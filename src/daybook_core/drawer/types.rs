@@ -153,10 +153,6 @@ impl DocEntryDiff {
 #[derive(Debug, Clone)]
 #[cfg_attr(feature = "uniffi", derive(uniffi::Enum))]
 pub enum DrawerEvent {
-    ListChanged {
-        drawer_heads: ChangeHashSet,
-        origin: crate::event_origin::SwitchEventOrigin,
-    },
     DocAdded {
         id: DocId,
         entry: DocNBranches,

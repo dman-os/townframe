@@ -3,7 +3,7 @@ use crate::interlude::*;
 #[cfg(test)]
 use super::BranchStateRow;
 use super::{BranchKind, BranchRefRow, DrawerRepo};
-use crate::drawer::types::{DocEntry, DocNBranches, StoredBranchRef};
+use crate::drawer::types::{DocEntry, DocEntryDiff, DocNBranches, StoredBranchRef};
 use crate::stores::VersionTag;
 use automerge::ReadDoc;
 use daybook_types::doc::{ChangeHashSet, DocId};
@@ -233,11 +233,32 @@ impl DrawerRepo {
 
         if changed {
             *self.current_heads.lock().expect(ERROR_MUTEX) = drawer_heads.clone();
-            self.registry
-                .notify([crate::drawer::DrawerEvent::ListChanged {
-                    drawer_heads,
-                    origin: self.local_origin(),
-                }]);
+            let mut changed_docs: HashSet<DocId> = HashSet::new();
+            for (doc_id, _, _) in &migrated_rows {
+                changed_docs.insert(doc_id.clone());
+            }
+            for doc_id in changed_docs {
+                let Some(entry) = self.current_doc_branches(&doc_id).await? else {
+                    tracing::warn!(
+                        ?doc_id,
+                        "missing doc branches while notifying migrated local branches"
+                    );
+                    continue;
+                };
+                self.registry
+                    .notify([crate::drawer::DrawerEvent::DocUpdated {
+                        id: doc_id,
+                        entry,
+                        diff: DocEntryDiff {
+                            changed_facet_keys: Vec::new(),
+                            added_facet_keys: Vec::new(),
+                            removed_facet_keys: Vec::new(),
+                            moved_branch_names: Vec::new(),
+                        },
+                        drawer_heads: drawer_heads.clone(),
+                        origin: self.local_origin(),
+                    }]);
+            }
         }
         Ok(())
     }
@@ -325,12 +346,22 @@ impl DrawerRepo {
                 .get_branch_heads_by_doc_id(&branch_ref.branch_doc_id)
                 .await?
             else {
+                tracing::warn!(
+                    branch_name = %branch_name,
+                    branch_doc_id = %branch_ref.branch_doc_id,
+                    "missing branch heads for drawer branch ref"
+                );
                 continue;
             };
             branches.insert(branch_name, latest_heads);
         }
         for (branch_path, branch_doc_id) in self.list_local_branch_refs(doc_id).await? {
             let Some(latest_heads) = self.get_branch_heads_by_doc_id(&branch_doc_id).await? else {
+                tracing::warn!(
+                    branch_path = %branch_path,
+                    branch_doc_id = %branch_doc_id,
+                    "missing branch heads for local branch ref"
+                );
                 continue;
             };
             branches.insert(branch_path, latest_heads);

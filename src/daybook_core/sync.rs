@@ -1714,28 +1714,31 @@ mod tests {
                                     doc_blobs_index_repo.enqueue_delete(id.clone()).unwrap_or_log();
                                 }
                                 crate::drawer::DrawerEvent::DocAdded { id, entry, .. } => {
-                                    if let Some(heads) = entry.branches.get("main") {
+                                    for (branch_name, heads) in &entry.branches {
                                         doc_blobs_index_repo
                                             .enqueue_upsert(
                                                 id.clone(),
-                                                daybook_types::doc::BranchPath::from("main"),
+                                                daybook_types::doc::BranchPath::from(
+                                                    branch_name.as_str(),
+                                                ),
                                                 heads.clone(),
                                             )
                                             .unwrap_or_log();
                                     }
                                 }
                                 crate::drawer::DrawerEvent::DocUpdated { id, entry, .. } => {
-                                    if let Some(heads) = entry.branches.get("main") {
+                                    for (branch_name, heads) in &entry.branches {
                                         doc_blobs_index_repo
                                             .enqueue_upsert(
                                                 id.clone(),
-                                                daybook_types::doc::BranchPath::from("main"),
+                                                daybook_types::doc::BranchPath::from(
+                                                    branch_name.as_str(),
+                                                ),
                                                 heads.clone(),
                                             )
                                             .unwrap_or_log();
                                     }
                                 }
-                                crate::drawer::DrawerEvent::ListChanged { .. } => {}
                             },
                             Err(crate::repos::RecvError::Dropped { dropped_count }) => {
                                 panic!("doc blobs bridge dropped {dropped_count} drawer events");
@@ -1784,8 +1787,7 @@ mod tests {
                             | crate::drawer::DrawerEvent::DocDeleted { id, .. } if id == doc_id => {
                                 *last_activity_for_wait.lock().expect(ERROR_MUTEX) = std::time::Instant::now();
                             }
-                            crate::drawer::DrawerEvent::ListChanged { .. }
-                            | crate::drawer::DrawerEvent::DocAdded { .. }
+                            crate::drawer::DrawerEvent::DocAdded { .. }
                             | crate::drawer::DrawerEvent::DocUpdated { .. }
                             | crate::drawer::DrawerEvent::DocDeleted { .. } => {
                                 *last_activity_for_wait.lock().expect(ERROR_MUTEX) = std::time::Instant::now();

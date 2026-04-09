@@ -647,7 +647,7 @@ impl crate::rt::switch::SwitchSink for FacetRefTriageListener {
                 crate::drawer::DrawerEvent::DocAdded {
                     id,
                     entry,
-                    drawer_heads,
+                    drawer_heads: _,
                     ..
                 } => {
                     let Some(heads) = entry.branches.get("main") else {
@@ -656,7 +656,7 @@ impl crate::rt::switch::SwitchSink for FacetRefTriageListener {
                     let branch_path = BranchPath::from("main");
                     let Some(_keys) = self
                         .drawer_repo
-                        .get_facet_keys_if_latest(id, &branch_path, heads, drawer_heads)
+                        .get_facet_keys_if_latest(id, &branch_path, heads)
                         .await?
                     else {
                         return Ok(outcome);
@@ -668,7 +668,7 @@ impl crate::rt::switch::SwitchSink for FacetRefTriageListener {
                     id,
                     entry,
                     diff,
-                    drawer_heads,
+                    drawer_heads: _,
                     ..
                 } => {
                     if !diff
@@ -685,7 +685,7 @@ impl crate::rt::switch::SwitchSink for FacetRefTriageListener {
                     let branch_path = BranchPath::from("main");
                     let Some(_keys) = self
                         .drawer_repo
-                        .get_facet_keys_if_latest(id, &branch_path, heads, drawer_heads)
+                        .get_facet_keys_if_latest(id, &branch_path, heads)
                         .await?
                     else {
                         self.index_repo.enqueue_delete(id.clone())?;
@@ -694,7 +694,6 @@ impl crate::rt::switch::SwitchSink for FacetRefTriageListener {
                     self.index_repo
                         .enqueue_upsert(id.clone(), branch_path, heads.clone())?;
                 }
-                crate::drawer::DrawerEvent::ListChanged { .. } => {}
             },
             _ => {}
         }

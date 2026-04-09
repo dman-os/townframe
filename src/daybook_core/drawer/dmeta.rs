@@ -11,7 +11,7 @@ fn dmeta_key() -> String {
 }
 
 fn timestamp_scalar(now: Timestamp) -> automerge::ScalarValue {
-    automerge::ScalarValue::Timestamp(now.as_second())
+    automerge::ScalarValue::Str(now.to_string().into())
 }
 
 pub fn facet_meta_obj<D: ReadDoc>(doc: &D, facet_key: &FacetKey) -> Res<Option<automerge::ObjId>> {
@@ -47,7 +47,11 @@ pub fn facet_uuid_for_key<D: ReadDoc + autosurgeon::ReadDoc>(
     };
     match autosurgeon::hydrate_prop::<_, Option<Vec<Uuid>>, _, _>(doc, &facet_meta_obj, "uuid") {
         Ok(Some(uuids)) => Ok(uuids.into_iter().next()),
-        _ => Ok(None),
+        Ok(None) => Ok(None),
+        Err(err) => {
+            tracing::warn!(?facet_key, ?err, "failed hydrating dmeta facet uuid");
+            Ok(None)
+        }
     }
 }
 

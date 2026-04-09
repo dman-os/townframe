@@ -342,11 +342,19 @@ impl capabilities::HostFacetTokenRw for SharedWashCtx {
             .get(&handle)
             .context("error locating token")
             .to_anyhow()?;
-        let Some(doc) = plugin
+        let doc = plugin
             .get_doc(&token.doc_id, &token.branch_path, &token.heads)
             .await
-            .to_anyhow()?
-        else {
+            .to_anyhow()?;
+        let doc = if doc.is_none() && token.branch_path != token.target_branch_path {
+            plugin
+                .get_doc(&token.doc_id, &token.target_branch_path, &token.heads)
+                .await
+                .to_anyhow()?
+        } else {
+            doc
+        };
+        let Some(doc) = doc else {
             return Ok(false);
         };
         Ok(doc.facets.contains_key(&token.facet_key))
@@ -362,11 +370,19 @@ impl capabilities::HostFacetTokenRw for SharedWashCtx {
             .get(&handle)
             .context("error locating token")
             .to_anyhow()?;
-        match plugin
+        let doc = plugin
             .get_doc(&token.doc_id, &token.branch_path, &token.heads)
             .await
-            .to_anyhow()?
-        {
+            .to_anyhow()?;
+        let doc = if doc.is_none() && token.branch_path != token.target_branch_path {
+            plugin
+                .get_doc(&token.doc_id, &token.target_branch_path, &token.heads)
+                .await
+                .to_anyhow()?
+        } else {
+            doc
+        };
+        match doc {
             Some(doc) => {
                 let Some(facet) = doc.facets.get(&token.facet_key) else {
                     // FIXME: either the context should terminal error this
@@ -407,32 +423,29 @@ impl capabilities::HostFacetTokenRw for SharedWashCtx {
             .to_anyhow()?;
         let facet: daybook_types::doc::FacetRaw = wit_doc::facet_into(&facet_json)
             .map_err(|err| capabilities::UpdateDocError::InvalidPatch(err.to_string()))?;
-        match plugin
-            .drawer_repo
-            .create_branch_at_heads_from_branch(
-                &token.doc_id,
-                &token.branch_path,
-                &token.target_branch_path,
-                &token.heads,
-                None,
-            )
-            .await
-        {
-            Ok(()) => {}
-            Err(crate::drawer::types::DrawerError::BranchAlreadyExists { name }) => {
-                return Err(anyhow::anyhow!(
-                    "staging branch unexpectedly already exists: {name}"
-                ));
-            }
-            Err(crate::drawer::types::DrawerError::DocNotFound { .. }) => todo!(),
-            Err(crate::drawer::types::DrawerError::BranchNotFound { .. }) => todo!(),
-            Err(crate::drawer::types::DrawerError::InvalidKey { .. }) => {
-                return Err(anyhow::anyhow!(
-                    "unexpected invalid key while ensuring branch"
-                ));
-            }
-            Err(crate::drawer::types::DrawerError::Other { inner }) => {
-                return Err(anyhow::anyhow!("unexpected error ensuring branch: {inner}"));
+        if token.branch_path != token.target_branch_path {
+            match plugin
+                .drawer_repo
+                .create_branch_at_heads_from_branch(
+                    &token.doc_id,
+                    &token.branch_path,
+                    &token.target_branch_path,
+                    &token.heads,
+                    None,
+                )
+                .await
+            {
+                Ok(()) | Err(crate::drawer::types::DrawerError::BranchAlreadyExists { .. }) => {}
+                Err(crate::drawer::types::DrawerError::DocNotFound { .. }) => todo!(),
+                Err(crate::drawer::types::DrawerError::BranchNotFound { .. }) => todo!(),
+                Err(crate::drawer::types::DrawerError::InvalidKey { .. }) => {
+                    return Err(anyhow::anyhow!(
+                        "unexpected invalid key while ensuring branch"
+                    ));
+                }
+                Err(crate::drawer::types::DrawerError::Other { inner }) => {
+                    return Err(anyhow::anyhow!("unexpected error ensuring branch: {inner}"));
+                }
             }
         }
         match plugin

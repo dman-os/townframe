@@ -531,6 +531,9 @@ impl drawer::Host for SharedWashCtx {
         doc_id: drawer::DocId,
         heads: drawer::Heads,
     ) -> wasmtime::Result<Result<drawer::Doc, drawer::GetDocError>> {
+        use crate::rt::dispatch::{ActiveDispatchArgs, FacetRoutineArgs};
+        use anyhow::Context;
+
         let heads = match am_utils_rs::parse_commit_heads(&heads) {
             Ok(val) => val,
             Err(err) => return Ok(Err(drawer::GetDocError::InvalidHeads(format!("{err:?}")))),
@@ -538,13 +541,29 @@ impl drawer::Host for SharedWashCtx {
         let heads = ChangeHashSet(heads);
 
         let plugin = DaybookPlugin::from_ctx(self);
+        let wflow_plugin = wflow::wash_plugin_wflow::WflowPlugin::try_from_ctx(self)
+            .context("only wflows are supported as drawer host")?;
+        let job_id = wflow_plugin
+            .job_id_of_ctx(self)
+            .expect("there should be a job??");
+        let Some(dispatch) = plugin.dispatch_repo.get_by_wflow_job(&job_id[..]).await else {
+            anyhow::bail!("no active dispatch found for job: {job_id}");
+        };
+        let ActiveDispatchArgs::FacetRoutine(FacetRoutineArgs {
+            branch_path,
+            doc_id: dispatch_doc_id,
+            ..
+        }) = &dispatch.args;
+        if *dispatch_doc_id != doc_id {
+            anyhow::bail!(
+                "doc_id mismatch for get_doc_at_heads: requested={} dispatch={}",
+                doc_id,
+                dispatch_doc_id
+            );
+        }
 
         match plugin
-            .get_doc(
-                &doc_id,
-                &daybook_types::doc::BranchPath::from("main"),
-                &heads,
-            )
+            .get_doc(&doc_id, branch_path, &heads)
             .await
             .to_anyhow()?
         {

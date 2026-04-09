@@ -1,7 +1,7 @@
 use crate::interlude::*;
 
 use crate::drawer::DrawerEvent;
-use crate::rt::dispatch::{DispatchEvent, DispatchOnSuccessHook};
+use crate::rt::dispatch::{DispatchEvent, DispatchOnSuccessHook, DispatchStatus};
 use crate::rt::switch::{
     facet_keys_set_to_meta_doc, SwitchEvent, SwitchSink, SwitchSinkCtx, SwitchSinkOutcome,
     SwtchSinkInterest,
@@ -37,7 +37,7 @@ struct DocProcessorTriageListener {
     facet_reference_specs: Arc<HashMap<String, Vec<FacetReferenceManifest>>>,
     predicate_requirements: HashSet<DocPredicateEvalRequirement>,
     predicate_resolved: HashMap<DocPredicateEvalRequirement, DocPredicateEvalResolved>,
-    dispatch_to_job: HashMap<String, (DocId, String, String)>,
+    dispatch_to_job: HashMap<String, String>,
     job_to_dispatch: HashMap<String, String>,
 }
 
@@ -46,15 +46,19 @@ impl DocProcessorTriageListener {
         doc_id: &DocId,
         processor_full_id: &str,
         branch_path: &BranchPath,
+        doc_heads: &ChangeHashSet,
     ) -> String {
-        format!("{doc_id}:{processor_full_id}:{}", branch_path.as_str())
+        format!(
+            "{}:{}:{}:{}",
+            doc_id,
+            processor_full_id,
+            branch_path,
+            am_utils_rs::serialize_commit_heads(doc_heads.as_ref()).join(",")
+        )
     }
 
     fn clear_inflight_dispatch(&mut self, dispatch_id: &str) {
-        if let Some((doc_id, processor_full_id, branch_path)) =
-            self.dispatch_to_job.remove(dispatch_id)
-        {
-            let job_key = format!("{doc_id}:{processor_full_id}:{branch_path}");
+        if let Some(job_key) = self.dispatch_to_job.remove(dispatch_id) {
             self.job_to_dispatch.remove(&job_key);
         }
     }
@@ -269,8 +273,12 @@ impl DocProcessorTriageListener {
                     wflow_args_json: None,
                 },
             };
-            let job_key =
-                Self::inflight_job_key(doc_id, &processor.processor_full_id, &branch_path);
+            let job_key = Self::inflight_job_key(
+                doc_id,
+                &processor.processor_full_id,
+                &branch_path,
+                doc_heads,
+            );
             let old_dispatch = self.job_to_dispatch.get(&job_key).cloned();
             if let Some(dispatch_id) = old_dispatch {
                 info!(
@@ -297,15 +305,9 @@ impl DocProcessorTriageListener {
                     }],
                 )
                 .await?;
-            self.job_to_dispatch.insert(job_key, dispatch_id.clone());
-            self.dispatch_to_job.insert(
-                dispatch_id,
-                (
-                    doc_id.clone(),
-                    processor.processor_full_id.clone(),
-                    branch_path.as_str().to_string(),
-                ),
-            );
+            self.job_to_dispatch
+                .insert(job_key.clone(), dispatch_id.clone());
+            self.dispatch_to_job.insert(dispatch_id, job_key);
         }
         Ok(())
     }
@@ -344,23 +346,22 @@ impl SwitchSink for DocProcessorTriageListener {
                     let rt = ctx
                         .rt
                         .ok_or_else(|| ferr!("triage listener context missing rt"))?;
-                    if let Some(dispatch) = rt.dispatch_repo.get_any(id).await {
-                        if matches!(
-                            dispatch.status,
-                            crate::rt::dispatch::DispatchStatus::Succeeded
-                                | crate::rt::dispatch::DispatchStatus::Failed
-                                | crate::rt::dispatch::DispatchStatus::Cancelled
-                        ) {
-                            self.clear_inflight_dispatch(id);
-                        }
-                    } else {
+                    let Some(dispatch) = rt.dispatch_repo.get_any(id).await else {
+                        self.clear_inflight_dispatch(id);
+                        return Ok(SwitchSinkOutcome::default());
+                    };
+                    if matches!(
+                        dispatch.status,
+                        DispatchStatus::Succeeded
+                            | DispatchStatus::Failed
+                            | DispatchStatus::Cancelled
+                    ) {
                         self.clear_inflight_dispatch(id);
                     }
                 }
-                _ => {}
+                DispatchEvent::DispatchAdded { .. } => {}
             },
             SwitchEvent::Drawer(event) => match &**event {
-                DrawerEvent::ListChanged { .. } => {}
                 DrawerEvent::DocDeleted {
                     id,
                     deleted_facet_keys,
@@ -398,7 +399,7 @@ impl SwitchSink for DocProcessorTriageListener {
                 DrawerEvent::DocAdded {
                     id,
                     entry,
-                    drawer_heads,
+                    drawer_heads: _,
                     origin,
                 } => {
                     for (branch_name, heads) in &entry.branches {
@@ -411,7 +412,7 @@ impl SwitchSink for DocProcessorTriageListener {
                             .ok_or_else(|| ferr!("triage listener context missing rt"))?;
                         let Some(facet_keys_set) = rt
                             .drawer
-                            .get_facet_keys_if_latest(id, &branch_path, heads, drawer_heads)
+                            .get_facet_keys_if_latest(id, &branch_path, heads)
                             .await?
                         else {
                             continue;
@@ -454,7 +455,7 @@ impl SwitchSink for DocProcessorTriageListener {
                     id,
                     entry,
                     diff,
-                    drawer_heads,
+                    drawer_heads: _,
                     origin,
                 } => {
                     let dmeta_key = FacetKey::from(WellKnownFacetTag::Dmeta);
@@ -510,7 +511,7 @@ impl SwitchSink for DocProcessorTriageListener {
                             .ok_or_else(|| ferr!("triage listener context missing rt"))?;
                         let Some(facet_keys_set) = rt
                             .drawer
-                            .get_facet_keys_if_latest(id, &branch_path, heads, drawer_heads)
+                            .get_facet_keys_if_latest(id, &branch_path, heads)
                             .await?
                         else {
                             debug!(?id, ?branch_path, "skipping triage for stale heads");

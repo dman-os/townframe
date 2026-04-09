@@ -75,10 +75,26 @@ impl FacetCacheState {
         value: daybook_types::doc::ArcFacetRaw,
     ) {
         let cache_key = (doc_id.clone(), facet_uuid);
-        if let Some(existing_entry) = self.entries.get_mut(&cache_key) {
+        let cost = Self::estimate_cost(value.as_ref());
+        if self.entries.contains_key(&cache_key) {
+            let pruned = self.pool.lock().unwrap().insert_key(&cache_key, cost);
+            let self_pruned = pruned.iter().any(|pkey| pkey == &cache_key);
+            for pkey in pruned {
+                self.remove_without_pool(&pkey);
+            }
+            if self_pruned {
+                return;
+            }
+            let existing_entry = self
+                .entries
+                .get_mut(&cache_key)
+                .expect("entry must exist after non-self prune");
             existing_entry.heads = facet_heads;
             existing_entry.value = value;
-            self.pool.lock().unwrap().touch_key(&cache_key);
+            self.by_doc
+                .entry(doc_id.clone())
+                .or_default()
+                .insert(facet_uuid);
             self.seen_once.remove(&cache_key);
             return;
         }
@@ -88,10 +104,13 @@ impl FacetCacheState {
             return;
         }
 
-        let cost = Self::estimate_cost(value.as_ref());
         let pruned = self.pool.lock().unwrap().insert_key(&cache_key, cost);
+        let self_pruned = pruned.iter().any(|pkey| pkey == &cache_key);
         for pkey in pruned {
             self.remove_without_pool(&pkey);
+        }
+        if self_pruned {
+            return;
         }
 
         self.entries.insert(

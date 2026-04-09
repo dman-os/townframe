@@ -83,7 +83,6 @@ impl DrawerRepo {
                             self.invalidate_entry_cache(id);
                             self.invalidate_facet_cache_doc(id);
                         }
-                        _ => {}
                     }
                 }
 
@@ -136,7 +135,7 @@ impl DrawerRepo {
         }
 
         // Init snapshot is synthesized from current drawer + branch heads.
-        let mut events = Vec::with_capacity(entries.len() + 1);
+        let mut events = Vec::with_capacity(entries.len());
         for (id, _entry) in entries {
             events.push(DrawerEvent::DocAdded {
                 id: id.clone(),
@@ -148,10 +147,6 @@ impl DrawerRepo {
                 origin: self.local_origin(),
             });
         }
-        events.push(DrawerEvent::ListChanged {
-            drawer_heads,
-            origin: self.local_origin(),
-        });
         Ok(events)
     }
 
@@ -185,9 +180,19 @@ impl DrawerRepo {
                 let vtag = match val {
                     automerge::Value::Scalar(scalar) => match &**scalar {
                         automerge::ScalarValue::Bytes(bytes) => bytes,
-                        _ => return Ok(()),
+                        other => {
+                            eyre::bail!(
+                                "invalid drawer vtag scalar while handling patch: expected bytes, got {:?}",
+                                other
+                            );
+                        }
                     },
-                    _ => return Ok(()),
+                    other => {
+                        eyre::bail!(
+                            "invalid drawer vtag value while handling patch: expected scalar, got {:?}",
+                            other
+                        );
+                    }
                 };
                 let vtag = VersionTag::hydrate_bytes(vtag)?;
                 let event_origin = crate::repos::resolve_origin_from_vtag_actor(
@@ -237,10 +242,6 @@ impl DrawerRepo {
                         drawer_heads: drawer_heads.clone(),
                         origin: event_origin.clone(),
                     });
-                    out.push(DrawerEvent::ListChanged {
-                        drawer_heads,
-                        origin: event_origin,
-                    });
                 } else {
                     let previous_heads = new_entry
                         .previous_version_heads
@@ -253,7 +254,14 @@ impl DrawerRepo {
                             "doc update previous entry not found at previous_version_heads",
                         )?;
                     if old_entry.branches != new_entry.branches {
-                        out.push(DrawerEvent::ListChanged {
+                        let entry = self
+                            .current_doc_branches(&doc_id)
+                            .await?
+                            .ok_or_eyre("drawer doc updated but branch state missing")?;
+                        out.push(DrawerEvent::DocUpdated {
+                            id: doc_id,
+                            entry,
+                            diff: crate::drawer::DocEntryDiff::new(&old_entry, &new_entry, vec![]),
                             drawer_heads,
                             origin: event_origin,
                         });
@@ -294,10 +302,6 @@ impl DrawerRepo {
                     deleted_facet_keys,
                     entry: None,
                     origin: event_origin.clone(),
-                });
-                out.push(DrawerEvent::ListChanged {
-                    drawer_heads,
-                    origin: event_origin,
                 });
             }
             _ => {}

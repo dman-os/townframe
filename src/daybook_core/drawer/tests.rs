@@ -400,7 +400,7 @@ async fn test_v2_batch_add_emits_single_list_changed() -> Res<()> {
         .await?;
 
     let mut events = Vec::new();
-    for _ in 0..4 {
+    for _ in 0..3 {
         let event = tokio::time::timeout(
             std::time::Duration::from_secs(2),
             listener.recv_lossy_async(),
@@ -413,7 +413,6 @@ async fn test_v2_batch_add_emits_single_list_changed() -> Res<()> {
 
     let mut added_ids = HashSet::new();
     let mut doc_added_heads = Vec::new();
-    let mut list_changed_heads = Vec::new();
     for event in events {
         match &*event {
             DrawerEvent::DocAdded {
@@ -421,9 +420,6 @@ async fn test_v2_batch_add_emits_single_list_changed() -> Res<()> {
             } => {
                 added_ids.insert(id.clone());
                 doc_added_heads.push(drawer_heads.clone());
-            }
-            DrawerEvent::ListChanged { drawer_heads, .. } => {
-                list_changed_heads.push(drawer_heads.clone());
             }
             other => eyre::bail!("unexpected event: {other:?}"),
         }
@@ -434,10 +430,7 @@ async fn test_v2_batch_add_emits_single_list_changed() -> Res<()> {
         assert!(added_ids.contains(&created_id));
     }
     assert_eq!(doc_added_heads.len(), 3);
-    assert_eq!(list_changed_heads.len(), 1);
-    for heads in doc_added_heads {
-        assert_eq!(heads, list_changed_heads[0]);
-    }
+    assert!(doc_added_heads.windows(2).all(|pair| pair[0] == pair[1]));
 
     stop_token.stop().await?;
     acx_stop.stop().await?;

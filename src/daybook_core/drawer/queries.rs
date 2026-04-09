@@ -366,7 +366,6 @@ impl DrawerRepo {
         doc_id: &DocId,
         branch_path: &daybook_types::doc::BranchPath,
         heads: &ChangeHashSet,
-        _drawer_heads: &ChangeHashSet,
     ) -> Res<Option<HashSet<FacetKey>>> {
         if self.cancel_token.is_cancelled() {
             eyre::bail!("repo is stopped");
