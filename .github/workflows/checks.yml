@@ -30,6 +30,7 @@ env:
 jobs:
   checks:
     runs-on: ubuntu-latest
+    timeout-minutes: 90
     steps:
       - name: Setup tmate session
         if: ${{ github.event_name == 'workflow_dispatch' && inputs.tmate_enabled }}
@@ -74,8 +75,9 @@ jobs:
 
       - name: build plug OCI artifacts
         run: |
-          nix develop .#ci-rust --command cargo --color=always run -p xtask -- build-plug-oci --plug-root ./src/plug_dayledger
+          nix develop .#ci-rust --command cargo --color=always run -p xtask -- build-plug-oci --plug-root ./src/plug_test
           nix develop .#ci-rust --command cargo --color=always run -p xtask -- build-plug-oci --plug-root ./src/plug_plabels
+          nix develop .#ci-rust --command cargo --color=always run -p xtask -- build-plug-oci --plug-root ./src/plug_dayledger
 
       - name: kotlin tests
         run: |
