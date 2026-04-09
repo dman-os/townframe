@@ -48,7 +48,6 @@ import org.example.daybook.uniffi.core.DocBundle
 import org.example.daybook.uniffi.core.DocEntry
 import org.example.daybook.uniffi.core.DocNBranches
 import org.example.daybook.uniffi.core.DrawerEvent
-import org.example.daybook.uniffi.core.FacetDisplayHint
 import org.example.daybook.uniffi.core.FfiConverterTypeConfigEvent
 import org.example.daybook.uniffi.core.FfiConverterTypeCreateProgressTaskArgs
 import org.example.daybook.uniffi.core.FfiConverterTypeDispatchEvent
@@ -56,7 +55,6 @@ import org.example.daybook.uniffi.core.FfiConverterTypeDocBundle
 import org.example.daybook.uniffi.core.FfiConverterTypeDocEntry
 import org.example.daybook.uniffi.core.FfiConverterTypeDocNBranches
 import org.example.daybook.uniffi.core.FfiConverterTypeDrawerEvent
-import org.example.daybook.uniffi.core.FfiConverterTypeFacetDisplayHint
 import org.example.daybook.uniffi.core.FfiConverterTypeKnownRepoEntry
 import org.example.daybook.uniffi.core.FfiConverterTypeListenerRegistration
 import org.example.daybook.uniffi.core.FfiConverterTypePanel
@@ -92,9 +90,11 @@ import org.example.daybook.uniffi.core.Window
 import org.example.daybook.uniffi.types.AddDocArgs
 import org.example.daybook.uniffi.types.Doc
 import org.example.daybook.uniffi.types.DocPatch
+import org.example.daybook.uniffi.types.FacetDisplayHint
 import org.example.daybook.uniffi.types.FfiConverterTypeAddDocArgs
 import org.example.daybook.uniffi.types.FfiConverterTypeDoc
 import org.example.daybook.uniffi.types.FfiConverterTypeDocPatch
+import org.example.daybook.uniffi.types.FfiConverterTypeFacetDisplayHint
 import org.example.daybook.uniffi.core.RustBuffer as RustBufferConfigEvent
 import org.example.daybook.uniffi.core.RustBuffer as RustBufferCreateProgressTaskArgs
 import org.example.daybook.uniffi.core.RustBuffer as RustBufferDispatchEvent
@@ -102,7 +102,6 @@ import org.example.daybook.uniffi.core.RustBuffer as RustBufferDocBundle
 import org.example.daybook.uniffi.core.RustBuffer as RustBufferDocEntry
 import org.example.daybook.uniffi.core.RustBuffer as RustBufferDocNBranches
 import org.example.daybook.uniffi.core.RustBuffer as RustBufferDrawerEvent
-import org.example.daybook.uniffi.core.RustBuffer as RustBufferFacetDisplayHint
 import org.example.daybook.uniffi.core.RustBuffer as RustBufferKnownRepoEntry
 import org.example.daybook.uniffi.core.RustBuffer as RustBufferListenerRegistration
 import org.example.daybook.uniffi.core.RustBuffer as RustBufferPanel
@@ -122,6 +121,7 @@ import org.example.daybook.uniffi.core.RustBuffer as RustBufferWindow
 import org.example.daybook.uniffi.types.RustBuffer as RustBufferAddDocArgs
 import org.example.daybook.uniffi.types.RustBuffer as RustBufferDoc
 import org.example.daybook.uniffi.types.RustBuffer as RustBufferDocPatch
+import org.example.daybook.uniffi.types.RustBuffer as RustBufferFacetDisplayHint
 
 // This is a helper for safely working with byte buffers returned from the Rust code.
 // A rust-owned buffer is represented by its capacity, its current length, and a
@@ -1477,7 +1477,7 @@ external fun uniffi_daybook_ffi_fn_clone_rtffi(`handle`: Long,uniffi_out_err: Un
 ): Long
 external fun uniffi_daybook_ffi_fn_free_rtffi(`handle`: Long,uniffi_out_err: UniffiRustCallStatus, 
 ): Unit
-external fun uniffi_daybook_ffi_fn_constructor_rtffi_load(`fcx`: Long,`drawerRepo`: Long,`plugsRepo`: Long,`dispatchRepo`: Long,`progressRepo`: Long,`blobsRepo`: Long,`configRepo`: Long,`deviceId`: RustBuffer.ByValue,
+external fun uniffi_daybook_ffi_fn_constructor_rtffi_load(`fcx`: Long,`drawerRepo`: Long,`plugsRepo`: Long,`dispatchRepo`: Long,`progressRepo`: Long,`blobsRepo`: Long,`configRepo`: Long,`deviceId`: RustBuffer.ByValue,`startupProgressTaskId`: RustBuffer.ByValue,
 ): Long
 external fun uniffi_daybook_ffi_fn_method_rtffi_dispatch_doc_facet(`ptr`: Long,`plugId`: RustBuffer.ByValue,`routineName`: RustBuffer.ByValue,`docId`: RustBuffer.ByValue,`branchPath`: RustBuffer.ByValue,
 ): Long
@@ -1689,19 +1689,19 @@ private fun uniffiCheckApiChecksums(lib: IntegrityCheckingUniffiLib) {
     if (lib.uniffi_daybook_ffi_checksum_method_configrepoffi_ffi_register_listener() != 12494.toShort()) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
-    if (lib.uniffi_daybook_ffi_checksum_method_configrepoffi_get_facet_display_hint() != 14702.toShort()) {
+    if (lib.uniffi_daybook_ffi_checksum_method_configrepoffi_get_facet_display_hint() != 1644.toShort()) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
     if (lib.uniffi_daybook_ffi_checksum_method_configrepoffi_get_mltools_config_json() != 36447.toShort()) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
-    if (lib.uniffi_daybook_ffi_checksum_method_configrepoffi_list_display_hints() != 47455.toShort()) {
+    if (lib.uniffi_daybook_ffi_checksum_method_configrepoffi_list_display_hints() != 60117.toShort()) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
     if (lib.uniffi_daybook_ffi_checksum_method_configrepoffi_provision_mobile_default_mltools() != 36327.toShort()) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
-    if (lib.uniffi_daybook_ffi_checksum_method_configrepoffi_set_facet_display_hint() != 7725.toShort()) {
+    if (lib.uniffi_daybook_ffi_checksum_method_configrepoffi_set_facet_display_hint() != 8753.toShort()) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
     if (lib.uniffi_daybook_ffi_checksum_method_configrepoffi_set_mltools_config_json() != 35501.toShort()) {
@@ -1926,7 +1926,7 @@ private fun uniffiCheckApiChecksums(lib: IntegrityCheckingUniffiLib) {
     if (lib.uniffi_daybook_ffi_checksum_constructor_tablesrepoffi_load() != 40277.toShort()) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
-    if (lib.uniffi_daybook_ffi_checksum_constructor_rtffi_load() != 49748.toShort()) {
+    if (lib.uniffi_daybook_ffi_checksum_constructor_rtffi_load() != 48058.toShort()) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
 }
@@ -8735,9 +8735,9 @@ open class RtFfi: Disposable, AutoCloseable, RtFfiInterface
         
     @Throws(FfiException::class)
     @Suppress("ASSIGNED_BUT_NEVER_ACCESSED_VARIABLE")
-     suspend fun `load`(`fcx`: FfiCtx, `drawerRepo`: DrawerRepoFfi, `plugsRepo`: PlugsRepoFfi, `dispatchRepo`: DispatchRepoFfi, `progressRepo`: ProgressRepoFfi, `blobsRepo`: BlobsRepoFfi, `configRepo`: ConfigRepoFfi, `deviceId`: kotlin.String) : RtFfi {
+     suspend fun `load`(`fcx`: FfiCtx, `drawerRepo`: DrawerRepoFfi, `plugsRepo`: PlugsRepoFfi, `dispatchRepo`: DispatchRepoFfi, `progressRepo`: ProgressRepoFfi, `blobsRepo`: BlobsRepoFfi, `configRepo`: ConfigRepoFfi, `deviceId`: kotlin.String, `startupProgressTaskId`: kotlin.String?) : RtFfi {
         return uniffiRustCallAsync(
-        UniffiLib.uniffi_daybook_ffi_fn_constructor_rtffi_load(FfiConverterTypeFfiCtx.lower(`fcx`),FfiConverterTypeDrawerRepoFfi.lower(`drawerRepo`),FfiConverterTypePlugsRepoFfi.lower(`plugsRepo`),FfiConverterTypeDispatchRepoFfi.lower(`dispatchRepo`),FfiConverterTypeProgressRepoFfi.lower(`progressRepo`),FfiConverterTypeBlobsRepoFfi.lower(`blobsRepo`),FfiConverterTypeConfigRepoFfi.lower(`configRepo`),FfiConverterString.lower(`deviceId`),),
+        UniffiLib.uniffi_daybook_ffi_fn_constructor_rtffi_load(FfiConverterTypeFfiCtx.lower(`fcx`),FfiConverterTypeDrawerRepoFfi.lower(`drawerRepo`),FfiConverterTypePlugsRepoFfi.lower(`plugsRepo`),FfiConverterTypeDispatchRepoFfi.lower(`dispatchRepo`),FfiConverterTypeProgressRepoFfi.lower(`progressRepo`),FfiConverterTypeBlobsRepoFfi.lower(`blobsRepo`),FfiConverterTypeConfigRepoFfi.lower(`configRepo`),FfiConverterString.lower(`deviceId`),FfiConverterOptionalString.lower(`startupProgressTaskId`),),
         { future, callback, continuation -> UniffiLib.ffi_daybook_ffi_rust_future_poll_u64(future, callback, continuation) },
         { future, continuation -> UniffiLib.ffi_daybook_ffi_rust_future_complete_u64(future, continuation) },
         { future -> UniffiLib.ffi_daybook_ffi_rust_future_free_u64(future) },
@@ -10716,38 +10716,6 @@ public object FfiConverterOptionalTypeDocEntry: FfiConverterRustBuffer<DocEntry?
 /**
  * @suppress
  */
-public object FfiConverterOptionalTypeFacetDisplayHint: FfiConverterRustBuffer<FacetDisplayHint?> {
-    override fun read(buf: ByteBuffer): FacetDisplayHint? {
-        if (buf.get().toInt() == 0) {
-            return null
-        }
-        return FfiConverterTypeFacetDisplayHint.read(buf)
-    }
-
-    override fun allocationSize(value: FacetDisplayHint?): ULong {
-        if (value == null) {
-            return 1UL
-        } else {
-            return 1UL + FfiConverterTypeFacetDisplayHint.allocationSize(value)
-        }
-    }
-
-    override fun write(value: FacetDisplayHint?, buf: ByteBuffer) {
-        if (value == null) {
-            buf.put(0)
-        } else {
-            buf.put(1)
-            FfiConverterTypeFacetDisplayHint.write(value, buf)
-        }
-    }
-}
-
-
-
-
-/**
- * @suppress
- */
 public object FfiConverterOptionalTypePanel: FfiConverterRustBuffer<Panel?> {
     override fun read(buf: ByteBuffer): Panel? {
         if (buf.get().toInt() == 0) {
@@ -10962,6 +10930,38 @@ public object FfiConverterOptionalTypeDoc: FfiConverterRustBuffer<Doc?> {
         } else {
             buf.put(1)
             FfiConverterTypeDoc.write(value, buf)
+        }
+    }
+}
+
+
+
+
+/**
+ * @suppress
+ */
+public object FfiConverterOptionalTypeFacetDisplayHint: FfiConverterRustBuffer<FacetDisplayHint?> {
+    override fun read(buf: ByteBuffer): FacetDisplayHint? {
+        if (buf.get().toInt() == 0) {
+            return null
+        }
+        return FfiConverterTypeFacetDisplayHint.read(buf)
+    }
+
+    override fun allocationSize(value: FacetDisplayHint?): ULong {
+        if (value == null) {
+            return 1UL
+        } else {
+            return 1UL + FfiConverterTypeFacetDisplayHint.allocationSize(value)
+        }
+    }
+
+    override fun write(value: FacetDisplayHint?, buf: ByteBuffer) {
+        if (value == null) {
+            buf.put(0)
+        } else {
+            buf.put(1)
+            FfiConverterTypeFacetDisplayHint.write(value, buf)
         }
     }
 }
@@ -11528,3 +11528,66 @@ public object FfiConverterTypeUuid: FfiConverter<Uuid, RustBuffer.ByValue> {
         FfiConverterByteArray.write(builtinValue, buf)
     }
 }
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+

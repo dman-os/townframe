@@ -45,10 +45,15 @@ impl TablesRepoFfi {
     }
 
     async fn stop(&self) -> Result<(), FfiError> {
-        if let Some(token) = self.stop_token.lock().await.take() {
-            token.stop().await?;
-        }
-        Ok(())
+        let stop_token = self.stop_token.lock().await.take();
+        self.fcx
+            .do_on_rt(async move {
+                if let Some(token) = stop_token {
+                    token.stop().await?;
+                }
+                Ok::<(), FfiError>(())
+            })
+            .await
     }
 
     #[tracing::instrument(skip(self))]

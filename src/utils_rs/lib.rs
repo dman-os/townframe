@@ -174,6 +174,22 @@ pub fn setup_tracing_once() {
     });
 }
 
+static APP_STARTUP_INSTANT: std::sync::OnceLock<std::time::Instant> = std::sync::OnceLock::new();
+
+pub fn init_app_startup_clock() {
+    let _ = APP_STARTUP_INSTANT.get_or_init(std::time::Instant::now);
+}
+
+pub fn app_startup_elapsed() -> std::time::Duration {
+    APP_STARTUP_INSTANT
+        .get_or_init(std::time::Instant::now)
+        .elapsed()
+}
+
+pub fn app_startup_elapsed_ms() -> u128 {
+    app_startup_elapsed().as_millis()
+}
+
 mod cheapstr {
     use crate::interlude::*;
 

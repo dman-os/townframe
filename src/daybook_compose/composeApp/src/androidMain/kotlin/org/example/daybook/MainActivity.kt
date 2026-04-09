@@ -66,9 +66,11 @@ class MainActivity : ComponentActivity() {
 @Composable
 fun AndroidApp() {
     val context = LocalContext.current
+    val activity = context as? ComponentActivity
 
     var hasOverlayPermission by remember { mutableStateOf(Settings.canDrawOverlays(context)) }
     var permissionRefreshTick by remember { mutableIntStateOf(0) }
+    var shutdownRequested by remember { mutableStateOf(false) }
 
     val permissionLauncher =
         rememberLauncherForActivityResult(ActivityResultContracts.RequestMultiplePermissions()) {
@@ -109,6 +111,11 @@ fun AndroidApp() {
                         if (event == Lifecycle.Event.ON_RESUME) {
                             hasOverlayPermission = Settings.canDrawOverlays(context)
                             permissionRefreshTick += 1
+                        } else if (event == Lifecycle.Event.ON_DESTROY) {
+                            // Ignore config-change destroys; shut down only when activity is actually finishing.
+                            if (activity?.isFinishing != false) {
+                                shutdownRequested = true
+                            }
                         }
                     }
                 lifecycleOwner.lifecycle.addObserver(observer)
@@ -229,7 +236,10 @@ fun AndroidApp() {
                 if (hasOverlayPermission) {
                     startMagicWandService(context)
                 }
-            }
+            },
+            shutdownRequested = shutdownRequested,
+            onShutdownCompleted = {},
+            autoShutdownOnDispose = false
         )
     }
 }

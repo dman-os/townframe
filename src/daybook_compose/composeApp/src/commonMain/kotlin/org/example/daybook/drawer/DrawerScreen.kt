@@ -118,10 +118,13 @@ class DrawerScreenViewModel(
 }
 
 @Composable
-fun DrawerScreen(contentType: DaybookContentType, modifier: Modifier = Modifier) {
+fun DrawerScreen(
+    drawerVm: DrawerViewModel,
+    contentType: DaybookContentType,
+    modifier: Modifier = Modifier
+) {
     val container = LocalContainer.current
     val tablesVm: TablesViewModel = viewModel { TablesViewModel(container.tablesRepo) }
-    val drawerVm: DrawerViewModel = viewModel { DrawerViewModel(container.drawerRepo) }
     val vm =
         viewModel {
             DrawerScreenViewModel(drawerVm, container.tablesRepo, container.blobsRepo, tablesVm)

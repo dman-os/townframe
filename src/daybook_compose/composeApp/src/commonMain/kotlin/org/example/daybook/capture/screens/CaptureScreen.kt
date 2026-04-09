@@ -46,14 +46,6 @@ import org.example.daybook.uniffi.core.*
 import org.example.daybook.uniffi.types.AddDocArgs
 import org.example.daybook.uniffi.types.Doc
 
-sealed interface DocsListState {
-    data class Data(val docs: List<Doc>) : DocsListState
-
-    data class Error(val error: FfiException) : DocsListState
-
-    object Loading : DocsListState
-}
-
 class CaptureScreenViewModel(
     val drawerRepo: DrawerRepoFfi,
     val tablesRepo: TablesRepoFfi,
@@ -169,9 +161,6 @@ class CaptureScreenViewModel(
         }
     }
 
-    private val _docsList = MutableStateFlow(DocsListState.Loading as DocsListState)
-    val docsList = _docsList.asStateFlow()
-
     // Registration handle to auto-unregister
     private var listenerRegistration: ListenerRegistration? = null
 
@@ -181,17 +170,17 @@ class CaptureScreenViewModel(
             override fun onDrawerEvent(event: DrawerEvent) {
                 viewModelScope.launch {
                     when (event) {
-                        is DrawerEvent.ListChanged -> {
-                            refreshDocs()
-                        }
-
-                        is DrawerEvent.DocAdded -> {
-                            refreshDocs()
-                        }
-
                         is DrawerEvent.DocUpdated -> {
                             if (event.id == _currentDocId.value) {
                                 loadDoc(event.id)
+                            }
+                        }
+
+                        is DrawerEvent.DocDeleted -> {
+                            if (event.id == _currentDocId.value) {
+                                _currentDocId.value = null
+                                _currentDoc.value = null
+                                editorController.bindDoc(null)
                             }
                         }
 
@@ -202,7 +191,6 @@ class CaptureScreenViewModel(
         }
 
     init {
-        loadLatestDocs()
         if (initialDocId != null) {
             loadDoc(initialDocId)
         } else {
@@ -231,30 +219,6 @@ class CaptureScreenViewModel(
                     }
                 }
             }
-        }
-    }
-
-    private suspend fun refreshDocs() {
-        _docsList.value = DocsListState.Loading
-        try {
-            val branches = drawerRepo.list()
-            val docs =
-                branches.mapNotNull { b ->
-                    try {
-                        drawerRepo.get(b.docId, "main")
-                    } catch (e: FfiException) {
-                        null
-                    }
-                }
-            _docsList.value = DocsListState.Data(docs)
-        } catch (err: FfiException) {
-            _docsList.value = DocsListState.Error(err)
-        }
-    }
-
-    fun loadLatestDocs() {
-        viewModelScope.launch {
-            refreshDocs()
         }
     }
 

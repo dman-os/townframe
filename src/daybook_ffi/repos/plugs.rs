@@ -5,7 +5,7 @@ use daybook_core::plugs::{PlugsEvent, PlugsRepo};
 
 #[derive(uniffi::Object)]
 pub struct PlugsRepoFfi {
-    _fcx: SharedFfiCtx,
+    fcx: SharedFfiCtx,
     pub repo: Arc<PlugsRepo>,
     stop_token: tokio::sync::Mutex<Option<daybook_core::repos::RepoStopToken>>,
 }
@@ -41,16 +41,21 @@ impl PlugsRepoFfi {
             .await
             .inspect_err(|err| tracing::error!(?err))?;
         Ok(Arc::new(Self {
-            _fcx: fcx,
+            fcx,
             repo,
             stop_token: Some(stop_token).into(),
         }))
     }
 
     async fn stop(&self) -> Result<(), FfiError> {
-        if let Some(token) = self.stop_token.lock().await.take() {
-            token.stop().await?;
-        }
-        Ok(())
+        let stop_token = self.stop_token.lock().await.take();
+        self.fcx
+            .do_on_rt(async move {
+                if let Some(token) = stop_token {
+                    token.stop().await?;
+                }
+                Ok::<(), FfiError>(())
+            })
+            .await
     }
 }

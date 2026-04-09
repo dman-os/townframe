@@ -1373,6 +1373,87 @@ public object FfiConverterTypeListenerRegistration: FfiConverter<ListenerRegistr
 
 
 
+data class BranchDeleteTombstone (
+    var `vtag`: VersionTag
+    , 
+    var `branchDocId`: kotlin.String
+    , 
+    var `branchHeads`: ChangeHashSet
+    
+){
+    
+
+    
+
+    
+    companion object
+}
+
+/**
+ * @suppress
+ */
+public object FfiConverterTypeBranchDeleteTombstone: FfiConverterRustBuffer<BranchDeleteTombstone> {
+    override fun read(buf: ByteBuffer): BranchDeleteTombstone {
+        return BranchDeleteTombstone(
+            FfiConverterTypeVersionTag.read(buf),
+            FfiConverterString.read(buf),
+            FfiConverterTypeChangeHashSet.read(buf),
+        )
+    }
+
+    override fun allocationSize(value: BranchDeleteTombstone) = (
+            FfiConverterTypeVersionTag.allocationSize(value.`vtag`) +
+            FfiConverterString.allocationSize(value.`branchDocId`) +
+            FfiConverterTypeChangeHashSet.allocationSize(value.`branchHeads`)
+    )
+
+    override fun write(value: BranchDeleteTombstone, buf: ByteBuffer) {
+            FfiConverterTypeVersionTag.write(value.`vtag`, buf)
+            FfiConverterString.write(value.`branchDocId`, buf)
+            FfiConverterTypeChangeHashSet.write(value.`branchHeads`, buf)
+    }
+}
+
+
+
+data class BranchSnapshot (
+    var `branchDocId`: kotlin.String
+    , 
+    var `branchHeads`: ChangeHashSet
+    
+){
+    
+
+    
+
+    
+    companion object
+}
+
+/**
+ * @suppress
+ */
+public object FfiConverterTypeBranchSnapshot: FfiConverterRustBuffer<BranchSnapshot> {
+    override fun read(buf: ByteBuffer): BranchSnapshot {
+        return BranchSnapshot(
+            FfiConverterString.read(buf),
+            FfiConverterTypeChangeHashSet.read(buf),
+        )
+    }
+
+    override fun allocationSize(value: BranchSnapshot) = (
+            FfiConverterString.allocationSize(value.`branchDocId`) +
+            FfiConverterTypeChangeHashSet.allocationSize(value.`branchHeads`)
+    )
+
+    override fun write(value: BranchSnapshot, buf: ByteBuffer) {
+            FfiConverterString.write(value.`branchDocId`, buf)
+            FfiConverterTypeChangeHashSet.write(value.`branchHeads`, buf)
+    }
+}
+
+
+
 data class CreateProgressTaskArgs (
     var `id`: kotlin.String
     , 
@@ -1464,8 +1545,48 @@ public object FfiConverterTypeDocBundle: FfiConverterRustBuffer<DocBundle> {
 
 
 
+data class DocDeleteTombstone (
+    var `vtag`: VersionTag
+    , 
+    var `branches`: Map<kotlin.String, BranchSnapshot>
+    
+){
+    
+
+    
+
+    
+    companion object
+}
+
+/**
+ * @suppress
+ */
+public object FfiConverterTypeDocDeleteTombstone: FfiConverterRustBuffer<DocDeleteTombstone> {
+    override fun read(buf: ByteBuffer): DocDeleteTombstone {
+        return DocDeleteTombstone(
+            FfiConverterTypeVersionTag.read(buf),
+            FfiConverterMapStringTypeBranchSnapshot.read(buf),
+        )
+    }
+
+    override fun allocationSize(value: DocDeleteTombstone) = (
+            FfiConverterTypeVersionTag.allocationSize(value.`vtag`) +
+            FfiConverterMapStringTypeBranchSnapshot.allocationSize(value.`branches`)
+    )
+
+    override fun write(value: DocDeleteTombstone, buf: ByteBuffer) {
+            FfiConverterTypeVersionTag.write(value.`vtag`, buf)
+            FfiConverterMapStringTypeBranchSnapshot.write(value.`branches`, buf)
+    }
+}
+
+
+
 data class DocEntry (
     var `branches`: Map<kotlin.String, StoredBranchRef>
+    , 
+    var `branchesDeleted`: Map<kotlin.String, List<BranchDeleteTombstone>>
     , 
     var `vtag`: VersionTag
     , 
@@ -1487,6 +1608,7 @@ public object FfiConverterTypeDocEntry: FfiConverterRustBuffer<DocEntry> {
     override fun read(buf: ByteBuffer): DocEntry {
         return DocEntry(
             FfiConverterMapStringTypeStoredBranchRef.read(buf),
+            FfiConverterMapStringSequenceTypeBranchDeleteTombstone.read(buf),
             FfiConverterTypeVersionTag.read(buf),
             FfiConverterOptionalTypeChangeHashSet.read(buf),
         )
@@ -1494,12 +1616,14 @@ public object FfiConverterTypeDocEntry: FfiConverterRustBuffer<DocEntry> {
 
     override fun allocationSize(value: DocEntry) = (
             FfiConverterMapStringTypeStoredBranchRef.allocationSize(value.`branches`) +
+            FfiConverterMapStringSequenceTypeBranchDeleteTombstone.allocationSize(value.`branchesDeleted`) +
             FfiConverterTypeVersionTag.allocationSize(value.`vtag`) +
             FfiConverterOptionalTypeChangeHashSet.allocationSize(value.`previousVersionHeads`)
     )
 
     override fun write(value: DocEntry, buf: ByteBuffer) {
             FfiConverterMapStringTypeStoredBranchRef.write(value.`branches`, buf)
+            FfiConverterMapStringSequenceTypeBranchDeleteTombstone.write(value.`branchesDeleted`, buf)
             FfiConverterTypeVersionTag.write(value.`vtag`, buf)
             FfiConverterOptionalTypeChangeHashSet.write(value.`previousVersionHeads`, buf)
     }
@@ -1509,6 +1633,10 @@ public object FfiConverterTypeDocEntry: FfiConverterRustBuffer<DocEntry> {
 
 data class DocEntryDiff (
     var `changedFacetKeys`: List<FacetKey>
+    , 
+    var `addedFacetKeys`: List<FacetKey>
+    , 
+    var `removedFacetKeys`: List<FacetKey>
     , 
     var `movedBranchNames`: List<kotlin.String>
     
@@ -1528,17 +1656,23 @@ public object FfiConverterTypeDocEntryDiff: FfiConverterRustBuffer<DocEntryDiff>
     override fun read(buf: ByteBuffer): DocEntryDiff {
         return DocEntryDiff(
             FfiConverterSequenceTypeFacetKey.read(buf),
+            FfiConverterSequenceTypeFacetKey.read(buf),
+            FfiConverterSequenceTypeFacetKey.read(buf),
             FfiConverterSequenceString.read(buf),
         )
     }
 
     override fun allocationSize(value: DocEntryDiff) = (
             FfiConverterSequenceTypeFacetKey.allocationSize(value.`changedFacetKeys`) +
+            FfiConverterSequenceTypeFacetKey.allocationSize(value.`addedFacetKeys`) +
+            FfiConverterSequenceTypeFacetKey.allocationSize(value.`removedFacetKeys`) +
             FfiConverterSequenceString.allocationSize(value.`movedBranchNames`)
     )
 
     override fun write(value: DocEntryDiff, buf: ByteBuffer) {
             FfiConverterSequenceTypeFacetKey.write(value.`changedFacetKeys`, buf)
+            FfiConverterSequenceTypeFacetKey.write(value.`addedFacetKeys`, buf)
+            FfiConverterSequenceTypeFacetKey.write(value.`removedFacetKeys`, buf)
             FfiConverterSequenceString.write(value.`movedBranchNames`, buf)
     }
 }
@@ -1578,49 +1712,6 @@ public object FfiConverterTypeDocNBranches: FfiConverterRustBuffer<DocNBranches>
     override fun write(value: DocNBranches, buf: ByteBuffer) {
             FfiConverterString.write(value.`docId`, buf)
             FfiConverterMapStringTypeChangeHashSet.write(value.`branches`, buf)
-    }
-}
-
-
-
-data class FacetDisplayHint (
-    var `alwaysVisible`: kotlin.Boolean
-    , 
-    var `displayTitle`: kotlin.String?
-    , 
-    var `deets`: FacetKeyDisplayDeets
-    
-){
-    
-
-    
-
-    
-    companion object
-}
-
-/**
- * @suppress
- */
-public object FfiConverterTypeFacetDisplayHint: FfiConverterRustBuffer<FacetDisplayHint> {
-    override fun read(buf: ByteBuffer): FacetDisplayHint {
-        return FacetDisplayHint(
-            FfiConverterBoolean.read(buf),
-            FfiConverterOptionalString.read(buf),
-            FfiConverterTypeFacetKeyDisplayDeets.read(buf),
-        )
-    }
-
-    override fun allocationSize(value: FacetDisplayHint) = (
-            FfiConverterBoolean.allocationSize(value.`alwaysVisible`) +
-            FfiConverterOptionalString.allocationSize(value.`displayTitle`) +
-            FfiConverterTypeFacetKeyDisplayDeets.allocationSize(value.`deets`)
-    )
-
-    override fun write(value: FacetDisplayHint, buf: ByteBuffer) {
-            FfiConverterBoolean.write(value.`alwaysVisible`, buf)
-            FfiConverterOptionalString.write(value.`displayTitle`, buf)
-            FfiConverterTypeFacetKeyDisplayDeets.write(value.`deets`, buf)
     }
 }
 
@@ -2718,7 +2809,8 @@ public object FfiConverterTypeCaptureMode: FfiConverterRustBuffer<CaptureMode> {
 sealed class ConfigEvent {
     
     data class Changed(
-        val `heads`: org.example.daybook.uniffi.core.ChangeHashSet) : ConfigEvent()
+        val `heads`: org.example.daybook.uniffi.core.ChangeHashSet, 
+        val `origin`: org.example.daybook.uniffi.core.SwitchEventOrigin) : ConfigEvent()
         
     {
         
@@ -2726,8 +2818,14 @@ sealed class ConfigEvent {
         companion object
     }
     
-    object SyncDevicesChanged : ConfigEvent()
-    
+    data class SyncDevicesChanged(
+        val `origin`: org.example.daybook.uniffi.core.SwitchEventOrigin) : ConfigEvent()
+        
+    {
+        
+
+        companion object
+    }
     
 
     
@@ -2747,8 +2845,11 @@ public object FfiConverterTypeConfigEvent : FfiConverterRustBuffer<ConfigEvent>{
         return when(buf.getInt()) {
             1 -> ConfigEvent.Changed(
                 FfiConverterTypeChangeHashSet.read(buf),
+                FfiConverterTypeSwitchEventOrigin.read(buf),
                 )
-            2 -> ConfigEvent.SyncDevicesChanged
+            2 -> ConfigEvent.SyncDevicesChanged(
+                FfiConverterTypeSwitchEventOrigin.read(buf),
+                )
             else -> throw RuntimeException("invalid enum value, something is very wrong!!")
         }
     }
@@ -2759,12 +2860,14 @@ public object FfiConverterTypeConfigEvent : FfiConverterRustBuffer<ConfigEvent>{
             (
                 4UL
                 + FfiConverterTypeChangeHashSet.allocationSize(value.`heads`)
+                + FfiConverterTypeSwitchEventOrigin.allocationSize(value.`origin`)
             )
         }
         is ConfigEvent.SyncDevicesChanged -> {
             // Add the size for the Int that specifies the variant plus the size needed for all fields
             (
                 4UL
+                + FfiConverterTypeSwitchEventOrigin.allocationSize(value.`origin`)
             )
         }
     }
@@ -2774,49 +2877,15 @@ public object FfiConverterTypeConfigEvent : FfiConverterRustBuffer<ConfigEvent>{
             is ConfigEvent.Changed -> {
                 buf.putInt(1)
                 FfiConverterTypeChangeHashSet.write(value.`heads`, buf)
+                FfiConverterTypeSwitchEventOrigin.write(value.`origin`, buf)
                 Unit
             }
             is ConfigEvent.SyncDevicesChanged -> {
                 buf.putInt(2)
+                FfiConverterTypeSwitchEventOrigin.write(value.`origin`, buf)
                 Unit
             }
         }.let { /* this makes the `when` an expression, which ensures it is exhaustive */ }
-    }
-}
-
-
-
-
-
-
-enum class DateTimeFacetDisplayType {
-    
-    TIME_AND_DATE,
-    RELATIVE,
-    TIME_ONLY,
-    DATE_ONLY;
-
-    
-
-
-    companion object
-}
-
-
-/**
- * @suppress
- */
-public object FfiConverterTypeDateTimeFacetDisplayType: FfiConverterRustBuffer<DateTimeFacetDisplayType> {
-    override fun read(buf: ByteBuffer) = try {
-        DateTimeFacetDisplayType.values()[buf.getInt() - 1]
-    } catch (e: IndexOutOfBoundsException) {
-        throw RuntimeException("invalid enum value, something is very wrong!!", e)
-    }
-
-    override fun allocationSize(value: DateTimeFacetDisplayType) = 4UL
-
-    override fun write(value: DateTimeFacetDisplayType, buf: ByteBuffer) {
-        buf.putInt(value.ordinal + 1)
     }
 }
 
@@ -2828,7 +2897,19 @@ sealed class DispatchEvent {
     
     data class DispatchAdded(
         val `id`: kotlin.String, 
-        val `heads`: org.example.daybook.uniffi.core.ChangeHashSet) : DispatchEvent()
+        val `heads`: org.example.daybook.uniffi.core.ChangeHashSet, 
+        val `origin`: org.example.daybook.uniffi.core.SwitchEventOrigin) : DispatchEvent()
+        
+    {
+        
+
+        companion object
+    }
+    
+    data class DispatchUpdated(
+        val `id`: kotlin.String, 
+        val `heads`: org.example.daybook.uniffi.core.ChangeHashSet, 
+        val `origin`: org.example.daybook.uniffi.core.SwitchEventOrigin) : DispatchEvent()
         
     {
         
@@ -2838,7 +2919,8 @@ sealed class DispatchEvent {
     
     data class DispatchDeleted(
         val `id`: kotlin.String, 
-        val `heads`: org.example.daybook.uniffi.core.ChangeHashSet) : DispatchEvent()
+        val `heads`: org.example.daybook.uniffi.core.ChangeHashSet, 
+        val `origin`: org.example.daybook.uniffi.core.SwitchEventOrigin) : DispatchEvent()
         
     {
         
@@ -2865,10 +2947,17 @@ public object FfiConverterTypeDispatchEvent : FfiConverterRustBuffer<DispatchEve
             1 -> DispatchEvent.DispatchAdded(
                 FfiConverterString.read(buf),
                 FfiConverterTypeChangeHashSet.read(buf),
+                FfiConverterTypeSwitchEventOrigin.read(buf),
                 )
-            2 -> DispatchEvent.DispatchDeleted(
+            2 -> DispatchEvent.DispatchUpdated(
                 FfiConverterString.read(buf),
                 FfiConverterTypeChangeHashSet.read(buf),
+                FfiConverterTypeSwitchEventOrigin.read(buf),
+                )
+            3 -> DispatchEvent.DispatchDeleted(
+                FfiConverterString.read(buf),
+                FfiConverterTypeChangeHashSet.read(buf),
+                FfiConverterTypeSwitchEventOrigin.read(buf),
                 )
             else -> throw RuntimeException("invalid enum value, something is very wrong!!")
         }
@@ -2881,6 +2970,16 @@ public object FfiConverterTypeDispatchEvent : FfiConverterRustBuffer<DispatchEve
                 4UL
                 + FfiConverterString.allocationSize(value.`id`)
                 + FfiConverterTypeChangeHashSet.allocationSize(value.`heads`)
+                + FfiConverterTypeSwitchEventOrigin.allocationSize(value.`origin`)
+            )
+        }
+        is DispatchEvent.DispatchUpdated -> {
+            // Add the size for the Int that specifies the variant plus the size needed for all fields
+            (
+                4UL
+                + FfiConverterString.allocationSize(value.`id`)
+                + FfiConverterTypeChangeHashSet.allocationSize(value.`heads`)
+                + FfiConverterTypeSwitchEventOrigin.allocationSize(value.`origin`)
             )
         }
         is DispatchEvent.DispatchDeleted -> {
@@ -2889,6 +2988,7 @@ public object FfiConverterTypeDispatchEvent : FfiConverterRustBuffer<DispatchEve
                 4UL
                 + FfiConverterString.allocationSize(value.`id`)
                 + FfiConverterTypeChangeHashSet.allocationSize(value.`heads`)
+                + FfiConverterTypeSwitchEventOrigin.allocationSize(value.`origin`)
             )
         }
     }
@@ -2899,12 +2999,21 @@ public object FfiConverterTypeDispatchEvent : FfiConverterRustBuffer<DispatchEve
                 buf.putInt(1)
                 FfiConverterString.write(value.`id`, buf)
                 FfiConverterTypeChangeHashSet.write(value.`heads`, buf)
+                FfiConverterTypeSwitchEventOrigin.write(value.`origin`, buf)
                 Unit
             }
-            is DispatchEvent.DispatchDeleted -> {
+            is DispatchEvent.DispatchUpdated -> {
                 buf.putInt(2)
                 FfiConverterString.write(value.`id`, buf)
                 FfiConverterTypeChangeHashSet.write(value.`heads`, buf)
+                FfiConverterTypeSwitchEventOrigin.write(value.`origin`, buf)
+                Unit
+            }
+            is DispatchEvent.DispatchDeleted -> {
+                buf.putInt(3)
+                FfiConverterString.write(value.`id`, buf)
+                FfiConverterTypeChangeHashSet.write(value.`heads`, buf)
+                FfiConverterTypeSwitchEventOrigin.write(value.`origin`, buf)
                 Unit
             }
         }.let { /* this makes the `when` an expression, which ensures it is exhaustive */ }
@@ -2917,19 +3026,11 @@ public object FfiConverterTypeDispatchEvent : FfiConverterRustBuffer<DispatchEve
 
 sealed class DrawerEvent {
     
-    data class ListChanged(
-        val `drawerHeads`: org.example.daybook.uniffi.core.ChangeHashSet) : DrawerEvent()
-        
-    {
-        
-
-        companion object
-    }
-    
     data class DocAdded(
         val `id`: kotlin.String, 
         val `entry`: org.example.daybook.uniffi.core.DocNBranches, 
-        val `drawerHeads`: org.example.daybook.uniffi.core.ChangeHashSet) : DrawerEvent()
+        val `drawerHeads`: org.example.daybook.uniffi.core.ChangeHashSet, 
+        val `origin`: org.example.daybook.uniffi.core.SwitchEventOrigin) : DrawerEvent()
         
     {
         
@@ -2941,7 +3042,8 @@ sealed class DrawerEvent {
         val `id`: kotlin.String, 
         val `entry`: org.example.daybook.uniffi.core.DocNBranches, 
         val `diff`: org.example.daybook.uniffi.core.DocEntryDiff, 
-        val `drawerHeads`: org.example.daybook.uniffi.core.ChangeHashSet) : DrawerEvent()
+        val `drawerHeads`: org.example.daybook.uniffi.core.ChangeHashSet, 
+        val `origin`: org.example.daybook.uniffi.core.SwitchEventOrigin) : DrawerEvent()
         
     {
         
@@ -2952,7 +3054,9 @@ sealed class DrawerEvent {
     data class DocDeleted(
         val `id`: kotlin.String, 
         val `drawerHeads`: org.example.daybook.uniffi.core.ChangeHashSet, 
-        val `entry`: org.example.daybook.uniffi.core.DocEntry?) : DrawerEvent()
+        val `deletedFacetKeys`: List<org.example.daybook.uniffi.types.FacetKey>, 
+        val `entry`: org.example.daybook.uniffi.core.DocEntry?, 
+        val `origin`: org.example.daybook.uniffi.core.SwitchEventOrigin) : DrawerEvent()
         
     {
         
@@ -2976,37 +3080,31 @@ sealed class DrawerEvent {
 public object FfiConverterTypeDrawerEvent : FfiConverterRustBuffer<DrawerEvent>{
     override fun read(buf: ByteBuffer): DrawerEvent {
         return when(buf.getInt()) {
-            1 -> DrawerEvent.ListChanged(
-                FfiConverterTypeChangeHashSet.read(buf),
-                )
-            2 -> DrawerEvent.DocAdded(
+            1 -> DrawerEvent.DocAdded(
                 FfiConverterString.read(buf),
                 FfiConverterTypeDocNBranches.read(buf),
                 FfiConverterTypeChangeHashSet.read(buf),
+                FfiConverterTypeSwitchEventOrigin.read(buf),
                 )
-            3 -> DrawerEvent.DocUpdated(
+            2 -> DrawerEvent.DocUpdated(
                 FfiConverterString.read(buf),
                 FfiConverterTypeDocNBranches.read(buf),
                 FfiConverterTypeDocEntryDiff.read(buf),
                 FfiConverterTypeChangeHashSet.read(buf),
+                FfiConverterTypeSwitchEventOrigin.read(buf),
                 )
-            4 -> DrawerEvent.DocDeleted(
+            3 -> DrawerEvent.DocDeleted(
                 FfiConverterString.read(buf),
                 FfiConverterTypeChangeHashSet.read(buf),
+                FfiConverterSequenceTypeFacetKey.read(buf),
                 FfiConverterOptionalTypeDocEntry.read(buf),
+                FfiConverterTypeSwitchEventOrigin.read(buf),
                 )
             else -> throw RuntimeException("invalid enum value, something is very wrong!!")
         }
     }
 
     override fun allocationSize(value: DrawerEvent) = when(value) {
-        is DrawerEvent.ListChanged -> {
-            // Add the size for the Int that specifies the variant plus the size needed for all fields
-            (
-                4UL
-                + FfiConverterTypeChangeHashSet.allocationSize(value.`drawerHeads`)
-            )
-        }
         is DrawerEvent.DocAdded -> {
             // Add the size for the Int that specifies the variant plus the size needed for all fields
             (
@@ -3014,6 +3112,7 @@ public object FfiConverterTypeDrawerEvent : FfiConverterRustBuffer<DrawerEvent>{
                 + FfiConverterString.allocationSize(value.`id`)
                 + FfiConverterTypeDocNBranches.allocationSize(value.`entry`)
                 + FfiConverterTypeChangeHashSet.allocationSize(value.`drawerHeads`)
+                + FfiConverterTypeSwitchEventOrigin.allocationSize(value.`origin`)
             )
         }
         is DrawerEvent.DocUpdated -> {
@@ -3024,6 +3123,7 @@ public object FfiConverterTypeDrawerEvent : FfiConverterRustBuffer<DrawerEvent>{
                 + FfiConverterTypeDocNBranches.allocationSize(value.`entry`)
                 + FfiConverterTypeDocEntryDiff.allocationSize(value.`diff`)
                 + FfiConverterTypeChangeHashSet.allocationSize(value.`drawerHeads`)
+                + FfiConverterTypeSwitchEventOrigin.allocationSize(value.`origin`)
             )
         }
         is DrawerEvent.DocDeleted -> {
@@ -3032,149 +3132,39 @@ public object FfiConverterTypeDrawerEvent : FfiConverterRustBuffer<DrawerEvent>{
                 4UL
                 + FfiConverterString.allocationSize(value.`id`)
                 + FfiConverterTypeChangeHashSet.allocationSize(value.`drawerHeads`)
+                + FfiConverterSequenceTypeFacetKey.allocationSize(value.`deletedFacetKeys`)
                 + FfiConverterOptionalTypeDocEntry.allocationSize(value.`entry`)
+                + FfiConverterTypeSwitchEventOrigin.allocationSize(value.`origin`)
             )
         }
     }
 
     override fun write(value: DrawerEvent, buf: ByteBuffer) {
         when(value) {
-            is DrawerEvent.ListChanged -> {
-                buf.putInt(1)
-                FfiConverterTypeChangeHashSet.write(value.`drawerHeads`, buf)
-                Unit
-            }
             is DrawerEvent.DocAdded -> {
-                buf.putInt(2)
+                buf.putInt(1)
                 FfiConverterString.write(value.`id`, buf)
                 FfiConverterTypeDocNBranches.write(value.`entry`, buf)
                 FfiConverterTypeChangeHashSet.write(value.`drawerHeads`, buf)
+                FfiConverterTypeSwitchEventOrigin.write(value.`origin`, buf)
                 Unit
             }
             is DrawerEvent.DocUpdated -> {
-                buf.putInt(3)
+                buf.putInt(2)
                 FfiConverterString.write(value.`id`, buf)
                 FfiConverterTypeDocNBranches.write(value.`entry`, buf)
                 FfiConverterTypeDocEntryDiff.write(value.`diff`, buf)
                 FfiConverterTypeChangeHashSet.write(value.`drawerHeads`, buf)
+                FfiConverterTypeSwitchEventOrigin.write(value.`origin`, buf)
                 Unit
             }
             is DrawerEvent.DocDeleted -> {
-                buf.putInt(4)
+                buf.putInt(3)
                 FfiConverterString.write(value.`id`, buf)
                 FfiConverterTypeChangeHashSet.write(value.`drawerHeads`, buf)
+                FfiConverterSequenceTypeFacetKey.write(value.`deletedFacetKeys`, buf)
                 FfiConverterOptionalTypeDocEntry.write(value.`entry`, buf)
-                Unit
-            }
-        }.let { /* this makes the `when` an expression, which ensures it is exhaustive */ }
-    }
-}
-
-
-
-
-
-sealed class FacetKeyDisplayDeets {
-    
-    object DebugPrint : FacetKeyDisplayDeets()
-    
-    
-    data class DateTime(
-        val `displayType`: org.example.daybook.uniffi.core.DateTimeFacetDisplayType) : FacetKeyDisplayDeets()
-        
-    {
-        
-
-        companion object
-    }
-    
-    object UnixPath : FacetKeyDisplayDeets()
-    
-    
-    data class Title(
-        val `showEditor`: kotlin.Boolean) : FacetKeyDisplayDeets()
-        
-    {
-        
-
-        companion object
-    }
-    
-
-    
-
-    
-    
-
-
-    companion object
-}
-
-/**
- * @suppress
- */
-public object FfiConverterTypeFacetKeyDisplayDeets : FfiConverterRustBuffer<FacetKeyDisplayDeets>{
-    override fun read(buf: ByteBuffer): FacetKeyDisplayDeets {
-        return when(buf.getInt()) {
-            1 -> FacetKeyDisplayDeets.DebugPrint
-            2 -> FacetKeyDisplayDeets.DateTime(
-                FfiConverterTypeDateTimeFacetDisplayType.read(buf),
-                )
-            3 -> FacetKeyDisplayDeets.UnixPath
-            4 -> FacetKeyDisplayDeets.Title(
-                FfiConverterBoolean.read(buf),
-                )
-            else -> throw RuntimeException("invalid enum value, something is very wrong!!")
-        }
-    }
-
-    override fun allocationSize(value: FacetKeyDisplayDeets) = when(value) {
-        is FacetKeyDisplayDeets.DebugPrint -> {
-            // Add the size for the Int that specifies the variant plus the size needed for all fields
-            (
-                4UL
-            )
-        }
-        is FacetKeyDisplayDeets.DateTime -> {
-            // Add the size for the Int that specifies the variant plus the size needed for all fields
-            (
-                4UL
-                + FfiConverterTypeDateTimeFacetDisplayType.allocationSize(value.`displayType`)
-            )
-        }
-        is FacetKeyDisplayDeets.UnixPath -> {
-            // Add the size for the Int that specifies the variant plus the size needed for all fields
-            (
-                4UL
-            )
-        }
-        is FacetKeyDisplayDeets.Title -> {
-            // Add the size for the Int that specifies the variant plus the size needed for all fields
-            (
-                4UL
-                + FfiConverterBoolean.allocationSize(value.`showEditor`)
-            )
-        }
-    }
-
-    override fun write(value: FacetKeyDisplayDeets, buf: ByteBuffer) {
-        when(value) {
-            is FacetKeyDisplayDeets.DebugPrint -> {
-                buf.putInt(1)
-                Unit
-            }
-            is FacetKeyDisplayDeets.DateTime -> {
-                buf.putInt(2)
-                FfiConverterTypeDateTimeFacetDisplayType.write(value.`displayType`, buf)
-                Unit
-            }
-            is FacetKeyDisplayDeets.UnixPath -> {
-                buf.putInt(3)
-                Unit
-            }
-            is FacetKeyDisplayDeets.Title -> {
-                buf.putInt(4)
-                FfiConverterBoolean.write(value.`showEditor`, buf)
+                FfiConverterTypeSwitchEventOrigin.write(value.`origin`, buf)
                 Unit
             }
         }.let { /* this makes the `when` an expression, which ensures it is exhaustive */ }
@@ -3189,7 +3179,8 @@ sealed class PlugsEvent {
     
     data class PlugAdded(
         val `id`: kotlin.String, 
-        val `heads`: org.example.daybook.uniffi.core.ChangeHashSet) : PlugsEvent()
+        val `heads`: org.example.daybook.uniffi.core.ChangeHashSet, 
+        val `origin`: org.example.daybook.uniffi.core.SwitchEventOrigin) : PlugsEvent()
         
     {
         
@@ -3199,7 +3190,8 @@ sealed class PlugsEvent {
     
     data class PlugChanged(
         val `id`: kotlin.String, 
-        val `heads`: org.example.daybook.uniffi.core.ChangeHashSet) : PlugsEvent()
+        val `heads`: org.example.daybook.uniffi.core.ChangeHashSet, 
+        val `origin`: org.example.daybook.uniffi.core.SwitchEventOrigin) : PlugsEvent()
         
     {
         
@@ -3209,7 +3201,18 @@ sealed class PlugsEvent {
     
     data class PlugDeleted(
         val `id`: kotlin.String, 
-        val `heads`: org.example.daybook.uniffi.core.ChangeHashSet) : PlugsEvent()
+        val `heads`: org.example.daybook.uniffi.core.ChangeHashSet, 
+        val `origin`: org.example.daybook.uniffi.core.SwitchEventOrigin) : PlugsEvent()
+        
+    {
+        
+
+        companion object
+    }
+    
+    data class ConfigDocsChanged(
+        val `heads`: org.example.daybook.uniffi.core.ChangeHashSet, 
+        val `origin`: org.example.daybook.uniffi.core.SwitchEventOrigin) : PlugsEvent()
         
     {
         
@@ -3236,14 +3239,21 @@ public object FfiConverterTypePlugsEvent : FfiConverterRustBuffer<PlugsEvent>{
             1 -> PlugsEvent.PlugAdded(
                 FfiConverterString.read(buf),
                 FfiConverterTypeChangeHashSet.read(buf),
+                FfiConverterTypeSwitchEventOrigin.read(buf),
                 )
             2 -> PlugsEvent.PlugChanged(
                 FfiConverterString.read(buf),
                 FfiConverterTypeChangeHashSet.read(buf),
+                FfiConverterTypeSwitchEventOrigin.read(buf),
                 )
             3 -> PlugsEvent.PlugDeleted(
                 FfiConverterString.read(buf),
                 FfiConverterTypeChangeHashSet.read(buf),
+                FfiConverterTypeSwitchEventOrigin.read(buf),
+                )
+            4 -> PlugsEvent.ConfigDocsChanged(
+                FfiConverterTypeChangeHashSet.read(buf),
+                FfiConverterTypeSwitchEventOrigin.read(buf),
                 )
             else -> throw RuntimeException("invalid enum value, something is very wrong!!")
         }
@@ -3256,6 +3266,7 @@ public object FfiConverterTypePlugsEvent : FfiConverterRustBuffer<PlugsEvent>{
                 4UL
                 + FfiConverterString.allocationSize(value.`id`)
                 + FfiConverterTypeChangeHashSet.allocationSize(value.`heads`)
+                + FfiConverterTypeSwitchEventOrigin.allocationSize(value.`origin`)
             )
         }
         is PlugsEvent.PlugChanged -> {
@@ -3264,6 +3275,7 @@ public object FfiConverterTypePlugsEvent : FfiConverterRustBuffer<PlugsEvent>{
                 4UL
                 + FfiConverterString.allocationSize(value.`id`)
                 + FfiConverterTypeChangeHashSet.allocationSize(value.`heads`)
+                + FfiConverterTypeSwitchEventOrigin.allocationSize(value.`origin`)
             )
         }
         is PlugsEvent.PlugDeleted -> {
@@ -3272,6 +3284,15 @@ public object FfiConverterTypePlugsEvent : FfiConverterRustBuffer<PlugsEvent>{
                 4UL
                 + FfiConverterString.allocationSize(value.`id`)
                 + FfiConverterTypeChangeHashSet.allocationSize(value.`heads`)
+                + FfiConverterTypeSwitchEventOrigin.allocationSize(value.`origin`)
+            )
+        }
+        is PlugsEvent.ConfigDocsChanged -> {
+            // Add the size for the Int that specifies the variant plus the size needed for all fields
+            (
+                4UL
+                + FfiConverterTypeChangeHashSet.allocationSize(value.`heads`)
+                + FfiConverterTypeSwitchEventOrigin.allocationSize(value.`origin`)
             )
         }
     }
@@ -3282,18 +3303,27 @@ public object FfiConverterTypePlugsEvent : FfiConverterRustBuffer<PlugsEvent>{
                 buf.putInt(1)
                 FfiConverterString.write(value.`id`, buf)
                 FfiConverterTypeChangeHashSet.write(value.`heads`, buf)
+                FfiConverterTypeSwitchEventOrigin.write(value.`origin`, buf)
                 Unit
             }
             is PlugsEvent.PlugChanged -> {
                 buf.putInt(2)
                 FfiConverterString.write(value.`id`, buf)
                 FfiConverterTypeChangeHashSet.write(value.`heads`, buf)
+                FfiConverterTypeSwitchEventOrigin.write(value.`origin`, buf)
                 Unit
             }
             is PlugsEvent.PlugDeleted -> {
                 buf.putInt(3)
                 FfiConverterString.write(value.`id`, buf)
                 FfiConverterTypeChangeHashSet.write(value.`heads`, buf)
+                FfiConverterTypeSwitchEventOrigin.write(value.`origin`, buf)
+                Unit
+            }
+            is PlugsEvent.ConfigDocsChanged -> {
+                buf.putInt(4)
+                FfiConverterTypeChangeHashSet.write(value.`heads`, buf)
+                FfiConverterTypeSwitchEventOrigin.write(value.`origin`, buf)
                 Unit
             }
         }.let { /* this makes the `when` an expression, which ensures it is exhaustive */ }
@@ -3828,6 +3858,103 @@ public object FfiConverterTypeProgressUpdateDeets : FfiConverterRustBuffer<Progr
                 buf.putInt(3)
                 FfiConverterTypeProgressFinalState.write(value.`state`, buf)
                 FfiConverterOptionalString.write(value.`message`, buf)
+                Unit
+            }
+        }.let { /* this makes the `when` an expression, which ensures it is exhaustive */ }
+    }
+}
+
+
+
+
+
+sealed class SwitchEventOrigin {
+    
+    data class Local(
+        val `actorId`: kotlin.String) : SwitchEventOrigin()
+        
+    {
+        
+
+        companion object
+    }
+    
+    data class Remote(
+        val `peerId`: kotlin.String) : SwitchEventOrigin()
+        
+    {
+        
+
+        companion object
+    }
+    
+    object Bootstrap : SwitchEventOrigin()
+    
+    
+
+    
+
+    
+    
+
+
+    companion object
+}
+
+/**
+ * @suppress
+ */
+public object FfiConverterTypeSwitchEventOrigin : FfiConverterRustBuffer<SwitchEventOrigin>{
+    override fun read(buf: ByteBuffer): SwitchEventOrigin {
+        return when(buf.getInt()) {
+            1 -> SwitchEventOrigin.Local(
+                FfiConverterString.read(buf),
+                )
+            2 -> SwitchEventOrigin.Remote(
+                FfiConverterString.read(buf),
+                )
+            3 -> SwitchEventOrigin.Bootstrap
+            else -> throw RuntimeException("invalid enum value, something is very wrong!!")
+        }
+    }
+
+    override fun allocationSize(value: SwitchEventOrigin) = when(value) {
+        is SwitchEventOrigin.Local -> {
+            // Add the size for the Int that specifies the variant plus the size needed for all fields
+            (
+                4UL
+                + FfiConverterString.allocationSize(value.`actorId`)
+            )
+        }
+        is SwitchEventOrigin.Remote -> {
+            // Add the size for the Int that specifies the variant plus the size needed for all fields
+            (
+                4UL
+                + FfiConverterString.allocationSize(value.`peerId`)
+            )
+        }
+        is SwitchEventOrigin.Bootstrap -> {
+            // Add the size for the Int that specifies the variant plus the size needed for all fields
+            (
+                4UL
+            )
+        }
+    }
+
+    override fun write(value: SwitchEventOrigin, buf: ByteBuffer) {
+        when(value) {
+            is SwitchEventOrigin.Local -> {
+                buf.putInt(1)
+                FfiConverterString.write(value.`actorId`, buf)
+                Unit
+            }
+            is SwitchEventOrigin.Remote -> {
+                buf.putInt(2)
+                FfiConverterString.write(value.`peerId`, buf)
+                Unit
+            }
+            is SwitchEventOrigin.Bootstrap -> {
+                buf.putInt(3)
                 Unit
             }
         }.let { /* this makes the `when` an expression, which ensures it is exhaustive */ }
@@ -5114,6 +5241,34 @@ public object FfiConverterSequenceString: FfiConverterRustBuffer<List<kotlin.Str
 /**
  * @suppress
  */
+public object FfiConverterSequenceTypeBranchDeleteTombstone: FfiConverterRustBuffer<List<BranchDeleteTombstone>> {
+    override fun read(buf: ByteBuffer): List<BranchDeleteTombstone> {
+        val len = buf.getInt()
+        return List<BranchDeleteTombstone>(len) {
+            FfiConverterTypeBranchDeleteTombstone.read(buf)
+        }
+    }
+
+    override fun allocationSize(value: List<BranchDeleteTombstone>): ULong {
+        val sizeForLength = 4UL
+        val sizeForItems = value.map { FfiConverterTypeBranchDeleteTombstone.allocationSize(it) }.sum()
+        return sizeForLength + sizeForItems
+    }
+
+    override fun write(value: List<BranchDeleteTombstone>, buf: ByteBuffer) {
+        buf.putInt(value.size)
+        value.iterator().forEach {
+            FfiConverterTypeBranchDeleteTombstone.write(it, buf)
+        }
+    }
+}
+
+
+
+
+/**
+ * @suppress
+ */
 public object FfiConverterSequenceTypeKnownRepoEntry: FfiConverterRustBuffer<List<KnownRepoEntry>> {
     override fun read(buf: ByteBuffer): List<KnownRepoEntry> {
         val len = buf.getInt()
@@ -5338,6 +5493,45 @@ public object FfiConverterSequenceTypeUuid: FfiConverterRustBuffer<List<Uuid>> {
 /**
  * @suppress
  */
+public object FfiConverterMapStringTypeBranchSnapshot: FfiConverterRustBuffer<Map<kotlin.String, BranchSnapshot>> {
+    override fun read(buf: ByteBuffer): Map<kotlin.String, BranchSnapshot> {
+        val len = buf.getInt()
+        return buildMap<kotlin.String, BranchSnapshot>(len) {
+            repeat(len) {
+                val k = FfiConverterString.read(buf)
+                val v = FfiConverterTypeBranchSnapshot.read(buf)
+                this[k] = v
+            }
+        }
+    }
+
+    override fun allocationSize(value: Map<kotlin.String, BranchSnapshot>): ULong {
+        val spaceForMapSize = 4UL
+        val spaceForChildren = value.map { (k, v) ->
+            FfiConverterString.allocationSize(k) +
+            FfiConverterTypeBranchSnapshot.allocationSize(v)
+        }.sum()
+        return spaceForMapSize + spaceForChildren
+    }
+
+    override fun write(value: Map<kotlin.String, BranchSnapshot>, buf: ByteBuffer) {
+        buf.putInt(value.size)
+        // The parens on `(k, v)` here ensure we're calling the right method,
+        // which is important for compatibility with older android devices.
+        // Ref https://blog.danlew.net/2017/03/16/kotlin-puzzler-whose-line-is-it-anyways/
+        value.forEach { (k, v) ->
+            FfiConverterString.write(k, buf)
+            FfiConverterTypeBranchSnapshot.write(v, buf)
+        }
+    }
+}
+
+
+
+
+/**
+ * @suppress
+ */
 public object FfiConverterMapStringTypeStoredBranchRef: FfiConverterRustBuffer<Map<kotlin.String, StoredBranchRef>> {
     override fun read(buf: ByteBuffer): Map<kotlin.String, StoredBranchRef> {
         val len = buf.getInt()
@@ -5367,6 +5561,45 @@ public object FfiConverterMapStringTypeStoredBranchRef: FfiConverterRustBuffer<M
         value.forEach { (k, v) ->
             FfiConverterString.write(k, buf)
             FfiConverterTypeStoredBranchRef.write(v, buf)
+        }
+    }
+}
+
+
+
+
+/**
+ * @suppress
+ */
+public object FfiConverterMapStringSequenceTypeBranchDeleteTombstone: FfiConverterRustBuffer<Map<kotlin.String, List<BranchDeleteTombstone>>> {
+    override fun read(buf: ByteBuffer): Map<kotlin.String, List<BranchDeleteTombstone>> {
+        val len = buf.getInt()
+        return buildMap<kotlin.String, List<BranchDeleteTombstone>>(len) {
+            repeat(len) {
+                val k = FfiConverterString.read(buf)
+                val v = FfiConverterSequenceTypeBranchDeleteTombstone.read(buf)
+                this[k] = v
+            }
+        }
+    }
+
+    override fun allocationSize(value: Map<kotlin.String, List<BranchDeleteTombstone>>): ULong {
+        val spaceForMapSize = 4UL
+        val spaceForChildren = value.map { (k, v) ->
+            FfiConverterString.allocationSize(k) +
+            FfiConverterSequenceTypeBranchDeleteTombstone.allocationSize(v)
+        }.sum()
+        return spaceForMapSize + spaceForChildren
+    }
+
+    override fun write(value: Map<kotlin.String, List<BranchDeleteTombstone>>, buf: ByteBuffer) {
+        buf.putInt(value.size)
+        // The parens on `(k, v)` here ensure we're calling the right method,
+        // which is important for compatibility with older android devices.
+        // Ref https://blog.danlew.net/2017/03/16/kotlin-puzzler-whose-line-is-it-anyways/
+        value.forEach { (k, v) ->
+            FfiConverterString.write(k, buf)
+            FfiConverterSequenceTypeBranchDeleteTombstone.write(v, buf)
         }
     }
 }
@@ -5582,3 +5815,10 @@ public object FfiConverterTypeUuid: FfiConverter<Uuid, RustBuffer.ByValue> {
  */
 public typealias VersionTag = kotlin.String
 public typealias FfiConverterTypeVersionTag = FfiConverterString
+
+
+
+
+
+
+

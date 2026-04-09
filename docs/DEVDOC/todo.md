@@ -23,6 +23,9 @@
 
 ## Stack
 
+- [ ] Good and local document classification
+  - [ ] Receipt parsing
+  - [ ] Collators
 - [ ] Sync panel
 - [ ] P2P
   - [x] iroh
@@ -35,9 +38,6 @@
 - [ ] Blobs server
   - [x] Iroh blobs?
   - [x] Chunked hashing for transfers
-- [ ] Good and local document classification
-  - [ ] Receipt parsing
-  - [ ] Collators
 - [ ] daybook_server
   - [ ] Decide on wrpc vs json
 - [ ] DrawerScreen
@@ -45,14 +45,14 @@
   - [ ] Press again to change views
 - [ ] Mltools config should be per device
 - [ ] Processors should only run on device that created the doc
-- [ ] use a env var or an env! var to set global multipliers for our test timeouts
+- [x] use a env var or an env! var to set global multipliers for our test timeouts
 - [ ] File locks on repo
 - [ ] Store plugin info in drawer??
 - [ ] Js execution
   - [ ] https://json-render.dev/ based display
 - [ ] DocEditor
 - [x] Progress system
-  - [ ] Blob download
+  - [x] Blob download
 - [x] Overhaul bottom bar
   - [ ] Change color when in different modes.
   - [ ] Experiment with floating bottom bar

@@ -91,6 +91,8 @@ import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.delay
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.withContext
 import io.github.vinceglb.filekit.dialogs.compose.rememberDirectoryPickerLauncher
 import io.github.vinceglb.filekit.path
 import org.example.daybook.capture.CameraCaptureContext
@@ -188,7 +190,7 @@ private object WelcomeRoute {
 fun WelcomeFlowNavHost(
     repos: List<KnownRepoEntry>,
     permCtx: PermissionsContext?,
-    cameraPreviewFfi: CameraPreviewFfi,
+    cameraPreviewFfi: CameraPreviewFfi?,
     selectedWelcomeRepo: KnownRepoEntry?,
     cloneUiState: CloneUiState?,
     createRepoUiState: CreateRepoUiState?,
@@ -574,13 +576,25 @@ fun WelcomeFlowNavHost(
             if (scannerState == null) {
                 LaunchedEffect(Unit) { navController.popBackStack() }
             } else {
-                CloneQrScannerScreen(
-                    cameraPreviewFfi = cameraPreviewFfi,
-                    onDetectedUrl = { detectedUrl ->
-                        onCloneUiStateChange(CloneUiState.UrlInput(urlInput = detectedUrl))
-                        navController.popBackStack(WelcomeRoute.CloneUrl, false)
+                if (cameraPreviewFfi == null) {
+                    Box(modifier = Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
+                        Column(
+                            horizontalAlignment = Alignment.CenterHorizontally,
+                            verticalArrangement = Arrangement.spacedBy(12.dp)
+                        ) {
+                            CircularProgressIndicator()
+                            Text("Initializing camera…", style = MaterialTheme.typography.bodyMedium)
+                        }
                     }
-                )
+                } else {
+                    CloneQrScannerScreen(
+                        cameraPreviewFfi = cameraPreviewFfi,
+                        onDetectedUrl = { detectedUrl ->
+                            onCloneUiStateChange(CloneUiState.UrlInput(urlInput = detectedUrl))
+                            navController.popBackStack(WelcomeRoute.CloneUrl, false)
+                        }
+                    )
+                }
             }
         }
 
@@ -1034,14 +1048,32 @@ private fun CloneQrScannerScreen(
         candidate.matches(Regex("^[A-Za-z][A-Za-z0-9+.-]*:.*$"))
 
     val useNativePreviewQr = remember(cameraPreviewFfi) { cameraPreviewFfi.supportsNativeQrAnalysis() }
-    val analyzer = remember { CameraQrAnalyzerFfi.load() }
+    var analyzer by remember { mutableStateOf<CameraQrAnalyzerFfi?>(null) }
+    LaunchedEffect(Unit) {
+        if (analyzer == null) {
+            analyzer = withContext(Dispatchers.IO) { CameraQrAnalyzerFfi.load() }
+        }
+    }
+    val analyzerReady = analyzer
+    if (analyzerReady == null) {
+        Box(modifier = Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
+            Column(
+                horizontalAlignment = Alignment.CenterHorizontally,
+                verticalArrangement = Arrangement.spacedBy(12.dp)
+            ) {
+                CircularProgressIndicator()
+                Text("Initializing QR analyzer…", style = MaterialTheme.typography.bodyMedium)
+            }
+        }
+        return
+    }
     val uiScope = rememberCoroutineScope()
     var userVisibleError by remember { mutableStateOf<String?>(null) }
     var hasCompleted by remember { mutableStateOf(false) }
     val frameBridge =
-        remember(analyzer) {
+        remember(analyzerReady) {
             CameraQrOverlayBridge(
-                analyzer = analyzer,
+                analyzer = analyzerReady,
                 onDetectedText = { rawText ->
                     uiScope.launch {
                         if (hasCompleted) return@launch
@@ -1076,7 +1108,7 @@ private fun CloneQrScannerScreen(
         }
     val overlayState by (if (useNativePreviewQr) previewBridge.state else frameBridge.state).collectAsState()
 
-    androidx.compose.runtime.DisposableEffect(analyzer, frameBridge, previewBridge, useNativePreviewQr) {
+    androidx.compose.runtime.DisposableEffect(analyzerReady, frameBridge, previewBridge, useNativePreviewQr) {
         if (useNativePreviewQr) {
             previewBridge.start()
         } else {
@@ -1085,7 +1117,7 @@ private fun CloneQrScannerScreen(
         onDispose {
             previewBridge.stop()
             frameBridge.stop()
-            analyzer.close()
+            analyzerReady.close()
         }
     }
 
@@ -1327,6 +1359,10 @@ fun CloneShareDialogContent(
         errorMessage = null
         ticketUrl = null
         qrPngBytes = null
+        if (syncRepo == null) {
+            errorMessage = "Sync service is still starting. Try again in a moment."
+            return@LaunchedEffect
+        }
         try {
             val ticket = syncRepo.getTicketWithQrPng(768u)
             ticketUrl = ticket.ticketUrl

@@ -17,12 +17,12 @@ import org.example.daybook.uniffi.FfiException
 import org.example.daybook.uniffi.NoHandle
 import org.example.daybook.uniffi.ProgressEventListener
 import org.example.daybook.uniffi.ProgressRepoFfi
-import org.example.daybook.uniffi.core.FacetDisplayHint
 import org.example.daybook.uniffi.core.ListenerRegistration
 import org.example.daybook.uniffi.core.ProgressEvent
 import org.example.daybook.uniffi.core.ProgressTaskState
 import org.example.daybook.uniffi.core.ProgressUpdateDeets
 import org.example.daybook.uniffi.core.ProgressTask
+import org.example.daybook.uniffi.types.FacetDisplayHint
 
 data class ConfigError(val message: String, val exception: FfiException)
 
