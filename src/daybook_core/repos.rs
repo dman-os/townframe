@@ -810,4 +810,37 @@ mod origin_tests {
             crate::event_origin::SwitchEventOrigin::Local { actor_id } if actor_id == actor.to_string()
         ));
     }
+
+    #[test]
+    fn resolve_origin_from_vtag_actor_live_remote_maps_peer_id() {
+        let local_actor = automerge::ActorId::from([1_u8; 16]);
+        let vtag_actor = automerge::ActorId::from([2_u8; 16]);
+        let origin = resolve_origin_from_vtag_actor(
+            &local_actor,
+            &vtag_actor,
+            Some(&BigRepoChangeOrigin::Remote {
+                peer_id: "peer-123".into(),
+                connection_id: samod::ConnectionId::from(0_u32),
+            }),
+        );
+        assert!(matches!(
+            origin,
+            crate::event_origin::SwitchEventOrigin::Remote { peer_id } if peer_id == "peer-123"
+        ));
+    }
+
+    #[test]
+    fn resolve_origin_from_vtag_actor_live_local_mismatch_maps_unknown_remote() {
+        let local_actor = automerge::ActorId::from([1_u8; 16]);
+        let vtag_actor = automerge::ActorId::from([2_u8; 16]);
+        let origin = resolve_origin_from_vtag_actor(
+            &local_actor,
+            &vtag_actor,
+            Some(&BigRepoChangeOrigin::Local),
+        );
+        assert!(matches!(
+            origin,
+            crate::event_origin::SwitchEventOrigin::Remote { peer_id } if peer_id == "unknown"
+        ));
+    }
 }

@@ -792,6 +792,11 @@ impl DrawerRepo {
             }
             for (branch_path, branch_doc_id) in local_branch_refs {
                 let branch_path = daybook_types::doc::BranchPath::from(branch_path);
+                self.remove_branch_from_partitions_if_needed(
+                    self.branch_kind_for_path(&branch_path)?,
+                    &branch_doc_id,
+                )
+                .await?;
                 let branch_heads = self
                     .get_branch_heads_by_doc_id(&branch_doc_id)
                     .await?

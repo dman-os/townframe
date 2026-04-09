@@ -331,6 +331,27 @@ pub struct FacetTokenRw {
     pub facet_acl: Vec<daybook_types::manifest::RoutineFacetAccess>,
 }
 
+async fn refreshed_heads_for_rw_token(
+    plugin: &Arc<DaybookPlugin>,
+    token: &FacetTokenRw,
+) -> anyhow::Result<ChangeHashSet> {
+    let Some(entry) = plugin
+        .drawer_repo
+        .get_doc_branches(&token.doc_id)
+        .await
+        .to_anyhow()?
+    else {
+        return Ok(token.heads.clone());
+    };
+    if let Some(heads) = entry.branches.get(token.branch_path.as_str()) {
+        return Ok(heads.clone());
+    }
+    if let Some(heads) = entry.branches.get(token.target_branch_path.as_str()) {
+        return Ok(heads.clone());
+    }
+    Ok(token.heads.clone())
+}
+
 impl capabilities::HostFacetTokenRw for SharedWashCtx {
     async fn exists(
         &mut self,
@@ -342,13 +363,14 @@ impl capabilities::HostFacetTokenRw for SharedWashCtx {
             .get(&handle)
             .context("error locating token")
             .to_anyhow()?;
+        let refreshed_heads = refreshed_heads_for_rw_token(&plugin, token).await?;
         let doc = plugin
-            .get_doc(&token.doc_id, &token.branch_path, &token.heads)
+            .get_doc(&token.doc_id, &token.branch_path, &refreshed_heads)
             .await
             .to_anyhow()?;
         let doc = if doc.is_none() && token.branch_path != token.target_branch_path {
             plugin
-                .get_doc(&token.doc_id, &token.target_branch_path, &token.heads)
+                .get_doc(&token.doc_id, &token.target_branch_path, &refreshed_heads)
                 .await
                 .to_anyhow()?
         } else {
@@ -370,13 +392,14 @@ impl capabilities::HostFacetTokenRw for SharedWashCtx {
             .get(&handle)
             .context("error locating token")
             .to_anyhow()?;
+        let refreshed_heads = refreshed_heads_for_rw_token(&plugin, token).await?;
         let doc = plugin
-            .get_doc(&token.doc_id, &token.branch_path, &token.heads)
+            .get_doc(&token.doc_id, &token.branch_path, &refreshed_heads)
             .await
             .to_anyhow()?;
         let doc = if doc.is_none() && token.branch_path != token.target_branch_path {
             plugin
-                .get_doc(&token.doc_id, &token.target_branch_path, &token.heads)
+                .get_doc(&token.doc_id, &token.target_branch_path, &refreshed_heads)
                 .await
                 .to_anyhow()?
         } else {

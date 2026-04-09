@@ -349,6 +349,11 @@ pub fn reconcile_value<R: Reconciler>(
                         map_reconciler.put(key, TimestampSeqValue(seconds_seq))?;
                         continue;
                     }
+                    debug!(
+                        key,
+                        ?value,
+                        "failed to coerce timestamp field; storing raw json"
+                    );
                 }
                 map_reconciler.put(key, ThroughJson(value))?;
             }

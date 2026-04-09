@@ -164,6 +164,8 @@ impl FacetCacheState {
 
 impl DrawerRepo {
     pub(super) fn invalidate_entry_cache(&self, id: &DocId) {
+        // Keep pool/cache ordering strict: remove from `entry_pool` (via `remove_key`)
+        // before deleting from `entry_cache` so the pool cannot retain stale refs.
         let mut pool = self.entry_pool.lock().unwrap();
         pool.remove_key(id);
         self.entry_cache.remove(id);

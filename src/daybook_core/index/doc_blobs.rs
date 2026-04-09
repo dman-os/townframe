@@ -283,10 +283,11 @@ impl DocBlobsIndexRepo {
                     Err(err) => {
                         warn!(
                             %doc_id,
+                            %branch_path,
                             ?err,
                             "failed to parse blob facet while indexing; evicting stale blob refs"
                         );
-                        self.delete_doc(doc_id).await?;
+                        self.delete_doc_branch(doc_id, branch_path).await?;
                         return Ok(ReindexDocOutcome::Evicted);
                     }
                 };
