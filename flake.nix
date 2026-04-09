@@ -235,7 +235,7 @@
             cargo-leptos
             trunk
 
-            maestro
+            # maestro
           ];
 
           devOnlyInputs = with pkgs; [

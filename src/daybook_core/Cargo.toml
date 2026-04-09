@@ -171,4 +171,3 @@ wflow = { workspace = true, features = ["test-harness"] }
 insta = { workspace = true, features = ["json"] }
 tempfile.workspace = true
 loom.workspace = true
-plug_test = { workspace = true }

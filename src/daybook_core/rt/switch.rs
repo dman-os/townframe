@@ -262,9 +262,6 @@ pub async fn spawn_switch_worker(
 
             let events = worker.rt.drawer.events_for_init().await?;
             for event in events {
-                if !matches!(event, DrawerEvent::ListChanged { .. }) {
-                    continue;
-                }
                 let event = Arc::new(event);
                 worker
                     .track_event_heads(&SwitchEvent::Drawer(Arc::clone(&event)))
@@ -372,28 +369,26 @@ pub async fn spawn_switch_worker(
                                 break;
                             }
                         };
-                        if matches!(&*event, DrawerEvent::ListChanged { .. }) {
-                            if let Err(error) = worker.track_event_heads(&SwitchEvent::Drawer(Arc::clone(&event))).await {
-                                if switch_worker_is_shutting_down(&cancel_token, &rt_cancel_token) {
-                                    debug!(?error, "SwitchWorker exiting during shutdown");
-                                    break;
-                                }
-                                return Err(error);
+                        if let Err(error) = worker.track_event_heads(&SwitchEvent::Drawer(Arc::clone(&event))).await {
+                            if switch_worker_is_shutting_down(&cancel_token, &rt_cancel_token) {
+                                debug!(?error, "SwitchWorker exiting during shutdown");
+                                break;
                             }
-                            if let Err(error) = worker.dispatch_to_listeners(&SwitchEvent::Drawer(event)).await {
-                                if switch_worker_is_shutting_down(&cancel_token, &rt_cancel_token) {
-                                    debug!(?error, "SwitchWorker exiting during shutdown");
-                                    break;
-                                }
-                                return Err(error);
+                            return Err(error);
+                        }
+                        if let Err(error) = worker.dispatch_to_listeners(&SwitchEvent::Drawer(event)).await {
+                            if switch_worker_is_shutting_down(&cancel_token, &rt_cancel_token) {
+                                debug!(?error, "SwitchWorker exiting during shutdown");
+                                break;
                             }
-                            if let Err(error) = worker.refresh_branch_index().await {
-                                if switch_worker_is_shutting_down(&cancel_token, &rt_cancel_token) {
-                                    debug!(?error, "SwitchWorker exiting during shutdown");
-                                    break;
-                                }
-                                return Err(error);
+                            return Err(error);
+                        }
+                        if let Err(error) = worker.refresh_branch_index().await {
+                            if switch_worker_is_shutting_down(&cancel_token, &rt_cancel_token) {
+                                debug!(?error, "SwitchWorker exiting during shutdown");
+                                break;
                             }
+                            return Err(error);
                         }
                     }
                     doc_evt = partition_listener.recv() => {
@@ -570,7 +565,12 @@ impl SwitchWorker {
                     return Ok(Some((branch_doc_id, next_state)));
                 }
                 let (diff, origin, deleted_facet_keys) = self
-                    .compute_partition_doc_diff(&doc_id, prev_heads.as_ref(), Some(&new_heads))
+                    .compute_partition_doc_diff(
+                        &doc_id,
+                        &BranchPath::from("main"),
+                        prev_heads.as_ref(),
+                        Some(&new_heads),
+                    )
                     .await?;
                 let entry = self
                     .rt
@@ -608,7 +608,12 @@ impl SwitchWorker {
                     return Ok(Some((branch_doc_id, next_state)));
                 }
                 let (diff, origin, deleted_facet_keys) = self
-                    .compute_partition_doc_diff(&doc_id, next_state.last_heads.as_ref(), None)
+                    .compute_partition_doc_diff(
+                        &doc_id,
+                        &BranchPath::from("main"),
+                        next_state.last_heads.as_ref(),
+                        None,
+                    )
                     .await?;
                 let evt = Arc::new(DrawerEvent::DocDeleted {
                     id: doc_id.clone(),
@@ -632,6 +637,7 @@ impl SwitchWorker {
     async fn compute_partition_doc_diff(
         &self,
         doc_id: &DocId,
+        branch_path: &BranchPath,
         prev_heads: Option<&ChangeHashSet>,
         next_heads: Option<&ChangeHashSet>,
     ) -> Res<(
@@ -644,7 +650,12 @@ impl SwitchWorker {
             if let Some(doc) = self
                 .rt
                 .drawer
-                .get_doc_with_facets_at_heads(doc_id, heads, Some(vec![dmeta_key.clone()]))
+                .get_doc_with_facets_at_branch_heads(
+                    doc_id,
+                    branch_path,
+                    heads,
+                    Some(vec![dmeta_key.clone()]),
+                )
                 .await?
             {
                 if let Some(dmeta_raw) = doc.facets.get(&dmeta_key) {
@@ -678,7 +689,12 @@ impl SwitchWorker {
             if let Some(doc) = self
                 .rt
                 .drawer
-                .get_doc_with_facets_at_heads(doc_id, heads, Some(vec![dmeta_key.clone()]))
+                .get_doc_with_facets_at_branch_heads(
+                    doc_id,
+                    branch_path,
+                    heads,
+                    Some(vec![dmeta_key.clone()]),
+                )
                 .await?
             {
                 if let Some(dmeta_raw) = doc.facets.get(&dmeta_key) {
@@ -820,7 +836,6 @@ impl SwitchWorker {
             return Ok(true);
         };
         match &**event {
-            DrawerEvent::ListChanged { .. } => Ok(true),
             DrawerEvent::DocDeleted {
                 id,
                 deleted_facet_keys,
@@ -844,7 +859,7 @@ impl SwitchWorker {
             DrawerEvent::DocAdded {
                 id,
                 entry,
-                drawer_heads,
+                drawer_heads: _,
                 ..
             } => {
                 let Some(heads) = entry.branches.get("main") else {
@@ -854,7 +869,7 @@ impl SwitchWorker {
                 let Some(facet_keys_set) = self
                     .rt
                     .drawer
-                    .get_facet_keys_if_latest(id, &branch_path, heads, drawer_heads)
+                    .get_facet_keys_if_latest(id, &branch_path, heads)
                     .await?
                 else {
                     return Ok(false);
@@ -877,7 +892,7 @@ impl SwitchWorker {
                 id,
                 entry,
                 diff,
-                drawer_heads,
+                drawer_heads: _,
                 ..
             } => {
                 if !diff
@@ -909,7 +924,7 @@ impl SwitchWorker {
                 let Some(facet_keys_set) = self
                     .rt
                     .drawer
-                    .get_facet_keys_if_latest(id, &branch_path, heads, drawer_heads)
+                    .get_facet_keys_if_latest(id, &branch_path, heads)
                     .await?
                 else {
                     return Ok(false);
@@ -1052,8 +1067,7 @@ mod tests {
         ) -> Res<SwitchSinkOutcome> {
             let origin = match event {
                 SwitchEvent::Drawer(event) => match &**event {
-                    DrawerEvent::ListChanged { origin, .. }
-                    | DrawerEvent::DocAdded { origin, .. }
+                    DrawerEvent::DocAdded { origin, .. }
                     | DrawerEvent::DocUpdated { origin, .. }
                     | DrawerEvent::DocDeleted { origin, .. } => origin.clone(),
                 },
@@ -1478,7 +1492,12 @@ mod tests {
 
         dispatch_test_event(
             &mut runtime_listeners,
-            &SwitchEvent::Drawer(Arc::new(DrawerEvent::ListChanged {
+            &SwitchEvent::Drawer(Arc::new(DrawerEvent::DocAdded {
+                id: "d1".into(),
+                entry: crate::drawer::DocNBranches {
+                    doc_id: "d1".into(),
+                    branches: HashMap::new(),
+                },
                 drawer_heads: ChangeHashSet(Vec::new().into()),
                 origin: crate::event_origin::SwitchEventOrigin::Remote {
                     peer_id: "peer-a".into(),

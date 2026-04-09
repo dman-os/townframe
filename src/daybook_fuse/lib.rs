@@ -537,6 +537,7 @@ mod tests {
                     .document_id()
                     .clone(),
                 local_user_path,
+                sql_ctx.db_pool.clone(),
                 temp_dir.path().join("local_state"),
                 Arc::new(std::sync::Mutex::new(KeyedLruPool::new(1000))),
                 Arc::new(std::sync::Mutex::new(KeyedLruPool::new(1000))),

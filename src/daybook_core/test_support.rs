@@ -216,6 +216,7 @@ pub async fn test_cx_with_options(
         Arc::clone(&big_repo),
         drawer_doc_id,
         local_user_path.clone(),
+        sql_ctx.db_pool.clone(),
         temp_dir.path().join("local_states"),
         Arc::new(std::sync::Mutex::new(
             crate::drawer::lru::KeyedLruPool::new(1000),
@@ -284,4 +285,22 @@ pub async fn test_cx_with_options(
         rt_stop,
         _temp_dir: temp_dir,
     })
+}
+
+#[cfg(test)]
+pub async fn import_test_plug_oci(test_cx: &DaybookTestContext) -> Res<()> {
+    let artifact_path = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .join("../../target/oci")
+        .join("@daybook/test");
+    eyre::ensure!(
+        artifact_path.exists(),
+        "missing OCI plug artifact at '{}'. Build it first with: cargo run -p xtask -- build-plug-oci --plug-root ./src/plug_test",
+        artifact_path.display()
+    );
+    test_cx
+        .rt
+        .plugs_repo
+        .import_from_oci_layout(&artifact_path, crate::plugs::OciImportOptions::default())
+        .await?;
+    Ok(())
 }

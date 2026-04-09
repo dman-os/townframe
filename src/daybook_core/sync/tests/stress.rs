@@ -521,6 +521,29 @@ async fn apply_event(
                 FacetKey::from(WellKnownFacetTag::TitleGeneric),
                 FacetRaw::from(WellKnownFacet::TitleGeneric(format!("branch-create-{idx}"))),
             );
+            let create_out = node
+                .drawer
+                .create_branch_at_heads_from_branch(
+                    &doc_id,
+                    &new_branch,
+                    &daybook_types::doc::BranchPath::from("main"),
+                    &main_heads,
+                    Some(daybook_types::doc::UserPath::from(
+                        node.ctx.local_user_path.clone(),
+                    )),
+                )
+                .await;
+            if let Err(err) = create_out {
+                if is_missing_facets_object_err(&err) {
+                    return Ok(None);
+                }
+                match err {
+                    crate::drawer::types::DrawerError::BranchAlreadyExists { .. } => {
+                        return Ok(None);
+                    }
+                    _ => return Err(err.into()),
+                }
+            }
             let out = node
                 .drawer
                 .update_at_heads(

@@ -51,8 +51,8 @@ pub fn should_skip_live_patch(
 
 /// Resolve event origin for versioned map updates where a `vtag` actor id is present.
 ///
-/// `live_origin` is advisory for live notifications only. When absent (historical replay),
-/// we infer local-vs-nonlocal from `vtag_actor_id`.
+/// `live_origin` is authoritative for live notifications. Historical replay (`None`)
+/// cannot reliably recover source transport semantics, so it falls back to non-local/unknown.
 pub fn resolve_origin_from_vtag_actor(
     local_actor_id: &automerge::ActorId,
     vtag_actor_id: &automerge::ActorId,
@@ -61,6 +61,11 @@ pub fn resolve_origin_from_vtag_actor(
     match live_origin {
         Some(am_utils_rs::repo::BigRepoChangeOrigin::Bootstrap) => {
             crate::event_origin::SwitchEventOrigin::Bootstrap
+        }
+        Some(am_utils_rs::repo::BigRepoChangeOrigin::Remote { peer_id, .. }) => {
+            crate::event_origin::SwitchEventOrigin::Remote {
+                peer_id: peer_id.to_string(),
+            }
         }
         Some(am_utils_rs::repo::BigRepoChangeOrigin::Local) => {
             if vtag_actor_id == local_actor_id {
@@ -73,12 +78,7 @@ pub fn resolve_origin_from_vtag_actor(
                 }
             }
         }
-        Some(am_utils_rs::repo::BigRepoChangeOrigin::Remote { peer_id, .. }) => {
-            crate::event_origin::SwitchEventOrigin::Remote {
-                peer_id: peer_id.to_string(),
-            }
-        }
-        _ => crate::event_origin::SwitchEventOrigin::Remote {
+        None => crate::event_origin::SwitchEventOrigin::Remote {
             peer_id: "unknown".to_string(),
         },
     }
@@ -771,5 +771,76 @@ mod loom_tests {
             assert!(seen.len() <= 2);
             assert!(seen.iter().all(|v| *v == 1 || *v == 2));
         });
+    }
+}
+
+#[cfg(test)]
+mod origin_tests {
+    use super::*;
+    use am_utils_rs::repo::BigRepoChangeOrigin;
+
+    #[test]
+    fn resolve_origin_from_vtag_actor_bootstrap_takes_precedence_over_local_actor_match() {
+        let actor = automerge::ActorId::from([1_u8; 16]);
+        let origin =
+            resolve_origin_from_vtag_actor(&actor, &actor, Some(&BigRepoChangeOrigin::Bootstrap));
+        assert!(matches!(
+            origin,
+            crate::event_origin::SwitchEventOrigin::Bootstrap
+        ));
+    }
+
+    #[test]
+    fn resolve_origin_from_vtag_actor_replay_none_does_not_mark_local() {
+        let actor = automerge::ActorId::from([1_u8; 16]);
+        let origin = resolve_origin_from_vtag_actor(&actor, &actor, None);
+        assert!(matches!(
+            origin,
+            crate::event_origin::SwitchEventOrigin::Remote { peer_id } if peer_id == "unknown"
+        ));
+    }
+
+    #[test]
+    fn resolve_origin_from_vtag_actor_live_local_stays_local_for_matching_actor() {
+        let actor = automerge::ActorId::from([1_u8; 16]);
+        let origin =
+            resolve_origin_from_vtag_actor(&actor, &actor, Some(&BigRepoChangeOrigin::Local));
+        assert!(matches!(
+            origin,
+            crate::event_origin::SwitchEventOrigin::Local { actor_id } if actor_id == actor.to_string()
+        ));
+    }
+
+    #[test]
+    fn resolve_origin_from_vtag_actor_live_remote_maps_peer_id() {
+        let local_actor = automerge::ActorId::from([1_u8; 16]);
+        let vtag_actor = automerge::ActorId::from([2_u8; 16]);
+        let origin = resolve_origin_from_vtag_actor(
+            &local_actor,
+            &vtag_actor,
+            Some(&BigRepoChangeOrigin::Remote {
+                peer_id: "peer-123".into(),
+                connection_id: samod::ConnectionId::from(0_u32),
+            }),
+        );
+        assert!(matches!(
+            origin,
+            crate::event_origin::SwitchEventOrigin::Remote { peer_id } if peer_id == "peer-123"
+        ));
+    }
+
+    #[test]
+    fn resolve_origin_from_vtag_actor_live_local_mismatch_maps_unknown_remote() {
+        let local_actor = automerge::ActorId::from([1_u8; 16]);
+        let vtag_actor = automerge::ActorId::from([2_u8; 16]);
+        let origin = resolve_origin_from_vtag_actor(
+            &local_actor,
+            &vtag_actor,
+            Some(&BigRepoChangeOrigin::Local),
+        );
+        assert!(matches!(
+            origin,
+            crate::event_origin::SwitchEventOrigin::Remote { peer_id } if peer_id == "unknown"
+        ));
     }
 }

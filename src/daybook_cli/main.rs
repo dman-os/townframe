@@ -1079,6 +1079,7 @@ mod tests {
             Arc::clone(&ctx.big_repo),
             ctx.doc_drawer.document_id().clone(),
             ctx.local_user_path.clone().into(),
+            ctx.sql.db_pool.clone(),
             ctx.layout.repo_root.join("local_state"),
             Arc::new(std::sync::Mutex::new(
                 daybook_core::drawer::lru::KeyedLruPool::new(1000),
@@ -1369,6 +1370,7 @@ mod lazy {
                     Arc::clone(&ctx.big_repo),
                     ctx.doc_drawer.document_id().clone(),
                     ctx.local_user_path.clone().into(),
+                    ctx.sql.db_pool.clone(),
                     ctx.layout.repo_root.join("local_state"),
                     Arc::new(std::sync::Mutex::new(
                         daybook_core::drawer::lru::KeyedLruPool::new(1000),

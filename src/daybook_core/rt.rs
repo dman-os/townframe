@@ -33,8 +33,8 @@ pub mod triage;
 pub mod wash_plugin;
 
 use dispatch::{
-    ActiveDispatch, ActiveDispatchArgs, ActiveDispatchDeets, DispatchOnSuccessHook, DispatchRepo,
-    FacetRoutineArgs,
+    facet_routine_args_fingerprint, ActiveDispatch, ActiveDispatchArgs, ActiveDispatchDeets,
+    DispatchOnSuccessHook, DispatchRepo, FacetRoutineArgs,
 };
 use init::InitRepo;
 
@@ -797,6 +797,8 @@ impl Rt {
             if merged_successfully {
                 // Merge staging branch into target branch
                 info!(
+                    %dispatch_id,
+                    %entry_id,
                     ?doc_id,
                     ?staging_branch_path,
                     ?target_branch_path,
@@ -810,13 +812,26 @@ impl Rt {
                     Ok(()) => {}
                     Err(crate::drawer::types::DrawerError::BranchNotFound { name }) => {
                         warn!(
+                            %dispatch_id,
+                            %entry_id,
                             ?doc_id,
                             ?name,
+                            ?staging_branch_path,
+                            ?target_branch_path,
                             "staging branch missing during merge; treating dispatch as failed"
                         );
                         merged_successfully = false;
                     }
                     Err(err) => {
+                        error!(
+                            %dispatch_id,
+                            %entry_id,
+                            ?doc_id,
+                            ?staging_branch_path,
+                            ?target_branch_path,
+                            ?err,
+                            "staging merge returned error"
+                        );
                         return Err(eyre::eyre!(err).wrap_err("error merging staging branch"));
                     }
                 }
@@ -824,6 +839,8 @@ impl Rt {
                 if merged_successfully {
                     // Delete the staging branch after successful merge
                     info!(
+                        %dispatch_id,
+                        %entry_id,
                         ?doc_id,
                         ?staging_branch_path,
                         "deleting staging branch after successful merge"
@@ -834,6 +851,8 @@ impl Rt {
                         .or_else(|err| match err {
                             crate::drawer::types::DrawerError::BranchNotFound { .. } => {
                                 debug!(
+                                    %dispatch_id,
+                                    %entry_id,
                                     ?doc_id,
                                     ?staging_branch_path,
                                     "staging branch already removed after successful merge"
@@ -848,6 +867,8 @@ impl Rt {
             if !merged_successfully {
                 // Delete staging branch on failure if it exists.
                 info!(
+                    %dispatch_id,
+                    %entry_id,
                     ?doc_id,
                     ?staging_branch_path,
                     "deleting staging branch due to failure"
@@ -1031,7 +1052,34 @@ impl Rt {
                                 .await?;
                         }
                         DispatchOnSuccessHook::ProcessorRunLog { .. } => {}
-                        DispatchOnSuccessHook::CommandInvokeReply { .. } => {}
+                        DispatchOnSuccessHook::CommandInvokeReply {
+                            parent_wflow_job_id,
+                            request_id,
+                        } => {
+                            let error_json = serde_json::json!({
+                                "kind": "dependency-failed",
+                                "dispatch_id": waiting_id,
+                                "message": "dependency dispatch failed before command invocation could run",
+                            });
+                            let reply = daybook_pdk::InvokeCommandReply {
+                                request_id: request_id.clone(),
+                                status: daybook_pdk::InvokeCommandStatus::Failed,
+                                value_json: None,
+                                error_json: Some(error_json.to_string()),
+                            };
+                            self.wflow_ingress
+                                .send_message(
+                                    Arc::from(parent_wflow_job_id.as_str()),
+                                    Arc::from(request_id.as_str()),
+                                    serde_json::to_string(&reply).expect(ERROR_JSON),
+                                )
+                                .await
+                                .wrap_err_with(|| {
+                                    format!(
+                                        "error sending failed command invoke reply to parent job {parent_wflow_job_id}"
+                                    )
+                                })?;
+                        }
                     }
                 }
                 continue;
@@ -1199,39 +1247,33 @@ impl Rt {
         let ActiveDispatchArgs::FacetRoutine(FacetRoutineArgs {
             doc_id,
             staging_branch_path,
+            command_invoke_acl_snapshot,
             facet_key: _,
             ..
         }) = &parent_dispatch.args;
         let ActiveDispatchDeets::Wflow {
-            plug_id,
+            plug_id: _,
             routine_name,
             ..
         } = &parent_dispatch.deets;
 
-        let parent_plug_manifest = self
-            .plugs_repo
-            .get(plug_id)
-            .await
-            .ok_or_else(|| ferr!("parent plug not found for command invoke: {plug_id}"))?;
-        let parent_routine_manifest = parent_plug_manifest
-            .routines
-            .get(routine_name.as_str())
-            .ok_or_else(|| {
-                ferr!("parent routine not found for command invoke: {plug_id}/{routine_name}")
-            })?;
-
         let target_ref = daybook_pdk::parse_command_url_str(target_command_url)
             .map_err(|err| ferr!("invalid command URL in invoke token: {err}"))?;
-        let is_allowed =
-            parent_routine_manifest
-                .command_invoke_acl()
-                .iter()
-                .any(|allowlisted_url| {
-                    daybook_pdk::parse_command_url(allowlisted_url).is_ok_and(|parsed| {
-                        parsed.plug_id == target_ref.plug_id
-                            && parsed.command_name == target_ref.command_name
-                    })
-                });
+        let mut is_allowed = false;
+        for allowlisted_url in command_invoke_acl_snapshot {
+            let parsed = daybook_pdk::parse_command_url(allowlisted_url).map_err(|err| {
+                ferr!(
+                    "invalid command_invoke_acl_snapshot entry '{}': {err}",
+                    allowlisted_url
+                )
+            })?;
+            if parsed.plug_id == target_ref.plug_id
+                && parsed.command_name == target_ref.command_name
+            {
+                is_allowed = true;
+                break;
+            }
+        }
         if !is_allowed {
             return Err(InvokeCommandFromWflowError::Denied(format!(
                 "command target '{}' is not allowlisted by routine '{}'",
@@ -1535,6 +1577,16 @@ impl Rt {
             waiting_on_dispatch_ids,
             on_success_hooks,
         });
+        let ActiveDispatchArgs::FacetRoutine(args) = &active_dispatch.args;
+        debug!(
+            %dispatch_id,
+            arg_fingerprint = %facet_routine_args_fingerprint(args),
+            doc_id = ?args.doc_id,
+            branch_path = %args.branch_path,
+            staging_branch_path = %args.staging_branch_path,
+            heads = ?am_utils_rs::serialize_commit_heads(args.heads.as_ref()),
+            "dispatch_no_gate_internal prepared dispatch args"
+        );
         if let Err(add_err) = self
             .dispatch_repo
             .add(dispatch_id.clone(), Arc::clone(&active_dispatch))

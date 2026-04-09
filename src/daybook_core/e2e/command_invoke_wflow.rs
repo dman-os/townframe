@@ -4,6 +4,7 @@ use daybook_types::doc::{AddDocArgs, FacetKey, FacetRaw, WellKnownFacet, WellKno
 #[tokio::test(flavor = "multi_thread")]
 async fn test_command_invoke_success_reply() -> Res<()> {
     let test_cx = crate::test_support::test_cx("command_invoke").await?;
+    crate::test_support::import_test_plug_oci(&test_cx).await?;
 
     let success_doc_id = test_cx
         .drawer_repo

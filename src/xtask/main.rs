@@ -53,6 +53,9 @@ async fn main_main() -> Res<()> {
         Commands::IrpcClientCancelProbe {} => {
             irpc_client_cancel_probe().await?;
         }
+        Commands::Automerge08MinimalRepro {} => {
+            automerge08_minimal_repro()?;
+        }
         Commands::BuildPlugOci {
             plug_root,
             out_root,
@@ -1115,6 +1118,67 @@ fn similarity_summary(score: f32) -> &'static str {
     }
 }
 
+fn automerge08_minimal_repro() -> Res<()> {
+    use automerge08::transaction::Transactable;
+    for round in 0..40u32 {
+        let mut main = automerge08::Automerge::new();
+
+        {
+            let mut tx = main.transaction();
+            tx.put(automerge08::ROOT, "note", "init")?;
+            tx.commit();
+        }
+        let h0 = main.get_heads();
+
+        let mut branch_a = main.fork_at(&h0)?;
+        {
+            let mut tx = branch_a.transaction();
+            tx.put(automerge08::ROOT, "title", "A")?;
+            tx.commit();
+        }
+        {
+            let mut patch_log = automerge08::PatchLog::active();
+            main.merge_and_log_patches(&mut branch_a, &mut patch_log)?;
+            let _ = main.make_patches(&mut patch_log);
+        }
+        {
+            // Candidate barrier: canonicalize internal graph via save/load
+            let bytes = main.save();
+            main = automerge08::Automerge::load(&bytes)?;
+            let mut tx = main.transaction();
+            tx.put(automerge08::ROOT, "a", "ok")?;
+            tx.commit();
+        }
+        let h1 = main.get_heads();
+
+        let mut branch_b = main.fork_at(&h1)?;
+        {
+            let mut tx = branch_b.transaction();
+            tx.put(automerge08::ROOT, "note", "B")?;
+            tx.commit();
+        }
+        {
+            let mut patch_log = automerge08::PatchLog::active();
+            main.merge_and_log_patches(&mut branch_b, &mut patch_log)?;
+            let _ = main.make_patches(&mut patch_log);
+        }
+        {
+            let bytes = main.save();
+            main = automerge08::Automerge::load(&bytes)?;
+            let mut tx = main.transaction();
+            tx.put(automerge08::ROOT, "b", "ok")?;
+            tx.commit();
+        }
+
+        let _stale = main.fork_at(&h1)?;
+        if round % 10 == 0 {
+            println!("ok round={round}");
+        }
+    }
+    println!("PASS: save/load barrier survived 40 rounds");
+    Ok(())
+}
+
 const CLAP_STYLE: clap::builder::Styles = clap::builder::Styles::styled()
     .header(AnsiColor::Yellow.on_default())
     .usage(AnsiColor::Green.on_default())
@@ -1159,4 +1223,5 @@ enum Commands {
     IrpcDisconnectProbe {},
     IrpcInflightDisconnectProbe {},
     IrpcClientCancelProbe {},
+    Automerge08MinimalRepro {},
 }

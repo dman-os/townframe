@@ -8,6 +8,8 @@ use std::borrow::Cow;
 use std::collections::HashSet;
 
 const BASE64_FIELD_SUFFIX: &str = "Base64";
+const TIMESTAMP_FIELD_SUFFIX_SNAKE: &str = "_at";
+const TIMESTAMP_FIELD_SUFFIX_TS_SNAKE: &str = "_ts";
 
 fn decode_base64_field(value: &str) -> Option<Vec<u8>> {
     data_encoding::BASE64
@@ -22,6 +24,106 @@ fn encode_base64_field(value: &[u8]) -> String {
 
 fn is_base64_field(key: &str) -> bool {
     key.ends_with(BASE64_FIELD_SUFFIX)
+}
+
+fn is_timestamp_field(key: &str) -> bool {
+    let key_lc = key.to_ascii_lowercase();
+    key_lc == "timestamp"
+        || key_lc == "ts"
+        || key_lc.ends_with(TIMESTAMP_FIELD_SUFFIX_SNAKE)
+        || key_lc.ends_with(TIMESTAMP_FIELD_SUFFIX_TS_SNAKE)
+        || key.ends_with("At")
+        || key.ends_with("Ts")
+        || key.ends_with("Timestamp")
+}
+
+fn epoch_int_to_seconds(raw: i64) -> i64 {
+    const MILLIS_THRESHOLD: i64 = 100_000_000_000;
+    if raw.unsigned_abs() >= MILLIS_THRESHOLD as u64 {
+        raw / 1000
+    } else {
+        raw
+    }
+}
+
+fn timestamp_seconds_from_string(raw: &str) -> Option<i64> {
+    if let Ok(ts) = raw.parse::<Timestamp>() {
+        return Some(ts.as_second());
+    }
+    if let Some(with_utc_offset) = raw
+        .strip_suffix('Z')
+        .map(|prefix| format!("{prefix}+00:00"))
+    {
+        if let Ok(ts) = with_utc_offset.parse::<Timestamp>() {
+            return Some(ts.as_second());
+        }
+    }
+    let parsed_int = raw.parse::<i64>().ok()?;
+    Some(epoch_int_to_seconds(parsed_int))
+}
+
+fn timestamp_seconds_from_json(value: &serde_json::Value) -> Option<i64> {
+    match value {
+        serde_json::Value::String(text) => timestamp_seconds_from_string(text),
+        serde_json::Value::Number(number) => {
+            if let Some(int_value) = number.as_i64() {
+                return Some(epoch_int_to_seconds(int_value));
+            }
+            number
+                .as_u64()
+                .and_then(|uint| i64::try_from(uint).ok())
+                .map(epoch_int_to_seconds)
+        }
+        _ => None,
+    }
+}
+
+fn timestamp_seconds_from_json_array(value: &serde_json::Value) -> Option<Vec<i64>> {
+    let serde_json::Value::Array(items) = value else {
+        return None;
+    };
+    let mut out = Vec::with_capacity(items.len());
+    for item in items {
+        let seconds = timestamp_seconds_from_json(item)?;
+        out.push(seconds);
+    }
+    Some(out)
+}
+
+struct TimestampScalarValue(i64);
+
+impl autosurgeon::Reconcile for TimestampScalarValue {
+    type Key<'a> = autosurgeon::reconcile::NoKey;
+
+    fn reconcile<R: autosurgeon::Reconciler>(&self, mut reconciler: R) -> Result<(), R::Error> {
+        reconciler.timestamp(self.0)
+    }
+}
+
+struct TimestampSeqValue(Vec<i64>);
+
+impl autosurgeon::Reconcile for TimestampSeqValue {
+    type Key<'a> = autosurgeon::reconcile::NoKey;
+
+    fn reconcile<R: autosurgeon::Reconciler>(&self, mut reconciler: R) -> Result<(), R::Error> {
+        use autosurgeon::reconcile::SeqReconciler;
+
+        let mut seq = reconciler.seq()?;
+        let old_len = seq.len()?;
+        if old_len > self.0.len() {
+            for idx in (self.0.len()..old_len).rev() {
+                seq.delete(idx)?;
+            }
+        }
+        for (idx, seconds) in self.0.iter().enumerate() {
+            if idx < old_len {
+                seq.set(idx, TimestampScalarValue(*seconds))?;
+            } else {
+                seq.insert(idx, TimestampScalarValue(*seconds))?;
+            }
+        }
+        Ok(())
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
@@ -237,6 +339,21 @@ pub fn reconcile_value<R: Reconciler>(
                         }
                         warn!(key, "invalid base64 payload, storing as string");
                     }
+                }
+                if is_timestamp_field(key) {
+                    if let Some(seconds) = timestamp_seconds_from_json(value) {
+                        map_reconciler.put(key, TimestampScalarValue(seconds))?;
+                        continue;
+                    }
+                    if let Some(seconds_seq) = timestamp_seconds_from_json_array(value) {
+                        map_reconciler.put(key, TimestampSeqValue(seconds_seq))?;
+                        continue;
+                    }
+                    debug!(
+                        key,
+                        ?value,
+                        "failed to coerce timestamp field; storing raw json"
+                    );
                 }
                 map_reconciler.put(key, ThroughJson(value))?;
             }
@@ -705,6 +822,103 @@ mod tests {
         let hydrated: ThroughJson<serde_json::Value> =
             autosurgeon::hydrate_prop(&doc, automerge::ROOT, "facet")?;
         assert_eq!(hydrated.0, payload);
+        Ok(())
+    }
+
+    #[test]
+    fn timestamp_fields_reconcile_to_automerge_timestamp_scalars() -> Res<()> {
+        let mut doc = automerge::AutoCommit::new();
+        let ts = Timestamp::from_second(1_704_164_645)?;
+        let payload = serde_json::json!({
+            "createdAt": ts.to_string(),
+            "updated_at": [1700000000, "2026-01-02T03:04:06Z"],
+            "status": "not-a-ts-field"
+        });
+        autosurgeon::reconcile_prop(
+            &mut doc,
+            automerge::ROOT,
+            "facet",
+            ThroughJson(payload.clone()),
+        )?;
+
+        let facet_obj = doc
+            .get(&automerge::ROOT, "facet")?
+            .ok_or_else(|| ferr!("facet not found"))?
+            .1;
+        let created_at_value = doc
+            .get(&facet_obj, "createdAt")?
+            .ok_or_else(|| ferr!("createdAt missing"))?
+            .0;
+        match created_at_value {
+            automerge::Value::Scalar(scalar) => match scalar.as_ref() {
+                automerge::ScalarValue::Timestamp(_) => {}
+                other => panic!("expected createdAt as timestamp scalar, got {other:?}"),
+            },
+            other => panic!("expected scalar for createdAt, got {other:?}"),
+        }
+
+        let updated_at_obj = doc
+            .get(&facet_obj, "updated_at")?
+            .ok_or_else(|| ferr!("updated_at missing"))?
+            .1;
+        let first_updated = doc
+            .get(&updated_at_obj, 0)?
+            .ok_or_else(|| ferr!("updated_at[0] missing"))?
+            .0;
+        let second_updated = doc
+            .get(&updated_at_obj, 1)?
+            .ok_or_else(|| ferr!("updated_at[1] missing"))?
+            .0;
+        for value in [first_updated, second_updated] {
+            match value {
+                automerge::Value::Scalar(scalar) => match scalar.as_ref() {
+                    automerge::ScalarValue::Timestamp(_) => {}
+                    other => panic!("expected updated_at item as timestamp scalar, got {other:?}"),
+                },
+                other => panic!("expected scalar value in updated_at list, got {other:?}"),
+            }
+        }
+
+        let hydrated: ThroughJson<serde_json::Value> =
+            autosurgeon::hydrate_prop(&doc, automerge::ROOT, "facet")?;
+        let created_at = hydrated
+            .0
+            .get("createdAt")
+            .and_then(serde_json::Value::as_str)
+            .ok_or_else(|| ferr!("hydrated createdAt missing or non-string"))?;
+        assert_eq!(created_at.parse::<Timestamp>()?.as_second(), ts.as_second());
+        assert_eq!(
+            hydrated.0.get("status"),
+            payload.get("status"),
+            "non timestamp-like fields must remain unchanged"
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn timestamp_field_with_invalid_shape_falls_back_to_plain_json() -> Res<()> {
+        let mut doc = automerge::AutoCommit::new();
+        let payload = serde_json::json!({
+            "createdAt": {"bad": true}
+        });
+        autosurgeon::reconcile_prop(
+            &mut doc,
+            automerge::ROOT,
+            "facet",
+            ThroughJson(payload.clone()),
+        )?;
+        let facet_obj = doc
+            .get(&automerge::ROOT, "facet")?
+            .ok_or_else(|| ferr!("facet not found"))?
+            .1;
+        let created_at_value = doc
+            .get(&facet_obj, "createdAt")?
+            .ok_or_else(|| ferr!("createdAt missing"))?
+            .0;
+        match created_at_value {
+            automerge::Value::Object(automerge::ObjType::Map) => {}
+            other => panic!("invalid timestamp shape should remain map/json, got {other:?}"),
+        }
         Ok(())
     }
 

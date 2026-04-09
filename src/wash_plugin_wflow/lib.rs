@@ -176,8 +176,9 @@ impl host::Host for SharedWashCtx {
                     )
                     .expect("impossible: wasm is single threaded");
                 let _ = value_json;
+            } else {
+                anyhow::bail!("concurrent steps not allowed");
             }
-            anyhow::bail!("concurrent steps not allowed");
         }
         let step_id = job.cur_step.load(std::sync::atomic::Ordering::Relaxed);
         let journal = job.journal.lock().expect(ERROR_MUTEX);

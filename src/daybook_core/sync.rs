@@ -1634,6 +1634,7 @@ mod tests {
             Arc::clone(&rtx.big_repo),
             rtx.doc_drawer.document_id().clone(),
             daybook_types::doc::UserPath::from(rtx.local_user_path.clone()),
+            rtx.sql.db_pool.clone(),
             rtx.layout.repo_root.join("local_state"),
             Arc::new(std::sync::Mutex::new(
                 crate::drawer::lru::KeyedLruPool::new(1000),
@@ -1713,16 +1714,44 @@ mod tests {
                                     doc_blobs_index_repo.enqueue_delete(id.clone()).unwrap_or_log();
                                 }
                                 crate::drawer::DrawerEvent::DocAdded { id, entry, .. } => {
-                                    if let Some(heads) = entry.branches.get("main") {
-                                        doc_blobs_index_repo.enqueue_upsert(id.clone(), heads.clone()).unwrap_or_log();
+                                    for (branch_name, heads) in &entry.branches {
+                                        doc_blobs_index_repo
+                                            .enqueue_upsert(
+                                                id.clone(),
+                                                daybook_types::doc::BranchPath::from(
+                                                    branch_name.as_str(),
+                                                ),
+                                                heads.clone(),
+                                            )
+                                            .unwrap_or_log();
                                     }
                                 }
                                 crate::drawer::DrawerEvent::DocUpdated { id, entry, .. } => {
-                                    if let Some(heads) = entry.branches.get("main") {
-                                        doc_blobs_index_repo.enqueue_upsert(id.clone(), heads.clone()).unwrap_or_log();
+                                    let retained_branches: Vec<daybook_types::doc::BranchPath> = entry
+                                        .branches
+                                        .keys()
+                                        .map(|branch_name| {
+                                            daybook_types::doc::BranchPath::from(branch_name.as_str())
+                                        })
+                                        .collect();
+                                    doc_blobs_index_repo
+                                        .enqueue_delete_branches_not_in(
+                                            id.clone(),
+                                            retained_branches,
+                                        )
+                                        .unwrap_or_log();
+                                    for (branch_name, heads) in &entry.branches {
+                                        doc_blobs_index_repo
+                                            .enqueue_upsert(
+                                                id.clone(),
+                                                daybook_types::doc::BranchPath::from(
+                                                    branch_name.as_str(),
+                                                ),
+                                                heads.clone(),
+                                            )
+                                            .unwrap_or_log();
                                     }
                                 }
-                                crate::drawer::DrawerEvent::ListChanged { .. } => {}
                             },
                             Err(crate::repos::RecvError::Dropped { dropped_count }) => {
                                 panic!("doc blobs bridge dropped {dropped_count} drawer events");
@@ -1771,8 +1800,7 @@ mod tests {
                             | crate::drawer::DrawerEvent::DocDeleted { id, .. } if id == doc_id => {
                                 *last_activity_for_wait.lock().expect(ERROR_MUTEX) = std::time::Instant::now();
                             }
-                            crate::drawer::DrawerEvent::ListChanged { .. }
-                            | crate::drawer::DrawerEvent::DocAdded { .. }
+                            crate::drawer::DrawerEvent::DocAdded { .. }
                             | crate::drawer::DrawerEvent::DocUpdated { .. }
                             | crate::drawer::DrawerEvent::DocDeleted { .. } => {
                                 *last_activity_for_wait.lock().expect(ERROR_MUTEX) = std::time::Instant::now();

@@ -405,6 +405,7 @@ impl RepoCtx {
                 Arc::clone(big_repo),
                 doc_drawer.document_id().clone(),
                 daybook_types::doc::UserPath::from(local_user_path.to_string()),
+                sql.clone(),
                 blobs_root
                     .parent()
                     .ok_or_eyre("blobs root missing parent")?

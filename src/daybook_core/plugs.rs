@@ -502,10 +502,6 @@ pub fn system_plugs() -> Vec<manifest::PlugManifest> {
         },
     ];
 
-    #[cfg(test)]
-    let mut plugs = plugs;
-    #[cfg(test)]
-    plugs.push(plug_test::plug_manifest());
     plugs
 }
 
@@ -1394,10 +1390,6 @@ impl PlugsRepo {
                                     "/daybook_wflows.wasm.zst"
                                 ))
                                 .as_slice(),
-                                "plug_test.wasm.zst" => {
-                                    include_bytes!(concat!(env!("OUT_DIR"), "/plug_test.wasm.zst"))
-                                        .as_slice()
-                                }
                                 _ => {
                                     eyre::bail!("unsupported static wasm component_url");
                                 }
@@ -1931,7 +1923,6 @@ impl PlugsRepo {
                     }
                     "static" => match url.path() {
                         "daybook_wflows.wasm.zst" => {}
-                        "plug_test.wasm.zst" => {}
                         _ => eyre::bail!("Unrecognized static component_url: {url}",),
                     },
                     scheme if scheme == crate::blobs::BLOB_SCHEME => {

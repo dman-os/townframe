@@ -15,6 +15,7 @@ const DOC_BLOBS_LOCAL_STATE_ID: &str = "@daybook/wip/doc-blobs-index";
 #[derive(Debug, Clone)]
 pub struct DocBlobMembership {
     pub doc_id: DocId,
+    pub branch_path: BranchPath,
     pub blob_hash: String,
     pub length_octets: u64,
     pub origin_heads: ChangeHashSet,
@@ -103,7 +104,9 @@ impl DocBlobsIndexRepo {
                             let Some(item) = item else {
                                 break;
                             };
-                            repo.handle_worker_item(item).await.unwrap_or_log();
+                            repo.handle_worker_item(item)
+                                .await
+                                .expect("doc blobs worker item handling failed");
                         }
                     }
                 }
@@ -124,10 +127,11 @@ impl DocBlobsIndexRepo {
             r#"
             CREATE TABLE IF NOT EXISTS doc_blob_refs (
                 doc_id TEXT NOT NULL,
+                branch_path TEXT NOT NULL,
                 blob_hash TEXT NOT NULL,
                 length_octets INTEGER NOT NULL DEFAULT 0,
                 origin_heads TEXT NOT NULL,
-                PRIMARY KEY(doc_id, blob_hash)
+                PRIMARY KEY(doc_id, branch_path, blob_hash)
             )
             "#,
         )
@@ -147,8 +151,52 @@ impl DocBlobsIndexRepo {
             .await?;
         }
 
+        let has_branch_path_col: Option<i64> = sqlx::query_scalar(
+            "SELECT 1 FROM pragma_table_info('doc_blob_refs') WHERE name = 'branch_path'",
+        )
+        .fetch_optional(db_pool)
+        .await?;
+        if has_branch_path_col.is_none() {
+            let mut tx = db_pool.begin().await?;
+            sqlx::query("ALTER TABLE doc_blob_refs RENAME TO doc_blob_refs_old")
+                .execute(&mut *tx)
+                .await?;
+            sqlx::query(
+                r#"
+                CREATE TABLE doc_blob_refs (
+                    doc_id TEXT NOT NULL,
+                    branch_path TEXT NOT NULL,
+                    blob_hash TEXT NOT NULL,
+                    length_octets INTEGER NOT NULL DEFAULT 0,
+                    origin_heads TEXT NOT NULL,
+                    PRIMARY KEY(doc_id, branch_path, blob_hash)
+                )
+                "#,
+            )
+            .execute(&mut *tx)
+            .await?;
+            sqlx::query(
+                r#"
+                INSERT INTO doc_blob_refs (doc_id, branch_path, blob_hash, length_octets, origin_heads)
+                SELECT doc_id, 'main', blob_hash, length_octets, origin_heads
+                FROM doc_blob_refs_old
+                "#,
+            )
+            .execute(&mut *tx)
+            .await?;
+            sqlx::query("DROP TABLE doc_blob_refs_old")
+                .execute(&mut *tx)
+                .await?;
+            tx.commit().await?;
+        }
+
         sqlx::query(
             "CREATE INDEX IF NOT EXISTS idx_doc_blob_refs_blob_hash ON doc_blob_refs(blob_hash)",
+        )
+        .execute(db_pool)
+        .await?;
+        sqlx::query(
+            "CREATE INDEX IF NOT EXISTS idx_doc_blob_refs_doc_branch ON doc_blob_refs(doc_id, branch_path)",
         )
         .execute(db_pool)
         .await?;
@@ -158,23 +206,41 @@ impl DocBlobsIndexRepo {
 
     async fn handle_worker_item(&self, item: DocBlobsIndexWorkItem) -> Res<()> {
         match item {
-            DocBlobsIndexWorkItem::Upsert { doc_id, heads } => {
-                match self.reindex_doc(&doc_id, &heads).await? {
-                    ReindexDocOutcome::Present => {
-                        self.registry
-                            .notify([DocBlobsIndexEvent::Updated { doc_id }]);
-                    }
-                    ReindexDocOutcome::Evicted => {
-                        self.registry
-                            .notify([DocBlobsIndexEvent::Deleted { doc_id }]);
-                    }
+            DocBlobsIndexWorkItem::Upsert {
+                doc_id,
+                branch_path,
+                heads,
+            } => match self.reindex_doc(&doc_id, &branch_path, &heads).await? {
+                ReindexDocOutcome::Present => {
+                    self.registry
+                        .notify([DocBlobsIndexEvent::Updated { doc_id }]);
                 }
-            }
+                ReindexDocOutcome::Evicted => {
+                    self.registry
+                        .notify([DocBlobsIndexEvent::Deleted { doc_id }]);
+                }
+            },
             DocBlobsIndexWorkItem::DeleteDoc { doc_id } => {
                 self.delete_doc(&doc_id).await?;
                 self.registry
                     .notify([DocBlobsIndexEvent::Deleted { doc_id }]);
             }
+            DocBlobsIndexWorkItem::DeleteDocBranchesNotIn {
+                doc_id,
+                branch_paths,
+            } => match self
+                .delete_doc_branches_not_in(&doc_id, &branch_paths)
+                .await?
+            {
+                ReindexDocOutcome::Present => {
+                    self.registry
+                        .notify([DocBlobsIndexEvent::Updated { doc_id }]);
+                }
+                ReindexDocOutcome::Evicted => {
+                    self.registry
+                        .notify([DocBlobsIndexEvent::Deleted { doc_id }]);
+                }
+            },
         }
         Ok(())
     }
@@ -182,23 +248,31 @@ impl DocBlobsIndexRepo {
     pub async fn reindex_doc(
         &self,
         doc_id: &DocId,
+        branch_path: &BranchPath,
         heads: &ChangeHashSet,
     ) -> Res<ReindexDocOutcome> {
-        let Some(facet_keys) = self.drawer_repo.facet_keys_at_heads(doc_id, heads).await? else {
-            self.delete_doc(doc_id).await?;
-            return Ok(ReindexDocOutcome::Evicted);
+        let Some(facet_keys) = self
+            .drawer_repo
+            .facet_keys_at_branch_heads(doc_id, branch_path, heads)
+            .await?
+        else {
+            return self.delete_doc_branch(doc_id, branch_path).await;
         };
         let selected_blob_keys: Vec<FacetKey> = facet_keys
             .into_iter()
             .filter(|facet_key| facet_key.tag == WellKnownFacetTag::Blob.into())
             .collect();
         if selected_blob_keys.is_empty() {
-            self.delete_doc(doc_id).await?;
-            return Ok(ReindexDocOutcome::Evicted);
+            return self.delete_doc_branch(doc_id, branch_path).await;
         }
         let facets = self
             .drawer_repo
-            .get_at_heads_with_facets_arc(doc_id, heads, Some(selected_blob_keys))
+            .get_at_branch_heads_with_facets_arc(
+                doc_id,
+                branch_path,
+                heads,
+                Some(selected_blob_keys),
+            )
             .await?
             .map(|(facets, _)| facets)
             .ok_or_eyre("doc didn't match expectation")?;
@@ -211,10 +285,11 @@ impl DocBlobsIndexRepo {
                     Err(err) => {
                         warn!(
                             %doc_id,
+                            %branch_path,
                             ?err,
                             "failed to parse blob facet while indexing; evicting stale blob refs"
                         );
-                        self.delete_doc(doc_id).await?;
+                        self.delete_doc_branch(doc_id, branch_path).await?;
                         return Ok(ReindexDocOutcome::Evicted);
                     }
                 };
@@ -236,18 +311,20 @@ impl DocBlobsIndexRepo {
             }
         }
 
-        self.reindex_doc_hashes(doc_id, heads, &blobs).await
+        self.reindex_doc_hashes(doc_id, branch_path, heads, &blobs)
+            .await
     }
 
     async fn reindex_doc_hashes(
         &self,
         doc_id: &DocId,
+        branch_path: &BranchPath,
         heads: &ChangeHashSet,
         blobs: &HashMap<String, u64>,
     ) -> Res<ReindexDocOutcome> {
         let mut tx = self.db_pool.begin().await?;
         let prev_hashes: HashSet<String> = self
-            .list_hashes_for_doc_tx(tx.as_mut(), doc_id)
+            .list_hashes_for_doc_branch_tx(tx.as_mut(), doc_id, branch_path)
             .await?
             .into_iter()
             .collect();
@@ -256,7 +333,7 @@ impl DocBlobsIndexRepo {
         let mut hashes_to_remove = HashSet::new();
         for hash in prev_hashes.difference(&next_hashes) {
             if self
-                .hash_is_unused_excluding_doc_tx(tx.as_mut(), hash, doc_id)
+                .hash_is_unused_excluding_doc_branch_tx(tx.as_mut(), hash, doc_id, branch_path)
                 .await?
             {
                 hashes_to_remove.insert(hash.clone());
@@ -267,38 +344,50 @@ impl DocBlobsIndexRepo {
         self.publish_hash_delta_with_retry(&hashes_to_add, &hashes_to_remove)
             .await?;
 
-        sqlx::query("DELETE FROM doc_blob_refs WHERE doc_id = ?1")
+        sqlx::query("DELETE FROM doc_blob_refs WHERE doc_id = ?1 AND branch_path = ?2")
             .bind(doc_id)
+            .bind(branch_path.as_str())
             .execute(&mut *tx)
             .await?;
 
         if blobs.is_empty() {
             tx.commit().await?;
-            return Ok(ReindexDocOutcome::Evicted);
+            return self.doc_presence_outcome(doc_id).await;
         }
 
         let serialized_heads =
             serde_json::to_string(&am_utils_rs::serialize_commit_heads(&heads.0))
                 .expect(ERROR_JSON);
 
-        let mut query_builder = QueryBuilder::new(
-            "INSERT INTO doc_blob_refs (doc_id, blob_hash, length_octets, origin_heads) ",
-        );
-        query_builder.push_values(blobs.iter(), |mut row, (hash, length_octets)| {
-            row.push_bind(doc_id)
-                .push_bind(hash)
-                .push_bind(
-                    i64::try_from(*length_octets)
-                        .expect("blob length octets exceeds sqlite INTEGER range"),
+        let mut rows: Vec<(&str, i64)> = Vec::with_capacity(blobs.len());
+        for (hash, length_octets) in blobs {
+            let length_octets_i64 = i64::try_from(*length_octets).map_err(|_| {
+                eyre::eyre!(
+                    "blob length octets exceeds sqlite INTEGER range: doc_id={} branch={} length_octets={}",
+                    doc_id,
+                    branch_path.as_str(),
+                    length_octets
                 )
+            })?;
+            rows.push((hash.as_str(), length_octets_i64));
+        }
+
+        let mut query_builder = QueryBuilder::new(
+            "INSERT INTO doc_blob_refs (doc_id, branch_path, blob_hash, length_octets, origin_heads) ",
+        );
+        query_builder.push_values(rows.iter(), |mut row, (hash, length_octets_i64)| {
+            row.push_bind(doc_id)
+                .push_bind(branch_path.as_str())
+                .push_bind(hash)
+                .push_bind(*length_octets_i64)
                 .push_bind(&serialized_heads);
         });
         query_builder.push(
-            " ON CONFLICT(doc_id, blob_hash) DO UPDATE SET origin_heads = excluded.origin_heads, length_octets = excluded.length_octets",
+            " ON CONFLICT(doc_id, branch_path, blob_hash) DO UPDATE SET origin_heads = excluded.origin_heads, length_octets = excluded.length_octets",
         );
         query_builder.build().execute(&mut *tx).await?;
         tx.commit().await?;
-        Ok(ReindexDocOutcome::Present)
+        self.doc_presence_outcome(doc_id).await
     }
 
     pub async fn delete_doc(&self, doc_id: &DocId) -> Res<()> {
@@ -325,6 +414,57 @@ impl DocBlobsIndexRepo {
             .await?;
         tx.commit().await?;
         Ok(())
+    }
+
+    async fn delete_doc_branch(
+        &self,
+        doc_id: &DocId,
+        branch_path: &BranchPath,
+    ) -> Res<ReindexDocOutcome> {
+        let mut tx = self.db_pool.begin().await?;
+        let prev_hashes: HashSet<String> = self
+            .list_hashes_for_doc_branch_tx(tx.as_mut(), doc_id, branch_path)
+            .await?
+            .into_iter()
+            .collect();
+        let mut hashes_to_remove = HashSet::new();
+        for hash in &prev_hashes {
+            if self
+                .hash_is_unused_excluding_doc_branch_tx(tx.as_mut(), hash, doc_id, branch_path)
+                .await?
+            {
+                hashes_to_remove.insert(hash.clone());
+            }
+        }
+        self.publish_hash_delta_with_retry(&HashSet::new(), &hashes_to_remove)
+            .await?;
+        sqlx::query("DELETE FROM doc_blob_refs WHERE doc_id = ?1 AND branch_path = ?2")
+            .bind(doc_id)
+            .bind(branch_path.as_str())
+            .execute(&mut *tx)
+            .await?;
+        tx.commit().await?;
+        self.doc_presence_outcome(doc_id).await
+    }
+
+    async fn doc_presence_outcome(&self, doc_id: &DocId) -> Res<ReindexDocOutcome> {
+        let exists: i64 = sqlx::query_scalar(
+            r#"
+            SELECT EXISTS(
+                SELECT 1
+                FROM doc_blob_refs
+                WHERE doc_id = ?1
+            )
+            "#,
+        )
+        .bind(doc_id)
+        .fetch_one(&self.db_pool)
+        .await?;
+        if exists == 0 {
+            Ok(ReindexDocOutcome::Evicted)
+        } else {
+            Ok(ReindexDocOutcome::Present)
+        }
     }
 
     async fn publish_hash_delta_with_retry(
@@ -369,7 +509,7 @@ impl DocBlobsIndexRepo {
     pub async fn list_hashes_for_doc(&self, doc_id: &DocId) -> Res<Vec<String>> {
         let hashes: Vec<String> = sqlx::query_scalar(
             r#"
-            SELECT blob_hash
+            SELECT DISTINCT blob_hash
             FROM doc_blob_refs
             WHERE doc_id = ?1
             ORDER BY blob_hash ASC
@@ -388,13 +528,35 @@ impl DocBlobsIndexRepo {
     ) -> Res<Vec<String>> {
         let hashes: Vec<String> = sqlx::query_scalar(
             r#"
-            SELECT blob_hash
+            SELECT DISTINCT blob_hash
             FROM doc_blob_refs
             WHERE doc_id = ?1
             ORDER BY blob_hash ASC
             "#,
         )
         .bind(doc_id)
+        .fetch_all(tx)
+        .await?;
+        Ok(hashes)
+    }
+
+    async fn list_hashes_for_doc_branch_tx(
+        &self,
+        tx: &mut sqlx::SqliteConnection,
+        doc_id: &DocId,
+        branch_path: &BranchPath,
+    ) -> Res<Vec<String>> {
+        let hashes: Vec<String> = sqlx::query_scalar(
+            r#"
+            SELECT blob_hash
+            FROM doc_blob_refs
+            WHERE doc_id = ?1
+              AND branch_path = ?2
+            ORDER BY blob_hash ASC
+            "#,
+        )
+        .bind(doc_id)
+        .bind(branch_path.as_str())
         .fetch_all(tx)
         .await?;
         Ok(hashes)
@@ -423,12 +585,38 @@ impl DocBlobsIndexRepo {
         Ok(exists_other == 0)
     }
 
-    pub async fn list_blob_refs_for_doc(&self, doc_id: &DocId) -> Res<Vec<DocBlobRef>> {
-        let rows: Vec<(String, i64)> = sqlx::query_as(
+    async fn hash_is_unused_excluding_doc_branch_tx(
+        &self,
+        tx: &mut sqlx::SqliteConnection,
+        hash: &str,
+        doc_id: &DocId,
+        branch_path: &BranchPath,
+    ) -> Res<bool> {
+        let exists_other: i64 = sqlx::query_scalar(
             r#"
-            SELECT blob_hash, length_octets
+            SELECT EXISTS(
+                SELECT 1
+                FROM doc_blob_refs
+                WHERE blob_hash = ?1
+                  AND NOT (doc_id = ?2 AND branch_path = ?3)
+            )
+            "#,
+        )
+        .bind(hash)
+        .bind(doc_id)
+        .bind(branch_path.as_str())
+        .fetch_one(tx)
+        .await?;
+        Ok(exists_other == 0)
+    }
+
+    pub async fn list_blob_refs_for_doc(&self, doc_id: &DocId) -> Res<Vec<DocBlobRef>> {
+        let rows: Vec<(String, i64, i64)> = sqlx::query_as(
+            r#"
+            SELECT blob_hash, MIN(length_octets), MAX(length_octets)
             FROM doc_blob_refs
             WHERE doc_id = ?1
+            GROUP BY blob_hash
             ORDER BY blob_hash ASC
             "#,
         )
@@ -436,8 +624,12 @@ impl DocBlobsIndexRepo {
         .fetch_all(&self.db_pool)
         .await?;
         rows.into_iter()
-            .map(|(blob_hash, length_octets)| {
-                let length_octets = u64::try_from(length_octets)
+            .map(|(blob_hash, min_length_octets, max_length_octets)| {
+                eyre::ensure!(
+                    min_length_octets == max_length_octets,
+                    "inconsistent blob length for hash {blob_hash} on doc {doc_id}: {min_length_octets} vs {max_length_octets}"
+                );
+                let length_octets = u64::try_from(min_length_octets)
                     .map_err(|_| ferr!("invalid negative blob length for hash {blob_hash}"))?;
                 Ok(DocBlobRef {
                     blob_hash,
@@ -448,12 +640,12 @@ impl DocBlobsIndexRepo {
     }
 
     pub async fn list_docs_for_hash(&self, hash: &str) -> Res<Vec<DocBlobMembership>> {
-        let rows: Vec<(String, String, i64)> = sqlx::query_as(
+        let rows: Vec<(String, String, String, i64)> = sqlx::query_as(
             r#"
-            SELECT doc_id, origin_heads, length_octets
+            SELECT doc_id, branch_path, origin_heads, length_octets
             FROM doc_blob_refs
             WHERE blob_hash = ?1
-            ORDER BY doc_id ASC
+            ORDER BY doc_id ASC, branch_path ASC
             "#,
         )
         .bind(hash)
@@ -461,12 +653,13 @@ impl DocBlobsIndexRepo {
         .await?;
 
         rows.into_iter()
-            .map(|(doc_id, origin_heads, length_octets)| {
+            .map(|(doc_id, branch_path, origin_heads, length_octets)| {
                 let head_strings: Vec<String> = serde_json::from_str(&origin_heads)?;
                 let length_octets = u64::try_from(length_octets)
                     .map_err(|_| ferr!("invalid negative blob length for hash {hash}"))?;
                 Ok(DocBlobMembership {
                     doc_id,
+                    branch_path: BranchPath::from(branch_path),
                     blob_hash: hash.to_string(),
                     length_octets,
                     origin_heads: ChangeHashSet(am_utils_rs::parse_commit_heads(&head_strings)?),
@@ -488,21 +681,26 @@ impl DocBlobsIndexRepo {
         Ok(hashes)
     }
 
-    pub async fn list_all_memberships(&self) -> Res<Vec<(DocId, String, u64)>> {
-        let rows: Vec<(DocId, String, i64)> = sqlx::query_as(
+    pub async fn list_all_memberships(&self) -> Res<Vec<(DocId, BranchPath, String, u64)>> {
+        let rows: Vec<(DocId, String, String, i64)> = sqlx::query_as(
             r#"
-            SELECT doc_id, blob_hash, length_octets
+            SELECT doc_id, branch_path, blob_hash, length_octets
             FROM doc_blob_refs
-            ORDER BY doc_id ASC, blob_hash ASC
+            ORDER BY doc_id ASC, branch_path ASC, blob_hash ASC
             "#,
         )
         .fetch_all(&self.db_pool)
         .await?;
         rows.into_iter()
-            .map(|(doc_id, blob_hash, length_octets)| {
+            .map(|(doc_id, branch_path, blob_hash, length_octets)| {
                 let length_octets = u64::try_from(length_octets)
                     .map_err(|_| ferr!("invalid negative blob length for hash {blob_hash}"))?;
-                Ok((doc_id, blob_hash, length_octets))
+                Ok((
+                    doc_id,
+                    BranchPath::from(branch_path),
+                    blob_hash,
+                    length_octets,
+                ))
             })
             .collect()
     }
@@ -516,9 +714,18 @@ impl DocBlobsIndexRepo {
         })
     }
 
-    pub fn enqueue_upsert(&self, doc_id: DocId, heads: ChangeHashSet) -> Res<()> {
+    pub fn enqueue_upsert(
+        &self,
+        doc_id: DocId,
+        branch_path: BranchPath,
+        heads: ChangeHashSet,
+    ) -> Res<()> {
         self.work_tx
-            .send(DocBlobsIndexWorkItem::Upsert { doc_id, heads })
+            .send(DocBlobsIndexWorkItem::Upsert {
+                doc_id,
+                branch_path,
+                heads,
+            })
             .map_err(|err| ferr!("doc_blobs_index work queue closed: {err}"))?;
         Ok(())
     }
@@ -528,6 +735,48 @@ impl DocBlobsIndexRepo {
             .send(DocBlobsIndexWorkItem::DeleteDoc { doc_id })
             .map_err(|err| ferr!("doc_blobs_index work queue closed: {err}"))?;
         Ok(())
+    }
+
+    pub fn enqueue_delete_branches_not_in(
+        &self,
+        doc_id: DocId,
+        branch_paths: Vec<BranchPath>,
+    ) -> Res<()> {
+        self.work_tx
+            .send(DocBlobsIndexWorkItem::DeleteDocBranchesNotIn {
+                doc_id,
+                branch_paths,
+            })
+            .map_err(|err| ferr!("doc_blobs_index work queue closed: {err}"))?;
+        Ok(())
+    }
+
+    async fn delete_doc_branches_not_in(
+        &self,
+        doc_id: &DocId,
+        branch_paths: &[BranchPath],
+    ) -> Res<ReindexDocOutcome> {
+        let retained: HashSet<&str> = branch_paths.iter().map(|path| path.as_str()).collect();
+        let current: Vec<String> = sqlx::query_scalar(
+            r#"
+            SELECT DISTINCT branch_path
+            FROM doc_blob_refs
+            WHERE doc_id = ?1
+            "#,
+        )
+        .bind(doc_id)
+        .fetch_all(&self.db_pool)
+        .await?;
+        let mut outcome = self.doc_presence_outcome(doc_id).await?;
+        for branch_path in current {
+            if retained.contains(branch_path.as_str()) {
+                continue;
+            }
+            outcome = self
+                .delete_doc_branch(doc_id, &BranchPath::from(branch_path))
+                .await?;
+        }
+        Ok(outcome)
     }
 }
 
@@ -557,8 +806,18 @@ pub enum ReindexDocOutcome {
 
 #[derive(Debug, Clone)]
 enum DocBlobsIndexWorkItem {
-    Upsert { doc_id: DocId, heads: ChangeHashSet },
-    DeleteDoc { doc_id: DocId },
+    Upsert {
+        doc_id: DocId,
+        branch_path: BranchPath,
+        heads: ChangeHashSet,
+    },
+    DeleteDoc {
+        doc_id: DocId,
+    },
+    DeleteDocBranchesNotIn {
+        doc_id: DocId,
+        branch_paths: Vec<BranchPath>,
+    },
 }
 
 struct DocBlobsTriageListener {
@@ -596,51 +855,48 @@ impl crate::rt::switch::SwitchSink for DocBlobsTriageListener {
             crate::drawer::DrawerEvent::DocAdded {
                 id,
                 entry,
-                drawer_heads,
+                drawer_heads: _,
                 ..
             } => {
-                let Some(heads) = entry.branches.get("main") else {
-                    return Ok(outcome);
-                };
-                let branch_path = BranchPath::from("main");
-                let Some(_keys) = self
-                    .drawer_repo
-                    .get_facet_keys_if_latest(id, &branch_path, heads, drawer_heads)
-                    .await?
-                else {
-                    return Ok(outcome);
-                };
-                self.index_repo.enqueue_upsert(id.clone(), heads.clone())?;
+                for (branch_name, heads) in &entry.branches {
+                    let branch_path = BranchPath::from(branch_name.as_str());
+                    let Some(_keys) = self
+                        .drawer_repo
+                        .get_facet_keys_if_latest(id, &branch_path, heads)
+                        .await?
+                    else {
+                        continue;
+                    };
+                    self.index_repo
+                        .enqueue_upsert(id.clone(), branch_path, heads.clone())?;
+                }
             }
             crate::drawer::DrawerEvent::DocUpdated {
                 id,
                 entry,
-                diff,
-                drawer_heads,
+                drawer_heads: _,
                 ..
             } => {
-                if !diff
-                    .moved_branch_names
-                    .iter()
-                    .any(|branch_name| branch_name == "main")
-                {
-                    return Ok(outcome);
+                let branch_paths: Vec<BranchPath> = entry
+                    .branches
+                    .keys()
+                    .map(|name| BranchPath::from(name.as_str()))
+                    .collect();
+                self.index_repo
+                    .enqueue_delete_branches_not_in(id.clone(), branch_paths)?;
+                for (branch_name, heads) in &entry.branches {
+                    let branch_path = BranchPath::from(branch_name.as_str());
+                    let Some(_keys) = self
+                        .drawer_repo
+                        .get_facet_keys_if_latest(id, &branch_path, heads)
+                        .await?
+                    else {
+                        continue;
+                    };
+                    self.index_repo
+                        .enqueue_upsert(id.clone(), branch_path, heads.clone())?;
                 }
-                let Some(heads) = entry.branches.get("main") else {
-                    self.index_repo.enqueue_delete(id.clone())?;
-                    return Ok(outcome);
-                };
-                let branch_path = BranchPath::from("main");
-                let Some(_keys) = self
-                    .drawer_repo
-                    .get_facet_keys_if_latest(id, &branch_path, heads, drawer_heads)
-                    .await?
-                else {
-                    return Ok(outcome);
-                };
-                self.index_repo.enqueue_upsert(id.clone(), heads.clone())?;
             }
-            crate::drawer::DrawerEvent::ListChanged { .. } => {}
         }
         Ok(outcome)
     }
@@ -740,7 +996,11 @@ mod tests {
         let listener = repo.subscribe(SubscribeOpts::new(16));
         let missing_doc_id = "doc-missing-for-blob-index".to_string();
 
-        repo.enqueue_upsert(missing_doc_id.clone(), ChangeHashSet(default()))?;
+        repo.enqueue_upsert(
+            missing_doc_id.clone(),
+            BranchPath::from("main"),
+            ChangeHashSet(default()),
+        )?;
 
         let evt = listener
             .recv_async()
@@ -787,6 +1047,7 @@ mod tests {
             Arc::clone(&big_repo),
             drawer_doc_id,
             local_user_path.clone(),
+            crate::app::SqlCtx::new("sqlite::memory:").await?.db_pool,
             temp_dir.path().join("drawer-local-state"),
             Arc::new(std::sync::Mutex::new(
                 crate::drawer::lru::KeyedLruPool::new(1000),
@@ -831,7 +1092,7 @@ mod tests {
             .await?
             .and_then(|branches| branches.branches.get("main").cloned())
             .ok_or_eyre("expected main branch heads for test doc")?;
-        repo.enqueue_upsert(doc_id.clone(), heads)?;
+        repo.enqueue_upsert(doc_id.clone(), BranchPath::from("main"), heads)?;
 
         wait_for_partition_member_count(&big_repo, &partition_id, 1).await?;
         assert!(

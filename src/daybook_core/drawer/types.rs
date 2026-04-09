@@ -1,4 +1,5 @@
 use crate::interlude::*;
+
 use daybook_types::doc::{ChangeHashSet, Doc, DocId, FacetKey};
 
 #[derive(Debug, Clone)]
@@ -15,6 +16,8 @@ pub enum DrawerError {
     DocNotFound { id: DocId },
     /// headless patch for unrecognized branch: {name}
     BranchNotFound { name: String },
+    /// branch already exists: {name}
+    BranchAlreadyExists { name: String },
     /// patch has an invalid key: {inner}
     InvalidKey {
         #[from]
@@ -150,10 +153,6 @@ impl DocEntryDiff {
 #[derive(Debug, Clone)]
 #[cfg_attr(feature = "uniffi", derive(uniffi::Enum))]
 pub enum DrawerEvent {
-    ListChanged {
-        drawer_heads: ChangeHashSet,
-        origin: crate::event_origin::SwitchEventOrigin,
-    },
     DocAdded {
         id: DocId,
         entry: DocNBranches,
