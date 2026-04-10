@@ -25,6 +25,7 @@ import androidx.compose.foundation.layout.widthIn
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.KeyboardArrowRight
 import androidx.compose.material.icons.filled.Add
+import androidx.compose.material.icons.filled.FolderOpen
 import androidx.compose.material.icons.filled.MoreVert
 import androidx.compose.material.icons.filled.Menu
 import androidx.compose.material.icons.filled.MenuOpen
@@ -74,11 +75,15 @@ import org.example.daybook.ChromeState
 import org.example.daybook.ChromeStateTopAppBar
 import org.example.daybook.ConfigViewModel
 import org.example.daybook.DaybookContentType
+import org.example.daybook.DrawerViewModel
 import org.example.daybook.LocalChromeStateManager
 import org.example.daybook.LocalContainer
+import org.example.daybook.LocalDocEditorStore
+import org.example.daybook.LocalDrawerViewModel
 import org.example.daybook.Routes
 import org.example.daybook.TablesState
 import org.example.daybook.TablesViewModel
+import org.example.daybook.drawer.DocList
 import org.example.daybook.progress.ProgressList
 import org.example.daybook.uniffi.core.WindowLayout
 import org.example.daybook.uniffi.core.WindowLayoutOrientation as ConfigOrientation
@@ -500,6 +505,9 @@ fun SidebarContent(navController: NavHostController, modifier: Modifier = Modifi
 
     val sidebarFeatures = rememberSidebarFeatures(navController)
     val scope = rememberCoroutineScope()
+    val drawerVm: DrawerViewModel = LocalDrawerViewModel.current
+    val docEditorStore = LocalDocEditorStore.current
+    val selectedDrawerDocId by docEditorStore.selectedDocId.collectAsState()
 
     // Observe route changes to update selection highlight
     // Use currentBackStackEntryAsState to reactively observe route changes
@@ -552,7 +560,14 @@ fun SidebarContent(navController: NavHostController, modifier: Modifier = Modifi
                     ) {
                         allSidebarFeatures.forEach { item ->
                             val featureRoute = getRouteForFeature(item)
-                            val isSelected = featureRoute != null && featureRoute == currentRoute
+                            val isDocEditorRoute = currentRoute == AppScreens.DocEditor.name
+                            val isSelected =
+                                when {
+                                    featureRoute == null -> false
+                                    featureRoute == currentRoute -> true
+                                    item.key == FeatureKeys.Drawer && isDocEditorRoute -> true
+                                    else -> false
+                                }
                             NavigationRailItem(
                                 selected = isSelected,
                                 onClick = {
@@ -570,28 +585,82 @@ fun SidebarContent(navController: NavHostController, modifier: Modifier = Modifi
                         }
                     }
                     HorizontalDivider()
-                    TabRow(selectedTabIndex = selectedSidebarPane) {
-                        Tab(
-                            selected = selectedSidebarPane == 0,
-                            onClick = { selectedSidebarPane = 0 },
-                            text = { Text("Tabs") }
-                        )
-                        Tab(
-                            selected = selectedSidebarPane == 1,
-                            onClick = { selectedSidebarPane = 1 },
-                            text = { Text("Progress") }
-                        )
-                    }
-                    when (selectedSidebarPane) {
-                        0 -> {
-                            TabSelectionList(
-                                onTabSelected = { /* TODO: Handle tab selection */ },
-                                modifier = Modifier.weight(1f)
+                    Row(
+                        modifier = Modifier.fillMaxWidth().weight(1f)
+                    ) {
+                        NavigationRail(
+                            modifier = Modifier.fillMaxHeight().padding(top = 8.dp)
+                        ) {
+                            NavigationRailItem(
+                                selected = selectedSidebarPane == 0,
+                                onClick = { selectedSidebarPane = 0 },
+                                icon = { Icon(Icons.Default.Menu, contentDescription = "Tabs") },
+                                label = { Text("Tabs") },
+                                alwaysShowLabel = true
+                            )
+                            NavigationRailItem(
+                                selected = selectedSidebarPane == 1,
+                                onClick = { selectedSidebarPane = 1 },
+                                icon = { Icon(Icons.Default.MoreVert, contentDescription = "Progress") },
+                                label = { Text("Progress") },
+                                alwaysShowLabel = true
+                            )
+                            NavigationRailItem(
+                                selected = selectedSidebarPane == 2,
+                                onClick = { selectedSidebarPane = 2 },
+                                icon = { Icon(Icons.Default.FolderOpen, contentDescription = "Drawer") },
+                                label = { Text("Drawer") },
+                                alwaysShowLabel = true
                             )
                         }
+                        VerticalDivider()
+                        Column(
+                            modifier = Modifier.weight(1f).fillMaxHeight()
+                        ) {
+                            val paneTitle =
+                                when (selectedSidebarPane) {
+                                    0 -> "Tabs"
+                                    1 -> "Progress"
+                                    else -> "Drawer"
+                                }
+                            Row(
+                                modifier = Modifier.fillMaxWidth().padding(horizontal = 12.dp, vertical = 8.dp),
+                                verticalAlignment = Alignment.CenterVertically
+                            ) {
+                                Text(
+                                    text = paneTitle,
+                                    style = MaterialTheme.typography.titleSmall
+                                )
+                            }
+                            HorizontalDivider()
+                            when (selectedSidebarPane) {
+                                0 -> {
+                                    TabSelectionList(
+                                        onTabSelected = { /* TODO: Handle tab selection */ },
+                                        modifier = Modifier.weight(1f)
+                                    )
+                                }
 
-                        else -> {
-                            ProgressList(modifier = Modifier.weight(1f).fillMaxWidth())
+                                1 -> {
+                                    ProgressList(modifier = Modifier.weight(1f).fillMaxWidth())
+                                }
+
+                                else -> {
+                                    DocList(
+                                        drawerViewModel = drawerVm,
+                                        selectedDocId = selectedDrawerDocId,
+                                        onDocClick = { docId ->
+                                            docEditorStore.selectDoc(docId)
+                                            if (currentRoute != AppScreens.DocEditor.name) {
+                                                navController.navigate(AppScreens.DocEditor.name) {
+                                                    launchSingleTop = true
+                                                }
+                                            }
+                                        },
+                                        modifier = Modifier.weight(1f).fillMaxWidth()
+                                    )
+                                }
+                            }
                         }
                     }
                 }
@@ -601,7 +670,14 @@ fun SidebarContent(navController: NavHostController, modifier: Modifier = Modifi
             NavigationRail(modifier = Modifier.fillMaxHeight()) {
                 allSidebarFeatures.forEach { item ->
                     val featureRoute = getRouteForFeature(item)
-                    val isSelected = featureRoute != null && featureRoute == currentRoute
+                    val isDocEditorRoute = currentRoute == AppScreens.DocEditor.name
+                    val isSelected =
+                        when {
+                            featureRoute == null -> false
+                            featureRoute == currentRoute -> true
+                            item.key == FeatureKeys.Drawer && isDocEditorRoute -> true
+                            else -> false
+                        }
 
                     NavigationRailItem(
                         selected = isSelected,

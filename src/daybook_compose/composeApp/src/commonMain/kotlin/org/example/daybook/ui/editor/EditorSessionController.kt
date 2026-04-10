@@ -3,6 +3,7 @@
 package org.example.daybook.ui.editor
 
 import kotlin.uuid.Uuid
+import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.delay
@@ -106,7 +107,22 @@ class EditorSessionController(
     private var saveDebounceJob: Job? = null
     private var nextScrollRequestSeq: Long = 1
 
-    fun bindDoc(doc: Doc?, bundle: DocBundle? = null) {
+    fun bindDoc(
+        doc: Doc?,
+        bundle: DocBundle? = null,
+        allowOverwriteDirtySameDoc: Boolean = false,
+    ) {
+        val currentState = _state.value
+        val incomingDocId = doc?.id
+        if (
+            !allowOverwriteDirtySameDoc &&
+            currentState.isDirty &&
+            currentState.docId != null &&
+            currentState.docId == incomingDocId
+        ) {
+            return
+        }
+        saveDebounceJob?.cancel()
         persistedDocSnapshot = doc
         facetHeadsByKeyString = bundle?.facetHeadsByKey?.mapKeys { (facetKey, _) -> facetKeyRefPathString(facetKey) } ?: emptyMap()
         mainBranchHeads = bundle?.branchHeads.orEmpty()
@@ -207,6 +223,7 @@ class EditorSessionController(
         if (!snapshot.isDirty) {
             return
         }
+        val snapshotDraft = draftFingerprint(snapshot)
 
         _state.update { it.copy(isSaving = true, saveError = null) }
         try {
@@ -239,7 +256,7 @@ class EditorSessionController(
                     )
                 onDocCreated?.invoke(addedId)
                 val bundle = drawerRepo.getBundle(addedId, "main")
-                bindDoc(bundle?.doc, bundle)
+                bindDoc(bundle?.doc, bundle, allowOverwriteDirtySameDoc = true)
                 return
             }
 
@@ -249,10 +266,28 @@ class EditorSessionController(
                 drawerRepo.updateBatch(listOf(UpdateDocArgsV2("main", null, patch)))
             }
             val bundle = drawerRepo.getBundle(currentDocId, "main")
-            bindDoc(bundle?.doc, bundle)
+            val current = _state.value
+            val sameDoc = current.docId == snapshot.docId
+            val noNewerDraftChanges = draftFingerprint(current) == snapshotDraft
+            if (sameDoc && noNewerDraftChanges) {
+                bindDoc(bundle?.doc, bundle, allowOverwriteDirtySameDoc = true)
+            } else if (sameDoc) {
+                _state.update { it.copy(isSaving = false) }
+            }
         } catch (error: Throwable) {
+            if (error is CancellationException) {
+                throw error
+            }
             _state.update { it.copy(isSaving = false, saveError = error.message ?: "Failed to save") }
         }
+    }
+
+    private fun draftFingerprint(state: EditorSessionState): Pair<String, Map<String, String>> {
+        val notes =
+            state.noteEditors
+                .mapKeys { (facetKey, _) -> facetKeyRefPathString(facetKey) }
+                .mapValues { (_, editorState) -> editorState.draft }
+        return state.titleDraft to notes
     }
 
     private fun buildBoundState(doc: Doc?): EditorSessionState {

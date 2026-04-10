@@ -26,7 +26,10 @@ import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.ArrowDownward
 import androidx.compose.material.icons.filled.ArrowUpward
+import androidx.compose.material.icons.filled.CheckCircle
+import androidx.compose.material.icons.filled.Error
 import androidx.compose.material.icons.filled.MoreVert
+import androidx.compose.material.icons.filled.Sync
 import androidx.compose.material.icons.filled.Star
 import androidx.compose.material.icons.outlined.StarOutline
 import androidx.compose.material3.DropdownMenu
@@ -60,6 +63,8 @@ import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
+import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.graphics.vector.ImageVector
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.draw.clip
 import coil3.compose.AsyncImage
@@ -74,6 +79,18 @@ import org.example.daybook.uniffi.types.Doc
 import org.example.daybook.uniffi.types.FacetKey
 import org.example.daybook.uniffi.types.WellKnownFacet
 
+private enum class EditorSaveStatus {
+    Idle,
+    Saving,
+    Error
+}
+
+private data class SaveStatusUi(
+    val icon: ImageVector,
+    val tint: Color,
+    val label: String,
+)
+
 @Composable
 fun DocEditor(
     controller: EditorSessionController,
@@ -83,6 +100,12 @@ fun DocEditor(
     val state by controller.state.collectAsState()
     val snackbarHostState = remember { SnackbarHostState() }
     var uiMessage by remember { mutableStateOf<String?>(null) }
+    val saveStatus =
+        when {
+            state.saveError != null -> EditorSaveStatus.Error
+            state.isSaving -> EditorSaveStatus.Saving
+            else -> EditorSaveStatus.Idle
+        }
 
     LaunchedEffect(state.saveError) {
         val errorMessage = state.saveError ?: return@LaunchedEffect
@@ -146,6 +169,7 @@ fun DocEditor(
                             descriptor = descriptor,
                             doc = state.doc,
                             controller = controller,
+                            saveStatus = saveStatus,
                             modifier = Modifier.bringIntoViewRequester(bringIntoViewRequester),
                             canShowMenu = state.docId != null,
                             noteDraft = state.noteEditors[descriptor.facetKey]?.draft,
@@ -159,15 +183,6 @@ fun DocEditor(
                         if (index < state.contentFacetViews.lastIndex) {
                             HorizontalDivider(modifier = Modifier.padding(vertical = 8.dp))
                         }
-                    }
-
-                    if (state.isSaving) {
-                        Text(
-                            text = "Saving…",
-                            style = MaterialTheme.typography.bodySmall,
-                            color = MaterialTheme.colorScheme.onSurfaceVariant,
-                            modifier = Modifier.padding(top = 8.dp),
-                        )
                     }
 
                     if (showInlineFacetRack) {
@@ -199,6 +214,7 @@ private fun FacetListItem(
     descriptor: FacetViewDescriptor,
     doc: Doc?,
     controller: EditorSessionController,
+    saveStatus: EditorSaveStatus,
     modifier: Modifier = Modifier,
     canShowMenu: Boolean,
     noteDraft: String?,
@@ -212,6 +228,7 @@ private fun FacetListItem(
     Column(modifier = modifier.fillMaxWidth()) {
         FacetHeader(
             descriptor = descriptor,
+            saveStatus = saveStatus,
             canShowMenu = canShowMenu,
             onAddNote = { controller.addNoteFacetAfter(descriptor.facetKey) },
             onMakePrimary = { controller.makeFacetPrimary(descriptor.facetKey) },
@@ -267,9 +284,11 @@ private fun FacetListItem(
     }
 }
 
+@OptIn(ExperimentalMaterial3Api::class)
 @Composable
 private fun FacetHeader(
     descriptor: FacetViewDescriptor,
+    saveStatus: EditorSaveStatus,
     canShowMenu: Boolean,
     onAddNote: () -> Unit,
     onMakePrimary: () -> Unit,
@@ -278,6 +297,22 @@ private fun FacetHeader(
     canMoveUp: Boolean,
     canMoveDown: Boolean,
 ) {
+    val saveStatusUi =
+        when (saveStatus) {
+            EditorSaveStatus.Idle -> null
+            EditorSaveStatus.Saving ->
+                SaveStatusUi(
+                    icon = Icons.Filled.Sync,
+                    tint = MaterialTheme.colorScheme.primary,
+                    label = "Saving"
+                )
+            EditorSaveStatus.Error ->
+                SaveStatusUi(
+                    icon = Icons.Filled.Error,
+                    tint = MaterialTheme.colorScheme.error,
+                    label = "Save failed"
+                )
+        }
     val interactionSource = remember { MutableInteractionSource() }
     val isHovered by interactionSource.collectIsHoveredAsState()
     Row(
@@ -295,6 +330,24 @@ private fun FacetHeader(
             Row(
                 verticalAlignment = Alignment.CenterVertically,
             ) {
+                if (saveStatusUi != null) {
+                    TooltipBox(
+                        positionProvider = TooltipDefaults.rememberPlainTooltipPositionProvider(),
+                        tooltip = {
+                            PlainTooltip {
+                                Text(saveStatusUi.label)
+                            }
+                        },
+                        state = rememberTooltipState(),
+                    ) {
+                        Icon(
+                            imageVector = saveStatusUi.icon,
+                            contentDescription = saveStatusUi.label,
+                            tint = saveStatusUi.tint,
+                        )
+                    }
+                    Spacer(modifier = Modifier.width(4.dp))
+                }
                 if (showPriorityActions) {
                     FacetActionIconButton(
                         label = if (descriptor.isPrimary) "Facet is primary" else "Make this facet primary",

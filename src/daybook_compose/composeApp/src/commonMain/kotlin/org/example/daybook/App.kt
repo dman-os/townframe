@@ -97,6 +97,7 @@ import org.example.daybook.capture.data.CameraPreviewQrBridge
 import org.example.daybook.capture.data.CameraQrOverlayBridge
 import org.example.daybook.capture.screens.CaptureScreen
 import org.example.daybook.capture.ui.DaybookCameraViewport
+import org.example.daybook.drawer.DocEditorScreen
 import org.example.daybook.drawer.DrawerScreen
 import org.example.daybook.progress.ProgressList
 import org.example.daybook.progress.ProgressAmountBlock
@@ -192,6 +193,16 @@ val LocalContainer =
         error("no AppContainer provided")
     }
 
+val LocalDrawerViewModel =
+    staticCompositionLocalOf<DrawerViewModel> {
+        error("no DrawerViewModel provided")
+    }
+
+val LocalDocEditorStore =
+    staticCompositionLocalOf<DocEditorStoreViewModel> {
+        error("no DocEditorStoreViewModel provided")
+    }
+
 data class AppConfig(val theme: ThemeConfig = ThemeConfig.Dark)
 
 enum class AppScreens {
@@ -200,7 +211,8 @@ enum class AppScreens {
     Tables,
     Progress,
     Settings,
-    Drawer
+    Drawer,
+    DocEditor
 }
 
 private sealed interface AppInitState {
@@ -988,6 +1000,9 @@ fun App(
 
             is AppInitState.Ready -> {
                 val appContainer = state.container
+                val drawerVm: DrawerViewModel = viewModel { DrawerViewModel(appContainer.drawerRepo) }
+                val docEditorStore: DocEditorStoreViewModel =
+                    viewModel { DocEditorStoreViewModel(appContainer.drawerRepo) }
                 var shutdownDone by remember(appContainer.ffiCtx) { mutableStateOf(false) }
 
                 LaunchedEffect(shutdownRequested, appContainer.ffiCtx, shutdownDone) {
@@ -1014,7 +1029,9 @@ fun App(
 
                 Box(modifier = Modifier.fillMaxSize()) {
                     CompositionLocalProvider(
-                        LocalContainer provides appContainer
+                        LocalContainer provides appContainer,
+                        LocalDrawerViewModel provides drawerVm,
+                        LocalDocEditorStore provides docEditorStore
                     ) {
                         val syncingState = cloneUiState as? CloneUiState.Syncing
                         if (syncingState != null) {
@@ -1427,8 +1444,7 @@ fun Routes(
     extraAction: (() -> Unit)? = null,
     navController: NavHostController
 ) {
-    val container = LocalContainer.current
-    val drawerVm: DrawerViewModel = viewModel { DrawerViewModel(container.drawerRepo) }
+    val drawerVm = LocalDrawerViewModel.current
 
     NavHost(
         startDestination = AppScreens.Home.name,
@@ -1455,8 +1471,23 @@ fun Routes(
             ProvideChromeState(ChromeState(title = "Drawer")) {
                 DrawerScreen(
                     drawerVm = drawerVm,
+                    onOpenDoc = {
+                        navController.navigate(AppScreens.DocEditor.name) { launchSingleTop = true }
+                    },
                     modifier = modifier,
-                    contentType = contentType
+                )
+            }
+        }
+        composable(route = AppScreens.DocEditor.name) {
+            ProvideChromeState(
+                ChromeState(
+                    title = "Doc Editor",
+                    onBack = { navController.popBackStack() }
+                )
+            ) {
+                DocEditorScreen(
+                    contentType = contentType,
+                    modifier = modifier
                 )
             }
         }

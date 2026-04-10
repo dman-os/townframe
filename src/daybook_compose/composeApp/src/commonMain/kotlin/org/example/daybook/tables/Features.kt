@@ -12,9 +12,7 @@ import androidx.compose.material.icons.filled.Settings
 import androidx.compose.material.icons.filled.TableChart
 import androidx.compose.material3.Icon
 import androidx.compose.runtime.Composable
-import androidx.compose.runtime.rememberCoroutineScope
 import androidx.navigation.NavHostController
-import kotlinx.coroutines.launch
 import org.example.daybook.AppScreens
 
 /**
@@ -22,33 +20,21 @@ import org.example.daybook.AppScreens
  */
 @Composable
 fun rememberAllFeatures(navController: NavHostController): List<FeatureItem> {
-    val scope = rememberCoroutineScope()
-
     return listOf(
         FeatureItem(FeatureKeys.Home, { Icon(Icons.Default.Home, contentDescription = "Home") }, "Home") {
-            scope.launch {
-                navController.navigate(AppScreens.Home.name)
-            }
+            navController.navigate(AppScreens.Home.name)
         },
         FeatureItem(FeatureKeys.Capture, { Icon(Icons.Default.CameraAlt, contentDescription = "Capture") }, "Capture") {
-            scope.launch {
-                navController.navigate(AppScreens.Capture.name)
-            }
+            navController.navigate(AppScreens.Capture.name)
         },
         FeatureItem(FeatureKeys.Drawer, { Icon(Icons.AutoMirrored.Filled.LibraryBooks, contentDescription = "Drawer") }, "Drawer") {
-            scope.launch {
-                navController.navigate(AppScreens.Drawer.name)
-            }
+            navController.navigate(AppScreens.Drawer.name)
         },
         FeatureItem(FeatureKeys.Tables, { Icon(Icons.Default.TableChart, contentDescription = "Tables") }, "Tables") {
-            scope.launch {
-                navController.navigate(AppScreens.Tables.name)
-            }
+            navController.navigate(AppScreens.Tables.name)
         },
         FeatureItem(FeatureKeys.Progress, { Icon(Icons.Default.Notifications, contentDescription = "Progress") }, "Progress") {
-            scope.launch {
-                navController.navigate(AppScreens.Progress.name)
-            }
+            navController.navigate(AppScreens.Progress.name)
         }
     )
 }
@@ -94,7 +80,6 @@ fun rememberMenuFeatures(
     navController: NavHostController,
     onShowCloneShare: () -> Unit = {}
 ): List<FeatureItem> {
-    val scope = rememberCoroutineScope()
     val allFeatures = rememberAllFeatures(navController)
 
     // Get the bottom bar features (Home, Capture, Documents)
@@ -106,14 +91,10 @@ fun rememberMenuFeatures(
     return otherFeatures +
         listOf(
             FeatureItem(FeatureKeys.CloneShare, { Icon(Icons.Default.QrCode2, contentDescription = "Clone") }, "Clone") {
-                scope.launch {
-                    onShowCloneShare()
-                }
+                onShowCloneShare()
             },
             FeatureItem(FeatureKeys.Settings, { Icon(Icons.Default.Settings, contentDescription = "Settings") }, "Settings") {
-                scope.launch {
-                    navController.navigate(AppScreens.Settings.name)
-                }
+                navController.navigate(AppScreens.Settings.name)
             }
         )
 }
