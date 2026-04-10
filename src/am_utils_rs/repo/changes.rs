@@ -1,8 +1,8 @@
 use crate::interlude::*;
 
+use crate::repo::DocumentId;
 use automerge::ChangeHash;
 use autosurgeon::Prop;
-use crate::repo::DocumentId;
 use std::sync::Mutex;
 use tokio::{sync::mpsc, task::JoinHandle};
 use tokio_util::sync::CancellationToken;
@@ -10,10 +10,7 @@ use tokio_util::sync::CancellationToken;
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum BigRepoChangeOrigin {
     Local,
-    Remote {
-        peer_id: Arc<str>,
-        connection_id: crate::repo::BigRepoConnectionId,
-    },
+    Remote { peer_id: crate::repo::PeerId },
     Bootstrap,
 }
 
@@ -139,12 +136,8 @@ pub struct DocChangeBrokerLease {
 impl DocChangeBrokerLease {
     pub fn filter(&self) -> DocIdFilter {
         DocIdFilter {
-            doc_id: self.doc_id.clone(),
+            doc_id: self.doc_id,
         }
-    }
-
-    pub(crate) async fn wait_until_ready(&self) {
-        let _ = &self.doc_id;
     }
 }
 
@@ -194,12 +187,12 @@ impl ChangeListenerManager {
                 if let Some(lease) = occupied.get().upgrade() {
                     return Ok(lease);
                 }
-                let lease = self.spawn_doc_change_lease(occupied.key().clone());
+                let lease = self.spawn_doc_change_lease(*occupied.key());
                 occupied.insert(Arc::downgrade(&lease));
                 Ok(lease)
             }
             dashmap::mapref::entry::Entry::Vacant(vacant) => {
-                let lease = self.spawn_doc_change_lease(vacant.key().clone());
+                let lease = self.spawn_doc_change_lease(*vacant.key());
                 vacant.insert(Arc::downgrade(&lease));
                 Ok(lease)
             }

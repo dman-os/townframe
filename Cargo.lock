@@ -145,7 +145,7 @@ name = "am_utils_rs"
 version = "0.1.0"
 dependencies = [
  "async-trait",
- "automerge 0.7.3",
+ "automerge",
  "automerge_sedimentree",
  "autosurgeon",
  "blake3",
@@ -168,6 +168,7 @@ dependencies = [
  "subduction_crypto",
  "subduction_keyhive",
  "subduction_keyhive_policy",
+ "subduction_websocket",
  "thiserror 2.0.18",
  "tokio",
  "tokio-tungstenite",
@@ -258,7 +259,7 @@ name = "api_utils_rs"
 version = "0.1.0"
 dependencies = [
  "async-trait",
- "automerge 0.7.3",
+ "automerge",
  "autosurgeon",
  "color-eyre",
  "displaydoc",
@@ -663,30 +664,6 @@ checksum = "c08606f8c3cbf4ce6ec8e28fb0014a2c086708fe954eaa885384a6165172e7e8"
 
 [[package]]
 name = "automerge"
-version = "0.7.3"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "b4c51597d92d370bfaed45068412dfa06f3c6dc35eef987119f6e4e0da96bb3d"
-dependencies = [
- "cfg-if 1.0.4",
- "flate2",
- "getrandom 0.3.4",
- "hex",
- "hexane 0.1.7",
- "itertools 0.14.0",
- "leb128",
- "rand 0.9.2",
- "rustc-hash 2.1.1",
- "serde",
- "sha2 0.11.0-rc.2",
- "smol_str",
- "thiserror 2.0.18",
- "tinyvec",
- "tracing",
- "unicode-segmentation",
-]
-
-[[package]]
-name = "automerge"
 version = "0.8.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "2aab56635599ee2e9df28d9ce180c155b8dbcdd96e4c3f62895fc6a44137d328"
@@ -695,7 +672,7 @@ dependencies = [
  "flate2",
  "getrandom 0.3.4",
  "hex",
- "hexane 0.2.1",
+ "hexane",
  "itertools 0.14.0",
  "leb128",
  "rand 0.9.2",
@@ -714,17 +691,17 @@ name = "automerge_sedimentree"
 version = "0.8.0"
 source = "git+https://github.com/inkandswitch/subduction?rev=50111d91549f14061e2cac568367ae2c32dbc267#50111d91549f14061e2cac568367ae2c32dbc267"
 dependencies = [
- "automerge 0.8.0",
+ "automerge",
  "sedimentree_core",
  "thiserror 2.0.18",
 ]
 
 [[package]]
 name = "autosurgeon"
-version = "0.10.1"
-source = "git+https://github.com/dman-os/autosurgeon?rev=2896663de0e23f789cffe8e98bbbcbcbf21f23ad#2896663de0e23f789cffe8e98bbbcbcbf21f23ad"
+version = "0.11.0"
+source = "git+https://github.com/dman-os/autosurgeon?rev=6826469986b150e6b736dc8e24619aa01a03ecef#6826469986b150e6b736dc8e24619aa01a03ecef"
 dependencies = [
- "automerge 0.7.3",
+ "automerge",
  "autosurgeon-derive",
  "pastey",
  "similar",
@@ -734,8 +711,8 @@ dependencies = [
 
 [[package]]
 name = "autosurgeon-derive"
-version = "0.10.1"
-source = "git+https://github.com/dman-os/autosurgeon?rev=2896663de0e23f789cffe8e98bbbcbcbf21f23ad#2896663de0e23f789cffe8e98bbbcbcbf21f23ad"
+version = "0.11.0"
+source = "git+https://github.com/dman-os/autosurgeon?rev=6826469986b150e6b736dc8e24619aa01a03ecef#6826469986b150e6b736dc8e24619aa01a03ecef"
 dependencies = [
  "proc-macro2",
  "quote",
@@ -1741,7 +1718,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "117725a109d387c937a1533ce01b450cbde6b88abceea8473c4d7a85853cda3c"
 dependencies = [
  "lazy_static",
- "windows-sys 0.48.0",
+ "windows-sys 0.59.0",
 ]
 
 [[package]]
@@ -2474,7 +2451,7 @@ name = "daybook_cli"
 version = "0.1.0"
 dependencies = [
  "am_utils_rs",
- "automerge 0.7.3",
+ "automerge",
  "autosurgeon",
  "clap",
  "clap_complete",
@@ -2508,7 +2485,7 @@ dependencies = [
  "anyhow",
  "api_utils_rs",
  "async-trait",
- "automerge 0.7.3",
+ "automerge",
  "autosurgeon",
  "bs58",
  "color-eyre",
@@ -2578,7 +2555,7 @@ version = "0.1.0"
 dependencies = [
  "am_utils_rs",
  "api_utils_rs",
- "automerge 0.7.3",
+ "automerge",
  "autosurgeon",
  "daybook_core",
  "daybook_types",
@@ -2645,7 +2622,7 @@ dependencies = [
  "addr",
  "am_utils_rs",
  "api_utils_rs",
- "automerge 0.7.3",
+ "automerge",
  "autosurgeon",
  "blake3",
  "camino",
@@ -2978,7 +2955,7 @@ dependencies = [
  "libc",
  "option-ext",
  "redox_users 0.5.2",
- "windows-sys 0.60.2",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]
@@ -3931,7 +3908,7 @@ dependencies = [
  "libc",
  "log",
  "rustversion",
- "windows-link 0.1.3",
+ "windows-link 0.2.1",
  "windows-result 0.4.1",
 ]
 
@@ -4314,16 +4291,6 @@ checksum = "7f24254aa9a54b5c858eaee2f5bccdb46aaf0e486a595ed5fd8f86ba55232a70"
 
 [[package]]
 name = "hexane"
-version = "0.1.7"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "8ab946df174dbf65fc07610c1f936b3e40b9ca7cfd09c0f827f9509a62e93a39"
-dependencies = [
- "leb128",
- "thiserror 2.0.18",
-]
-
-[[package]]
-name = "hexane"
 version = "0.2.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "8f4ecba0bb4e14df997df7cab6d1b584c6432d8865cf2adfced814706d715a7b"
@@ -4596,7 +4563,7 @@ dependencies = [
  "libc",
  "percent-encoding",
  "pin-project-lite",
- "socket2 0.5.10",
+ "socket2 0.6.0",
  "system-configuration",
  "tokio",
  "tower-service",
@@ -5427,7 +5394,7 @@ dependencies = [
  "portable-atomic",
  "portable-atomic-util",
  "serde_core",
- "windows-sys 0.60.2",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]
@@ -6575,7 +6542,7 @@ dependencies = [
  "pin-project-lite",
  "rustc-hash 2.1.1",
  "rustls 0.23.37",
- "socket2 0.5.10",
+ "socket2 0.6.0",
  "thiserror 2.0.18",
  "tokio",
  "tokio-stream",
@@ -6619,7 +6586,7 @@ checksum = "bb9be4fedd6b98f3ba82ccd3506f4d0219fb723c3f97c67e12fe1494aa020e44"
 dependencies = [
  "cfg_aliases",
  "libc",
- "socket2 0.5.10",
+ "socket2 0.6.0",
  "tracing",
  "windows-sys 0.61.2",
 ]
@@ -7641,7 +7608,7 @@ version = "0.1.0"
 dependencies = [
  "am_utils_rs",
  "api_utils_rs",
- "automerge 0.7.3",
+ "automerge",
  "color-eyre",
  "daybook_types",
  "displaydoc",
@@ -8028,7 +7995,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "ac6c3320f9abac597dcbc668774ef006702672474aad53c6d596b62e487b40b1"
 dependencies = [
  "heck",
- "itertools 0.13.0",
+ "itertools 0.14.0",
  "log",
  "multimap",
  "once_cell",
@@ -8050,7 +8017,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "9120690fafc389a67ba3803df527d0ec9cbbc9cc45e4cc20b332996dfb672425"
 dependencies = [
  "anyhow",
- "itertools 0.13.0",
+ "itertools 0.14.0",
  "proc-macro2",
  "quote",
  "syn 2.0.106",
@@ -8178,7 +8145,7 @@ dependencies = [
  "quinn-udp",
  "rustc-hash 2.1.1",
  "rustls 0.23.37",
- "socket2 0.5.10",
+ "socket2 0.6.0",
  "thiserror 2.0.18",
  "tokio",
  "tracing",
@@ -8216,7 +8183,7 @@ dependencies = [
  "cfg_aliases",
  "libc",
  "once_cell",
- "socket2 0.5.10",
+ "socket2 0.6.0",
  "tracing",
  "windows-sys 0.60.2",
 ]
@@ -8842,7 +8809,7 @@ dependencies = [
  "errno",
  "libc",
  "linux-raw-sys 0.11.0",
- "windows-sys 0.60.2",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]
@@ -8947,7 +8914,7 @@ dependencies = [
  "security-framework 3.5.1",
  "security-framework-sys",
  "webpki-root-certs",
- "windows-sys 0.60.2",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]
@@ -9208,7 +9175,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "5b55fb86dfd3a2f5f76ea78310a88f96c4ea21a3031f8d212443d56123fd0521"
 dependencies = [
  "libc",
- "windows-sys 0.60.2",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]
@@ -10240,7 +10207,7 @@ dependencies = [
  "getrandom 0.4.1",
  "once_cell",
  "rustix 1.1.3",
- "windows-sys 0.60.2",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]
@@ -11022,7 +10989,7 @@ checksum = "f2f6fb2847f6742cd76af783a2a2c49e9375d0a111c7bef6f71cd9e738c72d6e"
 dependencies = [
  "memoffset",
  "tempfile",
- "windows-sys 0.60.2",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]
@@ -12583,7 +12550,7 @@ version = "0.1.11"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "c2a7b1c03c876122aa43f3020e6c3c3ee5c05081c9a00739faf7503aeba10d22"
 dependencies = [
- "windows-sys 0.48.0",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]
@@ -13496,7 +13463,7 @@ dependencies = [
 name = "xtask"
 version = "0.1.0"
 dependencies = [
- "automerge 0.8.0",
+ "automerge",
  "automerge_sedimentree",
  "bon",
  "clap",

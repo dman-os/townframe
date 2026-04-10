@@ -1186,8 +1186,11 @@ fn automerge08_minimal_repro() -> Res<()> {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 struct NoopConnection;
 
-impl subduction_core::connection::Connection<future_form::Sendable, subduction_core::connection::message::SyncMessage>
-    for NoopConnection
+impl
+    subduction_core::connection::Connection<
+        future_form::Sendable,
+        subduction_core::connection::message::SyncMessage,
+    > for NoopConnection
 {
     type DisconnectionError = std::convert::Infallible;
     type SendError = std::convert::Infallible;
@@ -1206,8 +1209,10 @@ impl subduction_core::connection::Connection<future_form::Sendable, subduction_c
 
     fn recv(
         &self,
-    ) -> futures::future::BoxFuture<'_, Result<subduction_core::connection::message::SyncMessage, Self::RecvError>>
-    {
+    ) -> futures::future::BoxFuture<
+        '_,
+        Result<subduction_core::connection::message::SyncMessage, Self::RecvError>,
+    > {
         async { std::future::pending().await }.boxed()
     }
 }
@@ -1218,7 +1223,8 @@ async fn subduction_automerge_demo() -> Res<()> {
     use automerge08::transaction::Transactable;
     use sedimentree_core::{blob::Blob, id::SedimentreeId, loose_commit::id::CommitId};
     use subduction_core::{
-        policy::open::OpenPolicy, storage::memory::MemoryStorage, subduction::builder::SubductionBuilder,
+        policy::open::OpenPolicy, storage::memory::MemoryStorage,
+        subduction::builder::SubductionBuilder,
     };
     use subduction_crypto::signer::memory::MemorySigner;
     use subduction_websocket::tokio::{TimeoutTokio, TokioSpawn};
@@ -1226,11 +1232,11 @@ async fn subduction_automerge_demo() -> Res<()> {
     let signer = MemorySigner::generate();
     let (subduction, _handler, _listener, _manager) =
         SubductionBuilder::<_, _, _, _, _, 256>::new()
-        .signer(signer)
-        .storage(MemoryStorage::new(), Arc::new(OpenPolicy))
-        .spawner(TokioSpawn)
-        .timer(TimeoutTokio)
-        .build::<future_form::Sendable, NoopConnection>();
+            .signer(signer)
+            .storage(MemoryStorage::new(), Arc::new(OpenPolicy))
+            .spawner(TokioSpawn)
+            .timer(TimeoutTokio)
+            .build::<future_form::Sendable, NoopConnection>();
 
     let sedimentree_id = SedimentreeId::new([7u8; 32]);
 

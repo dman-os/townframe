@@ -990,65 +990,49 @@ async fn test_bigrepo_raw_automerge_stale_heads_after_merges() -> Res<()> {
 
     let main_handle = big_repo.create_doc(automerge::Automerge::new()).await?;
     main_handle
-        .with_document_local(|doc| {
+        .with_document(|doc| {
             let mut tx = doc.transaction();
             tx.put(automerge::ROOT, "note", "init")?;
             tx.commit();
             eyre::Ok(())
         })
         .await??;
-    let h0 = main_handle
-        .with_document_local(|doc| doc.get_heads())
-        .await?;
+    let h0 = main_handle.with_document(|doc| doc.get_heads()).await?;
 
-    let branch_a_doc = main_handle
-        .with_document_local(|doc| doc.fork_at(&h0))
-        .await??;
+    let branch_a_doc = main_handle.with_document(|doc| doc.fork_at(&h0)).await??;
     let branch_a_handle = big_repo.create_doc(branch_a_doc).await?;
     branch_a_handle
-        .with_document_local(|doc| {
+        .with_document(|doc| {
             let mut tx = doc.transaction();
             tx.put(automerge::ROOT, "title", "A")?;
             tx.commit();
             eyre::Ok(())
         })
         .await??;
-    let mut a_snapshot = branch_a_handle
-        .with_document_local(|doc| doc.clone())
-        .await?;
+    let mut a_snapshot = branch_a_handle.with_document(|doc| doc.clone()).await?;
     main_handle
-        .with_document_local(|doc| doc.merge(&mut a_snapshot))
+        .with_document(|doc| doc.merge(&mut a_snapshot))
         .await??;
-    let h1 = main_handle
-        .with_document_local(|doc| doc.get_heads())
-        .await?;
+    let h1 = main_handle.with_document(|doc| doc.get_heads()).await?;
 
-    let branch_b_doc = main_handle
-        .with_document_local(|doc| doc.fork_at(&h1))
-        .await??;
+    let branch_b_doc = main_handle.with_document(|doc| doc.fork_at(&h1)).await??;
     let branch_b_handle = big_repo.create_doc(branch_b_doc).await?;
     branch_b_handle
-        .with_document_local(|doc| {
+        .with_document(|doc| {
             let mut tx = doc.transaction();
             tx.put(automerge::ROOT, "note", "B")?;
             tx.commit();
             eyre::Ok(())
         })
         .await??;
-    let mut b_snapshot = branch_b_handle
-        .with_document_local(|doc| doc.clone())
-        .await?;
+    let mut b_snapshot = branch_b_handle.with_document(|doc| doc.clone()).await?;
     main_handle
-        .with_document_local(|doc| doc.merge(&mut b_snapshot))
+        .with_document(|doc| doc.merge(&mut b_snapshot))
         .await??;
-    let h2 = main_handle
-        .with_document_local(|doc| doc.get_heads())
-        .await?;
+    let h2 = main_handle.with_document(|doc| doc.get_heads()).await?;
     assert_ne!(h2, h1, "main should advance after second merge");
 
-    let stale = main_handle
-        .with_document_local(|doc| doc.fork_at(&h1))
-        .await??;
+    let stale = main_handle.with_document(|doc| doc.fork_at(&h1)).await??;
     assert!(
         !stale.get_heads().is_empty(),
         "fork_at on older known heads should work through BigRepo handle path"

@@ -112,8 +112,9 @@ impl DrawerRepo {
             .await?
             .ok_or_eyre("drawer doc not found")?;
 
-        let initial_heads =
-            drawer_am_handle.with_document_sync(|doc| ChangeHashSet(doc.get_heads().into()));
+        let initial_heads = drawer_am_handle
+            .with_document_read(|doc| ChangeHashSet(doc.get_heads().into()))
+            .await;
 
         let broker = big_repo
             .ensure_change_broker(drawer_am_handle.clone())
@@ -255,7 +256,7 @@ impl DrawerRepo {
             return Ok(None);
         };
         let latest_heads = handle
-            .with_document_local(|doc| ChangeHashSet(doc.get_heads().into()))
+            .with_document(|doc| ChangeHashSet(doc.get_heads().into()))
             .await?;
         Ok(Some(latest_heads))
     }
@@ -321,7 +322,7 @@ impl DrawerRepo {
             return Ok(None);
         };
         let (contains_all_heads, missing_heads) = handle
-            .with_document_local(|doc| {
+            .with_document(|doc| {
                 let mut missing = Vec::new();
                 for head in heads.iter() {
                     if doc.get_change_by_hash(head).is_none() {
@@ -388,24 +389,29 @@ impl DrawerRepo {
             .find_doc_handle(&branch_doc_id)
             .await?
             .ok_or_eyre("branch doc handle missing for tombstoned branch")?;
-        let keys = handle.with_document_sync(|am_doc| {
-            let facets_obj = match automerge::ReadDoc::get_at(
-                am_doc,
-                automerge::ROOT,
-                "facets",
-                &snapshot.branch_heads,
-            )? {
-                Some((automerge::Value::Object(automerge::ObjType::Map), id)) => id,
-                _ => return Ok::<HashSet<FacetKey>, eyre::Report>(HashSet::new()),
-            };
-            let mut out = HashSet::new();
-            for item in
-                automerge::ReadDoc::map_range_at(am_doc, &facets_obj, .., &snapshot.branch_heads)
-            {
-                out.insert(FacetKey::from(item.key.to_string().as_str()));
-            }
-            Ok(out)
-        })?;
+        let keys = handle
+            .with_document_read(|am_doc| {
+                let facets_obj = match automerge::ReadDoc::get_at(
+                    am_doc,
+                    automerge::ROOT,
+                    "facets",
+                    &snapshot.branch_heads,
+                )? {
+                    Some((automerge::Value::Object(automerge::ObjType::Map), id)) => id,
+                    _ => return Ok::<HashSet<FacetKey>, eyre::Report>(HashSet::new()),
+                };
+                let mut out = HashSet::new();
+                for item in automerge::ReadDoc::map_range_at(
+                    am_doc,
+                    &facets_obj,
+                    ..,
+                    &snapshot.branch_heads,
+                ) {
+                    out.insert(FacetKey::from(item.key.to_string().as_str()));
+                }
+                Ok(out)
+            })
+            .await?;
         Ok(keys)
     }
 

@@ -4,8 +4,8 @@ use crate::interlude::*;
 
 use am_utils_rs::sync::{
     peer::{
-        PeerSyncProgressEvent, PeerSyncWorkerEvent, PeerSyncWorkerStopToken, DocSyncAck,
-        DocSyncRequest, SpawnPeerSyncWorkerArgs,
+        DocSyncAck, DocSyncRequest, PeerSyncProgressEvent, PeerSyncWorkerEvent,
+        PeerSyncWorkerStopToken, SpawnPeerSyncWorkerArgs,
     },
     protocol::{PartitionId, PartitionSyncRpc, PeerKey},
     store::SyncStoreHandle,
@@ -1347,13 +1347,8 @@ impl Worker {
                 let parsed = item_id
                     .parse::<DocumentId>()
                     .map_err(|err| ferr!("invalid remote doc id '{item_id}': {err}"))?;
-                self.handle_doc_deleted_request(
-                    peer_key,
-                    event.partition_id,
-                    parsed,
-                    event.cursor,
-                )
-                .await?;
+                self.handle_doc_deleted_request(peer_key, event.partition_id, parsed, event.cursor)
+                    .await?;
             }
         }
         Ok(())
@@ -1452,8 +1447,7 @@ impl Worker {
             if had_peer_entry {
                 if let Some(conn_id) = self.conn_by_peer.get(&endpoint_id).copied() {
                     if let Some(peer_state) = self.known_peer_set.get_mut(&conn_id) {
-                        peer_state.doc_pending_docs =
-                            peer_state.doc_pending_docs.saturating_sub(1);
+                        peer_state.doc_pending_docs = peer_state.doc_pending_docs.saturating_sub(1);
                         refresh_peer = true;
                     }
                 }
@@ -1716,7 +1710,7 @@ impl Worker {
             return Ok(None);
         };
         let latest_heads = local_doc
-            .with_document_local(|doc| ChangeHashSet(Arc::from(doc.get_heads())))
+            .with_document(|doc| ChangeHashSet(Arc::from(doc.get_heads())))
             .await?;
         let stop_token = doc_worker::spawn_doc_sync_worker(
             doc_id.clone(),
@@ -1819,7 +1813,7 @@ impl Worker {
             .find_doc(&doc_id)
             .await?
             .ok_or_eyre("active doc sync state missing local doc handle")?
-            .with_document_local(|doc| ChangeHashSet(Arc::from(doc.get_heads())))
+            .with_document(|doc| ChangeHashSet(Arc::from(doc.get_heads())))
             .await?;
         self.scheduler
             .active_docs

@@ -38,7 +38,7 @@ impl DrawerRepo {
         let facet_keys: Vec<_> = args.facets.keys().cloned().collect();
 
         let heads = handle
-            .with_document_local(|am_doc| {
+            .with_document(|am_doc| {
                 am_doc.set_actor(mutation_actor_id.clone());
                 let mut tx = am_doc.transaction();
                 tx.put(automerge::ROOT, "$schema", "daybook.doc")?;
@@ -232,7 +232,7 @@ impl DrawerRepo {
         };
         let mutation_actor_id = self.content_actor_id(patch.user_path.as_ref(), &branch_doc_id);
         let existing_facet_keys = handle
-            .with_document_local(|am_doc| {
+            .with_document(|am_doc| {
                 let facets_obj =
                     match automerge::ReadDoc::get_at(am_doc, automerge::ROOT, "facets", &heads)? {
                         Some((automerge::Value::Object(automerge::ObjType::Map), id)) => id,
@@ -257,7 +257,7 @@ impl DrawerRepo {
 
         // 1. Update content doc
         let (_new_heads, invalidated_uuids) = handle
-            .with_document_local(|am_doc| {
+            .with_document(|am_doc| {
                 am_doc.set_actor(mutation_actor_id.clone());
                 let mut tx = am_doc.transaction_at(automerge::PatchLog::null(), &heads);
 
@@ -343,7 +343,7 @@ impl DrawerRepo {
             });
         };
         let branch_doc = from_handle
-            .with_document_local(|am_doc| {
+            .with_document(|am_doc| {
                 let current_heads = am_doc.get_heads();
                 let current_heads_serialized = am_utils_rs::serialize_commit_heads(&current_heads);
                 let from_heads_serialized =
@@ -545,7 +545,7 @@ impl DrawerRepo {
         // 1. Merge content docs
         let user_path_for_dmeta = user_path.clone();
         let mut am_from = from_handle
-            .with_document_local(|from_doc| {
+            .with_document(|from_doc| {
                 let current_heads = from_doc.get_heads();
                 let current_heads_serialized = am_utils_rs::serialize_commit_heads(&current_heads);
                 let from_heads_serialized =
@@ -612,7 +612,7 @@ impl DrawerRepo {
             })
             .await??;
         let (_new_heads, _modified_facets, invalidated_uuids) = handle
-            .with_document_local(move |am_doc| {
+            .with_document(move |am_doc| {
                 am_doc.set_actor(mutation_actor_id.clone());
                 let (patches, new_heads) = match std::panic::catch_unwind(
                     std::panic::AssertUnwindSafe(|| -> Res<(Vec<automerge::Patch>, ChangeHashSet)> {

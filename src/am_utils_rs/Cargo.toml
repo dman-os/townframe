@@ -63,6 +63,7 @@ subduction_keyhive = { workspace = true }
 subduction_keyhive_policy = { workspace = true }
 future_form = { version = "0.3.0" }
 automerge_sedimentree = { workspace = true }
+subduction_websocket = { workspace = true, features = ["tokio_base"] }
 
 #
 # logging
