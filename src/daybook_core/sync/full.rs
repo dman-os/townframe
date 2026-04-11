@@ -21,7 +21,14 @@ use crate::progress::{
 };
 use crate::repo::RepoCtx;
 use crate::sync::{PARTITION_SYNC_ALPN, REPO_SYNC_ALPN};
-use am_utils_rs::{BigRepoConnectionId, BigRepoPeerDocState};
+
+type BigRepoConnectionId = EndpointId;
+
+#[derive(Debug, Clone, Default)]
+struct BigRepoPeerDocState {
+    shared_heads: Option<Vec<automerge::ChangeHash>>,
+    their_heads: Option<Vec<automerge::ChangeHash>>,
+}
 
 mod blob_worker;
 mod doc_worker;
@@ -76,6 +83,7 @@ pub enum FullSyncEvent {
 enum Msg {
     SetPeer {
         endpoint_id: EndpointId,
+        endpoint_addr: iroh::EndpointAddr,
         conn_id: BigRepoConnectionId,
         partitions: HashSet<PartitionKey>,
         peer_key: PeerKey,
@@ -202,6 +210,7 @@ impl WorkerHandle {
     pub async fn set_connection(
         &self,
         endpoint_id: EndpointId,
+        endpoint_addr: iroh::EndpointAddr,
         conn_id: BigRepoConnectionId,
         peer_key: PeerKey,
         partition_ids: HashSet<PartitionId>,
@@ -220,6 +229,7 @@ impl WorkerHandle {
             resp: tx,
             conn_id,
             endpoint_id,
+            endpoint_addr,
             partitions,
             peer_key,
         };
@@ -292,7 +302,7 @@ pub async fn start_full_sync_worker(
 
     let mut worker = Worker {
         big_repo: Arc::clone(&rcx.big_repo),
-        local_peer_key: rcx.big_repo.local_peer_key(),
+        local_peer_key: format!("/{}/{}", rcx.repo_id, iroh_endpoint.id()),
         cancel_token: cancel_token.clone(),
         msg_tx: msg_tx.clone(),
         sync_progress_tx: sync_progress_tx.clone(),
@@ -489,6 +499,7 @@ struct Partition {
 
 struct PeerSyncState {
     endpoint_id: EndpointId,
+    endpoint_addr: iroh::EndpointAddr,
     partitions: HashSet<PartitionKey>,
     peer_key: PeerKey,
     bootstrap_ready: bool,
@@ -527,6 +538,7 @@ struct ImportRequestedDoc {
 struct ActiveDocSyncState {
     latest_heads: ChangeHashSet,
     stop_token: doc_worker::DocSyncWorkerStopToken,
+    ack_cutoffs: HashMap<EndpointId, HashMap<PartitionKey, u64>>,
 }
 
 struct ActiveImportSyncState {
@@ -728,6 +740,7 @@ impl Worker {
         match msg {
             Msg::SetPeer {
                 endpoint_id,
+                endpoint_addr,
                 resp,
                 partitions,
                 conn_id,
@@ -757,6 +770,7 @@ impl Worker {
                     PeerSyncState {
                         partitions,
                         endpoint_id,
+                        endpoint_addr,
                         peer_key: peer_key.clone(),
                         bootstrap_ready: false,
                         live_ready: false,
@@ -1063,8 +1077,9 @@ impl Worker {
                 continue;
             };
             let peer_key = peer_state.peer_key.clone();
+            let endpoint_addr = peer_state.endpoint_addr.clone();
             let parts = self.desired_partitions_for_peer(endpoint_id);
-            self.refresh_peer_partition_session(endpoint_id, peer_key, parts)
+            self.refresh_peer_partition_session(endpoint_id, endpoint_addr, peer_key, parts)
                 .await?;
         }
         self.scheduler.peer_sessions_to_refresh = double;
@@ -1074,6 +1089,7 @@ impl Worker {
     async fn refresh_peer_partition_session(
         &mut self,
         endpoint_id: EndpointId,
+        endpoint_addr: iroh::EndpointAddr,
         peer_key: PeerKey,
         partitions: HashSet<PartitionKey>,
     ) -> Res<()> {
@@ -1102,7 +1118,7 @@ impl Worker {
         }
         let rpc_client = irpc_iroh::client::<PartitionSyncRpc>(
             self.iroh_endpoint.clone(),
-            iroh::EndpointAddr::new(endpoint_id),
+            endpoint_addr,
             PARTITION_SYNC_ALPN,
         );
         let (doc_ack_tx, doc_ack_rx) = mpsc::channel(8192);
@@ -1678,10 +1694,19 @@ impl Worker {
                 self.scheduler.clear_import_task(&doc_id);
                 continue;
             };
+            let Some(conn_id) = self.conn_by_peer.get(&endpoint_id).copied() else {
+                self.scheduler.clear_import_task(&doc_id);
+                continue;
+            };
+            let Some(peer_state) = self.known_peer_set.get(&conn_id) else {
+                self.scheduler.clear_import_task(&doc_id);
+                continue;
+            };
             let active = ActiveImportSyncState {
                 stop_token: import_worker::spawn_import_sync_worker(
                     doc_id.clone(),
                     endpoint_id,
+                    peer_state.endpoint_addr.clone(),
                     self.local_peer_key.clone(),
                     self.cancel_token.child_token(),
                     self.msg_tx.clone(),
@@ -1712,17 +1737,49 @@ impl Worker {
         let latest_heads = local_doc
             .with_document(|doc| ChangeHashSet(Arc::from(doc.get_heads())))
             .await?;
+        let Some(sync_state) = self.doc_sync_set.get(&doc_id) else {
+            return Ok(None);
+        };
+        let Some((&endpoint_id, _)) = sync_state.requested_peers.iter().next() else {
+            return Ok(None);
+        };
+        let Some(conn_id) = self.conn_by_peer.get(&endpoint_id).copied() else {
+            return Ok(None);
+        };
+        let Some(peer_state) = self.known_peer_set.get(&conn_id) else {
+            return Ok(None);
+        };
+        let Some(peer_key) = self.peer_key_for_endpoint(endpoint_id) else {
+            return Ok(None);
+        };
         let stop_token = doc_worker::spawn_doc_sync_worker(
             doc_id.clone(),
+            endpoint_id,
+            peer_state.endpoint_addr.clone(),
+            endpoint_id,
+            peer_key,
+            self.local_peer_key.clone(),
             Arc::clone(&self.big_repo),
+            self.iroh_endpoint.clone(),
             cancel_token.clone(),
             self.msg_tx.clone(),
             retry,
         )
         .await?;
+        let mut ack_cutoffs = HashMap::new();
+        if let Some(requested_parts) = sync_state.requested_peers.get(&endpoint_id) {
+            let mut per_partition = HashMap::new();
+            for (partition_key, cursors) in requested_parts {
+                if let Some(max_cursor) = cursors.iter().copied().max() {
+                    per_partition.insert(partition_key.clone(), max_cursor);
+                }
+            }
+            ack_cutoffs.insert(endpoint_id, per_partition);
+        }
         Ok(Some(ActiveDocSyncState {
             latest_heads,
             stop_token,
+            ack_cutoffs,
         }))
     }
 
@@ -1856,13 +1913,31 @@ impl Worker {
                 let Some(samod_doc) = self.doc_sync_set.get_mut(&doc_id) else {
                     continue;
                 };
-                if let Some(partitions) = samod_doc.requested_peers.remove(&peer_state.endpoint_id)
+                let ack_cutoff = self
+                    .scheduler
+                    .active_docs
+                    .get(&doc_id)
+                    .and_then(|active| active.ack_cutoffs.get(&peer_state.endpoint_id))
+                    .cloned();
+                if let Some(requested_parts) = samod_doc.requested_peers.get_mut(&peer_state.endpoint_id)
                 {
-                    for (partition_key, cursors) in partitions {
-                        let PartitionKey::BigRepoPartition(partition_id) = partition_key else {
-                            continue;
-                        };
-                        for cursor in cursors {
+                    let mut emptied_partition_keys = Vec::new();
+                    for (partition_key, cursors) in requested_parts.iter_mut() {
+                        let cutoff = ack_cutoff
+                            .as_ref()
+                            .and_then(|per_partition| per_partition.get(partition_key))
+                            .copied()
+                            .unwrap_or(0);
+                        let ackable = cursors
+                            .iter()
+                            .copied()
+                            .filter(|cursor| *cursor <= cutoff)
+                            .collect::<Vec<_>>();
+                        for cursor in ackable {
+                            cursors.remove(&cursor);
+                            let PartitionKey::BigRepoPartition(partition_id) = partition_key else {
+                                continue;
+                            };
                             debug!(
                                 endpoint_id = ?peer_state.endpoint_id,
                                 partition_id = %partition_id,
@@ -1872,16 +1947,25 @@ impl Worker {
                             );
                             self.scheduler.note_doc_synced(
                                 peer_state.endpoint_id,
-                                &partition_id,
+                                partition_id,
                                 cursor,
                                 &doc_id.to_string(),
                             );
                             partitions_to_advance
                                 .push((peer_state.endpoint_id, partition_id.clone()));
                         }
+                        if cursors.is_empty() {
+                            emptied_partition_keys.push(partition_key.clone());
+                        }
                     }
-                    peer_state.doc_pending_docs = peer_state.doc_pending_docs.saturating_sub(1);
-                    peers_to_refresh.push(peer_state.endpoint_id);
+                    for partition_key in emptied_partition_keys {
+                        requested_parts.remove(&partition_key);
+                    }
+                    if requested_parts.is_empty() {
+                        samod_doc.requested_peers.remove(&peer_state.endpoint_id);
+                        peer_state.doc_pending_docs = peer_state.doc_pending_docs.saturating_sub(1);
+                        peers_to_refresh.push(peer_state.endpoint_id);
+                    }
                 }
             }
             // events_to_emit.push(FullSyncEvent::PeerFullSynced {
@@ -1899,19 +1983,20 @@ impl Worker {
         for endpoint_id in peers_to_refresh {
             self.refresh_peer_fully_synced_state(endpoint_id).await?;
         }
+        if let Some(active) = self.scheduler.active_docs.remove(&doc_id) {
+            active.stop_token.stop().await?;
+        }
+        self.scheduler.clear_doc_pending(&doc_id);
         let requested_peers_empty = self
             .doc_sync_set
             .get(&doc_id)
             .map(|state| state.requested_peers.is_empty())
             .unwrap_or(true);
-        if self.scheduler.active_docs.contains_key(&doc_id) && requested_peers_empty {
-            let Some(active) = self.scheduler.active_docs.remove(&doc_id) else {
-                return Ok(());
-            };
-            let _latest_heads = active.latest_heads.clone();
-            active.stop_token.stop().await?;
-            self.scheduler.clear_doc_pending(&doc_id);
+        if requested_peers_empty {
             self.doc_sync_set.remove(&doc_id);
+            self.scheduler.clear_doc_task(&doc_id);
+        } else if !self.scheduler.is_doc_pending(&doc_id) {
+            self.scheduler.set_doc_pending_now(&doc_id);
         }
         for event in events_to_emit {
             self.emit_full_sync_event(event).await?;
@@ -2477,11 +2562,11 @@ impl Worker {
         let mut emit_full = None;
         let mut emit_stale = false;
         if let Some(peer_state) = self.known_peer_set.get_mut(&conn_id) {
-            // "Fully synced" is a bootstrap/data convergence signal.
-            // Live subscription readiness is orthogonal and can flap during reconnects.
-            let is_fully_synced = peer_state.bootstrap_ready
-                && peer_state.bootstrap_remaining_docs == 0
-                && peer_state.doc_pending_docs == 0;
+            // In the one-shot doc worker model, pending doc cursors can briefly lag while
+            // new requests arrive faster than each snapshot round-trip completes.
+            // Treat "fully synced" as bootstrap complete + live stream ready.
+            let is_fully_synced =
+                peer_state.bootstrap_ready && peer_state.bootstrap_remaining_docs == 0 && peer_state.live_ready;
             debug!(
                 endpoint_id = ?endpoint_id,
                 bootstrap_ready = peer_state.bootstrap_ready,

@@ -172,6 +172,7 @@ impl BigRepo {
         Ok((
             Arc::clone(&out),
             BigRepoStopToken {
+                runtime: out.runtime.clone(),
                 change_manager_stop: Some(change_manager_stop),
                 partition_forwarder_cancel: out.partition_forwarder_cancel.clone(),
                 partition_forwarders: Arc::clone(&out.join_set),
@@ -495,6 +496,7 @@ impl BigRepo {
 }
 
 pub struct BigRepoStopToken {
+    runtime: runtime::BigRepoRuntimeHandle,
     change_manager_stop: Option<changes::ChangeListenerManagerStopToken>,
     partition_forwarder_cancel: CancellationToken,
     partition_forwarders: Arc<utils_rs::AbortableJoinSet>,
@@ -502,10 +504,17 @@ pub struct BigRepoStopToken {
 
 impl BigRepoStopToken {
     pub async fn stop(mut self) -> Res<()> {
+        self.runtime.shutdown().await;
         self.partition_forwarder_cancel.cancel();
-        self.partition_forwarders
-            .stop(Duration::from_secs(5))
-            .await?;
+        match self.partition_forwarders.stop(Duration::from_secs(5)).await {
+            Ok(()) => {}
+            Err(utils_rs::AbortableJoinSetStopError::Timeout(_))
+            | Err(utils_rs::AbortableJoinSetStopError::Aborted) => {
+                // Subduction listener/manager tasks are long-lived service loops.
+                // On process/repo shutdown we can continue after aborting them.
+            }
+            Err(err) => return Err(err.into()),
+        }
         if let Some(stop_token) = self.change_manager_stop.take() {
             stop_token.stop().await?;
         }

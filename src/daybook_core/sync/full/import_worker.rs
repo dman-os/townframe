@@ -24,6 +24,7 @@ pub(super) enum ImportDocOutcome {
 pub(super) fn spawn_import_sync_worker(
     doc_id: DocumentId,
     endpoint_id: EndpointId,
+    endpoint_addr: iroh::EndpointAddr,
     local_peer_key: PeerKey,
     cancel_token: CancellationToken,
     msg_tx: mpsc::UnboundedSender<Msg>,
@@ -35,6 +36,7 @@ pub(super) fn spawn_import_sync_worker(
     let worker = ImportSyncWorker {
         doc_id,
         endpoint_id,
+        endpoint_addr,
         local_peer_key,
         cancel_token,
         msg_tx,
@@ -60,6 +62,7 @@ pub(super) fn spawn_import_sync_worker(
 struct ImportSyncWorker {
     doc_id: DocumentId,
     endpoint_id: EndpointId,
+    endpoint_addr: iroh::EndpointAddr,
     local_peer_key: PeerKey,
     cancel_token: CancellationToken,
     msg_tx: mpsc::UnboundedSender<Msg>,
@@ -77,7 +80,7 @@ impl ImportSyncWorker {
         }
         let rpc_client = irpc_iroh::client::<am_utils_rs::repo::rpc::RepoSyncRpc>(
             self.iroh_endpoint.clone(),
-            iroh::EndpointAddr::new(self.endpoint_id),
+            self.endpoint_addr.clone(),
             REPO_SYNC_ALPN,
         );
         let rpc_response = tokio::select! {

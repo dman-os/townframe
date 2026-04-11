@@ -60,8 +60,12 @@ enum RuntimeMsg {
         origin: BigRepoChangeOrigin,
         done: oneshot::Sender<Res<()>>,
     },
+    Shutdown {
+        done: oneshot::Sender<()>,
+    },
 }
 
+#[derive(Clone)]
 pub(super) struct BigRepoRuntimeHandle {
     msg_tx: mpsc::UnboundedSender<RuntimeMsg>,
 }
@@ -116,6 +120,12 @@ impl BigRepoRuntimeHandle {
         done_rx
             .await
             .map_err(|_| eyre::eyre!("big repo runtime dropped commit response"))?
+    }
+
+    pub(super) async fn shutdown(&self) {
+        let (done_tx, done_rx) = oneshot::channel();
+        let _ = self.msg_tx.send(RuntimeMsg::Shutdown { done: done_tx });
+        let _ = done_rx.await;
     }
 }
 
@@ -182,6 +192,7 @@ where
     use subduction_websocket::tokio::{TimeoutTokio, TokioSpawn};
 
     let policy = Arc::new(OpenPolicy);
+    let storage_for_reads = storage.clone();
     let (subduction, _handler, listener, manager) = SubductionBuilder::<_, _, _, _, _, 256>::new()
         .signer(signer)
         .storage(storage, policy)
@@ -240,12 +251,24 @@ where
                     RuntimeMsg::LoadDoc { doc_id, done } => {
                         let out = async {
                             let sedimentree_id: SedimentreeId = doc_id.into();
-                            let Some(blobs) =
-                                subduction.get_blobs(sedimentree_id).await.map_err(|err| {
-                                    ferr!("failed reading blobs from subduction storage: {err}")
-                                })?
-                            else {
-                                return Ok(None);
+                            let blobs = match subduction
+                                .get_blobs(sedimentree_id)
+                                .await
+                                .map_err(|err| ferr!("failed reading blobs from subduction: {err}"))?
+                            {
+                                Some(blobs) => blobs.into_iter().collect::<Vec<_>>(),
+                                None => {
+                                    let Some(blobs) =
+                                        load_blobs_from_storage(&storage_for_reads, sedimentree_id)
+                                            .await
+                                            .map_err(|err| {
+                                                ferr!("failed reading blobs from storage: {err}")
+                                            })?
+                                    else {
+                                        return Ok(None);
+                                    };
+                                    blobs
+                                }
                             };
                             let doc = reconstruct_automerge_from_blobs(blobs)?;
                             eyre::Ok(Some(doc))
@@ -275,6 +298,10 @@ where
                         }
                         .await;
                         done.send(out).unwrap();
+                    }
+                    RuntimeMsg::Shutdown { done } => {
+                        done.send(()).unwrap();
+                        break;
                     }
                 }
             }
@@ -308,4 +335,25 @@ where
         pending = next;
     }
     Ok(doc)
+}
+
+async fn load_blobs_from_storage<S>(
+    storage: &S,
+    sedimentree_id: SedimentreeId,
+) -> Result<Option<Vec<Blob>>, <S as subduction_core::storage::traits::Storage<future_form::Sendable>>::Error>
+where
+    S: subduction_core::storage::traits::Storage<future_form::Sendable>,
+{
+    let mut blobs = Vec::new();
+    for verified in <S as subduction_core::storage::traits::Storage<future_form::Sendable>>::load_loose_commits(storage, sedimentree_id).await? {
+        blobs.push(verified.blob().clone());
+    }
+    for verified in <S as subduction_core::storage::traits::Storage<future_form::Sendable>>::load_fragments(storage, sedimentree_id).await? {
+        blobs.push(verified.blob().clone());
+    }
+    if blobs.is_empty() {
+        Ok(None)
+    } else {
+        Ok(Some(blobs))
+    }
 }

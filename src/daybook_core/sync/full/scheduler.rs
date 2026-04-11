@@ -617,7 +617,7 @@ mod tests {
     #[test]
     fn doc_task_dedup_single_pending_entry() {
         let mut scheduler = Scheduler::default();
-        let doc_id = doc("11111111-1111-1111-1111-111111111111");
+        let doc_id = doc("1111111111111111111111111111111111111111111111111111111111111111");
 
         scheduler.set_doc_pending_now(&doc_id);
         scheduler.set_doc_pending_now(&doc_id);
@@ -632,7 +632,7 @@ mod tests {
     #[test]
     fn import_task_dedup_single_pending_entry() {
         let mut scheduler = Scheduler::default();
-        let doc_id = doc("22222222-2222-2222-2222-222222222222");
+        let doc_id = doc("2222222222222222222222222222222222222222222222222222222222222222");
 
         scheduler.set_import_pending_now(&doc_id);
         scheduler.set_import_pending_now(&doc_id);
