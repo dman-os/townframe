@@ -5,6 +5,10 @@
 package org.example.daybook
 
 import androidx.compose.animation.AnimatedVisibility
+import androidx.compose.animation.EnterTransition
+import androidx.compose.animation.ExitTransition
+import androidx.compose.animation.slideInHorizontally
+import androidx.compose.animation.slideOutHorizontally
 import androidx.compose.animation.core.FastOutSlowInEasing
 import androidx.compose.animation.core.RepeatMode
 import androidx.compose.animation.core.animateFloat
@@ -1467,7 +1471,13 @@ fun Routes(
                 SettingsScreen(modifier = modifier)
             }
         }
-        composable(route = AppScreens.Drawer.name) {
+        composable(
+            route = AppScreens.Drawer.name,
+            enterTransition = { EnterTransition.None },
+            exitTransition = { ExitTransition.None },
+            popEnterTransition = { EnterTransition.None },
+            popExitTransition = { ExitTransition.None }
+        ) {
             ProvideChromeState(ChromeState(title = "Drawer")) {
                 DrawerScreen(
                     drawerVm = drawerVm,
@@ -1478,7 +1488,23 @@ fun Routes(
                 )
             }
         }
-        composable(route = AppScreens.DocEditor.name) {
+        composable(
+            route = AppScreens.DocEditor.name,
+            enterTransition = {
+                slideInHorizontally(
+                    animationSpec = tween(240),
+                    initialOffsetX = { fullWidth -> fullWidth }
+                )
+            },
+            exitTransition = { ExitTransition.None },
+            popEnterTransition = { EnterTransition.None },
+            popExitTransition = {
+                slideOutHorizontally(
+                    animationSpec = tween(240),
+                    targetOffsetX = { fullWidth -> fullWidth }
+                )
+            }
+        ) {
             ProvideChromeState(
                 ChromeState(
                     title = "Doc Editor",

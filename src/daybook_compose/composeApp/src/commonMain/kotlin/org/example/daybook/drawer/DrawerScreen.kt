@@ -10,6 +10,7 @@ import androidx.compose.foundation.gestures.Orientation
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.rememberLazyListState
+import androidx.compose.foundation.background
 import androidx.compose.material3.*
 import androidx.compose.runtime.*
 import androidx.compose.ui.Alignment
@@ -134,13 +135,20 @@ fun DocEditorScreen(
         }
     }
 
-    DrawerDocEditorContent(
-        controller = selectedController,
-        selectedDocId = selectedDocId,
-        modifier = modifier.fillMaxSize(),
-        showFacetSidebar = contentType == DaybookContentType.LIST_AND_DETAIL,
-        showInlineFacetRack = contentType != DaybookContentType.LIST_AND_DETAIL
-    )
+    Box(
+        modifier =
+            modifier
+                .fillMaxSize()
+                .background(MaterialTheme.colorScheme.surface)
+    ) {
+        DrawerDocEditorContent(
+            controller = selectedController,
+            selectedDocId = selectedDocId,
+            modifier = Modifier.fillMaxSize(),
+            showFacetSidebar = contentType == DaybookContentType.LIST_AND_DETAIL,
+            showInlineFacetRack = contentType != DaybookContentType.LIST_AND_DETAIL
+        )
+    }
 }
 
 @Composable

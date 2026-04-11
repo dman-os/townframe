@@ -3,6 +3,10 @@ package org.example.daybook
 import androidx.compose.runtime.CompositionLocalProvider
 import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.LaunchedEffect
+import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.remember
+import androidx.compose.runtime.setValue
 import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.unit.Density
 import androidx.compose.ui.unit.DpSize
@@ -52,18 +56,20 @@ fun main() = application {
     Window(
         onCloseRequest = {
             println("[APP_SHUTDOWN] start: close requested, beginning graceful shutdown")
-            exitApplication()
+            signalShutdownRequested.set(true)
         },
         title = "Daybook",
         state = windowState
     ) {
+        var shutdownRequested by remember { mutableStateOf(false) }
+        var shutdownDone by remember { mutableStateOf(false) }
         LaunchedEffect(Unit) {
             while (true) {
                 if (signalShutdownRequested.getAndSet(false)) {
                     println("[APP_SHUTDOWN] start: signal-triggered graceful shutdown")
-                    EventQueue.invokeLater { exitApplication() }
-                    break
+                    shutdownRequested = true
                 }
+                if (shutdownDone) break
                 delay(100)
             }
         }
@@ -87,7 +93,12 @@ fun main() = application {
             App(
                 extraAction = {
                 },
-                autoShutdownOnDispose = true
+                shutdownRequested = shutdownRequested,
+                onShutdownCompleted = {
+                    shutdownDone = true
+                    EventQueue.invokeLater { exitApplication() }
+                },
+                autoShutdownOnDispose = false
             )
         }
     }

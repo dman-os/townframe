@@ -13,6 +13,7 @@ use tokio_util::sync::CancellationToken;
 
 const REPO_MARKER_FILE: &str = "db.repo.txt";
 const REPO_USER_ID_KEY: &str = "repo.user_id";
+const SQLITE_POOL_ACQUIRE_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(90);
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct RepoLayout {
@@ -234,6 +235,7 @@ impl RepoCtx {
             .create_if_missing(true);
         let partition_pool = sqlx::sqlite::SqlitePoolOptions::new()
             .max_connections(1)
+            .acquire_timeout(SQLITE_POOL_ACQUIRE_TIMEOUT)
             .connect_with(connect_options)
             .await
             .wrap_err("failed connecting big repo sqlite")?;

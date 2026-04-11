@@ -3,6 +3,9 @@ use sqlx::sqlite::{SqliteConnectOptions, SqliteJournalMode, SqlitePoolOptions};
 use std::str::FromStr;
 use tokio_util::sync::CancellationToken;
 
+const SQLITE_POOL_ACQUIRE_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(90);
+const SQLITE_BUSY_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(90);
+
 #[derive(Debug, Clone)]
 pub enum LocalStateEvent {
     ListChanged,
@@ -118,10 +121,11 @@ impl SqliteLocalStateRepo {
         let connect_options =
             SqliteConnectOptions::from_str(&format!("sqlite://{sqlite_file_path}"))?
                 .journal_mode(SqliteJournalMode::Wal)
-                .busy_timeout(std::time::Duration::from_secs(5))
+                .busy_timeout(SQLITE_BUSY_TIMEOUT)
                 .create_if_missing(true);
         let db_pool = SqlitePoolOptions::new()
             .max_connections(1)
+            .acquire_timeout(SQLITE_POOL_ACQUIRE_TIMEOUT)
             .connect_with(connect_options)
             .await
             .wrap_err("error initializing sqlite local state connection")?;

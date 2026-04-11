@@ -89,9 +89,11 @@ import androidx.compose.ui.unit.sp
 import androidx.lifecycle.viewModelScope
 import androidx.lifecycle.viewmodel.compose.viewModel
 import androidx.navigation.NavHostController
+import androidx.navigation.compose.currentBackStackEntryAsState
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.launch
+import org.example.daybook.AppScreens
 import org.example.daybook.ChromeState
 import org.example.daybook.ChromeStateTopAppBar
 import org.example.daybook.ConfigViewModel
@@ -271,6 +273,9 @@ fun CompactLayout(
     val featureControllers = navBarFeatureControllers + prominentButtonControllers
     val featureReadyStates = featureControllers.map { it.ready.collectAsState() }
     var menuGestureSurfaceWindowRect by remember { mutableStateOf<Rect?>(null) }
+    val navBackStackEntry by navController.currentBackStackEntryAsState()
+    val currentRoute = navBackStackEntry?.destination?.route
+    val isDocEditorFullscreen = currentRoute == AppScreens.DocEditor.name
 
     val menuGestureModifier =
         Modifier
@@ -415,6 +420,14 @@ fun CompactLayout(
     val tablesRepo = LocalContainer.current.tablesRepo
     val vm = viewModel { TablesViewModel(tablesRepo) }
 
+    LaunchedEffect(isDocEditorFullscreen) {
+        if (isDocEditorFullscreen) {
+            revealSheetState.hide()
+            leftDrawerState.close()
+            showFeaturesMenu = false
+        }
+    }
+
     // Clear cached tab layout rects whenever the selected table or sheet content changes
     // FIXME:
     LaunchedEffect(vm.tablesState.collectAsState(), sheetContent) {
@@ -495,14 +508,16 @@ fun CompactLayout(
         Scaffold(
             modifier = modifier,
             bottomBar = {
-                DaybookBottomNavigationBar(
-                    centerContent = {
-                        centerNavBarContent()
-                    },
-                    // showLeftDrawerHint = leftDrawerState.currentValue == DrawerValue.Closed && !isLeftDrawerDragging,
-                    showLeftDrawerHint = true,
-                    bottomBarModifier = menuGestureModifier,
-                )
+                if (!isDocEditorFullscreen) {
+                    DaybookBottomNavigationBar(
+                        centerContent = {
+                            centerNavBarContent()
+                        },
+                        // showLeftDrawerHint = leftDrawerState.currentValue == DrawerValue.Closed && !isLeftDrawerDragging,
+                        showLeftDrawerHint = true,
+                        bottomBarModifier = menuGestureModifier,
+                    )
+                }
             },
             snackbarHost = { SnackbarHost(snackbarHostState) }
         ) { scaffoldPadding ->
