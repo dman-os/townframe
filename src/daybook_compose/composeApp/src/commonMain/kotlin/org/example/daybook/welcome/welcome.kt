@@ -335,19 +335,52 @@ fun WelcomeFlowNavHost(
         }
 
         composable(WelcomeRoute.CreateRepo) {
-            val editState =
-                (createRepoUiState as? CreateRepoUiState.Editing)
-                    ?: CreateRepoUiState.Editing(repoName = "daybook-repo")
+            val editState = createRepoUiState as? CreateRepoUiState.Editing
             fun updateCreateState(
                 transform: (CreateRepoUiState.Editing) -> CreateRepoUiState.Editing
             ) {
                 val current = createRepoUiState as? CreateRepoUiState.Editing ?: return
                 onCreateRepoUiStateChange(transform(current))
             }
-            if (createRepoUiState !is CreateRepoUiState.Editing) {
-                LaunchedEffect(Unit) {
-                    onCreateRepoUiStateChange(editState)
+
+            if (editState == null) {
+                Surface(
+                    modifier = Modifier.fillMaxSize(),
+                    color = MaterialTheme.colorScheme.background
+                ) {
+                    Box(
+                        modifier = Modifier.fillMaxSize(),
+                        contentAlignment = Alignment.Center
+                    ) {
+                        CircularProgressIndicator()
+                    }
                 }
+                LaunchedEffect(Unit) {
+                    val repoName = "daybook-repo"
+                    try {
+                        val defaultParent = withAppFfiCtx { gcx ->
+                            gcx.defaultCloneParentDir().trim()
+                        }
+                        onCreateRepoUiStateChange(
+                            CreateRepoUiState.Editing(
+                                repoName = repoName,
+                                parentPath = defaultParent,
+                                isCreating = false
+                            )
+                        )
+                    } catch (error: Throwable) {
+                        if (error is CancellationException) throw error
+                        onCreateRepoUiStateChange(
+                            CreateRepoUiState.Editing(
+                                repoName = repoName,
+                                parentPath = "",
+                                isCreating = false,
+                                errorMessage = "Failed loading default parent: ${describeThrowable(error)}"
+                            )
+                        )
+                    }
+                }
+                return@composable
             }
 
             CreateRepoScreen(
@@ -384,21 +417,20 @@ fun WelcomeFlowNavHost(
                 }
             )
 
-            if (editState.parentPath.isBlank()) {
-                LaunchedEffect(Unit) {
+            if (editState.parentPath.isBlank() && !editState.isCreating) {
+                LaunchedEffect(editState.parentPath, editState.isCreating) {
                     try {
                         val defaultParent = withAppFfiCtx { gcx ->
                             gcx.defaultCloneParentDir().trim()
                         }
-                        updateCreateState { current ->
-                            if (!current.parentPath.isBlank()) {
-                                current
-                            } else {
-                                current.copy(
+                        val latest = createRepoUiState as? CreateRepoUiState.Editing ?: return@LaunchedEffect
+                        if (latest.parentPath.isBlank()) {
+                            onCreateRepoUiStateChange(
+                                latest.copy(
                                     parentPath = defaultParent,
                                     errorMessage = null
                                 )
-                            }
+                            )
                         }
                     } catch (error: Throwable) {
                         if (error is CancellationException) throw error

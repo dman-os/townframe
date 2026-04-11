@@ -1150,11 +1150,18 @@ fun App(
 
 private suspend fun shutdownAppContainer(appContainer: AppContainer) {
     println("[APP_SHUTDOWN] flushing to disk: begin")
+    val rtFfi = appContainer.rtFfi
     val syncRepo = appContainer.syncRepo
     if (syncRepo != null) {
         withContext(Dispatchers.IO) {
             println("[APP_SHUTDOWN] flushing to disk: stopping sync repo")
             syncRepo.stop()
+        }
+    }
+    if (rtFfi != null) {
+        withContext(Dispatchers.IO) {
+            println("[APP_SHUTDOWN] flushing to disk: stopping runtime repo")
+            rtFfi.stop()
         }
     }
     withContext(Dispatchers.IO) {
@@ -1166,7 +1173,7 @@ private suspend fun shutdownAppContainer(appContainer: AppContainer) {
     appContainer.tablesRepo.close()
     appContainer.dispatchRepo.close()
     appContainer.progressRepo.close()
-    appContainer.rtFfi?.close()
+    rtFfi?.close()
     appContainer.plugsRepo.close()
     appContainer.configRepo.close()
     appContainer.blobsRepo.close()

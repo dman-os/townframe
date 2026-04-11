@@ -6,6 +6,7 @@ import org.jetbrains.kotlin.gradle.targets.js.webpack.KotlinWebpackConfig
 import org.gradle.api.tasks.Copy
 import org.gradle.api.tasks.Delete
 import org.gradle.api.tasks.Exec
+import org.gradle.api.tasks.Sync
 import org.gradle.process.CommandLineArgumentProvider
 import java.io.File
 
@@ -385,55 +386,46 @@ fun registerRustAndroidCopyTask(
 ) =
     run {
         val destDir = File(project.projectDir, "src/androidMain/jniLibs/$targetAbi")
-        val destSoFile = File(destDir, "libdaybook_ffi.so")
-        val destLibcxxFile = File(destDir, "libc++_shared.so")
 
-        tasks.register<Copy>(taskName) {
-        group = "build"
-        description = "Copy Rust daybook_ffi and libc++_shared.so to Android jniLibs"
+        tasks.register<Sync>(taskName) {
+            group = "build"
+            description = "Sync Rust daybook_ffi and native Android runtime libs to jniLibs"
 
-        dependsOn(buildTaskName)
+            dependsOn(buildTaskName)
+            into(destDir)
 
-        val sourceSoFile = File(cargoTargetDir, sourceLibPath.removePrefix("target/"))
-        val ortLibDir = ortLibLocation?.let(::File)
-        val ortSharedLibs =
-            if (ortPreferDynamicLink && ortLibDir != null && ortLibDir.exists()) {
-                ortLibDir
-                    .listFiles()
-                    ?.filter { it.isFile && it.name.contains(".so") }
-                    ?.toList()
-                    ?: emptyList()
-            } else {
-                emptyList()
-            }
-        val androidNdkRoot = System.getenv("ANDROID_NDK_ROOT")
-        val libcxxSourceFile =
-            if (!androidNdkRoot.isNullOrBlank()) ndkLibCppSharedForAbi(targetAbi, androidNdkRoot) else null
-
-        doFirst {
+            val sourceSoFile = File(cargoTargetDir, sourceLibPath.removePrefix("target/"))
             if (!sourceSoFile.exists()) {
                 throw GradleException("Missing Rust Android library: ${sourceSoFile.absolutePath}")
             }
-            destDir.mkdirs()
-            destSoFile.delete()
-            destLibcxxFile.delete()
+            from(sourceSoFile)
+
+            val androidNdkRoot = System.getenv("ANDROID_NDK_ROOT")
+            val libcxxSourceFile =
+                if (!androidNdkRoot.isNullOrBlank()) ndkLibCppSharedForAbi(targetAbi, androidNdkRoot) else null
+            if (libcxxSourceFile != null && libcxxSourceFile.exists()) {
+                from(libcxxSourceFile)
+            }
+
+            val ortLibDir = ortLibLocation?.let(::File)
+            val ortSharedLibs =
+                if (ortPreferDynamicLink && ortLibDir != null && ortLibDir.exists()) {
+                    ortLibDir
+                        .listFiles()
+                        ?.filter { it.isFile && it.name.contains(".so") }
+                        ?.toList()
+                        ?: emptyList()
+                } else {
+                    emptyList()
+                }
             if (ortSharedLibs.isNotEmpty()) {
                 logger.lifecycle(
-                    "Copying ${ortSharedLibs.size} ORT shared libraries from ${ortLibDir?.absolutePath} (profile=${ortLibProfile ?: "unknown"})"
+                    "Syncing ${ortSharedLibs.size} ORT shared libraries from ${ortLibDir?.absolutePath} (profile=${ortLibProfile ?: "unknown"})"
                 )
+                from(ortSharedLibs)
             }
         }
-
-        from(sourceSoFile)
-        if (libcxxSourceFile != null && libcxxSourceFile.exists()) {
-            from(libcxxSourceFile)
-        }
-        if (ortSharedLibs.isNotEmpty()) {
-            from(ortSharedLibs)
-        }
-        into(destDir)
     }
-}
 
 // Debug variant: build Rust in debug mode
 tasks.register<Exec>("buildRustAndroidDebug") {
