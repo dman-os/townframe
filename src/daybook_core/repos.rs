@@ -38,12 +38,12 @@ pub trait Repo {
 /// (for example `diff_events`) should pass `live_origin = None` and must not be skipped.
 pub fn should_skip_live_patch(
     live_origin: Option<&am_utils_rs::repo::BigRepoChangeOrigin>,
-    exclude_peer_id: Option<&str>,
+    exclude_peer_id: Option<&am_utils_rs::repo::PeerId>,
 ) -> bool {
     match live_origin {
         Some(am_utils_rs::repo::BigRepoChangeOrigin::Local) => true,
         Some(am_utils_rs::repo::BigRepoChangeOrigin::Remote { peer_id, .. }) => {
-            exclude_peer_id.is_some_and(|exclude| peer_id.to_string() == exclude)
+            exclude_peer_id.is_some_and(|exclude| peer_id == exclude)
         }
         Some(am_utils_rs::repo::BigRepoChangeOrigin::Bootstrap) | None => false,
     }
@@ -819,8 +819,7 @@ mod origin_tests {
             &local_actor,
             &vtag_actor,
             Some(&BigRepoChangeOrigin::Remote {
-                peer_id: "peer-123".into(),
-                connection_id: am_utils_rs::BigRepoConnectionId::from(0_u32),
+                peer_id: crate::peer_id_from_label("peer-123"),
             }),
         );
         assert!(matches!(

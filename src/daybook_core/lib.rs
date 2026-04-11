@@ -99,4 +99,14 @@ pub fn init_sqlite_vec() {
     });
 }
 
+pub(crate) fn peer_id_from_label(label: &str) -> am_utils_rs::repo::PeerId {
+    use sha2::Digest;
+    let mut hasher = sha2::Sha256::new();
+    hasher.update(label.as_bytes());
+    let digest = hasher.finalize();
+    let mut bytes = [0_u8; 32];
+    bytes.copy_from_slice(&digest[..32]);
+    am_utils_rs::repo::PeerId::new(bytes)
+}
+
 pub mod app;

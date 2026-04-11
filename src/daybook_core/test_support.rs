@@ -131,7 +131,7 @@ pub async fn test_cx_with_options(
 
     // Generate unique IDs for this test to ensure complete isolation across parallel test runs
     let device_id = format!("test_{}", uuid::Uuid::new_v4().simple());
-    let peer_id = format!("test_{}", uuid::Uuid::new_v4().simple());
+    let peer_id = crate::peer_id_from_label(&format!("test_{}", uuid::Uuid::new_v4().simple()));
 
     // Initialize SharedBigRepo with memory storage
     let (big_repo, acx_stop) = BigRepo::boot(am_utils_rs::repo::Config {

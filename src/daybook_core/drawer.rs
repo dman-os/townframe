@@ -42,7 +42,7 @@ pub struct DrawerRepo {
     pub big_repo: SharedBigRepo,
     drawer_doc_id: DocumentId,
     local_actor_id: ActorId,
-    local_peer_id: String,
+    local_peer_id: am_utils_rs::repo::PeerId,
     local_user_path: daybook_types::doc::UserPath,
 
     // LRU Caches
@@ -133,7 +133,7 @@ impl DrawerRepo {
 
         let main_cancel_token = CancellationToken::new();
         let repo = Arc::new(Self {
-            local_peer_id: big_repo.local_peer_key(),
+            local_peer_id: big_repo.local_peer_id(),
             big_repo,
             drawer_doc_id,
             local_actor_id,

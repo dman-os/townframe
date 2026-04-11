@@ -297,9 +297,8 @@ pub async fn clone_repo_init_from_url(
         let (big_repo, big_repo_stop) = am_utils_rs::BigRepo::boot(am_utils_rs::repo::Config {
             storage: am_utils_rs::repo::StorageConfig::Disk {
                 path: staging.join("samod"),
-                big_repo_sqlite_url: None,
             },
-            peer_id: format!("/{}/{}", bootstrap.repo_id, identity.iroh_public_key),
+            peer_id: identity.iroh_public_key.into(),
         })
         .await?;
         let source_peer_key = format!("/{}/{}", bootstrap.repo_id, bootstrap.endpoint_id);

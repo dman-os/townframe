@@ -586,7 +586,7 @@ pub struct PlugsRepo {
     mutation_mutex: tokio::sync::Mutex<()>,
     plug_config_doc_init_lock: tokio::sync::Mutex<()>,
     local_actor_id: ActorId,
-    local_peer_id: String,
+    local_peer_id: am_utils_rs::repo::PeerId,
     cancel_token: CancellationToken,
     _change_listener_tickets: Vec<am_utils_rs::repo::BigRepoChangeListenerRegistration>,
     _change_broker_leases: Vec<Arc<am_utils_rs::repo::BigRepoDocChangeBrokerLease>>,
@@ -718,7 +718,7 @@ impl PlugsRepo {
             store,
             blobs,
             local_actor_id,
-            local_peer_id: big_repo.local_peer_key(),
+            local_peer_id: big_repo.local_peer_id(),
             registry: Arc::clone(&registry),
             mutation_mutex: tokio::sync::Mutex::new(()),
             plug_config_doc_init_lock: tokio::sync::Mutex::new(()),
@@ -747,9 +747,11 @@ impl PlugsRepo {
         ))
     }
 
-    pub fn get_plugs_heads(&self) -> ChangeHashSet {
+    pub async fn get_plugs_heads(&self) -> ChangeHashSet {
         self.app_am_handle
-            .with_document_sync(|am_doc| ChangeHashSet(am_doc.get_heads().into()))
+            .with_document(|am_doc| ChangeHashSet(am_doc.get_heads().into()))
+            .await
+            .expect("with_document read should not fail")
     }
 
     async fn latest_manifest_delete_actor(
@@ -815,7 +817,7 @@ impl PlugsRepo {
                     &heads,
                     &mut events,
                     Some(&origin),
-                    Some(self.local_peer_id.as_str()),
+                    Some(&self.local_peer_id),
                 )
                 .await?;
             }
@@ -977,17 +979,20 @@ impl PlugsRepo {
         from: ChangeHashSet,
         to: Option<ChangeHashSet>,
     ) -> Res<Vec<PlugsEvent>> {
-        let (patches, heads) = self.app_am_handle.with_document_sync(|am_doc| {
-            let heads = if let Some(ref to_set) = to {
-                to_set.clone()
-            } else {
-                ChangeHashSet(am_doc.get_heads().into())
-            };
-            let patches = am_doc
-                .diff_obj(&automerge::ROOT, &from, &heads, true)
-                .wrap_err("diff_obj failed")?;
-            eyre::Ok((patches, heads))
-        })?;
+        let (patches, heads) = self
+            .app_am_handle
+            .with_document(|am_doc| {
+                let heads = if let Some(ref to_set) = to {
+                    to_set.clone()
+                } else {
+                    ChangeHashSet(am_doc.get_heads().into())
+                };
+                let patches = am_doc
+                    .diff_obj(&automerge::ROOT, &from, &heads, true)
+                    .wrap_err("diff_obj failed")?;
+                eyre::Ok((patches, heads))
+            })
+            .await??;
         let heads = heads.0;
         let mut events = vec![];
         for patch in patches {
@@ -1000,7 +1005,7 @@ impl PlugsRepo {
 
     pub async fn events_for_init(&self) -> Res<Vec<PlugsEvent>> {
         // Init snapshot is synthesized from current local store state.
-        let heads = self.get_plugs_heads();
+        let heads = self.get_plugs_heads().await;
         let plug_ids = self
             .store
             .query_sync(|store| store.manifests.keys().cloned().collect::<Vec<_>>())
@@ -1022,7 +1027,7 @@ impl PlugsRepo {
         patch_heads: &Arc<[automerge::ChangeHash]>,
         out: &mut Vec<PlugsEvent>,
         live_origin: Option<&am_utils_rs::repo::BigRepoChangeOrigin>,
-        exclude_peer_id: Option<&str>,
+        exclude_peer_id: Option<&am_utils_rs::repo::PeerId>,
     ) -> Res<()> {
         let is_config_docs_vtag_patch = matches!(
             &patch.action,
@@ -2273,7 +2278,7 @@ mod tests {
     async fn setup_repo() -> Res<(SharedBigRepo, Arc<PlugsRepo>, DocumentId, tempfile::TempDir)> {
         let local_user_path = daybook_types::doc::UserPath::from("/test-user/test-device");
         let (big_repo, _acx_stop) = BigRepo::boot(am_utils_rs::repo::Config {
-            peer_id: "test".into(),
+            peer_id: crate::peer_id_from_label("test"),
             storage: am_utils_rs::repo::StorageConfig::Memory,
         })
         .await?;

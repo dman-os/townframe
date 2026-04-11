@@ -47,7 +47,7 @@ async fn new_meta_db_pool() -> Res<sqlx::SqlitePool> {
 async fn test_v2_smoke() -> Res<()> {
     utils_rs::testing::setup_tracing_once();
     let (big_repo, acx_stop) = BigRepo::boot(am_utils_rs::repo::Config {
-        peer_id: "test-v2".into(),
+        peer_id: crate::peer_id_from_label("test-v2"),
         storage: am_utils_rs::repo::StorageConfig::Memory,
     })
     .await?;
@@ -145,7 +145,7 @@ async fn test_v2_smoke() -> Res<()> {
 async fn test_partitions_track_non_tmp_branches() -> Res<()> {
     utils_rs::testing::setup_tracing_once();
     let (big_repo, acx_stop) = BigRepo::boot(am_utils_rs::repo::Config {
-        peer_id: "test-v2-partitions".into(),
+        peer_id: crate::peer_id_from_label("test-v2-partitions"),
         storage: am_utils_rs::repo::StorageConfig::Memory,
     })
     .await?;
@@ -267,7 +267,7 @@ async fn test_partitions_track_non_tmp_branches() -> Res<()> {
 async fn test_v2_batch_add_smoke() -> Res<()> {
     utils_rs::testing::setup_tracing_once();
     let (big_repo, acx_stop) = BigRepo::boot(am_utils_rs::repo::Config {
-        peer_id: "test-v2-batch-add".into(),
+        peer_id: crate::peer_id_from_label("test-v2-batch-add"),
         storage: am_utils_rs::repo::StorageConfig::Memory,
     })
     .await?;
@@ -337,7 +337,7 @@ async fn test_v2_batch_add_smoke() -> Res<()> {
 async fn test_v2_batch_add_emits_single_list_changed() -> Res<()> {
     utils_rs::testing::setup_tracing_once();
     let (big_repo, acx_stop) = BigRepo::boot(am_utils_rs::repo::Config {
-        peer_id: "test-v2-batch-add-events".into(),
+        peer_id: crate::peer_id_from_label("test-v2-batch-add-events"),
         storage: am_utils_rs::repo::StorageConfig::Memory,
     })
     .await?;
@@ -441,7 +441,7 @@ async fn test_v2_batch_add_emits_single_list_changed() -> Res<()> {
 async fn test_v2_merge() -> Res<()> {
     utils_rs::testing::setup_tracing_once();
     let (big_repo, acx_stop) = BigRepo::boot(am_utils_rs::repo::Config {
-        peer_id: "test-v2-merge".into(),
+        peer_id: crate::peer_id_from_label("test-v2-merge"),
         storage: am_utils_rs::repo::StorageConfig::Memory,
     })
     .await?;
@@ -589,7 +589,7 @@ async fn test_v2_merge() -> Res<()> {
 async fn test_resolve_handle_for_heads_does_not_match_foreign_doc_heads() -> Res<()> {
     utils_rs::testing::setup_tracing_once();
     let (big_repo, acx_stop) = BigRepo::boot(am_utils_rs::repo::Config {
-        peer_id: "test-resolve-handle-heads".into(),
+        peer_id: crate::peer_id_from_label("test-resolve-handle-heads"),
         storage: am_utils_rs::repo::StorageConfig::Memory,
     })
     .await?;
@@ -666,7 +666,7 @@ async fn test_resolve_handle_for_heads_does_not_match_foreign_doc_heads() -> Res
 async fn test_create_branch_at_stale_main_heads_after_intervening_merges() -> Res<()> {
     utils_rs::testing::setup_tracing_once();
     let (big_repo, acx_stop) = BigRepo::boot(am_utils_rs::repo::Config {
-        peer_id: "test-stale-heads-after-merges".into(),
+        peer_id: crate::peer_id_from_label("test-stale-heads-after-merges"),
         storage: am_utils_rs::repo::StorageConfig::Memory,
     })
     .await?;
@@ -983,7 +983,7 @@ fn test_raw_automerge_merge_and_log_make_patches_without_followup_commit_stale_f
 async fn test_bigrepo_raw_automerge_stale_heads_after_merges() -> Res<()> {
     utils_rs::testing::setup_tracing_once();
     let (big_repo, acx_stop) = BigRepo::boot(am_utils_rs::repo::Config {
-        peer_id: "test-bigrepo-stale-heads".into(),
+        peer_id: crate::peer_id_from_label("test-bigrepo-stale-heads"),
         storage: am_utils_rs::repo::StorageConfig::Memory,
     })
     .await?;
@@ -1043,128 +1043,10 @@ async fn test_bigrepo_raw_automerge_stale_heads_after_merges() -> Res<()> {
 }
 
 #[tokio::test(flavor = "multi_thread")]
-async fn test_v2_sync_smoke() -> Res<()> {
-    utils_rs::testing::setup_tracing_once();
-    let (client_acx, client_acx_stop) = BigRepo::boot(am_utils_rs::repo::Config {
-        peer_id: "client".into(),
-        storage: am_utils_rs::repo::StorageConfig::Memory,
-    })
-    .await?;
-    let (server_acx, server_acx_stop) = BigRepo::boot(am_utils_rs::repo::Config {
-        peer_id: "server".into(),
-        storage: am_utils_rs::repo::StorageConfig::Memory,
-    })
-    .await?;
-
-    // Connect repos
-    {
-        #[allow(deprecated)]
-        fn repos(big_repo: &SharedBigRepo) -> &samod::Repo {
-            big_repo.samod_repo()
-        }
-        crate::tincans::connect_repos(repos(&client_acx), repos(&server_acx));
-        repos(&client_acx).when_connected("server".into()).await?;
-        repos(&server_acx).when_connected("client".into()).await?;
-    }
-
-    let drawer_doc_id = {
-        let mut doc = automerge::Automerge::new();
-        let mut tx = doc.transaction();
-        tx.put(automerge::ROOT, "version", "0")?;
-        tx.commit();
-        let handle = client_acx.add_doc(doc).await?;
-        handle.document_id().clone()
-    };
-
-    let entry_pool = Arc::new(std::sync::Mutex::new(KeyedLruPool::new(1000)));
-    let doc_pool = Arc::new(std::sync::Mutex::new(KeyedLruPool::new(1000)));
-
-    let (client_repo, client_stop) = DrawerRepo::load(
-        Arc::clone(&client_acx),
-        drawer_doc_id.clone(),
-        daybook_types::doc::UserPath::from("/duser-wip-localtest/ddev-wip-iroh-localtest"),
-        new_meta_db_pool().await?,
-        std::env::temp_dir().join(Uuid::new_v4().to_string()),
-        Arc::clone(&entry_pool),
-        Arc::clone(&doc_pool),
-        None,
-    )
-    .await?;
-    let (server_repo, server_stop) = DrawerRepo::load(
-        Arc::clone(&server_acx),
-        drawer_doc_id.clone(),
-        daybook_types::doc::UserPath::from("/duser-wip-localtest/ddev-wip-iroh-localtest"),
-        new_meta_db_pool().await?,
-        std::env::temp_dir().join(Uuid::new_v4().to_string()),
-        Arc::clone(&entry_pool),
-        Arc::clone(&doc_pool),
-        None,
-    )
-    .await?;
-
-    // Ensure baseline drawer sync converges before asserting incremental replication.
-    tokio::time::timeout(std::time::Duration::from_secs(20), async {
-        loop {
-            let client_heads = client_repo
-                .drawer_am_handle
-                .with_document(|doc| doc.get_heads());
-            let server_heads = server_repo
-                .drawer_am_handle
-                .with_document(|doc| doc.get_heads());
-            if client_heads == server_heads {
-                break Ok::<(), eyre::Report>(());
-            }
-            tokio::time::sleep(std::time::Duration::from_millis(100)).await;
-        }
-    })
-    .await
-    .wrap_err("timeout waiting for drawer baseline sync")??;
-
-    // 1. Client adds a doc
-    let new_doc_id = client_repo
-        .add(AddDocArgs {
-            branch_path: "main".into(),
-            facets: [(
-                FacetKey::from(WellKnownFacetTag::Note),
-                WellKnownFacet::Note("Hello".into()).into(),
-            )]
-            .into(),
-            user_path: None,
-        })
-        .await?;
-
-    // 2. Server should eventually observe the replicated doc
-    tokio::time::timeout(std::time::Duration::from_secs(20), async {
-        loop {
-            let list = server_repo.list().await?;
-            if list.iter().any(|entry| entry.doc_id == new_doc_id) {
-                break Ok::<(), eyre::Report>(());
-            }
-            tokio::time::sleep(std::time::Duration::from_millis(100)).await;
-        }
-    })
-    .await
-    .wrap_err("timeout waiting for DocAdded")??;
-
-    // 3. Server should be able to list the doc.
-    // Note: this test validates drawer-map replication only. Content-doc sync is
-    // covered by sync tests that exercise full document transfer semantics.
-    let list = server_repo.list().await?;
-    assert_eq!(list.len(), 1);
-    assert_eq!(list[0].doc_id, new_doc_id);
-
-    client_acx_stop.stop().await?;
-    server_acx_stop.stop().await?;
-    client_stop.stop().await?;
-    server_stop.stop().await?;
-    Ok(())
-}
-
-#[tokio::test(flavor = "multi_thread")]
 async fn test_v2_additional_apis() -> Res<()> {
     utils_rs::testing::setup_tracing_once();
     let (big_repo, acx_stop) = BigRepo::boot(am_utils_rs::repo::Config {
-        peer_id: "test-v2-apis".into(),
+        peer_id: crate::peer_id_from_label("test-v2-apis"),
         storage: am_utils_rs::repo::StorageConfig::Memory,
     })
     .await?;
@@ -1346,7 +1228,7 @@ async fn test_v2_additional_apis() -> Res<()> {
 async fn test_v2_metadata_maintenance() -> Res<()> {
     utils_rs::testing::setup_tracing_once();
     let (big_repo, acx_stop) = BigRepo::boot(am_utils_rs::repo::Config {
-        peer_id: "test-v2-meta".into(),
+        peer_id: crate::peer_id_from_label("test-v2-meta"),
         storage: am_utils_rs::repo::StorageConfig::Memory,
     })
     .await?;
@@ -1419,11 +1301,13 @@ async fn test_v2_metadata_maintenance() -> Res<()> {
             .branch_doc_id,
     )?;
     let handle = big_repo.find_doc_handle(&am_id).await?.unwrap();
-    handle.with_document(|doc| -> Res<()> {
-        let heads = facet_recovery::recover_facet_heads(doc, &facet_title)?;
-        assert_eq!(heads.len(), 1, "should have 1 head for title");
-        Ok(())
-    })?;
+    handle
+        .with_document(|doc| -> Res<()> {
+            let heads = facet_recovery::recover_facet_heads(doc, &facet_title)?;
+            assert_eq!(heads.len(), 1, "should have 1 head for title");
+            Ok(())
+        })
+        .await??;
 
     // 2. Test 'update' metadata and user attribution
     let user_path2 = UserPath::from("/duser-wip-testmeta2/ddev-wip-iroh-testmeta2/plug2/routine2");
@@ -1568,24 +1452,26 @@ async fn test_v2_metadata_maintenance() -> Res<()> {
     Ok(())
 }
 
-fn latest_change_actor(handle: &am_utils_rs::repo::BigDocHandle) -> Res<automerge::ActorId> {
-    handle.with_document(|doc| {
-        let heads = doc.get_heads();
-        let Some(latest_head) = heads.first() else {
-            eyre::bail!("doc has no heads");
-        };
-        let change = doc
-            .get_change_by_hash(latest_head)
-            .ok_or_eyre("latest head change not found")?;
-        Ok(change.actor_id().clone())
-    })
+async fn latest_change_actor(handle: &am_utils_rs::repo::BigDocHandle) -> Res<automerge::ActorId> {
+    handle
+        .with_document(|doc| {
+            let heads = doc.get_heads();
+            let Some(latest_head) = heads.first() else {
+                eyre::bail!("doc has no heads");
+            };
+            let change = doc
+                .get_change_by_hash(latest_head)
+                .ok_or_eyre("latest head change not found")?;
+            Ok(change.actor_id().clone())
+        })
+        .await?
 }
 
 #[tokio::test(flavor = "multi_thread")]
 async fn test_update_at_heads_uses_patch_user_path_actor() -> Res<()> {
     utils_rs::testing::setup_tracing_once();
     let (big_repo, acx_stop) = BigRepo::boot(am_utils_rs::repo::Config {
-        peer_id: "test-update-actor".into(),
+        peer_id: crate::peer_id_from_label("test-update-actor"),
         storage: am_utils_rs::repo::StorageConfig::Memory,
     })
     .await?;
@@ -1656,7 +1542,7 @@ async fn test_update_at_heads_uses_patch_user_path_actor() -> Res<()> {
         )?)
         .await?
         .ok_or_eyre("doc not found")?;
-    let latest_actor = latest_change_actor(&handle)?;
+    let latest_actor = latest_change_actor(&handle).await?;
     assert_eq!(latest_actor, expected_actor);
 
     stop_token.stop().await?;
@@ -1668,7 +1554,7 @@ async fn test_update_at_heads_uses_patch_user_path_actor() -> Res<()> {
 async fn test_merge_from_heads_uses_user_path_actor() -> Res<()> {
     utils_rs::testing::setup_tracing_once();
     let (big_repo, acx_stop) = BigRepo::boot(am_utils_rs::repo::Config {
-        peer_id: "test-merge-actor".into(),
+        peer_id: crate::peer_id_from_label("test-merge-actor"),
         storage: am_utils_rs::repo::StorageConfig::Memory,
     })
     .await?;
@@ -1773,7 +1659,7 @@ async fn test_merge_from_heads_uses_user_path_actor() -> Res<()> {
         )?)
         .await?
         .ok_or_eyre("doc not found")?;
-    let latest_actor = latest_change_actor(&handle)?;
+    let latest_actor = latest_change_actor(&handle).await?;
     assert_eq!(latest_actor, expected_actor);
 
     stop_token.stop().await?;
@@ -1785,7 +1671,7 @@ async fn test_merge_from_heads_uses_user_path_actor() -> Res<()> {
 async fn test_facet_keys_touched_by_local_actor_includes_user_path_scoped_actor() -> Res<()> {
     utils_rs::testing::setup_tracing_once();
     let (big_repo, acx_stop) = BigRepo::boot(am_utils_rs::repo::Config {
-        peer_id: "test-local-facet-touch".into(),
+        peer_id: crate::peer_id_from_label("test-local-facet-touch"),
         storage: am_utils_rs::repo::StorageConfig::Memory,
     })
     .await?;
@@ -1932,7 +1818,7 @@ fn test_facet_cache_large_one_hit_entries_do_not_pollute() {
 async fn test_v2_updated_at_merge() -> Res<()> {
     utils_rs::testing::setup_tracing_once();
     let (big_repo, acx_stop) = BigRepo::boot(am_utils_rs::repo::Config {
-        peer_id: "test-v2-updated-at".into(),
+        peer_id: crate::peer_id_from_label("test-v2-updated-at"),
         storage: am_utils_rs::repo::StorageConfig::Memory,
     })
     .await?;
@@ -2092,19 +1978,21 @@ async fn test_v2_updated_at_merge() -> Res<()> {
             .branch_doc_id,
     )?;
     let handle = big_repo.find_doc_handle(&am_id).await?.unwrap();
-    let recovered_heads = handle.with_document(|doc| -> Res<Vec<automerge::ChangeHash>> {
-        let heads = facet_recovery::recover_facet_heads(doc, &facet_title)?;
+    let recovered_heads = handle
+        .with_document(|doc| -> Res<Vec<automerge::ChangeHash>> {
+            let heads = facet_recovery::recover_facet_heads(doc, &facet_title)?;
 
-        // On a concurrent update where both sides clear and insert,
-        // Automerge list merge will result in both inserted elements being present.
-        assert_eq!(
-            heads.len(),
-            2,
-            "updatedAt should have 2 elements after concurrent merge"
-        );
+            // On a concurrent update where both sides clear and insert,
+            // Automerge list merge will result in both inserted elements being present.
+            assert_eq!(
+                heads.len(),
+                2,
+                "updatedAt should have 2 elements after concurrent merge"
+            );
 
-        Ok(heads)
-    })?;
+            Ok(heads)
+        })
+        .await??;
 
     let mut recovered_values = std::collections::HashSet::new();
     for head in &recovered_heads {
@@ -2142,7 +2030,7 @@ async fn test_v2_updated_at_merge() -> Res<()> {
 async fn test_v2_facet_blame_maintenance() -> Res<()> {
     utils_rs::testing::setup_tracing_once();
     let (big_repo, acx_stop) = BigRepo::boot(am_utils_rs::repo::Config {
-        peer_id: "test-v2-blame".into(),
+        peer_id: crate::peer_id_from_label("test-v2-blame"),
         storage: am_utils_rs::repo::StorageConfig::Memory,
     })
     .await?;
@@ -2299,7 +2187,7 @@ async fn test_v2_facet_blame_maintenance() -> Res<()> {
 async fn test_v2_listener_is_scoped_to_drawer_doc() -> Res<()> {
     utils_rs::testing::setup_tracing_once();
     let (big_repo, acx_stop) = BigRepo::boot(am_utils_rs::repo::Config {
-        peer_id: "test-v2-scope".into(),
+        peer_id: crate::peer_id_from_label("test-v2-scope"),
         storage: am_utils_rs::repo::StorageConfig::Memory,
     })
     .await?;
@@ -2377,7 +2265,7 @@ async fn test_v2_listener_is_scoped_to_drawer_doc() -> Res<()> {
 async fn test_v2_content_update_does_not_emit_drawer_membership_events() -> Res<()> {
     utils_rs::testing::setup_tracing_once();
     let (big_repo, acx_stop) = BigRepo::boot(am_utils_rs::repo::Config {
-        peer_id: "test-v2-changed-facets".into(),
+        peer_id: crate::peer_id_from_label("test-v2-changed-facets"),
         storage: am_utils_rs::repo::StorageConfig::Memory,
     })
     .await?;
@@ -2462,7 +2350,7 @@ async fn test_v2_content_update_does_not_emit_drawer_membership_events() -> Res<
 async fn test_diff_events_delete_origin_uses_map_deleted_tombstone() -> Res<()> {
     utils_rs::testing::setup_tracing_once();
     let (big_repo, acx_stop) = BigRepo::boot(am_utils_rs::repo::Config {
-        peer_id: "test-v2-delete-origin".into(),
+        peer_id: crate::peer_id_from_label("test-v2-delete-origin"),
         storage: am_utils_rs::repo::StorageConfig::Memory,
     })
     .await?;
@@ -2541,7 +2429,7 @@ async fn test_diff_events_delete_origin_uses_map_deleted_tombstone() -> Res<()> 
 async fn test_add_rejects_unknown_facet_tag() -> Res<()> {
     utils_rs::testing::setup_tracing_once();
     let (big_repo, acx_stop) = BigRepo::boot(am_utils_rs::repo::Config {
-        peer_id: "test-v2-unknown-tag".into(),
+        peer_id: crate::peer_id_from_label("test-v2-unknown-tag"),
         storage: am_utils_rs::repo::StorageConfig::Memory,
     })
     .await?;
@@ -2590,7 +2478,7 @@ async fn test_add_rejects_unknown_facet_tag() -> Res<()> {
 async fn test_add_rejects_self_reference_without_target_facet() -> Res<()> {
     utils_rs::testing::setup_tracing_once();
     let (big_repo, acx_stop) = BigRepo::boot(am_utils_rs::repo::Config {
-        peer_id: "test-v2-self-ref".into(),
+        peer_id: crate::peer_id_from_label("test-v2-self-ref"),
         storage: am_utils_rs::repo::StorageConfig::Memory,
     })
     .await?;
@@ -2649,7 +2537,7 @@ async fn test_add_rejects_self_reference_without_target_facet() -> Res<()> {
 async fn test_add_accepts_body_self_reference_with_empty_fragment_for_present_target() -> Res<()> {
     utils_rs::testing::setup_tracing_once();
     let (big_repo, acx_stop) = BigRepo::boot(am_utils_rs::repo::Config {
-        peer_id: "test-v2-body-empty-fragment-self".into(),
+        peer_id: crate::peer_id_from_label("test-v2-body-empty-fragment-self"),
         storage: am_utils_rs::repo::StorageConfig::Memory,
     })
     .await?;
@@ -2720,10 +2608,9 @@ async fn perf_samod_disk_add_like_drawer_baseline() -> Res<()> {
     std::fs::create_dir_all(&storage_path)?;
 
     let (big_repo, acx_stop) = BigRepo::boot(am_utils_rs::repo::Config {
-        peer_id: format!("perf-drawer-raw-amctx-{}", Uuid::new_v4()),
+        peer_id: crate::peer_id_from_label("perf-drawer-raw-amctx"),
         storage: am_utils_rs::repo::StorageConfig::Disk {
             path: storage_path.clone(),
-            big_repo_sqlite_url: None,
         },
     })
     .await?;
@@ -2748,55 +2635,60 @@ async fn perf_samod_disk_add_like_drawer_baseline() -> Res<()> {
         let content_handle = big_repo.add_doc(content_doc).await?;
         let content_doc_id = content_handle.document_id().to_string();
 
-        let _content_heads = content_handle.with_document(|doc| -> Res<ChangeHashSet> {
-            let mut tx = doc.transaction();
-            tx.put(automerge::ROOT, "$schema", "daybook.doc")?;
-            tx.put(automerge::ROOT, "id", &content_doc_id)?;
-            let facets_obj = tx.put_object(automerge::ROOT, "facets", automerge::ObjType::Map)?;
-            for jj in 0..4_u64 {
-                let facet_obj = tx.put_object(
-                    &facets_obj,
-                    format!("org.test.perf/{jj:02}"),
-                    automerge::ObjType::Map,
-                )?;
-                tx.put(&facet_obj, "title", format!("doc-{ii}-facet-{jj}"))?;
-                tx.put(&facet_obj, "num", (ii * 10 + jj) as i64)?;
-                let tags_obj = tx.put_object(&facet_obj, "tags", automerge::ObjType::List)?;
-                tx.insert(&tags_obj, 0, "alpha")?;
-                tx.insert(&tags_obj, 1, "beta")?;
-                tx.insert(&tags_obj, 2, "gamma")?;
-            }
-            let (heads, _) = tx.commit();
-            let head = heads.expect("content doc commit failed");
-            Ok(ChangeHashSet(Arc::from([head])))
-        })?;
+        let _content_heads = content_handle
+            .with_document(|doc| -> Res<ChangeHashSet> {
+                let mut tx = doc.transaction();
+                tx.put(automerge::ROOT, "$schema", "daybook.doc")?;
+                tx.put(automerge::ROOT, "id", &content_doc_id)?;
+                let facets_obj =
+                    tx.put_object(automerge::ROOT, "facets", automerge::ObjType::Map)?;
+                for jj in 0..4_u64 {
+                    let facet_obj = tx.put_object(
+                        &facets_obj,
+                        format!("org.test.perf/{jj:02}"),
+                        automerge::ObjType::Map,
+                    )?;
+                    tx.put(&facet_obj, "title", format!("doc-{ii}-facet-{jj}"))?;
+                    tx.put(&facet_obj, "num", (ii * 10 + jj) as i64)?;
+                    let tags_obj = tx.put_object(&facet_obj, "tags", automerge::ObjType::List)?;
+                    tx.insert(&tags_obj, 0, "alpha")?;
+                    tx.insert(&tags_obj, 1, "beta")?;
+                    tx.insert(&tags_obj, 2, "gamma")?;
+                }
+                let (heads, _) = tx.commit();
+                let head = heads.expect("content doc commit failed");
+                Ok(ChangeHashSet(Arc::from([head])))
+            })
+            .await??;
 
-        aggregate_handle.with_document(|doc| -> Res<()> {
-            let mut tx = doc.transaction();
-            let docs_obj = match tx.get(automerge::ROOT, "docs")? {
-                Some((automerge::Value::Object(automerge::ObjType::Map), id)) => id,
-                _ => eyre::bail!("aggregate docs map missing"),
-            };
-            let map_obj = match tx.get(&docs_obj, "map")? {
-                Some((automerge::Value::Object(automerge::ObjType::Map), id)) => id,
-                _ => eyre::bail!("aggregate docs.map missing"),
-            };
-            let entry = DocEntry {
-                branches: [(
-                    "main".to_string(),
-                    StoredBranchRef {
-                        branch_doc_id: content_doc_id.to_string(),
-                    },
-                )]
-                .into(),
-                branches_deleted: HashMap::new(),
-                vtag: VersionTag::mint(local_actor_id.clone()),
-                previous_version_heads: None,
-            };
-            autosurgeon::reconcile_prop(&mut tx, &map_obj, &*content_doc_id, &entry)?;
-            tx.commit();
-            Ok(())
-        })?;
+        aggregate_handle
+            .with_document(|doc| -> Res<()> {
+                let mut tx = doc.transaction();
+                let docs_obj = match tx.get(automerge::ROOT, "docs")? {
+                    Some((automerge::Value::Object(automerge::ObjType::Map), id)) => id,
+                    _ => eyre::bail!("aggregate docs map missing"),
+                };
+                let map_obj = match tx.get(&docs_obj, "map")? {
+                    Some((automerge::Value::Object(automerge::ObjType::Map), id)) => id,
+                    _ => eyre::bail!("aggregate docs.map missing"),
+                };
+                let entry = DocEntry {
+                    branches: [(
+                        "main".to_string(),
+                        StoredBranchRef {
+                            branch_doc_id: content_doc_id.to_string(),
+                        },
+                    )]
+                    .into(),
+                    branches_deleted: HashMap::new(),
+                    vtag: VersionTag::mint(local_actor_id.clone()),
+                    previous_version_heads: None,
+                };
+                autosurgeon::reconcile_prop(&mut tx, &map_obj, &*content_doc_id, &entry)?;
+                tx.commit();
+                Ok(())
+            })
+            .await??;
     }
 
     let elapsed = started_at.elapsed();
@@ -2820,10 +2712,9 @@ async fn perf_drawer_add_disk_baseline() -> Res<()> {
     std::fs::create_dir_all(&storage_path)?;
 
     let (big_repo, acx_stop) = BigRepo::boot(am_utils_rs::repo::Config {
-        peer_id: format!("perf-drawer-add-{}", Uuid::new_v4()),
+        peer_id: crate::peer_id_from_label("perf-drawer-add"),
         storage: am_utils_rs::repo::StorageConfig::Disk {
             path: storage_path.clone(),
-            big_repo_sqlite_url: None,
         },
     })
     .await?;

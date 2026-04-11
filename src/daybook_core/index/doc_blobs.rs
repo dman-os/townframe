@@ -1022,7 +1022,7 @@ mod tests {
     async fn doc_blobs_index_publishes_docs_scope_partition_membership() -> Res<()> {
         let local_user_path = daybook_types::doc::UserPath::from("/test-user/test-device");
         let (big_repo, big_repo_stop) = BigRepo::boot(am_utils_rs::repo::Config {
-            peer_id: "test-doc-blobs-scope".into(),
+            peer_id: crate::peer_id_from_label("test-doc-blobs-scope"),
             storage: am_utils_rs::repo::StorageConfig::Memory,
         })
         .await?;

@@ -59,6 +59,7 @@ impl LiveDocBundle {
 #[derive(educe::Educe)]
 #[educe(Debug)]
 pub struct BigRepo {
+    local_peer_id: PeerId,
     #[educe(Debug(ignore))]
     state_pool: sqlx::SqlitePool,
     #[educe(Debug(ignore))]
@@ -150,6 +151,7 @@ impl BigRepo {
         };
 
         let out = Arc::new(Self {
+            local_peer_id: peer_id,
             state_pool,
             partition_store,
             runtime,
@@ -179,6 +181,10 @@ impl BigRepo {
 
     pub fn partition_store(&self) -> Arc<PartitionStore> {
         Arc::clone(&self.partition_store)
+    }
+
+    pub fn local_peer_id(&self) -> PeerId {
+        self.local_peer_id
     }
 
     pub async fn subscribe_partition_doc_events_local(

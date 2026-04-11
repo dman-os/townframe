@@ -154,6 +154,10 @@ impl crate::repos::Repo for DispatchRepo {
 }
 
 impl DispatchRepo {
+    pub(crate) fn db_pool(&self) -> &sqlx::SqlitePool {
+        &self.db_pool
+    }
+
     fn local_origin(&self) -> crate::event_origin::SwitchEventOrigin {
         crate::event_origin::SwitchEventOrigin::Local {
             actor_id: self.local_actor_id.to_string(),
@@ -942,7 +946,7 @@ mod tests {
     ) -> Res<(Arc<DispatchRepo>, daybook_types::doc::UserPath)> {
         let local_user_path = daybook_types::doc::UserPath::from("/test-user/test-device");
         let (big_repo, _acx_stop) = BigRepo::boot(am_utils_rs::repo::Config {
-            peer_id: "test-dispatch".into(),
+            peer_id: crate::peer_id_from_label("test-dispatch"),
             storage: am_utils_rs::repo::StorageConfig::Memory,
         })
         .await?;

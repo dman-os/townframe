@@ -105,7 +105,7 @@ pub struct ConfigRepo {
     pub registry: Arc<crate::repos::ListenersRegistry>,
     plug_repo: Arc<PlugsRepo>,
     local_actor_id: ActorId,
-    local_peer_id: String,
+    local_peer_id: am_utils_rs::repo::PeerId,
     sql_pool: sqlx::SqlitePool,
     cancel_token: CancellationToken,
     sync_config_lock: tokio::sync::Mutex<()>,
@@ -233,7 +233,7 @@ impl ConfigRepo {
             registry: Arc::clone(&registry),
             plug_repo,
             local_actor_id,
-            local_peer_id: big_repo.local_peer_key(),
+            local_peer_id: big_repo.local_peer_id(),
             sql_pool,
             cancel_token: cancel_token.clone(),
             sync_config_lock: tokio::sync::Mutex::new(()),
@@ -302,7 +302,7 @@ impl ConfigRepo {
                     &heads,
                     &mut events,
                     Some(&origin),
-                    Some(self.local_peer_id.as_str()),
+                    Some(&self.local_peer_id),
                 )
                 .await?;
                 // events were added
@@ -385,17 +385,20 @@ impl ConfigRepo {
         from: ChangeHashSet,
         to: Option<ChangeHashSet>,
     ) -> Res<Vec<ConfigEvent>> {
-        let (patches, heads) = self.app_am_handle.with_document_sync(|am_doc| {
-            let heads = if let Some(ref to_set) = to {
-                to_set.clone()
-            } else {
-                ChangeHashSet(am_doc.get_heads().into())
-            };
-            let patches = am_doc
-                .diff_obj(&automerge::ROOT, &from, &heads, true)
-                .expect("diff_obj failed");
-            (patches, heads)
-        });
+        let (patches, heads) = self
+            .app_am_handle
+            .with_document(|am_doc| {
+                let heads = if let Some(ref to_set) = to {
+                    to_set.clone()
+                } else {
+                    ChangeHashSet(am_doc.get_heads().into())
+                };
+                let patches = am_doc
+                    .diff_obj(&automerge::ROOT, &from, &heads, true)
+                    .expect("diff_obj failed");
+                (patches, heads)
+            })
+            .await?;
         let heads = heads.0;
         let mut events = vec![];
         for patch in patches {
@@ -420,7 +423,7 @@ impl ConfigRepo {
         patch_heads: &Arc<[automerge::ChangeHash]>,
         out: &mut Vec<ConfigEvent>,
         live_origin: Option<&am_utils_rs::repo::BigRepoChangeOrigin>,
-        exclude_peer_id: Option<&str>,
+        exclude_peer_id: Option<&am_utils_rs::repo::PeerId>,
     ) -> Res<()> {
         // Live notification path: local writes are emitted directly by mutators.
         // Historical replay passes `live_origin = None` and must not be skipped.
@@ -529,7 +532,7 @@ impl ConfigRepo {
             .find_doc_handle(&self.app_doc_id)
             .await?
             .ok_or_eyre("app doc not found")?;
-        let heads = handle.with_document_sync(|doc| doc.get_heads());
+        let heads = handle.with_document(|doc| doc.get_heads()).await?;
         Ok(Arc::from(heads))
     }
 
@@ -726,7 +729,7 @@ mod tests {
     async fn upsert_actor_user_path_registers_directory_entries() -> Res<()> {
         let local_user_path = daybook_types::doc::UserPath::from("/test-user/test-device");
         let (big_repo, _acx_stop) = BigRepo::boot(am_utils_rs::repo::Config {
-            peer_id: "test-config-actors".into(),
+            peer_id: crate::peer_id_from_label("test-config-actors"),
             storage: am_utils_rs::repo::StorageConfig::Memory,
         })
         .await?;

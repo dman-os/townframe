@@ -20,7 +20,7 @@ impl DrawerRepo {
         if self.cancel_token.is_cancelled() {
             eyre::bail!("repo is stopped");
         }
-        let (drawer_heads, entries) = self.current_drawer_entries()?;
+        let (drawer_heads, entries) = self.current_drawer_entries().await?;
         {
             let mut pool = self.entry_pool.lock().unwrap();
             for (doc_id, entry) in &entries {
@@ -42,7 +42,7 @@ impl DrawerRepo {
         if self.cancel_token.is_cancelled() {
             eyre::bail!("repo is stopped");
         }
-        let (_drawer_heads, entries) = self.current_drawer_entries()?;
+        let (_drawer_heads, entries) = self.current_drawer_entries().await?;
         let mut results = Vec::with_capacity(entries.len());
         for (doc_id, entry) in entries {
             results.push(

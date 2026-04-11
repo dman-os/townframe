@@ -218,7 +218,7 @@ pub async fn spawn_switch_worker(
     use crate::repos::{Repo, SubscribeOpts};
 
     let _app_doc_id = app_doc_id;
-    let store = SwitchStore::load(rt.big_repo.state_pool().clone()).await?;
+    let store = SwitchStore::load(rt.dispatch_repo.db_pool().clone()).await?;
 
     let drawer_listener = rt
         .drawer
@@ -740,7 +740,7 @@ impl SwitchWorker {
         // Partition events do not encode authoritative local/remote intent at processor granularity.
         // Keep origin neutral here; processor-locality is evaluated later during triage.
         let origin = crate::event_origin::SwitchEventOrigin::Remote {
-            peer_id: "partition".into(),
+            peer_id: crate::peer_id_from_label("partition").to_string(),
         };
         Ok((
             crate::drawer::DocEntryDiff {
@@ -1500,7 +1500,7 @@ mod tests {
                 },
                 drawer_heads: ChangeHashSet(Vec::new().into()),
                 origin: crate::event_origin::SwitchEventOrigin::Remote {
-                    peer_id: "peer-a".into(),
+                    peer_id: crate::peer_id_from_label("peer-a").to_string(),
                 },
             })),
         )
@@ -1528,7 +1528,7 @@ mod tests {
             &mut runtime_listeners,
             &SwitchEvent::Config(Arc::new(crate::config::ConfigEvent::SyncDevicesChanged {
                 origin: crate::event_origin::SwitchEventOrigin::Remote {
-                    peer_id: "peer-b".into(),
+                    peer_id: crate::peer_id_from_label("peer-b").to_string(),
                 },
             })),
         )
@@ -1542,14 +1542,14 @@ mod tests {
             got,
             vec![
                 crate::event_origin::SwitchEventOrigin::Remote {
-                    peer_id: "peer-a".into()
+                    peer_id: crate::peer_id_from_label("peer-a").to_string()
                 },
                 crate::event_origin::SwitchEventOrigin::Bootstrap,
                 crate::event_origin::SwitchEventOrigin::Local {
                     actor_id: "actor-a".into()
                 },
                 crate::event_origin::SwitchEventOrigin::Remote {
-                    peer_id: "peer-b".into()
+                    peer_id: crate::peer_id_from_label("peer-b").to_string()
                 }
             ]
         );
