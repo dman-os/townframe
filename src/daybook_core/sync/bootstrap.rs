@@ -147,9 +147,7 @@ pub async fn request_clone_provision_via_rpc(
             .map_err(|err| eyre::eyre!("clone provision rpc failed: {err}"))?;
         return Ok(response);
     }
-    let endpoint = iroh::Endpoint::builder(iroh::endpoint::presets::N0)
-        .bind()
-        .await?;
+    let endpoint = iroh::Endpoint::builder().bind().await?;
     let client = irpc_iroh::client::<CloneProvisionRpc>(
         endpoint.clone(),
         endpoint_addr,
@@ -189,8 +187,7 @@ pub async fn connect_and_pull_required_partitions_once(
     bootstrap: &SyncBootstrapState,
     timeout: std::time::Duration,
 ) -> Res<()> {
-    let endpoint_builder =
-        iroh::Endpoint::builder(iroh::endpoint::presets::N0).secret_key(iroh_secret_key);
+    let endpoint_builder = iroh::Endpoint::builder().secret_key(iroh_secret_key);
     #[cfg(test)]
     let endpoint_builder = endpoint_builder
         .relay_mode(iroh::RelayMode::Disabled)

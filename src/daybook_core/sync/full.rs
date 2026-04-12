@@ -24,12 +24,6 @@ use crate::sync::{PARTITION_SYNC_ALPN, REPO_SYNC_ALPN};
 
 type BigRepoConnectionId = EndpointId;
 
-#[derive(Debug, Clone, Default)]
-struct BigRepoPeerDocState {
-    shared_heads: Option<Vec<automerge::ChangeHash>>,
-    their_heads: Option<Vec<automerge::ChangeHash>>,
-}
-
 mod blob_worker;
 mod doc_worker;
 mod import_worker;
@@ -78,6 +72,10 @@ pub enum FullSyncEvent {
     StalePeer {
         endpoint_id: EndpointId,
     },
+    PeerConnectionLost {
+        endpoint_id: EndpointId,
+        reason: String,
+    },
 }
 
 enum Msg {
@@ -98,12 +96,14 @@ enum Msg {
         endpoint_id: EndpointId,
         resp: tokio::sync::oneshot::Sender<()>,
     },
-    DocPeerStateViewUpdated {
+    DocSyncCompleted {
         doc_id: DocumentId,
-        diff: DocPeerStateView,
+        endpoint_id: EndpointId,
+        outcome: am_utils_rs::repo::SyncDocOutcome,
     },
     DocSyncRequestBackoff {
         doc_id: DocumentId,
+        endpoint_id: EndpointId,
         delay: Duration,
         previous_attempt_no: usize,
         previous_backoff: Duration,
@@ -114,10 +114,12 @@ enum Msg {
     },
     ImportDocCompleted {
         doc_id: DocumentId,
+        endpoint_id: EndpointId,
         outcome: import_worker::ImportDocOutcome,
     },
     ImportDocBackoff {
         doc_id: DocumentId,
+        endpoint_id: EndpointId,
         delay: Duration,
         previous_attempt_no: usize,
         previous_backoff: Duration,
@@ -151,7 +153,6 @@ enum Msg {
         resp: tokio::sync::oneshot::Sender<()>,
     },
 }
-type DocPeerStateView = HashMap<BigRepoConnectionId, BigRepoPeerDocState>;
 
 #[derive(Debug, Clone)]
 #[allow(dead_code)]
@@ -394,10 +395,13 @@ pub async fn start_full_sync_worker(
                     }
                 }
             }
-            worker
-                .scheduler
-                .docs_to_stop
-                .extend(worker.scheduler.active_docs.keys().cloned());
+            worker.scheduler.docs_to_stop.extend(
+                worker
+                    .scheduler
+                    .active_docs
+                    .keys()
+                    .map(|key| key.doc_id.clone()),
+            );
             worker.batch_stop_docs().await?;
             worker.batch_stop_imports().await?;
             worker.batch_stop_blobs().await?;
@@ -536,13 +540,31 @@ struct ImportRequestedDoc {
 }
 
 struct ActiveDocSyncState {
-    latest_heads: ChangeHashSet,
     stop_token: doc_worker::DocSyncWorkerStopToken,
-    ack_cutoffs: HashMap<EndpointId, HashMap<PartitionKey, u64>>,
+    retry: RetryState,
+}
+
+#[derive(Debug, Clone, Hash, PartialEq, Eq)]
+struct DocSyncTaskKey {
+    doc_id: DocumentId,
+    endpoint_id: EndpointId,
+}
+
+enum BootDocSyncWorkerResult {
+    Spawned(ActiveDocSyncState),
+    MissingLocal,
+    Deferred,
 }
 
 struct ActiveImportSyncState {
     stop_token: import_worker::ImportSyncWorkerStopToken,
+    retry: RetryState,
+}
+
+#[derive(Debug, Clone, Hash, PartialEq, Eq)]
+struct ImportSyncTaskKey {
+    doc_id: DocumentId,
+    endpoint_id: EndpointId,
 }
 
 struct ActiveBlobSyncState {
@@ -666,6 +688,7 @@ impl Worker {
             }
             PeerSyncWorkerEvent::AbnormalExit { peer, reason } => {
                 warn!(endpoint_id = ?endpoint_id, peer, reason, "peer sync worker exited abnormally");
+                let lost_reason = reason.clone();
                 self.emit_peer_progress_status(
                     endpoint_id,
                     ProgressUpdateDeets::Completed {
@@ -675,6 +698,11 @@ impl Worker {
                 )
                 .await?;
                 self.emit_stale_peer(endpoint_id).await?;
+                self.emit_full_sync_event(FullSyncEvent::PeerConnectionLost {
+                    endpoint_id,
+                    reason: lost_reason,
+                })
+                .await?;
                 self.scheduler.peer_sessions_to_refresh.insert(endpoint_id);
             }
         }
@@ -807,11 +835,17 @@ impl Worker {
                 self.refresh_full_sync_waiters();
                 resp.send(()).inspect_err(|_| warn!(ERROR_CALLER)).ok();
             }
-            Msg::DocPeerStateViewUpdated { doc_id, diff } => {
-                self.handle_doc_peer_state_change(doc_id, diff).await?
+            Msg::DocSyncCompleted {
+                doc_id,
+                endpoint_id,
+                outcome,
+            } => {
+                self.handle_doc_sync_completed(doc_id, endpoint_id, outcome)
+                    .await?
             }
             Msg::DocSyncRequestBackoff {
                 doc_id,
+                endpoint_id,
                 delay,
                 previous_attempt_no,
                 previous_backoff,
@@ -819,6 +853,7 @@ impl Worker {
             } => {
                 self.handle_doc_request_backoff(
                     doc_id,
+                    endpoint_id,
                     delay,
                     previous_attempt_no,
                     previous_backoff,
@@ -829,11 +864,17 @@ impl Worker {
             Msg::DocSyncMissingLocal { doc_id } => {
                 self.handle_doc_missing_local(doc_id).await?;
             }
-            Msg::ImportDocCompleted { doc_id, outcome } => {
-                self.handle_import_doc_completed(doc_id, outcome).await?;
+            Msg::ImportDocCompleted {
+                doc_id,
+                endpoint_id,
+                outcome,
+            } => {
+                self.handle_import_doc_completed(doc_id, endpoint_id, outcome)
+                    .await?;
             }
             Msg::ImportDocBackoff {
                 doc_id,
+                endpoint_id,
                 delay,
                 previous_attempt_no,
                 previous_backoff,
@@ -841,6 +882,7 @@ impl Worker {
             } => {
                 self.handle_import_doc_backoff(
                     doc_id,
+                    endpoint_id,
                     delay,
                     previous_attempt_no,
                     previous_backoff,
@@ -1009,24 +1051,32 @@ impl Worker {
                     .pending_tasks
                     .keys()
                     .filter_map(|task| match task {
-                        scheduler::SyncTask::Doc(doc_id) => Some(doc_id.clone()),
+                        scheduler::SyncTask::Doc(task_key)
+                            if task_key.endpoint_id == endpoint_id =>
+                        {
+                            Some(task_key.clone())
+                        }
                         scheduler::SyncTask::Import(_) | scheduler::SyncTask::Blob(_) => None,
                     })
                     .collect();
-                for doc_id in docs {
-                    self.scheduler.enqueue_doc(doc_id);
+                for task_key in docs {
+                    self.scheduler.enqueue_doc(task_key);
                 }
                 let imports: Vec<_> = self
                     .scheduler
                     .pending_tasks
                     .keys()
                     .filter_map(|task| match task {
-                        scheduler::SyncTask::Import(doc_id) => Some(doc_id.clone()),
+                        scheduler::SyncTask::Import(task_key)
+                            if task_key.endpoint_id == endpoint_id =>
+                        {
+                            Some(task_key.clone())
+                        }
                         scheduler::SyncTask::Doc(_) | scheduler::SyncTask::Blob(_) => None,
                     })
                     .collect();
-                for doc_id in imports {
-                    self.scheduler.enqueue_import(doc_id);
+                for task_key in imports {
+                    self.scheduler.enqueue_import(task_key);
                 }
             }
             PartitionKey::BlobScope(_) => {
@@ -1385,8 +1435,8 @@ impl Worker {
             return Ok(());
         };
         self.emit_stale_peer(endpoint_id).await?;
-        let samod_doc_state = self.doc_sync_set.entry(doc_id.clone()).or_default();
-        let requested_parts = samod_doc_state
+        let doc_sync_state = self.doc_sync_set.entry(doc_id.clone()).or_default();
+        let requested_parts = doc_sync_state
             .requested_peers
             .entry(endpoint_id)
             .or_default();
@@ -1409,10 +1459,14 @@ impl Worker {
             cursor,
             &doc_id.to_string(),
         );
-        if !self.scheduler.active_docs.contains_key(&doc_id)
-            && !self.scheduler.is_doc_pending(&doc_id)
+        let task_key = DocSyncTaskKey {
+            doc_id: doc_id.clone(),
+            endpoint_id,
+        };
+        if !self.scheduler.active_docs.contains_key(&task_key)
+            && !self.scheduler.is_doc_pending(&task_key)
         {
-            self.scheduler.set_doc_pending_now(&doc_id);
+            self.scheduler.set_doc_pending_now(&task_key);
         }
         Ok(())
     }
@@ -1447,11 +1501,21 @@ impl Worker {
             }
             clear_import_request = import_state.requested_peers.is_empty();
         }
+        let import_task_key = ImportSyncTaskKey {
+            doc_id: doc_id.clone(),
+            endpoint_id,
+        };
+        self.scheduler.clear_import_task(&import_task_key);
+        if let Some(active) = self.scheduler.active_imports.remove(&import_task_key) {
+            active.stop_token.stop().await?;
+        }
         if clear_import_request {
             self.import_doc_set.remove(&doc_id);
-            self.scheduler.clear_import_task(&doc_id);
-            if let Some(active) = self.scheduler.active_imports.remove(&doc_id) {
-                active.stop_token.stop().await?;
+            for task_key in self.scheduler.import_task_keys_for_doc(&doc_id) {
+                self.scheduler.clear_import_task(&task_key);
+                if let Some(active) = self.scheduler.active_imports.remove(&task_key) {
+                    active.stop_token.stop().await?;
+                }
             }
         }
 
@@ -1471,7 +1535,21 @@ impl Worker {
         }
         if clear_doc_request {
             self.doc_sync_set.remove(&doc_id);
-            self.scheduler.clear_doc_task(&doc_id);
+            for task_key in self.scheduler.doc_task_keys_for_doc(&doc_id) {
+                self.scheduler.clear_doc_task(&task_key);
+                if let Some(active) = self.scheduler.active_docs.remove(&task_key) {
+                    active.stop_token.stop().await?;
+                }
+            }
+        } else {
+            let task_key = DocSyncTaskKey {
+                doc_id: doc_id.clone(),
+                endpoint_id,
+            };
+            self.scheduler.clear_doc_task(&task_key);
+            if let Some(active) = self.scheduler.active_docs.remove(&task_key) {
+                active.stop_token.stop().await?;
+            }
         }
         if refresh_peer {
             self.refresh_peer_fully_synced_state(endpoint_id).await?;
@@ -1507,10 +1585,14 @@ impl Worker {
             .or_default()
             .insert(cursor);
 
-        if !self.scheduler.active_imports.contains_key(&doc_id)
-            && self.scheduler.pending_import_state(&doc_id).is_none()
+        let task_key = ImportSyncTaskKey {
+            doc_id: doc_id.clone(),
+            endpoint_id,
+        };
+        if !self.scheduler.active_imports.contains_key(&task_key)
+            && self.scheduler.pending_import_state(&task_key).is_none()
         {
-            self.scheduler.set_import_pending_now(&doc_id);
+            self.scheduler.set_import_pending_now(&task_key);
         }
         Ok(())
     }
@@ -1627,12 +1709,12 @@ impl Worker {
         if budget == 0 {
             return Ok(());
         }
-        let doc_ids = self.scheduler.drain_queued_docs(budget);
-        for doc_id in doc_ids {
-            if self.scheduler.active_docs.contains_key(&doc_id) {
+        let doc_tasks = self.scheduler.drain_queued_docs(budget);
+        for task_key in doc_tasks {
+            if self.scheduler.active_docs.contains_key(&task_key) {
                 continue;
             }
-            let prior_pending = self.scheduler.pending_doc_state(&doc_id);
+            let prior_pending = self.scheduler.pending_doc_state(&task_key);
             let now = std::time::Instant::now();
             let retry = RetryState {
                 attempt_no: prior_pending.as_ref().map_or(0, |prior| prior.attempt_no),
@@ -1643,14 +1725,24 @@ impl Worker {
                     .as_ref()
                     .map_or(now, |prior| prior.last_attempt_at),
             };
-            match self.boot_doc_sync_worker(doc_id.clone(), retry).await? {
-                Some(active) => {
-                    self.scheduler.clear_doc_pending(&doc_id);
-                    self.scheduler.active_docs.insert(doc_id, active);
+            match self.boot_doc_sync_worker(task_key.clone(), retry).await? {
+                BootDocSyncWorkerResult::Spawned(active) => {
+                    self.scheduler.clear_doc_pending(&task_key);
+                    self.scheduler.active_docs.insert(task_key, active);
                     budget = budget.saturating_sub(1);
                 }
-                None => {
-                    self.handle_doc_missing_local(doc_id).await?;
+                BootDocSyncWorkerResult::MissingLocal => {
+                    self.handle_doc_missing_local(task_key.doc_id).await?;
+                }
+                BootDocSyncWorkerResult::Deferred => {
+                    let now = std::time::Instant::now();
+                    let pending = scheduler::PendingTaskState {
+                        attempt_no: retry.attempt_no,
+                        last_backoff: retry.last_backoff,
+                        last_attempt_at: now,
+                        due_at: now + Duration::from_millis(500),
+                    };
+                    self.scheduler.set_doc_backoff(&task_key, pending);
                 }
             }
         }
@@ -1670,12 +1762,12 @@ impl Worker {
         if budget == 0 {
             return Ok(());
         }
-        let doc_ids = self.scheduler.drain_queued_imports(budget);
-        for doc_id in doc_ids {
-            if self.scheduler.active_imports.contains_key(&doc_id) {
+        let task_keys = self.scheduler.drain_queued_imports(budget);
+        for task_key in task_keys {
+            if self.scheduler.active_imports.contains_key(&task_key) {
                 continue;
             }
-            let prior_pending = self.scheduler.pending_import_state(&doc_id);
+            let prior_pending = self.scheduler.pending_import_state(&task_key);
             let now = std::time::Instant::now();
             let retry = RetryState {
                 attempt_no: prior_pending.as_ref().map_or(0, |prior| prior.attempt_no),
@@ -1686,27 +1778,45 @@ impl Worker {
                     .as_ref()
                     .map_or(now, |prior| prior.last_attempt_at),
             };
-            let Some(import_state) = self.import_doc_set.get(&doc_id) else {
-                self.scheduler.clear_import_task(&doc_id);
+            let Some(import_state) = self.import_doc_set.get(&task_key.doc_id) else {
+                self.scheduler.clear_import_task(&task_key);
                 continue;
             };
-            let Some((&endpoint_id, _)) = import_state.requested_peers.iter().next() else {
-                self.scheduler.clear_import_task(&doc_id);
+            if !import_state
+                .requested_peers
+                .contains_key(&task_key.endpoint_id)
+            {
+                self.scheduler.clear_import_task(&task_key);
+                continue;
+            }
+            let Some(conn_id) = self.conn_by_peer.get(&task_key.endpoint_id).copied() else {
+                let now = std::time::Instant::now();
+                let pending = scheduler::PendingTaskState {
+                    attempt_no: retry.attempt_no,
+                    last_backoff: retry.last_backoff,
+                    last_attempt_at: now,
+                    due_at: now + Duration::from_millis(500),
+                };
+                self.scheduler.set_import_backoff(&task_key, pending);
                 continue;
             };
-            let Some(conn_id) = self.conn_by_peer.get(&endpoint_id).copied() else {
-                self.scheduler.clear_import_task(&doc_id);
+            if !self.known_peer_set.contains_key(&conn_id) {
+                let now = std::time::Instant::now();
+                let pending = scheduler::PendingTaskState {
+                    attempt_no: retry.attempt_no,
+                    last_backoff: retry.last_backoff,
+                    last_attempt_at: now,
+                    due_at: now + Duration::from_millis(500),
+                };
+                self.scheduler.set_import_backoff(&task_key, pending);
                 continue;
-            };
-            let Some(peer_state) = self.known_peer_set.get(&conn_id) else {
-                self.scheduler.clear_import_task(&doc_id);
-                continue;
-            };
+            }
             let active = ActiveImportSyncState {
                 stop_token: import_worker::spawn_import_sync_worker(
-                    doc_id.clone(),
-                    endpoint_id,
-                    peer_state.endpoint_addr.clone(),
+                    task_key.doc_id.clone(),
+                    import_worker::ImportSyncTarget {
+                        endpoint_id: task_key.endpoint_id,
+                    },
                     self.local_peer_key.clone(),
                     self.cancel_token.child_token(),
                     self.msg_tx.clone(),
@@ -1714,9 +1824,10 @@ impl Worker {
                     self.iroh_endpoint.clone(),
                     retry,
                 )?,
+                retry,
             };
-            self.scheduler.clear_import_pending(&doc_id);
-            self.scheduler.active_imports.insert(doc_id, active);
+            self.scheduler.clear_import_pending(&task_key);
+            self.scheduler.active_imports.insert(task_key, active);
             budget = budget.saturating_sub(1);
             if budget == 0 {
                 break;
@@ -1727,59 +1838,42 @@ impl Worker {
 
     async fn boot_doc_sync_worker(
         &self,
-        doc_id: DocumentId,
+        task_key: DocSyncTaskKey,
         retry: RetryState,
-    ) -> Res<Option<ActiveDocSyncState>> {
+    ) -> Res<BootDocSyncWorkerResult> {
         let cancel_token = self.cancel_token.child_token();
-        let Some(local_doc) = self.big_repo.find_doc(&doc_id).await? else {
-            return Ok(None);
-        };
-        let latest_heads = local_doc
-            .with_document(|doc| ChangeHashSet(Arc::from(doc.get_heads())))
-            .await?;
+        let doc_id = task_key.doc_id;
+        let endpoint_id = task_key.endpoint_id;
+        if self.big_repo.find_doc(&doc_id).await?.is_none() {
+            return Ok(BootDocSyncWorkerResult::MissingLocal);
+        }
         let Some(sync_state) = self.doc_sync_set.get(&doc_id) else {
-            return Ok(None);
+            return Ok(BootDocSyncWorkerResult::Deferred);
         };
-        let Some((&endpoint_id, _)) = sync_state.requested_peers.iter().next() else {
-            return Ok(None);
-        };
+        if !sync_state.requested_peers.contains_key(&endpoint_id) {
+            return Ok(BootDocSyncWorkerResult::Deferred);
+        }
         let Some(conn_id) = self.conn_by_peer.get(&endpoint_id).copied() else {
-            return Ok(None);
+            return Ok(BootDocSyncWorkerResult::Deferred);
         };
-        let Some(peer_state) = self.known_peer_set.get(&conn_id) else {
-            return Ok(None);
-        };
-        let Some(peer_key) = self.peer_key_for_endpoint(endpoint_id) else {
-            return Ok(None);
-        };
+        if !self.known_peer_set.contains_key(&conn_id) {
+            return Ok(BootDocSyncWorkerResult::Deferred);
+        }
         let stop_token = doc_worker::spawn_doc_sync_worker(
-            doc_id.clone(),
-            endpoint_id,
-            peer_state.endpoint_addr.clone(),
-            endpoint_id,
-            peer_key,
-            self.local_peer_key.clone(),
+            doc_id,
+            doc_worker::DocSyncTarget {
+                endpoint_id,
+                peer_id: am_utils_rs::repo::PeerId::new(*endpoint_id.as_bytes()),
+            },
             Arc::clone(&self.big_repo),
-            self.iroh_endpoint.clone(),
             cancel_token.clone(),
             self.msg_tx.clone(),
             retry,
         )
         .await?;
-        let mut ack_cutoffs = HashMap::new();
-        if let Some(requested_parts) = sync_state.requested_peers.get(&endpoint_id) {
-            let mut per_partition = HashMap::new();
-            for (partition_key, cursors) in requested_parts {
-                if let Some(max_cursor) = cursors.iter().copied().max() {
-                    per_partition.insert(partition_key.clone(), max_cursor);
-                }
-            }
-            ack_cutoffs.insert(endpoint_id, per_partition);
-        }
-        Ok(Some(ActiveDocSyncState {
-            latest_heads,
+        Ok(BootDocSyncWorkerResult::Spawned(ActiveDocSyncState {
             stop_token,
-            ack_cutoffs,
+            retry,
         }))
     }
 
@@ -1791,10 +1885,12 @@ impl Worker {
 
         let stopped_doc_ids = self.scheduler.docs_to_stop.drain().collect::<Vec<_>>();
         for doc_id in &stopped_doc_ids {
-            if let Some(active) = self.scheduler.active_docs.remove(doc_id) {
-                stop_futs.push(active.stop_token.stop());
+            for task_key in self.scheduler.doc_task_keys_for_doc(doc_id) {
+                if let Some(active) = self.scheduler.active_docs.remove(&task_key) {
+                    stop_futs.push(active.stop_token.stop());
+                }
+                self.scheduler.clear_doc_task(&task_key);
             }
-            self.scheduler.clear_doc_task(doc_id);
         }
 
         futures::stream::iter(stop_futs)
@@ -1857,136 +1953,105 @@ impl Worker {
         Ok(())
     }
 
-    async fn handle_doc_peer_state_change(
+    async fn handle_doc_sync_completed(
         &mut self,
         doc_id: DocumentId,
-        diff: DocPeerStateView,
+        endpoint_id: EndpointId,
+        outcome: am_utils_rs::repo::SyncDocOutcome,
     ) -> Res<()> {
-        if !self.scheduler.active_docs.contains_key(&doc_id) {
+        let task_key = DocSyncTaskKey {
+            doc_id: doc_id.clone(),
+            endpoint_id,
+        };
+        let Some(active) = self.scheduler.active_docs.get(&task_key) else {
             return Ok(());
-        }
-        let local_heads = self
-            .big_repo
-            .find_doc(&doc_id)
-            .await?
-            .ok_or_eyre("active doc sync state missing local doc handle")?
-            .with_document(|doc| ChangeHashSet(Arc::from(doc.get_heads())))
-            .await?;
-        self.scheduler
+        };
+        let active = self
+            .scheduler
             .active_docs
-            .get_mut(&doc_id)
-            .expect("active doc sync state should exist")
-            .latest_heads = local_heads.clone();
-        let mut events_to_emit = Vec::new();
-        let mut progress_completions = Vec::new();
-        let mut peers_to_refresh = Vec::new();
-        let mut partitions_to_advance = Vec::new();
-        for (conn_id, diff) in diff {
-            let Some(peer_state) = self.known_peer_set.get_mut(&conn_id) else {
-                debug!(?conn_id, "unknown connection for FullSyncWorker");
-                continue;
-            };
-            let they_have_our_changes = diff
-                .shared_heads
-                .as_ref()
-                .map(|heads| heads_equal_as_set(heads, &local_heads))
-                .unwrap_or_default();
-            let we_have_their_changes = diff
-                .their_heads
-                .as_ref()
-                .zip(diff.shared_heads.as_ref())
-                .map(|(their, shared)| heads_equal_as_set(their, shared))
-                .unwrap_or_default();
+            .remove(&task_key)
+            .expect("active doc worker must exist");
+        active.stop_token.stop().await?;
+        self.scheduler.clear_doc_pending(&task_key);
 
-            if they_have_our_changes && we_have_their_changes {
-                debug!(
-                    endpoint_id = ?peer_state.endpoint_id,
-                    %doc_id,
-                    local_head_count = local_heads.len(),
-                    "full worker observed doc synced with peer"
-                );
-                events_to_emit.push(FullSyncEvent::DocSyncedWithPeer {
-                    endpoint_id: peer_state.endpoint_id,
-                    doc_id: doc_id.clone(),
-                });
-                progress_completions.push((peer_state.endpoint_id, doc_id.clone()));
-                let Some(samod_doc) = self.doc_sync_set.get_mut(&doc_id) else {
-                    continue;
-                };
-                let ack_cutoff = self
-                    .scheduler
-                    .active_docs
-                    .get(&doc_id)
-                    .and_then(|active| active.ack_cutoffs.get(&peer_state.endpoint_id))
-                    .cloned();
-                if let Some(requested_parts) = samod_doc.requested_peers.get_mut(&peer_state.endpoint_id)
-                {
-                    let mut emptied_partition_keys = Vec::new();
-                    for (partition_key, cursors) in requested_parts.iter_mut() {
-                        let cutoff = ack_cutoff
-                            .as_ref()
-                            .and_then(|per_partition| per_partition.get(partition_key))
-                            .copied()
-                            .unwrap_or(0);
-                        let ackable = cursors
-                            .iter()
-                            .copied()
-                            .filter(|cursor| *cursor <= cutoff)
-                            .collect::<Vec<_>>();
-                        for cursor in ackable {
-                            cursors.remove(&cursor);
+        match outcome {
+            am_utils_rs::repo::SyncDocOutcome::Success => {
+                let mut partitions_to_advance = Vec::new();
+                let mut refreshed_peer = false;
+
+                if let Some(sync_state) = self.doc_sync_set.get_mut(&doc_id) {
+                    if let Some(requested_parts) = sync_state.requested_peers.remove(&endpoint_id) {
+                        if let Some(conn_id) = self.conn_by_peer.get(&endpoint_id).copied() {
+                            if let Some(peer_state) = self.known_peer_set.get_mut(&conn_id) {
+                                peer_state.doc_pending_docs =
+                                    peer_state.doc_pending_docs.saturating_sub(1);
+                                refreshed_peer = true;
+                            }
+                        }
+
+                        for (partition_key, cursors) in requested_parts {
                             let PartitionKey::BigRepoPartition(partition_id) = partition_key else {
                                 continue;
                             };
-                            debug!(
-                                endpoint_id = ?peer_state.endpoint_id,
-                                partition_id = %partition_id,
-                                %doc_id,
-                                cursor,
-                                "full worker observed doc sync cursor"
-                            );
-                            self.scheduler.note_doc_synced(
-                                peer_state.endpoint_id,
-                                partition_id,
-                                cursor,
-                                &doc_id.to_string(),
-                            );
-                            partitions_to_advance
-                                .push((peer_state.endpoint_id, partition_id.clone()));
+                            for cursor in cursors {
+                                self.scheduler.note_doc_synced(
+                                    endpoint_id,
+                                    &partition_id,
+                                    cursor,
+                                    &doc_id.to_string(),
+                                );
+                            }
+                            partitions_to_advance.push(partition_id);
                         }
-                        if cursors.is_empty() {
-                            emptied_partition_keys.push(partition_key.clone());
-                        }
-                    }
-                    for partition_key in emptied_partition_keys {
-                        requested_parts.remove(&partition_key);
-                    }
-                    if requested_parts.is_empty() {
-                        samod_doc.requested_peers.remove(&peer_state.endpoint_id);
-                        peer_state.doc_pending_docs = peer_state.doc_pending_docs.saturating_sub(1);
-                        peers_to_refresh.push(peer_state.endpoint_id);
                     }
                 }
-            }
-            // events_to_emit.push(FullSyncEvent::PeerFullSynced {
-            //     endpoint_id: peer_state.endpoint_id,
-            // });
-            // peer_state.emitted_full_synced = true;
-        }
-        for (endpoint_id, partition_id) in partitions_to_advance {
-            let Some(peer_key) = self.peer_key_for_endpoint(endpoint_id) else {
-                continue;
-            };
-            self.maybe_emit_cursor_advance_acks(endpoint_id, &peer_key, &partition_id)
+
+                for partition_id in partitions_to_advance {
+                    if let Some(peer_key) = self.peer_key_for_endpoint(endpoint_id) {
+                        self.maybe_emit_cursor_advance_acks(endpoint_id, &peer_key, &partition_id)
+                            .await?;
+                    }
+                }
+                if refreshed_peer {
+                    self.refresh_peer_fully_synced_state(endpoint_id).await?;
+                }
+                self.emit_full_sync_event(FullSyncEvent::DocSyncedWithPeer {
+                    endpoint_id,
+                    doc_id: doc_id.clone(),
+                })
                 .await?;
+                self.emit_peer_progress_status(
+                    endpoint_id,
+                    ProgressUpdateDeets::Status {
+                        severity: ProgressSeverity::Info,
+                        message: format!("doc sync completed: {doc_id}"),
+                    },
+                )
+                .await?;
+            }
+            am_utils_rs::repo::SyncDocOutcome::NotFoundOrUnauthorized
+            | am_utils_rs::repo::SyncDocOutcome::TransportError
+            | am_utils_rs::repo::SyncDocOutcome::IoError => {
+                let delay = match outcome {
+                    am_utils_rs::repo::SyncDocOutcome::NotFoundOrUnauthorized => {
+                        Duration::from_secs(1)
+                    }
+                    am_utils_rs::repo::SyncDocOutcome::TransportError => Duration::from_millis(500),
+                    am_utils_rs::repo::SyncDocOutcome::IoError => Duration::from_secs(1),
+                    am_utils_rs::repo::SyncDocOutcome::Success => unreachable!(),
+                };
+                let now = std::time::Instant::now();
+                let backoff = next_backoff_delay(active.retry.last_backoff, delay);
+                let pending = scheduler::PendingTaskState {
+                    attempt_no: active.retry.attempt_no + 1,
+                    last_backoff: backoff,
+                    last_attempt_at: now,
+                    due_at: now + backoff,
+                };
+                self.scheduler.set_doc_backoff(&task_key, pending);
+            }
         }
-        for endpoint_id in peers_to_refresh {
-            self.refresh_peer_fully_synced_state(endpoint_id).await?;
-        }
-        if let Some(active) = self.scheduler.active_docs.remove(&doc_id) {
-            active.stop_token.stop().await?;
-        }
-        self.scheduler.clear_doc_pending(&doc_id);
+
         let requested_peers_empty = self
             .doc_sync_set
             .get(&doc_id)
@@ -1994,22 +2059,24 @@ impl Worker {
             .unwrap_or(true);
         if requested_peers_empty {
             self.doc_sync_set.remove(&doc_id);
-            self.scheduler.clear_doc_task(&doc_id);
-        } else if !self.scheduler.is_doc_pending(&doc_id) {
-            self.scheduler.set_doc_pending_now(&doc_id);
-        }
-        for event in events_to_emit {
-            self.emit_full_sync_event(event).await?;
-        }
-        for (endpoint_id, doc_id) in progress_completions {
-            self.emit_peer_progress_status(
-                endpoint_id,
-                ProgressUpdateDeets::Status {
-                    severity: ProgressSeverity::Info,
-                    message: format!("doc sync completed: {doc_id}"),
-                },
-            )
-            .await?;
+            for task_key in self.scheduler.doc_task_keys_for_doc(&doc_id) {
+                self.scheduler.clear_doc_task(&task_key);
+                if let Some(active) = self.scheduler.active_docs.remove(&task_key) {
+                    active.stop_token.stop().await?;
+                }
+            }
+        } else if let Some(sync_state) = self.doc_sync_set.get(&doc_id) {
+            for endpoint_id in sync_state.requested_peers.keys().copied() {
+                let pending_key = DocSyncTaskKey {
+                    doc_id: doc_id.clone(),
+                    endpoint_id,
+                };
+                if !self.scheduler.active_docs.contains_key(&pending_key)
+                    && !self.scheduler.is_doc_pending(&pending_key)
+                {
+                    self.scheduler.set_doc_pending_now(&pending_key);
+                }
+            }
         }
         Ok(())
     }
@@ -2017,13 +2084,27 @@ impl Worker {
     async fn handle_doc_request_backoff(
         &mut self,
         doc_id: DocumentId,
+        endpoint_id: EndpointId,
         delay: Duration,
         previous_attempt_no: usize,
         previous_backoff: Duration,
         _previous_attempt_at: std::time::Instant,
     ) -> Res<()> {
-        if let Some(active) = self.scheduler.active_docs.remove(&doc_id) {
+        let task_key = DocSyncTaskKey {
+            doc_id: doc_id.clone(),
+            endpoint_id,
+        };
+        if let Some(active) = self.scheduler.active_docs.remove(&task_key) {
             active.stop_token.stop().await?;
+        }
+        if self
+            .doc_sync_set
+            .get(&doc_id)
+            .and_then(|state| state.requested_peers.get(&endpoint_id))
+            .is_none()
+        {
+            self.scheduler.clear_doc_task(&task_key);
+            return Ok(());
         }
         let now = std::time::Instant::now();
         let delay = delay.min(Duration::from_secs(600));
@@ -2034,15 +2115,17 @@ impl Worker {
             last_attempt_at: now,
             due_at: now + backoff,
         };
-        self.scheduler.set_doc_backoff(&doc_id, pending);
+        self.scheduler.set_doc_backoff(&task_key, pending);
         Ok(())
     }
 
     async fn handle_doc_missing_local(&mut self, doc_id: DocumentId) -> Res<()> {
-        if let Some(active) = self.scheduler.active_docs.remove(&doc_id) {
-            active.stop_token.stop().await?;
+        for task_key in self.scheduler.doc_task_keys_for_doc(&doc_id) {
+            if let Some(active) = self.scheduler.active_docs.remove(&task_key) {
+                active.stop_token.stop().await?;
+            }
+            self.scheduler.clear_doc_task(&task_key);
         }
-        self.scheduler.clear_doc_task(&doc_id);
 
         let Some(sync_state) = self.doc_sync_set.remove(&doc_id) else {
             return Ok(());
@@ -2084,45 +2167,62 @@ impl Worker {
     async fn handle_import_doc_completed(
         &mut self,
         doc_id: DocumentId,
+        endpoint_id: EndpointId,
         outcome: import_worker::ImportDocOutcome,
     ) -> Res<()> {
-        let prior_pending = self.scheduler.pending_import_state(&doc_id);
-        if let Some(active) = self.scheduler.active_imports.remove(&doc_id) {
+        let task_key = ImportSyncTaskKey {
+            doc_id: doc_id.clone(),
+            endpoint_id,
+        };
+        let prior_pending = self.scheduler.pending_import_state(&task_key);
+        if let Some(active) = self.scheduler.active_imports.remove(&task_key) {
             active.stop_token.stop().await?;
         }
-        self.scheduler.clear_import_pending(&doc_id);
+        self.scheduler.clear_import_pending(&task_key);
 
-        let Some(import_state) = self.import_doc_set.remove(&doc_id) else {
-            self.scheduler.clear_import_task(&doc_id);
+        if !self.import_doc_set.contains_key(&doc_id) {
+            self.scheduler.clear_import_task(&task_key);
             return Ok(());
-        };
-        self.scheduler.clear_import_task(&doc_id);
+        }
+        self.scheduler.clear_import_task(&task_key);
 
         match outcome {
             import_worker::ImportDocOutcome::Imported => {
-                for (&endpoint_id, partitions) in &import_state.requested_peers {
-                    let Some(peer_key) = self.peer_key_for_endpoint(endpoint_id) else {
-                        continue;
-                    };
-                    for (partition_key, cursors) in partitions {
-                        let PartitionKey::BigRepoPartition(partition_id) = partition_key else {
-                            continue;
-                        };
-                        for cursor in cursors {
-                            self.scheduler.note_cursor_ready_immediate(
+                let endpoint_partitions = self
+                    .import_doc_set
+                    .get_mut(&doc_id)
+                    .and_then(|state| state.requested_peers.remove(&endpoint_id));
+                if let Some(partitions) = endpoint_partitions {
+                    if let Some(peer_key) = self.peer_key_for_endpoint(endpoint_id) {
+                        for (partition_key, cursors) in partitions {
+                            let PartitionKey::BigRepoPartition(partition_id) = partition_key else {
+                                continue;
+                            };
+                            for cursor in cursors {
+                                self.scheduler.note_cursor_ready_immediate(
+                                    endpoint_id,
+                                    &partition_id,
+                                    cursor,
+                                );
+                            }
+                            self.maybe_emit_cursor_advance_acks(
                                 endpoint_id,
-                                partition_id,
-                                *cursor,
-                            );
-                        }
-                        self.maybe_emit_cursor_advance_acks(endpoint_id, &peer_key, partition_id)
+                                &peer_key,
+                                &partition_id,
+                            )
                             .await?;
+                        }
                     }
                 }
-            }
-            import_worker::ImportDocOutcome::LocalPresent => {
-                for (endpoint_id, partitions) in import_state.requested_peers {
-                    let Some(peer_key) = self.peer_key_for_endpoint(endpoint_id) else {
+
+                // After one successful import, doc is now local; push remaining import requests into doc-sync path.
+                let remaining = self
+                    .import_doc_set
+                    .get_mut(&doc_id)
+                    .map(|state| state.requested_peers.drain().collect::<Vec<_>>())
+                    .unwrap_or_default();
+                for (other_endpoint_id, partitions) in remaining {
+                    let Some(peer_key) = self.peer_key_for_endpoint(other_endpoint_id) else {
                         continue;
                     };
                     for (partition_key, cursors) in partitions {
@@ -2141,12 +2241,45 @@ impl Worker {
                     }
                 }
             }
+            import_worker::ImportDocOutcome::LocalPresent => {
+                let Some(partitions) = self
+                    .import_doc_set
+                    .get_mut(&doc_id)
+                    .and_then(|state| state.requested_peers.remove(&endpoint_id))
+                else {
+                    return Ok(());
+                };
+                let Some(peer_key) = self.peer_key_for_endpoint(endpoint_id) else {
+                    return Ok(());
+                };
+                for (partition_key, cursors) in partitions {
+                    let PartitionKey::BigRepoPartition(partition_id) = partition_key else {
+                        continue;
+                    };
+                    for cursor in cursors {
+                        self.handle_request_doc_sync(
+                            peer_key.clone(),
+                            partition_id.clone(),
+                            doc_id.clone(),
+                            cursor,
+                        )
+                        .await?;
+                    }
+                }
+            }
             import_worker::ImportDocOutcome::MissingOnRemote => {
                 warn!(
-                    %doc_id,
+                    %doc_id, endpoint_id = ?endpoint_id,
                     "import worker could not fetch doc from remote; waiting for replay/retry"
                 );
-                self.import_doc_set.insert(doc_id.clone(), import_state);
+                if self
+                    .import_doc_set
+                    .get(&doc_id)
+                    .and_then(|state| state.requested_peers.get(&endpoint_id))
+                    .is_none()
+                {
+                    return Ok(());
+                }
                 let now = std::time::Instant::now();
                 let previous_backoff = prior_pending
                     .as_ref()
@@ -2160,7 +2293,21 @@ impl Worker {
                     last_attempt_at: now,
                     due_at: now + backoff,
                 };
-                self.scheduler.set_import_backoff(&doc_id, pending);
+                self.scheduler.set_import_backoff(&task_key, pending);
+            }
+        }
+
+        let clear_doc_import_state = self
+            .import_doc_set
+            .get(&doc_id)
+            .is_none_or(|state| state.requested_peers.is_empty());
+        if clear_doc_import_state {
+            self.import_doc_set.remove(&doc_id);
+            for import_task_key in self.scheduler.import_task_keys_for_doc(&doc_id) {
+                self.scheduler.clear_import_task(&import_task_key);
+                if let Some(active) = self.scheduler.active_imports.remove(&import_task_key) {
+                    active.stop_token.stop().await?;
+                }
             }
         }
         Ok(())
@@ -2169,16 +2316,26 @@ impl Worker {
     async fn handle_import_doc_backoff(
         &mut self,
         doc_id: DocumentId,
+        endpoint_id: EndpointId,
         delay: Duration,
         previous_attempt_no: usize,
         previous_backoff: Duration,
         _previous_attempt_at: std::time::Instant,
     ) -> Res<()> {
-        if let Some(active) = self.scheduler.active_imports.remove(&doc_id) {
+        let task_key = ImportSyncTaskKey {
+            doc_id,
+            endpoint_id,
+        };
+        if let Some(active) = self.scheduler.active_imports.remove(&task_key) {
             active.stop_token.stop().await?;
         }
-        if !self.import_doc_set.contains_key(&doc_id) {
-            self.scheduler.clear_import_task(&doc_id);
+        if self
+            .import_doc_set
+            .get(&task_key.doc_id)
+            .and_then(|state| state.requested_peers.get(&task_key.endpoint_id))
+            .is_none()
+        {
+            self.scheduler.clear_import_task(&task_key);
             return Ok(());
         }
         let now = std::time::Instant::now();
@@ -2190,7 +2347,7 @@ impl Worker {
             last_attempt_at: now,
             due_at: now + backoff,
         };
-        self.scheduler.set_import_backoff(&doc_id, pending);
+        self.scheduler.set_import_backoff(&task_key, pending);
         Ok(())
     }
 }
@@ -2520,18 +2677,40 @@ impl Worker {
 
     async fn remove_peer_from_doc_sync_set(&mut self, endpoint_id: EndpointId) -> Res<()> {
         let mut to_remove = Vec::new();
+        let mut to_stop = Vec::new();
         for (doc_id, sync_state) in &mut self.doc_sync_set {
             sync_state.requested_peers.remove(&endpoint_id);
+            self.scheduler.clear_doc_task(&DocSyncTaskKey {
+                doc_id: doc_id.clone(),
+                endpoint_id,
+            });
+            if let Some(active) = self.scheduler.active_docs.remove(&DocSyncTaskKey {
+                doc_id: doc_id.clone(),
+                endpoint_id,
+            }) {
+                to_stop.push(active.stop_token);
+            }
             if sync_state.requested_peers.is_empty() {
                 to_remove.push(doc_id.clone());
             }
         }
-        for doc_id in to_remove {
-            self.scheduler.clear_doc_task(&doc_id);
-            self.scheduler.docs_to_stop.remove(&doc_id);
-            if let Some(active) = self.scheduler.active_docs.remove(&doc_id) {
-                active.stop_token.stop().await?;
+        for task_key in self.scheduler.doc_task_keys_for_peer(endpoint_id) {
+            self.scheduler.clear_doc_task(&task_key);
+            if let Some(active) = self.scheduler.active_docs.remove(&task_key) {
+                to_stop.push(active.stop_token);
             }
+        }
+        for stop_token in to_stop {
+            stop_token.stop().await?;
+        }
+        for doc_id in to_remove {
+            for task_key in self.scheduler.doc_task_keys_for_doc(&doc_id) {
+                self.scheduler.clear_doc_task(&task_key);
+                if let Some(active) = self.scheduler.active_docs.remove(&task_key) {
+                    active.stop_token.stop().await?;
+                }
+            }
+            self.scheduler.docs_to_stop.remove(&doc_id);
             self.doc_sync_set.remove(&doc_id);
         }
         Ok(())
@@ -2545,11 +2724,19 @@ impl Worker {
                 to_remove.push(doc_id.clone());
             }
         }
-        for doc_id in to_remove {
-            if let Some(active) = self.scheduler.active_imports.remove(&doc_id) {
+        for task_key in self.scheduler.import_task_keys_for_peer(endpoint_id) {
+            if let Some(active) = self.scheduler.active_imports.remove(&task_key) {
                 active.stop_token.stop().await?;
             }
-            self.scheduler.clear_import_task(&doc_id);
+            self.scheduler.clear_import_task(&task_key);
+        }
+        for doc_id in to_remove {
+            for task_key in self.scheduler.import_task_keys_for_doc(&doc_id) {
+                if let Some(active) = self.scheduler.active_imports.remove(&task_key) {
+                    active.stop_token.stop().await?;
+                }
+                self.scheduler.clear_import_task(&task_key);
+            }
             self.import_doc_set.remove(&doc_id);
         }
         Ok(())
@@ -2561,18 +2748,20 @@ impl Worker {
         };
         let mut emit_full = None;
         let mut emit_stale = false;
+        let endpoint_has_doc_work = self.scheduler.endpoint_has_doc_work(endpoint_id);
         if let Some(peer_state) = self.known_peer_set.get_mut(&conn_id) {
-            // In the one-shot doc worker model, pending doc cursors can briefly lag while
-            // new requests arrive faster than each snapshot round-trip completes.
-            // Treat "fully synced" as bootstrap complete + live stream ready.
-            let is_fully_synced =
-                peer_state.bootstrap_ready && peer_state.bootstrap_remaining_docs == 0 && peer_state.live_ready;
+            let is_fully_synced = peer_state.bootstrap_ready
+                && peer_state.bootstrap_remaining_docs == 0
+                && peer_state.live_ready
+                && !endpoint_has_doc_work
+                && peer_state.doc_pending_docs == 0;
             debug!(
                 endpoint_id = ?endpoint_id,
                 bootstrap_ready = peer_state.bootstrap_ready,
                 bootstrap_synced_docs = peer_state.bootstrap_synced_docs,
                 bootstrap_remaining_docs = peer_state.bootstrap_remaining_docs,
                 doc_pending_docs = peer_state.doc_pending_docs,
+                endpoint_has_doc_work,
                 emitted_full_synced = peer_state.emitted_full_synced,
                 live_ready = peer_state.live_ready,
                 is_fully_synced,
@@ -2872,10 +3061,6 @@ impl Worker {
 
         Ok(())
     }
-}
-
-fn heads_equal_as_set(left: &[automerge::ChangeHash], right: &[automerge::ChangeHash]) -> bool {
-    left.len() == right.len() && left.iter().all(|head| right.contains(head))
 }
 
 fn next_backoff_delay(previous: Duration, minimum: Duration) -> Duration {

@@ -107,12 +107,22 @@ impl BigRepo {
                 Ok(val) => val,
                 Err(_) => return Ok(None),
             };
-            let Some(doc) = self.load_automerge(&parsed).await? else {
-                return Ok(None);
+            let live_bundle = self
+                .live_bundles
+                .get(&parsed)
+                .and_then(|entry| entry.value().upgrade());
+            let automerge_save = if let Some(bundle) = live_bundle {
+                let doc = bundle.doc.lock().await;
+                doc.save()
+            } else {
+                let Some(doc) = self.load_automerge(&parsed).await? else {
+                    return Ok(None);
+                };
+                doc.save()
             };
             Ok(Some(FullDoc {
                 doc_id,
-                automerge_save: doc.save(),
+                automerge_save,
             }))
         }))
         .buffered_unordered(16)

@@ -36,7 +36,7 @@ automerge_sedimentree = { workspace = true }
 subduction_websocket = { workspace = true, features = ["tokio_base"] }
 future_form = "0.3.0"
 irpc = { version = "0.13.0", features = ["derive"] }
-irpc-iroh = "0.13.0"
+irpc-iroh = "0.12.0"
 automerge08 = { package = "automerge", version = "0.8.0" }
 tracing = { workspace = true }
 http.workspace = true

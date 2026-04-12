@@ -14,6 +14,7 @@ mod changes;
 mod partition;
 pub mod rpc;
 mod runtime;
+pub use runtime::SyncDocOutcome;
 
 pub use changes::{
     path_prefix_matches as big_repo_path_prefix_matches, BigRepoChangeNotification,
@@ -29,6 +30,7 @@ pub use changes::{
 
 pub type DocumentId = crate::ids::DocId32;
 pub type PeerId = crate::ids::PeerId32;
+pub const SUBDUCTION_ALPN: &[u8] = b"subduction/0";
 
 #[derive(Debug, Clone)]
 pub struct Config {
@@ -45,13 +47,15 @@ pub enum StorageConfig {
 struct LiveDocBundle {
     doc_id: DocumentId,
     doc: tokio::sync::Mutex<automerge::Automerge>,
+    _lease: runtime::RuntimeDocLease,
 }
 
 impl LiveDocBundle {
-    fn new(doc_id: DocumentId, doc: automerge::Automerge) -> Self {
+    fn new(doc_id: DocumentId, doc: automerge::Automerge, lease: runtime::RuntimeDocLease) -> Self {
         Self {
             doc_id,
             doc: tokio::sync::Mutex::new(doc),
+            _lease: lease,
         }
     }
 }
@@ -254,7 +258,8 @@ impl BigRepo {
         while self.local_contains_document(&doc_id).await? {
             doc_id = DocumentId::random();
         }
-        let bundle = Arc::new(LiveDocBundle::new(doc_id, initial_content));
+        let lease = self.runtime.acquire_doc_lease(doc_id).await?;
+        let bundle = Arc::new(LiveDocBundle::new(doc_id, initial_content, lease));
         self.persist_full_bundle(&bundle).await?;
         self.upsert_known_doc(bundle.doc_id).await?;
 
@@ -290,7 +295,8 @@ impl BigRepo {
         document_id: DocumentId,
         initial_content: automerge::Automerge,
     ) -> Res<BigDocHandle> {
-        let bundle = Arc::new(LiveDocBundle::new(document_id, initial_content));
+        let lease = self.runtime.acquire_doc_lease(document_id).await?;
+        let bundle = Arc::new(LiveDocBundle::new(document_id, initial_content, lease));
         self.persist_full_bundle(&bundle).await?;
         self.upsert_known_doc(bundle.doc_id).await?;
 
@@ -363,7 +369,8 @@ impl BigRepo {
         let Some(doc) = self.load_automerge(document_id).await? else {
             return Ok(None);
         };
-        let bundle = Arc::new(LiveDocBundle::new(*document_id, doc));
+        let lease = self.runtime.acquire_doc_lease(*document_id).await?;
+        let bundle = Arc::new(LiveDocBundle::new(*document_id, doc, lease));
         self.live_bundles
             .insert(*document_id, Arc::downgrade(&bundle));
         Ok(Some(bundle))
@@ -401,6 +408,56 @@ impl BigRepo {
         self.runtime
             .commit_delta(doc_id, commits, heads, patches, origin)
             .await
+    }
+
+    pub async fn ensure_peer_connection(
+        &self,
+        endpoint: iroh::Endpoint,
+        endpoint_addr: iroh::EndpointAddr,
+        peer_id: PeerId,
+    ) -> Res<()> {
+        self.runtime
+            .ensure_peer_connection(endpoint, endpoint_addr, peer_id)
+            .await
+    }
+
+    pub async fn remove_peer_connection(&self, peer_id: PeerId) -> Res<()> {
+        self.runtime.remove_peer_connection(peer_id).await
+    }
+
+    pub async fn accept_incoming_peer_connection(
+        &self,
+        quic_conn: iroh::endpoint::Connection,
+    ) -> Res<()> {
+        self.runtime.accept_incoming_connection(quic_conn).await
+    }
+
+    pub async fn sync_doc_with_peer(
+        &self,
+        doc_id: DocumentId,
+        peer_id: PeerId,
+        subscribe: bool,
+        timeout: Option<std::time::Duration>,
+    ) -> Res<SyncDocOutcome> {
+        let outcome = self
+            .runtime
+            .sync_doc_with_peer(doc_id, peer_id, subscribe, timeout)
+            .await?;
+        if matches!(outcome, SyncDocOutcome::Success) {
+            if let Some(bundle) = self
+                .live_bundles
+                .get(&doc_id)
+                .and_then(|entry| entry.value().upgrade())
+            {
+                if let Some(updated_doc) = self.runtime.load_doc(doc_id).await? {
+                    let mut doc = bundle.doc.lock().await;
+                    let mut updated_doc = updated_doc;
+                    doc.merge(&mut updated_doc)
+                        .wrap_err("failed merging synced remote doc into live bundle")?;
+                }
+            }
+        }
+        Ok(outcome)
     }
 }
 
@@ -554,6 +611,18 @@ impl BigDocHandle {
     where
         F: FnOnce(&mut automerge::Automerge) -> R,
     {
+        self.with_document_with_origin(operation, BigRepoChangeOrigin::Local)
+            .await
+    }
+
+    pub async fn with_document_with_origin<F, R>(
+        &self,
+        operation: F,
+        origin: BigRepoChangeOrigin,
+    ) -> Res<R>
+    where
+        F: FnOnce(&mut automerge::Automerge) -> R,
+    {
         let mut doc = self.bundle.doc.lock().await;
 
         let before_heads = doc.get_heads();
@@ -579,13 +648,7 @@ impl BigDocHandle {
             .collect::<Vec<_>>();
 
         self.repo
-            .apply_commit_delta(
-                *self.document_id(),
-                changes,
-                after_heads,
-                patches,
-                BigRepoChangeOrigin::Local,
-            )
+            .apply_commit_delta(*self.document_id(), changes, after_heads, patches, origin)
             .await?;
 
         Ok(out)

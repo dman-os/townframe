@@ -49,7 +49,7 @@ blake3.workspace = true
 # errors
 thiserror.workspace = true
 iroh = { workspace = true, optional = true }
-irpc = { version = "0.13.0", optional = true, features = ["derive"] }
+irpc = { version = "0.12.0", optional = true, features = ["derive"] }
 
 #
 # sync
@@ -61,6 +61,7 @@ sedimentree_fs_storage = { workspace = true }
 subduction_crypto = { workspace = true }
 subduction_keyhive = { workspace = true }
 subduction_keyhive_policy = { workspace = true }
+subduction_iroh = { workspace = true }
 future_form = { version = "0.3.0" }
 automerge_sedimentree = { workspace = true }
 subduction_websocket = { workspace = true, features = ["tokio_base"] }

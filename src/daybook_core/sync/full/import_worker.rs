@@ -20,11 +20,15 @@ pub(super) enum ImportDocOutcome {
     MissingOnRemote,
 }
 
+#[derive(Clone)]
+pub(super) struct ImportSyncTarget {
+    pub endpoint_id: EndpointId,
+}
+
 #[allow(clippy::too_many_arguments)]
 pub(super) fn spawn_import_sync_worker(
     doc_id: DocumentId,
-    endpoint_id: EndpointId,
-    endpoint_addr: iroh::EndpointAddr,
+    target: ImportSyncTarget,
     local_peer_key: PeerKey,
     cancel_token: CancellationToken,
     msg_tx: mpsc::UnboundedSender<Msg>,
@@ -35,8 +39,7 @@ pub(super) fn spawn_import_sync_worker(
     let stop_cancel_token = cancel_token.clone();
     let worker = ImportSyncWorker {
         doc_id,
-        endpoint_id,
-        endpoint_addr,
+        target,
         local_peer_key,
         cancel_token,
         msg_tx,
@@ -61,8 +64,7 @@ pub(super) fn spawn_import_sync_worker(
 
 struct ImportSyncWorker {
     doc_id: DocumentId,
-    endpoint_id: EndpointId,
-    endpoint_addr: iroh::EndpointAddr,
+    target: ImportSyncTarget,
     local_peer_key: PeerKey,
     cancel_token: CancellationToken,
     msg_tx: mpsc::UnboundedSender<Msg>,
@@ -78,9 +80,10 @@ impl ImportSyncWorker {
             self.complete(ImportDocOutcome::LocalPresent);
             return;
         }
+        let target = &self.target;
         let rpc_client = irpc_iroh::client::<am_utils_rs::repo::rpc::RepoSyncRpc>(
             self.iroh_endpoint.clone(),
-            self.endpoint_addr.clone(),
+            iroh::EndpointAddr::new(target.endpoint_id),
             REPO_SYNC_ALPN,
         );
         let rpc_response = tokio::select! {
@@ -95,12 +98,12 @@ impl ImportSyncWorker {
         let response = match rpc_response {
             Ok(Ok(response)) => response,
             Ok(Err(err)) => {
-                warn!(%doc_id_string, endpoint_id = ?self.endpoint_id, ?err, "repo GetDocsFull rejected in import worker");
+                warn!(%doc_id_string, endpoint_id = ?target.endpoint_id, ?err, "repo GetDocsFull rejected in import worker");
                 self.request_backoff(Duration::from_secs(2));
                 return;
             }
             Err(err) => {
-                warn!(%doc_id_string, endpoint_id = ?self.endpoint_id, ?err, "repo GetDocsFull rpc failed in import worker");
+                warn!(%doc_id_string, endpoint_id = ?target.endpoint_id, ?err, "repo GetDocsFull rpc failed in import worker");
                 self.request_backoff(Duration::from_secs(2));
                 return;
             }
@@ -119,6 +122,7 @@ impl ImportSyncWorker {
             Err(err) => {
                 warn!(
                     doc_id = full_doc.doc_id,
+                    endpoint_id = ?target.endpoint_id,
                     ?err,
                     "invalid automerge payload in import worker"
                 );
@@ -132,14 +136,14 @@ impl ImportSyncWorker {
             return;
         }
 
-        match self.big_repo.import_doc(self.doc_id.clone(), loaded).await {
+        match self.big_repo.import_doc(self.doc_id, loaded).await {
             Ok(_) => self.complete(ImportDocOutcome::Imported),
             Err(err) => {
                 if self.local_contains().await {
                     self.complete(ImportDocOutcome::LocalPresent);
                     return;
                 }
-                warn!(%doc_id_string, endpoint_id = ?self.endpoint_id, ?err, "local import failed in import worker");
+                warn!(%doc_id_string, endpoint_id = ?target.endpoint_id, ?err, "local import failed in import worker");
                 self.request_backoff(Duration::from_secs(2));
             }
         }
@@ -159,6 +163,7 @@ impl ImportSyncWorker {
         self.msg_tx
             .send(Msg::ImportDocCompleted {
                 doc_id: self.doc_id.clone(),
+                endpoint_id: self.target.endpoint_id,
                 outcome,
             })
             .expect("FullSyncWorker went down without cleaning import worker");
@@ -168,6 +173,7 @@ impl ImportSyncWorker {
         self.msg_tx
             .send(Msg::ImportDocBackoff {
                 doc_id: self.doc_id.clone(),
+                endpoint_id: self.target.endpoint_id,
                 delay,
                 previous_attempt_no: self.retry.attempt_no,
                 previous_backoff: self.retry.last_backoff,

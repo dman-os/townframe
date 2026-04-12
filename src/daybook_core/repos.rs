@@ -780,6 +780,34 @@ mod origin_tests {
     use am_utils_rs::repo::BigRepoChangeOrigin;
 
     #[test]
+    fn should_skip_live_patch_skips_local_and_keeps_unrelated_remote() {
+        let exclude_peer = crate::peer_id_from_label("peer-exclude");
+        assert!(should_skip_live_patch(
+            Some(&BigRepoChangeOrigin::Local),
+            Some(&exclude_peer)
+        ));
+
+        let other_peer = crate::peer_id_from_label("peer-other");
+        assert!(!should_skip_live_patch(
+            Some(&BigRepoChangeOrigin::Remote {
+                peer_id: other_peer
+            }),
+            Some(&exclude_peer)
+        ));
+    }
+
+    #[test]
+    fn should_skip_live_patch_skips_matching_remote_peer() {
+        let exclude_peer = crate::peer_id_from_label("peer-a");
+        assert!(should_skip_live_patch(
+            Some(&BigRepoChangeOrigin::Remote {
+                peer_id: exclude_peer
+            }),
+            Some(&exclude_peer)
+        ));
+    }
+
+    #[test]
     fn resolve_origin_from_vtag_actor_bootstrap_takes_precedence_over_local_actor_match() {
         let actor = automerge::ActorId::from([1_u8; 16]);
         let origin =
@@ -815,16 +843,17 @@ mod origin_tests {
     fn resolve_origin_from_vtag_actor_live_remote_maps_peer_id() {
         let local_actor = automerge::ActorId::from([1_u8; 16]);
         let vtag_actor = automerge::ActorId::from([2_u8; 16]);
+        let remote_peer_id = crate::peer_id_from_label("peer-123");
         let origin = resolve_origin_from_vtag_actor(
             &local_actor,
             &vtag_actor,
             Some(&BigRepoChangeOrigin::Remote {
-                peer_id: crate::peer_id_from_label("peer-123"),
+                peer_id: remote_peer_id,
             }),
         );
         assert!(matches!(
             origin,
-            crate::event_origin::SwitchEventOrigin::Remote { peer_id } if peer_id == "peer-123"
+            crate::event_origin::SwitchEventOrigin::Remote { peer_id } if peer_id == remote_peer_id.to_string()
         ));
     }
 

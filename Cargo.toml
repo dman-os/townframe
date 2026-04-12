@@ -227,7 +227,7 @@ clap_complete = "4.5"
 
 # 
 # networks
-iroh = "0.97.0"
+iroh = "0.96.1"
 
 [patch.crates-io]
 # wash-runtime = { path = "../wash/crates/wash-runtime/"}

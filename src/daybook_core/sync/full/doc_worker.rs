@@ -16,13 +16,8 @@ impl DocSyncWorkerStopToken {
 #[allow(clippy::too_many_arguments)]
 pub async fn spawn_doc_sync_worker(
     doc_id: DocumentId,
-    endpoint_id: EndpointId,
-    endpoint_addr: iroh::EndpointAddr,
-    conn_id: BigRepoConnectionId,
-    peer_key: PeerKey,
-    local_peer_key: PeerKey,
+    target: DocSyncTarget,
     big_repo: SharedBigRepo,
-    iroh_endpoint: iroh::Endpoint,
     cancel_token: CancellationToken,
     msg_tx: mpsc::UnboundedSender<Msg>,
     retry: RetryState,
@@ -30,13 +25,8 @@ pub async fn spawn_doc_sync_worker(
     let stop_cancel_token = cancel_token.clone();
     let worker = DocSyncWorker {
         doc_id,
-        endpoint_id,
-        endpoint_addr,
-        conn_id,
-        peer_key,
-        local_peer_key,
+        target,
         big_repo,
-        iroh_endpoint,
         msg_tx,
         retry,
     };
@@ -56,77 +46,41 @@ pub async fn spawn_doc_sync_worker(
 
 struct DocSyncWorker {
     doc_id: DocumentId,
-    endpoint_id: EndpointId,
-    endpoint_addr: iroh::EndpointAddr,
-    conn_id: BigRepoConnectionId,
-    peer_key: PeerKey,
-    local_peer_key: PeerKey,
+    target: DocSyncTarget,
     big_repo: SharedBigRepo,
-    iroh_endpoint: iroh::Endpoint,
     msg_tx: mpsc::UnboundedSender<Msg>,
     retry: RetryState,
+}
+
+#[derive(Clone)]
+pub struct DocSyncTarget {
+    pub endpoint_id: EndpointId,
+    pub peer_id: am_utils_rs::repo::PeerId,
 }
 
 impl DocSyncWorker {
     async fn run(self, cancel_token: CancellationToken) {
         let res: Res<()> = async {
-            let Some(local_handle) = self.big_repo.find_doc_handle(&self.doc_id).await? else {
+            if self.big_repo.find_doc_handle(&self.doc_id).await?.is_none() {
                 self.handle_missing_doc();
                 return Ok(());
-            };
-
-            let rpc_client = irpc_iroh::client::<am_utils_rs::repo::rpc::RepoSyncRpc>(
-                self.iroh_endpoint.clone(),
-                self.endpoint_addr.clone(),
-                REPO_SYNC_ALPN,
-            );
-
-            let req = am_utils_rs::repo::rpc::GetDocsFullRpcReq {
-                peer: self.local_peer_key.clone(),
-                req: am_utils_rs::repo::rpc::GetDocsFullRequest {
-                    doc_ids: vec![self.doc_id.to_string()],
-                },
-            };
-            let response = tokio::select! {
-                _ = cancel_token.cancelled() => return Ok(()),
-                out = rpc_client.rpc(req) => out,
             }
-            .wrap_err("repo get docs full rpc failed")?
-            .map_err(|err| ferr!("repo get docs full rejected: {err:?}"))?;
 
-            let Some(full_doc) = response
-                .docs
-                .into_iter()
-                .find(|item| item.doc_id == self.doc_id.to_string())
-            else {
-                self.handle_timeout();
-                return Ok(());
+            let outcome = tokio::select! {
+                _ = cancel_token.cancelled() => return Ok(()),
+                out = self.big_repo.sync_doc_with_peer(
+                    self.doc_id,
+                    self.target.peer_id,
+                    false,
+                    Some(Duration::from_secs(10)),
+                ) => out?,
             };
 
-            let mut remote_doc = automerge::Automerge::load(&full_doc.automerge_save)
-                .map_err(|err| ferr!("invalid remote automerge payload: {err}"))?;
-
-            local_handle
-                .with_document(|local_doc| -> Res<()> {
-                    local_doc.merge(&mut remote_doc)?;
-                    Ok(())
-                })
-                .await
-                .wrap_err("failed applying remote doc merge")??;
-
-            let heads = local_handle.with_document_read(|doc| doc.get_heads()).await;
-            let mut diff = HashMap::new();
-            diff.insert(
-                self.conn_id,
-                BigRepoPeerDocState {
-                    shared_heads: Some(heads.clone()),
-                    their_heads: Some(heads),
-                },
-            );
             self.msg_tx
-                .send(Msg::DocPeerStateViewUpdated {
-                    doc_id: self.doc_id.clone(),
-                    diff,
+                .send(Msg::DocSyncCompleted {
+                    doc_id: self.doc_id,
+                    endpoint_id: self.target.endpoint_id,
+                    outcome,
                 })
                 .expect("FullSyncWorker went down without cleaning doc sync worker");
             Ok(())
@@ -136,8 +90,7 @@ impl DocSyncWorker {
         if let Err(err) = res {
             warn!(
                 doc_id = %self.doc_id,
-                endpoint_id = ?self.endpoint_id,
-                peer_key = %self.peer_key,
+                endpoint_id = ?self.target.endpoint_id,
                 ?err,
                 "doc sync worker failed"
             );
@@ -148,7 +101,8 @@ impl DocSyncWorker {
     fn handle_timeout(&self) {
         self.msg_tx
             .send(Msg::DocSyncRequestBackoff {
-                doc_id: self.doc_id.clone(),
+                doc_id: self.doc_id,
+                endpoint_id: self.target.endpoint_id,
                 delay: Duration::from_millis(500),
                 previous_attempt_no: self.retry.attempt_no,
                 previous_backoff: self.retry.last_backoff,
@@ -160,7 +114,7 @@ impl DocSyncWorker {
     fn handle_missing_doc(&self) {
         self.msg_tx
             .send(Msg::DocSyncMissingLocal {
-                doc_id: self.doc_id.clone(),
+                doc_id: self.doc_id,
             })
             .expect("FullSyncWorker went down without cleaning boot_doc_sync_worker");
     }

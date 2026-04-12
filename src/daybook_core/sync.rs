@@ -21,9 +21,28 @@ pub const REPO_SYNC_ALPN: &[u8] = b"townframe/repo-sync/0";
 pub const CLONE_PROVISION_ALPN: &[u8] = b"townframe/clone-provision/0";
 pub const CORE_DOCS_PARTITION_ID: &str = "core.docs";
 
+#[derive(Debug, Clone)]
+struct SubductionProtocolHandler {
+    big_repo: Arc<am_utils_rs::repo::BigRepo>,
+}
+
+impl iroh::protocol::ProtocolHandler for SubductionProtocolHandler {
+    async fn accept(
+        &self,
+        connection: iroh::endpoint::Connection,
+    ) -> Result<(), iroh::protocol::AcceptError> {
+        self.big_repo
+            .accept_incoming_peer_connection(connection)
+            .await
+            .map_err(|err| iroh::protocol::AcceptError::from_boxed(err.into()))
+    }
+}
+
 enum ActivePeerState {
     Connecting,
-    Connected { peer_key: am_utils_rs::sync::protocol::PeerKey },
+    Connected {
+        peer_key: am_utils_rs::sync::protocol::PeerKey,
+    },
 }
 
 pub struct IrohSyncRepo {
@@ -37,7 +56,7 @@ pub struct IrohSyncRepo {
     _doc_blobs_index_repo: Arc<DocBlobsIndexRepo>,
     progress_repo: Option<Arc<ProgressRepo>>,
 
-    active_samod_peers: tokio::sync::RwLock<HashMap<EndpointId, ActivePeerState>>,
+    active_peers: tokio::sync::RwLock<HashMap<EndpointId, ActivePeerState>>,
     full_sync_handle: full::WorkerHandle,
     sync_store: am_utils_rs::sync::store::SyncStoreHandle,
     reconnect_task_cancel: CancellationToken,
@@ -148,8 +167,7 @@ impl IrohSyncRepo {
         doc_blobs_index_repo: Arc<DocBlobsIndexRepo>,
         progress_repo: Option<Arc<ProgressRepo>>,
     ) -> Res<(Arc<Self>, IrohSyncRepoStopToken)> {
-        let endpoint_builder = iroh::Endpoint::builder(iroh::endpoint::presets::N0)
-            .secret_key(rcx.iroh_secret_key.clone());
+        let endpoint_builder = iroh::Endpoint::builder().secret_key(rcx.iroh_secret_key.clone());
         #[cfg(test)]
         let endpoint_builder = endpoint_builder
             .relay_mode(iroh::RelayMode::Disabled)
@@ -197,6 +215,12 @@ impl IrohSyncRepo {
                 ),
             )
             .accept(
+                am_utils_rs::repo::SUBDUCTION_ALPN,
+                SubductionProtocolHandler {
+                    big_repo: Arc::clone(&rcx.big_repo),
+                },
+            )
+            .accept(
                 CLONE_PROVISION_ALPN,
                 irpc_iroh::IrohProtocol::<bootstrap::CloneProvisionRpc>::with_sender(
                     clone_rpc_tx.clone(),
@@ -232,7 +256,7 @@ impl IrohSyncRepo {
             progress_repo,
             cancel_token: cancel_token.clone(),
             registry: crate::repos::ListenersRegistry::new(),
-            active_samod_peers: default(),
+            active_peers: default(),
             full_sync_handle,
             sync_store: partition_sync_store.clone(),
             reconnect_task_cancel: reconnect_task_cancel.clone(),
@@ -260,9 +284,7 @@ impl IrohSyncRepo {
             let repo = Arc::clone(&repo);
             let full_stop_token = full_stop_token;
             async move {
-                let loop_res = repo
-                    .machine_loop(full_sync_rx)
-                    .await;
+                let loop_res = repo.machine_loop(full_sync_rx).await;
                 let full_stop_res = full_stop_token.stop().await;
                 #[cfg(test)]
                 bootstrap::unregister_test_clone_rpc_sender(router_for_shutdown.endpoint().id())
@@ -398,7 +420,22 @@ impl IrohSyncRepo {
             }
         }
         // cleanup
-        self.active_samod_peers.write().await.clear();
+        let active_peers = self
+            .active_peers
+            .read()
+            .await
+            .keys()
+            .copied()
+            .collect::<Vec<_>>();
+        for endpoint_id in active_peers {
+            self.full_sync_handle.del_connection(endpoint_id).await.ok();
+            self.rcx
+                .big_repo
+                .remove_peer_connection(am_utils_rs::repo::PeerId::new(*endpoint_id.as_bytes()))
+                .await
+                .ok();
+        }
+        self.active_peers.write().await.clear();
         eyre::Ok(())
     }
 
@@ -473,26 +510,29 @@ impl IrohSyncRepo {
         })
     }
 
-    fn peer_key_for_endpoint(&self, endpoint_id: EndpointId) -> am_utils_rs::sync::protocol::PeerKey {
+    fn peer_key_for_endpoint(
+        &self,
+        endpoint_id: EndpointId,
+    ) -> am_utils_rs::sync::protocol::PeerKey {
         format!("/{}/{}", self.rcx.repo_id, endpoint_id)
     }
 
     async fn reserve_endpoint_connection(&self, endpoint_id: EndpointId) -> bool {
-        let mut active_samod_peers = self.active_samod_peers.write().await;
-        if active_samod_peers.contains_key(&endpoint_id) {
+        let mut active_peers = self.active_peers.write().await;
+        if active_peers.contains_key(&endpoint_id) {
             return false;
         }
-        active_samod_peers.insert(endpoint_id, ActivePeerState::Connecting);
+        active_peers.insert(endpoint_id, ActivePeerState::Connecting);
         true
     }
 
     async fn clear_endpoint_if_connecting(&self, endpoint_id: EndpointId) {
-        let mut active_samod_peers = self.active_samod_peers.write().await;
+        let mut active_peers = self.active_peers.write().await;
         if matches!(
-            active_samod_peers.get(&endpoint_id),
+            active_peers.get(&endpoint_id),
             Some(ActivePeerState::Connecting)
         ) {
-            active_samod_peers.remove(&endpoint_id);
+            active_peers.remove(&endpoint_id);
         }
     }
 
@@ -507,6 +547,14 @@ impl IrohSyncRepo {
         self.sync_store
             .allow_peer(peer_key.clone(), Some(endpoint_id))
             .await?;
+        self.rcx
+            .big_repo
+            .ensure_peer_connection(
+                self.router.endpoint().clone(),
+                endpoint_addr.clone(),
+                am_utils_rs::repo::PeerId::new(*endpoint_id.as_bytes()),
+            )
+            .await?;
         if let Err(err) = self
             .full_sync_handle
             .set_connection(
@@ -518,12 +566,17 @@ impl IrohSyncRepo {
             )
             .await
         {
+            self.rcx
+                .big_repo
+                .remove_peer_connection(am_utils_rs::repo::PeerId::new(*endpoint_id.as_bytes()))
+                .await
+                .ok();
             self.clear_endpoint_if_connecting(endpoint_id).await;
             return Err(err);
         }
 
         let old = self
-            .active_samod_peers
+            .active_peers
             .write()
             .await
             .insert(endpoint_id, ActivePeerState::Connected { peer_key });
@@ -536,23 +589,41 @@ impl IrohSyncRepo {
         endpoint_id: EndpointId,
         peer_key: am_utils_rs::sync::protocol::PeerKey,
     ) -> Res<()> {
-        if self.active_samod_peers.read().await.contains_key(&endpoint_id) {
+        if self.active_peers.read().await.contains_key(&endpoint_id) {
             return Ok(());
         }
         let partition_ids = self.peer_partition_ids(&peer_key);
         self.sync_store
             .allow_peer(peer_key.clone(), Some(endpoint_id))
             .await?;
-        self.full_sync_handle
+        let endpoint_addr = iroh::EndpointAddr::new(endpoint_id);
+        self.rcx
+            .big_repo
+            .ensure_peer_connection(
+                self.router.endpoint().clone(),
+                endpoint_addr.clone(),
+                am_utils_rs::repo::PeerId::new(*endpoint_id.as_bytes()),
+            )
+            .await?;
+        if let Err(err) = self
+            .full_sync_handle
             .set_connection(
                 endpoint_id,
-                iroh::EndpointAddr::new(endpoint_id),
+                endpoint_addr,
                 endpoint_id,
                 peer_key.clone(),
                 partition_ids,
             )
-            .await?;
-        self.active_samod_peers
+            .await
+        {
+            self.rcx
+                .big_repo
+                .remove_peer_connection(am_utils_rs::repo::PeerId::new(*endpoint_id.as_bytes()))
+                .await
+                .ok();
+            return Err(err);
+        }
+        self.active_peers
             .write()
             .await
             .insert(endpoint_id, ActivePeerState::Connected { peer_key });
@@ -610,6 +681,22 @@ impl IrohSyncRepo {
             full::FullSyncEvent::StalePeer { endpoint_id } => self
                 .registry
                 .notify([IrohSyncEvent::StalePeer { endpoint_id }]),
+            full::FullSyncEvent::PeerConnectionLost {
+                endpoint_id,
+                reason,
+            } => {
+                self.full_sync_handle.del_connection(endpoint_id).await.ok();
+                self.rcx
+                    .big_repo
+                    .remove_peer_connection(am_utils_rs::repo::PeerId::new(*endpoint_id.as_bytes()))
+                    .await
+                    .ok();
+                self.active_peers.write().await.remove(&endpoint_id);
+                self.registry.notify([IrohSyncEvent::ConnectionClosed {
+                    endpoint_id,
+                    reason,
+                }]);
+            }
         }
         Ok(())
     }
@@ -753,7 +840,7 @@ impl IrohSyncRepo {
                     })
                     .unwrap_or_default();
                 let connected_peers = self
-                    .active_samod_peers
+                    .active_peers
                     .read()
                     .await
                     .keys()
