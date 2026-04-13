@@ -159,67 +159,75 @@ impl DrawerRepo {
 
     pub(super) async fn migrate_legacy_local_branches_from_drawer_map(&self) -> Res<()> {
         let mut migrated_rows: Vec<(DocId, daybook_types::doc::BranchPath, String)> = Vec::new();
-        let (changed, drawer_heads) = self.drawer_am_handle.with_document(|doc| {
-            let current_heads = ChangeHashSet(doc.get_heads().into());
-            let map_id = match doc.get(automerge::ROOT, "docs")? {
-                Some((automerge::Value::Object(automerge::ObjType::Map), id)) => {
-                    match doc.get(&id, "map")? {
-                        Some((automerge::Value::Object(automerge::ObjType::Map), id)) => id,
-                        _ => eyre::bail!("invalid drawer shape"),
+        let (changed, drawer_heads) = self
+            .drawer_am_handle
+            .with_document(|doc| {
+                let current_heads = ChangeHashSet(doc.get_heads().into());
+                let map_id = match doc.get(automerge::ROOT, "docs")? {
+                    Some((automerge::Value::Object(automerge::ObjType::Map), id)) => {
+                        match doc.get(&id, "map")? {
+                            Some((automerge::Value::Object(automerge::ObjType::Map), id)) => id,
+                            _ => eyre::bail!("invalid drawer shape"),
+                        }
+                    }
+                    None => return eyre::Ok((false, current_heads)),
+                    _ => eyre::bail!("invalid drawer shape"),
+                };
+
+                let mut updates: Vec<(DocId, DocEntry)> = Vec::new();
+                for item in doc.map_range(&map_id, ..) {
+                    let doc_id = DocId::from(item.key.clone());
+                    let entry: DocEntry =
+                        autosurgeon::hydrate_prop::<_, DocEntry, _, _>(doc, &map_id, item.key)?;
+                    let mut next_entry = entry.clone();
+                    let mut moved_any = false;
+                    let mut branch_names: Vec<String> =
+                        next_entry.branches.keys().cloned().collect();
+                    branch_names.sort();
+                    for branch_name in branch_names {
+                        let branch_path: daybook_types::doc::BranchPath =
+                            daybook_types::doc::BranchPath::from(branch_name.as_str());
+                        if branch_path == "/tmp" || branch_path.starts_with("/tmp/") {
+                            let Some(branch_ref) = next_entry.branches.remove(&branch_name) else {
+                                continue;
+                            };
+                            migrated_rows.push((
+                                doc_id.clone(),
+                                branch_path,
+                                branch_ref.branch_doc_id,
+                            ));
+                            moved_any = true;
+                        }
+                    }
+                    if moved_any {
+                        next_entry.vtag = VersionTag::update(self.local_actor_id.clone());
+                        next_entry.previous_version_heads = Some(current_heads.clone());
+                        updates.push((doc_id, next_entry));
                     }
                 }
-                None => return eyre::Ok((false, current_heads)),
-                _ => eyre::bail!("invalid drawer shape"),
-            };
 
-            let mut updates: Vec<(DocId, DocEntry)> = Vec::new();
-            for item in doc.map_range(&map_id, ..) {
-                let doc_id = DocId::from(item.key.clone());
-                let entry: DocEntry =
-                    autosurgeon::hydrate_prop::<_, DocEntry, _, _>(doc, &map_id, item.key)?;
-                let mut next_entry = entry.clone();
-                let mut moved_any = false;
-                let mut branch_names: Vec<String> = next_entry.branches.keys().cloned().collect();
-                branch_names.sort();
-                for branch_name in branch_names {
-                    let branch_path: daybook_types::doc::BranchPath =
-                        daybook_types::doc::BranchPath::from(branch_name.as_str());
-                    if branch_path == "/tmp" || branch_path.starts_with("/tmp/") {
-                        let Some(branch_ref) = next_entry.branches.remove(&branch_name) else {
-                            continue;
-                        };
-                        migrated_rows.push((doc_id.clone(), branch_path, branch_ref.branch_doc_id));
-                        moved_any = true;
+                if updates.is_empty() {
+                    return eyre::Ok((false, current_heads));
+                }
+
+                let mut tx = doc.transaction();
+                let map_id = match tx.get(automerge::ROOT, "docs")? {
+                    Some((automerge::Value::Object(automerge::ObjType::Map), id)) => {
+                        match tx.get(&id, "map")? {
+                            Some((automerge::Value::Object(automerge::ObjType::Map), id)) => id,
+                            _ => eyre::bail!("invalid drawer shape"),
+                        }
                     }
+                    _ => eyre::bail!("invalid drawer shape"),
+                };
+                for (doc_id, entry) in updates {
+                    autosurgeon::reconcile_prop(&mut tx, &map_id, &*doc_id, entry)?;
                 }
-                if moved_any {
-                    next_entry.vtag = VersionTag::update(self.local_actor_id.clone());
-                    next_entry.previous_version_heads = Some(current_heads.clone());
-                    updates.push((doc_id, next_entry));
-                }
-            }
-
-            if updates.is_empty() {
-                return eyre::Ok((false, current_heads));
-            }
-
-            let mut tx = doc.transaction();
-            let map_id = match tx.get(automerge::ROOT, "docs")? {
-                Some((automerge::Value::Object(automerge::ObjType::Map), id)) => {
-                    match tx.get(&id, "map")? {
-                        Some((automerge::Value::Object(automerge::ObjType::Map), id)) => id,
-                        _ => eyre::bail!("invalid drawer shape"),
-                    }
-                }
-                _ => eyre::bail!("invalid drawer shape"),
-            };
-            for (doc_id, entry) in updates {
-                autosurgeon::reconcile_prop(&mut tx, &map_id, &*doc_id, entry)?;
-            }
-            let (heads, _) = tx.commit();
-            let head = heads.expect("commit failed");
-            eyre::Ok((true, ChangeHashSet(Arc::from([head]))))
-        })?;
+                let (heads, _) = tx.commit();
+                let head = heads.expect("commit failed");
+                eyre::Ok((true, ChangeHashSet(Arc::from([head]))))
+            })
+            .await??;
 
         if migrated_rows.is_empty() {
             return Ok(());
@@ -381,30 +389,36 @@ impl DrawerRepo {
             .map(Some)
     }
 
-    pub(super) fn current_drawer_entries(&self) -> Res<(ChangeHashSet, Vec<(DocId, DocEntry)>)> {
-        self.drawer_am_handle.with_document(|doc| {
-            let drawer_heads = ChangeHashSet(doc.get_heads().into());
-            let map_id = match doc.get(automerge::ROOT, "docs")? {
-                Some((automerge::Value::Object(automerge::ObjType::Map), id)) => {
-                    match doc.get(&id, "map")? {
-                        Some((automerge::Value::Object(automerge::ObjType::Map), id)) => id,
-                        _ => eyre::bail!("invalid drawer shape"),
+    pub(super) async fn current_drawer_entries(
+        &self,
+    ) -> Res<(ChangeHashSet, Vec<(DocId, DocEntry)>)> {
+        Ok(self
+            .drawer_am_handle
+            .with_document(|doc| {
+                let drawer_heads = ChangeHashSet(doc.get_heads().into());
+                let map_id = match doc.get(automerge::ROOT, "docs")? {
+                    Some((automerge::Value::Object(automerge::ObjType::Map), id)) => {
+                        match doc.get(&id, "map")? {
+                            Some((automerge::Value::Object(automerge::ObjType::Map), id)) => id,
+                            _ => eyre::bail!("invalid drawer shape"),
+                        }
+                    }
+                    None => return eyre::Ok((drawer_heads, Vec::new())),
+                    _ => eyre::bail!("invalid drawer shape"),
+                };
+
+                let mut entries = Vec::new();
+                for item in doc.map_range(&map_id, ..) {
+                    let doc_id = DocId::from(item.key.clone());
+                    let entry: Option<DocEntry> =
+                        autosurgeon::hydrate_prop(doc, &map_id, item.key)?;
+                    if let Some(entry) = entry {
+                        entries.push((doc_id, entry));
                     }
                 }
-                None => return eyre::Ok((drawer_heads, Vec::new())),
-                _ => eyre::bail!("invalid drawer shape"),
-            };
-
-            let mut entries = Vec::new();
-            for item in doc.map_range(&map_id, ..) {
-                let doc_id = DocId::from(item.key.clone());
-                let entry: Option<DocEntry> = autosurgeon::hydrate_prop(doc, &map_id, item.key)?;
-                if let Some(entry) = entry {
-                    entries.push((doc_id, entry));
-                }
-            }
-            eyre::Ok((drawer_heads, entries))
-        })
+                eyre::Ok((drawer_heads, entries))
+            })
+            .await??)
     }
 
     pub(super) async fn hydrate_entry_at_heads(

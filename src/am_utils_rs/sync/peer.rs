@@ -2,6 +2,7 @@ use crate::interlude::*;
 
 use crate::sync::protocol::*;
 use crate::sync::store::SyncStoreHandle;
+use crate::DocumentId;
 
 use std::collections::HashMap;
 use std::time::Instant;
@@ -9,7 +10,7 @@ use tokio::sync::{broadcast, mpsc};
 use tokio_util::sync::CancellationToken;
 
 #[derive(Debug, Clone)]
-pub enum SamodSyncRequest {
+pub enum DocSyncRequest {
     PartitionMemberEvent {
         peer_key: PeerKey,
         event: PartitionMemberEvent,
@@ -21,13 +22,13 @@ pub enum SamodSyncRequest {
     RequestDocSync {
         peer_key: PeerKey,
         partition_id: PartitionId,
-        doc_id: String,
+        doc_id: DocumentId,
         cursor: u64,
     },
     ImportDoc {
         peer_key: PeerKey,
         partition_id: PartitionId,
-        doc_id: String,
+        doc_id: DocumentId,
         cursor: u64,
     },
     /// NOTE: this doesn't mean a request for deletion from repo (since that's not yet
@@ -36,13 +37,13 @@ pub enum SamodSyncRequest {
     DocDeleted {
         peer_key: PeerKey,
         partition_id: PartitionId,
-        doc_id: String,
+        doc_id: DocumentId,
         cursor: u64,
     },
 }
 
 #[derive(Debug, Clone)]
-pub enum SamodSyncAck {
+pub enum DocSyncAck {
     MemberCursorAdvanced {
         partition_id: PartitionId,
         cursor: u64,
@@ -53,7 +54,7 @@ pub enum SamodSyncAck {
     },
     DocSynced {
         partition_id: PartitionId,
-        doc_id: String,
+        doc_id: DocumentId,
         cursor: u64,
     },
 }
@@ -98,8 +99,8 @@ pub struct SpawnPeerSyncWorkerArgs {
     pub remote_peer: PeerKey,
     pub rpc_client: irpc::Client<PartitionSyncRpc>,
     pub sync_store: SyncStoreHandle,
-    pub samod_sync_tx: mpsc::Sender<SamodSyncRequest>,
-    pub samod_ack_rx: mpsc::Receiver<SamodSyncAck>,
+    pub doc_sync_tx: mpsc::Sender<DocSyncRequest>,
+    pub doc_ack_rx: mpsc::Receiver<DocSyncAck>,
     pub target_partitions: Vec<PartitionId>,
 }
 
@@ -134,8 +135,8 @@ pub async fn spawn_peer_sync_worker(
         remote_peer: args.remote_peer.clone(),
         rpc_client: args.rpc_client,
         sync_store: args.sync_store,
-        samod_sync_tx: args.samod_sync_tx,
-        samod_ack_rx: args.samod_ack_rx,
+        doc_sync_tx: args.doc_sync_tx,
+        doc_ack_rx: args.doc_ack_rx,
         target_partitions: args.target_partitions,
         progress_tx,
         events_tx: events_tx.clone(),
@@ -199,12 +200,12 @@ pub async fn spawn_peer_sync_worker(
             }
             tokio::select! {
                 biased;
-                recv = worker.samod_ack_rx.recv() => {
+                recv = worker.doc_ack_rx.recv() => {
                     let Some(ack) = recv else {
-                        debug!("samod ack channel closed; stopping peer sync worker");
+                        debug!("doc ack channel closed; stopping peer sync worker");
                         break;
                     };
-                    worker.handle_samod_ack(ack).await?;
+                    worker.handle_doc_ack(ack).await?;
                 }
                 recv = rpc_rx.recv() => {
                     let item = recv
@@ -280,8 +281,8 @@ struct PeerSyncWorker {
     remote_peer: PeerKey,
     rpc_client: irpc::Client<PartitionSyncRpc>,
     sync_store: SyncStoreHandle,
-    samod_sync_tx: mpsc::Sender<SamodSyncRequest>,
-    samod_ack_rx: mpsc::Receiver<SamodSyncAck>,
+    doc_sync_tx: mpsc::Sender<DocSyncRequest>,
+    doc_ack_rx: mpsc::Receiver<DocSyncAck>,
     target_partitions: Vec<PartitionId>,
     progress_tx: broadcast::Sender<PeerSyncProgressEvent>,
     events_tx: broadcast::Sender<PeerSyncWorkerEvent>,
@@ -389,13 +390,13 @@ impl PeerSyncWorker {
                     );
                     return Ok(());
                 }
-                self.samod_sync_tx
-                    .send(SamodSyncRequest::PartitionMemberEvent {
+                self.doc_sync_tx
+                    .send(DocSyncRequest::PartitionMemberEvent {
                         peer_key: self.remote_peer.clone(),
                         event,
                     })
                     .await
-                    .map_err(|err| eyre::eyre!("samod sync channel closed: {err}"))?;
+                    .map_err(|err| eyre::eyre!("doc sync channel closed: {err}"))?;
                 Ok(())
             }
             SubscriptionItem::DocEvent(event) => {
@@ -410,13 +411,13 @@ impl PeerSyncWorker {
                     );
                     return Ok(());
                 }
-                self.samod_sync_tx
-                    .send(SamodSyncRequest::PartitionDocEvent {
+                self.doc_sync_tx
+                    .send(DocSyncRequest::PartitionDocEvent {
                         peer_key: self.remote_peer.clone(),
                         event,
                     })
                     .await
-                    .map_err(|err| eyre::eyre!("samod sync channel closed: {err}"))?;
+                    .map_err(|err| eyre::eyre!("doc sync channel closed: {err}"))?;
                 Ok(())
             }
         }
@@ -462,20 +463,20 @@ impl PeerSyncWorker {
         Ok(())
     }
 
-    async fn handle_samod_ack(&mut self, ack: SamodSyncAck) -> Res<()> {
+    async fn handle_doc_ack(&mut self, ack: DocSyncAck) -> Res<()> {
         match ack {
-            SamodSyncAck::MemberCursorAdvanced {
+            DocSyncAck::MemberCursorAdvanced {
                 partition_id,
                 cursor,
             } => {
                 self.apply_member_cursor_advance_ack(partition_id, cursor)
                     .await
             }
-            SamodSyncAck::CursorAdvanced {
+            DocSyncAck::CursorAdvanced {
                 partition_id,
                 cursor,
             }
-            | SamodSyncAck::DocSynced {
+            | DocSyncAck::DocSynced {
                 partition_id,
                 doc_id: _,
                 cursor,

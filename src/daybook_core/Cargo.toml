@@ -89,7 +89,6 @@ uniffi = { workspace = true, features = ["cli"] }
 # sync
 autosurgeon = { workspace = true, features = ["uuid"] }
 automerge = { workspace = true }
-samod = { workspace = true, features = ["tokio", "tungstenite-rustls-webpki-roots"] }
 
 #
 # http
@@ -130,10 +129,10 @@ jsonschema = { version = "0.42.0", default-features = false }
 #
 # sync
 iroh = { workspace = true }
-iroh-tickets = "0.4.0"
-iroh-blobs = "0.99.0"
-iroh-docs = "0.97.0"
-iroh-gossip = "0.97.0"
+iroh-tickets = "0.3.0"
+iroh-blobs = "0.98.0"
+iroh-docs = "0.96.0"
+iroh-gossip = "0.96.0"
 
 #
 # os
@@ -141,8 +140,8 @@ directories.workspace = true
 fs4.workspace = true
 rand.workspace = true
 keyring = { version = "3.6.3", default-features = false }
-irpc-iroh = "0.13.0"
-irpc = "0.13.0"
+irpc-iroh = "0.12.0"
+irpc = "0.12.0"
 tempfile = { workspace = true, optional = true }
 
 [target.'cfg(target_os = "linux")'.dependencies]

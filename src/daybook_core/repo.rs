@@ -5,11 +5,7 @@ use crate::app::*;
 
 use am_utils_rs::partition::PartitionStore;
 use fs4::fs_std::FileExt;
-use sqlx::sqlite::SqliteConnectOptions;
 use sqlx::SqlitePool;
-use std::str::FromStr;
-use tokio::sync::broadcast;
-use tokio_util::sync::CancellationToken;
 
 const REPO_MARKER_FILE: &str = "db.repo.txt";
 const REPO_USER_ID_KEY: &str = "repo.user_id";
@@ -103,8 +99,8 @@ pub struct RepoCtx {
     pub big_repo: SharedBigRepo,
     big_repo_stop: std::sync::Mutex<Option<am_utils_rs::BigRepoStopToken>>,
 
-    pub doc_app: samod::DocHandle,
-    pub doc_drawer: samod::DocHandle,
+    pub doc_app: am_utils_rs::repo::BigDocHandle,
+    pub doc_drawer: am_utils_rs::repo::BigDocHandle,
 
     pub local_actor_id: automerge::ActorId,
     pub local_user_path: String,
@@ -197,48 +193,18 @@ impl RepoCtx {
             device_bs58
         );
         let local_user_path = format!("/{repo_user_id}/{device_id}");
-        let peer_id = format!("/{}/{}", identity.repo_id, iroh_public_key);
         let am_config = am_utils_rs::repo::Config {
             storage: am_utils_rs::repo::StorageConfig::Disk {
                 path: layout.samod_root.clone(),
-                big_repo_sqlite_url: None,
             },
-            peer_id,
+            peer_id: identity.iroh_public_key.into(),
         };
         let local_actor_id = daybook_types::doc::user_path::to_actor_id(
             &daybook_types::doc::UserPath::from(local_user_path.clone()),
         );
 
-        let big_repo_sqlite_url = format!(
-            "sqlite://{}",
-            layout.repo_root.join("big_repo.sqlite").display()
-        );
-        let connect_options = SqliteConnectOptions::from_str(&big_repo_sqlite_url)
-            .wrap_err_with(|| format!("invalid sqlite url: {big_repo_sqlite_url}"))?
-            .create_if_missing(true);
-        let partition_pool = sqlx::sqlite::SqlitePoolOptions::new()
-            .max_connections(1)
-            .connect_with(connect_options)
-            .await
-            .wrap_err("failed connecting big repo sqlite")?;
-        let (partition_events_tx, _) =
-            broadcast::channel(am_utils_rs::sync::protocol::DEFAULT_SUBSCRIPTION_CAPACITY);
-        let partition_forwarder_cancel = CancellationToken::new();
-        let partition_forwarders = Arc::new(utils_rs::AbortableJoinSet::new());
-        let partition_store = Arc::new(PartitionStore::new(
-            partition_pool,
-            partition_events_tx,
-            partition_forwarder_cancel.clone(),
-            Arc::clone(&partition_forwarders),
-        ));
-        partition_store.ensure_schema().await?;
-        let (big_repo, big_repo_stop) = am_utils_rs::BigRepo::boot_with_partition_store(
-            am_config,
-            Arc::clone(&partition_store),
-            partition_forwarder_cancel,
-            partition_forwarders,
-        )
-        .await?;
+        let (big_repo, big_repo_stop) = am_utils_rs::BigRepo::boot(am_config).await?;
+        let partition_store = big_repo.partition_store();
 
         let doc_app_cell = tokio::sync::OnceCell::new();
         let doc_drawer_cell = tokio::sync::OnceCell::new();
@@ -302,8 +268,8 @@ impl RepoCtx {
 
     async fn run_repo_init_dance(
         big_repo: &SharedBigRepo,
-        doc_app: &samod::DocHandle,
-        doc_drawer: &samod::DocHandle,
+        doc_app: &am_utils_rs::repo::BigDocHandle,
+        doc_drawer: &am_utils_rs::repo::BigDocHandle,
         local_user_path: &str,
         sql: &SqlitePool,
         blobs_root: std::path::PathBuf,

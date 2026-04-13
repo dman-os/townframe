@@ -38,14 +38,14 @@ pub struct InitRepo {
     pub registry: Arc<crate::repos::ListenersRegistry>,
     big_repo: SharedBigRepo,
     app_doc_id: DocumentId,
-    app_am_handle: samod::DocHandle,
+    app_am_handle: am_utils_rs::repo::BigDocHandle,
     store: crate::stores::AmStoreHandle<InitStore>,
     local_actor_id: ActorId,
     sql_pool: sqlx::SqlitePool,
     running_dispatches: tokio::sync::RwLock<HashMap<String, String>>,
     per_boot_done: tokio::sync::RwLock<HashSet<String>>,
     cancel_token: CancellationToken,
-    local_peer_id: String,
+    local_peer_id: am_utils_rs::repo::PeerId,
     _change_listener_tickets: Vec<am_utils_rs::repo::BigRepoChangeListenerRegistration>,
     _change_broker_leases: Vec<Arc<am_utils_rs::repo::BigRepoDocChangeBrokerLease>>,
 }
@@ -95,7 +95,7 @@ impl InitRepo {
         let cancel_token = CancellationToken::new();
         let (ticket, notif_rx) =
             InitStore::register_change_listener(&big_repo, &app_doc_id, vec![]).await?;
-        let local_peer_id = big_repo.samod_repo().peer_id().to_string();
+        let local_peer_id = big_repo.local_peer_id();
 
         let repo = Arc::new(Self {
             registry: Arc::clone(&registry),
@@ -202,7 +202,10 @@ impl InitRepo {
 
     pub async fn events_for_init(&self) -> Res<Vec<InitEvent>> {
         // Init snapshot is the current app-doc heads.
-        let heads = self.app_am_handle.with_document(|doc| doc.get_heads());
+        let heads = self
+            .app_am_handle
+            .with_document(|doc| doc.get_heads())
+            .await?;
         Ok(vec![InitEvent::Changed {
             heads: ChangeHashSet(Arc::from(heads)),
         }])
@@ -213,17 +216,20 @@ impl InitRepo {
         from: ChangeHashSet,
         to: Option<ChangeHashSet>,
     ) -> Res<Vec<InitEvent>> {
-        let (patches, heads) = self.app_am_handle.with_document(|am_doc| {
-            let heads = if let Some(ref to_set) = to {
-                to_set.clone()
-            } else {
-                ChangeHashSet(am_doc.get_heads().into())
-            };
-            let patches = am_doc
-                .diff_obj(&automerge::ROOT, &from, &heads, true)
-                .expect("diff_obj failed");
-            (patches, heads)
-        });
+        let (patches, heads) = self
+            .app_am_handle
+            .with_document(|am_doc| {
+                let heads = if let Some(ref to_set) = to {
+                    to_set.clone()
+                } else {
+                    ChangeHashSet(am_doc.get_heads().into())
+                };
+                let patches = am_doc
+                    .diff_obj(&automerge::ROOT, &from, &heads, true)
+                    .expect("diff_obj failed");
+                (patches, heads)
+            })
+            .await?;
         let mut events = vec![];
         for patch in patches {
             // Replay path: do not apply live-origin filtering.
@@ -239,7 +245,7 @@ impl InitRepo {
         patch_heads: &Arc<[automerge::ChangeHash]>,
         out: &mut Vec<InitEvent>,
         live_origin: Option<&am_utils_rs::repo::BigRepoChangeOrigin>,
-        exclude_peer_id: Option<&str>,
+        exclude_peer_id: Option<&am_utils_rs::repo::PeerId>,
     ) -> Res<()> {
         // Live notification path only: skip local self-echoes here.
         // Replay/diff calls pass `live_origin = None` and are never skipped.

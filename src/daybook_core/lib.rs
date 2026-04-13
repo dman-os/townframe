@@ -9,10 +9,10 @@ mod interlude {
     pub use daybook_types::doc::ChangeHashSet;
 
     pub use am_utils_rs::prelude::*;
+    pub use am_utils_rs::DocumentId;
     pub use api_utils_rs::prelude::*;
     pub use automerge::ActorId;
     pub use autosurgeon::{Hydrate, Reconcile};
-    pub use samod::DocumentId;
     pub use std::{
         borrow::Cow,
         collections::{HashMap, HashSet},
@@ -47,9 +47,6 @@ mod e2e;
 
 #[cfg(any(test, feature = "test-support"))]
 pub mod test_support;
-
-#[cfg(test)]
-mod tincans;
 
 #[cfg(feature = "uniffi")]
 uniffi::setup_scaffolding!();
@@ -97,6 +94,16 @@ pub fn init_sqlite_vec() {
         ) -> i32 = std::mem::transmute(sqlite_vec::sqlite3_vec_init as *const ());
         libsqlite3_sys::sqlite3_auto_extension(Some(entry_point));
     });
+}
+
+pub(crate) fn peer_id_from_label(label: &str) -> am_utils_rs::repo::PeerId {
+    use sha2::Digest;
+    let mut hasher = sha2::Sha256::new();
+    hasher.update(label.as_bytes());
+    let digest = hasher.finalize();
+    let mut bytes = [0_u8; 32];
+    bytes.copy_from_slice(&digest[..32]);
+    am_utils_rs::repo::PeerId::new(bytes)
 }
 
 pub mod app;

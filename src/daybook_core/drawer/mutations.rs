@@ -38,7 +38,7 @@ impl DrawerRepo {
         let facet_keys: Vec<_> = args.facets.keys().cloned().collect();
 
         let heads = handle
-            .with_document_local(|am_doc| {
+            .with_document(|am_doc| {
                 am_doc.set_actor(mutation_actor_id.clone());
                 let mut tx = am_doc.transaction();
                 tx.put(automerge::ROOT, "$schema", "daybook.doc")?;
@@ -113,29 +113,32 @@ impl DrawerRepo {
             prepared_docs.push(self.prepare_add_doc(args).await?);
         }
 
-        let drawer_heads = self.drawer_am_handle.with_document(|doc| {
-            doc.set_actor(self.local_actor_id.clone());
-            let mut tx = doc.transaction();
-            let docs_obj = match tx.get(automerge::ROOT, "docs")? {
-                Some((automerge::Value::Object(automerge::ObjType::Map), id)) => id,
-                _ => tx.put_object(automerge::ROOT, "docs", automerge::ObjType::Map)?,
-            };
-            let map_id = match tx.get(&docs_obj, "map")? {
-                Some((automerge::Value::Object(automerge::ObjType::Map), id)) => id,
-                _ => tx.put_object(&docs_obj, "map", automerge::ObjType::Map)?,
-            };
-            for prepared in &prepared_docs {
-                autosurgeon::reconcile_prop(
-                    &mut tx,
-                    &map_id,
-                    autosurgeon::Prop::Key((&prepared.doc_id[..]).into()),
-                    &prepared.entry,
-                )?;
-            }
-            let (heads, _) = tx.commit();
-            let heads = heads.expect("commit failed");
-            eyre::Ok(ChangeHashSet(Arc::from([heads])))
-        })?;
+        let drawer_heads = self
+            .drawer_am_handle
+            .with_document(|doc| {
+                doc.set_actor(self.local_actor_id.clone());
+                let mut tx = doc.transaction();
+                let docs_obj = match tx.get(automerge::ROOT, "docs")? {
+                    Some((automerge::Value::Object(automerge::ObjType::Map), id)) => id,
+                    _ => tx.put_object(automerge::ROOT, "docs", automerge::ObjType::Map)?,
+                };
+                let map_id = match tx.get(&docs_obj, "map")? {
+                    Some((automerge::Value::Object(automerge::ObjType::Map), id)) => id,
+                    _ => tx.put_object(&docs_obj, "map", automerge::ObjType::Map)?,
+                };
+                for prepared in &prepared_docs {
+                    autosurgeon::reconcile_prop(
+                        &mut tx,
+                        &map_id,
+                        autosurgeon::Prop::Key((&prepared.doc_id[..]).into()),
+                        &prepared.entry,
+                    )?;
+                }
+                let (heads, _) = tx.commit();
+                let heads = heads.expect("commit failed");
+                eyre::Ok(ChangeHashSet(Arc::from([heads])))
+            })
+            .await??;
 
         let mut doc_ids = Vec::with_capacity(prepared_docs.len());
         let mut events = Vec::with_capacity(prepared_docs.len());
@@ -232,7 +235,7 @@ impl DrawerRepo {
         };
         let mutation_actor_id = self.content_actor_id(patch.user_path.as_ref(), &branch_doc_id);
         let existing_facet_keys = handle
-            .with_document_local(|am_doc| {
+            .with_document(|am_doc| {
                 let facets_obj =
                     match automerge::ReadDoc::get_at(am_doc, automerge::ROOT, "facets", &heads)? {
                         Some((automerge::Value::Object(automerge::ObjType::Map), id)) => id,
@@ -257,7 +260,7 @@ impl DrawerRepo {
 
         // 1. Update content doc
         let (_new_heads, invalidated_uuids) = handle
-            .with_document_local(|am_doc| {
+            .with_document(|am_doc| {
                 am_doc.set_actor(mutation_actor_id.clone());
                 let mut tx = am_doc.transaction_at(automerge::PatchLog::null(), &heads);
 
@@ -343,7 +346,7 @@ impl DrawerRepo {
             });
         };
         let branch_doc = from_handle
-            .with_document_local(|am_doc| {
+            .with_document(|am_doc| {
                 let current_heads = am_doc.get_heads();
                 let current_heads_serialized = am_utils_rs::serialize_commit_heads(&current_heads);
                 let from_heads_serialized =
@@ -444,28 +447,32 @@ impl DrawerRepo {
             );
             new_entry.vtag = VersionTag::update(self.local_actor_id.clone());
 
-            let drawer_heads = self.drawer_am_handle.with_document(|doc| {
-                let current_drawer_heads = ChangeHashSet(doc.get_heads().into());
-                new_entry.previous_version_heads = Some(current_drawer_heads);
+            let drawer_heads = self
+                .drawer_am_handle
+                .with_document(|doc| {
+                    let current_drawer_heads = ChangeHashSet(doc.get_heads().into());
+                    new_entry.previous_version_heads = Some(current_drawer_heads);
 
-                let mut tx = doc.transaction();
-                let map_id = match tx.get(automerge::ROOT, "docs")? {
-                    Some((automerge::Value::Object(automerge::ObjType::Map), docs_id)) => {
-                        match tx.get(&docs_id, "map")? {
-                            Some((automerge::Value::Object(automerge::ObjType::Map), map_id)) => {
-                                map_id
+                    let mut tx = doc.transaction();
+                    let map_id = match tx.get(automerge::ROOT, "docs")? {
+                        Some((automerge::Value::Object(automerge::ObjType::Map), docs_id)) => {
+                            match tx.get(&docs_id, "map")? {
+                                Some((
+                                    automerge::Value::Object(automerge::ObjType::Map),
+                                    map_id,
+                                )) => map_id,
+                                _ => eyre::bail!("drawer map not found"),
                             }
-                            _ => eyre::bail!("drawer map not found"),
                         }
-                    }
-                    _ => eyre::bail!("drawer docs not found"),
-                };
+                        _ => eyre::bail!("drawer docs not found"),
+                    };
 
-                autosurgeon::reconcile_prop(&mut tx, &map_id, &**id, &new_entry)?;
-                let (heads, _) = tx.commit();
-                let heads = heads.expect("commit failed");
-                eyre::Ok(ChangeHashSet(Arc::from([heads])))
-            })?;
+                    autosurgeon::reconcile_prop(&mut tx, &map_id, &**id, &new_entry)?;
+                    let (heads, _) = tx.commit();
+                    let heads = heads.expect("commit failed");
+                    eyre::Ok(ChangeHashSet(Arc::from([heads])))
+                })
+                .await??;
 
             self.invalidate_entry_cache(id);
             *self.current_heads.lock().expect(ERROR_MUTEX) = drawer_heads.clone();
@@ -545,7 +552,7 @@ impl DrawerRepo {
         // 1. Merge content docs
         let user_path_for_dmeta = user_path.clone();
         let mut am_from = from_handle
-            .with_document_local(|from_doc| {
+            .with_document(|from_doc| {
                 let current_heads = from_doc.get_heads();
                 let current_heads_serialized = am_utils_rs::serialize_commit_heads(&current_heads);
                 let from_heads_serialized =
@@ -612,7 +619,7 @@ impl DrawerRepo {
             })
             .await??;
         let (_new_heads, _modified_facets, invalidated_uuids) = handle
-            .with_document_local(move |am_doc| {
+            .with_document(move |am_doc| {
                 am_doc.set_actor(mutation_actor_id.clone());
                 let (patches, new_heads) = match std::panic::catch_unwind(
                     std::panic::AssertUnwindSafe(|| -> Res<(Vec<automerge::Patch>, ChangeHashSet)> {
@@ -727,47 +734,52 @@ impl DrawerRepo {
         let mut deleted_facet_keys: Vec<FacetKey> = deleted_facet_keys_set.into_iter().collect();
         deleted_facet_keys.sort();
 
-        let res = self.drawer_am_handle.with_document(|doc| {
-            let docs_id = match doc.get(automerge::ROOT, "docs")? {
-                Some((automerge::Value::Object(automerge::ObjType::Map), docs_id)) => docs_id,
-                _ => eyre::bail!("drawer docs not found"),
-            };
-            let map_id = match doc.get(&docs_id, "map")? {
-                Some((automerge::Value::Object(automerge::ObjType::Map), map_id)) => map_id,
-                _ => eyre::bail!("drawer map not found"),
-            };
+        let res = self
+            .drawer_am_handle
+            .with_document(|doc| {
+                let docs_id = match doc.get(automerge::ROOT, "docs")? {
+                    Some((automerge::Value::Object(automerge::ObjType::Map), docs_id)) => docs_id,
+                    _ => eyre::bail!("drawer docs not found"),
+                };
+                let map_id = match doc.get(&docs_id, "map")? {
+                    Some((automerge::Value::Object(automerge::ObjType::Map), map_id)) => map_id,
+                    _ => eyre::bail!("drawer map not found"),
+                };
 
-            let entry: Option<DocEntry> = autosurgeon::hydrate_prop(doc, &map_id, &**id)?;
-            let Some(entry) = entry else {
-                return Ok((false, ChangeHashSet::default(), None));
-            };
+                let entry: Option<DocEntry> = autosurgeon::hydrate_prop(doc, &map_id, &**id)?;
+                let Some(entry) = entry else {
+                    return Ok((false, ChangeHashSet::default(), None));
+                };
 
-            let mut tx = doc.transaction();
-            let map_deleted_id = match tx.get(&docs_id, "map_deleted")? {
-                Some((automerge::Value::Object(automerge::ObjType::Map), id)) => id,
-                _ => tx.put_object(&docs_id, "map_deleted", automerge::ObjType::Map)?,
-            };
-            let mut deleted_tags: Vec<DocDeleteTombstone> = match tx.get(&map_deleted_id, &**id)? {
-                Some((automerge::Value::Object(automerge::ObjType::List), _)) => {
-                    autosurgeon::hydrate_prop::<_, Vec<DocDeleteTombstone>, _, _>(
-                        &tx,
-                        &map_deleted_id,
-                        &**id,
-                    )?
-                }
-                Some((other, _)) => eyre::bail!("invalid map_deleted entry shape: {other:?}"),
-                None => Vec::new(),
-            };
-            deleted_tags.push(DocDeleteTombstone {
-                vtag: VersionTag::update(self.local_actor_id.clone()),
-                branches: deleted_branch_snapshots.clone(),
-            });
-            autosurgeon::reconcile_prop(&mut tx, &map_deleted_id, &**id, deleted_tags)?;
-            tx.delete(&map_id, &**id)?;
-            let (heads, _) = tx.commit();
-            let heads = heads.expect("commit failed");
-            Ok((true, ChangeHashSet(Arc::from([heads])), Some(entry)))
-        });
+                let mut tx = doc.transaction();
+                let map_deleted_id = match tx.get(&docs_id, "map_deleted")? {
+                    Some((automerge::Value::Object(automerge::ObjType::Map), id)) => id,
+                    _ => tx.put_object(&docs_id, "map_deleted", automerge::ObjType::Map)?,
+                };
+                let mut deleted_tags: Vec<DocDeleteTombstone> = match tx
+                    .get(&map_deleted_id, &**id)?
+                {
+                    Some((automerge::Value::Object(automerge::ObjType::List), _)) => {
+                        autosurgeon::hydrate_prop::<_, Vec<DocDeleteTombstone>, _, _>(
+                            &tx,
+                            &map_deleted_id,
+                            &**id,
+                        )?
+                    }
+                    Some((other, _)) => eyre::bail!("invalid map_deleted entry shape: {other:?}"),
+                    None => Vec::new(),
+                };
+                deleted_tags.push(DocDeleteTombstone {
+                    vtag: VersionTag::update(self.local_actor_id.clone()),
+                    branches: deleted_branch_snapshots.clone(),
+                });
+                autosurgeon::reconcile_prop(&mut tx, &map_deleted_id, &**id, deleted_tags)?;
+                tx.delete(&map_id, &**id)?;
+                let (heads, _) = tx.commit();
+                let heads = heads.expect("commit failed");
+                Ok((true, ChangeHashSet(Arc::from([heads])), Some(entry)))
+            })
+            .await?;
 
         let (existed, drawer_heads, entry) = res?;
 
@@ -955,26 +967,31 @@ impl DrawerRepo {
             });
         new_entry.vtag = VersionTag::update(self.local_actor_id.clone());
 
-        let drawer_heads = self.drawer_am_handle.with_document(|doc| {
-            let current_drawer_heads = ChangeHashSet(doc.get_heads().into());
-            new_entry.previous_version_heads = Some(current_drawer_heads);
+        let drawer_heads = self
+            .drawer_am_handle
+            .with_document(|doc| {
+                let current_drawer_heads = ChangeHashSet(doc.get_heads().into());
+                new_entry.previous_version_heads = Some(current_drawer_heads);
 
-            let mut tx = doc.transaction();
-            let map_id = match tx.get(automerge::ROOT, "docs")? {
-                Some((automerge::Value::Object(automerge::ObjType::Map), docs_id)) => {
-                    match tx.get(&docs_id, "map")? {
-                        Some((automerge::Value::Object(automerge::ObjType::Map), map_id)) => map_id,
-                        _ => eyre::bail!("drawer map not found"),
+                let mut tx = doc.transaction();
+                let map_id = match tx.get(automerge::ROOT, "docs")? {
+                    Some((automerge::Value::Object(automerge::ObjType::Map), docs_id)) => {
+                        match tx.get(&docs_id, "map")? {
+                            Some((automerge::Value::Object(automerge::ObjType::Map), map_id)) => {
+                                map_id
+                            }
+                            _ => eyre::bail!("drawer map not found"),
+                        }
                     }
-                }
-                _ => eyre::bail!("drawer docs not found"),
-            };
+                    _ => eyre::bail!("drawer docs not found"),
+                };
 
-            autosurgeon::reconcile_prop(&mut tx, &map_id, &**id, &new_entry)?;
-            let (heads, _) = tx.commit();
-            let heads = heads.expect("commit failed");
-            eyre::Ok(ChangeHashSet(Arc::from([heads])))
-        })?;
+                autosurgeon::reconcile_prop(&mut tx, &map_id, &**id, &new_entry)?;
+                let (heads, _) = tx.commit();
+                let heads = heads.expect("commit failed");
+                eyre::Ok(ChangeHashSet(Arc::from([heads])))
+            })
+            .await??;
         let diff = DocEntryDiff::new(&entry, &new_entry, Vec::new());
 
         // Update caches and notify

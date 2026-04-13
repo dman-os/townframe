@@ -60,7 +60,7 @@ impl DrawerRepo {
                         &heads,
                         &mut events,
                         Some(&origin),
-                        Some(self.local_peer_id.as_str()),
+                        Some(&self.local_peer_id),
                     )
                     .await
                 {
@@ -101,11 +101,14 @@ impl DrawerRepo {
             eyre::bail!("repo is stopped");
         }
 
-        let (patches, heads) = self.drawer_am_handle.with_document(|am_doc| {
-            let heads = to.unwrap_or_else(|| ChangeHashSet(am_doc.get_heads().into()));
-            let patches = am_doc.diff_obj(&automerge::ROOT, &from, &heads, true)?;
-            eyre::Ok((patches, heads))
-        })?;
+        let (patches, heads) = self
+            .drawer_am_handle
+            .with_document(|am_doc| {
+                let heads = to.unwrap_or_else(|| ChangeHashSet(am_doc.get_heads().into()));
+                let patches = am_doc.diff_obj(&automerge::ROOT, &from, &heads, true)?;
+                eyre::Ok((patches, heads))
+            })
+            .await??;
 
         let mut events = vec![];
         for patch in patches {
@@ -121,7 +124,7 @@ impl DrawerRepo {
             eyre::bail!("repo is stopped");
         }
 
-        let (drawer_heads, entries) = self.current_drawer_entries()?;
+        let (drawer_heads, entries) = self.current_drawer_entries().await?;
 
         {
             let mut pool = self.entry_pool.lock().unwrap();
@@ -156,7 +159,7 @@ impl DrawerRepo {
         patch_heads: &Arc<[automerge::ChangeHash]>,
         out: &mut Vec<DrawerEvent>,
         live_origin: Option<&am_utils_rs::repo::BigRepoChangeOrigin>,
-        exclude_peer_id: Option<&str>,
+        exclude_peer_id: Option<&am_utils_rs::repo::PeerId>,
     ) -> Res<()> {
         // Live notification path: local writes are emitted by mutators.
         // Replay/diff paths pass `live_origin = None`.

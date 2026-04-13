@@ -2,7 +2,7 @@ use crate::interlude::*;
 
 use super::{
     IrohSyncRepo, CLONE_PROVISION_ALPN, CORE_DOCS_PARTITION_ID, IROH_CLONE_URL_SCHEME,
-    PARTITION_SYNC_ALPN,
+    PARTITION_SYNC_ALPN, REPO_SYNC_ALPN,
 };
 
 use std::str::FromStr;
@@ -147,9 +147,7 @@ pub async fn request_clone_provision_via_rpc(
             .map_err(|err| eyre::eyre!("clone provision rpc failed: {err}"))?;
         return Ok(response);
     }
-    let endpoint = iroh::Endpoint::builder(iroh::endpoint::presets::N0)
-        .bind()
-        .await?;
+    let endpoint = iroh::Endpoint::builder().bind().await?;
     let client = irpc_iroh::client::<CloneProvisionRpc>(
         endpoint.clone(),
         endpoint_addr,
@@ -189,32 +187,20 @@ pub async fn connect_and_pull_required_partitions_once(
     bootstrap: &SyncBootstrapState,
     timeout: std::time::Duration,
 ) -> Res<()> {
-    let endpoint_builder =
-        iroh::Endpoint::builder(iroh::endpoint::presets::N0).secret_key(iroh_secret_key);
+    let endpoint_builder = iroh::Endpoint::builder().secret_key(iroh_secret_key);
     #[cfg(test)]
     let endpoint_builder = endpoint_builder
         .relay_mode(iroh::RelayMode::Disabled)
         .clear_address_lookup();
     let endpoint = endpoint_builder.bind().await?;
-    let conn = big_repo
-        .spawn_connection_iroh(&endpoint, bootstrap.endpoint_addr.clone(), None)
-        .await?;
-
-    let result: Res<()> = async {
-        let pull_res = pull_required_partitions_once(
-            big_repo,
-            blobs_repo,
-            local_peer_key,
-            &endpoint,
-            bootstrap,
-            timeout,
-        )
-        .await;
-        let stop_res = conn.stop().await;
-        pull_res?;
-        stop_res?;
-        Ok(())
-    }
+    let result: Res<()> = pull_required_partitions_once(
+        big_repo,
+        blobs_repo,
+        local_peer_key,
+        &endpoint,
+        bootstrap,
+        timeout,
+    )
     .await;
     endpoint.close().await;
     result
@@ -297,14 +283,13 @@ pub async fn clone_repo_init_from_url(
         let (big_repo, big_repo_stop) = am_utils_rs::BigRepo::boot(am_utils_rs::repo::Config {
             storage: am_utils_rs::repo::StorageConfig::Disk {
                 path: staging.join("samod"),
-                big_repo_sqlite_url: None,
             },
-            peer_id: format!("/{}/{}", bootstrap.repo_id, identity.iroh_public_key),
+            peer_id: identity.iroh_public_key.into(),
         })
         .await?;
         let source_peer_key = format!("/{}/{}", bootstrap.repo_id, bootstrap.endpoint_id);
         let (sync_store, sync_store_stop) =
-            am_utils_rs::sync::store::spawn_sync_store(big_repo.state_pool().clone()).await?;
+            am_utils_rs::sync::store::spawn_sync_store(sql.db_pool.clone()).await?;
         let allow_res = sync_store
             .allow_peer(source_peer_key, Some(bootstrap.endpoint_id))
             .await;
@@ -450,6 +435,41 @@ async fn pull_required_partitions_once(
                 core_docs.contains(&app_doc_id),
                 core_docs.contains(&drawer_doc_id)
             );
+        }
+
+        let repo_rpc = irpc_iroh::client::<am_utils_rs::repo::rpc::RepoSyncRpc>(
+            endpoint.clone(),
+            bootstrap.endpoint_addr.clone(),
+            REPO_SYNC_ALPN,
+        );
+        let full_docs = repo_rpc
+            .rpc(am_utils_rs::repo::rpc::GetDocsFullRpcReq {
+                peer: local_peer_key.to_string(),
+                req: am_utils_rs::repo::rpc::GetDocsFullRequest {
+                    doc_ids: vec![app_doc_id.clone(), drawer_doc_id.clone()],
+                },
+            })
+            .await
+            .wrap_err("GetDocsFull rpc failed during clone bootstrap")?
+            .map_err(|err| eyre::eyre!("GetDocsFull rejected during clone bootstrap: {err:?}"))?;
+
+        for full_doc in full_docs.docs {
+            let parsed = DocumentId::from_str(&full_doc.doc_id).wrap_err_with(|| {
+                format!(
+                    "invalid core doc id in bootstrap payload: {}",
+                    full_doc.doc_id
+                )
+            })?;
+            if big_repo.find_doc_handle(&parsed).await?.is_some() {
+                continue;
+            }
+            let loaded = automerge::Automerge::load(&full_doc.automerge_save).map_err(|err| {
+                eyre::eyre!(
+                    "invalid automerge payload for core doc {} during clone bootstrap: {err}",
+                    full_doc.doc_id
+                )
+            })?;
+            big_repo.import_doc(parsed, loaded).await?;
         }
 
         let mut attempts = 0usize;

@@ -20,7 +20,7 @@ impl DrawerRepo {
         if self.cancel_token.is_cancelled() {
             eyre::bail!("repo is stopped");
         }
-        let (drawer_heads, entries) = self.current_drawer_entries()?;
+        let (drawer_heads, entries) = self.current_drawer_entries().await?;
         {
             let mut pool = self.entry_pool.lock().unwrap();
             for (doc_id, entry) in &entries {
@@ -42,7 +42,7 @@ impl DrawerRepo {
         if self.cancel_token.is_cancelled() {
             eyre::bail!("repo is stopped");
         }
-        let (_drawer_heads, entries) = self.current_drawer_entries()?;
+        let (_drawer_heads, entries) = self.current_drawer_entries().await?;
         let mut results = Vec::with_capacity(entries.len());
         for (doc_id, entry) in entries {
             results.push(
@@ -118,7 +118,7 @@ impl DrawerRepo {
         };
 
         let (facets, facet_heads_by_key, to_cache) = handle
-            .with_document_local(|am_doc| {
+            .with_document(|am_doc| {
                 let mut facets = HashMap::new();
                 let mut facet_heads_by_key = HashMap::new();
                 let mut to_cache = Vec::new();
@@ -250,7 +250,7 @@ impl DrawerRepo {
             return Ok(None);
         };
         let branch_heads = handle
-            .with_document_local(|doc| ChangeHashSet(doc.get_heads().into()))
+            .with_document(|doc| ChangeHashSet(doc.get_heads().into()))
             .await?;
         let Some((facets, facet_heads_by_key)) = self
             .get_at_branch_heads_with_facets_arc(doc_id, branch_path, &branch_heads, facet_keys)
@@ -328,7 +328,7 @@ impl DrawerRepo {
             return Ok(None);
         };
         let keys = handle
-            .with_document_local(|am_doc| {
+            .with_document(|am_doc| {
                 let facets_obj =
                     match automerge::ReadDoc::get_at(am_doc, automerge::ROOT, "facets", heads)? {
                         Some((automerge::Value::Object(automerge::ObjType::Map), id)) => id,
@@ -383,7 +383,7 @@ impl DrawerRepo {
             eyre::bail!("doc not found");
         };
         handle
-            .with_document_local(|am_doc| {
+            .with_document(|am_doc| {
                 facet_recovery::recover_facet_heads_at(am_doc, facet_key, heads)
             })
             .await?
@@ -475,7 +475,7 @@ impl DrawerRepo {
                 .get_facet_heads_at_branch_heads(doc_id, branch_path, heads, key)
                 .await?;
             let is_local = handle
-                .with_document_local(|am_doc| {
+                .with_document(|am_doc| {
                     for head in &facet_heads {
                         if let Some(change) = am_doc.get_change_by_hash(head) {
                             if local_actor_ids.contains(change.actor_id()) {

@@ -10,6 +10,7 @@ mod interlude {
 mod gen;
 
 use clap::builder::styling::AnsiColor;
+use futures::FutureExt;
 use irpc::{channel::oneshot, rpc_requests, Client, WithChannels};
 use irpc_iroh::IrohProtocol;
 use serde::{Deserialize, Serialize};
@@ -17,6 +18,8 @@ use serde::{Deserialize, Serialize};
 use crate::interlude::*;
 
 const IRPC_PROBE_ALPN: &[u8] = b"townframe/xtask/irpc-probe/0";
+const OCI_PLUG_ARTIFACT_TYPE: &str = "application/vnd.daybook.plug.v1";
+const OCI_PLUG_MANIFEST_LAYER_MEDIA_TYPE: &str = "application/vnd.daybook.plug.manifest.v1+json";
 
 #[rpc_requests(message = ProbeMessage)]
 #[derive(Debug, Serialize, Deserialize)]
@@ -55,6 +58,9 @@ async fn main_main() -> Res<()> {
         }
         Commands::Automerge08MinimalRepro {} => {
             automerge08_minimal_repro()?;
+        }
+        Commands::SubductionAutomergeDemo {} => {
+            subduction_automerge_demo().await?;
         }
         Commands::BuildPlugOci {
             plug_root,
@@ -579,7 +585,7 @@ async fn build_plug_oci(plug_root: PathBuf, out_root: Option<PathBuf>) -> Res<()
     let oci_manifest_layer_digest: oci_spec::image::Digest =
         format!("sha256:{oci_manifest_payload_digest_hex}").parse()?;
     layer_descriptors.push(Descriptor::new(
-        MediaType::Other(daybook_core::plugs::OCI_PLUG_MANIFEST_LAYER_MEDIA_TYPE.into()),
+        MediaType::Other(OCI_PLUG_MANIFEST_LAYER_MEDIA_TYPE.into()),
         oci_manifest_payload.len() as u64,
         oci_manifest_layer_digest,
     ));
@@ -597,9 +603,7 @@ async fn build_plug_oci(plug_root: PathBuf, out_root: Option<PathBuf>) -> Res<()
     let image_manifest = ImageManifestBuilder::default()
         .schema_version(2u32)
         .media_type(MediaType::ImageManifest)
-        .artifact_type(MediaType::Other(
-            daybook_core::plugs::OCI_PLUG_ARTIFACT_TYPE.into(),
-        ))
+        .artifact_type(MediaType::Other(OCI_PLUG_ARTIFACT_TYPE.into()))
         .config(config_desc)
         .layers(layer_descriptors)
         .build()?;
@@ -621,9 +625,7 @@ async fn build_plug_oci(plug_root: PathBuf, out_root: Option<PathBuf>) -> Res<()
     let image_index = ImageIndexBuilder::default()
         .schema_version(2u32)
         .media_type(MediaType::ImageIndex)
-        .artifact_type(MediaType::Other(
-            daybook_core::plugs::OCI_PLUG_ARTIFACT_TYPE.into(),
-        ))
+        .artifact_type(MediaType::Other(OCI_PLUG_ARTIFACT_TYPE.into()))
         .manifests(vec![index_manifest_desc])
         .build()?;
     image_index
@@ -1181,6 +1183,154 @@ fn automerge08_minimal_repro() -> Res<()> {
     Ok(())
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct NoopConnection;
+
+impl
+    subduction_core::connection::Connection<
+        future_form::Sendable,
+        subduction_core::connection::message::SyncMessage,
+    > for NoopConnection
+{
+    type DisconnectionError = std::convert::Infallible;
+    type SendError = std::convert::Infallible;
+    type RecvError = std::convert::Infallible;
+
+    fn disconnect(&self) -> futures::future::BoxFuture<'_, Result<(), Self::DisconnectionError>> {
+        async { Ok(()) }.boxed()
+    }
+
+    fn send(
+        &self,
+        _message: &subduction_core::connection::message::SyncMessage,
+    ) -> futures::future::BoxFuture<'_, Result<(), Self::SendError>> {
+        async { Ok(()) }.boxed()
+    }
+
+    fn recv(
+        &self,
+    ) -> futures::future::BoxFuture<
+        '_,
+        Result<subduction_core::connection::message::SyncMessage, Self::RecvError>,
+    > {
+        async { std::future::pending().await }.boxed()
+    }
+}
+
+async fn subduction_automerge_demo() -> Res<()> {
+    use std::collections::BTreeSet;
+
+    use automerge08::transaction::Transactable;
+    use sedimentree_core::{blob::Blob, id::SedimentreeId, loose_commit::id::CommitId};
+    use subduction_core::{
+        policy::open::OpenPolicy, storage::memory::MemoryStorage,
+        subduction::builder::SubductionBuilder,
+    };
+    use subduction_crypto::signer::memory::MemorySigner;
+    use subduction_websocket::tokio::{TimeoutTokio, TokioSpawn};
+
+    let signer = MemorySigner::generate();
+    let (subduction, _handler, _listener, _manager) =
+        SubductionBuilder::<_, _, _, _, _, 256>::new()
+            .signer(signer)
+            .storage(MemoryStorage::new(), Arc::new(OpenPolicy))
+            .spawner(TokioSpawn)
+            .timer(TimeoutTokio)
+            .build::<future_form::Sendable, NoopConnection>();
+
+    let sedimentree_id = SedimentreeId::new([7u8; 32]);
+
+    let mut doc = automerge08::Automerge::new();
+    {
+        let mut tx = doc.transaction();
+        tx.put(automerge08::ROOT, "title", "hello from subduction")?;
+        tx.put(automerge08::ROOT, "count", 1_i64)?;
+        tx.commit();
+    }
+
+    let ingested = automerge_sedimentree::ingest::ingest_automerge(&doc, sedimentree_id)
+        .wrap_err("failed ingesting initial automerge doc")?;
+    subduction
+        .add_sedimentree(sedimentree_id, ingested.sedimentree, ingested.blobs)
+        .await
+        .wrap_err("failed adding initial sedimentree")?;
+
+    let before_heads = doc.get_heads();
+    {
+        let mut tx = doc.transaction();
+        tx.put(automerge08::ROOT, "title", "title after mutation")?;
+        tx.put(automerge08::ROOT, "count", 2_i64)?;
+        tx.put(automerge08::ROOT, "status", "updated")?;
+        tx.commit();
+    }
+
+    for change in doc.get_changes(&before_heads) {
+        let head = CommitId::new(change.hash().0);
+        let parents = change
+            .deps()
+            .iter()
+            .map(|dep| CommitId::new(dep.0))
+            .collect::<BTreeSet<_>>();
+        subduction
+            .add_commit(
+                sedimentree_id,
+                head,
+                parents,
+                Blob::new(change.raw_bytes().to_vec()),
+            )
+            .await
+            .wrap_err("failed adding incremental commit")?;
+    }
+
+    let blobs = subduction
+        .get_blobs(sedimentree_id)
+        .await
+        .wrap_err("failed reading blobs from subduction storage")?
+        .ok_or_eyre("no blobs persisted for sedimentree")?;
+
+    let mut restored = automerge08::Automerge::new();
+    let mut pending = blobs
+        .into_iter()
+        .map(|blob| blob.as_slice().to_vec())
+        .collect::<Vec<_>>();
+    while !pending.is_empty() {
+        let mut next = Vec::new();
+        let mut progressed = false;
+        for blob in pending {
+            match restored.load_incremental(&blob) {
+                Ok(_) => progressed = true,
+                Err(_) => next.push(blob),
+            }
+        }
+        if !progressed {
+            eyre::bail!("failed reconstructing automerge doc from subduction blobs");
+        }
+        pending = next;
+    }
+
+    let title = read_root_str(&restored, "title")?;
+    let status = read_root_str(&restored, "status")?;
+    println!("subduction-automerge demo:");
+    println!("  title={title}");
+    println!("  status={status}");
+    println!("  heads={}", restored.get_heads().len());
+
+    Ok(())
+}
+
+fn read_root_str(doc: &automerge08::Automerge, key: &str) -> Res<String> {
+    use automerge08::{ReadDoc, ScalarValue, Value};
+
+    let value = doc.get(automerge08::ROOT, key)?;
+    let Some((Value::Scalar(scalar), _)) = value else {
+        eyre::bail!("missing scalar field '{key}'");
+    };
+    match scalar.as_ref() {
+        ScalarValue::Str(value) => Ok(value.to_string()),
+        _ => eyre::bail!("field '{key}' is not a string"),
+    }
+}
+
 const CLAP_STYLE: clap::builder::Styles = clap::builder::Styles::styled()
     .header(AnsiColor::Yellow.on_default())
     .usage(AnsiColor::Green.on_default())
@@ -1226,4 +1376,5 @@ enum Commands {
     IrpcInflightDisconnectProbe {},
     IrpcClientCancelProbe {},
     Automerge08MinimalRepro {},
+    SubductionAutomergeDemo {},
 }

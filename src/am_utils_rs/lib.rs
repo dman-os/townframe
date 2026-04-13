@@ -4,18 +4,18 @@ mod interlude {
 
 pub mod prelude {
     pub use crate::codecs::ThroughJson;
+    pub use crate::ids::{DocId32, PeerId32};
 
     #[cfg(feature = "repo")]
     pub use crate::repo::{BigRepo, SharedBigRepo};
     pub use automerge;
     pub use autosurgeon;
-    #[cfg(feature = "repo")]
-    pub use samod;
 }
 
 use crate::interlude::*;
 
 pub mod codecs;
+pub mod ids;
 #[cfg(feature = "repo")]
 pub mod partition;
 #[cfg(feature = "repo")]
@@ -23,7 +23,7 @@ pub mod repo;
 #[cfg(feature = "repo")]
 pub mod sync;
 #[cfg(feature = "repo")]
-pub use repo::{BigDocHandle, BigRepo, BigRepoStopToken, SharedBigRepo};
+pub use repo::{BigDocHandle, BigRepo, BigRepoStopToken, DocumentId, SharedBigRepo};
 
 use automerge::ChangeHash;
 

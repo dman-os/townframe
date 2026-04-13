@@ -329,11 +329,11 @@ impl TablesStore {
 pub struct TablesRepo {
     pub big_repo: SharedBigRepo,
     pub app_doc_id: DocumentId,
-    pub app_am_handle: samod::DocHandle,
+    pub app_am_handle: am_utils_rs::repo::BigDocHandle,
     store: crate::stores::AmStoreHandle<TablesStore>,
     pub registry: Arc<crate::repos::ListenersRegistry>,
     pub local_actor_id: ActorId,
-    local_peer_id: String,
+    local_peer_id: am_utils_rs::repo::PeerId,
     cancel_token: CancellationToken,
     _change_listener_tickets: Vec<am_utils_rs::repo::BigRepoChangeListenerRegistration>,
     _change_broker_leases: Vec<Arc<am_utils_rs::repo::BigRepoDocChangeBrokerLease>>,
@@ -403,7 +403,7 @@ impl TablesRepo {
         let cancel_token = CancellationToken::new();
         let (ticket, notif_rx) =
             TablesStore::register_change_listener(&big_repo, &app_doc_id, vec![]).await?;
-        let local_peer_id = big_repo.samod_repo().peer_id().to_string();
+        let local_peer_id = big_repo.local_peer_id();
 
         let repo = Self {
             big_repo,
@@ -627,7 +627,7 @@ impl TablesRepo {
                     &heads,
                     &mut events,
                     Some(&origin),
-                    Some(self.local_peer_id.as_str()),
+                    Some(&self.local_peer_id),
                 )
                 .await?;
             }
@@ -829,17 +829,20 @@ impl TablesRepo {
         from: ChangeHashSet,
         to: Option<ChangeHashSet>,
     ) -> Res<Vec<TablesEvent>> {
-        let (patches, heads) = self.app_am_handle.with_document(|am_doc| {
-            let heads = if let Some(ref to_set) = to {
-                to_set.clone()
-            } else {
-                ChangeHashSet(am_doc.get_heads().into())
-            };
-            let patches = am_doc
-                .diff_obj(&automerge::ROOT, &from, &heads, true)
-                .wrap_err("diff_obj failed")?;
-            eyre::Ok((patches, heads))
-        })?;
+        let (patches, heads) = self
+            .app_am_handle
+            .with_document(|am_doc| {
+                let heads = if let Some(ref to_set) = to {
+                    to_set.clone()
+                } else {
+                    ChangeHashSet(am_doc.get_heads().into())
+                };
+                let patches = am_doc
+                    .diff_obj(&automerge::ROOT, &from, &heads, true)
+                    .wrap_err("diff_obj failed")?;
+                eyre::Ok((patches, heads))
+            })
+            .await??;
         let heads = heads.0;
         let mut events = vec![];
         for patch in patches {
@@ -856,7 +859,7 @@ impl TablesRepo {
         patch_heads: &Arc<[automerge::ChangeHash]>,
         out: &mut Vec<TablesEvent>,
         live_origin: Option<&am_utils_rs::repo::BigRepoChangeOrigin>,
-        exclude_peer_id: Option<&str>,
+        exclude_peer_id: Option<&am_utils_rs::repo::PeerId>,
     ) -> Res<()> {
         if crate::repos::should_skip_live_patch(live_origin, exclude_peer_id) {
             return Ok(());
@@ -1650,7 +1653,7 @@ mod tests {
     #[tokio::test(flavor = "multi_thread")]
     async fn load_ensures_non_empty_tables_graph() -> Res<()> {
         let (big_repo, big_repo_stop) = BigRepo::boot(am_utils_rs::repo::Config {
-            peer_id: "test-tables-ensure-non-empty".into(),
+            peer_id: crate::peer_id_from_label("test-tables-ensure-non-empty"),
             storage: am_utils_rs::repo::StorageConfig::Memory,
         })
         .await?;

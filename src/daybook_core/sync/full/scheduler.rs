@@ -8,8 +8,8 @@ pub(super) struct Scheduler {
     pub pending_tasks: HashMap<SyncTask, PendingTaskState>,
     pub partitions_to_refresh: HashSet<PartitionKey>,
     pub peer_sessions_to_refresh: HashSet<EndpointId>,
-    pub active_docs: HashMap<DocumentId, ActiveDocSyncState>,
-    pub active_imports: HashMap<DocumentId, ActiveImportSyncState>,
+    pub active_docs: HashMap<DocSyncTaskKey, ActiveDocSyncState>,
+    pub active_imports: HashMap<ImportSyncTaskKey, ActiveImportSyncState>,
     pub active_blobs: HashMap<String, ActiveBlobSyncState>,
     pub blob_requirements: HashMap<String, HashSet<PartitionKey>>,
     pub cursor_ack_state: HashMap<EndpointId, HashMap<PartitionId, PartitionCursorAckState>>,
@@ -17,8 +17,8 @@ pub(super) struct Scheduler {
 
 #[derive(Debug, Clone, Hash, PartialEq, Eq)]
 pub(super) enum SyncTask {
-    Doc(DocumentId),
-    Import(DocumentId),
+    Doc(DocSyncTaskKey),
+    Import(ImportSyncTaskKey),
     Blob(String),
 }
 
@@ -60,14 +60,14 @@ impl Scheduler {
             .any(|task| matches!(task, SyncTask::Blob(_)))
     }
 
-    pub fn is_doc_pending(&self, doc_id: &DocumentId) -> bool {
+    pub fn is_doc_pending(&self, task_key: &DocSyncTaskKey) -> bool {
         self.pending_tasks
-            .contains_key(&SyncTask::Doc(doc_id.clone()))
+            .contains_key(&SyncTask::Doc(task_key.clone()))
     }
 
-    pub fn pending_doc_state(&self, doc_id: &DocumentId) -> Option<PendingTaskState> {
+    pub fn pending_doc_state(&self, task_key: &DocSyncTaskKey) -> Option<PendingTaskState> {
         self.pending_tasks
-            .get(&SyncTask::Doc(doc_id.clone()))
+            .get(&SyncTask::Doc(task_key.clone()))
             .cloned()
     }
 
@@ -77,32 +77,34 @@ impl Scheduler {
             .cloned()
     }
 
-    pub fn pending_import_state(&self, doc_id: &DocumentId) -> Option<PendingTaskState> {
+    pub fn pending_import_state(&self, task_key: &ImportSyncTaskKey) -> Option<PendingTaskState> {
         self.pending_tasks
-            .get(&SyncTask::Import(doc_id.clone()))
+            .get(&SyncTask::Import(task_key.clone()))
             .cloned()
     }
 
-    pub fn enqueue_doc(&mut self, doc_id: DocumentId) {
-        self.queued_tasks.insert(SyncTask::Doc(doc_id));
+    pub fn enqueue_doc(&mut self, task_key: DocSyncTaskKey) {
+        self.queued_tasks.insert(SyncTask::Doc(task_key));
     }
 
     pub fn enqueue_blob(&mut self, hash: String) {
         self.queued_tasks.insert(SyncTask::Blob(hash));
     }
 
-    pub fn enqueue_import(&mut self, doc_id: DocumentId) {
-        self.queued_tasks.insert(SyncTask::Import(doc_id));
+    pub fn enqueue_import(&mut self, task_key: ImportSyncTaskKey) {
+        self.queued_tasks.insert(SyncTask::Import(task_key));
     }
 
-    pub fn clear_doc_task(&mut self, doc_id: &DocumentId) {
-        self.pending_tasks.remove(&SyncTask::Doc(doc_id.clone()));
-        self.queued_tasks.remove(&SyncTask::Doc(doc_id.clone()));
+    pub fn clear_doc_task(&mut self, task_key: &DocSyncTaskKey) {
+        self.pending_tasks.remove(&SyncTask::Doc(task_key.clone()));
+        self.queued_tasks.remove(&SyncTask::Doc(task_key.clone()));
     }
 
-    pub fn clear_import_task(&mut self, doc_id: &DocumentId) {
-        self.pending_tasks.remove(&SyncTask::Import(doc_id.clone()));
-        self.queued_tasks.remove(&SyncTask::Import(doc_id.clone()));
+    pub fn clear_import_task(&mut self, task_key: &ImportSyncTaskKey) {
+        self.pending_tasks
+            .remove(&SyncTask::Import(task_key.clone()));
+        self.queued_tasks
+            .remove(&SyncTask::Import(task_key.clone()));
     }
 
     pub fn clear_blob_task(&mut self, hash: &str) {
@@ -110,17 +112,17 @@ impl Scheduler {
         self.queued_tasks.remove(&SyncTask::Blob(hash.to_string()));
     }
 
-    pub fn set_doc_pending_now(&mut self, doc_id: &DocumentId) {
+    pub fn set_doc_pending_now(&mut self, task_key: &DocSyncTaskKey) {
         let now = std::time::Instant::now();
         self.pending_tasks
-            .entry(SyncTask::Doc(doc_id.clone()))
+            .entry(SyncTask::Doc(task_key.clone()))
             .or_insert(PendingTaskState {
                 attempt_no: 0,
                 last_backoff: Duration::from_millis(0),
                 last_attempt_at: now,
                 due_at: now,
             });
-        self.enqueue_doc(doc_id.clone());
+        self.enqueue_doc(task_key.clone());
     }
 
     pub fn set_blob_pending_now(&mut self, hash: &str) {
@@ -136,22 +138,22 @@ impl Scheduler {
         self.enqueue_blob(hash.to_string());
     }
 
-    pub fn set_import_pending_now(&mut self, doc_id: &DocumentId) {
+    pub fn set_import_pending_now(&mut self, task_key: &ImportSyncTaskKey) {
         let now = std::time::Instant::now();
         self.pending_tasks
-            .entry(SyncTask::Import(doc_id.clone()))
+            .entry(SyncTask::Import(task_key.clone()))
             .or_insert(PendingTaskState {
                 attempt_no: 0,
                 last_backoff: Duration::from_millis(0),
                 last_attempt_at: now,
                 due_at: now,
             });
-        self.enqueue_import(doc_id.clone());
+        self.enqueue_import(task_key.clone());
     }
 
-    pub fn set_doc_backoff(&mut self, doc_id: &DocumentId, pending: PendingTaskState) {
+    pub fn set_doc_backoff(&mut self, task_key: &DocSyncTaskKey, pending: PendingTaskState) {
         self.pending_tasks
-            .insert(SyncTask::Doc(doc_id.clone()), pending);
+            .insert(SyncTask::Doc(task_key.clone()), pending);
     }
 
     pub fn set_blob_backoff(&mut self, hash: &str, pending: PendingTaskState) {
@@ -159,38 +161,39 @@ impl Scheduler {
             .insert(SyncTask::Blob(hash.to_string()), pending);
     }
 
-    pub fn set_import_backoff(&mut self, doc_id: &DocumentId, pending: PendingTaskState) {
+    pub fn set_import_backoff(&mut self, task_key: &ImportSyncTaskKey, pending: PendingTaskState) {
         self.pending_tasks
-            .insert(SyncTask::Import(doc_id.clone()), pending);
+            .insert(SyncTask::Import(task_key.clone()), pending);
     }
 
-    pub fn clear_doc_pending(&mut self, doc_id: &DocumentId) {
-        self.pending_tasks.remove(&SyncTask::Doc(doc_id.clone()));
+    pub fn clear_doc_pending(&mut self, task_key: &DocSyncTaskKey) {
+        self.pending_tasks.remove(&SyncTask::Doc(task_key.clone()));
     }
 
     pub fn clear_blob_pending(&mut self, hash: &str) {
         self.pending_tasks.remove(&SyncTask::Blob(hash.to_string()));
     }
 
-    pub fn clear_import_pending(&mut self, doc_id: &DocumentId) {
-        self.pending_tasks.remove(&SyncTask::Import(doc_id.clone()));
+    pub fn clear_import_pending(&mut self, task_key: &ImportSyncTaskKey) {
+        self.pending_tasks
+            .remove(&SyncTask::Import(task_key.clone()));
     }
 
-    pub fn drain_queued_docs(&mut self, budget: usize) -> Vec<DocumentId> {
+    pub fn drain_queued_docs(&mut self, budget: usize) -> Vec<DocSyncTaskKey> {
         if budget == 0 {
             return Vec::new();
         }
-        let docs: Vec<DocumentId> = self
+        let docs: Vec<DocSyncTaskKey> = self
             .queued_tasks
             .iter()
             .filter_map(|task| match task {
-                SyncTask::Doc(doc_id) => Some(doc_id.clone()),
+                SyncTask::Doc(task_key) => Some(task_key.clone()),
                 SyncTask::Import(_) | SyncTask::Blob(_) => None,
             })
             .take(budget)
             .collect();
-        for doc_id in &docs {
-            self.queued_tasks.remove(&SyncTask::Doc(doc_id.clone()));
+        for task_key in &docs {
+            self.queued_tasks.remove(&SyncTask::Doc(task_key.clone()));
         }
         docs
     }
@@ -214,21 +217,22 @@ impl Scheduler {
         blobs
     }
 
-    pub fn drain_queued_imports(&mut self, budget: usize) -> Vec<DocumentId> {
+    pub fn drain_queued_imports(&mut self, budget: usize) -> Vec<ImportSyncTaskKey> {
         if budget == 0 {
             return Vec::new();
         }
-        let docs: Vec<DocumentId> = self
+        let docs: Vec<ImportSyncTaskKey> = self
             .queued_tasks
             .iter()
             .filter_map(|task| match task {
-                SyncTask::Import(doc_id) => Some(doc_id.clone()),
+                SyncTask::Import(task_key) => Some(task_key.clone()),
                 SyncTask::Doc(_) | SyncTask::Blob(_) => None,
             })
             .take(budget)
             .collect();
-        for doc_id in &docs {
-            self.queued_tasks.remove(&SyncTask::Import(doc_id.clone()));
+        for task_key in &docs {
+            self.queued_tasks
+                .remove(&SyncTask::Import(task_key.clone()));
         }
         docs
     }
@@ -326,34 +330,34 @@ impl Scheduler {
             .pending_tasks
             .iter()
             .filter_map(|(task, pending)| match task {
-                SyncTask::Doc(doc_id)
-                    if pending.due_at <= now && !self.active_docs.contains_key(doc_id) =>
+                SyncTask::Doc(task_key)
+                    if pending.due_at <= now && !self.active_docs.contains_key(task_key) =>
                 {
-                    Some(doc_id.clone())
+                    Some(task_key.clone())
                 }
                 _ => None,
             })
             .take(doc_budget)
             .collect();
-        for doc_id in due_docs {
-            self.enqueue_doc(doc_id);
+        for task_key in due_docs {
+            self.enqueue_doc(task_key);
         }
 
         let due_imports: Vec<_> = self
             .pending_tasks
             .iter()
             .filter_map(|(task, pending)| match task {
-                SyncTask::Import(doc_id)
-                    if pending.due_at <= now && !self.active_imports.contains_key(doc_id) =>
+                SyncTask::Import(task_key)
+                    if pending.due_at <= now && !self.active_imports.contains_key(task_key) =>
                 {
-                    Some(doc_id.clone())
+                    Some(task_key.clone())
                 }
                 _ => None,
             })
             .take(import_budget)
             .collect();
-        for doc_id in due_imports {
-            self.enqueue_import(doc_id);
+        for task_key in due_imports {
+            self.enqueue_import(task_key);
         }
 
         let due_blobs: Vec<_> = self
@@ -534,6 +538,96 @@ impl Scheduler {
         part_state.last_emitted_cursor = Some(cursor);
         Ok(())
     }
+
+    pub fn endpoint_has_doc_work(&self, endpoint_id: EndpointId) -> bool {
+        self.active_docs
+            .keys()
+            .any(|key| key.endpoint_id == endpoint_id)
+            || self
+                .queued_tasks
+                .iter()
+                .any(|task| matches!(task, SyncTask::Doc(key) if key.endpoint_id == endpoint_id))
+            || self
+                .pending_tasks
+                .keys()
+                .any(|task| matches!(task, SyncTask::Doc(key) if key.endpoint_id == endpoint_id))
+    }
+
+    pub fn doc_task_keys_for_doc(&self, doc_id: &DocumentId) -> HashSet<DocSyncTaskKey> {
+        let mut keys = HashSet::new();
+        keys.extend(
+            self.active_docs
+                .keys()
+                .filter(|key| &key.doc_id == doc_id)
+                .cloned(),
+        );
+        keys.extend(self.pending_tasks.keys().filter_map(|task| match task {
+            SyncTask::Doc(key) if &key.doc_id == doc_id => Some(key.clone()),
+            SyncTask::Import(_) | SyncTask::Blob(_) => None,
+        }));
+        keys.extend(self.queued_tasks.iter().filter_map(|task| match task {
+            SyncTask::Doc(key) if &key.doc_id == doc_id => Some(key.clone()),
+            SyncTask::Import(_) | SyncTask::Blob(_) => None,
+        }));
+        keys
+    }
+
+    pub fn doc_task_keys_for_peer(&self, endpoint_id: EndpointId) -> HashSet<DocSyncTaskKey> {
+        let mut keys = HashSet::new();
+        keys.extend(
+            self.active_docs
+                .keys()
+                .filter(|key| key.endpoint_id == endpoint_id)
+                .cloned(),
+        );
+        keys.extend(self.pending_tasks.keys().filter_map(|task| match task {
+            SyncTask::Doc(key) if key.endpoint_id == endpoint_id => Some(key.clone()),
+            SyncTask::Import(_) | SyncTask::Blob(_) => None,
+        }));
+        keys.extend(self.queued_tasks.iter().filter_map(|task| match task {
+            SyncTask::Doc(key) if key.endpoint_id == endpoint_id => Some(key.clone()),
+            SyncTask::Import(_) | SyncTask::Blob(_) => None,
+        }));
+        keys
+    }
+
+    pub fn import_task_keys_for_doc(&self, doc_id: &DocumentId) -> HashSet<ImportSyncTaskKey> {
+        let mut keys = HashSet::new();
+        keys.extend(
+            self.active_imports
+                .keys()
+                .filter(|key| &key.doc_id == doc_id)
+                .cloned(),
+        );
+        keys.extend(self.pending_tasks.keys().filter_map(|task| match task {
+            SyncTask::Import(key) if &key.doc_id == doc_id => Some(key.clone()),
+            SyncTask::Doc(_) | SyncTask::Blob(_) => None,
+        }));
+        keys.extend(self.queued_tasks.iter().filter_map(|task| match task {
+            SyncTask::Import(key) if &key.doc_id == doc_id => Some(key.clone()),
+            SyncTask::Doc(_) | SyncTask::Blob(_) => None,
+        }));
+        keys
+    }
+
+    pub fn import_task_keys_for_peer(&self, endpoint_id: EndpointId) -> HashSet<ImportSyncTaskKey> {
+        let mut keys = HashSet::new();
+        keys.extend(
+            self.active_imports
+                .keys()
+                .filter(|key| key.endpoint_id == endpoint_id)
+                .cloned(),
+        );
+        keys.extend(self.pending_tasks.keys().filter_map(|task| match task {
+            SyncTask::Import(key) if key.endpoint_id == endpoint_id => Some(key.clone()),
+            SyncTask::Doc(_) | SyncTask::Blob(_) => None,
+        }));
+        keys.extend(self.queued_tasks.iter().filter_map(|task| match task {
+            SyncTask::Import(key) if key.endpoint_id == endpoint_id => Some(key.clone()),
+            SyncTask::Doc(_) | SyncTask::Blob(_) => None,
+        }));
+        keys
+    }
 }
 
 #[cfg(test)]
@@ -617,30 +711,36 @@ mod tests {
     #[test]
     fn doc_task_dedup_single_pending_entry() {
         let mut scheduler = Scheduler::default();
-        let doc_id = doc("11111111-1111-1111-1111-111111111111");
+        let task_key = DocSyncTaskKey {
+            doc_id: doc("1111111111111111111111111111111111111111111111111111111111111111"),
+            endpoint_id: endpoint(1),
+        };
 
-        scheduler.set_doc_pending_now(&doc_id);
-        scheduler.set_doc_pending_now(&doc_id);
-        scheduler.enqueue_doc(doc_id.clone());
+        scheduler.set_doc_pending_now(&task_key);
+        scheduler.set_doc_pending_now(&task_key);
+        scheduler.enqueue_doc(task_key.clone());
 
         let batch = scheduler.drain_queued_docs(32);
         assert_eq!(batch.len(), 1);
-        assert_eq!(batch[0], doc_id);
+        assert_eq!(batch[0], task_key);
         assert!(scheduler.is_doc_pending(&batch[0]));
     }
 
     #[test]
     fn import_task_dedup_single_pending_entry() {
         let mut scheduler = Scheduler::default();
-        let doc_id = doc("22222222-2222-2222-2222-222222222222");
+        let task_key = ImportSyncTaskKey {
+            doc_id: doc("2222222222222222222222222222222222222222222222222222222222222222"),
+            endpoint_id: endpoint(2),
+        };
 
-        scheduler.set_import_pending_now(&doc_id);
-        scheduler.set_import_pending_now(&doc_id);
-        scheduler.enqueue_import(doc_id.clone());
+        scheduler.set_import_pending_now(&task_key);
+        scheduler.set_import_pending_now(&task_key);
+        scheduler.enqueue_import(task_key.clone());
 
         let batch = scheduler.drain_queued_imports(32);
         assert_eq!(batch.len(), 1);
-        assert_eq!(batch[0], doc_id);
+        assert_eq!(batch[0], task_key);
         assert!(scheduler.pending_import_state(&batch[0]).is_some());
     }
 

@@ -42,7 +42,7 @@ pub struct DrawerRepo {
     pub big_repo: SharedBigRepo,
     drawer_doc_id: DocumentId,
     local_actor_id: ActorId,
-    local_peer_id: String,
+    local_peer_id: am_utils_rs::repo::PeerId,
     local_user_path: daybook_types::doc::UserPath,
 
     // LRU Caches
@@ -60,7 +60,7 @@ pub struct DrawerRepo {
     _change_listener_tickets: Vec<am_utils_rs::repo::BigRepoChangeListenerRegistration>,
     _change_broker_leases: Vec<Arc<am_utils_rs::repo::BigRepoDocChangeBrokerLease>>,
     current_heads: std::sync::Mutex<ChangeHashSet>,
-    drawer_am_handle: samod::DocHandle,
+    drawer_am_handle: am_utils_rs::repo::BigDocHandle,
     meta_db_pool: sqlx::SqlitePool,
     plugs_repo: Option<Arc<crate::plugs::PlugsRepo>>,
 }
@@ -112,8 +112,9 @@ impl DrawerRepo {
             .await?
             .ok_or_eyre("drawer doc not found")?;
 
-        let initial_heads =
-            drawer_am_handle.with_document(|doc| ChangeHashSet(doc.get_heads().into()));
+        let initial_heads = drawer_am_handle
+            .with_document_read(|doc| ChangeHashSet(doc.get_heads().into()))
+            .await;
 
         let broker = big_repo
             .ensure_change_broker(drawer_am_handle.clone())
@@ -132,7 +133,7 @@ impl DrawerRepo {
 
         let main_cancel_token = CancellationToken::new();
         let repo = Arc::new(Self {
-            local_peer_id: big_repo.samod_repo().peer_id().to_string(),
+            local_peer_id: big_repo.local_peer_id(),
             big_repo,
             drawer_doc_id,
             local_actor_id,
@@ -255,7 +256,7 @@ impl DrawerRepo {
             return Ok(None);
         };
         let latest_heads = handle
-            .with_document_local(|doc| ChangeHashSet(doc.get_heads().into()))
+            .with_document(|doc| ChangeHashSet(doc.get_heads().into()))
             .await?;
         Ok(Some(latest_heads))
     }
@@ -321,7 +322,7 @@ impl DrawerRepo {
             return Ok(None);
         };
         let (contains_all_heads, missing_heads) = handle
-            .with_document_local(|doc| {
+            .with_document(|doc| {
                 let mut missing = Vec::new();
                 for head in heads.iter() {
                     if doc.get_change_by_hash(head).is_none() {
@@ -388,24 +389,29 @@ impl DrawerRepo {
             .find_doc_handle(&branch_doc_id)
             .await?
             .ok_or_eyre("branch doc handle missing for tombstoned branch")?;
-        let keys = handle.with_document(|am_doc| {
-            let facets_obj = match automerge::ReadDoc::get_at(
-                am_doc,
-                automerge::ROOT,
-                "facets",
-                &snapshot.branch_heads,
-            )? {
-                Some((automerge::Value::Object(automerge::ObjType::Map), id)) => id,
-                _ => return Ok::<HashSet<FacetKey>, eyre::Report>(HashSet::new()),
-            };
-            let mut out = HashSet::new();
-            for item in
-                automerge::ReadDoc::map_range_at(am_doc, &facets_obj, .., &snapshot.branch_heads)
-            {
-                out.insert(FacetKey::from(item.key.to_string().as_str()));
-            }
-            Ok(out)
-        })?;
+        let keys = handle
+            .with_document_read(|am_doc| {
+                let facets_obj = match automerge::ReadDoc::get_at(
+                    am_doc,
+                    automerge::ROOT,
+                    "facets",
+                    &snapshot.branch_heads,
+                )? {
+                    Some((automerge::Value::Object(automerge::ObjType::Map), id)) => id,
+                    _ => return Ok::<HashSet<FacetKey>, eyre::Report>(HashSet::new()),
+                };
+                let mut out = HashSet::new();
+                for item in automerge::ReadDoc::map_range_at(
+                    am_doc,
+                    &facets_obj,
+                    ..,
+                    &snapshot.branch_heads,
+                ) {
+                    out.insert(FacetKey::from(item.key.to_string().as_str()));
+                }
+                Ok(out)
+            })
+            .await?;
         Ok(keys)
     }
 

@@ -165,8 +165,8 @@ pub enum InitFromGlobalsMode {
 pub async fn init_from_globals(
     big_repo: &SharedBigRepo,
     sql: &SqlitePool,
-    doc_app_cell: &tokio::sync::OnceCell<samod::DocHandle>,
-    doc_drawer_cell: &tokio::sync::OnceCell<samod::DocHandle>,
+    doc_app_cell: &tokio::sync::OnceCell<am_utils_rs::repo::BigDocHandle>,
+    doc_drawer_cell: &tokio::sync::OnceCell<am_utils_rs::repo::BigDocHandle>,
     mode: InitFromGlobalsMode,
 ) -> Res<()> {
     let init_state = globals::get_init_state(sql).await?;
