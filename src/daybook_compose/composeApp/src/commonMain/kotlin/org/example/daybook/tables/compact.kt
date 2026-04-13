@@ -751,6 +751,10 @@ fun CompactLayout(
                     },
                     onDismiss = {
                         scope.launch {
+                            menuCloseDragEnabled = false
+                            highlightedMenuItem = null
+                            lastDragWindowPos = null
+                            showFeaturesMenu = false
                             menuSheetState.hide()
                         }
                     },

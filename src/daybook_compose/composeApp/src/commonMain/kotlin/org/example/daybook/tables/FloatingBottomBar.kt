@@ -1,10 +1,12 @@
 package org.example.daybook.tables
 
+import androidx.compose.animation.core.Animatable
 import androidx.compose.animation.core.animateFloatAsState
 import androidx.compose.animation.core.tween
 import androidx.compose.foundation.gestures.Orientation
 import androidx.compose.foundation.gestures.draggable
 import androidx.compose.foundation.gestures.rememberDraggableState
+import androidx.compose.foundation.background
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
@@ -14,11 +16,11 @@ import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
-import androidx.compose.foundation.layout.heightIn
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.safeContentPadding
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.rememberScrollState
+import androidx.compose.ui.draw.clip
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
@@ -31,32 +33,29 @@ import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.getValue
-import androidx.compose.runtime.mutableIntStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
-import androidx.compose.ui.draw.drawWithContent
 import androidx.compose.ui.geometry.CornerRadius
 import androidx.compose.ui.geometry.Rect
 import androidx.compose.ui.geometry.RoundRect
 import androidx.compose.ui.graphics.Outline
 import androidx.compose.ui.graphics.Path
 import androidx.compose.ui.graphics.Shape
-import androidx.compose.ui.graphics.drawscope.clipRect
 import androidx.compose.ui.layout.boundsInWindow
 import androidx.compose.ui.layout.onGloballyPositioned
-import androidx.compose.ui.layout.onSizeChanged
 import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.unit.LayoutDirection
 import androidx.compose.ui.unit.dp
+import androidx.compose.ui.unit.times
 import kotlinx.coroutines.launch
 
 private object FloatingBarDefaults {
     val barHeight = 56.dp
     val horizontalPadding = 16.dp
-    val verticalPadding = 2.dp
+    val verticalPadding = 8.dp
     val menuTopRadius = 28.dp
 }
 
@@ -143,7 +142,7 @@ fun FloatingBottomNavigationBar(
             tonalElevation = 0.dp
         ) {
             Row(
-                modifier = Modifier.fillMaxSize().padding(horizontal = 30.dp),
+                modifier = Modifier.fillMaxSize().padding(horizontal = 30.dp, vertical = 5.dp),
                 verticalAlignment = Alignment.CenterVertically
             ) {
                 centerContent()
@@ -181,61 +180,90 @@ fun FloatingGrowingMenuSheet(
 
     val scope = rememberCoroutineScope()
     val density = LocalDensity.current
-    var sheetHeightPx by remember { mutableIntStateOf(1) }
     val maxMenuHeight = remember { 560.dp }
+    val maxMenuHeightPx = with(density) { maxMenuHeight.toPx().coerceAtLeast(1f) }
     val bottomInset = with(density) { (FloatingBarDefaults.barHeight.toPx() + 8.dp.toPx()).toDp() }
+    val flingCloseThreshold = 220f
 
-    val dragModifier =
-        if (enableDragToClose) {
-            Modifier.draggable(
-                state =
-                    rememberDraggableState { dragAmount ->
-                        val total = sheetHeightPx.coerceAtLeast(1).toFloat()
-                        val boundedProgress = sheetState.progress.coerceIn(0f, maxAnchor)
-                        val currentVisible = total * boundedProgress
-                        val nextVisible = (currentVisible - dragAmount).coerceIn(0f, total)
-                        val nextProgress = (nextVisible / total).coerceIn(0f, maxAnchor)
-                        sheetState.setProgressImmediate(nextProgress)
-                    },
-                orientation = Orientation.Vertical,
-                onDragStopped = { velocityY ->
-                    sheetState.settle(velocityY)
-                    if (sheetState.progress <= 0f) {
-                        onDismiss()
+    Box(modifier = modifier.fillMaxSize().padding(horizontal = FloatingBarDefaults.horizontalPadding)) {
+        val openFraction = (sheetState.progress / maxAnchor).coerceIn(0f, 1f)
+        val targetHeight = (maxMenuHeight * openFraction)
+        val dragModifier =
+            if (enableDragToClose) {
+                Modifier.draggable(
+                    state =
+                        rememberDraggableState { dragAmount ->
+                            val total = maxMenuHeightPx
+                            val boundedProgress = sheetState.progress.coerceIn(0f, maxAnchor)
+                            val currentVisible = total * (boundedProgress / maxAnchor).coerceIn(0f, 1f)
+                            val nextVisible = (currentVisible - dragAmount).coerceIn(0f, total)
+                            val nextProgress = ((nextVisible / total) * maxAnchor).coerceIn(0f, maxAnchor)
+                            sheetState.setProgressImmediate(nextProgress)
+                        },
+                    orientation = Orientation.Vertical,
+                    onDragStopped = { velocityY ->
+                        if (velocityY > flingCloseThreshold) {
+                            scope.launch {
+                                val anim = Animatable(sheetState.progress.coerceIn(0f, maxAnchor))
+                                anim.animateTo(0f, animationSpec = tween(durationMillis = 200)) {
+                                    sheetState.setProgressImmediate(value)
+                                }
+                                sheetState.hideInstant()
+                                onDismiss()
+                            }
+                        } else {
+                            sheetState.settle(velocityY) { settledProgress ->
+                                if (settledProgress <= 0f) {
+                                    onDismiss()
+                                }
+                            }
+                        }
                     }
-                }
-            )
-        } else {
-            Modifier
-        }
-
-    Surface(
-        modifier =
-            modifier
-                .fillMaxSize()
-                .padding(horizontal = FloatingBarDefaults.horizontalPadding)
-                .padding(bottom = FloatingBarDefaults.verticalPadding)
-                .onSizeChanged { sheetHeightPx = it.height.coerceAtLeast(1) }
-                .drawWithReveal(
-                    sheetHeightPx = sheetHeightPx,
-                    progress = sheetState.progress.coerceIn(0f, maxAnchor)
                 )
-                .then(dragModifier),
-        color = MaterialTheme.colorScheme.surfaceContainerLow.copy(alpha = 0.96f),
-        shape = RoundedCornerShape(
-            topStart = FloatingBarDefaults.menuTopRadius,
-            topEnd = FloatingBarDefaults.menuTopRadius,
-            bottomStart = 28.dp,
-            bottomEnd = 28.dp
-        ),
-        shadowElevation = 12.dp,
-        tonalElevation = 0.dp
-    ) {
-        Column(
-            modifier = Modifier.fillMaxWidth().heightIn(max = maxMenuHeight).padding(horizontal = 16.dp),
-            verticalArrangement = Arrangement.Bottom
+            } else {
+                Modifier
+            }
+        val surfaceHeight = targetHeight.coerceAtLeast(1.dp)
+
+        Surface(
+            modifier =
+                Modifier
+                    .align(Alignment.BottomCenter)
+                    .fillMaxWidth()
+                    .padding(bottom = FloatingBarDefaults.verticalPadding)
+                    .height(surfaceHeight)
+                    .then(dragModifier),
+            color = MaterialTheme.colorScheme.surfaceContainerLow.copy(alpha = 0.96f),
+            shape = RoundedCornerShape(
+                topStart = FloatingBarDefaults.menuTopRadius,
+                topEnd = FloatingBarDefaults.menuTopRadius,
+                bottomStart = 28.dp,
+                bottomEnd = 28.dp
+            ),
+            shadowElevation = 12.dp,
+            tonalElevation = 0.dp
         ) {
-            Spacer(Modifier.weight(1f, fill = true))
+            Column(
+                modifier = Modifier.fillMaxSize().padding(horizontal = 16.dp),
+                verticalArrangement = Arrangement.Bottom
+            ) {
+                Box(
+                    modifier =
+                        Modifier
+                            .fillMaxWidth()
+                            .padding(top = 8.dp, bottom = 6.dp),
+                    contentAlignment = Alignment.Center
+                ) {
+                    Box(
+                        modifier =
+                            Modifier
+                                .height(4.dp)
+                                .width(36.dp)
+                                .clip(RoundedCornerShape(2.dp))
+                                .background(MaterialTheme.colorScheme.onSurface.copy(alpha = 0.18f))
+                    )
+                }
+                Spacer(Modifier.weight(1f, fill = true))
             Column(
                 modifier =
                     Modifier
@@ -265,21 +293,7 @@ fun FloatingGrowingMenuSheet(
                 }
                 Spacer(Modifier.height(bottomInset))
             }
+            }
         }
     }
 }
-
-private fun Modifier.drawWithReveal(sheetHeightPx: Int, progress: Float): Modifier =
-    this.then(
-        Modifier
-            .heightIn(max = 560.dp)
-            .fillMaxWidth()
-            .drawWithContent {
-                val total = sheetHeightPx.coerceAtLeast(1).toFloat()
-                val visible = (total * progress).coerceIn(0f, total)
-                val revealTop = size.height - visible
-                clipRect(top = revealTop.coerceAtLeast(0f)) {
-                    this@drawWithContent.drawContent()
-                }
-            }
-    )

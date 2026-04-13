@@ -132,7 +132,11 @@ class RevealBottomSheetState(
         }
     }
 
-    fun settle(velocity: Float, animationSpec: AnimationSpec<Float> = spring()) {
+    fun settle(
+        velocity: Float,
+        animationSpec: AnimationSpec<Float> = spring(),
+        onSettled: ((Float) -> Unit)? = null
+    ) {
         scope.launch {
             val current = anim.value
             val anchors = this@RevealBottomSheetState.anchors
@@ -158,6 +162,7 @@ class RevealBottomSheetState(
             anim.animateTo(target.coerceIn(0f, 1f), animationSpec = animationSpec)
             setProgressImmediate(anim.value)
             isVisible = anim.value > 0f
+            onSettled?.invoke(anim.value)
         }
     }
 }
