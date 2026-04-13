@@ -95,21 +95,43 @@ class CaptureScreenViewModel(
 
     private fun persistCaptureMode(mode: CaptureMode) {
         viewModelScope.launch {
-            val state = tablesVm.tablesState.value
-            val selectedTableId = tablesVm.selectedTableId.value
-            if (state is TablesState.Data && selectedTableId != null) {
-                val windowId =
-                    state.tables[selectedTableId]?.window?.let { windowPolicy ->
-                        when (windowPolicy) {
-                            is TableWindow.Specific -> windowPolicy.id
-                            is TableWindow.AllWindows -> state.windows.keys.firstOrNull()
+            try {
+                val state = tablesVm.tablesState.value
+                val selectedTableId = tablesVm.selectedTableId.value
+                if (state is TablesState.Data && selectedTableId != null) {
+                    val windowId =
+                        state.tables[selectedTableId]?.window?.let { windowPolicy ->
+                            when (windowPolicy) {
+                                is TableWindow.Specific -> windowPolicy.id
+                                is TableWindow.AllWindows -> state.windows.keys.firstOrNull()
+                            }
+                        }
+                    windowId?.let { id ->
+                        state.windows[id]?.let { window ->
+                            tablesRepo.setWindow(id, window.copy(lastCaptureMode = mode))
                         }
                     }
-                windowId?.let { id ->
-                    state.windows[id]?.let { window ->
-                        tablesRepo.setWindow(id, window.copy(lastCaptureMode = mode))
-                    }
                 }
+            } catch (e: FfiException) {
+                val selectedTableId = tablesVm.selectedTableId.value
+                val state = tablesVm.tablesState.value
+                val windowId =
+                    if (state is TablesState.Data && selectedTableId != null) {
+                        state.tables[selectedTableId]?.window?.let { windowPolicy ->
+                            when (windowPolicy) {
+                                is TableWindow.Specific -> windowPolicy.id
+                                is TableWindow.AllWindows -> state.windows.keys.firstOrNull()
+                            }
+                        }
+                    } else {
+                        null
+                    }
+                println(
+                    "[CAPTURE] persistCaptureMode failed mode=$mode selectedTableId=$selectedTableId windowId=$windowId err=${e.message}"
+                )
+                _message.value = "Failed to persist capture mode"
+            } catch (t: Throwable) {
+                throw t
             }
         }
     }

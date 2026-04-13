@@ -239,7 +239,7 @@ fun AndroidApp() {
             },
             shutdownRequested = shutdownRequested,
             onShutdownCompleted = {},
-            autoShutdownOnDispose = false
+            autoShutdownOnDispose = true
         )
     }
 }

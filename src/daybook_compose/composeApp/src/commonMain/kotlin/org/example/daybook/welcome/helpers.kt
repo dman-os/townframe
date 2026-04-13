@@ -6,11 +6,11 @@ import org.example.daybook.uniffi.AppFfiCtx
 import org.example.daybook.uniffi.FfiException
 
 internal suspend inline fun <T> withAppFfiCtx(crossinline block: suspend (AppFfiCtx) -> T): T {
-    return withContext(Dispatchers.IO) {
-        val gcx = AppFfiCtx.init()
-        try {
-            block(gcx)
-        } finally {
+    val gcx = withContext(Dispatchers.IO) { AppFfiCtx.init() }
+    return try {
+        block(gcx)
+    } finally {
+        withContext(Dispatchers.IO) {
             gcx.close()
         }
     }

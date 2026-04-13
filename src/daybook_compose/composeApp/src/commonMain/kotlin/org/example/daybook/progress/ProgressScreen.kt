@@ -7,6 +7,7 @@ import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
+import androidx.compose.foundation.layout.PaddingValues
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxHeight
@@ -44,6 +45,7 @@ import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.derivedStateOf
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableIntStateOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
@@ -52,6 +54,8 @@ import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.text.TextStyle
 import androidx.compose.ui.text.style.TextOverflow
+import androidx.compose.ui.layout.onSizeChanged
+import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.unit.dp
 import androidx.lifecycle.viewmodel.compose.viewModel
 import kotlinx.coroutines.delay
@@ -337,6 +341,8 @@ private fun ProgressDetailScreen(
     val listState = rememberLazyListState()
     val timelineHeaderIndex =
         2 + (if (task.tags.isNotEmpty()) 1 else 0) + (if (amountEntry != null) 1 else 0)
+    val density = LocalDensity.current
+    var pinnedHeaderHeightPx by remember { mutableIntStateOf(0) }
     val showPinnedTimelineHeader by remember(listState, timelineHeaderIndex) {
         derivedStateOf {
             listState.firstVisibleItemIndex > timelineHeaderIndex ||
@@ -354,6 +360,12 @@ private fun ProgressDetailScreen(
                 modifier = Modifier
                     .fillMaxSize()
                     .padding(12.dp),
+                contentPadding =
+                    if (showPinnedTimelineHeader) {
+                        PaddingValues(top = with(density) { pinnedHeaderHeightPx.toDp() })
+                    } else {
+                        PaddingValues(0.dp)
+                    },
                 verticalArrangement = Arrangement.spacedBy(8.dp)
             ) {
                 val typeInfo = progressTypeInfo(task)
@@ -467,7 +479,11 @@ private fun ProgressDetailScreen(
             if (showPinnedTimelineHeader) {
                 Surface(
                     color = MaterialTheme.colorScheme.surface,
-                    modifier = Modifier.fillMaxWidth().align(Alignment.TopStart)
+                    modifier =
+                        Modifier
+                            .fillMaxWidth()
+                            .align(Alignment.TopStart)
+                            .onSizeChanged { pinnedHeaderHeightPx = it.height }
                 ) {
                     Column(modifier = Modifier.fillMaxWidth().padding(horizontal = 12.dp, vertical = 12.dp)) {
                         Text("Timeline", style = MaterialTheme.typography.titleSmall)
@@ -566,14 +582,9 @@ private fun progressTypeInfo(task: ProgressTask): ProgressTypeInfo {
 }
 
 private fun latestAmountEntry(task: ProgressTask, updates: List<ProgressUpdateEntry>): ProgressUpdateEntry? {
-    val latestFromTimeline = updates.lastOrNull { it.update.deets is ProgressUpdateDeets.Amount }
+    val amountUpdates = updates.filter { it.update.deets is ProgressUpdateDeets.Amount }
     val latestTask = task.latestUpdate?.takeIf { it.update.deets is ProgressUpdateDeets.Amount }
-    return when {
-        latestTask == null -> latestFromTimeline
-        latestFromTimeline == null -> latestTask
-        latestTask.sequence >= latestFromTimeline.sequence -> latestTask
-        else -> latestFromTimeline
-    }
+    return (amountUpdates + listOfNotNull(latestTask)).maxByOrNull { it.sequence }
 }
 
 private fun formatClock(unixSecs: Long): String {

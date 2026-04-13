@@ -4,9 +4,11 @@ package org.example.daybook
 
 import androidx.lifecycle.ViewModel
 import androidx.lifecycle.viewModelScope
+import kotlinx.coroutines.Job
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.asStateFlow
+import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
 import kotlin.time.Clock
 import kotlin.time.Duration.Companion.minutes
@@ -35,6 +37,7 @@ class DocEditorStoreViewModel(
     val selectedController = _selectedController.asStateFlow()
 
     private var listenerRegistration: ListenerRegistration? = null
+    private var registerJob: Job? = null
     private val evictionTtlMs = 10.minutes.inWholeMilliseconds
 
     private val listener =
@@ -59,9 +62,15 @@ class DocEditorStoreViewModel(
         }
 
     init {
-        viewModelScope.launch {
-            listenerRegistration = drawerRepo.ffiRegisterListener(listener)
-        }
+        registerJob =
+            viewModelScope.launch {
+                val registration = drawerRepo.ffiRegisterListener(listener)
+                if (!isActive) {
+                    registration.unregister()
+                    return@launch
+                }
+                listenerRegistration = registration
+            }
         viewModelScope.launch {
             while (true) {
                 delay(30_000)
@@ -143,6 +152,7 @@ class DocEditorStoreViewModel(
     private fun nowMs(): Long = Clock.System.now().toEpochMilliseconds()
 
     override fun onCleared() {
+        registerJob?.cancel()
         listenerRegistration?.unregister()
         super.onCleared()
     }

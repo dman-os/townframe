@@ -1540,6 +1540,7 @@ mod lazy {
                 let (rt, stop) = daybook_core::rt::Rt::boot(
                     daybook_core::rt::RtConfig {
                         device_id: "main_TODO_XXX".into(),
+                        startup_progress_task_id: None,
                     },
                     ctx.doc_app.document_id().clone(),
                     format!("sqlite://{}", ctx.layout.sqlite_path.display()),

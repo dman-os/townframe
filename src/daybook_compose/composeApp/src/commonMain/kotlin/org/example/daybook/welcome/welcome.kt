@@ -1087,7 +1087,7 @@ private fun CloneQrScannerScreen(
         }
     }
     val analyzerReady = analyzer
-    if (analyzerReady == null) {
+    if (!useNativePreviewQr && analyzerReady == null) {
         Box(modifier = Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
             Column(
                 horizontalAlignment = Alignment.CenterHorizontally,
@@ -1104,21 +1104,23 @@ private fun CloneQrScannerScreen(
     var hasCompleted by remember { mutableStateOf(false) }
     val frameBridge =
         remember(analyzerReady) {
-            CameraQrOverlayBridge(
-                analyzer = analyzerReady,
-                onDetectedText = { rawText ->
-                    uiScope.launch {
-                        if (hasCompleted) return@launch
-                        val candidate = rawText.trim()
-                        if (!looksLikeUrl(candidate)) {
-                            userVisibleError = "Detected QR is not a URL."
-                            return@launch
+            analyzerReady?.let { readyAnalyzer ->
+                CameraQrOverlayBridge(
+                    analyzer = readyAnalyzer,
+                    onDetectedText = { rawText ->
+                        uiScope.launch {
+                            if (hasCompleted) return@launch
+                            val candidate = rawText.trim()
+                            if (!looksLikeUrl(candidate)) {
+                                userVisibleError = "Detected QR is not a URL."
+                                return@launch
+                            }
+                            hasCompleted = true
+                            onDetectedUrl(candidate)
                         }
-                        hasCompleted = true
-                        onDetectedUrl(candidate)
                     }
-                }
-            )
+                )
+            }
         }
     val previewBridge =
         remember(cameraPreviewFfi) {
@@ -1138,18 +1140,23 @@ private fun CloneQrScannerScreen(
                 }
             )
         }
-    val overlayState by (if (useNativePreviewQr) previewBridge.state else frameBridge.state).collectAsState()
+    val overlayState by
+        (if (useNativePreviewQr) {
+            previewBridge.state
+        } else {
+            frameBridge?.state ?: previewBridge.state
+        }).collectAsState()
 
     androidx.compose.runtime.DisposableEffect(analyzerReady, frameBridge, previewBridge, useNativePreviewQr) {
         if (useNativePreviewQr) {
             previewBridge.start()
         } else {
-            frameBridge.start()
+            frameBridge?.start()
         }
         onDispose {
             previewBridge.stop()
-            frameBridge.stop()
-            analyzerReady.close()
+            frameBridge?.stop()
+            analyzerReady?.close()
         }
     }
 
@@ -1168,7 +1175,12 @@ private fun CloneQrScannerScreen(
                         } else {
                             overlayState.overlays
                         },
-                    onFrameAvailable = if (useNativePreviewQr) null else frameBridge::submitFrame
+                    onFrameAvailable =
+                        if (useNativePreviewQr) {
+                            null
+                        } else {
+                            frameBridge?.let { bridge -> { sample -> bridge.submitFrame(sample) } }
+                        }
                 )
             }
             val errorText = userVisibleError ?: overlayState.latestError

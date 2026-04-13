@@ -30,6 +30,7 @@ private fun installSignalHandler(signalName: String) {
         println("[APP_SHUTDOWN] installed signal handler name=$signalName")
     }.onFailure { error ->
         println("[APP_SHUTDOWN] failed to install signal handler name=$signalName err=${error.message}")
+        throw error
     }
 }
 

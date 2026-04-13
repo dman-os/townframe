@@ -395,8 +395,10 @@ fun registerRustAndroidCopyTask(
             into(destDir)
 
             val sourceSoFile = File(cargoTargetDir, sourceLibPath.removePrefix("target/"))
-            if (!sourceSoFile.exists()) {
-                throw GradleException("Missing Rust Android library: ${sourceSoFile.absolutePath}")
+            doFirst {
+                if (!sourceSoFile.exists()) {
+                    throw GradleException("Missing Rust Android library: ${sourceSoFile.absolutePath}")
+                }
             }
             from(sourceSoFile)
 

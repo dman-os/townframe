@@ -854,7 +854,6 @@ fun App(
                     withStartupStage("warmUpTablesRepo", startupMark, startupProgress) {
                         warmUpTablesRepo(tablesRepo ?: error("tables repo failed to load"))
                     }
-                    startupProgress.complete(startupMark.elapsedNow().toString())
                     AppContainer(
                         ffiCtx = fcxReady,
                         drawerRepo = drawerRepo ?: error("drawer repo failed to load"),
@@ -913,9 +912,10 @@ fun App(
         val current = ready.container
         if (current.syncRepo != null && current.rtFfi != null) return@LaunchedEffect
 
+        var loadedSyncRepo: SyncRepoFfi? = null
         try {
             println("[APP_INIT] stage=deferred SyncRepoFfi.load start")
-            val syncRepo = withContext(Dispatchers.IO) {
+            loadedSyncRepo = withContext(Dispatchers.IO) {
                 SyncRepoFfi.load(
                     fcx = current.ffiCtx,
                     configRepo = current.configRepo,
@@ -941,9 +941,42 @@ fun App(
                 )
             }
             println("[APP_INIT] stage=deferred RtFfi.load done")
-            initState = AppInitState.Ready(current.copy(syncRepo = syncRepo, rtFfi = rtFfi))
+            withContext(Dispatchers.IO) {
+                current.progressRepo.addUpdate(
+                    STARTUP_PROGRESS_TASK_ID,
+                    ProgressUpdate(
+                        at = Clock.System.now(),
+                        title = "App startup",
+                        deets =
+                            ProgressUpdateDeets.Completed(
+                                state = ProgressFinalState.SUCCEEDED,
+                                message =
+                                    "startup complete (from_app_start_ms=${appStartMark.elapsedNow().inWholeMilliseconds})"
+                            )
+                    )
+                )
+            }
+            initState = AppInitState.Ready(current.copy(syncRepo = loadedSyncRepo, rtFfi = rtFfi))
         } catch (throwable: Throwable) {
             if (throwable is CancellationException) throw throwable
+            runCatching {
+                withContext(Dispatchers.IO) {
+                    loadedSyncRepo?.close()
+                    current.progressRepo.addUpdate(
+                        STARTUP_PROGRESS_TASK_ID,
+                        ProgressUpdate(
+                            at = Clock.System.now(),
+                            title = "App startup",
+                            deets =
+                                ProgressUpdateDeets.Completed(
+                                    state = ProgressFinalState.FAILED,
+                                    message =
+                                        "startup failed during deferred runtime load: ${throwable.message ?: "unknown error"} (from_app_start_ms=${appStartMark.elapsedNow().inWholeMilliseconds})"
+                                )
+                        )
+                    )
+                }
+            }
             initState = AppInitState.Error(throwable)
         }
     }
@@ -1004,9 +1037,11 @@ fun App(
 
             is AppInitState.Ready -> {
                 val appContainer = state.container
-                val drawerVm: DrawerViewModel = viewModel { DrawerViewModel(appContainer.drawerRepo) }
+                val containerKey = "container:${appContainer.ffiCtx}"
+                val drawerVm: DrawerViewModel =
+                    viewModel(key = "drawerVm:$containerKey") { DrawerViewModel(appContainer.drawerRepo) }
                 val docEditorStore: DocEditorStoreViewModel =
-                    viewModel { DocEditorStoreViewModel(appContainer.drawerRepo) }
+                    viewModel(key = "docEditorStoreVm:$containerKey") { DocEditorStoreViewModel(appContainer.drawerRepo) }
                 var shutdownDone by remember(appContainer.ffiCtx) { mutableStateOf(false) }
 
                 LaunchedEffect(shutdownRequested, appContainer.ffiCtx, shutdownDone) {

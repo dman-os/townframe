@@ -406,5 +406,10 @@ impl InitRepo {
                 },
             )
             .await
+            .wrap_err_with(|| {
+                format!(
+                    "failed to add_update for {plug_id}/{init_key} {stage} task_id={task_id}"
+                )
+            })
     }
 }

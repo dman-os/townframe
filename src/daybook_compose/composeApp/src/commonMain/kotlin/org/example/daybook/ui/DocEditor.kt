@@ -142,6 +142,7 @@ fun DocEditor(
                     color = MaterialTheme.colorScheme.onSurfaceVariant,
                 )
             }
+            EditorSaveStatusIndicator(saveStatus = saveStatus, modifier = Modifier.fillMaxWidth())
             HorizontalDivider(modifier = Modifier.padding(vertical = 8.dp))
 
             BoxWithConstraints(modifier = Modifier.weight(1f).fillMaxWidth()) {
@@ -169,7 +170,6 @@ fun DocEditor(
                             descriptor = descriptor,
                             doc = state.doc,
                             controller = controller,
-                            saveStatus = saveStatus,
                             modifier = Modifier.bringIntoViewRequester(bringIntoViewRequester),
                             canShowMenu = state.docId != null,
                             noteDraft = state.noteEditors[descriptor.facetKey]?.draft,
@@ -214,7 +214,6 @@ private fun FacetListItem(
     descriptor: FacetViewDescriptor,
     doc: Doc?,
     controller: EditorSessionController,
-    saveStatus: EditorSaveStatus,
     modifier: Modifier = Modifier,
     canShowMenu: Boolean,
     noteDraft: String?,
@@ -228,7 +227,6 @@ private fun FacetListItem(
     Column(modifier = modifier.fillMaxWidth()) {
         FacetHeader(
             descriptor = descriptor,
-            saveStatus = saveStatus,
             canShowMenu = canShowMenu,
             onAddNote = { controller.addNoteFacetAfter(descriptor.facetKey) },
             onMakePrimary = { controller.makeFacetPrimary(descriptor.facetKey) },
@@ -288,7 +286,6 @@ private fun FacetListItem(
 @Composable
 private fun FacetHeader(
     descriptor: FacetViewDescriptor,
-    saveStatus: EditorSaveStatus,
     canShowMenu: Boolean,
     onAddNote: () -> Unit,
     onMakePrimary: () -> Unit,
@@ -297,22 +294,6 @@ private fun FacetHeader(
     canMoveUp: Boolean,
     canMoveDown: Boolean,
 ) {
-    val saveStatusUi =
-        when (saveStatus) {
-            EditorSaveStatus.Idle -> null
-            EditorSaveStatus.Saving ->
-                SaveStatusUi(
-                    icon = Icons.Filled.Sync,
-                    tint = MaterialTheme.colorScheme.primary,
-                    label = "Saving"
-                )
-            EditorSaveStatus.Error ->
-                SaveStatusUi(
-                    icon = Icons.Filled.Error,
-                    tint = MaterialTheme.colorScheme.error,
-                    label = "Save failed"
-                )
-        }
     val interactionSource = remember { MutableInteractionSource() }
     val isHovered by interactionSource.collectIsHoveredAsState()
     Row(
@@ -330,24 +311,6 @@ private fun FacetHeader(
             Row(
                 verticalAlignment = Alignment.CenterVertically,
             ) {
-                if (saveStatusUi != null) {
-                    TooltipBox(
-                        positionProvider = TooltipDefaults.rememberPlainTooltipPositionProvider(),
-                        tooltip = {
-                            PlainTooltip {
-                                Text(saveStatusUi.label)
-                            }
-                        },
-                        state = rememberTooltipState(),
-                    ) {
-                        Icon(
-                            imageVector = saveStatusUi.icon,
-                            contentDescription = saveStatusUi.label,
-                            tint = saveStatusUi.tint,
-                        )
-                    }
-                    Spacer(modifier = Modifier.width(4.dp))
-                }
                 if (showPriorityActions) {
                     FacetActionIconButton(
                         label = if (descriptor.isPrimary) "Facet is primary" else "Make this facet primary",
@@ -398,6 +361,51 @@ private fun FacetHeader(
                     }
                 }
             }
+        }
+    }
+}
+
+@Composable
+private fun toSaveStatusUi(saveStatus: EditorSaveStatus): SaveStatusUi? =
+    when (saveStatus) {
+        EditorSaveStatus.Idle -> null
+        EditorSaveStatus.Saving ->
+            SaveStatusUi(
+                icon = Icons.Filled.Sync,
+                tint = MaterialTheme.colorScheme.primary,
+                label = "Saving"
+            )
+        EditorSaveStatus.Error ->
+            SaveStatusUi(
+                icon = Icons.Filled.Error,
+                tint = MaterialTheme.colorScheme.error,
+                label = "Save failed"
+            )
+    }
+
+@OptIn(ExperimentalMaterial3Api::class)
+@Composable
+private fun EditorSaveStatusIndicator(saveStatus: EditorSaveStatus, modifier: Modifier = Modifier) {
+    val saveStatusUi = toSaveStatusUi(saveStatus) ?: return
+    Row(
+        modifier = modifier.padding(horizontal = 12.dp, vertical = 4.dp),
+        horizontalArrangement = Arrangement.End,
+        verticalAlignment = Alignment.CenterVertically
+    ) {
+        TooltipBox(
+            positionProvider = TooltipDefaults.rememberPlainTooltipPositionProvider(),
+            tooltip = {
+                PlainTooltip {
+                    Text(saveStatusUi.label)
+                }
+            },
+            state = rememberTooltipState(),
+        ) {
+            Icon(
+                imageVector = saveStatusUi.icon,
+                contentDescription = saveStatusUi.label,
+                tint = saveStatusUi.tint,
+            )
         }
     }
 }

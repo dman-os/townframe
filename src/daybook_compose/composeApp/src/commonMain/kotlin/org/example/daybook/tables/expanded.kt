@@ -682,8 +682,10 @@ fun SidebarContent(navController: NavHostController, modifier: Modifier = Modifi
                     NavigationRailItem(
                         selected = isSelected,
                         onClick = {
-                            scope.launch {
-                                item.onActivate()
+                            if (item.enabled) {
+                                scope.launch {
+                                    item.onActivate()
+                                }
                             }
                         },
                         enabled = item.enabled,

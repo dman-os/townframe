@@ -14,7 +14,7 @@ Experimental.
 > #### what's in the oven ‍‍👩🏿‍🍳?
 > 
 > - Our first feature!
-> - Agent sanboxing/orchestration.
+> - Agent sandboxing/orchestration.
 
 ## 🌞 Daybook 
 

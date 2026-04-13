@@ -391,7 +391,7 @@ fun CompactLayout(
                                 val menuItemKey = highlightedMenuItem
                                 val feature = allMenuItems.find { it.key == menuItemKey }
                                 val hoveredLongEnough = menuItemKey != null && activationReadyMenuItem == menuItemKey
-                                if (feature != null && hoveredLongEnough) {
+                                if (feature != null && feature.enabled && hoveredLongEnough) {
                                     feature.onActivate()
                                     shouldClose = true
                                 }
@@ -402,7 +402,7 @@ fun CompactLayout(
                                 navBarFeatureControllers.forEachIndexed { idx, ctrl ->
                                     if (ctrl.ready.value && !shouldClose) {
                                         val feature = navBarFeatures.getOrNull(idx)
-                                        if (feature != null) {
+                                        if (feature != null && feature.enabled) {
                                             scope.launch { feature.onActivate() }
                                             shouldClose = true
                                         }
