@@ -15,4 +15,3 @@ object CaptureNavActions {
         _modeCycleRequests.tryEmit(Unit)
     }
 }
-

@@ -72,7 +72,10 @@ const ortRootDir = $.relativeDir("../target/ort");
 const sourceArchivePath = ortRootDir.join(`onnxruntime-${ortSourceTag}.tar.gz`);
 const sourceDir = ortRootDir.join(`onnxruntime-src-${ortSourceTag}`);
 const sourceCompleteFile = ortRootDir.join(`.source-${ortSourceTag}.complete`);
-const fetchcontentCacheDir = ortRootDir.join("fetchcontent-cache", ortSourceTag);
+const fetchcontentCacheDir = ortRootDir.join(
+  "fetchcontent-cache",
+  ortSourceTag,
+);
 const distDir = ortRootDir.join(
   "dist",
   ortSourceTag,

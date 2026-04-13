@@ -224,6 +224,7 @@ private fun CustomBottomBarItem(
     Box(
         modifier =
             modifier
+                .clickable(enabled = enabled, onClick = onClick)
                 .padding(vertical = 2.dp),
         contentAlignment = Alignment.Center
     ) {
@@ -235,7 +236,7 @@ private fun CustomBottomBarItem(
             Box(
                 modifier =
                     Modifier
-                        .width(104.dp)
+                        .width(56.dp)
                         .clip(itemShape)
                         .background(background)
                         .then(
@@ -245,18 +246,12 @@ private fun CustomBottomBarItem(
                                 Modifier
                             }
                         )
-                        .clickable(enabled = enabled, onClick = onClick)
-                        .padding(horizontal = 12.dp, vertical = 6.dp),
+                        .padding(horizontal = 10.dp, vertical = 6.dp),
                 contentAlignment = Alignment.Center
             ) {
-                Column(
-                    horizontalAlignment = Alignment.CenterHorizontally,
-                    verticalArrangement = Arrangement.spacedBy(4.dp)
-                ) {
-                    Box { icon() }
-                    Box { label() }
-                }
+                Box { icon() }
             }
+            Box { label() }
         }
     }
 }
