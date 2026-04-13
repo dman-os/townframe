@@ -186,6 +186,15 @@ private object WelcomeRoute {
     const val CloneLocation = "welcome_clone_location"
 }
 
+private suspend fun fetchDefaultParentDir(): Result<String> =
+    try {
+        val defaultParent = withAppFfiCtx { gcx -> gcx.defaultCloneParentDir().trim() }
+        Result.success(defaultParent)
+    } catch (error: Throwable) {
+        if (error is CancellationException) throw error
+        Result.failure(error)
+    }
+
 @Composable
 fun WelcomeFlowNavHost(
     repos: List<KnownRepoEntry>,
@@ -357,10 +366,9 @@ fun WelcomeFlowNavHost(
                 }
                 LaunchedEffect(Unit) {
                     val repoName = "daybook-repo"
-                    try {
-                        val defaultParent = withAppFfiCtx { gcx ->
-                            gcx.defaultCloneParentDir().trim()
-                        }
+                    val defaultParentResult = fetchDefaultParentDir()
+                    if (defaultParentResult.isSuccess) {
+                        val defaultParent = defaultParentResult.getOrThrow()
                         onCreateRepoUiStateChange(
                             CreateRepoUiState.Editing(
                                 repoName = repoName,
@@ -368,8 +376,8 @@ fun WelcomeFlowNavHost(
                                 isCreating = false
                             )
                         )
-                    } catch (error: Throwable) {
-                        if (error is CancellationException) throw error
+                    } else {
+                        val error = defaultParentResult.exceptionOrNull() ?: error("unknown failure")
                         onCreateRepoUiStateChange(
                             CreateRepoUiState.Editing(
                                 repoName = repoName,
@@ -419,10 +427,9 @@ fun WelcomeFlowNavHost(
 
             if (editState.parentPath.isBlank() && !editState.isCreating) {
                 LaunchedEffect(editState.parentPath, editState.isCreating) {
-                    try {
-                        val defaultParent = withAppFfiCtx { gcx ->
-                            gcx.defaultCloneParentDir().trim()
-                        }
+                    val defaultParentResult = fetchDefaultParentDir()
+                    if (defaultParentResult.isSuccess) {
+                        val defaultParent = defaultParentResult.getOrThrow()
                         val latest = createRepoUiState as? CreateRepoUiState.Editing ?: return@LaunchedEffect
                         if (latest.parentPath.isBlank()) {
                             onCreateRepoUiStateChange(
@@ -432,8 +439,8 @@ fun WelcomeFlowNavHost(
                                 )
                             )
                         }
-                    } catch (error: Throwable) {
-                        if (error is CancellationException) throw error
+                    } else {
+                        val error = defaultParentResult.exceptionOrNull() ?: error("unknown failure")
                         updateCreateState { current ->
                             current.copy(
                                 errorMessage = "Failed loading default parent: ${describeThrowable(error)}"

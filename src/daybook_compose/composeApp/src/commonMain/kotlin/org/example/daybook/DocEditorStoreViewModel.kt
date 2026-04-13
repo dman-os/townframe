@@ -15,7 +15,6 @@ import kotlin.time.Duration.Companion.minutes
 import org.example.daybook.ui.editor.EditorSessionController
 import org.example.daybook.uniffi.DrawerEventListener
 import org.example.daybook.uniffi.DrawerRepoFfi
-import org.example.daybook.uniffi.FfiException
 import org.example.daybook.uniffi.core.DrawerEvent
 import org.example.daybook.uniffi.core.ListenerRegistration
 
@@ -118,13 +117,9 @@ class DocEditorStoreViewModel(
 
     private suspend fun refreshDoc(docId: String) {
         val entry = sessions[docId] ?: return
-        try {
-            val bundle = drawerRepo.getBundle(docId, "main")
-            entry.controller.bindDoc(bundle?.doc, bundle)
-            entry.lastTouchedMs = nowMs()
-        } catch (e: FfiException) {
-            throw e
-        }
+        val bundle = drawerRepo.getBundle(docId, "main")
+        entry.controller.bindDoc(bundle?.doc, bundle)
+        entry.lastTouchedMs = nowMs()
     }
 
     private fun evictIdleSessions() {

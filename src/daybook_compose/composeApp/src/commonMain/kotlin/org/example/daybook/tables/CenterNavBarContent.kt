@@ -43,7 +43,6 @@ import androidx.compose.ui.unit.dp
 import androidx.navigation.NavHostController
 import androidx.navigation.compose.currentBackStackEntryAsState
 import kotlinx.coroutines.launch
-import org.example.daybook.AppScreens
 import org.example.daybook.LocalChromeStateManager
 import org.example.daybook.MainFeatureActionButton
 
@@ -265,15 +264,6 @@ private fun CustomBottomBarItem(
 }
 
 private fun isFeatureRouteSelected(featureKey: String, currentRoute: String?): Boolean {
-    val targetRoute =
-        when (featureKey) {
-            FeatureKeys.Home -> AppScreens.Home.name
-            FeatureKeys.Capture -> AppScreens.Capture.name
-            FeatureKeys.Drawer -> AppScreens.Drawer.name
-            FeatureKeys.Tables -> AppScreens.Tables.name
-            FeatureKeys.Progress -> AppScreens.Progress.name
-            FeatureKeys.Settings -> AppScreens.Settings.name
-            else -> null
-        }
+    val targetRoute = routeForFeatureKey(featureKey)
     return targetRoute != null && targetRoute == currentRoute
 }

@@ -51,6 +51,9 @@ fun main() = application {
         Runtime.getRuntime().addShutdownHook(hook)
         onDispose {
             runCatching { Runtime.getRuntime().removeShutdownHook(hook) }
+                .onFailure { error ->
+                    println("[APP_SHUTDOWN] failed to remove shutdown hook err=${error.message}")
+                }
         }
     }
 

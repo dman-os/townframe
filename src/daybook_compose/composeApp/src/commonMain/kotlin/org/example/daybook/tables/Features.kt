@@ -16,6 +16,17 @@ import androidx.navigation.NavHostController
 import org.example.daybook.AppScreens
 import org.example.daybook.capture.CaptureNavActions
 
+fun routeForFeatureKey(featureKey: String): String? =
+    when (featureKey) {
+        FeatureKeys.Home -> AppScreens.Home.name
+        FeatureKeys.Capture -> AppScreens.Capture.name
+        FeatureKeys.Drawer -> AppScreens.Drawer.name
+        FeatureKeys.Tables -> AppScreens.Tables.name
+        FeatureKeys.Progress -> AppScreens.Progress.name
+        FeatureKeys.Settings -> AppScreens.Settings.name
+        else -> null
+    }
+
 /**
  * All available features. This is the master list.
  */

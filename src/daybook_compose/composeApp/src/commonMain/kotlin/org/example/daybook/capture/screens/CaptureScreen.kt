@@ -16,7 +16,10 @@ import androidx.compose.ui.unit.dp
 import androidx.lifecycle.ViewModel
 import androidx.lifecycle.viewModelScope
 import androidx.lifecycle.viewmodel.compose.viewModel
+import kotlinx.coroutines.flow.MutableSharedFlow
 import kotlinx.coroutines.flow.MutableStateFlow
+import kotlinx.coroutines.flow.SharedFlow
+import kotlinx.coroutines.flow.asSharedFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.launch
 import org.example.daybook.ChromeState
@@ -63,8 +66,8 @@ class CaptureScreenViewModel(
     private val _currentDoc = MutableStateFlow<Doc?>(null)
     val currentDoc = _currentDoc.asStateFlow()
 
-    private val _message = MutableStateFlow<String?>(null)
-    val message = _message.asStateFlow()
+    private val _message = MutableSharedFlow<String>(extraBufferCapacity = 1, replay = 0)
+    val message: SharedFlow<String> = _message.asSharedFlow()
 
     val editorController =
         EditorSessionController(
@@ -89,8 +92,7 @@ class CaptureScreenViewModel(
                 CaptureMode.CAMERA -> CaptureMode.MIC
                 CaptureMode.MIC -> CaptureMode.TEXT
             }
-        _captureMode.value = next
-        persistCaptureMode(next)
+        setCaptureMode(next)
     }
 
     private fun persistCaptureMode(mode: CaptureMode) {
@@ -129,7 +131,7 @@ class CaptureScreenViewModel(
                 println(
                     "[CAPTURE] persistCaptureMode failed mode=$mode selectedTableId=$selectedTableId windowId=$windowId err=${e.message}"
                 )
-                _message.value = "Failed to persist capture mode"
+                _message.tryEmit("Failed to persist capture mode")
             } catch (t: Throwable) {
                 throw t
             }
@@ -174,16 +176,12 @@ class CaptureScreenViewModel(
                     )
 
                 drawerRepo.add(args)
-                _message.value = "Photo saved successfully"
+                _message.tryEmit("Photo saved successfully")
             } catch (e: FfiException) {
                 println("Error saving image: $e")
-                _message.value = "Error saving photo: ${e.message}"
+                _message.tryEmit("Error saving photo: ${e.message}")
             }
         }
-    }
-
-    fun clearMessage() {
-        _message.value = null
     }
 
     fun loadDoc(id: String) {
@@ -300,12 +298,10 @@ fun CaptureScreen(modifier: Modifier = Modifier, initialDocId: String? = null) {
         }
 
     val snackbarHostState = remember { SnackbarHostState() }
-    val message by vm.message.collectAsState()
 
-    LaunchedEffect(message) {
-        message?.let {
-            snackbarHostState.showSnackbar(it)
-            vm.clearMessage()
+    LaunchedEffect(vm) {
+        vm.message.collect { msg ->
+            snackbarHostState.showSnackbar(msg)
         }
     }
 
