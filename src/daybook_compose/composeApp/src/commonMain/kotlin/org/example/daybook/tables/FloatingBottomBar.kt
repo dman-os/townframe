@@ -7,6 +7,7 @@ import androidx.compose.foundation.gestures.Orientation
 import androidx.compose.foundation.gestures.draggable
 import androidx.compose.foundation.gestures.rememberDraggableState
 import androidx.compose.foundation.background
+import androidx.compose.foundation.border
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
@@ -46,14 +47,16 @@ import androidx.compose.ui.graphics.Path
 import androidx.compose.ui.graphics.Shape
 import androidx.compose.ui.layout.boundsInWindow
 import androidx.compose.ui.layout.onGloballyPositioned
+import androidx.compose.ui.layout.onSizeChanged
 import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.unit.LayoutDirection
+import androidx.compose.ui.unit.Dp
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.times
 import kotlinx.coroutines.launch
 
 private object FloatingBarDefaults {
-    val barHeight = 56.dp
+    val barHeight = 64.dp
     val horizontalPadding = 16.dp
     val verticalPadding = 8.dp
     val menuTopRadius = 28.dp
@@ -111,6 +114,7 @@ private class NippleBarShape(
 fun FloatingBottomNavigationBar(
     centerContent: @Composable RowScope.() -> Unit,
     menuOpenProgress: Float,
+    onBarHeightChanged: (Dp) -> Unit = {},
     bottomBarModifier: Modifier = Modifier
 ) {
     val density = LocalDensity.current
@@ -135,14 +139,19 @@ fun FloatingBottomNavigationBar(
                 )
     ) {
         Surface(
-            modifier = Modifier.fillMaxWidth().height(FloatingBarDefaults.barHeight),
+            modifier =
+                Modifier
+                    .fillMaxWidth()
+                    .onSizeChanged {
+                        onBarHeightChanged(with(density) { it.height.toDp() })
+                    },
             color = MaterialTheme.colorScheme.surfaceContainerLow.copy(alpha = 0.94f),
             shape = NippleBarShape(protrusionPx = protrusionPx, cornerRadiusPx = cornerRadiusPx),
             shadowElevation = 10.dp,
             tonalElevation = 0.dp
         ) {
             Row(
-                modifier = Modifier.fillMaxSize().padding(horizontal = 30.dp, vertical = 5.dp),
+                modifier = Modifier.fillMaxWidth().padding(horizontal = 20.dp),
                 verticalAlignment = Alignment.CenterVertically
             ) {
                 centerContent()
@@ -168,8 +177,10 @@ fun FloatingBottomNavigationBar(
 fun FloatingGrowingMenuSheet(
     sheetState: RevealBottomSheetState,
     maxAnchor: Float,
+    barHeight: Dp,
     menuItems: List<FeatureItem>,
     highlightedMenuItem: String?,
+    activationReadyMenuItem: String?,
     enableDragToClose: Boolean,
     onMenuItemLayout: (key: String, rect: Rect) -> Unit,
     onDismiss: () -> Unit,
@@ -182,8 +193,10 @@ fun FloatingGrowingMenuSheet(
     val density = LocalDensity.current
     val maxMenuHeight = remember { 560.dp }
     val maxMenuHeightPx = with(density) { maxMenuHeight.toPx().coerceAtLeast(1f) }
-    val bottomInset = with(density) { (FloatingBarDefaults.barHeight.toPx() + 8.dp.toPx()).toDp() }
+    val bottomInset = barHeight + 8.dp
     val flingCloseThreshold = 220f
+    val armedIndicatorColor = MaterialTheme.colorScheme.primary.copy(alpha = 0.95f)
+    val menuItemShape = RoundedCornerShape(28.dp)
 
     Box(modifier = modifier.fillMaxSize().padding(horizontal = FloatingBarDefaults.horizontalPadding)) {
         val openFraction = (sheetState.progress / maxAnchor).coerceIn(0f, 1f)
@@ -272,6 +285,7 @@ fun FloatingGrowingMenuSheet(
                 verticalArrangement = Arrangement.spacedBy(8.dp)
             ) {
                 menuItems.forEach { item ->
+                    val isActivationReady = item.key == activationReadyMenuItem
                     NavigationDrawerItem(
                         selected = item.key == highlightedMenuItem,
                         onClick = {
@@ -283,9 +297,21 @@ fun FloatingGrowingMenuSheet(
                         },
                         icon = { item.icon() },
                         label = { item.labelContent?.invoke() ?: Text(item.label) },
+                        shape = menuItemShape,
                         modifier =
                             Modifier
                                 .fillMaxWidth()
+                                .then(
+                                    if (isActivationReady) {
+                                        Modifier.border(
+                                            width = 1.5.dp,
+                                            color = armedIndicatorColor,
+                                            shape = menuItemShape
+                                        )
+                                    } else {
+                                        Modifier
+                                    }
+                                )
                                 .onGloballyPositioned {
                                     onMenuItemLayout(item.key, it.boundsInWindow())
                                 }

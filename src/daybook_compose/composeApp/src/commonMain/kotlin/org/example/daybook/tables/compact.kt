@@ -91,6 +91,7 @@ import androidx.lifecycle.viewmodel.compose.viewModel
 import androidx.navigation.NavHostController
 import androidx.navigation.compose.currentBackStackEntryAsState
 import kotlinx.coroutines.Job
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.launch
 import org.example.daybook.AppScreens
@@ -217,6 +218,7 @@ fun CompactLayout(
     var highlightedTable by remember { mutableStateOf<Uuid?>(null) }
     var highlightedTab by remember { mutableStateOf<Uuid?>(null) }
     var highlightedMenuItem by remember { mutableStateOf<String?>(null) }
+    var activationReadyMenuItem by remember { mutableStateOf<String?>(null) }
     var isDragging by remember { mutableStateOf(false) }
     var isLeftDrawerDragging by remember { mutableStateOf(false) }
     var addButtonWindowRect by remember { mutableStateOf<Rect?>(null) }
@@ -230,6 +232,7 @@ fun CompactLayout(
     val addTabReadyState = addTabController.ready.collectAsState()
     val addTableReadyState = addTableController.ready.collectAsState()
     var addTableButtonWindowRect by remember { mutableStateOf<Rect?>(null) }
+    var floatingBarHeight by remember { mutableStateOf(64.dp) }
     // feature button layout rects (populated when toolbar renders)
     var featureButtonLayouts by remember { mutableStateOf(mapOf<String, Rect>()) }
 
@@ -290,12 +293,19 @@ fun CompactLayout(
             .pointerInput(Unit) {
                 var menuSheetOpenedByDrag = false
                 var horizontalDragDistance = 0f
+                val menuHoverActivationDurationMs = 250L
+                var hoveredMenuItemKey: String? = null
+                var hoverActivationJob: Job? = null
                 detectDragGestures(
                     onDragStart = { _ ->
                         isDragging = true
                         isLeftDrawerDragging = true
                         menuSheetOpenedByDrag = false
                         horizontalDragDistance = 0f
+                        hoveredMenuItemKey = null
+                        activationReadyMenuItem = null
+                        hoverActivationJob?.cancel()
+                        hoverActivationJob = null
                     },
                     onDrag = { change, dragAmount ->
                         if (menuSheetState.isVisible && menuCloseDragEnabled) {
@@ -320,7 +330,24 @@ fun CompactLayout(
                         val menuHit = menuItemLayouts.entries.find { (_, rect) ->
                             rect.contains(windowPos)
                         }
-                        highlightedMenuItem = menuHit?.key
+                        val menuHitKey = menuHit?.key
+                        if (menuHitKey != hoveredMenuItemKey) {
+                            hoveredMenuItemKey = menuHitKey
+                            activationReadyMenuItem = null
+                            hoverActivationJob?.cancel()
+                            hoverActivationJob = null
+                            if (menuHitKey != null) {
+                                val candidateKey = menuHitKey
+                                hoverActivationJob =
+                                    scope.launch {
+                                        delay(menuHoverActivationDurationMs)
+                                        if (hoveredMenuItemKey == candidateKey) {
+                                            activationReadyMenuItem = candidateKey
+                                        }
+                                    }
+                            }
+                        }
+                        highlightedMenuItem = menuHitKey
 
                         // Also update controllers with their target rects for toolbar rollout
                         featureButtonLayouts.forEach { (k, r) ->
@@ -359,49 +386,52 @@ fun CompactLayout(
                             }
                             var shouldClose = false
 
-                            // If released over a menu item, activate it and close
+                            // If released over a menu item that is armed, activate and close.
                             if (highlightedMenuItem != null && lastDragWindowPos != null) {
                                 val menuItemKey = highlightedMenuItem
                                 val feature = allMenuItems.find { it.key == menuItemKey }
-                                if (feature != null) {
+                                val hoveredLongEnough = menuItemKey != null && activationReadyMenuItem == menuItemKey
+                                if (feature != null && hoveredLongEnough) {
                                     feature.onActivate()
                                     shouldClose = true
                                 }
-                            } else {
-                                // Otherwise, activate any ready feature from toolbar rollout
-                                // Check nav bar features first
+                            }
+
+                            // Also allow armed bar/prominent items in the same drag flow.
+                            if (!shouldClose) {
                                 navBarFeatureControllers.forEachIndexed { idx, ctrl ->
-                                    if (ctrl.ready.value) {
+                                    if (ctrl.ready.value && !shouldClose) {
                                         val feature = navBarFeatures.getOrNull(idx)
                                         if (feature != null) {
                                             scope.launch { feature.onActivate() }
                                             shouldClose = true
                                         }
                                     }
-                                    ctrl.cancel()
                                 }
-                                // Check prominent buttons
                                 prominentButtonControllers.forEachIndexed { idx, ctrl ->
-                                    if (ctrl.ready.value) {
+                                    if (ctrl.ready.value && !shouldClose) {
                                         val button = prominentButtons.getOrNull(idx)
                                         if (button != null && button.enabled) {
                                             scope.launch { button.onClick() }
                                             shouldClose = true
                                         }
                                     }
-                                    ctrl.cancel()
                                 }
                             }
 
+                            navBarFeatureControllers.forEach { it.cancel() }
+                            prominentButtonControllers.forEach { it.cancel() }
+
                             // Clear highlights
                             highlightedMenuItem = null
+                            activationReadyMenuItem = null
                             lastDragWindowPos = null
+                            hoveredMenuItemKey = null
+                            hoverActivationJob?.cancel()
+                            hoverActivationJob = null
                             isDragging = false
                             menuSheetOpenedByDrag = false
 
-                            // Cancel all controllers
-                            navBarFeatureControllers.forEach { it.cancel() }
-                            prominentButtonControllers.forEach { it.cancel() }
                             showFeaturesMenu = false
 
                             // Close sheet if item was activated, otherwise settle to nearest anchor
@@ -420,7 +450,11 @@ fun CompactLayout(
                             navBarFeatureControllers.forEach { it.cancel() }
                             prominentButtonControllers.forEach { it.cancel() }
                             highlightedMenuItem = null
+                            activationReadyMenuItem = null
                             lastDragWindowPos = null
+                            hoveredMenuItemKey = null
+                            hoverActivationJob?.cancel()
+                            hoverActivationJob = null
                             isDragging = false
                             menuSheetOpenedByDrag = false
                             menuCloseDragEnabled = false
@@ -453,6 +487,7 @@ fun CompactLayout(
         highlightedTab = null
         highlightedTable = null
         highlightedMenuItem = null
+        activationReadyMenuItem = null
     }
 
     // Ensure sheet snaps to correct anchor when content changes while sheet is open
@@ -468,6 +503,7 @@ fun CompactLayout(
         if (!menuSheetState.isVisible) {
             menuCloseDragEnabled = false
             highlightedMenuItem = null
+            activationReadyMenuItem = null
             lastDragWindowPos = null
         }
     }
@@ -546,6 +582,7 @@ fun CompactLayout(
                             centerNavBarContent()
                         },
                         menuOpenProgress = menuOpenProgress,
+                        onBarHeightChanged = { floatingBarHeight = it },
                         bottomBarModifier = menuGestureModifier,
                     )
                 }
@@ -743,8 +780,10 @@ fun CompactLayout(
                 FloatingGrowingMenuSheet(
                     sheetState = menuSheetState,
                     maxAnchor = SheetConfig.MENU_MAX_ANCHOR,
+                    barHeight = floatingBarHeight,
                     menuItems = allMenuItems,
                     highlightedMenuItem = highlightedMenuItem,
+                    activationReadyMenuItem = activationReadyMenuItem,
                     enableDragToClose = menuCloseDragEnabled,
                     onMenuItemLayout = { key, rect ->
                         menuItemLayouts = menuItemLayouts + (key to rect)
@@ -753,6 +792,7 @@ fun CompactLayout(
                         scope.launch {
                             menuCloseDragEnabled = false
                             highlightedMenuItem = null
+                            activationReadyMenuItem = null
                             lastDragWindowPos = null
                             showFeaturesMenu = false
                             menuSheetState.hide()
@@ -764,6 +804,7 @@ fun CompactLayout(
                         }
                         menuCloseDragEnabled = false
                         showFeaturesMenu = false
+                        activationReadyMenuItem = null
                         menuSheetState.hide()
                     },
                     modifier = Modifier.fillMaxSize()

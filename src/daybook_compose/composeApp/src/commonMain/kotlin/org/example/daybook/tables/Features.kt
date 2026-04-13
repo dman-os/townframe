@@ -4,7 +4,7 @@ package org.example.daybook.tables
 
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.LibraryBooks
-import androidx.compose.material.icons.filled.CameraAlt
+import androidx.compose.material.icons.filled.EditNote
 import androidx.compose.material.icons.filled.Home
 import androidx.compose.material.icons.filled.Notifications
 import androidx.compose.material.icons.filled.QrCode2
@@ -14,6 +14,7 @@ import androidx.compose.material3.Icon
 import androidx.compose.runtime.Composable
 import androidx.navigation.NavHostController
 import org.example.daybook.AppScreens
+import org.example.daybook.capture.CaptureNavActions
 
 /**
  * All available features. This is the master list.
@@ -21,21 +22,46 @@ import org.example.daybook.AppScreens
 @Composable
 fun rememberAllFeatures(navController: NavHostController): List<FeatureItem> {
     return listOf(
-        FeatureItem(FeatureKeys.Home, { Icon(Icons.Default.Home, contentDescription = "Home") }, "Home") {
-            navController.navigate(AppScreens.Home.name)
-        },
-        FeatureItem(FeatureKeys.Capture, { Icon(Icons.Default.CameraAlt, contentDescription = "Capture") }, "Capture") {
-            navController.navigate(AppScreens.Capture.name)
-        },
-        FeatureItem(FeatureKeys.Drawer, { Icon(Icons.AutoMirrored.Filled.LibraryBooks, contentDescription = "Drawer") }, "Drawer") {
-            navController.navigate(AppScreens.Drawer.name)
-        },
-        FeatureItem(FeatureKeys.Tables, { Icon(Icons.Default.TableChart, contentDescription = "Tables") }, "Tables") {
-            navController.navigate(AppScreens.Tables.name)
-        },
-        FeatureItem(FeatureKeys.Progress, { Icon(Icons.Default.Notifications, contentDescription = "Progress") }, "Progress") {
-            navController.navigate(AppScreens.Progress.name)
-        }
+        FeatureItem(
+            key = FeatureKeys.Home,
+            icon = { Icon(Icons.Default.Home, contentDescription = "Home") },
+            selectedIcon = { Icon(Icons.Default.Home, contentDescription = "Home") },
+            label = "Home",
+            onActivate = { navController.navigate(AppScreens.Home.name) },
+            onReselect = { navController.navigate(AppScreens.Home.name) }
+        ),
+        FeatureItem(
+            key = FeatureKeys.Capture,
+            icon = { Icon(Icons.Default.EditNote, contentDescription = "Capture") },
+            selectedIcon = { Icon(Icons.Default.EditNote, contentDescription = "Capture") },
+            label = "Capture",
+            onActivate = { navController.navigate(AppScreens.Capture.name) },
+            onReselect = { CaptureNavActions.requestModeCycle() }
+        ),
+        FeatureItem(
+            key = FeatureKeys.Drawer,
+            icon = { Icon(Icons.AutoMirrored.Filled.LibraryBooks, contentDescription = "Drawer") },
+            selectedIcon = { Icon(Icons.AutoMirrored.Filled.LibraryBooks, contentDescription = "Drawer") },
+            label = "Drawer",
+            onActivate = { navController.navigate(AppScreens.Drawer.name) },
+            onReselect = { navController.navigate(AppScreens.Drawer.name) }
+        ),
+        FeatureItem(
+            key = FeatureKeys.Tables,
+            icon = { Icon(Icons.Default.TableChart, contentDescription = "Tables") },
+            selectedIcon = { Icon(Icons.Default.TableChart, contentDescription = "Tables") },
+            label = "Tables",
+            onActivate = { navController.navigate(AppScreens.Tables.name) },
+            onReselect = { navController.navigate(AppScreens.Tables.name) }
+        ),
+        FeatureItem(
+            key = FeatureKeys.Progress,
+            icon = { Icon(Icons.Default.Notifications, contentDescription = "Progress") },
+            selectedIcon = { Icon(Icons.Default.Notifications, contentDescription = "Progress") },
+            label = "Progress",
+            onActivate = { navController.navigate(AppScreens.Progress.name) },
+            onReselect = { navController.navigate(AppScreens.Progress.name) }
+        )
     )
 }
 
@@ -90,12 +116,22 @@ fun rememberMenuFeatures(
 
     return otherFeatures +
         listOf(
-            FeatureItem(FeatureKeys.CloneShare, { Icon(Icons.Default.QrCode2, contentDescription = "Clone") }, "Clone") {
-                onShowCloneShare()
-            },
-            FeatureItem(FeatureKeys.Settings, { Icon(Icons.Default.Settings, contentDescription = "Settings") }, "Settings") {
-                navController.navigate(AppScreens.Settings.name)
-            }
+            FeatureItem(
+                key = FeatureKeys.CloneShare,
+                icon = { Icon(Icons.Default.QrCode2, contentDescription = "Clone") },
+                selectedIcon = { Icon(Icons.Default.QrCode2, contentDescription = "Clone") },
+                label = "Clone",
+                onActivate = { onShowCloneShare() },
+                onReselect = { onShowCloneShare() }
+            ),
+            FeatureItem(
+                key = FeatureKeys.Settings,
+                icon = { Icon(Icons.Default.Settings, contentDescription = "Settings") },
+                selectedIcon = { Icon(Icons.Default.Settings, contentDescription = "Settings") },
+                label = "Settings",
+                onActivate = { navController.navigate(AppScreens.Settings.name) },
+                onReselect = { navController.navigate(AppScreens.Settings.name) }
+            )
         )
 }
 

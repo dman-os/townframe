@@ -25,6 +25,7 @@ import org.example.daybook.MainFeatureActionButton
 import org.example.daybook.ProvideChromeState
 import org.example.daybook.TablesState
 import org.example.daybook.TablesViewModel
+import org.example.daybook.capture.CaptureNavActions
 import org.example.daybook.capture.LocalCameraCaptureContext
 import org.example.daybook.capture.ui.DaybookCameraViewport
 import org.example.daybook.ui.DocEditor
@@ -79,6 +80,17 @@ class CaptureScreenViewModel(
         if (_captureMode.value == mode) return
         _captureMode.value = mode
         persistCaptureMode(mode)
+    }
+
+    fun cycleCaptureMode() {
+        val next =
+            when (_captureMode.value) {
+                CaptureMode.TEXT -> CaptureMode.CAMERA
+                CaptureMode.CAMERA -> CaptureMode.MIC
+                CaptureMode.MIC -> CaptureMode.TEXT
+            }
+        _captureMode.value = next
+        persistCaptureMode(next)
     }
 
     private fun persistCaptureMode(mode: CaptureMode) {
@@ -244,6 +256,12 @@ fun CaptureScreen(modifier: Modifier = Modifier, initialDocId: String? = null) {
         }
 
     val captureMode by vm.captureMode.collectAsState()
+
+    LaunchedEffect(vm) {
+        CaptureNavActions.modeCycleRequests.collect {
+            vm.cycleCaptureMode()
+        }
+    }
 
     val captureContext = LocalCameraCaptureContext.current
     val canCapture =
