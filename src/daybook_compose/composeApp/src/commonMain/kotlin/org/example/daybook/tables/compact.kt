@@ -185,8 +185,10 @@ fun CompactLayout(
 ) {
     var showFeaturesMenu by remember { mutableStateOf(false) }
     val scope = rememberCoroutineScope()
-    val revealSheetState = rememberRevealBottomSheetState(initiallyVisible = false)
+    val tabsSheetState = rememberRevealBottomSheetState(initiallyVisible = false)
+    val menuSheetState = rememberRevealBottomSheetState(initiallyVisible = false)
     var sheetContent by remember { mutableStateOf(SheetContent.MENU) }
+    var menuCloseDragEnabled by remember { mutableStateOf(false) }
     val leftDrawerState = rememberDrawerState(initialValue = DrawerValue.Closed)
 
     // Config ViewModel
@@ -250,6 +252,11 @@ fun CompactLayout(
                 baseMenuFeatures
             }
         }
+    val nonProminentButtons = chromeState.additionalFeatureButtons.filter { !it.prominent }
+    val allMenuItems =
+        remember(menuFeatures, nonProminentButtons) {
+            menuFeatures.withAdditionalFeatureButtons(nonProminentButtons)
+        }
 
     // Create controllers and ready-state trackers for each navBar feature (used in center rollout)
     val navBarFeatureKeys = navBarFeatures.map { it.key }
@@ -291,10 +298,14 @@ fun CompactLayout(
                         horizontalDragDistance = 0f
                     },
                     onDrag = { change, dragAmount ->
+                        if (menuSheetState.isVisible && menuCloseDragEnabled) {
+                            return@detectDragGestures
+                        }
                         horizontalDragDistance += dragAmount.x
                         if (!menuSheetOpenedByDrag && dragAmount.y < 0f && kotlin.math.abs(dragAmount.y) > kotlin.math.abs(dragAmount.x)) {
                             sheetContent = SheetContent.MENU
-                            revealSheetState.openToContent(SheetContent.MENU, scope)
+                            menuCloseDragEnabled = false
+                            menuSheetState.openToContent(SheetContent.MENU, scope)
                             menuSheetOpenedByDrag = true
                         }
                         if (!menuSheetOpenedByDrag) {
@@ -351,7 +362,7 @@ fun CompactLayout(
                             // If released over a menu item, activate it and close
                             if (highlightedMenuItem != null && lastDragWindowPos != null) {
                                 val menuItemKey = highlightedMenuItem
-                                val feature = menuFeatures.find { it.key == menuItemKey }
+                                val feature = allMenuItems.find { it.key == menuItemKey }
                                 if (feature != null) {
                                     feature.onActivate()
                                     shouldClose = true
@@ -395,9 +406,11 @@ fun CompactLayout(
 
                             // Close sheet if item was activated, otherwise settle to nearest anchor
                             if (shouldClose) {
-                                revealSheetState.hide()
+                                menuCloseDragEnabled = false
+                                menuSheetState.hide()
                             } else {
-                                revealSheetState.settle(0f)
+                                menuCloseDragEnabled = true
+                                menuSheetState.settle(0f)
                             }
                         }
                     },
@@ -410,7 +423,8 @@ fun CompactLayout(
                             lastDragWindowPos = null
                             isDragging = false
                             menuSheetOpenedByDrag = false
-                            revealSheetState.hide()
+                            menuCloseDragEnabled = false
+                            menuSheetState.hide()
                             showFeaturesMenu = false
                         }
                     }
@@ -422,7 +436,9 @@ fun CompactLayout(
 
     LaunchedEffect(isDocEditorFullscreen) {
         if (isDocEditorFullscreen) {
-            revealSheetState.hide()
+            tabsSheetState.hide()
+            menuSheetState.hide()
+            menuCloseDragEnabled = false
             leftDrawerState.close()
             showFeaturesMenu = false
         }
@@ -441,15 +457,25 @@ fun CompactLayout(
 
     // Ensure sheet snaps to correct anchor when content changes while sheet is open
     LaunchedEffect(sheetContent) {
-        if (revealSheetState.isVisible) {
-            revealSheetState.ensureValidAnchor(sheetContent, scope)
+        if (sheetContent == SheetContent.TABS && tabsSheetState.isVisible) {
+            tabsSheetState.ensureValidAnchor(sheetContent, scope)
+        }
+    }
+    LaunchedEffect(menuSheetState) {
+        menuSheetState.setAnchors(SheetConfig.getAnchors(SheetContent.MENU))
+    }
+    LaunchedEffect(menuSheetState.isVisible) {
+        if (!menuSheetState.isVisible) {
+            menuCloseDragEnabled = false
+            highlightedMenuItem = null
+            lastDragWindowPos = null
         }
     }
 
     val centerNavBarContent: @Composable RowScope.() -> Unit = {
         CenterNavBarContent(
             navController = navController,
-            isMenuOpen = revealSheetState.isVisible && sheetContent == SheetContent.MENU,
+            isMenuOpen = menuSheetState.isVisible,
             showFeaturesMenu = showFeaturesMenu,
             featureReadyStates = featureReadyStates,
             features = navBarFeatures,
@@ -463,8 +489,8 @@ fun CompactLayout(
                 scope.launch {
                     feature.onActivate()
                     // Close the sheet if it's open and showing the menu
-                    if (revealSheetState.isVisible && sheetContent == SheetContent.MENU) {
-                        revealSheetState.hide()
+                    if (menuSheetState.isVisible) {
+                        menuSheetState.hide()
                     }
                 }
             }
@@ -509,32 +535,37 @@ fun CompactLayout(
             modifier = modifier,
             bottomBar = {
                 if (!isDocEditorFullscreen) {
-                    DaybookBottomNavigationBar(
+                    val menuOpenProgress =
+                        if (menuSheetState.isVisible) {
+                            (menuSheetState.progress / SheetConfig.MENU_MAX_ANCHOR).coerceIn(0f, 1f)
+                        } else {
+                            0f
+                        }
+                    FloatingBottomNavigationBar(
                         centerContent = {
                             centerNavBarContent()
                         },
-                        // showLeftDrawerHint = leftDrawerState.currentValue == DrawerValue.Closed && !isLeftDrawerDragging,
-                        showLeftDrawerHint = true,
+                        menuOpenProgress = menuOpenProgress,
                         bottomBarModifier = menuGestureModifier,
                     )
                 }
             },
             snackbarHost = { SnackbarHost(snackbarHostState) }
         ) { scaffoldPadding ->
-            Box(
-                modifier =
-                    Modifier
-                        .fillMaxSize()
-                        .padding(scaffoldPadding)
-            ) {
-                RevealBottomSheetScaffold(
-                    sheetState = revealSheetState,
-                    // For TABS sheet: hidden and expanded anchors. For MENU sheet: hidden, 2/3, and expanded anchors
-                    sheetAnchors = SheetConfig.getAnchors(sheetContent),
+            Box(modifier = Modifier.fillMaxSize()) {
+                Box(
+                    modifier =
+                        Modifier
+                            .fillMaxSize()
+                            .padding(scaffoldPadding)
+                ) {
+                    RevealBottomSheetScaffold(
+                    sheetState = tabsSheetState,
+                    sheetAnchors = SheetConfig.getAnchors(SheetContent.TABS),
                     sheetDragHandle = null,
-                    sheetHeader = { headerModifier: Modifier ->
-                        when (sheetContent) {
-                    SheetContent.TABS -> {
+                    sheetHeader =
+                        if (sheetContent == SheetContent.TABS) {
+                            { headerModifier: Modifier ->
                         // Place table title / header when in TABS sheet
                         val tablesState = vm.tablesState.collectAsState().value
                         val selectedTableId = vm.selectedTableId.collectAsState().value
@@ -609,55 +640,10 @@ fun CompactLayout(
                                 }
                             }
                         }
-                    }
-
-                            SheetContent.MENU -> {
-                                // Header for menu sheet
-                                Surface(
-                                    modifier = headerModifier.fillMaxWidth(),
-                                    color = Color.Transparent
-                                ) {
-                                    Column(
-                                        modifier =
-                                            Modifier
-                                                .fillMaxWidth()
-                                                .background(MaterialTheme.colorScheme.surfaceContainerLow)
-                                    ) {
-                                        // handle drawn in header
-                                        Box(
-                                            modifier =
-                                                Modifier
-                                                    .fillMaxWidth()
-                                                    .padding(top = 8.dp, bottom = 4.dp),
-                                            contentAlignment = Alignment.Center
-                                        ) {
-                                            Box(
-                                                modifier =
-                                                    Modifier
-                                                        .height(4.dp)
-                                                        .width(36.dp)
-                                                        .background(
-                                                            MaterialTheme.colorScheme.onSurface.copy(
-                                                                alpha = 0.12f
-                                                            ),
-                                                            shape = RoundedCornerShape(2.dp)
-                                                        )
-                                            )
-                                        }
-                                        Row(
-                                            modifier = Modifier.padding(16.dp),
-                                            verticalAlignment = Alignment.CenterVertically
-                                        ) {
-                                            Text(
-                                                text = "Menu",
-                                                style = MaterialTheme.typography.titleMedium
-                                            )
-                                        }
-                                    }
-                                }
                             }
-                        }
-                    },
+                        } else {
+                            null
+                        },
                     topBar = {
                 // Get chrome state manager and observe the current state (from the current screen)
                 val chromeStateManager = LocalChromeStateManager.current
@@ -686,23 +672,24 @@ fun CompactLayout(
                 ChromeStateTopAppBar(mergedChromeState)
                     },
                     sheetContent = {
-                SheetContentHost(
-                    sheetContent = sheetContent,
+                if (sheetContent == SheetContent.TABS) {
+                    SheetContentHost(
+                    sheetContent = SheetContent.TABS,
                     onTabSelected = {
                         // When the user selects a tab from the sheet, route it via the vm
                         vm.selectTab(it.id)
-                        revealSheetState.hide()
+                        tabsSheetState.hide()
                     },
                     onTableSelected = { table ->
                         vm.selectTable(table.id)
                     },
                     onDismiss = {
-                        revealSheetState.hide()
+                        tabsSheetState.hide()
                     },
                     onFeatureActivate = {
                         showFeaturesMenu = false
                         scope.launch {
-                            revealSheetState.hide()
+                            tabsSheetState.hide()
                         }
                     },
                     onTabLayout = { tabId, rect ->
@@ -722,37 +709,61 @@ fun CompactLayout(
                     addTableController = addTableController,
                     highlightedTab = highlightedTab,
                     highlightedTable = highlightedTable,
-                    features = menuFeatures,
-                    onMenuItemLayout = { key, rect ->
-                        menuItemLayouts = menuItemLayouts + (key to rect)
-                    },
-                    highlightedMenuItem = highlightedMenuItem,
+                    features = emptyList(),
+                    onMenuItemLayout = { _, _ -> },
+                    highlightedMenuItem = null,
                     tableViewMode = tableViewMode
                 )
+                }
                     },
                     sheetPeekHeight = 0.dp,
                     modifier = Modifier.matchParentSize()
-                ) { contentPadding ->
-                    Box(
-                        modifier =
-                            Modifier
-                                .fillMaxSize()
-                                .padding(contentPadding)
-                    ) {
-                        Row(modifier = Modifier.fillMaxSize()) {
-                            Box(modifier = Modifier.weight(1f, fill = true)) {
-                                Routes(
-                                    modifier = Modifier.fillMaxSize(),
-                                    navController = navController,
-                                    extraAction = extraAction,
-                                    contentType = contentType
-                                )
-                            }
+                    ) { contentPadding ->
+                        Box(
+                            modifier =
+                                Modifier
+                                    .fillMaxSize()
+                                    .padding(contentPadding)
+                        ) {
+                            Row(modifier = Modifier.fillMaxSize()) {
+                                Box(modifier = Modifier.weight(1f, fill = true)) {
+                                    Routes(
+                                        modifier = Modifier.fillMaxSize(),
+                                        navController = navController,
+                                        extraAction = extraAction,
+                                        contentType = contentType
+                                    )
+                                }
 
-                            // Sidebar not shown in compact view
+                                // Sidebar not shown in compact view
+                            }
                         }
                     }
                 }
+                FloatingGrowingMenuSheet(
+                    sheetState = menuSheetState,
+                    maxAnchor = SheetConfig.MENU_MAX_ANCHOR,
+                    menuItems = allMenuItems,
+                    highlightedMenuItem = highlightedMenuItem,
+                    enableDragToClose = menuCloseDragEnabled,
+                    onMenuItemLayout = { key, rect ->
+                        menuItemLayouts = menuItemLayouts + (key to rect)
+                    },
+                    onDismiss = {
+                        scope.launch {
+                            menuSheetState.hide()
+                        }
+                    },
+                    onItemActivate = { item ->
+                        if (item.enabled) {
+                            item.onActivate()
+                        }
+                        menuCloseDragEnabled = false
+                        showFeaturesMenu = false
+                        menuSheetState.hide()
+                    },
+                    modifier = Modifier.fillMaxSize()
+                )
             }
         }
 

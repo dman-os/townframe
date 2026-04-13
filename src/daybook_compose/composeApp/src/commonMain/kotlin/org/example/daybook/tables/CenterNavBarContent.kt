@@ -35,6 +35,7 @@ import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.lifecycle.viewmodel.compose.viewModel
 import androidx.navigation.NavHostController
+import androidx.navigation.compose.currentBackStackEntryAsState
 import kotlinx.coroutines.launch
 import org.example.daybook.AppScreens
 import org.example.daybook.ChromeState
@@ -62,6 +63,8 @@ fun RowScope.CenterNavBarContent(
     modifier: Modifier = Modifier
 ) {
     val scope = rememberCoroutineScope()
+    val navBackStackEntry by navController.currentBackStackEntryAsState()
+    val currentRoute = navBackStackEntry?.destination?.route
 
     // Get chrome state from manager
     val chromeStateManager = LocalChromeStateManager.current
@@ -114,7 +117,10 @@ fun RowScope.CenterNavBarContent(
                             },
                     icon = { button.icon() },
                     label = { button.label() },
-                    selected = hoverOver || readyState,
+                    selected =
+                        hoverOver ||
+                            readyState ||
+                            isFeatureRouteSelected(button.key, currentRoute),
                     enabled = button.enabled
                 )
             }
@@ -175,9 +181,26 @@ fun RowScope.CenterNavBarContent(
                     label = {
                         Text(feature.label, style = MaterialTheme.typography.labelSmall)
                     },
-                    selected = hoverOver || ready
+                    selected =
+                        hoverOver ||
+                            ready ||
+                            isFeatureRouteSelected(feature.key, currentRoute)
                 )
             }
         }
     }
+}
+
+private fun isFeatureRouteSelected(featureKey: String, currentRoute: String?): Boolean {
+    val targetRoute =
+        when (featureKey) {
+            FeatureKeys.Home -> AppScreens.Home.name
+            FeatureKeys.Capture -> AppScreens.Capture.name
+            FeatureKeys.Drawer -> AppScreens.Drawer.name
+            FeatureKeys.Tables -> AppScreens.Tables.name
+            FeatureKeys.Progress -> AppScreens.Progress.name
+            FeatureKeys.Settings -> AppScreens.Settings.name
+            else -> null
+        }
+    return targetRoute != null && targetRoute == currentRoute
 }
