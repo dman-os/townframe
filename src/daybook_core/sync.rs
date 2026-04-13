@@ -895,6 +895,7 @@ impl crate::repos::Repo for IrohSyncRepo {
 mod tests {
     use super::*;
     mod stress;
+    mod ladder;
 
     use crate::blobs::BlobsRepo;
     use crate::drawer::DrawerRepo;

@@ -1281,7 +1281,9 @@ fn cmp_doc_events(left: &PartitionDocEvent, right: &PartitionDocEvent) -> std::c
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::repo::{BigRepo, Config, PeerId, StorageConfig};
     use sqlx::sqlite::SqlitePoolOptions;
+    use std::collections::HashSet;
     use tokio::time::{timeout, Duration};
 
     async fn make_store() -> PartitionStore {
@@ -1303,6 +1305,15 @@ mod tests {
             .await
             .expect("schema should initialize");
         store
+    }
+
+    async fn boot_repo() -> (Arc<BigRepo>, crate::repo::BigRepoStopToken) {
+        BigRepo::boot(Config {
+            peer_id: PeerId::new([9_u8; 32]),
+            storage: StorageConfig::Memory,
+        })
+        .await
+        .expect("big repo should boot")
     }
 
     #[tokio::test]
@@ -1420,5 +1431,164 @@ mod tests {
             .await
             .expect("replay should produce at least one item");
         assert!(first_item.is_some());
+    }
+
+    #[tokio::test]
+    async fn get_docs_full_respects_allowed_partitions() {
+        let (repo, stop) = boot_repo().await;
+        let partition_a: PartitionId = "p-a".into();
+        let partition_b: PartitionId = "p-b".into();
+        let doc_a = repo.create_doc(automerge::Automerge::new()).await.unwrap();
+        let doc_b = repo.create_doc(automerge::Automerge::new()).await.unwrap();
+        repo.partition_store()
+            .add_member(
+                &partition_a,
+                &doc_a.document_id().to_string(),
+                &serde_json::json!({}),
+            )
+            .await
+            .unwrap();
+        repo.partition_store()
+            .add_member(
+                &partition_b,
+                &doc_b.document_id().to_string(),
+                &serde_json::json!({}),
+            )
+            .await
+            .unwrap();
+
+        let allowed = repo
+            .get_docs_full_in_partitions(
+                &[doc_a.document_id().to_string()],
+                std::slice::from_ref(&partition_a),
+            )
+            .await
+            .expect("allowed doc should be readable");
+        assert_eq!(allowed.len(), 1);
+        assert_eq!(allowed[0].doc_id, doc_a.document_id().to_string());
+
+        let denied = repo
+            .get_docs_full_in_partitions(
+                &[
+                    doc_a.document_id().to_string(),
+                    doc_b.document_id().to_string(),
+                ],
+                std::slice::from_ref(&partition_a),
+            )
+            .await;
+        assert!(
+            denied.is_err(),
+            "access should be denied for partition-b doc"
+        );
+
+        stop.stop().await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn bigrepo_member_snapshot_paginates_all_docs() {
+        let store = make_store().await;
+        let partition_id: PartitionId = "p-member-page".into();
+        let mut expected = HashSet::new();
+        for idx in 0..3 {
+            let item_id = format!("item-{idx}");
+            expected.insert(item_id.clone());
+            store
+                .add_member(&partition_id, &item_id, &serde_json::json!({}))
+                .await
+                .expect("membership add should succeed");
+        }
+
+        let mut since = None;
+        let mut seen = Vec::new();
+        loop {
+            let response = store
+                .get_partition_member_events_for_peer(
+                    &"peer-x".into(),
+                    &GetPartitionMemberEventsRequest {
+                        partitions: vec![PartitionCursorRequest {
+                            partition_id: partition_id.clone(),
+                            since,
+                        }],
+                        limit: 1,
+                    },
+                )
+                .await
+                .expect("member snapshot page should succeed");
+            seen.extend(response.events);
+            let page = response
+                .cursors
+                .into_iter()
+                .find(|page| page.partition_id == partition_id)
+                .expect("page for partition must be returned");
+            if !page.has_more {
+                break;
+            }
+            since = page.next_cursor;
+        }
+
+        let item_ids = seen
+            .into_iter()
+            .map(|event| match event.deets {
+                PartitionMemberEventDeets::MemberUpsert { item_id, .. }
+                | PartitionMemberEventDeets::MemberRemoved { item_id, .. } => item_id,
+            })
+            .collect::<HashSet<_>>();
+        assert_eq!(item_ids, expected);
+    }
+
+    #[tokio::test]
+    async fn bigrepo_doc_snapshot_paginates_all_docs() {
+        let store = make_store().await;
+        let partition_id: PartitionId = "p-doc-page".into();
+        let mut expected = HashSet::new();
+        for idx in 0..3 {
+            let item_id = format!("item-{idx}");
+            expected.insert(item_id.clone());
+            store
+                .add_member(&partition_id, &item_id, &serde_json::json!({}))
+                .await
+                .expect("membership add should succeed");
+            store
+                .record_item_change(&partition_id, &item_id, &serde_json::json!({"idx": idx}))
+                .await
+                .expect("doc event should succeed");
+        }
+
+        let mut since = None;
+        let mut seen = Vec::new();
+        loop {
+            let response = store
+                .get_partition_doc_events_for_peer(
+                    &"peer-x".into(),
+                    &GetPartitionDocEventsRequest {
+                        partitions: vec![PartitionCursorRequest {
+                            partition_id: partition_id.clone(),
+                            since,
+                        }],
+                        limit: 1,
+                    },
+                )
+                .await
+                .expect("doc snapshot page should succeed");
+            seen.extend(response.events);
+            let page = response
+                .cursors
+                .into_iter()
+                .find(|page| page.partition_id == partition_id)
+                .expect("page for partition must be returned");
+            if !page.has_more {
+                break;
+            }
+            since = page.next_cursor;
+        }
+
+        let item_ids = seen
+            .into_iter()
+            .map(|event| match event.deets {
+                PartitionDocEventDeets::ItemChanged { item_id, .. }
+                | PartitionDocEventDeets::ItemDeleted { item_id, .. } => item_id,
+            })
+            .collect::<HashSet<_>>();
+        assert_eq!(item_ids, expected);
     }
 }

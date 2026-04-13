@@ -100,7 +100,6 @@ pub struct ChangeListenerManager {
     local_listeners: Mutex<Vec<LocalListener>>,
     /// used to send local ops to the switchboard
     local_tx: mpsc::UnboundedSender<Vec<BigRepoLocalNotification>>,
-    brokers: DHashMap<DocumentId, std::sync::Weak<DocChangeBrokerLease>>,
     cancel_token: CancellationToken,
 }
 
@@ -129,18 +128,6 @@ impl DocIdFilter {
     }
 }
 
-pub struct DocChangeBrokerLease {
-    doc_id: DocumentId,
-}
-
-impl DocChangeBrokerLease {
-    pub fn filter(&self) -> DocIdFilter {
-        DocIdFilter {
-            doc_id: self.doc_id,
-        }
-    }
-}
-
 impl ChangeListenerManager {
     pub fn boot() -> (Arc<Self>, ChangeListenerManagerStopToken) {
         let (change_tx, change_rx) = mpsc::unbounded_channel();
@@ -154,7 +141,6 @@ impl ChangeListenerManager {
             head_tx,
             local_listeners: default(),
             local_tx,
-            brokers: default(),
             cancel_token: cancel_token.clone(),
         };
         let out = Arc::new(out);
@@ -174,29 +160,6 @@ impl ChangeListenerManager {
             eyre::bail!("ChangeListenerManager is stopped");
         }
         Ok(())
-    }
-
-    fn spawn_doc_change_lease(&self, doc_id: DocumentId) -> Arc<DocChangeBrokerLease> {
-        Arc::new(DocChangeBrokerLease { doc_id })
-    }
-
-    pub async fn add_doc_listener(&self, doc_id: DocumentId) -> Res<Arc<DocChangeBrokerLease>> {
-        self.ensure_live()?;
-        match self.brokers.entry(doc_id) {
-            dashmap::mapref::entry::Entry::Occupied(mut occupied) => {
-                if let Some(lease) = occupied.get().upgrade() {
-                    return Ok(lease);
-                }
-                let lease = self.spawn_doc_change_lease(*occupied.key());
-                occupied.insert(Arc::downgrade(&lease));
-                Ok(lease)
-            }
-            dashmap::mapref::entry::Entry::Vacant(vacant) => {
-                let lease = self.spawn_doc_change_lease(*vacant.key());
-                vacant.insert(Arc::downgrade(&lease));
-                Ok(lease)
-            }
-        }
     }
 
     pub(super) fn notify_doc_created(
@@ -325,7 +288,6 @@ impl ChangeListenerManager {
             ChangeListenerRegistration {
                 manager: Arc::downgrade(self),
                 id,
-                _broker_leases: Vec::new(),
             },
             change_rx,
         ))
@@ -381,7 +343,6 @@ impl ChangeListenerManager {
             HeadListenerRegistration {
                 manager: Arc::downgrade(self),
                 id,
-                _broker_leases: Vec::new(),
             },
             change_rx,
         ))
@@ -600,14 +561,6 @@ fn origin_matches_filter(origin: &BigRepoChangeOrigin, filter: OriginFilter) -> 
 pub struct ChangeListenerRegistration {
     manager: std::sync::Weak<ChangeListenerManager>,
     id: Uuid,
-    _broker_leases: Vec<Arc<DocChangeBrokerLease>>,
-}
-
-impl ChangeListenerRegistration {
-    pub fn with_broker_leases(mut self, broker_leases: Vec<Arc<DocChangeBrokerLease>>) -> Self {
-        self._broker_leases = broker_leases;
-        self
-    }
 }
 
 impl Drop for ChangeListenerRegistration {
@@ -632,14 +585,6 @@ struct HeadListener {
 pub struct HeadListenerRegistration {
     manager: std::sync::Weak<ChangeListenerManager>,
     id: Uuid,
-    _broker_leases: Vec<Arc<DocChangeBrokerLease>>,
-}
-
-impl HeadListenerRegistration {
-    pub fn with_broker_leases(mut self, broker_leases: Vec<Arc<DocChangeBrokerLease>>) -> Self {
-        self._broker_leases = broker_leases;
-        self
-    }
 }
 
 impl Drop for HeadListenerRegistration {

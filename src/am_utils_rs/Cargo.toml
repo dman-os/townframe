@@ -15,7 +15,19 @@ repo = [
     "dep:tokio-tungstenite",
     "dep:sqlx",
     "dep:serde_json",
-    "dep:irpc"
+    "dep:irpc",
+    "dep:automerge_sedimentree",
+    "dep:future_form",
+    "dep:keyhive_core",
+    "dep:keyhive_crypto",
+    "dep:sedimentree_core",
+    "dep:sedimentree_fs_storage",
+    "dep:subduction_core",
+    "dep:subduction_crypto",
+    "dep:subduction_iroh",
+    "dep:subduction_keyhive",
+    "dep:subduction_keyhive_policy",
+    "dep:subduction_websocket",
 ]
 
 [dependencies]
@@ -53,18 +65,18 @@ irpc = { version = "0.12.0", optional = true, features = ["derive"] }
 
 #
 # sync
-keyhive_core = "0.3.0"
-keyhive_crypto = "0.1.0"
-subduction_core = { workspace = true }
-sedimentree_core = { workspace = true }
-sedimentree_fs_storage = { workspace = true }
-subduction_crypto = { workspace = true }
-subduction_keyhive = { workspace = true }
-subduction_keyhive_policy = { workspace = true }
-subduction_iroh = { workspace = true }
-future_form = { version = "0.3.0" }
-automerge_sedimentree = { workspace = true }
-subduction_websocket = { workspace = true, features = ["tokio_base"] }
+automerge_sedimentree = { workspace = true, optional = true }
+future_form = { version = "0.3.0", optional = true }
+keyhive_core = { version = "0.3.0", optional = true }
+keyhive_crypto = { version = "0.1.0", optional = true}
+sedimentree_core = { workspace = true, optional = true }
+sedimentree_fs_storage = { workspace = true, optional = true }
+subduction_core = { workspace = true, optional = true }
+subduction_crypto = { workspace = true, optional = true }
+subduction_iroh = { workspace = true, optional = true }
+subduction_keyhive = { workspace = true, optional = true }
+subduction_keyhive_policy = { workspace = true, optional = true }
+subduction_websocket = { workspace = true, features = ["tokio_base"], optional = true }
 
 #
 # logging

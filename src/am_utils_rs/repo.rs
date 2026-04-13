@@ -671,6 +671,7 @@ async fn ensure_docs_schema(state_pool: &sqlx::SqlitePool) -> Res<()> {
 mod tests {
     use super::*;
     use automerge::{transaction::Transactable, ReadDoc, ScalarValue};
+    use autosurgeon::Prop;
     use tokio::time::{timeout, Duration};
 
     async fn boot_repo() -> Res<(Arc<BigRepo>, BigRepoStopToken)> {
@@ -709,6 +710,15 @@ mod tests {
         }
     }
 
+    async fn recv_change_batch(
+        rx: &mut tokio::sync::mpsc::UnboundedReceiver<Vec<BigRepoChangeNotification>>,
+    ) -> Vec<BigRepoChangeNotification> {
+        timeout(Duration::from_secs(1), rx.recv())
+            .await
+            .expect("timed out waiting for change batch")
+            .expect("change listener closed unexpectedly")
+    }
+
     #[tokio::test]
     async fn with_document_roundtrip_rehydrates_from_storage() -> Res<()> {
         let (repo, _stop_token) = boot_repo().await?;
@@ -732,6 +742,144 @@ mod tests {
             .await;
         assert_eq!(title, "after");
 
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn change_listener_doc_id_filter_only_receives_target_doc() -> Res<()> {
+        let (repo, _stop_token) = boot_repo().await?;
+        let first_handle = repo.create_doc(automerge::Automerge::new()).await?;
+        let first_doc_id = *first_handle.document_id();
+        let second_handle = repo.create_doc(automerge::Automerge::new()).await?;
+
+        let (_registration, mut rx) = repo
+            .subscribe_change_listener(BigRepoChangeFilter {
+                doc_id: Some(BigRepoDocIdFilter::new(first_doc_id)),
+                origin: None,
+                path: Vec::new(),
+            })
+            .await?;
+
+        first_handle
+            .with_document(|doc| {
+                doc.transact(|tx| tx.put(automerge::ROOT, "title", "first"))
+                    .expect("failed mutating first doc");
+            })
+            .await?;
+        second_handle
+            .with_document(|doc| {
+                doc.transact(|tx| tx.put(automerge::ROOT, "title", "second"))
+                    .expect("failed mutating second doc");
+            })
+            .await?;
+
+        let batch = recv_change_batch(&mut rx).await;
+        assert!(!batch.is_empty());
+        assert!(batch.iter().all(|item| match item {
+            BigRepoChangeNotification::DocCreated { doc_id, .. }
+            | BigRepoChangeNotification::DocImported { doc_id, .. }
+            | BigRepoChangeNotification::DocChanged { doc_id, .. } => *doc_id == first_doc_id,
+        }));
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn change_listener_path_filter_matches_only_prefix() -> Res<()> {
+        let (repo, _stop_token) = boot_repo().await?;
+        let handle = repo.create_doc(automerge::Automerge::new()).await?;
+        let doc_id = *handle.document_id();
+
+        handle
+            .with_document(|doc| {
+                doc.transact(|tx| {
+                    let profile = tx
+                        .put_object(automerge::ROOT, "profile", automerge::ObjType::Map)
+                        .expect("failed creating profile object");
+                    tx.put(&profile, "title", "seed")
+                        .expect("failed seeding profile title");
+                    eyre::Ok(())
+                })
+                .expect("failed seeding nested profile");
+            })
+            .await?;
+
+        let profile_obj = handle
+            .with_document_read(|doc| {
+                let Some((automerge::Value::Object(_), profile_obj)) = doc
+                    .get(automerge::ROOT, "profile")
+                    .expect("failed reading profile")
+                else {
+                    panic!("expected profile object");
+                };
+                profile_obj
+            })
+            .await;
+
+        let (_registration, mut rx) = repo
+            .subscribe_change_listener(BigRepoChangeFilter {
+                doc_id: Some(BigRepoDocIdFilter::new(doc_id)),
+                origin: None,
+                path: vec![Prop::Key("profile".into())],
+            })
+            .await?;
+
+        handle
+            .with_document(|doc| {
+                doc.transact(|tx| {
+                    tx.put(&profile_obj, "title", "one")
+                        .expect("failed mutating profile title");
+                    eyre::Ok(())
+                })
+                .expect("failed mutating nested profile");
+            })
+            .await?;
+        handle
+            .with_document(|doc| {
+                doc.transact(|tx| tx.put(automerge::ROOT, "body", "two"))
+                    .expect("failed mutating body");
+            })
+            .await?;
+
+        let batch = recv_change_batch(&mut rx).await;
+        assert_eq!(batch.len(), 1);
+        let BigRepoChangeNotification::DocChanged {
+            doc_id: seen_doc_id,
+            patch,
+            ..
+        } = &batch[0]
+        else {
+            panic!("expected doc changed notification");
+        };
+        assert_eq!(*seen_doc_id, doc_id);
+        assert!(big_repo_path_prefix_matches(
+            &[Prop::Key("profile".into())],
+            &patch.path[..]
+        ));
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn change_listener_origin_filter_works_for_local_events() -> Res<()> {
+        let (repo, _stop_token) = boot_repo().await?;
+        let (_registration, mut rx) = repo
+            .subscribe_change_listener(BigRepoChangeFilter {
+                doc_id: None,
+                origin: Some(BigRepoOriginFilter::Local),
+                path: Vec::new(),
+            })
+            .await?;
+
+        let handle = repo.create_doc(automerge::Automerge::new()).await?;
+        let doc_id = *handle.document_id();
+
+        let batch = recv_change_batch(&mut rx).await;
+        assert!(batch.iter().any(|item| matches!(
+            item,
+            BigRepoChangeNotification::DocCreated {
+                doc_id: seen_doc_id,
+                ..
+            } if *seen_doc_id == doc_id
+        )));
         Ok(())
     }
 
@@ -830,6 +978,44 @@ mod tests {
             .await;
         assert_eq!(final_count, (writer_count * increments_per_writer) as i64);
 
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn local_listener_doc_id_filter_only_receives_target_doc() -> Res<()> {
+        let (repo, _stop_token) = boot_repo().await?;
+        let target_handle = repo.create_doc(automerge::Automerge::new()).await?;
+        let target_doc_id = *target_handle.document_id();
+        let other_handle = repo.create_doc(automerge::Automerge::new()).await?;
+
+        let (_registration, mut rx) = repo
+            .subscribe_local_listener(BigRepoLocalFilter {
+                doc_id: Some(BigRepoDocIdFilter::new(target_doc_id)),
+            })
+            .await?;
+
+        target_handle
+            .with_document(|doc| {
+                doc.transact(|tx| tx.put(automerge::ROOT, "count", 1))
+                    .expect("failed mutating target doc");
+            })
+            .await?;
+        other_handle
+            .with_document(|doc| {
+                doc.transact(|tx| tx.put(automerge::ROOT, "count", 2))
+                    .expect("failed mutating other doc");
+            })
+            .await?;
+
+        let batch = timeout(Duration::from_secs(1), rx.recv())
+            .await
+            .expect("timed out waiting for local batch")
+            .expect("local listener closed unexpectedly");
+        assert!(batch.iter().all(|item| match item {
+            BigRepoLocalNotification::DocCreated { doc_id, .. }
+            | BigRepoLocalNotification::DocImported { doc_id, .. }
+            | BigRepoLocalNotification::DocHeadsUpdated { doc_id, .. } => *doc_id == target_doc_id,
+        }));
         Ok(())
     }
 

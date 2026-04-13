@@ -547,3 +547,112 @@ impl PeerSyncWorker {
         Ok(())
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::sync::store::spawn_sync_store;
+    use crate::sync::store::SyncStoreStopToken;
+    use sqlx::sqlite::SqlitePoolOptions;
+
+    async fn make_worker() -> Res<(PeerSyncWorker, SyncStoreStopToken)> {
+        let pool = SqlitePoolOptions::new()
+            .max_connections(1)
+            .connect("sqlite::memory:")
+            .await?;
+        let (sync_store, stop) = spawn_sync_store(pool).await?;
+        let (rpc_tx, _rpc_rx) = mpsc::channel(1);
+        let (doc_sync_tx, _doc_sync_rx) = mpsc::channel(1);
+        let (_doc_ack_tx, doc_ack_rx) = mpsc::channel(1);
+        let (progress_tx, _progress_rx) = broadcast::channel(1);
+        let (events_tx, _events_rx) = broadcast::channel(1);
+        let worker = PeerSyncWorker {
+            local_peer: "local".into(),
+            remote_peer: "remote".into(),
+            rpc_client: irpc::Client::<PartitionSyncRpc>::local(rpc_tx),
+            sync_store,
+            doc_sync_tx,
+            doc_ack_rx,
+            target_partitions: Vec::new(),
+            progress_tx,
+            events_tx,
+        };
+        Ok((worker, stop))
+    }
+
+    #[tokio::test]
+    async fn apply_cursor_advance_ack_updates_persisted_cursor() -> Res<()> {
+        let (mut worker, stop): (PeerSyncWorker, SyncStoreStopToken) = make_worker().await?;
+        let partition_id: PartitionId = "p-doc".into();
+
+        worker
+            .apply_cursor_advance_ack(partition_id.clone(), 8)
+            .await?;
+
+        let cursor = worker
+            .sync_store
+            .get_partition_cursor(worker.remote_peer.clone(), partition_id)
+            .await?;
+        assert_eq!(cursor.doc_cursor, Some(8));
+
+        stop.stop().await?;
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn apply_cursor_advance_ack_ignores_stale_cursor() -> Res<()> {
+        let (mut worker, stop): (PeerSyncWorker, SyncStoreStopToken) = make_worker().await?;
+        let partition_id: PartitionId = "p-stale".into();
+
+        worker
+            .sync_store
+            .set_partition_cursor(
+                worker.remote_peer.clone(),
+                partition_id.clone(),
+                None,
+                Some(9),
+            )
+            .await?;
+        worker
+            .apply_cursor_advance_ack(partition_id.clone(), 4)
+            .await?;
+
+        let cursor = worker
+            .sync_store
+            .get_partition_cursor(worker.remote_peer.clone(), partition_id)
+            .await?;
+        assert_eq!(cursor.doc_cursor, Some(9));
+
+        stop.stop().await?;
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn apply_member_cursor_advance_ack_updates_member_cursor_independently() -> Res<()> {
+        let (mut worker, stop): (PeerSyncWorker, SyncStoreStopToken) = make_worker().await?;
+        let partition_id: PartitionId = "p-member".into();
+
+        worker
+            .sync_store
+            .set_partition_cursor(
+                worker.remote_peer.clone(),
+                partition_id.clone(),
+                None,
+                Some(3),
+            )
+            .await?;
+        worker
+            .apply_member_cursor_advance_ack(partition_id.clone(), 7)
+            .await?;
+
+        let cursor = worker
+            .sync_store
+            .get_partition_cursor(worker.remote_peer.clone(), partition_id)
+            .await?;
+        assert_eq!(cursor.member_cursor, Some(7));
+        assert_eq!(cursor.doc_cursor, Some(3));
+
+        stop.stop().await?;
+        Ok(())
+    }
+}

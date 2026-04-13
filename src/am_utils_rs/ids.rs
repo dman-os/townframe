@@ -55,12 +55,14 @@ impl std::str::FromStr for DocId32 {
     }
 }
 
+#[cfg(feature = "repo")]
 impl From<sedimentree_core::id::SedimentreeId> for DocId32 {
     fn from(value: sedimentree_core::id::SedimentreeId) -> Self {
         Self::new(*value.as_bytes())
     }
 }
 
+#[cfg(feature = "repo")]
 impl From<DocId32> for sedimentree_core::id::SedimentreeId {
     fn from(value: DocId32) -> Self {
         sedimentree_core::id::SedimentreeId::new(value.into_bytes())
@@ -117,12 +119,14 @@ impl std::str::FromStr for PeerId32 {
     }
 }
 
+#[cfg(feature = "repo")]
 impl From<subduction_core::peer::id::PeerId> for PeerId32 {
     fn from(value: subduction_core::peer::id::PeerId) -> Self {
         Self::new(*value.as_bytes())
     }
 }
 
+#[cfg(feature = "repo")]
 impl From<PeerId32> for subduction_core::peer::id::PeerId {
     fn from(value: PeerId32) -> Self {
         subduction_core::peer::id::PeerId::new(value.into_bytes())
@@ -174,6 +178,7 @@ mod tests {
         assert_eq!(decoded, peer_id);
     }
 
+    #[cfg(feature = "repo")]
     #[test]
     fn doc_id_sedimentree_roundtrip() {
         let doc_id = DocId32::new([23_u8; 32]);
@@ -182,6 +187,7 @@ mod tests {
         assert_eq!(decoded, doc_id);
     }
 
+    #[cfg(feature = "repo")]
     #[test]
     fn peer_id_subduction_roundtrip() {
         let peer_id = PeerId32::new([31_u8; 32]);

@@ -1056,6 +1056,7 @@ impl Worker {
                         {
                             Some(task_key.clone())
                         }
+                        scheduler::SyncTask::Doc(_) => None,
                         scheduler::SyncTask::Import(_) | scheduler::SyncTask::Blob(_) => None,
                     })
                     .collect();
@@ -1072,6 +1073,7 @@ impl Worker {
                         {
                             Some(task_key.clone())
                         }
+                        scheduler::SyncTask::Import(_) => None,
                         scheduler::SyncTask::Doc(_) | scheduler::SyncTask::Blob(_) => None,
                     })
                     .collect();
@@ -1490,7 +1492,6 @@ impl Worker {
             .partition_store()
             .remove_member(&partition_id, &doc_id.to_string(), &serde_json::json!({}))
             .await?;
-        self.scheduler.docs_to_stop.insert(doc_id.clone());
         let mut clear_import_request = false;
         if let Some(import_state) = self.import_doc_set.get_mut(&doc_id) {
             if let Some(requested_parts) = import_state.requested_peers.get_mut(&endpoint_id) {
@@ -2310,6 +2311,7 @@ impl Worker {
                 }
             }
         }
+        self.refresh_peer_fully_synced_state(endpoint_id).await?;
         Ok(())
     }
 
