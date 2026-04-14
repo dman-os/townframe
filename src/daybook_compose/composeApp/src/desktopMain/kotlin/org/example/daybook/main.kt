@@ -102,7 +102,10 @@ fun main() = application {
                     shutdownDone = true
                     EventQueue.invokeLater { exitApplication() }
                 },
-                autoShutdownOnDispose = false
+                autoShutdownOnDispose = false,
+                onExitRequest = {
+                    signalShutdownRequested.set(true)
+                }
             )
         }
     }

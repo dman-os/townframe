@@ -926,11 +926,17 @@ fun LeftDrawer(
     ) {
         var selectedPane by remember { mutableIntStateOf(1) }
 
-        Text(
-            text = "LeftDrawer",
-            style = MaterialTheme.typography.titleMedium,
-            modifier = Modifier.padding(16.dp)
-        )
+        Row(
+            modifier = Modifier.fillMaxWidth().padding(horizontal = 16.dp, vertical = 12.dp),
+            verticalAlignment = Alignment.CenterVertically
+        ) {
+            SidebarMenuButton()
+            Spacer(Modifier.width(12.dp))
+            Text(
+                text = "Daybook",
+                style = MaterialTheme.typography.titleMedium
+            )
+        }
         HorizontalDivider()
 
         when (selectedPane) {

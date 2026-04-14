@@ -155,6 +155,7 @@ enum class DaybookContentType {
 }
 
 val LocalPermCtx = compositionLocalOf<PermissionsContext?> { null }
+val LocalAppExitRequest = compositionLocalOf<(() -> Unit)?> { null }
 
 data class PermissionsContext(
     val hasCamera: Boolean = false,
@@ -706,7 +707,8 @@ fun App(
     navController: NavHostController = rememberNavController(),
     shutdownRequested: Boolean = false,
     onShutdownCompleted: (() -> Unit)? = null,
-    autoShutdownOnDispose: Boolean = true
+    autoShutdownOnDispose: Boolean = true,
+    onExitRequest: (() -> Unit)? = null
 ) {
     val permCtx = LocalPermCtx.current
     val appStartMark = remember { TimeSource.Monotonic.markNow() }
@@ -1090,12 +1092,13 @@ fun App(
                             // Provide camera capture context for coordination between camera and bottom bar
                             val cameraCaptureContext = remember { CameraCaptureContext() }
                             val chromeStateManager = remember { ChromeStateManager() }
-                            ProvideCameraCaptureContext(cameraCaptureContext) {
-                                CompositionLocalProvider(
-                                    LocalChromeStateManager provides chromeStateManager
-                                ) {
-                                    val bigDialogState = remember { BigDialogState() }
-                                    AdaptiveAppLayout(
+                    ProvideCameraCaptureContext(cameraCaptureContext) {
+                        CompositionLocalProvider(
+                            LocalChromeStateManager provides chromeStateManager,
+                            LocalAppExitRequest provides onExitRequest
+                        ) {
+                            val bigDialogState = remember { BigDialogState() }
+                            AdaptiveAppLayout(
                                         modifier = surfaceModifier,
                                         navController = navController,
                                         extraAction = extraAction,
