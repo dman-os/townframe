@@ -99,17 +99,17 @@ private object SidebarLayoutConstants {
     /** Default expanded sidebar weight (40% of available space) */
     const val DEFAULT_SIDEBAR_WEIGHT = 0.4f
 
-    /** Collapsed/rail sidebar weight (5% of available space) */
-    const val COLLAPSED_SIDEBAR_WEIGHT = 0.04f
+    /** Collapsed/rail sidebar weight (10% of available space) */
+    const val COLLAPSED_SIDEBAR_WEIGHT = 0.10f
 
     /** Threshold weight to determine if sidebar is expanded or collapsed */
     const val SIDEBAR_EXPANDED_THRESHOLD = 0.15f
 
     /** Minimum weight for any pane to prevent it from disappearing */
-    const val MIN_PANE_WEIGHT = 0.040f
+    const val MIN_PANE_WEIGHT = 0.10f
 
-    /** Rail mode size in dp (icon-only navigation rail) */
-    const val RAIL_SIZE_DP = 40f
+    /** Rail mode transition point in dp (icon-only navigation rail vs drawer) */
+    const val RAIL_TRANSITION_DP = 80f
 
     /** Maximum dp for discrete regime (transition point from rail to drawer) */
     const val DISCRETE_REGIME_MAX_DP = 235f
@@ -445,14 +445,14 @@ fun LayoutFromConfig(
             val leftPane = layoutConfig.leftRegion.deets
             val leftRegimes =
                 if (leftPane.variant is WindowLayoutPaneVariant.Sidebar) {
-                    // Sidebar: discrete 0-RAIL_SIZE_DP for rail mode, continuous above
+                    // Sidebar: discrete 0-RAIL_TRANSITION_DP for rail mode, continuous above
                     listOf(
                         PaneSizeRegime.Discrete(
                             minDp = 0f,
                             maxDp = SidebarLayoutConstants.DISCRETE_REGIME_MAX_DP,
-                            sizeDp = SidebarLayoutConstants.RAIL_SIZE_DP
+                            sizeDp = SidebarLayoutConstants.RAIL_TRANSITION_DP
                         ),
-                        PaneSizeRegime.Continuous(minDp = SidebarLayoutConstants.RAIL_SIZE_DP)
+                        PaneSizeRegime.Continuous(minDp = SidebarLayoutConstants.RAIL_TRANSITION_DP)
                     )
                 } else {
                     // Default: continuous
@@ -651,7 +651,12 @@ fun SidebarContent(navController: NavHostController, modifier: Modifier = Modifi
             }
         } else {
             // Narrow mode: NavigationRail with features only
-            NavigationRail(modifier = Modifier.align(Alignment.Center).fillMaxHeight()) {
+            NavigationRail(
+                modifier =
+                    Modifier
+                        .align(Alignment.Center)
+                        .fillMaxHeight()
+            ) {
                 allSidebarFeatures.forEach { item ->
                     val featureRoute = getRouteForFeature(item)
                     val isDocEditorRoute = currentRoute == AppScreens.DocEditor.name
@@ -756,14 +761,14 @@ fun RenderLayoutRegion(
             val childPane = child.deets
             val childRegimes =
                 if (childPane.variant is WindowLayoutPaneVariant.Sidebar) {
-                    // Sidebar: discrete 0-RAIL_SIZE_DP for rail mode, continuous above
+                    // Sidebar: discrete 0-RAIL_TRANSITION_DP for rail mode, continuous above
                     listOf(
                         PaneSizeRegime.Discrete(
                             minDp = 0f,
                             maxDp = SidebarLayoutConstants.DISCRETE_REGIME_MAX_DP,
-                            sizeDp = SidebarLayoutConstants.RAIL_SIZE_DP
+                            sizeDp = SidebarLayoutConstants.RAIL_TRANSITION_DP
                         ),
-                        PaneSizeRegime.Continuous(minDp = SidebarLayoutConstants.RAIL_SIZE_DP)
+                        PaneSizeRegime.Continuous(minDp = SidebarLayoutConstants.RAIL_TRANSITION_DP)
                     )
                 } else {
                     // Default: continuous
@@ -873,6 +878,150 @@ fun DockableRegion(
         // Accessor to get weight for a specific key
         fun getWeight(key: Any): Float = weightMap[key] ?: 1f
 
+        private fun logDiscreteWeightConversion(
+            phase: String,
+            keyA: Any,
+            keyB: Any,
+            regime: PaneSizeRegime.Discrete,
+            virtualSizeDpA: Float,
+            virtualSizeDpB: Float,
+            totalSizeDp: Float,
+            totalWeight: Float,
+            totalCurrentWeight: Float,
+            targetWeightA: Float,
+            targetWeightB: Float,
+            newWeightA: Float,
+            newWeightB: Float
+        ) {
+            println(
+                buildString {
+                    append("[DOCKABLE_DISCRETE] phase=")
+                    append(phase)
+                    append(" keyA=")
+                    append(keyA)
+                    append(" keyB=")
+                    append(keyB)
+                    append(" regime={minDp=")
+                    append(regime.minDp)
+                    append(", maxDp=")
+                    append(regime.maxDp)
+                    append(", sizeDp=")
+                    append(regime.sizeDp)
+                    append("}")
+                    append(" virtualSizeDpA=")
+                    append(virtualSizeDpA)
+                    append(" virtualSizeDpB=")
+                    append(virtualSizeDpB)
+                    append(" totalSizeDp=")
+                    append(totalSizeDp)
+                    append(" totalWeight=")
+                    append(totalWeight)
+                    append(" totalCurrentWeight=")
+                    append(totalCurrentWeight)
+                    append(" targetWeightA=")
+                    append(targetWeightA)
+                    append(" targetWeightB=")
+                    append(targetWeightB)
+                    append(" newWeightA=")
+                    append(newWeightA)
+                    append(" newWeightB=")
+                    append(newWeightB)
+                }
+            )
+        }
+
+        private fun sizeDpToWeight(sizeDp: Float, totalSizeDp: Float, totalWeight: Float): Float =
+            if (totalSizeDp <= 0f) 0f else (sizeDp / totalSizeDp) * totalWeight
+
+        private fun resolveDiscreteTargetSizeDp(
+            regime: PaneSizeRegime.Discrete,
+            virtualSizeDp: Float
+        ): Float =
+            when {
+                virtualSizeDp < regime.minDp -> regime.sizeDp
+                virtualSizeDp <= regime.maxDp -> regime.sizeDp
+                else -> virtualSizeDp
+            }
+
+        private fun rebalanceDiscreteWeights(keys: List<Any>, totalSizePx: Int) {
+            if (totalSizePx <= 0 || keys.isEmpty()) return
+
+            val totalSizeDp = with(density) { totalSizePx.toDp().value }
+            if (totalSizeDp <= 0f) return
+
+            val totalWeight = keys.sumOf { getWeight(it).toDouble() }.toFloat()
+            if (totalWeight <= 0f) return
+
+            val currentWeights = keys.associateWith { getWeight(it) }
+            val discreteTargets = linkedMapOf<Any, Pair<PaneSizeRegime.Discrete, Float>>()
+
+            keys.forEach { key ->
+                val currentSizeDp = getSizeDp(key, totalSizePx, totalWeight)
+                val regime = getCurrentRegime(key, currentSizeDp)
+                if (regime is PaneSizeRegime.Discrete) {
+                    discreteTargets[key] = regime to sizeDpToWeight(regime.sizeDp, totalSizeDp, totalWeight)
+                }
+            }
+
+            if (discreteTargets.isEmpty()) return
+
+            val discreteTargetSum =
+                discreteTargets.values.sumOf { it.second.toDouble() }.toFloat()
+            val fixedScale =
+                if (discreteTargetSum > totalWeight && discreteTargetSum > 0f) {
+                    totalWeight / discreteTargetSum
+                } else {
+                    1f
+                }
+
+            val appliedDiscreteWeights =
+                discreteTargets.mapValues { (_, value) -> value.second * fixedScale }
+            val appliedDiscreteSum = appliedDiscreteWeights.values.sum()
+
+            val remainingKeys = keys.filterNot { appliedDiscreteWeights.containsKey(it) }
+            val remainingBudget = (totalWeight - appliedDiscreteSum).coerceAtLeast(0f)
+            val remainingCurrentSum =
+                remainingKeys.sumOf { currentWeights.getValue(it).toDouble() }.toFloat()
+
+            val redistributedRemainingWeights =
+                when {
+                    remainingKeys.isEmpty() -> emptyMap()
+                    remainingCurrentSum > 0f -> {
+                        remainingKeys.associateWith { key ->
+                            (currentWeights.getValue(key) / remainingCurrentSum) * remainingBudget
+                        }
+                    }
+
+                    else -> {
+                        val fallbackWeight = remainingBudget / remainingKeys.size.toFloat()
+                        remainingKeys.associateWith { fallbackWeight }
+                    }
+                }
+
+            (appliedDiscreteWeights.mapValues { it.value } + redistributedRemainingWeights).forEach { (key, weight) ->
+                weightMap[key] = weight
+            }
+
+            val newTotalWeight = getTotalWeight()
+            keys.forEach { key ->
+                sizeDpMap[key] = getSizeDp(key, totalSizePx, newTotalWeight)
+            }
+
+            discreteTargets.forEach { (key, value) ->
+                val regime = value.first
+                val currentWeight = currentWeights.getValue(key)
+                val appliedWeight = appliedDiscreteWeights.getValue(key)
+                println(
+                    "[DOCKABLE_DISCRETE] phase=reconcile/resize key=$key " +
+                        "regime={minDp=${regime.minDp}, maxDp=${regime.maxDp}, sizeDp=${regime.sizeDp}} " +
+                        "totalSizeDp=$totalSizeDp totalWeight=$totalWeight currentWeight=$currentWeight " +
+                        "targetWeight=${value.second} appliedWeight=$appliedWeight fixedScale=$fixedScale " +
+                        "appliedDiscreteSum=$appliedDiscreteSum remainingBudget=$remainingBudget " +
+                        "remainingCurrentSum=$remainingCurrentSum newTotalWeight=$newTotalWeight"
+                )
+            }
+        }
+
         // Get current size in dp for a key
         private fun getSizeDp(key: Any, totalSizePx: Int, totalWeight: Float): Float {
             if (totalSizePx == 0 || totalWeight == 0f) return sizeDpMap[key] ?: 0f
@@ -884,12 +1033,16 @@ fun DockableRegion(
         // Determine which regime a pane is currently in based on its size
         private fun getCurrentRegime(key: Any, sizeDp: Float): PaneSizeRegime? {
             val regimes = paneRegimes[key] ?: return null
+            val firstRegime = regimes.firstOrNull()
+            if (sizeDp < 0f && firstRegime is PaneSizeRegime.Discrete) {
+                return firstRegime
+            }
             return regimes.find { regime ->
                 when (regime) {
                     is PaneSizeRegime.Discrete -> sizeDp >= regime.minDp && sizeDp <= regime.maxDp
                     is PaneSizeRegime.Continuous -> sizeDp >= regime.minDp && sizeDp <= regime.maxDp
                 }
-            } ?: regimes.lastOrNull()
+            }
         }
 
         // The Logic: Syncs the incoming N items with our storage
@@ -911,6 +1064,15 @@ fun DockableRegion(
                     sizeIterator.remove()
                 }
             }
+
+            val weightIterator = weightMap.iterator()
+            while (weightIterator.hasNext()) {
+                if (!currentKeySet.contains(weightIterator.next().key)) {
+                    weightIterator.remove()
+                }
+            }
+
+            rebalanceDiscreteWeights(keys, totalSizePx)
         }
 
         // Start drag - track initial state of both panes
@@ -960,29 +1122,62 @@ fun DockableRegion(
                     if (inRangeA && inRangeB) {
                         // Both in discrete ranges - larger one wins
                         if (sizeA >= sizeB) {
-                            val targetWeightA = (sizeA / totalSizeDp) * totalWeight
+                            val targetWeightA = sizeDpToWeight(sizeA, totalSizeDp, totalWeight)
+                            val targetWeightB = sizeDpToWeight(sizeB, totalSizeDp, totalWeight)
                             val newWeightA = targetWeightA.coerceAtLeast(
                                 SidebarLayoutConstants.MIN_PANE_WEIGHT
                             )
                             val newWeightB = (totalCurrentWeight - newWeightA).coerceAtLeast(
                                 SidebarLayoutConstants.MIN_PANE_WEIGHT
                             )
+                            logDiscreteWeightConversion(
+                                phase = "endDrag/bothDiscrete/AWins",
+                                keyA = keyA,
+                                keyB = keyB,
+                                regime = regimeA,
+                                virtualSizeDpA = virtualSizeDpA,
+                                virtualSizeDpB = virtualSizeDpB,
+                                totalSizeDp = totalSizeDp,
+                                totalWeight = totalWeight,
+                                totalCurrentWeight = totalCurrentWeight,
+                                targetWeightA = targetWeightA,
+                                targetWeightB = targetWeightB,
+                                newWeightA = newWeightA,
+                                newWeightB = newWeightB
+                            )
                             weightMap[keyA] = newWeightA
                             weightMap[keyB] = newWeightB
                         } else {
-                            val targetWeightB = (sizeB / totalSizeDp) * totalWeight
+                            val targetWeightA = sizeDpToWeight(sizeA, totalSizeDp, totalWeight)
+                            val targetWeightB = sizeDpToWeight(sizeB, totalSizeDp, totalWeight)
                             val newWeightB = targetWeightB.coerceAtLeast(
                                 SidebarLayoutConstants.MIN_PANE_WEIGHT
                             )
                             val newWeightA = (totalCurrentWeight - newWeightB).coerceAtLeast(
                                 SidebarLayoutConstants.MIN_PANE_WEIGHT
                             )
+                            logDiscreteWeightConversion(
+                                phase = "endDrag/bothDiscrete/BWins",
+                                keyA = keyA,
+                                keyB = keyB,
+                                regime = regimeB,
+                                virtualSizeDpA = virtualSizeDpA,
+                                virtualSizeDpB = virtualSizeDpB,
+                                totalSizeDp = totalSizeDp,
+                                totalWeight = totalWeight,
+                                totalCurrentWeight = totalCurrentWeight,
+                                targetWeightA = targetWeightA,
+                                targetWeightB = targetWeightB,
+                                newWeightA = newWeightA,
+                                newWeightB = newWeightB
+                            )
                             weightMap[keyA] = newWeightA
                             weightMap[keyB] = newWeightB
                         }
                     } else {
                         // One or both outside discrete range - use virtual sizes
-                        val targetWeightA = (virtualSizeDpA / totalSizeDp) * totalWeight
+                        val targetSizeDpA = resolveDiscreteTargetSizeDp(regimeA, virtualSizeDpA)
+                        val targetWeightA = sizeDpToWeight(targetSizeDpA, totalSizeDp, totalWeight)
                         val newWeightA =
                             targetWeightA
                                 .coerceAtLeast(
@@ -1003,18 +1198,35 @@ fun DockableRegion(
                     val inRangeA =
                         virtualSizeDpA >= regimeA.minDp && virtualSizeDpA <= regimeA.maxDp
                     if (inRangeA) {
-                        val targetWeightA = (regimeA.sizeDp / totalSizeDp) * totalWeight
+                        val targetWeightA = sizeDpToWeight(regimeA.sizeDp, totalSizeDp, totalWeight)
+                        val targetWeightB = sizeDpToWeight(virtualSizeDpB, totalSizeDp, totalWeight)
                         val newWeightA = targetWeightA.coerceAtLeast(
                             SidebarLayoutConstants.MIN_PANE_WEIGHT
                         )
                         val newWeightB = (totalCurrentWeight - newWeightA).coerceAtLeast(
                             SidebarLayoutConstants.MIN_PANE_WEIGHT
                         )
+                        logDiscreteWeightConversion(
+                            phase = "endDrag/discreteA",
+                            keyA = keyA,
+                            keyB = keyB,
+                            regime = regimeA,
+                            virtualSizeDpA = virtualSizeDpA,
+                            virtualSizeDpB = virtualSizeDpB,
+                            totalSizeDp = totalSizeDp,
+                            totalWeight = totalWeight,
+                            totalCurrentWeight = totalCurrentWeight,
+                            targetWeightA = targetWeightA,
+                            targetWeightB = targetWeightB,
+                            newWeightA = newWeightA,
+                            newWeightB = newWeightB
+                        )
                         weightMap[keyA] = newWeightA
                         weightMap[keyB] = newWeightB
                     } else {
                         // Outside discrete range - use virtual size
-                        val targetWeightA = (virtualSizeDpA / totalSizeDp) * totalWeight
+                        val targetSizeDpA = resolveDiscreteTargetSizeDp(regimeA, virtualSizeDpA)
+                        val targetWeightA = sizeDpToWeight(targetSizeDpA, totalSizeDp, totalWeight)
                         val newWeightA =
                             targetWeightA
                                 .coerceAtLeast(
@@ -1035,18 +1247,35 @@ fun DockableRegion(
                     val inRangeB =
                         virtualSizeDpB >= regimeB.minDp && virtualSizeDpB <= regimeB.maxDp
                     if (inRangeB) {
-                        val targetWeightB = (regimeB.sizeDp / totalSizeDp) * totalWeight
+                        val targetWeightA = sizeDpToWeight(virtualSizeDpA, totalSizeDp, totalWeight)
+                        val targetWeightB = sizeDpToWeight(regimeB.sizeDp, totalSizeDp, totalWeight)
                         val newWeightB = targetWeightB.coerceAtLeast(
                             SidebarLayoutConstants.MIN_PANE_WEIGHT
                         )
                         val newWeightA = (totalCurrentWeight - newWeightB).coerceAtLeast(
                             SidebarLayoutConstants.MIN_PANE_WEIGHT
                         )
+                        logDiscreteWeightConversion(
+                            phase = "endDrag/discreteB",
+                            keyA = keyA,
+                            keyB = keyB,
+                            regime = regimeB,
+                            virtualSizeDpA = virtualSizeDpA,
+                            virtualSizeDpB = virtualSizeDpB,
+                            totalSizeDp = totalSizeDp,
+                            totalWeight = totalWeight,
+                            totalCurrentWeight = totalCurrentWeight,
+                            targetWeightA = targetWeightA,
+                            targetWeightB = targetWeightB,
+                            newWeightA = newWeightA,
+                            newWeightB = newWeightB
+                        )
                         weightMap[keyA] = newWeightA
                         weightMap[keyB] = newWeightB
                     } else {
                         // Outside discrete range - use virtual size
-                        val targetWeightA = (virtualSizeDpA / totalSizeDp) * totalWeight
+                        val targetSizeDpA = resolveDiscreteTargetSizeDp(regimeB, virtualSizeDpA)
+                        val targetWeightA = sizeDpToWeight(targetSizeDpA, totalSizeDp, totalWeight)
                         val newWeightA =
                             targetWeightA
                                 .coerceAtLeast(
@@ -1064,7 +1293,7 @@ fun DockableRegion(
 
                 // Both continuous: use virtual sizes
                 else -> {
-                    val targetWeightA = (virtualSizeDpA / totalSizeDp) * totalWeight
+                    val targetWeightA = sizeDpToWeight(virtualSizeDpA, totalSizeDp, totalWeight)
                     val newWeightA =
                         targetWeightA
                             .coerceAtLeast(
@@ -1133,8 +1362,8 @@ fun DockableRegion(
                         if (virtualSizeDpA >= regimeA.minDp && virtualSizeDpA <= regimeA.maxDp) {
                             regimeA.sizeDp
                         } else {
-                            // Outside discrete range, use virtual size (will cross to another regime)
-                            virtualSizeDpA
+                            // Outside discrete range, clamp below the rail and allow expansion above it
+                            resolveDiscreteTargetSizeDp(regimeA, virtualSizeDpA)
                         }
                     }
 
@@ -1154,8 +1383,8 @@ fun DockableRegion(
                         if (virtualSizeDpB >= regimeB.minDp && virtualSizeDpB <= regimeB.maxDp) {
                             regimeB.sizeDp
                         } else {
-                            // Outside discrete range, use virtual size (will cross to another regime)
-                            virtualSizeDpB
+                            // Outside discrete range, clamp below the rail and allow expansion above it
+                            resolveDiscreteTargetSizeDp(regimeB, virtualSizeDpB)
                         }
                     }
 
@@ -1180,8 +1409,9 @@ fun DockableRegion(
                     if (sizeA >= sizeB) {
                         // A wins
                         val totalWeight = getTotalWeight()
-                        val targetWeightA =
-                            (sizeA / with(density) { totalSizePx.toDp().value }) * totalWeight
+                        val totalSizeDp = with(density) { totalSizePx.toDp().value }
+                        val targetWeightA = sizeDpToWeight(sizeA, totalSizeDp, totalWeight)
+                        val targetWeightB = sizeDpToWeight(sizeB, totalSizeDp, totalWeight)
                         val weightA = getWeight(keyA)
                         val weightB = getWeight(keyB)
                         val totalCurrentWeight = weightA + weightB
@@ -1191,14 +1421,30 @@ fun DockableRegion(
                         val newWeightB = (totalCurrentWeight - newWeightA).coerceAtLeast(
                             SidebarLayoutConstants.MIN_PANE_WEIGHT
                         )
+                        logDiscreteWeightConversion(
+                            phase = "resize/bothDiscrete/AWins",
+                            keyA = keyA,
+                            keyB = keyB,
+                            regime = regimeA,
+                            virtualSizeDpA = virtualSizeDpA,
+                            virtualSizeDpB = virtualSizeDpB,
+                            totalSizeDp = totalSizeDp,
+                            totalWeight = totalWeight,
+                            totalCurrentWeight = totalCurrentWeight,
+                            targetWeightA = targetWeightA,
+                            targetWeightB = targetWeightB,
+                            newWeightA = newWeightA,
+                            newWeightB = newWeightB
+                        )
                         weightMap[keyA] = newWeightA
                         weightMap[keyB] = newWeightB
                         return true
                     } else {
                         // B wins
                         val totalWeight = getTotalWeight()
-                        val targetWeightB =
-                            (sizeB / with(density) { totalSizePx.toDp().value }) * totalWeight
+                        val totalSizeDp = with(density) { totalSizePx.toDp().value }
+                        val targetWeightA = sizeDpToWeight(sizeA, totalSizeDp, totalWeight)
+                        val targetWeightB = sizeDpToWeight(sizeB, totalSizeDp, totalWeight)
                         val weightA = getWeight(keyA)
                         val weightB = getWeight(keyB)
                         val totalCurrentWeight = weightA + weightB
@@ -1207,6 +1453,21 @@ fun DockableRegion(
                         )
                         val newWeightA = (totalCurrentWeight - newWeightB).coerceAtLeast(
                             SidebarLayoutConstants.MIN_PANE_WEIGHT
+                        )
+                        logDiscreteWeightConversion(
+                            phase = "resize/bothDiscrete/BWins",
+                            keyA = keyA,
+                            keyB = keyB,
+                            regime = regimeB,
+                            virtualSizeDpA = virtualSizeDpA,
+                            virtualSizeDpB = virtualSizeDpB,
+                            totalSizeDp = totalSizeDp,
+                            totalWeight = totalWeight,
+                            totalCurrentWeight = totalCurrentWeight,
+                            targetWeightA = targetWeightA,
+                            targetWeightB = targetWeightB,
+                            newWeightA = newWeightA,
+                            newWeightB = newWeightB
                         )
                         weightMap[keyA] = newWeightA
                         weightMap[keyB] = newWeightB
@@ -1218,8 +1479,8 @@ fun DockableRegion(
             // Convert target sizes to weights and apply
             val totalWeight = getTotalWeight()
             val totalSizeDp = with(density) { totalSizePx.toDp().value }
-            val targetWeightA = (targetSizeDpA / totalSizeDp) * totalWeight
-            val targetWeightB = (targetSizeDpB / totalSizeDp) * totalWeight
+            val targetWeightA = sizeDpToWeight(targetSizeDpA, totalSizeDp, totalWeight)
+            val targetWeightB = sizeDpToWeight(targetSizeDpB, totalSizeDp, totalWeight)
 
             // Ensure weights don't invert
             val weightA = getWeight(keyA)
