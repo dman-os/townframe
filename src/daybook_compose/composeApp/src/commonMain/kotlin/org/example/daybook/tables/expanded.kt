@@ -99,14 +99,14 @@ private object SidebarLayoutConstants {
     /** Default expanded sidebar weight (40% of available space) */
     const val DEFAULT_SIDEBAR_WEIGHT = 0.4f
 
-    /** Collapsed/rail sidebar weight (10% of available space) */
-    const val COLLAPSED_SIDEBAR_WEIGHT = 0.10f
+    /** Collapsed/rail sidebar weight (5% of available space) */
+    const val COLLAPSED_SIDEBAR_WEIGHT = 0.04f
 
     /** Threshold weight to determine if sidebar is expanded or collapsed */
     const val SIDEBAR_EXPANDED_THRESHOLD = 0.15f
 
     /** Minimum weight for any pane to prevent it from disappearing */
-    const val MIN_PANE_WEIGHT = 0.10f
+    const val MIN_PANE_WEIGHT = 0.040f
 
     /** Rail mode size in dp (icon-only navigation rail) */
     const val RAIL_SIZE_DP = 40f
@@ -591,17 +591,17 @@ fun SidebarContent(navController: NavHostController, modifier: Modifier = Modifi
                             modifier = Modifier.fillMaxHeight().padding(top = 8.dp)
                         ) {
                             NavigationRailItem(
-                                selected = selectedSidebarPane == 1,
-                                onClick = { selectedSidebarPane = 1 },
-                                icon = { Icon(Icons.Default.MoreVert, contentDescription = "Progress") },
-                                label = { Text("Progress") },
-                                alwaysShowLabel = true
-                            )
-                            NavigationRailItem(
                                 selected = selectedSidebarPane == 2,
                                 onClick = { selectedSidebarPane = 2 },
                                 icon = { Icon(Icons.Default.FolderOpen, contentDescription = "Drawer") },
                                 label = { Text("Drawer") },
+                                alwaysShowLabel = true
+                            )
+                            NavigationRailItem(
+                                selected = selectedSidebarPane == 1,
+                                onClick = { selectedSidebarPane = 1 },
+                                icon = { Icon(Icons.Default.MoreVert, contentDescription = "Progress") },
+                                label = { Text("Progress") },
                                 alwaysShowLabel = true
                             )
                         }
@@ -651,7 +651,7 @@ fun SidebarContent(navController: NavHostController, modifier: Modifier = Modifi
             }
         } else {
             // Narrow mode: NavigationRail with features only
-            NavigationRail(modifier = Modifier.fillMaxHeight()) {
+            NavigationRail(modifier = Modifier.align(Alignment.Center).fillMaxHeight()) {
                 allSidebarFeatures.forEach { item ->
                     val featureRoute = getRouteForFeature(item)
                     val isDocEditorRoute = currentRoute == AppScreens.DocEditor.name
