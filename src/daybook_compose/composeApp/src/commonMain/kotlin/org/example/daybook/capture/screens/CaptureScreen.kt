@@ -132,8 +132,6 @@ class CaptureScreenViewModel(
                     "[CAPTURE] persistCaptureMode failed mode=$mode selectedTableId=$selectedTableId windowId=$windowId err=${e.message}"
                 )
                 _message.tryEmit("Failed to persist capture mode")
-            } catch (t: Throwable) {
-                throw t
             }
         }
     }

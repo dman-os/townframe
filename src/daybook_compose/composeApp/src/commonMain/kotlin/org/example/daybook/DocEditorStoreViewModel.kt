@@ -12,6 +12,7 @@ import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
 import kotlin.time.Clock
 import kotlin.time.Duration.Companion.minutes
+import java.util.concurrent.ConcurrentHashMap
 import org.example.daybook.ui.editor.EditorSessionController
 import org.example.daybook.uniffi.DrawerEventListener
 import org.example.daybook.uniffi.DrawerRepoFfi
@@ -27,7 +28,7 @@ private data class DocEditorSessionEntry(
 class DocEditorStoreViewModel(
     private val drawerRepo: DrawerRepoFfi
 ) : ViewModel() {
-    private val sessions = mutableMapOf<String, DocEditorSessionEntry>()
+    private val sessions = ConcurrentHashMap<String, DocEditorSessionEntry>()
 
     private val _selectedDocId = MutableStateFlow<String?>(null)
     val selectedDocId = _selectedDocId.asStateFlow()
@@ -85,14 +86,14 @@ class DocEditorStoreViewModel(
             return
         }
 
-        val entry = sessions[docId] ?: createSession(docId)
+        val entry = createSession(docId)
         entry.lastTouchedMs = nowMs()
         _selectedController.value = entry.controller
         viewModelScope.launch { refreshDoc(docId) }
     }
 
     fun attachHost(docId: String) {
-        val entry = sessions[docId] ?: createSession(docId)
+        val entry = createSession(docId)
         entry.hostCount += 1
         entry.lastTouchedMs = nowMs()
     }
@@ -104,15 +105,15 @@ class DocEditorStoreViewModel(
     }
 
     private fun createSession(docId: String): DocEditorSessionEntry {
-        val controller =
-            EditorSessionController(
-                drawerRepo = drawerRepo,
-                scope = viewModelScope,
-                onDocCreated = { createdId -> selectDoc(createdId) }
-            )
-        val entry = DocEditorSessionEntry(controller = controller)
-        sessions[docId] = entry
-        return entry
+        return sessions.computeIfAbsent(docId) {
+            val controller =
+                EditorSessionController(
+                    drawerRepo = drawerRepo,
+                    scope = viewModelScope,
+                    onDocCreated = { createdId -> selectDoc(createdId) }
+                )
+            DocEditorSessionEntry(controller = controller)
+        }
     }
 
     private suspend fun refreshDoc(docId: String) {
@@ -126,7 +127,7 @@ class DocEditorStoreViewModel(
         val selectedId = _selectedDocId.value
         val now = nowMs()
         val toRemove = mutableListOf<String>()
-        for ((docId, entry) in sessions) {
+        for ((docId, entry) in sessions.entries) {
             if (docId == selectedId) {
                 continue
             }

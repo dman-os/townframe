@@ -1089,7 +1089,7 @@ private fun CloneQrScannerScreen(
     val useNativePreviewQr = remember(cameraPreviewFfi) { cameraPreviewFfi.supportsNativeQrAnalysis() }
     var analyzer by remember { mutableStateOf<CameraQrAnalyzerFfi?>(null) }
     LaunchedEffect(Unit) {
-        if (analyzer == null) {
+        if (analyzer == null && !useNativePreviewQr) {
             analyzer = withContext(Dispatchers.IO) { CameraQrAnalyzerFfi.load() }
         }
     }

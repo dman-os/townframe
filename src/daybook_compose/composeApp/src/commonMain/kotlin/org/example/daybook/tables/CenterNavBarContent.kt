@@ -13,7 +13,6 @@ import androidx.compose.animation.slideInHorizontally
 import androidx.compose.animation.slideOutHorizontally
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
-import androidx.compose.foundation.clickable
 import androidx.compose.foundation.interaction.MutableInteractionSource
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
@@ -39,6 +38,8 @@ import androidx.compose.ui.draw.clip
 import androidx.compose.ui.geometry.Rect
 import androidx.compose.ui.layout.boundsInWindow
 import androidx.compose.ui.layout.onGloballyPositioned
+import androidx.compose.foundation.selection.selectable
+import androidx.compose.ui.semantics.Role
 import androidx.compose.ui.unit.dp
 import androidx.navigation.NavHostController
 import androidx.navigation.compose.currentBackStackEntryAsState
@@ -226,11 +227,13 @@ private fun CustomBottomBarItem(
     Box(
         modifier =
             modifier
-                .clickable(
+                .selectable(
+                    selected = selected,
+                    onClick = onClick,
                     enabled = enabled,
                     interactionSource = outerInteraction,
                     indication = null,
-                    onClick = onClick
+                    role = Role.Tab
                 )
                 .padding(vertical = 2.dp),
         contentAlignment = Alignment.Center
