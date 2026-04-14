@@ -528,7 +528,6 @@ fun SidebarContent(navController: NavHostController, modifier: Modifier = Modifi
     // Map feature keys to routes for selection
     fun getRouteForFeature(feature: FeatureItem): String? = when (feature.key) {
         FeatureKeys.Home -> AppScreens.Home.name
-        FeatureKeys.Tables -> AppScreens.Tables.name
         FeatureKeys.Capture -> AppScreens.Capture.name
         FeatureKeys.Drawer -> AppScreens.Drawer.name
         FeatureKeys.Settings -> AppScreens.Settings.name
@@ -542,7 +541,7 @@ fun SidebarContent(navController: NavHostController, modifier: Modifier = Modifi
             }
     ) {
         if (isWide) {
-            var selectedSidebarPane by remember { mutableIntStateOf(0) }
+            var selectedSidebarPane by remember { mutableIntStateOf(1) }
 
             // Wide mode: navigation row + tabbed pane (tabs/progress)
             PermanentDrawerSheet(
@@ -592,13 +591,6 @@ fun SidebarContent(navController: NavHostController, modifier: Modifier = Modifi
                             modifier = Modifier.fillMaxHeight().padding(top = 8.dp)
                         ) {
                             NavigationRailItem(
-                                selected = selectedSidebarPane == 0,
-                                onClick = { selectedSidebarPane = 0 },
-                                icon = { Icon(Icons.Default.Menu, contentDescription = "Tabs") },
-                                label = { Text("Tabs") },
-                                alwaysShowLabel = true
-                            )
-                            NavigationRailItem(
                                 selected = selectedSidebarPane == 1,
                                 onClick = { selectedSidebarPane = 1 },
                                 icon = { Icon(Icons.Default.MoreVert, contentDescription = "Progress") },
@@ -619,7 +611,6 @@ fun SidebarContent(navController: NavHostController, modifier: Modifier = Modifi
                         ) {
                             val paneTitle =
                                 when (selectedSidebarPane) {
-                                    0 -> "Tabs"
                                     1 -> "Progress"
                                     else -> "Drawer"
                                 }
@@ -634,13 +625,6 @@ fun SidebarContent(navController: NavHostController, modifier: Modifier = Modifi
                             }
                             HorizontalDivider()
                             when (selectedSidebarPane) {
-                                0 -> {
-                                    TabSelectionList(
-                                        onTabSelected = { /* TODO: Handle tab selection */ },
-                                        modifier = Modifier.weight(1f)
-                                    )
-                                }
-
                                 1 -> {
                                     ProgressList(modifier = Modifier.weight(1f).fillMaxWidth())
                                 }

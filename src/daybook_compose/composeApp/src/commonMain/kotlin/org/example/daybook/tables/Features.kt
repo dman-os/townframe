@@ -9,7 +9,6 @@ import androidx.compose.material.icons.filled.Home
 import androidx.compose.material.icons.filled.Notifications
 import androidx.compose.material.icons.filled.QrCode2
 import androidx.compose.material.icons.filled.Settings
-import androidx.compose.material.icons.filled.TableChart
 import androidx.compose.material3.Icon
 import androidx.compose.runtime.Composable
 import androidx.navigation.NavHostController
@@ -21,7 +20,6 @@ fun routeForFeatureKey(featureKey: String): String? =
         FeatureKeys.Home -> AppScreens.Home.name
         FeatureKeys.Capture -> AppScreens.Capture.name
         FeatureKeys.Drawer -> AppScreens.Drawer.name
-        FeatureKeys.Tables -> AppScreens.Tables.name
         FeatureKeys.Progress -> AppScreens.Progress.name
         FeatureKeys.Settings -> AppScreens.Settings.name
         else -> null
@@ -56,14 +54,6 @@ fun rememberAllFeatures(navController: NavHostController): List<FeatureItem> {
             label = "Drawer",
             onActivate = { navController.navigate(AppScreens.Drawer.name) },
             onReselect = { navController.navigate(AppScreens.Drawer.name) }
-        ),
-        FeatureItem(
-            key = FeatureKeys.Tables,
-            icon = { Icon(Icons.Default.TableChart, contentDescription = "Tables") },
-            selectedIcon = { Icon(Icons.Default.TableChart, contentDescription = "Tables") },
-            label = "Tables",
-            onActivate = { navController.navigate(AppScreens.Tables.name) },
-            onReselect = { navController.navigate(AppScreens.Tables.name) }
         ),
         FeatureItem(
             key = FeatureKeys.Progress,

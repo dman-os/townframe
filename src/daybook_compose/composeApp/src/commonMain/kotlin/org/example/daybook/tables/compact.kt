@@ -924,7 +924,7 @@ fun LeftDrawer(
         modifier = modifier.width(320.dp),
         drawerContainerColor = MaterialTheme.colorScheme.surfaceContainer
     ) {
-        var selectedPane by remember { mutableIntStateOf(0) }
+        var selectedPane by remember { mutableIntStateOf(1) }
 
         Text(
             text = "LeftDrawer",
@@ -934,7 +934,11 @@ fun LeftDrawer(
         HorizontalDivider()
 
         when (selectedPane) {
-            0 -> {
+            1 -> {
+                ProgressList(modifier = Modifier.weight(1f).fillMaxWidth())
+            }
+
+            else -> {
                 selectedTable?.let { table ->
                     Text(
                         text = table.title,
@@ -949,52 +953,31 @@ fun LeftDrawer(
                     growUpward = false
                 )
             }
-
-            else -> {
-                ProgressList(modifier = Modifier.weight(1f).fillMaxWidth())
-            }
         }
 
-        TabRow(selectedTabIndex = selectedPane) {
+        TabRow(selectedTabIndex = 0) {
             Tab(
-                selected = selectedPane == 0,
-                onClick = { selectedPane = 0 },
-                text = { Text("Tabs") }
-            )
-            Tab(
-                selected = selectedPane == 1,
+                selected = true,
                 onClick = { selectedPane = 1 },
                 text = { Text("Progress") }
             )
         }
-        NavDrawerBottomBar(onAddTab = onAddTab, onClose = onDismiss)
+        NavDrawerBottomBar(onClose = onDismiss)
     }
 }
 
 @Composable
 fun NavDrawerBottomBar(
-    onAddTab: suspend () -> Unit,
     onClose: () -> Unit,
     modifier: Modifier = Modifier
 ) {
-    val scope = rememberCoroutineScope()
     BottomAppBar(
         modifier = modifier.fillMaxWidth(),//.height(70.dp),
         containerColor = MaterialTheme.colorScheme.surfaceContainerLow
     ) {
-        Button(
-            onClick = {
-                scope.launch {
-                    onAddTab()
-                }
-            },
-            modifier = Modifier.weight(1f).padding(start = 8.dp)
-        ) {
-            Text("Add Tab")
-        }
         OutlinedButton(
             onClick = onClose,
-            modifier = Modifier.padding(horizontal = 8.dp)
+            modifier = Modifier.fillMaxWidth().padding(horizontal = 8.dp)
         ) {
             Text("Close")
         }

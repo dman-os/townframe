@@ -40,6 +40,7 @@ import androidx.compose.ui.layout.boundsInWindow
 import androidx.compose.ui.layout.onGloballyPositioned
 import androidx.compose.foundation.selection.selectable
 import androidx.compose.ui.semantics.Role
+import androidx.compose.material3.LocalTextStyle
 import androidx.compose.ui.unit.dp
 import androidx.navigation.NavHostController
 import androidx.navigation.compose.currentBackStackEntryAsState
@@ -122,7 +123,13 @@ fun RowScope.CenterNavBarContent(
                     selectedFill = selectedFill,
                     armedIndicatorColor = armedIndicatorColor,
                     icon = button.icon,
-                    label = button.label,
+                    label = {
+                        androidx.compose.runtime.CompositionLocalProvider(
+                            LocalTextStyle provides MaterialTheme.typography.labelSmall
+                        ) {
+                            button.label()
+                        }
+                    },
                     onClick = {
                         if (button.enabled) {
                             scope.launch { button.onClick() }
