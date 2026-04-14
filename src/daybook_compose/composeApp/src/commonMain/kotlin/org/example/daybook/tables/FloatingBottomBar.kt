@@ -202,40 +202,37 @@ fun FloatingGrowingMenuSheet(
         val openFraction = (sheetState.progress / maxAnchor).coerceIn(0f, 1f)
         val targetHeight = (maxMenuHeight * openFraction)
         val dragModifier =
-            if (enableDragToClose) {
-                Modifier.draggable(
-                    state =
-                        rememberDraggableState { dragAmount ->
-                            val total = maxMenuHeightPx
-                            val boundedProgress = sheetState.progress.coerceIn(0f, maxAnchor)
-                            val currentVisible = total * (boundedProgress / maxAnchor).coerceIn(0f, 1f)
-                            val nextVisible = (currentVisible - dragAmount).coerceIn(0f, total)
-                            val nextProgress = ((nextVisible / total) * maxAnchor).coerceIn(0f, maxAnchor)
-                            sheetState.setProgressImmediate(nextProgress)
-                        },
-                    orientation = Orientation.Vertical,
-                    onDragStopped = { velocityY ->
-                        if (velocityY > flingCloseThreshold) {
-                            scope.launch {
-                                val anim = Animatable(sheetState.progress.coerceIn(0f, maxAnchor))
-                                anim.animateTo(0f, animationSpec = tween(durationMillis = 200)) {
-                                    sheetState.setProgressImmediate(value)
-                                }
-                                sheetState.hideInstant()
-                                onDismiss()
+            Modifier.draggable(
+                state =
+                    rememberDraggableState { dragAmount ->
+                        val total = maxMenuHeightPx
+                        val boundedProgress = sheetState.progress.coerceIn(0f, maxAnchor)
+                        val currentVisible = total * (boundedProgress / maxAnchor).coerceIn(0f, 1f)
+                        val nextVisible = (currentVisible - dragAmount).coerceIn(0f, total)
+                        val nextProgress = ((nextVisible / total) * maxAnchor).coerceIn(0f, maxAnchor)
+                        sheetState.setProgressImmediate(nextProgress)
+                    },
+                orientation = Orientation.Vertical,
+                onDragStopped = { velocityY ->
+                    if (velocityY > flingCloseThreshold) {
+                        scope.launch {
+                            val anim = Animatable(sheetState.progress.coerceIn(0f, maxAnchor))
+                            anim.animateTo(0f, animationSpec = tween(durationMillis = 200)) {
+                                sheetState.setProgressImmediate(value)
                             }
-                        } else {
-                            sheetState.settle(velocityY) { settledProgress ->
-                                if (settledProgress <= 0f) {
-                                    onDismiss()
-                                }
+                            sheetState.hideInstant()
+                            onDismiss()
+                        }
+                    } else {
+                        sheetState.settle(velocityY) { settledProgress ->
+                            if (settledProgress <= 0f) {
+                                onDismiss()
                             }
                         }
                     }
-                )
-            } else {
-                Modifier
-            }
+                }
+            )
+        val barDragAreaHeight = barHeight + FloatingBarDefaults.verticalPadding * 2
         val surfaceHeight = targetHeight.coerceAtLeast(1.dp)
 
         Surface(
@@ -321,5 +318,13 @@ fun FloatingGrowingMenuSheet(
             }
             }
         }
+        Box(
+            modifier =
+                Modifier
+                    .align(Alignment.BottomCenter)
+                    .fillMaxWidth()
+                    .height(barDragAreaHeight)
+                    .then(dragModifier)
+        )
     }
 }

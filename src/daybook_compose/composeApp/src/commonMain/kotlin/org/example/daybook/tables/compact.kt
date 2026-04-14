@@ -300,7 +300,7 @@ fun CompactLayout(
                     onDragStart = { _ ->
                         isDragging = true
                         isLeftDrawerDragging = true
-                        menuSheetOpenedByDrag = false
+                        menuSheetOpenedByDrag = menuSheetState.isVisible
                         horizontalDragDistance = 0f
                         hoveredMenuItemKey = null
                         activationReadyMenuItem = null
@@ -308,9 +308,6 @@ fun CompactLayout(
                         hoverActivationJob = null
                     },
                     onDrag = { change, dragAmount ->
-                        if (menuSheetState.isVisible && menuCloseDragEnabled) {
-                            return@detectDragGestures
-                        }
                         horizontalDragDistance += dragAmount.x
                         if (!menuSheetOpenedByDrag && dragAmount.y < 0f && kotlin.math.abs(dragAmount.y) > kotlin.math.abs(dragAmount.x)) {
                             sheetContent = SheetContent.MENU
