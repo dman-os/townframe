@@ -333,6 +333,7 @@
 
               shellHook = ''
                 export XDG_DATA_DIRS=${pkgs.fontconfig.out}/share:$XDG_DATA_DIRS
+                export LIBCLANG_PATH="${pkgs.lib.getLib pkgs.llvmPackages.libclang}/lib"
                 export LD_LIBRARY_PATH="$LD_LIBRARY_PATH:${self}/target/debug/:${
                   pkgs.lib.makeLibraryPath (
                     pkgs.lib.map (packageValue: pkgs.lib.getLib packageValue) (
