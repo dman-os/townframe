@@ -43,6 +43,7 @@ pub enum StorageConfig {
     Memory,
 }
 
+#[derive(Debug)]
 struct LiveDocBundle {
     doc_id: DocumentId,
     doc: tokio::sync::Mutex<automerge::Automerge>,
@@ -64,13 +65,9 @@ impl LiveDocBundle {
 pub struct BigRepo {
     local_peer_id: PeerId,
     #[educe(Debug(ignore))]
-    state_pool: sqlx::SqlitePool,
-    #[educe(Debug(ignore))]
     partition_store: Arc<PartitionStore>,
     #[educe(Debug(ignore))]
     runtime: runtime::BigRepoRuntimeHandle,
-    #[educe(Debug(ignore))]
-    live_bundles: DHashMap<DocumentId, std::sync::Weak<LiveDocBundle>>,
     #[educe(Debug(ignore))]
     change_manager: Arc<changes::ChangeListenerManager>,
     #[educe(Debug(ignore))]
@@ -125,7 +122,7 @@ impl BigRepo {
         let (change_manager, change_manager_stop) = changes::ChangeListenerManager::boot();
         let signer =
             subduction_crypto::signer::memory::MemorySigner::from_bytes(peer_id.as_bytes());
-        let runtime = match storage {
+        let (runtime, runtime_stop) = match storage {
             StorageConfig::Memory => runtime::spawn_big_repo_runtime(
                 Arc::clone(&join_set),
                 signer,
@@ -155,10 +152,8 @@ impl BigRepo {
 
         let out = Arc::new(Self {
             local_peer_id: peer_id,
-            state_pool,
             partition_store,
             runtime,
-            live_bundles: default(),
             change_manager,
             partition_forwarder_cancel,
             join_set,
@@ -175,7 +170,7 @@ impl BigRepo {
         Ok((
             Arc::clone(&out),
             BigRepoStopToken {
-                runtime: out.runtime.clone(),
+                runtime_stop,
                 change_manager_stop: Some(change_manager_stop),
                 partition_forwarder_cancel: out.partition_forwarder_cancel.clone(),
                 partition_forwarders: Arc::clone(&out.join_set),
@@ -244,33 +239,11 @@ impl BigRepo {
         self: &Arc<Self>,
         initial_content: automerge::Automerge,
     ) -> Res<BigDocHandle> {
-        let mut doc_id = DocumentId::random();
-        while self.local_contains_document(&doc_id).await? {
-            doc_id = DocumentId::random();
-        }
-        let lease = self.runtime.acquire_doc_lease(doc_id).await?;
-        let bundle = Arc::new(LiveDocBundle::new(doc_id, initial_content, lease));
-        self.persist_full_bundle(&bundle).await?;
-        self.upsert_known_doc(bundle.doc_id).await?;
-
-        self.live_bundles
-            .insert(bundle.doc_id, Arc::downgrade(&bundle));
-
-        let out = BigDocHandle {
+        let bundle = self.runtime.create_doc(initial_content).await?;
+        Ok(BigDocHandle {
             repo: Arc::clone(self),
             bundle,
-        };
-
-        let heads = Arc::<[automerge::ChangeHash]>::from(
-            out.with_document_read(|doc| doc.get_heads()).await,
-        );
-        self.record_doc_heads_change(out.document_id(), heads.to_vec())
-            .await?;
-        self.change_manager
-            .notify_doc_created(*out.document_id(), Arc::clone(&heads))?;
-        self.change_manager
-            .notify_local_doc_created(*out.document_id(), heads)?;
-        Ok(out)
+        })
     }
 
     pub async fn add_doc(
@@ -285,29 +258,14 @@ impl BigRepo {
         document_id: DocumentId,
         initial_content: automerge::Automerge,
     ) -> Res<BigDocHandle> {
-        let lease = self.runtime.acquire_doc_lease(document_id).await?;
-        let bundle = Arc::new(LiveDocBundle::new(document_id, initial_content, lease));
-        self.persist_full_bundle(&bundle).await?;
-        self.upsert_known_doc(bundle.doc_id).await?;
-
-        self.live_bundles
-            .insert(bundle.doc_id, Arc::downgrade(&bundle));
-
-        let out = BigDocHandle {
+        let bundle = self
+            .runtime
+            .import_doc(document_id, initial_content)
+            .await?;
+        Ok(BigDocHandle {
             repo: Arc::clone(self),
             bundle,
-        };
-
-        let heads = Arc::<[automerge::ChangeHash]>::from(
-            out.with_document_read(|doc| doc.get_heads()).await,
-        );
-        self.record_doc_heads_change(out.document_id(), heads.to_vec())
-            .await?;
-        self.change_manager
-            .notify_doc_imported(*out.document_id(), Arc::clone(&heads))?;
-        self.change_manager
-            .notify_local_doc_imported(*out.document_id(), heads)?;
-        Ok(out)
+        })
     }
 
     pub async fn find_doc(self: &Arc<Self>, document_id: &DocumentId) -> Res<Option<BigDocHandle>> {
@@ -318,73 +276,22 @@ impl BigRepo {
         self: &Arc<Self>,
         document_id: &DocumentId,
     ) -> Res<Option<BigDocHandle>> {
-        if let Some(bundle) = self.load_live_bundle(document_id).await? {
-            return Ok(Some(BigDocHandle {
+        Ok(self
+            .runtime
+            .find_doc_handle(*document_id)
+            .await?
+            .map(|bundle| BigDocHandle {
                 repo: Arc::clone(self),
                 bundle,
-            }));
-        }
-        Ok(None)
+            }))
     }
 
     pub async fn local_contains_document(self: &Arc<Self>, document_id: &DocumentId) -> Res<bool> {
-        if self
-            .live_bundles
-            .get(document_id)
-            .and_then(|entry| entry.value().upgrade())
-            .is_some()
-        {
-            return Ok(true);
-        }
-        let count: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM big_repo_docs WHERE doc_id = ?")
-            .bind(document_id.to_string())
-            .fetch_one(&self.state_pool)
-            .await
-            .wrap_err("failed checking big_repo_docs")?;
-        Ok(count > 0)
+        self.runtime.local_contains_document(*document_id).await
     }
 
-    async fn load_live_bundle(
-        self: &Arc<Self>,
-        document_id: &DocumentId,
-    ) -> Res<Option<Arc<LiveDocBundle>>> {
-        if let Some(existing) = self
-            .live_bundles
-            .get(document_id)
-            .and_then(|entry| entry.value().upgrade())
-        {
-            return Ok(Some(existing));
-        }
-
-        let Some(doc) = self.load_automerge(document_id).await? else {
-            return Ok(None);
-        };
-        let lease = self.runtime.acquire_doc_lease(*document_id).await?;
-        let bundle = Arc::new(LiveDocBundle::new(*document_id, doc, lease));
-        self.live_bundles
-            .insert(*document_id, Arc::downgrade(&bundle));
-        Ok(Some(bundle))
-    }
-
-    async fn upsert_known_doc(&self, doc_id: DocumentId) -> Res<()> {
-        sqlx::query("INSERT INTO big_repo_docs(doc_id) VALUES(?) ON CONFLICT(doc_id) DO NOTHING")
-            .bind(doc_id.to_string())
-            .execute(&self.state_pool)
-            .await
-            .wrap_err("failed upserting big_repo_docs")?;
-        Ok(())
-    }
-
-    async fn persist_full_bundle(&self, bundle: &LiveDocBundle) -> Res<()> {
-        let doc = bundle.doc.lock().await;
-        self.runtime.ingest_full(bundle.doc_id, doc.save()).await
-    }
-
-    pub(crate) async fn load_automerge(
-        &self,
-        doc_id: &DocumentId,
-    ) -> Res<Option<automerge::Automerge>> {
-        self.runtime.load_doc(*doc_id).await
+    pub(crate) async fn export_doc_save(&self, doc_id: &DocumentId) -> Res<Option<Vec<u8>>> {
+        self.runtime.export_doc_save(*doc_id).await
     }
 
     async fn apply_commit_delta(
@@ -433,20 +340,6 @@ impl BigRepo {
             .runtime
             .sync_doc_with_peer(doc_id, peer_id, subscribe, timeout)
             .await?;
-        if matches!(outcome, SyncDocOutcome::Success) {
-            if let Some(bundle) = self
-                .live_bundles
-                .get(&doc_id)
-                .and_then(|entry| entry.value().upgrade())
-            {
-                if let Some(updated_doc) = self.runtime.load_doc(doc_id).await? {
-                    let mut doc = bundle.doc.lock().await;
-                    let mut updated_doc = updated_doc;
-                    doc.merge(&mut updated_doc)
-                        .wrap_err("failed merging synced remote doc into live bundle")?;
-                }
-            }
-        }
         Ok(outcome)
     }
 }
@@ -543,7 +436,7 @@ impl BigRepo {
 }
 
 pub struct BigRepoStopToken {
-    runtime: runtime::BigRepoRuntimeHandle,
+    runtime_stop: runtime::BigRepoRuntimeStopToken,
     change_manager_stop: Option<changes::ChangeListenerManagerStopToken>,
     partition_forwarder_cancel: CancellationToken,
     partition_forwarders: Arc<utils_rs::AbortableJoinSet>,
@@ -551,7 +444,7 @@ pub struct BigRepoStopToken {
 
 impl BigRepoStopToken {
     pub async fn stop(mut self) -> Res<()> {
-        self.runtime.shutdown().await;
+        self.runtime_stop.stop().await?;
         self.partition_forwarder_cancel.cancel();
         match self.partition_forwarders.stop(Duration::from_secs(5)).await {
             Ok(()) => {}
@@ -622,6 +515,7 @@ impl BigDocHandle {
             return Ok(out);
         }
 
+        let doc_save = doc.save();
         let patches = doc.diff(&before_heads, &after_heads);
         let changes = doc
             .get_changes(&before_heads)
@@ -639,6 +533,10 @@ impl BigDocHandle {
 
         self.repo
             .apply_commit_delta(*self.document_id(), changes, after_heads, patches, origin)
+            .await?;
+        self.repo
+            .runtime
+            .ingest_full(*self.document_id(), doc_save)
             .await?;
 
         Ok(out)
@@ -1006,64 +904,6 @@ mod tests {
             | BigRepoLocalNotification::DocImported { doc_id, .. }
             | BigRepoLocalNotification::DocHeadsUpdated { doc_id, .. } => *doc_id == target_doc_id,
         }));
-        Ok(())
-    }
-
-    #[tokio::test]
-    async fn subscribe_change_listener_does_not_hydrate_known_docs() -> Res<()> {
-        let (repo, _stop_token) = boot_repo().await?;
-        for idx in 0..3 {
-            let mut doc = automerge::Automerge::new();
-            doc.transact(|tx| tx.put(automerge::ROOT, "idx", idx))
-                .expect("failed initializing doc");
-            let handle = repo.create_doc(doc).await?;
-            drop(handle);
-        }
-
-        repo.live_bundles.clear();
-        assert_eq!(repo.live_bundles.len(), 0);
-
-        let (_registration, _rx) = repo
-            .subscribe_change_listener(BigRepoChangeFilter {
-                doc_id: None,
-                origin: None,
-                path: Vec::new(),
-            })
-            .await?;
-
-        assert_eq!(
-            repo.live_bundles.len(),
-            0,
-            "subscription setup should not hydrate documents into live cache",
-        );
-
-        Ok(())
-    }
-
-    #[tokio::test]
-    async fn subscribe_head_listener_does_not_hydrate_known_docs() -> Res<()> {
-        let (repo, _stop_token) = boot_repo().await?;
-        for idx in 0..3 {
-            let mut doc = automerge::Automerge::new();
-            doc.transact(|tx| tx.put(automerge::ROOT, "idx", idx))
-                .expect("failed initializing doc");
-            let handle = repo.create_doc(doc).await?;
-            drop(handle);
-        }
-
-        repo.live_bundles.clear();
-        assert_eq!(repo.live_bundles.len(), 0);
-
-        let (_registration, _rx) = repo
-            .subscribe_head_listener(BigRepoHeadFilter { doc_id: None })
-            .await?;
-
-        assert_eq!(
-            repo.live_bundles.len(),
-            0,
-            "head subscription setup should not hydrate documents into live cache",
-        );
-
         Ok(())
     }
 

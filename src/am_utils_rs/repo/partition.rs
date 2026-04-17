@@ -7,20 +7,6 @@ use crate::repo::{BigRepo, DocumentId};
 use crate::sync::protocol::*;
 
 impl BigRepo {
-    pub(super) async fn record_doc_heads_change(
-        &self,
-        doc_id: &DocumentId,
-        heads: Vec<automerge::ChangeHash>,
-    ) -> Res<()> {
-        let item_payload = serde_json::json!({
-            "heads": crate::serialize_commit_heads(&heads),
-            "change_count_hint": 1_u64,
-        });
-        self.partition_store
-            .record_member_item_change(&doc_id.to_string(), &item_payload)
-            .await
-    }
-
     pub async fn partition_member_count(&self, part_id: &PartitionId) -> Res<i64> {
         self.partition_store.member_count(part_id).await
     }
@@ -107,18 +93,8 @@ impl BigRepo {
                 Ok(val) => val,
                 Err(_) => return Ok(None),
             };
-            let live_bundle = self
-                .live_bundles
-                .get(&parsed)
-                .and_then(|entry| entry.value().upgrade());
-            let automerge_save = if let Some(bundle) = live_bundle {
-                let doc = bundle.doc.lock().await;
-                doc.save()
-            } else {
-                let Some(doc) = self.load_automerge(&parsed).await? else {
-                    return Ok(None);
-                };
-                doc.save()
+            let Some(automerge_save) = self.export_doc_save(&parsed).await? else {
+                return Ok(None);
             };
             Ok(Some(FullDoc {
                 doc_id,
