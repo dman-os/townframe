@@ -58,7 +58,6 @@ pub struct DrawerRepo {
     pub registry: Arc<crate::repos::ListenersRegistry>,
     cancel_token: CancellationToken,
     _change_listener_tickets: Vec<am_utils_rs::repo::BigRepoChangeListenerRegistration>,
-    _change_broker_leases: Vec<Arc<am_utils_rs::repo::BigRepoDocChangeBrokerLease>>,
     current_heads: std::sync::Mutex<ChangeHashSet>,
     drawer_am_handle: am_utils_rs::repo::BigDocHandle,
     meta_db_pool: sqlx::SqlitePool,
@@ -116,10 +115,6 @@ impl DrawerRepo {
             .with_document_read(|doc| ChangeHashSet(doc.get_heads().into()))
             .await;
 
-        let broker = big_repo
-            .ensure_change_broker(drawer_am_handle.clone())
-            .await?;
-
         // Listen for changes to docs.map
         let (ticket, notif_rx) = big_repo
             .subscribe_change_listener(am_utils_rs::repo::BigRepoChangeFilter {
@@ -146,7 +141,6 @@ impl DrawerRepo {
             registry: crate::repos::ListenersRegistry::new(),
             cancel_token: main_cancel_token.child_token(),
             _change_listener_tickets: vec![ticket],
-            _change_broker_leases: vec![broker],
             current_heads: initial_heads.into(),
             drawer_am_handle,
             meta_db_pool,

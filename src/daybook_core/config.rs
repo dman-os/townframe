@@ -110,7 +110,6 @@ pub struct ConfigRepo {
     cancel_token: CancellationToken,
     sync_config_lock: tokio::sync::Mutex<()>,
     _change_listener_tickets: Vec<am_utils_rs::repo::BigRepoChangeListenerRegistration>,
-    _change_broker_leases: Vec<Arc<am_utils_rs::repo::BigRepoDocChangeBrokerLease>>,
 }
 
 impl crate::repos::Repo for ConfigRepo {
@@ -218,8 +217,6 @@ impl ConfigRepo {
             .await?
             .ok_or_eyre("unable to find app doc in am")?;
 
-        let broker = big_repo.ensure_change_broker(app_am_handle.clone()).await?;
-
         let cancel_token = CancellationToken::new();
         // Register change listener to automatically notify repo listeners
         let (ticket, notif_rx) =
@@ -238,7 +235,6 @@ impl ConfigRepo {
             cancel_token: cancel_token.clone(),
             sync_config_lock: tokio::sync::Mutex::new(()),
             _change_listener_tickets: vec![ticket],
-            _change_broker_leases: vec![broker],
         };
         let repo = Arc::new(repo);
 

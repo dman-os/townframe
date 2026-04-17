@@ -32,6 +32,8 @@ enum RuntimeMsg {
         doc_id: DocumentId,
         commits: Vec<(CommitId, BTreeSet<CommitId>, Vec<u8>)>,
         heads: Vec<automerge::ChangeHash>,
+        // FIXME: pre making the patches is not cheap, we should
+        // only bother if there's a listener (and there isn't any on content docs yet)
         patches: Vec<automerge::Patch>,
         origin: BigRepoChangeOrigin,
         done: oneshot::Sender<Res<()>>,
@@ -95,10 +97,8 @@ impl BigRepoRuntimeHandle {
                 doc_save,
                 done: done_tx,
             })
-            .map_err(|_| eyre::eyre!("big repo runtime channel closed"))?;
-        done_rx
-            .await
-            .map_err(|_| eyre::eyre!("big repo runtime dropped ingest response"))?
+            .map_err(|_| eyre::eyre!(ERROR_ACTOR))?;
+        done_rx.await.map_err(|_| eyre::eyre!(ERROR_CHANNEL))?
     }
 
     pub(super) async fn load_doc(&self, doc_id: DocumentId) -> Res<Option<automerge::Automerge>> {
@@ -108,10 +108,8 @@ impl BigRepoRuntimeHandle {
                 doc_id,
                 done: done_tx,
             })
-            .map_err(|_| eyre::eyre!("big repo runtime channel closed"))?;
-        done_rx
-            .await
-            .map_err(|_| eyre::eyre!("big repo runtime dropped load-doc response"))?
+            .map_err(|_| eyre::eyre!(ERROR_ACTOR))?;
+        done_rx.await.map_err(|_| eyre::eyre!(ERROR_CHANNEL))?
     }
 
     pub(super) async fn commit_delta(
@@ -132,10 +130,8 @@ impl BigRepoRuntimeHandle {
                 origin,
                 done: done_tx,
             })
-            .map_err(|_| eyre::eyre!("big repo runtime channel closed"))?;
-        done_rx
-            .await
-            .map_err(|_| eyre::eyre!("big repo runtime dropped commit response"))?
+            .map_err(|_| eyre::eyre!(ERROR_ACTOR))?;
+        done_rx.await.map_err(|_| eyre::eyre!(ERROR_CHANNEL))?
     }
 
     pub(super) async fn shutdown(&self) {
@@ -158,10 +154,8 @@ impl BigRepoRuntimeHandle {
                 peer_id,
                 done: done_tx,
             })
-            .map_err(|_| eyre::eyre!("big repo runtime channel closed"))?;
-        done_rx
-            .await
-            .map_err(|_| eyre::eyre!("big repo runtime dropped ensure-peer response"))?
+            .map_err(|_| eyre::eyre!(ERROR_ACTOR))?;
+        done_rx.await.map_err(|_| eyre::eyre!(ERROR_CHANNEL))?
     }
 
     pub(super) async fn remove_peer_connection(&self, peer_id: PeerId) -> Res<()> {
@@ -171,10 +165,8 @@ impl BigRepoRuntimeHandle {
                 peer_id,
                 done: done_tx,
             })
-            .map_err(|_| eyre::eyre!("big repo runtime channel closed"))?;
-        done_rx
-            .await
-            .map_err(|_| eyre::eyre!("big repo runtime dropped remove-peer response"))?
+            .map_err(|_| eyre::eyre!(ERROR_ACTOR))?;
+        done_rx.await.map_err(|_| eyre::eyre!(ERROR_CHANNEL))?
     }
 
     pub(super) async fn accept_incoming_connection(
@@ -187,10 +179,8 @@ impl BigRepoRuntimeHandle {
                 quic_conn,
                 done: done_tx,
             })
-            .map_err(|_| eyre::eyre!("big repo runtime channel closed"))?;
-        done_rx
-            .await
-            .map_err(|_| eyre::eyre!("big repo runtime dropped accept-conn response"))?
+            .map_err(|_| eyre::eyre!(ERROR_ACTOR))?;
+        done_rx.await.map_err(|_| eyre::eyre!(ERROR_CHANNEL))?
     }
 
     pub(super) async fn sync_doc_with_peer(
@@ -209,10 +199,8 @@ impl BigRepoRuntimeHandle {
                 timeout,
                 done: done_tx,
             })
-            .map_err(|_| eyre::eyre!("big repo runtime channel closed"))?;
-        done_rx
-            .await
-            .map_err(|_| eyre::eyre!("big repo runtime dropped sync-doc response"))?
+            .map_err(|_| eyre::eyre!(ERROR_ACTOR))?;
+        done_rx.await.map_err(|_| eyre::eyre!(ERROR_CHANNEL))?
     }
 
     pub(super) async fn acquire_doc_lease(&self, doc_id: DocumentId) -> Res<RuntimeDocLease> {
@@ -222,10 +210,8 @@ impl BigRepoRuntimeHandle {
                 doc_id,
                 done: done_tx,
             })
-            .map_err(|_| eyre::eyre!("big repo runtime channel closed"))?;
-        done_rx
-            .await
-            .map_err(|_| eyre::eyre!("big repo runtime dropped acquire-lease response"))??;
+            .map_err(|_| eyre::eyre!(ERROR_ACTOR))?;
+        done_rx.await.map_err(|_| eyre::eyre!(ERROR_CHANNEL))??;
         Ok(RuntimeDocLease {
             runtime: self.clone(),
             doc_id,
@@ -234,50 +220,6 @@ impl BigRepoRuntimeHandle {
 
     fn release_doc_lease(&self, doc_id: DocumentId) {
         let _ = self.msg_tx.send(RuntimeMsg::ReleaseDocLease { doc_id });
-    }
-}
-
-struct BigRepoRuntimeWorker {
-    partition_store: Arc<PartitionStore>,
-    change_manager: Arc<changes::ChangeListenerManager>,
-}
-
-impl BigRepoRuntimeWorker {
-    async fn handle_commit_delta(
-        &self,
-        doc_id: DocumentId,
-        heads: Vec<automerge::ChangeHash>,
-        patches: Vec<automerge::Patch>,
-        origin: BigRepoChangeOrigin,
-    ) -> Res<()> {
-        let item_payload = serde_json::json!({
-            "heads": crate::serialize_commit_heads(&heads),
-            "change_count_hint": 1_u64,
-        });
-        self.partition_store
-            .record_member_item_change(&doc_id.to_string(), &item_payload)
-            .await?;
-
-        let heads_arc = Arc::<[automerge::ChangeHash]>::from(heads);
-        self.change_manager.notify_doc_heads_changed(
-            doc_id,
-            Arc::clone(&heads_arc),
-            origin.clone(),
-        )?;
-        if matches!(origin, BigRepoChangeOrigin::Local) {
-            self.change_manager
-                .notify_local_doc_heads_updated(doc_id, Arc::clone(&heads_arc))?;
-        }
-        for patch in patches {
-            self.change_manager.notify_doc_changed(
-                doc_id,
-                Arc::new(patch),
-                Arc::clone(&heads_arc),
-                origin.clone(),
-            )?;
-        }
-
-        Ok(())
     }
 }
 
@@ -682,6 +624,51 @@ where
         .expect("failed spawning big repo runtime task");
 
     Ok(BigRepoRuntimeHandle { msg_tx })
+}
+
+struct BigRepoRuntimeWorker {
+    partition_store: Arc<PartitionStore>,
+    change_manager: Arc<changes::ChangeListenerManager>,
+}
+
+impl BigRepoRuntimeWorker {
+    async fn handle_commit_delta(
+        &self,
+        doc_id: DocumentId,
+        heads: Vec<automerge::ChangeHash>,
+        patches: Vec<automerge::Patch>,
+        origin: BigRepoChangeOrigin,
+    ) -> Res<()> {
+        let item_payload = serde_json::json!({
+            "heads": crate::serialize_commit_heads(&heads),
+            // FIXME: this should be incrementing per change
+            "change_count_hint": 1_u64,
+        });
+        self.partition_store
+            .record_member_item_change(&doc_id.to_string(), &item_payload)
+            .await?;
+
+        let heads_arc = Arc::<[automerge::ChangeHash]>::from(heads);
+        self.change_manager.notify_doc_heads_changed(
+            doc_id,
+            Arc::clone(&heads_arc),
+            origin.clone(),
+        )?;
+        if matches!(origin, BigRepoChangeOrigin::Local) {
+            self.change_manager
+                .notify_local_doc_heads_updated(doc_id, Arc::clone(&heads_arc))?;
+        }
+        for patch in patches {
+            self.change_manager.notify_doc_changed(
+                doc_id,
+                Arc::new(patch),
+                Arc::clone(&heads_arc),
+                origin.clone(),
+            )?;
+        }
+
+        Ok(())
+    }
 }
 
 struct IrohConnectResult {

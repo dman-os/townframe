@@ -589,7 +589,6 @@ pub struct PlugsRepo {
     local_peer_id: am_utils_rs::repo::PeerId,
     cancel_token: CancellationToken,
     _change_listener_tickets: Vec<am_utils_rs::repo::BigRepoChangeListenerRegistration>,
-    _change_broker_leases: Vec<Arc<am_utils_rs::repo::BigRepoDocChangeBrokerLease>>,
 }
 
 // Granular event enum for specific changes
@@ -705,8 +704,6 @@ impl PlugsRepo {
             .await?
             .ok_or_eyre("unable to find app doc in am")?;
 
-        let broker = big_repo.ensure_change_broker(app_am_handle.clone()).await?;
-
         let cancel_token = CancellationToken::new();
         let (ticket, notif_rx) =
             PlugsStore::register_change_listener(&big_repo, &app_doc_id, vec![]).await?;
@@ -724,7 +721,6 @@ impl PlugsRepo {
             plug_config_doc_init_lock: tokio::sync::Mutex::new(()),
             cancel_token: cancel_token.clone(),
             _change_listener_tickets: vec![ticket],
-            _change_broker_leases: vec![broker],
         };
         let repo = Arc::new(repo);
 

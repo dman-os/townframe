@@ -336,7 +336,6 @@ pub struct TablesRepo {
     local_peer_id: am_utils_rs::repo::PeerId,
     cancel_token: CancellationToken,
     _change_listener_tickets: Vec<am_utils_rs::repo::BigRepoChangeListenerRegistration>,
-    _change_broker_leases: Vec<Arc<am_utils_rs::repo::BigRepoDocChangeBrokerLease>>,
 }
 
 impl crate::repos::Repo for TablesRepo {
@@ -397,8 +396,6 @@ impl TablesRepo {
             .await?
             .ok_or_eyre("unable to find app doc in am")?;
 
-        let broker = big_repo.ensure_change_broker(app_am_handle.clone()).await?;
-
         // Register change listener to automatically notify repo listeners
         let cancel_token = CancellationToken::new();
         let (ticket, notif_rx) =
@@ -415,7 +412,6 @@ impl TablesRepo {
             local_peer_id,
             cancel_token: cancel_token.clone(),
             _change_listener_tickets: vec![ticket],
-            _change_broker_leases: vec![broker],
         };
         let repo = Arc::new(repo);
         repo.ensure_non_empty_graph().await?;

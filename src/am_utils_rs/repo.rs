@@ -21,9 +21,8 @@ pub use changes::{
     BigRepoChangeOrigin, BigRepoHeadNotification, BigRepoLocalNotification,
     ChangeFilter as BigRepoChangeFilter,
     ChangeListenerRegistration as BigRepoChangeListenerRegistration,
-    DocChangeBrokerLease as BigRepoDocChangeBrokerLease, DocIdFilter as BigRepoDocIdFilter,
-    HeadFilter as BigRepoHeadFilter, HeadListenerRegistration as BigRepoHeadListenerRegistration,
-    LocalFilter as BigRepoLocalFilter,
+    DocIdFilter as BigRepoDocIdFilter, HeadFilter as BigRepoHeadFilter,
+    HeadListenerRegistration as BigRepoHeadListenerRegistration, LocalFilter as BigRepoLocalFilter,
     LocalListenerRegistration as BigRepoLocalListenerRegistration,
     OriginFilter as BigRepoOriginFilter,
 };
@@ -207,15 +206,6 @@ impl BigRepo {
         &self,
     ) -> broadcast::Receiver<crate::sync::protocol::PartitionEvent> {
         self.partition_store.subscribe_partition_events()
-    }
-
-    pub async fn ensure_change_broker(
-        self: &Arc<Self>,
-        handle: BigDocHandle,
-    ) -> Res<Arc<changes::DocChangeBrokerLease>> {
-        self.change_manager
-            .add_doc_listener(*handle.document_id())
-            .await
     }
 
     pub async fn subscribe_change_listener(
