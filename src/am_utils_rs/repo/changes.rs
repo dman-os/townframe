@@ -293,6 +293,28 @@ impl ChangeListenerManager {
         ))
     }
 
+    pub fn has_change_listener_interest(
+        &self,
+        doc_id: DocumentId,
+        origin: &BigRepoChangeOrigin,
+    ) -> bool {
+        let listeners = self.listeners.lock().expect(ERROR_MUTEX);
+        listeners.iter().any(|listener| {
+            listener
+                .filter
+                .doc_id
+                .as_ref()
+                .map(|target| target.doc_id == doc_id)
+                .unwrap_or(true)
+                && listener
+                    .filter
+                    .origin
+                    .as_ref()
+                    .map(|target| origin_matches_filter(origin, *target))
+                    .unwrap_or(true)
+        })
+    }
+
     pub async fn subscribe_local_listener(
         self: &Arc<Self>,
         filter: LocalFilter,

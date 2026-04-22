@@ -23,7 +23,9 @@ pub mod repo;
 #[cfg(feature = "repo")]
 pub mod sync;
 #[cfg(feature = "repo")]
-pub use repo::{BigDocHandle, BigRepo, BigRepoStopToken, DocumentId, SharedBigRepo};
+pub use repo::{
+    BigDocHandle, BigRepo, BigRepoConnection, BigRepoStopToken, DocumentId, SharedBigRepo,
+};
 
 use automerge::ChangeHash;
 

@@ -1438,8 +1438,20 @@ mod tests {
         let (repo, stop) = boot_repo().await;
         let partition_a: PartitionId = "p-a".into();
         let partition_b: PartitionId = "p-b".into();
-        let doc_a = repo.create_doc(automerge::Automerge::new()).await.unwrap();
-        let doc_b = repo.create_doc(automerge::Automerge::new()).await.unwrap();
+        let doc_a = repo
+            .put_doc(
+                crate::repo::DocumentId::random(),
+                automerge::Automerge::new(),
+            )
+            .await
+            .unwrap();
+        let doc_b = repo
+            .put_doc(
+                crate::repo::DocumentId::random(),
+                automerge::Automerge::new(),
+            )
+            .await
+            .unwrap();
         repo.partition_store()
             .add_member(
                 &partition_a,

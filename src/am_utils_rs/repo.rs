@@ -1,12 +1,13 @@
 use crate::interlude::*;
-use crate::partition::PartitionStore;
+
+use std::collections::BTreeSet;
+use std::str::FromStr;
+use std::sync::atomic::{AtomicBool, Ordering};
 
 use automerge::ChangeHash;
 use autosurgeon::{Hydrate, Prop, Reconcile};
 use sedimentree_core::loose_commit::id::CommitId;
 use sqlx::sqlite::SqliteConnectOptions;
-use std::collections::BTreeSet;
-use std::str::FromStr;
 use tokio::sync::broadcast;
 use tokio_util::sync::CancellationToken;
 
@@ -16,19 +17,24 @@ pub mod rpc;
 mod runtime;
 pub use runtime::SyncDocOutcome;
 
+use crate::partition::PartitionStore;
+use crate::sync::protocol::*;
+
 pub use changes::{
     path_prefix_matches as big_repo_path_prefix_matches, BigRepoChangeNotification,
-    BigRepoChangeOrigin, BigRepoHeadNotification, BigRepoLocalNotification,
-    ChangeFilter as BigRepoChangeFilter,
+    BigRepoChangeOrigin, ChangeFilter as BigRepoChangeFilter,
     ChangeListenerRegistration as BigRepoChangeListenerRegistration,
-    DocIdFilter as BigRepoDocIdFilter, HeadFilter as BigRepoHeadFilter,
-    HeadListenerRegistration as BigRepoHeadListenerRegistration, LocalFilter as BigRepoLocalFilter,
-    LocalListenerRegistration as BigRepoLocalListenerRegistration,
-    OriginFilter as BigRepoOriginFilter,
+    DocIdFilter as BigRepoDocIdFilter, OriginFilter as BigRepoOriginFilter,
 };
 
 pub type DocumentId = crate::ids::DocId32;
 pub type PeerId = crate::ids::PeerId32;
+
+// FIXME: this is used by SubdctionProtocolHandler in core::sync
+// should that be moved here instead? Is that needeed in the scope
+// of subduction_iroh. Does it not provide it's own Router protocol?
+//
+// hmm, we already have RuntimeIrohTransport. I suspect the one in core, it's vestigial
 pub const SUBDUCTION_ALPN: &[u8] = b"subduction/0";
 
 #[derive(Debug, Clone)]
@@ -43,6 +49,8 @@ pub enum StorageConfig {
     Memory,
 }
 
+// FIXME: so essentially, we moved from a single live_buldes mutex to a per bundle mutex righ? 
+// let's move this to runtime
 #[derive(Debug)]
 struct LiveDocBundle {
     doc_id: DocumentId,
@@ -80,6 +88,62 @@ pub struct BigRepo {
 
 pub type SharedBigRepo = Arc<BigRepo>;
 
+#[derive(Clone)]
+pub struct BigRepoConnection {
+    repo: Arc<BigRepo>,
+    peer_id: PeerId,
+    closed: Arc<AtomicBool>,
+}
+
+impl BigRepoConnection {
+    pub fn peer_id(&self) -> PeerId {
+        self.peer_id
+    }
+
+    pub fn is_closed(&self) -> bool {
+        self.closed.load(Ordering::SeqCst)
+    }
+
+    fn mark_closed(&self) -> bool {
+        !self.closed.swap(true, Ordering::SeqCst)
+    }
+
+    pub async fn close(&self) -> Res<()> {
+        if !self.mark_closed() {
+            return Ok(());
+        }
+        self.repo.runtime.close_peer_connection(self.peer_id).await
+    }
+
+    pub async fn sync_doc_with_peer(
+        &self,
+        doc_id: DocumentId,
+        subscribe: bool,
+        timeout: Option<std::time::Duration>,
+    ) -> Res<SyncDocOutcome> {
+        if self.is_closed() {
+            eyre::bail!("connection is closed");
+        }
+        self.repo
+            .runtime
+            .sync_doc_with_peer(doc_id, self.peer_id, subscribe, timeout)
+            .await
+    }
+}
+
+// FIXME: let's replace this with a stop token instead
+// similar to the main branch (actually check how we did it there)
+impl Drop for BigRepoConnection {
+    fn drop(&mut self) {
+        if !self.mark_closed() {
+            return;
+        }
+        self.repo
+            .runtime
+            .request_close_peer_connection(self.peer_id);
+    }
+}
+
 impl BigRepo {
     pub async fn boot(config: Config) -> Res<(Arc<Self>, BigRepoStopToken)> {
         let Config { peer_id, storage } = config;
@@ -106,6 +170,11 @@ impl BigRepo {
         ensure_docs_schema(&state_pool).await?;
 
         let join_set = Arc::new(utils_rs::AbortableJoinSet::new());
+
+        // FIXME: let's make PartitionStore::new into PartitionStore::boot
+        // and have it be async and ensure it's own schema and
+        // PartitionStore should return a stop token meaning
+        // it should also manage it's own join_set and CancellationToken
         let partition_forwarder_cancel = CancellationToken::new();
         let partition_store = {
             let (partition_events_tx, _) =
@@ -186,6 +255,68 @@ impl BigRepo {
         self.local_peer_id
     }
 
+}
+
+// main methods
+impl BigRepo {
+    pub async fn get_doc(self: &Arc<Self>, document_id: &DocumentId) -> Res<Option<BigDocHandle>> {
+        Ok(self
+            .runtime
+            .get_doc_handle(*document_id)
+            .await?
+            .map(|bundle| BigDocHandle {
+                repo: Arc::clone(self),
+                bundle,
+            }))
+    }
+
+    pub async fn put_doc(
+        self: &Arc<Self>,
+        document_id: DocumentId,
+        initial_content: automerge::Automerge,
+    ) -> Res<BigDocHandle> {
+        let bundle = self.runtime.put_doc(document_id, initial_content).await?;
+        Ok(BigDocHandle {
+            repo: Arc::clone(self),
+            bundle,
+        })
+    }
+
+    pub async fn export_doc(&self, doc_id: &DocumentId) -> Res<Option<Vec<u8>>> {
+        self.runtime.export_doc_save(*doc_id).await
+    }
+
+    pub async fn connect_with_peer(
+        self: &Arc<Self>,
+        endpoint: iroh::Endpoint,
+        endpoint_addr: iroh::EndpointAddr,
+        peer_id: PeerId,
+    ) -> Res<BigRepoConnection> {
+        self.runtime
+            .ensure_peer_connection(endpoint, endpoint_addr, peer_id)
+            .await?;
+        Ok(BigRepoConnection {
+            repo: Arc::clone(self),
+            peer_id,
+            closed: Arc::new(AtomicBool::new(false)),
+        })
+    }
+
+    pub async fn accept_peer_connection(
+        self: &Arc<Self>,
+        quic_conn: iroh::endpoint::Connection,
+    ) -> Res<BigRepoConnection> {
+        let peer_id = self.runtime.accept_incoming_connection(quic_conn).await?;
+        Ok(BigRepoConnection {
+            repo: Arc::clone(self),
+            peer_id,
+            closed: Arc::new(AtomicBool::new(false)),
+        })
+    }
+}
+
+// change listeners
+impl BigRepo {
     pub async fn subscribe_partition_doc_events_local(
         &self,
         partition_id: &crate::sync::protocol::PartitionId,
@@ -213,134 +344,135 @@ impl BigRepo {
         let (registration, change_rx) = self.change_manager.subscribe_listener(filter).await?;
         Ok((registration, change_rx))
     }
+}
 
-    pub async fn subscribe_local_listener(
-        self: &Arc<Self>,
-        filter: BigRepoLocalFilter,
-    ) -> Res<(
-        BigRepoLocalListenerRegistration,
-        tokio::sync::mpsc::UnboundedReceiver<Vec<BigRepoLocalNotification>>,
-    )> {
-        self.change_manager.subscribe_local_listener(filter).await
+// partition support
+impl BigRepo {
+    pub async fn partition_member_count(&self, part_id: &PartitionId) -> Res<i64> {
+        self.partition_store.member_count(part_id).await
     }
 
-    pub async fn subscribe_head_listener(
-        self: &Arc<Self>,
-        filter: BigRepoHeadFilter,
-    ) -> Res<(
-        BigRepoHeadListenerRegistration,
-        tokio::sync::mpsc::UnboundedReceiver<Vec<BigRepoHeadNotification>>,
-    )> {
-        let (registration, rx) = self.change_manager.subscribe_head_listener(filter).await?;
-        Ok((registration, rx))
+    pub async fn is_member_present_in_partition_item_state(
+        &self,
+        partition_id: &PartitionId,
+        member_id: &str,
+    ) -> Res<bool> {
+        self.partition_store
+            .is_member_present_in_item_state(partition_id, member_id)
+            .await
     }
 
-    pub async fn create_doc(
-        self: &Arc<Self>,
-        initial_content: automerge::Automerge,
-    ) -> Res<BigDocHandle> {
-        let bundle = self.runtime.create_doc(initial_content).await?;
-        Ok(BigDocHandle {
-            repo: Arc::clone(self),
-            bundle,
-        })
-    }
-
-    pub async fn add_doc(
-        self: &Arc<Self>,
-        initial_content: automerge::Automerge,
-    ) -> Res<BigDocHandle> {
-        self.create_doc(initial_content).await
-    }
-
-    pub async fn import_doc(
-        self: &Arc<Self>,
-        document_id: DocumentId,
-        initial_content: automerge::Automerge,
-    ) -> Res<BigDocHandle> {
-        let bundle = self
-            .runtime
-            .import_doc(document_id, initial_content)
-            .await?;
-        Ok(BigDocHandle {
-            repo: Arc::clone(self),
-            bundle,
-        })
-    }
-
-    pub async fn find_doc(self: &Arc<Self>, document_id: &DocumentId) -> Res<Option<BigDocHandle>> {
-        self.find_doc_handle(document_id).await
-    }
-
-    pub async fn find_doc_handle(
-        self: &Arc<Self>,
-        document_id: &DocumentId,
-    ) -> Res<Option<BigDocHandle>> {
+    pub async fn list_partitions_for_peer(&self, peer: &PeerKey) -> Res<Vec<PartitionSummary>> {
         Ok(self
-            .runtime
-            .find_doc_handle(*document_id)
+            .partition_store
+            .list_partitions_for_peer(peer)
             .await?
-            .map(|bundle| BigDocHandle {
-                repo: Arc::clone(self),
-                bundle,
-            }))
+            .partitions)
     }
 
-    pub async fn local_contains_document(self: &Arc<Self>, document_id: &DocumentId) -> Res<bool> {
-        self.runtime.local_contains_document(*document_id).await
-    }
-
-    pub(crate) async fn export_doc_save(&self, doc_id: &DocumentId) -> Res<Option<Vec<u8>>> {
-        self.runtime.export_doc_save(*doc_id).await
-    }
-
-    async fn apply_commit_delta(
+    pub async fn get_partition_member_events_for_peer(
         &self,
-        doc_id: DocumentId,
-        commits: Vec<(CommitId, BTreeSet<CommitId>, Vec<u8>)>,
-        heads: Vec<automerge::ChangeHash>,
-        patches: Vec<automerge::Patch>,
-        origin: BigRepoChangeOrigin,
-    ) -> Res<()> {
-        self.runtime
-            .commit_delta(doc_id, commits, heads, patches, origin)
+        peer: &PeerKey,
+        req: &GetPartitionMemberEventsRequest,
+    ) -> Res<GetPartitionMemberEventsResponse> {
+        self.partition_store
+            .get_partition_member_events_for_peer(peer, req)
             .await
     }
 
-    pub async fn ensure_peer_connection(
+    pub async fn get_partition_doc_events_for_peer(
         &self,
-        endpoint: iroh::Endpoint,
-        endpoint_addr: iroh::EndpointAddr,
-        peer_id: PeerId,
-    ) -> Res<()> {
-        self.runtime
-            .ensure_peer_connection(endpoint, endpoint_addr, peer_id)
+        peer: &PeerKey,
+        req: &GetPartitionDocEventsRequest,
+    ) -> Res<GetPartitionDocEventsResponse> {
+        self.partition_store
+            .get_partition_doc_events_for_peer(peer, req)
             .await
     }
 
-    pub async fn remove_peer_connection(&self, peer_id: PeerId) -> Res<()> {
-        self.runtime.remove_peer_connection(peer_id).await
+    pub async fn subscribe_partition_events_for_peer(
+        &self,
+        peer: &PeerKey,
+        reqs: &SubPartitionsRequest,
+        capacity: usize,
+    ) -> Res<tokio::sync::mpsc::Receiver<SubscriptionItem>> {
+        self.partition_store
+            .subscribe_partition_events_for_peer(peer, reqs, capacity)
+            .await
     }
 
-    pub async fn accept_incoming_peer_connection(
+    pub async fn get_docs_full_in_partitions(
         &self,
-        quic_conn: iroh::endpoint::Connection,
-    ) -> Res<()> {
-        self.runtime.accept_incoming_connection(quic_conn).await
-    }
+        doc_ids: &[String],
+        allowed_partitions: &[PartitionId],
+    ) -> Res<Vec<FullDoc>> {
+        if doc_ids.len() > MAX_GET_DOCS_FULL_DOC_IDS {
+            return Err(PartitionSyncError::TooManyDocIds {
+                requested: doc_ids.len(),
+                max: MAX_GET_DOCS_FULL_DOC_IDS,
+            }
+            .into());
+        }
 
-    pub async fn sync_doc_with_peer(
-        &self,
-        doc_id: DocumentId,
-        peer_id: PeerId,
-        subscribe: bool,
-        timeout: Option<std::time::Duration>,
-    ) -> Res<SyncDocOutcome> {
-        let outcome = self
-            .runtime
-            .sync_doc_with_peer(doc_id, peer_id, subscribe, timeout)
+        let mut dedup = HashSet::new();
+        let requested_doc_ids: Vec<String> = doc_ids
+            .iter()
+            .filter(|doc_id| dedup.insert((*doc_id).clone()))
+            .cloned()
+            .collect();
+        let denied_doc_id = self
+            .find_first_inaccessible_doc_in_partitions(&requested_doc_ids, allowed_partitions)
             .await?;
-        Ok(outcome)
+        if let Some(denied) = denied_doc_id {
+            return Err(PartitionSyncError::DocAccessDenied { doc_id: denied }.into());
+        }
+
+        use futures::StreamExt;
+        use futures_buffered::BufferedStreamExt;
+        let rows = futures::stream::iter(requested_doc_ids.into_iter().map(|doc_id| async move {
+            let parsed = match DocumentId::from_str(&doc_id) {
+                Ok(val) => val,
+                Err(_) => return Ok(None),
+            };
+            let Some(automerge_save) = self.export_doc(&parsed).await? else {
+                return Ok(None);
+            };
+            Ok(Some(FullDoc {
+                doc_id,
+                automerge_save,
+            }))
+        }))
+        .buffered_unordered(16)
+        .collect::<Vec<Res<Option<FullDoc>>>>()
+        .await;
+
+        let mut out = Vec::new();
+        for row in rows {
+            if let Some(doc) = row? {
+                out.push(doc);
+            }
+        }
+        Ok(out)
+    }
+
+    pub async fn is_doc_accessible_in_partitions(
+        &self,
+        doc_id: &str,
+        allowed_partitions: &[PartitionId],
+    ) -> Res<bool> {
+        self.partition_store
+            .is_item_present_in_membership_partitions(doc_id, allowed_partitions)
+            .await
+    }
+
+    async fn find_first_inaccessible_doc_in_partitions(
+        &self,
+        doc_ids: &[String],
+        allowed_partitions: &[PartitionId],
+    ) -> Res<Option<String>> {
+        self.partition_store
+            .find_first_item_missing_membership_in_partitions(doc_ids, allowed_partitions)
+            .await
     }
 }
 
@@ -358,7 +490,7 @@ impl BigRepo {
         T: Hydrate + Reconcile + Send + Sync + 'static,
         P: Into<autosurgeon::Prop<'a>> + Send + Sync + 'static,
     {
-        let handle = self.find_doc(doc_id).await?.ok_or_eyre("doc not found")?;
+        let handle = self.get_doc(doc_id).await?.ok_or_eyre("doc not found")?;
         let res = handle
             .with_document(|doc| {
                 if let Some(actor) = &actor_id {
@@ -384,10 +516,7 @@ impl BigRepo {
         obj_id: automerge::ObjId,
         path: Vec<Prop<'static>>,
     ) -> Res<Option<(T, Arc<[automerge::ChangeHash]>)>> {
-        let handle = self
-            .find_doc_handle(doc_id)
-            .await?
-            .ok_or_eyre("doc not found")?;
+        let handle = self.get_doc(doc_id).await?.ok_or_eyre("doc not found")?;
         handle
             .with_document_read(|doc| -> Res<Option<(T, Arc<[automerge::ChangeHash]>)>> {
                 let heads: Arc<[automerge::ChangeHash]> = Arc::from(doc.get_heads());
@@ -412,10 +541,7 @@ impl BigRepo {
         obj_id: automerge::ObjId,
         path: Vec<Prop<'static>>,
     ) -> Res<Option<(T, Arc<[automerge::ChangeHash]>)>> {
-        let handle = self
-            .find_doc_handle(doc_id)
-            .await?
-            .ok_or_eyre("doc not found")?;
+        let handle = self.get_doc(doc_id).await?.ok_or_eyre("doc not found")?;
         handle
             .with_document_read(|doc| -> Res<Option<(T, Arc<[automerge::ChangeHash]>)>> {
                 let heads: Arc<[automerge::ChangeHash]> = Arc::from(heads.to_vec());
@@ -516,7 +642,6 @@ impl BigDocHandle {
         }
 
         let doc_save = doc.save();
-        let patches = doc.diff(&before_heads, &after_heads);
         let changes = doc
             .get_changes(&before_heads)
             .into_iter()
@@ -530,10 +655,27 @@ impl BigDocHandle {
                 (head, parents, change.raw_bytes().to_vec())
             })
             .collect::<Vec<_>>();
+        let patches = if self
+            .repo
+            .change_manager
+            .has_change_listener_interest(*self.document_id(), &origin)
+        {
+            doc.diff(&before_heads, &after_heads)
+        } else {
+            Vec::new()
+        };
 
         self.repo
-            .apply_commit_delta(*self.document_id(), changes, after_heads, patches, origin)
+            .runtime
+            .commit_delta(*self.document_id(), changes, after_heads, patches, origin)
             .await?;
+
+        // FIXME: this is a bug, why are we ingesting in addition
+        // to sending the commit delta? why are we saving??
+        //
+        // THIS IS VERY BROKEN. We shouldn't need this.
+        // and this is the only use place of ingest full,
+        // we should remove it then
         self.repo
             .runtime
             .ingest_full(*self.document_id(), doc_save)
@@ -560,6 +702,7 @@ mod tests {
     use super::*;
     use automerge::{transaction::Transactable, ReadDoc, ScalarValue};
     use autosurgeon::Prop;
+    use std::sync::atomic::AtomicBool;
     use tokio::time::{timeout, Duration};
 
     async fn boot_repo() -> Res<(Arc<BigRepo>, BigRepoStopToken)> {
@@ -608,14 +751,67 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn put_doc_get_doc_and_export_roundtrip() -> Res<()> {
+        let (repo, _stop_token) = boot_repo().await?;
+        let doc_id = DocumentId::random();
+        let mut doc = automerge::Automerge::new();
+        doc.transact(|tx| tx.put(automerge::ROOT, "title", "seed"))
+            .expect("failed seeding doc");
+
+        let handle = repo.put_doc(doc_id, doc).await?;
+        let fetched = repo.get_doc(&doc_id).await?.expect("doc should exist");
+        assert_eq!(fetched.document_id(), &doc_id);
+        assert_eq!(
+            fetched
+                .with_document_read(|doc| get_str_at_root(doc, "title"))
+                .await,
+            "seed"
+        );
+        let exported = repo
+            .export_doc(&doc_id)
+            .await?
+            .expect("export should exist");
+        assert!(!exported.is_empty());
+        drop(handle);
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn put_doc_rejects_existing_local_doc_id() -> Res<()> {
+        let (repo, _stop_token) = boot_repo().await?;
+        let doc_id = DocumentId::random();
+        let _ = repo.put_doc(doc_id, automerge::Automerge::new()).await?;
+        let err = repo
+            .put_doc(doc_id, automerge::Automerge::new())
+            .await
+            .expect_err("expected conflict");
+        assert!(err.to_string().contains("already exists locally"));
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn connection_close_is_idempotent() -> Res<()> {
+        let (repo, _stop_token) = boot_repo().await?;
+        let connection = BigRepoConnection {
+            repo,
+            peer_id: PeerId::new([9_u8; 32]),
+            closed: Arc::new(AtomicBool::new(false)),
+        };
+
+        connection.close().await?;
+        connection.close().await?;
+        Ok(())
+    }
+
+    #[tokio::test]
     async fn with_document_roundtrip_rehydrates_from_storage() -> Res<()> {
         let (repo, _stop_token) = boot_repo().await?;
         let mut doc = automerge::Automerge::new();
         doc.transact(|tx| tx.put(automerge::ROOT, "title", "before"))
             .expect("failed initializing title");
 
-        let handle = repo.create_doc(doc).await?;
-        let doc_id = *handle.document_id();
+        let doc_id = DocumentId::random();
+        let handle = repo.put_doc(doc_id, doc).await?;
         handle
             .with_document(|doc| {
                 doc.transact(|tx| tx.put(automerge::ROOT, "title", "after"))
@@ -624,21 +820,24 @@ mod tests {
             .await?;
         drop(handle);
 
-        let reloaded = repo.find_doc(&doc_id).await?.expect("doc should exist");
+        let reloaded = repo.get_doc(&doc_id).await?.expect("doc should exist");
         let title = reloaded
             .with_document_read(|doc| get_str_at_root(doc, "title"))
             .await;
         assert_eq!(title, "after");
-
         Ok(())
     }
 
     #[tokio::test]
     async fn change_listener_doc_id_filter_only_receives_target_doc() -> Res<()> {
         let (repo, _stop_token) = boot_repo().await?;
-        let first_handle = repo.create_doc(automerge::Automerge::new()).await?;
+        let first_handle = repo
+            .put_doc(DocumentId::random(), automerge::Automerge::new())
+            .await?;
         let first_doc_id = *first_handle.document_id();
-        let second_handle = repo.create_doc(automerge::Automerge::new()).await?;
+        let second_handle = repo
+            .put_doc(DocumentId::random(), automerge::Automerge::new())
+            .await?;
 
         let (_registration, mut rx) = repo
             .subscribe_change_listener(BigRepoChangeFilter {
@@ -674,7 +873,9 @@ mod tests {
     #[tokio::test]
     async fn change_listener_path_filter_matches_only_prefix() -> Res<()> {
         let (repo, _stop_token) = boot_repo().await?;
-        let handle = repo.create_doc(automerge::Automerge::new()).await?;
+        let handle = repo
+            .put_doc(DocumentId::random(), automerge::Automerge::new())
+            .await?;
         let doc_id = *handle.document_id();
 
         handle
@@ -757,7 +958,9 @@ mod tests {
             })
             .await?;
 
-        let handle = repo.create_doc(automerge::Automerge::new()).await?;
+        let handle = repo
+            .put_doc(DocumentId::random(), automerge::Automerge::new())
+            .await?;
         let doc_id = *handle.document_id();
 
         let batch = recv_change_batch(&mut rx).await;
@@ -766,51 +969,20 @@ mod tests {
             BigRepoChangeNotification::DocCreated {
                 doc_id: seen_doc_id,
                 ..
+            } | BigRepoChangeNotification::DocImported {
+                doc_id: seen_doc_id,
+                ..
             } if *seen_doc_id == doc_id
         )));
         Ok(())
     }
 
     #[tokio::test]
-    async fn with_document_emits_local_heads_without_background_gap() -> Res<()> {
-        let (repo, _stop_token) = boot_repo().await?;
-        let handle = repo.create_doc(automerge::Automerge::new()).await?;
-        let doc_id = *handle.document_id();
-        let (_registration, mut rx) = repo
-            .subscribe_local_listener(BigRepoLocalFilter {
-                doc_id: Some(BigRepoDocIdFilter::new(doc_id)),
-            })
-            .await?;
-
-        handle
-            .with_document(|doc| {
-                doc.transact(|tx| tx.put(automerge::ROOT, "count", 1))
-                    .expect("failed mutating doc");
-            })
-            .await?;
-
-        let mut has_doc_heads_updated = false;
-        for _ in 0..4 {
-            let batch = timeout(Duration::from_secs(1), rx.recv())
-                .await
-                .expect("timed out waiting for local head update")
-                .expect("local listener closed unexpectedly");
-            has_doc_heads_updated = batch.into_iter().any(
-                |item| matches!(item, BigRepoLocalNotification::DocHeadsUpdated { doc_id: seen_doc_id, .. } if seen_doc_id == doc_id),
-            );
-            if has_doc_heads_updated {
-                break;
-            }
-        }
-        assert!(has_doc_heads_updated);
-
-        Ok(())
-    }
-
-    #[tokio::test]
     async fn with_document_handles_concurrent_writers() -> Res<()> {
         let (repo, _stop_token) = boot_repo().await?;
-        let handle = repo.create_doc(automerge::Automerge::new()).await?;
+        let handle = repo
+            .put_doc(DocumentId::random(), automerge::Automerge::new())
+            .await?;
         let doc_id = *handle.document_id();
         handle
             .with_document(|doc| {
@@ -826,7 +998,7 @@ mod tests {
             let repo = Arc::clone(&repo);
             joins.push(tokio::spawn(async move {
                 let handle = repo
-                    .find_doc(&doc_id)
+                    .get_doc(&doc_id)
                     .await
                     .expect("failed finding doc")
                     .expect("missing doc");
@@ -859,112 +1031,12 @@ mod tests {
         }
 
         let final_count = repo
-            .find_doc(&doc_id)
+            .get_doc(&doc_id)
             .await?
             .expect("doc should exist")
             .with_document_read(|doc| get_int_at_root(doc, "count"))
             .await;
         assert_eq!(final_count, (writer_count * increments_per_writer) as i64);
-
-        Ok(())
-    }
-
-    #[tokio::test]
-    async fn local_listener_doc_id_filter_only_receives_target_doc() -> Res<()> {
-        let (repo, _stop_token) = boot_repo().await?;
-        let target_handle = repo.create_doc(automerge::Automerge::new()).await?;
-        let target_doc_id = *target_handle.document_id();
-        let other_handle = repo.create_doc(automerge::Automerge::new()).await?;
-
-        let (_registration, mut rx) = repo
-            .subscribe_local_listener(BigRepoLocalFilter {
-                doc_id: Some(BigRepoDocIdFilter::new(target_doc_id)),
-            })
-            .await?;
-
-        target_handle
-            .with_document(|doc| {
-                doc.transact(|tx| tx.put(automerge::ROOT, "count", 1))
-                    .expect("failed mutating target doc");
-            })
-            .await?;
-        other_handle
-            .with_document(|doc| {
-                doc.transact(|tx| tx.put(automerge::ROOT, "count", 2))
-                    .expect("failed mutating other doc");
-            })
-            .await?;
-
-        let batch = timeout(Duration::from_secs(1), rx.recv())
-            .await
-            .expect("timed out waiting for local batch")
-            .expect("local listener closed unexpectedly");
-        assert!(batch.iter().all(|item| match item {
-            BigRepoLocalNotification::DocCreated { doc_id, .. }
-            | BigRepoLocalNotification::DocImported { doc_id, .. }
-            | BigRepoLocalNotification::DocHeadsUpdated { doc_id, .. } => *doc_id == target_doc_id,
-        }));
-        Ok(())
-    }
-
-    #[tokio::test]
-    async fn create_doc_emits_change_notifications_without_manual_broker_pin() -> Res<()> {
-        let (repo, _stop_token) = boot_repo().await?;
-        let (_registration, mut rx) = repo
-            .subscribe_change_listener(BigRepoChangeFilter {
-                doc_id: None,
-                origin: None,
-                path: Vec::new(),
-            })
-            .await?;
-
-        let handle = repo.create_doc(automerge::Automerge::new()).await?;
-        let doc_id = *handle.document_id();
-        let batch = timeout(Duration::from_secs(1), rx.recv())
-            .await
-            .expect("timed out waiting for create notification")
-            .expect("change listener closed unexpectedly");
-        assert!(batch.into_iter().any(|n| {
-            matches!(
-                n,
-                BigRepoChangeNotification::DocCreated {
-                    doc_id: seen_doc_id,
-                    ..
-                } if seen_doc_id == doc_id
-            )
-        }));
-        Ok(())
-    }
-
-    #[tokio::test]
-    async fn import_doc_emits_change_notifications_without_manual_broker_pin() -> Res<()> {
-        let (repo, _stop_token) = boot_repo().await?;
-        let (_registration, mut rx) = repo
-            .subscribe_change_listener(BigRepoChangeFilter {
-                doc_id: None,
-                origin: None,
-                path: Vec::new(),
-            })
-            .await?;
-
-        let imported_doc_id = DocumentId::random();
-        let _handle = repo
-            .import_doc(imported_doc_id, automerge::Automerge::new())
-            .await?;
-
-        let batch = timeout(Duration::from_secs(1), rx.recv())
-            .await
-            .expect("timed out waiting for import notification")
-            .expect("change listener closed unexpectedly");
-        assert!(batch.into_iter().any(|n| {
-            matches!(
-                n,
-                BigRepoChangeNotification::DocImported {
-                    doc_id: seen_doc_id,
-                    ..
-                } if seen_doc_id == imported_doc_id
-            )
-        }));
         Ok(())
     }
 }

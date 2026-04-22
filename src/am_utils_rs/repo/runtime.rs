@@ -19,28 +19,20 @@ pub enum SyncDocOutcome {
     IoError,
 }
 
-enum RuntimeMsg {
+enum RuntimeCmd {
     IngestFull {
         doc_id: DocumentId,
         doc_save: Vec<u8>,
         done: oneshot::Sender<Res<()>>,
     },
-    CreateDoc {
-        initial_content: automerge::Automerge,
-        done: oneshot::Sender<Res<Arc<crate::repo::LiveDocBundle>>>,
-    },
-    ImportDoc {
+    PutDoc {
         doc_id: DocumentId,
         initial_content: automerge::Automerge,
         done: oneshot::Sender<Res<Arc<crate::repo::LiveDocBundle>>>,
     },
-    FindDocHandle {
+    GetDocHandle {
         doc_id: DocumentId,
         done: oneshot::Sender<Res<Option<Arc<crate::repo::LiveDocBundle>>>>,
-    },
-    LocalContainsDocument {
-        doc_id: DocumentId,
-        done: oneshot::Sender<Res<bool>>,
     },
     ExportDocSave {
         doc_id: DocumentId,
@@ -54,19 +46,19 @@ enum RuntimeMsg {
         origin: BigRepoChangeOrigin,
         done: oneshot::Sender<Res<()>>,
     },
-    EnsurePeerConnection {
+    ConnectOutgoing {
         endpoint: iroh::Endpoint,
         endpoint_addr: iroh::EndpointAddr,
         peer_id: PeerId,
         done: oneshot::Sender<Res<()>>,
     },
-    AcceptIncomingConnection {
+    AcceptIncoming {
         quic_conn: iroh::endpoint::Connection,
-        done: oneshot::Sender<Res<()>>,
+        done: oneshot::Sender<Res<PeerId>>,
     },
-    RemovePeerConnection {
+    CloseConnection {
         peer_id: PeerId,
-        done: oneshot::Sender<Res<()>>,
+        done: Option<oneshot::Sender<Res<()>>>,
     },
     SyncDocWithPeer {
         doc_id: DocumentId,
@@ -78,6 +70,9 @@ enum RuntimeMsg {
     ReleaseDocLease {
         doc_id: DocumentId,
     },
+}
+
+enum RuntimeEvt {
     RemoteHeadsObserved {
         doc_id: DocumentId,
         peer_id: PeerId,
@@ -98,7 +93,7 @@ enum RuntimeMsg {
 
 #[derive(Clone, Debug)]
 pub(super) struct BigRepoRuntimeHandle {
-    msg_tx: mpsc::UnboundedSender<RuntimeMsg>,
+    cmd_tx: mpsc::UnboundedSender<RuntimeCmd>,
 }
 
 pub(super) struct BigRepoRuntimeStopToken {
@@ -170,7 +165,7 @@ type RuntimeSubduction<S> = subduction_core::subduction::Subduction<
 
 #[derive(Clone)]
 struct RuntimeRemoteHeadsBridge {
-    msg_tx: mpsc::UnboundedSender<RuntimeMsg>,
+    evt_tx: mpsc::UnboundedSender<RuntimeEvt>,
 }
 
 impl subduction_core::remote_heads::RemoteHeadsObserver for RuntimeRemoteHeadsBridge {
@@ -180,18 +175,20 @@ impl subduction_core::remote_heads::RemoteHeadsObserver for RuntimeRemoteHeadsBr
         peer: subduction_core::peer::id::PeerId,
         _heads: subduction_core::remote_heads::RemoteHeads,
     ) {
-        let _ = self.msg_tx.send(RuntimeMsg::RemoteHeadsObserved {
-            doc_id: id.into(),
-            peer_id: peer.into(),
-        });
+        self.evt_tx
+            .send(RuntimeEvt::RemoteHeadsObserved {
+                doc_id: id.into(),
+                peer_id: peer.into(),
+            })
+            .expect("runtime event channel closed while observing remote heads");
     }
 }
 
 impl BigRepoRuntimeHandle {
     pub(super) async fn ingest_full(&self, doc_id: DocumentId, doc_save: Vec<u8>) -> Res<()> {
         let (done_tx, done_rx) = oneshot::channel();
-        self.msg_tx
-            .send(RuntimeMsg::IngestFull {
+        self.cmd_tx
+            .send(RuntimeCmd::IngestFull {
                 doc_id,
                 doc_save,
                 done: done_tx,
@@ -200,28 +197,14 @@ impl BigRepoRuntimeHandle {
         done_rx.await.map_err(|_| eyre::eyre!(ERROR_CHANNEL))?
     }
 
-    pub(super) async fn create_doc(
-        &self,
-        initial_content: automerge::Automerge,
-    ) -> Res<Arc<crate::repo::LiveDocBundle>> {
-        let (done_tx, done_rx) = oneshot::channel();
-        self.msg_tx
-            .send(RuntimeMsg::CreateDoc {
-                initial_content,
-                done: done_tx,
-            })
-            .map_err(|_| eyre::eyre!(ERROR_ACTOR))?;
-        done_rx.await.map_err(|_| eyre::eyre!(ERROR_CHANNEL))?
-    }
-
-    pub(super) async fn import_doc(
+    pub(super) async fn put_doc(
         &self,
         doc_id: DocumentId,
         initial_content: automerge::Automerge,
     ) -> Res<Arc<crate::repo::LiveDocBundle>> {
         let (done_tx, done_rx) = oneshot::channel();
-        self.msg_tx
-            .send(RuntimeMsg::ImportDoc {
+        self.cmd_tx
+            .send(RuntimeCmd::PutDoc {
                 doc_id,
                 initial_content,
                 done: done_tx,
@@ -230,24 +213,13 @@ impl BigRepoRuntimeHandle {
         done_rx.await.map_err(|_| eyre::eyre!(ERROR_CHANNEL))?
     }
 
-    pub(super) async fn find_doc_handle(
+    pub(super) async fn get_doc_handle(
         &self,
         doc_id: DocumentId,
     ) -> Res<Option<Arc<crate::repo::LiveDocBundle>>> {
         let (done_tx, done_rx) = oneshot::channel();
-        self.msg_tx
-            .send(RuntimeMsg::FindDocHandle {
-                doc_id,
-                done: done_tx,
-            })
-            .map_err(|_| eyre::eyre!(ERROR_ACTOR))?;
-        done_rx.await.map_err(|_| eyre::eyre!(ERROR_CHANNEL))?
-    }
-
-    pub(super) async fn local_contains_document(&self, doc_id: DocumentId) -> Res<bool> {
-        let (done_tx, done_rx) = oneshot::channel();
-        self.msg_tx
-            .send(RuntimeMsg::LocalContainsDocument {
+        self.cmd_tx
+            .send(RuntimeCmd::GetDocHandle {
                 doc_id,
                 done: done_tx,
             })
@@ -257,8 +229,8 @@ impl BigRepoRuntimeHandle {
 
     pub(super) async fn export_doc_save(&self, doc_id: DocumentId) -> Res<Option<Vec<u8>>> {
         let (done_tx, done_rx) = oneshot::channel();
-        self.msg_tx
-            .send(RuntimeMsg::ExportDocSave {
+        self.cmd_tx
+            .send(RuntimeCmd::ExportDocSave {
                 doc_id,
                 done: done_tx,
             })
@@ -275,8 +247,8 @@ impl BigRepoRuntimeHandle {
         origin: BigRepoChangeOrigin,
     ) -> Res<()> {
         let (done_tx, done_rx) = oneshot::channel();
-        self.msg_tx
-            .send(RuntimeMsg::CommitDelta {
+        self.cmd_tx
+            .send(RuntimeCmd::CommitDelta {
                 doc_id,
                 commits,
                 heads,
@@ -295,21 +267,10 @@ impl BigRepoRuntimeHandle {
         peer_id: PeerId,
     ) -> Res<()> {
         let (done_tx, done_rx) = oneshot::channel();
-        self.msg_tx
-            .send(RuntimeMsg::EnsurePeerConnection {
+        self.cmd_tx
+            .send(RuntimeCmd::ConnectOutgoing {
                 endpoint,
                 endpoint_addr,
-                peer_id,
-                done: done_tx,
-            })
-            .map_err(|_| eyre::eyre!(ERROR_ACTOR))?;
-        done_rx.await.map_err(|_| eyre::eyre!(ERROR_CHANNEL))?
-    }
-
-    pub(super) async fn remove_peer_connection(&self, peer_id: PeerId) -> Res<()> {
-        let (done_tx, done_rx) = oneshot::channel();
-        self.msg_tx
-            .send(RuntimeMsg::RemovePeerConnection {
                 peer_id,
                 done: done_tx,
             })
@@ -320,12 +281,23 @@ impl BigRepoRuntimeHandle {
     pub(super) async fn accept_incoming_connection(
         &self,
         quic_conn: iroh::endpoint::Connection,
-    ) -> Res<()> {
+    ) -> Res<PeerId> {
         let (done_tx, done_rx) = oneshot::channel();
-        self.msg_tx
-            .send(RuntimeMsg::AcceptIncomingConnection {
+        self.cmd_tx
+            .send(RuntimeCmd::AcceptIncoming {
                 quic_conn,
                 done: done_tx,
+            })
+            .map_err(|_| eyre::eyre!(ERROR_ACTOR))?;
+        done_rx.await.map_err(|_| eyre::eyre!(ERROR_CHANNEL))?
+    }
+
+    pub(super) async fn close_peer_connection(&self, peer_id: PeerId) -> Res<()> {
+        let (done_tx, done_rx) = oneshot::channel();
+        self.cmd_tx
+            .send(RuntimeCmd::CloseConnection {
+                peer_id,
+                done: Some(done_tx),
             })
             .map_err(|_| eyre::eyre!(ERROR_ACTOR))?;
         done_rx.await.map_err(|_| eyre::eyre!(ERROR_CHANNEL))?
@@ -339,8 +311,8 @@ impl BigRepoRuntimeHandle {
         timeout: Option<Duration>,
     ) -> Res<SyncDocOutcome> {
         let (done_tx, done_rx) = oneshot::channel();
-        self.msg_tx
-            .send(RuntimeMsg::SyncDocWithPeer {
+        self.cmd_tx
+            .send(RuntimeCmd::SyncDocWithPeer {
                 doc_id,
                 peer_id,
                 subscribe,
@@ -352,7 +324,26 @@ impl BigRepoRuntimeHandle {
     }
 
     fn release_doc_lease(&self, doc_id: DocumentId) {
-        let _ = self.msg_tx.send(RuntimeMsg::ReleaseDocLease { doc_id });
+        if self
+            .cmd_tx
+            .send(RuntimeCmd::ReleaseDocLease { doc_id })
+            .is_err()
+        {
+            debug!(%doc_id, "runtime stopped before releasing doc lease");
+        }
+    }
+
+    pub(super) fn request_close_peer_connection(&self, peer_id: PeerId) {
+        if self
+            .cmd_tx
+            .send(RuntimeCmd::CloseConnection {
+                peer_id,
+                done: None,
+            })
+            .is_err()
+        {
+            debug!(%peer_id, "runtime stopped before closing peer connection");
+        }
     }
 }
 
@@ -386,6 +377,10 @@ where
     let storage_for_reads = storage.clone();
     let runtime_stop = CancellationToken::new();
     let (done_tx, done_rx) = oneshot::channel();
+
+    // FIXME: question, why not use the normal join set for this?
+    // is this to allow stopping the runtime tasks from the main
+    // select loop?
     let runtime_tasks = Arc::new(utils_rs::AbortableJoinSet::new());
 
     let sedimentrees = Arc::new(subduction_core::sharded_map::ShardedMap::new());
@@ -399,9 +394,10 @@ where
         subduction_core::subduction::pending_blob_requests::PendingBlobRequests::new(256),
     ));
 
-    let (msg_tx, mut msg_rx) = mpsc::unbounded_channel::<RuntimeMsg>();
+    let (cmd_tx, mut cmd_rx) = mpsc::unbounded_channel::<RuntimeCmd>();
+    let (evt_tx, mut evt_rx) = mpsc::unbounded_channel::<RuntimeEvt>();
     let observer = RuntimeRemoteHeadsBridge {
-        msg_tx: msg_tx.clone(),
+        evt_tx: evt_tx.clone(),
     };
     let storage_powerbox = subduction_core::storage::powerbox::StoragePowerbox::new(
         storage.clone(),
@@ -446,16 +442,16 @@ where
         local_peer_id,
         nonce_cache,
         runtime_stop: runtime_stop.clone(),
-        msg_tx: msg_tx.clone(),
+        cmd_tx: cmd_tx.clone(),
+        evt_tx: evt_tx.clone(),
         connected_peers: Arc::new(tokio::sync::Mutex::new(HashMap::new())),
         doc_lease_counts: Arc::new(tokio::sync::Mutex::new(HashMap::new())),
         refresh_in_flight: Arc::new(tokio::sync::Mutex::new(HashSet::new())),
+        sync_publish_in_flight: Arc::new(tokio::sync::Mutex::new(HashSet::new())),
     };
 
     runtime_tasks
         .spawn({
-            // FIXME: use method on CancellationToken for running
-            // until cancellation
             let stop = runtime_stop.child_token();
             async move {
                 let _ = stop
@@ -488,9 +484,13 @@ where
                     tokio::select! {
                         biased;
                         _ = runtime_stop.cancelled() => break,
-                        msg = msg_rx.recv() => {
-                            let Some(msg) = msg else { break; };
-                            runtime_worker.handle_msg(msg).await;
+                        cmd = cmd_rx.recv() => {
+                            let Some(cmd) = cmd else { break; };
+                            runtime_worker.handle_cmd(cmd).await;
+                        },
+                        evt = evt_rx.recv() => {
+                            let Some(evt) = evt else { break; };
+                            runtime_worker.handle_evt(evt).await;
                         }
                     }
                 }
@@ -505,7 +505,7 @@ where
         .expect("failed spawning big repo runtime task");
 
     Ok((
-        BigRepoRuntimeHandle { msg_tx },
+        BigRepoRuntimeHandle { cmd_tx },
         BigRepoRuntimeStopToken {
             cancel_token: runtime_stop,
             done_rx: tokio::sync::Mutex::new(Some(done_rx)),
@@ -535,10 +535,12 @@ where
     local_peer_id: subduction_core::peer::id::PeerId,
     nonce_cache: Arc<subduction_core::nonce_cache::NonceCache>,
     runtime_stop: CancellationToken,
-    msg_tx: mpsc::UnboundedSender<RuntimeMsg>,
+    cmd_tx: mpsc::UnboundedSender<RuntimeCmd>,
+    evt_tx: mpsc::UnboundedSender<RuntimeEvt>,
     connected_peers: Arc<tokio::sync::Mutex<HashMap<PeerId, RuntimePeerConnectionStopToken>>>,
     doc_lease_counts: Arc<tokio::sync::Mutex<HashMap<DocumentId, usize>>>,
     refresh_in_flight: Arc<tokio::sync::Mutex<HashSet<DocumentId>>>,
+    sync_publish_in_flight: Arc<tokio::sync::Mutex<HashSet<DocumentId>>>,
 }
 
 impl<S> BigRepoRuntimeWorker<S>
@@ -552,38 +554,25 @@ where
     <S as subduction_core::storage::traits::Storage<future_form::Sendable>>::Error:
         std::fmt::Display + Send + Sync + 'static,
 {
-    async fn handle_msg(&mut self, msg: RuntimeMsg) {
-        match msg {
-            RuntimeMsg::IngestFull {
+    async fn handle_cmd(&mut self, cmd: RuntimeCmd) {
+        match cmd {
+            RuntimeCmd::IngestFull {
                 doc_id,
                 doc_save,
                 done,
-            } => {
-                self.handle_ingest_full(doc_id, doc_save, done).await;
-            }
-            RuntimeMsg::CreateDoc {
-                initial_content,
-                done,
-            } => {
-                self.handle_create_doc(initial_content, done).await;
-            }
-            RuntimeMsg::ImportDoc {
+            } => self.handle_ingest_full(doc_id, doc_save, done).await,
+            RuntimeCmd::PutDoc {
                 doc_id,
                 initial_content,
                 done,
-            } => {
-                self.handle_import_doc(doc_id, initial_content, done).await;
+            } => self.handle_put_doc(doc_id, initial_content, done).await,
+            RuntimeCmd::GetDocHandle { doc_id, done } => {
+                self.handle_get_doc_handle(doc_id, done).await
             }
-            RuntimeMsg::FindDocHandle { doc_id, done } => {
-                self.handle_find_doc_handle(doc_id, done).await;
+            RuntimeCmd::ExportDocSave { doc_id, done } => {
+                self.handle_export_doc_save(doc_id, done).await
             }
-            RuntimeMsg::LocalContainsDocument { doc_id, done } => {
-                self.handle_local_contains_document(doc_id, done).await;
-            }
-            RuntimeMsg::ExportDocSave { doc_id, done } => {
-                self.handle_export_doc_save(doc_id, done).await;
-            }
-            RuntimeMsg::CommitDelta {
+            RuntimeCmd::CommitDelta {
                 doc_id,
                 commits,
                 heads,
@@ -592,25 +581,25 @@ where
                 done,
             } => {
                 self.handle_commit_delta(doc_id, commits, heads, patches, origin, done)
-                    .await;
+                    .await
             }
-            RuntimeMsg::EnsurePeerConnection {
+            RuntimeCmd::ConnectOutgoing {
                 endpoint,
                 endpoint_addr,
                 peer_id,
                 done,
             } => {
-                self.handle_ensure_peer_connection(endpoint, endpoint_addr, peer_id, done)
-                    .await;
+                self.handle_connect_outgoing(endpoint, endpoint_addr, peer_id, done)
+                    .await
             }
-            RuntimeMsg::AcceptIncomingConnection { quic_conn, done } => {
+            RuntimeCmd::AcceptIncoming { quic_conn, done } => {
                 self.handle_accept_incoming_connection(quic_conn, done)
                     .await;
             }
-            RuntimeMsg::RemovePeerConnection { peer_id, done } => {
-                self.handle_remove_peer_connection(peer_id, done).await;
+            RuntimeCmd::CloseConnection { peer_id, done } => {
+                self.handle_close_peer_connection(peer_id, done).await;
             }
-            RuntimeMsg::SyncDocWithPeer {
+            RuntimeCmd::SyncDocWithPeer {
                 doc_id,
                 peer_id,
                 subscribe,
@@ -618,15 +607,18 @@ where
                 done,
             } => {
                 self.handle_sync_doc_with_peer(doc_id, peer_id, subscribe, timeout, done)
-                    .await;
+                    .await
             }
-            RuntimeMsg::ReleaseDocLease { doc_id } => {
-                self.handle_release_doc_lease(doc_id).await;
-            }
-            RuntimeMsg::RemoteHeadsObserved { doc_id, peer_id } => {
+            RuntimeCmd::ReleaseDocLease { doc_id } => self.handle_release_doc_lease(doc_id).await,
+        }
+    }
+
+    async fn handle_evt(&mut self, evt: RuntimeEvt) {
+        match evt {
+            RuntimeEvt::RemoteHeadsObserved { doc_id, peer_id } => {
                 self.handle_remote_heads_observed(doc_id, peer_id).await;
             }
-            RuntimeMsg::LiveDocRefreshLoaded {
+            RuntimeEvt::LiveDocRefreshLoaded {
                 doc_id,
                 peer_id,
                 snapshot,
@@ -634,14 +626,14 @@ where
                 self.handle_live_doc_refresh_loaded(doc_id, peer_id, snapshot)
                     .await;
             }
-            RuntimeMsg::ConnectionEstablished {
+            RuntimeEvt::ConnectionEstablished {
                 peer_id,
                 stop_token,
             } => {
                 self.handle_connection_established(peer_id, stop_token)
                     .await;
             }
-            RuntimeMsg::ConnectionLost { peer_id } => {
+            RuntimeEvt::ConnectionLost { peer_id } => {
                 self.handle_connection_lost(peer_id).await;
             }
         }
@@ -685,48 +677,26 @@ where
         });
     }
 
-    async fn handle_create_doc(
-        &mut self,
-        initial_content: automerge::Automerge,
-        done: oneshot::Sender<Res<Arc<crate::repo::LiveDocBundle>>>,
-    ) {
-        let result = (async {
-            let mut doc_id = DocumentId::random();
-            while self.local_contains_document_now(doc_id).await? {
-                doc_id = DocumentId::random();
-            }
-            self.create_doc_with_id_now(doc_id, initial_content).await
-        })
-        .await;
-        done.send(result).inspect_err(|_| warn!(ERROR_CALLER)).ok();
-    }
-
-    async fn handle_import_doc(
+    async fn handle_put_doc(
         &mut self,
         doc_id: DocumentId,
         initial_content: automerge::Automerge,
         done: oneshot::Sender<Res<Arc<crate::repo::LiveDocBundle>>>,
     ) {
-        let result = self.import_doc_now(doc_id, initial_content).await;
-        done.send(result).inspect_err(|_| warn!(ERROR_CALLER)).ok();;
+        // FIXME: inline put_doc_now, it's not used anywhere else
+        let result = self.put_doc_now(doc_id, initial_content).await;
+        done.send(result).inspect_err(|_| warn!(ERROR_CALLER)).ok();
     }
 
-    async fn handle_find_doc_handle(
+    async fn handle_get_doc_handle(
         &mut self,
         doc_id: DocumentId,
         done: oneshot::Sender<Res<Option<Arc<crate::repo::LiveDocBundle>>>>,
     ) {
-        let result = self.find_doc_handle_now(doc_id).await;
-        done.send(result).inspect_err(|_| warn!(ERROR_CALLER)).ok();;
-    }
-
-    async fn handle_local_contains_document(
-        &self,
-        doc_id: DocumentId,
-        done: oneshot::Sender<Res<bool>>,
-    ) {
-        let result = self.local_contains_document_now(doc_id).await;
-        done.send(result).inspect_err(|_| warn!(ERROR_CALLER)).ok();;
+        // FIXME: why are we doing this on the main thread when it'd block the event loop?
+        // also, inline it
+        let result = self.get_doc_handle_now(doc_id).await;
+        done.send(result).inspect_err(|_| warn!(ERROR_CALLER)).ok();
     }
 
     async fn handle_export_doc_save(
@@ -765,40 +735,21 @@ where
         Ok(count > 0)
     }
 
-    async fn import_doc_now(
+    async fn put_doc_now(
         &mut self,
         doc_id: DocumentId,
         initial_content: automerge::Automerge,
     ) -> Res<Arc<crate::repo::LiveDocBundle>> {
-        let lease = self.acquire_doc_lease_now(doc_id).await?;
-        let bundle = Arc::new(crate::repo::LiveDocBundle::new(
-            doc_id,
-            initial_content,
-            lease,
-        ));
-        let result = async {
-            self.persist_bundle_now(&bundle).await?;
-            self.upsert_known_doc_now(bundle.doc_id).await?;
-            self.register_live_bundle(Arc::clone(&bundle));
-            self.record_live_bundle_imported(Arc::clone(&bundle))
-                .await?;
-            eyre::Ok(bundle)
+        if self.local_contains_document_now(doc_id).await? {
+            eyre::bail!("document already exists locally");
         }
-        .await;
-        result
-    }
-
-    async fn create_doc_with_id_now(
-        &mut self,
-        doc_id: DocumentId,
-        initial_content: automerge::Automerge,
-    ) -> Res<Arc<crate::repo::LiveDocBundle>> {
         let lease = self.acquire_doc_lease_now(doc_id).await?;
         let bundle = Arc::new(crate::repo::LiveDocBundle::new(
             doc_id,
             initial_content,
             lease,
         ));
+        // FIXME: why separate result future?
         let result = async {
             self.persist_bundle_now(&bundle).await?;
             self.upsert_known_doc_now(bundle.doc_id).await?;
@@ -810,7 +761,7 @@ where
         result
     }
 
-    async fn find_doc_handle_now(
+    async fn get_doc_handle_now(
         &mut self,
         doc_id: DocumentId,
     ) -> Res<Option<Arc<crate::repo::LiveDocBundle>>> {
@@ -843,14 +794,13 @@ where
             .insert(bundle.doc_id, Arc::downgrade(&bundle));
     }
 
+    // FIXME: this method is only used in put_doc_now which constructs
+    // the bundle right away which is stupid that we lock and clone immedaiately
+    // inlining it might help
     async fn persist_bundle_now(&self, bundle: &crate::repo::LiveDocBundle) -> Res<()> {
-        let doc = bundle.doc.lock().await;
-        self.ingest_save_now(bundle.doc_id, doc.save()).await
-    }
-
-    async fn ingest_save_now(&self, doc_id: DocumentId, doc_save: Vec<u8>) -> Res<()> {
-        let doc = automerge::Automerge::load(&doc_save)
-            .map_err(|err| ferr!("failed loading automerge save for ingest: {err}"))?;
+        let doc = {
+            bundle.doc.lock().await.clone()
+        };
         let sedimentree_id: SedimentreeId = doc_id.into();
         let ingested = automerge_sedimentree::ingest::ingest_automerge(&doc, sedimentree_id)
             .map_err(|err| ferr!("failed ingesting automerge doc: {err}"))?;
@@ -870,6 +820,9 @@ where
         Ok(())
     }
 
+    // FIXME: again inlining this might be useful since it's only used once,
+    // too many abstractions is harmful. No need to go through the bundles here
+    // in put_doc_now
     async fn record_live_bundle_created(&self, bundle: Arc<crate::repo::LiveDocBundle>) -> Res<()> {
         let doc = bundle.doc.lock().await;
         let heads = Arc::<[automerge::ChangeHash]>::from(doc.get_heads());
@@ -888,27 +841,12 @@ where
         Ok(())
     }
 
-    async fn record_live_bundle_imported(
-        &self,
-        bundle: Arc<crate::repo::LiveDocBundle>,
-    ) -> Res<()> {
-        let doc = bundle.doc.lock().await;
-        let heads = Arc::<[automerge::ChangeHash]>::from(doc.get_heads());
-        let change_count_hint = doc.get_changes(&[]).len().max(1) as u64;
-        let item_payload = serde_json::json!({
-            "heads": crate::serialize_commit_heads(&heads),
-            "change_count_hint": change_count_hint.max(1),
-        });
-        self.partition_store
-            .record_member_item_change(&bundle.doc_id.to_string(), &item_payload)
-            .await?;
-        self.change_manager
-            .notify_doc_imported(bundle.doc_id, Arc::clone(&heads))?;
-        self.change_manager
-            .notify_local_doc_imported(bundle.doc_id, heads)?;
-        Ok(())
-    }
-
+    // FIXME: the structure of this is weird because you're trying
+    // to serve two different callers. 
+    // put_doc_now should fail for ids that are already locally used
+    //
+    // also, why are we loading the doc from storage on the main thread
+    // only to discard it? very weird
     async fn acquire_doc_lease_now(&self, doc_id: DocumentId) -> Res<RuntimeDocLease> {
         let mut counts = self.doc_lease_counts.lock().await;
         let count = counts.entry(doc_id).or_insert(0);
@@ -964,7 +902,7 @@ where
         result?;
         Ok(RuntimeDocLease {
             runtime: BigRepoRuntimeHandle {
-                msg_tx: self.msg_tx.clone(),
+                cmd_tx: self.cmd_tx.clone(),
             },
             doc_id,
         })
@@ -1007,7 +945,7 @@ where
         });
     }
 
-    async fn handle_ensure_peer_connection(
+    async fn handle_connect_outgoing(
         &self,
         endpoint: iroh::Endpoint,
         endpoint_addr: iroh::EndpointAddr,
@@ -1016,7 +954,7 @@ where
     ) {
         let subduction: Arc<RuntimeSubduction<S>> = Arc::clone(&self.subduction);
         let connect_signer = self.connect_signer.clone();
-        let msg_tx = self.msg_tx.clone();
+        let evt_tx = self.evt_tx.clone();
         let runtime_tasks = Arc::clone(&self.runtime_tasks);
         let connected_peers = Arc::clone(&self.connected_peers);
         self.spawn_background(async move {
@@ -1032,8 +970,8 @@ where
                 let sender_stop = stop_token.child_token();
                 let peer_id_for_listener = peer_id;
                 let peer_id_for_sender = peer_id;
-                let msg_tx_for_listener = msg_tx.clone();
-                let msg_tx_for_sender = msg_tx.clone();
+                let evt_tx_for_listener = evt_tx.clone();
+                let evt_tx_for_sender = evt_tx.clone();
                 runtime_tasks
                     .spawn({
                         let fut = connect.listener_task;
@@ -1044,11 +982,19 @@ where
                                 res = fut => {
                                     match res {
                                         Ok(()) => {
-                                            let _ = msg_tx_for_listener.send(RuntimeMsg::ConnectionLost { peer_id: peer_id_for_listener });
+                                            evt_tx_for_listener
+                                                .send(RuntimeEvt::ConnectionLost {
+                                                    peer_id: peer_id_for_listener,
+                                                })
+                                                .expect("runtime event channel closed");
                                         }
                                         Err(err) => {
                                             warn!(?err, %peer_id_for_listener, "connection listener task exited");
-                                            let _ = msg_tx_for_listener.send(RuntimeMsg::ConnectionLost { peer_id: peer_id_for_listener });
+                                            evt_tx_for_listener
+                                                .send(RuntimeEvt::ConnectionLost {
+                                                    peer_id: peer_id_for_listener,
+                                                })
+                                                .expect("runtime event channel closed");
                                         }
                                     }
                                 }
@@ -1066,11 +1012,19 @@ where
                                 res = fut => {
                                     match res {
                                         Ok(()) => {
-                                            let _ = msg_tx_for_sender.send(RuntimeMsg::ConnectionLost { peer_id: peer_id_for_sender });
+                                            evt_tx_for_sender
+                                                .send(RuntimeEvt::ConnectionLost {
+                                                    peer_id: peer_id_for_sender,
+                                                })
+                                                .expect("runtime event channel closed");
                                         }
                                         Err(err) => {
                                             warn!(?err, %peer_id_for_sender, "connection sender task exited");
-                                            let _ = msg_tx_for_sender.send(RuntimeMsg::ConnectionLost { peer_id: peer_id_for_sender });
+                                            evt_tx_for_sender
+                                                .send(RuntimeEvt::ConnectionLost {
+                                                    peer_id: peer_id_for_sender,
+                                                })
+                                                .expect("runtime event channel closed");
                                         }
                                     }
                                 }
@@ -1081,8 +1035,13 @@ where
                 subduction
                     .add_connection(connect.authenticated)
                     .await
-                    .map_err(|err| ferr!("failed subduction add_connection: {err}"))?;
-                let _ = msg_tx.send(RuntimeMsg::ConnectionEstablished { peer_id, stop_token });
+                    .map_err(|err| {
+                        stop_token.cancel();
+                        ferr!("failed subduction add_connection: {err}")
+                    })?;
+                evt_tx
+                    .send(RuntimeEvt::ConnectionEstablished { peer_id, stop_token })
+                    .expect("runtime event channel closed");
                 Ok(())
             }
             .await;
@@ -1093,13 +1052,13 @@ where
     async fn handle_accept_incoming_connection(
         &self,
         quic_conn: iroh::endpoint::Connection,
-        done: oneshot::Sender<Res<()>>,
+        done: oneshot::Sender<Res<PeerId>>,
     ) {
         let subduction: Arc<RuntimeSubduction<S>> = Arc::clone(&self.subduction);
         let connect_signer = self.connect_signer.clone();
         let nonce_cache = Arc::clone(&self.nonce_cache);
         let local_peer_id = self.local_peer_id;
-        let msg_tx = self.msg_tx.clone();
+        let evt_tx = self.evt_tx.clone();
         let runtime_tasks = Arc::clone(&self.runtime_tasks);
         let connected_peers = Arc::clone(&self.connected_peers);
         self.spawn_background(async move {
@@ -1114,15 +1073,15 @@ where
                 .map_err(|err| ferr!("failed subduction iroh accept: {err}"))?;
                 let peer_id = PeerId::from(accepted.authenticated.peer_id());
                 if connected_peers.lock().await.contains_key(&peer_id) {
-                    return Ok(());
+                    return Ok(peer_id);
                 }
                 let stop_token = RuntimePeerConnectionStopToken::new();
                 let listener_stop = stop_token.child_token();
                 let sender_stop = stop_token.child_token();
                 let peer_id_for_listener = peer_id;
                 let peer_id_for_sender = peer_id;
-                let msg_tx_for_listener = msg_tx.clone();
-                let msg_tx_for_sender = msg_tx.clone();
+                let evt_tx_for_listener = evt_tx.clone();
+                let evt_tx_for_sender = evt_tx.clone();
                 runtime_tasks
                     .spawn({
                         let fut = accepted.listener_task;
@@ -1133,11 +1092,19 @@ where
                                 res = fut => {
                                     match res {
                                         Ok(()) => {
-                                            let _ = msg_tx_for_listener.send(RuntimeMsg::ConnectionLost { peer_id: peer_id_for_listener });
+                                            evt_tx_for_listener
+                                                .send(RuntimeEvt::ConnectionLost {
+                                                    peer_id: peer_id_for_listener,
+                                                })
+                                                .expect("runtime event channel closed");
                                         }
                                         Err(err) => {
                                             warn!(?err, %peer_id_for_listener, "incoming connection listener task exited");
-                                            let _ = msg_tx_for_listener.send(RuntimeMsg::ConnectionLost { peer_id: peer_id_for_listener });
+                                            evt_tx_for_listener
+                                                .send(RuntimeEvt::ConnectionLost {
+                                                    peer_id: peer_id_for_listener,
+                                                })
+                                                .expect("runtime event channel closed");
                                         }
                                     }
                                 }
@@ -1155,11 +1122,19 @@ where
                                 res = fut => {
                                     match res {
                                         Ok(()) => {
-                                            let _ = msg_tx_for_sender.send(RuntimeMsg::ConnectionLost { peer_id: peer_id_for_sender });
+                                            evt_tx_for_sender
+                                                .send(RuntimeEvt::ConnectionLost {
+                                                    peer_id: peer_id_for_sender,
+                                                })
+                                                .expect("runtime event channel closed");
                                         }
                                         Err(err) => {
                                             warn!(?err, %peer_id_for_sender, "incoming connection sender task exited");
-                                            let _ = msg_tx_for_sender.send(RuntimeMsg::ConnectionLost { peer_id: peer_id_for_sender });
+                                            evt_tx_for_sender
+                                                .send(RuntimeEvt::ConnectionLost {
+                                                    peer_id: peer_id_for_sender,
+                                                })
+                                                .expect("runtime event channel closed");
                                         }
                                     }
                                 }
@@ -1170,16 +1145,25 @@ where
                 subduction
                     .add_connection(accepted.authenticated)
                     .await
-                    .map_err(|err| ferr!("failed subduction add_connection: {err}"))?;
-                let _ = msg_tx.send(RuntimeMsg::ConnectionEstablished { peer_id, stop_token });
-                Ok(())
+                    .map_err(|err| {
+                        stop_token.cancel();
+                        ferr!("failed subduction add_connection: {err}")
+                    })?;
+                evt_tx
+                    .send(RuntimeEvt::ConnectionEstablished { peer_id, stop_token })
+                    .expect("runtime event channel closed");
+                Ok(peer_id)
             }
             .await;
             done.send(out).expect(ERROR_CALLER);
         });
     }
 
-    async fn handle_remove_peer_connection(&self, peer_id: PeerId, done: oneshot::Sender<Res<()>>) {
+    async fn handle_close_peer_connection(
+        &self,
+        peer_id: PeerId,
+        done: Option<oneshot::Sender<Res<()>>>,
+    ) {
         let subduction: Arc<RuntimeSubduction<S>> = Arc::clone(&self.subduction);
         let connected_peers = Arc::clone(&self.connected_peers);
         self.spawn_background(async move {
@@ -1196,7 +1180,9 @@ where
                 Ok(())
             }
             .await;
-            done.send(out).expect(ERROR_CALLER);
+            if let Some(done) = done {
+                done.send(out).expect(ERROR_CALLER);
+            }
         });
     }
 
@@ -1217,6 +1203,7 @@ where
                 let before_doc =
                     load_doc_snapshot(&subduction, &storage_for_reads, sedimentree_id).await?;
                 let remote_peer_id: subduction_core::peer::id::PeerId = peer_id.into();
+                worker.sync_publish_in_flight.lock().await.insert(doc_id);
                 let result = subduction
                     .sync_with_peer(&remote_peer_id, sedimentree_id, subscribe, timeout)
                     .await;
@@ -1236,7 +1223,6 @@ where
                     }
                 };
                 if matches!(outcome, SyncDocOutcome::Success) {
-                    // FIXME: are we loadign the full sedimentree here?
                     let after_doc =
                         load_doc_snapshot(&subduction, &storage_for_reads, sedimentree_id).await?;
                     if let Some(after_doc) = after_doc {
@@ -1264,6 +1250,7 @@ where
                 Ok(outcome)
             }
             .await;
+            worker.sync_publish_in_flight.lock().await.remove(&doc_id);
             done.send(out).expect(ERROR_CALLER);
         });
     }
@@ -1288,14 +1275,16 @@ where
         drop(in_flight);
         let subduction: Arc<RuntimeSubduction<S>> = Arc::clone(&self.subduction);
         let storage_for_reads = self.storage_for_reads.clone();
-        let msg_tx = self.msg_tx.clone();
+        let evt_tx = self.evt_tx.clone();
         self.spawn_background(async move {
             let snapshot = load_doc_snapshot(&subduction, &storage_for_reads, doc_id).await;
-            let _ = msg_tx.send(RuntimeMsg::LiveDocRefreshLoaded {
-                doc_id,
-                peer_id,
-                snapshot,
-            });
+            evt_tx
+                .send(RuntimeEvt::LiveDocRefreshLoaded {
+                    doc_id,
+                    peer_id,
+                    snapshot,
+                })
+                .expect("runtime event channel closed");
         });
     }
 
@@ -1306,6 +1295,7 @@ where
         snapshot: Res<Option<automerge::Automerge>>,
     ) {
         self.refresh_in_flight.lock().await.remove(&doc_id);
+        let publish = !self.sync_publish_in_flight.lock().await.contains(&doc_id);
         let Ok(Some(after_doc)) = snapshot else {
             return;
         };
@@ -1316,7 +1306,7 @@ where
         else {
             return;
         };
-        self.apply_live_doc_refresh(bundle, after_doc, Some(peer_id))
+        self.apply_live_doc_refresh(bundle, after_doc, Some(peer_id), publish)
             .await;
     }
 
@@ -1348,6 +1338,7 @@ where
         bundle: Arc<crate::repo::LiveDocBundle>,
         mut after_doc: automerge::Automerge,
         peer_id: Option<PeerId>,
+        publish: bool,
     ) {
         let doc_id = bundle.doc_id;
         let before_heads = {
@@ -1372,6 +1363,9 @@ where
         let Some((after_heads, patches, change_count)) = maybe_delta else {
             return;
         };
+        if !publish {
+            return;
+        }
         let origin = peer_id
             .map(|peer_id| BigRepoChangeOrigin::Remote { peer_id })
             .unwrap_or(BigRepoChangeOrigin::Bootstrap);
