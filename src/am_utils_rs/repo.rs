@@ -6,13 +6,14 @@ use std::sync::atomic::{AtomicBool, Ordering};
 
 use automerge::ChangeHash;
 use autosurgeon::{Hydrate, Prop, Reconcile};
+use sedimentree_core::collections::{Map as SedMap, Set};
+use sedimentree_core::commit::FragmentState;
 use sedimentree_core::loose_commit::id::CommitId;
 use sqlx::sqlite::SqliteConnectOptions;
 use tokio::sync::broadcast;
 use tokio_util::sync::CancellationToken;
 
 mod changes;
-mod partition;
 pub mod rpc;
 mod runtime;
 pub use runtime::SyncDocOutcome;
@@ -49,12 +50,13 @@ pub enum StorageConfig {
     Memory,
 }
 
-// FIXME: so essentially, we moved from a single live_buldes mutex to a per bundle mutex righ? 
+// FIXME: so essentially, we moved from a single live_buldes mutex to a per bundle mutex righ?
 // let's move this to runtime
 #[derive(Debug)]
 struct LiveDocBundle {
     doc_id: DocumentId,
     doc: tokio::sync::Mutex<automerge::Automerge>,
+    fragment_state_store: tokio::sync::Mutex<SedMap<CommitId, FragmentState<Set<CommitId>>>>,
     _lease: runtime::RuntimeDocLease,
 }
 
@@ -63,6 +65,7 @@ impl LiveDocBundle {
         Self {
             doc_id,
             doc: tokio::sync::Mutex::new(doc),
+            fragment_state_store: tokio::sync::Mutex::new(SedMap::new()),
             _lease: lease,
         }
     }
@@ -254,7 +257,6 @@ impl BigRepo {
     pub fn local_peer_id(&self) -> PeerId {
         self.local_peer_id
     }
-
 }
 
 // main methods
@@ -641,7 +643,6 @@ impl BigDocHandle {
             return Ok(out);
         }
 
-        let doc_save = doc.save();
         let changes = doc
             .get_changes(&before_heads)
             .into_iter()
@@ -664,21 +665,11 @@ impl BigDocHandle {
         } else {
             Vec::new()
         };
+        drop(doc);
 
         self.repo
             .runtime
             .commit_delta(*self.document_id(), changes, after_heads, patches, origin)
-            .await?;
-
-        // FIXME: this is a bug, why are we ingesting in addition
-        // to sending the commit delta? why are we saving??
-        //
-        // THIS IS VERY BROKEN. We shouldn't need this.
-        // and this is the only use place of ingest full,
-        // we should remove it then
-        self.repo
-            .runtime
-            .ingest_full(*self.document_id(), doc_save)
             .await?;
 
         Ok(out)

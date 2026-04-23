@@ -1,8 +1,15 @@
+//! This is just a crappy reimpl of samod to get subduction working
+
 use crate::interlude::*;
 use crate::partition::PartitionStore;
 use crate::repo::{BigRepoChangeOrigin, DocumentId, PeerId};
 
+use core::convert::Infallible;
 use futures::future::BoxFuture;
+use sedimentree_core::collections::Set;
+use sedimentree_core::commit::{CommitStore, CountLeadingZeroBytes, FragmentState};
+use sedimentree_core::crypto::digest::Digest;
+use sedimentree_core::sedimentree::{Sedimentree, SedimentreeItem};
 use sedimentree_core::{blob::Blob, id::SedimentreeId, loose_commit::id::CommitId};
 use std::collections::{BTreeSet, HashMap, HashSet};
 use std::time::Duration;
@@ -10,6 +17,7 @@ use tokio::sync::{mpsc, oneshot};
 use tokio_util::sync::CancellationToken;
 
 use super::changes;
+use subduction_core::subduction::request::FragmentRequested;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum SyncDocOutcome {
@@ -20,11 +28,6 @@ pub enum SyncDocOutcome {
 }
 
 enum RuntimeCmd {
-    IngestFull {
-        doc_id: DocumentId,
-        doc_save: Vec<u8>,
-        done: oneshot::Sender<Res<()>>,
-    },
     PutDoc {
         doc_id: DocumentId,
         initial_content: automerge::Automerge,
@@ -82,6 +85,20 @@ enum RuntimeEvt {
         peer_id: PeerId,
         snapshot: Res<Option<automerge::Automerge>>,
     },
+    FragmentRequestsReady {
+        doc_id: DocumentId,
+        requests: Vec<FragmentRequested>,
+    },
+    FragmentProcessingFinished {
+        doc_id: DocumentId,
+    },
+    PutDocSucceeded {
+        doc_id: DocumentId,
+    },
+    PutDocFailed {
+        doc_id: DocumentId,
+        error: String,
+    },
     ConnectionEstablished {
         peer_id: PeerId,
         stop_token: RuntimePeerConnectionStopToken,
@@ -105,6 +122,11 @@ pub(super) struct BigRepoRuntimeStopToken {
 pub(super) struct RuntimeDocLease {
     runtime: BigRepoRuntimeHandle,
     doc_id: DocumentId,
+}
+
+struct PendingPutDoc {
+    initial_content: automerge::Automerge,
+    done: oneshot::Sender<Res<Arc<crate::repo::LiveDocBundle>>>,
 }
 
 impl Drop for RuntimeDocLease {
@@ -138,6 +160,8 @@ impl RuntimePeerConnectionStopToken {
     }
 }
 
+type SubductionSedimentrees =
+    Arc<subduction_core::sharded_map::ShardedMap<SedimentreeId, Sedimentree, 256>>;
 type RuntimeIrohTransport = subduction_core::transport::message::MessageTransport<
     subduction_iroh::transport::IrohTransport,
 >;
@@ -162,6 +186,28 @@ type RuntimeSubduction<S> = subduction_core::subduction::Subduction<
     sedimentree_core::depth::CountLeadingZeroBytes,
     256,
 >;
+pub trait RuntimeSubductionStorage:
+    subduction_core::storage::traits::Storage<
+        future_form::Sendable,
+        Error: std::fmt::Display + Send + Sync + 'static,
+    > + Clone
+    + Send
+    + Sync
+    + std::fmt::Debug
+    + 'static
+{
+}
+impl<T> RuntimeSubductionStorage for T where
+    T: subduction_core::storage::traits::Storage<
+            future_form::Sendable,
+            Error: std::fmt::Display + Send + Sync + 'static,
+        > + Clone
+        + Send
+        + Sync
+        + std::fmt::Debug
+        + 'static
+{
+}
 
 #[derive(Clone)]
 struct RuntimeRemoteHeadsBridge {
@@ -180,23 +226,11 @@ impl subduction_core::remote_heads::RemoteHeadsObserver for RuntimeRemoteHeadsBr
                 doc_id: id.into(),
                 peer_id: peer.into(),
             })
-            .expect("runtime event channel closed while observing remote heads");
+            .expect(ERROR_CHANNEL);
     }
 }
 
 impl BigRepoRuntimeHandle {
-    pub(super) async fn ingest_full(&self, doc_id: DocumentId, doc_save: Vec<u8>) -> Res<()> {
-        let (done_tx, done_rx) = oneshot::channel();
-        self.cmd_tx
-            .send(RuntimeCmd::IngestFull {
-                doc_id,
-                doc_save,
-                done: done_tx,
-            })
-            .map_err(|_| eyre::eyre!(ERROR_ACTOR))?;
-        done_rx.await.map_err(|_| eyre::eyre!(ERROR_CHANNEL))?
-    }
-
     pub(super) async fn put_doc(
         &self,
         doc_id: DocumentId,
@@ -355,14 +389,7 @@ pub(super) fn spawn_big_repo_runtime<S>(
     change_manager: Arc<changes::ChangeListenerManager>,
 ) -> Res<(BigRepoRuntimeHandle, BigRepoRuntimeStopToken)>
 where
-    S: subduction_core::storage::traits::Storage<future_form::Sendable>
-        + Clone
-        + Send
-        + Sync
-        + std::fmt::Debug
-        + 'static,
-    <S as subduction_core::storage::traits::Storage<future_form::Sendable>>::Error:
-        std::fmt::Display + Send + Sync + 'static,
+    S: RuntimeSubductionStorage,
 {
     use subduction_core::{policy::open::OpenPolicy, subduction::Subduction};
     use subduction_websocket::tokio::{TimeoutTokio, TokioSpawn};
@@ -433,6 +460,7 @@ where
     let subduction_handle: Arc<RuntimeSubduction<S>> = Arc::clone(&subduction);
     let runtime_worker = BigRepoRuntimeWorker {
         subduction: subduction_handle,
+        sedimentrees: Arc::clone(&sedimentrees),
         storage_for_reads,
         live_bundles: HashMap::new(),
         partition_store,
@@ -444,10 +472,13 @@ where
         runtime_stop: runtime_stop.clone(),
         cmd_tx: cmd_tx.clone(),
         evt_tx: evt_tx.clone(),
-        connected_peers: Arc::new(tokio::sync::Mutex::new(HashMap::new())),
-        doc_lease_counts: Arc::new(tokio::sync::Mutex::new(HashMap::new())),
-        refresh_in_flight: Arc::new(tokio::sync::Mutex::new(HashSet::new())),
-        sync_publish_in_flight: Arc::new(tokio::sync::Mutex::new(HashSet::new())),
+        connected_peers: default(),
+        doc_lease_counts: default(),
+        refresh_in_flight: default(),
+        sync_publish_in_flight: default(),
+        pending_fragment_requests: default(),
+        fragment_processing: default(),
+        pending_put_docs: default(),
     };
 
     runtime_tasks
@@ -461,7 +492,7 @@ where
                     .await;
             }
         })
-        .expect("failed spawning subduction listener");
+        .expect(ERROR_TOKIO);
     runtime_tasks
         .spawn({
             let stop = runtime_stop.child_token();
@@ -473,7 +504,7 @@ where
                     .await;
             }
         })
-        .expect("failed spawning subduction manager");
+        .expect(ERROR_TOKIO);
 
     join_set
         .spawn({
@@ -502,7 +533,7 @@ where
                 let _ = done_tx.send(());
             }
         })
-        .expect("failed spawning big repo runtime task");
+        .expect(ERROR_TOKIO);
 
     Ok((
         BigRepoRuntimeHandle { cmd_tx },
@@ -513,19 +544,12 @@ where
     ))
 }
 
-#[derive(Clone)]
 struct BigRepoRuntimeWorker<S>
 where
-    S: subduction_core::storage::traits::Storage<future_form::Sendable>
-        + Clone
-        + Send
-        + Sync
-        + std::fmt::Debug
-        + 'static,
-    <S as subduction_core::storage::traits::Storage<future_form::Sendable>>::Error:
-        std::fmt::Display + Send + Sync + 'static,
+    S: RuntimeSubductionStorage,
 {
     subduction: Arc<RuntimeSubduction<S>>,
+    sedimentrees: SubductionSedimentrees,
     storage_for_reads: S,
     live_bundles: HashMap<DocumentId, std::sync::Weak<crate::repo::LiveDocBundle>>,
     partition_store: Arc<PartitionStore>,
@@ -541,26 +565,17 @@ where
     doc_lease_counts: Arc<tokio::sync::Mutex<HashMap<DocumentId, usize>>>,
     refresh_in_flight: Arc<tokio::sync::Mutex<HashSet<DocumentId>>>,
     sync_publish_in_flight: Arc<tokio::sync::Mutex<HashSet<DocumentId>>>,
+    pending_fragment_requests: HashMap<DocumentId, BTreeSet<FragmentRequested>>,
+    fragment_processing: HashSet<DocumentId>,
+    pending_put_docs: HashMap<DocumentId, PendingPutDoc>,
 }
 
 impl<S> BigRepoRuntimeWorker<S>
 where
-    S: subduction_core::storage::traits::Storage<future_form::Sendable>
-        + Clone
-        + Send
-        + Sync
-        + std::fmt::Debug
-        + 'static,
-    <S as subduction_core::storage::traits::Storage<future_form::Sendable>>::Error:
-        std::fmt::Display + Send + Sync + 'static,
+    S: RuntimeSubductionStorage,
 {
     async fn handle_cmd(&mut self, cmd: RuntimeCmd) {
         match cmd {
-            RuntimeCmd::IngestFull {
-                doc_id,
-                doc_save,
-                done,
-            } => self.handle_ingest_full(doc_id, doc_save, done).await,
             RuntimeCmd::PutDoc {
                 doc_id,
                 initial_content,
@@ -626,6 +641,18 @@ where
                 self.handle_live_doc_refresh_loaded(doc_id, peer_id, snapshot)
                     .await;
             }
+            RuntimeEvt::FragmentRequestsReady { doc_id, requests } => {
+                self.handle_fragment_requests_ready(doc_id, requests).await;
+            }
+            RuntimeEvt::FragmentProcessingFinished { doc_id } => {
+                self.handle_fragment_processing_finished(doc_id).await;
+            }
+            RuntimeEvt::PutDocSucceeded { doc_id } => {
+                self.handle_put_doc_succeeded(doc_id).await;
+            }
+            RuntimeEvt::PutDocFailed { doc_id, error } => {
+                self.handle_put_doc_failed(doc_id, error).await;
+            }
             RuntimeEvt::ConnectionEstablished {
                 peer_id,
                 stop_token,
@@ -648,33 +675,7 @@ where
             .spawn(async move {
                 let _ = stop.run_until_cancelled(fut).await;
             })
-            .expect("failed spawning runtime background task");
-    }
-
-    async fn handle_ingest_full(
-        &self,
-        doc_id: DocumentId,
-        doc_save: Vec<u8>,
-        done: oneshot::Sender<Res<()>>,
-    ) {
-        let subduction: Arc<RuntimeSubduction<S>> = Arc::clone(&self.subduction);
-        self.spawn_background(async move {
-            let out = (async {
-                let doc = automerge::Automerge::load(&doc_save)
-                    .map_err(|err| ferr!("failed loading automerge save for ingest: {err}"))?;
-                let sedimentree_id: SedimentreeId = doc_id.into();
-                let ingested =
-                    automerge_sedimentree::ingest::ingest_automerge(&doc, sedimentree_id)
-                        .map_err(|err| ferr!("failed ingesting automerge doc: {err}"))?;
-                subduction
-                    .add_sedimentree(sedimentree_id, ingested.sedimentree, ingested.blobs)
-                    .await
-                    .map_err(|err| ferr!("failed add_sedimentree: {err}"))?;
-                eyre::Ok(())
-            })
-            .await;
-            done.send(out).expect(ERROR_CALLER);
-        });
+            .expect(ERROR_TOKIO);
     }
 
     async fn handle_put_doc(
@@ -683,9 +684,153 @@ where
         initial_content: automerge::Automerge,
         done: oneshot::Sender<Res<Arc<crate::repo::LiveDocBundle>>>,
     ) {
-        // FIXME: inline put_doc_now, it's not used anywhere else
-        let result = self.put_doc_now(doc_id, initial_content).await;
-        done.send(result).inspect_err(|_| warn!(ERROR_CALLER)).ok();
+        if self
+            .live_bundles
+            .get(&doc_id)
+            .and_then(|entry| entry.upgrade())
+            .is_some()
+            || self.pending_put_docs.contains_key(&doc_id)
+        {
+            done.send(Err(eyre::eyre!("document already exists locally")))
+                .inspect_err(|_| warn!(ERROR_CALLER))
+                .ok();
+            return;
+        }
+
+        let count: i64 =
+            match sqlx::query_scalar("SELECT COUNT(*) FROM big_repo_docs WHERE doc_id = ?")
+                .bind(doc_id.to_string())
+                .fetch_one(self.partition_store.state_pool())
+                .await
+            {
+                Ok(count) => count,
+                Err(err) => {
+                    done.send(Err(eyre::eyre!("failed checking big_repo_docs: {err}")))
+                        .inspect_err(|_| warn!(ERROR_CALLER))
+                        .ok();
+                    return;
+                }
+            };
+        if count > 0 {
+            done.send(Err(eyre::eyre!("document already exists locally")))
+                .inspect_err(|_| warn!(ERROR_CALLER))
+                .ok();
+            return;
+        }
+
+        self.pending_put_docs.insert(
+            doc_id,
+            PendingPutDoc {
+                initial_content: initial_content.clone(),
+                done,
+            },
+        );
+
+        let subduction: Arc<RuntimeSubduction<S>> = Arc::clone(&self.subduction);
+        let evt_tx = self.evt_tx.clone();
+        let fut = async move {
+            let sedimentree_id: SedimentreeId = doc_id.into();
+            let ingested =
+                automerge_sedimentree::ingest::ingest_automerge(&initial_content, sedimentree_id)
+                    .map_err(|err| ferr!("failed ingesting automerge doc: {err}"))?;
+            subduction
+                .add_sedimentree(sedimentree_id, ingested.sedimentree, ingested.blobs)
+                .await
+                .map_err(|err| ferr!("failed add_sedimentree: {err}"))?;
+            eyre::Ok(())
+        };
+        self.spawn_background(async move {
+            match fut.await {
+                Ok(()) => evt_tx
+                    .send(RuntimeEvt::PutDocSucceeded { doc_id })
+                    .expect(ERROR_CHANNEL),
+                Err(err) => evt_tx
+                    .send(RuntimeEvt::PutDocFailed {
+                        doc_id,
+                        error: err.to_string(),
+                    })
+                    .expect(ERROR_CHANNEL),
+            }
+        });
+    }
+
+    async fn handle_put_doc_succeeded(&mut self, doc_id: DocumentId) {
+        let Some(pending) = self.pending_put_docs.remove(&doc_id) else {
+            return;
+        };
+        let lease = match self.acquire_doc_lease_now(doc_id).await {
+            Ok(lease) => lease,
+            Err(err) => {
+                let _ = pending
+                    .done
+                    .send(Err(err))
+                    .inspect_err(|_| warn!(ERROR_CALLER));
+                return;
+            }
+        };
+        let bundle = Arc::new(crate::repo::LiveDocBundle::new(
+            doc_id,
+            pending.initial_content,
+            lease,
+        ));
+        self.register_live_bundle(Arc::clone(&bundle));
+        if let Err(err) = self.upsert_known_doc_now(doc_id).await {
+            self.live_bundles.remove(&doc_id);
+            self.release_doc_lease_now(doc_id).await;
+            let _ = pending
+                .done
+                .send(Err(err))
+                .inspect_err(|_| warn!(ERROR_CALLER));
+            return;
+        }
+        let item_payload = {
+            let doc = bundle.doc.lock().await;
+            let heads = Arc::<[automerge::ChangeHash]>::from(doc.get_heads());
+
+            // FIXME: this is hella broken, instead of cocunting total change hashes
+            // in automerge,
+            // what I want the change count to be is to be a counter to how many
+            // times a single partition_store payload have changed
+            let change_count_hint = doc.get_changes(&[]).len().max(1) as u64;
+            let item_payload = serde_json::json!({
+                "heads": crate::serialize_commit_heads(&heads),
+                "change_count_hint": change_count_hint.max(1),
+            });
+            (item_payload, heads)
+        };
+        let (item_payload, heads) = item_payload;
+        if let Err(err) = self
+            .partition_store
+            .record_member_item_change(&bundle.doc_id.to_string(), &item_payload)
+            .await
+        {
+            self.live_bundles.remove(&doc_id);
+            self.release_doc_lease_now(doc_id).await;
+            let _ = pending
+                .done
+                .send(Err(err))
+                .inspect_err(|_| warn!(ERROR_CALLER));
+            return;
+        }
+        self.change_manager
+            .notify_doc_created(bundle.doc_id, Arc::clone(&heads))
+            .expect("failed notifying doc created");
+        self.change_manager
+            .notify_local_doc_created(bundle.doc_id, heads)
+            .expect("failed notifying local doc created");
+        let _ = pending
+            .done
+            .send(Ok(bundle))
+            .inspect_err(|_| warn!(ERROR_CALLER));
+    }
+
+    async fn handle_put_doc_failed(&mut self, doc_id: DocumentId, error: String) {
+        if let Some(pending) = self.pending_put_docs.remove(&doc_id) {
+            let _ = pending
+                .done
+                .send(Err(eyre::eyre!("{error}")))
+                .inspect_err(|_| warn!(ERROR_CALLER));
+        }
     }
 
     async fn handle_get_doc_handle(
@@ -695,7 +840,27 @@ where
     ) {
         // FIXME: why are we doing this on the main thread when it'd block the event loop?
         // also, inline it
-        let result = self.get_doc_handle_now(doc_id).await;
+        let result = async move {
+            if let Some(bundle) = self
+                .live_bundles
+                .get(&doc_id)
+                .and_then(|entry| entry.upgrade())
+            {
+                return Ok(Some(bundle));
+            }
+            let Some(doc) =
+                    // FIXME: load_doc_snapshot should never be used on the main thread
+                    load_doc_snapshot(&self.sedimentrees, &self.storage_for_reads, doc_id).await?
+                else {
+                    return Ok(None);
+                };
+            let lease = self.acquire_doc_lease_now(doc_id).await?;
+            let bundle = Arc::new(crate::repo::LiveDocBundle::new(doc_id, doc, lease));
+            self.upsert_known_doc_now(doc_id).await?;
+            self.register_live_bundle(Arc::clone(&bundle));
+            Ok(Some(bundle))
+        }
+        .await;
         done.send(result).inspect_err(|_| warn!(ERROR_CALLER)).ok();
     }
 
@@ -708,107 +873,25 @@ where
             .live_bundles
             .get(&doc_id)
             .and_then(|entry| entry.upgrade());
-        let subduction: Arc<RuntimeSubduction<S>> = Arc::clone(&self.subduction);
         let storage_for_reads = self.storage_for_reads.clone();
+        let sedimentrees = Arc::clone(&self.sedimentrees);
         self.spawn_background(async move {
-            let snapshot =
-                export_doc_save_snapshot(live_bundle, &subduction, &storage_for_reads, doc_id)
-                    .await;
-            done.send(snapshot).expect(ERROR_CALLER);
+            let doc_id: DocumentId = doc_id.into();
+            let res = if let Some(bundle) = live_bundle {
+                let doc = bundle.doc.lock().await;
+                Ok(Some(doc.save()))
+            } else {
+                load_doc_snapshot(&sedimentrees, &storage_for_reads, doc_id)
+                    .await
+                    .map(|maybe_doc| maybe_doc.map(|doc| doc.save()))
+            };
+            done.send(res).expect(ERROR_CALLER);
         });
-    }
-
-    async fn local_contains_document_now(&self, doc_id: DocumentId) -> Res<bool> {
-        if self
-            .live_bundles
-            .get(&doc_id)
-            .and_then(|entry| entry.upgrade())
-            .is_some()
-        {
-            return Ok(true);
-        }
-        let count: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM big_repo_docs WHERE doc_id = ?")
-            .bind(doc_id.to_string())
-            .fetch_one(self.partition_store.state_pool())
-            .await
-            .wrap_err("failed checking big_repo_docs")?;
-        Ok(count > 0)
-    }
-
-    async fn put_doc_now(
-        &mut self,
-        doc_id: DocumentId,
-        initial_content: automerge::Automerge,
-    ) -> Res<Arc<crate::repo::LiveDocBundle>> {
-        if self.local_contains_document_now(doc_id).await? {
-            eyre::bail!("document already exists locally");
-        }
-        let lease = self.acquire_doc_lease_now(doc_id).await?;
-        let bundle = Arc::new(crate::repo::LiveDocBundle::new(
-            doc_id,
-            initial_content,
-            lease,
-        ));
-        // FIXME: why separate result future?
-        let result = async {
-            self.persist_bundle_now(&bundle).await?;
-            self.upsert_known_doc_now(bundle.doc_id).await?;
-            self.register_live_bundle(Arc::clone(&bundle));
-            self.record_live_bundle_created(Arc::clone(&bundle)).await?;
-            eyre::Ok(bundle)
-        }
-        .await;
-        result
-    }
-
-    async fn get_doc_handle_now(
-        &mut self,
-        doc_id: DocumentId,
-    ) -> Res<Option<Arc<crate::repo::LiveDocBundle>>> {
-        if let Some(bundle) = self
-            .live_bundles
-            .get(&doc_id)
-            .and_then(|entry| entry.upgrade())
-        {
-            return Ok(Some(bundle));
-        }
-
-        let Some(doc) =
-            load_doc_snapshot(&self.subduction, &self.storage_for_reads, doc_id).await?
-        else {
-            return Ok(None);
-        };
-        let lease = self.acquire_doc_lease_now(doc_id).await?;
-        let bundle = Arc::new(crate::repo::LiveDocBundle::new(doc_id, doc, lease));
-        let result = async {
-            self.upsert_known_doc_now(doc_id).await?;
-            self.register_live_bundle(Arc::clone(&bundle));
-            eyre::Ok(Some(bundle))
-        }
-        .await;
-        result
     }
 
     fn register_live_bundle(&mut self, bundle: Arc<crate::repo::LiveDocBundle>) {
         self.live_bundles
             .insert(bundle.doc_id, Arc::downgrade(&bundle));
-    }
-
-    // FIXME: this method is only used in put_doc_now which constructs
-    // the bundle right away which is stupid that we lock and clone immedaiately
-    // inlining it might help
-    async fn persist_bundle_now(&self, bundle: &crate::repo::LiveDocBundle) -> Res<()> {
-        let doc = {
-            bundle.doc.lock().await.clone()
-        };
-        let sedimentree_id: SedimentreeId = doc_id.into();
-        let ingested = automerge_sedimentree::ingest::ingest_automerge(&doc, sedimentree_id)
-            .map_err(|err| ferr!("failed ingesting automerge doc: {err}"))?;
-        self.subduction
-            .add_sedimentree(sedimentree_id, ingested.sedimentree, ingested.blobs)
-            .await
-            .map_err(|err| ferr!("failed add_sedimentree: {err}"))?;
-        Ok(())
     }
 
     async fn upsert_known_doc_now(&self, doc_id: DocumentId) -> Res<()> {
@@ -820,86 +903,11 @@ where
         Ok(())
     }
 
-    // FIXME: again inlining this might be useful since it's only used once,
-    // too many abstractions is harmful. No need to go through the bundles here
-    // in put_doc_now
-    async fn record_live_bundle_created(&self, bundle: Arc<crate::repo::LiveDocBundle>) -> Res<()> {
-        let doc = bundle.doc.lock().await;
-        let heads = Arc::<[automerge::ChangeHash]>::from(doc.get_heads());
-        let change_count_hint = doc.get_changes(&[]).len().max(1) as u64;
-        let item_payload = serde_json::json!({
-            "heads": crate::serialize_commit_heads(&heads),
-            "change_count_hint": change_count_hint.max(1),
-        });
-        self.partition_store
-            .record_member_item_change(&bundle.doc_id.to_string(), &item_payload)
-            .await?;
-        self.change_manager
-            .notify_doc_created(bundle.doc_id, Arc::clone(&heads))?;
-        self.change_manager
-            .notify_local_doc_created(bundle.doc_id, heads)?;
-        Ok(())
-    }
-
-    // FIXME: the structure of this is weird because you're trying
-    // to serve two different callers. 
-    // put_doc_now should fail for ids that are already locally used
-    //
-    // also, why are we loading the doc from storage on the main thread
-    // only to discard it? very weird
     async fn acquire_doc_lease_now(&self, doc_id: DocumentId) -> Res<RuntimeDocLease> {
         let mut counts = self.doc_lease_counts.lock().await;
         let count = counts.entry(doc_id).or_insert(0);
-        let first = *count == 0;
         *count += 1;
         drop(counts);
-
-        let result = async {
-            if first {
-                let sedimentree_id: SedimentreeId = doc_id.into();
-                let missing_in_runtime = self
-                    .subduction
-                    .get_blobs(sedimentree_id)
-                    .await
-                    .map_err(|err| ferr!("failed reading blobs from subduction: {err}"))?
-                    .is_none();
-                if missing_in_runtime {
-                    if let Some(blobs) =
-                        load_blobs_from_storage(&self.storage_for_reads, sedimentree_id)
-                            .await
-                            .map_err(|err| ferr!("failed reading blobs from storage: {err}"))?
-                    {
-                        let loaded_doc = reconstruct_automerge_from_blobs(blobs.clone())?;
-                        let ingested = automerge_sedimentree::ingest::ingest_automerge(
-                            &loaded_doc,
-                            sedimentree_id,
-                        )
-                        .map_err(|err| {
-                            ferr!("failed ingesting automerge doc for lease hydrate: {err}")
-                        })?;
-                        self.subduction
-                            .add_sedimentree(sedimentree_id, ingested.sedimentree, ingested.blobs)
-                            .await
-                            .map_err(|err| {
-                                ferr!("failed add_sedimentree for lease hydrate: {err}")
-                            })?;
-                    }
-                }
-            }
-            eyre::Ok(())
-        }
-        .await;
-        if result.is_err() {
-            let mut counts = self.doc_lease_counts.lock().await;
-            if let Some(count) = counts.get_mut(&doc_id) {
-                if *count > 1 {
-                    *count -= 1;
-                } else {
-                    counts.remove(&doc_id);
-                }
-            }
-        }
-        result?;
         Ok(RuntimeDocLease {
             runtime: BigRepoRuntimeHandle {
                 cmd_tx: self.cmd_tx.clone(),
@@ -930,18 +938,91 @@ where
     ) {
         let partition_store = Arc::clone(&self.partition_store);
         let change_manager = Arc::clone(&self.change_manager);
+        let subduction: Arc<RuntimeSubduction<S>> = Arc::clone(&self.subduction);
+        let evt_tx = self.evt_tx.clone();
         self.spawn_background(async move {
-            let out = apply_commit_delta(
-                &partition_store,
-                &change_manager,
-                doc_id,
-                commits.len().max(1) as u64,
-                heads,
-                patches,
-                origin,
-            )
+            let out = (async {
+                let sedimentree_id: SedimentreeId = doc_id.into();
+                let change_count = commits.len().max(1) as u64;
+                let mut fragment_requests = BTreeSet::new();
+                for (head, parents, blob) in commits {
+                    let maybe_request = subduction
+                        .add_commit(sedimentree_id, head, parents, Blob::new(blob))
+                        .await
+                        .map_err(|err| ferr!("failed add_commit: {err}"))?;
+                    if let Some(request) = maybe_request {
+                        fragment_requests.insert(request);
+                    }
+                }
+                commit_delta_bookkeep(
+                    &partition_store,
+                    &change_manager,
+                    doc_id,
+                    change_count,
+                    heads,
+                    patches,
+                    origin,
+                )
+                .await?;
+
+                if !fragment_requests.is_empty() {
+                    evt_tx
+                        .send(RuntimeEvt::FragmentRequestsReady {
+                            doc_id,
+                            requests: fragment_requests.into_iter().collect(),
+                        })
+                        .map_err(|_| eyre::eyre!(ERROR_ACTOR))?;
+                }
+
+                eyre::Ok(())
+            })
             .await;
             done.send(out).inspect_err(|_| warn!(ERROR_CALLER)).ok();
+        });
+    }
+    async fn handle_fragment_requests_ready(
+        &mut self,
+        doc_id: DocumentId,
+        requests: Vec<FragmentRequested>,
+    ) {
+        let pending = self.pending_fragment_requests.entry(doc_id).or_default();
+        for request in requests {
+            pending.insert(request);
+        }
+        self.maybe_start_fragment_processing(doc_id).await;
+    }
+
+    async fn handle_fragment_processing_finished(&mut self, doc_id: DocumentId) {
+        self.fragment_processing.remove(&doc_id);
+        self.maybe_start_fragment_processing(doc_id).await;
+    }
+
+    async fn maybe_start_fragment_processing(&mut self, doc_id: DocumentId) {
+        if self.fragment_processing.contains(&doc_id) {
+            return;
+        }
+        let Some(requests) = self.pending_fragment_requests.remove(&doc_id) else {
+            return;
+        };
+        let Some(bundle) = self
+            .live_bundles
+            .get(&doc_id)
+            .and_then(|entry| entry.upgrade())
+        else {
+            return;
+        };
+
+        self.fragment_processing.insert(doc_id);
+
+        let subduction: Arc<RuntimeSubduction<S>> = Arc::clone(&self.subduction);
+        let evt_tx = self.evt_tx.clone();
+        self.spawn_background(async move {
+            if let Err(err) = process_fragment_requests(bundle, requests, subduction).await {
+                warn!(%doc_id, ?err, "fragment follow-up failed");
+            }
+            evt_tx
+                .send(RuntimeEvt::FragmentProcessingFinished { doc_id })
+                .expect(ERROR_CHANNEL);
         });
     }
 
@@ -957,95 +1038,95 @@ where
         let evt_tx = self.evt_tx.clone();
         let runtime_tasks = Arc::clone(&self.runtime_tasks);
         let connected_peers = Arc::clone(&self.connected_peers);
-        self.spawn_background(async move {
-            let out = async {
-                if connected_peers.lock().await.contains_key(&peer_id) {
-                    return Ok(());
-                }
-                let connect = connect_outgoing(endpoint, endpoint_addr, &connect_signer)
-                    .await
-                    .map_err(|err| ferr!("failed subduction iroh connect: {err}"))?;
-                let stop_token = RuntimePeerConnectionStopToken::new();
-                let listener_stop = stop_token.child_token();
-                let sender_stop = stop_token.child_token();
-                let peer_id_for_listener = peer_id;
-                let peer_id_for_sender = peer_id;
-                let evt_tx_for_listener = evt_tx.clone();
-                let evt_tx_for_sender = evt_tx.clone();
-                runtime_tasks
-                    .spawn({
-                        let fut = connect.listener_task;
-                        async move {
-                            tokio::select! {
-                                biased;
-                                _ = listener_stop.cancelled() => {}
-                                res = fut => {
-                                    match res {
-                                        Ok(()) => {
-                                            evt_tx_for_listener
-                                                .send(RuntimeEvt::ConnectionLost {
-                                                    peer_id: peer_id_for_listener,
-                                                })
-                                                .expect("runtime event channel closed");
-                                        }
-                                        Err(err) => {
-                                            warn!(?err, %peer_id_for_listener, "connection listener task exited");
-                                            evt_tx_for_listener
-                                                .send(RuntimeEvt::ConnectionLost {
-                                                    peer_id: peer_id_for_listener,
-                                                })
-                                                .expect("runtime event channel closed");
-                                        }
-                                    }
-                                }
-                            }
-                        }
-                    })
-                    .expect("failed spawning connection listener");
-                runtime_tasks
-                    .spawn({
-                        let fut = connect.sender_task;
-                        async move {
-                            tokio::select! {
-                                biased;
-                                _ = sender_stop.cancelled() => {}
-                                res = fut => {
-                                    match res {
-                                        Ok(()) => {
-                                            evt_tx_for_sender
-                                                .send(RuntimeEvt::ConnectionLost {
-                                                    peer_id: peer_id_for_sender,
-                                                })
-                                                .expect("runtime event channel closed");
-                                        }
-                                        Err(err) => {
-                                            warn!(?err, %peer_id_for_sender, "connection sender task exited");
-                                            evt_tx_for_sender
-                                                .send(RuntimeEvt::ConnectionLost {
-                                                    peer_id: peer_id_for_sender,
-                                                })
-                                                .expect("runtime event channel closed");
-                                        }
-                                    }
-                                }
-                            }
-                        }
-                    })
-                    .expect("failed spawning connection sender");
-                subduction
-                    .add_connection(connect.authenticated)
-                    .await
-                    .map_err(|err| {
-                        stop_token.cancel();
-                        ferr!("failed subduction add_connection: {err}")
-                    })?;
-                evt_tx
-                    .send(RuntimeEvt::ConnectionEstablished { peer_id, stop_token })
-                    .expect("runtime event channel closed");
-                Ok(())
+        let fut = async move {
+            if connected_peers.lock().await.contains_key(&peer_id) {
+                return Ok(());
             }
-            .await;
-            done.send(out).expect(ERROR_CALLER);
+            let connect = connect_outgoing(endpoint, endpoint_addr, &connect_signer)
+                .await
+                .map_err(|err| ferr!("failed subduction iroh connect: {err}"))?;
+            let stop_token = RuntimePeerConnectionStopToken::new();
+            let fut_listener = {
+                let stop = stop_token.child_token();
+                let peer_id = peer_id;
+                let evt_tx = evt_tx.clone();
+                let fut = connect.listener_task;
+                async move {
+                    tokio::select! {
+                        biased;
+                        _ = stop.cancelled() => {}
+                        res = fut => {
+                            match res {
+                                Ok(()) => {
+                                    evt_tx
+                                        .send(RuntimeEvt::ConnectionLost {
+                                            peer_id: peer_id,
+                                        })
+                                        .expect(ERROR_CHANNEL);
+                                }
+                                Err(err) => {
+                                    warn!(?err, %peer_id, "connection listener task error");
+                                    evt_tx
+                                        .send(RuntimeEvt::ConnectionLost {
+                                            peer_id: peer_id,
+                                        })
+                                        .expect(ERROR_CHANNEL);
+                                }
+                            }
+                        }
+                    }
+                }
+            };
+            let fut_sender = {
+                let stop = stop_token.child_token();
+                let peer_id = peer_id;
+                let evt_tx = evt_tx.clone();
+                let fut = connect.sender_task;
+                async move {
+                    tokio::select! {
+                        biased;
+                        _ = stop.cancelled() => {}
+                        res = fut => {
+                            match res {
+                                Ok(()) => {
+                                    evt_tx
+                                        .send(RuntimeEvt::ConnectionLost {
+                                            peer_id: peer_id,
+                                        })
+                                        .expect(ERROR_CHANNEL);
+                                }
+                                Err(err) => {
+                                    warn!(?err, %peer_id, "connection sender task error");
+                                    evt_tx
+                                        .send(RuntimeEvt::ConnectionLost {
+                                            peer_id: peer_id,
+                                        })
+                                        .expect(ERROR_CHANNEL);
+                                }
+                            }
+                        }
+                    }
+                }
+            };
+            runtime_tasks.spawn(fut_listener).expect(ERROR_TOKIO);
+            runtime_tasks.spawn(fut_sender).expect(ERROR_TOKIO);
+            subduction
+                .add_connection(connect.authenticated)
+                .await
+                .map_err(|err| {
+                    stop_token.cancel();
+                    ferr!("failed subduction add_connection: {err}")
+                })?;
+            evt_tx
+                .send(RuntimeEvt::ConnectionEstablished {
+                    peer_id,
+                    stop_token,
+                })
+                .expect(ERROR_CHANNEL);
+            Ok(())
+        };
+        self.spawn_background(async move {
+            done.send(fut.await).expect(ERROR_CALLER);
         });
     }
 
@@ -1061,101 +1142,102 @@ where
         let evt_tx = self.evt_tx.clone();
         let runtime_tasks = Arc::clone(&self.runtime_tasks);
         let connected_peers = Arc::clone(&self.connected_peers);
-        self.spawn_background(async move {
-            let out = async {
-                let accepted = accept_incoming(
-                    quic_conn,
-                    &connect_signer,
-                    nonce_cache.as_ref(),
-                    local_peer_id,
-                )
-                .await
-                .map_err(|err| ferr!("failed subduction iroh accept: {err}"))?;
-                let peer_id = PeerId::from(accepted.authenticated.peer_id());
-                if connected_peers.lock().await.contains_key(&peer_id) {
-                    return Ok(peer_id);
-                }
-                let stop_token = RuntimePeerConnectionStopToken::new();
-                let listener_stop = stop_token.child_token();
-                let sender_stop = stop_token.child_token();
-                let peer_id_for_listener = peer_id;
-                let peer_id_for_sender = peer_id;
-                let evt_tx_for_listener = evt_tx.clone();
-                let evt_tx_for_sender = evt_tx.clone();
-                runtime_tasks
-                    .spawn({
-                        let fut = accepted.listener_task;
-                        async move {
-                            tokio::select! {
-                                biased;
-                                _ = listener_stop.cancelled() => {}
-                                res = fut => {
-                                    match res {
-                                        Ok(()) => {
-                                            evt_tx_for_listener
-                                                .send(RuntimeEvt::ConnectionLost {
-                                                    peer_id: peer_id_for_listener,
-                                                })
-                                                .expect("runtime event channel closed");
-                                        }
-                                        Err(err) => {
-                                            warn!(?err, %peer_id_for_listener, "incoming connection listener task exited");
-                                            evt_tx_for_listener
-                                                .send(RuntimeEvt::ConnectionLost {
-                                                    peer_id: peer_id_for_listener,
-                                                })
-                                                .expect("runtime event channel closed");
-                                        }
-                                    }
-                                }
-                            }
-                        }
-                    })
-                    .expect("failed spawning incoming connection listener");
-                runtime_tasks
-                    .spawn({
-                        let fut = accepted.sender_task;
-                        async move {
-                            tokio::select! {
-                                biased;
-                                _ = sender_stop.cancelled() => {}
-                                res = fut => {
-                                    match res {
-                                        Ok(()) => {
-                                            evt_tx_for_sender
-                                                .send(RuntimeEvt::ConnectionLost {
-                                                    peer_id: peer_id_for_sender,
-                                                })
-                                                .expect("runtime event channel closed");
-                                        }
-                                        Err(err) => {
-                                            warn!(?err, %peer_id_for_sender, "incoming connection sender task exited");
-                                            evt_tx_for_sender
-                                                .send(RuntimeEvt::ConnectionLost {
-                                                    peer_id: peer_id_for_sender,
-                                                })
-                                                .expect("runtime event channel closed");
-                                        }
-                                    }
-                                }
-                            }
-                        }
-                    })
-                    .expect("failed spawning incoming connection sender");
-                subduction
-                    .add_connection(accepted.authenticated)
-                    .await
-                    .map_err(|err| {
-                        stop_token.cancel();
-                        ferr!("failed subduction add_connection: {err}")
-                    })?;
-                evt_tx
-                    .send(RuntimeEvt::ConnectionEstablished { peer_id, stop_token })
-                    .expect("runtime event channel closed");
-                Ok(peer_id)
+        let fut = async move {
+            // do handshake
+            let accepted = accept_incoming(
+                quic_conn,
+                &connect_signer,
+                nonce_cache.as_ref(),
+                local_peer_id,
+            )
+            .await
+            .map_err(|err| ferr!("failed subduction iroh accept: {err}"))?;
+            let peer_id = PeerId::from(accepted.authenticated.peer_id());
+            if connected_peers.lock().await.contains_key(&peer_id) {
+                return Ok(peer_id);
             }
-            .await;
-            done.send(out).expect(ERROR_CALLER);
+            let stop_token = RuntimePeerConnectionStopToken::new();
+            let fut_listener = {
+                let stop = stop_token.child_token();
+                let evt_tx = evt_tx.clone();
+                let peer_id = peer_id;
+                let fut = accepted.listener_task;
+                async move {
+                    tokio::select! {
+                        biased;
+                        _ = stop.cancelled() => {}
+                        res = fut => {
+                            match res {
+                                Ok(()) => {
+                                    evt_tx
+                                        .send(RuntimeEvt::ConnectionLost {
+                                            peer_id,
+                                        })
+                                        .expect(ERROR_CHANNEL);
+                                }
+                                Err(err) => {
+                                    warn!(?err, %peer_id, "incoming connection listener task exited");
+                                    evt_tx
+                                        .send(RuntimeEvt::ConnectionLost {
+                                            peer_id: peer_id,
+                                        })
+                                        .expect(ERROR_CHANNEL);
+                                }
+                            }
+                        }
+                    }
+                }
+            };
+            let fut_sender = {
+                let stop = stop_token.child_token();
+                let peer_id = peer_id;
+                let evt_tx = evt_tx.clone();
+                let fut = accepted.sender_task;
+                async move {
+                    tokio::select! {
+                        biased;
+                        _ = stop.cancelled() => {}
+                        res = fut => {
+                            match res {
+                                Ok(()) => {
+                                    evt_tx
+                                        .send(RuntimeEvt::ConnectionLost {
+                                            peer_id: peer_id,
+                                        })
+                                        .expect(ERROR_CHANNEL);
+                                }
+                                Err(err) => {
+                                    warn!(?err, %peer_id, "incoming connection sender task exited");
+                                    evt_tx
+                                        .send(RuntimeEvt::ConnectionLost {
+                                            peer_id: peer_id,
+                                        })
+                                        .expect(ERROR_CHANNEL);
+                                }
+                            }
+                        }
+                    }
+                }
+            };
+            runtime_tasks.spawn(fut_listener).expect(ERROR_TOKIO);
+            runtime_tasks.spawn(fut_sender).expect(ERROR_TOKIO);
+            subduction
+                .add_connection(accepted.authenticated)
+                .await
+                .inspect_err(|_| {
+                    stop_token.cancel();
+                })
+                .wrap_err("failed subduction add_connection")?;
+            evt_tx
+                .send(RuntimeEvt::ConnectionEstablished {
+                    peer_id,
+                    stop_token,
+                })
+                .expect(ERROR_CHANNEL);
+            Ok(peer_id)
+        };
+        self.spawn_background(async move {
+            done.send(fut.await).expect(ERROR_CALLER);
         });
     }
 
@@ -1196,61 +1278,65 @@ where
     ) {
         let subduction: Arc<RuntimeSubduction<S>> = Arc::clone(&self.subduction);
         let storage_for_reads = self.storage_for_reads.clone();
-        let worker = self.clone();
-        self.spawn_background(async move {
-            let out = async {
-                let sedimentree_id: SedimentreeId = doc_id.into();
-                let before_doc =
-                    load_doc_snapshot(&subduction, &storage_for_reads, sedimentree_id).await?;
-                let remote_peer_id: subduction_core::peer::id::PeerId = peer_id.into();
-                worker.sync_publish_in_flight.lock().await.insert(doc_id);
-                let result = subduction
-                    .sync_with_peer(&remote_peer_id, sedimentree_id, subscribe, timeout)
-                    .await;
-                let outcome = match result {
-                    Ok((had_success, _stats, conn_errs)) => {
-                        if had_success {
-                            SyncDocOutcome::Success
-                        } else if conn_errs.is_empty() {
-                            SyncDocOutcome::NotFoundOrUnauthorized
-                        } else {
-                            SyncDocOutcome::TransportError
-                        }
-                    }
-                    Err(err) => {
-                        warn!(?err, %doc_id, %peer_id, "subduction sync_with_peer io error");
-                        SyncDocOutcome::IoError
-                    }
-                };
-                if matches!(outcome, SyncDocOutcome::Success) {
-                    let after_doc =
-                        load_doc_snapshot(&subduction, &storage_for_reads, sedimentree_id).await?;
-                    if let Some(after_doc) = after_doc {
-                        let before_heads = before_doc
-                            .as_ref()
-                            .map_or_else(Vec::new, |doc| doc.get_heads());
-                        let after_heads = after_doc.get_heads();
-                        if before_heads != after_heads {
-                            let patches = after_doc.diff(&before_heads, &after_heads);
-                            let change_count =
-                                after_doc.get_changes(&before_heads).len().max(1) as u64;
-                            apply_commit_delta(
-                                &worker.partition_store,
-                                &worker.change_manager,
-                                doc_id,
-                                change_count,
-                                after_heads,
-                                patches,
-                                BigRepoChangeOrigin::Remote { peer_id },
-                            )
-                            .await?;
-                        }
+        let sedimentrees = Arc::clone(&self.sedimentrees);
+        let partition_store = Arc::clone(&self.partition_store);
+        let change_manager = Arc::clone(&self.change_manager);
+        let sync_publish_in_flight = Arc::clone(&self.sync_publish_in_flight);
+        let fut = async move {
+            let sedimentree_id: SedimentreeId = doc_id.into();
+            let before_doc =
+                load_doc_snapshot(&sedimentrees, &storage_for_reads, sedimentree_id).await?;
+            let remote_peer_id: subduction_core::peer::id::PeerId = peer_id.into();
+            sync_publish_in_flight.lock().await.insert(doc_id);
+            let result = subduction
+                .sync_with_peer(&remote_peer_id, sedimentree_id, subscribe, timeout)
+                .await;
+            let outcome = match result {
+                Ok((had_success, _stats, conn_errs)) => {
+                    if had_success {
+                        SyncDocOutcome::Success
+                    } else if conn_errs.is_empty() {
+                        SyncDocOutcome::NotFoundOrUnauthorized
+                    } else {
+                        SyncDocOutcome::TransportError
                     }
                 }
-                Ok(outcome)
+                Err(err) => {
+                    warn!(?err, %doc_id, %peer_id, "subduction sync_with_peer io error");
+                    SyncDocOutcome::IoError
+                }
+            };
+            // FIXME: this is hella broken
+            if matches!(outcome, SyncDocOutcome::Success) {
+                let after_doc =
+                    load_doc_snapshot(&sedimentrees, &storage_for_reads, sedimentree_id).await?;
+                if let Some(after_doc) = after_doc {
+                    let before_heads = before_doc
+                        .as_ref()
+                        .map_or_else(Vec::new, |doc| doc.get_heads());
+                    let after_heads = after_doc.get_heads();
+                    if before_heads != after_heads {
+                        let patches = after_doc.diff(&before_heads, &after_heads);
+                        let change_count = after_doc.get_changes(&before_heads).len().max(1) as u64;
+                        commit_delta_bookkeep(
+                            &partition_store,
+                            &change_manager,
+                            doc_id,
+                            change_count,
+                            after_heads,
+                            patches,
+                            BigRepoChangeOrigin::Remote { peer_id },
+                        )
+                        .await?;
+                    }
+                }
             }
-            .await;
-            worker.sync_publish_in_flight.lock().await.remove(&doc_id);
+            eyre::Ok(outcome)
+        };
+        let sync_publish_in_flight = Arc::clone(&self.sync_publish_in_flight);
+        self.spawn_background(async move {
+            let out = fut.await;
+            sync_publish_in_flight.lock().await.remove(&doc_id);
             done.send(out).expect(ERROR_CALLER);
         });
     }
@@ -1273,18 +1359,24 @@ where
             return;
         }
         drop(in_flight);
-        let subduction: Arc<RuntimeSubduction<S>> = Arc::clone(&self.subduction);
         let storage_for_reads = self.storage_for_reads.clone();
         let evt_tx = self.evt_tx.clone();
+        let sedimentrees = Arc::clone(&self.sedimentrees);
         self.spawn_background(async move {
-            let snapshot = load_doc_snapshot(&subduction, &storage_for_reads, doc_id).await;
+            // FIXME:  yeah so this code is hella confused. Subduction runs
+            // the sync algorithm right?  The automerge sync algorithm? What happens
+            // when subduction syncs a doc between two peers. Might have
+            // to look into ./symlinks code and automerge-repo integration
+            // but I'm not sure if we need to do sync/merge ourselves
+            // (not to mention apply the commit delta on top after? wthhh)
+            let snapshot = load_doc_snapshot(&sedimentrees, &storage_for_reads, doc_id).await;
             evt_tx
                 .send(RuntimeEvt::LiveDocRefreshLoaded {
                     doc_id,
                     peer_id,
                     snapshot,
                 })
-                .expect("runtime event channel closed");
+                .expect(ERROR_CHANNEL);
         });
     }
 
@@ -1369,7 +1461,12 @@ where
         let origin = peer_id
             .map(|peer_id| BigRepoChangeOrigin::Remote { peer_id })
             .unwrap_or(BigRepoChangeOrigin::Bootstrap);
-        if let Err(err) = apply_commit_delta(
+        // FIXME: uhh, is this needed? doesn't subduction send sync changes
+        // to the storage??
+        //
+        // also, you're not doing this on spawn_background unless the
+        // otehr usage of the method
+        if let Err(err) = commit_delta_bookkeep(
             &self.partition_store,
             &self.change_manager,
             doc_id,
@@ -1399,7 +1496,7 @@ impl BigRepoRuntimeStopToken {
     }
 }
 
-async fn apply_commit_delta(
+async fn commit_delta_bookkeep(
     partition_store: &Arc<PartitionStore>,
     change_manager: &Arc<changes::ChangeListenerManager>,
     doc_id: DocumentId,
@@ -1433,79 +1530,95 @@ async fn apply_commit_delta(
     Ok(())
 }
 
-async fn load_doc_snapshot<S, D>(
-    subduction: &Arc<RuntimeSubduction<S>>,
-    storage_for_reads: &S,
-    doc_id: D,
-) -> Res<Option<automerge::Automerge>>
-where
-    S: subduction_core::storage::traits::Storage<future_form::Sendable>
-        + Clone
-        + Send
-        + Sync
-        + std::fmt::Debug
-        + 'static,
-    <S as subduction_core::storage::traits::Storage<future_form::Sendable>>::Error:
-        std::fmt::Display + Send + Sync + 'static,
-    D: Into<DocumentId>,
-{
-    let doc_id: DocumentId = doc_id.into();
-    let sedimentree_id: SedimentreeId = doc_id.into();
-    let blobs = match subduction
-        .get_blobs(sedimentree_id)
-        .await
-        .map_err(|err| ferr!("failed reading blobs from subduction: {err}"))?
-    {
-        Some(blobs) => blobs.into_iter().collect::<Vec<_>>(),
-        None => {
-            let Some(blobs) = load_blobs_from_storage(storage_for_reads, sedimentree_id)
-                .await
-                .map_err(|err| ferr!("failed reading blobs from storage: {err}"))?
-            else {
-                return Ok(None);
-            };
-            let loaded_doc = reconstruct_automerge_from_blobs(blobs.clone())?;
-            let ingested =
-                automerge_sedimentree::ingest::ingest_automerge(&loaded_doc, sedimentree_id)
-                    .map_err(|err| {
-                        ferr!("failed ingesting automerge doc from storage fallback: {err}")
-                    })?;
-            subduction
-                .add_sedimentree(sedimentree_id, ingested.sedimentree, ingested.blobs)
-                .await
-                .map_err(|err| ferr!("failed add_sedimentree from storage fallback: {err}"))?;
-            blobs
-        }
-    };
-    let doc = reconstruct_automerge_from_blobs(blobs)?;
-    Ok(Some(doc))
+struct FragmentWorkItem {
+    head: CommitId,
+    boundary: BTreeSet<CommitId>,
+    checkpoints: Vec<CommitId>,
+    blob: Vec<u8>,
 }
 
-async fn export_doc_save_snapshot<S, D>(
-    live_bundle: Option<Arc<crate::repo::LiveDocBundle>>,
-    subduction: &Arc<RuntimeSubduction<S>>,
-    storage_for_reads: &S,
-    doc_id: D,
-) -> Res<Option<Vec<u8>>>
+async fn process_fragment_requests<S>(
+    bundle: Arc<crate::repo::LiveDocBundle>,
+    requests: BTreeSet<FragmentRequested>,
+    subduction: Arc<RuntimeSubduction<S>>,
+) -> Res<()>
 where
-    S: subduction_core::storage::traits::Storage<future_form::Sendable>
-        + Clone
-        + Send
-        + Sync
-        + std::fmt::Debug
-        + 'static,
-    <S as subduction_core::storage::traits::Storage<future_form::Sendable>>::Error:
-        std::fmt::Display + Send + Sync + 'static,
-    D: Into<DocumentId>,
+    S: RuntimeSubductionStorage,
 {
-    let doc_id: DocumentId = doc_id.into();
-    if let Some(bundle) = live_bundle {
-        let doc = bundle.doc.lock().await;
-        return Ok(Some(doc.save()));
+    if requests.is_empty() {
+        return Ok(());
     }
-    Ok(load_doc_snapshot(subduction, storage_for_reads, doc_id)
-        .await?
-        .map(|doc| doc.save()))
+
+    let doc_id = bundle.doc_id;
+    let work = {
+        let doc = bundle.doc.lock().await;
+        let heads: Vec<CommitId> = requests.iter().map(|request| request.head()).collect();
+        let mut known = bundle.fragment_state_store.lock().await;
+        let store = OwnedSedimentreeAutomerge::from(&*doc);
+        let states = store
+            .build_fragment_store(&heads, &mut known, &CountLeadingZeroBytes)
+            .map_err(|err| ferr!("failed building fragment store: {err}"))?
+            .into_iter()
+            .cloned()
+            .collect::<Vec<FragmentState<Set<CommitId>>>>();
+        let mut out = Vec::with_capacity(states.len());
+        for state in states {
+            let members: Vec<automerge::ChangeHash> = state
+                .members()
+                .iter()
+                .map(|member| automerge::ChangeHash(*member.as_bytes()))
+                .collect();
+            let fragment = doc.bundle(members).map_err(|err| {
+                ferr!(
+                    "failed building fragment bundle for {}: {err}",
+                    state.head_id()
+                )
+            })?;
+            out.push(FragmentWorkItem {
+                head: state.head_id(),
+                boundary: state.boundary().keys().copied().collect(),
+                checkpoints: state.checkpoints().iter().copied().collect(),
+                blob: fragment.bytes().to_vec(),
+            });
+        }
+        out
+    };
+
+    for item in work {
+        subduction
+            .add_fragment(
+                doc_id.into(),
+                item.head,
+                item.boundary,
+                &item.checkpoints,
+                Blob::new(item.blob),
+            )
+            .await
+            .map_err(|err| ferr!("failed add_fragment: {err}"))?;
+    }
+
+    return Ok(());
+
+    struct OwnedSedimentreeAutomerge<'a>(&'a automerge::Automerge);
+
+    impl<'a> From<&'a automerge::Automerge> for OwnedSedimentreeAutomerge<'a> {
+        fn from(value: &'a automerge::Automerge) -> Self {
+            Self(value)
+        }
+    }
+
+    impl<'a> CommitStore<'a> for OwnedSedimentreeAutomerge<'a> {
+        type Node = Set<CommitId>;
+        type LookupError = Infallible;
+
+        fn lookup(&self, id: CommitId) -> Result<Option<Self::Node>, Self::LookupError> {
+            let change_hash = automerge::ChangeHash(*id.as_bytes());
+            Ok(self
+                .0
+                .get_change_meta_by_hash(&change_hash)
+                .map(|meta| meta.deps.iter().map(|dep| CommitId::new(dep.0)).collect()))
+        }
+    }
 }
 
 struct IrohConnectResult {
@@ -1587,64 +1700,84 @@ async fn accept_incoming(
     })
 }
 
-fn reconstruct_automerge_from_blobs<I>(blobs: I) -> Res<automerge::Automerge>
+async fn load_doc_snapshot<S, D>(
+    sedimentrees: &SubductionSedimentrees,
+    storage_for_reads: &S,
+    doc_id: D,
+) -> Res<Option<automerge::Automerge>>
 where
-    I: IntoIterator<Item = Blob>,
+    S: RuntimeSubductionStorage,
+    D: Into<DocumentId>,
 {
-    let mut doc = automerge::Automerge::new();
-    let mut pending = blobs
-        .into_iter()
-        .map(|blob| blob.as_slice().to_vec())
-        .collect::<Vec<_>>();
-    while !pending.is_empty() {
-        let mut next = Vec::new();
-        let mut progressed = false;
-        for blob in pending {
-            match doc.load_incremental(&blob) {
-                Ok(_) => progressed = true,
-                Err(_) => next.push(blob),
-            }
-        }
-        if !progressed {
-            eyre::bail!("failed reconstructing automerge doc from subduction blobs");
-        }
-        pending = next;
-    }
-    Ok(doc)
-}
+    let doc_id: DocumentId = doc_id.into();
+    let sedimentree_id: SedimentreeId = doc_id.into();
 
-async fn load_blobs_from_storage<S>(
-    storage: &S,
-    sedimentree_id: SedimentreeId,
-) -> Result<
-    Option<Vec<Blob>>,
-    <S as subduction_core::storage::traits::Storage<future_form::Sendable>>::Error,
->
-where
-    S: subduction_core::storage::traits::Storage<future_form::Sendable>,
-{
-    let mut blobs = Vec::new();
-    for verified in
+    let loose_commits =
         <S as subduction_core::storage::traits::Storage<future_form::Sendable>>::load_loose_commits(
-            storage,
+            storage_for_reads,
             sedimentree_id,
-        )
-        .await?
-    {
-        blobs.push(verified.blob().clone());
-    }
-    for verified in
+        );
+    let fragments =
         <S as subduction_core::storage::traits::Storage<future_form::Sendable>>::load_fragments(
-            storage,
+            storage_for_reads,
             sedimentree_id,
-        )
-        .await?
-    {
-        blobs.push(verified.blob().clone());
+        );
+    let (loose_commits, fragments) = futures::future::try_join(loose_commits, fragments)
+        .await
+        .wrap_err("failed reading blobs from storage")?;
+    if loose_commits.is_empty() && fragments.is_empty() {
+        return Ok(None);
     }
-    if blobs.is_empty() {
-        Ok(None)
-    } else {
-        Ok(Some(blobs))
+    let blobs = loose_commits
+        .iter()
+        .map(|verified| verified.blob().clone())
+        .chain(fragments.iter().map(|verified| verified.blob().clone()))
+        .collect::<Vec<_>>();
+
+    let (tree, fresh) = match sedimentrees.get_cloned(&sedimentree_id).await {
+        Some(tree) => (tree, false),
+        None => {
+            let tree = Sedimentree::new(
+                fragments
+                    .into_iter()
+                    .map(|verified| verified.payload().clone())
+                    .collect(),
+                loose_commits
+                    .into_iter()
+                    .map(|verified| verified.payload().clone())
+                    .collect(),
+            );
+            (tree, true)
+        }
+    };
+    let blob_by_digest = blobs
+        .iter()
+        .map(|blob| (Digest::hash(blob), blob.as_slice()))
+        .collect::<sedimentree_core::collections::Map<_, _>>();
+    let order = tree
+        .topsorted_blob_order()
+        .map_err(|err| ferr!("failed ordering sedimentree blobs: {err}"))?;
+    let fragments: Vec<_> = tree.fragments().collect();
+    let loose: Vec<_> = tree.loose_commits().collect();
+
+    let mut buf = Vec::new();
+    for item in &order {
+        let digest = match item {
+            SedimentreeItem::Fragment(ii) => fragments[*ii].summary().blob_meta().digest(),
+            SedimentreeItem::LooseCommit(ii) => loose[*ii].blob_meta().digest(),
+        };
+        let raw = blob_by_digest
+            .get(&digest)
+            .ok_or_else(|| ferr!("blob not found for ordered sedimentree item"))?;
+        buf.extend_from_slice(raw);
     }
+
+    let mut doc = automerge::Automerge::new();
+    doc.load_incremental(&buf)
+        .map_err(|err| ferr!("failed reconstructing automerge doc from ordered blobs: {err}"))?;
+
+    if fresh {
+        sedimentrees.insert(sedimentree_id, tree).await;
+    }
+    Ok(Some(doc))
 }
