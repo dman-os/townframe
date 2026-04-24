@@ -15,56 +15,55 @@ import androidx.navigation.NavHostController
 import org.example.daybook.AppScreens
 import org.example.daybook.capture.CaptureNavActions
 
-fun routeForFeatureKey(featureKey: String): String? =
-    when (featureKey) {
-        FeatureKeys.Home -> AppScreens.Home.name
-        FeatureKeys.Capture -> AppScreens.Capture.name
-        FeatureKeys.Drawer -> AppScreens.Drawer.name
-        FeatureKeys.Progress -> AppScreens.Progress.name
-        FeatureKeys.Settings -> AppScreens.Settings.name
-        else -> null
-    }
+fun routeForFeatureKey(featureKey: String): String? = when (featureKey) {
+    FeatureKeys.Home -> AppScreens.Home.name
+    FeatureKeys.Capture -> AppScreens.Capture.name
+    FeatureKeys.Drawer -> AppScreens.Drawer.name
+    FeatureKeys.Progress -> AppScreens.Progress.name
+    FeatureKeys.Settings -> AppScreens.Settings.name
+    else -> null
+}
 
 /**
  * All available features. This is the master list.
  */
 @Composable
-fun rememberAllFeatures(navController: NavHostController): List<FeatureItem> {
-    return listOf(
-        FeatureItem(
-            key = FeatureKeys.Home,
-            icon = { Icon(Icons.Default.Home, contentDescription = "Home") },
-            selectedIcon = { Icon(Icons.Default.Home, contentDescription = "Home") },
-            label = "Home",
-            onActivate = { navController.navigate(AppScreens.Home.name) },
-            onReselect = { navController.navigate(AppScreens.Home.name) }
-        ),
-        FeatureItem(
-            key = FeatureKeys.Capture,
-            icon = { Icon(Icons.Default.EditNote, contentDescription = "Capture") },
-            selectedIcon = { Icon(Icons.Default.EditNote, contentDescription = "Capture") },
-            label = "Capture",
-            onActivate = { navController.navigate(AppScreens.Capture.name) },
-            onReselect = { CaptureNavActions.requestModeCycle() }
-        ),
-        FeatureItem(
-            key = FeatureKeys.Drawer,
-            icon = { Icon(Icons.AutoMirrored.Filled.LibraryBooks, contentDescription = "Drawer") },
-            selectedIcon = { Icon(Icons.AutoMirrored.Filled.LibraryBooks, contentDescription = "Drawer") },
-            label = "Drawer",
-            onActivate = { navController.navigate(AppScreens.Drawer.name) },
-            onReselect = { navController.navigate(AppScreens.Drawer.name) }
-        ),
-        FeatureItem(
-            key = FeatureKeys.Progress,
-            icon = { Icon(Icons.Default.Notifications, contentDescription = "Progress") },
-            selectedIcon = { Icon(Icons.Default.Notifications, contentDescription = "Progress") },
-            label = "Progress",
-            onActivate = { navController.navigate(AppScreens.Progress.name) },
-            onReselect = { navController.navigate(AppScreens.Progress.name) }
-        )
+fun rememberAllFeatures(navController: NavHostController): List<FeatureItem> = listOf(
+    FeatureItem(
+        key = FeatureKeys.Home,
+        icon = { Icon(Icons.Default.Home, contentDescription = "Home") },
+        selectedIcon = { Icon(Icons.Default.Home, contentDescription = "Home") },
+        label = "Home",
+        onActivate = { navController.navigate(AppScreens.Home.name) },
+        onReselect = { navController.navigate(AppScreens.Home.name) }
+    ),
+    FeatureItem(
+        key = FeatureKeys.Capture,
+        icon = { Icon(Icons.Default.EditNote, contentDescription = "Capture") },
+        selectedIcon = { Icon(Icons.Default.EditNote, contentDescription = "Capture") },
+        label = "Capture",
+        onActivate = { navController.navigate(AppScreens.Capture.name) },
+        onReselect = { CaptureNavActions.requestModeCycle() }
+    ),
+    FeatureItem(
+        key = FeatureKeys.Drawer,
+        icon = { Icon(Icons.AutoMirrored.Filled.LibraryBooks, contentDescription = "Drawer") },
+        selectedIcon = {
+            Icon(Icons.AutoMirrored.Filled.LibraryBooks, contentDescription = "Drawer")
+        },
+        label = "Drawer",
+        onActivate = { navController.navigate(AppScreens.Drawer.name) },
+        onReselect = { navController.navigate(AppScreens.Drawer.name) }
+    ),
+    FeatureItem(
+        key = FeatureKeys.Progress,
+        icon = { Icon(Icons.Default.Notifications, contentDescription = "Progress") },
+        selectedIcon = { Icon(Icons.Default.Notifications, contentDescription = "Progress") },
+        label = "Progress",
+        onActivate = { navController.navigate(AppScreens.Progress.name) },
+        onReselect = { navController.navigate(AppScreens.Progress.name) }
     )
-}
+)
 
 /**
  * Features that appear in the bottom nav bar (compact).
@@ -84,14 +83,15 @@ fun rememberNavBarFeatures(navController: NavHostController): List<FeatureItem> 
 
 /**
  * Features that appear in the sidebar (expanded layout).
- * For sidebar: show only Home and Documents.
+ * For sidebar: show Capture first, then Home and Documents.
  */
 @Composable
 fun rememberSidebarFeatures(navController: NavHostController): List<FeatureItem> {
     val allFeatures = rememberAllFeatures(navController)
 
-    // Return only Home and Documents
+    // Return Capture first so it becomes the primary sidebar action.
     return listOfNotNull(
+        allFeatures.find { it.key == FeatureKeys.Capture },
         allFeatures.find { it.key == FeatureKeys.Home },
         allFeatures.find { it.key == FeatureKeys.Drawer }
     )

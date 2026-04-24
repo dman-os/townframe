@@ -3,7 +3,6 @@
 package org.example.daybook.tables
 
 import androidx.compose.foundation.gestures.Orientation
-import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
@@ -18,19 +17,18 @@ import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.layout.widthIn
 import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.automirrored.filled.KeyboardArrowLeft
 import androidx.compose.material.icons.automirrored.filled.KeyboardArrowRight
-import androidx.compose.material.icons.filled.Add
 import androidx.compose.material.icons.filled.FolderOpen
-import androidx.compose.material.icons.filled.MoreVert
 import androidx.compose.material.icons.filled.Menu
-import androidx.compose.material.icons.filled.MenuOpen
+import androidx.compose.material.icons.filled.MoreVert
 import androidx.compose.material3.*
 import androidx.compose.material3.DropdownMenu
 import androidx.compose.material3.DropdownMenuItem
 import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.IconButton
-import androidx.compose.material3.LargeFloatingActionButton
+import androidx.compose.material3.IconButtonDefaults
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.NavigationDrawerItem
 import androidx.compose.material3.NavigationRail
@@ -67,7 +65,6 @@ import org.example.daybook.ChromeStateTopAppBar
 import org.example.daybook.ConfigViewModel
 import org.example.daybook.DaybookContentType
 import org.example.daybook.DrawerViewModel
-import org.example.daybook.dockable.DockableDivider
 import org.example.daybook.LocalChromeStateManager
 import org.example.daybook.LocalContainer
 import org.example.daybook.LocalDocEditorStore
@@ -75,16 +72,17 @@ import org.example.daybook.LocalDrawerViewModel
 import org.example.daybook.Routes
 import org.example.daybook.TablesState
 import org.example.daybook.TablesViewModel
+import org.example.daybook.dockable.DockableDivider
 import org.example.daybook.drawer.DocList
 import org.example.daybook.progress.ProgressList
+import org.example.daybook.uniffi.core.Uuid
+import org.example.daybook.uniffi.core.Window
 import org.example.daybook.uniffi.core.WindowLayout
 import org.example.daybook.uniffi.core.WindowLayoutOrientation as ConfigOrientation
 import org.example.daybook.uniffi.core.WindowLayoutPane
 import org.example.daybook.uniffi.core.WindowLayoutPaneVariant
 import org.example.daybook.uniffi.core.WindowLayoutRegion
 import org.example.daybook.uniffi.core.WindowLayoutRegionSize
-import org.example.daybook.uniffi.core.Window
-import org.example.daybook.uniffi.core.Uuid
 
 /**
  * Constants for sidebar layout weights and sizes
@@ -118,10 +116,7 @@ fun ExpandedLayout(
     contentType: DaybookContentType,
     onShowCloneShare: () -> Unit = {}
 ) {
-    val navBarFeatures = rememberNavBarFeatures(navController)
-    val sidebarFeatures = rememberSidebarFeatures(navController)
     val menuFeatures = rememberMenuFeatures(navController, onShowCloneShare = onShowCloneShare)
-    val scope = rememberCoroutineScope()
 
     // Tables ViewModel
     val tablesRepo = LocalContainer.current.tablesRepo
@@ -178,83 +173,7 @@ fun ExpandedLayout(
     val mergedChromeState =
         ChromeState(
             title = screenChromeState.title ?: "Daybook",
-            navigationIcon =
-                screenChromeState.navigationIcon ?: {
-                    IconButton(onClick = {
-                        // Toggle left pane: Hidden -> Visible (expanded) -> Visible (collapsed/rail) -> Hidden
-                        if (layoutConfig != null && tablesState is TablesState.Data &&
-                            selectedTableId != null
-                        ) {
-                            val state = tablesState as TablesState.Data
-                            val windowId =
-                                state.tables[selectedTableId]?.window?.let { windowPolicy ->
-                                    when (windowPolicy) {
-                                        is org.example.daybook.uniffi.core.TableWindow.Specific -> windowPolicy.id
-                                        is org.example.daybook.uniffi.core.TableWindow.AllWindows -> state.windows.keys.firstOrNull()
-                                    }
-                                }
-
-                            windowId?.let { id ->
-                                val window = state.windows[id]
-                                if (window != null) {
-                                    val currentVisible = window.layout.leftVisible
-                                    val currentWeight =
-                                        when (val s = window.layout.leftRegion.size) {
-                                            is org.example.daybook.uniffi.core.WindowLayoutRegionSize.Weight -> s.v1
-                                        }
-
-                                    val (nextVisible, nextWeight) =
-                                        when {
-                                            !currentVisible -> {
-                                                true to
-                                                    SidebarLayoutConstants.DEFAULT_SIDEBAR_WEIGHT
-                                            }
-
-                                            currentWeight >
-                                                SidebarLayoutConstants.SIDEBAR_EXPANDED_THRESHOLD -> {
-                                                true to
-                                                    SidebarLayoutConstants.COLLAPSED_SIDEBAR_WEIGHT
-                                            }
-
-                                            else -> {
-                                                false to
-                                                    SidebarLayoutConstants.DEFAULT_SIDEBAR_WEIGHT
-                                            }
-                                        }
-
-                                    scope.launch {
-                                        tablesRepo.setWindow(
-                                            id,
-                                            window.copy(
-                                                layout =
-                                                    window.layout.copy(
-                                                        leftVisible = nextVisible,
-                                                        leftRegion =
-                                                            window.layout.leftRegion.copy(
-                                                                size =
-                                                                    org.example.daybook.uniffi.core.WindowLayoutRegionSize
-                                                                        .Weight(nextWeight)
-                                                            )
-                                                    )
-                                            )
-                                        )
-                                    }
-                                }
-                            }
-                        }
-                    }) {
-                        Icon(
-                            imageVector = if (layoutConfig?.leftVisible ==
-                                true
-                            ) {
-                                Icons.Default.MenuOpen
-                            } else {
-                                Icons.Default.Menu
-                            },
-                            contentDescription = "Toggle Sidebar"
-                        )
-                    }
-                },
+            navigationIcon = screenChromeState.navigationIcon,
             onBack = screenChromeState.onBack,
             actions = {
                 // Screen actions first, then layout actions
@@ -263,30 +182,9 @@ fun ExpandedLayout(
             showTopBar = if (isScreenChromeEmpty) true else screenChromeState.showTopBar
         )
 
-    val allFeatures = rememberAllFeatures(navController)
-    val captureFeature = allFeatures.find { it.key == FeatureKeys.Capture }
-
     Scaffold(
         modifier = modifier,
-        snackbarHost = { SnackbarHost(snackbarHostState) },
-        floatingActionButton = {
-            val button = screenChromeState.mainFeatureActionButton
-            val onClick: (suspend () -> Unit)? = when (button) {
-                is org.example.daybook.MainFeatureActionButton.Button -> {
-                    if (button.enabled) button.onClick else null
-                }
-
-                null -> captureFeature?.onActivate
-            }
-            if (onClick != null) {
-                LargeFloatingActionButton(
-                    onClick = { scope.launch { onClick() } },
-                    shape = CircleShape,
-                ) {
-                    Icon(Icons.Filled.Add, "Large floating action button")
-                }
-            }
-        }
+        snackbarHost = { SnackbarHost(snackbarHostState) }
     ) { innerPadding ->
         if (layoutConfig != null) {
             LayoutFromConfig(
@@ -475,22 +373,13 @@ private fun SidebarPaneDividerToggleButton(
     val scope = rememberCoroutineScope()
     val selection = resolveSelectedWindow(tablesState, selectedTableId) ?: return
     val (windowId, window) = selection
-    val currentVisible = window.layout.leftVisible
     val currentWeight = (window.layout.leftRegion.size as WindowLayoutRegionSize.Weight).v1
 
-    val (nextVisible, nextWeight) =
-        when {
-            !currentVisible -> {
-                true to SidebarLayoutConstants.DEFAULT_SIDEBAR_WEIGHT
-            }
-
-            currentWeight > SidebarLayoutConstants.SIDEBAR_EXPANDED_THRESHOLD -> {
-                true to SidebarLayoutConstants.COLLAPSED_SIDEBAR_WEIGHT
-            }
-
-            else -> {
-                false to SidebarLayoutConstants.DEFAULT_SIDEBAR_WEIGHT
-            }
+    val nextWeight =
+        if (currentWeight > SidebarLayoutConstants.SIDEBAR_EXPANDED_THRESHOLD) {
+            SidebarLayoutConstants.COLLAPSED_SIDEBAR_WEIGHT
+        } else {
+            SidebarLayoutConstants.DEFAULT_SIDEBAR_WEIGHT
         }
 
     IconButton(
@@ -501,7 +390,7 @@ private fun SidebarPaneDividerToggleButton(
                     window.copy(
                         layout =
                             window.layout.copy(
-                                leftVisible = nextVisible,
+                                leftVisible = true,
                                 leftRegion =
                                     window.layout.leftRegion.copy(
                                         size =
@@ -512,10 +401,18 @@ private fun SidebarPaneDividerToggleButton(
                 )
             }
         },
-        modifier = modifier.width(28.dp).height(28.dp)
+        modifier = modifier.width(32.dp).height(32.dp),
+        colors = IconButtonDefaults.iconButtonColors(
+            containerColor = MaterialTheme.colorScheme.surfaceContainer,
+            contentColor = MaterialTheme.colorScheme.onSurface
+        )
     ) {
         Icon(
-            imageVector = if (currentVisible) Icons.Default.MenuOpen else Icons.Default.Menu,
+            imageVector = if (currentWeight > SidebarLayoutConstants.SIDEBAR_EXPANDED_THRESHOLD) {
+                Icons.AutoMirrored.Filled.KeyboardArrowLeft
+            } else {
+                Icons.AutoMirrored.Filled.KeyboardArrowRight
+            },
             contentDescription = "Toggle sidebar"
         )
     }
@@ -571,18 +468,10 @@ fun SidebarContent(
             }
     ) {
         Column(
-            modifier = Modifier.fillMaxSize(), 
+            modifier = Modifier.fillMaxSize()
         ) {
-            Box(
-                modifier = Modifier.fillMaxWidth()
-                    .padding(horizontal = 16.dp, vertical = 8.dp)
-                    .align(Alignment.Start)
-            ) {
-                SidebarMenuButton(menuItems = menuFeatures)
-            }
             if (isWide) {
                 var selectedSidebarPane by remember { mutableIntStateOf(1) }
-
                 // Wide mode: navigation row + tabbed pane (tabs/progress)
                 PermanentDrawerSheet(
                     modifier =
@@ -594,33 +483,41 @@ fun SidebarContent(
                         modifier = Modifier.fillMaxSize()
                     ) {
                         Row(
-                            modifier = Modifier.fillMaxWidth().padding(horizontal = 8.dp, vertical = 8.dp),
-                            horizontalArrangement = Arrangement.SpaceEvenly
+                            modifier = Modifier.fillMaxWidth().padding(
+                                horizontal = 16.dp,
+                                vertical = 8.dp
+                            ),
                         ) {
-                            allSidebarFeatures.forEach { item ->
-                                val featureRoute = getRouteForFeature(item)
-                                val isDocEditorRoute = currentRoute == AppScreens.DocEditor.name
-                                val isSelected =
-                                    when {
-                                        featureRoute == null -> false
-                                        featureRoute == currentRoute -> true
-                                        item.key == FeatureKeys.Drawer && isDocEditorRoute -> true
-                                        else -> false
-                                    }
-                                NavigationRailItem(
-                                    selected = isSelected,
-                                    onClick = {
-                                        scope.launch {
-                                            if (item.enabled) {
-                                                item.onActivate()
-                                            }
+                            SidebarMenuButton(menuItems = menuFeatures)
+                            Row(
+                                modifier = Modifier.fillMaxWidth(),
+                                horizontalArrangement = Arrangement.SpaceAround,
+                            ) {
+                                allSidebarFeatures.forEach { item ->
+                                    val featureRoute = getRouteForFeature(item)
+                                    val isDocEditorRoute = currentRoute == AppScreens.DocEditor.name
+                                    val isSelected =
+                                        when {
+                                            featureRoute == null -> false
+                                            featureRoute == currentRoute -> true
+                                            item.key == FeatureKeys.Drawer && isDocEditorRoute -> true
+                                            else -> false
                                         }
-                                    },
-                                    enabled = item.enabled,
-                                    icon = { item.icon() },
-                                    label = { item.labelContent?.invoke() ?: Text(item.label) },
-                                    alwaysShowLabel = false
-                                )
+                                    NavigationRailItem(
+                                        selected = isSelected,
+                                        onClick = {
+                                            scope.launch {
+                                                if (item.enabled) {
+                                                    item.onActivate()
+                                                }
+                                            }
+                                        },
+                                        enabled = item.enabled,
+                                        icon = { item.icon() },
+                                        label = { item.labelContent?.invoke() ?: Text(item.label) },
+                                        alwaysShowLabel = true
+                                    )
+                                }
                             }
                         }
                         HorizontalDivider()
@@ -633,14 +530,24 @@ fun SidebarContent(
                                 NavigationRailItem(
                                     selected = selectedSidebarPane == 2,
                                     onClick = { selectedSidebarPane = 2 },
-                                    icon = { Icon(Icons.Default.FolderOpen, contentDescription = "Drawer") },
+                                    icon = {
+                                        Icon(
+                                            Icons.Default.FolderOpen,
+                                            contentDescription = "Drawer"
+                                        )
+                                    },
                                     label = { Text("Drawer") },
                                     alwaysShowLabel = true
                                 )
                                 NavigationRailItem(
                                     selected = selectedSidebarPane == 1,
                                     onClick = { selectedSidebarPane = 1 },
-                                    icon = { Icon(Icons.Default.MoreVert, contentDescription = "Progress") },
+                                    icon = {
+                                        Icon(
+                                            Icons.Default.MoreVert,
+                                            contentDescription = "Progress"
+                                        )
+                                    },
                                     label = { Text("Progress") },
                                     alwaysShowLabel = true
                                 )
@@ -655,7 +562,10 @@ fun SidebarContent(
                                         else -> "Drawer"
                                     }
                                 Row(
-                                    modifier = Modifier.fillMaxWidth().padding(horizontal = 12.dp, vertical = 8.dp),
+                                    modifier = Modifier.fillMaxWidth().padding(
+                                        horizontal = 12.dp,
+                                        vertical = 8.dp
+                                    ),
                                     verticalAlignment = Alignment.CenterVertically
                                 ) {
                                     Text(
@@ -676,7 +586,9 @@ fun SidebarContent(
                                             onDocClick = { docId ->
                                                 docEditorStore.selectDoc(docId)
                                                 if (currentRoute != AppScreens.DocEditor.name) {
-                                                    navController.navigate(AppScreens.DocEditor.name) {
+                                                    navController.navigate(
+                                                        AppScreens.DocEditor.name
+                                                    ) {
                                                         launchSingleTop = true
                                                     }
                                                 }
@@ -690,6 +602,13 @@ fun SidebarContent(
                     }
                 }
             } else {
+                Box(
+                    modifier = Modifier.fillMaxWidth()
+                        .padding(horizontal = 16.dp, vertical = 8.dp)
+                        .align(Alignment.Start)
+                ) {
+                    SidebarMenuButton(menuItems = menuFeatures)
+                }
                 // Narrow mode: NavigationRail with features only
                 NavigationRail(
                     modifier = Modifier.fillMaxHeight()
@@ -738,11 +657,11 @@ fun RenderLayoutPane(
     when (val variant = pane.variant) {
         is WindowLayoutPaneVariant.Sidebar -> {
             // Render sidebar UI
-                SidebarContent(
-                    navController = navController,
-                    menuFeatures = rememberMenuFeatures(navController),
-                    modifier = modifier
-                )
+            SidebarContent(
+                navController = navController,
+                menuFeatures = rememberMenuFeatures(navController),
+                modifier = modifier
+            )
         }
 
         is WindowLayoutPaneVariant.Routes -> {
@@ -927,12 +846,11 @@ fun DockableRegion(
         private fun resolveDiscreteTargetSizeDp(
             regime: PaneSizeRegime.Discrete,
             virtualSizeDp: Float
-        ): Float =
-            when {
-                virtualSizeDp < regime.minDp -> regime.sizeDp
-                virtualSizeDp <= regime.maxDp -> regime.sizeDp
-                else -> virtualSizeDp
-            }
+        ): Float = when {
+            virtualSizeDp < regime.minDp -> regime.sizeDp
+            virtualSizeDp <= regime.maxDp -> regime.sizeDp
+            else -> virtualSizeDp
+        }
 
         private fun rebalanceDiscreteWeights(keys: List<Any>, totalSizePx: Int) {
             if (totalSizePx <= 0 || keys.isEmpty()) return
@@ -950,7 +868,8 @@ fun DockableRegion(
                 val currentSizeDp = getSizeDp(key, totalSizePx, totalWeight)
                 val regime = getCurrentRegime(key, currentSizeDp)
                 if (regime is PaneSizeRegime.Discrete) {
-                    discreteTargets[key] = regime to sizeDpToWeight(regime.sizeDp, totalSizeDp, totalWeight)
+                    discreteTargets[key] =
+                        regime to sizeDpToWeight(regime.sizeDp, totalSizeDp, totalWeight)
                 }
             }
 
@@ -977,6 +896,7 @@ fun DockableRegion(
             val redistributedRemainingWeights =
                 when {
                     remainingKeys.isEmpty() -> emptyMap()
+
                     remainingCurrentSum > 0f -> {
                         remainingKeys.associateWith { key ->
                             (currentWeights.getValue(key) / remainingCurrentSum) * remainingBudget
@@ -989,7 +909,11 @@ fun DockableRegion(
                     }
                 }
 
-            (appliedDiscreteWeights.mapValues { it.value } + redistributedRemainingWeights).forEach { (key, weight) ->
+            (
+                appliedDiscreteWeights.mapValues {
+                    it.value
+                } + redistributedRemainingWeights
+                ).forEach { (key, weight) ->
                 weightMap[key] = weight
             }
 
@@ -997,7 +921,6 @@ fun DockableRegion(
             keys.forEach { key ->
                 sizeDpMap[key] = getSizeDp(key, totalSizePx, newTotalWeight)
             }
-
         }
 
         // Get current size in dp for a key
@@ -1443,6 +1366,7 @@ fun DockableRegion(
                 var dragStarted by remember { mutableStateOf(false) }
                 DockableDivider(
                     orientation = orientation,
+                    centerContentVisibleOnlyOnHover = true,
                     onDragStart = {
                         dragStarted = true
                         state.startDrag(

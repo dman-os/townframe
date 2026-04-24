@@ -16,14 +16,14 @@ import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
-import androidx.compose.runtime.mutableStateOf
 import androidx.compose.ui.Modifier
-import androidx.compose.ui.layout.Layout
 import androidx.compose.ui.input.pointer.PointerIcon
 import androidx.compose.ui.input.pointer.pointerHoverIcon
 import androidx.compose.ui.input.pointer.pointerInput
+import androidx.compose.ui.layout.Layout
 import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.unit.dp
 import kotlin.math.roundToInt
@@ -37,6 +37,7 @@ fun DockableDivider(
     onDragCancel: () -> Unit,
     modifier: Modifier = Modifier,
     pillInvisibleWhenNotHovered: Boolean = true,
+    centerContentVisibleOnlyOnHover: Boolean = false,
     centerContent: (@Composable () -> Unit)? = null
 ) {
     val density = LocalDensity.current
@@ -76,8 +77,8 @@ fun DockableDivider(
         modifier
             .then(
                 when (orientation) {
-                    Orientation.Horizontal -> Modifier.width(2.dp).fillMaxHeight()
-                    Orientation.Vertical -> Modifier.height(2.dp).fillMaxWidth()
+                    Orientation.Horizontal -> Modifier.width(4.dp).fillMaxHeight()
+                    Orientation.Vertical -> Modifier.height(4.dp).fillMaxWidth()
                 }
             )
             .pointerHoverIcon(PointerIcon.Hand)
@@ -96,6 +97,7 @@ fun DockableDivider(
                             onDragCancel = { cancelDrag() }
                         )
                     }
+
                     Orientation.Vertical -> {
                         detectVerticalDragGestures(
                             onDragStart = { startDrag() },
@@ -160,8 +162,18 @@ fun DockableDivider(
                         shape = RoundedCornerShape(4.dp)
                     )
             )
-            if (centerContent != null) {
-                centerContent()
+            val showCenterContent =
+                centerContent != null &&
+                    (
+                        !centerContentVisibleOnlyOnHover ||
+                            (isHovered && !isDragging)
+                        )
+            if (showCenterContent) {
+                Box(
+                    modifier = Modifier.hoverable(interactionSource)
+                ) {
+                    centerContent()
+                }
             }
         }
     ) { measurables, constraints ->
@@ -181,18 +193,31 @@ fun DockableDivider(
             }
         val lineLengthPx =
             when (orientation) {
-                Orientation.Horizontal -> maxOf(fallbackLengthPx, (layoutHeight * 0.5f).roundToInt())
+                Orientation.Horizontal -> maxOf(
+                    fallbackLengthPx,
+                    (layoutHeight * 0.5f).roundToInt()
+                )
+
                 Orientation.Vertical -> maxOf(fallbackLengthPx, (layoutWidth * 0.5f).roundToInt())
             }
 
         val linePlaceable =
             measurables.first().measure(
                 when (orientation) {
-                    Orientation.Horizontal -> androidx.compose.ui.unit.Constraints.fixed(lineThicknessPx, lineLengthPx)
-                    Orientation.Vertical -> androidx.compose.ui.unit.Constraints.fixed(lineLengthPx, lineThicknessPx)
+                    Orientation.Horizontal -> androidx.compose.ui.unit.Constraints.fixed(
+                        lineThicknessPx,
+                        lineLengthPx
+                    )
+
+                    Orientation.Vertical -> androidx.compose.ui.unit.Constraints.fixed(
+                        lineLengthPx,
+                        lineThicknessPx
+                    )
                 }
             )
-        val centerPlaceable = measurables.getOrNull(1)?.measure(androidx.compose.ui.unit.Constraints())
+        val centerPlaceable = measurables.getOrNull(
+            1
+        )?.measure(androidx.compose.ui.unit.Constraints())
 
         layout(layoutWidth, layoutHeight) {
             linePlaceable.place(

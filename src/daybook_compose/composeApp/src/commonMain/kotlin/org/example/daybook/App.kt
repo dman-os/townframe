@@ -1518,10 +1518,10 @@ fun Routes(
         }
         composable(
             route = AppScreens.Drawer.name,
-            enterTransition = { EnterTransition.None },
-            exitTransition = { ExitTransition.None },
-            popEnterTransition = { EnterTransition.None },
-            popExitTransition = { ExitTransition.None }
+            // enterTransition = { EnterTransition.None },
+            // exitTransition = { ExitTransition.None },
+            // popEnterTransition = { EnterTransition.None },
+            // popExitTransition = { ExitTransition.None }
         ) {
             ProvideChromeState(ChromeState(title = "Drawer")) {
                 DrawerScreen(
@@ -1541,8 +1541,8 @@ fun Routes(
                     initialOffsetX = { fullWidth -> fullWidth }
                 )
             },
-            exitTransition = { ExitTransition.None },
-            popEnterTransition = { EnterTransition.None },
+            // exitTransition = { ExitTransition.None },
+            // popEnterTransition = { EnterTransition.None },
             popExitTransition = {
                 slideOutHorizontally(
                     animationSpec = tween(240),
