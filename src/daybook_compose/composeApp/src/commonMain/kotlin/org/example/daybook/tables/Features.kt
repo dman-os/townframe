@@ -135,12 +135,3 @@ fun rememberMenuFeatures(
             )
         )
 }
-
-/**
- * @deprecated Use rememberNavBarFeatures, rememberMenuFeatures, or rememberSidebarFeatures instead.
- * This function is kept for backward compatibility but returns all features.
- */
-@Composable
-@Deprecated("Use rememberNavBarFeatures, rememberMenuFeatures, or rememberSidebarFeatures instead")
-fun rememberFeatures(navController: NavHostController): List<FeatureItem> =
-    rememberAllFeatures(navController)

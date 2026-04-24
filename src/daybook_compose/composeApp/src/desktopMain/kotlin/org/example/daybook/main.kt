@@ -14,10 +14,10 @@ import androidx.compose.ui.unit.dp
 import androidx.compose.ui.window.Window
 import androidx.compose.ui.window.application
 import androidx.compose.ui.window.rememberWindowState
-import kotlinx.coroutines.delay
 import java.awt.EventQueue
-import sun.misc.Signal
 import java.util.concurrent.atomic.AtomicBoolean
+import kotlinx.coroutines.delay
+import sun.misc.Signal
 
 private val signalShutdownRequested = AtomicBoolean(false)
 
@@ -29,14 +29,18 @@ private fun installSignalHandler(signalName: String) {
         }
         println("[APP_SHUTDOWN] installed signal handler name=$signalName")
     }.onFailure { error ->
-        println("[APP_SHUTDOWN] failed to install signal handler name=$signalName err=${error.message}")
+        println(
+            "[APP_SHUTDOWN] failed to install signal handler name=$signalName err=${error.message}"
+        )
         throw error
     }
 }
 
 fun main() = application {
-    installSignalHandler("INT")
-    installSignalHandler("TERM")
+    LaunchedEffect(Unit) {
+        installSignalHandler("INT")
+        installSignalHandler("TERM")
+    }
 
     val windowState =
         rememberWindowState(
@@ -47,7 +51,8 @@ fun main() = application {
             size = DpSize((0.75 * 1600).dp, (900 - 20).dp)
         )
     DisposableEffect(Unit) {
-        val hook = Thread { println("[APP_SHUTDOWN] JVM shutdown hook triggered (signal/process exit)") }
+        val hook =
+            Thread { println("[APP_SHUTDOWN] JVM shutdown hook triggered (signal/process exit)") }
         Runtime.getRuntime().addShutdownHook(hook)
         onDispose {
             runCatching { Runtime.getRuntime().removeShutdownHook(hook) }

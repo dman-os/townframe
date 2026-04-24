@@ -3,11 +3,11 @@ package org.example.daybook.tables
 import androidx.compose.animation.core.Animatable
 import androidx.compose.animation.core.animateFloatAsState
 import androidx.compose.animation.core.tween
+import androidx.compose.foundation.background
+import androidx.compose.foundation.border
 import androidx.compose.foundation.gestures.Orientation
 import androidx.compose.foundation.gestures.draggable
 import androidx.compose.foundation.gestures.rememberDraggableState
-import androidx.compose.foundation.background
-import androidx.compose.foundation.border
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
@@ -21,7 +21,6 @@ import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.safeContentPadding
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.rememberScrollState
-import androidx.compose.ui.draw.clip
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
@@ -39,6 +38,7 @@ import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.draw.clip
 import androidx.compose.ui.geometry.CornerRadius
 import androidx.compose.ui.geometry.Rect
 import androidx.compose.ui.geometry.RoundRect
@@ -49,8 +49,8 @@ import androidx.compose.ui.layout.boundsInWindow
 import androidx.compose.ui.layout.onGloballyPositioned
 import androidx.compose.ui.layout.onSizeChanged
 import androidx.compose.ui.platform.LocalDensity
-import androidx.compose.ui.unit.LayoutDirection
 import androidx.compose.ui.unit.Dp
+import androidx.compose.ui.unit.LayoutDirection
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.times
 import kotlinx.coroutines.launch
@@ -62,10 +62,8 @@ private object FloatingBarDefaults {
     val menuTopRadius = 28.dp
 }
 
-private class NippleBarShape(
-    private val protrusionPx: Float,
-    private val cornerRadiusPx: Float
-) : Shape {
+private class NippleBarShape(private val protrusionPx: Float, private val cornerRadiusPx: Float) :
+    Shape {
     override fun createOutline(
         size: androidx.compose.ui.geometry.Size,
         layoutDirection: LayoutDirection,
@@ -162,13 +160,17 @@ fun FloatingBottomNavigationBar(
             imageVector = Icons.Default.ChevronRight,
             contentDescription = "Swipe right for drawer",
             tint = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.78f * nippleAlpha),
-            modifier = Modifier.align(Alignment.CenterStart).padding(start = 7.dp).width(13.dp).height(13.dp)
+            modifier = Modifier.align(
+                Alignment.CenterStart
+            ).padding(start = 7.dp).width(13.dp).height(13.dp)
         )
         Icon(
             imageVector = Icons.Default.KeyboardArrowUp,
             contentDescription = "Swipe up for menu",
             tint = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.78f * nippleAlpha),
-            modifier = Modifier.align(Alignment.CenterEnd).padding(end = 7.dp).width(13.dp).height(13.dp)
+            modifier = Modifier.align(
+                Alignment.CenterEnd
+            ).padding(end = 7.dp).width(13.dp).height(13.dp)
         )
     }
 }
@@ -198,7 +200,11 @@ fun FloatingGrowingMenuSheet(
     val armedIndicatorColor = MaterialTheme.colorScheme.primary.copy(alpha = 0.95f)
     val menuItemShape = RoundedCornerShape(28.dp)
 
-    Box(modifier = modifier.fillMaxSize().padding(horizontal = FloatingBarDefaults.horizontalPadding)) {
+    Box(
+        modifier = modifier.fillMaxSize().padding(
+            horizontal = FloatingBarDefaults.horizontalPadding
+        )
+    ) {
         val openFraction = (sheetState.progress / maxAnchor).coerceIn(0f, 1f)
         val targetHeight = (maxMenuHeight * openFraction)
         val dragModifier =
@@ -209,7 +215,10 @@ fun FloatingGrowingMenuSheet(
                         val boundedProgress = sheetState.progress.coerceIn(0f, maxAnchor)
                         val currentVisible = total * (boundedProgress / maxAnchor).coerceIn(0f, 1f)
                         val nextVisible = (currentVisible - dragAmount).coerceIn(0f, total)
-                        val nextProgress = ((nextVisible / total) * maxAnchor).coerceIn(0f, maxAnchor)
+                        val nextProgress = ((nextVisible / total) * maxAnchor).coerceIn(
+                            0f,
+                            maxAnchor
+                        )
                         sheetState.setProgressImmediate(nextProgress)
                     },
                 orientation = Orientation.Vertical,
@@ -234,6 +243,7 @@ fun FloatingGrowingMenuSheet(
             )
         val barDragAreaHeight = barHeight + FloatingBarDefaults.verticalPadding * 2
         val surfaceHeight = targetHeight.coerceAtLeast(1.dp)
+        val effectiveDragModifier = if (enableDragToClose) dragModifier else Modifier
 
         Surface(
             modifier =
@@ -242,7 +252,7 @@ fun FloatingGrowingMenuSheet(
                     .fillMaxWidth()
                     .padding(bottom = FloatingBarDefaults.verticalPadding)
                     .height(surfaceHeight)
-                    .then(dragModifier),
+                    .then(effectiveDragModifier),
             color = MaterialTheme.colorScheme.surfaceContainerLow.copy(alpha = 0.96f),
             shape = RoundedCornerShape(
                 topStart = FloatingBarDefaults.menuTopRadius,
@@ -274,48 +284,48 @@ fun FloatingGrowingMenuSheet(
                     )
                 }
                 Spacer(Modifier.weight(1f, fill = true))
-            Column(
-                modifier =
-                    Modifier
-                        .fillMaxWidth()
-                        .verticalScroll(rememberScrollState()),
-                verticalArrangement = Arrangement.spacedBy(8.dp)
-            ) {
-                menuItems.forEach { item ->
-                    val isActivationReady = item.key == activationReadyMenuItem
-                    NavigationDrawerItem(
-                        selected = item.key == highlightedMenuItem,
-                        onClick = {
-                            scope.launch {
-                                if (item.enabled) {
-                                    onItemActivate(item)
-                                }
-                            }
-                        },
-                        icon = { item.icon() },
-                        label = { item.labelContent?.invoke() ?: Text(item.label) },
-                        shape = menuItemShape,
-                        modifier =
-                            Modifier
-                                .fillMaxWidth()
-                                .then(
-                                    if (isActivationReady) {
-                                        Modifier.border(
-                                            width = 1.5.dp,
-                                            color = armedIndicatorColor,
-                                            shape = menuItemShape
-                                        )
-                                    } else {
-                                        Modifier
+                Column(
+                    modifier =
+                        Modifier
+                            .fillMaxWidth()
+                            .verticalScroll(rememberScrollState()),
+                    verticalArrangement = Arrangement.spacedBy(8.dp)
+                ) {
+                    menuItems.forEach { item ->
+                        val isActivationReady = item.key == activationReadyMenuItem
+                        NavigationDrawerItem(
+                            selected = item.key == highlightedMenuItem,
+                            onClick = {
+                                scope.launch {
+                                    if (item.enabled) {
+                                        onItemActivate(item)
                                     }
-                                )
-                                .onGloballyPositioned {
-                                    onMenuItemLayout(item.key, it.boundsInWindow())
                                 }
-                    )
+                            },
+                            icon = { item.icon() },
+                            label = { item.labelContent?.invoke() ?: Text(item.label) },
+                            shape = menuItemShape,
+                            modifier =
+                                Modifier
+                                    .fillMaxWidth()
+                                    .then(
+                                        if (isActivationReady) {
+                                            Modifier.border(
+                                                width = 1.5.dp,
+                                                color = armedIndicatorColor,
+                                                shape = menuItemShape
+                                            )
+                                        } else {
+                                            Modifier
+                                        }
+                                    )
+                                    .onGloballyPositioned {
+                                        onMenuItemLayout(item.key, it.boundsInWindow())
+                                    }
+                        )
+                    }
+                    Spacer(Modifier.height(bottomInset))
                 }
-                Spacer(Modifier.height(bottomInset))
-            }
             }
         }
         Box(
@@ -324,7 +334,7 @@ fun FloatingGrowingMenuSheet(
                     .align(Alignment.BottomCenter)
                     .fillMaxWidth()
                     .height(barDragAreaHeight)
-                    .then(dragModifier)
+                    .then(effectiveDragModifier)
         )
     }
 }

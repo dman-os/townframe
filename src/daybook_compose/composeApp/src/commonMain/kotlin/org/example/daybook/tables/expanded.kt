@@ -486,12 +486,12 @@ fun SidebarContent(
                             modifier = Modifier.fillMaxWidth().padding(
                                 horizontal = 16.dp,
                                 vertical = 8.dp
-                            ),
+                            )
                         ) {
                             SidebarMenuButton(menuItems = menuFeatures)
                             Row(
                                 modifier = Modifier.fillMaxWidth(),
-                                horizontalArrangement = Arrangement.SpaceAround,
+                                horizontalArrangement = Arrangement.SpaceAround
                             ) {
                                 allSidebarFeatures.forEach { item ->
                                     val featureRoute = getRouteForFeature(item)
@@ -1117,16 +1117,16 @@ fun DockableRegion(
                         weightMap[keyB] = newWeightB
                     } else {
                         // Outside discrete range - use virtual size
-                        val targetSizeDpA = resolveDiscreteTargetSizeDp(regimeB, virtualSizeDpA)
-                        val targetWeightA = sizeDpToWeight(targetSizeDpA, totalSizeDp, totalWeight)
-                        val newWeightA =
-                            targetWeightA
+                        val targetSizeDpB = resolveDiscreteTargetSizeDp(regimeB, virtualSizeDpB)
+                        val targetWeightB = sizeDpToWeight(targetSizeDpB, totalSizeDp, totalWeight)
+                        val newWeightB =
+                            targetWeightB
                                 .coerceAtLeast(
                                     SidebarLayoutConstants.MIN_PANE_WEIGHT
                                 ).coerceAtMost(
                                     totalCurrentWeight - SidebarLayoutConstants.MIN_PANE_WEIGHT
                                 )
-                        val newWeightB = (totalCurrentWeight - newWeightA).coerceAtLeast(
+                        val newWeightA = (totalCurrentWeight - newWeightB).coerceAtLeast(
                             SidebarLayoutConstants.MIN_PANE_WEIGHT
                         )
                         weightMap[keyA] = newWeightA
