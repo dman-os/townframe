@@ -49,6 +49,7 @@ pub struct ProcessorRunlogDone {
 
 pub struct RtConfig {
     pub device_id: String,
+    pub startup_progress_task_id: Option<String>,
 }
 
 pub struct Rt {
@@ -98,7 +99,7 @@ impl RtStopToken {
         if let Err(err) = self.switch_worker.stop().await {
             warn!(
                 ?err,
-                "error stopping doc_changes_worker during shutdown - continuing"
+                "error stopping switch_worker during shutdown - continuing"
             );
         }
 
@@ -213,6 +214,39 @@ pub enum InvokeCommandFromWflowError {
 }
 
 impl Rt {
+    async fn emit_startup_progress_status(
+        progress_repo: &Arc<crate::progress::ProgressRepo>,
+        startup_progress_task_id: Option<&str>,
+        message: String,
+    ) -> Res<()> {
+        let Some(task_id) = startup_progress_task_id else {
+            return Ok(());
+        };
+        progress_repo
+            .add_update(
+                task_id,
+                crate::progress::ProgressUpdate {
+                    at: jiff::Timestamp::now(),
+                    title: Some("App startup".to_string()),
+                    deets: crate::progress::ProgressUpdateDeets::Status {
+                        severity: crate::progress::ProgressSeverity::Info,
+                        message,
+                    },
+                },
+            )
+            .await
+    }
+
+    fn startup_timing_note(
+        stage_started: std::time::Instant,
+        total_started: std::time::Instant,
+    ) -> String {
+        let stage_ms = stage_started.elapsed().as_millis();
+        let total_ms = total_started.elapsed().as_millis();
+        let from_app_start = format!(" from_app_start_ms={}", utils_rs::app_startup_elapsed_ms());
+        format!("stage_ms={stage_ms} total_ms={total_ms}{from_app_start}")
+    }
+
     pub fn processor_runlog_item_id(doc_id: &str, processor_full_id: &str) -> String {
         format!("v1|doc:{doc_id}|proc:{processor_full_id}")
     }
@@ -251,35 +285,90 @@ impl Rt {
         local_actor_id: ActorId,
         local_state_root: PathBuf,
     ) -> Res<(Arc<Self>, RtStopToken)> {
+        let total_started = std::time::Instant::now();
+        let startup_progress_task_id = config.startup_progress_task_id.clone();
         crate::repo::ensure_expected_partitions_for_docs(
             &big_repo,
             &app_doc_id,
             drawer.drawer_doc_id(),
         )
         .await?;
+        Self::emit_startup_progress_status(
+            &progress_repo,
+            startup_progress_task_id.as_deref(),
+            "rt boot: ensured partitions".to_string(),
+        )
+        .await?;
+
         let wcx = wflow::Ctx::init(&wflow_db_url).await?;
+        Self::emit_startup_progress_status(
+            &progress_repo,
+            startup_progress_task_id.as_deref(),
+            "rt boot: initialized wflow ctx".to_string(),
+        )
+        .await?;
         let (sqlite_local_state_repo, sqlite_local_state_stop) =
             SqliteLocalStateRepo::boot(local_state_root).await?;
+        Self::emit_startup_progress_status(
+            &progress_repo,
+            startup_progress_task_id.as_deref(),
+            "rt boot: loaded sqlite local state".to_string(),
+        )
+        .await?;
+
+        let stage_started = std::time::Instant::now();
         let (init_repo, init_repo_stop) = InitRepo::load(
             Arc::clone(&big_repo),
             app_doc_id.clone(),
             local_actor_id.clone(),
             sql_pool,
+            Arc::clone(&progress_repo),
+            startup_progress_task_id.clone(),
+        )
+        .await?;
+        Self::emit_startup_progress_status(
+            &progress_repo,
+            startup_progress_task_id.as_deref(),
+            format!(
+                "rt boot: loaded init repo ({})",
+                Self::startup_timing_note(stage_started, total_started)
+            ),
         )
         .await?;
 
+        let stage_started = std::time::Instant::now();
         let (doc_facet_set_index_repo, doc_facet_set_index_stop) =
             crate::index::DocFacetSetIndexRepo::boot(
                 Arc::clone(&drawer),
                 Arc::clone(&sqlite_local_state_repo),
             )
             .await?;
+        Self::emit_startup_progress_status(
+            &progress_repo,
+            startup_progress_task_id.as_deref(),
+            format!(
+                "rt boot: loaded facet-set index ({})",
+                Self::startup_timing_note(stage_started, total_started)
+            ),
+        )
+        .await?;
+        let stage_started = std::time::Instant::now();
         let (doc_blobs_index_repo, doc_blobs_index_stop) = crate::index::DocBlobsIndexRepo::boot(
             Arc::clone(&drawer),
             Arc::clone(&blobs_repo),
             Arc::clone(&sqlite_local_state_repo),
         )
         .await?;
+        Self::emit_startup_progress_status(
+            &progress_repo,
+            startup_progress_task_id.as_deref(),
+            format!(
+                "rt boot: loaded doc-blobs index ({})",
+                Self::startup_timing_note(stage_started, total_started)
+            ),
+        )
+        .await?;
+        let stage_started = std::time::Instant::now();
         let (doc_facet_ref_index_repo, doc_facet_ref_index_stop) =
             crate::index::DocFacetRefIndexRepo::boot(
                 Arc::clone(&drawer),
@@ -287,6 +376,15 @@ impl Rt {
                 Arc::clone(&sqlite_local_state_repo),
             )
             .await?;
+        Self::emit_startup_progress_status(
+            &progress_repo,
+            startup_progress_task_id.as_deref(),
+            format!(
+                "rt boot: loaded facet-ref index ({})",
+                Self::startup_timing_note(stage_started, total_started)
+            ),
+        )
+        .await?;
 
         let wflow_plugin = Arc::new(wash_plugin_wflow::WflowPlugin::new(Arc::clone(
             &wcx.metastore,
@@ -322,6 +420,12 @@ impl Rt {
             .await
             .to_eyre()
             .wrap_err("error starting wash host")?;
+        Self::emit_startup_progress_status(
+            &progress_repo,
+            startup_progress_task_id.as_deref(),
+            "rt boot: wash host started".to_string(),
+        )
+        .await?;
 
         let mut bundles_to_load: HashSet<(String, String)> = default();
         for (_dispatch_id, dispach) in dispatch_repo.list().await {
@@ -336,6 +440,8 @@ impl Rt {
             }
         }
         for (plug_id, bundle_name) in bundles_to_load {
+            let plug_id_for_log = plug_id.clone();
+            let bundle_name_for_log = bundle_name.clone();
             let plug_man = plugs_repo.get(&plug_id).await.ok_or_else(|| {
                 ferr!("plug with active dispatch not found in repo: plug={plug_id} bundle={bundle_name}")
             })?;
@@ -352,11 +458,25 @@ impl Rt {
                 bundle_man,
             )
             .await?;
+            Self::emit_startup_progress_status(
+                &progress_repo,
+                startup_progress_task_id.as_deref(),
+                format!(
+                    "rt boot: resumed workload plug={plug_id_for_log} bundle={bundle_name_for_log}"
+                ),
+            )
+            .await?;
         }
 
         let part_idx = 0;
         let (wflow_part_handle, wflow_part_state) =
             wflow::start_partition_worker(&wcx, Arc::clone(&wflow_plugin), part_idx).await?;
+        Self::emit_startup_progress_status(
+            &progress_repo,
+            startup_progress_task_id.as_deref(),
+            "rt boot: partition worker started".to_string(),
+        )
+        .await?;
         let part_log = PartitionLogRef::new(Arc::clone(&wcx.logstore));
         let wflow_ingress = Arc::new(wflow::ingress::PartitionLogIngress::new(
             part_log,
@@ -401,9 +521,25 @@ impl Rt {
             .map(|plug| plug.id())
             .collect::<Vec<_>>();
         plug_ids.sort();
+        let stage_started = std::time::Instant::now();
         for plug_id in plug_ids {
-            let _ = rt.ensure_plug_init_dispatches(&plug_id).await?;
+            let _ = rt
+                .ensure_plug_init_dispatches(
+                    &plug_id,
+                    startup_progress_task_id.as_deref(),
+                    Some(total_started),
+                )
+                .await?;
         }
+        Self::emit_startup_progress_status(
+            &rt.progress_repo,
+            startup_progress_task_id.as_deref(),
+            format!(
+                "rt boot: plug init queue complete ({})",
+                Self::startup_timing_note(stage_started, total_started)
+            ),
+        )
+        .await?;
 
         // Start the DocTriageWorker to automatically queue jobs when docs are added
         let switch_sinks: BTreeMap<String, Box<dyn crate::rt::switch::SwitchSink + Send + Sync>> =
@@ -585,7 +721,13 @@ impl Rt {
         Ok(out)
     }
 
-    async fn ensure_plug_init_dispatches(&self, plug_id: &str) -> Res<Vec<String>> {
+    async fn ensure_plug_init_dispatches(
+        &self,
+        plug_id: &str,
+        startup_progress_task_id: Option<&str>,
+        total_started: Option<std::time::Instant>,
+    ) -> Res<Vec<String>> {
+        let stage_started = std::time::Instant::now();
         let order = self.collect_plug_and_dependency_order(plug_id).await?;
         let mut unresolved_init_dispatch_ids = vec![];
         for plug_id in order {
@@ -607,12 +749,40 @@ impl Rt {
                     .is_done(&init_manifest.run_mode, &init_id)
                     .await?
                 {
+                    self.init_repo
+                        .report_boot_init_stage(
+                            &init_manifest.run_mode,
+                            &plug_id,
+                            &init_key.0,
+                            "already done",
+                            init::BootInitProgressContext {
+                                startup_progress_task_id_override: startup_progress_task_id
+                                    .map(str::to_owned),
+                                stage_started,
+                                total_started,
+                            },
+                        )
+                        .await?;
                     continue;
                 }
                 if let Some(running_dispatch_id) =
                     self.init_repo.get_running_dispatch(&init_id).await
                 {
                     unresolved_init_dispatch_ids.push(running_dispatch_id);
+                    self.init_repo
+                        .report_boot_init_stage(
+                            &init_manifest.run_mode,
+                            &plug_id,
+                            &init_key.0,
+                            "running",
+                            init::BootInitProgressContext {
+                                startup_progress_task_id_override: startup_progress_task_id
+                                    .map(str::to_owned),
+                                stage_started,
+                                total_started,
+                            },
+                        )
+                        .await?;
                     continue;
                 }
                 let daybook_types::manifest::InitDeets::InvokeRoutine { routine_name } =
@@ -649,6 +819,20 @@ impl Rt {
                     .set_running_dispatch(&init_id, &dispatch_id)
                     .await?;
                 unresolved_init_dispatch_ids.push(dispatch_id);
+                self.init_repo
+                    .report_boot_init_stage(
+                        &init_manifest.run_mode,
+                        &plug_id,
+                        &init_key.0,
+                        "queued",
+                        init::BootInitProgressContext {
+                            startup_progress_task_id_override: startup_progress_task_id
+                                .map(str::to_owned),
+                            stage_started,
+                            total_started,
+                        },
+                    )
+                    .await?;
             }
         }
         Ok(unresolved_init_dispatch_ids)
@@ -1320,7 +1504,7 @@ impl Rt {
             format!("cmdinvoke-{encoded}")
         };
         let waiting_on_dispatch_ids = self
-            .ensure_plug_init_dispatches(&target_ref.plug_id)
+            .ensure_plug_init_dispatches(&target_ref.plug_id, None, None)
             .await?;
         let staging_heads = self
             .drawer
@@ -1364,7 +1548,9 @@ impl Rt {
         on_success_hooks: Vec<DispatchOnSuccessHook>,
     ) -> Res<String> {
         self.ensure_rt_live()?;
-        let waiting_on_dispatch_ids = self.ensure_plug_init_dispatches(plug_id).await?;
+        let waiting_on_dispatch_ids = self
+            .ensure_plug_init_dispatches(plug_id, None, None)
+            .await?;
         self.dispatch_no_gate_internal(
             plug_id,
             routine_name,

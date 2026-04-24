@@ -11,38 +11,42 @@ import androidx.compose.animation.fadeIn
 import androidx.compose.animation.fadeOut
 import androidx.compose.animation.slideInHorizontally
 import androidx.compose.animation.slideOutHorizontally
+import androidx.compose.foundation.background
+import androidx.compose.foundation.border
+import androidx.compose.foundation.interaction.MutableInteractionSource
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
+import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.RowScope
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
+import androidx.compose.foundation.layout.width
+import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material3.Button
 import androidx.compose.material3.MaterialTheme
-import androidx.compose.material3.NavigationBarItem
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.draw.clip
 import androidx.compose.ui.geometry.Rect
 import androidx.compose.ui.layout.boundsInWindow
 import androidx.compose.ui.layout.onGloballyPositioned
-import androidx.compose.ui.text.style.TextOverflow
+import androidx.compose.foundation.selection.selectable
+import androidx.compose.ui.semantics.Role
+import androidx.compose.material3.LocalTextStyle
 import androidx.compose.ui.unit.dp
-import androidx.lifecycle.viewmodel.compose.viewModel
 import androidx.navigation.NavHostController
+import androidx.navigation.compose.currentBackStackEntryAsState
 import kotlinx.coroutines.launch
-import org.example.daybook.AppScreens
-import org.example.daybook.ChromeState
 import org.example.daybook.LocalChromeStateManager
-import org.example.daybook.LocalContainer
 import org.example.daybook.MainFeatureActionButton
-import org.example.daybook.TablesState
-import org.example.daybook.TablesViewModel
 
 /**
  * Abstraction for center navigation bar content that adapts based on navigation state
@@ -62,6 +66,11 @@ fun RowScope.CenterNavBarContent(
     modifier: Modifier = Modifier
 ) {
     val scope = rememberCoroutineScope()
+    val navBackStackEntry by navController.currentBackStackEntryAsState()
+    val currentRoute = navBackStackEntry?.destination?.route
+    val armedIndicatorColor = MaterialTheme.colorScheme.primary.copy(alpha = 0.95f)
+    val hoverFill = MaterialTheme.colorScheme.primary.copy(alpha = 0.12f)
+    val selectedFill = MaterialTheme.colorScheme.primary.copy(alpha = 0.24f)
 
     // Get chrome state from manager
     val chromeStateManager = LocalChromeStateManager.current
@@ -95,27 +104,37 @@ fun RowScope.CenterNavBarContent(
                         featureButtonLayouts[prominentButtonKey]?.contains(pw)
                     } ?: false
 
-                NavigationBarItem(
-                    onClick = {
-                        if (button.enabled) {
-                            scope.launch {
-                                button.onClick()
-                            }
-                        }
-                    },
+                val selected = isFeatureRouteSelected(button.key, currentRoute)
+                CustomBottomBarItem(
                     modifier =
                         Modifier
-                            .weight(1f)
+                            .padding(vertical = 3.dp)
                             .onGloballyPositioned { layoutCoordinates ->
                                 onFeatureButtonLayout(
                                     button.key,
                                     layoutCoordinates.boundsInWindow()
                                 )
                             },
-                    icon = { button.icon() },
-                    label = { button.label() },
-                    selected = hoverOver || readyState,
-                    enabled = button.enabled
+                    selected = selected,
+                    hover = hoverOver,
+                    armed = hoverOver && readyState,
+                    enabled = button.enabled,
+                    hoverFill = hoverFill,
+                    selectedFill = selectedFill,
+                    armedIndicatorColor = armedIndicatorColor,
+                    icon = button.icon,
+                    label = {
+                        androidx.compose.runtime.CompositionLocalProvider(
+                            LocalTextStyle provides MaterialTheme.typography.labelSmall
+                        ) {
+                            button.label()
+                        }
+                    },
+                    onClick = {
+                        if (button.enabled) {
+                            scope.launch { button.onClick() }
+                        }
+                    }
                 )
             }
         }
@@ -154,30 +173,107 @@ fun RowScope.CenterNavBarContent(
                         ?: false
                 val ready = featureReadyStates.getOrNull(idx)?.value ?: false
 
-                NavigationBarItem(
-                    onClick = {
-                        scope.launch {
-                            onFeatureActivate(feature)
-                        }
-                    },
+                val selected = isFeatureRouteSelected(feature.key, currentRoute)
+                CustomBottomBarItem(
                     modifier =
                         Modifier
-                            .weight(1f)
+                            .padding(vertical = 3.dp)
                             .onGloballyPositioned { layoutCoordinates ->
                                 onFeatureButtonLayout(
                                     feature.key,
                                     layoutCoordinates.boundsInWindow()
                                 )
                             },
-                    icon = {
-                        feature.icon()
-                    },
-                    label = {
-                        Text(feature.label, style = MaterialTheme.typography.labelSmall)
-                    },
-                    selected = hoverOver || ready
+                    selected = selected,
+                    hover = hoverOver,
+                    armed = hoverOver && ready,
+                    enabled = feature.enabled,
+                    hoverFill = hoverFill,
+                    selectedFill = selectedFill,
+                    armedIndicatorColor = armedIndicatorColor,
+                    icon = if (selected) (feature.selectedIcon ?: feature.icon) else feature.icon,
+                    label = { Text(feature.label, style = MaterialTheme.typography.labelSmall) },
+                    onClick = {
+                        scope.launch {
+                            if (selected) {
+                                (feature.onReselect ?: { onFeatureActivate(feature) }).invoke()
+                            } else {
+                                onFeatureActivate(feature)
+                            }
+                        }
+                    }
                 )
             }
         }
     }
+}
+
+@Composable
+private fun CustomBottomBarItem(
+    selected: Boolean,
+    hover: Boolean,
+    armed: Boolean,
+    enabled: Boolean,
+    hoverFill: androidx.compose.ui.graphics.Color,
+    selectedFill: androidx.compose.ui.graphics.Color,
+    armedIndicatorColor: androidx.compose.ui.graphics.Color,
+    icon: @Composable () -> Unit,
+    label: @Composable () -> Unit,
+    onClick: () -> Unit,
+    modifier: Modifier = Modifier
+) {
+    val itemShape = RoundedCornerShape(20.dp)
+    val outerInteraction = remember { MutableInteractionSource() }
+    val background =
+        when {
+            selected -> selectedFill
+            hover -> hoverFill
+            else -> androidx.compose.ui.graphics.Color.Transparent
+        }
+
+    Box(
+        modifier =
+            modifier
+                .selectable(
+                    selected = selected,
+                    onClick = onClick,
+                    enabled = enabled,
+                    interactionSource = outerInteraction,
+                    indication = null,
+                    role = Role.Tab
+                )
+                .padding(vertical = 2.dp),
+        contentAlignment = Alignment.Center
+    ) {
+        Column(
+            modifier = Modifier.padding(vertical = 2.dp),
+            horizontalAlignment = Alignment.CenterHorizontally,
+            verticalArrangement = Arrangement.spacedBy(4.dp)
+        ) {
+            Box(
+                modifier =
+                    Modifier
+                        .width(56.dp)
+                        .clip(itemShape)
+                        .background(background)
+                        .then(
+                            if (armed) {
+                                Modifier.border(width = 1.5.dp, color = armedIndicatorColor, shape = itemShape)
+                            } else {
+                                Modifier
+                            }
+                        )
+                        .padding(horizontal = 10.dp, vertical = 6.dp),
+                contentAlignment = Alignment.Center
+            ) {
+                Box { icon() }
+            }
+            Box { label() }
+        }
+    }
+}
+
+private fun isFeatureRouteSelected(featureKey: String, currentRoute: String?): Boolean {
+    val targetRoute = routeForFeatureKey(featureKey)
+    return targetRoute != null && targetRoute == currentRoute
 }

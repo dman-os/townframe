@@ -26,7 +26,10 @@ import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.ArrowDownward
 import androidx.compose.material.icons.filled.ArrowUpward
+import androidx.compose.material.icons.filled.CheckCircle
+import androidx.compose.material.icons.filled.Error
 import androidx.compose.material.icons.filled.MoreVert
+import androidx.compose.material.icons.filled.Sync
 import androidx.compose.material.icons.filled.Star
 import androidx.compose.material.icons.outlined.StarOutline
 import androidx.compose.material3.DropdownMenu
@@ -60,6 +63,8 @@ import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
+import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.graphics.vector.ImageVector
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.draw.clip
 import coil3.compose.AsyncImage
@@ -74,6 +79,18 @@ import org.example.daybook.uniffi.types.Doc
 import org.example.daybook.uniffi.types.FacetKey
 import org.example.daybook.uniffi.types.WellKnownFacet
 
+private enum class EditorSaveStatus {
+    Idle,
+    Saving,
+    Error
+}
+
+private data class SaveStatusUi(
+    val icon: ImageVector,
+    val tint: Color,
+    val label: String,
+)
+
 @Composable
 fun DocEditor(
     controller: EditorSessionController,
@@ -83,6 +100,12 @@ fun DocEditor(
     val state by controller.state.collectAsState()
     val snackbarHostState = remember { SnackbarHostState() }
     var uiMessage by remember { mutableStateOf<String?>(null) }
+    val saveStatus =
+        when {
+            state.saveError != null -> EditorSaveStatus.Error
+            state.isSaving -> EditorSaveStatus.Saving
+            else -> EditorSaveStatus.Idle
+        }
 
     LaunchedEffect(state.saveError) {
         val errorMessage = state.saveError ?: return@LaunchedEffect
@@ -119,6 +142,7 @@ fun DocEditor(
                     color = MaterialTheme.colorScheme.onSurfaceVariant,
                 )
             }
+            EditorSaveStatusIndicator(saveStatus = saveStatus, modifier = Modifier.fillMaxWidth())
             HorizontalDivider(modifier = Modifier.padding(vertical = 8.dp))
 
             BoxWithConstraints(modifier = Modifier.weight(1f).fillMaxWidth()) {
@@ -159,15 +183,6 @@ fun DocEditor(
                         if (index < state.contentFacetViews.lastIndex) {
                             HorizontalDivider(modifier = Modifier.padding(vertical = 8.dp))
                         }
-                    }
-
-                    if (state.isSaving) {
-                        Text(
-                            text = "Saving…",
-                            style = MaterialTheme.typography.bodySmall,
-                            color = MaterialTheme.colorScheme.onSurfaceVariant,
-                            modifier = Modifier.padding(top = 8.dp),
-                        )
                     }
 
                     if (showInlineFacetRack) {
@@ -267,6 +282,7 @@ private fun FacetListItem(
     }
 }
 
+@OptIn(ExperimentalMaterial3Api::class)
 @Composable
 private fun FacetHeader(
     descriptor: FacetViewDescriptor,
@@ -345,6 +361,51 @@ private fun FacetHeader(
                     }
                 }
             }
+        }
+    }
+}
+
+@Composable
+private fun toSaveStatusUi(saveStatus: EditorSaveStatus): SaveStatusUi? =
+    when (saveStatus) {
+        EditorSaveStatus.Idle -> null
+        EditorSaveStatus.Saving ->
+            SaveStatusUi(
+                icon = Icons.Filled.Sync,
+                tint = MaterialTheme.colorScheme.primary,
+                label = "Saving"
+            )
+        EditorSaveStatus.Error ->
+            SaveStatusUi(
+                icon = Icons.Filled.Error,
+                tint = MaterialTheme.colorScheme.error,
+                label = "Save failed"
+            )
+    }
+
+@OptIn(ExperimentalMaterial3Api::class)
+@Composable
+private fun EditorSaveStatusIndicator(saveStatus: EditorSaveStatus, modifier: Modifier = Modifier) {
+    val saveStatusUi = toSaveStatusUi(saveStatus) ?: return
+    Row(
+        modifier = modifier.padding(horizontal = 12.dp, vertical = 4.dp),
+        horizontalArrangement = Arrangement.End,
+        verticalAlignment = Alignment.CenterVertically
+    ) {
+        TooltipBox(
+            positionProvider = TooltipDefaults.rememberPlainTooltipPositionProvider(),
+            tooltip = {
+                PlainTooltip {
+                    Text(saveStatusUi.label)
+                }
+            },
+            state = rememberTooltipState(),
+        ) {
+            Icon(
+                imageVector = saveStatusUi.icon,
+                contentDescription = saveStatusUi.label,
+                tint = saveStatusUi.tint,
+            )
         }
     }
 }

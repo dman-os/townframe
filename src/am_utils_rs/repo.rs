@@ -26,6 +26,8 @@ pub use changes::{
 };
 pub use samod_core::ChangeOrigin as BigRepoChangeOrigin;
 
+const SQLITE_POOL_ACQUIRE_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(90);
+
 #[derive(Debug, Clone)]
 pub struct BigRepoConfig {
     pub sqlite_url: String,
@@ -151,6 +153,7 @@ impl BigRepo {
             .create_if_missing(true);
         let state_pool = sqlx::sqlite::SqlitePoolOptions::new()
             .max_connections(1)
+            .acquire_timeout(SQLITE_POOL_ACQUIRE_TIMEOUT)
             .connect_with(connect_options)
             .await
             .wrap_err("failed connecting big repo sqlite")?;

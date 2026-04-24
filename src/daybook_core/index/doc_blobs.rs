@@ -548,7 +548,7 @@ impl DocBlobsIndexRepo {
     ) -> Res<Vec<String>> {
         let hashes: Vec<String> = sqlx::query_scalar(
             r#"
-            SELECT blob_hash
+            SELECT DISTINCT blob_hash
             FROM doc_blob_refs
             WHERE doc_id = ?1
               AND branch_path = ?2

@@ -76,16 +76,23 @@ impl SyncRepoFfi {
     }
 
     async fn stop(&self) -> Result<(), FfiError> {
-        if let Some(token) = self.sync_stop_token.lock().await.take() {
-            token.stop().await?;
-        }
-        if let Some(token) = self.doc_blobs_index_stop_token.lock().await.take() {
-            token.stop().await?;
-        }
-        if let Some(token) = self.sqlite_local_state_stop_token.lock().await.take() {
-            token.stop().await?;
-        }
-        Ok(())
+        let sync_stop_token = self.sync_stop_token.lock().await.take();
+        let doc_blobs_index_stop_token = self.doc_blobs_index_stop_token.lock().await.take();
+        let sqlite_local_state_stop_token = self.sqlite_local_state_stop_token.lock().await.take();
+        self.fcx
+            .do_on_rt(async move {
+                if let Some(token) = sync_stop_token {
+                    token.stop().await?;
+                }
+                if let Some(token) = doc_blobs_index_stop_token {
+                    token.stop().await?;
+                }
+                if let Some(token) = sqlite_local_state_stop_token {
+                    token.stop().await?;
+                }
+                Ok::<(), FfiError>(())
+            })
+            .await
     }
 
     async fn get_ticket_url(self: Arc<Self>) -> Result<String, FfiError> {

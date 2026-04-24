@@ -42,12 +42,21 @@ pub struct InitRepo {
     store: crate::stores::AmStoreHandle<InitStore>,
     local_actor_id: ActorId,
     sql_pool: sqlx::SqlitePool,
+    progress_repo: Arc<crate::progress::ProgressRepo>,
+    startup_progress_task_id: Option<String>,
     running_dispatches: tokio::sync::RwLock<HashMap<String, String>>,
     per_boot_done: tokio::sync::RwLock<HashSet<String>>,
     cancel_token: CancellationToken,
     local_peer_id: String,
     _change_listener_tickets: Vec<am_utils_rs::repo::BigRepoChangeListenerRegistration>,
     _change_broker_leases: Vec<Arc<am_utils_rs::repo::BigRepoDocChangeBrokerLease>>,
+}
+
+#[derive(Clone)]
+pub struct BootInitProgressContext {
+    pub startup_progress_task_id_override: Option<String>,
+    pub stage_started: std::time::Instant,
+    pub total_started: Option<std::time::Instant>,
 }
 
 impl crate::repos::Repo for InitRepo {
@@ -66,6 +75,8 @@ impl InitRepo {
         app_doc_id: DocumentId,
         local_actor_id: ActorId,
         sql_pool: sqlx::SqlitePool,
+        progress_repo: Arc<crate::progress::ProgressRepo>,
+        startup_progress_task_id: Option<String>,
     ) -> Res<(Arc<Self>, crate::repos::RepoStopToken)> {
         sqlx::query(
             r#"
@@ -105,6 +116,8 @@ impl InitRepo {
             store,
             local_actor_id,
             sql_pool,
+            progress_repo,
+            startup_progress_task_id,
             running_dispatches: default(),
             per_boot_done: default(),
             cancel_token: cancel_token.clone(),
@@ -353,5 +366,50 @@ impl InitRepo {
             running.remove(init_id);
         }
         Ok(())
+    }
+
+    pub async fn report_boot_init_stage(
+        &self,
+        run_mode: &daybook_types::manifest::InitRunMode,
+        plug_id: &str,
+        init_key: &str,
+        stage: &str,
+        ctx: BootInitProgressContext,
+    ) -> Res<()> {
+        if !matches!(run_mode, daybook_types::manifest::InitRunMode::PerBoot) {
+            return Ok(());
+        }
+        let startup_task_id = ctx
+            .startup_progress_task_id_override
+            .or_else(|| self.startup_progress_task_id.clone());
+        let Some(task_id) = startup_task_id else {
+            return Ok(());
+        };
+        let stage_ms = ctx.stage_started.elapsed().as_millis();
+        let total_ms = ctx
+            .total_started
+            .map(|total| total.elapsed().as_millis())
+            .unwrap_or(stage_ms);
+        let from_app_start_ms = utils_rs::app_startup_elapsed_ms();
+        self.progress_repo
+            .add_update(
+                &task_id,
+                crate::progress::ProgressUpdate {
+                    at: jiff::Timestamp::now(),
+                    title: Some("App startup".to_string()),
+                    deets: crate::progress::ProgressUpdateDeets::Status {
+                        severity: crate::progress::ProgressSeverity::Info,
+                        message: format!(
+                            "rt init per-boot: {plug_id}/{init_key} {stage}; stage_ms={stage_ms} total_ms={total_ms} from_app_start_ms={from_app_start_ms}",
+                        ),
+                    },
+                },
+            )
+            .await
+            .wrap_err_with(|| {
+                format!(
+                    "failed to add_update for {plug_id}/{init_key} {stage} task_id={task_id}"
+                )
+            })
     }
 }

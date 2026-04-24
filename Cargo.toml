@@ -225,7 +225,7 @@ iroh = "0.97.0"
 
 [patch.crates-io]
 # wash-runtime = { path = "../wash/crates/wash-runtime/"}
-wash-runtime = { git = "https://github.com/wasmcloud/wasmcloud", rev = "33fa1990f9d4fbc85cac2a2b5f7f8be7b4fab83e" }
+wash-runtime = { git = "https://github.com/wasmcloud/wasmcloud", rev = "1eba3b068dd0ebc9fd45a9daa785bdb4476d8fd2" }
 autosurgeon = { git = "https://github.com/dman-os/autosurgeon", rev = "2896663de0e23f789cffe8e98bbbcbcbf21f23ad" }
 samod = { git = "https://github.com/dman-os/samod", rev = "2cf21c6654c60872080dc73be2bf344f3cf3269f" }
 samod-core = { git = "https://github.com/dman-os/samod", rev = "2cf21c6654c60872080dc73be2bf344f3cf3269f" }

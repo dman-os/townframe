@@ -224,6 +224,7 @@ impl AppFfiCtx {
     #[tracing::instrument(err)]
     async fn init() -> Result<Arc<Self>, FfiError> {
         utils_rs::setup_tracing_once();
+        utils_rs::init_app_startup_clock();
 
         let rt = crate::init_tokio()?;
         let rt = Arc::new(rt);

@@ -33,6 +33,7 @@ impl RtFfi {
         blobs_repo: Arc<crate::repos::blobs::BlobsRepoFfi>,
         config_repo: Arc<crate::repos::config::ConfigRepoFfi>,
         device_id: String,
+        startup_progress_task_id: Option<String>,
     ) -> Result<Arc<Self>, FfiError> {
         let cx = Arc::clone(&fcx.rcx);
         let repo_root = cx.layout.repo_root.to_path_buf();
@@ -42,7 +43,10 @@ impl RtFfi {
 
         let (rt, stop_token) = fcx
             .do_on_rt(daybook_core::rt::Rt::boot(
-                daybook_core::rt::RtConfig { device_id },
+                daybook_core::rt::RtConfig {
+                    device_id,
+                    startup_progress_task_id,
+                },
                 cx.doc_app.document_id().clone(),
                 wflow_db_url,
                 cx.sql.db_pool.clone(),
@@ -67,10 +71,15 @@ impl RtFfi {
     }
 
     pub async fn stop(&self) -> Result<(), FfiError> {
-        if let Some(token) = self.stop_token.lock().await.take() {
-            token.stop().await?;
-        }
-        Ok(())
+        let stop_token = self.stop_token.lock().await.take();
+        self.fcx
+            .do_on_rt(async move {
+                if let Some(token) = stop_token {
+                    token.stop().await?;
+                }
+                Ok::<(), FfiError>(())
+            })
+            .await
     }
 
     pub async fn dispatch_doc_facet(

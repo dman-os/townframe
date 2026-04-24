@@ -254,6 +254,7 @@ pub async fn test_cx_with_options(
     let (rt, rt_stop) = crate::rt::Rt::boot(
         crate::rt::RtConfig {
             device_id: device_id.clone(),
+            startup_progress_task_id: None,
         },
         app_doc_id,
         wflow_db_url,

@@ -91,6 +91,8 @@ import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.delay
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.withContext
 import io.github.vinceglb.filekit.dialogs.compose.rememberDirectoryPickerLauncher
 import io.github.vinceglb.filekit.path
 import org.example.daybook.capture.CameraCaptureContext
@@ -184,11 +186,20 @@ private object WelcomeRoute {
     const val CloneLocation = "welcome_clone_location"
 }
 
+private suspend fun fetchDefaultParentDir(): Result<String> =
+    try {
+        val defaultParent = withAppFfiCtx { gcx -> gcx.defaultCloneParentDir().trim() }
+        Result.success(defaultParent)
+    } catch (error: Throwable) {
+        if (error is CancellationException) throw error
+        Result.failure(error)
+    }
+
 @Composable
 fun WelcomeFlowNavHost(
     repos: List<KnownRepoEntry>,
     permCtx: PermissionsContext?,
-    cameraPreviewFfi: CameraPreviewFfi,
+    cameraPreviewFfi: CameraPreviewFfi?,
     selectedWelcomeRepo: KnownRepoEntry?,
     cloneUiState: CloneUiState?,
     createRepoUiState: CreateRepoUiState?,
@@ -333,19 +344,51 @@ fun WelcomeFlowNavHost(
         }
 
         composable(WelcomeRoute.CreateRepo) {
-            val editState =
-                (createRepoUiState as? CreateRepoUiState.Editing)
-                    ?: CreateRepoUiState.Editing(repoName = "daybook-repo")
+            val editState = createRepoUiState as? CreateRepoUiState.Editing
             fun updateCreateState(
                 transform: (CreateRepoUiState.Editing) -> CreateRepoUiState.Editing
             ) {
                 val current = createRepoUiState as? CreateRepoUiState.Editing ?: return
                 onCreateRepoUiStateChange(transform(current))
             }
-            if (createRepoUiState !is CreateRepoUiState.Editing) {
-                LaunchedEffect(Unit) {
-                    onCreateRepoUiStateChange(editState)
+
+            if (editState == null) {
+                Surface(
+                    modifier = Modifier.fillMaxSize(),
+                    color = MaterialTheme.colorScheme.background
+                ) {
+                    Box(
+                        modifier = Modifier.fillMaxSize(),
+                        contentAlignment = Alignment.Center
+                    ) {
+                        CircularProgressIndicator()
+                    }
                 }
+                LaunchedEffect(Unit) {
+                    val repoName = "daybook-repo"
+                    val defaultParentResult = fetchDefaultParentDir()
+                    if (defaultParentResult.isSuccess) {
+                        val defaultParent = defaultParentResult.getOrThrow()
+                        onCreateRepoUiStateChange(
+                            CreateRepoUiState.Editing(
+                                repoName = repoName,
+                                parentPath = defaultParent,
+                                isCreating = false
+                            )
+                        )
+                    } else {
+                        val error = defaultParentResult.exceptionOrNull() ?: error("unknown failure")
+                        onCreateRepoUiStateChange(
+                            CreateRepoUiState.Editing(
+                                repoName = repoName,
+                                parentPath = "",
+                                isCreating = false,
+                                errorMessage = "Failed loading default parent: ${describeThrowable(error)}"
+                            )
+                        )
+                    }
+                }
+                return@composable
             }
 
             CreateRepoScreen(
@@ -382,24 +425,22 @@ fun WelcomeFlowNavHost(
                 }
             )
 
-            if (editState.parentPath.isBlank()) {
-                LaunchedEffect(Unit) {
-                    try {
-                        val defaultParent = withAppFfiCtx { gcx ->
-                            gcx.defaultCloneParentDir().trim()
-                        }
-                        updateCreateState { current ->
-                            if (!current.parentPath.isBlank()) {
-                                current
-                            } else {
-                                current.copy(
+            if (editState.parentPath.isBlank() && !editState.isCreating) {
+                LaunchedEffect(editState.parentPath, editState.isCreating) {
+                    val defaultParentResult = fetchDefaultParentDir()
+                    if (defaultParentResult.isSuccess) {
+                        val defaultParent = defaultParentResult.getOrThrow()
+                        val latest = createRepoUiState as? CreateRepoUiState.Editing ?: return@LaunchedEffect
+                        if (latest.parentPath.isBlank()) {
+                            onCreateRepoUiStateChange(
+                                latest.copy(
                                     parentPath = defaultParent,
                                     errorMessage = null
                                 )
-                            }
+                            )
                         }
-                    } catch (error: Throwable) {
-                        if (error is CancellationException) throw error
+                    } else {
+                        val error = defaultParentResult.exceptionOrNull() ?: error("unknown failure")
                         updateCreateState { current ->
                             current.copy(
                                 errorMessage = "Failed loading default parent: ${describeThrowable(error)}"
@@ -574,13 +615,25 @@ fun WelcomeFlowNavHost(
             if (scannerState == null) {
                 LaunchedEffect(Unit) { navController.popBackStack() }
             } else {
-                CloneQrScannerScreen(
-                    cameraPreviewFfi = cameraPreviewFfi,
-                    onDetectedUrl = { detectedUrl ->
-                        onCloneUiStateChange(CloneUiState.UrlInput(urlInput = detectedUrl))
-                        navController.popBackStack(WelcomeRoute.CloneUrl, false)
+                if (cameraPreviewFfi == null) {
+                    Box(modifier = Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
+                        Column(
+                            horizontalAlignment = Alignment.CenterHorizontally,
+                            verticalArrangement = Arrangement.spacedBy(12.dp)
+                        ) {
+                            CircularProgressIndicator()
+                            Text("Initializing camera…", style = MaterialTheme.typography.bodyMedium)
+                        }
                     }
-                )
+                } else {
+                    CloneQrScannerScreen(
+                        cameraPreviewFfi = cameraPreviewFfi,
+                        onDetectedUrl = { detectedUrl ->
+                            onCloneUiStateChange(CloneUiState.UrlInput(urlInput = detectedUrl))
+                            navController.popBackStack(WelcomeRoute.CloneUrl, false)
+                        }
+                    )
+                }
             }
         }
 
@@ -1034,27 +1087,47 @@ private fun CloneQrScannerScreen(
         candidate.matches(Regex("^[A-Za-z][A-Za-z0-9+.-]*:.*$"))
 
     val useNativePreviewQr = remember(cameraPreviewFfi) { cameraPreviewFfi.supportsNativeQrAnalysis() }
-    val analyzer = remember { CameraQrAnalyzerFfi.load() }
+    var analyzer by remember { mutableStateOf<CameraQrAnalyzerFfi?>(null) }
+    LaunchedEffect(Unit) {
+        if (analyzer == null && !useNativePreviewQr) {
+            analyzer = withContext(Dispatchers.IO) { CameraQrAnalyzerFfi.load() }
+        }
+    }
+    val analyzerReady = analyzer
+    if (!useNativePreviewQr && analyzerReady == null) {
+        Box(modifier = Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
+            Column(
+                horizontalAlignment = Alignment.CenterHorizontally,
+                verticalArrangement = Arrangement.spacedBy(12.dp)
+            ) {
+                CircularProgressIndicator()
+                Text("Initializing QR analyzer…", style = MaterialTheme.typography.bodyMedium)
+            }
+        }
+        return
+    }
     val uiScope = rememberCoroutineScope()
     var userVisibleError by remember { mutableStateOf<String?>(null) }
     var hasCompleted by remember { mutableStateOf(false) }
     val frameBridge =
-        remember(analyzer) {
-            CameraQrOverlayBridge(
-                analyzer = analyzer,
-                onDetectedText = { rawText ->
-                    uiScope.launch {
-                        if (hasCompleted) return@launch
-                        val candidate = rawText.trim()
-                        if (!looksLikeUrl(candidate)) {
-                            userVisibleError = "Detected QR is not a URL."
-                            return@launch
+        remember(analyzerReady) {
+            analyzerReady?.let { readyAnalyzer ->
+                CameraQrOverlayBridge(
+                    analyzer = readyAnalyzer,
+                    onDetectedText = { rawText ->
+                        uiScope.launch {
+                            if (hasCompleted) return@launch
+                            val candidate = rawText.trim()
+                            if (!looksLikeUrl(candidate)) {
+                                userVisibleError = "Detected QR is not a URL."
+                                return@launch
+                            }
+                            hasCompleted = true
+                            onDetectedUrl(candidate)
                         }
-                        hasCompleted = true
-                        onDetectedUrl(candidate)
                     }
-                }
-            )
+                )
+            }
         }
     val previewBridge =
         remember(cameraPreviewFfi) {
@@ -1074,18 +1147,23 @@ private fun CloneQrScannerScreen(
                 }
             )
         }
-    val overlayState by (if (useNativePreviewQr) previewBridge.state else frameBridge.state).collectAsState()
+    val overlayState by
+        (if (useNativePreviewQr) {
+            previewBridge.state
+        } else {
+            frameBridge?.state ?: previewBridge.state
+        }).collectAsState()
 
-    androidx.compose.runtime.DisposableEffect(analyzer, frameBridge, previewBridge, useNativePreviewQr) {
+    androidx.compose.runtime.DisposableEffect(analyzerReady, frameBridge, previewBridge, useNativePreviewQr) {
         if (useNativePreviewQr) {
             previewBridge.start()
         } else {
-            frameBridge.start()
+            frameBridge?.start()
         }
         onDispose {
             previewBridge.stop()
-            frameBridge.stop()
-            analyzer.close()
+            frameBridge?.stop()
+            analyzerReady?.close()
         }
     }
 
@@ -1104,7 +1182,12 @@ private fun CloneQrScannerScreen(
                         } else {
                             overlayState.overlays
                         },
-                    onFrameAvailable = if (useNativePreviewQr) null else frameBridge::submitFrame
+                    onFrameAvailable =
+                        if (useNativePreviewQr) {
+                            null
+                        } else {
+                            frameBridge?.let { bridge -> { sample -> bridge.submitFrame(sample) } }
+                        }
                 )
             }
             val errorText = userVisibleError ?: overlayState.latestError
@@ -1327,6 +1410,10 @@ fun CloneShareDialogContent(
         errorMessage = null
         ticketUrl = null
         qrPngBytes = null
+        if (syncRepo == null) {
+            errorMessage = "Sync service is still starting. Try again in a moment."
+            return@LaunchedEffect
+        }
         try {
             val ticket = syncRepo.getTicketWithQrPng(768u)
             ticketUrl = ticket.ticketUrl

@@ -84,10 +84,6 @@ class DrawerViewModel(val drawerRepo: DrawerRepoFfi) : ViewModel() {
             override fun onDrawerEvent(event: DrawerEvent) {
                 viewModelScope.launch {
                     when (event) {
-                        is DrawerEvent.ListChanged -> {
-                            refreshRunner.submit(DrawerRefreshIntent.ListOnly)
-                        }
-
                         is DrawerEvent.DocAdded -> {
                             refreshRunner.submit(DrawerRefreshIntent.ListOnly)
                         }

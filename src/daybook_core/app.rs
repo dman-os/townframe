@@ -4,6 +4,9 @@ use sqlx::sqlite::{SqliteConnectOptions, SqliteJournalMode, SqlitePoolOptions};
 use sqlx::SqlitePool;
 use std::str::FromStr;
 
+const SQLITE_POOL_ACQUIRE_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(90);
+const SQLITE_BUSY_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(90);
+
 pub struct SqlCtx {
     pub db_pool: SqlitePool,
 }
@@ -26,10 +29,11 @@ impl SqlCtx {
         }
 
         let db_pool = SqlitePoolOptions::new()
+            .acquire_timeout(SQLITE_POOL_ACQUIRE_TIMEOUT)
             .connect_with(
                 SqliteConnectOptions::from_str(database_url)?
                     .journal_mode(SqliteJournalMode::Wal)
-                    .busy_timeout(std::time::Duration::from_secs(5))
+                    .busy_timeout(SQLITE_BUSY_TIMEOUT)
                     .create_if_missing(true),
             )
             .await

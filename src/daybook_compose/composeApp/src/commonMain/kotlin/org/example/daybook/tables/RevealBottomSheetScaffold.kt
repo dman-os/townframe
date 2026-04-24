@@ -132,9 +132,13 @@ class RevealBottomSheetState(
         }
     }
 
-    fun settle(velocity: Float, animationSpec: AnimationSpec<Float> = spring()) {
+    fun settle(
+        velocity: Float,
+        animationSpec: AnimationSpec<Float> = spring(),
+        onSettled: ((Float) -> Unit)? = null
+    ) {
         scope.launch {
-            val current = anim.value
+            val current = progress
             val anchors = this@RevealBottomSheetState.anchors
             // If a strong fling, bias toward direction
             val biasedTarget =
@@ -155,9 +159,11 @@ class RevealBottomSheetState(
                         ?: if (current < 0.5f) 0f else 1f
                 }
 
+            anim.snapTo(current.coerceIn(0f, 1f))
             anim.animateTo(target.coerceIn(0f, 1f), animationSpec = animationSpec)
             setProgressImmediate(anim.value)
             isVisible = anim.value > 0f
+            onSettled?.invoke(anim.value)
         }
     }
 }
@@ -481,7 +487,6 @@ fun RevealBottomSheetScaffold(
                     val visiblePx =
                         if (sheetState.isVisible) (peekPx + total * sheetState.progress) else 0f
                     val headerTopGlobal = (layoutHeight - visiblePx).toInt()
-
 
                     // Place underlay first so header can partially obscure it.
                     underlayPlaceables.fastForEach { up ->

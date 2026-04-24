@@ -366,6 +366,7 @@ jobs:
           echo "cli_archive_path=${cli_archive_path}" >> "${GITHUB_OUTPUT}"
 
       - uses: actions/upload-artifact@v6
+        name: upload app
         if: env.DAYBOOK_IS_RELEASE_BUILD != '1'
         with:
           name: daybook-compose-android-${{ env.DAYBOOK_COMPOSE_PROFILE }}
@@ -373,6 +374,7 @@ jobs:
           retention-days: ${{ env.DAYBOOK_COMPOSE_PROFILE == 'debug' && 7 || 90 }}
 
       - uses: actions/upload-artifact@v6
+        name: upload cli
         if: env.DAYBOOK_IS_RELEASE_BUILD != '1'
         with:
           name: daybook-cli-android-termux-aarch64-${{ env.DAYBOOK_COMPOSE_PROFILE }}
@@ -494,6 +496,7 @@ jobs:
           "cli_archive_path=$cliArchivePath" | Out-File -FilePath $env:GITHUB_OUTPUT -Encoding utf8 -Append
 
       - uses: actions/upload-artifact@v6
+        name: upload app
         if: env.DAYBOOK_IS_RELEASE_BUILD != '1'
         with:
           name: daybook-compose-windows-x64-${{ env.DAYBOOK_COMPOSE_PROFILE }}
@@ -501,6 +504,7 @@ jobs:
           retention-days: ${{ env.DAYBOOK_COMPOSE_PROFILE == 'debug' && 7 || 90 }}
 
       - uses: actions/upload-artifact@v6
+        name: upload cli
         if: env.DAYBOOK_IS_RELEASE_BUILD != '1'
         with:
           name: daybook-cli-windows-x64-${{ env.DAYBOOK_COMPOSE_PROFILE }}
@@ -624,6 +628,7 @@ jobs:
           echo "cli_archive_path=${cli_archive_path}" >> "${GITHUB_OUTPUT}"
 
       - uses: actions/upload-artifact@v6
+        name: upload app
         if: env.DAYBOOK_IS_RELEASE_BUILD != '1'
         with:
           name: daybook-compose-macos-arm64-${{ env.DAYBOOK_COMPOSE_PROFILE }}
@@ -631,6 +636,7 @@ jobs:
           retention-days: ${{ env.DAYBOOK_COMPOSE_PROFILE == 'debug' && 7 || 90 }}
 
       - uses: actions/upload-artifact@v6
+        name: upload cli
         if: env.DAYBOOK_IS_RELEASE_BUILD != '1'
         with:
           name: daybook-cli-macos-arm64-${{ env.DAYBOOK_COMPOSE_PROFILE }}

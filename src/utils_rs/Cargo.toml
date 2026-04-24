@@ -48,7 +48,7 @@ blake3 = { workspace = true, optional = true }
 # ahash = { workspace = true, optional = true }
 dashmap = { version = "6.1", features = ["serde"] }
 uuid = { version = "1", features = ["serde", "v4"] }
-indexmap = "2.11"
+indexmap = "2.14"
 regex = "1"
 time.workspace = true
 url.workspace = true

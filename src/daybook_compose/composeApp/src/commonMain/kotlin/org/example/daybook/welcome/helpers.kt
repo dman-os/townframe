@@ -1,14 +1,18 @@
 package org.example.daybook
 
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.withContext
 import org.example.daybook.uniffi.AppFfiCtx
 import org.example.daybook.uniffi.FfiException
 
 internal suspend inline fun <T> withAppFfiCtx(crossinline block: suspend (AppFfiCtx) -> T): T {
-    val gcx = AppFfiCtx.init()
-    try {
-        return block(gcx)
+    val gcx = withContext(Dispatchers.IO) { AppFfiCtx.init() }
+    return try {
+        block(gcx)
     } finally {
-        gcx.close()
+        withContext(Dispatchers.IO) {
+            gcx.close()
+        }
     }
 }
 
