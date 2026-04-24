@@ -99,7 +99,7 @@ impl RtStopToken {
         if let Err(err) = self.switch_worker.stop().await {
             warn!(
                 ?err,
-                "error stopping doc_changes_worker during shutdown - continuing"
+                "error stopping switch_worker during shutdown - continuing"
             );
         }
 

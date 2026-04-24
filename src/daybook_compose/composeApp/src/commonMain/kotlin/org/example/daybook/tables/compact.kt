@@ -245,20 +245,10 @@ fun CompactLayout(
     val chromeState by chromeStateManager.currentState.collectAsState()
     val prominentButtons = chromeState.additionalFeatureButtons.filter { it.prominent }
 
-    // If prominent buttons are displacing nav bar features, add displaced features to menu
-    val menuFeatures =
-        remember(baseMenuFeatures, navBarFeatures, prominentButtons) {
-            if (prominentButtons.isNotEmpty()) {
-                // Prominent buttons displace nav bar features, so add them to menu
-                baseMenuFeatures + navBarFeatures
-            } else {
-                baseMenuFeatures
-            }
-        }
     val nonProminentButtons = chromeState.additionalFeatureButtons.filter { !it.prominent }
     val allMenuItems =
-        remember(menuFeatures, nonProminentButtons) {
-            menuFeatures.withAdditionalFeatureButtons(nonProminentButtons)
+        remember(nonProminentButtons) {
+            nonProminentButtons.map { it.toFeatureItem() }
         }
 
     // Create controllers and ready-state trackers for each navBar feature (used in center rollout)
@@ -560,7 +550,15 @@ fun CompactLayout(
                     scope.launch {
                         leftDrawerState.close()
                     }
-                }
+                },
+                topLeftMenuItems =
+                    remember(baseMenuFeatures, navBarFeatures, prominentButtons) {
+                        if (prominentButtons.isNotEmpty()) {
+                            baseMenuFeatures + navBarFeatures
+                        } else {
+                            baseMenuFeatures
+                        }
+                    }
             )
         }
     ) {
@@ -907,6 +905,7 @@ fun LeftDrawer(
     onDismiss: () -> Unit,
     onAddTab: suspend () -> Unit,
     onTabSelected: (Tab) -> Unit,
+    topLeftMenuItems: List<FeatureItem>,
     modifier: Modifier = Modifier
 ) {
     val tablesRepo = LocalContainer.current.tablesRepo
@@ -930,7 +929,7 @@ fun LeftDrawer(
             modifier = Modifier.fillMaxWidth().padding(horizontal = 16.dp, vertical = 12.dp),
             verticalAlignment = Alignment.CenterVertically
         ) {
-            SidebarMenuButton()
+            SidebarMenuButton(menuItems = topLeftMenuItems)
             Spacer(Modifier.width(12.dp))
             Text(
                 text = "Daybook",

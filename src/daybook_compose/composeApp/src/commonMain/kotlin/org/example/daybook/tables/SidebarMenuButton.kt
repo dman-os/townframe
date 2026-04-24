@@ -12,14 +12,20 @@ import androidx.compose.runtime.Composable
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Modifier
 import androidx.compose.material3.MaterialTheme
 import org.example.daybook.LocalAppExitRequest
+import kotlinx.coroutines.launch
 
 @Composable
-fun SidebarMenuButton(modifier: Modifier = Modifier) {
+fun SidebarMenuButton(
+    menuItems: List<FeatureItem> = emptyList(),
+    modifier: Modifier = Modifier
+) {
     val exitRequest = LocalAppExitRequest.current
+    val scope = rememberCoroutineScope()
     var showMenu by remember { mutableStateOf(false) }
 
     Box(modifier = modifier) {
@@ -30,6 +36,17 @@ fun SidebarMenuButton(modifier: Modifier = Modifier) {
             expanded = showMenu,
             onDismissRequest = { showMenu = false }
         ) {
+            menuItems.forEach { item ->
+                DropdownMenuItem(
+                    text = { item.labelContent?.invoke() ?: Text(item.label) },
+                    leadingIcon = { item.icon() },
+                    enabled = item.enabled,
+                    onClick = {
+                        showMenu = false
+                        scope.launch { item.onActivate() }
+                    }
+                )
+            }
             DropdownMenuItem(
                 text = { Text("Exit") },
                 leadingIcon = { Icon(Icons.Default.Close, contentDescription = null) },

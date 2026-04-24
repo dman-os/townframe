@@ -35,3 +35,5 @@ jniLibs
 *.log
 
 __pycache__
+
+.codex

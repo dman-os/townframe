@@ -118,7 +118,6 @@ fun ExpandedLayout(
     contentType: DaybookContentType,
     onShowCloneShare: () -> Unit = {}
 ) {
-    var showFeaturesMenu by remember { mutableStateOf(false) }
     val navBarFeatures = rememberNavBarFeatures(navController)
     val sidebarFeatures = rememberSidebarFeatures(navController)
     val menuFeatures = rememberMenuFeatures(navController, onShowCloneShare = onShowCloneShare)
@@ -168,13 +167,6 @@ fun ExpandedLayout(
     // Get chrome state manager and observe the current state (from the current screen)
     val chromeStateManager = LocalChromeStateManager.current
     val screenChromeState by chromeStateManager.currentState.collectAsState()
-
-    // Get non-prominent buttons for dropdown menu
-    val nonProminentButtons = screenChromeState.additionalFeatureButtons.filter { !it.prominent }
-    val allMenuFeatures =
-        remember(menuFeatures, nonProminentButtons) {
-            menuFeatures.withAdditionalFeatureButtons(nonProminentButtons)
-        }
 
     // Merge layout-specific chrome with screen chrome
     // Check if screen chrome is empty (no title, no navigation icon, no actions, and showTopBar is false)
@@ -267,37 +259,6 @@ fun ExpandedLayout(
             actions = {
                 // Screen actions first, then layout actions
                 screenChromeState.actions?.invoke()
-                Box {
-                    IconButton(onClick = { showFeaturesMenu = true }) {
-                        Icon(
-                            imageVector = Icons.Default.MoreVert,
-                            contentDescription = "Open features menu"
-                        )
-                    }
-                    DropdownMenu(
-                        expanded = showFeaturesMenu,
-                        onDismissRequest = { showFeaturesMenu = false }
-                    ) {
-                        allMenuFeatures.forEach { item ->
-                            DropdownMenuItem(
-                                text = {
-                                    item.labelContent?.invoke() ?: Text(item.label)
-                                },
-                                onClick = {
-                                    showFeaturesMenu = false
-                                    scope.launch {
-                                        if (item.enabled) {
-                                            item.onActivate()
-                                        }
-                                    }
-                                },
-                                leadingIcon = {
-                                    item.icon()
-                                },
-                            )
-                        }
-                    }
-                }
             },
             showTopBar = if (isScreenChromeEmpty) true else screenChromeState.showTopBar
         )
@@ -562,7 +523,11 @@ private fun SidebarPaneDividerToggleButton(
 
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
-fun SidebarContent(navController: NavHostController, modifier: Modifier = Modifier) {
+fun SidebarContent(
+    navController: NavHostController,
+    menuFeatures: List<FeatureItem>,
+    modifier: Modifier = Modifier
+) {
     val density = LocalDensity.current
     var widthPx by remember { mutableIntStateOf(0) }
     val widthDp = with(density) { widthPx.toDp() }
@@ -613,7 +578,7 @@ fun SidebarContent(navController: NavHostController, modifier: Modifier = Modifi
                     .padding(horizontal = 16.dp, vertical = 8.dp)
                     .align(Alignment.Start)
             ) {
-                SidebarMenuButton()
+                SidebarMenuButton(menuItems = menuFeatures)
             }
             if (isWide) {
                 var selectedSidebarPane by remember { mutableIntStateOf(1) }
@@ -773,10 +738,11 @@ fun RenderLayoutPane(
     when (val variant = pane.variant) {
         is WindowLayoutPaneVariant.Sidebar -> {
             // Render sidebar UI
-            SidebarContent(
-                navController = navController,
-                modifier = modifier
-            )
+                SidebarContent(
+                    navController = navController,
+                    menuFeatures = rememberMenuFeatures(navController),
+                    modifier = modifier
+                )
         }
 
         is WindowLayoutPaneVariant.Routes -> {
