@@ -58,6 +58,7 @@ camino = "1.2.2"
 sqlx = { workspace = true, optional = true, features = ["sqlite", "runtime-tokio"] }
 rand.workspace = true
 blake3.workspace = true
+tempfile.workspace = true
 
 #
 # errors
@@ -67,11 +68,11 @@ irpc = { version = "0.12.0", optional = true, features = ["derive"] }
 
 #
 # sync
-automerge_sedimentree = { workspace = true, optional = true }
+automerge_sedimentree = { workspace = true, optional = true, features = ["rayon"] }
 future_form = { version = "0.3.0", optional = true }
 keyhive_core = { version = "0.3.0", optional = true }
 keyhive_crypto = { version = "0.1.0", optional = true}
-sedimentree_core = { workspace = true, optional = true }
+sedimentree_core = { workspace = true, optional = true, features = ["rayon"] }
 sedimentree_fs_storage = { workspace = true, optional = true }
 subduction_core = { workspace = true, optional = true }
 subduction_crypto = { workspace = true, optional = true }

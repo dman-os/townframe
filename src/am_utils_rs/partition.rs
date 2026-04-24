@@ -130,7 +130,8 @@ impl PartitionStore {
         sqlx::query(
             r#"CREATE TABLE IF NOT EXISTS partition_state(
                 partition_id TEXT PRIMARY KEY,
-                latest_txid INTEGER NOT NULL DEFAULT 0
+                latest_txid INTEGER NOT NULL DEFAULT 0,
+                change_count INTEGER NOT NULL DEFAULT 0
             )"#,
         )
         .execute(&self.state_pool)
@@ -146,10 +147,10 @@ impl PartitionStore {
     pub async fn ensure_partition(&self, partition_id: &PartitionId) -> Res<()> {
         sqlx::query(
             r#"
-            INSERT INTO partition_state(partition_id, latest_txid)
-            VALUES(?, 0)
-            ON CONFLICT(partition_id) DO NOTHING
-            "#,
+        INSERT INTO partition_state(partition_id, latest_txid)
+        VALUES(?, 0)
+        ON CONFLICT(partition_id) DO NOTHING
+        "#,
         )
         .bind(partition_id)
         .execute(&self.state_pool)
@@ -1075,6 +1076,16 @@ async fn record_item_change_tx(
     item_payload: &serde_json::Value,
 ) -> Res<u64> {
     let item_payload_json = serde_json::to_string(item_payload)?;
+    sqlx::query(
+        r#"
+        INSERT INTO partition_state(partition_id, latest_txid, change_count)
+        VALUES(?, 0, 0)
+        ON CONFLICT(partition_id) DO NOTHING
+        "#,
+    )
+    .bind(partition_id)
+    .execute(&mut *conn)
+    .await?;
     let txid = alloc_txid(conn).await?;
     sqlx::query(
         r#"
@@ -1093,6 +1104,16 @@ async fn record_item_change_tx(
     .bind(txid as i64)
     .execute(&mut *conn)
     .await?;
+    sqlx::query(
+        r#"
+        UPDATE partition_state
+        SET change_count = change_count + 1
+        WHERE partition_id = ?
+        "#,
+    )
+    .bind(partition_id)
+    .execute(&mut *conn)
+    .await?;
     Ok(txid)
 }
 
@@ -1103,6 +1124,16 @@ async fn record_item_deleted_tx(
     item_payload: &serde_json::Value,
 ) -> Res<u64> {
     let item_payload_json = serde_json::to_string(item_payload)?;
+    sqlx::query(
+        r#"
+        INSERT INTO partition_state(partition_id, latest_txid, change_count)
+        VALUES(?, 0, 0)
+        ON CONFLICT(partition_id) DO NOTHING
+        "#,
+    )
+    .bind(partition_id)
+    .execute(&mut *conn)
+    .await?;
     let txid = alloc_txid(conn).await?;
     sqlx::query(
         r#"
@@ -1119,6 +1150,16 @@ async fn record_item_deleted_tx(
     .bind(item_id)
     .bind(item_payload_json)
     .bind(txid as i64)
+    .execute(&mut *conn)
+    .await?;
+    sqlx::query(
+        r#"
+        UPDATE partition_state
+        SET change_count = change_count + 1
+        WHERE partition_id = ?
+        "#,
+    )
+    .bind(partition_id)
     .execute(&mut *conn)
     .await?;
     Ok(txid)

@@ -6,7 +6,6 @@ use crate::repo::{BigRepoChangeOrigin, DocumentId, PeerId};
 
 use core::convert::Infallible;
 use futures::future::BoxFuture;
-use sedimentree_core::collections::Set;
 use sedimentree_core::commit::{CommitStore, CountLeadingZeroBytes, FragmentState};
 use sedimentree_core::crypto::digest::Digest;
 use sedimentree_core::sedimentree::{Sedimentree, SedimentreeItem};
@@ -17,6 +16,7 @@ use tokio::sync::{mpsc, oneshot};
 use tokio_util::sync::CancellationToken;
 
 use super::changes;
+use automerge_sedimentree::indexed::OwnedParents;
 use subduction_core::subduction::request::FragmentRequested;
 
 const DOC_WORKER_IDLE_TTL: Duration = Duration::from_secs(3);
@@ -34,17 +34,25 @@ pub(super) struct LiveDocBundle {
     pub(super) doc_id: DocumentId,
     pub(super) doc: tokio::sync::Mutex<automerge::Automerge>,
     pub(super) fragment_state_store: tokio::sync::Mutex<
-        sedimentree_core::collections::Map<CommitId, FragmentState<Set<CommitId>>>,
+        sedimentree_core::collections::Map<CommitId, FragmentState<OwnedParents>>,
     >,
     pub(super) _lease: RuntimeDocLease,
 }
 
 impl LiveDocBundle {
-    fn new(doc_id: DocumentId, doc: automerge::Automerge, lease: RuntimeDocLease) -> Self {
+    fn new(
+        doc_id: DocumentId,
+        doc: automerge::Automerge,
+        fragment_state_store: sedimentree_core::collections::Map<
+            CommitId,
+            FragmentState<OwnedParents>,
+        >,
+        lease: RuntimeDocLease,
+    ) -> Self {
         Self {
             doc_id,
             doc: tokio::sync::Mutex::new(doc),
-            fragment_state_store: tokio::sync::Mutex::new(sedimentree_core::collections::Map::new()),
+            fragment_state_store: tokio::sync::Mutex::new(fragment_state_store),
             _lease: lease,
         }
     }
@@ -76,7 +84,7 @@ enum RuntimeCmd {
         endpoint: iroh::Endpoint,
         endpoint_addr: iroh::EndpointAddr,
         peer_id: PeerId,
-        done: oneshot::Sender<Res<()>>,
+        done: oneshot::Sender<Res<PeerId>>,
     },
     AcceptIncoming {
         quic_conn: iroh::endpoint::Connection,
@@ -324,12 +332,13 @@ impl BigRepoRuntimeHandle {
         done_rx.await.map_err(|_| eyre::eyre!(ERROR_CHANNEL))?
     }
 
+    #[tracing::instrument(skip_all, fields(%peer_id))]
     pub(super) async fn ensure_peer_connection(
         &self,
         endpoint: iroh::Endpoint,
         endpoint_addr: iroh::EndpointAddr,
         peer_id: PeerId,
-    ) -> Res<()> {
+    ) -> Res<PeerId> {
         let (done_tx, done_rx) = oneshot::channel();
         self.cmd_tx
             .send(RuntimeCmd::ConnectOutgoing {
@@ -342,6 +351,7 @@ impl BigRepoRuntimeHandle {
         done_rx.await.map_err(|_| eyre::eyre!(ERROR_CHANNEL))?
     }
 
+    #[tracing::instrument(skip_all)]
     pub(super) async fn accept_incoming_connection(
         &self,
         quic_conn: iroh::endpoint::Connection,
@@ -356,6 +366,7 @@ impl BigRepoRuntimeHandle {
         done_rx.await.map_err(|_| eyre::eyre!(ERROR_CHANNEL))?
     }
 
+    #[tracing::instrument(skip_all, fields(%peer_id))]
     pub(super) async fn close_peer_connection(&self, peer_id: PeerId) -> Res<()> {
         let (done_tx, done_rx) = oneshot::channel();
         self.cmd_tx
@@ -367,6 +378,10 @@ impl BigRepoRuntimeHandle {
         done_rx.await.map_err(|_| eyre::eyre!(ERROR_CHANNEL))?
     }
 
+    #[tracing::instrument(
+        skip_all,
+        fields(%doc_id, %peer_id, subscribe, timeout = ?timeout)
+    )]
     pub(super) async fn sync_doc_with_peer(
         &self,
         doc_id: DocumentId,
@@ -897,11 +912,23 @@ where
             .expect(ERROR_ACTOR);
     }
 
+    #[tracing::instrument(skip_all, fields(session = ?session))]
     async fn handle_sync_session_observed(
         &mut self,
         session: subduction_core::sync_session::SyncSession,
     ) {
         let doc_id: DocumentId = session.sedimentree_id.into();
+        println!(
+            "XXX runtime sync_session_observed doc_id={doc_id:?} peer_id={:?} kind={:?} remote_heads_present={}",
+            session.peer_id,
+            session.kind,
+            session.remote_heads.is_some()
+        );
+        debug!(
+            peer_id = %session.peer_id,
+            kind = ?session.kind,
+            "observed sync session"
+        );
         let worker = self.doc_worker_handle(doc_id).expect(ERROR_ACTOR);
         if let Some(entry) = self.doc_workers.get_mut(&doc_id) {
             entry.transient_work += 1;
@@ -1090,6 +1117,7 @@ where
         let bundle = Arc::new(LiveDocBundle::new(
             self.doc_id,
             initial_content,
+            ingested.fragment_state_store,
             RuntimeDocLease {
                 runtime: self.runtime_handle.clone(),
                 doc_id: self.doc_id,
@@ -1098,10 +1126,8 @@ where
         let (item_payload, heads) = {
             let doc = bundle.doc.lock().await;
             let heads = Arc::<[automerge::ChangeHash]>::from(doc.get_heads());
-            let change_count_hint = doc.get_changes(&[]).len().max(1) as u64;
             let item_payload = serde_json::json!({
                 "heads": crate::serialize_commit_heads(&heads),
-                "change_count_hint": change_count_hint,
             });
             (item_payload, heads)
         };
@@ -1133,9 +1159,11 @@ where
         let Some(doc) = self.take_or_load_transient_doc().await? else {
             return Ok(None);
         };
+        let fragment_state_store = build_fragment_state_store(&doc).await?;
         let bundle = Arc::new(LiveDocBundle::new(
             self.doc_id,
             doc,
+            fragment_state_store,
             RuntimeDocLease {
                 runtime: self.runtime_handle.clone(),
                 doc_id: self.doc_id,
@@ -1179,7 +1207,6 @@ where
         origin: BigRepoChangeOrigin,
     ) -> Res<()> {
         let sedimentree_id: SedimentreeId = self.doc_id.into();
-        let change_count = commits.len().max(1) as u64;
         for (head, parents, blob) in commits {
             let maybe_request = self
                 .subduction
@@ -1194,7 +1221,6 @@ where
             &self.partition_store,
             &self.change_manager,
             self.doc_id,
-            change_count,
             heads,
             patches,
             origin,
@@ -1208,6 +1234,17 @@ where
         &mut self,
         session: subduction_core::sync_session::SyncSession,
     ) -> Res<()> {
+        let doc_id = self.doc_id;
+        println!(
+            "XXX runtime apply_sync_session doc_id={:?} peer_id={:?} kind={:?} received_commits={} received_fragments={} sent_commits={} sent_fragments={}",
+            session.sedimentree_id,
+            session.peer_id,
+            session.kind,
+            session.received_commit_ids.len(),
+            session.received_fragment_ids.len(),
+            session.sent_commit_ids.len(),
+            session.sent_fragment_ids.len()
+        );
         if session.received_commit_ids.is_empty() && session.received_fragment_ids.is_empty() {
             return Ok(());
         }
@@ -1236,6 +1273,12 @@ where
                         .map_err(|err| eyre::eyre!("failed applying sync session blob: {err}"))?;
                 }
                 let after_heads = doc.get_heads();
+                println!(
+                    "XXX runtime apply_sync_session doc_id={:?} before_heads={} after_heads={}",
+                    doc_id,
+                    before_heads.len(),
+                    after_heads.len()
+                );
                 if before_heads == after_heads {
                     return Ok(None);
                 }
@@ -1246,13 +1289,10 @@ where
         let Some((after_heads, patches)) = maybe_delta else {
             return Ok(());
         };
-        let change_count =
-            (session.received_commit_ids.len() + session.received_fragment_ids.len()).max(1) as u64;
         commit_delta_bookkeep(
             &self.partition_store,
             &self.change_manager,
             self.doc_id,
-            change_count,
             after_heads,
             patches,
             BigRepoChangeOrigin::Remote {
@@ -1361,7 +1401,7 @@ where
         endpoint: iroh::Endpoint,
         endpoint_addr: iroh::EndpointAddr,
         peer_id: PeerId,
-        done: oneshot::Sender<Res<()>>,
+        done: oneshot::Sender<Res<PeerId>>,
     ) {
         let subduction: Arc<RuntimeSubduction<S>> = Arc::clone(&self.subduction);
         let connect_signer = self.connect_signer.clone();
@@ -1370,11 +1410,12 @@ where
         let connected_peers = Arc::clone(&self.connected_peers);
         let fut = async move {
             if connected_peers.lock().await.contains_key(&peer_id) {
-                return Ok(());
+                return Ok(peer_id);
             }
             let connect = connect_outgoing(endpoint, endpoint_addr, &connect_signer)
                 .await
                 .map_err(|err| ferr!("failed subduction iroh connect: {err}"))?;
+            let peer_id = PeerId::from(connect.authenticated.peer_id());
             let stop_token = RuntimePeerConnectionStopToken::new();
             let fut_listener = {
                 let stop = stop_token.child_token();
@@ -1453,7 +1494,7 @@ where
                     stop_token,
                 })
                 .expect(ERROR_CHANNEL);
-            Ok(())
+            Ok(peer_id)
         };
         self.spawn_background(async move {
             done.send(fut.await).expect(ERROR_CALLER);
@@ -1598,6 +1639,7 @@ where
         });
     }
 
+    #[tracing::instrument(skip_all, fields(%peer_id))]
     async fn handle_connection_lost(&self, peer_id: PeerId) {
         let maybe_stop = self.connected_peers.lock().await.remove(&peer_id);
         if let Some(connection) = maybe_stop {
@@ -1607,11 +1649,13 @@ where
         }
     }
 
+    #[tracing::instrument(skip_all, fields(%peer_id))]
     async fn handle_connection_established(
         &self,
         peer_id: PeerId,
         stop_token: RuntimePeerConnectionStopToken,
     ) {
+        println!("XXX runtime connection_established peer_id={peer_id:?}");
         if stop_token.is_cancelled() {
             return;
         }
@@ -1627,6 +1671,10 @@ impl<S> BigRepoRuntimeWorker<S>
 where
     S: RuntimeSubductionStorage,
 {
+    #[tracing::instrument(
+        skip_all,
+        fields(%doc_id, %peer_id, subscribe, timeout = ?timeout)
+    )]
     async fn handle_sync_doc_with_peer(
         &mut self,
         doc_id: DocumentId,
@@ -1635,6 +1683,9 @@ where
         timeout: Option<Duration>,
         done: oneshot::Sender<Res<SyncDocOutcome>>,
     ) {
+        println!(
+            "XXX runtime handle_sync_doc_with_peer doc_id={doc_id:?} peer_id={peer_id:?} subscribe={subscribe} timeout={timeout:?}"
+        );
         let worker = self.doc_worker_handle(doc_id).expect(ERROR_ACTOR);
         if let Some(entry) = self.doc_workers.get_mut(&doc_id) {
             entry.transient_work += 1;
@@ -1649,7 +1700,9 @@ where
             .expect(ERROR_ACTOR);
     }
 
+    #[tracing::instrument(skip_all, fields(%doc_id, %peer_id))]
     async fn handle_remote_heads_observed(&mut self, doc_id: DocumentId, peer_id: PeerId) {
+        println!("XXX runtime remote_heads_observed doc_id={doc_id:?} peer_id={peer_id:?}");
         if self
             .live_bundles
             .get(&doc_id)
@@ -1686,14 +1739,12 @@ async fn commit_delta_bookkeep(
     partition_store: &Arc<PartitionStore>,
     change_manager: &Arc<changes::ChangeListenerManager>,
     doc_id: DocumentId,
-    change_count_hint: u64,
     heads: Vec<automerge::ChangeHash>,
     patches: Vec<automerge::Patch>,
     origin: BigRepoChangeOrigin,
 ) -> Res<()> {
     let item_payload = serde_json::json!({
         "heads": crate::serialize_commit_heads(&heads),
-        "change_count_hint": change_count_hint.max(1),
     });
     partition_store
         .record_member_item_change(&doc_id.to_string(), &item_payload)
@@ -1746,7 +1797,7 @@ where
             .map_err(|err| ferr!("failed building fragment store: {err}"))?
             .into_iter()
             .cloned()
-            .collect::<Vec<FragmentState<Set<CommitId>>>>();
+            .collect::<Vec<FragmentState<OwnedParents>>>();
         let mut out = Vec::with_capacity(states.len());
         for state in states {
             let members: Vec<automerge::ChangeHash> = state
@@ -1794,15 +1845,19 @@ where
     }
 
     impl<'a> CommitStore<'a> for OwnedSedimentreeAutomerge<'a> {
-        type Node = Set<CommitId>;
+        type Node = OwnedParents;
         type LookupError = Infallible;
 
         fn lookup(&self, id: CommitId) -> Result<Option<Self::Node>, Self::LookupError> {
             let change_hash = automerge::ChangeHash(*id.as_bytes());
-            Ok(self
-                .0
-                .get_change_meta_by_hash(&change_hash)
-                .map(|meta| meta.deps.iter().map(|dep| CommitId::new(dep.0)).collect()))
+            Ok(self.0.get_change_meta_by_hash(&change_hash).map(|meta| {
+                OwnedParents::from(
+                    meta.deps
+                        .iter()
+                        .map(|dep| CommitId::new(dep.0))
+                        .collect::<sedimentree_core::collections::Set<_>>(),
+                )
+            }))
         }
     }
 }
@@ -1966,4 +2021,19 @@ where
         sedimentrees.insert(sedimentree_id, tree).await;
     }
     Ok(Some(doc))
+}
+
+async fn build_fragment_state_store(
+    doc: &automerge::Automerge,
+) -> Res<sedimentree_core::collections::Map<CommitId, FragmentState<OwnedParents>>> {
+    let metadata = doc.get_changes_meta(&[]);
+    let store =
+        automerge_sedimentree::indexed::IndexedSedimentreeAutomerge::from_metadata(&metadata);
+    let heads: Vec<CommitId> = doc.get_heads().iter().map(|h| CommitId::new(h.0)).collect();
+    let mut known: sedimentree_core::collections::Map<CommitId, FragmentState<OwnedParents>> =
+        sedimentree_core::collections::Map::new();
+    store
+        .build_fragment_store(&heads, &mut known, &CountLeadingZeroBytes)
+        .map_err(|err| ferr!("failed building fragment state store: {err}"))?;
+    Ok(known)
 }

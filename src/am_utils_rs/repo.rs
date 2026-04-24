@@ -255,7 +255,8 @@ impl BigRepo {
         endpoint_addr: iroh::EndpointAddr,
         peer_id: PeerId,
     ) -> Res<(BigRepoConnection, BigRepoConnectionStopToken)> {
-        self.runtime
+        let peer_id = self
+            .runtime
             .ensure_peer_connection(endpoint, endpoint_addr, peer_id)
             .await?;
         let closed = Arc::new(AtomicBool::new(false));
@@ -577,6 +578,11 @@ impl BigDocHandle {
         &self.bundle.doc_id
     }
 
+    #[cfg(test)]
+    async fn fragment_state_store_len(&self) -> usize {
+        self.bundle.fragment_state_store.lock().await.len()
+    }
+
     pub async fn with_document_read<F, R>(&self, operation: F) -> R
     where
         F: FnOnce(&automerge::Automerge) -> R,
@@ -660,13 +666,30 @@ mod tests {
     use super::*;
     use automerge::{transaction::Transactable, ReadDoc, ScalarValue};
     use autosurgeon::Prop;
+    use std::path::PathBuf;
     use std::sync::atomic::AtomicBool;
-    use tokio::time::{timeout, Duration};
+    use std::sync::{
+        atomic::{AtomicUsize, Ordering},
+        Arc,
+    };
+    use tempfile::tempdir;
+    use tokio::{
+        sync::Notify,
+        time::{timeout, Duration},
+    };
 
     async fn boot_repo() -> Res<(Arc<BigRepo>, BigRepoStopToken)> {
         BigRepo::boot(Config {
             peer_id: PeerId::new([7_u8; 32]),
             storage: StorageConfig::Memory,
+        })
+        .await
+    }
+
+    async fn boot_disk_repo(path: PathBuf) -> Res<(Arc<BigRepo>, BigRepoStopToken)> {
+        BigRepo::boot(Config {
+            peer_id: PeerId::new([7_u8; 32]),
+            storage: StorageConfig::Disk { path },
         })
         .await
     }
@@ -708,6 +731,22 @@ mod tests {
             .expect("change listener closed unexpectedly")
     }
 
+    fn read_proc_status_value(label: &str) -> Option<u64> {
+        let status = std::fs::read_to_string("/proc/self/status").ok()?;
+        status.lines().find_map(|line| {
+            let rest = line.strip_prefix(label)?;
+            rest.split_whitespace().nth(0)?.parse().ok()
+        })
+    }
+
+    fn rss_kib() -> Option<u64> {
+        read_proc_status_value("VmRSS:")
+    }
+
+    fn hwm_kib() -> Option<u64> {
+        read_proc_status_value("VmHWM:")
+    }
+
     #[tokio::test]
     async fn put_doc_get_doc_and_export_roundtrip() -> Res<()> {
         let (repo, _stop_token) = boot_repo().await?;
@@ -731,6 +770,32 @@ mod tests {
             .expect("export should exist");
         assert!(!exported.is_empty());
         drop(handle);
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn reopened_doc_rehydrates_fragment_state_store() -> Res<()> {
+        let temp_root = tempdir()?;
+        let repo_path = temp_root.path().join("repo");
+        let doc_id = DocumentId::random();
+        let payload = uuid::Uuid::new_v4().to_string();
+        let value = make_sync_doc_value_with_payload("base", 1024, &payload);
+
+        let (repo, stop_token) = boot_disk_repo(repo_path.clone()).await?;
+        let mut doc = automerge::Automerge::new();
+        write_sync_doc_value_as_transactions(&mut doc, &value);
+        let handle = repo.put_doc(doc_id, doc).await?;
+        drop(handle);
+        stop_token.stop().await?;
+
+        let (repo, stop_token) = boot_disk_repo(repo_path).await?;
+        let reopened = repo.get_doc(&doc_id).await?.expect("doc should exist");
+        assert!(
+            reopened.fragment_state_store_len().await > 0,
+            "reopened docs should rebuild fragment state"
+        );
+        drop(reopened);
+        stop_token.stop().await?;
         Ok(())
     }
 
@@ -765,6 +830,71 @@ mod tests {
         connection.close().await?;
         connection.close().await?;
         stop_token.stop().await?;
+        Ok(())
+    }
+
+    #[test]
+    fn large_fragment_store_build_profile_par() -> Res<()> {
+        use automerge_sedimentree::indexed::IndexedSedimentreeAutomerge;
+        use sedimentree_core::{
+            collections::Map,
+            commit::{CommitStore, CountLeadingZeroBytes, FragmentState},
+        };
+        use std::time::Instant;
+
+        const SWEEP_COUNTS: &[usize] = &[128, 256, 512, 1024, 2048, 4096];
+
+        for &item_count in SWEEP_COUNTS {
+            let payload = uuid::Uuid::new_v4().to_string();
+            let value_started = Instant::now();
+            let value = make_sync_doc_value_with_payload("base", item_count, &payload);
+            let value_elapsed = value_started.elapsed();
+
+            let mut doc = automerge::Automerge::new();
+            let write_started = Instant::now();
+            write_sync_doc_value_as_transactions(&mut doc, &value);
+            let write_elapsed = write_started.elapsed();
+
+            let meta_started = Instant::now();
+            let metadata = doc.get_changes_meta(&[]);
+            let meta_elapsed = meta_started.elapsed();
+            let heads: Vec<_> = doc
+                .get_heads()
+                .iter()
+                .map(|hash| sedimentree_core::loose_commit::id::CommitId::new(hash.0))
+                .collect();
+            let store = IndexedSedimentreeAutomerge::from_metadata(&metadata);
+            let mut known: Map<
+                sedimentree_core::loose_commit::id::CommitId,
+                FragmentState<automerge_sedimentree::indexed::OwnedParents>,
+            > = Map::new();
+
+            let rss_before = rss_kib();
+            let hwm_before = hwm_kib();
+            let start = Instant::now();
+            let fresh = store
+                .build_fragment_store_par(&heads, &mut known, &CountLeadingZeroBytes)
+                .expect("build_fragment_store");
+            let elapsed = start.elapsed();
+            let rss_after = rss_kib();
+            let hwm_after = hwm_kib();
+
+            eprintln!(
+                "large_fragment_store_profile_par item_count={} value_ms={} write_ms={} metadata_ms={} build_ms={} changes={} heads={} fragments={} rss_kib_before={:?} rss_kib_after={:?} hwm_kib_before={:?} hwm_kib_after={:?}",
+                item_count,
+                value_elapsed.as_millis(),
+                write_elapsed.as_millis(),
+                meta_elapsed.as_millis(),
+                elapsed.as_millis(),
+                metadata.len(),
+                heads.len(),
+                fresh.len(),
+                rss_before,
+                rss_after,
+                hwm_before,
+                hwm_after,
+            );
+        }
         Ok(())
     }
 
@@ -1002,6 +1132,751 @@ mod tests {
             .with_document_read(|doc| get_int_at_root(doc, "count"))
             .await;
         assert_eq!(final_count, (writer_count * increments_per_writer) as i64);
+        Ok(())
+    }
+
+    const SYNC_DOC_ITEMS: usize = 32;
+    const SYNC_DOC_PAYLOAD_LEN: usize = 384;
+    const SYNC_LARGE_DOC_ITEMS: usize = 1000;
+    const SYNC_LARGE_DOC_PAYLOAD_LEN: usize = 1024;
+    const SYNC_PROPAGATION_TIMEOUT: Duration = Duration::from_secs(10);
+    const SYNC_CASE_TIMEOUT: Duration = Duration::from_secs(30);
+
+    #[derive(Clone, Copy, Debug)]
+    struct SyncMutation {
+        item_idx: usize,
+        note_key: &'static str,
+        side_label: &'static str,
+    }
+
+    fn make_sync_doc_value(
+        title: &str,
+        item_count: usize,
+        payload_len: usize,
+    ) -> serde_json::Value {
+        let payload = "v".repeat(payload_len.max(1));
+        make_sync_doc_value_with_payload(title, item_count, &payload)
+    }
+
+    fn make_sync_doc_value_with_payload(
+        title: &str,
+        item_count: usize,
+        payload: &str,
+    ) -> serde_json::Value {
+        serde_json::json!({
+            "title": title,
+            "items": (0..item_count)
+                .map(|idx| serde_json::json!({
+                    "value": format!("{title}-{idx}-{payload}"),
+                    "note": ""
+                }))
+                .collect::<Vec<_>>(),
+        })
+    }
+
+    fn apply_sync_mutation(
+        doc: &mut serde_json::Value,
+        mutation: SyncMutation,
+        payload_len: usize,
+    ) {
+        let items = doc
+            .get_mut("items")
+            .and_then(serde_json::Value::as_array_mut)
+            .expect("sync doc should contain an items array");
+        let item = items
+            .get_mut(mutation.item_idx)
+            .and_then(serde_json::Value::as_object_mut)
+            .expect("sync mutation item index should exist");
+        item.insert(
+            "note".into(),
+            serde_json::Value::String(format!(
+                "{}:{}:{}",
+                mutation.side_label,
+                mutation.note_key,
+                "n".repeat(payload_len.max(1))
+            )),
+        );
+    }
+
+    fn sync_item_note(doc: &serde_json::Value, item_idx: usize) -> &str {
+        doc.get("items")
+            .and_then(serde_json::Value::as_array)
+            .and_then(|items| items.get(item_idx))
+            .and_then(serde_json::Value::as_object)
+            .and_then(|item| item.get("note"))
+            .and_then(serde_json::Value::as_str)
+            .expect("sync doc item note should exist")
+    }
+
+    fn sync_note_snapshot(doc: &serde_json::Value, item_indices: &[usize]) -> Vec<(usize, String)> {
+        item_indices
+            .iter()
+            .copied()
+            .map(|item_idx| (item_idx, sync_item_note(doc, item_idx).to_string()))
+            .collect()
+    }
+
+    fn apply_sync_mutation_in_place(
+        doc: &mut automerge::Automerge,
+        mutation: SyncMutation,
+        payload_len: usize,
+    ) {
+        let note = format!(
+            "{}:{}:{}",
+            mutation.side_label,
+            mutation.note_key,
+            "n".repeat(payload_len.max(1))
+        );
+        let items_obj = doc
+            .get(automerge::ROOT, "items")
+            .expect("failed reading sync items list")
+            .expect("sync doc should contain an items list")
+            .1;
+        let item_obj = doc
+            .get(&items_obj, mutation.item_idx)
+            .expect("failed reading sync item")
+            .expect("sync mutation item index should exist")
+            .1;
+        doc.transact(|tx| {
+            tx.put(&item_obj, "note", note.as_str())
+                .expect("failed writing sync item note");
+            eyre::Ok(())
+        })
+        .expect("failed applying sync mutation in place");
+    }
+
+    fn write_sync_doc_value(doc: &mut automerge::Automerge, value: &serde_json::Value) {
+        let title = value
+            .get("title")
+            .and_then(serde_json::Value::as_str)
+            .expect("sync doc should contain a title");
+        let items = value
+            .get("items")
+            .and_then(serde_json::Value::as_array)
+            .expect("sync doc should contain an items array");
+        doc.transact(|tx| {
+            tx.put(automerge::ROOT, "title", title)
+                .expect("failed writing sync title");
+            let items_obj = tx
+                .put_object(automerge::ROOT, "items", automerge::ObjType::List)
+                .expect("failed creating sync items list");
+            for item in items.iter().rev() {
+                let item_obj = tx
+                    .insert_object(&items_obj, 0, automerge::ObjType::Map)
+                    .expect("failed inserting sync item");
+                let item_value = item
+                    .get("value")
+                    .and_then(serde_json::Value::as_str)
+                    .expect("sync item should contain a string value");
+                let item_note = item
+                    .get("note")
+                    .and_then(serde_json::Value::as_str)
+                    .expect("sync item should contain a string note");
+                tx.put(&item_obj, "value", item_value)
+                    .expect("failed writing sync item value");
+                tx.put(&item_obj, "note", item_note)
+                    .expect("failed writing sync item note");
+            }
+            eyre::Ok(())
+        })
+        .expect("failed writing sync doc");
+    }
+
+    fn write_sync_doc_value_as_transactions(
+        doc: &mut automerge::Automerge,
+        value: &serde_json::Value,
+    ) {
+        let title = value
+            .get("title")
+            .and_then(serde_json::Value::as_str)
+            .expect("sync doc should contain a title");
+        let items = value
+            .get("items")
+            .and_then(serde_json::Value::as_array)
+            .expect("sync doc should contain an items array");
+        doc.transact(|tx| {
+            tx.put(automerge::ROOT, "title", title)
+                .expect("failed writing sync title");
+            tx.put_object(automerge::ROOT, "items", automerge::ObjType::List)
+                .expect("failed creating sync items list");
+            eyre::Ok(())
+        })
+        .expect("failed creating sync doc root");
+
+        let items_obj = doc
+            .get(automerge::ROOT, "items")
+            .expect("sync doc should contain an items list")
+            .unwrap()
+            .1;
+
+        for (idx, item) in items.iter().enumerate() {
+            let item_value = item
+                .get("value")
+                .and_then(serde_json::Value::as_str)
+                .expect("sync item should contain a string value");
+            let item_note = item
+                .get("note")
+                .and_then(serde_json::Value::as_str)
+                .expect("sync item should contain a string note");
+            doc.transact(|tx| {
+                let item_obj = tx
+                    .insert_object(&items_obj, idx, automerge::ObjType::Map)
+                    .expect("failed inserting sync item");
+                tx.put(&item_obj, "value", item_value)
+                    .expect("failed writing sync item value");
+                tx.put(&item_obj, "note", item_note)
+                    .expect("failed writing sync item note");
+                eyre::Ok(())
+            })
+            .expect("failed writing sync item");
+        }
+    }
+
+    #[tracing::instrument(skip_all, fields(doc_id = %handle.document_id()))]
+    async fn read_json_doc(handle: &BigDocHandle) -> serde_json::Value {
+        handle
+            .with_document(|doc| {
+                autosurgeon::hydrate::<_, crate::codecs::ThroughJson<serde_json::Value>>(doc)
+                    .expect("failed hydrating sync doc")
+                    .0
+            })
+            .await
+            .expect("sync doc should always hydrate as json")
+    }
+
+    #[tracing::instrument(skip_all, fields(doc_id = %handle.document_id(), timeout_ms = timeout_dur.as_millis() as u64))]
+    async fn wait_for_json_doc(
+        handle: &BigDocHandle,
+        expected: &serde_json::Value,
+        timeout_dur: Duration,
+    ) {
+        timeout(timeout_dur, async {
+            loop {
+                if read_json_doc(handle).await == *expected {
+                    break;
+                }
+                tokio::time::sleep(Duration::from_millis(25)).await;
+            }
+        })
+        .await
+        .expect("timed out waiting for JSON document to converge");
+    }
+
+    struct SyncRepoNode {
+        repo: Arc<BigRepo>,
+        stop_token: BigRepoStopToken,
+        endpoint: iroh::Endpoint,
+        accept_count: Arc<AtomicUsize>,
+        accept_notify: Arc<Notify>,
+        accepted_connection: Arc<tokio::sync::Mutex<Option<BigRepoConnection>>>,
+        accept_task: Option<tokio::task::JoinHandle<()>>,
+    }
+
+    impl SyncRepoNode {
+        #[tracing::instrument(skip(path), fields(seed, accept_incoming))]
+        async fn boot(path: PathBuf, seed: u8, accept_incoming: bool) -> Res<Self> {
+            tracing::info!(path = %path.display(), "booting sync repo node");
+            let (repo, stop_token) = BigRepo::boot(Config {
+                peer_id: PeerId::new([seed; 32]),
+                storage: StorageConfig::Disk { path },
+            })
+            .await?;
+            let endpoint = iroh::Endpoint::builder()
+                .alpns(vec![subduction_iroh::ALPN.to_vec()])
+                .clear_ip_transports()
+                .bind_addr((std::net::Ipv4Addr::LOCALHOST, 0))?
+                .relay_mode(iroh::RelayMode::Disabled)
+                .clear_address_lookup()
+                .bind()
+                .await
+                .wrap_err("failed binding iroh endpoint")?;
+
+            let accept_count = Arc::new(AtomicUsize::new(0));
+            let accept_notify = Arc::new(Notify::new());
+            let accepted_connection = Arc::new(tokio::sync::Mutex::new(None));
+            let accept_task = if accept_incoming {
+                let accept_repo = Arc::clone(&repo);
+                let accept_endpoint = endpoint.clone();
+                let accept_count = Arc::clone(&accept_count);
+                let accept_notify = Arc::clone(&accept_notify);
+                let accepted_connection = Arc::clone(&accepted_connection);
+                Some(tokio::spawn(async move {
+                    loop {
+                        let Some(incoming) = accept_endpoint.accept().await else {
+                            break;
+                        };
+                        let quic_conn = incoming.await.expect("failed accepting iroh connection");
+                        let (connection, _stop_token) = accept_repo
+                            .accept_peer_connection(quic_conn)
+                            .await
+                            .expect("failed accepting peer connection");
+                        *accepted_connection.lock().await = Some(connection.clone());
+                        accept_count.fetch_add(1, Ordering::SeqCst);
+                        accept_notify.notify_waiters();
+                    }
+                }))
+            } else {
+                None
+            };
+
+            tracing::info!(
+                repo_peer_id = %repo.local_peer_id(),
+                endpoint_id = %endpoint.addr().id,
+                accept_incoming,
+                "booted sync repo node"
+            );
+
+            Ok(Self {
+                repo,
+                stop_token,
+                endpoint,
+                accept_count,
+                accept_notify,
+                accepted_connection,
+                accept_task,
+            })
+        }
+
+        fn peer_id(&self) -> PeerId {
+            self.repo.local_peer_id()
+        }
+
+        #[tracing::instrument(skip(self), fields(expected))]
+        async fn wait_for_accepts(&self, expected: usize) {
+            timeout(SYNC_PROPAGATION_TIMEOUT, async {
+                loop {
+                    if self.accept_count.load(Ordering::SeqCst) >= expected {
+                        break;
+                    }
+                    self.accept_notify.notified().await;
+                }
+            })
+            .await
+            .expect("timed out waiting for iroh accept loop");
+        }
+
+        async fn accepted_connection(&self) -> BigRepoConnection {
+            self.accepted_connection
+                .lock()
+                .await
+                .clone()
+                .expect("expected accepted connection to be available")
+        }
+
+        #[tracing::instrument(skip(self))]
+        async fn shutdown(mut self) -> Res<()> {
+            tracing::info!(
+                repo_peer_id = %self.repo.local_peer_id(),
+                "shutting down sync repo node"
+            );
+            self.endpoint.close().await;
+            if let Some(task) = self.accept_task.take() {
+                task.await.expect("accept loop panicked");
+            }
+            self.stop_token.stop().await?;
+            Ok(())
+        }
+    }
+
+    #[tracing::instrument(skip_all, fields(item_count, payload_len, ?local_mutation, ?remote_mutation))]
+    async fn run_sync_case(
+        item_count: usize,
+        payload_len: usize,
+        local_mutation: Option<SyncMutation>,
+        remote_mutation: Option<SyncMutation>,
+        exit_after_put: bool,
+    ) -> Res<()> {
+        utils_rs::testing::setup_tracing_once();
+        tracing::info!("starting sync case");
+        let temp_root = tempdir()?;
+        let server_path = temp_root.path().join("server");
+        let client_path = temp_root.path().join("client");
+
+        let mut expected_doc = make_sync_doc_value("base", item_count, payload_len);
+        let mut client_expected_doc = expected_doc.clone();
+        let mut server_expected_doc = expected_doc.clone();
+        let mut base_doc = automerge::Automerge::new();
+        write_sync_doc_value(&mut base_doc, &expected_doc);
+
+        tracing::info!("booting server and client repos");
+        let server = SyncRepoNode::boot(server_path, 51, true).await?;
+        let client = SyncRepoNode::boot(client_path, 61, false).await?;
+        let doc_id = DocumentId::random();
+
+        tracing::info!(%doc_id, "seeding initial docs");
+        let server_doc = put_doc_with_automerge(&server.repo, doc_id, base_doc.clone()).await?;
+        let client_doc = put_doc_with_automerge(&client.repo, doc_id, base_doc).await?;
+
+        if exit_after_put {
+            tracing::info!("exiting sync case immediately after put_doc seeding");
+            server.shutdown().await?;
+            client.shutdown().await?;
+            return Ok(());
+        }
+
+        set_doc_actor(&server_doc, automerge::ActorId::from([51_u8; 16])).await?;
+        set_doc_actor(&client_doc, automerge::ActorId::from([61_u8; 16])).await?;
+
+        if let Some(mutation) = local_mutation {
+            tracing::info!(?mutation, "applying local mutation");
+            client_doc
+                .with_document(|doc| {
+                    apply_sync_mutation_in_place(doc, mutation, payload_len);
+                })
+                .await?;
+            apply_sync_mutation(&mut expected_doc, mutation, payload_len);
+            apply_sync_mutation(&mut client_expected_doc, mutation, payload_len);
+        }
+        if let Some(mutation) = remote_mutation {
+            tracing::info!(?mutation, "applying remote mutation");
+            server_doc
+                .with_document(|doc| {
+                    apply_sync_mutation_in_place(doc, mutation, payload_len);
+                })
+                .await?;
+            apply_sync_mutation(&mut expected_doc, mutation, payload_len);
+            apply_sync_mutation(&mut server_expected_doc, mutation, payload_len);
+        }
+
+        tracing::info!("connecting client to server");
+        let (client_conn, _client_stop) = client
+            .repo
+            .connect_with_peer(
+                client.endpoint.clone(),
+                server.endpoint.addr(),
+                server.peer_id(),
+            )
+            .await?;
+        server.wait_for_accepts(1).await;
+
+        let subscribe = false;
+        if local_mutation.is_some() && remote_mutation.is_some() {
+            let server_conn = server.accepted_connection().await;
+            tracing::info!(
+                client_peer_id = %client_conn.peer_id(),
+                server_peer_id = %server_conn.peer_id(),
+                subscribe,
+                "running concurrent sync_doc_with_peer"
+            );
+            let (client_result, server_result) = tokio::join!(
+                timeout(
+                    SYNC_CASE_TIMEOUT,
+                    client_conn.sync_doc_with_peer(
+                        doc_id,
+                        subscribe,
+                        Some(SYNC_PROPAGATION_TIMEOUT),
+                    ),
+                ),
+                timeout(
+                    SYNC_CASE_TIMEOUT,
+                    server_conn.sync_doc_with_peer(
+                        doc_id,
+                        subscribe,
+                        Some(SYNC_PROPAGATION_TIMEOUT),
+                    ),
+                ),
+            );
+            let client_outcome =
+                client_result.expect("timed out waiting for sync_doc_with_peer")?;
+            let server_outcome =
+                server_result.expect("timed out waiting for reverse sync_doc_with_peer")?;
+            assert_eq!(client_outcome, SyncDocOutcome::Success);
+            assert_eq!(server_outcome, SyncDocOutcome::Success);
+
+            drop(client_doc);
+            drop(server_doc);
+
+            let client_doc = client
+                .repo
+                .get_doc(&doc_id)
+                .await?
+                .expect("client doc should exist");
+            let server_doc = server
+                .repo
+                .get_doc(&doc_id)
+                .await?
+                .expect("server doc should exist");
+            let client_state = read_json_doc(&client_doc).await;
+            let server_state = read_json_doc(&server_doc).await;
+            tracing::info!(
+                client_state = ?client_state,
+                server_state = ?server_state,
+                "post-sync diverged-head state"
+            );
+            tracing::info!(
+                client_expected_notes = ?sync_note_snapshot(&client_expected_doc, &[5, 17]),
+                server_expected_notes = ?sync_note_snapshot(&server_expected_doc, &[5, 17]),
+                expected_notes = ?sync_note_snapshot(&expected_doc, &[5, 17]),
+                client_state_notes = ?sync_note_snapshot(&client_state, &[5, 17]),
+                server_state_notes = ?sync_note_snapshot(&server_state, &[5, 17]),
+                "post-sync diverged-head note snapshot"
+            );
+            wait_for_json_doc(&client_doc, &expected_doc, SYNC_CASE_TIMEOUT).await;
+            wait_for_json_doc(&server_doc, &expected_doc, SYNC_CASE_TIMEOUT).await;
+        } else {
+            tracing::info!(
+                peer_id = %client_conn.peer_id(),
+                subscribe,
+                "running sync_doc_with_peer"
+            );
+            let outcome = timeout(
+                SYNC_CASE_TIMEOUT,
+                client_conn.sync_doc_with_peer(doc_id, subscribe, Some(SYNC_PROPAGATION_TIMEOUT)),
+            )
+            .await
+            .expect("timed out waiting for sync_doc_with_peer")?;
+            assert_eq!(outcome, SyncDocOutcome::Success);
+
+            tracing::info!("verifying doc convergence");
+            wait_for_json_doc(&client_doc, &expected_doc, SYNC_CASE_TIMEOUT).await;
+            wait_for_json_doc(&server_doc, &expected_doc, SYNC_CASE_TIMEOUT).await;
+        }
+
+        tracing::info!("closing client connection and shutting down repos");
+        client_conn.close().await?;
+        server.shutdown().await?;
+        client.shutdown().await?;
+        Ok(())
+    }
+
+    #[tracing::instrument(
+        skip_all,
+        fields(item_count, payload_len, ?first_remote_mutation, ?second_local_mutation)
+    )]
+    async fn run_restart_reconnect_case(
+        item_count: usize,
+        payload_len: usize,
+        first_remote_mutation: Option<SyncMutation>,
+        second_local_mutation: Option<SyncMutation>,
+    ) -> Res<()> {
+        utils_rs::testing::setup_tracing_once();
+        tracing::info!("starting reconnect case");
+        let temp_root = tempdir()?;
+        let server_path = temp_root.path().join("server");
+        let client_path = temp_root.path().join("client");
+
+        let mut expected_doc = make_sync_doc_value("base", item_count, payload_len);
+        let mut base_doc = automerge::Automerge::new();
+        write_sync_doc_value(&mut base_doc, &expected_doc);
+        let server = SyncRepoNode::boot(server_path.clone(), 71, true).await?;
+        let client = SyncRepoNode::boot(client_path, 81, false).await?;
+        let doc_id = DocumentId::random();
+        let server_doc = put_doc_with_automerge(&server.repo, doc_id, base_doc.clone()).await?;
+        let client_doc = put_doc_with_automerge(&client.repo, doc_id, base_doc).await?;
+        set_doc_actor(&server_doc, automerge::ActorId::from([71_u8; 16])).await?;
+        set_doc_actor(&client_doc, automerge::ActorId::from([81_u8; 16])).await?;
+
+        if let Some(mutation) = first_remote_mutation {
+            tracing::info!(?mutation, "applying first remote mutation");
+            server_doc
+                .with_document(|doc| {
+                    apply_sync_mutation_in_place(doc, mutation, payload_len);
+                })
+                .await?;
+            apply_sync_mutation(&mut expected_doc, mutation, payload_len);
+        }
+
+        tracing::info!("connecting client to server");
+        let (client_conn, _client_stop) = client
+            .repo
+            .connect_with_peer(
+                client.endpoint.clone(),
+                server.endpoint.addr(),
+                server.peer_id(),
+            )
+            .await?;
+        server.wait_for_accepts(1).await;
+
+        tracing::info!("running initial sync before server shutdown");
+        let outcome = timeout(
+            SYNC_CASE_TIMEOUT,
+            client_conn.sync_doc_with_peer(doc_id, false, Some(SYNC_PROPAGATION_TIMEOUT)),
+        )
+        .await
+        .expect("timed out waiting for initial sync_doc_with_peer")?;
+        assert_eq!(outcome, SyncDocOutcome::Success);
+        wait_for_json_doc(&client_doc, &expected_doc, SYNC_CASE_TIMEOUT).await;
+        wait_for_json_doc(&server_doc, &expected_doc, SYNC_CASE_TIMEOUT).await;
+
+        tracing::info!("shutting down server while connection is still live");
+        server.shutdown().await?;
+        client_conn.close().await?;
+
+        tracing::info!("rebooting server from the same disk path");
+        let server = SyncRepoNode::boot(server_path, 71, true).await?;
+        let server_doc = server
+            .repo
+            .get_doc(&doc_id)
+            .await?
+            .expect("server doc should persist across restart");
+        wait_for_json_doc(&server_doc, &expected_doc, SYNC_CASE_TIMEOUT).await;
+
+        if let Some(mutation) = second_local_mutation {
+            tracing::info!(?mutation, "applying second local mutation after restart");
+            client_doc
+                .with_document(|doc| {
+                    apply_sync_mutation_in_place(doc, mutation, payload_len);
+                })
+                .await?;
+            apply_sync_mutation(&mut expected_doc, mutation, payload_len);
+        }
+
+        tracing::info!("reconnecting after server restart");
+        let (client_conn, _client_stop) = client
+            .repo
+            .connect_with_peer(
+                client.endpoint.clone(),
+                server.endpoint.addr(),
+                server.peer_id(),
+            )
+            .await?;
+        server.wait_for_accepts(1).await;
+
+        tracing::info!("running sync after restart");
+        let outcome = timeout(
+            SYNC_CASE_TIMEOUT,
+            client_conn.sync_doc_with_peer(doc_id, false, Some(SYNC_PROPAGATION_TIMEOUT)),
+        )
+        .await
+        .expect("timed out waiting for reconnect sync_doc_with_peer")?;
+        assert_eq!(outcome, SyncDocOutcome::Success);
+        wait_for_json_doc(&client_doc, &expected_doc, SYNC_CASE_TIMEOUT).await;
+        wait_for_json_doc(&server_doc, &expected_doc, SYNC_CASE_TIMEOUT).await;
+
+        client_conn.close().await?;
+        server.shutdown().await?;
+        client.shutdown().await?;
+        Ok(())
+    }
+
+    #[tracing::instrument(skip_all, fields(doc_id = %doc_id))]
+    async fn put_doc_with_automerge(
+        repo: &Arc<BigRepo>,
+        doc_id: DocumentId,
+        doc: automerge::Automerge,
+    ) -> Res<BigDocHandle> {
+        repo.put_doc(doc_id, doc).await
+    }
+
+    #[tracing::instrument(skip_all, fields(doc_id = %handle.document_id()))]
+    async fn set_doc_actor(handle: &BigDocHandle, actor: automerge::ActorId) -> Res<()> {
+        handle
+            .with_document(|doc| {
+                doc.set_actor(actor);
+            })
+            .await?;
+        Ok(())
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn sync_with_peer_uses_remote_changes_when_only_remote_diverged() -> Res<()> {
+        timeout(
+            SYNC_CASE_TIMEOUT,
+            run_sync_case(
+                SYNC_DOC_ITEMS,
+                SYNC_DOC_PAYLOAD_LEN,
+                None,
+                Some(SyncMutation {
+                    item_idx: 7,
+                    note_key: "remote_note",
+                    side_label: "remote",
+                }),
+                false,
+            ),
+        )
+        .await
+        .expect("sync test timed out")?;
+        Ok(())
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn sync_with_peer_uses_local_changes_when_only_local_diverged() -> Res<()> {
+        timeout(
+            SYNC_CASE_TIMEOUT,
+            run_sync_case(
+                SYNC_DOC_ITEMS,
+                SYNC_DOC_PAYLOAD_LEN,
+                Some(SyncMutation {
+                    item_idx: 11,
+                    note_key: "local_note",
+                    side_label: "local",
+                }),
+                None,
+                false,
+            ),
+        )
+        .await
+        .expect("sync test timed out")?;
+        Ok(())
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn sync_with_peer_both_diverged_loses_remote_change() -> Res<()> {
+        timeout(
+            SYNC_CASE_TIMEOUT,
+            run_sync_case(
+                SYNC_DOC_ITEMS,
+                SYNC_DOC_PAYLOAD_LEN,
+                Some(SyncMutation {
+                    item_idx: 5,
+                    note_key: "local_note",
+                    side_label: "local",
+                }),
+                Some(SyncMutation {
+                    item_idx: 17,
+                    note_key: "remote_note",
+                    side_label: "remote",
+                }),
+                false,
+            ),
+        )
+        .await
+        .expect("sync test timed out")?;
+        Ok(())
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn sync_with_peer_handles_large_fragmented_remote_docs() -> Res<()> {
+        timeout(
+            SYNC_CASE_TIMEOUT,
+            run_sync_case(
+                SYNC_LARGE_DOC_ITEMS,
+                SYNC_LARGE_DOC_PAYLOAD_LEN,
+                None,
+                Some(SyncMutation {
+                    item_idx: 777,
+                    note_key: "remote_note",
+                    side_label: "remote",
+                }),
+                true,
+            ),
+        )
+        .await
+        .expect("sync test timed out")?;
+        Ok(())
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn sync_with_peer_survives_repo_restart_with_live_connection() -> Res<()> {
+        timeout(
+            SYNC_CASE_TIMEOUT * 2,
+            run_restart_reconnect_case(
+                SYNC_DOC_ITEMS,
+                SYNC_DOC_PAYLOAD_LEN,
+                Some(SyncMutation {
+                    item_idx: 7,
+                    note_key: "remote_note",
+                    side_label: "remote",
+                }),
+                Some(SyncMutation {
+                    item_idx: 3,
+                    note_key: "local_after_restart",
+                    side_label: "local",
+                }),
+            ),
+        )
+        .await
+        .expect("sync test timed out")?;
         Ok(())
     }
 }

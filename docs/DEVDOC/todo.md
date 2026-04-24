@@ -71,6 +71,7 @@
     - [ ] How to avoid missing triage work?
 - [x] Keychains for secrets
 - [ ] Predicates for losing/gaining facets
+- [ ] Drop warning on stop tokens
 
 - [ ] Cleanup and show it to people
  

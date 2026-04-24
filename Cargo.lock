@@ -172,6 +172,7 @@ dependencies = [
  "subduction_keyhive",
  "subduction_keyhive_policy",
  "subduction_websocket",
+ "tempfile",
  "thiserror 2.0.18",
  "tokio",
  "tokio-tungstenite",
@@ -707,6 +708,7 @@ name = "automerge_sedimentree"
 version = "0.9.0"
 dependencies = [
  "automerge",
+ "rayon",
  "sedimentree_core",
  "thiserror 2.0.18",
 ]
@@ -9306,6 +9308,7 @@ dependencies = [
  "getrandom 0.2.16",
  "nonempty 0.12.0",
  "num-bigint",
+ "rayon",
  "serde",
  "siphasher",
  "thiserror 2.0.18",
