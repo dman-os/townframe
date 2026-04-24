@@ -237,6 +237,17 @@ autosurgeon = { git = "https://github.com/dman-os/autosurgeon", rev = "682646998
 autosurgeon-derive = { git = "https://github.com/dman-os/autosurgeon", rev = "6826469986b150e6b736dc8e24619aa01a03ecef" }
 # sqlite-vec = { git = "https://github.com/vlasky/sqlite-vec", rev = "9facf1ab84f2a360c0f1e62db3a7f3eca5bc099a" }
 
+[patch."https://github.com/inkandswitch/subduction"]
+subduction_core = { path = "/home/asdf/repos/rust/subduction/subduction_core" }
+subduction_iroh = { path = "/home/asdf/repos/rust/subduction/subduction_iroh" }
+subduction_websocket = { path = "/home/asdf/repos/rust/subduction/subduction_websocket" }
+sedimentree_core = { path = "/home/asdf/repos/rust/subduction/sedimentree_core" }
+automerge_sedimentree = { path = "/home/asdf/repos/rust/subduction/automerge_sedimentree" }
+sedimentree_fs_storage = { path = "/home/asdf/repos/rust/subduction/sedimentree_fs_storage" }
+subduction_crypto = { path = "/home/asdf/repos/rust/subduction/subduction_crypto" }
+subduction_keyhive = { path = "/home/asdf/repos/rust/subduction/subduction_keyhive" }
+subduction_keyhive_policy = { path = "/home/asdf/repos/rust/subduction/subduction_keyhive_policy" }
+
 
 # The default profile is optimized for Wasm builds because
 # that's what [Trunk reads](https://github.com/trunk-rs/trunk/issues/605).

@@ -1911,31 +1911,25 @@ fn command_invoke_reply_from_result(
 mod tests {
     use super::*;
     use sqlx::sqlite::SqlitePoolOptions;
-    use tokio::sync::broadcast;
-    use tokio_util::sync::CancellationToken;
 
-    async fn make_partition_store() -> Res<am_utils_rs::partition::PartitionStore> {
+    async fn make_partition_store() -> Res<(
+        std::sync::Arc<am_utils_rs::partition::PartitionStore>,
+        am_utils_rs::partition::PartitionStoreStopToken,
+    )> {
         let pool = SqlitePoolOptions::new()
             .max_connections(1)
             .connect("sqlite::memory:")
             .await?;
-        let (events_tx, _) = broadcast::channel(1024);
-        let store = am_utils_rs::partition::PartitionStore::new(
-            pool,
-            events_tx,
-            CancellationToken::new(),
-            std::sync::Arc::new(utils_rs::AbortableJoinSet::new()),
-        );
-        store.ensure_schema().await?;
+        let (store, stop_token) = am_utils_rs::partition::PartitionStore::boot(pool).await?;
         store
             .ensure_partition(&PROCESSOR_RUNLOG_PARTITION_ID.to_string())
             .await?;
-        Ok(store)
+        Ok((store, stop_token))
     }
 
     #[tokio::test]
     async fn processor_runlog_upsert_is_bounded_for_same_doc_processor() -> Res<()> {
-        let store = make_partition_store().await?;
+        let (store, stop_token) = make_partition_store().await?;
         let item_id = Rt::processor_runlog_item_id("doc-1", "@daybook/plabels/label-note");
 
         upsert_processor_runlog_item(
@@ -1967,6 +1961,7 @@ mod tests {
         assert_eq!(payload["done_by_peer_id"], serde_json::json!("peer-a"));
         assert_eq!(payload["done_token"], serde_json::json!("token-2"));
 
+        stop_token.stop().await?;
         Ok(())
     }
 }

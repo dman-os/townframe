@@ -6,19 +6,16 @@ use std::sync::atomic::{AtomicBool, Ordering};
 
 use automerge::ChangeHash;
 use autosurgeon::{Hydrate, Prop, Reconcile};
-use sedimentree_core::collections::{Map as SedMap, Set};
-use sedimentree_core::commit::FragmentState;
 use sedimentree_core::loose_commit::id::CommitId;
 use sqlx::sqlite::SqliteConnectOptions;
 use tokio::sync::broadcast;
-use tokio_util::sync::CancellationToken;
 
 mod changes;
 pub mod rpc;
 mod runtime;
 pub use runtime::SyncDocOutcome;
 
-use crate::partition::PartitionStore;
+use crate::partition::{PartitionStore, PartitionStoreStopToken};
 use crate::sync::protocol::*;
 
 pub use changes::{
@@ -50,27 +47,6 @@ pub enum StorageConfig {
     Memory,
 }
 
-// FIXME: so essentially, we moved from a single live_buldes mutex to a per bundle mutex righ?
-// let's move this to runtime
-#[derive(Debug)]
-struct LiveDocBundle {
-    doc_id: DocumentId,
-    doc: tokio::sync::Mutex<automerge::Automerge>,
-    fragment_state_store: tokio::sync::Mutex<SedMap<CommitId, FragmentState<Set<CommitId>>>>,
-    _lease: runtime::RuntimeDocLease,
-}
-
-impl LiveDocBundle {
-    fn new(doc_id: DocumentId, doc: automerge::Automerge, lease: runtime::RuntimeDocLease) -> Self {
-        Self {
-            doc_id,
-            doc: tokio::sync::Mutex::new(doc),
-            fragment_state_store: tokio::sync::Mutex::new(SedMap::new()),
-            _lease: lease,
-        }
-    }
-}
-
 #[derive(educe::Educe)]
 #[educe(Debug)]
 pub struct BigRepo {
@@ -82,10 +58,6 @@ pub struct BigRepo {
     #[educe(Debug(ignore))]
     change_manager: Arc<changes::ChangeListenerManager>,
     #[educe(Debug(ignore))]
-    partition_forwarder_cancel: CancellationToken,
-    #[educe(Debug(ignore))]
-    join_set: Arc<utils_rs::AbortableJoinSet>,
-    #[educe(Debug(ignore))]
     change_manager_stop: std::sync::Mutex<Option<changes::ChangeListenerManagerStopToken>>,
 }
 
@@ -93,6 +65,13 @@ pub type SharedBigRepo = Arc<BigRepo>;
 
 #[derive(Clone)]
 pub struct BigRepoConnection {
+    repo: Arc<BigRepo>,
+    peer_id: PeerId,
+    closed: Arc<AtomicBool>,
+}
+
+#[derive(Clone)]
+pub struct BigRepoConnectionStopToken {
     repo: Arc<BigRepo>,
     peer_id: PeerId,
     closed: Arc<AtomicBool>,
@@ -134,16 +113,16 @@ impl BigRepoConnection {
     }
 }
 
-// FIXME: let's replace this with a stop token instead
-// similar to the main branch (actually check how we did it there)
-impl Drop for BigRepoConnection {
-    fn drop(&mut self) {
+impl BigRepoConnectionStopToken {
+    fn mark_closed(&self) -> bool {
+        !self.closed.swap(true, Ordering::SeqCst)
+    }
+
+    pub async fn stop(self) -> Res<()> {
         if !self.mark_closed() {
-            return;
+            return Ok(());
         }
-        self.repo
-            .runtime
-            .request_close_peer_connection(self.peer_id);
+        self.repo.runtime.close_peer_connection(self.peer_id).await
     }
 }
 
@@ -172,31 +151,16 @@ impl BigRepo {
         };
         ensure_docs_schema(&state_pool).await?;
 
-        let join_set = Arc::new(utils_rs::AbortableJoinSet::new());
-
-        // FIXME: let's make PartitionStore::new into PartitionStore::boot
-        // and have it be async and ensure it's own schema and
-        // PartitionStore should return a stop token meaning
-        // it should also manage it's own join_set and CancellationToken
-        let partition_forwarder_cancel = CancellationToken::new();
-        let partition_store = {
-            let (partition_events_tx, _) =
-                broadcast::channel(crate::sync::protocol::DEFAULT_SUBSCRIPTION_CAPACITY);
-            Arc::new(PartitionStore::new(
-                state_pool.clone(),
-                partition_events_tx,
-                partition_forwarder_cancel.clone(),
-                Arc::clone(&join_set),
-            ))
-        };
-        partition_store.ensure_schema().await?;
+        let (partition_store, partition_store_stop) =
+            PartitionStore::boot(state_pool.clone()).await?;
+        let runtime_tasks = Arc::new(utils_rs::AbortableJoinSet::new());
 
         let (change_manager, change_manager_stop) = changes::ChangeListenerManager::boot();
         let signer =
             subduction_crypto::signer::memory::MemorySigner::from_bytes(peer_id.as_bytes());
         let (runtime, runtime_stop) = match storage {
             StorageConfig::Memory => runtime::spawn_big_repo_runtime(
-                Arc::clone(&join_set),
+                Arc::clone(&runtime_tasks),
                 signer,
                 subduction_core::storage::memory::MemoryStorage::new(),
                 Arc::clone(&partition_store),
@@ -213,7 +177,7 @@ impl BigRepo {
                 let fs_storage = sedimentree_fs_storage::FsStorage::new(subduction_dir)
                     .wrap_err("failed booting subduction fs storage")?;
                 runtime::spawn_big_repo_runtime(
-                    Arc::clone(&join_set),
+                    Arc::clone(&runtime_tasks),
                     signer,
                     fs_storage,
                     Arc::clone(&partition_store),
@@ -227,8 +191,6 @@ impl BigRepo {
             partition_store,
             runtime,
             change_manager,
-            partition_forwarder_cancel,
-            join_set,
             change_manager_stop: std::sync::Mutex::new(Some(change_manager_stop)),
         });
 
@@ -244,8 +206,7 @@ impl BigRepo {
             BigRepoStopToken {
                 runtime_stop,
                 change_manager_stop: Some(change_manager_stop),
-                partition_forwarder_cancel: out.partition_forwarder_cancel.clone(),
-                partition_forwarders: Arc::clone(&out.join_set),
+                partition_store_stop,
             },
         ))
     }
@@ -293,27 +254,43 @@ impl BigRepo {
         endpoint: iroh::Endpoint,
         endpoint_addr: iroh::EndpointAddr,
         peer_id: PeerId,
-    ) -> Res<BigRepoConnection> {
+    ) -> Res<(BigRepoConnection, BigRepoConnectionStopToken)> {
         self.runtime
             .ensure_peer_connection(endpoint, endpoint_addr, peer_id)
             .await?;
-        Ok(BigRepoConnection {
-            repo: Arc::clone(self),
-            peer_id,
-            closed: Arc::new(AtomicBool::new(false)),
-        })
+        let closed = Arc::new(AtomicBool::new(false));
+        Ok((
+            BigRepoConnection {
+                repo: Arc::clone(self),
+                peer_id,
+                closed: Arc::clone(&closed),
+            },
+            BigRepoConnectionStopToken {
+                repo: Arc::clone(self),
+                peer_id,
+                closed,
+            },
+        ))
     }
 
     pub async fn accept_peer_connection(
         self: &Arc<Self>,
         quic_conn: iroh::endpoint::Connection,
-    ) -> Res<BigRepoConnection> {
+    ) -> Res<(BigRepoConnection, BigRepoConnectionStopToken)> {
         let peer_id = self.runtime.accept_incoming_connection(quic_conn).await?;
-        Ok(BigRepoConnection {
-            repo: Arc::clone(self),
-            peer_id,
-            closed: Arc::new(AtomicBool::new(false)),
-        })
+        let closed = Arc::new(AtomicBool::new(false));
+        Ok((
+            BigRepoConnection {
+                repo: Arc::clone(self),
+                peer_id,
+                closed: Arc::clone(&closed),
+            },
+            BigRepoConnectionStopToken {
+                repo: Arc::clone(self),
+                peer_id,
+                closed,
+            },
+        ))
     }
 }
 
@@ -566,23 +543,13 @@ impl BigRepo {
 pub struct BigRepoStopToken {
     runtime_stop: runtime::BigRepoRuntimeStopToken,
     change_manager_stop: Option<changes::ChangeListenerManagerStopToken>,
-    partition_forwarder_cancel: CancellationToken,
-    partition_forwarders: Arc<utils_rs::AbortableJoinSet>,
+    partition_store_stop: PartitionStoreStopToken,
 }
 
 impl BigRepoStopToken {
     pub async fn stop(mut self) -> Res<()> {
         self.runtime_stop.stop().await?;
-        self.partition_forwarder_cancel.cancel();
-        match self.partition_forwarders.stop(Duration::from_secs(5)).await {
-            Ok(()) => {}
-            Err(utils_rs::AbortableJoinSetStopError::Timeout(_))
-            | Err(utils_rs::AbortableJoinSetStopError::Aborted) => {
-                // Subduction listener/manager tasks are long-lived service loops.
-                // On process/repo shutdown we can continue after aborting them.
-            }
-            Err(err) => return Err(err.into()),
-        }
+        self.partition_store_stop.stop().await?;
         if let Some(stop_token) = self.change_manager_stop.take() {
             stop_token.stop().await?;
         }
@@ -593,7 +560,7 @@ impl BigRepoStopToken {
 #[derive(Clone)]
 pub struct BigDocHandle {
     repo: Arc<BigRepo>,
-    bundle: Arc<LiveDocBundle>,
+    bundle: Arc<runtime::LiveDocBundle>,
 }
 
 impl std::fmt::Debug for BigDocHandle {
@@ -783,14 +750,21 @@ mod tests {
     #[tokio::test]
     async fn connection_close_is_idempotent() -> Res<()> {
         let (repo, _stop_token) = boot_repo().await?;
+        let closed = Arc::new(AtomicBool::new(false));
         let connection = BigRepoConnection {
+            repo: Arc::clone(&repo),
+            peer_id: PeerId::new([9_u8; 32]),
+            closed: Arc::clone(&closed),
+        };
+        let stop_token = BigRepoConnectionStopToken {
             repo,
             peer_id: PeerId::new([9_u8; 32]),
-            closed: Arc::new(AtomicBool::new(false)),
+            closed,
         };
 
         connection.close().await?;
         connection.close().await?;
+        stop_token.stop().await?;
         Ok(())
     }
 

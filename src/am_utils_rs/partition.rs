@@ -13,6 +13,7 @@ use crate::sync::protocol::{
     PartitionSummary, PeerKey, SubPartitionsRequest, SubscriptionItem, SubscriptionStreamKind,
     DEFAULT_EVENT_PAGE_LIMIT,
 };
+use std::time::Duration;
 
 const META_NEXT_TXID_KEY: &str = "next_txid";
 const MAX_PAGE_LIMIT: u32 = 1_024;
@@ -26,7 +27,7 @@ pub struct PartitionStore {
 }
 
 impl PartitionStore {
-    pub fn new(
+    fn new(
         state_pool: sqlx::SqlitePool,
         partition_events_tx: broadcast::Sender<PartitionEvent>,
         partition_forwarder_cancel: CancellationToken,
@@ -38,6 +39,27 @@ impl PartitionStore {
             partition_forwarder_cancel,
             partition_forwarders,
         }
+    }
+
+    pub async fn boot(state_pool: sqlx::SqlitePool) -> Res<(Arc<Self>, PartitionStoreStopToken)> {
+        let (partition_events_tx, _) =
+            broadcast::channel(crate::sync::protocol::DEFAULT_SUBSCRIPTION_CAPACITY);
+        let partition_forwarder_cancel = CancellationToken::new();
+        let partition_forwarders = Arc::new(utils_rs::AbortableJoinSet::new());
+        let store = Arc::new(Self::new(
+            state_pool,
+            partition_events_tx,
+            partition_forwarder_cancel.clone(),
+            Arc::clone(&partition_forwarders),
+        ));
+        store.ensure_schema().await?;
+        Ok((
+            store,
+            PartitionStoreStopToken {
+                partition_forwarder_cancel,
+                partition_forwarders,
+            },
+        ))
     }
 
     pub fn state_pool(&self) -> &sqlx::SqlitePool {
@@ -1011,6 +1033,23 @@ impl PartitionStore {
         self.partition_forwarders
             .spawn(async move { fut.await.unwrap() })?;
         Ok(rx)
+    }
+}
+
+pub struct PartitionStoreStopToken {
+    partition_forwarder_cancel: CancellationToken,
+    partition_forwarders: Arc<utils_rs::AbortableJoinSet>,
+}
+
+impl PartitionStoreStopToken {
+    pub async fn stop(self) -> Res<()> {
+        self.partition_forwarder_cancel.cancel();
+        match self.partition_forwarders.stop(Duration::from_secs(5)).await {
+            Ok(()) => Ok(()),
+            Err(utils_rs::AbortableJoinSetStopError::Timeout(_))
+            | Err(utils_rs::AbortableJoinSetStopError::Aborted) => Ok(()),
+            Err(err) => Err(err.into()),
+        }
     }
 }
 
