@@ -138,7 +138,7 @@ class RevealBottomSheetState(
         onSettled: ((Float) -> Unit)? = null
     ) {
         scope.launch {
-            val current = anim.value
+            val current = progress
             val anchors = this@RevealBottomSheetState.anchors
             // If a strong fling, bias toward direction
             val biasedTarget =
@@ -486,7 +486,6 @@ fun RevealBottomSheetScaffold(
                     val visiblePx =
                         if (sheetState.isVisible) (peekPx + total * sheetState.progress) else 0f
                     val headerTopGlobal = (layoutHeight - visiblePx).toInt()
-
 
                     // Place underlay first so header can partially obscure it.
                     underlayPlaceables.fastForEach { up ->
