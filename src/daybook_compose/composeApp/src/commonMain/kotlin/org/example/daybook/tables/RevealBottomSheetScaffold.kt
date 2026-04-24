@@ -159,6 +159,7 @@ class RevealBottomSheetState(
                         ?: if (current < 0.5f) 0f else 1f
                 }
 
+            anim.snapTo(current.coerceIn(0f, 1f))
             anim.animateTo(target.coerceIn(0f, 1f), animationSpec = animationSpec)
             setProgressImmediate(anim.value)
             isVisible = anim.value > 0f

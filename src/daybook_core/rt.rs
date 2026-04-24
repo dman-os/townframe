@@ -521,6 +521,7 @@ impl Rt {
             .map(|plug| plug.id())
             .collect::<Vec<_>>();
         plug_ids.sort();
+        let stage_started = std::time::Instant::now();
         for plug_id in plug_ids {
             let _ = rt
                 .ensure_plug_init_dispatches(
@@ -535,7 +536,7 @@ impl Rt {
             startup_progress_task_id.as_deref(),
             format!(
                 "rt boot: plug init queue complete ({})",
-                Self::startup_timing_note(total_started, total_started)
+                Self::startup_timing_note(stage_started, total_started)
             ),
         )
         .await?;

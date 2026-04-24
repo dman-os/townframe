@@ -38,6 +38,7 @@ import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.draw.alpha
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.geometry.CornerRadius
 import androidx.compose.ui.geometry.Rect
@@ -205,7 +206,8 @@ fun FloatingGrowingMenuSheet(
             horizontal = FloatingBarDefaults.horizontalPadding
         )
     ) {
-        val openFraction = (sheetState.progress / maxAnchor).coerceIn(0f, 1f)
+        val safeMaxAnchor = maxAnchor.coerceAtLeast(1e-6f)
+        val openFraction = (sheetState.progress / safeMaxAnchor).coerceIn(0f, 1f)
         val targetHeight = (maxMenuHeight * openFraction)
         val dragModifier =
             Modifier.draggable(
@@ -213,11 +215,12 @@ fun FloatingGrowingMenuSheet(
                     rememberDraggableState { dragAmount ->
                         val total = maxMenuHeightPx
                         val boundedProgress = sheetState.progress.coerceIn(0f, maxAnchor)
-                        val currentVisible = total * (boundedProgress / maxAnchor).coerceIn(0f, 1f)
+                        val currentVisible =
+                            total * (boundedProgress / safeMaxAnchor).coerceIn(0f, 1f)
                         val nextVisible = (currentVisible - dragAmount).coerceIn(0f, total)
-                        val nextProgress = ((nextVisible / total) * maxAnchor).coerceIn(
+                        val nextProgress = ((nextVisible / total) * safeMaxAnchor).coerceIn(
                             0f,
-                            maxAnchor
+                            safeMaxAnchor
                         )
                         sheetState.setProgressImmediate(nextProgress)
                     },
@@ -293,36 +296,69 @@ fun FloatingGrowingMenuSheet(
                 ) {
                     menuItems.forEach { item ->
                         val isActivationReady = item.key == activationReadyMenuItem
-                        NavigationDrawerItem(
-                            selected = item.key == highlightedMenuItem,
-                            onClick = {
-                                scope.launch {
-                                    if (item.enabled) {
-                                        onItemActivate(item)
-                                    }
-                                }
-                            },
-                            icon = { item.icon() },
-                            label = { item.labelContent?.invoke() ?: Text(item.label) },
-                            shape = menuItemShape,
-                            modifier =
-                                Modifier
-                                    .fillMaxWidth()
-                                    .then(
-                                        if (isActivationReady) {
-                                            Modifier.border(
-                                                width = 1.5.dp,
-                                                color = armedIndicatorColor,
-                                                shape = menuItemShape
-                                            )
-                                        } else {
-                                            Modifier
+                        if (item.enabled) {
+                            NavigationDrawerItem(
+                                selected = item.key == highlightedMenuItem,
+                                onClick = {
+                                    scope.launch { onItemActivate(item) }
+                                },
+                                icon = { item.icon() },
+                                label = { item.labelContent?.invoke() ?: Text(item.label) },
+                                shape = menuItemShape,
+                                modifier =
+                                    Modifier
+                                        .fillMaxWidth()
+                                        .then(
+                                            if (isActivationReady) {
+                                                Modifier.border(
+                                                    width = 1.5.dp,
+                                                    color = armedIndicatorColor,
+                                                    shape = menuItemShape
+                                                )
+                                            } else {
+                                                Modifier
+                                            }
+                                        )
+                                        .onGloballyPositioned {
+                                            onMenuItemLayout(item.key, it.boundsInWindow())
                                         }
-                                    )
-                                    .onGloballyPositioned {
-                                        onMenuItemLayout(item.key, it.boundsInWindow())
-                                    }
-                        )
+                            )
+                        } else {
+                            Surface(
+                                modifier =
+                                    Modifier
+                                        .fillMaxWidth()
+                                        .alpha(0.38f)
+                                        .then(
+                                            if (isActivationReady) {
+                                                Modifier.border(
+                                                    width = 1.5.dp,
+                                                    color = armedIndicatorColor,
+                                                    shape = menuItemShape
+                                                )
+                                            } else {
+                                                Modifier
+                                            }
+                                        )
+                                        .onGloballyPositioned {
+                                            onMenuItemLayout(item.key, it.boundsInWindow())
+                                        },
+                                shape = menuItemShape,
+                                color = MaterialTheme.colorScheme.surfaceContainerLow
+                            ) {
+                                Row(
+                                    modifier = Modifier.fillMaxWidth().padding(
+                                        horizontal = 16.dp,
+                                        vertical = 12.dp
+                                    ),
+                                    verticalAlignment = Alignment.CenterVertically,
+                                    horizontalArrangement = Arrangement.spacedBy(12.dp)
+                                ) {
+                                    item.icon()
+                                    item.labelContent?.invoke() ?: Text(item.label)
+                                }
+                            }
+                        }
                     }
                     Spacer(Modifier.height(bottomInset))
                 }

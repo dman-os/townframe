@@ -193,6 +193,7 @@ fun ExpandedLayout(
                 navController = navController,
                 extraAction = extraAction,
                 chromeState = mergedChromeState,
+                menuFeatures = menuFeatures,
                 modifier = Modifier.padding(innerPadding).fillMaxSize(),
                 contentType = contentType
             )
@@ -212,6 +213,7 @@ fun LayoutFromConfig(
     navController: NavHostController,
     extraAction: (() -> Unit)?,
     chromeState: ChromeState,
+    menuFeatures: List<FeatureItem>,
     modifier: Modifier = Modifier,
     contentType: DaybookContentType
 ) {
@@ -312,6 +314,7 @@ fun LayoutFromConfig(
                     pane = leftPane,
                     navController = navController,
                     extraAction = extraAction,
+                    menuFeatures = menuFeatures,
                     modifier = Modifier.fillMaxSize(),
                     contentType = contentType
                 )
@@ -326,6 +329,7 @@ fun LayoutFromConfig(
                     pane = layoutConfig.centerRegion.deets,
                     navController = navController,
                     extraAction = extraAction,
+                    menuFeatures = menuFeatures,
                     modifier = Modifier.weight(1f).fillMaxWidth(),
                     contentType = contentType
                 )
@@ -339,6 +343,7 @@ fun LayoutFromConfig(
                     pane = layoutConfig.rightRegion.deets,
                     navController = navController,
                     extraAction = extraAction,
+                    menuFeatures = menuFeatures,
                     modifier = Modifier.fillMaxSize(),
                     contentType = contentType
                 )
@@ -651,6 +656,7 @@ fun RenderLayoutPane(
     pane: WindowLayoutPane,
     navController: NavHostController,
     extraAction: (() -> Unit)? = null,
+    menuFeatures: List<FeatureItem>,
     modifier: Modifier = Modifier,
     contentType: DaybookContentType
 ) {
@@ -659,7 +665,7 @@ fun RenderLayoutPane(
             // Render sidebar UI
             SidebarContent(
                 navController = navController,
-                menuFeatures = rememberMenuFeatures(navController),
+                menuFeatures = menuFeatures,
                 modifier = modifier
             )
         }
@@ -680,6 +686,7 @@ fun RenderLayoutPane(
                 region = variant.v1,
                 navController = navController,
                 extraAction = extraAction,
+                menuFeatures = menuFeatures,
                 modifier = modifier,
                 contentType = contentType
             )
@@ -692,6 +699,7 @@ fun RenderLayoutRegion(
     region: WindowLayoutRegion,
     navController: NavHostController,
     extraAction: (() -> Unit)? = null,
+    menuFeatures: List<FeatureItem>,
     modifier: Modifier = Modifier,
     contentType: DaybookContentType
 ) {
@@ -737,6 +745,7 @@ fun RenderLayoutRegion(
                     pane = child.deets,
                     navController = navController,
                     extraAction = extraAction,
+                    menuFeatures = menuFeatures,
                     modifier = Modifier.fillMaxSize(),
                     contentType = contentType
                 )
