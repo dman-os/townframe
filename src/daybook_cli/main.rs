@@ -980,11 +980,11 @@ Routine impl: {routine_impl:?}
                             .dispatch(
                                 &plug_id,
                                 &routine_name[..],
-                                daybook_core::rt::DispatchArgs::DocFacet {
+                                daybook_core::rt::DispatchArgs::DocRoutine {
                                     doc_id: doc_id.clone(),
                                     branch_path: branch_path.clone(),
                                     heads: heads.clone(),
-                                    facet_key: None,
+                                    changed_facet_keys: vec![],
                                     wflow_args_json: None,
                                 },
                             )

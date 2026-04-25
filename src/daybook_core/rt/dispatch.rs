@@ -75,6 +75,18 @@ pub enum ActiveDispatchArgs {
 }
 
 #[derive(Hydrate, Reconcile, Serialize, Deserialize, Debug, Clone)]
+pub struct ProcessorInvocation {
+    pub trigger_doc_id: daybook_types::doc::DocId,
+    pub changed_facet_keys: Vec<String>,
+}
+
+#[derive(Hydrate, Reconcile, Serialize, Deserialize, Debug, Clone)]
+pub enum RoutineInvocation {
+    Processor(ProcessorInvocation),
+    Command,
+}
+
+#[derive(Hydrate, Reconcile, Serialize, Deserialize, Debug, Clone)]
 pub struct FacetRoutineArgs {
     pub doc_id: daybook_types::doc::DocId,
     #[autosurgeon(with = "am_utils_rs::codecs::utf8_path")]
@@ -82,7 +94,7 @@ pub struct FacetRoutineArgs {
     #[autosurgeon(with = "am_utils_rs::codecs::utf8_path")]
     pub staging_branch_path: daybook_types::doc::BranchPath,
     pub heads: ChangeHashSet,
-    pub facet_key: String,
+    pub invocation: RoutineInvocation,
     #[autosurgeon(with = "am_utils_rs::codecs::json")]
     pub facet_acl: Vec<daybook_types::manifest::RoutineFacetAccess>,
     #[autosurgeon(with = "am_utils_rs::codecs::json")]
@@ -969,7 +981,7 @@ mod tests {
                 branch_path: "main".into(),
                 staging_branch_path: "/tmp/stage".into(),
                 heads: ChangeHashSet(Vec::new().into()),
-                facet_key: "facet".into(),
+                invocation: RoutineInvocation::Command,
                 facet_acl: vec![],
                 config_facet_acl: vec![],
                 local_state_acl: vec![],
@@ -998,7 +1010,7 @@ mod tests {
                 branch_path: "main".into(),
                 staging_branch_path: "/tmp/stage".into(),
                 heads: ChangeHashSet(Vec::new().into()),
-                facet_key: "facet".into(),
+                invocation: RoutineInvocation::Command,
                 facet_acl: vec![],
                 config_facet_acl: vec![],
                 local_state_acl: vec![],
@@ -1119,5 +1131,71 @@ mod tests {
                     && matches!(origin, crate::event_origin::SwitchEventOrigin::Local { .. })
         ));
         Ok(())
+    }
+
+    #[test]
+    fn processor_invocation_serializes_with_changed_facet_keys() {
+        let proc = ProcessorInvocation {
+            trigger_doc_id: "doc-1".into(),
+            changed_facet_keys: vec![
+                "org.example.note/main".into(),
+                "org.example.blob/main".into(),
+            ],
+        };
+        let json = serde_json::to_value(&proc).expect("serialize");
+        assert_eq!(json["trigger_doc_id"], "doc-1");
+        let keys = json["changed_facet_keys"].as_array().unwrap();
+        assert_eq!(keys.len(), 2);
+        assert!(keys.iter().any(|k| k == "org.example.note/main"));
+        assert!(keys.iter().any(|k| k == "org.example.blob/main"));
+    }
+
+    #[test]
+    fn routine_invocation_command_roundtrips() {
+        let inv = RoutineInvocation::Command;
+        let json = serde_json::to_value(&inv).expect("serialize");
+        assert_eq!(json, serde_json::json!("Command"));
+        let roundtrip: RoutineInvocation = serde_json::from_value(json).expect("deserialize");
+        assert!(matches!(roundtrip, RoutineInvocation::Command));
+    }
+
+    #[test]
+    fn routine_invocation_processor_roundtrips() {
+        let inv = RoutineInvocation::Processor(ProcessorInvocation {
+            trigger_doc_id: "doc-1".into(),
+            changed_facet_keys: vec!["org.example.note/main".into()],
+        });
+        let json = serde_json::to_value(&inv).expect("serialize");
+        assert!(json.get("Processor").is_some());
+        let roundtrip: RoutineInvocation = serde_json::from_value(json).expect("deserialize");
+        assert!(matches!(
+            roundtrip,
+            RoutineInvocation::Processor(ProcessorInvocation {
+                trigger_doc_id,
+                changed_facet_keys,
+            }) if trigger_doc_id == "doc-1" && changed_facet_keys == vec!["org.example.note/main"]
+        ));
+    }
+
+    #[test]
+    fn facet_routine_args_fingerprint_is_stable_for_same_input() {
+        let args = FacetRoutineArgs {
+            doc_id: "doc-1".into(),
+            branch_path: "main".into(),
+            staging_branch_path: "/tmp/stage".into(),
+            heads: ChangeHashSet(Vec::new().into()),
+            invocation: RoutineInvocation::Processor(ProcessorInvocation {
+                trigger_doc_id: "doc-1".into(),
+                changed_facet_keys: vec!["org.example.note/main".into()],
+            }),
+            facet_acl: vec![],
+            config_facet_acl: vec![],
+            local_state_acl: vec![],
+            command_invoke_acl_snapshot: vec![],
+            wflow_args_json: None,
+        };
+        let fp1 = facet_routine_args_fingerprint(&args);
+        let fp2 = facet_routine_args_fingerprint(&args);
+        assert_eq!(fp1, fp2, "fingerprint should be stable for identical args");
     }
 }

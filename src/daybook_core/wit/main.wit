@@ -82,10 +82,20 @@ interface facet-routine {
     use capabilities.{command-invoke-token, facet-token-ro, facet-token-rw};
     use sqlite-connection.{connection as sqlite-connection-token};
 
+    record processor-invocation {
+        trigger-doc-id: doc-id,
+        changed-facet-keys: list<string>,
+    }
+
+    variant routine-invocation {
+        processor(processor-invocation),
+        command,
+    }
+
     record facet-routine-args {
         doc-id: doc-id,
         heads: heads,
-        facet-key: string,
+        invocation: routine-invocation,
 
         rw-facet-tokens: list<tuple<string, facet-token-rw>>,
         ro-facet-tokens: list<tuple<string, facet-token-ro>>,

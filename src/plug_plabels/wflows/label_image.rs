@@ -13,11 +13,11 @@ pub fn run(cx: &mut WflowCtx) -> Result<(), wflow_sdk::JobErrorX> {
     use daybook_types::doc::{WellKnownFacet, WellKnownFacetTag};
 
     let args = facet_routine::get_args();
+    let pseudo_label_key = crate::types::pseudo_label_key().to_string();
     let working_facet_token =
-        tuple_list_get(&args.rw_facet_tokens, &args.facet_key).ok_or_else(|| {
+        tuple_list_get(&args.rw_facet_tokens, &pseudo_label_key).ok_or_else(|| {
             wflow_sdk::JobErrorX::Terminal(ferr!(
-                "working facet key '{}' not found",
-                args.facet_key
+                "pseudoLabel facet token not found in rw_facet_tokens"
             ))
         })?;
 

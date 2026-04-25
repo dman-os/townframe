@@ -9,12 +9,11 @@ pub fn run(cx: &mut WflowCtx) -> Result<(), JobErrorX> {
 
     let mut args = facet_routine::get_args();
 
-    let working_facet_token =
-        tuple_list_get(&args.rw_facet_tokens, &args.facet_key).ok_or_else(|| {
-            JobErrorX::Terminal(ferr!(
-                "working facet key '{}' not found in rw_facet_tokens",
-                args.facet_key
-            ))
+    let embedding_facet_key =
+        daybook_types::doc::FacetKey::from(WellKnownFacetTag::Embedding).to_string();
+    let working_facet_token = tuple_list_get(&args.rw_facet_tokens, &embedding_facet_key)
+        .ok_or_else(|| {
+            JobErrorX::Terminal(ferr!("embedding facet token not found in rw_facet_tokens"))
         })?;
 
     let blob_facet_key = daybook_types::doc::FacetKey::from(WellKnownFacetTag::Blob).to_string();

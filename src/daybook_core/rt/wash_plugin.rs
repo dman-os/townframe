@@ -668,7 +668,7 @@ impl facet_routine::Host for SharedWashCtx {
         let ActiveDispatchArgs::FacetRoutine(FacetRoutineArgs {
             doc_id,
             heads,
-            facet_key,
+            invocation,
             branch_path: target_branch_path,
             staging_branch_path,
             facet_acl,
@@ -846,10 +846,20 @@ impl facet_routine::Host for SharedWashCtx {
             command_invoke_tokens.push((target_url.to_string(), token));
         }
 
+        let wit_invocation = match invocation {
+            dispatch::RoutineInvocation::Processor(proc) => {
+                facet_routine::RoutineInvocation::Processor(facet_routine::ProcessorInvocation {
+                    trigger_doc_id: proc.trigger_doc_id.clone(),
+                    changed_facet_keys: proc.changed_facet_keys.clone(),
+                })
+            }
+            dispatch::RoutineInvocation::Command => facet_routine::RoutineInvocation::Command,
+        };
+
         Ok(facet_routine::FacetRoutineArgs {
             doc_id: doc_id.clone(),
             heads: am_utils_rs::serialize_commit_heads(heads.as_ref()),
-            facet_key: facet_key.clone(),
+            invocation: wit_invocation,
             rw_facet_tokens,
             ro_facet_tokens,
             rw_config_facet_tokens,

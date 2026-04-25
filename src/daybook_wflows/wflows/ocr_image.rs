@@ -8,16 +8,14 @@ pub fn run(cx: &mut WflowCtx) -> Result<(), JobErrorX> {
 
     let args = facet_routine::get_args();
 
+    let note_facet_key = daybook_types::doc::FacetKey::from(WellKnownFacetTag::Note).to_string();
     let working_facet_token = args
         .rw_facet_tokens
         .into_iter()
-        .find(|(key, _)| key == &args.facet_key)
+        .find(|(key, _)| key == &note_facet_key)
         .map(|(_, token)| token)
         .ok_or_else(|| {
-            JobErrorX::Terminal(ferr!(
-                "working facet key '{}' not found in rw_facet_tokens",
-                args.facet_key
-            ))
+            JobErrorX::Terminal(ferr!("note facet token not found in rw_facet_tokens"))
         })?;
 
     let blob_facet_key = daybook_types::doc::FacetKey::from(WellKnownFacetTag::Blob).to_string();

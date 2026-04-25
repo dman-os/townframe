@@ -6,6 +6,7 @@
       - [ ] OCI based
     - [x] Un-previlaged processors should go in their own branch
   - [ ] Backup ATProto PD
+      - [ ] Use pascal case in facet tags
   - [ ] Chatbot
   - [ ] Generated UI
   - [ ] FUSE/dpath

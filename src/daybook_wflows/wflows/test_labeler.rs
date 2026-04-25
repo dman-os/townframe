@@ -3,18 +3,19 @@ use wflow_sdk::{JobErrorX, Json, WflowCtx};
 
 pub fn run(cx: &mut WflowCtx) -> Result<(), JobErrorX> {
     use crate::wit::townframe::daybook::facet_routine;
+    use daybook_types::doc::WellKnownFacetTag;
     let args = facet_routine::get_args();
 
-    // Find the working facet token (the one with write access matching facet_key)
+    let label_facet_key =
+        daybook_types::doc::FacetKey::from(WellKnownFacetTag::LabelGeneric).to_string();
     let working_facet_token = args
         .rw_facet_tokens
         .iter()
-        .find(|(key, _)| key == &args.facet_key)
+        .find(|(key, _)| key == &label_facet_key)
         .map(|(_, token)| token)
         .ok_or_else(|| {
             JobErrorX::Terminal(ferr!(
-                "working facet key '{}' not found in rw_facet_tokens",
-                args.facet_key
+                "labelGeneric facet token not found in rw_facet_tokens"
             ))
         })?;
 

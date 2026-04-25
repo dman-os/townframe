@@ -56,8 +56,7 @@ mod wflows;
 use daybook_types::manifest::{
     CommandDeets, CommandManifest, DocPredicateClause, FacetDependencyManifest, FacetManifest,
     FacetReferenceKind, FacetReferenceManifest, PlugManifest, ProcessorDeets, ProcessorManifest,
-    RoutineFacetAccess, RoutineImpl, RoutineLocalStateAccess, RoutineManifest,
-    RoutineManifestDeets,
+    RoutineDocAcl, RoutineFacetAccess, RoutineImpl, RoutineLocalStateAccess, RoutineManifest,
 };
 use std::sync::Arc;
 
@@ -216,8 +215,8 @@ pub fn plug_manifest() -> PlugManifest {
                         key: "label-note".into(),
                         bundle: "plug_plabels".into(),
                     },
-                    deets: RoutineManifestDeets::DocFacet {
-                        working_facet_tag: PlabelFacetTag::PseudoLabel.as_str().into(),
+                    doc_acls: vec![RoutineDocAcl {
+                        doc_predicate: DocPredicateClause::HasTag(PlabelFacetTag::PseudoLabel.as_str().into()),
                         facet_acl: vec![
                             RoutineFacetAccess {
                                 owner_plug_id: None,
@@ -241,14 +240,15 @@ pub fn plug_manifest() -> PlugManifest {
                                 write: true,
                             },
                         ],
-                        config_facet_acl: vec![RoutineFacetAccess {
-                            owner_plug_id: None,
-                            tag: PlabelFacetTag::PseudoLabelCandidatesFacet.as_str().into(),
-                            key_id: Some("label-candidates".into()),
-                            read: true,
-                            write: true,
-                        }],
-                    },
+                    }],
+                    query_acls: vec![],
+                    config_facet_acl: vec![RoutineFacetAccess {
+                        owner_plug_id: None,
+                        tag: PlabelFacetTag::PseudoLabelCandidatesFacet.as_str().into(),
+                        key_id: Some("label-candidates".into()),
+                        read: true,
+                        write: true,
+                    }],
                     local_state_acl: vec![RoutineLocalStateAccess {
                         plug_id: "@daybook/plabels".into(),
                         local_state_key: "label-classifier".into(),
@@ -264,8 +264,8 @@ pub fn plug_manifest() -> PlugManifest {
                         key: "label-image".into(),
                         bundle: "plug_plabels".into(),
                     },
-                    deets: RoutineManifestDeets::DocFacet {
-                        working_facet_tag: PlabelFacetTag::PseudoLabel.as_str().into(),
+                    doc_acls: vec![RoutineDocAcl {
+                        doc_predicate: DocPredicateClause::HasTag(PlabelFacetTag::PseudoLabel.as_str().into()),
                         facet_acl: vec![
                             RoutineFacetAccess {
                                 owner_plug_id: None,
@@ -296,14 +296,15 @@ pub fn plug_manifest() -> PlugManifest {
                                 write: true,
                             },
                         ],
-                        config_facet_acl: vec![RoutineFacetAccess {
-                            owner_plug_id: None,
-                            tag: PlabelFacetTag::PseudoLabelCandidatesFacet.as_str().into(),
-                            key_id: Some("label-candidates".into()),
-                            read: true,
-                            write: true,
-                        }],
-                    },
+                    }],
+                    query_acls: vec![],
+                    config_facet_acl: vec![RoutineFacetAccess {
+                        owner_plug_id: None,
+                        tag: PlabelFacetTag::PseudoLabelCandidatesFacet.as_str().into(),
+                        key_id: Some("label-candidates".into()),
+                        read: true,
+                        write: true,
+                    }],
                     local_state_acl: vec![RoutineLocalStateAccess {
                         plug_id: "@daybook/plabels".into(),
                         local_state_key: "label-classifier".into(),
@@ -319,8 +320,8 @@ pub fn plug_manifest() -> PlugManifest {
                         key: "learn-image-label-candidates".into(),
                         bundle: "plug_plabels".into(),
                     },
-                    deets: RoutineManifestDeets::DocFacet {
-                        working_facet_tag: PlabelFacetTag::PseudoLabel.as_str().into(),
+                    doc_acls: vec![RoutineDocAcl {
+                        doc_predicate: DocPredicateClause::HasTag(PlabelFacetTag::PseudoLabel.as_str().into()),
                         facet_acl: vec![
                             RoutineFacetAccess {
                                 owner_plug_id: None,
@@ -337,14 +338,15 @@ pub fn plug_manifest() -> PlugManifest {
                                 write: false,
                             },
                         ],
-                        config_facet_acl: vec![RoutineFacetAccess {
-                            owner_plug_id: None,
-                            tag: PlabelFacetTag::PseudoLabelCandidatesFacet.as_str().into(),
-                            key_id: Some("label-candidates".into()),
-                            read: true,
-                            write: true,
-                        }],
-                    },
+                    }],
+                    query_acls: vec![],
+                    config_facet_acl: vec![RoutineFacetAccess {
+                        owner_plug_id: None,
+                        tag: PlabelFacetTag::PseudoLabelCandidatesFacet.as_str().into(),
+                        key_id: Some("label-candidates".into()),
+                        read: true,
+                        write: true,
+                    }],
                     local_state_acl: vec![RoutineLocalStateAccess {
                         plug_id: "@daybook/plabels".into(),
                         local_state_key: "label-candidates-learner".into(),
@@ -360,8 +362,8 @@ pub fn plug_manifest() -> PlugManifest {
                         key: "learn-note-label-candidates".into(),
                         bundle: "plug_plabels".into(),
                     },
-                    deets: RoutineManifestDeets::DocFacet {
-                        working_facet_tag: PlabelFacetTag::PseudoLabel.as_str().into(),
+                    doc_acls: vec![RoutineDocAcl {
+                        doc_predicate: DocPredicateClause::HasTag(PlabelFacetTag::PseudoLabel.as_str().into()),
                         facet_acl: vec![RoutineFacetAccess {
                             owner_plug_id: None,
                             tag: WellKnownFacetTag::Note.into(),
@@ -369,14 +371,15 @@ pub fn plug_manifest() -> PlugManifest {
                             read: true,
                             write: false,
                         }],
-                        config_facet_acl: vec![RoutineFacetAccess {
-                            owner_plug_id: None,
-                            tag: PlabelFacetTag::PseudoLabelCandidatesFacet.as_str().into(),
-                            key_id: Some("label-candidates".into()),
-                            read: true,
-                            write: true,
-                        }],
-                    },
+                    }],
+                    query_acls: vec![],
+                    config_facet_acl: vec![RoutineFacetAccess {
+                        owner_plug_id: None,
+                        tag: PlabelFacetTag::PseudoLabelCandidatesFacet.as_str().into(),
+                        key_id: Some("label-candidates".into()),
+                        read: true,
+                        write: true,
+                    }],
                     local_state_acl: vec![RoutineLocalStateAccess {
                         plug_id: "@daybook/plabels".into(),
                         local_state_key: "label-candidates-learner".into(),

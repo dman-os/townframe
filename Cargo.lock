@@ -7598,11 +7598,15 @@ version = "0.1.0"
 dependencies = [
  "api_utils_rs",
  "color-eyre",
+ "daybook_core",
  "daybook_pdk",
  "daybook_types",
  "schemars 1.2.0",
  "serde",
  "serde_json",
+ "sqlx",
+ "tokio",
+ "utils_rs",
  "wflow_sdk",
  "wit-bindgen 0.55.0",
 ]

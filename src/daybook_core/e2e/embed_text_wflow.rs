@@ -42,11 +42,11 @@ async fn test_embed_text_workflow() -> Res<()> {
         .dispatch(
             "@daybook/wip",
             "embed-text",
-            crate::rt::DispatchArgs::DocFacet {
+            crate::rt::DispatchArgs::DocRoutine {
                 doc_id: doc_id.clone(),
                 branch_path: daybook_types::doc::BranchPath::from("main"),
                 heads,
-                facet_key: None,
+                changed_facet_keys: vec![],
                 wflow_args_json: None,
             },
         )

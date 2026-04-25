@@ -1157,7 +1157,7 @@ mod tests {
     #[test]
     fn test_llm_chat_cloud_router_roundtrip() -> Res<()> {
         let llm_model_name =
-            std::env::var("OLLAMA_LLM_MODEL").unwrap_or_else(|_| "gemma3".to_string());
+            std::env::var("OLLAMA_LLM_MODEL").unwrap_or_else(|_| "gemma4".to_string());
         let runtime = tokio::runtime::Builder::new_current_thread()
             .enable_all()
             .build()?;

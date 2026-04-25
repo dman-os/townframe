@@ -80,7 +80,7 @@ use daybook_types::doc::{Note, WellKnownFacetTag};
 use daybook_types::manifest::{
     CompareOp, DocPredicateClause, FacetDependencyManifest, FacetManifest, FacetReferenceKind,
     FacetReferenceManifest, PlugDependencyManifest, PlugManifest, ProcessorDeets,
-    ProcessorManifest, RoutineFacetAccess, RoutineImpl, RoutineManifest, RoutineManifestDeets,
+    ProcessorManifest, RoutineDocAcl, RoutineFacetAccess, RoutineImpl, RoutineManifest,
 };
 use std::sync::Arc;
 
@@ -146,26 +146,35 @@ pub fn plug_manifest() -> PlugManifest {
                     key: "parse-hledger".into(),
                     bundle: "plug_dayledger".into(),
                 },
-                deets: RoutineManifestDeets::DocFacet {
-                    working_facet_tag: claim_tag.clone(),
+                doc_acls: vec![RoutineDocAcl {
+                    doc_predicate: DocPredicateClause::And(vec![
+                        DocPredicateClause::HasTag(note_tag.clone()),
+                        DocPredicateClause::FacetFieldMatch {
+                            tag: note_tag.clone(),
+                            json_path: "$.mime".into(),
+                            operator: CompareOp::Eq,
+                            value: serde_json::json!("text/x-hledger-journal"),
+                        },
+                    ]),
                     facet_acl: vec![
                         RoutineFacetAccess {
                             owner_plug_id: None,
-                            tag: note_tag.clone(),
+                            tag: WellKnownFacetTag::Note.into(),
                             key_id: None,
                             read: true,
                             write: false,
                         },
                         RoutineFacetAccess {
                             owner_plug_id: None,
-                            tag: claim_tag,
+                            tag: DayledgerFacetTag::Claim.as_str().into(),
                             key_id: None,
                             read: true,
                             write: true,
                         },
                     ],
-                    config_facet_acl: Default::default(),
-                },
+                }],
+                query_acls: vec![],
+                config_facet_acl: Default::default(),
                 command_invoke_acl: Default::default(),
                 local_state_acl: Default::default(),
             }),

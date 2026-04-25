@@ -7,16 +7,15 @@ pub fn run(cx: &mut WflowCtx) -> Result<(), JobErrorX> {
     use daybook_types::doc::{WellKnownFacet, WellKnownFacetTag};
 
     let args = facet_routine::get_args();
+    let embedding_facet_key =
+        daybook_types::doc::FacetKey::from(WellKnownFacetTag::Embedding).to_string();
     let embedding_facet_token = args
         .ro_facet_tokens
         .iter()
-        .find(|(key, _)| key == &args.facet_key)
+        .find(|(key, _)| key == &embedding_facet_key)
         .map(|(_, token)| token)
         .ok_or_else(|| {
-            JobErrorX::Terminal(ferr!(
-                "embedding facet key '{}' not found in ro_facet_tokens",
-                args.facet_key
-            ))
+            JobErrorX::Terminal(ferr!("embedding facet token not found in ro_facet_tokens"))
         })?;
     let sqlite_connection = args
         .sqlite_connections
@@ -82,7 +81,7 @@ pub fn run(cx: &mut WflowCtx) -> Result<(), JobErrorX> {
                     "SELECT rowid FROM doc_embedding_meta WHERE doc_id = ?1 AND facet_key = ?2",
                     &[
                         SqlValue::Text(args.doc_id.clone()),
-                        SqlValue::Text(args.facet_key.clone()),
+                        SqlValue::Text(embedding_facet_key.clone()),
                     ],
                 )
                 .map_err(|err| JobErrorX::Terminal(ferr!("error selecting vector row: {err:?}")))?;
@@ -134,7 +133,7 @@ pub fn run(cx: &mut WflowCtx) -> Result<(), JobErrorX> {
                         &[
                             SqlValue::Integer(inserted_rowid),
                             SqlValue::Text(args.doc_id.clone()),
-                            SqlValue::Text(args.facet_key.clone()),
+                            SqlValue::Text(embedding_facet_key.clone()),
                             SqlValue::Text(serialized_heads.clone()),
                         ],
                     )

@@ -250,11 +250,28 @@ pub struct WflowBundleManifest {
 
 #[derive(Debug, Serialize, Deserialize, Validate, Clone)]
 #[serde(rename_all = "camelCase")]
+pub struct RoutineDocAcl {
+    #[garde(dive)]
+    pub doc_predicate: DocPredicateClause,
+    #[garde(dive)]
+    #[serde(default)]
+    pub facet_acl: Vec<RoutineFacetAccess>,
+}
+
+#[derive(Debug, Serialize, Deserialize, Validate, Clone)]
+#[serde(rename_all = "camelCase")]
 pub struct RoutineManifest {
     #[garde(dive)]
     pub r#impl: RoutineImpl,
     #[garde(dive)]
-    pub deets: RoutineManifestDeets,
+    #[serde(default)]
+    pub doc_acls: Vec<RoutineDocAcl>,
+    #[garde(dive)]
+    #[serde(default)]
+    pub query_acls: Vec<DocPredicateClause>,
+    #[garde(dive)]
+    #[serde(default)]
+    pub config_facet_acl: Vec<RoutineFacetAccess>,
     #[garde(skip)]
     #[serde(default)]
     pub command_invoke_acl: Vec<Url>,
@@ -275,51 +292,59 @@ impl RoutineManifest {
         use crate::doc::{FacetKey, FacetTag};
         let mut read_tags = std::collections::HashSet::new();
         let mut read_keys = std::collections::HashSet::new();
-        let facet_acl = match &self.deets {
-            RoutineManifestDeets::DocFacet { facet_acl, .. } => facet_acl.as_slice(),
-            _ => &[],
-        };
-        for access in facet_acl {
-            if !access.read {
-                continue;
+        for doc_acl in &self.doc_acls {
+            for access in &doc_acl.facet_acl {
+                if !access.read {
+                    continue;
+                }
+                let tag_str = access.tag.0.as_str();
+                if let Some(ref id) = access.key_id {
+                    read_keys.insert(FacetKey {
+                        tag: FacetTag::from(tag_str),
+                        id: id.clone(),
+                    });
+                } else {
+                    read_tags.insert(access.tag.0.clone());
+                }
             }
-            let tag_str = access.tag.0.as_str();
-            if let Some(ref id) = access.key_id {
-                read_keys.insert(FacetKey {
-                    tag: FacetTag::from(tag_str),
-                    id: id.clone(),
-                });
-            } else {
-                read_tags.insert(access.tag.0.clone());
-            }
-        }
-        if let RoutineManifestDeets::DocFacet {
-            working_facet_tag, ..
-        } = &self.deets
-        {
-            read_tags.insert(working_facet_tag.0.clone());
         }
         (read_tags, read_keys)
     }
 
-    pub fn facet_acl(&self) -> &[RoutineFacetAccess] {
-        match &self.deets {
-            RoutineManifestDeets::DocFacet { facet_acl, .. } => facet_acl.as_slice(),
-            _ => &[],
+    /// Union of all facet ACLs across doc ACLs.
+    pub fn facet_acl(&self) -> Vec<RoutineFacetAccess> {
+        let mut out = Vec::new();
+        for doc_acl in &self.doc_acls {
+            out.extend(doc_acl.facet_acl.iter().cloned());
         }
+        out
     }
 
     pub fn config_facet_acl(&self) -> &[RoutineFacetAccess] {
-        match &self.deets {
-            RoutineManifestDeets::DocFacet {
-                config_facet_acl, ..
-            } => config_facet_acl.as_slice(),
-            _ => &[],
-        }
+        self.config_facet_acl.as_slice()
     }
 
     pub fn command_invoke_acl(&self) -> &[Url] {
         self.command_invoke_acl.as_slice()
+    }
+
+    /// All facet tags referenced by this routine's ACLs and query ACLs.
+    pub fn referenced_tags(&self) -> std::collections::HashSet<FacetTag> {
+        let mut out = std::collections::HashSet::new();
+        for doc_acl in &self.doc_acls {
+            for tag in doc_acl.doc_predicate.referenced_tags() {
+                out.insert(tag);
+            }
+            for access in &doc_acl.facet_acl {
+                out.insert(access.tag.clone());
+            }
+        }
+        for predicate in &self.query_acls {
+            for tag in predicate.referenced_tags() {
+                out.insert(tag);
+            }
+        }
+        out
     }
 }
 
@@ -332,29 +357,6 @@ pub enum RoutineImpl {
         #[garde(dive)]
         key: KeyGeneric,
     },
-}
-
-// FIXME: this is poorly designed
-#[derive(Debug, Serialize, Deserialize, Validate, Clone)]
-#[serde(rename_all = "camelCase")]
-pub enum RoutineManifestDeets {
-    /// Routine that can be invoked on a document with rw access on whole doc
-    /// FIXME: remove this branch?
-    DocInvoke {},
-    /// Routine that is invoked when with ro access
-    /// to doc but rw access on facet.
-    DocFacet {
-        #[garde(dive)]
-        working_facet_tag: FacetTag,
-        #[garde(dive)]
-        #[serde(default)]
-        facet_acl: Vec<RoutineFacetAccess>,
-        #[garde(dive)]
-        #[serde(default)]
-        config_facet_acl: Vec<RoutineFacetAccess>,
-    },
-    // DocCollator { predicate },
-    // DocPropCollator { predicate },
 }
 
 #[derive(Debug, Serialize, Deserialize, Validate, Clone)]
@@ -1230,5 +1232,215 @@ mod tests {
             CompareOp::Lt,
             &serde_json::json!(5.0),
         ));
+    }
+
+    #[test]
+    fn routine_manifest_read_facet_set_from_doc_acls() {
+        let manifest = RoutineManifest {
+            r#impl: RoutineImpl::Wflow {
+                bundle: "test".into(),
+                key: "test".into(),
+            },
+            doc_acls: vec![
+                RoutineDocAcl {
+                    doc_predicate: DocPredicateClause::HasTag("org.example.note".into()),
+                    facet_acl: vec![
+                        RoutineFacetAccess {
+                            owner_plug_id: None,
+                            tag: "org.example.note".into(),
+                            key_id: None,
+                            read: true,
+                            write: false,
+                        },
+                        RoutineFacetAccess {
+                            owner_plug_id: None,
+                            tag: "org.example.blob".into(),
+                            key_id: Some("main".into()),
+                            read: true,
+                            write: true,
+                        },
+                    ],
+                },
+                RoutineDocAcl {
+                    doc_predicate: DocPredicateClause::HasTag("org.example.todo".into()),
+                    facet_acl: vec![RoutineFacetAccess {
+                        owner_plug_id: None,
+                        tag: "org.example.todo".into(),
+                        key_id: None,
+                        read: false,
+                        write: true,
+                    }],
+                },
+            ],
+            query_acls: vec![],
+            config_facet_acl: vec![],
+            command_invoke_acl: vec![],
+            local_state_acl: vec![],
+        };
+
+        let (read_tags, read_keys) = manifest.read_facet_set();
+        assert!(read_tags.contains("org.example.note"));
+        assert!(!read_tags.contains("org.example.blob"));
+        assert!(!read_tags.contains("org.example.todo"));
+        assert_eq!(read_keys.len(), 1);
+        assert!(read_keys.contains(&crate::doc::FacetKey {
+            tag: "org.example.blob".into(),
+            id: "main".into(),
+        }));
+    }
+
+    #[test]
+    fn routine_manifest_facet_acl_unions_all_doc_acls() {
+        let manifest = RoutineManifest {
+            r#impl: RoutineImpl::Wflow {
+                bundle: "test".into(),
+                key: "test".into(),
+            },
+            doc_acls: vec![
+                RoutineDocAcl {
+                    doc_predicate: DocPredicateClause::HasTag("org.example.note".into()),
+                    facet_acl: vec![RoutineFacetAccess {
+                        owner_plug_id: None,
+                        tag: "org.example.note".into(),
+                        key_id: None,
+                        read: true,
+                        write: false,
+                    }],
+                },
+                RoutineDocAcl {
+                    doc_predicate: DocPredicateClause::HasTag("org.example.todo".into()),
+                    facet_acl: vec![RoutineFacetAccess {
+                        owner_plug_id: None,
+                        tag: "org.example.todo".into(),
+                        key_id: None,
+                        read: false,
+                        write: true,
+                    }],
+                },
+            ],
+            query_acls: vec![],
+            config_facet_acl: vec![],
+            command_invoke_acl: vec![],
+            local_state_acl: vec![],
+        };
+
+        let acl = manifest.facet_acl();
+        assert_eq!(acl.len(), 2);
+        assert!(acl.iter().any(|a| a.tag.0 == "org.example.note" && a.read));
+        assert!(acl.iter().any(|a| a.tag.0 == "org.example.todo" && a.write));
+    }
+
+    #[test]
+    fn routine_manifest_referenced_tags_includes_doc_predicate_and_query_acls() {
+        let manifest = RoutineManifest {
+            r#impl: RoutineImpl::Wflow {
+                bundle: "test".into(),
+                key: "test".into(),
+            },
+            doc_acls: vec![RoutineDocAcl {
+                doc_predicate: DocPredicateClause::HasTag("org.example.note".into()),
+                facet_acl: vec![RoutineFacetAccess {
+                    owner_plug_id: None,
+                    tag: "org.example.blob".into(),
+                    key_id: None,
+                    read: true,
+                    write: false,
+                }],
+            }],
+            query_acls: vec![DocPredicateClause::HasTag("org.example.todo".into())],
+            config_facet_acl: vec![],
+            command_invoke_acl: vec![],
+            local_state_acl: vec![],
+        };
+
+        let tags = manifest.referenced_tags();
+        assert!(tags.contains(&FacetTag::from("org.example.note")));
+        assert!(tags.contains(&FacetTag::from("org.example.blob")));
+        assert!(tags.contains(&FacetTag::from("org.example.todo")));
+    }
+
+    #[test]
+    fn routine_manifest_serializes_with_flat_acl_fields() {
+        let manifest = RoutineManifest {
+            r#impl: RoutineImpl::Wflow {
+                bundle: "test".into(),
+                key: "test".into(),
+            },
+            doc_acls: vec![RoutineDocAcl {
+                doc_predicate: DocPredicateClause::HasTag("org.example.note".into()),
+                facet_acl: vec![RoutineFacetAccess {
+                    owner_plug_id: None,
+                    tag: "org.example.note".into(),
+                    key_id: None,
+                    read: true,
+                    write: false,
+                }],
+            }],
+            query_acls: vec![DocPredicateClause::HasTag("org.example.todo".into())],
+            config_facet_acl: vec![RoutineFacetAccess {
+                owner_plug_id: Some("@daybook/test".into()),
+                tag: "org.example.config".into(),
+                key_id: None,
+                read: true,
+                write: true,
+            }],
+            command_invoke_acl: vec![],
+            local_state_acl: vec![],
+        };
+
+        let json = serde_json::to_value(&manifest).expect("serialize");
+        assert!(json.get("docAcls").is_some(), "docAcls field should exist");
+        assert!(
+            json.get("queryAcls").is_some(),
+            "queryAcls field should exist"
+        );
+        assert!(
+            json.get("configFacetAcl").is_some(),
+            "configFacetAcl field should exist"
+        );
+        assert!(
+            json.get("deets").is_none(),
+            "old RoutineManifestDeets enum should not exist"
+        );
+    }
+
+    #[test]
+    fn routine_manifest_deserializes_flat_acl_fields() {
+        let json = serde_json::json!({
+            "impl": {
+                "wflow": {
+                    "bundle": "test",
+                    "key": "test"
+                }
+            },
+            "docAcls": [
+                {
+                    "docPredicate": { "hasTag": "org.example.note" },
+                    "facetAcl": [
+                        {
+                            "tag": "org.example.note",
+                            "read": true,
+                            "write": false
+                        }
+                    ]
+                }
+            ],
+            "queryAcls": [
+                { "hasTag": "org.example.todo" }
+            ],
+            "configFacetAcl": [
+                {
+                    "tag": "org.example.config",
+                    "read": true,
+                    "write": true
+                }
+            ]
+        });
+
+        let manifest: RoutineManifest = serde_json::from_value(json).expect("deserialize");
+        assert_eq!(manifest.doc_acls.len(), 1);
+        assert_eq!(manifest.query_acls.len(), 1);
+        assert_eq!(manifest.config_facet_acl.len(), 1);
+        assert_eq!(manifest.local_state_acl.len(), 0);
     }
 }
