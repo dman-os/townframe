@@ -61,16 +61,12 @@ daybook_core = { path = "./src/daybook_core", default-features = false }
 daybook_fuse = { path = "./src/daybook_fuse", default-features = false }
 daybook_types = { path = "./src/daybook_types", default-features = false }
 daybook_pdk = { path = "./src/daybook_pdk", default-features = false }
-plug_plabels = { path = "./src/plug_plabels", default-features = false }
-plug_test = { path = "./src/plug_test", default-features = false }
 mltools = { path = "./src/mltools", default-features = false }
-pauperfuse = { path = "./src/pauperfuse", default-features = false }
 wflow = { path = "./src/wflow", default-features = false }
 wflow_core = { path = "./src/wflow_core", default-features = false }
 wflow_tokio = { path = "./src/wflow_tokio", default-features = false }
 wflow_sdk = { path = "./src/wflow_sdk", default-features = false }
 wash_plugin_wflow = { path = "./src/wash_plugin_wflow", default-features = false }
-wash_plugin_pglite = { path = "./src/wash_plugin_pglite", default-features = false }
 wash_plugin_utils = { path = "./src/wash_plugin_utils/" }
 wash_plugin_mltools = { path = "./src/wash_plugin_mltools/" }
 
@@ -85,10 +81,6 @@ async-trait = "0.1"
 futures = "0.3"
 tokio = { version = "1", default-features = false }
 tokio-util = { version = "0.7.17", features = [] }
-
-#
-# ds
-ahash = "0.8"
 time = { version = "0.3", default-features = false, features = ["serde"] }
 uuid = { version = "1", features = ["serde"] }
 once_cell = "1"
@@ -111,13 +103,6 @@ blake3 = "1.8"
 zstd = "0.13"
 
 #
-# web
-leptos = { version = "0.8", default-features = false }
-leptos-use = { version = "0.16", default-features = false }
-leptos_meta = { version = "0.8" }
-leptos_router = { version = "0.8", default-features = false }
-
-#
 # macros
 pastey = "0.1"
 displaydoc = "0.2"
@@ -129,7 +114,6 @@ struct-patch = "0.10.4"
 thiserror = "2"
 anyhow = "1"
 garde = { version = "0.22", features = ["derive", "regex", "url", "email"] }
-terrors = "0.3.3"
 
 #
 # logging
@@ -144,11 +128,6 @@ tracing-unwrap = "1.0"
 tracing-appender = "0.2.3"
 tracing-error = "0.2.1"
 tracing-futures = "0.2.5"
-
-#
-# auth
-kanidm_client = "1.7.2"
-kanidm_proto = "1.7.2"
 
 #
 # os
@@ -166,15 +145,12 @@ utoipa = { version = "5.4.0", features = ["debug", "uuid", "time", "smallvec",  
 # utoipa-swagger-ui = "9"
 # http
 tower = "0.5"
-tower-http = "0.6"
 reqwest = { version = "0.12", default-features = false, features = ["charset", "http2", "system-proxy", "json", "stream", "rustls-tls"] }
-gloo = { version = "0.11.0", default-features = false }
 
 #
 # sync
 automerge = "0.7.3"
 autosurgeon = "0.10.1"
-automerge-test = "0.6"
 samod = { version = "0.8.0" }
 samod-core = { version = "0.8.0" }
 # samod = { path = "src/samod/samod" }
@@ -209,7 +185,6 @@ uniffi = { version = "0.31.0" }
 #
 # wasm
 wasmtime = "*"
-wasmtime-wasi = { version = "*" }
 wash-runtime = "0.2.0"
 wit-bindgen = "0.55.0"
 # wash-runtime = { path = "../wash/crates/wash-runtime/"}

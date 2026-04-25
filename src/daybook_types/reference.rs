@@ -4,32 +4,11 @@ pub fn select_json_path_values<'a>(
     value: &'a serde_json::Value,
     json_path: &str,
 ) -> Res<Vec<&'a serde_json::Value>> {
-    if json_path == "$" {
-        return Ok(vec![value]);
-    }
-
-    if json_path.starts_with('/') {
-        return Ok(value.pointer(json_path).into_iter().collect());
-    }
-
-    if let Some(path_tail) = json_path.strip_prefix("$.") {
-        let mut current = value;
-        for segment in path_tail.split('.') {
-            if segment.is_empty() {
-                eyre::bail!("invalid json path '{}'", json_path);
-            }
-            let Some(next) = current.get(segment) else {
-                return Ok(vec![]);
-            };
-            current = next;
-        }
-        return Ok(vec![current]);
-    }
-
-    eyre::bail!(
-        "unsupported json path '{}'; expected JSON pointer '/a/b' or root-dot path '$.a.b'",
-        json_path
-    )
+    use jsonpath_rust::JsonPath;
+    let results = value
+        .query(json_path)
+        .map_err(|err| eyre::eyre!("jsonpath error: {err}"))?;
+    Ok(results)
 }
 
 pub fn schema_node_for_json_path<'a>(

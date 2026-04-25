@@ -73,3 +73,4 @@ pastey.workspace = true
 addr.workspace = true
 blake3.workspace = true
 camino = { version = "1.2.2", features = ["serde1"] }
+jsonpath-rust = "1.0.4"

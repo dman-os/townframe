@@ -618,9 +618,30 @@ pub enum DocPredicateClause {
         #[garde(dive)]
         target_tag: FacetTag,
     },
+    FacetFieldMatch {
+        #[garde(dive)]
+        tag: FacetTag,
+        #[garde(length(min = 1))]
+        json_path: String,
+        #[garde(skip)]
+        operator: CompareOp,
+        #[garde(skip)]
+        value: serde_json::Value,
+    },
     Or(#[garde(dive)] Vec<Self>),
     And(#[garde(dive)] Vec<Self>),
     Not(#[garde(dive)] Box<Self>),
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub enum CompareOp {
+    Eq,
+    Ne,
+    Gt,
+    Gte,
+    Lt,
+    Lte,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
@@ -653,6 +674,9 @@ impl DocPredicateClause {
             Self::HasReferenceToTag { source_tag, .. } => {
                 out.insert(DocPredicateEvalRequirement::FacetsOfTag(source_tag.clone()));
                 out.insert(DocPredicateEvalRequirement::FacetManifest);
+            }
+            Self::FacetFieldMatch { tag, .. } => {
+                out.insert(DocPredicateEvalRequirement::FacetsOfTag(tag.clone()));
             }
             Self::Or(clauses) | Self::And(clauses) => {
                 for clause in clauses {
@@ -703,6 +727,25 @@ impl DocPredicateClause {
                     facet_reference_specs,
                 )
             }
+            Self::FacetFieldMatch {
+                tag,
+                json_path,
+                operator,
+                value,
+            } => {
+                let Some(DocPredicateEvalResolved::FacetsOfTag(source_facets)) =
+                    resolved.get(&DocPredicateEvalRequirement::FacetsOfTag(tag.clone()))
+                else {
+                    return match mode {
+                        DocPredicateEvalMode::ApproxInterest => {
+                            doc.facets.keys().any(|key| key.tag.to_string() == tag.0)
+                        }
+                        DocPredicateEvalMode::Exact => false,
+                    };
+                };
+
+                evaluate_facet_field_match(source_facets, json_path, *operator, value)
+            }
             Self::Or(clauses) => clauses
                 .iter()
                 .any(|clause| clause.evaluate(doc, mode, resolved)),
@@ -735,6 +778,9 @@ impl DocPredicateClause {
             } => {
                 out.insert(source_tag.clone());
                 out.insert(target_tag.clone());
+            }
+            Self::FacetFieldMatch { tag, .. } => {
+                out.insert(tag.clone());
             }
             Self::Or(clauses) | Self::And(clauses) => {
                 for clause in clauses {
@@ -808,6 +854,54 @@ fn facet_has_reference_to_tag(
         }
     }
     false
+}
+
+fn evaluate_facet_field_match(
+    facets: &[(crate::doc::FacetKey, crate::doc::FacetRaw)],
+    json_path: &str,
+    operator: CompareOp,
+    expected: &serde_json::Value,
+) -> bool {
+    use jsonpath_rust::JsonPath;
+    for (_, raw) in facets {
+        let Ok(found) = raw.query(json_path) else {
+            continue;
+        };
+        for found_val in found {
+            if compare_json_values(found_val, operator, expected) {
+                return true;
+            }
+        }
+    }
+    false
+}
+
+fn compare_json_values(lhs: &serde_json::Value, op: CompareOp, rhs: &serde_json::Value) -> bool {
+    match op {
+        CompareOp::Eq => lhs == rhs,
+        CompareOp::Ne => lhs != rhs,
+        CompareOp::Gt | CompareOp::Gte | CompareOp::Lt | CompareOp::Lte => {
+            if let (Some(lhs), Some(rhs)) = (lhs.as_f64(), rhs.as_f64()) {
+                return match op {
+                    CompareOp::Gt => lhs > rhs,
+                    CompareOp::Gte => lhs >= rhs,
+                    CompareOp::Lt => lhs < rhs,
+                    CompareOp::Lte => lhs <= rhs,
+                    _ => unreachable!(),
+                };
+            }
+            if let (Some(lhs), Some(rhs)) = (lhs.as_str(), rhs.as_str()) {
+                return match op {
+                    CompareOp::Gt => lhs > rhs,
+                    CompareOp::Gte => lhs >= rhs,
+                    CompareOp::Lt => lhs < rhs,
+                    CompareOp::Lte => lhs <= rhs,
+                    _ => unreachable!(),
+                };
+            }
+            false
+        }
+    }
 }
 
 #[derive(Debug, Serialize, Deserialize, Validate, Clone, PartialEq, Eq, Hash)]
@@ -930,5 +1024,211 @@ mod tests {
         DocChangePredicate::ChangedFacetKeys(vec![key.clone()])
             .append_referenced_facet_scope(&mut read_tags, &mut read_keys);
         assert!(read_keys.contains(&key));
+    }
+
+    #[test]
+    fn facet_field_match_eq_string() {
+        let tag: FacetTag = "org.example.note".into();
+        let note_json = serde_json::json!({
+            "mime": "text/x-hledger-journal",
+            "content": "2024-01-01 test\n  assets:cash  $10\n  expenses:food"
+        });
+        let facets = vec![(
+            crate::doc::FacetKey {
+                tag: "org.example.note".into(),
+                id: "main".into(),
+            },
+            note_json,
+        )];
+
+        let predicate = DocPredicateClause::FacetFieldMatch {
+            tag: tag.clone(),
+            json_path: "$.mime".into(),
+            operator: CompareOp::Eq,
+            value: serde_json::Value::String("text/x-hledger-journal".into()),
+        };
+
+        let mut requirements = HashSet::new();
+        predicate.append_requirements(&mut requirements);
+        assert!(requirements.contains(&DocPredicateEvalRequirement::FacetsOfTag(tag.clone())));
+
+        let mut resolved = HashMap::new();
+        resolved.insert(
+            DocPredicateEvalRequirement::FacetsOfTag(tag),
+            DocPredicateEvalResolved::FacetsOfTag(facets),
+        );
+
+        let doc = crate::doc::Doc {
+            id: "doc1".into(),
+            facets: HashMap::new(),
+        };
+
+        assert!(predicate.evaluate(&doc, DocPredicateEvalMode::Exact, &resolved));
+    }
+
+    #[test]
+    fn facet_field_match_ne_string() {
+        let tag: FacetTag = "org.example.note".into();
+        let note_json = serde_json::json!({
+            "mime": "text/plain",
+            "content": "hello"
+        });
+        let facets = vec![(
+            crate::doc::FacetKey {
+                tag: "org.example.note".into(),
+                id: "main".into(),
+            },
+            note_json,
+        )];
+
+        let predicate = DocPredicateClause::FacetFieldMatch {
+            tag: tag.clone(),
+            json_path: "$.mime".into(),
+            operator: CompareOp::Ne,
+            value: serde_json::Value::String("text/x-hledger-journal".into()),
+        };
+
+        let mut resolved = HashMap::new();
+        resolved.insert(
+            DocPredicateEvalRequirement::FacetsOfTag(tag),
+            DocPredicateEvalResolved::FacetsOfTag(facets),
+        );
+
+        let doc = crate::doc::Doc {
+            id: "doc1".into(),
+            facets: HashMap::new(),
+        };
+
+        assert!(predicate.evaluate(&doc, DocPredicateEvalMode::Exact, &resolved));
+    }
+
+    #[test]
+    fn facet_field_match_gt_numeric() {
+        let tag: FacetTag = "org.example.note".into();
+        let note_json = serde_json::json!({
+            "confidence": 0.95
+        });
+        let facets = vec![(
+            crate::doc::FacetKey {
+                tag: "org.example.note".into(),
+                id: "main".into(),
+            },
+            note_json,
+        )];
+
+        let predicate = DocPredicateClause::FacetFieldMatch {
+            tag: tag.clone(),
+            json_path: "$.confidence".into(),
+            operator: CompareOp::Gt,
+            value: serde_json::json!(0.5),
+        };
+
+        let mut resolved = HashMap::new();
+        resolved.insert(
+            DocPredicateEvalRequirement::FacetsOfTag(tag),
+            DocPredicateEvalResolved::FacetsOfTag(facets),
+        );
+
+        let doc = crate::doc::Doc {
+            id: "doc1".into(),
+            facets: HashMap::new(),
+        };
+
+        assert!(predicate.evaluate(&doc, DocPredicateEvalMode::Exact, &resolved));
+    }
+
+    #[test]
+    fn facet_field_match_mismatch() {
+        let tag: FacetTag = "org.example.note".into();
+        let note_json = serde_json::json!({
+            "mime": "text/plain"
+        });
+        let facets = vec![(
+            crate::doc::FacetKey {
+                tag: "org.example.note".into(),
+                id: "main".into(),
+            },
+            note_json,
+        )];
+
+        let predicate = DocPredicateClause::FacetFieldMatch {
+            tag: tag.clone(),
+            json_path: "$.mime".into(),
+            operator: CompareOp::Eq,
+            value: serde_json::Value::String("text/x-hledger-journal".into()),
+        };
+
+        let mut resolved = HashMap::new();
+        resolved.insert(
+            DocPredicateEvalRequirement::FacetsOfTag(tag),
+            DocPredicateEvalResolved::FacetsOfTag(facets),
+        );
+
+        let doc = crate::doc::Doc {
+            id: "doc1".into(),
+            facets: HashMap::new(),
+        };
+
+        assert!(!predicate.evaluate(&doc, DocPredicateEvalMode::Exact, &resolved));
+    }
+
+    #[test]
+    fn facet_field_match_deserialization() {
+        let json = serde_json::json!({
+            "facetFieldMatch": {
+                "tag": "org.example.note",
+                "json_path": "$.mime",
+                "operator": "eq",
+                "value": "text/x-hledger-journal"
+            }
+        });
+
+        let clause: DocPredicateClause = serde_json::from_value(json).expect("valid clause");
+        assert!(matches!(clause, DocPredicateClause::FacetFieldMatch {
+            json_path, ..
+        } if json_path == "$.mime"));
+    }
+
+    #[test]
+    fn compare_json_values_eq_neq() {
+        assert!(compare_json_values(
+            &serde_json::json!("hello"),
+            CompareOp::Eq,
+            &serde_json::json!("hello"),
+        ));
+        assert!(!compare_json_values(
+            &serde_json::json!("hello"),
+            CompareOp::Eq,
+            &serde_json::json!("world"),
+        ));
+        assert!(compare_json_values(
+            &serde_json::json!("hello"),
+            CompareOp::Ne,
+            &serde_json::json!("world"),
+        ));
+    }
+
+    #[test]
+    fn compare_json_values_numeric() {
+        assert!(compare_json_values(
+            &serde_json::json!(10.0),
+            CompareOp::Gt,
+            &serde_json::json!(5.0),
+        ));
+        assert!(!compare_json_values(
+            &serde_json::json!(3.0),
+            CompareOp::Gt,
+            &serde_json::json!(5.0),
+        ));
+        assert!(compare_json_values(
+            &serde_json::json!(5.0),
+            CompareOp::Gte,
+            &serde_json::json!(5.0),
+        ));
+        assert!(compare_json_values(
+            &serde_json::json!(3.0),
+            CompareOp::Lt,
+            &serde_json::json!(5.0),
+        ));
     }
 }
