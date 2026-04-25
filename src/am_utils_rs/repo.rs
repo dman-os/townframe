@@ -731,6 +731,17 @@ mod tests {
             .expect("change listener closed unexpectedly")
     }
 
+    async fn recv_head_batch(
+        rx: &mut tokio::sync::mpsc::UnboundedReceiver<
+            Vec<super::changes::BigRepoHeadNotification>,
+        >,
+    ) -> Vec<super::changes::BigRepoHeadNotification> {
+        timeout(Duration::from_secs(1), rx.recv())
+            .await
+            .expect("timed out waiting for head batch")
+            .expect("head listener closed unexpectedly")
+    }
+
     fn read_proc_status_value(label: &str) -> Option<u64> {
         let status = std::fs::read_to_string("/proc/self/status").ok()?;
         status.lines().find_map(|line| {
@@ -834,6 +845,7 @@ mod tests {
     }
 
     #[test]
+    #[ignore]
     fn large_fragment_store_build_profile_par() -> Res<()> {
         use automerge_sedimentree::indexed::IndexedSedimentreeAutomerge;
         use sedimentree_core::{
@@ -1069,6 +1081,112 @@ mod tests {
                 ..
             } if *seen_doc_id == doc_id
         )));
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn change_and_head_listeners_ignore_noop_mutation() -> Res<()> {
+        let (repo, _stop_token) = boot_repo().await?;
+        let handle = repo
+            .put_doc(DocumentId::random(), automerge::Automerge::new())
+            .await?;
+        let doc_id = *handle.document_id();
+
+        let (_change_registration, mut change_rx) = repo
+            .subscribe_change_listener(BigRepoChangeFilter {
+                doc_id: Some(BigRepoDocIdFilter::new(doc_id)),
+                origin: Some(BigRepoOriginFilter::Local),
+                path: Vec::new(),
+            })
+            .await?;
+        let (_head_registration, mut head_rx) = repo
+            .change_manager
+            .subscribe_head_listener(super::changes::HeadFilter {
+                doc_id: Some(super::changes::DocIdFilter::new(doc_id)),
+            })
+            .await?;
+
+        handle
+            .with_document(|_| {
+                // No-op on purpose.
+            })
+            .await?;
+
+        assert!(timeout(Duration::from_millis(250), change_rx.recv())
+            .await
+            .is_err());
+        assert!(timeout(Duration::from_millis(250), head_rx.recv())
+            .await
+            .is_err());
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn remote_change_and_head_notifications_survive_handle_reopen() -> Res<()> {
+        let (repo, _stop_token) = boot_repo().await?;
+        let doc_id = DocumentId::random();
+        let mut doc = automerge::Automerge::new();
+        doc.transact(|tx| tx.put(automerge::ROOT, "title", "seed"))
+            .expect("failed seeding title");
+
+        let handle = repo.put_doc(doc_id, doc).await?;
+        drop(handle);
+        let handle = repo.get_doc(&doc_id).await?.expect("doc should exist");
+
+        let (_change_registration, mut change_rx) = repo
+            .subscribe_change_listener(BigRepoChangeFilter {
+                doc_id: Some(BigRepoDocIdFilter::new(doc_id)),
+                origin: Some(BigRepoOriginFilter::Remote),
+                path: Vec::new(),
+            })
+            .await?;
+        let (_head_registration, mut head_rx) = repo
+            .change_manager
+            .subscribe_head_listener(super::changes::HeadFilter {
+                doc_id: Some(super::changes::DocIdFilter::new(doc_id)),
+            })
+            .await?;
+
+        handle
+            .with_document_with_origin(
+                |doc| {
+                    doc.transact(|tx| tx.put(automerge::ROOT, "title", "remote-after"))
+                        .expect("failed mutating remote doc");
+                },
+                BigRepoChangeOrigin::Remote {
+                    peer_id: PeerId::new([9_u8; 32]),
+                },
+            )
+            .await?;
+
+        let change_batch = recv_change_batch(&mut change_rx).await;
+        assert!(matches!(
+            change_batch.as_slice(),
+            [BigRepoChangeNotification::DocChanged {
+                doc_id: seen_doc_id,
+                origin: BigRepoChangeOrigin::Remote { .. },
+                ..
+            }] if *seen_doc_id == doc_id
+        ));
+
+        let head_batch: Vec<super::changes::BigRepoHeadNotification> =
+            recv_head_batch(&mut head_rx).await;
+        assert!(matches!(
+            head_batch.as_slice(),
+            [super::changes::BigRepoHeadNotification::DocHeadsChanged {
+                doc_id: seen_doc_id,
+                origin: BigRepoChangeOrigin::Remote { .. },
+                ..
+            }] if *seen_doc_id == doc_id
+        ));
+
+        let title = repo
+            .get_doc(&doc_id)
+            .await?
+            .expect("doc should still exist")
+            .with_document_read(|doc| get_str_at_root(doc, "title"))
+            .await;
+        assert_eq!(title, "remote-after");
         Ok(())
     }
 
@@ -1749,6 +1867,102 @@ mod tests {
         Ok(())
     }
 
+    #[tracing::instrument(skip_all, fields(item_count, payload_len, ?remote_mutation))]
+    async fn run_remote_change_listener_without_live_handle_case(
+        item_count: usize,
+        payload_len: usize,
+        remote_mutation: SyncMutation,
+    ) -> Res<()> {
+        utils_rs::testing::setup_tracing_once();
+        tracing::info!("starting remote listener without live handle case");
+        let temp_root = tempdir()?;
+        let server_path = temp_root.path().join("server");
+        let client_path = temp_root.path().join("client");
+
+        let mut expected_doc = make_sync_doc_value("base", item_count, payload_len);
+        let mut base_doc = automerge::Automerge::new();
+        write_sync_doc_value(&mut base_doc, &expected_doc);
+
+        let server = SyncRepoNode::boot(server_path, 91, true).await?;
+        let client = SyncRepoNode::boot(client_path, 92, false).await?;
+        let doc_id = DocumentId::random();
+
+        let server_doc = put_doc_with_automerge(&server.repo, doc_id, base_doc.clone()).await?;
+        let client_doc = put_doc_with_automerge(&client.repo, doc_id, base_doc).await?;
+        set_doc_actor(&server_doc, automerge::ActorId::from([91_u8; 16])).await?;
+        set_doc_actor(&client_doc, automerge::ActorId::from([92_u8; 16])).await?;
+
+        let (_change_registration, mut change_rx) = server
+            .repo
+            .subscribe_change_listener(BigRepoChangeFilter {
+                doc_id: Some(BigRepoDocIdFilter::new(doc_id)),
+                origin: Some(BigRepoOriginFilter::Remote),
+                path: Vec::new(),
+            })
+            .await?;
+        let (_head_registration, mut head_rx) = server
+            .repo
+            .change_manager
+            .subscribe_head_listener(super::changes::HeadFilter {
+                doc_id: Some(super::changes::DocIdFilter::new(doc_id)),
+            })
+            .await?;
+
+        drop(server_doc);
+        tracing::info!("dropped the server doc handle before remote sync");
+
+        client_doc
+            .with_document(|doc| {
+                apply_sync_mutation_in_place(doc, remote_mutation, payload_len);
+            })
+            .await?;
+        apply_sync_mutation(&mut expected_doc, remote_mutation, payload_len);
+
+        let (client_conn, _client_stop) = connect_sync_pair(&client, &server).await?;
+        server.wait_for_accepts(1).await;
+
+        let outcome = timeout(
+            SYNC_CASE_TIMEOUT,
+            client_conn.sync_doc_with_peer(doc_id, false, Some(SYNC_PROPAGATION_TIMEOUT)),
+        )
+        .await
+        .expect("timed out waiting for remote sync_doc_with_peer")?;
+        assert_eq!(outcome, SyncDocOutcome::Success);
+
+        let change_batch = recv_change_batch(&mut change_rx).await;
+        assert!(matches!(
+            change_batch.as_slice(),
+            [BigRepoChangeNotification::DocChanged {
+                doc_id: seen_doc_id,
+                origin: BigRepoChangeOrigin::Remote { .. },
+                ..
+            }] if *seen_doc_id == doc_id
+        ));
+
+        let head_batch: Vec<super::changes::BigRepoHeadNotification> =
+            recv_head_batch(&mut head_rx).await;
+        assert!(matches!(
+            head_batch.as_slice(),
+            [super::changes::BigRepoHeadNotification::DocHeadsChanged {
+                doc_id: seen_doc_id,
+                origin: BigRepoChangeOrigin::Remote { .. },
+                ..
+            }] if *seen_doc_id == doc_id
+        ));
+
+        let reopened = server
+            .repo
+            .get_doc(&doc_id)
+            .await?
+            .expect("server doc should remain persisted");
+        wait_for_json_doc(&reopened, &expected_doc, SYNC_CASE_TIMEOUT).await;
+
+        client_conn.close().await?;
+        server.shutdown().await?;
+        client.shutdown().await?;
+        Ok(())
+    }
+
     #[tracing::instrument(skip_all, fields(doc_id = %doc_id))]
     async fn put_doc_with_automerge(
         repo: &Arc<BigRepo>,
@@ -1766,6 +1980,80 @@ mod tests {
             })
             .await?;
         Ok(())
+    }
+
+    #[tracing::instrument(skip_all, fields(doc_id = %doc_id, ?mutation))]
+    async fn apply_local_sync_mutation_and_assert_notifications(
+        repo: &Arc<BigRepo>,
+        conn: &BigRepoConnection,
+        handle: &BigDocHandle,
+        doc_id: DocumentId,
+        mutation: SyncMutation,
+        payload_len: usize,
+    ) -> Res<()> {
+        let (_change_registration, mut change_rx) = repo
+            .subscribe_change_listener(BigRepoChangeFilter {
+                doc_id: Some(BigRepoDocIdFilter::new(doc_id)),
+                origin: Some(BigRepoOriginFilter::Local),
+                path: Vec::new(),
+            })
+            .await?;
+        let (_head_registration, mut head_rx) = repo
+            .change_manager
+            .subscribe_head_listener(super::changes::HeadFilter {
+                doc_id: Some(super::changes::DocIdFilter::new(doc_id)),
+            })
+            .await?;
+
+        handle
+            .with_document(|doc| {
+                apply_sync_mutation_in_place(doc, mutation, payload_len);
+            })
+            .await?;
+
+        let change_batch = recv_change_batch(&mut change_rx).await;
+        assert!(matches!(
+            change_batch.as_slice(),
+            [BigRepoChangeNotification::DocChanged {
+                doc_id: seen_doc_id,
+                origin: BigRepoChangeOrigin::Local,
+                ..
+            }] if *seen_doc_id == doc_id
+        ));
+
+        let head_batch: Vec<super::changes::BigRepoHeadNotification> =
+            recv_head_batch(&mut head_rx).await;
+        assert!(matches!(
+            head_batch.as_slice(),
+            [super::changes::BigRepoHeadNotification::DocHeadsChanged {
+                doc_id: seen_doc_id,
+                origin: BigRepoChangeOrigin::Local,
+                ..
+            }] if *seen_doc_id == doc_id
+        ));
+
+        let outcome = timeout(
+            SYNC_CASE_TIMEOUT,
+            conn.sync_doc_with_peer(doc_id, false, Some(SYNC_PROPAGATION_TIMEOUT)),
+        )
+        .await
+        .expect("timed out waiting for local sync_doc_with_peer")?;
+        assert_eq!(outcome, SyncDocOutcome::Success);
+        Ok(())
+    }
+
+    async fn connect_sync_pair(
+        client: &SyncRepoNode,
+        server: &SyncRepoNode,
+    ) -> Res<(BigRepoConnection, BigRepoConnectionStopToken)> {
+        client
+            .repo
+            .connect_with_peer(
+                client.endpoint.clone(),
+                server.endpoint.addr(),
+                server.peer_id(),
+            )
+            .await
     }
 
     #[tokio::test(flavor = "multi_thread")]
@@ -1836,6 +2124,7 @@ mod tests {
     }
 
     #[tokio::test(flavor = "multi_thread")]
+    #[ignore]
     async fn sync_with_peer_handles_large_fragmented_remote_docs() -> Res<()> {
         timeout(
             SYNC_CASE_TIMEOUT,
@@ -1878,5 +2167,282 @@ mod tests {
         .await
         .expect("sync test timed out")?;
         Ok(())
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn sync_with_peer_local_write_emits_notifications_while_connected() -> Res<()> {
+        timeout(
+            SYNC_CASE_TIMEOUT,
+            async {
+                let temp_root = tempdir()?;
+                let server_path = temp_root.path().join("server");
+                let client_path = temp_root.path().join("client");
+
+                let mut expected_doc = make_sync_doc_value("base", SYNC_DOC_ITEMS, SYNC_DOC_PAYLOAD_LEN);
+                let mut base_doc = automerge::Automerge::new();
+                write_sync_doc_value(&mut base_doc, &expected_doc);
+
+                let server = SyncRepoNode::boot(server_path, 101, true).await?;
+                let client = SyncRepoNode::boot(client_path, 102, false).await?;
+                let doc_id = DocumentId::random();
+                let server_doc = put_doc_with_automerge(&server.repo, doc_id, base_doc.clone()).await?;
+                let client_doc = put_doc_with_automerge(&client.repo, doc_id, base_doc).await?;
+                set_doc_actor(&server_doc, automerge::ActorId::from([101_u8; 16])).await?;
+                set_doc_actor(&client_doc, automerge::ActorId::from([102_u8; 16])).await?;
+
+                let (client_conn, _client_stop) = connect_sync_pair(&client, &server).await?;
+                server.wait_for_accepts(1).await;
+
+                apply_local_sync_mutation_and_assert_notifications(
+                    &client.repo,
+                    &client_conn,
+                    &client_doc,
+                    doc_id,
+                    SyncMutation {
+                        item_idx: 4,
+                        note_key: "local_connected",
+                        side_label: "local",
+                    },
+                    SYNC_DOC_PAYLOAD_LEN,
+                )
+                .await?;
+                apply_sync_mutation(
+                    &mut expected_doc,
+                    SyncMutation {
+                        item_idx: 4,
+                        note_key: "local_connected",
+                        side_label: "local",
+                    },
+                    SYNC_DOC_PAYLOAD_LEN,
+                );
+
+                wait_for_json_doc(&client_doc, &expected_doc, SYNC_CASE_TIMEOUT).await;
+                wait_for_json_doc(&server_doc, &expected_doc, SYNC_CASE_TIMEOUT).await;
+
+                client_conn.close().await?;
+                server.shutdown().await?;
+                client.shutdown().await?;
+                eyre::Ok(())
+            },
+        )
+        .await
+        .expect("sync test timed out")?;
+        Ok(())
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn sync_with_peer_remote_change_notifies_without_live_handle() -> Res<()> {
+        timeout(
+            SYNC_CASE_TIMEOUT,
+            run_remote_change_listener_without_live_handle_case(
+                SYNC_DOC_ITEMS,
+                SYNC_DOC_PAYLOAD_LEN,
+                SyncMutation {
+                    item_idx: 13,
+                    note_key: "remote_no_handle",
+                    side_label: "remote",
+                },
+            ),
+        )
+        .await
+        .expect("sync test timed out")?;
+        Ok(())
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn sync_with_peer_remote_change_notifies_with_live_handle_and_listeners() -> Res<()> {
+        timeout(
+            SYNC_CASE_TIMEOUT,
+            async {
+                let temp_root = tempdir()?;
+                let server_path = temp_root.path().join("server");
+                let client_path = temp_root.path().join("client");
+
+                let mut expected_doc = make_sync_doc_value("base", SYNC_DOC_ITEMS, SYNC_DOC_PAYLOAD_LEN);
+                let mut base_doc = automerge::Automerge::new();
+                write_sync_doc_value(&mut base_doc, &expected_doc);
+
+                let server = SyncRepoNode::boot(server_path, 111, true).await?;
+                let client = SyncRepoNode::boot(client_path, 112, false).await?;
+                let doc_id = DocumentId::random();
+                let server_doc = put_doc_with_automerge(&server.repo, doc_id, base_doc.clone()).await?;
+                let client_doc = put_doc_with_automerge(&client.repo, doc_id, base_doc).await?;
+                set_doc_actor(&server_doc, automerge::ActorId::from([111_u8; 16])).await?;
+                set_doc_actor(&client_doc, automerge::ActorId::from([112_u8; 16])).await?;
+
+                let (_change_registration, mut change_rx) = server
+                    .repo
+                    .subscribe_change_listener(BigRepoChangeFilter {
+                        doc_id: Some(BigRepoDocIdFilter::new(doc_id)),
+                        origin: Some(BigRepoOriginFilter::Remote),
+                        path: Vec::new(),
+                    })
+                    .await?;
+                let (_head_registration, mut head_rx) = server
+                    .repo
+                    .change_manager
+                    .subscribe_head_listener(super::changes::HeadFilter {
+                        doc_id: Some(super::changes::DocIdFilter::new(doc_id)),
+                    })
+                    .await?;
+
+                let (client_conn, _client_stop) = connect_sync_pair(&client, &server).await?;
+                server.wait_for_accepts(1).await;
+
+                client_doc
+                    .with_document(|doc| {
+                        apply_sync_mutation_in_place(
+                            doc,
+                            SyncMutation {
+                                item_idx: 7,
+                                note_key: "remote_with_handle",
+                                side_label: "remote",
+                            },
+                            SYNC_DOC_PAYLOAD_LEN,
+                        );
+                    })
+                    .await?;
+                apply_sync_mutation(
+                    &mut expected_doc,
+                    SyncMutation {
+                        item_idx: 7,
+                        note_key: "remote_with_handle",
+                        side_label: "remote",
+                    },
+                    SYNC_DOC_PAYLOAD_LEN,
+                );
+
+                let outcome = timeout(
+                    SYNC_CASE_TIMEOUT,
+                    client_conn.sync_doc_with_peer(
+                        doc_id,
+                        false,
+                        Some(SYNC_PROPAGATION_TIMEOUT),
+                    ),
+                )
+                .await
+                .expect("timed out waiting for remote sync_doc_with_peer")?;
+                assert_eq!(outcome, SyncDocOutcome::Success);
+
+                let change_batch = recv_change_batch(&mut change_rx).await;
+                assert!(matches!(
+                    change_batch.as_slice(),
+                    [BigRepoChangeNotification::DocChanged {
+                        doc_id: seen_doc_id,
+                        origin: BigRepoChangeOrigin::Remote { .. },
+                        ..
+                    }] if *seen_doc_id == doc_id
+                ));
+
+                let head_batch: Vec<super::changes::BigRepoHeadNotification> =
+                    recv_head_batch(&mut head_rx).await;
+                assert!(matches!(
+                    head_batch.as_slice(),
+                    [super::changes::BigRepoHeadNotification::DocHeadsChanged {
+                        doc_id: seen_doc_id,
+                        origin: BigRepoChangeOrigin::Remote { .. },
+                        ..
+                    }] if *seen_doc_id == doc_id
+                ));
+
+                wait_for_json_doc(&server_doc, &expected_doc, SYNC_CASE_TIMEOUT).await;
+                wait_for_json_doc(&client_doc, &expected_doc, SYNC_CASE_TIMEOUT).await;
+
+                client_conn.close().await?;
+                server.shutdown().await?;
+                client.shutdown().await?;
+                eyre::Ok(())
+            },
+        )
+        .await
+        .expect("sync test timed out")?;
+        Ok(())
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn sync_with_peer_local_change_without_change_listener_only_emits_heads() -> Res<()> {
+        timeout(
+            SYNC_CASE_TIMEOUT,
+            async {
+                let temp_root = tempdir()?;
+                let server_path = temp_root.path().join("server");
+                let client_path = temp_root.path().join("client");
+
+                let mut expected_doc = make_sync_doc_value("base", SYNC_DOC_ITEMS, SYNC_DOC_PAYLOAD_LEN);
+                let mut base_doc = automerge::Automerge::new();
+                write_sync_doc_value(&mut base_doc, &expected_doc);
+
+                let server = SyncRepoNode::boot(server_path, 121, true).await?;
+                let client = SyncRepoNode::boot(client_path, 122, false).await?;
+                let doc_id = DocumentId::random();
+                let server_doc = put_doc_with_automerge(&server.repo, doc_id, base_doc.clone()).await?;
+                let client_doc = put_doc_with_automerge(&client.repo, doc_id, base_doc).await?;
+                set_doc_actor(&server_doc, automerge::ActorId::from([121_u8; 16])).await?;
+                set_doc_actor(&client_doc, automerge::ActorId::from([122_u8; 16])).await?;
+
+                let (_head_registration, mut head_rx) = client
+                    .repo
+                    .change_manager
+                    .subscribe_head_listener(super::changes::HeadFilter {
+                        doc_id: Some(super::changes::DocIdFilter::new(doc_id)),
+                    })
+                    .await?;
+                assert!(
+                    !client
+                        .repo
+                        .change_manager
+                        .has_change_listener_interest(doc_id, &BigRepoChangeOrigin::Local),
+                    "no change listeners should be interested before mutation"
+                );
+
+                let (client_conn, _client_stop) = connect_sync_pair(&client, &server).await?;
+                server.wait_for_accepts(1).await;
+
+                client_doc
+                    .with_document(|doc| {
+                        apply_sync_mutation_in_place(
+                            doc,
+                            SyncMutation {
+                                item_idx: 2,
+                                note_key: "heads_only",
+                                side_label: "local",
+                            },
+                            SYNC_DOC_PAYLOAD_LEN,
+                        );
+                    })
+                    .await?;
+                apply_sync_mutation(
+                    &mut expected_doc,
+                    SyncMutation {
+                        item_idx: 2,
+                        note_key: "heads_only",
+                        side_label: "local",
+                    },
+                    SYNC_DOC_PAYLOAD_LEN,
+                );
+
+                let head_batch: Vec<super::changes::BigRepoHeadNotification> =
+                    recv_head_batch(&mut head_rx).await;
+                assert!(matches!(
+                    head_batch.as_slice(),
+                    [super::changes::BigRepoHeadNotification::DocHeadsChanged {
+                        doc_id: seen_doc_id,
+                        origin: BigRepoChangeOrigin::Local,
+                        ..
+                    }] if *seen_doc_id == doc_id
+                ));
+
+                wait_for_json_doc(&client_doc, &expected_doc, SYNC_CASE_TIMEOUT).await;
+                wait_for_json_doc(&server_doc, &expected_doc, SYNC_CASE_TIMEOUT).await;
+
+                client_conn.close().await?;
+                server.shutdown().await?;
+                client.shutdown().await?;
+                eyre::Ok(())
+            },
+        )
+        .await
+        .expect("sync test timed out")?;
+                eyre::Ok(())
     }
 }

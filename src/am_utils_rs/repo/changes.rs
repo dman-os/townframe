@@ -695,3 +695,223 @@ pub fn prop_matches(listener_prop: &Prop<'_>, change_prop: &automerge::Prop) -> 
         _ => false,
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use automerge::transaction::Transactable;
+    use std::sync::Arc;
+    use tokio::time::{timeout, Duration};
+
+    fn make_change_fixture() -> (DocumentId, Arc<[ChangeHash]>, Arc<automerge::Patch>) {
+        let doc_id = DocumentId::random();
+        let mut doc = automerge::Automerge::new();
+        let before_heads = doc.get_heads();
+        doc.transact(|tx| {
+            tx.put(automerge::ROOT, "title", "seed")
+                .expect("failed seeding doc");
+            eyre::Ok(())
+        })
+        .expect("failed creating doc change");
+        let after_heads = doc.get_heads();
+        let patch = doc
+            .diff(&before_heads, &after_heads)
+            .into_iter()
+            .next()
+            .expect("expected patch for doc change");
+        (doc_id, Arc::from(after_heads), Arc::new(patch))
+    }
+
+    async fn recv_batch<T: Send>(
+        rx: &mut tokio::sync::mpsc::UnboundedReceiver<Vec<T>>,
+    ) -> Vec<T> {
+        timeout(Duration::from_secs(1), rx.recv())
+            .await
+            .expect("timed out waiting for notification")
+            .expect("listener closed unexpectedly")
+    }
+
+    #[tokio::test]
+    async fn change_listener_drop_unregisters_listener() -> Res<()> {
+        let (manager, _stop) = ChangeListenerManager::boot();
+        let (doc_id, heads, patch) = make_change_fixture();
+        let (registration, mut rx) = manager
+            .subscribe_listener(ChangeFilter {
+                doc_id: Some(DocIdFilter::new(doc_id)),
+                origin: None,
+                path: Vec::new(),
+            })
+            .await?;
+
+        assert!(manager.has_change_listener_interest(doc_id, &BigRepoChangeOrigin::Local));
+        drop(registration);
+        assert!(!manager.has_change_listener_interest(doc_id, &BigRepoChangeOrigin::Local));
+
+        manager.notify_doc_changed(doc_id, patch, heads, BigRepoChangeOrigin::Local)?;
+        let closed = timeout(Duration::from_millis(250), rx.recv())
+            .await
+            .expect("expected receiver to resolve")
+            .is_none();
+        assert!(closed, "change listener should be removed on drop");
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn head_listener_drop_unregisters_listener() -> Res<()> {
+        let (manager, _stop) = ChangeListenerManager::boot();
+        let (doc_id, heads, _) = make_change_fixture();
+        let (registration, mut rx) = manager
+            .subscribe_head_listener(HeadFilter {
+                doc_id: Some(DocIdFilter::new(doc_id)),
+            })
+            .await?;
+
+        drop(registration);
+        manager.notify_doc_heads_changed(doc_id, heads, BigRepoChangeOrigin::Bootstrap)?;
+        let closed = timeout(Duration::from_millis(250), rx.recv())
+            .await
+            .expect("expected receiver to resolve")
+            .is_none();
+        assert!(closed, "head listener should be removed on drop");
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn change_listener_manager_stop_blocks_subscribe_and_notify() -> Res<()> {
+        let (manager, stop) = ChangeListenerManager::boot();
+        stop.stop().await?;
+
+        let result = manager
+            .subscribe_listener(ChangeFilter {
+                doc_id: None,
+                origin: None,
+                path: Vec::new(),
+            })
+            .await;
+        assert!(result.is_err(), "stopped manager should reject subscriptions");
+        let err = result.err().expect("expected subscription error");
+        assert!(err.to_string().contains("stopped"));
+
+        let (doc_id, heads, patch) = make_change_fixture();
+        let err = manager
+            .notify_doc_changed(doc_id, patch, heads, BigRepoChangeOrigin::Local)
+            .expect_err("stopped manager should reject notifications");
+        assert!(err.to_string().contains("stopped"));
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn local_listener_receives_local_notifications() -> Res<()> {
+        let (manager, _stop) = ChangeListenerManager::boot();
+        let (doc_id, heads, _) = make_change_fixture();
+        let (_registration, mut rx) = manager
+            .subscribe_local_listener(LocalFilter {
+                doc_id: Some(DocIdFilter::new(doc_id)),
+            })
+            .await?;
+
+        manager.notify_local_doc_created(doc_id, Arc::clone(&heads))?;
+        let first_batch = recv_batch(&mut rx).await;
+        assert!(matches!(
+            first_batch.as_slice(),
+            [BigRepoLocalNotification::DocCreated { doc_id: seen_doc_id, .. }]
+            if *seen_doc_id == doc_id
+        ));
+
+        manager.notify_local_doc_imported(doc_id, Arc::clone(&heads))?;
+        let second_batch = recv_batch(&mut rx).await;
+        assert!(matches!(
+            second_batch.as_slice(),
+            [BigRepoLocalNotification::DocImported { doc_id: seen_doc_id, .. }]
+            if *seen_doc_id == doc_id
+        ));
+
+        manager.notify_local_doc_heads_updated(doc_id, heads)?;
+        let third_batch = recv_batch(&mut rx).await;
+        assert!(matches!(
+            third_batch.as_slice(),
+            [BigRepoLocalNotification::DocHeadsUpdated { doc_id: seen_doc_id, .. }]
+            if *seen_doc_id == doc_id
+        ));
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn head_listener_receives_head_notifications() -> Res<()> {
+        let (manager, _stop) = ChangeListenerManager::boot();
+        let (doc_id, heads, _) = make_change_fixture();
+        let (_registration, mut rx) = manager
+            .subscribe_head_listener(HeadFilter {
+                doc_id: Some(DocIdFilter::new(doc_id)),
+            })
+            .await?;
+
+        manager.notify_doc_heads_changed(doc_id, heads, BigRepoChangeOrigin::Remote {
+            peer_id: crate::repo::PeerId::new([42_u8; 32]),
+        })?;
+        let batch = recv_batch(&mut rx).await;
+        assert!(matches!(
+            batch.as_slice(),
+            [BigRepoHeadNotification::DocHeadsChanged {
+                doc_id: seen_doc_id,
+                origin: BigRepoChangeOrigin::Remote { .. },
+                ..
+            }] if *seen_doc_id == doc_id
+        ));
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn change_listener_origin_filters_remote_and_bootstrap() -> Res<()> {
+        let (manager, _stop) = ChangeListenerManager::boot();
+        let (doc_id, heads, patch) = make_change_fixture();
+        let (remote_registration, mut remote_rx) = manager
+            .subscribe_listener(ChangeFilter {
+                doc_id: Some(DocIdFilter::new(doc_id)),
+                origin: Some(OriginFilter::Remote),
+                path: Vec::new(),
+            })
+            .await?;
+        let (bootstrap_registration, mut bootstrap_rx) = manager
+            .subscribe_listener(ChangeFilter {
+                doc_id: Some(DocIdFilter::new(doc_id)),
+                origin: Some(OriginFilter::Bootstrap),
+                path: Vec::new(),
+            })
+            .await?;
+
+        manager.notify_doc_changed(
+            doc_id,
+            Arc::clone(&patch),
+            Arc::clone(&heads),
+            BigRepoChangeOrigin::Remote {
+                peer_id: crate::repo::PeerId::new([11_u8; 32]),
+            },
+        )?;
+        manager.notify_doc_changed(doc_id, patch, heads, BigRepoChangeOrigin::Bootstrap)?;
+
+        let remote_batch = recv_batch(&mut remote_rx).await;
+        assert!(matches!(
+            remote_batch.as_slice(),
+            [BigRepoChangeNotification::DocChanged {
+                doc_id: seen_doc_id,
+                origin: BigRepoChangeOrigin::Remote { .. },
+                ..
+            }] if *seen_doc_id == doc_id
+        ));
+
+        let bootstrap_batch = recv_batch(&mut bootstrap_rx).await;
+        assert!(matches!(
+            bootstrap_batch.as_slice(),
+            [BigRepoChangeNotification::DocChanged {
+                doc_id: seen_doc_id,
+                origin: BigRepoChangeOrigin::Bootstrap,
+                ..
+            }] if *seen_doc_id == doc_id
+        ));
+
+        drop(remote_registration);
+        drop(bootstrap_registration);
+        Ok(())
+    }
+}
