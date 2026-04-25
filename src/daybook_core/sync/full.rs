@@ -85,6 +85,7 @@ enum Msg {
         conn_id: BigRepoConnectionId,
         partitions: HashSet<PartitionKey>,
         peer_key: PeerKey,
+        connection: am_utils_rs::repo::BigRepoConnection,
         resp: tokio::sync::oneshot::Sender<()>,
     },
     // OutgoingConn {
@@ -214,6 +215,7 @@ impl WorkerHandle {
         endpoint_addr: iroh::EndpointAddr,
         conn_id: BigRepoConnectionId,
         peer_key: PeerKey,
+        connection: am_utils_rs::repo::BigRepoConnection,
         partition_ids: HashSet<PartitionId>,
     ) -> Res<()> {
         let partitions: HashSet<PartitionKey> = partition_ids
@@ -233,6 +235,7 @@ impl WorkerHandle {
             endpoint_addr,
             partitions,
             peer_key,
+            connection,
         };
         self.msg_tx.send(msg).wrap_err(ERROR_ACTOR)?;
         rx.await.wrap_err(ERROR_CHANNEL)
@@ -506,6 +509,7 @@ struct PeerSyncState {
     endpoint_addr: iroh::EndpointAddr,
     partitions: HashSet<PartitionKey>,
     peer_key: PeerKey,
+    connection: am_utils_rs::repo::BigRepoConnection,
     bootstrap_ready: bool,
     live_ready: bool,
     bootstrap_synced_docs: u64,
@@ -773,6 +777,7 @@ impl Worker {
                 partitions,
                 conn_id,
                 peer_key,
+                connection,
             } => {
                 let old_conn_id = self.conn_by_peer.get(&endpoint_id).copied();
                 let old_state = self
@@ -800,6 +805,7 @@ impl Worker {
                         endpoint_id,
                         endpoint_addr,
                         peer_key: peer_key.clone(),
+                        connection,
                         bootstrap_ready: false,
                         live_ready: false,
                         bootstrap_synced_docs: 0,
@@ -822,6 +828,7 @@ impl Worker {
                 if let Some(conn_id) = self.conn_by_peer.remove(&endpoint_id) {
                     if let Some(state) = self.known_peer_set.remove(&conn_id) {
                         self.endpoint_by_peer_key.remove(&state.peer_key);
+                        state.connection.close().await.ok();
                         self.remove_peer_from_doc_sync_set(endpoint_id).await?;
                         self.remove_peer_from_import_doc_set(endpoint_id).await?;
                         self.remove_peer_partition_session(endpoint_id).await?;
@@ -1391,7 +1398,7 @@ impl Worker {
                 let parsed = item_id
                     .parse::<DocumentId>()
                     .map_err(|err| ferr!("invalid remote doc id '{item_id}': {err}"))?;
-                if self.big_repo.local_contains_document(&parsed).await? {
+                if self.big_repo.get_doc(&parsed).await?.is_some() {
                     self.handle_request_doc_sync(
                         peer_key,
                         event.partition_id,
@@ -1845,7 +1852,7 @@ impl Worker {
         let cancel_token = self.cancel_token.child_token();
         let doc_id = task_key.doc_id;
         let endpoint_id = task_key.endpoint_id;
-        if self.big_repo.find_doc(&doc_id).await?.is_none() {
+        if self.big_repo.get_doc(&doc_id).await?.is_none() {
             return Ok(BootDocSyncWorkerResult::MissingLocal);
         }
         let Some(sync_state) = self.doc_sync_set.get(&doc_id) else {
@@ -1857,14 +1864,15 @@ impl Worker {
         let Some(conn_id) = self.conn_by_peer.get(&endpoint_id).copied() else {
             return Ok(BootDocSyncWorkerResult::Deferred);
         };
-        if !self.known_peer_set.contains_key(&conn_id) {
+        let Some(peer_state) = self.known_peer_set.get(&conn_id) else {
             return Ok(BootDocSyncWorkerResult::Deferred);
-        }
+        };
+        let connection = peer_state.connection.clone();
         let stop_token = doc_worker::spawn_doc_sync_worker(
             doc_id,
             doc_worker::DocSyncTarget {
                 endpoint_id,
-                peer_id: am_utils_rs::repo::PeerId::new(*endpoint_id.as_bytes()),
+                connection,
             },
             Arc::clone(&self.big_repo),
             cancel_token.clone(),

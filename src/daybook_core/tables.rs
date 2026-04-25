@@ -392,7 +392,7 @@ impl TablesRepo {
             .await?;
 
         let app_am_handle = big_repo
-            .find_doc_handle(&app_doc_id)
+            .get_doc(&app_doc_id)
             .await?
             .ok_or_eyre("unable to find app doc in am")?;
 
@@ -1657,7 +1657,7 @@ mod tests {
         let app_doc_id = {
             let doc_bytes = crate::app::version_updates::version_latest()?;
             let doc = automerge::Automerge::load(&doc_bytes)?;
-            let handle = big_repo.add_doc(doc).await?;
+            let handle = big_repo.put_doc(DocumentId::random(), doc).await?;
             handle.document_id().clone()
         };
 

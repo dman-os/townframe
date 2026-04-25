@@ -107,7 +107,7 @@ impl DrawerRepo {
             daybook_types::doc::user_path::for_repo(&local_user_path, "drawer-repo")?;
         let local_actor_id = daybook_types::doc::user_path::to_actor_id(&local_user_path);
         let drawer_am_handle = big_repo
-            .find_doc_handle(&drawer_doc_id)
+            .get_doc(&drawer_doc_id)
             .await?
             .ok_or_eyre("drawer doc not found")?;
 
@@ -275,11 +275,11 @@ impl DrawerRepo {
             return Ok(Some(handle.clone()));
         }
         let document_id = DocumentId::from_str(branch_doc_id)?;
-        let has_local = self.big_repo.local_contains_document(&document_id).await?;
+        let has_local = self.big_repo.get_doc(&document_id).await?.is_some();
         if !has_local {
             return Ok(None);
         }
-        let Some(handle) = self.big_repo.find_doc(&document_id).await? else {
+        let Some(handle) = self.big_repo.get_doc(&document_id).await? else {
             return Ok(None);
         };
         self.branch_handles
@@ -378,9 +378,7 @@ impl DrawerRepo {
     ) -> Res<HashSet<FacetKey>> {
         let branch_doc_id = DocumentId::from_str(&snapshot.branch_doc_id)
             .wrap_err_with(|| format!("invalid branch doc id '{}'", snapshot.branch_doc_id))?;
-        let handle = self
-            .big_repo
-            .find_doc_handle(&branch_doc_id)
+        let handle = self.big_repo.get_doc(&branch_doc_id)
             .await?
             .ok_or_eyre("branch doc handle missing for tombstoned branch")?;
         let keys = handle

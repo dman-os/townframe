@@ -13,6 +13,8 @@ mod interlude {
     pub use api_utils_rs::prelude::*;
     pub use automerge::ActorId;
     pub use autosurgeon::{Hydrate, Reconcile};
+    #[cfg(any(test, feature = "test-support"))]
+    pub use crate::test_support::BigRepoTestCompat;
     pub use std::{
         borrow::Cow,
         collections::{HashMap, HashSet},

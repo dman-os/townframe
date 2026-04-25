@@ -55,22 +55,21 @@ struct DocSyncWorker {
 #[derive(Clone)]
 pub struct DocSyncTarget {
     pub endpoint_id: EndpointId,
-    pub peer_id: am_utils_rs::repo::PeerId,
+    pub connection: am_utils_rs::repo::BigRepoConnection,
 }
 
 impl DocSyncWorker {
     async fn run(self, cancel_token: CancellationToken) {
         let res: Res<()> = async {
-            if self.big_repo.find_doc_handle(&self.doc_id).await?.is_none() {
+            if self.big_repo.get_doc(&self.doc_id).await?.is_none() {
                 self.handle_missing_doc();
                 return Ok(());
             }
 
             let outcome = tokio::select! {
                 _ = cancel_token.cancelled() => return Ok(()),
-                out = self.big_repo.sync_doc_with_peer(
+                out = self.target.connection.sync_doc_with_peer(
                     self.doc_id,
-                    self.target.peer_id,
                     false,
                     Some(Duration::from_secs(10)),
                 ) => out?,

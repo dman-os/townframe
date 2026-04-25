@@ -1033,7 +1033,11 @@ mod tests {
             tx.put(automerge::ROOT, "version", "0")?;
             tx.commit();
         }
-        let drawer_doc_id = big_repo.add_doc(drawer_doc).await?.document_id().clone();
+        let drawer_doc_id = big_repo
+            .put_doc(DocumentId::random(), drawer_doc)
+            .await?
+            .document_id()
+            .clone();
         let temp_dir = tempfile::tempdir()?;
         let blobs_repo = crate::blobs::BlobsRepo::new(
             temp_dir.path().join("blobs"),

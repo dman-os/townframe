@@ -136,7 +136,7 @@ impl ImportSyncWorker {
             return;
         }
 
-        match self.big_repo.import_doc(self.doc_id, loaded).await {
+        match self.big_repo.put_doc(self.doc_id, loaded).await {
             Ok(_) => self.complete(ImportDocOutcome::Imported),
             Err(err) => {
                 if self.local_contains().await {
@@ -150,10 +150,10 @@ impl ImportSyncWorker {
     }
 
     async fn local_contains(&self) -> bool {
-        match self.big_repo.local_contains_document(&self.doc_id).await {
-            Ok(has) => has,
+        match self.big_repo.get_doc(&self.doc_id).await {
+            Ok(has) => has.is_some(),
             Err(err) => {
-                warn!(%self.doc_id, ?err, "local_contains_document failed in import worker");
+                warn!(%self.doc_id, ?err, "get_doc failed in import worker");
                 false
             }
         }

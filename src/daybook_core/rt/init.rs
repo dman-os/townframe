@@ -87,7 +87,7 @@ impl InitRepo {
         );
 
         let app_am_handle = big_repo
-            .find_doc_handle(&app_doc_id)
+            .get_doc(&app_doc_id)
             .await?
             .ok_or_eyre("unable to find app doc in am")?;
         let cancel_token = CancellationToken::new();

@@ -8,7 +8,7 @@ use super::{
 use std::str::FromStr;
 
 use futures::StreamExt;
-use iroh::EndpointId;
+use iroh::{EndpointId, Watcher};
 use iroh_blobs::api::downloader::DownloadProgressItem;
 use iroh_tickets::endpoint::EndpointTicket;
 use irpc::{channel, rpc_requests};
@@ -89,7 +89,7 @@ impl IrohSyncRepo {
 
 impl IrohSyncRepo {
     async fn current_endpoint_addr_for_clone(&self) -> iroh::EndpointAddr {
-        self.router.endpoint().addr()
+        self.router.endpoint().watch_addr().get()
     }
 
     pub async fn current_bootstrap_state(&self) -> SyncBootstrapState {
@@ -190,8 +190,9 @@ pub async fn connect_and_pull_required_partitions_once(
     let endpoint_builder = iroh::Endpoint::builder().secret_key(iroh_secret_key);
     #[cfg(test)]
     let endpoint_builder = endpoint_builder
-        .relay_mode(iroh::RelayMode::Disabled)
-        .clear_address_lookup();
+        .clear_ip_transports()
+        .bind_addr((std::net::Ipv4Addr::LOCALHOST, 0))?
+        .relay_mode(iroh::RelayMode::Disabled);
     let endpoint = endpoint_builder.bind().await?;
     let result: Res<()> = pull_required_partitions_once(
         big_repo,
@@ -460,7 +461,7 @@ async fn pull_required_partitions_once(
                     full_doc.doc_id
                 )
             })?;
-            if big_repo.find_doc_handle(&parsed).await?.is_some() {
+            if big_repo.get_doc(&parsed).await?.is_some() {
                 continue;
             }
             let loaded = automerge::Automerge::load(&full_doc.automerge_save).map_err(|err| {
@@ -469,14 +470,14 @@ async fn pull_required_partitions_once(
                     full_doc.doc_id
                 )
             })?;
-            big_repo.import_doc(parsed, loaded).await?;
+            big_repo.put_doc(parsed, loaded).await?;
         }
 
         let mut attempts = 0usize;
         loop {
             attempts += 1;
-            let app = big_repo.find_doc_handle(&bootstrap.app_doc_id).await?.is_some();
-            let drawer = big_repo.find_doc_handle(&bootstrap.drawer_doc_id).await?.is_some();
+            let app = big_repo.get_doc(&bootstrap.app_doc_id).await?.is_some();
+            let drawer = big_repo.get_doc(&bootstrap.drawer_doc_id).await?.is_some();
             if app && drawer {
                 break;
             }

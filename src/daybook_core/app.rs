@@ -179,10 +179,8 @@ pub async fn init_from_globals(
             else {
                 eyre::bail!("repo init_state missing for existing repository");
             };
-            let (handle_app, handle_drawer) = tokio::try_join!(
-                big_repo.find_doc_handle(&doc_id_app),
-                big_repo.find_doc_handle(&doc_id_drawer)
-            )?;
+            let (handle_app, handle_drawer) =
+                tokio::try_join!(big_repo.get_doc(&doc_id_app), big_repo.get_doc(&doc_id_drawer))?;
             if handle_app.is_none() || handle_drawer.is_none() {
                 eyre::bail!(
                     "required core docs missing in existing repository (app_present={}, drawer_present={})",
@@ -203,7 +201,7 @@ pub async fn init_from_globals(
                 let bytes = version_updates::version_latest()?;
                 let doc = automerge::Automerge::load(&bytes)
                     .wrap_err("error loading version_latest for app doc")?;
-                big_repo.add_doc(doc).await?
+                big_repo.put_doc(DocumentId::random(), doc).await?
             };
             let drawer_doc = {
                 let mut doc = automerge::AutoCommit::new();
@@ -211,7 +209,7 @@ pub async fn init_from_globals(
                 let bytes = doc.save_nocompress();
                 let doc = automerge::Automerge::load(&bytes)
                     .wrap_err("error loading version_latest for drawer doc")?;
-                big_repo.add_doc(doc).await?
+                big_repo.put_doc(DocumentId::random(), doc).await?
             };
             globals::set_init_state(
                 sql,

@@ -213,7 +213,7 @@ impl ConfigRepo {
             .await?;
 
         let app_am_handle = big_repo
-            .find_doc_handle(&app_doc_id)
+            .get_doc(&app_doc_id)
             .await?
             .ok_or_eyre("unable to find app doc in am")?;
 
@@ -523,9 +523,7 @@ impl ConfigRepo {
     }
 
     pub async fn get_config_heads(&self) -> Res<Arc<[automerge::ChangeHash]>> {
-        let handle = self
-            .big_repo
-            .find_doc_handle(&self.app_doc_id)
+        let handle = self.big_repo.get_doc(&self.app_doc_id)
             .await?
             .ok_or_eyre("app doc not found")?;
         let heads = handle.with_document(|doc| doc.get_heads()).await?;
@@ -731,7 +729,7 @@ mod tests {
         .await?;
 
         let app_doc = automerge::Automerge::load(&crate::app::version_updates::version_latest()?)?;
-        let app_doc_handle = big_repo.add_doc(app_doc).await?;
+        let app_doc_handle = big_repo.put_doc(DocumentId::random(), app_doc).await?;
         let app_doc_id = app_doc_handle.document_id().clone();
 
         let temp = tempfile::tempdir()?;

@@ -1504,7 +1504,6 @@ mod tests {
                 .clear_ip_transports()
                 .bind_addr((std::net::Ipv4Addr::LOCALHOST, 0))?
                 .relay_mode(iroh::RelayMode::Disabled)
-                .clear_address_lookup()
                 .bind()
                 .await
                 .wrap_err("failed binding iroh endpoint")?;

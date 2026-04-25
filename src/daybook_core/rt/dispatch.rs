@@ -950,7 +950,9 @@ mod tests {
             storage: am_utils_rs::repo::StorageConfig::Memory,
         })
         .await?;
-        let app_doc = big_repo.add_doc(automerge::Automerge::new()).await?;
+        let app_doc = big_repo
+            .put_doc(DocumentId::random(), automerge::Automerge::new())
+            .await?;
         let app_doc_id = app_doc.document_id().clone();
         let (repo, _stop) =
             DispatchRepo::load(big_repo, app_doc_id, local_user_path.clone(), db_pool).await?;

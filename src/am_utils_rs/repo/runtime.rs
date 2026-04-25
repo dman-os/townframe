@@ -918,12 +918,6 @@ where
         session: subduction_core::sync_session::SyncSession,
     ) {
         let doc_id: DocumentId = session.sedimentree_id.into();
-        println!(
-            "XXX runtime sync_session_observed doc_id={doc_id:?} peer_id={:?} kind={:?} remote_heads_present={}",
-            session.peer_id,
-            session.kind,
-            session.remote_heads.is_some()
-        );
         debug!(
             peer_id = %session.peer_id,
             kind = ?session.kind,
@@ -1234,17 +1228,6 @@ where
         &mut self,
         session: subduction_core::sync_session::SyncSession,
     ) -> Res<()> {
-        let doc_id = self.doc_id;
-        println!(
-            "XXX runtime apply_sync_session doc_id={:?} peer_id={:?} kind={:?} received_commits={} received_fragments={} sent_commits={} sent_fragments={}",
-            session.sedimentree_id,
-            session.peer_id,
-            session.kind,
-            session.received_commit_ids.len(),
-            session.received_fragment_ids.len(),
-            session.sent_commit_ids.len(),
-            session.sent_fragment_ids.len()
-        );
         if session.received_commit_ids.is_empty() && session.received_fragment_ids.is_empty() {
             return Ok(());
         }
@@ -1273,12 +1256,6 @@ where
                         .map_err(|err| eyre::eyre!("failed applying sync session blob: {err}"))?;
                 }
                 let after_heads = doc.get_heads();
-                println!(
-                    "XXX runtime apply_sync_session doc_id={:?} before_heads={} after_heads={}",
-                    doc_id,
-                    before_heads.len(),
-                    after_heads.len()
-                );
                 if before_heads == after_heads {
                     return Ok(None);
                 }
@@ -1655,7 +1632,6 @@ where
         peer_id: PeerId,
         stop_token: RuntimePeerConnectionStopToken,
     ) {
-        println!("XXX runtime connection_established peer_id={peer_id:?}");
         if stop_token.is_cancelled() {
             return;
         }
@@ -1683,9 +1659,6 @@ where
         timeout: Option<Duration>,
         done: oneshot::Sender<Res<SyncDocOutcome>>,
     ) {
-        println!(
-            "XXX runtime handle_sync_doc_with_peer doc_id={doc_id:?} peer_id={peer_id:?} subscribe={subscribe} timeout={timeout:?}"
-        );
         let worker = self.doc_worker_handle(doc_id).expect(ERROR_ACTOR);
         if let Some(entry) = self.doc_workers.get_mut(&doc_id) {
             entry.transient_work += 1;
@@ -1702,7 +1675,6 @@ where
 
     #[tracing::instrument(skip_all, fields(%doc_id, %peer_id))]
     async fn handle_remote_heads_observed(&mut self, doc_id: DocumentId, peer_id: PeerId) {
-        println!("XXX runtime remote_heads_observed doc_id={doc_id:?} peer_id={peer_id:?}");
         if self
             .live_bundles
             .get(&doc_id)

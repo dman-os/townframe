@@ -32,8 +32,9 @@ impl iroh::protocol::ProtocolHandler for SubductionProtocolHandler {
         connection: iroh::endpoint::Connection,
     ) -> Result<(), iroh::protocol::AcceptError> {
         self.big_repo
-            .accept_incoming_peer_connection(connection)
+            .accept_peer_connection(connection)
             .await
+            .map(|_| ())
             .map_err(|err| iroh::protocol::AcceptError::from_boxed(err.into()))
     }
 }
@@ -170,8 +171,9 @@ impl IrohSyncRepo {
         let endpoint_builder = iroh::Endpoint::builder().secret_key(rcx.iroh_secret_key.clone());
         #[cfg(test)]
         let endpoint_builder = endpoint_builder
-            .relay_mode(iroh::RelayMode::Disabled)
-            .clear_address_lookup();
+            .clear_ip_transports()
+            .bind_addr((std::net::Ipv4Addr::LOCALHOST, 0))?
+            .relay_mode(iroh::RelayMode::Disabled);
         let endpoint = endpoint_builder.bind().await?;
         let blobs = blobs_repo.iroh_store();
         let gossip = iroh_gossip::net::Gossip::builder().spawn(endpoint.clone());
@@ -429,11 +431,6 @@ impl IrohSyncRepo {
             .collect::<Vec<_>>();
         for endpoint_id in active_peers {
             self.full_sync_handle.del_connection(endpoint_id).await.ok();
-            self.rcx
-                .big_repo
-                .remove_peer_connection(am_utils_rs::repo::PeerId::new(*endpoint_id.as_bytes()))
-                .await
-                .ok();
         }
         self.active_peers.write().await.clear();
         eyre::Ok(())
@@ -547,9 +544,10 @@ impl IrohSyncRepo {
         self.sync_store
             .allow_peer(peer_key.clone(), Some(endpoint_id))
             .await?;
-        self.rcx
+        let (connection, _stop_token) = self
+            .rcx
             .big_repo
-            .ensure_peer_connection(
+            .connect_with_peer(
                 self.router.endpoint().clone(),
                 endpoint_addr.clone(),
                 am_utils_rs::repo::PeerId::new(*endpoint_id.as_bytes()),
@@ -562,15 +560,11 @@ impl IrohSyncRepo {
                 endpoint_addr,
                 conn_id,
                 peer_key.clone(),
+                connection,
                 partition_ids,
             )
             .await
         {
-            self.rcx
-                .big_repo
-                .remove_peer_connection(am_utils_rs::repo::PeerId::new(*endpoint_id.as_bytes()))
-                .await
-                .ok();
             self.clear_endpoint_if_connecting(endpoint_id).await;
             return Err(err);
         }
@@ -597,9 +591,10 @@ impl IrohSyncRepo {
             .allow_peer(peer_key.clone(), Some(endpoint_id))
             .await?;
         let endpoint_addr = iroh::EndpointAddr::new(endpoint_id);
-        self.rcx
+        let (connection, _stop_token) = self
+            .rcx
             .big_repo
-            .ensure_peer_connection(
+            .connect_with_peer(
                 self.router.endpoint().clone(),
                 endpoint_addr.clone(),
                 am_utils_rs::repo::PeerId::new(*endpoint_id.as_bytes()),
@@ -612,15 +607,11 @@ impl IrohSyncRepo {
                 endpoint_addr,
                 endpoint_id,
                 peer_key.clone(),
+                connection,
                 partition_ids,
             )
             .await
         {
-            self.rcx
-                .big_repo
-                .remove_peer_connection(am_utils_rs::repo::PeerId::new(*endpoint_id.as_bytes()))
-                .await
-                .ok();
             return Err(err);
         }
         self.active_peers
@@ -686,11 +677,6 @@ impl IrohSyncRepo {
                 reason,
             } => {
                 self.full_sync_handle.del_connection(endpoint_id).await.ok();
-                self.rcx
-                    .big_repo
-                    .remove_peer_connection(am_utils_rs::repo::PeerId::new(*endpoint_id.as_bytes()))
-                    .await
-                    .ok();
                 self.active_peers.write().await.remove(&endpoint_id);
                 self.registry.notify([IrohSyncEvent::ConnectionClosed {
                     endpoint_id,
