@@ -68,6 +68,12 @@ Feel free to throw yourself or tokens at the code though I'd personally apprecia
 
   - Scripts `./x/compose-up.ts` and `./x/compose-logs.ts` operate on this file.
 
+- `./src/plug_test/`: plug used for testing.
+
+- `./src/plug_plabels/`: plug providign pseudo-labelling and classification utils.
+
+- `./src/plug_dayledger/`: personal finance plug.
+
 ## Style guide
 
 - Avoid crates with a `src/` directory. 
@@ -123,4 +129,7 @@ cargo clippy --all-targets --all-features
 prek -a
 # type check kotlin app 
 ./x/check-dayb.ts
+
+# build a plug OCI package
+cargo x build-plug-oci --plug-root ./src/plug_test/
 ```

@@ -1,4 +1,5 @@
 use crate::interlude::*;
+use crate::rt::dispatch;
 use daybook_types::doc::{self as root_doc};
 
 fn wasmtime_err(msg: impl std::fmt::Display) -> wasmtime::Error {
@@ -17,10 +18,10 @@ mod binds_guest {
         imports: { default: async | trappable | tracing },
         exports: { default: async | trappable | tracing },
         with: {
-            "townframe:daybook/capabilities.doc-token-ro": super::caps::DocTokenRo,
-            "townframe:daybook/capabilities.doc-token-rw": super::caps::DocTokenRw,
-            "townframe:daybook/capabilities.facet-token-ro": super::caps::FacetTokenRo,
-            "townframe:daybook/capabilities.facet-token-rw": super::caps::FacetTokenRw,
+            "townframe:daybook/capabilities.doc-token": super::caps::DocToken,
+            "townframe:daybook/capabilities.facet-token": super::caps::FacetToken,
+            "townframe:daybook/capabilities.facet-create-token": super::caps::FacetCreateToken,
+            "townframe:daybook/capabilities.facet-tag-token": super::caps::FacetTagToken,
             "townframe:daybook/capabilities.command-invoke-token": super::caps::CommandInvokeToken,
             "townframe:daybook/sqlite-connection.connection": super::local_state_sql::SqliteConnectionToken,
         }
@@ -645,10 +646,85 @@ impl drawer::Host for SharedWashCtx {
     }
 }
 
+async fn build_doc_facet_tokens(
+    ctx: &mut SharedWashCtx,
+    plugin: &Arc<DaybookPlugin>,
+    doc_tokens: &dispatch::DocFacetTokens,
+) -> wasmtime::Result<facet_routine::DocFacetTokens> {
+        let doc_rights = caps::doc_rights_from_facet_acl(&doc_tokens.facet_acl);
+        let doc_token = ctx.table.push(caps::DocToken {
+            doc_id: doc_tokens.doc_id.clone(),
+            branch_path: doc_tokens.branch_path.clone(),
+            heads: doc_tokens.heads.clone(),
+            rights: doc_rights,
+            facet_acl: doc_tokens.facet_acl.clone(),
+        })?;
+
+        let doc = match plugin
+            .get_doc(&doc_tokens.doc_id, &doc_tokens.branch_path, &doc_tokens.heads)
+            .await
+            .map_err(wasmtime_err)?
+        {
+            Some(doc) => doc,
+            None => {
+                return Ok(facet_routine::DocFacetTokens {
+                    doc: doc_token,
+                    facets: vec![],
+                    tags: vec![],
+                });
+            }
+        };
+
+        let mut facet_tokens: Vec<wasmtime::component::Resource<capabilities::FacetToken>> = Vec::new();
+        let mut tag_tokens: Vec<wasmtime::component::Resource<capabilities::FacetTagToken>> = Vec::new();
+        let mut seen_tag_wide: std::collections::HashSet<String> = std::collections::HashSet::new();
+
+        for access in &doc_tokens.facet_acl {
+            let tag_str = access.tag.0.clone();
+            let rights = caps::facet_rights_from_access(access);
+
+            if access.key_id.is_some() {
+                // Key-level access: create FacetToken if facet exists
+                let facet_key = daybook_types::doc::FacetKey {
+                    tag: daybook_types::doc::FacetTag::from(tag_str.as_str()),
+                    id: access.key_id.as_ref().unwrap().clone(),
+                };
+                if doc.facets.contains_key(&facet_key) {
+                    let ftoken = ctx.table.push(caps::FacetToken {
+                        doc_id: doc_tokens.doc_id.clone(),
+                        branch_path: doc_tokens.branch_path.clone(),
+                        heads: doc_tokens.heads.clone(),
+                        facet_key,
+                        rights,
+                    })?;
+                    facet_tokens.push(ftoken);
+                }
+            } else {
+                // Tag-wide access: create FacetTagToken (once per tag)
+                if seen_tag_wide.insert(tag_str.clone()) {
+                    let ttoken = ctx.table.push(caps::FacetTagToken {
+                        doc_id: doc_tokens.doc_id.clone(),
+                        branch_path: doc_tokens.branch_path.clone(),
+                        heads: doc_tokens.heads.clone(),
+                        tag: tag_str,
+                        rights,
+                        facet_acl: doc_tokens.facet_acl.clone(),
+                    })?;
+                    tag_tokens.push(ttoken);
+                }
+            }
+        }
+
+        Ok(facet_routine::DocFacetTokens {
+            doc: doc_token,
+            facets: facet_tokens,
+            tags: tag_tokens,
+        })
+}
+
 impl facet_routine::Host for SharedWashCtx {
     async fn get_args(&mut self) -> wasmtime::Result<facet_routine::FacetRoutineArgs> {
         use crate::rt::*;
-        use daybook_types::doc::FacetKey;
 
         let wflow_plugin = wflow::wash_plugin_wflow::WflowPlugin::try_from_ctx(self)
             .ok_or_else(|| wasmtime_err("only wflows are supported as facet-routine"))?;
@@ -667,92 +743,26 @@ impl facet_routine::Host for SharedWashCtx {
         };
         let ActiveDispatchArgs::FacetRoutine(FacetRoutineArgs {
             doc_id,
+            branch_path: _,
+            staging_branch_path: _,
             heads,
             invocation,
-            branch_path: target_branch_path,
-            staging_branch_path,
-            facet_acl,
-            config_facet_acl,
+            primary_doc,
+            config_docs,
             local_state_acl,
             command_invoke_acl_snapshot,
             wflow_args_json: _,
         }) = &dispatch.args;
         let ActiveDispatchDeets::Wflow { plug_id, .. } = &dispatch.deets;
-        let _routine_name = dispatch.deets.routine_name();
-        // Use staging branch path from dispatch (already set when job was created)
-        let staging_branch_path = staging_branch_path.clone();
 
-        // Create tokens based on ACL
-        let mut rw_facet_tokens: Vec<(
-            String,
-            wasmtime::component::Resource<capabilities::FacetTokenRw>,
-        )> = Vec::new();
-        let mut ro_facet_tokens: Vec<(
-            String,
-            wasmtime::component::Resource<capabilities::FacetTokenRo>,
-        )> = Vec::new();
-        let mut sqlite_connections: Vec<(
-            String,
-            wasmtime::component::Resource<sqlite_connection::Connection>,
-        )> = Vec::new();
-        let mut rw_config_facet_tokens: Vec<(
-            String,
-            wasmtime::component::Resource<capabilities::FacetTokenRw>,
-        )> = Vec::new();
-        let mut ro_config_facet_tokens: Vec<(
-            String,
-            wasmtime::component::Resource<capabilities::FacetTokenRo>,
-        )> = Vec::new();
-        let mut command_invoke_tokens: Vec<(
-            String,
-            wasmtime::component::Resource<capabilities::CommandInvokeToken>,
-        )> = Vec::new();
+        let primary_doc_tokens = build_doc_facet_tokens(self, &dayook_plugin, primary_doc).await?;
 
-        for access in facet_acl {
-            let facet_key = access
-                .key_id
-                .as_ref()
-                .map(|id| daybook_types::doc::FacetKey {
-                    tag: daybook_types::doc::FacetTag::from(access.tag.0.as_str()),
-                    id: id.clone(),
-                })
-                .unwrap_or_else(|| FacetKey::from(access.tag.0.as_str()));
-            let facet_key_str = facet_key.to_string();
-
-            if access.write {
-                debug!(
-                    ?doc_id,
-                    target_branch_path = %target_branch_path,
-                    staging_branch_path = %staging_branch_path,
-                    heads = ?am_utils_rs::serialize_commit_heads(heads.as_ref()),
-                    "creating rw facet token"
-                );
-                let token = self.table.push(caps::FacetTokenRw {
-                    doc_id: doc_id.clone(),
-                    heads: heads.clone(),
-                    branch_path: staging_branch_path.clone(),
-                    target_branch_path: target_branch_path.clone(),
-                    facet_key: facet_key.clone(),
-                    facet_acl: facet_acl.clone(),
-                })?;
-                rw_facet_tokens.push((facet_key_str, token));
-            } else if access.read {
-                let token = self.table.push(caps::FacetTokenRo {
-                    doc_id: doc_id.clone(),
-                    branch_path: target_branch_path.clone(),
-                    heads: heads.clone(),
-                    facet_key: facet_key.clone(),
-                })?;
-                ro_facet_tokens.push((facet_key_str, token));
-            }
-        }
-
-        if !config_facet_acl.is_empty() {
+        let mut config_doc_tokens: Vec<facet_routine::DocFacetTokens> = Vec::new();
+        if !config_docs.is_empty() {
             let mut owner_config_docs: HashMap<String, (String, ChangeHashSet)> = HashMap::new();
-            for access in config_facet_acl {
-                let owner_plug_id = access
-                    .owner_plug_id
-                    .clone()
+            for config_doc_meta in config_docs {
+                let owner_plug_id = config_doc_meta.facet_acl.first()
+                    .and_then(|a| a.owner_plug_id.clone())
                     .unwrap_or_else(|| plug_id.clone());
                 let (config_doc_id, config_heads) = if let Some(found) =
                     owner_config_docs.get(&owner_plug_id)
@@ -760,65 +770,40 @@ impl facet_routine::Host for SharedWashCtx {
                     found.clone()
                 } else {
                     let config_doc_id = dayook_plugin
-                            .plugs_repo
-                            .get_or_init_plug_config_doc_id(&owner_plug_id, &dayook_plugin.drawer_repo)
-                            .await
-                            .map_err(|err| {
-                                wasmtime_err(format!(
-                                    "error getting/initializing config doc for plug {owner_plug_id}: {err}"
-                                ))
-                            })?;
+                        .plugs_repo
+                        .get_or_init_plug_config_doc_id(&owner_plug_id, &dayook_plugin.drawer_repo)
+                        .await
+                        .map_err(|err| wasmtime_err(format!(
+                            "error getting/initializing config doc for plug {owner_plug_id}: {err}"
+                        )))?;
                     let config_heads = dayook_plugin
                         .drawer_repo
                         .get_doc_branches(&config_doc_id)
                         .await
-                        .map_err(|err| {
-                            wasmtime_err(format!("error getting config doc branches: {err}"))
-                        })?
+                        .map_err(|err| wasmtime_err(format!("error getting config doc branches: {err}")))?
                         .and_then(|doc| doc.branches.get("main").cloned())
-                        .ok_or_else(|| {
-                            wasmtime_err(format!(
-                                "config doc missing main branch for plug {owner_plug_id}"
-                            ))
-                        })?;
-                    owner_config_docs.insert(
-                        owner_plug_id.clone(),
-                        (config_doc_id.clone(), config_heads.clone()),
-                    );
+                        .ok_or_else(|| wasmtime_err(format!(
+                            "config doc missing main branch for plug {owner_plug_id}"
+                        )))?;
+                    owner_config_docs.insert(owner_plug_id.clone(), (config_doc_id.clone(), config_heads.clone()));
                     (config_doc_id, config_heads)
                 };
-                let config_facet_key = access
-                    .key_id
-                    .as_ref()
-                    .map(|id| daybook_types::doc::FacetKey {
-                        tag: daybook_types::doc::FacetTag::from(access.tag.0.as_str()),
-                        id: id.clone(),
-                    })
-                    .unwrap_or_else(|| FacetKey::from(access.tag.0.as_str()));
-                let config_facet_key_str = config_facet_key.to_string();
-
-                if access.write {
-                    let token = self.table.push(caps::FacetTokenRw {
-                        doc_id: config_doc_id.clone(),
-                        heads: config_heads.clone(),
-                        branch_path: daybook_types::doc::BranchPath::from("main"),
-                        target_branch_path: daybook_types::doc::BranchPath::from("main"),
-                        facet_key: config_facet_key.clone(),
-                        facet_acl: vec![],
-                    })?;
-                    rw_config_facet_tokens.push((config_facet_key_str, token));
-                } else if access.read {
-                    let token = self.table.push(caps::FacetTokenRo {
-                        doc_id: config_doc_id.clone(),
-                        branch_path: daybook_types::doc::BranchPath::from("main"),
-                        heads: config_heads.clone(),
-                        facet_key: config_facet_key.clone(),
-                    })?;
-                    ro_config_facet_tokens.push((config_facet_key_str, token));
-                }
+                let config_doc_tokens_meta = dispatch::DocFacetTokens {
+                    doc_id: config_doc_id,
+                    branch_path: daybook_types::doc::BranchPath::from("main"),
+                    staging_branch_path: daybook_types::doc::BranchPath::from("main"),
+                    heads: config_heads,
+                    facet_acl: config_doc_meta.facet_acl.clone(),
+                };
+                let tokens = build_doc_facet_tokens(self, &dayook_plugin, &config_doc_tokens_meta).await?;
+                config_doc_tokens.push(tokens);
             }
         }
 
+        let mut sqlite_connections: Vec<(
+            String,
+            wasmtime::component::Resource<sqlite_connection::Connection>,
+        )> = Vec::new();
         for local_state_access in local_state_acl {
             let local_state_id = crate::local_state::SqliteLocalStateRepo::local_state_id(
                 &local_state_access.plug_id,
@@ -838,6 +823,10 @@ impl facet_routine::Host for SharedWashCtx {
             ));
         }
 
+        let mut command_invoke_tokens: Vec<(
+            String,
+            wasmtime::component::Resource<capabilities::CommandInvokeToken>,
+        )> = Vec::new();
         for target_url in command_invoke_acl_snapshot {
             let token = self.table.push(caps::CommandInvokeToken {
                 parent_wflow_job_id: Arc::clone(&job_id),
@@ -860,10 +849,8 @@ impl facet_routine::Host for SharedWashCtx {
             doc_id: doc_id.clone(),
             heads: am_utils_rs::serialize_commit_heads(heads.as_ref()),
             invocation: wit_invocation,
-            rw_facet_tokens,
-            ro_facet_tokens,
-            rw_config_facet_tokens,
-            ro_config_facet_tokens,
+            primary_doc: primary_doc_tokens,
+            config_docs: config_doc_tokens,
             command_invoke_tokens,
             sqlite_connections,
         })

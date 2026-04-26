@@ -1,32 +1,41 @@
-use super::super::*;
 use crate::interlude::*;
 use wflow_sdk::{JobErrorX, Json, WflowCtx};
 
 pub fn run(cx: &mut WflowCtx) -> Result<(), JobErrorX> {
+    use crate::wit::townframe::daybook::capabilities::FacetRights;
     use crate::wit::townframe::daybook::facet_routine;
     use crate::wit::townframe::daybook::mltools_embed;
     use daybook_types::doc::{WellKnownFacet, WellKnownFacetTag};
 
-    let mut args = facet_routine::get_args();
+    let args = facet_routine::get_args();
 
     let embedding_facet_key =
         daybook_types::doc::FacetKey::from(WellKnownFacetTag::Embedding).to_string();
-    let working_facet_token = tuple_list_get(&args.rw_facet_tokens, &embedding_facet_key)
+    let working_facet_token = args
+        .primary_doc
+        .facets
+        .iter()
+        .find(|t| t.key() == embedding_facet_key && t.rights().contains(FacetRights::UPDATE))
         .ok_or_else(|| {
-            JobErrorX::Terminal(ferr!("embedding facet token not found in rw_facet_tokens"))
+            JobErrorX::Terminal(ferr!("embedding facet token with update rights not found"))
         })?;
 
     let blob_facet_key = daybook_types::doc::FacetKey::from(WellKnownFacetTag::Blob).to_string();
-    let mut ro_facet_tokens = std::mem::take(&mut args.ro_facet_tokens);
-    let blob_facet_token =
-        tuple_list_take(&mut ro_facet_tokens, &blob_facet_key).ok_or_else(|| {
+    let blob_facet_token = args
+        .primary_doc
+        .facets
+        .iter()
+        .find(|t| t.key() == blob_facet_key && t.rights().contains(FacetRights::READ))
+        .ok_or_else(|| {
             JobErrorX::Terminal(ferr!(
-                "blob facet key '{}' not found in ro_facet_tokens",
+                "blob facet key '{}' not found with read rights",
                 blob_facet_key
             ))
         })?;
 
-    let blob_raw = blob_facet_token.get();
+    let blob_raw = blob_facet_token
+        .get()
+        .map_err(|err| JobErrorX::Terminal(ferr!("access error reading blob facet: {err:?}")))?;
     let blob_json: daybook_types::doc::FacetRaw = serde_json::from_str(&blob_raw)
         .map_err(|err| JobErrorX::Terminal(ferr!("error parsing blob facet json: {err}")))?;
     let blob = match WellKnownFacet::from_json(blob_json, WellKnownFacetTag::Blob)
@@ -40,7 +49,10 @@ pub fn run(cx: &mut WflowCtx) -> Result<(), JobErrorX> {
         return Ok(());
     }
 
-    let embed_result = mltools_embed::embed_image(blob_facet_token)
+    let blob_embed_token = blob_facet_token.clone(None).map_err(|err| {
+        JobErrorX::Terminal(ferr!("access error cloning blob facet token: {err:?}"))
+    })?;
+    let embed_result = mltools_embed::embed_image(blob_embed_token)
         .map_err(|err| JobErrorX::Terminal(ferr!("error running embed-image: {err}")))?;
 
     let heads = am_utils_rs::parse_commit_heads(&args.heads)
@@ -73,8 +85,14 @@ pub fn run(cx: &mut WflowCtx) -> Result<(), JobErrorX> {
         let new_facet = serde_json::to_string(&new_facet).expect(ERROR_JSON);
         working_facet_token
             .update(&new_facet)
-            .wrap_err("error updating image embedding facet")
-            .map_err(JobErrorX::Terminal)?;
+            .map_err(|err| {
+                JobErrorX::Terminal(ferr!(
+                    "access error updating image embedding facet: {err:?}"
+                ))
+            })?
+            .map_err(|err| {
+                JobErrorX::Terminal(ferr!("error updating image embedding facet: {err:?}"))
+            })?;
         Ok(Json(()))
     })?;
 

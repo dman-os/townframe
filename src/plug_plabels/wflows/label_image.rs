@@ -9,30 +9,36 @@ const LOCAL_STATE_KEY: &str = "@daybook/plabels/label-classifier";
 const CANDIDATE_SET_ID: &str = "label-candidates";
 
 pub fn run(cx: &mut WflowCtx) -> Result<(), wflow_sdk::JobErrorX> {
+    use crate::wit::townframe::daybook::capabilities::FacetRights;
     use crate::wit::townframe::daybook::facet_routine;
     use daybook_types::doc::{WellKnownFacet, WellKnownFacetTag};
 
     let args = facet_routine::get_args();
     let pseudo_label_key = crate::types::pseudo_label_key().to_string();
-    let working_facet_token =
-        tuple_list_get(&args.rw_facet_tokens, &pseudo_label_key).ok_or_else(|| {
+    let working_facet_token = args
+        .primary_doc
+        .facets
+        .iter()
+        .find(|t| t.key() == pseudo_label_key && t.rights().contains(FacetRights::UPDATE))
+        .ok_or_else(|| {
             wflow_sdk::JobErrorX::Terminal(ferr!(
-                "pseudoLabel facet token not found in rw_facet_tokens"
+                "pseudoLabel facet token with update rights not found"
             ))
         })?;
 
     let embedding_facet_key =
         daybook_types::doc::FacetKey::from(WellKnownFacetTag::Embedding).to_string();
-    let embedding_facet_token = tuple_list_get(&args.ro_facet_tokens, &embedding_facet_key)
+    let embedding_facet_token = args
+        .primary_doc
+        .facets
+        .iter()
+        .find(|t| t.key() == embedding_facet_key && t.rights().contains(FacetRights::READ))
         .ok_or_else(|| {
             wflow_sdk::JobErrorX::Terminal(ferr!(
-                "embedding facet key '{}' not found",
+                "embedding facet key '{}' not found with read rights",
                 embedding_facet_key
             ))
         })?;
-    if !embedding_facet_token.exists() {
-        return Ok(());
-    }
 
     let sqlite_connection =
         tuple_list_get(&args.sqlite_connections, LOCAL_STATE_KEY).ok_or_else(|| {
@@ -40,15 +46,29 @@ pub fn run(cx: &mut WflowCtx) -> Result<(), wflow_sdk::JobErrorX> {
         })?;
 
     let config_facet_key = crate::types::pseudo_label_candidates_key(CANDIDATE_SET_ID).to_string();
-    let rw_config_token = tuple_list_get(&args.rw_config_facet_tokens, &config_facet_key);
-    let ro_config_token = tuple_list_get(&args.ro_config_facet_tokens, &config_facet_key);
+    let rw_config_token = args
+        .config_docs
+        .iter()
+        .flat_map(|cd| cd.facets.iter())
+        .find(|t| t.key() == config_facet_key && t.rights().contains(FacetRights::UPDATE));
+    let ro_config_token = args
+        .config_docs
+        .iter()
+        .flat_map(|cd| cd.facets.iter())
+        .find(|t| t.key() == config_facet_key && t.rights().contains(FacetRights::READ));
     let error_facet_key = crate::types::pseudo_label_error_key().to_string();
-    let error_facet_token =
-        tuple_list_get(&args.rw_facet_tokens, &error_facet_key).ok_or_else(|| {
+    let error_facet_token = args
+        .primary_doc
+        .facets
+        .iter()
+        .find(|t| t.key() == error_facet_key && t.rights().contains(FacetRights::UPDATE))
+        .ok_or_else(|| {
             wflow_sdk::JobErrorX::Terminal(ferr!("error facet key '{}' not found", error_facet_key))
         })?;
 
-    let embedding_raw = embedding_facet_token.get();
+    let embedding_raw = embedding_facet_token.get().map_err(|err| {
+        wflow_sdk::JobErrorX::Terminal(ferr!("error reading embedding facet: {err:?}"))
+    })?;
     let embedding_json: daybook_types::doc::FacetRaw = serde_json::from_str(&embedding_raw)
         .map_err(|err| {
             wflow_sdk::JobErrorX::Terminal(ferr!("error parsing embedding facet json: {err}"))

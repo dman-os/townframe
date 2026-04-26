@@ -2,6 +2,7 @@ use crate::interlude::*;
 use wflow_sdk::{JobErrorX, Json, WflowCtx};
 
 pub fn run(cx: &mut WflowCtx) -> Result<(), JobErrorX> {
+    use crate::wit::townframe::daybook::capabilities::FacetRights;
     use crate::wit::townframe::daybook::facet_routine;
     use crate::wit::townframe::sql::types::SqlValue;
     use daybook_types::doc::{WellKnownFacet, WellKnownFacetTag};
@@ -10,12 +11,12 @@ pub fn run(cx: &mut WflowCtx) -> Result<(), JobErrorX> {
     let embedding_facet_key =
         daybook_types::doc::FacetKey::from(WellKnownFacetTag::Embedding).to_string();
     let embedding_facet_token = args
-        .ro_facet_tokens
+        .primary_doc
+        .facets
         .iter()
-        .find(|(key, _)| key == &embedding_facet_key)
-        .map(|(_, token)| token)
+        .find(|t| t.key() == embedding_facet_key && t.rights().contains(FacetRights::READ))
         .ok_or_else(|| {
-            JobErrorX::Terminal(ferr!("embedding facet token not found in ro_facet_tokens"))
+            JobErrorX::Terminal(ferr!("embedding facet token with read rights not found"))
         })?;
     let sqlite_connection = args
         .sqlite_connections
@@ -28,7 +29,9 @@ pub fn run(cx: &mut WflowCtx) -> Result<(), JobErrorX> {
             ))
         })?;
 
-    let embedding_raw = embedding_facet_token.get();
+    let embedding_raw = embedding_facet_token.get().map_err(|err| {
+        JobErrorX::Terminal(ferr!("access error reading embedding facet: {err:?}"))
+    })?;
     let embedding_json: daybook_types::doc::FacetRaw = serde_json::from_str(&embedding_raw)
         .map_err(|err| JobErrorX::Terminal(ferr!("error parsing embedding facet json: {err}")))?;
     let embedding = match WellKnownFacet::from_json(embedding_json, WellKnownFacetTag::Embedding)

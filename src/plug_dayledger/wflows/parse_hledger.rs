@@ -1,23 +1,28 @@
-use super::super::*;
 use crate::interlude::*;
 use crate::types::{Claim, ClaimPostingHint, HledgerTxnDeets, PostingSign};
 use wflow_sdk::WflowCtx;
 
 pub fn run(_cx: &mut WflowCtx) -> Result<(), wflow_sdk::JobErrorX> {
+    use crate::wit::townframe::daybook::capabilities::FacetRights;
     use crate::wit::townframe::daybook::facet_routine;
     use daybook_types::doc::{WellKnownFacet, WellKnownFacetTag};
 
     let args = facet_routine::get_args();
 
-    // Read the Note facet from ro_facet_tokens (the input/trigger)
     let note_facet_key_str =
         daybook_types::doc::FacetKey::from(WellKnownFacetTag::Note).to_string();
-    let note_token =
-        tuple_list_get(&args.ro_facet_tokens, &note_facet_key_str).ok_or_else(|| {
-            wflow_sdk::JobErrorX::Terminal(ferr!("note facet token not found in ro_facet_tokens"))
+    let note_token = args
+        .primary_doc
+        .facets
+        .iter()
+        .find(|t| t.key() == note_facet_key_str && t.rights().contains(FacetRights::READ))
+        .ok_or_else(|| {
+            wflow_sdk::JobErrorX::Terminal(ferr!("note facet token with read rights not found"))
         })?;
 
-    let note_raw = note_token.get();
+    let note_raw = note_token.get().map_err(|err| {
+        wflow_sdk::JobErrorX::Terminal(ferr!("error reading note facet: {err:?}"))
+    })?;
     let note_json: daybook_types::doc::FacetRaw =
         serde_json::from_str(&note_raw).map_err(|err| {
             wflow_sdk::JobErrorX::Terminal(ferr!("error parsing note facet json: {err}"))
@@ -32,7 +37,9 @@ pub fn run(_cx: &mut WflowCtx) -> Result<(), wflow_sdk::JobErrorX> {
     let transactions = crate::hledger::parse::journal::parse_journal(&note.content)
         .map_err(|err| wflow_sdk::JobErrorX::Terminal(ferr!("hledger parse error: {err:?}")))?;
 
-    let note_heads = note_token.heads();
+    let note_heads = note_token.heads().map_err(|err| {
+        wflow_sdk::JobErrorX::Terminal(ferr!("error reading note heads: {err:?}"))
+    })?;
     let note_facet_key = daybook_types::doc::FacetKey::from(WellKnownFacetTag::Note);
     let note_url_str = format!(
         "db+facet:///{}/{}/{}",
@@ -46,20 +53,29 @@ pub fn run(_cx: &mut WflowCtx) -> Result<(), wflow_sdk::JobErrorX> {
         heads: note_heads,
     };
 
-    // Read existing claims from the rw claim token (claim/main)
     let claim_tag_str = crate::types::DayledgerFacetTag::Claim.as_str();
-    let claim_facet_key_str = daybook_types::doc::FacetKey::from(claim_tag_str).to_string();
-    let existing_claims: HashMap<String, Claim> =
-        if let Some(claim_token) = tuple_list_get(&args.rw_facet_tokens, &claim_facet_key_str) {
-            if claim_token.exists() {
-                let claim_raw = claim_token.get();
-                serde_json::from_str(&claim_raw).unwrap_or_default()
-            } else {
-                HashMap::new()
-            }
-        } else {
-            HashMap::new()
-        };
+    let claim_facet_key = daybook_types::doc::FacetKey::from(claim_tag_str);
+
+    let claim_tag_token = args
+        .primary_doc
+        .tags
+        .iter()
+        .find(|t| t.tag() == claim_tag_str && t.rights().contains(FacetRights::UPDATE))
+        .ok_or_else(|| {
+            wflow_sdk::JobErrorX::Terminal(ferr!("claim tag token with update rights not found"))
+        })?;
+
+    let existing_claims: HashMap<String, Claim> = if let Some(claim_token) =
+        args.primary_doc.facets.iter().find(|t| {
+            t.key() == claim_facet_key.to_string() && t.rights().contains(FacetRights::READ)
+        }) {
+        let claim_raw = claim_token.get().map_err(|err| {
+            wflow_sdk::JobErrorX::Terminal(ferr!("error reading claim facet: {err:?}"))
+        })?;
+        serde_json::from_str(&claim_raw).unwrap_or_default()
+    } else {
+        HashMap::new()
+    };
 
     let mut new_claims: HashMap<String, Claim> = HashMap::new();
 
@@ -68,15 +84,15 @@ pub fn run(_cx: &mut WflowCtx) -> Result<(), wflow_sdk::JobErrorX> {
         new_claims.insert(claim_id, claim);
     }
 
-    // Write updated claims back
-    if let Some(claim_token) = tuple_list_get(&args.rw_facet_tokens, &claim_facet_key_str) {
-        let claims_json = serde_json::to_string(&new_claims).map_err(|err| {
-            wflow_sdk::JobErrorX::Terminal(ferr!("serde error serializing claims: {err}"))
+    let claims_json = serde_json::to_string(&new_claims).map_err(|err| {
+        wflow_sdk::JobErrorX::Terminal(ferr!("serde error serializing claims: {err}"))
+    })?;
+
+    claim_tag_token
+        .create(&claim_facet_key.id, &claims_json)
+        .map_err(|err| {
+            wflow_sdk::JobErrorX::Terminal(ferr!("error creating/updating claim facet: {err:?}"))
         })?;
-        claim_token.update(&claims_json).map_err(|err| {
-            wflow_sdk::JobErrorX::Terminal(ferr!("update claim facet error: {err:?}"))
-        })?;
-    }
 
     Ok(())
 }

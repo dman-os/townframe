@@ -25,6 +25,12 @@ pub fn is_domain_name(value: &str, _context: &()) -> garde::Result {
 #[repr(transparent)]
 pub struct FacetTag(#[garde(custom(is_domain_name))] pub String);
 
+impl Default for FacetTag {
+    fn default() -> Self {
+        Self(String::new())
+    }
+}
+
 impl<T> From<T> for FacetTag
 where
     T: Into<String>,
@@ -359,7 +365,7 @@ pub enum RoutineImpl {
     },
 }
 
-#[derive(Debug, Serialize, Deserialize, Validate, Clone)]
+#[derive(Debug, Default, Serialize, Deserialize, Validate, Clone)]
 #[serde(rename_all = "camelCase")]
 pub struct RoutineFacetAccess {
     /// Required for config_facet_acl entries to disambiguate owner config doc.
@@ -378,8 +384,12 @@ pub struct RoutineFacetAccess {
     #[serde(default)]
     #[garde(skip)]
     pub write: bool,
-    // #[serde(default)]
-    // pub list: bool,
+    #[serde(default)]
+    #[garde(skip)]
+    pub create: bool,
+    #[serde(default)]
+    #[garde(skip)]
+    pub delete: bool,
 }
 
 #[derive(Debug, Serialize, Deserialize, Validate, Clone)]
@@ -1251,6 +1261,8 @@ mod tests {
                             key_id: None,
                             read: true,
                             write: false,
+                            create: false,
+                            delete: false,
                         },
                         RoutineFacetAccess {
                             owner_plug_id: None,
@@ -1258,6 +1270,8 @@ mod tests {
                             key_id: Some("main".into()),
                             read: true,
                             write: true,
+                            create: false,
+                            delete: false,
                         },
                     ],
                 },
@@ -1269,6 +1283,8 @@ mod tests {
                         key_id: None,
                         read: false,
                         write: true,
+                        create: false,
+                        delete: false,
                     }],
                 },
             ],
@@ -1305,6 +1321,8 @@ mod tests {
                         key_id: None,
                         read: true,
                         write: false,
+                        create: false,
+                        delete: false,
                     }],
                 },
                 RoutineDocAcl {
@@ -1315,6 +1333,8 @@ mod tests {
                         key_id: None,
                         read: false,
                         write: true,
+                        create: false,
+                        delete: false,
                     }],
                 },
             ],
@@ -1345,6 +1365,8 @@ mod tests {
                     key_id: None,
                     read: true,
                     write: false,
+                    create: false,
+                    delete: false,
                 }],
             }],
             query_acls: vec![DocPredicateClause::HasTag("org.example.todo".into())],
@@ -1374,6 +1396,8 @@ mod tests {
                     key_id: None,
                     read: true,
                     write: false,
+                    create: false,
+                    delete: false,
                 }],
             }],
             query_acls: vec![DocPredicateClause::HasTag("org.example.todo".into())],
@@ -1383,6 +1407,8 @@ mod tests {
                 key_id: None,
                 read: true,
                 write: true,
+                create: false,
+                delete: false,
             }],
             command_invoke_acl: vec![],
             local_state_acl: vec![],

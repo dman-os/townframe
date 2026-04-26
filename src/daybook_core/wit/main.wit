@@ -34,8 +34,19 @@ interface drawer {
 }
 
 interface capabilities {
-    use townframe:daybook-types/doc.{doc, doc-patch, facet-raw, doc-id};
+    use townframe:daybook-types/doc.{doc-id, facet-raw};
     use types.{heads};
+
+    record datetime {
+        seconds: u64,
+        nanoseconds: u32,
+    }
+
+    variant access-error {
+        denied,
+        not-found,
+        other(string),
+    }
 
     variant update-doc-error {
         invalid-patch(string),
@@ -49,37 +60,74 @@ interface capabilities {
         other(string),
     }
 
-    resource doc-token-ro {
-        get: func() -> doc;
+    record facet-meta {
+        created-at: datetime,
     }
 
-    resource doc-token-rw {
-        get: func() -> doc;
-        update: func(patch: doc-patch) -> result<_, update-doc-error>;
+    record doc-meta {
+        created-at: datetime,
+        updated-at: list<datetime>,
     }
 
-    resource facet-token-ro {
-        exists: func() -> bool;
-        get: func() -> facet-raw;
-        heads: func() -> heads;
+    flags doc-rights {
+        meta-read,
+        delete,
+        facet-list,
     }
 
-    resource facet-token-rw {
-        exists: func() -> bool;
-        get: func() -> facet-raw;
-        heads: func() -> heads;
-        update: func(patch: facet-raw) -> result<_, update-doc-error>;
+    flags facet-rights {
+        read,
+        update,
+        create,
+        delete,
+    }
+
+    resource doc-token {
+        id: func() -> doc-id;
+        rights: func() -> doc-rights;
+        clone: func(downscope: option<doc-rights>) -> result<doc-token, access-error>;
+        get-meta: func() -> result<doc-meta, access-error>;
+        list-facets: func() -> result<list<tuple<string, facet-token>>, access-error>;
+        get-facet: func(key: string) -> result<option<facet-token>, access-error>;
+        list-tags: func() -> result<list<tuple<string, facet-tag-token>>, access-error>;
+    }
+
+    resource facet-token {
+        key: func() -> string;
+        rights: func() -> facet-rights;
+        clone: func(downscope: option<facet-rights>) -> result<facet-token, access-error>;
+        meta: func() -> result<facet-meta, access-error>;
+        get: func() -> result<facet-raw, access-error>;
+        heads: func() -> result<heads, access-error>;
+        update: func(patch: facet-raw) -> result<result<_, update-doc-error>, access-error>;
+    }
+
+    resource facet-create-token {
+        key: func() -> string;
+        create-facet: func(data: facet-raw) -> result<facet-token, update-doc-error>;
+    }
+
+    resource facet-tag-token {
+        tag: func() -> string;
+        rights: func() -> facet-rights;
+        list-facets: func() -> result<list<facet-token>, access-error>;
+        get: func(key-id: string) -> result<option<facet-token>, access-error>;
+        create: func(key-id: string, data: facet-raw) -> result<facet-token, update-doc-error>;
+        get-create-token: func(key-id: string) -> result<facet-create-token, update-doc-error>;
     }
 
     resource command-invoke-token {
         invoke: func(request-json: string) -> result<string, invoke-command-error>;
     }
+
+    delete-facet: func(token: facet-token) -> result<_, access-error>;
+    delete-doc: func(token: doc-token) -> result<_, access-error>;
 }
 
 interface facet-routine {
     use townframe:daybook-types/doc.{doc-id};
     use types.{heads};
-    use capabilities.{command-invoke-token, facet-token-ro, facet-token-rw};
+    use capabilities.{command-invoke-token, doc-token, facet-token, facet-tag-token};
     use sqlite-connection.{connection as sqlite-connection-token};
 
     record processor-invocation {
@@ -92,15 +140,18 @@ interface facet-routine {
         command,
     }
 
+    record doc-facet-tokens {
+        doc: doc-token,
+        facets: list<facet-token>,
+        tags: list<facet-tag-token>,
+    }
+
     record facet-routine-args {
         doc-id: doc-id,
         heads: heads,
         invocation: routine-invocation,
-
-        rw-facet-tokens: list<tuple<string, facet-token-rw>>,
-        ro-facet-tokens: list<tuple<string, facet-token-ro>>,
-        rw-config-facet-tokens: list<tuple<string, facet-token-rw>>,
-        ro-config-facet-tokens: list<tuple<string, facet-token-ro>>,
+        primary-doc: doc-facet-tokens,
+        config-docs: list<doc-facet-tokens>,
         command-invoke-tokens: list<tuple<string, command-invoke-token>>,
         sqlite-connections: list<tuple<string, sqlite-connection-token>>,
     }
@@ -123,22 +174,22 @@ interface sqlite-connection {
 }
 
 interface mltools-ocr {
-    use capabilities.{facet-token-ro};
+    use capabilities.{facet-token};
     use townframe:mltools/ocr.{ocr-result};
 
-    ocr-image: func(blob-facet: facet-token-ro) -> result<ocr-result, string>;
+    ocr-image: func(blob-facet: facet-token) -> result<ocr-result, string>;
 }
 
 interface mltools-embed {
-    use capabilities.{facet-token-ro};
+    use capabilities.{facet-token};
     use townframe:mltools/embed.{embed-result};
 
     embed-text: func(text: string) -> result<embed-result, string>;
-    embed-image: func(blob-facet: facet-token-ro) -> result<embed-result, string>;
+    embed-image: func(blob-facet: facet-token) -> result<embed-result, string>;
 }
 
 interface mltools-image-tools {
-    use capabilities.{facet-token-ro};
+    use capabilities.{facet-token};
 
     record image-bytes-result {
         bytes: list<u8>,
@@ -148,7 +199,7 @@ interface mltools-image-tools {
     }
 
     downsize-image-from-blob: func(
-        blob-facet: facet-token-ro,
+        blob-facet: facet-token,
         max-side: u32,
         jpeg-quality: u8,
     ) -> result<image-bytes-result, string>;

@@ -69,19 +69,35 @@ mod wasm_runtime {
         source: String,
     }
 
-    fn get_working_facet_token(
-        args: &crate::wit::townframe::daybook::facet_routine::FacetRoutineArgs,
-    ) -> Result<&crate::wit::townframe::daybook::capabilities::FacetTokenRw, JobErrorX> {
-        let label_key =
-            daybook_types::doc::FacetKey::from(daybook_types::doc::WellKnownFacetTag::LabelGeneric)
-                .to_string();
-        args.rw_facet_tokens
+    fn find_facet_token_with_rights<'a>(
+        args: &'a crate::wit::townframe::daybook::facet_routine::FacetRoutineArgs,
+        key: &str,
+        required_right: crate::wit::townframe::daybook::capabilities::FacetRights,
+    ) -> Result<&'a crate::wit::townframe::daybook::capabilities::FacetToken, JobErrorX> {
+        args.primary_doc
+            .facets
             .iter()
-            .find(|(key, _)| key == &label_key)
-            .map(|(_, token)| token)
+            .find(|t| t.key() == key && t.rights().contains(required_right))
             .ok_or_else(|| {
                 JobErrorX::Terminal(ferr!(
-                    "labelGeneric facet token not found in rw_facet_tokens"
+                    "facet token '{}' with required rights not found",
+                    key
+                ))
+            })
+    }
+
+    fn find_facet_token<'a>(
+        args: &'a crate::wit::townframe::daybook::facet_routine::FacetRoutineArgs,
+        key: &str,
+    ) -> Result<&'a crate::wit::townframe::daybook::capabilities::FacetToken, JobErrorX> {
+        args.primary_doc
+            .facets
+            .iter()
+            .find(|t| t.key() == key)
+            .ok_or_else(|| {
+                JobErrorX::Terminal(ferr!(
+                    "facet token '{}' not found",
+                    key
                 ))
             })
     }
@@ -102,7 +118,7 @@ mod wasm_runtime {
 
     fn update_label(
         cx: &mut WflowCtx,
-        token: &crate::wit::townframe::daybook::capabilities::FacetTokenRw,
+        token: &crate::wit::townframe::daybook::capabilities::FacetToken,
         value: &str,
     ) -> Result<(), JobErrorX> {
         use daybook_types::doc::WellKnownFacet;
@@ -112,7 +128,8 @@ mod wasm_runtime {
             let facet_json = serde_json::to_string(&facet).expect(ERROR_JSON);
             token
                 .update(&facet_json)
-                .map_err(|err| JobErrorX::Terminal(ferr!("error updating label facet: {err:?}")))?;
+                .map_err(|err| JobErrorX::Terminal(ferr!("error updating label facet: {err:?}")))?
+                .map_err(|err| JobErrorX::Terminal(ferr!("update doc error: {err:?}")))?;
             Ok(Json(()))
         })?;
         Ok(())
@@ -163,7 +180,9 @@ mod wasm_runtime {
 
     fn invoke_child_success(cx: &mut WflowCtx) -> Result<(), JobErrorX> {
         let args = crate::wit::townframe::daybook::facet_routine::get_args();
-        let working = get_working_facet_token(&args)?;
+        let label_key =
+            daybook_types::doc::FacetKey::from(daybook_types::doc::WellKnownFacetTag::LabelGeneric).to_string();
+        let working = find_facet_token_with_rights(&args, &label_key, crate::wit::townframe::daybook::capabilities::FacetRights::UPDATE)?;
         update_label(cx, working, "invoke-child-success-started")?;
         let token = find_command_token(&args, "/child-success")?;
         invoke_child_and_wait(cx, token, "req-child-success", false)?;
@@ -172,7 +191,9 @@ mod wasm_runtime {
 
     fn invoke_child_failure(cx: &mut WflowCtx) -> Result<(), JobErrorX> {
         let args = crate::wit::townframe::daybook::facet_routine::get_args();
-        let working = get_working_facet_token(&args)?;
+        let label_key =
+            daybook_types::doc::FacetKey::from(daybook_types::doc::WellKnownFacetTag::LabelGeneric).to_string();
+        let working = find_facet_token_with_rights(&args, &label_key, crate::wit::townframe::daybook::capabilities::FacetRights::UPDATE)?;
         update_label(cx, working, "invoke-child-failure-started")?;
         let token = find_command_token(&args, "/child-failure")?;
         invoke_child_and_wait(cx, token, "req-child-failure", true)?;
@@ -186,14 +207,18 @@ mod wasm_runtime {
             )));
         }
         let routine_args = crate::wit::townframe::daybook::facet_routine::get_args();
-        let working = get_working_facet_token(&routine_args)?;
+        let label_key =
+            daybook_types::doc::FacetKey::from(daybook_types::doc::WellKnownFacetTag::LabelGeneric).to_string();
+        let working = find_facet_token_with_rights(&routine_args, &label_key, crate::wit::townframe::daybook::capabilities::FacetRights::UPDATE)?;
         update_label(cx, working, "child-success-ran")?;
         Ok(())
     }
 
     fn child_failure(cx: &mut WflowCtx, args: ChildArgs) -> Result<(), JobErrorX> {
         let routine_args = crate::wit::townframe::daybook::facet_routine::get_args();
-        let working = get_working_facet_token(&routine_args)?;
+        let label_key =
+            daybook_types::doc::FacetKey::from(daybook_types::doc::WellKnownFacetTag::LabelGeneric).to_string();
+        let working = find_facet_token_with_rights(&routine_args, &label_key, crate::wit::townframe::daybook::capabilities::FacetRights::UPDATE)?;
         update_label(cx, working, "child-failure-ran")?;
         Err(JobErrorX::Terminal(ferr!(
             "child-failure from source '{}'",
@@ -201,7 +226,7 @@ mod wasm_runtime {
         )))
     }
 
-    fn report_capabilities(cx: &mut WflowCtx) -> Result<(), JobErrorX> {
+    fn report_capabilities(_cx: &mut WflowCtx) -> Result<(), JobErrorX> {
         use crate::wit::townframe::daybook::facet_routine;
         use crate::wit::townframe::sql::types::SqlValue;
 
@@ -220,12 +245,34 @@ mod wasm_runtime {
             }
         };
 
+        let facet_keys_and_rights: Vec<(String, String)> = args.primary_doc.facets.iter().map(|t| (t.key(), format!("{:?}", t.rights()))).collect();
+        let tag_keys_and_rights: Vec<(String, String)> = args.primary_doc.tags.iter().map(|t| (t.tag(), format!("{:?}", t.rights()))).collect();
+        let config_doc_facet_keys_and_rights: Vec<Vec<(String, String)>> = args.config_docs.iter().map(|cd| {
+            cd.facets.iter().map(|t| (t.key(), format!("{:?}", t.rights()))).collect()
+        }).collect();
+        let config_doc_tag_keys_and_rights: Vec<Vec<(String, String)>> = args.config_docs.iter().map(|cd| {
+            cd.tags.iter().map(|t| (t.tag(), format!("{:?}", t.rights()))).collect()
+        }).collect();
+
+        let facet_keys: Vec<String> = facet_keys_and_rights.iter().map(|(k, _)| k.clone()).collect();
+        let tag_keys: Vec<String> = tag_keys_and_rights.iter().map(|(k, _)| k.clone()).collect();
+        let config_doc_facet_keys: Vec<Vec<String>> = config_doc_facet_keys_and_rights.iter().map(|v| v.iter().map(|(k, _)| k.clone()).collect()).collect();
+        let config_doc_tag_keys: Vec<Vec<String>> = config_doc_tag_keys_and_rights.iter().map(|v| v.iter().map(|(k, _)| k.clone()).collect()).collect();
+        let facet_rights_map: std::collections::BTreeMap<String, String> = facet_keys_and_rights.into_iter().collect();
+        let tag_rights_map: std::collections::BTreeMap<String, String> = tag_keys_and_rights.into_iter().collect();
+        let config_facet_rights: Vec<std::collections::BTreeMap<String, String>> = config_doc_facet_keys_and_rights.into_iter().map(|v| v.into_iter().collect()).collect();
+        let config_tag_rights: Vec<std::collections::BTreeMap<String, String>> = config_doc_tag_keys_and_rights.into_iter().map(|v| v.into_iter().collect()).collect();
+
         let summary = serde_json::json!({
             "invocation": invocation_kind,
-            "rw_facet_keys": args.rw_facet_tokens.iter().map(|(k, _)| k.clone()).collect::<Vec<_>>(),
-            "ro_facet_keys": args.ro_facet_tokens.iter().map(|(k, _)| k.clone()).collect::<Vec<_>>(),
-            "rw_config_facet_keys": args.rw_config_facet_tokens.iter().map(|(k, _)| k.clone()).collect::<Vec<_>>(),
-            "ro_config_facet_keys": args.ro_config_facet_tokens.iter().map(|(k, _)| k.clone()).collect::<Vec<_>>(),
+            "primary_facet_keys": facet_keys,
+            "primary_tag_keys": tag_keys,
+            "primary_facet_rights": facet_rights_map,
+            "primary_tag_rights": tag_rights_map,
+            "config_doc_facet_keys": config_doc_facet_keys,
+            "config_doc_tag_keys": config_doc_tag_keys,
+            "config_doc_facet_rights": config_facet_rights,
+            "config_doc_tag_rights": config_tag_rights,
             "command_invoke_urls": args.command_invoke_tokens.iter().map(|(k, _)| k.clone()).collect::<Vec<_>>(),
             "sqlite_connections": args.sqlite_connections.iter().map(|(k, _)| k.clone()).collect::<Vec<_>>(),
         });
@@ -274,7 +321,8 @@ mod wasm_runtime {
 mod e2e;
 
 pub fn plug_manifest() -> PlugManifest {
-    use daybook_types::doc::WellKnownFacetTag;
+        use daybook_types::doc::WellKnownFacetTag;
+        use daybook_types::manifest::FacetManifest;
 
     PlugManifest {
         namespace: "daybook".into(),
@@ -290,10 +338,16 @@ pub fn plug_manifest() -> PlugManifest {
         dependencies: [(
             "@daybook/core@v0.0.1".into(),
             PlugDependencyManifest {
-                keys: vec![FacetDependencyManifest {
-                    key_tag: WellKnownFacetTag::LabelGeneric.into(),
-                    value_schema: schemars::schema_for!(String),
-                }],
+                keys: vec![
+                    FacetDependencyManifest {
+                        key_tag: WellKnownFacetTag::LabelGeneric.into(),
+                        value_schema: schemars::schema_for!(String),
+                    },
+                    FacetDependencyManifest {
+                        key_tag: WellKnownFacetTag::Note.into(),
+                        value_schema: schemars::schema_for!(daybook_types::doc::Note),
+                    },
+                ],
                 local_states: vec![],
             }
             .into(),
@@ -317,6 +371,8 @@ pub fn plug_manifest() -> PlugManifest {
                             key_id: None,
                             read: true,
                             write: true,
+                            create: false,
+                            delete: false,
                         }],
                     }],
                     query_acls: vec![],
@@ -346,6 +402,8 @@ pub fn plug_manifest() -> PlugManifest {
                             key_id: None,
                             read: true,
                             write: true,
+                            create: false,
+                            delete: false,
                         }],
                     }],
                     query_acls: vec![],
@@ -375,6 +433,8 @@ pub fn plug_manifest() -> PlugManifest {
                             key_id: None,
                             read: true,
                             write: true,
+                            create: false,
+                            delete: false,
                         }],
                     }],
                     query_acls: vec![],
@@ -400,6 +460,8 @@ pub fn plug_manifest() -> PlugManifest {
                             key_id: None,
                             read: true,
                             write: true,
+                            create: false,
+                            delete: false,
                         }],
                     }],
                     query_acls: vec![],
@@ -426,6 +488,8 @@ pub fn plug_manifest() -> PlugManifest {
                                 key_id: None,
                                 read: true,
                                 write: true,
+                                create: false,
+                                delete: false,
                             },
                             RoutineFacetAccess {
                                 owner_plug_id: None,
@@ -433,6 +497,8 @@ pub fn plug_manifest() -> PlugManifest {
                                 key_id: None,
                                 read: true,
                                 write: false,
+                                create: false,
+                                delete: false,
                             },
                         ],
                     }],
@@ -444,6 +510,8 @@ pub fn plug_manifest() -> PlugManifest {
                             key_id: None,
                             read: true,
                             write: true,
+                            create: false,
+                            delete: false,
                         },
                         RoutineFacetAccess {
                             owner_plug_id: None,
@@ -451,6 +519,8 @@ pub fn plug_manifest() -> PlugManifest {
                             key_id: None,
                             read: true,
                             write: false,
+                            create: false,
+                            delete: false,
                         },
                     ],
                     local_state_acl: vec![daybook_types::manifest::RoutineLocalStateAccess {
@@ -482,6 +552,8 @@ pub fn plug_manifest() -> PlugManifest {
                                 key_id: None,
                                 read: true,
                                 write: true,
+                                create: false,
+                                delete: false,
                             },
                             RoutineFacetAccess {
                                 owner_plug_id: None,
@@ -489,6 +561,8 @@ pub fn plug_manifest() -> PlugManifest {
                                 key_id: None,
                                 read: true,
                                 write: false,
+                                create: false,
+                                delete: false,
                             },
                         ],
                     }],
@@ -500,6 +574,8 @@ pub fn plug_manifest() -> PlugManifest {
                             key_id: None,
                             read: true,
                             write: true,
+                            create: false,
+                            delete: false,
                         },
                         RoutineFacetAccess {
                             owner_plug_id: None,
@@ -507,6 +583,8 @@ pub fn plug_manifest() -> PlugManifest {
                             key_id: None,
                             read: true,
                             write: false,
+                            create: false,
+                            delete: false,
                         },
                     ],
                     local_state_acl: vec![daybook_types::manifest::RoutineLocalStateAccess {
@@ -533,6 +611,8 @@ pub fn plug_manifest() -> PlugManifest {
                             key_id: None,
                             read: true,
                             write: true,
+                            create: false,
+                            delete: false,
                         }],
                     }],
                     query_acls: vec![],
@@ -561,6 +641,8 @@ pub fn plug_manifest() -> PlugManifest {
                             key_id: None,
                             read: true,
                             write: true,
+                            create: false,
+                            delete: false,
                         }],
                     }],
                     query_acls: vec![],
@@ -666,7 +748,20 @@ pub fn plug_manifest() -> PlugManifest {
         .into(),
         inits: Default::default(),
         processors: Default::default(),
-        facets: vec![],
+        facets: vec![
+            FacetManifest {
+                key_tag: "org.example.test.config".into(),
+                value_schema: schemars::schema_for!(serde_json::Value),
+                display_config: Default::default(),
+                references: vec![],
+            },
+            FacetManifest {
+                key_tag: "org.example.test.config-ro".into(),
+                value_schema: schemars::schema_for!(serde_json::Value),
+                display_config: Default::default(),
+                references: vec![],
+            },
+        ],
     }
 }
 

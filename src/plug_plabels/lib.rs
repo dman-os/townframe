@@ -77,11 +77,6 @@ mod wasm_runtime {
             .map(|(_, entry_value)| entry_value)
     }
 
-    pub(crate) fn tuple_list_take<T>(pairs: &mut Vec<(String, T)>, key: &str) -> Option<T> {
-        let ix = pairs.iter().position(|(entry_key, _)| entry_key == key)?;
-        Some(pairs.swap_remove(ix).1)
-    }
-
     pub(crate) fn row_text(
         row: &crate::wit::townframe::sql::types::ResultRow,
         name: &str,
@@ -160,7 +155,7 @@ mod wasm_runtime {
 
 #[cfg(target_arch = "wasm32")]
 pub(crate) use wasm_runtime::{
-    embedding_bytes_to_f32, row_blob, row_i64, row_text, tuple_list_get, tuple_list_take,
+    embedding_bytes_to_f32, row_blob, row_i64, row_text, tuple_list_get,
 };
 
 pub fn plug_manifest() -> PlugManifest {
@@ -224,6 +219,8 @@ pub fn plug_manifest() -> PlugManifest {
                                 key_id: None,
                                 read: true,
                                 write: false,
+                                create: false,
+                                delete: false,
                             },
                             RoutineFacetAccess {
                                 owner_plug_id: None,
@@ -231,6 +228,8 @@ pub fn plug_manifest() -> PlugManifest {
                                 key_id: None,
                                 read: true,
                                 write: true,
+                                create: false,
+                                delete: false,
                             },
                             RoutineFacetAccess {
                                 owner_plug_id: None,
@@ -238,6 +237,8 @@ pub fn plug_manifest() -> PlugManifest {
                                 key_id: None,
                                 read: true,
                                 write: true,
+                                create: false,
+                                delete: false,
                             },
                         ],
                     }],
@@ -248,6 +249,8 @@ pub fn plug_manifest() -> PlugManifest {
                         key_id: Some("label-candidates".into()),
                         read: true,
                         write: true,
+                        create: false,
+                        delete: false,
                     }],
                     local_state_acl: vec![RoutineLocalStateAccess {
                         plug_id: "@daybook/plabels".into(),
@@ -273,6 +276,8 @@ pub fn plug_manifest() -> PlugManifest {
                                 key_id: None,
                                 read: true,
                                 write: false,
+                                create: false,
+                                delete: false,
                             },
                             RoutineFacetAccess {
                                 owner_plug_id: None,
@@ -280,6 +285,8 @@ pub fn plug_manifest() -> PlugManifest {
                                 key_id: None,
                                 read: true,
                                 write: false,
+                                create: false,
+                                delete: false,
                             },
                             RoutineFacetAccess {
                                 owner_plug_id: None,
@@ -287,6 +294,8 @@ pub fn plug_manifest() -> PlugManifest {
                                 key_id: None,
                                 read: true,
                                 write: true,
+                                create: false,
+                                delete: false,
                             },
                             RoutineFacetAccess {
                                 owner_plug_id: None,
@@ -294,6 +303,8 @@ pub fn plug_manifest() -> PlugManifest {
                                 key_id: None,
                                 read: true,
                                 write: true,
+                                create: false,
+                                delete: false,
                             },
                         ],
                     }],
@@ -304,6 +315,8 @@ pub fn plug_manifest() -> PlugManifest {
                         key_id: Some("label-candidates".into()),
                         read: true,
                         write: true,
+                        create: false,
+                        delete: false,
                     }],
                     local_state_acl: vec![RoutineLocalStateAccess {
                         plug_id: "@daybook/plabels".into(),
@@ -329,6 +342,8 @@ pub fn plug_manifest() -> PlugManifest {
                                 key_id: None,
                                 read: true,
                                 write: false,
+                                create: false,
+                                delete: false,
                             },
                             RoutineFacetAccess {
                                 owner_plug_id: None,
@@ -336,6 +351,8 @@ pub fn plug_manifest() -> PlugManifest {
                                 key_id: None,
                                 read: true,
                                 write: false,
+                                create: false,
+                                delete: false,
                             },
                         ],
                     }],
@@ -346,6 +363,8 @@ pub fn plug_manifest() -> PlugManifest {
                         key_id: Some("label-candidates".into()),
                         read: true,
                         write: true,
+                        create: false,
+                        delete: false,
                     }],
                     local_state_acl: vec![RoutineLocalStateAccess {
                         plug_id: "@daybook/plabels".into(),
@@ -370,6 +389,8 @@ pub fn plug_manifest() -> PlugManifest {
                             key_id: None,
                             read: true,
                             write: false,
+                            create: false,
+                            delete: false,
                         }],
                     }],
                     query_acls: vec![],
@@ -379,6 +400,8 @@ pub fn plug_manifest() -> PlugManifest {
                         key_id: Some("label-candidates".into()),
                         read: true,
                         write: true,
+                        create: false,
+                        delete: false,
                     }],
                     local_state_acl: vec![RoutineLocalStateAccess {
                         plug_id: "@daybook/plabels".into(),

@@ -87,6 +87,18 @@ pub enum RoutineInvocation {
 }
 
 #[derive(Hydrate, Reconcile, Serialize, Deserialize, Debug, Clone)]
+pub struct DocFacetTokens {
+    pub doc_id: daybook_types::doc::DocId,
+    #[autosurgeon(with = "am_utils_rs::codecs::utf8_path")]
+    pub branch_path: daybook_types::doc::BranchPath,
+    #[autosurgeon(with = "am_utils_rs::codecs::utf8_path")]
+    pub staging_branch_path: daybook_types::doc::BranchPath,
+    pub heads: ChangeHashSet,
+    #[autosurgeon(with = "am_utils_rs::codecs::json")]
+    pub facet_acl: Vec<daybook_types::manifest::RoutineFacetAccess>,
+}
+
+#[derive(Hydrate, Reconcile, Serialize, Deserialize, Debug, Clone)]
 pub struct FacetRoutineArgs {
     pub doc_id: daybook_types::doc::DocId,
     #[autosurgeon(with = "am_utils_rs::codecs::utf8_path")]
@@ -95,10 +107,9 @@ pub struct FacetRoutineArgs {
     pub staging_branch_path: daybook_types::doc::BranchPath,
     pub heads: ChangeHashSet,
     pub invocation: RoutineInvocation,
+    pub primary_doc: DocFacetTokens,
     #[autosurgeon(with = "am_utils_rs::codecs::json")]
-    pub facet_acl: Vec<daybook_types::manifest::RoutineFacetAccess>,
-    #[autosurgeon(with = "am_utils_rs::codecs::json")]
-    pub config_facet_acl: Vec<daybook_types::manifest::RoutineFacetAccess>,
+    pub config_docs: Vec<DocFacetTokens>,
     #[autosurgeon(with = "am_utils_rs::codecs::json")]
     pub local_state_acl: Vec<daybook_types::manifest::RoutineLocalStateAccess>,
     #[serde(default)]
@@ -982,8 +993,14 @@ mod tests {
                 staging_branch_path: "/tmp/stage".into(),
                 heads: ChangeHashSet(Vec::new().into()),
                 invocation: RoutineInvocation::Command,
-                facet_acl: vec![],
-                config_facet_acl: vec![],
+                primary_doc: DocFacetTokens {
+                    doc_id: "doc-1".into(),
+                    branch_path: "main".into(),
+                    staging_branch_path: "/tmp/stage".into(),
+                    heads: ChangeHashSet(Vec::new().into()),
+                    facet_acl: vec![],
+                },
+                config_docs: vec![],
                 local_state_acl: vec![],
                 command_invoke_acl_snapshot: vec![],
                 wflow_args_json: None,
@@ -1011,8 +1028,14 @@ mod tests {
                 staging_branch_path: "/tmp/stage".into(),
                 heads: ChangeHashSet(Vec::new().into()),
                 invocation: RoutineInvocation::Command,
-                facet_acl: vec![],
-                config_facet_acl: vec![],
+                primary_doc: DocFacetTokens {
+                    doc_id: "doc-1".into(),
+                    branch_path: "main".into(),
+                    staging_branch_path: "/tmp/stage".into(),
+                    heads: ChangeHashSet(Vec::new().into()),
+                    facet_acl: vec![],
+                },
+                config_docs: vec![],
                 local_state_acl: vec![],
                 command_invoke_acl_snapshot: vec![],
                 wflow_args_json: None,
@@ -1188,8 +1211,14 @@ mod tests {
                 trigger_doc_id: "doc-1".into(),
                 changed_facet_keys: vec!["org.example.note/main".into()],
             }),
-            facet_acl: vec![],
-            config_facet_acl: vec![],
+            primary_doc: DocFacetTokens {
+                doc_id: "doc-1".into(),
+                branch_path: "main".into(),
+                staging_branch_path: "/tmp/stage".into(),
+                heads: ChangeHashSet(Vec::new().into()),
+                facet_acl: vec![],
+            },
+            config_docs: vec![],
             local_state_acl: vec![],
             command_invoke_acl_snapshot: vec![],
             wflow_args_json: None,

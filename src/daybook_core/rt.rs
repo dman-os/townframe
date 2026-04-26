@@ -1636,12 +1636,18 @@ impl Rt {
             .unwrap_or_else(|| format!("{plug_id}/{routine_name}-{dispatch_id}"));
 
         let mut args = ActiveDispatchArgs::FacetRoutine(FacetRoutineArgs {
-            doc_id,
-            branch_path,
-            heads,
+            doc_id: doc_id.clone(),
+            branch_path: branch_path.clone(),
+            heads: heads.clone(),
             invocation,
-            facet_acl: routine_man.facet_acl(),
-            config_facet_acl: routine_man.config_facet_acl().to_vec(),
+            primary_doc: dispatch::DocFacetTokens {
+                doc_id: doc_id.clone(),
+                branch_path: branch_path.clone(),
+                staging_branch_path: daybook_types::doc::BranchPath::from("/tmp/placeholder"),
+                heads: heads.clone(),
+                facet_acl: routine_man.facet_acl(),
+            },
+            config_docs: vec![],
             local_state_acl: routine_man.local_state_acl.clone(),
             command_invoke_acl_snapshot: routine_man.command_invoke_acl().to_vec(),
             wflow_args_json,

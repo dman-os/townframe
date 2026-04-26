@@ -49,13 +49,6 @@ mod wasm_runtime {
 
     struct Component;
 
-    pub(crate) fn tuple_list_get<'a, T>(pairs: &'a [(String, T)], key: &str) -> Option<&'a T> {
-        pairs
-            .iter()
-            .find(|(entry_key, _)| entry_key == key)
-            .map(|(_, entry_value)| entry_value)
-    }
-
     impl crate::wit::exports::townframe::wflow::bundle::Guest for Component {
         fn run(args: crate::wit::exports::townframe::wflow::bundle::RunArgs) -> JobResult {
             use crate::wflows::*;
@@ -67,9 +60,6 @@ mod wasm_runtime {
         }
     }
 }
-
-#[cfg(target_arch = "wasm32")]
-pub(crate) use wasm_runtime::tuple_list_get;
 
 #[cfg(target_arch = "wasm32")]
 pub mod wflows {
@@ -163,6 +153,8 @@ pub fn plug_manifest() -> PlugManifest {
                             key_id: None,
                             read: true,
                             write: false,
+                            create: false,
+                            delete: false,
                         },
                         RoutineFacetAccess {
                             owner_plug_id: None,
@@ -170,6 +162,8 @@ pub fn plug_manifest() -> PlugManifest {
                             key_id: None,
                             read: true,
                             write: true,
+                            create: true,
+                            delete: false,
                         },
                     ],
                 }],

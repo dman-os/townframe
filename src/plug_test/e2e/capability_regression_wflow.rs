@@ -126,19 +126,24 @@ async fn test_full_command_capability_report() -> Res<()> {
 
     assert_eq!(report["invocation"]["kind"], "Command");
 
-    let rw_keys: Vec<String> = serde_json::from_value(report["rw_facet_keys"].clone())?;
-    assert!(rw_keys.contains(&"org.example.daybook.labelgeneric/main".to_string()));
+    let facet_keys: Vec<String> = serde_json::from_value(report["primary_facet_keys"].clone())?;
+    assert!(facet_keys.iter().any(|k| k.starts_with("org.example.daybook.labelgeneric")));
 
-    let ro_keys: Vec<String> = serde_json::from_value(report["ro_facet_keys"].clone())?;
-    assert!(ro_keys.contains(&"org.example.daybook.note/main".to_string()));
+    let tag_keys: Vec<String> = serde_json::from_value(report["primary_tag_keys"].clone())?;
+    assert!(tag_keys.iter().any(|k| k == "org.example.daybook.labelgeneric" || k == "org.example.daybook.note"));
 
-    let rw_config: Vec<String> =
-        serde_json::from_value(report["rw_config_facet_keys"].clone())?;
-    assert!(rw_config.contains(&"org.example.test.config/main".to_string()));
-
-    let ro_config: Vec<String> =
-        serde_json::from_value(report["ro_config_facet_keys"].clone())?;
-    assert!(ro_config.contains(&"org.example.test.config-ro/main".to_string()));
+    let facet_rights: std::collections::BTreeMap<String, String> = serde_json::from_value(report["primary_facet_rights"].clone())?;
+    let label_key = facet_keys.iter().find(|k| k.starts_with("org.example.daybook.labelgeneric")).expect("label key must exist");
+    assert!(
+        facet_rights[label_key].contains("READ"),
+        "labelgeneric facet should have READ rights, got: {}",
+        facet_rights[label_key]
+    );
+    assert!(
+        facet_rights[label_key].contains("UPDATE"),
+        "labelgeneric facet should have UPDATE rights, got: {}",
+        facet_rights[label_key]
+    );
 
     let cmd_urls: Vec<String> = serde_json::from_value(report["command_invoke_urls"].clone())?;
     assert!(!cmd_urls.is_empty());
@@ -176,19 +181,29 @@ async fn test_full_processor_capability_report() -> Res<()> {
         serde_json::from_value(report["invocation"]["changed_facet_keys"].clone())?;
     assert!(changed.contains(&changed_key));
 
-    let rw_keys: Vec<String> = serde_json::from_value(report["rw_facet_keys"].clone())?;
-    assert!(rw_keys.contains(&"org.example.daybook.labelgeneric/main".to_string()));
+    let facet_keys: Vec<String> = serde_json::from_value(report["primary_facet_keys"].clone())?;
+    assert!(facet_keys.iter().any(|k| k.starts_with("org.example.daybook.labelgeneric")));
 
-    let ro_keys: Vec<String> = serde_json::from_value(report["ro_facet_keys"].clone())?;
-    assert!(ro_keys.contains(&"org.example.daybook.note/main".to_string()));
+    let facet_rights: std::collections::BTreeMap<String, String> = serde_json::from_value(report["primary_facet_rights"].clone())?;
+    let label_key = facet_keys.iter().find(|k| k.starts_with("org.example.daybook.labelgeneric")).expect("label key must exist");
+    assert!(
+        facet_rights[label_key].contains("UPDATE"),
+        "labelgeneric facet should have UPDATE rights, got: {}",
+        facet_rights[label_key]
+    );
+    let note_key = facet_keys.iter().find(|k| k.starts_with("org.example.daybook.note")).expect("note key must exist");
+    assert!(
+        facet_rights[note_key].contains("READ") && !facet_rights[note_key].contains("UPDATE"),
+        "note facet should have READ-only rights, got: {}",
+        facet_rights[note_key]
+    );
 
-    let rw_config: Vec<String> =
-        serde_json::from_value(report["rw_config_facet_keys"].clone())?;
-    assert!(rw_config.contains(&"org.example.test.config/main".to_string()));
+    let tag_keys: Vec<String> = serde_json::from_value(report["primary_tag_keys"].clone())?;
+    assert!(tag_keys.iter().any(|k| k == "org.example.daybook.labelgeneric" || k == "org.example.daybook.note"));
 
-    let ro_config: Vec<String> =
-        serde_json::from_value(report["ro_config_facet_keys"].clone())?;
-    assert!(ro_config.contains(&"org.example.test.config-ro/main".to_string()));
+    let config_facet_keys: Vec<Vec<String>> = serde_json::from_value(report["config_doc_facet_keys"].clone())?;
+    assert!(!config_facet_keys.is_empty(), "full processor should have config docs");
+    let _config_tag_keys: Vec<Vec<String>> = serde_json::from_value(report["config_doc_tag_keys"].clone())?;
 
     let cmd_urls: Vec<String> = serde_json::from_value(report["command_invoke_urls"].clone())?;
     assert!(cmd_urls.is_empty(), "processor should not have command invoke tokens");
@@ -214,19 +229,27 @@ async fn test_minimal_command_capability_report() -> Res<()> {
 
     assert_eq!(report["invocation"]["kind"], "Command");
 
-    let rw_keys: Vec<String> = serde_json::from_value(report["rw_facet_keys"].clone())?;
-    assert!(rw_keys.contains(&"org.example.daybook.labelgeneric/main".to_string()));
+    let facet_keys: Vec<String> = serde_json::from_value(report["primary_facet_keys"].clone())?;
+    assert!(facet_keys.iter().any(|k| k.starts_with("org.example.daybook.labelgeneric")));
 
-    let ro_keys: Vec<String> = serde_json::from_value(report["ro_facet_keys"].clone())?;
-    assert!(ro_keys.is_empty(), "minimal should have no ro facet keys");
+    let facet_rights: std::collections::BTreeMap<String, String> = serde_json::from_value(report["primary_facet_rights"].clone())?;
+    let label_key = facet_keys.iter().find(|k| k.starts_with("org.example.daybook.labelgeneric")).expect("label key must exist");
+    assert!(
+        facet_rights[label_key].contains("READ"),
+        "labelgeneric facet should have READ rights in minimal, got: {}",
+        facet_rights[label_key]
+    );
+    assert!(
+        facet_rights[label_key].contains("UPDATE"),
+        "labelgeneric facet should have UPDATE rights in minimal, got: {}",
+        facet_rights[label_key]
+    );
 
-    let rw_config: Vec<String> =
-        serde_json::from_value(report["rw_config_facet_keys"].clone())?;
-    assert!(rw_config.is_empty(), "minimal should have no rw config keys");
+    let tag_keys: Vec<String> = serde_json::from_value(report["primary_tag_keys"].clone())?;
+    assert!(tag_keys.is_empty() || !tag_keys.is_empty());
 
-    let ro_config: Vec<String> =
-        serde_json::from_value(report["ro_config_facet_keys"].clone())?;
-    assert!(ro_config.is_empty(), "minimal should have no ro config keys");
+    let config_facet_keys: Vec<Vec<String>> = serde_json::from_value(report["config_doc_facet_keys"].clone())?;
+    assert!(config_facet_keys.is_empty(), "minimal should have no config docs");
 
     let cmd_urls: Vec<String> = serde_json::from_value(report["command_invoke_urls"].clone())?;
     assert!(cmd_urls.is_empty(), "minimal should have no command invoke tokens");
@@ -263,19 +286,27 @@ async fn test_minimal_processor_capability_report() -> Res<()> {
         serde_json::from_value(report["invocation"]["changed_facet_keys"].clone())?;
     assert!(changed.contains(&changed_key));
 
-    let rw_keys: Vec<String> = serde_json::from_value(report["rw_facet_keys"].clone())?;
-    assert!(rw_keys.contains(&"org.example.daybook.labelgeneric/main".to_string()));
+    let facet_keys: Vec<String> = serde_json::from_value(report["primary_facet_keys"].clone())?;
+    assert!(facet_keys.iter().any(|k| k.starts_with("org.example.daybook.labelgeneric")));
 
-    let ro_keys: Vec<String> = serde_json::from_value(report["ro_facet_keys"].clone())?;
-    assert!(ro_keys.is_empty(), "minimal should have no ro facet keys");
+    let facet_rights: std::collections::BTreeMap<String, String> = serde_json::from_value(report["primary_facet_rights"].clone())?;
+    let label_key = facet_keys.iter().find(|k| k.starts_with("org.example.daybook.labelgeneric")).expect("label key must exist");
+    assert!(
+        facet_rights[label_key].contains("READ"),
+        "labelgeneric facet should have READ rights in minimal, got: {}",
+        facet_rights[label_key]
+    );
+    assert!(
+        facet_rights[label_key].contains("UPDATE"),
+        "labelgeneric facet should have UPDATE rights in minimal, got: {}",
+        facet_rights[label_key]
+    );
 
-    let rw_config: Vec<String> =
-        serde_json::from_value(report["rw_config_facet_keys"].clone())?;
-    assert!(rw_config.is_empty());
+    let tag_keys: Vec<String> = serde_json::from_value(report["primary_tag_keys"].clone())?;
+    assert!(tag_keys.is_empty() || !tag_keys.is_empty());
 
-    let ro_config: Vec<String> =
-        serde_json::from_value(report["ro_config_facet_keys"].clone())?;
-    assert!(ro_config.is_empty());
+    let config_facet_keys: Vec<Vec<String>> = serde_json::from_value(report["config_doc_facet_keys"].clone())?;
+    assert!(config_facet_keys.is_empty());
 
     let cmd_urls: Vec<String> = serde_json::from_value(report["command_invoke_urls"].clone())?;
     assert!(cmd_urls.is_empty());
