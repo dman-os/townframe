@@ -1275,9 +1275,23 @@ impl Worker {
     async fn handle_doc_sync_request(&mut self, req: DocSyncRequest) -> Res<()> {
         match req {
             DocSyncRequest::PartitionMemberEvent { peer_key, event } => {
+                debug!(
+                    peer_key = %peer_key,
+                    partition_id = %event.partition_id,
+                    cursor = event.cursor,
+                    deets = ?event.deets,
+                    "routing partition member event into sync worker"
+                );
                 self.handle_partition_member_event(peer_key, event).await?;
             }
             DocSyncRequest::PartitionDocEvent { peer_key, event } => {
+                debug!(
+                    peer_key = %peer_key,
+                    partition_id = %event.partition_id,
+                    cursor = event.cursor,
+                    deets = ?event.deets,
+                    "routing partition doc event into sync worker"
+                );
                 self.handle_partition_doc_event(peer_key, event).await?;
             }
             DocSyncRequest::RequestDocSync {
@@ -1286,6 +1300,13 @@ impl Worker {
                 doc_id,
                 cursor,
             } => {
+                debug!(
+                    peer_key = %peer_key,
+                    partition_id = %partition_id,
+                    %doc_id,
+                    cursor,
+                    "routing doc sync request"
+                );
                 self.handle_request_doc_sync(peer_key, partition_id, doc_id, cursor)
                     .await?;
             }
@@ -1295,6 +1316,13 @@ impl Worker {
                 doc_id,
                 cursor,
             } => {
+                debug!(
+                    peer_key = %peer_key,
+                    partition_id = %partition_id,
+                    %doc_id,
+                    cursor,
+                    "routing doc deleted notification"
+                );
                 self.handle_doc_deleted_request(peer_key, partition_id, doc_id, cursor)
                     .await?;
             }
@@ -1323,8 +1351,22 @@ impl Worker {
             .member_cursor
             .is_some_and(|current| event.cursor <= current)
         {
+            info!(
+                endpoint_id = ?endpoint_id,
+                partition_id = %event.partition_id,
+                cursor = event.cursor,
+                existing_cursor = existing.member_cursor,
+                "skipping stale partition member event"
+            );
             return Ok(());
         }
+        info!(
+            endpoint_id = ?endpoint_id,
+            partition_id = %event.partition_id,
+            cursor = event.cursor,
+            item_id = %match &event.deets { am_utils_rs::sync::protocol::PartitionMemberEventDeets::MemberUpsert { item_id, .. } => item_id, am_utils_rs::sync::protocol::PartitionMemberEventDeets::MemberRemoved { item_id, .. } => item_id },
+            "processing partition member event"
+        );
         match &event.deets {
             am_utils_rs::sync::protocol::PartitionMemberEventDeets::MemberUpsert {
                 item_id,
@@ -1336,6 +1378,12 @@ impl Worker {
                     .partition_store()
                     .add_member(&event.partition_id, item_id, &payload)
                     .await?;
+                info!(
+                    endpoint_id = ?endpoint_id,
+                    partition_id = %event.partition_id,
+                    item_id = %item_id,
+                    "added member to partition store"
+                );
                 if let Some(scope) = BlobScope::from_partition_id(&event.partition_id) {
                     self.add_hash_to_blob_scope(scope, item_id.clone()).await?;
                 }
@@ -1398,7 +1446,16 @@ impl Worker {
                 let parsed = item_id
                     .parse::<DocumentId>()
                     .map_err(|err| ferr!("invalid remote doc id '{item_id}': {err}"))?;
-                if self.big_repo.get_doc(&parsed).await?.is_some() {
+                let local_present = self.big_repo.get_doc(&parsed).await?.is_some();
+                debug!(
+                    peer_key = %peer_key,
+                    partition_id = %event.partition_id,
+                    cursor = event.cursor,
+                    %parsed,
+                    local_present,
+                    "processing changed doc event"
+                );
+                if local_present {
                     self.handle_request_doc_sync(
                         peer_key,
                         event.partition_id,
@@ -1462,6 +1519,19 @@ impl Worker {
             }
             self.refresh_peer_fully_synced_state(endpoint_id).await?;
         }
+        debug!(
+            endpoint_id = ?endpoint_id,
+            %doc_id,
+            partition_id = %partition_id,
+            cursor,
+            pending_doc_count = self
+                .conn_by_peer
+                .get(&endpoint_id)
+                .and_then(|conn_id| self.known_peer_set.get(conn_id))
+                .map(|peer| peer.doc_pending_docs)
+                .unwrap_or_default(),
+            "queued doc sync request"
+        );
         self.scheduler.note_doc_sync_requested(
             endpoint_id,
             &partition_id,
@@ -1592,6 +1662,14 @@ impl Worker {
             .entry(PartitionKey::BigRepoPartition(partition_id))
             .or_default()
             .insert(cursor);
+
+        debug!(
+            endpoint_id = ?endpoint_id,
+            peer_key = %peer_key,
+            %doc_id,
+            cursor,
+            "queued doc import request"
+        );
 
         let task_key = ImportSyncTaskKey {
             doc_id: doc_id.clone(),
@@ -1733,16 +1811,37 @@ impl Worker {
                     .as_ref()
                     .map_or(now, |prior| prior.last_attempt_at),
             };
+            debug!(
+                endpoint_id = ?task_key.endpoint_id,
+                %task_key.doc_id,
+                attempt_no = retry.attempt_no,
+                "booting doc sync worker"
+            );
             match self.boot_doc_sync_worker(task_key.clone(), retry).await? {
                 BootDocSyncWorkerResult::Spawned(active) => {
+                    debug!(
+                        endpoint_id = ?task_key.endpoint_id,
+                        %task_key.doc_id,
+                        "doc sync worker spawned"
+                    );
                     self.scheduler.clear_doc_pending(&task_key);
                     self.scheduler.active_docs.insert(task_key, active);
                     budget = budget.saturating_sub(1);
                 }
                 BootDocSyncWorkerResult::MissingLocal => {
+                    debug!(
+                        endpoint_id = ?task_key.endpoint_id,
+                        %task_key.doc_id,
+                        "doc sync worker missing local doc"
+                    );
                     self.handle_doc_missing_local(task_key.doc_id).await?;
                 }
                 BootDocSyncWorkerResult::Deferred => {
+                    debug!(
+                        endpoint_id = ?task_key.endpoint_id,
+                        %task_key.doc_id,
+                        "doc sync worker deferred"
+                    );
                     let now = std::time::Instant::now();
                     let pending = scheduler::PendingTaskState {
                         attempt_no: retry.attempt_no,
@@ -1798,6 +1897,11 @@ impl Worker {
                 continue;
             }
             let Some(conn_id) = self.conn_by_peer.get(&task_key.endpoint_id).copied() else {
+                debug!(
+                    endpoint_id = ?task_key.endpoint_id,
+                    %task_key.doc_id,
+                    "import worker deferred: missing connection"
+                );
                 let now = std::time::Instant::now();
                 let pending = scheduler::PendingTaskState {
                     attempt_no: retry.attempt_no,
@@ -1809,6 +1913,11 @@ impl Worker {
                 continue;
             };
             if !self.known_peer_set.contains_key(&conn_id) {
+                debug!(
+                    endpoint_id = ?task_key.endpoint_id,
+                    %task_key.doc_id,
+                    "import worker deferred: missing peer state"
+                );
                 let now = std::time::Instant::now();
                 let pending = scheduler::PendingTaskState {
                     attempt_no: retry.attempt_no,
@@ -1834,6 +1943,11 @@ impl Worker {
                 )?,
                 retry,
             };
+            debug!(
+                endpoint_id = ?task_key.endpoint_id,
+                %task_key.doc_id,
+                "import sync worker spawned"
+            );
             self.scheduler.clear_import_pending(&task_key);
             self.scheduler.active_imports.insert(task_key, active);
             budget = budget.saturating_sub(1);
@@ -1982,6 +2096,12 @@ impl Worker {
             .expect("active doc worker must exist");
         active.stop_token.stop().await?;
         self.scheduler.clear_doc_pending(&task_key);
+        debug!(
+            endpoint_id = ?endpoint_id,
+            %doc_id,
+            outcome = ?outcome,
+            "doc sync worker completed"
+        );
 
         match outcome {
             am_utils_rs::repo::SyncDocOutcome::Success => {
@@ -2188,6 +2308,12 @@ impl Worker {
             active.stop_token.stop().await?;
         }
         self.scheduler.clear_import_pending(&task_key);
+        debug!(
+            endpoint_id = ?endpoint_id,
+            %doc_id,
+            outcome = ?outcome,
+            "import worker completed"
+        );
 
         if !self.import_doc_set.contains_key(&doc_id) {
             self.scheduler.clear_import_task(&task_key);

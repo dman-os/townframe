@@ -237,6 +237,7 @@ impl<T> RuntimeSubductionStorage for T where
 #[derive(Clone)]
 struct RuntimeRemoteHeadsBridge {
     evt_tx: mpsc::UnboundedSender<RuntimeEvt>,
+    shutdown: CancellationToken,
 }
 
 impl subduction_core::remote_heads::RemoteHeadsObserver for RuntimeRemoteHeadsBridge {
@@ -246,26 +247,43 @@ impl subduction_core::remote_heads::RemoteHeadsObserver for RuntimeRemoteHeadsBr
         peer: subduction_core::peer::id::PeerId,
         _heads: subduction_core::remote_heads::RemoteHeads,
     ) {
-        self.evt_tx
-            .send(RuntimeEvt::RemoteHeadsObserved {
+        send_runtime_evt(
+            &self.evt_tx,
+            &self.shutdown,
+            RuntimeEvt::RemoteHeadsObserved {
                 doc_id: id.into(),
                 peer_id: peer.into(),
-            })
-            .expect(ERROR_CHANNEL);
+            },
+        );
     }
 }
 
 #[derive(Clone)]
 struct RuntimeSyncSessionBridge {
     evt_tx: mpsc::UnboundedSender<RuntimeEvt>,
+    shutdown: CancellationToken,
 }
 
 impl subduction_core::sync_session::SyncSessionObserver for RuntimeSyncSessionBridge {
     fn on_sync_session(&self, session: subduction_core::sync_session::SyncSession) {
-        self.evt_tx
-            .send(RuntimeEvt::SyncSessionObserved { session })
-            .expect(ERROR_CHANNEL);
+        send_runtime_evt(
+            &self.evt_tx,
+            &self.shutdown,
+            RuntimeEvt::SyncSessionObserved { session },
+        );
     }
+}
+
+fn send_runtime_evt(
+    evt_tx: &mpsc::UnboundedSender<RuntimeEvt>,
+    shutdown: &CancellationToken,
+    evt: RuntimeEvt,
+) {
+    if shutdown.is_cancelled() {
+        let _ = evt_tx.send(evt);
+        return;
+    }
+    evt_tx.send(evt).expect(ERROR_CHANNEL);
 }
 
 impl BigRepoRuntimeHandle {
@@ -454,11 +472,13 @@ where
     let storage_for_reads = storage.clone();
     let observer = RuntimeRemoteHeadsBridge {
         evt_tx: evt_tx.clone(),
+        shutdown: runtime_stop.clone(),
     };
     let sync_session_observer: Arc<
         dyn subduction_core::sync_session::SyncSessionObserver + Send + Sync,
     > = Arc::new(RuntimeSyncSessionBridge {
         evt_tx: evt_tx.clone(),
+        shutdown: runtime_stop.clone(),
     });
     let storage_powerbox = subduction_core::storage::powerbox::StoragePowerbox::new(
         storage.clone(),
@@ -777,6 +797,7 @@ where
                 cmd_tx: self.cmd_tx.clone(),
             },
             runtime_evt_tx: runtime_evt_tx.clone(),
+            shutdown: worker_cancel.clone(),
         };
         runtime_tasks
             .spawn(async move {
@@ -795,18 +816,21 @@ where
                 }
                 .await;
                 if let Err(err) = res {
-                    runtime_evt_tx
-                        .send(RuntimeEvt::FatalWorkerError {
+                    send_runtime_evt(
+                        &runtime_evt_tx,
+                        &worker_cancel,
+                        RuntimeEvt::FatalWorkerError {
                             doc_id: Some(doc_id),
                             context: "doc worker",
                             error: format!("{err:?}"),
-                        })
-                        .expect(ERROR_CHANNEL);
+                        },
+                    );
                 }
-                worker
-                    .runtime_evt_tx
-                    .send(RuntimeEvt::DocWorkerStopped { doc_id })
-                    .expect(ERROR_CHANNEL);
+                send_runtime_evt(
+                    &worker.runtime_evt_tx,
+                    &worker_cancel,
+                    RuntimeEvt::DocWorkerStopped { doc_id },
+                );
             })
             .expect(ERROR_TOKIO);
         self.doc_workers.insert(
@@ -1006,6 +1030,7 @@ where
     change_manager: Arc<changes::ChangeListenerManager>,
     runtime_handle: BigRepoRuntimeHandle,
     runtime_evt_tx: mpsc::UnboundedSender<RuntimeEvt>,
+    shutdown: CancellationToken,
 }
 
 enum DocWorkerDocState {
@@ -1033,11 +1058,13 @@ where
             }
             DocWorkerMsg::ExportDocSave { done } => {
                 let res = self.handle_export_doc_save().await;
-                self.runtime_evt_tx
-                    .send(RuntimeEvt::DocWorkerTransientFinished {
+                send_runtime_evt(
+                    &self.runtime_evt_tx,
+                    &self.shutdown,
+                    RuntimeEvt::DocWorkerTransientFinished {
                         doc_id: self.doc_id,
-                    })
-                    .expect(ERROR_CHANNEL);
+                    },
+                );
                 done.send(res).expect(ERROR_CALLER);
             }
             DocWorkerMsg::CommitDelta {
@@ -1050,20 +1077,24 @@ where
                 let res = self
                     .handle_commit_delta(commits, heads, patches, origin)
                     .await;
-                self.runtime_evt_tx
-                    .send(RuntimeEvt::DocWorkerTransientFinished {
+                send_runtime_evt(
+                    &self.runtime_evt_tx,
+                    &self.shutdown,
+                    RuntimeEvt::DocWorkerTransientFinished {
                         doc_id: self.doc_id,
-                    })
-                    .expect(ERROR_CHANNEL);
+                    },
+                );
                 done.send(res).expect(ERROR_CALLER);
             }
             DocWorkerMsg::ApplySyncSession { session } => {
                 self.handle_apply_sync_session(session).await?;
-                self.runtime_evt_tx
-                    .send(RuntimeEvt::DocWorkerTransientFinished {
+                send_runtime_evt(
+                    &self.runtime_evt_tx,
+                    &self.shutdown,
+                    RuntimeEvt::DocWorkerTransientFinished {
                         doc_id: self.doc_id,
-                    })
-                    .expect(ERROR_CHANNEL);
+                    },
+                );
             }
             DocWorkerMsg::SyncWithPeer {
                 peer_id,
@@ -1074,11 +1105,13 @@ where
                 let res = self
                     .handle_sync_with_peer(peer_id, subscribe, timeout)
                     .await;
-                self.runtime_evt_tx
-                    .send(RuntimeEvt::DocWorkerTransientFinished {
+                send_runtime_evt(
+                    &self.runtime_evt_tx,
+                    &self.shutdown,
+                    RuntimeEvt::DocWorkerTransientFinished {
                         doc_id: self.doc_id,
-                    })
-                    .expect(ERROR_CHANNEL);
+                    },
+                );
                 done.send(res).expect(ERROR_CALLER);
             }
             DocWorkerMsg::ReleaseHandleLease => {}
@@ -1133,21 +1166,25 @@ where
         self.change_manager
             .notify_local_doc_created(self.doc_id, heads)?;
         self.state = DocWorkerDocState::Live(Arc::clone(&bundle));
-        self.runtime_evt_tx
-            .send(RuntimeEvt::DocWorkerHandleAcquired {
+        send_runtime_evt(
+            &self.runtime_evt_tx,
+            &self.shutdown,
+            RuntimeEvt::DocWorkerHandleAcquired {
                 bundle: Arc::clone(&bundle),
-            })
-            .expect(ERROR_CHANNEL);
+            },
+        );
         Ok(bundle)
     }
 
     async fn handle_acquire_handle(&mut self) -> Res<Option<Arc<LiveDocBundle>>> {
         if let DocWorkerDocState::Live(bundle) = &self.state {
-            self.runtime_evt_tx
-                .send(RuntimeEvt::DocWorkerHandleAcquired {
+            send_runtime_evt(
+                &self.runtime_evt_tx,
+                &self.shutdown,
+                RuntimeEvt::DocWorkerHandleAcquired {
                     bundle: Arc::clone(bundle),
-                })
-                .expect(ERROR_CHANNEL);
+                },
+            );
             return Ok(Some(Arc::clone(bundle)));
         }
         let Some(doc) = self.take_or_load_transient_doc().await? else {
@@ -1164,11 +1201,13 @@ where
             },
         ));
         self.state = DocWorkerDocState::Live(Arc::clone(&bundle));
-        self.runtime_evt_tx
-            .send(RuntimeEvt::DocWorkerHandleAcquired {
+        send_runtime_evt(
+            &self.runtime_evt_tx,
+            &self.shutdown,
+            RuntimeEvt::DocWorkerHandleAcquired {
                 bundle: Arc::clone(&bundle),
-            })
-            .expect(ERROR_CHANNEL);
+            },
+        );
         Ok(Some(bundle))
     }
 
@@ -1383,6 +1422,7 @@ where
         let subduction: Arc<RuntimeSubduction<S>> = Arc::clone(&self.subduction);
         let connect_signer = self.connect_signer.clone();
         let evt_tx = self.evt_tx.clone();
+        let shutdown = self.runtime_stop.clone();
         let runtime_tasks = Arc::clone(&self.runtime_tasks);
         let connected_peers = Arc::clone(&self.connected_peers);
         let fut = async move {
@@ -1398,6 +1438,7 @@ where
                 let stop = stop_token.child_token();
                 let peer_id = peer_id;
                 let evt_tx = evt_tx.clone();
+                let shutdown = shutdown.clone();
                 let fut = connect.listener_task;
                 async move {
                     tokio::select! {
@@ -1406,19 +1447,19 @@ where
                         res = fut => {
                             match res {
                                 Ok(()) => {
-                                    evt_tx
-                                        .send(RuntimeEvt::ConnectionLost {
-                                            peer_id: peer_id,
-                                        })
-                                        .expect(ERROR_CHANNEL);
+                                    send_runtime_evt(
+                                        &evt_tx,
+                                        &shutdown,
+                                        RuntimeEvt::ConnectionLost { peer_id: peer_id },
+                                    );
                                 }
                                 Err(err) => {
                                     warn!(?err, %peer_id, "connection listener task error");
-                                    evt_tx
-                                        .send(RuntimeEvt::ConnectionLost {
-                                            peer_id: peer_id,
-                                        })
-                                        .expect(ERROR_CHANNEL);
+                                    send_runtime_evt(
+                                        &evt_tx,
+                                        &shutdown,
+                                        RuntimeEvt::ConnectionLost { peer_id: peer_id },
+                                    );
                                 }
                             }
                         }
@@ -1429,6 +1470,7 @@ where
                 let stop = stop_token.child_token();
                 let peer_id = peer_id;
                 let evt_tx = evt_tx.clone();
+                let shutdown = shutdown.clone();
                 let fut = connect.sender_task;
                 async move {
                     tokio::select! {
@@ -1437,19 +1479,19 @@ where
                         res = fut => {
                             match res {
                                 Ok(()) => {
-                                    evt_tx
-                                        .send(RuntimeEvt::ConnectionLost {
-                                            peer_id: peer_id,
-                                        })
-                                        .expect(ERROR_CHANNEL);
+                                    send_runtime_evt(
+                                        &evt_tx,
+                                        &shutdown,
+                                        RuntimeEvt::ConnectionLost { peer_id: peer_id },
+                                    );
                                 }
                                 Err(err) => {
                                     warn!(?err, %peer_id, "connection sender task error");
-                                    evt_tx
-                                        .send(RuntimeEvt::ConnectionLost {
-                                            peer_id: peer_id,
-                                        })
-                                        .expect(ERROR_CHANNEL);
+                                    send_runtime_evt(
+                                        &evt_tx,
+                                        &shutdown,
+                                        RuntimeEvt::ConnectionLost { peer_id: peer_id },
+                                    );
                                 }
                             }
                         }
@@ -1465,12 +1507,11 @@ where
                     stop_token.cancel();
                     ferr!("failed subduction add_connection: {err}")
                 })?;
-            evt_tx
-                .send(RuntimeEvt::ConnectionEstablished {
-                    peer_id,
-                    stop_token,
-                })
-                .expect(ERROR_CHANNEL);
+            send_runtime_evt(
+                &evt_tx,
+                &shutdown,
+                RuntimeEvt::ConnectionEstablished { peer_id, stop_token },
+            );
             Ok(peer_id)
         };
         self.spawn_background(async move {
@@ -1488,6 +1529,7 @@ where
         let nonce_cache = Arc::clone(&self.nonce_cache);
         let local_peer_id = self.local_peer_id;
         let evt_tx = self.evt_tx.clone();
+        let shutdown = self.runtime_stop.clone();
         let runtime_tasks = Arc::clone(&self.runtime_tasks);
         let connected_peers = Arc::clone(&self.connected_peers);
         let fut = async move {
@@ -1508,6 +1550,7 @@ where
             let fut_listener = {
                 let stop = stop_token.child_token();
                 let evt_tx = evt_tx.clone();
+                let shutdown = shutdown.clone();
                 let peer_id = peer_id;
                 let fut = accepted.listener_task;
                 async move {
@@ -1517,19 +1560,19 @@ where
                         res = fut => {
                             match res {
                                 Ok(()) => {
-                                    evt_tx
-                                        .send(RuntimeEvt::ConnectionLost {
-                                            peer_id,
-                                        })
-                                        .expect(ERROR_CHANNEL);
+                                    send_runtime_evt(
+                                        &evt_tx,
+                                        &shutdown,
+                                        RuntimeEvt::ConnectionLost { peer_id },
+                                    );
                                 }
                                 Err(err) => {
                                     warn!(?err, %peer_id, "incoming connection listener task exited");
-                                    evt_tx
-                                        .send(RuntimeEvt::ConnectionLost {
-                                            peer_id: peer_id,
-                                        })
-                                        .expect(ERROR_CHANNEL);
+                                    send_runtime_evt(
+                                        &evt_tx,
+                                        &shutdown,
+                                        RuntimeEvt::ConnectionLost { peer_id: peer_id },
+                                    );
                                 }
                             }
                         }
@@ -1540,6 +1583,7 @@ where
                 let stop = stop_token.child_token();
                 let peer_id = peer_id;
                 let evt_tx = evt_tx.clone();
+                let shutdown = shutdown.clone();
                 let fut = accepted.sender_task;
                 async move {
                     tokio::select! {
@@ -1548,19 +1592,19 @@ where
                         res = fut => {
                             match res {
                                 Ok(()) => {
-                                    evt_tx
-                                        .send(RuntimeEvt::ConnectionLost {
-                                            peer_id: peer_id,
-                                        })
-                                        .expect(ERROR_CHANNEL);
+                                    send_runtime_evt(
+                                        &evt_tx,
+                                        &shutdown,
+                                        RuntimeEvt::ConnectionLost { peer_id: peer_id },
+                                    );
                                 }
                                 Err(err) => {
                                     warn!(?err, %peer_id, "incoming connection sender task exited");
-                                    evt_tx
-                                        .send(RuntimeEvt::ConnectionLost {
-                                            peer_id: peer_id,
-                                        })
-                                        .expect(ERROR_CHANNEL);
+                                    send_runtime_evt(
+                                        &evt_tx,
+                                        &shutdown,
+                                        RuntimeEvt::ConnectionLost { peer_id: peer_id },
+                                    );
                                 }
                             }
                         }
@@ -1576,12 +1620,11 @@ where
                     stop_token.cancel();
                 })
                 .wrap_err("failed subduction add_connection")?;
-            evt_tx
-                .send(RuntimeEvt::ConnectionEstablished {
-                    peer_id,
-                    stop_token,
-                })
-                .expect(ERROR_CHANNEL);
+            send_runtime_evt(
+                &evt_tx,
+                &shutdown,
+                RuntimeEvt::ConnectionEstablished { peer_id, stop_token },
+            );
             Ok(peer_id)
         };
         self.spawn_background(async move {

@@ -24,6 +24,7 @@ pub const CORE_DOCS_PARTITION_ID: &str = "core.docs";
 #[derive(Debug, Clone)]
 struct SubductionProtocolHandler {
     big_repo: Arc<am_utils_rs::repo::BigRepo>,
+    incoming_peer_tx: tokio::sync::mpsc::Sender<am_utils_rs::repo::PeerId>,
 }
 
 impl iroh::protocol::ProtocolHandler for SubductionProtocolHandler {
@@ -31,11 +32,16 @@ impl iroh::protocol::ProtocolHandler for SubductionProtocolHandler {
         &self,
         connection: iroh::endpoint::Connection,
     ) -> Result<(), iroh::protocol::AcceptError> {
-        self.big_repo
+        let (conn, _stop_token) = self
+            .big_repo
             .accept_peer_connection(connection)
             .await
-            .map(|_| ())
-            .map_err(|err| iroh::protocol::AcceptError::from_boxed(err.into()))
+            .map_err(|err| iroh::protocol::AcceptError::from_boxed(err.into()))?;
+        self.incoming_peer_tx
+            .try_send(conn.peer_id())
+            .inspect_err(|err| warn!(?err, "incoming peer channel full; dropping notification"))
+            .ok();
+        Ok(())
     }
 }
 
@@ -203,6 +209,8 @@ impl IrohSyncRepo {
         )
         .await?;
 
+        let (incoming_peer_tx, mut incoming_peer_rx) = tokio::sync::mpsc::channel(128);
+
         let router = iroh::protocol::Router::builder(endpoint.clone())
             .accept(
                 PARTITION_SYNC_ALPN,
@@ -220,6 +228,7 @@ impl IrohSyncRepo {
                 am_utils_rs::repo::SUBDUCTION_ALPN,
                 SubductionProtocolHandler {
                     big_repo: Arc::clone(&rcx.big_repo),
+                    incoming_peer_tx,
                 },
             )
             .accept(
@@ -270,6 +279,22 @@ impl IrohSyncRepo {
         bootstrap::register_test_clone_rpc_sender(router.endpoint().id(), clone_rpc_tx.clone())
             .await;
 
+        let incoming_peer_handle = tokio::spawn({
+            let repo = Arc::clone(&repo);
+            async move {
+                while let Some(peer_id) = incoming_peer_rx.recv().await {
+                    let endpoint_id = iroh::EndpointId::from(peer_id);
+                    let peer_key = repo.peer_key_for_endpoint(endpoint_id);
+                    if let Err(err) = repo.register_incoming_peer(endpoint_id, peer_key).await {
+                        warn!(?err, %endpoint_id, "failed registering incoming peer");
+                    } else {
+                        info!(%endpoint_id, "registered incoming peer");
+                    }
+                }
+            }
+            .instrument(tracing::info_span!("IrohSyncRepo incoming peer task"))
+        });
+
         let clone_rpc_handle = tokio::spawn({
             let repo = Arc::clone(&repo);
             async move {
@@ -291,6 +316,7 @@ impl IrohSyncRepo {
                 #[cfg(test)]
                 bootstrap::unregister_test_clone_rpc_sender(router_for_shutdown.endpoint().id())
                     .await;
+                incoming_peer_handle.abort();
                 clone_rpc_handle.abort();
                 loop_res.unwrap();
                 full_stop_res.unwrap();

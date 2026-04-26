@@ -359,6 +359,14 @@ impl PeerSyncWorker {
                 eyre::bail!("partition subscription lagged; dropped={dropped}")
             }
             SubscriptionItem::ReplayComplete { stream } => {
+                debug!(
+                    remote_peer = %self.remote_peer,
+                    stream = ?stream,
+                    member_replay_complete = *member_replay_complete,
+                    doc_replay_complete = *doc_replay_complete,
+                    bootstrap_emitted = *bootstrap_emitted,
+                    "subscription replay complete"
+                );
                 if stream == SubscriptionStreamKind::Member {
                     *member_replay_complete = true;
                 } else if stream == SubscriptionStreamKind::Doc {
@@ -379,6 +387,13 @@ impl PeerSyncWorker {
                 Ok(())
             }
             SubscriptionItem::MemberEvent(event) => {
+                debug!(
+                    remote_peer = %self.remote_peer,
+                    partition_id = %event.partition_id,
+                    cursor = event.cursor,
+                    deets = ?event.deets,
+                    "received member subscription event"
+                );
                 if self
                     .member_event_is_stale(&event.partition_id, event.cursor)
                     .await?
@@ -400,6 +415,13 @@ impl PeerSyncWorker {
                 Ok(())
             }
             SubscriptionItem::DocEvent(event) => {
+                debug!(
+                    remote_peer = %self.remote_peer,
+                    partition_id = %event.partition_id,
+                    cursor = event.cursor,
+                    deets = ?event.deets,
+                    "received doc subscription event"
+                );
                 if self
                     .doc_event_is_stale(&event.partition_id, event.cursor)
                     .await?
