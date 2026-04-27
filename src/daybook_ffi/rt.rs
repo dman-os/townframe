@@ -96,11 +96,11 @@ impl RtFfi {
                 rt.dispatch(
                     &plug_id,
                     &routine_name,
-                    daybook_core::rt::DispatchArgs::DocFacet {
+                    daybook_core::rt::DispatchArgs::DocRoutine {
                         doc_id,
                         branch_path: daybook_types::doc::BranchPath::from(branch_path),
                         heads: daybook_types::doc::ChangeHashSet(vec![].into()),
-                        facet_key: None,
+                        changed_facet_keys: vec![],
                         wflow_args_json: None,
                     },
                 )

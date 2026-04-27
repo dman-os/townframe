@@ -69,10 +69,10 @@ struct CacheEmbeddingRow<'a> {
 
 pub struct LabelRequest<'a> {
     pub sqlite_connection: &'a crate::wit::townframe::daybook::sqlite_connection::Connection,
-    pub rw_config_token: Option<&'a crate::wit::townframe::daybook::capabilities::FacetTokenRw>,
-    pub ro_config_token: Option<&'a crate::wit::townframe::daybook::capabilities::FacetTokenRo>,
-    pub working_facet_token: &'a crate::wit::townframe::daybook::capabilities::FacetTokenRw,
-    pub error_facet_token: &'a crate::wit::townframe::daybook::capabilities::FacetTokenRw,
+    pub rw_config_token: Option<&'a crate::wit::townframe::daybook::capabilities::FacetToken>,
+    pub ro_config_token: Option<&'a crate::wit::townframe::daybook::capabilities::FacetToken>,
+    pub working_facet_token: &'a crate::wit::townframe::daybook::capabilities::FacetToken,
+    pub error_facet_token: &'a crate::wit::townframe::daybook::capabilities::FacetToken,
     pub input_vector_json: &'a str,
     pub source_ref: &'a Url,
     pub source_ref_heads: Option<Vec<String>>,
@@ -173,42 +173,32 @@ pub fn apply_labeling(req: LabelRequest<'_>) -> Result<(), JobErrorX> {
 
     let config_facet_key = pseudo_label_candidates_key(req.candidate_set_id).to_string();
     let (label_set, config_heads_json, config_heads) = if let Some(token) = req.rw_config_token {
-        let heads = token.heads();
+        let heads = token.heads().map_err(|err| {
+            JobErrorX::Terminal(ferr!("error reading config facet heads: {err:?}"))
+        })?;
         let heads_json = serde_json::to_string(&heads).expect(ERROR_JSON);
-        let label_set = if token.exists() {
-            let raw = token.get();
-            let facet_raw: daybook_types::doc::FacetRaw =
-                serde_json::from_str(&raw).map_err(|err| {
-                    JobErrorX::Terminal(ferr!("error parsing config label set facet json: {err}"))
-                })?;
+        let raw = token
+            .get()
+            .map_err(|err| JobErrorX::Terminal(ferr!("error reading config label set: {err:?}")))?;
+        let facet_raw: daybook_types::doc::FacetRaw =
+            serde_json::from_str(&raw).map_err(|err| {
+                JobErrorX::Terminal(ferr!("error parsing config label set facet json: {err}"))
+            })?;
+        let label_set =
             serde_json::from_value::<PseudoLabelCandidatesFacet>(facet_raw).map_err(|err| {
                 JobErrorX::Terminal(ferr!(
                     "config facet is not plug_plabels pseudo label candidates: {err}"
                 ))
-            })?
-        } else {
-            let value = default_label_set();
-            let facet_raw: daybook_types::doc::FacetRaw = serde_json::to_value(value.clone())
-                .map_err(|err| {
-                    JobErrorX::Terminal(ferr!(
-                        "error serializing default pseudo label candidate set: {err}"
-                    ))
-                })?;
-            let facet_raw = serde_json::to_string(&facet_raw).expect(ERROR_JSON);
-            token
-                .update(&facet_raw)
-                .wrap_err("error writing default PseudoLabelCandidates config facet")
-                .map_err(JobErrorX::Terminal)?;
-            value
-        };
+            })?;
         (label_set, heads_json, Some(heads))
     } else if let Some(token) = req.ro_config_token {
-        if !token.exists() {
-            return Ok(());
-        }
-        let heads = token.heads();
+        let heads = token
+            .heads()
+            .map_err(|err| JobErrorX::Terminal(ferr!("error reading ro config heads: {err:?}")))?;
         let heads_json = serde_json::to_string(&heads).expect(ERROR_JSON);
-        let raw = token.get();
+        let raw = token.get().map_err(|err| {
+            JobErrorX::Terminal(ferr!("error reading ro config label set: {err:?}"))
+        })?;
         let facet_raw: daybook_types::doc::FacetRaw =
             serde_json::from_str(&raw).map_err(|err| {
                 JobErrorX::Terminal(ferr!("error parsing config label set facet json: {err}"))
@@ -612,8 +602,8 @@ pub fn apply_labeling(req: LabelRequest<'_>) -> Result<(), JobErrorX> {
     let new_facet = serde_json::to_string(&new_facet).expect(ERROR_JSON);
     req.working_facet_token
         .update(&new_facet)
-        .wrap_err("error updating label facet")
-        .map_err(JobErrorX::Terminal)?;
+        .map_err(|err| JobErrorX::Terminal(ferr!("error updating label facet: {err:?}")))?
+        .map_err(|err| JobErrorX::Terminal(ferr!("update doc error: {err:?}")))?;
     Ok(())
 }
 
@@ -647,8 +637,8 @@ fn write_no_hit_error(
     let facet_raw = serde_json::to_string(&facet_raw).expect(ERROR_JSON);
     req.error_facet_token
         .update(&facet_raw)
-        .wrap_err("error updating label error facet")
-        .map_err(JobErrorX::Terminal)?;
+        .map_err(|err| JobErrorX::Terminal(ferr!("error updating label error facet: {err:?}")))?
+        .map_err(|err| JobErrorX::Terminal(ferr!("update doc error: {err:?}")))?;
     Ok(())
 }
 

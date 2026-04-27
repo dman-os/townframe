@@ -168,8 +168,8 @@ pub fn system_plugs() -> Vec<manifest::PlugManifest> {
                             key: "ocr-image".into(),
                             bundle: "daybook_wflows".into(),
                         },
-                        deets: RoutineManifestDeets::DocFacet {
-                            working_facet_tag: WellKnownFacetTag::Note.into(),
+                        doc_acls: vec![RoutineDocAcl {
+                            doc_predicate: DocPredicateClause::HasTag(WellKnownFacetTag::Note.into()),
                             facet_acl: vec![
                                 RoutineFacetAccess {
                                     owner_plug_id: None,
@@ -177,6 +177,8 @@ pub fn system_plugs() -> Vec<manifest::PlugManifest> {
                                     key_id: None,
                                     read: true,
                                     write: false,
+                                    create: false,
+                                    delete: false,
                                 },
                                 RoutineFacetAccess {
                                     owner_plug_id: None,
@@ -184,10 +186,13 @@ pub fn system_plugs() -> Vec<manifest::PlugManifest> {
                                     key_id: None,
                                     read: true,
                                     write: true,
+                                    create: false,
+                                    delete: false,
                                 },
                             ],
-                            config_facet_acl: vec![],
-                        },
+                        }],
+                        query_acls: vec![],
+                        config_facet_acl: vec![],
                         local_state_acl: vec![],
                         command_invoke_acl: vec![],
                     }
@@ -200,8 +205,8 @@ pub fn system_plugs() -> Vec<manifest::PlugManifest> {
                             key: "embed-image".into(),
                             bundle: "daybook_wflows".into(),
                         },
-                        deets: RoutineManifestDeets::DocFacet {
-                            working_facet_tag: WellKnownFacetTag::Embedding.into(),
+                        doc_acls: vec![RoutineDocAcl {
+                            doc_predicate: DocPredicateClause::HasTag(WellKnownFacetTag::Embedding.into()),
                             facet_acl: vec![
                                 RoutineFacetAccess {
                                     owner_plug_id: None,
@@ -209,6 +214,8 @@ pub fn system_plugs() -> Vec<manifest::PlugManifest> {
                                     key_id: None,
                                     read: true,
                                     write: false,
+                                    create: false,
+                                    delete: false,
                                 },
                                 RoutineFacetAccess {
                                     owner_plug_id: None,
@@ -216,10 +223,13 @@ pub fn system_plugs() -> Vec<manifest::PlugManifest> {
                                     key_id: None,
                                     read: true,
                                     write: true,
+                                    create: false,
+                                    delete: false,
                                 },
                             ],
-                            config_facet_acl: vec![],
-                        },
+                        }],
+                        query_acls: vec![],
+                        config_facet_acl: vec![],
                         local_state_acl: vec![],
                         command_invoke_acl: vec![],
                     }
@@ -232,8 +242,8 @@ pub fn system_plugs() -> Vec<manifest::PlugManifest> {
                             key: "embed-text".into(),
                             bundle: "daybook_wflows".into(),
                         },
-                        deets: RoutineManifestDeets::DocFacet {
-                            working_facet_tag: WellKnownFacetTag::Embedding.into(),
+                        doc_acls: vec![RoutineDocAcl {
+                            doc_predicate: DocPredicateClause::HasTag(WellKnownFacetTag::Embedding.into()),
                             facet_acl: vec![
                                 RoutineFacetAccess {
                                     owner_plug_id: None,
@@ -241,6 +251,8 @@ pub fn system_plugs() -> Vec<manifest::PlugManifest> {
                                     key_id: None,
                                     read: true,
                                     write: false,
+                                    create: false,
+                                    delete: false,
                                 },
                                 RoutineFacetAccess {
                                     owner_plug_id: None,
@@ -248,10 +260,13 @@ pub fn system_plugs() -> Vec<manifest::PlugManifest> {
                                     key_id: None,
                                     read: true,
                                     write: true,
+                                    create: false,
+                                    delete: false,
                                 },
                             ],
-                            config_facet_acl: vec![],
-                        },
+                        }],
+                        query_acls: vec![],
+                        config_facet_acl: vec![],
                         local_state_acl: vec![],
                         command_invoke_acl: vec![],
                     }
@@ -264,17 +279,20 @@ pub fn system_plugs() -> Vec<manifest::PlugManifest> {
                             key: "index-embedding".into(),
                             bundle: "daybook_wflows".into(),
                         },
-                        deets: RoutineManifestDeets::DocFacet {
-                            working_facet_tag: WellKnownFacetTag::Embedding.into(),
+                        doc_acls: vec![RoutineDocAcl {
+                            doc_predicate: DocPredicateClause::HasTag(WellKnownFacetTag::Embedding.into()),
                             facet_acl: vec![RoutineFacetAccess {
                                 owner_plug_id: None,
                                 tag: WellKnownFacetTag::Embedding.into(),
                                 key_id: None,
                                 read: true,
                                 write: false,
+                                create: false,
+                                delete: false,
                             }],
-                            config_facet_acl: vec![],
-                        },
+                        }],
+                        query_acls: vec![],
+                        config_facet_acl: vec![],
                         local_state_acl: vec![RoutineLocalStateAccess {
                             plug_id: "@daybook/wip".into(),
                             local_state_key: "doc-embedding-index".into(),
@@ -291,17 +309,20 @@ pub fn system_plugs() -> Vec<manifest::PlugManifest> {
                             key: "test-label".into(),
                             bundle: "daybook_wflows".into(),
                         },
-                        deets: RoutineManifestDeets::DocFacet {
-                            working_facet_tag: WellKnownFacetTag::LabelGeneric.into(),
+                        doc_acls: vec![RoutineDocAcl {
+                            doc_predicate: DocPredicateClause::HasTag(WellKnownFacetTag::LabelGeneric.into()),
                             facet_acl: vec![RoutineFacetAccess {
                                 owner_plug_id: None,
                                 tag: WellKnownFacetTag::LabelGeneric.into(),
                                 key_id: None,
                                 read: true,
                                 write: true,
+                                create: false,
+                                delete: false,
                             }],
-                            config_facet_acl: vec![],
-                        },
+                        }],
+                        query_acls: vec![],
+                        config_facet_acl: vec![],
                         local_state_acl: vec![],
                         command_invoke_acl: vec![],
                     }
@@ -2069,16 +2090,13 @@ impl PlugsRepo {
                 }
             }
 
-            // If it's a DocProp routine, the 'working_prop_tag' must also be accessible.
-            if let manifest::RoutineManifestDeets::DocFacet {
-                working_facet_tag, ..
-            } = &routine.deets
-            {
-                if !available_tags.contains(&working_facet_tag.to_string()) {
+            // Validate all tags referenced by doc_acls are in scope.
+            for tag in routine.referenced_tags() {
+                if !available_tags.contains(&tag.to_string()) {
                     eyre::bail!(
-                        "Invalid routine deets for '{}': working_facet_tag '{}' not in scope",
+                        "Invalid routine ACL for '{}': tag '{}' is neither declared nor depended on by this plug. Avail tags {available_tags:?}",
                         routine_name,
-                        working_facet_tag
+                        tag
                     );
                 }
             }
@@ -2471,7 +2489,9 @@ mod tests {
                     key: "wflow1".into(),
                     bundle: "bundle1".into(),
                 },
-                deets: manifest::RoutineManifestDeets::DocInvoke {},
+                doc_acls: vec![],
+                query_acls: vec![],
+                config_facet_acl: vec![],
                 local_state_acl: vec![],
                 command_invoke_acl: vec![],
             }
@@ -2559,7 +2579,9 @@ mod tests {
                     key: "wflow1".into(),
                     bundle: "missing_bundle".into(),
                 },
-                deets: manifest::RoutineManifestDeets::DocInvoke {},
+                doc_acls: vec![],
+                query_acls: vec![],
+                config_facet_acl: vec![],
                 local_state_acl: vec![],
                 command_invoke_acl: vec![],
             }
@@ -2590,7 +2612,9 @@ mod tests {
                     key: "missing_key".into(),
                     bundle: "bundle1".into(),
                 },
-                deets: manifest::RoutineManifestDeets::DocInvoke {},
+                doc_acls: vec![],
+                query_acls: vec![],
+                config_facet_acl: vec![],
                 local_state_acl: vec![],
                 command_invoke_acl: vec![],
             }
@@ -2772,7 +2796,9 @@ mod tests {
                     key: "wflow1".into(),
                     bundle: "bundle1".into(),
                 },
-                deets: manifest::RoutineManifestDeets::DocInvoke {},
+                doc_acls: vec![],
+                query_acls: vec![],
+                config_facet_acl: vec![],
                 local_state_acl: vec![],
                 command_invoke_acl: vec![],
             }
@@ -2826,7 +2852,9 @@ mod tests {
                     key: "wflow1".into(),
                     bundle: "bundle1".into(),
                 },
-                deets: manifest::RoutineManifestDeets::DocInvoke {},
+                doc_acls: vec![],
+                query_acls: vec![],
+                config_facet_acl: vec![],
                 local_state_acl: vec![],
                 command_invoke_acl: vec![],
             }
@@ -2860,7 +2888,9 @@ mod tests {
                     key: "wflow1".into(),
                     bundle: "bundle1".into(),
                 },
-                deets: manifest::RoutineManifestDeets::DocInvoke {},
+                doc_acls: vec![],
+                query_acls: vec![],
+                config_facet_acl: vec![],
                 local_state_acl: vec![],
                 command_invoke_acl: vec!["db+command:///@test/target/cmd1".parse().unwrap()],
             }
@@ -2901,7 +2931,9 @@ mod tests {
                     key: "wflow1".into(),
                     bundle: "bundle1".into(),
                 },
-                deets: manifest::RoutineManifestDeets::DocInvoke {},
+                doc_acls: vec![],
+                query_acls: vec![],
+                config_facet_acl: vec![],
                 local_state_acl: vec![],
                 command_invoke_acl: vec![],
             }
@@ -2933,7 +2965,9 @@ mod tests {
                     key: "wflow1".into(),
                     bundle: "bundle1".into(),
                 },
-                deets: manifest::RoutineManifestDeets::DocInvoke {},
+                doc_acls: vec![],
+                query_acls: vec![],
+                config_facet_acl: vec![],
                 local_state_acl: vec![],
                 command_invoke_acl: vec!["db+command:///@test/provider/nope".parse().unwrap()],
             }

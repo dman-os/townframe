@@ -25,6 +25,12 @@ pub fn is_domain_name(value: &str, _context: &()) -> garde::Result {
 #[repr(transparent)]
 pub struct FacetTag(#[garde(custom(is_domain_name))] pub String);
 
+impl Default for FacetTag {
+    fn default() -> Self {
+        Self(String::new())
+    }
+}
+
 impl<T> From<T> for FacetTag
 where
     T: Into<String>,
@@ -250,11 +256,28 @@ pub struct WflowBundleManifest {
 
 #[derive(Debug, Serialize, Deserialize, Validate, Clone)]
 #[serde(rename_all = "camelCase")]
+pub struct RoutineDocAcl {
+    #[garde(dive)]
+    pub doc_predicate: DocPredicateClause,
+    #[garde(dive)]
+    #[serde(default)]
+    pub facet_acl: Vec<RoutineFacetAccess>,
+}
+
+#[derive(Debug, Serialize, Deserialize, Validate, Clone)]
+#[serde(rename_all = "camelCase")]
 pub struct RoutineManifest {
     #[garde(dive)]
     pub r#impl: RoutineImpl,
     #[garde(dive)]
-    pub deets: RoutineManifestDeets,
+    #[serde(default)]
+    pub doc_acls: Vec<RoutineDocAcl>,
+    #[garde(dive)]
+    #[serde(default)]
+    pub query_acls: Vec<DocPredicateClause>,
+    #[garde(dive)]
+    #[serde(default)]
+    pub config_facet_acl: Vec<RoutineFacetAccess>,
     #[garde(skip)]
     #[serde(default)]
     pub command_invoke_acl: Vec<Url>,
@@ -275,51 +298,59 @@ impl RoutineManifest {
         use crate::doc::{FacetKey, FacetTag};
         let mut read_tags = std::collections::HashSet::new();
         let mut read_keys = std::collections::HashSet::new();
-        let facet_acl = match &self.deets {
-            RoutineManifestDeets::DocFacet { facet_acl, .. } => facet_acl.as_slice(),
-            _ => &[],
-        };
-        for access in facet_acl {
-            if !access.read {
-                continue;
+        for doc_acl in &self.doc_acls {
+            for access in &doc_acl.facet_acl {
+                if !access.read {
+                    continue;
+                }
+                let tag_str = access.tag.0.as_str();
+                if let Some(ref id) = access.key_id {
+                    read_keys.insert(FacetKey {
+                        tag: FacetTag::from(tag_str),
+                        id: id.clone(),
+                    });
+                } else {
+                    read_tags.insert(access.tag.0.clone());
+                }
             }
-            let tag_str = access.tag.0.as_str();
-            if let Some(ref id) = access.key_id {
-                read_keys.insert(FacetKey {
-                    tag: FacetTag::from(tag_str),
-                    id: id.clone(),
-                });
-            } else {
-                read_tags.insert(access.tag.0.clone());
-            }
-        }
-        if let RoutineManifestDeets::DocFacet {
-            working_facet_tag, ..
-        } = &self.deets
-        {
-            read_tags.insert(working_facet_tag.0.clone());
         }
         (read_tags, read_keys)
     }
 
-    pub fn facet_acl(&self) -> &[RoutineFacetAccess] {
-        match &self.deets {
-            RoutineManifestDeets::DocFacet { facet_acl, .. } => facet_acl.as_slice(),
-            _ => &[],
+    /// Union of all facet ACLs across doc ACLs.
+    pub fn facet_acl(&self) -> Vec<RoutineFacetAccess> {
+        let mut out = Vec::new();
+        for doc_acl in &self.doc_acls {
+            out.extend(doc_acl.facet_acl.iter().cloned());
         }
+        out
     }
 
     pub fn config_facet_acl(&self) -> &[RoutineFacetAccess] {
-        match &self.deets {
-            RoutineManifestDeets::DocFacet {
-                config_facet_acl, ..
-            } => config_facet_acl.as_slice(),
-            _ => &[],
-        }
+        self.config_facet_acl.as_slice()
     }
 
     pub fn command_invoke_acl(&self) -> &[Url] {
         self.command_invoke_acl.as_slice()
+    }
+
+    /// All facet tags referenced by this routine's ACLs and query ACLs.
+    pub fn referenced_tags(&self) -> std::collections::HashSet<FacetTag> {
+        let mut out = std::collections::HashSet::new();
+        for doc_acl in &self.doc_acls {
+            for tag in doc_acl.doc_predicate.referenced_tags() {
+                out.insert(tag);
+            }
+            for access in &doc_acl.facet_acl {
+                out.insert(access.tag.clone());
+            }
+        }
+        for predicate in &self.query_acls {
+            for tag in predicate.referenced_tags() {
+                out.insert(tag);
+            }
+        }
+        out
     }
 }
 
@@ -334,30 +365,7 @@ pub enum RoutineImpl {
     },
 }
 
-// FIXME: this is poorly designed
-#[derive(Debug, Serialize, Deserialize, Validate, Clone)]
-#[serde(rename_all = "camelCase")]
-pub enum RoutineManifestDeets {
-    /// Routine that can be invoked on a document with rw access on whole doc
-    /// FIXME: remove this branch?
-    DocInvoke {},
-    /// Routine that is invoked when with ro access
-    /// to doc but rw access on facet.
-    DocFacet {
-        #[garde(dive)]
-        working_facet_tag: FacetTag,
-        #[garde(dive)]
-        #[serde(default)]
-        facet_acl: Vec<RoutineFacetAccess>,
-        #[garde(dive)]
-        #[serde(default)]
-        config_facet_acl: Vec<RoutineFacetAccess>,
-    },
-    // DocCollator { predicate },
-    // DocPropCollator { predicate },
-}
-
-#[derive(Debug, Serialize, Deserialize, Validate, Clone)]
+#[derive(Debug, Default, Serialize, Deserialize, Validate, Clone)]
 #[serde(rename_all = "camelCase")]
 pub struct RoutineFacetAccess {
     /// Required for config_facet_acl entries to disambiguate owner config doc.
@@ -376,8 +384,12 @@ pub struct RoutineFacetAccess {
     #[serde(default)]
     #[garde(skip)]
     pub write: bool,
-    // #[serde(default)]
-    // pub list: bool,
+    #[serde(default)]
+    #[garde(skip)]
+    pub create: bool,
+    #[serde(default)]
+    #[garde(skip)]
+    pub delete: bool,
 }
 
 #[derive(Debug, Serialize, Deserialize, Validate, Clone)]
@@ -618,9 +630,30 @@ pub enum DocPredicateClause {
         #[garde(dive)]
         target_tag: FacetTag,
     },
+    FacetFieldMatch {
+        #[garde(dive)]
+        tag: FacetTag,
+        #[garde(length(min = 1))]
+        json_path: String,
+        #[garde(skip)]
+        operator: CompareOp,
+        #[garde(skip)]
+        value: serde_json::Value,
+    },
     Or(#[garde(dive)] Vec<Self>),
     And(#[garde(dive)] Vec<Self>),
     Not(#[garde(dive)] Box<Self>),
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub enum CompareOp {
+    Eq,
+    Ne,
+    Gt,
+    Gte,
+    Lt,
+    Lte,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
@@ -653,6 +686,9 @@ impl DocPredicateClause {
             Self::HasReferenceToTag { source_tag, .. } => {
                 out.insert(DocPredicateEvalRequirement::FacetsOfTag(source_tag.clone()));
                 out.insert(DocPredicateEvalRequirement::FacetManifest);
+            }
+            Self::FacetFieldMatch { tag, .. } => {
+                out.insert(DocPredicateEvalRequirement::FacetsOfTag(tag.clone()));
             }
             Self::Or(clauses) | Self::And(clauses) => {
                 for clause in clauses {
@@ -703,6 +739,25 @@ impl DocPredicateClause {
                     facet_reference_specs,
                 )
             }
+            Self::FacetFieldMatch {
+                tag,
+                json_path,
+                operator,
+                value,
+            } => {
+                let Some(DocPredicateEvalResolved::FacetsOfTag(source_facets)) =
+                    resolved.get(&DocPredicateEvalRequirement::FacetsOfTag(tag.clone()))
+                else {
+                    return match mode {
+                        DocPredicateEvalMode::ApproxInterest => {
+                            doc.facets.keys().any(|key| key.tag.to_string() == tag.0)
+                        }
+                        DocPredicateEvalMode::Exact => false,
+                    };
+                };
+
+                evaluate_facet_field_match(source_facets, json_path, *operator, value)
+            }
             Self::Or(clauses) => clauses
                 .iter()
                 .any(|clause| clause.evaluate(doc, mode, resolved)),
@@ -735,6 +790,9 @@ impl DocPredicateClause {
             } => {
                 out.insert(source_tag.clone());
                 out.insert(target_tag.clone());
+            }
+            Self::FacetFieldMatch { tag, .. } => {
+                out.insert(tag.clone());
             }
             Self::Or(clauses) | Self::And(clauses) => {
                 for clause in clauses {
@@ -808,6 +866,54 @@ fn facet_has_reference_to_tag(
         }
     }
     false
+}
+
+fn evaluate_facet_field_match(
+    facets: &[(crate::doc::FacetKey, crate::doc::FacetRaw)],
+    json_path: &str,
+    operator: CompareOp,
+    expected: &serde_json::Value,
+) -> bool {
+    use jsonpath_rust::JsonPath;
+    for (_, raw) in facets {
+        let Ok(found) = raw.query(json_path) else {
+            continue;
+        };
+        for found_val in found {
+            if compare_json_values(found_val, operator, expected) {
+                return true;
+            }
+        }
+    }
+    false
+}
+
+fn compare_json_values(lhs: &serde_json::Value, op: CompareOp, rhs: &serde_json::Value) -> bool {
+    match op {
+        CompareOp::Eq => lhs == rhs,
+        CompareOp::Ne => lhs != rhs,
+        CompareOp::Gt | CompareOp::Gte | CompareOp::Lt | CompareOp::Lte => {
+            if let (Some(lhs), Some(rhs)) = (lhs.as_f64(), rhs.as_f64()) {
+                return match op {
+                    CompareOp::Gt => lhs > rhs,
+                    CompareOp::Gte => lhs >= rhs,
+                    CompareOp::Lt => lhs < rhs,
+                    CompareOp::Lte => lhs <= rhs,
+                    _ => unreachable!(),
+                };
+            }
+            if let (Some(lhs), Some(rhs)) = (lhs.as_str(), rhs.as_str()) {
+                return match op {
+                    CompareOp::Gt => lhs > rhs,
+                    CompareOp::Gte => lhs >= rhs,
+                    CompareOp::Lt => lhs < rhs,
+                    CompareOp::Lte => lhs <= rhs,
+                    _ => unreachable!(),
+                };
+            }
+            false
+        }
+    }
 }
 
 #[derive(Debug, Serialize, Deserialize, Validate, Clone, PartialEq, Eq, Hash)]
@@ -930,5 +1036,437 @@ mod tests {
         DocChangePredicate::ChangedFacetKeys(vec![key.clone()])
             .append_referenced_facet_scope(&mut read_tags, &mut read_keys);
         assert!(read_keys.contains(&key));
+    }
+
+    #[test]
+    fn facet_field_match_eq_string() {
+        let tag: FacetTag = "org.example.note".into();
+        let note_json = serde_json::json!({
+            "mime": "text/x-hledger-journal",
+            "content": "2024-01-01 test\n  assets:cash  $10\n  expenses:food"
+        });
+        let facets = vec![(
+            crate::doc::FacetKey {
+                tag: "org.example.note".into(),
+                id: "main".into(),
+            },
+            note_json,
+        )];
+
+        let predicate = DocPredicateClause::FacetFieldMatch {
+            tag: tag.clone(),
+            json_path: "$.mime".into(),
+            operator: CompareOp::Eq,
+            value: serde_json::Value::String("text/x-hledger-journal".into()),
+        };
+
+        let mut requirements = HashSet::new();
+        predicate.append_requirements(&mut requirements);
+        assert!(requirements.contains(&DocPredicateEvalRequirement::FacetsOfTag(tag.clone())));
+
+        let mut resolved = HashMap::new();
+        resolved.insert(
+            DocPredicateEvalRequirement::FacetsOfTag(tag),
+            DocPredicateEvalResolved::FacetsOfTag(facets),
+        );
+
+        let doc = crate::doc::Doc {
+            id: "doc1".into(),
+            facets: HashMap::new(),
+        };
+
+        assert!(predicate.evaluate(&doc, DocPredicateEvalMode::Exact, &resolved));
+    }
+
+    #[test]
+    fn facet_field_match_ne_string() {
+        let tag: FacetTag = "org.example.note".into();
+        let note_json = serde_json::json!({
+            "mime": "text/plain",
+            "content": "hello"
+        });
+        let facets = vec![(
+            crate::doc::FacetKey {
+                tag: "org.example.note".into(),
+                id: "main".into(),
+            },
+            note_json,
+        )];
+
+        let predicate = DocPredicateClause::FacetFieldMatch {
+            tag: tag.clone(),
+            json_path: "$.mime".into(),
+            operator: CompareOp::Ne,
+            value: serde_json::Value::String("text/x-hledger-journal".into()),
+        };
+
+        let mut resolved = HashMap::new();
+        resolved.insert(
+            DocPredicateEvalRequirement::FacetsOfTag(tag),
+            DocPredicateEvalResolved::FacetsOfTag(facets),
+        );
+
+        let doc = crate::doc::Doc {
+            id: "doc1".into(),
+            facets: HashMap::new(),
+        };
+
+        assert!(predicate.evaluate(&doc, DocPredicateEvalMode::Exact, &resolved));
+    }
+
+    #[test]
+    fn facet_field_match_gt_numeric() {
+        let tag: FacetTag = "org.example.note".into();
+        let note_json = serde_json::json!({
+            "confidence": 0.95
+        });
+        let facets = vec![(
+            crate::doc::FacetKey {
+                tag: "org.example.note".into(),
+                id: "main".into(),
+            },
+            note_json,
+        )];
+
+        let predicate = DocPredicateClause::FacetFieldMatch {
+            tag: tag.clone(),
+            json_path: "$.confidence".into(),
+            operator: CompareOp::Gt,
+            value: serde_json::json!(0.5),
+        };
+
+        let mut resolved = HashMap::new();
+        resolved.insert(
+            DocPredicateEvalRequirement::FacetsOfTag(tag),
+            DocPredicateEvalResolved::FacetsOfTag(facets),
+        );
+
+        let doc = crate::doc::Doc {
+            id: "doc1".into(),
+            facets: HashMap::new(),
+        };
+
+        assert!(predicate.evaluate(&doc, DocPredicateEvalMode::Exact, &resolved));
+    }
+
+    #[test]
+    fn facet_field_match_mismatch() {
+        let tag: FacetTag = "org.example.note".into();
+        let note_json = serde_json::json!({
+            "mime": "text/plain"
+        });
+        let facets = vec![(
+            crate::doc::FacetKey {
+                tag: "org.example.note".into(),
+                id: "main".into(),
+            },
+            note_json,
+        )];
+
+        let predicate = DocPredicateClause::FacetFieldMatch {
+            tag: tag.clone(),
+            json_path: "$.mime".into(),
+            operator: CompareOp::Eq,
+            value: serde_json::Value::String("text/x-hledger-journal".into()),
+        };
+
+        let mut resolved = HashMap::new();
+        resolved.insert(
+            DocPredicateEvalRequirement::FacetsOfTag(tag),
+            DocPredicateEvalResolved::FacetsOfTag(facets),
+        );
+
+        let doc = crate::doc::Doc {
+            id: "doc1".into(),
+            facets: HashMap::new(),
+        };
+
+        assert!(!predicate.evaluate(&doc, DocPredicateEvalMode::Exact, &resolved));
+    }
+
+    #[test]
+    fn facet_field_match_deserialization() {
+        let json = serde_json::json!({
+            "facetFieldMatch": {
+                "tag": "org.example.note",
+                "json_path": "$.mime",
+                "operator": "eq",
+                "value": "text/x-hledger-journal"
+            }
+        });
+
+        let clause: DocPredicateClause = serde_json::from_value(json).expect("valid clause");
+        assert!(matches!(clause, DocPredicateClause::FacetFieldMatch {
+            json_path, ..
+        } if json_path == "$.mime"));
+    }
+
+    #[test]
+    fn compare_json_values_eq_neq() {
+        assert!(compare_json_values(
+            &serde_json::json!("hello"),
+            CompareOp::Eq,
+            &serde_json::json!("hello"),
+        ));
+        assert!(!compare_json_values(
+            &serde_json::json!("hello"),
+            CompareOp::Eq,
+            &serde_json::json!("world"),
+        ));
+        assert!(compare_json_values(
+            &serde_json::json!("hello"),
+            CompareOp::Ne,
+            &serde_json::json!("world"),
+        ));
+    }
+
+    #[test]
+    fn compare_json_values_numeric() {
+        assert!(compare_json_values(
+            &serde_json::json!(10.0),
+            CompareOp::Gt,
+            &serde_json::json!(5.0),
+        ));
+        assert!(!compare_json_values(
+            &serde_json::json!(3.0),
+            CompareOp::Gt,
+            &serde_json::json!(5.0),
+        ));
+        assert!(compare_json_values(
+            &serde_json::json!(5.0),
+            CompareOp::Gte,
+            &serde_json::json!(5.0),
+        ));
+        assert!(compare_json_values(
+            &serde_json::json!(3.0),
+            CompareOp::Lt,
+            &serde_json::json!(5.0),
+        ));
+    }
+
+    #[test]
+    fn routine_manifest_read_facet_set_from_doc_acls() {
+        let manifest = RoutineManifest {
+            r#impl: RoutineImpl::Wflow {
+                bundle: "test".into(),
+                key: "test".into(),
+            },
+            doc_acls: vec![
+                RoutineDocAcl {
+                    doc_predicate: DocPredicateClause::HasTag("org.example.note".into()),
+                    facet_acl: vec![
+                        RoutineFacetAccess {
+                            owner_plug_id: None,
+                            tag: "org.example.note".into(),
+                            key_id: None,
+                            read: true,
+                            write: false,
+                            create: false,
+                            delete: false,
+                        },
+                        RoutineFacetAccess {
+                            owner_plug_id: None,
+                            tag: "org.example.blob".into(),
+                            key_id: Some("main".into()),
+                            read: true,
+                            write: true,
+                            create: false,
+                            delete: false,
+                        },
+                    ],
+                },
+                RoutineDocAcl {
+                    doc_predicate: DocPredicateClause::HasTag("org.example.todo".into()),
+                    facet_acl: vec![RoutineFacetAccess {
+                        owner_plug_id: None,
+                        tag: "org.example.todo".into(),
+                        key_id: None,
+                        read: false,
+                        write: true,
+                        create: false,
+                        delete: false,
+                    }],
+                },
+            ],
+            query_acls: vec![],
+            config_facet_acl: vec![],
+            command_invoke_acl: vec![],
+            local_state_acl: vec![],
+        };
+
+        let (read_tags, read_keys) = manifest.read_facet_set();
+        assert!(read_tags.contains("org.example.note"));
+        assert!(!read_tags.contains("org.example.blob"));
+        assert!(!read_tags.contains("org.example.todo"));
+        assert_eq!(read_keys.len(), 1);
+        assert!(read_keys.contains(&crate::doc::FacetKey {
+            tag: "org.example.blob".into(),
+            id: "main".into(),
+        }));
+    }
+
+    #[test]
+    fn routine_manifest_facet_acl_unions_all_doc_acls() {
+        let manifest = RoutineManifest {
+            r#impl: RoutineImpl::Wflow {
+                bundle: "test".into(),
+                key: "test".into(),
+            },
+            doc_acls: vec![
+                RoutineDocAcl {
+                    doc_predicate: DocPredicateClause::HasTag("org.example.note".into()),
+                    facet_acl: vec![RoutineFacetAccess {
+                        owner_plug_id: None,
+                        tag: "org.example.note".into(),
+                        key_id: None,
+                        read: true,
+                        write: false,
+                        create: false,
+                        delete: false,
+                    }],
+                },
+                RoutineDocAcl {
+                    doc_predicate: DocPredicateClause::HasTag("org.example.todo".into()),
+                    facet_acl: vec![RoutineFacetAccess {
+                        owner_plug_id: None,
+                        tag: "org.example.todo".into(),
+                        key_id: None,
+                        read: false,
+                        write: true,
+                        create: false,
+                        delete: false,
+                    }],
+                },
+            ],
+            query_acls: vec![],
+            config_facet_acl: vec![],
+            command_invoke_acl: vec![],
+            local_state_acl: vec![],
+        };
+
+        let acl = manifest.facet_acl();
+        assert_eq!(acl.len(), 2);
+        assert!(acl.iter().any(|a| a.tag.0 == "org.example.note" && a.read));
+        assert!(acl.iter().any(|a| a.tag.0 == "org.example.todo" && a.write));
+    }
+
+    #[test]
+    fn routine_manifest_referenced_tags_includes_doc_predicate_and_query_acls() {
+        let manifest = RoutineManifest {
+            r#impl: RoutineImpl::Wflow {
+                bundle: "test".into(),
+                key: "test".into(),
+            },
+            doc_acls: vec![RoutineDocAcl {
+                doc_predicate: DocPredicateClause::HasTag("org.example.note".into()),
+                facet_acl: vec![RoutineFacetAccess {
+                    owner_plug_id: None,
+                    tag: "org.example.blob".into(),
+                    key_id: None,
+                    read: true,
+                    write: false,
+                    create: false,
+                    delete: false,
+                }],
+            }],
+            query_acls: vec![DocPredicateClause::HasTag("org.example.todo".into())],
+            config_facet_acl: vec![],
+            command_invoke_acl: vec![],
+            local_state_acl: vec![],
+        };
+
+        let tags = manifest.referenced_tags();
+        assert!(tags.contains(&FacetTag::from("org.example.note")));
+        assert!(tags.contains(&FacetTag::from("org.example.blob")));
+        assert!(tags.contains(&FacetTag::from("org.example.todo")));
+    }
+
+    #[test]
+    fn routine_manifest_serializes_with_flat_acl_fields() {
+        let manifest = RoutineManifest {
+            r#impl: RoutineImpl::Wflow {
+                bundle: "test".into(),
+                key: "test".into(),
+            },
+            doc_acls: vec![RoutineDocAcl {
+                doc_predicate: DocPredicateClause::HasTag("org.example.note".into()),
+                facet_acl: vec![RoutineFacetAccess {
+                    owner_plug_id: None,
+                    tag: "org.example.note".into(),
+                    key_id: None,
+                    read: true,
+                    write: false,
+                    create: false,
+                    delete: false,
+                }],
+            }],
+            query_acls: vec![DocPredicateClause::HasTag("org.example.todo".into())],
+            config_facet_acl: vec![RoutineFacetAccess {
+                owner_plug_id: Some("@daybook/test".into()),
+                tag: "org.example.config".into(),
+                key_id: None,
+                read: true,
+                write: true,
+                create: false,
+                delete: false,
+            }],
+            command_invoke_acl: vec![],
+            local_state_acl: vec![],
+        };
+
+        let json = serde_json::to_value(&manifest).expect("serialize");
+        assert!(json.get("docAcls").is_some(), "docAcls field should exist");
+        assert!(
+            json.get("queryAcls").is_some(),
+            "queryAcls field should exist"
+        );
+        assert!(
+            json.get("configFacetAcl").is_some(),
+            "configFacetAcl field should exist"
+        );
+        assert!(
+            json.get("deets").is_none(),
+            "old RoutineManifestDeets enum should not exist"
+        );
+    }
+
+    #[test]
+    fn routine_manifest_deserializes_flat_acl_fields() {
+        let json = serde_json::json!({
+            "impl": {
+                "wflow": {
+                    "bundle": "test",
+                    "key": "test"
+                }
+            },
+            "docAcls": [
+                {
+                    "docPredicate": { "hasTag": "org.example.note" },
+                    "facetAcl": [
+                        {
+                            "tag": "org.example.note",
+                            "read": true,
+                            "write": false
+                        }
+                    ]
+                }
+            ],
+            "queryAcls": [
+                { "hasTag": "org.example.todo" }
+            ],
+            "configFacetAcl": [
+                {
+                    "tag": "org.example.config",
+                    "read": true,
+                    "write": true
+                }
+            ]
+        });
+
+        let manifest: RoutineManifest = serde_json::from_value(json).expect("deserialize");
+        assert_eq!(manifest.doc_acls.len(), 1);
+        assert_eq!(manifest.query_acls.len(), 1);
+        assert_eq!(manifest.config_facet_acl.len(), 1);
+        assert_eq!(manifest.local_state_acl.len(), 0);
     }
 }

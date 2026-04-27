@@ -16,37 +16,48 @@ const DOWNSIZE_MAX_SIDE: u32 = 896;
 const DOWNSIZE_JPEG_QUALITY: u8 = 80;
 
 pub fn run(cx: &mut WflowCtx) -> Result<(), JobErrorX> {
+    use crate::wit::townframe::daybook::capabilities::FacetRights;
     use crate::wit::townframe::daybook::facet_routine;
     use daybook_types::doc::{WellKnownFacet, WellKnownFacetTag};
 
-    let mut args = facet_routine::get_args();
+    let args = facet_routine::get_args();
     let embedding_facet_key =
         daybook_types::doc::FacetKey::from(WellKnownFacetTag::Embedding).to_string();
 
-    let mut ro_facet_tokens = std::mem::take(&mut args.ro_facet_tokens);
-    let embedding_facet_token = tuple_list_take(&mut ro_facet_tokens, &embedding_facet_key)
+    let embedding_facet_token = args
+        .primary_doc
+        .facets
+        .iter()
+        .find(|t| t.key() == embedding_facet_key && t.rights().contains(FacetRights::READ))
         .ok_or_else(|| {
             JobErrorX::Terminal(ferr!(
-                "embedding facet key '{}' not found in ro_facet_tokens",
+                "embedding facet key '{}' not found with read rights",
                 embedding_facet_key
             ))
         })?;
-    if !embedding_facet_token.exists() {
-        return Ok(());
-    }
     let sqlite_connection =
         tuple_list_get(&args.sqlite_connections, LOCAL_STATE_KEY).ok_or_else(|| {
             JobErrorX::Terminal(ferr!("missing sqlite connection '{LOCAL_STATE_KEY}'"))
         })?;
 
     let config_facet_key = pseudo_label_candidates_key(CANDIDATE_SET_CONFIG_FACET_ID).to_string();
-    let rw_config_token = tuple_list_get(&args.rw_config_facet_tokens, &config_facet_key);
-    let ro_config_token = tuple_list_get(&args.ro_config_facet_tokens, &config_facet_key);
+    let rw_config_token = args
+        .config_docs
+        .iter()
+        .flat_map(|cd| cd.facets.iter())
+        .find(|t| t.key() == config_facet_key && t.rights().contains(FacetRights::UPDATE));
+    let ro_config_token = args
+        .config_docs
+        .iter()
+        .flat_map(|cd| cd.facets.iter())
+        .find(|t| t.key() == config_facet_key && t.rights().contains(FacetRights::READ));
     if rw_config_token.is_none() && ro_config_token.is_none() {
         return Ok(());
     }
 
-    let embedding_raw = embedding_facet_token.get();
+    let embedding_raw = embedding_facet_token
+        .get()
+        .map_err(|err| JobErrorX::Terminal(ferr!("error reading embedding facet: {err:?}")))?;
     let embedding_json: daybook_types::doc::FacetRaw = serde_json::from_str(&embedding_raw)
         .map_err(|err| JobErrorX::Terminal(ferr!("error parsing embedding facet json: {err}")))?;
     let embedding = match WellKnownFacet::from_json(embedding_json, WellKnownFacetTag::Embedding)
@@ -75,18 +86,18 @@ pub fn run(cx: &mut WflowCtx) -> Result<(), JobErrorX> {
         return Ok(());
     }
     let blob_facet_key = parsed_ref.facet_key.to_string();
-    let blob_facet_token =
-        tuple_list_take(&mut ro_facet_tokens, &blob_facet_key).ok_or_else(|| {
-            JobErrorX::Terminal(ferr!(
-                "blob facet key '{}' referenced by embedding not found in ro_facet_tokens",
-                blob_facet_key
-            ))
-        })?;
-    if !blob_facet_token.exists() {
+    let blob_facet_token = args
+        .primary_doc
+        .facets
+        .iter()
+        .find(|t| t.key() == blob_facet_key && t.rights().contains(FacetRights::READ));
+    let Some(blob_facet_token) = blob_facet_token else {
         return Ok(());
-    }
+    };
 
-    let blob_raw = blob_facet_token.get();
+    let blob_raw = blob_facet_token
+        .get()
+        .map_err(|err| JobErrorX::Terminal(ferr!("error reading blob facet: {err:?}")))?;
     let blob_json: daybook_types::doc::FacetRaw = serde_json::from_str(&blob_raw)
         .map_err(|err| JobErrorX::Terminal(ferr!("error parsing blob facet json: {err}")))?;
     let blob = match WellKnownFacet::from_json(blob_json, WellKnownFacetTag::Blob)
@@ -106,7 +117,9 @@ pub fn run(cx: &mut WflowCtx) -> Result<(), JobErrorX> {
         ensure_embedding_cache_schema(sqlite_connection)?;
 
         let downsized = mltools_image_tools::downsize_image_from_blob(
-            blob_facet_token,
+            blob_facet_token.clone(None).map_err(|err| {
+                JobErrorX::Terminal(ferr!("error cloning blob facet token: {err:?}"))
+            })?,
             DOWNSIZE_MAX_SIDE,
             DOWNSIZE_JPEG_QUALITY,
         )
@@ -143,8 +156,10 @@ pub fn run(cx: &mut WflowCtx) -> Result<(), JobErrorX> {
                 let facet_raw = serde_json::to_string(&facet_raw).expect(ERROR_JSON);
                 token
                     .update(&facet_raw)
-                    .wrap_err("error updating learned proposal set")
-                    .map_err(JobErrorX::Terminal)?;
+                    .map_err(|err| {
+                        JobErrorX::Terminal(ferr!("error updating learned proposal set: {err:?}"))
+                    })?
+                    .map_err(|err| JobErrorX::Terminal(ferr!("update doc error: {err:?}")))?;
             }
         }
 
@@ -181,57 +196,38 @@ Rules:
 }
 
 fn load_or_init_proposal_set(
-    rw_config_token: Option<&crate::wit::townframe::daybook::capabilities::FacetTokenRw>,
-    ro_config_token: Option<&crate::wit::townframe::daybook::capabilities::FacetTokenRo>,
+    rw_config_token: Option<&crate::wit::townframe::daybook::capabilities::FacetToken>,
+    ro_config_token: Option<&crate::wit::townframe::daybook::capabilities::FacetToken>,
 ) -> Result<PseudoLabelCandidatesFacet, JobErrorX> {
     if let Some(token) = rw_config_token {
-        if token.exists() {
-            let raw = token.get();
-            let facet_raw: daybook_types::doc::FacetRaw =
-                serde_json::from_str(&raw).map_err(|err| {
-                    JobErrorX::Terminal(ferr!(
-                        "error parsing config proposal set facet json: {err}"
-                    ))
-                })?;
-            return serde_json::from_value::<PseudoLabelCandidatesFacet>(facet_raw).map_err(
-                |err| {
-                    JobErrorX::Terminal(ferr!("config facet is not pseudo label candidates: {err}"))
-                },
-            );
-        }
-
-        let value = PseudoLabelCandidatesFacet { labels: vec![] };
+        let raw = token
+            .get()
+            .map_err(|err| JobErrorX::Terminal(ferr!("error reading config facet: {err:?}")))?;
         let facet_raw: daybook_types::doc::FacetRaw =
-            serde_json::to_value(value.clone()).map_err(|err| {
-                JobErrorX::Terminal(ferr!("error serializing default proposal set: {err}"))
+            serde_json::from_str(&raw).map_err(|err| {
+                JobErrorX::Terminal(ferr!("error parsing config proposal set facet json: {err}"))
             })?;
-        let facet_raw = serde_json::to_string(&facet_raw).expect(ERROR_JSON);
-        token
-            .update(&facet_raw)
-            .wrap_err("error writing default learned proposal set")
-            .map_err(JobErrorX::Terminal)?;
-        return Ok(value);
-    }
-
-    if let Some(token) = ro_config_token {
-        if !token.exists() {
-            return Ok(PseudoLabelCandidatesFacet { labels: vec![] });
-        }
-        let raw = token.get();
+        serde_json::from_value::<PseudoLabelCandidatesFacet>(facet_raw).map_err(|err| {
+            JobErrorX::Terminal(ferr!("config facet is not pseudo label candidates: {err}"))
+        })
+    } else if let Some(token) = ro_config_token {
+        let raw = token
+            .get()
+            .map_err(|err| JobErrorX::Terminal(ferr!("error reading ro config facet: {err:?}")))?;
         let facet_raw: daybook_types::doc::FacetRaw =
             serde_json::from_str(&raw).map_err(|err| {
                 JobErrorX::Terminal(ferr!(
                     "error parsing ro config proposal set facet json: {err}"
                 ))
             })?;
-        return serde_json::from_value::<PseudoLabelCandidatesFacet>(facet_raw).map_err(|err| {
+        serde_json::from_value::<PseudoLabelCandidatesFacet>(facet_raw).map_err(|err| {
             JobErrorX::Terminal(ferr!(
                 "ro config facet is not pseudo label candidates: {err}"
             ))
-        });
+        })
+    } else {
+        Ok(PseudoLabelCandidatesFacet { labels: vec![] })
     }
-
-    Ok(PseudoLabelCandidatesFacet { labels: vec![] })
 }
 
 fn ensure_embedding_cache_schema(

@@ -33,11 +33,11 @@ async fn test_command_invoke_success_reply() -> Res<()> {
         .dispatch(
             "@daybook/test",
             "invoke-child-success",
-            crate::rt::DispatchArgs::DocFacet {
+            crate::rt::DispatchArgs::DocRoutine {
                 doc_id: success_doc_id.clone(),
                 branch_path: daybook_types::doc::BranchPath::from("main"),
                 heads: success_heads,
-                facet_key: None,
+                changed_facet_keys: vec![],
                 wflow_args_json: None,
             },
         )

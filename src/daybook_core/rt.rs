@@ -8,7 +8,7 @@ use crate::drawer::DrawerRepo;
 use crate::plugs::PlugsRepo;
 use daybook_types::manifest;
 
-use daybook_types::doc::{FacetKey, FacetTag};
+
 use std::collections::BTreeMap;
 use wash_runtime::{
     host::{Host as WashHost, HostApi},
@@ -191,16 +191,11 @@ impl RtStopToken {
 
 #[derive(Debug)]
 pub enum DispatchArgs {
-    DocInvoke {
+    DocRoutine {
         doc_id: String,
         branch_path: daybook_types::doc::BranchPath,
         heads: ChangeHashSet,
-    },
-    DocFacet {
-        doc_id: String,
-        branch_path: daybook_types::doc::BranchPath,
-        heads: ChangeHashSet,
-        facet_key: Option<String>,
+        changed_facet_keys: Vec<String>,
         wflow_args_json: Option<String>,
     },
 }
@@ -801,11 +796,11 @@ impl Rt {
                     .dispatch_no_gate(
                         &plug_id,
                         &routine_name.0,
-                        DispatchArgs::DocFacet {
+                        DispatchArgs::DocRoutine {
                             doc_id: config_doc_id,
                             branch_path: daybook_types::doc::BranchPath::from("main"),
                             heads: config_heads,
-                            facet_key: None,
+                            changed_facet_keys: vec![],
                             wflow_args_json: None,
                         },
                         vec![DispatchOnSuccessHook::InitMarkDone {
@@ -1432,7 +1427,6 @@ impl Rt {
             doc_id,
             staging_branch_path,
             command_invoke_acl_snapshot,
-            facet_key: _,
             ..
         }) = &parent_dispatch.args;
         let ActiveDispatchDeets::Wflow {
@@ -1521,11 +1515,11 @@ impl Rt {
         self.dispatch_no_gate_internal(
             &target_ref.plug_id,
             &target_routine_name.0,
-            DispatchArgs::DocFacet {
+            DispatchArgs::DocRoutine {
                 doc_id: doc_id.clone(),
                 branch_path: staging_branch_path.clone(),
                 heads: staging_heads,
-                facet_key: None,
+                changed_facet_keys: vec![],
                 wflow_args_json: Some(request.args_json.clone()),
             },
             vec![DispatchOnSuccessHook::CommandInvokeReply {
@@ -1606,67 +1600,61 @@ impl Rt {
             .get(routine_name)
             .ok_or_else(|| ferr!("routine not found in plug manifest: {plug_id}/{routine_name}"))?;
 
-        use daybook_types::manifest::RoutineManifestDeets;
-        let (mut dispatch_id, mut args) = match (&routine_man.deets, args) {
-            (
-                RoutineManifestDeets::DocFacet {
-                    working_facet_tag, ..
-                },
-                DispatchArgs::DocFacet {
-                    doc_id,
-                    heads,
-                    branch_path,
-                    facet_key,
-                    wflow_args_json,
-                },
-            ) => {
-                let tag: FacetTag = working_facet_tag.0.clone().into();
-                let facet_key = match facet_key {
-                    Some(id) => FacetKey { tag, id },
-                    None => tag.into(),
-                };
-                let facet_key = facet_key.to_string();
-                let dispatch_id = {
-                    let mut identity = String::new();
-                    use std::fmt::Write as _;
-                    write!(
-                        &mut identity,
-                        "{}|{}|{}|{}",
-                        doc_id,
-                        am_utils_rs::serialize_commit_heads(heads.as_ref()).join(","),
-                        plug_id,
-                        routine_name
-                    )
-                    .expect("writing to string should never fail");
-                    utils_rs::hash::blake3_hash_bytes(identity.as_bytes())
-                };
-                let dispatch_id = fixed_dispatch_id
-                    .clone()
-                    .unwrap_or_else(|| format!("{plug_id}/{routine_name}-{dispatch_id}"));
-                (
-                    dispatch_id,
-                    ActiveDispatchArgs::FacetRoutine(FacetRoutineArgs {
-                        doc_id,
-                        branch_path,
-                        heads,
-                        facet_key,
-                        facet_acl: routine_man.facet_acl().to_vec(),
-                        config_facet_acl: routine_man.config_facet_acl().to_vec(),
-                        local_state_acl: routine_man.local_state_acl.clone(),
-                        command_invoke_acl_snapshot: routine_man.command_invoke_acl().to_vec(),
-                        wflow_args_json,
-                        staging_branch_path: daybook_types::doc::BranchPath::from(
-                            "/tmp/placeholder",
-                        ), // Will be set when job is created
-                    }),
-                )
-            }
-            (deets, args) => {
-                return Err(ferr!(
-                    "routine type and args don't match: {deets:?}, {args:?}"
-                ));
-            }
+        let DispatchArgs::DocRoutine {
+            doc_id,
+            branch_path,
+            heads,
+            changed_facet_keys,
+            wflow_args_json,
+        } = args;
+
+        let invocation = if changed_facet_keys.is_empty() {
+            dispatch::RoutineInvocation::Command
+        } else {
+            dispatch::RoutineInvocation::Processor(dispatch::ProcessorInvocation {
+                trigger_doc_id: doc_id.clone(),
+                changed_facet_keys,
+            })
         };
+
+        let dispatch_id = {
+            let mut identity = String::new();
+            use std::fmt::Write as _;
+            write!(
+                &mut identity,
+                "{}|{}|{}|{}",
+                doc_id,
+                am_utils_rs::serialize_commit_heads(heads.as_ref()).join(","),
+                plug_id,
+                routine_name
+            )
+            .expect("writing to string should never fail");
+            utils_rs::hash::blake3_hash_bytes(identity.as_bytes())
+        };
+        let mut dispatch_id = fixed_dispatch_id
+            .clone()
+            .unwrap_or_else(|| format!("{plug_id}/{routine_name}-{dispatch_id}"));
+
+        let mut args = ActiveDispatchArgs::FacetRoutine(FacetRoutineArgs {
+            doc_id: doc_id.clone(),
+            branch_path: branch_path.clone(),
+            heads: heads.clone(),
+            invocation,
+            primary_doc: dispatch::DocFacetTokens {
+                doc_id: doc_id.clone(),
+                branch_path: branch_path.clone(),
+                staging_branch_path: daybook_types::doc::BranchPath::from("/tmp/placeholder"),
+                heads: heads.clone(),
+                facet_acl: routine_man.facet_acl(),
+            },
+            config_docs: vec![],
+            local_state_acl: routine_man.local_state_acl.clone(),
+            command_invoke_acl_snapshot: routine_man.command_invoke_acl().to_vec(),
+            wflow_args_json,
+            staging_branch_path: daybook_types::doc::BranchPath::from(
+                "/tmp/placeholder",
+            ), // Will be set when job is created
+        });
         if let Some(existing) = self.dispatch_repo.get_any(&dispatch_id).await {
             let can_reuse = serde_json::to_string(&existing.on_success_hooks).expect(ERROR_JSON)
                 == serde_json::to_string(&on_success_hooks).expect(ERROR_JSON)
@@ -2018,11 +2006,10 @@ fn dispatch_stable_identity(dispatch: &ActiveDispatch) -> String {
                 doc_id,
                 branch_path,
                 heads,
-                facet_key,
                 ..
             }),
         ) => format!(
-            "{plug_id}/{routine_name}|{doc_id}|{}|{}|{facet_key}",
+            "{plug_id}/{routine_name}|{doc_id}|{}|{}",
             branch_path.as_str(),
             serde_json::to_string(heads).expect(ERROR_JSON)
         ),

@@ -61,7 +61,10 @@ const androidApiLevel = $.env.ANDROID_API_LEVEL ?? "31";
 const androidNdkRoot = $.env.ANDROID_NDK_ROOT;
 if (!androidNdkRoot) throw new Error("ANDROID_NDK_ROOT must be set");
 const ndkRevision = $.env.ANDROID_NDK_REVISION ??
-  androidNdkRoot.split(/[\\/]/).filter((part) => part.length > 0).at(-1) ??
+  androidNdkRoot
+    .split(/[\\/]/)
+    .filter((part) => part.length > 0)
+    .at(-1) ??
   "unknown-ndk";
 const buildKeySuffix = `api${androidApiLevel}-ndk${ndkRevision}`.replaceAll(
   /[^\w.-]+/g,
@@ -103,7 +106,7 @@ if (!((await distCompleteFile.exists()) && (await libDirFile.exists()))) {
         .showProgress()
         .pipeToPath(sourceArchivePath);
     }
-    if (needsSourceExtract && await sourceCompleteFile.exists()) {
+    if (needsSourceExtract && (await sourceCompleteFile.exists())) {
       await Deno.remove(sourceCompleteFile.toString());
     }
     await removeTreeIfExists(sourceDir.toString());
@@ -142,13 +145,18 @@ if (!((await distCompleteFile.exists()) && (await libDirFile.exists()))) {
   await distCompleteFile.writeText("ok\n");
 }
 
-if (await sourceDir.exists() && $.env.DAYBOOK_CLEAN_ORT_ANDROID_BUILD !== "0") {
+if (
+  (await sourceDir.exists()) &&
+  $.env.DAYBOOK_CLEAN_ORT_ANDROID_BUILD !== "0"
+) {
   // Default cleanup keeps disk use low. Set DAYBOOK_CLEAN_ORT_ANDROID_BUILD=0 to keep intermediates.
   await cleanupOrtBuildArtifacts(sourceDir);
 }
 
 await $`./gradlew ${gradleTask} -PdaybookProfile=${composeProfile} -PortLibLocation=${
-  (await libDirFile.readText()).trim()
+  (
+    await libDirFile.readText()
+  ).trim()
 } -PortLibProfile=${
   $.env.ORT_LIB_PROFILE ?? ortBuildConfig
 } -PortPreferDynamicLink=${$.env.ORT_PREFER_DYNAMIC_LINK ?? "1"}`

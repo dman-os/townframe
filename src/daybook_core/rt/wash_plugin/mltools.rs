@@ -14,9 +14,9 @@ async fn mltools_ctx_from_config_repo(plugin: &DaybookPlugin) -> mltools::Ctx {
 impl mltools_ocr::Host for SharedWashCtx {
     async fn ocr_image(
         &mut self,
-        blob_facet: wasmtime::component::Resource<capabilities::FacetTokenRo>,
+        blob_facet: wasmtime::component::Resource<capabilities::FacetToken>,
     ) -> wasmtime::Result<Result<mltools_ocr::OcrResult, String>> {
-        let blob = match super::caps::get_blob_facet_from_token_ro(self, &blob_facet).await? {
+        let blob = match super::caps::get_blob_facet_from_token(self, &blob_facet).await? {
             Ok(value) => value,
             Err(err) => return Ok(Err(err)),
         };
@@ -74,9 +74,9 @@ impl mltools_embed::Host for SharedWashCtx {
 
     async fn embed_image(
         &mut self,
-        blob_facet: wasmtime::component::Resource<capabilities::FacetTokenRo>,
+        blob_facet: wasmtime::component::Resource<capabilities::FacetToken>,
     ) -> wasmtime::Result<Result<mltools_embed::EmbedResult, String>> {
-        let blob = match super::caps::get_blob_facet_from_token_ro(self, &blob_facet).await? {
+        let blob = match super::caps::get_blob_facet_from_token(self, &blob_facet).await? {
             Ok(value) => value,
             Err(err) => return Ok(Err(err)),
         };
@@ -173,11 +173,11 @@ impl mltools_llm_chat::Host for SharedWashCtx {
 impl mltools_image_tools::Host for SharedWashCtx {
     async fn downsize_image_from_blob(
         &mut self,
-        blob_facet: wasmtime::component::Resource<capabilities::FacetTokenRo>,
+        blob_facet: wasmtime::component::Resource<capabilities::FacetToken>,
         max_side: u32,
         jpeg_quality: u8,
     ) -> wasmtime::Result<Result<mltools_image_tools::ImageBytesResult, String>> {
-        let blob = match super::caps::get_blob_facet_from_token_ro(self, &blob_facet).await? {
+        let blob = match super::caps::get_blob_facet_from_token(self, &blob_facet).await? {
             Ok(value) => value,
             Err(err) => return Ok(Err(err)),
         };

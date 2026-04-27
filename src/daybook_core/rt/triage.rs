@@ -13,7 +13,7 @@ use daybook_types::doc::{Doc, DocId, FacetKey, WellKnownFacetTag};
 use daybook_types::manifest::{
     ChangeOriginDeets, DocChangeKind, DocPredicateEvalMode, DocPredicateEvalRequirement,
     DocPredicateEvalResolved, FacetReferenceManifest, KeyGeneric, NodePredicate, ProcessorDeets,
-    ProcessorEventPredicate, ProcessorManifest, RoutineManifest, RoutineManifestDeets,
+    ProcessorEventPredicate, ProcessorManifest,
 };
 
 struct PreparedProcessor {
@@ -21,7 +21,6 @@ struct PreparedProcessor {
     plug_id: String,
     routine_name: KeyGeneric,
     processor_manifest: Arc<ProcessorManifest>,
-    routine_manifest: Arc<RoutineManifest>,
     event_predicate: ProcessorEventPredicate,
     /// Tag-level: any facet with this tag counts as read.
     read_tags: HashSet<String>,
@@ -115,7 +114,6 @@ impl DocProcessorTriageListener {
                             plug_id: plug_id.clone(),
                             routine_name: routine_name.clone(),
                             processor_manifest: Arc::clone(processor),
-                            routine_manifest: Arc::clone(routine),
                             event_predicate: event_predicate.clone(),
                             read_tags,
                             read_keys,
@@ -259,19 +257,23 @@ impl DocProcessorTriageListener {
                 heads = ?am_utils_rs::serialize_commit_heads(doc_heads.as_ref()),
                 "dispatching job"
             );
-            let args = match &processor.routine_manifest.deets {
-                RoutineManifestDeets::DocInvoke {} => DispatchArgs::DocInvoke {
-                    doc_id: doc_id.clone(),
-                    branch_path: branch_path.clone(),
-                    heads: doc_heads.clone(),
-                },
-                RoutineManifestDeets::DocFacet { .. } => DispatchArgs::DocFacet {
-                    doc_id: doc_id.clone(),
-                    branch_path: branch_path.clone(),
-                    heads: doc_heads.clone(),
-                    facet_key: None,
-                    wflow_args_json: None,
-                },
+            let changed_facet_keys: Vec<String> = changed_facet_keys
+                .map(|keys| {
+                    keys.iter()
+                        .filter(|key| {
+                            processor.read_tags.contains(&key.tag.to_string())
+                                || processor.read_keys.contains(key)
+                        })
+                        .map(|key| key.to_string())
+                        .collect()
+                })
+                .unwrap_or_default();
+            let args = DispatchArgs::DocRoutine {
+                doc_id: doc_id.clone(),
+                branch_path: branch_path.clone(),
+                heads: doc_heads.clone(),
+                changed_facet_keys,
+                wflow_args_json: None,
             };
             let job_key = Self::inflight_job_key(
                 doc_id,
