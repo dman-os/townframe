@@ -4,17 +4,18 @@
 
 #[allow(unused)]
 mod interlude {
+    pub use crate::app::SqlCtx;
     pub use crate::stores::{AmStore, VersionTag, Versioned};
 
     pub use daybook_types::doc::ChangeHashSet;
 
+    #[cfg(any(test, feature = "test-support"))]
+    pub use crate::test_support::BigRepoTestCompat;
     pub use am_utils_rs::prelude::*;
     pub use am_utils_rs::DocumentId;
     pub use api_utils_rs::prelude::*;
     pub use automerge::ActorId;
     pub use autosurgeon::{Hydrate, Reconcile};
-    #[cfg(any(test, feature = "test-support"))]
-    pub use crate::test_support::BigRepoTestCompat;
     pub use std::{
         borrow::Cow,
         collections::{HashMap, HashSet},

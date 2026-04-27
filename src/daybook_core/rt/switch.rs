@@ -32,19 +32,19 @@ struct BranchRef {
 
 #[derive(Clone)]
 pub struct SwitchStore {
-    db_pool: sqlx::SqlitePool,
+    repo_sql: SqlCtx,
 }
 
 impl SwitchStore {
-    async fn load(db_pool: sqlx::SqlitePool) -> Res<Self> {
-        init_schema(&db_pool).await?;
-        Ok(Self { db_pool })
+    async fn load(repo_sql: SqlCtx) -> Res<Self> {
+        init_schema(&repo_sql).await?;
+        Ok(Self { repo_sql })
     }
 
     async fn get_partition_cursor(&self, partition_id: &str) -> Res<u64> {
         let row = sqlx::query("SELECT cursor FROM switch_partition_cursor WHERE partition_id = ?1")
             .bind(partition_id)
-            .fetch_optional(&self.db_pool)
+            .fetch_optional(&self.repo_sql.db_pool)
             .await?;
         Ok(row
             .map(|rowv| rowv.get::<i64, _>("cursor"))
@@ -59,7 +59,7 @@ impl SwitchStore {
         branch_doc_id: Option<&str>,
         state: Option<&SwitchDocState>,
     ) -> Res<()> {
-        let mut tx = self.db_pool.begin().await?;
+        let mut tx = self.repo_sql.db_pool.begin().await?;
         sqlx::query(
             "INSERT INTO switch_partition_cursor(partition_id, cursor, updated_at)\n             VALUES (?1, ?2, unixepoch())\n             ON CONFLICT(partition_id) DO UPDATE SET\n                 cursor = excluded.cursor,\n                 updated_at = excluded.updated_at",
         )
@@ -95,7 +95,7 @@ impl SwitchStore {
             "SELECT doc_id, branch_name, present, last_heads_json FROM switch_doc_state WHERE branch_doc_id = ?1",
         )
         .bind(branch_doc_id)
-        .fetch_optional(&self.db_pool)
+        .fetch_optional(&self.repo_sql.db_pool)
         .await?;
         let Some(row) = row else {
             return Ok(None);
@@ -117,16 +117,16 @@ impl SwitchStore {
     }
 }
 
-async fn init_schema(db_pool: &sqlx::SqlitePool) -> Res<()> {
+async fn init_schema(repo_sql: &SqlCtx) -> Res<()> {
     sqlx::query(
         "CREATE TABLE IF NOT EXISTS switch_partition_cursor (\n             partition_id TEXT PRIMARY KEY,\n             cursor INTEGER NOT NULL,\n             updated_at INTEGER NOT NULL\n         )",
     )
-    .execute(db_pool)
+    .execute(&repo_sql.db_pool)
     .await?;
     sqlx::query(
         "CREATE TABLE IF NOT EXISTS switch_doc_state (\n             branch_doc_id TEXT PRIMARY KEY,\n             doc_id TEXT NOT NULL,\n             branch_name TEXT NOT NULL,\n             present INTEGER NOT NULL,\n             last_heads_json TEXT,\n             updated_at INTEGER NOT NULL\n         )",
     )
-    .execute(db_pool)
+    .execute(&repo_sql.db_pool)
     .await?;
     Ok(())
 }
@@ -212,13 +212,12 @@ struct PreparedSwitchSink {
 
 pub async fn spawn_switch_worker(
     rt: Arc<Rt>,
-    app_doc_id: DocumentId,
+    repo_sql: SqlCtx,
     sinks: BTreeMap<String, Box<dyn SwitchSink + Send + Sync>>,
 ) -> Res<SwitchWorkerHandle> {
     use crate::repos::{Repo, SubscribeOpts};
 
-    let _app_doc_id = app_doc_id;
-    let store = SwitchStore::load(rt.dispatch_repo.db_pool().clone()).await?;
+    let store = SwitchStore::load(repo_sql).await?;
 
     let drawer_listener = rt
         .drawer
@@ -972,12 +971,11 @@ mod tests {
     use std::sync::{Arc as StdArc, Mutex};
 
     async fn test_switch_store() -> Res<SwitchStore> {
-        let sqlite_url = "sqlite::memory:";
-        let db_pool = sqlx::sqlite::SqlitePoolOptions::new()
-            .max_connections(1)
-            .connect(sqlite_url)
-            .await?;
-        SwitchStore::load(db_pool).await
+        let sql = SqlCtx::new(crate::app::SqlConfig {
+            database_url: "sqlite::memory:".into(),
+        })
+        .await?;
+        SwitchStore::load(sql).await
     }
 
     #[tokio::test(flavor = "multi_thread")]

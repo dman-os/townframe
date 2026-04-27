@@ -135,16 +135,20 @@ async fn static_cli(cli: Cli) -> Res<ExitCode> {
         | StaticCommands::Clone { .. }
         | StaticCommands::Completions { .. } => unreachable!(),
         StaticCommands::Dump => {
-            let mut drawer = ctx.doc_drawer.with_document(|doc| {
-                // eyre::Ok(doc.hydrate(None))
-                let value: ThroughJson<serde_json::Value> = autosurgeon::hydrate(doc)?;
-                eyre::Ok(value.0)
-            })?;
-            let mut app = ctx.doc_app.with_document(|doc| {
-                // eyre::Ok(doc.hydrate(None))
-                let value: ThroughJson<serde_json::Value> = autosurgeon::hydrate(doc)?;
-                eyre::Ok(value.0)
-            })?;
+            let mut drawer = ctx
+                .doc_drawer
+                .with_document(|doc| {
+                    let value: ThroughJson<serde_json::Value> = autosurgeon::hydrate(doc)?;
+                    eyre::Ok(value.0)
+                })
+                .await??;
+            let mut app = ctx
+                .doc_app
+                .with_document(|doc| {
+                    let value: ThroughJson<serde_json::Value> = autosurgeon::hydrate(doc)?;
+                    eyre::Ok(value.0)
+                })
+                .await??;
             fn display_byte_array(val: &mut serde_json::Value) {
                 match val {
                     serde_json::Value::Array(values) => {
@@ -437,11 +441,12 @@ async fn static_cli(cli: Cli) -> Res<ExitCode> {
                 println!();
             }
 
-            let mut endpoint_ids = Vec::with_capacity(sync_urls.len());
             for sync_url in &sync_urls {
-                let bootstrap = sync_repo.connect_url(sync_url).await?;
-                endpoint_ids.push(bootstrap.endpoint_id);
+                sync_repo.connect_url(sync_url).await?;
             }
+            let config_repo = lazy::config_repo().await?;
+            let devices = config_repo.list_known_sync_devices().await?;
+            let endpoint_ids: Vec<_> = devices.into_iter().map(|d| d.endpoint_id).collect();
 
             if exit_when_synced {
                 if endpoint_ids.is_empty() {
@@ -471,36 +476,32 @@ async fn static_cli(cli: Cli) -> Res<ExitCode> {
                                 Ok(event) => {
                                     match &*event {
                                         IrohSyncEvent::IncomingConnection {
-                                            endpoint_id,
-                                            conn_id,
-                                            peer_id,
+                                            peer_key,
                                         } => {
-                                            info!(?endpoint_id, ?conn_id, ?peer_id, "incoming connection");
+                                            info!(%peer_key, "incoming connection");
                                         }
                                         IrohSyncEvent::OutgoingConnection {
-                                            endpoint_id,
-                                            conn_id,
-                                            peer_id,
+                                            peer_key,
                                         } => {
-                                            info!(?endpoint_id, ?conn_id, ?peer_id, "outgoing connection");
+                                            info!(%peer_key, "outgoing connection");
                                         }
-                                        IrohSyncEvent::ConnectionClosed { endpoint_id, reason } => {
-                                            info!(?endpoint_id, ?reason, "connection closed");
+                                        IrohSyncEvent::ConnectionClosed { peer_key, reason } => {
+                                            info!(%peer_key, ?reason, "connection closed");
                                         }
                                         IrohSyncEvent::PeerFullySynced {
-                                            endpoint_id,
+                                            peer_key,
                                             doc_count,
                                         } => {
-                                            info!(?endpoint_id, ?doc_count, "peer fully synced");
+                                            info!(%peer_key, ?doc_count, "peer fully synced");
                                         }
                                         IrohSyncEvent::DocSyncedWithPeer {
-                                            endpoint_id,
+                                            peer_key,
                                             doc_id,
                                         } => {
-                                            info!(?endpoint_id, ?doc_id, "doc synced with peer");
+                                            info!(%peer_key, ?doc_id, "doc synced with peer");
                                         }
-                                        IrohSyncEvent::BlobSynced { hash, endpoint_id } => {
-                                            info!(?endpoint_id, %hash, "blob synced");
+                                        IrohSyncEvent::BlobSynced { hash, peer_key } => {
+                                            info!(?peer_key, %hash, "blob synced");
                                         }
                                         IrohSyncEvent::BlobSyncBackoff {
                                             hash,
@@ -510,22 +511,22 @@ async fn static_cli(cli: Cli) -> Res<ExitCode> {
                                             info!(%hash, ?delay, ?attempt_no, "blob sync backoff");
                                         }
                                         IrohSyncEvent::BlobDownloadStarted {
-                                            endpoint_id,
+                                            peer_key,
                                             partition,
                                             hash,
                                         } => {
-                                            info!(?endpoint_id, ?partition, %hash, "blob download started");
+                                            info!(%peer_key, ?partition, %hash, "blob download started");
                                         }
                                         IrohSyncEvent::BlobDownloadFinished {
-                                            endpoint_id,
+                                            peer_key,
                                             partition,
                                             hash,
                                             success,
                                         } => {
-                                            info!(?endpoint_id, ?partition, %hash, ?success, "blob download finished");
+                                            info!(%peer_key, ?partition, %hash, ?success, "blob download finished");
                                         }
-                                        IrohSyncEvent::StalePeer { endpoint_id } => {
-                                            warn!(?endpoint_id, "stale sync peer");
+                                        IrohSyncEvent::StalePeer { peer_key } => {
+                                            warn!(%peer_key, "stale sync peer");
                                         }
                                     }
                                 }
@@ -566,18 +567,15 @@ async fn static_cli(cli: Cli) -> Res<ExitCode> {
                     iroh_ticket_url,
                     name,
                 } => {
-                    let requester_endpoint_id = Some(ctx.iroh_public_key.clone());
-                    let bootstrap = daybook_core::sync::request_clone_provision_via_rpc(
+                    let provision = daybook_core::sync::request_clone_provision_from_url(
                         &iroh_ticket_url,
-                        daybook_core::sync::CloneProvisionRequest {
+                        daybook_core::sync::RequestCloneProvisionReq {
                             requested_device_name: None,
-                            provision: false,
-                            requester_endpoint_id,
-                            requester_peer_key: ,
+                            requester_endpoint_id: ctx.iroh_public_key.clone(),
                         },
                     )
-                    .await?
-                    .to_bootstrap_state()?;
+                    .await?;
+                    let bootstrap = provision.to_bootstrap_state()?;
                     let local_repo_id = ctx.repo_id.clone();
                     if bootstrap.repo_id != local_repo_id {
                         eyre::bail!(
@@ -594,7 +592,7 @@ async fn static_cli(cli: Cli) -> Res<ExitCode> {
                         bootstrap.endpoint_id.to_string()
                     };
                     config_repo
-                        .upsert_known_sync_device(daybook_core::app::globals::SyncDeviceEntry {
+                        .upsert_known_sync_device(daybook_core::repo::globals::SyncDeviceEntry {
                             endpoint_id: bootstrap.endpoint_id,
                             name: device_name,
                             added_at: Timestamp::now(),
@@ -1077,7 +1075,6 @@ mod tests {
             Arc::clone(&ctx.big_repo),
             ctx.doc_drawer.document_id().clone(),
             ctx.local_user_path.clone().into(),
-            ctx.sql.db_pool.clone(),
             ctx.layout.repo_root.join("local_state"),
             Arc::new(std::sync::Mutex::new(
                 daybook_core::drawer::lru::KeyedLruPool::new(1000),
@@ -1368,7 +1365,6 @@ mod lazy {
                     Arc::clone(&ctx.big_repo),
                     ctx.doc_drawer.document_id().clone(),
                     ctx.local_user_path.clone().into(),
-                    ctx.sql.db_pool.clone(),
                     ctx.layout.repo_root.join("local_state"),
                     Arc::new(std::sync::Mutex::new(
                         daybook_core::drawer::lru::KeyedLruPool::new(1000),

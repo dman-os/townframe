@@ -175,7 +175,7 @@ async fn ensure_schema(pool: &sqlx::SqlitePool) -> Res<()> {
     sqlx::query(
         r#"
         CREATE TABLE IF NOT EXISTS sync_allowed_peers(
-            peer_key TEXT PRIMARY KEY,
+            peer_key TEXT PRIMARY KEY
         )
         "#,
     )
@@ -205,7 +205,7 @@ async fn handle_msg(pool: &sqlx::SqlitePool, msg: StoreMsg) {
         } => {
             let out = async {
                 sqlx::query(
-                    "INSERT INTO sync_allowed_peers(peer_key) VALUES(?, ?) ON CONFLICT(peer_key) DO UPDATE SET endpoint_id = excluded.endpoint_id",
+                    "INSERT INTO sync_allowed_peers(peer_key) VALUES(?) ON CONFLICT(peer_key) DO NOTHING",
                 )
                 .bind(&peer[..])
                 .execute(pool)

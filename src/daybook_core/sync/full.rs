@@ -543,7 +543,6 @@ enum BootDocSyncWorkerResult {
 
 struct ActiveImportSyncState {
     stop_token: import_worker::ImportSyncWorkerStopToken,
-    retry: RetryState,
 }
 
 #[derive(Debug, Clone, Hash, PartialEq, Eq)]
@@ -1688,7 +1687,6 @@ impl Worker {
                     self.iroh_endpoint.clone(),
                     retry,
                 )?,
-                retry,
             };
             debug!(
                 endpoint_id = ?task_key.peer_id,
@@ -2659,7 +2657,6 @@ impl Worker {
     }
 
     async fn emit_stale_peer(&mut self, peer_key: PeerKey) -> Res<()> {
-        let mut stale = None;
         let peer_id = self
             .peer_id_by_peer_key
             .get(&peer_key)
@@ -2670,10 +2667,9 @@ impl Worker {
             .expect(ERROR_UNRECONIZED);
         if peer_state.emitted_full_synced {
             peer_state.emitted_full_synced = false;
-            stale = Some(peer_state.peer_id);
+            self.emit_full_sync_event(FullSyncEvent::StalePeer { peer_key })
+                .await?;
         }
-        self.emit_full_sync_event(FullSyncEvent::StalePeer { peer_key })
-            .await?;
         Ok(())
     }
 

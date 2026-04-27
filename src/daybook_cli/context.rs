@@ -23,8 +23,13 @@ pub async fn open_repo_ctx(config: &Config, ensure_initialized: bool) -> Res<Sha
     let rcx = if ensure_initialized
         && !daybook_core::repo::is_repo_initialized(&config.cli_config.repo_path).await?
     {
-        daybook_core::repo::RepoCtx::init(&config.cli_config.repo_path, options, local_device_name)
-            .await?
+        daybook_core::repo::RepoCtx::init(
+            &config.cli_config.repo_path,
+            options,
+            local_device_name.clone(),
+            local_device_name,
+        )
+        .await?
     } else {
         daybook_core::repo::RepoCtx::open(&config.cli_config.repo_path, options, local_device_name)
             .await?

@@ -240,7 +240,7 @@ impl Rt {
         config: RtConfig,
         app_doc_id: DocumentId,
         wflow_db_url: String,
-        sql_pool: sqlx::SqlitePool,
+        repo_sql: SqlCtx,
         big_repo: SharedBigRepo,
         drawer: Arc<DrawerRepo>,
         plugs_repo: Arc<PlugsRepo>,
@@ -264,7 +264,7 @@ impl Rt {
             Arc::clone(&big_repo),
             app_doc_id.clone(),
             local_actor_id.clone(),
-            sql_pool,
+            repo_sql.clone(),
         )
         .await?;
 
@@ -428,8 +428,7 @@ impl Rt {
             ]
             .into();
         let switch_worker =
-            crate::rt::switch::spawn_switch_worker(Arc::clone(&rt), app_doc_id, switch_sinks)
-                .await?;
+            crate::rt::switch::spawn_switch_worker(Arc::clone(&rt), repo_sql, switch_sinks).await?;
 
         let partition_watcher = tokio::spawn({
             let repo = Arc::clone(&rt);
@@ -1906,66 +1905,6 @@ fn command_invoke_reply_from_result(
     }
 }
 
-#[cfg(test)]
-#[allow(clippy::items_after_test_module)]
-mod tests {
-    use super::*;
-    use sqlx::sqlite::SqlitePoolOptions;
-
-    async fn make_partition_store() -> Res<(
-        std::sync::Arc<am_utils_rs::partition::PartitionStore>,
-        am_utils_rs::partition::PartitionStoreStopToken,
-    )> {
-        let pool = SqlitePoolOptions::new()
-            .max_connections(1)
-            .connect("sqlite::memory:")
-            .await?;
-        let (store, stop_token) = am_utils_rs::partition::PartitionStore::boot(pool).await?;
-        store
-            .ensure_partition(&PROCESSOR_RUNLOG_PARTITION_ID.to_string())
-            .await?;
-        Ok((store, stop_token))
-    }
-
-    #[tokio::test]
-    async fn processor_runlog_upsert_is_bounded_for_same_doc_processor() -> Res<()> {
-        let (store, stop_token) = make_partition_store().await?;
-        let item_id = Rt::processor_runlog_item_id("doc-1", "@daybook/plabels/label-note");
-
-        upsert_processor_runlog_item(
-            &store,
-            "peer-a",
-            "doc-1",
-            "@daybook/plabels/label-note",
-            "token-1",
-        )
-        .await?;
-        upsert_processor_runlog_item(
-            &store,
-            "peer-a",
-            "doc-1",
-            "@daybook/plabels/label-note",
-            "token-2",
-        )
-        .await?;
-
-        let count = store
-            .item_row_count(&PROCESSOR_RUNLOG_PARTITION_ID.to_string(), &item_id)
-            .await?;
-        assert_eq!(count, 1, "runlog should overwrite in-place for same key");
-
-        let payload = store
-            .item_payload(&PROCESSOR_RUNLOG_PARTITION_ID.to_string(), &item_id)
-            .await?
-            .ok_or_eyre("expected runlog payload row")?;
-        assert_eq!(payload["done_by_peer_id"], serde_json::json!("peer-a"));
-        assert_eq!(payload["done_token"], serde_json::json!("token-2"));
-
-        stop_token.stop().await?;
-        Ok(())
-    }
-}
-
 async fn ensure_bundle_workload_running(
     wcx: &wflow::Ctx,
     wash_host: &WashHost,
@@ -2041,7 +1980,6 @@ async fn ensure_bundle_workload_running(
     }
     Ok(workload_id)
 }
-
 async fn start_bundle_workload(
     wash_host: &WashHost,
     blobs_repo: &BlobsRepo,
@@ -2125,4 +2063,64 @@ async fn start_bundle_workload(
         .await
         .to_eyre()?;
     Ok(())
+}
+
+#[cfg(test)]
+#[allow(clippy::items_after_test_module)]
+mod tests {
+    use super::*;
+    use sqlx::sqlite::SqlitePoolOptions;
+
+    async fn make_partition_store() -> Res<(
+        std::sync::Arc<am_utils_rs::partition::PartitionStore>,
+        am_utils_rs::partition::PartitionStoreStopToken,
+    )> {
+        let pool = SqlitePoolOptions::new()
+            .max_connections(1)
+            .connect("sqlite::memory:")
+            .await?;
+        let (store, stop_token) = am_utils_rs::partition::PartitionStore::boot(pool).await?;
+        store
+            .ensure_partition(&PROCESSOR_RUNLOG_PARTITION_ID.to_string())
+            .await?;
+        Ok((store, stop_token))
+    }
+
+    #[tokio::test]
+    async fn processor_runlog_upsert_is_bounded_for_same_doc_processor() -> Res<()> {
+        let (store, stop_token) = make_partition_store().await?;
+        let item_id = Rt::processor_runlog_item_id("doc-1", "@daybook/plabels/label-note");
+
+        upsert_processor_runlog_item(
+            &store,
+            "peer-a",
+            "doc-1",
+            "@daybook/plabels/label-note",
+            "token-1",
+        )
+        .await?;
+        upsert_processor_runlog_item(
+            &store,
+            "peer-a",
+            "doc-1",
+            "@daybook/plabels/label-note",
+            "token-2",
+        )
+        .await?;
+
+        let count = store
+            .item_row_count(&PROCESSOR_RUNLOG_PARTITION_ID.to_string(), &item_id)
+            .await?;
+        assert_eq!(count, 1, "runlog should overwrite in-place for same key");
+
+        let payload = store
+            .item_payload(&PROCESSOR_RUNLOG_PARTITION_ID.to_string(), &item_id)
+            .await?
+            .ok_or_eyre("expected runlog payload row")?;
+        assert_eq!(payload["done_by_peer_id"], serde_json::json!("peer-a"));
+        assert_eq!(payload["done_token"], serde_json::json!("token-2"));
+
+        stop_token.stop().await?;
+        Ok(())
+    }
 }

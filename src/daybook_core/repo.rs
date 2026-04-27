@@ -4,7 +4,6 @@ use crate::app::*;
 
 use am_utils_rs::partition::PartitionStore;
 use fs4::fs_std::FileExt;
-use sqlx::SqlitePool;
 
 const REPO_MARKER_FILE: &str = "db.repo.txt";
 
@@ -28,8 +27,8 @@ struct RepoLockInfo {
 }
 
 pub struct RepoLockGuard {
-    file: std::fs::File,
-    lock_path: std::path::PathBuf,
+    _file: std::fs::File,
+    _path: std::path::PathBuf,
 }
 
 impl RepoLockGuard {
@@ -37,7 +36,7 @@ impl RepoLockGuard {
         if let Some(parent) = lock_path.parent() {
             std::fs::create_dir_all(parent)?;
         }
-        let mut file = std::fs::OpenOptions::new()
+        let mut _file = std::fs::OpenOptions::new()
             .create(true)
             .read(true)
             .write(true)
@@ -46,7 +45,7 @@ impl RepoLockGuard {
             .wrap_err_with(|| format!("error opening repo lock file {}", lock_path.display()))?;
 
         // NOTE: lock is released when file is dropped
-        file.try_lock_exclusive().map_err(|err| {
+        _file.try_lock_exclusive().map_err(|err| {
             let holder = std::fs::read_to_string(lock_path)
                 .ok()
                 .and_then(|content| serde_json::from_str::<RepoLockInfo>(&content).ok());
@@ -69,13 +68,13 @@ impl RepoLockGuard {
             pid: std::process::id(),
             created_at_unix_secs: jiff::Timestamp::now().as_second(),
         };
-        file.set_len(0)?;
+        _file.set_len(0)?;
         let json = serde_json::to_string(&lock_info)?;
-        std::io::Write::write_all(&mut file, json.as_bytes())?;
-        std::io::Write::flush(&mut file)?;
+        std::io::Write::write_all(&mut _file, json.as_bytes())?;
+        std::io::Write::flush(&mut _file)?;
         Ok(Self {
-            file,
-            lock_path: lock_path.to_path_buf(),
+            _file,
+            _path: lock_path.to_path_buf(),
         })
     }
 }
@@ -130,7 +129,53 @@ impl RepoCtx {
                 layout.marker_path.display()
             );
         }
-        Self::open_inner(layout, lock_guard, options, local_device_name, false, None).await
+        cleanup_blobs_staging_dir(&layout.blobs_root).await?;
+        let sql = SqlCtx::new(SqlConfig {
+            database_url: format!("sqlite://{}", layout.sqlite_path.display()),
+        })
+        .await?;
+        let (repo_id, repo_name, user_id) = tokio::try_join!(
+            globals::get_string_global(&sql, "global.repo_id"),
+            globals::get_string_global(&sql, "global.repo_name"),
+            globals::get_string_global(&sql, "global.user_id"),
+        )?;
+        let repo_id = repo_id.ok_or_eyre("missing global from repo: repo_id")?;
+        let repo_name = repo_name.ok_or_eyre("missing global from repo: repo_name")?;
+        let user_id = user_id.ok_or_eyre("missing global from repo: user_id")?;
+        let identity = crate::secrets::SecretRepo::load_identity(&repo_id)
+            .await?
+            .ok_or_eyre("missing secret from keyring")?;
+        let UserInfo {
+            local_peer_key,
+            local_user_path,
+            local_actor_id,
+        } = compute_user_info(&repo_id, &user_id, &identity);
+        let (big_repo, big_repo_stop, partition_store) = boot_big_repo(&layout, &identity).await?;
+        let (doc_app, doc_drawer) = load_core_docs(&big_repo, &sql).await?;
+        ensure_expected_partitions_for_docs(
+            &big_repo,
+            doc_app.document_id(),
+            doc_drawer.document_id(),
+        )
+        .await?;
+        Ok(RepoCtx {
+            local_peer_key: local_peer_key,
+            repo_name: repo_name,
+            layout: layout,
+            lock_guard: lock_guard,
+            sql: sql,
+            partition_store: partition_store,
+            big_repo: big_repo,
+            big_repo_stop: std::sync::Mutex::new(Some(big_repo_stop)),
+            doc_app: doc_app,
+            doc_drawer: doc_drawer,
+            local_actor_id: local_actor_id,
+            local_user_path: local_user_path,
+            repo_id: repo_id,
+            iroh_public_key: identity.iroh_public_key.to_string(),
+            iroh_secret_key: identity.iroh_secret_key,
+            local_device_name: local_device_name,
+        })
     }
 
     pub async fn init(
@@ -147,159 +192,79 @@ impl RepoCtx {
                 layout.repo_root.display()
             );
         }
-        Self::open_inner(
-            layout,
-            lock_guard,
-            options,
-            local_device_name,
-            true,
-            Some(repo_name),
-        )
-        .await
-    }
-
-    async fn open_inner(
-        layout: RepoLayout,
-        lock_guard: RepoLockGuard,
-        _options: RepoOpenOptions,
-        local_device_name: String,
-        initialize_repo: bool,
-        repo_name: Option<String>,
-    ) -> Res<Self> {
-        // cleanup_blobs_staging_dir
-        {
-            let staging_root = (&layout.blobs_root).join("staging");
-            if tokio::fs::try_exists(&staging_root).await? {
-                tokio::fs::remove_dir_all(&staging_root).await?;
-            }
-            tokio::fs::create_dir_all(&staging_root).await?;
-        }
-
+        cleanup_blobs_staging_dir(&layout.blobs_root).await?;
         let sql = SqlCtx::new(SqlConfig {
             database_url: format!("sqlite://{}", layout.sqlite_path.display()),
         })
         .await?;
-        const REPO_NAME_KEY: &str = "global.repo_name";
-        const REPO_ID_KEY: &str = "global.repo_id";
-        const REPO_USER_ID_KEY: &str = "global.user_id";
-        let (repo_id, repo_name, repo_user_id) = if initialize_repo {
-            let repo_id = {
-                let id = Uuid::new_v4();
-                let id = utils_rs::hash::encode_base58_multibase(id);
-                format!("drepo_{id}")
-            };
-            let Some(repo_name) = repo_name else {
-                eyre::bail!("repo name must be set when initialize_repo");
-            };
-            let reop_user_id = format!(
-                "{}{}",
-                daybook_types::doc::user_path::USER_ID_PREFIX,
-                Uuid::new_v4().bs58()
-            );
-            tokio::try_join!(
-                globals::set_string_global(&sql.db_pool, REPO_ID_KEY, &repo_id),
-                globals::set_string_global(&sql.db_pool, REPO_NAME_KEY, &repo_name),
-                globals::set_string_global(&sql.db_pool, REPO_USER_ID_KEY, &reop_user_id),
-            )?;
-            (repo_id, repo_name, reop_user_id)
-        } else {
-            let (repo_id, repo_name, reop_user_id) = tokio::try_join!(
-                globals::get_string_global(&sql.db_pool, REPO_ID_KEY),
-                globals::get_string_global(&sql.db_pool, REPO_NAME_KEY),
-                globals::get_string_global(&sql.db_pool, REPO_USER_ID_KEY),
-            )?;
-            (
-                repo_id.ok_or_eyre("missing global from repo")?,
-                repo_name.ok_or_eyre("missig global from repo")?,
-                reop_user_id.ok_or_eyre("missing global from repo")?,
-            )
+        let repo_id = {
+            let id = Uuid::new_v4();
+            let id = utils_rs::hash::encode_base58_multibase(id);
+            format!("drepo_{id}")
         };
-        let identity = if initialize_repo {
+        let user_id = format!(
+            "{}{}",
+            daybook_types::doc::user_path::USER_ID_PREFIX,
+            Uuid::new_v4().bs58()
+        );
+        tokio::try_join!(
+            globals::set_string_global(&sql, "global.repo_id", &repo_id),
+            globals::set_string_global(&sql, "global.repo_name", &repo_name),
+            globals::set_string_global(&sql, "global.user_id", &user_id),
+        )?;
+        let identity = {
             let secret = iroh::SecretKey::generate(&mut rand::rng());
             crate::secrets::SecretRepo::set_identity(&repo_id, secret).await?
-        } else {
-            crate::secrets::SecretRepo::load_identity(&repo_id)
-                .await?
-                .ok_or_eyre("missing secret from keyring")?
         };
-        let iroh_public_key = identity.iroh_public_key.to_string();
-
-        let local_peer_key =
-            daybook_types::doc::format_peer_key(&repo_id, identity.iroh_public_key.as_bytes());
-        let pkey_bs58 =
-            utils_rs::hash::encode_base58_multibase(identity.iroh_public_key.as_bytes());
-        let local_peer_key = format!("/{repo_id}/{pkey_bs58}").into();
-        let device_id = format!(
-            "{}{}",
-            daybook_types::doc::user_path::DEVICE_ID_PREFIX,
-            pkey_bs58
-        );
-
-        let local_user_path = format!("/{repo_user_id}/{device_id}");
-        let am_config = am_utils_rs::repo::Config {
-            storage: am_utils_rs::repo::StorageConfig::Disk {
-                path: layout.samod_root.clone(),
-            },
-            peer_id: identity.iroh_public_key.into(),
-        };
-        let local_actor_id = daybook_types::doc::user_path::to_actor_id(
-            &daybook_types::doc::UserPath::from(local_user_path.clone()),
-        );
-
-        let (big_repo, big_repo_stop) = am_utils_rs::BigRepo::boot(am_config).await?;
-        let partition_store = big_repo.partition_store();
-
-        let (doc_app, doc_drawer) = if initialize_repo {
-            init_core_docs(&big_repo, &sql.db_pool).await?
-        } else {
-            load_core_docs(&big_repo, &sql.db_pool).await?
-        };
+        let UserInfo {
+            local_peer_key,
+            local_user_path,
+            local_actor_id,
+        } = compute_user_info(&repo_id, &user_id, &identity);
+        let (big_repo, big_repo_stop, partition_store) = boot_big_repo(&layout, &identity).await?;
+        let (doc_app, doc_drawer) = init_core_docs(&big_repo, &sql).await?;
         ensure_expected_partitions_for_docs(
             &big_repo,
             doc_app.document_id(),
             doc_drawer.document_id(),
         )
         .await?;
-
-        if initialize_repo {
-            Self::run_repo_init_dance(
-                &big_repo,
-                &doc_app,
-                &doc_drawer,
-                &local_user_path,
-                &sql.db_pool,
-                layout.blobs_root.clone(),
-            )
-            .await?;
-            mark_repo_initialized(&layout.repo_root).await?;
-        }
-
-        Ok(Self {
-            local_peer_key,
-            repo_name,
-            layout,
-            lock_guard,
-            sql,
-            partition_store,
-            big_repo,
+        Self::run_repo_init_dance(
+            &big_repo,
+            &doc_app,
+            &doc_drawer,
+            &local_user_path,
+            &sql,
+            layout.blobs_root.clone(),
+        )
+        .await?;
+        mark_repo_initialized(&layout.repo_root).await?;
+        Ok(RepoCtx {
+            local_peer_key: local_peer_key,
+            repo_name: repo_name,
+            layout: layout,
+            lock_guard: lock_guard,
+            sql: sql,
+            partition_store: partition_store,
+            big_repo: big_repo,
             big_repo_stop: std::sync::Mutex::new(Some(big_repo_stop)),
-            doc_app,
-            doc_drawer,
-            local_actor_id,
-            local_user_path,
-            repo_id,
-            iroh_public_key,
+            doc_app: doc_app,
+            doc_drawer: doc_drawer,
+            local_actor_id: local_actor_id,
+            local_user_path: local_user_path,
+            repo_id: repo_id,
+            iroh_public_key: identity.iroh_public_key.to_string(),
             iroh_secret_key: identity.iroh_secret_key,
-            local_device_name,
+            local_device_name: local_device_name,
         })
     }
 
-    async fn run_repo_init_dance(
+    pub(crate) async fn run_repo_init_dance(
         big_repo: &SharedBigRepo,
         doc_app: &am_utils_rs::repo::BigDocHandle,
         doc_drawer: &am_utils_rs::repo::BigDocHandle,
         local_user_path: &str,
-        sql: &SqlitePool,
+        sql: &SqlCtx,
         blobs_root: std::path::PathBuf,
     ) -> Res<()> {
         use crate::blobs::BlobsRepo;
@@ -484,6 +449,100 @@ impl RepoCtx {
     }
 }
 
+struct UserInfo {
+    local_peer_key: am_utils_rs::sync::protocol::PeerKey,
+    local_user_path: String,
+    local_actor_id: automerge::ActorId,
+}
+
+fn compute_user_info(
+    repo_id: &str,
+    user_id: &str,
+    identity: &crate::secrets::RepoIdentity,
+) -> UserInfo {
+    let pkey_bs58 = utils_rs::hash::encode_base58_multibase(identity.iroh_public_key.as_bytes());
+    let device_id = format!(
+        "{}{}",
+        daybook_types::doc::user_path::DEVICE_ID_PREFIX,
+        pkey_bs58
+    );
+    let local_user_path = format!("/{user_id}/{device_id}");
+    let local_peer_key =
+        daybook_types::doc::format_peer_key(repo_id, identity.iroh_public_key.as_bytes());
+    let local_actor_id = daybook_types::doc::user_path::to_actor_id(
+        &daybook_types::doc::UserPath::from(local_user_path.clone()),
+    );
+    UserInfo {
+        local_peer_key,
+        local_user_path,
+        local_actor_id,
+    }
+}
+
+async fn boot_big_repo(
+    layout: &RepoLayout,
+    identity: &crate::secrets::RepoIdentity,
+) -> Res<(
+    SharedBigRepo,
+    am_utils_rs::BigRepoStopToken,
+    Arc<PartitionStore>,
+)> {
+    let am_config = am_utils_rs::repo::Config {
+        storage: am_utils_rs::repo::StorageConfig::Disk {
+            path: layout.samod_root.clone(),
+        },
+        peer_id: identity.iroh_public_key.into(),
+    };
+    let (big_repo, big_repo_stop) = am_utils_rs::BigRepo::boot(am_config).await?;
+    let partition_store = big_repo.partition_store();
+    Ok((big_repo, big_repo_stop, partition_store))
+}
+
+async fn cleanup_blobs_staging_dir(blobs_root: &Path) -> Res<()> {
+    let staging_root = blobs_root.join("staging");
+    if tokio::fs::try_exists(&staging_root).await? {
+        tokio::fs::remove_dir_all(&staging_root).await?;
+    }
+    tokio::fs::create_dir_all(&staging_root).await?;
+    Ok(())
+}
+
+#[expect(clippy::too_many_arguments)]
+pub(crate) async fn finish_clone_init(
+    big_repo: &SharedBigRepo,
+    sql: &SqlCtx,
+    local_user_path: String,
+    blobs_root: std::path::PathBuf,
+) -> Res<()> {
+    let init_state = globals::get_init_state(sql).await?;
+    let (doc_id_app, doc_id_drawer) = match init_state {
+        globals::InitState::Created {
+            doc_id_app,
+            doc_id_drawer,
+        } => (doc_id_app, doc_id_drawer),
+        globals::InitState::None => eyre::bail!("clone init: InitState not set"),
+    };
+    let doc_app = big_repo
+        .get_doc(&doc_id_app)
+        .await?
+        .ok_or_eyre("clone init: app doc missing from BigRepo")?;
+    let doc_drawer = big_repo
+        .get_doc(&doc_id_drawer)
+        .await?
+        .ok_or_eyre("clone init: drawer doc missing from BigRepo")?;
+    ensure_expected_partitions_for_docs(big_repo, &doc_id_app, &doc_id_drawer).await?;
+    RepoCtx::run_repo_init_dance(
+        big_repo,
+        &doc_app,
+        &doc_drawer,
+        &local_user_path,
+        sql,
+        blobs_root,
+    )
+    .await?;
+    Ok(())
+}
+
 pub(crate) async fn ensure_expected_partitions_for_docs(
     big_repo: &SharedBigRepo,
     doc_app_id: &DocumentId,
@@ -559,13 +618,13 @@ pub async fn is_repo_bootstrapped(repo_root: &std::path::Path) -> Res<bool> {
             layout.sqlite_path.display()
         )
     })?;
-    let init_state = globals::get_init_state(&sql.db_pool).await?;
+    let init_state = globals::get_init_state(&sql).await?;
     Ok(matches!(init_state, globals::InitState::Created { .. }))
 }
 
 async fn load_core_docs(
     big_repo: &SharedBigRepo,
-    repo_sql: &SqlitePool,
+    repo_sql: &SqlCtx,
 ) -> Res<(
     am_utils_rs::repo::BigDocHandle,
     am_utils_rs::repo::BigDocHandle,
@@ -597,7 +656,7 @@ async fn load_core_docs(
 
 async fn init_core_docs(
     big_repo: &SharedBigRepo,
-    repo_sql: &SqlitePool,
+    repo_sql: &SqlCtx,
 ) -> Res<(
     am_utils_rs::repo::BigDocHandle,
     am_utils_rs::repo::BigDocHandle,
@@ -630,9 +689,7 @@ async fn init_core_docs(
 }
 
 pub mod globals {
-    use sqlx::SqlitePool;
-
-    use crate::interlude::*;
+    use crate::{app::SqlCtx, interlude::*};
 
     #[derive(serde::Serialize, serde::Deserialize, Debug, Clone)]
     pub enum InitState {
@@ -644,10 +701,10 @@ pub mod globals {
     }
     const INIT_STATE_KEY: &str = "global.init_state";
 
-    pub async fn get_init_state(sql: &SqlitePool) -> Res<InitState> {
+    pub async fn get_init_state(sql: &SqlCtx) -> Res<InitState> {
         let rec = sqlx::query_scalar::<_, String>("SELECT value FROM kvstore WHERE key = ?1")
             .bind(INIT_STATE_KEY)
-            .fetch_optional(sql)
+            .fetch_optional(&sql.db_pool)
             .await?;
         let state = match rec {
             Some(json) => serde_json::from_str::<InitState>(&json)?,
@@ -655,26 +712,26 @@ pub mod globals {
         };
         Ok(state)
     }
-    pub async fn set_init_state(sql: &SqlitePool, state: &InitState) -> Res<()> {
+    pub async fn set_init_state(sql: &SqlCtx, state: &InitState) -> Res<()> {
         let json = serde_json::to_string(state)?;
         sqlx::query("INSERT INTO kvstore(key, value) VALUES (?1, ?2) ON CONFLICT(key) DO UPDATE SET value = excluded.value")
         .bind(INIT_STATE_KEY)
         .bind(&json)
-        .execute(sql)
+        .execute(&sql.db_pool)
         .await?;
         Ok(())
     }
 
-    pub async fn get_string_global(sql: &SqlitePool, key: &str) -> Res<Option<String>> {
+    pub async fn get_string_global(sql: &SqlCtx, key: &str) -> Res<Option<String>> {
         let rec = sqlx::query_scalar::<_, String>("SELECT value FROM kvstore WHERE key = ?1")
             .bind(key)
-            .fetch_optional(sql)
+            .fetch_optional(&sql.db_pool)
             .await?;
         Ok(rec)
     }
 
-    pub async fn set_string_global(sql: &SqlitePool, key: &str, value: &str) -> Res<()> {
-        let mut tx = sql.begin().await?;
+    pub async fn set_string_global(sql: &SqlCtx, key: &str, value: &str) -> Res<()> {
+        let mut tx = sql.db_pool.begin().await?;
 
         if let Some(repo_id) =
             sqlx::query_scalar::<_, String>("SELECT value FROM kvstore WHERE key = ?1")
@@ -707,10 +764,10 @@ pub mod globals {
         pub added_at: Timestamp,
         pub last_connected_at: Option<Timestamp>,
     }
-    pub async fn get_sync_config(sql: &SqlitePool) -> Res<SyncConfig> {
+    pub async fn get_sync_config(sql: &SqlCtx) -> Res<SyncConfig> {
         let rec = sqlx::query_scalar::<_, String>("SELECT value FROM kvstore WHERE key = ?1")
             .bind(SYNC_CONFIG_KEY)
-            .fetch_optional(sql)
+            .fetch_optional(&sql.db_pool)
             .await?;
         let state = match rec {
             Some(json) => serde_json::from_str::<SyncConfig>(&json)?,
@@ -719,12 +776,12 @@ pub mod globals {
         Ok(state)
     }
 
-    pub async fn set_sync_config(sql: &SqlitePool, state: &SyncConfig) -> Res<()> {
+    pub async fn set_sync_config(sql: &SqlCtx, state: &SyncConfig) -> Res<()> {
         let json = serde_json::to_string(state)?;
         sqlx::query("INSERT INTO kvstore(key, value) VALUES (?1, ?2) ON CONFLICT(key) DO UPDATE SET value = excluded.value")
             .bind(SYNC_CONFIG_KEY)
             .bind(&json)
-            .execute(sql)
+            .execute(&sql.db_pool)
             .await?;
         Ok(())
     }

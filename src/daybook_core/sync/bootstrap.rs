@@ -8,7 +8,7 @@ use super::{
 use std::str::FromStr;
 
 use futures::StreamExt;
-use iroh::{EndpointId, Watcher};
+use iroh::EndpointId;
 use iroh_blobs::api::downloader::DownloadProgressItem;
 use iroh_tickets::endpoint::EndpointTicket;
 use irpc::{channel, rpc_requests};
@@ -45,13 +45,34 @@ pub struct CloneRepoInitResult {
     pub bootstrap: SyncBootstrapState,
 }
 
+// ---------------------------------------------------------------------------
+// Resolve clone info (lightweight metadata, no authentication required)
+// ---------------------------------------------------------------------------
+
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
-pub struct CloneProvisionRequest {
-    // FIXME: why are all of these optional?
+pub struct CloneInfoRequest {
     pub requested_device_name: Option<String>,
-    pub provision: bool,
-    pub requester_endpoint_id: Option<String>,
-    pub requester_peer_key: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct CloneInfoResponse {
+    pub repo_name: String,
+    pub device_name: Option<String>,
+}
+
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+pub struct ResolveCloneInfoRpcReq {
+    pub req: CloneInfoRequest,
+}
+
+// ---------------------------------------------------------------------------
+// Request clone provision (full bootstrap + peer authorization)
+// ---------------------------------------------------------------------------
+
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct RequestCloneProvisionReq {
+    pub requested_device_name: Option<String>,
+    pub requester_endpoint_id: String,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
@@ -62,19 +83,18 @@ pub struct CloneProvisionResponse {
     pub app_doc_id: String,
     pub drawer_doc_id: String,
     pub device_name: Option<String>,
-    pub issued_iroh_secret_key_hex: Option<String>,
-    pub issued_iroh_public_key: Option<String>,
-    pub issued_peer_key: Option<am_utils_rs::sync::protocol::PeerKey>,
 }
 
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct RequestCloneProvisionRpcReq {
-    pub req: CloneProvisionRequest,
+    pub req: RequestCloneProvisionReq,
 }
 
 #[rpc_requests(message = CloneProvisionRpcMessage)]
 #[derive(Debug, serde::Serialize, serde::Deserialize)]
 pub enum CloneProvisionRpc {
+    #[rpc(tx = channel::oneshot::Sender<Result<CloneInfoResponse, String>>)]
+    ResolveCloneInfo(ResolveCloneInfoRpcReq),
     #[rpc(tx = channel::oneshot::Sender<Result<CloneProvisionResponse, String>>)]
     RequestCloneProvision(RequestCloneProvisionRpcReq),
 }
@@ -108,16 +128,54 @@ impl CloneProvisionResponse {
     }
 }
 
-pub async fn request_clone_provision_via_rpc(
-    source_url: &str,
-    request: CloneProvisionRequest,
-) -> Res<CloneProvisionResponse> {
+// ---------------------------------------------------------------------------
+// Client-side RPC helpers
+// ---------------------------------------------------------------------------
+
+#[tracing::instrument(skip(source_url))]
+pub async fn resolve_clone_info_from_url(source_url: &str) -> Res<CloneInfoResponse> {
     let endpoint_addr = parse_clone_endpoint_addr(source_url)?;
+    let req = ResolveCloneInfoRpcReq {
+        req: CloneInfoRequest {
+            requested_device_name: None,
+        },
+    };
     #[cfg(test)]
     if let Some(local_sender) = lookup_test_clone_rpc_sender(endpoint_addr.id).await {
         let client = irpc::Client::<CloneProvisionRpc>::local(local_sender);
         let response = client
-            .rpc(RequestCloneProvisionRpcReq { req: request })
+            .rpc(req)
+            .await
+            .wrap_err("clone info rpc transport failed (in-memory)")?
+            .map_err(|err| eyre::eyre!("clone info rpc failed: {err}"))?;
+        return Ok(response);
+    }
+    let endpoint = iroh::Endpoint::builder().bind().await?;
+    let client = irpc_iroh::client::<CloneProvisionRpc>(
+        endpoint.clone(),
+        endpoint_addr,
+        CLONE_PROVISION_ALPN,
+    );
+    let response_res = client.rpc(req).await;
+    endpoint.close().await;
+    let response = response_res
+        .wrap_err("clone info rpc transport failed")?
+        .map_err(|err| eyre::eyre!("clone info rpc failed: {err}"))?;
+    Ok(response)
+}
+
+#[tracing::instrument(skip(source_url))]
+pub async fn request_clone_provision_from_url(
+    source_url: &str,
+    req: RequestCloneProvisionReq,
+) -> Res<CloneProvisionResponse> {
+    let endpoint_addr = parse_clone_endpoint_addr(source_url)?;
+    let req = RequestCloneProvisionRpcReq { req };
+    #[cfg(test)]
+    if let Some(local_sender) = lookup_test_clone_rpc_sender(endpoint_addr.id).await {
+        let client = irpc::Client::<CloneProvisionRpc>::local(local_sender);
+        let response = client
+            .rpc(req)
             .await
             .wrap_err("clone provision rpc transport failed (in-memory)")?
             .map_err(|err| eyre::eyre!("clone provision rpc failed: {err}"))?;
@@ -129,29 +187,12 @@ pub async fn request_clone_provision_via_rpc(
         endpoint_addr,
         CLONE_PROVISION_ALPN,
     );
-    let response_res = client
-        .rpc(RequestCloneProvisionRpcReq { req: request })
-        .await;
+    let response_res = client.rpc(req).await;
     endpoint.close().await;
     let response = response_res
         .wrap_err("clone provision rpc transport failed")?
         .map_err(|err| eyre::eyre!("clone provision rpc failed: {err}"))?;
     Ok(response)
-}
-
-#[tracing::instrument(skip(source_url))]
-pub async fn resolve_bootstrap_from_url(source_url: &str) -> Res<SyncBootstrapState> {
-    request_clone_provision_via_rpc(
-        source_url,
-        CloneProvisionRequest {
-            requested_device_name: None,
-            provision: false,
-            requester_endpoint_id: None,
-            requester_peer_key: None,
-        },
-    )
-    .await?
-    .to_bootstrap_state()
 }
 
 #[tracing::instrument(skip(big_repo, blobs_repo, iroh_secret_key, bootstrap, timeout))]
@@ -183,6 +224,7 @@ pub async fn connect_and_pull_required_partitions_once(
     result
 }
 
+// FIXME: move parts of this into a RepoCtx method
 #[tracing::instrument(skip(source_url, destination, options))]
 pub async fn clone_repo_init_from_url(
     source_url: &str,
@@ -207,40 +249,53 @@ pub async fn clone_repo_init_from_url(
     tokio::fs::create_dir_all(&staging).await?;
 
     let cloned = async {
-        let provision = request_clone_provision_via_rpc(
+        // Generate identity locally — secret keys never leave the device.
+        let local_secret = iroh::SecretKey::generate(&mut rand::rng());
+        let local_public = local_secret.public();
+
+        let provision = request_clone_provision_from_url(
             source_url,
-            CloneProvisionRequest {
+            RequestCloneProvisionReq {
                 requested_device_name: Some(format!("clone-{}", std::env::consts::ARCH)),
-                provision: true,
-                requester_endpoint_id: None,
-                requester_peer_key: None,
+                requester_endpoint_id: local_public.to_string(),
             },
         )
         .await?;
         let bootstrap = provision.to_bootstrap_state()?;
+
+        let local_peer_key =
+            daybook_types::doc::format_peer_key(&bootstrap.repo_id, local_public.as_bytes());
+
         let sqlite_path = staging.join("sqlite.db");
         let sql = crate::app::SqlCtx::new(crate::app::SqlConfig {
             database_url: format!("sqlite://{}", sqlite_path.display()),
         })
         .await?;
-        crate::app::globals::set_repo_id(&sql.db_pool, &bootstrap.repo_id).await?;
-        let issued_secret_hex = provision
-            .issued_iroh_secret_key_hex
-            .ok_or_eyre("clone provision response missing issued_iroh_secret_key_hex")?;
-        let issued_public_key = provision
-            .issued_iroh_public_key
-            .ok_or_eyre("clone provision response missing issued_iroh_public_key")?;
-        let identity = crate::secrets::SecretRepo::set_identity_from_secret_hex(
-            &sql.db_pool,
-            &bootstrap.repo_id,
-            &issued_secret_hex,
-        )
-        .await?;
-        if identity.iroh_public_key.to_string() != issued_public_key {
+        crate::repo::globals::set_string_global(&sql, "global.repo_id", &bootstrap.repo_id).await?;
+        crate::repo::globals::set_string_global(&sql, "global.repo_name", &bootstrap.repo_name)
+            .await?;
+        let user_id = format!(
+            "{}{}",
+            daybook_types::doc::user_path::USER_ID_PREFIX,
+            Uuid::new_v4().bs58()
+        );
+        crate::repo::globals::set_string_global(&sql, "global.user_id", &user_id).await?;
+
+        let identity =
+            crate::secrets::SecretRepo::set_identity(&bootstrap.repo_id, local_secret.clone())
+                .await?;
+        if identity.iroh_public_key.to_string() != local_public.to_string() {
             eyre::bail!("provisioned public key mismatch while cloning");
         }
-        let _repo_user_id = crate::repo::get_or_init_repo_user_id(&sql.db_pool).await?;
-        let mut sync_config = crate::app::globals::get_sync_config(&sql.db_pool).await?;
+
+        let pkey_bs58 = utils_rs::hash::encode_base58_multibase(local_public.as_bytes());
+        let device_id = format!(
+            "{}{}",
+            daybook_types::doc::user_path::DEVICE_ID_PREFIX,
+            pkey_bs58
+        );
+        let local_user_path = format!("/{user_id}/{device_id}");
+        let mut sync_config = crate::repo::globals::get_sync_config(&sql).await?;
         if !sync_config
             .known_devices
             .iter()
@@ -248,7 +303,7 @@ pub async fn clone_repo_init_from_url(
         {
             sync_config
                 .known_devices
-                .push(crate::app::globals::SyncDeviceEntry {
+                .push(crate::repo::globals::SyncDeviceEntry {
                     endpoint_id: bootstrap.endpoint_id,
                     name: bootstrap
                         .device_name
@@ -257,7 +312,7 @@ pub async fn clone_repo_init_from_url(
                     added_at: jiff::Timestamp::now(),
                     last_connected_at: None,
                 });
-            crate::app::globals::set_sync_config(&sql.db_pool, &sync_config).await?;
+            crate::repo::globals::set_sync_config(&sql, &sync_config).await?;
         }
 
         let (big_repo, big_repo_stop) = am_utils_rs::BigRepo::boot(am_utils_rs::repo::Config {
@@ -270,58 +325,49 @@ pub async fn clone_repo_init_from_url(
         let source_peer_key = format!("/{}/{}", bootstrap.repo_id, bootstrap.endpoint_id);
         let (sync_store, sync_store_stop) =
             am_utils_rs::sync::store::spawn_sync_store(sql.db_pool.clone()).await?;
-        let allow_res = sync_store
-            .allow_peer(source_peer_key, Some(bootstrap.endpoint_id))
-            .await;
+        let allow_res = sync_store.allow_peer(source_peer_key.into()).await;
         let stop_res = sync_store_stop.stop().await;
         allow_res?;
         stop_res?;
-        let local_peer_key = format!("/{}/{}", bootstrap.repo_id, identity.iroh_public_key);
+
         let blobs_repo = crate::blobs::BlobsRepo::new(
             staging.join("blobs"),
             "clone-bootstrap".to_string(),
             Arc::new(crate::blobs::NoopPartitionMembershipWriter),
         )
         .await?;
-        let init_res: Res<()> = async {
-            connect_and_pull_required_partitions_once(
-                &big_repo,
-                &blobs_repo,
-                &local_peer_key,
-                identity.iroh_secret_key.clone(),
-                &bootstrap,
-                options.timeout,
-            )
-            .await?;
-            crate::app::globals::set_init_state(
-                &sql.db_pool,
-                &crate::app::globals::InitState::Created {
-                    doc_id_app: bootstrap.app_doc_id.clone(),
-                    doc_id_drawer: bootstrap.drawer_doc_id.clone(),
-                },
-            )
-            .await?;
-            crate::repo::mark_repo_initialized(&staging).await?;
-            Ok(())
-        }
-        .await;
-        let blobs_stop_res = blobs_repo.shutdown().await;
-        let stop_res = big_repo_stop.stop().await;
-        if let Err(err) = init_res {
-            if let Err(blobs_err) = blobs_stop_res {
-                return Err(err.wrap_err(format!(
-                    "additionally failed stopping clone bootstrap blobs repo: {blobs_err}"
-                )));
-            }
-            if let Err(stop_err) = stop_res {
-                return Err(err.wrap_err(format!(
-                    "additionally failed stopping clone bootstrap big repo: {stop_err}"
-                )));
-            }
-            return Err(err);
-        }
-        blobs_stop_res?;
-        stop_res?;
+
+        connect_and_pull_required_partitions_once(
+            &big_repo,
+            &blobs_repo,
+            &local_peer_key,
+            local_secret.clone(),
+            &bootstrap,
+            options.timeout,
+        )
+        .await?;
+
+        blobs_repo.shutdown().await?;
+
+        crate::repo::globals::set_init_state(
+            &sql,
+            &crate::repo::globals::InitState::Created {
+                doc_id_app: bootstrap.app_doc_id.clone(),
+                doc_id_drawer: bootstrap.drawer_doc_id.clone(),
+            },
+        )
+        .await?;
+
+        crate::repo::finish_clone_init(
+            &big_repo,
+            &sql,
+            local_user_path,
+            staging.join("blobs"),
+        )
+        .await?;
+        crate::repo::mark_repo_initialized(&staging).await?;
+
+        big_repo_stop.stop().await?;
         Ok::<SyncBootstrapState, eyre::Report>(bootstrap)
     }
     .await;
@@ -382,7 +428,7 @@ async fn pull_required_partitions_once(
         );
         let partition_list = partition_rpc
             .rpc(am_utils_rs::sync::protocol::ListPartitionsRpcReq {
-                peer: local_peer_key.to_string(),
+                peer: local_peer_key.into(),
             })
             .await
             .wrap_err("list required partitions rpc failed")?
@@ -424,7 +470,7 @@ async fn pull_required_partitions_once(
         );
         let full_docs = repo_rpc
             .rpc(am_utils_rs::repo::rpc::GetDocsFullRpcReq {
-                peer: local_peer_key.to_string(),
+                peer: local_peer_key.into(),
                 req: am_utils_rs::repo::rpc::GetDocsFullRequest {
                     doc_ids: vec![app_doc_id.clone(), drawer_doc_id.clone()],
                 },
@@ -500,7 +546,7 @@ async fn list_current_partition_members(
         let page = partition_rpc
             .rpc(
                 am_utils_rs::sync::protocol::GetPartitionMemberEventsRpcReq {
-                    peer: local_peer_key.to_string(),
+                    peer: local_peer_key.into(),
                     req: am_utils_rs::sync::protocol::GetPartitionMemberEventsRequest {
                         partitions: vec![am_utils_rs::sync::protocol::PartitionCursorRequest {
                             partition_id: partition_id.to_string(),
@@ -608,10 +654,12 @@ async fn ensure_blob_hash_present(
     Ok(())
 }
 
-fn parse_clone_endpoint_addr(input: &str) -> Res<iroh::EndpointAddr> {
-    let payload = input
-        .strip_prefix(&format!("{IROH_CLONE_URL_SCHEME}:"))
-        .ok_or_eyre("invalid clone url scheme, expected db+iroh-clone:<endpoint-ticket>")?;
+pub fn parse_clone_endpoint_addr(input: &str) -> Res<iroh::EndpointAddr> {
+    let payload = if let Some(stripped) = input.strip_prefix(&format!("{IROH_CLONE_URL_SCHEME}:")) {
+        stripped
+    } else {
+        input
+    };
     let endpoint_ticket = EndpointTicket::from_str(payload)
         .wrap_err("invalid endpoint ticket payload in clone url")?;
     Ok(endpoint_ticket.into())

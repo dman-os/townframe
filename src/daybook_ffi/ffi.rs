@@ -34,6 +34,12 @@ pub struct FfiCtx {
 pub type SharedFfiCtx = Arc<FfiCtx>;
 
 #[derive(Debug, Clone, uniffi::Record)]
+pub struct CloneInfo {
+    pub repo_name: String,
+    pub device_name: Option<String>,
+}
+
+#[derive(Debug, Clone, uniffi::Record)]
 pub struct CloneBootstrapInfo {
     pub endpoint_id: String,
     pub repo_id: String,
@@ -60,6 +66,13 @@ pub struct CloneDestinationCheck {
 pub struct CloneTicketWithQr {
     pub ticket_url: String,
     pub qr_png_bytes: Vec<u8>,
+}
+
+fn clone_info_to_ffi(info: daybook_core::sync::CloneInfoResponse) -> CloneInfo {
+    CloneInfo {
+        repo_name: info.repo_name,
+        device_name: info.device_name,
+    }
 }
 
 fn bootstrap_to_ffi(bootstrap: daybook_core::sync::SyncBootstrapState) -> CloneBootstrapInfo {
@@ -172,21 +185,23 @@ impl FfiCtx {
         let repo_root_for_init = std::path::PathBuf::from(repo_root);
 
         let (rcx, acx) = do_on_rt(&rt, async move {
-            let rcx = if daybook_core::repo::is_repo_initialized(&repo_root_for_init).await? {
-                acx.open_repo(
-                    &repo_root_for_init,
-                    daybook_core::repo::RepoOpenOptions {},
-                    format!("daybook-ffi-{}", std::env::consts::ARCH),
-                )
-                .await?
-            } else {
-                acx.init_repo(
-                    &repo_root_for_init,
-                    daybook_core::repo::RepoOpenOptions {},
-                    format!("daybook-ffi-{}", std::env::consts::ARCH),
-                )
-                .await?
-            };
+                let device_name = format!("daybook-ffi-{}", std::env::consts::ARCH);
+                let rcx = if daybook_core::repo::is_repo_initialized(&repo_root_for_init).await? {
+                    acx.open_repo(
+                        &repo_root_for_init,
+                        daybook_core::repo::RepoOpenOptions {},
+                        device_name.clone(),
+                    )
+                    .await?
+                } else {
+                    acx.init_repo(
+                        &repo_root_for_init,
+                        daybook_core::repo::RepoOpenOptions {},
+                        device_name.clone(),
+                        device_name,
+                    )
+                    .await?
+                };
             let rcx = Arc::new(rcx);
 
             eyre::Ok((rcx, acx))
@@ -260,9 +275,22 @@ impl AppFfiCtx {
         let repo_root = std::path::PathBuf::from(repo_root);
         let this = Arc::clone(&self);
         self.do_on_rt(async move {
-            let repo =
-                daybook_core::repo::upsert_known_repo(&this.inner.sql.db_pool, &repo_root).await?;
-            eyre::Ok(repo)
+            let device_name = format!("daybook-ffi-{}", std::env::consts::ARCH);
+            let rcx = this
+                .inner
+                .open_repo(
+                    &repo_root,
+                    daybook_core::repo::RepoOpenOptions {},
+                    device_name,
+                )
+                .await?;
+            let entry = daybook_core::app::globals::upsert_known_repo(
+                &this.inner.sql.db_pool,
+                &rcx,
+            )
+            .await?;
+            rcx.shutdown().await?;
+            eyre::Ok(entry)
         })
         .await
         .map_err(Into::into)
@@ -320,20 +348,10 @@ impl AppFfiCtx {
     async fn resolve_clone_url(
         self: Arc<Self>,
         source_url: String,
-    ) -> Result<CloneBootstrapInfo, FfiError> {
+    ) -> Result<CloneInfo, FfiError> {
         self.do_on_rt(async move {
-            let bootstrap = daybook_core::sync::request_clone_provision_via_rpc(
-                &source_url,
-                daybook_core::sync::CloneProvisionRequest {
-                    requested_device_name: None,
-                    provision: false,
-                    requester_endpoint_id: None,
-                    requester_peer_key: None,
-                },
-            )
-            .await?
-            .to_bootstrap_state()?;
-            Ok::<CloneBootstrapInfo, eyre::Report>(bootstrap_to_ffi(bootstrap))
+            let info = daybook_core::sync::resolve_clone_info_from_url(&source_url).await?;
+            Ok::<CloneInfo, eyre::Report>(clone_info_to_ffi(info))
         })
         .await
         .map_err(Into::into)
@@ -354,7 +372,16 @@ impl AppFfiCtx {
                 daybook_core::sync::CloneRepoInitOptions::default(),
             )
             .await?;
-            daybook_core::repo::upsert_known_repo(&this.inner.sql.db_pool, &out.repo_path).await?;
+            let device_name = format!("daybook-ffi-{}", std::env::consts::ARCH);
+            let rcx = this
+                .inner
+                .open_repo(
+                    &out.repo_path,
+                    daybook_core::repo::RepoOpenOptions {},
+                    device_name,
+                )
+                .await?;
+            rcx.shutdown().await?;
             Ok::<CloneInitResult, eyre::Report>(CloneInitResult {
                 repo_path: out.repo_path.display().to_string(),
                 bootstrap: bootstrap_to_ffi(out.bootstrap),

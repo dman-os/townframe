@@ -155,12 +155,12 @@ impl SyncRepoFfi {
     async fn connect_url(
         self: Arc<Self>,
         source_url: String,
-    ) -> Result<CloneBootstrapInfo, FfiError> {
+    ) -> Result<(), FfiError> {
         let this = Arc::clone(&self);
         self.fcx
             .do_on_rt(async move {
-                let bootstrap = this.repo.connect_url(&source_url).await?;
-                Ok::<CloneBootstrapInfo, FfiError>(bootstrap_to_ffi(bootstrap))
+                this.repo.connect_url(&source_url).await?;
+                Ok::<(), FfiError>(())
             })
             .await
     }

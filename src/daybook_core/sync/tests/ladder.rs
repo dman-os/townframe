@@ -6,7 +6,8 @@ async fn boot_connected_sync_pair(
     let repo_a_path = temp_root.path().join("repo-a");
     let repo_b_path = temp_root.path().join("repo-b");
     tokio::fs::create_dir_all(&repo_a_path).await?;
-    let rtx = RepoCtx::init(&repo_a_path, RepoOpenOptions {}, "test-device".into()).await?;
+    let device_name = "test-device".to_string();
+    let rtx = RepoCtx::init(&repo_a_path, RepoOpenOptions {}, device_name.clone(), device_name).await?;
     rtx.shutdown().await?;
     drop(rtx);
 
@@ -16,10 +17,11 @@ async fn boot_connected_sync_pair(
     let node_b = open_sync_node(&repo_b_path).await?;
 
     let addr_a = node_a.sync_repo.endpoint_addr();
+    let endpoint_id_a = addr_a.id;
     node_b.sync_repo.connect_endpoint_addr(addr_a).await?;
-    wait_for_sync_convergence(&node_a, &node_b, addr_a.id, Duration::from_secs(20)).await?;
+    wait_for_sync_convergence(&node_a, &node_b, endpoint_id_a, Duration::from_secs(20)).await?;
 
-    Ok((temp_root, node_a, node_b, addr_a.id))
+    Ok((temp_root, node_a, node_b, endpoint_id_a))
 }
 
 async fn update_title_at_main_branch(node: &SyncTestNode, doc_id: &String, title: &str) -> Res<()> {
@@ -228,7 +230,8 @@ async fn iroh_sync_single_doc_created_before_connect_replicates() -> Res<()> {
     let repo_a_path = temp_root.path().join("repo-a");
     let repo_b_path = temp_root.path().join("repo-b");
     tokio::fs::create_dir_all(&repo_a_path).await?;
-    let rtx = RepoCtx::init(&repo_a_path, RepoOpenOptions {}, "test-device".into()).await?;
+    let device_name = "test-device".to_string();
+    let rtx = RepoCtx::init(&repo_a_path, RepoOpenOptions {}, device_name.clone(), device_name).await?;
     rtx.shutdown().await?;
     drop(rtx);
 
@@ -254,8 +257,9 @@ async fn iroh_sync_single_doc_created_before_connect_replicates() -> Res<()> {
         .await?;
 
     let addr_a = node_a.sync_repo.endpoint_addr();
+    let endpoint_id_a = addr_a.id;
     node_b.sync_repo.connect_endpoint_addr(addr_a).await?;
-    wait_for_sync_convergence(&node_a, &node_b, addr_a.id, Duration::from_secs(20)).await?;
+    wait_for_sync_convergence(&node_a, &node_b, endpoint_id_a, Duration::from_secs(20)).await?;
 
     let doc_on_a = node_a
         .drawer
@@ -299,7 +303,8 @@ async fn iroh_sync_single_blob_created_before_connect_replicates() -> Res<()> {
     let repo_a_path = temp_root.path().join("repo-a");
     let repo_b_path = temp_root.path().join("repo-b");
     tokio::fs::create_dir_all(&repo_a_path).await?;
-    let rtx = RepoCtx::init(&repo_a_path, RepoOpenOptions {}, "test-device".into()).await?;
+    let device_name = "test-device".to_string();
+    let rtx = RepoCtx::init(&repo_a_path, RepoOpenOptions {}, device_name.clone(), device_name).await?;
     rtx.shutdown().await?;
     drop(rtx);
 
@@ -334,8 +339,9 @@ async fn iroh_sync_single_blob_created_before_connect_replicates() -> Res<()> {
         .await?;
 
     let addr_a = node_a.sync_repo.endpoint_addr();
+    let endpoint_id_a = addr_a.id;
     node_b.sync_repo.connect_endpoint_addr(addr_a).await?;
-    wait_for_sync_convergence(&node_a, &node_b, addr_a.id, Duration::from_secs(20)).await?;
+    wait_for_sync_convergence(&node_a, &node_b, endpoint_id_a, Duration::from_secs(20)).await?;
 
     let doc_on_a = node_a
         .drawer
@@ -380,7 +386,8 @@ async fn iroh_sync_single_doc_created_while_connected_replicates() -> Res<()> {
     let repo_a_path = temp_root.path().join("repo-a");
     let repo_b_path = temp_root.path().join("repo-b");
     tokio::fs::create_dir_all(&repo_a_path).await?;
-    let rtx = RepoCtx::init(&repo_a_path, RepoOpenOptions {}, "test-device".into()).await?;
+    let device_name = "test-device".to_string();
+    let rtx = RepoCtx::init(&repo_a_path, RepoOpenOptions {}, device_name.clone(), device_name).await?;
     rtx.shutdown().await?;
     drop(rtx);
 
@@ -390,8 +397,9 @@ async fn iroh_sync_single_doc_created_while_connected_replicates() -> Res<()> {
     let node_b = open_sync_node(&repo_b_path).await?;
 
     let addr_a = node_a.sync_repo.endpoint_addr();
+    let endpoint_id_a = addr_a.id;
     node_b.sync_repo.connect_endpoint_addr(addr_a).await?;
-    wait_for_sync_convergence(&node_a, &node_b, addr_a.id, Duration::from_secs(20)).await?;
+    wait_for_sync_convergence(&node_a, &node_b, endpoint_id_a, Duration::from_secs(20)).await?;
 
     let title_key = FacetKey::from(WellKnownFacetTag::TitleGeneric);
     let doc_on_a = node_a
@@ -453,7 +461,8 @@ async fn iroh_sync_single_blob_created_while_connected_replicates() -> Res<()> {
     let repo_a_path = temp_root.path().join("repo-a");
     let repo_b_path = temp_root.path().join("repo-b");
     tokio::fs::create_dir_all(&repo_a_path).await?;
-    let rtx = RepoCtx::init(&repo_a_path, RepoOpenOptions {}, "test-device".into()).await?;
+    let device_name = "test-device".to_string();
+    let rtx = RepoCtx::init(&repo_a_path, RepoOpenOptions {}, device_name.clone(), device_name).await?;
     rtx.shutdown().await?;
     drop(rtx);
 
@@ -463,8 +472,9 @@ async fn iroh_sync_single_blob_created_while_connected_replicates() -> Res<()> {
     let node_b = open_sync_node(&repo_b_path).await?;
 
     let addr_a = node_a.sync_repo.endpoint_addr();
+    let endpoint_id_a = addr_a.id;
     node_b.sync_repo.connect_endpoint_addr(addr_a).await?;
-    wait_for_sync_convergence(&node_a, &node_b, addr_a.id, Duration::from_secs(20)).await?;
+    wait_for_sync_convergence(&node_a, &node_b, endpoint_id_a, Duration::from_secs(20)).await?;
 
     let payload = b"connected sync blob".to_vec();
     let hash = node_a.blobs_repo.put(&payload).await?;
@@ -722,11 +732,11 @@ async fn iroh_sync_single_doc_survives_remote_restart_and_reconnect() -> Res<()>
     node_b.stop().await?;
 
     let reopened_b = open_sync_node(&repo_b_path).await?;
-    let reopened_bootstrap_ba = reopened_b.sync_repo.connect_url(&ticket_a).await?;
+    let reopened_endpoint_addr = reopened_b.sync_repo.connect_url(&ticket_a).await?;
     wait_for_sync_convergence(
         &node_a,
         &reopened_b,
-        reopened_bootstrap_ba.endpoint_id,
+        reopened_endpoint_addr.id,
         Duration::from_secs(20),
     )
     .await?;
@@ -850,6 +860,7 @@ async fn iroh_sync_shutdown_peer_updates_catch_up_after_reconnect() -> Res<()> {
 
     let reopened_a = open_sync_node(&repo_a_path).await?;
     let reopened_addr_a = reopened_a.sync_repo.endpoint_addr();
+    let reopened_endpoint_id = reopened_addr_a.id;
     node_b
         .sync_repo
         .connect_endpoint_addr(reopened_addr_a)
@@ -858,7 +869,7 @@ async fn iroh_sync_shutdown_peer_updates_catch_up_after_reconnect() -> Res<()> {
     node_b
         .sync_repo
         .wait_for_full_sync(
-            std::slice::from_ref(&reopened_addr_a.id),
+            std::slice::from_ref(&reopened_endpoint_id),
             Duration::from_secs(120),
         )
         .await?;
@@ -973,5 +984,79 @@ async fn iroh_sync_shutdown_peer_updates_catch_up_after_reconnect() -> Res<()> {
 
     reopened_a.stop().await?;
     node_b.stop().await?;
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn clone_bootstrap_populates_all_globals_and_can_open() -> Res<()> {
+    utils_rs::testing::setup_tracing_once();
+    std::env::set_var("DAYB_DISABLE_KEYRING", "1");
+    let temp_root = tempfile::tempdir()?;
+    let repo_a_path = temp_root.path().join("repo-a");
+    let repo_b_path = temp_root.path().join("repo-b");
+
+    tokio::fs::create_dir_all(&repo_a_path).await?;
+    let device_name = "test-device".to_string();
+    let rtx = RepoCtx::init(
+        &repo_a_path,
+        RepoOpenOptions {},
+        device_name.clone(),
+        device_name,
+    )
+    .await?;
+    let source_repo_id = rtx.repo_id.clone();
+    let source_repo_name = rtx.repo_name.clone();
+    let source_doc_app = rtx.doc_app.document_id().clone();
+    let source_doc_drawer = rtx.doc_drawer.document_id().clone();
+    rtx.shutdown().await?;
+    drop(rtx);
+
+    let node_a = open_sync_node(&repo_a_path).await?;
+    let ticket = node_a.sync_repo.get_clone_ticket_url().await?;
+    bootstrap_clone_repo_from_url_for_tests(&ticket, &repo_b_path).await?;
+    node_a.stop().await?;
+
+    let cloned =
+        RepoCtx::open(&repo_b_path, RepoOpenOptions {}, "clone-device".to_string()).await?;
+
+    assert_eq!(
+        cloned.repo_id, source_repo_id,
+        "clone must share the source repo_id"
+    );
+    assert_eq!(
+        cloned.repo_name, source_repo_name,
+        "clone must share the source repo_name"
+    );
+    assert_eq!(
+        cloned.local_device_name, "clone-device",
+        "clone must accept a local device name on open"
+    );
+
+    let user_id = crate::repo::globals::get_string_global(&cloned.sql, "global.user_id")
+        .await?
+        .ok_or_eyre("global.user_id missing from cloned repo")?;
+    assert!(
+        user_id.starts_with(daybook_types::doc::user_path::USER_ID_PREFIX),
+        "user_id must start with USER_ID_PREFIX, got: {user_id}"
+    );
+    assert!(
+        cloned.local_user_path.contains(&user_id),
+        "local_user_path must embed the user_id: {} not in {}",
+        user_id,
+        cloned.local_user_path
+    );
+
+    assert_eq!(
+        cloned.doc_app.document_id(),
+        &source_doc_app,
+        "cloned app_doc must reference the source's app doc id"
+    );
+    assert_eq!(
+        cloned.doc_drawer.document_id(),
+        &source_doc_drawer,
+        "cloned drawer_doc must reference the source's drawer doc id"
+    );
+
+    cloned.shutdown().await?;
     Ok(())
 }

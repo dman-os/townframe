@@ -83,7 +83,7 @@ impl ImportSyncWorker {
         let target = &self.target;
         let rpc_client = irpc_iroh::client::<am_utils_rs::repo::rpc::RepoSyncRpc>(
             self.iroh_endpoint.clone(),
-            iroh::EndpointAddr::new(target.peer_id),
+            iroh::EndpointAddr::new(target.peer_id.into()),
             REPO_SYNC_ALPN,
         );
         let rpc_response = tokio::select! {

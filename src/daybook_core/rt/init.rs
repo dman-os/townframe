@@ -41,7 +41,7 @@ pub struct InitRepo {
     app_am_handle: am_utils_rs::repo::BigDocHandle,
     store: crate::stores::AmStoreHandle<InitStore>,
     local_actor_id: ActorId,
-    sql_pool: sqlx::SqlitePool,
+    repo_sql: SqlCtx,
     running_dispatches: tokio::sync::RwLock<HashMap<String, String>>,
     per_boot_done: tokio::sync::RwLock<HashSet<String>>,
     cancel_token: CancellationToken,
@@ -64,7 +64,7 @@ impl InitRepo {
         big_repo: SharedBigRepo,
         app_doc_id: DocumentId,
         local_actor_id: ActorId,
-        sql_pool: sqlx::SqlitePool,
+        repo_sql: SqlCtx,
     ) -> Res<(Arc<Self>, crate::repos::RepoStopToken)> {
         sqlx::query(
             r#"
@@ -74,7 +74,7 @@ impl InitRepo {
             )
             "#,
         )
-        .execute(&sql_pool)
+        .execute(&repo_sql.db_pool)
         .await?;
 
         let registry = crate::repos::ListenersRegistry::new();
@@ -102,7 +102,7 @@ impl InitRepo {
             app_am_handle,
             store,
             local_actor_id,
-            sql_pool,
+            repo_sql,
             running_dispatches: default(),
             per_boot_done: default(),
             cancel_token: cancel_token.clone(),
@@ -277,7 +277,7 @@ impl InitRepo {
                     "SELECT init_id FROM init_per_node WHERE init_id = ?1",
                 )
                 .bind(init_id)
-                .fetch_optional(&self.sql_pool)
+                .fetch_optional(&self.repo_sql.db_pool)
                 .await?;
                 rec.is_some()
             }
@@ -323,7 +323,7 @@ impl InitRepo {
                 )
                 .bind(init_id)
                 .bind(jiff::Timestamp::now().to_string())
-                .execute(&self.sql_pool)
+                .execute(&self.repo_sql.db_pool)
                 .await?;
             }
             daybook_types::manifest::InitRunMode::PerBoot => {

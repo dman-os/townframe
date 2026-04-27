@@ -3,6 +3,7 @@
 // FIXME: break aprart file, NVIM is lagging like 500ms on each scroll
 // FIXME: remove tmp branches from the branch doc and use sqliite
 
+use crate::app::SqlCtx;
 use crate::interlude::*;
 use crate::plugs::PlugsRepo;
 
@@ -60,7 +61,7 @@ pub struct DrawerRepo {
     _change_listener_tickets: Vec<am_utils_rs::repo::BigRepoChangeListenerRegistration>,
     current_heads: std::sync::Mutex<ChangeHashSet>,
     drawer_am_handle: am_utils_rs::repo::BigDocHandle,
-    meta_db_pool: sqlx::SqlitePool,
+    meta_store_sql: SqlCtx,
     plugs_repo: Option<Arc<crate::plugs::PlugsRepo>>,
 }
 
@@ -96,7 +97,7 @@ impl DrawerRepo {
         big_repo: SharedBigRepo,
         drawer_doc_id: DocumentId,
         local_user_path: daybook_types::doc::UserPath,
-        meta_db_pool: sqlx::SqlitePool,
+        meta_db_pool: SqlCtx,
         _local_state_root: PathBuf,
         entry_pool: SharedKeyedLruPool<DocId>,
         doc_pool: SharedKeyedLruPool<FacetCacheKey>,
@@ -143,7 +144,7 @@ impl DrawerRepo {
             _change_listener_tickets: vec![ticket],
             current_heads: initial_heads.into(),
             drawer_am_handle,
-            meta_db_pool,
+            meta_store_sql: meta_db_pool,
             #[cfg(not(test))]
             plugs_repo: Some(plugs_repo),
             #[cfg(test)]
@@ -378,7 +379,9 @@ impl DrawerRepo {
     ) -> Res<HashSet<FacetKey>> {
         let branch_doc_id = DocumentId::from_str(&snapshot.branch_doc_id)
             .wrap_err_with(|| format!("invalid branch doc id '{}'", snapshot.branch_doc_id))?;
-        let handle = self.big_repo.get_doc(&branch_doc_id)
+        let handle = self
+            .big_repo
+            .get_doc(&branch_doc_id)
             .await?
             .ok_or_eyre("branch doc handle missing for tombstoned branch")?;
         let keys = handle

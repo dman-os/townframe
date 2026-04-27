@@ -234,7 +234,7 @@ pub async fn test_cx_with_options(
         app_doc_id.clone(),
         Arc::clone(&plugs_repo),
         local_user_path.clone(),
-        sql_ctx.db_pool.clone(),
+        sql_ctx.clone(),
     )
     .await?;
     let config_user_path =
@@ -252,7 +252,7 @@ pub async fn test_cx_with_options(
         Arc::clone(&big_repo),
         app_doc_id.clone(),
         local_user_path.clone(),
-        sql_ctx.db_pool.clone(),
+        sql_ctx.clone(),
     )
     .await?;
     let dispatch_user_path =
@@ -262,12 +262,12 @@ pub async fn test_cx_with_options(
         .upsert_actor_user_path(dispatch_actor_id, dispatch_user_path)
         .await?;
     let (progress_repo, progress_stop) =
-        crate::progress::ProgressRepo::boot(sql_ctx.db_pool.clone()).await?;
+        crate::progress::ProgressRepo::boot(sql_ctx.clone()).await?;
     let (drawer_repo, drawer_stop) = DrawerRepo::load(
         Arc::clone(&big_repo),
         drawer_doc_id,
         local_user_path.clone(),
-        sql_ctx.db_pool.clone(),
+        sql_ctx.clone(),
         temp_dir.path().join("local_states"),
         Arc::new(std::sync::Mutex::new(
             crate::drawer::lru::KeyedLruPool::new(1000),
@@ -308,7 +308,7 @@ pub async fn test_cx_with_options(
         },
         app_doc_id,
         wflow_db_url,
-        sql_ctx.db_pool.clone(),
+        sql_ctx.clone(),
         Arc::clone(&big_repo),
         Arc::clone(&drawer_repo),
         Arc::clone(&plugs_repo),

@@ -106,7 +106,7 @@ pub struct ConfigRepo {
     plug_repo: Arc<PlugsRepo>,
     local_actor_id: ActorId,
     local_peer_id: am_utils_rs::repo::PeerId,
-    sql_pool: sqlx::SqlitePool,
+    repo_sql: crate::app::SqlCtx,
     cancel_token: CancellationToken,
     sync_config_lock: tokio::sync::Mutex<()>,
     _change_listener_tickets: Vec<am_utils_rs::repo::BigRepoChangeListenerRegistration>,
@@ -179,7 +179,7 @@ impl ConfigRepo {
         app_doc_id: DocumentId,
         plug_repo: Arc<PlugsRepo>,
         local_user_path: daybook_types::doc::UserPath,
-        sql_pool: sqlx::SqlitePool,
+        repo_sql: crate::app::SqlCtx,
     ) -> Res<(Arc<Self>, crate::repos::RepoStopToken)> {
         let registry = crate::repos::ListenersRegistry::new();
         let store_val = ConfigStore::load(&big_repo, &app_doc_id).await?;
@@ -231,7 +231,7 @@ impl ConfigRepo {
             plug_repo,
             local_actor_id,
             local_peer_id: big_repo.local_peer_id(),
-            sql_pool,
+            repo_sql,
             cancel_token: cancel_token.clone(),
             sync_config_lock: tokio::sync::Mutex::new(()),
             _change_listener_tickets: vec![ticket],
@@ -635,7 +635,7 @@ impl ConfigRepo {
     }
 
     pub async fn list_known_sync_devices(&self) -> Res<Vec<crate::repo::globals::SyncDeviceEntry>> {
-        let config = crate::repo::globals::get_sync_config(&self.sql_pool).await?;
+        let config = crate::repo::globals::get_sync_config(&self.repo_sql).await?;
         Ok(config.known_devices)
     }
 
@@ -647,7 +647,7 @@ impl ConfigRepo {
             eyre::bail!("repo is stopped");
         }
         let _sync_config_guard = self.sync_config_lock.lock().await;
-        let mut config = crate::repo::globals::get_sync_config(&self.sql_pool).await?;
+        let mut config = crate::repo::globals::get_sync_config(&self.repo_sql).await?;
         if let Some(existing) = config
             .known_devices
             .iter_mut()
@@ -657,7 +657,7 @@ impl ConfigRepo {
         } else {
             config.known_devices.push(device);
         }
-        crate::repo::globals::set_sync_config(&self.sql_pool, &config).await?;
+        crate::repo::globals::set_sync_config(&self.repo_sql, &config).await?;
         self.registry.notify([ConfigEvent::SyncDevicesChanged {
             origin: self.local_origin(),
         }]);
@@ -669,14 +669,14 @@ impl ConfigRepo {
             eyre::bail!("repo is stopped");
         }
         let _sync_config_guard = self.sync_config_lock.lock().await;
-        let mut config = crate::repo::globals::get_sync_config(&self.sql_pool).await?;
+        let mut config = crate::repo::globals::get_sync_config(&self.repo_sql).await?;
         let before = config.known_devices.len();
         config
             .known_devices
             .retain(|entry| &entry.endpoint_id != endpoint_id);
         let removed = config.known_devices.len() != before;
         if removed {
-            crate::repo::globals::set_sync_config(&self.sql_pool, &config).await?;
+            crate::repo::globals::set_sync_config(&self.repo_sql, &config).await?;
             self.registry.notify([ConfigEvent::SyncDevicesChanged {
                 origin: self.local_origin(),
             }]);
@@ -693,7 +693,7 @@ impl ConfigRepo {
             eyre::bail!("repo is stopped");
         }
         let _sync_config_guard = self.sync_config_lock.lock().await;
-        let mut config = crate::repo::globals::get_sync_config(&self.sql_pool).await?;
+        let mut config = crate::repo::globals::get_sync_config(&self.repo_sql).await?;
         if config
             .known_devices
             .iter()
@@ -709,7 +709,7 @@ impl ConfigRepo {
                 added_at: jiff::Timestamp::now(),
                 last_connected_at: None,
             });
-        crate::repo::globals::set_sync_config(&self.sql_pool, &config).await?;
+        crate::repo::globals::set_sync_config(&self.repo_sql, &config).await?;
         self.registry.notify([ConfigEvent::SyncDevicesChanged {
             origin: self.local_origin(),
         }]);
@@ -759,7 +759,7 @@ mod tests {
             app_doc_id,
             plugs_repo,
             local_user_path.clone(),
-            sql_ctx.db_pool.clone(),
+            sql_ctx.clone(),
         )
         .await?;
 

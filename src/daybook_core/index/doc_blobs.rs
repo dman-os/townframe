@@ -1054,8 +1054,7 @@ mod tests {
             crate::app::SqlCtx::new(crate::app::SqlConfig {
                 database_url: "sqlite::memory:".into(),
             })
-            .await?
-            .db_pool,
+            .await?,
             temp_dir.path().join("drawer-local-state"),
             Arc::new(std::sync::Mutex::new(
                 crate::drawer::lru::KeyedLruPool::new(1000),

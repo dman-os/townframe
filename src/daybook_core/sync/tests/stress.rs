@@ -182,10 +182,12 @@ async fn init_and_copy_repo_cluster(root: &std::path::Path) -> Res<Vec<PathBuf>>
         .map(|idx| root.join(format!("repo-{idx}")))
         .collect::<Vec<_>>();
     tokio::fs::create_dir_all(&paths[0]).await?;
+    let device_name = "stress-test-device".to_string();
     let rtx = RepoCtx::init(
         &paths[0],
         RepoOpenOptions::default(),
-        "stress-test-device".into(),
+        device_name.clone(),
+        device_name,
     )
     .await?;
     let source_repo_id = rtx.repo_id.clone();
@@ -254,12 +256,12 @@ async fn connect_topology(
             .ok_or_eyre("node missing while connecting")?;
 
         let ticket_b = node_b.sync_repo.get_clone_ticket_url().await?;
-        let bootstrap_ab = node_a.sync_repo.connect_url(&ticket_b).await?;
-        endpoint_sets[*a].insert(bootstrap_ab.endpoint_id);
+        let endpoint_addr_ab = node_a.sync_repo.connect_url(&ticket_b).await?;
+        endpoint_sets[*a].insert(endpoint_addr_ab.id);
 
         let ticket_a = node_a.sync_repo.get_clone_ticket_url().await?;
-        let bootstrap_ba = node_b.sync_repo.connect_url(&ticket_a).await?;
-        endpoint_sets[*b].insert(bootstrap_ba.endpoint_id);
+        let endpoint_addr_ba = node_b.sync_repo.connect_url(&ticket_a).await?;
+        endpoint_sets[*b].insert(endpoint_addr_ba.id);
     }
     Ok(endpoint_sets)
 }

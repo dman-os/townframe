@@ -37,7 +37,7 @@
 
           androidBuildToolsVersion = "35.0.0";
           androidApiLevel = "31";
-          rustVersion = "2026-01-01";
+          rustVersion = "2026-04-16";
 
           ghjkMainEnv = {
             CARGO_BUILD_JOBS = "8";

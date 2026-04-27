@@ -385,11 +385,19 @@ impl IrohSyncRepo {
                 }
                 val = clone_rpc_rx.recv() => {
                     let msg = val.ok_or_eyre("clone rpc is down")?;
+                    use irpc::WithChannels;
                     match msg {
-                        bootstrap::CloneProvisionRpcMessage::RequestCloneProvision(req) => {
-                            use irpc::WithChannels;
+                        bootstrap::CloneProvisionRpcMessage::ResolveCloneInfo(req) => {
                             let WithChannels { inner, tx, .. } = req;
-                            let out = self.handle_clone_provision_request(inner.req).await;
+                            let out = self.handle_resolve_clone_info(inner.req).await;
+                            tx.send(out.map_err(|err| format!("{err:#}")))
+                                .await
+                                .inspect_err(|_| warn!(ERROR_CALLER))
+                                .ok();
+                        }
+                        bootstrap::CloneProvisionRpcMessage::RequestCloneProvision(req) => {
+                            let WithChannels { inner, tx, .. } = req;
+                            let out = self.handle_request_clone_provision(inner.req).await;
                             tx.send(out.map_err(|err| format!("{err:#}")))
                                 .await
                                 .inspect_err(|_| warn!(ERROR_CALLER))
@@ -480,7 +488,6 @@ impl IrohSyncRepo {
                 peer_key: Arc::clone(&peer_key),
             }];
             let partition_ids = self.peer_partition_ids(&peer_key);
-            self.sync_store.allow_peer(Arc::clone(&peer_key)).await?;
             let remote_info = self
                 .router
                 .endpoint()
@@ -541,66 +548,37 @@ impl IrohSyncRepo {
         Ok(())
     }
 
-    async fn handle_clone_provision_request(
+    async fn handle_resolve_clone_info(
         &self,
-        req: bootstrap::CloneProvisionRequest,
+        req: bootstrap::CloneInfoRequest,
+    ) -> Res<bootstrap::CloneInfoResponse> {
+        let _ = req;
+        Ok(bootstrap::CloneInfoResponse {
+            repo_name: self.rcx.repo_name.clone(),
+            device_name: Some(self.rcx.local_device_name.clone()),
+        })
+    }
+
+    async fn handle_request_clone_provision(
+        &self,
+        req: bootstrap::RequestCloneProvisionReq,
     ) -> Res<bootstrap::CloneProvisionResponse> {
-        if let (Some(requester_peer_key), Some(requester_endpoint_id)) = (
-            req.requester_peer_key.as_ref(),
-            req.requester_endpoint_id.as_ref(),
-        ) {
-            let endpoint_id = iroh::PublicKey::from_str(requester_endpoint_id)
-                .wrap_err("invalid requester_endpoint_id in clone provision request")?;
-            self.sync_store
-                .allow_peer(requester_peer_key.into())
-                .await?;
-        }
-        let bootstrap = {
-            let endpoint_addr = self.router.endpoint().addr();
-            let endpoint_id = endpoint_addr.id;
-            SyncBootstrapState {
-                endpoint_addr,
-                endpoint_id,
-                repo_id: self.rcx.repo_id.clone(),
-                repo_name: self.rcx.repo_name.clone(),
-                app_doc_id: self.rcx.doc_app.document_id().clone(),
-                drawer_doc_id: self.rcx.doc_drawer.document_id().clone(),
-                device_name: Some(self.rcx.local_device_name.clone()),
-            }
-        };
-        if !req.provision {
-            return Ok(bootstrap::CloneProvisionResponse {
-                endpoint_addr: bootstrap.endpoint_addr.clone(),
-                repo_id: bootstrap.repo_id,
-                repo_name: bootstrap.repo_name,
-                app_doc_id: bootstrap.app_doc_id.to_string(),
-                drawer_doc_id: bootstrap.drawer_doc_id.to_string(),
-                device_name: bootstrap.device_name,
-                issued_iroh_secret_key_hex: None,
-                issued_iroh_public_key: None,
-                issued_peer_key: None,
-            });
-        }
-        let issued_secret = iroh::SecretKey::generate(&mut rand::rng());
-        let issued_public = issued_secret.public();
-        let issued_peer_key =
-            daybook_types::doc::format_peer_key(&self.rcx.repo_id, issued_public.as_bytes());
-        self.sync_store.allow_peer(issued_peer_key.clone()).await?;
+        let endpoint_id = iroh::PublicKey::from_str(&req.requester_endpoint_id)
+            .wrap_err("invalid requester_endpoint_id in clone provision request")?;
+        let requester_peer_key =
+            daybook_types::doc::format_peer_key(&self.rcx.repo_id, endpoint_id.as_bytes());
+        self.sync_store.allow_peer(requester_peer_key).await?;
+        let endpoint_addr = self.router.endpoint().addr();
         let device_name = req
             .requested_device_name
-            .unwrap_or_else(|| format!("clone-{}", issued_public));
+            .unwrap_or_else(|| format!("clone-{}", endpoint_id));
         Ok(bootstrap::CloneProvisionResponse {
-            endpoint_addr: bootstrap.endpoint_addr,
-            repo_id: bootstrap.repo_id,
-            repo_name: bootstrap.repo_name,
-            app_doc_id: bootstrap.app_doc_id.to_string(),
-            drawer_doc_id: bootstrap.drawer_doc_id.to_string(),
+            endpoint_addr,
+            repo_id: self.rcx.repo_id.clone(),
+            repo_name: self.rcx.repo_name.clone(),
+            app_doc_id: self.rcx.doc_app.document_id().to_string(),
+            drawer_doc_id: self.rcx.doc_drawer.document_id().to_string(),
             device_name: Some(device_name),
-            issued_iroh_secret_key_hex: Some(
-                data_encoding::HEXLOWER.encode(&issued_secret.to_bytes()),
-            ),
-            issued_iroh_public_key: Some(issued_public.to_string()),
-            issued_peer_key: Some(issued_peer_key),
         })
     }
 
@@ -611,16 +589,6 @@ impl IrohSyncRepo {
         }
         active_peers.insert(peer_id, ActivePeerState::Connecting);
         true
-    }
-
-    async fn clear_pending_connection(&self, peer_id: PeerId) {
-        let mut active_peers = self.active_peers.write().await;
-        if matches!(
-            active_peers.get(&peer_id),
-            Some(ActivePeerState::Connecting)
-        ) {
-            active_peers.remove(&peer_id);
-        }
     }
 
     async fn handle_full_sync_evt(&self, evt: full::FullSyncEvent) -> Res<()> {
@@ -694,7 +662,6 @@ impl IrohSyncRepo {
             }];
 
             let partition_ids = self.peer_partition_ids(&peer_key);
-            self.sync_store.allow_peer(peer_key.clone()).await?;
             let conn = self
                 .rcx
                 .big_repo
@@ -726,14 +693,11 @@ impl IrohSyncRepo {
         Ok(())
     }
 
-    pub async fn connect_url(&self, source_url: &str) -> Res<bootstrap::SyncBootstrapState> {
+    pub async fn connect_url(&self, source_url: &str) -> Res<iroh::EndpointAddr> {
         self.ensure_repo_live()?;
-        let endpoint_addr = parse_clone_endpoint_addr(source_url)?;
-        let endpoint_ticket = EndpointTicket::from_str(payload)
-            .wrap_err("invalid endpoint ticket payload in clone url")?;
-        self.connect_endpoint_addr(bootstrap.endpoint_addr.clone())
-            .await?;
-        Ok(bootstrap)
+        let endpoint_addr = bootstrap::parse_clone_endpoint_addr(source_url)?;
+        self.connect_endpoint_addr(endpoint_addr.clone()).await?;
+        Ok(endpoint_addr)
     }
 
     pub async fn connect_known_devices_once(&self) -> Res<()> {
@@ -774,9 +738,11 @@ impl IrohSyncRepo {
         if target_peers.is_empty() {
             return Ok(());
         }
+        let peer_ids: Vec<am_utils_rs::ids::PeerId32> =
+            endpoint_ids.iter().cloned().map(Into::into).collect();
         let initial_snapshot = self
             .full_sync_handle
-            .get_peer_sync_snapshot(endpoint_ids)
+            .get_peer_sync_snapshot(peer_ids.clone())
             .await?;
         debug!(
             target_peers = ?target_peers,
@@ -785,7 +751,7 @@ impl IrohSyncRepo {
         );
         let timeout_outcome = tokio::time::timeout(timeout, async {
             self.full_sync_handle
-                .wait_for_peers_fully_synced(endpoint_ids)
+                .wait_for_peers_fully_synced(peer_ids.clone())
                 .await?;
             eyre::Ok(())
         })
@@ -795,20 +761,21 @@ impl IrohSyncRepo {
             Err(_) => {
                 let latest_snapshot = self
                     .full_sync_handle
-                    .get_peer_sync_snapshot(endpoint_ids)
+                    .get_peer_sync_snapshot(peer_ids.clone())
                     .await
                     .map(|snapshot| format!("{snapshot:?}"))
                     .unwrap_or_else(|err| format!("snapshot_error={err:?}"));
                 let remaining = self
                     .full_sync_handle
-                    .get_peer_sync_snapshot(endpoint_ids)
+                    .get_peer_sync_snapshot(peer_ids.clone())
                     .await
                     .map(|snapshot| {
                         target_peers
                             .iter()
                             .filter(|endpoint_id| {
+                                let peer_id: am_utils_rs::ids::PeerId32 = (**endpoint_id).into();
                                 !snapshot
-                                    .get(*endpoint_id)
+                                    .get(&peer_id)
                                     .is_some_and(|peer| peer.emitted_full_synced)
                             })
                             .copied()
@@ -997,14 +964,9 @@ mod tests {
         }
 
         let sync_url = node_a.sync_repo.get_clone_ticket_url().await?;
-        let bootstrap = node_b.sync_repo.connect_url(&sync_url).await?;
-        wait_for_sync_convergence(
-            &node_a,
-            &node_b,
-            bootstrap.endpoint_id,
-            Duration::from_secs(20),
-        )
-        .await?;
+        let endpoint_addr = node_b.sync_repo.connect_url(&sync_url).await?;
+        wait_for_sync_convergence(&node_a, &node_b, endpoint_addr.id, Duration::from_secs(20))
+            .await?;
         for doc_id in &created_doc_ids {
             wait_for_doc_presence_with_activity(&node_b, doc_id, Duration::from_secs(60)).await?;
         }
@@ -1034,14 +996,9 @@ mod tests {
         let node_b = open_sync_node(&repo_b_path).await?;
 
         let sync_url = node_a.sync_repo.get_clone_ticket_url().await?;
-        let bootstrap = node_b.sync_repo.connect_url(&sync_url).await?;
-        wait_for_sync_convergence(
-            &node_a,
-            &node_b,
-            bootstrap.endpoint_id,
-            Duration::from_secs(20),
-        )
-        .await?;
+        let endpoint_addr = node_b.sync_repo.connect_url(&sync_url).await?;
+        wait_for_sync_convergence(&node_a, &node_b, endpoint_addr.id, Duration::from_secs(20))
+            .await?;
 
         let doc_on_a = node_a
             .drawer
@@ -1087,7 +1044,14 @@ mod tests {
         let repo_b_path = temp_root.path().join("repo-b");
 
         tokio::fs::create_dir_all(&repo_a_path).await?;
-        let rtx = RepoCtx::init(&repo_a_path, RepoOpenOptions {}, "test-device".into()).await?;
+        let device_name = "test-device".to_string();
+        let rtx = RepoCtx::init(
+            &repo_a_path,
+            RepoOpenOptions {},
+            device_name.clone(),
+            device_name,
+        )
+        .await?;
         rtx.shutdown().await?;
         drop(rtx);
 
@@ -1100,14 +1064,9 @@ mod tests {
         let node_b = open_sync_node(&repo_b_path).await?;
 
         let sync_url = node_a.sync_repo.get_clone_ticket_url().await?;
-        let bootstrap = node_b.sync_repo.connect_url(&sync_url).await?;
-        wait_for_sync_convergence(
-            &node_a,
-            &node_b,
-            bootstrap.endpoint_id,
-            Duration::from_secs(20),
-        )
-        .await?;
+        let endpoint_addr = node_b.sync_repo.connect_url(&sync_url).await?;
+        wait_for_sync_convergence(&node_a, &node_b, endpoint_addr.id, Duration::from_secs(20))
+            .await?;
 
         let doc_id = node_a
             .drawer
@@ -1172,7 +1131,14 @@ mod tests {
         let repo_b_path = temp_root.path().join("repo-b");
 
         tokio::fs::create_dir_all(&repo_a_path).await?;
-        let rtx = RepoCtx::init(&repo_a_path, RepoOpenOptions {}, "test-device".into()).await?;
+        let device_name = "test-device".to_string();
+        let rtx = RepoCtx::init(
+            &repo_a_path,
+            RepoOpenOptions {},
+            device_name.clone(),
+            device_name,
+        )
+        .await?;
         rtx.shutdown().await?;
         drop(rtx);
 
@@ -1224,18 +1190,21 @@ mod tests {
         let repo_path = temp_root.path().join("repo-a");
         tokio::fs::create_dir_all(&repo_path).await?;
 
-        let rtx = RepoCtx::init(&repo_path, RepoOpenOptions {}, "test-device".into()).await?;
+        let device_name = "test-device".to_string();
+        let rtx = RepoCtx::init(
+            &repo_path,
+            RepoOpenOptions {},
+            device_name.clone(),
+            device_name,
+        )
+        .await?;
         rtx.shutdown().await?;
         drop(rtx);
 
         let node = open_sync_node(&repo_path).await?;
         let ticket = node.sync_repo.get_clone_ticket_url().await?;
-        let bootstrap = crate::sync::resolve_bootstrap_from_url(&ticket).await?;
-        let addr_debug = format!("{:?}", bootstrap.endpoint_addr);
-        assert!(
-            !addr_debug.contains("Relay("),
-            "test bootstrap endpoint should not advertise relay addresses: {addr_debug}"
-        );
+        let info = crate::sync::resolve_clone_info_from_url(&ticket).await?;
+        assert!(!info.repo_name.is_empty());
         node.stop().await?;
         Ok(())
     }
@@ -1278,14 +1247,9 @@ mod tests {
         assert_eq!(created.len(), 100);
 
         let sync_url = node_a.sync_repo.get_clone_ticket_url().await?;
-        let bootstrap = node_b.sync_repo.connect_url(&sync_url).await?;
-        wait_for_sync_convergence(
-            &node_a,
-            &node_b,
-            bootstrap.endpoint_id,
-            Duration::from_secs(120),
-        )
-        .await?;
+        let endpoint_addr = node_b.sync_repo.connect_url(&sync_url).await?;
+        wait_for_sync_convergence(&node_a, &node_b, endpoint_addr.id, Duration::from_secs(20))
+            .await?;
         let ids_a = list_doc_ids(&node_a.drawer).await?;
         let ids_b = list_doc_ids(&node_b.drawer).await?;
         assert_eq!(
@@ -1337,14 +1301,9 @@ mod tests {
         node_a.drawer.batch_add(args_batch).await?;
 
         let sync_url = node_a.sync_repo.get_clone_ticket_url().await?;
-        let bootstrap = node_b.sync_repo.connect_url(&sync_url).await?;
-        wait_for_sync_convergence(
-            &node_a,
-            &node_b,
-            bootstrap.endpoint_id,
-            Duration::from_secs(60),
-        )
-        .await?;
+        let endpoint_addr = node_b.sync_repo.connect_url(&sync_url).await?;
+        wait_for_sync_convergence(&node_a, &node_b, endpoint_addr.id, Duration::from_secs(60))
+            .await?;
 
         for (hash, expected) in &blob_payloads {
             let got =
@@ -1369,7 +1328,14 @@ mod tests {
         let repo_b_path = temp_root.path().join("repo-b");
 
         tokio::fs::create_dir_all(&repo_a_path).await?;
-        let rtx = RepoCtx::init(&repo_a_path, RepoOpenOptions {}, "test-device".into()).await?;
+        let device_name = "test-device".to_string();
+        let rtx = RepoCtx::init(
+            &repo_a_path,
+            RepoOpenOptions {},
+            device_name.clone(),
+            device_name,
+        )
+        .await?;
         rtx.shutdown().await?;
         drop(rtx);
 
@@ -1393,14 +1359,9 @@ mod tests {
         bootstrap_clone_repo_from_url_for_tests(&sync_url, &repo_b_path).await?;
 
         let node_b = open_sync_node(&repo_b_path).await?;
-        let bootstrap = node_b.sync_repo.connect_url(&sync_url).await?;
-        wait_for_sync_convergence(
-            &node_a,
-            &node_b,
-            bootstrap.endpoint_id,
-            Duration::from_secs(30),
-        )
-        .await?;
+        let endpoint_addr = node_b.sync_repo.connect_url(&sync_url).await?;
+        wait_for_sync_convergence(&node_a, &node_b, endpoint_addr.id, Duration::from_secs(30))
+            .await?;
 
         for doc_id in &created_doc_ids {
             wait_for_doc_presence_with_activity(&node_b, doc_id, Duration::from_secs(60)).await?;
@@ -1514,23 +1475,38 @@ mod tests {
         }
 
         tokio::fs::create_dir_all(repo_a_path).await?;
-        let rtx = RepoCtx::init(repo_a_path, RepoOpenOptions {}, "test-device".into()).await?;
+        let device_name = "test-device".to_string();
+        let rtx = RepoCtx::init(
+            repo_a_path,
+            RepoOpenOptions {},
+            device_name.clone(),
+            device_name,
+        )
+        .await?;
         let source_repo_id = rtx.repo_id.clone();
-        let source_repo_user_id = crate::repo::get_or_init_repo_user_id(&rtx.sql.db_pool).await?;
+        let source_repo_user_id =
+            crate::repo::globals::get_string_global(&rtx.sql, "global.user_id")
+                .await?
+                .ok_or_eyre("source repo user_id missing")?;
         rtx.shutdown().await?;
         drop(rtx);
         force_delete_journal_mode(&repo_a_path.join("sqlite.db")).await?;
         force_delete_journal_mode(&repo_a_path.join("samod").join("big_repo.sqlite")).await?;
 
         copy_dir_all(repo_a_path, repo_b_path)?;
-        let repo_b_sql = crate::app::SqlCtx::new(&format!(
-            "sqlite://{}",
-            repo_b_path.join("sqlite.db").display()
-        ))
+        let repo_b_sql = crate::app::SqlCtx::new(crate::app::SqlConfig {
+            database_url: format!("sqlite://{}", repo_b_path.join("sqlite.db").display()),
+        })
         .await?;
-        crate::app::globals::set_repo_id(&repo_b_sql.db_pool, &source_repo_id).await?;
-        crate::repo::set_repo_user_id(&repo_b_sql.db_pool, &source_repo_user_id).await?;
-        let repo_b_repo_id = crate::app::globals::get_repo_id(&repo_b_sql.db_pool)
+        crate::repo::globals::set_string_global(&repo_b_sql, "global.repo_id", &source_repo_id)
+            .await?;
+        crate::repo::globals::set_string_global(
+            &repo_b_sql,
+            "global.user_id",
+            &source_repo_user_id,
+        )
+        .await?;
+        let repo_b_repo_id = crate::repo::globals::get_string_global(&repo_b_sql, "global.repo_id")
             .await?
             .ok_or_eyre("repo_b repo_id missing after copy")?;
         if repo_b_repo_id != source_repo_id {
@@ -1540,10 +1516,9 @@ mod tests {
                 repo_b_repo_id
             );
         }
-        crate::secrets::force_set_fallback_secret_for_tests(
-            &repo_b_sql.db_pool,
+        crate::secrets::SecretRepo::set_identity(
             &source_repo_id,
-            &iroh::SecretKey::generate(&mut rand::rng()),
+            iroh::SecretKey::generate(&mut rand::rng()),
         )
         .await?;
         Ok(())
@@ -1586,7 +1561,7 @@ mod tests {
             Arc::clone(&rtx.big_repo),
             rtx.doc_drawer.document_id().clone(),
             daybook_types::doc::UserPath::from(rtx.local_user_path.clone()),
-            rtx.sql.db_pool.clone(),
+            rtx.sql.clone(),
             rtx.layout.repo_root.join("local_state"),
             Arc::new(std::sync::Mutex::new(
                 crate::drawer::lru::KeyedLruPool::new(1000),
@@ -1602,7 +1577,7 @@ mod tests {
             rtx.doc_app.document_id().clone(),
             Arc::clone(&plugs_repo),
             daybook_types::doc::UserPath::from(rtx.local_user_path.clone()),
-            rtx.sql.db_pool.clone(),
+            rtx.sql.clone(),
         )
         .await?;
         let (sqlite_local_state_repo, sqlite_local_state_stop) =
@@ -1618,7 +1593,7 @@ mod tests {
                 Arc::clone(&drawer_repo),
                 Arc::clone(&doc_blobs_index_repo),
             );
-        let (progress_repo, progress_stop) = ProgressRepo::boot(rtx.sql.db_pool.clone()).await?;
+        let (progress_repo, progress_stop) = ProgressRepo::boot(rtx.sql.clone()).await?;
         let (sync_repo, sync_stop) = IrohSyncRepo::boot(
             Arc::clone(&rtx),
             Arc::clone(&config_repo),
@@ -1828,12 +1803,12 @@ mod tests {
         let node_b = open_sync_node(&repo_b_path).await?;
 
         let ticket_a = node_a.sync_repo.get_clone_ticket_url().await?;
-        let bootstrap_ba = node_b.sync_repo.connect_url(&ticket_a).await?;
+        let endpoint_addr_ba = node_b.sync_repo.connect_url(&ticket_a).await?;
 
         wait_for_sync_convergence(
             &node_a,
             &node_b,
-            bootstrap_ba.endpoint_id,
+            endpoint_addr_ba.id,
             Duration::from_secs(20),
         )
         .await?;
@@ -1843,7 +1818,7 @@ mod tests {
         node_b
             .sync_repo
             .wait_for_full_sync(
-                std::slice::from_ref(&bootstrap_ba.endpoint_id),
+                std::slice::from_ref(&endpoint_addr_ba.id),
                 Duration::from_secs(5),
             )
             .await?;
@@ -1945,11 +1920,9 @@ mod tests {
                         out
                     })
                     .ok_or_else(|| eyre::eyre!("right missing doc heads for {doc_id}"))?;
-                last_left = Some(left_heads.clone());
-                last_right = Some(right_heads.clone());
-                last_left = Some(left_heads.clone());
-                last_right = Some(right_heads.clone());
-                if left_heads == right_heads {
+                last_left = Some(left_heads);
+                last_right = Some(right_heads);
+                if last_left == last_right {
                     break eyre::Ok(());
                 }
                 tokio::time::sleep(Duration::from_millis(200)).await;

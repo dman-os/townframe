@@ -6,6 +6,7 @@ use sqlx::sqlite::{SqliteConnectOptions, SqliteJournalMode, SqlitePoolOptions};
 use sqlx::SqlitePool;
 use std::str::FromStr;
 
+#[derive(Clone)]
 pub struct SqlCtx {
     pub db_pool: SqlitePool,
 }
@@ -28,6 +29,7 @@ impl SqlCtx {
         }
 
         let db_pool = SqlitePoolOptions::new()
+            .max_connections(1)
             .connect_with(
                 SqliteConnectOptions::from_str(&config.database_url)?
                     .journal_mode(SqliteJournalMode::Wal)
@@ -205,12 +207,6 @@ pub mod globals {
         sql: &SqlitePool,
         rcx: &crate::repo::RepoCtx,
     ) -> Res<KnownRepoEntry> {
-        let repo_root = std::path::absolute(&rcx.layout.repo_root).wrap_err_with(|| {
-            format!(
-                "error absolutizing repo path {}",
-                rcx.layout.repo_root.display()
-            )
-        })?;
         let repo_path = rcx.layout.repo_root.display().to_string();
         let now_unix_secs = jiff::Timestamp::now().as_second();
         let mut repo_config = get_repo_config(sql).await?;
