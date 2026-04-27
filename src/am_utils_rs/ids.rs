@@ -29,7 +29,9 @@ impl DocId32 {
 
 impl std::fmt::Display for DocId32 {
     fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(formatter, "{}", data_encoding::HEXLOWER.encode(&self.0))
+        // FIXME: use fixed size stack buffer to write string onto and then write that onto the
+        // formatter
+        write!(formatter, "{}", bs58::encode(&self.0).into_string())
     }
 }
 
@@ -43,14 +45,9 @@ impl std::str::FromStr for DocId32 {
     type Err = eyre::Report;
 
     fn from_str(value: &str) -> Result<Self, Self::Err> {
-        let raw = data_encoding::HEXLOWER
-            .decode(value.as_bytes())
-            .wrap_err("invalid DocId32 hex")?;
-        if raw.len() != 32 {
-            eyre::bail!("invalid DocId32 length: {}", raw.len());
-        }
-        let mut bytes = [0_u8; 32];
-        bytes.copy_from_slice(&raw);
+        let bytes: [u8; 32] = bs58::decode(value.as_bytes())
+            .into_array_const()
+            .wrap_err("invalid DocId32 bs58")?;
         Ok(Self(bytes))
     }
 }
@@ -93,7 +90,9 @@ impl PeerId32 {
 
 impl std::fmt::Display for PeerId32 {
     fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(formatter, "{}", data_encoding::HEXLOWER.encode(&self.0))
+        // FIXME: use fixed size stack buffer to write string onto and then write that onto the
+        // formatter
+        write!(formatter, "{}", bs58::encode(&self.0).into_string())
     }
 }
 
@@ -107,14 +106,9 @@ impl std::str::FromStr for PeerId32 {
     type Err = eyre::Report;
 
     fn from_str(value: &str) -> Result<Self, Self::Err> {
-        let raw = data_encoding::HEXLOWER
-            .decode(value.as_bytes())
-            .wrap_err("invalid PeerId32 hex")?;
-        if raw.len() != 32 {
-            eyre::bail!("invalid PeerId32 length: {}", raw.len());
-        }
-        let mut bytes = [0_u8; 32];
-        bytes.copy_from_slice(&raw);
+        let bytes: [u8; 32] = bs58::decode(value.as_bytes())
+            .into_array_const()
+            .wrap_err("invalid PeerId32 bs58")?;
         Ok(Self(bytes))
     }
 }
@@ -152,7 +146,7 @@ mod tests {
     use super::*;
 
     #[test]
-    fn doc_id_hex_roundtrip() -> Res<()> {
+    fn doc_id_roundtrip() -> Res<()> {
         let doc_id = DocId32::new([7_u8; 32]);
         let encoded = doc_id.to_string();
         let decoded: DocId32 = encoded.parse()?;
@@ -161,7 +155,7 @@ mod tests {
     }
 
     #[test]
-    fn peer_id_hex_roundtrip() -> Res<()> {
+    fn peer_id_roundtrip() -> Res<()> {
         let peer_id = PeerId32::new([9_u8; 32]);
         let encoded = peer_id.to_string();
         let decoded: PeerId32 = encoded.parse()?;

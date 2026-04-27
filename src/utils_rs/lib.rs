@@ -6,6 +6,7 @@ pub mod testing;
 pub mod prelude {
     pub use crate::interlude::*;
 
+    pub use bs58;
     pub use dashmap;
     pub use displaydoc;
     pub use dotenv_flow;
@@ -65,6 +66,7 @@ pub mod expect_tags {
     pub const ERROR_TOKIO: &str = "tokio error: shutting down?";
     pub const ERROR_CALLER: &str = "caller dropped before response";
     pub const ERROR_INVALID_PATCH: &str = "invalid patch: hydration failed";
+    pub const ERROR_UNRECONIZED: &str = "unrecognized identifier";
 }
 
 #[inline]
@@ -734,6 +736,8 @@ impl AbortableJoinSet {
         }
     }
 
+    // TODO: avoid using a tokio JoinSet but instead use our own CancellationToken
+    // based approach to support join handles
     pub fn spawn<F>(&self, fut: F) -> Result<(), AbortableJoinSetError>
     where
         F: std::future::Future<Output = ()> + Send + 'static,

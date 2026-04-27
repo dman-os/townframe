@@ -1051,7 +1051,11 @@ mod tests {
             Arc::clone(&big_repo),
             drawer_doc_id,
             local_user_path.clone(),
-            crate::app::SqlCtx::new("sqlite::memory:").await?.db_pool,
+            crate::app::SqlCtx::new(crate::app::SqlConfig {
+                database_url: "sqlite::memory:".into(),
+            })
+            .await?
+            .db_pool,
             temp_dir.path().join("drawer-local-state"),
             Arc::new(std::sync::Mutex::new(
                 crate::drawer::lru::KeyedLruPool::new(1000),

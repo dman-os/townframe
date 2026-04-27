@@ -2,15 +2,17 @@
 
 use crate::interlude::*;
 
-use am_utils_rs::sync::{
-    peer::{
-        DocSyncAck, DocSyncRequest, PeerSyncProgressEvent, PeerSyncWorkerEvent,
-        PeerSyncWorkerStopToken, SpawnPeerSyncWorkerArgs,
+use am_utils_rs::{
+    repo::PeerId,
+    sync::{
+        peer::{
+            DocSyncAck, DocSyncRequest, PeerSyncProgressEvent, PeerSyncWorkerEvent,
+            PeerSyncWorkerStopToken, SpawnPeerSyncWorkerArgs,
+        },
+        protocol::{PartitionId, PartitionSyncRpc, PeerKey},
+        store::SyncStoreHandle,
     },
-    protocol::{PartitionId, PartitionSyncRpc, PeerKey},
-    store::SyncStoreHandle,
 };
-use iroh::EndpointId;
 use tokio::sync::mpsc;
 use tokio_util::sync::CancellationToken;
 
@@ -22,7 +24,7 @@ use crate::progress::{
 use crate::repo::RepoCtx;
 use crate::sync::{PARTITION_SYNC_ALPN, REPO_SYNC_ALPN};
 
-type BigRepoConnectionId = EndpointId;
+type BigRepoConnectionId = PeerId;
 
 mod blob_worker;
 mod doc_worker;
@@ -42,24 +44,24 @@ pub struct WorkerHandle {
 #[derive(Debug, Clone)]
 pub enum FullSyncEvent {
     PeerFullSynced {
-        endpoint_id: EndpointId,
+        peer_key: PeerKey,
         doc_count: usize,
     },
     DocSyncedWithPeer {
-        endpoint_id: EndpointId,
+        peer_key: PeerKey,
         doc_id: DocumentId,
     },
     BlobSynced {
         hash: String,
-        endpoint_id: Option<EndpointId>,
+        peer_key: Option<PeerKey>,
     },
     BlobDownloadStarted {
-        endpoint_id: EndpointId,
+        peer_key: PeerKey,
         partition: PartitionKey,
         hash: String,
     },
     BlobDownloadFinished {
-        endpoint_id: EndpointId,
+        peer_key: PeerKey,
         partition: PartitionKey,
         hash: String,
         success: bool,
@@ -70,19 +72,13 @@ pub enum FullSyncEvent {
         attempt_no: usize,
     },
     StalePeer {
-        endpoint_id: EndpointId,
-    },
-    PeerConnectionLost {
-        endpoint_id: EndpointId,
-        reason: String,
+        peer_key: PeerKey,
     },
 }
 
 enum Msg {
     SetPeer {
-        endpoint_id: EndpointId,
         endpoint_addr: iroh::EndpointAddr,
-        conn_id: BigRepoConnectionId,
         partitions: HashSet<PartitionKey>,
         peer_key: PeerKey,
         connection: am_utils_rs::repo::BigRepoConnection,
@@ -94,17 +90,17 @@ enum Msg {
     //     resp: tokio::sync::oneshot::Sender<()>,
     // },
     DelPeer {
-        endpoint_id: EndpointId,
+        peer_id: PeerId,
         resp: tokio::sync::oneshot::Sender<()>,
     },
     DocSyncCompleted {
         doc_id: DocumentId,
-        endpoint_id: EndpointId,
+        peer_id: PeerId,
         outcome: am_utils_rs::repo::SyncDocOutcome,
     },
     DocSyncRequestBackoff {
         doc_id: DocumentId,
-        endpoint_id: EndpointId,
+        peer_id: PeerId,
         delay: Duration,
         previous_attempt_no: usize,
         previous_backoff: Duration,
@@ -115,12 +111,12 @@ enum Msg {
     },
     ImportDocCompleted {
         doc_id: DocumentId,
-        endpoint_id: EndpointId,
+        peer_id: PeerId,
         outcome: import_worker::ImportDocOutcome,
     },
     ImportDocBackoff {
         doc_id: DocumentId,
-        endpoint_id: EndpointId,
+        peer_id: PeerId,
         delay: Duration,
         previous_attempt_no: usize,
         previous_backoff: Duration,
@@ -128,7 +124,7 @@ enum Msg {
     },
     BlobSyncMarkedSynced {
         hash: String,
-        endpoint_id: Option<EndpointId>,
+        peer_id: Option<PeerId>,
     },
     BlobSyncRequestBackoff {
         hash: String,
@@ -138,19 +134,19 @@ enum Msg {
         previous_attempt_at: std::time::Instant,
     },
     PeerSyncWorkerProgress {
-        endpoint_id: EndpointId,
+        peer_id: PeerId,
         event: PeerSyncProgressEvent,
     },
     PeerSyncWorkerEvent {
-        endpoint_id: EndpointId,
+        peer_id: PeerId,
         event: PeerSyncWorkerEvent,
     },
     GetPeerSyncSnapshot {
-        endpoint_ids: Vec<EndpointId>,
-        resp: tokio::sync::oneshot::Sender<HashMap<EndpointId, PeerSyncSnapshot>>,
+        peer_ids: Vec<PeerId>,
+        resp: tokio::sync::oneshot::Sender<HashMap<PeerId, PeerSyncSnapshot>>,
     },
     WaitForPeersFullySynced {
-        endpoint_ids: Vec<EndpointId>,
+        peer_ids: Vec<PeerId>,
         resp: tokio::sync::oneshot::Sender<()>,
     },
 }
@@ -168,7 +164,7 @@ pub(crate) struct PeerSyncSnapshot {
 }
 
 struct FullSyncWaiter {
-    remaining: HashSet<EndpointId>,
+    remaining: HashSet<PeerId>,
     resp: tokio::sync::oneshot::Sender<()>,
 }
 
@@ -180,12 +176,12 @@ enum SyncProgressMsg {
         hash: String,
     },
     BlobDownloadStarted {
-        endpoint_id: EndpointId,
+        peer_id: PeerId,
         partition: PartitionKey,
         hash: String,
     },
     BlobDownloadProgress {
-        endpoint_id: EndpointId,
+        peer_id: PeerId,
         partition: PartitionKey,
         hash: String,
         done: u64,
@@ -195,7 +191,7 @@ enum SyncProgressMsg {
         hash: String,
     },
     BlobDownloadFinished {
-        endpoint_id: EndpointId,
+        peer_id: PeerId,
         partition: PartitionKey,
         hash: String,
         success: bool,
@@ -211,11 +207,9 @@ enum SyncProgressMsg {
 impl WorkerHandle {
     pub async fn set_connection(
         &self,
-        endpoint_id: EndpointId,
-        endpoint_addr: iroh::EndpointAddr,
-        conn_id: BigRepoConnectionId,
-        peer_key: PeerKey,
         connection: am_utils_rs::repo::BigRepoConnection,
+        endpoint_addr: iroh::EndpointAddr,
+        peer_key: PeerKey,
         partition_ids: HashSet<PartitionId>,
     ) -> Res<()> {
         let partitions: HashSet<PartitionKey> = partition_ids
@@ -230,8 +224,6 @@ impl WorkerHandle {
         let (tx, rx) = tokio::sync::oneshot::channel();
         let msg = Msg::SetPeer {
             resp: tx,
-            conn_id,
-            endpoint_id,
             endpoint_addr,
             partitions,
             peer_key,
@@ -240,35 +232,26 @@ impl WorkerHandle {
         self.msg_tx.send(msg).wrap_err(ERROR_ACTOR)?;
         rx.await.wrap_err(ERROR_CHANNEL)
     }
-    pub async fn del_connection(&self, endpoint_id: EndpointId) -> Res<()> {
+    pub async fn del_connection(&self, peer_id: PeerId) -> Res<()> {
         let (tx, rx) = tokio::sync::oneshot::channel();
-        let msg = Msg::DelPeer {
-            resp: tx,
-            endpoint_id,
-        };
+        let msg = Msg::DelPeer { resp: tx, peer_id };
         self.msg_tx.send(msg).wrap_err(ERROR_ACTOR)?;
         rx.await.wrap_err(ERROR_CHANNEL)
     }
 
     pub async fn get_peer_sync_snapshot(
         &self,
-        endpoint_ids: &[EndpointId],
-    ) -> Res<HashMap<EndpointId, PeerSyncSnapshot>> {
+        peer_ids: Vec<PeerId>,
+    ) -> Res<HashMap<PeerId, PeerSyncSnapshot>> {
         let (tx, rx) = tokio::sync::oneshot::channel();
-        let msg = Msg::GetPeerSyncSnapshot {
-            endpoint_ids: endpoint_ids.to_vec(),
-            resp: tx,
-        };
+        let msg = Msg::GetPeerSyncSnapshot { peer_ids, resp: tx };
         self.msg_tx.send(msg).wrap_err(ERROR_ACTOR)?;
         rx.await.wrap_err(ERROR_CHANNEL)
     }
 
-    pub async fn wait_for_peers_fully_synced(&self, endpoint_ids: &[EndpointId]) -> Res<()> {
+    pub async fn wait_for_peers_fully_synced(&self, peer_ids: Vec<PeerId>) -> Res<()> {
         let (tx, rx) = tokio::sync::oneshot::channel();
-        let msg = Msg::WaitForPeersFullySynced {
-            endpoint_ids: endpoint_ids.to_vec(),
-            resp: tx,
-        };
+        let msg = Msg::WaitForPeersFullySynced { peer_ids, resp: tx };
         self.msg_tx.send(msg).wrap_err(ERROR_ACTOR)?;
         rx.await.wrap_err(ERROR_CHANNEL)
     }
@@ -306,7 +289,7 @@ pub async fn start_full_sync_worker(
 
     let mut worker = Worker {
         big_repo: Arc::clone(&rcx.big_repo),
-        local_peer_key: format!("/{}/{}", rcx.repo_id, iroh_endpoint.id()),
+        local_peer_key: Arc::clone(&rcx.local_peer_key),
         cancel_token: cancel_token.clone(),
         msg_tx: msg_tx.clone(),
         sync_progress_tx: sync_progress_tx.clone(),
@@ -334,8 +317,7 @@ pub async fn start_full_sync_worker(
         scheduler: default(),
 
         known_peer_set: default(),
-        conn_by_peer: default(),
-        endpoint_by_peer_key: default(),
+        peer_id_by_peer_key: default(),
         seen_peer_keys: default(),
         peer_partition_sessions: default(),
         full_sync_waiters: Vec::new(),
@@ -467,10 +449,9 @@ struct Worker {
     max_active_sync_workers: usize,
 
     known_peer_set: HashMap<BigRepoConnectionId, PeerSyncState>,
-    conn_by_peer: HashMap<EndpointId, BigRepoConnectionId>,
-    endpoint_by_peer_key: HashMap<PeerKey, EndpointId>,
+    peer_id_by_peer_key: HashMap<PeerKey, PeerId>,
     seen_peer_keys: HashSet<PeerKey>,
-    peer_partition_sessions: HashMap<EndpointId, PeerPartitionSession>,
+    peer_partition_sessions: HashMap<PeerId, PeerPartitionSession>,
     full_sync_waiters: Vec<FullSyncWaiter>,
 }
 
@@ -501,14 +482,14 @@ impl PartitionKey {
 #[derive(Default)]
 struct Partition {
     is_active: bool,
-    peers: HashSet<EndpointId>,
+    peers: HashSet<PeerId>,
 }
 
 struct PeerSyncState {
-    endpoint_id: EndpointId,
+    peer_id: PeerId,
+    peer_key: PeerKey,
     endpoint_addr: iroh::EndpointAddr,
     partitions: HashSet<PartitionKey>,
-    peer_key: PeerKey,
     connection: am_utils_rs::repo::BigRepoConnection,
     bootstrap_ready: bool,
     live_ready: bool,
@@ -535,12 +516,12 @@ pub(super) struct RetryState {
 
 #[derive(Default)]
 struct DocSyncState {
-    requested_peers: HashMap<EndpointId, HashMap<PartitionKey, HashSet<u64>>>,
+    requested_peers: HashMap<PeerId, HashMap<PartitionKey, HashSet<u64>>>,
 }
 
 #[derive(Default)]
 struct ImportRequestedDoc {
-    requested_peers: HashMap<EndpointId, HashMap<PartitionKey, HashSet<u64>>>,
+    requested_peers: HashMap<PeerId, HashMap<PartitionKey, HashSet<u64>>>,
 }
 
 struct ActiveDocSyncState {
@@ -551,7 +532,7 @@ struct ActiveDocSyncState {
 #[derive(Debug, Clone, Hash, PartialEq, Eq)]
 struct DocSyncTaskKey {
     doc_id: DocumentId,
-    endpoint_id: EndpointId,
+    peer_id: PeerId,
 }
 
 enum BootDocSyncWorkerResult {
@@ -568,7 +549,7 @@ struct ActiveImportSyncState {
 #[derive(Debug, Clone, Hash, PartialEq, Eq)]
 struct ImportSyncTaskKey {
     doc_id: DocumentId,
-    endpoint_id: EndpointId,
+    peer_id: PeerId,
 }
 
 struct ActiveBlobSyncState {
@@ -577,159 +558,15 @@ struct ActiveBlobSyncState {
 
 #[derive(Hash, PartialEq, Eq)]
 struct BlobProgressKey {
-    endpoint_id: EndpointId,
+    peer_id: PeerId,
     partition: PartitionKey,
     hash: String,
 }
 
 impl Worker {
-    async fn handle_peer_sync_worker_progress(
-        &mut self,
-        endpoint_id: EndpointId,
-        event: PeerSyncProgressEvent,
-    ) -> Res<()> {
-        match event {
-            PeerSyncProgressEvent::PhaseStarted { phase } => {
-                debug!(endpoint_id = ?endpoint_id, phase, "peer sync phase started");
-                self.emit_peer_progress_status(
-                    endpoint_id,
-                    ProgressUpdateDeets::Status {
-                        severity: ProgressSeverity::Info,
-                        message: format!("phase started: {phase}"),
-                    },
-                )
-                .await?;
-            }
-            PeerSyncProgressEvent::PhaseFinished { phase, elapsed } => {
-                debug!(endpoint_id = ?endpoint_id, phase, elapsed_ms = elapsed.as_millis(), "peer sync phase finished");
-                self.emit_peer_progress_status(
-                    endpoint_id,
-                    ProgressUpdateDeets::Status {
-                        severity: ProgressSeverity::Info,
-                        message: format!("phase finished: {phase} ({:?})", elapsed),
-                    },
-                )
-                .await?;
-            }
-            PeerSyncProgressEvent::DocSyncStatus {
-                synced_docs,
-                remaining_docs,
-            } => {
-                debug!(
-                    endpoint_id = ?endpoint_id,
-                    synced_docs,
-                    remaining_docs,
-                    "peer sync worker doc status"
-                );
-                self.emit_peer_progress_status(
-                    endpoint_id,
-                    ProgressUpdateDeets::Amount {
-                        severity: ProgressSeverity::Info,
-                        done: synced_docs,
-                        total: Some(synced_docs.saturating_add(remaining_docs)),
-                        unit: ProgressUnit::Generic {
-                            label: "docs".to_string(),
-                        },
-                        message: Some("doc sync status".to_string()),
-                    },
-                )
-                .await?;
-                if let Some(conn_id) = self.conn_by_peer.get(&endpoint_id).copied() {
-                    if let Some(peer_state) = self.known_peer_set.get_mut(&conn_id) {
-                        peer_state.bootstrap_synced_docs = synced_docs;
-                        peer_state.bootstrap_remaining_docs = remaining_docs;
-                    }
-                }
-                self.refresh_peer_fully_synced_state(endpoint_id).await?;
-            }
-        }
-        Ok(())
-    }
-
-    async fn handle_peer_sync_worker_event(
-        &mut self,
-        endpoint_id: EndpointId,
-        event: PeerSyncWorkerEvent,
-    ) -> Res<()> {
-        match event {
-            PeerSyncWorkerEvent::Bootstrapped {
-                peer,
-                partition_count,
-            } => {
-                debug!(endpoint_id = ?endpoint_id, peer, partition_count, "peer sync worker bootstrapped");
-                self.emit_peer_progress_status(
-                    endpoint_id,
-                    ProgressUpdateDeets::Status {
-                        severity: ProgressSeverity::Info,
-                        message: format!("bootstrapped with {partition_count} partitions"),
-                    },
-                )
-                .await?;
-                if let Some(conn_id) = self.conn_by_peer.get(&endpoint_id).copied() {
-                    if let Some(peer_state) = self.known_peer_set.get_mut(&conn_id) {
-                        peer_state.bootstrap_ready = true;
-                        peer_state.bootstrap_remaining_docs = 0;
-                    }
-                }
-                self.refresh_peer_fully_synced_state(endpoint_id).await?;
-            }
-            PeerSyncWorkerEvent::LiveReady { peer } => {
-                debug!(endpoint_id = ?endpoint_id, peer, "peer sync worker entered live mode");
-                self.emit_peer_progress_status(
-                    endpoint_id,
-                    ProgressUpdateDeets::Completed {
-                        state: ProgressFinalState::Succeeded,
-                        message: Some("peer entered live mode".to_string()),
-                    },
-                )
-                .await?;
-                if let Some(conn_id) = self.conn_by_peer.get(&endpoint_id).copied() {
-                    if let Some(peer_state) = self.known_peer_set.get_mut(&conn_id) {
-                        peer_state.live_ready = true;
-                    }
-                }
-                self.refresh_peer_fully_synced_state(endpoint_id).await?;
-            }
-            PeerSyncWorkerEvent::AbnormalExit { peer, reason } => {
-                warn!(endpoint_id = ?endpoint_id, peer, reason, "peer sync worker exited abnormally");
-                let lost_reason = reason.clone();
-                self.emit_peer_progress_status(
-                    endpoint_id,
-                    ProgressUpdateDeets::Completed {
-                        state: ProgressFinalState::Failed,
-                        message: Some(format!("peer worker abnormal exit: {reason}")),
-                    },
-                )
-                .await?;
-                self.emit_stale_peer(endpoint_id).await?;
-                self.emit_full_sync_event(FullSyncEvent::PeerConnectionLost {
-                    endpoint_id,
-                    reason: lost_reason,
-                })
-                .await?;
-                self.scheduler.peer_sessions_to_refresh.insert(endpoint_id);
-            }
-        }
-        Ok(())
-    }
-
-    fn endpoint_for_peer_key(&self, peer_key: &str) -> Option<EndpointId> {
-        self.endpoint_by_peer_key.get(peer_key).copied()
-    }
-
-    fn peer_key_for_endpoint(&self, endpoint_id: EndpointId) -> Option<PeerKey> {
-        let conn_id = self.conn_by_peer.get(&endpoint_id).copied()?;
-        let peer_state = self.known_peer_set.get(&conn_id)?;
-        Some(peer_state.peer_key.clone())
-    }
-
-    fn peer_is_fully_synced(&self, endpoint_id: EndpointId) -> bool {
-        let Some(conn_id) = self.conn_by_peer.get(&endpoint_id).copied() else {
-            return false;
-        };
-        self.known_peer_set
-            .get(&conn_id)
-            .is_some_and(|peer_state| peer_state.emitted_full_synced)
+    fn peer_key_for_id(&self, peer_id: PeerId) -> Option<PeerKey> {
+        let peer_state = self.known_peer_set.get(&peer_id)?;
+        Some(Arc::clone(&peer_state.peer_key))
     }
 
     fn refresh_full_sync_waiters(&mut self) {
@@ -738,9 +575,11 @@ impl Worker {
         }
         let mut pending = std::mem::take(&mut self.full_sync_waiters);
         for mut waiter in pending.drain(..) {
-            waiter
-                .remaining
-                .retain(|endpoint_id| !self.peer_is_fully_synced(*endpoint_id));
+            waiter.remaining.retain(|peer_id| !{
+                self.known_peer_set
+                    .get(&peer_id)
+                    .is_some_and(|peer_state| peer_state.emitted_full_synced)
+            });
             if waiter.remaining.is_empty() {
                 waiter
                     .resp
@@ -771,27 +610,26 @@ impl Worker {
     async fn handle_msg(&mut self, msg: Msg) -> Res<()> {
         match msg {
             Msg::SetPeer {
-                endpoint_id,
                 endpoint_addr,
                 resp,
                 partitions,
-                conn_id,
                 peer_key,
                 connection,
             } => {
-                let old_conn_id = self.conn_by_peer.get(&endpoint_id).copied();
+                let peer_id = connection.peer_id;
+                let old_peer_id = self.peer_id_by_peer_key.get(&peer_key);
                 let old_state = self
                     .known_peer_set
-                    .remove(&conn_id)
-                    .or_else(|| old_conn_id.and_then(|id| self.known_peer_set.remove(&id)));
+                    .remove(&peer_id)
+                    .or_else(|| old_peer_id.and_then(|id| self.known_peer_set.remove(&id)));
                 if let Some(old_state) = old_state.as_ref() {
                     if old_state.peer_key != peer_key {
-                        self.endpoint_by_peer_key.remove(&old_state.peer_key);
+                        self.peer_id_by_peer_key.remove(&old_state.peer_key);
                     }
                 }
                 let new_parts: Vec<_> = if let Some(old) = old_state {
                     for part_key in old.partitions.difference(&partitions) {
-                        self.remove_peer_from_part(part_key.clone(), endpoint_id)
+                        self.remove_peer_from_part(part_key.clone(), peer_id)
                             .await?;
                     }
                     partitions.difference(&old.partitions).cloned().collect()
@@ -799,10 +637,10 @@ impl Worker {
                     partitions.iter().cloned().collect()
                 };
                 self.known_peer_set.insert(
-                    conn_id,
+                    peer_id,
                     PeerSyncState {
                         partitions,
-                        endpoint_id,
+                        peer_id,
                         endpoint_addr,
                         peer_key: peer_key.clone(),
                         connection,
@@ -814,45 +652,42 @@ impl Worker {
                         emitted_full_synced: false,
                     },
                 );
-                self.conn_by_peer.insert(endpoint_id, conn_id);
-                self.endpoint_by_peer_key
-                    .insert(peer_key.clone(), endpoint_id);
+                self.peer_id_by_peer_key
+                    .insert(Arc::clone(&peer_key), peer_id);
                 self.seen_peer_keys.insert(peer_key.clone());
                 for part_key in new_parts {
-                    self.add_peer_to_part(part_key, endpoint_id).await?;
+                    self.add_peer_to_part(part_key, peer_id).await?;
                 }
                 self.refresh_full_sync_waiters();
                 resp.send(()).inspect_err(|_| warn!(ERROR_CALLER)).ok();
             }
-            Msg::DelPeer { endpoint_id, resp } => {
-                if let Some(conn_id) = self.conn_by_peer.remove(&endpoint_id) {
-                    if let Some(state) = self.known_peer_set.remove(&conn_id) {
-                        self.endpoint_by_peer_key.remove(&state.peer_key);
-                        state.connection.close().await.ok();
-                        self.remove_peer_from_doc_sync_set(endpoint_id).await?;
-                        self.remove_peer_from_import_doc_set(endpoint_id).await?;
-                        self.remove_peer_partition_session(endpoint_id).await?;
-                        for part_key in state.partitions {
-                            self.remove_peer_from_part(part_key, endpoint_id).await?;
-                        }
+            Msg::DelPeer { resp, peer_id } => {
+                if let Some(state) = self.known_peer_set.remove(&peer_id) {
+                    self.peer_id_by_peer_key.remove(&state.peer_key);
+                    state.connection.stop().await.ok();
+                    self.remove_peer_from_doc_sync_set(peer_id).await?;
+                    self.remove_peer_from_import_doc_set(peer_id).await?;
+                    self.remove_peer_partition_session(peer_id).await?;
+                    for part_key in state.partitions {
+                        self.remove_peer_from_part(part_key, peer_id).await?;
                     }
                 }
-                self.endpoint_by_peer_key
-                    .retain(|_peer_key, cached_endpoint| *cached_endpoint != endpoint_id);
+                self.peer_id_by_peer_key
+                    .retain(|_peer_key, cached_endpoint| *cached_endpoint != peer_id);
                 self.refresh_full_sync_waiters();
                 resp.send(()).inspect_err(|_| warn!(ERROR_CALLER)).ok();
             }
             Msg::DocSyncCompleted {
                 doc_id,
-                endpoint_id,
+                peer_id,
                 outcome,
             } => {
-                self.handle_doc_sync_completed(doc_id, endpoint_id, outcome)
+                self.handle_doc_sync_completed(doc_id, peer_id, outcome)
                     .await?
             }
             Msg::DocSyncRequestBackoff {
                 doc_id,
-                endpoint_id,
+                peer_id,
                 delay,
                 previous_attempt_no,
                 previous_backoff,
@@ -860,7 +695,7 @@ impl Worker {
             } => {
                 self.handle_doc_request_backoff(
                     doc_id,
-                    endpoint_id,
+                    peer_id,
                     delay,
                     previous_attempt_no,
                     previous_backoff,
@@ -873,15 +708,15 @@ impl Worker {
             }
             Msg::ImportDocCompleted {
                 doc_id,
-                endpoint_id,
+                peer_id,
                 outcome,
             } => {
-                self.handle_import_doc_completed(doc_id, endpoint_id, outcome)
+                self.handle_import_doc_completed(doc_id, peer_id, outcome)
                     .await?;
             }
             Msg::ImportDocBackoff {
                 doc_id,
-                endpoint_id,
+                peer_id,
                 delay,
                 previous_attempt_no,
                 previous_backoff,
@@ -889,7 +724,7 @@ impl Worker {
             } => {
                 self.handle_import_doc_backoff(
                     doc_id,
-                    endpoint_id,
+                    peer_id,
                     delay,
                     previous_attempt_no,
                     previous_backoff,
@@ -897,8 +732,8 @@ impl Worker {
                 )
                 .await?;
             }
-            Msg::BlobSyncMarkedSynced { hash, endpoint_id } => {
-                self.handle_blob_marked_synced(hash, endpoint_id).await?;
+            Msg::BlobSyncMarkedSynced { hash, peer_id } => {
+                self.handle_blob_marked_synced(hash, peer_id).await?;
             }
             Msg::BlobSyncRequestBackoff {
                 hash,
@@ -916,22 +751,20 @@ impl Worker {
                 )
                 .await?;
             }
-            Msg::PeerSyncWorkerProgress { endpoint_id, event } => {
-                self.handle_peer_sync_worker_progress(endpoint_id, event)
+            Msg::PeerSyncWorkerProgress { peer_id, event } => {
+                self.handle_peer_sync_worker_progress(peer_id, event)
                     .await?;
             }
-            Msg::PeerSyncWorkerEvent { endpoint_id, event } => {
-                self.handle_peer_sync_worker_event(endpoint_id, event)
-                    .await?;
+            Msg::PeerSyncWorkerEvent { peer_id, event } => {
+                self.handle_peer_sync_worker_event(peer_id, event).await?;
             }
-            Msg::GetPeerSyncSnapshot { endpoint_ids, resp } => {
-                let snapshot = endpoint_ids
+            Msg::GetPeerSyncSnapshot { peer_ids, resp } => {
+                let snapshot = peer_ids
                     .into_iter()
-                    .filter_map(|endpoint_id| {
-                        let conn_id = self.conn_by_peer.get(&endpoint_id).copied()?;
-                        let peer_state = self.known_peer_set.get(&conn_id)?;
+                    .filter_map(|peer_id| {
+                        let peer_state = self.known_peer_set.get(&peer_id)?;
                         Some((
-                            endpoint_id,
+                            peer_id,
                             PeerSyncSnapshot {
                                 emitted_full_synced: peer_state.emitted_full_synced,
                                 bootstrap_ready: peer_state.bootstrap_ready,
@@ -941,7 +774,7 @@ impl Worker {
                                 live_ready: peer_state.live_ready,
                                 has_peer_session: self
                                     .peer_partition_sessions
-                                    .contains_key(&endpoint_id),
+                                    .contains_key(&peer_id),
                             },
                         ))
                     })
@@ -950,12 +783,16 @@ impl Worker {
                     .inspect_err(|_| warn!(ERROR_CALLER))
                     .ok();
             }
-            Msg::WaitForPeersFullySynced { endpoint_ids, resp } => {
-                let remaining = endpoint_ids
+            Msg::WaitForPeersFullySynced { peer_ids, resp } => {
+                let remaining = peer_ids
                     .into_iter()
                     .collect::<HashSet<_>>()
                     .into_iter()
-                    .filter(|endpoint_id| !self.peer_is_fully_synced(*endpoint_id))
+                    .filter(|peer_id| !{
+                        self.known_peer_set
+                            .get(peer_id)
+                            .is_some_and(|peer_state| peer_state.emitted_full_synced)
+                    })
                     .collect::<HashSet<_>>();
                 if remaining.is_empty() {
                     resp.send(()).inspect_err(|_| warn!(ERROR_CALLER)).ok();
@@ -974,7 +811,7 @@ impl Worker {
         for part_key in double.drain() {
             for peer_state in self.known_peer_set.values() {
                 if peer_state.partitions.contains(&part_key) {
-                    affected_peers.insert(peer_state.endpoint_id);
+                    affected_peers.insert(peer_state.peer_id);
                 }
             }
             let (activate, is_active) = {
@@ -999,43 +836,34 @@ impl Worker {
         }
         self.scheduler.partitions_to_refresh = double;
         let mut sessions_to_remove = Vec::new();
-        for endpoint_id in affected_peers {
-            let desired_parts = self.desired_partitions_for_peer(endpoint_id);
-            let Some(conn_id) = self.conn_by_peer.get(&endpoint_id).copied() else {
-                if desired_parts.is_empty() {
-                    sessions_to_remove.push(endpoint_id);
-                }
-                continue;
-            };
-            let Some(_peer_state) = self.known_peer_set.get(&conn_id) else {
-                if desired_parts.is_empty() {
-                    sessions_to_remove.push(endpoint_id);
-                }
-                continue;
-            };
+        for peer_id in affected_peers {
+            let desired_parts = self.desired_partitions_for_peer(peer_id);
             if desired_parts.is_empty() {
-                sessions_to_remove.push(endpoint_id);
+                sessions_to_remove.push(peer_id);
                 continue;
             }
-            let Some(session) = self.peer_partition_sessions.get(&endpoint_id) else {
-                self.scheduler.peer_sessions_to_refresh.insert(endpoint_id);
+            let Some(_peer_state) = self.known_peer_set.get(&peer_id) else {
+                continue;
+            };
+            let Some(session) = self.peer_partition_sessions.get(&peer_id) else {
+                self.scheduler.peer_sessions_to_refresh.insert(peer_id);
                 continue;
             };
             if session.partitions != desired_parts {
-                self.scheduler.peer_sessions_to_refresh.insert(endpoint_id);
+                self.scheduler.peer_sessions_to_refresh.insert(peer_id);
             }
         }
-        for endpoint_id in sessions_to_remove {
-            self.remove_peer_partition_session(endpoint_id).await?;
+        for peer_id in sessions_to_remove {
+            self.remove_peer_partition_session(peer_id).await?;
         }
         Ok(())
     }
 
-    fn desired_partitions_for_peer(&self, endpoint_id: EndpointId) -> HashSet<PartitionKey> {
+    fn desired_partitions_for_peer(&self, peer_id: PeerId) -> HashSet<PartitionKey> {
         self.partitions
             .iter()
             .filter_map(|(part_key, part)| {
-                if part.peers.contains(&endpoint_id) {
+                if part.peers.contains(&peer_id) {
                     Some(part_key.clone())
                 } else {
                     None
@@ -1044,13 +872,9 @@ impl Worker {
             .collect()
     }
 
-    async fn add_peer_to_part(
-        &mut self,
-        part_key: PartitionKey,
-        endpoint_id: EndpointId,
-    ) -> Res<()> {
+    async fn add_peer_to_part(&mut self, part_key: PartitionKey, peer_id: PeerId) -> Res<()> {
         let part = self.partitions.entry(part_key.clone()).or_default();
-        part.peers.insert(endpoint_id);
+        part.peers.insert(peer_id);
         match part_key {
             PartitionKey::BigRepoPartition(_) => {
                 let docs: Vec<_> = self
@@ -1058,9 +882,7 @@ impl Worker {
                     .pending_tasks
                     .keys()
                     .filter_map(|task| match task {
-                        scheduler::SyncTask::Doc(task_key)
-                            if task_key.endpoint_id == endpoint_id =>
-                        {
+                        scheduler::SyncTask::Doc(task_key) if task_key.peer_id == peer_id => {
                             Some(task_key.clone())
                         }
                         scheduler::SyncTask::Doc(_) => None,
@@ -1075,9 +897,7 @@ impl Worker {
                     .pending_tasks
                     .keys()
                     .filter_map(|task| match task {
-                        scheduler::SyncTask::Import(task_key)
-                            if task_key.endpoint_id == endpoint_id =>
-                        {
+                        scheduler::SyncTask::Import(task_key) if task_key.peer_id == peer_id => {
                             Some(task_key.clone())
                         }
                         scheduler::SyncTask::Import(_) => None,
@@ -1107,13 +927,9 @@ impl Worker {
         Ok(())
     }
 
-    async fn remove_peer_from_part(
-        &mut self,
-        part_key: PartitionKey,
-        endpoint_id: EndpointId,
-    ) -> Res<()> {
+    async fn remove_peer_from_part(&mut self, part_key: PartitionKey, peer_id: PeerId) -> Res<()> {
         let part = self.partitions.entry(part_key.clone()).or_default();
-        part.peers.remove(&endpoint_id);
+        part.peers.remove(&peer_id);
         self.scheduler.partitions_to_refresh.insert(part_key);
         Ok(())
     }
@@ -1128,17 +944,14 @@ impl Worker {
 impl Worker {
     async fn batch_refresh_peer_sessions(&mut self) -> Res<()> {
         let mut double = std::mem::replace(&mut self.scheduler.peer_sessions_to_refresh, default());
-        for endpoint_id in double.drain() {
-            let Some(conn_id) = self.conn_by_peer.get(&endpoint_id).copied() else {
+        for peer_id in double.drain() {
+            let Some(peer_state) = self.known_peer_set.get(&peer_id) else {
                 continue;
             };
-            let Some(peer_state) = self.known_peer_set.get(&conn_id) else {
-                continue;
-            };
-            let peer_key = peer_state.peer_key.clone();
+            let peer_key = Arc::clone(&peer_state.peer_key);
             let endpoint_addr = peer_state.endpoint_addr.clone();
-            let parts = self.desired_partitions_for_peer(endpoint_id);
-            self.refresh_peer_partition_session(endpoint_id, endpoint_addr, peer_key, parts)
+            let parts = self.desired_partitions_for_peer(peer_id);
+            self.refresh_peer_partition_session(peer_id, endpoint_addr, peer_key, parts)
                 .await?;
         }
         self.scheduler.peer_sessions_to_refresh = double;
@@ -1147,12 +960,12 @@ impl Worker {
 
     async fn refresh_peer_partition_session(
         &mut self,
-        endpoint_id: EndpointId,
+        peer_id: PeerId,
         endpoint_addr: iroh::EndpointAddr,
         peer_key: PeerKey,
         partitions: HashSet<PartitionKey>,
     ) -> Res<()> {
-        let session = self.peer_partition_sessions.remove(&endpoint_id);
+        let session = self.peer_partition_sessions.remove(&peer_id);
         if let Some(mut session) = session {
             session.forward_cancel_token.cancel();
             for join_handle in session.forward_handles.drain(..) {
@@ -1163,7 +976,7 @@ impl Worker {
                 .await
                 {
                     warn!(
-                        endpoint_id = ?endpoint_id,
+                        endpoint_id = ?peer_id,
                         ?err,
                         "error waiting for peer session forwarder during refresh"
                     );
@@ -1171,7 +984,7 @@ impl Worker {
             }
             session.stop.stop().await?;
         }
-        self.scheduler.clear_peer_cursor_acks(endpoint_id);
+        self.scheduler.clear_peer_cursor_acks(peer_id);
         if partitions.is_empty() {
             return Ok(());
         }
@@ -1204,13 +1017,13 @@ impl Worker {
                         _ = cancel.cancelled() => break,
                         recv = progress_rx.recv() => match recv {
                             Ok(event) => {
-                                msg_tx.send(Msg::PeerSyncWorkerProgress { endpoint_id, event })
+                                msg_tx.send(Msg::PeerSyncWorkerProgress { peer_id, event })
                                     .inspect_err(|_| warn!("full sync worker closed while forwarding peer progress"))
                                     .ok();
                             }
                             Err(tokio::sync::broadcast::error::RecvError::Closed) => break,
                             Err(tokio::sync::broadcast::error::RecvError::Lagged(dropped)) => {
-                                warn!(endpoint_id = ?endpoint_id, dropped, "lagged forwarding peer worker progress");
+                                warn!(endpoint_id = ?peer_id, dropped, "lagged forwarding peer worker progress");
                             }
                         }
                     }
@@ -1228,13 +1041,13 @@ impl Worker {
                         _ = cancel.cancelled() => break,
                         recv = events_rx.recv() => match recv {
                             Ok(event) => {
-                                msg_tx.send(Msg::PeerSyncWorkerEvent { endpoint_id, event })
+                                msg_tx.send(Msg::PeerSyncWorkerEvent { peer_id, event })
                                     .inspect_err(|_| warn!("full sync worker closed while forwarding peer event"))
                                     .ok();
                             }
                             Err(tokio::sync::broadcast::error::RecvError::Closed) => break,
                             Err(tokio::sync::broadcast::error::RecvError::Lagged(dropped)) => {
-                                warn!(endpoint_id = ?endpoint_id, dropped, "lagged forwarding peer worker event");
+                                warn!(endpoint_id = ?peer_id, dropped, "lagged forwarding peer worker event");
                             }
                         }
                     }
@@ -1243,7 +1056,7 @@ impl Worker {
             forward_handles.push(join_handle);
         }
         self.peer_partition_sessions.insert(
-            endpoint_id,
+            peer_id,
             PeerPartitionSession {
                 stop,
                 doc_ack_tx,
@@ -1255,8 +1068,8 @@ impl Worker {
         Ok(())
     }
 
-    async fn remove_peer_partition_session(&mut self, endpoint_id: EndpointId) -> Res<()> {
-        let session = self.peer_partition_sessions.remove(&endpoint_id);
+    async fn remove_peer_partition_session(&mut self, peer_id: PeerId) -> Res<()> {
+        let session = self.peer_partition_sessions.remove(&peer_id);
         if let Some(mut session) = session {
             session.forward_cancel_token.cancel();
             for join_handle in session.forward_handles.drain(..) {
@@ -1268,7 +1081,7 @@ impl Worker {
             }
             session.stop.stop().await?;
         }
-        self.scheduler.clear_peer_cursor_acks(endpoint_id);
+        self.scheduler.clear_peer_cursor_acks(peer_id);
         Ok(())
     }
 
@@ -1331,16 +1144,13 @@ impl Worker {
         Ok(())
     }
 
+    #[tracing::instrument(skip(self))]
     async fn handle_partition_member_event(
         &mut self,
         peer_key: PeerKey,
         event: am_utils_rs::sync::protocol::PartitionMemberEvent,
     ) -> Res<()> {
-        let Some(endpoint_id) = self.endpoint_for_peer_key(&peer_key) else {
-            self.handle_unknown_peer_request(
-                &peer_key,
-                format!("partition member event for {}", event.partition_id),
-            )?;
+        let Some(peer_id) = self.peer_id_of_known_peer(&peer_key)? else {
             return Ok(());
         };
         let existing = self
@@ -1352,18 +1162,12 @@ impl Worker {
             .is_some_and(|current| event.cursor <= current)
         {
             info!(
-                endpoint_id = ?endpoint_id,
-                partition_id = %event.partition_id,
-                cursor = event.cursor,
                 existing_cursor = existing.member_cursor,
                 "skipping stale partition member event"
             );
             return Ok(());
         }
         info!(
-            endpoint_id = ?endpoint_id,
-            partition_id = %event.partition_id,
-            cursor = event.cursor,
             item_id = %match &event.deets { am_utils_rs::sync::protocol::PartitionMemberEventDeets::MemberUpsert { item_id, .. } => item_id, am_utils_rs::sync::protocol::PartitionMemberEventDeets::MemberRemoved { item_id, .. } => item_id },
             "processing partition member event"
         );
@@ -1379,8 +1183,6 @@ impl Worker {
                     .add_member(&event.partition_id, item_id, &payload)
                     .await?;
                 info!(
-                    endpoint_id = ?endpoint_id,
-                    partition_id = %event.partition_id,
                     item_id = %item_id,
                     "added member to partition store"
                 );
@@ -1403,29 +1205,23 @@ impl Worker {
                 }
             }
         }
-        self.maybe_emit_member_cursor_ack(endpoint_id, &event.partition_id, event.cursor)
+        self.maybe_emit_member_cursor_ack(peer_id, &event.partition_id, event.cursor)
             .await
     }
 
+    #[tracing::instrument(skip(self))]
     async fn handle_partition_doc_event(
         &mut self,
         peer_key: PeerKey,
         event: am_utils_rs::sync::protocol::PartitionDocEvent,
     ) -> Res<()> {
         if BlobScope::from_partition_id(&event.partition_id).is_some() {
-            let Some(endpoint_id) = self.endpoint_for_peer_key(&peer_key) else {
-                self.handle_unknown_peer_request(
-                    &peer_key,
-                    format!("blob-scope doc event for {}", event.partition_id),
-                )?;
+            let Some(peer_id) = self.peer_id_of_known_peer(&peer_key)? else {
                 return Ok(());
             };
-            self.scheduler.note_cursor_ready_immediate(
-                endpoint_id,
-                &event.partition_id,
-                event.cursor,
-            );
-            self.maybe_emit_cursor_advance_acks(endpoint_id, &peer_key, &event.partition_id)
+            self.scheduler
+                .note_cursor_ready_immediate(peer_id, &event.partition_id, event.cursor);
+            self.maybe_emit_cursor_advance_acks(peer_id, &peer_key, &event.partition_id)
                 .await?;
             return Ok(());
         }
@@ -1486,6 +1282,7 @@ impl Worker {
         Ok(())
     }
 
+    #[tracing::instrument(skip(self))]
     async fn handle_request_doc_sync(
         &mut self,
         peer_key: PeerKey,
@@ -1493,54 +1290,36 @@ impl Worker {
         doc_id: DocumentId,
         cursor: u64,
     ) -> Res<()> {
-        let Some(endpoint_id) = self.endpoint_for_peer_key(&peer_key) else {
-            self.handle_unknown_peer_request(
-                &peer_key,
-                format!("request doc sync for {}", doc_id),
-            )?;
+        let Some(peer_id) = self.peer_id_of_known_peer(&peer_key)? else {
             return Ok(());
         };
-        self.emit_stale_peer(endpoint_id).await?;
+        self.emit_stale_peer(Arc::clone(&peer_key)).await?;
         let doc_sync_state = self.doc_sync_set.entry(doc_id.clone()).or_default();
-        let requested_parts = doc_sync_state
-            .requested_peers
-            .entry(endpoint_id)
-            .or_default();
+        let requested_parts = doc_sync_state.requested_peers.entry(peer_id).or_default();
         let was_empty_for_peer = requested_parts.values().all(|cursors| cursors.is_empty());
         requested_parts
             .entry(PartitionKey::BigRepoPartition(partition_id.clone()))
             .or_default()
             .insert(cursor);
         if was_empty_for_peer {
-            if let Some(conn_id) = self.conn_by_peer.get(&endpoint_id).copied() {
-                if let Some(peer_state) = self.known_peer_set.get_mut(&conn_id) {
-                    peer_state.doc_pending_docs = peer_state.doc_pending_docs.saturating_add(1);
-                }
+            if let Some(peer_state) = self.known_peer_set.get_mut(&peer_id) {
+                peer_state.doc_pending_docs = peer_state.doc_pending_docs.saturating_add(1);
             }
-            self.refresh_peer_fully_synced_state(endpoint_id).await?;
+            self.refresh_peer_fully_synced_state(peer_id).await?;
         }
         debug!(
-            endpoint_id = ?endpoint_id,
-            %doc_id,
-            partition_id = %partition_id,
-            cursor,
             pending_doc_count = self
-                .conn_by_peer
-                .get(&endpoint_id)
-                .and_then(|conn_id| self.known_peer_set.get(conn_id))
+                .known_peer_set
+                .get(&peer_id)
                 .map(|peer| peer.doc_pending_docs)
                 .unwrap_or_default(),
             "queued doc sync request"
         );
-        self.scheduler.note_doc_sync_requested(
-            endpoint_id,
-            &partition_id,
-            cursor,
-            &doc_id.to_string(),
-        );
+        self.scheduler
+            .note_doc_sync_requested(peer_id, &partition_id, cursor, &doc_id.to_string());
         let task_key = DocSyncTaskKey {
             doc_id: doc_id.clone(),
-            endpoint_id,
+            peer_id,
         };
         if !self.scheduler.active_docs.contains_key(&task_key)
             && !self.scheduler.is_doc_pending(&task_key)
@@ -1550,6 +1329,7 @@ impl Worker {
         Ok(())
     }
 
+    #[tracing::instrument(skip(self))]
     async fn handle_doc_deleted_request(
         &mut self,
         peer_key: PeerKey,
@@ -1557,31 +1337,27 @@ impl Worker {
         doc_id: DocumentId,
         cursor: u64,
     ) -> Res<()> {
-        let Some(endpoint_id) = self.endpoint_for_peer_key(&peer_key) else {
-            self.handle_unknown_peer_request(
-                &peer_key,
-                format!("doc deleted request for {}", doc_id),
-            )?;
+        let Some(peer_id) = self.peer_id_of_known_peer(&peer_key)? else {
             return Ok(());
         };
-        self.emit_stale_peer(endpoint_id).await?;
+        self.emit_stale_peer(Arc::clone(&peer_key)).await?;
         self.big_repo
             .partition_store()
             .remove_member(&partition_id, &doc_id.to_string(), &serde_json::json!({}))
             .await?;
         let mut clear_import_request = false;
         if let Some(import_state) = self.import_doc_set.get_mut(&doc_id) {
-            if let Some(requested_parts) = import_state.requested_peers.get_mut(&endpoint_id) {
+            if let Some(requested_parts) = import_state.requested_peers.get_mut(&peer_id) {
                 requested_parts.remove(&PartitionKey::BigRepoPartition(partition_id.clone()));
                 if requested_parts.is_empty() {
-                    import_state.requested_peers.remove(&endpoint_id);
+                    import_state.requested_peers.remove(&peer_id);
                 }
             }
             clear_import_request = import_state.requested_peers.is_empty();
         }
         let import_task_key = ImportSyncTaskKey {
             doc_id: doc_id.clone(),
-            endpoint_id,
+            peer_id,
         };
         self.scheduler.clear_import_task(&import_task_key);
         if let Some(active) = self.scheduler.active_imports.remove(&import_task_key) {
@@ -1600,14 +1376,12 @@ impl Worker {
         let mut refresh_peer = false;
         let mut clear_doc_request = false;
         if let Some(sync_state) = self.doc_sync_set.get_mut(&doc_id) {
-            let had_peer_entry = sync_state.requested_peers.remove(&endpoint_id).is_some();
+            let had_peer_entry = sync_state.requested_peers.remove(&peer_id).is_some();
             clear_doc_request = sync_state.requested_peers.is_empty();
             if had_peer_entry {
-                if let Some(conn_id) = self.conn_by_peer.get(&endpoint_id).copied() {
-                    if let Some(peer_state) = self.known_peer_set.get_mut(&conn_id) {
-                        peer_state.doc_pending_docs = peer_state.doc_pending_docs.saturating_sub(1);
-                        refresh_peer = true;
-                    }
+                if let Some(peer_state) = self.known_peer_set.get_mut(&peer_id) {
+                    peer_state.doc_pending_docs = peer_state.doc_pending_docs.saturating_sub(1);
+                    refresh_peer = true;
                 }
             }
         }
@@ -1622,7 +1396,7 @@ impl Worker {
         } else {
             let task_key = DocSyncTaskKey {
                 doc_id: doc_id.clone(),
-                endpoint_id,
+                peer_id,
             };
             self.scheduler.clear_doc_task(&task_key);
             if let Some(active) = self.scheduler.active_docs.remove(&task_key) {
@@ -1630,14 +1404,15 @@ impl Worker {
             }
         }
         if refresh_peer {
-            self.refresh_peer_fully_synced_state(endpoint_id).await?;
+            self.refresh_peer_fully_synced_state(peer_id).await?;
         }
         self.scheduler
-            .note_cursor_ready_immediate(endpoint_id, &partition_id, cursor);
-        self.maybe_emit_cursor_advance_acks(endpoint_id, &peer_key, &partition_id)
+            .note_cursor_ready_immediate(peer_id, &partition_id, cursor);
+        self.maybe_emit_cursor_advance_acks(peer_id, &peer_key, &partition_id)
             .await
     }
 
+    #[tracing::instrument(skip(self))]
     async fn enqueue_doc_import_request(
         &mut self,
         peer_key: PeerKey,
@@ -1645,27 +1420,21 @@ impl Worker {
         doc_id: DocumentId,
         cursor: u64,
     ) -> Res<()> {
-        let Some(endpoint_id) = self.endpoint_for_peer_key(&peer_key) else {
-            self.handle_unknown_peer_request(
-                &peer_key,
-                format!("import doc request for {}", doc_id),
-            )?;
+        let Some(peer_id) = self.peer_id_of_known_peer(&peer_key)? else {
             return Ok(());
         };
-        self.emit_stale_peer(endpoint_id).await?;
+        self.emit_stale_peer(Arc::clone(&peer_key)).await?;
 
         let import_state = self.import_doc_set.entry(doc_id.clone()).or_default();
         import_state
             .requested_peers
-            .entry(endpoint_id)
+            .entry(peer_id)
             .or_default()
             .entry(PartitionKey::BigRepoPartition(partition_id))
             .or_default()
             .insert(cursor);
 
         debug!(
-            endpoint_id = ?endpoint_id,
-            peer_key = %peer_key,
             %doc_id,
             cursor,
             "queued doc import request"
@@ -1673,7 +1442,7 @@ impl Worker {
 
         let task_key = ImportSyncTaskKey {
             doc_id: doc_id.clone(),
-            endpoint_id,
+            peer_id,
         };
         if !self.scheduler.active_imports.contains_key(&task_key)
             && self.scheduler.pending_import_state(&task_key).is_none()
@@ -1683,9 +1452,10 @@ impl Worker {
         Ok(())
     }
 
+    #[tracing::instrument(skip(self))]
     async fn maybe_emit_cursor_advance_acks(
         &mut self,
-        endpoint_id: EndpointId,
+        peer_id: PeerId,
         peer_key: &PeerKey,
         partition_id: &PartitionId,
     ) -> Res<()> {
@@ -1697,18 +1467,18 @@ impl Worker {
                 .doc_cursor;
             let Some(next_cursor) =
                 self.scheduler
-                    .next_ready_cursor_to_ack(endpoint_id, partition_id, persisted)
+                    .next_ready_cursor_to_ack(peer_id, partition_id, persisted)
             else {
                 break;
             };
-            let Some(session) = self.peer_partition_sessions.get(&endpoint_id) else {
+            let Some(session) = self.peer_partition_sessions.get(&peer_id) else {
                 warn!(
-                    endpoint_id = ?endpoint_id,
+                    endpoint_id = ?peer_id,
                     partition_id = %partition_id,
                     cursor = next_cursor,
                     "missing peer session while emitting cursor advance ack"
                 );
-                self.scheduler.peer_sessions_to_refresh.insert(endpoint_id);
+                self.scheduler.peer_sessions_to_refresh.insert(peer_id);
                 break;
             };
             if let Err(err) = session.doc_ack_tx.try_send(DocSyncAck::CursorAdvanced {
@@ -1718,38 +1488,34 @@ impl Worker {
                 match err {
                     tokio::sync::mpsc::error::TrySendError::Closed(_) => {
                         warn!(
-                            endpoint_id = ?endpoint_id,
-                            partition_id = %partition_id,
                             cursor = next_cursor,
                             "failed sending cursor advance ack to peer worker: channel closed"
                         );
                     }
                     tokio::sync::mpsc::error::TrySendError::Full(_) => {
                         warn!(
-                            endpoint_id = ?endpoint_id,
-                            partition_id = %partition_id,
                             cursor = next_cursor,
                             "failed sending cursor advance ack to peer worker: channel full"
                         );
                     }
                 }
-                self.scheduler.peer_sessions_to_refresh.insert(endpoint_id);
+                self.scheduler.peer_sessions_to_refresh.insert(peer_id);
                 break;
             }
             self.scheduler
-                .commit_ack_cursor(endpoint_id, partition_id, persisted, next_cursor)?;
+                .commit_ack_cursor(peer_id, partition_id, persisted, next_cursor)?;
         }
         Ok(())
     }
 
     async fn maybe_emit_member_cursor_ack(
         &mut self,
-        endpoint_id: EndpointId,
+        peer_id: PeerId,
         partition_id: &PartitionId,
         cursor: u64,
     ) -> Res<()> {
-        let Some(session) = self.peer_partition_sessions.get(&endpoint_id) else {
-            self.scheduler.peer_sessions_to_refresh.insert(endpoint_id);
+        let Some(session) = self.peer_partition_sessions.get(&peer_id) else {
+            self.scheduler.peer_sessions_to_refresh.insert(peer_id);
             return Ok(());
         };
         if let Err(err) = session
@@ -1762,7 +1528,7 @@ impl Worker {
             match err {
                 tokio::sync::mpsc::error::TrySendError::Closed(_) => {
                     warn!(
-                        endpoint_id = ?endpoint_id,
+                        endpoint_id = ?peer_id,
                         partition_id = %partition_id,
                         cursor,
                         "failed sending member cursor advance ack to peer worker: channel closed"
@@ -1770,14 +1536,14 @@ impl Worker {
                 }
                 tokio::sync::mpsc::error::TrySendError::Full(_) => {
                     warn!(
-                        endpoint_id = ?endpoint_id,
+                        endpoint_id = ?peer_id,
                         partition_id = %partition_id,
                         cursor,
                         "failed sending member cursor advance ack to peer worker: channel full"
                     );
                 }
             }
-            self.scheduler.peer_sessions_to_refresh.insert(endpoint_id);
+            self.scheduler.peer_sessions_to_refresh.insert(peer_id);
         }
         Ok(())
     }
@@ -1812,7 +1578,7 @@ impl Worker {
                     .map_or(now, |prior| prior.last_attempt_at),
             };
             debug!(
-                endpoint_id = ?task_key.endpoint_id,
+                endpoint_id = ?task_key.peer_id,
                 %task_key.doc_id,
                 attempt_no = retry.attempt_no,
                 "booting doc sync worker"
@@ -1820,7 +1586,7 @@ impl Worker {
             match self.boot_doc_sync_worker(task_key.clone(), retry).await? {
                 BootDocSyncWorkerResult::Spawned(active) => {
                     debug!(
-                        endpoint_id = ?task_key.endpoint_id,
+                        endpoint_id = ?task_key.peer_id,
                         %task_key.doc_id,
                         "doc sync worker spawned"
                     );
@@ -1830,7 +1596,7 @@ impl Worker {
                 }
                 BootDocSyncWorkerResult::MissingLocal => {
                     debug!(
-                        endpoint_id = ?task_key.endpoint_id,
+                        endpoint_id = ?task_key.peer_id,
                         %task_key.doc_id,
                         "doc sync worker missing local doc"
                     );
@@ -1838,7 +1604,7 @@ impl Worker {
                 }
                 BootDocSyncWorkerResult::Deferred => {
                     debug!(
-                        endpoint_id = ?task_key.endpoint_id,
+                        endpoint_id = ?task_key.peer_id,
                         %task_key.doc_id,
                         "doc sync worker deferred"
                     );
@@ -1889,32 +1655,13 @@ impl Worker {
                 self.scheduler.clear_import_task(&task_key);
                 continue;
             };
-            if !import_state
-                .requested_peers
-                .contains_key(&task_key.endpoint_id)
-            {
+            if !import_state.requested_peers.contains_key(&task_key.peer_id) {
                 self.scheduler.clear_import_task(&task_key);
                 continue;
             }
-            let Some(conn_id) = self.conn_by_peer.get(&task_key.endpoint_id).copied() else {
+            if !self.known_peer_set.contains_key(&task_key.peer_id) {
                 debug!(
-                    endpoint_id = ?task_key.endpoint_id,
-                    %task_key.doc_id,
-                    "import worker deferred: missing connection"
-                );
-                let now = std::time::Instant::now();
-                let pending = scheduler::PendingTaskState {
-                    attempt_no: retry.attempt_no,
-                    last_backoff: retry.last_backoff,
-                    last_attempt_at: now,
-                    due_at: now + Duration::from_millis(500),
-                };
-                self.scheduler.set_import_backoff(&task_key, pending);
-                continue;
-            };
-            if !self.known_peer_set.contains_key(&conn_id) {
-                debug!(
-                    endpoint_id = ?task_key.endpoint_id,
+                    endpoint_id = ?task_key.peer_id,
                     %task_key.doc_id,
                     "import worker deferred: missing peer state"
                 );
@@ -1932,7 +1679,7 @@ impl Worker {
                 stop_token: import_worker::spawn_import_sync_worker(
                     task_key.doc_id.clone(),
                     import_worker::ImportSyncTarget {
-                        endpoint_id: task_key.endpoint_id,
+                        peer_id: task_key.peer_id,
                     },
                     self.local_peer_key.clone(),
                     self.cancel_token.child_token(),
@@ -1944,7 +1691,7 @@ impl Worker {
                 retry,
             };
             debug!(
-                endpoint_id = ?task_key.endpoint_id,
+                endpoint_id = ?task_key.peer_id,
                 %task_key.doc_id,
                 "import sync worker spawned"
             );
@@ -1965,27 +1712,24 @@ impl Worker {
     ) -> Res<BootDocSyncWorkerResult> {
         let cancel_token = self.cancel_token.child_token();
         let doc_id = task_key.doc_id;
-        let endpoint_id = task_key.endpoint_id;
+        let peer_id = task_key.peer_id;
         if self.big_repo.get_doc(&doc_id).await?.is_none() {
             return Ok(BootDocSyncWorkerResult::MissingLocal);
         }
         let Some(sync_state) = self.doc_sync_set.get(&doc_id) else {
             return Ok(BootDocSyncWorkerResult::Deferred);
         };
-        if !sync_state.requested_peers.contains_key(&endpoint_id) {
+        if !sync_state.requested_peers.contains_key(&peer_id) {
             return Ok(BootDocSyncWorkerResult::Deferred);
         }
-        let Some(conn_id) = self.conn_by_peer.get(&endpoint_id).copied() else {
-            return Ok(BootDocSyncWorkerResult::Deferred);
-        };
-        let Some(peer_state) = self.known_peer_set.get(&conn_id) else {
+        let Some(peer_state) = self.known_peer_set.get(&peer_id) else {
             return Ok(BootDocSyncWorkerResult::Deferred);
         };
         let connection = peer_state.connection.clone();
         let stop_token = doc_worker::spawn_doc_sync_worker(
             doc_id,
             doc_worker::DocSyncTarget {
-                endpoint_id,
+                peer_id,
                 connection,
             },
             Arc::clone(&self.big_repo),
@@ -2076,32 +1820,25 @@ impl Worker {
         Ok(())
     }
 
+    #[tracing::instrument(skip(self))]
     async fn handle_doc_sync_completed(
         &mut self,
         doc_id: DocumentId,
-        endpoint_id: EndpointId,
+        peer_id: PeerId,
         outcome: am_utils_rs::repo::SyncDocOutcome,
     ) -> Res<()> {
         let task_key = DocSyncTaskKey {
             doc_id: doc_id.clone(),
-            endpoint_id,
-        };
-        let Some(active) = self.scheduler.active_docs.get(&task_key) else {
-            return Ok(());
+            peer_id,
         };
         let active = self
             .scheduler
             .active_docs
             .remove(&task_key)
-            .expect("active doc worker must exist");
+            .expect(ERROR_UNRECONIZED);
         active.stop_token.stop().await?;
         self.scheduler.clear_doc_pending(&task_key);
-        debug!(
-            endpoint_id = ?endpoint_id,
-            %doc_id,
-            outcome = ?outcome,
-            "doc sync worker completed"
-        );
+        debug!("doc sync worker completed");
 
         match outcome {
             am_utils_rs::repo::SyncDocOutcome::Success => {
@@ -2109,13 +1846,15 @@ impl Worker {
                 let mut refreshed_peer = false;
 
                 if let Some(sync_state) = self.doc_sync_set.get_mut(&doc_id) {
-                    if let Some(requested_parts) = sync_state.requested_peers.remove(&endpoint_id) {
-                        if let Some(conn_id) = self.conn_by_peer.get(&endpoint_id).copied() {
-                            if let Some(peer_state) = self.known_peer_set.get_mut(&conn_id) {
-                                peer_state.doc_pending_docs =
-                                    peer_state.doc_pending_docs.saturating_sub(1);
-                                refreshed_peer = true;
-                            }
+                    if let Some(requested_parts) = sync_state.requested_peers.remove(&peer_id) {
+                        {
+                            let peer_state = self
+                                .known_peer_set
+                                .get_mut(&peer_id)
+                                .expect(ERROR_UNRECONIZED);
+                            peer_state.doc_pending_docs =
+                                peer_state.doc_pending_docs.saturating_sub(1);
+                            refreshed_peer = true;
                         }
 
                         for (partition_key, cursors) in requested_parts {
@@ -2124,7 +1863,7 @@ impl Worker {
                             };
                             for cursor in cursors {
                                 self.scheduler.note_doc_synced(
-                                    endpoint_id,
+                                    peer_id,
                                     &partition_id,
                                     cursor,
                                     &doc_id.to_string(),
@@ -2135,22 +1874,18 @@ impl Worker {
                     }
                 }
 
+                let peer_key = self.peer_key_for_id(peer_id).expect(ERROR_UNRECONIZED);
                 for partition_id in partitions_to_advance {
-                    if let Some(peer_key) = self.peer_key_for_endpoint(endpoint_id) {
-                        self.maybe_emit_cursor_advance_acks(endpoint_id, &peer_key, &partition_id)
-                            .await?;
-                    }
+                    self.maybe_emit_cursor_advance_acks(peer_id, &peer_key, &partition_id)
+                        .await?;
                 }
                 if refreshed_peer {
-                    self.refresh_peer_fully_synced_state(endpoint_id).await?;
+                    self.refresh_peer_fully_synced_state(peer_id).await?;
                 }
-                self.emit_full_sync_event(FullSyncEvent::DocSyncedWithPeer {
-                    endpoint_id,
-                    doc_id: doc_id.clone(),
-                })
-                .await?;
+                self.emit_full_sync_event(FullSyncEvent::DocSyncedWithPeer { peer_key, doc_id })
+                    .await?;
                 self.emit_peer_progress_status(
-                    endpoint_id,
+                    peer_id,
                     ProgressUpdateDeets::Status {
                         severity: ProgressSeverity::Info,
                         message: format!("doc sync completed: {doc_id}"),
@@ -2198,7 +1933,7 @@ impl Worker {
             for endpoint_id in sync_state.requested_peers.keys().copied() {
                 let pending_key = DocSyncTaskKey {
                     doc_id: doc_id.clone(),
-                    endpoint_id,
+                    peer_id: endpoint_id,
                 };
                 if !self.scheduler.active_docs.contains_key(&pending_key)
                     && !self.scheduler.is_doc_pending(&pending_key)
@@ -2210,10 +1945,11 @@ impl Worker {
         Ok(())
     }
 
+    #[tracing::instrument(skip(self))]
     async fn handle_doc_request_backoff(
         &mut self,
         doc_id: DocumentId,
-        endpoint_id: EndpointId,
+        peer_id: PeerId,
         delay: Duration,
         previous_attempt_no: usize,
         previous_backoff: Duration,
@@ -2221,7 +1957,7 @@ impl Worker {
     ) -> Res<()> {
         let task_key = DocSyncTaskKey {
             doc_id: doc_id.clone(),
-            endpoint_id,
+            peer_id,
         };
         if let Some(active) = self.scheduler.active_docs.remove(&task_key) {
             active.stop_token.stop().await?;
@@ -2229,7 +1965,7 @@ impl Worker {
         if self
             .doc_sync_set
             .get(&doc_id)
-            .and_then(|state| state.requested_peers.get(&endpoint_id))
+            .and_then(|state| state.requested_peers.get(&peer_id))
             .is_none()
         {
             self.scheduler.clear_doc_task(&task_key);
@@ -2248,6 +1984,7 @@ impl Worker {
         Ok(())
     }
 
+    #[tracing::instrument(skip(self))]
     async fn handle_doc_missing_local(&mut self, doc_id: DocumentId) -> Res<()> {
         for task_key in self.scheduler.doc_task_keys_for_doc(&doc_id) {
             if let Some(active) = self.scheduler.active_docs.remove(&task_key) {
@@ -2266,16 +2003,14 @@ impl Worker {
             .copied()
             .collect::<Vec<_>>();
         let mut peers_to_refresh = Vec::new();
-        for endpoint_id in sync_state.requested_peers.keys() {
-            if let Some(conn_id) = self.conn_by_peer.get(endpoint_id).copied() {
-                if let Some(peer_state) = self.known_peer_set.get_mut(&conn_id) {
-                    peer_state.doc_pending_docs = peer_state.doc_pending_docs.saturating_sub(1);
-                    peers_to_refresh.push(*endpoint_id);
-                }
+        for peer_id in sync_state.requested_peers.keys() {
+            if let Some(peer_state) = self.known_peer_set.get_mut(&peer_id) {
+                peer_state.doc_pending_docs = peer_state.doc_pending_docs.saturating_sub(1);
+                peers_to_refresh.push(*peer_id);
             }
         }
-        for endpoint_id in peers_to_refresh {
-            self.refresh_peer_fully_synced_state(endpoint_id).await?;
+        for peer_id in peers_to_refresh {
+            self.refresh_peer_fully_synced_state(peer_id).await?;
         }
         for endpoint_id in endpoint_ids {
             self.emit_peer_progress_status(
@@ -2293,60 +2028,49 @@ impl Worker {
         Ok(())
     }
 
+    #[tracing::instrument(skip(self))]
     async fn handle_import_doc_completed(
         &mut self,
         doc_id: DocumentId,
-        endpoint_id: EndpointId,
+        peer_id: PeerId,
         outcome: import_worker::ImportDocOutcome,
     ) -> Res<()> {
         let task_key = ImportSyncTaskKey {
             doc_id: doc_id.clone(),
-            endpoint_id,
+            peer_id,
         };
         let prior_pending = self.scheduler.pending_import_state(&task_key);
         if let Some(active) = self.scheduler.active_imports.remove(&task_key) {
             active.stop_token.stop().await?;
         }
-        self.scheduler.clear_import_pending(&task_key);
-        debug!(
-            endpoint_id = ?endpoint_id,
-            %doc_id,
-            outcome = ?outcome,
-            "import worker completed"
-        );
+        debug!("import worker completed");
 
         if !self.import_doc_set.contains_key(&doc_id) {
             self.scheduler.clear_import_task(&task_key);
             return Ok(());
         }
-        self.scheduler.clear_import_task(&task_key);
 
         match outcome {
             import_worker::ImportDocOutcome::Imported => {
                 let endpoint_partitions = self
                     .import_doc_set
                     .get_mut(&doc_id)
-                    .and_then(|state| state.requested_peers.remove(&endpoint_id));
+                    .and_then(|state| state.requested_peers.remove(&peer_id));
                 if let Some(partitions) = endpoint_partitions {
-                    if let Some(peer_key) = self.peer_key_for_endpoint(endpoint_id) {
-                        for (partition_key, cursors) in partitions {
-                            let PartitionKey::BigRepoPartition(partition_id) = partition_key else {
-                                continue;
-                            };
-                            for cursor in cursors {
-                                self.scheduler.note_cursor_ready_immediate(
-                                    endpoint_id,
-                                    &partition_id,
-                                    cursor,
-                                );
-                            }
-                            self.maybe_emit_cursor_advance_acks(
-                                endpoint_id,
-                                &peer_key,
+                    let peer_key = self.peer_key_for_id(peer_id).expect(ERROR_UNRECONIZED);
+                    for (partition_key, cursors) in partitions {
+                        let PartitionKey::BigRepoPartition(partition_id) = partition_key else {
+                            continue;
+                        };
+                        for cursor in cursors {
+                            self.scheduler.note_cursor_ready_immediate(
+                                peer_id,
                                 &partition_id,
-                            )
-                            .await?;
+                                cursor,
+                            );
                         }
+                        self.maybe_emit_cursor_advance_acks(peer_id, &peer_key, &partition_id)
+                            .await?;
                     }
                 }
 
@@ -2357,7 +2081,7 @@ impl Worker {
                     .map(|state| state.requested_peers.drain().collect::<Vec<_>>())
                     .unwrap_or_default();
                 for (other_endpoint_id, partitions) in remaining {
-                    let Some(peer_key) = self.peer_key_for_endpoint(other_endpoint_id) else {
+                    let Some(peer_key) = self.peer_key_for_id(other_endpoint_id) else {
                         continue;
                     };
                     for (partition_key, cursors) in partitions {
@@ -2377,42 +2101,63 @@ impl Worker {
                 }
             }
             import_worker::ImportDocOutcome::LocalPresent => {
-                let Some(partitions) = self
+                let partitions = self
                     .import_doc_set
                     .get_mut(&doc_id)
-                    .and_then(|state| state.requested_peers.remove(&endpoint_id))
-                else {
-                    return Ok(());
-                };
-                let Some(peer_key) = self.peer_key_for_endpoint(endpoint_id) else {
-                    return Ok(());
-                };
-                for (partition_key, cursors) in partitions {
-                    let PartitionKey::BigRepoPartition(partition_id) = partition_key else {
+                    .and_then(|state| state.requested_peers.remove(&peer_id));
+                if let Some(partitions) = partitions {
+                    let peer_key = self.peer_key_for_id(peer_id).expect(ERROR_UNRECONIZED);
+                    for (partition_key, cursors) in partitions {
+                        let PartitionKey::BigRepoPartition(partition_id) = partition_key else {
+                            continue;
+                        };
+                        for cursor in cursors {
+                            self.handle_request_doc_sync(
+                                peer_key.clone(),
+                                partition_id.clone(),
+                                doc_id.clone(),
+                                cursor,
+                            )
+                            .await?;
+                        }
+                    }
+                }
+
+                // Doc is now local; push remaining import requests into doc-sync path.
+                let remaining = self
+                    .import_doc_set
+                    .get_mut(&doc_id)
+                    .map(|state| state.requested_peers.drain().collect::<Vec<_>>())
+                    .unwrap_or_default();
+                for (other_endpoint_id, partitions) in remaining {
+                    let Some(peer_key) = self.peer_key_for_id(other_endpoint_id) else {
                         continue;
                     };
-                    for cursor in cursors {
-                        self.handle_request_doc_sync(
-                            peer_key.clone(),
-                            partition_id.clone(),
-                            doc_id.clone(),
-                            cursor,
-                        )
-                        .await?;
+                    for (partition_key, cursors) in partitions {
+                        let PartitionKey::BigRepoPartition(partition_id) = partition_key else {
+                            continue;
+                        };
+                        for cursor in cursors {
+                            self.handle_request_doc_sync(
+                                peer_key.clone(),
+                                partition_id.clone(),
+                                doc_id.clone(),
+                                cursor,
+                            )
+                            .await?;
+                        }
                     }
                 }
             }
             import_worker::ImportDocOutcome::MissingOnRemote => {
-                warn!(
-                    %doc_id, endpoint_id = ?endpoint_id,
-                    "import worker could not fetch doc from remote; waiting for replay/retry"
-                );
+                warn!("import worker could not fetch doc from remote; waiting for replay/retry");
                 if self
                     .import_doc_set
                     .get(&doc_id)
-                    .and_then(|state| state.requested_peers.get(&endpoint_id))
+                    .and_then(|state| state.requested_peers.get(&peer_id))
                     .is_none()
                 {
+                    self.scheduler.clear_import_task(&task_key);
                     return Ok(());
                 }
                 let now = std::time::Instant::now();
@@ -2445,30 +2190,27 @@ impl Worker {
                 }
             }
         }
-        self.refresh_peer_fully_synced_state(endpoint_id).await?;
+        self.refresh_peer_fully_synced_state(peer_id).await?;
         Ok(())
     }
 
     async fn handle_import_doc_backoff(
         &mut self,
         doc_id: DocumentId,
-        endpoint_id: EndpointId,
+        peer_id: PeerId,
         delay: Duration,
         previous_attempt_no: usize,
         previous_backoff: Duration,
         _previous_attempt_at: std::time::Instant,
     ) -> Res<()> {
-        let task_key = ImportSyncTaskKey {
-            doc_id,
-            endpoint_id,
-        };
+        let task_key = ImportSyncTaskKey { doc_id, peer_id };
         if let Some(active) = self.scheduler.active_imports.remove(&task_key) {
             active.stop_token.stop().await?;
         }
         if self
             .import_doc_set
             .get(&task_key.doc_id)
-            .and_then(|state| state.requested_peers.get(&task_key.endpoint_id))
+            .and_then(|state| state.requested_peers.get(&task_key.peer_id))
             .is_none()
         {
             self.scheduler.clear_import_task(&task_key);
@@ -2609,7 +2351,7 @@ impl Worker {
         Ok(())
     }
 
-    fn active_peers_for_blob(&self, hash: &str) -> Vec<EndpointId> {
+    fn active_peers_for_blob(&self, hash: &str) -> Vec<PeerId> {
         let mut peers = HashSet::new();
         let Some(partitions) = self.scheduler.blob_requirements.get(hash) else {
             return Vec::new();
@@ -2696,7 +2438,7 @@ impl Worker {
     async fn handle_blob_marked_synced(
         &mut self,
         hash: String,
-        endpoint_id: Option<EndpointId>,
+        peer_id: Option<PeerId>,
     ) -> Res<()> {
         if !self.scheduler.blob_requirements.contains_key(&hash) {
             return Ok(());
@@ -2706,9 +2448,10 @@ impl Worker {
             active.stop_token.stop().await?;
         }
         self.scheduler.clear_blob_pending(&hash);
+        let peer_key = peer_id.and_then(|id| self.peer_key_for_id(id));
         self.emit_full_sync_event(FullSyncEvent::BlobSynced {
             hash: sync_hash,
-            endpoint_id,
+            peer_key,
         })
         .await?;
         Ok(())
@@ -2752,6 +2495,130 @@ impl Worker {
 
 // progress related methods
 impl Worker {
+    async fn handle_peer_sync_worker_progress(
+        &mut self,
+        peer_id: PeerId,
+        event: PeerSyncProgressEvent,
+    ) -> Res<()> {
+        match event {
+            PeerSyncProgressEvent::PhaseStarted { phase } => {
+                debug!(peer_id = ?peer_id, phase, "peer sync phase started");
+                self.emit_peer_progress_status(
+                    peer_id,
+                    ProgressUpdateDeets::Status {
+                        severity: ProgressSeverity::Info,
+                        message: format!("phase started: {phase}"),
+                    },
+                )
+                .await?;
+            }
+            PeerSyncProgressEvent::PhaseFinished { phase, elapsed } => {
+                debug!(peer_id = ?peer_id, phase, elapsed_ms = elapsed.as_millis(), "peer sync phase finished");
+                self.emit_peer_progress_status(
+                    peer_id,
+                    ProgressUpdateDeets::Status {
+                        severity: ProgressSeverity::Info,
+                        message: format!("phase finished: {phase} ({:?})", elapsed),
+                    },
+                )
+                .await?;
+            }
+            PeerSyncProgressEvent::DocSyncStatus {
+                synced_docs,
+                remaining_docs,
+            } => {
+                debug!(
+                    peer_id = ?peer_id,
+                    synced_docs,
+                    remaining_docs,
+                    "peer sync worker doc status"
+                );
+                self.emit_peer_progress_status(
+                    peer_id,
+                    ProgressUpdateDeets::Amount {
+                        severity: ProgressSeverity::Info,
+                        done: synced_docs,
+                        total: Some(synced_docs.saturating_add(remaining_docs)),
+                        unit: ProgressUnit::Generic {
+                            label: "docs".to_string(),
+                        },
+                        message: Some("doc sync status".to_string()),
+                    },
+                )
+                .await?;
+                if let Some(peer_state) = self.known_peer_set.get_mut(&peer_id) {
+                    peer_state.bootstrap_synced_docs = synced_docs;
+                    peer_state.bootstrap_remaining_docs = remaining_docs;
+                }
+                self.refresh_peer_fully_synced_state(peer_id).await?;
+            }
+        }
+        Ok(())
+    }
+
+    #[tracing::instrument(skip(self))]
+    async fn handle_peer_sync_worker_event(
+        &mut self,
+        peer_id: PeerId,
+        event: PeerSyncWorkerEvent,
+    ) -> Res<()> {
+        let peer_key = self.peer_key_for_id(peer_id).expect(ERROR_UNRECONIZED);
+        match event {
+            PeerSyncWorkerEvent::Bootstrapped {
+                peer,
+                partition_count,
+            } => {
+                debug!(?peer, partition_count, "peer sync worker bootstrapped");
+                self.emit_peer_progress_status(
+                    peer_id,
+                    ProgressUpdateDeets::Status {
+                        severity: ProgressSeverity::Info,
+                        message: format!("bootstrapped with {partition_count} partitions"),
+                    },
+                )
+                .await?;
+                let peer_state = self
+                    .known_peer_set
+                    .get_mut(&peer_id)
+                    .expect(ERROR_UNRECONIZED);
+                peer_state.bootstrap_ready = true;
+                peer_state.bootstrap_remaining_docs = 0;
+                self.refresh_peer_fully_synced_state(peer_id).await?;
+            }
+            PeerSyncWorkerEvent::LiveReady { peer } => {
+                debug!(?peer, "peer sync worker entered live mode");
+                self.emit_peer_progress_status(
+                    peer_id,
+                    ProgressUpdateDeets::Completed {
+                        state: ProgressFinalState::Succeeded,
+                        message: Some("peer entered live mode".to_string()),
+                    },
+                )
+                .await?;
+                let peer_state = self
+                    .known_peer_set
+                    .get_mut(&peer_id)
+                    .expect(ERROR_UNRECONIZED);
+                peer_state.live_ready = true;
+                self.refresh_peer_fully_synced_state(peer_id).await?;
+            }
+            PeerSyncWorkerEvent::AbnormalExit { peer, reason } => {
+                warn!(?peer, reason, "peer sync worker exited abnormally");
+                self.emit_peer_progress_status(
+                    peer_id,
+                    ProgressUpdateDeets::Completed {
+                        state: ProgressFinalState::Failed,
+                        message: Some(format!("peer worker abnormal exit: {reason}")),
+                    },
+                )
+                .await?;
+                self.emit_stale_peer(peer_key).await?;
+                self.scheduler.peer_sessions_to_refresh.insert(peer_id);
+            }
+        }
+        Ok(())
+    }
+
     fn has_progress_repo(&self) -> bool {
         self.progress_repo.is_some()
     }
@@ -2763,66 +2630,65 @@ impl Worker {
         _message: String,
         _final_state: Option<ProgressFinalState>,
     ) -> Res<()> {
+        // FIXME: wtf
         Ok(())
-    }
-
-    fn peer_sync_task_id(endpoint_id: EndpointId) -> String {
-        format!("sync/full/peer/{endpoint_id}")
     }
 
     async fn emit_peer_progress_status(
         &self,
-        endpoint_id: EndpointId,
+        peer_id: PeerId,
         deets: ProgressUpdateDeets,
     ) -> Res<()> {
         if !self.has_progress_repo() {
             return Ok(());
         }
-        let task_id = Self::peer_sync_task_id(endpoint_id);
+        let task_id = format!("sync/full/peer/{peer_id}");
         self.emit_progress_task(
             task_id.clone(),
             vec![
                 "/type/sync".to_string(),
                 "/sync/full".to_string(),
                 "/kind/peer_sync".to_string(),
-                format!("/peer/{endpoint_id}"),
+                format!("/peer/{peer_id}"),
             ],
         )
         .await?;
-        self.emit_progress_update(&task_id, deets, Some(format!("peer sync {endpoint_id}")))
+        self.emit_progress_update(&task_id, deets, Some(format!("peer sync {peer_id}")))
             .await?;
         Ok(())
     }
 
-    async fn emit_stale_peer(&mut self, endpoint_id: EndpointId) -> Res<()> {
+    async fn emit_stale_peer(&mut self, peer_key: PeerKey) -> Res<()> {
         let mut stale = None;
-        if let Some(conn_id) = self.conn_by_peer.get(&endpoint_id).copied() {
-            if let Some(peer_state) = self.known_peer_set.get_mut(&conn_id) {
-                if peer_state.emitted_full_synced {
-                    peer_state.emitted_full_synced = false;
-                    stale = Some(peer_state.endpoint_id);
-                }
-            }
+        let peer_id = self
+            .peer_id_by_peer_key
+            .get(&peer_key)
+            .expect(ERROR_UNRECONIZED);
+        let peer_state = self
+            .known_peer_set
+            .get_mut(peer_id)
+            .expect(ERROR_UNRECONIZED);
+        if peer_state.emitted_full_synced {
+            peer_state.emitted_full_synced = false;
+            stale = Some(peer_state.peer_id);
         }
-        if let Some(endpoint_id) = stale {
-            self.emit_full_sync_event(FullSyncEvent::StalePeer { endpoint_id })
-                .await?;
-        }
+        self.emit_full_sync_event(FullSyncEvent::StalePeer { peer_key })
+            .await?;
         Ok(())
     }
 
-    async fn remove_peer_from_doc_sync_set(&mut self, endpoint_id: EndpointId) -> Res<()> {
+    async fn remove_peer_from_doc_sync_set(&mut self, peer_id: PeerId) -> Res<()> {
         let mut to_remove = Vec::new();
         let mut to_stop = Vec::new();
         for (doc_id, sync_state) in &mut self.doc_sync_set {
-            sync_state.requested_peers.remove(&endpoint_id);
+            sync_state.requested_peers.remove(&peer_id);
             self.scheduler.clear_doc_task(&DocSyncTaskKey {
                 doc_id: doc_id.clone(),
-                endpoint_id,
+                peer_id,
             });
             if let Some(active) = self.scheduler.active_docs.remove(&DocSyncTaskKey {
                 doc_id: doc_id.clone(),
-                endpoint_id,
+                peer_id,
             }) {
                 to_stop.push(active.stop_token);
             }
@@ -2830,7 +2696,7 @@ impl Worker {
                 to_remove.push(doc_id.clone());
             }
         }
-        for task_key in self.scheduler.doc_task_keys_for_peer(endpoint_id) {
+        for task_key in self.scheduler.doc_task_keys_for_peer(peer_id) {
             self.scheduler.clear_doc_task(&task_key);
             if let Some(active) = self.scheduler.active_docs.remove(&task_key) {
                 to_stop.push(active.stop_token);
@@ -2852,15 +2718,15 @@ impl Worker {
         Ok(())
     }
 
-    async fn remove_peer_from_import_doc_set(&mut self, endpoint_id: EndpointId) -> Res<()> {
+    async fn remove_peer_from_import_doc_set(&mut self, peer_id: PeerId) -> Res<()> {
         let mut to_remove = Vec::new();
         for (doc_id, import_state) in &mut self.import_doc_set {
-            import_state.requested_peers.remove(&endpoint_id);
+            import_state.requested_peers.remove(&peer_id);
             if import_state.requested_peers.is_empty() {
                 to_remove.push(doc_id.clone());
             }
         }
-        for task_key in self.scheduler.import_task_keys_for_peer(endpoint_id) {
+        for task_key in self.scheduler.import_task_keys_for_peer(peer_id) {
             if let Some(active) = self.scheduler.active_imports.remove(&task_key) {
                 active.stop_token.stop().await?;
             }
@@ -2878,82 +2744,74 @@ impl Worker {
         Ok(())
     }
 
-    async fn refresh_peer_fully_synced_state(&mut self, endpoint_id: EndpointId) -> Res<()> {
-        let Some(conn_id) = self.conn_by_peer.get(&endpoint_id).copied() else {
-            return Ok(());
-        };
-        let mut emit_full = None;
-        let mut emit_stale = false;
-        let endpoint_has_doc_work = self.scheduler.endpoint_has_doc_work(endpoint_id);
-        if let Some(peer_state) = self.known_peer_set.get_mut(&conn_id) {
-            let is_fully_synced = peer_state.bootstrap_ready
-                && peer_state.bootstrap_remaining_docs == 0
-                && peer_state.live_ready
-                && !endpoint_has_doc_work
-                && peer_state.doc_pending_docs == 0;
-            debug!(
-                endpoint_id = ?endpoint_id,
-                bootstrap_ready = peer_state.bootstrap_ready,
-                bootstrap_synced_docs = peer_state.bootstrap_synced_docs,
-                bootstrap_remaining_docs = peer_state.bootstrap_remaining_docs,
-                doc_pending_docs = peer_state.doc_pending_docs,
-                endpoint_has_doc_work,
-                emitted_full_synced = peer_state.emitted_full_synced,
-                live_ready = peer_state.live_ready,
-                is_fully_synced,
-                "refresh_peer_fully_synced_state evaluated"
-            );
-            if is_fully_synced {
-                if !peer_state.emitted_full_synced {
-                    peer_state.emitted_full_synced = true;
-                    emit_full = Some(peer_state.bootstrap_synced_docs as usize);
-                }
-            } else if peer_state.emitted_full_synced {
-                peer_state.emitted_full_synced = false;
-                emit_stale = true;
+    #[tracing::instrument(skip(self))]
+    async fn refresh_peer_fully_synced_state(&mut self, peer_id: PeerId) -> Res<()> {
+        let endpoint_has_doc_work = self.scheduler.endpoint_has_doc_work(peer_id);
+        let peer_state = self
+            .known_peer_set
+            .get_mut(&peer_id)
+            .expect(ERROR_UNRECONIZED);
+        let is_fully_synced = peer_state.bootstrap_ready
+            && peer_state.bootstrap_remaining_docs == 0
+            && peer_state.live_ready
+            && !endpoint_has_doc_work
+            && peer_state.doc_pending_docs == 0;
+        debug!(
+            bootstrap_ready = peer_state.bootstrap_ready,
+            bootstrap_synced_docs = peer_state.bootstrap_synced_docs,
+            bootstrap_remaining_docs = peer_state.bootstrap_remaining_docs,
+            doc_pending_docs = peer_state.doc_pending_docs,
+            endpoint_has_doc_work,
+            emitted_full_synced = peer_state.emitted_full_synced,
+            live_ready = peer_state.live_ready,
+            is_fully_synced,
+            "refresh_peer_fully_synced_state evaluated"
+        );
+        let peer_key = Arc::clone(&peer_state.peer_key);
+        if is_fully_synced {
+            if !peer_state.emitted_full_synced {
+                peer_state.emitted_full_synced = true;
+                let doc_count = peer_state.bootstrap_synced_docs as usize;
+                self.emit_peer_progress_status(
+                    peer_id,
+                    ProgressUpdateDeets::Status {
+                        severity: ProgressSeverity::Info,
+                        message: format!("peer fully synced ({doc_count} docs converged)"),
+                    },
+                )
+                .await?;
+                self.emit_full_sync_event(FullSyncEvent::PeerFullSynced {
+                    peer_key,
+                    doc_count,
+                })
+                .await?;
             }
-        }
-        if let Some(doc_count) = emit_full {
+        } else if peer_state.emitted_full_synced {
+            peer_state.emitted_full_synced = false;
             self.emit_peer_progress_status(
-                endpoint_id,
-                ProgressUpdateDeets::Status {
-                    severity: ProgressSeverity::Info,
-                    message: format!("peer fully synced ({doc_count} docs converged)"),
-                },
-            )
-            .await?;
-            self.emit_full_sync_event(FullSyncEvent::PeerFullSynced {
-                endpoint_id,
-                doc_count,
-            })
-            .await?;
-        } else if emit_stale {
-            self.emit_peer_progress_status(
-                endpoint_id,
+                peer_id,
                 ProgressUpdateDeets::Status {
                     severity: ProgressSeverity::Warn,
                     message: "peer no longer fully synced".to_string(),
                 },
             )
             .await?;
-            self.emit_full_sync_event(FullSyncEvent::StalePeer { endpoint_id })
+            self.emit_full_sync_event(FullSyncEvent::StalePeer { peer_key })
                 .await?;
         }
         self.refresh_full_sync_waiters();
         Ok(())
     }
 
-    fn handle_unknown_peer_request(&self, peer_key: &str, context: String) -> Res<()> {
-        if self.seen_peer_keys.contains(peer_key) {
-            debug!(
-                peer_key,
-                context, "ignoring stale request for disconnected peer"
-            );
-            return Ok(());
+    fn peer_id_of_known_peer(&self, peer_key: &str) -> Res<Option<PeerId>> {
+        if let Some(peer_id) = self.peer_id_by_peer_key.get(peer_key) {
+            return Ok(Some(*peer_id));
         }
-        eyre::bail!(
-            "received sync request for never-seen peer: peer_key={peer_key}; context={context}"
-        );
+        if self.seen_peer_keys.contains(peer_key) {
+            warn!(peer_key, "stale request for disconnected peer");
+            return Ok(None);
+        }
+        eyre::bail!("received sync request for never-seen peer: peer_key={peer_key}");
     }
 
     async fn emit_full_sync_event(&self, event: FullSyncEvent) -> Res<()> {
@@ -3000,20 +2858,21 @@ impl Worker {
 
     async fn emit_blob_progress_start(
         &self,
-        endpoint_id: EndpointId,
+        peer_id: PeerId,
         partition: PartitionKey,
         hash: &str,
     ) -> Res<()> {
         self.emit_peer_progress_status(
-            endpoint_id,
+            peer_id,
             ProgressUpdateDeets::Status {
                 severity: ProgressSeverity::Info,
                 message: format!("blob download started: {hash}"),
             },
         )
         .await?;
+        let peer_key = self.peer_key_for_id(peer_id).expect(ERROR_UNRECONIZED);
         self.emit_full_sync_event(FullSyncEvent::BlobDownloadStarted {
-            endpoint_id,
+            peer_key,
             partition,
             hash: hash.to_string(),
         })
@@ -3023,23 +2882,24 @@ impl Worker {
 
     async fn emit_blob_progress_amount(
         &self,
-        _endpoint_id: EndpointId,
+        _peer_id: PeerId,
         _partition: PartitionKey,
         _hash: &str,
         _done: u64,
     ) -> Res<()> {
+        // FIXME: wtf
         Ok(())
     }
 
     async fn emit_blob_progress_finished(
         &self,
-        endpoint_id: EndpointId,
+        peer_id: PeerId,
         partition: PartitionKey,
         hash: &str,
         success: bool,
     ) -> Res<()> {
         self.emit_peer_progress_status(
-            endpoint_id,
+            peer_id,
             ProgressUpdateDeets::Status {
                 severity: if success {
                     ProgressSeverity::Info
@@ -3053,8 +2913,9 @@ impl Worker {
             },
         )
         .await?;
+        let peer_key = self.peer_key_for_id(peer_id).expect(ERROR_UNRECONIZED);
         self.emit_full_sync_event(FullSyncEvent::BlobDownloadFinished {
-            endpoint_id,
+            peer_key,
             partition,
             hash: hash.to_string(),
             success,
@@ -3083,25 +2944,25 @@ impl Worker {
                     worker_started.insert((partition, hash));
                 }
                 SyncProgressMsg::BlobDownloadStarted {
-                    endpoint_id,
+                    peer_id: endpoint_id,
                     partition,
                     hash,
                 } => {
                     started.insert(BlobProgressKey {
-                        endpoint_id,
+                        peer_id: endpoint_id,
                         partition,
                         hash,
                     });
                 }
                 SyncProgressMsg::BlobDownloadProgress {
-                    endpoint_id,
+                    peer_id: endpoint_id,
                     partition,
                     hash,
                     done,
                 } => {
                     progress_latest.insert(
                         BlobProgressKey {
-                            endpoint_id,
+                            peer_id: endpoint_id,
                             partition,
                             hash,
                         },
@@ -3112,14 +2973,14 @@ impl Worker {
                     materialize_started.insert((partition, hash));
                 }
                 SyncProgressMsg::BlobDownloadFinished {
-                    endpoint_id,
+                    peer_id: endpoint_id,
                     partition,
                     hash,
                     success,
                 } => {
                     finished.insert(
                         BlobProgressKey {
-                            endpoint_id,
+                            peer_id: endpoint_id,
                             partition,
                             hash,
                         },
@@ -3154,7 +3015,7 @@ impl Worker {
         }
 
         for key in started {
-            self.emit_blob_progress_start(key.endpoint_id, key.partition, &key.hash)
+            self.emit_blob_progress_start(key.peer_id, key.partition, &key.hash)
                 .await?;
         }
 
@@ -3162,7 +3023,7 @@ impl Worker {
             if finished.contains_key(&key) {
                 continue;
             }
-            self.emit_blob_progress_amount(key.endpoint_id, key.partition, &key.hash, done)
+            self.emit_blob_progress_amount(key.peer_id, key.partition, &key.hash, done)
                 .await?;
         }
 
@@ -3177,7 +3038,7 @@ impl Worker {
         }
 
         for (key, success) in finished {
-            self.emit_blob_progress_finished(key.endpoint_id, key.partition, &key.hash, success)
+            self.emit_blob_progress_finished(key.peer_id, key.partition, &key.hash, success)
                 .await?;
         }
 

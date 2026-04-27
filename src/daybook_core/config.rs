@@ -523,7 +523,9 @@ impl ConfigRepo {
     }
 
     pub async fn get_config_heads(&self) -> Res<Arc<[automerge::ChangeHash]>> {
-        let handle = self.big_repo.get_doc(&self.app_doc_id)
+        let handle = self
+            .big_repo
+            .get_doc(&self.app_doc_id)
             .await?
             .ok_or_eyre("app doc not found")?;
         let heads = handle.with_document(|doc| doc.get_heads()).await?;
@@ -632,20 +634,20 @@ impl ConfigRepo {
             .await
     }
 
-    pub async fn list_known_sync_devices(&self) -> Res<Vec<crate::app::globals::SyncDeviceEntry>> {
-        let config = crate::app::globals::get_sync_config(&self.sql_pool).await?;
+    pub async fn list_known_sync_devices(&self) -> Res<Vec<crate::repo::globals::SyncDeviceEntry>> {
+        let config = crate::repo::globals::get_sync_config(&self.sql_pool).await?;
         Ok(config.known_devices)
     }
 
     pub async fn upsert_known_sync_device(
         &self,
-        device: crate::app::globals::SyncDeviceEntry,
+        device: crate::repo::globals::SyncDeviceEntry,
     ) -> Res<()> {
         if self.cancel_token.is_cancelled() {
             eyre::bail!("repo is stopped");
         }
         let _sync_config_guard = self.sync_config_lock.lock().await;
-        let mut config = crate::app::globals::get_sync_config(&self.sql_pool).await?;
+        let mut config = crate::repo::globals::get_sync_config(&self.sql_pool).await?;
         if let Some(existing) = config
             .known_devices
             .iter_mut()
@@ -655,7 +657,7 @@ impl ConfigRepo {
         } else {
             config.known_devices.push(device);
         }
-        crate::app::globals::set_sync_config(&self.sql_pool, &config).await?;
+        crate::repo::globals::set_sync_config(&self.sql_pool, &config).await?;
         self.registry.notify([ConfigEvent::SyncDevicesChanged {
             origin: self.local_origin(),
         }]);
@@ -667,14 +669,14 @@ impl ConfigRepo {
             eyre::bail!("repo is stopped");
         }
         let _sync_config_guard = self.sync_config_lock.lock().await;
-        let mut config = crate::app::globals::get_sync_config(&self.sql_pool).await?;
+        let mut config = crate::repo::globals::get_sync_config(&self.sql_pool).await?;
         let before = config.known_devices.len();
         config
             .known_devices
             .retain(|entry| &entry.endpoint_id != endpoint_id);
         let removed = config.known_devices.len() != before;
         if removed {
-            crate::app::globals::set_sync_config(&self.sql_pool, &config).await?;
+            crate::repo::globals::set_sync_config(&self.sql_pool, &config).await?;
             self.registry.notify([ConfigEvent::SyncDevicesChanged {
                 origin: self.local_origin(),
             }]);
@@ -691,7 +693,7 @@ impl ConfigRepo {
             eyre::bail!("repo is stopped");
         }
         let _sync_config_guard = self.sync_config_lock.lock().await;
-        let mut config = crate::app::globals::get_sync_config(&self.sql_pool).await?;
+        let mut config = crate::repo::globals::get_sync_config(&self.sql_pool).await?;
         if config
             .known_devices
             .iter()
@@ -701,13 +703,13 @@ impl ConfigRepo {
         }
         config
             .known_devices
-            .push(crate::app::globals::SyncDeviceEntry {
+            .push(crate::repo::globals::SyncDeviceEntry {
                 endpoint_id,
                 name: device_name.to_string(),
                 added_at: jiff::Timestamp::now(),
                 last_connected_at: None,
             });
-        crate::app::globals::set_sync_config(&self.sql_pool, &config).await?;
+        crate::repo::globals::set_sync_config(&self.sql_pool, &config).await?;
         self.registry.notify([ConfigEvent::SyncDevicesChanged {
             origin: self.local_origin(),
         }]);
@@ -748,7 +750,10 @@ mod tests {
             local_user_path.clone(),
         )
         .await?;
-        let sql_ctx = crate::app::SqlCtx::new("sqlite::memory:").await?;
+        let sql_ctx = crate::app::SqlCtx::new(crate::app::SqlConfig {
+            database_url: "sqlite::memory:".into(),
+        })
+        .await?;
         let (config_repo, config_stop) = ConfigRepo::load(
             Arc::clone(&big_repo),
             app_doc_id,

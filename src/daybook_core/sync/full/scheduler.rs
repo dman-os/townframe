@@ -7,12 +7,12 @@ pub(super) struct Scheduler {
     pub queued_tasks: HashSet<SyncTask>,
     pub pending_tasks: HashMap<SyncTask, PendingTaskState>,
     pub partitions_to_refresh: HashSet<PartitionKey>,
-    pub peer_sessions_to_refresh: HashSet<EndpointId>,
+    pub peer_sessions_to_refresh: HashSet<PeerId>,
     pub active_docs: HashMap<DocSyncTaskKey, ActiveDocSyncState>,
     pub active_imports: HashMap<ImportSyncTaskKey, ActiveImportSyncState>,
     pub active_blobs: HashMap<String, ActiveBlobSyncState>,
     pub blob_requirements: HashMap<String, HashSet<PartitionKey>>,
-    pub cursor_ack_state: HashMap<EndpointId, HashMap<PartitionId, PartitionCursorAckState>>,
+    pub cursor_ack_state: HashMap<PeerId, HashMap<PartitionId, PartitionCursorAckState>>,
 }
 
 #[derive(Debug, Clone, Hash, PartialEq, Eq)]
@@ -380,20 +380,20 @@ impl Scheduler {
         }
     }
 
-    pub fn clear_peer_cursor_acks(&mut self, endpoint_id: EndpointId) {
-        self.cursor_ack_state.remove(&endpoint_id);
+    pub fn clear_peer_cursor_acks(&mut self, peer_id: PeerId) {
+        self.cursor_ack_state.remove(&peer_id);
     }
 
     pub fn note_doc_sync_requested(
         &mut self,
-        endpoint_id: EndpointId,
+        peer_id: PeerId,
         partition_id: &PartitionId,
         cursor: u64,
         doc_id: &str,
     ) {
         let part_state = self
             .cursor_ack_state
-            .entry(endpoint_id)
+            .entry(peer_id)
             .or_default()
             .entry(partition_id.clone())
             .or_default();
@@ -420,13 +420,13 @@ impl Scheduler {
 
     pub fn note_cursor_ready_immediate(
         &mut self,
-        endpoint_id: EndpointId,
+        peer_id: PeerId,
         partition_id: &PartitionId,
         cursor: u64,
     ) {
         let part_state = self
             .cursor_ack_state
-            .entry(endpoint_id)
+            .entry(peer_id)
             .or_default()
             .entry(partition_id.clone())
             .or_default();
@@ -438,14 +438,14 @@ impl Scheduler {
 
     pub fn note_doc_synced(
         &mut self,
-        endpoint_id: EndpointId,
+        pid: PeerId,
         partition_id: &PartitionId,
         cursor: u64,
         doc_id: &str,
     ) {
         let part_state = self
             .cursor_ack_state
-            .entry(endpoint_id)
+            .entry(pid)
             .or_default()
             .entry(partition_id.clone())
             .or_default();
@@ -469,11 +469,11 @@ impl Scheduler {
 
     pub fn next_ready_cursor_to_ack(
         &self,
-        endpoint_id: EndpointId,
+        pid: PeerId,
         partition_id: &PartitionId,
         persisted_cursor: Option<u64>,
     ) -> Option<u64> {
-        let part_state = self.cursor_ack_state.get(&endpoint_id)?.get(partition_id)?;
+        let part_state = self.cursor_ack_state.get(&pid)?.get(partition_id)?;
         let floor = persisted_cursor
             .unwrap_or(0)
             .max(part_state.last_emitted_cursor.unwrap_or(0));
@@ -494,14 +494,14 @@ impl Scheduler {
 
     pub fn commit_ack_cursor(
         &mut self,
-        endpoint_id: EndpointId,
+        pid: PeerId,
         partition_id: &PartitionId,
         persisted_cursor: Option<u64>,
         cursor: u64,
     ) -> Res<()> {
         let Some(part_state) = self
             .cursor_ack_state
-            .get_mut(&endpoint_id)
+            .get_mut(&pid)
             .and_then(|parts| parts.get_mut(partition_id))
         else {
             return Ok(());
@@ -539,30 +539,25 @@ impl Scheduler {
         Ok(())
     }
 
-    pub fn endpoint_has_doc_work(&self, endpoint_id: EndpointId) -> bool {
-        self.active_docs
-            .keys()
-            .any(|key| key.endpoint_id == endpoint_id)
+    pub fn endpoint_has_doc_work(&self, pid: PeerId) -> bool {
+        self.active_docs.keys().any(|key| key.peer_id == pid)
             || self
                 .queued_tasks
                 .iter()
-                .any(|task| matches!(task, SyncTask::Doc(key) if key.endpoint_id == endpoint_id))
+                .any(|task| matches!(task, SyncTask::Doc(key) if key.peer_id == pid))
             || self
                 .pending_tasks
                 .keys()
-                .any(|task| matches!(task, SyncTask::Doc(key) if key.endpoint_id == endpoint_id))
-            || self
-                .active_imports
-                .keys()
-                .any(|key| key.endpoint_id == endpoint_id)
+                .any(|task| matches!(task, SyncTask::Doc(key) if key.peer_id == pid))
+            || self.active_imports.keys().any(|key| key.peer_id == pid)
             || self
                 .queued_tasks
                 .iter()
-                .any(|task| matches!(task, SyncTask::Import(key) if key.endpoint_id == endpoint_id))
+                .any(|task| matches!(task, SyncTask::Import(key) if key.peer_id == pid))
             || self
                 .pending_tasks
                 .keys()
-                .any(|task| matches!(task, SyncTask::Import(key) if key.endpoint_id == endpoint_id))
+                .any(|task| matches!(task, SyncTask::Import(key) if key.peer_id == pid))
     }
 
     pub fn doc_task_keys_for_doc(&self, doc_id: &DocumentId) -> HashSet<DocSyncTaskKey> {
@@ -584,20 +579,20 @@ impl Scheduler {
         keys
     }
 
-    pub fn doc_task_keys_for_peer(&self, endpoint_id: EndpointId) -> HashSet<DocSyncTaskKey> {
+    pub fn doc_task_keys_for_peer(&self, peer_id: PeerId) -> HashSet<DocSyncTaskKey> {
         let mut keys = HashSet::new();
         keys.extend(
             self.active_docs
                 .keys()
-                .filter(|key| key.endpoint_id == endpoint_id)
+                .filter(|key| key.peer_id == peer_id)
                 .cloned(),
         );
         keys.extend(self.pending_tasks.keys().filter_map(|task| match task {
-            SyncTask::Doc(key) if key.endpoint_id == endpoint_id => Some(key.clone()),
+            SyncTask::Doc(key) if key.peer_id == peer_id => Some(key.clone()),
             SyncTask::Doc(_) | SyncTask::Import(_) | SyncTask::Blob(_) => None,
         }));
         keys.extend(self.queued_tasks.iter().filter_map(|task| match task {
-            SyncTask::Doc(key) if key.endpoint_id == endpoint_id => Some(key.clone()),
+            SyncTask::Doc(key) if key.peer_id == peer_id => Some(key.clone()),
             SyncTask::Doc(_) | SyncTask::Import(_) | SyncTask::Blob(_) => None,
         }));
         keys
@@ -622,20 +617,20 @@ impl Scheduler {
         keys
     }
 
-    pub fn import_task_keys_for_peer(&self, endpoint_id: EndpointId) -> HashSet<ImportSyncTaskKey> {
+    pub fn import_task_keys_for_peer(&self, peer_id: PeerId) -> HashSet<ImportSyncTaskKey> {
         let mut keys = HashSet::new();
         keys.extend(
             self.active_imports
                 .keys()
-                .filter(|key| key.endpoint_id == endpoint_id)
+                .filter(|key| key.peer_id == peer_id)
                 .cloned(),
         );
         keys.extend(self.pending_tasks.keys().filter_map(|task| match task {
-            SyncTask::Import(key) if key.endpoint_id == endpoint_id => Some(key.clone()),
+            SyncTask::Import(key) if key.peer_id == peer_id => Some(key.clone()),
             SyncTask::Doc(_) | SyncTask::Import(_) | SyncTask::Blob(_) => None,
         }));
         keys.extend(self.queued_tasks.iter().filter_map(|task| match task {
-            SyncTask::Import(key) if key.endpoint_id == endpoint_id => Some(key.clone()),
+            SyncTask::Import(key) if key.peer_id == peer_id => Some(key.clone()),
             SyncTask::Doc(_) | SyncTask::Import(_) | SyncTask::Blob(_) => None,
         }));
         keys
@@ -646,8 +641,8 @@ impl Scheduler {
 mod tests {
     use super::*;
 
-    fn endpoint(seed: u8) -> EndpointId {
-        iroh::SecretKey::from_bytes(&[seed; 32]).public()
+    fn endpoint(seed: u8) -> PeerId {
+        PeerId::new([seed; 32])
     }
 
     fn doc(id: &str) -> DocumentId {
@@ -657,104 +652,104 @@ mod tests {
     #[test]
     fn endpoint_has_doc_work_includes_import_tasks() {
         let mut scheduler = Scheduler::default();
-        let endpoint = endpoint(1);
+        let peer = endpoint(1);
         let task_key = ImportSyncTaskKey {
             doc_id: doc("1111111111111111111111111111111111111111111111111111111111111111"),
-            endpoint_id: endpoint,
+            peer_id: peer,
         };
 
-        assert!(!scheduler.endpoint_has_doc_work(endpoint));
+        assert!(!scheduler.endpoint_has_doc_work(peer));
         scheduler.set_import_pending_now(&task_key);
-        assert!(scheduler.endpoint_has_doc_work(endpoint));
+        assert!(scheduler.endpoint_has_doc_work(peer));
         scheduler.clear_import_task(&task_key);
-        assert!(!scheduler.endpoint_has_doc_work(endpoint));
+        assert!(!scheduler.endpoint_has_doc_work(peer));
     }
 
     #[test]
     fn doc_task_key_discovery_stays_endpoint_scoped() {
         let mut scheduler = Scheduler::default();
         let doc_id = doc("2222222222222222222222222222222222222222222222222222222222222222");
-        let endpoint_a = endpoint(2);
-        let endpoint_b = endpoint(3);
+        let peer_a = endpoint(2);
+        let peer_b = endpoint(3);
         let task_a = DocSyncTaskKey {
             doc_id: doc_id.clone(),
-            endpoint_id: endpoint_a,
+            peer_id: peer_a,
         };
         let task_b = DocSyncTaskKey {
             doc_id,
-            endpoint_id: endpoint_b,
+            peer_id: peer_b,
         };
 
         scheduler.set_doc_pending_now(&task_a);
         scheduler.set_doc_pending_now(&task_b);
 
-        let peer_keys = scheduler.doc_task_keys_for_peer(endpoint_a);
+        let peer_keys = scheduler.doc_task_keys_for_peer(peer_a);
         assert!(peer_keys.contains(&task_a));
         assert!(!peer_keys.contains(&task_b));
     }
 
     #[test]
     fn cursor_ack_advances_contiguously_only() {
-        let endpoint = endpoint(7);
+        let peer = endpoint(7);
         let part: PartitionId = "p-main".into();
         let mut scheduler = Scheduler::default();
 
-        scheduler.note_doc_sync_requested(endpoint, &part, 10, "doc-a");
-        scheduler.note_doc_sync_requested(endpoint, &part, 12, "doc-b");
-        scheduler.note_doc_sync_requested(endpoint, &part, 11, "doc-c");
+        scheduler.note_doc_sync_requested(peer, &part, 10, "doc-a");
+        scheduler.note_doc_sync_requested(peer, &part, 12, "doc-b");
+        scheduler.note_doc_sync_requested(peer, &part, 11, "doc-c");
 
-        scheduler.note_doc_synced(endpoint, &part, 12, "doc-b");
+        scheduler.note_doc_synced(peer, &part, 12, "doc-b");
         assert_eq!(
-            scheduler.next_ready_cursor_to_ack(endpoint, &part, Some(9)),
+            scheduler.next_ready_cursor_to_ack(peer, &part, Some(9)),
             None
         );
 
-        scheduler.note_doc_synced(endpoint, &part, 10, "doc-a");
+        scheduler.note_doc_synced(peer, &part, 10, "doc-a");
         assert_eq!(
-            scheduler.next_ready_cursor_to_ack(endpoint, &part, Some(9)),
+            scheduler.next_ready_cursor_to_ack(peer, &part, Some(9)),
             Some(10)
         );
         assert_eq!(
-            scheduler.next_ready_cursor_to_ack(endpoint, &part, Some(9)),
+            scheduler.next_ready_cursor_to_ack(peer, &part, Some(9)),
             Some(10)
         );
         scheduler
-            .commit_ack_cursor(endpoint, &part, Some(9), 10)
+            .commit_ack_cursor(peer, &part, Some(9), 10)
             .expect("commit should succeed");
         assert_eq!(
-            scheduler.next_ready_cursor_to_ack(endpoint, &part, Some(10)),
+            scheduler.next_ready_cursor_to_ack(peer, &part, Some(10)),
             None
         );
 
-        scheduler.note_doc_synced(endpoint, &part, 11, "doc-c");
+        scheduler.note_doc_synced(peer, &part, 11, "doc-c");
         assert_eq!(
-            scheduler.next_ready_cursor_to_ack(endpoint, &part, Some(10)),
+            scheduler.next_ready_cursor_to_ack(peer, &part, Some(10)),
             Some(12)
         );
         scheduler
-            .commit_ack_cursor(endpoint, &part, Some(10), 12)
+            .commit_ack_cursor(peer, &part, Some(10), 12)
             .expect("commit should succeed");
     }
 
     #[test]
     fn late_doc_request_downgrades_ready_slot_to_pending() {
-        let endpoint = endpoint(8);
+        let peer = endpoint(8);
         let part: PartitionId = "p-late".into();
         let mut scheduler = Scheduler::default();
 
-        scheduler.note_cursor_ready_immediate(endpoint, &part, 20);
+        scheduler.note_cursor_ready_immediate(peer, &part, 20);
         assert_eq!(
-            scheduler.next_ready_cursor_to_ack(endpoint, &part, Some(19)),
+            scheduler.next_ready_cursor_to_ack(peer, &part, Some(19)),
             Some(20)
         );
-        scheduler.note_doc_sync_requested(endpoint, &part, 20, "doc-z");
+        scheduler.note_doc_sync_requested(peer, &part, 20, "doc-z");
         assert_eq!(
-            scheduler.next_ready_cursor_to_ack(endpoint, &part, Some(19)),
+            scheduler.next_ready_cursor_to_ack(peer, &part, Some(19)),
             None
         );
-        scheduler.note_doc_synced(endpoint, &part, 20, "doc-z");
+        scheduler.note_doc_synced(peer, &part, 20, "doc-z");
         assert_eq!(
-            scheduler.next_ready_cursor_to_ack(endpoint, &part, Some(19)),
+            scheduler.next_ready_cursor_to_ack(peer, &part, Some(19)),
             Some(20)
         );
     }
@@ -764,7 +759,7 @@ mod tests {
         let mut scheduler = Scheduler::default();
         let task_key = DocSyncTaskKey {
             doc_id: doc("1111111111111111111111111111111111111111111111111111111111111111"),
-            endpoint_id: endpoint(1),
+            peer_id: endpoint(1),
         };
 
         scheduler.set_doc_pending_now(&task_key);
@@ -782,7 +777,7 @@ mod tests {
         let mut scheduler = Scheduler::default();
         let task_key = ImportSyncTaskKey {
             doc_id: doc("2222222222222222222222222222222222222222222222222222222222222222"),
-            endpoint_id: endpoint(2),
+            peer_id: endpoint(2),
         };
 
         scheduler.set_import_pending_now(&task_key);
@@ -797,23 +792,23 @@ mod tests {
 
     #[test]
     fn replay_convergence_floor_skips_old_ready_slots() {
-        let endpoint = endpoint(3);
+        let peer = endpoint(3);
         let part: PartitionId = "p-replay".into();
         let mut scheduler = Scheduler::default();
 
-        scheduler.note_cursor_ready_immediate(endpoint, &part, 3);
-        scheduler.note_cursor_ready_immediate(endpoint, &part, 4);
-        scheduler.note_cursor_ready_immediate(endpoint, &part, 5);
+        scheduler.note_cursor_ready_immediate(peer, &part, 3);
+        scheduler.note_cursor_ready_immediate(peer, &part, 4);
+        scheduler.note_cursor_ready_immediate(peer, &part, 5);
 
         assert_eq!(
-            scheduler.next_ready_cursor_to_ack(endpoint, &part, Some(4)),
+            scheduler.next_ready_cursor_to_ack(peer, &part, Some(4)),
             Some(5)
         );
         scheduler
-            .commit_ack_cursor(endpoint, &part, Some(4), 5)
+            .commit_ack_cursor(peer, &part, Some(4), 5)
             .expect("commit should succeed");
         assert_eq!(
-            scheduler.next_ready_cursor_to_ack(endpoint, &part, Some(5)),
+            scheduler.next_ready_cursor_to_ack(peer, &part, Some(5)),
             None
         );
     }

@@ -47,6 +47,7 @@ pub struct CloneRepoInitResult {
 
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct CloneProvisionRequest {
+    // FIXME: why are all of these optional?
     pub requested_device_name: Option<String>,
     pub provision: bool,
     pub requester_endpoint_id: Option<String>,
@@ -63,7 +64,7 @@ pub struct CloneProvisionResponse {
     pub device_name: Option<String>,
     pub issued_iroh_secret_key_hex: Option<String>,
     pub issued_iroh_public_key: Option<String>,
-    pub issued_peer_key: Option<String>,
+    pub issued_peer_key: Option<am_utils_rs::sync::protocol::PeerKey>,
 }
 
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
@@ -79,39 +80,14 @@ pub enum CloneProvisionRpc {
 }
 
 impl IrohSyncRepo {
-    pub async fn get_ticket_url(&self) -> Res<String> {
+    pub async fn get_clone_ticket_url(&self) -> Res<String> {
         self.ensure_repo_live()?;
-        let endpoint_addr = self.current_endpoint_addr_for_clone().await;
+        let endpoint_addr = self.router.endpoint().addr();
         let endpoint_ticket = EndpointTicket::from(endpoint_addr).to_string();
         Ok(format!("{IROH_CLONE_URL_SCHEME}:{endpoint_ticket}"))
     }
-}
-
-impl IrohSyncRepo {
-    async fn current_endpoint_addr_for_clone(&self) -> iroh::EndpointAddr {
-        self.router.endpoint().watch_addr().get()
-    }
-
-    pub async fn current_bootstrap_state(&self) -> SyncBootstrapState {
-        let repo_name = self
-            .rcx
-            .layout
-            .repo_root
-            .file_name()
-            .map(|name| name.to_string_lossy().to_string())
-            .filter(|name| !name.is_empty())
-            .unwrap_or_else(|| self.rcx.repo_id.clone());
-        let endpoint_addr = self.current_endpoint_addr_for_clone().await;
-        let endpoint_id = endpoint_addr.id;
-        SyncBootstrapState {
-            endpoint_addr,
-            endpoint_id,
-            repo_id: self.rcx.repo_id.clone(),
-            repo_name,
-            app_doc_id: self.rcx.doc_app.document_id().clone(),
-            drawer_doc_id: self.rcx.doc_drawer.document_id().clone(),
-            device_name: Some(self.rcx.local_device_name.clone()),
-        }
+    pub fn endpoint_addr(&self) -> iroh::EndpointAddr {
+        self.router.endpoint().addr()
     }
 }
 
@@ -243,7 +219,10 @@ pub async fn clone_repo_init_from_url(
         .await?;
         let bootstrap = provision.to_bootstrap_state()?;
         let sqlite_path = staging.join("sqlite.db");
-        let sql = crate::app::SqlCtx::new(&format!("sqlite://{}", sqlite_path.display())).await?;
+        let sql = crate::app::SqlCtx::new(crate::app::SqlConfig {
+            database_url: format!("sqlite://{}", sqlite_path.display()),
+        })
+        .await?;
         crate::app::globals::set_repo_id(&sql.db_pool, &bootstrap.repo_id).await?;
         let issued_secret_hex = provision
             .issued_iroh_secret_key_hex

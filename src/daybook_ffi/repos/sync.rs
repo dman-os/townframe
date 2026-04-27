@@ -91,7 +91,12 @@ impl SyncRepoFfi {
     async fn get_ticket_url(self: Arc<Self>) -> Result<String, FfiError> {
         let this = Arc::clone(&self);
         self.fcx
-            .do_on_rt(async move { this.repo.get_ticket_url().await.map_err(FfiError::from) })
+            .do_on_rt(async move {
+                this.repo
+                    .get_clone_ticket_url()
+                    .await
+                    .map_err(FfiError::from)
+            })
             .await
     }
 
@@ -99,7 +104,7 @@ impl SyncRepoFfi {
         let this = Arc::clone(&self);
         self.fcx
             .do_on_rt(async move {
-                let ticket_url = this.repo.get_ticket_url().await?;
+                let ticket_url = this.repo.get_clone_ticket_url().await?;
                 let qr_code = QrCode::new(ticket_url.as_bytes())
                     .map_err(|err| eyre::eyre!("failed to encode QR ticket: {err}"))?;
                 let image = qr_code
@@ -125,7 +130,7 @@ impl SyncRepoFfi {
         let this = Arc::clone(&self);
         self.fcx
             .do_on_rt(async move {
-                let ticket_url = this.repo.get_ticket_url().await?;
+                let ticket_url = this.repo.get_clone_ticket_url().await?;
                 let qr_code = QrCode::new(ticket_url.as_bytes())
                     .map_err(|err| eyre::eyre!("failed to encode QR ticket: {err}"))?;
                 let image = qr_code

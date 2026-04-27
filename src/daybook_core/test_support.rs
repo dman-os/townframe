@@ -17,10 +17,8 @@ pub trait BigRepoTestCompat {
         &self,
         doc_id: &am_utils_rs::DocumentId,
     ) -> BoxFuture<'_, Res<Option<am_utils_rs::BigDocHandle>>>;
-    fn local_contains_document(
-        &self,
-        doc_id: &am_utils_rs::DocumentId,
-    ) -> BoxFuture<'_, Res<bool>>;
+    fn local_contains_document(&self, doc_id: &am_utils_rs::DocumentId)
+        -> BoxFuture<'_, Res<bool>>;
 }
 
 impl BigRepoTestCompat for Arc<am_utils_rs::BigRepo> {
@@ -227,7 +225,10 @@ pub async fn test_cx_with_options(
         local_user_path.clone(),
     )
     .await?;
-    let sql_ctx = crate::app::SqlCtx::new("sqlite::memory:").await?;
+    let sql_ctx = crate::app::SqlCtx::new(crate::app::SqlConfig {
+        database_url: "sqlite::memory:".into(),
+    })
+    .await?;
     let (config_repo, config_stop) = crate::config::ConfigRepo::load(
         Arc::clone(&big_repo),
         app_doc_id.clone(),

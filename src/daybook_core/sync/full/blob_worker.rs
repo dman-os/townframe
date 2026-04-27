@@ -17,7 +17,7 @@ impl BlobSyncWorkerStopToken {
 pub fn spawn_blob_sync_worker(
     partition: PartitionKey,
     hash: String,
-    peers: Vec<EndpointId>,
+    peers: Vec<PeerId>,
     cancel_token: CancellationToken,
     msg_tx: mpsc::UnboundedSender<Msg>,
     sync_progress_tx: mpsc::Sender<SyncProgressMsg>,
@@ -172,7 +172,7 @@ pub fn spawn_blob_sync_worker(
             return;
         };
 
-        let mut selected_endpoint: Option<EndpointId> = None;
+        let mut selected_endpoint: Option<PeerId> = None;
         let mut saw_download_signal = false;
         let mut saw_download_error = false;
         use futures::StreamExt;
@@ -183,10 +183,10 @@ pub fn spawn_blob_sync_worker(
             match item {
                 iroh_blobs::api::downloader::DownloadProgressItem::TryProvider { id, .. } => {
                     saw_download_signal = true;
-                    selected_endpoint = Some(id);
+                    selected_endpoint = Some(id.into());
                     worker
                         .send_progress(SyncProgressMsg::BlobDownloadStarted {
-                            endpoint_id: id,
+                            peer_id: id.into(),
                             partition: worker.partition.clone(),
                             hash: worker.hash.clone(),
                         })
@@ -194,10 +194,10 @@ pub fn spawn_blob_sync_worker(
                 }
                 iroh_blobs::api::downloader::DownloadProgressItem::Progress(done) => {
                     saw_download_signal = true;
-                    if let Some(endpoint_id) = selected_endpoint {
+                    if let Some(peer_id) = selected_endpoint {
                         worker
                             .send_progress(SyncProgressMsg::BlobDownloadProgress {
-                                endpoint_id,
+                                peer_id,
                                 partition: worker.partition.clone(),
                                 hash: worker.hash.clone(),
                                 done,
@@ -278,7 +278,7 @@ pub fn spawn_blob_sync_worker(
                 {
                     worker
                         .send_progress(SyncProgressMsg::BlobDownloadFinished {
-                            endpoint_id,
+                            peer_id: endpoint_id,
                             partition: worker.partition.clone(),
                             hash: worker.hash.clone(),
                             success: true,
@@ -300,7 +300,7 @@ pub fn spawn_blob_sync_worker(
                 if let Some(endpoint_id) = selected_endpoint {
                     worker
                         .send_progress(SyncProgressMsg::BlobDownloadFinished {
-                            endpoint_id,
+                            peer_id: endpoint_id,
                             partition: worker.partition.clone(),
                             hash: worker.hash.clone(),
                             success: false,
@@ -333,7 +333,7 @@ pub fn spawn_blob_sync_worker(
 struct BlobSyncWorker {
     partition: PartitionKey,
     hash: String,
-    peers: Vec<EndpointId>,
+    peers: Vec<PeerId>,
     cancel_token: CancellationToken,
     msg_tx: mpsc::UnboundedSender<Msg>,
     sync_progress_tx: mpsc::Sender<SyncProgressMsg>,
@@ -355,11 +355,11 @@ impl BlobSyncWorker {
             .expect("FullSyncWorker went down without cleaning boot_blob_sync_worker");
     }
 
-    fn mark_synced(&self, endpoint_id: Option<EndpointId>) {
+    fn mark_synced(&self, peer_id: Option<PeerId>) {
         self.msg_tx
             .send(Msg::BlobSyncMarkedSynced {
                 hash: self.hash.clone(),
-                endpoint_id,
+                peer_id,
             })
             .expect("FullSyncWorker went down without cleaning boot_blob_sync_worker");
     }

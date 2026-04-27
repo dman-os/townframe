@@ -1019,7 +1019,10 @@ mod tests {
 
     #[tokio::test]
     async fn sqlite_dispatch_lifecycle_and_event_parity() -> Res<()> {
-        let sql = crate::app::SqlCtx::new("sqlite::memory:").await?;
+        let sql = crate::app::SqlCtx::new(crate::app::SqlConfig {
+            database_url: "sqlite::memory:".into(),
+        })
+        .await?;
         let (repo, _) = setup_repo_with_pool(sql.db_pool.clone()).await?;
         let sub = repo.subscribe(SubscribeOpts::new(8));
 
@@ -1063,7 +1066,10 @@ mod tests {
 
     #[tokio::test]
     async fn sqlite_waiting_dependency_flow() -> Res<()> {
-        let sql = crate::app::SqlCtx::new("sqlite::memory:").await?;
+        let sql = crate::app::SqlCtx::new(crate::app::SqlConfig {
+            database_url: "sqlite::memory:".into(),
+        })
+        .await?;
         let (repo, _) = setup_repo_with_pool(sql.db_pool.clone()).await?;
 
         repo.add("wait-1".into(), waiting_dispatch("job-wait-1", &["dep-1"]))
@@ -1099,9 +1105,11 @@ mod tests {
     #[tokio::test]
     async fn sqlite_reload_persists_dispatch_rows_and_frontier() -> Res<()> {
         let temp = tempfile::tempdir()?;
-        let db_url = format!("sqlite://{}", temp.path().join("dispatch.sqlite").display());
+        let sql_cfg = crate::app::SqlConfig {
+            database_url: format!("sqlite://{}", temp.path().join("dispatch.sqlite").display()),
+        };
 
-        let sql = crate::app::SqlCtx::new(&db_url).await?;
+        let sql = crate::app::SqlCtx::new(sql_cfg.clone()).await?;
         let (repo, _) = setup_repo_with_pool(sql.db_pool.clone()).await?;
         repo.add("disp-a".into(), active_dispatch("job-a")).await?;
         repo.set_wflow_part_frontier("part-1".into(), 44).await?;
@@ -1109,7 +1117,7 @@ mod tests {
         drop(repo);
         drop(sql);
 
-        let sql = crate::app::SqlCtx::new(&db_url).await?;
+        let sql = crate::app::SqlCtx::new(sql_cfg.clone()).await?;
         let (repo, _) = setup_repo_with_pool(sql.db_pool.clone()).await?;
         let loaded = repo
             .get_any("disp-a")

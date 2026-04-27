@@ -196,7 +196,7 @@ async fn init_and_copy_repo_cluster(root: &std::path::Path) -> Res<Vec<PathBuf>>
 
     let seed_node = open_sync_node(&paths[0]).await?;
     let result = async {
-        let ticket = seed_node.sync_repo.get_ticket_url().await?;
+        let ticket = seed_node.sync_repo.get_clone_ticket_url().await?;
         for dst in paths.iter().skip(1) {
             bootstrap_clone_repo_from_url_for_tests(&ticket, dst).await?;
 
@@ -253,11 +253,11 @@ async fn connect_topology(
             .as_ref()
             .ok_or_eyre("node missing while connecting")?;
 
-        let ticket_b = node_b.sync_repo.get_ticket_url().await?;
+        let ticket_b = node_b.sync_repo.get_clone_ticket_url().await?;
         let bootstrap_ab = node_a.sync_repo.connect_url(&ticket_b).await?;
         endpoint_sets[*a].insert(bootstrap_ab.endpoint_id);
 
-        let ticket_a = node_a.sync_repo.get_ticket_url().await?;
+        let ticket_a = node_a.sync_repo.get_clone_ticket_url().await?;
         let bootstrap_ba = node_b.sync_repo.connect_url(&ticket_a).await?;
         endpoint_sets[*b].insert(bootstrap_ba.endpoint_id);
     }

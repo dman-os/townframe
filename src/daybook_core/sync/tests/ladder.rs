@@ -1,6 +1,7 @@
 use super::*;
 
-async fn boot_connected_sync_pair() -> Res<(tempfile::TempDir, SyncTestNode, SyncTestNode, EndpointId)> {
+async fn boot_connected_sync_pair(
+) -> Res<(tempfile::TempDir, SyncTestNode, SyncTestNode, EndpointId)> {
     let temp_root = tempfile::tempdir()?;
     let repo_a_path = temp_root.path().join("repo-a");
     let repo_b_path = temp_root.path().join("repo-b");
@@ -10,30 +11,18 @@ async fn boot_connected_sync_pair() -> Res<(tempfile::TempDir, SyncTestNode, Syn
     drop(rtx);
 
     let node_a = open_sync_node(&repo_a_path).await?;
-    let ticket_a = node_a.sync_repo.get_ticket_url().await?;
+    let ticket_a = node_a.sync_repo.get_clone_ticket_url().await?;
     bootstrap_clone_repo_from_url_for_tests(&ticket_a, &repo_b_path).await?;
     let node_b = open_sync_node(&repo_b_path).await?;
 
-    let bootstrap_a = node_a.sync_repo.current_bootstrap_state().await;
-    node_b
-        .sync_repo
-        .connect_endpoint_addr(bootstrap_a.endpoint_addr.clone())
-        .await?;
-    wait_for_sync_convergence(
-        &node_a,
-        &node_b,
-        bootstrap_a.endpoint_id,
-        Duration::from_secs(20),
-    )
-    .await?;
-    Ok((temp_root, node_a, node_b, bootstrap_a.endpoint_id))
+    let addr_a = node_a.sync_repo.endpoint_addr();
+    node_b.sync_repo.connect_endpoint_addr(addr_a).await?;
+    wait_for_sync_convergence(&node_a, &node_b, addr_a.id, Duration::from_secs(20)).await?;
+
+    Ok((temp_root, node_a, node_b, addr_a.id))
 }
 
-async fn update_title_at_main_branch(
-    node: &SyncTestNode,
-    doc_id: &String,
-    title: &str,
-) -> Res<()> {
+async fn update_title_at_main_branch(node: &SyncTestNode, doc_id: &String, title: &str) -> Res<()> {
     let title_key = FacetKey::from(WellKnownFacetTag::TitleGeneric);
     let branch = daybook_types::doc::BranchPath::from("main");
     let Some((_, heads)) = node.drawer.get_with_heads(doc_id, &branch, None).await? else {
@@ -43,11 +32,7 @@ async fn update_title_at_main_branch(
         .update_at_heads(
             daybook_types::doc::DocPatch {
                 id: doc_id.to_string(),
-                facets_set: [(
-                    title_key,
-                    WellKnownFacet::TitleGeneric(title.into()).into(),
-                )]
-                .into(),
+                facets_set: [(title_key, WellKnownFacet::TitleGeneric(title.into()).into())].into(),
                 facets_remove: vec![],
                 user_path: Some(daybook_types::doc::UserPath::from(
                     node.ctx.local_user_path.clone(),
@@ -71,11 +56,7 @@ async fn update_title_at_heads(
         .update_at_heads(
             daybook_types::doc::DocPatch {
                 id: doc_id.clone(),
-                facets_set: [(
-                    title_key,
-                    WellKnownFacet::TitleGeneric(title.into()).into(),
-                )]
-                .into(),
+                facets_set: [(title_key, WellKnownFacet::TitleGeneric(title.into()).into())].into(),
                 facets_remove: vec![],
                 user_path: Some(daybook_types::doc::UserPath::from(
                     node.ctx.local_user_path.clone(),
@@ -185,10 +166,12 @@ async fn assert_title_and_note_synced(
     );
     assert_eq!(
         doc_on_b.0.facets.get(&note_key),
-        Some(&serde_json::Value::from(WellKnownFacet::Note(daybook_types::doc::Note {
-            mime: "text/plain".into(),
-            content: expected_note.into(),
-        }))),
+        Some(&serde_json::Value::from(WellKnownFacet::Note(
+            daybook_types::doc::Note {
+                mime: "text/plain".into(),
+                content: expected_note.into(),
+            }
+        ))),
     );
     Ok(())
 }
@@ -199,16 +182,21 @@ async fn wait_for_synced_doc_on_both_sides(
     doc_id: &String,
     branch: &daybook_types::doc::BranchPath,
     timeout: Duration,
-) -> Res<(
-    Arc<daybook_types::doc::Doc>,
-    Arc<daybook_types::doc::Doc>,
-)> {
+) -> Res<(Arc<daybook_types::doc::Doc>, Arc<daybook_types::doc::Doc>)> {
     Ok(tokio::time::timeout(timeout, async {
         loop {
-            let left_doc = left.drawer.get_doc_bundle_at_branch(doc_id, branch, None).await?;
-            let right_doc = right.drawer.get_doc_bundle_at_branch(doc_id, branch, None).await?;
+            let left_doc = left
+                .drawer
+                .get_doc_bundle_at_branch(doc_id, branch, None)
+                .await?;
+            let right_doc = right
+                .drawer
+                .get_doc_bundle_at_branch(doc_id, branch, None)
+                .await?;
             if let (Some(left_doc), Some(right_doc)) = (left_doc, right_doc) {
-                if left_doc.doc.id == right_doc.doc.id && left_doc.doc.facets == right_doc.doc.facets {
+                if left_doc.doc.id == right_doc.doc.id
+                    && left_doc.doc.facets == right_doc.doc.facets
+                {
                     return eyre::Ok((Arc::new(left_doc.doc), Arc::new(right_doc.doc)));
                 }
             }
@@ -245,7 +233,7 @@ async fn iroh_sync_single_doc_created_before_connect_replicates() -> Res<()> {
     drop(rtx);
 
     let node_a = open_sync_node(&repo_a_path).await?;
-    let ticket_a = node_a.sync_repo.get_ticket_url().await?;
+    let ticket_a = node_a.sync_repo.get_clone_ticket_url().await?;
     bootstrap_clone_repo_from_url_for_tests(&ticket_a, &repo_b_path).await?;
     let node_b = open_sync_node(&repo_b_path).await?;
 
@@ -265,27 +253,26 @@ async fn iroh_sync_single_doc_created_before_connect_replicates() -> Res<()> {
         })
         .await?;
 
-    let bootstrap_a = node_a.sync_repo.current_bootstrap_state().await;
-    node_b
-        .sync_repo
-        .connect_endpoint_addr(bootstrap_a.endpoint_addr.clone())
-        .await?;
-    wait_for_sync_convergence(
-        &node_a,
-        &node_b,
-        bootstrap_a.endpoint_id,
-        Duration::from_secs(20),
-    )
-    .await?;
+    let addr_a = node_a.sync_repo.endpoint_addr();
+    node_b.sync_repo.connect_endpoint_addr(addr_a).await?;
+    wait_for_sync_convergence(&node_a, &node_b, addr_a.id, Duration::from_secs(20)).await?;
 
     let doc_on_a = node_a
         .drawer
-        .get_with_heads(&doc_on_a, &daybook_types::doc::BranchPath::from("main"), None)
+        .get_with_heads(
+            &doc_on_a,
+            &daybook_types::doc::BranchPath::from("main"),
+            None,
+        )
         .await?
         .ok_or_eyre("node_a lost the pre-connect doc")?;
     let doc_on_b = node_b
         .drawer
-        .get_with_heads(&doc_on_a.0.id, &daybook_types::doc::BranchPath::from("main"), None)
+        .get_with_heads(
+            &doc_on_a.0.id,
+            &daybook_types::doc::BranchPath::from("main"),
+            None,
+        )
         .await?
         .ok_or_eyre("node_b did not receive the pre-connect doc")?;
 
@@ -317,7 +304,7 @@ async fn iroh_sync_single_blob_created_before_connect_replicates() -> Res<()> {
     drop(rtx);
 
     let node_a = open_sync_node(&repo_a_path).await?;
-    let ticket_a = node_a.sync_repo.get_ticket_url().await?;
+    let ticket_a = node_a.sync_repo.get_clone_ticket_url().await?;
     bootstrap_clone_repo_from_url_for_tests(&ticket_a, &repo_b_path).await?;
     let node_b = open_sync_node(&repo_b_path).await?;
 
@@ -346,18 +333,9 @@ async fn iroh_sync_single_blob_created_before_connect_replicates() -> Res<()> {
         })
         .await?;
 
-    let bootstrap_a = node_a.sync_repo.current_bootstrap_state().await;
-    node_b
-        .sync_repo
-        .connect_endpoint_addr(bootstrap_a.endpoint_addr.clone())
-        .await?;
-    wait_for_sync_convergence(
-        &node_a,
-        &node_b,
-        bootstrap_a.endpoint_id,
-        Duration::from_secs(20),
-    )
-    .await?;
+    let addr_a = node_a.sync_repo.endpoint_addr();
+    node_b.sync_repo.connect_endpoint_addr(addr_a).await?;
+    wait_for_sync_convergence(&node_a, &node_b, addr_a.id, Duration::from_secs(20)).await?;
 
     let doc_on_a = node_a
         .drawer
@@ -407,22 +385,13 @@ async fn iroh_sync_single_doc_created_while_connected_replicates() -> Res<()> {
     drop(rtx);
 
     let node_a = open_sync_node(&repo_a_path).await?;
-    let ticket_a = node_a.sync_repo.get_ticket_url().await?;
+    let ticket_a = node_a.sync_repo.get_clone_ticket_url().await?;
     bootstrap_clone_repo_from_url_for_tests(&ticket_a, &repo_b_path).await?;
     let node_b = open_sync_node(&repo_b_path).await?;
 
-    let bootstrap_a = node_a.sync_repo.current_bootstrap_state().await;
-    node_b
-        .sync_repo
-        .connect_endpoint_addr(bootstrap_a.endpoint_addr.clone())
-        .await?;
-    wait_for_sync_convergence(
-        &node_a,
-        &node_b,
-        bootstrap_a.endpoint_id,
-        Duration::from_secs(20),
-    )
-    .await?;
+    let addr_a = node_a.sync_repo.endpoint_addr();
+    node_b.sync_repo.connect_endpoint_addr(addr_a).await?;
+    wait_for_sync_convergence(&node_a, &node_b, addr_a.id, Duration::from_secs(20)).await?;
 
     let title_key = FacetKey::from(WellKnownFacetTag::TitleGeneric);
     let doc_on_a = node_a
@@ -443,12 +412,20 @@ async fn iroh_sync_single_doc_created_while_connected_replicates() -> Res<()> {
     wait_for_doc_presence_with_activity(&node_b, &doc_on_a, Duration::from_secs(60)).await?;
     let doc_on_a = node_a
         .drawer
-        .get_with_heads(&doc_on_a, &daybook_types::doc::BranchPath::from("main"), None)
+        .get_with_heads(
+            &doc_on_a,
+            &daybook_types::doc::BranchPath::from("main"),
+            None,
+        )
         .await?
         .ok_or_eyre("node_a lost the connected doc")?;
     let doc_on_b = node_b
         .drawer
-        .get_with_heads(&doc_on_a.0.id, &daybook_types::doc::BranchPath::from("main"), None)
+        .get_with_heads(
+            &doc_on_a.0.id,
+            &daybook_types::doc::BranchPath::from("main"),
+            None,
+        )
         .await?
         .ok_or_eyre("node_b did not receive the connected doc")?;
 
@@ -481,22 +458,13 @@ async fn iroh_sync_single_blob_created_while_connected_replicates() -> Res<()> {
     drop(rtx);
 
     let node_a = open_sync_node(&repo_a_path).await?;
-    let ticket_a = node_a.sync_repo.get_ticket_url().await?;
+    let ticket_a = node_a.sync_repo.get_clone_ticket_url().await?;
     bootstrap_clone_repo_from_url_for_tests(&ticket_a, &repo_b_path).await?;
     let node_b = open_sync_node(&repo_b_path).await?;
 
-    let bootstrap_a = node_a.sync_repo.current_bootstrap_state().await;
-    node_b
-        .sync_repo
-        .connect_endpoint_addr(bootstrap_a.endpoint_addr.clone())
-        .await?;
-    wait_for_sync_convergence(
-        &node_a,
-        &node_b,
-        bootstrap_a.endpoint_id,
-        Duration::from_secs(20),
-    )
-    .await?;
+    let addr_a = node_a.sync_repo.endpoint_addr();
+    node_b.sync_repo.connect_endpoint_addr(addr_a).await?;
+    wait_for_sync_convergence(&node_a, &node_b, addr_a.id, Duration::from_secs(20)).await?;
 
     let payload = b"connected sync blob".to_vec();
     let hash = node_a.blobs_repo.put(&payload).await?;
@@ -715,7 +683,7 @@ async fn iroh_sync_single_doc_survives_remote_restart_and_reconnect() -> Res<()>
     let (temp_root, node_a, node_b, _bootstrap_id) = boot_connected_sync_pair().await?;
     let repo_a_path = temp_root.path().join("repo-a");
     let repo_b_path = temp_root.path().join("repo-b");
-    let ticket_a = node_a.sync_repo.get_ticket_url().await?;
+    let ticket_a = node_a.sync_repo.get_clone_ticket_url().await?;
 
     let title_key = FacetKey::from(WellKnownFacetTag::TitleGeneric);
     let doc_on_a = node_a
@@ -736,7 +704,11 @@ async fn iroh_sync_single_doc_survives_remote_restart_and_reconnect() -> Res<()>
 
     let doc_on_b = node_b
         .drawer
-        .get_with_heads(&doc_on_a, &daybook_types::doc::BranchPath::from("main"), None)
+        .get_with_heads(
+            &doc_on_a,
+            &daybook_types::doc::BranchPath::from("main"),
+            None,
+        )
         .await?
         .ok_or_eyre("node_b could not load synced doc after initial connect")?;
     assert_eq!(
@@ -761,7 +733,11 @@ async fn iroh_sync_single_doc_survives_remote_restart_and_reconnect() -> Res<()>
 
     let Some((_, heads)) = node_a
         .drawer
-        .get_with_heads(&doc_on_a, &daybook_types::doc::BranchPath::from("main"), None)
+        .get_with_heads(
+            &doc_on_a,
+            &daybook_types::doc::BranchPath::from("main"),
+            None,
+        )
         .await?
     else {
         eyre::bail!("node_a lost doc before update after remote restart: {doc_on_a}");
@@ -797,7 +773,11 @@ async fn iroh_sync_single_doc_survives_remote_restart_and_reconnect() -> Res<()>
 
     let doc_on_b = reopened_b
         .drawer
-        .get_with_heads(&doc_on_a, &daybook_types::doc::BranchPath::from("main"), None)
+        .get_with_heads(
+            &doc_on_a,
+            &daybook_types::doc::BranchPath::from("main"),
+            None,
+        )
         .await?
         .ok_or_eyre("reopened node_b could not load synced doc after reconnect")?;
     assert_eq!(
@@ -840,7 +820,11 @@ async fn iroh_sync_shutdown_peer_updates_catch_up_after_reconnect() -> Res<()> {
     wait_for_doc_presence_with_activity(&node_b, &doc_on_a, Duration::from_secs(60)).await?;
     assert_title_synced(&node_a, &node_b, &doc_on_a, "Live base title").await?;
 
-    let Some((_, base_heads)) = node_b.drawer.get_with_heads(&doc_on_a, &branch, None).await? else {
+    let Some((_, base_heads)) = node_b
+        .drawer
+        .get_with_heads(&doc_on_a, &branch, None)
+        .await?
+    else {
         eyre::bail!("missing base heads on node_b before shutdown updates: {doc_on_a}");
     };
 
@@ -865,18 +849,19 @@ async fn iroh_sync_shutdown_peer_updates_catch_up_after_reconnect() -> Res<()> {
     update_title_at_main_branch(&node_b, &doc_on_b, "B offline created title v2").await?;
 
     let reopened_a = open_sync_node(&repo_a_path).await?;
-    let reopened_bootstrap_a = reopened_a.sync_repo.current_bootstrap_state().await;
+    let reopened_addr_a = reopened_a.sync_repo.endpoint_addr();
     node_b
         .sync_repo
-        .connect_endpoint_addr(reopened_bootstrap_a.endpoint_addr.clone())
+        .connect_endpoint_addr(reopened_addr_a)
         .await?;
+
     node_b
         .sync_repo
         .wait_for_full_sync(
-            std::slice::from_ref(&reopened_bootstrap_a.endpoint_id),
+            std::slice::from_ref(&reopened_addr_a.id),
             Duration::from_secs(120),
         )
-    .await?;
+        .await?;
 
     // Debug: list what each node knows after full sync
     let reopened_a_items = reopened_a.ctx.partition_store.list_known_item_ids().await?;
@@ -886,32 +871,67 @@ async fn iroh_sync_shutdown_peer_updates_catch_up_after_reconnect() -> Res<()> {
     eprintln!("=== POST FULL-SYNC DEBUG ===");
     eprintln!("reopened_a partition items: {:?}", reopened_a_items);
     eprintln!("node_b partition items: {:?}", node_b_items);
-    eprintln!("reopened_a drawer docs: {:?}", reopened_a_branches.iter().map(|d| &d.doc_id).collect::<Vec<_>>());
-    eprintln!("node_b drawer docs: {:?}", node_b_branches.iter().map(|d| &d.doc_id).collect::<Vec<_>>());
+    eprintln!(
+        "reopened_a drawer docs: {:?}",
+        reopened_a_branches
+            .iter()
+            .map(|d| &d.doc_id)
+            .collect::<Vec<_>>()
+    );
+    eprintln!(
+        "node_b drawer docs: {:?}",
+        node_b_branches
+            .iter()
+            .map(|d| &d.doc_id)
+            .collect::<Vec<_>>()
+    );
     // Check branch doc for doc_on_b
     if let Some(entry_b) = node_b.drawer.get_entry(&doc_on_b).await? {
-        eprintln!("node_b doc_on_b entry branches: {:?}", entry_b.branches.keys().collect::<Vec<_>>());
+        eprintln!(
+            "node_b doc_on_b entry branches: {:?}",
+            entry_b.branches.keys().collect::<Vec<_>>()
+        );
         if let Some(main_branch) = entry_b.branches.get("main") {
-            eprintln!("node_b doc_on_b main branch_doc_id: {}", main_branch.branch_doc_id);
-            let branch_doc_in_a = reopened_a.ctx.big_repo.get_doc(&main_branch.branch_doc_id.parse().unwrap()).await?;
-            let branch_doc_in_b = node_b.ctx.big_repo.get_doc(&main_branch.branch_doc_id.parse().unwrap()).await?;
-            eprintln!("branch doc in reopened_a big_repo: {}", branch_doc_in_a.is_some());
-            eprintln!("branch doc in node_b big_repo: {}", branch_doc_in_b.is_some());
+            eprintln!(
+                "node_b doc_on_b main branch_doc_id: {}",
+                main_branch.branch_doc_id
+            );
+            let branch_doc_in_a = reopened_a
+                .ctx
+                .big_repo
+                .get_doc(&main_branch.branch_doc_id.parse().unwrap())
+                .await?;
+            let branch_doc_in_b = node_b
+                .ctx
+                .big_repo
+                .get_doc(&main_branch.branch_doc_id.parse().unwrap())
+                .await?;
+            eprintln!(
+                "branch doc in reopened_a big_repo: {}",
+                branch_doc_in_a.is_some()
+            );
+            eprintln!(
+                "branch doc in node_b big_repo: {}",
+                branch_doc_in_b.is_some()
+            );
             // Check which partitions contain the branch doc via SQL
             let partitions_for_branch: Vec<(String, i64)> = sqlx::query_as(
-                "SELECT partition_id, present FROM partition_membership_state WHERE item_id = ?"
+                "SELECT partition_id, present FROM partition_membership_state WHERE item_id = ?",
             )
             .bind(&main_branch.branch_doc_id)
             .fetch_all(node_b.ctx.partition_store.state_pool())
             .await?;
             eprintln!("node_b branch doc partitions: {:?}", partitions_for_branch);
             let partitions_for_branch_a: Vec<(String, i64)> = sqlx::query_as(
-                "SELECT partition_id, present FROM partition_membership_state WHERE item_id = ?"
+                "SELECT partition_id, present FROM partition_membership_state WHERE item_id = ?",
             )
             .bind(&main_branch.branch_doc_id)
             .fetch_all(reopened_a.ctx.partition_store.state_pool())
             .await?;
-            eprintln!("reopened_a branch doc partitions: {:?}", partitions_for_branch_a);
+            eprintln!(
+                "reopened_a branch doc partitions: {:?}",
+                partitions_for_branch_a
+            );
         }
     }
     eprintln!("=== END DEBUG ===");

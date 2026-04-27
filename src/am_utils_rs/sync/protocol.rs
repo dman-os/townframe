@@ -5,7 +5,7 @@ use irpc::{channel, rpc_requests};
 // FIXME: make these either a [u8; 32] or Arc<str>, they get cloned
 // incredilbly frequently
 pub type PartitionId = String;
-pub type PeerKey = String;
+pub type PeerKey = Arc<str>;
 pub type CursorIndex = u64;
 
 pub const MAX_GET_DOCS_FULL_DOC_IDS: usize = 256;

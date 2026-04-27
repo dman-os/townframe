@@ -1,5 +1,7 @@
 use crate::interlude::*;
-use automerge::transaction::Transactable;
+
+use crate::repo::RepoCtx;
+
 use sqlx::sqlite::{SqliteConnectOptions, SqliteJournalMode, SqlitePoolOptions};
 use sqlx::SqlitePool;
 use std::str::FromStr;
@@ -14,9 +16,9 @@ pub struct SqlConfig {
 }
 
 impl SqlCtx {
-    pub async fn new(database_url: &str) -> Res<Self> {
-        if !database_url.starts_with("sqlite::memory:") {
-            if let Some(path) = database_url.strip_prefix("sqlite://") {
+    pub async fn new(config: SqlConfig) -> Res<Self> {
+        if !config.database_url.starts_with("sqlite::memory:") {
+            if let Some(path) = config.database_url.strip_prefix("sqlite://") {
                 if let Some(parent) = std::path::Path::new(path).parent() {
                     std::fs::create_dir_all(parent).wrap_err_with(|| {
                         format!("Failed to create database directory: {}", parent.display())
@@ -27,7 +29,7 @@ impl SqlCtx {
 
         let db_pool = SqlitePoolOptions::new()
             .connect_with(
-                SqliteConnectOptions::from_str(database_url)?
+                SqliteConnectOptions::from_str(&config.database_url)?
                     .journal_mode(SqliteJournalMode::Wal)
                     .busy_timeout(std::time::Duration::from_secs(5))
                     .create_if_missing(true),
@@ -102,12 +104,40 @@ pub struct AppCtx {
 
 impl AppCtx {
     pub async fn new(config: AppConfig) -> Res<Self> {
-        let sql = SqlCtx::new(&config.sql.database_url).await?;
+        let sql = SqlCtx::new(config.sql.clone()).await?;
         Ok(Self { config, sql })
     }
 
     pub async fn load() -> Res<Self> {
         Self::new(AppConfig::load()?).await
+    }
+    pub async fn init_repo(
+        &self,
+        repo_root: &std::path::Path,
+        options: crate::repo::RepoOpenOptions,
+        repo_name: String,
+        local_device_name: String,
+    ) -> Res<RepoCtx> {
+        let rcx = RepoCtx::init(repo_root, options, repo_name, local_device_name).await?;
+        if let Err(err) = crate::app::globals::upsert_known_repo(&self.sql.db_pool, &rcx).await {
+            let _ = rcx.shutdown().await;
+            return Err(err);
+        }
+        Ok(rcx)
+    }
+
+    pub async fn open_repo(
+        &self,
+        repo_root: &std::path::Path,
+        options: crate::repo::RepoOpenOptions,
+        local_device_name: String,
+    ) -> Res<RepoCtx> {
+        let rcx = RepoCtx::open(repo_root, options, local_device_name).await?;
+        if let Err(err) = crate::app::globals::upsert_known_repo(&self.sql.db_pool, &rcx).await {
+            let _ = rcx.shutdown().await;
+            return Err(err);
+        }
+        Ok(rcx)
     }
 }
 
@@ -156,193 +186,11 @@ pub mod version_updates {
     }
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum InitFromGlobalsMode {
-    RequireExisting,
-    CreateFresh,
-}
-
-pub async fn init_from_globals(
-    big_repo: &SharedBigRepo,
-    sql: &SqlitePool,
-    doc_app_cell: &tokio::sync::OnceCell<am_utils_rs::repo::BigDocHandle>,
-    doc_drawer_cell: &tokio::sync::OnceCell<am_utils_rs::repo::BigDocHandle>,
-    mode: InitFromGlobalsMode,
-) -> Res<()> {
-    let init_state = globals::get_init_state(sql).await?;
-    let (handle_app, handle_drawer) = match mode {
-        InitFromGlobalsMode::RequireExisting => {
-            let globals::InitState::Created {
-                doc_id_app,
-                doc_id_drawer,
-            } = init_state
-            else {
-                eyre::bail!("repo init_state missing for existing repository");
-            };
-            let (handle_app, handle_drawer) =
-                tokio::try_join!(big_repo.get_doc(&doc_id_app), big_repo.get_doc(&doc_id_drawer))?;
-            if handle_app.is_none() || handle_drawer.is_none() {
-                eyre::bail!(
-                    "required core docs missing in existing repository (app_present={}, drawer_present={})",
-                    handle_app.is_some(),
-                    handle_drawer.is_some()
-                );
-            }
-            (
-                handle_app.expect("checked handle_app"),
-                handle_drawer.expect("checked handle_drawer"),
-            )
-        }
-        InitFromGlobalsMode::CreateFresh => {
-            if !matches!(init_state, globals::InitState::None) {
-                eyre::bail!("repo globals already initialized; expected fresh init_state");
-            }
-            let app_doc = {
-                let bytes = version_updates::version_latest()?;
-                let doc = automerge::Automerge::load(&bytes)
-                    .wrap_err("error loading version_latest for app doc")?;
-                big_repo.put_doc(DocumentId::random(), doc).await?
-            };
-            let drawer_doc = {
-                let mut doc = automerge::AutoCommit::new();
-                doc.put(automerge::ROOT, "version", "0")?;
-                let bytes = doc.save_nocompress();
-                let doc = automerge::Automerge::load(&bytes)
-                    .wrap_err("error loading version_latest for drawer doc")?;
-                big_repo.put_doc(DocumentId::random(), doc).await?
-            };
-            globals::set_init_state(
-                sql,
-                &globals::InitState::Created {
-                    doc_id_app: app_doc.document_id().clone(),
-                    doc_id_drawer: drawer_doc.document_id().clone(),
-                },
-            )
-            .await?;
-            (app_doc, drawer_doc)
-        }
-    };
-
-    let (Ok(()), Ok(())) = (
-        doc_drawer_cell.set(handle_drawer),
-        doc_app_cell.set(handle_app),
-    ) else {
-        eyre::bail!("double ctx initialization");
-    };
-    Ok(())
-}
-
 pub mod globals {
     use sqlx::SqlitePool;
 
     use crate::interlude::*;
 
-    #[derive(serde::Serialize, serde::Deserialize, Debug, Clone)]
-    pub enum InitState {
-        None,
-        Created {
-            doc_id_app: DocumentId,
-            doc_id_drawer: DocumentId,
-        },
-    }
-    const INIT_STATE_KEY: &str = "init_state";
-
-    pub async fn get_init_state(sql: &SqlitePool) -> Res<InitState> {
-        let rec = sqlx::query_scalar::<_, String>("SELECT value FROM kvstore WHERE key = ?1")
-            .bind(INIT_STATE_KEY)
-            .fetch_optional(sql)
-            .await?;
-        let state = match rec {
-            Some(json) => serde_json::from_str::<InitState>(&json)?,
-            None => InitState::None,
-        };
-        Ok(state)
-    }
-    pub async fn set_init_state(sql: &SqlitePool, state: &InitState) -> Res<()> {
-        let json = serde_json::to_string(state)?;
-        sqlx::query("INSERT INTO kvstore(key, value) VALUES (?1, ?2) ON CONFLICT(key) DO UPDATE SET value = excluded.value")
-        .bind(INIT_STATE_KEY)
-        .bind(&json)
-        .execute(sql)
-        .await?;
-        Ok(())
-    }
-
-    const LOCAL_USER_PATH_KEY: &str = "local_user_path";
-    pub async fn get_local_user_path(sql: &SqlitePool) -> Res<Option<String>> {
-        let rec = sqlx::query_scalar::<_, String>("SELECT value FROM kvstore WHERE key = ?1")
-            .bind(LOCAL_USER_PATH_KEY)
-            .fetch_optional(sql)
-            .await?;
-        Ok(rec)
-    }
-
-    pub async fn set_local_user_path(sql: &SqlitePool, path: &str) -> Res<()> {
-        sqlx::query("INSERT INTO kvstore(key, value) VALUES (?1, ?2) ON CONFLICT(key) DO UPDATE SET value = excluded.value")
-        .bind(LOCAL_USER_PATH_KEY)
-        .bind(path)
-        .execute(sql)
-        .await?;
-        Ok(())
-    }
-
-    const REPO_ID_KEY: &str = "repo_id";
-
-    pub async fn get_repo_id(sql: &SqlitePool) -> Res<Option<String>> {
-        let rec = sqlx::query_scalar::<_, String>("SELECT value FROM kvstore WHERE key = ?1")
-            .bind(REPO_ID_KEY)
-            .fetch_optional(sql)
-            .await?;
-        Ok(rec)
-    }
-
-    pub async fn set_repo_id(sql: &SqlitePool, repo_id: &str) -> Res<()> {
-        sqlx::query("INSERT INTO kvstore(key, value) VALUES (?1, ?2) ON CONFLICT(key) DO UPDATE SET value = excluded.value")
-            .bind(REPO_ID_KEY)
-            .bind(repo_id)
-            .execute(sql)
-            .await?;
-        Ok(())
-    }
-
-    pub async fn get_or_init_repo_id(sql: &SqlitePool) -> Res<String> {
-        let mut tx = sql.begin().await?;
-
-        if let Some(repo_id) =
-            sqlx::query_scalar::<_, String>("SELECT value FROM kvstore WHERE key = ?1")
-                .bind(REPO_ID_KEY)
-                .fetch_optional(&mut *tx)
-                .await?
-        {
-            tx.commit().await?;
-            return Ok(repo_id);
-        }
-
-        let id = Uuid::new_v4();
-        let id = utils_rs::hash::encode_base58_multibase(id);
-        let generated_repo_id = format!("drepo_{id}");
-
-        sqlx::query("INSERT OR IGNORE INTO kvstore(key, value) VALUES (?1, ?2)")
-            .bind(REPO_ID_KEY)
-            .bind(&generated_repo_id)
-            .execute(&mut *tx)
-            .await?;
-
-        let repo_id = sqlx::query_scalar::<_, String>("SELECT value FROM kvstore WHERE key = ?1")
-            .bind(REPO_ID_KEY)
-            .fetch_one(&mut *tx)
-            .await?;
-
-        tx.commit().await?;
-        Ok(repo_id)
-    }
-
-    #[derive(serde::Serialize, serde::Deserialize, Debug, Clone, Default, PartialEq, Eq)]
-    #[cfg_attr(feature = "uniffi", derive(uniffi::Record))]
-    pub struct RepoConfig {
-        pub known_repos: Vec<KnownRepoEntry>,
-        pub last_used_repo_id: Option<String>,
-    }
     #[derive(serde::Serialize, serde::Deserialize, Debug, Clone, PartialEq, Eq)]
     #[cfg_attr(feature = "uniffi", derive(uniffi::Record))]
     pub struct KnownRepoEntry {
@@ -353,22 +201,54 @@ pub mod globals {
         pub created_at_unix_secs: i64,
         pub last_opened_at_unix_secs: i64,
     }
-    #[derive(serde::Serialize, serde::Deserialize, Debug, Clone, PartialEq, Eq, Default)]
-    pub struct SyncConfig {
-        pub known_devices: Vec<SyncDeviceEntry>,
-    }
+    pub async fn upsert_known_repo(
+        sql: &SqlitePool,
+        rcx: &crate::repo::RepoCtx,
+    ) -> Res<KnownRepoEntry> {
+        let repo_root = std::path::absolute(&rcx.layout.repo_root).wrap_err_with(|| {
+            format!(
+                "error absolutizing repo path {}",
+                rcx.layout.repo_root.display()
+            )
+        })?;
+        let repo_path = rcx.layout.repo_root.display().to_string();
+        let now_unix_secs = jiff::Timestamp::now().as_second();
+        let mut repo_config = get_repo_config(sql).await?;
+        if let Some(existing_repo) = repo_config
+            .known_repos
+            .iter_mut()
+            .find(|repo| repo.path == repo_path)
+        {
+            existing_repo.last_opened_at_unix_secs = now_unix_secs;
+            if existing_repo.name.is_empty() {
+                existing_repo.name = rcx.repo_name.clone();
+            }
+            let repo = existing_repo.clone();
+            repo_config.last_used_repo_id = Some(repo.id.clone());
+            set_repo_config(sql, &repo_config).await?;
+            return Ok(repo);
+        }
 
-    #[derive(serde::Serialize, serde::Deserialize, Debug, Clone, PartialEq, Eq)]
-    pub struct SyncDeviceEntry {
-        pub endpoint_id: iroh::EndpointId,
-        pub name: String,
-        pub added_at: Timestamp,
-        pub last_connected_at: Option<Timestamp>,
+        let repo = KnownRepoEntry {
+            id: repo_path.clone(),
+            name: rcx.repo_name.clone(),
+            path: repo_path,
+            created_at_unix_secs: now_unix_secs,
+            last_opened_at_unix_secs: now_unix_secs,
+        };
+        repo_config.last_used_repo_id = Some(repo.id.clone());
+        repo_config.known_repos.push(repo.clone());
+        set_repo_config(sql, &repo_config).await?;
+        Ok(repo)
     }
 
     const REPO_CONFIG_KEY: &str = "repo_config";
-    const SYNC_CONFIG_KEY: &str = "sync_config";
-
+    #[derive(serde::Serialize, serde::Deserialize, Debug, Clone, Default, PartialEq, Eq)]
+    #[cfg_attr(feature = "uniffi", derive(uniffi::Record))]
+    pub struct RepoConfig {
+        pub known_repos: Vec<KnownRepoEntry>,
+        pub last_used_repo_id: Option<String>,
+    }
     pub async fn get_repo_config(sql: &SqlitePool) -> Res<RepoConfig> {
         let rec = sqlx::query_scalar::<_, String>("SELECT value FROM kvstore WHERE key = ?1")
             .bind(REPO_CONFIG_KEY)
@@ -388,28 +268,6 @@ pub mod globals {
         .bind(&json)
         .execute(sql)
         .await?;
-        Ok(())
-    }
-
-    pub async fn get_sync_config(sql: &SqlitePool) -> Res<SyncConfig> {
-        let rec = sqlx::query_scalar::<_, String>("SELECT value FROM kvstore WHERE key = ?1")
-            .bind(SYNC_CONFIG_KEY)
-            .fetch_optional(sql)
-            .await?;
-        let state = match rec {
-            Some(json) => serde_json::from_str::<SyncConfig>(&json)?,
-            None => SyncConfig::default(),
-        };
-        Ok(state)
-    }
-
-    pub async fn set_sync_config(sql: &SqlitePool, state: &SyncConfig) -> Res<()> {
-        let json = serde_json::to_string(state)?;
-        sqlx::query("INSERT INTO kvstore(key, value) VALUES (?1, ?2) ON CONFLICT(key) DO UPDATE SET value = excluded.value")
-            .bind(SYNC_CONFIG_KEY)
-            .bind(&json)
-            .execute(sql)
-            .await?;
         Ok(())
     }
 }

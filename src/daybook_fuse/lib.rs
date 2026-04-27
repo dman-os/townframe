@@ -484,8 +484,10 @@ mod tests {
             tokio::fs::create_dir_all(&am_path).await?;
 
             let sql_path = temp_dir.path().join("sqlite.db");
-            let sql_url = format!("sqlite://{}", sql_path.display());
-            let sql_ctx = daybook_core::app::SqlCtx::new(&sql_url).await?;
+            let sql_ctx = daybook_core::app::SqlCtx::new(daybook_core::app::SqlConfig {
+                database_url: format!("sqlite://{}", sql_path.display()),
+            })
+            .await?;
             daybook_core::app::globals::set_local_user_path(
                 &sql_ctx.db_pool,
                 "/test-user/test-device",

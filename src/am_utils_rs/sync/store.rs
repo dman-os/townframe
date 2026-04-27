@@ -2,7 +2,6 @@ use crate::interlude::*;
 
 use crate::sync::protocol::{CursorIndex, PartitionId, PeerKey};
 
-use iroh::EndpointId;
 use sqlx::Row;
 use tokio::sync::{mpsc, oneshot};
 use tokio_util::sync::CancellationToken;
@@ -42,29 +41,25 @@ pub struct PartitionSyncCursorState {
 
 enum StoreMsg {
     AllowPeer {
-        peer: PeerKey,
-        endpoint_id: Option<EndpointId>,
+        peer_key: PeerKey,
+        // peer_id: Option<PeerId>,
         resp: oneshot::Sender<Res<()>>,
     },
     RevokePeer {
-        peer: PeerKey,
+        peer_key: PeerKey,
         resp: oneshot::Sender<Res<()>>,
     },
     IsPeerAllowed {
-        peer: PeerKey,
-        resp: oneshot::Sender<Res<bool>>,
-    },
-    IsEndpointAllowed {
-        endpoint_id: EndpointId,
+        peer_key: PeerKey,
         resp: oneshot::Sender<Res<bool>>,
     },
     GetPartitionCursor {
-        peer: PeerKey,
+        peer_key: PeerKey,
         partition_id: PartitionId,
         resp: oneshot::Sender<Res<PartitionSyncCursorState>>,
     },
     SetPartitionCursor {
-        peer: PeerKey,
+        peer_key: PeerKey,
         partition_id: PartitionId,
         member_cursor: Option<CursorIndex>,
         doc_cursor: Option<CursorIndex>,
@@ -73,51 +68,38 @@ enum StoreMsg {
 }
 
 impl SyncStoreHandle {
-    pub async fn allow_peer(&self, peer: PeerKey, endpoint_id: Option<EndpointId>) -> Res<()> {
-        let (resp_tx, resp_rx) = oneshot::channel();
+    pub async fn allow_peer(&self, peer: PeerKey) -> Res<()> {
+        let (tx, rx) = oneshot::channel();
         self.tx
             .send(StoreMsg::AllowPeer {
-                peer,
-                endpoint_id,
-                resp: resp_tx,
+                peer_key: peer,
+                resp: tx,
             })
             .wrap_err("sync store closed")?;
-        resp_rx.await.wrap_err(ERROR_CHANNEL)?
+        rx.await.wrap_err(ERROR_CHANNEL)?
     }
 
-    pub async fn revoke_peer(&self, peer: PeerKey) -> Res<()> {
+    pub async fn revoke_peer(&self, peer_key: PeerKey) -> Res<()> {
         let (resp_tx, resp_rx) = oneshot::channel();
         self.tx
             .send(StoreMsg::RevokePeer {
-                peer,
+                peer_key,
                 resp: resp_tx,
             })
             .wrap_err("sync store closed")?;
         resp_rx.await.wrap_err(ERROR_CHANNEL)?
     }
 
-    pub async fn is_peer_allowed(&self, peer: PeerKey) -> Res<bool> {
+    pub async fn is_peer_allowed(&self, peer_key: PeerKey) -> Res<bool> {
         let (resp_tx, resp_rx) = oneshot::channel();
         self.tx
             .send(StoreMsg::IsPeerAllowed {
-                peer,
+                peer_key,
                 resp: resp_tx,
             })
             .wrap_err("sync store closed")?;
         resp_rx.await.wrap_err(ERROR_CHANNEL)?
     }
-
-    pub async fn is_endpoint_allowed(&self, endpoint_id: EndpointId) -> Res<bool> {
-        let (resp_tx, resp_rx) = oneshot::channel();
-        self.tx
-            .send(StoreMsg::IsEndpointAllowed {
-                endpoint_id,
-                resp: resp_tx,
-            })
-            .wrap_err("sync store closed")?;
-        resp_rx.await.wrap_err(ERROR_CHANNEL)?
-    }
-
     pub async fn get_partition_cursor(
         &self,
         peer: PeerKey,
@@ -126,7 +108,7 @@ impl SyncStoreHandle {
         let (resp_tx, resp_rx) = oneshot::channel();
         self.tx
             .send(StoreMsg::GetPartitionCursor {
-                peer,
+                peer_key: peer,
                 partition_id,
                 resp: resp_tx,
             })
@@ -144,7 +126,7 @@ impl SyncStoreHandle {
         let (resp_tx, resp_rx) = oneshot::channel();
         self.tx
             .send(StoreMsg::SetPartitionCursor {
-                peer,
+                peer_key: peer,
                 partition_id,
                 member_cursor,
                 doc_cursor,
@@ -194,7 +176,6 @@ async fn ensure_schema(pool: &sqlx::SqlitePool) -> Res<()> {
         r#"
         CREATE TABLE IF NOT EXISTS sync_allowed_peers(
             peer_key TEXT PRIMARY KEY,
-            endpoint_id TEXT NULL
         )
         "#,
     )
@@ -219,16 +200,14 @@ async fn ensure_schema(pool: &sqlx::SqlitePool) -> Res<()> {
 async fn handle_msg(pool: &sqlx::SqlitePool, msg: StoreMsg) {
     match msg {
         StoreMsg::AllowPeer {
-            peer,
-            endpoint_id,
+            peer_key: peer,
             resp,
         } => {
             let out = async {
                 sqlx::query(
-                    "INSERT INTO sync_allowed_peers(peer_key, endpoint_id) VALUES(?, ?) ON CONFLICT(peer_key) DO UPDATE SET endpoint_id = excluded.endpoint_id",
+                    "INSERT INTO sync_allowed_peers(peer_key) VALUES(?, ?) ON CONFLICT(peer_key) DO UPDATE SET endpoint_id = excluded.endpoint_id",
                 )
-                .bind(peer)
-                .bind(endpoint_id.map(|id| id.to_string()))
+                .bind(&peer[..])
                 .execute(pool)
                 .await?;
                 Ok(())
@@ -236,10 +215,13 @@ async fn handle_msg(pool: &sqlx::SqlitePool, msg: StoreMsg) {
             .await;
             resp.send(out).inspect_err(|_| warn!(ERROR_CALLER)).ok();
         }
-        StoreMsg::RevokePeer { peer, resp } => {
+        StoreMsg::RevokePeer {
+            peer_key: peer,
+            resp,
+        } => {
             let out = async {
                 sqlx::query("DELETE FROM sync_allowed_peers WHERE peer_key = ?")
-                    .bind(&peer)
+                    .bind(&peer[..])
                     .execute(pool)
                     .await?;
                 Ok(())
@@ -247,25 +229,15 @@ async fn handle_msg(pool: &sqlx::SqlitePool, msg: StoreMsg) {
             .await;
             resp.send(out).inspect_err(|_| warn!(ERROR_CALLER)).ok();
         }
-        StoreMsg::IsPeerAllowed { peer, resp } => {
+        StoreMsg::IsPeerAllowed {
+            peer_key: peer,
+            resp,
+        } => {
             let out = async {
                 let exists: i64 = sqlx::query_scalar(
                     "SELECT EXISTS(SELECT 1 FROM sync_allowed_peers WHERE peer_key = ?)",
                 )
-                .bind(peer)
-                .fetch_one(pool)
-                .await?;
-                Ok(exists == 1)
-            }
-            .await;
-            resp.send(out).inspect_err(|_| warn!(ERROR_CALLER)).ok();
-        }
-        StoreMsg::IsEndpointAllowed { endpoint_id, resp } => {
-            let out = async {
-                let exists: i64 = sqlx::query_scalar(
-                    "SELECT EXISTS(SELECT 1 FROM sync_allowed_peers WHERE endpoint_id = ?)",
-                )
-                .bind(endpoint_id.to_string())
+                .bind(&peer[..])
                 .fetch_one(pool)
                 .await?;
                 Ok(exists == 1)
@@ -274,7 +246,7 @@ async fn handle_msg(pool: &sqlx::SqlitePool, msg: StoreMsg) {
             resp.send(out).inspect_err(|_| warn!(ERROR_CALLER)).ok();
         }
         StoreMsg::GetPartitionCursor {
-            peer,
+            peer_key: peer,
             partition_id,
             resp,
         } => {
@@ -282,7 +254,7 @@ async fn handle_msg(pool: &sqlx::SqlitePool, msg: StoreMsg) {
                 let row = sqlx::query(
                     "SELECT member_cursor, doc_cursor FROM sync_partition_cursors WHERE peer_key = ? AND partition_id = ?",
                 )
-                .bind(peer)
+                .bind(&peer[..])
                 .bind(partition_id)
                 .fetch_optional(pool)
                 .await?;
@@ -307,7 +279,7 @@ async fn handle_msg(pool: &sqlx::SqlitePool, msg: StoreMsg) {
             resp.send(out).inspect_err(|_| warn!(ERROR_CALLER)).ok();
         }
         StoreMsg::SetPartitionCursor {
-            peer,
+            peer_key: peer,
             partition_id,
             member_cursor,
             doc_cursor,
@@ -323,7 +295,7 @@ async fn handle_msg(pool: &sqlx::SqlitePool, msg: StoreMsg) {
                         doc_cursor = excluded.doc_cursor
                     "#,
                 )
-                .bind(peer)
+                .bind(&peer[..])
                 .bind(partition_id)
                 .bind(member_cursor.map(|val| val as i64))
                 .bind(doc_cursor.map(|val| val as i64))
@@ -348,12 +320,12 @@ mod tests {
         let peer: PeerKey = "peer-a".into();
         let partition: PartitionId = "part-a".into();
 
-        store.allow_peer(peer.clone(), None).await?;
+        store.allow_peer(Arc::clone(&peer)).await?;
         store
-            .set_partition_cursor(peer.clone(), partition.clone(), Some(10), Some(20))
+            .set_partition_cursor(Arc::clone(&peer), partition.clone(), Some(10), Some(20))
             .await?;
-        store.revoke_peer(peer.clone()).await?;
-        store.allow_peer(peer.clone(), None).await?;
+        store.revoke_peer(Arc::clone(&peer)).await?;
+        store.allow_peer(Arc::clone(&peer)).await?;
 
         let cursor = store.get_partition_cursor(peer, partition).await?;
         assert_eq!(cursor.member_cursor, Some(10));

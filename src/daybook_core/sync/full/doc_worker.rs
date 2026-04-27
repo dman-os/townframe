@@ -54,7 +54,7 @@ struct DocSyncWorker {
 
 #[derive(Clone)]
 pub struct DocSyncTarget {
-    pub endpoint_id: EndpointId,
+    pub peer_id: PeerId,
     pub connection: am_utils_rs::repo::BigRepoConnection,
 }
 
@@ -78,7 +78,7 @@ impl DocSyncWorker {
             self.msg_tx
                 .send(Msg::DocSyncCompleted {
                     doc_id: self.doc_id,
-                    endpoint_id: self.target.endpoint_id,
+                    peer_id: self.target.peer_id,
                     outcome,
                 })
                 .expect("FullSyncWorker went down without cleaning doc sync worker");
@@ -89,7 +89,7 @@ impl DocSyncWorker {
         if let Err(err) = res {
             warn!(
                 doc_id = %self.doc_id,
-                endpoint_id = ?self.target.endpoint_id,
+                peer_id = ?self.target.peer_id,
                 ?err,
                 "doc sync worker failed"
             );
@@ -101,7 +101,7 @@ impl DocSyncWorker {
         self.msg_tx
             .send(Msg::DocSyncRequestBackoff {
                 doc_id: self.doc_id,
-                endpoint_id: self.target.endpoint_id,
+                peer_id: self.target.peer_id,
                 delay: Duration::from_millis(500),
                 previous_attempt_no: self.retry.attempt_no,
                 previous_backoff: self.retry.last_backoff,

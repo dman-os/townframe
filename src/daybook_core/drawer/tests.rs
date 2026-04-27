@@ -40,7 +40,11 @@ fn local_branch(name: &str) -> daybook_types::doc::BranchPath {
 }
 
 async fn new_meta_db_pool() -> Res<sqlx::SqlitePool> {
-    Ok(crate::app::SqlCtx::new("sqlite::memory:").await?.db_pool)
+    Ok(crate::app::SqlCtx::new(crate::app::SqlConfig {
+        database_url: "sqlite::memory:".into(),
+    })
+    .await?
+    .db_pool)
 }
 
 #[tokio::test(flavor = "multi_thread")]
