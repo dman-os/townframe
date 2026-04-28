@@ -320,6 +320,7 @@ pub async fn clone_repo_init_from_url(
                 path: staging.join("samod"),
             },
             peer_id: identity.iroh_public_key.into(),
+            secret_key_bytes: identity.iroh_secret_key.to_bytes(),
         })
         .await?;
         let source_peer_key = format!("/{}/{}", bootstrap.repo_id, bootstrap.endpoint_id);

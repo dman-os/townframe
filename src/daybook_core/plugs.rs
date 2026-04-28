@@ -2275,6 +2275,7 @@ mod tests {
         let local_user_path = daybook_types::doc::UserPath::from("/test-user/test-device");
         let (big_repo, _acx_stop) = BigRepo::boot(am_utils_rs::repo::Config {
             peer_id: crate::peer_id_from_label("test"),
+            secret_key_bytes: rand::random::<[u8; 32]>(),
             storage: am_utils_rs::repo::StorageConfig::Memory,
         })
         .await?;

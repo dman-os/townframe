@@ -498,7 +498,8 @@ where
             async move {
                 let _ = stop
                     .run_until_cancelled(async move {
-                        manager.await.unwrap();
+                        // NOTE: manager only returns abort signal on Subduction drop
+                        manager.await.ok();
                     })
                     .await;
             }
@@ -786,12 +787,14 @@ where
                             context: "doc worker",
                             error: format!("{err:?}"),
                         })
-                        .expect(ERROR_CHANNEL);
+                        .inspect_err(|_| warn!(ERROR_CHANNEL))
+                        .ok();
                 }
                 worker
                     .runtime_evt_tx
                     .send(RuntimeEvt::DocWorkerStopped { doc_id })
-                    .expect(ERROR_CHANNEL);
+                    .inspect_err(|_| warn!(ERROR_CHANNEL))
+                    .ok();
             })
             .expect(ERROR_TOKIO);
         self.doc_workers.insert(
@@ -1001,7 +1004,9 @@ where
             Ok((peer_id, closed))
         };
         self.spawn_background(async move {
-            done.send(fut.await).expect(ERROR_CALLER);
+            done.send(fut.await)
+                .inspect_err(|_| warn!(ERROR_CALLER))
+                .ok();
         });
     }
 
@@ -1088,7 +1093,9 @@ where
             Ok((peer_id, closed))
         };
         self.spawn_background(async move {
-            done.send(fut.await).expect(ERROR_CALLER);
+            done.send(fut.await)
+                .inspect_err(|_| warn!(ERROR_CALLER))
+                .ok();
         });
     }
 
@@ -1110,7 +1117,7 @@ where
             }
             .await;
             if let Some(done) = done {
-                done.send(out).expect(ERROR_CALLER);
+                done.send(out).inspect_err(|_| warn!(ERROR_CALLER)).ok();
             }
         });
     }
@@ -1276,11 +1283,11 @@ where
                 done,
             } => {
                 let res = self.handle_put_doc(initial_content).await;
-                done.send(res).expect(ERROR_CALLER);
+                done.send(res).inspect_err(|_| warn!(ERROR_CALLER)).ok();
             }
             DocWorkerMsg::AcquireHandle { done } => {
                 let res = self.handle_acquire_handle().await;
-                done.send(res).expect(ERROR_CALLER);
+                done.send(res).inspect_err(|_| warn!(ERROR_CALLER)).ok();
             }
             DocWorkerMsg::ExportDocSave { done } => {
                 let res = self.handle_export_doc_save().await;
@@ -1289,7 +1296,7 @@ where
                         doc_id: self.doc_id,
                     })
                     .expect(ERROR_CHANNEL);
-                done.send(res).expect(ERROR_CALLER);
+                done.send(res).inspect_err(|_| warn!(ERROR_CALLER)).ok();
             }
             DocWorkerMsg::CommitDelta {
                 commits,
@@ -1306,7 +1313,7 @@ where
                         doc_id: self.doc_id,
                     })
                     .expect(ERROR_CHANNEL);
-                done.send(res).expect(ERROR_CALLER);
+                done.send(res).inspect_err(|_| warn!(ERROR_CALLER)).ok();
             }
             DocWorkerMsg::ApplySyncSession { session } => {
                 self.handle_apply_sync_session(session).await?;
@@ -1330,7 +1337,7 @@ where
                     doc_id: self.doc_id,
                 };
                 evt_tx.send(evt).expect(ERROR_CHANNEL);
-                done.send(res).expect(ERROR_CALLER);
+                done.send(res).inspect_err(|_| warn!(ERROR_CALLER)).ok();
             }
             DocWorkerMsg::ReleaseHandleLease => {}
         }

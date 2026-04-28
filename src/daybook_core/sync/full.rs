@@ -1829,11 +1829,15 @@ impl Worker {
             doc_id: doc_id.clone(),
             peer_id,
         };
-        let active = self
-            .scheduler
-            .active_docs
-            .remove(&task_key)
-            .expect(ERROR_UNRECONIZED);
+        let Some(active) = self.scheduler.active_docs.remove(&task_key) else {
+            warn!(
+                ?doc_id,
+                ?peer_id,
+                ?outcome,
+                "doc sync completed for unrecognized task (peer may have exited abnormally)"
+            );
+            return Ok(());
+        };
         active.stop_token.stop().await?;
         self.scheduler.clear_doc_pending(&task_key);
         debug!("doc sync worker completed");
@@ -1845,15 +1849,17 @@ impl Worker {
 
                 if let Some(sync_state) = self.doc_sync_set.get_mut(&doc_id) {
                     if let Some(requested_parts) = sync_state.requested_peers.remove(&peer_id) {
-                        {
-                            let peer_state = self
-                                .known_peer_set
-                                .get_mut(&peer_id)
-                                .expect(ERROR_UNRECONIZED);
-                            peer_state.doc_pending_docs =
-                                peer_state.doc_pending_docs.saturating_sub(1);
-                            refreshed_peer = true;
-                        }
+                        let Some(peer_state) = self.known_peer_set.get_mut(&peer_id) else {
+                            warn!(
+                                ?doc_id,
+                                ?peer_id,
+                                "peer missing from known_peer_set during doc sync completion"
+                            );
+                            return Ok(());
+                        };
+                        peer_state.doc_pending_docs =
+                            peer_state.doc_pending_docs.saturating_sub(1);
+                        refreshed_peer = true;
 
                         for (partition_key, cursors) in requested_parts {
                             let PartitionKey::BigRepoPartition(partition_id) = partition_key else {

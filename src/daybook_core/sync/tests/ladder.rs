@@ -7,7 +7,13 @@ async fn boot_connected_sync_pair(
     let repo_b_path = temp_root.path().join("repo-b");
     tokio::fs::create_dir_all(&repo_a_path).await?;
     let device_name = "test-device".to_string();
-    let rtx = RepoCtx::init(&repo_a_path, RepoOpenOptions {}, device_name.clone(), device_name).await?;
+    let rtx = RepoCtx::init(
+        &repo_a_path,
+        RepoOpenOptions {},
+        device_name.clone(),
+        device_name,
+    )
+    .await?;
     rtx.shutdown().await?;
     drop(rtx);
 
@@ -231,7 +237,13 @@ async fn iroh_sync_single_doc_created_before_connect_replicates() -> Res<()> {
     let repo_b_path = temp_root.path().join("repo-b");
     tokio::fs::create_dir_all(&repo_a_path).await?;
     let device_name = "test-device".to_string();
-    let rtx = RepoCtx::init(&repo_a_path, RepoOpenOptions {}, device_name.clone(), device_name).await?;
+    let rtx = RepoCtx::init(
+        &repo_a_path,
+        RepoOpenOptions {},
+        device_name.clone(),
+        device_name,
+    )
+    .await?;
     rtx.shutdown().await?;
     drop(rtx);
 
@@ -304,7 +316,13 @@ async fn iroh_sync_single_blob_created_before_connect_replicates() -> Res<()> {
     let repo_b_path = temp_root.path().join("repo-b");
     tokio::fs::create_dir_all(&repo_a_path).await?;
     let device_name = "test-device".to_string();
-    let rtx = RepoCtx::init(&repo_a_path, RepoOpenOptions {}, device_name.clone(), device_name).await?;
+    let rtx = RepoCtx::init(
+        &repo_a_path,
+        RepoOpenOptions {},
+        device_name.clone(),
+        device_name,
+    )
+    .await?;
     rtx.shutdown().await?;
     drop(rtx);
 
@@ -387,7 +405,13 @@ async fn iroh_sync_single_doc_created_while_connected_replicates() -> Res<()> {
     let repo_b_path = temp_root.path().join("repo-b");
     tokio::fs::create_dir_all(&repo_a_path).await?;
     let device_name = "test-device".to_string();
-    let rtx = RepoCtx::init(&repo_a_path, RepoOpenOptions {}, device_name.clone(), device_name).await?;
+    let rtx = RepoCtx::init(
+        &repo_a_path,
+        RepoOpenOptions {},
+        device_name.clone(),
+        device_name,
+    )
+    .await?;
     rtx.shutdown().await?;
     drop(rtx);
 
@@ -462,7 +486,13 @@ async fn iroh_sync_single_blob_created_while_connected_replicates() -> Res<()> {
     let repo_b_path = temp_root.path().join("repo-b");
     tokio::fs::create_dir_all(&repo_a_path).await?;
     let device_name = "test-device".to_string();
-    let rtx = RepoCtx::init(&repo_a_path, RepoOpenOptions {}, device_name.clone(), device_name).await?;
+    let rtx = RepoCtx::init(
+        &repo_a_path,
+        RepoOpenOptions {},
+        device_name.clone(),
+        device_name,
+    )
+    .await?;
     rtx.shutdown().await?;
     drop(rtx);
 
@@ -691,7 +721,6 @@ async fn iroh_sync_single_doc_survives_remote_restart_and_reconnect() -> Res<()>
     std::env::set_var("DAYB_DISABLE_KEYRING", "1");
 
     let (temp_root, node_a, node_b, _bootstrap_id) = boot_connected_sync_pair().await?;
-    let repo_a_path = temp_root.path().join("repo-a");
     let repo_b_path = temp_root.path().join("repo-b");
     let ticket_a = node_a.sync_repo.get_clone_ticket_url().await?;
 

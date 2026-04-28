@@ -23,6 +23,9 @@ pub struct GetDocsFullRpcReq {
     pub req: GetDocsFullRequest,
 }
 
+// NOTE: this is used over an 0rtt iroh irpc impl wihch is
+// only safe when all the requests are idempotent. if this
+// changes for our requests, amend the 0rtt usage
 #[rpc_requests(message = RepoSyncRpcMessage)]
 #[derive(Debug, serde::Serialize, serde::Deserialize)]
 pub enum RepoSyncRpc {

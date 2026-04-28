@@ -492,6 +492,7 @@ async fn boot_big_repo(
             path: layout.samod_root.clone(),
         },
         peer_id: identity.iroh_public_key.into(),
+        secret_key_bytes: identity.iroh_secret_key.to_bytes(),
     };
     let (big_repo, big_repo_stop) = am_utils_rs::BigRepo::boot(am_config).await?;
     let partition_store = big_repo.partition_store();

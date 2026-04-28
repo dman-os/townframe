@@ -103,6 +103,7 @@ impl Ctx {
             mpsc::unbounded_channel::<DocSetupRequest>();
         let (big_repo, _big_repo_stop) = am_utils_rs::BigRepo::boot(am_utils_rs::repo::Config {
             peer_id: "daybook_sync".to_string(),
+            secret_key_bytes: [0u8; 32],
             storage: am_utils_rs::repo::StorageConfig::Disk {
                 path: "/tmp/samod-sync".into(),
                 big_repo_sqlite_url: None,

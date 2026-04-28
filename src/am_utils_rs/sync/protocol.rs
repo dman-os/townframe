@@ -199,6 +199,9 @@ pub struct SubPartitionsRpcReq {
     pub req: SubPartitionsRequest,
 }
 
+// NOTE: we're using 0rtt verson iroh irpc which is only
+// safe when these requests are idempotent safe. amend this
+// if adding new requests that aren't idempotent
 #[rpc_requests(message = PartitionSyncRpcMessage)]
 #[derive(Debug, serde::Serialize, serde::Deserialize)]
 pub enum PartitionSyncRpc {

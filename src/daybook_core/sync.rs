@@ -209,18 +209,6 @@ impl IrohSyncRepo {
 
         let router = iroh::protocol::Router::builder(endpoint.clone())
             .accept(
-                PARTITION_SYNC_ALPN,
-                irpc_iroh::IrohProtocol::<am_utils_rs::sync::protocol::PartitionSyncRpc>::with_sender(
-                    partition_sync_node.local_sender(),
-                ),
-            )
-            .accept(
-                REPO_SYNC_ALPN,
-                irpc_iroh::IrohProtocol::<am_utils_rs::repo::rpc::RepoSyncRpc>::with_sender(
-                    repo_rpc.local_sender(),
-                ),
-            )
-            .accept(
                 SUBDUCTION_ALPN,
                 SubductionProtocolHandler {
                     big_repo: Arc::clone(&rcx.big_repo),
@@ -229,7 +217,21 @@ impl IrohSyncRepo {
                 },
             )
             .accept(
+                PARTITION_SYNC_ALPN,
+                irpc_iroh::Iroh0RttProtocol::<am_utils_rs::sync::protocol::PartitionSyncRpc>::with_sender(
+                    partition_sync_node.local_sender(),
+                ),
+            )
+            .accept(
+                REPO_SYNC_ALPN,
+                irpc_iroh::Iroh0RttProtocol::<am_utils_rs::repo::rpc::RepoSyncRpc>::with_sender(
+                    repo_rpc.local_sender(),
+                ),
+            )
+            .accept(
                 CLONE_PROVISION_ALPN,
+                // NOTE: we don't use 0Rtt since CloneProvisionRpc requests are not idempotetnt
+                // safe
                 irpc_iroh::IrohProtocol::<bootstrap::CloneProvisionRpc>::with_sender(
                     clone_rpc_tx.clone(),
                 ),

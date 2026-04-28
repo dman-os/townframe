@@ -49,10 +49,11 @@ async fn new_meta_store_sql() -> Res<crate::app::SqlCtx> {
 #[tokio::test(flavor = "multi_thread")]
 async fn test_v2_smoke() -> Res<()> {
     utils_rs::testing::setup_tracing_once();
-    let (big_repo, acx_stop) = BigRepo::boot(am_utils_rs::repo::Config {
-        peer_id: crate::peer_id_from_label("test-v2"),
+        let (big_repo, acx_stop) = BigRepo::boot(am_utils_rs::repo::Config {
+            peer_id: crate::peer_id_from_label("test-v2"),
+            secret_key_bytes: rand::random::<[u8; 32]>(),
         storage: am_utils_rs::repo::StorageConfig::Memory,
-    })
+        })
     .await?;
 
     let drawer_doc_id = {
@@ -149,6 +150,7 @@ async fn test_partitions_track_non_tmp_branches() -> Res<()> {
     utils_rs::testing::setup_tracing_once();
     let (big_repo, acx_stop) = BigRepo::boot(am_utils_rs::repo::Config {
         peer_id: crate::peer_id_from_label("test-v2-partitions"),
+        secret_key_bytes: rand::random::<[u8; 32]>(),
         storage: am_utils_rs::repo::StorageConfig::Memory,
     })
     .await?;
@@ -271,6 +273,7 @@ async fn test_v2_batch_add_smoke() -> Res<()> {
     utils_rs::testing::setup_tracing_once();
     let (big_repo, acx_stop) = BigRepo::boot(am_utils_rs::repo::Config {
         peer_id: crate::peer_id_from_label("test-v2-batch-add"),
+        secret_key_bytes: rand::random::<[u8; 32]>(),
         storage: am_utils_rs::repo::StorageConfig::Memory,
     })
     .await?;
@@ -341,6 +344,7 @@ async fn test_v2_batch_add_emits_single_list_changed() -> Res<()> {
     utils_rs::testing::setup_tracing_once();
     let (big_repo, acx_stop) = BigRepo::boot(am_utils_rs::repo::Config {
         peer_id: crate::peer_id_from_label("test-v2-batch-add-events"),
+        secret_key_bytes: rand::random::<[u8; 32]>(),
         storage: am_utils_rs::repo::StorageConfig::Memory,
     })
     .await?;
@@ -445,6 +449,7 @@ async fn test_v2_merge() -> Res<()> {
     utils_rs::testing::setup_tracing_once();
     let (big_repo, acx_stop) = BigRepo::boot(am_utils_rs::repo::Config {
         peer_id: crate::peer_id_from_label("test-v2-merge"),
+        secret_key_bytes: rand::random::<[u8; 32]>(),
         storage: am_utils_rs::repo::StorageConfig::Memory,
     })
     .await?;
@@ -593,6 +598,7 @@ async fn test_resolve_handle_for_heads_does_not_match_foreign_doc_heads() -> Res
     utils_rs::testing::setup_tracing_once();
     let (big_repo, acx_stop) = BigRepo::boot(am_utils_rs::repo::Config {
         peer_id: crate::peer_id_from_label("test-resolve-handle-heads"),
+        secret_key_bytes: rand::random::<[u8; 32]>(),
         storage: am_utils_rs::repo::StorageConfig::Memory,
     })
     .await?;
@@ -670,6 +676,7 @@ async fn test_create_branch_at_stale_main_heads_after_intervening_merges() -> Re
     utils_rs::testing::setup_tracing_once();
     let (big_repo, acx_stop) = BigRepo::boot(am_utils_rs::repo::Config {
         peer_id: crate::peer_id_from_label("test-stale-heads-after-merges"),
+        secret_key_bytes: rand::random::<[u8; 32]>(),
         storage: am_utils_rs::repo::StorageConfig::Memory,
     })
     .await?;
@@ -987,6 +994,7 @@ async fn test_bigrepo_raw_automerge_stale_heads_after_merges() -> Res<()> {
     utils_rs::testing::setup_tracing_once();
     let (big_repo, acx_stop) = BigRepo::boot(am_utils_rs::repo::Config {
         peer_id: crate::peer_id_from_label("test-bigrepo-stale-heads"),
+        secret_key_bytes: rand::random::<[u8; 32]>(),
         storage: am_utils_rs::repo::StorageConfig::Memory,
     })
     .await?;
@@ -1050,6 +1058,7 @@ async fn test_v2_additional_apis() -> Res<()> {
     utils_rs::testing::setup_tracing_once();
     let (big_repo, acx_stop) = BigRepo::boot(am_utils_rs::repo::Config {
         peer_id: crate::peer_id_from_label("test-v2-apis"),
+        secret_key_bytes: rand::random::<[u8; 32]>(),
         storage: am_utils_rs::repo::StorageConfig::Memory,
     })
     .await?;
@@ -1232,6 +1241,7 @@ async fn test_v2_metadata_maintenance() -> Res<()> {
     utils_rs::testing::setup_tracing_once();
     let (big_repo, acx_stop) = BigRepo::boot(am_utils_rs::repo::Config {
         peer_id: crate::peer_id_from_label("test-v2-meta"),
+        secret_key_bytes: rand::random::<[u8; 32]>(),
         storage: am_utils_rs::repo::StorageConfig::Memory,
     })
     .await?;
@@ -1475,6 +1485,7 @@ async fn test_update_at_heads_uses_patch_user_path_actor() -> Res<()> {
     utils_rs::testing::setup_tracing_once();
     let (big_repo, acx_stop) = BigRepo::boot(am_utils_rs::repo::Config {
         peer_id: crate::peer_id_from_label("test-update-actor"),
+        secret_key_bytes: rand::random::<[u8; 32]>(),
         storage: am_utils_rs::repo::StorageConfig::Memory,
     })
     .await?;
@@ -1558,6 +1569,7 @@ async fn test_merge_from_heads_uses_user_path_actor() -> Res<()> {
     utils_rs::testing::setup_tracing_once();
     let (big_repo, acx_stop) = BigRepo::boot(am_utils_rs::repo::Config {
         peer_id: crate::peer_id_from_label("test-merge-actor"),
+        secret_key_bytes: rand::random::<[u8; 32]>(),
         storage: am_utils_rs::repo::StorageConfig::Memory,
     })
     .await?;
@@ -1675,6 +1687,7 @@ async fn test_facet_keys_touched_by_local_actor_includes_user_path_scoped_actor(
     utils_rs::testing::setup_tracing_once();
     let (big_repo, acx_stop) = BigRepo::boot(am_utils_rs::repo::Config {
         peer_id: crate::peer_id_from_label("test-local-facet-touch"),
+        secret_key_bytes: rand::random::<[u8; 32]>(),
         storage: am_utils_rs::repo::StorageConfig::Memory,
     })
     .await?;
@@ -1822,6 +1835,7 @@ async fn test_v2_updated_at_merge() -> Res<()> {
     utils_rs::testing::setup_tracing_once();
     let (big_repo, acx_stop) = BigRepo::boot(am_utils_rs::repo::Config {
         peer_id: crate::peer_id_from_label("test-v2-updated-at"),
+        secret_key_bytes: rand::random::<[u8; 32]>(),
         storage: am_utils_rs::repo::StorageConfig::Memory,
     })
     .await?;
@@ -2034,6 +2048,7 @@ async fn test_v2_facet_blame_maintenance() -> Res<()> {
     utils_rs::testing::setup_tracing_once();
     let (big_repo, acx_stop) = BigRepo::boot(am_utils_rs::repo::Config {
         peer_id: crate::peer_id_from_label("test-v2-blame"),
+        secret_key_bytes: rand::random::<[u8; 32]>(),
         storage: am_utils_rs::repo::StorageConfig::Memory,
     })
     .await?;
@@ -2191,6 +2206,7 @@ async fn test_v2_listener_is_scoped_to_drawer_doc() -> Res<()> {
     utils_rs::testing::setup_tracing_once();
     let (big_repo, acx_stop) = BigRepo::boot(am_utils_rs::repo::Config {
         peer_id: crate::peer_id_from_label("test-v2-scope"),
+        secret_key_bytes: rand::random::<[u8; 32]>(),
         storage: am_utils_rs::repo::StorageConfig::Memory,
     })
     .await?;
@@ -2269,6 +2285,7 @@ async fn test_v2_content_update_does_not_emit_drawer_membership_events() -> Res<
     utils_rs::testing::setup_tracing_once();
     let (big_repo, acx_stop) = BigRepo::boot(am_utils_rs::repo::Config {
         peer_id: crate::peer_id_from_label("test-v2-changed-facets"),
+        secret_key_bytes: rand::random::<[u8; 32]>(),
         storage: am_utils_rs::repo::StorageConfig::Memory,
     })
     .await?;
@@ -2354,6 +2371,7 @@ async fn test_diff_events_delete_origin_uses_map_deleted_tombstone() -> Res<()> 
     utils_rs::testing::setup_tracing_once();
     let (big_repo, acx_stop) = BigRepo::boot(am_utils_rs::repo::Config {
         peer_id: crate::peer_id_from_label("test-v2-delete-origin"),
+        secret_key_bytes: rand::random::<[u8; 32]>(),
         storage: am_utils_rs::repo::StorageConfig::Memory,
     })
     .await?;
@@ -2433,6 +2451,7 @@ async fn test_add_rejects_unknown_facet_tag() -> Res<()> {
     utils_rs::testing::setup_tracing_once();
     let (big_repo, acx_stop) = BigRepo::boot(am_utils_rs::repo::Config {
         peer_id: crate::peer_id_from_label("test-v2-unknown-tag"),
+        secret_key_bytes: rand::random::<[u8; 32]>(),
         storage: am_utils_rs::repo::StorageConfig::Memory,
     })
     .await?;
@@ -2482,6 +2501,7 @@ async fn test_add_rejects_self_reference_without_target_facet() -> Res<()> {
     utils_rs::testing::setup_tracing_once();
     let (big_repo, acx_stop) = BigRepo::boot(am_utils_rs::repo::Config {
         peer_id: crate::peer_id_from_label("test-v2-self-ref"),
+        secret_key_bytes: rand::random::<[u8; 32]>(),
         storage: am_utils_rs::repo::StorageConfig::Memory,
     })
     .await?;
@@ -2541,6 +2561,7 @@ async fn test_add_accepts_body_self_reference_with_empty_fragment_for_present_ta
     utils_rs::testing::setup_tracing_once();
     let (big_repo, acx_stop) = BigRepo::boot(am_utils_rs::repo::Config {
         peer_id: crate::peer_id_from_label("test-v2-body-empty-fragment-self"),
+        secret_key_bytes: rand::random::<[u8; 32]>(),
         storage: am_utils_rs::repo::StorageConfig::Memory,
     })
     .await?;
@@ -2612,6 +2633,7 @@ async fn perf_samod_disk_add_like_drawer_baseline() -> Res<()> {
 
     let (big_repo, acx_stop) = BigRepo::boot(am_utils_rs::repo::Config {
         peer_id: crate::peer_id_from_label("perf-drawer-raw-amctx"),
+        secret_key_bytes: rand::random::<[u8; 32]>(),
         storage: am_utils_rs::repo::StorageConfig::Disk {
             path: storage_path.clone(),
         },
@@ -2716,6 +2738,7 @@ async fn perf_drawer_add_disk_baseline() -> Res<()> {
 
     let (big_repo, acx_stop) = BigRepo::boot(am_utils_rs::repo::Config {
         peer_id: crate::peer_id_from_label("perf-drawer-add"),
+        secret_key_bytes: rand::random::<[u8; 32]>(),
         storage: am_utils_rs::repo::StorageConfig::Disk {
             path: storage_path.clone(),
         },

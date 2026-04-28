@@ -184,6 +184,7 @@ pub async fn test_cx_with_options(
     // Initialize SharedBigRepo with memory storage
     let (big_repo, acx_stop) = BigRepo::boot(am_utils_rs::repo::Config {
         peer_id,
+        secret_key_bytes: rand::random::<[u8; 32]>(),
         storage: am_utils_rs::repo::StorageConfig::Memory,
     })
     .await?;

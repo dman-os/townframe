@@ -500,6 +500,7 @@ mod tests {
                     big_repo_sqlite_url: None,
                 },
                 peer_id: "daybook_fuse_test".to_string(),
+                secret_key_bytes: [0u8; 32],
             })
             .await?;
 

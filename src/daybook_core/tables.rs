@@ -1650,6 +1650,7 @@ mod tests {
     async fn load_ensures_non_empty_tables_graph() -> Res<()> {
         let (big_repo, big_repo_stop) = BigRepo::boot(am_utils_rs::repo::Config {
             peer_id: crate::peer_id_from_label("test-tables-ensure-non-empty"),
+            secret_key_bytes: rand::random::<[u8; 32]>(),
             storage: am_utils_rs::repo::StorageConfig::Memory,
         })
         .await?;

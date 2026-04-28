@@ -1390,6 +1390,7 @@ mod tests {
     async fn boot_repo() -> (Arc<BigRepo>, crate::repo::BigRepoStopToken) {
         BigRepo::boot(Config {
             peer_id: PeerId::new([9_u8; 32]),
+            secret_key_bytes: [9_u8; 32],
             storage: StorageConfig::Memory,
         })
         .await

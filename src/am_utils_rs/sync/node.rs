@@ -98,6 +98,7 @@ struct SyncNodeWorker {
 }
 
 impl SyncNodeWorker {
+    #[tracing::instrument(skip(self))]
     async fn handle_rpc_message(&mut self, msg: PartitionSyncRpcMessage) {
         match msg {
             PartitionSyncRpcMessage::ListPartitions(req) => {
@@ -243,6 +244,7 @@ impl SyncNodeWorker {
         if known {
             return Ok(());
         }
+        warn!("unkown peer access attempt");
         Err(PartitionSyncError::Internal {
             message: format!("peer {peer:?} is not allowed in sync node"),
         })

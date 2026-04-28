@@ -31,6 +31,7 @@ pub type PeerId = crate::ids::PeerId32;
 #[derive(Debug, Clone)]
 pub struct Config {
     pub peer_id: PeerId,
+    pub secret_key_bytes: [u8; 32],
     pub storage: StorageConfig,
 }
 
@@ -58,7 +59,7 @@ pub type SharedBigRepo = Arc<BigRepo>;
 
 impl BigRepo {
     pub async fn boot(config: Config) -> Res<(Arc<Self>, BigRepoStopToken)> {
-        let Config { peer_id, storage } = config;
+        let Config { peer_id, secret_key_bytes, storage } = config;
         let sqlite_url = match &storage {
             StorageConfig::Memory => "sqlite::memory:".to_string(),
             StorageConfig::Disk { path } => {
@@ -86,7 +87,7 @@ impl BigRepo {
 
         let (change_manager, change_manager_stop) = changes::ChangeListenerManager::boot();
         let signer =
-            subduction_crypto::signer::memory::MemorySigner::from_bytes(peer_id.as_bytes());
+            subduction_crypto::signer::memory::MemorySigner::from_bytes(&config.secret_key_bytes);
         let (runtime, runtime_stop) = match storage {
             StorageConfig::Memory => runtime::spawn_big_repo_runtime(
                 signer,
@@ -638,6 +639,7 @@ mod tests {
     async fn boot_repo() -> Res<(Arc<BigRepo>, BigRepoStopToken)> {
         BigRepo::boot(Config {
             peer_id: PeerId::new([7_u8; 32]),
+            secret_key_bytes: [7_u8; 32],
             storage: StorageConfig::Memory,
         })
         .await
@@ -646,6 +648,7 @@ mod tests {
     async fn boot_disk_repo(path: PathBuf) -> Res<(Arc<BigRepo>, BigRepoStopToken)> {
         BigRepo::boot(Config {
             peer_id: PeerId::new([7_u8; 32]),
+            secret_key_bytes: [7_u8; 32],
             storage: StorageConfig::Disk { path },
         })
         .await
@@ -1430,6 +1433,7 @@ mod tests {
             tracing::info!(path = %path.display(), "booting sync repo node");
             let (repo, stop_token) = BigRepo::boot(Config {
                 peer_id: PeerId::new([seed; 32]),
+                secret_key_bytes: [seed; 32],
                 storage: StorageConfig::Disk { path },
             })
             .await?;
