@@ -75,7 +75,7 @@ impl SyncStoreHandle {
                 peer_key: peer,
                 resp: tx,
             })
-            .wrap_err("sync store closed")?;
+            .wrap_err(ERROR_ACTOR)?;
         rx.await.wrap_err(ERROR_CHANNEL)?
     }
 
@@ -86,7 +86,7 @@ impl SyncStoreHandle {
                 peer_key,
                 resp: resp_tx,
             })
-            .wrap_err("sync store closed")?;
+            .wrap_err(ERROR_ACTOR)?;
         resp_rx.await.wrap_err(ERROR_CHANNEL)?
     }
 
@@ -97,7 +97,7 @@ impl SyncStoreHandle {
                 peer_key,
                 resp: resp_tx,
             })
-            .wrap_err("sync store closed")?;
+            .wrap_err(ERROR_ACTOR)?;
         resp_rx.await.wrap_err(ERROR_CHANNEL)?
     }
     pub async fn get_partition_cursor(
@@ -112,7 +112,7 @@ impl SyncStoreHandle {
                 partition_id,
                 resp: resp_tx,
             })
-            .wrap_err("sync store closed")?;
+            .wrap_err(ERROR_ACTOR)?;
         resp_rx.await.wrap_err(ERROR_CHANNEL)?
     }
 
@@ -132,7 +132,7 @@ impl SyncStoreHandle {
                 doc_cursor,
                 resp: resp_tx,
             })
-            .wrap_err("sync store closed")?;
+            .wrap_err(ERROR_ACTOR)?;
         resp_rx.await.wrap_err(ERROR_CHANNEL)?
     }
 }

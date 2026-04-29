@@ -49,11 +49,11 @@ async fn new_meta_store_sql() -> Res<crate::app::SqlCtx> {
 #[tokio::test(flavor = "multi_thread")]
 async fn test_v2_smoke() -> Res<()> {
     utils_rs::testing::setup_tracing_once();
-        let (big_repo, acx_stop) = BigRepo::boot(am_utils_rs::repo::Config {
-            peer_id: crate::peer_id_from_label("test-v2"),
-            secret_key_bytes: rand::random::<[u8; 32]>(),
+    let (big_repo, acx_stop) = BigRepo::boot(am_utils_rs::repo::Config {
+        peer_id: crate::peer_id_from_label("test-v2"),
+        secret_key_bytes: rand::random::<[u8; 32]>(),
         storage: am_utils_rs::repo::StorageConfig::Memory,
-        })
+    })
     .await?;
 
     let drawer_doc_id = {

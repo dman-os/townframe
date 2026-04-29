@@ -59,7 +59,11 @@ pub type SharedBigRepo = Arc<BigRepo>;
 
 impl BigRepo {
     pub async fn boot(config: Config) -> Res<(Arc<Self>, BigRepoStopToken)> {
-        let Config { peer_id, secret_key_bytes, storage } = config;
+        let Config {
+            peer_id,
+            secret_key_bytes,
+            storage,
+        } = config;
         let sqlite_url = match &storage {
             StorageConfig::Memory => "sqlite::memory:".to_string(),
             StorageConfig::Disk { path } => {

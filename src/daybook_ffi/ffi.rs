@@ -185,23 +185,23 @@ impl FfiCtx {
         let repo_root_for_init = std::path::PathBuf::from(repo_root);
 
         let (rcx, acx) = do_on_rt(&rt, async move {
-                let device_name = format!("daybook-ffi-{}", std::env::consts::ARCH);
-                let rcx = if daybook_core::repo::is_repo_initialized(&repo_root_for_init).await? {
-                    acx.open_repo(
-                        &repo_root_for_init,
-                        daybook_core::repo::RepoOpenOptions {},
-                        device_name.clone(),
-                    )
-                    .await?
-                } else {
-                    acx.init_repo(
-                        &repo_root_for_init,
-                        daybook_core::repo::RepoOpenOptions {},
-                        device_name.clone(),
-                        device_name,
-                    )
-                    .await?
-                };
+            let device_name = format!("daybook-ffi-{}", std::env::consts::ARCH);
+            let rcx = if daybook_core::repo::is_repo_initialized(&repo_root_for_init).await? {
+                acx.open_repo(
+                    &repo_root_for_init,
+                    daybook_core::repo::RepoOpenOptions {},
+                    device_name.clone(),
+                )
+                .await?
+            } else {
+                acx.init_repo(
+                    &repo_root_for_init,
+                    daybook_core::repo::RepoOpenOptions {},
+                    device_name.clone(),
+                    device_name,
+                )
+                .await?
+            };
             let rcx = Arc::new(rcx);
 
             eyre::Ok((rcx, acx))
@@ -284,11 +284,9 @@ impl AppFfiCtx {
                     device_name,
                 )
                 .await?;
-            let entry = daybook_core::app::globals::upsert_known_repo(
-                &this.inner.sql.db_pool,
-                &rcx,
-            )
-            .await?;
+            let entry =
+                daybook_core::app::globals::upsert_known_repo(&this.inner.sql.db_pool, &rcx)
+                    .await?;
             rcx.shutdown().await?;
             eyre::Ok(entry)
         })
@@ -345,10 +343,7 @@ impl AppFfiCtx {
     }
 
     #[tracing::instrument(err, skip(self, source_url))]
-    async fn resolve_clone_url(
-        self: Arc<Self>,
-        source_url: String,
-    ) -> Result<CloneInfo, FfiError> {
+    async fn resolve_clone_url(self: Arc<Self>, source_url: String) -> Result<CloneInfo, FfiError> {
         self.do_on_rt(async move {
             let info = daybook_core::sync::resolve_clone_info_from_url(&source_url).await?;
             Ok::<CloneInfo, eyre::Report>(clone_info_to_ffi(info))

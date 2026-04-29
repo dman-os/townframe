@@ -722,9 +722,7 @@ mod tests {
         (doc_id, Arc::from(after_heads), Arc::new(patch))
     }
 
-    async fn recv_batch<T: Send>(
-        rx: &mut tokio::sync::mpsc::UnboundedReceiver<Vec<T>>,
-    ) -> Vec<T> {
+    async fn recv_batch<T: Send>(rx: &mut tokio::sync::mpsc::UnboundedReceiver<Vec<T>>) -> Vec<T> {
         timeout(Duration::from_secs(1), rx.recv())
             .await
             .expect("timed out waiting for notification")
@@ -788,7 +786,10 @@ mod tests {
                 path: Vec::new(),
             })
             .await;
-        assert!(result.is_err(), "stopped manager should reject subscriptions");
+        assert!(
+            result.is_err(),
+            "stopped manager should reject subscriptions"
+        );
         let err = result.err().expect("expected subscription error");
         assert!(err.to_string().contains("stopped"));
 
@@ -846,9 +847,13 @@ mod tests {
             })
             .await?;
 
-        manager.notify_doc_heads_changed(doc_id, heads, BigRepoChangeOrigin::Remote {
-            peer_id: crate::repo::PeerId::new([42_u8; 32]),
-        })?;
+        manager.notify_doc_heads_changed(
+            doc_id,
+            heads,
+            BigRepoChangeOrigin::Remote {
+                peer_id: crate::repo::PeerId::new([42_u8; 32]),
+            },
+        )?;
         let batch = recv_batch(&mut rx).await;
         assert!(matches!(
             batch.as_slice(),

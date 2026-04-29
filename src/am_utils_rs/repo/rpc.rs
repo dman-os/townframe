@@ -19,7 +19,6 @@ pub struct GetDocsFullResponse {
 
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct GetDocsFullRpcReq {
-    pub peer: crate::sync::protocol::PeerKey,
     pub req: GetDocsFullRequest,
 }
 
@@ -34,16 +33,13 @@ pub enum RepoSyncRpc {
 }
 
 pub struct RepoRpcHandle {
-    rpc_tx: mpsc::Sender<RepoSyncRpcMessage>,
-    rpc_client: irpc::Client<RepoSyncRpc>,
+    rpc_tx: mpsc::Sender<(crate::sync::protocol::PeerKey, RepoSyncRpcMessage)>,
 }
 
 impl RepoRpcHandle {
-    pub fn rpc_client(&self) -> irpc::Client<RepoSyncRpc> {
-        self.rpc_client.clone()
-    }
-
-    pub fn local_sender(&self) -> mpsc::Sender<RepoSyncRpcMessage> {
+    pub fn local_sender(
+        &self,
+    ) -> mpsc::Sender<(crate::sync::protocol::PeerKey, RepoSyncRpcMessage)> {
         self.rpc_tx.clone()
     }
 }
@@ -68,7 +64,6 @@ pub async fn spawn_repo_rpc(
     access_policy: Arc<dyn PartitionAccessPolicy>,
 ) -> Res<(RepoRpcHandle, RepoRpcStopToken)> {
     let (rpc_tx, mut rpc_rx) = mpsc::channel(1024);
-    let rpc_client = irpc::Client::<RepoSyncRpc>::local(rpc_tx.clone());
 
     let cancel_token = CancellationToken::new();
     let fut = {
@@ -79,10 +74,10 @@ pub async fn spawn_repo_rpc(
                     biased;
                     _ = cancel_token.cancelled() => break,
                     msg = rpc_rx.recv() => {
-                        let Some(msg) = msg else {
+                        let Some((peer, msg)) = msg else {
                             break;
                         };
-                        handle_rpc_message(&big_repo, &sync_store, access_policy.as_ref(), msg).await;
+                        handle_rpc_message(&big_repo, &sync_store, access_policy.as_ref(), peer, msg).await;
                     }
                 }
             }
@@ -91,7 +86,7 @@ pub async fn spawn_repo_rpc(
     };
     let join_handle = tokio::spawn(async { fut.await.unwrap() });
     Ok((
-        RepoRpcHandle { rpc_tx, rpc_client },
+        RepoRpcHandle { rpc_tx },
         RepoRpcStopToken {
             cancel_token,
             join_handle,
@@ -103,12 +98,12 @@ async fn handle_rpc_message(
     big_repo: &SharedBigRepo,
     sync_store: &SyncStoreHandle,
     access_policy: &dyn PartitionAccessPolicy,
+    peer: crate::sync::protocol::PeerKey,
     msg: RepoSyncRpcMessage,
 ) {
     match msg {
         RepoSyncRpcMessage::GetDocsFull(req) => {
             let WithChannels { inner, tx, .. } = req;
-            let GetDocsFullRpcReq { peer, req } = inner;
             let out = (async {
                 ensure_known_peer(sync_store, &peer).await?;
                 let mut allowed_partitions = big_repo
@@ -122,7 +117,7 @@ async fn handle_rpc_message(
                     .map(|part| part.partition_id)
                     .collect::<Vec<_>>();
                 let docs = big_repo
-                    .get_docs_full_in_partitions(&req.doc_ids, &allowed_partition_ids)
+                    .get_docs_full_in_partitions(&inner.req.doc_ids, &allowed_partition_ids)
                     .await
                     .map_err(map_repo_err)?;
                 Ok::<_, PartitionSyncError>(GetDocsFullResponse { docs })

@@ -258,7 +258,7 @@ impl WorkerHandle {
 }
 
 pub struct StopToken {
-    cancel_token: CancellationToken,
+    pub cancel_token: CancellationToken,
     join_handle: tokio::task::JoinHandle<()>,
 }
 
@@ -273,7 +273,7 @@ impl StopToken {
     }
 }
 
-pub async fn start_full_sync_worker(
+pub async fn spawn_full_sync_worker(
     rcx: Arc<RepoCtx>,
     blobs_repo: Arc<BlobsRepo>,
     progress_repo: Option<Arc<ProgressRepo>>,
@@ -663,7 +663,14 @@ impl Worker {
             Msg::DelPeer { resp, peer_id } => {
                 if let Some(state) = self.known_peer_set.remove(&peer_id) {
                     self.peer_id_by_peer_key.remove(&state.peer_key);
-                    state.connection.stop().await.ok();
+                    state
+                        .connection
+                        .stop()
+                        .await
+                        .inspect_err(|err| {
+                            error!("error on disconnection from peer {peer_id:?}: {err}")
+                        })
+                        .ok();
                     self.remove_peer_from_doc_sync_set(peer_id).await?;
                     self.remove_peer_from_import_doc_set(peer_id).await?;
                     self.remove_peer_partition_session(peer_id).await?;
@@ -1458,7 +1465,12 @@ impl Worker {
         peer_key: &PeerKey,
         partition_id: &PartitionId,
     ) -> Res<()> {
+        let mut loop_counter = 0;
         loop {
+            loop_counter += 1;
+            if loop_counter > 1 {
+                unreachable!("this actually loops??");
+            }
             let persisted = self
                 .sync_store
                 .get_partition_cursor(peer_key.clone(), partition_id.clone())
@@ -1857,8 +1869,7 @@ impl Worker {
                             );
                             return Ok(());
                         };
-                        peer_state.doc_pending_docs =
-                            peer_state.doc_pending_docs.saturating_sub(1);
+                        peer_state.doc_pending_docs = peer_state.doc_pending_docs.saturating_sub(1);
                         refreshed_peer = true;
 
                         for (partition_key, cursors) in requested_parts {

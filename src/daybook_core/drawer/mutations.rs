@@ -29,10 +29,7 @@ impl DrawerRepo {
             return Err(ferr!("new docs must be created on main"))?;
         }
         let doc_am = automerge::Automerge::new();
-        let handle = self
-            .big_repo
-            .put_doc(DocumentId::random(), doc_am)
-            .await?;
+        let handle = self.big_repo.put_doc(DocumentId::random(), doc_am).await?;
         let doc_id = DocId::from(Uuid::new_v4().bs58());
         let branch_doc_id = handle.document_id().to_string();
         let mutation_actor_id = self.content_actor_id(args.user_path.as_ref(), &branch_doc_id);

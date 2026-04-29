@@ -6,7 +6,7 @@ use crate::repos::config::ConfigRepoFfi;
 use crate::repos::drawer::DrawerRepoFfi;
 use crate::repos::progress::ProgressRepoFfi;
 
-use daybook_core::index::{DocBlobsIndexRepo, DocBlobsIndexStopToken};
+use daybook_core::index::DocBlobsIndexRepo;
 use daybook_core::local_state::SqliteLocalStateRepo;
 use daybook_core::repos::RepoStopToken;
 use daybook_core::sync::{IrohSyncRepo, IrohSyncRepoStopToken};
@@ -17,7 +17,7 @@ pub struct SyncRepoFfi {
     fcx: SharedFfiCtx,
     pub repo: Arc<IrohSyncRepo>,
     sync_stop_token: tokio::sync::Mutex<Option<IrohSyncRepoStopToken>>,
-    doc_blobs_index_stop_token: tokio::sync::Mutex<Option<DocBlobsIndexStopToken>>,
+    doc_blobs_index_stop_token: tokio::sync::Mutex<Option<RepoStopToken>>,
     sqlite_local_state_stop_token: tokio::sync::Mutex<Option<RepoStopToken>>,
 }
 
@@ -152,10 +152,7 @@ impl SyncRepoFfi {
             .await
     }
 
-    async fn connect_url(
-        self: Arc<Self>,
-        source_url: String,
-    ) -> Result<(), FfiError> {
+    async fn connect_url(self: Arc<Self>, source_url: String) -> Result<(), FfiError> {
         let this = Arc::clone(&self);
         self.fcx
             .do_on_rt(async move {

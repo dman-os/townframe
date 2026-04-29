@@ -176,7 +176,6 @@ pub async fn spawn_peer_sync_worker(
                 .rpc_client
                 .server_streaming(
                     SubPartitionsRpcReq {
-                        peer: worker.local_peer.clone(),
                         req: SubPartitionsRequest { partitions: reqs },
                     },
                     DEFAULT_SUBSCRIPTION_CAPACITY,
@@ -294,9 +293,7 @@ impl PeerSyncWorker {
     ) -> Res<(Vec<PartitionId>, HashMap<PartitionId, u64>)> {
         let partitions = self
             .rpc_client
-            .rpc(ListPartitionsRpcReq {
-                peer: self.local_peer.clone(),
-            })
+            .rpc(ListPartitionsRpcReq)
             .await
             .wrap_err("list partitions rpc failed")??
             .partitions;

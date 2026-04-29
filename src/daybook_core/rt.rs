@@ -83,7 +83,7 @@ pub struct RtStopToken {
     rt: Arc<Rt>,
     partition_watcher: tokio::task::JoinHandle<()>,
     switch_worker: switch::SwitchWorkerHandle,
-    doc_blobs_index_stop: crate::index::DocBlobsIndexStopToken,
+    doc_blobs_index_stop: crate::repos::RepoStopToken,
     doc_facet_set_index_stop: crate::index::DocFacetSetIndexStopToken,
     doc_facet_ref_index_stop: crate::index::DocFacetRefIndexStopToken,
     sqlite_local_state_stop: crate::repos::RepoStopToken,

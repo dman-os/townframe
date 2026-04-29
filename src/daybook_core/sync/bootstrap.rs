@@ -263,8 +263,7 @@ pub async fn clone_repo_init_from_url(
         .await?;
         let bootstrap = provision.to_bootstrap_state()?;
 
-        let local_peer_key =
-            daybook_types::doc::format_peer_key(&bootstrap.repo_id, local_public.as_bytes());
+        let local_peer_key = daybook_types::doc::format_peer_key(local_public.as_bytes());
 
         let sqlite_path = staging.join("sqlite.db");
         let sql = crate::app::SqlCtx::new(crate::app::SqlConfig {
@@ -274,6 +273,12 @@ pub async fn clone_repo_init_from_url(
         crate::repo::globals::set_string_global(&sql, "global.repo_id", &bootstrap.repo_id).await?;
         crate::repo::globals::set_string_global(&sql, "global.repo_name", &bootstrap.repo_name)
             .await?;
+        let checkout_id = {
+            let id = Uuid::new_v4();
+            let id = utils_rs::hash::encode_base58_multibase(id);
+            format!("dcheckout_{id}")
+        };
+        crate::repo::globals::set_string_global(&sql, "global.checkout_id", &checkout_id).await?;
         let user_id = format!(
             "{}{}",
             daybook_types::doc::user_path::USER_ID_PREFIX,
@@ -282,8 +287,7 @@ pub async fn clone_repo_init_from_url(
         crate::repo::globals::set_string_global(&sql, "global.user_id", &user_id).await?;
 
         let identity =
-            crate::secrets::SecretRepo::set_identity(&bootstrap.repo_id, local_secret.clone())
-                .await?;
+            crate::secrets::SecretRepo::set_identity(&checkout_id, local_secret.clone()).await?;
         if identity.iroh_public_key.to_string() != local_public.to_string() {
             eyre::bail!("provisioned public key mismatch while cloning");
         }
@@ -323,7 +327,7 @@ pub async fn clone_repo_init_from_url(
             secret_key_bytes: identity.iroh_secret_key.to_bytes(),
         })
         .await?;
-        let source_peer_key = format!("/{}/{}", bootstrap.repo_id, bootstrap.endpoint_id);
+        let source_peer_key = daybook_types::doc::format_peer_key(bootstrap.endpoint_id.as_bytes());
         let (sync_store, sync_store_stop) =
             am_utils_rs::sync::store::spawn_sync_store(sql.db_pool.clone()).await?;
         let allow_res = sync_store.allow_peer(source_peer_key.into()).await;
@@ -359,13 +363,8 @@ pub async fn clone_repo_init_from_url(
         )
         .await?;
 
-        crate::repo::finish_clone_init(
-            &big_repo,
-            &sql,
-            local_user_path,
-            staging.join("blobs"),
-        )
-        .await?;
+        crate::repo::finish_clone_init(&big_repo, &sql, local_user_path, staging.join("blobs"))
+            .await?;
         crate::repo::mark_repo_initialized(&staging).await?;
 
         big_repo_stop.stop().await?;
@@ -428,9 +427,7 @@ async fn pull_required_partitions_once(
             PARTITION_SYNC_ALPN,
         );
         let partition_list = partition_rpc
-            .rpc(am_utils_rs::sync::protocol::ListPartitionsRpcReq {
-                peer: local_peer_key.into(),
-            })
+            .rpc(am_utils_rs::sync::protocol::ListPartitionsRpcReq)
             .await
             .wrap_err("list required partitions rpc failed")?
             .map_err(|err| eyre::eyre!("list required partitions rpc failed: {err:?}"))?;
@@ -471,7 +468,6 @@ async fn pull_required_partitions_once(
         );
         let full_docs = repo_rpc
             .rpc(am_utils_rs::repo::rpc::GetDocsFullRpcReq {
-                peer: local_peer_key.into(),
                 req: am_utils_rs::repo::rpc::GetDocsFullRequest {
                     doc_ids: vec![app_doc_id.clone(), drawer_doc_id.clone()],
                 },
@@ -538,7 +534,7 @@ async fn pull_required_partitions_once(
 
 async fn list_current_partition_members(
     partition_rpc: &irpc::Client<am_utils_rs::sync::protocol::PartitionSyncRpc>,
-    local_peer_key: &str,
+    _local_peer_key: &str,
     partition_id: &str,
 ) -> Res<HashSet<String>> {
     let mut current_members = HashSet::new();
@@ -547,7 +543,6 @@ async fn list_current_partition_members(
         let page = partition_rpc
             .rpc(
                 am_utils_rs::sync::protocol::GetPartitionMemberEventsRpcReq {
-                    peer: local_peer_key.into(),
                     req: am_utils_rs::sync::protocol::GetPartitionMemberEventsRequest {
                         partitions: vec![am_utils_rs::sync::protocol::PartitionCursorRequest {
                             partition_id: partition_id.to_string(),

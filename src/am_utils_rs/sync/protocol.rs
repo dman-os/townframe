@@ -177,25 +177,20 @@ pub enum PartitionSyncError {
 }
 
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
-pub struct ListPartitionsRpcReq {
-    pub peer: PeerKey,
-}
+pub struct ListPartitionsRpcReq;
 
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct GetPartitionMemberEventsRpcReq {
-    pub peer: PeerKey,
     pub req: GetPartitionMemberEventsRequest,
 }
 
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct GetPartitionDocEventsRpcReq {
-    pub peer: PeerKey,
     pub req: GetPartitionDocEventsRequest,
 }
 
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct SubPartitionsRpcReq {
-    pub peer: PeerKey,
     pub req: SubPartitionsRequest,
 }
 

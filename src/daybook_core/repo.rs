@@ -97,6 +97,7 @@ pub struct RepoCtx {
     pub local_user_path: String,
     pub local_device_name: String,
     pub repo_id: String,
+    pub checkout_id: String,
     pub repo_name: String,
 
     pub iroh_public_key: String,
@@ -104,14 +105,31 @@ pub struct RepoCtx {
 }
 
 impl RepoCtx {
-    pub async fn shutdown(&self) -> Res<()> {
-        let stop = self
-            .big_repo_stop
-            .lock()
-            .expect(ERROR_MUTEX)
-            .take()
-            .ok_or_eyre("big repo stop token missing")?;
-        stop.stop().await?;
+    pub async fn shutdown(self: Arc<Self>) -> Res<()> {
+        match Arc::try_unwrap(self) {
+            Ok(self2) => {
+                drop(self2.doc_app);
+                drop(self2.doc_drawer);
+
+                let stop = self2
+                    .big_repo_stop
+                    .lock()
+                    .expect(ERROR_MUTEX)
+                    .take()
+                    .expect("big repo stop token missing, double shutdown!");
+                stop.stop().await?;
+            }
+            Err(self2) => {
+                warn!("someone is still holding on to the RepoCtx, shutdown order bug lurks!");
+                let stop = self2
+                    .big_repo_stop
+                    .lock()
+                    .expect(ERROR_MUTEX)
+                    .take()
+                    .expect("big repo stop token missing, double shutdown!");
+                stop.stop().await?;
+            }
+        }
         Ok(())
     }
 
@@ -119,7 +137,7 @@ impl RepoCtx {
         repo_root: &std::path::Path,
         options: RepoOpenOptions,
         local_device_name: String,
-    ) -> Res<Self> {
+    ) -> Res<Arc<Self>> {
         let layout = repo_layout(repo_root)?;
         let lock_guard = RepoLockGuard::acquire(&layout.lock_path)?;
         if !is_repo_initialized(&layout.repo_root).await? {
@@ -134,15 +152,17 @@ impl RepoCtx {
             database_url: format!("sqlite://{}", layout.sqlite_path.display()),
         })
         .await?;
-        let (repo_id, repo_name, user_id) = tokio::try_join!(
+        let (repo_id, repo_name, user_id, checkout_id) = tokio::try_join!(
             globals::get_string_global(&sql, "global.repo_id"),
             globals::get_string_global(&sql, "global.repo_name"),
             globals::get_string_global(&sql, "global.user_id"),
+            globals::get_string_global(&sql, "global.checkout_id"),
         )?;
         let repo_id = repo_id.ok_or_eyre("missing global from repo: repo_id")?;
         let repo_name = repo_name.ok_or_eyre("missing global from repo: repo_name")?;
         let user_id = user_id.ok_or_eyre("missing global from repo: user_id")?;
-        let identity = crate::secrets::SecretRepo::load_identity(&repo_id)
+        let checkout_id = checkout_id.ok_or_eyre("missing global from repo: checkout_id")?;
+        let identity = crate::secrets::SecretRepo::load_identity(&checkout_id)
             .await?
             .ok_or_eyre("missing secret from keyring")?;
         let UserInfo {
@@ -158,7 +178,7 @@ impl RepoCtx {
             doc_drawer.document_id(),
         )
         .await?;
-        Ok(RepoCtx {
+        Ok(Arc::new(RepoCtx {
             local_peer_key: local_peer_key,
             repo_name: repo_name,
             layout: layout,
@@ -172,10 +192,11 @@ impl RepoCtx {
             local_actor_id: local_actor_id,
             local_user_path: local_user_path,
             repo_id: repo_id,
+            checkout_id: checkout_id,
             iroh_public_key: identity.iroh_public_key.to_string(),
             iroh_secret_key: identity.iroh_secret_key,
             local_device_name: local_device_name,
-        })
+        }))
     }
 
     pub async fn init(
@@ -183,7 +204,7 @@ impl RepoCtx {
         options: RepoOpenOptions,
         repo_name: String,
         local_device_name: String,
-    ) -> Res<Self> {
+    ) -> Res<Arc<Self>> {
         let layout = repo_layout(repo_root)?;
         let lock_guard = RepoLockGuard::acquire(&layout.lock_path)?;
         if is_repo_initialized(&layout.repo_root).await? {
@@ -202,6 +223,11 @@ impl RepoCtx {
             let id = utils_rs::hash::encode_base58_multibase(id);
             format!("drepo_{id}")
         };
+        let checkout_id = {
+            let id = Uuid::new_v4();
+            let id = utils_rs::hash::encode_base58_multibase(id);
+            format!("dcheckout_{id}")
+        };
         let user_id = format!(
             "{}{}",
             daybook_types::doc::user_path::USER_ID_PREFIX,
@@ -209,12 +235,13 @@ impl RepoCtx {
         );
         tokio::try_join!(
             globals::set_string_global(&sql, "global.repo_id", &repo_id),
+            globals::set_string_global(&sql, "global.checkout_id", &checkout_id),
             globals::set_string_global(&sql, "global.repo_name", &repo_name),
             globals::set_string_global(&sql, "global.user_id", &user_id),
         )?;
         let identity = {
             let secret = iroh::SecretKey::generate(&mut rand::rng());
-            crate::secrets::SecretRepo::set_identity(&repo_id, secret).await?
+            crate::secrets::SecretRepo::set_identity(&checkout_id, secret).await?
         };
         let UserInfo {
             local_peer_key,
@@ -239,7 +266,7 @@ impl RepoCtx {
         )
         .await?;
         mark_repo_initialized(&layout.repo_root).await?;
-        Ok(RepoCtx {
+        Ok(Arc::new(RepoCtx {
             local_peer_key: local_peer_key,
             repo_name: repo_name,
             layout: layout,
@@ -253,10 +280,11 @@ impl RepoCtx {
             local_actor_id: local_actor_id,
             local_user_path: local_user_path,
             repo_id: repo_id,
+            checkout_id: checkout_id,
             iroh_public_key: identity.iroh_public_key.to_string(),
             iroh_secret_key: identity.iroh_secret_key,
             local_device_name: local_device_name,
-        })
+        }))
     }
 
     pub(crate) async fn run_repo_init_dance(
@@ -456,7 +484,7 @@ struct UserInfo {
 }
 
 fn compute_user_info(
-    repo_id: &str,
+    _repo_id: &str,
     user_id: &str,
     identity: &crate::secrets::RepoIdentity,
 ) -> UserInfo {
@@ -467,8 +495,7 @@ fn compute_user_info(
         pkey_bs58
     );
     let local_user_path = format!("/{user_id}/{device_id}");
-    let local_peer_key =
-        daybook_types::doc::format_peer_key(repo_id, identity.iroh_public_key.as_bytes());
+    let local_peer_key = daybook_types::doc::format_peer_key(identity.iroh_public_key.as_bytes());
     let local_actor_id = daybook_types::doc::user_path::to_actor_id(
         &daybook_types::doc::UserPath::from(local_user_path.clone()),
     );
@@ -734,13 +761,13 @@ pub mod globals {
     pub async fn set_string_global(sql: &SqlCtx, key: &str, value: &str) -> Res<()> {
         let mut tx = sql.db_pool.begin().await?;
 
-        if let Some(repo_id) =
+        if let Some(existing) =
             sqlx::query_scalar::<_, String>("SELECT value FROM kvstore WHERE key = ?1")
                 .bind(key)
                 .fetch_optional(&mut *tx)
                 .await?
         {
-            eyre::bail!("{key} already set: {repo_id}");
+            eyre::bail!("{key} already set: {existing}");
         }
 
         sqlx::query("INSERT INTO kvstore(key, value) VALUES (?1, ?2)")
@@ -750,6 +777,17 @@ pub mod globals {
             .await?;
 
         tx.commit().await?;
+        Ok(())
+    }
+
+    pub async fn upsert_string_global(sql: &SqlCtx, key: &str, value: &str) -> Res<()> {
+        sqlx::query(
+            "INSERT INTO kvstore(key, value) VALUES (?1, ?2) ON CONFLICT(key) DO UPDATE SET value = excluded.value",
+        )
+        .bind(key)
+        .bind(value)
+        .execute(&sql.db_pool)
+        .await?;
         Ok(())
     }
     const SYNC_CONFIG_KEY: &str = "global.sync_config";

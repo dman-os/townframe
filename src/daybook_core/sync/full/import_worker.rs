@@ -89,7 +89,6 @@ impl ImportSyncWorker {
         let rpc_response = tokio::select! {
             _ = self.cancel_token.cancelled() => return,
             response = rpc_client.rpc(am_utils_rs::repo::rpc::GetDocsFullRpcReq {
-                peer: self.local_peer_key.clone(),
                 req: am_utils_rs::repo::rpc::GetDocsFullRequest {
                     doc_ids: vec![doc_id_string.clone()],
                 },

@@ -44,6 +44,54 @@ impl iroh::protocol::ProtocolHandler for SubductionProtocolHandler {
     }
 }
 
+struct AuthenticatedIrohProtocol<S: irpc::rpc::RemoteService> {
+    tx: tokio::sync::mpsc::Sender<(am_utils_rs::sync::protocol::PeerKey, S::Message)>,
+    peer_key_fn:
+        Arc<dyn Fn(iroh::EndpointId) -> am_utils_rs::sync::protocol::PeerKey + Send + Sync>,
+}
+
+impl<S: irpc::rpc::RemoteService> std::fmt::Debug for AuthenticatedIrohProtocol<S> {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("AuthenticatedIrohProtocol")
+            .field("tx", &self.tx)
+            .finish_non_exhaustive()
+    }
+}
+
+impl<S: irpc::rpc::RemoteService> Clone for AuthenticatedIrohProtocol<S> {
+    fn clone(&self) -> Self {
+        Self {
+            tx: self.tx.clone(),
+            peer_key_fn: Arc::clone(&self.peer_key_fn),
+        }
+    }
+}
+
+impl<S: irpc::rpc::RemoteService + serde::de::DeserializeOwned + Send + 'static>
+    iroh::protocol::ProtocolHandler for AuthenticatedIrohProtocol<S>
+{
+    async fn accept(
+        &self,
+        conn: iroh::endpoint::Connection,
+    ) -> Result<(), iroh::protocol::AcceptError> {
+        let peer_key = (self.peer_key_fn)(conn.remote_id());
+        loop {
+            let msg = match irpc_iroh::read_request::<S>(&conn).await {
+                Ok(Some(msg)) => msg,
+                Ok(None) => break,
+                Err(err) => {
+                    warn!(?err, "error reading request from authenticated connection");
+                    break;
+                }
+            };
+            if self.tx.send((peer_key.clone(), msg)).await.is_err() {
+                break;
+            }
+        }
+        Ok(())
+    }
+}
+
 enum ActivePeerState {
     Connecting,
     Connected {
@@ -66,10 +114,7 @@ pub struct IrohSyncRepo {
     active_peers: tokio::sync::RwLock<HashMap<PeerId, ActivePeerState>>,
     full_sync_handle: full::WorkerHandle,
     sync_store: am_utils_rs::sync::store::SyncStoreHandle,
-    reconnect_task_cancel: CancellationToken,
-    reconnect_task: Arc<tokio::sync::Mutex<Option<JoinHandle<()>>>>,
-    // bootstrap_docs: tokio::sync::Mutex<Vec<iroh_docs::api::Doc>>,
-    // active_endpoint_ids: tokio::sync::RwLock<HashMap<String, ()>>,
+    reconnect_task: Arc<std::sync::Mutex<Option<JoinHandle<()>>>>,
 }
 
 #[derive(Debug, Clone)]
@@ -120,8 +165,8 @@ pub enum IrohSyncEvent {
 pub struct IrohSyncRepoStopToken {
     cancel_token: CancellationToken,
     worker_handle: JoinHandle<()>,
-    reconnect_task_cancel: CancellationToken,
-    reconnect_task: Arc<tokio::sync::Mutex<Option<JoinHandle<()>>>>,
+    full_stop_token: full::StopToken,
+    reconnect_task: Arc<std::sync::Mutex<Option<JoinHandle<()>>>>,
     router: iroh::protocol::Router,
     partition_sync_stop_token: am_utils_rs::sync::node::SyncNodeStopToken,
     repo_rpc_stop_token: am_utils_rs::repo::rpc::RepoRpcStopToken,
@@ -131,8 +176,7 @@ pub struct IrohSyncRepoStopToken {
 impl IrohSyncRepoStopToken {
     pub async fn stop(self) -> Res<()> {
         self.cancel_token.cancel();
-        self.reconnect_task_cancel.cancel();
-        let reconnect_handle = self.reconnect_task.lock().await.take();
+        let reconnect_handle = self.reconnect_task.lock().expect(ERROR_MUTEX).take();
         if let Some(handle) = reconnect_handle {
             utils_rs::wait_on_handle_with_timeout(
                 handle,
@@ -140,20 +184,24 @@ impl IrohSyncRepoStopToken {
             )
             .await?;
         }
+        // pre light the stop signal to the full worker
+        self.full_stop_token.cancel_token.cancel();
         // Worker shutdown drains active repo connections; each connection stop can wait up to 5s.
         utils_rs::wait_on_handle_with_timeout(
             self.worker_handle,
-            utils_rs::scale_timeout(Duration::from_secs(60)),
+            utils_rs::scale_timeout(Duration::from_secs(10)),
         )
         .await?;
+        self.full_stop_token.stop().await?;
         // NOTE: we only add timeouts for stop tokens that don't have internal
         // timeouts
         tokio::time::timeout(
-            utils_rs::scale_timeout(Duration::from_secs(60)),
+            utils_rs::scale_timeout(Duration::from_secs(10)),
             self.router.shutdown(),
         )
         .await
         .map_err(|_| eyre::eyre!("timeout for waiting router shutdown"))??;
+
         self.repo_rpc_stop_token.stop().await?;
         self.partition_sync_stop_token.stop().await?;
 
@@ -183,13 +231,13 @@ impl IrohSyncRepo {
             .spawn(endpoint.clone(), blobs.clone(), gossip.clone())
             .await
             .map_err(|err| ferr!("error booting iroh docs protocol: {err:?}"))?;
+
         let cancel_token = CancellationToken::new();
 
         let (incoming_conn_tx, incoming_conn_rx) = tokio::sync::mpsc::unbounded_channel();
         let (conn_end_tx, conn_end_rx) = tokio::sync::mpsc::unbounded_channel();
         let (clone_rpc_tx, clone_rpc_rx) = tokio::sync::mpsc::channel(128);
-        let reconnect_task_cancel = CancellationToken::new();
-        let reconnect_task = Arc::new(tokio::sync::Mutex::new(None));
+
         let (partition_sync_store, partition_sync_store_stop_token) =
             am_utils_rs::sync::store::spawn_sync_store(rcx.sql.db_pool.clone()).await?;
         let (partition_sync_node, partition_sync_stop_token) =
@@ -213,20 +261,26 @@ impl IrohSyncRepo {
                 SubductionProtocolHandler {
                     big_repo: Arc::clone(&rcx.big_repo),
                     incoming_conn_tx,
-                    end_signal_tx: conn_end_tx.clone()
+                    end_signal_tx: conn_end_tx.clone(),
                 },
             )
             .accept(
                 PARTITION_SYNC_ALPN,
-                irpc_iroh::Iroh0RttProtocol::<am_utils_rs::sync::protocol::PartitionSyncRpc>::with_sender(
-                    partition_sync_node.local_sender(),
-                ),
+                AuthenticatedIrohProtocol::<am_utils_rs::sync::protocol::PartitionSyncRpc> {
+                    tx: partition_sync_node.local_sender(),
+                    peer_key_fn: Arc::new(|endpoint_id| {
+                        daybook_types::doc::format_peer_key(endpoint_id.as_bytes())
+                    }),
+                },
             )
             .accept(
                 REPO_SYNC_ALPN,
-                irpc_iroh::Iroh0RttProtocol::<am_utils_rs::repo::rpc::RepoSyncRpc>::with_sender(
-                    repo_rpc.local_sender(),
-                ),
+                AuthenticatedIrohProtocol::<am_utils_rs::repo::rpc::RepoSyncRpc> {
+                    tx: repo_rpc.local_sender(),
+                    peer_key_fn: Arc::new(|endpoint_id| {
+                        daybook_types::doc::format_peer_key(endpoint_id.as_bytes())
+                    }),
+                },
             )
             .accept(
                 CLONE_PROVISION_ALPN,
@@ -248,7 +302,7 @@ impl IrohSyncRepo {
             .ensure_local_sync_device(router.endpoint().id(), &rcx.local_device_name)
             .await?;
 
-        let (mut full_sync_handle, full_stop_token) = full::start_full_sync_worker(
+        let (mut full_sync_handle, full_stop_token) = full::spawn_full_sync_worker(
             Arc::clone(&rcx),
             Arc::clone(&blobs_repo),
             progress_repo.clone(),
@@ -258,6 +312,7 @@ impl IrohSyncRepo {
         .await?;
         let full_sync_rx = full_sync_handle.events_rx.take().expect("impossible");
 
+        let reconnect_task = default();
         let repo = Arc::new(Self {
             rcx,
             router: router.clone(),
@@ -270,7 +325,6 @@ impl IrohSyncRepo {
             conn_end_signal_tx: conn_end_tx,
             full_sync_handle,
             sync_store: partition_sync_store.clone(),
-            reconnect_task_cancel: reconnect_task_cancel.clone(),
             reconnect_task: Arc::clone(&reconnect_task),
             // bootstrap_docs: tokio::sync::Mutex::new(Vec::new()),
             // active_endpoint_ids: tokio::sync::RwLock::new(HashMap::new()),
@@ -283,17 +337,14 @@ impl IrohSyncRepo {
         let router_for_shutdown = router.clone();
         let worker_handle = tokio::spawn({
             let repo = Arc::clone(&repo);
-            let full_stop_token = full_stop_token;
             async move {
                 let loop_res = repo
                     .machine_loop(full_sync_rx, clone_rpc_rx, incoming_conn_rx, conn_end_rx)
                     .await;
-                let full_stop_res = full_stop_token.stop().await;
                 #[cfg(test)]
                 bootstrap::unregister_test_clone_rpc_sender(router_for_shutdown.endpoint().id())
                     .await;
                 loop_res.unwrap();
-                full_stop_res.unwrap();
             }
             .instrument(tracing::info_span!("IrohSyncRepo listen task"))
         });
@@ -302,8 +353,8 @@ impl IrohSyncRepo {
             repo,
             IrohSyncRepoStopToken {
                 cancel_token,
+                full_stop_token,
                 worker_handle,
-                reconnect_task_cancel,
                 reconnect_task,
                 router,
                 partition_sync_stop_token,
@@ -334,28 +385,30 @@ impl IrohSyncRepo {
     }
 
     async fn spawn_connect_known_devices_once(self: &Arc<Self>, trigger: &'static str) {
-        let mut reconnect_task = self.reconnect_task.lock().await;
+        let Ok(mut reconnect_task) = self.reconnect_task.try_lock() else {
+            // if locked, someone else has already qued an reconnect task or
+            // or we're shutting down
+            return;
+        };
         if let Some(existing) = reconnect_task.as_ref() {
             if !existing.is_finished() {
                 return;
             }
         }
-        if let Some(done) = reconnect_task.take() {
-            let _ = done.await;
-        }
+        // NOTE: we just drop the old handle since we're using
+        // a mutex which we shouldn't hold across await points
+        // if let Some(done) = reconnect_task.take() {
+        //     let _ = done.await;
+        // }
         let repo = Arc::clone(self);
-        let task_cancel = self.reconnect_task_cancel.child_token();
         let handle = tokio::spawn(async move {
-            tokio::select! {
-                _ = task_cancel.cancelled() => {}
-                out = repo.connect_known_devices_once() => {
-                    if let Err(err) = out {
-                        if !repo.cancel_token.is_cancelled() && !task_cancel.is_cancelled() {
-                            warn!(?err, trigger, "known-device reconnect failed");
-                        }
+            let _ = repo.cancel_token.clone().run_until_cancelled(async move {
+                if let Err(err) = repo.connect_known_devices_once().await {
+                    if !repo.cancel_token.is_cancelled() {
+                        warn!(?err, trigger, "known-device reconnect failed");
                     }
                 }
-            }
+            });
         });
         *reconnect_task = Some(handle);
     }
@@ -484,8 +537,7 @@ impl IrohSyncRepo {
         }
         let peer_id = conn.peer_id;
         let res = async {
-            let peer_key =
-                daybook_types::doc::format_peer_key(&self.rcx.repo_id, conn.peer_id.as_bytes());
+            let peer_key = daybook_types::doc::format_peer_key(conn.peer_id.as_bytes());
             let events = [IrohSyncEvent::IncomingConnection {
                 peer_key: Arc::clone(&peer_key),
             }];
@@ -567,8 +619,7 @@ impl IrohSyncRepo {
     ) -> Res<bootstrap::CloneProvisionResponse> {
         let endpoint_id = iroh::PublicKey::from_str(&req.requester_endpoint_id)
             .wrap_err("invalid requester_endpoint_id in clone provision request")?;
-        let requester_peer_key =
-            daybook_types::doc::format_peer_key(&self.rcx.repo_id, endpoint_id.as_bytes());
+        let requester_peer_key = daybook_types::doc::format_peer_key(endpoint_id.as_bytes());
         self.sync_store.allow_peer(requester_peer_key).await?;
         let endpoint_addr = self.router.endpoint().addr();
         let device_name = req
@@ -657,8 +708,7 @@ impl IrohSyncRepo {
             return Ok(());
         }
         let res = async {
-            let peer_key =
-                daybook_types::doc::format_peer_key(&self.rcx.repo_id, endpoint_id.as_bytes());
+            let peer_key = daybook_types::doc::format_peer_key(endpoint_id.as_bytes());
             let events = [IrohSyncEvent::OutgoingConnection {
                 peer_key: Arc::clone(&peer_key),
             }];
@@ -864,7 +914,7 @@ mod tests {
         _plugs_repo: Arc<PlugsRepo>,
         plugs_stop: crate::repos::RepoStopToken,
         config_stop: crate::repos::RepoStopToken,
-        doc_blobs_index_stop: crate::index::DocBlobsIndexStopToken,
+        doc_blobs_index_stop: crate::repos::RepoStopToken,
         sqlite_local_state_stop: crate::repos::RepoStopToken,
         doc_blobs_bridge_cancel: CancellationToken,
         doc_blobs_bridge_handle: Option<JoinHandle<()>>,
@@ -874,6 +924,17 @@ mod tests {
 
     impl SyncTestNode {
         async fn stop(mut self) -> Res<()> {
+            // NOTE: do early cancellation before
+            // waiting on actual stops
+            self.sync_stop.cancel_token.cancel();
+            self.progress_stop.cancel_token.cancel();
+            self.doc_blobs_bridge_cancel.cancel();
+            self.doc_blobs_index_stop.cancel_token.cancel();
+            self.sqlite_local_state_stop.cancel_token.cancel();
+            self.config_stop.cancel_token.cancel();
+            self.drawer_stop.cancel_token.cancel();
+            self.plugs_stop.cancel_token.cancel();
+
             tokio::time::timeout(
                 utils_rs::scale_timeout(Duration::from_secs(30)),
                 self.sync_stop.stop(),
@@ -886,7 +947,6 @@ mod tests {
             )
             .await
             .map_err(|_| eyre::eyre!("timeout waiting progress stop"))??;
-            self.doc_blobs_bridge_cancel.cancel();
             if let Some(handle) = self.doc_blobs_bridge_handle.take() {
                 tokio::time::timeout(
                     utils_rs::scale_timeout(Duration::from_secs(5)),
@@ -941,7 +1001,6 @@ mod tests {
     #[tokio::test(flavor = "multi_thread")]
     async fn iroh_sync_between_copied_repos() -> Res<()> {
         utils_rs::testing::setup_tracing_once();
-        std::env::set_var("DAYB_DISABLE_KEYRING", "1");
         let temp_root = tempfile::tempdir()?;
         let repo_a_path = temp_root.path().join("repo-a");
         let repo_b_path = temp_root.path().join("repo-b");
@@ -988,7 +1047,6 @@ mod tests {
     #[tokio::test(flavor = "multi_thread")]
     async fn iroh_live_sync_bidirectional_after_clone() -> Res<()> {
         utils_rs::testing::setup_tracing_once();
-        std::env::set_var("DAYB_DISABLE_KEYRING", "1");
         let temp_root = tempfile::tempdir()?;
         let repo_a_path = temp_root.path().join("repo-a");
         let repo_b_path = temp_root.path().join("repo-b");
@@ -1040,7 +1098,6 @@ mod tests {
     #[tokio::test(flavor = "multi_thread")]
     async fn iroh_live_sync_propagates_repeated_doc_updates() -> Res<()> {
         utils_rs::testing::setup_tracing_once();
-        std::env::set_var("DAYB_DISABLE_KEYRING", "1");
         let temp_root = tempfile::tempdir()?;
         let repo_a_path = temp_root.path().join("repo-a");
         let repo_b_path = temp_root.path().join("repo-b");
@@ -1055,7 +1112,6 @@ mod tests {
         )
         .await?;
         rtx.shutdown().await?;
-        drop(rtx);
 
         let seed_node = open_sync_node(&repo_a_path).await?;
         let ticket = seed_node.sync_repo.get_clone_ticket_url().await?;
@@ -1127,7 +1183,6 @@ mod tests {
     #[tokio::test(flavor = "multi_thread")]
     async fn cloned_repo_registers_core_docs_partition_on_open() -> Res<()> {
         utils_rs::testing::setup_tracing_once();
-        std::env::set_var("DAYB_DISABLE_KEYRING", "1");
         let temp_root = tempfile::tempdir()?;
         let repo_a_path = temp_root.path().join("repo-a");
         let repo_b_path = temp_root.path().join("repo-b");
@@ -1142,7 +1197,6 @@ mod tests {
         )
         .await?;
         rtx.shutdown().await?;
-        drop(rtx);
 
         let node_a = open_sync_node(&repo_a_path).await?;
         let created_doc_id = node_a
@@ -1187,7 +1241,6 @@ mod tests {
     #[tokio::test(flavor = "multi_thread")]
     async fn bootstrap_ticket_in_tests_omits_relay_addresses() -> Res<()> {
         utils_rs::testing::setup_tracing_once();
-        std::env::set_var("DAYB_DISABLE_KEYRING", "1");
         let temp_root = tempfile::tempdir()?;
         let repo_path = temp_root.path().join("repo-a");
         tokio::fs::create_dir_all(&repo_path).await?;
@@ -1201,7 +1254,6 @@ mod tests {
         )
         .await?;
         rtx.shutdown().await?;
-        drop(rtx);
 
         let node = open_sync_node(&repo_path).await?;
         let ticket = node.sync_repo.get_clone_ticket_url().await?;
@@ -1214,7 +1266,6 @@ mod tests {
     #[tokio::test(flavor = "multi_thread")]
     async fn iroh_clone_sync_batch_100_docs_with_blobs() -> Res<()> {
         utils_rs::testing::setup_tracing_once();
-        std::env::set_var("DAYB_DISABLE_KEYRING", "1");
         let temp_root = tempfile::tempdir()?;
         let repo_a_path = temp_root.path().join("repo-a");
         let repo_b_path = temp_root.path().join("repo-b");
@@ -1267,7 +1318,6 @@ mod tests {
     #[tokio::test(flavor = "multi_thread")]
     async fn iroh_blob_sync_validates_bytes() -> Res<()> {
         utils_rs::testing::setup_tracing_once();
-        std::env::set_var("DAYB_DISABLE_KEYRING", "1");
         let temp_root = tempfile::tempdir()?;
         let repo_a_path = temp_root.path().join("repo-a");
         let repo_b_path = temp_root.path().join("repo-b");
@@ -1324,7 +1374,6 @@ mod tests {
     #[tokio::test(flavor = "multi_thread")]
     async fn iroh_sync_after_bootstrap_clone_converges() -> Res<()> {
         utils_rs::testing::setup_tracing_once();
-        std::env::set_var("DAYB_DISABLE_KEYRING", "1");
         let temp_root = tempfile::tempdir()?;
         let repo_a_path = temp_root.path().join("repo-a");
         let repo_b_path = temp_root.path().join("repo-b");
@@ -1339,7 +1388,6 @@ mod tests {
         )
         .await?;
         rtx.shutdown().await?;
-        drop(rtx);
 
         let node_a = open_sync_node(&repo_a_path).await?;
         let mut created_doc_ids = Vec::new();
@@ -1491,7 +1539,6 @@ mod tests {
                 .await?
                 .ok_or_eyre("source repo user_id missing")?;
         rtx.shutdown().await?;
-        drop(rtx);
         force_delete_journal_mode(&repo_a_path.join("sqlite.db")).await?;
         force_delete_journal_mode(&repo_a_path.join("samod").join("big_repo.sqlite")).await?;
 
@@ -1500,12 +1547,23 @@ mod tests {
             database_url: format!("sqlite://{}", repo_b_path.join("sqlite.db").display()),
         })
         .await?;
-        crate::repo::globals::set_string_global(&repo_b_sql, "global.repo_id", &source_repo_id)
+        crate::repo::globals::upsert_string_global(&repo_b_sql, "global.repo_id", &source_repo_id)
             .await?;
-        crate::repo::globals::set_string_global(
+        crate::repo::globals::upsert_string_global(
             &repo_b_sql,
             "global.user_id",
             &source_repo_user_id,
+        )
+        .await?;
+        let repo_b_checkout_id = {
+            let id = Uuid::new_v4();
+            let id = utils_rs::hash::encode_base58_multibase(id);
+            format!("dcheckout_{id}")
+        };
+        crate::repo::globals::upsert_string_global(
+            &repo_b_sql,
+            "global.checkout_id",
+            &repo_b_checkout_id,
         )
         .await?;
         let repo_b_repo_id = crate::repo::globals::get_string_global(&repo_b_sql, "global.repo_id")
@@ -1519,7 +1577,7 @@ mod tests {
             );
         }
         crate::secrets::SecretRepo::set_identity(
-            &source_repo_id,
+            &repo_b_checkout_id,
             iroh::SecretKey::generate(&mut rand::rng()),
         )
         .await?;
@@ -1542,8 +1600,7 @@ mod tests {
     }
 
     async fn open_sync_node(repo_root: &std::path::Path) -> Res<SyncTestNode> {
-        let rtx =
-            Arc::new(RepoCtx::open(repo_root, RepoOpenOptions {}, "test-device".into()).await?);
+        let rtx = RepoCtx::open(repo_root, RepoOpenOptions {}, "test-device".into()).await?;
         let blobs_repo = BlobsRepo::new(
             rtx.layout.blobs_root.clone(),
             rtx.local_user_path.clone(),
@@ -1794,7 +1851,6 @@ mod tests {
     #[tokio::test(flavor = "multi_thread")]
     async fn wait_for_full_sync_succeeds_after_event_was_already_emitted() -> Res<()> {
         utils_rs::testing::setup_tracing_once();
-        std::env::set_var("DAYB_DISABLE_KEYRING", "1");
 
         let temp_root = tempfile::tempdir()?;
         let repo_a_path = temp_root.path().join("repo-a");
@@ -1976,7 +2032,6 @@ mod tests {
     #[tokio::test(flavor = "multi_thread")]
     async fn wait_for_blob_bytes_retries_until_blob_arrives() -> Res<()> {
         utils_rs::testing::setup_tracing_once();
-        std::env::set_var("DAYB_DISABLE_KEYRING", "1");
 
         let temp_root = tempfile::tempdir()?;
         let blobs_repo = BlobsRepo::new(

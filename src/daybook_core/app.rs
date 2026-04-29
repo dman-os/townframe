@@ -119,7 +119,7 @@ impl AppCtx {
         options: crate::repo::RepoOpenOptions,
         repo_name: String,
         local_device_name: String,
-    ) -> Res<RepoCtx> {
+    ) -> Res<Arc<RepoCtx>> {
         let rcx = RepoCtx::init(repo_root, options, repo_name, local_device_name).await?;
         if let Err(err) = crate::app::globals::upsert_known_repo(&self.sql.db_pool, &rcx).await {
             let _ = rcx.shutdown().await;
@@ -133,7 +133,7 @@ impl AppCtx {
         repo_root: &std::path::Path,
         options: crate::repo::RepoOpenOptions,
         local_device_name: String,
-    ) -> Res<RepoCtx> {
+    ) -> Res<Arc<RepoCtx>> {
         let rcx = RepoCtx::open(repo_root, options, local_device_name).await?;
         if let Err(err) = crate::app::globals::upsert_known_repo(&self.sql.db_pool, &rcx).await {
             let _ = rcx.shutdown().await;
@@ -197,6 +197,7 @@ pub mod globals {
     #[cfg_attr(feature = "uniffi", derive(uniffi::Record))]
     pub struct KnownRepoEntry {
         pub id: String,
+        pub checkout_id: String,
         #[serde(default)]
         pub name: String,
         pub path: String,
@@ -227,6 +228,7 @@ pub mod globals {
 
         let repo = KnownRepoEntry {
             id: repo_path.clone(),
+            checkout_id: rcx.checkout_id.clone(),
             name: rcx.repo_name.clone(),
             path: repo_path,
             created_at_unix_secs: now_unix_secs,

@@ -11,8 +11,8 @@ pub struct SecretRepo;
 impl SecretRepo {
     const KEYRING_USERNAME: &'static str = "iroh_secret_key_v1";
 
-    pub async fn load_identity(repo_id: &str) -> Res<Option<RepoIdentity>> {
-        let service_name = format!("daybook.repo.{repo_id}");
+    pub async fn load_identity(checkout_id: &str) -> Res<Option<RepoIdentity>> {
+        let service_name = format!("daybook.checkout.{checkout_id}");
         tokio::task::spawn_blocking(move || {
             let entry =
                 keyring::Entry::new(&service_name, Self::KEYRING_USERNAME).wrap_err_with(|| {
@@ -43,8 +43,8 @@ impl SecretRepo {
         .expect(ERROR_TOKIO)
     }
 
-    pub async fn set_identity(repo_id: &str, secret: iroh::SecretKey) -> Res<RepoIdentity> {
-        let service_name = format!("daybook.repo.{repo_id}");
+    pub async fn set_identity(checkout_id: &str, secret: iroh::SecretKey) -> Res<RepoIdentity> {
+        let service_name = format!("daybook.checkout.{checkout_id}");
         tokio::task::spawn_blocking(move || {
             let entry =
                 keyring::Entry::new(&service_name, Self::KEYRING_USERNAME).wrap_err_with(|| {

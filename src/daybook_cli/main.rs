@@ -1030,7 +1030,7 @@ mod tests {
         plugs_stop: daybook_core::repos::RepoStopToken,
         drawer_stop: daybook_core::repos::RepoStopToken,
         config_stop: daybook_core::repos::RepoStopToken,
-        doc_blobs_index_stop: daybook_core::index::doc_blobs::DocBlobsIndexStopToken,
+        doc_blobs_index_stop: daybook_core::repos::RepoStopToken,
         sqlite_local_state_stop: RepoStopToken,
     }
 
@@ -1054,8 +1054,7 @@ mod tests {
     }
 
     async fn open_cli_sync_node(repo_root: &std::path::Path) -> Res<CliSyncNode> {
-        let ctx =
-            Arc::new(RepoCtx::open(repo_root, RepoOpenOptions {}, "cli-test-device".into()).await?);
+        let ctx = RepoCtx::open(repo_root, RepoOpenOptions {}, "cli-test-device".into()).await?;
         let blobs_repo = BlobsRepo::new(
             ctx.layout.blobs_root.clone(),
             ctx.local_user_path.clone(),
@@ -1128,7 +1127,6 @@ mod tests {
     #[tokio::test(flavor = "multi_thread")]
     async fn cli_clone_and_wait_until_synced_smoke() -> Res<()> {
         utils_rs::testing::setup_tracing_once();
-        std::env::set_var("DAYB_DISABLE_KEYRING", "1");
         let temp_root = std::env::temp_dir().join(format!(
             "daybook-cli-sync-test-{}-{}",
             std::process::id(),

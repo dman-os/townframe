@@ -74,6 +74,10 @@ Feel free to throw yourself or tokens at the code though I'd personally apprecia
   - The source files and `Cargo.toml` should reside in the same root.
   - Avoid deeply nested directory hierarchies.
 - Are you importing that type in too many files? Consider putting it in the `interlude` module of the crate.
+  - `utils_rs` provides a prelude that exports a lot of common things expected to go into other crate `interlude`s.
+    - `Res`, an alias for `eyre::Result` for generic errors.
+    - `ferr!`, an alias of `eyre::eyre!` for quick error messages.
+    - Instead of `unwrap` or generic, usless messages for `expect` or `ferr!` like "xxx channel was closed", prefer the common expect_tags consts seen in the `mod expect_tags` contained in `./src/utils_rs/lib.rs` like `ERROR_CHANNEL`, `ERROR_JSON`, `ERROR_IMPOSSIBLE` (for unreachable cases).
 - Don't use single char variable names, they make harder to use `sed` for replacement.
 - DHashMaps shouldn't not be used for sync across tasks/threads. 
   - They easily deadlock if modified across multiple tasks.

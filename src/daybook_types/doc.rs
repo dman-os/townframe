@@ -344,9 +344,9 @@ pub type FacetBlame = HashMap<FacetKey, DocUserId>;
 
 pub type UserPath = camino::Utf8PathBuf;
 pub type BranchPath = camino::Utf8PathBuf;
-pub fn format_peer_key(repo_id: &str, pubkey: &[u8; 32]) -> Arc<str> {
+pub fn format_peer_key(pubkey: &[u8; 32]) -> Arc<str> {
     let pkey_bs58 = utils_rs::hash::encode_base58_multibase(pubkey);
-    format!("/{repo_id}/{pkey_bs58}").into()
+    format!("dnode-iroh-{pkey_bs58}").into()
 }
 
 pub mod user_path {

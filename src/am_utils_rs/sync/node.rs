@@ -9,16 +9,11 @@ use irpc::WithChannels;
 use tokio_util::sync::CancellationToken;
 
 pub struct SyncNodeHandle {
-    rpc_tx: tokio::sync::mpsc::Sender<PartitionSyncRpcMessage>,
-    rpc_client: irpc::Client<PartitionSyncRpc>,
+    rpc_tx: tokio::sync::mpsc::Sender<(PeerKey, PartitionSyncRpcMessage)>,
 }
 
 impl SyncNodeHandle {
-    pub fn rpc_client(&self) -> irpc::Client<PartitionSyncRpc> {
-        self.rpc_client.clone()
-    }
-
-    pub fn local_sender(&self) -> tokio::sync::mpsc::Sender<PartitionSyncRpcMessage> {
+    pub fn local_sender(&self) -> tokio::sync::mpsc::Sender<(PeerKey, PartitionSyncRpcMessage)> {
         self.rpc_tx.clone()
     }
 }
@@ -48,7 +43,6 @@ pub async fn spawn_sync_node(
     access_policy: Arc<dyn PartitionAccessPolicy>,
 ) -> Res<(SyncNodeHandle, SyncNodeStopToken)> {
     let (rpc_tx, mut rpc_rx) = tokio::sync::mpsc::channel(1024);
-    let rpc_client = irpc::Client::<PartitionSyncRpc>::local(rpc_tx.clone());
 
     let cancel_token = CancellationToken::new();
     let subscription_tasks = Arc::new(utils_rs::AbortableJoinSet::new());
@@ -68,10 +62,10 @@ pub async fn spawn_sync_node(
                     biased;
                     _ = cancel_token.cancelled() => break,
                     msg = rpc_rx.recv() => {
-                        let Some(msg) = msg else {
+                        let Some((peer, msg)) = msg else {
                             break;
                         };
-                        worker.handle_rpc_message(msg).await;
+                        worker.handle_rpc_message(peer, msg).await;
                     }
                 }
             }
@@ -80,7 +74,7 @@ pub async fn spawn_sync_node(
     };
     let join_handle = tokio::spawn(async { fut.await.unwrap() });
     Ok((
-        SyncNodeHandle { rpc_tx, rpc_client },
+        SyncNodeHandle { rpc_tx },
         SyncNodeStopToken {
             cancel_token,
             subscription_tasks,
@@ -98,12 +92,11 @@ struct SyncNodeWorker {
 }
 
 impl SyncNodeWorker {
-    #[tracing::instrument(skip(self))]
-    async fn handle_rpc_message(&mut self, msg: PartitionSyncRpcMessage) {
+    #[tracing::instrument(skip(self, msg))]
+    async fn handle_rpc_message(&mut self, peer: PeerKey, msg: PartitionSyncRpcMessage) {
         match msg {
             PartitionSyncRpcMessage::ListPartitions(req) => {
-                let WithChannels { inner, tx, .. } = req;
-                let ListPartitionsRpcReq { peer } = inner;
+                let WithChannels { inner: _, tx, .. } = req;
                 let out = (async {
                     self.ensure_known_peer(&peer).await?;
                     let mut partitions = self
@@ -122,13 +115,12 @@ impl SyncNodeWorker {
             }
             PartitionSyncRpcMessage::GetPartitionMemberEvents(req) => {
                 let WithChannels { inner, tx, .. } = req;
-                let GetPartitionMemberEventsRpcReq { peer, req } = inner;
                 let out = (async {
                     self.ensure_known_peer(&peer).await?;
-                    self.ensure_partition_access(&peer, &req.partitions)?;
+                    self.ensure_partition_access(&peer, &inner.req.partitions)?;
                     let out = self
                         .partition_store
-                        .get_partition_member_events_for_peer(&peer, &req)
+                        .get_partition_member_events_for_peer(&peer, &inner.req)
                         .await
                         .map_err(map_repo_err)?;
                     Ok::<_, PartitionSyncError>(GetPartitionMemberEventsResponse {
@@ -141,13 +133,12 @@ impl SyncNodeWorker {
             }
             PartitionSyncRpcMessage::GetPartitionDocEvents(req) => {
                 let WithChannels { inner, tx, .. } = req;
-                let GetPartitionDocEventsRpcReq { peer, req } = inner;
                 let out = (async {
                     self.ensure_known_peer(&peer).await?;
-                    self.ensure_partition_access(&peer, &req.partitions)?;
+                    self.ensure_partition_access(&peer, &inner.req.partitions)?;
                     let out = self
                         .partition_store
-                        .get_partition_doc_events_for_peer(&peer, &req)
+                        .get_partition_doc_events_for_peer(&peer, &inner.req)
                         .await
                         .map_err(map_repo_err)?;
                     Ok::<_, PartitionSyncError>(GetPartitionDocEventsResponse {
@@ -160,10 +151,9 @@ impl SyncNodeWorker {
             }
             PartitionSyncRpcMessage::SubPartitions(req) => {
                 let WithChannels { inner, tx, .. } = req;
-                let SubPartitionsRpcReq { peer, req } = inner;
                 let maybe_sub = (async {
                     self.ensure_known_peer(&peer).await?;
-                    for part in &req.partitions {
+                    for part in &inner.req.partitions {
                         if !self
                             .access_policy
                             .can_access_partition(&peer, &part.partition_id)
@@ -176,7 +166,7 @@ impl SyncNodeWorker {
                     self.partition_store
                         .subscribe_partition_events_for_peer(
                             &peer,
-                            &req,
+                            &inner.req,
                             DEFAULT_SUBSCRIPTION_CAPACITY,
                         )
                         .await

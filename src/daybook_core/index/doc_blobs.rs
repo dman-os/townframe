@@ -54,27 +54,12 @@ impl Repo for DocBlobsIndexRepo {
     }
 }
 
-pub struct DocBlobsIndexStopToken {
-    cancel_token: CancellationToken,
-    worker_handle: Option<tokio::task::JoinHandle<()>>,
-}
-
-impl DocBlobsIndexStopToken {
-    pub async fn stop(mut self) -> Res<()> {
-        self.cancel_token.cancel();
-        if let Some(handle) = self.worker_handle.take() {
-            utils_rs::wait_on_handle_with_timeout(handle, Duration::from_secs(2)).await?;
-        }
-        Ok(())
-    }
-}
-
 impl DocBlobsIndexRepo {
     pub async fn boot(
         drawer_repo: Arc<DrawerRepo>,
         blobs_repo: Arc<BlobsRepo>,
         sqlite_local_state_repo: Arc<crate::local_state::SqliteLocalStateRepo>,
-    ) -> Res<(Arc<Self>, DocBlobsIndexStopToken)> {
+    ) -> Res<(Arc<Self>, crate::repos::RepoStopToken)> {
         let (_sqlite_file_path, db_pool) = sqlite_local_state_repo
             .ensure_sqlite_pool(DOC_BLOBS_LOCAL_STATE_ID)
             .await?;
@@ -115,7 +100,7 @@ impl DocBlobsIndexRepo {
 
         Ok((
             repo,
-            DocBlobsIndexStopToken {
+            crate::repos::RepoStopToken {
                 cancel_token,
                 worker_handle: Some(worker_handle),
             },
@@ -726,14 +711,14 @@ impl DocBlobsIndexRepo {
                 branch_path,
                 heads,
             })
-            .map_err(|err| ferr!("doc_blobs_index work queue closed: {err}"))?;
+            .wrap_err(ERROR_ACTOR)?;
         Ok(())
     }
 
     pub fn enqueue_delete(&self, doc_id: DocId) -> Res<()> {
         self.work_tx
             .send(DocBlobsIndexWorkItem::DeleteDoc { doc_id })
-            .map_err(|err| ferr!("doc_blobs_index work queue closed: {err}"))?;
+            .wrap_err(ERROR_ACTOR)?;
         Ok(())
     }
 
@@ -747,7 +732,7 @@ impl DocBlobsIndexRepo {
                 doc_id,
                 branch_paths,
             })
-            .map_err(|err| ferr!("doc_blobs_index work queue closed: {err}"))?;
+            .wrap_err(ERROR_ACTOR)?;
         Ok(())
     }
 
@@ -1005,7 +990,7 @@ mod tests {
         let evt = listener
             .recv_async()
             .await
-            .map_err(|err| ferr!("listener recv failed: {err:?}"))?;
+            .map_err(|_| ferr!(ERROR_CHANNEL))?;
         assert!(
             matches!(
                 &*evt,
