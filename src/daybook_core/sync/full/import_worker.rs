@@ -1,14 +1,15 @@
 use super::*;
 
 pub(super) struct ImportSyncWorkerStopToken {
-    cancel_token: CancellationToken,
-    join_handle: tokio::task::JoinHandle<()>,
+    task_handle: utils_rs::TaskHandle,
 }
 
 impl ImportSyncWorkerStopToken {
     pub async fn stop(self) -> Res<()> {
-        self.cancel_token.cancel();
-        utils_rs::wait_on_handle_with_timeout(self.join_handle, Duration::from_secs(2)).await?;
+        self.task_handle.abort();
+        tokio::time::timeout(Duration::from_secs(2), self.task_handle.join())
+            .await
+            .ok();
         Ok(())
     }
 }
@@ -25,23 +26,20 @@ pub(super) struct ImportSyncTarget {
     pub peer_id: PeerId,
 }
 
-#[allow(clippy::too_many_arguments)]
 pub(super) fn spawn_import_sync_worker(
     doc_id: DocumentId,
     target: ImportSyncTarget,
     local_peer_key: PeerKey,
-    cancel_token: CancellationToken,
     msg_tx: mpsc::UnboundedSender<Msg>,
     big_repo: SharedBigRepo,
     iroh_endpoint: iroh::Endpoint,
     retry: RetryState,
+    task_set: &utils_rs::AbortableJoinSet,
 ) -> Res<ImportSyncWorkerStopToken> {
-    let stop_cancel_token = cancel_token.clone();
     let worker = ImportSyncWorker {
         doc_id,
         target,
         local_peer_key,
-        cancel_token,
         msg_tx,
         big_repo,
         iroh_endpoint,
@@ -49,24 +47,18 @@ pub(super) fn spawn_import_sync_worker(
     };
     let fut = async move {
         worker.run().await;
-    };
-    let join_handle = tokio::spawn(
-        async move {
-            fut.await;
-        }
-        .instrument(tracing::info_span!("ImportSyncWorker task")),
-    );
-    Ok(ImportSyncWorkerStopToken {
-        cancel_token: stop_cancel_token,
-        join_handle,
-    })
+    }
+    .instrument(tracing::info_span!("ImportSyncWorker task"));
+    let task_handle = task_set
+        .spawn(fut)
+        .map_err(|_| ferr!("task set aborted"))?;
+    Ok(ImportSyncWorkerStopToken { task_handle })
 }
 
 struct ImportSyncWorker {
     doc_id: DocumentId,
     target: ImportSyncTarget,
     local_peer_key: PeerKey,
-    cancel_token: CancellationToken,
     msg_tx: mpsc::UnboundedSender<Msg>,
     big_repo: SharedBigRepo,
     iroh_endpoint: iroh::Endpoint,
@@ -86,14 +78,13 @@ impl ImportSyncWorker {
             iroh::EndpointAddr::new(target.peer_id.into()),
             REPO_SYNC_ALPN,
         );
-        let rpc_response = tokio::select! {
-            _ = self.cancel_token.cancelled() => return,
-            response = rpc_client.rpc(am_utils_rs::repo::rpc::GetDocsFullRpcReq {
+        let rpc_response = rpc_client
+            .rpc(am_utils_rs::repo::rpc::GetDocsFullRpcReq {
                 req: am_utils_rs::repo::rpc::GetDocsFullRequest {
                     doc_ids: vec![doc_id_string.clone()],
                 },
-            }) => response,
-        };
+            })
+            .await;
         let response = match rpc_response {
             Ok(Ok(response)) => response,
             Ok(Err(err)) => {
@@ -165,7 +156,7 @@ impl ImportSyncWorker {
                 peer_id: self.target.peer_id,
                 outcome,
             })
-            .expect("FullSyncWorker went down without cleaning import worker");
+            .ok();
     }
 
     fn request_backoff(&self, delay: Duration) {
@@ -178,6 +169,6 @@ impl ImportSyncWorker {
                 previous_backoff: self.retry.last_backoff,
                 previous_attempt_at: self.retry.last_attempt_at,
             })
-            .expect("FullSyncWorker went down without cleaning import worker");
+            .ok();
     }
 }

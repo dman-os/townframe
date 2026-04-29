@@ -1,4 +1,5 @@
 use crate::interlude::*;
+use daybook_types::doc::BranchPath;
 use daybook_types::doc::{self as root_doc};
 
 fn wasmtime_err(msg: impl std::fmt::Display) -> wasmtime::Error {
@@ -383,7 +384,7 @@ impl DaybookPlugin {
     async fn get_doc(
         &self,
         doc_id: &DocId,
-        branch_path: &daybook_types::doc::BranchPath,
+        branch_path: &daybook_types::doc::BranchPathBuf,
         heads: &ChangeHashSet,
     ) -> Res<Option<Arc<daybook_types::doc::Doc>>> {
         self.drawer_repo
@@ -393,7 +394,7 @@ impl DaybookPlugin {
 
     async fn patch_doc(
         &self,
-        branch_path: daybook_types::doc::BranchPath,
+        branch_path: &BranchPath,
         heads: Option<ChangeHashSet>,
         patch: root_doc::DocPatch,
     ) -> Result<(), crate::drawer::types::DrawerError> {
@@ -618,11 +619,7 @@ impl drawer::Host for SharedWashCtx {
 
         let plugin = DaybookPlugin::from_ctx(self);
         match plugin
-            .patch_doc(
-                daybook_types::doc::BranchPath::from(branch_path),
-                heads,
-                patch,
-            )
+            .patch_doc(BranchPath::new(&branch_path), heads, patch)
             .await
         {
             Ok(_) => Ok(Ok(())),
@@ -801,8 +798,8 @@ impl facet_routine::Host for SharedWashCtx {
                     let token = self.table.push(caps::FacetTokenRw {
                         doc_id: config_doc_id.clone(),
                         heads: config_heads.clone(),
-                        branch_path: daybook_types::doc::BranchPath::from("main"),
-                        target_branch_path: daybook_types::doc::BranchPath::from("main"),
+                        branch_path: daybook_types::doc::BranchPathBuf::from("main"),
+                        target_branch_path: daybook_types::doc::BranchPathBuf::from("main"),
                         facet_key: config_facet_key.clone(),
                         facet_acl: vec![],
                     })?;
@@ -810,7 +807,7 @@ impl facet_routine::Host for SharedWashCtx {
                 } else if access.read {
                     let token = self.table.push(caps::FacetTokenRo {
                         doc_id: config_doc_id.clone(),
-                        branch_path: daybook_types::doc::BranchPath::from("main"),
+                        branch_path: daybook_types::doc::BranchPathBuf::from("main"),
                         heads: config_heads.clone(),
                         facet_key: config_facet_key.clone(),
                     })?;

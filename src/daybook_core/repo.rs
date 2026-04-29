@@ -3,18 +3,20 @@ use crate::interlude::*;
 use crate::app::*;
 
 use am_utils_rs::partition::PartitionStore;
+use am_utils_rs::repo::BigDocHandle;
+use daybook_types::doc::{UserPath, UserPathBuf};
 use fs4::fs_std::FileExt;
 
 const REPO_MARKER_FILE: &str = "db.repo.txt";
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct RepoLayout {
-    pub repo_root: std::path::PathBuf,
-    pub samod_root: std::path::PathBuf,
-    pub sqlite_path: std::path::PathBuf,
-    pub blobs_root: std::path::PathBuf,
-    pub marker_path: std::path::PathBuf,
-    pub lock_path: std::path::PathBuf,
+    pub repo_root: PathBuf,
+    pub samod_root: PathBuf,
+    pub sqlite_path: PathBuf,
+    pub blobs_root: PathBuf,
+    pub marker_path: PathBuf,
+    pub lock_path: PathBuf,
 }
 
 #[derive(Debug, Clone, Default)]
@@ -28,7 +30,7 @@ struct RepoLockInfo {
 
 pub struct RepoLockGuard {
     _file: std::fs::File,
-    _path: std::path::PathBuf,
+    _path: PathBuf,
 }
 
 impl RepoLockGuard {
@@ -89,12 +91,12 @@ pub struct RepoCtx {
     pub big_repo: SharedBigRepo,
     big_repo_stop: std::sync::Mutex<Option<am_utils_rs::BigRepoStopToken>>,
 
-    pub doc_app: am_utils_rs::repo::BigDocHandle,
-    pub doc_drawer: am_utils_rs::repo::BigDocHandle,
+    pub doc_app: BigDocHandle,
+    pub doc_drawer: BigDocHandle,
 
     pub local_peer_key: am_utils_rs::sync::protocol::PeerKey,
     pub local_actor_id: automerge::ActorId,
-    pub local_user_path: String,
+    pub local_user_path: UserPathBuf,
     pub local_device_name: String,
     pub repo_id: String,
     pub checkout_id: String,
@@ -190,7 +192,7 @@ impl RepoCtx {
             doc_app: doc_app,
             doc_drawer: doc_drawer,
             local_actor_id: local_actor_id,
-            local_user_path: local_user_path,
+            local_user_path,
             repo_id: repo_id,
             checkout_id: checkout_id,
             iroh_public_key: identity.iroh_public_key.to_string(),
@@ -278,7 +280,7 @@ impl RepoCtx {
             doc_app: doc_app,
             doc_drawer: doc_drawer,
             local_actor_id: local_actor_id,
-            local_user_path: local_user_path,
+            local_user_path,
             repo_id: repo_id,
             checkout_id: checkout_id,
             iroh_public_key: identity.iroh_public_key.to_string(),
@@ -287,13 +289,13 @@ impl RepoCtx {
         }))
     }
 
-    pub(crate) async fn run_repo_init_dance(
+    async fn run_repo_init_dance(
         big_repo: &SharedBigRepo,
-        doc_app: &am_utils_rs::repo::BigDocHandle,
-        doc_drawer: &am_utils_rs::repo::BigDocHandle,
-        local_user_path: &str,
+        doc_app: &BigDocHandle,
+        doc_drawer: &BigDocHandle,
+        local_user_path: &UserPath,
         sql: &SqlCtx,
-        blobs_root: std::path::PathBuf,
+        blobs_root: PathBuf,
     ) -> Res<()> {
         use crate::blobs::BlobsRepo;
         use crate::config::ConfigRepo;
@@ -304,7 +306,7 @@ impl RepoCtx {
 
         let blobs_repo = BlobsRepo::new(
             blobs_root.clone(),
-            local_user_path.to_string(),
+            local_user_path.to_owned(),
             Arc::new(crate::blobs::PartitionStoreMembershipWriter::new(
                 big_repo.partition_store(),
             )),
@@ -322,7 +324,7 @@ impl RepoCtx {
                 Arc::clone(big_repo),
                 Arc::clone(&blobs_repo),
                 doc_app.document_id().clone(),
-                daybook_types::doc::UserPath::from(local_user_path.to_string()),
+                local_user_path.to_owned(),
             )
             .await
             .wrap_err("error loading plugs repo during init dance")?;
@@ -333,23 +335,21 @@ impl RepoCtx {
                 Arc::clone(big_repo),
                 doc_app.document_id().clone(),
                 Arc::clone(plugs_repo.as_ref().expect("plugs repo must be loaded")),
-                daybook_types::doc::UserPath::from(local_user_path.to_string()),
+                local_user_path.to_owned(),
                 sql.clone(),
             )
             .await?;
             config_stop = Some(stop);
-            let config_user_path = daybook_types::doc::user_path::for_repo(
-                &daybook_types::doc::UserPath::from(local_user_path.to_string()),
-                "config-repo",
-            )?;
+
+            let config_user_path =
+                daybook_types::doc::user_path::for_repo(local_user_path.to_owned(), "config-repo")?;
             let config_actor_id = daybook_types::doc::user_path::to_actor_id(&config_user_path);
             config_repo
                 .upsert_actor_user_path(config_actor_id, config_user_path)
                 .await?;
-            let plugs_user_path = daybook_types::doc::user_path::for_repo(
-                &daybook_types::doc::UserPath::from(local_user_path.to_string()),
-                "plugs-repo",
-            )?;
+
+            let plugs_user_path =
+                daybook_types::doc::user_path::for_repo(local_user_path.to_owned(), "plugs-repo")?;
             let plugs_actor_id = daybook_types::doc::user_path::to_actor_id(&plugs_user_path);
             config_repo
                 .upsert_actor_user_path(plugs_actor_id, plugs_user_path)
@@ -358,14 +358,12 @@ impl RepoCtx {
             let (_tables_repo, stop) = TablesRepo::load(
                 Arc::clone(big_repo),
                 doc_app.document_id().clone(),
-                daybook_types::doc::UserPath::from(local_user_path.to_string()),
+                local_user_path.to_owned(),
             )
             .await?;
             tables_stop = Some(stop);
-            let tables_user_path = daybook_types::doc::user_path::for_repo(
-                &daybook_types::doc::UserPath::from(local_user_path.to_string()),
-                "tables-repo",
-            )?;
+            let tables_user_path =
+                daybook_types::doc::user_path::for_repo(local_user_path.to_owned(), "tables-repo")?;
             let tables_actor_id = daybook_types::doc::user_path::to_actor_id(&tables_user_path);
             config_repo
                 .upsert_actor_user_path(tables_actor_id, tables_user_path)
@@ -374,13 +372,13 @@ impl RepoCtx {
             let (_dispatch_repo, stop) = DispatchRepo::load(
                 Arc::clone(big_repo),
                 doc_app.document_id().clone(),
-                daybook_types::doc::UserPath::from(local_user_path.to_string()),
+                UserPathBuf::from(local_user_path.to_string()),
                 sql.clone(),
             )
             .await?;
             dispatch_stop = Some(stop);
             let dispatch_user_path = daybook_types::doc::user_path::for_repo(
-                &daybook_types::doc::UserPath::from(local_user_path.to_string()),
+                local_user_path.to_owned(),
                 "dispatch-repo",
             )?;
             let dispatch_actor_id = daybook_types::doc::user_path::to_actor_id(&dispatch_user_path);
@@ -391,7 +389,7 @@ impl RepoCtx {
             let (_drawer_repo, stop) = DrawerRepo::load(
                 Arc::clone(big_repo),
                 doc_drawer.document_id().clone(),
-                daybook_types::doc::UserPath::from(local_user_path.to_string()),
+                UserPathBuf::from(local_user_path.to_string()),
                 sql.clone(),
                 blobs_root
                     .parent()
@@ -411,11 +409,10 @@ impl RepoCtx {
                 )),
             )
             .await?;
+
             drawer_stop = Some(stop);
-            let drawer_user_path = daybook_types::doc::user_path::for_repo(
-                &daybook_types::doc::UserPath::from(local_user_path.to_string()),
-                "drawer-repo",
-            )?;
+            let drawer_user_path =
+                daybook_types::doc::user_path::for_repo(local_user_path.to_owned(), "drawer-repo")?;
             let drawer_actor_id = daybook_types::doc::user_path::to_actor_id(&drawer_user_path);
             config_repo
                 .upsert_actor_user_path(drawer_actor_id, drawer_user_path)
@@ -479,7 +476,7 @@ impl RepoCtx {
 
 struct UserInfo {
     local_peer_key: am_utils_rs::sync::protocol::PeerKey,
-    local_user_path: String,
+    local_user_path: UserPathBuf,
     local_actor_id: automerge::ActorId,
 }
 
@@ -494,11 +491,10 @@ fn compute_user_info(
         daybook_types::doc::user_path::DEVICE_ID_PREFIX,
         pkey_bs58
     );
-    let local_user_path = format!("/{user_id}/{device_id}");
+    let local_user_path = UserPathBuf::new().join("/").join(user_id).join(device_id);
     let local_peer_key = daybook_types::doc::format_peer_key(identity.iroh_public_key.as_bytes());
-    let local_actor_id = daybook_types::doc::user_path::to_actor_id(
-        &daybook_types::doc::UserPath::from(local_user_path.clone()),
-    );
+    let local_actor_id =
+        daybook_types::doc::user_path::to_actor_id(&UserPathBuf::from(local_user_path.clone()));
     UserInfo {
         local_peer_key,
         local_user_path,
@@ -539,8 +535,8 @@ async fn cleanup_blobs_staging_dir(blobs_root: &Path) -> Res<()> {
 pub(crate) async fn finish_clone_init(
     big_repo: &SharedBigRepo,
     sql: &SqlCtx,
-    local_user_path: String,
-    blobs_root: std::path::PathBuf,
+    local_user_path: UserPathBuf,
+    blobs_root: PathBuf,
 ) -> Res<()> {
     let init_state = globals::get_init_state(sql).await?;
     let (doc_id_app, doc_id_drawer) = match init_state {
@@ -653,10 +649,7 @@ pub async fn is_repo_bootstrapped(repo_root: &std::path::Path) -> Res<bool> {
 async fn load_core_docs(
     big_repo: &SharedBigRepo,
     repo_sql: &SqlCtx,
-) -> Res<(
-    am_utils_rs::repo::BigDocHandle,
-    am_utils_rs::repo::BigDocHandle,
-)> {
+) -> Res<(BigDocHandle, BigDocHandle)> {
     let init_state = globals::get_init_state(repo_sql).await?;
     let globals::InitState::Created {
         doc_id_app,
@@ -685,10 +678,7 @@ async fn load_core_docs(
 async fn init_core_docs(
     big_repo: &SharedBigRepo,
     repo_sql: &SqlCtx,
-) -> Res<(
-    am_utils_rs::repo::BigDocHandle,
-    am_utils_rs::repo::BigDocHandle,
-)> {
+) -> Res<(BigDocHandle, BigDocHandle)> {
     use automerge::transaction::Transactable;
 
     let app_doc = {

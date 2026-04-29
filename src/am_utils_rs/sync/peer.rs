@@ -6,7 +6,7 @@ use crate::DocumentId;
 
 use std::collections::HashMap;
 use std::time::Instant;
-use tokio::sync::{broadcast, mpsc};
+use tokio::sync::mpsc;
 use tokio_util::sync::CancellationToken;
 
 #[derive(Debug, Clone)]
@@ -89,12 +89,16 @@ pub enum PeerSyncWorkerEvent {
     },
 }
 
-pub struct PeerSyncWorkerHandle {
-    pub progress_rx: Option<broadcast::Receiver<PeerSyncProgressEvent>>,
-    pub events_rx: Option<broadcast::Receiver<PeerSyncWorkerEvent>>,
+#[derive(Debug, Clone)]
+pub enum PeerSyncWorkerMsg {
+    Progress {
+        peer: PeerKey,
+        event: PeerSyncProgressEvent,
+    },
+    Event(PeerSyncWorkerEvent),
 }
 
-pub struct SpawnPeerSyncWorkerArgs {
+pub struct SpawnPeerSyncWorkerArgs<'a> {
     pub local_peer: PeerKey,
     pub remote_peer: PeerKey,
     pub rpc_client: irpc::Client<PartitionSyncRpc>,
@@ -102,34 +106,31 @@ pub struct SpawnPeerSyncWorkerArgs {
     pub doc_sync_tx: mpsc::Sender<DocSyncRequest>,
     pub doc_ack_rx: mpsc::Receiver<DocSyncAck>,
     pub target_partitions: Vec<PartitionId>,
+    pub msg_tx: mpsc::Sender<PeerSyncWorkerMsg>,
+    pub task_set: &'a utils_rs::AbortableJoinSet,
 }
 
 pub struct PeerSyncWorkerStopToken {
-    cancel_token: CancellationToken,
-    join_handle: tokio::task::JoinHandle<()>,
+    task_handle: utils_rs::TaskHandle,
     remote_peer: PeerKey,
 }
 
 impl PeerSyncWorkerStopToken {
     pub async fn stop(self) -> Res<()> {
         debug!(remote_peer = %self.remote_peer, "stopping peer sync worker");
-        self.cancel_token.cancel();
-        let res = utils_rs::wait_on_handle_with_timeout(self.join_handle, Duration::from_secs(5))
-            .await
-            .wrap_err("failed stopping peer sync worker");
+        self.task_handle.abort();
+        let res = tokio::time::timeout(Duration::from_secs(5), self.task_handle.join()).await;
         debug!(remote_peer = %self.remote_peer, result = ?res.as_ref().map(|_| ()), "peer sync worker stop finished");
-        res
+        Ok(())
     }
 }
 
 pub async fn spawn_peer_sync_worker(
-    args: SpawnPeerSyncWorkerArgs,
-) -> Res<(PeerSyncWorkerHandle, PeerSyncWorkerStopToken)> {
+    args: SpawnPeerSyncWorkerArgs<'_>,
+) -> Res<PeerSyncWorkerStopToken> {
     let remote_peer_for_stop = args.remote_peer.clone();
-    let (progress_tx, progress_rx) = broadcast::channel(2048);
-    let (events_tx, events_rx) = broadcast::channel(256);
-
-    let cancel_token = CancellationToken::new();
+    let remote_peer_for_task = args.remote_peer.clone();
+    let msg_tx = args.msg_tx.clone();
     let mut worker = PeerSyncWorker {
         local_peer: args.local_peer,
         remote_peer: args.remote_peer.clone(),
@@ -138,8 +139,7 @@ pub async fn spawn_peer_sync_worker(
         doc_sync_tx: args.doc_sync_tx,
         doc_ack_rx: args.doc_ack_rx,
         target_partitions: args.target_partitions,
-        progress_tx,
-        events_tx: events_tx.clone(),
+        msg_tx: args.msg_tx,
     };
     let fut = async move {
         let t0 = Instant::now();
@@ -185,10 +185,10 @@ pub async fn spawn_peer_sync_worker(
         };
 
         worker
-            .events_tx
-            .send(PeerSyncWorkerEvent::LiveReady {
+            .msg_tx
+            .try_send(PeerSyncWorkerMsg::Event(PeerSyncWorkerEvent::LiveReady {
                 peer: worker.remote_peer.clone(),
-            })
+            }))
             .ok();
 
         loop {
@@ -225,54 +225,41 @@ pub async fn spawn_peer_sync_worker(
         }
         Ok(())
     };
-    let join_handle = tokio::spawn({
-        let cancel_token = cancel_token.clone();
-        // let cancel_token = cancel_token.clone();
-        let span = tracing::info_span!("PeerSyncWorker", remote_peer = %args.remote_peer);
-        async move {
-            let run_res: Res<()> = match cancel_token.run_until_cancelled(fut).await {
-                Some(out) => out,
-                None => Ok(()),
-            };
-            // if cancel_token.is_cancelled() {
-            //     debug!("peer sync worker exiting cleanly after cancellation");
-            //     return;
-            // }
-            if let Err(err) = &run_res {
-                events_tx
-                    .send(PeerSyncWorkerEvent::AbnormalExit {
-                        peer: args.remote_peer,
-                        reason: err.to_string(),
-                    })
-                    .ok();
-            }
-            debug!(result = ?run_res.as_ref().map(|_| ()), "peer sync worker future exiting");
-            if let Err(err) = run_res {
-                let is_closed_by_peer = err.chain().any(|cause| {
-                    let msg = cause.to_string();
-                    msg.contains("closed by peer: 0") || msg.contains("closed by peer")
-                });
-                if is_closed_by_peer {
-                    info!("peer sync worker exited after remote close");
-                } else {
-                    warn!(?err, "peer sync worker exiting with abnormal error");
-                }
+    let span = tracing::info_span!("PeerSyncWorker", remote_peer = %args.remote_peer);
+    let wrapped = async move {
+        let run_res: Res<()> = fut.await;
+        if let Err(err) = &run_res {
+            msg_tx
+                .try_send(PeerSyncWorkerMsg::Event(PeerSyncWorkerEvent::AbnormalExit {
+                    peer: remote_peer_for_task,
+                    reason: err.to_string(),
+                }))
+                .ok();
+        }
+        debug!(result = ?run_res.as_ref().map(|_| ()), "peer sync worker future exiting");
+        if let Err(err) = run_res {
+            let is_closed_by_peer = err.chain().any(|cause| {
+                let msg = cause.to_string();
+                msg.contains("closed by peer: 0") || msg.contains("closed by peer")
+            });
+            if is_closed_by_peer {
+                info!("peer sync worker exited after remote close");
+            } else {
+                warn!(?err, "peer sync worker exiting with abnormal error");
             }
         }
-        .instrument(span)
-    });
+    }
+    .instrument(span);
 
-    Ok((
-        PeerSyncWorkerHandle {
-            progress_rx: Some(progress_rx),
-            events_rx: Some(events_rx),
-        },
-        PeerSyncWorkerStopToken {
-            cancel_token,
-            join_handle,
-            remote_peer: remote_peer_for_stop,
-        },
-    ))
+    let task_handle = args
+        .task_set
+        .spawn(wrapped)
+        .map_err(|_| ferr!("task set aborted"))?;
+
+    Ok(PeerSyncWorkerStopToken {
+        task_handle,
+        remote_peer: remote_peer_for_stop,
+    })
 }
 
 struct PeerSyncWorker {
@@ -283,8 +270,7 @@ struct PeerSyncWorker {
     doc_sync_tx: mpsc::Sender<DocSyncRequest>,
     doc_ack_rx: mpsc::Receiver<DocSyncAck>,
     target_partitions: Vec<PartitionId>,
-    progress_tx: broadcast::Sender<PeerSyncProgressEvent>,
-    events_tx: broadcast::Sender<PeerSyncWorkerEvent>,
+    msg_tx: mpsc::Sender<PeerSyncWorkerMsg>,
 }
 
 impl PeerSyncWorker {
@@ -373,11 +359,13 @@ impl PeerSyncWorker {
                     *replay_phase_finished = true;
                 }
                 if *member_replay_complete && *doc_replay_complete && !*bootstrap_emitted {
-                    self.events_tx
-                        .send(PeerSyncWorkerEvent::Bootstrapped {
-                            peer: self.remote_peer.clone(),
-                            partition_count,
-                        })
+                    self.msg_tx
+                        .try_send(PeerSyncWorkerMsg::Event(
+                            PeerSyncWorkerEvent::Bootstrapped {
+                                peer: self.remote_peer.clone(),
+                                partition_count,
+                            },
+                        ))
                         .ok();
                     *bootstrap_emitted = true;
                 }
@@ -461,14 +449,20 @@ impl PeerSyncWorker {
     }
 
     fn emit_phase_started(&self, phase: &'static str) {
-        self.progress_tx
-            .send(PeerSyncProgressEvent::PhaseStarted { phase })
+        self.msg_tx
+            .try_send(PeerSyncWorkerMsg::Progress {
+                peer: self.remote_peer.clone(),
+                event: PeerSyncProgressEvent::PhaseStarted { phase },
+            })
             .ok();
     }
 
     fn emit_phase_finished(&self, phase: &'static str, elapsed: Duration) {
-        self.progress_tx
-            .send(PeerSyncProgressEvent::PhaseFinished { phase, elapsed })
+        self.msg_tx
+            .try_send(PeerSyncWorkerMsg::Progress {
+                peer: self.remote_peer.clone(),
+                event: PeerSyncProgressEvent::PhaseFinished { phase, elapsed },
+            })
             .ok();
     }
 
@@ -583,8 +577,7 @@ mod tests {
         let (rpc_tx, _rpc_rx) = mpsc::channel(1);
         let (doc_sync_tx, _doc_sync_rx) = mpsc::channel(1);
         let (_doc_ack_tx, doc_ack_rx) = mpsc::channel(1);
-        let (progress_tx, _progress_rx) = broadcast::channel(1);
-        let (events_tx, _events_rx) = broadcast::channel(1);
+        let (msg_tx, _msg_rx) = mpsc::channel(1);
         let worker = PeerSyncWorker {
             local_peer: "local".into(),
             remote_peer: "remote".into(),
@@ -593,8 +586,7 @@ mod tests {
             doc_sync_tx,
             doc_ack_rx,
             target_partitions: Vec::new(),
-            progress_tx,
-            events_tx,
+            msg_tx,
         };
         Ok((worker, stop))
     }

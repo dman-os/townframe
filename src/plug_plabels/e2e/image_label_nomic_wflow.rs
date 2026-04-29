@@ -25,7 +25,7 @@ async fn test_image_label_fallback_nomic_pipeline() -> Res<()> {
     };
 
     let new_doc = AddDocArgs {
-        branch_path: daybook_types::doc::BranchPath::from("main"),
+        branch_path: daybook_types::doc::BranchPathBuf::from("main"),
         facets: [(
             FacetKey::from(WellKnownFacetTag::Blob),
             WellKnownFacet::Blob(blob_facet).into(),
@@ -44,7 +44,7 @@ async fn test_image_label_fallback_nomic_pipeline() -> Res<()> {
             .drawer_repo
             .get_doc_with_facets_at_branch(
                 &doc_id,
-                &daybook_types::doc::BranchPath::from("main"),
+                &daybook_types::doc::BranchPathBuf::from("main"),
                 None,
             )
             .await?

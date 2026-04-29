@@ -352,7 +352,7 @@ async fn collect_doc_branch_heads(
         let mut branch_names = branches.branches.keys().cloned().collect::<Vec<_>>();
         branch_names.sort_unstable();
         for branch_name in branch_names {
-            let branch = daybook_types::doc::BranchPath::from(branch_name.as_str());
+            let branch = daybook_types::doc::BranchPathBuf::from(branch_name.as_str());
             let Some((_doc, heads)) = node.drawer.get_with_heads(&doc_id, &branch, None).await?
             else {
                 eyre::bail!(
@@ -413,7 +413,7 @@ async fn collect_blob_hashes(node: &SyncTestNode) -> Res<HashSet<String>> {
             continue;
         };
         for branch_name in branches.branches.keys() {
-            let branch = daybook_types::doc::BranchPath::from(branch_name.as_str());
+            let branch = daybook_types::doc::BranchPathBuf::from(branch_name.as_str());
             let Some(doc) = node
                 .drawer
                 .get_doc_with_facets_at_branch(&doc_id, &branch, None)
@@ -453,9 +453,9 @@ async fn apply_event(
             let id = node
                 .drawer
                 .add(AddDocArgs {
-                    branch_path: daybook_types::doc::BranchPath::from("main"),
+                    branch_path: daybook_types::doc::BranchPathBuf::from("main"),
                     facets,
-                    user_path: Some(daybook_types::doc::UserPath::from(
+                    user_path: Some(daybook_types::doc::UserPathBuf::from(
                         node.ctx.local_user_path.clone(),
                     )),
                 })
@@ -466,7 +466,7 @@ async fn apply_event(
             let Some(doc_id) = pick_doc_id(node, rng).await? else {
                 return Ok(None);
             };
-            let branch = daybook_types::doc::BranchPath::from("main");
+            let branch = daybook_types::doc::BranchPathBuf::from("main");
             let Some((_doc, heads)) = node.drawer.get_with_heads(&doc_id, &branch, None).await?
             else {
                 return Ok(None);
@@ -486,11 +486,11 @@ async fn apply_event(
                         id: doc_id.clone(),
                         facets_set,
                         facets_remove: vec![],
-                        user_path: Some(daybook_types::doc::UserPath::from(
+                        user_path: Some(daybook_types::doc::UserPathBuf::from(
                             node.ctx.local_user_path.clone(),
                         )),
                     },
-                    branch.clone(),
+                    &branch,
                     Some(heads),
                 )
                 .await;
@@ -506,13 +506,17 @@ async fn apply_event(
             let Some(doc_id) = pick_doc_id(node, rng).await? else {
                 return Ok(None);
             };
-            let new_branch = daybook_types::doc::BranchPath::from(format!(
+            let new_branch = daybook_types::doc::BranchPathBuf::from(format!(
                 "/stress/{}",
                 rng.random_range(0..32)
             ));
             let Some((_doc, main_heads)) = node
                 .drawer
-                .get_with_heads(&doc_id, &daybook_types::doc::BranchPath::from("main"), None)
+                .get_with_heads(
+                    &doc_id,
+                    &daybook_types::doc::BranchPathBuf::from("main"),
+                    None,
+                )
                 .await?
             else {
                 return Ok(None);
@@ -527,11 +531,9 @@ async fn apply_event(
                 .create_branch_at_heads_from_branch(
                     &doc_id,
                     &new_branch,
-                    &daybook_types::doc::BranchPath::from("main"),
+                    &daybook_types::doc::BranchPathBuf::from("main"),
                     &main_heads,
-                    Some(daybook_types::doc::UserPath::from(
-                        node.ctx.local_user_path.clone(),
-                    )),
+                    Some(&node.ctx.local_user_path),
                 )
                 .await;
             if let Err(err) = create_out {
@@ -552,11 +554,11 @@ async fn apply_event(
                         id: doc_id.clone(),
                         facets_set,
                         facets_remove: vec![],
-                        user_path: Some(daybook_types::doc::UserPath::from(
+                        user_path: Some(daybook_types::doc::UserPathBuf::from(
                             node.ctx.local_user_path.clone(),
                         )),
                     },
-                    new_branch.clone(),
+                    &new_branch,
                     Some(main_heads),
                 )
                 .await;
@@ -588,11 +590,11 @@ async fn apply_event(
                         id: doc_id.clone(),
                         facets_set,
                         facets_remove: vec![],
-                        user_path: Some(daybook_types::doc::UserPath::from(
+                        user_path: Some(daybook_types::doc::UserPathBuf::from(
                             node.ctx.local_user_path.clone(),
                         )),
                     },
-                    branch.clone(),
+                    &branch,
                     Some(heads),
                 )
                 .await;
@@ -618,7 +620,7 @@ async fn apply_event(
             let Some(doc_id) = pick_doc_id(node, rng).await? else {
                 return Ok(None);
             };
-            let branch = daybook_types::doc::BranchPath::from("main");
+            let branch = daybook_types::doc::BranchPathBuf::from("main");
             let Some((_doc, heads)) = node.drawer.get_with_heads(&doc_id, &branch, None).await?
             else {
                 return Ok(None);
@@ -643,11 +645,11 @@ async fn apply_event(
                         id: doc_id.clone(),
                         facets_set,
                         facets_remove: vec![],
-                        user_path: Some(daybook_types::doc::UserPath::from(
+                        user_path: Some(daybook_types::doc::UserPathBuf::from(
                             node.ctx.local_user_path.clone(),
                         )),
                     },
-                    branch,
+                    &branch,
                     Some(heads),
                 )
                 .await;
@@ -681,7 +683,7 @@ async fn pick_doc_id(node: &SyncTestNode, rng: &mut StdRng) -> Res<Option<String
             .drawer
             .get_doc_with_facets_at_branch(
                 &doc_id,
-                &daybook_types::doc::BranchPath::from("main"),
+                &daybook_types::doc::BranchPathBuf::from("main"),
                 None,
             )
             .await
@@ -704,7 +706,7 @@ async fn pick_doc_id(node: &SyncTestNode, rng: &mut StdRng) -> Res<Option<String
 async fn pick_doc_and_branch(
     node: &SyncTestNode,
     rng: &mut StdRng,
-) -> Res<Option<(String, daybook_types::doc::BranchPath)>> {
+) -> Res<Option<(String, daybook_types::doc::BranchPathBuf)>> {
     let Some(doc_id) = pick_doc_id(node, rng).await? else {
         return Ok(None);
     };
@@ -718,14 +720,14 @@ async fn pick_doc_and_branch(
     names.shuffle(rng);
     Ok(Some((
         doc_id,
-        daybook_types::doc::BranchPath::from(names[0].clone()),
+        daybook_types::doc::BranchPathBuf::from(names[0].clone()),
     )))
 }
 
 async fn pick_doc_and_non_main_branch(
     node: &SyncTestNode,
     rng: &mut StdRng,
-) -> Res<Option<(String, daybook_types::doc::BranchPath)>> {
+) -> Res<Option<(String, daybook_types::doc::BranchPathBuf)>> {
     let mut docs = list_doc_ids(&node.drawer)
         .await?
         .into_iter()
@@ -747,7 +749,7 @@ async fn pick_doc_and_non_main_branch(
         non_main.shuffle(rng);
         return Ok(Some((
             doc_id,
-            daybook_types::doc::BranchPath::from(non_main[0].clone()),
+            daybook_types::doc::BranchPathBuf::from(non_main[0].clone()),
         )));
     }
     Ok(None)

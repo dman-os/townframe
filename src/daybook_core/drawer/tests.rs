@@ -9,19 +9,25 @@ use crate::drawer::{
 };
 use crate::repos::Repo;
 
-use daybook_types::doc::{AddDocArgs, ChangeHashSet, DocId, DocPatch, FacetKey};
+use daybook_types::doc::{
+    AddDocArgs, BranchPath, BranchPathBuf, ChangeHashSet, DocId, DocPatch, FacetKey,
+};
 
 use std::str::FromStr;
 
 use automerge::transaction::Transactable;
 use automerge::ReadDoc;
-use daybook_types::doc::{Body, UserPath, WellKnownFacet, WellKnownFacetTag};
+use daybook_types::doc::{Body, UserPathBuf, WellKnownFacet, WellKnownFacetTag};
 use daybook_types::url::build_facet_ref;
 
 async fn get_dmeta_on_main(repo: &DrawerRepo, doc_id: &DocId) -> Res<daybook_types::doc::Dmeta> {
     let dmeta_key = FacetKey::from(WellKnownFacetTag::Dmeta);
     let doc = repo
-        .get_doc_with_facets_at_branch(doc_id, &"main".into(), Some(vec![dmeta_key.clone()]))
+        .get_doc_with_facets_at_branch(
+            doc_id,
+            BranchPath::new("main"),
+            Some(vec![dmeta_key.clone()]),
+        )
         .await?
         .ok_or_eyre("doc not found when loading dmeta")?;
     let dmeta = doc
@@ -35,8 +41,8 @@ async fn get_dmeta_on_main(repo: &DrawerRepo, doc_id: &DocId) -> Res<daybook_typ
     Ok(dmeta)
 }
 
-fn local_branch(name: &str) -> daybook_types::doc::BranchPath {
-    daybook_types::doc::BranchPath::from(format!("/test-device/{name}"))
+fn local_branch(name: &str) -> BranchPathBuf {
+    BranchPathBuf::from(format!("/test-device/{name}"))
 }
 
 async fn new_meta_store_sql() -> Res<crate::app::SqlCtx> {
@@ -70,7 +76,7 @@ async fn test_v2_smoke() -> Res<()> {
     let (repo, stop_token) = DrawerRepo::load(
         Arc::clone(&big_repo),
         drawer_doc_id,
-        daybook_types::doc::UserPath::from("/duser-wip-localtest/ddev-wip-iroh-localtest"),
+        daybook_types::doc::UserPathBuf::from("/duser-wip-localtest/ddev-wip-iroh-localtest"),
         new_meta_store_sql().await?,
         std::env::temp_dir().join(Uuid::new_v4().to_string()),
         entry_pool,
@@ -83,7 +89,7 @@ async fn test_v2_smoke() -> Res<()> {
     let facet_title_key = FacetKey::from(WellKnownFacetTag::TitleGeneric);
     let doc_id = repo
         .add(AddDocArgs {
-            branch_path: "main".into(),
+            branch_path: BranchPathBuf::from("main"),
             facets: [(
                 facet_title_key.clone(),
                 WellKnownFacet::TitleGeneric("Initial".into()).into(),
@@ -101,7 +107,7 @@ async fn test_v2_smoke() -> Res<()> {
 
     // 3. Get doc
     let doc = repo
-        .get_doc_with_facets_at_branch(&doc_id, &"main".into(), None)
+        .get_doc_with_facets_at_branch(&doc_id, BranchPath::new("main"), None)
         .await?
         .unwrap();
     assert_eq!(
@@ -121,13 +127,13 @@ async fn test_v2_smoke() -> Res<()> {
             facets_remove: vec![],
             user_path: None,
         },
-        "main".into(),
+        BranchPath::new("main"),
         None,
     )
     .await?;
 
     let doc = repo
-        .get_doc_with_facets_at_branch(&doc_id, &"main".into(), None)
+        .get_doc_with_facets_at_branch(&doc_id, BranchPath::new("main"), None)
         .await?
         .unwrap();
     assert_eq!(
@@ -169,7 +175,7 @@ async fn test_partitions_track_non_tmp_branches() -> Res<()> {
     let (repo, stop_token) = DrawerRepo::load(
         Arc::clone(&big_repo),
         drawer_doc_id,
-        daybook_types::doc::UserPath::from("/duser-wip-localtest/ddev-wip-iroh-localtest"),
+        daybook_types::doc::UserPathBuf::from("/duser-wip-localtest/ddev-wip-iroh-localtest"),
         new_meta_store_sql().await?,
         std::env::temp_dir().join(Uuid::new_v4().to_string()),
         entry_pool,
@@ -183,7 +189,7 @@ async fn test_partitions_track_non_tmp_branches() -> Res<()> {
 
     let doc_id = repo
         .add(AddDocArgs {
-            branch_path: "main".into(),
+            branch_path: BranchPathBuf::from("main"),
             facets: [(
                 title_key.clone(),
                 WellKnownFacet::TitleGeneric("Initial".into()).into(),
@@ -206,8 +212,8 @@ async fn test_partitions_track_non_tmp_branches() -> Res<()> {
 
     repo.create_branch_at_heads_from_branch(
         &doc_id,
-        &daybook_types::doc::BranchPath::from("/tmp/job-1"),
-        &"main".into(),
+        &BranchPathBuf::from("/tmp/job-1"),
+        BranchPath::new("main"),
         &main_heads,
         None,
     )
@@ -223,7 +229,7 @@ async fn test_partitions_track_non_tmp_branches() -> Res<()> {
             facets_remove: vec![],
             user_path: None,
         },
-        daybook_types::doc::BranchPath::from("/tmp/job-1"),
+        &BranchPath::new("/tmp/job-1"),
         Some(main_heads.clone()),
     )
     .await?;
@@ -232,7 +238,7 @@ async fn test_partitions_track_non_tmp_branches() -> Res<()> {
     repo.create_branch_at_heads_from_branch(
         &doc_id,
         &local_branch("branch-a"),
-        &"main".into(),
+        BranchPath::new("main"),
         &main_heads,
         None,
     )
@@ -248,7 +254,7 @@ async fn test_partitions_track_non_tmp_branches() -> Res<()> {
             facets_remove: vec![],
             user_path: None,
         },
-        local_branch("branch-a"),
+        &local_branch("branch-a"),
         Some(main_heads),
     )
     .await?;
@@ -292,7 +298,7 @@ async fn test_v2_batch_add_smoke() -> Res<()> {
     let (repo, stop_token) = DrawerRepo::load(
         Arc::clone(&big_repo),
         drawer_doc_id,
-        daybook_types::doc::UserPath::from("/duser-wip-localtest/ddev-wip-iroh-localtest"),
+        daybook_types::doc::UserPathBuf::from("/duser-wip-localtest/ddev-wip-iroh-localtest"),
         new_meta_store_sql().await?,
         std::env::temp_dir().join(Uuid::new_v4().to_string()),
         entry_pool,
@@ -305,7 +311,7 @@ async fn test_v2_batch_add_smoke() -> Res<()> {
     let created_ids = repo
         .batch_add(vec![
             AddDocArgs {
-                branch_path: "main".into(),
+                branch_path: BranchPathBuf::from("main"),
                 facets: [(
                     title_key.clone(),
                     WellKnownFacet::TitleGeneric("First".into()).into(),
@@ -314,7 +320,7 @@ async fn test_v2_batch_add_smoke() -> Res<()> {
                 user_path: None,
             },
             AddDocArgs {
-                branch_path: "main".into(),
+                branch_path: BranchPathBuf::from("main"),
                 facets: [(
                     title_key.clone(),
                     WellKnownFacet::TitleGeneric("Second".into()).into(),
@@ -363,7 +369,7 @@ async fn test_v2_batch_add_emits_single_list_changed() -> Res<()> {
     let (repo, stop_token) = DrawerRepo::load(
         Arc::clone(&big_repo),
         drawer_doc_id,
-        daybook_types::doc::UserPath::from("/duser-wip-localtest/ddev-wip-iroh-localtest"),
+        daybook_types::doc::UserPathBuf::from("/duser-wip-localtest/ddev-wip-iroh-localtest"),
         new_meta_store_sql().await?,
         std::env::temp_dir().join(Uuid::new_v4().to_string()),
         entry_pool,
@@ -377,7 +383,7 @@ async fn test_v2_batch_add_emits_single_list_changed() -> Res<()> {
     let created_ids = repo
         .batch_add(vec![
             AddDocArgs {
-                branch_path: "main".into(),
+                branch_path: BranchPathBuf::from("main"),
                 facets: [(
                     title_key.clone(),
                     WellKnownFacet::TitleGeneric("Alpha".into()).into(),
@@ -386,7 +392,7 @@ async fn test_v2_batch_add_emits_single_list_changed() -> Res<()> {
                 user_path: None,
             },
             AddDocArgs {
-                branch_path: "main".into(),
+                branch_path: BranchPathBuf::from("main"),
                 facets: [(
                     title_key.clone(),
                     WellKnownFacet::TitleGeneric("Beta".into()).into(),
@@ -395,7 +401,7 @@ async fn test_v2_batch_add_emits_single_list_changed() -> Res<()> {
                 user_path: None,
             },
             AddDocArgs {
-                branch_path: "main".into(),
+                branch_path: BranchPathBuf::from("main"),
                 facets: [(
                     title_key.clone(),
                     WellKnownFacet::TitleGeneric("Gamma".into()).into(),
@@ -468,7 +474,7 @@ async fn test_v2_merge() -> Res<()> {
     let (repo, stop_token) = DrawerRepo::load(
         Arc::clone(&big_repo),
         drawer_doc_id,
-        daybook_types::doc::UserPath::from("/duser-wip-localtest/ddev-wip-iroh-localtest"),
+        daybook_types::doc::UserPathBuf::from("/duser-wip-localtest/ddev-wip-iroh-localtest"),
         new_meta_store_sql().await?,
         std::env::temp_dir().join(Uuid::new_v4().to_string()),
         entry_pool,
@@ -483,7 +489,7 @@ async fn test_v2_merge() -> Res<()> {
     // 1. Add doc on main
     let doc_id = repo
         .add(AddDocArgs {
-            branch_path: "main".into(),
+            branch_path: BranchPathBuf::from("main"),
             facets: [(
                 facet_title.clone(),
                 WellKnownFacet::TitleGeneric("Base".into()).into(),
@@ -500,7 +506,7 @@ async fn test_v2_merge() -> Res<()> {
     repo.create_branch_at_heads_from_branch(
         &doc_id,
         &local_branch("branch-a"),
-        &"main".into(),
+        BranchPath::new("main"),
         &main_heads,
         None,
     )
@@ -516,7 +522,7 @@ async fn test_v2_merge() -> Res<()> {
             facets_remove: vec![],
             user_path: None,
         },
-        local_branch("branch-a"),
+        &local_branch("branch-a"),
         Some(main_heads.clone()),
     )
     .await?;
@@ -525,7 +531,7 @@ async fn test_v2_merge() -> Res<()> {
     repo.create_branch_at_heads_from_branch(
         &doc_id,
         &local_branch("branch-b"),
-        &"main".into(),
+        BranchPath::new("main"),
         &main_heads,
         None,
     )
@@ -537,7 +543,7 @@ async fn test_v2_merge() -> Res<()> {
             facets_remove: vec![],
             user_path: None,
         },
-        local_branch("branch-b"),
+        &local_branch("branch-b"),
         Some(main_heads.clone()),
     )
     .await?;
@@ -551,7 +557,7 @@ async fn test_v2_merge() -> Res<()> {
         .clone();
     repo.merge_from_heads(
         &doc_id,
-        &"main".into(),
+        BranchPath::new("main"),
         &local_branch("branch-a"),
         &a_heads,
         None,
@@ -567,7 +573,7 @@ async fn test_v2_merge() -> Res<()> {
         .clone();
     repo.merge_from_heads(
         &doc_id,
-        &"main".into(),
+        BranchPath::new("main"),
         &local_branch("branch-b"),
         &b_heads,
         None,
@@ -576,7 +582,7 @@ async fn test_v2_merge() -> Res<()> {
 
     // 6. Verify merge
     let doc = repo
-        .get_doc_with_facets_at_branch(&doc_id, &"main".into(), None)
+        .get_doc_with_facets_at_branch(&doc_id, BranchPath::new("main"), None)
         .await?
         .unwrap();
     assert_eq!(
@@ -617,7 +623,7 @@ async fn test_resolve_handle_for_heads_does_not_match_foreign_doc_heads() -> Res
     let (repo, stop_token) = DrawerRepo::load(
         Arc::clone(&big_repo),
         drawer_doc_id,
-        daybook_types::doc::UserPath::from("/duser-wip-localtest/ddev-wip-iroh-localtest"),
+        daybook_types::doc::UserPathBuf::from("/duser-wip-localtest/ddev-wip-iroh-localtest"),
         new_meta_store_sql().await?,
         std::env::temp_dir().join(Uuid::new_v4().to_string()),
         entry_pool,
@@ -628,7 +634,7 @@ async fn test_resolve_handle_for_heads_does_not_match_foreign_doc_heads() -> Res
 
     let doc_a = repo
         .add(AddDocArgs {
-            branch_path: "main".into(),
+            branch_path: BranchPathBuf::from("main"),
             facets: [(
                 FacetKey::from(WellKnownFacetTag::Note),
                 WellKnownFacet::Note("A".into()).into(),
@@ -639,7 +645,7 @@ async fn test_resolve_handle_for_heads_does_not_match_foreign_doc_heads() -> Res
         .await?;
     let doc_b = repo
         .add(AddDocArgs {
-            branch_path: "main".into(),
+            branch_path: BranchPathBuf::from("main"),
             facets: [(
                 FacetKey::from(WellKnownFacetTag::Note),
                 WellKnownFacet::Note("B".into()).into(),
@@ -659,7 +665,7 @@ async fn test_resolve_handle_for_heads_does_not_match_foreign_doc_heads() -> Res
         .ok_or_eyre("doc_a main missing")?;
 
     let resolved = repo
-        .resolve_handle_for_branch_heads(&doc_b, &"main".into(), &doc_a_heads)
+        .resolve_handle_for_branch_heads(&doc_b, BranchPath::new("main"), &doc_a_heads)
         .await?;
     assert!(
         resolved.is_none(),
@@ -695,7 +701,7 @@ async fn test_create_branch_at_stale_main_heads_after_intervening_merges() -> Re
     let (repo, stop_token) = DrawerRepo::load(
         Arc::clone(&big_repo),
         drawer_doc_id,
-        daybook_types::doc::UserPath::from("/duser-wip-localtest/ddev-wip-iroh-localtest"),
+        daybook_types::doc::UserPathBuf::from("/duser-wip-localtest/ddev-wip-iroh-localtest"),
         new_meta_store_sql().await?,
         std::env::temp_dir().join(Uuid::new_v4().to_string()),
         entry_pool,
@@ -710,7 +716,7 @@ async fn test_create_branch_at_stale_main_heads_after_intervening_merges() -> Re
     for round in 0..32 {
         let doc_id = repo
             .add(AddDocArgs {
-                branch_path: "main".into(),
+                branch_path: BranchPathBuf::from("main"),
                 facets: [(
                     facet_note.clone(),
                     WellKnownFacet::Note(format!("init-{round}").into()).into(),
@@ -729,11 +735,11 @@ async fn test_create_branch_at_stale_main_heads_after_intervening_merges() -> Re
             .ok_or_eyre("missing main branch after add")?
             .clone();
 
-        let branch_a = daybook_types::doc::BranchPath::from(format!("/tmp/stale-a-{round}"));
+        let branch_a = BranchPathBuf::from(format!("/tmp/stale-a-{round}"));
         repo.create_branch_at_heads_from_branch(
             &doc_id,
             &branch_a,
-            &"main".into(),
+            BranchPath::new("main"),
             &base_heads,
             None,
         )
@@ -749,7 +755,7 @@ async fn test_create_branch_at_stale_main_heads_after_intervening_merges() -> Re
                 facets_remove: vec![],
                 user_path: None,
             },
-            branch_a.clone(),
+            &branch_a,
             Some(base_heads.clone()),
         )
         .await?;
@@ -761,7 +767,7 @@ async fn test_create_branch_at_stale_main_heads_after_intervening_merges() -> Re
             .get(&branch_a.to_string())
             .ok_or_eyre("missing branch-a state after update")?
             .clone();
-        repo.merge_from_heads(&doc_id, &"main".into(), &branch_a, &a_heads, None)
+        repo.merge_from_heads(&doc_id, BranchPath::new("main"), &branch_a, &a_heads, None)
             .await?;
         let heads_after_a = repo
             .get_doc_branches(&doc_id)
@@ -772,11 +778,11 @@ async fn test_create_branch_at_stale_main_heads_after_intervening_merges() -> Re
             .ok_or_eyre("missing main after merge a")?
             .clone();
 
-        let branch_b = daybook_types::doc::BranchPath::from(format!("/tmp/stale-b-{round}"));
+        let branch_b = BranchPathBuf::from(format!("/tmp/stale-b-{round}"));
         repo.create_branch_at_heads_from_branch(
             &doc_id,
             &branch_b,
-            &"main".into(),
+            BranchPath::new("main"),
             &heads_after_a,
             None,
         )
@@ -792,7 +798,7 @@ async fn test_create_branch_at_stale_main_heads_after_intervening_merges() -> Re
                 facets_remove: vec![],
                 user_path: None,
             },
-            branch_b.clone(),
+            &branch_b,
             Some(heads_after_a.clone()),
         )
         .await?;
@@ -804,16 +810,16 @@ async fn test_create_branch_at_stale_main_heads_after_intervening_merges() -> Re
             .get(&branch_b.to_string())
             .ok_or_eyre("missing branch-b state after update")?
             .clone();
-        repo.merge_from_heads(&doc_id, &"main".into(), &branch_b, &b_heads, None)
+        repo.merge_from_heads(&doc_id, BranchPath::new("main"), &branch_b, &b_heads, None)
             .await?;
 
         // Recreate the stale-heads path: materialize a new branch from an older main head set
         // after main has already advanced through an intervening merge.
-        let stale_branch = daybook_types::doc::BranchPath::from(format!("/tmp/stale-c-{round}"));
+        let stale_branch = BranchPathBuf::from(format!("/tmp/stale-c-{round}"));
         repo.create_branch_at_heads_from_branch(
             &doc_id,
             &stale_branch,
-            &"main".into(),
+            BranchPath::new("main"),
             &heads_after_a,
             None,
         )
@@ -829,7 +835,7 @@ async fn test_create_branch_at_stale_main_heads_after_intervening_merges() -> Re
                 facets_remove: vec![],
                 user_path: None,
             },
-            stale_branch.clone(),
+            &stale_branch,
             Some(heads_after_a.clone()),
         )
         .await?;
@@ -841,8 +847,14 @@ async fn test_create_branch_at_stale_main_heads_after_intervening_merges() -> Re
             .get(&stale_branch.to_string())
             .ok_or_eyre("missing stale branch state after update")?
             .clone();
-        repo.merge_from_heads(&doc_id, &"main".into(), &stale_branch, &stale_heads, None)
-            .await?;
+        repo.merge_from_heads(
+            &doc_id,
+            BranchPath::new("main"),
+            &stale_branch,
+            &stale_heads,
+            None,
+        )
+        .await?;
 
         assert!(
             repo.del(&doc_id).await?,
@@ -1077,7 +1089,7 @@ async fn test_v2_additional_apis() -> Res<()> {
     let (repo, stop_token) = DrawerRepo::load(
         Arc::clone(&big_repo),
         drawer_doc_id,
-        daybook_types::doc::UserPath::from("/duser-wip-localtest/ddev-wip-iroh-localtest"),
+        daybook_types::doc::UserPathBuf::from("/duser-wip-localtest/ddev-wip-iroh-localtest"),
         new_meta_store_sql().await?,
         std::env::temp_dir().join(Uuid::new_v4().to_string()),
         entry_pool,
@@ -1091,7 +1103,7 @@ async fn test_v2_additional_apis() -> Res<()> {
     // 1. Add doc
     let doc_id = repo
         .add(AddDocArgs {
-            branch_path: "main".into(),
+            branch_path: BranchPathBuf::from("main"),
             facets: [(
                 facet_title.clone(),
                 WellKnownFacet::TitleGeneric("Base".into()).into(),
@@ -1107,7 +1119,7 @@ async fn test_v2_additional_apis() -> Res<()> {
 
     // 3. Test get_with_heads
     let (doc, heads) = repo
-        .get_with_heads(&doc_id, &"main".into(), None)
+        .get_with_heads(&doc_id, BranchPath::new("main"), None)
         .await?
         .unwrap();
     assert_eq!(
@@ -1117,7 +1129,7 @@ async fn test_v2_additional_apis() -> Res<()> {
 
     // 4. Test get_if_latest
     let doc_latest = repo
-        .get_if_latest(&doc_id, &"main".into(), &heads, None)
+        .get_if_latest(&doc_id, BranchPath::new("main"), &heads, None)
         .await?
         .unwrap();
     assert_eq!(
@@ -1127,13 +1139,13 @@ async fn test_v2_additional_apis() -> Res<()> {
 
     let wrong_heads = ChangeHashSet(Arc::from([automerge::ChangeHash([0u8; 32])]));
     assert!(repo
-        .get_if_latest(&doc_id, &"main".into(), &wrong_heads, None)
+        .get_if_latest(&doc_id, BranchPath::new("main"), &wrong_heads, None)
         .await?
         .is_none());
 
     // 5. Test update_batch
     repo.update_batch(vec![UpdateDocArgsV2 {
-        branch_path: "main".into(),
+        branch_path: BranchPathBuf::from("main"),
         heads: None,
         patch: DocPatch {
             id: doc_id.clone(),
@@ -1150,7 +1162,7 @@ async fn test_v2_additional_apis() -> Res<()> {
     .map_err(|e| eyre::eyre!("batch update failed: {:?}", e))?;
 
     let doc_updated = repo
-        .get_doc_with_facets_at_branch(&doc_id, &"main".into(), None)
+        .get_doc_with_facets_at_branch(&doc_id, BranchPath::new("main"), None)
         .await?
         .unwrap();
     assert_eq!(
@@ -1170,7 +1182,7 @@ async fn test_v2_additional_apis() -> Res<()> {
     repo.create_branch_at_heads_from_branch(
         &doc_id,
         &local_branch("branch-a"),
-        &"main".into(),
+        BranchPath::new("main"),
         &latest_main_heads,
         None,
     )
@@ -1186,15 +1198,20 @@ async fn test_v2_additional_apis() -> Res<()> {
             facets_remove: vec![],
             user_path: None,
         },
-        local_branch("branch-a"),
+        &local_branch("branch-a"),
         Some(latest_main_heads),
     )
     .await?;
 
-    repo.merge_from_branch(&doc_id, &"main".into(), &local_branch("branch-a"), None)
-        .await?;
+    repo.merge_from_branch(
+        &doc_id,
+        BranchPath::new("main"),
+        &local_branch("branch-a"),
+        None,
+    )
+    .await?;
     let doc_merged = repo
-        .get_doc_with_facets_at_branch(&doc_id, &"main".into(), None)
+        .get_doc_with_facets_at_branch(&doc_id, BranchPath::new("main"), None)
         .await?
         .unwrap();
     assert_eq!(
@@ -1260,7 +1277,7 @@ async fn test_v2_metadata_maintenance() -> Res<()> {
     let (repo, stop_token) = DrawerRepo::load(
         Arc::clone(&big_repo),
         drawer_doc_id,
-        daybook_types::doc::UserPath::from("/duser-wip-localtest/ddev-wip-iroh-localtest"),
+        daybook_types::doc::UserPathBuf::from("/duser-wip-localtest/ddev-wip-iroh-localtest"),
         new_meta_store_sql().await?,
         std::env::temp_dir().join(Uuid::new_v4().to_string()),
         entry_pool,
@@ -1271,12 +1288,13 @@ async fn test_v2_metadata_maintenance() -> Res<()> {
 
     let facet_title = FacetKey::from(WellKnownFacetTag::TitleGeneric);
     let facet_note = FacetKey::from(WellKnownFacetTag::Note);
-    let user_path = UserPath::from("/duser-wip-testmeta1/ddev-wip-iroh-testmeta1/plug1/routine1");
+    let user_path =
+        UserPathBuf::from("/duser-wip-testmeta1/ddev-wip-iroh-testmeta1/plug1/routine1");
 
     // 1. Test 'add' metadata
     let doc_id = repo
         .add(AddDocArgs {
-            branch_path: "main".into(),
+            branch_path: BranchPathBuf::from("main"),
             facets: [(
                 facet_title.clone(),
                 WellKnownFacet::TitleGeneric("Initial".into()).into(),
@@ -1288,7 +1306,7 @@ async fn test_v2_metadata_maintenance() -> Res<()> {
 
     let dmeta_after_add = get_dmeta_on_main(&repo, &doc_id).await?;
     let main_branch_doc_id = repo
-        .get_branch_state(&doc_id, &"main".into())
+        .get_branch_state(&doc_id, BranchPath::new("main"))
         .await?
         .ok_or_eyre("missing main branch state")?
         .branch_doc_id;
@@ -1308,7 +1326,7 @@ async fn test_v2_metadata_maintenance() -> Res<()> {
     // Check Dmeta in content doc
     let am_id = DocumentId::from_str(
         &repo
-            .get_branch_state(&doc_id, &"main".into())
+            .get_branch_state(&doc_id, BranchPath::new("main"))
             .await?
             .ok_or_eyre("missing main branch state")?
             .branch_doc_id,
@@ -1323,7 +1341,8 @@ async fn test_v2_metadata_maintenance() -> Res<()> {
         .await??;
 
     // 2. Test 'update' metadata and user attribution
-    let user_path2 = UserPath::from("/duser-wip-testmeta2/ddev-wip-iroh-testmeta2/plug2/routine2");
+    let user_path2 =
+        UserPathBuf::from("/duser-wip-testmeta2/ddev-wip-iroh-testmeta2/plug2/routine2");
     repo.update_at_heads(
         DocPatch {
             id: doc_id.clone(),
@@ -1335,7 +1354,7 @@ async fn test_v2_metadata_maintenance() -> Res<()> {
             facets_remove: vec![],
             user_path: Some(user_path2.clone()),
         },
-        "main".into(),
+        BranchPath::new("main"),
         None,
     )
     .await?;
@@ -1369,7 +1388,7 @@ async fn test_v2_metadata_maintenance() -> Res<()> {
             facets_remove: vec![facet_note.clone()],
             user_path: None,
         },
-        "main".into(),
+        BranchPath::new("main"),
         None,
     )
     .await?;
@@ -1398,7 +1417,7 @@ async fn test_v2_metadata_maintenance() -> Res<()> {
             facets_remove: vec![],
             user_path: None,
         },
-        "main".into(),
+        BranchPath::new("main"),
         None,
     )
     .await?;
@@ -1417,7 +1436,7 @@ async fn test_v2_metadata_maintenance() -> Res<()> {
     repo.create_branch_at_heads_from_branch(
         &doc_id,
         &local_branch("branch-a"),
-        &"main".into(),
+        BranchPath::new("main"),
         &main_heads,
         None,
     )
@@ -1433,7 +1452,7 @@ async fn test_v2_metadata_maintenance() -> Res<()> {
             facets_remove: vec![],
             user_path: None,
         },
-        local_branch("branch-a"),
+        &local_branch("branch-a"),
         Some(main_heads),
     )
     .await?;
@@ -1447,10 +1466,10 @@ async fn test_v2_metadata_maintenance() -> Res<()> {
 
     repo.merge_from_heads(
         &doc_id,
-        &"main".into(),
+        BranchPath::new("main"),
         &local_branch("branch-a"),
         &a_heads,
-        Some(user_path.clone()),
+        Some(&user_path),
     )
     .await?;
 
@@ -1500,7 +1519,7 @@ async fn test_update_at_heads_uses_patch_user_path_actor() -> Res<()> {
     let (repo, stop_token) = DrawerRepo::load(
         Arc::clone(&big_repo),
         drawer_doc_id,
-        daybook_types::doc::UserPath::from("/duser-wip-localtest/ddev-wip-iroh-localtest"),
+        daybook_types::doc::UserPathBuf::from("/duser-wip-localtest/ddev-wip-iroh-localtest"),
         new_meta_store_sql().await?,
         std::env::temp_dir().join(Uuid::new_v4().to_string()),
         Arc::new(std::sync::Mutex::new(KeyedLruPool::new(1000))),
@@ -1511,7 +1530,7 @@ async fn test_update_at_heads_uses_patch_user_path_actor() -> Res<()> {
 
     let doc_id = repo
         .add(AddDocArgs {
-            branch_path: "main".into(),
+            branch_path: BranchPathBuf::from("main"),
             facets: [(
                 FacetKey::from(WellKnownFacetTag::TitleGeneric),
                 WellKnownFacet::TitleGeneric("before".into()).into(),
@@ -1521,7 +1540,7 @@ async fn test_update_at_heads_uses_patch_user_path_actor() -> Res<()> {
         })
         .await?;
 
-    let user_path = UserPath::from("/duser-wip-testactor/ddev-wip-iroh-testactor/plug/routine");
+    let user_path = UserPathBuf::from("/duser-wip-testactor/ddev-wip-iroh-testactor/plug/routine");
     repo.update_at_heads(
         DocPatch {
             id: doc_id.clone(),
@@ -1533,7 +1552,7 @@ async fn test_update_at_heads_uses_patch_user_path_actor() -> Res<()> {
             facets_remove: vec![],
             user_path: Some(user_path.clone()),
         },
-        "main".into(),
+        BranchPath::new("main"),
         None,
     )
     .await?;
@@ -1541,7 +1560,7 @@ async fn test_update_at_heads_uses_patch_user_path_actor() -> Res<()> {
     let expected_actor = repo.content_actor_id(
         Some(&user_path),
         &repo
-            .get_branch_state(&doc_id, &"main".into())
+            .get_branch_state(&doc_id, BranchPath::new("main"))
             .await?
             .ok_or_eyre("missing main branch state")?
             .branch_doc_id,
@@ -1549,7 +1568,7 @@ async fn test_update_at_heads_uses_patch_user_path_actor() -> Res<()> {
     let handle = big_repo
         .find_doc_handle(&DocumentId::from_str(
             &repo
-                .get_branch_state(&doc_id, &"main".into())
+                .get_branch_state(&doc_id, BranchPath::new("main"))
                 .await?
                 .ok_or_eyre("missing main branch state")?
                 .branch_doc_id,
@@ -1584,7 +1603,7 @@ async fn test_merge_from_heads_uses_user_path_actor() -> Res<()> {
     let (repo, stop_token) = DrawerRepo::load(
         Arc::clone(&big_repo),
         drawer_doc_id,
-        daybook_types::doc::UserPath::from("/duser-wip-localtest/ddev-wip-iroh-localtest"),
+        daybook_types::doc::UserPathBuf::from("/duser-wip-localtest/ddev-wip-iroh-localtest"),
         new_meta_store_sql().await?,
         std::env::temp_dir().join(Uuid::new_v4().to_string()),
         Arc::new(std::sync::Mutex::new(KeyedLruPool::new(1000))),
@@ -1595,7 +1614,7 @@ async fn test_merge_from_heads_uses_user_path_actor() -> Res<()> {
 
     let doc_id = repo
         .add(AddDocArgs {
-            branch_path: "main".into(),
+            branch_path: BranchPathBuf::from("main"),
             facets: [(
                 FacetKey::from(WellKnownFacetTag::TitleGeneric),
                 WellKnownFacet::TitleGeneric("base".into()).into(),
@@ -1616,7 +1635,7 @@ async fn test_merge_from_heads_uses_user_path_actor() -> Res<()> {
     repo.create_branch_at_heads_from_branch(
         &doc_id,
         &local_branch("branch-a"),
-        &"main".into(),
+        BranchPath::new("main"),
         &main_heads,
         None,
     )
@@ -1632,7 +1651,7 @@ async fn test_merge_from_heads_uses_user_path_actor() -> Res<()> {
             facets_remove: vec![],
             user_path: None,
         },
-        local_branch("branch-a"),
+        &local_branch("branch-a"),
         Some(main_heads),
     )
     .await?;
@@ -1646,20 +1665,20 @@ async fn test_merge_from_heads_uses_user_path_actor() -> Res<()> {
         .cloned()
         .ok_or_eyre("missing branch-a")?;
     let merge_user_path =
-        UserPath::from("/duser-wip-testmerge/ddev-wip-iroh-testmerge/plug/routine");
+        UserPathBuf::from("/duser-wip-testmerge/ddev-wip-iroh-testmerge/plug/routine");
     repo.merge_from_heads(
         &doc_id,
-        &"main".into(),
+        BranchPath::new("main"),
         &local_branch("branch-a"),
         &branch_heads,
-        Some(merge_user_path.clone()),
+        Some(&merge_user_path),
     )
     .await?;
 
     let expected_actor = repo.content_actor_id(
         Some(&merge_user_path),
         &repo
-            .get_branch_state(&doc_id, &"main".into())
+            .get_branch_state(&doc_id, BranchPath::new("main"))
             .await?
             .ok_or_eyre("missing main branch state")?
             .branch_doc_id,
@@ -1667,7 +1686,7 @@ async fn test_merge_from_heads_uses_user_path_actor() -> Res<()> {
     let handle = big_repo
         .find_doc_handle(&DocumentId::from_str(
             &repo
-                .get_branch_state(&doc_id, &"main".into())
+                .get_branch_state(&doc_id, BranchPath::new("main"))
                 .await?
                 .ok_or_eyre("missing main branch state")?
                 .branch_doc_id,
@@ -1702,7 +1721,7 @@ async fn test_facet_keys_touched_by_local_actor_includes_user_path_scoped_actor(
     let (repo, stop_token) = DrawerRepo::load(
         Arc::clone(&big_repo),
         drawer_doc_id,
-        daybook_types::doc::UserPath::from("/duser-wip-localtest/ddev-wip-iroh-localtest"),
+        daybook_types::doc::UserPathBuf::from("/duser-wip-localtest/ddev-wip-iroh-localtest"),
         new_meta_store_sql().await?,
         std::env::temp_dir().join(Uuid::new_v4().to_string()),
         Arc::new(std::sync::Mutex::new(KeyedLruPool::new(1000))),
@@ -1713,7 +1732,7 @@ async fn test_facet_keys_touched_by_local_actor_includes_user_path_scoped_actor(
 
     let doc_id = repo
         .add(AddDocArgs {
-            branch_path: "main".into(),
+            branch_path: BranchPathBuf::from("main"),
             facets: [(
                 FacetKey::from(WellKnownFacetTag::TitleGeneric),
                 WellKnownFacet::TitleGeneric("base".into()).into(),
@@ -1723,7 +1742,7 @@ async fn test_facet_keys_touched_by_local_actor_includes_user_path_scoped_actor(
         })
         .await?;
 
-    let user_path = UserPath::from("/duser-wip-localtest/ddev-wip-iroh-localtest/plug/routine");
+    let user_path = UserPathBuf::from("/duser-wip-localtest/ddev-wip-iroh-localtest/plug/routine");
     let note_key = FacetKey::from(WellKnownFacetTag::Note);
     repo.update_at_heads(
         DocPatch {
@@ -1736,7 +1755,7 @@ async fn test_facet_keys_touched_by_local_actor_includes_user_path_scoped_actor(
             facets_remove: vec![],
             user_path: Some(user_path),
         },
-        "main".into(),
+        BranchPath::new("main"),
         None,
     )
     .await?;
@@ -1752,7 +1771,7 @@ async fn test_facet_keys_touched_by_local_actor_includes_user_path_scoped_actor(
     let touched = repo
         .facet_keys_touched_by_local_actor(
             &doc_id,
-            &"main".into(),
+            BranchPath::new("main"),
             &main_heads,
             std::slice::from_ref(&note_key),
         )
@@ -1854,7 +1873,7 @@ async fn test_v2_updated_at_merge() -> Res<()> {
     let (repo, stop_token) = DrawerRepo::load(
         Arc::clone(&big_repo),
         drawer_doc_id,
-        daybook_types::doc::UserPath::from("/duser-wip-localtest/ddev-wip-iroh-localtest"),
+        daybook_types::doc::UserPathBuf::from("/duser-wip-localtest/ddev-wip-iroh-localtest"),
         new_meta_store_sql().await?,
         std::env::temp_dir().join(Uuid::new_v4().to_string()),
         entry_pool,
@@ -1868,7 +1887,7 @@ async fn test_v2_updated_at_merge() -> Res<()> {
     // 1. Add doc on main
     let doc_id = repo
         .add(AddDocArgs {
-            branch_path: "main".into(),
+            branch_path: BranchPathBuf::from("main"),
             facets: [(
                 facet_title.clone(),
                 WellKnownFacet::TitleGeneric("Base".into()).into(),
@@ -1885,7 +1904,7 @@ async fn test_v2_updated_at_merge() -> Res<()> {
     repo.create_branch_at_heads_from_branch(
         &doc_id,
         &local_branch("branch-a"),
-        &"main".into(),
+        BranchPath::new("main"),
         &main_heads,
         None,
     )
@@ -1901,7 +1920,7 @@ async fn test_v2_updated_at_merge() -> Res<()> {
             facets_remove: vec![],
             user_path: None,
         },
-        local_branch("branch-a"),
+        &local_branch("branch-a"),
         Some(main_heads.clone()),
     )
     .await?;
@@ -1909,7 +1928,7 @@ async fn test_v2_updated_at_merge() -> Res<()> {
     repo.create_branch_at_heads_from_branch(
         &doc_id,
         &local_branch("branch-b"),
-        &"main".into(),
+        BranchPath::new("main"),
         &main_heads,
         None,
     )
@@ -1925,7 +1944,7 @@ async fn test_v2_updated_at_merge() -> Res<()> {
             facets_remove: vec![],
             user_path: None,
         },
-        local_branch("branch-b"),
+        &local_branch("branch-b"),
         Some(main_heads.clone()),
     )
     .await?;
@@ -1970,7 +1989,7 @@ async fn test_v2_updated_at_merge() -> Res<()> {
 
     repo.merge_from_heads(
         &doc_id,
-        &"main".into(),
+        BranchPath::new("main"),
         &local_branch("branch-a"),
         &a_heads,
         None,
@@ -1978,7 +1997,7 @@ async fn test_v2_updated_at_merge() -> Res<()> {
     .await?;
     repo.merge_from_heads(
         &doc_id,
-        &"main".into(),
+        BranchPath::new("main"),
         &local_branch("branch-b"),
         &b_heads,
         None,
@@ -1989,7 +2008,7 @@ async fn test_v2_updated_at_merge() -> Res<()> {
     // can resolve the corresponding facet payload versions.
     let am_id = DocumentId::from_str(
         &repo
-            .get_branch_state(&doc_id, &"main".into())
+            .get_branch_state(&doc_id, BranchPath::new("main"))
             .await?
             .ok_or_eyre("missing main branch state")?
             .branch_doc_id,
@@ -2017,7 +2036,7 @@ async fn test_v2_updated_at_merge() -> Res<()> {
         let at_doc = repo
             .get_doc_with_facets_at_branch_heads(
                 &doc_id,
-                &"main".into(),
+                BranchPath::new("main"),
                 &single_head,
                 Some(vec![facet_title.clone()]),
             )
@@ -2067,7 +2086,7 @@ async fn test_v2_facet_blame_maintenance() -> Res<()> {
     let (repo, stop_token) = DrawerRepo::load(
         Arc::clone(&big_repo),
         drawer_doc_id,
-        daybook_types::doc::UserPath::from("/duser-wip-localtest/ddev-wip-iroh-localtest"),
+        daybook_types::doc::UserPathBuf::from("/duser-wip-localtest/ddev-wip-iroh-localtest"),
         new_meta_store_sql().await?,
         std::env::temp_dir().join(Uuid::new_v4().to_string()),
         entry_pool,
@@ -2082,7 +2101,7 @@ async fn test_v2_facet_blame_maintenance() -> Res<()> {
     // 1. Add doc
     let doc_id = repo
         .add(AddDocArgs {
-            branch_path: "main".into(),
+            branch_path: BranchPathBuf::from("main"),
             facets: [(
                 facet_title.clone(),
                 WellKnownFacet::TitleGeneric("Initial".into()).into(),
@@ -2101,7 +2120,7 @@ async fn test_v2_facet_blame_maintenance() -> Res<()> {
     repo.create_branch_at_heads_from_branch(
         &doc_id,
         &local_branch("branch-a"),
-        &"main".into(),
+        BranchPath::new("main"),
         &initial_heads,
         None,
     )
@@ -2117,7 +2136,7 @@ async fn test_v2_facet_blame_maintenance() -> Res<()> {
             facets_remove: vec![],
             user_path: None,
         },
-        local_branch("branch-a"),
+        &local_branch("branch-a"),
         Some(initial_heads.clone()),
     )
     .await?;
@@ -2134,7 +2153,7 @@ async fn test_v2_facet_blame_maintenance() -> Res<()> {
     repo.create_branch_at_heads_from_branch(
         &doc_id,
         &local_branch("branch-b"),
-        &"main".into(),
+        BranchPath::new("main"),
         &initial_heads,
         None,
     )
@@ -2146,7 +2165,7 @@ async fn test_v2_facet_blame_maintenance() -> Res<()> {
             facets_remove: vec![],
             user_path: None,
         },
-        local_branch("branch-b"),
+        &local_branch("branch-b"),
         Some(initial_heads.clone()),
     )
     .await?;
@@ -2162,7 +2181,7 @@ async fn test_v2_facet_blame_maintenance() -> Res<()> {
     // 4. Merge branch-a to main
     repo.merge_from_heads(
         &doc_id,
-        &"main".into(),
+        BranchPath::new("main"),
         &local_branch("branch-a"),
         &a_heads,
         None,
@@ -2180,7 +2199,7 @@ async fn test_v2_facet_blame_maintenance() -> Res<()> {
     // 5. Merge branch-b to main
     repo.merge_from_heads(
         &doc_id,
-        &"main".into(),
+        BranchPath::new("main"),
         &local_branch("branch-b"),
         &b_heads,
         None,
@@ -2229,7 +2248,7 @@ async fn test_v2_listener_is_scoped_to_drawer_doc() -> Res<()> {
     let (repo_a, stop_a) = DrawerRepo::load(
         Arc::clone(&big_repo),
         drawer_doc_id_a,
-        daybook_types::doc::UserPath::from("/duser-wip-localtest/ddev-wip-iroh-localtest"),
+        daybook_types::doc::UserPathBuf::from("/duser-wip-localtest/ddev-wip-iroh-localtest"),
         new_meta_store_sql().await?,
         std::env::temp_dir().join(Uuid::new_v4().to_string()),
         Arc::clone(&entry_pool),
@@ -2240,7 +2259,7 @@ async fn test_v2_listener_is_scoped_to_drawer_doc() -> Res<()> {
     let (repo_b, stop_b) = DrawerRepo::load(
         Arc::clone(&big_repo),
         drawer_doc_id_b,
-        daybook_types::doc::UserPath::from("/duser-wip-localtest/ddev-wip-iroh-localtest"),
+        daybook_types::doc::UserPathBuf::from("/duser-wip-localtest/ddev-wip-iroh-localtest"),
         new_meta_store_sql().await?,
         std::env::temp_dir().join(Uuid::new_v4().to_string()),
         Arc::clone(&entry_pool),
@@ -2254,7 +2273,7 @@ async fn test_v2_listener_is_scoped_to_drawer_doc() -> Res<()> {
     let facet_note = FacetKey::from(WellKnownFacetTag::Note);
     let _doc_id_a = repo_a
         .add(AddDocArgs {
-            branch_path: "main".into(),
+            branch_path: BranchPathBuf::from("main"),
             facets: [(
                 facet_note.clone(),
                 WellKnownFacet::Note("hello-from-a".into()).into(),
@@ -2304,7 +2323,7 @@ async fn test_v2_content_update_does_not_emit_drawer_membership_events() -> Res<
     let (repo, stop_token) = DrawerRepo::load(
         Arc::clone(&big_repo),
         drawer_doc_id,
-        daybook_types::doc::UserPath::from("/duser-wip-localtest/ddev-wip-iroh-localtest"),
+        daybook_types::doc::UserPathBuf::from("/duser-wip-localtest/ddev-wip-iroh-localtest"),
         new_meta_store_sql().await?,
         std::env::temp_dir().join(Uuid::new_v4().to_string()),
         entry_pool,
@@ -2317,7 +2336,7 @@ async fn test_v2_content_update_does_not_emit_drawer_membership_events() -> Res<
     let facet_note = FacetKey::from(WellKnownFacetTag::Note);
     let doc_id = repo
         .add(AddDocArgs {
-            branch_path: "main".into(),
+            branch_path: BranchPathBuf::from("main"),
             facets: [
                 (
                     facet_title.clone(),
@@ -2346,7 +2365,7 @@ async fn test_v2_content_update_does_not_emit_drawer_membership_events() -> Res<
             facets_remove: vec![facet_note.clone()],
             user_path: None,
         },
-        "main".into(),
+        BranchPath::new("main"),
         None,
     )
     .await?;
@@ -2390,7 +2409,7 @@ async fn test_diff_events_delete_origin_uses_map_deleted_tombstone() -> Res<()> 
     let (repo, stop_token) = DrawerRepo::load(
         Arc::clone(&big_repo),
         drawer_doc_id,
-        daybook_types::doc::UserPath::from("/duser-wip-localtest/ddev-wip-iroh-localtest"),
+        daybook_types::doc::UserPathBuf::from("/duser-wip-localtest/ddev-wip-iroh-localtest"),
         new_meta_store_sql().await?,
         std::env::temp_dir().join(Uuid::new_v4().to_string()),
         entry_pool,
@@ -2401,7 +2420,7 @@ async fn test_diff_events_delete_origin_uses_map_deleted_tombstone() -> Res<()> 
 
     let doc_id = repo
         .add(AddDocArgs {
-            branch_path: "main".into(),
+            branch_path: BranchPathBuf::from("main"),
             facets: [(
                 FacetKey::from(WellKnownFacetTag::TitleGeneric),
                 WellKnownFacet::TitleGeneric("delete me".into()).into(),
@@ -2468,7 +2487,7 @@ async fn test_add_rejects_unknown_facet_tag() -> Res<()> {
     let (repo, stop_token) = DrawerRepo::load(
         big_repo,
         drawer_doc_id,
-        daybook_types::doc::UserPath::from("/duser-wip-localtest/ddev-wip-iroh-localtest"),
+        daybook_types::doc::UserPathBuf::from("/duser-wip-localtest/ddev-wip-iroh-localtest"),
         new_meta_store_sql().await?,
         std::env::temp_dir().join(Uuid::new_v4().to_string()),
         Arc::new(std::sync::Mutex::new(KeyedLruPool::new(1000))),
@@ -2480,7 +2499,7 @@ async fn test_add_rejects_unknown_facet_tag() -> Res<()> {
     let unknown_facet_key = FacetKey::from("org.test.unknown/main");
     let add_result = repo
         .add(AddDocArgs {
-            branch_path: "main".into(),
+            branch_path: BranchPathBuf::from("main"),
             facets: [(unknown_facet_key, serde_json::json!({"hello":"world"}))].into(),
             user_path: None,
         })
@@ -2518,7 +2537,7 @@ async fn test_add_rejects_self_reference_without_target_facet() -> Res<()> {
     let (repo, stop_token) = DrawerRepo::load(
         big_repo,
         drawer_doc_id,
-        daybook_types::doc::UserPath::from("/duser-wip-localtest/ddev-wip-iroh-localtest"),
+        daybook_types::doc::UserPathBuf::from("/duser-wip-localtest/ddev-wip-iroh-localtest"),
         new_meta_store_sql().await?,
         std::env::temp_dir().join(Uuid::new_v4().to_string()),
         Arc::new(std::sync::Mutex::new(KeyedLruPool::new(1000))),
@@ -2540,7 +2559,7 @@ async fn test_add_rejects_self_reference_without_target_facet() -> Res<()> {
 
     let add_result = repo
         .add(AddDocArgs {
-            branch_path: "main".into(),
+            branch_path: BranchPathBuf::from("main"),
             facets: [(image_metadata_facet_key, image_metadata_facet.into())].into(),
             user_path: None,
         })
@@ -2578,7 +2597,7 @@ async fn test_add_accepts_body_self_reference_with_empty_fragment_for_present_ta
     let (repo, stop_token) = DrawerRepo::load(
         big_repo,
         drawer_doc_id,
-        daybook_types::doc::UserPath::from("/duser-wip-localtest/ddev-wip-iroh-localtest"),
+        daybook_types::doc::UserPathBuf::from("/duser-wip-localtest/ddev-wip-iroh-localtest"),
         new_meta_store_sql().await?,
         std::env::temp_dir().join(Uuid::new_v4().to_string()),
         Arc::new(std::sync::Mutex::new(KeyedLruPool::new(1000))),
@@ -2597,7 +2616,7 @@ async fn test_add_accepts_body_self_reference_with_empty_fragment_for_present_ta
 
     let add_result = repo
         .add(AddDocArgs {
-            branch_path: "main".into(),
+            branch_path: BranchPathBuf::from("main"),
             facets: [
                 (
                     note_facet_key.clone(),
@@ -2759,7 +2778,7 @@ async fn perf_drawer_add_disk_baseline() -> Res<()> {
     let (repo, stop_token) = DrawerRepo::load(
         Arc::clone(&big_repo),
         drawer_doc_id,
-        daybook_types::doc::UserPath::from("/duser-wip-localtest/ddev-wip-iroh-localtest"),
+        daybook_types::doc::UserPathBuf::from("/duser-wip-localtest/ddev-wip-iroh-localtest"),
         new_meta_store_sql().await?,
         std::env::temp_dir().join(Uuid::new_v4().to_string()),
         entry_pool,
@@ -2773,7 +2792,7 @@ async fn perf_drawer_add_disk_baseline() -> Res<()> {
     for ii in 0..total_docs {
         let _doc_id = repo
             .add(AddDocArgs {
-                branch_path: "main".into(),
+                branch_path: BranchPathBuf::from("main"),
                 facets: [
                     (
                         FacetKey::from(WellKnownFacetTag::TitleGeneric),

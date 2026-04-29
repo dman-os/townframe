@@ -76,7 +76,7 @@ impl DrawerRepoFfi {
     #[tracing::instrument(err, skip(self))]
     async fn get(self: Arc<Self>, id: DocId, branch_path: String) -> Result<Option<Doc>, FfiError> {
         let this = Arc::clone(&self);
-        let branch_path = daybook_types::doc::BranchPath::from(branch_path);
+        let branch_path = daybook_types::doc::BranchPathBuf::from(branch_path);
         Ok(self
             .fcx
             .do_on_rt(async move {
@@ -95,7 +95,7 @@ impl DrawerRepoFfi {
         branch_path: String,
     ) -> Result<Option<DocBundle>, FfiError> {
         let this = Arc::clone(&self);
-        let branch_path = daybook_types::doc::BranchPath::from(branch_path);
+        let branch_path = daybook_types::doc::BranchPathBuf::from(branch_path);
         Ok(self
             .fcx
             .do_on_rt(async move {
@@ -141,7 +141,7 @@ impl DrawerRepoFfi {
         heads: Option<ChangeHashSet>,
     ) -> Result<(), FfiError> {
         let this = Arc::clone(&self);
-        let branch_path = daybook_types::doc::BranchPath::from(branch_path);
+        let branch_path = daybook_types::doc::BranchPathBuf::from(branch_path);
         Ok(self
             .fcx
             .do_on_rt(async move {

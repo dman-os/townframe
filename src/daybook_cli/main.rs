@@ -247,7 +247,7 @@ async fn static_cli(cli: Cli) -> Res<ExitCode> {
                         error!("branch not found for doc: {id} - {val}");
                         return Ok(ExitCode::FAILURE);
                     }
-                    daybook_types::doc::BranchPath::from(val.as_str())
+                    daybook_types::doc::BranchPathBuf::from(val.as_str())
                 }
                 None => {
                     let Some(branch) = branches.main_branch_path() else {
@@ -266,7 +266,7 @@ async fn static_cli(cli: Cli) -> Res<ExitCode> {
         }
         StaticCommands::Touch => {
             let doc = daybook_types::doc::AddDocArgs {
-                branch_path: daybook_types::doc::BranchPath::from("main"),
+                branch_path: daybook_types::doc::BranchPathBuf::from("main"),
                 facets: [
                     //
                     (
@@ -275,7 +275,7 @@ async fn static_cli(cli: Cli) -> Res<ExitCode> {
                     ),
                 ]
                 .into(),
-                user_path: Some(daybook_types::doc::UserPath::from(
+                user_path: Some(daybook_types::doc::UserPathBuf::from(
                     ctx.local_user_path.clone(),
                 )),
             };
@@ -294,7 +294,7 @@ async fn static_cli(cli: Cli) -> Res<ExitCode> {
                         error!("branch not found for doc: {id} - {val}");
                         return Ok(ExitCode::FAILURE);
                     }
-                    daybook_types::doc::BranchPath::from(val.as_str())
+                    daybook_types::doc::BranchPathBuf::from(val.as_str())
                 }
                 None => {
                     let Some(branch) = branches.main_branch_path() else {
@@ -355,7 +355,7 @@ async fn static_cli(cli: Cli) -> Res<ExitCode> {
                 daybook_fuse::Config {
                     root_path,
                     metadata_db_path,
-                    branch_path: daybook_types::doc::BranchPath::from("main"),
+                    branch_path: daybook_types::doc::BranchPathBuf::from("main"),
                     poll_interval: std::time::Duration::from_millis(250),
                 },
                 Arc::clone(&drawer_repo),
@@ -960,7 +960,7 @@ Routine impl: {routine_impl:?}
                                 if branches.branches.contains_key(val) {
                                     eyre::bail!("branch not found for doc: {doc_id} - {val}");
                                 }
-                                daybook_types::doc::BranchPath::from(val.as_str())
+                                daybook_types::doc::BranchPathBuf::from(val.as_str())
                             }
                             None => {
                                 let Some(branch) = branches.main_branch_path() else {
@@ -1067,7 +1067,7 @@ mod tests {
             Arc::clone(&ctx.big_repo),
             Arc::clone(&blobs_repo),
             ctx.doc_app.document_id().clone(),
-            daybook_types::doc::UserPath::from(ctx.local_user_path.clone()),
+            daybook_types::doc::UserPathBuf::from(ctx.local_user_path.clone()),
         )
         .await?;
         let (drawer_repo, drawer_stop) = DrawerRepo::load(
@@ -1088,7 +1088,7 @@ mod tests {
             Arc::clone(&ctx.big_repo),
             ctx.doc_app.document_id().clone(),
             Arc::clone(&plugs_repo),
-            daybook_types::doc::UserPath::from(ctx.local_user_path.clone()),
+            daybook_types::doc::UserPathBuf::from(ctx.local_user_path.clone()),
             ctx.sql.db_pool.clone(),
         )
         .await?;
@@ -1146,9 +1146,9 @@ mod tests {
             node_a
                 .drawer
                 .add(daybook_types::doc::AddDocArgs {
-                    branch_path: daybook_types::doc::BranchPath::from("main"),
+                    branch_path: daybook_types::doc::BranchPathBuf::from("main"),
                     facets: default(),
-                    user_path: Some(daybook_types::doc::UserPath::from(
+                    user_path: Some(daybook_types::doc::UserPathBuf::from(
                         node_a.ctx.local_user_path.clone(),
                     )),
                 })
@@ -1339,7 +1339,7 @@ mod lazy {
                     Arc::clone(&ctx.big_repo),
                     Arc::clone(&blobs),
                     ctx.doc_app.document_id().clone(),
-                    daybook_types::doc::UserPath::from(ctx.local_user_path.clone()),
+                    daybook_types::doc::UserPathBuf::from(ctx.local_user_path.clone()),
                 )
                 .await?;
                 plugs.ensure_system_plugs().await?;
@@ -1394,7 +1394,7 @@ mod lazy {
                     Arc::clone(&ctx.big_repo),
                     ctx.doc_app.document_id().clone(),
                     Arc::clone(&plugs),
-                    daybook_types::doc::UserPath::from(ctx.local_user_path.clone()),
+                    daybook_types::doc::UserPathBuf::from(ctx.local_user_path.clone()),
                     ctx.sql.db_pool.clone(),
                 )
                 .await?;
@@ -1417,7 +1417,7 @@ mod lazy {
                 let (dispatch, dispatch_stop) = DispatchRepo::load(
                     Arc::clone(&ctx.big_repo),
                     ctx.doc_app.document_id().clone(),
-                    daybook_types::doc::UserPath::from(ctx.local_user_path.clone()),
+                    daybook_types::doc::UserPathBuf::from(ctx.local_user_path.clone()),
                     ctx.sql.db_pool.clone(),
                 )
                 .await?;

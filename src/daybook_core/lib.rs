@@ -7,7 +7,7 @@ mod interlude {
     pub use crate::app::SqlCtx;
     pub use crate::stores::{AmStore, VersionTag, Versioned};
 
-    pub use daybook_types::doc::ChangeHashSet;
+    pub use daybook_types::doc::{BranchPath, BranchPathBuf, ChangeHashSet, UserPath, UserPathBuf};
 
     #[cfg(any(test, feature = "test-support"))]
     pub use crate::test_support::BigRepoTestCompat;

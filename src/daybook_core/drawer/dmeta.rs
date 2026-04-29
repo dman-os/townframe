@@ -223,7 +223,7 @@ fn set_user(
     actors.insert(
         actor_id.to_string(),
         UserMeta {
-            user_path: user_path.clone(),
+            user_path: user_path.to_owned(),
         },
     );
     autosurgeon::reconcile_prop(tx, dmeta_obj, "actors", ThroughJson(actors))?;
@@ -256,7 +256,7 @@ pub fn ensure_for_add(
         actors.insert(
             actor_id.to_string(),
             UserMeta {
-                user_path: user_path.clone(),
+                user_path: user_path.to_owned(),
             },
         );
     }

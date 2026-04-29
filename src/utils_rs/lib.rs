@@ -617,6 +617,26 @@ pub enum AbortableJoinSetStopError {
 }
 
 #[derive(Debug)]
+pub struct TaskHandle {
+    abort: tokio::task::AbortHandle,
+    done_rx: tokio::sync::oneshot::Receiver<()>,
+}
+
+impl TaskHandle {
+    pub fn abort(&self) {
+        self.abort.abort();
+    }
+
+    pub fn is_finished(&self) -> bool {
+        self.abort.is_finished()
+    }
+
+    pub async fn join(self) {
+        let _ = self.done_rx.await;
+    }
+}
+
+#[derive(Debug)]
 pub struct AbortableJoinSet {
     inner: std::sync::Mutex<Option<tokio::task::JoinSet<()>>>,
 }
@@ -634,9 +654,7 @@ impl AbortableJoinSet {
         }
     }
 
-    // TODO: avoid using a tokio JoinSet but instead use our own CancellationToken
-    // based approach to support join handles
-    pub fn spawn<F>(&self, fut: F) -> Result<(), AbortableJoinSetError>
+    pub fn spawn<F>(&self, fut: F) -> Result<TaskHandle, AbortableJoinSetError>
     where
         F: std::future::Future<Output = ()> + Send + 'static,
     {
@@ -644,8 +662,12 @@ impl AbortableJoinSet {
         let Some(join_set) = guard.as_mut() else {
             return Err(AbortableJoinSetError::Aborted);
         };
-        join_set.spawn(fut);
-        Ok(())
+        let (done_tx, done_rx) = tokio::sync::oneshot::channel();
+        let abort = join_set.spawn(async move {
+            fut.await;
+            let _ = done_tx.send(());
+        });
+        Ok(TaskHandle { abort, done_rx })
     }
 
     pub fn abort(&self) {

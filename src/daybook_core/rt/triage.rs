@@ -7,7 +7,7 @@ use crate::rt::switch::{
     SwtchSinkInterest,
 };
 use crate::rt::{DispatchArgs, Rt};
-use daybook_types::doc::BranchPath;
+use daybook_types::doc::BranchPathBuf;
 use daybook_types::doc::{Doc, DocId, FacetKey, WellKnownFacetTag};
 
 use daybook_types::manifest::{
@@ -45,7 +45,7 @@ impl DocProcessorTriageListener {
     fn inflight_job_key(
         doc_id: &DocId,
         processor_full_id: &str,
-        branch_path: &BranchPath,
+        branch_path: &BranchPathBuf,
         doc_heads: &ChangeHashSet,
     ) -> String {
         format!(
@@ -138,7 +138,7 @@ impl DocProcessorTriageListener {
         doc_id: &DocId,
         doc_heads: &ChangeHashSet,
         doc: &Doc,
-        branch_path: daybook_types::doc::BranchPath,
+        branch_path: daybook_types::doc::BranchPathBuf,
         _event_origin: &crate::event_origin::SwitchEventOrigin,
         change_kind: DocChangeKind,
         changed_facet_keys: Option<&HashSet<FacetKey>>,
@@ -379,7 +379,7 @@ impl SwitchSink for DocProcessorTriageListener {
                         return Ok(SwitchSinkOutcome::default());
                     }
                     let meta_doc = facet_keys_set_to_meta_doc(id, &deleted_set);
-                    let pseudo_branch = BranchPath::from("main");
+                    let pseudo_branch = BranchPathBuf::from("main");
                     self.triage_doc(
                         ctx,
                         id,
@@ -403,7 +403,7 @@ impl SwitchSink for DocProcessorTriageListener {
                     origin,
                 } => {
                     for (branch_name, heads) in &entry.branches {
-                        let branch_path = BranchPath::from(branch_name.as_str());
+                        let branch_path = BranchPathBuf::from(branch_name.as_str());
                         if branch_path.to_string().starts_with("/tmp/") {
                             continue;
                         }
@@ -494,7 +494,7 @@ impl SwitchSink for DocProcessorTriageListener {
                             Some(diff.removed_facet_keys.iter().cloned().collect())
                         };
                     for (branch_name, heads) in &entry.branches {
-                        let branch_path = BranchPath::from(branch_name.as_str());
+                        let branch_path = BranchPathBuf::from(branch_name.as_str());
                         if branch_path.to_string().starts_with("/tmp/") {
                             continue;
                         }
@@ -625,7 +625,7 @@ fn evaluate_node_predicate(predicate: &NodePredicate, is_local_for_processor: bo
 fn make_processor_done_token(
     doc_id: &DocId,
     processor_full_id: &str,
-    branch_path: &daybook_types::doc::BranchPath,
+    branch_path: &daybook_types::doc::BranchPathBuf,
     heads: &ChangeHashSet,
 ) -> String {
     let mut fingerprint = String::new();

@@ -32,7 +32,7 @@ impl DrawerRepo {
         let handle = self.big_repo.put_doc(DocumentId::random(), doc_am).await?;
         let doc_id = DocId::from(Uuid::new_v4().bs58());
         let branch_doc_id = handle.document_id().to_string();
-        let mutation_actor_id = self.content_actor_id(args.user_path.as_ref(), &branch_doc_id);
+        let mutation_actor_id = self.content_actor_id(args.user_path.as_deref(), &branch_doc_id);
         let now = Timestamp::now();
 
         let facet_keys: Vec<_> = args.facets.keys().cloned().collect();
@@ -62,7 +62,7 @@ impl DrawerRepo {
                     &facets_obj,
                     &facet_keys,
                     now,
-                    args.user_path.as_ref(),
+                    args.user_path.as_deref(),
                     &mutation_actor_id,
                 )?;
 
@@ -193,7 +193,7 @@ impl DrawerRepo {
     pub async fn update_at_heads(
         &self,
         patch: DocPatch,
-        branch_path: daybook_types::doc::BranchPath,
+        branch_path: &daybook_types::doc::BranchPath,
         heads: Option<ChangeHashSet>,
     ) -> Result<(), DrawerError> {
         if self.cancel_token.is_cancelled() {
@@ -233,7 +233,7 @@ impl DrawerRepo {
                 name: branch_path.to_string(),
             });
         };
-        let mutation_actor_id = self.content_actor_id(patch.user_path.as_ref(), &branch_doc_id);
+        let mutation_actor_id = self.content_actor_id(patch.user_path.as_deref(), &branch_doc_id);
         let existing_facet_keys = handle
             .with_document(|am_doc| {
                 let facets_obj =
@@ -289,7 +289,7 @@ impl DrawerRepo {
                     &facet_keys_set,
                     &facet_keys_remove,
                     now,
-                    patch.user_path.as_ref(),
+                    patch.user_path.as_deref(),
                     &mutation_actor_id,
                 )?;
 
@@ -318,7 +318,7 @@ impl DrawerRepo {
         to_branch: &daybook_types::doc::BranchPath,
         from_branch: &daybook_types::doc::BranchPath,
         from_heads: &ChangeHashSet,
-        user_path: Option<daybook_types::doc::UserPath>,
+        user_path: Option<&daybook_types::doc::UserPath>,
     ) -> Result<(), DrawerError> {
         if self.cancel_token.is_cancelled() {
             return Err(DrawerError::Other {
@@ -507,7 +507,7 @@ impl DrawerRepo {
         to_branch: &daybook_types::doc::BranchPath,
         from_branch: &daybook_types::doc::BranchPath,
         from_heads: &ChangeHashSet,
-        user_path: Option<daybook_types::doc::UserPath>,
+        user_path: Option<&daybook_types::doc::UserPath>,
     ) -> Result<(), DrawerError> {
         match self
             .create_branch_at_heads_from_branch(id, to_branch, from_branch, from_heads, user_path)
@@ -524,7 +524,7 @@ impl DrawerRepo {
         to_branch: &daybook_types::doc::BranchPath,
         from_branch: &daybook_types::doc::BranchPath,
         from_heads: &ChangeHashSet,
-        user_path: Option<daybook_types::doc::UserPath>,
+        user_path: Option<&daybook_types::doc::UserPath>,
     ) -> Result<(), DrawerError> {
         if self.cancel_token.is_cancelled() {
             return Err(DrawerError::Other {
@@ -541,7 +541,7 @@ impl DrawerRepo {
             .await?
             .ok_or_else(|| DrawerError::DocNotFound { id: id.clone() })?;
         let mutation_actor_id =
-            self.content_actor_id(user_path.as_ref(), &to_branch_ref.branch_doc_id);
+            self.content_actor_id(user_path.as_deref(), &to_branch_ref.branch_doc_id);
         let from_branch_ref = self.get_branch_ref(id, from_branch).await?.ok_or_else(|| {
             DrawerError::BranchNotFound {
                 name: from_branch.to_string(),
@@ -690,7 +690,7 @@ impl DrawerRepo {
                         &facets_obj,
                         &modified_facets,
                         now,
-                        user_path_for_dmeta.as_ref(),
+                        user_path_for_dmeta,
                         &mutation_actor_id,
                     )?;
                     let (heads_after_merge, _) = tx.commit();
@@ -795,8 +795,8 @@ impl DrawerRepo {
             let local_branch_refs = self.list_local_branch_refs(id).await?;
             for (branch_path, branch_ref) in &entry.branches {
                 self.remove_branch_from_partitions_if_needed(
-                    self.branch_kind_for_path(&daybook_types::doc::BranchPath::from(
-                        branch_path.clone(),
+                    self.branch_kind_for_path(&daybook_types::doc::BranchPath::new(
+                        &branch_path[..],
                     ))?,
                     &branch_ref.branch_doc_id,
                 )
@@ -807,7 +807,7 @@ impl DrawerRepo {
                 self.branch_handles.remove(&branch_ref.branch_doc_id);
             }
             for (branch_path, branch_doc_id) in local_branch_refs {
-                let branch_path = daybook_types::doc::BranchPath::from(branch_path);
+                let branch_path = daybook_types::doc::BranchPath::new(&branch_path);
                 self.remove_branch_from_partitions_if_needed(
                     self.branch_kind_for_path(&branch_path)?,
                     &branch_doc_id,
@@ -848,7 +848,7 @@ impl DrawerRepo {
         use futures_buffered::BufferedStreamExt;
         let mut stream = futures::stream::iter(patches.into_iter().enumerate().map(
             |(ii, args)| async move {
-                self.update_at_heads(args.patch, args.branch_path, args.heads)
+                self.update_at_heads(args.patch, &args.branch_path, args.heads)
                     .await
                     .map_err(|err| (ii, err))
             },
@@ -874,7 +874,7 @@ impl DrawerRepo {
         id: &DocId,
         to_branch: &daybook_types::doc::BranchPath,
         from_branch: &daybook_types::doc::BranchPath,
-        user_path: Option<daybook_types::doc::UserPath>,
+        user_path: Option<&daybook_types::doc::UserPath>,
     ) -> Result<(), DrawerError> {
         if self.cancel_token.is_cancelled() {
             return Err(DrawerError::Other {
@@ -896,7 +896,7 @@ impl DrawerRepo {
         &self,
         id: &DocId,
         branch_path: &daybook_types::doc::BranchPath,
-        _user_path: Option<daybook_types::doc::UserPath>,
+        _user_path: Option<&daybook_types::doc::UserPath>,
     ) -> Result<bool, DrawerError> {
         if self.cancel_token.is_cancelled() {
             return Err(DrawerError::Other {

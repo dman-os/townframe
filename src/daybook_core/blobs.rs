@@ -87,7 +87,7 @@ impl PartitionMembershipWriter for NoopPartitionMembershipWriter {
 #[derive(Clone)]
 pub struct BlobsRepo {
     root: PathBuf,
-    src_local_user_path: String,
+    src_local_user_path: UserPathBuf,
     iroh_store: iroh_blobs::api::Store,
     hash_locks: Arc<std::sync::Mutex<HashMap<String, Arc<tokio::sync::Mutex<()>>>>>,
     partition_writer: Arc<dyn PartitionMembershipWriter>,
@@ -107,7 +107,7 @@ struct BlobMetaV1 {
     mode: BlobMode,
     size_bytes: u64,
     mime: Option<String>,
-    src_local_user_path: String,
+    src_local_user_path: UserPathBuf,
     source_paths: Vec<String>,
     created_at_unix_secs: i64,
     iroh_ingested: bool,
@@ -162,7 +162,7 @@ impl BlobScope {
 impl BlobsRepo {
     pub async fn new(
         root: PathBuf,
-        src_local_user_path: String,
+        src_local_user_path: UserPathBuf,
         partition_writer: Arc<dyn PartitionMembershipWriter>,
     ) -> Result<Arc<Self>, eyre::Report> {
         let objects_root = root.join("objects");
@@ -786,7 +786,7 @@ mod tests {
         let temp_dir = tempfile::tempdir().unwrap();
         let repo = BlobsRepo::new(
             temp_dir.path().to_path_buf(),
-            "/local/test-user".to_string(),
+            "/local/test-user".into(),
             Arc::new(NoopPartitionMembershipWriter),
         )
         .await
@@ -901,7 +901,7 @@ mod tests {
             mode: BlobMode::Reference,
             size_bytes: 123,
             mime: None,
-            src_local_user_path: "/local/test-user".to_string(),
+            src_local_user_path: "/local/test-user".into(),
             source_paths: vec!["/tmp/does/not/exist".to_string()],
             created_at_unix_secs: 1,
             iroh_ingested: true,

@@ -20,7 +20,7 @@ use daybook_core::drawer::DrawerRepo;
 pub struct Config {
     pub root_path: PathBuf,
     pub metadata_db_path: PathBuf,
-    pub branch_path: daybook_types::doc::BranchPath,
+    pub branch_path: daybook_types::doc::BranchPathBuf,
     pub poll_interval: Duration,
 }
 
@@ -29,7 +29,7 @@ impl Default for Config {
         Self {
             root_path: PathBuf::from("./.daybook/livetree"),
             metadata_db_path: PathBuf::from("./.daybook/pauperfuse/livetree.sqlite"),
-            branch_path: daybook_types::doc::BranchPath::from("main"),
+            branch_path: daybook_types::doc::BranchPathBuf::from("main"),
             poll_interval: Duration::from_millis(250),
         }
     }
@@ -515,7 +515,7 @@ mod tests {
             )
             .await?;
 
-            let local_user_path = daybook_types::doc::UserPath::from("/test-user/test-device");
+            let local_user_path = daybook_types::doc::UserPathBuf::from("/test-user/test-device");
             let blobs_repo = BlobsRepo::new(
                 temp_dir.path().join("blobs"),
                 local_user_path.to_string(),
@@ -576,7 +576,7 @@ mod tests {
             let doc_id = self
                 .drawer_repo
                 .add(AddDocArgs {
-                    branch_path: daybook_types::doc::BranchPath::from("main"),
+                    branch_path: daybook_types::doc::BranchPathBuf::from("main"),
                     facets: [(
                         FacetKey::from(WellKnownFacetTag::TitleGeneric),
                         WellKnownFacet::TitleGeneric(title.to_string()).into(),
@@ -684,7 +684,7 @@ mod tests {
             .drawer_repo
             .get_doc_with_facets_at_branch(
                 &doc_id,
-                &daybook_types::doc::BranchPath::from("main"),
+                &daybook_types::doc::BranchPathBuf::from("main"),
                 None,
             )
             .await?
@@ -718,7 +718,7 @@ mod tests {
             .drawer_repo
             .get_doc_with_facets_at_branch(
                 &doc_id,
-                &daybook_types::doc::BranchPath::from("main"),
+                &daybook_types::doc::BranchPathBuf::from("main"),
                 None,
             )
             .await?
@@ -733,7 +733,7 @@ mod tests {
         let patch = Doc::diff(&current_doc, &edited_doc);
         harness
             .drawer_repo
-            .update_at_heads(patch, daybook_types::doc::BranchPath::from("main"), None)
+            .update_at_heads(patch, daybook_types::doc::BranchPathBuf::from("main"), None)
             .await?;
 
         let report = pull_changes(&mut fuse_ctx).await?;

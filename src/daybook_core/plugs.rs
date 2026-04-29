@@ -682,10 +682,10 @@ impl PlugsRepo {
         big_repo: SharedBigRepo,
         blobs: Arc<crate::blobs::BlobsRepo>,
         app_doc_id: DocumentId,
-        local_user_path: daybook_types::doc::UserPath,
+        local_user_path: daybook_types::doc::UserPathBuf,
     ) -> Res<(Arc<Self>, crate::repos::RepoStopToken)> {
         let local_user_path =
-            daybook_types::doc::user_path::for_repo(&local_user_path, "plugs-repo")?;
+            daybook_types::doc::user_path::for_repo(local_user_path, "plugs-repo")?;
         let local_actor_id = daybook_types::doc::user_path::to_actor_id(&local_user_path);
         let registry = crate::repos::ListenersRegistry::new();
 
@@ -1189,7 +1189,7 @@ impl PlugsRepo {
         }
         let doc_id = drawer_repo
             .add(daybook_types::doc::AddDocArgs {
-                branch_path: daybook_types::doc::BranchPath::from("main"),
+                branch_path: daybook_types::doc::BranchPathBuf::from("main"),
                 facets: HashMap::new(),
                 user_path: None,
             })
@@ -2272,7 +2272,7 @@ mod tests {
     use crate::repos::{Repo, SubscribeOpts, TryRecvError};
 
     async fn setup_repo() -> Res<(SharedBigRepo, Arc<PlugsRepo>, DocumentId, tempfile::TempDir)> {
-        let local_user_path = daybook_types::doc::UserPath::from("/test-user/test-device");
+        let local_user_path = daybook_types::doc::UserPathBuf::from("/test-user/test-device");
         let (big_repo, _acx_stop) = BigRepo::boot(am_utils_rs::repo::Config {
             peer_id: crate::peer_id_from_label("test"),
             secret_key_bytes: rand::random::<[u8; 32]>(),
@@ -2287,7 +2287,7 @@ mod tests {
         let temp_dir = tempfile::tempdir()?;
         let blobs = crate::blobs::BlobsRepo::new(
             temp_dir.path().to_path_buf(),
-            "/test-user".to_string(),
+            "/test-user".into(),
             Arc::new(crate::blobs::PartitionStoreMembershipWriter::new(
                 big_repo.partition_store(),
             )),

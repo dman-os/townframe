@@ -5,7 +5,7 @@ use daybook_types::doc::{ChangeHashSet, Doc, DocId, FacetKey};
 #[derive(Debug, Clone)]
 #[cfg_attr(feature = "uniffi", derive(uniffi::Record))]
 pub struct UpdateDocArgsV2 {
-    pub branch_path: daybook_types::doc::BranchPath,
+    pub branch_path: daybook_types::doc::BranchPathBuf,
     pub heads: Option<ChangeHashSet>,
     pub patch: daybook_types::doc::DocPatch,
 }
@@ -94,14 +94,14 @@ pub struct DocBundle {
 }
 
 impl DocNBranches {
-    pub fn main_branch_path(&self) -> Option<daybook_types::doc::BranchPath> {
+    pub fn main_branch_path(&self) -> Option<daybook_types::doc::BranchPathBuf> {
         if self.branches.contains_key("main") {
-            Some(daybook_types::doc::BranchPath::from("main"))
+            Some(daybook_types::doc::BranchPathBuf::from("main"))
         } else {
             self.branches
                 .keys()
                 .next()
-                .map(|key| daybook_types::doc::BranchPath::from(key.as_str()))
+                .map(|key| daybook_types::doc::BranchPathBuf::from(key.as_str()))
         }
     }
 }

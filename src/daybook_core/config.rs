@@ -19,7 +19,7 @@ pub struct ConfigStore {
 #[cfg_attr(feature = "uniffi", derive(uniffi::Record))]
 pub struct UserMeta {
     #[autosurgeon(with = "am_utils_rs::codecs::utf8_path")]
-    pub user_path: daybook_types::doc::UserPath,
+    pub user_path: daybook_types::doc::UserPathBuf,
     #[autosurgeon(with = "am_utils_rs::codecs::date")]
     pub seen_at: Timestamp,
 }
@@ -178,13 +178,13 @@ impl ConfigRepo {
         big_repo: SharedBigRepo,
         app_doc_id: DocumentId,
         plug_repo: Arc<PlugsRepo>,
-        local_user_path: daybook_types::doc::UserPath,
+        local_user_path: daybook_types::doc::UserPathBuf,
         repo_sql: crate::app::SqlCtx,
     ) -> Res<(Arc<Self>, crate::repos::RepoStopToken)> {
         let registry = crate::repos::ListenersRegistry::new();
         let store_val = ConfigStore::load(&big_repo, &app_doc_id).await?;
         let local_user_path =
-            daybook_types::doc::user_path::for_repo(&local_user_path, "config-repo")?;
+            daybook_types::doc::user_path::for_repo(local_user_path, "config-repo")?;
         let local_actor_id = daybook_types::doc::user_path::to_actor_id(&local_user_path);
 
         let store = crate::stores::AmStoreHandle::new(
@@ -344,7 +344,7 @@ impl ConfigRepo {
     pub async fn upsert_actor_user_path(
         &self,
         actor_id: automerge::ActorId,
-        user_path: daybook_types::doc::UserPath,
+        user_path: daybook_types::doc::UserPathBuf,
     ) -> Res<()> {
         if self.cancel_token.is_cancelled() {
             eyre::bail!("repo is stopped");
@@ -622,7 +622,7 @@ impl ConfigRepo {
     pub async fn get_actor_user_path(
         &self,
         actor_id: &automerge::ActorId,
-    ) -> Option<daybook_types::doc::UserPath> {
+    ) -> Option<daybook_types::doc::UserPathBuf> {
         let actor_id_str = actor_id.to_string();
         self.store
             .query_sync(move |store| {
@@ -723,7 +723,7 @@ mod tests {
 
     #[tokio::test]
     async fn upsert_actor_user_path_registers_directory_entries() -> Res<()> {
-        let local_user_path = daybook_types::doc::UserPath::from("/test-user/test-device");
+        let local_user_path = daybook_types::doc::UserPathBuf::from("/test-user/test-device");
         let (big_repo, _acx_stop) = BigRepo::boot(am_utils_rs::repo::Config {
             peer_id: crate::peer_id_from_label("test-config-actors"),
             secret_key_bytes: rand::random::<[u8; 32]>(),
@@ -738,7 +738,7 @@ mod tests {
         let temp = tempfile::tempdir()?;
         let blobs_repo = crate::blobs::BlobsRepo::new(
             temp.path().join("blobs"),
-            local_user_path.to_string(),
+            local_user_path.clone(),
             Arc::new(crate::blobs::PartitionStoreMembershipWriter::new(
                 big_repo.partition_store(),
             )),
@@ -772,7 +772,8 @@ mod tests {
             "tables-repo",
             "init-repo",
         ] {
-            let scoped_path = daybook_types::doc::user_path::for_repo(&local_user_path, scope)?;
+            let scoped_path =
+                daybook_types::doc::user_path::for_repo(local_user_path.clone(), scope)?;
             let scoped_actor = daybook_types::doc::user_path::to_actor_id(&scoped_path);
             config_repo
                 .upsert_actor_user_path(scoped_actor.clone(), scoped_path.clone())

@@ -298,7 +298,10 @@ pub async fn clone_repo_init_from_url(
             daybook_types::doc::user_path::DEVICE_ID_PREFIX,
             pkey_bs58
         );
-        let local_user_path = format!("/{user_id}/{device_id}");
+        let local_user_path = daybook_types::doc::UserPathBuf::new()
+            .join("/")
+            .join(user_id)
+            .join(device_id);
         let mut sync_config = crate::repo::globals::get_sync_config(&sql).await?;
         if !sync_config
             .known_devices
@@ -337,7 +340,7 @@ pub async fn clone_repo_init_from_url(
 
         let blobs_repo = crate::blobs::BlobsRepo::new(
             staging.join("blobs"),
-            "clone-bootstrap".to_string(),
+            "clone-bootstrap".into(),
             Arc::new(crate::blobs::NoopPartitionMembershipWriter),
         )
         .await?;

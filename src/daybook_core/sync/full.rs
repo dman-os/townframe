@@ -7,7 +7,7 @@ use am_utils_rs::{
     sync::{
         peer::{
             DocSyncAck, DocSyncRequest, PeerSyncProgressEvent, PeerSyncWorkerEvent,
-            PeerSyncWorkerStopToken, SpawnPeerSyncWorkerArgs,
+            PeerSyncWorkerMsg, PeerSyncWorkerStopToken, SpawnPeerSyncWorkerArgs,
         },
         protocol::{PartitionId, PartitionSyncRpc, PeerKey},
         store::SyncStoreHandle,
@@ -122,25 +122,6 @@ enum Msg {
         previous_backoff: Duration,
         previous_attempt_at: std::time::Instant,
     },
-    BlobSyncMarkedSynced {
-        hash: String,
-        peer_id: Option<PeerId>,
-    },
-    BlobSyncRequestBackoff {
-        hash: String,
-        delay: Duration,
-        previous_attempt_no: usize,
-        previous_backoff: Duration,
-        previous_attempt_at: std::time::Instant,
-    },
-    PeerSyncWorkerProgress {
-        peer_id: PeerId,
-        event: PeerSyncProgressEvent,
-    },
-    PeerSyncWorkerEvent {
-        peer_id: PeerId,
-        event: PeerSyncWorkerEvent,
-    },
     GetPeerSyncSnapshot {
         peer_ids: Vec<PeerId>,
         resp: tokio::sync::oneshot::Sender<HashMap<PeerId, PeerSyncSnapshot>>,
@@ -201,6 +182,8 @@ enum SyncProgressMsg {
         hash: String,
         success: bool,
         reason: String,
+        synced_peer_id: Option<PeerId>,
+        backoff: Option<(Duration, RetryState)>,
     },
 }
 
@@ -283,9 +266,11 @@ pub async fn spawn_full_sync_worker(
     let (msg_tx, mut msg_rx) = mpsc::unbounded_channel();
     let (sync_progress_tx, mut sync_progress_rx) = mpsc::channel::<SyncProgressMsg>(8192);
     let (doc_sync_tx, mut doc_sync_rx) = mpsc::channel::<DocSyncRequest>(8192);
+    let (peer_worker_msg_tx, mut peer_worker_msg_rx) = mpsc::channel::<PeerSyncWorkerMsg>(8192);
     let (events_tx, events_rx) = tokio::sync::broadcast::channel(1024);
 
     let cancel_token = CancellationToken::new();
+    let task_set = utils_rs::AbortableJoinSet::new();
 
     let mut worker = Worker {
         big_repo: Arc::clone(&rcx.big_repo),
@@ -294,6 +279,7 @@ pub async fn spawn_full_sync_worker(
         msg_tx: msg_tx.clone(),
         sync_progress_tx: sync_progress_tx.clone(),
         doc_sync_tx: doc_sync_tx.clone(),
+        peer_worker_msg_tx: peer_worker_msg_tx.clone(),
         events_tx,
         partitions: [
             (
@@ -311,6 +297,7 @@ pub async fn spawn_full_sync_worker(
         progress_repo,
         sync_store,
         iroh_endpoint,
+        task_set,
 
         doc_sync_set: default(),
         import_doc_set: default(),
@@ -375,6 +362,32 @@ pub async fn spawn_full_sync_worker(
                         };
                         worker.handle_doc_sync_request(req).await?;
                     }
+                    val = peer_worker_msg_rx.recv() => {
+                        let Some(msg) = val else {
+                            warn!("peer worker msg channel closed");
+                            break;
+                        };
+                        let peer_key = match &msg {
+                            PeerSyncWorkerMsg::Progress { peer, .. } => peer.clone(),
+                            PeerSyncWorkerMsg::Event(event) => match event {
+                                PeerSyncWorkerEvent::Bootstrapped { peer, .. } => peer.clone(),
+                                PeerSyncWorkerEvent::LiveReady { peer } => peer.clone(),
+                                PeerSyncWorkerEvent::AbnormalExit { peer, .. } => peer.clone(),
+                            },
+                        };
+                        let Some(peer_id) = worker.peer_id_by_peer_key.get(&peer_key).copied() else {
+                            warn!(%peer_key, "peer worker message for unknown peer");
+                            continue;
+                        };
+                        match msg {
+                            PeerSyncWorkerMsg::Progress { event, .. } => {
+                                worker.handle_peer_sync_worker_progress(peer_id, event).await?;
+                            }
+                            PeerSyncWorkerMsg::Event(event) => {
+                                worker.handle_peer_sync_worker_event(peer_id, event).await?;
+                            }
+                        }
+                    }
                     _ = janitor_tick.tick() => {
                         worker.backoff_janitor_enqueue_due();
                     }
@@ -387,19 +400,22 @@ pub async fn spawn_full_sync_worker(
                     .keys()
                     .map(|key| key.doc_id.clone()),
             );
-            worker.batch_stop_docs().await?;
-            worker.batch_stop_imports().await?;
-            worker.batch_stop_blobs().await?;
-            for (_endpoint_id, mut session) in worker.peer_partition_sessions.drain() {
-                session.forward_cancel_token.cancel();
-                session.stop.stop().await?;
-                for join_handle in session.forward_handles.drain(..) {
-                    utils_rs::wait_on_handle_with_timeout(
-                        join_handle,
-                        utils_rs::scale_timeout(Duration::from_secs(1)),
-                    )
-                    .await?;
+            if let Err(err) = worker.batch_stop_docs().await {
+                warn!(?err, "error stopping doc workers during shutdown");
+            }
+            if let Err(err) = worker.batch_stop_imports().await {
+                warn!(?err, "error stopping import workers during shutdown");
+            }
+            if let Err(err) = worker.batch_stop_blobs().await {
+                warn!(?err, "error stopping blob workers during shutdown");
+            }
+            for (_endpoint_id, session) in worker.peer_partition_sessions.drain() {
+                if let Err(err) = session.stop.stop().await {
+                    warn!(?err, "error stopping peer session during shutdown");
                 }
+            }
+            if let Err(err) = worker.task_set.stop(Duration::from_secs(5)).await {
+                warn!(?err, "error waiting for task set during shutdown");
             }
             eyre::Ok(())
         }
@@ -432,6 +448,7 @@ struct Worker {
     progress_repo: Option<Arc<ProgressRepo>>,
     sync_store: SyncStoreHandle,
     iroh_endpoint: iroh::Endpoint,
+    task_set: utils_rs::AbortableJoinSet,
 
     partitions: HashMap<PartitionKey, Partition>,
 
@@ -445,6 +462,7 @@ struct Worker {
     msg_tx: mpsc::UnboundedSender<Msg>,
     sync_progress_tx: mpsc::Sender<SyncProgressMsg>,
     doc_sync_tx: mpsc::Sender<DocSyncRequest>,
+    peer_worker_msg_tx: mpsc::Sender<PeerSyncWorkerMsg>,
     events_tx: tokio::sync::broadcast::Sender<FullSyncEvent>,
     max_active_sync_workers: usize,
 
@@ -502,12 +520,10 @@ struct PeerSyncState {
 struct PeerPartitionSession {
     stop: PeerSyncWorkerStopToken,
     doc_ack_tx: mpsc::Sender<DocSyncAck>,
-    forward_cancel_token: CancellationToken,
-    forward_handles: Vec<tokio::task::JoinHandle<()>>,
     partitions: HashSet<PartitionKey>,
 }
 
-#[derive(Clone, Copy)]
+#[derive(Debug, Clone, Copy)]
 pub(super) struct RetryState {
     pub attempt_no: usize,
     pub last_backoff: Duration,
@@ -738,32 +754,6 @@ impl Worker {
                 )
                 .await?;
             }
-            Msg::BlobSyncMarkedSynced { hash, peer_id } => {
-                self.handle_blob_marked_synced(hash, peer_id).await?;
-            }
-            Msg::BlobSyncRequestBackoff {
-                hash,
-                delay,
-                previous_attempt_no,
-                previous_backoff,
-                previous_attempt_at,
-            } => {
-                self.handle_blob_request_backoff(
-                    hash,
-                    delay,
-                    previous_attempt_no,
-                    previous_backoff,
-                    previous_attempt_at,
-                )
-                .await?;
-            }
-            Msg::PeerSyncWorkerProgress { peer_id, event } => {
-                self.handle_peer_sync_worker_progress(peer_id, event)
-                    .await?;
-            }
-            Msg::PeerSyncWorkerEvent { peer_id, event } => {
-                self.handle_peer_sync_worker_event(peer_id, event).await?;
-            }
             Msg::GetPeerSyncSnapshot { peer_ids, resp } => {
                 let snapshot = peer_ids
                     .into_iter()
@@ -972,22 +962,7 @@ impl Worker {
         partitions: HashSet<PartitionKey>,
     ) -> Res<()> {
         let session = self.peer_partition_sessions.remove(&peer_id);
-        if let Some(mut session) = session {
-            session.forward_cancel_token.cancel();
-            for join_handle in session.forward_handles.drain(..) {
-                if let Err(err) = utils_rs::wait_on_handle_with_timeout(
-                    join_handle,
-                    utils_rs::scale_timeout(Duration::from_secs(1)),
-                )
-                .await
-                {
-                    warn!(
-                        endpoint_id = ?peer_id,
-                        ?err,
-                        "error waiting for peer session forwarder during refresh"
-                    );
-                }
-            }
+        if let Some(session) = session {
             session.stop.stop().await?;
         }
         self.scheduler.clear_peer_cursor_acks(peer_id);
@@ -1000,74 +975,23 @@ impl Worker {
             PARTITION_SYNC_ALPN,
         );
         let (doc_ack_tx, doc_ack_rx) = mpsc::channel(8192);
-        let (mut handle, stop) =
-            am_utils_rs::sync::peer::spawn_peer_sync_worker(SpawnPeerSyncWorkerArgs {
-                local_peer: self.local_peer_key.clone(),
-                remote_peer: peer_key,
-                rpc_client,
-                sync_store: self.sync_store.clone(),
-                doc_sync_tx: self.doc_sync_tx.clone(),
-                doc_ack_rx,
-                target_partitions: partitions.iter().map(PartitionKey::partition_id).collect(),
-            })
-            .await?;
-        let forward_cancel_token = self.cancel_token.child_token();
-        let mut forward_handles = Vec::with_capacity(2);
-        if let Some(mut progress_rx) = handle.progress_rx.take() {
-            let msg_tx = self.msg_tx.clone();
-            let cancel = forward_cancel_token.child_token();
-            let join_handle = tokio::spawn(async move {
-                loop {
-                    tokio::select! {
-                        biased;
-                        _ = cancel.cancelled() => break,
-                        recv = progress_rx.recv() => match recv {
-                            Ok(event) => {
-                                msg_tx.send(Msg::PeerSyncWorkerProgress { peer_id, event })
-                                    .inspect_err(|_| warn!("full sync worker closed while forwarding peer progress"))
-                                    .ok();
-                            }
-                            Err(tokio::sync::broadcast::error::RecvError::Closed) => break,
-                            Err(tokio::sync::broadcast::error::RecvError::Lagged(dropped)) => {
-                                warn!(endpoint_id = ?peer_id, dropped, "lagged forwarding peer worker progress");
-                            }
-                        }
-                    }
-                }
-            });
-            forward_handles.push(join_handle);
-        }
-        if let Some(mut events_rx) = handle.events_rx.take() {
-            let msg_tx = self.msg_tx.clone();
-            let cancel = forward_cancel_token.child_token();
-            let join_handle = tokio::spawn(async move {
-                loop {
-                    tokio::select! {
-                        biased;
-                        _ = cancel.cancelled() => break,
-                        recv = events_rx.recv() => match recv {
-                            Ok(event) => {
-                                msg_tx.send(Msg::PeerSyncWorkerEvent { peer_id, event })
-                                    .inspect_err(|_| warn!("full sync worker closed while forwarding peer event"))
-                                    .ok();
-                            }
-                            Err(tokio::sync::broadcast::error::RecvError::Closed) => break,
-                            Err(tokio::sync::broadcast::error::RecvError::Lagged(dropped)) => {
-                                warn!(endpoint_id = ?peer_id, dropped, "lagged forwarding peer worker event");
-                            }
-                        }
-                    }
-                }
-            });
-            forward_handles.push(join_handle);
-        }
+        let stop = am_utils_rs::sync::peer::spawn_peer_sync_worker(SpawnPeerSyncWorkerArgs {
+            local_peer: self.local_peer_key.clone(),
+            remote_peer: peer_key,
+            rpc_client,
+            sync_store: self.sync_store.clone(),
+            doc_sync_tx: self.doc_sync_tx.clone(),
+            doc_ack_rx,
+            target_partitions: partitions.iter().map(PartitionKey::partition_id).collect(),
+            msg_tx: self.peer_worker_msg_tx.clone(),
+            task_set: &self.task_set,
+        })
+        .await?;
         self.peer_partition_sessions.insert(
             peer_id,
             PeerPartitionSession {
                 stop,
                 doc_ack_tx,
-                forward_cancel_token,
-                forward_handles,
                 partitions,
             },
         );
@@ -1076,15 +1000,7 @@ impl Worker {
 
     async fn remove_peer_partition_session(&mut self, peer_id: PeerId) -> Res<()> {
         let session = self.peer_partition_sessions.remove(&peer_id);
-        if let Some(mut session) = session {
-            session.forward_cancel_token.cancel();
-            for join_handle in session.forward_handles.drain(..) {
-                utils_rs::wait_on_handle_with_timeout(
-                    join_handle,
-                    utils_rs::scale_timeout(Duration::from_secs(1)),
-                )
-                .await?;
-            }
+        if let Some(session) = session {
             session.stop.stop().await?;
         }
         self.scheduler.clear_peer_cursor_acks(peer_id);
@@ -1693,11 +1609,11 @@ impl Worker {
                         peer_id: task_key.peer_id,
                     },
                     self.local_peer_key.clone(),
-                    self.cancel_token.child_token(),
                     self.msg_tx.clone(),
                     Arc::clone(&self.big_repo),
                     self.iroh_endpoint.clone(),
                     retry,
+                    &self.task_set,
                 )?,
             };
             debug!(
@@ -1720,7 +1636,6 @@ impl Worker {
         task_key: DocSyncTaskKey,
         retry: RetryState,
     ) -> Res<BootDocSyncWorkerResult> {
-        let cancel_token = self.cancel_token.child_token();
         let doc_id = task_key.doc_id;
         let peer_id = task_key.peer_id;
         if self.big_repo.get_doc(&doc_id).await?.is_none() {
@@ -1743,11 +1658,10 @@ impl Worker {
                 connection,
             },
             Arc::clone(&self.big_repo),
-            cancel_token.clone(),
             self.msg_tx.clone(),
             retry,
-        )
-        .await?;
+            &self.task_set,
+        )?;
         Ok(BootDocSyncWorkerResult::Spawned(ActiveDocSyncState {
             stop_token,
             retry,
@@ -1755,34 +1669,19 @@ impl Worker {
     }
 
     async fn batch_stop_docs(&mut self) -> Res<()> {
-        use futures::StreamExt;
-        use futures_buffered::BufferedStreamExt;
-
-        let mut stop_futs = vec![];
-
         let stopped_doc_ids = self.scheduler.docs_to_stop.drain().collect::<Vec<_>>();
         for doc_id in &stopped_doc_ids {
             for task_key in self.scheduler.doc_task_keys_for_doc(doc_id) {
                 if let Some(active) = self.scheduler.active_docs.remove(&task_key) {
-                    stop_futs.push(active.stop_token.stop());
+                    active.stop_token.stop().await?;
                 }
                 self.scheduler.clear_doc_task(&task_key);
             }
         }
-
-        futures::stream::iter(stop_futs)
-            .buffered_unordered(16)
-            .collect::<Vec<_>>()
-            .await
-            .into_iter()
-            .collect::<Res<Vec<_>>>()?;
         Ok(())
     }
 
     async fn batch_stop_imports(&mut self) -> Res<()> {
-        use futures::StreamExt;
-        use futures_buffered::BufferedStreamExt;
-
         self.scheduler
             .queued_tasks
             .retain(|task| !matches!(task, scheduler::SyncTask::Import(_)));
@@ -1790,24 +1689,13 @@ impl Worker {
             .pending_tasks
             .retain(|task, _| !matches!(task, scheduler::SyncTask::Import(_)));
 
-        let mut stop_futs = vec![];
         for (_doc_id, active) in self.scheduler.active_imports.drain() {
-            stop_futs.push(active.stop_token.stop());
+            active.stop_token.stop().await?;
         }
-
-        futures::stream::iter(stop_futs)
-            .buffered_unordered(16)
-            .collect::<Vec<_>>()
-            .await
-            .into_iter()
-            .collect::<Res<Vec<_>>>()?;
         Ok(())
     }
 
     async fn batch_stop_blobs(&mut self) -> Res<()> {
-        use futures::StreamExt;
-        use futures_buffered::BufferedStreamExt;
-
         self.scheduler
             .queued_tasks
             .retain(|task| !matches!(task, scheduler::SyncTask::Blob(_)));
@@ -1816,17 +1704,9 @@ impl Worker {
             .retain(|task, _| !matches!(task, scheduler::SyncTask::Blob(_)));
         self.scheduler.blob_requirements.clear();
 
-        let mut stop_futs = vec![];
         for (_hash, active) in self.scheduler.active_blobs.drain() {
-            stop_futs.push(active.stop_token.stop());
+            active.stop_token.stop().await?;
         }
-
-        futures::stream::iter(stop_futs)
-            .buffered_unordered(16)
-            .collect::<Vec<_>>()
-            .await
-            .into_iter()
-            .collect::<Res<Vec<_>>>()?;
         Ok(())
     }
 
@@ -2434,12 +2314,11 @@ impl Worker {
                         partition,
                         hash.clone(),
                         peers,
-                        self.cancel_token.child_token(),
-                        self.msg_tx.clone(),
                         self.sync_progress_tx.clone(),
                         Arc::clone(&self.blobs_repo),
                         self.iroh_endpoint.clone(),
                         retry,
+                        &self.task_set,
                     )?,
                 };
                 self.scheduler.clear_blob_pending(&hash);
@@ -2949,7 +2828,10 @@ impl Worker {
         let mut progress_latest: HashMap<BlobProgressKey, u64> = HashMap::new();
         let mut materialize_started: HashSet<(PartitionKey, String)> = HashSet::new();
         let mut finished: HashMap<BlobProgressKey, bool> = HashMap::new();
-        let mut worker_finished: HashMap<(PartitionKey, String), (bool, String)> = HashMap::new();
+        let mut worker_finished: HashMap<
+            (PartitionKey, String),
+            (bool, String, Option<PeerId>, Option<(Duration, RetryState)>),
+        > = HashMap::new();
 
         for msg in buffer.drain(..) {
             match msg {
@@ -3005,8 +2887,11 @@ impl Worker {
                     hash,
                     success,
                     reason,
+                    synced_peer_id,
+                    backoff,
                 } => {
-                    worker_finished.insert((partition, hash), (success, reason));
+                    worker_finished
+                        .insert((partition, hash), (success, reason, synced_peer_id, backoff));
                 }
             }
         }
@@ -3055,7 +2940,7 @@ impl Worker {
                 .await?;
         }
 
-        for ((partition, hash), (success, reason)) in worker_finished {
+        for ((partition, hash), (success, reason, synced_peer_id, backoff)) in worker_finished {
             self.emit_blob_worker_status(
                 partition,
                 &hash,
@@ -3067,6 +2952,20 @@ impl Worker {
                 }),
             )
             .await?;
+            if let Some(peer_id) = synced_peer_id {
+                self.handle_blob_marked_synced(hash.clone(), Some(peer_id))
+                    .await?;
+            }
+            if let Some((delay, retry)) = backoff {
+                self.handle_blob_request_backoff(
+                    hash,
+                    delay,
+                    retry.attempt_no,
+                    retry.last_backoff,
+                    retry.last_attempt_at,
+                )
+                .await?;
+            }
         }
 
         Ok(())

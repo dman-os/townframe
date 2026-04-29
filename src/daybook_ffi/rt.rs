@@ -89,7 +89,7 @@ impl RtFfi {
                     &routine_name,
                     daybook_core::rt::DispatchArgs::DocFacet {
                         doc_id,
-                        branch_path: daybook_types::doc::BranchPath::from(branch_path),
+                        branch_path: daybook_types::doc::BranchPathBuf::from(branch_path),
                         heads: daybook_types::doc::ChangeHashSet(vec![].into()),
                         facet_key: None,
                         wflow_args_json: None,

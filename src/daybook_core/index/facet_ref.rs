@@ -4,7 +4,7 @@ use crate::drawer::DrawerRepo;
 use crate::plugs::PlugsRepo;
 use crate::repos::Repo;
 
-use daybook_types::doc::{BranchPath, ChangeHashSet, DocId, FacetKey};
+use daybook_types::doc::{BranchPathBuf, ChangeHashSet, DocId, FacetKey};
 use daybook_types::manifest::{DocPredicateClause, FacetReferenceKind, FacetReferenceManifest};
 use daybook_types::reference::select_json_path_values;
 use daybook_types::url::{parse_facet_ref, FACET_SELF_DOC_ID};
@@ -254,7 +254,7 @@ impl DocFacetRefIndexRepo {
     pub async fn reindex_doc(
         &self,
         doc_id: &DocId,
-        branch_path: &BranchPath,
+        branch_path: &BranchPathBuf,
         heads: &ChangeHashSet,
     ) -> Res<()> {
         let specs = self.reference_specs.read().await.clone();
@@ -414,7 +414,7 @@ impl DocFacetRefIndexRepo {
     pub fn enqueue_upsert(
         &self,
         doc_id: DocId,
-        branch_path: BranchPath,
+        branch_path: BranchPathBuf,
         heads: ChangeHashSet,
     ) -> Res<()> {
         self.work_tx
@@ -582,7 +582,7 @@ fn row_to_edge(row: (String, String, String, String, String, String)) -> Res<Doc
 enum DocFacetRefIndexWorkItem {
     Upsert {
         doc_id: DocId,
-        branch_path: BranchPath,
+        branch_path: BranchPathBuf,
         heads: ChangeHashSet,
     },
     DeleteDoc {
@@ -653,7 +653,7 @@ impl crate::rt::switch::SwitchSink for FacetRefTriageListener {
                     let Some(heads) = entry.branches.get("main") else {
                         return Ok(outcome);
                     };
-                    let branch_path = BranchPath::from("main");
+                    let branch_path = BranchPathBuf::from("main");
                     let Some(_keys) = self
                         .drawer_repo
                         .get_facet_keys_if_latest(id, &branch_path, heads)
@@ -682,7 +682,7 @@ impl crate::rt::switch::SwitchSink for FacetRefTriageListener {
                         self.index_repo.enqueue_delete(id.clone())?;
                         return Ok(outcome);
                     };
-                    let branch_path = BranchPath::from("main");
+                    let branch_path = BranchPathBuf::from("main");
                     let Some(_keys) = self
                         .drawer_repo
                         .get_facet_keys_if_latest(id, &branch_path, heads)
@@ -731,7 +731,7 @@ mod tests {
         let src_doc_id = test_context
             .drawer_repo
             .add(AddDocArgs {
-                branch_path: BranchPath::from("main"),
+                branch_path: BranchPathBuf::from("main"),
                 facets: [(
                     FacetKey::from(WellKnownFacetTag::Note),
                     FacetRaw::from(WellKnownFacet::Note("hello".to_string().into())),
@@ -747,7 +747,7 @@ mod tests {
         let embedding_doc_id = test_context
             .drawer_repo
             .add(AddDocArgs {
-                branch_path: BranchPath::from("main"),
+                branch_path: BranchPathBuf::from("main"),
                 facets: [(
                     FacetKey::from(WellKnownFacetTag::Embedding),
                     FacetRaw::from(WellKnownFacet::Embedding(daybook_types::doc::Embedding {

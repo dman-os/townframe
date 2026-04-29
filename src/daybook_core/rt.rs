@@ -192,12 +192,12 @@ impl RtStopToken {
 pub enum DispatchArgs {
     DocInvoke {
         doc_id: String,
-        branch_path: daybook_types::doc::BranchPath,
+        branch_path: daybook_types::doc::BranchPathBuf,
         heads: ChangeHashSet,
     },
     DocFacet {
         doc_id: String,
-        branch_path: daybook_types::doc::BranchPath,
+        branch_path: daybook_types::doc::BranchPathBuf,
         heads: ChangeHashSet,
         facet_key: Option<String>,
         wflow_args_json: Option<String>,
@@ -632,7 +632,7 @@ impl Rt {
                         &routine_name.0,
                         DispatchArgs::DocFacet {
                             doc_id: config_doc_id,
-                            branch_path: daybook_types::doc::BranchPath::from("main"),
+                            branch_path: daybook_types::doc::BranchPathBuf::from("main"),
                             heads: config_heads,
                             facet_key: None,
                             wflow_args_json: None,
@@ -1468,7 +1468,7 @@ impl Rt {
                         local_state_acl: routine_man.local_state_acl.clone(),
                         command_invoke_acl_snapshot: routine_man.command_invoke_acl().to_vec(),
                         wflow_args_json,
-                        staging_branch_path: daybook_types::doc::BranchPath::from(
+                        staging_branch_path: daybook_types::doc::BranchPathBuf::from(
                             "/tmp/placeholder",
                         ), // Will be set when job is created
                     }),
@@ -1512,7 +1512,7 @@ impl Rt {
                 // let fqk = format!("{workload_id}/{key}");
                 let job_id = format!("{dispatch_id}-{id}", id = Uuid::new_v4().bs58());
                 let staging_branch_path =
-                    daybook_types::doc::BranchPath::from(format!("/tmp/{}", job_id));
+                    daybook_types::doc::BranchPathBuf::from(format!("/tmp/{}", job_id));
 
                 // Update args with staging branch path
                 let ActiveDispatchArgs::FacetRoutine(ref mut facet_args) = args;

@@ -24,7 +24,7 @@ async fn test_ocr_image_workflow() -> Res<()> {
     };
 
     let new_doc = AddDocArgs {
-        branch_path: daybook_types::doc::BranchPath::from("main"),
+        branch_path: daybook_types::doc::BranchPathBuf::from("main"),
         facets: [(
             FacetKey::from(WellKnownFacetTag::Blob),
             WellKnownFacet::Blob(blob_facet).into(),
@@ -61,7 +61,11 @@ async fn test_ocr_image_workflow() -> Res<()> {
 
     let updated_doc = test_cx
         .drawer_repo
-        .get_doc_with_facets_at_branch(&doc_id, &daybook_types::doc::BranchPath::from("main"), None)
+        .get_doc_with_facets_at_branch(
+            &doc_id,
+            &daybook_types::doc::BranchPathBuf::from("main"),
+            None,
+        )
         .await?
         .ok_or_eyre("doc not found")?;
 

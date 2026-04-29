@@ -900,7 +900,9 @@ mod tests {
     use crate::progress::ProgressRepo;
     use crate::repo::{RepoCtx, RepoOpenOptions};
     use crate::repos::{Repo, SubscribeOpts};
-    use daybook_types::doc::{AddDocArgs, FacetKey, FacetRaw, WellKnownFacet, WellKnownFacetTag};
+    use daybook_types::doc::{
+        AddDocArgs, DocId, FacetKey, FacetRaw, WellKnownFacet, WellKnownFacetTag,
+    };
     use tokio::task::JoinHandle;
     use tokio_util::sync::CancellationToken;
 
@@ -1014,9 +1016,9 @@ mod tests {
             let new_doc_id = node_a
                 .drawer
                 .add(daybook_types::doc::AddDocArgs {
-                    branch_path: daybook_types::doc::BranchPath::from("main"),
+                    branch_path: daybook_types::doc::BranchPathBuf::from("main"),
                     facets: default(),
-                    user_path: Some(daybook_types::doc::UserPath::from(
+                    user_path: Some(daybook_types::doc::UserPathBuf::from(
                         node_a.ctx.local_user_path.clone(),
                     )),
                 })
@@ -1063,9 +1065,9 @@ mod tests {
         let doc_on_a = node_a
             .drawer
             .add(daybook_types::doc::AddDocArgs {
-                branch_path: daybook_types::doc::BranchPath::from("main"),
+                branch_path: daybook_types::doc::BranchPathBuf::from("main"),
                 facets: default(),
-                user_path: Some(daybook_types::doc::UserPath::from(
+                user_path: Some(daybook_types::doc::UserPathBuf::from(
                     node_a.ctx.local_user_path.clone(),
                 )),
             })
@@ -1075,9 +1077,9 @@ mod tests {
         let doc_on_b = node_b
             .drawer
             .add(daybook_types::doc::AddDocArgs {
-                branch_path: daybook_types::doc::BranchPath::from("main"),
+                branch_path: daybook_types::doc::BranchPathBuf::from("main"),
                 facets: default(),
-                user_path: Some(daybook_types::doc::UserPath::from(
+                user_path: Some(daybook_types::doc::UserPathBuf::from(
                     node_b.ctx.local_user_path.clone(),
                 )),
             })
@@ -1129,9 +1131,9 @@ mod tests {
         let doc_id = node_a
             .drawer
             .add(daybook_types::doc::AddDocArgs {
-                branch_path: daybook_types::doc::BranchPath::from("main"),
+                branch_path: daybook_types::doc::BranchPathBuf::from("main"),
                 facets: default(),
-                user_path: Some(daybook_types::doc::UserPath::from(
+                user_path: Some(daybook_types::doc::UserPathBuf::from(
                     node_a.ctx.local_user_path.clone(),
                 )),
             })
@@ -1139,7 +1141,7 @@ mod tests {
         wait_for_doc_presence_with_activity(&node_b, &doc_id, Duration::from_secs(60)).await?;
 
         for idx in 0..6 {
-            let branch = daybook_types::doc::BranchPath::from("main");
+            let branch = daybook_types::doc::BranchPathBuf::from("main");
             let Some((_doc, heads)) = node_a.drawer.get_with_heads(&doc_id, &branch, None).await?
             else {
                 eyre::bail!("missing source doc after initial sync: {doc_id}");
@@ -1156,11 +1158,11 @@ mod tests {
                         id: doc_id.clone(),
                         facets_set,
                         facets_remove: vec![],
-                        user_path: Some(daybook_types::doc::UserPath::from(
+                        user_path: Some(daybook_types::doc::UserPathBuf::from(
                             node_a.ctx.local_user_path.clone(),
                         )),
                     },
-                    branch.clone(),
+                    &branch,
                     Some(heads),
                 )
                 .await?;
@@ -1170,7 +1172,7 @@ mod tests {
             &node_a,
             &node_b,
             &doc_id,
-            &daybook_types::doc::BranchPath::from("main"),
+            &daybook_types::doc::BranchPathBuf::from("main"),
             Duration::from_secs(30),
         )
         .await?;
@@ -1202,9 +1204,9 @@ mod tests {
         let created_doc_id = node_a
             .drawer
             .add(daybook_types::doc::AddDocArgs {
-                branch_path: daybook_types::doc::BranchPath::from("main"),
+                branch_path: daybook_types::doc::BranchPathBuf::from("main"),
                 facets: default(),
-                user_path: Some(daybook_types::doc::UserPath::from(
+                user_path: Some(daybook_types::doc::UserPathBuf::from(
                     node_a.ctx.local_user_path.clone(),
                 )),
             })
@@ -1279,7 +1281,7 @@ mod tests {
             let payload = format!("blob-payload-{idx:03}").into_bytes();
             let hash = node_a.blobs_repo.put(&payload).await?;
             args_batch.push(AddDocArgs {
-                branch_path: daybook_types::doc::BranchPath::from("main"),
+                branch_path: daybook_types::doc::BranchPathBuf::from("main"),
                 facets: [(
                     FacetKey::from(WellKnownFacetTag::Blob),
                     FacetRaw::from(WellKnownFacet::Blob(daybook_types::doc::Blob {
@@ -1291,7 +1293,7 @@ mod tests {
                     })),
                 )]
                 .into(),
-                user_path: Some(daybook_types::doc::UserPath::from(
+                user_path: Some(daybook_types::doc::UserPathBuf::from(
                     node_a.ctx.local_user_path.clone(),
                 )),
             });
@@ -1333,7 +1335,7 @@ mod tests {
             let hash = node_a.blobs_repo.put(&payload).await?;
             blob_payloads.push((hash.clone(), payload));
             args_batch.push(AddDocArgs {
-                branch_path: daybook_types::doc::BranchPath::from("main"),
+                branch_path: daybook_types::doc::BranchPathBuf::from("main"),
                 facets: [(
                     FacetKey::from(WellKnownFacetTag::Blob),
                     FacetRaw::from(WellKnownFacet::Blob(daybook_types::doc::Blob {
@@ -1345,7 +1347,7 @@ mod tests {
                     })),
                 )]
                 .into(),
-                user_path: Some(daybook_types::doc::UserPath::from(
+                user_path: Some(daybook_types::doc::UserPathBuf::from(
                     node_a.ctx.local_user_path.clone(),
                 )),
             });
@@ -1395,9 +1397,9 @@ mod tests {
             let new_doc_id = node_a
                 .drawer
                 .add(daybook_types::doc::AddDocArgs {
-                    branch_path: daybook_types::doc::BranchPath::from("main"),
+                    branch_path: daybook_types::doc::BranchPathBuf::from("main"),
                     facets: default(),
-                    user_path: Some(daybook_types::doc::UserPath::from(
+                    user_path: Some(daybook_types::doc::UserPathBuf::from(
                         node_a.ctx.local_user_path.clone(),
                     )),
                 })
@@ -1613,13 +1615,13 @@ mod tests {
             Arc::clone(&rtx.big_repo),
             Arc::clone(&blobs_repo),
             rtx.doc_app.document_id().clone(),
-            daybook_types::doc::UserPath::from(rtx.local_user_path.clone()),
+            daybook_types::doc::UserPathBuf::from(rtx.local_user_path.clone()),
         )
         .await?;
         let (drawer_repo, drawer_stop) = DrawerRepo::load(
             Arc::clone(&rtx.big_repo),
             rtx.doc_drawer.document_id().clone(),
-            daybook_types::doc::UserPath::from(rtx.local_user_path.clone()),
+            daybook_types::doc::UserPathBuf::from(rtx.local_user_path.clone()),
             rtx.sql.clone(),
             rtx.layout.repo_root.join("local_state"),
             Arc::new(std::sync::Mutex::new(
@@ -1635,7 +1637,7 @@ mod tests {
             Arc::clone(&rtx.big_repo),
             rtx.doc_app.document_id().clone(),
             Arc::clone(&plugs_repo),
-            daybook_types::doc::UserPath::from(rtx.local_user_path.clone()),
+            daybook_types::doc::UserPathBuf::from(rtx.local_user_path.clone()),
             rtx.sql.clone(),
         )
         .await?;
@@ -1704,7 +1706,7 @@ mod tests {
                                         doc_blobs_index_repo
                                             .enqueue_upsert(
                                                 id.clone(),
-                                                daybook_types::doc::BranchPath::from(
+                                                daybook_types::doc::BranchPathBuf::from(
                                                     branch_name.as_str(),
                                                 ),
                                                 heads.clone(),
@@ -1713,11 +1715,11 @@ mod tests {
                                     }
                                 }
                                 crate::drawer::DrawerEvent::DocUpdated { id, entry, .. } => {
-                                    let retained_branches: Vec<daybook_types::doc::BranchPath> = entry
+                                    let retained_branches: Vec<daybook_types::doc::BranchPathBuf> = entry
                                         .branches
                                         .keys()
                                         .map(|branch_name| {
-                                            daybook_types::doc::BranchPath::from(branch_name.as_str())
+                                            daybook_types::doc::BranchPathBuf::from(branch_name.as_str())
                                         })
                                         .collect();
                                     doc_blobs_index_repo
@@ -1730,7 +1732,7 @@ mod tests {
                                         doc_blobs_index_repo
                                             .enqueue_upsert(
                                                 id.clone(),
-                                                daybook_types::doc::BranchPath::from(
+                                                daybook_types::doc::BranchPathBuf::from(
                                                     branch_name.as_str(),
                                                 ),
                                                 heads.clone(),
@@ -1758,9 +1760,10 @@ mod tests {
 
     async fn wait_for_doc_presence_with_activity(
         node: &SyncTestNode,
-        doc_id: &str,
+        doc_id: &DocId,
         absolute_timeout: Duration,
     ) -> Res<()> {
+        info!("XXX wait_for_doc_presence_with_activity");
         let last_activity = Arc::new(std::sync::Mutex::new(std::time::Instant::now()));
         let last_activity_for_wait = Arc::clone(&last_activity);
         let drawer_listener = node.drawer.subscribe(SubscribeOpts::new(1024));
@@ -1770,17 +1773,17 @@ mod tests {
             loop {
                 let found = node
                     .drawer
-                    .list_just_ids()
-                    .await
-                    .map(|(_, ids)| ids.iter().any(|id| id == doc_id))
-                    .unwrap_or(false);
+                    .get_doc_with_facets_at_branch(doc_id, daybook_types::doc::BranchPath::new("main"), None)
+                    .await?
+                    .is_some();
                 if found {
                     break;
                 }
+                info!("XXX doc not found, waiting for signals");
                 tokio::select! {
                     val = drawer_listener.recv_lossy_async() => {
                         let evt = val.map_err(|_| eyre::eyre!("drawer listener closed while waiting for doc presence"))?;
-                        match evt.as_ref() {
+                        match dbg!(evt.as_ref()) {
                             crate::drawer::DrawerEvent::DocAdded { id, .. }
                             | crate::drawer::DrawerEvent::DocUpdated { id, .. }
                             | crate::drawer::DrawerEvent::DocDeleted { id, .. } if id == doc_id => {
@@ -1794,7 +1797,7 @@ mod tests {
                         }
                     }
                     val = sync_listener.recv_async() => {
-                        match val {
+                        match dbg!(val) {
                             Ok(_) => {
                                 *last_activity_for_wait.lock().expect(ERROR_MUTEX) = std::time::Instant::now();
                             }
@@ -1805,7 +1808,7 @@ mod tests {
                         }
                     }
                     val = progress_listener.recv_async() => {
-                        match val {
+                        match dbg!(val) {
                             Ok(_) => {
                                 *last_activity_for_wait.lock().expect(ERROR_MUTEX) = std::time::Instant::now();
                             }
@@ -1830,6 +1833,7 @@ mod tests {
                 since_last_activity,
             )
         })??;
+        info!("XXX doc_presence_with_activity detected");
         Ok(())
     }
 
@@ -1839,12 +1843,14 @@ mod tests {
         endpoint_id: EndpointId,
         timeout: Duration,
     ) -> Res<()> {
+        info!("XXX wait_for_sync_convergence");
         tokio::try_join!(
             target
                 .sync_repo
                 .wait_for_full_sync(std::slice::from_ref(&endpoint_id), timeout),
             wait_for_doc_set_parity(&source.drawer, &target.drawer, timeout),
         )?;
+        info!("XXX sync_convergence achieved");
         Ok(())
     }
 
@@ -2004,6 +2010,7 @@ mod tests {
         hash: &str,
         timeout: Duration,
     ) -> Res<Vec<u8>> {
+        info!("XXX wait_for_blob_bytes");
         tokio::time::timeout(timeout, async {
             loop {
                 let path = match blobs_repo.get_path(hash).await {
@@ -2020,6 +2027,7 @@ mod tests {
                     }
                 };
                 if tokio::fs::try_exists(&path).await? {
+                    info!("XXX blob_bytes recieved");
                     return tokio::fs::read(path).await.map_err(Into::into);
                 }
                 tokio::time::sleep(Duration::from_millis(200)).await;
@@ -2036,7 +2044,7 @@ mod tests {
         let temp_root = tempfile::tempdir()?;
         let blobs_repo = BlobsRepo::new(
             temp_root.path().join("blobs"),
-            "/u/stress-test/dev-local".to_string(),
+            "/u/stress-test/dev-local".into(),
             Arc::new(crate::blobs::NoopPartitionMembershipWriter),
         )
         .await?;

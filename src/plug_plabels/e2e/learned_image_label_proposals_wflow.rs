@@ -143,7 +143,7 @@ async fn add_blob_image_doc(
     test_cx
         .drawer_repo
         .add(AddDocArgs {
-            branch_path: daybook_types::doc::BranchPath::from("main"),
+            branch_path: daybook_types::doc::BranchPathBuf::from("main"),
             facets: [(
                 FacetKey::from(WellKnownFacetTag::Blob),
                 WellKnownFacet::Blob(blob_facet).into(),
@@ -181,7 +181,7 @@ async fn wait_for_proposal_set(
             .drawer_repo
             .get_doc_with_facets_at_branch(
                 &config_doc_id,
-                &daybook_types::doc::BranchPath::from("main"),
+                &daybook_types::doc::BranchPathBuf::from("main"),
                 None,
             )
             .await?

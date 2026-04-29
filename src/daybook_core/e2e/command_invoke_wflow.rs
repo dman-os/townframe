@@ -9,7 +9,7 @@ async fn test_command_invoke_success_reply() -> Res<()> {
     let success_doc_id = test_cx
         .drawer_repo
         .add(AddDocArgs {
-            branch_path: daybook_types::doc::BranchPath::from("main"),
+            branch_path: daybook_types::doc::BranchPathBuf::from("main"),
             facets: [(
                 FacetKey::from(WellKnownFacetTag::LabelGeneric),
                 FacetRaw::from(WellKnownFacet::LabelGeneric("seed-success".into())),
@@ -22,7 +22,7 @@ async fn test_command_invoke_success_reply() -> Res<()> {
         .drawer_repo
         .get_with_heads(
             &success_doc_id,
-            &daybook_types::doc::BranchPath::from("main"),
+            &daybook_types::doc::BranchPathBuf::from("main"),
             None,
         )
         .await?
@@ -35,7 +35,7 @@ async fn test_command_invoke_success_reply() -> Res<()> {
             "invoke-child-success",
             crate::rt::DispatchArgs::DocFacet {
                 doc_id: success_doc_id.clone(),
-                branch_path: daybook_types::doc::BranchPath::from("main"),
+                branch_path: daybook_types::doc::BranchPathBuf::from("main"),
                 heads: success_heads,
                 facet_key: None,
                 wflow_args_json: None,

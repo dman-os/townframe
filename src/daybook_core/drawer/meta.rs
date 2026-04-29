@@ -158,7 +158,7 @@ impl DrawerRepo {
     }
 
     pub(super) async fn migrate_legacy_local_branches_from_drawer_map(&self) -> Res<()> {
-        let mut migrated_rows: Vec<(DocId, daybook_types::doc::BranchPath, String)> = Vec::new();
+        let mut migrated_rows: Vec<(DocId, daybook_types::doc::BranchPathBuf, String)> = Vec::new();
         let (changed, drawer_heads) = self
             .drawer_am_handle
             .with_document(|doc| {
@@ -185,8 +185,8 @@ impl DrawerRepo {
                         next_entry.branches.keys().cloned().collect();
                     branch_names.sort();
                     for branch_name in branch_names {
-                        let branch_path: daybook_types::doc::BranchPath =
-                            daybook_types::doc::BranchPath::from(branch_name.as_str());
+                        let branch_path =
+                            daybook_types::doc::BranchPathBuf::from(branch_name.as_str());
                         if branch_path == "/tmp" || branch_path.starts_with("/tmp/") {
                             let Some(branch_ref) = next_entry.branches.remove(&branch_name) else {
                                 continue;
@@ -287,8 +287,8 @@ impl DrawerRepo {
         let Some(entry) = self.get_entry(doc_id).await? else {
             return Ok(None);
         };
-        let branch_path_str = branch_path.to_string();
-        let Some(branch_ref) = entry.branches.get(&branch_path_str) else {
+        let branch_path_str = branch_path.as_str();
+        let Some(branch_ref) = entry.branches.get(branch_path_str) else {
             return Ok(None);
         };
         Ok(Some((branch_ref.clone(), branch_kind)))
@@ -343,7 +343,7 @@ impl DrawerRepo {
         branch_names.sort();
         let mut branches = HashMap::new();
         for branch_name in branch_names {
-            let branch_path = daybook_types::doc::BranchPath::from(branch_name.as_str());
+            let branch_path = daybook_types::doc::BranchPath::new(branch_name.as_str());
             if self.branch_kind_for_path(&branch_path)? == BranchKind::Local {
                 continue;
             }

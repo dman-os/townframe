@@ -207,12 +207,12 @@ pub async fn test_cx_with_options(
     };
 
     // Load config first to get local identity
-    let local_user_path = daybook_types::doc::UserPath::from("/test-user");
+    let local_user_path = daybook_types::doc::UserPathBuf::from("/test-user");
     let local_actor_id = daybook_types::doc::user_path::to_actor_id(&local_user_path);
     let temp_dir = tempfile::tempdir()?;
     let blobs = crate::blobs::BlobsRepo::new(
         temp_dir.path().join("blobs"),
-        local_user_path.to_string(),
+        local_user_path.clone(),
         Arc::new(crate::blobs::PartitionStoreMembershipWriter::new(
             big_repo.partition_store(),
         )),
@@ -238,13 +238,16 @@ pub async fn test_cx_with_options(
         sql_ctx.clone(),
     )
     .await?;
+
     let config_user_path =
-        daybook_types::doc::user_path::for_repo(&local_user_path, "config-repo")?;
+        daybook_types::doc::user_path::for_repo(local_user_path.clone(), "config-repo")?;
     let config_actor_id = daybook_types::doc::user_path::to_actor_id(&config_user_path);
     config_repo
         .upsert_actor_user_path(config_actor_id, config_user_path)
         .await?;
-    let plugs_user_path = daybook_types::doc::user_path::for_repo(&local_user_path, "plugs-repo")?;
+
+    let plugs_user_path =
+        daybook_types::doc::user_path::for_repo(local_user_path.clone(), "plugs-repo")?;
     let plugs_actor_id = daybook_types::doc::user_path::to_actor_id(&plugs_user_path);
     config_repo
         .upsert_actor_user_path(plugs_actor_id, plugs_user_path)
@@ -257,7 +260,7 @@ pub async fn test_cx_with_options(
     )
     .await?;
     let dispatch_user_path =
-        daybook_types::doc::user_path::for_repo(&local_user_path, "dispatch-repo")?;
+        daybook_types::doc::user_path::for_repo(local_user_path.clone(), "dispatch-repo")?;
     let dispatch_actor_id = daybook_types::doc::user_path::to_actor_id(&dispatch_user_path);
     config_repo
         .upsert_actor_user_path(dispatch_actor_id, dispatch_user_path)
@@ -283,7 +286,7 @@ pub async fn test_cx_with_options(
     )
     .await?;
     let drawer_user_path =
-        daybook_types::doc::user_path::for_repo(&local_user_path, "drawer-repo")?;
+        daybook_types::doc::user_path::for_repo(local_user_path.clone(), "drawer-repo")?;
     let drawer_actor_id = daybook_types::doc::user_path::to_actor_id(&drawer_user_path);
     config_repo
         .upsert_actor_user_path(drawer_actor_id, drawer_user_path)

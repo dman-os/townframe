@@ -78,9 +78,9 @@ pub enum ActiveDispatchArgs {
 pub struct FacetRoutineArgs {
     pub doc_id: daybook_types::doc::DocId,
     #[autosurgeon(with = "am_utils_rs::codecs::utf8_path")]
-    pub branch_path: daybook_types::doc::BranchPath,
+    pub branch_path: daybook_types::doc::BranchPathBuf,
     #[autosurgeon(with = "am_utils_rs::codecs::utf8_path")]
-    pub staging_branch_path: daybook_types::doc::BranchPath,
+    pub staging_branch_path: daybook_types::doc::BranchPathBuf,
     pub heads: ChangeHashSet,
     pub facet_key: String,
     #[autosurgeon(with = "am_utils_rs::codecs::json")]
@@ -163,13 +163,13 @@ impl DispatchRepo {
     pub async fn load(
         _big_repo: SharedBigRepo,
         _app_doc_id: DocumentId,
-        local_user_path: daybook_types::doc::UserPath,
+        local_user_path: UserPathBuf,
         repo_sql: SqlCtx,
     ) -> Res<(Arc<Self>, crate::repos::RepoStopToken)> {
         init_schema(&repo_sql).await?;
 
         let local_user_path =
-            daybook_types::doc::user_path::for_repo(&local_user_path, "dispatch-repo")?;
+            daybook_types::doc::user_path::for_repo(local_user_path, "dispatch-repo")?;
         let local_actor_id = daybook_types::doc::user_path::to_actor_id(&local_user_path);
         let state = load_state(&repo_sql).await?;
         let registry = crate::repos::ListenersRegistry::new();
@@ -939,8 +939,8 @@ mod tests {
 
     async fn setup_repo_with_sql(
         repo_sql: SqlCtx,
-    ) -> Res<(Arc<DispatchRepo>, daybook_types::doc::UserPath)> {
-        let local_user_path = daybook_types::doc::UserPath::from("/test-user/test-device");
+    ) -> Res<(Arc<DispatchRepo>, daybook_types::doc::UserPathBuf)> {
+        let local_user_path = daybook_types::doc::UserPathBuf::from("/test-user/test-device");
         let (big_repo, _acx_stop) = BigRepo::boot(am_utils_rs::repo::Config {
             peer_id: crate::peer_id_from_label("test-dispatch"),
             secret_key_bytes: rand::random::<[u8; 32]>(),

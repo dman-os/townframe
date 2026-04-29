@@ -1,7 +1,7 @@
 use crate::drawer::DrawerRepo;
 use crate::interlude::*;
 use crate::repos::Repo;
-use daybook_types::doc::{BranchPath, ChangeHashSet, DocId, WellKnownFacetTag};
+use daybook_types::doc::{BranchPathBuf, ChangeHashSet, DocId, WellKnownFacetTag};
 use sqlx::{Sqlite, SqlitePool, Transaction};
 use tokio_util::sync::CancellationToken;
 
@@ -335,7 +335,7 @@ impl DocFacetSetIndexRepo {
     pub fn enqueue_upsert(
         &self,
         doc_id: DocId,
-        branch_path: BranchPath,
+        branch_path: BranchPathBuf,
         heads: ChangeHashSet,
     ) -> Res<()> {
         self.work_tx
@@ -360,7 +360,7 @@ impl DocFacetSetIndexRepo {
 enum DocFacetSetIndexWorkItem {
     Upsert {
         doc_id: DocId,
-        branch_path: BranchPath,
+        branch_path: BranchPathBuf,
         heads: ChangeHashSet,
     },
     DeleteDoc {
@@ -407,7 +407,7 @@ impl crate::rt::switch::SwitchSink for FacetSetTriageListener {
                 let Some(heads) = entry.branches.get("main") else {
                     return Ok(outcome);
                 };
-                let branch_path = BranchPath::from("main");
+                let branch_path = BranchPathBuf::from("main");
                 let Some(_keys) = self
                     .drawer_repo
                     .get_facet_keys_if_latest(id, &branch_path, heads)
@@ -443,7 +443,7 @@ impl crate::rt::switch::SwitchSink for FacetSetTriageListener {
                     self.index_repo.enqueue_delete(id.clone())?;
                     return Ok(outcome);
                 };
-                let branch_path = BranchPath::from("main");
+                let branch_path = BranchPathBuf::from("main");
                 let Some(_keys) = self
                     .drawer_repo
                     .get_facet_keys_if_latest(id, &branch_path, heads)
@@ -489,7 +489,7 @@ mod tests {
         let doc_id = test_context
             .drawer_repo
             .add(AddDocArgs {
-                branch_path: BranchPath::from("main"),
+                branch_path: BranchPathBuf::from("main"),
                 facets: [
                     (
                         FacetKey::from(WellKnownFacetTag::Note),

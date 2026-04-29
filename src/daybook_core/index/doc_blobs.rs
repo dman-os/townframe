@@ -4,7 +4,7 @@ use crate::drawer::DrawerRepo;
 use crate::interlude::*;
 use crate::repos::Repo;
 use daybook_types::doc::{
-    BranchPath, ChangeHashSet, DocId, FacetKey, WellKnownFacet, WellKnownFacetTag,
+    BranchPathBuf, ChangeHashSet, DocId, FacetKey, WellKnownFacet, WellKnownFacetTag,
 };
 use sqlx::QueryBuilder;
 use sqlx::SqlitePool;
@@ -15,7 +15,7 @@ const DOC_BLOBS_LOCAL_STATE_ID: &str = "@daybook/wip/doc-blobs-index";
 #[derive(Debug, Clone)]
 pub struct DocBlobMembership {
     pub doc_id: DocId,
-    pub branch_path: BranchPath,
+    pub branch_path: BranchPathBuf,
     pub blob_hash: String,
     pub length_octets: u64,
     pub origin_heads: ChangeHashSet,
@@ -233,7 +233,7 @@ impl DocBlobsIndexRepo {
     pub async fn reindex_doc(
         &self,
         doc_id: &DocId,
-        branch_path: &BranchPath,
+        branch_path: &BranchPathBuf,
         heads: &ChangeHashSet,
     ) -> Res<ReindexDocOutcome> {
         let Some(facet_keys) = self
@@ -303,7 +303,7 @@ impl DocBlobsIndexRepo {
     async fn reindex_doc_hashes(
         &self,
         doc_id: &DocId,
-        branch_path: &BranchPath,
+        branch_path: &BranchPathBuf,
         heads: &ChangeHashSet,
         blobs: &HashMap<String, u64>,
     ) -> Res<ReindexDocOutcome> {
@@ -404,7 +404,7 @@ impl DocBlobsIndexRepo {
     async fn delete_doc_branch(
         &self,
         doc_id: &DocId,
-        branch_path: &BranchPath,
+        branch_path: &BranchPathBuf,
     ) -> Res<ReindexDocOutcome> {
         let mut tx = self.db_pool.begin().await?;
         let prev_hashes: HashSet<String> = self
@@ -529,7 +529,7 @@ impl DocBlobsIndexRepo {
         &self,
         tx: &mut sqlx::SqliteConnection,
         doc_id: &DocId,
-        branch_path: &BranchPath,
+        branch_path: &BranchPathBuf,
     ) -> Res<Vec<String>> {
         let hashes: Vec<String> = sqlx::query_scalar(
             r#"
@@ -575,7 +575,7 @@ impl DocBlobsIndexRepo {
         tx: &mut sqlx::SqliteConnection,
         hash: &str,
         doc_id: &DocId,
-        branch_path: &BranchPath,
+        branch_path: &BranchPathBuf,
     ) -> Res<bool> {
         let exists_other: i64 = sqlx::query_scalar(
             r#"
@@ -644,7 +644,7 @@ impl DocBlobsIndexRepo {
                     .map_err(|_| ferr!("invalid negative blob length for hash {hash}"))?;
                 Ok(DocBlobMembership {
                     doc_id,
-                    branch_path: BranchPath::from(branch_path),
+                    branch_path: BranchPathBuf::from(branch_path),
                     blob_hash: hash.to_string(),
                     length_octets,
                     origin_heads: ChangeHashSet(am_utils_rs::parse_commit_heads(&head_strings)?),
@@ -666,7 +666,7 @@ impl DocBlobsIndexRepo {
         Ok(hashes)
     }
 
-    pub async fn list_all_memberships(&self) -> Res<Vec<(DocId, BranchPath, String, u64)>> {
+    pub async fn list_all_memberships(&self) -> Res<Vec<(DocId, BranchPathBuf, String, u64)>> {
         let rows: Vec<(DocId, String, String, i64)> = sqlx::query_as(
             r#"
             SELECT doc_id, branch_path, blob_hash, length_octets
@@ -682,7 +682,7 @@ impl DocBlobsIndexRepo {
                     .map_err(|_| ferr!("invalid negative blob length for hash {blob_hash}"))?;
                 Ok((
                     doc_id,
-                    BranchPath::from(branch_path),
+                    BranchPathBuf::from(branch_path),
                     blob_hash,
                     length_octets,
                 ))
@@ -702,7 +702,7 @@ impl DocBlobsIndexRepo {
     pub fn enqueue_upsert(
         &self,
         doc_id: DocId,
-        branch_path: BranchPath,
+        branch_path: BranchPathBuf,
         heads: ChangeHashSet,
     ) -> Res<()> {
         self.work_tx
@@ -725,7 +725,7 @@ impl DocBlobsIndexRepo {
     pub fn enqueue_delete_branches_not_in(
         &self,
         doc_id: DocId,
-        branch_paths: Vec<BranchPath>,
+        branch_paths: Vec<BranchPathBuf>,
     ) -> Res<()> {
         self.work_tx
             .send(DocBlobsIndexWorkItem::DeleteDocBranchesNotIn {
@@ -739,7 +739,7 @@ impl DocBlobsIndexRepo {
     async fn delete_doc_branches_not_in(
         &self,
         doc_id: &DocId,
-        branch_paths: &[BranchPath],
+        branch_paths: &[BranchPathBuf],
     ) -> Res<ReindexDocOutcome> {
         let retained: HashSet<&str> = branch_paths.iter().map(|path| path.as_str()).collect();
         let current: Vec<String> = sqlx::query_scalar(
@@ -758,7 +758,7 @@ impl DocBlobsIndexRepo {
                 continue;
             }
             outcome = self
-                .delete_doc_branch(doc_id, &BranchPath::from(branch_path))
+                .delete_doc_branch(doc_id, &BranchPathBuf::from(branch_path))
                 .await?;
         }
         Ok(outcome)
@@ -793,7 +793,7 @@ pub enum ReindexDocOutcome {
 enum DocBlobsIndexWorkItem {
     Upsert {
         doc_id: DocId,
-        branch_path: BranchPath,
+        branch_path: BranchPathBuf,
         heads: ChangeHashSet,
     },
     DeleteDoc {
@@ -801,7 +801,7 @@ enum DocBlobsIndexWorkItem {
     },
     DeleteDocBranchesNotIn {
         doc_id: DocId,
-        branch_paths: Vec<BranchPath>,
+        branch_paths: Vec<BranchPathBuf>,
     },
 }
 
@@ -844,7 +844,7 @@ impl crate::rt::switch::SwitchSink for DocBlobsTriageListener {
                 ..
             } => {
                 for (branch_name, heads) in &entry.branches {
-                    let branch_path = BranchPath::from(branch_name.as_str());
+                    let branch_path = BranchPathBuf::from(branch_name.as_str());
                     let Some(_keys) = self
                         .drawer_repo
                         .get_facet_keys_if_latest(id, &branch_path, heads)
@@ -862,15 +862,15 @@ impl crate::rt::switch::SwitchSink for DocBlobsTriageListener {
                 drawer_heads: _,
                 ..
             } => {
-                let branch_paths: Vec<BranchPath> = entry
+                let branch_paths: Vec<BranchPathBuf> = entry
                     .branches
                     .keys()
-                    .map(|name| BranchPath::from(name.as_str()))
+                    .map(|name| BranchPathBuf::from(name.as_str()))
                     .collect();
                 self.index_repo
                     .enqueue_delete_branches_not_in(id.clone(), branch_paths)?;
                 for (branch_name, heads) in &entry.branches {
-                    let branch_path = BranchPath::from(branch_name.as_str());
+                    let branch_path = BranchPathBuf::from(branch_name.as_str());
                     let Some(_keys) = self
                         .drawer_repo
                         .get_facet_keys_if_latest(id, &branch_path, heads)
@@ -936,7 +936,7 @@ mod tests {
         let doc_id = test_context
             .drawer_repo
             .add(AddDocArgs {
-                branch_path: BranchPath::from("main"),
+                branch_path: BranchPathBuf::from("main"),
                 facets: [(
                     FacetKey::from(WellKnownFacetTag::Blob),
                     FacetRaw::from(WellKnownFacet::Blob(daybook_types::doc::Blob {
@@ -983,7 +983,7 @@ mod tests {
 
         repo.enqueue_upsert(
             missing_doc_id.clone(),
-            BranchPath::from("main"),
+            BranchPathBuf::from("main"),
             ChangeHashSet(default()),
         )?;
 
@@ -1005,7 +1005,7 @@ mod tests {
 
     #[tokio::test(flavor = "multi_thread")]
     async fn doc_blobs_index_publishes_docs_scope_partition_membership() -> Res<()> {
-        let local_user_path = daybook_types::doc::UserPath::from("/test-user/test-device");
+        let local_user_path = daybook_types::doc::UserPathBuf::from("/test-user/test-device");
         let (big_repo, big_repo_stop) = BigRepo::boot(am_utils_rs::repo::Config {
             peer_id: crate::peer_id_from_label("test-doc-blobs-scope"),
             secret_key_bytes: rand::random::<[u8; 32]>(),
@@ -1027,7 +1027,7 @@ mod tests {
         let temp_dir = tempfile::tempdir()?;
         let blobs_repo = crate::blobs::BlobsRepo::new(
             temp_dir.path().join("blobs"),
-            "/test-user".to_string(),
+            "/test-user".into(),
             Arc::new(crate::blobs::PartitionStoreMembershipWriter::new(
                 big_repo.partition_store(),
             )),
@@ -1065,7 +1065,7 @@ mod tests {
         let hash = utils_rs::hash::encode_base58_multibase(b"docs-scope-hash");
         let doc_id = drawer_repo
             .add(AddDocArgs {
-                branch_path: BranchPath::from("main"),
+                branch_path: BranchPathBuf::from("main"),
                 facets: [(
                     FacetKey::from(WellKnownFacetTag::Blob),
                     FacetRaw::from(WellKnownFacet::Blob(daybook_types::doc::Blob {
@@ -1085,7 +1085,7 @@ mod tests {
             .await?
             .and_then(|branches| branches.branches.get("main").cloned())
             .ok_or_eyre("expected main branch heads for test doc")?;
-        repo.enqueue_upsert(doc_id.clone(), BranchPath::from("main"), heads)?;
+        repo.enqueue_upsert(doc_id.clone(), BranchPathBuf::from("main"), heads)?;
 
         wait_for_partition_member_count(&big_repo, &partition_id, 1).await?;
         assert!(

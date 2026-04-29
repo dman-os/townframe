@@ -44,7 +44,7 @@ pub struct DrawerRepo {
     drawer_doc_id: DocumentId,
     local_actor_id: ActorId,
     local_peer_id: am_utils_rs::repo::PeerId,
-    local_user_path: daybook_types::doc::UserPath,
+    local_user_path: daybook_types::doc::UserPathBuf,
 
     // LRU Caches
     entry_cache: Arc<DHashMap<DocId, DocEntry>>,
@@ -96,7 +96,7 @@ impl DrawerRepo {
     pub async fn load(
         big_repo: SharedBigRepo,
         drawer_doc_id: DocumentId,
-        local_user_path: daybook_types::doc::UserPath,
+        local_user_path: daybook_types::doc::UserPathBuf,
         meta_db_pool: SqlCtx,
         _local_state_root: PathBuf,
         entry_pool: SharedKeyedLruPool<DocId>,
@@ -105,7 +105,7 @@ impl DrawerRepo {
         #[cfg(test)] plugs_repo: Option<Arc<PlugsRepo>>,
     ) -> Res<(Arc<Self>, crate::repos::RepoStopToken)> {
         let local_user_path =
-            daybook_types::doc::user_path::for_repo(&local_user_path, "drawer-repo")?;
+            daybook_types::doc::user_path::for_repo(local_user_path, "drawer-repo")?;
         let local_actor_id = daybook_types::doc::user_path::to_actor_id(&local_user_path);
         let drawer_am_handle = big_repo
             .get_doc(&drawer_doc_id)
@@ -176,7 +176,7 @@ impl DrawerRepo {
         &self,
         branch_path: &daybook_types::doc::BranchPath,
     ) -> Res<BranchKind> {
-        if branch_path == &daybook_types::doc::BranchPath::from("main") {
+        if branch_path == daybook_types::doc::BranchPath::new("main") {
             return Ok(BranchKind::Replicated);
         }
         if branch_path == "/tmp" || branch_path.starts_with("/tmp/") {
@@ -239,9 +239,7 @@ impl DrawerRepo {
         user_path: Option<&daybook_types::doc::UserPath>,
         branch_doc_id: &str,
     ) -> ActorId {
-        let base_user_path = user_path
-            .cloned()
-            .unwrap_or_else(|| self.local_user_path.clone());
+        let base_user_path = user_path.unwrap_or_else(|| &self.local_user_path);
         let scoped_user_path = base_user_path.join("branches").join(branch_doc_id);
         daybook_types::doc::user_path::to_actor_id(&scoped_user_path)
     }
@@ -417,7 +415,7 @@ impl DrawerRepo {
     ) -> Res<HashMap<String, BranchSnapshot>> {
         let mut out = HashMap::new();
         for (branch_name, branch_ref) in &entry.branches {
-            let branch_path = daybook_types::doc::BranchPath::from(branch_name.as_str());
+            let branch_path = daybook_types::doc::BranchPath::new(branch_name.as_str());
             if branch_path.to_string().starts_with("/tmp/") {
                 continue;
             }

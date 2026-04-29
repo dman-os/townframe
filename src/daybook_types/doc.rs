@@ -11,7 +11,7 @@ pub type MimeType = String;
 #[cfg_attr(feature = "schemars", derive(schemars::JsonSchema))]
 pub struct UserMeta {
     #[cfg_attr(feature = "schemars", schemars(with = "String"))]
-    pub user_path: UserPath,
+    pub user_path: UserPathBuf,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -342,8 +342,10 @@ pub type DocId = String;
 pub type DocUserId = automerge::ActorId;
 pub type FacetBlame = HashMap<FacetKey, DocUserId>;
 
-pub type UserPath = camino::Utf8PathBuf;
-pub type BranchPath = camino::Utf8PathBuf;
+pub type UserPathBuf = camino::Utf8PathBuf;
+pub type UserPath = camino::Utf8Path;
+pub type BranchPathBuf = camino::Utf8PathBuf;
+pub type BranchPath = camino::Utf8Path;
 pub fn format_peer_key(pubkey: &[u8; 32]) -> Arc<str> {
     let pkey_bs58 = utils_rs::hash::encode_base58_multibase(pubkey);
     format!("dnode-iroh-{pkey_bs58}").into()
@@ -355,7 +357,7 @@ pub mod user_path {
     pub const USER_ID_PREFIX: &str = "duser-wip-";
     pub const DEVICE_ID_PREFIX: &str = "ddev-wip-iroh-";
 
-    pub fn new(device: &str, plug: Option<&str>, routine: Option<&str>) -> UserPath {
+    pub fn new(device: &str, plug: Option<&str>, routine: Option<&str>) -> UserPathBuf {
         let mut path = Utf8PathBuf::from("/");
         path.push(device);
         if let Some(plug) = plug {
@@ -367,18 +369,23 @@ pub mod user_path {
         path
     }
 
-    pub fn to_actor_id(path: &UserPath) -> automerge::ActorId {
+    pub fn to_actor_id(path: &UserPathBuf) -> automerge::ActorId {
         let hash = blake3::hash(path.as_str().as_bytes());
         let mut bytes = [0u8; 16];
         bytes.copy_from_slice(&hash.as_bytes()[..16]);
         automerge::ActorId::from(bytes)
     }
 
-    pub fn for_repo(base_user_path: &UserPath, repo_scope: &str) -> Res<UserPath> {
+    pub fn for_repo(mut base_user_path: UserPathBuf, repo_scope: &str) -> Res<UserPathBuf> {
         validate_segment("repo_scope", repo_scope)?;
-        let mut path = base_user_path.clone();
-        path.push(repo_scope);
-        parse(path.as_str())
+        base_user_path.push(repo_scope);
+        if !base_user_path.is_absolute() {
+            eyre::bail!("UserPath must start with /");
+        }
+        if base_user_path.as_str() != "/" && base_user_path.as_str().ends_with('/') {
+            eyre::bail!("UserPath must not end with /");
+        }
+        Ok(base_user_path)
     }
 
     pub fn for_plug_routine(
@@ -386,7 +393,7 @@ pub mod user_path {
         device_id: &str,
         plug_id: &str,
         routine_id: &str,
-    ) -> Res<UserPath> {
+    ) -> Res<UserPathBuf> {
         validate_segment("user_id", user_id)?;
         validate_segment("device_id", device_id)?;
         validate_segment("plug_id", plug_id)?;
@@ -396,7 +403,13 @@ pub mod user_path {
         path.push(device_id);
         path.push(plug_id);
         path.push(routine_id);
-        parse(path.as_str())
+        if !path.is_absolute() {
+            eyre::bail!("UserPath must start with /");
+        }
+        if path.as_str() != "/" && path.as_str().ends_with('/') {
+            eyre::bail!("UserPath must not end with /");
+        }
+        Ok(path)
     }
 
     fn validate_segment(label: &str, value: &str) -> Res<()> {
@@ -412,7 +425,7 @@ pub mod user_path {
         Ok(())
     }
 
-    pub fn plug(path: &UserPath) -> Option<&str> {
+    pub fn plug(path: &UserPathBuf) -> Option<&str> {
         path.as_str()
             .trim_start_matches('/')
             .split('/')
@@ -420,7 +433,7 @@ pub mod user_path {
             .nth(2)
     }
 
-    pub fn routine(path: &UserPath) -> Option<&str> {
+    pub fn routine(path: &UserPathBuf) -> Option<&str> {
         path.as_str()
             .trim_start_matches('/')
             .split('/')
@@ -428,7 +441,7 @@ pub mod user_path {
             .nth(3)
     }
 
-    pub fn parse(input: &str) -> Res<UserPath> {
+    pub fn parse(input: &str) -> Res<UserPathBuf> {
         let path = Utf8PathBuf::from(input);
         if !path.is_absolute() {
             eyre::bail!("UserPath must start with /");
@@ -446,9 +459,9 @@ pub mod user_path {
         #[test]
         fn for_repo_rejects_invalid_segment() {
             let base = Utf8PathBuf::from("/");
-            assert!(for_repo(&base, "").is_err());
-            assert!(for_repo(&base, "a/b").is_err());
-            assert!(for_repo(&base, "..").is_err());
+            assert!(for_repo(base.clone(), "").is_err());
+            assert!(for_repo(base.clone(), "a/b").is_err());
+            assert!(for_repo(base.clone(), "..").is_err());
         }
 
         #[test]
@@ -461,7 +474,7 @@ pub mod user_path {
         #[test]
         fn for_repo_handles_root_base_with_push() {
             let base = Utf8PathBuf::from("/");
-            let path = for_repo(&base, "config-repo").expect("expected valid repo path");
+            let path = for_repo(base.clone(), "config-repo").expect("expected valid repo path");
             assert_eq!(path.as_str(), "/config-repo");
         }
     }
@@ -508,9 +521,9 @@ impl Doc {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[cfg_attr(feature = "uniffi", derive(uniffi::Record))]
 pub struct AddDocArgs {
-    pub branch_path: BranchPath,
+    pub branch_path: BranchPathBuf,
     pub facets: HashMap<FacetKey, FacetRaw>,
-    pub user_path: Option<UserPath>,
+    pub user_path: Option<UserPathBuf>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -522,7 +535,7 @@ pub struct DocPatch {
     /// facets to remove (by key)
     pub facets_remove: Vec<FacetKey>,
     /// Optional user path for recording in drawer
-    pub user_path: Option<UserPath>,
+    pub user_path: Option<UserPathBuf>,
 }
 
 impl DocPatch {

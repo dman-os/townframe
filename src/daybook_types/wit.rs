@@ -3,7 +3,7 @@ pub mod doc {
 
     use crate::doc as root_doc;
     use api_utils_rs::wit::townframe::api_utils::utils::Datetime;
-    pub use root_doc::{Blob, DocId, FacetKey, MimeType, Multihash, Note, UserPath};
+    pub use root_doc::{Blob, DocId, FacetKey, MimeType, Multihash, Note, UserPathBuf};
 
     #[derive(Debug, Clone, Serialize, Deserialize)]
     pub struct UserMeta {
@@ -191,7 +191,7 @@ pub mod doc {
                     .into_iter()
                     .map(|key| FacetKey::from(&key))
                     .collect(),
-                user_path: val.user_path.map(root_doc::UserPath::from),
+                user_path: val.user_path.map(root_doc::UserPathBuf::from),
             })
         }
     }

@@ -1,14 +1,15 @@
 use super::*;
 
 pub(super) struct BlobSyncWorkerStopToken {
-    cancel_token: CancellationToken,
-    join_handle: tokio::task::JoinHandle<()>,
+    task_handle: utils_rs::TaskHandle,
 }
 
 impl BlobSyncWorkerStopToken {
     pub async fn stop(self) -> Res<()> {
-        self.cancel_token.cancel();
-        utils_rs::wait_on_handle_with_timeout(self.join_handle, Duration::from_secs(2)).await?;
+        self.task_handle.abort();
+        tokio::time::timeout(Duration::from_secs(2), self.task_handle.join())
+            .await
+            .ok();
         Ok(())
     }
 }
@@ -18,20 +19,16 @@ pub fn spawn_blob_sync_worker(
     partition: PartitionKey,
     hash: String,
     peers: Vec<PeerId>,
-    cancel_token: CancellationToken,
-    msg_tx: mpsc::UnboundedSender<Msg>,
     sync_progress_tx: mpsc::Sender<SyncProgressMsg>,
     blobs_repo: Arc<BlobsRepo>,
     endpoint: iroh::Endpoint,
     retry: RetryState,
+    task_set: &utils_rs::AbortableJoinSet,
 ) -> Res<BlobSyncWorkerStopToken> {
-    let stop_cancel_token = cancel_token.clone();
     let worker = BlobSyncWorker {
         partition,
         hash,
         peers,
-        cancel_token,
-        msg_tx,
         sync_progress_tx,
         blobs_repo,
         endpoint,
@@ -55,6 +52,8 @@ pub fn spawn_blob_sync_worker(
                         hash: worker.hash.clone(),
                         success: false,
                         reason: "invalid hash".to_string(),
+                        synced_peer_id: None,
+                        backoff: None,
                     })
                     .await;
                 return;
@@ -71,9 +70,10 @@ pub fn spawn_blob_sync_worker(
                         hash: worker.hash.clone(),
                         success: false,
                         reason: "iroh store lookup failed".to_string(),
+                        synced_peer_id: None,
+                        backoff: Some((Duration::from_secs(2), worker.retry)),
                     })
                     .await;
-                worker.request_backoff(Duration::from_secs(2));
                 return;
             }
         };
@@ -88,21 +88,23 @@ pub fn spawn_blob_sync_worker(
                         hash: worker.hash.clone(),
                         success: false,
                         reason: "local blob lookup failed".to_string(),
+                        synced_peer_id: None,
+                        backoff: Some((Duration::from_secs(2), worker.retry)),
                     })
                     .await;
-                worker.request_backoff(Duration::from_secs(2));
                 return;
             }
         };
 
         if has_local_hash {
-            worker.mark_synced(None);
             worker
                 .send_progress(SyncProgressMsg::BlobWorkerFinished {
                     partition: worker.partition.clone(),
                     hash: worker.hash.clone(),
                     success: true,
                     reason: "already present in blobs repo".to_string(),
+                    synced_peer_id: None,
+                    backoff: None,
                 })
                 .await;
             return;
@@ -117,13 +119,14 @@ pub fn spawn_blob_sync_worker(
                 .await;
             match worker.blobs_repo.put_from_store(&worker.hash).await {
                 Ok(_) => {
-                    worker.mark_synced(None);
                     worker
                         .send_progress(SyncProgressMsg::BlobWorkerFinished {
                             partition: worker.partition.clone(),
                             hash: worker.hash.clone(),
                             success: true,
                             reason: "materialized from local iroh store".to_string(),
+                            synced_peer_id: None,
+                            backoff: None,
                         })
                         .await;
                 }
@@ -135,9 +138,10 @@ pub fn spawn_blob_sync_worker(
                             hash: worker.hash.clone(),
                             success: false,
                             reason: "put_from_store failed".to_string(),
+                            synced_peer_id: None,
+                            backoff: Some((Duration::from_secs(2), worker.retry)),
                         })
                         .await;
-                    worker.request_backoff(Duration::from_secs(2));
                 }
             }
             return;
@@ -150,9 +154,10 @@ pub fn spawn_blob_sync_worker(
                     hash: worker.hash.clone(),
                     success: false,
                     reason: "no peers available".to_string(),
+                    synced_peer_id: None,
+                    backoff: Some((Duration::from_secs(2), worker.retry)),
                 })
                 .await;
-            worker.request_backoff(Duration::from_secs(2));
             return;
         }
 
@@ -166,9 +171,10 @@ pub fn spawn_blob_sync_worker(
                     hash: worker.hash.clone(),
                     success: false,
                     reason: "failed to open download stream".to_string(),
+                    synced_peer_id: None,
+                    backoff: Some((Duration::from_secs(2), worker.retry)),
                 })
                 .await;
-            worker.request_backoff(Duration::from_secs(2));
             return;
         };
 
@@ -176,10 +182,7 @@ pub fn spawn_blob_sync_worker(
         let mut saw_download_signal = false;
         let mut saw_download_error = false;
         use futures::StreamExt;
-        while let Some(item) = tokio::select! {
-            _ = worker.cancel_token.cancelled() => return,
-            item = stream.next() => item,
-        } {
+        while let Some(item) = stream.next().await {
             match item {
                 iroh_blobs::api::downloader::DownloadProgressItem::TryProvider { id, .. } => {
                     saw_download_signal = true;
@@ -223,9 +226,10 @@ pub fn spawn_blob_sync_worker(
                     hash: worker.hash.clone(),
                     success: false,
                     reason: "download reported error".to_string(),
+                    synced_peer_id: None,
+                    backoff: Some((Duration::from_secs(2), worker.retry)),
                 })
                 .await;
-            worker.request_backoff(Duration::from_secs(2));
             return;
         }
 
@@ -245,9 +249,10 @@ pub fn spawn_blob_sync_worker(
                         hash: worker.hash.clone(),
                         success: false,
                         reason: "iroh store lookup failed after download".to_string(),
+                        synced_peer_id: None,
+                        backoff: Some((Duration::from_secs(2), worker.retry)),
                     })
                     .await;
-                worker.request_backoff(Duration::from_secs(2));
                 return;
             }
         };
@@ -259,9 +264,10 @@ pub fn spawn_blob_sync_worker(
                     hash: worker.hash.clone(),
                     success: false,
                     reason: "download completed but blob missing from store".to_string(),
+                    synced_peer_id: None,
+                    backoff: Some((Duration::from_secs(2), worker.retry)),
                 })
                 .await;
-            worker.request_backoff(Duration::from_secs(2));
             return;
         }
 
@@ -273,9 +279,8 @@ pub fn spawn_blob_sync_worker(
             .await;
         match worker.blobs_repo.put_from_store(&worker.hash).await {
             Ok(_) => {
-                if let Some(endpoint_id) =
-                    selected_endpoint.or_else(|| worker.peers.first().copied())
-                {
+                let synced_peer_id = selected_endpoint.or_else(|| worker.peers.first().copied());
+                if let Some(endpoint_id) = synced_peer_id {
                     worker
                         .send_progress(SyncProgressMsg::BlobDownloadFinished {
                             peer_id: endpoint_id,
@@ -291,9 +296,10 @@ pub fn spawn_blob_sync_worker(
                         hash: worker.hash.clone(),
                         success: true,
                         reason: "download and materialize succeeded".to_string(),
+                        synced_peer_id,
+                        backoff: None,
                     })
                     .await;
-                worker.mark_synced(selected_endpoint);
             }
             Err(err) => {
                 tracing::warn!(?err, hash = %worker.hash, "put_from_store failed after download");
@@ -317,25 +323,23 @@ pub fn spawn_blob_sync_worker(
                         } else {
                             "download produced no data".to_string()
                         },
+                        synced_peer_id: None,
+                        backoff: Some((Duration::from_secs(2), worker.retry)),
                     })
                     .await;
-                worker.request_backoff(Duration::from_secs(2));
             }
         }
     };
-    let join_handle = tokio::spawn(fut.instrument(tracing::info_span!("BlobSyncWorker task")));
-    Ok(BlobSyncWorkerStopToken {
-        cancel_token: stop_cancel_token,
-        join_handle,
-    })
+    let task_handle = task_set
+        .spawn(fut.instrument(tracing::info_span!("BlobSyncWorker task")))
+        .map_err(|_| ferr!("task set aborted"))?;
+    Ok(BlobSyncWorkerStopToken { task_handle })
 }
 
 struct BlobSyncWorker {
     partition: PartitionKey,
     hash: String,
     peers: Vec<PeerId>,
-    cancel_token: CancellationToken,
-    msg_tx: mpsc::UnboundedSender<Msg>,
     sync_progress_tx: mpsc::Sender<SyncProgressMsg>,
     blobs_repo: Arc<BlobsRepo>,
     endpoint: iroh::Endpoint,
@@ -343,27 +347,6 @@ struct BlobSyncWorker {
 }
 
 impl BlobSyncWorker {
-    fn request_backoff(&self, delay: Duration) {
-        self.msg_tx
-            .send(Msg::BlobSyncRequestBackoff {
-                hash: self.hash.clone(),
-                delay,
-                previous_attempt_no: self.retry.attempt_no,
-                previous_backoff: self.retry.last_backoff,
-                previous_attempt_at: self.retry.last_attempt_at,
-            })
-            .expect("FullSyncWorker went down without cleaning boot_blob_sync_worker");
-    }
-
-    fn mark_synced(&self, peer_id: Option<PeerId>) {
-        self.msg_tx
-            .send(Msg::BlobSyncMarkedSynced {
-                hash: self.hash.clone(),
-                peer_id,
-            })
-            .expect("FullSyncWorker went down without cleaning boot_blob_sync_worker");
-    }
-
     async fn send_progress(&self, msg: SyncProgressMsg) {
         if let Err(err) = self.sync_progress_tx.try_send(msg) {
             tracing::debug!(?err, hash = %self.hash, "dropping blob worker progress message");

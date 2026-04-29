@@ -33,7 +33,7 @@ impl TablesRepoFfi {
             .do_on_rt(TablesRepo::load(
                 Arc::clone(&fcx.rcx.big_repo),
                 fcx.rcx.doc_app.document_id().clone(),
-                daybook_types::doc::UserPath::from(fcx.rcx.local_user_path.clone()),
+                daybook_types::doc::UserPathBuf::from(fcx.rcx.local_user_path.clone()),
             ))
             .await
             .inspect_err(|err| tracing::error!(?err))?;

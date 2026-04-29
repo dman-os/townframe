@@ -1,3 +1,5 @@
+use daybook_types::doc::{BranchPath, BranchPathBuf};
+
 use super::*;
 
 async fn boot_connected_sync_pair(
@@ -31,7 +33,7 @@ async fn boot_connected_sync_pair(
 
 async fn update_title_at_main_branch(node: &SyncTestNode, doc_id: &String, title: &str) -> Res<()> {
     let title_key = FacetKey::from(WellKnownFacetTag::TitleGeneric);
-    let branch = daybook_types::doc::BranchPath::from("main");
+    let branch = BranchPathBuf::from("main");
     let Some((_, heads)) = node.drawer.get_with_heads(doc_id, &branch, None).await? else {
         eyre::bail!("missing doc while updating title: {doc_id}");
     };
@@ -41,11 +43,11 @@ async fn update_title_at_main_branch(node: &SyncTestNode, doc_id: &String, title
                 id: doc_id.to_string(),
                 facets_set: [(title_key, WellKnownFacet::TitleGeneric(title.into()).into())].into(),
                 facets_remove: vec![],
-                user_path: Some(daybook_types::doc::UserPath::from(
+                user_path: Some(daybook_types::doc::UserPathBuf::from(
                     node.ctx.local_user_path.clone(),
                 )),
             },
-            branch,
+            &branch,
             Some(heads),
         )
         .await?;
@@ -65,11 +67,11 @@ async fn update_title_at_heads(
                 id: doc_id.clone(),
                 facets_set: [(title_key, WellKnownFacet::TitleGeneric(title.into()).into())].into(),
                 facets_remove: vec![],
-                user_path: Some(daybook_types::doc::UserPath::from(
+                user_path: Some(daybook_types::doc::UserPathBuf::from(
                     node.ctx.local_user_path.clone(),
                 )),
             },
-            daybook_types::doc::BranchPath::from("main"),
+            BranchPath::new("main"),
             Some(heads.clone()),
         )
         .await?;
@@ -97,11 +99,11 @@ async fn update_note_at_heads(
                 )]
                 .into(),
                 facets_remove: vec![],
-                user_path: Some(daybook_types::doc::UserPath::from(
+                user_path: Some(daybook_types::doc::UserPathBuf::from(
                     node.ctx.local_user_path.clone(),
                 )),
             },
-            daybook_types::doc::BranchPath::from("main"),
+            BranchPath::new("main"),
             Some(heads.clone()),
         )
         .await?;
@@ -115,7 +117,7 @@ async fn assert_title_synced(
     expected_title: &str,
 ) -> Res<()> {
     let title_key = FacetKey::from(WellKnownFacetTag::TitleGeneric);
-    let branch = daybook_types::doc::BranchPath::from("main");
+    let branch = BranchPathBuf::from("main");
     wait_for_doc_head_parity(node_a, node_b, doc_id, &branch, Duration::from_secs(30)).await?;
     let doc_on_a = node_a
         .drawer
@@ -149,7 +151,7 @@ async fn assert_title_and_note_synced(
 ) -> Res<()> {
     let title_key = FacetKey::from(WellKnownFacetTag::TitleGeneric);
     let note_key = FacetKey::from(WellKnownFacetTag::Note);
-    let branch = daybook_types::doc::BranchPath::from("main");
+    let branch = BranchPathBuf::from("main");
     wait_for_doc_head_parity(node_a, node_b, doc_id, &branch, Duration::from_secs(30)).await?;
     let doc_on_a = node_a
         .drawer
@@ -187,7 +189,7 @@ async fn wait_for_synced_doc_on_both_sides(
     left: &SyncTestNode,
     right: &SyncTestNode,
     doc_id: &String,
-    branch: &daybook_types::doc::BranchPath,
+    branch: &BranchPathBuf,
     timeout: Duration,
 ) -> Res<(Arc<daybook_types::doc::Doc>, Arc<daybook_types::doc::Doc>)> {
     Ok(tokio::time::timeout(timeout, async {
@@ -253,13 +255,13 @@ async fn iroh_sync_single_doc_created_before_connect_replicates() -> Res<()> {
         let doc_on_a = node_a
             .drawer
             .add(daybook_types::doc::AddDocArgs {
-                branch_path: daybook_types::doc::BranchPath::from("main"),
+                branch_path: BranchPathBuf::from("main"),
                 facets: [(
                     title_key.clone(),
                     WellKnownFacet::TitleGeneric("Pre-connect sync doc".into()).into(),
                 )]
                 .into(),
-                user_path: Some(daybook_types::doc::UserPath::from(
+                user_path: Some(daybook_types::doc::UserPathBuf::from(
                     node_a.ctx.local_user_path.clone(),
                 )),
             })
@@ -272,20 +274,12 @@ async fn iroh_sync_single_doc_created_before_connect_replicates() -> Res<()> {
 
         let doc_on_a = node_a
             .drawer
-            .get_with_heads(
-                &doc_on_a,
-                &daybook_types::doc::BranchPath::from("main"),
-                None,
-            )
+            .get_with_heads(&doc_on_a, &BranchPathBuf::from("main"), None)
             .await?
             .ok_or_eyre("node_a lost the pre-connect doc")?;
         let doc_on_b = node_b
             .drawer
-            .get_with_heads(
-                &doc_on_a.0.id,
-                &daybook_types::doc::BranchPath::from("main"),
-                None,
-            )
+            .get_with_heads(&doc_on_a.0.id, &BranchPathBuf::from("main"), None)
             .await?
             .ok_or_eyre("node_b did not receive the pre-connect doc")?;
 
@@ -334,7 +328,7 @@ async fn iroh_sync_single_blob_created_before_connect_replicates() -> Res<()> {
         let doc_id = node_a
             .drawer
             .add(daybook_types::doc::AddDocArgs {
-                branch_path: daybook_types::doc::BranchPath::from("main"),
+                branch_path: BranchPathBuf::from("main"),
                 facets: [(
                     blob_key.clone(),
                     WellKnownFacet::Blob(daybook_types::doc::Blob {
@@ -347,7 +341,7 @@ async fn iroh_sync_single_blob_created_before_connect_replicates() -> Res<()> {
                     .into(),
                 )]
                 .into(),
-                user_path: Some(daybook_types::doc::UserPath::from(
+                user_path: Some(daybook_types::doc::UserPathBuf::from(
                     node_a.ctx.local_user_path.clone(),
                 )),
             })
@@ -360,12 +354,12 @@ async fn iroh_sync_single_blob_created_before_connect_replicates() -> Res<()> {
 
         let doc_on_a = node_a
             .drawer
-            .get_with_heads(&doc_id, &daybook_types::doc::BranchPath::from("main"), None)
+            .get_with_heads(&doc_id, &BranchPathBuf::from("main"), None)
             .await?
             .ok_or_eyre("node_a lost the pre-connect blob doc")?;
         let doc_on_b = node_b
             .drawer
-            .get_with_heads(&doc_id, &daybook_types::doc::BranchPath::from("main"), None)
+            .get_with_heads(&doc_id, &BranchPathBuf::from("main"), None)
             .await?
             .ok_or_eyre("node_b did not receive the pre-connect blob doc")?;
 
@@ -426,13 +420,13 @@ async fn iroh_sync_single_doc_created_while_connected_replicates() -> Res<()> {
         let doc_on_a = node_a
             .drawer
             .add(daybook_types::doc::AddDocArgs {
-                branch_path: daybook_types::doc::BranchPath::from("main"),
+                branch_path: BranchPathBuf::from("main"),
                 facets: [(
                     title_key.clone(),
                     WellKnownFacet::TitleGeneric("Connected doc sync".into()).into(),
                 )]
                 .into(),
-                user_path: Some(daybook_types::doc::UserPath::from(
+                user_path: Some(daybook_types::doc::UserPathBuf::from(
                     node_a.ctx.local_user_path.clone(),
                 )),
             })
@@ -441,20 +435,12 @@ async fn iroh_sync_single_doc_created_while_connected_replicates() -> Res<()> {
         wait_for_doc_presence_with_activity(&node_b, &doc_on_a, Duration::from_secs(60)).await?;
         let doc_on_a = node_a
             .drawer
-            .get_with_heads(
-                &doc_on_a,
-                &daybook_types::doc::BranchPath::from("main"),
-                None,
-            )
+            .get_with_heads(&doc_on_a, &BranchPathBuf::from("main"), None)
             .await?
             .ok_or_eyre("node_a lost the connected doc")?;
         let doc_on_b = node_b
             .drawer
-            .get_with_heads(
-                &doc_on_a.0.id,
-                &daybook_types::doc::BranchPath::from("main"),
-                None,
-            )
+            .get_with_heads(&doc_on_a.0.id, &BranchPathBuf::from("main"), None)
             .await?
             .ok_or_eyre("node_b did not receive the connected doc")?;
 
@@ -509,7 +495,7 @@ async fn iroh_sync_single_blob_created_while_connected_replicates() -> Res<()> {
         let doc_id = node_a
             .drawer
             .add(daybook_types::doc::AddDocArgs {
-                branch_path: daybook_types::doc::BranchPath::from("main"),
+                branch_path: BranchPathBuf::from("main"),
                 facets: [(
                     blob_key.clone(),
                     WellKnownFacet::Blob(daybook_types::doc::Blob {
@@ -522,7 +508,7 @@ async fn iroh_sync_single_blob_created_while_connected_replicates() -> Res<()> {
                     .into(),
                 )]
                 .into(),
-                user_path: Some(daybook_types::doc::UserPath::from(
+                user_path: Some(daybook_types::doc::UserPathBuf::from(
                     node_a.ctx.local_user_path.clone(),
                 )),
             })
@@ -534,12 +520,12 @@ async fn iroh_sync_single_blob_created_while_connected_replicates() -> Res<()> {
 
         let doc_on_a = node_a
             .drawer
-            .get_with_heads(&doc_id, &daybook_types::doc::BranchPath::from("main"), None)
+            .get_with_heads(&doc_id, &BranchPathBuf::from("main"), None)
             .await?
             .ok_or_eyre("node_a lost the connected blob doc")?;
         let doc_on_b = node_b
             .drawer
-            .get_with_heads(&doc_id, &daybook_types::doc::BranchPath::from("main"), None)
+            .get_with_heads(&doc_id, &BranchPathBuf::from("main"), None)
             .await?
             .ok_or_eyre("node_b did not receive the connected blob doc")?;
 
@@ -575,13 +561,13 @@ async fn iroh_sync_connected_doc_updates_propagate_originator_then_other() -> Re
         let doc_id = node_a
             .drawer
             .add(daybook_types::doc::AddDocArgs {
-                branch_path: daybook_types::doc::BranchPath::from("main"),
+                branch_path: BranchPathBuf::from("main"),
                 facets: [(
                     title_key.clone(),
                     WellKnownFacet::TitleGeneric("Base title".into()).into(),
                 )]
                 .into(),
-                user_path: Some(daybook_types::doc::UserPath::from(
+                user_path: Some(daybook_types::doc::UserPathBuf::from(
                     node_a.ctx.local_user_path.clone(),
                 )),
             })
@@ -609,28 +595,35 @@ async fn iroh_sync_connected_doc_updates_propagate_other_then_originator() -> Re
     let (_temp_root, node_a, node_b, _) = boot_connected_sync_pair().await?;
     {
         let title_key = FacetKey::from(WellKnownFacetTag::TitleGeneric);
+        info!("XXX adding doc");
         let doc_id = node_a
             .drawer
             .add(daybook_types::doc::AddDocArgs {
-                branch_path: daybook_types::doc::BranchPath::from("main"),
+                branch_path: BranchPathBuf::from("main"),
                 facets: [(
                     title_key.clone(),
                     WellKnownFacet::TitleGeneric("Base title".into()).into(),
                 )]
                 .into(),
-                user_path: Some(daybook_types::doc::UserPath::from(
+                user_path: Some(daybook_types::doc::UserPathBuf::from(
                     node_a.ctx.local_user_path.clone(),
                 )),
             })
             .await?;
 
+        info!("XXX waiting for doc to sync");
         wait_for_doc_presence_with_activity(&node_b, &doc_id, Duration::from_secs(60)).await?;
+        info!("XXX asserting title exists");
         assert_title_synced(&node_a, &node_b, &doc_id, "Base title").await?;
 
+        info!("XXX updating doc on node b");
         update_title_at_main_branch(&node_b, &doc_id, "B update 1").await?;
+        info!("XXX waiting for update on node a");
         assert_title_synced(&node_a, &node_b, &doc_id, "B update 1").await?;
 
+        info!("XXX updating title on node a");
         update_title_at_main_branch(&node_a, &doc_id, "A update 2").await?;
+        info!("XXX waiting for update on node b");
         assert_title_synced(&node_a, &node_b, &doc_id, "A update 2").await?;
     }
     node_b.stop().await?;
@@ -648,20 +641,20 @@ async fn iroh_sync_connected_divergent_facet_updates_propagate_originator_then_o
         let doc_id = node_a
             .drawer
             .add(daybook_types::doc::AddDocArgs {
-                branch_path: daybook_types::doc::BranchPath::from("main"),
+                branch_path: BranchPathBuf::from("main"),
                 facets: [(
                     title_key.clone(),
                     WellKnownFacet::TitleGeneric("Base title".into()).into(),
                 )]
                 .into(),
-                user_path: Some(daybook_types::doc::UserPath::from(
+                user_path: Some(daybook_types::doc::UserPathBuf::from(
                     node_a.ctx.local_user_path.clone(),
                 )),
             })
             .await?;
 
         wait_for_doc_presence_with_activity(&node_b, &doc_id, Duration::from_secs(60)).await?;
-        let branch = daybook_types::doc::BranchPath::from("main");
+        let branch = BranchPathBuf::from("main");
         let Some((_, base_heads)) = node_a.drawer.get_with_heads(&doc_id, &branch, None).await?
         else {
             eyre::bail!("missing base heads before divergent updates");
@@ -688,20 +681,20 @@ async fn iroh_sync_connected_divergent_facet_updates_propagate_other_then_origin
         let doc_id = node_a
             .drawer
             .add(daybook_types::doc::AddDocArgs {
-                branch_path: daybook_types::doc::BranchPath::from("main"),
+                branch_path: BranchPathBuf::from("main"),
                 facets: [(
                     title_key.clone(),
                     WellKnownFacet::TitleGeneric("Base title".into()).into(),
                 )]
                 .into(),
-                user_path: Some(daybook_types::doc::UserPath::from(
+                user_path: Some(daybook_types::doc::UserPathBuf::from(
                     node_a.ctx.local_user_path.clone(),
                 )),
             })
             .await?;
 
         wait_for_doc_presence_with_activity(&node_b, &doc_id, Duration::from_secs(60)).await?;
-        let branch = daybook_types::doc::BranchPath::from("main");
+        let branch = BranchPathBuf::from("main");
         let Some((_, base_heads)) = node_a.drawer.get_with_heads(&doc_id, &branch, None).await?
         else {
             eyre::bail!("missing base heads before divergent updates");
@@ -730,13 +723,13 @@ async fn iroh_sync_single_doc_survives_remote_restart_and_reconnect() -> Res<()>
         let doc_on_a = node_a
             .drawer
             .add(daybook_types::doc::AddDocArgs {
-                branch_path: daybook_types::doc::BranchPath::from("main"),
+                branch_path: BranchPathBuf::from("main"),
                 facets: [(
                     title_key.clone(),
                     WellKnownFacet::TitleGeneric("Initial title".into()).into(),
                 )]
                 .into(),
-                user_path: Some(daybook_types::doc::UserPath::from(
+                user_path: Some(daybook_types::doc::UserPathBuf::from(
                     node_a.ctx.local_user_path.clone(),
                 )),
             })
@@ -747,11 +740,7 @@ async fn iroh_sync_single_doc_survives_remote_restart_and_reconnect() -> Res<()>
 
             let doc_on_b = node_b
                 .drawer
-                .get_with_heads(
-                    &doc_on_a,
-                    &daybook_types::doc::BranchPath::from("main"),
-                    None,
-                )
+                .get_with_heads(&doc_on_a, &BranchPathBuf::from("main"), None)
                 .await?
                 .ok_or_eyre("node_b could not load synced doc after initial connect")?;
             assert_eq!(
@@ -777,11 +766,7 @@ async fn iroh_sync_single_doc_survives_remote_restart_and_reconnect() -> Res<()>
         {
             let Some((_, heads)) = node_a
                 .drawer
-                .get_with_heads(
-                    &doc_on_a,
-                    &daybook_types::doc::BranchPath::from("main"),
-                    None,
-                )
+                .get_with_heads(&doc_on_a, &BranchPathBuf::from("main"), None)
                 .await?
             else {
                 eyre::bail!("node_a lost doc before update after remote restart: {doc_on_a}");
@@ -797,11 +782,11 @@ async fn iroh_sync_single_doc_survives_remote_restart_and_reconnect() -> Res<()>
                         )]
                         .into(),
                         facets_remove: vec![],
-                        user_path: Some(daybook_types::doc::UserPath::from(
+                        user_path: Some(daybook_types::doc::UserPathBuf::from(
                             node_a.ctx.local_user_path.clone(),
                         )),
                     },
-                    daybook_types::doc::BranchPath::from("main"),
+                    BranchPath::new("main"),
                     Some(heads),
                 )
                 .await?;
@@ -810,18 +795,14 @@ async fn iroh_sync_single_doc_survives_remote_restart_and_reconnect() -> Res<()>
                 &node_a,
                 &reopened_b,
                 &doc_on_a,
-                &daybook_types::doc::BranchPath::from("main"),
+                BranchPath::new("main"),
                 Duration::from_secs(30),
             )
             .await?;
 
             let doc_on_b = reopened_b
                 .drawer
-                .get_with_heads(
-                    &doc_on_a,
-                    &daybook_types::doc::BranchPath::from("main"),
-                    None,
-                )
+                .get_with_heads(&doc_on_a, &BranchPathBuf::from("main"), None)
                 .await?
                 .ok_or_eyre("reopened node_b could not load synced doc after reconnect")?;
             assert_eq!(
@@ -854,7 +835,7 @@ async fn iroh_sync_shutdown_peer_updates_catch_up_after_reconnect() -> Res<()> {
     let repo_a_path = temp_root.path().join("repo-a");
 
     let title_key = FacetKey::from(WellKnownFacetTag::TitleGeneric);
-    let branch = daybook_types::doc::BranchPath::from("main");
+    let branch = BranchPathBuf::from("main");
     let doc_on_a = node_a
         .drawer
         .add(daybook_types::doc::AddDocArgs {
@@ -864,7 +845,7 @@ async fn iroh_sync_shutdown_peer_updates_catch_up_after_reconnect() -> Res<()> {
                 WellKnownFacet::TitleGeneric("Live base title".into()).into(),
             )]
             .into(),
-            user_path: Some(daybook_types::doc::UserPath::from(
+            user_path: Some(daybook_types::doc::UserPathBuf::from(
                 node_a.ctx.local_user_path.clone(),
             )),
         })
@@ -896,7 +877,7 @@ async fn iroh_sync_shutdown_peer_updates_catch_up_after_reconnect() -> Res<()> {
                     WellKnownFacet::TitleGeneric("B offline created title".into()).into(),
                 )]
                 .into(),
-                user_path: Some(daybook_types::doc::UserPath::from(
+                user_path: Some(daybook_types::doc::UserPathBuf::from(
                     node_b.ctx.local_user_path.clone(),
                 )),
             })
@@ -998,7 +979,7 @@ async fn iroh_sync_shutdown_peer_updates_catch_up_after_reconnect() -> Res<()> {
         }
         eprintln!("=== END DEBUG ===");
 
-        let branch = daybook_types::doc::BranchPath::from("main");
+        let branch = BranchPathBuf::from("main");
         let (doc_a_on_reopened_a, doc_a_on_b) = wait_for_synced_doc_on_both_sides(
             &reopened_a,
             &node_b,
@@ -1090,7 +1071,7 @@ async fn clone_bootstrap_populates_all_globals_and_can_open() -> Res<()> {
         "user_id must start with USER_ID_PREFIX, got: {user_id}"
     );
     assert!(
-        cloned.local_user_path.contains(&user_id),
+        cloned.local_user_path.as_str().contains(&user_id),
         "local_user_path must embed the user_id: {} not in {}",
         user_id,
         cloned.local_user_path

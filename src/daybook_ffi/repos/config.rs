@@ -47,7 +47,7 @@ impl ConfigRepoFfi {
                 Arc::clone(&fcx.rcx.big_repo),
                 fcx.rcx.doc_app.document_id().clone(),
                 Arc::clone(&plug_repo.repo),
-                daybook_types::doc::UserPath::from(fcx.rcx.local_user_path.to_string()),
+                daybook_types::doc::UserPathBuf::from(fcx.rcx.local_user_path.to_string()),
                 fcx.rcx.sql.db_pool.clone(),
             ))
             .await

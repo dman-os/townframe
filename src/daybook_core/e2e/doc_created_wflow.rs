@@ -9,7 +9,7 @@ async fn test_labeler_workflow() -> Res<()> {
 
     // Create and add a document to the drawer
     let new_doc = AddDocArgs {
-        branch_path: daybook_types::doc::BranchPath::from("main"),
+        branch_path: daybook_types::doc::BranchPathBuf::from("main"),
         facets: [
             //
             (
@@ -54,7 +54,11 @@ async fn test_labeler_workflow() -> Res<()> {
     // Verify the doc has a LabelGeneric tag from test-labeler
     let updated_doc = test_cx
         .drawer_repo
-        .get_doc_with_facets_at_branch(&doc_id, &daybook_types::doc::BranchPath::from("main"), None)
+        .get_doc_with_facets_at_branch(
+            &doc_id,
+            &daybook_types::doc::BranchPathBuf::from("main"),
+            None,
+        )
         .await?
         .ok_or_eyre("doc not found")?;
 
@@ -85,7 +89,7 @@ async fn test_staging_branch_workflow() -> Res<()> {
 
     // Create and add a document to the drawer
     let new_doc = AddDocArgs {
-        branch_path: daybook_types::doc::BranchPath::from("main"),
+        branch_path: daybook_types::doc::BranchPathBuf::from("main"),
         facets: [(
             FacetKey::from(WellKnownFacetTag::Note),
             WellKnownFacet::Note("Test staging branch".into()).into(),
@@ -99,7 +103,7 @@ async fn test_staging_branch_workflow() -> Res<()> {
 
     // Wait for the dispatch to be created
     let mut dispatch_id: Option<String> = None;
-    let mut staging_branch_path: Option<daybook_types::doc::BranchPath> = None;
+    let mut staging_branch_path: Option<daybook_types::doc::BranchPathBuf> = None;
 
     for _ in 0..600 {
         let dispatches = test_cx.dispatch_repo.list().await;
@@ -177,7 +181,11 @@ async fn test_staging_branch_workflow() -> Res<()> {
     // Verify the final result is in the target branch (main)
     let final_doc = test_cx
         .drawer_repo
-        .get_doc_with_facets_at_branch(&doc_id, &daybook_types::doc::BranchPath::from("main"), None)
+        .get_doc_with_facets_at_branch(
+            &doc_id,
+            &daybook_types::doc::BranchPathBuf::from("main"),
+            None,
+        )
         .await?
         .ok_or_eyre("doc not found")?;
 

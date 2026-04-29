@@ -371,11 +371,11 @@ impl TablesRepo {
     pub async fn load(
         big_repo: SharedBigRepo,
         app_doc_id: DocumentId,
-        local_user_path: daybook_types::doc::UserPath,
+        local_user_path: daybook_types::doc::UserPathBuf,
     ) -> Res<(Arc<Self>, crate::repos::RepoStopToken)> {
-        let local_user_path =
-            daybook_types::doc::user_path::for_repo(&local_user_path, "tables-repo")?;
-        let local_actor_id = daybook_types::doc::user_path::to_actor_id(&local_user_path);
+        let local_actor_id = daybook_types::doc::user_path::to_actor_id(
+            &daybook_types::doc::user_path::for_repo(local_user_path, "tables-repo")?,
+        );
         let registry = crate::repos::ListenersRegistry::new();
 
         let store_val = TablesStore::load(&big_repo, &app_doc_id).await?;
@@ -1665,7 +1665,7 @@ mod tests {
         let (repo, stop_token) = TablesRepo::load(
             Arc::clone(&big_repo),
             app_doc_id,
-            daybook_types::doc::UserPath::from("/duser-test/ddev-test"),
+            daybook_types::doc::UserPathBuf::from("/duser-test/ddev-test"),
         )
         .await?;
 

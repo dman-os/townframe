@@ -13,7 +13,7 @@ async fn test_embed_text_workflow() -> Res<()> {
     .await?;
 
     let new_doc = AddDocArgs {
-        branch_path: daybook_types::doc::BranchPath::from("main"),
+        branch_path: daybook_types::doc::BranchPathBuf::from("main"),
         facets: [(
             FacetKey::from(WellKnownFacetTag::Note),
             WellKnownFacet::Note(daybook_types::doc::Note {
@@ -33,7 +33,11 @@ async fn test_embed_text_workflow() -> Res<()> {
 
     let (_doc, heads) = test_cx
         .drawer_repo
-        .get_with_heads(&doc_id, &daybook_types::doc::BranchPath::from("main"), None)
+        .get_with_heads(
+            &doc_id,
+            &daybook_types::doc::BranchPathBuf::from("main"),
+            None,
+        )
         .await?
         .ok_or_eyre("doc not found after add")?;
 
@@ -44,7 +48,7 @@ async fn test_embed_text_workflow() -> Res<()> {
             "embed-text",
             crate::rt::DispatchArgs::DocFacet {
                 doc_id: doc_id.clone(),
-                branch_path: daybook_types::doc::BranchPath::from("main"),
+                branch_path: daybook_types::doc::BranchPathBuf::from("main"),
                 heads,
                 facet_key: None,
                 wflow_args_json: None,
@@ -61,7 +65,11 @@ async fn test_embed_text_workflow() -> Res<()> {
 
     let updated_doc = test_cx
         .drawer_repo
-        .get_doc_with_facets_at_branch(&doc_id, &daybook_types::doc::BranchPath::from("main"), None)
+        .get_doc_with_facets_at_branch(
+            &doc_id,
+            &daybook_types::doc::BranchPathBuf::from("main"),
+            None,
+        )
         .await?
         .ok_or_eyre("doc not found after embed-text workflow")?;
 

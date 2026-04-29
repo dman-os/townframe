@@ -27,7 +27,7 @@ async fn test_embedding_processor_indexes_into_plugin_local_sqlite_state() -> Re
         .into();
 
     let new_doc = AddDocArgs {
-        branch_path: daybook_types::doc::BranchPath::from("main"),
+        branch_path: daybook_types::doc::BranchPathBuf::from("main"),
         facets: [
             (
                 FacetKey::from(WellKnownFacetTag::Note),
@@ -49,7 +49,11 @@ async fn test_embedding_processor_indexes_into_plugin_local_sqlite_state() -> Re
     let doc_id = test_context.drawer_repo.add(new_doc).await?;
     let (_doc, heads) = test_context
         .drawer_repo
-        .get_with_heads(&doc_id, &daybook_types::doc::BranchPath::from("main"), None)
+        .get_with_heads(
+            &doc_id,
+            &daybook_types::doc::BranchPathBuf::from("main"),
+            None,
+        )
         .await?
         .ok_or_eyre("doc not found after add")?;
 
@@ -63,7 +67,7 @@ async fn test_embedding_processor_indexes_into_plugin_local_sqlite_state() -> Re
             "index-embedding",
             crate::rt::DispatchArgs::DocFacet {
                 doc_id: doc_id.clone(),
-                branch_path: daybook_types::doc::BranchPath::from("main"),
+                branch_path: daybook_types::doc::BranchPathBuf::from("main"),
                 heads,
                 facet_key: None,
                 wflow_args_json: None,

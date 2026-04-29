@@ -7,7 +7,7 @@ use crate::plugs::PlugsEvent;
 use crate::rt::dispatch::DispatchEvent;
 use crate::rt::Rt;
 use am_utils_rs::sync::protocol::{PartitionDocEvent, PartitionDocEventDeets};
-use daybook_types::doc::BranchPath;
+use daybook_types::doc::BranchPathBuf;
 use daybook_types::doc::{Doc, DocId, FacetKey, WellKnownFacet, WellKnownFacetTag};
 use daybook_types::manifest::{
     DocPredicateEvalMode, DocPredicateEvalRequirement, DocPredicateEvalResolved,
@@ -554,7 +554,7 @@ impl SwitchWorker {
                 let Some((_, new_heads)) = self
                     .rt
                     .drawer
-                    .get_with_heads(&doc_id, &BranchPath::from("main"), None)
+                    .get_with_heads(&doc_id, &BranchPathBuf::from("main"), None)
                     .await?
                 else {
                     return Ok(None);
@@ -566,7 +566,7 @@ impl SwitchWorker {
                 let (diff, origin, deleted_facet_keys) = self
                     .compute_partition_doc_diff(
                         &doc_id,
-                        &BranchPath::from("main"),
+                        &BranchPathBuf::from("main"),
                         prev_heads.as_ref(),
                         Some(&new_heads),
                     )
@@ -609,7 +609,7 @@ impl SwitchWorker {
                 let (diff, origin, deleted_facet_keys) = self
                     .compute_partition_doc_diff(
                         &doc_id,
-                        &BranchPath::from("main"),
+                        &BranchPathBuf::from("main"),
                         next_state.last_heads.as_ref(),
                         None,
                     )
@@ -636,7 +636,7 @@ impl SwitchWorker {
     async fn compute_partition_doc_diff(
         &self,
         doc_id: &DocId,
-        branch_path: &BranchPath,
+        branch_path: &BranchPathBuf,
         prev_heads: Option<&ChangeHashSet>,
         next_heads: Option<&ChangeHashSet>,
     ) -> Res<(
@@ -864,7 +864,7 @@ impl SwitchWorker {
                 let Some(heads) = entry.branches.get("main") else {
                     return Ok(false);
                 };
-                let branch_path = BranchPath::from("main");
+                let branch_path = BranchPathBuf::from("main");
                 let Some(facet_keys_set) = self
                     .rt
                     .drawer
@@ -919,7 +919,7 @@ impl SwitchWorker {
                 let Some(heads) = entry.branches.get("main") else {
                     return Ok(false);
                 };
-                let branch_path = BranchPath::from("main");
+                let branch_path = BranchPathBuf::from("main");
                 let Some(facet_keys_set) = self
                     .rt
                     .drawer
@@ -1150,7 +1150,7 @@ mod tests {
         let _doc_id = ctx
             .drawer_repo
             .add(AddDocArgs {
-                branch_path: daybook_types::doc::BranchPath::from("main"),
+                branch_path: daybook_types::doc::BranchPathBuf::from("main"),
                 facets: [(
                     WellKnownFacetTag::Note.into(),
                     daybook_types::doc::WellKnownFacet::Note("Hello world".into()).into(),
@@ -1196,7 +1196,7 @@ mod tests {
         let doc_id = ctx
             .drawer_repo
             .add(AddDocArgs {
-                branch_path: daybook_types::doc::BranchPath::from("main"),
+                branch_path: daybook_types::doc::BranchPathBuf::from("main"),
                 facets: [(
                     WellKnownFacetTag::Note.into(),
                     daybook_types::doc::WellKnownFacet::Note("Hello world".into()).into(),
@@ -1256,7 +1256,7 @@ mod tests {
                     facets_remove: vec![],
                     user_path: None,
                 },
-                daybook_types::doc::BranchPath::from("main"),
+                daybook_types::doc::BranchPath::new("main"),
                 None,
             )
             .await?;
@@ -1285,7 +1285,7 @@ mod tests {
         let _doc_id = ctx
             .drawer_repo
             .add(AddDocArgs {
-                branch_path: daybook_types::doc::BranchPath::from("main"),
+                branch_path: daybook_types::doc::BranchPathBuf::from("main"),
                 facets: [(
                     WellKnownFacetTag::Note.into(),
                     daybook_types::doc::WellKnownFacet::Note("Hi".into()).into(),

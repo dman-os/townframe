@@ -13,7 +13,7 @@ fn wasmtime_err(msg: impl std::fmt::Display) -> wasmtime::Error {
 
 pub struct DocTokenRo {
     pub doc_id: DocId,
-    pub branch_path: daybook_types::doc::BranchPath,
+    pub branch_path: daybook_types::doc::BranchPathBuf,
     pub heads: ChangeHashSet,
 }
 
@@ -62,7 +62,7 @@ impl capabilities::HostDocTokenRo for SharedWashCtx {
 
 pub struct DocTokenRw {
     pub doc_id: DocId,
-    pub branch_path: daybook_types::doc::BranchPath,
+    pub branch_path: daybook_types::doc::BranchPathBuf,
     pub heads: ChangeHashSet,
 }
 
@@ -121,7 +121,7 @@ impl capabilities::HostDocTokenRw for SharedWashCtx {
                 drawer::UpdateDocError::InvalidPatch(err.to_string())
             })?;
         match plugin
-            .patch_doc(token.branch_path.clone(), Some(token.heads.clone()), patch)
+            .patch_doc(&token.branch_path, Some(token.heads.clone()), patch)
             .await
         {
             Ok(_) => Ok(Ok(())),
@@ -152,7 +152,7 @@ impl capabilities::HostDocTokenRw for SharedWashCtx {
 
 pub struct FacetTokenRo {
     pub doc_id: DocId,
-    pub branch_path: daybook_types::doc::BranchPath,
+    pub branch_path: daybook_types::doc::BranchPathBuf,
     pub heads: ChangeHashSet,
     pub facet_key: daybook_types::doc::FacetKey,
 }
@@ -319,9 +319,9 @@ pub(super) fn blob_hash_from_blob_facet(blob: &daybook_types::doc::Blob) -> Resu
 
 pub struct FacetTokenRw {
     pub doc_id: DocId,
-    pub branch_path: daybook_types::doc::BranchPath,
+    pub branch_path: daybook_types::doc::BranchPathBuf,
     #[allow(dead_code)]
-    pub target_branch_path: daybook_types::doc::BranchPath,
+    pub target_branch_path: daybook_types::doc::BranchPathBuf,
     pub heads: ChangeHashSet,
     pub facet_key: daybook_types::doc::FacetKey,
     #[allow(dead_code)]
@@ -473,7 +473,7 @@ impl capabilities::HostFacetTokenRw for SharedWashCtx {
                     facets_remove: default(),
                     user_path: None,
                 },
-                token.branch_path.clone(),
+                &token.branch_path,
                 Some(token.heads.clone()),
             )
             .await
