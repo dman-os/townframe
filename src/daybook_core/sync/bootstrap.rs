@@ -249,10 +249,11 @@ pub async fn clone_repo_init_from_url(
     tokio::fs::create_dir_all(&staging).await?;
 
     let cloned = async {
+        let secret_repo = crate::secrets::SecretRepo::boot().await?;
+
         // Generate identity locally — secret keys never leave the device.
         let local_secret = iroh::SecretKey::generate(&mut rand::rng());
         let local_public = local_secret.public();
-
         let provision = request_clone_provision_from_url(
             source_url,
             RequestCloneProvisionReq {
@@ -286,11 +287,9 @@ pub async fn clone_repo_init_from_url(
         );
         crate::repo::globals::set_string_global(&sql, "global.user_id", &user_id).await?;
 
-        let identity =
-            crate::secrets::SecretRepo::set_identity(&checkout_id, local_secret.clone()).await?;
-        if identity.iroh_public_key.to_string() != local_public.to_string() {
-            eyre::bail!("provisioned public key mismatch while cloning");
-        }
+        let identity = secret_repo
+            .set_identity(&checkout_id, local_secret.clone())
+            .await?;
 
         let pkey_bs58 = utils_rs::hash::encode_base58_multibase(local_public.as_bytes());
         let device_id = format!(
@@ -423,7 +422,7 @@ async fn pull_required_partitions_once(
     bootstrap: &SyncBootstrapState,
     timeout: std::time::Duration,
 ) -> Res<()> {
-    tokio::time::timeout(timeout, async move {
+    let fut = async move {
         let partition_rpc = irpc_iroh::client::<am_utils_rs::sync::protocol::PartitionSyncRpc>(
             endpoint.clone(),
             bootstrap.endpoint_addr.clone(),
@@ -448,12 +447,9 @@ async fn pull_required_partitions_once(
             }
         }
 
-        let core_docs = list_current_partition_members(
-            &partition_rpc,
-            local_peer_key,
-            CORE_DOCS_PARTITION_ID,
-        )
-        .await?;
+        let core_docs =
+            list_current_partition_members(&partition_rpc, local_peer_key, CORE_DOCS_PARTITION_ID)
+                .await?;
         let app_doc_id = bootstrap.app_doc_id.to_string();
         let drawer_doc_id = bootstrap.drawer_doc_id.to_string();
         if !core_docs.contains(&app_doc_id) || !core_docs.contains(&drawer_doc_id) {
@@ -528,9 +524,10 @@ async fn pull_required_partitions_once(
         }
 
         Ok::<(), eyre::Report>(())
-    })
-    .await
-    .map_err(|_| eyre::eyre!("timed out waiting for required partitions during clone"))??;
+    };
+    tokio::time::timeout(timeout, fut)
+        .await
+        .map_err(|_| eyre::eyre!("timed out waiting for required partitions during clone"))??;
 
     Ok(())
 }

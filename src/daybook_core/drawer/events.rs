@@ -127,7 +127,7 @@ impl DrawerRepo {
         let (drawer_heads, entries) = self.current_drawer_entries().await?;
 
         {
-            let mut pool = self.entry_pool.lock().unwrap();
+            let mut pool = self.entry_pool.lock().expect(ERROR_MUTEX);
             for (doc_id, entry) in &entries {
                 let pruned = pool.insert_key(doc_id, 1);
                 for pkey in pruned {

@@ -151,61 +151,6 @@ pub enum TryRecvError {
     Dropped { dropped_count: u64 },
 }
 
-struct QueueState<E> {
-    queue: std::sync::Mutex<VecDeque<Arc<E>>>,
-    condvar: std::sync::Condvar,
-    notify: tokio::sync::Notify,
-    capacity: usize,
-    closed: AtomicBool,
-    dropped_count: AtomicU64,
-}
-
-impl<E> QueueState<E> {
-    fn new(capacity: usize) -> Arc<Self> {
-        assert!(capacity > 0, "subscribe capacity must be > 0");
-        Arc::new(Self {
-            queue: std::sync::Mutex::new(VecDeque::with_capacity(capacity)),
-            condvar: std::sync::Condvar::new(),
-            notify: tokio::sync::Notify::new(),
-            capacity,
-            closed: AtomicBool::new(false),
-            dropped_count: AtomicU64::new(0),
-        })
-    }
-
-    fn push(&self, event: Arc<E>) {
-        if self.closed.load(Ordering::Acquire) {
-            return;
-        }
-
-        let mut lock = self.queue.lock().expect(ERROR_MUTEX);
-        if lock.len() >= self.capacity {
-            lock.pop_front();
-            let prev = self.dropped_count.fetch_add(1, Ordering::AcqRel);
-            if prev == 0 {
-                warn!("listener queue dropped events due to full capacity");
-            }
-        }
-        lock.push_back(event);
-        drop(lock);
-
-        self.condvar.notify_one();
-        self.notify.notify_waiters();
-    }
-
-    fn close(&self) {
-        let was_closed = self.closed.swap(true, Ordering::AcqRel);
-        if !was_closed {
-            self.condvar.notify_all();
-            self.notify.notify_waiters();
-        }
-    }
-
-    fn pop_now(&self) -> Option<Arc<E>> {
-        self.queue.lock().expect(ERROR_MUTEX).pop_front()
-    }
-}
-
 type ErasedEvent = Arc<dyn std::any::Any + Send + Sync + 'static>;
 
 #[derive(Clone)]
@@ -245,15 +190,13 @@ impl ListenersRegistry {
     where
         E: Send + Sync + 'static,
     {
-        let state = QueueState::<E>::new(opts.capacity);
-        let state_for_cb = Arc::clone(&state);
+        let (sender, receiver) = async_channel::bounded::<Arc<E>>(opts.capacity);
+        let dropped_count = Arc::new(AtomicU64::new(0));
+        let dropped_count_for_cb = Arc::clone(&dropped_count);
 
         let registration = Arc::new(ListenerRegistration::new(
             Arc::downgrade(self),
-            Some({
-                let state = Arc::clone(&state);
-                Arc::new(move || state.close())
-            }),
+            None,
         ));
 
         {
@@ -261,12 +204,17 @@ impl ListenersRegistry {
             lock.push((
                 registration.id,
                 ErasedListener::new(move |event: Arc<E>| {
-                    state_for_cb.push(event);
+                    match sender.force_send(Arc::clone(&event)) {
+                        Ok(Some(_)) => {
+                            dropped_count_for_cb.fetch_add(1, Ordering::Relaxed);
+                        }
+                        _ => {}
+                    }
                 }),
             ));
         }
 
-        ListenerHandle::new(state, registration)
+        ListenerHandle::new(receiver, registration, dropped_count)
     }
 
     pub fn notify<E, I>(&self, events: I)
@@ -371,8 +319,9 @@ pub struct ListenerHandle<E>
 where
     E: Send + Sync + 'static,
 {
-    state: Arc<QueueState<E>>,
+    receiver: async_channel::Receiver<Arc<E>>,
     registration: Arc<ListenerRegistration>,
+    dropped_count: Arc<AtomicU64>,
     seen_dropped_count: AtomicU64,
 }
 
@@ -380,10 +329,15 @@ impl<E> ListenerHandle<E>
 where
     E: Send + Sync + 'static,
 {
-    fn new(state: Arc<QueueState<E>>, registration: Arc<ListenerRegistration>) -> Self {
+    fn new(
+        receiver: async_channel::Receiver<Arc<E>>,
+        registration: Arc<ListenerRegistration>,
+        dropped_count: Arc<AtomicU64>,
+    ) -> Self {
         Self {
-            state,
+            receiver,
             registration,
+            dropped_count,
             seen_dropped_count: AtomicU64::new(0),
         }
     }
@@ -393,7 +347,7 @@ where
     }
 
     fn take_drop_error(&self) -> Option<u64> {
-        let now = self.state.dropped_count.load(Ordering::Acquire);
+        let now = self.dropped_count.load(Ordering::Acquire);
         let seen = self.seen_dropped_count.load(Ordering::Acquire);
         if now > seen {
             self.seen_dropped_count.store(now, Ordering::Release);
@@ -404,14 +358,15 @@ where
     }
 
     pub fn has_dropped(&self) -> bool {
-        self.state.dropped_count.load(Ordering::Acquire) > 0
+        self.dropped_count.load(Ordering::Acquire) > 0
     }
 
     pub fn dropped_count(&self) -> u64 {
-        self.state.dropped_count.load(Ordering::Acquire)
+        self.dropped_count.load(Ordering::Acquire)
     }
 
     pub fn close(&self) {
+        self.receiver.close();
         self.registration.unregister_impl();
     }
 
@@ -420,102 +375,54 @@ where
             return Err(TryRecvError::Dropped { dropped_count });
         }
 
-        if let Some(ev) = self.state.pop_now() {
-            return Ok(ev);
+        match self.receiver.try_recv() {
+            Ok(ev) => Ok(ev),
+            Err(async_channel::TryRecvError::Empty) => Err(TryRecvError::Empty),
+            Err(async_channel::TryRecvError::Closed) => Err(TryRecvError::Closed),
         }
-
-        if self.state.closed.load(Ordering::Acquire) {
-            return Err(TryRecvError::Closed);
-        }
-
-        Err(TryRecvError::Empty)
     }
 
     pub fn try_recv_lossy(&self) -> Result<Arc<E>, TryRecvError> {
-        if let Some(ev) = self.state.pop_now() {
-            return Ok(ev);
+        match self.receiver.try_recv() {
+            Ok(ev) => Ok(ev),
+            Err(async_channel::TryRecvError::Empty) => Err(TryRecvError::Empty),
+            Err(async_channel::TryRecvError::Closed) => Err(TryRecvError::Closed),
         }
-
-        if self.state.closed.load(Ordering::Acquire) {
-            return Err(TryRecvError::Closed);
-        }
-
-        Err(TryRecvError::Empty)
     }
 
     pub fn recv_blocking(&self) -> Result<Arc<E>, RecvError> {
-        loop {
-            if let Some(dropped_count) = self.take_drop_error() {
-                return Err(RecvError::Dropped { dropped_count });
-            }
+        if let Some(dropped_count) = self.take_drop_error() {
+            return Err(RecvError::Dropped { dropped_count });
+        }
 
-            if let Some(ev) = self.state.pop_now() {
-                return Ok(ev);
-            }
-
-            if self.state.closed.load(Ordering::Acquire) {
-                return Err(RecvError::Closed);
-            }
-
-            let mut lock = self.state.queue.lock().expect(ERROR_MUTEX);
-            while lock.is_empty() && !self.state.closed.load(Ordering::Acquire) {
-                lock = self.state.condvar.wait(lock).expect(ERROR_MUTEX);
-            }
-            drop(lock);
+        match self.receiver.recv_blocking() {
+            Ok(ev) => Ok(ev),
+            Err(async_channel::RecvError) => Err(RecvError::Closed),
         }
     }
 
     pub fn recv_lossy_blocking(&self) -> Result<Arc<E>, RecvError> {
-        loop {
-            if let Some(ev) = self.state.pop_now() {
-                return Ok(ev);
-            }
-
-            if self.state.closed.load(Ordering::Acquire) {
-                return Err(RecvError::Closed);
-            }
-
-            let mut lock = self.state.queue.lock().expect(ERROR_MUTEX);
-            while lock.is_empty() && !self.state.closed.load(Ordering::Acquire) {
-                lock = self.state.condvar.wait(lock).expect(ERROR_MUTEX);
-            }
-            drop(lock);
+        match self.receiver.recv_blocking() {
+            Ok(ev) => Ok(ev),
+            Err(async_channel::RecvError) => Err(RecvError::Closed),
         }
     }
 
     pub async fn recv_async(&self) -> Result<Arc<E>, RecvError> {
-        loop {
-            let notified = self.state.notify.notified();
+        if let Some(dropped_count) = self.take_drop_error() {
+            return Err(RecvError::Dropped { dropped_count });
+        }
 
-            if let Some(dropped_count) = self.take_drop_error() {
-                return Err(RecvError::Dropped { dropped_count });
-            }
-
-            if let Some(ev) = self.state.pop_now() {
-                return Ok(ev);
-            }
-
-            if self.state.closed.load(Ordering::Acquire) {
-                return Err(RecvError::Closed);
-            }
-
-            notified.await;
+        match self.receiver.recv().await {
+            Ok(ev) => Ok(ev),
+            Err(async_channel::RecvError) => Err(RecvError::Closed),
         }
     }
 
     pub async fn recv_lossy_async(&self) -> Result<Arc<E>, RecvError> {
-        loop {
-            let notified = self.state.notify.notified();
-
-            if let Some(ev) = self.state.pop_now() {
-                return Ok(ev);
-            }
-
-            if self.state.closed.load(Ordering::Acquire) {
-                return Err(RecvError::Closed);
-            }
-
-            notified.await;
+        match self.receiver.recv().await {
+            Ok(ev) => Ok(ev),
+            Err(async_channel::RecvError) => Err(RecvError::Closed),
         }
     }
 
@@ -531,22 +438,21 @@ where
         self,
     ) -> impl futures::stream::Stream<Item = Result<Arc<E>, RecvError>> + Send {
         futures::stream::unfold(self, |handle| async move {
-            match handle.recv_async().await {
+            if let Some(dropped_count) = handle.take_drop_error() {
+                return Some((Err(RecvError::Dropped { dropped_count }), handle));
+            }
+            match handle.receiver.recv().await {
                 Ok(ev) => Some((Ok(ev), handle)),
-                Err(RecvError::Dropped { dropped_count }) => {
-                    Some((Err(RecvError::Dropped { dropped_count }), handle))
-                }
-                Err(RecvError::Closed) => None,
+                Err(async_channel::RecvError) => None,
             }
         })
     }
 
     pub fn into_stream_lossy(self) -> impl futures::stream::Stream<Item = Arc<E>> + Send {
         futures::stream::unfold(self, |handle| async move {
-            match handle.recv_lossy_async().await {
+            match handle.receiver.recv().await {
                 Ok(ev) => Some((ev, handle)),
-                Err(RecvError::Closed) => None,
-                Err(RecvError::Dropped { .. }) => unreachable!("lossy stream never reports drops"),
+                Err(async_channel::RecvError) => None,
             }
         })
     }
@@ -630,27 +536,44 @@ mod tests {
     use super::*;
     use std::sync::Weak;
 
-    fn mk_handle(capacity: usize) -> ListenerHandle<u64> {
-        let state = QueueState::<u64>::new(capacity);
+    struct TestSender {
+        inner: async_channel::Sender<Arc<u64>>,
+        dropped_count: Arc<AtomicU64>,
+    }
+
+    impl TestSender {
+        fn try_send(&self, v: u64) {
+            self.inner.try_send(Arc::new(v)).unwrap();
+        }
+
+        fn force_send(&self, v: u64) {
+            if let Ok(Some(_)) = self.inner.force_send(Arc::new(v)) {
+                self.dropped_count.fetch_add(1, Ordering::Relaxed);
+            }
+        }
+    }
+
+    fn mk_handle(capacity: usize) -> (TestSender, ListenerHandle<u64>) {
+        let (sender, receiver) = async_channel::bounded(capacity);
+        let dropped_count = Arc::new(AtomicU64::new(0));
         let reg = Arc::new(ListenerRegistration {
             registry: Weak::new(),
             id: Uuid::new_v4(),
-            on_unregister: Some({
-                let state = Arc::clone(&state);
-                Arc::new(move || state.close())
-            }),
+            on_unregister: None,
             on_unregister_extra: std::sync::Mutex::new(Vec::new()),
             is_unregistered: AtomicBool::new(false),
         });
-        ListenerHandle::new(state, reg)
+        let handle = ListenerHandle::new(receiver, reg, Arc::clone(&dropped_count));
+        let sender = TestSender { inner: sender, dropped_count };
+        (sender, handle)
     }
 
     #[test]
     fn bounded_queue_drops_oldest_and_surfaces_drop_error() {
-        let handle = mk_handle(2);
-        handle.state.push(Arc::new(1));
-        handle.state.push(Arc::new(2));
-        handle.state.push(Arc::new(3));
+        let (sender, handle) = mk_handle(2);
+        sender.try_send(1);
+        sender.try_send(2);
+        sender.force_send(3);
 
         assert_eq!(handle.dropped_count(), 1);
         assert!(handle.has_dropped());
@@ -666,7 +589,7 @@ mod tests {
 
     #[test]
     fn close_returns_closed() {
-        let handle = mk_handle(2);
+        let (_sender, handle) = mk_handle(2);
         handle.close();
 
         assert_eq!(handle.try_recv(), Err(TryRecvError::Closed));
@@ -677,9 +600,9 @@ mod tests {
 
     #[test]
     fn lossy_try_recv_skips_drop_error() {
-        let handle = mk_handle(1);
-        handle.state.push(Arc::new(10));
-        handle.state.push(Arc::new(20));
+        let (sender, handle) = mk_handle(1);
+        sender.try_send(10);
+        sender.force_send(20);
 
         assert_eq!(handle.dropped_count(), 1);
         assert_eq!(*handle.try_recv_lossy().expect("value expected"), 20);

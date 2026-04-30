@@ -154,17 +154,22 @@ impl BigRepo {
 
 // main methods
 impl BigRepo {
+    #[tracing::instrument(level = "trace", skip_all, fields(%document_id))]
     pub async fn get_doc(self: &Arc<Self>, document_id: &DocumentId) -> Res<Option<BigDocHandle>> {
-        Ok(self
+        info!(%document_id, "XXX BigRepo::get_doc enter");
+        let out = self
             .runtime
             .get_doc_handle(*document_id)
             .await?
             .map(|bundle| BigDocHandle {
                 repo: Arc::clone(self),
                 bundle,
-            }))
+            });
+        info!(%document_id, "XXX BigRepo::get_doc exit");
+        Ok(out)
     }
 
+    #[tracing::instrument(level = "trace", skip_all, fields(%document_id))]
     pub async fn put_doc(
         self: &Arc<Self>,
         document_id: DocumentId,
@@ -177,6 +182,7 @@ impl BigRepo {
         })
     }
 
+    #[tracing::instrument(level = "trace", skip_all, fields(%doc_id))]
     pub async fn export_doc(&self, doc_id: &DocumentId) -> Res<Option<Vec<u8>>> {
         self.runtime.export_doc_save(*doc_id).await
     }
@@ -421,6 +427,7 @@ impl BigRepo {
 
 // autosurgeon suport
 impl BigRepo {
+    #[tracing::instrument(level = "trace", skip_all, fields(%doc_id))]
     pub async fn reconcile_prop_with_actor<'a, T, P>(
         self: &Arc<Self>,
         doc_id: &DocumentId,
@@ -434,25 +441,12 @@ impl BigRepo {
         P: Into<autosurgeon::Prop<'a>> + Send + Sync + 'static,
     {
         let handle = self.get_doc(doc_id).await?.ok_or_eyre("doc not found")?;
-        let res = handle
-            .with_document(|doc| {
-                if let Some(actor) = &actor_id {
-                    doc.set_actor(actor.clone());
-                }
-                doc.transact(|tx| {
-                    autosurgeon::reconcile_prop(tx, obj_id, prop_name, update)
-                        .wrap_err("error reconciling")?;
-                    eyre::Ok(())
-                })
-            })
+        handle
+            .reconcile_prop_with_actor(obj_id, prop_name, update, actor_id)
             .await
-            .wrap_err("error on reconcile transaction")?;
-        match res {
-            Ok(success) => Ok(success.hash),
-            Err(failure) => Err(ferr!("error on reconcile transaction: {failure:?}")),
-        }
     }
 
+    #[tracing::instrument(level = "trace", skip_all, fields(%doc_id))]
     pub async fn hydrate_path<T: Hydrate + Reconcile + Send + Sync + 'static>(
         self: &Arc<Self>,
         doc_id: &DocumentId,
@@ -460,23 +454,10 @@ impl BigRepo {
         path: Vec<Prop<'static>>,
     ) -> Res<Option<(T, Arc<[automerge::ChangeHash]>)>> {
         let handle = self.get_doc(doc_id).await?.ok_or_eyre("doc not found")?;
-        handle
-            .with_document_read(|doc| -> Res<Option<(T, Arc<[automerge::ChangeHash]>)>> {
-                let heads: Arc<[automerge::ChangeHash]> = Arc::from(doc.get_heads());
-                if path.is_empty() && obj_id == automerge::ROOT {
-                    let value: T = autosurgeon::hydrate(doc).wrap_err("error hydrating")?;
-                    Ok(Some((value, heads)))
-                } else {
-                    match autosurgeon::hydrate_path(doc, &obj_id, path.clone()) {
-                        Ok(Some(value)) => Ok(Some((value, heads))),
-                        Ok(None) => Ok(None),
-                        Err(err) => Err(ferr!("error hydrating: {err:?}")),
-                    }
-                }
-            })
-            .await
+        handle.hydrate_path(obj_id, path).await
     }
 
+    #[tracing::instrument(level = "trace", skip_all, fields(%doc_id))]
     pub async fn hydrate_path_at_heads<T: Hydrate + Reconcile + Send + Sync + 'static>(
         self: &Arc<Self>,
         doc_id: &DocumentId,
@@ -485,22 +466,7 @@ impl BigRepo {
         path: Vec<Prop<'static>>,
     ) -> Res<Option<(T, Arc<[automerge::ChangeHash]>)>> {
         let handle = self.get_doc(doc_id).await?.ok_or_eyre("doc not found")?;
-        handle
-            .with_document_read(|doc| -> Res<Option<(T, Arc<[automerge::ChangeHash]>)>> {
-                let heads: Arc<[automerge::ChangeHash]> = Arc::from(heads.to_vec());
-                if path.is_empty() && obj_id == automerge::ROOT {
-                    let value: T =
-                        autosurgeon::hydrate_at(doc, &heads).wrap_err("error hydrating")?;
-                    Ok(Some((value, heads)))
-                } else {
-                    match autosurgeon::hydrate_path_at(doc, &obj_id, path.clone(), &heads) {
-                        Ok(Some(value)) => Ok(Some((value, heads))),
-                        Ok(None) => Ok(None),
-                        Err(err) => Err(ferr!("error hydrating: {err:?}")),
-                    }
-                }
-            })
-            .await
+        handle.hydrate_path_at_heads(heads, obj_id, path).await
     }
 }
 
@@ -550,8 +516,12 @@ impl BigDocHandle {
     where
         F: FnOnce(&automerge::Automerge) -> R,
     {
+        info!(doc_id = %self.bundle.doc_id, "XXX BigDocHandle with_document_read acquiring lock");
         let doc = self.bundle.doc.lock().await;
-        operation(&doc)
+        info!(doc_id = %self.bundle.doc_id, "XXX BigDocHandle with_document_read got lock");
+        let out = operation(&doc);
+        info!(doc_id = %self.bundle.doc_id, "XXX BigDocHandle with_document_read releasing lock");
+        out
     }
 
     pub async fn with_document<F, R>(&self, operation: F) -> Res<R>
@@ -570,12 +540,15 @@ impl BigDocHandle {
     where
         F: FnOnce(&mut automerge::Automerge) -> R,
     {
+        info!(doc_id = %self.bundle.doc_id, "XXX BigDocHandle with_document_with_origin acquiring lock");
         let mut doc = self.bundle.doc.lock().await;
+        info!(doc_id = %self.bundle.doc_id, "XXX BigDocHandle with_document_with_origin got lock");
 
         let before_heads = doc.get_heads();
         let out = operation(&mut doc);
         let after_heads = doc.get_heads();
         if before_heads == after_heads {
+            info!(doc_id = %self.bundle.doc_id, "XXX BigDocHandle with_document_with_origin no-op, releasing lock");
             return Ok(out);
         }
 
@@ -601,6 +574,7 @@ impl BigDocHandle {
         } else {
             Vec::new()
         };
+        info!(doc_id = %self.bundle.doc_id, "XXX BigDocHandle with_document_with_origin releasing lock");
         drop(doc);
 
         self.repo
@@ -608,7 +582,82 @@ impl BigDocHandle {
             .commit_delta(*self.document_id(), changes, after_heads, patches, origin)
             .await?;
 
+        info!(doc_id = %self.bundle.doc_id, "XXX BigDocHandle with_document_with_origin commit_delta done");
         Ok(out)
+    }
+
+    pub async fn reconcile_prop_with_actor<'a, T, P>(
+        &self,
+        obj_id: automerge::ObjId,
+        prop_name: P,
+        update: &T,
+        actor_id: Option<automerge::ActorId>,
+    ) -> Res<Option<ChangeHash>>
+    where
+        T: Hydrate + Reconcile + Send + Sync + 'static,
+        P: Into<autosurgeon::Prop<'a>> + Send + Sync + 'static,
+    {
+        let res = self
+            .with_document(|doc| {
+                if let Some(actor) = &actor_id {
+                    doc.set_actor(actor.clone());
+                }
+                doc.transact(|tx| {
+                    autosurgeon::reconcile_prop(tx, obj_id, prop_name, update)
+                        .wrap_err("error reconciling")?;
+                    eyre::Ok(())
+                })
+            })
+            .await
+            .wrap_err("error on reconcile transaction")?;
+        match res {
+            Ok(success) => Ok(success.hash),
+            Err(failure) => Err(ferr!("error on reconcile transaction: {failure:?}")),
+        }
+    }
+
+    pub async fn hydrate_path<T: Hydrate + Reconcile + Send + Sync + 'static>(
+        &self,
+        obj_id: automerge::ObjId,
+        path: Vec<Prop<'static>>,
+    ) -> Res<Option<(T, Arc<[automerge::ChangeHash]>)>> {
+        self.with_document_read(|doc| -> Res<Option<(T, Arc<[automerge::ChangeHash]>)>> {
+            let heads: Arc<[automerge::ChangeHash]> = Arc::from(doc.get_heads());
+            if path.is_empty() && obj_id == automerge::ROOT {
+                let value: T = autosurgeon::hydrate(doc).wrap_err("error hydrating")?;
+                Ok(Some((value, heads)))
+            } else {
+                match autosurgeon::hydrate_path(doc, &obj_id, path.clone()) {
+                    Ok(Some(value)) => Ok(Some((value, heads))),
+                    Ok(None) => Ok(None),
+                    Err(err) => Err(ferr!("error hydrating: {err:?}")),
+                }
+            }
+        })
+        .await
+    }
+
+    pub async fn hydrate_path_at_heads<T: Hydrate + Reconcile + Send + Sync + 'static>(
+        &self,
+        heads: &[automerge::ChangeHash],
+        obj_id: automerge::ObjId,
+        path: Vec<Prop<'static>>,
+    ) -> Res<Option<(T, Arc<[automerge::ChangeHash]>)>> {
+        self.with_document_read(|doc| -> Res<Option<(T, Arc<[automerge::ChangeHash]>)>> {
+            let heads: Arc<[automerge::ChangeHash]> = Arc::from(heads.to_vec());
+            if path.is_empty() && obj_id == automerge::ROOT {
+                let value: T =
+                    autosurgeon::hydrate_at(doc, &heads).wrap_err("error hydrating")?;
+                Ok(Some((value, heads)))
+            } else {
+                match autosurgeon::hydrate_path_at(doc, &obj_id, path.clone(), &heads) {
+                    Ok(Some(value)) => Ok(Some((value, heads))),
+                    Ok(None) => Ok(None),
+                    Err(err) => Err(ferr!("error hydrating: {err:?}")),
+                }
+            }
+        })
+        .await
     }
 }
 

@@ -16,13 +16,14 @@ impl DrawerRepo {
         self.current_heads.lock().expect(ERROR_MUTEX).clone()
     }
 
+    #[tracing::instrument(level = "trace", skip_all)]
     pub async fn list_just_ids(&self) -> Res<(ChangeHashSet, Vec<String>)> {
         if self.cancel_token.is_cancelled() {
             eyre::bail!("repo is stopped");
         }
         let (drawer_heads, entries) = self.current_drawer_entries().await?;
         {
-            let mut pool = self.entry_pool.lock().unwrap();
+            let mut pool = self.entry_pool.lock().expect(ERROR_MUTEX);
             for (doc_id, entry) in &entries {
                 let pruned = pool.insert_key(doc_id, 1);
                 for pkey in pruned {
@@ -38,6 +39,8 @@ impl DrawerRepo {
         results.sort();
         Ok((drawer_heads, results))
     }
+
+    #[tracing::instrument(level = "trace", skip_all)]
     pub async fn list(&self) -> Res<Vec<DocNBranches>> {
         if self.cancel_token.is_cancelled() {
             eyre::bail!("repo is stopped");
@@ -53,6 +56,7 @@ impl DrawerRepo {
         Ok(results)
     }
 
+    #[tracing::instrument(level = "trace", skip_all, fields(%doc_id))]
     pub async fn get_entry_at_heads(
         &self,
         doc_id: &DocId,
@@ -68,12 +72,13 @@ impl DrawerRepo {
         self.hydrate_entry_at_heads(doc_id, heads).await
     }
 
+    #[tracing::instrument(level = "trace", skip_all, fields(%doc_id))]
     pub async fn get_entry(&self, doc_id: &DocId) -> Res<Option<DocEntry>> {
         if self.cancel_token.is_cancelled() {
             eyre::bail!("repo is stopped");
         }
         if let Some(cached) = self.entry_cache.get(doc_id) {
-            let mut pool = self.entry_pool.lock().unwrap();
+            let mut pool = self.entry_pool.lock().expect(ERROR_MUTEX);
             pool.touch_key(doc_id);
             return Ok(Some(cached.clone()));
         }
@@ -82,7 +87,7 @@ impl DrawerRepo {
         let entry = self.hydrate_entry_at_heads(doc_id, &heads).await?;
 
         if let Some(entry) = entry {
-            let mut pool = self.entry_pool.lock().unwrap();
+            let mut pool = self.entry_pool.lock().expect(ERROR_MUTEX);
             let pruned = pool.insert_key(doc_id, 1);
             for pkey in pruned {
                 self.entry_cache.remove(&pkey);
@@ -109,11 +114,13 @@ impl DrawerRepo {
         if self.cancel_token.is_cancelled() {
             eyre::bail!("repo is stopped");
         }
+        info!(%doc_id, %branch_path, "XXX get_at_branch_heads_with_facets_arc enter");
 
         let Some(handle) = self
             .resolve_handle_for_branch_heads(doc_id, branch_path, heads)
             .await?
         else {
+            info!(%doc_id, %branch_path, "XXX get_at_branch_heads_with_facets_arc no handle");
             return Ok(None);
         };
 
@@ -177,25 +184,33 @@ impl DrawerRepo {
         for (uuid, heads, value) in to_cache {
             self.facet_cache_put(doc_id, uuid, heads, value);
         }
+        info!(%doc_id, %branch_path, "XXX get_at_branch_heads_with_facets_arc exit");
 
         Ok(Some((facets, facet_heads_by_key)))
     }
 
     /// Get a doc at specific branch.
+    #[tracing::instrument(level = "trace", skip_all, fields(%doc_id, %branch_path))]
     pub async fn get_doc_with_facets_at_branch(
         &self,
         doc_id: &DocId,
         branch_path: &daybook_types::doc::BranchPath,
         facet_keys: Option<Vec<FacetKey>>,
     ) -> Res<Option<Arc<Doc>>> {
+        info!(%doc_id, %branch_path, "XXX get_doc_with_facets_at_branch enter");
         let Some(branch_heads) = self.get_branch_heads_for_path(doc_id, branch_path).await? else {
+            info!(%doc_id, %branch_path, "XXX get_doc_with_facets_at_branch no branch heads");
             return Ok(None);
         };
 
-        self.get_doc_with_facets_at_branch_heads(doc_id, branch_path, &branch_heads, facet_keys)
-            .await
+        let out = self
+            .get_doc_with_facets_at_branch_heads(doc_id, branch_path, &branch_heads, facet_keys)
+            .await;
+        info!(%doc_id, %branch_path, "XXX get_doc_with_facets_at_branch exit");
+        out
     }
 
+    #[tracing::instrument(level = "trace", skip_all, fields(%doc_id))]
     pub async fn get_doc_branches(&self, doc_id: &DocId) -> Res<Option<DocNBranches>> {
         if self.cancel_token.is_cancelled() {
             eyre::bail!("repo is stopped");
@@ -204,6 +219,7 @@ impl DrawerRepo {
     }
 
     /// Get a doc at specific branch heads (exact version).
+    #[tracing::instrument(level = "trace", skip_all, fields(%id, %branch_path))]
     pub async fn get_doc_with_facets_at_branch_heads(
         &self,
         id: &DocId,
@@ -228,6 +244,7 @@ impl DrawerRepo {
         })))
     }
 
+    #[tracing::instrument(level = "trace", skip_all, fields(%doc_id, %branch_path))]
     pub async fn get_doc_bundle_at_branch(
         &self,
         doc_id: &DocId,
@@ -273,6 +290,7 @@ impl DrawerRepo {
         }))
     }
 
+    #[tracing::instrument(level = "trace", skip_all, fields(%doc_id, %branch_path))]
     pub async fn get_with_heads(
         &self,
         doc_id: &DocId,

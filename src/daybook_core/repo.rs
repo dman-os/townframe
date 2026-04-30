@@ -104,6 +104,7 @@ pub struct RepoCtx {
 
     pub iroh_public_key: String,
     pub iroh_secret_key: iroh::SecretKey,
+    pub secret_repo: Arc<crate::secrets::SecretRepo>,
 }
 
 impl RepoCtx {
@@ -137,7 +138,7 @@ impl RepoCtx {
 
     pub async fn open(
         repo_root: &std::path::Path,
-        options: RepoOpenOptions,
+        _options: RepoOpenOptions,
         local_device_name: String,
     ) -> Res<Arc<Self>> {
         let layout = repo_layout(repo_root)?;
@@ -149,6 +150,7 @@ impl RepoCtx {
                 layout.marker_path.display()
             );
         }
+        let secret_repo = Arc::new(crate::secrets::SecretRepo::boot().await?);
         cleanup_blobs_staging_dir(&layout.blobs_root).await?;
         let sql = SqlCtx::new(SqlConfig {
             database_url: format!("sqlite://{}", layout.sqlite_path.display()),
@@ -164,7 +166,8 @@ impl RepoCtx {
         let repo_name = repo_name.ok_or_eyre("missing global from repo: repo_name")?;
         let user_id = user_id.ok_or_eyre("missing global from repo: user_id")?;
         let checkout_id = checkout_id.ok_or_eyre("missing global from repo: checkout_id")?;
-        let identity = crate::secrets::SecretRepo::load_identity(&checkout_id)
+        let identity = secret_repo
+            .load_identity(&checkout_id)
             .await?
             .ok_or_eyre("missing secret from keyring")?;
         let UserInfo {
@@ -181,6 +184,7 @@ impl RepoCtx {
         )
         .await?;
         Ok(Arc::new(RepoCtx {
+            secret_repo,
             local_peer_key: local_peer_key,
             repo_name: repo_name,
             layout: layout,
@@ -215,6 +219,7 @@ impl RepoCtx {
                 layout.repo_root.display()
             );
         }
+        let secret_repo = Arc::new(crate::secrets::SecretRepo::boot().await?);
         cleanup_blobs_staging_dir(&layout.blobs_root).await?;
         let sql = SqlCtx::new(SqlConfig {
             database_url: format!("sqlite://{}", layout.sqlite_path.display()),
@@ -243,7 +248,7 @@ impl RepoCtx {
         )?;
         let identity = {
             let secret = iroh::SecretKey::generate(&mut rand::rng());
-            crate::secrets::SecretRepo::set_identity(&checkout_id, secret).await?
+            secret_repo.set_identity(&checkout_id, secret).await?
         };
         let UserInfo {
             local_peer_key,
@@ -269,7 +274,8 @@ impl RepoCtx {
         .await?;
         mark_repo_initialized(&layout.repo_root).await?;
         Ok(Arc::new(RepoCtx {
-            local_peer_key: local_peer_key,
+            secret_repo,
+            local_peer_key,
             repo_name: repo_name,
             layout: layout,
             lock_guard: lock_guard,

@@ -93,7 +93,7 @@ impl FacetCacheState {
         if &cached.heads != heads {
             return None;
         }
-        self.pool.lock().unwrap().touch_key(&key);
+        self.pool.lock().expect(ERROR_MUTEX).touch_key(&key);
         Some(Arc::clone(&cached.value))
     }
 
@@ -107,7 +107,7 @@ impl FacetCacheState {
         let cache_key = (doc_id.clone(), facet_uuid);
         let cost = Self::estimate_cost(value.as_ref());
         if self.entries.contains_key(&cache_key) {
-            let pruned = self.pool.lock().unwrap().insert_key(&cache_key, cost);
+            let pruned = self.pool.lock().expect(ERROR_MUTEX).insert_key(&cache_key, cost);
             let self_pruned = pruned.iter().any(|pkey| pkey == &cache_key);
             for pkey in pruned {
                 self.remove_without_pool(&pkey);
@@ -134,7 +134,7 @@ impl FacetCacheState {
             return;
         }
 
-        let pruned = self.pool.lock().unwrap().insert_key(&cache_key, cost);
+        let pruned = self.pool.lock().expect(ERROR_MUTEX).insert_key(&cache_key, cost);
         let self_pruned = pruned.iter().any(|pkey| pkey == &cache_key);
         for pkey in pruned {
             self.remove_without_pool(&pkey);
@@ -158,7 +158,7 @@ impl FacetCacheState {
 
     fn invalidate_facet(&mut self, doc_id: &DocId, facet_uuid: &Uuid) {
         let key = (doc_id.clone(), *facet_uuid);
-        self.pool.lock().unwrap().remove_key(&key);
+        self.pool.lock().expect(ERROR_MUTEX).remove_key(&key);
         self.remove_without_pool(&key);
     }
 
@@ -170,7 +170,7 @@ impl FacetCacheState {
             .into_iter()
             .map(|uuid| (doc_id.clone(), uuid))
             .collect();
-        self.pool.lock().unwrap().remove_keys(keys.clone());
+        self.pool.lock().expect(ERROR_MUTEX).remove_keys(keys.clone());
         for key in keys {
             self.remove_without_pool(&key);
         }
@@ -196,7 +196,7 @@ impl DrawerRepo {
     pub(super) fn invalidate_entry_cache(&self, id: &DocId) {
         // Keep pool/cache ordering strict: remove from `entry_pool` (via `remove_key`)
         // before deleting from `entry_cache` so the pool cannot retain stale refs.
-        let mut pool = self.entry_pool.lock().unwrap();
+        let mut pool = self.entry_pool.lock().expect(ERROR_MUTEX);
         pool.remove_key(id);
         self.entry_cache.remove(id);
     }
@@ -209,7 +209,7 @@ impl DrawerRepo {
     }
 
     pub(super) fn invalidate_facet_cache_doc(&self, doc_id: &DocId) {
-        self.facet_cache.lock().unwrap().invalidate_doc(doc_id);
+        self.facet_cache.lock().expect(ERROR_MUTEX).invalidate_doc(doc_id);
     }
 
     pub(super) fn facet_cache_get(

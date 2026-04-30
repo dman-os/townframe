@@ -230,10 +230,12 @@ pub async fn spawn_peer_sync_worker(
         let run_res: Res<()> = fut.await;
         if let Err(err) = &run_res {
             msg_tx
-                .try_send(PeerSyncWorkerMsg::Event(PeerSyncWorkerEvent::AbnormalExit {
-                    peer: remote_peer_for_task,
-                    reason: err.to_string(),
-                }))
+                .try_send(PeerSyncWorkerMsg::Event(
+                    PeerSyncWorkerEvent::AbnormalExit {
+                        peer: remote_peer_for_task,
+                        reason: err.to_string(),
+                    },
+                ))
                 .ok();
         }
         debug!(result = ?run_res.as_ref().map(|_| ()), "peer sync worker future exiting");

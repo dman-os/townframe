@@ -6,25 +6,63 @@ pub struct RepoIdentity {
     pub iroh_public_key: iroh::PublicKey,
 }
 
-pub struct SecretRepo;
+pub struct SecretRepo {
+    store: Arc<keyring_core::CredentialStore>,
+}
 
 impl SecretRepo {
     const KEYRING_USERNAME: &'static str = "iroh_secret_key_v1";
 
-    pub async fn load_identity(checkout_id: &str) -> Res<Option<RepoIdentity>> {
-        let service_name = format!("daybook.checkout.{checkout_id}");
+    pub async fn boot() -> Res<Self> {
+        let store: Arc<keyring_core::CredentialStore> = if std::cfg!(test) {
+            static TEST_STORE: tokio::sync::OnceCell<Arc<keyring_core::mock::Store>> =
+                tokio::sync::OnceCell::const_new();
+            TEST_STORE
+                .get_or_try_init(|| async { keyring_core::mock::Store::new() })
+                .await?
+                .clone()
+        } else {
+            tokio::task::spawn_blocking(move || {
+                let store;
+                #[cfg(target_os = "linux")]
+                {
+                    store = zbus_secret_service_keyring_store::Store::new()?;
+                }
+                #[cfg(target_os = "android")]
+                {
+                    store = android_native_keyring_store::Store::new()?;
+                }
+                #[cfg(target_os = "windows")]
+                {
+                    store = windows_native_keyring_store::Store::new()?;
+                }
+                #[cfg(any(target_os = "macos", target_os = "ios"))]
+                {
+                    store = apple_native_keyring_store::keychain::Store::new()?;
+                }
+                eyre::Ok(store)
+            })
+            .await
+            .expect(ERROR_TOKIO)?
+        };
+        Ok(Self { store })
+    }
+    pub async fn load_identity(&self, checkout_id: &str) -> Res<Option<RepoIdentity>> {
+        let store = self.store.clone();
+        let user = format!("daybook.checkout.{checkout_id}.{}", Self::KEYRING_USERNAME);
         tokio::task::spawn_blocking(move || {
-            let entry =
-                keyring::Entry::new(&service_name, Self::KEYRING_USERNAME).wrap_err_with(|| {
-                    format!("failed creating keyring entry for iroh secret key ({service_name})")
-                })?;
-            let secret = match entry.get_secret() {
-                Err(keyring::Error::NoEntry) => return Ok(None),
+            let entry = store
+                .build("daybook", &user, None)
+                .wrap_err("failed to create keyring entry")?;
+            let secret = match entry.get_password() {
+                Err(keyring_core::Error::NoEntry) => return Ok(None),
                 Err(err) => {
                     return Err(eyre::eyre!(err))
                         .wrap_err("failed reading iroh secret key from keyring");
                 }
                 Ok(secret) => {
+                    let secret = utils_rs::hash::decode_base58_multibase(&secret)
+                        .wrap_err("error decode bs58 secret")?;
                     if secret.len() != 32 {
                         eyre::bail!("secret corruption, bad length")
                     }
@@ -43,17 +81,19 @@ impl SecretRepo {
         .expect(ERROR_TOKIO)
     }
 
-    pub async fn set_identity(checkout_id: &str, secret: iroh::SecretKey) -> Res<RepoIdentity> {
-        let service_name = format!("daybook.checkout.{checkout_id}");
+    pub async fn set_identity(
+        &self,
+        checkout_id: &str,
+        secret: iroh::SecretKey,
+    ) -> Res<RepoIdentity> {
+        let store = self.store.clone();
+        let user = format!("daybook.checkout.{checkout_id}.{}", Self::KEYRING_USERNAME);
         tokio::task::spawn_blocking(move || {
-            let entry =
-                keyring::Entry::new(&service_name, Self::KEYRING_USERNAME).wrap_err_with(|| {
-                    format!(
-                    "failed creating keyring entry for provisioned clone identity ({service_name})"
-                )
-                })?;
+            let entry = store
+                .build("daybook", &user, None)
+                .wrap_err("failed to create keyring entry")?;
             entry
-                .set_secret(&secret.to_bytes())
+                .set_password(&utils_rs::hash::encode_base58_multibase(secret.to_bytes()))
                 .wrap_err("failed setting keyring secret from provisioned clone identity")?;
             let public = secret.public();
             Ok(RepoIdentity {
@@ -63,18 +103,5 @@ impl SecretRepo {
         })
         .await
         .expect(ERROR_TOKIO)
-    }
-}
-
-fn is_keyring_disabled() -> bool {
-    std::env::var("DAYB_DISABLE_KEYRING")
-        .map(|value| value == "1")
-        .unwrap_or(false)
-}
-
-fn has_persistent_keyring_backend() -> bool {
-    match keyring::default::default_credential_builder().persistence() {
-        keyring::credential::CredentialPersistence::UntilDelete => true,
-        _ => false,
     }
 }

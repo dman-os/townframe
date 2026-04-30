@@ -2890,8 +2890,10 @@ impl Worker {
                     synced_peer_id,
                     backoff,
                 } => {
-                    worker_finished
-                        .insert((partition, hash), (success, reason, synced_peer_id, backoff));
+                    worker_finished.insert(
+                        (partition, hash),
+                        (success, reason, synced_peer_id, backoff),
+                    );
                 }
             }
         }

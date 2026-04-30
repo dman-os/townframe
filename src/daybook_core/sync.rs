@@ -926,6 +926,7 @@ mod tests {
 
     impl SyncTestNode {
         async fn stop(mut self) -> Res<()> {
+            info!("XXX stopping node");
             // NOTE: do early cancellation before
             // waiting on actual stops
             self.sync_stop.cancel_token.cancel();
@@ -1493,6 +1494,8 @@ mod tests {
         Ok(())
     }
 
+    // FIXME: this sucks, it should be using RepoCtx directly and
+    // duplicates repo init code
     async fn init_and_copy_repo_pair(
         repo_a_path: &std::path::Path,
         repo_b_path: &std::path::Path,
@@ -1540,6 +1543,7 @@ mod tests {
             crate::repo::globals::get_string_global(&rtx.sql, "global.user_id")
                 .await?
                 .ok_or_eyre("source repo user_id missing")?;
+        let secret_repo = rtx.secret_repo.clone();
         rtx.shutdown().await?;
         force_delete_journal_mode(&repo_a_path.join("sqlite.db")).await?;
         force_delete_journal_mode(&repo_a_path.join("samod").join("big_repo.sqlite")).await?;
@@ -1578,11 +1582,12 @@ mod tests {
                 repo_b_repo_id
             );
         }
-        crate::secrets::SecretRepo::set_identity(
-            &repo_b_checkout_id,
-            iroh::SecretKey::generate(&mut rand::rng()),
-        )
-        .await?;
+        secret_repo
+            .set_identity(
+                &repo_b_checkout_id,
+                iroh::SecretKey::generate(&mut rand::rng()),
+            )
+            .await?;
         Ok(())
     }
 
@@ -1769,21 +1774,26 @@ mod tests {
         let drawer_listener = node.drawer.subscribe(SubscribeOpts::new(1024));
         let sync_listener = node.sync_repo.subscribe(SubscribeOpts::new(2048));
         let progress_listener = node.progress_repo.subscribe(SubscribeOpts::new(4096));
+        let mut loop_count = 0u64;
         tokio::time::timeout(absolute_timeout, async {
             loop {
+                loop_count += 1;
+                info!(%loop_count, "XXX fetching doc with facets");
                 let found = node
                     .drawer
                     .get_doc_with_facets_at_branch(doc_id, daybook_types::doc::BranchPath::new("main"), None)
                     .await?
                     .is_some();
                 if found {
+                    info!(%loop_count, "XXX doc found, breaking");
                     break;
                 }
                 info!("XXX doc not found, waiting for signals");
                 tokio::select! {
                     val = drawer_listener.recv_lossy_async() => {
                         let evt = val.map_err(|_| eyre::eyre!("drawer listener closed while waiting for doc presence"))?;
-                        match dbg!(evt.as_ref()) {
+                        info!("XXX drawer activity detected");
+                        match evt.as_ref() {
                             crate::drawer::DrawerEvent::DocAdded { id, .. }
                             | crate::drawer::DrawerEvent::DocUpdated { id, .. }
                             | crate::drawer::DrawerEvent::DocDeleted { id, .. } if id == doc_id => {
@@ -1795,11 +1805,15 @@ mod tests {
                                 *last_activity_for_wait.lock().expect(ERROR_MUTEX) = std::time::Instant::now();
                             }
                         }
+                        info!("XXX lock released");
                     }
                     val = sync_listener.recv_async() => {
-                        match dbg!(val) {
+                        info!("XXX sync event detected");
+                        match val {
                             Ok(_) => {
+                                info!("XXX full sync detected");
                                 *last_activity_for_wait.lock().expect(ERROR_MUTEX) = std::time::Instant::now();
+                                info!("XXX lock released");
                             }
                             Err(crate::repos::RecvError::Closed) => eyre::bail!("sync listener closed while waiting for doc presence"),
                             Err(crate::repos::RecvError::Dropped { dropped_count }) => {
@@ -1808,9 +1822,11 @@ mod tests {
                         }
                     }
                     val = progress_listener.recv_async() => {
-                        match dbg!(val) {
+                        info!("XXX progress event recieved {val:?}");
+                        match val {
                             Ok(_) => {
                                 *last_activity_for_wait.lock().expect(ERROR_MUTEX) = std::time::Instant::now();
+                                info!("XXX lock released");
                             }
                             Err(crate::repos::RecvError::Closed) => eyre::bail!("progress listener closed while waiting for doc presence"),
                             Err(crate::repos::RecvError::Dropped { dropped_count }) => {
@@ -1825,6 +1841,7 @@ mod tests {
         })
         .await
         .map_err(|_| {
+            info!("XXX timeout error");
             let since_last_activity = std::time::Instant::now()
                 .saturating_duration_since(*last_activity.lock().expect(ERROR_MUTEX));
             eyre::eyre!(

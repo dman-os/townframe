@@ -270,19 +270,27 @@ impl DrawerRepo {
         &self,
         branch_doc_id: &str,
     ) -> Res<Option<am_utils_rs::repo::BigDocHandle>> {
+        info!(%branch_doc_id, "XXX get_handle_by_branch_doc_id enter");
         if let Some(handle) = self.branch_handles.get(branch_doc_id) {
+            info!(%branch_doc_id, "XXX get_handle_by_branch_doc_id cache hit");
             return Ok(Some(handle.clone()));
         }
         let document_id = DocumentId::from_str(branch_doc_id)?;
+        info!(%branch_doc_id, "XXX get_handle_by_branch_doc_id calling get_doc");
         let has_local = self.big_repo.get_doc(&document_id).await?.is_some();
         if !has_local {
+            info!(%branch_doc_id, "XXX get_handle_by_branch_doc_id no local doc");
             return Ok(None);
         }
+        info!(%branch_doc_id, "XXX get_handle_by_branch_doc_id calling get_doc again");
         let Some(handle) = self.big_repo.get_doc(&document_id).await? else {
+            info!(%branch_doc_id, "XXX get_handle_by_branch_doc_id gone between calls");
             return Ok(None);
         };
+        info!(%branch_doc_id, "XXX get_handle_by_branch_doc_id got handle");
         self.branch_handles
             .insert(branch_doc_id.to_string(), handle.clone());
+        info!(%branch_doc_id, "XXX get_handle_by_branch_doc_id exit");
         Ok(Some(handle))
     }
 
@@ -292,26 +300,16 @@ impl DrawerRepo {
         branch_path: &daybook_types::doc::BranchPath,
         heads: &ChangeHashSet,
     ) -> Res<Option<am_utils_rs::repo::BigDocHandle>> {
+        info!(%doc_id, %branch_path, "XXX resolve_handle_for_branch_heads enter");
         let Some(branch_ref) = self.get_branch_ref(doc_id, branch_path).await? else {
-            debug!(
-                ?doc_id,
-                branch_path = %branch_path,
-                heads = ?am_utils_rs::serialize_commit_heads(heads.as_ref()),
-                "resolve_handle_for_branch_heads: branch ref not found"
-            );
+            info!(%doc_id, %branch_path, "XXX resolve_handle_for_branch_heads no branch ref");
             return Ok(None);
         };
         let Some(handle) = self
             .get_handle_by_branch_doc_id(&branch_ref.branch_doc_id)
             .await?
         else {
-            debug!(
-                ?doc_id,
-                branch_path = %branch_path,
-                branch_doc_id = %branch_ref.branch_doc_id,
-                heads = ?am_utils_rs::serialize_commit_heads(heads.as_ref()),
-                "resolve_handle_for_branch_heads: branch handle not found locally"
-            );
+            info!(%doc_id, %branch_path, branch_doc_id = %branch_ref.branch_doc_id, "XXX resolve_handle_for_branch_heads no handle");
             return Ok(None);
         };
         let (contains_all_heads, missing_heads) = handle
@@ -326,23 +324,10 @@ impl DrawerRepo {
             })
             .await??;
         if !contains_all_heads {
-            debug!(
-                ?doc_id,
-                branch_path = %branch_path,
-                branch_doc_id = %branch_ref.branch_doc_id,
-                heads = ?am_utils_rs::serialize_commit_heads(heads.as_ref()),
-                ?missing_heads,
-                "resolve_handle_for_branch_heads: branch is missing requested heads"
-            );
+            info!(%doc_id, %branch_path, ?missing_heads, "XXX resolve_handle_for_branch_heads missing heads");
             return Ok(None);
         }
-        debug!(
-            ?doc_id,
-            branch_path = %branch_path,
-            branch_doc_id = %branch_ref.branch_doc_id,
-            heads = ?am_utils_rs::serialize_commit_heads(heads.as_ref()),
-            "resolve_handle_for_branch_heads: resolved successfully"
-        );
+        info!(%doc_id, %branch_path, "XXX resolve_handle_for_branch_heads exit");
         Ok(Some(handle))
     }
 
@@ -480,7 +465,7 @@ impl DrawerRepo {
 
             let schema_json = serde_json::to_value(&facet_manifest.value_schema)?;
             let schema_cache_key = (facet_tag.clone(), serde_json::to_string(&schema_json)?);
-            let mut cache = self.facet_schema_validators.lock().unwrap();
+            let mut cache = self.facet_schema_validators.lock().expect(ERROR_MUTEX);
             let validator = if let Some(existing) = cache.get(&schema_cache_key) {
                 Arc::clone(existing)
             } else {

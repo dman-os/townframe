@@ -188,11 +188,14 @@ impl BigRepoRuntimeHandle {
     }
 
     pub async fn get_doc_handle(&self, doc_id: DocumentId) -> Res<Option<Arc<LiveDocBundle>>> {
+        info!(%doc_id, "XXX runtime get_doc_handle enter");
         let (tx, rx) = oneshot::channel();
         self.cmd_tx
             .send(RuntimeCmd::GetDocHandle { doc_id, resp: tx })
             .map_err(|_| eyre::eyre!(ERROR_ACTOR))?;
-        rx.await.map_err(|_| eyre::eyre!(ERROR_CHANNEL))?
+        let out = rx.await.map_err(|_| eyre::eyre!(ERROR_CHANNEL))?;
+        info!(%doc_id, "XXX runtime get_doc_handle exit");
+        out
     }
 
     pub async fn export_doc_save(&self, doc_id: DocumentId) -> Res<Option<Vec<u8>>> {
@@ -738,8 +741,10 @@ where
     }
 
     fn spawn_doc_worker(&mut self, doc_id: DocumentId) -> Res<()> {
+        info!(%doc_id, "XXX runtime spawn_doc_worker enter");
         if self.doc_workers.contains_key(&doc_id) {
             self.clear_doc_worker_eviction(doc_id);
+            info!(%doc_id, "XXX runtime spawn_doc_worker already exists");
             return Ok(());
         }
         let (msg_tx, mut msg_rx) = mpsc::unbounded_channel();
@@ -807,6 +812,7 @@ where
                 eviction_deadline: Some(Instant::now() + DOC_WORKER_IDLE_TTL),
             },
         );
+        info!(%doc_id, "XXX runtime spawn_doc_worker exit");
         Ok(())
     }
 
@@ -840,10 +846,12 @@ where
         doc_id: DocumentId,
         done: oneshot::Sender<Res<Option<Arc<LiveDocBundle>>>>,
     ) {
+        info!(%doc_id, "XXX runtime handle_get_doc_handle enter");
         let worker = self.doc_worker_handle(doc_id).expect(ERROR_ACTOR);
         worker
             .send(DocWorkerMsg::AcquireHandle { done })
             .expect(ERROR_ACTOR);
+        info!(%doc_id, "XXX runtime handle_get_doc_handle exit");
     }
 
     async fn handle_export_doc_save(
@@ -1400,7 +1408,9 @@ where
     }
 
     async fn handle_acquire_handle(&mut self) -> Res<Option<Arc<LiveDocBundle>>> {
+        info!(doc_id = %self.doc_id, "XXX doc worker handle_acquire_handle enter");
         if let DocWorkerDocState::Live(bundle) = &self.state {
+            info!(doc_id = %self.doc_id, "XXX doc worker handle_acquire_handle already live");
             self.runtime_evt_tx
                 .send(RuntimeEvt::DocWorkerHandleAcquired {
                     bundle: Arc::clone(bundle),
@@ -1408,10 +1418,14 @@ where
                 .expect(ERROR_CHANNEL);
             return Ok(Some(Arc::clone(bundle)));
         }
+        info!(doc_id = %self.doc_id, "XXX doc worker handle_acquire_handle loading doc");
         let Some(doc) = self.take_or_load_transient_doc().await? else {
+            info!(doc_id = %self.doc_id, "XXX doc worker handle_acquire_handle no doc");
             return Ok(None);
         };
+        info!(doc_id = %self.doc_id, "XXX doc worker handle_acquire_handle building fragment store");
         let fragment_state_store = build_fragment_state_store(&doc).await?;
+        info!(doc_id = %self.doc_id, "XXX doc worker handle_acquire_handle creating bundle");
         let bundle = Arc::new(LiveDocBundle::new(
             self.doc_id,
             doc,
@@ -1427,6 +1441,7 @@ where
                 bundle: Arc::clone(&bundle),
             })
             .expect(ERROR_CHANNEL);
+        info!(doc_id = %self.doc_id, "XXX doc worker handle_acquire_handle exit");
         Ok(Some(bundle))
     }
 
@@ -1604,16 +1619,23 @@ where
     }
 
     async fn take_or_load_transient_doc(&mut self) -> Res<Option<automerge::Automerge>> {
-        match std::mem::replace(&mut self.state, DocWorkerDocState::Unloaded) {
-            DocWorkerDocState::Transient(doc) => Ok(Some(doc)),
+        info!(doc_id = %self.doc_id, "XXX doc worker take_or_load_transient_doc enter");
+        let out = match std::mem::replace(&mut self.state, DocWorkerDocState::Unloaded) {
+            DocWorkerDocState::Transient(doc) => {
+                info!(doc_id = %self.doc_id, "XXX doc worker take_or_load_transient_doc transient");
+                Ok(Some(doc))
+            }
             DocWorkerDocState::Unloaded => {
+                info!(doc_id = %self.doc_id, "XXX doc worker take_or_load_transient_doc unloaded, loading");
                 load_doc_snapshot(&self.sedimentrees, &self.storage_for_reads, self.doc_id).await
             }
             DocWorkerDocState::Live(bundle) => {
                 self.state = DocWorkerDocState::Live(bundle);
                 eyre::bail!("document already live")
             }
-        }
+        };
+        info!(doc_id = %self.doc_id, "XXX doc worker take_or_load_transient_doc exit");
+        out
     }
 
     async fn upsert_known_doc_now(&self) -> Res<()> {
@@ -1841,6 +1863,7 @@ where
     D: Into<DocumentId>,
 {
     let doc_id: DocumentId = doc_id.into();
+    info!(%doc_id, "XXX load_doc_snapshot enter");
     let sedimentree_id: SedimentreeId = doc_id.into();
 
     let loose_commits =
@@ -1853,10 +1876,13 @@ where
             storage_for_reads,
             sedimentree_id,
         );
+    info!(%doc_id, "XXX load_doc_snapshot loading loose commits and fragments");
     let (loose_commits, fragments) = futures::future::try_join(loose_commits, fragments)
         .await
         .wrap_err("failed reading blobs from storage")?;
+    info!(%doc_id, loose_commits = loose_commits.len(), fragments = fragments.len(), "XXX load_doc_snapshot loaded");
     if loose_commits.is_empty() && fragments.is_empty() {
+        info!(%doc_id, "XXX load_doc_snapshot empty, returning None");
         return Ok(None);
     }
     let blobs = loose_commits
@@ -1903,13 +1929,16 @@ where
         buf.extend_from_slice(raw);
     }
 
+    info!(%doc_id, buf_len = buf.len(), "XXX load_doc_snapshot reconstructing automerge doc");
     let mut doc = automerge::Automerge::new();
     doc.load_incremental(&buf)
         .map_err(|err| ferr!("failed reconstructing automerge doc from ordered blobs: {err}"))?;
 
     if fresh {
+        info!(%doc_id, "XXX load_doc_snapshot inserting into sedimentrees");
         sedimentrees.insert(sedimentree_id, tree).await;
     }
+    info!(%doc_id, "XXX load_doc_snapshot exit");
     Ok(Some(doc))
 }
 

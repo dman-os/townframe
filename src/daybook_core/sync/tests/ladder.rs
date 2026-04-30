@@ -118,7 +118,9 @@ async fn assert_title_synced(
 ) -> Res<()> {
     let title_key = FacetKey::from(WellKnownFacetTag::TitleGeneric);
     let branch = BranchPathBuf::from("main");
+    info!("XXX waiting for head parity");
     wait_for_doc_head_parity(node_a, node_b, doc_id, &branch, Duration::from_secs(30)).await?;
+    info!("XXX head parity detected");
     let doc_on_a = node_a
         .drawer
         .get_with_heads(doc_id, &branch, None)

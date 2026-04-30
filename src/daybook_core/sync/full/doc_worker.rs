@@ -35,9 +35,7 @@ pub fn spawn_doc_sync_worker(
     }
     .instrument(tracing::info_span!("DocSyncWorker task"));
 
-    let task_handle = task_set
-        .spawn(fut)
-        .map_err(|_| ferr!("task set aborted"))?;
+    let task_handle = task_set.spawn(fut).map_err(|_| ferr!("task set aborted"))?;
 
     Ok(DocSyncWorkerStopToken { task_handle })
 }

@@ -144,7 +144,7 @@ impl DrawerRepo {
         let mut events = Vec::with_capacity(prepared_docs.len());
 
         {
-            let mut pool = self.entry_pool.lock().unwrap();
+            let mut pool = self.entry_pool.lock().expect(ERROR_MUTEX);
             for prepared in &prepared_docs {
                 let pruned = pool.insert_key(&prepared.doc_id, 1);
                 for pkey in pruned {
@@ -180,6 +180,7 @@ impl DrawerRepo {
         Ok(doc_ids)
     }
 
+    #[tracing::instrument(level = "trace", skip_all)]
     pub async fn add(&self, args: AddDocArgs) -> Result<DocId, DrawerError> {
         let mut created = self.batch_add(vec![args]).await?;
         if created.len() != 1 {
@@ -190,6 +191,7 @@ impl DrawerRepo {
         Ok(created.pop().expect("checked above"))
     }
 
+    #[tracing::instrument(level = "trace", skip_all, fields(%patch.id, %branch_path))]
     pub async fn update_at_heads(
         &self,
         patch: DocPatch,
@@ -312,6 +314,7 @@ impl DrawerRepo {
         Ok(())
     }
 
+    #[tracing::instrument(level = "trace", skip_all, fields(%id, %to_branch, %from_branch))]
     pub async fn create_branch_at_heads_from_branch(
         &self,
         id: &DocId,
@@ -892,6 +895,7 @@ impl DrawerRepo {
             .await
     }
 
+    #[tracing::instrument(level = "trace", skip_all, fields(%id, %branch_path))]
     pub async fn delete_branch(
         &self,
         id: &DocId,

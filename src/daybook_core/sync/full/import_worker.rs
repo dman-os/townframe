@@ -49,9 +49,7 @@ pub(super) fn spawn_import_sync_worker(
         worker.run().await;
     }
     .instrument(tracing::info_span!("ImportSyncWorker task"));
-    let task_handle = task_set
-        .spawn(fut)
-        .map_err(|_| ferr!("task set aborted"))?;
+    let task_handle = task_set.spawn(fut).map_err(|_| ferr!("task set aborted"))?;
     Ok(ImportSyncWorkerStopToken { task_handle })
 }
 
