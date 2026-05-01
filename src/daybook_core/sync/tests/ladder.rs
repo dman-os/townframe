@@ -889,10 +889,16 @@ async fn iroh_sync_shutdown_peer_updates_catch_up_after_reconnect() -> Res<()> {
             .connect_endpoint_addr(reopened_addr_a)
             .await?;
 
+        let required_partitions = node_b
+            .sync_repo
+            .peer_partition_ids("")
+            .into_iter()
+            .collect::<Vec<_>>();
         node_b
             .sync_repo
             .wait_for_full_sync(
                 std::slice::from_ref(&reopened_endpoint_id),
+                &required_partitions,
                 Duration::from_secs(120),
             )
             .await?;

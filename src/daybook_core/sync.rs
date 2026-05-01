@@ -133,6 +133,10 @@ pub enum IrohSyncEvent {
         peer_key: PeerKey,
         doc_count: usize,
     },
+    PartitionFullySynced {
+        peer_key: PeerKey,
+        partition: String,
+    },
     DocSyncedWithPeer {
         peer_key: PeerKey,
         doc_id: DocumentId,
@@ -185,7 +189,6 @@ impl IrohSyncRepoStopToken {
             .await?;
         }
         // pre light the stop signal to the full worker
-        self.full_stop_token.cancel_token.cancel();
         // Worker shutdown drains active repo connections; each connection stop can wait up to 5s.
         utils_rs::wait_on_handle_with_timeout(
             self.worker_handle,
@@ -303,7 +306,8 @@ impl IrohSyncRepo {
             .await?;
 
         let (mut full_sync_handle, full_stop_token) = full::spawn_full_sync_worker(
-            Arc::clone(&rcx),
+            Arc::clone(&rcx.big_repo),
+            Arc::clone(&rcx.local_peer_key),
             Arc::clone(&blobs_repo),
             progress_repo.clone(),
             partition_sync_store.clone(),
@@ -660,6 +664,12 @@ impl IrohSyncRepo {
                 doc_count,
                 peer_key,
             }]),
+            full::FullSyncEvent::PartitionFullSynced { peer_key, partition } => self
+                .registry
+                .notify([IrohSyncEvent::PartitionFullySynced {
+                    peer_key,
+                    partition: partition.as_tag_value().to_string(),
+                }]),
             full::FullSyncEvent::DocSyncedWithPeer { peer_key, doc_id } => self
                 .registry
                 .notify([IrohSyncEvent::DocSyncedWithPeer { peer_key, doc_id }]),
@@ -787,6 +797,7 @@ impl IrohSyncRepo {
     pub async fn wait_for_full_sync(
         &self,
         endpoint_ids: &[EndpointId],
+        required_partitions: &[am_utils_rs::sync::protocol::PartitionId],
         timeout: Duration,
     ) -> Res<()> {
         self.ensure_repo_live()?;
@@ -797,6 +808,11 @@ impl IrohSyncRepo {
         if target_peers.is_empty() {
             return Ok(());
         }
+        let required_partitions: HashSet<full::PartitionKey> = required_partitions
+            .iter()
+            .cloned()
+            .map(full::PartitionKey::from_partition_id)
+            .collect();
         let peer_ids: Vec<am_utils_rs::ids::PeerId32> =
             endpoint_ids.iter().cloned().map(Into::into).collect();
         let initial_snapshot = self
@@ -805,12 +821,13 @@ impl IrohSyncRepo {
             .await?;
         debug!(
             target_peers = ?target_peers,
+            required_partitions = ?required_partitions,
             initial_snapshot = ?initial_snapshot,
             "wait_for_full_sync initial state"
         );
         let timeout_outcome = tokio::time::timeout(timeout, async {
             self.full_sync_handle
-                .wait_for_peers_fully_synced(peer_ids.clone())
+                .wait_for_peers_fully_synced(peer_ids.clone(), required_partitions.clone())
                 .await?;
             eyre::Ok(())
         })
@@ -835,7 +852,11 @@ impl IrohSyncRepo {
                                 let peer_id: am_utils_rs::ids::PeerId32 = (**endpoint_id).into();
                                 !snapshot
                                     .get(&peer_id)
-                                    .is_some_and(|peer| peer.emitted_full_synced)
+                                    .is_some_and(|peer| {
+                                        required_partitions
+                                            .iter()
+                                            .all(|partition| peer.fully_synced_partitions.contains(partition))
+                                    })
                             })
                             .copied()
                             .collect::<HashSet<_>>()
@@ -876,7 +897,15 @@ impl IrohSyncRepo {
     }
 
     pub async fn wait_until_peers_sync(&self, endpoint_ids: &[EndpointId]) -> Res<()> {
-        self.wait_for_full_sync(endpoint_ids, Duration::from_secs(30))
+        let required_partitions = self
+            .peer_partition_ids("")
+            .into_iter()
+            .collect::<Vec<_>>();
+        self.wait_for_full_sync(
+            endpoint_ids,
+            &required_partitions,
+            Duration::from_secs(30),
+        )
             .await
     }
 }
@@ -1750,10 +1779,17 @@ mod tests {
         endpoint_id: EndpointId,
         timeout: Duration,
     ) -> Res<()> {
+        let required_partitions = source
+            .sync_repo
+            .peer_partition_ids("")
+            .into_iter()
+            .collect::<Vec<_>>();
         tokio::try_join!(
-            target
-                .sync_repo
-                .wait_for_full_sync(std::slice::from_ref(&endpoint_id), timeout),
+            target.sync_repo.wait_for_full_sync(
+                std::slice::from_ref(&endpoint_id),
+                &required_partitions,
+                timeout,
+            ),
             wait_for_doc_set_parity(&source.drawer, &target.drawer, timeout),
         )?;
         Ok(())
@@ -1784,10 +1820,16 @@ mod tests {
 
         tokio::time::sleep(Duration::from_secs(1)).await;
 
+        let required_partitions = node_b
+            .sync_repo
+            .peer_partition_ids("")
+            .into_iter()
+            .collect::<Vec<_>>();
         node_b
             .sync_repo
             .wait_for_full_sync(
                 std::slice::from_ref(&endpoint_addr_ba.id),
+                &required_partitions,
                 Duration::from_secs(5),
             )
             .await?;

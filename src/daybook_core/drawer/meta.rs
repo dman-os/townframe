@@ -3,7 +3,7 @@ use crate::interlude::*;
 #[cfg(test)]
 use super::BranchStateRow;
 use super::{BranchKind, BranchRefRow, DrawerRepo};
-use crate::drawer::types::{DocEntry, DocEntryDiff, DocNBranches, StoredBranchRef};
+use crate::drawer::types::{DocEntry, DocNBranches, StoredBranchRef};
 use crate::stores::VersionTag;
 use automerge::ReadDoc;
 use daybook_types::doc::{ChangeHashSet, DocId};

@@ -7,6 +7,14 @@ use irpc::{channel, rpc_requests, WithChannels};
 use tokio::sync::mpsc;
 use tokio_util::sync::CancellationToken;
 
+pub const MAX_GET_DOCS_FULL_DOC_IDS: usize = 256;
+
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct FullDoc {
+    pub doc_id: String,
+    pub automerge_save: Vec<u8>,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct GetDocsFullRequest {
     pub doc_ids: Vec<String>,
@@ -14,7 +22,7 @@ pub struct GetDocsFullRequest {
 
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct GetDocsFullResponse {
-    pub docs: Vec<crate::sync::protocol::FullDoc>,
+    pub docs: Vec<FullDoc>,
 }
 
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]

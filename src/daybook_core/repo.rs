@@ -589,14 +589,14 @@ pub(crate) async fn ensure_expected_partitions_for_docs(
         partition_store.ensure_partition(&partition_id).await?;
     }
     partition_store
-        .add_member(
+        .upsert_item(
             &crate::sync::CORE_DOCS_PARTITION_ID.to_string(),
             &doc_drawer_id.to_string(),
             &serde_json::json!({}),
         )
         .await?;
     partition_store
-        .add_member(
+        .upsert_item(
             &crate::sync::CORE_DOCS_PARTITION_ID.to_string(),
             &doc_app_id.to_string(),
             &serde_json::json!({}),

@@ -1,3 +1,4 @@
+pub mod machine;
 pub mod node;
 pub mod peer;
 pub mod protocol;

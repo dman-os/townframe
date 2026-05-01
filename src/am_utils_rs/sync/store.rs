@@ -36,7 +36,7 @@ impl SyncStoreStopToken {
 #[derive(Debug, Clone)]
 pub struct PartitionSyncCursorState {
     pub member_cursor: Option<CursorIndex>,
-    pub doc_cursor: Option<CursorIndex>,
+    pub item_cursor: Option<CursorIndex>,
 }
 
 enum StoreMsg {
@@ -62,7 +62,7 @@ enum StoreMsg {
         peer_key: PeerKey,
         partition_id: PartitionId,
         member_cursor: Option<CursorIndex>,
-        doc_cursor: Option<CursorIndex>,
+        item_cursor: Option<CursorIndex>,
         resp: oneshot::Sender<Res<()>>,
     },
 }
@@ -121,7 +121,7 @@ impl SyncStoreHandle {
         peer: PeerKey,
         partition_id: PartitionId,
         member_cursor: Option<CursorIndex>,
-        doc_cursor: Option<CursorIndex>,
+        item_cursor: Option<CursorIndex>,
     ) -> Res<()> {
         let (resp_tx, resp_rx) = oneshot::channel();
         self.tx
@@ -129,7 +129,7 @@ impl SyncStoreHandle {
                 peer_key: peer,
                 partition_id,
                 member_cursor,
-                doc_cursor,
+                item_cursor,
                 resp: resp_tx,
             })
             .wrap_err(ERROR_ACTOR)?;
@@ -187,7 +187,7 @@ async fn ensure_schema(pool: &sqlx::SqlitePool) -> Res<()> {
             peer_key TEXT NOT NULL,
             partition_id TEXT NOT NULL,
             member_cursor INTEGER NULL,
-            doc_cursor INTEGER NULL,
+            item_cursor INTEGER NULL,
             PRIMARY KEY(peer_key, partition_id)
         )
         "#,
@@ -252,7 +252,7 @@ async fn handle_msg(pool: &sqlx::SqlitePool, msg: StoreMsg) {
         } => {
             let out = async {
                 let row = sqlx::query(
-                    "SELECT member_cursor, doc_cursor FROM sync_partition_cursors WHERE peer_key = ? AND partition_id = ?",
+                    "SELECT member_cursor, item_cursor FROM sync_partition_cursors WHERE peer_key = ? AND partition_id = ?",
                 )
                 .bind(&peer[..])
                 .bind(partition_id)
@@ -261,18 +261,18 @@ async fn handle_msg(pool: &sqlx::SqlitePool, msg: StoreMsg) {
                 let Some(row) = row else {
                     return Ok(PartitionSyncCursorState {
                         member_cursor: None,
-                        doc_cursor: None,
+                        item_cursor: None,
                     });
                 };
                 let member_cursor = row
                     .try_get::<Option<i64>, _>("member_cursor")?
                     .map(|val| val.max(0) as u64);
-                let doc_cursor = row
-                    .try_get::<Option<i64>, _>("doc_cursor")?
+                let item_cursor = row
+                    .try_get::<Option<i64>, _>("item_cursor")?
                     .map(|val| val.max(0) as u64);
                 Ok(PartitionSyncCursorState {
                     member_cursor,
-                    doc_cursor,
+                    item_cursor,
                 })
             }
             .await;
@@ -282,23 +282,23 @@ async fn handle_msg(pool: &sqlx::SqlitePool, msg: StoreMsg) {
             peer_key: peer,
             partition_id,
             member_cursor,
-            doc_cursor,
+            item_cursor,
             resp,
         } => {
             let out = async {
                 sqlx::query(
                     r#"
-                    INSERT INTO sync_partition_cursors(peer_key, partition_id, member_cursor, doc_cursor)
+                    INSERT INTO sync_partition_cursors(peer_key, partition_id, member_cursor, item_cursor)
                     VALUES(?, ?, ?, ?)
                     ON CONFLICT(peer_key, partition_id) DO UPDATE SET
                         member_cursor = excluded.member_cursor,
-                        doc_cursor = excluded.doc_cursor
+                        item_cursor = excluded.item_cursor
                     "#,
                 )
                 .bind(&peer[..])
                 .bind(partition_id)
                 .bind(member_cursor.map(|val| val as i64))
-                .bind(doc_cursor.map(|val| val as i64))
+                .bind(item_cursor.map(|val| val as i64))
                 .execute(pool)
                 .await?;
                 Ok(())
@@ -329,7 +329,7 @@ mod tests {
 
         let cursor = store.get_partition_cursor(peer, partition).await?;
         assert_eq!(cursor.member_cursor, Some(10));
-        assert_eq!(cursor.doc_cursor, Some(20));
+        assert_eq!(cursor.item_cursor, Some(20));
 
         stop.stop().await?;
         Ok(())

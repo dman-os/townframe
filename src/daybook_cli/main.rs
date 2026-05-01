@@ -459,7 +459,7 @@ async fn static_cli(cli: Cli) -> Res<ExitCode> {
                     }
                     res = sync_repo
                             // TODO: parametrize timeout
-                            .wait_for_full_sync(&endpoint_ids, std::time::Duration::from_secs(30)) => {
+                            .wait_until_peers_sync(&endpoint_ids) => {
                         res?;
                     }
                 }
@@ -493,6 +493,12 @@ async fn static_cli(cli: Cli) -> Res<ExitCode> {
                                             doc_count,
                                         } => {
                                             info!(%peer_key, ?doc_count, "peer fully synced");
+                                        }
+                                        IrohSyncEvent::PartitionFullySynced {
+                                            peer_key,
+                                            partition,
+                                        } => {
+                                            info!(%peer_key, ?partition, "partition fully synced");
                                         }
                                         IrohSyncEvent::DocSyncedWithPeer {
                                             peer_key,
@@ -1162,10 +1168,7 @@ mod tests {
         let bootstrap = node_b.sync_repo.connect_url(&ticket).await?;
         node_b
             .sync_repo
-            .wait_for_full_sync(
-                std::slice::from_ref(&bootstrap.endpoint_id),
-                Duration::from_secs(30),
-            )
+            .wait_until_peers_sync(std::slice::from_ref(&bootstrap.endpoint_id))
             .await?;
 
         let ids_a = list_doc_ids(&node_a.drawer).await?;

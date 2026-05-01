@@ -8,10 +8,8 @@ pub type PartitionId = String;
 pub type PeerKey = Arc<str>;
 pub type CursorIndex = u64;
 
-pub const MAX_GET_DOCS_FULL_DOC_IDS: usize = 256;
 pub const DEFAULT_EVENT_PAGE_LIMIT: u32 = 512;
 pub const DEFAULT_SUBSCRIPTION_CAPACITY: usize = 1024;
-pub const DEFAULT_DOC_BATCH_LIMIT: usize = 128;
 
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct PartitionSummary {
@@ -30,7 +28,7 @@ pub struct PartitionCursorRequest {
 pub struct PartitionStreamCursorRequest {
     pub partition_id: PartitionId,
     pub since_member: Option<CursorIndex>,
-    pub since_doc: Option<CursorIndex>,
+    pub since_item: Option<CursorIndex>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
@@ -59,11 +57,9 @@ pub struct PartitionEvent {
 pub enum PartitionEventDeets {
     MemberUpsert {
         item_id: String,
-        payload: serde_json::Value,
     },
     MemberRemoved {
         item_id: String,
-        payload: serde_json::Value,
     },
     ItemChanged {
         item_id: String,
@@ -77,27 +73,21 @@ pub enum PartitionEventDeets {
 
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub enum PartitionMemberEventDeets {
-    MemberUpsert { item_id: String, payload: String },
-    MemberRemoved { item_id: String, payload: String },
+    MemberUpsert { item_id: String },
+    MemberRemoved { item_id: String },
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
-pub struct PartitionDocEvent {
+pub struct PartitionItemEvent {
     pub cursor: CursorIndex,
     pub partition_id: PartitionId,
-    pub deets: PartitionDocEventDeets,
+    pub deets: PartitionItemEventDeets,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
-pub enum PartitionDocEventDeets {
+pub enum PartitionItemEventDeets {
     ItemChanged { item_id: String, payload: String },
     ItemDeleted { item_id: String, payload: String },
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
-pub struct FullDoc {
-    pub doc_id: String,
-    pub automerge_save: Vec<u8>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
@@ -121,14 +111,14 @@ pub struct GetPartitionMemberEventsResponse {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
-pub struct GetPartitionDocEventsRequest {
+pub struct GetPartitionItemEventsRequest {
     pub partitions: Vec<PartitionCursorRequest>,
     pub limit: u32,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
-pub struct GetPartitionDocEventsResponse {
-    pub events: Vec<PartitionDocEvent>,
+pub struct GetPartitionItemEventsResponse {
+    pub events: Vec<PartitionItemEvent>,
     pub cursors: Vec<PartitionCursorPage>,
 }
 
@@ -137,16 +127,27 @@ pub struct SubPartitionsRequest {
     pub partitions: Vec<PartitionStreamCursorRequest>,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[derive(
+    Debug,
+    Clone,
+    Copy,
+    PartialEq,
+    Eq,
+    Hash,
+    PartialOrd,
+    Ord,
+    serde::Serialize,
+    serde::Deserialize,
+)]
 pub enum SubscriptionStreamKind {
     Member,
-    Doc,
+    Item,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub enum SubscriptionItem {
     MemberEvent(PartitionMemberEvent),
-    DocEvent(PartitionDocEvent),
+    ItemEvent(PartitionItemEvent),
     ReplayComplete { stream: SubscriptionStreamKind },
     Lagged { dropped: u64 },
 }
@@ -166,12 +167,8 @@ pub enum PartitionSyncError {
     AccessDenied { partition_id: PartitionId },
     /// invalid cursor {cursor:?}
     InvalidCursor { cursor: CursorIndex },
-    /// requested too many docs: requested={requested} max={max}
-    TooManyDocIds { requested: usize, max: usize },
     /// unknown partition {partition_id:?}
     UnknownPartition { partition_id: PartitionId },
-    /// access denied for doc {doc_id}
-    DocAccessDenied { doc_id: String },
     /// internal error: {message}
     Internal { message: String },
 }
@@ -185,8 +182,8 @@ pub struct GetPartitionMemberEventsRpcReq {
 }
 
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
-pub struct GetPartitionDocEventsRpcReq {
-    pub req: GetPartitionDocEventsRequest,
+pub struct GetPartitionItemEventsRpcReq {
+    pub req: GetPartitionItemEventsRequest,
 }
 
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
@@ -204,8 +201,8 @@ pub enum PartitionSyncRpc {
     ListPartitions(ListPartitionsRpcReq),
     #[rpc(tx = channel::oneshot::Sender<Result<GetPartitionMemberEventsResponse, PartitionSyncError>>)]
     GetPartitionMemberEvents(GetPartitionMemberEventsRpcReq),
-    #[rpc(tx = channel::oneshot::Sender<Result<GetPartitionDocEventsResponse, PartitionSyncError>>)]
-    GetPartitionDocEvents(GetPartitionDocEventsRpcReq),
+    #[rpc(tx = channel::oneshot::Sender<Result<GetPartitionItemEventsResponse, PartitionSyncError>>)]
+    GetPartitionItemEvents(GetPartitionItemEventsRpcReq),
     #[rpc(tx = channel::mpsc::Sender<SubscriptionItem>)]
     SubPartitions(SubPartitionsRpcReq),
 }

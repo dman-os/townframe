@@ -2,14 +2,11 @@ use crate::interlude::*;
 
 use super::{
     IrohSyncRepo, CLONE_PROVISION_ALPN, CORE_DOCS_PARTITION_ID, IROH_CLONE_URL_SCHEME,
-    PARTITION_SYNC_ALPN, REPO_SYNC_ALPN,
 };
 
 use std::str::FromStr;
 
-use futures::StreamExt;
 use iroh::EndpointId;
-use iroh_blobs::api::downloader::DownloadProgressItem;
 use iroh_tickets::endpoint::EndpointTicket;
 use irpc::{channel, rpc_requests};
 #[cfg(test)]
@@ -195,12 +192,13 @@ pub async fn request_clone_provision_from_url(
     Ok(response)
 }
 
-#[tracing::instrument(skip(big_repo, blobs_repo, iroh_secret_key, bootstrap, timeout))]
+#[tracing::instrument(skip(big_repo, blobs_repo, local_peer_key, iroh_secret_key, bootstrap, timeout, sql))]
 pub async fn connect_and_pull_required_partitions_once(
     big_repo: &SharedBigRepo,
     blobs_repo: &Arc<crate::blobs::BlobsRepo>,
     local_peer_key: &str,
     iroh_secret_key: iroh::SecretKey,
+    sql: &crate::app::SqlCtx,
     bootstrap: &SyncBootstrapState,
     timeout: std::time::Duration,
 ) -> Res<()> {
@@ -211,17 +209,152 @@ pub async fn connect_and_pull_required_partitions_once(
         .bind_addr((std::net::Ipv4Addr::LOCALHOST, 0))?
         .relay_mode(iroh::RelayMode::Disabled);
     let endpoint = endpoint_builder.bind().await?;
-    let result: Res<()> = pull_required_partitions_once(
+    let result: Res<()> = pull_required_partitions_via_full_sync_worker(
         big_repo,
         blobs_repo,
         local_peer_key,
         &endpoint,
+        sql,
         bootstrap,
         timeout,
     )
     .await;
     endpoint.close().await;
     result
+}
+
+async fn pull_required_partitions_via_full_sync_worker(
+    big_repo: &SharedBigRepo,
+    blobs_repo: &Arc<crate::blobs::BlobsRepo>,
+    local_peer_key: &str,
+    endpoint: &iroh::Endpoint,
+    sql: &crate::app::SqlCtx,
+    bootstrap: &SyncBootstrapState,
+    timeout: std::time::Duration,
+) -> Res<()> {
+    let _ = local_peer_key;
+    let source_peer_key = daybook_types::doc::format_peer_key(bootstrap.endpoint_id.as_bytes());
+    let peer_id: am_utils_rs::repo::PeerId = bootstrap.endpoint_id.into();
+
+    let (sync_store, sync_store_stop) =
+        am_utils_rs::sync::store::spawn_sync_store(sql.db_pool.clone()).await?;
+    sync_store.allow_peer(source_peer_key.clone()).await?;
+
+    let (sync_node_handle, sync_node_stop) = am_utils_rs::sync::node::spawn_sync_node(
+        big_repo.partition_store().clone(),
+        sync_store.clone(),
+        Arc::new(am_utils_rs::sync::AllowAllPartitionAccessPolicy),
+    )
+    .await?;
+
+    let _sync_router = iroh::protocol::Router::builder(endpoint.clone())
+        .accept(
+            super::PARTITION_SYNC_ALPN,
+            super::AuthenticatedIrohProtocol::<am_utils_rs::sync::protocol::PartitionSyncRpc> {
+                tx: sync_node_handle.local_sender(),
+                peer_key_fn: Arc::new(|endpoint_id| {
+                    daybook_types::doc::format_peer_key(endpoint_id.as_bytes())
+                }),
+            },
+        )
+        .spawn();
+
+    // Ensure blob scope partitions exist locally so bootstrap_blob_scope_memberships
+    // doesn't fail on an empty partition store.
+    big_repo
+        .partition_store()
+        .ensure_partition(&CORE_DOCS_PARTITION_ID.to_string())
+        .await?;
+    big_repo
+        .partition_store()
+        .ensure_partition(
+            &crate::drawer::DrawerRepo::replicated_partition_id_for_drawer(
+                &bootstrap.drawer_doc_id,
+            ),
+        )
+        .await?;
+    big_repo
+        .partition_store()
+        .ensure_partition(&crate::rt::PROCESSOR_RUNLOG_PARTITION_ID.to_string())
+        .await?;
+    big_repo
+        .partition_store()
+        .ensure_partition(&crate::blobs::BLOB_SCOPE_DOCS_PARTITION_ID.to_string())
+        .await?;
+    big_repo
+        .partition_store()
+        .ensure_partition(&crate::blobs::BLOB_SCOPE_PLUGS_PARTITION_ID.to_string())
+        .await?;
+
+    let (worker_handle, worker_stop) = super::full::spawn_full_sync_worker(
+        Arc::clone(big_repo),
+        source_peer_key.clone().into(),
+        Arc::clone(blobs_repo),
+        None,
+        sync_store,
+        endpoint.clone(),
+    )
+    .await?;
+
+    let partitions: HashSet<am_utils_rs::sync::protocol::PartitionId> = [
+        CORE_DOCS_PARTITION_ID.to_string(),
+        crate::blobs::BLOB_SCOPE_PLUGS_PARTITION_ID.to_string(),
+    ]
+    .into_iter()
+    .collect();
+
+    let connection = big_repo
+        .open_connection_iroh(
+            endpoint.clone(),
+            bootstrap.endpoint_addr.clone(),
+            peer_id,
+            None,
+        )
+        .await?;
+
+    worker_handle
+        .set_connection(
+            connection,
+            bootstrap.endpoint_addr.clone(),
+            source_peer_key.clone(),
+            partitions.clone(),
+        )
+        .await?;
+
+    let timeout_result = tokio::time::timeout(timeout, async {
+        let required_partitions = partitions
+            .iter()
+            .cloned()
+            .map(super::full::PartitionKey::from_partition_id)
+            .collect::<HashSet<_>>();
+        worker_handle
+            .wait_for_peers_fully_synced(vec![peer_id], required_partitions)
+            .await
+    })
+    .await;
+
+    worker_stop.cancel_token.cancel();
+
+    let _ = sync_node_stop.stop().await;
+    let _ = sync_store_stop.stop().await;
+
+    match timeout_result {
+        Ok(Ok(())) => {}
+        Ok(Err(err)) => return Err(err),
+        Err(_) => {
+            eyre::bail!("timed out waiting for required partitions during clone");
+        }
+    }
+
+    let app_present = big_repo.get_doc(&bootstrap.app_doc_id).await?.is_some();
+    let drawer_present = big_repo.get_doc(&bootstrap.drawer_doc_id).await?.is_some();
+    if !app_present || !drawer_present {
+        eyre::bail!(
+            "required core docs missing after clone sync (app_present={app_present}, drawer_present={drawer_present})"
+        );
+    }
+
+    Ok(())
 }
 
 // FIXME: move parts of this into a RepoCtx method
@@ -329,18 +462,12 @@ pub async fn clone_repo_init_from_url(
             secret_key_bytes: identity.iroh_secret_key.to_bytes(),
         })
         .await?;
-        let source_peer_key = daybook_types::doc::format_peer_key(bootstrap.endpoint_id.as_bytes());
-        let (sync_store, sync_store_stop) =
-            am_utils_rs::sync::store::spawn_sync_store(sql.db_pool.clone()).await?;
-        let allow_res = sync_store.allow_peer(source_peer_key.into()).await;
-        let stop_res = sync_store_stop.stop().await;
-        allow_res?;
-        stop_res?;
-
         let blobs_repo = crate::blobs::BlobsRepo::new(
             staging.join("blobs"),
             "clone-bootstrap".into(),
-            Arc::new(crate::blobs::NoopPartitionMembershipWriter),
+            Arc::new(crate::blobs::PartitionStoreMembershipWriter::new(
+                big_repo.partition_store(),
+            )),
         )
         .await?;
 
@@ -349,6 +476,7 @@ pub async fn clone_repo_init_from_url(
             &blobs_repo,
             &local_peer_key,
             local_secret.clone(),
+            &sql,
             &bootstrap,
             options.timeout,
         )
@@ -412,242 +540,6 @@ fn next_clone_staging_dir(parent: &std::path::Path) -> Res<std::path::PathBuf> {
         "failed allocating clone staging directory under {}",
         parent.display()
     );
-}
-
-async fn pull_required_partitions_once(
-    big_repo: &SharedBigRepo,
-    blobs_repo: &Arc<crate::blobs::BlobsRepo>,
-    local_peer_key: &str,
-    endpoint: &iroh::Endpoint,
-    bootstrap: &SyncBootstrapState,
-    timeout: std::time::Duration,
-) -> Res<()> {
-    let fut = async move {
-        let partition_rpc = irpc_iroh::client::<am_utils_rs::sync::protocol::PartitionSyncRpc>(
-            endpoint.clone(),
-            bootstrap.endpoint_addr.clone(),
-            PARTITION_SYNC_ALPN,
-        );
-        let partition_list = partition_rpc
-            .rpc(am_utils_rs::sync::protocol::ListPartitionsRpcReq)
-            .await
-            .wrap_err("list required partitions rpc failed")?
-            .map_err(|err| eyre::eyre!("list required partitions rpc failed: {err:?}"))?;
-        let available_partitions: HashSet<String> = partition_list
-            .partitions
-            .into_iter()
-            .map(|summary| summary.partition_id)
-            .collect();
-        for required in [
-            CORE_DOCS_PARTITION_ID.to_string(),
-            crate::blobs::BLOB_SCOPE_PLUGS_PARTITION_ID.to_string(),
-        ] {
-            if !available_partitions.contains(&required) {
-                eyre::bail!("required partition missing on clone source: {required}");
-            }
-        }
-
-        let core_docs =
-            list_current_partition_members(&partition_rpc, local_peer_key, CORE_DOCS_PARTITION_ID)
-                .await?;
-        let app_doc_id = bootstrap.app_doc_id.to_string();
-        let drawer_doc_id = bootstrap.drawer_doc_id.to_string();
-        if !core_docs.contains(&app_doc_id) || !core_docs.contains(&drawer_doc_id) {
-            eyre::bail!(
-                "required core docs missing from partition {CORE_DOCS_PARTITION_ID} (app_present={}, drawer_present={})",
-                core_docs.contains(&app_doc_id),
-                core_docs.contains(&drawer_doc_id)
-            );
-        }
-
-        let repo_rpc = irpc_iroh::client::<am_utils_rs::repo::rpc::RepoSyncRpc>(
-            endpoint.clone(),
-            bootstrap.endpoint_addr.clone(),
-            REPO_SYNC_ALPN,
-        );
-        let full_docs = repo_rpc
-            .rpc(am_utils_rs::repo::rpc::GetDocsFullRpcReq {
-                req: am_utils_rs::repo::rpc::GetDocsFullRequest {
-                    doc_ids: vec![app_doc_id.clone(), drawer_doc_id.clone()],
-                },
-            })
-            .await
-            .wrap_err("GetDocsFull rpc failed during clone bootstrap")?
-            .map_err(|err| eyre::eyre!("GetDocsFull rejected during clone bootstrap: {err:?}"))?;
-
-        for full_doc in full_docs.docs {
-            let parsed = DocumentId::from_str(&full_doc.doc_id).wrap_err_with(|| {
-                format!(
-                    "invalid core doc id in bootstrap payload: {}",
-                    full_doc.doc_id
-                )
-            })?;
-            if big_repo.get_doc(&parsed).await?.is_some() {
-                continue;
-            }
-            let loaded = automerge::Automerge::load(&full_doc.automerge_save).map_err(|err| {
-                eyre::eyre!(
-                    "invalid automerge payload for core doc {} during clone bootstrap: {err}",
-                    full_doc.doc_id
-                )
-            })?;
-            big_repo.put_doc(parsed, loaded).await?;
-        }
-
-        let mut attempts = 0usize;
-        loop {
-            attempts += 1;
-            let app = big_repo.get_doc(&bootstrap.app_doc_id).await?.is_some();
-            let drawer = big_repo.get_doc(&bootstrap.drawer_doc_id).await?.is_some();
-            if app && drawer {
-                break;
-            }
-            if attempts.is_multiple_of(10) {
-                debug!(
-                    attempts,
-                    app_doc_id = %bootstrap.app_doc_id,
-                    drawer_doc_id = %bootstrap.drawer_doc_id,
-                    "still waiting for required docs after clone bootstrap pull attempt"
-                );
-            }
-            tokio::time::sleep(std::time::Duration::from_millis(150)).await;
-        }
-
-        let plug_blob_hashes = list_current_partition_members(
-            &partition_rpc,
-            local_peer_key,
-            crate::blobs::BLOB_SCOPE_PLUGS_PARTITION_ID,
-        )
-        .await?;
-        for hash in plug_blob_hashes {
-            ensure_blob_hash_present(blobs_repo, endpoint, bootstrap.endpoint_id, &hash).await?;
-        }
-
-        Ok::<(), eyre::Report>(())
-    };
-    tokio::time::timeout(timeout, fut)
-        .await
-        .map_err(|_| eyre::eyre!("timed out waiting for required partitions during clone"))??;
-
-    Ok(())
-}
-
-async fn list_current_partition_members(
-    partition_rpc: &irpc::Client<am_utils_rs::sync::protocol::PartitionSyncRpc>,
-    _local_peer_key: &str,
-    partition_id: &str,
-) -> Res<HashSet<String>> {
-    let mut current_members = HashSet::new();
-    let mut since = None;
-    loop {
-        let page = partition_rpc
-            .rpc(
-                am_utils_rs::sync::protocol::GetPartitionMemberEventsRpcReq {
-                    req: am_utils_rs::sync::protocol::GetPartitionMemberEventsRequest {
-                        partitions: vec![am_utils_rs::sync::protocol::PartitionCursorRequest {
-                            partition_id: partition_id.to_string(),
-                            since,
-                        }],
-                        limit: am_utils_rs::sync::protocol::DEFAULT_EVENT_PAGE_LIMIT,
-                    },
-                },
-            )
-            .await
-            .wrap_err_with(|| {
-                format!("partition member replay rpc failed for partition {partition_id}")
-            })?
-            .map_err(|err| {
-                eyre::eyre!(
-                    "partition member replay rpc failed for partition {partition_id}: {err:?}"
-                )
-            })?;
-        for event in page.events {
-            match event.deets {
-                am_utils_rs::sync::protocol::PartitionMemberEventDeets::MemberUpsert {
-                    item_id,
-                    ..
-                } => {
-                    current_members.insert(item_id);
-                }
-                am_utils_rs::sync::protocol::PartitionMemberEventDeets::MemberRemoved {
-                    item_id,
-                    ..
-                } => {
-                    current_members.remove(&item_id);
-                }
-            }
-        }
-        let cursor = page
-            .cursors
-            .into_iter()
-            .find(|cursor| cursor.partition_id == partition_id)
-            .ok_or_eyre("partition cursor page missing during clone bootstrap")?;
-        if !cursor.has_more {
-            break;
-        }
-        since = Some(
-            cursor
-                .next_cursor
-                .ok_or_eyre("partition replay cursor missing next_cursor")?,
-        );
-    }
-    Ok(current_members)
-}
-
-async fn ensure_blob_hash_present(
-    blobs_repo: &Arc<crate::blobs::BlobsRepo>,
-    endpoint: &iroh::Endpoint,
-    endpoint_id: EndpointId,
-    hash: &str,
-) -> Res<()> {
-    if blobs_repo.has_hash(hash).await? {
-        return Ok(());
-    }
-    let iroh_hash = crate::blobs::daybook_hash_to_iroh_hash(hash)?;
-    if blobs_repo.iroh_store().blobs().has(iroh_hash).await? {
-        blobs_repo.put_from_store(hash).await?;
-        return Ok(());
-    }
-    let downloader = blobs_repo.iroh_store().downloader(endpoint);
-    let progress = downloader.download(iroh_hash, vec![endpoint_id]);
-    let mut stream = progress
-        .stream()
-        .await
-        .map_err(|err| eyre::eyre!("failed opening blob download stream for {hash}: {err:?}"))?;
-    let mut saw_error = false;
-    let mut last_error: Option<String> = None;
-    while let Some(item) = stream.next().await {
-        match item {
-            DownloadProgressItem::DownloadError => {
-                eyre::bail!("blob download reported error for hash {hash}: download error");
-            }
-            DownloadProgressItem::Error(err) => {
-                eyre::bail!("blob download reported error for hash {hash}: {err:?}");
-            }
-            item @ DownloadProgressItem::ProviderFailed { .. } => {
-                saw_error = true;
-                last_error = Some(format!("{item:?}"));
-            }
-            DownloadProgressItem::TryProvider { .. }
-            | DownloadProgressItem::Progress(_)
-            | DownloadProgressItem::PartComplete { .. } => {}
-        }
-    }
-    let blob_present = blobs_repo.iroh_store().blobs().has(iroh_hash).await?;
-    if !blob_present {
-        if saw_error {
-            if let Some(details) = last_error {
-                eyre::bail!("blob download reported error for hash {hash}: {details}");
-            }
-            eyre::bail!("blob download reported error for hash {hash}");
-        }
-        eyre::bail!("blob not found in iroh store after download for hash {hash}");
-    }
-    blobs_repo.put_from_store(hash).await?;
-    if !blobs_repo.has_hash(hash).await? {
-        eyre::bail!("blob materialization failed for hash {hash}");
-    }
-    Ok(())
 }
 
 pub fn parse_clone_endpoint_addr(input: &str) -> Res<iroh::EndpointAddr> {

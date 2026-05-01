@@ -297,7 +297,7 @@ async fn wait_network_rest(
         };
         let peers = endpoint_sets[idx].iter().cloned().collect::<Vec<_>>();
         if !peers.is_empty() {
-            node.sync_repo.wait_for_full_sync(&peers, timeout).await?;
+            node.sync_repo.wait_until_peers_sync(&peers).await?;
         }
     }
 

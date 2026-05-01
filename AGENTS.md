@@ -101,6 +101,7 @@
 > You're begged not to be lazy with solutions.
 
 - If you're not able to cleanly read a provided web link through tool calls, pause and ask for a copy/paste of the contents. NEVER ASSUME THE CONTENTS OF A LINK YOU HAVEN'T SEEN!
+- Currently doing compaction? Always indicate whoever reads your summary that they should refresh on AGENTS.md and any .md docs linked from it.
 
 ## Cheating
 

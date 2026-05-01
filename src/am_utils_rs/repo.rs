@@ -263,14 +263,14 @@ impl BigRepoConnection {
 
 // change listeners
 impl BigRepo {
-    pub async fn subscribe_partition_doc_events_local(
+    pub async fn subscribe_partition_item_events_local(
         &self,
         partition_id: &crate::sync::protocol::PartitionId,
         since: Option<u64>,
         capacity: usize,
-    ) -> Res<tokio::sync::mpsc::Receiver<crate::sync::protocol::PartitionDocEvent>> {
+    ) -> Res<tokio::sync::mpsc::Receiver<crate::sync::protocol::PartitionItemEvent>> {
         self.partition_store
-            .subscribe_partition_doc_events_local(partition_id, since, capacity)
+            .subscribe_partition_item_events_local(partition_id, since, capacity)
             .await
     }
 
@@ -326,13 +326,13 @@ impl BigRepo {
             .await
     }
 
-    pub async fn get_partition_doc_events_for_peer(
+    pub async fn get_partition_item_events_for_peer(
         &self,
         peer: &PeerKey,
-        req: &GetPartitionDocEventsRequest,
-    ) -> Res<GetPartitionDocEventsResponse> {
+        req: &GetPartitionItemEventsRequest,
+    ) -> Res<GetPartitionItemEventsResponse> {
         self.partition_store
-            .get_partition_doc_events_for_peer(peer, req)
+            .get_partition_item_events_for_peer(peer, req)
             .await
     }
 
@@ -351,11 +351,14 @@ impl BigRepo {
         &self,
         doc_ids: &[String],
         allowed_partitions: &[PartitionId],
-    ) -> Res<Vec<FullDoc>> {
-        if doc_ids.len() > MAX_GET_DOCS_FULL_DOC_IDS {
-            return Err(PartitionSyncError::TooManyDocIds {
-                requested: doc_ids.len(),
-                max: MAX_GET_DOCS_FULL_DOC_IDS,
+    ) -> Res<Vec<crate::repo::rpc::FullDoc>> {
+        if doc_ids.len() > crate::repo::rpc::MAX_GET_DOCS_FULL_DOC_IDS {
+            return Err(PartitionSyncError::Internal {
+                message: format!(
+                    "requested too many docs: {} exceeds max {}",
+                    doc_ids.len(),
+                    crate::repo::rpc::MAX_GET_DOCS_FULL_DOC_IDS
+                ),
             }
             .into());
         }
@@ -370,7 +373,10 @@ impl BigRepo {
             .find_first_inaccessible_doc_in_partitions(&requested_doc_ids, allowed_partitions)
             .await?;
         if let Some(denied) = denied_doc_id {
-            return Err(PartitionSyncError::DocAccessDenied { doc_id: denied }.into());
+            return Err(PartitionSyncError::Internal {
+                message: format!("access denied for doc {denied}"),
+            }
+            .into());
         }
 
         use futures::StreamExt;
@@ -383,13 +389,13 @@ impl BigRepo {
             let Some(automerge_save) = self.export_doc(&parsed).await? else {
                 return Ok(None);
             };
-            Ok(Some(FullDoc {
+            Ok(Some(crate::repo::rpc::FullDoc {
                 doc_id,
                 automerge_save,
             }))
         }))
         .buffered_unordered(16)
-        .collect::<Vec<Res<Option<FullDoc>>>>()
+        .collect::<Vec<Res<Option<crate::repo::rpc::FullDoc>>>>()
         .await;
 
         let mut out = Vec::new();

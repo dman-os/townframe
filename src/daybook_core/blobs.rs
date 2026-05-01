@@ -10,17 +10,16 @@ use tokio::io::AsyncWriteExt;
 
 #[async_trait]
 pub trait PartitionMembershipWriter: Send + Sync {
-    async fn add_member(
+    async fn upsert_item(
         &self,
         partition_id: &str,
         member_id: &str,
         payload: &serde_json::Value,
     ) -> Res<()>;
-    async fn remove_member(
+    async fn remove_item(
         &self,
         partition_id: &str,
         member_id: &str,
-        payload: &serde_json::Value,
     ) -> Res<()>;
 }
 
@@ -37,25 +36,24 @@ impl PartitionStoreMembershipWriter {
 
 #[async_trait]
 impl PartitionMembershipWriter for PartitionStoreMembershipWriter {
-    async fn add_member(
+    async fn upsert_item(
         &self,
         partition_id: &str,
         member_id: &str,
         payload: &serde_json::Value,
     ) -> Res<()> {
         self.partition_store
-            .add_member(&partition_id.to_string(), member_id, payload)
+            .upsert_item(&partition_id.to_string(), member_id, payload)
             .await
     }
 
-    async fn remove_member(
+    async fn remove_item(
         &self,
         partition_id: &str,
         member_id: &str,
-        payload: &serde_json::Value,
     ) -> Res<()> {
         self.partition_store
-            .remove_member(&partition_id.to_string(), member_id, payload)
+            .remove_item(&partition_id.to_string(), member_id)
             .await
     }
 }
@@ -65,7 +63,7 @@ pub struct NoopPartitionMembershipWriter;
 
 #[async_trait]
 impl PartitionMembershipWriter for NoopPartitionMembershipWriter {
-    async fn add_member(
+    async fn upsert_item(
         &self,
         _partition_id: &str,
         _member_id: &str,
@@ -74,11 +72,10 @@ impl PartitionMembershipWriter for NoopPartitionMembershipWriter {
         Ok(())
     }
 
-    async fn remove_member(
+    async fn remove_item(
         &self,
         _partition_id: &str,
         _member_id: &str,
-        _payload: &serde_json::Value,
     ) -> Res<()> {
         Ok(())
     }
@@ -151,12 +148,6 @@ impl BlobScope {
         }
     }
 
-    fn as_payload_scope(self) -> &'static str {
-        match self {
-            Self::Docs => "docs",
-            Self::Plugs => "plugs",
-        }
-    }
 }
 
 impl BlobsRepo {
@@ -183,36 +174,16 @@ impl BlobsRepo {
     }
 
     pub async fn add_hash_to_scope(&self, scope: BlobScope, hash: &str) -> Res<()> {
-        let payload = self.partition_member_payload(scope, hash).await?;
+        let payload = serde_json::json!({});
         self.partition_writer
-            .add_member(scope.partition_id(), hash, &payload)
+            .upsert_item(scope.partition_id(), hash, &payload)
             .await
     }
 
     pub async fn remove_hash_from_scope(&self, scope: BlobScope, hash: &str) -> Res<()> {
-        let payload = self.partition_member_payload(scope, hash).await?;
         self.partition_writer
-            .remove_member(scope.partition_id(), hash, &payload)
+            .remove_item(scope.partition_id(), hash)
             .await
-    }
-
-    async fn partition_member_payload(
-        &self,
-        scope: BlobScope,
-        hash: &str,
-    ) -> Res<serde_json::Value> {
-        let object_paths = self.object_paths(hash)?;
-        let size_bytes = if let Some(meta) = self.read_meta(&object_paths.meta).await? {
-            meta.size_bytes
-        } else if tokio::fs::try_exists(&object_paths.blob).await? {
-            tokio::fs::metadata(&object_paths.blob).await?.len()
-        } else {
-            0
-        };
-        Ok(serde_json::json!({
-            "scope": scope.as_payload_scope(),
-            "size_bytes": size_bytes,
-        }))
     }
 
     pub async fn put_path_copy(&self, source_path: &Path) -> Res<String> {

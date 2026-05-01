@@ -131,17 +131,17 @@ impl SyncNodeWorker {
                 .await;
                 tx.send(out).await.inspect_err(|_| warn!(ERROR_CALLER)).ok();
             }
-            PartitionSyncRpcMessage::GetPartitionDocEvents(req) => {
+            PartitionSyncRpcMessage::GetPartitionItemEvents(req) => {
                 let WithChannels { inner, tx, .. } = req;
                 let out = (async {
                     self.ensure_known_peer(&peer).await?;
                     self.ensure_partition_access(&peer, &inner.req.partitions)?;
                     let out = self
                         .partition_store
-                        .get_partition_doc_events_for_peer(&peer, &inner.req)
+                        .get_partition_item_events_for_peer(&peer, &inner.req)
                         .await
                         .map_err(map_repo_err)?;
-                    Ok::<_, PartitionSyncError>(GetPartitionDocEventsResponse {
+                    Ok::<_, PartitionSyncError>(GetPartitionItemEventsResponse {
                         events: out.events,
                         cursors: out.cursors,
                     })

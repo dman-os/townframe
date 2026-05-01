@@ -6,7 +6,7 @@ use crate::drawer::DrawerEvent;
 use crate::plugs::PlugsEvent;
 use crate::rt::dispatch::DispatchEvent;
 use crate::rt::Rt;
-use am_utils_rs::sync::protocol::{PartitionDocEvent, PartitionDocEventDeets};
+use am_utils_rs::sync::protocol::{PartitionItemEvent, PartitionItemEventDeets};
 use daybook_types::doc::BranchPathBuf;
 use daybook_types::doc::{Doc, DocId, FacetKey, WellKnownFacet, WellKnownFacetTag};
 use daybook_types::manifest::{
@@ -300,7 +300,7 @@ pub async fn spawn_switch_worker(
             let mut partition_listener = worker
                 .rt
                 .big_repo
-                .subscribe_partition_doc_events_local(
+                .subscribe_partition_item_events_local(
                     &docs_partition_id,
                     Some(cursor),
                     SUBSCRIPTION_CAPACITY,
@@ -519,11 +519,11 @@ impl SwitchWorker {
 
     async fn handle_partition_doc_event(
         &mut self,
-        event: &PartitionDocEvent,
+        event: &PartitionItemEvent,
     ) -> Res<Option<(String, SwitchDocState)>> {
         let branch_doc_id = match &event.deets {
-            PartitionDocEventDeets::ItemChanged { item_id, .. }
-            | PartitionDocEventDeets::ItemDeleted { item_id, .. } => item_id.clone(),
+            PartitionItemEventDeets::ItemChanged { item_id, .. }
+            | PartitionItemEventDeets::ItemDeleted { item_id, .. } => item_id.clone(),
         };
         let stored_state = self
             .store
@@ -550,7 +550,7 @@ impl SwitchWorker {
         next_state.branch_name = branch_name.clone();
 
         match &event.deets {
-            PartitionDocEventDeets::ItemChanged { .. } => {
+            PartitionItemEventDeets::ItemChanged { .. } => {
                 let Some((_, new_heads)) = self
                     .rt
                     .drawer
@@ -602,7 +602,7 @@ impl SwitchWorker {
                 next_state.last_heads = Some(new_heads);
                 let _ = deleted_facet_keys;
             }
-            PartitionDocEventDeets::ItemDeleted { .. } => {
+            PartitionItemEventDeets::ItemDeleted { .. } => {
                 if !next_state.present {
                     return Ok(Some((branch_doc_id, next_state)));
                 }
