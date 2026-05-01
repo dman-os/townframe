@@ -329,7 +329,7 @@ impl TablesStore {
 pub struct TablesRepo {
     pub big_repo: SharedBigRepo,
     pub app_doc_id: DocumentId,
-    pub app_am_handle: am_utils_rs::repo::BigDocHandle,
+    pub app_doc_handle: am_utils_rs::repo::BigDocHandle,
     store: crate::stores::AmStoreHandle<TablesStore>,
     pub registry: Arc<crate::repos::ListenersRegistry>,
     pub local_actor_id: ActorId,
@@ -378,11 +378,15 @@ impl TablesRepo {
         );
         let registry = crate::repos::ListenersRegistry::new();
 
-        let store_val = TablesStore::load(&big_repo, &app_doc_id).await?;
+        let app_doc_handle = big_repo
+            .get_doc(&app_doc_id)
+            .await?
+            .ok_or_eyre("unable to find app doc in am")?;
+
+        let store_val = TablesStore::load(&app_doc_handle).await?;
         let store = crate::stores::AmStoreHandle::new(
             store_val,
-            Arc::clone(&big_repo),
-            app_doc_id.clone(),
+            app_doc_handle.clone(),
             local_actor_id.clone(),
         );
         store
@@ -390,11 +394,6 @@ impl TablesRepo {
                 store.rebuild_indices();
             })
             .await?;
-
-        let app_am_handle = big_repo
-            .get_doc(&app_doc_id)
-            .await?
-            .ok_or_eyre("unable to find app doc in am")?;
 
         // Register change listener to automatically notify repo listeners
         let cancel_token = CancellationToken::new();
@@ -405,7 +404,7 @@ impl TablesRepo {
         let repo = Self {
             big_repo,
             app_doc_id,
-            app_am_handle,
+            app_doc_handle,
             store,
             registry: Arc::clone(&registry),
             local_actor_id,
@@ -633,9 +632,8 @@ impl TablesRepo {
                     TablesEvent::WindowAdded { id, heads }
                     | TablesEvent::WindowChanged { id, heads } => {
                         let Some((new_window, _)) = self
-                            .big_repo
+                            .app_doc_handle
                             .hydrate_path_at_heads::<Versioned<Window>>(
-                                &self.app_doc_id,
                                 &heads.0,
                                 automerge::ROOT,
                                 vec![
@@ -672,9 +670,8 @@ impl TablesRepo {
                     }
                     TablesEvent::TabAdded { id, heads } | TablesEvent::TabChanged { id, heads } => {
                         let Some((new_tab, _)) = self
-                            .big_repo
+                            .app_doc_handle
                             .hydrate_path_at_heads::<Versioned<Tab>>(
-                                &self.app_doc_id,
                                 &heads.0,
                                 automerge::ROOT,
                                 vec![
@@ -712,9 +709,8 @@ impl TablesRepo {
                     TablesEvent::PanelAdded { id, heads }
                     | TablesEvent::PanelChanged { id, heads } => {
                         let Some((new_panel, _)) = self
-                            .big_repo
+                            .app_doc_handle
                             .hydrate_path_at_heads::<Versioned<Panel>>(
-                                &self.app_doc_id,
                                 &heads.0,
                                 automerge::ROOT,
                                 vec![
@@ -752,9 +748,8 @@ impl TablesRepo {
                     TablesEvent::TableAdded { id, heads }
                     | TablesEvent::TableChanged { id, heads } => {
                         let Some((new_table, _)) = self
-                            .big_repo
+                            .app_doc_handle
                             .hydrate_path_at_heads::<Versioned<Table>>(
-                                &self.app_doc_id,
                                 &heads.0,
                                 automerge::ROOT,
                                 vec![
@@ -805,9 +800,8 @@ impl TablesRepo {
         item_id: Uuid,
         heads: &ChangeHashSet,
     ) -> Res<Option<Vec<VersionTag>>> {
-        self.big_repo
+        self.app_doc_handle
             .hydrate_path_at_heads::<Vec<VersionTag>>(
-                &self.app_doc_id,
                 &heads.0,
                 automerge::ROOT,
                 vec![
@@ -826,8 +820,8 @@ impl TablesRepo {
         to: Option<ChangeHashSet>,
     ) -> Res<Vec<TablesEvent>> {
         let (patches, heads) = self
-            .app_am_handle
-            .with_document(|am_doc| {
+            .app_doc_handle
+            .with_document_read(|am_doc| {
                 let heads = if let Some(ref to_set) = to {
                     to_set.clone()
                 } else {
@@ -838,7 +832,7 @@ impl TablesRepo {
                     .wrap_err("diff_obj failed")?;
                 eyre::Ok((patches, heads))
             })
-            .await??;
+            .await?;
         let heads = heads.0;
         let mut events = vec![];
         for patch in patches {

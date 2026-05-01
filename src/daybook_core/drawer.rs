@@ -60,7 +60,7 @@ pub struct DrawerRepo {
     cancel_token: CancellationToken,
     _change_listener_tickets: Vec<am_utils_rs::repo::BigRepoChangeListenerRegistration>,
     current_heads: std::sync::Mutex<ChangeHashSet>,
-    drawer_am_handle: am_utils_rs::repo::BigDocHandle,
+    drawer_doc_handle: am_utils_rs::repo::BigDocHandle,
     meta_store_sql: SqlCtx,
     plugs_repo: Option<Arc<crate::plugs::PlugsRepo>>,
 }
@@ -143,7 +143,7 @@ impl DrawerRepo {
             cancel_token: main_cancel_token.child_token(),
             _change_listener_tickets: vec![ticket],
             current_heads: initial_heads.into(),
-            drawer_am_handle,
+            drawer_doc_handle: drawer_am_handle,
             meta_store_sql: meta_db_pool,
             #[cfg(not(test))]
             plugs_repo: Some(plugs_repo),
@@ -151,7 +151,6 @@ impl DrawerRepo {
             plugs_repo,
         });
         repo.ensure_local_branch_schema().await?;
-        repo.migrate_legacy_local_branches_from_drawer_map().await?;
 
         let worker_handle = tokio::spawn({
             let repo = Arc::clone(&repo);
@@ -245,12 +244,13 @@ impl DrawerRepo {
     }
 
     async fn get_branch_heads_by_doc_id(&self, branch_doc_id: &str) -> Res<Option<ChangeHashSet>> {
+        info!("XXX get_branch_heads_by_doc_id enter");
         let Some(handle) = self.get_handle_by_branch_doc_id(branch_doc_id).await? else {
             return Ok(None);
         };
         let latest_heads = handle
-            .with_document(|doc| ChangeHashSet(doc.get_heads().into()))
-            .await?;
+            .with_document_read(|doc| ChangeHashSet(doc.get_heads().into()))
+            .await;
         Ok(Some(latest_heads))
     }
 
@@ -259,6 +259,7 @@ impl DrawerRepo {
         doc_id: &DocId,
         branch_path: &daybook_types::doc::BranchPath,
     ) -> Res<Option<ChangeHashSet>> {
+        info!("XXX get_branch_heads_for_path enter");
         let Some(branch_ref) = self.get_branch_ref(doc_id, branch_path).await? else {
             return Ok(None);
         };
@@ -313,7 +314,7 @@ impl DrawerRepo {
             return Ok(None);
         };
         let (contains_all_heads, missing_heads) = handle
-            .with_document(|doc| {
+            .with_document_read(|doc| {
                 let mut missing = Vec::new();
                 for head in heads.iter() {
                     if doc.get_change_by_hash(head).is_none() {
@@ -322,7 +323,7 @@ impl DrawerRepo {
                 }
                 Ok::<(bool, Vec<String>), eyre::Report>((missing.is_empty(), missing))
             })
-            .await??;
+            .await?;
         if !contains_all_heads {
             info!(%doc_id, %branch_path, ?missing_heads, "XXX resolve_handle_for_branch_heads missing heads");
             return Ok(None);
@@ -337,9 +338,8 @@ impl DrawerRepo {
         heads: &Arc<[automerge::ChangeHash]>,
     ) -> Res<Option<DocDeleteTombstone>> {
         let Some((tags, _)) = self
-            .big_repo
+            .drawer_doc_handle
             .hydrate_path_at_heads::<Vec<DocDeleteTombstone>>(
-                &self.drawer_doc_id,
                 heads,
                 automerge::ROOT,
                 vec![

@@ -93,6 +93,7 @@ impl DrawerRepo {
         doc_id: &DocId,
         branch_path: &daybook_types::doc::BranchPath,
     ) -> Res<Option<String>> {
+        info!("XXX get_local_branch_ref enter");
         let rec = sqlx::query_scalar::<_, String>(&format!(
             "SELECT branch_doc_id FROM {LOCAL_BRANCH_TABLE} WHERE doc_id = ?1 AND branch_path = ?2"
         ))
@@ -157,125 +158,12 @@ impl DrawerRepo {
         Ok(())
     }
 
-    pub(super) async fn migrate_legacy_local_branches_from_drawer_map(&self) -> Res<()> {
-        let mut migrated_rows: Vec<(DocId, daybook_types::doc::BranchPathBuf, String)> = Vec::new();
-        let (changed, drawer_heads) = self
-            .drawer_am_handle
-            .with_document(|doc| {
-                let current_heads = ChangeHashSet(doc.get_heads().into());
-                let map_id = match doc.get(automerge::ROOT, "docs")? {
-                    Some((automerge::Value::Object(automerge::ObjType::Map), id)) => {
-                        match doc.get(&id, "map")? {
-                            Some((automerge::Value::Object(automerge::ObjType::Map), id)) => id,
-                            _ => eyre::bail!("invalid drawer shape"),
-                        }
-                    }
-                    None => return eyre::Ok((false, current_heads)),
-                    _ => eyre::bail!("invalid drawer shape"),
-                };
-
-                let mut updates: Vec<(DocId, DocEntry)> = Vec::new();
-                for item in doc.map_range(&map_id, ..) {
-                    let doc_id = DocId::from(item.key.clone());
-                    let entry: DocEntry =
-                        autosurgeon::hydrate_prop::<_, DocEntry, _, _>(doc, &map_id, item.key)?;
-                    let mut next_entry = entry.clone();
-                    let mut moved_any = false;
-                    let mut branch_names: Vec<String> =
-                        next_entry.branches.keys().cloned().collect();
-                    branch_names.sort();
-                    for branch_name in branch_names {
-                        let branch_path =
-                            daybook_types::doc::BranchPathBuf::from(branch_name.as_str());
-                        if branch_path == "/tmp" || branch_path.starts_with("/tmp/") {
-                            let Some(branch_ref) = next_entry.branches.remove(&branch_name) else {
-                                continue;
-                            };
-                            migrated_rows.push((
-                                doc_id.clone(),
-                                branch_path,
-                                branch_ref.branch_doc_id,
-                            ));
-                            moved_any = true;
-                        }
-                    }
-                    if moved_any {
-                        next_entry.vtag = VersionTag::update(self.local_actor_id.clone());
-                        next_entry.previous_version_heads = Some(current_heads.clone());
-                        updates.push((doc_id, next_entry));
-                    }
-                }
-
-                if updates.is_empty() {
-                    return eyre::Ok((false, current_heads));
-                }
-
-                let mut tx = doc.transaction();
-                let map_id = match tx.get(automerge::ROOT, "docs")? {
-                    Some((automerge::Value::Object(automerge::ObjType::Map), id)) => {
-                        match tx.get(&id, "map")? {
-                            Some((automerge::Value::Object(automerge::ObjType::Map), id)) => id,
-                            _ => eyre::bail!("invalid drawer shape"),
-                        }
-                    }
-                    _ => eyre::bail!("invalid drawer shape"),
-                };
-                for (doc_id, entry) in updates {
-                    autosurgeon::reconcile_prop(&mut tx, &map_id, &*doc_id, entry)?;
-                }
-                let (heads, _) = tx.commit();
-                let head = heads.expect("commit failed");
-                eyre::Ok((true, ChangeHashSet(Arc::from([head]))))
-            })
-            .await??;
-
-        if migrated_rows.is_empty() {
-            return Ok(());
-        }
-
-        let vtag = VersionTag::update(self.local_actor_id.clone());
-        for (doc_id, branch_path, branch_doc_id) in &migrated_rows {
-            self.upsert_local_branch_ref(doc_id, branch_path, branch_doc_id, &vtag)
-                .await?;
-        }
-
-        if changed {
-            *self.current_heads.lock().expect(ERROR_MUTEX) = drawer_heads.clone();
-            let mut changed_docs: HashSet<DocId> = HashSet::new();
-            for (doc_id, _, _) in &migrated_rows {
-                changed_docs.insert(doc_id.clone());
-            }
-            for doc_id in changed_docs {
-                let Some(entry) = self.current_doc_branches(&doc_id).await? else {
-                    tracing::warn!(
-                        ?doc_id,
-                        "missing doc branches while notifying migrated local branches"
-                    );
-                    continue;
-                };
-                self.registry
-                    .notify([crate::drawer::DrawerEvent::DocUpdated {
-                        id: doc_id,
-                        entry,
-                        diff: DocEntryDiff {
-                            changed_facet_keys: Vec::new(),
-                            added_facet_keys: Vec::new(),
-                            removed_facet_keys: Vec::new(),
-                            moved_branch_names: Vec::new(),
-                        },
-                        drawer_heads: drawer_heads.clone(),
-                        origin: self.local_origin(),
-                    }]);
-            }
-        }
-        Ok(())
-    }
-
     pub(super) async fn get_entry_branch_ref(
         &self,
         doc_id: &DocId,
         branch_path: &daybook_types::doc::BranchPath,
     ) -> Res<Option<(StoredBranchRef, BranchKind)>> {
+        info!("XXX get_entry_branch_ref enter");
         let branch_kind = self.branch_kind_for_path(branch_path)?;
         if branch_kind == BranchKind::Local {
             let Some(branch_doc_id) = self.get_local_branch_ref(doc_id, branch_path).await? else {
@@ -299,6 +187,7 @@ impl DrawerRepo {
         doc_id: &DocId,
         branch_path: &daybook_types::doc::BranchPath,
     ) -> Res<Option<BranchRefRow>> {
+        info!("XXX get_branch_ref enter");
         let Some((branch_ref, branch_kind)) =
             self.get_entry_branch_ref(doc_id, branch_path).await?
         else {
@@ -393,8 +282,8 @@ impl DrawerRepo {
         &self,
     ) -> Res<(ChangeHashSet, Vec<(DocId, DocEntry)>)> {
         Ok(self
-            .drawer_am_handle
-            .with_document(|doc| {
+            .drawer_doc_handle
+            .with_document_read(|doc| {
                 let drawer_heads = ChangeHashSet(doc.get_heads().into());
                 let map_id = match doc.get(automerge::ROOT, "docs")? {
                     Some((automerge::Value::Object(automerge::ObjType::Map), id)) => {
@@ -418,7 +307,7 @@ impl DrawerRepo {
                 }
                 eyre::Ok((drawer_heads, entries))
             })
-            .await??)
+            .await?)
     }
 
     pub(super) async fn hydrate_entry_at_heads(
@@ -426,14 +315,15 @@ impl DrawerRepo {
         doc_id: &DocId,
         heads: &ChangeHashSet,
     ) -> Res<Option<DocEntry>> {
+        info!("XXX hydrate_entry_at_heads enter");
         let path = vec![
             "docs".into(),
             "map".into(),
             autosurgeon::Prop::Key(doc_id.to_string().into()),
         ];
         let entry = self
-            .big_repo
-            .hydrate_path_at_heads::<DocEntry>(&self.drawer_doc_id, heads, automerge::ROOT, path)
+            .drawer_doc_handle
+            .hydrate_path_at_heads::<DocEntry>(heads, automerge::ROOT, path)
             .await?;
         Ok(entry.map(|(entry_value, _)| entry_value))
     }

@@ -100,7 +100,7 @@ pub enum ConfigEvent {
 pub struct ConfigRepo {
     big_repo: SharedBigRepo,
     app_doc_id: DocumentId,
-    app_am_handle: am_utils_rs::repo::BigDocHandle,
+    app_doc_handle: am_utils_rs::repo::BigDocHandle,
     store: crate::stores::AmStoreHandle<ConfigStore>,
     pub registry: Arc<crate::repos::ListenersRegistry>,
     plug_repo: Arc<PlugsRepo>,
@@ -156,9 +156,8 @@ impl ConfigRepo {
         heads: &Arc<[automerge::ChangeHash]>,
     ) -> Res<Option<ActorId>> {
         let Some((tags, _)) = self
-            .big_repo
+            .app_doc_handle
             .hydrate_path_at_heads::<Vec<VersionTag>>(
-                &self.app_doc_id,
                 heads,
                 automerge::ROOT,
                 vec![
@@ -182,15 +181,20 @@ impl ConfigRepo {
         repo_sql: crate::app::SqlCtx,
     ) -> Res<(Arc<Self>, crate::repos::RepoStopToken)> {
         let registry = crate::repos::ListenersRegistry::new();
-        let store_val = ConfigStore::load(&big_repo, &app_doc_id).await?;
+
+        let app_doc_handle = big_repo
+            .get_doc(&app_doc_id)
+            .await?
+            .ok_or_eyre("unable to find app doc in am")?;
+
+        let store_val = ConfigStore::load(&app_doc_handle).await?;
         let local_user_path =
             daybook_types::doc::user_path::for_repo(local_user_path, "config-repo")?;
         let local_actor_id = daybook_types::doc::user_path::to_actor_id(&local_user_path);
 
         let store = crate::stores::AmStoreHandle::new(
             store_val,
-            Arc::clone(&big_repo),
-            app_doc_id.clone(),
+            app_doc_handle.clone(),
             local_actor_id.clone(),
         );
 
@@ -212,11 +216,6 @@ impl ConfigRepo {
             })
             .await?;
 
-        let app_am_handle = big_repo
-            .get_doc(&app_doc_id)
-            .await?
-            .ok_or_eyre("unable to find app doc in am")?;
-
         let cancel_token = CancellationToken::new();
         // Register change listener to automatically notify repo listeners
         let (ticket, notif_rx) =
@@ -225,7 +224,7 @@ impl ConfigRepo {
         let repo = Self {
             big_repo: Arc::clone(&big_repo),
             app_doc_id: app_doc_id.clone(),
-            app_am_handle,
+            app_doc_handle,
             store,
             registry: Arc::clone(&registry),
             plug_repo,
@@ -315,9 +314,8 @@ impl ConfigRepo {
 
             if let Some(heads) = last_heads {
                 let (new_store, _) = self
-                    .big_repo
+                    .app_doc_handle
                     .hydrate_path_at_heads::<ConfigStore>(
-                        &self.app_doc_id,
                         &heads,
                         automerge::ROOT,
                         vec![ConfigStore::prop().into()],
@@ -382,8 +380,8 @@ impl ConfigRepo {
         to: Option<ChangeHashSet>,
     ) -> Res<Vec<ConfigEvent>> {
         let (patches, heads) = self
-            .app_am_handle
-            .with_document(|am_doc| {
+            .app_doc_handle
+            .with_document_read(|am_doc| {
                 let heads = if let Some(ref to_set) = to {
                     to_set.clone()
                 } else {
@@ -394,7 +392,7 @@ impl ConfigRepo {
                     .expect("diff_obj failed");
                 (patches, heads)
             })
-            .await?;
+            .await;
         let heads = heads.0;
         let mut events = vec![];
         for patch in patches {
@@ -528,7 +526,7 @@ impl ConfigRepo {
             .get_doc(&self.app_doc_id)
             .await?
             .ok_or_eyre("app doc not found")?;
-        let heads = handle.with_document(|doc| doc.get_heads()).await?;
+        let heads = handle.with_document_read(|doc| doc.get_heads()).await;
         Ok(Arc::from(heads))
     }
 

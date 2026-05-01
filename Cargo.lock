@@ -749,6 +749,7 @@ dependencies = [
 [[package]]
 name = "automerge_sedimentree"
 version = "0.9.0"
+source = "git+https://github.com/dman-os/subduction?rev=752ac4ba23a3de244b914b2f3bc7d7208ccf8cc2#752ac4ba23a3de244b914b2f3bc7d7208ccf8cc2"
 dependencies = [
  "automerge",
  "rayon",
@@ -1060,6 +1061,7 @@ dependencies = [
 [[package]]
 name = "bijou64"
 version = "0.2.0"
+source = "git+https://github.com/dman-os/subduction?rev=752ac4ba23a3de244b914b2f3bc7d7208ccf8cc2#752ac4ba23a3de244b914b2f3bc7d7208ccf8cc2"
 dependencies = [
  "thiserror 2.0.18",
 ]
@@ -2590,6 +2592,7 @@ dependencies = [
  "sqlite-vec",
  "sqlx",
  "struct-patch",
+ "surelock",
  "tempfile",
  "thiserror 2.0.18",
  "time",
@@ -9283,6 +9286,7 @@ dependencies = [
 [[package]]
 name = "sedimentree_core"
 version = "0.10.0"
+source = "git+https://github.com/dman-os/subduction?rev=752ac4ba23a3de244b914b2f3bc7d7208ccf8cc2#752ac4ba23a3de244b914b2f3bc7d7208ccf8cc2"
 dependencies = [
  "async-lock",
  "bijou64",
@@ -9303,6 +9307,7 @@ dependencies = [
 [[package]]
 name = "sedimentree_fs_storage"
 version = "0.9.0"
+source = "git+https://github.com/dman-os/subduction?rev=752ac4ba23a3de244b914b2f3bc7d7208ccf8cc2#752ac4ba23a3de244b914b2f3bc7d7208ccf8cc2"
 dependencies = [
  "async-lock",
  "future_form",
@@ -10110,6 +10115,7 @@ dependencies = [
 [[package]]
 name = "subduction_core"
 version = "0.12.0"
+source = "git+https://github.com/dman-os/subduction?rev=752ac4ba23a3de244b914b2f3bc7d7208ccf8cc2#752ac4ba23a3de244b914b2f3bc7d7208ccf8cc2"
 dependencies = [
  "async-channel",
  "async-lock",
@@ -10130,6 +10136,7 @@ dependencies = [
 [[package]]
 name = "subduction_crypto"
 version = "0.6.0"
+source = "git+https://github.com/dman-os/subduction?rev=752ac4ba23a3de244b914b2f3bc7d7208ccf8cc2#752ac4ba23a3de244b914b2f3bc7d7208ccf8cc2"
 dependencies = [
  "ed25519-dalek 2.2.0",
  "future_form",
@@ -10143,6 +10150,7 @@ dependencies = [
 [[package]]
 name = "subduction_iroh"
 version = "0.7.0"
+source = "git+https://github.com/dman-os/subduction?rev=752ac4ba23a3de244b914b2f3bc7d7208ccf8cc2#752ac4ba23a3de244b914b2f3bc7d7208ccf8cc2"
 dependencies = [
  "async-channel",
  "async-lock",
@@ -10161,6 +10169,7 @@ dependencies = [
 [[package]]
 name = "subduction_keyhive"
 version = "0.4.0"
+source = "git+https://github.com/dman-os/subduction?rev=752ac4ba23a3de244b914b2f3bc7d7208ccf8cc2#752ac4ba23a3de244b914b2f3bc7d7208ccf8cc2"
 dependencies = [
  "async-lock",
  "base64 0.22.1",
@@ -10181,6 +10190,7 @@ dependencies = [
 [[package]]
 name = "subduction_keyhive_policy"
 version = "0.8.0"
+source = "git+https://github.com/dman-os/subduction?rev=752ac4ba23a3de244b914b2f3bc7d7208ccf8cc2#752ac4ba23a3de244b914b2f3bc7d7208ccf8cc2"
 dependencies = [
  "async-channel",
  "ed25519-dalek 2.2.0",
@@ -10201,6 +10211,7 @@ dependencies = [
 [[package]]
 name = "subduction_websocket"
 version = "0.9.1"
+source = "git+https://github.com/dman-os/subduction?rev=752ac4ba23a3de244b914b2f3bc7d7208ccf8cc2#752ac4ba23a3de244b914b2f3bc7d7208ccf8cc2"
 dependencies = [
  "async-channel",
  "async-lock",
@@ -10226,6 +10237,15 @@ name = "subtle"
 version = "2.6.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "13c2bddecc57b384dee18652358fb23172facb8a2c51ccc10d74c157bdea3292"
+
+[[package]]
+name = "surelock"
+version = "0.1.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "a46767bf6a98ed239a27040ba62154869479e7ee9fc39d01cc6740edc8741cf6"
+dependencies = [
+ "thiserror 2.0.18",
+]
 
 [[package]]
 name = "syn"

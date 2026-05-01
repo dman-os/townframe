@@ -107,7 +107,11 @@ impl FacetCacheState {
         let cache_key = (doc_id.clone(), facet_uuid);
         let cost = Self::estimate_cost(value.as_ref());
         if self.entries.contains_key(&cache_key) {
-            let pruned = self.pool.lock().expect(ERROR_MUTEX).insert_key(&cache_key, cost);
+            let pruned = self
+                .pool
+                .lock()
+                .expect(ERROR_MUTEX)
+                .insert_key(&cache_key, cost);
             let self_pruned = pruned.iter().any(|pkey| pkey == &cache_key);
             for pkey in pruned {
                 self.remove_without_pool(&pkey);
@@ -134,7 +138,11 @@ impl FacetCacheState {
             return;
         }
 
-        let pruned = self.pool.lock().expect(ERROR_MUTEX).insert_key(&cache_key, cost);
+        let pruned = self
+            .pool
+            .lock()
+            .expect(ERROR_MUTEX)
+            .insert_key(&cache_key, cost);
         let self_pruned = pruned.iter().any(|pkey| pkey == &cache_key);
         for pkey in pruned {
             self.remove_without_pool(&pkey);
@@ -170,7 +178,10 @@ impl FacetCacheState {
             .into_iter()
             .map(|uuid| (doc_id.clone(), uuid))
             .collect();
-        self.pool.lock().expect(ERROR_MUTEX).remove_keys(keys.clone());
+        self.pool
+            .lock()
+            .expect(ERROR_MUTEX)
+            .remove_keys(keys.clone());
         for key in keys {
             self.remove_without_pool(&key);
         }
@@ -204,12 +215,15 @@ impl DrawerRepo {
     pub(super) fn invalidate_facet_cache_entry(&self, doc_id: &DocId, facet_uuid: &Uuid) {
         self.facet_cache
             .lock()
-            .unwrap()
+            .expect(ERROR_MUTEX)
             .invalidate_facet(doc_id, facet_uuid);
     }
 
     pub(super) fn invalidate_facet_cache_doc(&self, doc_id: &DocId) {
-        self.facet_cache.lock().expect(ERROR_MUTEX).invalidate_doc(doc_id);
+        self.facet_cache
+            .lock()
+            .expect(ERROR_MUTEX)
+            .invalidate_doc(doc_id);
     }
 
     pub(super) fn facet_cache_get(
@@ -220,7 +234,7 @@ impl DrawerRepo {
     ) -> Option<daybook_types::doc::ArcFacetRaw> {
         self.facet_cache
             .lock()
-            .unwrap()
+            .expect(ERROR_MUTEX)
             .get_if_heads_match(doc_id, facet_uuid, facet_heads)
     }
 
@@ -233,7 +247,7 @@ impl DrawerRepo {
     ) {
         self.facet_cache
             .lock()
-            .unwrap()
+            .expect(ERROR_MUTEX)
             .put(doc_id, facet_uuid, facet_heads, value);
     }
 }

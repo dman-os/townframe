@@ -75,6 +75,8 @@
 
 - [ ] Cleanup and show it to people
  
+- [ ] Remove all async Mutexes and dashmap
+  - [ ] Convert DHashMap to be wrapper around RwLock<HashMap>
 - [ ] Interesting queries
   - [ ] Expected processors not processed
   - [ ] Deleted docs
@@ -194,7 +196,6 @@
       - [ ] https://motherton.db.app
       - [ ] https://mother.town.app
 - [ ] PgLite based testing
-- [ ] Convert DHashMap to be wrapper around RwLock<HashMap>
 - [ ] DRY up all the wit bindgen
 - [ ] Move http tests into api crates
   - [ ] Replace http with wrpc?

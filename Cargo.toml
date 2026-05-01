@@ -99,6 +99,7 @@ url = "2.5.7"
 addr = "0.15.6"
 scopeguard = "1.2.0"
 semver = { version = "1", features = ["serde"] }
+surelock = "0.1"
 
 #
 # encoding
@@ -176,15 +177,15 @@ gloo = { version = "0.11.0", default-features = false }
 automerge = "0.8.0"
 autosurgeon = "0.11.0"
 automerge-test = "0.6"
-subduction_core = { git = "https://github.com/inkandswitch/subduction", rev = "50111d91549f14061e2cac568367ae2c32dbc267" }
-subduction_iroh = { git = "https://github.com/inkandswitch/subduction", rev = "50111d91549f14061e2cac568367ae2c32dbc267"  }
-subduction_websocket = { git = "https://github.com/inkandswitch/subduction", rev = "50111d91549f14061e2cac568367ae2c32dbc267"  }
-sedimentree_core = { git = "https://github.com/inkandswitch/subduction", rev = "50111d91549f14061e2cac568367ae2c32dbc267"  }
-automerge_sedimentree = { git = "https://github.com/inkandswitch/subduction", rev = "50111d91549f14061e2cac568367ae2c32dbc267"  }
-sedimentree_fs_storage = { git = "https://github.com/inkandswitch/subduction", rev = "50111d91549f14061e2cac568367ae2c32dbc267"  }
-subduction_crypto = { git = "https://github.com/inkandswitch/subduction", rev = "50111d91549f14061e2cac568367ae2c32dbc267"  }
-subduction_keyhive = { git = "https://github.com/inkandswitch/subduction", rev = "50111d91549f14061e2cac568367ae2c32dbc267"  }
-subduction_keyhive_policy = { git = "https://github.com/inkandswitch/subduction", rev = "50111d91549f14061e2cac568367ae2c32dbc267"  }
+subduction_core = { git = "https://github.com/dman-os/subduction", rev = "752ac4ba23a3de244b914b2f3bc7d7208ccf8cc2" }
+subduction_iroh = { git = "https://github.com/dman-os/subduction", rev = "752ac4ba23a3de244b914b2f3bc7d7208ccf8cc2"  }
+subduction_websocket = { git = "https://github.com/dman-os/subduction", rev = "752ac4ba23a3de244b914b2f3bc7d7208ccf8cc2"  }
+sedimentree_core = { git = "https://github.com/dman-os/subduction", rev = "752ac4ba23a3de244b914b2f3bc7d7208ccf8cc2"  }
+automerge_sedimentree = { git = "https://github.com/dman-os/subduction", rev = "752ac4ba23a3de244b914b2f3bc7d7208ccf8cc2"  }
+sedimentree_fs_storage = { git = "https://github.com/dman-os/subduction", rev = "752ac4ba23a3de244b914b2f3bc7d7208ccf8cc2"  }
+subduction_crypto = { git = "https://github.com/dman-os/subduction", rev = "752ac4ba23a3de244b914b2f3bc7d7208ccf8cc2"  }
+subduction_keyhive = { git = "https://github.com/dman-os/subduction", rev = "752ac4ba23a3de244b914b2f3bc7d7208ccf8cc2"  }
+subduction_keyhive_policy = { git = "https://github.com/dman-os/subduction", rev = "752ac4ba23a3de244b914b2f3bc7d7208ccf8cc2"  }
 async-channel = "2.5.0"
 qrcode = { version = "0.14.1", default-features = false }
 
@@ -237,16 +238,16 @@ autosurgeon = { git = "https://github.com/dman-os/autosurgeon", rev = "682646998
 autosurgeon-derive = { git = "https://github.com/dman-os/autosurgeon", rev = "6826469986b150e6b736dc8e24619aa01a03ecef" }
 # sqlite-vec = { git = "https://github.com/vlasky/sqlite-vec", rev = "9facf1ab84f2a360c0f1e62db3a7f3eca5bc099a" }
 
-[patch."https://github.com/inkandswitch/subduction"]
-subduction_core = { path = "/home/asdf/repos/rust/subduction/subduction_core" }
-subduction_iroh = { path = "/home/asdf/repos/rust/subduction/subduction_iroh" }
-subduction_websocket = { path = "/home/asdf/repos/rust/subduction/subduction_websocket" }
-sedimentree_core = { path = "/home/asdf/repos/rust/subduction/sedimentree_core" }
-automerge_sedimentree = { path = "/home/asdf/repos/rust/subduction/automerge_sedimentree" }
-sedimentree_fs_storage = { path = "/home/asdf/repos/rust/subduction/sedimentree_fs_storage" }
-subduction_crypto = { path = "/home/asdf/repos/rust/subduction/subduction_crypto" }
-subduction_keyhive = { path = "/home/asdf/repos/rust/subduction/subduction_keyhive" }
-subduction_keyhive_policy = { path = "/home/asdf/repos/rust/subduction/subduction_keyhive_policy" }
+# [patch."https://github.com/inkandswitch/subduction"]
+# subduction_core = { path = "/home/asdf/repos/rust/subduction/subduction_core" }
+# subduction_iroh = { path = "/home/asdf/repos/rust/subduction/subduction_iroh" }
+# subduction_websocket = { path = "/home/asdf/repos/rust/subduction/subduction_websocket" }
+# sedimentree_core = { path = "/home/asdf/repos/rust/subduction/sedimentree_core" }
+# automerge_sedimentree = { path = "/home/asdf/repos/rust/subduction/automerge_sedimentree" }
+# sedimentree_fs_storage = { path = "/home/asdf/repos/rust/subduction/sedimentree_fs_storage" }
+# subduction_crypto = { path = "/home/asdf/repos/rust/subduction/subduction_crypto" }
+# subduction_keyhive = { path = "/home/asdf/repos/rust/subduction/subduction_keyhive" }
+# subduction_keyhive_policy = { path = "/home/asdf/repos/rust/subduction/subduction_keyhive_policy" }
 
 
 # The default profile is optimized for Wasm builds because

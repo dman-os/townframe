@@ -1763,6 +1763,7 @@ mod tests {
         Ok(ids.into_iter().collect())
     }
 
+    #[tracing::instrument(skip_all)]
     async fn wait_for_doc_presence_with_activity(
         node: &SyncTestNode,
         doc_id: &DocId,

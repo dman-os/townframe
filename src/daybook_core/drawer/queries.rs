@@ -72,27 +72,35 @@ impl DrawerRepo {
         self.hydrate_entry_at_heads(doc_id, heads).await
     }
 
-    #[tracing::instrument(level = "trace", skip_all, fields(%doc_id))]
+    #[tracing::instrument(skip_all, fields(%doc_id))]
     pub async fn get_entry(&self, doc_id: &DocId) -> Res<Option<DocEntry>> {
+        info!("XXX get_entry enter");
         if self.cancel_token.is_cancelled() {
             eyre::bail!("repo is stopped");
         }
+        info!("XXX getting from cache, checking entry_cache");
         if let Some(cached) = self.entry_cache.get(doc_id) {
+            info!("XXX cache hit, locking entry_pool");
             let mut pool = self.entry_pool.lock().expect(ERROR_MUTEX);
             pool.touch_key(doc_id);
             return Ok(Some(cached.clone()));
         }
 
+        info!("XXX cache miss, hydrating from drawer doc");
         let heads = self.current_heads.lock().expect(ERROR_MUTEX).clone();
         let entry = self.hydrate_entry_at_heads(doc_id, &heads).await?;
 
+        info!(?entry, "XXX entry result from drawer doc");
         if let Some(entry) = entry {
+            info!("XXX locking pool to update cache");
             let mut pool = self.entry_pool.lock().expect(ERROR_MUTEX);
             let pruned = pool.insert_key(doc_id, 1);
             for pkey in pruned {
                 self.entry_cache.remove(&pkey);
             }
+            info!("XXX updating cache");
             self.entry_cache.insert(doc_id.clone(), entry.clone());
+            info!("XXX done");
             Ok(Some(entry))
         } else {
             Ok(None)
@@ -125,7 +133,7 @@ impl DrawerRepo {
         };
 
         let (facets, facet_heads_by_key, to_cache) = handle
-            .with_document(|am_doc| {
+            .with_document_read(|am_doc| {
                 let mut facets = HashMap::new();
                 let mut facet_heads_by_key = HashMap::new();
                 let mut to_cache = Vec::new();
@@ -179,7 +187,7 @@ impl DrawerRepo {
                 }
                 eyre::Ok((facets, facet_heads_by_key, to_cache))
             })
-            .await??;
+            .await?;
 
         for (uuid, heads, value) in to_cache {
             self.facet_cache_put(doc_id, uuid, heads, value);
@@ -227,6 +235,7 @@ impl DrawerRepo {
         heads: &ChangeHashSet,
         facet_keys: Option<Vec<FacetKey>>,
     ) -> Res<Option<Arc<Doc>>> {
+        info!("XXX get_doc_with_facets_at_branch_heads entered");
         let facets = self
             .get_at_branch_heads_with_facets_arc(id, branch_path, heads, facet_keys)
             .await?
@@ -267,8 +276,8 @@ impl DrawerRepo {
             return Ok(None);
         };
         let branch_heads = handle
-            .with_document(|doc| ChangeHashSet(doc.get_heads().into()))
-            .await?;
+            .with_document_read(|doc| ChangeHashSet(doc.get_heads().into()))
+            .await;
         let Some((facets, facet_heads_by_key)) = self
             .get_at_branch_heads_with_facets_arc(doc_id, branch_path, &branch_heads, facet_keys)
             .await?
@@ -346,7 +355,7 @@ impl DrawerRepo {
             return Ok(None);
         };
         let keys = handle
-            .with_document(|am_doc| {
+            .with_document_read(|am_doc| {
                 let facets_obj =
                     match automerge::ReadDoc::get_at(am_doc, automerge::ROOT, "facets", heads)? {
                         Some((automerge::Value::Object(automerge::ObjType::Map), id)) => id,
@@ -359,7 +368,7 @@ impl DrawerRepo {
                 }
                 Ok(out)
             })
-            .await??;
+            .await?;
         Ok(Some(keys))
     }
 
@@ -401,10 +410,10 @@ impl DrawerRepo {
             eyre::bail!("doc not found");
         };
         handle
-            .with_document(|am_doc| {
+            .with_document_read(|am_doc| {
                 facet_recovery::recover_facet_heads_at(am_doc, facet_key, heads)
             })
-            .await?
+            .await
     }
 
     pub async fn get_facet_heads_at_branch(
@@ -493,7 +502,7 @@ impl DrawerRepo {
                 .get_facet_heads_at_branch_heads(doc_id, branch_path, heads, key)
                 .await?;
             let is_local = handle
-                .with_document(|am_doc| {
+                .with_document_read(|am_doc| {
                     for head in &facet_heads {
                         if let Some(change) = am_doc.get_change_by_hash(head) {
                             if local_actor_ids.contains(change.actor_id()) {
@@ -503,7 +512,7 @@ impl DrawerRepo {
                     }
                     false
                 })
-                .await?;
+                .await;
             if is_local {
                 out.insert(key.clone());
             }

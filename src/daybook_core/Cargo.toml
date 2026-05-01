@@ -66,6 +66,7 @@ struct-patch.workspace = true
 data-encoding.workspace = true
 bs58.workspace = true
 addr.workspace = true
+surelock.workspace = true
 
 #
 # async

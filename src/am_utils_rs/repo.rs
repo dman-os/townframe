@@ -90,8 +90,7 @@ impl BigRepo {
             PartitionStore::boot(state_pool.clone()).await?;
 
         let (change_manager, change_manager_stop) = changes::ChangeListenerManager::boot();
-        let signer =
-            subduction_crypto::signer::memory::MemorySigner::from_bytes(&config.secret_key_bytes);
+        let signer = subduction_crypto::signer::memory::MemorySigner::from_bytes(&secret_key_bytes);
         let (runtime, runtime_stop) = match storage {
             StorageConfig::Memory => runtime::spawn_big_repo_runtime(
                 signer,
@@ -425,51 +424,6 @@ impl BigRepo {
     }
 }
 
-// autosurgeon suport
-impl BigRepo {
-    #[tracing::instrument(level = "trace", skip_all, fields(%doc_id))]
-    pub async fn reconcile_prop_with_actor<'a, T, P>(
-        self: &Arc<Self>,
-        doc_id: &DocumentId,
-        obj_id: automerge::ObjId,
-        prop_name: P,
-        update: &T,
-        actor_id: Option<automerge::ActorId>,
-    ) -> Res<Option<ChangeHash>>
-    where
-        T: Hydrate + Reconcile + Send + Sync + 'static,
-        P: Into<autosurgeon::Prop<'a>> + Send + Sync + 'static,
-    {
-        let handle = self.get_doc(doc_id).await?.ok_or_eyre("doc not found")?;
-        handle
-            .reconcile_prop_with_actor(obj_id, prop_name, update, actor_id)
-            .await
-    }
-
-    #[tracing::instrument(level = "trace", skip_all, fields(%doc_id))]
-    pub async fn hydrate_path<T: Hydrate + Reconcile + Send + Sync + 'static>(
-        self: &Arc<Self>,
-        doc_id: &DocumentId,
-        obj_id: automerge::ObjId,
-        path: Vec<Prop<'static>>,
-    ) -> Res<Option<(T, Arc<[automerge::ChangeHash]>)>> {
-        let handle = self.get_doc(doc_id).await?.ok_or_eyre("doc not found")?;
-        handle.hydrate_path(obj_id, path).await
-    }
-
-    #[tracing::instrument(level = "trace", skip_all, fields(%doc_id))]
-    pub async fn hydrate_path_at_heads<T: Hydrate + Reconcile + Send + Sync + 'static>(
-        self: &Arc<Self>,
-        doc_id: &DocumentId,
-        heads: &[automerge::ChangeHash],
-        obj_id: automerge::ObjId,
-        path: Vec<Prop<'static>>,
-    ) -> Res<Option<(T, Arc<[automerge::ChangeHash]>)>> {
-        let handle = self.get_doc(doc_id).await?.ok_or_eyre("doc not found")?;
-        handle.hydrate_path_at_heads(heads, obj_id, path).await
-    }
-}
-
 pub struct BigRepoStopToken {
     runtime_stop: runtime::BigRepoRuntimeStopToken,
     change_manager_stop: Option<changes::ChangeListenerManagerStopToken>,
@@ -646,8 +600,7 @@ impl BigDocHandle {
         self.with_document_read(|doc| -> Res<Option<(T, Arc<[automerge::ChangeHash]>)>> {
             let heads: Arc<[automerge::ChangeHash]> = Arc::from(heads.to_vec());
             if path.is_empty() && obj_id == automerge::ROOT {
-                let value: T =
-                    autosurgeon::hydrate_at(doc, &heads).wrap_err("error hydrating")?;
+                let value: T = autosurgeon::hydrate_at(doc, &heads).wrap_err("error hydrating")?;
                 Ok(Some((value, heads)))
             } else {
                 match autosurgeon::hydrate_path_at(doc, &obj_id, path.clone(), &heads) {

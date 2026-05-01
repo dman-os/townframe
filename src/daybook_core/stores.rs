@@ -1,5 +1,6 @@
 use crate::interlude::*;
 
+use am_utils_rs::BigDocHandle;
 use automerge::ActorId;
 use futures::future::BoxFuture;
 
@@ -10,37 +11,31 @@ pub trait AmStore: Hydrate + Reconcile + Send + Sync + 'static {
     // async fn flush(&mut self, args: &mut Self::FlushArgs) -> Res<()> {
     async fn flush(
         &mut self,
-        big_repo: &mut SharedBigRepo,
-        doc_id: &DocumentId,
+        doc_handle: &BigDocHandle,
         actor_id: Option<ActorId>,
     ) -> Res<Option<automerge::ChangeHash>> {
-        self.flush_with_prop(big_repo, doc_id, Self::prop(), actor_id)
+        self.flush_with_prop(doc_handle, Self::prop(), actor_id)
             .await
     }
 
     async fn flush_with_prop(
         &mut self,
-        big_repo: &mut SharedBigRepo,
-        doc_id: &DocumentId,
+        doc_handle: &BigDocHandle,
         prop: Cow<'static, str>,
         actor_id: Option<ActorId>,
     ) -> Res<Option<automerge::ChangeHash>> {
-        big_repo
-            .reconcile_prop_with_actor(doc_id, automerge::ROOT, prop, self, actor_id)
+        doc_handle
+            .reconcile_prop_with_actor(automerge::ROOT, prop, self, actor_id)
             .await
     }
 
-    async fn load(big_repo: &SharedBigRepo, app_doc_id: &DocumentId) -> Res<Self> {
-        Self::load_from_prop(big_repo, app_doc_id, Self::prop()).await
+    async fn load(doc_handle: &BigDocHandle) -> Res<Self> {
+        Self::load_from_prop(doc_handle, Self::prop()).await
     }
 
-    async fn load_from_prop(
-        big_repo: &SharedBigRepo,
-        app_doc_id: &DocumentId,
-        prop: Cow<'static, str>,
-    ) -> Res<Self> {
-        big_repo
-            .hydrate_path::<Self>(app_doc_id, automerge::ROOT, vec![prop.into()])
+    async fn load_from_prop(doc_handle: &BigDocHandle, prop: Cow<'static, str>) -> Res<Self> {
+        doc_handle
+            .hydrate_path::<Self>(automerge::ROOT, vec![prop.into()])
             .await?
             .ok_or_eyre("unable to find obj in am")
             .map(|(val, _heads)| val)
@@ -79,8 +74,7 @@ pub trait AmStore: Hydrate + Reconcile + Send + Sync + 'static {
 
 struct Inner<S> {
     store: S,
-    big_repo: SharedBigRepo,
-    doc_id: DocumentId,
+    doc_handle: BigDocHandle,
     store_prop: Option<String>,
     local_actor_id: ActorId,
     // flush_args: S::FlushArgs,
@@ -92,19 +86,10 @@ impl<S: AmStore> Inner<S> {
         match &self.store_prop {
             Some(prop) => {
                 self.store
-                    .flush_with_prop(
-                        &mut self.big_repo,
-                        &self.doc_id,
-                        Cow::Owned(prop.clone()),
-                        Some(actor_id),
-                    )
+                    .flush_with_prop(&self.doc_handle, Cow::Owned(prop.clone()), Some(actor_id))
                     .await
             }
-            None => {
-                self.store
-                    .flush(&mut self.big_repo, &self.doc_id, Some(actor_id))
-                    .await
-            }
+            None => self.store.flush(&self.doc_handle, Some(actor_id)).await,
         }
     }
 }
@@ -127,25 +112,22 @@ where
     pub fn new(
         store: S,
         //flush_args: S::FlushArgs,
-        big_repo: SharedBigRepo,
-        doc_id: DocumentId,
+        doc_handle: BigDocHandle,
         local_actor_id: ActorId,
     ) -> Self {
-        Self::new_with_prop(store, big_repo, doc_id, None, local_actor_id)
+        Self::new_with_prop(store, doc_handle, None, local_actor_id)
     }
 
     pub fn new_with_prop(
         store: S,
-        big_repo: SharedBigRepo,
-        doc_id: DocumentId,
+        doc_handle: BigDocHandle,
         store_prop: Option<String>,
         local_actor_id: ActorId,
     ) -> Self {
         Self {
             inner: Arc::new(tokio::sync::RwLock::new(Inner {
                 store,
-                big_repo,
-                doc_id,
+                doc_handle,
                 store_prop,
                 local_actor_id,
             })),

@@ -580,7 +580,7 @@ pub struct PlugsRepo {
     pub registry: Arc<crate::repos::ListenersRegistry>,
     big_repo: SharedBigRepo,
     app_doc_id: DocumentId,
-    app_am_handle: am_utils_rs::repo::BigDocHandle,
+    app_doc_handle: am_utils_rs::repo::BigDocHandle,
     store: crate::stores::AmStoreHandle<PlugsStore>,
     blobs: Arc<crate::blobs::BlobsRepo>,
     mutation_mutex: tokio::sync::Mutex<()>,
@@ -689,20 +689,19 @@ impl PlugsRepo {
         let local_actor_id = daybook_types::doc::user_path::to_actor_id(&local_user_path);
         let registry = crate::repos::ListenersRegistry::new();
 
-        let store_val = PlugsStore::load(&big_repo, &app_doc_id).await?;
+        let app_doc_handle = big_repo
+            .get_doc(&app_doc_id)
+            .await?
+            .ok_or_eyre("unable to find app doc in am")?;
+
+        let store_val = PlugsStore::load(&app_doc_handle).await?;
         let store = crate::stores::AmStoreHandle::new(
             store_val,
-            Arc::clone(&big_repo),
-            app_doc_id.clone(),
+            app_doc_handle.clone(),
             local_actor_id.clone(),
         );
 
         store.mutate_sync(|store| store.rebuild_indices()).await?;
-
-        let app_am_handle = big_repo
-            .get_doc(&app_doc_id)
-            .await?
-            .ok_or_eyre("unable to find app doc in am")?;
 
         let cancel_token = CancellationToken::new();
         let (ticket, notif_rx) =
@@ -711,7 +710,7 @@ impl PlugsRepo {
         let repo = Self {
             big_repo: Arc::clone(&big_repo),
             app_doc_id: app_doc_id.clone(),
-            app_am_handle,
+            app_doc_handle,
             store,
             blobs,
             local_actor_id,
@@ -744,10 +743,9 @@ impl PlugsRepo {
     }
 
     pub async fn get_plugs_heads(&self) -> ChangeHashSet {
-        self.app_am_handle
-            .with_document(|am_doc| ChangeHashSet(am_doc.get_heads().into()))
+        self.app_doc_handle
+            .with_document_read(|am_doc| ChangeHashSet(am_doc.get_heads().into()))
             .await
-            .expect("with_document read should not fail")
     }
 
     async fn latest_manifest_delete_actor(
@@ -756,9 +754,8 @@ impl PlugsRepo {
         heads: &Arc<[automerge::ChangeHash]>,
     ) -> Res<Option<ActorId>> {
         let Some((tags, _)) = self
-            .big_repo
+            .app_doc_handle
             .hydrate_path_at_heads::<Vec<VersionTag>>(
-                &self.app_doc_id,
                 heads,
                 automerge::ROOT,
                 vec![
@@ -825,9 +822,8 @@ impl PlugsRepo {
                     PlugsEvent::PlugAdded { id, heads, origin }
                     | PlugsEvent::PlugChanged { id, heads, origin } => {
                         let Some((new_versioned, _)) = self
-                            .big_repo
+                            .app_doc_handle
                             .hydrate_path_at_heads::<Versioned<ThroughJson<Arc<manifest::PlugManifest>>>>(
-                                &self.app_doc_id,
                                 &heads.0,
                                 automerge::ROOT,
                                 vec![
@@ -944,9 +940,8 @@ impl PlugsRepo {
                     }
                     PlugsEvent::ConfigDocsChanged { heads, origin } => {
                         let Some((new_versioned, _)) = self
-                            .big_repo
+                            .app_doc_handle
                             .hydrate_path_at_heads::<Versioned<ThroughJson<HashMap<String, String>>>>(
-                                &self.app_doc_id,
                                 &heads.0,
                                 automerge::ROOT,
                                 vec![PlugsStore::prop().into(), "plug_config_doc_ids".into()],
@@ -976,8 +971,8 @@ impl PlugsRepo {
         to: Option<ChangeHashSet>,
     ) -> Res<Vec<PlugsEvent>> {
         let (patches, heads) = self
-            .app_am_handle
-            .with_document(|am_doc| {
+            .app_doc_handle
+            .with_document_read(|am_doc| {
                 let heads = if let Some(ref to_set) = to {
                     to_set.clone()
                 } else {
@@ -988,7 +983,7 @@ impl PlugsRepo {
                     .wrap_err("diff_obj failed")?;
                 eyre::Ok((patches, heads))
             })
-            .await??;
+            .await?;
         let heads = heads.0;
         let mut events = vec![];
         for patch in patches {

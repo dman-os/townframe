@@ -102,13 +102,13 @@ impl DrawerRepo {
         }
 
         let (patches, heads) = self
-            .drawer_am_handle
-            .with_document(|am_doc| {
+            .drawer_doc_handle
+            .with_document_read(|am_doc| {
                 let heads = to.unwrap_or_else(|| ChangeHashSet(am_doc.get_heads().into()));
                 let patches = am_doc.diff_obj(&automerge::ROOT, &from, &heads, true)?;
                 eyre::Ok((patches, heads))
             })
-            .await??;
+            .await?;
 
         let mut events = vec![];
         for patch in patches {
@@ -216,9 +216,8 @@ impl DrawerRepo {
                     autosurgeon::Prop::Key(doc_id.to_string().into()),
                 ];
                 let (new_entry, drawer_heads) = self
-                    .big_repo
+                    .drawer_doc_handle
                     .hydrate_path_at_heads::<DocEntry>(
-                        &self.drawer_doc_id,
                         patch_heads,
                         automerge::ROOT,
                         path,

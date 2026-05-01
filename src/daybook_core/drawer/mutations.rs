@@ -114,7 +114,7 @@ impl DrawerRepo {
         }
 
         let drawer_heads = self
-            .drawer_am_handle
+            .drawer_doc_handle
             .with_document(|doc| {
                 doc.set_actor(self.local_actor_id.clone());
                 let mut tx = doc.transaction();
@@ -237,7 +237,7 @@ impl DrawerRepo {
         };
         let mutation_actor_id = self.content_actor_id(patch.user_path.as_deref(), &branch_doc_id);
         let existing_facet_keys = handle
-            .with_document(|am_doc| {
+            .with_document_read(|am_doc| {
                 let facets_obj =
                     match automerge::ReadDoc::get_at(am_doc, automerge::ROOT, "facets", &heads)? {
                         Some((automerge::Value::Object(automerge::ObjType::Map), id)) => id,
@@ -249,7 +249,7 @@ impl DrawerRepo {
                 }
                 Ok(out)
             })
-            .await??;
+            .await?;
         let mut resulting_keys = existing_facet_keys;
         for facet_key in patch.facets_set.keys() {
             resulting_keys.insert(facet_key.clone());
@@ -349,7 +349,7 @@ impl DrawerRepo {
             });
         };
         let branch_doc = from_handle
-            .with_document(|am_doc| {
+            .with_document_read(|am_doc| {
                 let current_heads = am_doc.get_heads();
                 let current_heads_serialized = am_utils_rs::serialize_commit_heads(&current_heads);
                 let from_heads_serialized =
@@ -421,7 +421,7 @@ impl DrawerRepo {
                     }
                 }
             })
-            .await??;
+            .await?;
         let handle = self
             .big_repo
             .put_doc(DocumentId::random(), branch_doc)
@@ -454,7 +454,7 @@ impl DrawerRepo {
             new_entry.vtag = VersionTag::update(self.local_actor_id.clone());
 
             let drawer_heads = self
-                .drawer_am_handle
+                .drawer_doc_handle
                 .with_document(|doc| {
                     let current_drawer_heads = ChangeHashSet(doc.get_heads().into());
                     new_entry.previous_version_heads = Some(current_drawer_heads);
@@ -558,7 +558,7 @@ impl DrawerRepo {
         // 1. Merge content docs
         let user_path_for_dmeta = user_path.clone();
         let mut am_from = from_handle
-            .with_document(|from_doc| {
+            .with_document_read(|from_doc| {
                 let current_heads = from_doc.get_heads();
                 let current_heads_serialized = am_utils_rs::serialize_commit_heads(&current_heads);
                 let from_heads_serialized =
@@ -623,7 +623,7 @@ impl DrawerRepo {
                     }
                 }
             })
-            .await??;
+            .await?;
         let (_new_heads, _modified_facets, invalidated_uuids) = handle
             .with_document(move |am_doc| {
                 am_doc.set_actor(mutation_actor_id.clone());
@@ -741,7 +741,7 @@ impl DrawerRepo {
         deleted_facet_keys.sort();
 
         let res = self
-            .drawer_am_handle
+            .drawer_doc_handle
             .with_document(|doc| {
                 let docs_id = match doc.get(automerge::ROOT, "docs")? {
                     Some((automerge::Value::Object(automerge::ObjType::Map), docs_id)) => docs_id,
@@ -975,7 +975,7 @@ impl DrawerRepo {
         new_entry.vtag = VersionTag::update(self.local_actor_id.clone());
 
         let drawer_heads = self
-            .drawer_am_handle
+            .drawer_doc_handle
             .with_document(|doc| {
                 let current_drawer_heads = ChangeHashSet(doc.get_heads().into());
                 new_entry.previous_version_heads = Some(current_drawer_heads);

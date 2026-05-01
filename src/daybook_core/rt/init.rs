@@ -78,18 +78,17 @@ impl InitRepo {
         .await?;
 
         let registry = crate::repos::ListenersRegistry::new();
-        let store_val = InitStore::load(&big_repo, &app_doc_id).await?;
-        let store = crate::stores::AmStoreHandle::new(
-            store_val,
-            Arc::clone(&big_repo),
-            app_doc_id.clone(),
-            local_actor_id.clone(),
-        );
 
         let app_am_handle = big_repo
             .get_doc(&app_doc_id)
             .await?
             .ok_or_eyre("unable to find app doc in am")?;
+        let store_val = InitStore::load(&app_am_handle).await?;
+        let store = crate::stores::AmStoreHandle::new(
+            store_val,
+            app_am_handle.clone(),
+            local_actor_id.clone(),
+        );
         let cancel_token = CancellationToken::new();
         let (ticket, notif_rx) =
             InitStore::register_change_listener(&big_repo, &app_doc_id, vec![]).await?;
@@ -174,9 +173,8 @@ impl InitRepo {
             }
             if let Some(InitEvent::Changed { heads }) = events.last().cloned() {
                 let Some((new_store, _)) = self
-                    .big_repo
+                    .app_am_handle
                     .hydrate_path_at_heads::<InitStore>(
-                        &self.app_doc_id,
                         &heads.0,
                         automerge::ROOT,
                         vec![InitStore::prop().into()],
@@ -201,8 +199,8 @@ impl InitRepo {
         // Init snapshot is the current app-doc heads.
         let heads = self
             .app_am_handle
-            .with_document(|doc| doc.get_heads())
-            .await?;
+            .with_document_read(|doc| doc.get_heads())
+            .await;
         Ok(vec![InitEvent::Changed {
             heads: ChangeHashSet(Arc::from(heads)),
         }])
@@ -215,7 +213,7 @@ impl InitRepo {
     ) -> Res<Vec<InitEvent>> {
         let (patches, heads) = self
             .app_am_handle
-            .with_document(|am_doc| {
+            .with_document_read(|am_doc| {
                 let heads = if let Some(ref to_set) = to {
                     to_set.clone()
                 } else {
@@ -226,7 +224,7 @@ impl InitRepo {
                     .expect("diff_obj failed");
                 (patches, heads)
             })
-            .await?;
+            .await;
         let mut events = vec![];
         for patch in patches {
             // Replay path: do not apply live-origin filtering.
