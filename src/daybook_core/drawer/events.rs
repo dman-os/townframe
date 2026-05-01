@@ -53,7 +53,11 @@ impl DrawerRepo {
                         doc_id
                     );
                 }
-                *self.current_heads.lock().expect(ERROR_MUTEX) = ChangeHashSet(Arc::clone(&heads));
+                let new_heads = ChangeHashSet(Arc::clone(&heads));
+                surelock::key::lock_scope(|key| {
+                    let (mut current_heads, _key) = key.lock(&self.current_heads);
+                    *current_heads = new_heads;
+                });
                 if let Err(err) = self
                     .events_for_patch(
                         &patch,
@@ -127,14 +131,17 @@ impl DrawerRepo {
         let (drawer_heads, entries) = self.current_drawer_entries().await?;
 
         {
-            let mut pool = self.entry_pool.lock().expect(ERROR_MUTEX);
-            for (doc_id, entry) in &entries {
-                let pruned = pool.insert_key(doc_id, 1);
-                for pkey in pruned {
-                    self.entry_cache.remove(&pkey);
-                }
-                self.entry_cache.insert(doc_id.clone(), entry.clone());
-            }
+            surelock::key::lock_scope(|key| {
+                key.lock_with(&(&self.entry_pool, &self.entry_cache), |(mut pool, mut cache)| {
+                    for (doc_id, entry) in &entries {
+                        let pruned = pool.insert_key(doc_id, 1);
+                        for pkey in pruned {
+                            cache.remove(&pkey);
+                        }
+                        cache.insert(doc_id.clone(), entry.clone());
+                    }
+                });
+            });
         }
 
         // Init snapshot is synthesized from current drawer + branch heads.

@@ -1042,10 +1042,10 @@ mod tests {
             })
             .await?,
             temp_dir.path().join("drawer-local-state"),
-            Arc::new(std::sync::Mutex::new(
+            Arc::new(surelock::mutex::Mutex::new(
                 crate::drawer::lru::KeyedLruPool::new(1000),
             )),
-            Arc::new(std::sync::Mutex::new(
+            Arc::new(surelock::mutex::Mutex::new(
                 crate::drawer::lru::KeyedLruPool::new(1000),
             )),
             None,

@@ -8,7 +8,7 @@ use std::collections::VecDeque;
 /// When the total cost exceeds capacity, it returns the IDs that should be pruned
 /// based on the Least Recently Used strategy.
 pub type LruItemId = u64;
-pub type SharedKeyedLruPool<K> = Arc<std::sync::Mutex<KeyedLruPool<K>>>;
+pub type SharedKeyedLruPool<K> = Arc<surelock::mutex::Mutex<KeyedLruPool<K>>>;
 
 pub struct LruPool {
     capacity: usize,

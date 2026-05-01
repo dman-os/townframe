@@ -1,14 +1,13 @@
 use crate::interlude::*;
 
 use super::DrawerRepo;
-use crate::drawer::lru::SharedKeyedLruPool;
+use crate::drawer::lru::KeyedLruPool;
 
 use daybook_types::doc::{ChangeHashSet, DocId, FacetRaw};
 
 pub struct FacetCacheState {
     pub entries: HashMap<FacetCacheKey, FacetCacheEntry>,
     by_doc: HashMap<DocId, HashSet<Uuid>>,
-    pool: SharedKeyedLruPool<FacetCacheKey>,
     seen_once: HashSet<FacetCacheKey>,
     seen_order: std::collections::VecDeque<FacetCacheKey>,
     seen_capacity: usize,
@@ -22,11 +21,10 @@ pub struct FacetCacheEntry {
 }
 
 impl FacetCacheState {
-    pub fn new(pool: SharedKeyedLruPool<FacetCacheKey>) -> Self {
+    pub fn new() -> Self {
         Self {
             entries: HashMap::new(),
             by_doc: HashMap::new(),
-            pool,
             seen_once: HashSet::new(),
             seen_order: std::collections::VecDeque::new(),
             seen_capacity: 4096,
@@ -84,6 +82,7 @@ impl FacetCacheState {
 
     pub(super) fn get_if_heads_match(
         &mut self,
+        pool: &mut KeyedLruPool<FacetCacheKey>,
         doc_id: &DocId,
         facet_uuid: &Uuid,
         heads: &ChangeHashSet,
@@ -93,12 +92,13 @@ impl FacetCacheState {
         if &cached.heads != heads {
             return None;
         }
-        self.pool.lock().expect(ERROR_MUTEX).touch_key(&key);
+        pool.touch_key(&key);
         Some(Arc::clone(&cached.value))
     }
 
     pub fn put(
         &mut self,
+        pool: &mut KeyedLruPool<FacetCacheKey>,
         doc_id: &DocId,
         facet_uuid: Uuid,
         facet_heads: ChangeHashSet,
@@ -107,11 +107,7 @@ impl FacetCacheState {
         let cache_key = (doc_id.clone(), facet_uuid);
         let cost = Self::estimate_cost(value.as_ref());
         if self.entries.contains_key(&cache_key) {
-            let pruned = self
-                .pool
-                .lock()
-                .expect(ERROR_MUTEX)
-                .insert_key(&cache_key, cost);
+            let pruned = pool.insert_key(&cache_key, cost);
             let self_pruned = pruned.iter().any(|pkey| pkey == &cache_key);
             for pkey in pruned {
                 self.remove_without_pool(&pkey);
@@ -138,11 +134,7 @@ impl FacetCacheState {
             return;
         }
 
-        let pruned = self
-            .pool
-            .lock()
-            .expect(ERROR_MUTEX)
-            .insert_key(&cache_key, cost);
+        let pruned = pool.insert_key(&cache_key, cost);
         let self_pruned = pruned.iter().any(|pkey| pkey == &cache_key);
         for pkey in pruned {
             self.remove_without_pool(&pkey);
@@ -164,13 +156,18 @@ impl FacetCacheState {
             .insert(facet_uuid);
     }
 
-    fn invalidate_facet(&mut self, doc_id: &DocId, facet_uuid: &Uuid) {
+    fn invalidate_facet(
+        &mut self,
+        pool: &mut KeyedLruPool<FacetCacheKey>,
+        doc_id: &DocId,
+        facet_uuid: &Uuid,
+    ) {
         let key = (doc_id.clone(), *facet_uuid);
-        self.pool.lock().expect(ERROR_MUTEX).remove_key(&key);
+        pool.remove_key(&key);
         self.remove_without_pool(&key);
     }
 
-    fn invalidate_doc(&mut self, doc_id: &DocId) {
+    fn invalidate_doc(&mut self, pool: &mut KeyedLruPool<FacetCacheKey>, doc_id: &DocId) {
         let Some(uuids) = self.by_doc.get(doc_id).cloned() else {
             return;
         };
@@ -178,10 +175,7 @@ impl FacetCacheState {
             .into_iter()
             .map(|uuid| (doc_id.clone(), uuid))
             .collect();
-        self.pool
-            .lock()
-            .expect(ERROR_MUTEX)
-            .remove_keys(keys.clone());
+        pool.remove_keys(keys.clone());
         for key in keys {
             self.remove_without_pool(&key);
         }
@@ -205,25 +199,28 @@ impl FacetCacheState {
 
 impl DrawerRepo {
     pub(super) fn invalidate_entry_cache(&self, id: &DocId) {
-        // Keep pool/cache ordering strict: remove from `entry_pool` (via `remove_key`)
-        // before deleting from `entry_cache` so the pool cannot retain stale refs.
-        let mut pool = self.entry_pool.lock().expect(ERROR_MUTEX);
-        pool.remove_key(id);
-        self.entry_cache.remove(id);
+        surelock::key::lock_scope(|key| {
+            key.lock_with(&(&self.entry_pool, &self.entry_cache), |(mut pool, mut cache)| {
+                pool.remove_key(id);
+                cache.remove(id);
+            });
+        });
     }
 
     pub(super) fn invalidate_facet_cache_entry(&self, doc_id: &DocId, facet_uuid: &Uuid) {
-        self.facet_cache
-            .lock()
-            .expect(ERROR_MUTEX)
-            .invalidate_facet(doc_id, facet_uuid);
+        surelock::key::lock_scope(|key| {
+            key.lock_with(&(&self.facet_cache, &self.doc_pool), |(mut cache, mut pool)| {
+                cache.invalidate_facet(&mut pool, doc_id, facet_uuid);
+            });
+        });
     }
 
     pub(super) fn invalidate_facet_cache_doc(&self, doc_id: &DocId) {
-        self.facet_cache
-            .lock()
-            .expect(ERROR_MUTEX)
-            .invalidate_doc(doc_id);
+        surelock::key::lock_scope(|key| {
+            key.lock_with(&(&self.facet_cache, &self.doc_pool), |(mut cache, mut pool)| {
+                cache.invalidate_doc(&mut pool, doc_id);
+            });
+        });
     }
 
     pub(super) fn facet_cache_get(
@@ -232,10 +229,11 @@ impl DrawerRepo {
         facet_uuid: &Uuid,
         facet_heads: &ChangeHashSet,
     ) -> Option<daybook_types::doc::ArcFacetRaw> {
-        self.facet_cache
-            .lock()
-            .expect(ERROR_MUTEX)
-            .get_if_heads_match(doc_id, facet_uuid, facet_heads)
+        surelock::key::lock_scope(|key| {
+            key.lock_with(&(&self.facet_cache, &self.doc_pool), |(mut cache, mut pool)| {
+                cache.get_if_heads_match(&mut pool, doc_id, facet_uuid, facet_heads)
+            }).0
+        })
     }
 
     pub(super) fn facet_cache_put(
@@ -245,9 +243,10 @@ impl DrawerRepo {
         facet_heads: ChangeHashSet,
         value: daybook_types::doc::ArcFacetRaw,
     ) {
-        self.facet_cache
-            .lock()
-            .expect(ERROR_MUTEX)
-            .put(doc_id, facet_uuid, facet_heads, value);
+        surelock::key::lock_scope(|key| {
+            key.lock_with(&(&self.facet_cache, &self.doc_pool), |(mut cache, mut pool)| {
+                cache.put(&mut pool, doc_id, facet_uuid, facet_heads, value);
+            });
+        });
     }
 }

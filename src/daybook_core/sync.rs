@@ -926,7 +926,6 @@ mod tests {
 
     impl SyncTestNode {
         async fn stop(mut self) -> Res<()> {
-            info!("XXX stopping node");
             // NOTE: do early cancellation before
             // waiting on actual stops
             self.sync_stop.cancel_token.cancel();
@@ -1629,10 +1628,10 @@ mod tests {
             daybook_types::doc::UserPathBuf::from(rtx.local_user_path.clone()),
             rtx.sql.clone(),
             rtx.layout.repo_root.join("local_state"),
-            Arc::new(std::sync::Mutex::new(
+            Arc::new(surelock::mutex::Mutex::new(
                 crate::drawer::lru::KeyedLruPool::new(1000),
             )),
-            Arc::new(std::sync::Mutex::new(
+            Arc::new(surelock::mutex::Mutex::new(
                 crate::drawer::lru::KeyedLruPool::new(1000),
             )),
             Some(Arc::clone(&plugs_repo)),
@@ -1769,7 +1768,6 @@ mod tests {
         doc_id: &DocId,
         absolute_timeout: Duration,
     ) -> Res<()> {
-        info!("XXX wait_for_doc_presence_with_activity");
         let last_activity = Arc::new(std::sync::Mutex::new(std::time::Instant::now()));
         let last_activity_for_wait = Arc::clone(&last_activity);
         let drawer_listener = node.drawer.subscribe(SubscribeOpts::new(1024));
@@ -1779,21 +1777,17 @@ mod tests {
         tokio::time::timeout(absolute_timeout, async {
             loop {
                 loop_count += 1;
-                info!(%loop_count, "XXX fetching doc with facets");
                 let found = node
                     .drawer
                     .get_doc_with_facets_at_branch(doc_id, daybook_types::doc::BranchPath::new("main"), None)
                     .await?
                     .is_some();
                 if found {
-                    info!(%loop_count, "XXX doc found, breaking");
                     break;
                 }
-                info!("XXX doc not found, waiting for signals");
                 tokio::select! {
                     val = drawer_listener.recv_lossy_async() => {
                         let evt = val.map_err(|_| eyre::eyre!("drawer listener closed while waiting for doc presence"))?;
-                        info!("XXX drawer activity detected");
                         match evt.as_ref() {
                             crate::drawer::DrawerEvent::DocAdded { id, .. }
                             | crate::drawer::DrawerEvent::DocUpdated { id, .. }
@@ -1806,15 +1800,11 @@ mod tests {
                                 *last_activity_for_wait.lock().expect(ERROR_MUTEX) = std::time::Instant::now();
                             }
                         }
-                        info!("XXX lock released");
                     }
                     val = sync_listener.recv_async() => {
-                        info!("XXX sync event detected");
                         match val {
                             Ok(_) => {
-                                info!("XXX full sync detected");
                                 *last_activity_for_wait.lock().expect(ERROR_MUTEX) = std::time::Instant::now();
-                                info!("XXX lock released");
                             }
                             Err(crate::repos::RecvError::Closed) => eyre::bail!("sync listener closed while waiting for doc presence"),
                             Err(crate::repos::RecvError::Dropped { dropped_count }) => {
@@ -1823,11 +1813,9 @@ mod tests {
                         }
                     }
                     val = progress_listener.recv_async() => {
-                        info!("XXX progress event recieved {val:?}");
                         match val {
                             Ok(_) => {
                                 *last_activity_for_wait.lock().expect(ERROR_MUTEX) = std::time::Instant::now();
-                                info!("XXX lock released");
                             }
                             Err(crate::repos::RecvError::Closed) => eyre::bail!("progress listener closed while waiting for doc presence"),
                             Err(crate::repos::RecvError::Dropped { dropped_count }) => {
@@ -1842,7 +1830,6 @@ mod tests {
         })
         .await
         .map_err(|_| {
-            info!("XXX timeout error");
             let since_last_activity = std::time::Instant::now()
                 .saturating_duration_since(*last_activity.lock().expect(ERROR_MUTEX));
             eyre::eyre!(
@@ -1851,7 +1838,6 @@ mod tests {
                 since_last_activity,
             )
         })??;
-        info!("XXX doc_presence_with_activity detected");
         Ok(())
     }
 
@@ -1861,14 +1847,12 @@ mod tests {
         endpoint_id: EndpointId,
         timeout: Duration,
     ) -> Res<()> {
-        info!("XXX wait_for_sync_convergence");
         tokio::try_join!(
             target
                 .sync_repo
                 .wait_for_full_sync(std::slice::from_ref(&endpoint_id), timeout),
             wait_for_doc_set_parity(&source.drawer, &target.drawer, timeout),
         )?;
-        info!("XXX sync_convergence achieved");
         Ok(())
     }
 
@@ -2028,7 +2012,6 @@ mod tests {
         hash: &str,
         timeout: Duration,
     ) -> Res<Vec<u8>> {
-        info!("XXX wait_for_blob_bytes");
         tokio::time::timeout(timeout, async {
             loop {
                 let path = match blobs_repo.get_path(hash).await {
@@ -2045,7 +2028,6 @@ mod tests {
                     }
                 };
                 if tokio::fs::try_exists(&path).await? {
-                    info!("XXX blob_bytes recieved");
                     return tokio::fs::read(path).await.map_err(Into::into);
                 }
                 tokio::time::sleep(Duration::from_millis(200)).await;

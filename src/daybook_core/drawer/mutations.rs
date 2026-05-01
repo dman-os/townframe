@@ -144,15 +144,17 @@ impl DrawerRepo {
         let mut events = Vec::with_capacity(prepared_docs.len());
 
         {
-            let mut pool = self.entry_pool.lock().expect(ERROR_MUTEX);
-            for prepared in &prepared_docs {
-                let pruned = pool.insert_key(&prepared.doc_id, 1);
-                for pkey in pruned {
-                    self.entry_cache.remove(&pkey);
-                }
-                self.entry_cache
-                    .insert(prepared.doc_id.clone(), prepared.entry.clone());
-            }
+            surelock::key::lock_scope(|key| {
+                key.lock_with(&(&self.entry_pool, &self.entry_cache), |(mut pool, mut cache)| {
+                    for prepared in &prepared_docs {
+                        let pruned = pool.insert_key(&prepared.doc_id, 1);
+                        for pkey in pruned {
+                            cache.remove(&pkey);
+                        }
+                        cache.insert(prepared.doc_id.clone(), prepared.entry.clone());
+                    }
+                });
+            });
         }
 
         for prepared in prepared_docs {
@@ -162,8 +164,10 @@ impl DrawerRepo {
             )
             .await?;
             doc_ids.push(prepared.doc_id.clone());
-            self.branch_handles
-                .insert(prepared.branch_doc_id.clone(), prepared.handle);
+            surelock::key::lock_scope(|key| {
+                let (mut handles, _key) = key.lock(&self.branch_handles);
+                handles.insert(prepared.branch_doc_id.clone(), prepared.handle);
+            });
             events.push(DrawerEvent::DocAdded {
                 id: prepared.doc_id.clone(),
                 entry: DocNBranches {
@@ -174,7 +178,10 @@ impl DrawerRepo {
                 origin: self.local_origin(),
             });
         }
-        *self.current_heads.lock().expect(ERROR_MUTEX) = drawer_heads.clone();
+        surelock::key::lock_scope(|key| {
+            let (mut heads, _key) = key.lock(&self.current_heads);
+            *heads = drawer_heads.clone();
+        });
         self.registry.notify(events);
 
         Ok(doc_ids)
@@ -308,8 +315,10 @@ impl DrawerRepo {
             self.invalidate_facet_cache_entry(&patch.id, &uuid);
         }
 
-        self.branch_handles
-            .insert(handle.document_id().to_string(), handle);
+        surelock::key::lock_scope(|key| {
+            let (mut handles, _key) = key.lock(&self.branch_handles);
+            handles.insert(handle.document_id().to_string(), handle);
+        });
 
         Ok(())
     }
@@ -439,7 +448,10 @@ impl DrawerRepo {
             self.invalidate_entry_cache(id);
             self.get_drawer_heads()
         } else {
-            let latest_drawer_heads = self.current_heads.lock().expect(ERROR_MUTEX).clone();
+            let latest_drawer_heads = surelock::key::lock_scope(|key| {
+                let (heads, _key) = key.lock(&self.current_heads);
+                heads.clone()
+            });
             let entry = self
                 .get_entry_at_heads(id, &latest_drawer_heads)
                 .await?
@@ -481,14 +493,20 @@ impl DrawerRepo {
                 .await??;
 
             self.invalidate_entry_cache(id);
-            *self.current_heads.lock().expect(ERROR_MUTEX) = drawer_heads.clone();
+            surelock::key::lock_scope(|key| {
+                let (mut heads, _key) = key.lock(&self.current_heads);
+                *heads = drawer_heads.clone();
+            });
             drawer_heads
         };
         let updated_entry = self
             .current_doc_branches(id)
             .await?
             .ok_or_eyre("branch state missing after create_branch_at_heads_from_branch")?;
-        self.branch_handles.insert(branch_doc_id, handle);
+        surelock::key::lock_scope(|key| {
+            let (mut handles, _key) = key.lock(&self.branch_handles);
+            handles.insert(branch_doc_id, handle);
+        });
         self.registry.notify([DrawerEvent::DocUpdated {
             id: id.clone(),
             entry: updated_entry,
@@ -714,7 +732,27 @@ impl DrawerRepo {
             self.invalidate_facet_cache_entry(id, &uuid);
         }
 
-        *self.current_heads.lock().expect(ERROR_MUTEX) = drawer_heads.clone();
+        surelock::key::lock_scope(|key| {
+            let (mut heads, _key) = key.lock(&self.current_heads);
+            *heads = drawer_heads.clone();
+        });
+
+        let updated_entry = self
+            .current_doc_branches(id)
+            .await?
+            .ok_or_eyre("branch state missing after merge_from_heads")?;
+        self.registry.notify([DrawerEvent::DocUpdated {
+            id: id.clone(),
+            entry: updated_entry,
+            diff: DocEntryDiff {
+                changed_facet_keys: Vec::new(),
+                added_facet_keys: Vec::new(),
+                removed_facet_keys: Vec::new(),
+                moved_branch_names: vec![to_branch.to_string()],
+            },
+            drawer_heads,
+            origin: self.local_origin(),
+        }]);
 
         Ok(())
     }
@@ -806,9 +844,12 @@ impl DrawerRepo {
                 .await?;
             }
             self.invalidate_entry_cache(id);
-            for branch_ref in entry.branches.values() {
-                self.branch_handles.remove(&branch_ref.branch_doc_id);
-            }
+            surelock::key::lock_scope(|key| {
+                let (mut handles, _key) = key.lock(&self.branch_handles);
+                for branch_ref in entry.branches.values() {
+                    handles.remove(&branch_ref.branch_doc_id);
+                }
+            });
             for (branch_path, branch_doc_id) in local_branch_refs {
                 let branch_path = daybook_types::doc::BranchPath::new(&branch_path);
                 self.remove_branch_from_partitions_if_needed(
@@ -827,10 +868,16 @@ impl DrawerRepo {
                     &branch_heads,
                 )
                 .await?;
-                self.branch_handles.remove(&branch_doc_id);
+                surelock::key::lock_scope(|key| {
+                    let (mut handles, _key) = key.lock(&self.branch_handles);
+                    handles.remove(&branch_doc_id);
+                });
             }
             self.invalidate_facet_cache_doc(id);
-            *self.current_heads.lock().expect(ERROR_MUTEX) = drawer_heads.clone();
+            surelock::key::lock_scope(|key| {
+                let (mut heads, _key) = key.lock(&self.current_heads);
+                *heads = drawer_heads.clone();
+            });
             self.registry.notify([DrawerEvent::DocDeleted {
                 id: id.clone(),
                 entry: Some(entry.clone()),
@@ -922,7 +969,10 @@ impl DrawerRepo {
             &branch_ref.branch_doc_id,
         )
         .await?;
-        self.branch_handles.remove(&branch_ref.branch_doc_id);
+        surelock::key::lock_scope(|key| {
+            let (mut handles, _key) = key.lock(&self.branch_handles);
+            handles.remove(&branch_ref.branch_doc_id);
+        });
 
         if branch_ref.branch_kind == BranchKind::Local {
             self.delete_local_branch_ref_with_tombstone(
@@ -953,7 +1003,10 @@ impl DrawerRepo {
             return Ok(true);
         }
 
-        let latest_drawer_heads = self.current_heads.lock().expect(ERROR_MUTEX).clone();
+        let latest_drawer_heads = surelock::key::lock_scope(|key| {
+            let (heads, _key) = key.lock(&self.current_heads);
+            heads.clone()
+        });
         let entry = self
             .get_entry_at_heads(id, &latest_drawer_heads)
             .await?
@@ -1004,7 +1057,10 @@ impl DrawerRepo {
         // Update caches and notify
         self.invalidate_entry_cache(id);
 
-        *self.current_heads.lock().expect(ERROR_MUTEX) = drawer_heads.clone();
+        surelock::key::lock_scope(|key| {
+            let (mut heads, _key) = key.lock(&self.current_heads);
+            *heads = drawer_heads.clone();
+        });
         let updated_entry = self
             .current_doc_branches(id)
             .await?

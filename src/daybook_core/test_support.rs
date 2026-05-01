@@ -273,10 +273,10 @@ pub async fn test_cx_with_options(
         local_user_path.clone(),
         sql_ctx.clone(),
         temp_dir.path().join("local_states"),
-        Arc::new(std::sync::Mutex::new(
+        Arc::new(surelock::mutex::Mutex::new(
             crate::drawer::lru::KeyedLruPool::new(1000),
         )),
-        Arc::new(std::sync::Mutex::new(
+        Arc::new(surelock::mutex::Mutex::new(
             crate::drawer::lru::KeyedLruPool::new(1000),
         )),
         #[cfg(not(test))]

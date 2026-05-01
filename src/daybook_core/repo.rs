@@ -401,10 +401,10 @@ impl RepoCtx {
                     .parent()
                     .ok_or_eyre("blobs root missing parent")?
                     .join("local_state"),
-                Arc::new(std::sync::Mutex::new(
+                Arc::new(surelock::mutex::Mutex::new(
                     crate::drawer::lru::KeyedLruPool::new(1000),
                 )),
-                Arc::new(std::sync::Mutex::new(
+                Arc::new(surelock::mutex::Mutex::new(
                     crate::drawer::lru::KeyedLruPool::new(1000),
                 )),
                 #[cfg(not(test))]

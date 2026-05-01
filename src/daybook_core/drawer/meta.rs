@@ -93,7 +93,6 @@ impl DrawerRepo {
         doc_id: &DocId,
         branch_path: &daybook_types::doc::BranchPath,
     ) -> Res<Option<String>> {
-        info!("XXX get_local_branch_ref enter");
         let rec = sqlx::query_scalar::<_, String>(&format!(
             "SELECT branch_doc_id FROM {LOCAL_BRANCH_TABLE} WHERE doc_id = ?1 AND branch_path = ?2"
         ))
@@ -163,7 +162,6 @@ impl DrawerRepo {
         doc_id: &DocId,
         branch_path: &daybook_types::doc::BranchPath,
     ) -> Res<Option<(StoredBranchRef, BranchKind)>> {
-        info!("XXX get_entry_branch_ref enter");
         let branch_kind = self.branch_kind_for_path(branch_path)?;
         if branch_kind == BranchKind::Local {
             let Some(branch_doc_id) = self.get_local_branch_ref(doc_id, branch_path).await? else {
@@ -187,7 +185,6 @@ impl DrawerRepo {
         doc_id: &DocId,
         branch_path: &daybook_types::doc::BranchPath,
     ) -> Res<Option<BranchRefRow>> {
-        info!("XXX get_branch_ref enter");
         let Some((branch_ref, branch_kind)) =
             self.get_entry_branch_ref(doc_id, branch_path).await?
         else {
@@ -315,7 +312,6 @@ impl DrawerRepo {
         doc_id: &DocId,
         heads: &ChangeHashSet,
     ) -> Res<Option<DocEntry>> {
-        info!("XXX hydrate_entry_at_heads enter");
         let path = vec![
             "docs".into(),
             "map".into(),

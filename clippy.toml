@@ -6,7 +6,8 @@ await-holding-invalid-types = [
   { path = "dashmap::mapref::entry::Entry", reason = "potentially deadlocks" },
   { path = "dashmap::mapref::multiple::RefMulti", reason = "potentially deadlocks" },
   { path = "dashmap::mapref::multiple::RefMutMulti", reason = "potentially deadlocks" },
-  { path = "tokio::sync::Mutex", reason = "potential futurelock" }
+  { path = "tokio::sync::Mutex", reason = "potential futurelock" },
+  { path = "surelock::mutex::guard::MutexGuard", reason = "potentially deadlocks if held across await" }
 ]
 disallowed-names = [
   "a","b","c","d","e",

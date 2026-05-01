@@ -71,8 +71,8 @@ async fn test_v2_smoke() -> Res<()> {
         handle.document_id().clone()
     };
 
-    let entry_pool = Arc::new(std::sync::Mutex::new(KeyedLruPool::new(1000)));
-    let doc_pool = Arc::new(std::sync::Mutex::new(KeyedLruPool::new(1000)));
+    let entry_pool = Arc::new(surelock::mutex::Mutex::new(KeyedLruPool::new(1000)));
+    let doc_pool = Arc::new(surelock::mutex::Mutex::new(KeyedLruPool::new(1000)));
     let (repo, stop_token) = DrawerRepo::load(
         Arc::clone(&big_repo),
         drawer_doc_id,
@@ -170,8 +170,8 @@ async fn test_partitions_track_non_tmp_branches() -> Res<()> {
         handle.document_id().clone()
     };
 
-    let entry_pool = Arc::new(std::sync::Mutex::new(KeyedLruPool::new(1000)));
-    let doc_pool = Arc::new(std::sync::Mutex::new(KeyedLruPool::new(1000)));
+    let entry_pool = Arc::new(surelock::mutex::Mutex::new(KeyedLruPool::new(1000)));
+    let doc_pool = Arc::new(surelock::mutex::Mutex::new(KeyedLruPool::new(1000)));
     let (repo, stop_token) = DrawerRepo::load(
         Arc::clone(&big_repo),
         drawer_doc_id,
@@ -293,8 +293,8 @@ async fn test_v2_batch_add_smoke() -> Res<()> {
         handle.document_id().clone()
     };
 
-    let entry_pool = Arc::new(std::sync::Mutex::new(KeyedLruPool::new(1000)));
-    let doc_pool = Arc::new(std::sync::Mutex::new(KeyedLruPool::new(1000)));
+    let entry_pool = Arc::new(surelock::mutex::Mutex::new(KeyedLruPool::new(1000)));
+    let doc_pool = Arc::new(surelock::mutex::Mutex::new(KeyedLruPool::new(1000)));
     let (repo, stop_token) = DrawerRepo::load(
         Arc::clone(&big_repo),
         drawer_doc_id,
@@ -364,8 +364,8 @@ async fn test_v2_batch_add_emits_single_list_changed() -> Res<()> {
         handle.document_id().clone()
     };
 
-    let entry_pool = Arc::new(std::sync::Mutex::new(KeyedLruPool::new(1000)));
-    let doc_pool = Arc::new(std::sync::Mutex::new(KeyedLruPool::new(1000)));
+    let entry_pool = Arc::new(surelock::mutex::Mutex::new(KeyedLruPool::new(1000)));
+    let doc_pool = Arc::new(surelock::mutex::Mutex::new(KeyedLruPool::new(1000)));
     let (repo, stop_token) = DrawerRepo::load(
         Arc::clone(&big_repo),
         drawer_doc_id,
@@ -469,8 +469,8 @@ async fn test_v2_merge() -> Res<()> {
         handle.document_id().clone()
     };
 
-    let entry_pool = Arc::new(std::sync::Mutex::new(KeyedLruPool::new(1000)));
-    let doc_pool = Arc::new(std::sync::Mutex::new(KeyedLruPool::new(1000)));
+    let entry_pool = Arc::new(surelock::mutex::Mutex::new(KeyedLruPool::new(1000)));
+    let doc_pool = Arc::new(surelock::mutex::Mutex::new(KeyedLruPool::new(1000)));
     let (repo, stop_token) = DrawerRepo::load(
         Arc::clone(&big_repo),
         drawer_doc_id,
@@ -618,8 +618,8 @@ async fn test_resolve_handle_for_heads_does_not_match_foreign_doc_heads() -> Res
         handle.document_id().clone()
     };
 
-    let entry_pool = Arc::new(std::sync::Mutex::new(KeyedLruPool::new(1000)));
-    let doc_pool = Arc::new(std::sync::Mutex::new(KeyedLruPool::new(1000)));
+    let entry_pool = Arc::new(surelock::mutex::Mutex::new(KeyedLruPool::new(1000)));
+    let doc_pool = Arc::new(surelock::mutex::Mutex::new(KeyedLruPool::new(1000)));
     let (repo, stop_token) = DrawerRepo::load(
         Arc::clone(&big_repo),
         drawer_doc_id,
@@ -696,8 +696,8 @@ async fn test_create_branch_at_stale_main_heads_after_intervening_merges() -> Re
         handle.document_id().clone()
     };
 
-    let entry_pool = Arc::new(std::sync::Mutex::new(KeyedLruPool::new(1000)));
-    let doc_pool = Arc::new(std::sync::Mutex::new(KeyedLruPool::new(1000)));
+    let entry_pool = Arc::new(surelock::mutex::Mutex::new(KeyedLruPool::new(1000)));
+    let doc_pool = Arc::new(surelock::mutex::Mutex::new(KeyedLruPool::new(1000)));
     let (repo, stop_token) = DrawerRepo::load(
         Arc::clone(&big_repo),
         drawer_doc_id,
@@ -1084,8 +1084,8 @@ async fn test_v2_additional_apis() -> Res<()> {
         handle.document_id().clone()
     };
 
-    let entry_pool = Arc::new(std::sync::Mutex::new(KeyedLruPool::new(1000)));
-    let doc_pool = Arc::new(std::sync::Mutex::new(KeyedLruPool::new(1000)));
+    let entry_pool = Arc::new(surelock::mutex::Mutex::new(KeyedLruPool::new(1000)));
+    let doc_pool = Arc::new(surelock::mutex::Mutex::new(KeyedLruPool::new(1000)));
     let (repo, stop_token) = DrawerRepo::load(
         Arc::clone(&big_repo),
         drawer_doc_id,
@@ -1272,8 +1272,8 @@ async fn test_v2_metadata_maintenance() -> Res<()> {
         handle.document_id().clone()
     };
 
-    let entry_pool = Arc::new(std::sync::Mutex::new(KeyedLruPool::new(1000)));
-    let doc_pool = Arc::new(std::sync::Mutex::new(KeyedLruPool::new(1000)));
+    let entry_pool = Arc::new(surelock::mutex::Mutex::new(KeyedLruPool::new(1000)));
+    let doc_pool = Arc::new(surelock::mutex::Mutex::new(KeyedLruPool::new(1000)));
     let (repo, stop_token) = DrawerRepo::load(
         Arc::clone(&big_repo),
         drawer_doc_id,
@@ -1522,8 +1522,8 @@ async fn test_update_at_heads_uses_patch_user_path_actor() -> Res<()> {
         daybook_types::doc::UserPathBuf::from("/duser-wip-localtest/ddev-wip-iroh-localtest"),
         new_meta_store_sql().await?,
         std::env::temp_dir().join(Uuid::new_v4().to_string()),
-        Arc::new(std::sync::Mutex::new(KeyedLruPool::new(1000))),
-        Arc::new(std::sync::Mutex::new(KeyedLruPool::new(1000))),
+        Arc::new(surelock::mutex::Mutex::new(KeyedLruPool::new(1000))),
+        Arc::new(surelock::mutex::Mutex::new(KeyedLruPool::new(1000))),
         None,
     )
     .await?;
@@ -1606,8 +1606,8 @@ async fn test_merge_from_heads_uses_user_path_actor() -> Res<()> {
         daybook_types::doc::UserPathBuf::from("/duser-wip-localtest/ddev-wip-iroh-localtest"),
         new_meta_store_sql().await?,
         std::env::temp_dir().join(Uuid::new_v4().to_string()),
-        Arc::new(std::sync::Mutex::new(KeyedLruPool::new(1000))),
-        Arc::new(std::sync::Mutex::new(KeyedLruPool::new(1000))),
+        Arc::new(surelock::mutex::Mutex::new(KeyedLruPool::new(1000))),
+        Arc::new(surelock::mutex::Mutex::new(KeyedLruPool::new(1000))),
         None,
     )
     .await?;
@@ -1724,8 +1724,8 @@ async fn test_facet_keys_touched_by_local_actor_includes_user_path_scoped_actor(
         daybook_types::doc::UserPathBuf::from("/duser-wip-localtest/ddev-wip-iroh-localtest"),
         new_meta_store_sql().await?,
         std::env::temp_dir().join(Uuid::new_v4().to_string()),
-        Arc::new(std::sync::Mutex::new(KeyedLruPool::new(1000))),
-        Arc::new(std::sync::Mutex::new(KeyedLruPool::new(1000))),
+        Arc::new(surelock::mutex::Mutex::new(KeyedLruPool::new(1000))),
+        Arc::new(surelock::mutex::Mutex::new(KeyedLruPool::new(1000))),
         None,
     )
     .await?;
@@ -1788,46 +1788,46 @@ async fn test_facet_keys_touched_by_local_actor_includes_user_path_scoped_actor(
 
 #[test]
 fn test_facet_cache_admission_requires_second_put() {
-    let pool = Arc::new(std::sync::Mutex::new(KeyedLruPool::new(10_000)));
-    let mut cache = FacetCacheState::new(pool);
+    let mut pool = KeyedLruPool::new(10_000);
+    let mut cache = FacetCacheState::new();
     let doc_id = "doc-1".to_string();
     let facet_uuid = Uuid::new_v4();
     let heads = ChangeHashSet(Vec::new().into());
     let value = Arc::new(serde_json::json!({"mime":"text/plain","content":"hello"}));
 
-    cache.put(&doc_id, facet_uuid, heads.clone(), Arc::clone(&value));
-    let miss = cache.get_if_heads_match(&doc_id, &facet_uuid, &heads);
+    cache.put(&mut pool, &doc_id, facet_uuid, heads.clone(), Arc::clone(&value));
+    let miss = cache.get_if_heads_match(&mut pool, &doc_id, &facet_uuid, &heads);
     assert!(miss.is_none(), "first write should stay probationary");
 
-    cache.put(&doc_id, facet_uuid, heads.clone(), Arc::clone(&value));
-    let hit = cache.get_if_heads_match(&doc_id, &facet_uuid, &heads);
+    cache.put(&mut pool, &doc_id, facet_uuid, heads.clone(), Arc::clone(&value));
+    let hit = cache.get_if_heads_match(&mut pool, &doc_id, &facet_uuid, &heads);
     assert!(hit.is_some(), "second write should be admitted");
 }
 
 #[test]
 fn test_facet_cache_miss_on_heads_change() {
-    let pool = Arc::new(std::sync::Mutex::new(KeyedLruPool::new(10_000)));
-    let mut cache = FacetCacheState::new(pool);
+    let mut pool = KeyedLruPool::new(10_000);
+    let mut cache = FacetCacheState::new();
     let doc_id = "doc-2".to_string();
     let facet_uuid = Uuid::new_v4();
     let heads_a = ChangeHashSet(Vec::new().into());
     let heads_b = ChangeHashSet(Arc::from([automerge::ChangeHash([1u8; 32])]));
     let value = Arc::new(serde_json::json!({"content":"a"}));
 
-    cache.put(&doc_id, facet_uuid, heads_a.clone(), Arc::clone(&value));
-    cache.put(&doc_id, facet_uuid, heads_a.clone(), Arc::clone(&value));
+    cache.put(&mut pool, &doc_id, facet_uuid, heads_a.clone(), Arc::clone(&value));
+    cache.put(&mut pool, &doc_id, facet_uuid, heads_a.clone(), Arc::clone(&value));
     assert!(cache
-        .get_if_heads_match(&doc_id, &facet_uuid, &heads_a)
+        .get_if_heads_match(&mut pool, &doc_id, &facet_uuid, &heads_a)
         .is_some());
     assert!(cache
-        .get_if_heads_match(&doc_id, &facet_uuid, &heads_b)
+        .get_if_heads_match(&mut pool, &doc_id, &facet_uuid, &heads_b)
         .is_none());
 }
 
 #[test]
 fn test_facet_cache_large_one_hit_entries_do_not_pollute() {
-    let pool = Arc::new(std::sync::Mutex::new(KeyedLruPool::new(1024)));
-    let mut cache = FacetCacheState::new(pool);
+    let mut pool = KeyedLruPool::new(1024);
+    let mut cache = FacetCacheState::new();
     let doc_id = "doc-3".to_string();
     let heads = ChangeHashSet(Vec::new().into());
 
@@ -1835,10 +1835,10 @@ fn test_facet_cache_large_one_hit_entries_do_not_pollute() {
         let facet_uuid = Uuid::new_v4();
         let payload = "x".repeat(4 * 1024);
         let value = Arc::new(serde_json::json!({"idx": index, "payload": payload}));
-        cache.put(&doc_id, facet_uuid, heads.clone(), Arc::clone(&value));
+        cache.put(&mut pool, &doc_id, facet_uuid, heads.clone(), Arc::clone(&value));
         assert!(
             cache
-                .get_if_heads_match(&doc_id, &facet_uuid, &heads)
+                .get_if_heads_match(&mut pool, &doc_id, &facet_uuid, &heads)
                 .is_none(),
             "probationary one-hit values should not be admitted"
         );
@@ -1868,8 +1868,8 @@ async fn test_v2_updated_at_merge() -> Res<()> {
         handle.document_id().clone()
     };
 
-    let entry_pool = Arc::new(std::sync::Mutex::new(KeyedLruPool::new(1000)));
-    let doc_pool = Arc::new(std::sync::Mutex::new(KeyedLruPool::new(1000)));
+    let entry_pool = Arc::new(surelock::mutex::Mutex::new(KeyedLruPool::new(1000)));
+    let doc_pool = Arc::new(surelock::mutex::Mutex::new(KeyedLruPool::new(1000)));
     let (repo, stop_token) = DrawerRepo::load(
         Arc::clone(&big_repo),
         drawer_doc_id,
@@ -2081,8 +2081,8 @@ async fn test_v2_facet_blame_maintenance() -> Res<()> {
         handle.document_id().clone()
     };
 
-    let entry_pool = Arc::new(std::sync::Mutex::new(KeyedLruPool::new(1000)));
-    let doc_pool = Arc::new(std::sync::Mutex::new(KeyedLruPool::new(1000)));
+    let entry_pool = Arc::new(surelock::mutex::Mutex::new(KeyedLruPool::new(1000)));
+    let doc_pool = Arc::new(surelock::mutex::Mutex::new(KeyedLruPool::new(1000)));
     let (repo, stop_token) = DrawerRepo::load(
         Arc::clone(&big_repo),
         drawer_doc_id,
@@ -2242,8 +2242,8 @@ async fn test_v2_listener_is_scoped_to_drawer_doc() -> Res<()> {
     let drawer_doc_id_a = make_drawer_doc().await?;
     let drawer_doc_id_b = make_drawer_doc().await?;
 
-    let entry_pool = Arc::new(std::sync::Mutex::new(KeyedLruPool::new(1000)));
-    let doc_pool = Arc::new(std::sync::Mutex::new(KeyedLruPool::new(1000)));
+    let entry_pool = Arc::new(surelock::mutex::Mutex::new(KeyedLruPool::new(1000)));
+    let doc_pool = Arc::new(surelock::mutex::Mutex::new(KeyedLruPool::new(1000)));
 
     let (repo_a, stop_a) = DrawerRepo::load(
         Arc::clone(&big_repo),
@@ -2318,8 +2318,8 @@ async fn test_v2_content_update_does_not_emit_drawer_membership_events() -> Res<
         handle.document_id().clone()
     };
 
-    let entry_pool = Arc::new(std::sync::Mutex::new(KeyedLruPool::new(1000)));
-    let doc_pool = Arc::new(std::sync::Mutex::new(KeyedLruPool::new(1000)));
+    let entry_pool = Arc::new(surelock::mutex::Mutex::new(KeyedLruPool::new(1000)));
+    let doc_pool = Arc::new(surelock::mutex::Mutex::new(KeyedLruPool::new(1000)));
     let (repo, stop_token) = DrawerRepo::load(
         Arc::clone(&big_repo),
         drawer_doc_id,
@@ -2404,8 +2404,8 @@ async fn test_diff_events_delete_origin_uses_map_deleted_tombstone() -> Res<()> 
         handle.document_id().clone()
     };
 
-    let entry_pool = Arc::new(std::sync::Mutex::new(KeyedLruPool::new(1000)));
-    let doc_pool = Arc::new(std::sync::Mutex::new(KeyedLruPool::new(1000)));
+    let entry_pool = Arc::new(surelock::mutex::Mutex::new(KeyedLruPool::new(1000)));
+    let doc_pool = Arc::new(surelock::mutex::Mutex::new(KeyedLruPool::new(1000)));
     let (repo, stop_token) = DrawerRepo::load(
         Arc::clone(&big_repo),
         drawer_doc_id,
@@ -2490,8 +2490,8 @@ async fn test_add_rejects_unknown_facet_tag() -> Res<()> {
         daybook_types::doc::UserPathBuf::from("/duser-wip-localtest/ddev-wip-iroh-localtest"),
         new_meta_store_sql().await?,
         std::env::temp_dir().join(Uuid::new_v4().to_string()),
-        Arc::new(std::sync::Mutex::new(KeyedLruPool::new(1000))),
-        Arc::new(std::sync::Mutex::new(KeyedLruPool::new(1000))),
+        Arc::new(surelock::mutex::Mutex::new(KeyedLruPool::new(1000))),
+        Arc::new(surelock::mutex::Mutex::new(KeyedLruPool::new(1000))),
         None,
     )
     .await?;
@@ -2540,8 +2540,8 @@ async fn test_add_rejects_self_reference_without_target_facet() -> Res<()> {
         daybook_types::doc::UserPathBuf::from("/duser-wip-localtest/ddev-wip-iroh-localtest"),
         new_meta_store_sql().await?,
         std::env::temp_dir().join(Uuid::new_v4().to_string()),
-        Arc::new(std::sync::Mutex::new(KeyedLruPool::new(1000))),
-        Arc::new(std::sync::Mutex::new(KeyedLruPool::new(1000))),
+        Arc::new(surelock::mutex::Mutex::new(KeyedLruPool::new(1000))),
+        Arc::new(surelock::mutex::Mutex::new(KeyedLruPool::new(1000))),
         None,
     )
     .await?;
@@ -2600,8 +2600,8 @@ async fn test_add_accepts_body_self_reference_with_empty_fragment_for_present_ta
         daybook_types::doc::UserPathBuf::from("/duser-wip-localtest/ddev-wip-iroh-localtest"),
         new_meta_store_sql().await?,
         std::env::temp_dir().join(Uuid::new_v4().to_string()),
-        Arc::new(std::sync::Mutex::new(KeyedLruPool::new(1000))),
-        Arc::new(std::sync::Mutex::new(KeyedLruPool::new(1000))),
+        Arc::new(surelock::mutex::Mutex::new(KeyedLruPool::new(1000))),
+        Arc::new(surelock::mutex::Mutex::new(KeyedLruPool::new(1000))),
         None,
     )
     .await?;
@@ -2773,8 +2773,8 @@ async fn perf_drawer_add_disk_baseline() -> Res<()> {
         handle.document_id().clone()
     };
 
-    let entry_pool = Arc::new(std::sync::Mutex::new(KeyedLruPool::new(4000)));
-    let doc_pool = Arc::new(std::sync::Mutex::new(KeyedLruPool::new(4000)));
+    let entry_pool = Arc::new(surelock::mutex::Mutex::new(KeyedLruPool::new(4000)));
+    let doc_pool = Arc::new(surelock::mutex::Mutex::new(KeyedLruPool::new(4000)));
     let (repo, stop_token) = DrawerRepo::load(
         Arc::clone(&big_repo),
         drawer_doc_id,

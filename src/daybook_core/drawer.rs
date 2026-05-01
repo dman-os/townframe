@@ -24,6 +24,7 @@ pub use crate::drawer::types::{DocBundle, DocEntry, DocEntryDiff, DocNBranches, 
 use cache::*;
 use lru::SharedKeyedLruPool;
 use types::{BranchSnapshot, DocDeleteTombstone};
+use cache::FacetCacheKey;
 
 use automerge::ReadDoc;
 use daybook_types::doc::{ChangeHashSet, DocId, FacetKey, FacetRaw};
@@ -47,19 +48,20 @@ pub struct DrawerRepo {
     local_user_path: daybook_types::doc::UserPathBuf,
 
     // LRU Caches
-    entry_cache: Arc<DHashMap<DocId, DocEntry>>,
-    facet_cache: std::sync::Mutex<FacetCacheState>,
+    entry_cache: surelock::mutex::Mutex<HashMap<DocId, DocEntry>>,
+    facet_cache: surelock::mutex::Mutex<FacetCacheState>,
     facet_schema_validators:
-        std::sync::Mutex<HashMap<(String, String), Arc<jsonschema::Validator>>>,
-    branch_handles: Arc<DHashMap<String, am_utils_rs::repo::BigDocHandle>>,
+        surelock::mutex::Mutex<HashMap<(String, String), Arc<jsonschema::Validator>>>,
+    branch_handles: surelock::mutex::Mutex<HashMap<String, am_utils_rs::repo::BigDocHandle>>,
 
     // LRU Pools (Policy only)
     entry_pool: SharedKeyedLruPool<DocId>,
+    doc_pool: SharedKeyedLruPool<FacetCacheKey>,
 
     pub registry: Arc<crate::repos::ListenersRegistry>,
     cancel_token: CancellationToken,
     _change_listener_tickets: Vec<am_utils_rs::repo::BigRepoChangeListenerRegistration>,
-    current_heads: std::sync::Mutex<ChangeHashSet>,
+    current_heads: surelock::mutex::Mutex<ChangeHashSet>,
     drawer_doc_handle: am_utils_rs::repo::BigDocHandle,
     meta_store_sql: SqlCtx,
     plugs_repo: Option<Arc<crate::plugs::PlugsRepo>>,
@@ -134,15 +136,16 @@ impl DrawerRepo {
             drawer_doc_id,
             local_actor_id,
             local_user_path,
-            entry_cache: Arc::new(DHashMap::new()),
-            facet_cache: std::sync::Mutex::new(FacetCacheState::new(doc_pool)),
-            facet_schema_validators: std::sync::Mutex::new(HashMap::new()),
-            branch_handles: Arc::new(DHashMap::new()),
+            entry_cache: surelock::mutex::Mutex::new(HashMap::new()),
+            facet_cache: surelock::mutex::Mutex::new(FacetCacheState::new()),
+            facet_schema_validators: surelock::mutex::Mutex::new(HashMap::new()),
+            branch_handles: surelock::mutex::Mutex::new(HashMap::new()),
             entry_pool,
+            doc_pool,
             registry: crate::repos::ListenersRegistry::new(),
             cancel_token: main_cancel_token.child_token(),
             _change_listener_tickets: vec![ticket],
-            current_heads: initial_heads.into(),
+            current_heads: surelock::mutex::Mutex::new(initial_heads),
             drawer_doc_handle: drawer_am_handle,
             meta_store_sql: meta_db_pool,
             #[cfg(not(test))]
@@ -244,7 +247,6 @@ impl DrawerRepo {
     }
 
     async fn get_branch_heads_by_doc_id(&self, branch_doc_id: &str) -> Res<Option<ChangeHashSet>> {
-        info!("XXX get_branch_heads_by_doc_id enter");
         let Some(handle) = self.get_handle_by_branch_doc_id(branch_doc_id).await? else {
             return Ok(None);
         };
@@ -259,7 +261,6 @@ impl DrawerRepo {
         doc_id: &DocId,
         branch_path: &daybook_types::doc::BranchPath,
     ) -> Res<Option<ChangeHashSet>> {
-        info!("XXX get_branch_heads_for_path enter");
         let Some(branch_ref) = self.get_branch_ref(doc_id, branch_path).await? else {
             return Ok(None);
         };
@@ -271,27 +272,24 @@ impl DrawerRepo {
         &self,
         branch_doc_id: &str,
     ) -> Res<Option<am_utils_rs::repo::BigDocHandle>> {
-        info!(%branch_doc_id, "XXX get_handle_by_branch_doc_id enter");
-        if let Some(handle) = self.branch_handles.get(branch_doc_id) {
-            info!(%branch_doc_id, "XXX get_handle_by_branch_doc_id cache hit");
-            return Ok(Some(handle.clone()));
+        if let Some(handle) = surelock::key::lock_scope(|key| {
+            let (handles, _key) = key.lock(&self.branch_handles);
+            handles.get(branch_doc_id).cloned()
+        }) {
+            return Ok(Some(handle));
         }
         let document_id = DocumentId::from_str(branch_doc_id)?;
-        info!(%branch_doc_id, "XXX get_handle_by_branch_doc_id calling get_doc");
         let has_local = self.big_repo.get_doc(&document_id).await?.is_some();
         if !has_local {
-            info!(%branch_doc_id, "XXX get_handle_by_branch_doc_id no local doc");
             return Ok(None);
         }
-        info!(%branch_doc_id, "XXX get_handle_by_branch_doc_id calling get_doc again");
         let Some(handle) = self.big_repo.get_doc(&document_id).await? else {
-            info!(%branch_doc_id, "XXX get_handle_by_branch_doc_id gone between calls");
             return Ok(None);
         };
-        info!(%branch_doc_id, "XXX get_handle_by_branch_doc_id got handle");
-        self.branch_handles
-            .insert(branch_doc_id.to_string(), handle.clone());
-        info!(%branch_doc_id, "XXX get_handle_by_branch_doc_id exit");
+        surelock::key::lock_scope(|key| {
+            let (mut handles, _key) = key.lock(&self.branch_handles);
+            handles.insert(branch_doc_id.to_string(), handle.clone());
+        });
         Ok(Some(handle))
     }
 
@@ -301,16 +299,13 @@ impl DrawerRepo {
         branch_path: &daybook_types::doc::BranchPath,
         heads: &ChangeHashSet,
     ) -> Res<Option<am_utils_rs::repo::BigDocHandle>> {
-        info!(%doc_id, %branch_path, "XXX resolve_handle_for_branch_heads enter");
         let Some(branch_ref) = self.get_branch_ref(doc_id, branch_path).await? else {
-            info!(%doc_id, %branch_path, "XXX resolve_handle_for_branch_heads no branch ref");
             return Ok(None);
         };
         let Some(handle) = self
             .get_handle_by_branch_doc_id(&branch_ref.branch_doc_id)
             .await?
         else {
-            info!(%doc_id, %branch_path, branch_doc_id = %branch_ref.branch_doc_id, "XXX resolve_handle_for_branch_heads no handle");
             return Ok(None);
         };
         let (contains_all_heads, missing_heads) = handle
@@ -325,10 +320,8 @@ impl DrawerRepo {
             })
             .await?;
         if !contains_all_heads {
-            info!(%doc_id, %branch_path, ?missing_heads, "XXX resolve_handle_for_branch_heads missing heads");
             return Ok(None);
         }
-        info!(%doc_id, %branch_path, "XXX resolve_handle_for_branch_heads exit");
         Ok(Some(handle))
     }
 
@@ -465,10 +458,7 @@ impl DrawerRepo {
 
             let schema_json = serde_json::to_value(&facet_manifest.value_schema)?;
             let schema_cache_key = (facet_tag.clone(), serde_json::to_string(&schema_json)?);
-            let mut cache = self.facet_schema_validators.lock().expect(ERROR_MUTEX);
-            let validator = if let Some(existing) = cache.get(&schema_cache_key) {
-                Arc::clone(existing)
-            } else {
+            let validator = {
                 let compiled = jsonschema::validator_for(&schema_json).map_err(|err| {
                     eyre::eyre!(
                         "failed to compile facet schema validator for facet_manifest tag '{}': {err}",
@@ -476,8 +466,15 @@ impl DrawerRepo {
                     )
                 })?;
                 let compiled = Arc::new(compiled);
-                cache.insert(schema_cache_key, Arc::clone(&compiled));
-                compiled
+                surelock::key::lock_scope(|key| {
+                    let (mut cache, _key) = key.lock(&self.facet_schema_validators);
+                    if let Some(existing) = cache.get(&schema_cache_key) {
+                        Arc::clone(existing)
+                    } else {
+                        cache.insert(schema_cache_key, Arc::clone(&compiled));
+                        compiled
+                    }
+                })
             };
             if let Err(validation_error) = validator.validate(facet_value) {
                 eyre::bail!(

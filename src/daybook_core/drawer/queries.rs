@@ -13,7 +13,10 @@ use daybook_types::doc::{ChangeHashSet, Doc, DocId, FacetKey, FacetRaw, WellKnow
 // queries
 impl DrawerRepo {
     pub fn get_drawer_heads(&self) -> ChangeHashSet {
-        self.current_heads.lock().expect(ERROR_MUTEX).clone()
+        surelock::key::lock_scope(|key| {
+            let (heads, _key) = key.lock(&self.current_heads);
+            heads.clone()
+        })
     }
 
     #[tracing::instrument(level = "trace", skip_all)]
@@ -23,14 +26,17 @@ impl DrawerRepo {
         }
         let (drawer_heads, entries) = self.current_drawer_entries().await?;
         {
-            let mut pool = self.entry_pool.lock().expect(ERROR_MUTEX);
-            for (doc_id, entry) in &entries {
-                let pruned = pool.insert_key(doc_id, 1);
-                for pkey in pruned {
-                    self.entry_cache.remove(&pkey);
-                }
-                self.entry_cache.insert(doc_id.clone(), entry.clone());
-            }
+            surelock::key::lock_scope(|key| {
+                key.lock_with(&(&self.entry_pool, &self.entry_cache), |(mut pool, mut cache)| {
+                    for (doc_id, entry) in &entries {
+                        let pruned = pool.insert_key(doc_id, 1);
+                        for pkey in pruned {
+                            cache.remove(&pkey);
+                        }
+                        cache.insert(doc_id.clone(), entry.clone());
+                    }
+                });
+            });
         }
         let mut results = entries
             .into_iter()
@@ -65,7 +71,10 @@ impl DrawerRepo {
         if self.cancel_token.is_cancelled() {
             eyre::bail!("repo is stopped");
         }
-        let current_heads = self.current_heads.lock().expect(ERROR_MUTEX).clone();
+        let current_heads = surelock::key::lock_scope(|key| {
+            let (heads, _key) = key.lock(&self.current_heads);
+            heads.clone()
+        });
         if heads == &current_heads {
             return self.get_entry(doc_id).await;
         }
@@ -74,33 +83,36 @@ impl DrawerRepo {
 
     #[tracing::instrument(skip_all, fields(%doc_id))]
     pub async fn get_entry(&self, doc_id: &DocId) -> Res<Option<DocEntry>> {
-        info!("XXX get_entry enter");
         if self.cancel_token.is_cancelled() {
             eyre::bail!("repo is stopped");
         }
-        info!("XXX getting from cache, checking entry_cache");
-        if let Some(cached) = self.entry_cache.get(doc_id) {
-            info!("XXX cache hit, locking entry_pool");
-            let mut pool = self.entry_pool.lock().expect(ERROR_MUTEX);
-            pool.touch_key(doc_id);
-            return Ok(Some(cached.clone()));
+        if let Some(cached) = surelock::key::lock_scope(|key| {
+            key.lock_with(&(&self.entry_pool, &self.entry_cache), |(mut pool, cache)| {
+                cache.get(doc_id).map(|entry| {
+                    pool.touch_key(doc_id);
+                    entry.clone()
+                })
+            }).0
+        }) {
+            return Ok(Some(cached));
         }
 
-        info!("XXX cache miss, hydrating from drawer doc");
-        let heads = self.current_heads.lock().expect(ERROR_MUTEX).clone();
+        let heads = surelock::key::lock_scope(|key| {
+            let (heads, _key) = key.lock(&self.current_heads);
+            heads.clone()
+        });
         let entry = self.hydrate_entry_at_heads(doc_id, &heads).await?;
 
-        info!(?entry, "XXX entry result from drawer doc");
         if let Some(entry) = entry {
-            info!("XXX locking pool to update cache");
-            let mut pool = self.entry_pool.lock().expect(ERROR_MUTEX);
-            let pruned = pool.insert_key(doc_id, 1);
-            for pkey in pruned {
-                self.entry_cache.remove(&pkey);
-            }
-            info!("XXX updating cache");
-            self.entry_cache.insert(doc_id.clone(), entry.clone());
-            info!("XXX done");
+            surelock::key::lock_scope(|key| {
+                key.lock_with(&(&self.entry_pool, &self.entry_cache), |(mut pool, mut cache)| {
+                    let pruned = pool.insert_key(doc_id, 1);
+                    for pkey in pruned {
+                        cache.remove(&pkey);
+                    }
+                    cache.insert(doc_id.clone(), entry.clone());
+                });
+            });
             Ok(Some(entry))
         } else {
             Ok(None)
@@ -122,13 +134,11 @@ impl DrawerRepo {
         if self.cancel_token.is_cancelled() {
             eyre::bail!("repo is stopped");
         }
-        info!(%doc_id, %branch_path, "XXX get_at_branch_heads_with_facets_arc enter");
 
         let Some(handle) = self
             .resolve_handle_for_branch_heads(doc_id, branch_path, heads)
             .await?
         else {
-            info!(%doc_id, %branch_path, "XXX get_at_branch_heads_with_facets_arc no handle");
             return Ok(None);
         };
 
@@ -192,7 +202,6 @@ impl DrawerRepo {
         for (uuid, heads, value) in to_cache {
             self.facet_cache_put(doc_id, uuid, heads, value);
         }
-        info!(%doc_id, %branch_path, "XXX get_at_branch_heads_with_facets_arc exit");
 
         Ok(Some((facets, facet_heads_by_key)))
     }
@@ -205,16 +214,13 @@ impl DrawerRepo {
         branch_path: &daybook_types::doc::BranchPath,
         facet_keys: Option<Vec<FacetKey>>,
     ) -> Res<Option<Arc<Doc>>> {
-        info!(%doc_id, %branch_path, "XXX get_doc_with_facets_at_branch enter");
         let Some(branch_heads) = self.get_branch_heads_for_path(doc_id, branch_path).await? else {
-            info!(%doc_id, %branch_path, "XXX get_doc_with_facets_at_branch no branch heads");
             return Ok(None);
         };
 
         let out = self
             .get_doc_with_facets_at_branch_heads(doc_id, branch_path, &branch_heads, facet_keys)
             .await;
-        info!(%doc_id, %branch_path, "XXX get_doc_with_facets_at_branch exit");
         out
     }
 
@@ -235,7 +241,6 @@ impl DrawerRepo {
         heads: &ChangeHashSet,
         facet_keys: Option<Vec<FacetKey>>,
     ) -> Res<Option<Arc<Doc>>> {
-        info!("XXX get_doc_with_facets_at_branch_heads entered");
         let facets = self
             .get_at_branch_heads_with_facets_arc(id, branch_path, heads, facet_keys)
             .await?

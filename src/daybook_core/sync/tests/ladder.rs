@@ -118,9 +118,7 @@ async fn assert_title_synced(
 ) -> Res<()> {
     let title_key = FacetKey::from(WellKnownFacetTag::TitleGeneric);
     let branch = BranchPathBuf::from("main");
-    info!("XXX waiting for head parity");
     wait_for_doc_head_parity(node_a, node_b, doc_id, &branch, Duration::from_secs(30)).await?;
-    info!("XXX head parity detected");
     let doc_on_a = node_a
         .drawer
         .get_with_heads(doc_id, &branch, None)
@@ -597,7 +595,6 @@ async fn iroh_sync_connected_doc_updates_propagate_other_then_originator() -> Re
     let (_temp_root, node_a, node_b, _) = boot_connected_sync_pair().await?;
     {
         let title_key = FacetKey::from(WellKnownFacetTag::TitleGeneric);
-        info!("XXX adding doc");
         let doc_id = node_a
             .drawer
             .add(daybook_types::doc::AddDocArgs {
@@ -613,19 +610,13 @@ async fn iroh_sync_connected_doc_updates_propagate_other_then_originator() -> Re
             })
             .await?;
 
-        info!("XXX waiting for doc to sync");
         wait_for_doc_presence_with_activity(&node_b, &doc_id, Duration::from_secs(60)).await?;
-        info!("XXX asserting title exists");
         assert_title_synced(&node_a, &node_b, &doc_id, "Base title").await?;
 
-        info!("XXX updating doc on node b");
         update_title_at_main_branch(&node_b, &doc_id, "B update 1").await?;
-        info!("XXX waiting for update on node a");
         assert_title_synced(&node_a, &node_b, &doc_id, "B update 1").await?;
 
-        info!("XXX updating title on node a");
         update_title_at_main_branch(&node_a, &doc_id, "A update 2").await?;
-        info!("XXX waiting for update on node b");
         assert_title_synced(&node_a, &node_b, &doc_id, "A update 2").await?;
     }
     node_b.stop().await?;
@@ -832,7 +823,6 @@ async fn iroh_sync_shutdown_peer_updates_catch_up_after_reconnect() -> Res<()> {
         path_a = ?node_a.ctx.layout,
         addr_b = ?node_b.sync_repo.endpoint_addr(),
         path_b = ?node_b.ctx.layout,
-        "XXX"
     );
     let repo_a_path = temp_root.path().join("repo-a");
 
@@ -893,7 +883,6 @@ async fn iroh_sync_shutdown_peer_updates_catch_up_after_reconnect() -> Res<()> {
             path_a = ?reopened_a.ctx.layout,
             addr_b = ?node_b.sync_repo.endpoint_addr(),
             path_b = ?node_b.ctx.layout,
-            "XXX"
         );
         node_b
             .sync_repo
