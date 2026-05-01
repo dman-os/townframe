@@ -1903,7 +1903,7 @@ where
         };
         let raw = blob_by_digest
             .get(&digest)
-            .ok_or_else(|| ferr!("blob not found for ordered sedimentree item"))?;
+            .ok_or_eyre("blob not found for ordered sedimentree item")?;
         buf.extend_from_slice(raw);
     }
 

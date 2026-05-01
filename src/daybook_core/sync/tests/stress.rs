@@ -245,6 +245,26 @@ async fn connect_topology(
     nodes: &[Option<SyncTestNode>],
     edges: &[(usize, usize)],
 ) -> Res<Vec<HashSet<EndpointId>>> {
+    // Pre-provision all active nodes with each other's endpoint IDs
+    // so that auth doesn't block connections in the mesh topology.
+    let active_nodes: Vec<(usize, &SyncTestNode)> = nodes
+        .iter()
+        .enumerate()
+        .filter_map(|(i, n)| n.as_ref().map(|n| (i, n)))
+        .collect();
+    for (i, node_i) in &active_nodes {
+        for (j, node_j) in &active_nodes {
+            if i == j {
+                continue;
+            }
+            let peer_endpoint_id = node_j.sync_repo.router.endpoint().id();
+            node_i
+                .sync_repo
+                .allow_peer_by_endpoint_id(peer_endpoint_id)
+                .await?;
+        }
+    }
+
     let mut endpoint_sets = vec![HashSet::<EndpointId>::new(); NODE_COUNT];
     for (a, b) in edges {
         let node_a = nodes[*a]

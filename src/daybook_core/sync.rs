@@ -635,6 +635,13 @@ impl IrohSyncRepo {
         })
     }
 
+    /// Allow a peer to connect to this node by their endpoint ID.
+    /// Useful for test setups where nodes need to connect in a mesh topology.
+    pub async fn allow_peer_by_endpoint_id(&self, endpoint_id: EndpointId) -> Res<()> {
+        let peer_key = daybook_types::doc::format_peer_key(endpoint_id.as_bytes());
+        self.sync_store.allow_peer(peer_key).await
+    }
+
     async fn reserve_endpoint_connection(&self, peer_id: PeerId) -> bool {
         let mut active_peers = self.active_peers.write().await;
         if active_peers.contains_key(&peer_id) {
@@ -1433,101 +1440,10 @@ mod tests {
         Ok(())
     }
 
-    fn copy_dir_all(src: &std::path::Path, dst: &std::path::Path) -> Res<()> {
-        std::fs::create_dir_all(dst)
-            .wrap_err_with(|| format!("failed creating copy destination {}", dst.display()))?;
-        for entry in std::fs::read_dir(src)
-            .wrap_err_with(|| format!("failed reading source directory {}", src.display()))?
-        {
-            let entry = entry
-                .wrap_err_with(|| format!("failed reading directory entry in {}", src.display()))?;
-            let file_type = entry.file_type().wrap_err_with(|| {
-                format!(
-                    "failed getting file type for source entry {}",
-                    entry.path().display()
-                )
-            })?;
-            let src_path = entry.path();
-            let dst_path = dst.join(entry.file_name());
-            if file_type.is_dir() {
-                copy_dir_all(&src_path, &dst_path).wrap_err_with(|| {
-                    format!(
-                        "failed recursively copying directory {} -> {}",
-                        src_path.display(),
-                        dst_path.display()
-                    )
-                })?;
-            } else if file_type.is_file() {
-                match std::fs::copy(&src_path, &dst_path) {
-                    Ok(_) => {}
-                    Err(err) if err.kind() == std::io::ErrorKind::NotFound => {
-                        // SQLite WAL/SHM sidecars can disappear between read_dir and copy.
-                        // Missing any other file is unexpected and should fail loudly.
-                        let file_name = src_path
-                            .file_name()
-                            .and_then(|name| name.to_str())
-                            .unwrap_or_default();
-                        if file_name.ends_with("-wal") || file_name.ends_with("-shm") {
-                            continue;
-                        }
-                        return Err(err).wrap_err_with(|| {
-                            format!(
-                                "unexpected missing file during copy {} -> {}",
-                                src_path.display(),
-                                dst_path.display()
-                            )
-                        });
-                    }
-                    Err(err) => {
-                        return Err(err).wrap_err_with(|| {
-                            format!(
-                                "failed copying file {} -> {}",
-                                src_path.display(),
-                                dst_path.display()
-                            )
-                        });
-                    }
-                }
-            }
-        }
-        Ok(())
-    }
-
-    // FIXME: this sucks, it should be using RepoCtx directly and
-    // duplicates repo init code
     async fn init_and_copy_repo_pair(
         repo_a_path: &std::path::Path,
         repo_b_path: &std::path::Path,
     ) -> Res<()> {
-        async fn force_delete_journal_mode(sqlite_path: &std::path::Path) -> Res<()> {
-            use sqlx::sqlite::{SqliteConnectOptions, SqlitePoolOptions};
-            use std::str::FromStr;
-
-            let db_url = format!("sqlite://{}", sqlite_path.display());
-            let pool = SqlitePoolOptions::new()
-                .max_connections(1)
-                .connect_with(
-                    SqliteConnectOptions::from_str(&db_url)?
-                        .create_if_missing(false)
-                        .busy_timeout(Duration::from_secs(5)),
-                )
-                .await?;
-            let _ = sqlx::query("PRAGMA wal_checkpoint(TRUNCATE)")
-                .execute(&pool)
-                .await;
-            let mode: String = sqlx::query_scalar("PRAGMA journal_mode=DELETE")
-                .fetch_one(&pool)
-                .await?;
-            if mode.to_lowercase() != "delete" {
-                eyre::bail!(
-                    "failed forcing sqlite journal mode to DELETE for {} (got: {mode})",
-                    sqlite_path.display()
-                );
-            }
-            pool.close().await;
-            Ok(())
-        }
-
         tokio::fs::create_dir_all(repo_a_path).await?;
         let device_name = "test-device".to_string();
         let rtx = RepoCtx::init(
@@ -1538,56 +1454,43 @@ mod tests {
         )
         .await?;
         let source_repo_id = rtx.repo_id.clone();
-        let source_repo_user_id =
-            crate::repo::globals::get_string_global(&rtx.sql, "global.user_id")
-                .await?
-                .ok_or_eyre("source repo user_id missing")?;
-        let secret_repo = rtx.secret_repo.clone();
+        let source_app_doc_id = rtx.doc_app.document_id().clone();
+        let source_drawer_doc_id = rtx.doc_drawer.document_id().clone();
         rtx.shutdown().await?;
-        force_delete_journal_mode(&repo_a_path.join("sqlite.db")).await?;
-        force_delete_journal_mode(&repo_a_path.join("samod").join("big_repo.sqlite")).await?;
 
-        copy_dir_all(repo_a_path, repo_b_path)?;
-        let repo_b_sql = crate::app::SqlCtx::new(crate::app::SqlConfig {
-            database_url: format!("sqlite://{}", repo_b_path.join("sqlite.db").display()),
-        })
-        .await?;
-        crate::repo::globals::upsert_string_global(&repo_b_sql, "global.repo_id", &source_repo_id)
-            .await?;
-        crate::repo::globals::upsert_string_global(
-            &repo_b_sql,
-            "global.user_id",
-            &source_repo_user_id,
-        )
-        .await?;
-        let repo_b_checkout_id = {
-            let id = Uuid::new_v4();
-            let id = utils_rs::hash::encode_base58_multibase(id);
-            format!("dcheckout_{id}")
-        };
-        crate::repo::globals::upsert_string_global(
-            &repo_b_sql,
-            "global.checkout_id",
-            &repo_b_checkout_id,
-        )
-        .await?;
-        let repo_b_repo_id = crate::repo::globals::get_string_global(&repo_b_sql, "global.repo_id")
-            .await?
-            .ok_or_eyre("repo_b repo_id missing after copy")?;
-        if repo_b_repo_id != source_repo_id {
-            eyre::bail!(
-                "copied repo_id mismatch (source={}, copied={})",
-                source_repo_id,
-                repo_b_repo_id
-            );
+        let seed_node = open_sync_node(repo_a_path).await?;
+        let result = async {
+            let ticket = seed_node.sync_repo.get_clone_ticket_url().await?;
+            bootstrap_clone_repo_from_url_for_tests(&ticket, repo_b_path).await?;
+
+            let ctx =
+                RepoCtx::open(repo_b_path, RepoOpenOptions {}, "test-device".into()).await?;
+            if ctx.repo_id != source_repo_id {
+                eyre::bail!(
+                    "init repo_id mismatch after clone (source={}, cloned={})",
+                    source_repo_id,
+                    ctx.repo_id
+                );
+            }
+            if ctx.doc_app.document_id() != &source_app_doc_id {
+                eyre::bail!(
+                    "init app doc mismatch after clone (source={}, cloned={})",
+                    source_app_doc_id,
+                    ctx.doc_app.document_id()
+                );
+            }
+            if ctx.doc_drawer.document_id() != &source_drawer_doc_id {
+                eyre::bail!(
+                    "init drawer doc mismatch after clone (source={}, cloned={})",
+                    source_drawer_doc_id,
+                    ctx.doc_drawer.document_id()
+                );
+            }
+            ctx.shutdown().await
         }
-        secret_repo
-            .set_identity(
-                &repo_b_checkout_id,
-                iroh::SecretKey::generate(&mut rand::rng()),
-            )
-            .await?;
-        Ok(())
+        .await;
+        seed_node.stop().await?;
+        result
     }
 
     async fn bootstrap_clone_repo_from_url_for_tests(
