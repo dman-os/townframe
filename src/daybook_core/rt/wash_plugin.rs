@@ -651,91 +651,100 @@ async fn build_doc_facet_tokens(
     plugin: &Arc<DaybookPlugin>,
     doc_tokens: &dispatch::DocFacetTokens,
 ) -> wasmtime::Result<facet_routine::DocFacetTokens> {
-        let doc_rights = caps::doc_rights_from_facet_acl(&doc_tokens.facet_acl);
-        let doc_token = ctx.table.push(caps::DocToken {
+    let doc_rights = caps::doc_rights_from_facet_acl(&doc_tokens.facet_acl);
+    let doc_token = ctx.table.push(caps::DocToken {
+        doc_id: doc_tokens.doc_id.clone(),
+        branch_path: doc_tokens.branch_path.clone(),
+        staging_branch_path: doc_tokens.staging_branch_path.clone(),
+        heads: doc_tokens.heads.clone(),
+        rights: doc_rights,
+        facet_acl: doc_tokens.facet_acl.clone(),
+    })?;
+
+    let doc = match plugin
+        .get_doc(
+            &doc_tokens.doc_id,
+            &doc_tokens.branch_path,
+            &doc_tokens.heads,
+        )
+        .await
+        .map_err(wasmtime_err)?
+    {
+        Some(doc) => doc,
+        None => {
+            return Ok(facet_routine::DocFacetTokens {
+                doc: doc_token,
+                facets: vec![],
+                tags: vec![],
+            });
+        }
+    };
+
+    // Build facet tokens: for every existing facet that matches any ACL entry,
+    // aggregate rights from all matching entries (tag-wide + key-specific).
+    let mut facet_tokens: Vec<wasmtime::component::Resource<capabilities::FacetToken>> = Vec::new();
+    for (facet_key, _) in doc.facets.iter() {
+        let mut rights = capabilities::FacetRights::empty();
+        for access in &doc_tokens.facet_acl {
+            if access.tag.0 != facet_key.tag.to_string() {
+                continue;
+            }
+            if let Some(id) = &access.key_id {
+                if id != &facet_key.id {
+                    continue;
+                }
+            }
+            rights |= caps::facet_rights_from_access(access);
+        }
+        if rights == capabilities::FacetRights::empty() {
+            continue;
+        }
+        let ftoken = ctx.table.push(caps::FacetToken {
             doc_id: doc_tokens.doc_id.clone(),
             branch_path: doc_tokens.branch_path.clone(),
             staging_branch_path: doc_tokens.staging_branch_path.clone(),
             heads: doc_tokens.heads.clone(),
-            rights: doc_rights,
+            facet_key: facet_key.clone(),
+            rights,
+        })?;
+        facet_tokens.push(ftoken);
+    }
+
+    // Build tag tokens: one per tag that has at least one tag-wide ACL entry.
+    // Aggregate rights from all tag-wide entries for that tag.
+    let mut tag_tokens: Vec<wasmtime::component::Resource<capabilities::FacetTagToken>> =
+        Vec::new();
+    let mut tag_rights_map: std::collections::HashMap<String, capabilities::FacetRights> =
+        std::collections::HashMap::new();
+    for access in &doc_tokens.facet_acl {
+        if access.key_id.is_some() {
+            continue;
+        }
+        let tag_str = access.tag.0.clone();
+        let entry_rights = caps::facet_rights_from_access(access);
+        tag_rights_map
+            .entry(tag_str)
+            .and_modify(|r| *r |= entry_rights)
+            .or_insert(entry_rights);
+    }
+    for (tag_str, rights) in tag_rights_map {
+        let ttoken = ctx.table.push(caps::FacetTagToken {
+            doc_id: doc_tokens.doc_id.clone(),
+            branch_path: doc_tokens.branch_path.clone(),
+            staging_branch_path: doc_tokens.staging_branch_path.clone(),
+            heads: doc_tokens.heads.clone(),
+            tag: tag_str.clone(),
+            rights,
             facet_acl: doc_tokens.facet_acl.clone(),
         })?;
+        tag_tokens.push(ttoken);
+    }
 
-        let doc = match plugin
-            .get_doc(&doc_tokens.doc_id, &doc_tokens.branch_path, &doc_tokens.heads)
-            .await
-            .map_err(wasmtime_err)?
-        {
-            Some(doc) => doc,
-            None => {
-                return Ok(facet_routine::DocFacetTokens {
-                    doc: doc_token,
-                    facets: vec![],
-                    tags: vec![],
-                });
-            }
-        };
-
-        // Build facet tokens: for every existing facet that matches any ACL entry,
-        // aggregate rights from all matching entries (tag-wide + key-specific).
-        let mut facet_tokens: Vec<wasmtime::component::Resource<capabilities::FacetToken>> = Vec::new();
-        for (facet_key, _) in doc.facets.iter() {
-            let mut rights = capabilities::FacetRights::empty();
-            for access in &doc_tokens.facet_acl {
-                if access.tag.0 != facet_key.tag.to_string() {
-                    continue;
-                }
-                if let Some(id) = &access.key_id {
-                    if id != &facet_key.id {
-                        continue;
-                    }
-                }
-                rights |= caps::facet_rights_from_access(access);
-            }
-            if rights == capabilities::FacetRights::empty() {
-                continue;
-            }
-            let ftoken = ctx.table.push(caps::FacetToken {
-                doc_id: doc_tokens.doc_id.clone(),
-                branch_path: doc_tokens.branch_path.clone(),
-                staging_branch_path: doc_tokens.staging_branch_path.clone(),
-                heads: doc_tokens.heads.clone(),
-                facet_key: facet_key.clone(),
-                rights,
-            })?;
-            facet_tokens.push(ftoken);
-        }
-
-        // Build tag tokens: one per tag that has at least one tag-wide ACL entry.
-        // Aggregate rights from all tag-wide entries for that tag.
-        let mut tag_tokens: Vec<wasmtime::component::Resource<capabilities::FacetTagToken>> = Vec::new();
-        let mut tag_rights_map: std::collections::HashMap<String, capabilities::FacetRights> = std::collections::HashMap::new();
-        for access in &doc_tokens.facet_acl {
-            if access.key_id.is_some() {
-                continue;
-            }
-            let tag_str = access.tag.0.clone();
-            let entry_rights = caps::facet_rights_from_access(access);
-            tag_rights_map.entry(tag_str).and_modify(|r| *r |= entry_rights).or_insert(entry_rights);
-        }
-        for (tag_str, rights) in tag_rights_map {
-            let ttoken = ctx.table.push(caps::FacetTagToken {
-                doc_id: doc_tokens.doc_id.clone(),
-                branch_path: doc_tokens.branch_path.clone(),
-                staging_branch_path: doc_tokens.staging_branch_path.clone(),
-                heads: doc_tokens.heads.clone(),
-                tag: tag_str.clone(),
-                rights,
-                facet_acl: doc_tokens.facet_acl.clone(),
-            })?;
-            tag_tokens.push(ttoken);
-        }
-
-        Ok(facet_routine::DocFacetTokens {
-            doc: doc_token,
-            facets: facet_tokens,
-            tags: tag_tokens,
-        })
+    Ok(facet_routine::DocFacetTokens {
+        doc: doc_token,
+        facets: facet_tokens,
+        tags: tag_tokens,
+    })
 }
 
 impl facet_routine::Host for SharedWashCtx {
@@ -777,7 +786,9 @@ impl facet_routine::Host for SharedWashCtx {
         if !config_docs.is_empty() {
             let mut owner_config_docs: HashMap<String, (String, ChangeHashSet)> = HashMap::new();
             for config_doc_meta in config_docs {
-                let owner_plug_id = config_doc_meta.facet_acl.first()
+                let owner_plug_id = config_doc_meta
+                    .facet_acl
+                    .first()
                     .and_then(|a| a.owner_plug_id.clone())
                     .unwrap_or_else(|| plug_id.clone());
                 let (config_doc_id, config_heads) = if let Some(found) =
@@ -789,19 +800,28 @@ impl facet_routine::Host for SharedWashCtx {
                         .plugs_repo
                         .get_or_init_plug_config_doc_id(&owner_plug_id, &dayook_plugin.drawer_repo)
                         .await
-                        .map_err(|err| wasmtime_err(format!(
+                        .map_err(|err| {
+                            wasmtime_err(format!(
                             "error getting/initializing config doc for plug {owner_plug_id}: {err}"
-                        )))?;
+                        ))
+                        })?;
                     let config_heads = dayook_plugin
                         .drawer_repo
                         .get_doc_branches(&config_doc_id)
                         .await
-                        .map_err(|err| wasmtime_err(format!("error getting config doc branches: {err}")))?
+                        .map_err(|err| {
+                            wasmtime_err(format!("error getting config doc branches: {err}"))
+                        })?
                         .and_then(|doc| doc.branches.get("main").cloned())
-                        .ok_or_else(|| wasmtime_err(format!(
-                            "config doc missing main branch for plug {owner_plug_id}"
-                        )))?;
-                    owner_config_docs.insert(owner_plug_id.clone(), (config_doc_id.clone(), config_heads.clone()));
+                        .ok_or_else(|| {
+                            wasmtime_err(format!(
+                                "config doc missing main branch for plug {owner_plug_id}"
+                            ))
+                        })?;
+                    owner_config_docs.insert(
+                        owner_plug_id.clone(),
+                        (config_doc_id.clone(), config_heads.clone()),
+                    );
                     (config_doc_id, config_heads)
                 };
                 let config_doc_tokens_meta = dispatch::DocFacetTokens {
@@ -811,7 +831,8 @@ impl facet_routine::Host for SharedWashCtx {
                     heads: config_heads,
                     facet_acl: config_doc_meta.facet_acl.clone(),
                 };
-                let tokens = build_doc_facet_tokens(self, &dayook_plugin, &config_doc_tokens_meta).await?;
+                let tokens =
+                    build_doc_facet_tokens(self, &dayook_plugin, &config_doc_tokens_meta).await?;
                 config_doc_tokens.push(tokens);
             }
         }

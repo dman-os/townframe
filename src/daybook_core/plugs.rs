@@ -169,7 +169,9 @@ pub fn system_plugs() -> Vec<manifest::PlugManifest> {
                             bundle: "daybook_wflows".into(),
                         },
                         doc_acls: vec![RoutineDocAcl {
-                            doc_predicate: DocPredicateClause::HasTag(WellKnownFacetTag::Note.into()),
+                            doc_predicate: DocPredicateClause::HasTag(
+                                WellKnownFacetTag::Note.into(),
+                            ),
                             facet_acl: vec![
                                 RoutineFacetAccess {
                                     owner_plug_id: None,
@@ -206,7 +208,9 @@ pub fn system_plugs() -> Vec<manifest::PlugManifest> {
                             bundle: "daybook_wflows".into(),
                         },
                         doc_acls: vec![RoutineDocAcl {
-                            doc_predicate: DocPredicateClause::HasTag(WellKnownFacetTag::Embedding.into()),
+                            doc_predicate: DocPredicateClause::HasTag(
+                                WellKnownFacetTag::Embedding.into(),
+                            ),
                             facet_acl: vec![
                                 RoutineFacetAccess {
                                     owner_plug_id: None,
@@ -243,7 +247,9 @@ pub fn system_plugs() -> Vec<manifest::PlugManifest> {
                             bundle: "daybook_wflows".into(),
                         },
                         doc_acls: vec![RoutineDocAcl {
-                            doc_predicate: DocPredicateClause::HasTag(WellKnownFacetTag::Embedding.into()),
+                            doc_predicate: DocPredicateClause::HasTag(
+                                WellKnownFacetTag::Embedding.into(),
+                            ),
                             facet_acl: vec![
                                 RoutineFacetAccess {
                                     owner_plug_id: None,
@@ -280,7 +286,9 @@ pub fn system_plugs() -> Vec<manifest::PlugManifest> {
                             bundle: "daybook_wflows".into(),
                         },
                         doc_acls: vec![RoutineDocAcl {
-                            doc_predicate: DocPredicateClause::HasTag(WellKnownFacetTag::Embedding.into()),
+                            doc_predicate: DocPredicateClause::HasTag(
+                                WellKnownFacetTag::Embedding.into(),
+                            ),
                             facet_acl: vec![RoutineFacetAccess {
                                 owner_plug_id: None,
                                 tag: WellKnownFacetTag::Embedding.into(),
@@ -310,7 +318,9 @@ pub fn system_plugs() -> Vec<manifest::PlugManifest> {
                             bundle: "daybook_wflows".into(),
                         },
                         doc_acls: vec![RoutineDocAcl {
-                            doc_predicate: DocPredicateClause::HasTag(WellKnownFacetTag::LabelGeneric.into()),
+                            doc_predicate: DocPredicateClause::HasTag(
+                                WellKnownFacetTag::LabelGeneric.into(),
+                            ),
                             facet_acl: vec![RoutineFacetAccess {
                                 owner_plug_id: None,
                                 tag: WellKnownFacetTag::LabelGeneric.into(),

@@ -1,8 +1,8 @@
+use api_utils_rs::prelude::*;
 use daybook_types::doc::{AddDocArgs, FacetKey, FacetRaw, WellKnownFacet, WellKnownFacetTag};
 use sqlx::sqlite::SqliteConnectOptions;
 use sqlx::{ConnectOptions, SqlitePool};
 use std::str::FromStr;
-use api_utils_rs::prelude::*;
 
 async fn open_plug_test_local_state(
     test_cx: &daybook_core::test_support::DaybookTestContext,
@@ -27,11 +27,7 @@ async fn dispatch_and_wait(
 ) -> Res<String> {
     let (_doc, heads) = test_cx
         .drawer_repo
-        .get_with_heads(
-            doc_id,
-            &daybook_types::doc::BranchPath::from("main"),
-            None,
-        )
+        .get_with_heads(doc_id, &daybook_types::doc::BranchPath::from("main"), None)
         .await?
         .ok_or_eyre("doc not found")?;
 
@@ -73,17 +69,13 @@ async fn dispatch_and_wait(
     Ok(dispatch_id)
 }
 
-async fn fetch_capability_report(
-    db_pool: &SqlitePool,
-    doc_id: &str,
-) -> Res<serde_json::Value> {
-    let summary_json: String = sqlx::query_scalar(
-        "SELECT summary_json FROM capability_report WHERE doc_id = ?1",
-    )
-    .bind(doc_id)
-    .fetch_one(db_pool)
-    .await
-    .wrap_err_with(|| format!("no capability_report row for doc_id={doc_id}"))?;
+async fn fetch_capability_report(db_pool: &SqlitePool, doc_id: &str) -> Res<serde_json::Value> {
+    let summary_json: String =
+        sqlx::query_scalar("SELECT summary_json FROM capability_report WHERE doc_id = ?1")
+            .bind(doc_id)
+            .fetch_one(db_pool)
+            .await
+            .wrap_err_with(|| format!("no capability_report row for doc_id={doc_id}"))?;
 
     Ok(serde_json::from_str(&summary_json)?)
 }
@@ -100,7 +92,9 @@ async fn fetch_capability_report_v2(
     .bind(test_name)
     .fetch_one(db_pool)
     .await
-    .wrap_err_with(|| format!("no capability_report_v2 row for doc_id={doc_id} test_name={test_name}"))?;
+    .wrap_err_with(|| {
+        format!("no capability_report_v2 row for doc_id={doc_id} test_name={test_name}")
+    })?;
 
     Ok(serde_json::from_str(&summary_json)?)
 }
@@ -144,13 +138,21 @@ async fn test_full_command_capability_report() -> Res<()> {
     assert_eq!(report["invocation"]["kind"], "Command");
 
     let facet_keys: Vec<String> = serde_json::from_value(report["primary_facet_keys"].clone())?;
-    assert!(facet_keys.iter().any(|k| k.starts_with("org.example.daybook.labelgeneric")));
+    assert!(facet_keys
+        .iter()
+        .any(|k| k.starts_with("org.example.daybook.labelgeneric")));
 
     let tag_keys: Vec<String> = serde_json::from_value(report["primary_tag_keys"].clone())?;
-    assert!(tag_keys.iter().any(|k| k == "org.example.daybook.labelgeneric" || k == "org.example.daybook.note"));
+    assert!(tag_keys
+        .iter()
+        .any(|k| k == "org.example.daybook.labelgeneric" || k == "org.example.daybook.note"));
 
-    let facet_rights: std::collections::BTreeMap<String, String> = serde_json::from_value(report["primary_facet_rights"].clone())?;
-    let label_key = facet_keys.iter().find(|k| k.starts_with("org.example.daybook.labelgeneric")).expect("label key must exist");
+    let facet_rights: std::collections::BTreeMap<String, String> =
+        serde_json::from_value(report["primary_facet_rights"].clone())?;
+    let label_key = facet_keys
+        .iter()
+        .find(|k| k.starts_with("org.example.daybook.labelgeneric"))
+        .expect("label key must exist");
     assert!(
         facet_rights[label_key].contains("READ"),
         "labelgeneric facet should have READ rights, got: {}",
@@ -165,29 +167,48 @@ async fn test_full_command_capability_report() -> Res<()> {
     let cmd_urls: Vec<String> = serde_json::from_value(report["command_invoke_urls"].clone())?;
     assert!(!cmd_urls.is_empty());
 
-    let config_facet_keys: Vec<Vec<String>> = serde_json::from_value(report["config_doc_facet_keys"].clone())?;
-    assert!(!config_facet_keys.is_empty(), "full command should have config docs");
-    let config_tag_keys: Vec<Vec<String>> = serde_json::from_value(report["config_doc_tag_keys"].clone())?;
-    assert!(!config_tag_keys.is_empty(), "full command should have config doc tags");
-
-    let config_tag_rights: Vec<std::collections::BTreeMap<String, String>> = serde_json::from_value(report["config_doc_tag_rights"].clone())?;
-    assert!(!config_tag_rights.is_empty(), "full command should have config doc tag rights");
-
-    let config_rw_tag = config_tag_keys[0].iter().find(|k| k == &"org.example.test.config").expect("config-rw tag must exist");
+    let config_facet_keys: Vec<Vec<String>> =
+        serde_json::from_value(report["config_doc_facet_keys"].clone())?;
     assert!(
-        config_tag_rights[0][config_rw_tag].contains("READ") && config_tag_rights[0][config_rw_tag].contains("UPDATE"),
+        !config_facet_keys.is_empty(),
+        "full command should have config docs"
+    );
+    let config_tag_keys: Vec<Vec<String>> =
+        serde_json::from_value(report["config_doc_tag_keys"].clone())?;
+    assert!(
+        !config_tag_keys.is_empty(),
+        "full command should have config doc tags"
+    );
+
+    let config_tag_rights: Vec<std::collections::BTreeMap<String, String>> =
+        serde_json::from_value(report["config_doc_tag_rights"].clone())?;
+    assert!(
+        !config_tag_rights.is_empty(),
+        "full command should have config doc tag rights"
+    );
+
+    let config_rw_tag = config_tag_keys[0]
+        .iter()
+        .find(|k| k == &"org.example.test.config")
+        .expect("config-rw tag must exist");
+    assert!(
+        config_tag_rights[0][config_rw_tag].contains("READ")
+            && config_tag_rights[0][config_rw_tag].contains("UPDATE"),
         "config tag should have READ+UPDATE, got: {}",
         config_tag_rights[0][config_rw_tag]
     );
-    let config_ro_tag = config_tag_keys[0].iter().find(|k| k == &"org.example.test.config-ro").expect("config-ro tag must exist");
+    let config_ro_tag = config_tag_keys[0]
+        .iter()
+        .find(|k| k == &"org.example.test.config-ro")
+        .expect("config-ro tag must exist");
     assert!(
-        config_tag_rights[0][config_ro_tag].contains("READ") && !config_tag_rights[0][config_ro_tag].contains("UPDATE"),
+        config_tag_rights[0][config_ro_tag].contains("READ")
+            && !config_tag_rights[0][config_ro_tag].contains("UPDATE"),
         "config-ro tag should have READ-only, got: {}",
         config_tag_rights[0][config_ro_tag]
     );
 
-    let sqlite_conns: Vec<String> =
-        serde_json::from_value(report["sqlite_connections"].clone())?;
+    let sqlite_conns: Vec<String> = serde_json::from_value(report["sqlite_connections"].clone())?;
     assert!(sqlite_conns.contains(&"@daybook/test/capability-report".to_string()));
 
     test_cx.stop().await?;
@@ -220,16 +241,25 @@ async fn test_full_processor_capability_report() -> Res<()> {
     assert!(changed.contains(&changed_key));
 
     let facet_keys: Vec<String> = serde_json::from_value(report["primary_facet_keys"].clone())?;
-    assert!(facet_keys.iter().any(|k| k.starts_with("org.example.daybook.labelgeneric")));
+    assert!(facet_keys
+        .iter()
+        .any(|k| k.starts_with("org.example.daybook.labelgeneric")));
 
-    let facet_rights: std::collections::BTreeMap<String, String> = serde_json::from_value(report["primary_facet_rights"].clone())?;
-    let label_key = facet_keys.iter().find(|k| k.starts_with("org.example.daybook.labelgeneric")).expect("label key must exist");
+    let facet_rights: std::collections::BTreeMap<String, String> =
+        serde_json::from_value(report["primary_facet_rights"].clone())?;
+    let label_key = facet_keys
+        .iter()
+        .find(|k| k.starts_with("org.example.daybook.labelgeneric"))
+        .expect("label key must exist");
     assert!(
         facet_rights[label_key].contains("UPDATE"),
         "labelgeneric facet should have UPDATE rights, got: {}",
         facet_rights[label_key]
     );
-    let note_key = facet_keys.iter().find(|k| k.starts_with("org.example.daybook.note")).expect("note key must exist");
+    let note_key = facet_keys
+        .iter()
+        .find(|k| k.starts_with("org.example.daybook.note"))
+        .expect("note key must exist");
     assert!(
         facet_rights[note_key].contains("READ") && !facet_rights[note_key].contains("UPDATE"),
         "note facet should have READ-only rights, got: {}",
@@ -237,36 +267,64 @@ async fn test_full_processor_capability_report() -> Res<()> {
     );
 
     let tag_keys: Vec<String> = serde_json::from_value(report["primary_tag_keys"].clone())?;
-    assert!(tag_keys.iter().any(|k| k == "org.example.daybook.labelgeneric" || k == "org.example.daybook.note"));
+    assert!(tag_keys
+        .iter()
+        .any(|k| k == "org.example.daybook.labelgeneric" || k == "org.example.daybook.note"));
 
-    let config_facet_keys: Vec<Vec<String>> = serde_json::from_value(report["config_doc_facet_keys"].clone())?;
-    assert!(!config_facet_keys.is_empty(), "full processor should have config docs");
-    let config_tag_keys: Vec<Vec<String>> = serde_json::from_value(report["config_doc_tag_keys"].clone())?;
-    assert!(!config_tag_keys.is_empty(), "full processor should have config doc tags");
-
-    let config_facet_rights: Vec<std::collections::BTreeMap<String, String>> = serde_json::from_value(report["config_doc_facet_rights"].clone())?;
-    let config_tag_rights: Vec<std::collections::BTreeMap<String, String>> = serde_json::from_value(report["config_doc_tag_rights"].clone())?;
-    assert!(!config_facet_rights.is_empty(), "full processor should have config doc facet rights");
-    assert!(!config_tag_rights.is_empty(), "full processor should have config doc tag rights");
-
-    let config_rw_tag = config_tag_keys[0].iter().find(|k| k == &"org.example.test.config").expect("config-rw tag must exist");
+    let config_facet_keys: Vec<Vec<String>> =
+        serde_json::from_value(report["config_doc_facet_keys"].clone())?;
     assert!(
-        config_tag_rights[0][config_rw_tag].contains("READ") && config_tag_rights[0][config_rw_tag].contains("UPDATE"),
+        !config_facet_keys.is_empty(),
+        "full processor should have config docs"
+    );
+    let config_tag_keys: Vec<Vec<String>> =
+        serde_json::from_value(report["config_doc_tag_keys"].clone())?;
+    assert!(
+        !config_tag_keys.is_empty(),
+        "full processor should have config doc tags"
+    );
+
+    let config_facet_rights: Vec<std::collections::BTreeMap<String, String>> =
+        serde_json::from_value(report["config_doc_facet_rights"].clone())?;
+    let config_tag_rights: Vec<std::collections::BTreeMap<String, String>> =
+        serde_json::from_value(report["config_doc_tag_rights"].clone())?;
+    assert!(
+        !config_facet_rights.is_empty(),
+        "full processor should have config doc facet rights"
+    );
+    assert!(
+        !config_tag_rights.is_empty(),
+        "full processor should have config doc tag rights"
+    );
+
+    let config_rw_tag = config_tag_keys[0]
+        .iter()
+        .find(|k| k == &"org.example.test.config")
+        .expect("config-rw tag must exist");
+    assert!(
+        config_tag_rights[0][config_rw_tag].contains("READ")
+            && config_tag_rights[0][config_rw_tag].contains("UPDATE"),
         "config tag should have READ+UPDATE, got: {}",
         config_tag_rights[0][config_rw_tag]
     );
-    let config_ro_tag = config_tag_keys[0].iter().find(|k| k == &"org.example.test.config-ro").expect("config-ro tag must exist");
+    let config_ro_tag = config_tag_keys[0]
+        .iter()
+        .find(|k| k == &"org.example.test.config-ro")
+        .expect("config-ro tag must exist");
     assert!(
-        config_tag_rights[0][config_ro_tag].contains("READ") && !config_tag_rights[0][config_ro_tag].contains("UPDATE"),
+        config_tag_rights[0][config_ro_tag].contains("READ")
+            && !config_tag_rights[0][config_ro_tag].contains("UPDATE"),
         "config-ro tag should have READ-only, got: {}",
         config_tag_rights[0][config_ro_tag]
     );
 
     let cmd_urls: Vec<String> = serde_json::from_value(report["command_invoke_urls"].clone())?;
-    assert!(cmd_urls.is_empty(), "processor should not have command invoke tokens");
+    assert!(
+        cmd_urls.is_empty(),
+        "processor should not have command invoke tokens"
+    );
 
-    let sqlite_conns: Vec<String> =
-        serde_json::from_value(report["sqlite_connections"].clone())?;
+    let sqlite_conns: Vec<String> = serde_json::from_value(report["sqlite_connections"].clone())?;
     assert!(sqlite_conns.contains(&"@daybook/test/capability-report".to_string()));
 
     test_cx.stop().await?;
@@ -287,10 +345,16 @@ async fn test_minimal_command_capability_report() -> Res<()> {
     assert_eq!(report["invocation"]["kind"], "Command");
 
     let facet_keys: Vec<String> = serde_json::from_value(report["primary_facet_keys"].clone())?;
-    assert!(facet_keys.iter().any(|k| k.starts_with("org.example.daybook.labelgeneric")));
+    assert!(facet_keys
+        .iter()
+        .any(|k| k.starts_with("org.example.daybook.labelgeneric")));
 
-    let facet_rights: std::collections::BTreeMap<String, String> = serde_json::from_value(report["primary_facet_rights"].clone())?;
-    let label_key = facet_keys.iter().find(|k| k.starts_with("org.example.daybook.labelgeneric")).expect("label key must exist");
+    let facet_rights: std::collections::BTreeMap<String, String> =
+        serde_json::from_value(report["primary_facet_rights"].clone())?;
+    let label_key = facet_keys
+        .iter()
+        .find(|k| k.starts_with("org.example.daybook.labelgeneric"))
+        .expect("label key must exist");
     assert!(
         facet_rights[label_key].contains("READ"),
         "labelgeneric facet should have READ rights in minimal, got: {}",
@@ -305,14 +369,20 @@ async fn test_minimal_command_capability_report() -> Res<()> {
     let tag_keys: Vec<String> = serde_json::from_value(report["primary_tag_keys"].clone())?;
     assert!(tag_keys.is_empty() || !tag_keys.is_empty());
 
-    let config_facet_keys: Vec<Vec<String>> = serde_json::from_value(report["config_doc_facet_keys"].clone())?;
-    assert!(config_facet_keys.is_empty(), "minimal should have no config docs");
+    let config_facet_keys: Vec<Vec<String>> =
+        serde_json::from_value(report["config_doc_facet_keys"].clone())?;
+    assert!(
+        config_facet_keys.is_empty(),
+        "minimal should have no config docs"
+    );
 
     let cmd_urls: Vec<String> = serde_json::from_value(report["command_invoke_urls"].clone())?;
-    assert!(cmd_urls.is_empty(), "minimal should have no command invoke tokens");
+    assert!(
+        cmd_urls.is_empty(),
+        "minimal should have no command invoke tokens"
+    );
 
-    let sqlite_conns: Vec<String> =
-        serde_json::from_value(report["sqlite_connections"].clone())?;
+    let sqlite_conns: Vec<String> = serde_json::from_value(report["sqlite_connections"].clone())?;
     assert!(sqlite_conns.contains(&"@daybook/test/capability-report".to_string()));
 
     test_cx.stop().await?;
@@ -344,10 +414,16 @@ async fn test_minimal_processor_capability_report() -> Res<()> {
     assert!(changed.contains(&changed_key));
 
     let facet_keys: Vec<String> = serde_json::from_value(report["primary_facet_keys"].clone())?;
-    assert!(facet_keys.iter().any(|k| k.starts_with("org.example.daybook.labelgeneric")));
+    assert!(facet_keys
+        .iter()
+        .any(|k| k.starts_with("org.example.daybook.labelgeneric")));
 
-    let facet_rights: std::collections::BTreeMap<String, String> = serde_json::from_value(report["primary_facet_rights"].clone())?;
-    let label_key = facet_keys.iter().find(|k| k.starts_with("org.example.daybook.labelgeneric")).expect("label key must exist");
+    let facet_rights: std::collections::BTreeMap<String, String> =
+        serde_json::from_value(report["primary_facet_rights"].clone())?;
+    let label_key = facet_keys
+        .iter()
+        .find(|k| k.starts_with("org.example.daybook.labelgeneric"))
+        .expect("label key must exist");
     assert!(
         facet_rights[label_key].contains("READ"),
         "labelgeneric facet should have READ rights in minimal, got: {}",
@@ -362,14 +438,14 @@ async fn test_minimal_processor_capability_report() -> Res<()> {
     let tag_keys: Vec<String> = serde_json::from_value(report["primary_tag_keys"].clone())?;
     assert!(tag_keys.is_empty() || !tag_keys.is_empty());
 
-    let config_facet_keys: Vec<Vec<String>> = serde_json::from_value(report["config_doc_facet_keys"].clone())?;
+    let config_facet_keys: Vec<Vec<String>> =
+        serde_json::from_value(report["config_doc_facet_keys"].clone())?;
     assert!(config_facet_keys.is_empty());
 
     let cmd_urls: Vec<String> = serde_json::from_value(report["command_invoke_urls"].clone())?;
     assert!(cmd_urls.is_empty());
 
-    let sqlite_conns: Vec<String> =
-        serde_json::from_value(report["sqlite_connections"].clone())?;
+    let sqlite_conns: Vec<String> = serde_json::from_value(report["sqlite_connections"].clone())?;
     assert!(sqlite_conns.contains(&"@daybook/test/capability-report".to_string()));
 
     test_cx.stop().await?;
@@ -387,9 +463,18 @@ async fn test_downscope_capability() -> Res<()> {
     let db_pool = open_plug_test_local_state(&test_cx).await?;
     let report = fetch_capability_report_v2(&db_pool, &doc_id, "test_downscope").await?;
 
-    assert!(report["has_read"].as_bool().unwrap_or(false), "cloned token should have READ");
-    assert!(!report["has_update"].as_bool().unwrap_or(true), "cloned token should not have UPDATE");
-    assert!(report["update_denied"].as_bool().unwrap_or(false), "update on read-only clone should be denied");
+    assert!(
+        report["has_read"].as_bool().unwrap_or(false),
+        "cloned token should have READ"
+    );
+    assert!(
+        !report["has_update"].as_bool().unwrap_or(true),
+        "cloned token should not have UPDATE"
+    );
+    assert!(
+        report["update_denied"].as_bool().unwrap_or(false),
+        "update on read-only clone should be denied"
+    );
 
     test_cx.stop().await?;
     Ok(())
@@ -406,7 +491,10 @@ async fn test_denied_update_capability() -> Res<()> {
     let db_pool = open_plug_test_local_state(&test_cx).await?;
     let report = fetch_capability_report_v2(&db_pool, &doc_id, "test_denied_update").await?;
 
-    assert!(report["update_denied"].as_bool().unwrap_or(false), "update on read-only token should be denied");
+    assert!(
+        report["update_denied"].as_bool().unwrap_or(false),
+        "update on read-only token should be denied"
+    );
 
     test_cx.stop().await?;
     Ok(())
@@ -423,10 +511,22 @@ async fn test_acl_aggregate_capability() -> Res<()> {
     let db_pool = open_plug_test_local_state(&test_cx).await?;
     let report = fetch_capability_report_v2(&db_pool, &doc_id, "test_acl_aggregate").await?;
 
-    assert!(report["tag_has_read"].as_bool().unwrap_or(false), "tag token should have READ from aggregated ACLs");
-    assert!(report["tag_has_update"].as_bool().unwrap_or(false), "tag token should have UPDATE from aggregated ACLs");
-    assert!(report["facet_has_read"].as_bool().unwrap_or(false), "facet token should have READ from aggregated ACLs");
-    assert!(report["facet_has_update"].as_bool().unwrap_or(false), "facet token should have UPDATE from aggregated ACLs");
+    assert!(
+        report["tag_has_read"].as_bool().unwrap_or(false),
+        "tag token should have READ from aggregated ACLs"
+    );
+    assert!(
+        report["tag_has_update"].as_bool().unwrap_or(false),
+        "tag token should have UPDATE from aggregated ACLs"
+    );
+    assert!(
+        report["facet_has_read"].as_bool().unwrap_or(false),
+        "facet token should have READ from aggregated ACLs"
+    );
+    assert!(
+        report["facet_has_update"].as_bool().unwrap_or(false),
+        "facet token should have UPDATE from aggregated ACLs"
+    );
 
     test_cx.stop().await?;
     Ok(())
@@ -443,10 +543,19 @@ async fn test_create_facet_capability() -> Res<()> {
     let db_pool = open_plug_test_local_state(&test_cx).await?;
     let report = fetch_capability_report_v2(&db_pool, &doc_id, "test_create_facet").await?;
 
-    assert_eq!(report["created_key"].as_str().unwrap_or(""), "org.example.test.createable/new-key");
+    assert_eq!(
+        report["created_key"].as_str().unwrap_or(""),
+        "org.example.test.createable/new-key"
+    );
     let rights = report["created_rights"].as_str().unwrap_or("");
-    assert!(rights.contains("READ"), "created facet token should have READ, got: {rights}");
-    assert!(rights.contains("UPDATE"), "created facet token should have UPDATE, got: {rights}");
+    assert!(
+        rights.contains("READ"),
+        "created facet token should have READ, got: {rights}"
+    );
+    assert!(
+        rights.contains("UPDATE"),
+        "created facet token should have UPDATE, got: {rights}"
+    );
 
     test_cx.stop().await?;
     Ok(())
@@ -463,11 +572,23 @@ async fn test_get_create_token_capability() -> Res<()> {
     let db_pool = open_plug_test_local_state(&test_cx).await?;
     let report = fetch_capability_report_v2(&db_pool, &doc_id, "test_get_create_token").await?;
 
-    assert_eq!(report["ctoken_key"].as_str().unwrap_or(""), "org.example.test.createable/another-key");
-    assert_eq!(report["created_key"].as_str().unwrap_or(""), "org.example.test.createable/another-key");
+    assert_eq!(
+        report["ctoken_key"].as_str().unwrap_or(""),
+        "org.example.test.createable/another-key"
+    );
+    assert_eq!(
+        report["created_key"].as_str().unwrap_or(""),
+        "org.example.test.createable/another-key"
+    );
     let rights = report["created_rights"].as_str().unwrap_or("");
-    assert!(rights.contains("READ"), "created facet token should have READ, got: {rights}");
-    assert!(rights.contains("UPDATE"), "created facet token should have UPDATE, got: {rights}");
+    assert!(
+        rights.contains("READ"),
+        "created facet token should have READ, got: {rights}"
+    );
+    assert!(
+        rights.contains("UPDATE"),
+        "created facet token should have UPDATE, got: {rights}"
+    );
 
     test_cx.stop().await?;
     Ok(())
@@ -484,7 +605,10 @@ async fn test_delete_facet_capability() -> Res<()> {
     let db_pool = open_plug_test_local_state(&test_cx).await?;
     let report = fetch_capability_report_v2(&db_pool, &doc_id, "test_delete_facet").await?;
 
-    assert!(report["deleted"].as_bool().unwrap_or(false), "delete_facet should succeed");
+    assert!(
+        report["deleted"].as_bool().unwrap_or(false),
+        "delete_facet should succeed"
+    );
 
     test_cx.stop().await?;
     Ok(())

@@ -211,7 +211,9 @@ pub fn plug_manifest() -> PlugManifest {
                         bundle: "plug_plabels".into(),
                     },
                     doc_acls: vec![RoutineDocAcl {
-                        doc_predicate: DocPredicateClause::HasTag(PlabelFacetTag::PseudoLabel.as_str().into()),
+                        doc_predicate: DocPredicateClause::HasTag(
+                            PlabelFacetTag::PseudoLabel.as_str().into(),
+                        ),
                         facet_acl: vec![
                             RoutineFacetAccess {
                                 owner_plug_id: None,
@@ -268,7 +270,9 @@ pub fn plug_manifest() -> PlugManifest {
                         bundle: "plug_plabels".into(),
                     },
                     doc_acls: vec![RoutineDocAcl {
-                        doc_predicate: DocPredicateClause::HasTag(PlabelFacetTag::PseudoLabel.as_str().into()),
+                        doc_predicate: DocPredicateClause::HasTag(
+                            PlabelFacetTag::PseudoLabel.as_str().into(),
+                        ),
                         facet_acl: vec![
                             RoutineFacetAccess {
                                 owner_plug_id: None,
@@ -334,7 +338,9 @@ pub fn plug_manifest() -> PlugManifest {
                         bundle: "plug_plabels".into(),
                     },
                     doc_acls: vec![RoutineDocAcl {
-                        doc_predicate: DocPredicateClause::HasTag(PlabelFacetTag::PseudoLabel.as_str().into()),
+                        doc_predicate: DocPredicateClause::HasTag(
+                            PlabelFacetTag::PseudoLabel.as_str().into(),
+                        ),
                         facet_acl: vec![
                             RoutineFacetAccess {
                                 owner_plug_id: None,
@@ -382,7 +388,9 @@ pub fn plug_manifest() -> PlugManifest {
                         bundle: "plug_plabels".into(),
                     },
                     doc_acls: vec![RoutineDocAcl {
-                        doc_predicate: DocPredicateClause::HasTag(PlabelFacetTag::PseudoLabel.as_str().into()),
+                        doc_predicate: DocPredicateClause::HasTag(
+                            PlabelFacetTag::PseudoLabel.as_str().into(),
+                        ),
                         facet_acl: vec![RoutineFacetAccess {
                             owner_plug_id: None,
                             tag: WellKnownFacetTag::Note.into(),

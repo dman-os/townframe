@@ -8,7 +8,6 @@ use crate::drawer::DrawerRepo;
 use crate::plugs::PlugsRepo;
 use daybook_types::manifest;
 
-
 use std::collections::BTreeMap;
 use wash_runtime::{
     host::{Host as WashHost, HostApi},
@@ -1635,10 +1634,19 @@ impl Rt {
             .unwrap_or_else(|| format!("{plug_id}/{routine_name}-{dispatch_id}"));
 
         // Build config_docs from config_facet_acl, grouping by owner_plug_id
-        let mut config_docs_by_owner: std::collections::HashMap<String, Vec<daybook_types::manifest::RoutineFacetAccess>> = std::collections::HashMap::new();
+        let mut config_docs_by_owner: std::collections::HashMap<
+            String,
+            Vec<daybook_types::manifest::RoutineFacetAccess>,
+        > = std::collections::HashMap::new();
         for access in routine_man.config_facet_acl() {
-            let owner = access.owner_plug_id.clone().unwrap_or_else(|| plug_id.to_string());
-            config_docs_by_owner.entry(owner).or_default().push(access.clone());
+            let owner = access
+                .owner_plug_id
+                .clone()
+                .unwrap_or_else(|| plug_id.to_string());
+            config_docs_by_owner
+                .entry(owner)
+                .or_default()
+                .push(access.clone());
         }
         let config_docs: Vec<dispatch::DocFacetTokens> = config_docs_by_owner
             .into_iter()
@@ -1667,9 +1675,7 @@ impl Rt {
             local_state_acl: routine_man.local_state_acl.clone(),
             command_invoke_acl_snapshot: routine_man.command_invoke_acl().to_vec(),
             wflow_args_json,
-            staging_branch_path: daybook_types::doc::BranchPath::from(
-                "/tmp/placeholder",
-            ), // Will be set when job is created
+            staging_branch_path: daybook_types::doc::BranchPath::from("/tmp/placeholder"), // Will be set when job is created
         });
         if let Some(existing) = self.dispatch_repo.get_any(&dispatch_id).await {
             let can_reuse = serde_json::to_string(&existing.on_success_hooks).expect(ERROR_JSON)
