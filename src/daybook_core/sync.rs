@@ -961,31 +961,47 @@ mod tests {
     }
 
     impl SyncTestNode {
-        async fn stop(mut self) -> Res<()> {
-            // NOTE: do early cancellation before
-            // waiting on actual stops
-            self.sync_stop.cancel_token.cancel();
-            self.progress_stop.cancel_token.cancel();
-            self.doc_blobs_bridge_cancel.cancel();
-            self.doc_blobs_index_stop.cancel_token.cancel();
-            self.sqlite_local_state_stop.cancel_token.cancel();
-            self.config_stop.cancel_token.cancel();
-            self.drawer_stop.cancel_token.cancel();
-            self.plugs_stop.cancel_token.cancel();
+        async fn stop(self) -> Res<()> {
+            let SyncTestNode {
+                ctx,
+                blobs_repo: _blobs_repo,
+                drawer: _drawer,
+                progress_repo: _progress_repo,
+                progress_stop,
+                drawer_stop,
+                _plugs_repo,
+                plugs_stop,
+                config_stop,
+                doc_blobs_index_stop,
+                sqlite_local_state_stop,
+                doc_blobs_bridge_cancel,
+                doc_blobs_bridge_handle,
+                sync_repo,
+                sync_stop,
+            } = self;
+            // NOTE: do early cancellation before waiting on actual stops.
+            sync_stop.cancel_token.cancel();
+            doc_blobs_bridge_cancel.cancel();
+            doc_blobs_index_stop.cancel_token.cancel();
+            sqlite_local_state_stop.cancel_token.cancel();
+            config_stop.cancel_token.cancel();
+            drawer_stop.cancel_token.cancel();
+            plugs_stop.cancel_token.cancel();
 
             tokio::time::timeout(
                 utils_rs::scale_timeout(Duration::from_secs(30)),
-                self.sync_stop.stop(),
+                sync_stop.stop(),
             )
             .await
             .map_err(|_| eyre::eyre!("timeout waiting sync stop"))??;
+            drop(sync_repo);
             tokio::time::timeout(
                 utils_rs::scale_timeout(Duration::from_secs(10)),
-                self.progress_stop.stop(),
+                progress_stop.stop(),
             )
             .await
             .map_err(|_| eyre::eyre!("timeout waiting progress stop"))??;
-            if let Some(handle) = self.doc_blobs_bridge_handle.take() {
+            if let Some(handle) = doc_blobs_bridge_handle {
                 tokio::time::timeout(
                     utils_rs::scale_timeout(Duration::from_secs(5)),
                     utils_rs::wait_on_handle_with_timeout(
@@ -998,37 +1014,37 @@ mod tests {
             }
             tokio::time::timeout(
                 utils_rs::scale_timeout(Duration::from_secs(10)),
-                self.doc_blobs_index_stop.stop(),
+                doc_blobs_index_stop.stop(),
             )
             .await
             .map_err(|_| eyre::eyre!("timeout waiting doc blobs index stop"))??;
             tokio::time::timeout(
                 utils_rs::scale_timeout(Duration::from_secs(10)),
-                self.sqlite_local_state_stop.stop(),
+                sqlite_local_state_stop.stop(),
             )
             .await
             .map_err(|_| eyre::eyre!("timeout waiting sqlite local state stop"))??;
             tokio::time::timeout(
                 utils_rs::scale_timeout(Duration::from_secs(10)),
-                self.config_stop.stop(),
+                config_stop.stop(),
             )
             .await
             .map_err(|_| eyre::eyre!("timeout waiting config stop"))??;
             tokio::time::timeout(
                 utils_rs::scale_timeout(Duration::from_secs(10)),
-                self.drawer_stop.stop(),
+                drawer_stop.stop(),
             )
             .await
             .map_err(|_| eyre::eyre!("timeout waiting drawer stop"))??;
             tokio::time::timeout(
                 utils_rs::scale_timeout(Duration::from_secs(10)),
-                self.plugs_stop.stop(),
+                plugs_stop.stop(),
             )
             .await
             .map_err(|_| eyre::eyre!("timeout waiting plugs stop"))??;
             tokio::time::timeout(
                 utils_rs::scale_timeout(Duration::from_secs(10)),
-                self.ctx.shutdown(),
+                ctx.shutdown(),
             )
             .await
             .map_err(|_| eyre::eyre!("timeout waiting ctx shutdown"))??;

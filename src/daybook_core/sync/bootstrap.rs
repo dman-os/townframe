@@ -380,9 +380,18 @@ pub async fn clone_repo_init_from_url(
     tokio::fs::create_dir_all(parent).await?;
     let staging = next_clone_staging_dir(parent)?;
     tokio::fs::create_dir_all(&staging).await?;
+    let layout = crate::repo::RepoLayout {
+        repo_root: destination.clone(),
+        samod_root: destination.join("samod"),
+        sqlite_path: destination.join("sqlite.db"),
+        blobs_root: destination.join("blobs"),
+        marker_path: destination.join("db.repo.txt"),
+        lock_path: destination.join("repo.lock"),
+    };
+    let lock_guard = crate::repo::RepoLockGuard::acquire(&staging.join("repo.lock"))?;
 
     let cloned = async {
-        let secret_repo = crate::secrets::SecretRepo::boot().await?;
+        let secret_repo = Arc::new(crate::secrets::SecretRepo::boot().await?);
 
         // Generate identity locally — secret keys never leave the device.
         let local_secret = iroh::SecretKey::generate(&mut rand::rng());
@@ -430,10 +439,17 @@ pub async fn clone_repo_init_from_url(
             daybook_types::doc::user_path::DEVICE_ID_PREFIX,
             pkey_bs58
         );
+        let local_device_name = bootstrap
+            .device_name
+            .clone()
+            .unwrap_or_else(|| format!("clone-{}", std::env::consts::ARCH));
         let local_user_path = daybook_types::doc::UserPathBuf::new()
             .join("/")
             .join(user_id)
             .join(device_id);
+        let local_actor_id = daybook_types::doc::user_path::to_actor_id(
+            &daybook_types::doc::UserPathBuf::from(local_user_path.clone()),
+        );
         let mut sync_config = crate::repo::globals::get_sync_config(&sql).await?;
         if !sync_config
             .known_devices
@@ -493,11 +509,32 @@ pub async fn clone_repo_init_from_url(
         )
         .await?;
 
-        crate::repo::finish_clone_init(&big_repo, &sql, local_user_path, staging.join("blobs"))
-            .await?;
+        let rcx = crate::repo::finish_clone_init(
+            crate::repo::RepoCtxParts {
+                layout,
+                lock_guard,
+                sql: sql.clone(),
+                partition_store: big_repo.partition_store().clone(),
+                big_repo: big_repo.clone(),
+                big_repo_stop: std::sync::Mutex::new(Some(big_repo_stop)),
+                local_peer_key,
+                local_actor_id,
+                local_user_path,
+                local_device_name,
+                repo_id: bootstrap.repo_id.clone(),
+                checkout_id,
+                repo_name: bootstrap.repo_name.clone(),
+                iroh_public_key: identity.iroh_public_key.to_string(),
+                iroh_secret_key: identity.iroh_secret_key,
+                secret_repo: Arc::clone(&secret_repo),
+            },
+            &big_repo,
+            staging.join("blobs"),
+        )
+        .await?;
         crate::repo::mark_repo_initialized(&staging).await?;
 
-        big_repo_stop.stop().await?;
+        rcx.shutdown().await?;
         Ok::<SyncBootstrapState, eyre::Report>(bootstrap)
     }
     .await;

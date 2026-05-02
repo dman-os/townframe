@@ -1042,14 +1042,27 @@ mod tests {
 
     impl CliSyncNode {
         async fn stop(self) -> Res<()> {
-            self.sync_stop.stop().await?;
-            self.progress_stop.stop().await?;
-            self.doc_blobs_index_stop.stop().await?;
-            self.sqlite_local_state_stop.stop().await?;
-            self.config_stop.stop().await?;
-            self.drawer_stop.stop().await?;
-            self.plugs_stop.stop().await?;
-            self.ctx.shutdown().await?;
+            let CliSyncNode {
+                ctx,
+                drawer: _drawer,
+                sync_repo,
+                sync_stop,
+                progress_stop,
+                plugs_stop,
+                drawer_stop,
+                config_stop,
+                doc_blobs_index_stop,
+                sqlite_local_state_stop,
+            } = self;
+            sync_stop.stop().await?;
+            drop(sync_repo);
+            progress_stop.stop().await?;
+            doc_blobs_index_stop.stop().await?;
+            sqlite_local_state_stop.stop().await?;
+            config_stop.stop().await?;
+            drawer_stop.stop().await?;
+            plugs_stop.stop().await?;
+            ctx.shutdown().await?;
             Ok(())
         }
     }

@@ -7,7 +7,7 @@ use am_utils_rs::{
     sync::{
         machine::{SyncCompletion, SyncMachine, SyncMachineCommand},
         peer::{
-            PeerSyncProgressEvent, PeerSyncWorkerEvent, PeerSyncWorkerMsg,
+            PeerSyncProgressEvent, PeerSyncWorkerEvent, PeerSyncWorkerExit, PeerSyncWorkerMsg,
             PeerSyncWorkerStopToken, SpawnPeerSyncWorkerArgs,
         },
         protocol::{PartitionId, PartitionSyncRpc, PeerKey, SubscriptionItem},
@@ -316,6 +316,7 @@ pub async fn spawn_full_sync_worker(
         scheduler: default(),
 
         known_peer_set: default(),
+        expected_peer_session_closes: default(),
         peer_id_by_peer_key: default(),
         seen_peer_keys: default(),
         peer_partition_sessions: default(),
@@ -413,6 +414,10 @@ pub async fn spawn_full_sync_worker(
             if let Err(err) = worker.batch_stop_blobs().await {
                 warn!(?err, "error stopping blob workers during shutdown");
             }
+            let peer_ids_to_stop = worker.peer_partition_sessions.keys().copied().collect::<Vec<_>>();
+            for peer_id in peer_ids_to_stop {
+                worker.expected_peer_session_closes.insert(peer_id);
+            }
             for (_endpoint_id, session) in worker.peer_partition_sessions.drain() {
                 if let Err(err) = session.stop.stop().await {
                     warn!(?err, "error stopping peer session during shutdown");
@@ -469,6 +474,7 @@ struct Worker {
     max_active_sync_workers: usize,
 
     known_peer_set: HashMap<BigRepoConnectionId, PeerSyncState>,
+    expected_peer_session_closes: HashSet<PeerId>,
     peer_id_by_peer_key: HashMap<PeerKey, PeerId>,
     seen_peer_keys: HashSet<PeerKey>,
     peer_partition_sessions: HashMap<PeerId, PeerPartitionSession>,
@@ -1060,6 +1066,7 @@ impl Worker {
         peer_key: PeerKey,
         partitions: HashSet<PartitionKey>,
     ) -> Res<()> {
+        self.expected_peer_session_closes.insert(peer_id);
         let session = self.peer_partition_sessions.remove(&peer_id);
         if let Some(session) = session {
             session.stop.stop().await?;
@@ -1095,6 +1102,7 @@ impl Worker {
     }
 
     async fn remove_peer_partition_session(&mut self, peer_id: PeerId) -> Res<()> {
+        self.expected_peer_session_closes.insert(peer_id);
         let session = self.peer_partition_sessions.remove(&peer_id);
         if let Some(session) = session {
             session.stop.stop().await?;
@@ -2207,7 +2215,27 @@ impl Worker {
                 self.refresh_peer_fully_synced_state(peer_id).await?;
             }
             PeerSyncWorkerEvent::AbnormalExit { peer, reason } => {
-                warn!(?peer, reason, "peer sync worker exited abnormally");
+                if self.cancel_token.is_cancelled() {
+                    debug!(?peer, reason = %reason, "peer sync worker exited during shutdown");
+                    return Ok(());
+                }
+                if self.expected_peer_session_closes.remove(&peer_id) {
+                    debug!(?peer, reason = %reason, "peer sync worker exited after an expected stop");
+                    return Ok(());
+                }
+                let peer_known = self.known_peer_set.contains_key(&peer_id);
+                if !peer_known {
+                    debug!(?peer, reason = %reason, "peer sync worker exited after peer was already removed");
+                    return Ok(());
+                }
+                match &reason {
+                    PeerSyncWorkerExit::SubscriptionStreamClosed => {
+                        warn!(?peer, reason = %reason, "peer sync worker exited while peer was still active");
+                    }
+                    _ => {
+                        warn!(?peer, reason = %reason, "peer sync worker exited abnormally");
+                    }
+                }
                 self.emit_peer_progress_status(
                     peer_id,
                     ProgressUpdateDeets::Completed {

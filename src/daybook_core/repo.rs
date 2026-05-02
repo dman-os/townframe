@@ -107,7 +107,49 @@ pub struct RepoCtx {
     pub secret_repo: Arc<crate::secrets::SecretRepo>,
 }
 
+pub(crate) struct RepoCtxParts {
+    pub layout: RepoLayout,
+    pub lock_guard: RepoLockGuard,
+    pub sql: SqlCtx,
+    pub partition_store: Arc<PartitionStore>,
+    pub big_repo: SharedBigRepo,
+    pub big_repo_stop: std::sync::Mutex<Option<am_utils_rs::BigRepoStopToken>>,
+    pub local_peer_key: am_utils_rs::sync::protocol::PeerKey,
+    pub local_actor_id: automerge::ActorId,
+    pub local_user_path: UserPathBuf,
+    pub local_device_name: String,
+    pub repo_id: String,
+    pub checkout_id: String,
+    pub repo_name: String,
+    pub iroh_public_key: String,
+    pub iroh_secret_key: iroh::SecretKey,
+    pub secret_repo: Arc<crate::secrets::SecretRepo>,
+}
+
 impl RepoCtx {
+    fn from_parts(parts: RepoCtxParts, doc_app: BigDocHandle, doc_drawer: BigDocHandle) -> Arc<Self> {
+        Arc::new(Self {
+            secret_repo: parts.secret_repo,
+            local_peer_key: parts.local_peer_key,
+            repo_name: parts.repo_name,
+            layout: parts.layout,
+            lock_guard: parts.lock_guard,
+            sql: parts.sql,
+            partition_store: parts.partition_store,
+            big_repo: parts.big_repo,
+            big_repo_stop: parts.big_repo_stop,
+            doc_app,
+            doc_drawer,
+            local_actor_id: parts.local_actor_id,
+            local_user_path: parts.local_user_path,
+            repo_id: parts.repo_id,
+            checkout_id: parts.checkout_id,
+            iroh_public_key: parts.iroh_public_key,
+            iroh_secret_key: parts.iroh_secret_key,
+            local_device_name: parts.local_device_name,
+        })
+    }
+
     pub async fn shutdown(self: Arc<Self>) -> Res<()> {
         match Arc::try_unwrap(self) {
             Ok(self2) => {
@@ -183,26 +225,25 @@ impl RepoCtx {
             doc_drawer.document_id(),
         )
         .await?;
-        Ok(Arc::new(RepoCtx {
-            secret_repo,
-            local_peer_key: local_peer_key,
-            repo_name: repo_name,
-            layout: layout,
-            lock_guard: lock_guard,
-            sql: sql,
-            partition_store: partition_store,
-            big_repo: big_repo,
+        let parts = RepoCtxParts {
+            layout,
+            lock_guard,
+            sql,
+            partition_store,
+            big_repo,
             big_repo_stop: std::sync::Mutex::new(Some(big_repo_stop)),
-            doc_app: doc_app,
-            doc_drawer: doc_drawer,
-            local_actor_id: local_actor_id,
+            local_peer_key,
+            local_actor_id,
             local_user_path,
-            repo_id: repo_id,
-            checkout_id: checkout_id,
+            local_device_name,
+            repo_id,
+            checkout_id,
+            repo_name,
             iroh_public_key: identity.iroh_public_key.to_string(),
             iroh_secret_key: identity.iroh_secret_key,
-            local_device_name: local_device_name,
-        }))
+            secret_repo,
+        };
+        Ok(Self::from_parts(parts, doc_app, doc_drawer))
     }
 
     pub async fn init(
@@ -273,26 +314,25 @@ impl RepoCtx {
         )
         .await?;
         mark_repo_initialized(&layout.repo_root).await?;
-        Ok(Arc::new(RepoCtx {
-            secret_repo,
-            local_peer_key,
-            repo_name: repo_name,
-            layout: layout,
-            lock_guard: lock_guard,
-            sql: sql,
-            partition_store: partition_store,
-            big_repo: big_repo,
+        let parts = RepoCtxParts {
+            layout,
+            lock_guard,
+            sql,
+            partition_store,
+            big_repo,
             big_repo_stop: std::sync::Mutex::new(Some(big_repo_stop)),
-            doc_app: doc_app,
-            doc_drawer: doc_drawer,
-            local_actor_id: local_actor_id,
+            local_peer_key,
+            local_actor_id,
             local_user_path,
-            repo_id: repo_id,
-            checkout_id: checkout_id,
+            local_device_name,
+            repo_id,
+            checkout_id,
+            repo_name,
             iroh_public_key: identity.iroh_public_key.to_string(),
             iroh_secret_key: identity.iroh_secret_key,
-            local_device_name: local_device_name,
-        }))
+            secret_repo,
+        };
+        Ok(Self::from_parts(parts, doc_app, doc_drawer))
     }
 
     async fn run_repo_init_dance(
@@ -537,13 +577,13 @@ async fn cleanup_blobs_staging_dir(blobs_root: &Path) -> Res<()> {
     Ok(())
 }
 
-#[expect(clippy::too_many_arguments)]
 pub(crate) async fn finish_clone_init(
+    parts: RepoCtxParts,
     big_repo: &SharedBigRepo,
-    sql: &SqlCtx,
-    local_user_path: UserPathBuf,
     blobs_root: PathBuf,
-) -> Res<()> {
+) -> Res<Arc<RepoCtx>> {
+    let sql = &parts.sql;
+    let local_user_path = &parts.local_user_path;
     let init_state = globals::get_init_state(sql).await?;
     let (doc_id_app, doc_id_drawer) = match init_state {
         globals::InitState::Created {
@@ -565,12 +605,12 @@ pub(crate) async fn finish_clone_init(
         big_repo,
         &doc_app,
         &doc_drawer,
-        &local_user_path,
+        local_user_path,
         sql,
         blobs_root,
     )
     .await?;
-    Ok(())
+    Ok(RepoCtx::from_parts(parts, doc_app, doc_drawer))
 }
 
 pub(crate) async fn ensure_expected_partitions_for_docs(

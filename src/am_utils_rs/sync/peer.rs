@@ -6,6 +6,7 @@ use crate::sync::store::SyncStoreHandle;
 use std::collections::HashMap;
 use std::time::Instant;
 use tokio::sync::mpsc;
+use thiserror::Error;
 
 #[derive(Debug, Clone)]
 pub enum PeerSyncProgressEvent {
@@ -33,8 +34,24 @@ pub enum PeerSyncWorkerEvent {
     },
     AbnormalExit {
         peer: PeerKey,
-        reason: String,
+        reason: PeerSyncWorkerExit,
     },
+}
+
+#[derive(Debug, Clone, Error)]
+pub enum PeerSyncWorkerExit {
+    #[error("subscription stream closed")]
+    SubscriptionStreamClosed,
+    #[error("list partitions failed: {reason}")]
+    ListPartitionsFailed { reason: String },
+    #[error("partition cursor lookup failed: {reason}")]
+    PartitionCursorLookupFailed { reason: String },
+    #[error("subscription rpc failed: {reason}")]
+    SubscriptionRpcFailed { reason: String },
+    #[error("subscription recv failed: {reason}")]
+    SubscriptionRecvFailed { reason: String },
+    #[error("subscription item handling failed: {reason}")]
+    SubscriptionItemFailed { reason: String },
 }
 
 #[derive(Debug, Clone)]
@@ -95,7 +112,9 @@ pub async fn spawn_peer_sync_worker(
         let (parts, frontiers) = worker
             .get_partition_frontiers()
             .await
-            .wrap_err("error during catchup")?;
+            .map_err(|err| PeerSyncWorkerExit::ListPartitionsFailed {
+                reason: err.to_string(),
+            })?;
         worker.emit_phase_finished("list_partitions", t0.elapsed());
 
         let subscribe_started_at = Instant::now();
@@ -113,7 +132,10 @@ pub async fn spawn_peer_sync_worker(
                 let cursor = worker
                     .sync_store
                     .get_partition_cursor(worker.remote_peer.clone(), part.clone())
-                    .await?;
+                    .await
+                    .map_err(|err| PeerSyncWorkerExit::PartitionCursorLookupFailed {
+                        reason: err.to_string(),
+                    })?;
                 reqs.push(PartitionStreamCursorRequest {
                     partition_id: part.clone(),
                     since_member: cursor.member_cursor,
@@ -129,7 +151,9 @@ pub async fn spawn_peer_sync_worker(
                     DEFAULT_SUBSCRIPTION_CAPACITY,
                 )
                 .await
-                .wrap_err("subscription rpc failed")?
+                .map_err(|err| PeerSyncWorkerExit::SubscriptionRpcFailed {
+                    reason: err.to_string(),
+                })?
         };
 
         worker
@@ -148,9 +172,12 @@ pub async fn spawn_peer_sync_worker(
             tokio::select! {
                 biased;
                 recv = rpc_rx.recv() => {
-                    let item = recv
-                        .wrap_err("subscription recv failed")?
-                        .ok_or_else(|| ferr!("subscription stream closed"))?;
+                    let item = recv.map_err(|err| PeerSyncWorkerExit::SubscriptionRecvFailed {
+                        reason: err.to_string(),
+                    })?;
+                    let Some(item) = item else {
+                        return Err(PeerSyncWorkerExit::SubscriptionStreamClosed);
+                    };
                     worker
                         .handle_subscription_item(
                             item,
@@ -160,7 +187,10 @@ pub async fn spawn_peer_sync_worker(
                             &mut bootstrap_emitted,
                             &mut replay_phase_finished,
                         )
-                        .await?;
+                        .await
+                        .map_err(|err| PeerSyncWorkerExit::SubscriptionItemFailed {
+                            reason: err.to_string(),
+                        })?;
                 }
             }
         }
@@ -168,29 +198,18 @@ pub async fn spawn_peer_sync_worker(
     };
     let span = tracing::info_span!("PeerSyncWorker", remote_peer = %args.remote_peer);
     let wrapped = async move {
-        let run_res: Res<()> = fut.await;
+        let run_res: Result<(), PeerSyncWorkerExit> = fut.await;
         if let Err(err) = &run_res {
             msg_tx
                 .try_send(PeerSyncWorkerMsg::Event(
                     PeerSyncWorkerEvent::AbnormalExit {
                         peer: remote_peer_for_task,
-                        reason: err.to_string(),
+                        reason: err.clone(),
                     },
                 ))
                 .ok();
         }
         debug!(result = ?run_res.as_ref().map(|_| ()), "peer sync worker future exiting");
-        if let Err(err) = run_res {
-            let is_closed_by_peer = err.chain().any(|cause| {
-                let msg = cause.to_string();
-                msg.contains("closed by peer: 0") || msg.contains("closed by peer")
-            });
-            if is_closed_by_peer {
-                info!("peer sync worker exited after remote close");
-            } else {
-                warn!(?err, "peer sync worker exiting with abnormal error");
-            }
-        }
     }
     .instrument(span);
 
