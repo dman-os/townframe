@@ -88,6 +88,23 @@ async fn fetch_capability_report(
     Ok(serde_json::from_str(&summary_json)?)
 }
 
+async fn fetch_capability_report_v2(
+    db_pool: &SqlitePool,
+    doc_id: &str,
+    test_name: &str,
+) -> Res<serde_json::Value> {
+    let summary_json: String = sqlx::query_scalar(
+        "SELECT summary_json FROM capability_report_v2 WHERE doc_id = ?1 AND test_name = ?2",
+    )
+    .bind(doc_id)
+    .bind(test_name)
+    .fetch_one(db_pool)
+    .await
+    .wrap_err_with(|| format!("no capability_report_v2 row for doc_id={doc_id} test_name={test_name}"))?;
+
+    Ok(serde_json::from_str(&summary_json)?)
+}
+
 async fn setup_doc(test_cx: &daybook_core::test_support::DaybookTestContext) -> Res<String> {
     let doc_id = test_cx
         .drawer_repo
@@ -148,6 +165,27 @@ async fn test_full_command_capability_report() -> Res<()> {
     let cmd_urls: Vec<String> = serde_json::from_value(report["command_invoke_urls"].clone())?;
     assert!(!cmd_urls.is_empty());
 
+    let config_facet_keys: Vec<Vec<String>> = serde_json::from_value(report["config_doc_facet_keys"].clone())?;
+    assert!(!config_facet_keys.is_empty(), "full command should have config docs");
+    let config_tag_keys: Vec<Vec<String>> = serde_json::from_value(report["config_doc_tag_keys"].clone())?;
+    assert!(!config_tag_keys.is_empty(), "full command should have config doc tags");
+
+    let config_tag_rights: Vec<std::collections::BTreeMap<String, String>> = serde_json::from_value(report["config_doc_tag_rights"].clone())?;
+    assert!(!config_tag_rights.is_empty(), "full command should have config doc tag rights");
+
+    let config_rw_tag = config_tag_keys[0].iter().find(|k| k == &"org.example.test.config").expect("config-rw tag must exist");
+    assert!(
+        config_tag_rights[0][config_rw_tag].contains("READ") && config_tag_rights[0][config_rw_tag].contains("UPDATE"),
+        "config tag should have READ+UPDATE, got: {}",
+        config_tag_rights[0][config_rw_tag]
+    );
+    let config_ro_tag = config_tag_keys[0].iter().find(|k| k == &"org.example.test.config-ro").expect("config-ro tag must exist");
+    assert!(
+        config_tag_rights[0][config_ro_tag].contains("READ") && !config_tag_rights[0][config_ro_tag].contains("UPDATE"),
+        "config-ro tag should have READ-only, got: {}",
+        config_tag_rights[0][config_ro_tag]
+    );
+
     let sqlite_conns: Vec<String> =
         serde_json::from_value(report["sqlite_connections"].clone())?;
     assert!(sqlite_conns.contains(&"@daybook/test/capability-report".to_string()));
@@ -203,7 +241,26 @@ async fn test_full_processor_capability_report() -> Res<()> {
 
     let config_facet_keys: Vec<Vec<String>> = serde_json::from_value(report["config_doc_facet_keys"].clone())?;
     assert!(!config_facet_keys.is_empty(), "full processor should have config docs");
-    let _config_tag_keys: Vec<Vec<String>> = serde_json::from_value(report["config_doc_tag_keys"].clone())?;
+    let config_tag_keys: Vec<Vec<String>> = serde_json::from_value(report["config_doc_tag_keys"].clone())?;
+    assert!(!config_tag_keys.is_empty(), "full processor should have config doc tags");
+
+    let config_facet_rights: Vec<std::collections::BTreeMap<String, String>> = serde_json::from_value(report["config_doc_facet_rights"].clone())?;
+    let config_tag_rights: Vec<std::collections::BTreeMap<String, String>> = serde_json::from_value(report["config_doc_tag_rights"].clone())?;
+    assert!(!config_facet_rights.is_empty(), "full processor should have config doc facet rights");
+    assert!(!config_tag_rights.is_empty(), "full processor should have config doc tag rights");
+
+    let config_rw_tag = config_tag_keys[0].iter().find(|k| k == &"org.example.test.config").expect("config-rw tag must exist");
+    assert!(
+        config_tag_rights[0][config_rw_tag].contains("READ") && config_tag_rights[0][config_rw_tag].contains("UPDATE"),
+        "config tag should have READ+UPDATE, got: {}",
+        config_tag_rights[0][config_rw_tag]
+    );
+    let config_ro_tag = config_tag_keys[0].iter().find(|k| k == &"org.example.test.config-ro").expect("config-ro tag must exist");
+    assert!(
+        config_tag_rights[0][config_ro_tag].contains("READ") && !config_tag_rights[0][config_ro_tag].contains("UPDATE"),
+        "config-ro tag should have READ-only, got: {}",
+        config_tag_rights[0][config_ro_tag]
+    );
 
     let cmd_urls: Vec<String> = serde_json::from_value(report["command_invoke_urls"].clone())?;
     assert!(cmd_urls.is_empty(), "processor should not have command invoke tokens");
@@ -314,6 +371,120 @@ async fn test_minimal_processor_capability_report() -> Res<()> {
     let sqlite_conns: Vec<String> =
         serde_json::from_value(report["sqlite_connections"].clone())?;
     assert!(sqlite_conns.contains(&"@daybook/test/capability-report".to_string()));
+
+    test_cx.stop().await?;
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn test_downscope_capability() -> Res<()> {
+    let test_cx = daybook_core::test_support::test_cx("cap_reg_downscope").await?;
+    super::common::import_test_plug_oci(&test_cx).await?;
+
+    let doc_id = setup_doc(&test_cx).await?;
+    dispatch_and_wait(&test_cx, "test-downscope", &doc_id, vec![]).await?;
+
+    let db_pool = open_plug_test_local_state(&test_cx).await?;
+    let report = fetch_capability_report_v2(&db_pool, &doc_id, "test_downscope").await?;
+
+    assert!(report["has_read"].as_bool().unwrap_or(false), "cloned token should have READ");
+    assert!(!report["has_update"].as_bool().unwrap_or(true), "cloned token should not have UPDATE");
+    assert!(report["update_denied"].as_bool().unwrap_or(false), "update on read-only clone should be denied");
+
+    test_cx.stop().await?;
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn test_denied_update_capability() -> Res<()> {
+    let test_cx = daybook_core::test_support::test_cx("cap_reg_denied").await?;
+    super::common::import_test_plug_oci(&test_cx).await?;
+
+    let doc_id = setup_doc(&test_cx).await?;
+    dispatch_and_wait(&test_cx, "test-denied-update", &doc_id, vec![]).await?;
+
+    let db_pool = open_plug_test_local_state(&test_cx).await?;
+    let report = fetch_capability_report_v2(&db_pool, &doc_id, "test_denied_update").await?;
+
+    assert!(report["update_denied"].as_bool().unwrap_or(false), "update on read-only token should be denied");
+
+    test_cx.stop().await?;
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn test_acl_aggregate_capability() -> Res<()> {
+    let test_cx = daybook_core::test_support::test_cx("cap_reg_acl_agg").await?;
+    super::common::import_test_plug_oci(&test_cx).await?;
+
+    let doc_id = setup_doc(&test_cx).await?;
+    dispatch_and_wait(&test_cx, "test-acl-aggregate", &doc_id, vec![]).await?;
+
+    let db_pool = open_plug_test_local_state(&test_cx).await?;
+    let report = fetch_capability_report_v2(&db_pool, &doc_id, "test_acl_aggregate").await?;
+
+    assert!(report["tag_has_read"].as_bool().unwrap_or(false), "tag token should have READ from aggregated ACLs");
+    assert!(report["tag_has_update"].as_bool().unwrap_or(false), "tag token should have UPDATE from aggregated ACLs");
+    assert!(report["facet_has_read"].as_bool().unwrap_or(false), "facet token should have READ from aggregated ACLs");
+    assert!(report["facet_has_update"].as_bool().unwrap_or(false), "facet token should have UPDATE from aggregated ACLs");
+
+    test_cx.stop().await?;
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn test_create_facet_capability() -> Res<()> {
+    let test_cx = daybook_core::test_support::test_cx("cap_reg_create").await?;
+    super::common::import_test_plug_oci(&test_cx).await?;
+
+    let doc_id = setup_doc(&test_cx).await?;
+    dispatch_and_wait(&test_cx, "test-create-facet", &doc_id, vec![]).await?;
+
+    let db_pool = open_plug_test_local_state(&test_cx).await?;
+    let report = fetch_capability_report_v2(&db_pool, &doc_id, "test_create_facet").await?;
+
+    assert_eq!(report["created_key"].as_str().unwrap_or(""), "org.example.test.createable/new-key");
+    let rights = report["created_rights"].as_str().unwrap_or("");
+    assert!(rights.contains("READ"), "created facet token should have READ, got: {rights}");
+    assert!(rights.contains("UPDATE"), "created facet token should have UPDATE, got: {rights}");
+
+    test_cx.stop().await?;
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn test_get_create_token_capability() -> Res<()> {
+    let test_cx = daybook_core::test_support::test_cx("cap_reg_get_create").await?;
+    super::common::import_test_plug_oci(&test_cx).await?;
+
+    let doc_id = setup_doc(&test_cx).await?;
+    dispatch_and_wait(&test_cx, "test-get-create-token", &doc_id, vec![]).await?;
+
+    let db_pool = open_plug_test_local_state(&test_cx).await?;
+    let report = fetch_capability_report_v2(&db_pool, &doc_id, "test_get_create_token").await?;
+
+    assert_eq!(report["ctoken_key"].as_str().unwrap_or(""), "org.example.test.createable/another-key");
+    assert_eq!(report["created_key"].as_str().unwrap_or(""), "org.example.test.createable/another-key");
+    let rights = report["created_rights"].as_str().unwrap_or("");
+    assert!(rights.contains("READ"), "created facet token should have READ, got: {rights}");
+    assert!(rights.contains("UPDATE"), "created facet token should have UPDATE, got: {rights}");
+
+    test_cx.stop().await?;
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn test_delete_facet_capability() -> Res<()> {
+    let test_cx = daybook_core::test_support::test_cx("cap_reg_delete").await?;
+    super::common::import_test_plug_oci(&test_cx).await?;
+
+    let doc_id = setup_doc(&test_cx).await?;
+    dispatch_and_wait(&test_cx, "test-delete-facet", &doc_id, vec![]).await?;
+
+    let db_pool = open_plug_test_local_state(&test_cx).await?;
+    let report = fetch_capability_report_v2(&db_pool, &doc_id, "test_delete_facet").await?;
+
+    assert!(report["deleted"].as_bool().unwrap_or(false), "delete_facet should succeed");
 
     test_cx.stop().await?;
     Ok(())

@@ -37,7 +37,7 @@
 
           androidBuildToolsVersion = "35.0.0";
           androidApiLevel = "31";
-          rustVersion = "2026-01-01";
+          rustVersion = "2026-04-16";
 
           ghjkMainEnv = {
             CARGO_BUILD_JOBS = "8";
@@ -333,7 +333,6 @@
 
               shellHook = ''
                 export XDG_DATA_DIRS=${pkgs.fontconfig.out}/share:$XDG_DATA_DIRS
-                export LIBCLANG_PATH="${pkgs.lib.getLib pkgs.llvmPackages.libclang}/lib"
                 export LD_LIBRARY_PATH="$LD_LIBRARY_PATH:${self}/target/debug/:${
                   pkgs.lib.makeLibraryPath (
                     pkgs.lib.map (packageValue: pkgs.lib.getLib packageValue) (

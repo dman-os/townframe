@@ -35,9 +35,36 @@ pub fn doc_rights_from_facet_acl(_facet_acl: &[daybook_types::manifest::RoutineF
     rights
 }
 
+async fn ensure_staging_branch(
+    plugin: &DaybookPlugin,
+    doc_id: &DocId,
+    source_branch_path: &daybook_types::doc::BranchPath,
+    staging_branch_path: &daybook_types::doc::BranchPath,
+    heads: &ChangeHashSet,
+) -> Result<(), crate::drawer::types::DrawerError> {
+    if source_branch_path == staging_branch_path {
+        return Ok(());
+    }
+    match plugin
+        .drawer_repo
+        .create_branch_at_heads_from_branch(
+            doc_id,
+            source_branch_path,
+            staging_branch_path,
+            heads,
+            None,
+        )
+        .await
+    {
+        Ok(()) | Err(crate::drawer::types::DrawerError::BranchAlreadyExists { .. }) => Ok(()),
+        Err(e) => Err(e),
+    }
+}
+
 pub struct DocToken {
     pub doc_id: DocId,
     pub branch_path: daybook_types::doc::BranchPath,
+    pub staging_branch_path: daybook_types::doc::BranchPath,
     pub heads: ChangeHashSet,
     pub rights: capabilities::DocRights,
     pub facet_acl: Vec<daybook_types::manifest::RoutineFacetAccess>,
@@ -78,6 +105,7 @@ impl capabilities::HostDocToken for SharedWashCtx {
         let new_token = self.table.push(DocToken {
             doc_id: token.doc_id.clone(),
             branch_path: token.branch_path.clone(),
+            staging_branch_path: token.staging_branch_path.clone(),
             heads: token.heads.clone(),
             rights: new_rights,
             facet_acl: token.facet_acl.clone(),
@@ -117,12 +145,12 @@ impl capabilities::HostDocToken for SharedWashCtx {
         &mut self,
         handle: wasmtime::component::Resource<capabilities::DocToken>,
     ) -> wasmtime::Result<Result<Vec<(String, wasmtime::component::Resource<capabilities::FacetToken>)>, capabilities::AccessError>> {
-        let (doc_id, branch_path, heads, _rights, facet_acl) = {
+        let (doc_id, branch_path, staging_branch_path, heads, _rights, facet_acl) = {
             let token = self.table.get(&handle).map_err(|err| wasmtime_err(format!("error locating doc token: {err}")))?;
             if !token.rights.contains(capabilities::DocRights::FACET_LIST) {
                 return Ok(Err(capabilities::AccessError::Denied));
             }
-            (token.doc_id.clone(), token.branch_path.clone(), token.heads.clone(), token.rights, token.facet_acl.clone())
+            (token.doc_id.clone(), token.branch_path.clone(), token.staging_branch_path.clone(), token.heads.clone(), token.rights, token.facet_acl.clone())
         };
         let plugin = DaybookPlugin::from_ctx(self);
         let doc = match plugin.get_doc(&doc_id, &branch_path, &heads).await.map_err(wasmtime_err)? {
@@ -149,6 +177,7 @@ impl capabilities::HostDocToken for SharedWashCtx {
             let ftoken = self.table.push(FacetToken {
                 doc_id: doc_id.clone(),
                 branch_path: branch_path.clone(),
+                staging_branch_path: staging_branch_path.clone(),
                 heads: heads.clone(),
                 facet_key: facet_key.clone(),
                 rights,
@@ -194,6 +223,7 @@ if rights == capabilities::FacetRights::empty() {
         let ftoken = self.table.push(FacetToken {
             doc_id: token.doc_id.clone(),
             branch_path: token.branch_path.clone(),
+            staging_branch_path: token.staging_branch_path.clone(),
             heads: token.heads.clone(),
             facet_key,
             rights,
@@ -205,12 +235,12 @@ if rights == capabilities::FacetRights::empty() {
         &mut self,
         handle: wasmtime::component::Resource<capabilities::DocToken>,
     ) -> wasmtime::Result<Result<Vec<(String, wasmtime::component::Resource<capabilities::FacetTagToken>)>, capabilities::AccessError>> {
-        let (doc_id, branch_path, heads, _rights, facet_acl) = {
+        let (doc_id, branch_path, staging_branch_path, heads, _rights, facet_acl) = {
             let token = self.table.get(&handle).map_err(|err| wasmtime_err(format!("error locating doc token: {err}")))?;
             if !token.rights.contains(capabilities::DocRights::FACET_LIST) {
                 return Ok(Err(capabilities::AccessError::Denied));
             }
-            (token.doc_id.clone(), token.branch_path.clone(), token.heads.clone(), token.rights, token.facet_acl.clone())
+            (token.doc_id.clone(), token.branch_path.clone(), token.staging_branch_path.clone(), token.heads.clone(), token.rights, token.facet_acl.clone())
         };
         let mut tag_rights: std::collections::HashMap<String, capabilities::FacetRights> = std::collections::HashMap::new();
         for access in &facet_acl {
@@ -226,6 +256,7 @@ if rights == capabilities::FacetRights::empty() {
             let ttoken = self.table.push(FacetTagToken {
                 doc_id: doc_id.clone(),
                 branch_path: branch_path.clone(),
+                staging_branch_path: staging_branch_path.clone(),
                 heads: heads.clone(),
                 tag: tag_str.clone(),
                 rights,
@@ -248,6 +279,7 @@ if rights == capabilities::FacetRights::empty() {
 pub struct FacetToken {
     pub doc_id: DocId,
     pub branch_path: daybook_types::doc::BranchPath,
+    pub staging_branch_path: daybook_types::doc::BranchPath,
     pub heads: ChangeHashSet,
     pub facet_key: daybook_types::doc::FacetKey,
     pub rights: capabilities::FacetRights,
@@ -288,6 +320,7 @@ impl capabilities::HostFacetToken for SharedWashCtx {
         let new_token = self.table.push(FacetToken {
             doc_id: token.doc_id.clone(),
             branch_path: token.branch_path.clone(),
+            staging_branch_path: token.staging_branch_path.clone(),
             heads: token.heads.clone(),
             facet_key: token.facet_key.clone(),
             rights: new_rights,
@@ -364,6 +397,15 @@ impl capabilities::HostFacetToken for SharedWashCtx {
         let facet: daybook_types::doc::FacetRaw = wit_doc::facet_into(&facet_json)
             .map_err(|err| capabilities::UpdateDocError::InvalidPatch(err.to_string()))?;
         let plugin = DaybookPlugin::from_ctx(self);
+        if let Err(err) = ensure_staging_branch(&plugin, &token.doc_id, &token.branch_path, &token.staging_branch_path, &token.heads).await {
+            return Ok(Ok(Err(match err {
+                crate::drawer::types::DrawerError::DocNotFound { .. } => capabilities::UpdateDocError::Other("doc not found".into()),
+                crate::drawer::types::DrawerError::BranchNotFound { .. } => capabilities::UpdateDocError::Other("branch not found".into()),
+                crate::drawer::types::DrawerError::InvalidKey { inner: root_doc::FacetTagParseError::NotDomainName { _tag: tag } } => capabilities::UpdateDocError::InvalidKey(tag),
+                crate::drawer::types::DrawerError::Other { inner } => return Err(wasmtime_err(format!("unexpected error: {inner}"))),
+                crate::drawer::types::DrawerError::BranchAlreadyExists { .. } => unreachable!(),
+            })));
+        }
         match plugin.drawer_repo.update_at_heads(
             daybook_types::doc::DocPatch {
                 id: token.doc_id.clone(),
@@ -371,8 +413,8 @@ impl capabilities::HostFacetToken for SharedWashCtx {
                 facets_remove: default(),
                 user_path: None,
             },
-            token.branch_path.clone(),
-            Some(token.heads.clone()),
+            token.staging_branch_path.clone(),
+            None,
         ).await {
             Ok(_) => Ok(Ok(Ok(()))),
             Err(crate::drawer::types::DrawerError::DocNotFound { .. }) => Ok(Ok(Err(capabilities::UpdateDocError::Other("doc not found".into())))),
@@ -419,20 +461,14 @@ impl capabilities::HostFacetCreateToken for SharedWashCtx {
         let facet: daybook_types::doc::FacetRaw = wit_doc::facet_into(&data)
             .map_err(|err| capabilities::UpdateDocError::InvalidPatch(err.to_string()))?;
         let plugin = DaybookPlugin::from_ctx(self);
-        if token.branch_path != token.target_branch_path {
-            match plugin.drawer_repo.create_branch_at_heads_from_branch(
-                &token.doc_id,
-                &token.branch_path,
-                &token.target_branch_path,
-                &token.heads,
-                None,
-            ).await {
-                Ok(()) | Err(crate::drawer::types::DrawerError::BranchAlreadyExists { .. }) => {}
-                Err(crate::drawer::types::DrawerError::DocNotFound { .. }) => return Ok(Err(capabilities::UpdateDocError::Other("doc not found".into()))),
-                Err(crate::drawer::types::DrawerError::BranchNotFound { .. }) => return Ok(Err(capabilities::UpdateDocError::Other("branch not found".into()))),
-                Err(crate::drawer::types::DrawerError::Other { inner }) => return Err(wasmtime_err(format!("unexpected error ensuring branch: {inner}"))),
-                Err(crate::drawer::types::DrawerError::InvalidKey { .. }) => return Err(wasmtime_err("unexpected invalid key")),
-            }
+        if let Err(err) = ensure_staging_branch(&plugin, &token.doc_id, &token.branch_path, &token.target_branch_path, &token.heads).await {
+            return Ok(Err(match err {
+                crate::drawer::types::DrawerError::DocNotFound { .. } => capabilities::UpdateDocError::Other("doc not found".into()),
+                crate::drawer::types::DrawerError::BranchNotFound { .. } => capabilities::UpdateDocError::Other("branch not found".into()),
+                crate::drawer::types::DrawerError::InvalidKey { inner: root_doc::FacetTagParseError::NotDomainName { _tag: tag } } => capabilities::UpdateDocError::InvalidKey(tag),
+                crate::drawer::types::DrawerError::Other { inner } => return Err(wasmtime_err(format!("unexpected error: {inner}"))),
+                crate::drawer::types::DrawerError::BranchAlreadyExists { .. } => unreachable!(),
+            }));
         }
         match plugin.drawer_repo.update_at_heads(
             daybook_types::doc::DocPatch {
@@ -441,13 +477,14 @@ impl capabilities::HostFacetCreateToken for SharedWashCtx {
                 facets_remove: default(),
                 user_path: None,
             },
-            token.branch_path.clone(),
-            Some(token.heads.clone()),
+            token.target_branch_path.clone(),
+            None,
         ).await {
             Ok(_) => {
                 let ftoken = self.table.push(FacetToken {
                     doc_id: token.doc_id.clone(),
-                    branch_path: token.branch_path.clone(),
+                    branch_path: token.target_branch_path.clone(),
+                    staging_branch_path: token.target_branch_path.clone(),
                     heads: token.heads.clone(),
                     facet_key: token.facet_key.clone(),
                     rights: capabilities::FacetRights::READ | capabilities::FacetRights::UPDATE | capabilities::FacetRights::DELETE,
@@ -474,6 +511,7 @@ impl capabilities::HostFacetCreateToken for SharedWashCtx {
 pub struct FacetTagToken {
     pub doc_id: DocId,
     pub branch_path: daybook_types::doc::BranchPath,
+    pub staging_branch_path: daybook_types::doc::BranchPath,
     pub heads: ChangeHashSet,
     pub tag: String,
     pub rights: capabilities::FacetRights,
@@ -501,12 +539,12 @@ impl capabilities::HostFacetTagToken for SharedWashCtx {
         &mut self,
         handle: wasmtime::component::Resource<capabilities::FacetTagToken>,
     ) -> wasmtime::Result<Result<Vec<wasmtime::component::Resource<capabilities::FacetToken>>, capabilities::AccessError>> {
-        let (doc_id, branch_path, heads, _rights, tag, facet_acl) = {
+        let (doc_id, branch_path, staging_branch_path, heads, _rights, tag, facet_acl) = {
             let token = self.table.get(&handle).map_err(|err| wasmtime_err(format!("error locating facet tag token: {err}")))?;
             if !token.rights.contains(capabilities::FacetRights::READ) {
                 return Ok(Err(capabilities::AccessError::Denied));
             }
-            (token.doc_id.clone(), token.branch_path.clone(), token.heads.clone(), token.rights, token.tag.clone(), token.facet_acl.clone())
+            (token.doc_id.clone(), token.branch_path.clone(), token.staging_branch_path.clone(), token.heads.clone(), token.rights, token.tag.clone(), token.facet_acl.clone())
         };
         let plugin = DaybookPlugin::from_ctx(self);
         let doc = match plugin.get_doc(&doc_id, &branch_path, &heads).await.map_err(wasmtime_err)? {
@@ -536,6 +574,7 @@ impl capabilities::HostFacetTagToken for SharedWashCtx {
             let ftoken = self.table.push(FacetToken {
                 doc_id: doc_id.clone(),
                 branch_path: branch_path.clone(),
+                staging_branch_path: staging_branch_path.clone(),
                 heads: heads.clone(),
                 facet_key: facet_key.clone(),
                 rights,
@@ -584,6 +623,7 @@ impl capabilities::HostFacetTagToken for SharedWashCtx {
         let ftoken = self.table.push(FacetToken {
             doc_id: token.doc_id.clone(),
             branch_path: token.branch_path.clone(),
+            staging_branch_path: token.staging_branch_path.clone(),
             heads: token.heads.clone(),
             facet_key: facet_key.clone(),
             rights,
@@ -608,6 +648,15 @@ impl capabilities::HostFacetTagToken for SharedWashCtx {
         let facet: daybook_types::doc::FacetRaw = wit_doc::facet_into(&data)
             .map_err(|err| capabilities::UpdateDocError::InvalidPatch(err.to_string()))?;
         let plugin = DaybookPlugin::from_ctx(self);
+        if let Err(err) = ensure_staging_branch(&plugin, &token.doc_id, &token.branch_path, &token.staging_branch_path, &token.heads).await {
+            return Ok(Err(match err {
+                crate::drawer::types::DrawerError::DocNotFound { .. } => capabilities::UpdateDocError::Other("doc not found".into()),
+                crate::drawer::types::DrawerError::BranchNotFound { .. } => capabilities::UpdateDocError::Other("branch not found".into()),
+                crate::drawer::types::DrawerError::InvalidKey { inner: root_doc::FacetTagParseError::NotDomainName { _tag: tag } } => capabilities::UpdateDocError::InvalidKey(tag),
+                crate::drawer::types::DrawerError::Other { inner } => return Err(wasmtime_err(format!("unexpected error: {inner}"))),
+                crate::drawer::types::DrawerError::BranchAlreadyExists { .. } => unreachable!(),
+            }));
+        }
         match plugin.drawer_repo.update_at_heads(
             daybook_types::doc::DocPatch {
                 id: token.doc_id.clone(),
@@ -615,13 +664,14 @@ impl capabilities::HostFacetTagToken for SharedWashCtx {
                 facets_remove: default(),
                 user_path: None,
             },
-            token.branch_path.clone(),
-            Some(token.heads.clone()),
+            token.staging_branch_path.clone(),
+            None,
         ).await {
             Ok(_) => {
                 let ftoken = self.table.push(FacetToken {
                     doc_id: token.doc_id.clone(),
                     branch_path: token.branch_path.clone(),
+                    staging_branch_path: token.staging_branch_path.clone(),
                     heads: token.heads.clone(),
                     facet_key,
                     rights: capabilities::FacetRights::READ | capabilities::FacetRights::UPDATE | capabilities::FacetRights::DELETE,
@@ -652,7 +702,7 @@ impl capabilities::HostFacetTagToken for SharedWashCtx {
         let ctoken = self.table.push(FacetCreateToken {
             doc_id: token.doc_id.clone(),
             branch_path: token.branch_path.clone(),
-            target_branch_path: token.branch_path.clone(),
+            target_branch_path: token.staging_branch_path.clone(),
             heads: token.heads.clone(),
             facet_key,
             facet_acl: token.facet_acl.clone(),
@@ -679,6 +729,14 @@ impl capabilities::Host for SharedWashCtx {
             return Ok(Err(capabilities::AccessError::Denied));
         }
         let plugin = DaybookPlugin::from_ctx(self);
+        if let Err(err) = ensure_staging_branch(&plugin, &ft.doc_id, &ft.branch_path, &ft.staging_branch_path, &ft.heads).await {
+            return Ok(Err(match err {
+                crate::drawer::types::DrawerError::DocNotFound { .. } => capabilities::AccessError::NotFound,
+                crate::drawer::types::DrawerError::BranchNotFound { .. } => capabilities::AccessError::NotFound,
+                crate::drawer::types::DrawerError::Other { inner } => return Err(wasmtime_err(format!("unexpected error: {inner}"))),
+                _ => return Err(wasmtime_err("unexpected error ensuring branch")),
+            }));
+        }
         match plugin.drawer_repo.update_at_heads(
             daybook_types::doc::DocPatch {
                 id: ft.doc_id.clone(),
@@ -686,8 +744,8 @@ impl capabilities::Host for SharedWashCtx {
                 facets_remove: vec![ft.facet_key.clone()],
                 user_path: None,
             },
-            ft.branch_path.clone(),
-            Some(ft.heads.clone()),
+            ft.staging_branch_path.clone(),
+            None,
         ).await {
             Ok(_) => {
                 let _ = self.table.delete(token);

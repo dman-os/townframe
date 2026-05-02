@@ -135,6 +135,39 @@ mod wasm_runtime {
         Ok(())
     }
 
+    fn write_report_v2(
+        args: &crate::wit::townframe::daybook::facet_routine::FacetRoutineArgs,
+        test_name: &str,
+        summary: &serde_json::Value,
+    ) -> Result<(), JobErrorX> {
+        use crate::wit::townframe::sql::types::SqlValue;
+        let local_state_key = "@daybook/test/capability-report";
+        let sqlite_connection = args
+            .sqlite_connections
+            .iter()
+            .find(|(key, _)| key == local_state_key)
+            .map(|(_, conn)| conn)
+            .ok_or_else(|| JobErrorX::Terminal(ferr!("missing sqlite connection '{local_state_key}'")))?;
+
+        sqlite_connection
+            .query_batch(
+                "CREATE TABLE IF NOT EXISTS capability_report_v2 (doc_id TEXT NOT NULL, test_name TEXT NOT NULL, summary_json TEXT NOT NULL, PRIMARY KEY (doc_id, test_name))"
+            )
+            .map_err(|err| JobErrorX::Terminal(ferr!("error creating capability_report_v2 table: {err:?}")))?;
+
+        sqlite_connection
+            .query(
+                "INSERT OR REPLACE INTO capability_report_v2 (doc_id, test_name, summary_json) VALUES (?1, ?2, ?3)",
+                &[
+                    SqlValue::Text(args.doc_id.clone()),
+                    SqlValue::Text(test_name.into()),
+                    SqlValue::Text(summary.to_string()),
+                ],
+            )
+            .map_err(|err| JobErrorX::Terminal(ferr!("error writing capability report: {err:?}")))?;
+        Ok(())
+    }
+
     fn invoke_child_and_wait(
         cx: &mut WflowCtx,
         token: &crate::wit::townframe::daybook::capabilities::CommandInvokeToken,
@@ -226,6 +259,135 @@ mod wasm_runtime {
         )))
     }
 
+    fn test_downscope(_cx: &mut WflowCtx) -> Result<(), JobErrorX> {
+        let args = crate::wit::townframe::daybook::facet_routine::get_args();
+        let label_key =
+            daybook_types::doc::FacetKey::from(daybook_types::doc::WellKnownFacetTag::LabelGeneric).to_string();
+        let token = find_facet_token_with_rights(&args, &label_key, crate::wit::townframe::daybook::capabilities::FacetRights::UPDATE)?;
+
+        let read_only = token.clone(Some(crate::wit::townframe::daybook::capabilities::FacetRights::READ))
+            .map_err(|err| JobErrorX::Terminal(ferr!("clone denied: {err:?}")))?;
+
+        let has_read = read_only.rights().contains(crate::wit::townframe::daybook::capabilities::FacetRights::READ);
+        let has_update = read_only.rights().contains(crate::wit::townframe::daybook::capabilities::FacetRights::UPDATE);
+
+        let facet_json = serde_json::to_string(&daybook_types::doc::WellKnownFacet::LabelGeneric("downscope-read-only".into())).expect(ERROR_JSON);
+        let update_denied = matches!(read_only.update(&facet_json), Err(_));
+
+        let summary = serde_json::json!({
+            "has_read": has_read,
+            "has_update": has_update,
+            "update_denied": update_denied,
+        });
+        write_report_v2(&args, "test_downscope", &summary)?;
+        Ok(())
+    }
+
+    fn test_denied_update(_cx: &mut WflowCtx) -> Result<(), JobErrorX> {
+        let args = crate::wit::townframe::daybook::facet_routine::get_args();
+        let label_key =
+            daybook_types::doc::FacetKey::from(daybook_types::doc::WellKnownFacetTag::LabelGeneric).to_string();
+        let token = find_facet_token(&args, &label_key)?;
+
+        let facet_json = serde_json::to_string(&daybook_types::doc::WellKnownFacet::LabelGeneric("should-fail".into())).expect(ERROR_JSON);
+        let update_denied = matches!(token.update(&facet_json), Err(_));
+
+        let summary = serde_json::json!({ "update_denied": update_denied });
+        write_report_v2(&args, "test_denied_update", &summary)?;
+        Ok(())
+    }
+
+    fn test_acl_aggregate(_cx: &mut WflowCtx) -> Result<(), JobErrorX> {
+        let args = crate::wit::townframe::daybook::facet_routine::get_args();
+
+        let tag_token = args.primary_doc.tags.iter()
+            .find(|t| t.tag() == "org.example.daybook.labelgeneric")
+            .ok_or_else(|| JobErrorX::Terminal(ferr!("labelgeneric tag token not found")))?;
+        let tag_has_read = tag_token.rights().contains(crate::wit::townframe::daybook::capabilities::FacetRights::READ);
+        let tag_has_update = tag_token.rights().contains(crate::wit::townframe::daybook::capabilities::FacetRights::UPDATE);
+
+        let label_key = daybook_types::doc::FacetKey::from(daybook_types::doc::WellKnownFacetTag::LabelGeneric).to_string();
+        let facet_token = find_facet_token_with_rights(&args, &label_key, crate::wit::townframe::daybook::capabilities::FacetRights::READ)?;
+        let facet_has_read = facet_token.rights().contains(crate::wit::townframe::daybook::capabilities::FacetRights::READ);
+        let facet_has_update = facet_token.rights().contains(crate::wit::townframe::daybook::capabilities::FacetRights::UPDATE);
+
+        let summary = serde_json::json!({
+            "tag_has_read": tag_has_read,
+            "tag_has_update": tag_has_update,
+            "facet_has_read": facet_has_read,
+            "facet_has_update": facet_has_update,
+        });
+        write_report_v2(&args, "test_acl_aggregate", &summary)?;
+        Ok(())
+    }
+
+    fn test_create_facet(_cx: &mut WflowCtx) -> Result<(), JobErrorX> {
+        let args = crate::wit::townframe::daybook::facet_routine::get_args();
+        let tag_token = args.primary_doc.tags.iter()
+            .find(|t| t.tag() == "org.example.test.createable")
+            .ok_or_else(|| JobErrorX::Terminal(ferr!("createable tag token not found")))?;
+
+        if !tag_token.rights().contains(crate::wit::townframe::daybook::capabilities::FacetRights::CREATE) {
+            return Err(JobErrorX::Terminal(ferr!("createable tag token missing CREATE right")));
+        }
+
+        let new_facet = daybook_types::doc::WellKnownFacet::LabelGeneric("created-via-tag".into());
+        let facet_json = serde_json::to_string(&new_facet).expect(ERROR_JSON);
+        let created = tag_token.create("new-key", &facet_json)
+            .map_err(|err| JobErrorX::Terminal(ferr!("create failed: {err:?}")))?;
+
+        let summary = serde_json::json!({
+            "created_key": created.key(),
+            "created_rights": format!("{:?}", created.rights()),
+        });
+        write_report_v2(&args, "test_create_facet", &summary)?;
+        Ok(())
+    }
+
+    fn test_get_create_token(_cx: &mut WflowCtx) -> Result<(), JobErrorX> {
+        let args = crate::wit::townframe::daybook::facet_routine::get_args();
+        let tag_token = args.primary_doc.tags.iter()
+            .find(|t| t.tag() == "org.example.test.createable")
+            .ok_or_else(|| JobErrorX::Terminal(ferr!("createable tag token not found")))?;
+
+        let ctoken = tag_token.get_create_token("another-key")
+            .map_err(|err| JobErrorX::Terminal(ferr!("get_create_token failed: {err:?}")))?;
+
+        let new_facet = daybook_types::doc::WellKnownFacet::LabelGeneric("created-via-create-token".into());
+        let facet_json = serde_json::to_string(&new_facet).expect(ERROR_JSON);
+        let created = ctoken.create_facet(&facet_json)
+            .map_err(|err| JobErrorX::Terminal(ferr!("create_facet failed: {err:?}")))?;
+
+        let summary = serde_json::json!({
+            "ctoken_key": ctoken.key(),
+            "created_key": created.key(),
+            "created_rights": format!("{:?}", created.rights()),
+        });
+        write_report_v2(&args, "test_get_create_token", &summary)?;
+        Ok(())
+    }
+
+    fn test_delete_facet(_cx: &mut WflowCtx) -> Result<(), JobErrorX> {
+        let args = crate::wit::townframe::daybook::facet_routine::get_args();
+        let doc = &args.primary_doc.doc;
+        let label_key = daybook_types::doc::FacetKey::from(daybook_types::doc::WellKnownFacetTag::LabelGeneric).to_string();
+
+        let token = doc.get_facet(&label_key)
+            .map_err(|err| JobErrorX::Terminal(ferr!("get_facet error: {err:?}")))?
+            .ok_or_else(|| JobErrorX::Terminal(ferr!("labelgeneric facet not found")))?;
+
+        if !token.rights().contains(crate::wit::townframe::daybook::capabilities::FacetRights::DELETE) {
+            return Err(JobErrorX::Terminal(ferr!("labelgeneric facet token missing DELETE right")));
+        }
+
+        crate::wit::townframe::daybook::capabilities::delete_facet(token)
+            .map_err(|err| JobErrorX::Terminal(ferr!("delete_facet failed: {err:?}")))?;
+
+        let summary = serde_json::json!({ "deleted": true });
+        write_report_v2(&args, "test_delete_facet", &summary)?;
+        Ok(())
+    }
+
     fn report_capabilities(_cx: &mut WflowCtx) -> Result<(), JobErrorX> {
         use crate::wit::townframe::daybook::facet_routine;
         use crate::wit::townframe::sql::types::SqlValue;
@@ -312,6 +474,12 @@ mod wasm_runtime {
                 "child-success" => |cx, args: ChildArgs| child_success(cx, args),
                 "child-failure" => |cx, args: ChildArgs| child_failure(cx, args),
                 "report-capabilities" => |cx, _args: serde_json::Value| report_capabilities(cx),
+                "test-downscope" => |cx, _args: serde_json::Value| test_downscope(cx),
+                "test-denied-update" => |cx, _args: serde_json::Value| test_denied_update(cx),
+                "test-acl-aggregate" => |cx, _args: serde_json::Value| test_acl_aggregate(cx),
+                "test-create-facet" => |cx, _args: serde_json::Value| test_create_facet(cx),
+                "test-get-create-token" => |cx, _args: serde_json::Value| test_get_create_token(cx),
+                "test-delete-facet" => |cx, _args: serde_json::Value| test_delete_facet(cx),
             })
         }
     }
@@ -654,6 +822,219 @@ pub fn plug_manifest() -> PlugManifest {
                     command_invoke_acl: vec![],
                 }),
             ),
+            (
+                "test-downscope".into(),
+                Arc::new(RoutineManifest {
+                    r#impl: RoutineImpl::Wflow {
+                        key: "test-downscope".into(),
+                        bundle: "plug_test".into(),
+                    },
+                    doc_acls: vec![RoutineDocAcl {
+                        doc_predicate: DocPredicateClause::HasTag(
+                            WellKnownFacetTag::LabelGeneric.into(),
+                        ),
+                        facet_acl: vec![RoutineFacetAccess {
+                            owner_plug_id: None,
+                            tag: WellKnownFacetTag::LabelGeneric.into(),
+                            key_id: None,
+                            read: true,
+                            write: true,
+                            create: false,
+                            delete: false,
+                        }],
+                    }],
+                    query_acls: vec![],
+                    config_facet_acl: vec![],
+                    local_state_acl: vec![daybook_types::manifest::RoutineLocalStateAccess {
+                        plug_id: "@daybook/test".into(),
+                        local_state_key: "capability-report".into(),
+                    }],
+                    command_invoke_acl: vec![],
+                }),
+            ),
+            (
+                "test-denied-update".into(),
+                Arc::new(RoutineManifest {
+                    r#impl: RoutineImpl::Wflow {
+                        key: "test-denied-update".into(),
+                        bundle: "plug_test".into(),
+                    },
+                    doc_acls: vec![RoutineDocAcl {
+                        doc_predicate: DocPredicateClause::HasTag(
+                            WellKnownFacetTag::LabelGeneric.into(),
+                        ),
+                        facet_acl: vec![RoutineFacetAccess {
+                            owner_plug_id: None,
+                            tag: WellKnownFacetTag::LabelGeneric.into(),
+                            key_id: None,
+                            read: true,
+                            write: false,
+                            create: false,
+                            delete: false,
+                        }],
+                    }],
+                    query_acls: vec![],
+                    config_facet_acl: vec![],
+                    local_state_acl: vec![daybook_types::manifest::RoutineLocalStateAccess {
+                        plug_id: "@daybook/test".into(),
+                        local_state_key: "capability-report".into(),
+                    }],
+                    command_invoke_acl: vec![],
+                }),
+            ),
+            (
+                "test-acl-aggregate".into(),
+                Arc::new(RoutineManifest {
+                    r#impl: RoutineImpl::Wflow {
+                        key: "test-acl-aggregate".into(),
+                        bundle: "plug_test".into(),
+                    },
+                    doc_acls: vec![RoutineDocAcl {
+                        doc_predicate: DocPredicateClause::HasTag(
+                            WellKnownFacetTag::LabelGeneric.into(),
+                        ),
+                        facet_acl: vec![
+                            RoutineFacetAccess {
+                                owner_plug_id: None,
+                                tag: WellKnownFacetTag::LabelGeneric.into(),
+                                key_id: None,
+                                read: true,
+                                write: false,
+                                create: false,
+                                delete: false,
+                            },
+                            RoutineFacetAccess {
+                                owner_plug_id: None,
+                                tag: WellKnownFacetTag::LabelGeneric.into(),
+                                key_id: None,
+                                read: false,
+                                write: true,
+                                create: false,
+                                delete: false,
+                            },
+                        ],
+                    }],
+                    query_acls: vec![],
+                    config_facet_acl: vec![],
+                    local_state_acl: vec![daybook_types::manifest::RoutineLocalStateAccess {
+                        plug_id: "@daybook/test".into(),
+                        local_state_key: "capability-report".into(),
+                    }],
+                    command_invoke_acl: vec![],
+                }),
+            ),
+            (
+                "test-create-facet".into(),
+                Arc::new(RoutineManifest {
+                    r#impl: RoutineImpl::Wflow {
+                        key: "test-create-facet".into(),
+                        bundle: "plug_test".into(),
+                    },
+                    doc_acls: vec![RoutineDocAcl {
+                        doc_predicate: DocPredicateClause::HasTag(
+                            WellKnownFacetTag::LabelGeneric.into(),
+                        ),
+                        facet_acl: vec![
+                            RoutineFacetAccess {
+                                owner_plug_id: None,
+                                tag: WellKnownFacetTag::LabelGeneric.into(),
+                                key_id: None,
+                                read: true,
+                                write: false,
+                                create: false,
+                                delete: false,
+                            },
+                            RoutineFacetAccess {
+                                owner_plug_id: None,
+                                tag: "org.example.test.createable".into(),
+                                key_id: None,
+                                read: false,
+                                write: false,
+                                create: true,
+                                delete: false,
+                            },
+                        ],
+                    }],
+                    query_acls: vec![],
+                    config_facet_acl: vec![],
+                    local_state_acl: vec![daybook_types::manifest::RoutineLocalStateAccess {
+                        plug_id: "@daybook/test".into(),
+                        local_state_key: "capability-report".into(),
+                    }],
+                    command_invoke_acl: vec![],
+                }),
+            ),
+            (
+                "test-get-create-token".into(),
+                Arc::new(RoutineManifest {
+                    r#impl: RoutineImpl::Wflow {
+                        key: "test-get-create-token".into(),
+                        bundle: "plug_test".into(),
+                    },
+                    doc_acls: vec![RoutineDocAcl {
+                        doc_predicate: DocPredicateClause::HasTag(
+                            WellKnownFacetTag::LabelGeneric.into(),
+                        ),
+                        facet_acl: vec![
+                            RoutineFacetAccess {
+                                owner_plug_id: None,
+                                tag: WellKnownFacetTag::LabelGeneric.into(),
+                                key_id: None,
+                                read: true,
+                                write: false,
+                                create: false,
+                                delete: false,
+                            },
+                            RoutineFacetAccess {
+                                owner_plug_id: None,
+                                tag: "org.example.test.createable".into(),
+                                key_id: None,
+                                read: false,
+                                write: false,
+                                create: true,
+                                delete: false,
+                            },
+                        ],
+                    }],
+                    query_acls: vec![],
+                    config_facet_acl: vec![],
+                    local_state_acl: vec![daybook_types::manifest::RoutineLocalStateAccess {
+                        plug_id: "@daybook/test".into(),
+                        local_state_key: "capability-report".into(),
+                    }],
+                    command_invoke_acl: vec![],
+                }),
+            ),
+            (
+                "test-delete-facet".into(),
+                Arc::new(RoutineManifest {
+                    r#impl: RoutineImpl::Wflow {
+                        key: "test-delete-facet".into(),
+                        bundle: "plug_test".into(),
+                    },
+                    doc_acls: vec![RoutineDocAcl {
+                        doc_predicate: DocPredicateClause::HasTag(
+                            WellKnownFacetTag::LabelGeneric.into(),
+                        ),
+                        facet_acl: vec![RoutineFacetAccess {
+                            owner_plug_id: None,
+                            tag: WellKnownFacetTag::LabelGeneric.into(),
+                            key_id: None,
+                            read: true,
+                            write: false,
+                            create: false,
+                            delete: true,
+                        }],
+                    }],
+                    query_acls: vec![],
+                    config_facet_acl: vec![],
+                    local_state_acl: vec![daybook_types::manifest::RoutineLocalStateAccess {
+                        plug_id: "@daybook/test".into(),
+                        local_state_key: "capability-report".into(),
+                    }],
+                    command_invoke_acl: vec![],
+                }),
+            ),
         ]
         .into(),
         wflow_bundles: [(
@@ -665,6 +1046,12 @@ pub fn plug_manifest() -> PlugManifest {
                     "child-success".into(),
                     "child-failure".into(),
                     "report-capabilities".into(),
+                    "test-downscope".into(),
+                    "test-denied-update".into(),
+                    "test-acl-aggregate".into(),
+                    "test-create-facet".into(),
+                    "test-get-create-token".into(),
+                    "test-delete-facet".into(),
                 ],
                 component_urls: vec!["static:plug_test.wasm.zst".parse().unwrap()],
             }
@@ -757,6 +1144,12 @@ pub fn plug_manifest() -> PlugManifest {
             },
             FacetManifest {
                 key_tag: "org.example.test.config-ro".into(),
+                value_schema: schemars::schema_for!(serde_json::Value),
+                display_config: Default::default(),
+                references: vec![],
+            },
+            FacetManifest {
+                key_tag: "org.example.test.createable".into(),
                 value_schema: schemars::schema_for!(serde_json::Value),
                 display_config: Default::default(),
                 references: vec![],

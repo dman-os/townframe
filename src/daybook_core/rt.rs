@@ -990,16 +990,15 @@ impl Rt {
                 {
                     Ok(()) => {}
                     Err(crate::drawer::types::DrawerError::BranchNotFound { name }) => {
-                        warn!(
+                        debug!(
                             %dispatch_id,
                             %entry_id,
                             ?doc_id,
                             ?name,
                             ?staging_branch_path,
                             ?target_branch_path,
-                            "staging branch missing during merge; treating dispatch as failed"
+                            "staging branch missing during merge; wflow made no facet changes"
                         );
-                        merged_successfully = false;
                     }
                     Err(err) => {
                         error!(
@@ -1635,6 +1634,23 @@ impl Rt {
             .clone()
             .unwrap_or_else(|| format!("{plug_id}/{routine_name}-{dispatch_id}"));
 
+        // Build config_docs from config_facet_acl, grouping by owner_plug_id
+        let mut config_docs_by_owner: std::collections::HashMap<String, Vec<daybook_types::manifest::RoutineFacetAccess>> = std::collections::HashMap::new();
+        for access in routine_man.config_facet_acl() {
+            let owner = access.owner_plug_id.clone().unwrap_or_else(|| plug_id.to_string());
+            config_docs_by_owner.entry(owner).or_default().push(access.clone());
+        }
+        let config_docs: Vec<dispatch::DocFacetTokens> = config_docs_by_owner
+            .into_iter()
+            .map(|(_owner, facet_acl)| dispatch::DocFacetTokens {
+                doc_id: String::new(),
+                branch_path: daybook_types::doc::BranchPath::from("main"),
+                staging_branch_path: daybook_types::doc::BranchPath::from("main"),
+                heads: daybook_types::doc::ChangeHashSet(Vec::new().into()),
+                facet_acl,
+            })
+            .collect();
+
         let mut args = ActiveDispatchArgs::FacetRoutine(FacetRoutineArgs {
             doc_id: doc_id.clone(),
             branch_path: branch_path.clone(),
@@ -1647,7 +1663,7 @@ impl Rt {
                 heads: heads.clone(),
                 facet_acl: routine_man.facet_acl(),
             },
-            config_docs: vec![],
+            config_docs,
             local_state_acl: routine_man.local_state_acl.clone(),
             command_invoke_acl_snapshot: routine_man.command_invoke_acl().to_vec(),
             wflow_args_json,
@@ -1692,6 +1708,7 @@ impl Rt {
                 // Update args with staging branch path
                 let ActiveDispatchArgs::FacetRoutine(ref mut facet_args) = args;
                 facet_args.staging_branch_path = staging_branch_path.clone();
+                facet_args.primary_doc.staging_branch_path = staging_branch_path.clone();
 
                 let mut entry_id = None;
                 let mut wflow_partition_id = None;

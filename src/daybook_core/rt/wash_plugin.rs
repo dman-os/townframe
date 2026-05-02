@@ -655,6 +655,7 @@ async fn build_doc_facet_tokens(
         let doc_token = ctx.table.push(caps::DocToken {
             doc_id: doc_tokens.doc_id.clone(),
             branch_path: doc_tokens.branch_path.clone(),
+            staging_branch_path: doc_tokens.staging_branch_path.clone(),
             heads: doc_tokens.heads.clone(),
             rights: doc_rights,
             facet_acl: doc_tokens.facet_acl.clone(),
@@ -675,44 +676,59 @@ async fn build_doc_facet_tokens(
             }
         };
 
+        // Build facet tokens: for every existing facet that matches any ACL entry,
+        // aggregate rights from all matching entries (tag-wide + key-specific).
         let mut facet_tokens: Vec<wasmtime::component::Resource<capabilities::FacetToken>> = Vec::new();
-        let mut tag_tokens: Vec<wasmtime::component::Resource<capabilities::FacetTagToken>> = Vec::new();
-        let mut seen_tag_wide: std::collections::HashSet<String> = std::collections::HashSet::new();
-
-        for access in &doc_tokens.facet_acl {
-            let tag_str = access.tag.0.clone();
-            let rights = caps::facet_rights_from_access(access);
-
-            if access.key_id.is_some() {
-                // Key-level access: create FacetToken if facet exists
-                let facet_key = daybook_types::doc::FacetKey {
-                    tag: daybook_types::doc::FacetTag::from(tag_str.as_str()),
-                    id: access.key_id.as_ref().unwrap().clone(),
-                };
-                if doc.facets.contains_key(&facet_key) {
-                    let ftoken = ctx.table.push(caps::FacetToken {
-                        doc_id: doc_tokens.doc_id.clone(),
-                        branch_path: doc_tokens.branch_path.clone(),
-                        heads: doc_tokens.heads.clone(),
-                        facet_key,
-                        rights,
-                    })?;
-                    facet_tokens.push(ftoken);
+        for (facet_key, _) in doc.facets.iter() {
+            let mut rights = capabilities::FacetRights::empty();
+            for access in &doc_tokens.facet_acl {
+                if access.tag.0 != facet_key.tag.to_string() {
+                    continue;
                 }
-            } else {
-                // Tag-wide access: create FacetTagToken (once per tag)
-                if seen_tag_wide.insert(tag_str.clone()) {
-                    let ttoken = ctx.table.push(caps::FacetTagToken {
-                        doc_id: doc_tokens.doc_id.clone(),
-                        branch_path: doc_tokens.branch_path.clone(),
-                        heads: doc_tokens.heads.clone(),
-                        tag: tag_str,
-                        rights,
-                        facet_acl: doc_tokens.facet_acl.clone(),
-                    })?;
-                    tag_tokens.push(ttoken);
+                if let Some(id) = &access.key_id {
+                    if id != &facet_key.id {
+                        continue;
+                    }
                 }
+                rights |= caps::facet_rights_from_access(access);
             }
+            if rights == capabilities::FacetRights::empty() {
+                continue;
+            }
+            let ftoken = ctx.table.push(caps::FacetToken {
+                doc_id: doc_tokens.doc_id.clone(),
+                branch_path: doc_tokens.branch_path.clone(),
+                staging_branch_path: doc_tokens.staging_branch_path.clone(),
+                heads: doc_tokens.heads.clone(),
+                facet_key: facet_key.clone(),
+                rights,
+            })?;
+            facet_tokens.push(ftoken);
+        }
+
+        // Build tag tokens: one per tag that has at least one tag-wide ACL entry.
+        // Aggregate rights from all tag-wide entries for that tag.
+        let mut tag_tokens: Vec<wasmtime::component::Resource<capabilities::FacetTagToken>> = Vec::new();
+        let mut tag_rights_map: std::collections::HashMap<String, capabilities::FacetRights> = std::collections::HashMap::new();
+        for access in &doc_tokens.facet_acl {
+            if access.key_id.is_some() {
+                continue;
+            }
+            let tag_str = access.tag.0.clone();
+            let entry_rights = caps::facet_rights_from_access(access);
+            tag_rights_map.entry(tag_str).and_modify(|r| *r |= entry_rights).or_insert(entry_rights);
+        }
+        for (tag_str, rights) in tag_rights_map {
+            let ttoken = ctx.table.push(caps::FacetTagToken {
+                doc_id: doc_tokens.doc_id.clone(),
+                branch_path: doc_tokens.branch_path.clone(),
+                staging_branch_path: doc_tokens.staging_branch_path.clone(),
+                heads: doc_tokens.heads.clone(),
+                tag: tag_str.clone(),
+                rights,
+                facet_acl: doc_tokens.facet_acl.clone(),
+            })?;
+            tag_tokens.push(ttoken);
         }
 
         Ok(facet_routine::DocFacetTokens {
