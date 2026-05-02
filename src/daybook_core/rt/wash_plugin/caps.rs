@@ -5,7 +5,7 @@ use daybook_types::doc::ChangeHashSet;
 use daybook_types::doc::DocId;
 use wash_runtime::engine::ctx::SharedCtx as SharedWashCtx;
 
-use super::{bindgen_doc, binds_guest, capabilities, drawer, root_doc, wit_doc, DaybookPlugin};
+use super::{capabilities, root_doc, wit_doc, DaybookPlugin};
 
 fn wasmtime_err(msg: impl std::fmt::Display) -> wasmtime::Error {
     wasmtime::Error::msg(msg.to_string())
@@ -61,7 +61,7 @@ async fn ensure_staging_branch(
         .await
     {
         Ok(()) | Err(crate::drawer::types::DrawerError::BranchAlreadyExists { .. }) => Ok(()),
-        Err(e) => Err(e),
+        Err(err) => Err(err),
     }
 }
 
@@ -162,11 +162,11 @@ impl capabilities::HostDocToken for SharedWashCtx {
         };
         let created_at = dmeta
             .as_ref()
-            .map(|m| m.created_at.as_second() as u64)
+            .map(|meta| meta.created_at.as_second() as u64)
             .unwrap_or(0);
         let updated_at: Vec<u64> = dmeta
             .as_ref()
-            .map(|m| m.updated_at.iter().map(|t| t.as_second() as u64).collect())
+            .map(|meta| meta.updated_at.iter().map(|ts| ts.as_second() as u64).collect())
             .unwrap_or_default();
         Ok(Ok(capabilities::DocMeta {
             created_at: capabilities::Datetime {
@@ -175,8 +175,8 @@ impl capabilities::HostDocToken for SharedWashCtx {
             },
             updated_at: updated_at
                 .into_iter()
-                .map(|s| capabilities::Datetime {
-                    seconds: s,
+                .map(|sec| capabilities::Datetime {
+                    seconds: sec,
                     nanoseconds: 0,
                 })
                 .collect(),
@@ -955,7 +955,7 @@ impl capabilities::HostFacetTagToken for SharedWashCtx {
             Ok(_) => {
                 let ftoken = self.table.push(FacetToken {
                     doc_id: token.doc_id.clone(),
-                    branch_path: token.branch_path.clone(),
+                    branch_path: token.staging_branch_path.clone(),
                     staging_branch_path: token.staging_branch_path.clone(),
                     heads: token.heads.clone(),
                     facet_key,

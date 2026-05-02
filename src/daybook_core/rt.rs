@@ -970,7 +970,7 @@ impl Rt {
                 ..
             }) = &dispatch.args;
 
-            let mut merged_successfully = matches!(&event.result, JobRunResult::Success { .. });
+            let merged_successfully = matches!(&event.result, JobRunResult::Success { .. });
 
             if merged_successfully {
                 // Merge staging branch into target branch
@@ -1649,8 +1649,8 @@ impl Rt {
                 .push(access.clone());
         }
         let config_docs: Vec<dispatch::DocFacetTokens> = config_docs_by_owner
-            .into_iter()
-            .map(|(_owner, facet_acl)| dispatch::DocFacetTokens {
+            .into_values()
+            .map(|facet_acl| dispatch::DocFacetTokens {
                 doc_id: String::new(),
                 branch_path: daybook_types::doc::BranchPath::from("main"),
                 staging_branch_path: daybook_types::doc::BranchPath::from("main"),

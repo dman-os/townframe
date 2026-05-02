@@ -724,7 +724,7 @@ async fn build_doc_facet_tokens(
         let entry_rights = caps::facet_rights_from_access(access);
         tag_rights_map
             .entry(tag_str)
-            .and_modify(|r| *r |= entry_rights)
+            .and_modify(|rights| *rights |= entry_rights)
             .or_insert(entry_rights);
     }
     for (tag_str, rights) in tag_rights_map {
@@ -789,7 +789,7 @@ impl facet_routine::Host for SharedWashCtx {
                 let owner_plug_id = config_doc_meta
                     .facet_acl
                     .first()
-                    .and_then(|a| a.owner_plug_id.clone())
+                    .and_then(|access| access.owner_plug_id.clone())
                     .unwrap_or_else(|| plug_id.clone());
                 let (config_doc_id, config_heads) = if let Some(found) =
                     owner_config_docs.get(&owner_plug_id)

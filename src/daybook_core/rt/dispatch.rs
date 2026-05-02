@@ -799,7 +799,7 @@ fn dispatch_heads_for_dispatches<'a>(
     dispatches: impl Iterator<Item = (&'a String, &'a Arc<ActiveDispatch>)>,
 ) -> ChangeHashSet {
     let mut items = dispatches.collect::<Vec<_>>();
-    items.sort_unstable_by(|(lhs_id, _), (rhs_id, _)| lhs_id.cmp(rhs_id));
+    items.sort_unstable_by_key(|(id, _)| *id);
     let mut heads = Vec::with_capacity(items.len());
     for (id, dispatch) in items {
         heads.push(dispatch_head_for_dispatch(id, dispatch));

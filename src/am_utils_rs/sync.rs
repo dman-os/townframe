@@ -199,13 +199,7 @@ mod tests {
                                 }
                             }
                         }
-                        loop {
-                            let Some((&cursor, state)) = slots.first_key_value() else {
-                                break;
-                            };
-                            if !matches!(state, AckSlotState::Ready) {
-                                break;
-                            }
+                        while let Some((&cursor, AckSlotState::Ready)) = slots.first_key_value() {
                             slots.pop_first();
                             if samod_ack_tx
                                 .send(SamodSyncAck::CursorAdvanced {

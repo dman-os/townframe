@@ -19,17 +19,11 @@ pub fn is_domain_name(value: &str, _context: &()) -> garde::Result {
     Ok(())
 }
 
-#[derive(Debug, Validate, Serialize, Deserialize, PartialEq, Eq, Hash, Clone)]
+#[derive(Debug, Validate, Serialize, Deserialize, PartialEq, Eq, Hash, Clone, Default)]
 #[serde(transparent)]
 #[garde(transparent)]
 #[repr(transparent)]
 pub struct FacetTag(#[garde(custom(is_domain_name))] pub String);
-
-impl Default for FacetTag {
-    fn default() -> Self {
-        Self(String::new())
-    }
-}
 
 impl<T> From<T> for FacetTag
 where
