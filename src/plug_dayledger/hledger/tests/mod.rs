@@ -1,6 +1,7 @@
 use chumsky::prelude::*;
 
 use super::parse::common::*;
+use super::parse::journal::parse_journal;
 use super::types::*;
 
 mod fixtures;
@@ -39,6 +40,17 @@ where
     let result = parser.parse(input);
     let (_, errs) = result.into_output_errors();
     errs
+}
+
+fn parse_journal_ok(input: &str) -> Vec<Transaction> {
+    parse_journal(input).unwrap_or_else(|errs| {
+        let msg = errs
+            .iter()
+            .map(|e| format!("{:?}", e))
+            .collect::<Vec<_>>()
+            .join("\n");
+        panic!("journal parse failed for {input:?}:\n{msg}");
+    })
 }
 
 #[test]
@@ -151,4 +163,38 @@ fn test_balance_assertion_star() {
 fn test_sample_journal_not_empty() {
     let input = include_str!("fixtures/sample.journal");
     assert!(!input.is_empty());
+}
+
+#[test]
+fn test_parse_sample_journal_fixture() {
+    let input = include_str!("fixtures/sample.journal");
+    let txns = parse_journal_ok(input);
+
+    assert_eq!(txns.len(), 5);
+    assert_eq!(txns[0].date.to_string(), "2008-01-01");
+    assert_eq!(txns[0].description, "income");
+    assert_eq!(txns[0].postings.len(), 2);
+    assert_eq!(txns[3].status, Status::Cleared);
+    assert_eq!(txns[3].description, "eat & shop");
+    assert_eq!(txns[3].postings.len(), 3);
+}
+
+#[test]
+fn test_parse_journal_handles_final_comment_without_looping() {
+    let txns = parse_journal_ok(
+        "2008/01/01 income\n    assets:bank:checking  $1\n    income:salary\n\n;final comment",
+    );
+
+    assert_eq!(txns.len(), 1);
+    assert_eq!(txns[0].description, "income");
+}
+
+#[test]
+fn test_parse_journal_handles_trailing_blank_lines() {
+    let txns = parse_journal_ok(
+        "2008/01/01 income\n    assets:bank:checking  $1\n    income:salary\n\n\n",
+    );
+
+    assert_eq!(txns.len(), 1);
+    assert_eq!(txns[0].description, "income");
 }

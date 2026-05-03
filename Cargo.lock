@@ -7556,6 +7556,7 @@ dependencies = [
  "automerge 0.7.3",
  "chumsky",
  "color-eyre",
+ "daybook_core",
  "daybook_types",
  "displaydoc",
  "jiff",

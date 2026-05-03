@@ -52,3 +52,4 @@ rust_decimal = "1.41.0"
 
 [dev-dependencies]
 automerge.workspace = true
+daybook_core = { workspace = true, features = ["test-support"] }

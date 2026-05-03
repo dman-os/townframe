@@ -53,8 +53,8 @@ async fn ensure_staging_branch(
         .drawer_repo
         .create_branch_at_heads_from_branch(
             doc_id,
-            source_branch_path,
             staging_branch_path,
+            source_branch_path,
             heads,
             None,
         )

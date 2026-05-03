@@ -54,45 +54,48 @@ pub fn run(_cx: &mut WflowCtx) -> Result<(), wflow_sdk::JobErrorX> {
     };
 
     let claim_tag_str = crate::types::DayledgerFacetTag::Claim.as_str();
-    let claim_facet_key = daybook_types::doc::FacetKey::from(claim_tag_str);
+    let claim_tag = daybook_types::doc::FacetKey::from(claim_tag_str).tag;
 
     let claim_tag_token = args
         .primary_doc
         .tags
         .iter()
-        .find(|t| t.tag() == claim_tag_str && t.rights().contains(FacetRights::UPDATE))
+        .find(|t| t.tag() == claim_tag_str && t.rights().contains(FacetRights::CREATE))
         .ok_or_else(|| {
-            wflow_sdk::JobErrorX::Terminal(ferr!("claim tag token with update rights not found"))
+            wflow_sdk::JobErrorX::Terminal(ferr!("claim tag token with create rights not found"))
         })?;
 
-    let existing_claims: HashMap<String, Claim> = if let Some(claim_token) =
-        args.primary_doc.facets.iter().find(|t| {
-            t.key() == claim_facet_key.to_string() && t.rights().contains(FacetRights::READ)
-        }) {
+    let mut existing_claims: HashMap<String, Claim> = HashMap::new();
+    for claim_token in args.primary_doc.facets.iter() {
+        let facet_key = daybook_types::doc::FacetKey::from(claim_token.key().as_str());
+        if &facet_key.tag != &claim_tag || !claim_token.rights().contains(FacetRights::READ) {
+            continue;
+        }
+
         let claim_raw = claim_token.get().map_err(|err| {
             wflow_sdk::JobErrorX::Terminal(ferr!("error reading claim facet: {err:?}"))
         })?;
-        serde_json::from_str(&claim_raw).unwrap_or_default()
-    } else {
-        HashMap::new()
-    };
-
-    let mut new_claims: HashMap<String, Claim> = HashMap::new();
+        let claim = serde_json::from_str(&claim_raw).map_err(|err| {
+            wflow_sdk::JobErrorX::Terminal(ferr!("error parsing claim facet json: {err}"))
+        })?;
+        let claim_id = facet_key.id;
+        existing_claims.insert(claim_id, claim);
+    }
 
     for (txn_index, txn) in transactions.iter().enumerate() {
         let (claim_id, claim) = match_or_create_claim(txn, txn_index, &existing_claims, &src_ref);
-        new_claims.insert(claim_id, claim);
-    }
-
-    let claims_json = serde_json::to_string(&new_claims).map_err(|err| {
-        wflow_sdk::JobErrorX::Terminal(ferr!("serde error serializing claims: {err}"))
-    })?;
-
-    claim_tag_token
-        .create(&claim_facet_key.id, &claims_json)
-        .map_err(|err| {
-            wflow_sdk::JobErrorX::Terminal(ferr!("error creating/updating claim facet: {err:?}"))
+        let claim_json = serde_json::to_string(&claim).map_err(|err| {
+            wflow_sdk::JobErrorX::Terminal(ferr!("serde error serializing claim: {err}"))
         })?;
+
+        claim_tag_token
+            .create(&claim_id, &claim_json)
+            .map_err(|err| {
+                wflow_sdk::JobErrorX::Terminal(ferr!(
+                    "error creating/updating claim facet: {err:?}"
+                ))
+            })?;
+    }
 
     Ok(())
 }
@@ -124,8 +127,8 @@ fn match_or_create_claim(
         }
     }
 
-    // 3. Create new claim with content-hash-based ID
-    let new_id = hash_txn(txn);
+    // 3. Create new claim with a stable per-transaction id.
+    let new_id = format!("txn_{txn_index}_{}", hash_txn(txn));
     let new_claim = build_claim(txn, txn_index, src_ref, None);
     (new_id, new_claim)
 }

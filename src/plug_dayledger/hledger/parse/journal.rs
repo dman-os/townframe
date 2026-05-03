@@ -60,11 +60,11 @@ fn posting_linep<'a>() -> impl Parser<'a, &'a str, Posting, extra::Err<Rich<'a, 
 
 pub fn parse_journal(input: &str) -> Result<Vec<Transaction>, Vec<Rich<'_, char>>> {
     let comment_line = ws0()
-        .then(just(';').then(none_of(['\n']).repeated()).or_not())
-        .then_ignore(newline_or_eof())
+        .then(just(';').then(none_of(['\n']).repeated()))
+        .then_ignore(just('\n').ignored().or(end()))
         .ignored();
 
-    let blank_line = ws0().then_ignore(newline_or_eof()).ignored();
+    let blank_line = ws0().then_ignore(just('\n')).ignored();
 
     let item = choice((
         transactionp().map(Some),
@@ -72,7 +72,11 @@ pub fn parse_journal(input: &str) -> Result<Vec<Transaction>, Vec<Rich<'_, char>
         blank_line.to(None),
     ));
 
-    let parser = item.repeated().collect::<Vec<_>>().then_ignore(end());
+    let parser = item
+        .repeated()
+        .collect::<Vec<_>>()
+        .then_ignore(ws0())
+        .then_ignore(end());
 
     let result = parser.parse(input);
     let (output, errs) = result.into_output_errors();
@@ -94,7 +98,9 @@ pub fn transactionp<'a>() -> impl Parser<'a, &'a str, Transaction, extra::Err<Ri
         .then(just('=').ignore_then(datep()).or_not())
         .then_ignore(ws0())
         .then(status)
+        .then_ignore(ws0())
         .then(codep().or_not())
+        .then_ignore(ws0())
         .then(
             none_of([';', '\n'])
                 .repeated()

@@ -1,9 +1,14 @@
+#![recursion_limit = "256"]
+
 mod interlude {
     pub use utils_rs::prelude::*;
 }
 
 pub mod hledger;
 pub mod types;
+
+#[cfg(test)]
+mod e2e;
 
 #[cfg(target_arch = "wasm32")]
 mod wit {
