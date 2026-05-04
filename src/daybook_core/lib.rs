@@ -24,7 +24,7 @@ mod interlude {
         sync::{Arc, LazyLock, RwLock},
     };
     pub use struct_patch::Patch;
-    pub use utils_rs::{CHeapStr};
+    pub use utils_rs::CHeapStr;
 }
 
 pub mod blobs;

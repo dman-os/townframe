@@ -5,8 +5,8 @@ use crate::sync::store::SyncStoreHandle;
 
 use std::collections::HashMap;
 use std::time::Instant;
-use tokio::sync::mpsc;
 use thiserror::Error;
+use tokio::sync::mpsc;
 
 #[derive(Debug, Clone)]
 pub enum PeerSyncProgressEvent {
@@ -109,12 +109,11 @@ pub async fn spawn_peer_sync_worker(
     let fut = async move {
         let t0 = Instant::now();
         worker.emit_phase_started("list_partitions");
-        let (parts, frontiers) = worker
-            .get_partition_frontiers()
-            .await
-            .map_err(|err| PeerSyncWorkerExit::ListPartitionsFailed {
+        let (parts, frontiers) = worker.get_partition_frontiers().await.map_err(|err| {
+            PeerSyncWorkerExit::ListPartitionsFailed {
                 reason: err.to_string(),
-            })?;
+            }
+        })?;
         worker.emit_phase_finished("list_partitions", t0.elapsed());
 
         let subscribe_started_at = Instant::now();
@@ -358,5 +357,4 @@ impl PeerSyncWorker {
             })
             .ok();
     }
-
 }

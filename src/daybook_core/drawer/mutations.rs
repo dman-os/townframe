@@ -145,15 +145,18 @@ impl DrawerRepo {
 
         {
             surelock::key::lock_scope(|key| {
-                key.lock_with(&(&self.entry_pool, &self.entry_cache), |(mut pool, mut cache)| {
-                    for prepared in &prepared_docs {
-                        let pruned = pool.insert_key(&prepared.doc_id, 1);
-                        for pkey in pruned {
-                            cache.remove(&pkey);
+                key.lock_with(
+                    &(&self.entry_pool, &self.entry_cache),
+                    |(mut pool, mut cache)| {
+                        for prepared in &prepared_docs {
+                            let pruned = pool.insert_key(&prepared.doc_id, 1);
+                            for pkey in pruned {
+                                cache.remove(&pkey);
+                            }
+                            cache.insert(prepared.doc_id.clone(), prepared.entry.clone());
                         }
-                        cache.insert(prepared.doc_id.clone(), prepared.entry.clone());
-                    }
-                });
+                    },
+                );
             });
         }
 

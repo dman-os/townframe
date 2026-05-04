@@ -8,7 +8,6 @@ use automerge::ChangeHash;
 use autosurgeon::{Hydrate, Prop, Reconcile};
 use sedimentree_core::loose_commit::id::CommitId;
 use sqlx::sqlite::SqliteConnectOptions;
-use tokio::sync::broadcast;
 
 mod changes;
 pub mod rpc;
@@ -84,7 +83,6 @@ impl BigRepo {
                 .await
                 .wrap_err("failed connecting big repo sqlite")?
         };
-        ensure_docs_schema(&state_pool).await?;
 
         let (partition_store, partition_store_stop) =
             PartitionStore::boot(state_pool.clone()).await?;
@@ -153,7 +151,10 @@ impl BigRepo {
 
 // main methods
 impl BigRepo {
-    #[tracing::instrument(level = "trace", skip_all, fields(%document_id))]
+    #[tracing::instrument(
+        skip_all,
+        fields(%document_id, %self.local_peer_id)
+    )]
     pub async fn get_doc(self: &Arc<Self>, document_id: &DocumentId) -> Res<Option<BigDocHandle>> {
         let out = self
             .runtime
@@ -163,15 +164,17 @@ impl BigRepo {
                 repo: Arc::clone(self),
                 bundle,
             });
+        info!(found = out.is_some(), "XXX get_doc");
         Ok(out)
     }
 
-    #[tracing::instrument(level = "trace", skip_all, fields(%document_id))]
+    #[tracing::instrument(skip_all, fields(%document_id, %self.local_peer_id))]
     pub async fn put_doc(
         self: &Arc<Self>,
         document_id: DocumentId,
         initial_content: automerge::Automerge,
     ) -> Res<BigDocHandle> {
+        info!("XXX put_doc");
         let bundle = self.runtime.put_doc(document_id, initial_content).await?;
         Ok(BigDocHandle {
             repo: Arc::clone(self),
@@ -179,14 +182,22 @@ impl BigRepo {
         })
     }
 
-    #[tracing::instrument(level = "trace", skip_all, fields(%doc_id))]
+    #[tracing::instrument(
+        skip_all,
+        fields(%doc_id, %self.local_peer_id)
+    )]
     pub async fn export_doc(&self, doc_id: &DocumentId) -> Res<Option<Vec<u8>>> {
+        info!(node_id = ?self.local_peer_id, "XXX export_doc");
         self.runtime.export_doc_save(*doc_id).await
     }
 }
 
 // iroh support
 impl BigRepo {
+    #[tracing::instrument(
+        skip_all,
+        fields(?peer_id, ?endpoint_addr, %self.local_peer_id)
+    )]
     pub async fn open_connection_iroh(
         self: &Arc<Self>,
         endpoint: iroh::Endpoint,
@@ -194,6 +205,7 @@ impl BigRepo {
         peer_id: PeerId,
         end_signal_tx: Option<tokio::sync::mpsc::UnboundedSender<ConnFinishSignal>>,
     ) -> Res<BigRepoConnection> {
+        info!("XXX open_connection_iroh");
         let (peer_id, closed) = self
             .runtime
             .open_connection_iroh(endpoint, endpoint_addr, peer_id, end_signal_tx)
@@ -205,11 +217,16 @@ impl BigRepo {
         })
     }
 
+    #[tracing::instrument(
+        skip_all,
+        fields(%self.local_peer_id)
+    )]
     pub async fn accept_connection_iroh(
         self: &Arc<Self>,
         conn: iroh::endpoint::Connection,
         end_signal_tx: Option<tokio::sync::mpsc::UnboundedSender<ConnFinishSignal>>,
     ) -> Res<BigRepoConnection> {
+        info!("XXX accept_connection_iroh");
         let (peer_id, closed) = self
             .runtime
             .accept_connection_iroh(conn, end_signal_tx)
@@ -242,20 +259,22 @@ impl BigRepoConnection {
     pub fn is_closed(&self) -> bool {
         self.closed.load(Ordering::SeqCst)
     }
-    pub async fn sync_doc_with_peer(
+
+    pub async fn sync_with_peer(
         &self,
         doc_id: DocumentId,
-        subscribe: bool,
         timeout: Option<std::time::Duration>,
     ) -> Res<SyncDocOutcome> {
         if self.is_closed() {
             eyre::bail!("connection is closed");
         }
+        info!(?doc_id, peer_id = ?self.peer_id, "XXX sync_with_peer");
         self.repo
             .runtime
-            .sync_doc_with_peer(doc_id, self.peer_id, subscribe, timeout)
+            .sync_doc_with_peer(doc_id, self.peer_id, timeout)
             .await
     }
+
     pub async fn stop(self) -> Res<()> {
         self.repo.runtime.close_peer_connection(self.peer_id).await
     }
@@ -263,23 +282,6 @@ impl BigRepoConnection {
 
 // change listeners
 impl BigRepo {
-    pub async fn subscribe_partition_item_events_local(
-        &self,
-        partition_id: &crate::sync::protocol::PartitionId,
-        since: Option<u64>,
-        capacity: usize,
-    ) -> Res<tokio::sync::mpsc::Receiver<crate::sync::protocol::PartitionItemEvent>> {
-        self.partition_store
-            .subscribe_partition_item_events_local(partition_id, since, capacity)
-            .await
-    }
-
-    pub fn subscribe_partition_events(
-        &self,
-    ) -> broadcast::Receiver<crate::sync::protocol::PartitionEvent> {
-        self.partition_store.subscribe_partition_events()
-    }
-
     pub async fn subscribe_change_listener(
         self: &Arc<Self>,
         filter: BigRepoChangeFilter,
@@ -297,7 +299,6 @@ impl BigRepo {
     pub async fn partition_member_count(&self, part_id: &PartitionId) -> Res<i64> {
         self.partition_store.member_count(part_id).await
     }
-
     pub async fn is_member_present_in_partition_item_state(
         &self,
         partition_id: &PartitionId,
@@ -305,45 +306,6 @@ impl BigRepo {
     ) -> Res<bool> {
         self.partition_store
             .is_member_present_in_item_state(partition_id, member_id)
-            .await
-    }
-
-    pub async fn list_partitions_for_peer(&self, peer: &PeerKey) -> Res<Vec<PartitionSummary>> {
-        Ok(self
-            .partition_store
-            .list_partitions_for_peer(peer)
-            .await?
-            .partitions)
-    }
-
-    pub async fn get_partition_member_events_for_peer(
-        &self,
-        peer: &PeerKey,
-        req: &GetPartitionMemberEventsRequest,
-    ) -> Res<GetPartitionMemberEventsResponse> {
-        self.partition_store
-            .get_partition_member_events_for_peer(peer, req)
-            .await
-    }
-
-    pub async fn get_partition_item_events_for_peer(
-        &self,
-        peer: &PeerKey,
-        req: &GetPartitionItemEventsRequest,
-    ) -> Res<GetPartitionItemEventsResponse> {
-        self.partition_store
-            .get_partition_item_events_for_peer(peer, req)
-            .await
-    }
-
-    pub async fn subscribe_partition_events_for_peer(
-        &self,
-        peer: &PeerKey,
-        reqs: &SubPartitionsRequest,
-        capacity: usize,
-    ) -> Res<tokio::sync::mpsc::Receiver<SubscriptionItem>> {
-        self.partition_store
-            .subscribe_partition_events_for_peer(peer, reqs, capacity)
             .await
     }
 
@@ -608,18 +570,6 @@ impl BigDocHandle {
         })
         .await
     }
-}
-
-async fn ensure_docs_schema(state_pool: &sqlx::SqlitePool) -> Res<()> {
-    sqlx::query(
-        r#"CREATE TABLE IF NOT EXISTS big_repo_docs(
-            doc_id TEXT PRIMARY KEY
-        )"#,
-    )
-    .execute(state_pool)
-    .await
-    .wrap_err("failed creating big_repo_docs schema")?;
-    Ok(())
 }
 
 #[cfg(test)]
@@ -1607,31 +1557,21 @@ mod tests {
             .await?;
         server.wait_for_accepts(1).await;
 
-        let subscribe = false;
         if local_mutation.is_some() && remote_mutation.is_some() {
             let server_conn = server.accepted_connection().await;
             tracing::info!(
                 client_peer_id = %client_conn.peer_id(),
                 server_peer_id = %server_conn.peer_id(),
-                subscribe,
                 "running concurrent sync_doc_with_peer"
             );
             let (client_result, server_result) = tokio::join!(
                 timeout(
                     SYNC_CASE_TIMEOUT,
-                    client_conn.sync_doc_with_peer(
-                        doc_id,
-                        subscribe,
-                        Some(SYNC_PROPAGATION_TIMEOUT),
-                    ),
+                    client_conn.sync_with_peer(doc_id, Some(SYNC_PROPAGATION_TIMEOUT),),
                 ),
                 timeout(
                     SYNC_CASE_TIMEOUT,
-                    server_conn.sync_doc_with_peer(
-                        doc_id,
-                        subscribe,
-                        Some(SYNC_PROPAGATION_TIMEOUT),
-                    ),
+                    server_conn.sync_with_peer(doc_id, Some(SYNC_PROPAGATION_TIMEOUT),),
                 ),
             );
             let client_outcome =
@@ -1674,12 +1614,11 @@ mod tests {
         } else {
             tracing::info!(
                 peer_id = %client_conn.peer_id(),
-                subscribe,
                 "running sync_doc_with_peer"
             );
             let outcome = timeout(
                 SYNC_CASE_TIMEOUT,
-                client_conn.sync_doc_with_peer(doc_id, subscribe, Some(SYNC_PROPAGATION_TIMEOUT)),
+                client_conn.sync_with_peer(doc_id, Some(SYNC_PROPAGATION_TIMEOUT)),
             )
             .await
             .expect("timed out waiting for sync_doc_with_peer")?;
@@ -1749,7 +1688,7 @@ mod tests {
         tracing::info!("running initial sync before server shutdown");
         let outcome = timeout(
             SYNC_CASE_TIMEOUT,
-            client_conn.sync_doc_with_peer(doc_id, false, Some(SYNC_PROPAGATION_TIMEOUT)),
+            client_conn.sync_with_peer(doc_id, Some(SYNC_PROPAGATION_TIMEOUT)),
         )
         .await
         .expect("timed out waiting for initial sync_doc_with_peer")?;
@@ -1795,7 +1734,7 @@ mod tests {
         tracing::info!("running sync after restart");
         let outcome = timeout(
             SYNC_CASE_TIMEOUT,
-            client_conn.sync_doc_with_peer(doc_id, false, Some(SYNC_PROPAGATION_TIMEOUT)),
+            client_conn.sync_with_peer(doc_id, Some(SYNC_PROPAGATION_TIMEOUT)),
         )
         .await
         .expect("timed out waiting for reconnect sync_doc_with_peer")?;
@@ -1865,7 +1804,7 @@ mod tests {
 
         let outcome = timeout(
             SYNC_CASE_TIMEOUT,
-            client_conn.sync_doc_with_peer(doc_id, false, Some(SYNC_PROPAGATION_TIMEOUT)),
+            client_conn.sync_with_peer(doc_id, Some(SYNC_PROPAGATION_TIMEOUT)),
         )
         .await
         .expect("timed out waiting for remote sync_doc_with_peer")?;
@@ -1976,7 +1915,7 @@ mod tests {
 
         let outcome = timeout(
             SYNC_CASE_TIMEOUT,
-            conn.sync_doc_with_peer(doc_id, false, Some(SYNC_PROPAGATION_TIMEOUT)),
+            conn.sync_with_peer(doc_id, Some(SYNC_PROPAGATION_TIMEOUT)),
         )
         .await
         .expect("timed out waiting for local sync_doc_with_peer")?;
@@ -2254,7 +2193,7 @@ mod tests {
 
             let outcome = timeout(
                 SYNC_CASE_TIMEOUT,
-                client_conn.sync_doc_with_peer(doc_id, false, Some(SYNC_PROPAGATION_TIMEOUT)),
+                client_conn.sync_with_peer(doc_id, Some(SYNC_PROPAGATION_TIMEOUT)),
             )
             .await
             .expect("timed out waiting for remote sync_doc_with_peer")?;

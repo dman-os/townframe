@@ -269,6 +269,7 @@ impl StopToken {
     }
 }
 
+#[tracing::instrument(skip_all, fields(%local_peer_key))]
 pub async fn spawn_full_sync_worker(
     big_repo: SharedBigRepo,
     local_peer_key: PeerKey,
@@ -325,9 +326,9 @@ pub async fn spawn_full_sync_worker(
         max_active_sync_workers: 24,
     };
 
-        worker.bootstrap_blob_scope_memberships().await?;
+    worker.bootstrap_blob_scope_memberships().await?;
 
-        let fut = {
+    let fut = {
         let cancel_token = cancel_token.clone();
         let mut janitor_tick = tokio::time::interval(Duration::from_millis(500));
         async move {
@@ -414,7 +415,11 @@ pub async fn spawn_full_sync_worker(
             if let Err(err) = worker.batch_stop_blobs().await {
                 warn!(?err, "error stopping blob workers during shutdown");
             }
-            let peer_ids_to_stop = worker.peer_partition_sessions.keys().copied().collect::<Vec<_>>();
+            let peer_ids_to_stop = worker
+                .peer_partition_sessions
+                .keys()
+                .copied()
+                .collect::<Vec<_>>();
             for peer_id in peer_ids_to_stop {
                 worker.expected_peer_session_closes.insert(peer_id);
             }
@@ -628,10 +633,11 @@ impl Worker {
             {
                 continue;
             }
-            if self
-                .sync_machine
-                .has_active_item_job_for(peer_key, &partition_id, &doc_id.to_string())
-            {
+            if self.sync_machine.has_active_item_job_for(
+                peer_key,
+                &partition_id,
+                &doc_id.to_string(),
+            ) {
                 return Ok(false);
             }
             if self.big_repo.get_doc(doc_id).await?.is_none() {
@@ -904,17 +910,20 @@ impl Worker {
                     .into_iter()
                     .filter(|peer_id| {
                         self.known_peer_set.get(peer_id).is_none_or(|peer_state| {
-                            !required_partitions
-                                .iter()
-                                .all(|partition| peer_state.fully_synced_partitions.contains(partition))
+                            !required_partitions.iter().all(|partition| {
+                                peer_state.fully_synced_partitions.contains(partition)
+                            })
                         })
                     })
                     .collect::<HashSet<_>>();
                 if remaining.is_empty() {
                     resp.send(()).inspect_err(|_| warn!(ERROR_CALLER)).ok();
                 } else {
-                    self.full_sync_waiters
-                        .push(FullSyncWaiter { remaining, required_partitions, resp });
+                    self.full_sync_waiters.push(FullSyncWaiter {
+                        remaining,
+                        required_partitions,
+                        resp,
+                    });
                 }
             }
         }
@@ -1091,13 +1100,8 @@ impl Worker {
             task_set: &self.task_set,
         })
         .await?;
-        self.peer_partition_sessions.insert(
-            peer_id,
-            PeerPartitionSession {
-                stop,
-                partitions,
-            },
-        );
+        self.peer_partition_sessions
+            .insert(peer_id, PeerPartitionSession { stop, partitions });
         Ok(())
     }
 
@@ -1119,7 +1123,9 @@ impl Worker {
         peer_key: PeerKey,
         item: SubscriptionItem,
     ) -> Res<()> {
-        let commands = self.sync_machine.on_subscription_item(peer_key.clone(), item)?;
+        let commands = self
+            .sync_machine
+            .on_subscription_item(peer_key.clone(), item)?;
         self.dispatch_sync_commands(commands).await?;
         Ok(())
     }
@@ -1133,7 +1139,10 @@ impl Worker {
     }
 
     #[tracing::instrument(skip(self))]
-    async fn dispatch_sync_command(&mut self, command: SyncMachineCommand) -> Res<Vec<SyncMachineCommand>> {
+    async fn dispatch_sync_command(
+        &mut self,
+        command: SyncMachineCommand,
+    ) -> Res<Vec<SyncMachineCommand>> {
         let key = match &command {
             SyncMachineCommand::ItemNewSync { key }
             | SyncMachineCommand::ItemChangeSync { key }
@@ -1149,7 +1158,8 @@ impl Worker {
             | SyncMachineCommand::ItemChangeSync { key } => {
                 match BlobScope::from_partition_id(&key.partition_id) {
                     Some(scope) => {
-                        self.add_hash_to_blob_scope(scope, key.item_id.clone()).await?;
+                        self.add_hash_to_blob_scope(scope, key.item_id.clone())
+                            .await?;
                     }
                     None => {
                         let doc_id = key
@@ -1177,7 +1187,8 @@ impl Worker {
                                 item_id: key.item_id.clone(),
                             })
                             .await?;
-                        self.remove_hash_from_blob_scope(scope, &key.item_id).await?;
+                        self.remove_hash_from_blob_scope(scope, &key.item_id)
+                            .await?;
                         return Ok(commands);
                     }
                     None => {
@@ -1185,13 +1196,14 @@ impl Worker {
                             .item_id
                             .parse::<DocumentId>()
                             .map_err(|err| ferr!("invalid item id '{}': {err}", key.item_id))?;
-                        let commands = self.handle_doc_deleted(
-                            peer_id,
-                            command_peer.clone(),
-                            key.partition_id.clone(),
-                            doc_id,
-                        )
-                        .await?;
+                        let commands = self
+                            .handle_doc_deleted(
+                                peer_id,
+                                command_peer.clone(),
+                                key.partition_id.clone(),
+                                doc_id,
+                            )
+                            .await?;
                         return Ok(commands);
                     }
                 }
@@ -1370,7 +1382,10 @@ impl Worker {
             let connection = peer_state.connection.clone();
             doc_worker::spawn_doc_sync_worker(
                 doc_id,
-                doc_worker::DocSyncTarget::Sync { peer_id, connection },
+                doc_worker::DocSyncTarget::Sync {
+                    peer_id,
+                    connection,
+                },
                 Arc::clone(&self.big_repo),
                 self.msg_tx.clone(),
                 retry,
@@ -1454,7 +1469,8 @@ impl Worker {
                 if let Some(sync_state) = self.doc_request_set.get_mut(&doc_id) {
                     if sync_state.requested_peers.remove(&peer_id) {
                         if let Some(peer_state) = self.known_peer_set.get_mut(&peer_id) {
-                            peer_state.doc_pending_docs = peer_state.doc_pending_docs.saturating_sub(1);
+                            peer_state.doc_pending_docs =
+                                peer_state.doc_pending_docs.saturating_sub(1);
                         }
                         refreshed_peer = true;
                     }
@@ -1468,23 +1484,28 @@ impl Worker {
                 let completion_peer = self.peer_key_for_id(peer_id).expect(ERROR_UNRECONIZED);
                 let item_payload = self.doc_item_payload_json(&doc_id).await?;
                 for partition_id in &partition_ids {
-                    if let Some(key) = self
-                        .sync_machine
-                        .find_active_item_key_for(&completion_peer, partition_id, &doc_id.to_string())
-                    {
+                    if let Some(key) = self.sync_machine.find_active_item_key_for(
+                        &completion_peer,
+                        partition_id,
+                        &doc_id.to_string(),
+                    ) {
                         let completion = match key.kind {
-                            am_utils_rs::sync::machine::ItemSyncKind::New => SyncCompletion::AddedMember {
-                                peer: key.peer,
-                                partition_id: partition_id.clone(),
-                                item_id: doc_id.to_string(),
-                                item_payload: item_payload.clone(),
-                            },
-                            am_utils_rs::sync::machine::ItemSyncKind::Change => SyncCompletion::ChangedItem {
-                                peer: key.peer,
-                                partition_id: partition_id.clone(),
-                                item_id: doc_id.to_string(),
-                                item_payload: item_payload.clone(),
-                            },
+                            am_utils_rs::sync::machine::ItemSyncKind::New => {
+                                SyncCompletion::AddedMember {
+                                    peer: key.peer,
+                                    partition_id: partition_id.clone(),
+                                    item_id: doc_id.to_string(),
+                                    item_payload: item_payload.clone(),
+                                }
+                            }
+                            am_utils_rs::sync::machine::ItemSyncKind::Change => {
+                                SyncCompletion::ChangedItem {
+                                    peer: key.peer,
+                                    partition_id: partition_id.clone(),
+                                    item_id: doc_id.to_string(),
+                                    item_payload: item_payload.clone(),
+                                }
+                            }
                             am_utils_rs::sync::machine::ItemSyncKind::Delete => {
                                 eyre::bail!("doc sync success cannot complete delete job")
                             }
@@ -1666,8 +1687,7 @@ impl Worker {
         }
 
         match outcome {
-            doc_worker::ImportDocOutcome::Imported
-            | doc_worker::ImportDocOutcome::LocalPresent => {
+            doc_worker::ImportDocOutcome::Imported | doc_worker::ImportDocOutcome::LocalPresent => {
                 if let Some(doc_state) = self.doc_request_set.get_mut(&doc_id) {
                     doc_state.requested_peers.remove(&peer_id);
                 }
@@ -1680,10 +1700,11 @@ impl Worker {
                 let completion_peer = self.peer_key_for_id(peer_id).expect(ERROR_UNRECONIZED);
                 let item_payload = self.doc_item_payload_json(&doc_id).await?;
                 for partition_id in &partition_ids {
-                    if let Some(key) = self
-                        .sync_machine
-                        .find_active_item_key_for(&completion_peer, partition_id, &doc_id.to_string())
-                    {
+                    if let Some(key) = self.sync_machine.find_active_item_key_for(
+                        &completion_peer,
+                        partition_id,
+                        &doc_id.to_string(),
+                    ) {
                         let completion = match outcome {
                             doc_worker::ImportDocOutcome::Imported => SyncCompletion::AddedMember {
                                 peer: key.peer,
@@ -1791,8 +1812,8 @@ impl Worker {
             loop {
                 let page = self
                     .big_repo
-                    .get_partition_member_events_for_peer(
-                        &self.local_peer_key,
+                    .partition_store()
+                    .get_partition_member_events(
                         &am_utils_rs::sync::protocol::GetPartitionMemberEventsRequest {
                             partitions: vec![am_utils_rs::sync::protocol::PartitionCursorRequest {
                                 partition_id: partition_id.clone(),
@@ -1967,7 +1988,10 @@ impl Worker {
                             continue;
                         }
                         let item_payload = "{}".to_string();
-                        for peer in self.sync_machine.active_peers_for_item(&partition_id, &hash) {
+                        for peer in self
+                            .sync_machine
+                            .active_peers_for_item(&partition_id, &hash)
+                        {
                             let commands = self
                                 .sync_machine
                                 .on_item_sync_completed(SyncCompletion::AddedMember {
@@ -2041,7 +2065,10 @@ impl Worker {
                 continue;
             }
             let item_payload = "{}".to_string();
-            for peer in self.sync_machine.active_peers_for_item(&partition_id, &hash) {
+            for peer in self
+                .sync_machine
+                .active_peers_for_item(&partition_id, &hash)
+            {
                 let commands = self
                     .sync_machine
                     .on_item_sync_completed(SyncCompletion::AddedMember {

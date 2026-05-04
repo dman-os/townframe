@@ -27,15 +27,18 @@ impl DrawerRepo {
         let (drawer_heads, entries) = self.current_drawer_entries().await?;
         {
             surelock::key::lock_scope(|key| {
-                key.lock_with(&(&self.entry_pool, &self.entry_cache), |(mut pool, mut cache)| {
-                    for (doc_id, entry) in &entries {
-                        let pruned = pool.insert_key(doc_id, 1);
-                        for pkey in pruned {
-                            cache.remove(&pkey);
+                key.lock_with(
+                    &(&self.entry_pool, &self.entry_cache),
+                    |(mut pool, mut cache)| {
+                        for (doc_id, entry) in &entries {
+                            let pruned = pool.insert_key(doc_id, 1);
+                            for pkey in pruned {
+                                cache.remove(&pkey);
+                            }
+                            cache.insert(doc_id.clone(), entry.clone());
                         }
-                        cache.insert(doc_id.clone(), entry.clone());
-                    }
-                });
+                    },
+                );
             });
         }
         let mut results = entries
@@ -87,12 +90,16 @@ impl DrawerRepo {
             eyre::bail!("repo is stopped");
         }
         if let Some(cached) = surelock::key::lock_scope(|key| {
-            key.lock_with(&(&self.entry_pool, &self.entry_cache), |(mut pool, cache)| {
-                cache.get(doc_id).map(|entry| {
-                    pool.touch_key(doc_id);
-                    entry.clone()
-                })
-            }).0
+            key.lock_with(
+                &(&self.entry_pool, &self.entry_cache),
+                |(mut pool, cache)| {
+                    cache.get(doc_id).map(|entry| {
+                        pool.touch_key(doc_id);
+                        entry.clone()
+                    })
+                },
+            )
+            .0
         }) {
             return Ok(Some(cached));
         }
@@ -105,13 +112,16 @@ impl DrawerRepo {
 
         if let Some(entry) = entry {
             surelock::key::lock_scope(|key| {
-                key.lock_with(&(&self.entry_pool, &self.entry_cache), |(mut pool, mut cache)| {
-                    let pruned = pool.insert_key(doc_id, 1);
-                    for pkey in pruned {
-                        cache.remove(&pkey);
-                    }
-                    cache.insert(doc_id.clone(), entry.clone());
-                });
+                key.lock_with(
+                    &(&self.entry_pool, &self.entry_cache),
+                    |(mut pool, mut cache)| {
+                        let pruned = pool.insert_key(doc_id, 1);
+                        for pkey in pruned {
+                            cache.remove(&pkey);
+                        }
+                        cache.insert(doc_id.clone(), entry.clone());
+                    },
+                );
             });
             Ok(Some(entry))
         } else {

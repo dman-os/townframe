@@ -1,8 +1,6 @@
 use crate::interlude::*;
 
-use super::{
-    IrohSyncRepo, CLONE_PROVISION_ALPN, CORE_DOCS_PARTITION_ID, IROH_CLONE_URL_SCHEME,
-};
+use super::{IrohSyncRepo, CLONE_PROVISION_ALPN, CORE_DOCS_PARTITION_ID, IROH_CLONE_URL_SCHEME};
 
 use std::str::FromStr;
 
@@ -192,7 +190,15 @@ pub async fn request_clone_provision_from_url(
     Ok(response)
 }
 
-#[tracing::instrument(skip(big_repo, blobs_repo, local_peer_key, iroh_secret_key, bootstrap, timeout, sql))]
+#[tracing::instrument(skip(
+    big_repo,
+    blobs_repo,
+    local_peer_key,
+    iroh_secret_key,
+    bootstrap,
+    timeout,
+    sql
+))]
 pub async fn connect_and_pull_required_partitions_once(
     big_repo: &SharedBigRepo,
     blobs_repo: &Arc<crate::blobs::BlobsRepo>,

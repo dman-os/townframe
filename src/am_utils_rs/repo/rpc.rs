@@ -115,9 +115,11 @@ async fn handle_rpc_message(
             let out = (async {
                 ensure_known_peer(sync_store, &peer).await?;
                 let mut allowed_partitions = big_repo
-                    .list_partitions_for_peer(&peer)
+                    .partition_store
+                    .list_partitions()
                     .await
-                    .map_err(map_repo_err)?;
+                    .map_err(map_repo_err)?
+                    .partitions;
                 allowed_partitions
                     .retain(|part| access_policy.can_access_partition(&peer, &part.partition_id));
                 let allowed_partition_ids = allowed_partitions

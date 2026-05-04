@@ -664,12 +664,13 @@ impl IrohSyncRepo {
                 doc_count,
                 peer_key,
             }]),
-            full::FullSyncEvent::PartitionFullSynced { peer_key, partition } => self
-                .registry
-                .notify([IrohSyncEvent::PartitionFullySynced {
-                    peer_key,
-                    partition: partition.as_tag_value().to_string(),
-                }]),
+            full::FullSyncEvent::PartitionFullSynced {
+                peer_key,
+                partition,
+            } => self.registry.notify([IrohSyncEvent::PartitionFullySynced {
+                peer_key,
+                partition: partition.as_tag_value().to_string(),
+            }]),
             full::FullSyncEvent::DocSyncedWithPeer { peer_key, doc_id } => self
                 .registry
                 .notify([IrohSyncEvent::DocSyncedWithPeer { peer_key, doc_id }]),
@@ -850,13 +851,11 @@ impl IrohSyncRepo {
                             .iter()
                             .filter(|endpoint_id| {
                                 let peer_id: am_utils_rs::ids::PeerId32 = (**endpoint_id).into();
-                                !snapshot
-                                    .get(&peer_id)
-                                    .is_some_and(|peer| {
-                                        required_partitions
-                                            .iter()
-                                            .all(|partition| peer.fully_synced_partitions.contains(partition))
+                                !snapshot.get(&peer_id).is_some_and(|peer| {
+                                    required_partitions.iter().all(|partition| {
+                                        peer.fully_synced_partitions.contains(partition)
                                     })
+                                })
                             })
                             .copied()
                             .collect::<HashSet<_>>()
@@ -897,15 +896,8 @@ impl IrohSyncRepo {
     }
 
     pub async fn wait_until_peers_sync(&self, endpoint_ids: &[EndpointId]) -> Res<()> {
-        let required_partitions = self
-            .peer_partition_ids("")
-            .into_iter()
-            .collect::<Vec<_>>();
-        self.wait_for_full_sync(
-            endpoint_ids,
-            &required_partitions,
-            Duration::from_secs(30),
-        )
+        let required_partitions = self.peer_partition_ids("").into_iter().collect::<Vec<_>>();
+        self.wait_for_full_sync(endpoint_ids, &required_partitions, Duration::from_secs(30))
             .await
     }
 }
@@ -1273,8 +1265,10 @@ mod tests {
         let partitions = node_b
             .ctx
             .big_repo
-            .list_partitions_for_peer(&"peer-partition-visibility".into())
-            .await?;
+            .partition_store()
+            .list_partitions()
+            .await?
+            .partitions;
         let core_partition = partitions
             .iter()
             .find(|summary| summary.partition_id == CORE_DOCS_PARTITION_ID);
@@ -1508,8 +1502,7 @@ mod tests {
             let ticket = seed_node.sync_repo.get_clone_ticket_url().await?;
             bootstrap_clone_repo_from_url_for_tests(&ticket, repo_b_path).await?;
 
-            let ctx =
-                RepoCtx::open(repo_b_path, RepoOpenOptions {}, "test-device".into()).await?;
+            let ctx = RepoCtx::open(repo_b_path, RepoOpenOptions {}, "test-device".into()).await?;
             if ctx.repo_id != source_repo_id {
                 eyre::bail!(
                     "init repo_id mismatch after clone (source={}, cloned={})",

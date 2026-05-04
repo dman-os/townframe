@@ -117,7 +117,8 @@ impl SyncMachine {
 
     pub fn clear_peer(&mut self, peer: &PeerKey) {
         self.cursor_state.remove(peer);
-        self.active_item_jobs.retain(|job_id, _| &job_id.peer != peer);
+        self.active_item_jobs
+            .retain(|job_id, _| &job_id.peer != peer);
     }
 
     pub fn sync_store(&self) -> &SyncStoreHandle {
@@ -141,8 +142,12 @@ impl SyncMachine {
                     return Ok(Vec::new());
                 }
                 let (kind, item_id) = match event.deets {
-                    PartitionMemberEventDeets::MemberUpsert { item_id } => (ItemSyncKind::New, item_id),
-                    PartitionMemberEventDeets::MemberRemoved { item_id } => (ItemSyncKind::Delete, item_id),
+                    PartitionMemberEventDeets::MemberUpsert { item_id } => {
+                        (ItemSyncKind::New, item_id)
+                    }
+                    PartitionMemberEventDeets::MemberRemoved { item_id } => {
+                        (ItemSyncKind::Delete, item_id)
+                    }
                 };
                 let key = ItemSyncKey {
                     peer: peer.clone(),
@@ -176,8 +181,12 @@ impl SyncMachine {
                     return Ok(Vec::new());
                 }
                 let (kind, item_id) = match event.deets {
-                    PartitionItemEventDeets::ItemChanged { item_id, .. } => (ItemSyncKind::Change, item_id),
-                    PartitionItemEventDeets::ItemDeleted { item_id, .. } => (ItemSyncKind::Delete, item_id),
+                    PartitionItemEventDeets::ItemChanged { item_id, .. } => {
+                        (ItemSyncKind::Change, item_id)
+                    }
+                    PartitionItemEventDeets::ItemDeleted { item_id, .. } => {
+                        (ItemSyncKind::Delete, item_id)
+                    }
                 };
                 let key = ItemSyncKey {
                     peer: peer.clone(),
@@ -247,10 +256,7 @@ impl SyncMachine {
 
         let mut commands = Vec::new();
         match &completion {
-            SyncCompletion::AddedMember {
-                item_payload,
-                ..
-            } => {
+            SyncCompletion::AddedMember { item_payload, .. } => {
                 let item_payload: serde_json::Value = serde_json::from_str(item_payload)?;
                 self.partition_store
                     .upsert_item(&partition_id, &item_id, &item_payload)
@@ -263,13 +269,18 @@ impl SyncMachine {
                     .await?;
             }
             SyncCompletion::DeletedMember { .. } => {
-                self.partition_store.remove_item(&partition_id, &item_id).await?;
+                self.partition_store
+                    .remove_item(&partition_id, &item_id)
+                    .await?;
             }
             SyncCompletion::Noop { .. } => {}
         }
 
         if job.kind == ItemSyncKind::New
-            && matches!(completion, SyncCompletion::AddedMember { .. } | SyncCompletion::Noop { .. })
+            && matches!(
+                completion,
+                SyncCompletion::AddedMember { .. } | SyncCompletion::Noop { .. }
+            )
         {
             let include_completed_peer = matches!(completion, SyncCompletion::Noop { .. });
             commands.extend(self.upgrade_new_jobs_to_change(
@@ -385,10 +396,13 @@ impl SyncMachine {
             partition_id: key.partition_id,
             item_id: key.item_id,
         };
-        let entry = self.active_item_jobs.entry(job_id).or_insert_with(|| ItemJobState {
-            kind: key.kind,
-            waiters: BTreeSet::new(),
-        });
+        let entry = self
+            .active_item_jobs
+            .entry(job_id)
+            .or_insert_with(|| ItemJobState {
+                kind: key.kind,
+                waiters: BTreeSet::new(),
+            });
         let already_active = !entry.waiters.is_empty();
         entry.waiters.insert(waiter);
         !already_active
@@ -436,12 +450,8 @@ impl SyncMachine {
                 waiter.stream,
                 waiter.cursor,
             );
-            self.drain_ready_cursor_advances(
-                &waiter.peer,
-                &waiter.partition_id,
-                waiter.stream,
-            )
-            .await?;
+            self.drain_ready_cursor_advances(&waiter.peer, &waiter.partition_id, waiter.stream)
+                .await?;
         }
         Ok(())
     }
@@ -561,7 +571,9 @@ mod tests {
         SubscriptionItem::MemberEvent(PartitionMemberEvent {
             cursor,
             partition_id: partition_id.to_string(),
-            deets: PartitionMemberEventDeets::MemberUpsert { item_id: item_id.to_string() },
+            deets: PartitionMemberEventDeets::MemberUpsert {
+                item_id: item_id.to_string(),
+            },
         })
     }
 
@@ -572,7 +584,11 @@ mod tests {
             .await?;
         let (partition_store, _ps_stop) = PartitionStore::boot(pool.clone()).await?;
         let (sync_store, stop) = spawn_sync_store(pool).await?;
-        Ok((SyncMachine::new(Arc::clone(&partition_store), sync_store), stop, partition_store))
+        Ok((
+            SyncMachine::new(Arc::clone(&partition_store), sync_store),
+            stop,
+            partition_store,
+        ))
     }
 
     async fn ensure_partition(machine: &SyncMachine, partition_id: &str) -> Res<()> {
@@ -613,7 +629,10 @@ mod tests {
                 item_payload: "{}".to_string(),
             })
             .await?;
-        let cursor = machine.sync_store.get_partition_cursor(p, "part".to_string()).await?;
+        let cursor = machine
+            .sync_store
+            .get_partition_cursor(p, "part".to_string())
+            .await?;
         assert_eq!(cursor.item_cursor, Some(15));
         stop.stop().await?;
         Ok(())
@@ -662,7 +681,10 @@ mod tests {
                 item_payload: "{}".to_string(),
             })
             .await?;
-        let cursor = machine.sync_store.get_partition_cursor(p, "part".to_string()).await?;
+        let cursor = machine
+            .sync_store
+            .get_partition_cursor(p, "part".to_string())
+            .await?;
         assert_eq!(cursor.item_cursor, Some(15));
         stop.stop().await?;
         Ok(())
@@ -703,7 +725,10 @@ mod tests {
                 item_payload: "{}".to_string(),
             })
             .await?;
-        let cursor = machine.sync_store.get_partition_cursor(p, "part".to_string()).await?;
+        let cursor = machine
+            .sync_store
+            .get_partition_cursor(p, "part".to_string())
+            .await?;
         assert_eq!(cursor.member_cursor, Some(7));
         stop.stop().await?;
         Ok(())
@@ -765,9 +790,15 @@ mod tests {
             })
             .await?;
         assert_eq!(cmds.len(), 2);
-        assert!(cmds.iter().all(|cmd| matches!(cmd, SyncMachineCommand::ItemChangeSync { .. })));
-        assert!(cmds.iter().any(|cmd| matches!(cmd, SyncMachineCommand::ItemChangeSync { key } if key.peer == p1)));
-        assert!(cmds.iter().any(|cmd| matches!(cmd, SyncMachineCommand::ItemChangeSync { key } if key.peer == p2)));
+        assert!(cmds
+            .iter()
+            .all(|cmd| matches!(cmd, SyncMachineCommand::ItemChangeSync { .. })));
+        assert!(cmds.iter().any(
+            |cmd| matches!(cmd, SyncMachineCommand::ItemChangeSync { key } if key.peer == p1)
+        ));
+        assert!(cmds.iter().any(
+            |cmd| matches!(cmd, SyncMachineCommand::ItemChangeSync { key } if key.peer == p2)
+        ));
 
         let cursor = machine
             .sync_store

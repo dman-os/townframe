@@ -21,10 +21,10 @@ pub mod types;
 
 pub use crate::drawer::types::{DocBundle, DocEntry, DocEntryDiff, DocNBranches, DrawerEvent};
 
+use cache::FacetCacheKey;
 use cache::*;
 use lru::SharedKeyedLruPool;
 use types::{BranchSnapshot, DocDeleteTombstone};
-use cache::FacetCacheKey;
 
 use automerge::ReadDoc;
 use daybook_types::doc::{ChangeHashSet, DocId, FacetKey, FacetRaw};
@@ -226,10 +226,7 @@ impl DrawerRepo {
         if branch_kind == BranchKind::Replicated {
             self.big_repo
                 .partition_store()
-                .remove_item(
-                    &self.replicated_partition_id(),
-                    branch_doc_id,
-                )
+                .remove_item(&self.replicated_partition_id(), branch_doc_id)
                 .await?;
         }
         Ok(())

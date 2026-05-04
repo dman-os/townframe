@@ -194,10 +194,7 @@ impl ListenersRegistry {
         let dropped_count = Arc::new(AtomicU64::new(0));
         let dropped_count_for_cb = Arc::clone(&dropped_count);
 
-        let registration = Arc::new(ListenerRegistration::new(
-            Arc::downgrade(self),
-            None,
-        ));
+        let registration = Arc::new(ListenerRegistration::new(Arc::downgrade(self), None));
 
         {
             let mut lock = self.list.lock().expect(ERROR_MUTEX);
@@ -564,7 +561,10 @@ mod tests {
             is_unregistered: AtomicBool::new(false),
         });
         let handle = ListenerHandle::new(receiver, reg, Arc::clone(&dropped_count));
-        let sender = TestSender { inner: sender, dropped_count };
+        let sender = TestSender {
+            inner: sender,
+            dropped_count,
+        };
         (sender, handle)
     }
 

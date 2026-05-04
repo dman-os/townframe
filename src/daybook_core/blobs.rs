@@ -16,11 +16,7 @@ pub trait PartitionMembershipWriter: Send + Sync {
         member_id: &str,
         payload: &serde_json::Value,
     ) -> Res<()>;
-    async fn remove_item(
-        &self,
-        partition_id: &str,
-        member_id: &str,
-    ) -> Res<()>;
+    async fn remove_item(&self, partition_id: &str, member_id: &str) -> Res<()>;
 }
 
 #[derive(Clone)]
@@ -47,11 +43,7 @@ impl PartitionMembershipWriter for PartitionStoreMembershipWriter {
             .await
     }
 
-    async fn remove_item(
-        &self,
-        partition_id: &str,
-        member_id: &str,
-    ) -> Res<()> {
+    async fn remove_item(&self, partition_id: &str, member_id: &str) -> Res<()> {
         self.partition_store
             .remove_item(&partition_id.to_string(), member_id)
             .await
@@ -72,11 +64,7 @@ impl PartitionMembershipWriter for NoopPartitionMembershipWriter {
         Ok(())
     }
 
-    async fn remove_item(
-        &self,
-        _partition_id: &str,
-        _member_id: &str,
-    ) -> Res<()> {
+    async fn remove_item(&self, _partition_id: &str, _member_id: &str) -> Res<()> {
         Ok(())
     }
 }
@@ -147,7 +135,6 @@ impl BlobScope {
             _ => None,
         }
     }
-
 }
 
 impl BlobsRepo {

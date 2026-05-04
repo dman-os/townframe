@@ -300,6 +300,7 @@ pub async fn spawn_switch_worker(
             let mut partition_listener = worker
                 .rt
                 .big_repo
+                .partition_store()
                 .subscribe_partition_item_events_local(
                     &docs_partition_id,
                     Some(cursor),

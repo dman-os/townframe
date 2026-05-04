@@ -226,7 +226,7 @@ impl Rt {
         let payload = self
             .big_repo
             .partition_store()
-            .item_payload(&PROCESSOR_RUNLOG_PARTITION_ID.to_string(), &item_id)
+            .item_payload_for_partition(&PROCESSOR_RUNLOG_PARTITION_ID.to_string(), &item_id)
             .await?;
         let Some(payload) = payload else {
             return Ok(None);
@@ -2114,7 +2114,7 @@ mod tests {
         assert_eq!(count, 1, "runlog should overwrite in-place for same key");
 
         let payload = store
-            .item_payload(&PROCESSOR_RUNLOG_PARTITION_ID.to_string(), &item_id)
+            .item_payload_for_partition(&PROCESSOR_RUNLOG_PARTITION_ID.to_string(), &item_id)
             .await?
             .ok_or_eyre("expected runlog payload row")?;
         assert_eq!(payload["done_by_peer_id"], serde_json::json!("peer-a"));

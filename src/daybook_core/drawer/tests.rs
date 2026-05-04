@@ -1795,11 +1795,23 @@ fn test_facet_cache_admission_requires_second_put() {
     let heads = ChangeHashSet(Vec::new().into());
     let value = Arc::new(serde_json::json!({"mime":"text/plain","content":"hello"}));
 
-    cache.put(&mut pool, &doc_id, facet_uuid, heads.clone(), Arc::clone(&value));
+    cache.put(
+        &mut pool,
+        &doc_id,
+        facet_uuid,
+        heads.clone(),
+        Arc::clone(&value),
+    );
     let miss = cache.get_if_heads_match(&mut pool, &doc_id, &facet_uuid, &heads);
     assert!(miss.is_none(), "first write should stay probationary");
 
-    cache.put(&mut pool, &doc_id, facet_uuid, heads.clone(), Arc::clone(&value));
+    cache.put(
+        &mut pool,
+        &doc_id,
+        facet_uuid,
+        heads.clone(),
+        Arc::clone(&value),
+    );
     let hit = cache.get_if_heads_match(&mut pool, &doc_id, &facet_uuid, &heads);
     assert!(hit.is_some(), "second write should be admitted");
 }
@@ -1814,8 +1826,20 @@ fn test_facet_cache_miss_on_heads_change() {
     let heads_b = ChangeHashSet(Arc::from([automerge::ChangeHash([1u8; 32])]));
     let value = Arc::new(serde_json::json!({"content":"a"}));
 
-    cache.put(&mut pool, &doc_id, facet_uuid, heads_a.clone(), Arc::clone(&value));
-    cache.put(&mut pool, &doc_id, facet_uuid, heads_a.clone(), Arc::clone(&value));
+    cache.put(
+        &mut pool,
+        &doc_id,
+        facet_uuid,
+        heads_a.clone(),
+        Arc::clone(&value),
+    );
+    cache.put(
+        &mut pool,
+        &doc_id,
+        facet_uuid,
+        heads_a.clone(),
+        Arc::clone(&value),
+    );
     assert!(cache
         .get_if_heads_match(&mut pool, &doc_id, &facet_uuid, &heads_a)
         .is_some());
@@ -1835,7 +1859,13 @@ fn test_facet_cache_large_one_hit_entries_do_not_pollute() {
         let facet_uuid = Uuid::new_v4();
         let payload = "x".repeat(4 * 1024);
         let value = Arc::new(serde_json::json!({"idx": index, "payload": payload}));
-        cache.put(&mut pool, &doc_id, facet_uuid, heads.clone(), Arc::clone(&value));
+        cache.put(
+            &mut pool,
+            &doc_id,
+            facet_uuid,
+            heads.clone(),
+            Arc::clone(&value),
+        );
         assert!(
             cache
                 .get_if_heads_match(&mut pool, &doc_id, &facet_uuid, &heads)

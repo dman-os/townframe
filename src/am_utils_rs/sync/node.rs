@@ -101,7 +101,7 @@ impl SyncNodeWorker {
                     self.ensure_known_peer(&peer).await?;
                     let mut partitions = self
                         .partition_store
-                        .list_partitions_for_peer(&peer)
+                        .list_partitions()
                         .await
                         .map_err(map_repo_err)?;
                     partitions.partitions.retain(|part| {
@@ -120,7 +120,7 @@ impl SyncNodeWorker {
                     self.ensure_partition_access(&peer, &inner.req.partitions)?;
                     let out = self
                         .partition_store
-                        .get_partition_member_events_for_peer(&peer, &inner.req)
+                        .get_partition_member_events(&inner.req)
                         .await
                         .map_err(map_repo_err)?;
                     Ok::<_, PartitionSyncError>(GetPartitionMemberEventsResponse {
@@ -138,7 +138,7 @@ impl SyncNodeWorker {
                     self.ensure_partition_access(&peer, &inner.req.partitions)?;
                     let out = self
                         .partition_store
-                        .get_partition_item_events_for_peer(&peer, &inner.req)
+                        .get_partition_item_events(&inner.req)
                         .await
                         .map_err(map_repo_err)?;
                     Ok::<_, PartitionSyncError>(GetPartitionItemEventsResponse {
@@ -164,11 +164,7 @@ impl SyncNodeWorker {
                         }
                     }
                     self.partition_store
-                        .subscribe_partition_events_for_peer(
-                            &peer,
-                            &inner.req,
-                            DEFAULT_SUBSCRIPTION_CAPACITY,
-                        )
+                        .subscribe(&inner.req, DEFAULT_SUBSCRIPTION_CAPACITY)
                         .await
                         .map_err(map_repo_err)
                 })

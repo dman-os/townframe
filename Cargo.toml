@@ -177,15 +177,15 @@ gloo = { version = "0.11.0", default-features = false }
 automerge = "0.8.0"
 autosurgeon = "0.11.0"
 automerge-test = "0.6"
-subduction_core = { git = "https://github.com/dman-os/subduction", rev = "752ac4ba23a3de244b914b2f3bc7d7208ccf8cc2" }
-subduction_iroh = { git = "https://github.com/dman-os/subduction", rev = "752ac4ba23a3de244b914b2f3bc7d7208ccf8cc2"  }
-subduction_websocket = { git = "https://github.com/dman-os/subduction", rev = "752ac4ba23a3de244b914b2f3bc7d7208ccf8cc2"  }
-sedimentree_core = { git = "https://github.com/dman-os/subduction", rev = "752ac4ba23a3de244b914b2f3bc7d7208ccf8cc2"  }
-automerge_sedimentree = { git = "https://github.com/dman-os/subduction", rev = "752ac4ba23a3de244b914b2f3bc7d7208ccf8cc2"  }
-sedimentree_fs_storage = { git = "https://github.com/dman-os/subduction", rev = "752ac4ba23a3de244b914b2f3bc7d7208ccf8cc2"  }
-subduction_crypto = { git = "https://github.com/dman-os/subduction", rev = "752ac4ba23a3de244b914b2f3bc7d7208ccf8cc2"  }
-subduction_keyhive = { git = "https://github.com/dman-os/subduction", rev = "752ac4ba23a3de244b914b2f3bc7d7208ccf8cc2"  }
-subduction_keyhive_policy = { git = "https://github.com/dman-os/subduction", rev = "752ac4ba23a3de244b914b2f3bc7d7208ccf8cc2"  }
+subduction_core = { git = "https://github.com/dman-os/subduction", rev = "7ef06707ca3cac0d1ad11c290c5a6743f1e80a3a" }
+subduction_iroh = { git = "https://github.com/dman-os/subduction", rev = "7ef06707ca3cac0d1ad11c290c5a6743f1e80a3a"  }
+subduction_websocket = { git = "https://github.com/dman-os/subduction", rev = "7ef06707ca3cac0d1ad11c290c5a6743f1e80a3a"  }
+sedimentree_core = { git = "https://github.com/dman-os/subduction", rev = "7ef06707ca3cac0d1ad11c290c5a6743f1e80a3a"  }
+automerge_sedimentree = { git = "https://github.com/dman-os/subduction", rev = "7ef06707ca3cac0d1ad11c290c5a6743f1e80a3a"  }
+sedimentree_fs_storage = { git = "https://github.com/dman-os/subduction", rev = "7ef06707ca3cac0d1ad11c290c5a6743f1e80a3a"  }
+subduction_crypto = { git = "https://github.com/dman-os/subduction", rev = "7ef06707ca3cac0d1ad11c290c5a6743f1e80a3a"  }
+subduction_keyhive = { git = "https://github.com/dman-os/subduction", rev = "7ef06707ca3cac0d1ad11c290c5a6743f1e80a3a"  }
+subduction_keyhive_policy = { git = "https://github.com/dman-os/subduction", rev = "7ef06707ca3cac0d1ad11c290c5a6743f1e80a3a"  }
 async-channel = "2.5.0"
 qrcode = { version = "0.14.1", default-features = false }
 

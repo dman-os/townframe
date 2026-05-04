@@ -200,26 +200,35 @@ impl FacetCacheState {
 impl DrawerRepo {
     pub(super) fn invalidate_entry_cache(&self, id: &DocId) {
         surelock::key::lock_scope(|key| {
-            key.lock_with(&(&self.entry_pool, &self.entry_cache), |(mut pool, mut cache)| {
-                pool.remove_key(id);
-                cache.remove(id);
-            });
+            key.lock_with(
+                &(&self.entry_pool, &self.entry_cache),
+                |(mut pool, mut cache)| {
+                    pool.remove_key(id);
+                    cache.remove(id);
+                },
+            );
         });
     }
 
     pub(super) fn invalidate_facet_cache_entry(&self, doc_id: &DocId, facet_uuid: &Uuid) {
         surelock::key::lock_scope(|key| {
-            key.lock_with(&(&self.facet_cache, &self.doc_pool), |(mut cache, mut pool)| {
-                cache.invalidate_facet(&mut pool, doc_id, facet_uuid);
-            });
+            key.lock_with(
+                &(&self.facet_cache, &self.doc_pool),
+                |(mut cache, mut pool)| {
+                    cache.invalidate_facet(&mut pool, doc_id, facet_uuid);
+                },
+            );
         });
     }
 
     pub(super) fn invalidate_facet_cache_doc(&self, doc_id: &DocId) {
         surelock::key::lock_scope(|key| {
-            key.lock_with(&(&self.facet_cache, &self.doc_pool), |(mut cache, mut pool)| {
-                cache.invalidate_doc(&mut pool, doc_id);
-            });
+            key.lock_with(
+                &(&self.facet_cache, &self.doc_pool),
+                |(mut cache, mut pool)| {
+                    cache.invalidate_doc(&mut pool, doc_id);
+                },
+            );
         });
     }
 
@@ -230,9 +239,13 @@ impl DrawerRepo {
         facet_heads: &ChangeHashSet,
     ) -> Option<daybook_types::doc::ArcFacetRaw> {
         surelock::key::lock_scope(|key| {
-            key.lock_with(&(&self.facet_cache, &self.doc_pool), |(mut cache, mut pool)| {
-                cache.get_if_heads_match(&mut pool, doc_id, facet_uuid, facet_heads)
-            }).0
+            key.lock_with(
+                &(&self.facet_cache, &self.doc_pool),
+                |(mut cache, mut pool)| {
+                    cache.get_if_heads_match(&mut pool, doc_id, facet_uuid, facet_heads)
+                },
+            )
+            .0
         })
     }
 
@@ -244,9 +257,12 @@ impl DrawerRepo {
         value: daybook_types::doc::ArcFacetRaw,
     ) {
         surelock::key::lock_scope(|key| {
-            key.lock_with(&(&self.facet_cache, &self.doc_pool), |(mut cache, mut pool)| {
-                cache.put(&mut pool, doc_id, facet_uuid, facet_heads, value);
-            });
+            key.lock_with(
+                &(&self.facet_cache, &self.doc_pool),
+                |(mut cache, mut pool)| {
+                    cache.put(&mut pool, doc_id, facet_uuid, facet_heads, value);
+                },
+            );
         });
     }
 }

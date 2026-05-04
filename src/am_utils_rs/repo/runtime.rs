@@ -116,7 +116,6 @@ enum RuntimeCmd {
     SyncDocWithPeer {
         doc_id: DocumentId,
         peer_id: PeerId,
-        subscribe: bool,
         timeout: Option<Duration>,
         resp: oneshot::Sender<Res<SyncDocOutcome>>,
     },
@@ -278,13 +277,12 @@ impl BigRepoRuntimeHandle {
 
     #[tracing::instrument(
         skip_all,
-        fields(%doc_id, %peer_id, subscribe, timeout = ?timeout)
+        fields(%doc_id, %peer_id, timeout = ?timeout)
     )]
     pub async fn sync_doc_with_peer(
         &self,
         doc_id: DocumentId,
         peer_id: PeerId,
-        subscribe: bool,
         timeout: Option<Duration>,
     ) -> Res<SyncDocOutcome> {
         let (tx, rx) = oneshot::channel();
@@ -292,7 +290,6 @@ impl BigRepoRuntimeHandle {
             .send(RuntimeCmd::SyncDocWithPeer {
                 doc_id,
                 peer_id,
-                subscribe,
                 timeout,
                 resp: tx,
             })
@@ -306,6 +303,7 @@ impl BigRepoRuntimeHandle {
             .send(RuntimeCmd::ReleaseDocLease { doc_id })
             .is_err()
         {
+            //let bt = std::backtrace::Backtrace::capture();
             warn!(%doc_id, "runtime stopped before releasing doc lease");
         }
     }
@@ -313,6 +311,7 @@ impl BigRepoRuntimeHandle {
 
 pub struct BigRepoRuntimeStopToken {
     cancel_token: CancellationToken,
+    machine_loop_handle: tokio::task::JoinHandle<()>,
     runtime_tasks: Arc<utils_rs::AbortableJoinSet>,
 }
 
@@ -325,6 +324,8 @@ impl BigRepoRuntimeStopToken {
             | Err(utils_rs::AbortableJoinSetStopError::Aborted) => {}
             Err(err) => return Err(err.into()),
         }
+        utils_rs::wait_on_handle_with_timeout(self.machine_loop_handle, Duration::from_secs(5))
+            .await?;
         Ok(())
     }
 }
@@ -467,7 +468,6 @@ where
         subduction: subduction_handle,
         sedimentrees: Arc::clone(&sedimentrees),
         storage_for_reads,
-        live_bundles: HashMap::new(),
         partition_store,
         change_manager,
         runtime_tasks: Arc::clone(&runtime_tasks),
@@ -481,6 +481,8 @@ where
         doc_workers: default(),
     };
 
+    let peer_id: PeerId = runtime_worker.local_peer_id.into();
+
     runtime_tasks
         .spawn({
             let stop = runtime_stop.clone();
@@ -491,6 +493,9 @@ where
                     })
                     .await;
             }
+            .instrument(
+                tracing::info_span!("BigRepoRuntime subduction listener", peer_id = %peer_id),
+            )
         })
         .expect(ERROR_TOKIO);
     runtime_tasks
@@ -504,6 +509,9 @@ where
                     })
                     .await;
             }
+            .instrument(
+                tracing::info_span!("BigRepoRuntime subduction manager", peer_id = %peer_id),
+            )
         })
         .expect(ERROR_TOKIO);
 
@@ -531,17 +539,19 @@ where
             }
             eyre::Ok(())
         }
+        .instrument(tracing::info_span!("BigRepoRuntime machine_loop", peer_id = %peer_id))
     };
-    runtime_tasks
-        .spawn(async move {
-            fut.await.unwrap();
-        })
-        .expect(ERROR_TOKIO);
+    // the main loop is not on the abortable join set
+    // to allow the children to die first before main does
+    let machine_loop_handle = tokio::spawn(async move {
+        fut.await.unwrap();
+    });
 
     Ok((
         BigRepoRuntimeHandle { cmd_tx },
         BigRepoRuntimeStopToken {
             cancel_token: runtime_stop,
+            machine_loop_handle,
             runtime_tasks,
         },
     ))
@@ -554,7 +564,6 @@ where
     subduction: Arc<BigRepoSubduction<S>>,
     sedimentrees: SubductionSedimentrees,
     storage_for_reads: S,
-    live_bundles: HashMap<DocumentId, std::sync::Weak<LiveDocBundle>>,
     partition_store: Arc<PartitionStore>,
     change_manager: Arc<changes::ChangeListenerManager>,
     runtime_tasks: Arc<utils_rs::AbortableJoinSet>,
@@ -623,11 +632,10 @@ where
             RuntimeCmd::SyncDocWithPeer {
                 doc_id,
                 peer_id,
-                subscribe,
                 timeout,
                 resp: done,
             } => {
-                self.handle_sync_doc_with_peer(doc_id, peer_id, subscribe, timeout, done)
+                self.handle_sync_doc_with_peer(doc_id, peer_id, timeout, done)
                     .await
             }
             RuntimeCmd::ReleaseDocLease { doc_id } => self.handle_release_doc_lease(doc_id).await,
@@ -682,9 +690,12 @@ where
     {
         let stop = self.runtime_stop.child_token();
         self.runtime_tasks
-            .spawn(async move {
-                let _ = stop.run_until_cancelled(fut).await;
-            })
+            .spawn(
+                async move {
+                    let _ = stop.run_until_cancelled(fut).await;
+                }
+                .instrument(tracing::info_span!("spawn_background")),
+            )
             .expect(ERROR_TOKIO);
     }
 
@@ -727,7 +738,6 @@ where
 
     fn handle_doc_worker_handle_acquired(&mut self, bundle: Arc<LiveDocBundle>) {
         let doc_id = bundle.doc_id;
-        self.register_live_bundle(Arc::clone(&bundle));
         if let Some(entry) = self.doc_workers.get_mut(&doc_id) {
             entry.local_handles += 1;
             entry.eviction_deadline = None;
@@ -738,6 +748,7 @@ where
         self.doc_workers.remove(&doc_id);
     }
 
+    #[tracing::instrument(skip_all,fields(%doc_id))]
     fn spawn_doc_worker(&mut self, doc_id: DocumentId) -> Res<()> {
         if self.doc_workers.contains_key(&doc_id) {
             self.clear_doc_worker_eviction(doc_id);
@@ -749,6 +760,8 @@ where
         let runtime_evt_tx = self.evt_tx.clone();
         let runtime_tasks = Arc::clone(&self.runtime_tasks);
         let mut worker = DocWorker {
+            doc_id_str: doc_id.to_string(),
+            doc_id_subduction: doc_id.into(),
             doc_id,
             state: DocWorkerDocState::Unloaded,
             pending_fragment_requests: BTreeSet::new(),
@@ -764,39 +777,42 @@ where
             // shutdown: worker_cancel.clone(),
         };
         runtime_tasks
-            .spawn(async move {
-                let res: Res<()> = async {
-                    loop {
-                        tokio::select! {
-                            biased;
-                            _ = worker_cancel.cancelled() => break,
-                            msg = msg_rx.recv() => {
-                                let Some(msg) = msg else { break; };
-                                worker.handle_msg(msg).await?;
+            .spawn(
+                async move {
+                    let res: Res<()> = async {
+                        loop {
+                            tokio::select! {
+                                biased;
+                                _ = worker_cancel.cancelled() => break,
+                                msg = msg_rx.recv() => {
+                                    let Some(msg) = msg else { break; };
+                                    worker.handle_msg(msg).await?;
+                                }
                             }
                         }
+                        Ok(())
                     }
-                    Ok(())
-                }
-                .await;
-                // FIXME: why two errors instead of stopped with error variant
-                if let Err(err) = res {
+                    .await;
+                    // FIXME: why two errors instead of stopped with error variant
+                    if let Err(err) = res {
+                        worker
+                            .runtime_evt_tx
+                            .send(RuntimeEvt::FatalWorkerError {
+                                doc_id: Some(doc_id),
+                                context: "doc worker",
+                                error: format!("{err:?}"),
+                            })
+                            .inspect_err(|_| warn!(ERROR_CHANNEL))
+                            .ok();
+                    }
                     worker
                         .runtime_evt_tx
-                        .send(RuntimeEvt::FatalWorkerError {
-                            doc_id: Some(doc_id),
-                            context: "doc worker",
-                            error: format!("{err:?}"),
-                        })
+                        .send(RuntimeEvt::DocWorkerStopped { doc_id })
                         .inspect_err(|_| warn!(ERROR_CHANNEL))
                         .ok();
                 }
-                worker
-                    .runtime_evt_tx
-                    .send(RuntimeEvt::DocWorkerStopped { doc_id })
-                    .inspect_err(|_| warn!(ERROR_CHANNEL))
-                    .ok();
-            })
+                .in_current_span(),
+            )
             .expect(ERROR_TOKIO);
         self.doc_workers.insert(
             doc_id,
@@ -861,11 +877,6 @@ where
             .expect(ERROR_ACTOR);
     }
 
-    fn register_live_bundle(&mut self, bundle: Arc<LiveDocBundle>) {
-        self.live_bundles
-            .insert(bundle.doc_id, Arc::downgrade(&bundle));
-    }
-
     async fn handle_release_doc_lease(&mut self, doc_id: DocumentId) {
         if let Some(entry) = self.doc_workers.get_mut(&doc_id) {
             entry.local_handles = entry.local_handles.saturating_sub(1);
@@ -901,7 +912,7 @@ where
             .expect(ERROR_ACTOR);
     }
 
-    #[tracing::instrument(skip_all, fields(session = ?session))]
+    #[tracing::instrument(skip_all)]
     async fn handle_sync_session_observed(
         &mut self,
         session: subduction_core::sync_session::SyncSession,
@@ -927,6 +938,7 @@ impl<S> BigRepoRuntimeWorker<S>
 where
     S: BigRepoSubductionStorage,
 {
+    #[tracing::instrument(skip_all)]
     async fn handle_open_conn_iroh(
         &self,
         endpoint: iroh::Endpoint,
@@ -1011,6 +1023,7 @@ where
         });
     }
 
+    #[tracing::instrument(skip_all)]
     async fn handle_accept_conn_iroh(
         &self,
         conn: iroh::endpoint::Connection,
@@ -1100,6 +1113,7 @@ where
         });
     }
 
+    #[tracing::instrument(skip_all)]
     async fn handle_close_iroh(&self, peer_id: PeerId, done: Option<oneshot::Sender<Res<()>>>) {
         let subduction: Arc<BigRepoSubduction<S>> = Arc::clone(&self.subduction);
         let connected_peers = Arc::clone(&self.connected_peers);
@@ -1167,13 +1181,12 @@ where
 {
     #[tracing::instrument(
         skip_all,
-        fields(%doc_id, %peer_id, subscribe, timeout = ?timeout)
+        fields(%doc_id, %peer_id,  timeout = ?timeout)
     )]
     async fn handle_sync_doc_with_peer(
         &mut self,
         doc_id: DocumentId,
         peer_id: PeerId,
-        subscribe: bool,
         timeout: Option<Duration>,
         done: oneshot::Sender<Res<SyncDocOutcome>>,
     ) {
@@ -1184,7 +1197,6 @@ where
         worker
             .send(DocWorkerMsg::SyncWithPeer {
                 peer_id,
-                subscribe,
                 timeout,
                 done,
             })
@@ -1244,7 +1256,6 @@ enum DocWorkerMsg {
     },
     SyncWithPeer {
         peer_id: PeerId,
-        subscribe: bool,
         timeout: Option<Duration>,
         done: oneshot::Sender<Res<SyncDocOutcome>>,
     },
@@ -1256,6 +1267,8 @@ where
     S: BigRepoSubductionStorage,
 {
     doc_id: DocumentId,
+    doc_id_str: String,
+    doc_id_subduction: SedimentreeId,
     state: DocWorkerDocState,
     pending_fragment_requests: BTreeSet<FragmentRequested>,
     subduction: Arc<BigRepoSubduction<S>>,
@@ -1270,7 +1283,7 @@ where
 enum DocWorkerDocState {
     Unloaded,
     Transient(automerge::Automerge),
-    Live(Arc<LiveDocBundle>),
+    Live(std::sync::Weak<LiveDocBundle>),
 }
 
 impl<S> DocWorker<S>
@@ -1318,7 +1331,7 @@ where
             }
             DocWorkerMsg::ApplySyncSession { session } => {
                 self.handle_apply_sync_session(session).await?;
-                (&self.runtime_evt_tx)
+                self.runtime_evt_tx
                     .send(RuntimeEvt::DocWorkerTransientFinished {
                         doc_id: self.doc_id,
                     })
@@ -1326,13 +1339,10 @@ where
             }
             DocWorkerMsg::SyncWithPeer {
                 peer_id,
-                subscribe,
                 timeout,
                 done,
             } => {
-                let res = self
-                    .handle_sync_with_peer(peer_id, subscribe, timeout)
-                    .await;
+                let res = self.handle_sync_with_peer(peer_id, timeout).await;
                 let evt_tx: &mpsc::UnboundedSender<RuntimeEvt> = &self.runtime_evt_tx;
                 let evt = RuntimeEvt::DocWorkerTransientFinished {
                     doc_id: self.doc_id,
@@ -1358,15 +1368,15 @@ where
         {
             eyre::bail!("document already exists locally");
         }
-        let sedimentree_id: SedimentreeId = self.doc_id.into();
+        let sedimentree_id: SedimentreeId = self.doc_id_subduction.clone();
         let ingested =
             automerge_sedimentree::ingest::ingest_automerge(&initial_content, sedimentree_id)
                 .map_err(|err| ferr!("failed ingesting automerge doc: {err}"))?;
+        info!("adding sedimentree");
         self.subduction
             .add_sedimentree(sedimentree_id, ingested.sedimentree, ingested.blobs)
             .await
             .map_err(|err| ferr!("failed add_sedimentree: {err}"))?;
-        self.upsert_known_doc_now().await?;
         let bundle = Arc::new(LiveDocBundle::new(
             self.doc_id,
             initial_content,
@@ -1385,13 +1395,13 @@ where
             (item_payload, heads)
         };
         self.partition_store
-            .record_member_item_change(&self.doc_id.to_string(), &item_payload)
+            .record_member_item_change(&self.doc_id_str, &item_payload)
             .await?;
         self.change_manager
             .notify_doc_created(self.doc_id, Arc::clone(&heads))?;
         self.change_manager
             .notify_local_doc_created(self.doc_id, heads)?;
-        self.state = DocWorkerDocState::Live(Arc::clone(&bundle));
+        self.state = DocWorkerDocState::Live(Arc::downgrade(&bundle));
         (&self.runtime_evt_tx)
             .send(RuntimeEvt::DocWorkerHandleAcquired {
                 bundle: Arc::clone(&bundle),
@@ -1402,12 +1412,15 @@ where
 
     async fn handle_acquire_handle(&mut self) -> Res<Option<Arc<LiveDocBundle>>> {
         if let DocWorkerDocState::Live(bundle) = &self.state {
-            self.runtime_evt_tx
-                .send(RuntimeEvt::DocWorkerHandleAcquired {
-                    bundle: Arc::clone(bundle),
-                })
-                .expect(ERROR_CHANNEL);
-            return Ok(Some(Arc::clone(bundle)));
+            if let Some(bundle) = bundle.upgrade() {
+                self.runtime_evt_tx
+                    .send(RuntimeEvt::DocWorkerHandleAcquired {
+                        bundle: Arc::clone(&bundle),
+                    })
+                    .expect(ERROR_CHANNEL);
+                return Ok(Some(Arc::clone(&bundle)));
+            }
+            self.state = DocWorkerDocState::Unloaded;
         }
         let Some(doc) = self.take_or_load_transient_doc().await? else {
             return Ok(None);
@@ -1422,7 +1435,7 @@ where
                 doc_id: self.doc_id,
             },
         ));
-        self.state = DocWorkerDocState::Live(Arc::clone(&bundle));
+        self.state = DocWorkerDocState::Live(Arc::downgrade(&bundle));
         self.runtime_evt_tx
             .send(RuntimeEvt::DocWorkerHandleAcquired {
                 bundle: Arc::clone(&bundle),
@@ -1433,10 +1446,23 @@ where
 
     async fn handle_export_doc_save(&mut self) -> Res<Option<Vec<u8>>> {
         match &self.state {
-            DocWorkerDocState::Live(bundle) => {
-                let doc = bundle.doc.lock().await;
-                Ok(Some(doc.save()))
-            }
+            DocWorkerDocState::Live(bundle) => match bundle.upgrade() {
+                Some(bundle) => {
+                    let doc = bundle.doc.lock().await;
+                    Ok(Some(doc.save()))
+                }
+                None => {
+                    let Some(doc) =
+                        load_doc_snapshot(&self.sedimentrees, &self.storage_for_reads, self.doc_id)
+                            .await?
+                    else {
+                        return Ok(None);
+                    };
+                    let save = doc.save();
+                    self.state = DocWorkerDocState::Transient(doc);
+                    Ok(Some(save))
+                }
+            },
             DocWorkerDocState::Transient(doc) => Ok(Some(doc.save())),
             DocWorkerDocState::Unloaded => {
                 let Some(doc) =
@@ -1459,7 +1485,7 @@ where
         patches: Vec<automerge::Patch>,
         origin: BigRepoChangeOrigin,
     ) -> Res<()> {
-        let sedimentree_id: SedimentreeId = self.doc_id.into();
+        let sedimentree_id: SedimentreeId = self.doc_id_subduction.clone();
         for (head, parents, blob) in commits {
             let maybe_request = self
                 .subduction
@@ -1483,11 +1509,21 @@ where
         Ok(())
     }
 
+    #[tracing::instrument(
+        skip_all,
+        fields(peer_id = %session.peer_id,kind = ?session.kind)
+    )]
     async fn handle_apply_sync_session(
         &mut self,
         session: subduction_core::sync_session::SyncSession,
     ) -> Res<()> {
-        if session.received_commit_ids.is_empty() && session.received_fragment_ids.is_empty() {
+        if session.is_empty() {
+            return Ok(());
+        }
+        if matches!(
+            session.kind,
+            subduction_core::sync_session::SyncSessionKind::InboundPush
+        ) {
             return Ok(());
         }
         let mut blobs = Vec::new();
@@ -1507,21 +1543,65 @@ where
                 .ok_or_eyre("synced fragment missing")?;
             blobs.push(verified.blob().clone().into_contents());
         }
-        let maybe_delta = self
-            .current_doc_mut(|doc| {
-                let before_heads = doc.get_heads();
-                for blob in blobs {
-                    doc.load_incremental(&blob)
-                        .map_err(|err| eyre::eyre!("failed applying sync session blob: {err}"))?;
-                }
+        let maybe_delta = match &mut self.state {
+            DocWorkerDocState::Unloaded => {
+                // since the doc in storage will have the latest blobs,
+                // we must load the before_heads from the partition payloads
+                let before_heads = {
+                    let local_tree = self
+                        .sedimentrees
+                        .contains_key(&self.doc_id_subduction)
+                        .await;
+                    info!(?local_tree, "XXX");
+                    let (_, mut before_heads) = self
+                        .partition_store
+                        .item_payloads(&self.doc_id_str)
+                        .await?
+                        .into_iter()
+                        .next()
+                        .expect("doc was not in partition previously");
+                    let before_heads = before_heads
+                        .as_object_mut()
+                        .expect(ERROR_IMPOSSIBLE)
+                        .remove("heads")
+                        .expect(ERROR_IMPOSSIBLE);
+                    let before_heads: Vec<String> =
+                        serde_json::from_value(before_heads).expect(ERROR_IMPOSSIBLE);
+
+                    crate::parse_commit_heads(&before_heads).expect(ERROR_IMPOSSIBLE)
+                };
+                let doc =
+                    load_doc_snapshot(&self.sedimentrees, &self.storage_for_reads, self.doc_id)
+                        .await?
+                        .unwrap_or_else(automerge::Automerge::new);
                 let after_heads = doc.get_heads();
-                if before_heads == after_heads {
-                    return Ok(None);
-                }
-                let patches = doc.diff(&before_heads, &after_heads);
-                Ok(Some((after_heads, patches)))
-            })
-            .await?;
+                let out = if &before_heads[..] == &after_heads[..] {
+                    None
+                } else {
+                    let patches = doc.diff(&before_heads, &after_heads);
+                    Some((after_heads, patches))
+                };
+                self.state = DocWorkerDocState::Transient(doc);
+                out
+            }
+            DocWorkerDocState::Transient(_) | DocWorkerDocState::Live(_) => {
+                self.current_doc_mut(|doc| {
+                    let before_heads = doc.get_heads();
+                    for blob in blobs {
+                        doc.load_incremental(&blob).map_err(|err| {
+                            eyre::eyre!("failed applying sync session blob: {err}")
+                        })?;
+                    }
+                    let after_heads = doc.get_heads();
+                    if before_heads == after_heads {
+                        return Ok(None);
+                    }
+                    let patches = doc.diff(&before_heads, &after_heads);
+                    Ok(Some((after_heads, patches)))
+                })
+                .await?
+            }
+        };
         let Some((after_heads, patches)) = maybe_delta else {
             return Ok(());
         };
@@ -1541,14 +1621,13 @@ where
     async fn handle_sync_with_peer(
         &self,
         peer_id: PeerId,
-        subscribe: bool,
         timeout: Option<Duration>,
     ) -> Res<SyncDocOutcome> {
         let sedimentree_id: SedimentreeId = self.doc_id.into();
         let remote_peer_id: subduction_core::peer::id::PeerId = peer_id.into();
         let result = self
             .subduction
-            .sync_with_peer(&remote_peer_id, sedimentree_id, subscribe, timeout)
+            .sync_with_peer(&remote_peer_id, sedimentree_id, false, timeout)
             .await;
         Ok(match result {
             Ok((had_success, _stats, conn_errs)) => {
@@ -1564,15 +1643,21 @@ where
         })
     }
 
+    // FIXME: this only does fragment processing if there's
+    // pending requests, is this wise? seems efficient but
+    // confirm that we can defer fragment processing like this
     async fn process_pending_fragment_requests(&mut self) -> Res<()> {
         let DocWorkerDocState::Live(bundle) = &self.state else {
+            return Ok(());
+        };
+        let Some(bundle) = bundle.upgrade() else {
             return Ok(());
         };
         if self.pending_fragment_requests.is_empty() {
             return Ok(());
         }
         let requests = std::mem::take(&mut self.pending_fragment_requests);
-        process_fragment_requests(Arc::clone(bundle), requests, Arc::clone(&self.subduction)).await
+        process_fragment_requests(Arc::clone(&bundle), requests, Arc::clone(&self.subduction)).await
     }
 
     async fn current_doc_mut<R>(
@@ -1580,13 +1665,24 @@ where
         f: impl FnOnce(&mut automerge::Automerge) -> Res<R>,
     ) -> Res<R> {
         match std::mem::replace(&mut self.state, DocWorkerDocState::Unloaded) {
-            DocWorkerDocState::Live(bundle) => {
-                let mut doc = bundle.doc.lock().await;
-                let out = f(&mut doc)?;
-                drop(doc);
-                self.state = DocWorkerDocState::Live(bundle);
-                Ok(out)
-            }
+            DocWorkerDocState::Live(bundle) => match bundle.upgrade() {
+                Some(bundle) => {
+                    let mut doc = bundle.doc.lock().await;
+                    let out = f(&mut doc)?;
+                    drop(doc);
+                    self.state = DocWorkerDocState::Live(Arc::downgrade(&bundle));
+                    Ok(out)
+                }
+                None => {
+                    let mut doc =
+                        load_doc_snapshot(&self.sedimentrees, &self.storage_for_reads, self.doc_id)
+                            .await?
+                            .unwrap_or_else(automerge::Automerge::new);
+                    let out = f(&mut doc)?;
+                    self.state = DocWorkerDocState::Transient(doc);
+                    Ok(out)
+                }
+            },
             DocWorkerDocState::Transient(mut doc) => {
                 let out = f(&mut doc)?;
                 self.state = DocWorkerDocState::Transient(doc);
@@ -1606,9 +1702,7 @@ where
 
     async fn take_or_load_transient_doc(&mut self) -> Res<Option<automerge::Automerge>> {
         let out = match std::mem::replace(&mut self.state, DocWorkerDocState::Unloaded) {
-            DocWorkerDocState::Transient(doc) => {
-                Ok(Some(doc))
-            }
+            DocWorkerDocState::Transient(doc) => Ok(Some(doc)),
             DocWorkerDocState::Unloaded => {
                 load_doc_snapshot(&self.sedimentrees, &self.storage_for_reads, self.doc_id).await
             }
@@ -1618,15 +1712,6 @@ where
             }
         };
         out
-    }
-
-    async fn upsert_known_doc_now(&self) -> Res<()> {
-        sqlx::query("INSERT INTO big_repo_docs(doc_id) VALUES(?) ON CONFLICT(doc_id) DO NOTHING")
-            .bind(self.doc_id.to_string())
-            .execute(self.partition_store.state_pool())
-            .await
-            .wrap_err("failed upserting big_repo_docs")?;
-        Ok(())
     }
 }
 

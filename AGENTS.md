@@ -137,3 +137,5 @@ Better to have good alignment with the operator as opposed to spending a million
 Try to be intelligent about the user's intention. 
 If it looks or inelegant what you're doing, you're very liekly misalinged and wasting effort.
 Make sure to get more confirmations if unsure.
+
+Does the work graze a FIXME seen in code, flag those ahead of time in case the current work is a good opportunit to resolve them.

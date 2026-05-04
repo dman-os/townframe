@@ -127,7 +127,11 @@ pub(crate) struct RepoCtxParts {
 }
 
 impl RepoCtx {
-    fn from_parts(parts: RepoCtxParts, doc_app: BigDocHandle, doc_drawer: BigDocHandle) -> Arc<Self> {
+    fn from_parts(
+        parts: RepoCtxParts,
+        doc_app: BigDocHandle,
+        doc_drawer: BigDocHandle,
+    ) -> Arc<Self> {
         Arc::new(Self {
             secret_repo: parts.secret_repo,
             local_peer_key: parts.local_peer_key,
