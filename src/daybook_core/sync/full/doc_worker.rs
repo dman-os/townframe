@@ -26,9 +26,9 @@ pub(super) enum DocSyncTarget {
     },
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone)]
 pub(super) enum ImportDocOutcome {
-    Imported,
+    Imported { heads: ChangeHashSet },
     LocalPresent,
     MissingOnRemote,
 }
@@ -66,9 +66,7 @@ pub fn spawn_doc_sync_worker(
                         doc_id: worker.doc_id.clone(),
                         peer_id,
                         delay: Duration::from_millis(500),
-                        previous_attempt_no: worker.retry.attempt_no,
-                        previous_backoff: worker.retry.last_backoff,
-                        previous_attempt_at: worker.retry.last_attempt_at,
+                        previous_retry_state: worker.retry,
                     }
                 }
             },
@@ -88,9 +86,7 @@ pub fn spawn_doc_sync_worker(
                         doc_id: worker.doc_id.clone(),
                         peer_id,
                         delay: Duration::from_secs(2),
-                        previous_attempt_no: worker.retry.attempt_no,
-                        previous_backoff: worker.retry.last_backoff,
-                        previous_attempt_at: worker.retry.last_attempt_at,
+                        previous_retry_state: worker.retry,
                     }
                 }
             },
@@ -116,11 +112,11 @@ impl DocSyncWorker {
         peer_id: PeerId,
         connection: am_utils_rs::repo::BigRepoConnection,
     ) -> Res<Msg> {
-        if self.big_repo.get_doc(&self.doc_id).await?.is_none() {
+        let Some(_handle) = self.big_repo.get_doc(&self.doc_id).await? else {
             return Ok(Msg::DocSyncMissingLocal {
                 doc_id: self.doc_id.clone(),
             });
-        }
+        };
 
         let outcome = connection
             .sync_with_peer(self.doc_id.clone(), Some(Duration::from_secs(10)))
@@ -162,9 +158,7 @@ impl DocSyncWorker {
                     doc_id: self.doc_id.clone(),
                     peer_id,
                     delay: Duration::from_secs(2),
-                    previous_attempt_no: self.retry.attempt_no,
-                    previous_backoff: self.retry.last_backoff,
-                    previous_attempt_at: self.retry.last_attempt_at,
+                    previous_retry_state: self.retry,
                 });
             }
             Err(err) => {
@@ -173,9 +167,7 @@ impl DocSyncWorker {
                     doc_id: self.doc_id.clone(),
                     peer_id,
                     delay: Duration::from_secs(2),
-                    previous_attempt_no: self.retry.attempt_no,
-                    previous_backoff: self.retry.last_backoff,
-                    previous_attempt_at: self.retry.last_attempt_at,
+                    previous_retry_state: self.retry,
                 });
             }
         };
@@ -204,9 +196,7 @@ impl DocSyncWorker {
                     doc_id: self.doc_id.clone(),
                     peer_id,
                     delay: Duration::from_secs(2),
-                    previous_attempt_no: self.retry.attempt_no,
-                    previous_backoff: self.retry.last_backoff,
-                    previous_attempt_at: self.retry.last_attempt_at,
+                    previous_retry_state: self.retry,
                 });
             }
         };
@@ -219,12 +209,15 @@ impl DocSyncWorker {
             });
         }
 
+        let heads = ChangeHashSet(loaded.get_heads().into());
         match self.big_repo.put_doc(self.doc_id.clone(), loaded).await {
             Ok(_) => Ok(Msg::ImportDocCompleted {
                 doc_id: self.doc_id.clone(),
                 peer_id,
-                outcome: ImportDocOutcome::Imported,
+                outcome: ImportDocOutcome::Imported { heads },
             }),
+            // FIXME: use modeled thiserror results here to
+            // indicate already existing
             Err(err) => {
                 if self.big_repo.get_doc(&self.doc_id).await?.is_some() {
                     return Ok(Msg::ImportDocCompleted {
@@ -238,9 +231,7 @@ impl DocSyncWorker {
                     doc_id: self.doc_id.clone(),
                     peer_id,
                     delay: Duration::from_secs(2),
-                    previous_attempt_no: self.retry.attempt_no,
-                    previous_backoff: self.retry.last_backoff,
-                    previous_attempt_at: self.retry.last_attempt_at,
+                    previous_retry_state: self.retry,
                 })
             }
         }

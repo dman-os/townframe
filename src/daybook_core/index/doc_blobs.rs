@@ -1061,7 +1061,7 @@ mod tests {
         )
         .await?;
 
-        let partition_id = crate::blobs::BLOB_SCOPE_DOCS_PARTITION_ID.to_string();
+        let partition_id: Arc<str> = crate::blobs::BLOB_SCOPE_DOCS_PARTITION_ID.into();
         let hash = utils_rs::hash::encode_base58_multibase(b"docs-scope-hash");
         let doc_id = drawer_repo
             .add(AddDocArgs {
@@ -1090,7 +1090,8 @@ mod tests {
         wait_for_partition_member_count(&big_repo, &partition_id, 1).await?;
         assert!(
             big_repo
-                .is_member_present_in_partition_item_state(&partition_id, &hash)
+                .partition_store()
+                .is_member_present_in_item_state(&partition_id, &hash)
                 .await?
         );
 
@@ -1099,7 +1100,8 @@ mod tests {
         wait_for_partition_member_count(&big_repo, &partition_id, 0).await?;
         assert!(
             !big_repo
-                .is_member_present_in_partition_item_state(&partition_id, &hash)
+                .partition_store()
+                .is_member_present_in_item_state(&partition_id, &hash)
                 .await?
         );
 

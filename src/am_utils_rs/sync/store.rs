@@ -255,7 +255,7 @@ async fn handle_msg(pool: &sqlx::SqlitePool, msg: StoreMsg) {
                     "SELECT member_cursor, item_cursor FROM sync_partition_cursors WHERE peer_key = ? AND partition_id = ?",
                 )
                 .bind(&peer[..])
-                .bind(partition_id)
+                .bind(&partition_id[..])
                 .fetch_optional(pool)
                 .await?;
                 let Some(row) = row else {
@@ -296,7 +296,7 @@ async fn handle_msg(pool: &sqlx::SqlitePool, msg: StoreMsg) {
                     "#,
                 )
                 .bind(&peer[..])
-                .bind(partition_id)
+                .bind(&partition_id[..])
                 .bind(member_cursor.map(|val| val as i64))
                 .bind(item_cursor.map(|val| val as i64))
                 .execute(pool)

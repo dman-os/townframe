@@ -601,6 +601,14 @@ pub async fn wait_on_handle<T>(
 }
 
 #[derive(Debug, thiserror::Error, displaydoc::Display)]
+pub enum AbortableTaskError {
+    /// task died before finish
+    FoundDead,
+    /// task set aborted
+    Aborted,
+}
+
+#[derive(Debug, thiserror::Error, displaydoc::Display)]
 pub enum AbortableJoinSetError {
     /// task set aborted
     Aborted,
@@ -631,8 +639,15 @@ impl TaskHandle {
         self.abort.is_finished()
     }
 
-    pub async fn join(self) {
-        let _ = self.done_rx.await;
+    pub async fn join(self, timeout: Duration) -> Result<(), AbortableTaskError> {
+        match tokio::time::timeout(timeout, self.done_rx).await {
+            Ok(Ok(_)) => Ok(()),
+            Ok(Err(_)) => Err(AbortableTaskError::FoundDead),
+            Err(_) => {
+                self.abort.abort();
+                Err(AbortableTaskError::Aborted)
+            }
+        }
     }
 }
 

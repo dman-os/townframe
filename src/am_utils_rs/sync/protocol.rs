@@ -4,8 +4,9 @@ use irpc::{channel, rpc_requests};
 
 // FIXME: make these either a [u8; 32] or Arc<str>, they get cloned
 // incredilbly frequently
-pub type PartitionId = String;
+pub type PartitionId = Arc<str>;
 pub type PeerKey = Arc<str>;
+
 pub type CursorIndex = u64;
 
 pub const DEFAULT_EVENT_PAGE_LIMIT: u32 = 512;
@@ -28,7 +29,7 @@ pub struct PartitionCursorRequest {
 pub struct PartitionStreamCursorRequest {
     pub partition_id: PartitionId,
     pub since_member: Option<CursorIndex>,
-    pub since_item: Option<CursorIndex>,
+    pub since_event: Option<CursorIndex>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
@@ -56,25 +57,25 @@ pub struct PartitionEvent {
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub enum PartitionEventDeets {
     MemberUpsert {
-        item_id: String,
+        item_id: Arc<str>,
     },
     MemberRemoved {
-        item_id: String,
+        item_id: Arc<str>,
     },
     ItemChanged {
-        item_id: String,
+        item_id: Arc<str>,
         payload: serde_json::Value,
     },
     ItemDeleted {
-        item_id: String,
+        item_id: Arc<str>,
         payload: serde_json::Value,
     },
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub enum PartitionMemberEventDeets {
-    MemberUpsert { item_id: String },
-    MemberRemoved { item_id: String },
+    MemberUpsert { item_id: Arc<str> },
+    MemberRemoved { item_id: Arc<str> },
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
@@ -86,8 +87,8 @@ pub struct PartitionItemEvent {
 
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub enum PartitionItemEventDeets {
-    ItemChanged { item_id: String, payload: String },
-    ItemDeleted { item_id: String, payload: String },
+    ItemChanged { item_id: Arc<str>, payload: String },
+    ItemDeleted { item_id: Arc<str>, payload: String },
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
@@ -136,7 +137,7 @@ pub enum SubscriptionStreamKind {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
-pub enum SubscriptionItem {
+pub enum SubscriptionEvent {
     MemberEvent(PartitionMemberEvent),
     ItemEvent(PartitionItemEvent),
     ReplayComplete { stream: SubscriptionStreamKind },
@@ -194,6 +195,6 @@ pub enum PartitionSyncRpc {
     GetPartitionMemberEvents(GetPartitionMemberEventsRpcReq),
     #[rpc(tx = channel::oneshot::Sender<Result<GetPartitionItemEventsResponse, PartitionSyncError>>)]
     GetPartitionItemEvents(GetPartitionItemEventsRpcReq),
-    #[rpc(tx = channel::mpsc::Sender<SubscriptionItem>)]
+    #[rpc(tx = channel::mpsc::Sender<SubscriptionEvent>)]
     SubPartitions(SubPartitionsRpcReq),
 }

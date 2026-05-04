@@ -167,7 +167,6 @@ impl WflowTestContextBuilder {
     }
 }
 /// Test context for wflow tests
-#[expect(unused)]
 pub struct WflowTestContext {
     pub temp_dir: tempfile::TempDir,
     pub metastore: Arc<dyn metastore::MetdataStore>,

@@ -7,53 +7,6 @@ use futures::future::BoxFuture;
 use crate::drawer::DrawerRepo;
 use crate::plugs::PlugsRepo;
 
-pub trait BigRepoTestCompat {
-    fn add_doc(&self, doc: automerge::Automerge) -> BoxFuture<'_, Res<am_utils_rs::BigDocHandle>>;
-    fn create_doc(
-        &self,
-        doc: automerge::Automerge,
-    ) -> BoxFuture<'_, Res<am_utils_rs::BigDocHandle>>;
-    fn find_doc_handle(
-        &self,
-        doc_id: &am_utils_rs::DocumentId,
-    ) -> BoxFuture<'_, Res<Option<am_utils_rs::BigDocHandle>>>;
-    fn local_contains_document(&self, doc_id: &am_utils_rs::DocumentId)
-        -> BoxFuture<'_, Res<bool>>;
-}
-
-impl BigRepoTestCompat for Arc<am_utils_rs::BigRepo> {
-    fn add_doc(&self, doc: automerge::Automerge) -> BoxFuture<'_, Res<am_utils_rs::BigDocHandle>> {
-        let repo = Arc::clone(self);
-        Box::pin(async move { repo.put_doc(am_utils_rs::DocumentId::random(), doc).await })
-    }
-
-    fn create_doc(
-        &self,
-        doc: automerge::Automerge,
-    ) -> BoxFuture<'_, Res<am_utils_rs::BigDocHandle>> {
-        let repo = Arc::clone(self);
-        Box::pin(async move { repo.put_doc(am_utils_rs::DocumentId::random(), doc).await })
-    }
-
-    fn find_doc_handle(
-        &self,
-        doc_id: &am_utils_rs::DocumentId,
-    ) -> BoxFuture<'_, Res<Option<am_utils_rs::BigDocHandle>>> {
-        let repo = Arc::clone(self);
-        let doc_id = *doc_id;
-        Box::pin(async move { repo.get_doc(&doc_id).await })
-    }
-
-    fn local_contains_document(
-        &self,
-        doc_id: &am_utils_rs::DocumentId,
-    ) -> BoxFuture<'_, Res<bool>> {
-        let repo = Arc::clone(self);
-        let doc_id = *doc_id;
-        Box::pin(async move { Ok(repo.get_doc(&doc_id).await?.is_some()) })
-    }
-}
-
 pub struct DaybookTestContext {
     pub _acx: SharedBigRepo,
     pub drawer_repo: Arc<DrawerRepo>,

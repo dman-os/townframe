@@ -8,14 +8,14 @@ pub(super) struct Scheduler {
     pub partitions_to_refresh: HashSet<PartitionKey>,
     pub peer_sessions_to_refresh: HashSet<PeerId>,
     pub active_docs: HashMap<DocSyncTaskKey, ActiveDocSyncState>,
-    pub active_blobs: HashMap<String, ActiveBlobSyncState>,
-    pub blob_requirements: HashMap<String, HashSet<PartitionKey>>,
+    pub active_blobs: HashMap<Arc<str>, ActiveBlobSyncState>,
+    pub blob_requirements: HashMap<Arc<str>, HashSet<PartitionKey>>,
 }
 
 #[derive(Debug, Clone, Hash, PartialEq, Eq)]
 pub(super) enum SyncTask {
     Doc(DocSyncTaskKey),
-    Blob(String),
+    Blob(Arc<str>),
 }
 
 #[derive(Debug, Clone)]
@@ -50,9 +50,9 @@ impl Scheduler {
             .cloned()
     }
 
-    pub fn pending_blob_state(&self, hash: &str) -> Option<PendingTaskState> {
+    pub fn pending_blob_state(&self, hash: Arc<str>) -> Option<PendingTaskState> {
         self.pending_tasks
-            .get(&SyncTask::Blob(hash.to_string()))
+            .get(&SyncTask::Blob(Arc::clone(&hash)))
             .cloned()
     }
 
@@ -60,21 +60,22 @@ impl Scheduler {
         self.queued_tasks.insert(SyncTask::Doc(task_key));
     }
 
-    pub fn enqueue_blob(&mut self, hash: String) {
+    pub fn enqueue_blob(&mut self, hash: Arc<str>) {
         self.queued_tasks.insert(SyncTask::Blob(hash));
     }
 
-    pub fn clear_doc_task(&mut self, task_key: &DocSyncTaskKey) {
+    pub fn clear_doc_task(&mut self, task_key: DocSyncTaskKey) {
         self.pending_tasks.remove(&SyncTask::Doc(task_key.clone()));
-        self.queued_tasks.remove(&SyncTask::Doc(task_key.clone()));
+        self.queued_tasks.remove(&SyncTask::Doc(task_key));
     }
 
-    pub fn clear_blob_task(&mut self, hash: &str) {
-        self.pending_tasks.remove(&SyncTask::Blob(hash.to_string()));
-        self.queued_tasks.remove(&SyncTask::Blob(hash.to_string()));
+    pub fn clear_blob_task(&mut self, hash: Arc<str>) {
+        self.pending_tasks
+            .remove(&SyncTask::Blob(Arc::clone(&hash)));
+        self.queued_tasks.remove(&SyncTask::Blob(hash));
     }
 
-    pub fn set_doc_pending_now(&mut self, task_key: &DocSyncTaskKey) {
+    pub fn set_doc_pending_now(&mut self, task_key: DocSyncTaskKey) {
         let now = std::time::Instant::now();
         self.pending_tasks
             .entry(SyncTask::Doc(task_key.clone()))
@@ -84,20 +85,20 @@ impl Scheduler {
                 last_attempt_at: now,
                 due_at: now,
             });
-        self.enqueue_doc(task_key.clone());
+        self.enqueue_doc(task_key);
     }
 
-    pub fn set_blob_pending_now(&mut self, hash: &str) {
+    pub fn set_blob_pending_now(&mut self, hash: Arc<str>) {
         let now = std::time::Instant::now();
         self.pending_tasks
-            .entry(SyncTask::Blob(hash.to_string()))
+            .entry(SyncTask::Blob(Arc::clone(&hash)))
             .or_insert(PendingTaskState {
                 attempt_no: 0,
                 last_backoff: Duration::from_millis(0),
                 last_attempt_at: now,
                 due_at: now,
             });
-        self.enqueue_blob(hash.to_string());
+        self.enqueue_blob(hash);
     }
 
     pub fn set_doc_backoff(&mut self, task_key: &DocSyncTaskKey, pending: PendingTaskState) {
@@ -105,17 +106,17 @@ impl Scheduler {
             .insert(SyncTask::Doc(task_key.clone()), pending);
     }
 
-    pub fn set_blob_backoff(&mut self, hash: &str, pending: PendingTaskState) {
+    pub fn set_blob_backoff(&mut self, hash: Arc<str>, pending: PendingTaskState) {
         self.pending_tasks
-            .insert(SyncTask::Blob(hash.to_string()), pending);
+            .insert(SyncTask::Blob(Arc::clone(&hash)), pending);
     }
 
-    pub fn clear_doc_pending(&mut self, task_key: &DocSyncTaskKey) {
-        self.pending_tasks.remove(&SyncTask::Doc(task_key.clone()));
+    pub fn clear_doc_pending(&mut self, task_key: DocSyncTaskKey) {
+        self.pending_tasks.remove(&SyncTask::Doc(task_key));
     }
 
-    pub fn clear_blob_pending(&mut self, hash: &str) {
-        self.pending_tasks.remove(&SyncTask::Blob(hash.to_string()));
+    pub fn clear_blob_pending(&mut self, hash: Arc<str>) {
+        self.pending_tasks.remove(&SyncTask::Blob(hash));
     }
 
     pub fn drain_queued_docs(&mut self, budget: usize) -> Vec<DocSyncTaskKey> {
@@ -137,21 +138,15 @@ impl Scheduler {
         docs
     }
 
-    pub fn drain_queued_blobs(&mut self, budget: usize) -> Vec<String> {
+    pub fn drain_queued_blobs(&mut self, budget: usize) -> Vec<Arc<str>> {
         if budget == 0 {
             return Vec::new();
         }
-        let blobs: Vec<String> = self
-            .queued_tasks
-            .iter()
-            .filter_map(|task| match task {
-                SyncTask::Blob(hash) => Some(hash.clone()),
-                SyncTask::Doc(_) => None,
-            })
-            .take(budget)
-            .collect();
-        for hash in &blobs {
-            self.queued_tasks.remove(&SyncTask::Blob(hash.clone()));
+        for hash in self.queued_tasks.iter().filter_map(|task| match task {
+            SyncTask::Blob(hash) => Some(Arc::clone(&hash)),
+            SyncTask::Doc(_) => None,
+        }) {
+            self.queued_tasks.remove(&SyncTask::Blob(hash));
         }
         blobs
     }
@@ -313,9 +308,9 @@ mod tests {
         };
 
         assert!(!scheduler.endpoint_has_doc_work(peer));
-        scheduler.set_doc_pending_now(&task_key);
+        scheduler.set_doc_pending_now(task_key.clone());
         assert!(scheduler.endpoint_has_doc_work(peer));
-        scheduler.clear_doc_task(&task_key);
+        scheduler.clear_doc_task(task_key);
         assert!(!scheduler.endpoint_has_doc_work(peer));
     }
 
@@ -334,8 +329,8 @@ mod tests {
             peer_id: peer_b,
         };
 
-        scheduler.set_doc_pending_now(&task_a);
-        scheduler.set_doc_pending_now(&task_b);
+        scheduler.set_doc_pending_now(task_a.clone());
+        scheduler.set_doc_pending_now(task_b.clone());
 
         let peer_keys = scheduler.doc_task_keys_for_peer(peer_a);
         assert!(peer_keys.contains(&task_a));
@@ -350,8 +345,8 @@ mod tests {
             peer_id: endpoint(1),
         };
 
-        scheduler.set_doc_pending_now(&task_key);
-        scheduler.set_doc_pending_now(&task_key);
+        scheduler.set_doc_pending_now(task_key.clone());
+        scheduler.set_doc_pending_now(task_key.clone());
         scheduler.enqueue_doc(task_key.clone());
 
         let batch = scheduler.drain_queued_docs(32);
@@ -363,15 +358,15 @@ mod tests {
     #[test]
     fn blob_task_dedup_single_pending_entry() {
         let mut scheduler = Scheduler::default();
-        let hash = "bafkreigh2akiscaildcv".to_string();
+        let hash: Arc<str> = "bafkreigh2akiscaildcv".into();
 
-        scheduler.set_blob_pending_now(&hash);
-        scheduler.set_blob_pending_now(&hash);
+        scheduler.set_blob_pending_now(Arc::clone(&hash));
+        scheduler.set_blob_pending_now(Arc::clone(&hash));
         scheduler.enqueue_blob(hash.clone());
 
         let batch = scheduler.drain_queued_blobs(32);
         assert_eq!(batch.len(), 1);
         assert_eq!(batch[0], hash);
-        assert!(scheduler.pending_blob_state(&batch[0]).is_some());
+        assert!(scheduler.pending_blob_state(batch[0]).is_some());
     }
 }

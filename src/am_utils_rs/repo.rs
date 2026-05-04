@@ -164,7 +164,7 @@ impl BigRepo {
                 repo: Arc::clone(self),
                 bundle,
             });
-        info!(found = out.is_some(), "XXX get_doc");
+        debug!(found = out.is_some(), "XXX get_doc");
         Ok(out)
     }
 
@@ -173,8 +173,8 @@ impl BigRepo {
         self: &Arc<Self>,
         document_id: DocumentId,
         initial_content: automerge::Automerge,
-    ) -> Res<BigDocHandle> {
-        info!("XXX put_doc");
+    ) -> Result<BigDocHandle, runtime::PutDocError> {
+        debug!("XXX put_doc");
         let bundle = self.runtime.put_doc(document_id, initial_content).await?;
         Ok(BigDocHandle {
             repo: Arc::clone(self),
@@ -187,7 +187,7 @@ impl BigRepo {
         fields(%doc_id, %self.local_peer_id)
     )]
     pub async fn export_doc(&self, doc_id: &DocumentId) -> Res<Option<Vec<u8>>> {
-        info!(node_id = ?self.local_peer_id, "XXX export_doc");
+        debug!(node_id = ?self.local_peer_id, "XXX export_doc");
         self.runtime.export_doc_save(*doc_id).await
     }
 }
@@ -205,7 +205,7 @@ impl BigRepo {
         peer_id: PeerId,
         end_signal_tx: Option<tokio::sync::mpsc::UnboundedSender<ConnFinishSignal>>,
     ) -> Res<BigRepoConnection> {
-        info!("XXX open_connection_iroh");
+        debug!("XXX open_connection_iroh");
         let (peer_id, closed) = self
             .runtime
             .open_connection_iroh(endpoint, endpoint_addr, peer_id, end_signal_tx)
@@ -226,7 +226,7 @@ impl BigRepo {
         conn: iroh::endpoint::Connection,
         end_signal_tx: Option<tokio::sync::mpsc::UnboundedSender<ConnFinishSignal>>,
     ) -> Res<BigRepoConnection> {
-        info!("XXX accept_connection_iroh");
+        debug!("XXX accept_connection_iroh");
         let (peer_id, closed) = self
             .runtime
             .accept_connection_iroh(conn, end_signal_tx)
@@ -239,10 +239,13 @@ impl BigRepo {
     }
 }
 
-#[derive(Clone)]
+#[derive(Clone, educe::Educe)]
+#[educe(Debug)]
 pub struct BigRepoConnection {
+    #[educe(Debug(ignore))]
     repo: Arc<BigRepo>,
     pub peer_id: PeerId,
+    #[educe(Debug(ignore))]
     closed: Arc<AtomicBool>,
 }
 
@@ -260,6 +263,8 @@ impl BigRepoConnection {
         self.closed.load(Ordering::SeqCst)
     }
 
+    /// NOTE: a succesful outcome doesn't correspond to doc
+    /// handles having the latest heads
     pub async fn sync_with_peer(
         &self,
         doc_id: DocumentId,
@@ -268,7 +273,7 @@ impl BigRepoConnection {
         if self.is_closed() {
             eyre::bail!("connection is closed");
         }
-        info!(?doc_id, peer_id = ?self.peer_id, "XXX sync_with_peer");
+        debug!(?doc_id, peer_id = ?self.peer_id, "XXX sync_with_peer");
         self.repo
             .runtime
             .sync_doc_with_peer(doc_id, self.peer_id, timeout)
@@ -296,17 +301,8 @@ impl BigRepo {
 
 // partition support
 impl BigRepo {
-    pub async fn partition_member_count(&self, part_id: &PartitionId) -> Res<i64> {
-        self.partition_store.member_count(part_id).await
-    }
-    pub async fn is_member_present_in_partition_item_state(
-        &self,
-        partition_id: &PartitionId,
-        member_id: &str,
-    ) -> Res<bool> {
-        self.partition_store
-            .is_member_present_in_item_state(partition_id, member_id)
-            .await
+    pub async fn doc_payload_heads(&self, doc_id: &str) -> Res<Arc<[ChangeHash]>> {
+        partition_doc_heads_payload(&self.partition_store, doc_id).await
     }
 
     pub async fn get_docs_full_in_partitions(
@@ -332,7 +328,11 @@ impl BigRepo {
             .cloned()
             .collect();
         let denied_doc_id = self
-            .find_first_inaccessible_doc_in_partitions(&requested_doc_ids, allowed_partitions)
+            .partition_store
+            .find_first_item_missing_membership_in_partitions(
+                &requested_doc_ids,
+                allowed_partitions,
+            )
             .await?;
         if let Some(denied) = denied_doc_id {
             return Err(PartitionSyncError::Internal {
@@ -367,26 +367,6 @@ impl BigRepo {
             }
         }
         Ok(out)
-    }
-
-    pub async fn is_doc_accessible_in_partitions(
-        &self,
-        doc_id: &str,
-        allowed_partitions: &[PartitionId],
-    ) -> Res<bool> {
-        self.partition_store
-            .is_item_present_in_membership_partitions(doc_id, allowed_partitions)
-            .await
-    }
-
-    async fn find_first_inaccessible_doc_in_partitions(
-        &self,
-        doc_ids: &[String],
-        allowed_partitions: &[PartitionId],
-    ) -> Res<Option<String>> {
-        self.partition_store
-            .find_first_item_missing_membership_in_partitions(doc_ids, allowed_partitions)
-            .await
     }
 }
 
@@ -1511,8 +1491,8 @@ mod tests {
         let doc_id = DocumentId::random();
 
         tracing::info!(%doc_id, "seeding initial docs");
-        let server_doc = put_doc_with_automerge(&server.repo, doc_id, base_doc.clone()).await?;
-        let client_doc = put_doc_with_automerge(&client.repo, doc_id, base_doc).await?;
+        let server_doc = server.repo.put_doc(doc_id, base_doc.clone()).await?;
+        let client_doc = client.repo.put_doc(doc_id, base_doc).await?;
 
         if exit_after_put {
             tracing::info!("exiting sync case immediately after put_doc seeding");
@@ -1658,8 +1638,8 @@ mod tests {
         let server = SyncRepoNode::boot(server_path.clone(), 71, true).await?;
         let client = SyncRepoNode::boot(client_path, 81, false).await?;
         let doc_id = DocumentId::random();
-        let server_doc = put_doc_with_automerge(&server.repo, doc_id, base_doc.clone()).await?;
-        let client_doc = put_doc_with_automerge(&client.repo, doc_id, base_doc).await?;
+        let server_doc = server.repo.put_doc(doc_id, base_doc.clone()).await?;
+        let client_doc = client.repo.put_doc(doc_id, base_doc).await?;
         set_doc_actor(&server_doc, automerge::ActorId::from([71_u8; 16])).await?;
         set_doc_actor(&client_doc, automerge::ActorId::from([81_u8; 16])).await?;
 
@@ -1768,8 +1748,8 @@ mod tests {
         let client = SyncRepoNode::boot(client_path, 92, false).await?;
         let doc_id = DocumentId::random();
 
-        let server_doc = put_doc_with_automerge(&server.repo, doc_id, base_doc.clone()).await?;
-        let client_doc = put_doc_with_automerge(&client.repo, doc_id, base_doc).await?;
+        let server_doc = server.repo.put_doc(doc_id, base_doc.clone()).await?;
+        let client_doc = client.repo.put_doc(doc_id, base_doc).await?;
         set_doc_actor(&server_doc, automerge::ActorId::from([91_u8; 16])).await?;
         set_doc_actor(&client_doc, automerge::ActorId::from([92_u8; 16])).await?;
 
@@ -1842,15 +1822,6 @@ mod tests {
         server.shutdown().await?;
         client.shutdown().await?;
         Ok(())
-    }
-
-    #[tracing::instrument(skip_all, fields(doc_id = %doc_id))]
-    async fn put_doc_with_automerge(
-        repo: &Arc<BigRepo>,
-        doc_id: DocumentId,
-        doc: automerge::Automerge,
-    ) -> Res<BigDocHandle> {
-        repo.put_doc(doc_id, doc).await
     }
 
     #[tracing::instrument(skip_all, fields(doc_id = %handle.document_id()))]
@@ -2066,8 +2037,8 @@ mod tests {
             let server = SyncRepoNode::boot(server_path, 101, true).await?;
             let client = SyncRepoNode::boot(client_path, 102, false).await?;
             let doc_id = DocumentId::random();
-            let server_doc = put_doc_with_automerge(&server.repo, doc_id, base_doc.clone()).await?;
-            let client_doc = put_doc_with_automerge(&client.repo, doc_id, base_doc).await?;
+            let server_doc = server.repo.put_doc(doc_id, base_doc.clone()).await?;
+            let client_doc = client.repo.put_doc(doc_id, base_doc).await?;
             set_doc_actor(&server_doc, automerge::ActorId::from([101_u8; 16])).await?;
             set_doc_actor(&client_doc, automerge::ActorId::from([102_u8; 16])).await?;
 
@@ -2144,8 +2115,8 @@ mod tests {
             let server = SyncRepoNode::boot(server_path, 111, true).await?;
             let client = SyncRepoNode::boot(client_path, 112, false).await?;
             let doc_id = DocumentId::random();
-            let server_doc = put_doc_with_automerge(&server.repo, doc_id, base_doc.clone()).await?;
-            let client_doc = put_doc_with_automerge(&client.repo, doc_id, base_doc).await?;
+            let server_doc = server.repo.put_doc(doc_id, base_doc.clone()).await?;
+            let client_doc = client.repo.put_doc(doc_id, base_doc).await?;
             set_doc_actor(&server_doc, automerge::ActorId::from([111_u8; 16])).await?;
             set_doc_actor(&client_doc, automerge::ActorId::from([112_u8; 16])).await?;
 
@@ -2248,8 +2219,8 @@ mod tests {
             let server = SyncRepoNode::boot(server_path, 121, true).await?;
             let client = SyncRepoNode::boot(client_path, 122, false).await?;
             let doc_id = DocumentId::random();
-            let server_doc = put_doc_with_automerge(&server.repo, doc_id, base_doc.clone()).await?;
-            let client_doc = put_doc_with_automerge(&client.repo, doc_id, base_doc).await?;
+            let server_doc = server.repo.put_doc(doc_id, base_doc.clone()).await?;
+            let client_doc = client.repo.put_doc(doc_id, base_doc).await?;
             set_doc_actor(&server_doc, automerge::ActorId::from([121_u8; 16])).await?;
             set_doc_actor(&client_doc, automerge::ActorId::from([122_u8; 16])).await?;
 
@@ -2317,4 +2288,24 @@ mod tests {
         .expect("sync test timed out")?;
         eyre::Ok(())
     }
+}
+
+async fn partition_doc_heads_payload(
+    part_store: &PartitionStore,
+    doc_id: &str,
+) -> Res<Arc<[ChangeHash]>> {
+    let (_, mut before_heads) = part_store
+        .item_payloads(doc_id)
+        .await?
+        .into_iter()
+        .next()
+        .expect("doc was not in partition previously");
+    let before_heads = before_heads
+        .as_object_mut()
+        .expect(ERROR_IMPOSSIBLE)
+        .remove("heads")
+        .expect(ERROR_IMPOSSIBLE);
+    let before_heads: Vec<String> = serde_json::from_value(before_heads).expect(ERROR_IMPOSSIBLE);
+
+    Ok(crate::parse_commit_heads(&before_heads).expect(ERROR_IMPOSSIBLE))
 }

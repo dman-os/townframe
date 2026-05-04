@@ -78,6 +78,7 @@ pub enum FullSyncEvent {
     },
 }
 
+#[derive(Debug)]
 enum Msg {
     SetPeer {
         endpoint_addr: iroh::EndpointAddr,
@@ -95,6 +96,16 @@ enum Msg {
         peer_id: PeerId,
         resp: tokio::sync::oneshot::Sender<()>,
     },
+    BlobSyncCompleted {
+        hash: Arc<str>,
+        outcome: blob_worker::SyncBlobOutcome,
+    },
+    BlobSyncBackoff {
+        hash: Arc<str>,
+        peer_id: PeerId,
+        delay: Duration,
+        previous_retry_state: RetryState,
+    },
     DocSyncCompleted {
         doc_id: DocumentId,
         peer_id: PeerId,
@@ -104,9 +115,7 @@ enum Msg {
         doc_id: DocumentId,
         peer_id: PeerId,
         delay: Duration,
-        previous_attempt_no: usize,
-        previous_backoff: Duration,
-        previous_attempt_at: std::time::Instant,
+        previous_retry_state: RetryState,
     },
     DocSyncMissingLocal {
         doc_id: DocumentId,
@@ -120,9 +129,7 @@ enum Msg {
         doc_id: DocumentId,
         peer_id: PeerId,
         delay: Duration,
-        previous_attempt_no: usize,
-        previous_backoff: Duration,
-        previous_attempt_at: std::time::Instant,
+        previous_retry_state: RetryState,
     },
     GetPeerSyncSnapshot {
         peer_ids: Vec<PeerId>,
@@ -159,36 +166,33 @@ struct FullSyncWaiter {
 enum SyncProgressMsg {
     BlobWorkerStarted {
         partition: PartitionKey,
-        hash: String,
+        hash: Arc<str>,
     },
     BlobDownloadStarted {
         peer_id: PeerId,
         partition: PartitionKey,
-        hash: String,
+        hash: Arc<str>,
     },
     BlobDownloadProgress {
         peer_id: PeerId,
         partition: PartitionKey,
-        hash: String,
+        hash: Arc<str>,
         done: u64,
     },
     BlobMaterializeStarted {
         partition: PartitionKey,
-        hash: String,
+        hash: Arc<str>,
     },
     BlobDownloadFinished {
-        peer_id: PeerId,
         partition: PartitionKey,
-        hash: String,
+        hash: Arc<str>,
         success: bool,
     },
     BlobWorkerFinished {
         partition: PartitionKey,
-        hash: String,
+        hash: Arc<str>,
         success: bool,
         reason: String,
-        synced_peer_id: Option<PeerId>,
-        backoff: Option<(Duration, RetryState)>,
     },
 }
 
@@ -359,12 +363,14 @@ pub async fn spawn_full_sync_worker(
                             warn!("FullSyncWorkerHandle dropped, closing loop");
                             break;
                         };
+                        info!(?msg, "XXX msg");
                         worker.handle_msg(msg).await?;
                     }
                     count = sync_progress_rx.recv_many(&mut sync_progress_buf, 512) => {
                         if count == 0 {
                             continue;
                         }
+                        info!(?count, "XXX sync progress");
                         worker.handle_sync_progress_batch(&mut sync_progress_buf).await?;
                     }
                     val = peer_worker_msg_rx.recv() => {
@@ -372,6 +378,7 @@ pub async fn spawn_full_sync_worker(
                             warn!("peer worker msg channel closed");
                             break;
                         };
+                        info!(?msg, "XXX peer worker msg");
                         let peer_key = match &msg {
                             PeerSyncWorkerMsg::Progress { peer, .. } => peer.clone(),
                             PeerSyncWorkerMsg::SubscriptionItem { peer, .. } => peer.clone(),
@@ -510,8 +517,8 @@ impl PartitionKey {
 
     fn partition_id(&self) -> PartitionId {
         match self {
-            Self::BigRepoPartition(partition_id) => partition_id.clone(),
-            Self::BlobScope(scope) => scope.partition_id().to_string(),
+            Self::BigRepoPartition(partition_id) => Arc::clone(partition_id),
+            Self::BlobScope(scope) => scope.partition_id().into(),
         }
     }
 }
@@ -587,24 +594,6 @@ impl Worker {
         let peer_state = self.known_peer_set.get(&peer_id)?;
         Some(Arc::clone(&peer_state.peer_key))
     }
-
-    async fn doc_item_payload_json(&self, doc_id: &DocumentId) -> Res<String> {
-        let doc = self
-            .big_repo
-            .get_doc(doc_id)
-            .await?
-            .ok_or_else(|| eyre::eyre!("missing doc for sync completion: {doc_id}"))?;
-        let payload = doc
-            .with_document_read(|doc| {
-                let heads: Arc<[automerge::ChangeHash]> = Arc::from(doc.get_heads());
-                serde_json::json!({
-                    "heads": am_utils_rs::serialize_commit_heads(&heads),
-                })
-            })
-            .await;
-        Ok(serde_json::to_string(&payload)?)
-    }
-
     async fn partition_is_fully_synced(
         &self,
         peer_id: PeerId,
@@ -620,24 +609,16 @@ impl Worker {
 
         let partition_id = partition.partition_id();
 
-        if self
-            .sync_machine
-            .has_active_item_jobs_for_partition(peer_key, &partition_id)
-        {
-            return Ok(false);
-        }
-
         for (doc_id, doc_state) in &self.doc_request_set {
             if !doc_state.requested_peers.contains(&peer_id)
                 || !doc_state.partition_ids.contains(&partition_id)
             {
                 continue;
             }
-            if self.sync_machine.has_active_item_job_for(
-                peer_key,
-                &partition_id,
-                &doc_id.to_string(),
-            ) {
+            if self
+                .sync_machine
+                .has_active_item_job_for(Arc::clone(peer_key), doc_id.into())
+            {
                 return Ok(false);
             }
             if self.big_repo.get_doc(doc_id).await?.is_none() {
@@ -731,16 +712,6 @@ impl Worker {
         self.refresh_full_sync_waiters();
     }
 
-    fn available_doc_boot_budget(&self) -> usize {
-        self.scheduler
-            .available_doc_boot_budget(self.max_active_sync_workers)
-    }
-
-    fn available_blob_boot_budget(&self) -> usize {
-        self.scheduler
-            .available_blob_boot_budget(self.max_active_sync_workers)
-    }
-
     async fn handle_msg(&mut self, msg: Msg) -> Res<()> {
         match msg {
             Msg::SetPeer {
@@ -830,19 +801,10 @@ impl Worker {
                 doc_id,
                 peer_id,
                 delay,
-                previous_attempt_no,
-                previous_backoff,
-                previous_attempt_at,
+                previous_retry_state,
             } => {
-                self.handle_doc_request_backoff(
-                    doc_id,
-                    peer_id,
-                    delay,
-                    previous_attempt_no,
-                    previous_backoff,
-                    previous_attempt_at,
-                )
-                .await?;
+                self.handle_doc_request_backoff(doc_id, peer_id, delay, previous_retry_state)
+                    .await?;
             }
             Msg::DocSyncMissingLocal { doc_id } => {
                 self.handle_doc_missing_local(doc_id).await?;
@@ -859,19 +821,10 @@ impl Worker {
                 doc_id,
                 peer_id,
                 delay,
-                previous_attempt_no,
-                previous_backoff,
-                previous_attempt_at,
+                previous_retry_state,
             } => {
-                self.handle_import_doc_backoff(
-                    doc_id,
-                    peer_id,
-                    delay,
-                    previous_attempt_no,
-                    previous_backoff,
-                    previous_attempt_at,
-                )
-                .await?;
+                self.handle_import_doc_backoff(doc_id, peer_id, delay, previous_retry_state)
+                    .await?;
             }
             Msg::GetPeerSyncSnapshot { peer_ids, resp } => {
                 let snapshot = peer_ids
@@ -1131,6 +1084,7 @@ impl Worker {
     }
 
     async fn dispatch_sync_commands(&mut self, commands: Vec<SyncMachineCommand>) -> Res<()> {
+        info!(?commands, "XXX");
         let mut pending = commands;
         while let Some(command) = pending.pop() {
             pending.extend(self.dispatch_sync_command(command).await?);
@@ -1156,6 +1110,10 @@ impl Worker {
         match command {
             SyncMachineCommand::ItemNewSync { key }
             | SyncMachineCommand::ItemChangeSync { key } => {
+                // FIXME: this is a terrible way to convert partition_id to kind
+                // let's instead look up our worker.partitions and check their
+                // type. let's ensure that when peers are added to the full
+                // sync worker, we alos have partition information
                 match BlobScope::from_partition_id(&key.partition_id) {
                     Some(scope) => {
                         self.add_hash_to_blob_scope(scope, key.item_id.clone())
@@ -1176,6 +1134,8 @@ impl Worker {
                     }
                 }
             }
+            // FIXME: delete is not supported so we just
+            // ack deletes immediately
             SyncMachineCommand::ItemDeleteSync { key } => {
                 match BlobScope::from_partition_id(&key.partition_id) {
                     Some(scope) => {
@@ -1183,7 +1143,6 @@ impl Worker {
                             .sync_machine
                             .on_item_sync_completed(SyncCompletion::DeletedMember {
                                 peer: key.peer.clone(),
-                                partition_id: key.partition_id.clone(),
                                 item_id: key.item_id.clone(),
                             })
                             .await?;
@@ -1255,7 +1214,6 @@ impl Worker {
             .sync_machine
             .on_item_sync_completed(SyncCompletion::DeletedMember {
                 peer: peer_key.clone(),
-                partition_id: partition_id.clone(),
                 item_id: doc_id.to_string(),
             })
             .await?;
@@ -1305,7 +1263,9 @@ impl Worker {
             return Ok(());
         }
 
-        let mut budget = self.available_doc_boot_budget();
+        let mut budget = self
+            .scheduler
+            .available_doc_boot_budget(self.max_active_sync_workers);
         if budget == 0 {
             return Ok(());
         }
@@ -1482,37 +1442,13 @@ impl Worker {
                     .map(|state| state.partition_ids.clone())
                     .unwrap_or_default();
                 let completion_peer = self.peer_key_for_id(peer_id).expect(ERROR_UNRECONIZED);
-                let item_payload = self.doc_item_payload_json(&doc_id).await?;
                 for partition_id in &partition_ids {
-                    if let Some(key) = self.sync_machine.find_active_item_key_for(
-                        &completion_peer,
-                        partition_id,
-                        &doc_id.to_string(),
-                    ) {
-                        let completion = match key.kind {
-                            am_utils_rs::sync::machine::ItemSyncKind::New => {
-                                SyncCompletion::AddedMember {
-                                    peer: key.peer,
-                                    partition_id: partition_id.clone(),
-                                    item_id: doc_id.to_string(),
-                                    item_payload: item_payload.clone(),
-                                }
-                            }
-                            am_utils_rs::sync::machine::ItemSyncKind::Change => {
-                                SyncCompletion::ChangedItem {
-                                    peer: key.peer,
-                                    partition_id: partition_id.clone(),
-                                    item_id: doc_id.to_string(),
-                                    item_payload: item_payload.clone(),
-                                }
-                            }
-                            am_utils_rs::sync::machine::ItemSyncKind::Delete => {
-                                eyre::bail!("doc sync success cannot complete delete job")
-                            }
-                        };
-                        let commands = self.sync_machine.on_item_sync_completed(completion).await?;
-                        self.dispatch_sync_commands(commands).await?;
-                    }
+                    let completion = SyncCompletion::ChangedItem {
+                        peer: key.peer,
+                        item_id: doc_id.to_string(),
+                    };
+                    let commands = self.sync_machine.on_item_sync_completed(completion).await?;
+                    self.dispatch_sync_commands(commands).await?;
                 }
 
                 if refreshed_peer {
@@ -1588,9 +1524,7 @@ impl Worker {
         doc_id: DocumentId,
         peer_id: PeerId,
         delay: Duration,
-        previous_attempt_no: usize,
-        previous_backoff: Duration,
-        _previous_attempt_at: std::time::Instant,
+        previous_retry_state: RetryState,
     ) -> Res<()> {
         let task_key = DocSyncTaskKey {
             doc_id: doc_id.clone(),
@@ -1609,9 +1543,9 @@ impl Worker {
         }
         let now = std::time::Instant::now();
         let delay = delay.min(Duration::from_secs(600));
-        let backoff = next_backoff_delay(previous_backoff, delay);
+        let backoff = next_backoff_delay(previous_retry_state.last_backoff, delay);
         let pending = scheduler::PendingTaskState {
-            attempt_no: previous_attempt_no + 1,
+            attempt_no: previous_retry_state.attempt_no + 1,
             last_backoff: backoff,
             last_attempt_at: now,
             due_at: now + backoff,
@@ -1687,42 +1621,37 @@ impl Worker {
         }
 
         match outcome {
-            doc_worker::ImportDocOutcome::Imported | doc_worker::ImportDocOutcome::LocalPresent => {
+            doc_worker::ImportDocOutcome::Imported { heads } => {
                 if let Some(doc_state) = self.doc_request_set.get_mut(&doc_id) {
                     doc_state.requested_peers.remove(&peer_id);
                 }
 
-                let partition_ids = self
-                    .doc_request_set
-                    .get(&doc_id)
-                    .map(|state| state.partition_ids.clone())
-                    .unwrap_or_default();
-                let completion_peer = self.peer_key_for_id(peer_id).expect(ERROR_UNRECONIZED);
-                let item_payload = self.doc_item_payload_json(&doc_id).await?;
-                for partition_id in &partition_ids {
-                    if let Some(key) = self.sync_machine.find_active_item_key_for(
-                        &completion_peer,
-                        partition_id,
-                        &doc_id.to_string(),
-                    ) {
-                        let completion = match outcome {
-                            doc_worker::ImportDocOutcome::Imported => SyncCompletion::AddedMember {
-                                peer: key.peer,
-                                partition_id: partition_id.clone(),
-                                item_id: doc_id.to_string(),
-                                item_payload: item_payload.clone(),
-                            },
-                            doc_worker::ImportDocOutcome::LocalPresent => SyncCompletion::Noop {
-                                peer: key.peer,
-                                partition_id: partition_id.clone(),
-                                item_id: doc_id.to_string(),
-                            },
-                            doc_worker::ImportDocOutcome::MissingOnRemote => unreachable!(),
-                        };
-                        let commands = self.sync_machine.on_item_sync_completed(completion).await?;
-                        self.dispatch_sync_commands(commands).await?;
-                    }
+                let commands = self
+                    .sync_machine
+                    .on_item_sync_completed(SyncCompletion::AddedMember {
+                        peer: key.peer,
+                        item_id: doc_id.to_string(),
+                        item_payload: serde_json::to_string(&json!({
+                            "heads": heads
+                        }))
+                        .expect(ERROR_JSON),
+                    })
+                    .await?;
+                self.dispatch_sync_commands(commands).await?;
+            }
+            doc_worker::ImportDocOutcome::LocalPresent => {
+                if let Some(doc_state) = self.doc_request_set.get_mut(&doc_id) {
+                    doc_state.requested_peers.remove(&peer_id);
                 }
+
+                let commands = self
+                    .sync_machine
+                    .on_item_sync_completed(SyncCompletion::Noop {
+                        peer: key.peer,
+                        item_id: doc_id.to_string(),
+                    })
+                    .await?;
+                self.dispatch_sync_commands(commands).await?;
             }
             doc_worker::ImportDocOutcome::MissingOnRemote => {
                 warn!("import worker could not fetch doc from remote; waiting for replay/retry");
@@ -1773,9 +1702,7 @@ impl Worker {
         doc_id: DocumentId,
         peer_id: PeerId,
         delay: Duration,
-        previous_attempt_no: usize,
-        previous_backoff: Duration,
-        _previous_attempt_at: std::time::Instant,
+        previous_retry_state: RetryState,
     ) -> Res<()> {
         let task_key = DocSyncTaskKey { doc_id, peer_id };
         if let Some(active) = self.scheduler.active_docs.remove(&task_key) {
@@ -1786,14 +1713,14 @@ impl Worker {
             .get(&task_key.doc_id)
             .is_none_or(|state| !state.requested_peers.contains(&task_key.peer_id))
         {
-            self.scheduler.clear_doc_task(&task_key);
+            self.scheduler.clear_doc_task(task_key.clone());
             return Ok(());
         }
         let now = std::time::Instant::now();
         let delay = delay.min(Duration::from_secs(600));
-        let backoff = next_backoff_delay(previous_backoff, delay);
+        let backoff = next_backoff_delay(previous_retry_state.last_backoff, delay);
         let pending = scheduler::PendingTaskState {
-            attempt_no: previous_attempt_no + 1,
+            attempt_no: previous_retry_state.attempt_no + 1,
             last_backoff: backoff,
             last_attempt_at: now,
             due_at: now + backoff,
@@ -1807,7 +1734,7 @@ impl Worker {
 impl Worker {
     async fn bootstrap_blob_scope_memberships(&mut self) -> Res<()> {
         for scope in [BlobScope::Docs, BlobScope::Plugs] {
-            let partition_id = scope.partition_id().to_string();
+            let partition_id = scope.partition_id().into();
             let mut since = None;
             loop {
                 let page = self
@@ -1816,7 +1743,7 @@ impl Worker {
                     .get_partition_member_events(
                         &am_utils_rs::sync::protocol::GetPartitionMemberEventsRequest {
                             partitions: vec![am_utils_rs::sync::protocol::PartitionCursorRequest {
-                                partition_id: partition_id.clone(),
+                                partition_id: Arc::clone(&partition_id),
                                 since,
                             }],
                             limit: am_utils_rs::sync::protocol::DEFAULT_EVENT_PAGE_LIMIT,
@@ -1853,17 +1780,17 @@ impl Worker {
         Ok(())
     }
 
-    async fn remove_blob_tracking_if_unused(&mut self, hash: &str) -> Res<()> {
+    async fn remove_blob_tracking_if_unused(&mut self, hash: Arc<str>) -> Res<()> {
         let should_drop = self
             .scheduler
             .blob_requirements
-            .get(hash)
+            .get(&hash)
             .is_none_or(HashSet::is_empty);
         if should_drop {
-            if let Some(active) = self.scheduler.active_blobs.remove(hash) {
+            if let Some(active) = self.scheduler.active_blobs.remove(&hash) {
                 active.stop_token.stop().await?;
             }
-            self.scheduler.blob_requirements.remove(hash);
+            self.scheduler.blob_requirements.remove(&hash);
             self.scheduler.clear_blob_task(hash);
         }
         Ok(())
@@ -1880,7 +1807,7 @@ impl Worker {
         })
     }
 
-    async fn add_hash_to_blob_scope(&mut self, scope: BlobScope, hash: String) -> Res<()> {
+    async fn add_hash_to_blob_scope(&mut self, scope: BlobScope, hash: Arc<str>) -> Res<()> {
         if utils_rs::hash::decode_base58_multibase(&hash).is_err() {
             warn!(scope = ?scope, hash, "dropping invalid hash in blob scope partition");
             return Ok(());
@@ -1889,21 +1816,21 @@ impl Worker {
         let part_set = self
             .scheduler
             .blob_requirements
-            .entry(hash.clone())
+            .entry(Arc::clone(&hash))
             .or_default();
         part_set.insert(part_key);
         if self.blob_required_by_any_active_partition(&hash)
             && !self.scheduler.active_blobs.contains_key(&hash)
         {
-            self.scheduler.set_blob_pending_now(&hash);
+            self.scheduler.set_blob_pending_now(Arc::clone(&hash));
         }
         self.refresh_peers_for_blob_hash(&hash).await?;
         Ok(())
     }
 
-    async fn remove_hash_from_blob_scope(&mut self, scope: BlobScope, hash: &str) -> Res<()> {
-        let affected_peers = self.active_peers_for_blob(hash);
-        if let Some(part_set) = self.scheduler.blob_requirements.get_mut(hash) {
+    async fn remove_hash_from_blob_scope(&mut self, scope: BlobScope, hash: Arc<str>) -> Res<()> {
+        let affected_peers = self.active_peers_for_blob(&hash);
+        if let Some(part_set) = self.scheduler.blob_requirements.get_mut(&hash) {
             part_set.remove(&PartitionKey::BlobScope(scope));
         }
         self.remove_blob_tracking_if_unused(hash).await?;
@@ -1914,18 +1841,18 @@ impl Worker {
     }
 
     async fn refresh_blob_scope_workers(&mut self) -> Res<()> {
-        let hashes: Vec<String> = self.scheduler.blob_requirements.keys().cloned().collect();
+        let hashes: Vec<_> = self.scheduler.blob_requirements.keys().cloned().collect();
         for hash in hashes {
             if self.blob_required_by_any_active_partition(&hash) {
                 if !self.scheduler.active_blobs.contains_key(&hash) {
-                    self.scheduler.set_blob_pending_now(&hash);
+                    self.scheduler.set_blob_pending_now(hash);
                 }
                 continue;
             }
             if let Some(active) = self.scheduler.active_blobs.remove(&hash) {
                 active.stop_token.stop().await?;
             }
-            self.scheduler.clear_blob_pending(&hash);
+            self.scheduler.clear_blob_pending(hash);
         }
         Ok(())
     }
@@ -1965,49 +1892,22 @@ impl Worker {
     }
 
     async fn batch_boot_blobs(&mut self) -> Res<()> {
-        let mut budget = self.available_blob_boot_budget();
+        let mut budget = self
+            .scheduler
+            .available_blob_boot_budget(self.max_active_sync_workers);
         if budget == 0 {
             return Ok(());
         }
-        let hashes = self.scheduler.drain_queued_blobs(budget);
-        for hash in hashes {
+        for hash in self.scheduler.drain_queued_blobs(budget) {
             if self.scheduler.active_blobs.contains_key(&hash) {
                 continue;
             }
             if !self.blob_required_by_any_active_partition(&hash) {
-                self.scheduler.clear_blob_pending(&hash);
+                self.scheduler.clear_blob_pending(hash);
                 continue;
             }
-            let prior_pending = self.scheduler.pending_blob_state(&hash);
-            if self.blobs_repo.has_hash(&hash).await? {
-                self.scheduler.clear_blob_pending(&hash);
-                if let Some(part_set) = self.scheduler.blob_requirements.get(&hash).cloned() {
-                    for partition_key in &part_set {
-                        let partition_id = partition_key.partition_id();
-                        if matches!(partition_key, PartitionKey::BigRepoPartition(_)) {
-                            continue;
-                        }
-                        let item_payload = "{}".to_string();
-                        for peer in self
-                            .sync_machine
-                            .active_peers_for_item(&partition_id, &hash)
-                        {
-                            let commands = self
-                                .sync_machine
-                                .on_item_sync_completed(SyncCompletion::AddedMember {
-                                    peer,
-                                    partition_id: partition_id.clone(),
-                                    item_id: hash.clone(),
-                                    item_payload: item_payload.clone(),
-                                })
-                                .await?;
-                            self.dispatch_sync_commands(commands).await?;
-                        }
-                    }
-                }
-                self.refresh_peers_for_blob_hash(&hash).await?;
-                continue;
-            }
+            let prior_pending = self.scheduler.pending_blob_state(Arc::clone(&hash));
+
             let peers = self.active_peers_for_blob(&hash);
             if peers.is_empty() {
                 self.scheduler.enqueue_blob(hash);
@@ -2037,7 +1937,7 @@ impl Worker {
                         &self.task_set,
                     )?,
                 };
-                self.scheduler.clear_blob_pending(&hash);
+                self.scheduler.clear_blob_pending(hash);
                 self.scheduler.active_blobs.insert(hash, active);
                 budget = budget.saturating_sub(1);
             }
@@ -2047,45 +1947,30 @@ impl Worker {
 
     async fn handle_blob_marked_synced(
         &mut self,
-        hash: String,
+        hash: Arc<str>,
         peer_id: Option<PeerId>,
     ) -> Res<()> {
         if !self.scheduler.blob_requirements.contains_key(&hash) {
             return Ok(());
         }
-        let partition_keys = self
-            .scheduler
-            .blob_requirements
-            .get(&hash)
-            .cloned()
-            .unwrap_or_default();
-        for partition_key in &partition_keys {
-            let partition_id = partition_key.partition_id();
-            if matches!(partition_key, PartitionKey::BigRepoPartition(_)) {
-                continue;
-            }
-            let item_payload = "{}".to_string();
-            for peer in self
+        // Blobs are identical with across peers so we just
+        // ack all peer jobs
+        for peer in self.sync_machine.active_peers_for_item(&hash) {
+            let commands = self
                 .sync_machine
-                .active_peers_for_item(&partition_id, &hash)
-            {
-                let commands = self
-                    .sync_machine
-                    .on_item_sync_completed(SyncCompletion::AddedMember {
-                        peer,
-                        partition_id: partition_id.clone(),
-                        item_id: hash.clone(),
-                        item_payload: item_payload.clone(),
-                    })
-                    .await?;
-                self.dispatch_sync_commands(commands).await?;
-            }
+                .on_item_sync_completed(SyncCompletion::AddedMember {
+                    peer,
+                    item_id: Arc::clone(&hash),
+                    item_payload: "{}".into(),
+                })
+                .await?;
+            self.dispatch_sync_commands(commands).await?;
         }
         let sync_hash = hash.clone();
         if let Some(active) = self.scheduler.active_blobs.remove(&hash) {
             active.stop_token.stop().await?;
         }
-        self.scheduler.clear_blob_pending(&hash);
+        self.scheduler.clear_blob_pending(Arc::clone(&hash));
         let peer_key = peer_id.and_then(|id| self.peer_key_for_id(id));
         self.emit_full_sync_event(FullSyncEvent::BlobSynced {
             hash: sync_hash,

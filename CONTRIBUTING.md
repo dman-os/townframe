@@ -92,6 +92,12 @@ Feel free to throw yourself or tokens at the code though I'd personally apprecia
 - Always use #[expect(...)] instead of #[allow(...)] for suppressing lints.
   - The expect attribute will warn if the lint is no longer triggered, helping to keep the codebase clean.
 
+- If a function always clones a parameter or does an allocation, replacing an argument by value instead of reference.
+  - For example, a &str that's immediately turned into a String.
+  - This embues the function signature with more information about the cost.
+  - If the clone/allocation is on an optional branch, a ref arg is fine.
+  - This obviously doesn't apply to cases where the value is transformed in the function changing semantics.
+    - For example, a serde_json::Value that's turned into a string.
 - Always collapse if statements per https://rust-lang.github.io/rust-clippy/master/index.html#collapsible_if
 - Always inline format! args when possible per https://rust-lang.github.io/rust-clippy/master/index.html#uninlined_format_args
 - Use method references over closures when possible per https://rust-lang.github.io/rust-clippy/master/index.html#redundant_closure_for_method_calls
@@ -103,6 +109,7 @@ Feel free to throw yourself or tokens at the code though I'd personally apprecia
 - When possible, make match statements exhaustive and avoid wildcard arms.
 - Newly added traits should include doc comments that explain their role and how implementations are expected to use them.
 - When writing tests, prefer comparing the equality of entire objects over fields one by one.
+- Adding a key to a hash map that shouldn't have seen that key before, add an `assert!(old.is_none(), "fishy")`
 
 ## Useful command snippets
 

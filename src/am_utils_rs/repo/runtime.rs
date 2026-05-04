@@ -75,11 +75,19 @@ impl Drop for RuntimeDocLease {
     }
 }
 
+#[derive(thiserror::Error, displaydoc::Display, Debug)]
+pub enum PutDocError {
+    /// IdOccpuied {id}
+    IdOccpuied { id: DocumentId },
+    /// {0:}
+    Other(#[from] eyre::Report),
+}
+
 enum RuntimeCmd {
     PutDoc {
         doc_id: DocumentId,
         initial_content: automerge::Automerge,
-        resp: oneshot::Sender<Res<Arc<LiveDocBundle>>>,
+        resp: oneshot::Sender<Result<Arc<LiveDocBundle>, PutDocError>>,
     },
     GetDocHandle {
         doc_id: DocumentId,
@@ -174,7 +182,7 @@ impl BigRepoRuntimeHandle {
         &self,
         doc_id: DocumentId,
         initial_content: automerge::Automerge,
-    ) -> Res<Arc<LiveDocBundle>> {
+    ) -> Result<Arc<LiveDocBundle>, PutDocError> {
         let (tx, rx) = oneshot::channel();
         self.cmd_tx
             .send(RuntimeCmd::PutDoc {
@@ -586,13 +594,30 @@ where
             RuntimeCmd::PutDoc {
                 doc_id,
                 initial_content,
-                resp: done,
-            } => self.handle_put_doc(doc_id, initial_content, done).await,
-            RuntimeCmd::GetDocHandle { doc_id, resp: done } => {
-                self.handle_get_doc_handle(doc_id, done).await
+                resp,
+            } => {
+                let worker = self.doc_worker_handle(doc_id).expect(ERROR_ACTOR);
+                worker
+                    .send(DocWorkerMsg::PutDoc {
+                        initial_content: initial_content,
+                        resp,
+                    })
+                    .expect(ERROR_ACTOR);
             }
-            RuntimeCmd::ExportDocSave { doc_id, resp: done } => {
-                self.handle_export_doc_save(doc_id, done).await
+            RuntimeCmd::GetDocHandle { doc_id, resp } => {
+                let worker = self.doc_worker_handle(doc_id).expect(ERROR_ACTOR);
+                worker
+                    .send(DocWorkerMsg::AcquireHandle { resp })
+                    .expect(ERROR_ACTOR);
+            }
+            RuntimeCmd::ExportDocSave { doc_id, resp } => {
+                let worker = self.doc_worker_handle(doc_id).expect(ERROR_ACTOR);
+                if let Some(entry) = self.doc_workers.get_mut(&doc_id) {
+                    entry.transient_work += 1;
+                }
+                worker
+                    .send(DocWorkerMsg::ExportDocSave { resp })
+                    .expect(ERROR_ACTOR);
             }
             RuntimeCmd::CommitDelta {
                 doc_id,
@@ -600,10 +625,21 @@ where
                 heads,
                 patches,
                 origin,
-                resp: done,
+                resp,
             } => {
-                self.handle_commit_delta(doc_id, commits, heads, patches, origin, done)
-                    .await
+                let worker = self.doc_worker_handle(doc_id).expect(ERROR_ACTOR);
+                if let Some(entry) = self.doc_workers.get_mut(&doc_id) {
+                    entry.transient_work += 1;
+                }
+                worker
+                    .send(DocWorkerMsg::CommitDelta {
+                        commits: commits,
+                        heads: heads,
+                        patches: patches,
+                        origin: origin,
+                        resp,
+                    })
+                    .expect(ERROR_ACTOR);
             }
             RuntimeCmd::OpenConnIroh {
                 endpoint,
@@ -635,8 +671,17 @@ where
                 timeout,
                 resp: done,
             } => {
-                self.handle_sync_doc_with_peer(doc_id, peer_id, timeout, done)
-                    .await
+                let worker = self.doc_worker_handle(doc_id).expect(ERROR_ACTOR);
+                if let Some(entry) = self.doc_workers.get_mut(&doc_id) {
+                    entry.transient_work += 1;
+                }
+                worker
+                    .send(DocWorkerMsg::SyncWithPeer {
+                        peer_id,
+                        timeout,
+                        done,
+                    })
+                    .expect(ERROR_ACTOR);
             }
             RuntimeCmd::ReleaseDocLease { doc_id } => self.handle_release_doc_lease(doc_id).await,
         }
@@ -760,7 +805,7 @@ where
         let runtime_evt_tx = self.evt_tx.clone();
         let runtime_tasks = Arc::clone(&self.runtime_tasks);
         let mut worker = DocWorker {
-            doc_id_str: doc_id.to_string(),
+            doc_id_str: doc_id.to_string().into(),
             doc_id_subduction: doc_id.into(),
             doc_id,
             state: DocWorkerDocState::Unloaded,
@@ -837,46 +882,6 @@ where
         Ok(entry.handle.clone())
     }
 
-    async fn handle_put_doc(
-        &mut self,
-        doc_id: DocumentId,
-        initial_content: automerge::Automerge,
-        done: oneshot::Sender<Res<Arc<LiveDocBundle>>>,
-    ) {
-        let worker = self.doc_worker_handle(doc_id).expect(ERROR_ACTOR);
-        worker
-            .send(DocWorkerMsg::PutDoc {
-                initial_content,
-                done,
-            })
-            .expect(ERROR_ACTOR);
-    }
-
-    async fn handle_get_doc_handle(
-        &mut self,
-        doc_id: DocumentId,
-        done: oneshot::Sender<Res<Option<Arc<LiveDocBundle>>>>,
-    ) {
-        let worker = self.doc_worker_handle(doc_id).expect(ERROR_ACTOR);
-        worker
-            .send(DocWorkerMsg::AcquireHandle { done })
-            .expect(ERROR_ACTOR);
-    }
-
-    async fn handle_export_doc_save(
-        &mut self,
-        doc_id: DocumentId,
-        done: oneshot::Sender<Res<Option<Vec<u8>>>>,
-    ) {
-        let worker = self.doc_worker_handle(doc_id).expect(ERROR_ACTOR);
-        if let Some(entry) = self.doc_workers.get_mut(&doc_id) {
-            entry.transient_work += 1;
-        }
-        worker
-            .send(DocWorkerMsg::ExportDocSave { done })
-            .expect(ERROR_ACTOR);
-    }
-
     async fn handle_release_doc_lease(&mut self, doc_id: DocumentId) {
         if let Some(entry) = self.doc_workers.get_mut(&doc_id) {
             entry.local_handles = entry.local_handles.saturating_sub(1);
@@ -886,30 +891,6 @@ where
                 .expect(ERROR_ACTOR);
         }
         self.schedule_doc_worker_eviction_if_idle(doc_id);
-    }
-
-    async fn handle_commit_delta(
-        &mut self,
-        doc_id: DocumentId,
-        commits: Vec<(CommitId, BTreeSet<CommitId>, Vec<u8>)>,
-        heads: Vec<automerge::ChangeHash>,
-        patches: Vec<automerge::Patch>,
-        origin: BigRepoChangeOrigin,
-        done: oneshot::Sender<Res<()>>,
-    ) {
-        let worker = self.doc_worker_handle(doc_id).expect(ERROR_ACTOR);
-        if let Some(entry) = self.doc_workers.get_mut(&doc_id) {
-            entry.transient_work += 1;
-        }
-        worker
-            .send(DocWorkerMsg::CommitDelta {
-                commits,
-                heads,
-                patches,
-                origin,
-                done,
-            })
-            .expect(ERROR_ACTOR);
     }
 
     #[tracing::instrument(skip_all)]
@@ -1174,36 +1155,6 @@ where
     }
 }
 
-// sync support
-impl<S> BigRepoRuntimeWorker<S>
-where
-    S: BigRepoSubductionStorage,
-{
-    #[tracing::instrument(
-        skip_all,
-        fields(%doc_id, %peer_id,  timeout = ?timeout)
-    )]
-    async fn handle_sync_doc_with_peer(
-        &mut self,
-        doc_id: DocumentId,
-        peer_id: PeerId,
-        timeout: Option<Duration>,
-        done: oneshot::Sender<Res<SyncDocOutcome>>,
-    ) {
-        let worker = self.doc_worker_handle(doc_id).expect(ERROR_ACTOR);
-        if let Some(entry) = self.doc_workers.get_mut(&doc_id) {
-            entry.transient_work += 1;
-        }
-        worker
-            .send(DocWorkerMsg::SyncWithPeer {
-                peer_id,
-                timeout,
-                done,
-            })
-            .expect(ERROR_ACTOR);
-    }
-}
-
 #[derive(Clone)]
 struct DocWorkerHandle {
     msg_tx: mpsc::UnboundedSender<DocWorkerMsg>,
@@ -1236,20 +1187,20 @@ struct DocWorkerEntry {
 enum DocWorkerMsg {
     PutDoc {
         initial_content: automerge::Automerge,
-        done: oneshot::Sender<Res<Arc<LiveDocBundle>>>,
+        resp: oneshot::Sender<Result<Arc<LiveDocBundle>, PutDocError>>,
     },
     AcquireHandle {
-        done: oneshot::Sender<Res<Option<Arc<LiveDocBundle>>>>,
+        resp: oneshot::Sender<Res<Option<Arc<LiveDocBundle>>>>,
     },
     ExportDocSave {
-        done: oneshot::Sender<Res<Option<Vec<u8>>>>,
+        resp: oneshot::Sender<Res<Option<Vec<u8>>>>,
     },
     CommitDelta {
         commits: Vec<(CommitId, BTreeSet<CommitId>, Vec<u8>)>,
         heads: Vec<automerge::ChangeHash>,
         patches: Vec<automerge::Patch>,
         origin: BigRepoChangeOrigin,
-        done: oneshot::Sender<Res<()>>,
+        resp: oneshot::Sender<Res<()>>,
     },
     ApplySyncSession {
         session: subduction_core::sync_session::SyncSession,
@@ -1267,7 +1218,7 @@ where
     S: BigRepoSubductionStorage,
 {
     doc_id: DocumentId,
-    doc_id_str: String,
+    doc_id_str: Arc<str>,
     doc_id_subduction: SedimentreeId,
     state: DocWorkerDocState,
     pending_fragment_requests: BTreeSet<FragmentRequested>,
@@ -1294,16 +1245,16 @@ where
         match msg {
             DocWorkerMsg::PutDoc {
                 initial_content,
-                done,
+                resp: done,
             } => {
                 let res = self.handle_put_doc(initial_content).await;
                 done.send(res).inspect_err(|_| warn!(ERROR_CALLER)).ok();
             }
-            DocWorkerMsg::AcquireHandle { done } => {
+            DocWorkerMsg::AcquireHandle { resp: done } => {
                 let res = self.handle_acquire_handle().await;
                 done.send(res).inspect_err(|_| warn!(ERROR_CALLER)).ok();
             }
-            DocWorkerMsg::ExportDocSave { done } => {
+            DocWorkerMsg::ExportDocSave { resp: done } => {
                 let res = self.handle_export_doc_save().await;
                 self.runtime_evt_tx
                     .send(RuntimeEvt::DocWorkerTransientFinished {
@@ -1317,7 +1268,7 @@ where
                 heads,
                 patches,
                 origin,
-                done,
+                resp: done,
             } => {
                 let res = self
                     .handle_commit_delta(commits, heads, patches, origin)
@@ -1357,50 +1308,48 @@ where
 
     async fn handle_put_doc(
         &mut self,
-        initial_content: automerge::Automerge,
-    ) -> Res<Arc<LiveDocBundle>> {
+        doc: automerge::Automerge,
+    ) -> Result<Arc<LiveDocBundle>, PutDocError> {
         if !matches!(self.state, DocWorkerDocState::Unloaded) {
-            eyre::bail!("document already exists locally");
+            return Err(PutDocError::IdOccpuied { id: self.doc_id });
         }
         if load_doc_snapshot(&self.sedimentrees, &self.storage_for_reads, self.doc_id)
             .await?
             .is_some()
         {
-            eyre::bail!("document already exists locally");
+            return Err(PutDocError::IdOccpuied { id: self.doc_id });
         }
         let sedimentree_id: SedimentreeId = self.doc_id_subduction.clone();
-        let ingested =
-            automerge_sedimentree::ingest::ingest_automerge(&initial_content, sedimentree_id)
-                .map_err(|err| ferr!("failed ingesting automerge doc: {err}"))?;
+        let ingested = automerge_sedimentree::ingest::ingest_automerge(&doc, sedimentree_id)
+            .map_err(|err| ferr!("failed ingesting automerge doc: {err}"))?;
         info!("adding sedimentree");
         self.subduction
             .add_sedimentree(sedimentree_id, ingested.sedimentree, ingested.blobs)
             .await
             .map_err(|err| ferr!("failed add_sedimentree: {err}"))?;
-        let bundle = Arc::new(LiveDocBundle::new(
-            self.doc_id,
-            initial_content,
-            ingested.fragment_state_store,
-            RuntimeDocLease {
-                runtime: self.runtime_handle.clone(),
-                doc_id: self.doc_id,
-            },
-        ));
         let (item_payload, heads) = {
-            let doc = bundle.doc.lock().await;
             let heads = Arc::<[automerge::ChangeHash]>::from(doc.get_heads());
             let item_payload = serde_json::json!({
                 "heads": crate::serialize_commit_heads(&heads),
             });
             (item_payload, heads)
         };
+        let bundle = Arc::new(LiveDocBundle::new(
+            self.doc_id,
+            doc,
+            ingested.fragment_state_store,
+            RuntimeDocLease {
+                runtime: self.runtime_handle.clone(),
+                doc_id: self.doc_id,
+            },
+        ));
         self.partition_store
-            .record_member_item_change(&self.doc_id_str, &item_payload)
+            .record_item_change_all_partitions(Arc::clone(&self.doc_id_str), &item_payload)
             .await?;
         self.change_manager
             .notify_doc_created(self.doc_id, Arc::clone(&heads))?;
         self.change_manager
-            .notify_local_doc_created(self.doc_id, heads)?;
+            .notify_local_doc_created(self.doc_id, Arc::clone(&heads))?;
         self.state = DocWorkerDocState::Live(Arc::downgrade(&bundle));
         (&self.runtime_evt_tx)
             .send(RuntimeEvt::DocWorkerHandleAcquired {
@@ -1500,6 +1449,7 @@ where
             &self.partition_store,
             &self.change_manager,
             self.doc_id,
+            Arc::clone(&self.doc_id_str),
             heads,
             patches,
             origin,
@@ -1547,29 +1497,9 @@ where
             DocWorkerDocState::Unloaded => {
                 // since the doc in storage will have the latest blobs,
                 // we must load the before_heads from the partition payloads
-                let before_heads = {
-                    let local_tree = self
-                        .sedimentrees
-                        .contains_key(&self.doc_id_subduction)
-                        .await;
-                    info!(?local_tree, "XXX");
-                    let (_, mut before_heads) = self
-                        .partition_store
-                        .item_payloads(&self.doc_id_str)
-                        .await?
-                        .into_iter()
-                        .next()
-                        .expect("doc was not in partition previously");
-                    let before_heads = before_heads
-                        .as_object_mut()
-                        .expect(ERROR_IMPOSSIBLE)
-                        .remove("heads")
-                        .expect(ERROR_IMPOSSIBLE);
-                    let before_heads: Vec<String> =
-                        serde_json::from_value(before_heads).expect(ERROR_IMPOSSIBLE);
-
-                    crate::parse_commit_heads(&before_heads).expect(ERROR_IMPOSSIBLE)
-                };
+                let before_heads =
+                    super::partition_doc_heads_payload(&self.partition_store, &self.doc_id_str)
+                        .await?;
                 let doc =
                     load_doc_snapshot(&self.sedimentrees, &self.storage_for_reads, self.doc_id)
                         .await?
@@ -1609,6 +1539,7 @@ where
             &self.partition_store,
             &self.change_manager,
             self.doc_id,
+            Arc::clone(&self.doc_id_str),
             after_heads,
             patches,
             BigRepoChangeOrigin::Remote {
@@ -1719,6 +1650,7 @@ async fn commit_delta_bookkeep(
     partition_store: &Arc<PartitionStore>,
     change_manager: &Arc<changes::ChangeListenerManager>,
     doc_id: DocumentId,
+    doc_id_str: Arc<str>,
     heads: Vec<automerge::ChangeHash>,
     patches: Vec<automerge::Patch>,
     origin: BigRepoChangeOrigin,
@@ -1727,7 +1659,7 @@ async fn commit_delta_bookkeep(
         "heads": crate::serialize_commit_heads(&heads),
     });
     partition_store
-        .record_member_item_change(&doc_id.to_string(), &item_payload)
+        .record_item_change_all_partitions(doc_id_str, &item_payload)
         .await?;
 
     let heads_arc = Arc::<[automerge::ChangeHash]>::from(heads);

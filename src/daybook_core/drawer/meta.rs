@@ -197,7 +197,6 @@ impl DrawerRepo {
     }
 
     #[cfg(test)]
-    #[expect(dead_code)]
     pub(super) async fn get_branch_state(
         &self,
         doc_id: &DocId,

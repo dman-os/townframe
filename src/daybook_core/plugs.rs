@@ -3025,22 +3025,14 @@ mod tests {
             .map(|url| url.path().trim_start_matches('/').to_string())
             .ok_or_eyre("expected converted blob URL in bundle1")?;
         assert_eq!(big_repo.partition_member_count(&partition_id).await?, 1);
-        assert!(
-            big_repo
-                .is_member_present_in_partition_item_state(&partition_id, &hash)
-                .await?
-        );
+        assert!(big_repo.contains_in_partition(&partition_id, &hash).await?);
 
         let mut plug_update = mock_plug("scope-membership");
         plug_update.version = "0.2.0".parse().unwrap();
         repo.add(plug_update).await?;
 
         assert_eq!(big_repo.partition_member_count(&partition_id).await?, 0);
-        assert!(
-            !big_repo
-                .is_member_present_in_partition_item_state(&partition_id, &hash)
-                .await?
-        );
+        assert!(!big_repo.contains_in_partition(&partition_id, &hash).await?);
         Ok(())
     }
 }
