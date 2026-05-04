@@ -442,7 +442,7 @@ pub struct Feature {
 }
 
 #[derive(bon::Builder)]
-#[allow(clippy::duplicated_attributes)]
+#[expect(clippy::duplicated_attributes)]
 #[builder(on(String, into), on(CHeapStr, into))]
 pub struct EndpointType {
     #[builder(start_fn)]
@@ -532,7 +532,7 @@ pub enum OutputType {
 }
 
 #[derive(bon::Builder)]
-#[allow(clippy::duplicated_attributes)]
+#[expect(clippy::duplicated_attributes)]
 #[builder(on(String, into), on(CHeapStr, into))]
 pub struct ErrorType {
     #[builder(field)]

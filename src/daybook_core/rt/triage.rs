@@ -130,7 +130,7 @@ impl DocProcessorTriageListener {
         Ok(())
     }
 
-    #[allow(clippy::too_many_arguments)]
+    #[expect(clippy::too_many_arguments)]
     #[tracing::instrument(skip(self, doc, doc_heads, ctx))]
     async fn triage_doc(
         &mut self,
@@ -577,7 +577,7 @@ fn changed_intersects_read_set(
         .any(|key| read_tags.contains(&key.tag.to_string()) || read_keys.contains(key))
 }
 
-#[allow(clippy::too_many_arguments)]
+#[expect(clippy::too_many_arguments)]
 fn should_processor_run_for_event(
     node_predicate: &NodePredicate,
     doc_change_predicate: &daybook_types::manifest::DocChangePredicate,

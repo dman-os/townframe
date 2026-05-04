@@ -1,4 +1,4 @@
-#[allow(unused_imports)]
+#[expect(unused_imports)]
 mod interlude {
     #[cfg(feature = "ssr")]
     pub use crate::server::SharedServerCtx;

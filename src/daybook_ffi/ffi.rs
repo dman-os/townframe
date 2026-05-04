@@ -27,7 +27,7 @@ impl FfiError {
 #[derive(uniffi::Object)]
 pub struct FfiCtx {
     rt: Arc<tokio::runtime::Runtime>,
-    #[allow(unused)]
+    #[expect(unused)]
     pub acx: Arc<AppCtx>,
     pub rcx: Arc<daybook_core::repo::RepoCtx>,
 }

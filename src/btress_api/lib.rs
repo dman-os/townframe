@@ -93,7 +93,7 @@ wit::export!(Component with_types_in wit);
 struct Component;
 
 impl wit::exports::townframe::btress_api::ctx::Guest for Component {
-    #[allow(async_fn_in_trait)]
+    #[expect(async_fn_in_trait)]
     fn init() -> Result<(), String> {
         crate::init().map_err(|err| format!("{err:?}"))?;
         Ok(())

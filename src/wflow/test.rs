@@ -9,7 +9,7 @@ mod fails_once;
 #[cfg(test)]
 mod fails_until_told;
 #[cfg(any(test, feature = "test-harness"))]
-#[allow(unused)]
+#[expect(unused)]
 mod keyvalue_plugin;
 #[cfg(test)]
 mod recover_from_log;
@@ -167,7 +167,7 @@ impl WflowTestContextBuilder {
     }
 }
 /// Test context for wflow tests
-#[allow(unused)]
+#[expect(unused)]
 pub struct WflowTestContext {
     pub temp_dir: tempfile::TempDir,
     pub metastore: Arc<dyn metastore::MetdataStore>,
@@ -529,7 +529,7 @@ impl WflowTestContext {
     }
 }
 
-#[allow(clippy::type_complexity)]
+#[expect(clippy::type_complexity)]
 fn new_in_memory_kv_store() -> Arc<Arc<DHashMap<Arc<[u8]>, Arc<[u8]>>>> {
     let kv: DHashMap<Arc<[u8]>, Arc<[u8]>> = default();
     let kv = Arc::new(kv);

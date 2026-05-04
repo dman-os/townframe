@@ -19,7 +19,7 @@ mod binds_guest {
 use binds_guest::townframe::mltools::{llm_chat, types};
 
 pub struct MltoolsPlugin {
-    #[allow(dead_code)]
+    #[expect(dead_code)]
     config: Config,
 }
 

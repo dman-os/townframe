@@ -136,7 +136,7 @@ enum Msg {
 }
 
 #[derive(Debug, Clone)]
-#[allow(dead_code)]
+#[expect(dead_code)]
 pub(crate) struct PeerSyncSnapshot {
     pub emitted_full_synced: bool,
     pub bootstrap_ready: bool,
@@ -155,7 +155,7 @@ struct FullSyncWaiter {
 }
 
 #[derive(Debug)]
-#[allow(clippy::enum_variant_names)]
+#[expect(clippy::enum_variant_names)]
 enum SyncProgressMsg {
     BlobWorkerStarted {
         partition: PartitionKey,

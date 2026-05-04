@@ -171,7 +171,7 @@ macro_rules! define_enum_and_tag {
                 }
             }
 
-            #[allow(clippy::should_implement_trait)]
+            #[expect(clippy::should_implement_trait)]
             pub fn from_str(input: &str) -> Option<Self> {
                 $(
                     if input.eq_ignore_ascii_case(concat!(

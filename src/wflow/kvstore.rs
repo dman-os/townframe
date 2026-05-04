@@ -34,7 +34,7 @@ enum KvMsg {
     NewCas {
         table: Arc<str>,
         key: Vec<u8>,
-        #[allow(clippy::type_complexity)]
+        #[expect(clippy::type_complexity)]
         resp: oneshot::Sender<Res<(Option<Arc<[u8]>>, i64)>>,
     },
     Swap {
@@ -42,7 +42,7 @@ enum KvMsg {
         key: Arc<[u8]>,
         value: Arc<[u8]>,
         snapshot_version: i64,
-        #[allow(clippy::type_complexity)]
+        #[expect(clippy::type_complexity)]
         resp: oneshot::Sender<Res<Result<(), (Option<Arc<[u8]>>, i64)>>>,
     },
 }

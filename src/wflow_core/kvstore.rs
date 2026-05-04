@@ -34,7 +34,7 @@ pub trait KvStore {
 /// This is a type-erased guard that uses dynamic dispatch to work with any store implementation.
 pub struct CasGuard {
     current_cb: Arc<dyn Fn() -> Option<Arc<[u8]>> + Send + Sync>,
-    #[allow(clippy::type_complexity)]
+    #[expect(clippy::type_complexity)]
     swap_cb: Arc<
         dyn Fn(Arc<[u8]>) -> futures::future::BoxFuture<'static, Res<Result<(), CasError>>>
             + Send
@@ -110,7 +110,7 @@ impl From<eyre::Report> for CasError {
     }
 }
 
-#[allow(clippy::type_complexity)]
+#[expect(clippy::type_complexity)]
 fn make_dhashmap_cas_guard(
     store: Arc<utils_rs::DHashMap<Arc<[u8]>, Arc<[u8]>>>,
     key: Arc<[u8]>,
@@ -301,7 +301,7 @@ pub mod tests {
 
     #[tokio::test]
     async fn test_dhashmap_kvstore() -> Res<()> {
-        #[allow(clippy::type_complexity)]
+        #[expect(clippy::type_complexity)]
         let store: Arc<DHashMap<Arc<[u8]>, Arc<[u8]>>> = Arc::new(DHashMap::default());
         let store_dyn: Arc<dyn KvStore + Send + Sync> = Arc::new(store);
         test_kv_store_impl(Arc::clone(&store_dyn)).await?;
@@ -314,7 +314,7 @@ pub mod tests {
         use loom::thread;
 
         loom::model(|| {
-            #[allow(clippy::type_complexity)]
+            #[expect(clippy::type_complexity)]
             let store: Arc<DHashMap<Arc<[u8]>, Arc<[u8]>>> = Arc::new(DHashMap::default());
             let key: Arc<[u8]> = b"loom_counter".to_vec().into();
 

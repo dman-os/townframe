@@ -84,11 +84,13 @@ Feel free to throw yourself or tokens at the code though I'd personally apprecia
   - They're only a good fit for single modifier situation where a normal HashMap won't work due to do async problems.
 - Do not use the cargo integration tests features.
   - I.e. avoid making tests in crate_root::tests.
-- Git submodules? I'm using `jj` :'/
+- Git submodules? I'm using `jj` which doesn't support submodules :'/
 - Prefer `futures_buffered::BufferedStreamExt::buffered_unordered` over
   `futures::StreamExt::buffer_unordered` for unordered buffered async stream work.
 - Avoid adding dependencies if possible
   - `wc -l Cargo.lock` is around 10k lines. Let's keep it that way.
+- Always use #[expect(...)] instead of #[allow(...)] for suppressing lints.
+  - The expect attribute will warn if the lint is no longer triggered, helping to keep the codebase clean.
 
 - Always collapse if statements per https://rust-lang.github.io/rust-clippy/master/index.html#collapsible_if
 - Always inline format! args when possible per https://rust-lang.github.io/rust-clippy/master/index.html#uninlined_format_args
@@ -119,7 +121,7 @@ DAYB_REPO_PATH=/tmp/repo1 cargo r -p daybook_cli --help
 cargo x --help
 
 # test rust code
-# nextest is preferred test runner
+# CRITICAL: nextest is preferred test runner
 RUST_LOG_TEST=info cargo nextest run
 # lint rust code
 cargo clippy --all-targets --all-features

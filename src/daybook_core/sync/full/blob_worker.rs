@@ -14,7 +14,7 @@ impl BlobSyncWorkerStopToken {
     }
 }
 
-#[allow(clippy::too_many_arguments)]
+#[expect(clippy::too_many_arguments)]
 pub fn spawn_blob_sync_worker(
     partition: PartitionKey,
     hash: String,

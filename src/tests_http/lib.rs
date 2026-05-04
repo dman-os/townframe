@@ -69,7 +69,7 @@ impl Drop for TestContext {
     }
 }
 
-#[allow(unused)]
+#[expect(unused)]
 async fn test_cx(test_name: &'static str) -> Res<TestContext> {
     tokio::task::block_in_place(|| {
         utils_rs::testing::load_envs_once();

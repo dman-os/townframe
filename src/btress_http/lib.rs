@@ -46,7 +46,7 @@ use wit::exports::wasi::http::incoming_handler::{
 use wit::wasi::http::types::{Headers, OutgoingBody, OutgoingResponse};
 
 impl HttpIncomingGuest for Component {
-    #[allow(async_fn_in_trait)]
+    #[expect(async_fn_in_trait)]
     fn handle(wasi_req: IncomingRequest, res_handle: ResponseOutparam) -> () {
         utils_rs::testing::setup_tracing_once();
 

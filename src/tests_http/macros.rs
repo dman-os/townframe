@@ -15,7 +15,7 @@ macro_rules! integration_table_tests {
         },
     )*) => {
         $(
-            #[allow(unused_variables)]
+            #[expect(unused_variables)]
             #[tokio::test]
             async fn $name() -> $crate::interlude::eyre::Result<()> {
                 use utils_rs::prelude::*;

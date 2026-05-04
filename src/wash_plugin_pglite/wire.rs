@@ -33,7 +33,7 @@ struct FilePaths {
     slock: PathBuf,
     /// Output from pglite (responses)
     cinput: PathBuf,
-    #[allow(dead_code)]
+    #[expect(dead_code)]
     clock: PathBuf,
 }
 
@@ -41,7 +41,7 @@ struct FilePaths {
 pub struct WireSession {
     config: Config,
     store: Store<WasiState>,
-    #[allow(dead_code)]
+    #[expect(dead_code)]
     instance: Instance,
     memory: Memory,
 
@@ -50,7 +50,7 @@ pub struct WireSession {
     interactive_one: TypedFunc<(), ()>,
     interactive_read: TypedFunc<(), i32>,
     use_wire: Option<TypedFunc<i32, ()>>,
-    #[allow(dead_code)]
+    #[expect(dead_code)]
     clear_error: Option<TypedFunc<(), ()>>,
 
     // Buffer info

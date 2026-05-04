@@ -32,7 +32,7 @@ pub enum PseudoLabelError {
 
 daybook_types::define_enum_and_tag!(
     "org.example.daybook.plabel.",
-    #[allow(clippy::enum_variant_names)]
+    #[expect(clippy::enum_variant_names)]
     #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, schemars::JsonSchema)]
     PlabelFacetTag,
     #[derive(Debug, Clone, Serialize, Deserialize, schemars::JsonSchema)]
@@ -56,14 +56,14 @@ daybook_types::define_enum_and_tag!(
     }
 );
 
-#[allow(dead_code)]
+#[expect(dead_code)]
 pub fn pseudo_label_key() -> daybook_types::doc::FacetKey {
     daybook_types::doc::FacetKey::from(daybook_types::doc::FacetTag::Any(
         PlabelFacetTag::PseudoLabel.as_str().into(),
     ))
 }
 
-#[allow(dead_code)]
+#[expect(dead_code)]
 pub fn pseudo_label_candidates_key(id: &str) -> daybook_types::doc::FacetKey {
     daybook_types::doc::FacetKey {
         tag: daybook_types::doc::FacetTag::Any(
@@ -73,7 +73,7 @@ pub fn pseudo_label_candidates_key(id: &str) -> daybook_types::doc::FacetKey {
     }
 }
 
-#[allow(dead_code)]
+#[expect(dead_code)]
 pub fn pseudo_label_error_key() -> daybook_types::doc::FacetKey {
     daybook_types::doc::FacetKey::from(daybook_types::doc::FacetTag::Any(
         PlabelFacetTag::PseudoLabelErrorFacet.as_str().into(),

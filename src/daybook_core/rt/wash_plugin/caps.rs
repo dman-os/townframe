@@ -320,11 +320,11 @@ pub(super) fn blob_hash_from_blob_facet(blob: &daybook_types::doc::Blob) -> Resu
 pub struct FacetTokenRw {
     pub doc_id: DocId,
     pub branch_path: daybook_types::doc::BranchPathBuf,
-    #[allow(dead_code)]
+    #[expect(dead_code)]
     pub target_branch_path: daybook_types::doc::BranchPathBuf,
     pub heads: ChangeHashSet,
     pub facet_key: daybook_types::doc::FacetKey,
-    #[allow(dead_code)]
+    #[expect(dead_code)]
     pub facet_acl: Vec<daybook_types::manifest::RoutineFacetAccess>,
 }
 

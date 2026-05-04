@@ -27,7 +27,7 @@ mod binds_guest {
         }
     });
 
-    #[allow(dead_code)]
+    #[expect(dead_code)]
     pub fn well_known_facet_to_wit(value: root_doc::WellKnownFacet) -> wit_doc::WellKnownFacet {
         match value {
             root_doc::WellKnownFacet::RefGeneric(val) => wit_doc::WellKnownFacet::RefGeneric(val),
@@ -152,7 +152,7 @@ mod binds_guest {
         }
     }
 
-    #[allow(dead_code)]
+    #[expect(dead_code)]
     pub fn wit_to_well_known_facet(
         value: wit_doc::WellKnownFacet,
     ) -> Res<root_doc::WellKnownFacet> {
@@ -304,7 +304,7 @@ mod binds_guest {
         })
     }
 
-    #[allow(dead_code)]
+    #[expect(dead_code)]
     pub fn wit_to_root_doc(value: wit_doc::Doc) -> root_doc::Doc {
         root_doc::Doc {
             id: value.id,

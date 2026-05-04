@@ -3,7 +3,7 @@
 //! FIXME: use ctrl_c handlers aross major await points
 //! FIXME: make each command a submodule
 
-#[allow(unused)]
+#[expect(unused)]
 mod interlude {
     pub use am_utils_rs::prelude::*;
     pub use utils_rs::prelude::*;

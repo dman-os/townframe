@@ -1,5 +1,5 @@
 pub mod app;
-#[allow(unused)]
+#[expect(unused)]
 mod interlude {
     pub use leptos::either::*;
     pub use leptos::prelude::*;

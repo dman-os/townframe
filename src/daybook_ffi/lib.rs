@@ -2,7 +2,7 @@
 // by rustc
 #![recursion_limit = "256"]
 
-#[allow(unused)]
+#[expect(unused)]
 mod interlude {
     pub use api_utils_rs::prelude::*;
     pub use autosurgeon::{Hydrate, Reconcile};

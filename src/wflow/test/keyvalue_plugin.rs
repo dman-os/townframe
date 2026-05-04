@@ -46,7 +46,7 @@ pub type BucketHandle = String;
 #[derive(Clone, Default)]
 pub struct WasiKeyvalue {
     /// Storage for all buckets, keyed by workload ID, then bucket name
-    #[allow(clippy::type_complexity)]
+    #[expect(clippy::type_complexity)]
     storage: Arc<RwLock<HashMap<Arc<str>, HashMap<String, BucketData>>>>,
 }
 

@@ -11,7 +11,7 @@ pub struct RtFfi {
 #[uniffi::export]
 impl RtFfi {
     #[uniffi::constructor]
-    #[allow(clippy::too_many_arguments)]
+    #[expect(clippy::too_many_arguments)]
     #[tracing::instrument(
         err,
         skip(

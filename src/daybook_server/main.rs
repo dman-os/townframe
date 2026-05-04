@@ -1,4 +1,4 @@
-#[allow(unused)]
+#[expect(unused)]
 mod interlude {
     pub use api_utils_rs::{api, prelude::*};
 

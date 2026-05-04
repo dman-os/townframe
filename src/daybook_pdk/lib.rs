@@ -1,4 +1,4 @@
-#[allow(unused)]
+#[expect(unused)]
 mod interlude {
     pub use serde::{Deserialize, Serialize};
     pub use std::time::Duration;

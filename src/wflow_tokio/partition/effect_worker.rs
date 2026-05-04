@@ -34,7 +34,7 @@ impl Drop for TokioEffectWorkerHandle {
     }
 }
 
-#[allow(clippy::too_many_arguments)]
+#[expect(clippy::too_many_arguments)]
 pub fn start_tokio_effect_worker(
     worker_id: usize,
     worker_name: WorkerId,

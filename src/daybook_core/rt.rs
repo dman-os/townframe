@@ -235,7 +235,7 @@ impl Rt {
         Ok(Some(done))
     }
 
-    #[allow(clippy::too_many_arguments)]
+    #[expect(clippy::too_many_arguments)]
     pub async fn boot(
         config: RtConfig,
         app_doc_id: DocumentId,
@@ -306,13 +306,13 @@ impl Rt {
                 .wrap_err("error creating mltools plugin")?;
 
         let wash_host = wflow::build_wash_host(vec![
-            #[allow(clippy::clone_on_ref_ptr)]
+            #[expect(clippy::clone_on_ref_ptr)]
             wflow_plugin.clone(),
-            #[allow(clippy::clone_on_ref_ptr)]
+            #[expect(clippy::clone_on_ref_ptr)]
             daybook_plugin.clone(),
-            #[allow(clippy::clone_on_ref_ptr)]
+            #[expect(clippy::clone_on_ref_ptr)]
             utils_plugin.clone(),
-            #[allow(clippy::clone_on_ref_ptr)]
+            #[expect(clippy::clone_on_ref_ptr)]
             mltools_plugin.clone(),
         ])
         .await?;
@@ -1396,7 +1396,7 @@ impl Rt {
         .await
     }
 
-    #[allow(clippy::too_many_arguments)]
+    #[expect(clippy::too_many_arguments)]
     async fn dispatch_no_gate_internal(
         &self,
         plug_id: &str,
@@ -2066,7 +2066,7 @@ async fn start_bundle_workload(
 }
 
 #[cfg(test)]
-#[allow(clippy::items_after_test_module)]
+#[expect(clippy::items_after_test_module)]
 mod tests {
     use super::*;
     use sqlx::sqlite::SqlitePoolOptions;

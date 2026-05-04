@@ -7,7 +7,7 @@ use crate::snapstore::{PartitionSnapshot, PartitionSnapshotRef};
 #[derive(Debug, Deserialize)]
 struct SnapshotWithMetadata {
     entry_id: u64,
-    #[allow(dead_code)]
+    #[expect(dead_code)]
     timestamp: Timestamp,
     snapshot: PartitionSnapshot,
 }

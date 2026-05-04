@@ -1,4 +1,4 @@
-#[allow(unused)]
+#[expect(unused)]
 mod interlude {
     pub use std::future::Future;
     pub use std::path::{Path, PathBuf};

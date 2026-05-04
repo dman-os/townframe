@@ -80,7 +80,7 @@ struct BranchRefRow {
 }
 
 #[cfg(test)]
-#[allow(dead_code)]
+#[expect(dead_code)]
 #[derive(Debug, Clone)]
 struct BranchStateRow {
     branch_path: String,
@@ -94,7 +94,7 @@ impl DrawerRepo {
         &self.drawer_doc_id
     }
 
-    #[allow(clippy::too_many_arguments)]
+    #[expect(clippy::too_many_arguments)]
     pub async fn load(
         big_repo: SharedBigRepo,
         drawer_doc_id: DocumentId,

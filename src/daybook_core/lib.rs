@@ -2,7 +2,7 @@
 // by rustc
 #![recursion_limit = "256"]
 
-#[allow(unused)]
+#[expect(unused)]
 mod interlude {
     pub use crate::app::SqlCtx;
     pub use crate::stores::{AmStore, VersionTag, Versioned};
@@ -37,7 +37,7 @@ pub mod local_state;
 pub mod plugs;
 pub mod progress;
 pub mod repo;
-#[allow(unused)]
+#[expect(unused)]
 pub mod repos;
 pub mod rt;
 pub mod secrets;
