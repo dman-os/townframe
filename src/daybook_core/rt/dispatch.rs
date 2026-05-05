@@ -941,12 +941,7 @@ mod tests {
         repo_sql: SqlCtx,
     ) -> Res<(Arc<DispatchRepo>, daybook_types::doc::UserPathBuf)> {
         let local_user_path = daybook_types::doc::UserPathBuf::from("/test-user/test-device");
-        let (big_repo, _acx_stop) = BigRepo::boot(am_utils_rs::repo::Config {
-            peer_id: crate::peer_id_from_label("test-dispatch"),
-            secret_key_bytes: rand::random::<[u8; 32]>(),
-            storage: am_utils_rs::repo::StorageConfig::Memory,
-        })
-        .await?;
+        let (big_repo, part_store, _acx_stop) = crate::drawer::tests::boot_repo().await?;
         let app_doc = big_repo
             .put_doc(DocumentId::random(), automerge::Automerge::new())
             .await?;

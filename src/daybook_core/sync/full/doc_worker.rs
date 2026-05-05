@@ -6,10 +6,7 @@ pub(super) struct DocSyncWorkerStopToken {
 
 impl DocSyncWorkerStopToken {
     pub async fn stop(self) -> Res<()> {
-        self.task_handle.abort();
-        tokio::time::timeout(Duration::from_secs(2), self.task_handle.join())
-            .await
-            .ok();
+        self.task_handle.join(Duration::from_secs(2)).await?;
         Ok(())
     }
 }

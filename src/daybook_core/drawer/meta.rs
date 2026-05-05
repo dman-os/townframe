@@ -191,7 +191,7 @@ impl DrawerRepo {
             return Ok(None);
         };
         Ok(Some(BranchRefRow {
-            branch_doc_id: branch_ref.branch_doc_id,
+            branch_doc_id: branch_ref.branch_doc_id.into(),
             branch_kind,
         }))
     }
@@ -249,6 +249,7 @@ impl DrawerRepo {
             branches.insert(branch_name, latest_heads);
         }
         for (branch_path, branch_doc_id) in self.list_local_branch_refs(doc_id).await? {
+            let branch_doc_id: Arc<str> = branch_doc_id.into();
             let Some(latest_heads) = self.get_branch_heads_by_doc_id(&branch_doc_id).await? else {
                 tracing::warn!(
                     branch_path = %branch_path,

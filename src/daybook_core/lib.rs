@@ -9,8 +9,6 @@ mod interlude {
 
     pub use daybook_types::doc::{BranchPath, BranchPathBuf, ChangeHashSet, UserPath, UserPathBuf};
 
-    #[cfg(any(test, feature = "test-support"))]
-    pub use crate::test_support::BigRepoTestCompat;
     pub use am_utils_rs::prelude::*;
     pub use am_utils_rs::DocumentId;
     pub use api_utils_rs::prelude::*;

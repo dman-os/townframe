@@ -213,7 +213,7 @@ impl SyncMachine {
             let item_partition_count = part_store.item_partition_count(&item_id).await?;
             if item_partition_count > 1 {
                 part_store
-                    .remove_item_from_partition(&partition_id, Arc::clone(&item_id))
+                    .remove_item_from_partition(Arc::clone(&partition_id), Arc::clone(&item_id))
                     .await?;
                 let old = state.slots.insert(cursor, CursorSlotState::Ready);
                 assert!(old.is_none(), "fishy");
@@ -385,15 +385,19 @@ impl SyncMachine {
             match &completion {
                 SyncCompletion::AddedMember { item_payload, .. } => {
                     self.partition_store
-                        .upsert_item(Arc::clone(&job_id.item_id), item_payload)
-                        .await?;
-                    self.partition_store
-                        .add_item_to_partition(&part_id, Arc::clone(&job_id.item_id))
+                        .upsert_item(
+                            Arc::clone(&job_id.item_id),
+                            item_payload,
+                            std::slice::from_ref(&part_id),
+                        )
                         .await?;
                 }
                 SyncCompletion::DeletedMember { .. } => {
                     self.partition_store
-                        .remove_item_from_partition(&part_id, Arc::clone(&job_id.item_id))
+                        .remove_item_from_partition(
+                            Arc::clone(&part_id),
+                            Arc::clone(&job_id.item_id),
+                        )
                         .await?;
                 }
                 SyncCompletion::ChangedItem { .. } | SyncCompletion::Noop { .. } => {}

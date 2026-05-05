@@ -142,11 +142,16 @@ impl Scheduler {
         if budget == 0 {
             return Vec::new();
         }
-        for hash in self.queued_tasks.iter().filter_map(|task| match task {
-            SyncTask::Blob(hash) => Some(Arc::clone(&hash)),
-            SyncTask::Doc(_) => None,
-        }) {
-            self.queued_tasks.remove(&SyncTask::Blob(hash));
+        let blobs: Vec<_> = self
+            .queued_tasks
+            .iter()
+            .filter_map(|task| match task {
+                SyncTask::Blob(hash) => Some(Arc::clone(&hash)),
+                SyncTask::Doc(_) => None,
+            })
+            .collect();
+        for hash in &blobs {
+            self.queued_tasks.remove(&SyncTask::Blob(Arc::clone(&hash)));
         }
         blobs
     }

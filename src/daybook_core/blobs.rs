@@ -12,11 +12,11 @@ use tokio::io::AsyncWriteExt;
 pub trait PartitionMembershipWriter: Send + Sync {
     async fn upsert_item(
         &self,
-        partition_id: &str,
-        member_id: &str,
+        partition_id: Arc<str>,
+        member_id: Arc<str>,
         payload: &serde_json::Value,
     ) -> Res<()>;
-    async fn remove_item(&self, partition_id: &str, member_id: &str) -> Res<()>;
+    async fn remove_item(&self, member_id: Arc<str>) -> Res<()>;
 }
 
 #[derive(Clone)]
@@ -34,19 +34,17 @@ impl PartitionStoreMembershipWriter {
 impl PartitionMembershipWriter for PartitionStoreMembershipWriter {
     async fn upsert_item(
         &self,
-        partition_id: &str,
-        member_id: &str,
+        partition_id: Arc<str>,
+        member_id: Arc<str>,
         payload: &serde_json::Value,
     ) -> Res<()> {
         self.partition_store
-            .upsert_item(&partition_id.to_string(), member_id, payload)
+            .upsert_item(member_id, payload, &[partition_id])
             .await
     }
 
-    async fn remove_item(&self, partition_id: &str, member_id: &str) -> Res<()> {
-        self.partition_store
-            .remove_item(&partition_id.to_string(), member_id)
-            .await
+    async fn remove_item(&self, member_id: Arc<str>) -> Res<()> {
+        self.partition_store.remove_item(member_id).await
     }
 }
 
@@ -57,14 +55,13 @@ pub struct NoopPartitionMembershipWriter;
 impl PartitionMembershipWriter for NoopPartitionMembershipWriter {
     async fn upsert_item(
         &self,
-        _partition_id: &str,
-        _member_id: &str,
+        _partition_id: Arc<str>,
+        _member_id: Arc<str>,
         _payload: &serde_json::Value,
     ) -> Res<()> {
         Ok(())
     }
-
-    async fn remove_item(&self, _partition_id: &str, _member_id: &str) -> Res<()> {
+    async fn remove_item(&self, _member_id: Arc<str>) -> Res<()> {
         Ok(())
     }
 }
@@ -160,17 +157,15 @@ impl BlobsRepo {
         }))
     }
 
-    pub async fn add_hash_to_scope(&self, scope: BlobScope, hash: &str) -> Res<()> {
+    pub async fn add_hash_to_scope(&self, scope: BlobScope, hash: Arc<str>) -> Res<()> {
         let payload = serde_json::json!({});
         self.partition_writer
-            .upsert_item(scope.partition_id(), hash, &payload)
+            .upsert_item(scope.partition_id().into(), hash, &payload)
             .await
     }
 
-    pub async fn remove_hash_from_scope(&self, scope: BlobScope, hash: &str) -> Res<()> {
-        self.partition_writer
-            .remove_item(scope.partition_id(), hash)
-            .await
+    pub async fn remove_hash_from_scope(&self, scope: BlobScope, hash: Arc<str>) -> Res<()> {
+        self.partition_writer.remove_item(hash).await
     }
 
     pub async fn put_path_copy(&self, source_path: &Path) -> Res<String> {

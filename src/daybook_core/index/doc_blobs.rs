@@ -262,7 +262,7 @@ impl DocBlobsIndexRepo {
             .map(|(facets, _)| facets)
             .ok_or_eyre("doc didn't match expectation")?;
 
-        let mut blobs = HashMap::<String, u64>::new();
+        let mut blobs = HashMap::<Arc<str>, u64>::new();
         for (_facet_key, facet_raw) in facets {
             let facet =
                 match WellKnownFacet::from_json((*facet_raw).clone(), WellKnownFacetTag::Blob) {
@@ -284,7 +284,10 @@ impl DocBlobsIndexRepo {
             if let Some(urls) = blob.urls {
                 for url in urls {
                     if let Some(hash) = parse_db_blob_hash(&url) {
-                        if let Some(existing_len) = blobs.insert(hash.clone(), blob.length_octets) {
+                        let hash: Arc<str> = hash.into();
+                        if let Some(existing_len) =
+                            blobs.insert(Arc::clone(&hash), blob.length_octets)
+                        {
                             eyre::ensure!(
                                 existing_len == blob.length_octets,
                                 "inconsistent blob length indexed for hash {hash}: {existing_len} != {}",
@@ -305,15 +308,16 @@ impl DocBlobsIndexRepo {
         doc_id: &DocId,
         branch_path: &BranchPathBuf,
         heads: &ChangeHashSet,
-        blobs: &HashMap<String, u64>,
+        blobs: &HashMap<Arc<str>, u64>,
     ) -> Res<ReindexDocOutcome> {
         let mut tx = self.db_pool.begin().await?;
-        let prev_hashes: HashSet<String> = self
+        let prev_hashes: HashSet<Arc<str>> = self
             .list_hashes_for_doc_branch_tx(tx.as_mut(), doc_id, branch_path)
             .await?
             .into_iter()
+            .map(|hash| hash.into())
             .collect();
-        let next_hashes: HashSet<String> = blobs.keys().cloned().collect();
+        let next_hashes: HashSet<Arc<str>> = blobs.keys().cloned().collect();
 
         let mut hashes_to_remove = HashSet::new();
         for hash in prev_hashes.difference(&next_hashes) {
@@ -324,7 +328,7 @@ impl DocBlobsIndexRepo {
                 hashes_to_remove.insert(hash.clone());
             }
         }
-        let hashes_to_add: HashSet<String> =
+        let hashes_to_add: HashSet<Arc<str>> =
             next_hashes.difference(&prev_hashes).cloned().collect();
         self.publish_hash_delta_with_retry(&hashes_to_add, &hashes_to_remove)
             .await?;
@@ -354,7 +358,7 @@ impl DocBlobsIndexRepo {
                     length_octets
                 )
             })?;
-            rows.push((hash.as_str(), length_octets_i64));
+            rows.push((&hash[..], length_octets_i64));
         }
 
         let mut query_builder = QueryBuilder::new(
@@ -377,10 +381,11 @@ impl DocBlobsIndexRepo {
 
     pub async fn delete_doc(&self, doc_id: &DocId) -> Res<()> {
         let mut tx = self.db_pool.begin().await?;
-        let prev_hashes: HashSet<String> = self
+        let prev_hashes: HashSet<Arc<str>> = self
             .list_hashes_for_doc_tx(tx.as_mut(), doc_id)
             .await?
             .into_iter()
+            .map(Into::into)
             .collect();
         let mut hashes_to_remove = HashSet::new();
         for hash in &prev_hashes {
@@ -407,10 +412,11 @@ impl DocBlobsIndexRepo {
         branch_path: &BranchPathBuf,
     ) -> Res<ReindexDocOutcome> {
         let mut tx = self.db_pool.begin().await?;
-        let prev_hashes: HashSet<String> = self
+        let prev_hashes: HashSet<Arc<str>> = self
             .list_hashes_for_doc_branch_tx(tx.as_mut(), doc_id, branch_path)
             .await?
             .into_iter()
+            .map(Into::into)
             .collect();
         let mut hashes_to_remove = HashSet::new();
         for hash in &prev_hashes {
@@ -454,15 +460,15 @@ impl DocBlobsIndexRepo {
 
     async fn publish_hash_delta_with_retry(
         &self,
-        hashes_to_add: &HashSet<String>,
-        hashes_to_remove: &HashSet<String>,
+        hashes_to_add: &HashSet<Arc<str>>,
+        hashes_to_remove: &HashSet<Arc<str>>,
     ) -> Res<()> {
         const MAX_ATTEMPTS: usize = 3;
         for hash in hashes_to_add {
             for attempt in 1..=MAX_ATTEMPTS {
                 let result = self
                     .blobs_repo
-                    .add_hash_to_scope(BlobScope::Docs, hash)
+                    .add_hash_to_scope(BlobScope::Docs, Arc::clone(&hash))
                     .await;
                 match result {
                     Ok(()) => break,
@@ -477,7 +483,7 @@ impl DocBlobsIndexRepo {
             for attempt in 1..=MAX_ATTEMPTS {
                 let result = self
                     .blobs_repo
-                    .remove_hash_from_scope(BlobScope::Docs, hash)
+                    .remove_hash_from_scope(BlobScope::Docs, Arc::clone(&hash))
                     .await;
                 match result {
                     Ok(()) => break,
@@ -907,15 +913,13 @@ mod tests {
     }
 
     async fn wait_for_partition_member_count(
-        big_repo: &SharedBigRepo,
-        partition_id: &str,
+        part_store: &Arc<am_utils_rs::partition::PartitionStore>,
+        partition_id: &Arc<str>,
         expected: i64,
     ) -> Res<()> {
         let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(10);
         while tokio::time::Instant::now() < deadline {
-            let count = big_repo
-                .partition_member_count(&partition_id.to_string())
-                .await?;
+            let count = part_store.member_count(partition_id).await?;
             if count == expected {
                 return Ok(());
             }
@@ -1006,12 +1010,7 @@ mod tests {
     #[tokio::test(flavor = "multi_thread")]
     async fn doc_blobs_index_publishes_docs_scope_partition_membership() -> Res<()> {
         let local_user_path = daybook_types::doc::UserPathBuf::from("/test-user/test-device");
-        let (big_repo, big_repo_stop) = BigRepo::boot(am_utils_rs::repo::Config {
-            peer_id: crate::peer_id_from_label("test-doc-blobs-scope"),
-            secret_key_bytes: rand::random::<[u8; 32]>(),
-            storage: am_utils_rs::repo::StorageConfig::Memory,
-        })
-        .await?;
+        let (big_repo, part_store, big_repo_stop) = crate::drawer::tests::boot_repo().await?;
         let mut drawer_doc = automerge::Automerge::new();
         {
             use automerge::transaction::Transactable;
@@ -1029,12 +1028,13 @@ mod tests {
             temp_dir.path().join("blobs"),
             "/test-user".into(),
             Arc::new(crate::blobs::PartitionStoreMembershipWriter::new(
-                big_repo.partition_store(),
+                Arc::clone(&part_store),
             )),
         )
         .await?;
         let (drawer_repo, drawer_stop) = crate::drawer::DrawerRepo::load(
             Arc::clone(&big_repo),
+            Arc::clone(&part_store),
             drawer_doc_id,
             local_user_path.clone(),
             crate::app::SqlCtx::new(crate::app::SqlConfig {
@@ -1087,28 +1087,26 @@ mod tests {
             .ok_or_eyre("expected main branch heads for test doc")?;
         repo.enqueue_upsert(doc_id.clone(), BranchPathBuf::from("main"), heads)?;
 
-        wait_for_partition_member_count(&big_repo, &partition_id, 1).await?;
+        wait_for_partition_member_count(&part_store, &partition_id, 1).await?;
         assert!(
-            big_repo
-                .partition_store()
-                .is_member_present_in_item_state(&partition_id, &hash)
+            part_store
+                .is_item_member_of_partitions(&hash, &[Arc::clone(&partition_id)],)
                 .await?
         );
 
         drawer_repo.del(&doc_id).await?;
         repo.enqueue_delete(doc_id.clone())?;
-        wait_for_partition_member_count(&big_repo, &partition_id, 0).await?;
+        wait_for_partition_member_count(&part_store, &partition_id, 0).await?;
         assert!(
-            !big_repo
-                .partition_store()
-                .is_member_present_in_item_state(&partition_id, &hash)
+            part_store
+                .is_item_member_of_partitions(&hash, &[Arc::clone(&partition_id)],)
                 .await?
         );
 
         repo_stop.stop().await?;
         sqlite_local_state_stop.stop().await?;
         drawer_stop.stop().await?;
-        big_repo_stop.stop().await?;
+        big_repo_stop().await?;
         Ok(())
     }
 }

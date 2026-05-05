@@ -6,10 +6,7 @@ pub(super) struct BlobSyncWorkerStopToken {
 
 impl BlobSyncWorkerStopToken {
     pub async fn stop(self) -> Res<()> {
-        self.task_handle.abort();
-        tokio::time::timeout(Duration::from_secs(2), self.task_handle.join())
-            .await
-            .ok();
+        self.task_handle.join(Duration::from_secs(2)).await?;
         Ok(())
     }
 }
@@ -25,26 +22,39 @@ pub fn spawn_blob_sync_worker(
     partition: PartitionKey,
     hash: Arc<str>,
     peers: Vec<PeerId>,
+    msg_tx: mpsc::UnboundedSender<Msg>,
     sync_progress_tx: mpsc::Sender<SyncProgressMsg>,
     blobs_repo: Arc<BlobsRepo>,
     endpoint: iroh::Endpoint,
-    retry: RetryState,
+    previous_retry_state: RetryState,
     task_set: &utils_rs::AbortableJoinSet,
 ) -> Res<BlobSyncWorkerStopToken> {
-    let worker = BlobSyncWorker {
+    let mut worker = BlobSyncWorker {
         partition,
         hash,
         peers,
         sync_progress_tx,
         blobs_repo,
         endpoint,
-        retry,
+        retry: previous_retry_state,
     };
     let fut = async move {
-        match worker.run().await {
+        let msg = match worker.run().await {
             Ok(msg) => msg,
-            Err(err) => todo!(),
-        }
+            Err(err) => {
+                worker.send_progress(SyncProgressMsg::BlobDownloadFinished {
+                    hash: Arc::clone(&worker.hash),
+                    partition: worker.partition.clone(),
+                    error: Some(err),
+                });
+                Msg::BlobSyncBackoff {
+                    hash: worker.hash,
+                    previous_retry_state,
+                    delay: Duration::from_secs(2),
+                }
+            }
+        };
+        msg_tx.send(msg).inspect_err(|_| warn!(ERROR_CALLER)).ok();
     };
     let task_handle = task_set
         .spawn(fut.instrument(tracing::info_span!("BlobSyncWorker task")))
@@ -116,7 +126,7 @@ impl BlobSyncWorker {
 
         let downloader = self.blobs_repo.iroh_store().downloader(&self.endpoint);
         let progress = downloader.download(iroh_hash, self.peers.clone());
-        let stream = progress.stream().await?;
+        let mut stream = progress.stream().await?;
 
         let mut selected_endpoint: Option<PeerId> = None;
         let mut saw_download_signal = false;
@@ -126,12 +136,12 @@ impl BlobSyncWorker {
             if saw_download_error {
                 warn!("curiousity trap: we saw stream cont after error");
             }
-            match item {
+            match &item {
                 iroh_blobs::api::downloader::DownloadProgressItem::TryProvider { id, .. } => {
                     saw_download_signal = true;
-                    selected_endpoint = Some(id.into());
+                    selected_endpoint = Some((*id).into());
                     self.send_progress(SyncProgressMsg::BlobDownloadStarted {
-                        peer_id: id.into(),
+                        peer_id: (*id).into(),
                         partition: self.partition.clone(),
                         hash: Arc::clone(&self.hash),
                     })
@@ -144,7 +154,7 @@ impl BlobSyncWorker {
                             peer_id,
                             partition: self.partition.clone(),
                             hash: Arc::clone(&self.hash),
-                            done,
+                            done_counter: *done,
                         })
                         .await;
                     }
@@ -155,13 +165,14 @@ impl BlobSyncWorker {
                 iroh_blobs::api::downloader::DownloadProgressItem::ProviderFailed { .. } => {}
                 iroh_blobs::api::downloader::DownloadProgressItem::DownloadError
                 | iroh_blobs::api::downloader::DownloadProgressItem::Error(_) => {
+                    error!("download error progress: {item:?}");
                     saw_download_error = true;
                 }
             }
         }
 
         if saw_download_error {
-            eyre::bail!("error seen during download");
+            eyre::bail!("error seen during download saw_download_signal={saw_download_signal}");
         }
 
         if !self.blobs_repo.iroh_store().blobs().has(iroh_hash).await? {

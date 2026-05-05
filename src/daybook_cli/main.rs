@@ -1215,6 +1215,7 @@ mod lazy {
     use daybook_core::plugs::PlugsRepo;
     use daybook_core::progress::ProgressRepo;
     use daybook_core::rt::dispatch::DispatchRepo;
+    use daybook_core::rt::init::InitRepo;
     use daybook_core::sync::IrohSyncRepo;
 
     static RT: OnceLock<Res<Arc<tokio::runtime::Runtime>>> = OnceLock::new();
@@ -1533,6 +1534,43 @@ mod lazy {
         }
     }
 
+    pub async fn init_repo() -> Res<Arc<InitRepo>> {
+        static SYNC: tokio::sync::OnceCell<Arc<IrohSyncRepo>> = tokio::sync::OnceCell::const_new();
+        match SYNC
+            .get_or_try_init(|| async {
+                let rcx = repo_ctx().await?;
+                let (repo, stop) = InitRepo::load(
+                    Arc::clone(&rcx.big_repo),
+                    rcx.doc_app.document_id().clone(),
+                    rcx.local_actor_id.clone(),
+                    rcx.sql.clone(),
+                )
+                .await?;
+                register_shutdown(move || async move { stop.stop().await });
+                Ok(repo)
+            })
+            .await
+        {
+            Ok(repo) => Ok(Arc::clone(repo)),
+            Err(err) => Err(err),
+        }
+    }
+    pub async fn sqlite_local_state_repo() -> Res<Arc<SqliteLocalStateRepo>> {
+        static SYNC: tokio::sync::OnceCell<Arc<IrohSyncRepo>> = tokio::sync::OnceCell::const_new();
+        match SYNC
+            .get_or_try_init(|| async {
+                let rcx = repo_ctx().await?;
+                let (repo, stop) =
+                    SqliteLocalStateRepo::boot(rcx.layout.repo_root.join("local_state")).await?;
+                register_shutdown(move || async move { stop.stop().await });
+                Ok(repo)
+            })
+            .await
+        {
+            Ok(repo) => Ok(Arc::clone(repo)),
+            Err(err) => Err(err),
+        }
+    }
     pub async fn daybook_rt() -> Res<Arc<daybook_core::rt::Rt>> {
         static DAYBOOK_RT: tokio::sync::OnceCell<Arc<daybook_core::rt::Rt>> =
             tokio::sync::OnceCell::const_new();
@@ -1545,22 +1583,21 @@ mod lazy {
                 let progress = progress_repo().await?;
                 let blobs = blobs_repo().await?;
                 let config_repo = config_repo().await?;
+                let init_repo = init_repo().await?;
+                let local_state_sqlite_repo = sqlite_local_state_repo().await?;
                 let (rt, stop) = daybook_core::rt::Rt::boot(
                     daybook_core::rt::RtConfig {
                         device_id: "main_TODO_XXX".into(),
                     },
-                    ctx.doc_app.document_id().clone(),
-                    format!("sqlite://{}", ctx.layout.sqlite_path.display()),
-                    ctx.sql.db_pool.clone(),
-                    Arc::clone(&ctx.big_repo),
+                    Arc::clone(&ctx),
                     Arc::clone(&drawer),
                     Arc::clone(&plugs),
                     Arc::clone(&dispatch),
                     Arc::clone(&progress),
                     Arc::clone(&blobs),
                     Arc::clone(&config_repo),
-                    ctx.local_actor_id.clone(),
-                    ctx.layout.repo_root.join("local_state"),
+                    Arc::clone(&init_repo),
+                    Arc::clone(&local_state_sqlite_repo),
                 )
                 .await?;
                 register_shutdown(move || async move { stop.stop().await });

@@ -299,8 +299,8 @@ pub async fn spawn_switch_worker(
                 .await?;
             let mut partition_listener = worker
                 .rt
-                .big_repo
-                .partition_store()
+                .rcx
+                .partition_store
                 .subscribe_partition_item_events_local(
                     &docs_partition_id,
                     Some(cursor),
@@ -407,7 +407,7 @@ pub async fn spawn_switch_worker(
                                 cursor,
                                 commit
                                     .as_ref()
-                                    .map(|(branch_doc_id, _)| branch_doc_id.as_str()),
+                                    .map(|(branch_doc_id, _)| &branch_doc_id[..]),
                                 commit.as_ref().map(|(_, state)| state),
                             )
                             .await?;
@@ -521,7 +521,7 @@ impl SwitchWorker {
     async fn handle_partition_doc_event(
         &mut self,
         event: &PartitionItemEvent,
-    ) -> Res<Option<(String, SwitchDocState)>> {
+    ) -> Res<Option<(Arc<str>, SwitchDocState)>> {
         let branch_doc_id = match &event.deets {
             PartitionItemEventDeets::ItemChanged { item_id, .. }
             | PartitionItemEventDeets::ItemDeleted { item_id, .. } => item_id.clone(),

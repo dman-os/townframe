@@ -1346,7 +1346,7 @@ where
             },
         ));
         self.partition_store
-            .upsert_item(Arc::clone(&self.doc_id_str), &item_payload)
+            .upsert_item(Arc::clone(&self.doc_id_str), &item_payload, &[])
             .await?;
         self.change_manager
             .notify_doc_created(self.doc_id, Arc::clone(&heads))?;
@@ -1760,7 +1760,7 @@ async fn commit_delta_bookkeep(
         "bookkeeping committed delta"
     );
     partition_store
-        .upsert_item(doc_id_str, &item_payload)
+        .upsert_item(doc_id_str, &item_payload, &[])
         .await?;
 
     let heads_arc = Arc::<[automerge::ChangeHash]>::from(heads);

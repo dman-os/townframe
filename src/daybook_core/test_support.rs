@@ -135,11 +135,16 @@ pub async fn test_cx_with_options(
     let peer_id = crate::peer_id_from_label(&format!("test_{}", uuid::Uuid::new_v4().simple()));
 
     // Initialize SharedBigRepo with memory storage
-    let (big_repo, acx_stop) = BigRepo::boot(am_utils_rs::repo::Config {
-        peer_id,
-        secret_key_bytes: rand::random::<[u8; 32]>(),
-        storage: am_utils_rs::repo::StorageConfig::Memory,
-    })
+    let (part_store, part_store_stop) =
+        crate::drawer::tests::boot_part_store("sqlite::memory:").await?;
+    let (big_repo, acx_stop) = BigRepo::boot(
+        am_utils_rs::repo::Config {
+            peer_id,
+            secret_key_bytes: rand::random::<[u8; 32]>(),
+            storage: am_utils_rs::repo::StorageConfig::Memory,
+        },
+        Arc::clone(&part_store),
+    )
     .await?;
 
     // Create a drawer document
@@ -167,7 +172,7 @@ pub async fn test_cx_with_options(
         temp_dir.path().join("blobs"),
         local_user_path.clone(),
         Arc::new(crate::blobs::PartitionStoreMembershipWriter::new(
-            big_repo.partition_store(),
+            Arc::clone(&big_repo),
         )),
     )
     .await?;
@@ -222,6 +227,7 @@ pub async fn test_cx_with_options(
         crate::progress::ProgressRepo::boot(sql_ctx.clone()).await?;
     let (drawer_repo, drawer_stop) = DrawerRepo::load(
         Arc::clone(&big_repo),
+        Arc::clone(&part_store),
         drawer_doc_id,
         local_user_path.clone(),
         sql_ctx.clone(),

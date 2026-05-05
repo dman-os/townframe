@@ -1642,12 +1642,7 @@ mod tests {
 
     #[tokio::test(flavor = "multi_thread")]
     async fn load_ensures_non_empty_tables_graph() -> Res<()> {
-        let (big_repo, big_repo_stop) = BigRepo::boot(am_utils_rs::repo::Config {
-            peer_id: crate::peer_id_from_label("test-tables-ensure-non-empty"),
-            secret_key_bytes: rand::random::<[u8; 32]>(),
-            storage: am_utils_rs::repo::StorageConfig::Memory,
-        })
-        .await?;
+        let (big_repo, _part_store, big_repo_stop) = crate::drawer::tests::boot_repo().await?;
 
         let app_doc_id = {
             let doc_bytes = crate::app::version_updates::version_latest()?;
@@ -1689,7 +1684,7 @@ mod tests {
         );
 
         stop_token.stop().await?;
-        big_repo_stop.stop().await?;
+        big_repo_stop().await?;
         Ok(())
     }
 }

@@ -7,14 +7,13 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use automerge::ChangeHash;
 use autosurgeon::{Hydrate, Prop, Reconcile};
 use sedimentree_core::loose_commit::id::CommitId;
-use sqlx::sqlite::SqliteConnectOptions;
 
 mod changes;
 pub mod rpc;
 mod runtime;
-pub use runtime::SyncDocOutcome;
+pub use runtime::{PutDocError, SyncDocOutcome};
 
-use crate::partition::{PartitionStore, PartitionStoreStopToken};
+use crate::partition::PartitionStore;
 use crate::sync::protocol::*;
 
 pub use changes::{
@@ -57,35 +56,15 @@ pub struct BigRepo {
 pub type SharedBigRepo = Arc<BigRepo>;
 
 impl BigRepo {
-    pub async fn boot(config: Config) -> Res<(Arc<Self>, BigRepoStopToken)> {
+    pub async fn boot(
+        config: Config,
+        partition_store: Arc<PartitionStore>,
+    ) -> Res<(Arc<Self>, BigRepoStopToken)> {
         let Config {
             peer_id,
             secret_key_bytes,
             storage,
         } = config;
-        let sqlite_url = match &storage {
-            StorageConfig::Memory => "sqlite::memory:".to_string(),
-            StorageConfig::Disk { path } => {
-                std::fs::create_dir_all(path).wrap_err_with(|| {
-                    format!("Failed to create storage directory: {}", path.display())
-                })?;
-                format!("sqlite://{}", path.join("big_repo.sqlite").display())
-            }
-        };
-
-        let state_pool = {
-            let connect_options = SqliteConnectOptions::from_str(&sqlite_url)
-                .wrap_err_with(|| format!("invalid sqlite url: {sqlite_url}"))?
-                .create_if_missing(true);
-            sqlx::sqlite::SqlitePoolOptions::new()
-                .max_connections(1)
-                .connect_with(connect_options)
-                .await
-                .wrap_err("failed connecting big repo sqlite")?
-        };
-
-        let (partition_store, partition_store_stop) =
-            PartitionStore::boot(state_pool.clone()).await?;
 
         let (change_manager, change_manager_stop) = changes::ChangeListenerManager::boot();
         let signer = subduction_crypto::signer::memory::MemorySigner::from_bytes(&secret_key_bytes);
@@ -135,13 +114,8 @@ impl BigRepo {
             BigRepoStopToken {
                 runtime_stop,
                 change_manager_stop: Some(change_manager_stop),
-                partition_store_stop,
             },
         ))
-    }
-
-    pub fn partition_store(&self) -> Arc<PartitionStore> {
-        Arc::clone(&self.partition_store)
     }
 
     pub fn local_peer_id(&self) -> PeerId {
@@ -373,13 +347,11 @@ impl BigRepo {
 pub struct BigRepoStopToken {
     runtime_stop: runtime::BigRepoRuntimeStopToken,
     change_manager_stop: Option<changes::ChangeListenerManagerStopToken>,
-    partition_store_stop: PartitionStoreStopToken,
 }
 
 impl BigRepoStopToken {
     pub async fn stop(mut self) -> Res<()> {
         self.runtime_stop.stop().await?;
-        self.partition_store_stop.stop().await?;
         if let Some(stop_token) = self.change_manager_stop.take() {
             stop_token.stop().await?;
         }
@@ -552,11 +524,37 @@ impl BigDocHandle {
     }
 }
 
+async fn partition_doc_heads_payload(
+    part_store: &PartitionStore,
+    doc_id: &str,
+) -> Res<Arc<[ChangeHash]>> {
+    tracing::info!(doc_id, "loading partition doc heads payload");
+    let mut before_heads = part_store
+        .item_payload(doc_id)
+        .await?
+        .expect("doc was not in partition previously");
+    let before_heads = before_heads
+        .as_object_mut()
+        .expect(ERROR_IMPOSSIBLE)
+        .remove("heads")
+        .expect(ERROR_IMPOSSIBLE);
+    let before_heads: Vec<String> = serde_json::from_value(before_heads).expect(ERROR_IMPOSSIBLE);
+
+    tracing::info!(
+        doc_id,
+        heads = before_heads.len(),
+        "loaded partition doc heads payload"
+    );
+    Ok(crate::parse_commit_heads(&before_heads).expect(ERROR_IMPOSSIBLE))
+}
+
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     use super::*;
+    use crate::partition::{PartitionStore, PartitionStoreStopToken};
     use automerge::{transaction::Transactable, ReadDoc, ScalarValue};
     use autosurgeon::Prop;
+    use sqlx::sqlite::SqliteConnectOptions;
     use std::path::PathBuf;
     use std::sync::{
         atomic::{AtomicUsize, Ordering},
@@ -568,22 +566,84 @@ mod tests {
         time::{timeout, Duration},
     };
 
-    async fn boot_repo() -> Res<(Arc<BigRepo>, BigRepoStopToken)> {
-        BigRepo::boot(Config {
-            peer_id: PeerId::new([7_u8; 32]),
-            secret_key_bytes: [7_u8; 32],
-            storage: StorageConfig::Memory,
-        })
-        .await
+    pub async fn boot_part_store(
+        sqlite_url: &str,
+    ) -> Res<(Arc<PartitionStore>, PartitionStoreStopToken)> {
+        let state_pool = {
+            let connect_options = SqliteConnectOptions::from_str(&sqlite_url)
+                .expect(ERROR_IMPOSSIBLE)
+                .create_if_missing(true);
+            sqlx::sqlite::SqlitePoolOptions::new()
+                .max_connections(1)
+                .connect_with(connect_options)
+                .await
+                .wrap_err("failed connecting big repo sqlite")?
+        };
+
+        PartitionStore::boot(state_pool).await
+    }
+    pub async fn boot_repo() -> Res<(
+        Arc<BigRepo>,
+        Arc<PartitionStore>,
+        Box<dyn FnOnce() -> futures::future::BoxFuture<'static, Res<()>>>,
+    )> {
+        let (partition_store, partition_store_stop) = boot_part_store("sqlite::memory:").await?;
+        let (repo, stop) = BigRepo::boot(
+            Config {
+                peer_id: PeerId::new([7_u8; 32]),
+                secret_key_bytes: [7_u8; 32],
+                storage: StorageConfig::Memory,
+            },
+            Arc::clone(&partition_store),
+        )
+        .await?;
+        Ok((
+            repo,
+            partition_store,
+            Box::new(move || {
+                async move {
+                    stop.stop().await?;
+                    partition_store_stop.stop().await?;
+                    eyre::Ok(())
+                }
+                .boxed()
+            }),
+        ))
     }
 
-    async fn boot_disk_repo(path: PathBuf) -> Res<(Arc<BigRepo>, BigRepoStopToken)> {
-        BigRepo::boot(Config {
-            peer_id: PeerId::new([7_u8; 32]),
-            secret_key_bytes: [7_u8; 32],
-            storage: StorageConfig::Disk { path },
-        })
-        .await
+    pub async fn boot_disk_repo(
+        path: PathBuf,
+    ) -> Res<(
+        Arc<BigRepo>,
+        Arc<PartitionStore>,
+        Box<dyn FnOnce() -> futures::future::BoxFuture<'static, Res<()>>>,
+    )> {
+        let (partition_store, partition_store_stop) = boot_part_store(&format!(
+            "sqlite://{}",
+            path.join("part_store.db").display()
+        ))
+        .await?;
+        let (repo, stop) = BigRepo::boot(
+            Config {
+                peer_id: PeerId::new([7_u8; 32]),
+                secret_key_bytes: [7_u8; 32],
+                storage: StorageConfig::Disk { path },
+            },
+            Arc::clone(&partition_store),
+        )
+        .await?;
+        Ok((
+            repo,
+            partition_store,
+            Box::new(move || {
+                async move {
+                    stop.stop().await?;
+                    partition_store_stop.stop().await?;
+                    eyre::Ok(())
+                }
+                .boxed()
+            }),
+        ))
     }
 
     fn get_int_at_root(doc: &automerge::Automerge, key: &str) -> i64 {
@@ -650,7 +710,7 @@ mod tests {
 
     #[tokio::test]
     async fn put_doc_get_doc_and_export_roundtrip() -> Res<()> {
-        let (repo, _stop_token) = boot_repo().await?;
+        let (repo, _part_store, _stop_token) = boot_repo().await?;
         let doc_id = DocumentId::random();
         let mut doc = automerge::Automerge::new();
         doc.transact(|tx| tx.put(automerge::ROOT, "title", "seed"))
@@ -682,27 +742,27 @@ mod tests {
         let payload = uuid::Uuid::new_v4().to_string();
         let value = make_sync_doc_value_with_payload("base", 1024, &payload);
 
-        let (repo, stop_token) = boot_disk_repo(repo_path.clone()).await?;
+        let (repo, _part_store, stop_token) = boot_disk_repo(repo_path.clone()).await?;
         let mut doc = automerge::Automerge::new();
         write_sync_doc_value_as_transactions(&mut doc, &value);
         let handle = repo.put_doc(doc_id, doc).await?;
         drop(handle);
-        stop_token.stop().await?;
+        stop_token().await?;
 
-        let (repo, stop_token) = boot_disk_repo(repo_path).await?;
+        let (repo, _part_store, stop_token) = boot_disk_repo(repo_path).await?;
         let reopened = repo.get_doc(&doc_id).await?.expect("doc should exist");
         assert!(
             reopened.fragment_state_store_len().await > 0,
             "reopened docs should rebuild fragment state"
         );
         drop(reopened);
-        stop_token.stop().await?;
+        stop_token().await?;
         Ok(())
     }
 
     #[tokio::test]
     async fn put_doc_rejects_existing_local_doc_id() -> Res<()> {
-        let (repo, _stop_token) = boot_repo().await?;
+        let (repo, _part_store, _stop_token) = boot_repo().await?;
         let doc_id = DocumentId::random();
         let _ = repo.put_doc(doc_id, automerge::Automerge::new()).await?;
         let err = repo
@@ -784,7 +844,7 @@ mod tests {
 
     #[tokio::test]
     async fn with_document_roundtrip_rehydrates_from_storage() -> Res<()> {
-        let (repo, _stop_token) = boot_repo().await?;
+        let (repo, _part_store, _stop_token) = boot_repo().await?;
         let mut doc = automerge::Automerge::new();
         doc.transact(|tx| tx.put(automerge::ROOT, "title", "before"))
             .expect("failed initializing title");
@@ -809,7 +869,7 @@ mod tests {
 
     #[tokio::test]
     async fn change_listener_doc_id_filter_only_receives_target_doc() -> Res<()> {
-        let (repo, _stop_token) = boot_repo().await?;
+        let (repo, _part_store, _stop_token) = boot_repo().await?;
         let first_handle = repo
             .put_doc(DocumentId::random(), automerge::Automerge::new())
             .await?;
@@ -851,7 +911,7 @@ mod tests {
 
     #[tokio::test]
     async fn change_listener_path_filter_matches_only_prefix() -> Res<()> {
-        let (repo, _stop_token) = boot_repo().await?;
+        let (repo, _part_store, _stop_token) = boot_repo().await?;
         let handle = repo
             .put_doc(DocumentId::random(), automerge::Automerge::new())
             .await?;
@@ -928,7 +988,7 @@ mod tests {
 
     #[tokio::test]
     async fn change_listener_origin_filter_works_for_local_events() -> Res<()> {
-        let (repo, _stop_token) = boot_repo().await?;
+        let (repo, _part_store, _stop_token) = boot_repo().await?;
         let (_registration, mut rx) = repo
             .subscribe_change_listener(BigRepoChangeFilter {
                 doc_id: None,
@@ -958,7 +1018,7 @@ mod tests {
 
     #[tokio::test]
     async fn change_and_head_listeners_ignore_noop_mutation() -> Res<()> {
-        let (repo, _stop_token) = boot_repo().await?;
+        let (repo, _part_store, _stop_token) = boot_repo().await?;
         let handle = repo
             .put_doc(DocumentId::random(), automerge::Automerge::new())
             .await?;
@@ -995,7 +1055,7 @@ mod tests {
 
     #[tokio::test]
     async fn remote_change_and_head_notifications_survive_handle_reopen() -> Res<()> {
-        let (repo, _stop_token) = boot_repo().await?;
+        let (repo, _part_store, _stop_token) = boot_repo().await?;
         let doc_id = DocumentId::random();
         let mut doc = automerge::Automerge::new();
         doc.transact(|tx| tx.put(automerge::ROOT, "title", "seed"))
@@ -1064,7 +1124,7 @@ mod tests {
 
     #[tokio::test]
     async fn with_document_handles_concurrent_writers() -> Res<()> {
-        let (repo, _stop_token) = boot_repo().await?;
+        let (repo, _part_store, _stop_token) = boot_repo().await?;
         let handle = repo
             .put_doc(DocumentId::random(), automerge::Automerge::new())
             .await?;
@@ -1360,17 +1420,26 @@ mod tests {
         accept_notify: Arc<Notify>,
         accepted_connection: Arc<tokio::sync::Mutex<Option<BigRepoConnection>>>,
         accept_task: Option<tokio::task::JoinHandle<()>>,
+        partition_store_stop: PartitionStoreStopToken,
     }
 
     impl SyncRepoNode {
         #[tracing::instrument(skip(path), fields(seed, accept_incoming))]
         async fn boot(path: PathBuf, seed: u8, accept_incoming: bool) -> Res<Self> {
             tracing::info!(path = %path.display(), "booting sync repo node");
-            let (repo, stop_token) = BigRepo::boot(Config {
-                peer_id: PeerId::new([seed; 32]),
-                secret_key_bytes: [seed; 32],
-                storage: StorageConfig::Disk { path },
-            })
+            let (partition_store, partition_store_stop) = boot_part_store(&format!(
+                "sqlite://{}",
+                path.join("part_store.db").display()
+            ))
+            .await?;
+            let (repo, stop_token) = BigRepo::boot(
+                Config {
+                    peer_id: PeerId::new([seed; 32]),
+                    secret_key_bytes: [seed; 32],
+                    storage: StorageConfig::Disk { path },
+                },
+                partition_store,
+            )
             .await?;
             let endpoint = iroh::Endpoint::builder()
                 .alpns(vec![subduction_iroh::ALPN.to_vec()])
@@ -1419,6 +1488,7 @@ mod tests {
             Ok(Self {
                 repo,
                 stop_token,
+                partition_store_stop,
                 endpoint,
                 accept_count,
                 accept_notify,
@@ -1464,6 +1534,7 @@ mod tests {
                 task.await.expect("accept loop panicked");
             }
             self.stop_token.stop().await?;
+            self.partition_store_stop.stop().await?;
             Ok(())
         }
     }
@@ -2291,28 +2362,4 @@ mod tests {
         .expect("sync test timed out")?;
         eyre::Ok(())
     }
-}
-
-async fn partition_doc_heads_payload(
-    part_store: &PartitionStore,
-    doc_id: &str,
-) -> Res<Arc<[ChangeHash]>> {
-    tracing::info!(doc_id, "loading partition doc heads payload");
-    let mut before_heads = part_store
-        .item_payload(doc_id)
-        .await?
-        .expect("doc was not in partition previously");
-    let before_heads = before_heads
-        .as_object_mut()
-        .expect(ERROR_IMPOSSIBLE)
-        .remove("heads")
-        .expect(ERROR_IMPOSSIBLE);
-    let before_heads: Vec<String> = serde_json::from_value(before_heads).expect(ERROR_IMPOSSIBLE);
-
-    tracing::info!(
-        doc_id,
-        heads = before_heads.len(),
-        "loaded partition doc heads payload"
-    );
-    Ok(crate::parse_commit_heads(&before_heads).expect(ERROR_IMPOSSIBLE))
 }

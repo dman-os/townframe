@@ -26,31 +26,17 @@ pub struct PartitionStore {
 }
 
 impl PartitionStore {
-    fn new(
-        state_pool: sqlx::SqlitePool,
-        partition_events_tx: broadcast::Sender<PartitionEvent>,
-        partition_forwarder_cancel: CancellationToken,
-        partition_forwarders: Arc<utils_rs::AbortableJoinSet>,
-    ) -> Self {
-        Self {
-            state_pool,
-            partition_events_tx,
-            partition_forwarder_cancel,
-            partition_forwarders,
-        }
-    }
-
     pub async fn boot(state_pool: sqlx::SqlitePool) -> Res<(Arc<Self>, PartitionStoreStopToken)> {
         let (partition_events_tx, _) =
             broadcast::channel(crate::sync::protocol::DEFAULT_SUBSCRIPTION_CAPACITY);
         let partition_forwarder_cancel = CancellationToken::new();
         let partition_forwarders = Arc::new(utils_rs::AbortableJoinSet::new());
-        let store = Arc::new(Self::new(
+        let store = Arc::new(Self {
             state_pool,
             partition_events_tx,
-            partition_forwarder_cancel.clone(),
-            Arc::clone(&partition_forwarders),
-        ));
+            partition_forwarder_cancel: partition_forwarder_cancel.clone(),
+            partition_forwarders: Arc::clone(&partition_forwarders),
+        });
         store.ensure_schema().await?;
         Ok((
             store,
@@ -187,7 +173,7 @@ impl PartitionStore {
         Ok(ids)
     }
 
-    pub async fn is_item_present_in_membership_partitions(
+    pub async fn is_item_member_of_partitions(
         &self,
         item_id: &str,
         allowed_partitions: &[PartitionId],
@@ -708,13 +694,35 @@ impl PartitionStore {
         Ok(())
     }
 
-    pub async fn upsert_item(&self, item_id: Arc<str>, item_payload: &serde_json::Value) -> Res<()> {
+    pub async fn upsert_item(
+        &self,
+        item_id: Arc<str>,
+        item_payload: &serde_json::Value,
+        partition_ids: &[PartitionId],
+    ) -> Res<()> {
         let mut tx = self.state_pool.begin().await?;
         let txid = record_item_upsert_tx(tx.as_mut(), &item_id, item_payload).await?;
-        let partition_ids = current_item_partition_ids(tx.as_mut(), &item_id).await?;
+        let mut partition_ids_to_add = partition_ids.to_vec();
+        partition_ids_to_add.sort();
+        partition_ids_to_add.dedup();
+        for partition_id in &partition_ids_to_add {
+            attach_item_to_partition_tx(tx.as_mut(), partition_id, &item_id, txid).await?;
+        }
+        let current_partition_ids = current_item_partition_ids(tx.as_mut(), &item_id).await?;
         tx.commit().await?;
 
-        for partition_id in partition_ids {
+        for partition_id in &partition_ids_to_add {
+            self.partition_events_tx
+                .send(PartitionEvent {
+                    cursor: txid,
+                    partition_id: partition_id.clone(),
+                    deets: PartitionEventDeets::MemberUpsert {
+                        item_id: Arc::clone(&item_id),
+                    },
+                })
+                .ok();
+        }
+        for partition_id in current_partition_ids {
             self.partition_events_tx
                 .send(PartitionEvent {
                     cursor: txid,
@@ -760,46 +768,8 @@ impl PartitionStore {
         item_id: Arc<str>,
     ) -> Res<()> {
         let mut tx = self.state_pool.begin().await?;
-        sqlx::query(
-            r#"
-            INSERT INTO partitions(partition_id, latest_txid, change_count)
-            VALUES(?, 0, 0)
-            ON CONFLICT(partition_id) DO NOTHING
-            "#,
-        )
-        .bind(&partition_id[..])
-        .execute(&mut *tx)
-        .await?;
         let txid = alloc_txid(tx.as_mut()).await?;
-        sqlx::query(
-            r#"
-            INSERT INTO partition_items(
-                partition_id, item_id, present, added_at_txid, removed_at_txid, latest_txid
-            ) VALUES(?, ?, 1, ?, NULL, ?)
-            ON CONFLICT(partition_id, item_id) DO UPDATE SET
-                present = 1,
-                added_at_txid = excluded.added_at_txid,
-                removed_at_txid = NULL,
-                latest_txid = excluded.latest_txid
-            "#,
-        )
-        .bind(&partition_id[..])
-        .bind(&item_id[..])
-        .bind(txid as i64)
-        .bind(txid as i64)
-        .execute(&mut *tx)
-        .await?;
-        sqlx::query(
-            r#"
-            UPDATE partitions
-            SET latest_txid = ?, change_count = change_count + 1
-            WHERE partition_id = ?
-            "#,
-        )
-        .bind(txid as i64)
-        .bind(&partition_id[..])
-        .execute(&mut *tx)
-        .await?;
+        attach_item_to_partition_tx(tx.as_mut(), partition_id, &item_id, txid).await?;
         let item_payload = current_item_payload_value(tx.as_mut(), &item_id).await?;
         tx.commit().await?;
 
@@ -817,10 +787,7 @@ impl PartitionStore {
                 .send(PartitionEvent {
                     cursor: txid,
                     partition_id: partition_id.clone(),
-                    deets: PartitionEventDeets::ItemChanged {
-                        item_id,
-                        payload,
-                    },
+                    deets: PartitionEventDeets::ItemChanged { item_id, payload },
                 })
                 .ok();
         }
@@ -829,7 +796,7 @@ impl PartitionStore {
 
     pub async fn remove_item_from_partition(
         &self,
-        partition_id: &PartitionId,
+        partition_id: PartitionId,
         item_id: Arc<str>,
     ) -> Res<()> {
         let mut tx = self.state_pool.begin().await?;
@@ -896,7 +863,7 @@ impl PartitionStore {
         self.partition_events_tx
             .send(PartitionEvent {
                 cursor: txid,
-                partition_id: partition_id.clone(),
+                partition_id: Arc::clone(&partition_id),
                 deets: PartitionEventDeets::MemberRemoved {
                     item_id: Arc::clone(&item_id),
                 },
@@ -905,7 +872,7 @@ impl PartitionStore {
         self.partition_events_tx
             .send(PartitionEvent {
                 cursor: txid,
-                partition_id: partition_id.clone(),
+                partition_id: partition_id,
                 deets: PartitionEventDeets::ItemDeleted {
                     item_id,
                     payload: item_payload,
@@ -987,6 +954,54 @@ async fn record_item_upsert_tx(
     Ok(txid)
 }
 
+async fn attach_item_to_partition_tx(
+    conn: &mut sqlx::SqliteConnection,
+    partition_id: &PartitionId,
+    item_id: &str,
+    txid: u64,
+) -> Res<()> {
+    sqlx::query(
+        r#"
+        INSERT INTO partitions(partition_id, latest_txid, change_count)
+        VALUES(?, 0, 0)
+        ON CONFLICT(partition_id) DO NOTHING
+        "#,
+    )
+    .bind(&partition_id[..])
+    .execute(&mut *conn)
+    .await?;
+    sqlx::query(
+        r#"
+        INSERT INTO partition_items(
+            partition_id, item_id, present, added_at_txid, removed_at_txid, latest_txid
+        ) VALUES(?, ?, 1, ?, NULL, ?)
+        ON CONFLICT(partition_id, item_id) DO UPDATE SET
+            present = 1,
+            added_at_txid = excluded.added_at_txid,
+            removed_at_txid = NULL,
+            latest_txid = excluded.latest_txid
+        "#,
+    )
+    .bind(&partition_id[..])
+    .bind(item_id)
+    .bind(txid as i64)
+    .bind(txid as i64)
+    .execute(&mut *conn)
+    .await?;
+    sqlx::query(
+        r#"
+        UPDATE partitions
+        SET latest_txid = ?, change_count = change_count + 1
+        WHERE partition_id = ?
+        "#,
+    )
+    .bind(txid as i64)
+    .bind(&partition_id[..])
+    .execute(&mut *conn)
+    .await?;
+    Ok(())
+}
+
 async fn record_item_delete_tx(conn: &mut sqlx::SqliteConnection, item_id: &str) -> Res<u64> {
     let txid = alloc_txid(conn).await?;
     sqlx::query(
@@ -1021,12 +1036,10 @@ async fn current_item_payload_value(
     conn: &mut sqlx::SqliteConnection,
     item_id: &str,
 ) -> Res<Option<serde_json::Value>> {
-    let row = sqlx::query(
-        "SELECT item_payload_json, deleted FROM items WHERE item_id = ?",
-    )
-    .bind(item_id)
-    .fetch_optional(&mut *conn)
-    .await?;
+    let row = sqlx::query("SELECT item_payload_json, deleted FROM items WHERE item_id = ?")
+        .bind(item_id)
+        .fetch_optional(&mut *conn)
+        .await?;
     let Some(row) = row else {
         return Ok(None);
     };
@@ -1245,40 +1258,14 @@ fn cmp_item_events(left: &PartitionItemEvent, right: &PartitionItemEvent) -> std
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::repo::{BigRepo, Config, PeerId, StorageConfig};
-    use sqlx::sqlite::SqlitePoolOptions;
     use std::collections::HashSet;
     use tokio::time::{timeout, Duration};
 
-    async fn make_store() -> PartitionStore {
-        let pool = SqlitePoolOptions::new()
-            .max_connections(1)
-            .connect("sqlite::memory:")
+    async fn make_store() -> Arc<PartitionStore> {
+        let (store, _stop) = crate::repo::tests::boot_part_store(&"sqlite::memory:")
             .await
-            .expect("in-memory sqlite pool should initialize");
-        let (events_tx, _events_rx) = broadcast::channel(1024);
-        let forwarders = Arc::new(utils_rs::AbortableJoinSet::new());
-        let store = PartitionStore::new(
-            pool,
-            events_tx,
-            CancellationToken::new(),
-            Arc::clone(&forwarders),
-        );
+            .expect("error booting in memory part store");
         store
-            .ensure_schema()
-            .await
-            .expect("schema should initialize");
-        store
-    }
-
-    async fn boot_repo() -> (Arc<BigRepo>, crate::repo::BigRepoStopToken) {
-        BigRepo::boot(Config {
-            peer_id: PeerId::new([9_u8; 32]),
-            secret_key_bytes: [9_u8; 32],
-            storage: StorageConfig::Memory,
-        })
-        .await
-        .expect("big repo should boot")
     }
 
     #[tokio::test]
@@ -1288,7 +1275,7 @@ mod tests {
         let expected_payload = serde_json::json!({ "k": "v" });
 
         store
-            .upsert_item(item_id.into(), &expected_payload)
+            .upsert_item(item_id.into(), &expected_payload, &[])
             .await
             .expect("item upsert should succeed");
         store
@@ -1296,7 +1283,7 @@ mod tests {
             .await
             .expect("item remove should succeed");
         store
-            .upsert_item(item_id.into(), &expected_payload)
+            .upsert_item(item_id.into(), &expected_payload, &[])
             .await
             .expect("item re-upsert should succeed");
 
@@ -1313,12 +1300,51 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn upsert_item_can_attach_partitions_in_one_tx() {
+        let store = make_store().await;
+        let partition_id: PartitionId = "p-one-tx".into();
+        let item_id = Arc::<str>::from("item-1");
+        let expected_payload = serde_json::json!({ "k": "v" });
+
+        store
+            .upsert_item(
+                Arc::clone(&item_id),
+                &expected_payload,
+                std::slice::from_ref(&partition_id),
+            )
+            .await
+            .expect("item upsert should succeed");
+
+        assert_eq!(
+            store
+                .item_payload(&item_id)
+                .await
+                .expect("item payload should read"),
+            Some(expected_payload)
+        );
+        assert_eq!(
+            store
+                .member_count(&partition_id)
+                .await
+                .expect("partition should exist"),
+            1
+        );
+        assert_eq!(
+            store
+                .item_partition_count(&item_id)
+                .await
+                .expect("item membership count should read"),
+            1
+        );
+    }
+
+    #[tokio::test]
     async fn subscribe_partition_item_events_local_replays_then_tails() {
         let store = make_store().await;
         let partition_id: PartitionId = "p-docs-local-sub".into();
         let item_id = "item-1";
         store
-            .upsert_item(item_id.into(), &serde_json::json!({}))
+            .upsert_item(item_id.into(), &serde_json::json!({}), &[])
             .await
             .expect("item upsert should succeed");
         store
@@ -1326,7 +1352,7 @@ mod tests {
             .await
             .expect("item membership should succeed");
         store
-            .upsert_item(item_id.into(), &serde_json::json!({"a": 1}))
+            .upsert_item(item_id.into(), &serde_json::json!({"a": 1}), &[])
             .await
             .expect("item change should succeed");
 
@@ -1346,7 +1372,7 @@ mod tests {
         ));
 
         store
-            .remove_item_from_partition(&partition_id, item_id.into())
+            .remove_item_from_partition(Arc::clone(&partition_id), item_id.into())
             .await
             .expect("item delete should succeed");
         let live_evt = timeout(Duration::from_secs(2), rx.recv())
@@ -1365,7 +1391,7 @@ mod tests {
         let partition_id: PartitionId = "p-replay".into();
         for idx in 0..8 {
             store
-                .upsert_item(format!("item-{idx}").into(), &serde_json::json!({}))
+                .upsert_item(format!("item-{idx}").into(), &serde_json::json!({}), &[])
                 .await
                 .expect("item upsert should succeed");
             store
@@ -1393,8 +1419,8 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn get_docs_full_respects_allowed_partitions() {
-        let (repo, stop) = boot_repo().await;
+    async fn get_docs_full_respects_allowed_partitions() -> Res<()> {
+        let (repo, partition_store, stop) = crate::repo::tests::boot_repo().await?;
         let partition_a: PartitionId = "p-a".into();
         let partition_b: PartitionId = "p-b".into();
         let doc_a = repo
@@ -1402,31 +1428,33 @@ mod tests {
                 crate::repo::DocumentId::random(),
                 automerge::Automerge::new(),
             )
-            .await
-            .unwrap();
+            .await?;
         let doc_b = repo
             .put_doc(
                 crate::repo::DocumentId::random(),
                 automerge::Automerge::new(),
             )
-            .await
-            .unwrap();
-        repo.partition_store()
-            .upsert_item(doc_a.document_id().to_string().into(), &serde_json::json!({}))
-            .await
-            .unwrap();
-        repo.partition_store()
+            .await?;
+        partition_store
+            .upsert_item(
+                doc_a.document_id().to_string().into(),
+                &serde_json::json!({}),
+                &[],
+            )
+            .await?;
+        partition_store
             .add_item_to_partition(&partition_a, doc_a.document_id().to_string().into())
-            .await
-            .unwrap();
-        repo.partition_store()
-            .upsert_item(doc_b.document_id().to_string().into(), &serde_json::json!({}))
-            .await
-            .unwrap();
-        repo.partition_store()
+            .await?;
+        partition_store
+            .upsert_item(
+                doc_b.document_id().to_string().into(),
+                &serde_json::json!({}),
+                &[],
+            )
+            .await?;
+        partition_store
             .add_item_to_partition(&partition_b, doc_b.document_id().to_string().into())
-            .await
-            .unwrap();
+            .await?;
 
         let allowed = repo
             .get_docs_full_in_partitions(
@@ -1452,7 +1480,7 @@ mod tests {
             "access should be denied for partition-b doc"
         );
 
-        stop.stop().await.unwrap();
+        stop().await
     }
 
     #[tokio::test]
@@ -1464,7 +1492,7 @@ mod tests {
             let item_id = format!("item-{idx}").into();
             expected.insert(Arc::clone(&item_id));
             store
-                .upsert_item(Arc::clone(&item_id), &serde_json::json!({}))
+                .upsert_item(Arc::clone(&item_id), &serde_json::json!({}), &[])
                 .await
                 .expect("membership add should succeed");
             store
@@ -1517,7 +1545,7 @@ mod tests {
             let item_id = format!("item-{idx}").into();
             expected.insert(Arc::clone(&item_id));
             store
-                .upsert_item(Arc::clone(&item_id), &serde_json::json!({"idx": idx}))
+                .upsert_item(Arc::clone(&item_id), &serde_json::json!({"idx": idx}), &[])
                 .await
                 .expect("membership add should succeed");
             store

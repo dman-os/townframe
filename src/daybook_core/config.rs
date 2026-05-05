@@ -722,12 +722,7 @@ mod tests {
     #[tokio::test]
     async fn upsert_actor_user_path_registers_directory_entries() -> Res<()> {
         let local_user_path = daybook_types::doc::UserPathBuf::from("/test-user/test-device");
-        let (big_repo, _acx_stop) = BigRepo::boot(am_utils_rs::repo::Config {
-            peer_id: crate::peer_id_from_label("test-config-actors"),
-            secret_key_bytes: rand::random::<[u8; 32]>(),
-            storage: am_utils_rs::repo::StorageConfig::Memory,
-        })
-        .await?;
+        let (big_repo, part_store, _acx_stop) = crate::drawer::tests::boot_repo().await?;
 
         let app_doc = automerge::Automerge::load(&crate::app::version_updates::version_latest()?)?;
         let app_doc_handle = big_repo.put_doc(DocumentId::random(), app_doc).await?;
@@ -738,7 +733,7 @@ mod tests {
             temp.path().join("blobs"),
             local_user_path.clone(),
             Arc::new(crate::blobs::PartitionStoreMembershipWriter::new(
-                big_repo.partition_store(),
+                Arc::clone(&part_store),
             )),
         )
         .await?;
@@ -786,6 +781,7 @@ mod tests {
         config_stop.stop().await?;
         plugs_stop.stop().await?;
         blobs_repo.shutdown().await?;
+        _acx_stop().await?;
         Ok(())
     }
 }

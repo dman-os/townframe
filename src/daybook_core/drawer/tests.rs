@@ -9,6 +9,8 @@ use crate::drawer::{
 };
 use crate::repos::Repo;
 
+use am_utils_rs::partition::{PartitionStore, PartitionStoreStopToken};
+use am_utils_rs::repo::PeerId;
 use daybook_types::doc::{
     AddDocArgs, BranchPath, BranchPathBuf, ChangeHashSet, DocId, DocPatch, FacetKey,
 };
@@ -52,22 +54,97 @@ async fn new_meta_store_sql() -> Res<crate::app::SqlCtx> {
     .await
 }
 
+pub async fn boot_part_store(
+    sqlite_url: &str,
+) -> Res<(Arc<PartitionStore>, PartitionStoreStopToken)> {
+    let state_pool = {
+        let connect_options = sqlx::sqlite::SqliteConnectOptions::from_str(&sqlite_url)
+            .expect(ERROR_IMPOSSIBLE)
+            .create_if_missing(true);
+        sqlx::sqlite::SqlitePoolOptions::new()
+            .max_connections(1)
+            .connect_with(connect_options)
+            .await
+            .wrap_err("failed connecting big repo sqlite")?
+    };
+
+    PartitionStore::boot(state_pool).await
+}
+pub async fn boot_repo() -> Res<(
+    Arc<BigRepo>,
+    Arc<PartitionStore>,
+    Box<dyn FnOnce() -> futures::future::BoxFuture<'static, Res<()>>>,
+)> {
+    let (partition_store, partition_store_stop) = boot_part_store("sqlite::memory:").await?;
+    let (repo, stop) = BigRepo::boot(
+        am_utils_rs::repo::Config {
+            peer_id: crate::peer_id_from_label("test-v2"),
+            secret_key_bytes: rand::random::<[u8; 32]>(),
+            storage: am_utils_rs::repo::StorageConfig::Memory,
+        },
+        Arc::clone(&partition_store),
+    )
+    .await?;
+    Ok((
+        repo,
+        partition_store,
+        Box::new(move || {
+            async move {
+                stop.stop().await?;
+                partition_store_stop.stop().await?;
+                eyre::Ok(())
+            }
+            .boxed()
+        }),
+    ))
+}
+
+pub async fn boot_disk_repo(
+    path: PathBuf,
+) -> Res<(
+    Arc<BigRepo>,
+    Arc<PartitionStore>,
+    Box<dyn FnOnce() -> futures::future::BoxFuture<'static, Res<()>>>,
+)> {
+    let (partition_store, partition_store_stop) = boot_part_store(&format!(
+        "sqlite://{}",
+        path.join("part_store.db").display()
+    ))
+    .await?;
+    let (repo, stop) = BigRepo::boot(
+        am_utils_rs::repo::Config {
+            peer_id: PeerId::new([7_u8; 32]),
+            secret_key_bytes: rand::random::<[u8; 32]>(),
+            storage: am_utils_rs::repo::StorageConfig::Disk { path },
+        },
+        Arc::clone(&partition_store),
+    )
+    .await?;
+    Ok((
+        repo,
+        partition_store,
+        Box::new(move || {
+            async move {
+                stop.stop().await?;
+                partition_store_stop.stop().await?;
+                eyre::Ok(())
+            }
+            .boxed()
+        }),
+    ))
+}
+
 #[tokio::test(flavor = "multi_thread")]
 async fn test_v2_smoke() -> Res<()> {
     utils_rs::testing::setup_tracing_once();
-    let (big_repo, acx_stop) = BigRepo::boot(am_utils_rs::repo::Config {
-        peer_id: crate::peer_id_from_label("test-v2"),
-        secret_key_bytes: rand::random::<[u8; 32]>(),
-        storage: am_utils_rs::repo::StorageConfig::Memory,
-    })
-    .await?;
+    let (big_repo, part_store, acx_stop) = boot_repo().await?;
 
     let drawer_doc_id = {
         let mut doc = automerge::Automerge::new();
         let mut tx = doc.transaction();
         tx.put(automerge::ROOT, "version", "0")?;
         tx.commit();
-        let handle = big_repo.add_doc(doc).await?;
+        let handle = big_repo.put_doc(DocumentId::random(), doc).await?;
         handle.document_id().clone()
     };
 
@@ -75,6 +152,7 @@ async fn test_v2_smoke() -> Res<()> {
     let doc_pool = Arc::new(surelock::mutex::Mutex::new(KeyedLruPool::new(1000)));
     let (repo, stop_token) = DrawerRepo::load(
         Arc::clone(&big_repo),
+        part_store,
         drawer_doc_id,
         daybook_types::doc::UserPathBuf::from("/duser-wip-localtest/ddev-wip-iroh-localtest"),
         new_meta_store_sql().await?,
@@ -147,26 +225,21 @@ async fn test_v2_smoke() -> Res<()> {
     assert_eq!(list.len(), 0);
 
     stop_token.stop().await?;
-    acx_stop.stop().await?;
+    acx_stop().await?;
     Ok(())
 }
 
 #[tokio::test(flavor = "multi_thread")]
 async fn test_partitions_track_non_tmp_branches() -> Res<()> {
     utils_rs::testing::setup_tracing_once();
-    let (big_repo, acx_stop) = BigRepo::boot(am_utils_rs::repo::Config {
-        peer_id: crate::peer_id_from_label("test-v2-partitions"),
-        secret_key_bytes: rand::random::<[u8; 32]>(),
-        storage: am_utils_rs::repo::StorageConfig::Memory,
-    })
-    .await?;
+    let (big_repo, part_store, acx_stop) = boot_repo().await?;
 
     let drawer_doc_id = {
         let mut doc = automerge::Automerge::new();
         let mut tx = doc.transaction();
         tx.put(automerge::ROOT, "version", "0")?;
         tx.commit();
-        let handle = big_repo.add_doc(doc).await?;
+        let handle = big_repo.put_doc(DocumentId::random(), doc).await?;
         handle.document_id().clone()
     };
 
@@ -174,6 +247,7 @@ async fn test_partitions_track_non_tmp_branches() -> Res<()> {
     let doc_pool = Arc::new(surelock::mutex::Mutex::new(KeyedLruPool::new(1000)));
     let (repo, stop_token) = DrawerRepo::load(
         Arc::clone(&big_repo),
+        Arc::clone(&part_store),
         drawer_doc_id,
         daybook_types::doc::UserPathBuf::from("/duser-wip-localtest/ddev-wip-iroh-localtest"),
         new_meta_store_sql().await?,
@@ -199,7 +273,7 @@ async fn test_partitions_track_non_tmp_branches() -> Res<()> {
         })
         .await?;
 
-    assert_eq!(big_repo.partition_member_count(&partition_id).await?, 1);
+    assert_eq!(part_store.member_count(&partition_id).await?, 1);
 
     let main_heads = repo
         .get_doc_branches(&doc_id)
@@ -233,7 +307,7 @@ async fn test_partitions_track_non_tmp_branches() -> Res<()> {
         Some(main_heads.clone()),
     )
     .await?;
-    assert_eq!(big_repo.partition_member_count(&partition_id).await?, 1);
+    assert_eq!(part_store.member_count(&partition_id).await?, 1);
 
     repo.create_branch_at_heads_from_branch(
         &doc_id,
@@ -258,38 +332,33 @@ async fn test_partitions_track_non_tmp_branches() -> Res<()> {
         Some(main_heads),
     )
     .await?;
-    assert_eq!(big_repo.partition_member_count(&partition_id).await?, 2);
+    assert_eq!(part_store.member_count(&partition_id).await?, 2);
 
     assert!(
         repo.delete_branch(&doc_id, &local_branch("branch-a"), None)
             .await?
     );
-    assert_eq!(big_repo.partition_member_count(&partition_id).await?, 1);
+    assert_eq!(part_store.member_count(&partition_id).await?, 1);
 
     assert!(repo.del(&doc_id).await?);
-    assert_eq!(big_repo.partition_member_count(&partition_id).await?, 0);
+    assert_eq!(part_store.member_count(&partition_id).await?, 0);
 
     stop_token.stop().await?;
-    acx_stop.stop().await?;
+    acx_stop().await?;
     Ok(())
 }
 
 #[tokio::test(flavor = "multi_thread")]
 async fn test_v2_batch_add_smoke() -> Res<()> {
     utils_rs::testing::setup_tracing_once();
-    let (big_repo, acx_stop) = BigRepo::boot(am_utils_rs::repo::Config {
-        peer_id: crate::peer_id_from_label("test-v2-batch-add"),
-        secret_key_bytes: rand::random::<[u8; 32]>(),
-        storage: am_utils_rs::repo::StorageConfig::Memory,
-    })
-    .await?;
+    let (big_repo, part_store, acx_stop) = boot_repo().await?;
 
     let drawer_doc_id = {
         let mut doc = automerge::Automerge::new();
         let mut tx = doc.transaction();
         tx.put(automerge::ROOT, "version", "0")?;
         tx.commit();
-        let handle = big_repo.add_doc(doc).await?;
+        let handle = big_repo.put_doc(DocumentId::random(), doc).await?;
         handle.document_id().clone()
     };
 
@@ -297,6 +366,7 @@ async fn test_v2_batch_add_smoke() -> Res<()> {
     let doc_pool = Arc::new(surelock::mutex::Mutex::new(KeyedLruPool::new(1000)));
     let (repo, stop_token) = DrawerRepo::load(
         Arc::clone(&big_repo),
+        part_store,
         drawer_doc_id,
         daybook_types::doc::UserPathBuf::from("/duser-wip-localtest/ddev-wip-iroh-localtest"),
         new_meta_store_sql().await?,
@@ -341,26 +411,21 @@ async fn test_v2_batch_add_smoke() -> Res<()> {
     assert!(listed_ids.contains(&created_ids[1]));
 
     stop_token.stop().await?;
-    acx_stop.stop().await?;
+    acx_stop().await?;
     Ok(())
 }
 
 #[tokio::test(flavor = "multi_thread")]
 async fn test_v2_batch_add_emits_single_list_changed() -> Res<()> {
     utils_rs::testing::setup_tracing_once();
-    let (big_repo, acx_stop) = BigRepo::boot(am_utils_rs::repo::Config {
-        peer_id: crate::peer_id_from_label("test-v2-batch-add-events"),
-        secret_key_bytes: rand::random::<[u8; 32]>(),
-        storage: am_utils_rs::repo::StorageConfig::Memory,
-    })
-    .await?;
+    let (big_repo, part_store, acx_stop) = boot_repo().await?;
 
     let drawer_doc_id = {
         let mut doc = automerge::Automerge::new();
         let mut tx = doc.transaction();
         tx.put(automerge::ROOT, "version", "0")?;
         tx.commit();
-        let handle = big_repo.add_doc(doc).await?;
+        let handle = big_repo.put_doc(DocumentId::random(), doc).await?;
         handle.document_id().clone()
     };
 
@@ -368,6 +433,7 @@ async fn test_v2_batch_add_emits_single_list_changed() -> Res<()> {
     let doc_pool = Arc::new(surelock::mutex::Mutex::new(KeyedLruPool::new(1000)));
     let (repo, stop_token) = DrawerRepo::load(
         Arc::clone(&big_repo),
+        part_store,
         drawer_doc_id,
         daybook_types::doc::UserPathBuf::from("/duser-wip-localtest/ddev-wip-iroh-localtest"),
         new_meta_store_sql().await?,
@@ -446,26 +512,21 @@ async fn test_v2_batch_add_emits_single_list_changed() -> Res<()> {
     assert!(doc_added_heads.windows(2).all(|pair| pair[0] == pair[1]));
 
     stop_token.stop().await?;
-    acx_stop.stop().await?;
+    acx_stop().await?;
     Ok(())
 }
 
 #[tokio::test(flavor = "multi_thread")]
 async fn test_v2_merge() -> Res<()> {
     utils_rs::testing::setup_tracing_once();
-    let (big_repo, acx_stop) = BigRepo::boot(am_utils_rs::repo::Config {
-        peer_id: crate::peer_id_from_label("test-v2-merge"),
-        secret_key_bytes: rand::random::<[u8; 32]>(),
-        storage: am_utils_rs::repo::StorageConfig::Memory,
-    })
-    .await?;
+    let (big_repo, part_store, acx_stop) = boot_repo().await?;
 
     let drawer_doc_id = {
         let mut doc = automerge::Automerge::new();
         let mut tx = doc.transaction();
         tx.put(automerge::ROOT, "version", "0")?;
         tx.commit();
-        let handle = big_repo.add_doc(doc).await?;
+        let handle = big_repo.put_doc(DocumentId::random(), doc).await?;
         handle.document_id().clone()
     };
 
@@ -473,6 +534,7 @@ async fn test_v2_merge() -> Res<()> {
     let doc_pool = Arc::new(surelock::mutex::Mutex::new(KeyedLruPool::new(1000)));
     let (repo, stop_token) = DrawerRepo::load(
         Arc::clone(&big_repo),
+        part_store,
         drawer_doc_id,
         daybook_types::doc::UserPathBuf::from("/duser-wip-localtest/ddev-wip-iroh-localtest"),
         new_meta_store_sql().await?,
@@ -595,26 +657,21 @@ async fn test_v2_merge() -> Res<()> {
     );
 
     stop_token.stop().await?;
-    acx_stop.stop().await?;
+    acx_stop().await?;
     Ok(())
 }
 
 #[tokio::test(flavor = "multi_thread")]
 async fn test_resolve_handle_for_heads_does_not_match_foreign_doc_heads() -> Res<()> {
     utils_rs::testing::setup_tracing_once();
-    let (big_repo, acx_stop) = BigRepo::boot(am_utils_rs::repo::Config {
-        peer_id: crate::peer_id_from_label("test-resolve-handle-heads"),
-        secret_key_bytes: rand::random::<[u8; 32]>(),
-        storage: am_utils_rs::repo::StorageConfig::Memory,
-    })
-    .await?;
+    let (big_repo, part_store, acx_stop) = boot_repo().await?;
 
     let drawer_doc_id = {
         let mut doc = automerge::Automerge::new();
         let mut tx = doc.transaction();
         tx.put(automerge::ROOT, "version", "0")?;
         tx.commit();
-        let handle = big_repo.add_doc(doc).await?;
+        let handle = big_repo.put_doc(DocumentId::random(), doc).await?;
         handle.document_id().clone()
     };
 
@@ -622,6 +679,7 @@ async fn test_resolve_handle_for_heads_does_not_match_foreign_doc_heads() -> Res
     let doc_pool = Arc::new(surelock::mutex::Mutex::new(KeyedLruPool::new(1000)));
     let (repo, stop_token) = DrawerRepo::load(
         Arc::clone(&big_repo),
+        part_store,
         drawer_doc_id,
         daybook_types::doc::UserPathBuf::from("/duser-wip-localtest/ddev-wip-iroh-localtest"),
         new_meta_store_sql().await?,
@@ -673,26 +731,21 @@ async fn test_resolve_handle_for_heads_does_not_match_foreign_doc_heads() -> Res
     );
 
     stop_token.stop().await?;
-    acx_stop.stop().await?;
+    acx_stop().await?;
     Ok(())
 }
 
 #[tokio::test(flavor = "multi_thread")]
 async fn test_create_branch_at_stale_main_heads_after_intervening_merges() -> Res<()> {
     utils_rs::testing::setup_tracing_once();
-    let (big_repo, acx_stop) = BigRepo::boot(am_utils_rs::repo::Config {
-        peer_id: crate::peer_id_from_label("test-stale-heads-after-merges"),
-        secret_key_bytes: rand::random::<[u8; 32]>(),
-        storage: am_utils_rs::repo::StorageConfig::Memory,
-    })
-    .await?;
+    let (big_repo, part_store, acx_stop) = boot_repo().await?;
 
     let drawer_doc_id = {
         let mut doc = automerge::Automerge::new();
         let mut tx = doc.transaction();
         tx.put(automerge::ROOT, "version", "0")?;
         tx.commit();
-        let handle = big_repo.add_doc(doc).await?;
+        let handle = big_repo.put_doc(DocumentId::random(), doc).await?;
         handle.document_id().clone()
     };
 
@@ -700,6 +753,7 @@ async fn test_create_branch_at_stale_main_heads_after_intervening_merges() -> Re
     let doc_pool = Arc::new(surelock::mutex::Mutex::new(KeyedLruPool::new(1000)));
     let (repo, stop_token) = DrawerRepo::load(
         Arc::clone(&big_repo),
+        part_store,
         drawer_doc_id,
         daybook_types::doc::UserPathBuf::from("/duser-wip-localtest/ddev-wip-iroh-localtest"),
         new_meta_store_sql().await?,
@@ -863,7 +917,7 @@ async fn test_create_branch_at_stale_main_heads_after_intervening_merges() -> Re
     }
 
     stop_token.stop().await?;
-    acx_stop.stop().await?;
+    acx_stop().await?;
     Ok(())
 }
 
@@ -1004,14 +1058,11 @@ fn test_raw_automerge_merge_and_log_make_patches_without_followup_commit_stale_f
 #[tokio::test(flavor = "multi_thread")]
 async fn test_bigrepo_raw_automerge_stale_heads_after_merges() -> Res<()> {
     utils_rs::testing::setup_tracing_once();
-    let (big_repo, acx_stop) = BigRepo::boot(am_utils_rs::repo::Config {
-        peer_id: crate::peer_id_from_label("test-bigrepo-stale-heads"),
-        secret_key_bytes: rand::random::<[u8; 32]>(),
-        storage: am_utils_rs::repo::StorageConfig::Memory,
-    })
-    .await?;
+    let (big_repo, part_store, acx_stop) = boot_repo().await?;
 
-    let main_handle = big_repo.create_doc(automerge::Automerge::new()).await?;
+    let main_handle = big_repo
+        .put_doc(DocumentId::random(), automerge::Automerge::new())
+        .await?;
     main_handle
         .with_document(|doc| {
             let mut tx = doc.transaction();
@@ -1023,7 +1074,7 @@ async fn test_bigrepo_raw_automerge_stale_heads_after_merges() -> Res<()> {
     let h0 = main_handle.with_document(|doc| doc.get_heads()).await?;
 
     let branch_a_doc = main_handle.with_document(|doc| doc.fork_at(&h0)).await??;
-    let branch_a_handle = big_repo.create_doc(branch_a_doc).await?;
+    let branch_a_handle = big_repo.put_doc(DocumentId::random(), branch_a_doc).await?;
     branch_a_handle
         .with_document(|doc| {
             let mut tx = doc.transaction();
@@ -1039,7 +1090,7 @@ async fn test_bigrepo_raw_automerge_stale_heads_after_merges() -> Res<()> {
     let h1 = main_handle.with_document(|doc| doc.get_heads()).await?;
 
     let branch_b_doc = main_handle.with_document(|doc| doc.fork_at(&h1)).await??;
-    let branch_b_handle = big_repo.create_doc(branch_b_doc).await?;
+    let branch_b_handle = big_repo.put_doc(DocumentId::random(), branch_b_doc).await?;
     branch_b_handle
         .with_document(|doc| {
             let mut tx = doc.transaction();
@@ -1061,26 +1112,21 @@ async fn test_bigrepo_raw_automerge_stale_heads_after_merges() -> Res<()> {
         "fork_at on older known heads should work through BigRepo handle path"
     );
 
-    acx_stop.stop().await?;
+    acx_stop().await?;
     Ok(())
 }
 
 #[tokio::test(flavor = "multi_thread")]
 async fn test_v2_additional_apis() -> Res<()> {
     utils_rs::testing::setup_tracing_once();
-    let (big_repo, acx_stop) = BigRepo::boot(am_utils_rs::repo::Config {
-        peer_id: crate::peer_id_from_label("test-v2-apis"),
-        secret_key_bytes: rand::random::<[u8; 32]>(),
-        storage: am_utils_rs::repo::StorageConfig::Memory,
-    })
-    .await?;
+    let (big_repo, part_store, acx_stop) = boot_repo().await?;
 
     let drawer_doc_id = {
         let mut doc = automerge::Automerge::new();
         let mut tx = doc.transaction();
         tx.put(automerge::ROOT, "version", "0")?;
         tx.commit();
-        let handle = big_repo.add_doc(doc).await?;
+        let handle = big_repo.put_doc(DocumentId::random(), doc).await?;
         handle.document_id().clone()
     };
 
@@ -1088,6 +1134,7 @@ async fn test_v2_additional_apis() -> Res<()> {
     let doc_pool = Arc::new(surelock::mutex::Mutex::new(KeyedLruPool::new(1000)));
     let (repo, stop_token) = DrawerRepo::load(
         Arc::clone(&big_repo),
+        part_store,
         drawer_doc_id,
         daybook_types::doc::UserPathBuf::from("/duser-wip-localtest/ddev-wip-iroh-localtest"),
         new_meta_store_sql().await?,
@@ -1249,26 +1296,21 @@ async fn test_v2_additional_apis() -> Res<()> {
     );
 
     stop_token.stop().await?;
-    acx_stop.stop().await?;
+    acx_stop().await?;
     Ok(())
 }
 
 #[tokio::test(flavor = "multi_thread")]
 async fn test_v2_metadata_maintenance() -> Res<()> {
     utils_rs::testing::setup_tracing_once();
-    let (big_repo, acx_stop) = BigRepo::boot(am_utils_rs::repo::Config {
-        peer_id: crate::peer_id_from_label("test-v2-meta"),
-        secret_key_bytes: rand::random::<[u8; 32]>(),
-        storage: am_utils_rs::repo::StorageConfig::Memory,
-    })
-    .await?;
+    let (big_repo, part_store, acx_stop) = boot_repo().await?;
 
     let drawer_doc_id = {
         let mut doc = automerge::Automerge::new();
         let mut tx = doc.transaction();
         tx.put(automerge::ROOT, "version", "0")?;
         tx.commit();
-        let handle = big_repo.add_doc(doc).await?;
+        let handle = big_repo.put_doc(DocumentId::random(), doc).await?;
         handle.document_id().clone()
     };
 
@@ -1276,6 +1318,7 @@ async fn test_v2_metadata_maintenance() -> Res<()> {
     let doc_pool = Arc::new(surelock::mutex::Mutex::new(KeyedLruPool::new(1000)));
     let (repo, stop_token) = DrawerRepo::load(
         Arc::clone(&big_repo),
+        part_store,
         drawer_doc_id,
         daybook_types::doc::UserPathBuf::from("/duser-wip-localtest/ddev-wip-iroh-localtest"),
         new_meta_store_sql().await?,
@@ -1331,7 +1374,7 @@ async fn test_v2_metadata_maintenance() -> Res<()> {
             .ok_or_eyre("missing main branch state")?
             .branch_doc_id,
     )?;
-    let handle = big_repo.find_doc_handle(&am_id).await?.unwrap();
+    let handle = big_repo.get_doc(&am_id).await?.unwrap();
     handle
         .with_document(|doc| -> Res<()> {
             let heads = facet_recovery::recover_facet_heads(doc, &facet_title)?;
@@ -1480,7 +1523,7 @@ async fn test_v2_metadata_maintenance() -> Res<()> {
     );
 
     stop_token.stop().await?;
-    acx_stop.stop().await?;
+    acx_stop().await?;
     Ok(())
 }
 
@@ -1502,22 +1545,18 @@ async fn latest_change_actor(handle: &am_utils_rs::repo::BigDocHandle) -> Res<au
 #[tokio::test(flavor = "multi_thread")]
 async fn test_update_at_heads_uses_patch_user_path_actor() -> Res<()> {
     utils_rs::testing::setup_tracing_once();
-    let (big_repo, acx_stop) = BigRepo::boot(am_utils_rs::repo::Config {
-        peer_id: crate::peer_id_from_label("test-update-actor"),
-        secret_key_bytes: rand::random::<[u8; 32]>(),
-        storage: am_utils_rs::repo::StorageConfig::Memory,
-    })
-    .await?;
+    let (big_repo, part_store, acx_stop) = boot_repo().await?;
     let drawer_doc_id = {
         let mut doc = automerge::Automerge::new();
         let mut tx = doc.transaction();
         tx.put(automerge::ROOT, "version", "0")?;
         tx.commit();
-        let handle = big_repo.add_doc(doc).await?;
+        let handle = big_repo.put_doc(DocumentId::random(), doc).await?;
         handle.document_id().clone()
     };
     let (repo, stop_token) = DrawerRepo::load(
         Arc::clone(&big_repo),
+        part_store,
         drawer_doc_id,
         daybook_types::doc::UserPathBuf::from("/duser-wip-localtest/ddev-wip-iroh-localtest"),
         new_meta_store_sql().await?,
@@ -1566,7 +1605,7 @@ async fn test_update_at_heads_uses_patch_user_path_actor() -> Res<()> {
             .branch_doc_id,
     );
     let handle = big_repo
-        .find_doc_handle(&DocumentId::from_str(
+        .get_doc(&DocumentId::from_str(
             &repo
                 .get_branch_state(&doc_id, BranchPath::new("main"))
                 .await?
@@ -1579,29 +1618,25 @@ async fn test_update_at_heads_uses_patch_user_path_actor() -> Res<()> {
     assert_eq!(latest_actor, expected_actor);
 
     stop_token.stop().await?;
-    acx_stop.stop().await?;
+    acx_stop().await?;
     Ok(())
 }
 
 #[tokio::test(flavor = "multi_thread")]
 async fn test_merge_from_heads_uses_user_path_actor() -> Res<()> {
     utils_rs::testing::setup_tracing_once();
-    let (big_repo, acx_stop) = BigRepo::boot(am_utils_rs::repo::Config {
-        peer_id: crate::peer_id_from_label("test-merge-actor"),
-        secret_key_bytes: rand::random::<[u8; 32]>(),
-        storage: am_utils_rs::repo::StorageConfig::Memory,
-    })
-    .await?;
+    let (big_repo, part_store, acx_stop) = boot_repo().await?;
     let drawer_doc_id = {
         let mut doc = automerge::Automerge::new();
         let mut tx = doc.transaction();
         tx.put(automerge::ROOT, "version", "0")?;
         tx.commit();
-        let handle = big_repo.add_doc(doc).await?;
+        let handle = big_repo.put_doc(DocumentId::random(), doc).await?;
         handle.document_id().clone()
     };
     let (repo, stop_token) = DrawerRepo::load(
         Arc::clone(&big_repo),
+        part_store,
         drawer_doc_id,
         daybook_types::doc::UserPathBuf::from("/duser-wip-localtest/ddev-wip-iroh-localtest"),
         new_meta_store_sql().await?,
@@ -1684,7 +1719,7 @@ async fn test_merge_from_heads_uses_user_path_actor() -> Res<()> {
             .branch_doc_id,
     );
     let handle = big_repo
-        .find_doc_handle(&DocumentId::from_str(
+        .get_doc(&DocumentId::from_str(
             &repo
                 .get_branch_state(&doc_id, BranchPath::new("main"))
                 .await?
@@ -1697,29 +1732,25 @@ async fn test_merge_from_heads_uses_user_path_actor() -> Res<()> {
     assert_eq!(latest_actor, expected_actor);
 
     stop_token.stop().await?;
-    acx_stop.stop().await?;
+    acx_stop().await?;
     Ok(())
 }
 
 #[tokio::test(flavor = "multi_thread")]
 async fn test_facet_keys_touched_by_local_actor_includes_user_path_scoped_actor() -> Res<()> {
     utils_rs::testing::setup_tracing_once();
-    let (big_repo, acx_stop) = BigRepo::boot(am_utils_rs::repo::Config {
-        peer_id: crate::peer_id_from_label("test-local-facet-touch"),
-        secret_key_bytes: rand::random::<[u8; 32]>(),
-        storage: am_utils_rs::repo::StorageConfig::Memory,
-    })
-    .await?;
+    let (big_repo, part_store, acx_stop) = boot_repo().await?;
     let drawer_doc_id = {
         let mut doc = automerge::Automerge::new();
         let mut tx = doc.transaction();
         tx.put(automerge::ROOT, "version", "0")?;
         tx.commit();
-        let handle = big_repo.add_doc(doc).await?;
+        let handle = big_repo.put_doc(DocumentId::random(), doc).await?;
         handle.document_id().clone()
     };
     let (repo, stop_token) = DrawerRepo::load(
         Arc::clone(&big_repo),
+        part_store,
         drawer_doc_id,
         daybook_types::doc::UserPathBuf::from("/duser-wip-localtest/ddev-wip-iroh-localtest"),
         new_meta_store_sql().await?,
@@ -1782,7 +1813,7 @@ async fn test_facet_keys_touched_by_local_actor_includes_user_path_scoped_actor(
     );
 
     stop_token.stop().await?;
-    acx_stop.stop().await?;
+    acx_stop().await?;
     Ok(())
 }
 
@@ -1882,19 +1913,14 @@ fn test_facet_cache_large_one_hit_entries_do_not_pollute() {
 #[tokio::test(flavor = "multi_thread")]
 async fn test_v2_updated_at_merge() -> Res<()> {
     utils_rs::testing::setup_tracing_once();
-    let (big_repo, acx_stop) = BigRepo::boot(am_utils_rs::repo::Config {
-        peer_id: crate::peer_id_from_label("test-v2-updated-at"),
-        secret_key_bytes: rand::random::<[u8; 32]>(),
-        storage: am_utils_rs::repo::StorageConfig::Memory,
-    })
-    .await?;
+    let (big_repo, part_store, acx_stop) = boot_repo().await?;
 
     let drawer_doc_id = {
         let mut doc = automerge::Automerge::new();
         let mut tx = doc.transaction();
         tx.put(automerge::ROOT, "version", "0")?;
         tx.commit();
-        let handle = big_repo.add_doc(doc).await?;
+        let handle = big_repo.put_doc(DocumentId::random(), doc).await?;
         handle.document_id().clone()
     };
 
@@ -1902,6 +1928,7 @@ async fn test_v2_updated_at_merge() -> Res<()> {
     let doc_pool = Arc::new(surelock::mutex::Mutex::new(KeyedLruPool::new(1000)));
     let (repo, stop_token) = DrawerRepo::load(
         Arc::clone(&big_repo),
+        part_store,
         drawer_doc_id,
         daybook_types::doc::UserPathBuf::from("/duser-wip-localtest/ddev-wip-iroh-localtest"),
         new_meta_store_sql().await?,
@@ -2043,7 +2070,7 @@ async fn test_v2_updated_at_merge() -> Res<()> {
             .ok_or_eyre("missing main branch state")?
             .branch_doc_id,
     )?;
-    let handle = big_repo.find_doc_handle(&am_id).await?.unwrap();
+    let handle = big_repo.get_doc(&am_id).await?.unwrap();
     let recovered_heads = handle
         .with_document(|doc| -> Res<Vec<automerge::ChangeHash>> {
             let heads = facet_recovery::recover_facet_heads(doc, &facet_title)?;
@@ -2088,26 +2115,21 @@ async fn test_v2_updated_at_merge() -> Res<()> {
     );
 
     stop_token.stop().await?;
-    acx_stop.stop().await?;
+    acx_stop().await?;
     Ok(())
 }
 
 #[tokio::test(flavor = "multi_thread")]
 async fn test_v2_facet_blame_maintenance() -> Res<()> {
     utils_rs::testing::setup_tracing_once();
-    let (big_repo, acx_stop) = BigRepo::boot(am_utils_rs::repo::Config {
-        peer_id: crate::peer_id_from_label("test-v2-blame"),
-        secret_key_bytes: rand::random::<[u8; 32]>(),
-        storage: am_utils_rs::repo::StorageConfig::Memory,
-    })
-    .await?;
+    let (big_repo, part_store, acx_stop) = boot_repo().await?;
 
     let drawer_doc_id = {
         let mut doc = automerge::Automerge::new();
         let mut tx = doc.transaction();
         tx.put(automerge::ROOT, "version", "0")?;
         tx.commit();
-        let handle = big_repo.add_doc(doc).await?;
+        let handle = big_repo.put_doc(DocumentId::random(), doc).await?;
         handle.document_id().clone()
     };
 
@@ -2115,6 +2137,7 @@ async fn test_v2_facet_blame_maintenance() -> Res<()> {
     let doc_pool = Arc::new(surelock::mutex::Mutex::new(KeyedLruPool::new(1000)));
     let (repo, stop_token) = DrawerRepo::load(
         Arc::clone(&big_repo),
+        part_store,
         drawer_doc_id,
         daybook_types::doc::UserPathBuf::from("/duser-wip-localtest/ddev-wip-iroh-localtest"),
         new_meta_store_sql().await?,
@@ -2246,26 +2269,21 @@ async fn test_v2_facet_blame_maintenance() -> Res<()> {
     assert!(dmeta_after_b.facets.contains_key(&facet_title));
 
     stop_token.stop().await?;
-    acx_stop.stop().await?;
+    acx_stop().await?;
     Ok(())
 }
 
 #[tokio::test(flavor = "multi_thread")]
 async fn test_v2_listener_is_scoped_to_drawer_doc() -> Res<()> {
     utils_rs::testing::setup_tracing_once();
-    let (big_repo, acx_stop) = BigRepo::boot(am_utils_rs::repo::Config {
-        peer_id: crate::peer_id_from_label("test-v2-scope"),
-        secret_key_bytes: rand::random::<[u8; 32]>(),
-        storage: am_utils_rs::repo::StorageConfig::Memory,
-    })
-    .await?;
+    let (big_repo, part_store, acx_stop) = boot_repo().await?;
 
     let make_drawer_doc = || async {
         let mut doc = automerge::Automerge::new();
         let mut tx = doc.transaction();
         tx.put(automerge::ROOT, "version", "0")?;
         tx.commit();
-        let handle = big_repo.add_doc(doc).await?;
+        let handle = big_repo.put_doc(DocumentId::random(), doc).await?;
         eyre::Ok(handle.document_id().clone())
     };
 
@@ -2277,6 +2295,7 @@ async fn test_v2_listener_is_scoped_to_drawer_doc() -> Res<()> {
 
     let (repo_a, stop_a) = DrawerRepo::load(
         Arc::clone(&big_repo),
+        Arc::clone(&part_store),
         drawer_doc_id_a,
         daybook_types::doc::UserPathBuf::from("/duser-wip-localtest/ddev-wip-iroh-localtest"),
         new_meta_store_sql().await?,
@@ -2288,6 +2307,7 @@ async fn test_v2_listener_is_scoped_to_drawer_doc() -> Res<()> {
     .await?;
     let (repo_b, stop_b) = DrawerRepo::load(
         Arc::clone(&big_repo),
+        part_store,
         drawer_doc_id_b,
         daybook_types::doc::UserPathBuf::from("/duser-wip-localtest/ddev-wip-iroh-localtest"),
         new_meta_store_sql().await?,
@@ -2325,26 +2345,21 @@ async fn test_v2_listener_is_scoped_to_drawer_doc() -> Res<()> {
 
     stop_a.stop().await?;
     stop_b.stop().await?;
-    acx_stop.stop().await?;
+    acx_stop().await?;
     Ok(())
 }
 
 #[tokio::test(flavor = "multi_thread")]
 async fn test_v2_content_update_does_not_emit_drawer_membership_events() -> Res<()> {
     utils_rs::testing::setup_tracing_once();
-    let (big_repo, acx_stop) = BigRepo::boot(am_utils_rs::repo::Config {
-        peer_id: crate::peer_id_from_label("test-v2-changed-facets"),
-        secret_key_bytes: rand::random::<[u8; 32]>(),
-        storage: am_utils_rs::repo::StorageConfig::Memory,
-    })
-    .await?;
+    let (big_repo, part_store, acx_stop) = boot_repo().await?;
 
     let drawer_doc_id = {
         let mut doc = automerge::Automerge::new();
         let mut tx = doc.transaction();
         tx.put(automerge::ROOT, "version", "0")?;
         tx.commit();
-        let handle = big_repo.add_doc(doc).await?;
+        let handle = big_repo.put_doc(DocumentId::random(), doc).await?;
         handle.document_id().clone()
     };
 
@@ -2352,6 +2367,7 @@ async fn test_v2_content_update_does_not_emit_drawer_membership_events() -> Res<
     let doc_pool = Arc::new(surelock::mutex::Mutex::new(KeyedLruPool::new(1000)));
     let (repo, stop_token) = DrawerRepo::load(
         Arc::clone(&big_repo),
+        part_store,
         drawer_doc_id,
         daybook_types::doc::UserPathBuf::from("/duser-wip-localtest/ddev-wip-iroh-localtest"),
         new_meta_store_sql().await?,
@@ -2411,26 +2427,21 @@ async fn test_v2_content_update_does_not_emit_drawer_membership_events() -> Res<
     );
 
     stop_token.stop().await?;
-    acx_stop.stop().await?;
+    acx_stop().await?;
     Ok(())
 }
 
 #[tokio::test(flavor = "multi_thread")]
 async fn test_diff_events_delete_origin_uses_map_deleted_tombstone() -> Res<()> {
     utils_rs::testing::setup_tracing_once();
-    let (big_repo, acx_stop) = BigRepo::boot(am_utils_rs::repo::Config {
-        peer_id: crate::peer_id_from_label("test-v2-delete-origin"),
-        secret_key_bytes: rand::random::<[u8; 32]>(),
-        storage: am_utils_rs::repo::StorageConfig::Memory,
-    })
-    .await?;
+    let (big_repo, part_store, acx_stop) = boot_repo().await?;
 
     let drawer_doc_id = {
         let mut doc = automerge::Automerge::new();
         let mut tx = doc.transaction();
         tx.put(automerge::ROOT, "version", "0")?;
         tx.commit();
-        let handle = big_repo.add_doc(doc).await?;
+        let handle = big_repo.put_doc(DocumentId::random(), doc).await?;
         handle.document_id().clone()
     };
 
@@ -2438,6 +2449,7 @@ async fn test_diff_events_delete_origin_uses_map_deleted_tombstone() -> Res<()> 
     let doc_pool = Arc::new(surelock::mutex::Mutex::new(KeyedLruPool::new(1000)));
     let (repo, stop_token) = DrawerRepo::load(
         Arc::clone(&big_repo),
+        part_store,
         drawer_doc_id,
         daybook_types::doc::UserPathBuf::from("/duser-wip-localtest/ddev-wip-iroh-localtest"),
         new_meta_store_sql().await?,
@@ -2491,31 +2503,27 @@ async fn test_diff_events_delete_origin_uses_map_deleted_tombstone() -> Res<()> 
     );
 
     stop_token.stop().await?;
-    acx_stop.stop().await?;
+    acx_stop().await?;
     Ok(())
 }
 
 #[tokio::test(flavor = "multi_thread")]
 async fn test_add_rejects_unknown_facet_tag() -> Res<()> {
     utils_rs::testing::setup_tracing_once();
-    let (big_repo, acx_stop) = BigRepo::boot(am_utils_rs::repo::Config {
-        peer_id: crate::peer_id_from_label("test-v2-unknown-tag"),
-        secret_key_bytes: rand::random::<[u8; 32]>(),
-        storage: am_utils_rs::repo::StorageConfig::Memory,
-    })
-    .await?;
+    let (big_repo, part_store, acx_stop) = boot_repo().await?;
 
     let drawer_doc_id = {
         let mut doc = automerge::Automerge::new();
         let mut tx = doc.transaction();
         tx.put(automerge::ROOT, "version", "0")?;
         tx.commit();
-        let handle = big_repo.add_doc(doc).await?;
+        let handle = big_repo.put_doc(DocumentId::random(), doc).await?;
         handle.document_id().clone()
     };
 
     let (repo, stop_token) = DrawerRepo::load(
         big_repo,
+        part_store,
         drawer_doc_id,
         daybook_types::doc::UserPathBuf::from("/duser-wip-localtest/ddev-wip-iroh-localtest"),
         new_meta_store_sql().await?,
@@ -2541,31 +2549,27 @@ async fn test_add_rejects_unknown_facet_tag() -> Res<()> {
         .contains("no registered manifest"));
 
     stop_token.stop().await?;
-    acx_stop.stop().await?;
+    acx_stop().await?;
     Ok(())
 }
 
 #[tokio::test(flavor = "multi_thread")]
 async fn test_add_rejects_self_reference_without_target_facet() -> Res<()> {
     utils_rs::testing::setup_tracing_once();
-    let (big_repo, acx_stop) = BigRepo::boot(am_utils_rs::repo::Config {
-        peer_id: crate::peer_id_from_label("test-v2-self-ref"),
-        secret_key_bytes: rand::random::<[u8; 32]>(),
-        storage: am_utils_rs::repo::StorageConfig::Memory,
-    })
-    .await?;
+    let (big_repo, part_store, acx_stop) = boot_repo().await?;
 
     let drawer_doc_id = {
         let mut doc = automerge::Automerge::new();
         let mut tx = doc.transaction();
         tx.put(automerge::ROOT, "version", "0")?;
         tx.commit();
-        let handle = big_repo.add_doc(doc).await?;
+        let handle = big_repo.put_doc(DocumentId::random(), doc).await?;
         handle.document_id().clone()
     };
 
     let (repo, stop_token) = DrawerRepo::load(
         big_repo,
+        part_store,
         drawer_doc_id,
         daybook_types::doc::UserPathBuf::from("/duser-wip-localtest/ddev-wip-iroh-localtest"),
         new_meta_store_sql().await?,
@@ -2601,31 +2605,27 @@ async fn test_add_rejects_self_reference_without_target_facet() -> Res<()> {
         .contains("self-reference target"));
 
     stop_token.stop().await?;
-    acx_stop.stop().await?;
+    acx_stop().await?;
     Ok(())
 }
 
 #[tokio::test(flavor = "multi_thread")]
 async fn test_add_accepts_body_self_reference_with_empty_fragment_for_present_target() -> Res<()> {
     utils_rs::testing::setup_tracing_once();
-    let (big_repo, acx_stop) = BigRepo::boot(am_utils_rs::repo::Config {
-        peer_id: crate::peer_id_from_label("test-v2-body-empty-fragment-self"),
-        secret_key_bytes: rand::random::<[u8; 32]>(),
-        storage: am_utils_rs::repo::StorageConfig::Memory,
-    })
-    .await?;
+    let (big_repo, part_store, acx_stop) = boot_repo().await?;
 
     let drawer_doc_id = {
         let mut doc = automerge::Automerge::new();
         let mut tx = doc.transaction();
         tx.put(automerge::ROOT, "version", "0")?;
         tx.commit();
-        let handle = big_repo.add_doc(doc).await?;
+        let handle = big_repo.put_doc(DocumentId::random(), doc).await?;
         handle.document_id().clone()
     };
 
     let (repo, stop_token) = DrawerRepo::load(
         big_repo,
+        part_store,
         drawer_doc_id,
         daybook_types::doc::UserPathBuf::from("/duser-wip-localtest/ddev-wip-iroh-localtest"),
         new_meta_store_sql().await?,
@@ -2668,7 +2668,7 @@ async fn test_add_accepts_body_self_reference_with_empty_fragment_for_present_ta
     assert!(add_result.is_ok(), "{add_result:?}");
 
     stop_token.stop().await?;
-    acx_stop.stop().await?;
+    acx_stop().await?;
     Ok(())
 }
 
@@ -2680,14 +2680,7 @@ async fn perf_samod_disk_add_like_drawer_baseline() -> Res<()> {
     let storage_path = temp_dir.path().join("samod-amctx-disk");
     std::fs::create_dir_all(&storage_path)?;
 
-    let (big_repo, acx_stop) = BigRepo::boot(am_utils_rs::repo::Config {
-        peer_id: crate::peer_id_from_label("perf-drawer-raw-amctx"),
-        secret_key_bytes: rand::random::<[u8; 32]>(),
-        storage: am_utils_rs::repo::StorageConfig::Disk {
-            path: storage_path.clone(),
-        },
-    })
-    .await?;
+    let (big_repo, part_store, acx_stop) = boot_disk_repo(storage_path.clone()).await?;
 
     let local_actor_id = automerge::ActorId::random();
     let mut aggregate_doc = automerge::Automerge::new();
@@ -2698,7 +2691,9 @@ async fn perf_samod_disk_add_like_drawer_baseline() -> Res<()> {
         tx.put_object(&docs_obj, "map", automerge::ObjType::Map)?;
         tx.commit();
     }
-    let aggregate_handle = big_repo.add_doc(aggregate_doc).await?;
+    let aggregate_handle = big_repo
+        .put_doc(DocumentId::random(), aggregate_doc)
+        .await?;
 
     let total_docs: u64 = 80;
     let started_at = std::time::Instant::now();
@@ -2706,7 +2701,7 @@ async fn perf_samod_disk_add_like_drawer_baseline() -> Res<()> {
     for ii in 0..total_docs {
         let mut content_doc = automerge::Automerge::new();
         content_doc.set_actor(automerge::ActorId::random());
-        let content_handle = big_repo.add_doc(content_doc).await?;
+        let content_handle = big_repo.put_doc(DocumentId::random(), content_doc).await?;
         let content_doc_id = content_handle.document_id().to_string();
 
         let _content_heads = content_handle
@@ -2750,7 +2745,7 @@ async fn perf_samod_disk_add_like_drawer_baseline() -> Res<()> {
                     branches: [(
                         "main".to_string(),
                         StoredBranchRef {
-                            branch_doc_id: content_doc_id.to_string(),
+                            branch_doc_id: content_doc_id.clone().into(),
                         },
                     )]
                     .into(),
@@ -2772,7 +2767,7 @@ async fn perf_samod_disk_add_like_drawer_baseline() -> Res<()> {
         total_docs, elapsed, docs_per_sec
     );
     assert!(docs_per_sec > 0.0);
-    acx_stop.stop().await?;
+    acx_stop().await?;
     Ok(())
 }
 
@@ -2785,21 +2780,14 @@ async fn perf_drawer_add_disk_baseline() -> Res<()> {
         .join(Uuid::new_v4().to_string());
     std::fs::create_dir_all(&storage_path)?;
 
-    let (big_repo, acx_stop) = BigRepo::boot(am_utils_rs::repo::Config {
-        peer_id: crate::peer_id_from_label("perf-drawer-add"),
-        secret_key_bytes: rand::random::<[u8; 32]>(),
-        storage: am_utils_rs::repo::StorageConfig::Disk {
-            path: storage_path.clone(),
-        },
-    })
-    .await?;
+    let (big_repo, part_store, acx_stop) = boot_disk_repo(storage_path.clone()).await?;
 
     let drawer_doc_id = {
         let mut doc = automerge::Automerge::new();
         let mut tx = doc.transaction();
         tx.put(automerge::ROOT, "version", "0")?;
         tx.commit();
-        let handle = big_repo.add_doc(doc).await?;
+        let handle = big_repo.put_doc(DocumentId::random(), doc).await?;
         handle.document_id().clone()
     };
 
@@ -2807,6 +2795,7 @@ async fn perf_drawer_add_disk_baseline() -> Res<()> {
     let doc_pool = Arc::new(surelock::mutex::Mutex::new(KeyedLruPool::new(4000)));
     let (repo, stop_token) = DrawerRepo::load(
         Arc::clone(&big_repo),
+        part_store,
         drawer_doc_id,
         daybook_types::doc::UserPathBuf::from("/duser-wip-localtest/ddev-wip-iroh-localtest"),
         new_meta_store_sql().await?,
@@ -2855,7 +2844,7 @@ async fn perf_drawer_add_disk_baseline() -> Res<()> {
     );
     assert!(docs_per_sec > 0.0);
     stop_token.stop().await?;
-    acx_stop.stop().await?;
+    acx_stop().await?;
     let _ = std::fs::remove_dir_all(&storage_path);
     Ok(())
 }

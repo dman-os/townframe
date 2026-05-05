@@ -3,6 +3,7 @@
 use crate::interlude::*;
 
 use am_utils_rs::{
+    partition::PartitionStore,
     repo::PeerId,
     sync::{
         machine::{SyncCompletion, SyncMachine, SyncMachineCommand},
@@ -10,7 +11,7 @@ use am_utils_rs::{
             PeerSyncProgressEvent, PeerSyncWorkerEvent, PeerSyncWorkerExit, PeerSyncWorkerMsg,
             PeerSyncWorkerStopToken, SpawnPeerSyncWorkerArgs,
         },
-        protocol::{PartitionId, PartitionSyncRpc, PeerKey, SubscriptionItem},
+        protocol::{PartitionId, PartitionSyncRpc, PeerKey, SubscriptionEvent},
         store::SyncStoreHandle,
     },
 };
@@ -102,7 +103,7 @@ enum Msg {
     },
     BlobSyncBackoff {
         hash: Arc<str>,
-        peer_id: PeerId,
+        // peer_id: PeerId,
         delay: Duration,
         previous_retry_state: RetryState,
     },
@@ -177,7 +178,7 @@ enum SyncProgressMsg {
         peer_id: PeerId,
         partition: PartitionKey,
         hash: Arc<str>,
-        done: u64,
+        done_counter: u64,
     },
     BlobMaterializeStarted {
         partition: PartitionKey,
@@ -186,7 +187,7 @@ enum SyncProgressMsg {
     BlobDownloadFinished {
         partition: PartitionKey,
         hash: Arc<str>,
-        success: bool,
+        error: Option<eyre::Report>,
     },
     BlobWorkerFinished {
         partition: PartitionKey,
@@ -276,6 +277,7 @@ impl StopToken {
 #[tracing::instrument(skip_all, fields(%local_peer_key))]
 pub async fn spawn_full_sync_worker(
     big_repo: SharedBigRepo,
+    parition_store: Arc<PartitionStore>,
     local_peer_key: PeerKey,
     blobs_repo: Arc<BlobsRepo>,
     progress_repo: Option<Arc<ProgressRepo>>,
@@ -290,7 +292,6 @@ pub async fn spawn_full_sync_worker(
     let cancel_token = CancellationToken::new();
     let task_set = utils_rs::AbortableJoinSet::new();
 
-    let partition_store = big_repo.partition_store().clone();
     let mut worker = Worker {
         big_repo,
         local_peer_key,
@@ -317,7 +318,8 @@ pub async fn spawn_full_sync_worker(
         task_set,
 
         doc_request_set: default(),
-        sync_machine: SyncMachine::new(partition_store, sync_store),
+        sync_machine: SyncMachine::new(partition_store, sync_store.clone()),
+        sync_store,
         scheduler: default(),
 
         known_peer_set: default(),
@@ -491,6 +493,7 @@ struct Worker {
     seen_peer_keys: HashSet<PeerKey>,
     peer_partition_sessions: HashMap<PeerId, PeerPartitionSession>,
     full_sync_waiters: Vec<FullSyncWaiter>,
+    sync_store: SyncStoreHandle,
 }
 
 #[derive(Debug, Clone, Hash, PartialEq, Eq, PartialOrd, Ord)]
@@ -617,7 +620,7 @@ impl Worker {
             }
             if self
                 .sync_machine
-                .has_active_item_job_for(Arc::clone(peer_key), doc_id.into())
+                .has_active_item_job_for(Arc::clone(peer_key), doc_id.to_string().into())
             {
                 return Ok(false);
             }
@@ -1047,7 +1050,7 @@ impl Worker {
             local_peer: self.local_peer_key.clone(),
             remote_peer: peer_key.clone(),
             rpc_client,
-            sync_store: self.sync_machine.sync_store().clone(),
+            sync_store: self.sync_store.clone(),
             target_partitions: partitions.iter().map(PartitionKey::partition_id).collect(),
             msg_tx: self.peer_worker_msg_tx.clone(),
             task_set: &self.task_set,
@@ -1074,11 +1077,12 @@ impl Worker {
         &mut self,
         _peer_id: PeerId,
         peer_key: PeerKey,
-        item: SubscriptionItem,
+        item: SubscriptionEvent,
     ) -> Res<()> {
         let commands = self
             .sync_machine
-            .on_subscription_item(peer_key.clone(), item)?;
+            .on_subscription_item(peer_key.clone(), item)
+            .await?;
         self.dispatch_sync_commands(commands).await?;
         Ok(())
     }
@@ -2469,7 +2473,7 @@ impl Worker {
                     peer_id: endpoint_id,
                     partition,
                     hash,
-                    done,
+                    done_counter: done,
                 } => {
                     progress_latest.insert(
                         BlobProgressKey {

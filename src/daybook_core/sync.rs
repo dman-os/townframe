@@ -245,7 +245,7 @@ impl IrohSyncRepo {
             am_utils_rs::sync::store::spawn_sync_store(rcx.sql.db_pool.clone()).await?;
         let (partition_sync_node, partition_sync_stop_token) =
             am_utils_rs::sync::node::spawn_sync_node(
-                rcx.big_repo.partition_store(),
+                Arc::clone(&rcx.partition_store),
                 partition_sync_store.clone(),
                 Arc::new(am_utils_rs::sync::AllowAllPartitionAccessPolicy),
             )
@@ -377,13 +377,13 @@ impl IrohSyncRepo {
 
     fn peer_partition_ids(&self, _peer_key: &str) -> HashSet<PartitionId> {
         [
-            CORE_DOCS_PARTITION_ID.to_string(),
+            CORE_DOCS_PARTITION_ID.into(),
             crate::drawer::DrawerRepo::replicated_partition_id_for_drawer(
                 self.rcx.doc_drawer.document_id(),
             ),
-            crate::blobs::BLOB_SCOPE_DOCS_PARTITION_ID.to_string(),
-            crate::blobs::BLOB_SCOPE_PLUGS_PARTITION_ID.to_string(),
-            crate::rt::PROCESSOR_RUNLOG_PARTITION_ID.to_string(),
+            crate::blobs::BLOB_SCOPE_DOCS_PARTITION_ID.into(),
+            crate::blobs::BLOB_SCOPE_PLUGS_PARTITION_ID.into(),
+            crate::rt::PROCESSOR_RUNLOG_PARTITION_ID.into(),
         ]
         .into()
     }
@@ -1264,14 +1264,13 @@ mod tests {
         let node_b = open_sync_node(&repo_b_path).await?;
         let partitions = node_b
             .ctx
-            .big_repo
-            .partition_store()
+            .partition_store
             .list_partitions()
             .await?
             .partitions;
         let core_partition = partitions
             .iter()
-            .find(|summary| summary.partition_id == CORE_DOCS_PARTITION_ID);
+            .find(|summary| &summary.partition_id[..] == CORE_DOCS_PARTITION_ID);
         assert!(
             core_partition.is_some(),
             "cloned repo should register core docs partition on open: {partitions:?}"
@@ -1552,7 +1551,7 @@ mod tests {
             rtx.layout.blobs_root.clone(),
             rtx.local_user_path.clone(),
             Arc::new(crate::blobs::PartitionStoreMembershipWriter::new(
-                rtx.big_repo.partition_store(),
+                Arc::clone(&rtx.partition_store),
             )),
         )
         .await?;
@@ -1565,6 +1564,7 @@ mod tests {
         .await?;
         let (drawer_repo, drawer_stop) = DrawerRepo::load(
             Arc::clone(&rtx.big_repo),
+            Arc::clone(&rtx.partition_store),
             rtx.doc_drawer.document_id().clone(),
             daybook_types::doc::UserPathBuf::from(rtx.local_user_path.clone()),
             rtx.sql.clone(),

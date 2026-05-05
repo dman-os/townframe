@@ -6,6 +6,7 @@ use crate::local_state::SqliteLocalStateRepo;
 use crate::blobs::BlobsRepo;
 use crate::drawer::DrawerRepo;
 use crate::plugs::PlugsRepo;
+use crate::repo::RepoCtx;
 use daybook_types::manifest;
 
 use daybook_types::doc::{FacetKey, FacetTag};
@@ -53,6 +54,7 @@ pub struct RtConfig {
 
 pub struct Rt {
     pub config: RtConfig,
+    pub rcx: Arc<RepoCtx>,
     pub cancel_token: tokio_util::sync::CancellationToken,
     pub plugs_repo: Arc<PlugsRepo>,
     pub drawer: Arc<DrawerRepo>,
@@ -61,7 +63,6 @@ pub struct Rt {
     pub dispatch_repo: Arc<dispatch::DispatchRepo>,
     pub init_repo: Arc<InitRepo>,
     pub progress_repo: Arc<crate::progress::ProgressRepo>,
-    pub big_repo: SharedBigRepo,
     pub wflow_part_state: Arc<PartitionWorkingState>,
     pub wcx: wflow::Ctx,
     pub wash_host: Arc<WashHost>,
@@ -74,7 +75,6 @@ pub struct Rt {
     pub doc_facet_set_index_repo: Arc<DocFacetSetIndexRepo>,
     pub doc_facet_ref_index_repo: Arc<DocFacetRefIndexRepo>,
     pub sqlite_local_state_repo: Arc<SqliteLocalStateRepo>,
-    pub local_actor_id: ActorId,
     local_wflow_part_id: String,
 }
 
@@ -86,8 +86,6 @@ pub struct RtStopToken {
     doc_blobs_index_stop: crate::repos::RepoStopToken,
     doc_facet_set_index_stop: crate::index::DocFacetSetIndexStopToken,
     doc_facet_ref_index_stop: crate::index::DocFacetRefIndexStopToken,
-    sqlite_local_state_stop: crate::repos::RepoStopToken,
-    init_repo_stop: crate::repos::RepoStopToken,
 }
 
 impl RtStopToken {
@@ -161,18 +159,6 @@ impl RtStopToken {
                 "error stopping doc_blobs_index_repo during shutdown - continuing"
             );
         }
-        if let Err(err) = self.sqlite_local_state_stop.stop().await {
-            warn!(
-                ?err,
-                "error stopping sqlite_local_state_repo during shutdown - continuing"
-            );
-        }
-        if let Err(err) = self.init_repo_stop.stop().await {
-            warn!(
-                ?err,
-                "error stopping init_repo during shutdown - continuing"
-            );
-        }
 
         if let Err(err) =
             utils_rs::wait_on_handle_with_timeout(self.partition_watcher, Duration::from_secs(10))
@@ -213,59 +199,23 @@ pub enum InvokeCommandFromWflowError {
 }
 
 impl Rt {
-    pub fn processor_runlog_item_id(doc_id: &str, processor_full_id: &str) -> String {
-        format!("v1|doc:{doc_id}|proc:{processor_full_id}")
-    }
-
-    pub async fn get_processor_runlog_done(
-        &self,
-        doc_id: &str,
-        processor_full_id: &str,
-    ) -> Res<Option<ProcessorRunlogDone>> {
-        let item_id = Self::processor_runlog_item_id(doc_id, processor_full_id);
-        let payload = self
-            .big_repo
-            .partition_store()
-            .item_payload_for_partition(&PROCESSOR_RUNLOG_PARTITION_ID.to_string(), &item_id)
-            .await?;
-        let Some(payload) = payload else {
-            return Ok(None);
-        };
-        let done = serde_json::from_value::<ProcessorRunlogDone>(payload)?;
-        Ok(Some(done))
-    }
-
     #[expect(clippy::too_many_arguments)]
     pub async fn boot(
         config: RtConfig,
-        app_doc_id: DocumentId,
-        wflow_db_url: String,
-        repo_sql: SqlCtx,
-        big_repo: SharedBigRepo,
+        rcx: Arc<RepoCtx>,
         drawer: Arc<DrawerRepo>,
         plugs_repo: Arc<PlugsRepo>,
         dispatch_repo: Arc<DispatchRepo>,
         progress_repo: Arc<crate::progress::ProgressRepo>,
         blobs_repo: Arc<BlobsRepo>,
         config_repo: Arc<ConfigRepo>,
-        local_actor_id: ActorId,
-        local_state_root: PathBuf,
+        init_repo: Arc<InitRepo>,
+        sqlite_local_state_repo: Arc<SqliteLocalStateRepo>,
     ) -> Res<(Arc<Self>, RtStopToken)> {
-        crate::repo::ensure_expected_partitions_for_docs(
-            &big_repo,
-            &app_doc_id,
-            drawer.drawer_doc_id(),
-        )
-        .await?;
-        let wcx = wflow::Ctx::init(&wflow_db_url).await?;
-        let (sqlite_local_state_repo, sqlite_local_state_stop) =
-            SqliteLocalStateRepo::boot(local_state_root).await?;
-        let (init_repo, init_repo_stop) = InitRepo::load(
-            Arc::clone(&big_repo),
-            app_doc_id.clone(),
-            local_actor_id.clone(),
-            repo_sql.clone(),
-        )
+        let wcx = wflow::Ctx::init(&format!(
+            "sqlite://{}",
+            rcx.layout.repo_root.join("wflows.db").display()
+        ))
         .await?;
 
         let (doc_facet_set_index_repo, doc_facet_set_index_stop) =
@@ -370,7 +320,7 @@ impl Rt {
             cancel_token: default(),
             plugs_repo,
             drawer,
-            big_repo,
+            rcx,
             wflow_ingress,
             dispatch_repo,
             init_repo,
@@ -388,7 +338,6 @@ impl Rt {
             sqlite_local_state_repo,
             config_repo,
             wflow_part_state,
-            local_actor_id,
         });
         rt.daybook_plugin.attach_rt(Arc::downgrade(&rt));
 
@@ -427,8 +376,12 @@ impl Rt {
                 ),
             ]
             .into();
-        let switch_worker =
-            crate::rt::switch::spawn_switch_worker(Arc::clone(&rt), repo_sql, switch_sinks).await?;
+        let switch_worker = crate::rt::switch::spawn_switch_worker(
+            Arc::clone(&rt),
+            rt.rcx.sql.clone(),
+            switch_sinks,
+        )
+        .await?;
 
         let partition_watcher = tokio::spawn({
             let repo = Arc::clone(&rt);
@@ -444,11 +397,26 @@ impl Rt {
                 doc_blobs_index_stop,
                 doc_facet_set_index_stop,
                 doc_facet_ref_index_stop,
-                sqlite_local_state_stop,
-                init_repo_stop,
                 wflow_part_handle,
             },
         ))
+    }
+    pub fn processor_runlog_item_id(doc_id: &str, processor_full_id: &str) -> Arc<str> {
+        format!("v1|doc:{doc_id}|proc:{processor_full_id}").into()
+    }
+
+    pub async fn get_processor_runlog_done(
+        &self,
+        doc_id: &str,
+        processor_full_id: &str,
+    ) -> Res<Option<ProcessorRunlogDone>> {
+        let item_id = Self::processor_runlog_item_id(doc_id, processor_full_id);
+        let payload = self.rcx.partition_store.item_payload(&item_id).await?;
+        let Some(payload) = payload else {
+            return Ok(None);
+        };
+        let done = serde_json::from_value::<ProcessorRunlogDone>(payload)?;
+        Ok(Some(done))
     }
 
     #[tracing::instrument(skip(self))]
@@ -1102,7 +1070,7 @@ impl Rt {
         done_token: &str,
     ) -> Res<()> {
         upsert_processor_runlog_item(
-            self.big_repo.partition_store().as_ref(),
+            self.rcx.partition_store.as_ref(),
             &self.config.device_id,
             doc_id,
             processor_full_id,
@@ -1811,10 +1779,10 @@ async fn upsert_processor_runlog_item(
         "done_at": jiff::Timestamp::now().to_string(),
     });
     partition_store
-        .record_item_change(
-            &PROCESSOR_RUNLOG_PARTITION_ID.to_string(),
-            &item_id,
+        .upsert_item(
+            Arc::clone(&item_id),
             &payload,
+            &[PROCESSOR_RUNLOG_PARTITION_ID.into()],
         )
         .await
 }
@@ -2081,7 +2049,7 @@ mod tests {
             .await?;
         let (store, stop_token) = am_utils_rs::partition::PartitionStore::boot(pool).await?;
         store
-            .ensure_partition(&PROCESSOR_RUNLOG_PARTITION_ID.to_string())
+            .ensure_partition(&PROCESSOR_RUNLOG_PARTITION_ID.into())
             .await?;
         Ok((store, stop_token))
     }
@@ -2108,13 +2076,15 @@ mod tests {
         )
         .await?;
 
-        let count = store
-            .item_row_count(&PROCESSOR_RUNLOG_PARTITION_ID.to_string(), &item_id)
-            .await?;
-        assert_eq!(count, 1, "runlog should overwrite in-place for same key");
+        assert!(
+            store
+                .is_item_member_of_partitions(&item_id, &[PROCESSOR_RUNLOG_PARTITION_ID.into()])
+                .await?,
+            "runlog should overwrite in-place for same key"
+        );
 
         let payload = store
-            .item_payload_for_partition(&PROCESSOR_RUNLOG_PARTITION_ID.to_string(), &item_id)
+            .item_payload(&item_id)
             .await?
             .ok_or_eyre("expected runlog payload row")?;
         assert_eq!(payload["done_by_peer_id"], serde_json::json!("peer-a"));

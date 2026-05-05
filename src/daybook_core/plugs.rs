@@ -1610,7 +1610,7 @@ impl PlugsRepo {
             .wrap_err_with(|| format!("error reading OCI layout blob '{}'", path.display()))
     }
 
-    fn blob_hashes_for_manifest(manifest: &manifest::PlugManifest) -> Res<HashSet<String>> {
+    fn blob_hashes_for_manifest(manifest: &manifest::PlugManifest) -> Res<HashSet<Arc<str>>> {
         let mut hashes = HashSet::new();
         for bundle in manifest.wflow_bundles.values() {
             for component_url in &bundle.component_urls {
@@ -1624,7 +1624,7 @@ impl PlugsRepo {
                 let hash = component_url.path().trim_start_matches('/');
                 eyre::ensure!(!hash.is_empty(), "empty blob hash in plug manifest URL");
                 utils_rs::hash::decode_base58_multibase(hash)?;
-                hashes.insert(hash.to_string());
+                hashes.insert(hash.into());
             }
         }
         Ok(hashes)
@@ -1633,12 +1633,12 @@ impl PlugsRepo {
     async fn publish_plug_scope_diff_for_manifest_change(
         &self,
         plug_id: &str,
-        prev_hashes: &HashSet<String>,
-        next_hashes: &HashSet<String>,
+        prev_hashes: &HashSet<Arc<str>>,
+        next_hashes: &HashSet<Arc<str>>,
     ) -> Res<()> {
         for hash in next_hashes.difference(prev_hashes) {
             self.blobs
-                .add_hash_to_scope(crate::blobs::BlobScope::Plugs, hash)
+                .add_hash_to_scope(crate::blobs::BlobScope::Plugs, Arc::clone(&hash))
                 .await?;
         }
         for hash in prev_hashes.difference(next_hashes) {
@@ -1647,7 +1647,7 @@ impl PlugsRepo {
                 .await
             {
                 self.blobs
-                    .remove_hash_from_scope(crate::blobs::BlobScope::Plugs, hash)
+                    .remove_hash_from_scope(crate::blobs::BlobScope::Plugs, Arc::clone(&hash))
                     .await?;
             }
         }
@@ -2266,14 +2266,15 @@ mod tests {
     use super::*;
     use crate::repos::{Repo, SubscribeOpts, TryRecvError};
 
-    async fn setup_repo() -> Res<(SharedBigRepo, Arc<PlugsRepo>, DocumentId, tempfile::TempDir)> {
+    async fn setup_repo() -> Res<(
+        SharedBigRepo,
+        Arc<am_utils_rs::partition::PartitionStore>,
+        Arc<PlugsRepo>,
+        DocumentId,
+        tempfile::TempDir,
+    )> {
         let local_user_path = daybook_types::doc::UserPathBuf::from("/test-user/test-device");
-        let (big_repo, _acx_stop) = BigRepo::boot(am_utils_rs::repo::Config {
-            peer_id: crate::peer_id_from_label("test"),
-            secret_key_bytes: rand::random::<[u8; 32]>(),
-            storage: am_utils_rs::repo::StorageConfig::Memory,
-        })
-        .await?;
+        let (big_repo, part_store, _acx_stop) = crate::drawer::tests::boot_repo().await?;
 
         let doc = automerge::Automerge::load(&version_updates::version_latest()?)?;
         let handle = big_repo.put_doc(DocumentId::random(), doc).await?;
@@ -2284,7 +2285,7 @@ mod tests {
             temp_dir.path().to_path_buf(),
             "/test-user".into(),
             Arc::new(crate::blobs::PartitionStoreMembershipWriter::new(
-                big_repo.partition_store(),
+                Arc::clone(&part_store),
             )),
         )
         .await?;
@@ -2296,7 +2297,7 @@ mod tests {
             local_user_path,
         )
         .await?;
-        Ok((big_repo, repo, doc_id, temp_dir))
+        Ok((big_repo, part_store, repo, doc_id, temp_dir))
     }
 
     fn mock_plug(name: &str) -> manifest::PlugManifest {
@@ -2319,7 +2320,7 @@ mod tests {
 
     #[tokio::test(flavor = "multi_thread")]
     async fn test_plug_add_success() -> Res<()> {
-        let (_acx, repo, _doc_id, _temp_dir) = setup_repo().await?;
+        let (_acx, _part_store, repo, _doc_id, _temp_dir) = setup_repo().await?;
         let plug = mock_plug("plug1");
 
         repo.add(plug).await?;
@@ -2331,7 +2332,7 @@ mod tests {
 
     #[tokio::test(flavor = "multi_thread")]
     async fn test_plug_add_emits_single_local_event() -> Res<()> {
-        let (_acx, repo, _doc_id, _temp_dir) = setup_repo().await?;
+        let (_acx, _part_store, repo, _doc_id, _temp_dir) = setup_repo().await?;
         let listener = repo.subscribe(SubscribeOpts::new(16));
 
         repo.add(mock_plug("plug-single-event")).await?;
@@ -2355,7 +2356,7 @@ mod tests {
 
     #[tokio::test(flavor = "multi_thread")]
     async fn test_plug_tag_clash() -> Res<()> {
-        let (_acx, repo, _doc_id, _temp_dir) = setup_repo().await?;
+        let (_acx, _part_store, repo, _doc_id, _temp_dir) = setup_repo().await?;
 
         // Add first plug with a tag
         let mut p1 = mock_plug("plug1");
@@ -2385,7 +2386,7 @@ mod tests {
 
     #[tokio::test(flavor = "multi_thread")]
     async fn test_plug_dependency_resolution() -> Res<()> {
-        let (_acx, repo, _doc_id, _temp_dir) = setup_repo().await?;
+        let (_acx, _part_store, repo, _doc_id, _temp_dir) = setup_repo().await?;
 
         // Add provider plug
         let mut provider = mock_plug("provider");
@@ -2417,7 +2418,7 @@ mod tests {
 
     #[tokio::test(flavor = "multi_thread")]
     async fn test_plug_missing_dependency() -> Res<()> {
-        let (_acx, repo, _doc_id, _temp_dir) = setup_repo().await?;
+        let (_acx, _part_store, repo, _doc_id, _temp_dir) = setup_repo().await?;
 
         let mut consumer = mock_plug("consumer");
         consumer.dependencies.insert(
@@ -2440,7 +2441,7 @@ mod tests {
 
     #[tokio::test(flavor = "multi_thread")]
     async fn test_plug_version_breaking_change() -> Res<()> {
-        let (_acx, repo, _doc_id, _temp_dir) = setup_repo().await?;
+        let (_acx, _part_store, repo, _doc_id, _temp_dir) = setup_repo().await?;
 
         // Create a temporary file for the component (keep it alive)
         let temp_dir = tempfile::tempdir()?;
@@ -2503,7 +2504,7 @@ mod tests {
 
     #[tokio::test(flavor = "multi_thread")]
     async fn test_plug_version_must_increase() -> Res<()> {
-        let (_acx, repo, _doc_id, _temp_dir) = setup_repo().await?;
+        let (_acx, _part_store, repo, _doc_id, _temp_dir) = setup_repo().await?;
 
         // Add initial version
         let mut p1_v1 = mock_plug("plug1");
@@ -2540,7 +2541,7 @@ mod tests {
 
     #[tokio::test(flavor = "multi_thread")]
     async fn test_plug_bundle_key_validation() -> Res<()> {
-        let (_acx, repo, _doc_id, _temp_dir) = setup_repo().await?;
+        let (_acx, _part_store, repo, _doc_id, _temp_dir) = setup_repo().await?;
 
         let temp_dir = tempfile::tempdir()?;
         let temp_path = temp_dir.path().join("component.wasm");
@@ -2614,7 +2615,7 @@ mod tests {
 
     #[tokio::test(flavor = "multi_thread")]
     async fn test_plug_component_url_validation() -> Res<()> {
-        let (_acx, repo, _doc_id, _temp_dir) = setup_repo().await?;
+        let (_acx, _part_store, repo, _doc_id, _temp_dir) = setup_repo().await?;
 
         // Test with non-existent file URL
         let mut plug = mock_plug("plug1");
@@ -2674,7 +2675,7 @@ mod tests {
 
     #[tokio::test(flavor = "multi_thread")]
     async fn test_plug_reference_json_path_must_exist_in_schema() -> Res<()> {
-        let (_acx, repo, _doc_id, _temp_dir) = setup_repo().await?;
+        let (_acx, _part_store, repo, _doc_id, _temp_dir) = setup_repo().await?;
 
         let mut plug = mock_plug("ref-path");
         plug.facets.push(manifest::FacetManifest {
@@ -2700,7 +2701,7 @@ mod tests {
 
     #[tokio::test(flavor = "multi_thread")]
     async fn test_plug_at_commit_json_path_type_must_be_array_of_strings() -> Res<()> {
-        let (_acx, repo, _doc_id, _temp_dir) = setup_repo().await?;
+        let (_acx, _part_store, repo, _doc_id, _temp_dir) = setup_repo().await?;
 
         let mut plug = mock_plug("bad-at-commit");
         plug.facets.push(manifest::FacetManifest {
@@ -2726,7 +2727,7 @@ mod tests {
 
     #[tokio::test(flavor = "multi_thread")]
     async fn test_processor_routine_must_exist() -> Res<()> {
-        let (_acx, repo, _doc_id, _temp_dir) = setup_repo().await?;
+        let (_acx, _part_store, repo, _doc_id, _temp_dir) = setup_repo().await?;
 
         let mut plug = mock_plug("processor-routine");
         plug.processors.insert(
@@ -2754,7 +2755,7 @@ mod tests {
 
     #[tokio::test(flavor = "multi_thread")]
     async fn test_processor_predicate_tags_must_be_in_scope() -> Res<()> {
-        let (_acx, repo, _doc_id, _temp_dir) = setup_repo().await?;
+        let (_acx, _part_store, repo, _doc_id, _temp_dir) = setup_repo().await?;
 
         let temp_dir = tempfile::tempdir()?;
         let temp_path = temp_dir.path().join("component.wasm");
@@ -2808,7 +2809,7 @@ mod tests {
 
     #[tokio::test(flavor = "multi_thread")]
     async fn test_command_invoke_acl_rejects_target_without_dependency() -> Res<()> {
-        let (_acx, repo, _doc_id, _temp_dir) = setup_repo().await?;
+        let (_acx, _part_store, repo, _doc_id, _temp_dir) = setup_repo().await?;
 
         let temp_dir = tempfile::tempdir()?;
         let temp_path = temp_dir.path().join("component.wasm");
@@ -2883,7 +2884,7 @@ mod tests {
 
     #[tokio::test(flavor = "multi_thread")]
     async fn test_command_invoke_acl_rejects_missing_command() -> Res<()> {
-        let (_acx, repo, _doc_id, _temp_dir) = setup_repo().await?;
+        let (_acx, _part_store, repo, _doc_id, _temp_dir) = setup_repo().await?;
 
         let temp_dir = tempfile::tempdir()?;
         let temp_path = temp_dir.path().join("component.wasm");
@@ -2953,7 +2954,7 @@ mod tests {
 
     #[tokio::test(flavor = "multi_thread")]
     async fn test_plug_file_to_blob_conversion() -> Res<()> {
-        let (_acx, repo, _doc_id, _temp_dir) = setup_repo().await?;
+        let (_acx, _part_store, repo, _doc_id, _temp_dir) = setup_repo().await?;
 
         // Create a temporary file with wasm content (keep it alive)
         let temp_dir = tempfile::tempdir()?;
@@ -2994,8 +2995,8 @@ mod tests {
 
     #[tokio::test(flavor = "multi_thread")]
     async fn test_plug_blob_scope_partition_tracks_add_and_remove() -> Res<()> {
-        let (big_repo, repo, _doc_id, _temp_dir) = setup_repo().await?;
-        let partition_id = crate::blobs::BLOB_SCOPE_PLUGS_PARTITION_ID.to_string();
+        let (_big_repo, part_store, repo, _doc_id, _temp_dir) = setup_repo().await?;
+        let partition_id = crate::blobs::BLOB_SCOPE_PLUGS_PARTITION_ID.into();
 
         let temp_dir = tempfile::tempdir()?;
         let temp_path = temp_dir.path().join("component.wasm");
@@ -3024,15 +3025,23 @@ mod tests {
             .and_then(|bundle| bundle.component_urls.first())
             .map(|url| url.path().trim_start_matches('/').to_string())
             .ok_or_eyre("expected converted blob URL in bundle1")?;
-        assert_eq!(big_repo.partition_member_count(&partition_id).await?, 1);
-        assert!(big_repo.contains_in_partition(&partition_id, &hash).await?);
+        assert_eq!(part_store.member_count(&partition_id).await?, 1);
+        assert!(
+            part_store
+                .is_item_member_of_partitions(&hash, &[Arc::clone(&partition_id)],)
+                .await?
+        );
 
         let mut plug_update = mock_plug("scope-membership");
         plug_update.version = "0.2.0".parse().unwrap();
         repo.add(plug_update).await?;
 
-        assert_eq!(big_repo.partition_member_count(&partition_id).await?, 0);
-        assert!(!big_repo.contains_in_partition(&partition_id, &hash).await?);
+        assert_eq!(part_store.member_count(&partition_id).await?, 0);
+        assert!(
+            !part_store
+                .is_item_member_of_partitions(&hash, &[Arc::clone(&partition_id)],)
+                .await?
+        );
         Ok(())
     }
 }

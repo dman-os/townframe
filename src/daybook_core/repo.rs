@@ -87,6 +87,7 @@ pub struct RepoCtx {
 
     pub sql: SqlCtx,
     pub partition_store: Arc<PartitionStore>,
+    partition_store_stop: am_utils_rs::partition::PartitionStoreStopToken,
 
     pub big_repo: SharedBigRepo,
     big_repo_stop: std::sync::Mutex<Option<am_utils_rs::BigRepoStopToken>>,
@@ -112,6 +113,7 @@ pub(crate) struct RepoCtxParts {
     pub lock_guard: RepoLockGuard,
     pub sql: SqlCtx,
     pub partition_store: Arc<PartitionStore>,
+    pub partition_store_stop: am_utils_rs::partition::PartitionStoreStopToken,
     pub big_repo: SharedBigRepo,
     pub big_repo_stop: std::sync::Mutex<Option<am_utils_rs::BigRepoStopToken>>,
     pub local_peer_key: am_utils_rs::sync::protocol::PeerKey,
@@ -140,6 +142,7 @@ impl RepoCtx {
             lock_guard: parts.lock_guard,
             sql: parts.sql,
             partition_store: parts.partition_store,
+            partition_store_stop: parts.partition_store_stop,
             big_repo: parts.big_repo,
             big_repo_stop: parts.big_repo_stop,
             doc_app,
@@ -221,10 +224,13 @@ impl RepoCtx {
             local_user_path,
             local_actor_id,
         } = compute_user_info(&repo_id, &user_id, &identity);
-        let (big_repo, big_repo_stop, partition_store) = boot_big_repo(&layout, &identity).await?;
+        let (partition_store, partition_store_stop) =
+            PartitionStore::boot(sql.db_pool.clone()).await?;
+        let (big_repo, big_repo_stop) =
+            boot_big_repo(&layout, &identity, Arc::clone(&partition_store)).await?;
         let (doc_app, doc_drawer) = load_core_docs(&big_repo, &sql).await?;
         ensure_expected_partitions_for_docs(
-            &big_repo,
+            &partition_store,
             doc_app.document_id(),
             doc_drawer.document_id(),
         )
@@ -235,6 +241,7 @@ impl RepoCtx {
             sql,
             partition_store,
             big_repo,
+            partition_store_stop,
             big_repo_stop: std::sync::Mutex::new(Some(big_repo_stop)),
             local_peer_key,
             local_actor_id,
@@ -300,16 +307,20 @@ impl RepoCtx {
             local_user_path,
             local_actor_id,
         } = compute_user_info(&repo_id, &user_id, &identity);
-        let (big_repo, big_repo_stop, partition_store) = boot_big_repo(&layout, &identity).await?;
+        let (partition_store, partition_store_stop) =
+            PartitionStore::boot(sql.db_pool.clone()).await?;
+        let (big_repo, big_repo_stop) =
+            boot_big_repo(&layout, &identity, Arc::clone(&partition_store)).await?;
         let (doc_app, doc_drawer) = init_core_docs(&big_repo, &sql).await?;
         ensure_expected_partitions_for_docs(
-            &big_repo,
+            &partition_store,
             doc_app.document_id(),
             doc_drawer.document_id(),
         )
         .await?;
         Self::run_repo_init_dance(
             &big_repo,
+            &partition_store,
             &doc_app,
             &doc_drawer,
             &local_user_path,
@@ -323,6 +334,7 @@ impl RepoCtx {
             lock_guard,
             sql,
             partition_store,
+            partition_store_stop,
             big_repo,
             big_repo_stop: std::sync::Mutex::new(Some(big_repo_stop)),
             local_peer_key,
@@ -341,6 +353,7 @@ impl RepoCtx {
 
     async fn run_repo_init_dance(
         big_repo: &SharedBigRepo,
+        partition_store: &Arc<PartitionStore>,
         doc_app: &BigDocHandle,
         doc_drawer: &BigDocHandle,
         local_user_path: &UserPath,
@@ -358,7 +371,7 @@ impl RepoCtx {
             blobs_root.clone(),
             local_user_path.to_owned(),
             Arc::new(crate::blobs::PartitionStoreMembershipWriter::new(
-                big_repo.partition_store(),
+                Arc::clone(&partition_store),
             )),
         )
         .await?;
@@ -438,6 +451,7 @@ impl RepoCtx {
 
             let (_drawer_repo, stop) = DrawerRepo::load(
                 Arc::clone(big_repo),
+                Arc::clone(&partition_store),
                 doc_drawer.document_id().clone(),
                 UserPathBuf::from(local_user_path.to_string()),
                 sql.clone(),
@@ -555,11 +569,8 @@ fn compute_user_info(
 async fn boot_big_repo(
     layout: &RepoLayout,
     identity: &crate::secrets::RepoIdentity,
-) -> Res<(
-    SharedBigRepo,
-    am_utils_rs::BigRepoStopToken,
-    Arc<PartitionStore>,
-)> {
+    partition_store: Arc<PartitionStore>,
+) -> Res<(SharedBigRepo, am_utils_rs::BigRepoStopToken)> {
     let am_config = am_utils_rs::repo::Config {
         storage: am_utils_rs::repo::StorageConfig::Disk {
             path: layout.samod_root.clone(),
@@ -567,9 +578,8 @@ async fn boot_big_repo(
         peer_id: identity.iroh_public_key.into(),
         secret_key_bytes: identity.iroh_secret_key.to_bytes(),
     };
-    let (big_repo, big_repo_stop) = am_utils_rs::BigRepo::boot(am_config).await?;
-    let partition_store = big_repo.partition_store();
-    Ok((big_repo, big_repo_stop, partition_store))
+    let (big_repo, big_repo_stop) = am_utils_rs::BigRepo::boot(am_config, partition_store).await?;
+    Ok((big_repo, big_repo_stop))
 }
 
 async fn cleanup_blobs_staging_dir(blobs_root: &Path) -> Res<()> {
@@ -583,7 +593,6 @@ async fn cleanup_blobs_staging_dir(blobs_root: &Path) -> Res<()> {
 
 pub(crate) async fn finish_clone_init(
     parts: RepoCtxParts,
-    big_repo: &SharedBigRepo,
     blobs_root: PathBuf,
 ) -> Res<Arc<RepoCtx>> {
     let sql = &parts.sql;
@@ -596,17 +605,21 @@ pub(crate) async fn finish_clone_init(
         } => (doc_id_app, doc_id_drawer),
         globals::InitState::None => eyre::bail!("clone init: InitState not set"),
     };
-    let doc_app = big_repo
+    let doc_app = parts
+        .big_repo
         .get_doc(&doc_id_app)
         .await?
         .ok_or_eyre("clone init: app doc missing from BigRepo")?;
-    let doc_drawer = big_repo
+    let doc_drawer = parts
+        .big_repo
         .get_doc(&doc_id_drawer)
         .await?
         .ok_or_eyre("clone init: drawer doc missing from BigRepo")?;
-    ensure_expected_partitions_for_docs(big_repo, &doc_id_app, &doc_id_drawer).await?;
+    ensure_expected_partitions_for_docs(&parts.partition_store, &doc_id_app, &doc_id_drawer)
+        .await?;
     RepoCtx::run_repo_init_dance(
-        big_repo,
+        &parts.big_repo,
+        &parts.partition_store,
         &doc_app,
         &doc_drawer,
         local_user_path,
@@ -618,32 +631,31 @@ pub(crate) async fn finish_clone_init(
 }
 
 pub(crate) async fn ensure_expected_partitions_for_docs(
-    big_repo: &SharedBigRepo,
+    partition_store: &Arc<PartitionStore>,
     doc_app_id: &DocumentId,
     doc_drawer_id: &DocumentId,
 ) -> Res<()> {
-    let partition_store = big_repo.partition_store();
     for partition_id in [
         crate::drawer::DrawerRepo::replicated_partition_id_for_drawer(doc_drawer_id),
-        crate::sync::CORE_DOCS_PARTITION_ID.to_string(),
-        crate::blobs::BLOB_SCOPE_DOCS_PARTITION_ID.to_string(),
-        crate::blobs::BLOB_SCOPE_PLUGS_PARTITION_ID.to_string(),
-        crate::rt::PROCESSOR_RUNLOG_PARTITION_ID.to_string(),
+        crate::sync::CORE_DOCS_PARTITION_ID.into(),
+        crate::blobs::BLOB_SCOPE_DOCS_PARTITION_ID.into(),
+        crate::blobs::BLOB_SCOPE_PLUGS_PARTITION_ID.into(),
+        crate::rt::PROCESSOR_RUNLOG_PARTITION_ID.into(),
     ] {
         partition_store.ensure_partition(&partition_id).await?;
     }
     partition_store
         .upsert_item(
-            &crate::sync::CORE_DOCS_PARTITION_ID.to_string(),
-            &doc_drawer_id.to_string(),
+            doc_drawer_id.to_string().into(),
             &serde_json::json!({}),
+            &[crate::sync::CORE_DOCS_PARTITION_ID.into()],
         )
         .await?;
     partition_store
         .upsert_item(
-            &crate::sync::CORE_DOCS_PARTITION_ID.to_string(),
-            &doc_app_id.to_string(),
+            doc_app_id.to_string().into(),
             &serde_json::json!({}),
+            &[crate::sync::CORE_DOCS_PARTITION_ID.into()],
         )
         .await?;
     Ok(())
