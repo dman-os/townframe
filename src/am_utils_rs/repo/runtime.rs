@@ -902,6 +902,8 @@ where
         debug!(
             peer_id = %session.peer_id,
             kind = ?session.kind,
+            received_commit_ids = session.received_commit_ids.len(),
+            received_fragment_ids = session.received_fragment_ids.len(),
             "observed sync session"
         );
         let worker = self.doc_worker_handle(doc_id).expect(ERROR_ACTOR);
@@ -1467,13 +1469,15 @@ where
         &mut self,
         session: subduction_core::sync_session::SyncSession,
     ) -> Res<()> {
+        info!(
+            doc_id = %self.doc_id,
+            peer_id = %session.peer_id,
+            kind = ?session.kind,
+            received_commit_ids = session.received_commit_ids.len(),
+            received_fragment_ids = session.received_fragment_ids.len(),
+            "applying sync session"
+        );
         if session.is_empty() {
-            return Ok(());
-        }
-        if matches!(
-            session.kind,
-            subduction_core::sync_session::SyncSessionKind::InboundPush
-        ) {
             return Ok(());
         }
         let mut blobs = Vec::new();
@@ -1493,23 +1497,92 @@ where
                 .ok_or_eyre("synced fragment missing")?;
             blobs.push(verified.blob().clone().into_contents());
         }
+        info!(
+            doc_id = %self.doc_id,
+            peer_id = %session.peer_id,
+            kind = ?session.kind,
+            blobs = blobs.len(),
+            is_unloaded = matches!(self.state, DocWorkerDocState::Unloaded),
+            is_transient = matches!(self.state, DocWorkerDocState::Transient(_)),
+            is_live = matches!(self.state, DocWorkerDocState::Live(_)),
+            "sync session applied blobs and is selecting doc state path"
+        );
         let maybe_delta = match &mut self.state {
             DocWorkerDocState::Unloaded => {
                 // since the doc in storage will have the latest blobs,
                 // we must load the before_heads from the partition payloads
+                info!(
+                    doc_id = %self.doc_id,
+                    peer_id = %session.peer_id,
+                    kind = ?session.kind,
+                    "unloaded sync session loading partition heads"
+                );
                 let before_heads =
                     super::partition_doc_heads_payload(&self.partition_store, &self.doc_id_str)
                         .await?;
-                let doc =
+                info!(
+                    doc_id = %self.doc_id,
+                    peer_id = %session.peer_id,
+                    kind = ?session.kind,
+                    heads = before_heads.len(),
+                    "unloaded sync session loaded partition heads"
+                );
+                info!(
+                    doc_id = %self.doc_id,
+                    peer_id = %session.peer_id,
+                    kind = ?session.kind,
+                    "unloaded sync session loading doc snapshot"
+                );
+                let mut doc =
                     load_doc_snapshot(&self.sedimentrees, &self.storage_for_reads, self.doc_id)
                         .await?
                         .unwrap_or_else(automerge::Automerge::new);
-                let after_heads = doc.get_heads();
-                let out = if &before_heads[..] == &after_heads[..] {
-                    None
+                info!(
+                    doc_id = %self.doc_id,
+                    peer_id = %session.peer_id,
+                    kind = ?session.kind,
+                    heads = doc.get_heads().len(),
+                    "unloaded sync session loaded doc snapshot"
+                );
+                let loaded_heads = doc.get_heads();
+                let out = if &before_heads[..] == &loaded_heads[..] {
+                    for blob in blobs {
+                        doc.load_incremental(&blob).map_err(|err| {
+                            eyre::eyre!("failed applying sync session blob: {err}")
+                        })?;
+                    }
+                    let after_heads = doc.get_heads();
+                    if &before_heads[..] == &after_heads[..] {
+                        info!(
+                            doc_id = %self.doc_id,
+                            peer_id = %session.peer_id,
+                            kind = ?session.kind,
+                            "unloaded sync session produced no delta after applying blobs"
+                        );
+                        None
+                    } else {
+                        let patches = doc.diff(&before_heads, &after_heads);
+                        info!(
+                            doc_id = %self.doc_id,
+                            peer_id = %session.peer_id,
+                            kind = ?session.kind,
+                            heads = after_heads.len(),
+                            patches = patches.len(),
+                            "unloaded sync session produced delta after applying blobs"
+                        );
+                        Some((after_heads, patches))
+                    }
                 } else {
-                    let patches = doc.diff(&before_heads, &after_heads);
-                    Some((after_heads, patches))
+                    let patches = doc.diff(&before_heads, &loaded_heads);
+                    info!(
+                        doc_id = %self.doc_id,
+                        peer_id = %session.peer_id,
+                        kind = ?session.kind,
+                        heads = loaded_heads.len(),
+                        patches = patches.len(),
+                        "unloaded sync session used loaded snapshot delta"
+                    );
+                    Some((loaded_heads, patches))
                 };
                 self.state = DocWorkerDocState::Transient(doc);
                 out
@@ -1598,6 +1671,7 @@ where
         match std::mem::replace(&mut self.state, DocWorkerDocState::Unloaded) {
             DocWorkerDocState::Live(bundle) => match bundle.upgrade() {
                 Some(bundle) => {
+                    info!(doc_id = %self.doc_id, "current doc mut using live bundle");
                     let mut doc = bundle.doc.lock().await;
                     let out = f(&mut doc)?;
                     drop(doc);
@@ -1605,6 +1679,7 @@ where
                     Ok(out)
                 }
                 None => {
+                    info!(doc_id = %self.doc_id, "current doc mut live bundle expired; loading snapshot");
                     let mut doc =
                         load_doc_snapshot(&self.sedimentrees, &self.storage_for_reads, self.doc_id)
                             .await?
@@ -1658,6 +1733,15 @@ async fn commit_delta_bookkeep(
     let item_payload = serde_json::json!({
         "heads": crate::serialize_commit_heads(&heads),
     });
+    let has_change_listener_interest = change_manager.has_change_listener_interest(doc_id, &origin);
+    info!(
+        %doc_id,
+        ?origin,
+        heads = heads.len(),
+        patches = patches.len(),
+        has_change_listener_interest,
+        "bookkeeping committed delta"
+    );
     partition_store
         .record_item_change_all_partitions(doc_id_str, &item_payload)
         .await?;
@@ -1863,6 +1947,7 @@ where
 {
     let doc_id: DocumentId = doc_id.into();
     let sedimentree_id: SedimentreeId = doc_id.into();
+    info!(%doc_id, sedimentree_id = %sedimentree_id, "loading doc snapshot");
 
     let loose_commits =
         <S as subduction_core::storage::traits::Storage<future_form::Sendable>>::load_loose_commits(
@@ -1877,6 +1962,12 @@ where
     let (loose_commits, fragments) = futures::future::try_join(loose_commits, fragments)
         .await
         .wrap_err("failed reading blobs from storage")?;
+    info!(
+        %doc_id,
+        loose_commits = loose_commits.len(),
+        fragments = fragments.len(),
+        "loaded doc snapshot blobs"
+    );
     if loose_commits.is_empty() && fragments.is_empty() {
         return Ok(None);
     }
@@ -1902,6 +1993,7 @@ where
             (tree, true)
         }
     };
+    info!(%doc_id, fresh, blobs = blobs.len(), "building sedimentree order");
     let blob_by_digest = blobs
         .iter()
         .map(|blob| (Digest::hash(blob), blob.as_slice()))
@@ -1909,6 +2001,7 @@ where
     let order = tree
         .topsorted_blob_order()
         .map_err(|err| ferr!("failed ordering sedimentree blobs: {err}"))?;
+    info!(%doc_id, items = order.len(), "built sedimentree order");
     let fragments: Vec<_> = tree.fragments().collect();
     let loose: Vec<_> = tree.loose_commits().collect();
 
@@ -1924,9 +2017,11 @@ where
         buf.extend_from_slice(raw);
     }
 
+    info!(%doc_id, buf_len = buf.len(), "loading doc snapshot into automerge");
     let mut doc = automerge::Automerge::new();
     doc.load_incremental(&buf)
         .map_err(|err| ferr!("failed reconstructing automerge doc from ordered blobs: {err}"))?;
+    info!(%doc_id, heads = doc.get_heads().len(), "loaded doc snapshot");
 
     if fresh {
         sedimentrees.insert(sedimentree_id, tree).await;

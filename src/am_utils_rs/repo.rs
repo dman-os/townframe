@@ -709,7 +709,10 @@ mod tests {
             .put_doc(doc_id, automerge::Automerge::new())
             .await
             .expect_err("expected conflict");
-        assert!(err.to_string().contains("already exists locally"));
+        assert!(matches!(
+            err,
+            runtime::PutDocError::IdOccpuied { id } if id == doc_id
+        ));
         Ok(())
     }
 
@@ -2294,6 +2297,7 @@ async fn partition_doc_heads_payload(
     part_store: &PartitionStore,
     doc_id: &str,
 ) -> Res<Arc<[ChangeHash]>> {
+    tracing::info!(doc_id, "loading partition doc heads payload");
     let (_, mut before_heads) = part_store
         .item_payloads(doc_id)
         .await?
@@ -2307,5 +2311,10 @@ async fn partition_doc_heads_payload(
         .expect(ERROR_IMPOSSIBLE);
     let before_heads: Vec<String> = serde_json::from_value(before_heads).expect(ERROR_IMPOSSIBLE);
 
+    tracing::info!(
+        doc_id,
+        heads = before_heads.len(),
+        "loaded partition doc heads payload"
+    );
     Ok(crate::parse_commit_heads(&before_heads).expect(ERROR_IMPOSSIBLE))
 }

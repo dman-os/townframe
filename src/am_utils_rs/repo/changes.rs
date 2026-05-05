@@ -168,6 +168,7 @@ impl ChangeListenerManager {
         heads: Arc<[ChangeHash]>,
     ) -> Res<()> {
         self.ensure_live()?;
+        info!(%doc_id, heads = heads.len(), "queue doc created notification");
         self.change_tx
             .send(vec![BigRepoChangeNotification::DocCreated {
                 doc_id,
@@ -183,6 +184,7 @@ impl ChangeListenerManager {
         heads: Arc<[ChangeHash]>,
     ) -> Res<()> {
         self.ensure_live()?;
+        info!(%doc_id, heads = heads.len(), "queue doc imported notification");
         self.change_tx
             .send(vec![BigRepoChangeNotification::DocImported {
                 doc_id,
@@ -200,6 +202,7 @@ impl ChangeListenerManager {
         origin: BigRepoChangeOrigin,
     ) -> Res<()> {
         self.ensure_live()?;
+        info!(%doc_id, ?origin, heads = heads.len(), "queue doc changed notification");
         self.change_tx
             .send(vec![BigRepoChangeNotification::DocChanged {
                 doc_id,
@@ -217,6 +220,7 @@ impl ChangeListenerManager {
         origin: BigRepoChangeOrigin,
     ) -> Res<()> {
         self.ensure_live()?;
+        info!(%doc_id, ?origin, heads = heads.len(), "queue doc heads notification");
         self.head_tx
             .send(vec![BigRepoHeadNotification::DocHeadsChanged {
                 doc_id,
@@ -411,6 +415,10 @@ impl ChangeListenerManager {
 
                 match input {
                     SwitchboardInput::Remote(notifications) => {
+                        info!(
+                            count = notifications.len(),
+                            "dispatching remote change notifications"
+                        );
                         let to_send = {
                             let listeners = self.listeners.lock().expect(ERROR_MUTEX);
                             let mut to_send = Vec::new();
@@ -445,6 +453,10 @@ impl ChangeListenerManager {
                         }
                     }
                     SwitchboardInput::Heads(notifications) => {
+                        info!(
+                            count = notifications.len(),
+                            "dispatching head notifications"
+                        );
                         let to_send = {
                             let listeners = self.head_listeners.lock().expect(ERROR_MUTEX);
                             let mut to_send = Vec::new();
@@ -482,6 +494,10 @@ impl ChangeListenerManager {
                         }
                     }
                     SwitchboardInput::Local(notifications) => {
+                        info!(
+                            count = notifications.len(),
+                            "dispatching local notifications"
+                        );
                         let to_send = {
                             let listeners = self.local_listeners.lock().expect(ERROR_MUTEX);
                             let mut to_send = Vec::new();

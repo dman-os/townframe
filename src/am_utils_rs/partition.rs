@@ -1103,7 +1103,7 @@ async fn alloc_txid(conn: &mut sqlx::SqliteConnection) -> Res<u64> {
     let out = next_value.saturating_sub(1);
     // NOTE: txid starts from 1 to make 0 a good
     // zero state for cursors
-    if out < 2 {
+    if out < 1 {
         eyre::bail!("invalid next_txid in sqlite: {next_value}");
     }
     let out = out as u64;

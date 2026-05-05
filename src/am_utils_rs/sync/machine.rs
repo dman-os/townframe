@@ -228,6 +228,8 @@ impl SyncMachine {
                     .await?;
                 let old = state.slots.insert(cursor, CursorSlotState::Ready);
                 assert!(old.is_none(), "fishy");
+                self.drain_ready_cursor_advances(&peer, &partition_id)
+                    .await?;
                 // if item is still in other partitons, no need for a delete command
                 return Ok(default());
             }
@@ -248,14 +250,16 @@ impl SyncMachine {
             .active_item_jobs
             .entry(job_id)
             .or_insert_with(|| ItemJobState {
-                dirty: true,
+                dirty: false,
                 high_water_at_last_dispatch: cursor,
                 last_change_kind: key.kind,
                 waiters: default(),
             });
-        entry.dirty = true;
-        assert!(entry.high_water_at_last_dispatch < cursor, "fishy");
-        entry.high_water_at_last_dispatch = cursor;
+        if !entry.waiters.is_empty() {
+            entry.dirty = true;
+            assert!(entry.high_water_at_last_dispatch < cursor, "fishy");
+            entry.high_water_at_last_dispatch = cursor;
+        }
         match (entry.last_change_kind, sync_kind) {
             // item added to new partition
             (ItemSyncKind::Change, ItemSyncKind::New)
@@ -273,7 +277,6 @@ impl SyncMachine {
             | (ItemSyncKind::Delete, ItemSyncKind::Change)
             => panic!("curiosity trap: event for deleted item"),
         }
-        entry.high_water_at_last_dispatch = cursor;
         entry.waiters.insert(
             cursor,
             CursorWaiter {
@@ -310,53 +313,56 @@ impl SyncMachine {
             return Ok(Vec::new());
         };
         let mut commands = Vec::new();
-        if job.dirty {
-            job.dirty = false;
-
-            let next_job_kind = match (&job.last_change_kind, &completion) {
-                (ItemSyncKind::New, SyncCompletion::AddedMember { .. })
-                | (ItemSyncKind::Change, SyncCompletion::AddedMember { .. })
-                | (ItemSyncKind::New, SyncCompletion::Noop { .. })
-                | (ItemSyncKind::New, SyncCompletion::ChangedItem { .. })
-                | (ItemSyncKind::Change, SyncCompletion::Noop { .. })
-                | (ItemSyncKind::Change, SyncCompletion::ChangedItem { .. }) => {
-                    ItemSyncKind::Change
-                }
-                (ItemSyncKind::Change, SyncCompletion::DeletedMember { .. })
-                | (ItemSyncKind::New, SyncCompletion::DeletedMember { .. }) => ItemSyncKind::New,
-                (ItemSyncKind::Delete, SyncCompletion::AddedMember { .. })
-                // NOTE: we still enueue a delete on previous delete in case
-                // there was a transient Added flip
-                | (ItemSyncKind::Delete, SyncCompletion::DeletedMember { .. })
-                | (ItemSyncKind::Delete, SyncCompletion::ChangedItem { .. })
-                | (ItemSyncKind::Delete, SyncCompletion::Noop { .. }) => ItemSyncKind::Delete,
-            };
-            // We had new waiters since we last
-            // dispatched for this job, we must
-            // dispatch a new command
+        let next_job_kind = match (&job.last_change_kind, &completion) {
+            (ItemSyncKind::New, SyncCompletion::AddedMember { .. })
+            | (ItemSyncKind::Change, SyncCompletion::AddedMember { .. })
+            | (ItemSyncKind::New, SyncCompletion::Noop { .. })
+            | (ItemSyncKind::New, SyncCompletion::ChangedItem { .. })
+            | (ItemSyncKind::Change, SyncCompletion::Noop { .. })
+            | (ItemSyncKind::Change, SyncCompletion::ChangedItem { .. }) => ItemSyncKind::Change,
+            (ItemSyncKind::Change, SyncCompletion::DeletedMember { .. })
+            | (ItemSyncKind::New, SyncCompletion::DeletedMember { .. }) => ItemSyncKind::New,
+            (ItemSyncKind::Delete, SyncCompletion::AddedMember { .. })
+            // NOTE: we still enqueue a delete on previous delete in case
+            // there was a transient Added flip
+            | (ItemSyncKind::Delete, SyncCompletion::DeletedMember { .. })
+            | (ItemSyncKind::Delete, SyncCompletion::ChangedItem { .. })
+            | (ItemSyncKind::Delete, SyncCompletion::Noop { .. }) => ItemSyncKind::Delete,
+        };
+        let should_requeue_current = job.dirty
+            || matches!(
+                (&job.last_change_kind, &completion),
+                (ItemSyncKind::New, SyncCompletion::Noop { .. })
+            );
+        if should_requeue_current {
+            job.last_change_kind = next_job_kind;
             commands.push(match next_job_kind {
                 ItemSyncKind::New => SyncMachineCommand::ItemNewSync {
                     key: ItemSyncKey {
                         peer: Arc::clone(&job_id.peer),
-                        item_id: Arc::clone(&job_id.peer),
+                        item_id: Arc::clone(&job_id.item_id),
                         kind: next_job_kind,
                     },
                 },
                 ItemSyncKind::Change => SyncMachineCommand::ItemChangeSync {
                     key: ItemSyncKey {
                         peer: Arc::clone(&job_id.peer),
-                        item_id: Arc::clone(&job_id.peer),
+                        item_id: Arc::clone(&job_id.item_id),
                         kind: next_job_kind,
                     },
                 },
-                ItemSyncKind::Delete => SyncMachineCommand::ItemChangeSync {
+                ItemSyncKind::Delete => SyncMachineCommand::ItemDeleteSync {
                     key: ItemSyncKey {
                         peer: Arc::clone(&job_id.peer),
-                        item_id: Arc::clone(&job_id.peer),
+                        item_id: Arc::clone(&job_id.item_id),
                         kind: next_job_kind,
                     },
                 },
             });
+            if job.dirty {
+                job.dirty = false;
+                return Ok(commands);
+            }
         }
         // remove it temporarily to allow mutable borrows
         // on self
@@ -413,7 +419,7 @@ impl SyncMachine {
             if ii_job.last_change_kind != ItemSyncKind::New {
                 continue;
             }
-            if job_id.peer != ii_id.peer {
+            if job_id.peer == ii_id.peer {
                 continue;
             }
             ii_job.last_change_kind = ItemSyncKind::Change;
