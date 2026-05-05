@@ -1,6 +1,3 @@
-// FIXME: cross partition membership is not modeled, we're forced to
-// duplicate the payload and the events across partitions
-
 use crate::interlude::*;
 
 use sqlx::Row;
@@ -94,11 +91,30 @@ impl PartitionStore {
         .await?;
 
         sqlx::query(
-            r#"CREATE TABLE IF NOT EXISTS partition_membership_state(
+            r#"CREATE TABLE IF NOT EXISTS partitions(
+                partition_id TEXT PRIMARY KEY,
+                latest_txid INTEGER NOT NULL DEFAULT 0,
+                change_count INTEGER NOT NULL DEFAULT 0
+            )"#,
+        )
+        .execute(&self.state_pool)
+        .await?;
+        sqlx::query(
+            r#"CREATE TABLE IF NOT EXISTS items(
+                item_id TEXT PRIMARY KEY,
+                item_payload_json TEXT NOT NULL DEFAULT '{}',
+                deleted INTEGER NOT NULL DEFAULT 0,
+                latest_txid INTEGER NOT NULL DEFAULT 0,
+                change_count INTEGER NOT NULL DEFAULT 0
+            )"#,
+        )
+        .execute(&self.state_pool)
+        .await?;
+        sqlx::query(
+            r#"CREATE TABLE IF NOT EXISTS partition_items(
                 partition_id TEXT NOT NULL,
                 item_id TEXT NOT NULL,
                 present INTEGER NOT NULL,
-                member_payload_json TEXT NOT NULL DEFAULT '{}',
                 added_at_txid INTEGER NULL,
                 removed_at_txid INTEGER NULL,
                 latest_txid INTEGER NOT NULL,
@@ -108,43 +124,14 @@ impl PartitionStore {
         .execute(&self.state_pool)
         .await?;
         sqlx::query(
-            "CREATE INDEX IF NOT EXISTS idx_partition_membership_state_item
-                ON partition_membership_state(item_id)",
-        )
-        .execute(&self.state_pool)
-        .await?;
-        // FIXME: is this index useful?
-        sqlx::query(
-            "CREATE INDEX IF NOT EXISTS idx_partition_membership_state_partition_latest
-                ON partition_membership_state(partition_id, latest_txid)",
+            "CREATE INDEX IF NOT EXISTS idx_partition_items_item
+                ON partition_items(item_id)",
         )
         .execute(&self.state_pool)
         .await?;
         sqlx::query(
-            r#"CREATE TABLE IF NOT EXISTS partition_item_state(
-                partition_id TEXT NOT NULL,
-                item_id TEXT NOT NULL,
-                deleted INTEGER NOT NULL,
-                item_payload_json TEXT NOT NULL DEFAULT '{}',
-                latest_txid INTEGER NOT NULL,
-                PRIMARY KEY(partition_id, item_id)
-            )"#,
-        )
-        .execute(&self.state_pool)
-        .await?;
-        sqlx::query(
-            r#"CREATE TABLE IF NOT EXISTS partition_state(
-                partition_id TEXT PRIMARY KEY,
-                latest_txid INTEGER NOT NULL DEFAULT 0,
-                change_count INTEGER NOT NULL DEFAULT 0
-            )"#,
-        )
-        .execute(&self.state_pool)
-        .await?;
-        // FIXME: is this index useful?
-        sqlx::query(
-            "CREATE INDEX IF NOT EXISTS idx_partition_item_state_partition_latest
-                ON partition_item_state(partition_id, latest_txid)",
+            "CREATE INDEX IF NOT EXISTS idx_partition_items_partition_latest
+                ON partition_items(partition_id, latest_txid)",
         )
         .execute(&self.state_pool)
         .await?;
@@ -156,7 +143,7 @@ impl PartitionStore {
 impl PartitionStore {
     pub async fn member_count(&self, part_id: &PartitionId) -> Res<i64> {
         let count = sqlx::query_scalar::<_, i64>(
-            "SELECT COUNT(1) FROM partition_membership_state WHERE partition_id = ? AND present = 1",
+            "SELECT COUNT(1) FROM partition_items WHERE partition_id = ? AND present = 1",
         )
         .bind(&part_id[..])
         .fetch_one(&self.state_pool)
@@ -164,55 +151,10 @@ impl PartitionStore {
         Ok(count)
     }
 
-    pub async fn is_member_present_in_item_state(
-        &self,
-        partition_id: &PartitionId,
-        member_id: &str,
-    ) -> Res<bool> {
-        let exists: i64 = sqlx::query_scalar(
-            "SELECT EXISTS(SELECT 1 FROM partition_item_state WHERE partition_id = ? AND item_id = ? AND deleted = 0)",
-        )
-        .bind(&partition_id[..])
-        .bind(member_id)
-        .fetch_one(&self.state_pool)
-        .await?;
-        Ok(exists == 1)
-    }
-
-    pub async fn item_payloads(
-        &self,
-        item_id: &str,
-    ) -> Res<HashMap<PartitionId, serde_json::Value>> {
-        let rows = sqlx::query(
-            "SELECT partition_id, item_payload_json FROM partition_item_state WHERE item_id = ? AND deleted = 0",
-        )
-        .bind(item_id)
-        .fetch_all(&self.state_pool)
-        .await?;
-        let rows = rows
-            .into_iter()
-            .map(|row| {
-                let part_id: String = row.try_get("partition_id")?;
-                let part_id = part_id.into();
-                let payload: String = row.try_get("item_payload_json")?;
-                eyre::Ok((
-                    part_id,
-                    serde_json::from_str::<serde_json::Value>(&payload).wrap_err(ERROR_JSON)?,
-                ))
-            })
-            .collect::<Res<_>>()?;
-        Ok(rows)
-    }
-
-    pub async fn item_payload_for_partition(
-        &self,
-        partition_id: &PartitionId,
-        item_id: &str,
-    ) -> Res<Option<serde_json::Value>> {
+    pub async fn item_payload(&self, item_id: &str) -> Res<Option<serde_json::Value>> {
         let payload_json = sqlx::query_scalar::<_, String>(
-            "SELECT item_payload_json FROM partition_item_state WHERE partition_id = ? AND item_id = ? AND deleted = 0",
+            "SELECT item_payload_json FROM items WHERE item_id = ? AND deleted = 0",
         )
-        .bind(&partition_id[..])
         .bind(item_id)
         .fetch_optional(&self.state_pool)
         .await?;
@@ -222,12 +164,10 @@ impl PartitionStore {
             .map_err(Into::into)
     }
 
-    // FIXME: let's do a uniquness constrain on (item_id, partition_id)
-    pub async fn item_row_count(&self, partition_id: &PartitionId, item_id: &str) -> Res<i64> {
+    pub async fn item_partition_count(&self, item_id: &str) -> Res<i64> {
         let count = sqlx::query_scalar::<_, i64>(
-            "SELECT COUNT(1) FROM partition_item_state WHERE partition_id = ? AND item_id = ?",
+            "SELECT COUNT(1) FROM partition_items WHERE item_id = ? AND present = 1",
         )
-        .bind(&partition_id[..])
         .bind(item_id)
         .fetch_one(&self.state_pool)
         .await?;
@@ -237,9 +177,9 @@ impl PartitionStore {
     pub async fn list_known_item_ids(&self) -> Res<Vec<String>> {
         let ids = sqlx::query_scalar(
             r#"
-            SELECT DISTINCT item_id AS doc_id FROM partition_membership_state
+            SELECT DISTINCT item_id AS doc_id FROM items
             UNION
-            SELECT DISTINCT item_id AS doc_id FROM partition_item_state
+            SELECT DISTINCT item_id AS doc_id FROM partition_items
             "#,
         )
         .fetch_all(&self.state_pool)
@@ -256,7 +196,7 @@ impl PartitionStore {
             return Ok(false);
         }
         let mut query = sqlx::QueryBuilder::<sqlx::Sqlite>::new(
-            "SELECT EXISTS(SELECT 1 FROM partition_membership_state WHERE item_id = ",
+            "SELECT EXISTS(SELECT 1 FROM partition_items WHERE item_id = ",
         );
         query.push_bind(item_id);
         query.push(" AND present = 1 AND partition_id IN (");
@@ -291,8 +231,7 @@ impl PartitionStore {
             query.push_bind(i64::try_from(idx).expect("item index exceeds sqlite INTEGER range"));
         }
         query.push(") SELECT requested.item_id FROM requested WHERE NOT EXISTS (");
-        query
-            .push("SELECT 1 FROM partition_membership_state m WHERE m.item_id = requested.item_id");
+        query.push("SELECT 1 FROM partition_items m WHERE m.item_id = requested.item_id");
         query.push(" AND m.present = 1 AND m.partition_id IN (");
         let mut partitions = query.separated(", ");
         for partition_id in allowed_partitions {
@@ -413,26 +352,22 @@ impl PartitionStore {
                 COALESCE(pm.member_count, 0) AS member_count,
                 COALESCE(mx.latest_txid, 0) AS latest_txid
             FROM (
-                SELECT partition_id FROM partition_state
+                SELECT partition_id FROM partitions
                 UNION
-                SELECT DISTINCT partition_id FROM partition_membership_state
-                UNION
-                SELECT DISTINCT partition_id FROM partition_item_state
+                SELECT DISTINCT partition_id FROM partition_items
             ) p
             LEFT JOIN (
                 SELECT partition_id, COUNT(1) AS member_count
-                FROM partition_membership_state
+                FROM partition_items
                 WHERE present = 1
                 GROUP BY partition_id
             ) pm ON pm.partition_id = p.partition_id
             LEFT JOIN (
                 SELECT partition_id, MAX(txid) AS latest_txid
                 FROM (
-                    SELECT partition_id, latest_txid AS txid FROM partition_state
+                    SELECT partition_id, latest_txid AS txid FROM partitions
                     UNION ALL
-                    SELECT partition_id, latest_txid AS txid FROM partition_membership_state
-                    UNION ALL
-                    SELECT partition_id, latest_txid AS txid FROM partition_item_state
+                    SELECT partition_id, latest_txid AS txid FROM partition_items
                 )
                 GROUP BY partition_id
             ) mx ON mx.partition_id = p.partition_id
@@ -762,8 +697,8 @@ impl PartitionStore {
     pub async fn ensure_partition(&self, partition_id: &PartitionId) -> Res<()> {
         sqlx::query(
             r#"
-        INSERT INTO partition_state(partition_id, latest_txid)
-        VALUES(?, 0)
+        INSERT INTO partitions(partition_id, latest_txid, change_count)
+        VALUES(?, 0, 0)
         ON CONFLICT(partition_id) DO NOTHING
         "#,
         )
@@ -773,40 +708,74 @@ impl PartitionStore {
         Ok(())
     }
 
-    pub async fn upsert_item(
+    pub async fn upsert_item(&self, item_id: Arc<str>, item_payload: &serde_json::Value) -> Res<()> {
+        let mut tx = self.state_pool.begin().await?;
+        let txid = record_item_upsert_tx(tx.as_mut(), &item_id, item_payload).await?;
+        let partition_ids = current_item_partition_ids(tx.as_mut(), &item_id).await?;
+        tx.commit().await?;
+
+        for partition_id in partition_ids {
+            self.partition_events_tx
+                .send(PartitionEvent {
+                    cursor: txid,
+                    partition_id,
+                    deets: PartitionEventDeets::ItemChanged {
+                        item_id: Arc::clone(&item_id),
+                        payload: item_payload.clone(),
+                    },
+                })
+                .ok();
+        }
+        Ok(())
+    }
+
+    pub async fn remove_item(&self, item_id: Arc<str>) -> Res<()> {
+        let mut tx = self.state_pool.begin().await?;
+        let Some(item_payload) = current_item_payload_value(tx.as_mut(), &item_id).await? else {
+            tx.commit().await?;
+            return Ok(());
+        };
+        let txid = record_item_delete_tx(tx.as_mut(), &item_id).await?;
+        let partition_ids = current_item_partition_ids(tx.as_mut(), &item_id).await?;
+        tx.commit().await?;
+
+        for partition_id in partition_ids {
+            self.partition_events_tx
+                .send(PartitionEvent {
+                    cursor: txid,
+                    partition_id,
+                    deets: PartitionEventDeets::ItemDeleted {
+                        item_id: Arc::clone(&item_id),
+                        payload: item_payload.clone(),
+                    },
+                })
+                .ok();
+        }
+        Ok(())
+    }
+
+    pub async fn add_item_to_partition(
         &self,
         partition_id: &PartitionId,
         item_id: Arc<str>,
-        item_payload: &serde_json::Value,
     ) -> Res<()> {
         let mut tx = self.state_pool.begin().await?;
         sqlx::query(
             r#"
-            INSERT INTO partition_state(partition_id, latest_txid)
-            VALUES(?, 0)
+            INSERT INTO partitions(partition_id, latest_txid, change_count)
+            VALUES(?, 0, 0)
             ON CONFLICT(partition_id) DO NOTHING
             "#,
         )
         .bind(&partition_id[..])
         .execute(&mut *tx)
         .await?;
-        let already_present: i64 = sqlx::query_scalar(
-            "SELECT EXISTS(SELECT 1 FROM partition_membership_state WHERE partition_id = ? AND item_id = ? AND present = 1)",
-        )
-        .bind(&partition_id[..])
-        .bind(&item_id[..])
-        .fetch_one(&mut *tx)
-        .await?;
-        if already_present == 1 {
-            tx.commit().await?;
-            return Ok(());
-        }
-        let membership_txid = alloc_txid(tx.as_mut()).await?;
-        let membership_write = sqlx::query(
+        let txid = alloc_txid(tx.as_mut()).await?;
+        sqlx::query(
             r#"
-            INSERT INTO partition_membership_state(
-                partition_id, item_id, present, member_payload_json, added_at_txid, removed_at_txid, latest_txid
-            ) VALUES(?, ?, 1, '{}', ?, NULL, ?)
+            INSERT INTO partition_items(
+                partition_id, item_id, present, added_at_txid, removed_at_txid, latest_txid
+            ) VALUES(?, ?, 1, ?, NULL, ?)
             ON CONFLICT(partition_id, item_id) DO UPDATE SET
                 present = 1,
                 added_at_txid = excluded.added_at_txid,
@@ -816,63 +785,58 @@ impl PartitionStore {
         )
         .bind(&partition_id[..])
         .bind(&item_id[..])
-        .bind(membership_txid as i64)
-        .bind(membership_txid as i64)
+        .bind(txid as i64)
+        .bind(txid as i64)
         .execute(&mut *tx)
         .await?;
-        if membership_write.rows_affected() == 0 {
-            tx.commit().await?;
-            return Ok(());
-        }
-        let item_payload_json = serde_json::to_string(item_payload)?;
-        let item_txid = alloc_txid(tx.as_mut()).await?;
         sqlx::query(
             r#"
-            INSERT INTO partition_item_state(
-                partition_id, item_id, deleted, item_payload_json, latest_txid
-            ) VALUES(?, ?, 0, ?, ?)
-            ON CONFLICT(partition_id, item_id) DO UPDATE SET
-                deleted = 0,
-                item_payload_json = excluded.item_payload_json,
-                latest_txid = excluded.latest_txid
+            UPDATE partitions
+            SET latest_txid = ?, change_count = change_count + 1
+            WHERE partition_id = ?
             "#,
         )
+        .bind(txid as i64)
         .bind(&partition_id[..])
-        .bind(&item_id[..])
-        .bind(&item_payload_json)
-        .bind(item_txid as i64)
         .execute(&mut *tx)
         .await?;
+        let item_payload = current_item_payload_value(tx.as_mut(), &item_id).await?;
         tx.commit().await?;
 
         self.partition_events_tx
             .send(PartitionEvent {
-                cursor: membership_txid,
+                cursor: txid,
                 partition_id: partition_id.clone(),
                 deets: PartitionEventDeets::MemberUpsert {
                     item_id: Arc::clone(&item_id),
                 },
             })
             .ok();
-        self.partition_events_tx
-            .send(PartitionEvent {
-                cursor: item_txid,
-                partition_id: partition_id.clone(),
-                deets: PartitionEventDeets::ItemChanged {
-                    item_id,
-                    payload: item_payload.clone(),
-                },
-            })
-            .ok();
+        if let Some(payload) = item_payload {
+            self.partition_events_tx
+                .send(PartitionEvent {
+                    cursor: txid,
+                    partition_id: partition_id.clone(),
+                    deets: PartitionEventDeets::ItemChanged {
+                        item_id,
+                        payload,
+                    },
+                })
+                .ok();
+        }
         Ok(())
     }
 
-    pub async fn remove_item(&self, partition_id: &PartitionId, item_id: Arc<str>) -> Res<()> {
+    pub async fn remove_item_from_partition(
+        &self,
+        partition_id: &PartitionId,
+        item_id: Arc<str>,
+    ) -> Res<()> {
         let mut tx = self.state_pool.begin().await?;
         sqlx::query(
             r#"
-            INSERT INTO partition_state(partition_id, latest_txid)
-            VALUES(?, 0)
+            INSERT INTO partitions(partition_id, latest_txid, change_count)
+            VALUES(?, 0, 0)
             ON CONFLICT(partition_id) DO NOTHING
             "#,
         )
@@ -880,7 +844,7 @@ impl PartitionStore {
         .execute(&mut *tx)
         .await?;
         let already_absent: i64 = sqlx::query_scalar(
-            "SELECT NOT EXISTS(SELECT 1 FROM partition_membership_state WHERE partition_id = ? AND item_id = ? AND present = 1)",
+            "SELECT NOT EXISTS(SELECT 1 FROM partition_items WHERE partition_id = ? AND item_id = ? AND present = 1)",
         )
         .bind(&partition_id[..])
         .bind(&item_id[..])
@@ -890,10 +854,10 @@ impl PartitionStore {
             tx.commit().await?;
             return Ok(());
         }
-        let membership_txid = alloc_txid(tx.as_mut()).await?;
-        let membership_write = sqlx::query(
+        let txid = alloc_txid(tx.as_mut()).await?;
+        let rows_affected = sqlx::query(
             r#"
-            UPDATE partition_membership_state
+            UPDATE partition_items
             SET present = 0,
                 removed_at_txid = ?,
                 latest_txid = ?
@@ -902,48 +866,36 @@ impl PartitionStore {
               AND present = 1
             "#,
         )
-        .bind(membership_txid as i64)
-        .bind(membership_txid as i64)
+        .bind(txid as i64)
+        .bind(txid as i64)
         .bind(&partition_id[..])
         .bind(&item_id[..])
         .execute(&mut *tx)
-        .await?;
-        if membership_write.rows_affected() == 0 {
+        .await?
+        .rows_affected();
+        if rows_affected == 0 {
             tx.commit().await?;
             return Ok(());
         }
-        let item_payload_json = sqlx::query_scalar::<_, String>(
-            "SELECT item_payload_json FROM partition_item_state WHERE partition_id = ? AND item_id = ?",
-        )
-        .bind(&partition_id[..])
-        .bind(&item_id[..])
-        .fetch_optional(&mut *tx)
-        .await?
-        .unwrap_or_else(|| "{}".to_string());
-        let item_payload = serde_json::from_str::<serde_json::Value>(&item_payload_json)?;
-        let item_txid = alloc_txid(tx.as_mut()).await?;
         sqlx::query(
             r#"
-            INSERT INTO partition_item_state(
-                partition_id, item_id, deleted, item_payload_json, latest_txid
-            ) VALUES(?, ?, 1, ?, ?)
-            ON CONFLICT(partition_id, item_id) DO UPDATE SET
-                deleted = 1,
-                item_payload_json = excluded.item_payload_json,
-                latest_txid = excluded.latest_txid
+            UPDATE partitions
+            SET latest_txid = ?, change_count = change_count + 1
+            WHERE partition_id = ?
             "#,
         )
+        .bind(txid as i64)
         .bind(&partition_id[..])
-        .bind(&item_id[..])
-        .bind(&item_payload_json)
-        .bind(item_txid as i64)
         .execute(&mut *tx)
         .await?;
+        let item_payload = current_item_payload_value(tx.as_mut(), &item_id)
+            .await?
+            .unwrap_or_else(|| serde_json::json!({}));
         tx.commit().await?;
 
         self.partition_events_tx
             .send(PartitionEvent {
-                cursor: membership_txid,
+                cursor: txid,
                 partition_id: partition_id.clone(),
                 deets: PartitionEventDeets::MemberRemoved {
                     item_id: Arc::clone(&item_id),
@@ -952,7 +904,7 @@ impl PartitionStore {
             .ok();
         self.partition_events_tx
             .send(PartitionEvent {
-                cursor: item_txid,
+                cursor: txid,
                 partition_id: partition_id.clone(),
                 deets: PartitionEventDeets::ItemDeleted {
                     item_id,
@@ -960,118 +912,6 @@ impl PartitionStore {
                 },
             })
             .ok();
-        Ok(())
-    }
-
-    pub async fn record_item_change(
-        &self,
-        partition_id: &PartitionId,
-        item_id: Arc<str>,
-        item_payload: &serde_json::Value,
-    ) -> Res<()> {
-        let mut tx = self.state_pool.begin().await?;
-        let txid = record_item_change_tx(tx.as_mut(), partition_id, &item_id, item_payload).await?;
-        tx.commit().await?;
-        self.partition_events_tx
-            .send(PartitionEvent {
-                cursor: txid,
-                partition_id: partition_id.clone(),
-                deets: PartitionEventDeets::ItemChanged {
-                    item_id,
-                    payload: item_payload.clone(),
-                },
-            })
-            .ok();
-        Ok(())
-    }
-
-    pub async fn record_item_deleted(
-        &self,
-        partition_id: &PartitionId,
-        item_id: Arc<str>,
-        item_payload: &serde_json::Value,
-    ) -> Res<()> {
-        let mut tx = self.state_pool.begin().await?;
-        let txid =
-            record_item_deleted_tx(tx.as_mut(), partition_id, &item_id, item_payload).await?;
-        tx.commit().await?;
-        self.partition_events_tx
-            .send(PartitionEvent {
-                cursor: txid,
-                partition_id: partition_id.clone(),
-                deets: PartitionEventDeets::ItemDeleted {
-                    item_id,
-                    payload: item_payload.clone(),
-                },
-            })
-            .ok();
-        Ok(())
-    }
-
-    pub async fn record_item_change_all_partitions(
-        &self,
-        item_id: Arc<str>,
-        item_payload: &serde_json::Value,
-    ) -> Res<()> {
-        let mut tx = self.state_pool.begin().await?;
-        let partition_rows = sqlx::query(
-            "SELECT partition_id FROM partition_membership_state WHERE item_id = ? AND present = 1",
-        )
-        .bind(&item_id[..])
-        .fetch_all(&mut *tx)
-        .await?;
-        let mut events = Vec::with_capacity(partition_rows.len());
-        for row in partition_rows {
-            let partition_id: String = row.try_get("partition_id")?;
-            let partition_id: PartitionId = partition_id.into();
-            let txid =
-                record_item_change_tx(tx.as_mut(), &partition_id, &item_id, item_payload).await?;
-            events.push(PartitionEvent {
-                cursor: txid,
-                partition_id,
-                deets: PartitionEventDeets::ItemChanged {
-                    item_id: Arc::clone(&item_id),
-                    payload: item_payload.clone(),
-                },
-            });
-        }
-        tx.commit().await?;
-        for event in events {
-            self.partition_events_tx.send(event).ok();
-        }
-        Ok(())
-    }
-
-    pub async fn remove_item_from_all_partitions(
-        &self,
-        item_id: Arc<str>,
-        item_payload: &serde_json::Value,
-    ) -> Res<()> {
-        let mut tx = self.state_pool.begin().await?;
-        let partition_rows =
-            sqlx::query("SELECT partition_id FROM partition_membership_state WHERE item_id = ?")
-                .bind(&item_id[..])
-                .fetch_all(&mut *tx)
-                .await?;
-        let mut events = Vec::with_capacity(partition_rows.len());
-        for row in partition_rows {
-            let partition_id: String = row.try_get("partition_id")?;
-            let partition_id = partition_id.into();
-            let txid =
-                record_item_deleted_tx(tx.as_mut(), &partition_id, &item_id, item_payload).await?;
-            events.push(PartitionEvent {
-                cursor: txid,
-                partition_id,
-                deets: PartitionEventDeets::ItemDeleted {
-                    item_id: Arc::clone(&item_id),
-                    payload: item_payload.clone(),
-                },
-            });
-        }
-        tx.commit().await?;
-        for event in events {
-            self.partition_events_tx.send(event).ok();
-        }
         Ok(())
     }
 }
@@ -1110,36 +950,24 @@ async fn alloc_txid(conn: &mut sqlx::SqliteConnection) -> Res<u64> {
     Ok(out)
 }
 
-async fn record_item_change_tx(
+async fn record_item_upsert_tx(
     conn: &mut sqlx::SqliteConnection,
-    partition_id: &PartitionId,
     item_id: &str,
     item_payload: &serde_json::Value,
 ) -> Res<u64> {
     let item_payload_json = serde_json::to_string(item_payload)?;
-    sqlx::query(
-        r#"
-        INSERT INTO partition_state(partition_id, latest_txid, change_count)
-        VALUES(?, 0, 0)
-        ON CONFLICT(partition_id) DO NOTHING
-        "#,
-    )
-    .bind(&partition_id[..])
-    .execute(&mut *conn)
-    .await?;
     let txid = alloc_txid(conn).await?;
     sqlx::query(
         r#"
-        INSERT INTO partition_item_state(
-            partition_id, item_id, deleted, item_payload_json, latest_txid
-        ) VALUES(?, ?, 0, ?, ?)
-        ON CONFLICT(partition_id, item_id) DO UPDATE SET
-            deleted = 0,
+        INSERT INTO items(item_id, item_payload_json, deleted, latest_txid, change_count)
+        VALUES(?, ?, 0, ?, 1)
+        ON CONFLICT(item_id) DO UPDATE SET
             item_payload_json = excluded.item_payload_json,
-            latest_txid = excluded.latest_txid
+            deleted = 0,
+            latest_txid = excluded.latest_txid,
+            change_count = items.change_count + 1
         "#,
     )
-    .bind(&partition_id[..])
     .bind(item_id)
     .bind(item_payload_json)
     .bind(txid as i64)
@@ -1147,78 +975,94 @@ async fn record_item_change_tx(
     .await?;
     sqlx::query(
         r#"
-        UPDATE partition_state
-        SET change_count = change_count + 1
-        WHERE partition_id = ?
+        UPDATE partition_items
+        SET latest_txid = ?
+        WHERE item_id = ? AND present = 1
         "#,
     )
-    .bind(&partition_id[..])
+    .bind(txid as i64)
+    .bind(item_id)
     .execute(&mut *conn)
     .await?;
     Ok(txid)
 }
 
-async fn record_item_deleted_tx(
-    conn: &mut sqlx::SqliteConnection,
-    partition_id: &PartitionId,
-    item_id: &str,
-    item_payload: &serde_json::Value,
-) -> Res<u64> {
-    let item_payload_json = serde_json::to_string(item_payload)?;
-    sqlx::query(
-        r#"
-        INSERT INTO partition_state(partition_id, latest_txid, change_count)
-        VALUES(?, 0, 0)
-        ON CONFLICT(partition_id) DO NOTHING
-        "#,
-    )
-    .bind(&partition_id[..])
-    .execute(&mut *conn)
-    .await?;
+async fn record_item_delete_tx(conn: &mut sqlx::SqliteConnection, item_id: &str) -> Res<u64> {
     let txid = alloc_txid(conn).await?;
     sqlx::query(
         r#"
-        INSERT INTO partition_item_state(
-            partition_id, item_id, deleted, item_payload_json, latest_txid
-        ) VALUES(?, ?, 1, ?, ?)
-        ON CONFLICT(partition_id, item_id) DO UPDATE SET
+        INSERT INTO items(item_id, item_payload_json, deleted, latest_txid, change_count)
+        VALUES(?, '{}', 1, ?, 1)
+        ON CONFLICT(item_id) DO UPDATE SET
             deleted = 1,
-            item_payload_json = excluded.item_payload_json,
-            latest_txid = excluded.latest_txid
+            latest_txid = excluded.latest_txid,
+            change_count = items.change_count + 1
         "#,
     )
-    .bind(&partition_id[..])
     .bind(item_id)
-    .bind(item_payload_json)
     .bind(txid as i64)
     .execute(&mut *conn)
     .await?;
     sqlx::query(
         r#"
-        UPDATE partition_state
-        SET change_count = change_count + 1
-        WHERE partition_id = ?
+        UPDATE partition_items
+        SET latest_txid = ?
+        WHERE item_id = ? AND present = 1
         "#,
     )
-    .bind(&partition_id[..])
+    .bind(txid as i64)
+    .bind(item_id)
     .execute(&mut *conn)
     .await?;
     Ok(txid)
+}
+
+async fn current_item_payload_value(
+    conn: &mut sqlx::SqliteConnection,
+    item_id: &str,
+) -> Res<Option<serde_json::Value>> {
+    let row = sqlx::query(
+        "SELECT item_payload_json, deleted FROM items WHERE item_id = ?",
+    )
+    .bind(item_id)
+    .fetch_optional(&mut *conn)
+    .await?;
+    let Some(row) = row else {
+        return Ok(None);
+    };
+    let deleted: i64 = row.try_get("deleted")?;
+    if deleted != 0 {
+        return Ok(None);
+    }
+    let payload_json: String = row.try_get("item_payload_json")?;
+    Ok(Some(
+        serde_json::from_str::<serde_json::Value>(&payload_json).wrap_err(ERROR_JSON)?,
+    ))
+}
+
+async fn current_item_partition_ids(
+    conn: &mut sqlx::SqliteConnection,
+    item_id: &str,
+) -> Res<Vec<PartitionId>> {
+    let rows = sqlx::query_scalar::<_, String>(
+        "SELECT partition_id FROM partition_items WHERE item_id = ? AND present = 1",
+    )
+    .bind(item_id)
+    .fetch_all(&mut *conn)
+    .await?;
+    Ok(rows.into_iter().map(Into::into).collect())
 }
 
 async fn ensure_partition_exists(pool: &sqlx::SqlitePool, partition_id: &PartitionId) -> Res<()> {
     let found: i64 = sqlx::query_scalar(
         r#"
         SELECT EXISTS(
-            SELECT 1 FROM partition_state WHERE partition_id = ?
+            SELECT 1 FROM partitions WHERE partition_id = ?
             UNION
-            SELECT 1 FROM partition_membership_state WHERE partition_id = ?
-            UNION
-            SELECT 1 FROM partition_item_state WHERE partition_id = ?
+            SELECT 1 FROM partition_items WHERE partition_id = ?
         )
         "#,
     )
-    .bind(&partition_id[..])
     .bind(&partition_id[..])
     .bind(&partition_id[..])
     .fetch_one(pool)
@@ -1242,13 +1086,13 @@ async fn load_member_partition_page(
     let rows = if let Some(since) = req.since {
         sqlx::query(
             r#"
-            SELECT txid, item_id, member_payload_json, kind FROM (
-                SELECT added_at_txid AS txid, item_id, member_payload_json, 1 AS kind
-                FROM partition_membership_state
+            SELECT txid, item_id, kind FROM (
+                SELECT added_at_txid AS txid, item_id, 1 AS kind
+                FROM partition_items
                 WHERE partition_id = ? AND added_at_txid IS NOT NULL AND added_at_txid > ?
                 UNION ALL
-                SELECT removed_at_txid AS txid, item_id, member_payload_json, 0 AS kind
-                FROM partition_membership_state
+                SELECT removed_at_txid AS txid, item_id, 0 AS kind
+                FROM partition_items
                 WHERE partition_id = ? AND removed_at_txid IS NOT NULL AND removed_at_txid > ?
             )
             ORDER BY txid, item_id, kind
@@ -1265,8 +1109,8 @@ async fn load_member_partition_page(
     } else {
         sqlx::query(
             r#"
-            SELECT COALESCE(added_at_txid, latest_txid) AS txid, item_id, member_payload_json, 1 AS kind
-            FROM partition_membership_state
+            SELECT COALESCE(added_at_txid, latest_txid) AS txid, item_id, 1 AS kind
+            FROM partition_items
             WHERE partition_id = ? AND present = 1
             ORDER BY txid, item_id
             LIMIT ?
@@ -1312,12 +1156,14 @@ async fn load_item_partition_page(
         sqlx::query(
             r#"
             SELECT
-                latest_txid AS event_txid,
-                item_id AS item_id,
-                deleted AS deleted,
-                item_payload_json AS payload_json
-            FROM partition_item_state
-            WHERE partition_id = ? AND latest_txid > ?
+                pi.latest_txid AS event_txid,
+                pi.item_id AS item_id,
+                pi.present AS present,
+                COALESCE(i.deleted, 0) AS deleted,
+                COALESCE(i.item_payload_json, '{}') AS payload_json
+            FROM partition_items pi
+            LEFT JOIN items i ON i.item_id = pi.item_id
+            WHERE pi.partition_id = ? AND pi.latest_txid > ?
             ORDER BY event_txid, item_id
             LIMIT ?
             "#,
@@ -1331,12 +1177,14 @@ async fn load_item_partition_page(
         sqlx::query(
             r#"
             SELECT
-                item_id AS item_id,
+                pi.item_id AS item_id,
                 0 AS deleted,
-                latest_txid AS event_txid,
-                item_payload_json AS payload_json
-            FROM partition_item_state
-            WHERE partition_id = ? AND deleted = 0
+                pi.latest_txid AS event_txid,
+                COALESCE(i.item_payload_json, '{}') AS payload_json,
+                pi.present AS present
+            FROM partition_items pi
+            LEFT JOIN items i ON i.item_id = pi.item_id
+            WHERE pi.partition_id = ? AND pi.present = 1 AND COALESCE(i.deleted, 0) = 0
             ORDER BY event_txid, item_id
             LIMIT ?
             "#,
@@ -1356,17 +1204,17 @@ async fn load_item_partition_page(
             let item_id: String = row.try_get("item_id")?;
             let item_id = item_id.into();
             let payload_json: String = row.try_get("payload_json")?;
+            let present: i64 = row.try_get("present")?;
             let deleted: i64 = row.try_get("deleted")?;
-            let deets = match deleted {
-                0 => PartitionItemEventDeets::ItemChanged {
+            let deets = match (present, deleted) {
+                (1, 0) => PartitionItemEventDeets::ItemChanged {
                     item_id,
                     payload: payload_json,
                 },
-                1 => PartitionItemEventDeets::ItemDeleted {
+                _ => PartitionItemEventDeets::ItemDeleted {
                     item_id,
                     payload: payload_json,
                 },
-                other => eyre::bail!("invalid deleted flag '{other}'"),
             };
             Ok(PartitionItemEvent {
                 cursor: event_txid.max(0) as u64,
@@ -1436,27 +1284,25 @@ mod tests {
     #[tokio::test]
     async fn upsert_item_restores_tombstoned_item_payload() {
         let store = make_store().await;
-        let partition_id: PartitionId = "p-docs".into();
         let item_id = "item-1";
         let expected_payload = serde_json::json!({ "k": "v" });
 
         store
-            .upsert_item(&partition_id, item_id.into(), &expected_payload)
+            .upsert_item(item_id.into(), &expected_payload)
             .await
             .expect("item upsert should succeed");
         store
-            .remove_item(&partition_id, item_id.into())
+            .remove_item(item_id.into())
             .await
             .expect("item remove should succeed");
         store
-            .upsert_item(&partition_id, item_id.into(), &expected_payload)
+            .upsert_item(item_id.into(), &expected_payload)
             .await
             .expect("item re-upsert should succeed");
 
         let payload_json: String = sqlx::query_scalar(
-            "SELECT item_payload_json FROM partition_item_state WHERE partition_id = ? AND item_id = ?",
+            "SELECT item_payload_json FROM items WHERE item_id = ? AND deleted = 0",
         )
-        .bind(&partition_id[..])
         .bind(item_id)
         .fetch_one(store.state_pool())
         .await
@@ -1472,11 +1318,15 @@ mod tests {
         let partition_id: PartitionId = "p-docs-local-sub".into();
         let item_id = "item-1";
         store
-            .upsert_item(&partition_id, item_id.into(), &serde_json::json!({}))
+            .upsert_item(item_id.into(), &serde_json::json!({}))
             .await
             .expect("item upsert should succeed");
         store
-            .record_item_change(&partition_id, item_id.into(), &serde_json::json!({"a": 1}))
+            .add_item_to_partition(&partition_id, item_id.into())
+            .await
+            .expect("item membership should succeed");
+        store
+            .upsert_item(item_id.into(), &serde_json::json!({"a": 1}))
             .await
             .expect("item change should succeed");
 
@@ -1496,7 +1346,7 @@ mod tests {
         ));
 
         store
-            .record_item_deleted(&partition_id, item_id.into(), &serde_json::json!({"a": 1}))
+            .remove_item_from_partition(&partition_id, item_id.into())
             .await
             .expect("item delete should succeed");
         let live_evt = timeout(Duration::from_secs(2), rx.recv())
@@ -1515,13 +1365,13 @@ mod tests {
         let partition_id: PartitionId = "p-replay".into();
         for idx in 0..8 {
             store
-                .upsert_item(
-                    &partition_id,
-                    format!("item-{idx}").into(),
-                    &serde_json::json!({}),
-                )
+                .upsert_item(format!("item-{idx}").into(), &serde_json::json!({}))
                 .await
                 .expect("item upsert should succeed");
+            store
+                .add_item_to_partition(&partition_id, format!("item-{idx}").into())
+                .await
+                .expect("item membership should succeed");
         }
 
         let req = SubPartitionsRequest {
@@ -1562,19 +1412,19 @@ mod tests {
             .await
             .unwrap();
         repo.partition_store()
-            .upsert_item(
-                &partition_a,
-                doc_a.document_id().to_string().into(),
-                &serde_json::json!({}),
-            )
+            .upsert_item(doc_a.document_id().to_string().into(), &serde_json::json!({}))
             .await
             .unwrap();
         repo.partition_store()
-            .upsert_item(
-                &partition_b,
-                doc_b.document_id().to_string().into(),
-                &serde_json::json!({}),
-            )
+            .add_item_to_partition(&partition_a, doc_a.document_id().to_string().into())
+            .await
+            .unwrap();
+        repo.partition_store()
+            .upsert_item(doc_b.document_id().to_string().into(), &serde_json::json!({}))
+            .await
+            .unwrap();
+        repo.partition_store()
+            .add_item_to_partition(&partition_b, doc_b.document_id().to_string().into())
             .await
             .unwrap();
 
@@ -1614,7 +1464,11 @@ mod tests {
             let item_id = format!("item-{idx}").into();
             expected.insert(Arc::clone(&item_id));
             store
-                .upsert_item(&partition_id, item_id, &serde_json::json!({}))
+                .upsert_item(Arc::clone(&item_id), &serde_json::json!({}))
+                .await
+                .expect("membership add should succeed");
+            store
+                .add_item_to_partition(&partition_id, item_id)
                 .await
                 .expect("membership add should succeed");
         }
@@ -1663,17 +1517,13 @@ mod tests {
             let item_id = format!("item-{idx}").into();
             expected.insert(Arc::clone(&item_id));
             store
-                .upsert_item(&partition_id, Arc::clone(&item_id), &serde_json::json!({}))
+                .upsert_item(Arc::clone(&item_id), &serde_json::json!({"idx": idx}))
                 .await
                 .expect("membership add should succeed");
             store
-                .record_item_change(
-                    &partition_id,
-                    Arc::clone(&item_id),
-                    &serde_json::json!({"idx": idx}),
-                )
+                .add_item_to_partition(&partition_id, Arc::clone(&item_id))
                 .await
-                .expect("doc event should succeed");
+                .expect("membership add should succeed");
         }
 
         let mut since = None;

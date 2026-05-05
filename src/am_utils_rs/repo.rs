@@ -2298,11 +2298,9 @@ async fn partition_doc_heads_payload(
     doc_id: &str,
 ) -> Res<Arc<[ChangeHash]>> {
     tracing::info!(doc_id, "loading partition doc heads payload");
-    let (_, mut before_heads) = part_store
-        .item_payloads(doc_id)
+    let mut before_heads = part_store
+        .item_payload(doc_id)
         .await?
-        .into_iter()
-        .next()
         .expect("doc was not in partition previously");
     let before_heads = before_heads
         .as_object_mut()

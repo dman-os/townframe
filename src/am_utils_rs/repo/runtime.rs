@@ -1346,7 +1346,7 @@ where
             },
         ));
         self.partition_store
-            .record_item_change_all_partitions(Arc::clone(&self.doc_id_str), &item_payload)
+            .upsert_item(Arc::clone(&self.doc_id_str), &item_payload)
             .await?;
         self.change_manager
             .notify_doc_created(self.doc_id, Arc::clone(&heads))?;
@@ -1507,7 +1507,7 @@ where
             is_live = matches!(self.state, DocWorkerDocState::Live(_)),
             "sync session applied blobs and is selecting doc state path"
         );
-        let maybe_delta = match &mut self.state {
+        let maybe_delta = match std::mem::replace(&mut self.state, DocWorkerDocState::Unloaded) {
             DocWorkerDocState::Unloaded => {
                 // since the doc in storage will have the latest blobs,
                 // we must load the before_heads from the partition payloads
@@ -1587,8 +1587,8 @@ where
                 self.state = DocWorkerDocState::Transient(doc);
                 out
             }
-            DocWorkerDocState::Transient(_) | DocWorkerDocState::Live(_) => {
-                self.current_doc_mut(|doc| {
+            DocWorkerDocState::Transient(mut doc) => {
+                let out = {
                     let before_heads = doc.get_heads();
                     for blob in blobs {
                         doc.load_incremental(&blob).map_err(|err| {
@@ -1597,13 +1597,72 @@ where
                     }
                     let after_heads = doc.get_heads();
                     if before_heads == after_heads {
-                        return Ok(None);
+                        None
+                    } else {
+                        let patches = doc.diff(&before_heads, &after_heads);
+                        Some((after_heads, patches))
                     }
-                    let patches = doc.diff(&before_heads, &after_heads);
-                    Ok(Some((after_heads, patches)))
-                })
-                .await?
+                };
+                self.state = DocWorkerDocState::Transient(doc);
+                out
             }
+            DocWorkerDocState::Live(bundle) => match bundle.upgrade() {
+                Some(bundle) => {
+                    info!(doc_id = %self.doc_id, "current doc mut using live bundle");
+                    let mut doc = bundle.doc.lock().await;
+                    let before_heads = doc.get_heads();
+                    for blob in blobs {
+                        doc.load_incremental(&blob).map_err(|err| {
+                            eyre::eyre!("failed applying sync session blob: {err}")
+                        })?;
+                    }
+                    let after_heads = doc.get_heads();
+                    let out = if before_heads == after_heads {
+                        None
+                    } else {
+                        let patches = doc.diff(&before_heads, &after_heads);
+                        Some((after_heads, patches))
+                    };
+                    drop(doc);
+                    self.state = DocWorkerDocState::Live(Arc::downgrade(&bundle));
+                    out
+                }
+                None => {
+                    info!(
+                        doc_id = %self.doc_id,
+                        peer_id = %session.peer_id,
+                        kind = ?session.kind,
+                        "live bundle expired; recovering sync delta from partition heads"
+                    );
+                    let before_heads =
+                        super::partition_doc_heads_payload(&self.partition_store, &self.doc_id_str)
+                            .await?;
+                    let mut doc =
+                        load_doc_snapshot(&self.sedimentrees, &self.storage_for_reads, self.doc_id)
+                            .await?
+                            .unwrap_or_else(automerge::Automerge::new);
+                    let loaded_heads = doc.get_heads();
+                    let out = if &before_heads[..] == &loaded_heads[..] {
+                        for blob in blobs {
+                            doc.load_incremental(&blob).map_err(|err| {
+                                eyre::eyre!("failed applying sync session blob: {err}")
+                            })?;
+                        }
+                        let after_heads = doc.get_heads();
+                        if &before_heads[..] == &after_heads[..] {
+                            None
+                        } else {
+                            let patches = doc.diff(&before_heads, &after_heads);
+                            Some((after_heads, patches))
+                        }
+                    } else {
+                        let patches = doc.diff(&before_heads, &loaded_heads);
+                        Some((loaded_heads, patches))
+                    };
+                    self.state = DocWorkerDocState::Transient(doc);
+                    out
+                }
+            },
         };
         let Some((after_heads, patches)) = maybe_delta else {
             return Ok(());
@@ -1664,48 +1723,6 @@ where
         process_fragment_requests(Arc::clone(&bundle), requests, Arc::clone(&self.subduction)).await
     }
 
-    async fn current_doc_mut<R>(
-        &mut self,
-        f: impl FnOnce(&mut automerge::Automerge) -> Res<R>,
-    ) -> Res<R> {
-        match std::mem::replace(&mut self.state, DocWorkerDocState::Unloaded) {
-            DocWorkerDocState::Live(bundle) => match bundle.upgrade() {
-                Some(bundle) => {
-                    info!(doc_id = %self.doc_id, "current doc mut using live bundle");
-                    let mut doc = bundle.doc.lock().await;
-                    let out = f(&mut doc)?;
-                    drop(doc);
-                    self.state = DocWorkerDocState::Live(Arc::downgrade(&bundle));
-                    Ok(out)
-                }
-                None => {
-                    info!(doc_id = %self.doc_id, "current doc mut live bundle expired; loading snapshot");
-                    let mut doc =
-                        load_doc_snapshot(&self.sedimentrees, &self.storage_for_reads, self.doc_id)
-                            .await?
-                            .unwrap_or_else(automerge::Automerge::new);
-                    let out = f(&mut doc)?;
-                    self.state = DocWorkerDocState::Transient(doc);
-                    Ok(out)
-                }
-            },
-            DocWorkerDocState::Transient(mut doc) => {
-                let out = f(&mut doc)?;
-                self.state = DocWorkerDocState::Transient(doc);
-                Ok(out)
-            }
-            DocWorkerDocState::Unloaded => {
-                let mut doc =
-                    load_doc_snapshot(&self.sedimentrees, &self.storage_for_reads, self.doc_id)
-                        .await?
-                        .unwrap_or_else(automerge::Automerge::new);
-                let out = f(&mut doc)?;
-                self.state = DocWorkerDocState::Transient(doc);
-                Ok(out)
-            }
-        }
-    }
-
     async fn take_or_load_transient_doc(&mut self) -> Res<Option<automerge::Automerge>> {
         let out = match std::mem::replace(&mut self.state, DocWorkerDocState::Unloaded) {
             DocWorkerDocState::Transient(doc) => Ok(Some(doc)),
@@ -1743,7 +1760,7 @@ async fn commit_delta_bookkeep(
         "bookkeeping committed delta"
     );
     partition_store
-        .record_item_change_all_partitions(doc_id_str, &item_payload)
+        .upsert_item(doc_id_str, &item_payload)
         .await?;
 
     let heads_arc = Arc::<[automerge::ChangeHash]>::from(heads);

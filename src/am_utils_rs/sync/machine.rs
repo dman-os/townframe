@@ -85,20 +85,9 @@ pub enum SyncCompletion {
         item_id: Arc<str>,
         item_payload: serde_json::Value,
     },
-    /// NOTE: changed item doesn't carry payloads
-    /// modifiers are expected to update the partition
-    /// store instead using [`record_item_change`].
-    ///
-    /// [`upsert_item`] can be used for local additions.
-    /// This is to allow BigRepoRuntime and other local systems
-    /// to indicate item additions/changes in a single transactional
-    /// context and avoid event based data loss.
-    /// Cursor based frontiers are reliable enough to ensure
-    /// no work is lost when processing remote events but
-    /// this is the best for now when it comes to local changes.
-    ///
-    /// [`record_item_change`]: crate::partition::PartitionStore::record_item_change
-    /// [`upsert_item`]: crate::partition::PartitionStore::upsert_item
+    /// NOTE: changed item doesn't carry payloads.
+    /// Local systems are expected to persist the payload separately
+    /// through the item store before or alongside membership updates.
     ChangedItem {
         peer: PeerKey,
         item_id: Arc<str>,
@@ -221,10 +210,10 @@ impl SyncMachine {
             );
         }
         if matches!(sync_kind, ItemSyncKind::Delete) {
-            let item_payloads_len = part_store.item_payloads(&item_id).await?.len();
-            if item_payloads_len > 1 {
+            let item_partition_count = part_store.item_partition_count(&item_id).await?;
+            if item_partition_count > 1 {
                 part_store
-                    .remove_item(&partition_id, Arc::clone(&item_id))
+                    .remove_item_from_partition(&partition_id, Arc::clone(&item_id))
                     .await?;
                 let old = state.slots.insert(cursor, CursorSlotState::Ready);
                 assert!(old.is_none(), "fishy");
@@ -396,12 +385,15 @@ impl SyncMachine {
             match &completion {
                 SyncCompletion::AddedMember { item_payload, .. } => {
                     self.partition_store
-                        .upsert_item(&part_id, Arc::clone(&job_id.item_id), item_payload)
+                        .upsert_item(Arc::clone(&job_id.item_id), item_payload)
+                        .await?;
+                    self.partition_store
+                        .add_item_to_partition(&part_id, Arc::clone(&job_id.item_id))
                         .await?;
                 }
                 SyncCompletion::DeletedMember { .. } => {
                     self.partition_store
-                        .remove_item(&part_id, Arc::clone(&job_id.item_id))
+                        .remove_item_from_partition(&part_id, Arc::clone(&job_id.item_id))
                         .await?;
                 }
                 SyncCompletion::ChangedItem { .. } | SyncCompletion::Noop { .. } => {}
