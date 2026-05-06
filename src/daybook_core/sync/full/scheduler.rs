@@ -1,21 +1,21 @@
+//! FIXME: This can be made generic and DRYed up
+
 use super::*;
 
 #[derive(Default)]
 pub(super) struct Scheduler {
-    pub docs_to_stop: HashSet<DocumentId>,
-    pub queued_tasks: HashSet<SyncTask>,
-    pub pending_tasks: HashMap<SyncTask, PendingTaskState>,
-    pub partitions_to_refresh: HashSet<PartitionKey>,
-    pub peer_sessions_to_refresh: HashSet<PeerId>,
-    pub active_docs: HashMap<DocSyncTaskKey, ActiveDocSyncState>,
-    pub active_blobs: HashMap<Arc<str>, ActiveBlobSyncState>,
-    pub blob_requirements: HashMap<Arc<str>, HashSet<PartitionKey>>,
-}
+    docs_to_stop: HashSet<DocSyncTaskKey>,
+    blobs_to_stop: HashSet<Hash>,
 
-#[derive(Debug, Clone, Hash, PartialEq, Eq)]
-pub(super) enum SyncTask {
-    Doc(DocSyncTaskKey),
-    Blob(Arc<str>),
+    // pending set reperesents all tasks that are not active
+    pending_docs: HashMap<DocSyncTaskKey, PendingTaskState>,
+    // tasks ready to boot and is a subset of pending
+    docs_to_boot: HashSet<DocSyncTaskKey>,
+    active_docs: HashMap<DocSyncTaskKey, ActiveDocSyncState>,
+
+    blobs_to_boot: HashSet<Hash>,
+    pending_blobs: HashMap<Hash, PendingTaskState>,
+    active_blobs: HashMap<Hash, ActiveBlobSyncState>,
 }
 
 #[derive(Debug, Clone)]
@@ -27,133 +27,157 @@ pub(super) struct PendingTaskState {
 }
 
 impl Scheduler {
-    pub fn has_queued_docs(&self) -> bool {
-        self.queued_tasks
-            .iter()
-            .any(|task| matches!(task, SyncTask::Doc(_)))
-    }
-
-    pub fn has_queued_blobs(&self) -> bool {
-        self.queued_tasks
-            .iter()
-            .any(|task| matches!(task, SyncTask::Blob(_)))
-    }
-
-    pub fn is_doc_pending(&self, task_key: &DocSyncTaskKey) -> bool {
-        self.pending_tasks
-            .contains_key(&SyncTask::Doc(task_key.clone()))
-    }
-
     pub fn pending_doc_state(&self, task_key: &DocSyncTaskKey) -> Option<PendingTaskState> {
-        self.pending_tasks
-            .get(&SyncTask::Doc(task_key.clone()))
-            .cloned()
+        self.pending_docs.get(&task_key).cloned()
     }
 
-    pub fn pending_blob_state(&self, hash: Arc<str>) -> Option<PendingTaskState> {
-        self.pending_tasks
-            .get(&SyncTask::Blob(Arc::clone(&hash)))
-            .cloned()
+    pub fn pending_blob_state(&self, hash: Hash) -> Option<PendingTaskState> {
+        self.pending_blobs.get(&hash).cloned()
+    }
+    pub fn has_docs_to_boot(&self) -> bool {
+        !self.docs_to_boot.is_empty()
     }
 
-    pub fn enqueue_doc(&mut self, task_key: DocSyncTaskKey) {
-        self.queued_tasks.insert(SyncTask::Doc(task_key));
+    pub fn has_blobs_to_boot(&self) -> bool {
+        !self.blobs_to_boot.is_empty()
     }
 
-    pub fn enqueue_blob(&mut self, hash: Arc<str>) {
-        self.queued_tasks.insert(SyncTask::Blob(hash));
+    pub fn enqueue_start_doc(&mut self, task_key: DocSyncTaskKey) {
+        self.docs_to_boot.insert(task_key);
     }
 
-    pub fn clear_doc_task(&mut self, task_key: DocSyncTaskKey) {
-        self.pending_tasks.remove(&SyncTask::Doc(task_key.clone()));
-        self.queued_tasks.remove(&SyncTask::Doc(task_key));
+    pub fn enqueue_start_blob(&mut self, hash: Hash) {
+        self.blobs_to_boot.insert(hash);
     }
 
-    pub fn clear_blob_task(&mut self, hash: Arc<str>) {
-        self.pending_tasks
-            .remove(&SyncTask::Blob(Arc::clone(&hash)));
-        self.queued_tasks.remove(&SyncTask::Blob(hash));
+    pub fn enqueue_stop_doc(&mut self, task_key: &DocSyncTaskKey) -> bool {
+        self.pending_docs.remove(&task_key);
+        self.docs_to_boot.remove(&task_key);
+        if self.active_docs.contains_key(&task_key) {
+            self.docs_to_stop.insert(task_key.clone());
+            true
+        } else {
+            false
+        }
+    }
+    pub fn clear_doc_task(&mut self, task_key: &DocSyncTaskKey) -> Option<ActiveDocSyncState> {
+        self.pending_docs.remove(&task_key);
+        self.docs_to_boot.remove(&task_key);
+        self.active_docs.remove(&task_key)
+    }
+
+    pub fn clear_blob_task(&mut self, hash: Hash) -> Option<ActiveBlobSyncState> {
+        self.pending_blobs.remove(&hash);
+        self.blobs_to_boot.remove(&hash);
+        self.active_blobs.remove(&hash)
+    }
+
+    pub fn enqueue_stop_blob(&mut self, hash: Hash) -> bool {
+        self.pending_blobs.remove(&hash);
+        self.blobs_to_boot.remove(&hash);
+        if self.active_blobs.contains_key(&hash) {
+            self.blobs_to_stop.insert(hash);
+            true
+        } else {
+            false
+        }
+    }
+
+    pub fn clear_all_tasks(&mut self) {
+        self.pending_docs.clear();
+        self.pending_blobs.clear();
+        self.docs_to_boot.clear();
+        self.blobs_to_boot.clear();
+        self.docs_to_stop.extend(self.active_docs.keys().cloned());
+        self.blobs_to_stop.extend(self.active_blobs.keys().cloned());
+    }
+    pub fn activate_doc(&mut self, task_key: DocSyncTaskKey, active: ActiveDocSyncState) {
+        self.pending_docs.remove(&task_key);
+        self.active_docs.insert(task_key, active);
+    }
+
+    pub fn activate_blob(&mut self, hash: Hash, active: ActiveBlobSyncState) {
+        self.pending_blobs.remove(&hash);
+        self.active_blobs.insert(hash, active);
+    }
+
+    pub fn is_doc_active(&self, key: &DocSyncTaskKey) -> bool {
+        self.active_docs.contains_key(key)
+    }
+
+    pub fn is_blob_active(&self, key: &Hash) -> bool {
+        self.active_blobs.contains_key(key)
     }
 
     pub fn set_doc_pending_now(&mut self, task_key: DocSyncTaskKey) {
+        if self.active_docs.contains_key(&task_key) || self.pending_docs.contains_key(&task_key) {
+            return;
+        }
         let now = std::time::Instant::now();
-        self.pending_tasks
-            .entry(SyncTask::Doc(task_key.clone()))
+        self.pending_docs
+            .entry(task_key.clone())
             .or_insert(PendingTaskState {
                 attempt_no: 0,
                 last_backoff: Duration::from_millis(0),
                 last_attempt_at: now,
                 due_at: now,
             });
-        self.enqueue_doc(task_key);
+        self.enqueue_start_doc(task_key);
     }
 
-    pub fn set_blob_pending_now(&mut self, hash: Arc<str>) {
+    pub fn set_blob_pending_now(&mut self, hash: Hash) {
+        // FIXME: why don't we look at enqueue_docs?
+        if self.active_blobs.contains_key(&hash) || self.pending_blobs.contains_key(&hash) {
+            return;
+        }
         let now = std::time::Instant::now();
-        self.pending_tasks
-            .entry(SyncTask::Blob(Arc::clone(&hash)))
-            .or_insert(PendingTaskState {
-                attempt_no: 0,
-                last_backoff: Duration::from_millis(0),
-                last_attempt_at: now,
-                due_at: now,
-            });
-        self.enqueue_blob(hash);
+        self.pending_blobs.entry(hash).or_insert(PendingTaskState {
+            attempt_no: 0,
+            last_backoff: Duration::from_millis(0),
+            last_attempt_at: now,
+            due_at: now,
+        });
+        self.enqueue_start_blob(hash);
     }
 
-    pub fn set_doc_backoff(&mut self, task_key: &DocSyncTaskKey, pending: PendingTaskState) {
-        self.pending_tasks
-            .insert(SyncTask::Doc(task_key.clone()), pending);
+    pub fn set_doc_backoff(&mut self, task_key: DocSyncTaskKey, pending: PendingTaskState) {
+        self.pending_docs.insert(task_key, pending);
     }
 
-    pub fn set_blob_backoff(&mut self, hash: Arc<str>, pending: PendingTaskState) {
-        self.pending_tasks
-            .insert(SyncTask::Blob(Arc::clone(&hash)), pending);
+    pub fn set_blob_backoff(&mut self, hash: Hash, pending: PendingTaskState) {
+        self.pending_blobs.insert(hash, pending);
     }
 
-    pub fn clear_doc_pending(&mut self, task_key: DocSyncTaskKey) {
-        self.pending_tasks.remove(&SyncTask::Doc(task_key));
-    }
-
-    pub fn clear_blob_pending(&mut self, hash: Arc<str>) {
-        self.pending_tasks.remove(&SyncTask::Blob(hash));
-    }
-
-    pub fn drain_queued_docs(&mut self, budget: usize) -> Vec<DocSyncTaskKey> {
+    pub fn drain_queued_docs(&mut self, mut budget: usize) -> Vec<DocSyncTaskKey> {
         if budget == 0 {
             return Vec::new();
         }
-        let docs: Vec<DocSyncTaskKey> = self
-            .queued_tasks
-            .iter()
-            .filter_map(|task| match task {
-                SyncTask::Doc(task_key) => Some(task_key.clone()),
-                SyncTask::Blob(_) => None,
-            })
-            .take(budget)
-            .collect();
+        while budget > 0 {
+            budget -= 1;
+        }
+        let mut docs = self.docs_to_boot.iter().take(budget).cloned().collect();
         for task_key in &docs {
-            self.queued_tasks.remove(&SyncTask::Doc(task_key.clone()));
+            self.docs_to_boot.remove(task_key);
         }
         docs
     }
 
-    pub fn drain_queued_blobs(&mut self, budget: usize) -> Vec<Arc<str>> {
+    pub fn drain_queued_blobs(&mut self, budget: usize) -> Vec<Hash> {
         if budget == 0 {
             return Vec::new();
         }
-        let blobs: Vec<_> = self
-            .queued_tasks
-            .iter()
-            .filter_map(|task| match task {
-                SyncTask::Blob(hash) => Some(Arc::clone(&hash)),
-                SyncTask::Doc(_) => None,
-            })
-            .collect();
+        let blobs = self.blobs_to_boot.iter().take(budget).cloned().collect();
         for hash in &blobs {
-            self.queued_tasks.remove(&SyncTask::Blob(Arc::clone(&hash)));
+            self.blobs_to_boot.remove(hash);
         }
         blobs
+    }
+
+    pub fn drain_stop_doc_queue(&mut self) -> Vec<DocSyncTaskKey> {
+        self.docs_to_stop.drain().collect()
+    }
+    pub fn drain_stop_blob_queue(&mut self) -> Vec<Hash> {
+        self.blobs_to_stop.drain().collect()
     }
 
     pub fn active_worker_count(&self) -> usize {
@@ -169,12 +193,7 @@ impl Scheduler {
         if remaining_total == 0 {
             return 0;
         }
-        let blob_demand = self.active_blobs.len()
-            + self
-                .queued_tasks
-                .iter()
-                .filter(|task| matches!(task, SyncTask::Blob(_)))
-                .count();
+        let blob_demand = self.active_blobs.len() + self.blobs_to_boot.len();
         let reserved_for_blob = MIN_BLOB_WORKER_FLOOR.min(blob_demand);
         let doc_cap = max_active_sync_workers.saturating_sub(reserved_for_blob);
         let remaining_doc_cap = doc_cap.saturating_sub(self.active_docs.len());
@@ -186,12 +205,7 @@ impl Scheduler {
         if remaining_total == 0 {
             return 0;
         }
-        let doc_demand = self.active_docs.len()
-            + self
-                .queued_tasks
-                .iter()
-                .filter(|task| matches!(task, SyncTask::Doc(_)))
-                .count();
+        let doc_demand = self.active_docs.len() + self.blobs_to_boot.len();
         let reserved_for_doc = MIN_DOC_WORKER_FLOOR.min(doc_demand);
         let blob_cap = max_active_sync_workers.saturating_sub(reserved_for_doc);
         let remaining_blob_cap = blob_cap.saturating_sub(self.active_blobs.len());
@@ -203,53 +217,43 @@ impl Scheduler {
         let doc_budget = self.available_doc_boot_budget(max_active_sync_workers);
         let blob_budget = self.available_blob_boot_budget(max_active_sync_workers);
 
-        let due_docs: Vec<_> = self
-            .pending_tasks
+        let tasks: Vec<_> = self
+            .pending_docs
             .iter()
-            .filter_map(|(task, pending)| match task {
-                SyncTask::Doc(task_key)
-                    if pending.due_at <= now && !self.active_docs.contains_key(task_key) =>
-                {
+            .filter_map(|(task_key, pending)| {
+                if pending.due_at <= now && !self.active_docs.contains_key(task_key) {
                     Some(task_key.clone())
+                } else {
+                    None
                 }
-                _ => None,
             })
             .take(doc_budget)
             .collect();
-        for task_key in due_docs {
-            self.enqueue_doc(task_key);
+        for task_key in tasks {
+            self.enqueue_start_doc(task_key);
         }
 
-        let due_blobs: Vec<_> = self
-            .pending_tasks
+        let tasks: Vec<_> = self
+            .pending_blobs
             .iter()
-            .filter_map(|(task, pending)| match task {
-                SyncTask::Blob(hash) => {
-                    if pending.due_at <= now && !self.active_blobs.contains_key(hash) {
-                        Some(hash.clone())
-                    } else {
-                        None
-                    }
+            .filter_map(|(hash, pending)| {
+                if pending.due_at <= now && !self.active_blobs.contains_key(hash) {
+                    Some(hash.clone())
+                } else {
+                    None
                 }
-                SyncTask::Doc(_) => None,
             })
             .take(blob_budget)
             .collect();
-        for hash in due_blobs {
-            self.enqueue_blob(hash);
+        for hash in tasks {
+            self.enqueue_start_blob(hash);
         }
     }
 
     pub fn endpoint_has_doc_work(&self, pid: PeerId) -> bool {
         self.active_docs.keys().any(|key| key.peer_id == pid)
-            || self
-                .queued_tasks
-                .iter()
-                .any(|task| matches!(task, SyncTask::Doc(key) if key.peer_id == pid))
-            || self
-                .pending_tasks
-                .keys()
-                .any(|task| matches!(task, SyncTask::Doc(key) if key.peer_id == pid))
+            || self.docs_to_boot.iter().any(|key| key.peer_id == pid)
+            || self.pending_docs.keys().any(|key| key.peer_id == pid)
     }
 
     pub fn doc_task_keys_for_doc(&self, doc_id: &DocumentId) -> HashSet<DocSyncTaskKey> {
@@ -260,13 +264,19 @@ impl Scheduler {
                 .filter(|key| &key.doc_id == doc_id)
                 .cloned(),
         );
-        keys.extend(self.pending_tasks.keys().filter_map(|task| match task {
-            SyncTask::Doc(key) if &key.doc_id == doc_id => Some(key.clone()),
-            SyncTask::Doc(_) | SyncTask::Blob(_) => None,
+        keys.extend(self.pending_docs.keys().filter_map(|key| {
+            if &key.doc_id == doc_id {
+                Some(key.clone())
+            } else {
+                None
+            }
         }));
-        keys.extend(self.queued_tasks.iter().filter_map(|task| match task {
-            SyncTask::Doc(key) if &key.doc_id == doc_id => Some(key.clone()),
-            SyncTask::Doc(_) | SyncTask::Blob(_) => None,
+        keys.extend(self.docs_to_boot.iter().filter_map(|key| {
+            if &key.doc_id == doc_id {
+                Some(key.clone())
+            } else {
+                None
+            }
         }));
         keys
     }
@@ -279,15 +289,29 @@ impl Scheduler {
                 .filter(|key| key.peer_id == peer_id)
                 .cloned(),
         );
-        keys.extend(self.pending_tasks.keys().filter_map(|task| match task {
-            SyncTask::Doc(key) if key.peer_id == peer_id => Some(key.clone()),
-            SyncTask::Doc(_) | SyncTask::Blob(_) => None,
+        keys.extend(self.pending_docs.keys().filter_map(|key| {
+            if key.peer_id == peer_id {
+                Some(key.clone())
+            } else {
+                None
+            }
         }));
-        keys.extend(self.queued_tasks.iter().filter_map(|task| match task {
-            SyncTask::Doc(key) if key.peer_id == peer_id => Some(key.clone()),
-            SyncTask::Doc(_) | SyncTask::Blob(_) => None,
+        keys.extend(self.docs_to_boot.iter().filter_map(|key| {
+            if key.peer_id == peer_id {
+                Some(key.clone())
+            } else {
+                None
+            }
         }));
         keys
+    }
+
+    pub fn docs_to_stop(&self) -> &HashSet<DocSyncTaskKey> {
+        &self.docs_to_stop
+    }
+
+    pub fn blobs_to_stop(&self) -> &HashSet<Hash> {
+        &self.blobs_to_stop
     }
 }
 
@@ -315,7 +339,7 @@ mod tests {
         assert!(!scheduler.endpoint_has_doc_work(peer));
         scheduler.set_doc_pending_now(task_key.clone());
         assert!(scheduler.endpoint_has_doc_work(peer));
-        scheduler.clear_doc_task(task_key);
+        scheduler.enqueue_stop_doc(&task_key);
         assert!(!scheduler.endpoint_has_doc_work(peer));
     }
 
@@ -352,22 +376,22 @@ mod tests {
 
         scheduler.set_doc_pending_now(task_key.clone());
         scheduler.set_doc_pending_now(task_key.clone());
-        scheduler.enqueue_doc(task_key.clone());
+        scheduler.enqueue_start_doc(task_key.clone());
 
         let batch = scheduler.drain_queued_docs(32);
         assert_eq!(batch.len(), 1);
         assert_eq!(batch[0], task_key);
-        assert!(scheduler.is_doc_pending(&batch[0]));
+        assert!(scheduler.pending_docs.contains_key(&batch[0]));
     }
 
     #[test]
     fn blob_task_dedup_single_pending_entry() {
         let mut scheduler = Scheduler::default();
-        let hash: Arc<str> = "bafkreigh2akiscaildcv".into();
+        let hash: Hash = Hash::new("bafkreigh2akiscaildcv");
 
-        scheduler.set_blob_pending_now(Arc::clone(&hash));
-        scheduler.set_blob_pending_now(Arc::clone(&hash));
-        scheduler.enqueue_blob(hash.clone());
+        scheduler.set_blob_pending_now(hash);
+        scheduler.set_blob_pending_now(hash);
+        scheduler.enqueue_start_blob(hash);
 
         let batch = scheduler.drain_queued_blobs(32);
         assert_eq!(batch.len(), 1);

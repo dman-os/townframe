@@ -33,6 +33,9 @@ pub enum PeerSyncWorkerEvent {
         peer: PeerKey,
         reason: PeerSyncWorkerExit,
     },
+    NaturalDeath {
+        peer: PeerKey,
+    },
 }
 
 #[derive(Debug, Clone, Error)]
@@ -69,7 +72,7 @@ pub struct SpawnPeerSyncWorkerArgs<'a> {
     pub remote_peer: PeerKey,
     pub rpc_client: irpc::Client<PartitionSyncRpc>,
     pub sync_store: SyncStoreHandle,
-    pub target_partitions: Vec<PartitionId>,
+    pub target_partitions: HashSet<PartitionId>,
     pub msg_tx: mpsc::Sender<PeerSyncWorkerMsg>,
     pub task_set: &'a utils_rs::AbortableJoinSet,
 }
@@ -81,6 +84,9 @@ pub struct PeerSyncWorkerStopToken {
 }
 
 impl PeerSyncWorkerStopToken {
+    pub fn cancel(&self) {
+        self.cancel_token.cancel();
+    }
     pub async fn stop(self) -> Res<()> {
         self.cancel_token.cancel();
         self.task_handle.join(Duration::from_secs(5)).await?;
@@ -199,16 +205,17 @@ pub async fn spawn_peer_sync_worker(
     let span = tracing::info_span!("PeerSyncWorker", remote_peer = %args.remote_peer);
     let wrapped = async move {
         let run_res: Result<(), PeerSyncWorkerExit> = fut.await;
-        if let Err(err) = &run_res {
-            msg_tx
-                .try_send(PeerSyncWorkerMsg::Event(
-                    PeerSyncWorkerEvent::AbnormalExit {
-                        peer: remote_peer_for_task,
-                        reason: err.clone(),
-                    },
-                ))
-                .ok();
-        }
+        let evt = if let Err(err) = &run_res {
+            PeerSyncWorkerEvent::AbnormalExit {
+                peer: remote_peer_for_task,
+                reason: err.clone(),
+            }
+        } else {
+            PeerSyncWorkerEvent::NaturalDeath {
+                peer: remote_peer_for_task,
+            }
+        };
+        msg_tx.try_send(PeerSyncWorkerMsg::Event(evt)).ok();
         debug!(result = ?run_res.as_ref().map(|_| ()), "peer sync worker future exiting");
     }
     .instrument(span);
@@ -230,14 +237,14 @@ struct PeerSyncWorker {
     remote_peer: PeerKey,
     rpc_client: irpc::Client<PartitionSyncRpc>,
     sync_store: SyncStoreHandle,
-    target_partitions: Vec<PartitionId>,
+    target_partitions: HashSet<PartitionId>,
     msg_tx: mpsc::Sender<PeerSyncWorkerMsg>,
 }
 
 impl PeerSyncWorker {
     async fn get_partition_frontiers(
         &mut self,
-    ) -> Res<(Vec<PartitionId>, HashMap<PartitionId, u64>)> {
+    ) -> Res<(HashSet<PartitionId>, HashMap<PartitionId, u64>)> {
         let partitions = self
             .rpc_client
             .rpc(ListPartitionsRpcReq)

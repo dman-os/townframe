@@ -71,11 +71,25 @@ struct ItemJobState {
     high_water_at_last_dispatch: CursorIndex,
 }
 
+/// FIXME: partition_ids are provided to commands
+/// only as hints as item ids across partitions are
+/// supposed to represent a single entity. The partition_ids
+/// here is misleading
+/// FIXME: consider also providing peer hints
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum SyncMachineCommand {
-    ItemNewSync { key: ItemSyncKey },
-    ItemChangeSync { key: ItemSyncKey },
-    ItemDeleteSync { key: ItemSyncKey },
+    ItemNewSync {
+        key: ItemSyncKey,
+        partition_hints: Vec<PartitionId>,
+    },
+    ItemChangeSync {
+        key: ItemSyncKey,
+        partition_hints: Vec<PartitionId>,
+    },
+    ItemDeleteSync {
+        key: ItemSyncKey,
+        partition_hints: Vec<PartitionId>,
+    },
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -270,17 +284,31 @@ impl SyncMachine {
             cursor,
             CursorWaiter {
                 peer,
-                partition_id,
+                partition_id: Arc::clone(&partition_id),
                 sync_kind,
                 stream_event: sub_kind,
             },
         );
+        let partition_hints = entry
+            .waiters
+            .values()
+            .map(|ww| Arc::clone(&ww.partition_id))
+            .collect();
         Ok(
             // FIXME: consider waiting until next dispatch for new commands
             vec![match key.kind {
-                ItemSyncKind::New => SyncMachineCommand::ItemNewSync { key },
-                ItemSyncKind::Change => SyncMachineCommand::ItemChangeSync { key },
-                ItemSyncKind::Delete => SyncMachineCommand::ItemDeleteSync { key },
+                ItemSyncKind::New => SyncMachineCommand::ItemNewSync {
+                    key,
+                    partition_hints,
+                },
+                ItemSyncKind::Change => SyncMachineCommand::ItemChangeSync {
+                    key,
+                    partition_hints,
+                },
+                ItemSyncKind::Delete => SyncMachineCommand::ItemDeleteSync {
+                    key,
+                    partition_hints,
+                },
             }],
         )
     }
@@ -325,27 +353,28 @@ impl SyncMachine {
             );
         if should_requeue_current {
             job.last_change_kind = next_job_kind;
+            let partition_hints = job
+                .waiters
+                .values()
+                .map(|ww| Arc::clone(&ww.partition_id))
+                .collect();
+            let key = ItemSyncKey {
+                peer: Arc::clone(&job_id.peer),
+                item_id: Arc::clone(&job_id.item_id),
+                kind: next_job_kind,
+            };
             commands.push(match next_job_kind {
                 ItemSyncKind::New => SyncMachineCommand::ItemNewSync {
-                    key: ItemSyncKey {
-                        peer: Arc::clone(&job_id.peer),
-                        item_id: Arc::clone(&job_id.item_id),
-                        kind: next_job_kind,
-                    },
+                    partition_hints,
+                    key,
                 },
                 ItemSyncKind::Change => SyncMachineCommand::ItemChangeSync {
-                    key: ItemSyncKey {
-                        peer: Arc::clone(&job_id.peer),
-                        item_id: Arc::clone(&job_id.item_id),
-                        kind: next_job_kind,
-                    },
+                    partition_hints,
+                    key,
                 },
                 ItemSyncKind::Delete => SyncMachineCommand::ItemDeleteSync {
-                    key: ItemSyncKey {
-                        peer: Arc::clone(&job_id.peer),
-                        item_id: Arc::clone(&job_id.item_id),
-                        kind: next_job_kind,
-                    },
+                    partition_hints,
+                    key,
                 },
             });
             if job.dirty {
@@ -421,7 +450,13 @@ impl SyncMachine {
             ii_job.last_change_kind = ItemSyncKind::Change;
             // FIXME: consider not setting it dirty
             ii_job.dirty = true;
+            let partition_ids = ii_job
+                .waiters
+                .values()
+                .map(|ww| Arc::clone(&ww.partition_id))
+                .collect();
             commands.push(SyncMachineCommand::ItemChangeSync {
+                partition_hints: partition_ids,
                 key: ItemSyncKey {
                     peer: Arc::clone(&ii_id.peer),
                     item_id: Arc::clone(&ii_id.item_id),
@@ -435,14 +470,6 @@ impl SyncMachine {
         }
 
         Ok(commands)
-    }
-
-    pub fn active_peers_for_item(&self, item_id: &str) -> Vec<PeerKey> {
-        self.active_item_jobs
-            .keys()
-            .filter(|job_id| &job_id.item_id[..] == item_id)
-            .map(|job_id| job_id.peer.clone())
-            .collect()
     }
 
     pub fn has_active_item_job_for(&self, peer: PeerKey, item_id: Arc<str>) -> bool {
@@ -624,13 +651,13 @@ mod tests {
         let cmds = machine
             .on_subscription_item(PeerKey::clone(&p), changed("part", "a", 10))
             .await?;
-        let [SyncMachineCommand::ItemChangeSync { key: key_a }] = cmds.as_slice() else {
+        let [SyncMachineCommand::ItemChangeSync { key: key_a, .. }] = cmds.as_slice() else {
             panic!("unexpected commands: {cmds:?}");
         };
         let cmds = machine
             .on_subscription_item(PeerKey::clone(&p), changed("part", "b", 15))
             .await?;
-        let [SyncMachineCommand::ItemChangeSync { key: key_b }] = cmds.as_slice() else {
+        let [SyncMachineCommand::ItemChangeSync { key: key_b, .. }] = cmds.as_slice() else {
             panic!("unexpected commands: {cmds:?}");
         };
 
@@ -667,7 +694,7 @@ mod tests {
             .pop()
             .unwrap()
         {
-            SyncMachineCommand::ItemChangeSync { key } => key,
+            SyncMachineCommand::ItemChangeSync { key, .. } => key,
             other => panic!("unexpected command: {other:?}"),
         };
         let key_15 = match machine
@@ -676,7 +703,7 @@ mod tests {
             .pop()
             .unwrap()
         {
-            SyncMachineCommand::ItemChangeSync { key } => key,
+            SyncMachineCommand::ItemChangeSync { key, .. } => key,
             other => panic!("unexpected command: {other:?}"),
         };
 
@@ -735,7 +762,7 @@ mod tests {
             .pop()
             .unwrap()
         {
-            SyncMachineCommand::ItemNewSync { key } => key,
+            SyncMachineCommand::ItemNewSync { key, .. } => key,
             other => panic!("unexpected command: {other:?}"),
         };
         machine
@@ -766,7 +793,7 @@ mod tests {
             .pop()
             .unwrap()
         {
-            SyncMachineCommand::ItemNewSync { key } => key,
+            SyncMachineCommand::ItemNewSync { key, .. } => key,
             other => panic!("unexpected command: {other:?}"),
         };
         let _ = machine
@@ -780,7 +807,7 @@ mod tests {
             })
             .await?;
         assert_eq!(cmds.len(), 1);
-        let [SyncMachineCommand::ItemChangeSync { key }] = cmds.as_slice() else {
+        let [SyncMachineCommand::ItemChangeSync { key, .. }] = cmds.as_slice() else {
             panic!("unexpected commands: {cmds:?}");
         };
         assert_eq!(key.peer, p2);
@@ -803,7 +830,7 @@ mod tests {
             .pop()
             .unwrap()
         {
-            SyncMachineCommand::ItemNewSync { key } => key,
+            SyncMachineCommand::ItemNewSync { key, .. } => key,
             other => panic!("unexpected command: {other:?}"),
         };
 
@@ -818,10 +845,10 @@ mod tests {
             .iter()
             .all(|cmd| matches!(cmd, SyncMachineCommand::ItemChangeSync { .. })));
         assert!(cmds.iter().any(
-            |cmd| matches!(cmd, SyncMachineCommand::ItemChangeSync { key } if key.peer == p1)
+            |cmd| matches!(cmd, SyncMachineCommand::ItemChangeSync { key ,..} if key.peer == p1)
         ));
         assert!(cmds.iter().any(
-            |cmd| matches!(cmd, SyncMachineCommand::ItemChangeSync { key } if key.peer == p2)
+            |cmd| matches!(cmd, SyncMachineCommand::ItemChangeSync { key ,..} if key.peer == p2)
         ));
 
         let cursor = machine

@@ -723,6 +723,7 @@ impl BlobsRepo {
 
 pub(crate) fn daybook_hash_to_iroh_hash(hash: &str) -> Res<iroh_blobs::Hash> {
     let decoded = utils_rs::hash::decode_base58_multibase(hash)?;
+    // FIXME: why is this 34 length?
     if decoded.len() < 34 {
         eyre::bail!("invalid daybook blob hash bytes");
     }

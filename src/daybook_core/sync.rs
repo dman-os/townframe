@@ -143,15 +143,12 @@ pub enum IrohSyncEvent {
     },
     BlobSynced {
         hash: String,
-        peer_key: Option<PeerKey>,
     },
     BlobDownloadStarted {
-        peer_key: PeerKey,
         partition: String,
         hash: String,
     },
     BlobDownloadFinished {
-        peer_key: PeerKey,
         partition: String,
         hash: String,
         success: bool,
@@ -674,25 +671,20 @@ impl IrohSyncRepo {
             full::FullSyncEvent::DocSyncedWithPeer { peer_key, doc_id } => self
                 .registry
                 .notify([IrohSyncEvent::DocSyncedWithPeer { peer_key, doc_id }]),
-            full::FullSyncEvent::BlobSynced { hash, peer_key } => self
-                .registry
-                .notify([IrohSyncEvent::BlobSynced { hash, peer_key }]),
-            full::FullSyncEvent::BlobDownloadStarted {
-                partition,
-                peer_key,
-                hash,
-            } => self.registry.notify([IrohSyncEvent::BlobDownloadStarted {
-                peer_key,
-                partition: partition.as_tag_value().to_string(),
-                hash,
-            }]),
+            full::FullSyncEvent::BlobSynced { hash } => {
+                self.registry.notify([IrohSyncEvent::BlobSynced { hash }])
+            }
+            full::FullSyncEvent::BlobDownloadStarted { partition, hash } => {
+                self.registry.notify([IrohSyncEvent::BlobDownloadStarted {
+                    partition: partition.as_tag_value().to_string(),
+                    hash,
+                }])
+            }
             full::FullSyncEvent::BlobDownloadFinished {
-                peer_key,
                 partition,
                 hash,
                 success,
             } => self.registry.notify([IrohSyncEvent::BlobDownloadFinished {
-                peer_key,
                 partition: partition.as_tag_value().to_string(),
                 hash,
                 success,

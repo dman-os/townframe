@@ -5,35 +5,28 @@ pub(super) struct DocSyncWorkerStopToken {
 }
 
 impl DocSyncWorkerStopToken {
-    pub async fn stop(self) -> Res<()> {
-        self.task_handle.join(Duration::from_secs(2)).await?;
-        Ok(())
+    pub async fn stop(self) {
+        self.task_handle
+            .join(Duration::from_secs(2))
+            .await
+            .inspect_err(|err| error!("error joining doc sync worker: {err:?}"))
+            .ok();
     }
 }
 
-#[derive(Clone)]
-pub(super) enum DocSyncTarget {
-    Sync {
-        peer_id: PeerId,
-        connection: am_utils_rs::repo::BigRepoConnection,
-    },
-    Import {
-        peer_id: PeerId,
-        iroh_endpoint: iroh::Endpoint,
-    },
-}
-
 #[derive(Debug, Clone)]
-pub(super) enum ImportDocOutcome {
+pub(super) enum SyncDocOutcome {
+    Synced,
     Imported { heads: ChangeHashSet },
     LocalPresent,
-    MissingOnRemote,
 }
 
 #[tracing::instrument(skip_all, fields(%doc_id))]
 pub fn spawn_doc_sync_worker(
     doc_id: DocumentId,
-    target: DocSyncTarget,
+    peer_id: PeerId,
+    connection: am_utils_rs::repo::BigRepoConnection,
+    iroh_endpoint: iroh::Endpoint,
     big_repo: SharedBigRepo,
     msg_tx: mpsc::UnboundedSender<Msg>,
     retry: RetryState,
@@ -46,47 +39,26 @@ pub fn spawn_doc_sync_worker(
     };
 
     let fut = async move {
-        let msg = match target {
-            DocSyncTarget::Sync {
+        let msg = match worker.run(peer_id, connection, iroh_endpoint).await {
+            Ok(outcome) => Msg::DocSyncCompleted {
+                doc_id: worker.doc_id.clone(),
                 peer_id,
-                connection,
-            } => match worker.sync_doc(peer_id, connection).await {
-                Ok(msg) => msg,
-                Err(err) => {
-                    error!(
-                        doc_id = %worker.doc_id,
-                        peer_id = ?peer_id,
-                        ?err,
-                        "doc sync worker failed"
-                    );
-                    Msg::DocSyncBackoff {
-                        doc_id: worker.doc_id.clone(),
-                        peer_id,
-                        delay: Duration::from_millis(500),
-                        previous_retry_state: worker.retry,
-                    }
-                }
+                outcome,
             },
-            DocSyncTarget::Import {
-                peer_id,
-                iroh_endpoint,
-            } => match worker.import_doc(peer_id, iroh_endpoint).await {
-                Ok(msg) => msg,
-                Err(err) => {
-                    error!(
-                        doc_id = %worker.doc_id,
-                        peer_id = ?peer_id,
-                        ?err,
-                        "import sync worker failed"
-                    );
-                    Msg::ImportDocBackoff {
-                        doc_id: worker.doc_id.clone(),
-                        peer_id,
-                        delay: Duration::from_secs(2),
-                        previous_retry_state: worker.retry,
-                    }
+            Err(err) => {
+                error!(
+                    doc_id = %worker.doc_id,
+                    peer_id = ?peer_id,
+                    ?err,
+                    "doc sync worker failed"
+                );
+                Msg::DocSyncBackoff {
+                    doc_id: worker.doc_id.clone(),
+                    peer_id,
+                    delay: Duration::from_millis(500),
+                    previous_retry_state: worker.retry,
                 }
-            },
+            }
         };
         msg_tx.send(msg).inspect_err(|_| warn!(ERROR_CALLER)).ok();
     }
@@ -104,133 +76,87 @@ struct DocSyncWorker {
 }
 
 impl DocSyncWorker {
-    async fn sync_doc(
+    async fn run(
         &self,
         peer_id: PeerId,
         connection: am_utils_rs::repo::BigRepoConnection,
-    ) -> Res<Msg> {
-        let Some(_handle) = self.big_repo.get_doc(&self.doc_id).await? else {
-            return Ok(Msg::DocSyncMissingLocal {
-                doc_id: self.doc_id.clone(),
-            });
-        };
-
-        let outcome = connection
-            .sync_with_peer(self.doc_id.clone(), Some(Duration::from_secs(10)))
-            .await?;
-
-        Ok(Msg::DocSyncCompleted {
-            doc_id: self.doc_id.clone(),
-            peer_id,
-            outcome,
-        })
-    }
-
-    async fn import_doc(&self, peer_id: PeerId, iroh_endpoint: iroh::Endpoint) -> Res<Msg> {
+        iroh_endpoint: iroh::Endpoint,
+    ) -> Res<SyncDocOutcome> {
         if self.big_repo.get_doc(&self.doc_id).await?.is_some() {
-            return Ok(Msg::ImportDocCompleted {
-                doc_id: self.doc_id.clone(),
-                peer_id,
-                outcome: ImportDocOutcome::LocalPresent,
-            });
+            let outcome = connection
+                .sync_with_peer(self.doc_id.clone(), Some(Duration::from_secs(10)))
+                .await?;
+            match outcome {
+                am_utils_rs::repo::SyncDocOutcome::Success => {
+                    return Ok(SyncDocOutcome::Synced);
+                }
+                am_utils_rs::repo::SyncDocOutcome::NotFoundOrUnauthorized
+                | am_utils_rs::repo::SyncDocOutcome::TransportError
+                | am_utils_rs::repo::SyncDocOutcome::IoError => {
+                    eyre::bail!("error during big_repo sync: {outcome:?}")
+                }
+            }
         }
+
         let rpc_client = irpc_iroh::client::<am_utils_rs::repo::rpc::RepoSyncRpc>(
             iroh_endpoint.clone(),
             iroh::EndpointAddr::new(peer_id.into()),
             crate::sync::REPO_SYNC_ALPN,
         );
         let doc_id_string = self.doc_id.to_string();
-        let rpc_response = rpc_client
+        let response = rpc_client
             .rpc(am_utils_rs::repo::rpc::GetDocsFullRpcReq {
                 req: am_utils_rs::repo::rpc::GetDocsFullRequest {
                     doc_ids: vec![doc_id_string.clone()],
                 },
             })
-            .await;
-        let response = match rpc_response {
-            Ok(Ok(response)) => response,
-            Ok(Err(err)) => {
-                warn!(%doc_id_string, endpoint_id = ?peer_id, ?err, "repo GetDocsFull rejected in import worker");
-                return Ok(Msg::ImportDocBackoff {
-                    doc_id: self.doc_id.clone(),
-                    peer_id,
-                    delay: Duration::from_secs(2),
-                    previous_retry_state: self.retry,
-                });
-            }
-            Err(err) => {
-                warn!(%doc_id_string, endpoint_id = ?peer_id, ?err, "repo GetDocsFull rpc failed in import worker");
-                return Ok(Msg::ImportDocBackoff {
-                    doc_id: self.doc_id.clone(),
-                    peer_id,
-                    delay: Duration::from_secs(2),
-                    previous_retry_state: self.retry,
-                });
-            }
-        };
+            .await
+            .wrap_err("GetDocsFull rpc failure")?
+            .wrap_err("GetDocsFull rejected")?;
 
-        let Some(full_doc) = response
+        let full_doc = response
             .docs
             .into_iter()
             .find(|doc| doc.doc_id == doc_id_string)
-        else {
-            return Ok(Msg::ImportDocCompleted {
-                doc_id: self.doc_id.clone(),
-                peer_id,
-                outcome: ImportDocOutcome::MissingOnRemote,
-            });
-        };
-        let loaded = match automerge::Automerge::load(&full_doc.automerge_save) {
-            Ok(loaded) => loaded,
-            Err(err) => {
-                warn!(
-                    doc_id = full_doc.doc_id,
-                    endpoint_id = ?peer_id,
-                    ?err,
-                    "invalid automerge payload in import worker"
-                );
-                return Ok(Msg::ImportDocBackoff {
-                    doc_id: self.doc_id.clone(),
-                    peer_id,
-                    delay: Duration::from_secs(2),
-                    previous_retry_state: self.retry,
-                });
-            }
-        };
+            .ok_or_eyre("missing on remote")?;
+        let loaded = automerge::Automerge::load(&full_doc.automerge_save)
+            .wrap_err("invalid automerge payload from GetDocsFull")?;
 
         if self.big_repo.get_doc(&self.doc_id).await?.is_some() {
-            return Ok(Msg::ImportDocCompleted {
-                doc_id: self.doc_id.clone(),
-                peer_id,
-                outcome: ImportDocOutcome::LocalPresent,
-            });
+            let outcome = connection
+                .sync_with_peer(self.doc_id.clone(), Some(Duration::from_secs(10)))
+                .await?;
+            match outcome {
+                am_utils_rs::repo::SyncDocOutcome::Success => {
+                    return Ok(SyncDocOutcome::Synced);
+                }
+                am_utils_rs::repo::SyncDocOutcome::NotFoundOrUnauthorized
+                | am_utils_rs::repo::SyncDocOutcome::TransportError
+                | am_utils_rs::repo::SyncDocOutcome::IoError => {
+                    eyre::bail!("error during big_repo sync: {outcome:?}")
+                }
+            }
         }
 
         let heads = ChangeHashSet(loaded.get_heads().into());
         match self.big_repo.put_doc(self.doc_id.clone(), loaded).await {
-            Ok(_) => Ok(Msg::ImportDocCompleted {
-                doc_id: self.doc_id.clone(),
-                peer_id,
-                outcome: ImportDocOutcome::Imported { heads },
-            }),
-            // FIXME: use modeled thiserror results here to
-            // indicate already existing
-            Err(err) => {
-                if self.big_repo.get_doc(&self.doc_id).await?.is_some() {
-                    return Ok(Msg::ImportDocCompleted {
-                        doc_id: self.doc_id.clone(),
-                        peer_id,
-                        outcome: ImportDocOutcome::LocalPresent,
-                    });
+            Ok(_) => Ok(SyncDocOutcome::Imported { heads }),
+            Err(am_utils_rs::repo::PutDocError::IdOccpuied { .. }) => {
+                let outcome = connection
+                    .sync_with_peer(self.doc_id.clone(), Some(Duration::from_secs(10)))
+                    .await?;
+                match outcome {
+                    am_utils_rs::repo::SyncDocOutcome::Success => {
+                        return Ok(SyncDocOutcome::Synced);
+                    }
+                    am_utils_rs::repo::SyncDocOutcome::NotFoundOrUnauthorized
+                    | am_utils_rs::repo::SyncDocOutcome::TransportError
+                    | am_utils_rs::repo::SyncDocOutcome::IoError => {
+                        eyre::bail!("error during big_repo sync: {outcome:?}")
+                    }
                 }
-                warn!(%doc_id_string, endpoint_id = ?peer_id, ?err, "local import failed in import worker");
-                Ok(Msg::ImportDocBackoff {
-                    doc_id: self.doc_id.clone(),
-                    peer_id,
-                    delay: Duration::from_secs(2),
-                    previous_retry_state: self.retry,
-                })
             }
+            Err(err) => Err(err).wrap_err("put_doc failed"),
         }
     }
 }

@@ -5,9 +5,12 @@ pub(super) struct BlobSyncWorkerStopToken {
 }
 
 impl BlobSyncWorkerStopToken {
-    pub async fn stop(self) -> Res<()> {
-        self.task_handle.join(Duration::from_secs(2)).await?;
-        Ok(())
+    pub async fn stop(self) {
+        self.task_handle
+            .join(Duration::from_secs(2))
+            .await
+            .inspect_err(|err| error!("error joining blob sync worker: {err:?}"))
+            .ok();
     }
 }
 
@@ -19,8 +22,8 @@ pub(super) enum SyncBlobOutcome {
 
 #[expect(clippy::too_many_arguments)]
 pub fn spawn_blob_sync_worker(
-    partition: PartitionKey,
-    hash: Arc<str>,
+    hash: Hash,
+    dayb_hash: Arc<str>,
     peers: Vec<PeerId>,
     msg_tx: mpsc::UnboundedSender<Msg>,
     sync_progress_tx: mpsc::Sender<SyncProgressMsg>,
@@ -30,8 +33,8 @@ pub fn spawn_blob_sync_worker(
     task_set: &utils_rs::AbortableJoinSet,
 ) -> Res<BlobSyncWorkerStopToken> {
     let mut worker = BlobSyncWorker {
-        partition,
         hash,
+        dayb_hash,
         peers,
         sync_progress_tx,
         blobs_repo,
@@ -40,11 +43,13 @@ pub fn spawn_blob_sync_worker(
     };
     let fut = async move {
         let msg = match worker.run().await {
-            Ok(msg) => msg,
+            Ok(outcome) => Msg::BlobSyncCompleted {
+                hash: worker.hash,
+                outcome,
+            },
             Err(err) => {
                 worker.send_progress(SyncProgressMsg::BlobDownloadFinished {
-                    hash: Arc::clone(&worker.hash),
-                    partition: worker.partition.clone(),
+                    hash: Arc::clone(&worker.dayb_hash),
                     error: Some(err),
                 });
                 Msg::BlobSyncBackoff {
@@ -63,8 +68,8 @@ pub fn spawn_blob_sync_worker(
 }
 
 struct BlobSyncWorker {
-    partition: PartitionKey,
-    hash: Arc<str>,
+    hash: Hash,
+    dayb_hash: Arc<str>,
     peers: Vec<PeerId>,
     sync_progress_tx: mpsc::Sender<SyncProgressMsg>,
     blobs_repo: Arc<BlobsRepo>,
@@ -78,54 +83,43 @@ impl BlobSyncWorker {
             tracing::debug!(?err, hash = %self.hash, "dropping blob worker progress message");
         }
     }
-    async fn run(&mut self) -> Res<Msg> {
+    async fn run(&mut self) -> Res<SyncBlobOutcome> {
         self.send_progress(SyncProgressMsg::BlobWorkerStarted {
-            partition: self.partition.clone(),
-            hash: Arc::clone(&self.hash),
+            hash: Arc::clone(&self.dayb_hash),
         })
         .await;
 
         let has_local_hash = self
             .blobs_repo
-            .has_hash(&self.hash)
+            .has_hash(&self.dayb_hash)
             .await
             .wrap_err("local blob lookup failied")?;
 
         if has_local_hash {
-            return Ok(Msg::BlobSyncCompleted {
-                hash: Arc::clone(&self.hash),
-                outcome: SyncBlobOutcome::LocalPresent,
-            });
+            return Ok(SyncBlobOutcome::LocalPresent);
         }
-
-        let iroh_hash =
-            crate::blobs::daybook_hash_to_iroh_hash(&self.hash).wrap_err("invalid hash")?;
 
         let has_in_store = self
             .blobs_repo
             .iroh_store()
             .blobs()
-            .has(iroh_hash)
+            .has(self.hash)
             .await
             .wrap_err("iroh store lookup failed")?;
 
         if has_in_store {
             self.send_progress(SyncProgressMsg::BlobMaterializeStarted {
-                partition: self.partition.clone(),
-                hash: Arc::clone(&self.hash),
+                hash: Arc::clone(&self.dayb_hash),
             })
             .await;
-            self.blobs_repo.put_from_store(&self.hash).await?;
-            return Ok(Msg::BlobSyncCompleted {
-                hash: Arc::clone(&self.hash),
-                outcome: SyncBlobOutcome::LocalPresent,
-            });
+            self.blobs_repo.put_from_store(&self.dayb_hash).await?;
+            return Ok(SyncBlobOutcome::LocalPresent);
         }
 
         assert!(!self.peers.is_empty());
 
         let downloader = self.blobs_repo.iroh_store().downloader(&self.endpoint);
-        let progress = downloader.download(iroh_hash, self.peers.clone());
+        let progress = downloader.download(self.hash, self.peers.clone());
         let mut stream = progress.stream().await?;
 
         let mut selected_endpoint: Option<PeerId> = None;
@@ -142,8 +136,7 @@ impl BlobSyncWorker {
                     selected_endpoint = Some((*id).into());
                     self.send_progress(SyncProgressMsg::BlobDownloadStarted {
                         peer_id: (*id).into(),
-                        partition: self.partition.clone(),
-                        hash: Arc::clone(&self.hash),
+                        hash: Arc::clone(&self.dayb_hash),
                     })
                     .await;
                 }
@@ -152,8 +145,7 @@ impl BlobSyncWorker {
                     if let Some(peer_id) = selected_endpoint {
                         self.send_progress(SyncProgressMsg::BlobDownloadProgress {
                             peer_id,
-                            partition: self.partition.clone(),
-                            hash: Arc::clone(&self.hash),
+                            hash: Arc::clone(&self.dayb_hash),
                             done_counter: *done,
                         })
                         .await;
@@ -175,19 +167,15 @@ impl BlobSyncWorker {
             eyre::bail!("error seen during download saw_download_signal={saw_download_signal}");
         }
 
-        if !self.blobs_repo.iroh_store().blobs().has(iroh_hash).await? {
+        if !self.blobs_repo.iroh_store().blobs().has(self.hash).await? {
             eyre::bail!("download completed but blob missing from store");
         }
 
         self.send_progress(SyncProgressMsg::BlobMaterializeStarted {
-            partition: self.partition.clone(),
-            hash: Arc::clone(&self.hash),
+            hash: Arc::clone(&self.dayb_hash),
         })
         .await;
-        self.blobs_repo.put_from_store(&self.hash).await?;
-        Ok(Msg::BlobSyncCompleted {
-            hash: Arc::clone(&self.hash),
-            outcome: SyncBlobOutcome::Downloaded {},
-        })
+        self.blobs_repo.put_from_store(&self.dayb_hash).await?;
+        Ok(SyncBlobOutcome::Downloaded {})
     }
 }
