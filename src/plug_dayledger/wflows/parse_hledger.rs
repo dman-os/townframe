@@ -1,5 +1,5 @@
 use crate::interlude::*;
-use crate::types::{Claim, ClaimPostingHint, HledgerTxnDeets, PostingSign};
+use crate::types::Claim;
 use wflow_sdk::WflowCtx;
 
 pub fn run(_cx: &mut WflowCtx) -> Result<(), wflow_sdk::JobErrorX> {
@@ -82,8 +82,9 @@ pub fn run(_cx: &mut WflowCtx) -> Result<(), wflow_sdk::JobErrorX> {
         existing_claims.insert(claim_id, claim);
     }
 
-    for (txn_index, txn) in transactions.iter().enumerate() {
-        let (claim_id, claim) = match_or_create_claim(txn, txn_index, &existing_claims, &src_ref);
+    for (claim_id, claim) in
+        crate::hledger::claim_matcher::match_claims(&transactions, &existing_claims, &src_ref)
+    {
         let claim_json = serde_json::to_string(&claim).map_err(|err| {
             wflow_sdk::JobErrorX::Terminal(ferr!("serde error serializing claim: {err}"))
         })?;
@@ -98,112 +99,4 @@ pub fn run(_cx: &mut WflowCtx) -> Result<(), wflow_sdk::JobErrorX> {
     }
 
     Ok(())
-}
-
-fn match_or_create_claim(
-    txn: &crate::hledger::types::Transaction,
-    txn_index: usize,
-    existing: &HashMap<String, Claim>,
-    src_ref: &daybook_types::doc::FacetRef,
-) -> (String, Claim) {
-    // 1. Try to find existing claim with matching txn_index in deets
-    for (key, claim) in existing {
-        if let Ok(deets) = serde_json::from_value::<HledgerTxnDeets>(claim.deets.clone()) {
-            if deets.txn_index == txn_index {
-                let updated = build_claim(txn, txn_index, src_ref, Some(claim));
-                return (key.clone(), updated);
-            }
-        }
-    }
-
-    // 2. Try to find existing claim with matching content hash
-    let content_hash = hash_txn(txn);
-    for (key, claim) in existing {
-        if let Ok(deets) = serde_json::from_value::<HledgerTxnDeets>(claim.deets.clone()) {
-            if deets.content_hash == content_hash {
-                let updated = build_claim(txn, txn_index, src_ref, Some(claim));
-                return (key.clone(), updated);
-            }
-        }
-    }
-
-    // 3. Create new claim with a stable per-transaction id.
-    let new_id = format!("txn_{txn_index}_{}", hash_txn(txn));
-    let new_claim = build_claim(txn, txn_index, src_ref, None);
-    (new_id, new_claim)
-}
-
-fn build_claim(
-    txn: &crate::hledger::types::Transaction,
-    txn_index: usize,
-    src_ref: &daybook_types::doc::FacetRef,
-    existing: Option<&Claim>,
-) -> Claim {
-    let posting_hints: Vec<ClaimPostingHint> = txn
-        .postings
-        .iter()
-        .map(|p| ClaimPostingHint {
-            account_hint: p.account.clone(),
-            amount: crate::types::Amount {
-                decimal: p.amount.quantity.clone(),
-                commodity: p.amount.commodity.clone(),
-            },
-            sign: match p.posting_type {
-                crate::hledger::types::PostingType::Regular => PostingSign::Debit,
-                crate::hledger::types::PostingType::Virtual => PostingSign::Credit,
-                crate::hledger::types::PostingType::BalancedVirtual => PostingSign::Debit,
-            },
-            hint_type: match p.posting_type {
-                crate::hledger::types::PostingType::Regular => None,
-                crate::hledger::types::PostingType::Virtual => Some("virtual".into()),
-                crate::hledger::types::PostingType::BalancedVirtual => {
-                    Some("balancedVirtual".into())
-                }
-            },
-        })
-        .collect();
-
-    let deets = HledgerTxnDeets {
-        txn_index,
-        code: txn.code.clone(),
-        tags: txn.tags.clone(),
-        posting_comments: txn
-            .postings
-            .iter()
-            .map(|p| {
-                let c = p.comment.clone();
-                if c.is_empty() {
-                    None
-                } else {
-                    Some(c)
-                }
-            })
-            .collect(),
-        content_hash: hash_txn(txn),
-    };
-
-    Claim {
-        ts: txn.date.to_string(),
-        posting_hints,
-        src_ref: src_ref.clone(),
-        src_refs: existing.map(|c| c.src_refs.clone()).unwrap_or_default(),
-        deets_kind: "hledger".into(),
-        deets: serde_json::to_value(deets).unwrap(),
-    }
-}
-
-// FIXME: use bs58 from utils_rs and also consider hash_obj from there
-fn hash_txn(txn: &crate::hledger::types::Transaction) -> String {
-    use std::collections::hash_map::DefaultHasher;
-    use std::hash::{Hash, Hasher};
-    let mut hasher = DefaultHasher::new();
-    txn.date.to_string().hash(&mut hasher);
-    txn.description.hash(&mut hasher);
-    txn.code.hash(&mut hasher);
-    for p in &txn.postings {
-        p.account.hash(&mut hasher);
-        p.amount.quantity.hash(&mut hasher);
-        p.amount.commodity.hash(&mut hasher);
-    }
-    format!("{:x}", hasher.finish())
 }

@@ -101,6 +101,9 @@ pub struct HledgerTxnDeets {
     pub txn_index: usize,
     /// Optional transaction code (the text in parentheses).
     pub code: Option<String>,
+    /// Transaction description/payee text as parsed from the hledger header.
+    #[serde(default)]
+    pub description: Option<String>,
     /// hledger tags as key-value pairs.
     pub tags: Vec<(String, String)>,
     /// Per-posting comments from the original hledger text.

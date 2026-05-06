@@ -166,7 +166,12 @@ impl capabilities::HostDocToken for SharedWashCtx {
             .unwrap_or(0);
         let updated_at: Vec<u64> = dmeta
             .as_ref()
-            .map(|meta| meta.updated_at.iter().map(|ts| ts.as_second() as u64).collect())
+            .map(|meta| {
+                meta.updated_at
+                    .iter()
+                    .map(|ts| ts.as_second() as u64)
+                    .collect()
+            })
             .unwrap_or_default();
         Ok(Ok(capabilities::DocMeta {
             created_at: capabilities::Datetime {
