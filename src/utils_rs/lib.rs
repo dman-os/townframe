@@ -711,3 +711,27 @@ impl AbortableJoinSet {
         }
     }
 }
+
+#[derive(Debug, thiserror::Error, displaydoc::Display)]
+/// {0}
+#[repr(transparent)]
+pub struct SerReport(eyre::Report);
+
+impl Serialize for SerReport {
+    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: serde::Serializer,
+    {
+        format!("{}", self.0).serialize(serializer)
+    }
+}
+
+impl<'de> serde::Deserialize<'de> for SerReport {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        let str = String::deserialize(deserializer)?;
+        Ok(Self(ferr!("{str}")))
+    }
+}

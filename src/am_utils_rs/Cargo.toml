@@ -64,7 +64,7 @@ tempfile.workspace = true
 # errors
 thiserror.workspace = true
 iroh = { workspace = true, optional = true }
-irpc = { version = "0.12.0", optional = true, features = ["derive"] }
+irpc = { workspace = true, optional = true }
 
 #
 # sync

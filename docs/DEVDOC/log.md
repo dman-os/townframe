@@ -1,5 +1,17 @@
 # duck-log
 
+## 2026-05-07 | yikes
+
+Yeah, still working on the sync stack. What does that make it, almost three months?
+But anyways, I've got the basic shape down. I spent the last few days cleaning up a lot of vibeslop by hand and I think I have clear picture of the algorithm in mind.
+I still don't have fully tested and I'm scared what kinds of bugs stress testing will unviel.
+
+In fact, I'm considering re-writing it in a sans-io, cleaner version that will allow me to test it piecemeal and have better quality control.
+Seems stupid to spend more weeks on this but I fear that keeping on with the buggy code of today will just bite me again in the future. 
+I'd like to resolve this while I have the clear picture in mind.
+
+The server side of this is not even started yet. I should take this opprtunity to design and impl something that will serve me for the forseeable future.
+
 ## 2026-03-31 | first feature, i'll be damned
 
 Okay, time to implement the personal ledger plugin for this shitshow.

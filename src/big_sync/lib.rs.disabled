@@ -1,0 +1,518 @@
+mod interlude {
+    pub use utils_rs::prelude::*;
+}
+
+use crate::interlude::*;
+
+use crate::repo::{DocumentId, PeerId};
+use crate::sync::machine::SyncMachine;
+use crate::sync::protocol::{PartitionId, PeerKey};
+
+use std::collections::{BTreeMap, BTreeSet};
+use std::time::{Duration, Instant};
+
+#[derive(Debug, Clone)]
+pub struct BigSyncConfig {
+    pub max_active_workers: usize,
+    pub min_doc_worker_floor: usize,
+    pub min_blob_worker_floor: usize,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
+pub struct WorkerId(pub u64);
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
+pub struct TaskId(pub u64);
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
+pub struct TaskRunId(pub u64);
+
+#[derive(Debug, Clone, PartialEq, Eq, Hash, PartialOrd, Ord)]
+pub enum BackendKind {
+    Doc,
+    Blob,
+    Rsync,
+    Custom(Arc<str>),
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Hash, PartialOrd, Ord)]
+pub enum WorkerKind {
+    SyncBackend(BackendKind),
+    Maintenance(Arc<str>),
+    Custom(Arc<str>),
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
+pub enum PeerPhase {
+    Disconnected,
+    Bootstrapping,
+    Live,
+    Draining,
+    Stopped,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
+pub enum TaskScope {
+    PerPeer,
+    PerItem,
+    FanoutToRequesters,
+    Global,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Hash, PartialOrd, Ord)]
+pub enum CompletionScope {
+    Peer,
+    Requesters,
+    Peers(BTreeSet<PeerId>),
+    Global,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Hash, PartialOrd, Ord)]
+pub enum TaskTarget {
+    Document {
+        peer_id: PeerId,
+        document_id: DocumentId,
+    },
+    Blob {
+        hash: Arc<str>,
+    },
+    Partition {
+        partition_id: PartitionId,
+    },
+    Custom {
+        label: Arc<str>,
+    },
+}
+
+#[derive(Debug, Clone)]
+pub struct TaskRequest {
+    pub backend: BackendKind,
+    pub target: TaskTarget,
+    pub requested_by: BTreeSet<PeerId>,
+    pub partitions: BTreeSet<PartitionId>,
+}
+
+#[derive(Debug, Clone)]
+pub struct TaskPlan {
+    pub backend: BackendKind,
+    pub worker_kind: WorkerKind,
+    pub task_scope: TaskScope,
+    pub completion_scope: CompletionScope,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
+pub enum TaskStatus {
+    Pending,
+    Queued,
+    Running {
+        worker_id: WorkerId,
+        run_id: TaskRunId,
+    },
+    BackingOff {
+        due_at: Instant,
+    },
+    Blocked,
+    Completed,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
+pub enum WorkerStatus {
+    Starting,
+    Running,
+    Stopping,
+    Exited,
+}
+
+#[derive(Debug, Clone)]
+pub struct RetryState {
+    pub attempt_no: usize,
+    pub last_backoff: Duration,
+    pub last_attempt_at: Instant,
+}
+
+#[derive(Debug, Clone)]
+pub struct PeerSyncCounters {
+    pub bootstrap_synced_docs: u64,
+    pub bootstrap_remaining_docs: u64,
+    pub doc_pending_docs: u64,
+    pub blob_pending_blobs: u64,
+}
+
+#[derive(Debug, Clone)]
+pub struct PeerState {
+    pub peer_id: PeerId,
+    pub peer_key: PeerKey,
+    pub endpoint_addr: Option<iroh::EndpointAddr>,
+    pub desired_partitions: BTreeSet<PartitionId>,
+    pub active_partitions: BTreeSet<PartitionId>,
+    pub phase: PeerPhase,
+    pub counters: PeerSyncCounters,
+    pub emitted_full_synced: bool,
+    pub session_generation: u64,
+    pub fully_synced_partitions: BTreeSet<PartitionId>,
+}
+
+#[derive(Debug, Clone)]
+pub struct PartitionState {
+    pub kind: BackendKind,
+    pub peers: BTreeSet<PeerId>,
+}
+
+#[derive(Debug, Clone)]
+pub struct TaskState {
+    pub task_id: TaskId,
+    pub request: TaskRequest,
+    pub plan: Option<TaskPlan>,
+    pub status: TaskStatus,
+    pub retry: RetryState,
+    pub assigned_worker: Option<WorkerId>,
+    pub run_id: Option<TaskRunId>,
+    pub requested_peers: BTreeSet<PeerId>,
+    pub blocked_reason: Option<Arc<str>>,
+}
+
+#[derive(Debug, Clone)]
+pub struct WorkerState {
+    pub worker_id: WorkerId,
+    pub worker_kind: WorkerKind,
+    pub task_id: Option<TaskId>,
+    pub run_id: Option<TaskRunId>,
+    pub status: WorkerStatus,
+    pub started_at: Option<Instant>,
+}
+
+#[derive(Debug, Clone)]
+pub struct TaskClaim {
+    pub task_id: TaskId,
+    pub worker_id: WorkerId,
+    pub run_id: TaskRunId,
+    pub plan: TaskPlan,
+}
+
+#[derive(Debug, Clone)]
+pub struct WorkerClaim {
+    pub worker_id: WorkerId,
+    pub task_id: TaskId,
+    pub run_id: TaskRunId,
+}
+
+#[derive(Debug, Clone)]
+pub struct PeerSnapshot {
+    pub peer_id: PeerId,
+    pub peer_key: PeerKey,
+    pub phase: PeerPhase,
+    pub emitted_full_synced: bool,
+    pub fully_synced_partitions: BTreeSet<PartitionId>,
+    pub counters: PeerSyncCounters,
+}
+
+#[derive(Debug, Clone)]
+pub struct TaskSnapshot {
+    pub task_id: TaskId,
+    pub backend: BackendKind,
+    pub status: TaskStatus,
+    pub assigned_worker: Option<WorkerId>,
+}
+
+#[derive(Debug, Clone)]
+pub struct WorkerSnapshot {
+    pub worker_id: WorkerId,
+    pub worker_kind: WorkerKind,
+    pub status: WorkerStatus,
+    pub task_id: Option<TaskId>,
+}
+
+#[derive(Debug, Clone)]
+pub struct BigSyncSnapshot {
+    pub peers: Vec<PeerSnapshot>,
+    pub tasks: Vec<TaskSnapshot>,
+    pub workers: Vec<WorkerSnapshot>,
+}
+
+#[derive(Debug, Clone)]
+pub enum BigSyncAction {
+    SpawnWorker {
+        worker_id: WorkerId,
+        task_id: TaskId,
+        run_id: TaskRunId,
+    },
+    StopWorker {
+        worker_id: WorkerId,
+    },
+    ScheduleTask {
+        task_id: TaskId,
+        due_at: Instant,
+    },
+    ClearTask {
+        task_id: TaskId,
+    },
+    MarkPeerReady {
+        peer_id: PeerId,
+    },
+    MarkPeerStale {
+        peer_id: PeerId,
+    },
+}
+
+pub trait BigSyncBackend: Send + Sync + 'static {
+    fn kind(&self) -> BackendKind;
+
+    fn classify(&self, request: &TaskRequest) -> Res<TaskPlan>;
+}
+
+#[allow(dead_code)]
+#[derive(Default)]
+pub struct BackendRegistry {
+    backends: BTreeMap<BackendKind, Arc<dyn BigSyncBackend>>,
+}
+
+#[allow(unused_variables)]
+impl BackendRegistry {
+    pub fn new() -> Self {
+        todo!()
+    }
+
+    pub fn insert(&mut self, backend: Arc<dyn BigSyncBackend>) -> Option<Arc<dyn FullSyncBackend>> {
+        todo!()
+    }
+
+    pub fn get(&self, kind: &BackendKind) -> Option<Arc<dyn BigSyncBackend>> {
+        todo!()
+    }
+
+    pub fn contains(&self, kind: &BackendKind) -> bool {
+        todo!()
+    }
+}
+
+#[allow(dead_code)]
+#[derive(Default)]
+pub struct TaskRegistry {
+    tasks: BTreeMap<TaskId, TaskState>,
+    ready: BTreeSet<TaskId>,
+    backing_off: BTreeSet<TaskId>,
+}
+
+#[allow(unused_variables)]
+impl TaskRegistry {
+    pub fn new() -> Self {
+        todo!()
+    }
+
+    pub fn insert(&mut self, state: TaskState) -> Option<TaskState> {
+        todo!()
+    }
+
+    pub fn get(&self, task_id: &TaskId) -> Option<&TaskState> {
+        todo!()
+    }
+
+    pub fn get_mut(&mut self, task_id: &TaskId) -> Option<&mut TaskState> {
+        todo!()
+    }
+
+    pub fn enqueue_ready(&mut self, task_id: TaskId) {
+        todo!()
+    }
+
+    pub fn mark_backing_off(&mut self, task_id: TaskId, due_at: Instant) {
+        todo!()
+    }
+
+    pub fn mark_running(&mut self, task_id: TaskId, worker_id: WorkerId, run_id: TaskRunId) {
+        todo!()
+    }
+
+    pub fn mark_completed(&mut self, task_id: TaskId) {
+        todo!()
+    }
+
+    pub fn claim_ready(&mut self) -> Option<TaskId> {
+        todo!()
+    }
+
+    pub fn remove(&mut self, task_id: &TaskId) -> Option<TaskState> {
+        todo!()
+    }
+}
+
+#[allow(dead_code)]
+#[derive(Default)]
+pub struct WorkerRegistry {
+    workers: BTreeMap<WorkerId, WorkerState>,
+}
+
+#[allow(unused_variables)]
+impl WorkerRegistry {
+    pub fn new() -> Self {
+        todo!()
+    }
+
+    pub fn insert(&mut self, state: WorkerState) -> Option<WorkerState> {
+        todo!()
+    }
+
+    pub fn get(&self, worker_id: &WorkerId) -> Option<&WorkerState> {
+        todo!()
+    }
+
+    pub fn get_mut(&mut self, worker_id: &WorkerId) -> Option<&mut WorkerState> {
+        todo!()
+    }
+
+    pub fn attach_task(
+        &mut self,
+        worker_id: WorkerId,
+        task_id: TaskId,
+        run_id: TaskRunId,
+    ) -> Res<()> {
+        todo!()
+    }
+
+    pub fn mark_stopping(&mut self, worker_id: WorkerId) -> Res<()> {
+        todo!()
+    }
+
+    pub fn remove(&mut self, worker_id: &WorkerId) -> Option<WorkerState> {
+        todo!()
+    }
+}
+
+#[allow(dead_code)]
+pub struct BigSyncMachine {
+    sync: SyncMachine,
+    config: BigSyncConfig,
+    backends: BackendRegistry,
+    peers: BTreeMap<PeerId, PeerState>,
+    partitions: BTreeMap<PartitionId, PartitionState>,
+    tasks: TaskRegistry,
+    workers: WorkerRegistry,
+    full_sync_waiters: Vec<BigSyncWaiter>,
+    next_worker_id: u64,
+    next_task_id: u64,
+    next_run_id: u64,
+}
+
+#[derive(Debug, Clone)]
+pub struct BigSyncWaiter {
+    pub remaining_peers: BTreeSet<PeerId>,
+    pub required_partitions: BTreeSet<PartitionId>,
+}
+
+#[allow(unused_variables)]
+impl BigSyncMachine {
+    pub fn new(sync: SyncMachine, config: BigSyncConfig) -> Self {
+        todo!()
+    }
+
+    pub fn sync_machine(&self) -> &SyncMachine {
+        todo!()
+    }
+
+    pub fn sync_machine_mut(&mut self) -> &mut SyncMachine {
+        todo!()
+    }
+
+    pub fn backends(&self) -> &BackendRegistry {
+        todo!()
+    }
+
+    pub fn backends_mut(&mut self) -> &mut BackendRegistry {
+        todo!()
+    }
+
+    pub fn set_peer(
+        &mut self,
+        peer_id: PeerId,
+        peer_key: PeerKey,
+        endpoint_addr: Option<iroh::EndpointAddr>,
+        partitions: BTreeSet<PartitionId>,
+    ) -> Res<Vec<BigSyncAction>> {
+        todo!()
+    }
+
+    pub fn remove_peer(&mut self, peer_id: PeerId) -> Res<Vec<BigSyncAction>> {
+        todo!()
+    }
+
+    pub fn request_task(&mut self, request: TaskRequest) -> Res<TaskId> {
+        todo!()
+    }
+
+    pub fn claim_ready_task(&mut self) -> Res<Option<TaskClaim>> {
+        todo!()
+    }
+
+    pub fn register_worker(&mut self, worker_kind: WorkerKind) -> Res<WorkerId> {
+        todo!()
+    }
+
+    pub fn worker_started(
+        &mut self,
+        worker_id: WorkerId,
+        task_id: TaskId,
+        run_id: TaskRunId,
+    ) -> Res<Vec<BigSyncAction>> {
+        todo!()
+    }
+
+    pub fn worker_completed(
+        &mut self,
+        worker_id: WorkerId,
+        run_id: TaskRunId,
+    ) -> Res<Vec<BigSyncAction>> {
+        todo!()
+    }
+
+    pub fn worker_failed(
+        &mut self,
+        worker_id: WorkerId,
+        run_id: TaskRunId,
+        retry: RetryState,
+    ) -> Res<Vec<BigSyncAction>> {
+        todo!()
+    }
+
+    pub fn worker_stopped(&mut self, worker_id: WorkerId) -> Res<Vec<BigSyncAction>> {
+        todo!()
+    }
+
+    pub fn on_subscription_item(
+        &mut self,
+        peer: PeerKey,
+        remote_item: crate::sync::protocol::SubscriptionEvent,
+    ) -> Res<Vec<BigSyncAction>> {
+        todo!()
+    }
+
+    pub fn on_tick(&mut self, now: Instant) -> Res<Vec<BigSyncAction>> {
+        todo!()
+    }
+
+    pub fn refresh_peer_fully_synced_state(
+        &mut self,
+        peer_id: PeerId,
+    ) -> Res<Vec<BigSyncAction>> {
+        todo!()
+    }
+
+    pub fn refresh_waiters(&mut self) -> Res<Vec<BigSyncAction>> {
+        todo!()
+    }
+
+    pub fn snapshot(&self) -> BigSyncSnapshot {
+        todo!()
+    }
+
+    pub fn next_worker_id(&mut self) -> WorkerId {
+        todo!()
+    }
+
+    pub fn next_task_id(&mut self) -> TaskId {
+        todo!()
+    }
+
+    pub fn next_run_id(&mut self) -> TaskRunId {
+        todo!()
+    }
+}

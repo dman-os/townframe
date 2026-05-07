@@ -1,0 +1,31 @@
+[package]
+name = "big_sync_core"
+version.workspace = true
+edition.workspace = true
+
+[lints]
+workspace = true
+
+[lib]
+path = "lib.rs"
+
+[dependencies]
+utils_rs = { workspace = true, features = ["hash"] }
+
+#
+# encoding
+bs58.workspace = true
+serde.workspace = true
+
+#
+# errors
+thiserror.workspace = true
+
+#
+# async
+# tokio-util.workspace = true
+async-channel.workspace = true
+futures.workspace = true
+
+structstruck.workspace = true
+future_form.workspace = true

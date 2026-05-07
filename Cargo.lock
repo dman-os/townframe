@@ -1035,6 +1035,37 @@ dependencies = [
 ]
 
 [[package]]
+name = "big_sync"
+version = "0.1.0"
+dependencies = [
+ "async-channel",
+ "big_sync_core",
+ "future_form",
+ "irpc 0.12.0",
+ "serde",
+ "sqlx",
+ "structstruck",
+ "thiserror 2.0.18",
+ "tokio-util",
+ "tracing",
+ "utils_rs",
+]
+
+[[package]]
+name = "big_sync_core"
+version = "0.1.0"
+dependencies = [
+ "async-channel",
+ "bs58",
+ "future_form",
+ "futures",
+ "serde",
+ "structstruck",
+ "thiserror 2.0.18",
+ "utils_rs",
+]
+
+[[package]]
 name = "bigdecimal"
 version = "0.3.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -10070,6 +10101,17 @@ dependencies = [
 ]
 
 [[package]]
+name = "structstruck"
+version = "0.5.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "f318209842d04696a2c139cd3d5d4d75c4a9e2af435b077aa5cbd391a79c34b3"
+dependencies = [
+ "proc-macro2",
+ "quote",
+ "venial",
+]
+
+[[package]]
 name = "strum"
 version = "0.26.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -11651,6 +11693,16 @@ name = "vcpkg"
 version = "0.2.15"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "accd4ea62f7bb7a82fe23066fb0957d48ef677f6eeb8215f372f52e48bb32426"
+
+[[package]]
+name = "venial"
+version = "0.5.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "61584a325b16f97b5b25fcc852eb9550843a251057a5e3e5992d2376f3df4bb2"
+dependencies = [
+ "proc-macro2",
+ "quote",
+]
 
 [[package]]
 name = "vergen"

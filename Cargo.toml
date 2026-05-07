@@ -2,6 +2,8 @@
 resolver = "3"
 members = [
   "./src/am_utils_rs",
+  "./src/big_sync_core/",
+  "./src/big_sync/",
   "./src/api_utils_rs",
   "./src/daybook_cli",
   "./src/daybook_core",
@@ -73,6 +75,8 @@ wash_plugin_wflow = { path = "./src/wash_plugin_wflow", default-features = false
 wash_plugin_pglite = { path = "./src/wash_plugin_pglite", default-features = false }
 wash_plugin_utils = { path = "./src/wash_plugin_utils/" }
 wash_plugin_mltools = { path = "./src/wash_plugin_mltools/" }
+big_sync_core = { path = "./src/big_sync_core/" }
+big_sync = { path = "./src/big_sync/" }
 
 #
 # meta
@@ -86,6 +90,11 @@ futures = "0.3"
 tokio = { version = "1.51", default-features = false }
 tokio-util = { version = "0.7.17", features = [] }
 async-lock = "3.4.2"
+future_form = "0.3.1"
+
+#
+# actors
+irpc = { version = "0.12.0", features = ["derive"] }
 
 #
 # ds
@@ -125,13 +134,13 @@ pastey = "0.1"
 displaydoc = "0.2"
 educe = "0.6"
 struct-patch = "0.10.4"
+structstruck = "0.5.1"
 
 #
 # errors
 thiserror = "2"
 anyhow = "1"
 garde = { version = "0.22", features = ["derive", "regex", "url", "email"] }
-terrors = "0.3.3"
 
 #
 # logging
@@ -166,7 +175,6 @@ axum-extra = { version = "0.10.1", default-features = false }
 http = "1"
 utoipa = { version = "5.4.0", features = ["debug", "uuid", "time", "smallvec",  "preserve_order"] }
 # utoipa-swagger-ui = "9"
-# http
 tower = "0.5"
 tower-http = "0.6"
 reqwest = { version = "0.12", default-features = false, features = ["charset", "http2", "system-proxy", "json", "stream", "rustls-tls"] }

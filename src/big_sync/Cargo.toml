@@ -1,0 +1,44 @@
+[package]
+name = "big_sync"
+version.workspace = true
+edition.workspace = true
+
+[lints]
+workspace = true
+
+[lib]
+path = "lib.rs"
+
+[dependencies]
+utils_rs = { workspace = true, features = ["hash"] }
+big_sync_core.workspace = true
+
+#
+# encoding
+serde.workspace = true
+
+#
+# errors
+thiserror.workspace = true
+
+#
+# macros
+structstruck.workspace = true
+
+#
+# async
+tokio-util.workspace = true
+async-channel.workspace = true
+future_form.workspace = true
+
+#
+# db
+sqlx = { workspace = true, features = ["sqlite", "runtime-tokio"] }
+
+#
+# actors
+irpc.workspace = true
+
+#
+# logging
+tracing.workspace = true
