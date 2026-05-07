@@ -86,7 +86,7 @@ pub enum PutDocError {
 enum RuntimeCmd {
     PutDoc {
         doc_id: DocumentId,
-        initial_content: automerge::Automerge,
+        initial_content: Box<automerge::Automerge>,
         resp: oneshot::Sender<Result<Arc<LiveDocBundle>, PutDocError>>,
     },
     GetDocHandle {
@@ -187,7 +187,7 @@ impl BigRepoRuntimeHandle {
         self.cmd_tx
             .send(RuntimeCmd::PutDoc {
                 doc_id,
-                initial_content,
+                initial_content: initial_content.into(),
                 resp: tx,
             })
             .map_err(|_| eyre::eyre!(ERROR_ACTOR))?;
@@ -451,7 +451,7 @@ where
         Arc::clone(&pending_blob_requests),
         sedimentree_core::depth::CountLeadingZeroBytes,
     );
-    sync_handler.set_sync_session_observer(sync_session_observer.clone());
+    sync_handler.set_sync_session_observer(Arc::clone(&sync_session_observer));
     let send_counter = sync_handler.send_counter().clone();
     let handler = Arc::new(sync_handler);
     let (subduction, listener, manager) = Subduction::new(
@@ -599,7 +599,7 @@ where
                 let worker = self.doc_worker_handle(doc_id).expect(ERROR_ACTOR);
                 worker
                     .send(DocWorkerMsg::PutDoc {
-                        initial_content: initial_content,
+                        initial_content,
                         resp,
                     })
                     .expect(ERROR_ACTOR);
@@ -633,10 +633,10 @@ where
                 }
                 worker
                     .send(DocWorkerMsg::CommitDelta {
-                        commits: commits,
-                        heads: heads,
-                        patches: patches,
-                        origin: origin,
+                        commits,
+                        heads,
+                        patches,
+                        origin,
                         resp,
                     })
                     .expect(ERROR_ACTOR);
@@ -938,7 +938,7 @@ where
         let cancel_token = self.runtime_stop.child_token();
         let fut = async move {
             if let Some(deets) = connected_peers.lock().await.get(&peer_id) {
-                return Ok((peer_id, deets.closed.clone()));
+                return Ok((peer_id, Arc::clone(&deets.closed)));
             }
             let connect = connect_outgoing(endpoint, endpoint_addr, &connect_signer).await?;
             let peer_id = PeerId::from(connect.authenticated.peer_id());
@@ -948,7 +948,6 @@ where
             ] {
                 let fut_wrapped = {
                     let cancel_token = cancel_token.clone();
-                    let peer_id = peer_id;
                     let evt_tx = evt_tx.clone();
                     async move {
                         let Some(res) = cancel_token.run_until_cancelled(fut).await else {
@@ -1038,7 +1037,6 @@ where
             ] {
                 let fut_wrapped = {
                     let cancel_token = cancel_token.clone();
-                    let peer_id = peer_id;
                     let evt_tx = evt_tx.clone();
                     async move {
                         let Some(res) = cancel_token.run_until_cancelled(fut).await else {
@@ -1188,7 +1186,7 @@ struct DocWorkerEntry {
 
 enum DocWorkerMsg {
     PutDoc {
-        initial_content: automerge::Automerge,
+        initial_content: Box<automerge::Automerge>,
         resp: oneshot::Sender<Result<Arc<LiveDocBundle>, PutDocError>>,
     },
     AcquireHandle {
@@ -1235,7 +1233,7 @@ where
 
 enum DocWorkerDocState {
     Unloaded,
-    Transient(automerge::Automerge),
+    Transient(Box<automerge::Automerge>),
     Live(std::sync::Weak<LiveDocBundle>),
 }
 
@@ -1275,7 +1273,7 @@ where
                 let res = self
                     .handle_commit_delta(commits, heads, patches, origin)
                     .await;
-                (&self.runtime_evt_tx)
+                self.runtime_evt_tx
                     .send(RuntimeEvt::DocWorkerTransientFinished {
                         doc_id: self.doc_id,
                     })
@@ -1310,7 +1308,7 @@ where
 
     async fn handle_put_doc(
         &mut self,
-        doc: automerge::Automerge,
+        doc: Box<automerge::Automerge>,
     ) -> Result<Arc<LiveDocBundle>, PutDocError> {
         if !matches!(self.state, DocWorkerDocState::Unloaded) {
             return Err(PutDocError::IdOccpuied { id: self.doc_id });
@@ -1321,7 +1319,7 @@ where
         {
             return Err(PutDocError::IdOccpuied { id: self.doc_id });
         }
-        let sedimentree_id: SedimentreeId = self.doc_id_subduction.clone();
+        let sedimentree_id: SedimentreeId = self.doc_id_subduction;
         let ingested = automerge_sedimentree::ingest::ingest_automerge(&doc, sedimentree_id)
             .map_err(|err| ferr!("failed ingesting automerge doc: {err}"))?;
         info!("adding sedimentree");
@@ -1338,7 +1336,7 @@ where
         };
         let bundle = Arc::new(LiveDocBundle::new(
             self.doc_id,
-            doc,
+            *doc,
             ingested.fragment_state_store,
             RuntimeDocLease {
                 runtime: self.runtime_handle.clone(),
@@ -1353,7 +1351,7 @@ where
         self.change_manager
             .notify_local_doc_created(self.doc_id, Arc::clone(&heads))?;
         self.state = DocWorkerDocState::Live(Arc::downgrade(&bundle));
-        (&self.runtime_evt_tx)
+        self.runtime_evt_tx
             .send(RuntimeEvt::DocWorkerHandleAcquired {
                 bundle: Arc::clone(&bundle),
             })
@@ -1410,7 +1408,7 @@ where
                         return Ok(None);
                     };
                     let save = doc.save();
-                    self.state = DocWorkerDocState::Transient(doc);
+                    self.state = DocWorkerDocState::Transient(doc.into());
                     Ok(Some(save))
                 }
             },
@@ -1423,7 +1421,7 @@ where
                     return Ok(None);
                 };
                 let save = doc.save();
-                self.state = DocWorkerDocState::Transient(doc);
+                self.state = DocWorkerDocState::Transient(doc.into());
                 Ok(Some(save))
             }
         }
@@ -1436,7 +1434,7 @@ where
         patches: Vec<automerge::Patch>,
         origin: BigRepoChangeOrigin,
     ) -> Res<()> {
-        let sedimentree_id: SedimentreeId = self.doc_id_subduction.clone();
+        let sedimentree_id: SedimentreeId = self.doc_id_subduction;
         for (head, parents, blob) in commits {
             let maybe_request = self
                 .subduction
@@ -1545,14 +1543,14 @@ where
                     "unloaded sync session loaded doc snapshot"
                 );
                 let loaded_heads = doc.get_heads();
-                let out = if &before_heads[..] == &loaded_heads[..] {
+                let out = if before_heads[..] == loaded_heads[..] {
                     for blob in blobs {
                         doc.load_incremental(&blob).map_err(|err| {
                             eyre::eyre!("failed applying sync session blob: {err}")
                         })?;
                     }
                     let after_heads = doc.get_heads();
-                    if &before_heads[..] == &after_heads[..] {
+                    if before_heads[..] == after_heads[..] {
                         info!(
                             doc_id = %self.doc_id,
                             peer_id = %session.peer_id,
@@ -1584,7 +1582,7 @@ where
                     );
                     Some((loaded_heads, patches))
                 };
-                self.state = DocWorkerDocState::Transient(doc);
+                self.state = DocWorkerDocState::Transient(doc.into());
                 out
             }
             DocWorkerDocState::Transient(mut doc) => {
@@ -1642,14 +1640,14 @@ where
                             .await?
                             .unwrap_or_else(automerge::Automerge::new);
                     let loaded_heads = doc.get_heads();
-                    let out = if &before_heads[..] == &loaded_heads[..] {
+                    let out = if before_heads[..] == loaded_heads[..] {
                         for blob in blobs {
                             doc.load_incremental(&blob).map_err(|err| {
                                 eyre::eyre!("failed applying sync session blob: {err}")
                             })?;
                         }
                         let after_heads = doc.get_heads();
-                        if &before_heads[..] == &after_heads[..] {
+                        if before_heads[..] == after_heads[..] {
                             None
                         } else {
                             let patches = doc.diff(&before_heads, &after_heads);
@@ -1659,7 +1657,7 @@ where
                         let patches = doc.diff(&before_heads, &loaded_heads);
                         Some((loaded_heads, patches))
                     };
-                    self.state = DocWorkerDocState::Transient(doc);
+                    self.state = DocWorkerDocState::Transient(doc.into());
                     out
                 }
             },
@@ -1725,7 +1723,7 @@ where
 
     async fn take_or_load_transient_doc(&mut self) -> Res<Option<automerge::Automerge>> {
         let out = match std::mem::replace(&mut self.state, DocWorkerDocState::Unloaded) {
-            DocWorkerDocState::Transient(doc) => Ok(Some(doc)),
+            DocWorkerDocState::Transient(doc) => Ok(Some(*doc)),
             DocWorkerDocState::Unloaded => {
                 load_doc_snapshot(&self.sedimentrees, &self.storage_for_reads, self.doc_id).await
             }
@@ -2052,7 +2050,11 @@ async fn build_fragment_state_store(
     let metadata = doc.get_changes_meta(&[]);
     let store =
         automerge_sedimentree::indexed::IndexedSedimentreeAutomerge::from_metadata(&metadata);
-    let heads: Vec<CommitId> = doc.get_heads().iter().map(|h| CommitId::new(h.0)).collect();
+    let heads: Vec<CommitId> = doc
+        .get_heads()
+        .iter()
+        .map(|hh| CommitId::new(hh.0))
+        .collect();
     let mut known: sedimentree_core::collections::Map<CommitId, FragmentState<OwnedParents>> =
         sedimentree_core::collections::Map::new();
     store

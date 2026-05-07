@@ -223,7 +223,7 @@ impl ConfigRepo {
 
         let repo = Self {
             big_repo: Arc::clone(&big_repo),
-            app_doc_id: app_doc_id.clone(),
+            app_doc_id,
             app_doc_handle,
             store,
             registry: Arc::clone(&registry),
@@ -722,11 +722,11 @@ mod tests {
     #[tokio::test]
     async fn upsert_actor_user_path_registers_directory_entries() -> Res<()> {
         let local_user_path = daybook_types::doc::UserPathBuf::from("/test-user/test-device");
-        let (big_repo, part_store, _acx_stop) = crate::drawer::tests::boot_repo().await?;
+        let (big_repo, part_store, _acx_stop) = crate::test_support::boot_repo().await?;
 
         let app_doc = automerge::Automerge::load(&crate::app::version_updates::version_latest()?)?;
         let app_doc_handle = big_repo.put_doc(DocumentId::random(), app_doc).await?;
-        let app_doc_id = app_doc_handle.document_id().clone();
+        let app_doc_id = *app_doc_handle.document_id();
 
         let temp = tempfile::tempdir()?;
         let blobs_repo = crate::blobs::BlobsRepo::new(
@@ -740,7 +740,7 @@ mod tests {
         let (plugs_repo, plugs_stop) = crate::plugs::PlugsRepo::load(
             Arc::clone(&big_repo),
             Arc::clone(&blobs_repo),
-            app_doc_id.clone(),
+            app_doc_id,
             local_user_path.clone(),
         )
         .await?;

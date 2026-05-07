@@ -1642,13 +1642,13 @@ mod tests {
 
     #[tokio::test(flavor = "multi_thread")]
     async fn load_ensures_non_empty_tables_graph() -> Res<()> {
-        let (big_repo, _part_store, big_repo_stop) = crate::drawer::tests::boot_repo().await?;
+        let (big_repo, _part_store, big_repo_stop) = crate::test_support::boot_repo().await?;
 
         let app_doc_id = {
             let doc_bytes = crate::app::version_updates::version_latest()?;
             let doc = automerge::Automerge::load(&doc_bytes)?;
             let handle = big_repo.put_doc(DocumentId::random(), doc).await?;
-            handle.document_id().clone()
+            *handle.document_id()
         };
 
         let (repo, stop_token) = TablesRepo::load(

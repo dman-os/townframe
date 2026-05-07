@@ -97,7 +97,7 @@ impl InitRepo {
         let repo = Arc::new(Self {
             registry: Arc::clone(&registry),
             big_repo: Arc::clone(&big_repo),
-            app_doc_id: app_doc_id.clone(),
+            app_doc_id,
             app_am_handle,
             store,
             local_actor_id,

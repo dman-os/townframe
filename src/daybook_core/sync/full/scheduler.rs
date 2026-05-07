@@ -28,7 +28,7 @@ pub(super) struct PendingTaskState {
 
 impl Scheduler {
     pub fn pending_doc_state(&self, task_key: &DocSyncTaskKey) -> Option<PendingTaskState> {
-        self.pending_docs.get(&task_key).cloned()
+        self.pending_docs.get(task_key).cloned()
     }
 
     pub fn pending_blob_state(&self, hash: Hash) -> Option<PendingTaskState> {
@@ -51,9 +51,9 @@ impl Scheduler {
     }
 
     pub fn enqueue_stop_doc(&mut self, task_key: &DocSyncTaskKey) -> bool {
-        self.pending_docs.remove(&task_key);
-        self.docs_to_boot.remove(&task_key);
-        if self.active_docs.contains_key(&task_key) {
+        self.pending_docs.remove(task_key);
+        self.docs_to_boot.remove(task_key);
+        if self.active_docs.contains_key(task_key) {
             self.docs_to_stop.insert(task_key.clone());
             true
         } else {
@@ -61,9 +61,9 @@ impl Scheduler {
         }
     }
     pub fn clear_doc_task(&mut self, task_key: &DocSyncTaskKey) -> Option<ActiveDocSyncState> {
-        self.pending_docs.remove(&task_key);
-        self.docs_to_boot.remove(&task_key);
-        self.active_docs.remove(&task_key)
+        self.pending_docs.remove(task_key);
+        self.docs_to_boot.remove(task_key);
+        self.active_docs.remove(task_key)
     }
 
     pub fn clear_blob_task(&mut self, hash: Hash) -> Option<ActiveBlobSyncState> {
@@ -155,7 +155,7 @@ impl Scheduler {
         while budget > 0 {
             budget -= 1;
         }
-        let mut docs = self.docs_to_boot.iter().take(budget).cloned().collect();
+        let docs = self.docs_to_boot.iter().take(budget).cloned().collect();
         for task_key in &docs {
             self.docs_to_boot.remove(task_key);
         }
@@ -238,7 +238,7 @@ impl Scheduler {
             .iter()
             .filter_map(|(hash, pending)| {
                 if pending.due_at <= now && !self.active_blobs.contains_key(hash) {
-                    Some(hash.clone())
+                    Some(*hash)
                 } else {
                     None
                 }
@@ -350,7 +350,7 @@ mod tests {
         let peer_a = endpoint(2);
         let peer_b = endpoint(3);
         let task_a = DocSyncTaskKey {
-            doc_id: doc_id.clone(),
+            doc_id,
             peer_id: peer_a,
         };
         let task_b = DocSyncTaskKey {

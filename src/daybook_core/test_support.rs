@@ -1,8 +1,9 @@
 use crate::interlude::*;
 use automerge::transaction::Transactable;
 
+use am_utils_rs::partition::{PartitionStore, PartitionStoreStopToken};
+use am_utils_rs::repo::PeerId;
 use am_utils_rs::SharedBigRepo;
-use futures::future::BoxFuture;
 
 use crate::drawer::DrawerRepo;
 use crate::plugs::PlugsRepo;
@@ -17,6 +18,8 @@ pub struct DaybookTestContext {
     pub config_stop: crate::repos::RepoStopToken,
     pub dispatch_stop: crate::repos::RepoStopToken,
     pub progress_stop: crate::repos::RepoStopToken,
+    pub init_stop: crate::repos::RepoStopToken,
+    pub sqlite_local_state_stop: crate::repos::RepoStopToken,
     pub acx_stop: am_utils_rs::BigRepoStopToken,
     pub rt_stop: crate::rt::RtStopToken,
     pub rt: Arc<crate::rt::Rt>,
@@ -112,6 +115,8 @@ impl DaybookTestContext {
         self.dispatch_stop.stop().await?;
         self.config_stop.stop().await?;
         self.plugs_stop.stop().await?;
+        self.init_stop.stop().await?;
+        self.sqlite_local_state_stop.stop().await?;
         self.acx_stop.stop().await?;
         Ok(())
     }
@@ -136,7 +141,7 @@ pub async fn test_cx_with_options(
 
     // Initialize SharedBigRepo with memory storage
     let (part_store, part_store_stop) =
-        crate::drawer::tests::boot_part_store("sqlite::memory:").await?;
+        crate::test_support::boot_part_store("sqlite::memory:").await?;
     let (big_repo, acx_stop) = BigRepo::boot(
         am_utils_rs::repo::Config {
             peer_id,
@@ -154,14 +159,14 @@ pub async fn test_cx_with_options(
         tx.put(automerge::ROOT, "version", "0")?;
         tx.commit();
         let handle = big_repo.put_doc(DocumentId::random(), doc).await?;
-        handle.document_id().clone()
+        *handle.document_id()
     };
 
     // Create an app document for all stores (config, plugs, dispatch, triage)
     let app_doc_id = {
         let doc = automerge::Automerge::load(&crate::app::version_updates::version_latest()?)?;
         let handle = big_repo.put_doc(DocumentId::random(), doc).await?;
-        handle.document_id().clone()
+        *handle.document_id()
     };
 
     // Load config first to get local identity
@@ -172,7 +177,7 @@ pub async fn test_cx_with_options(
         temp_dir.path().join("blobs"),
         local_user_path.clone(),
         Arc::new(crate::blobs::PartitionStoreMembershipWriter::new(
-            Arc::clone(&big_repo),
+            Arc::clone(&part_store),
         )),
     )
     .await?;
@@ -180,7 +185,7 @@ pub async fn test_cx_with_options(
     let (plugs_repo, plugs_stop) = PlugsRepo::load(
         Arc::clone(&big_repo),
         Arc::clone(&blobs),
-        app_doc_id.clone(),
+        app_doc_id,
         local_user_path.clone(),
     )
     .await?;
@@ -190,7 +195,7 @@ pub async fn test_cx_with_options(
     .await?;
     let (config_repo, config_stop) = crate::config::ConfigRepo::load(
         Arc::clone(&big_repo),
-        app_doc_id.clone(),
+        app_doc_id,
         Arc::clone(&plugs_repo),
         local_user_path.clone(),
         sql_ctx.clone(),
@@ -212,7 +217,7 @@ pub async fn test_cx_with_options(
         .await?;
     let (dispatch_repo, dispatch_stop) = crate::rt::dispatch::DispatchRepo::load(
         Arc::clone(&big_repo),
-        app_doc_id.clone(),
+        app_doc_id,
         local_user_path.clone(),
         sql_ctx.clone(),
     )
@@ -261,26 +266,76 @@ pub async fn test_cx_with_options(
             .wrap_err("error storing e2e mltools config")?;
     }
 
-    let db_path = temp_dir.path().join("wflow.db");
-    let wflow_db_url = format!("sqlite:{}?mode=rwc", db_path.display());
     plugs_repo.ensure_system_plugs().await?;
+
+    let repo_root = temp_dir.path().join("repo");
+    tokio::fs::create_dir_all(&repo_root).await?;
+    let layout = crate::repo::RepoLayout {
+        repo_root: repo_root.clone(),
+        samod_root: repo_root.join("samod"),
+        sqlite_path: repo_root.join("sqlite.db"),
+        blobs_root: repo_root.join("blobs"),
+        marker_path: repo_root.join("db.repo.txt"),
+        lock_path: repo_root.join("repo.lock"),
+    };
+    let lock_guard = crate::repo::RepoLockGuard::acquire(&layout.lock_path)?;
+    let secret_repo = Arc::new(crate::secrets::SecretRepo::boot().await?);
+    let iroh_secret_key = iroh::SecretKey::generate(&mut rand::rng());
+    let local_peer_key = daybook_types::doc::format_peer_key(peer_id.as_bytes());
+    let rcx = crate::repo::RepoCtx::from_parts(
+        crate::repo::RepoCtxParts {
+            layout,
+            lock_guard,
+            sql: sql_ctx.clone(),
+            partition_store: Arc::clone(&part_store),
+            partition_store_stop: part_store_stop,
+            big_repo: Arc::clone(&big_repo),
+            big_repo_stop: std::sync::Mutex::new(None),
+            local_peer_key,
+            local_actor_id: local_actor_id.clone(),
+            local_user_path: local_user_path.clone(),
+            local_device_name: device_id.clone(),
+            repo_id: format!("test-repo-{}", uuid::Uuid::new_v4().simple()),
+            checkout_id: format!("test-checkout-{}", uuid::Uuid::new_v4().simple()),
+            repo_name: format!("test-repo-{}", uuid::Uuid::new_v4().simple()),
+            iroh_public_key: peer_id.to_string(),
+            iroh_secret_key,
+            secret_repo: Arc::clone(&secret_repo),
+        },
+        big_repo
+            .get_doc(&app_doc_id)
+            .await?
+            .ok_or_eyre("missing app doc")?,
+        big_repo
+            .get_doc(&drawer_doc_id)
+            .await?
+            .ok_or_eyre("missing drawer doc")?,
+    );
+
+    let (init_repo, init_stop) = crate::rt::init::InitRepo::load(
+        Arc::clone(&big_repo),
+        app_doc_id,
+        local_actor_id,
+        sql_ctx.clone(),
+    )
+    .await?;
+    let (sqlite_local_state_repo, sqlite_local_state_stop) =
+        crate::local_state::SqliteLocalStateRepo::boot(temp_dir.path().join("local_states"))
+            .await?;
 
     let (rt, rt_stop) = crate::rt::Rt::boot(
         crate::rt::RtConfig {
             device_id: device_id.clone(),
         },
-        app_doc_id,
-        wflow_db_url,
-        sql_ctx.clone(),
-        Arc::clone(&big_repo),
+        rcx,
         Arc::clone(&drawer_repo),
         Arc::clone(&plugs_repo),
         Arc::clone(&dispatch_repo),
         Arc::clone(&progress_repo),
         Arc::clone(&blobs),
         Arc::clone(&config_repo),
-        local_actor_id,
-        temp_dir.path().join("local_states"),
+        init_repo,
+        sqlite_local_state_repo,
     )
     .await?;
 
@@ -295,6 +350,8 @@ pub async fn test_cx_with_options(
         config_stop,
         dispatch_stop,
         progress_stop,
+        init_stop,
+        sqlite_local_state_stop,
         acx_stop,
         rt_stop,
         _temp_dir: temp_dir,
@@ -317,4 +374,86 @@ pub async fn import_test_plug_oci(test_cx: &DaybookTestContext) -> Res<()> {
         .import_from_oci_layout(&artifact_path, crate::plugs::OciImportOptions::default())
         .await?;
     Ok(())
+}
+
+pub async fn boot_part_store(
+    sqlite_url: &str,
+) -> Res<(Arc<PartitionStore>, PartitionStoreStopToken)> {
+    let state_pool = {
+        use std::str::FromStr;
+        let connect_options = sqlx::sqlite::SqliteConnectOptions::from_str(sqlite_url)
+            .expect(ERROR_IMPOSSIBLE)
+            .create_if_missing(true);
+        sqlx::sqlite::SqlitePoolOptions::new()
+            .max_connections(1)
+            .connect_with(connect_options)
+            .await
+            .wrap_err("failed connecting big repo sqlite")?
+    };
+
+    PartitionStore::boot(state_pool).await
+}
+
+pub async fn boot_repo() -> Res<(
+    Arc<BigRepo>,
+    Arc<PartitionStore>,
+    Box<dyn FnOnce() -> futures::future::BoxFuture<'static, Res<()>>>,
+)> {
+    let (partition_store, partition_store_stop) = boot_part_store("sqlite::memory:").await?;
+    let (repo, stop) = BigRepo::boot(
+        am_utils_rs::repo::Config {
+            peer_id: crate::peer_id_from_label("test-v2"),
+            secret_key_bytes: rand::random::<[u8; 32]>(),
+            storage: am_utils_rs::repo::StorageConfig::Memory,
+        },
+        Arc::clone(&partition_store),
+    )
+    .await?;
+    Ok((
+        repo,
+        partition_store,
+        Box::new(move || {
+            async move {
+                stop.stop().await?;
+                partition_store_stop.stop().await?;
+                eyre::Ok(())
+            }
+            .boxed()
+        }),
+    ))
+}
+
+pub async fn boot_disk_repo(
+    path: PathBuf,
+) -> Res<(
+    Arc<BigRepo>,
+    Arc<PartitionStore>,
+    Box<dyn FnOnce() -> futures::future::BoxFuture<'static, Res<()>>>,
+)> {
+    let (partition_store, partition_store_stop) = boot_part_store(&format!(
+        "sqlite://{}",
+        path.join("part_store.db").display()
+    ))
+    .await?;
+    let (repo, stop) = BigRepo::boot(
+        am_utils_rs::repo::Config {
+            peer_id: PeerId::new([7_u8; 32]),
+            secret_key_bytes: rand::random::<[u8; 32]>(),
+            storage: am_utils_rs::repo::StorageConfig::Disk { path },
+        },
+        Arc::clone(&partition_store),
+    )
+    .await?;
+    Ok((
+        repo,
+        partition_store,
+        Box::new(move || {
+            async move {
+                stop.stop().await?;
+                partition_store_stop.stop().await?;
+                eyre::Ok(())
+            }
+            .boxed()
+        }),
+    ))
 }

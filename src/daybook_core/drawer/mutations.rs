@@ -222,7 +222,7 @@ impl DrawerRepo {
             return Ok(());
         }
 
-        let existing_branch_ref = self.get_branch_ref(&patch.id, &branch_path).await?;
+        let existing_branch_ref = self.get_branch_ref(&patch.id, branch_path).await?;
         let heads = match (heads, existing_branch_ref.as_ref()) {
             (Some(selected_heads), _) => selected_heads,
             (None, Some(branch_ref)) => self
@@ -579,8 +579,7 @@ impl DrawerRepo {
             .get_handle_by_branch_doc_id(&to_branch_ref.branch_doc_id)
             .await?
             .ok_or_else(|| DrawerError::DocNotFound { id: id.clone() })?;
-        let mutation_actor_id =
-            self.content_actor_id(user_path.as_deref(), &to_branch_ref.branch_doc_id);
+        let mutation_actor_id = self.content_actor_id(user_path, &to_branch_ref.branch_doc_id);
         let from_branch_ref = self.get_branch_ref(id, from_branch).await?.ok_or_else(|| {
             DrawerError::BranchNotFound {
                 name: from_branch.to_string(),
@@ -592,7 +591,7 @@ impl DrawerRepo {
             .ok_or_else(|| DrawerError::DocNotFound { id: id.clone() })?;
 
         // 1. Merge content docs
-        let user_path_for_dmeta = user_path.clone();
+        let user_path_for_dmeta = user_path;
         let mut am_from = from_handle
             .with_document_read(|from_doc| {
                 let current_heads = from_doc.get_heads();
@@ -859,7 +858,7 @@ impl DrawerRepo {
                 .collect::<Vec<(_, Arc<str>)>>();
             for (branch_path, branch_ref) in &entry.branches {
                 self.remove_branch_from_partitions_if_needed(
-                    self.branch_kind_for_path(&daybook_types::doc::BranchPath::new(
+                    self.branch_kind_for_path(daybook_types::doc::BranchPath::new(
                         &branch_path[..],
                     ))?,
                     &branch_ref.branch_doc_id.clone().into(),
@@ -876,7 +875,7 @@ impl DrawerRepo {
             for (branch_path, branch_doc_id) in local_branch_refs {
                 let branch_path = daybook_types::doc::BranchPath::new(&branch_path);
                 self.remove_branch_from_partitions_if_needed(
-                    self.branch_kind_for_path(&branch_path)?,
+                    self.branch_kind_for_path(branch_path)?,
                     &branch_doc_id,
                 )
                 .await?;
@@ -886,7 +885,7 @@ impl DrawerRepo {
                     .unwrap_or_default();
                 self.delete_local_branch_ref_with_tombstone(
                     id,
-                    &branch_path,
+                    branch_path,
                     &branch_doc_id,
                     &branch_heads,
                 )

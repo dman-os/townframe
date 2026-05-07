@@ -215,7 +215,7 @@ impl SyncMachine {
         };
         // clone self field AOT to avoid stream_state_mut mutable borrow
         // leading to borrow issues
-        let part_store = self.partition_store.clone();
+        let part_store = Arc::clone(&self.partition_store);
         let state = self.stream_state_mut(&peer, &partition_id, sub_kind);
         if cursor <= state.floor() {
             panic!(
@@ -241,7 +241,7 @@ impl SyncMachine {
         assert!(old.is_none(), "fishy");
 
         let key = ItemSyncKey {
-            peer: peer.clone(),
+            peer: Arc::clone(&peer),
             kind: sync_kind,
             item_id,
         };
@@ -322,8 +322,8 @@ impl SyncMachine {
             | SyncCompletion::ChangedItem { peer, item_id }
             | SyncCompletion::DeletedMember { peer, item_id }
             | SyncCompletion::Noop { peer, item_id } => ItemJobId {
-                peer: Arc::clone(&peer),
-                item_id: Arc::clone(&item_id),
+                peer: Arc::clone(peer),
+                item_id: Arc::clone(item_id),
             },
         };
         let Some(job) = self.active_item_jobs.get_mut(&job_id) else {
@@ -528,14 +528,14 @@ impl SyncMachine {
         // update sync store
         let existing = self
             .sync_store
-            .get_partition_cursor(PeerKey::clone(peer), Arc::clone(&partition_id))
+            .get_partition_cursor(PeerKey::clone(peer), Arc::clone(partition_id))
             .await?;
         let next_member_cursor = member_cursor.or(existing.member_cursor);
         let next_item_cursor = item_cursor.or(existing.item_cursor);
         self.sync_store
             .set_partition_cursor(
                 PeerKey::clone(peer),
-                partition_id.clone(),
+                Arc::clone(partition_id),
                 next_member_cursor,
                 next_item_cursor,
             )
@@ -664,14 +664,14 @@ mod tests {
         assert_eq!(key_a.peer, p);
         machine
             .on_item_sync_completed(SyncCompletion::ChangedItem {
-                peer: key_a.peer.clone(),
-                item_id: key_a.item_id.clone(),
+                peer: Arc::clone(&key_a.peer),
+                item_id: Arc::clone(&key_a.item_id),
             })
             .await?;
         machine
             .on_item_sync_completed(SyncCompletion::ChangedItem {
-                peer: key_b.peer.clone(),
-                item_id: key_b.item_id.clone(),
+                peer: Arc::clone(&key_b.peer),
+                item_id: Arc::clone(&key_b.item_id),
             })
             .await?;
         let cursor = machine
@@ -709,8 +709,8 @@ mod tests {
 
         machine
             .on_item_sync_completed(SyncCompletion::ChangedItem {
-                peer: key_15.peer.clone(),
-                item_id: key_15.item_id.clone(),
+                peer: Arc::clone(&key_15.peer),
+                item_id: Arc::clone(&key_15.item_id),
             })
             .await?;
         let cursor = machine
@@ -720,8 +720,8 @@ mod tests {
         assert_eq!(cursor.item_cursor, None);
         machine
             .on_item_sync_completed(SyncCompletion::ChangedItem {
-                peer: key_10.peer.clone(),
-                item_id: key_10.item_id.clone(),
+                peer: Arc::clone(&key_10.peer),
+                item_id: Arc::clone(&key_10.item_id),
             })
             .await?;
         let cursor = machine
@@ -767,8 +767,8 @@ mod tests {
         };
         machine
             .on_item_sync_completed(SyncCompletion::AddedMember {
-                peer: key.peer.clone(),
-                item_id: key.item_id.clone(),
+                peer: Arc::clone(&key.peer),
+                item_id: Arc::clone(&key.item_id),
                 item_payload: json!({}),
             })
             .await?;
@@ -801,8 +801,8 @@ mod tests {
             .await?;
         let cmds = machine
             .on_item_sync_completed(SyncCompletion::AddedMember {
-                peer: key_1.peer.clone(),
-                item_id: key_1.item_id.clone(),
+                peer: Arc::clone(&key_1.peer),
+                item_id: Arc::clone(&key_1.item_id),
                 item_payload: json!({}),
             })
             .await?;
@@ -836,8 +836,8 @@ mod tests {
 
         let cmds = machine
             .on_item_sync_completed(SyncCompletion::Noop {
-                peer: key_2.peer.clone(),
-                item_id: key_2.item_id.clone(),
+                peer: Arc::clone(&key_2.peer),
+                item_id: Arc::clone(&key_2.item_id),
             })
             .await?;
         assert_eq!(cmds.len(), 2);

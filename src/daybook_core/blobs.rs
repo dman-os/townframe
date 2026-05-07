@@ -16,7 +16,7 @@ pub trait PartitionMembershipWriter: Send + Sync {
         member_id: Arc<str>,
         payload: &serde_json::Value,
     ) -> Res<()>;
-    async fn remove_item(&self, member_id: Arc<str>) -> Res<()>;
+    async fn remove_item(&self, partition_id: Arc<str>, member_id: Arc<str>) -> Res<()>;
 }
 
 #[derive(Clone)]
@@ -43,8 +43,10 @@ impl PartitionMembershipWriter for PartitionStoreMembershipWriter {
             .await
     }
 
-    async fn remove_item(&self, member_id: Arc<str>) -> Res<()> {
-        self.partition_store.remove_item(member_id).await
+    async fn remove_item(&self, partition_id: Arc<str>, member_id: Arc<str>) -> Res<()> {
+        self.partition_store
+            .remove_item_from_partition(partition_id, member_id)
+            .await
     }
 }
 
@@ -61,7 +63,7 @@ impl PartitionMembershipWriter for NoopPartitionMembershipWriter {
     ) -> Res<()> {
         Ok(())
     }
-    async fn remove_item(&self, _member_id: Arc<str>) -> Res<()> {
+    async fn remove_item(&self, _partition_id: Arc<str>, _member_id: Arc<str>) -> Res<()> {
         Ok(())
     }
 }
@@ -165,7 +167,9 @@ impl BlobsRepo {
     }
 
     pub async fn remove_hash_from_scope(&self, scope: BlobScope, hash: Arc<str>) -> Res<()> {
-        self.partition_writer.remove_item(hash).await
+        self.partition_writer
+            .remove_item(scope.partition_id().into(), hash)
+            .await
     }
 
     pub async fn put_path_copy(&self, source_path: &Path) -> Res<String> {

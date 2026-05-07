@@ -201,11 +201,8 @@ impl ListenersRegistry {
             lock.push((
                 registration.id,
                 ErasedListener::new(move |event: Arc<E>| {
-                    match sender.force_send(Arc::clone(&event)) {
-                        Ok(Some(_)) => {
-                            dropped_count_for_cb.fetch_add(1, Ordering::Relaxed);
-                        }
-                        _ => {}
+                    if let Ok(Some(_)) = sender.force_send(Arc::clone(&event)) {
+                        dropped_count_for_cb.fetch_add(1, Ordering::Relaxed);
                     }
                 }),
             ));

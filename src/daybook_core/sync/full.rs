@@ -25,10 +25,10 @@ use iroh_blobs::Hash;
 use tokio::sync::mpsc;
 use tokio_util::sync::CancellationToken;
 
-use crate::blobs::{BlobScope, BlobsRepo};
+use crate::blobs::BlobsRepo;
 use crate::progress::{
     CreateProgressTaskArgs, ProgressFinalState, ProgressRepo, ProgressRetentionPolicy,
-    ProgressSeverity, ProgressUnit, ProgressUpdate, ProgressUpdateDeets,
+    ProgressSeverity, ProgressUpdate, ProgressUpdateDeets,
 };
 use crate::sync::PARTITION_SYNC_ALPN;
 
@@ -139,6 +139,7 @@ pub(crate) struct PeerSyncSnapshot {
     pub bootstrap_synced_docs: u64,
     pub bootstrap_remaining_docs: u64,
     pub doc_pending_docs: u64,
+    pub blob_pending_blobs: u64,
     pub live_ready: bool,
     pub has_peer_session: bool,
     pub fully_synced_partitions: HashSet<PartitionId>,
@@ -326,7 +327,7 @@ pub async fn spawn_full_sync_worker(
                     worker.batch_stop_docs().await?;
                 }
                 if !worker.scheduler.blobs_to_stop().is_empty() {
-                    worker.batch_stop_docs().await?;
+                    worker.batch_stop_blobs().await?;
                 }
                 if worker.scheduler.has_docs_to_boot() {
                     worker.batch_boot_docs().await?;
@@ -359,6 +360,7 @@ pub async fn spawn_full_sync_worker(
                             warn!("peer worker msg channel closed");
                             break;
                         };
+                        worker.handle_peer_sync_worker_msg(msg).await?;
                     }
                     _ = janitor_tick.tick() => {
                         worker.scheduler
@@ -473,6 +475,7 @@ struct PeerSyncState {
     bootstrap_synced_docs: u64,
     bootstrap_remaining_docs: u64,
     doc_pending_docs: u64,
+    blob_pending_blobs: u64,
     fully_synced_partitions: HashSet<PartitionId>,
     emitted_full_synced: bool,
 }
@@ -530,13 +533,13 @@ impl Worker {
                 let old_state = self
                     .known_peer_set
                     .remove(&peer_id)
-                    .or_else(|| old_peer_id.and_then(|id| self.known_peer_set.remove(&id)));
+                    .or_else(|| old_peer_id.and_then(|id| self.known_peer_set.remove(id)));
                 if let Some(old_state) = old_state.as_ref() {
                     if old_state.peer_key != peer_key {
                         self.peer_id_by_peer_key.remove(&old_state.peer_key);
                     }
                 }
-                let new_parts: Vec<_> = if let Some(old) = old_state {
+                let _new_parts: Vec<_> = if let Some(old) = old_state {
                     partitions.difference(&old.partitions).cloned().collect()
                 } else {
                     partitions.iter().cloned().collect()
@@ -547,13 +550,14 @@ impl Worker {
                         partitions,
                         peer_id,
                         endpoint_addr,
-                        peer_key: peer_key.clone(),
+                        peer_key: Arc::clone(&peer_key),
                         connection,
                         bootstrap_ready: false,
                         live_ready: false,
                         bootstrap_synced_docs: 0,
                         bootstrap_remaining_docs: 0,
                         doc_pending_docs: 0,
+                        blob_pending_blobs: 0,
                         fully_synced_partitions: default(),
                         emitted_full_synced: false,
                     },
@@ -574,23 +578,6 @@ impl Worker {
                 outcome,
             } => {
                 self.handle_doc_sync_completed(doc_id, peer_id, outcome)
-                    .await?
-            }
-            Msg::DocSyncBackoff {
-                doc_id,
-                peer_id,
-                delay,
-                previous_retry_state,
-            } => {
-                self.handle_doc_request_backoff(doc_id, peer_id, delay, previous_retry_state)
-                    .await?;
-            }
-            Msg::DocSyncCompleted {
-                doc_id,
-                peer_id,
-                outcome,
-            } => {
-                self.handle_doc_sync_completed(doc_id, peer_id, outcome)
                     .await?;
             }
             Msg::DocSyncBackoff {
@@ -602,7 +589,7 @@ impl Worker {
                 self.handle_doc_request_backoff(doc_id, peer_id, delay, previous_retry_state)
                     .await?;
             }
-            Msg::BlobSyncCompleted { hash, outcome } => {
+            Msg::BlobSyncCompleted { hash, outcome: _ } => {
                 self.handle_blob_marked_synced(hash).await?;
             }
             Msg::BlobSyncBackoff {
@@ -626,6 +613,7 @@ impl Worker {
                                 bootstrap_synced_docs: peer_state.bootstrap_synced_docs,
                                 bootstrap_remaining_docs: peer_state.bootstrap_remaining_docs,
                                 doc_pending_docs: peer_state.doc_pending_docs,
+                                blob_pending_blobs: peer_state.blob_pending_blobs,
                                 live_ready: peer_state.live_ready,
                                 has_peer_session: self
                                     .peer_partition_sessions
@@ -680,7 +668,7 @@ impl Worker {
         for mut waiter in pending.drain(..) {
             // let required_partitions = waiter.required_partitions.clone();
             waiter.remaining.retain(|peer_id| {
-                self.known_peer_set.get(&peer_id).is_none_or(|peer_state| {
+                self.known_peer_set.get(peer_id).is_none_or(|peer_state| {
                     !waiter
                         .required_partitions
                         .iter()
@@ -721,6 +709,7 @@ mod peer {
                         peer_state.bootstrap_synced_docs = 0;
                         peer_state.bootstrap_remaining_docs = 0;
                         peer_state.doc_pending_docs = 0;
+                        peer_state.blob_pending_blobs = 0;
                         peer_state.fully_synced_partitions.clear();
                         peer_state.emitted_full_synced = false;
                         (
@@ -756,7 +745,6 @@ mod peer {
                 );
                 let stop =
                     am_utils_rs::sync::peer::spawn_peer_sync_worker(SpawnPeerSyncWorkerArgs {
-                        local_peer: self.local_peer_key.clone(),
                         remote_peer: peer_key,
                         rpc_client,
                         sync_store: self.sync_store.clone(),
@@ -775,12 +763,12 @@ mod peer {
             info!(?msg, "XXX peer worker msg");
             let peer_key = match &msg {
                 PeerSyncWorkerMsg::Progress { peer, .. }
-                | PeerSyncWorkerMsg::SubscriptionItem { peer, .. } => peer.clone(),
+                | PeerSyncWorkerMsg::SubscriptionItem { peer, .. } => Arc::clone(peer),
                 PeerSyncWorkerMsg::Event(event) => match event {
                     PeerSyncWorkerEvent::Bootstrapped { peer, .. }
                     | PeerSyncWorkerEvent::LiveReady { peer }
                     | PeerSyncWorkerEvent::AbnormalExit { peer, .. }
-                    | PeerSyncWorkerEvent::NaturalDeath { peer } => peer.clone(),
+                    | PeerSyncWorkerEvent::NaturalDeath { peer } => Arc::clone(peer),
                 },
             };
             let Some(peer_id) = self.peer_id_by_peer_key.get(&peer_key).copied() else {
@@ -865,7 +853,7 @@ mod peer {
                         self.emit_stale_peer(peer_key).await?;
                         self.peer_sessions_to_refresh.insert(peer_id);
                     }
-                    PeerSyncWorkerEvent::NaturalDeath { peer } => {
+                    PeerSyncWorkerEvent::NaturalDeath { peer: _ } => {
                         if self.cancel_token.is_cancelled() {
                             return Ok(());
                         }
@@ -873,7 +861,7 @@ mod peer {
                             return Ok(());
                         }
                         let peer_known = self.known_peer_set.contains_key(&peer_id);
-                        if peer_known {
+                        if !peer_known {
                             return Ok(());
                         }
 
@@ -883,7 +871,7 @@ mod peer {
                             peer_id,
                             ProgressUpdateDeets::Completed {
                                 state: ProgressFinalState::Succeeded,
-                                message: Some(format!("peer worker natural exit")),
+                                message: Some("peer worker natural exit".to_string()),
                             },
                         )
                         .await?;
@@ -949,12 +937,12 @@ mod peer {
                         }
                     }
                     let task_key = DocSyncTaskKey {
-                        doc_id: doc_id.clone(),
+                        doc_id: *doc_id,
                         peer_id,
                     };
                     self.scheduler.enqueue_stop_doc(&task_key);
                     if state.requested_peers.is_empty() {
-                        to_remove_docs.push(doc_id.clone());
+                        to_remove_docs.push(*doc_id);
                     }
                 }
                 for (&hash, state) in &mut self.blob_requirements {
@@ -1021,12 +1009,14 @@ mod peer {
                 && peer_state.live_ready
                 && !endpoint_has_doc_work
                 && peer_state.doc_pending_docs == 0
+                && peer_state.blob_pending_blobs == 0
                 && peer_state.fully_synced_partitions == peer_state.partitions;
             debug!(
                 bootstrap_ready = peer_state.bootstrap_ready,
                 bootstrap_synced_docs = peer_state.bootstrap_synced_docs,
                 bootstrap_remaining_docs = peer_state.bootstrap_remaining_docs,
                 doc_pending_docs = peer_state.doc_pending_docs,
+                blob_pending_blobs = peer_state.blob_pending_blobs,
                 endpoint_has_doc_work,
                 emitted_full_synced = peer_state.emitted_full_synced,
                 live_ready = peer_state.live_ready,
@@ -1183,8 +1173,8 @@ mod machine {
                     let commands = self
                         .sync_machine
                         .on_item_sync_completed(SyncCompletion::DeletedMember {
-                            peer: key.peer.clone(),
-                            item_id: key.item_id.clone(),
+                            peer: Arc::clone(&key.peer),
+                            item_id: Arc::clone(&key.item_id),
                         })
                         .await?;
                     return Ok(commands);
@@ -1200,11 +1190,11 @@ mod machine {
             partition_ids: &[PartitionId],
             doc_id: DocumentId,
         ) -> Res<()> {
-            let state = self.doc_request_set.entry(doc_id.clone()).or_default();
+            let state = self.doc_request_set.entry(doc_id).or_default();
             for part_id in partition_ids {
                 state
                     .partition_ids
-                    .entry(Arc::clone(&part_id))
+                    .entry(Arc::clone(part_id))
                     .or_default()
                     .insert(peer_id);
             }
@@ -1219,10 +1209,8 @@ mod machine {
                     self.refresh_peer_fully_synced_state(peer_id).await?;
                 }
             }
-            self.scheduler.set_doc_pending_now(DocSyncTaskKey {
-                doc_id: doc_id.clone(),
-                peer_id,
-            });
+            self.scheduler
+                .set_doc_pending_now(DocSyncTaskKey { doc_id, peer_id });
             Ok(())
         }
 
@@ -1254,10 +1242,7 @@ mod machine {
                     peer_state.doc_pending_docs = peer_state.doc_pending_docs.saturating_sub(1);
                     self.refresh_peer_fully_synced_state(peer_id).await?;
                 }
-                let task_key = DocSyncTaskKey {
-                    doc_id: doc_id.clone(),
-                    peer_id,
-                };
+                let task_key = DocSyncTaskKey { doc_id, peer_id };
                 self.scheduler.enqueue_stop_doc(&task_key);
             }
             if clear_request {
@@ -1280,7 +1265,7 @@ mod machine {
             for part_id in partition_ids {
                 state
                     .partition_ids
-                    .entry(Arc::clone(&part_id))
+                    .entry(Arc::clone(part_id))
                     .or_default()
                     .insert(peer_id);
             }
@@ -1291,7 +1276,7 @@ mod machine {
                 .insert(peer_id, partition_ids.iter().map(Arc::clone).collect());
             if old.is_none() {
                 if let Some(peer_state) = self.known_peer_set.get_mut(&peer_id) {
-                    peer_state.doc_pending_docs = peer_state.doc_pending_docs.saturating_add(1);
+                    peer_state.blob_pending_blobs = peer_state.blob_pending_blobs.saturating_add(1);
                     self.refresh_peer_fully_synced_state(peer_id).await?;
                 }
             }
@@ -1323,6 +1308,7 @@ mod machine {
             };
             if had_peer {
                 if let Some(peer_state) = self.known_peer_set.get_mut(&peer_id) {
+                    peer_state.blob_pending_blobs = peer_state.blob_pending_blobs.saturating_sub(1);
                     self.refresh_peer_fully_synced_state(peer_id).await?;
                 }
             }
@@ -1450,10 +1436,7 @@ mod docs {
             peer_id: PeerId,
             outcome: doc_worker::SyncDocOutcome,
         ) -> Res<()> {
-            let task_key = DocSyncTaskKey {
-                doc_id: doc_id.clone(),
-                peer_id,
-            };
+            let task_key = DocSyncTaskKey { doc_id, peer_id };
             let Some(active) = self.scheduler.clear_doc_task(&task_key) else {
                 warn!(
                     ?doc_id,
@@ -1474,7 +1457,7 @@ mod docs {
                     if let Some(peer_state) = self.known_peer_set.get_mut(&peer_id) {
                         peer_state.doc_pending_docs = peer_state.doc_pending_docs.saturating_sub(1);
                     }
-                    drop(sync_state);
+                    let _ = sync_state;
                     self.refresh_peer_fully_synced_state(peer_id).await?;
                 }
             }
@@ -1503,13 +1486,6 @@ mod docs {
                         message: format!("doc import completed: {doc_id}"),
                     }),
                 ),
-                doc_worker::SyncDocOutcome::LocalPresent => (
-                    SyncCompletion::Noop {
-                        peer: Arc::clone(&peer_key),
-                        item_id: doc_id.to_string().into(),
-                    },
-                    None,
-                ),
             };
             let commands = self.sync_machine.on_item_sync_completed(result).await?;
             self.dispatch_sync_commands(commands).await?;
@@ -1534,10 +1510,8 @@ mod docs {
                 // enqueue any pending jobs on the peer in case they'd
                 // gone into backoff due to issues
                 for peer_id in sync_state.requested_peers.keys().copied() {
-                    self.scheduler.enqueue_start_doc(DocSyncTaskKey {
-                        doc_id: doc_id.clone(),
-                        peer_id,
-                    });
+                    self.scheduler
+                        .enqueue_start_doc(DocSyncTaskKey { doc_id, peer_id });
                 }
             }
             Ok(())
@@ -1551,10 +1525,7 @@ mod docs {
             delay: Duration,
             previous_retry_state: RetryState,
         ) -> Res<()> {
-            let task_key = DocSyncTaskKey {
-                doc_id: doc_id.clone(),
-                peer_id,
-            };
+            let task_key = DocSyncTaskKey { doc_id, peer_id };
             let Some(active) = self.scheduler.clear_doc_task(&task_key) else {
                 warn!(
                     ?doc_id,
@@ -1638,7 +1609,7 @@ mod blobs {
                     continue;
                 }
                 let stop_token = blob_worker::spawn_blob_sync_worker(
-                    hash.clone(),
+                    hash,
                     Arc::clone(&sync_state.item_id),
                     peers,
                     self.msg_tx.clone(),
@@ -1685,6 +1656,10 @@ mod blobs {
                         })
                         .await?;
                     self.dispatch_sync_commands(commands).await?;
+                    if let Some(peer_state) = self.known_peer_set.get_mut(&peer_id) {
+                        peer_state.blob_pending_blobs =
+                            peer_state.blob_pending_blobs.saturating_sub(1);
+                    }
                     self.refresh_peer_fully_synced_state(peer_id).await?;
                 }
                 self.emit_full_sync_event(FullSyncEvent::BlobSynced {
@@ -1724,7 +1699,7 @@ mod blobs {
             };
             let attempt_no = pending.attempt_no;
             let item_id = Arc::clone(&sync_state.item_id);
-            drop(sync_state);
+            let _ = sync_state;
             self.scheduler.set_blob_backoff(hash, pending);
             self.emit_full_sync_event(FullSyncEvent::BlobSyncBackoff {
                 hash: item_id,
@@ -1798,17 +1773,17 @@ mod progress {
                         self.emit_full_sync_event(FullSyncEvent::BlobDownloadStarted { hash })
                             .await?;
                     }
-                    SyncProgressMsg::BlobWorkerStarted { hash } => {
+                    SyncProgressMsg::BlobWorkerStarted { hash: _ } => {
                         // FIXME:
                     }
                     SyncProgressMsg::BlobDownloadProgress {
-                        hash,
-                        done_counter: done,
+                        hash: _,
+                        done_counter: _,
                         ..
                     } => {
                         // FIXME: the blob progress wirings have been removed
                     }
-                    SyncProgressMsg::BlobMaterializeStarted { hash } => {
+                    SyncProgressMsg::BlobMaterializeStarted { hash: _ } => {
                         // FIXME:
                     }
                     SyncProgressMsg::BlobDownloadFinished { hash, error } => {

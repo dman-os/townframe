@@ -68,7 +68,6 @@ pub enum PeerSyncWorkerMsg {
 }
 
 pub struct SpawnPeerSyncWorkerArgs<'a> {
-    pub local_peer: PeerKey,
     pub remote_peer: PeerKey,
     pub rpc_client: irpc::Client<PartitionSyncRpc>,
     pub sync_store: SyncStoreHandle,
@@ -79,7 +78,6 @@ pub struct SpawnPeerSyncWorkerArgs<'a> {
 
 pub struct PeerSyncWorkerStopToken {
     task_handle: utils_rs::TaskHandle,
-    remote_peer: PeerKey,
     cancel_token: CancellationToken,
 }
 
@@ -97,12 +95,10 @@ impl PeerSyncWorkerStopToken {
 pub async fn spawn_peer_sync_worker(
     args: SpawnPeerSyncWorkerArgs<'_>,
 ) -> Res<PeerSyncWorkerStopToken> {
-    let remote_peer_for_stop = args.remote_peer.clone();
-    let remote_peer_for_task = args.remote_peer.clone();
+    let remote_peer_for_task = Arc::clone(&args.remote_peer);
     let msg_tx = args.msg_tx.clone();
     let mut worker = PeerSyncWorker {
-        local_peer: args.local_peer,
-        remote_peer: args.remote_peer.clone(),
+        remote_peer: Arc::clone(&args.remote_peer),
         rpc_client: args.rpc_client,
         sync_store: args.sync_store,
         target_partitions: args.target_partitions,
@@ -135,13 +131,13 @@ pub async fn spawn_peer_sync_worker(
                 for part in &parts {
                     let cursor = worker
                         .sync_store
-                        .get_partition_cursor(worker.remote_peer.clone(), part.clone())
+                        .get_partition_cursor(Arc::clone(&worker.remote_peer), Arc::clone(part))
                         .await
                         .map_err(|err| PeerSyncWorkerExit::PartitionCursorLookupFailed {
                             reason: err.to_string(),
                         })?;
                     reqs.push(PartitionStreamCursorRequest {
-                        partition_id: part.clone(),
+                        partition_id: Arc::clone(part),
                         since_member: cursor.member_cursor,
                         since_event: cursor.item_cursor,
                     });
@@ -163,7 +159,7 @@ pub async fn spawn_peer_sync_worker(
             worker
                 .msg_tx
                 .try_send(PeerSyncWorkerMsg::Event(PeerSyncWorkerEvent::LiveReady {
-                    peer: worker.remote_peer.clone(),
+                    peer: Arc::clone(&worker.remote_peer),
                 }))
                 .ok();
 
@@ -228,12 +224,10 @@ pub async fn spawn_peer_sync_worker(
     Ok(PeerSyncWorkerStopToken {
         task_handle,
         cancel_token,
-        remote_peer: remote_peer_for_stop,
     })
 }
 
 struct PeerSyncWorker {
-    local_peer: PeerKey,
     remote_peer: PeerKey,
     rpc_client: irpc::Client<PartitionSyncRpc>,
     sync_store: SyncStoreHandle,
@@ -254,7 +248,7 @@ impl PeerSyncWorker {
 
         let mut remote_latest_by_partition: HashMap<PartitionId, u64> = partitions
             .iter()
-            .map(|item| (item.partition_id.clone(), item.latest_cursor))
+            .map(|item| (Arc::clone(&item.partition_id), item.latest_cursor))
             .collect();
 
         let mut frontiers: HashMap<PartitionId, u64> = default();
@@ -303,7 +297,7 @@ impl PeerSyncWorker {
                     self.msg_tx
                         .try_send(PeerSyncWorkerMsg::Event(
                             PeerSyncWorkerEvent::Bootstrapped {
-                                peer: self.remote_peer.clone(),
+                                peer: Arc::clone(&self.remote_peer),
                                 partition_count,
                             },
                         ))
@@ -322,7 +316,7 @@ impl PeerSyncWorker {
                 );
                 self.msg_tx
                     .send(PeerSyncWorkerMsg::SubscriptionItem {
-                        peer: self.remote_peer.clone(),
+                        peer: Arc::clone(&self.remote_peer),
                         item: SubscriptionEvent::MemberEvent(event),
                     })
                     .await
@@ -339,7 +333,7 @@ impl PeerSyncWorker {
                 );
                 self.msg_tx
                     .send(PeerSyncWorkerMsg::SubscriptionItem {
-                        peer: self.remote_peer.clone(),
+                        peer: Arc::clone(&self.remote_peer),
                         item: SubscriptionEvent::ItemEvent(event),
                     })
                     .await
@@ -352,7 +346,7 @@ impl PeerSyncWorker {
     fn emit_phase_started(&self, phase: &'static str) {
         self.msg_tx
             .try_send(PeerSyncWorkerMsg::Progress {
-                peer: self.remote_peer.clone(),
+                peer: Arc::clone(&self.remote_peer),
                 event: PeerSyncProgressEvent::PhaseStarted { phase },
             })
             .ok();
@@ -361,7 +355,7 @@ impl PeerSyncWorker {
     fn emit_phase_finished(&self, phase: &'static str, elapsed: Duration) {
         self.msg_tx
             .try_send(PeerSyncWorkerMsg::Progress {
-                peer: self.remote_peer.clone(),
+                peer: Arc::clone(&self.remote_peer),
                 event: PeerSyncProgressEvent::PhaseFinished { phase, elapsed },
             })
             .ok();

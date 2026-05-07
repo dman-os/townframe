@@ -192,7 +192,7 @@ async fn wait_for_synced_doc_on_both_sides(
     branch: &BranchPathBuf,
     timeout: Duration,
 ) -> Res<(Arc<daybook_types::doc::Doc>, Arc<daybook_types::doc::Doc>)> {
-    Ok(tokio::time::timeout(timeout, async {
+    tokio::time::timeout(timeout, async {
         loop {
             let left_doc = left
                 .drawer
@@ -212,7 +212,7 @@ async fn wait_for_synced_doc_on_both_sides(
             tokio::time::sleep(Duration::from_millis(200)).await;
         }
     })
-    .await??)
+    .await?
 }
 
 #[tokio::test(flavor = "multi_thread")]
@@ -1035,8 +1035,8 @@ async fn clone_bootstrap_populates_all_globals_and_can_open() -> Res<()> {
     .await?;
     let source_repo_id = rtx.repo_id.clone();
     let source_repo_name = rtx.repo_name.clone();
-    let source_doc_app = rtx.doc_app.document_id().clone();
-    let source_doc_drawer = rtx.doc_drawer.document_id().clone();
+    let source_doc_app = *rtx.doc_app.document_id();
+    let source_doc_drawer = *rtx.doc_drawer.document_id();
     rtx.shutdown().await?;
 
     let node_a = open_sync_node(&repo_a_path).await?;

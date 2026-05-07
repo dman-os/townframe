@@ -191,8 +191,8 @@ async fn init_and_copy_repo_cluster(root: &std::path::Path) -> Res<Vec<PathBuf>>
     )
     .await?;
     let source_repo_id = rtx.repo_id.clone();
-    let source_app_doc_id = rtx.doc_app.document_id().clone();
-    let source_drawer_doc_id = rtx.doc_drawer.document_id().clone();
+    let source_app_doc_id = *rtx.doc_app.document_id();
+    let source_drawer_doc_id = *rtx.doc_drawer.document_id();
     rtx.shutdown().await?;
 
     let seed_node = open_sync_node(&paths[0]).await?;

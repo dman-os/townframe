@@ -145,11 +145,9 @@ pub enum IrohSyncEvent {
         hash: String,
     },
     BlobDownloadStarted {
-        partition: String,
         hash: String,
     },
     BlobDownloadFinished {
-        partition: String,
         hash: String,
         success: bool,
     },
@@ -304,6 +302,7 @@ impl IrohSyncRepo {
 
         let (mut full_sync_handle, full_stop_token) = full::spawn_full_sync_worker(
             Arc::clone(&rcx.big_repo),
+            Arc::clone(&rcx.partition_store),
             Arc::clone(&rcx.local_peer_key),
             Arc::clone(&blobs_repo),
             progress_repo.clone(),
@@ -666,35 +665,33 @@ impl IrohSyncRepo {
                 partition,
             } => self.registry.notify([IrohSyncEvent::PartitionFullySynced {
                 peer_key,
-                partition: partition.as_tag_value().to_string(),
+                partition: partition.to_string(),
             }]),
             full::FullSyncEvent::DocSyncedWithPeer { peer_key, doc_id } => self
                 .registry
                 .notify([IrohSyncEvent::DocSyncedWithPeer { peer_key, doc_id }]),
             full::FullSyncEvent::BlobSynced { hash } => {
-                self.registry.notify([IrohSyncEvent::BlobSynced { hash }])
-            }
-            full::FullSyncEvent::BlobDownloadStarted { partition, hash } => {
-                self.registry.notify([IrohSyncEvent::BlobDownloadStarted {
-                    partition: partition.as_tag_value().to_string(),
-                    hash,
+                self.registry.notify([IrohSyncEvent::BlobSynced {
+                    hash: hash.to_string(),
                 }])
             }
-            full::FullSyncEvent::BlobDownloadFinished {
-                partition,
-                hash,
-                success,
-            } => self.registry.notify([IrohSyncEvent::BlobDownloadFinished {
-                partition: partition.as_tag_value().to_string(),
-                hash,
-                success,
-            }]),
+            full::FullSyncEvent::BlobDownloadStarted { hash } => {
+                self.registry.notify([IrohSyncEvent::BlobDownloadStarted {
+                    hash: hash.to_string(),
+                }])
+            }
+            full::FullSyncEvent::BlobDownloadFinished { hash, success } => {
+                self.registry.notify([IrohSyncEvent::BlobDownloadFinished {
+                    hash: hash.to_string(),
+                    success,
+                }])
+            }
             full::FullSyncEvent::BlobSyncBackoff {
                 hash,
                 delay,
                 attempt_no,
             } => self.registry.notify([IrohSyncEvent::BlobSyncBackoff {
-                hash,
+                hash: hash.to_string(),
                 delay,
                 attempt_no,
             }]),
@@ -741,7 +738,7 @@ impl IrohSyncRepo {
                 .active_peers
                 .write()
                 .await
-                .insert(peer_id, ActivePeerState::Connected { peer_key: peer_key });
+                .insert(peer_id, ActivePeerState::Connected { peer_key });
             assert!(matches!(old, Some(ActivePeerState::Connecting)), "fishy");
             self.registry.notify(events);
             eyre::Ok(())
@@ -801,11 +798,8 @@ impl IrohSyncRepo {
         if target_peers.is_empty() {
             return Ok(());
         }
-        let required_partitions: HashSet<full::PartitionKey> = required_partitions
-            .iter()
-            .cloned()
-            .map(full::PartitionKey::from_partition_id)
-            .collect();
+        let required_partitions: HashSet<am_utils_rs::sync::protocol::PartitionId> =
+            required_partitions.iter().cloned().collect();
         let peer_ids: Vec<am_utils_rs::ids::PeerId32> =
             endpoint_ids.iter().cloned().map(Into::into).collect();
         let initial_snapshot = self
@@ -1484,8 +1478,8 @@ mod tests {
         )
         .await?;
         let source_repo_id = rtx.repo_id.clone();
-        let source_app_doc_id = rtx.doc_app.document_id().clone();
-        let source_drawer_doc_id = rtx.doc_drawer.document_id().clone();
+        let source_app_doc_id = *rtx.doc_app.document_id();
+        let source_drawer_doc_id = *rtx.doc_drawer.document_id();
         rtx.shutdown().await?;
 
         let seed_node = open_sync_node(repo_a_path).await?;
@@ -1550,14 +1544,14 @@ mod tests {
         let (plugs_repo, plugs_stop) = PlugsRepo::load(
             Arc::clone(&rtx.big_repo),
             Arc::clone(&blobs_repo),
-            rtx.doc_app.document_id().clone(),
+            *rtx.doc_app.document_id(),
             daybook_types::doc::UserPathBuf::from(rtx.local_user_path.clone()),
         )
         .await?;
         let (drawer_repo, drawer_stop) = DrawerRepo::load(
             Arc::clone(&rtx.big_repo),
             Arc::clone(&rtx.partition_store),
-            rtx.doc_drawer.document_id().clone(),
+            *rtx.doc_drawer.document_id(),
             daybook_types::doc::UserPathBuf::from(rtx.local_user_path.clone()),
             rtx.sql.clone(),
             rtx.layout.repo_root.join("local_state"),
@@ -1572,7 +1566,7 @@ mod tests {
         .await?;
         let (config_repo, config_stop) = crate::config::ConfigRepo::load(
             Arc::clone(&rtx.big_repo),
-            rtx.doc_app.document_id().clone(),
+            *rtx.doc_app.document_id(),
             Arc::clone(&plugs_repo),
             daybook_types::doc::UserPathBuf::from(rtx.local_user_path.clone()),
             rtx.sql.clone(),

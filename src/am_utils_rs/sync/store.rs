@@ -322,7 +322,12 @@ mod tests {
 
         store.allow_peer(Arc::clone(&peer)).await?;
         store
-            .set_partition_cursor(Arc::clone(&peer), partition.clone(), Some(10), Some(20))
+            .set_partition_cursor(
+                Arc::clone(&peer),
+                Arc::clone(&partition),
+                Some(10),
+                Some(20),
+            )
             .await?;
         store.revoke_peer(Arc::clone(&peer)).await?;
         store.allow_peer(Arc::clone(&peer)).await?;

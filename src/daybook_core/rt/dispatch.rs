@@ -776,7 +776,7 @@ fn dispatch_heads_for_dispatches<'a>(
     dispatches: impl Iterator<Item = (&'a String, &'a Arc<ActiveDispatch>)>,
 ) -> ChangeHashSet {
     let mut items = dispatches.collect::<Vec<_>>();
-    items.sort_unstable_by(|(lhs_id, _), (rhs_id, _)| lhs_id.cmp(rhs_id));
+    items.sort_unstable_by_key(|(lhs_id, _)| *lhs_id);
     let mut heads = Vec::with_capacity(items.len());
     for (id, dispatch) in items {
         heads.push(dispatch_head_for_dispatch(id, dispatch));
@@ -941,11 +941,11 @@ mod tests {
         repo_sql: SqlCtx,
     ) -> Res<(Arc<DispatchRepo>, daybook_types::doc::UserPathBuf)> {
         let local_user_path = daybook_types::doc::UserPathBuf::from("/test-user/test-device");
-        let (big_repo, part_store, _acx_stop) = crate::drawer::tests::boot_repo().await?;
+        let (big_repo, _part_store, _acx_stop) = crate::test_support::boot_repo().await?;
         let app_doc = big_repo
             .put_doc(DocumentId::random(), automerge::Automerge::new())
             .await?;
-        let app_doc_id = app_doc.document_id().clone();
+        let app_doc_id = *app_doc.document_id();
         let (repo, _stop) =
             DispatchRepo::load(big_repo, app_doc_id, local_user_path.clone(), repo_sql).await?;
         Ok((repo, local_user_path))

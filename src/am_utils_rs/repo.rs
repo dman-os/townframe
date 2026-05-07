@@ -8,6 +8,9 @@ use automerge::ChangeHash;
 use autosurgeon::{Hydrate, Prop, Reconcile};
 use sedimentree_core::loose_commit::id::CommitId;
 
+// FIXME: properly test the changes impl and investigate
+// why it no longer has users
+#[expect(unused)]
 mod changes;
 pub mod rpc;
 mod runtime;
@@ -389,8 +392,8 @@ impl BigDocHandle {
         F: FnOnce(&automerge::Automerge) -> R,
     {
         let doc = self.bundle.doc.lock().await;
-        let out = operation(&doc);
-        out
+
+        operation(&doc)
     }
 
     pub async fn with_document<F, R>(&self, operation: F) -> Res<R>
@@ -570,7 +573,7 @@ pub(crate) mod tests {
         sqlite_url: &str,
     ) -> Res<(Arc<PartitionStore>, PartitionStoreStopToken)> {
         let state_pool = {
-            let connect_options = SqliteConnectOptions::from_str(&sqlite_url)
+            let connect_options = SqliteConnectOptions::from_str(sqlite_url)
                 .expect(ERROR_IMPOSSIBLE)
                 .create_if_missing(true);
             sqlx::sqlite::SqlitePoolOptions::new()
@@ -696,7 +699,7 @@ pub(crate) mod tests {
         let status = std::fs::read_to_string("/proc/self/status").ok()?;
         status.lines().find_map(|line| {
             let rest = line.strip_prefix(label)?;
-            rest.split_whitespace().nth(0)?.parse().ok()
+            rest.split_whitespace().next()?.parse().ok()
         })
     }
 

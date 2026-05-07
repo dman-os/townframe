@@ -18,7 +18,6 @@ impl DocSyncWorkerStopToken {
 pub(super) enum SyncDocOutcome {
     Synced,
     Imported { heads: ChangeHashSet },
-    LocalPresent,
 }
 
 #[tracing::instrument(skip_all, fields(%doc_id))]
@@ -41,7 +40,7 @@ pub fn spawn_doc_sync_worker(
     let fut = async move {
         let msg = match worker.run(peer_id, connection, iroh_endpoint).await {
             Ok(outcome) => Msg::DocSyncCompleted {
-                doc_id: worker.doc_id.clone(),
+                doc_id: worker.doc_id,
                 peer_id,
                 outcome,
             },
@@ -53,7 +52,7 @@ pub fn spawn_doc_sync_worker(
                     "doc sync worker failed"
                 );
                 Msg::DocSyncBackoff {
-                    doc_id: worker.doc_id.clone(),
+                    doc_id: worker.doc_id,
                     peer_id,
                     delay: Duration::from_millis(500),
                     previous_retry_state: worker.retry,
@@ -84,7 +83,7 @@ impl DocSyncWorker {
     ) -> Res<SyncDocOutcome> {
         if self.big_repo.get_doc(&self.doc_id).await?.is_some() {
             let outcome = connection
-                .sync_with_peer(self.doc_id.clone(), Some(Duration::from_secs(10)))
+                .sync_with_peer(self.doc_id, Some(Duration::from_secs(10)))
                 .await?;
             match outcome {
                 am_utils_rs::repo::SyncDocOutcome::Success => {
@@ -124,7 +123,7 @@ impl DocSyncWorker {
 
         if self.big_repo.get_doc(&self.doc_id).await?.is_some() {
             let outcome = connection
-                .sync_with_peer(self.doc_id.clone(), Some(Duration::from_secs(10)))
+                .sync_with_peer(self.doc_id, Some(Duration::from_secs(10)))
                 .await?;
             match outcome {
                 am_utils_rs::repo::SyncDocOutcome::Success => {
@@ -139,16 +138,14 @@ impl DocSyncWorker {
         }
 
         let heads = ChangeHashSet(loaded.get_heads().into());
-        match self.big_repo.put_doc(self.doc_id.clone(), loaded).await {
+        match self.big_repo.put_doc(self.doc_id, loaded).await {
             Ok(_) => Ok(SyncDocOutcome::Imported { heads }),
             Err(am_utils_rs::repo::PutDocError::IdOccpuied { .. }) => {
                 let outcome = connection
-                    .sync_with_peer(self.doc_id.clone(), Some(Duration::from_secs(10)))
+                    .sync_with_peer(self.doc_id, Some(Duration::from_secs(10)))
                     .await?;
                 match outcome {
-                    am_utils_rs::repo::SyncDocOutcome::Success => {
-                        return Ok(SyncDocOutcome::Synced);
-                    }
+                    am_utils_rs::repo::SyncDocOutcome::Success => Ok(SyncDocOutcome::Synced),
                     am_utils_rs::repo::SyncDocOutcome::NotFoundOrUnauthorized
                     | am_utils_rs::repo::SyncDocOutcome::TransportError
                     | am_utils_rs::repo::SyncDocOutcome::IoError => {

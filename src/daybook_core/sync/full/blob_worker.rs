@@ -48,10 +48,13 @@ pub fn spawn_blob_sync_worker(
                 outcome,
             },
             Err(err) => {
-                worker.send_progress(SyncProgressMsg::BlobDownloadFinished {
-                    hash: Arc::clone(&worker.dayb_hash),
-                    error: Some(err),
-                });
+                worker
+                    .send_progress(SyncProgressMsg::BlobDownloadFinished {
+                        hash: Arc::clone(&worker.dayb_hash),
+                        error: Some(err),
+                    })
+                    .await
+                    .ok();
                 Msg::BlobSyncBackoff {
                     hash: worker.hash,
                     previous_retry_state,

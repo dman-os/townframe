@@ -229,7 +229,7 @@ impl DrawerRepo {
         let mut branches = HashMap::new();
         for branch_name in branch_names {
             let branch_path = daybook_types::doc::BranchPath::new(branch_name.as_str());
-            if self.branch_kind_for_path(&branch_path)? == BranchKind::Local {
+            if self.branch_kind_for_path(branch_path)? == BranchKind::Local {
                 continue;
             }
             let Some(branch_ref) = entry.branches.get(&branch_name) else {
@@ -278,8 +278,7 @@ impl DrawerRepo {
     pub(super) async fn current_drawer_entries(
         &self,
     ) -> Res<(ChangeHashSet, Vec<(DocId, DocEntry)>)> {
-        Ok(self
-            .drawer_doc_handle
+        self.drawer_doc_handle
             .with_document_read(|doc| {
                 let drawer_heads = ChangeHashSet(doc.get_heads().into());
                 let map_id = match doc.get(automerge::ROOT, "docs")? {
@@ -304,7 +303,7 @@ impl DrawerRepo {
                 }
                 eyre::Ok((drawer_heads, entries))
             })
-            .await?)
+            .await
     }
 
     pub(super) async fn hydrate_entry_at_heads(

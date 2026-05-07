@@ -16,7 +16,7 @@ mod meta;
 mod mutations;
 mod queries;
 #[cfg(test)]
-pub mod tests;
+mod tests;
 pub mod types;
 
 pub use crate::drawer::types::{DocBundle, DocEntry, DocEntryDiff, DocNBranches, DrawerEvent};
@@ -124,9 +124,7 @@ impl DrawerRepo {
         // Listen for changes to docs.map
         let (ticket, notif_rx) = big_repo
             .subscribe_change_listener(am_utils_rs::repo::BigRepoChangeFilter {
-                doc_id: Some(am_utils_rs::repo::BigRepoDocIdFilter::new(
-                    drawer_doc_id.clone(),
-                )),
+                doc_id: Some(am_utils_rs::repo::BigRepoDocIdFilter::new(drawer_doc_id)),
                 path: vec!["docs".into(), "map".into()],
                 origin: None,
             })
@@ -211,7 +209,7 @@ impl DrawerRepo {
         heads: &ChangeHashSet,
     ) -> Res<()> {
         if branch_kind == BranchKind::Replicated {
-            let heads = am_utils_rs::serialize_commit_heads(&heads);
+            let heads = am_utils_rs::serialize_commit_heads(heads);
             self.partition_store
                 .upsert_item(
                     branch_doc_id,
@@ -234,7 +232,7 @@ impl DrawerRepo {
             self.partition_store
                 .remove_item_from_partition(
                     self.replicated_partition_id(),
-                    Arc::clone(&branch_doc_id),
+                    Arc::clone(branch_doc_id),
                 )
                 .await?;
         }
@@ -252,7 +250,7 @@ impl DrawerRepo {
     }
 
     async fn get_branch_heads_by_doc_id(&self, branch_doc_id: &str) -> Res<Option<ChangeHashSet>> {
-        let Some(handle) = self.get_handle_by_branch_doc_id(&branch_doc_id).await? else {
+        let Some(handle) = self.get_handle_by_branch_doc_id(branch_doc_id).await? else {
             return Ok(None);
         };
         let latest_heads = handle
@@ -283,7 +281,7 @@ impl DrawerRepo {
         }) {
             return Ok(Some(handle));
         }
-        let document_id = DocumentId::from_str(&branch_doc_id[..])?;
+        let document_id = DocumentId::from_str(branch_doc_id)?;
         let has_local = self.big_repo.get_doc(&document_id).await?.is_some();
         if !has_local {
             return Ok(None);
@@ -313,7 +311,7 @@ impl DrawerRepo {
         else {
             return Ok(None);
         };
-        let (contains_all_heads, missing_heads) = handle
+        let (contains_all_heads, _missing_heads) = handle
             .with_document_read(|doc| {
                 let mut missing = Vec::new();
                 for head in heads.iter() {

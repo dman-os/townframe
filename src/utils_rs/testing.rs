@@ -22,7 +22,6 @@ fn setup_tracing() -> Res<()> {
     #[cfg(target_arch = "wasm32")]
     let filter: Option<String> = None;
 
-    #[expect(clippy::unnecessary_literal_unwrap)]
     let filter = filter.unwrap_or_else(|| "info,cranelift_codegen=info,wasmtime_internal_cranelift=info,wasmtime=info,rustls=info,h2=info,hyper_util=info,ort::logging=warn,samod_core=warn,netlink_packet_route::link::buffer_tool=error,iroh_quinn_proto::connection=error,subduction_core=warn".into());
 
     // #[cfg(test)]

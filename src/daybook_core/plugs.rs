@@ -709,7 +709,7 @@ impl PlugsRepo {
 
         let repo = Self {
             big_repo: Arc::clone(&big_repo),
-            app_doc_id: app_doc_id.clone(),
+            app_doc_id,
             app_doc_handle,
             store,
             blobs,
@@ -1045,39 +1045,38 @@ impl PlugsRepo {
                 value: (val, _),
                 ..
             } if patch.path.len() == 3
-                && patch.path[1].1 == automerge::Prop::Map("manifests".into()) =>
+                && patch.path[1].1 == automerge::Prop::Map("manifests".into())
+                && key == "vtag" =>
             {
-                if key == "vtag" {
-                    let Some((_obj, automerge::Prop::Map(plug_id))) = patch.path.get(2) else {
-                        return Ok(());
-                    };
+                let Some((_obj, automerge::Prop::Map(plug_id))) = patch.path.get(2) else {
+                    return Ok(());
+                };
 
-                    let vtag_bytes = match val {
-                        automerge::Value::Scalar(scalar) => match &**scalar {
-                            automerge::ScalarValue::Bytes(bytes) => bytes,
-                            _ => return Ok(()),
-                        },
+                let vtag_bytes = match val {
+                    automerge::Value::Scalar(scalar) => match &**scalar {
+                        automerge::ScalarValue::Bytes(bytes) => bytes,
                         _ => return Ok(()),
-                    };
-                    let vtag = VersionTag::hydrate_bytes(vtag_bytes)?;
-                    let event_origin = crate::repos::resolve_origin_from_vtag_actor(
-                        &self.local_actor_id,
-                        &vtag.actor_id,
-                        live_origin,
-                    );
-                    if vtag.version.is_nil() {
-                        out.push(PlugsEvent::PlugAdded {
-                            id: plug_id.clone(),
-                            heads: heads.clone(),
-                            origin: event_origin.clone(),
-                        });
-                    } else {
-                        out.push(PlugsEvent::PlugChanged {
-                            id: plug_id.clone(),
-                            heads: heads.clone(),
-                            origin: event_origin.clone(),
-                        });
-                    }
+                    },
+                    _ => return Ok(()),
+                };
+                let vtag = VersionTag::hydrate_bytes(vtag_bytes)?;
+                let event_origin = crate::repos::resolve_origin_from_vtag_actor(
+                    &self.local_actor_id,
+                    &vtag.actor_id,
+                    live_origin,
+                );
+                if vtag.version.is_nil() {
+                    out.push(PlugsEvent::PlugAdded {
+                        id: plug_id.clone(),
+                        heads: heads.clone(),
+                        origin: event_origin.clone(),
+                    });
+                } else {
+                    out.push(PlugsEvent::PlugChanged {
+                        id: plug_id.clone(),
+                        heads: heads.clone(),
+                        origin: event_origin.clone(),
+                    });
                 }
             }
             automerge::PatchAction::DeleteMap { key }
@@ -1638,7 +1637,7 @@ impl PlugsRepo {
     ) -> Res<()> {
         for hash in next_hashes.difference(prev_hashes) {
             self.blobs
-                .add_hash_to_scope(crate::blobs::BlobScope::Plugs, Arc::clone(&hash))
+                .add_hash_to_scope(crate::blobs::BlobScope::Plugs, Arc::clone(hash))
                 .await?;
         }
         for hash in prev_hashes.difference(next_hashes) {
@@ -1647,7 +1646,7 @@ impl PlugsRepo {
                 .await
             {
                 self.blobs
-                    .remove_hash_from_scope(crate::blobs::BlobScope::Plugs, Arc::clone(&hash))
+                    .remove_hash_from_scope(crate::blobs::BlobScope::Plugs, Arc::clone(hash))
                     .await?;
             }
         }
@@ -2274,11 +2273,11 @@ mod tests {
         tempfile::TempDir,
     )> {
         let local_user_path = daybook_types::doc::UserPathBuf::from("/test-user/test-device");
-        let (big_repo, part_store, _acx_stop) = crate::drawer::tests::boot_repo().await?;
+        let (big_repo, part_store, _acx_stop) = crate::test_support::boot_repo().await?;
 
         let doc = automerge::Automerge::load(&version_updates::version_latest()?)?;
         let handle = big_repo.put_doc(DocumentId::random(), doc).await?;
-        let doc_id = handle.document_id().clone();
+        let doc_id = *handle.document_id();
 
         let temp_dir = tempfile::tempdir()?;
         let blobs = crate::blobs::BlobsRepo::new(
@@ -2290,13 +2289,8 @@ mod tests {
         )
         .await?;
 
-        let (repo, _repo_stop) = PlugsRepo::load(
-            Arc::clone(&big_repo),
-            blobs,
-            doc_id.clone(),
-            local_user_path,
-        )
-        .await?;
+        let (repo, _repo_stop) =
+            PlugsRepo::load(Arc::clone(&big_repo), blobs, doc_id, local_user_path).await?;
         Ok((big_repo, part_store, repo, doc_id, temp_dir))
     }
 

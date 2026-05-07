@@ -201,6 +201,7 @@ pub async fn request_clone_provision_from_url(
 ))]
 pub async fn connect_and_pull_required_partitions_once(
     big_repo: &SharedBigRepo,
+    partition_store: &Arc<am_utils_rs::partition::PartitionStore>,
     blobs_repo: &Arc<crate::blobs::BlobsRepo>,
     local_peer_key: &str,
     iroh_secret_key: iroh::SecretKey,
@@ -217,6 +218,7 @@ pub async fn connect_and_pull_required_partitions_once(
     let endpoint = endpoint_builder.bind().await?;
     let result: Res<()> = pull_required_partitions_via_full_sync_worker(
         big_repo,
+        partition_store,
         blobs_repo,
         local_peer_key,
         &endpoint,
@@ -231,6 +233,7 @@ pub async fn connect_and_pull_required_partitions_once(
 
 async fn pull_required_partitions_via_full_sync_worker(
     big_repo: &SharedBigRepo,
+    partition_store: &Arc<am_utils_rs::partition::PartitionStore>,
     blobs_repo: &Arc<crate::blobs::BlobsRepo>,
     local_peer_key: &str,
     endpoint: &iroh::Endpoint,
@@ -247,7 +250,7 @@ async fn pull_required_partitions_via_full_sync_worker(
     sync_store.allow_peer(source_peer_key.clone()).await?;
 
     let (sync_node_handle, sync_node_stop) = am_utils_rs::sync::node::spawn_sync_node(
-        big_repo.partition_store().clone(),
+        Arc::clone(partition_store),
         sync_store.clone(),
         Arc::new(am_utils_rs::sync::AllowAllPartitionAccessPolicy),
     )
@@ -267,34 +270,36 @@ async fn pull_required_partitions_via_full_sync_worker(
 
     // Ensure blob scope partitions exist locally so bootstrap_blob_scope_memberships
     // doesn't fail on an empty partition store.
-    big_repo
-        .partition_store()
-        .ensure_partition(&CORE_DOCS_PARTITION_ID.to_string())
+    let core_docs_partition_id: am_utils_rs::sync::protocol::PartitionId =
+        CORE_DOCS_PARTITION_ID.into();
+    let drawer_partition_id =
+        crate::drawer::DrawerRepo::replicated_partition_id_for_drawer(&bootstrap.drawer_doc_id);
+    let processor_runlog_partition_id: am_utils_rs::sync::protocol::PartitionId =
+        crate::rt::PROCESSOR_RUNLOG_PARTITION_ID.into();
+    let blob_scope_docs_partition_id: am_utils_rs::sync::protocol::PartitionId =
+        crate::blobs::BLOB_SCOPE_DOCS_PARTITION_ID.into();
+    let blob_scope_plugs_partition_id: am_utils_rs::sync::protocol::PartitionId =
+        crate::blobs::BLOB_SCOPE_PLUGS_PARTITION_ID.into();
+    partition_store
+        .ensure_partition(&core_docs_partition_id)
         .await?;
-    big_repo
-        .partition_store()
-        .ensure_partition(
-            &crate::drawer::DrawerRepo::replicated_partition_id_for_drawer(
-                &bootstrap.drawer_doc_id,
-            ),
-        )
+    partition_store
+        .ensure_partition(&drawer_partition_id)
         .await?;
-    big_repo
-        .partition_store()
-        .ensure_partition(&crate::rt::PROCESSOR_RUNLOG_PARTITION_ID.to_string())
+    partition_store
+        .ensure_partition(&processor_runlog_partition_id)
         .await?;
-    big_repo
-        .partition_store()
-        .ensure_partition(&crate::blobs::BLOB_SCOPE_DOCS_PARTITION_ID.to_string())
+    partition_store
+        .ensure_partition(&blob_scope_docs_partition_id)
         .await?;
-    big_repo
-        .partition_store()
-        .ensure_partition(&crate::blobs::BLOB_SCOPE_PLUGS_PARTITION_ID.to_string())
+    partition_store
+        .ensure_partition(&blob_scope_plugs_partition_id)
         .await?;
 
     let (worker_handle, worker_stop) = super::full::spawn_full_sync_worker(
         Arc::clone(big_repo),
-        source_peer_key.clone().into(),
+        Arc::clone(partition_store),
+        source_peer_key.clone(),
         Arc::clone(blobs_repo),
         None,
         sync_store,
@@ -303,8 +308,8 @@ async fn pull_required_partitions_via_full_sync_worker(
     .await?;
 
     let partitions: HashSet<am_utils_rs::sync::protocol::PartitionId> = [
-        CORE_DOCS_PARTITION_ID.to_string(),
-        crate::blobs::BLOB_SCOPE_PLUGS_PARTITION_ID.to_string(),
+        CORE_DOCS_PARTITION_ID.into(),
+        crate::blobs::BLOB_SCOPE_PLUGS_PARTITION_ID.into(),
     ]
     .into_iter()
     .collect();
@@ -328,11 +333,7 @@ async fn pull_required_partitions_via_full_sync_worker(
         .await?;
 
     let timeout_result = tokio::time::timeout(timeout, async {
-        let required_partitions = partitions
-            .iter()
-            .cloned()
-            .map(super::full::PartitionKey::from_partition_id)
-            .collect::<HashSet<_>>();
+        let required_partitions = partitions.iter().cloned().collect::<HashSet<_>>();
         worker_handle
             .wait_for_peers_fully_synced(vec![peer_id], required_partitions)
             .await
@@ -476,25 +477,31 @@ pub async fn clone_repo_init_from_url(
             crate::repo::globals::set_sync_config(&sql, &sync_config).await?;
         }
 
-        let (big_repo, big_repo_stop) = am_utils_rs::BigRepo::boot(am_utils_rs::repo::Config {
-            storage: am_utils_rs::repo::StorageConfig::Disk {
-                path: staging.join("samod"),
+        let (partition_store, partition_store_stop) =
+            am_utils_rs::partition::PartitionStore::boot(sql.db_pool.clone()).await?;
+        let (big_repo, big_repo_stop) = am_utils_rs::BigRepo::boot(
+            am_utils_rs::repo::Config {
+                storage: am_utils_rs::repo::StorageConfig::Disk {
+                    path: staging.join("samod"),
+                },
+                peer_id: identity.iroh_public_key.into(),
+                secret_key_bytes: identity.iroh_secret_key.to_bytes(),
             },
-            peer_id: identity.iroh_public_key.into(),
-            secret_key_bytes: identity.iroh_secret_key.to_bytes(),
-        })
+            Arc::clone(&partition_store),
+        )
         .await?;
         let blobs_repo = crate::blobs::BlobsRepo::new(
             staging.join("blobs"),
             "clone-bootstrap".into(),
             Arc::new(crate::blobs::PartitionStoreMembershipWriter::new(
-                big_repo.partition_store(),
+                Arc::clone(&partition_store),
             )),
         )
         .await?;
 
         connect_and_pull_required_partitions_once(
             &big_repo,
+            &partition_store,
             &blobs_repo,
             &local_peer_key,
             local_secret.clone(),
@@ -509,8 +516,8 @@ pub async fn clone_repo_init_from_url(
         crate::repo::globals::set_init_state(
             &sql,
             &crate::repo::globals::InitState::Created {
-                doc_id_app: bootstrap.app_doc_id.clone(),
-                doc_id_drawer: bootstrap.drawer_doc_id.clone(),
+                doc_id_app: bootstrap.app_doc_id,
+                doc_id_drawer: bootstrap.drawer_doc_id,
             },
         )
         .await?;
@@ -520,7 +527,8 @@ pub async fn clone_repo_init_from_url(
                 layout,
                 lock_guard,
                 sql: sql.clone(),
-                partition_store: big_repo.partition_store().clone(),
+                partition_store: Arc::clone(&partition_store),
+                partition_store_stop,
                 big_repo: big_repo.clone(),
                 big_repo_stop: std::sync::Mutex::new(Some(big_repo_stop)),
                 local_peer_key,
@@ -534,7 +542,6 @@ pub async fn clone_repo_init_from_url(
                 iroh_secret_key: identity.iroh_secret_key,
                 secret_repo: Arc::clone(&secret_repo),
             },
-            &big_repo,
             staging.join("blobs"),
         )
         .await?;

@@ -468,7 +468,7 @@ impl DocBlobsIndexRepo {
             for attempt in 1..=MAX_ATTEMPTS {
                 let result = self
                     .blobs_repo
-                    .add_hash_to_scope(BlobScope::Docs, Arc::clone(&hash))
+                    .add_hash_to_scope(BlobScope::Docs, Arc::clone(hash))
                     .await;
                 match result {
                     Ok(()) => break,
@@ -483,7 +483,7 @@ impl DocBlobsIndexRepo {
             for attempt in 1..=MAX_ATTEMPTS {
                 let result = self
                     .blobs_repo
-                    .remove_hash_from_scope(BlobScope::Docs, Arc::clone(&hash))
+                    .remove_hash_from_scope(BlobScope::Docs, Arc::clone(hash))
                     .await;
                 match result {
                     Ok(()) => break,
@@ -1010,7 +1010,7 @@ mod tests {
     #[tokio::test(flavor = "multi_thread")]
     async fn doc_blobs_index_publishes_docs_scope_partition_membership() -> Res<()> {
         let local_user_path = daybook_types::doc::UserPathBuf::from("/test-user/test-device");
-        let (big_repo, part_store, big_repo_stop) = crate::drawer::tests::boot_repo().await?;
+        let (big_repo, part_store, big_repo_stop) = crate::test_support::boot_repo().await?;
         let mut drawer_doc = automerge::Automerge::new();
         {
             use automerge::transaction::Transactable;
@@ -1018,11 +1018,10 @@ mod tests {
             tx.put(automerge::ROOT, "version", "0")?;
             tx.commit();
         }
-        let drawer_doc_id = big_repo
+        let drawer_doc_id = *big_repo
             .put_doc(DocumentId::random(), drawer_doc)
             .await?
-            .document_id()
-            .clone();
+            .document_id();
         let temp_dir = tempfile::tempdir()?;
         let blobs_repo = crate::blobs::BlobsRepo::new(
             temp_dir.path().join("blobs"),

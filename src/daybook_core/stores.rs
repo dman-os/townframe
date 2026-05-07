@@ -65,7 +65,7 @@ pub trait AmStore: Hydrate + Reconcile + Send + Sync + 'static {
         big_repo
             .subscribe_change_listener(am_utils_rs::repo::BigRepoChangeFilter {
                 path,
-                doc_id: Some(am_utils_rs::repo::BigRepoDocIdFilter::new(doc_id.clone())),
+                doc_id: Some(am_utils_rs::repo::BigRepoDocIdFilter::new(*doc_id)),
                 origin: None,
             })
             .await

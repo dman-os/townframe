@@ -129,7 +129,7 @@ pub(crate) struct RepoCtxParts {
 }
 
 impl RepoCtx {
-    fn from_parts(
+    pub(crate) fn from_parts(
         parts: RepoCtxParts,
         doc_app: BigDocHandle,
         doc_drawer: BigDocHandle,
@@ -259,7 +259,7 @@ impl RepoCtx {
 
     pub async fn init(
         repo_root: &std::path::Path,
-        options: RepoOpenOptions,
+        _options: RepoOpenOptions,
         repo_name: String,
         local_device_name: String,
     ) -> Res<Arc<Self>> {
@@ -371,7 +371,7 @@ impl RepoCtx {
             blobs_root.clone(),
             local_user_path.to_owned(),
             Arc::new(crate::blobs::PartitionStoreMembershipWriter::new(
-                Arc::clone(&partition_store),
+                Arc::clone(partition_store),
             )),
         )
         .await?;
@@ -386,7 +386,7 @@ impl RepoCtx {
             let (repo, stop) = PlugsRepo::load(
                 Arc::clone(big_repo),
                 Arc::clone(&blobs_repo),
-                doc_app.document_id().clone(),
+                *doc_app.document_id(),
                 local_user_path.to_owned(),
             )
             .await
@@ -396,7 +396,7 @@ impl RepoCtx {
 
             let (config_repo, stop) = ConfigRepo::load(
                 Arc::clone(big_repo),
-                doc_app.document_id().clone(),
+                *doc_app.document_id(),
                 Arc::clone(plugs_repo.as_ref().expect("plugs repo must be loaded")),
                 local_user_path.to_owned(),
                 sql.clone(),
@@ -420,7 +420,7 @@ impl RepoCtx {
 
             let (_tables_repo, stop) = TablesRepo::load(
                 Arc::clone(big_repo),
-                doc_app.document_id().clone(),
+                *doc_app.document_id(),
                 local_user_path.to_owned(),
             )
             .await?;
@@ -434,7 +434,7 @@ impl RepoCtx {
 
             let (_dispatch_repo, stop) = DispatchRepo::load(
                 Arc::clone(big_repo),
-                doc_app.document_id().clone(),
+                *doc_app.document_id(),
                 UserPathBuf::from(local_user_path.to_string()),
                 sql.clone(),
             )
@@ -451,8 +451,8 @@ impl RepoCtx {
 
             let (_drawer_repo, stop) = DrawerRepo::load(
                 Arc::clone(big_repo),
-                Arc::clone(&partition_store),
-                doc_drawer.document_id().clone(),
+                Arc::clone(partition_store),
+                *doc_drawer.document_id(),
                 UserPathBuf::from(local_user_path.to_string()),
                 sql.clone(),
                 blobs_root
@@ -760,8 +760,8 @@ async fn init_core_docs(
     globals::set_init_state(
         repo_sql,
         &globals::InitState::Created {
-            doc_id_app: app_doc.document_id().clone(),
-            doc_id_drawer: drawer_doc.document_id().clone(),
+            doc_id_app: *app_doc.document_id(),
+            doc_id_drawer: *drawer_doc.document_id(),
         },
     )
     .await?;

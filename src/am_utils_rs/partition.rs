@@ -239,7 +239,7 @@ impl PartitionStore {
         capacity: usize,
     ) -> Res<tokio::sync::mpsc::Receiver<PartitionItemEvent>> {
         ensure_partition_exists(&self.state_pool, partition_id).await?;
-        let partition_id = partition_id.clone();
+        let partition_id = Arc::clone(partition_id);
         let store = self.clone();
         let cancel_token = self.partition_forwarder_cancel.clone();
         let mut live_rx = self.partition_events_tx.subscribe();
@@ -255,7 +255,7 @@ impl PartitionStore {
                         let (events, _next_cursor, has_more) = load_item_partition_page(
                             &store.state_pool,
                             &PartitionCursorRequest {
-                                partition_id: partition_id.clone(),
+                                partition_id: Arc::clone(&partition_id),
                                 since: Some(high_watermark),
                             },
                             DEFAULT_EVENT_PAGE_LIMIT as usize,
@@ -310,7 +310,7 @@ impl PartitionStore {
                         };
                         let doc_event = PartitionItemEvent {
                             cursor: txid,
-                            partition_id: partition_id.clone(),
+                            partition_id: Arc::clone(&partition_id),
                             deets,
                         };
                         high_watermark = txid;
@@ -393,7 +393,7 @@ impl PartitionStore {
                 load_member_partition_page(&self.state_pool, part, limit).await?;
             events.append(&mut part_events);
             cursors.push(PartitionCursorPage {
-                partition_id: part.partition_id.clone(),
+                partition_id: Arc::clone(&part.partition_id),
                 next_cursor,
                 has_more,
             });
@@ -415,7 +415,7 @@ impl PartitionStore {
                 load_item_partition_page(&self.state_pool, part, limit).await?;
             events.append(&mut part_events);
             cursors.push(PartitionCursorPage {
-                partition_id: part.partition_id.clone(),
+                partition_id: Arc::clone(&part.partition_id),
                 next_cursor,
                 has_more,
             });
@@ -434,7 +434,7 @@ impl PartitionStore {
             .partitions
             .iter()
             .map(|item| PartitionCursorRequest {
-                partition_id: item.partition_id.clone(),
+                partition_id: Arc::clone(&item.partition_id),
                 since: item.since_member,
             })
             .collect();
@@ -442,14 +442,14 @@ impl PartitionStore {
             .partitions
             .iter()
             .map(|item| PartitionCursorRequest {
-                partition_id: item.partition_id.clone(),
+                partition_id: Arc::clone(&item.partition_id),
                 since: item.since_event,
             })
             .collect();
         let requested: HashSet<PartitionId> = reqs
             .partitions
             .iter()
-            .map(|item| item.partition_id.clone())
+            .map(|item| Arc::clone(&item.partition_id))
             .collect();
         let (tx, rx) = tokio::sync::mpsc::channel(capacity.max(1));
         let mut member_high_watermark: HashMap<PartitionId, u64> = reqs
@@ -457,7 +457,7 @@ impl PartitionStore {
             .iter()
             .map(|item| {
                 (
-                    item.partition_id.clone(),
+                    Arc::clone(&item.partition_id),
                     item.since_member.unwrap_or_default(),
                 )
             })
@@ -467,7 +467,7 @@ impl PartitionStore {
             .iter()
             .map(|item| {
                 (
-                    item.partition_id.clone(),
+                    Arc::clone(&item.partition_id),
                     item.since_event.unwrap_or_default(),
                 )
             })
@@ -486,7 +486,7 @@ impl PartitionStore {
                         .await?;
                     for event in replay_members.events {
                         let entry = member_high_watermark
-                            .entry(event.partition_id.clone())
+                            .entry(Arc::clone(&event.partition_id))
                             .or_default();
                         *entry = (*entry).max(event.cursor);
                         if tx
@@ -531,7 +531,7 @@ impl PartitionStore {
                         .await?;
                     for event in replay_docs.events {
                         let entry = doc_high_watermark
-                            .entry(event.partition_id.clone())
+                            .entry(Arc::clone(&event.partition_id))
                             .or_default();
                         *entry = (*entry).max(event.cursor);
                         if tx.send(SubscriptionEvent::ItemEvent(event)).await.is_err() {
@@ -578,7 +578,7 @@ impl PartitionStore {
                         continue;
                     }
                     let txid = event.cursor;
-                    let partition_id = event.partition_id.clone();
+                    let partition_id = Arc::clone(&event.partition_id);
                     match event.deets {
                         PartitionEventDeets::MemberUpsert { item_id } => {
                             let high_watermark =
@@ -589,7 +589,7 @@ impl PartitionStore {
                             if tx
                                 .send(SubscriptionEvent::MemberEvent(PartitionMemberEvent {
                                     cursor: event.cursor,
-                                    partition_id: partition_id.clone(),
+                                    partition_id: Arc::clone(&partition_id),
                                     deets: PartitionMemberEventDeets::MemberUpsert { item_id },
                                 }))
                                 .await
@@ -608,7 +608,7 @@ impl PartitionStore {
                             if tx
                                 .send(SubscriptionEvent::MemberEvent(PartitionMemberEvent {
                                     cursor: event.cursor,
-                                    partition_id: partition_id.clone(),
+                                    partition_id: Arc::clone(&partition_id),
                                     deets: PartitionMemberEventDeets::MemberRemoved { item_id },
                                 }))
                                 .await
@@ -629,7 +629,7 @@ impl PartitionStore {
                             if tx
                                 .send(SubscriptionEvent::ItemEvent(PartitionItemEvent {
                                     cursor: event.cursor,
-                                    partition_id: partition_id.clone(),
+                                    partition_id: Arc::clone(&partition_id),
                                     deets: PartitionItemEventDeets::ItemChanged {
                                         item_id,
                                         payload,
@@ -653,7 +653,7 @@ impl PartitionStore {
                             if tx
                                 .send(SubscriptionEvent::ItemEvent(PartitionItemEvent {
                                     cursor: event.cursor,
-                                    partition_id: partition_id.clone(),
+                                    partition_id: Arc::clone(&partition_id),
                                     deets: PartitionItemEventDeets::ItemDeleted {
                                         item_id,
                                         payload,
@@ -715,7 +715,7 @@ impl PartitionStore {
             self.partition_events_tx
                 .send(PartitionEvent {
                     cursor: txid,
-                    partition_id: partition_id.clone(),
+                    partition_id: Arc::clone(partition_id),
                     deets: PartitionEventDeets::MemberUpsert {
                         item_id: Arc::clone(&item_id),
                     },
@@ -776,7 +776,7 @@ impl PartitionStore {
         self.partition_events_tx
             .send(PartitionEvent {
                 cursor: txid,
-                partition_id: partition_id.clone(),
+                partition_id: Arc::clone(partition_id),
                 deets: PartitionEventDeets::MemberUpsert {
                     item_id: Arc::clone(&item_id),
                 },
@@ -786,7 +786,7 @@ impl PartitionStore {
             self.partition_events_tx
                 .send(PartitionEvent {
                     cursor: txid,
-                    partition_id: partition_id.clone(),
+                    partition_id: Arc::clone(partition_id),
                     deets: PartitionEventDeets::ItemChanged { item_id, payload },
                 })
                 .ok();
@@ -872,7 +872,7 @@ impl PartitionStore {
         self.partition_events_tx
             .send(PartitionEvent {
                 cursor: txid,
-                partition_id: partition_id,
+                partition_id,
                 deets: PartitionEventDeets::ItemDeleted {
                     item_id,
                     payload: item_payload,
@@ -1085,7 +1085,7 @@ async fn ensure_partition_exists(pool: &sqlx::SqlitePool, partition_id: &Partiti
     }
     Err(
         crate::sync::protocol::PartitionSyncError::UnknownPartition {
-            partition_id: partition_id.clone(),
+            partition_id: Arc::clone(partition_id),
         }
         .into(),
     )
@@ -1151,7 +1151,7 @@ async fn load_member_partition_page(
             };
             Ok(PartitionMemberEvent {
                 cursor: txid.max(0) as u64,
-                partition_id: req.partition_id.clone(),
+                partition_id: Arc::clone(&req.partition_id),
                 deets,
             })
         })
@@ -1231,7 +1231,7 @@ async fn load_item_partition_page(
             };
             Ok(PartitionItemEvent {
                 cursor: event_txid.max(0) as u64,
-                partition_id: req.partition_id.clone(),
+                partition_id: Arc::clone(&req.partition_id),
                 deets,
             })
         })
@@ -1262,7 +1262,7 @@ mod tests {
     use tokio::time::{timeout, Duration};
 
     async fn make_store() -> Arc<PartitionStore> {
-        let (store, _stop) = crate::repo::tests::boot_part_store(&"sqlite::memory:")
+        let (store, _stop) = crate::repo::tests::boot_part_store("sqlite::memory:")
             .await
             .expect("error booting in memory part store");
         store
@@ -1402,7 +1402,7 @@ mod tests {
 
         let req = SubPartitionsRequest {
             partitions: vec![crate::sync::protocol::PartitionStreamCursorRequest {
-                partition_id: partition_id.clone(),
+                partition_id: Arc::clone(&partition_id),
                 since_member: None,
                 since_event: None,
             }],
@@ -1507,7 +1507,7 @@ mod tests {
             let response = store
                 .get_partition_member_events(&GetPartitionMemberEventsRequest {
                     partitions: vec![PartitionCursorRequest {
-                        partition_id: partition_id.clone(),
+                        partition_id: Arc::clone(&partition_id),
                         since,
                     }],
                     limit: 1,
@@ -1560,7 +1560,7 @@ mod tests {
             let response = store
                 .get_partition_item_events(&GetPartitionItemEventsRequest {
                     partitions: vec![PartitionCursorRequest {
-                        partition_id: partition_id.clone(),
+                        partition_id: Arc::clone(&partition_id),
                         since,
                     }],
                     limit: 1,

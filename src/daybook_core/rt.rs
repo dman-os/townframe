@@ -2034,7 +2034,6 @@ async fn start_bundle_workload(
 }
 
 #[cfg(test)]
-#[expect(clippy::items_after_test_module)]
 mod tests {
     use super::*;
     use sqlx::sqlite::SqlitePoolOptions;

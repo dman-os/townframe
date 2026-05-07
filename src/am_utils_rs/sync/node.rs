@@ -159,7 +159,7 @@ impl SyncNodeWorker {
                             .can_access_partition(&peer, &part.partition_id)
                         {
                             return Err(PartitionSyncError::AccessDenied {
-                                partition_id: part.partition_id.clone(),
+                                partition_id: Arc::clone(&part.partition_id),
                             });
                         }
                     }
@@ -214,7 +214,7 @@ impl SyncNodeWorker {
                 .can_access_partition(peer, &req.partition_id)
             {
                 return Err(PartitionSyncError::AccessDenied {
-                    partition_id: req.partition_id.clone(),
+                    partition_id: Arc::clone(&req.partition_id),
                 });
             }
         }
@@ -224,7 +224,7 @@ impl SyncNodeWorker {
     async fn ensure_known_peer(&self, peer: &PeerKey) -> Result<(), PartitionSyncError> {
         let known = self
             .sync_store
-            .is_peer_allowed(peer.clone())
+            .is_peer_allowed(Arc::clone(peer))
             .await
             .map_err(map_store_err)?;
         if known {
