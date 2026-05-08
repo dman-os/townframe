@@ -306,6 +306,11 @@ struct Tasks {
 
 impl Tasks {
     fn stop_task(&mut self, id: TaskId) {
+        if self.pending.remove(&id).is_some() {
+            self.all.remove(&id);
+            return;
+        }
+        self.spawn_queue.retain(|task| task.id != id);
         self.stop_queue.insert(id);
     }
 
@@ -356,6 +361,20 @@ impl Tasks {
         self.all.insert(id, TaskState { retry });
         self.pending.insert(id, (Task { id, deets }, due_at));
         id
+    }
+
+    fn enqueue_due_tasks(&mut self, now: Instant) {
+        let due_task_ids: Vec<_> = self
+            .pending
+            .iter()
+            .filter_map(|(task_id, (_, due_at))| (*due_at <= now).then_some(*task_id))
+            .collect();
+        for task_id in due_task_ids {
+            let Some((task, _)) = self.pending.remove(&task_id) else {
+                continue;
+            };
+            self.spawn_queue.push(task);
+        }
     }
 
     pub fn drain_spawn_queue(&mut self) -> std::vec::Drain<'_, Task> {
@@ -439,36 +458,26 @@ pub struct BigSyncMachine {
 }
 
 impl BigSyncMachine {
-    pub fn tasks_mut(&mut self) -> &mut Tasks {
-        &mut self.tasks
+    pub fn drain_spawn_queue(&mut self) -> std::vec::Drain<'_, Task> {
+        self.tasks.drain_spawn_queue()
     }
 
-    pub async fn run<K: FutureForm, S: PartitionStore<K>>(
-        &mut self,
-        host_rx: &mpsc::Receiver<BigSyncCommand>,
-        inbox_rx: &mpsc::Receiver<BigSyncMsg>,
-        part_store: &S,
-    ) {
-        futures::select_biased! {
-            res = inbox_rx.recv().fuse() => {
-                let msg = res.expect(ERROR_CALLER);
-                self.handle_msg(msg, part_store).await;
-            }
-            res = host_rx.recv().fuse() => {
-                let msg = res.expect(ERROR_CALLER);
-                self.handle_cmd(msg);
-            }
-        }
+    pub fn drain_stop_queue(&mut self) -> std::collections::hash_set::Drain<'_, u64> {
+        self.tasks.drain_stop_queue()
     }
 
-    fn handle_cmd(&mut self, cmd: BigSyncCommand) {
+    pub fn handle_cmd(&mut self, cmd: BigSyncCommand) {
         match cmd {
             BigSyncCommand::SetPeer(evt) => self.handle_set_peer_evt(evt),
             BigSyncCommand::RemovePeer(evt) => self.handle_remove_peer_evt(evt),
         }
     }
 
-    async fn handle_msg<K: FutureForm, S: PartitionStore<K>>(
+    pub fn handle_tick(&mut self, now: Instant) {
+        self.tasks.enqueue_due_tasks(now);
+    }
+
+    pub async fn handle_msg<K: FutureForm, S: PartitionStore<K>>(
         &mut self,
         msg: BigSyncMsg,
         part_store: &S,

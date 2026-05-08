@@ -202,7 +202,7 @@ impl CursorSyncMachine {
                 part_store.remove_obj_from_part(obj_id, part_id).await;
                 let old = state.slots.insert(cursor, CursorSlotState::Ready);
                 assert!(old.is_none(), "fishy");
-                self.drain_ready_cursor_advances(peer, part_id, &part_store)
+                self.drain_ready_cursor_advances(peer, part_id, part_store)
                     .await;
                 // if obj is still in other partitons, no need for a delete command
                 return;
