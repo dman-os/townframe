@@ -6,7 +6,7 @@ use crate::interlude::*;
 pub type CursorIndex = u64;
 pub type ObjPayload = serde_json::Value;
 
-#[derive(Debug, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct PeerPartCursors {
     pub member_cursor: CursorIndex,
     pub obj_cursor: CursorIndex,

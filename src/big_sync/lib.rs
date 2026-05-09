@@ -4,23 +4,59 @@ mod interlude {
     pub use tokio_util::sync::CancellationToken;
 }
 
-use future_form::{FutureForm, Sendable};
-use futures::future::BoxFuture;
-use irpc::{channel::none::NoSender, rpc_requests, Client, WithChannels};
-use serde::{Deserialize, Serialize};
-
 use big_sync_core::{
-    mpsc,
-    part_store::{ObjPayload, PartitionStore, PeerPartCursors},
-    rpc::BigSyncRpcClient,
-    BigSyncEvent, BigSyncMachine, BigSyncMsg, ObjId, PartId, PeerId, SyncCompletion, SyncTask,
+    mpsc, BigSyncEvent, BigSyncMachine, BigSyncMsg, PartId, PeerId, SyncCompletion, SyncTask,
     SyncTaskDeets, TaskCtx, TaskId,
 };
 
 mod part_store;
 mod rpc;
+mod trap;
 
 use crate::interlude::*;
+
+pub struct BigSyncWorkerHandle {
+    host_tx: tokio::sync::mpsc::Sender<BigSyncWorkerMsg>,
+}
+
+type SharedPartitionStore = Arc<dyn part_store::HostPartitionStore>;
+type SharedPeerRpcClient = Arc<dyn rpc::HostBigRpcClient>;
+type SharedRpcClients = Arc<std::sync::Mutex<HashMap<PeerId, SharedPeerRpcClient>>>;
+
+#[derive(Debug, thiserror::Error, displaydoc::Display, Serialize, Deserialize)]
+pub enum BigSyncWorkerError {
+    /// Unkown backend {backend_id} set for part {part_id}
+    UnknownBackend {
+        backend_id: BackendId,
+        part_id: PartId,
+    },
+}
+
+structstruck::strike! {
+    enum BigSyncWorkerMsg {
+        SetPeer {
+            peer_id: PeerId,
+            client: SharedPeerRpcClient,
+            /// Partitions to sync from the peer
+            parts: HashMap<PartId, BackendId>,
+            resp: tokio::sync::oneshot::Sender<Result<(), BigSyncWorkerError>>
+        },
+        RemovePeer {
+            peer_id: PeerId,
+        },
+    }
+}
+
+#[async_trait]
+pub trait SyncBackend: Send + Sync + 'static {
+    async fn run(
+        &self,
+        task: SyncTaskDeets,
+        part_store: SharedPartitionStore,
+    ) -> Res<Vec<SyncCompletion>>;
+}
+
+pub type BackendId = u64;
 
 pub struct StopToken {
     pub cancel_token: CancellationToken,
@@ -38,44 +74,9 @@ impl StopToken {
     }
 }
 
-pub type BigSyncWorkerHandle = Client<BigSyncWorkerProtocol>;
-type SharedPartitionStore = Arc<dyn part_store::HostPartitionStore>;
-type SharedPeerRpcClient = Arc<dyn rpc::HostBigRpcClient>;
-type SharedRpcClients = Arc<std::sync::Mutex<HashMap<PeerId, SharedPeerRpcClient>>>;
-
-#[rpc_requests(message = BigSyncWorkerMessage)]
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub enum BigSyncWorkerProtocol {
-    #[rpc(tx = NoSender)]
-    SetPeer(SetPeerCommand),
-    #[rpc(tx = NoSender)]
-    RemovePeer(RemovePeerCommand),
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct SetPeerCommand {
-    pub peer_id: PeerId,
-    /// Partitions to sync from the peer
-    pub parts: std::collections::HashSet<PartId>,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct RemovePeerCommand {
-    pub peer_id: PeerId,
-}
-
-pub async fn set_peer(client: &BigSyncWorkerHandle, cmd: SetPeerCommand) -> Res<()> {
-    client.notify(cmd).await.wrap_err(ERROR_CHANNEL)?;
-    Ok(())
-}
-
-pub async fn remove_peer(client: &BigSyncWorkerHandle, cmd: RemovePeerCommand) -> Res<()> {
-    client.notify(cmd).await.wrap_err(ERROR_CHANNEL)?;
-    Ok(())
-}
-
 pub fn spawn_big_sync_worker(
     part_store: SharedPartitionStore,
+    sync_backends: HashMap<BackendId, Arc<dyn SyncBackend>>,
 ) -> Res<(BigSyncWorkerHandle, StopToken)> {
     let cancel_token = CancellationToken::new();
     let task_set = utils_rs::AbortableJoinSet::new();
@@ -85,20 +86,22 @@ pub fn spawn_big_sync_worker(
     let (sync_tx, sync_rx) = mpsc::bounded(64, "SyncWorkers".into(), "BigSyncMachine".into());
     let (task_tx, task_rx) = mpsc::bounded(64, "BigSync tasks".into(), "BigSyncMachine".into());
     let mut worker = BigSyncWorker {
-        task_set,
-        sync_backends: default(),
-        part_store,
-        rpc_clients: default(),
         cancel_token: cancel_token.clone(),
-        host_rx,
+        task_set,
+        part_store,
+        sync_backends,
         machine,
-        tasks: default(),
-        sync_tasks: default(),
 
+        host_rx,
         sync_tx,
         sync_rx,
         task_tx,
         task_rx,
+
+        rpc_clients: default(),
+        tasks: default(),
+        sync_tasks: default(),
+        peers: default(),
     };
     let fut = {
         let cancel_token = cancel_token.clone();
@@ -147,75 +150,12 @@ pub fn spawn_big_sync_worker(
     let join_handle = tokio::task::spawn(async move { fut.await.unwrap() }.in_current_span());
 
     Ok((
-        Client::local(host_tx),
+        BigSyncWorkerHandle { host_tx },
         StopToken {
             cancel_token,
             join_handle,
         },
     ))
-}
-
-#[async_trait]
-pub trait SyncBackend: Send + Sync + 'static {
-    async fn run(
-        &self,
-        task: SyncTaskDeets,
-        part_store: SharedPartitionStore,
-    ) -> Res<Vec<SyncCompletion>>;
-}
-
-struct SyncTaskWorker {
-    task: SyncTask,
-    backend: Arc<dyn SyncBackend>,
-    part_store: SharedPartitionStore,
-    host_tx: mpsc::Sender<BigSyncEvent>,
-    cancel_token: CancellationToken,
-}
-
-impl SyncTaskWorker {
-    async fn run(self) {
-        let res = tokio::select! {
-            biased;
-            () = self.cancel_token.cancelled() => {
-                return;
-            }
-            res = self.backend.run(self.task.deets.clone(), Arc::clone(&self.part_store)) => res,
-        };
-        match res {
-            Ok(completions) => {
-                for completion in completions {
-                    let (peer_id, obj_id) = match &completion {
-                        SyncCompletion::AddedMember { peer, obj_id, .. }
-                        | SyncCompletion::ChangedObject { peer, obj_id }
-                        | SyncCompletion::DeletedMember { peer, obj_id }
-                        | SyncCompletion::Noop { peer, obj_id } => (*peer, *obj_id),
-                    };
-                    self.host_tx
-                        .send(BigSyncEvent::SyncCompleted(
-                            big_sync_core::SyncCompletedEvent {
-                                task_id: self.task.id,
-                                peer_id,
-                                obj_id,
-                                completion,
-                            },
-                        ))
-                        .await
-                        .expect(ERROR_CHANNEL);
-                }
-            }
-            Err(err) => {
-                self.host_tx
-                    .send(BigSyncEvent::SyncFailed(big_sync_core::SyncFailedEvent {
-                        task_id: self.task.id,
-                        peer_id: self.task.deets.peer_id,
-                        obj_id: self.task.deets.obj_id,
-                        err,
-                    }))
-                    .await
-                    .expect(ERROR_CHANNEL);
-            }
-        }
-    }
 }
 
 #[derive(educe::Educe)]
@@ -238,20 +178,25 @@ struct BigSyncWorker {
     cancel_token: CancellationToken,
 
     task_set: utils_rs::AbortableJoinSet,
+    sync_backends: HashMap<BackendId, Arc<dyn SyncBackend>>,
 
-    tasks: HashMap<TaskId, TaskDeets>,
-    sync_tasks: HashMap<TaskId, ActiveSyncTaskDeets>,
-    sync_backends: HashMap<u64, Arc<dyn SyncBackend>>,
-    rpc_clients: SharedRpcClients,
-    part_store: SharedPartitionStore,
-
-    host_rx: tokio::sync::mpsc::Receiver<BigSyncWorkerMessage>,
+    host_rx: tokio::sync::mpsc::Receiver<BigSyncWorkerMsg>,
     machine: BigSyncMachine,
 
     sync_rx: mpsc::Receiver<BigSyncEvent>,
     sync_tx: mpsc::Sender<BigSyncEvent>,
     task_rx: mpsc::Receiver<BigSyncMsg>,
     task_tx: mpsc::Sender<BigSyncMsg>,
+
+    tasks: HashMap<TaskId, TaskDeets>,
+    peers: HashMap<PeerId, PeerState>,
+    sync_tasks: HashMap<TaskId, ActiveSyncTaskDeets>,
+    rpc_clients: SharedRpcClients,
+    part_store: SharedPartitionStore,
+}
+
+struct PeerState {
+    parts: HashMap<PartId, BackendId>,
 }
 
 struct TaskDeets {
@@ -264,54 +209,25 @@ struct ActiveSyncTaskDeets {
     handle: utils_rs::TaskHandle,
 }
 
-#[derive(Clone)]
-struct TaskTrap {
-    tx: tokio::sync::mpsc::Sender<eyre::Report>,
-}
-
-enum Never {}
-
-impl TaskTrap {
-    fn new() -> (Self, tokio::sync::mpsc::Receiver<eyre::Report>) {
-        let (tx, rx) = tokio::sync::mpsc::channel(1);
-        (Self { tx }, rx)
-    }
-
-    async fn run_or_trap<F, O>(&self, fut: F) -> O
-    where
-        F: std::future::Future<Output = Res<O>>,
-    {
-        match fut.await {
-            Ok(val) => val,
-            Err(err) => {
-                self.trap(err).await;
-                unreachable!()
-            }
-        }
-    }
-
-    async fn trap(&self, err: eyre::Report) -> Never {
-        self.tx.send(err).await.expect(ERROR_CHANNEL);
-        std::future::pending::<()>().await;
-        unreachable!()
-    }
-}
-
 const MAX_ACTIVE_SYNC_TASKS: usize = 32;
 
+enum LoopAction {
+    Cont,
+    Break,
+}
 impl BigSyncWorker {
     async fn machine_loop(&mut self, shutdown: Arc<BigRedToken>) -> Res<()> {
         let mut janitor_tick = tokio::time::interval(Duration::from_millis(500));
-        let (trap, mut err_rx) = TaskTrap::new();
+        let (trap, mut err_rx) = trap::TaskTrap::new();
         loop {
-            let part_store = TrappedTaskStore {
+            let part_store = trap::TrappedPartStore {
                 trap: trap.clone(),
                 inner: Arc::clone(&self.part_store),
             };
-            tokio::select! {
+            let loop_action = tokio::select! {
                 biased;
                 _ = self.cancel_token.cancelled() => {
-                    break;
+                    LoopAction::Break
                 }
                 res = err_rx.recv() => {
                     let err = res.expect(ERROR_IMPOSSIBLE);
@@ -319,34 +235,31 @@ impl BigSyncWorker {
                 },
                 msg = self.task_rx.recv() => {
                     let msg = msg.expect(ERROR_CALLER);
-                    self.machine.handle_msg(msg, &part_store).await;
+                    run_until_cancelled_or_trapped(
+                        &self.cancel_token,
+                        &mut err_rx,
+                        self.machine.handle_msg(msg, &part_store)
+                    ).await?
                 }
                 evt = self.sync_rx.recv() => {
                     let evt = evt.expect(ERROR_CALLER);
-                    self.machine.handle_evt(evt, &part_store).await;
+                    run_until_cancelled_or_trapped(
+                        &self.cancel_token,
+                        &mut err_rx,
+                        self.machine.handle_evt(evt, &part_store)
+                    ).await?
                 }
                 cmd = self.host_rx.recv() => {
-                    let cmd = cmd.expect(ERROR_CALLER);
-                    let evt = match cmd {
-                        BigSyncWorkerMessage::SetPeer(msg) => {
-                            let WithChannels { inner, .. } = msg;
-                            BigSyncEvent::SetPeer(big_sync_core::SetPeerEvent {
-                                peer_id: inner.peer_id,
-                                parts: inner.parts.into_iter().collect(),
-                            })
-                        }
-                        BigSyncWorkerMessage::RemovePeer(msg) => {
-                            let WithChannels { inner, .. } = msg;
-                            BigSyncEvent::RemovePeer(big_sync_core::RemovePeerEvent {
-                                peer_id: inner.peer_id,
-                            })
-                        }
-                    };
-                    self.machine.handle_evt(evt, &part_store).await;
+                    let msg = cmd.expect(ERROR_CALLER);
+                    self.handle_msg(msg, &mut err_rx, &part_store).await?
                 }
                 _ = janitor_tick.tick() => {
                     self.machine.handle_tick(std::time::Instant::now());
+                    LoopAction::Cont
                 }
+            };
+            if matches!(loop_action, LoopAction::Break) {
+                break;
             }
 
             self.batch_stop_tasks().await?;
@@ -362,6 +275,58 @@ impl BigSyncWorker {
             }
         }
         Ok(())
+    }
+
+    async fn handle_msg(
+        &mut self,
+        msg: BigSyncWorkerMsg,
+        err_rx: &mut tokio::sync::mpsc::Receiver<eyre::Report>,
+        part_store: &trap::TrappedPartStore,
+    ) -> Res<LoopAction> {
+        let evt = match msg {
+            BigSyncWorkerMsg::SetPeer {
+                peer_id,
+                client,
+                parts,
+                resp,
+            } => {
+                for (&part_id, &backend_id) in &parts {
+                    if !self.sync_backends.contains_key(&backend_id) {
+                        resp.send(Err(BigSyncWorkerError::UnknownBackend {
+                            backend_id,
+                            part_id,
+                        }))
+                        .inspect_err(|_| warn!(ERROR_CALLER))
+                        .ok();
+                        return Ok(LoopAction::Cont);
+                    }
+                }
+                self.rpc_clients
+                    .lock()
+                    .expect(ERROR_MUTEX)
+                    .insert(peer_id, client);
+                self.peers.insert(
+                    peer_id,
+                    PeerState {
+                        parts: parts.clone(),
+                    },
+                );
+                BigSyncEvent::SetPeer(big_sync_core::SetPeerEvent {
+                    peer_id: peer_id,
+                    parts: parts.into_keys().collect(),
+                })
+            }
+            BigSyncWorkerMsg::RemovePeer { peer_id } => {
+                self.peers.remove(&peer_id);
+                BigSyncEvent::RemovePeer(big_sync_core::RemovePeerEvent { peer_id })
+            }
+        };
+        run_until_cancelled_or_trapped(
+            &self.cancel_token,
+            err_rx,
+            self.machine.handle_evt(evt, part_store),
+        )
+        .await
     }
 
     async fn batch_stop_tasks(&mut self) -> Res<()> {
@@ -454,8 +419,8 @@ struct MachineTaskWorker {
 
 impl MachineTaskWorker {
     async fn run(self) {
-        let (trap, mut err_rx) = TaskTrap::new();
-        let part_store = TrappedTaskStore {
+        let (trap, mut err_rx) = trap::TaskTrap::new();
+        let part_store = trap::TrappedPartStore {
             trap: trap.clone(),
             inner: Arc::clone(&self.part_store),
         };
@@ -471,7 +436,7 @@ impl MachineTaskWorker {
                 .map(|(&peer_id, client)| {
                     (
                         peer_id,
-                        TrappedRpcClient {
+                        trap::TrappedRpcClient {
                             trap: trap.clone(),
                             inner: Arc::clone(&client),
                         },
@@ -494,92 +459,71 @@ impl MachineTaskWorker {
     }
 }
 
-struct TrappedTaskStore {
-    trap: TaskTrap,
-    inner: SharedPartitionStore,
+struct SyncTaskWorker {
+    task: SyncTask,
+    backend: Arc<dyn SyncBackend>,
+    part_store: SharedPartitionStore,
+    host_tx: mpsc::Sender<BigSyncEvent>,
+    cancel_token: CancellationToken,
 }
 
-impl PartitionStore<Sendable> for TrappedTaskStore {
-    fn member_count<'a>(&'a self, part_id: PartId) -> BoxFuture<'a, u64> {
-        let fut = self.inner.member_count(part_id);
-        Sendable::from_future(self.trap.run_or_trap(fut))
-    }
-
-    fn obj_payload<'a>(&'a self, obj_id: ObjId) -> BoxFuture<'a, Option<ObjPayload>> {
-        let fut = self.inner.obj_payload(obj_id);
-        Sendable::from_future(self.trap.run_or_trap(fut))
-    }
-
-    fn upsert_obj<'a>(
-        &'a self,
-        obj_id: ObjId,
-        payload: &ObjPayload,
-        parts: &[PartId],
-    ) -> BoxFuture<'a, ()> {
-        let fut = self.inner.upsert_obj(obj_id, payload.clone(), parts.into());
-        Sendable::from_future(self.trap.run_or_trap(fut))
-    }
-
-    fn obj_parts<'a>(&'a self, obj_id: ObjId) -> BoxFuture<'a, Vec<PartId>> {
-        let fut = self.inner.obj_parts(obj_id);
-        Sendable::from_future(self.trap.run_or_trap(fut))
-    }
-
-    fn add_obj_to_parts<'a>(&'a self, obj_id: ObjId, parts: &[PartId]) -> BoxFuture<'a, ()> {
-        let fut = self.inner.add_obj_to_parts(obj_id, parts.into());
-        Sendable::from_future(self.trap.run_or_trap(fut))
-    }
-
-    fn remove_obj_from_part<'a>(&'a self, obj_id: ObjId, part_id: PartId) -> BoxFuture<'a, ()> {
-        let fut = self.inner.remove_obj_from_part(obj_id, part_id);
-        Sendable::from_future(self.trap.run_or_trap(fut))
-    }
-
-    fn get_peer_part_cursor<'a>(
-        &'a self,
-        peer_id: PeerId,
-        part_id: PartId,
-    ) -> BoxFuture<'a, PeerPartCursors> {
-        let fut = self.inner.get_peer_part_cursor(peer_id, part_id);
-        Sendable::from_future(self.trap.run_or_trap(fut))
-    }
-
-    fn set_peer_part_cursor<'a>(
-        &'a self,
-        peer_id: PeerId,
-        part_id: PartId,
-        cursors: PeerPartCursors,
-    ) -> BoxFuture<'a, ()> {
-        let fut = self.inner.set_peer_part_cursor(peer_id, part_id, cursors);
-        Sendable::from_future(self.trap.run_or_trap(fut))
+impl SyncTaskWorker {
+    async fn run(self) {
+        let res = tokio::select! {
+            biased;
+            () = self.cancel_token.cancelled() => {
+                return;
+            }
+            res = self.backend.run(self.task.deets.clone(), Arc::clone(&self.part_store)) => res,
+        };
+        match res {
+            Ok(completions) => {
+                for completion in completions {
+                    let (peer_id, obj_id) = match &completion {
+                        SyncCompletion::AddedMember { peer, obj_id, .. }
+                        | SyncCompletion::ChangedObject { peer, obj_id }
+                        | SyncCompletion::DeletedMember { peer, obj_id }
+                        | SyncCompletion::Noop { peer, obj_id } => (*peer, *obj_id),
+                    };
+                    self.host_tx
+                        .send(BigSyncEvent::SyncCompleted(
+                            big_sync_core::SyncCompletedEvent {
+                                task_id: self.task.id,
+                                peer_id,
+                                obj_id,
+                                completion,
+                            },
+                        ))
+                        .await
+                        .expect(ERROR_CHANNEL);
+                }
+            }
+            Err(err) => {
+                self.host_tx
+                    .send(BigSyncEvent::SyncFailed(big_sync_core::SyncFailedEvent {
+                        task_id: self.task.id,
+                        peer_id: self.task.deets.peer_id,
+                        obj_id: self.task.deets.obj_id,
+                        err,
+                    }))
+                    .await
+                    .expect(ERROR_CHANNEL);
+            }
+        }
     }
 }
 
-struct TrappedRpcClient {
-    trap: TaskTrap,
-    inner: SharedPeerRpcClient,
-}
-
-impl BigSyncRpcClient<Sendable> for TrappedRpcClient {
-    fn peer_summary<'a>(
-        &'a self,
-        req: big_sync_core::rpc::PeerSummaryRequest,
-    ) -> BoxFuture<'a, big_sync_core::rpc::BigSyncRpcResult<big_sync_core::rpc::PeerSummaryResult>>
-    {
-        let fut = self.inner.peer_summary(req);
-        Sendable::from_future(self.trap.run_or_trap(fut))
-    }
-
-    fn sub_parts<'a>(
-        &'a self,
-        req: big_sync_core::rpc::SubPartsRequest,
-    ) -> BoxFuture<
-        'a,
-        big_sync_core::rpc::BigSyncRpcResult<
-            Result<mpsc::Receiver<big_sync_core::rpc::SubEvent>, big_sync_core::rpc::SubPartsError>,
-        >,
-    > {
-        let fut = self.inner.sub_parts(req);
-        Sendable::from_future(self.trap.run_or_trap(fut))
+async fn run_until_cancelled_or_trapped<E>(
+    cancel_token: &CancellationToken,
+    err_rx: &mut tokio::sync::mpsc::Receiver<E>,
+    fut: impl std::future::Future<Output = ()>,
+) -> Result<LoopAction, E> {
+    tokio::select! {
+        _ = cancel_token.cancelled() => Ok(LoopAction::Break),
+        res = err_rx.recv() => {
+            let err = res.expect(ERROR_IMPOSSIBLE);
+            Err(err)
+        },
+        () = fut => Ok(LoopAction::Cont)
     }
 }
