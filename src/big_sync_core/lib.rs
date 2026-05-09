@@ -1,15 +1,11 @@
-// Needs:
-// - pluggable PartititionStore,
-// - pluggable SyncStore,
-// - RPC protocol
-// - peer handshake
-//  - Decide strategy
+//! TODO: merkle catchup
+
 mod interlude {
     pub use utils_rs::prelude::*;
 
-    // FIXME: consider using indexed map instead
     pub use future_form::FutureForm;
 
+    // FIXME: consider using indexed map instead
     pub use std::collections::{HashMap as Map, HashSet as Set, VecDeque};
 
     pub use crate::{ObjId, PartId, PeerId};
@@ -61,37 +57,6 @@ structstruck::strike! {
                 pub err: eyre::Report,
             }
         ),
-    }
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
-pub enum SyncTaskKind {
-    New,
-    Change,
-    Delete,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct SyncTask {
-    pub peer_id: PeerId,
-    pub kind: SyncTaskKind,
-    pub obj_id: ObjId,
-    pub part_hints: Vec<PartId>,
-}
-
-impl SyncTask {
-    fn from_cursor_command(command: cursor::CursorMachineCommand) -> Self {
-        let kind = match command.kind {
-            cursor::ObjectSyncKind::New => SyncTaskKind::New,
-            cursor::ObjectSyncKind::Change => SyncTaskKind::Change,
-            cursor::ObjectSyncKind::Delete => SyncTaskKind::Delete,
-        };
-        Self {
-            peer_id: command.peer_id,
-            kind,
-            obj_id: command.obj_id,
-            part_hints: command.part_hints,
-        }
     }
 }
 
@@ -179,25 +144,43 @@ pub type CmdId = u64;
 
 pub type TaskId = u64;
 structstruck::strike! {
-    pub struct Task {
+    pub struct MachineTask {
         /// A task is a single threaded work that's enqueued
         /// by the sync machine and is supposed run concurrently
         /// to the main event loop
         pub id: TaskId,
         /// NOTE: host doesn't need to know the details
-        pub deets: pub enum TaskDeets {
-            SyncTask(SyncTask),
-            MachineTask(pub enum MachineTask {
-                DecidePeerStrategy (struct DecidePeerStrategyTask {
-                    peer_id: PeerId,
-                    parts: Set<PartId>
-                })
-                PeerReplay(struct PeerReplayTask {
-                    peer_id: PeerId,
-                    parts: Map<PartId, part_store::PeerPartCursors>
-                })
+        pub deets: pub enum MachineTaskDeets {
+            DecidePeerStrategy (struct DecidePeerStrategyTask {
+                peer_id: PeerId,
+                parts: Set<PartId>
+            })
+            PeerReplay(struct PeerReplayTask {
+                peer_id: PeerId,
+                parts: Map<PartId, part_store::PeerPartCursors>
             })
         }
+    }
+}
+structstruck::strike! {
+    #[derive(Clone)]
+    pub struct SyncTask {
+        pub id: TaskId,
+        pub deets:
+            struct SyncTaskDeets {
+                #![derive(Clone)]
+
+                pub peer_id: PeerId,
+                pub kind:
+                    pub enum SyncTaskKind {
+                        #![derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
+                        New,
+                        Change,
+                        Delete,
+                    },
+                pub obj_id: ObjId,
+                pub part_hints: Vec<PartId>,
+            }
     }
 }
 
@@ -214,12 +197,12 @@ impl MachineTask {
         self,
         cx: TaskCtx<K, S, R>,
     ) {
-        let res = match self {
-            Self::DecidePeerStrategy(inner) => inner
+        let res = match self.deets {
+            MachineTaskDeets::DecidePeerStrategy(inner) => inner
                 .run(&cx)
                 .await
                 .map_err(|err| MachineTaskErrDeets::DecidePeerStrategyError(err)),
-            Self::PeerReplay(inner) => inner
+            MachineTaskDeets::PeerReplay(inner) => inner
                 .run(&cx)
                 .await
                 .map_err(|err| MachineTaskErrDeets::PeerReplayWorkerError(err)),
@@ -278,16 +261,16 @@ impl DecidePeerStrategyTask {
             const MERKLE_DIFF_THRESHOLD: u64 = 256;
             let strat = if diff > MERKLE_DIFF_THRESHOLD {
                 // FIXME: merkle is not yet implemented
-                PeerPartStratDecision::Cursor(CursorStrat {
-                    latest_cursor: summary.latest_cursor,
-                    since_member: last_peer_cursor.member_cursor,
-                    since_obj: last_peer_cursor.obj_cursor,
-                })
                 // PeerPartStratDecision::Merkle(MerkleStrat {
                 //     latest_cursor: summary.latest_cursor,
                 //     since_member: last_peer_cursor.member_cursor,
                 //     since_obj: last_peer_cursor.obj_cursor,
                 // })
+                PeerPartStratDecision::Cursor(CursorStrat {
+                    latest_cursor: summary.latest_cursor,
+                    since_member: last_peer_cursor.member_cursor,
+                    since_obj: last_peer_cursor.obj_cursor,
+                })
             } else {
                 PeerPartStratDecision::Cursor(CursorStrat {
                     latest_cursor: summary.latest_cursor,
@@ -367,10 +350,15 @@ struct TaskState {
 struct Tasks {
     next_id: TaskId,
     all: Map<TaskId, TaskState>,
-    pending: Map<TaskId, (Task, Instant)>,
-    sync_spawn_queue: VecDeque<Task>,
-    machine_spawn_queue: VecDeque<Task>,
+    pending: Map<TaskId, (TaskSeed, Instant)>,
+    sync_spawn_queue: VecDeque<SyncTask>,
+    machine_spawn_queue: VecDeque<MachineTask>,
     stop_queue: Set<TaskId>,
+}
+
+enum TaskSeed {
+    Machine(MachineTaskDeets),
+    Sync(SyncTaskDeets),
 }
 
 impl Tasks {
@@ -386,7 +374,7 @@ impl Tasks {
         self.stop_queue.insert(id);
     }
 
-    fn spawn_task(&mut self, deets: TaskDeets) -> TaskId {
+    fn spawn_task(&mut self, seed: TaskSeed) -> TaskId {
         let id = self.next_id;
         self.next_id += 1;
         self.all.insert(
@@ -399,10 +387,11 @@ impl Tasks {
                 },
             },
         );
-        let task = Task { id, deets };
-        match &task.deets {
-            TaskDeets::SyncTask(_) => self.sync_spawn_queue.push_back(task),
-            TaskDeets::MachineTask(_) => self.machine_spawn_queue.push_back(task),
+        match seed {
+            TaskSeed::Sync(deets) => self.sync_spawn_queue.push_back(SyncTask { id, deets }),
+            TaskSeed::Machine(deets) => self
+                .machine_spawn_queue
+                .push_back(MachineTask { id, deets }),
         }
         id
     }
@@ -410,7 +399,7 @@ impl Tasks {
     #[must_use]
     fn spawn_delayed_task(
         &mut self,
-        deets: TaskDeets,
+        seed: TaskSeed,
         prev_retry: Retry,
         min_delay: Duration,
     ) -> TaskId {
@@ -435,7 +424,7 @@ impl Tasks {
         let id = self.next_id;
         self.next_id += 1;
         self.all.insert(id, TaskState { retry });
-        self.pending.insert(id, (Task { id, deets }, due_at));
+        self.pending.insert(id, (seed, due_at));
         id
     }
 
@@ -445,54 +434,32 @@ impl Tasks {
             .iter()
             .filter_map(|(task_id, (_, due_at))| (*due_at <= now).then_some(*task_id))
             .collect();
-        for task_id in due_task_ids {
-            let Some((task, _)) = self.pending.remove(&task_id) else {
+        for id in due_task_ids {
+            let Some((seed, _)) = self.pending.remove(&id) else {
                 continue;
             };
-            match &task.deets {
-                TaskDeets::SyncTask(_) => self.sync_spawn_queue.push_back(task),
-                TaskDeets::MachineTask(_) => self.machine_spawn_queue.push_back(task),
+            match seed {
+                TaskSeed::Sync(deets) => self.sync_spawn_queue.push_back(SyncTask { id, deets }),
+                TaskSeed::Machine(deets) => self
+                    .machine_spawn_queue
+                    .push_back(MachineTask { id, deets }),
             }
         }
     }
 
-    fn replace_task(&mut self, task_id: TaskId, deets: TaskDeets) -> bool {
-        if let Some((task, _due_at)) = self.pending.get_mut(&task_id) {
-            *task = Task { id: task_id, deets };
-            return true;
-        }
-        if let Some(task) = self
-            .sync_spawn_queue
-            .iter_mut()
-            .find(|task| task.id == task_id)
-        {
-            task.deets = deets;
-            return true;
-        }
-        if let Some(task) = self
-            .machine_spawn_queue
-            .iter_mut()
-            .find(|task| task.id == task_id)
-        {
-            task.deets = deets;
-            return true;
-        }
-        false
-    }
-
-    pub fn pop_sync_spawn_queue(&mut self) -> Option<Task> {
+    pub fn pop_sync_spawn_queue(&mut self) -> Option<SyncTask> {
         self.sync_spawn_queue.pop_front()
     }
 
-    pub fn peek_sync_spawn_queue(&self) -> Option<&Task> {
+    pub fn peek_sync_spawn_queue(&self) -> Option<&SyncTask> {
         self.sync_spawn_queue.front()
     }
 
-    pub fn pop_machine_spawn_queue(&mut self) -> Option<Task> {
+    pub fn pop_machine_spawn_queue(&mut self) -> Option<MachineTask> {
         self.machine_spawn_queue.pop_front()
     }
 
-    pub fn peek_machine_spawn_queue(&self) -> Option<&Task> {
+    pub fn peek_machine_spawn_queue(&self) -> Option<&MachineTask> {
         self.machine_spawn_queue.front()
     }
 
@@ -506,7 +473,7 @@ structstruck::strike! {
         fully_synced_parts: Set<PartId>,
         sync_workers: Map<ObjId, struct SyncWorkerState {
             task_id: TaskId,
-            task: SyncTask,
+            deets: SyncTaskDeets,
         }>,
         replay_worker: Option<struct PeerReplayWorkerState {
             task_id: TaskId,
@@ -577,20 +544,12 @@ pub struct BigSyncMachine {
 }
 
 impl BigSyncMachine {
-    pub fn pop_sync_spawn_queue(&mut self) -> Option<Task> {
+    pub fn pop_sync_spawn_queue(&mut self) -> Option<SyncTask> {
         self.tasks.pop_sync_spawn_queue()
     }
 
-    pub fn peek_sync_spawn_queue(&self) -> Option<&Task> {
-        self.tasks.peek_sync_spawn_queue()
-    }
-
-    pub fn pop_machine_spawn_queue(&mut self) -> Option<Task> {
+    pub fn pop_machine_spawn_queue(&mut self) -> Option<MachineTask> {
         self.tasks.pop_machine_spawn_queue()
-    }
-
-    pub fn peek_machine_spawn_queue(&self) -> Option<&Task> {
-        self.tasks.peek_machine_spawn_queue()
     }
 
     pub fn drain_stop_queue(&mut self) -> std::collections::hash_set::Drain<'_, u64> {
@@ -704,31 +663,44 @@ impl BigSyncMachine {
         }
     }
 
-    fn dispatch_cursor_cmd(&mut self, cmd: cursor::CursorMachineCommand) {
-        let Some(_peer_state) = self.peers.get(&cmd.peer_id) else {
-            assert!(self.all_seen_peer.contains(&cmd.peer_id), "fishy");
+    fn dispatch_cursor_cmd(
+        &mut self,
+        cursor::CursorMachineCommand {
+            peer_id,
+            kind,
+            obj_id,
+            part_hints,
+        }: cursor::CursorMachineCommand,
+    ) {
+        let Some(_peer_state) = self.peers.get(&peer_id) else {
+            assert!(self.all_seen_peer.contains(&peer_id), "fishy");
             return;
         };
-        let task = SyncTask::from_cursor_command(cmd);
-        let Some(peer_state) = self.peers.get_mut(&task.peer_id) else {
-            assert!(self.all_seen_peer.contains(&task.peer_id), "fishy");
+        let Some(peer_state) = self.peers.get_mut(&peer_id) else {
+            assert!(self.all_seen_peer.contains(&peer_id), "fishy");
             return;
         };
-        if let Some(worker) = peer_state.sync_workers.get_mut(&task.obj_id) {
-            worker.task = task.clone();
-            let _ = self
-                .tasks
-                .replace_task(worker.task_id, TaskDeets::SyncTask(task));
-            return;
+        if let Some(worker) = peer_state.sync_workers.remove(&obj_id) {
+            self.tasks.stop_task(worker.task_id);
         }
-        let task_id = self.tasks.spawn_task(TaskDeets::SyncTask(task.clone()));
+        let deets = SyncTaskDeets {
+            peer_id,
+            obj_id,
+            part_hints,
+            kind: match kind {
+                cursor::ObjectSyncKind::New => SyncTaskKind::New,
+                cursor::ObjectSyncKind::Change => SyncTaskKind::Change,
+                cursor::ObjectSyncKind::Delete => SyncTaskKind::Delete,
+            },
+        };
+        let task_id = self.tasks.spawn_task(TaskSeed::Sync(deets.clone()));
         peer_state
             .sync_workers
-            .insert(task.obj_id, SyncWorkerState { task_id, task });
+            .insert(obj_id, SyncWorkerState { task_id, deets });
     }
 
     fn handle_sync_failed(&mut self, evt: SyncFailedEvent, retry: Retry) {
-        let task = {
+        let deets = {
             let Some(peer_state) = self.peers.get(&evt.peer_id) else {
                 assert!(self.all_seen_peer.contains(&evt.peer_id), "fishy");
                 return;
@@ -739,18 +711,16 @@ impl BigSyncMachine {
             if worker.task_id != evt.task_id {
                 return;
             }
-            worker.task.clone()
+            worker.deets.clone()
         };
 
         let Some(peer_state) = self.peers.get_mut(&evt.peer_id) else {
             return;
         };
         if let Some(worker) = peer_state.sync_workers.get_mut(&evt.obj_id) {
-            let task_id = self.tasks.spawn_delayed_task(
-                TaskDeets::SyncTask(task),
-                retry,
-                Duration::from_secs(2),
-            );
+            let task_id =
+                self.tasks
+                    .spawn_delayed_task(TaskSeed::Sync(deets), retry, Duration::from_secs(2));
             worker.task_id = task_id;
         }
     }
@@ -817,16 +787,17 @@ impl BigSyncMachine {
             };
         }
         if !parts_retry.is_empty() {
-            let deets =
-                TaskDeets::MachineTask(MachineTask::DecidePeerStrategy(DecidePeerStrategyTask {
-                    peer_id,
-                    parts: parts_retry.clone(),
-                }));
-            let decide_task = self
-                .tasks
-                .spawn_delayed_task(deets, retry, Duration::from_secs(2));
+            let deets = MachineTaskDeets::DecidePeerStrategy(DecidePeerStrategyTask {
+                peer_id,
+                parts: parts_retry.clone(),
+            });
+            let decide_task = self.tasks.spawn_delayed_task(
+                TaskSeed::Machine(deets),
+                retry,
+                Duration::from_secs(2),
+            );
             for part_id in parts_retry {
-                                peer_state.parts.insert(
+                peer_state.parts.insert(
                     part_id,
                     PeerPartState {
                         strat: PeerPartStrategy::Pending(decide_task),
@@ -873,13 +844,13 @@ impl BigSyncMachine {
                 // noop
             }
         }
-        let deets = TaskDeets::MachineTask(MachineTask::PeerReplay(PeerReplayTask {
+        let deets = MachineTaskDeets::PeerReplay(PeerReplayTask {
             peer_id,
             parts: peer_state.cursors_for_peer_replay_worker_parts(worker.parts.iter()),
-        }));
-        let replay_task = self
-            .tasks
-            .spawn_delayed_task(deets, retry, Duration::from_secs(2));
+        });
+        let replay_task =
+            self.tasks
+                .spawn_delayed_task(TaskSeed::Machine(deets), retry, Duration::from_secs(2));
         peer_state.replay_worker = Some(PeerReplayWorkerState {
             task_id: replay_task,
             parts: worker.parts.clone(),
@@ -891,12 +862,11 @@ impl BigSyncMachine {
         // treating SetPeer as a refresh peer cmd in a way
         self.handle_remove_peer_evt(RemovePeerEvent { peer_id });
         self.all_seen_peer.insert(peer_id);
-        let deets =
-            TaskDeets::MachineTask(MachineTask::DecidePeerStrategy(DecidePeerStrategyTask {
-                peer_id,
-                parts: parts.iter().copied().collect(),
-            }));
-        let decide_task = self.tasks.spawn_task(deets);
+        let deets = MachineTaskDeets::DecidePeerStrategy(DecidePeerStrategyTask {
+            peer_id,
+            parts: parts.iter().copied().collect(),
+        });
+        let decide_task = self.tasks.spawn_task(TaskSeed::Machine(deets));
         self.peers.insert(
             peer_id,
             PeerState {
@@ -968,9 +938,7 @@ impl BigSyncMachine {
                 PeerPartStratDecision::Merkle(_strat) => todo!(),
                 PeerPartStratDecision::Cursor(strat) => PeerPartStrategy::Cursor(strat),
             };
-            peer_state
-                .parts
-                .insert(part_id, PeerPartState { strat });
+            peer_state.parts.insert(part_id, PeerPartState { strat });
             if let Some(old) = old {
                 match old.strat {
                     PeerPartStrategy::Pending(old_task_id) => {
@@ -984,11 +952,12 @@ impl BigSyncMachine {
         // retry peer summary requests for any parts
         // that were not resolved in the last request
         if !parts_retry.is_empty() {
-            let deets =
-                TaskDeets::MachineTask(MachineTask::DecidePeerStrategy(DecidePeerStrategyTask {
+            let deets = TaskSeed::Machine(MachineTaskDeets::DecidePeerStrategy(
+                DecidePeerStrategyTask {
                     peer_id,
                     parts: parts_retry.clone(),
-                }));
+                },
+            ));
             let decide_task = if parts_retry.len() == response_len {
                 self.tasks
                     .spawn_delayed_task(deets, retry, Duration::from_secs(2))
@@ -1026,7 +995,7 @@ impl BigSyncMachine {
                 None => true,
             };
             if refresh {
-                let deets = TaskDeets::MachineTask(MachineTask::PeerReplay(PeerReplayTask {
+                let deets = TaskSeed::Machine(MachineTaskDeets::PeerReplay(PeerReplayTask {
                     peer_id,
                     parts: peer_state.cursors_for_peer_replay_worker_parts(replay_req_parts.iter()),
                 }));

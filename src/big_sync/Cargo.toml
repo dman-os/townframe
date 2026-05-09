@@ -30,7 +30,6 @@ structstruck.workspace = true
 tokio-util.workspace = true
 async-channel.workspace = true
 future_form.workspace = true
-async-trait.workspace = true
 
 #
 # db

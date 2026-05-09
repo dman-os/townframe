@@ -17,7 +17,21 @@ pub trait BigSyncRpcClient<K: FutureForm> {
     ) -> K::Future<'a, BigSyncRpcResult<Result<Receiver<SubEvent>, SubPartsError>>>;
 }
 
-pub type SharedPeerRpcClient<K> = Arc<dyn BigSyncRpcClient<K>>;
+impl<K: FutureForm, T: BigSyncRpcClient<K> + ?Sized> BigSyncRpcClient<K> for Arc<T> {
+    fn peer_summary<'a>(
+        &'a self,
+        req: PeerSummaryRequest,
+    ) -> K::Future<'a, BigSyncRpcResult<PeerSummaryResult>> {
+        (**self).peer_summary(req)
+    }
+
+    fn sub_parts<'a>(
+        &'a self,
+        req: SubPartsRequest,
+    ) -> K::Future<'a, BigSyncRpcResult<Result<Receiver<SubEvent>, SubPartsError>>> {
+        (**self).sub_parts(req)
+    }
+}
 
 #[derive(Debug, Clone, Copy, PartialEq, PartialOrd, Eq, Serialize, Deserialize)]
 pub enum SubStreamKind {
