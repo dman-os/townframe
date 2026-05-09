@@ -1,9 +1,10 @@
 //! TODO: emit sync stats event for use in full.rs
 
-use crate::{interlude::*, part_store::PartitionStore};
+use crate::interlude::*;
 
-use crate::part_store::CursorIndex;
+use crate::part_store::{CursorIndex, PartitionStore};
 use crate::rpc::SubStreamKind;
+use crate::SyncCompletion;
 
 use std::collections::{BTreeMap, HashMap};
 
@@ -80,30 +81,6 @@ structstruck::strike! {
     }
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub enum SyncCompletion {
-    AddedMember {
-        peer: PeerId,
-        obj_id: ObjId,
-        obj_payload: serde_json::Value,
-    },
-    /// NOTE: changed obj doesn't carry payloads.
-    /// Local systems are expected to persist the payload separately
-    /// through the obj store before or alongside membership updates.
-    ChangedObject {
-        peer: PeerId,
-        obj_id: ObjId,
-    },
-    DeletedMember {
-        peer: PeerId,
-        obj_id: ObjId,
-    },
-    Noop {
-        peer: PeerId,
-        obj_id: ObjId,
-    },
-}
-
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum CursorSlotState {
     Pending,
@@ -139,13 +116,6 @@ struct PartitionCursorState {
 }
 
 impl CursorSyncMachine {
-    pub fn new() -> Self {
-        Self {
-            cursor_state: HashMap::new(),
-            active_obj_jobs: BTreeMap::new(),
-        }
-    }
-
     pub fn clear_peer(&mut self, peer: PeerId) {
         self.cursor_state.remove(&peer);
         self.active_obj_jobs.retain(|job_id, _| job_id.peer != peer);

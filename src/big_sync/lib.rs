@@ -12,7 +12,7 @@ use futures::future::BoxFuture;
 use big_sync_core::{
     part_store::{ObjPayload, PartitionStore, PeerPartCursors},
     rpc::{BigSyncRpcClient, BigSyncRpcResult},
-    BigSyncCommand, BigSyncMachine, BigSyncMsg, ObjId, PartId, PeerId, TaskCtx, TaskId,
+    BigSyncEvent, BigSyncMachine, BigSyncMsg, ObjId, PartId, PeerId, TaskCtx, TaskId,
 };
 use utils_rs::prelude::tokio::sync::oneshot;
 
@@ -37,7 +37,7 @@ impl StopToken {
 }
 
 pub struct TokioBigSyncWorkerHandle {
-    host_tx: big_sync_core::mpsc::Sender<BigSyncCommand>,
+    host_tx: big_sync_core::mpsc::Sender<BigSyncEvent>,
 }
 
 pub fn spawn_big_sync_worker(
@@ -109,7 +109,7 @@ struct BigSyncWorker {
     rpc_clients: HashMap<PeerId, Arc<BigSyncIrpcClient>>,
     part_store: Arc<part_store::SqlitePartStoreHandle>,
 
-    host_rx: big_sync_core::mpsc::Receiver<BigSyncCommand>,
+    host_rx: big_sync_core::mpsc::Receiver<BigSyncEvent>,
     machine: BigSyncMachine,
 }
 
@@ -147,7 +147,7 @@ impl BigSyncWorker {
                 },
                 cmd = self.host_rx.recv() => {
                     let cmd = cmd.expect(ERROR_CALLER);
-                    self.machine.handle_cmd(cmd);
+                    self.machine.handle_evt(cmd);
                 }
                 msg = task_rx.recv() => {
                     let msg = msg.expect(ERROR_CALLER);
