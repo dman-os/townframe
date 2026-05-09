@@ -25,6 +25,7 @@ pub trait PartitionStore<K: FutureForm> {
 
     fn obj_parts<'a>(&'a self, obj_id: ObjId) -> K::Future<'a, Vec<PartId>>;
 
+    fn add_obj_to_parts<'a>(&'a self, obj_id: ObjId, parts: &[PartId]) -> K::Future<'a, ()>;
     fn remove_obj_from_part<'a>(&'a self, obj_id: ObjId, part_id: PartId) -> K::Future<'a, ()>;
 
     fn get_peer_part_cursor<'a>(

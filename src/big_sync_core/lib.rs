@@ -10,7 +10,7 @@ mod interlude {
     // FIXME: consider using indexed map instead
     pub use future_form::FutureForm;
 
-    pub use std::collections::{HashMap as Map, HashSet as Set};
+    pub use std::collections::{HashMap as Map, HashSet as Set, VecDeque};
 
     pub use crate::{ObjId, PartId, PeerId};
 }
@@ -34,31 +34,31 @@ pub use ids::*;
 structstruck::strike! {
     pub enum BigSyncEvent {
         SetPeer (
-            struct SetPeerEvent {
-                peer_id: PeerId,
+            pub struct SetPeerEvent {
+                pub peer_id: PeerId,
                 /// Partitions to sync from the peer
-                parts: Set<PartId>,
+                pub parts: Set<PartId>,
             }
         ),
         RemovePeer (
-            struct RemovePeerEvent {
-                peer_id: PeerId,
+            pub struct RemovePeerEvent {
+                pub peer_id: PeerId,
             }
         ),
         SyncCompleted (
-            struct SyncCompletedEvent {
-                task_id: TaskId,
-                peer_id: PeerId,
-                obj_id: ObjId,
-                completion: SyncCompletion,
+            pub struct SyncCompletedEvent {
+                pub task_id: TaskId,
+                pub peer_id: PeerId,
+                pub obj_id: ObjId,
+                pub completion: SyncCompletion,
             }
         ),
         SyncFailed (
-            struct SyncFailedEvent {
-                task_id: TaskId,
-                peer_id: PeerId,
-                obj_id: ObjId,
-                err: eyre::Report,
+            pub struct SyncFailedEvent {
+                pub task_id: TaskId,
+                pub peer_id: PeerId,
+                pub obj_id: ObjId,
+                pub err: eyre::Report,
             }
         ),
     }
@@ -79,8 +79,8 @@ pub struct SyncTask {
     pub part_hints: Vec<PartId>,
 }
 
-impl From<cursor::CursorMachineCommand> for SyncTask {
-    fn from(command: cursor::CursorMachineCommand) -> Self {
+impl SyncTask {
+    fn from_cursor_command(command: cursor::CursorMachineCommand) -> Self {
         let kind = match command.kind {
             cursor::ObjectSyncKind::New => SyncTaskKind::New,
             cursor::ObjectSyncKind::Change => SyncTaskKind::Change,
@@ -368,7 +368,8 @@ struct Tasks {
     next_id: TaskId,
     all: Map<TaskId, TaskState>,
     pending: Map<TaskId, (Task, Instant)>,
-    spawn_queue: Vec<Task>,
+    sync_spawn_queue: VecDeque<Task>,
+    machine_spawn_queue: VecDeque<Task>,
     stop_queue: Set<TaskId>,
 }
 
@@ -380,7 +381,8 @@ impl Tasks {
             self.all.remove(&id);
             return;
         }
-        self.spawn_queue.retain(|task| task.id != id);
+        self.sync_spawn_queue.retain(|task| task.id != id);
+        self.machine_spawn_queue.retain(|task| task.id != id);
         self.stop_queue.insert(id);
     }
 
@@ -397,7 +399,11 @@ impl Tasks {
                 },
             },
         );
-        self.spawn_queue.push(Task { id, deets });
+        let task = Task { id, deets };
+        match &task.deets {
+            TaskDeets::SyncTask(_) => self.sync_spawn_queue.push_back(task),
+            TaskDeets::MachineTask(_) => self.machine_spawn_queue.push_back(task),
+        }
         id
     }
 
@@ -443,7 +449,10 @@ impl Tasks {
             let Some((task, _)) = self.pending.remove(&task_id) else {
                 continue;
             };
-            self.spawn_queue.push(task);
+            match &task.deets {
+                TaskDeets::SyncTask(_) => self.sync_spawn_queue.push_back(task),
+                TaskDeets::MachineTask(_) => self.machine_spawn_queue.push_back(task),
+            }
         }
     }
 
@@ -452,15 +461,39 @@ impl Tasks {
             *task = Task { id: task_id, deets };
             return true;
         }
-        if let Some(task) = self.spawn_queue.iter_mut().find(|task| task.id == task_id) {
+        if let Some(task) = self
+            .sync_spawn_queue
+            .iter_mut()
+            .find(|task| task.id == task_id)
+        {
+            task.deets = deets;
+            return true;
+        }
+        if let Some(task) = self
+            .machine_spawn_queue
+            .iter_mut()
+            .find(|task| task.id == task_id)
+        {
             task.deets = deets;
             return true;
         }
         false
     }
 
-    pub fn drain_spawn_queue(&mut self) -> std::vec::Drain<'_, Task> {
-        self.spawn_queue.drain(..)
+    pub fn pop_sync_spawn_queue(&mut self) -> Option<Task> {
+        self.sync_spawn_queue.pop_front()
+    }
+
+    pub fn peek_sync_spawn_queue(&self) -> Option<&Task> {
+        self.sync_spawn_queue.front()
+    }
+
+    pub fn pop_machine_spawn_queue(&mut self) -> Option<Task> {
+        self.machine_spawn_queue.pop_front()
+    }
+
+    pub fn peek_machine_spawn_queue(&self) -> Option<&Task> {
+        self.machine_spawn_queue.front()
     }
 
     pub fn drain_stop_queue(&mut self) -> std::collections::hash_set::Drain<'_, u64> {
@@ -544,8 +577,20 @@ pub struct BigSyncMachine {
 }
 
 impl BigSyncMachine {
-    pub fn drain_spawn_queue(&mut self) -> std::vec::Drain<'_, Task> {
-        self.tasks.drain_spawn_queue()
+    pub fn pop_sync_spawn_queue(&mut self) -> Option<Task> {
+        self.tasks.pop_sync_spawn_queue()
+    }
+
+    pub fn peek_sync_spawn_queue(&self) -> Option<&Task> {
+        self.tasks.peek_sync_spawn_queue()
+    }
+
+    pub fn pop_machine_spawn_queue(&mut self) -> Option<Task> {
+        self.tasks.pop_machine_spawn_queue()
+    }
+
+    pub fn peek_machine_spawn_queue(&self) -> Option<&Task> {
+        self.tasks.peek_machine_spawn_queue()
     }
 
     pub fn drain_stop_queue(&mut self) -> std::collections::hash_set::Drain<'_, u64> {
@@ -660,7 +705,11 @@ impl BigSyncMachine {
     }
 
     fn dispatch_cursor_cmd(&mut self, cmd: cursor::CursorMachineCommand) {
-        let task: SyncTask = cmd.into();
+        let Some(_peer_state) = self.peers.get(&cmd.peer_id) else {
+            assert!(self.all_seen_peer.contains(&cmd.peer_id), "fishy");
+            return;
+        };
+        let task = SyncTask::from_cursor_command(cmd);
         let Some(peer_state) = self.peers.get_mut(&task.peer_id) else {
             assert!(self.all_seen_peer.contains(&task.peer_id), "fishy");
             return;
@@ -679,13 +728,6 @@ impl BigSyncMachine {
     }
 
     fn handle_sync_failed(&mut self, evt: SyncFailedEvent, retry: Retry) {
-        warn!(
-            peer_id = ?evt.peer_id,
-            obj_id = ?evt.obj_id,
-            task_id = evt.task_id,
-            err = ?evt.err,
-            "sync task failed"
-        );
         let task = {
             let Some(peer_state) = self.peers.get(&evt.peer_id) else {
                 assert!(self.all_seen_peer.contains(&evt.peer_id), "fishy");
@@ -784,7 +826,7 @@ impl BigSyncMachine {
                 .tasks
                 .spawn_delayed_task(deets, retry, Duration::from_secs(2));
             for part_id in parts_retry {
-                peer_state.parts.insert(
+                                peer_state.parts.insert(
                     part_id,
                     PeerPartState {
                         strat: PeerPartStrategy::Pending(decide_task),
@@ -852,7 +894,7 @@ impl BigSyncMachine {
         let deets =
             TaskDeets::MachineTask(MachineTask::DecidePeerStrategy(DecidePeerStrategyTask {
                 peer_id,
-                parts: parts.clone(),
+                parts: parts.iter().copied().collect(),
             }));
         let decide_task = self.tasks.spawn_task(deets);
         self.peers.insert(
@@ -926,7 +968,9 @@ impl BigSyncMachine {
                 PeerPartStratDecision::Merkle(_strat) => todo!(),
                 PeerPartStratDecision::Cursor(strat) => PeerPartStrategy::Cursor(strat),
             };
-            peer_state.parts.insert(part_id, PeerPartState { strat });
+            peer_state
+                .parts
+                .insert(part_id, PeerPartState { strat });
             if let Some(old) = old {
                 match old.strat {
                     PeerPartStrategy::Pending(old_task_id) => {
