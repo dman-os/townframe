@@ -1,6 +1,10 @@
 use crate::interlude::*;
 
 use crate::{ScopeRef, ScopedIdResolver, ScopedObjRef, ScopedPartRef};
+use big_sync_core::merkle::{
+    self, BucketId, MerkleBucketKind, MerkleBucketSummary, MerkleFingerprintSeed, MerkleItemKind,
+    MerkleLeafItem,
+};
 use big_sync_core::part_store::{CursorIndex, ObjPayload};
 use big_sync_core::rpc::{
     ListPartsError, PartEvent, PartPage, PartSummary, PartTransition, SubEvent, SubPartsRequest,
@@ -50,6 +54,22 @@ pub trait HostPartitionStore: Send + Sync {
         &self,
         reqs: SubPartsRequest,
     ) -> Res<Result<mpsc::UnboundedReceiver<SubEvent>, ListPartsError>>;
+
+    async fn merkle_bucket(&self, part_id: PartId, path: BucketId) -> Res<MerkleBucketSummary>;
+
+    async fn merkle_child_buckets(
+        &self,
+        part_id: PartId,
+        path: BucketId,
+        summary_budget: u16,
+    ) -> Res<Vec<MerkleBucketSummary>>;
+
+    async fn merkle_leaf_items(
+        &self,
+        part_id: PartId,
+        path: BucketId,
+        seed: MerkleFingerprintSeed,
+    ) -> Res<Vec<MerkleLeafItem>>;
 }
 
 structstruck::strike! {
@@ -156,6 +176,74 @@ impl MemoryPartStoreState {
             .get(&scope_id)
             .cloned()
             .expect(ERROR_IMPOSSIBLE)
+    }
+
+    fn merkle_items_for_path(
+        &self,
+        part_id: PartId,
+        path: &BucketId,
+    ) -> Vec<(ObjId, MerkleItemKind, CursorIndex, Byte32Id)> {
+        let Some(part) = self.parts.get(&part_id) else {
+            return Vec::new();
+        };
+        part.members
+            .iter()
+            .filter_map(|(&obj_id, member)| {
+                let key_hash = merkle::obj_key_hash(obj_id);
+                if !key_hash.as_bytes().starts_with(&path.bytes) {
+                    return None;
+                }
+                let (kind, cursor, item_hash) = if let Some(removed_at) = member.removed_at {
+                    (
+                        MerkleItemKind::Removed,
+                        removed_at,
+                        merkle::removed_item_hash(obj_id),
+                    )
+                } else {
+                    let payload = self
+                        .objs
+                        .get(&obj_id)
+                        .and_then(|obj| obj.payload.as_ref())
+                        .expect(ERROR_IMPOSSIBLE);
+                    (
+                        MerkleItemKind::Present,
+                        member.changed_at,
+                        merkle::present_item_hash(obj_id, payload),
+                    )
+                };
+                Some((obj_id, kind, cursor, item_hash))
+            })
+            .collect()
+    }
+
+    fn merkle_summary(&self, part_id: PartId, path: BucketId) -> MerkleBucketSummary {
+        let items = self.merkle_items_for_path(part_id, &path);
+        let item_count = items.len() as u64;
+        let changed_at = items
+            .iter()
+            .map(|(_, _, cursor, _)| *cursor)
+            .max()
+            .unwrap_or(0);
+        let hash = if items.is_empty() {
+            merkle::empty_hash()
+        } else {
+            merkle::aggregate_hash(items.iter().map(|(_, _, _, hash)| *hash))
+        };
+        let kind = if item_count == 0 {
+            MerkleBucketKind::Empty
+        } else if item_count <= merkle::DEFAULT_MERKLE_LEAF_ITEM_TARGET || path.bytes.len() >= 4 {
+            MerkleBucketKind::Leaf
+        } else {
+            MerkleBucketKind::Branch
+        };
+        MerkleBucketSummary {
+            part_id,
+            path,
+            item_count,
+            hash,
+            changed_at,
+            kind,
+        }
     }
 }
 
@@ -597,6 +685,54 @@ impl HostPartitionStore for MemoryPartStore {
         };
         tokio::spawn(fut);
         Ok(Ok(rx))
+    }
+
+    async fn merkle_bucket(&self, part_id: PartId, path: BucketId) -> Res<MerkleBucketSummary> {
+        surelock::key::lock_scope(|key| {
+            let (guard, _key) = key.lock(&self.inner);
+            Ok(guard.merkle_summary(part_id, path))
+        })
+    }
+
+    async fn merkle_child_buckets(
+        &self,
+        part_id: PartId,
+        path: BucketId,
+        summary_budget: u16,
+    ) -> Res<Vec<MerkleBucketSummary>> {
+        surelock::key::lock_scope(|key| {
+            let (guard, _key) = key.lock(&self.inner);
+            let parent = guard.merkle_summary(part_id, path.clone());
+            if !matches!(parent.kind, MerkleBucketKind::Branch) {
+                return Ok(Vec::new());
+            }
+            let limit = usize::from(summary_budget).min(256);
+            Ok((0..=u8::MAX)
+                .take(limit)
+                .map(|child| guard.merkle_summary(part_id, path.child(child)))
+                .filter(|summary| !matches!(summary.kind, MerkleBucketKind::Empty))
+                .collect())
+        })
+    }
+
+    async fn merkle_leaf_items(
+        &self,
+        part_id: PartId,
+        path: BucketId,
+        seed: MerkleFingerprintSeed,
+    ) -> Res<Vec<MerkleLeafItem>> {
+        surelock::key::lock_scope(|key| {
+            let (guard, _key) = key.lock(&self.inner);
+            Ok(guard
+                .merkle_items_for_path(part_id, &path)
+                .into_iter()
+                .map(|(obj_id, kind, _, item_hash)| MerkleLeafItem {
+                    obj_id,
+                    kind,
+                    fingerprint: merkle::fingerprint_item(seed, obj_id, kind, item_hash),
+                })
+                .collect())
+        })
     }
 }
 

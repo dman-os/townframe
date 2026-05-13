@@ -2,8 +2,9 @@
 
 use crate::interlude::*;
 
+use crate::fingerprint::{Fingerprint, FingerprintSeed};
 use crate::mpsc::Receiver;
-use crate::part_store::CursorIndex;
+use crate::part_store::{CursorIndex, ObjPayload};
 
 pub trait BigSyncRpcClient<K: FutureForm> {
     fn peer_summary<'a>(
@@ -15,6 +16,78 @@ pub trait BigSyncRpcClient<K: FutureForm> {
         &'a self,
         req: SubPartsRequest,
     ) -> K::Future<'a, BigSyncRpcResult<Result<Receiver<SubEvent>, ListPartsError>>>;
+
+    /// Smart get_changed_buckets. It will dynamically adjust the levels to include
+    /// according to change counts [`GetChangedBucketsRequest::since`].
+    ///
+    /// The idea being, if there are a lot of changes since the cursor, higher
+    /// level bucket summaries can be useful since they allow fingerprint equal
+    /// noops.
+    fn get_changed_buckets<'a>(
+        &'a self,
+        req: GetChangedBucketsRequest,
+    ) -> K::Future<'a, BigSyncRpcResult<Result<Vec<BucketSummary>, ListPartsError>>>;
+
+    /// WARN: this doesn't limit the number of returned results
+    /// It thus only accepts buckets that are of the level [`PeerSummaryResult::deepest_bucket_level`]
+    fn leaf_buckets<'a>(
+        &'a self,
+        req: LeafBucketsRequest,
+    ) -> K::Future<'a, BigSyncRpcResult<Result<LeafBucketResult, LeafBucketsError>>>;
+}
+
+pub type BuckLevel = u8;
+pub type BucketFp = (u64, u64);
+
+pub struct GetChangedBucketsRequest {
+    pub part_id: PartId,
+    pub offset: BuckId,
+    pub since: CursorIndex,
+    /// RPC impls should return all changed
+    /// sibling buckets of the last bucket before the limit
+    /// in addition to the limit
+    /// I.e. extra headroom of [`BuckId::ARITY`] is allowed.
+    pub limit_hint: u32,
+}
+
+pub struct BucketSummary {
+    pub id: BuckId,
+    pub len: u32,
+    pub live_count: u32,
+    pub fp: BucketFp,
+    pub changed_at: CursorIndex,
+}
+
+structstruck::strike! {
+    #[derive(Debug)]
+    pub struct LeafBucketsRequest {
+        pub part_id: PartId,
+        pub since: CursorIndex,
+        pub buckets: Vec<BuckId>,
+        pub seed: FingerprintSeed,
+    }
+}
+
+#[derive(Debug, thiserror::Error, displaydoc::Display)]
+pub enum LeafBucketsError {
+    /// UnkownPart
+    UnkownPart,
+    /// Bucket level too shallow {buck_id:?}
+    ShallowBucket { buck_id: BuckId },
+}
+
+structstruck::strike! {
+    pub struct LeafBucketResult {
+        pub seed: FingerprintSeed,
+        pub bucks: Map<
+            BuckId,
+            Vec<pub struct BucketObjPageEntry {
+                pub obj_id: ObjId,
+                pub dead: bool,
+                pub fp: Fingerprint<(&'static str, ObjId, ObjPayload)>,
+            }>
+        >
+    }
 }
 
 structstruck::strike! {
@@ -37,6 +110,7 @@ structstruck::strike! {
                 pub member_count: u64,
             }
         >,
+        pub deepest_bucket_level: BuckLevel
     }
 }
 
@@ -52,25 +126,22 @@ structstruck::strike! {
 }
 
 structstruck::strike! {
-    #[derive(Debug, Clone, Serialize, Deserialize)]
-    pub struct PartTransition {
-        pub cursor: CursorIndex,
-        pub part_id: PartId,
-        pub obj_id: ObjId,
-    }
-}
-
-structstruck::strike! {
-    #[derive(Debug, Clone)]
-    pub enum PartEvent {
-        Upserted(PartTransition),
-        Deleted(PartTransition),
-    }
-}
-
-structstruck::strike! {
     pub struct PartPage {
-        pub events: Vec<PartEvent>,
+        pub events: Vec<pub enum PartEvent {
+            Upserted(pub struct ObjUpserted {
+                #![derive(Debug, Clone, Serialize, Deserialize)]
+                pub cursor: CursorIndex,
+                pub part_id: PartId,
+                pub obj_id: ObjId,
+                pub payload: ObjPayload,
+            }),
+            Deleted(pub struct ObjRemoved {
+                #![derive(Debug, Clone, Serialize, Deserialize)]
+                pub cursor: CursorIndex,
+                pub part_id: PartId,
+                pub obj_id: ObjId,
+            }),
+        }>,
         pub next_cursor: Option<CursorIndex>,
     }
 }
@@ -78,8 +149,8 @@ structstruck::strike! {
 structstruck::strike! {
     #[structstruck::each[derive(Debug, Clone, Serialize, Deserialize)]]
     pub enum SubEvent {
-        Upserted(PartTransition),
-        Deleted(PartTransition),
+        Upserted(ObjUpserted),
+        Deleted(ObjRemoved),
         ReplayComplete ,
     }
 }

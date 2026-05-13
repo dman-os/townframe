@@ -3,7 +3,7 @@ use crate::interlude::*;
 use crate::trap;
 
 use big_sync_core::{
-    mpsc, BigSyncEvent, BigSyncMachine, BigSyncMsg, PartId, PeerId, SyncCompletion, SyncTask,
+    mpsc, BigSyncEvent, BigSyncMachine, MachineTaskMsg, PartId, PeerId, SyncJobEvt, SyncTask,
     SyncTaskDeets, TaskCtx, TaskId,
 };
 
@@ -50,7 +50,7 @@ structstruck::strike! {
 
 #[async_trait]
 pub trait SyncBackend: Send + Sync + 'static {
-    async fn run(&self, task: SyncTaskDeets) -> Res<Vec<SyncCompletion>>;
+    async fn run(&self, task: SyncTaskDeets) -> Res<Vec<SyncJobEvt>>;
 }
 
 pub type BackendId = u64;
@@ -322,7 +322,7 @@ impl BigSyncWorker {
                     run_until_cancelled_or_trapped(
                         &self.cancel_token,
                         &mut err_rx,
-                        self.machine.handle_msg(msg, &part_store)
+                        self.machine.handle_task_msg(msg, &part_store)
                     ).await?
                 }
                 evt = self.sync_rx.recv() => {
@@ -584,10 +584,10 @@ impl SyncTaskWorker {
             Ok(completions) => {
                 for completion in completions {
                     let (peer_id, obj_id) = match &completion {
-                        SyncCompletion::AddedMember { peer, obj_id, .. }
-                        | SyncCompletion::ChangedObject { peer, obj_id }
-                        | SyncCompletion::DeletedMember { peer, obj_id }
-                        | SyncCompletion::Noop { peer, obj_id } => (*peer, *obj_id),
+                        SyncJobEvt::AddedMember { peer, obj_id, .. }
+                        | SyncJobEvt::ChangedObject { peer, obj_id }
+                        | SyncJobEvt::DeletedMember { peer, obj_id }
+                        | SyncJobEvt::Noop { peer, obj_id } => (*peer, *obj_id),
                     };
                     self.host_tx
                         .send(BigSyncEvent::SyncCompleted(

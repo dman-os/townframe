@@ -3,13 +3,26 @@
 
 use crate::interlude::*;
 
+use crate::rpc::BucketSummary;
+
+/// NOTE: cursors are cross-part and peer global.
 pub type CursorIndex = u64;
 pub type ObjPayload = serde_json::Value;
 
-pub trait PartitionStore<K: FutureForm> {
+pub trait PartStoreReadOnly<K: FutureForm> {
     fn member_count<'a>(&'a self, part_id: PartId) -> K::Future<'a, u64>;
     fn obj_payload<'a>(&'a self, obj_id: ObjId) -> K::Future<'a, Option<ObjPayload>>;
 
+    fn obj_parts<'a>(&'a self, obj_id: ObjId) -> K::Future<'a, Vec<PartId>>;
+    fn get_peer_part_cursor<'a>(
+        &'a self,
+        peer_id: PeerId,
+        part_id: PartId,
+    ) -> K::Future<'a, CursorIndex>;
+
+    fn get_bucket_summary<'a>(&'a self, id: BuckId) -> K::Future<'a, BucketSummary>;
+}
+pub trait PartStore<K: FutureForm>: PartStoreReadOnly<K> {
     fn upsert_obj<'a>(
         &'a self,
         obj_id: ObjId,
@@ -17,16 +30,8 @@ pub trait PartitionStore<K: FutureForm> {
         parts: &[PartId],
     ) -> K::Future<'a, ()>;
 
-    fn obj_parts<'a>(&'a self, obj_id: ObjId) -> K::Future<'a, Vec<PartId>>;
-
     fn add_obj_to_parts<'a>(&'a self, obj_id: ObjId, parts: &[PartId]) -> K::Future<'a, ()>;
     fn remove_obj_from_part<'a>(&'a self, obj_id: ObjId, part_id: PartId) -> K::Future<'a, ()>;
-
-    fn get_peer_part_cursor<'a>(
-        &'a self,
-        peer_id: PeerId,
-        part_id: PartId,
-    ) -> K::Future<'a, CursorIndex>;
 
     fn set_peer_part_cursor<'a>(
         &'a self,
@@ -43,7 +48,7 @@ pub mod contract {
 
     pub async fn assert_membership_semantics<S>(store: &S, part_id: PartId, obj_id: ObjId)
     where
-        S: PartitionStore<Sendable> + Sync,
+        S: PartStore<Sendable> + Sync,
     {
         let payload_a = serde_json::json!({"phase": "a"});
         let payload_b = serde_json::json!({"phase": "b"});
@@ -72,7 +77,7 @@ pub mod contract {
 
     pub async fn assert_add_obj_to_parts_is_idempotent<S>(store: &S, part_id: PartId, obj_id: ObjId)
     where
-        S: PartitionStore<Sendable> + Sync,
+        S: PartStore<Sendable> + Sync,
     {
         let payload = serde_json::json!({"phase": "restore"});
 
@@ -86,7 +91,7 @@ pub mod contract {
 
     pub async fn assert_peer_cursor_roundtrip<S>(store: &S, peer_id: PeerId, part_id: PartId)
     where
-        S: PartitionStore<Sendable> + Sync,
+        S: PartStore<Sendable> + Sync,
     {
         assert_eq!(store.get_peer_part_cursor(peer_id, part_id).await, 0);
         store.set_peer_part_cursor(peer_id, part_id, 17).await;
@@ -100,7 +105,7 @@ pub mod contract {
 mod tests {
     use super::contract;
     use super::*;
-    use crate::Byte32Id;
+    use crate::ids::Byte32Id;
     use future_form::{FutureForm, Sendable};
     use futures::executor::block_on;
 
@@ -121,7 +126,7 @@ mod tests {
         parts: Set<PartId>,
     }
 
-    impl PartitionStore<Sendable> for HarnessStore {
+    impl PartStoreReadOnly<Sendable> for HarnessStore {
         fn member_count<'a>(
             &'a self,
             part_id: PartId,
@@ -146,6 +151,36 @@ mod tests {
             })
         }
 
+        fn obj_parts<'a>(
+            &'a self,
+            obj_id: ObjId,
+        ) -> <Sendable as FutureForm>::Future<'a, Vec<PartId>> {
+            Sendable::from_future(async move {
+                let state = self.inner.lock().expect(ERROR_MUTEX);
+                state
+                    .objs
+                    .get(&obj_id)
+                    .map(|obj| obj.parts.iter().copied().collect())
+                    .unwrap_or_default()
+            })
+        }
+
+        fn get_peer_part_cursor<'a>(
+            &'a self,
+            peer_id: PeerId,
+            part_id: PartId,
+        ) -> <Sendable as FutureForm>::Future<'a, CursorIndex> {
+            Sendable::from_future(async move {
+                let state = self.inner.lock().expect(ERROR_MUTEX);
+                state
+                    .peer_part_cursors
+                    .get(&(peer_id, part_id))
+                    .copied()
+                    .unwrap_or_default()
+            })
+        }
+    }
+    impl PartStore<Sendable> for HarnessStore {
         fn upsert_obj<'a>(
             &'a self,
             obj_id: ObjId,
@@ -161,21 +196,6 @@ mod tests {
                 obj.parts.extend(parts);
             })
         }
-
-        fn obj_parts<'a>(
-            &'a self,
-            obj_id: ObjId,
-        ) -> <Sendable as FutureForm>::Future<'a, Vec<PartId>> {
-            Sendable::from_future(async move {
-                let state = self.inner.lock().expect(ERROR_MUTEX);
-                state
-                    .objs
-                    .get(&obj_id)
-                    .map(|obj| obj.parts.iter().copied().collect())
-                    .unwrap_or_default()
-            })
-        }
-
         fn add_obj_to_parts<'a>(
             &'a self,
             obj_id: ObjId,
@@ -205,21 +225,6 @@ mod tests {
                 if remove_obj {
                     state.objs.remove(&obj_id);
                 }
-            })
-        }
-
-        fn get_peer_part_cursor<'a>(
-            &'a self,
-            peer_id: PeerId,
-            part_id: PartId,
-        ) -> <Sendable as FutureForm>::Future<'a, CursorIndex> {
-            Sendable::from_future(async move {
-                let state = self.inner.lock().expect(ERROR_MUTEX);
-                state
-                    .peer_part_cursors
-                    .get(&(peer_id, part_id))
-                    .copied()
-                    .unwrap_or_default()
             })
         }
 

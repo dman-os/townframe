@@ -2,6 +2,7 @@ use super::HostPartitionStore;
 use crate::interlude::*;
 use crate::{ScopeRef, ScopedIdResolver, ScopedObjRef, ScopedPartRef};
 
+use big_sync_core::merkle::{BucketId, MerkleBucketSummary, MerkleFingerprintSeed, MerkleLeafItem};
 use big_sync_core::part_store::{CursorIndex, ObjPayload};
 use big_sync_core::rpc::{
     ListPartsError, PartEvent, PartPage, PartSummary, PartTransition, SubEvent, SubPartsRequest,
@@ -708,9 +709,31 @@ impl HostPartitionStore for SqlitePartStore {
         }
         Ok(Ok(rx))
     }
+
+    async fn merkle_bucket(&self, _part_id: PartId, _path: BucketId) -> Res<MerkleBucketSummary> {
+        unimplemented!("sqlite merkle store is not implemented yet")
+    }
+
+    async fn merkle_child_buckets(
+        &self,
+        _part_id: PartId,
+        _path: BucketId,
+        _summary_budget: u16,
+    ) -> Res<Vec<MerkleBucketSummary>> {
+        unimplemented!("sqlite merkle store is not implemented yet")
+    }
+
+    async fn merkle_leaf_items(
+        &self,
+        _part_id: PartId,
+        _path: BucketId,
+        _seed: MerkleFingerprintSeed,
+    ) -> Res<Vec<MerkleLeafItem>> {
+        unimplemented!("sqlite merkle store is not implemented yet")
+    }
 }
 
-impl big_sync_core::part_store::PartitionStore<Sendable> for SqlitePartStore {
+impl big_sync_core::part_store::PartStore<Sendable> for SqlitePartStore {
     fn member_count<'a>(&'a self, part_id: PartId) -> BoxFuture<'a, u64> {
         Sendable::from_future(async move {
             HostPartitionStore::member_count(self, part_id)
@@ -787,6 +810,47 @@ impl big_sync_core::part_store::PartitionStore<Sendable> for SqlitePartStore {
     ) -> BoxFuture<'a, ()> {
         Sendable::from_future(async move {
             HostPartitionStore::set_peer_part_cursor(self, peer_id, part_id, cursor)
+                .await
+                .expect(ERROR_IMPOSSIBLE)
+        })
+    }
+
+    fn merkle_bucket<'a>(
+        &'a self,
+        part_id: PartId,
+        path: &BucketId,
+    ) -> BoxFuture<'a, MerkleBucketSummary> {
+        let path = path.clone();
+        Sendable::from_future(async move {
+            HostPartitionStore::merkle_bucket(self, part_id, path)
+                .await
+                .expect(ERROR_IMPOSSIBLE)
+        })
+    }
+
+    fn merkle_child_buckets<'a>(
+        &'a self,
+        part_id: PartId,
+        path: &BucketId,
+        summary_budget: u16,
+    ) -> BoxFuture<'a, Vec<MerkleBucketSummary>> {
+        let path = path.clone();
+        Sendable::from_future(async move {
+            HostPartitionStore::merkle_child_buckets(self, part_id, path, summary_budget)
+                .await
+                .expect(ERROR_IMPOSSIBLE)
+        })
+    }
+
+    fn merkle_leaf_items<'a>(
+        &'a self,
+        part_id: PartId,
+        path: &BucketId,
+        seed: MerkleFingerprintSeed,
+    ) -> BoxFuture<'a, Vec<MerkleLeafItem>> {
+        let path = path.clone();
+        Sendable::from_future(async move {
+            HostPartitionStore::merkle_leaf_items(self, part_id, path, seed)
                 .await
                 .expect(ERROR_IMPOSSIBLE)
         })

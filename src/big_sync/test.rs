@@ -4,10 +4,11 @@ use std::sync::Mutex;
 
 use big_sync_core::mpsc::{self, Receiver};
 use big_sync_core::rpc::{
-    BigSyncRpcResult, ListPartsError, PeerSummaryRequest, PeerSummaryResult, SubEvent,
-    SubPartsRequest,
+    BigSyncRpcResult, ListPartsError, MerkleBucketsRequest, MerkleBucketsResponse,
+    MerkleLeafItemsRequest, MerkleLeafItemsResponse, PeerSummaryRequest, PeerSummaryResult,
+    SubEvent, SubPartsRequest,
 };
-use big_sync_core::{Byte32Id, PartId, PeerId, SyncCompletion, SyncTaskDeets};
+use big_sync_core::{Byte32Id, PartId, PeerId, SyncJobEvt, SyncTaskDeets};
 
 use crate::part_store::HostPartitionStore;
 use crate::part_store::MemoryPartStoreSnapshot;
@@ -138,6 +139,22 @@ impl MemoryRpcClient {
             obj_id,
         }))
     }
+
+    async fn map_remote_leaf_items(
+        &self,
+        items: Vec<big_sync_core::merkle::MerkleLeafItem>,
+    ) -> Res<Vec<big_sync_core::merkle::MerkleLeafItem>> {
+        let mut out = Vec::with_capacity(items.len());
+        for item in items {
+            let scoped_obj = self.target_part_store.scoped_obj(item.obj_id).await?;
+            out.push(big_sync_core::merkle::MerkleLeafItem {
+                obj_id: self.source_part_store.resolve_obj(&scoped_obj).await?,
+                kind: item.kind,
+                fingerprint: item.fingerprint,
+            });
+        }
+        Ok(out)
+    }
 }
 
 #[async_trait]
@@ -201,6 +218,51 @@ impl crate::rpc::HostBigRpcClient for MemoryRpcClient {
         });
         Ok(Ok(Ok(forward_rx)))
     }
+
+    async fn merkle_buckets(
+        &self,
+        req: MerkleBucketsRequest,
+    ) -> Res<BigSyncRpcResult<Result<MerkleBucketsResponse, ListPartsError>>> {
+        if !self.world.is_online(self.target_peer_id) {
+            return Ok(Err(big_sync_core::rpc::RpcError::TransportError));
+        }
+        let scoped_part = self.source_part_store.scoped_part(req.part_id).await?;
+        let remote_part_id = self.target_part_store.resolve_part(&scoped_part).await?;
+        let response = self
+            .target_part_store
+            .merkle_child_buckets(remote_part_id, req.path.clone(), req.summary_budget)
+            .await?;
+        let parent = self
+            .target_part_store
+            .merkle_bucket(remote_part_id, req.path)
+            .await?;
+        let map_summary = |mut summary: big_sync_core::merkle::MerkleBucketSummary| {
+            summary.part_id = req.part_id;
+            summary
+        };
+        Ok(Ok(Ok(MerkleBucketsResponse {
+            parent: map_summary(parent),
+            children: response.into_iter().map(map_summary).collect(),
+        })))
+    }
+
+    async fn merkle_leaf_items(
+        &self,
+        req: MerkleLeafItemsRequest,
+    ) -> Res<BigSyncRpcResult<Result<MerkleLeafItemsResponse, ListPartsError>>> {
+        if !self.world.is_online(self.target_peer_id) {
+            return Ok(Err(big_sync_core::rpc::RpcError::TransportError));
+        }
+        let scoped_part = self.source_part_store.scoped_part(req.part_id).await?;
+        let remote_part_id = self.target_part_store.resolve_part(&scoped_part).await?;
+        let items = self
+            .target_part_store
+            .merkle_leaf_items(remote_part_id, req.path, req.seed)
+            .await?;
+        Ok(Ok(Ok(MerkleLeafItemsResponse {
+            items: self.map_remote_leaf_items(items).await?,
+        })))
+    }
 }
 
 struct MemorySyncBackend {
@@ -225,7 +287,7 @@ impl MemorySyncBackend {
 
 #[async_trait]
 impl crate::SyncBackend for MemorySyncBackend {
-    async fn run(&self, task: SyncTaskDeets) -> Res<Vec<SyncCompletion>> {
+    async fn run(&self, task: SyncTaskDeets) -> Res<Vec<SyncJobEvt>> {
         let remote_part_store = self.world.store_for_peer(task.peer_id);
         let local_part_id = task.part_hints.first().copied().expect(ERROR_IMPOSSIBLE);
         let scoped_part = self.local_part_store.scoped_part(local_part_id).await?;
@@ -259,32 +321,30 @@ impl crate::SyncBackend for MemorySyncBackend {
             .latest_cursor;
 
         let completion = if local_has_part && !remote_has_part {
-            SyncCompletion::DeletedMember {
+            SyncJobEvt::DeletedMember {
                 peer: task.peer_id,
                 obj_id: task.obj_id,
             }
         } else if !local_has_part && remote_has_part {
             let obj_payload = remote_payload.expect(ERROR_IMPOSSIBLE);
-            SyncCompletion::AddedMember {
+            SyncJobEvt::AddedMember {
                 peer: task.peer_id,
                 obj_id: task.obj_id,
                 obj_payload,
             }
         } else if local_has_part && remote_has_part {
             match (local_payload, remote_payload) {
-                (Some(local), Some(remote)) if local == remote => SyncCompletion::Noop {
+                (Some(local), Some(remote)) if local == remote => SyncJobEvt::Noop {
                     peer: task.peer_id,
                     obj_id: task.obj_id,
                 },
-                (Some(local), Some(_)) if local_latest > remote_latest => {
-                    SyncCompletion::AddedMember {
-                        peer: task.peer_id,
-                        obj_id: task.obj_id,
-                        obj_payload: local,
-                    }
-                }
+                (Some(local), Some(_)) if local_latest > remote_latest => SyncJobEvt::AddedMember {
+                    peer: task.peer_id,
+                    obj_id: task.obj_id,
+                    obj_payload: local,
+                },
                 (Some(_), Some(remote)) if remote_latest > local_latest => {
-                    SyncCompletion::AddedMember {
+                    SyncJobEvt::AddedMember {
                         peer: task.peer_id,
                         obj_id: task.obj_id,
                         obj_payload: remote,
@@ -297,24 +357,24 @@ impl crate::SyncBackend for MemorySyncBackend {
                     } else {
                         local
                     };
-                    SyncCompletion::AddedMember {
+                    SyncJobEvt::AddedMember {
                         peer: task.peer_id,
                         obj_id: task.obj_id,
                         obj_payload,
                     }
                 }
-                (None, Some(payload)) => SyncCompletion::AddedMember {
+                (None, Some(payload)) => SyncJobEvt::AddedMember {
                     peer: task.peer_id,
                     obj_id: task.obj_id,
                     obj_payload: payload,
                 },
-                _ => SyncCompletion::Noop {
+                _ => SyncJobEvt::Noop {
                     peer: task.peer_id,
                     obj_id: task.obj_id,
                 },
             }
         } else {
-            SyncCompletion::Noop {
+            SyncJobEvt::Noop {
                 peer: task.peer_id,
                 obj_id: task.obj_id,
             }
@@ -374,6 +434,47 @@ fn scoped_obj(seed: u8) -> ScopedObjRef {
 
 fn payload(label: &str) -> serde_json::Value {
     serde_json::Value::from(label)
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn memory_part_store_merkle_includes_removed_members() -> Res<()> {
+    let store = crate::part_store::MemoryPartStore::default();
+    let part_id = store.resolve_part(&test_part()).await?;
+    let obj = scoped_obj(99);
+    let obj_id = store.resolve_obj(&obj).await?;
+    store
+        .upsert_obj(
+            obj_id,
+            serde_json::json!({"phase": "present"}),
+            vec![part_id],
+        )
+        .await?;
+    let present_root = store
+        .merkle_bucket(part_id, big_sync_core::merkle::BucketId::root())
+        .await?;
+
+    store.remove_obj_from_part(obj_id, part_id).await?;
+    let removed_root = store
+        .merkle_bucket(part_id, big_sync_core::merkle::BucketId::root())
+        .await?;
+    let removed_items = store
+        .merkle_leaf_items(
+            part_id,
+            big_sync_core::merkle::BucketId::root(),
+            big_sync_core::merkle::MerkleFingerprintSeed::new(1, 2),
+        )
+        .await?;
+
+    assert_ne!(present_root.hash, removed_root.hash);
+    assert_eq!(removed_root.item_count, 1);
+    assert_eq!(
+        removed_items
+            .iter()
+            .map(|item| (item.obj_id, item.kind))
+            .collect::<Vec<_>>(),
+        vec![(obj_id, big_sync_core::merkle::MerkleItemKind::Removed)]
+    );
+    Ok(())
 }
 
 async fn boot_node_with_store(
@@ -673,6 +774,60 @@ async fn memory_sync_delete_propagates_to_both_nodes() -> Res<()> {
     let (snapshot_a, snapshot_b) = assert_two_node_alignment(&node_a, &node_b, 0).await?;
     assert!(!snapshot_a.scoped_objs.contains_key(&obj));
     assert!(!snapshot_b.scoped_objs.contains_key(&obj));
+
+    node_a.stop().await?;
+    node_b.stop().await?;
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn memory_sync_large_gap_uses_merkle_catchup() -> Res<()> {
+    utils_rs::testing::setup_tracing_once();
+    let world = Arc::new(TestWorld::default());
+    let node_a = boot_node(Arc::clone(&world), 1).await?;
+    let node_b = boot_node(Arc::clone(&world), 2).await?;
+
+    for ii in 0..300 {
+        let obj = ScopedObjRef::new(test_scope(), format!("merkle.obj.{ii}"));
+        node_b
+            .seed_obj(&obj, serde_json::json!({ "ii": ii }))
+            .await?;
+    }
+
+    node_a.connect_to(&node_b).await?;
+    let deadline = std::time::Instant::now() + Duration::from_secs(15);
+    let snapshot = loop {
+        let snapshot = node_a.snapshot().await?;
+        if snapshot.scoped_objs.len() == 300 {
+            break snapshot;
+        }
+        if std::time::Instant::now() >= deadline {
+            return Err(ferr!(
+                "timed out waiting for merkle catchup, saw {} objects",
+                snapshot.scoped_objs.len()
+            ));
+        }
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    };
+    assert_eq!(snapshot.scoped_objs.len(), 300);
+    for ii in 0..300 {
+        let obj = ScopedObjRef::new(test_scope(), format!("merkle.obj.{ii}"));
+        let value = snapshot
+            .scoped_objs
+            .get(&obj)
+            .and_then(|obj| obj.payload.clone())
+            .expect(ERROR_IMPOSSIBLE);
+        assert_eq!(value, serde_json::json!({ "ii": ii }));
+    }
+
+    let part_id = node_a.store.resolve_part(&test_part()).await?;
+    assert_eq!(
+        snapshot
+            .peer_part_cursors
+            .get(&(node_b.peer_id, part_id))
+            .copied(),
+        Some(300)
+    );
 
     node_a.stop().await?;
     node_b.stop().await?;

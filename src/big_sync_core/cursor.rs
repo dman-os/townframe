@@ -1,96 +1,78 @@
 //! TODO: emit sync stats event for use in full.rs
+//! FIXME: figure out the delete obj story
 
 use crate::interlude::*;
 
-use crate::part_store::{CursorIndex, PartitionStore};
-use crate::SyncCompletion;
+use crate::part_store::{CursorIndex, ObjPayload};
+use crate::SyncJobEvt;
 
 use std::collections::{BTreeMap, HashMap};
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
-pub enum ObjectSyncKind {
-    New,
-    Change,
-    Delete,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, Hash, PartialOrd, Ord)]
-pub struct ObjectSyncKey {
-    pub peer: PeerId,
-    pub kind: ObjectSyncKind,
-    pub obj_id: ObjId,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, Hash, PartialOrd, Ord)]
-struct ObjectJobId {
-    peer: PeerId,
-    obj_id: ObjId,
-}
-
-#[derive(Debug, Clone)]
-pub struct CursorWaiter {
-    pub peer: PeerId,
-    pub part_id: PartId,
-    pub sync_kind: ObjectSyncKind,
-}
-
-/// Look at [`on_obj_sync_completed`] impl for how this
-/// actually works in more detail.
-///
-/// [`on_obj_sync_completed`]: SyncMachine::on_obj_sync_completed
-#[derive(Debug, Clone)]
-struct ObjectJobState {
-    /// Since a obj can be a member of multiple partitions
-    /// from a single peer and be involved in multiple
-    /// events (consquetive changes) we, have these events
-    /// wait on the same job to dedpe work.
-    waiters: BTreeMap<CursorIndex, CursorWaiter>,
-    /// Since the job represents a waiting state for multiple
-    /// cursor events, we must ensure to tend to the last one.
-    ///
-    /// This is only ever Delete if the obj is deleted from all
-    /// local partitions.
-    last_change_kind: ObjectSyncKind,
-    /// This is true if no new cursor waiters
-    /// have been added since we last dispatched
-    /// a command for this job.
-    ///
-    /// We must dispatch a command again for an obj
-    /// if a new change comes in for it while we're
-    /// waiting for a previous sync command to complete.
-    /// We only advance the waiting cursors as we detect
-    /// this rest state.
-    dirty: bool,
-    /// Any cursors below these can be assumed
-    /// to be processsed
-    high_water_at_last_dispatch: CursorIndex,
-}
-
-// FIXME: part_ids are provided to commands
-// only as hints as obj ids across partitions are
-// supposed to represent a single entity.
 structstruck::strike! {
     #[derive(Debug, Clone, PartialEq, Eq)]
-    pub struct CursorMachineCommand {
-        pub peer_id: PeerId,
-        pub kind: ObjectSyncKind,
-        pub obj_id: ObjId,
-        pub part_hints: Vec<PartId>,
+    pub enum CursorMachineCommand {
+        SyncObj {
+            obj_id: ObjId,
+            remote_payload: ObjPayload,
+            cursors: Vec<CursorIndex>,
+            /// Upsert the object at the sync backend to these
+            /// parts
+            part_hints: Vec<PartId>,
+        },
+        SetPartCursor {
+            part_id: PartId,
+            cursor: CursorIndex
+        },
+        RemoveObjFromPart {
+            obj_id: ObjId,
+            part_id: PartId,
+        }
     }
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum CursorSlotState {
-    Pending,
-    Ready,
-}
+structstruck::strike! {
+    #[derive(Debug, Default)]
+    pub struct CursorSyncMachine {
+        cursor_state: HashMap<
+            PartId,
+            struct CursorStreamState {
+                #![derive(Debug, Default)]
+                // FIXME: last_emitted_cursor and persisted_cursor are identical
+                persisted_cursor: Option<CursorIndex>,
+                last_emitted_cursor: Option<CursorIndex>,
+                slots: BTreeMap<
+                    CursorIndex,
+                    enum CursorSlotState {
+                        #![derive(Debug, Clone, Copy, PartialEq, Eq)]
+                        Pending,
+                        Ready,
+                    }
+                >,
+            }
+        >,
+        active_obj_jobs: BTreeMap<
+            ObjId,
 
-#[derive(Debug, Default)]
-struct CursorStreamState {
-    // FIXME: last_emitted_cursor and persisted_cursor are identical
-    persisted_cursor: Option<CursorIndex>,
-    last_emitted_cursor: Option<CursorIndex>,
-    slots: BTreeMap<CursorIndex, CursorSlotState>,
+            /// Look at [`SyncMachine::on_obj_sync_completed`] impl for how this
+            /// actually works in more detail.
+            struct ObjectJobState {
+                #![derive(Debug, Clone, Default)]
+                /// Since a obj can be a member of multiple partitions
+                /// from a single peer and be involved in multiple
+                /// events (consquetive changes) we, have these events
+                /// wait on the same job to dedpe work.
+                waiters: BTreeMap<
+                    CursorIndex,
+                    struct CursorWaiter {
+                        #![derive(Debug, Clone)]
+                        pub part_id: PartId,
+                    }
+                >,
+                removed_from_parts: Set<PartId>,
+            }
+
+        >,
+    }
 }
 
 impl CursorStreamState {
@@ -101,281 +83,89 @@ impl CursorStreamState {
     }
 }
 
-#[derive(Debug, Default)]
-pub struct CursorSyncMachine {
-    cursor_state: HashMap<PeerId, HashMap<PartId, CursorStreamState>>,
-    active_obj_jobs: BTreeMap<ObjectJobId, ObjectJobState>,
-}
-
 impl CursorSyncMachine {
-    pub fn clear_peer(&mut self, peer: PeerId) {
-        self.cursor_state.remove(&peer);
-        self.active_obj_jobs.retain(|job_id, _| job_id.peer != peer);
-    }
-
-    pub async fn on_subscription_evt<K: FutureForm, S: PartitionStore<K>>(
+    pub fn on_subscription_evt(
         &mut self,
-        peer: PeerId,
         evt: crate::rpc::SubEvent,
-        part_store: &S,
         out: &mut Vec<CursorMachineCommand>,
     ) {
         use crate::rpc::*;
 
-        let (obj_id, part_id, cursor, sync_kind) = match evt {
+        let (obj_id, part_id, cursor) = match &evt {
             SubEvent::ReplayComplete => return,
-            SubEvent::Upserted(event) => {
-                let job_id = ObjectJobId {
-                    peer,
-                    obj_id: event.obj_id,
-                };
-                let sync_kind = match self.active_obj_jobs.get(&job_id) {
-                    Some(job) if matches!(job.last_change_kind, ObjectSyncKind::Delete) => {
-                        ObjectSyncKind::New
-                    }
-                    Some(_) => ObjectSyncKind::Change,
-                    None => ObjectSyncKind::New,
-                };
-                (event.obj_id, event.part_id, event.cursor, sync_kind)
-            }
-            SubEvent::Deleted(event) => (
-                event.obj_id,
-                event.part_id,
-                event.cursor,
-                ObjectSyncKind::Delete,
-            ),
+            SubEvent::Deleted(event) => (event.obj_id, event.part_id, event.cursor),
+            SubEvent::Upserted(event) => (event.obj_id, event.part_id, event.cursor),
         };
-        // clone self field AOT to avoid stream_state_mut mutable borrow
-        // leading to borrow issues
-        let state = self.stream_state_mut(peer, part_id);
+        let state = self.cursor_state.entry(part_id).or_default();
         if cursor <= state.floor() {
             panic!(
                 "cursority trap: cursor ({cursor}) seen below floor ({})",
                 state.floor()
             );
         }
-        if matches!(sync_kind, ObjectSyncKind::Delete) {
-            let obj_partition_count = part_store.obj_parts(obj_id).await.len();
-            if obj_partition_count > 1 {
-                part_store.remove_obj_from_part(obj_id, part_id).await;
-                let old = state.slots.insert(cursor, CursorSlotState::Ready);
-                if let Some(old) = old {
-                    panic!("duplicate cursor {cursor} for peer {peer} part {part_id}: {old:?}");
-                }
-                self.drain_ready_cursor_advances(peer, part_id, part_store)
-                    .await;
-                // if obj is still in other partitons, no need for a delete command
-                return;
-            }
-        }
         let old = state.slots.insert(cursor, CursorSlotState::Pending);
         if let Some(old) = old {
-            panic!("duplicate cursor {cursor} for peer {peer} part {part_id}: {old:?}");
+            panic!("duplicate cursor {cursor} for part {part_id}: {old:?}");
         }
 
-        let key = ObjectSyncKey {
-            peer,
-            kind: sync_kind,
-            obj_id,
-        };
-        let job_id = ObjectJobId { peer, obj_id };
-        let entry = self
-            .active_obj_jobs
-            .entry(job_id)
-            .or_insert_with(|| ObjectJobState {
-                dirty: false,
-                high_water_at_last_dispatch: cursor,
-                last_change_kind: key.kind,
-                waiters: default(),
-            });
-        if !entry.waiters.is_empty() {
-            entry.dirty = true;
-            assert!(entry.high_water_at_last_dispatch < cursor, "fishy");
-            entry.high_water_at_last_dispatch = cursor;
-        }
-        match (entry.last_change_kind, sync_kind) {
-            // obj added to new partition
-            (ObjectSyncKind::Change, ObjectSyncKind::New)
-            | (ObjectSyncKind::New, ObjectSyncKind::New)
-            // obj changed
-            | (ObjectSyncKind::New, ObjectSyncKind::Change)
-            | (ObjectSyncKind::Change, ObjectSyncKind::Change)
-            // obj deleted
-            | (ObjectSyncKind::Change, ObjectSyncKind::Delete)
-            | (ObjectSyncKind::Delete, ObjectSyncKind::Delete)
-            | (ObjectSyncKind::New, ObjectSyncKind::Delete) => {}
-            // an object can be resurrected after a delete
-            (ObjectSyncKind::Delete, ObjectSyncKind::New) => {}
-            // A delete should not be followed by a change without a
-            // resurrecting upsert first.
-            (ObjectSyncKind::Delete, ObjectSyncKind::Change) => {
-                panic!("curiosity trap: event for deleted obj")
+        let job = self.active_obj_jobs.entry(obj_id).or_default();
+        let cmd = match evt {
+            SubEvent::Upserted(evt) => {
+                job.waiters.insert(cursor, CursorWaiter { part_id });
+                let part_hints = job.waiters.values().map(|ww| ww.part_id).collect();
+                CursorMachineCommand::SyncObj {
+                    obj_id: obj_id,
+                    part_hints,
+                    cursors: vec![cursor],
+                    remote_payload: evt.payload,
+                }
             }
-        }
-        entry.waiters.insert(
-            cursor,
-            CursorWaiter {
-                peer,
-                part_id,
-                sync_kind,
-            },
-        );
-        let part_hints = entry.waiters.values().map(|ww| ww.part_id).collect();
-        // FIXME: consider waiting until next dispatch for new commands
-        out.push(CursorMachineCommand {
-            peer_id: key.peer,
-            obj_id: key.obj_id,
-            part_hints,
-            kind: sync_kind,
-        });
+            SubEvent::Deleted(_) => {
+                job.removed_from_parts.insert(part_id);
+                state.slots.insert(cursor, CursorSlotState::Ready);
+                self.drain_ready_cursor_advances(part_id, out);
+                CursorMachineCommand::RemoveObjFromPart { obj_id, part_id }
+            }
+            SubEvent::ReplayComplete => unreachable!(),
+        };
+        out.push(cmd);
     }
 
-    pub async fn on_obj_sync_completed<K: FutureForm, S: PartitionStore<K>>(
-        &mut self,
-        completion: SyncCompletion,
-        part_store: &S,
-        out: &mut Vec<CursorMachineCommand>,
-    ) -> Res<()> {
-        let job_id = match &completion {
-            SyncCompletion::AddedMember { peer, obj_id, .. }
-            | SyncCompletion::ChangedObject { peer, obj_id }
-            | SyncCompletion::DeletedMember { peer, obj_id }
-            | SyncCompletion::Noop { peer, obj_id } => ObjectJobId {
-                peer: *peer,
-                obj_id: *obj_id,
-            },
-        };
-        let Some(job) = self.active_obj_jobs.get_mut(&job_id) else {
-            return Ok(());
-        };
-        let next_job_kind = match (&job.last_change_kind, &completion) {
-            (ObjectSyncKind::New, SyncCompletion::AddedMember { .. })
-            | (ObjectSyncKind::Change, SyncCompletion::AddedMember { .. })
-            | (ObjectSyncKind::New, SyncCompletion::Noop { .. })
-            | (ObjectSyncKind::New, SyncCompletion::ChangedObject { .. })
-            | (ObjectSyncKind::Change, SyncCompletion::Noop { .. })
-            | (ObjectSyncKind::Change, SyncCompletion::ChangedObject { .. }) => ObjectSyncKind::Change,
-            (ObjectSyncKind::Change, SyncCompletion::DeletedMember { .. })
-            | (ObjectSyncKind::New, SyncCompletion::DeletedMember { .. }) => ObjectSyncKind::New,
-            (ObjectSyncKind::Delete, SyncCompletion::AddedMember { .. })
-            // NOTE: we still enqueue a delete on previous delete in case
-            // there was a transient Added flip
-            | (ObjectSyncKind::Delete, SyncCompletion::DeletedMember { .. })
-            | (ObjectSyncKind::Delete, SyncCompletion::ChangedObject { .. })
-            | (ObjectSyncKind::Delete, SyncCompletion::Noop { .. }) => ObjectSyncKind::Delete,
-        };
-        let should_requeue_current = job.dirty
-            || matches!(
-                (&job.last_change_kind, &completion),
-                (ObjectSyncKind::New, SyncCompletion::Noop { .. })
-            );
-        if should_requeue_current {
-            job.last_change_kind = next_job_kind;
-            let partition_hints = job.waiters.values().map(|ww| ww.part_id).collect();
-            out.push(CursorMachineCommand {
-                peer_id: job_id.peer,
-                obj_id: job_id.obj_id,
-                kind: next_job_kind,
-                part_hints: partition_hints,
-            });
-            if job.dirty {
-                job.dirty = false;
-                return Ok(());
-            }
-        }
+    pub fn on_obj_sync_job_evt(&mut self, evt: &SyncJobEvt, out: &mut Vec<CursorMachineCommand>) {
         // remove it temporarily to allow mutable borrows
         // on self
-        let Some(mut job) = self.active_obj_jobs.remove(&job_id) else {
-            return Ok(());
+        let Some(mut job) = self.active_obj_jobs.remove(&evt.obj_id) else {
+            return;
         };
-
-        let mut per_partition_cursors = HashMap::new();
-        for (&ii, waiter) in job.waiters.iter() {
-            if ii > job.high_water_at_last_dispatch {
-                continue;
+        let mut affected_parts = vec![];
+        for &ii in &evt.cursors {
+            let waiter = job.waiters.remove(&ii).expect(ERROR_UNRECONIZED);
+            if job.removed_from_parts.contains(&waiter.part_id) {
+                // remove from part again incase the sync job
+                // re-added it
+                out.push(CursorMachineCommand::RemoveObjFromPart {
+                    obj_id: evt.obj_id,
+                    part_id: waiter.part_id,
+                });
             }
-            if !per_partition_cursors.contains_key(&waiter.part_id) {
-                per_partition_cursors.insert(waiter.part_id, vec![]);
-            }
-            let part_cursors = per_partition_cursors
-                .get_mut(&waiter.part_id)
-                .expect(ERROR_IMPOSSIBLE);
-            part_cursors.push(ii);
+            let state = self.cursor_state.entry(waiter.part_id).or_default();
+            state.slots.insert(ii, CursorSlotState::Ready);
+            affected_parts.push(waiter.part_id);
         }
-
-        for (part_id, cursors) in per_partition_cursors {
-            debug_assert!(cursors.is_sorted());
-            for &ii in &cursors {
-                let waiter = job.waiters.remove(&ii).expect(ERROR_IMPOSSIBLE);
-                let state = self.stream_state_mut(waiter.peer, part_id);
-                // mark slot ready
-                state.slots.insert(ii, CursorSlotState::Ready);
-            }
-
-            match &completion {
-                SyncCompletion::AddedMember { obj_payload, .. } => {
-                    part_store
-                        .upsert_obj(job_id.obj_id, obj_payload, &[part_id])
-                        .await;
-                }
-                SyncCompletion::DeletedMember { .. } => {
-                    part_store
-                        .remove_obj_from_part(job_id.obj_id, part_id)
-                        .await;
-                }
-                SyncCompletion::ChangedObject { .. } | SyncCompletion::Noop { .. } => {}
-            }
-            self.drain_ready_cursor_advances(job_id.peer, part_id, part_store)
-                .await;
+        for part_id in affected_parts {
+            self.drain_ready_cursor_advances(part_id, out);
         }
-
-        // emit sync requests on any other peers that
-        // have job on obj
-        for (ii_id, ii_job) in &mut self.active_obj_jobs {
-            if ii_id.obj_id != job_id.obj_id {
-                continue;
-            }
-            if ii_job.last_change_kind != ObjectSyncKind::New {
-                continue;
-            }
-            if job_id.peer == ii_id.peer {
-                continue;
-            }
-            ii_job.last_change_kind = ObjectSyncKind::Change;
-            // FIXME: consider not setting it dirty
-            ii_job.dirty = true;
-            let part_ids = ii_job.waiters.values().map(|ww| ww.part_id).collect();
-            out.push(CursorMachineCommand {
-                part_hints: part_ids,
-                peer_id: ii_id.peer,
-                obj_id: ii_id.obj_id,
-                kind: ObjectSyncKind::Change,
-            });
-        }
-
         if !job.waiters.is_empty() {
-            self.active_obj_jobs.insert(job_id, job);
+            self.active_obj_jobs.insert(evt.obj_id, job);
         }
-
-        Ok(())
     }
 
-    async fn drain_ready_cursor_advances<K: FutureForm, S: PartitionStore<K>>(
+    fn drain_ready_cursor_advances(
         &mut self,
-        peer: PeerId,
         part_id: PartId,
-        part_store: &S,
+        out: &mut Vec<CursorMachineCommand>,
     ) {
-        let state = {
-            if !self.cursor_state.contains_key(&peer) {
-                self.cursor_state.insert(peer, default());
-            }
-            let state = self.cursor_state.get_mut(&peer).expect(ERROR_IMPOSSIBLE);
-            if !state.contains_key(&part_id) {
-                state.insert(part_id, default());
-            }
-            state.get_mut(&part_id).expect(ERROR_IMPOSSIBLE)
-        };
+        let state = self.cursor_state.entry(part_id).or_default();
         // calculate Ready highmark
         let latest_ready = {
             let mut latest_ready = None;
@@ -394,7 +184,7 @@ impl CursorSyncMachine {
         };
 
         // update sync store
-        part_store.set_peer_part_cursor(peer, part_id, cursor).await;
+        out.push(CursorMachineCommand::SetPartCursor { part_id, cursor });
         while state
             .slots
             .first_key_value()
@@ -404,16 +194,5 @@ impl CursorSyncMachine {
         }
         state.last_emitted_cursor = Some(cursor);
         state.persisted_cursor = Some(cursor);
-    }
-
-    fn stream_state_mut(&mut self, peer: PeerId, part_id: PartId) -> &mut CursorStreamState {
-        if !self.cursor_state.contains_key(&peer) {
-            self.cursor_state.insert(peer, default());
-        }
-        let state = self.cursor_state.get_mut(&peer).expect(ERROR_IMPOSSIBLE);
-        if !state.contains_key(&part_id) {
-            state.insert(part_id, default());
-        }
-        state.get_mut(&part_id).expect(ERROR_IMPOSSIBLE)
     }
 }
