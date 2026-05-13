@@ -36,6 +36,7 @@ structstruck.workspace = true
 tokio-util.workspace = true
 async-channel.workspace = true
 future_form.workspace = true
+rand.workspace = true
 
 #
 # db
@@ -44,6 +45,9 @@ sqlx = { workspace = true, features = ["sqlite", "runtime-tokio"] }
 #
 # actors
 irpc.workspace = true
+
+[dev-dependencies]
+big_sync_core = { workspace = true, features = ["test-support"] }
 
 #
 # logging

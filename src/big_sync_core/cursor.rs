@@ -122,20 +122,27 @@ impl CursorSyncMachine {
     ) {
         use crate::rpc::*;
 
-        let (sync_kind, obj_id, part_id, cursor) = match evt {
-            SubEvent::ReplayComplete { .. } => return,
-            SubEvent::MemberEvent(event) => {
-                let (kind, obj_id) = match event.deets {
-                    PartMemberEventDeets::MemberUpsert(obj_id) => (ObjectSyncKind::New, obj_id),
-                    PartMemberEventDeets::MemberRemove(obj_id) => (ObjectSyncKind::Delete, obj_id),
+        let (obj_id, part_id, cursor, sync_kind) = match evt {
+            SubEvent::ReplayComplete => return,
+            SubEvent::Upserted(event) => {
+                let job_id = ObjectJobId {
+                    peer,
+                    obj_id: event.obj_id,
                 };
-                (kind, obj_id, event.part_id, event.cursor)
+                let sync_kind = match self.active_obj_jobs.get(&job_id) {
+                    Some(job) if matches!(job.last_change_kind, ObjectSyncKind::Delete) => {
+                        ObjectSyncKind::New
+                    }
+                    Some(_) => ObjectSyncKind::Change,
+                    None => ObjectSyncKind::New,
+                };
+                (event.obj_id, event.part_id, event.cursor, sync_kind)
             }
-            SubEvent::ObjChangeEvent(event) => (
-                ObjectSyncKind::Change,
+            SubEvent::Deleted(event) => (
                 event.obj_id,
                 event.part_id,
                 event.cursor,
+                ObjectSyncKind::Delete,
             ),
         };
         // clone self field AOT to avoid stream_state_mut mutable borrow
@@ -152,7 +159,9 @@ impl CursorSyncMachine {
             if obj_partition_count > 1 {
                 part_store.remove_obj_from_part(obj_id, part_id).await;
                 let old = state.slots.insert(cursor, CursorSlotState::Ready);
-                assert!(old.is_none(), "fishy");
+                if let Some(old) = old {
+                    panic!("duplicate cursor {cursor} for peer {peer} part {part_id}: {old:?}");
+                }
                 self.drain_ready_cursor_advances(peer, part_id, part_store)
                     .await;
                 // if obj is still in other partitons, no need for a delete command
@@ -160,7 +169,9 @@ impl CursorSyncMachine {
             }
         }
         let old = state.slots.insert(cursor, CursorSlotState::Pending);
-        assert!(old.is_none(), "fishy");
+        if let Some(old) = old {
+            panic!("duplicate cursor {cursor} for peer {peer} part {part_id}: {old:?}");
+        }
 
         let key = ObjectSyncKey {
             peer,
@@ -190,14 +201,16 @@ impl CursorSyncMachine {
             | (ObjectSyncKind::New, ObjectSyncKind::Change)
             | (ObjectSyncKind::Change, ObjectSyncKind::Change)
             // obj deleted
-            |(ObjectSyncKind::Change, ObjectSyncKind::Delete)
+            | (ObjectSyncKind::Change, ObjectSyncKind::Delete)
             | (ObjectSyncKind::Delete, ObjectSyncKind::Delete)
             | (ObjectSyncKind::New, ObjectSyncKind::Delete) => {}
-            // FIXME: I'm not sure how well we've modeled deletes
-            // in one partitions
-            (ObjectSyncKind::Delete, ObjectSyncKind::New)
-            | (ObjectSyncKind::Delete, ObjectSyncKind::Change)
-            => panic!("curiosity trap: event for deleted obj"),
+            // an object can be resurrected after a delete
+            (ObjectSyncKind::Delete, ObjectSyncKind::New) => {}
+            // A delete should not be followed by a change without a
+            // resurrecting upsert first.
+            (ObjectSyncKind::Delete, ObjectSyncKind::Change) => {
+                panic!("curiosity trap: event for deleted obj")
+            }
         }
         entry.waiters.insert(
             cursor,

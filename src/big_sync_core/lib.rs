@@ -77,6 +77,25 @@ pub enum SyncCompletion {
     },
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct TaskCounts {
+    pub all: usize,
+    pub pending: usize,
+    pub sync_spawn_queue: usize,
+    pub machine_spawn_queue: usize,
+    pub stop_queue: usize,
+}
+
+impl TaskCounts {
+    pub fn is_idle(&self) -> bool {
+        self.all == 0
+            && self.pending == 0
+            && self.sync_spawn_queue == 0
+            && self.machine_spawn_queue == 0
+            && self.stop_queue == 0
+    }
+}
+
 structstruck::strike! {
     pub enum BigSyncMsg {
         MachineTaskResult (struct {
@@ -543,6 +562,16 @@ impl BigSyncMachine {
 
     pub fn drain_stop_queue(&mut self) -> std::collections::hash_set::Drain<'_, u64> {
         self.tasks.drain_stop_queue()
+    }
+
+    pub fn task_counts(&self) -> TaskCounts {
+        TaskCounts {
+            all: self.tasks.all.len(),
+            pending: self.tasks.pending.len(),
+            sync_spawn_queue: self.tasks.sync_spawn_queue.len(),
+            machine_spawn_queue: self.tasks.machine_spawn_queue.len(),
+            stop_queue: self.tasks.stop_queue.len(),
+        }
     }
 
     pub async fn handle_evt<K: FutureForm, S: PartitionStore<K>>(

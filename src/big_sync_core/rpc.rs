@@ -3,7 +3,7 @@
 use crate::interlude::*;
 
 use crate::mpsc::Receiver;
-use crate::part_store::{CursorIndex, ObjPayload};
+use crate::part_store::CursorIndex;
 
 pub trait BigSyncRpcClient<K: FutureForm> {
     fn peer_summary<'a>(
@@ -52,12 +52,25 @@ structstruck::strike! {
 }
 
 structstruck::strike! {
+    #[derive(Debug, Clone, Serialize, Deserialize)]
+    pub struct PartTransition {
+        pub cursor: CursorIndex,
+        pub part_id: PartId,
+        pub obj_id: ObjId,
+    }
+}
+
+structstruck::strike! {
+    #[derive(Debug, Clone)]
+    pub enum PartEvent {
+        Upserted(PartTransition),
+        Deleted(PartTransition),
+    }
+}
+
+structstruck::strike! {
     pub struct PartPage {
-        pub events: Vec<pub enum PartEvent {
-            #![derive(Debug, Clone)]
-            MemberEvent(PartMemberEvent),
-            ObjChangeEvent(ObjChangeEvent)
-        }>,
+        pub events: Vec<PartEvent>,
         pub next_cursor: Option<CursorIndex>,
     }
 }
@@ -65,20 +78,8 @@ structstruck::strike! {
 structstruck::strike! {
     #[structstruck::each[derive(Debug, Clone, Serialize, Deserialize)]]
     pub enum SubEvent {
-        MemberEvent(pub struct PartMemberEvent {
-            pub cursor: CursorIndex,
-            pub part_id: PartId,
-            pub deets: pub enum PartMemberEventDeets {
-                MemberUpsert(ObjId),
-                MemberRemove(ObjId),
-            },
-        }),
-        ObjChangeEvent(pub struct ObjChangeEvent {
-            pub cursor: CursorIndex,
-            pub part_id: PartId,
-            pub obj_id: ObjId,
-            pub payload: ObjPayload,
-        }),
+        Upserted(PartTransition),
+        Deleted(PartTransition),
         ReplayComplete ,
     }
 }

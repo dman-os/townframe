@@ -1,11 +1,12 @@
 use std::collections::BTreeMap;
+#[cfg(test)]
+use std::collections::BTreeSet;
 
 use crate::interlude::*;
 
 use big_sync_core::part_store::{CursorIndex, ObjPayload};
 use big_sync_core::rpc::{
-    ListPartsError, PartEvent, PartMemberEvent, PartMemberEventDeets, PartPage, PartSummary,
-    SubEvent, SubPartsRequest,
+    ListPartsError, PartEvent, PartPage, PartSummary, PartTransition, SubEvent, SubPartsRequest,
 };
 use big_sync_core::{ObjId, PartId, PeerId};
 use utils_rs::prelude::tokio::sync::mpsc;
@@ -70,7 +71,6 @@ structstruck::strike! {
                         members: HashMap<
                             ObjId,
                             struct PartMemberState {
-                                added_at: CursorIndex,
                                 changed_at: CursorIndex,
                                 removed_at: Option<CursorIndex>,
                             }
@@ -107,19 +107,27 @@ impl Default for MemoryPartStore {
     }
 }
 
+#[cfg(test)]
+impl MemoryPartStore {
+    pub(crate) async fn ensure_part(&self, part_id: PartId) -> Res<()> {
+        surelock::key::lock_scope(|key| {
+            let (mut guard, _key) = key.lock(&self.inner);
+            guard.parts.entry(part_id).or_default();
+            Ok(())
+        })
+    }
+}
+
 impl PartState {
-    fn flush(&mut self) {
+    fn flush(&mut self, global_cursor: &mut GlobalCursor) {
         for ii in self.bus.events_to_drop.drain(..) {
             self.events.remove(&ii);
+            global_cursor.drop_cur(ii);
         }
         for evt in self.bus.buf.drain(..) {
             let (cursor, sub_evt) = match &evt {
-                PartEvent::MemberEvent(inner) => {
-                    (inner.cursor, SubEvent::MemberEvent(inner.clone()))
-                }
-                PartEvent::ObjChangeEvent(inner) => {
-                    (inner.cursor, SubEvent::ObjChangeEvent(inner.clone()))
-                }
+                PartEvent::Upserted(inner) => (inner.cursor, SubEvent::Upserted(inner.clone())),
+                PartEvent::Deleted(inner) => (inner.cursor, SubEvent::Deleted(inner.clone())),
             };
             self.events.insert(cursor, evt);
             for (ii, sub) in self.bus.subs.iter().enumerate() {
@@ -127,6 +135,9 @@ impl PartState {
                     self.bus.subs_to_drop.push(ii)
                 }
             }
+            self.bus.subs_to_drop.sort_unstable();
+            self.bus.subs_to_drop.dedup();
+            self.bus.subs_to_drop.reverse();
             for ii in self.bus.subs_to_drop.drain(..) {
                 self.bus.subs.swap_remove(ii);
             }
@@ -145,7 +156,8 @@ impl GlobalCursor {
     fn get(&mut self, part_id: PartId) -> CursorIndex {
         let ii = self
             .counter
-            .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            .fetch_add(1, std::sync::atomic::Ordering::SeqCst)
+            + 1;
         self.event_to_part.insert(ii, part_id);
         ii
     }
@@ -174,7 +186,11 @@ impl HostPartitionStore for MemoryPartStore {
                     part_id,
                     PartSummary {
                         latest_cursor: part.latest_cursor,
-                        member_count: part.members.len() as _,
+                        member_count: part
+                            .members
+                            .values()
+                            .filter(|member| member.removed_at.is_none())
+                            .count() as _,
                     },
                 );
             }
@@ -187,7 +203,12 @@ impl HostPartitionStore for MemoryPartStore {
             Ok(guard
                 .parts
                 .get(&part_id)
-                .map(|part| part.members.len() as u64)
+                .map(|part| {
+                    part.members
+                        .values()
+                        .filter(|member| member.removed_at.is_none())
+                        .count() as u64
+                })
                 .unwrap_or(0))
         })
     }
@@ -222,34 +243,33 @@ impl HostPartitionStore for MemoryPartStore {
             for &part_id in &parts {
                 let part = guard.parts.entry(part_id).or_default();
                 if let Some(old) = part.members.get_mut(&obj_id) {
-                    part.bus.remove_evt(old.changed_at);
-                    old.changed_at = guard.global_cursor.get(part_id);
-                    part.bus.queue_evt(PartEvent::MemberEvent(PartMemberEvent {
-                        cursor: old.changed_at,
+                    if let Some(old_removed_at) = old.removed_at.take() {
+                        part.bus.remove_evt(old_removed_at);
+                    } else {
+                        part.bus.remove_evt(old.changed_at);
+                    }
+                    let cursor = guard.global_cursor.get(part_id);
+                    old.changed_at = cursor;
+                    part.latest_cursor = cursor;
+                    part.bus.queue_evt(PartEvent::Upserted(PartTransition {
+                        cursor,
                         part_id,
-                        deets: PartMemberEventDeets::MemberUpsert(obj_id),
+                        obj_id,
                     }));
-                    part.latest_cursor = old.changed_at;
                 } else {
                     let state = PartMemberState {
-                        added_at: guard.global_cursor.get(part_id),
                         changed_at: guard.global_cursor.get(part_id),
                         removed_at: None,
                     };
-                    part.bus.queue_evt(PartEvent::MemberEvent(PartMemberEvent {
-                        cursor: state.added_at,
-                        part_id,
-                        deets: PartMemberEventDeets::MemberUpsert(obj_id),
-                    }));
-                    part.bus.queue_evt(PartEvent::MemberEvent(PartMemberEvent {
+                    part.latest_cursor = state.changed_at;
+                    part.bus.queue_evt(PartEvent::Upserted(PartTransition {
                         cursor: state.changed_at,
                         part_id,
-                        deets: PartMemberEventDeets::MemberUpsert(obj_id),
+                        obj_id,
                     }));
-                    part.latest_cursor = state.changed_at;
                     part.members.insert(obj_id, state);
                 }
-                part.flush();
+                part.flush(&mut guard.global_cursor);
             }
             Ok(())
         })
@@ -263,26 +283,33 @@ impl HostPartitionStore for MemoryPartStore {
             obj.parts.extend(&parts);
             for &part_id in &parts {
                 let part = guard.parts.entry(part_id).or_default();
-                if let None = part.members.get_mut(&obj_id) {
+                if let Some(old) = part.members.get_mut(&obj_id) {
+                    if old.removed_at.is_some() {
+                        if let Some(old_removed_at) = old.removed_at.take() {
+                            part.bus.remove_evt(old_removed_at);
+                        }
+                        old.changed_at = guard.global_cursor.get(part_id);
+                        part.latest_cursor = old.changed_at;
+                        part.bus.queue_evt(PartEvent::Upserted(PartTransition {
+                            cursor: old.changed_at,
+                            part_id,
+                            obj_id,
+                        }));
+                    }
+                } else {
                     let state = PartMemberState {
-                        added_at: guard.global_cursor.get(part_id),
                         changed_at: guard.global_cursor.get(part_id),
                         removed_at: None,
                     };
-                    part.bus.queue_evt(PartEvent::MemberEvent(PartMemberEvent {
-                        cursor: state.added_at,
-                        part_id,
-                        deets: PartMemberEventDeets::MemberUpsert(obj_id),
-                    }));
-                    part.bus.queue_evt(PartEvent::MemberEvent(PartMemberEvent {
+                    part.latest_cursor = state.changed_at;
+                    part.bus.queue_evt(PartEvent::Upserted(PartTransition {
                         cursor: state.changed_at,
                         part_id,
-                        deets: PartMemberEventDeets::MemberUpsert(obj_id),
+                        obj_id,
                     }));
-                    part.latest_cursor = state.changed_at;
                     part.members.insert(obj_id, state);
                 }
-                part.flush();
+                part.flush(&mut guard.global_cursor);
             }
             Ok(())
         })
@@ -293,21 +320,31 @@ impl HostPartitionStore for MemoryPartStore {
             let guard = &mut *guard;
             let part = guard.parts.entry(part_id).or_default();
             if let Some(old) = part.members.get_mut(&obj_id) {
-                if let Some(old) = old.removed_at {
-                    part.bus.remove_evt(old);
+                if let Some(old_removed_at) = old.removed_at.take() {
+                    part.bus.remove_evt(old_removed_at);
+                } else {
+                    part.bus.remove_evt(old.changed_at);
                 }
-                part.latest_cursor = guard.global_cursor.get(part_id);
-                old.removed_at = Some(part.latest_cursor);
-                part.bus.queue_evt(PartEvent::MemberEvent(PartMemberEvent {
-                    cursor: old.changed_at,
+                let cursor = guard.global_cursor.get(part_id);
+                part.latest_cursor = cursor;
+                old.removed_at = Some(cursor);
+                part.bus.queue_evt(PartEvent::Deleted(PartTransition {
+                    cursor,
                     part_id,
-                    deets: PartMemberEventDeets::MemberRemove(obj_id),
+                    obj_id,
                 }));
             }
-            let obj = guard.objs.entry(obj_id).or_default();
-            obj.parts.remove(&part_id);
+            let remove_obj = if let Some(obj) = guard.objs.get_mut(&obj_id) {
+                obj.parts.remove(&part_id);
+                obj.parts.is_empty()
+            } else {
+                false
+            };
+            if remove_obj {
+                guard.objs.remove(&obj_id);
+            }
 
-            part.flush();
+            part.flush(&mut guard.global_cursor);
             Ok(())
         })
     }
@@ -354,7 +391,7 @@ impl HostPartitionStore for MemoryPartStore {
                         unkown_parts: vec![part_id],
                     });
                 };
-                for (&ii, evt) in part.events.range(cursor..) {
+                for (&ii, evt) in part.events.range(cursor.saturating_add(1)..) {
                     if events.len() >= limit as usize {
                         next_cursor = Some(ii);
                         break;
@@ -399,15 +436,22 @@ impl HostPartitionStore for MemoryPartStore {
             let limit = 50;
             let mut events = Vec::with_capacity(limit);
             let parts: HashSet<_> = reqs.parts.iter().map(|req| req.part_id).collect();
-            let mut cursor = reqs.parts.iter().map(|req| req.cursor).min().unwrap_or(0);
+            let mut cursor = reqs
+                .parts
+                .iter()
+                .map(|req| req.cursor)
+                .min()
+                .unwrap_or(0)
+                .saturating_add(1);
             while !replay_done {
+                let mut next_cursor = cursor;
                 surelock::key::lock_scope(|key| {
                     let (mut guard, _key) = key.lock(&state);
                     let guard = &mut *guard;
 
                     for (&ii, part_id) in guard.global_cursor.event_to_part.range(cursor..) {
                         if events.len() >= limit as usize {
-                            cursor = ii + 1;
+                            next_cursor = ii + 1;
                             break;
                         }
                         let part = guard.parts.get(&part_id).expect(ERROR_IMPOSSIBLE);
@@ -415,17 +459,19 @@ impl HostPartitionStore for MemoryPartStore {
                         if parts.contains(&part_id) {
                             events.push(evt.clone())
                         }
+                        next_cursor = ii + 1;
                     }
                 });
                 replay_done = events.is_empty();
                 for evt in events.drain(..) {
                     if let Err(_) = tx.send(match evt {
-                        PartEvent::MemberEvent(inner) => SubEvent::MemberEvent(inner),
-                        PartEvent::ObjChangeEvent(inner) => SubEvent::ObjChangeEvent(inner),
+                        PartEvent::Upserted(inner) => SubEvent::Upserted(inner),
+                        PartEvent::Deleted(inner) => SubEvent::Deleted(inner),
                     }) {
                         return;
                     }
                 }
+                cursor = next_cursor;
             }
             if let Err(_) = tx.send(SubEvent::ReplayComplete) {
                 return;
@@ -442,5 +488,45 @@ impl HostPartitionStore for MemoryPartStore {
         };
         tokio::spawn(async move { fut.await });
         Ok(Ok(rx))
+    }
+}
+
+#[cfg(test)]
+#[derive(Debug, Clone, PartialEq)]
+pub(crate) struct MemoryPartStoreSnapshot {
+    pub objs: BTreeMap<ObjId, MemoryObjSnapshot>,
+    pub peer_part_cursors: BTreeMap<(PeerId, PartId), CursorIndex>,
+}
+
+#[cfg(test)]
+#[derive(Debug, Clone, PartialEq)]
+pub(crate) struct MemoryObjSnapshot {
+    pub payload: Option<ObjPayload>,
+    pub parts: BTreeSet<PartId>,
+}
+
+#[cfg(test)]
+impl MemoryPartStore {
+    pub(crate) async fn snapshot(&self) -> Res<MemoryPartStoreSnapshot> {
+        surelock::key::lock_scope(|key| {
+            let (guard, _key) = key.lock(&self.inner);
+            let objs = guard
+                .objs
+                .iter()
+                .map(|(&obj_id, obj)| {
+                    (
+                        obj_id,
+                        MemoryObjSnapshot {
+                            payload: obj.payload.clone(),
+                            parts: obj.parts.iter().copied().collect(),
+                        },
+                    )
+                })
+                .collect();
+            Ok(MemoryPartStoreSnapshot {
+                objs,
+                peer_part_cursors: guard.peer_part_cursors.clone().into_iter().collect(),
+            })
+        })
     }
 }

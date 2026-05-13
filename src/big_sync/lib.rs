@@ -9,13 +9,18 @@ use big_sync_core::{
     SyncTaskDeets, TaskCtx, TaskId,
 };
 
+#[cfg(test)]
+use big_sync_core::TaskCounts;
+
 mod part_store;
 mod rpc;
+#[cfg(test)]
 mod test;
 mod trap;
 
 use crate::interlude::*;
 
+#[derive(Clone)]
 pub struct BigSyncWorkerHandle {
     host_tx: tokio::sync::mpsc::Sender<BigSyncWorkerMsg>,
 }
@@ -44,6 +49,11 @@ structstruck::strike! {
         },
         RemovePeer {
             peer_id: PeerId,
+            resp: tokio::sync::oneshot::Sender<()>,
+        },
+        #[cfg(test)]
+        Snapshot {
+            resp: tokio::sync::oneshot::Sender<WorkerSnapshot>,
         },
     }
 }
@@ -60,6 +70,26 @@ pub struct StopToken {
     join_handle: tokio::task::JoinHandle<()>,
 }
 
+#[cfg(test)]
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct WorkerSnapshot {
+    pub peer_parts: HashMap<PeerId, HashMap<PartId, BackendId>>,
+    pub task_counts: TaskCounts,
+    pub active_machine_tasks: usize,
+    pub active_sync_tasks: usize,
+}
+
+#[cfg(test)]
+impl WorkerSnapshot {
+    pub fn is_idle(&self) -> bool {
+        self.task_counts.pending == 0
+            && self.task_counts.sync_spawn_queue == 0
+            && self.task_counts.machine_spawn_queue == 0
+            && self.task_counts.stop_queue == 0
+            && self.active_sync_tasks == 0
+    }
+}
+
 impl StopToken {
     pub async fn stop(self) -> Result<(), utils_rs::WaitOnHandleError> {
         self.cancel_token.cancel();
@@ -68,6 +98,75 @@ impl StopToken {
             utils_rs::scale_timeout(Duration::from_secs(5)),
         )
         .await
+    }
+}
+
+impl BigSyncWorkerHandle {
+    pub async fn set_peer(
+        &self,
+        peer_id: PeerId,
+        client: Arc<dyn rpc::HostBigRpcClient>,
+        parts: HashMap<PartId, BackendId>,
+    ) -> Res<()> {
+        let (resp_tx, resp_rx) = tokio::sync::oneshot::channel();
+        self.host_tx
+            .send(BigSyncWorkerMsg::SetPeer {
+                peer_id,
+                client,
+                parts,
+                resp: resp_tx,
+            })
+            .await
+            .wrap_err(ERROR_CHANNEL)?;
+        resp_rx.await.wrap_err(ERROR_CHANNEL)??;
+        Ok(())
+    }
+
+    pub async fn remove_peer(&self, peer_id: PeerId) -> Res<()> {
+        let (resp_tx, resp_rx) = tokio::sync::oneshot::channel();
+        self.host_tx
+            .send(BigSyncWorkerMsg::RemovePeer {
+                peer_id,
+                resp: resp_tx,
+            })
+            .await
+            .wrap_err(ERROR_CHANNEL)?;
+        resp_rx.await.wrap_err(ERROR_CHANNEL)?;
+        Ok(())
+    }
+
+    #[cfg(test)]
+    pub async fn snapshot(&self) -> Res<WorkerSnapshot> {
+        let (resp_tx, resp_rx) = tokio::sync::oneshot::channel();
+        self.host_tx
+            .send(BigSyncWorkerMsg::Snapshot { resp: resp_tx })
+            .await
+            .wrap_err(ERROR_CHANNEL)?;
+        Ok(resp_rx.await.wrap_err(ERROR_CHANNEL)?)
+    }
+
+    #[cfg(test)]
+    pub async fn wait_for_idle(&self, timeout: Duration) -> Res<()> {
+        let deadline = std::time::Instant::now() + timeout;
+        let mut last_snapshot = None;
+        loop {
+            let snapshot = self.snapshot().await?;
+            if snapshot.is_idle() {
+                if last_snapshot.as_ref().is_some_and(|prev| prev == &snapshot) {
+                    return Ok(());
+                }
+                last_snapshot = Some(snapshot);
+            } else {
+                last_snapshot = None;
+            }
+
+            if std::time::Instant::now() >= deadline {
+                return Err(ferr!(
+                    "timed out waiting for big_sync worker to become idle"
+                ));
+            }
+            tokio::time::sleep(Duration::from_millis(50)).await;
+        }
     }
 }
 
@@ -134,12 +233,10 @@ pub fn spawn_big_sync_worker(
             if let Some(Err(err)) = maybe_res {
                 return Err(err);
             }
-            if let Some(res) = Arc::try_unwrap(shutdown)
-                .expect(ERROR_IMPOSSIBLE)
-                .err
-                .take()
-            {
-                return Err(res);
+            if let Some(shutdown) = Arc::into_inner(shutdown) {
+                if let Some(res) = shutdown.err.into_inner() {
+                    return Err(res);
+                }
             }
             Ok(())
         }
@@ -308,14 +405,33 @@ impl BigSyncWorker {
                         parts: parts.clone(),
                     },
                 );
-                BigSyncEvent::SetPeer(big_sync_core::SetPeerEvent {
+                let evt = BigSyncEvent::SetPeer(big_sync_core::SetPeerEvent {
                     peer_id: peer_id,
                     parts: parts.into_keys().collect(),
-                })
+                });
+                let _ = resp.send(Ok(()));
+                evt
             }
-            BigSyncWorkerMsg::RemovePeer { peer_id } => {
+            BigSyncWorkerMsg::RemovePeer { peer_id, resp } => {
                 self.peers.remove(&peer_id);
-                BigSyncEvent::RemovePeer(big_sync_core::RemovePeerEvent { peer_id })
+                let evt = BigSyncEvent::RemovePeer(big_sync_core::RemovePeerEvent { peer_id });
+                let _ = resp.send(());
+                evt
+            }
+            #[cfg(test)]
+            BigSyncWorkerMsg::Snapshot { resp } => {
+                let snapshot = WorkerSnapshot {
+                    peer_parts: self
+                        .peers
+                        .iter()
+                        .map(|(&peer_id, peer_state)| (peer_id, peer_state.parts.clone()))
+                        .collect(),
+                    task_counts: self.machine.task_counts(),
+                    active_machine_tasks: self.tasks.len(),
+                    active_sync_tasks: self.sync_tasks.len(),
+                };
+                let _ = resp.send(snapshot);
+                return Ok(LoopAction::Cont);
             }
         };
         run_until_cancelled_or_trapped(
@@ -332,12 +448,20 @@ impl BigSyncWorker {
         for task_id in self.machine.drain_stop_queue() {
             if let Some(task) = self.tasks.remove(&task_id) {
                 task.cancel_token.cancel();
-                task.handle.join(Duration::from_secs(2)).await?;
+                task.handle
+                    .join(Duration::from_secs(2))
+                    .await
+                    .inspect_err(|err| error!(?err))
+                    .ok();
                 continue;
             }
             if let Some(task) = self.sync_tasks.remove(&task_id) {
                 task.cancel_token.cancel();
-                task.handle.join(Duration::from_secs(2)).await?;
+                task.handle
+                    .join(Duration::from_secs(2))
+                    .await
+                    .inspect_err(|err| error!(?err))
+                    .ok();
             }
         }
         Ok(())

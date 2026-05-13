@@ -9,6 +9,9 @@ workspace = true
 [lib]
 path = "lib.rs"
 
+[features]
+test-support = []
+
 [dependencies]
 utils_rs = { workspace = true, features = ["hash"] }
 
