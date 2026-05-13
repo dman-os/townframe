@@ -13,11 +13,7 @@ mod interlude {
 
 use std::time::Instant;
 
-use crate::{
-    interlude::*,
-    part_store::{PartitionStore, PeerPartCursors},
-    rpc::BigSyncRpcClient,
-};
+use crate::{interlude::*, part_store::PartitionStore, rpc::BigSyncRpcClient};
 
 mod cursor;
 mod ids;
@@ -101,7 +97,19 @@ structstruck::strike! {
             deets: enum MachineTaskErrDeets{
                 DecidePeerStrategyError(struct {
                     peer_id: PeerId,
-                    deets: GenericTaskError
+                    deets:
+                        enum DecidePeerStrategyErrorDeets {
+                            #![derive(Debug, thiserror::Error, displaydoc::Display)]
+                            /// {0}
+                            ListError(#[from] rpc::ListPartsError)
+                            /// {0}
+                            Rpc(#[from] rpc::RpcError),
+                            // /// {0}
+                            // MpscSend(#[from] mpsc::SendError),
+                            // /// {0}
+                            // MpscRecv(#[from] mpsc::RecvError),
+                        }
+
                 })
                 PeerReplayWorkerError(struct {
                     peer_id: PeerId,
@@ -111,7 +119,7 @@ structstruck::strike! {
                             /// StreamClosed
                             StreamClosed,
                             /// {0}
-                            SubError(#[from] rpc::SubPartsError)
+                            SubError(#[from] rpc::ListPartsError)
                             /// {0}
                             Rpc(#[from] rpc::RpcError),
                             /// {0}
@@ -157,7 +165,7 @@ structstruck::strike! {
             })
             PeerReplay(struct PeerReplayTask {
                 peer_id: PeerId,
-                parts: Map<PartId, part_store::PeerPartCursors>
+                parts: Map<PartId, CursorIndex>
             })
         }
     }
@@ -234,14 +242,14 @@ impl DecidePeerStrategyTask {
     async fn run_run<K: FutureForm, S: PartitionStore<K>, R: BigSyncRpcClient<K>>(
         self,
         cx: &TaskCtx<K, S, R>,
-    ) -> Result<TaskResultDeets, GenericTaskError> {
+    ) -> Result<TaskResultDeets, DecidePeerStrategyErrorDeets> {
         let peer_rpc = cx.rpc_clients.get(&self.peer_id).expect(ERROR_UNRECONIZED);
 
         let summary = peer_rpc
             .peer_summary(rpc::PeerSummaryRequest {
                 parts: self.parts.clone(),
             })
-            .await?;
+            .await??;
 
         let mut part_strats: Map<_, _> = default();
         for part_id in self.parts {
@@ -253,11 +261,7 @@ impl DecidePeerStrategyTask {
                 .part_store
                 .get_peer_part_cursor(self.peer_id, part_id)
                 .await;
-            let diff = summary.latest_cursor.abs_diff(
-                last_peer_cursor
-                    .member_cursor
-                    .min(last_peer_cursor.obj_cursor),
-            );
+            let diff = summary.latest_cursor.abs_diff(last_peer_cursor);
             const MERKLE_DIFF_THRESHOLD: u64 = 256;
             let strat = if diff > MERKLE_DIFF_THRESHOLD {
                 // FIXME: merkle is not yet implemented
@@ -268,14 +272,12 @@ impl DecidePeerStrategyTask {
                 // })
                 PeerPartStratDecision::Cursor(CursorStrat {
                     latest_cursor: summary.latest_cursor,
-                    since_member: last_peer_cursor.member_cursor,
-                    since_obj: last_peer_cursor.obj_cursor,
+                    last_cursor: last_peer_cursor,
                 })
             } else {
                 PeerPartStratDecision::Cursor(CursorStrat {
                     latest_cursor: summary.latest_cursor,
-                    since_member: last_peer_cursor.member_cursor,
-                    since_obj: last_peer_cursor.obj_cursor,
+                    last_cursor: last_peer_cursor,
                 })
             };
             part_strats.insert(part_id, strat);
@@ -308,10 +310,7 @@ impl PeerReplayTask {
                 parts: self
                     .parts
                     .into_iter()
-                    .map(|(part_id, cursors)| rpc::PartitionStreamCursorRequest {
-                        part_id,
-                        cursors,
-                    })
+                    .map(|(part_id, cursor)| rpc::PartStreamCursorRequest { part_id, cursor })
                     .collect(),
             })
             .await??;
@@ -489,8 +488,9 @@ structstruck::strike! {
                 Cursor(struct CursorStrat {
                     #![derive(PartialEq, Eq)]
                     latest_cursor: CursorIndex,
-                    since_member: CursorIndex,
-                    since_obj: CursorIndex,
+                    /// THe cursor that was last procssed from the
+                    /// peer
+                    last_cursor: CursorIndex,
                 }),
             }
         }>
@@ -501,31 +501,20 @@ impl PeerState {
     fn cursors_for_peer_replay_worker_parts<'a>(
         &self,
         parts: impl std::iter::Iterator<Item = &'a PartId>,
-    ) -> Map<PartId, PeerPartCursors> {
+    ) -> Map<PartId, CursorIndex> {
         parts
             .map(|&part_id| {
                 match self.parts.get(&part_id).expect(ERROR_IMPOSSIBLE).strat {
                     PeerPartStrategy::Pending(_) => unreachable!(),
                     PeerPartStrategy::Merkle(MerkleStrat { latest_cursor, .. }) => (
                         part_id,
-                        PeerPartCursors {
-                            // on merkle, start the replay since the latest
-                            // on a focus on live events
-                            member_cursor: latest_cursor,
-                            obj_cursor: latest_cursor,
-                        },
+                        // on merkle, start the replay since the latest
+                        // on a focus on live events
+                        latest_cursor,
                     ),
-                    PeerPartStrategy::Cursor(CursorStrat {
-                        since_member,
-                        since_obj,
-                        ..
-                    }) => (
-                        part_id,
-                        PeerPartCursors {
-                            member_cursor: since_member,
-                            obj_cursor: since_obj,
-                        },
-                    ),
+                    PeerPartStrategy::Cursor(CursorStrat { last_cursor, .. }) => {
+                        (part_id, last_cursor)
+                    }
                 }
             })
             .collect()
@@ -761,11 +750,12 @@ impl BigSyncMachine {
         DecidePeerStrategyError { peer_id, deets }: DecidePeerStrategyError,
     ) {
         match deets {
-            GenericTaskError::MpscSend(_) => unreachable!(),
-            GenericTaskError::Rpc(_) | GenericTaskError::MpscRecv(_) => {
-                // noop
+            DecidePeerStrategyErrorDeets::ListError(_) | DecidePeerStrategyErrorDeets::Rpc(_) => {
+                // noop, retry with backoff
+                // TODO: consider narrowing part set
             }
         }
+
         let Some(peer_state) = self.peers.get_mut(&peer_id) else {
             assert!(self.all_seen_peer.contains(&peer_id), "fishy");
             return;
@@ -825,7 +815,7 @@ impl BigSyncMachine {
             return;
         }
         match deets {
-            PeerReplayWorkerErrorDeets::SubError(rpc::SubPartsError::UnkownParts {
+            PeerReplayWorkerErrorDeets::SubError(rpc::ListPartsError::UnkownParts {
                 unkown_parts,
             }) => {
                 // remote part policy must have changed since last check

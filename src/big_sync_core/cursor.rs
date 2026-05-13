@@ -3,7 +3,6 @@
 use crate::interlude::*;
 
 use crate::part_store::{CursorIndex, PartitionStore};
-use crate::rpc::SubStreamKind;
 use crate::SyncCompletion;
 
 use std::collections::{BTreeMap, HashMap};
@@ -33,7 +32,6 @@ pub struct CursorWaiter {
     pub peer: PeerId,
     pub part_id: PartId,
     pub sync_kind: ObjectSyncKind,
-    pub stream_event: SubStreamKind,
 }
 
 /// Look at [`on_obj_sync_completed`] impl for how this
@@ -105,14 +103,8 @@ impl CursorStreamState {
 
 #[derive(Debug, Default)]
 pub struct CursorSyncMachine {
-    cursor_state: HashMap<PeerId, HashMap<PartId, PartitionCursorState>>,
+    cursor_state: HashMap<PeerId, HashMap<PartId, CursorStreamState>>,
     active_obj_jobs: BTreeMap<ObjectJobId, ObjectJobState>,
-}
-
-#[derive(Debug, Default)]
-struct PartitionCursorState {
-    member: CursorStreamState,
-    obj: CursorStreamState,
 }
 
 impl CursorSyncMachine {
@@ -130,36 +122,25 @@ impl CursorSyncMachine {
     ) {
         use crate::rpc::*;
 
-        let (sync_kind, obj_id, part_id, cursor, sub_kind) = match evt {
+        let (sync_kind, obj_id, part_id, cursor) = match evt {
             SubEvent::ReplayComplete { .. } => return,
             SubEvent::MemberEvent(event) => {
                 let (kind, obj_id) = match event.deets {
-                    PartitionMemberEventDeets::MemberUpsert(obj_id) => {
-                        (ObjectSyncKind::New, obj_id)
-                    }
-                    PartitionMemberEventDeets::MemberRemove(obj_id) => {
-                        (ObjectSyncKind::Delete, obj_id)
-                    }
+                    PartMemberEventDeets::MemberUpsert(obj_id) => (ObjectSyncKind::New, obj_id),
+                    PartMemberEventDeets::MemberRemove(obj_id) => (ObjectSyncKind::Delete, obj_id),
                 };
-                (
-                    kind,
-                    obj_id,
-                    event.part_id,
-                    event.cursor,
-                    SubStreamKind::Member,
-                )
+                (kind, obj_id, event.part_id, event.cursor)
             }
             SubEvent::ObjChangeEvent(event) => (
                 ObjectSyncKind::Change,
                 event.obj_id,
                 event.part_id,
                 event.cursor,
-                SubStreamKind::Objects,
             ),
         };
         // clone self field AOT to avoid stream_state_mut mutable borrow
         // leading to borrow issues
-        let state = self.stream_state_mut(peer, part_id, sub_kind);
+        let state = self.stream_state_mut(peer, part_id);
         if cursor <= state.floor() {
             panic!(
                 "cursority trap: cursor ({cursor}) seen below floor ({})",
@@ -224,7 +205,6 @@ impl CursorSyncMachine {
                 peer,
                 part_id,
                 sync_kind,
-                stream_event: sub_kind,
             },
         );
         let part_hints = entry.waiters.values().map(|ww| ww.part_id).collect();
@@ -314,7 +294,7 @@ impl CursorSyncMachine {
             debug_assert!(cursors.is_sorted());
             for &ii in &cursors {
                 let waiter = job.waiters.remove(&ii).expect(ERROR_IMPOSSIBLE);
-                let state = self.stream_state_mut(waiter.peer, part_id, waiter.stream_event);
+                let state = self.stream_state_mut(waiter.peer, part_id);
                 // mark slot ready
                 state.slots.insert(ii, CursorSlotState::Ready);
             }
@@ -384,87 +364,36 @@ impl CursorSyncMachine {
             state.get_mut(&part_id).expect(ERROR_IMPOSSIBLE)
         };
         // calculate Ready highmark
-        let (member_cursor, obj_cursor) = {
-            let member_cursor = {
-                let mut latest_ready = None;
-                let floor = state.member.floor();
-                for (cursor, slot) in state.member.slots.range(floor.saturating_add(1)..) {
-                    match slot {
-                        CursorSlotState::Ready => latest_ready = Some(*cursor),
-                        CursorSlotState::Pending => break,
-                    }
+        let latest_ready = {
+            let mut latest_ready = None;
+            let floor = state.floor();
+            for (cursor, slot) in state.slots.range(floor.saturating_add(1)..) {
+                match slot {
+                    CursorSlotState::Ready => latest_ready = Some(*cursor),
+                    CursorSlotState::Pending => break,
                 }
-                latest_ready
-            };
-            let obj_cursor = {
-                let mut latest_ready = None;
-                let floor = state.obj.floor();
-                for (cursor, slot) in state.obj.slots.range(floor.saturating_add(1)..) {
-                    match slot {
-                        CursorSlotState::Ready => latest_ready = Some(*cursor),
-                        CursorSlotState::Pending => break,
-                    }
-                }
-                latest_ready
-            };
-            (member_cursor, obj_cursor)
+            }
+            latest_ready
         };
 
-        if let (None, None) = (member_cursor, obj_cursor) {
+        let Some(cursor) = latest_ready else {
             return;
-        }
+        };
 
         // update sync store
-        // FIXME: get rid of the get_ call and have the part store impl do
-        // increment only increases on set removing one fetch call in the
-        // impl
-        let existing = part_store.get_peer_part_cursor(peer, part_id).await;
-        let next_member_cursor = member_cursor.unwrap_or(existing.member_cursor);
-        let next_obj_cursor = obj_cursor.unwrap_or(existing.obj_cursor);
-        part_store
-            .set_peer_part_cursor(
-                peer,
-                part_id,
-                crate::part_store::PeerPartCursors {
-                    member_cursor: next_member_cursor,
-                    obj_cursor: next_obj_cursor,
-                },
-            )
-            .await;
-
-        // remove cursor slots and update state
-        if let Some(cursor) = member_cursor {
-            while state
-                .member
-                .slots
-                .first_key_value()
-                .is_some_and(|(slot_cursor, _)| *slot_cursor <= cursor)
-            {
-                state.member.slots.pop_first();
-            }
-            state.member.last_emitted_cursor = Some(cursor);
-            state.member.persisted_cursor = Some(cursor);
+        part_store.set_peer_part_cursor(peer, part_id, cursor).await;
+        while state
+            .slots
+            .first_key_value()
+            .is_some_and(|(slot_cursor, _)| *slot_cursor <= cursor)
+        {
+            state.slots.pop_first();
         }
-        if let Some(cursor) = obj_cursor {
-            while state
-                .obj
-                .slots
-                .first_key_value()
-                .is_some_and(|(slot_cursor, _)| *slot_cursor <= cursor)
-            {
-                state.obj.slots.pop_first();
-            }
-            state.obj.last_emitted_cursor = Some(cursor);
-            state.obj.persisted_cursor = Some(cursor);
-        }
+        state.last_emitted_cursor = Some(cursor);
+        state.persisted_cursor = Some(cursor);
     }
 
-    fn stream_state_mut(
-        &mut self,
-        peer: PeerId,
-        part_id: PartId,
-        stream: SubStreamKind,
-    ) -> &mut CursorStreamState {
+    fn stream_state_mut(&mut self, peer: PeerId, part_id: PartId) -> &mut CursorStreamState {
         if !self.cursor_state.contains_key(&peer) {
             self.cursor_state.insert(peer, default());
         }
@@ -472,10 +401,6 @@ impl CursorSyncMachine {
         if !state.contains_key(&part_id) {
             state.insert(part_id, default());
         }
-        let partition = state.get_mut(&part_id).expect(ERROR_IMPOSSIBLE);
-        match stream {
-            SubStreamKind::Member => &mut partition.member,
-            SubStreamKind::Objects => &mut partition.obj,
-        }
+        state.get_mut(&part_id).expect(ERROR_IMPOSSIBLE)
     }
 }

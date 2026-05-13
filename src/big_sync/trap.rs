@@ -2,12 +2,15 @@ use crate::interlude::*;
 
 use big_sync_core::{
     mpsc,
-    part_store::{ObjPayload, PartitionStore, PeerPartCursors},
-    rpc::BigSyncRpcClient,
+    part_store::{CursorIndex, ObjPayload, PartitionStore},
+    rpc::{
+        BigSyncRpcClient, BigSyncRpcResult, ListPartsError, PeerSummaryRequest, PeerSummaryResult,
+        SubEvent, SubPartsRequest,
+    },
     ObjId, PartId, PeerId,
 };
 use future_form::{FutureForm, Sendable};
-use utils_rs::prelude::futures::future::BoxFuture;
+use futures::future::BoxFuture;
 
 #[derive(Clone)]
 pub struct TaskTrap {
@@ -87,7 +90,7 @@ impl PartitionStore<Sendable> for TrappedPartStore {
         &'a self,
         peer_id: PeerId,
         part_id: PartId,
-    ) -> BoxFuture<'a, PeerPartCursors> {
+    ) -> BoxFuture<'a, CursorIndex> {
         let fut = self.inner.get_peer_part_cursor(peer_id, part_id);
         Sendable::from_future(self.trap.run_or_trap(fut))
     }
@@ -96,9 +99,10 @@ impl PartitionStore<Sendable> for TrappedPartStore {
         &'a self,
         peer_id: PeerId,
         part_id: PartId,
-        cursors: PeerPartCursors,
+        cursor: CursorIndex,
     ) -> BoxFuture<'a, ()> {
-        let fut = self.inner.set_peer_part_cursor(peer_id, part_id, cursors);
+        let fut = self.inner.set_peer_part_cursor(peer_id, part_id, cursor);
+
         Sendable::from_future(self.trap.run_or_trap(fut))
     }
 }
@@ -111,22 +115,16 @@ pub struct TrappedRpcClient {
 impl BigSyncRpcClient<Sendable> for TrappedRpcClient {
     fn peer_summary<'a>(
         &'a self,
-        req: big_sync_core::rpc::PeerSummaryRequest,
-    ) -> BoxFuture<'a, big_sync_core::rpc::BigSyncRpcResult<big_sync_core::rpc::PeerSummaryResult>>
-    {
+        req: PeerSummaryRequest,
+    ) -> BoxFuture<'a, BigSyncRpcResult<Result<PeerSummaryResult, ListPartsError>>> {
         let fut = self.inner.peer_summary(req);
         Sendable::from_future(self.trap.run_or_trap(fut))
     }
 
     fn sub_parts<'a>(
         &'a self,
-        req: big_sync_core::rpc::SubPartsRequest,
-    ) -> BoxFuture<
-        'a,
-        big_sync_core::rpc::BigSyncRpcResult<
-            Result<mpsc::Receiver<big_sync_core::rpc::SubEvent>, big_sync_core::rpc::SubPartsError>,
-        >,
-    > {
+        req: SubPartsRequest,
+    ) -> BoxFuture<'a, BigSyncRpcResult<Result<mpsc::Receiver<SubEvent>, ListPartsError>>> {
         let fut = self.inner.sub_parts(req);
         Sendable::from_future(self.trap.run_or_trap(fut))
     }

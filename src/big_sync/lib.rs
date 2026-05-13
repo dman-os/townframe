@@ -11,6 +11,7 @@ use big_sync_core::{
 
 mod part_store;
 mod rpc;
+mod test;
 mod trap;
 
 use crate::interlude::*;
@@ -49,11 +50,7 @@ structstruck::strike! {
 
 #[async_trait]
 pub trait SyncBackend: Send + Sync + 'static {
-    async fn run(
-        &self,
-        task: SyncTaskDeets,
-        part_store: SharedPartitionStore,
-    ) -> Res<Vec<SyncCompletion>>;
+    async fn run(&self, task: SyncTaskDeets) -> Res<Vec<SyncCompletion>>;
 }
 
 pub type BackendId = u64;
@@ -387,7 +384,6 @@ impl BigSyncWorker {
         let worker = SyncTaskWorker {
             task: task.clone(),
             backend,
-            part_store: Arc::clone(&self.part_store),
             host_tx: self.sync_tx.clone(),
             cancel_token: self.cancel_token.child_token(),
         };
@@ -462,7 +458,6 @@ impl MachineTaskWorker {
 struct SyncTaskWorker {
     task: SyncTask,
     backend: Arc<dyn SyncBackend>,
-    part_store: SharedPartitionStore,
     host_tx: mpsc::Sender<BigSyncEvent>,
     cancel_token: CancellationToken,
 }
@@ -474,7 +469,7 @@ impl SyncTaskWorker {
             () = self.cancel_token.cancelled() => {
                 return;
             }
-            res = self.backend.run(self.task.deets.clone(), Arc::clone(&self.part_store)) => res,
+            res = self.backend.run(self.task.deets.clone()) => res,
         };
         match res {
             Ok(completions) => {

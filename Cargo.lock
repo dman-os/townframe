@@ -1045,6 +1045,7 @@ dependencies = [
  "serde",
  "sqlx",
  "structstruck",
+ "surelock",
  "thiserror 2.0.18",
  "tokio-util",
  "tracing",

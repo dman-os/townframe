@@ -10,8 +10,14 @@ workspace = true
 path = "lib.rs"
 
 [dependencies]
+#
+# internal
 utils_rs = { workspace = true, features = ["hash"] }
 big_sync_core.workspace = true
+
+#
+# ds
+surelock.workspace = true
 
 #
 # encoding
