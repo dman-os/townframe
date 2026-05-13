@@ -7,34 +7,44 @@ use big_sync_core::rpc::{
     BigSyncRpcResult, ListPartsError, PeerSummaryRequest, PeerSummaryResult, SubEvent,
     SubPartsRequest,
 };
-use big_sync_core::{Byte32Id, ObjId, PartId, PeerId, SyncCompletion, SyncTaskDeets};
+use big_sync_core::{Byte32Id, PartId, PeerId, SyncCompletion, SyncTaskDeets};
 
 use crate::part_store::HostPartitionStore;
 use crate::part_store::MemoryPartStoreSnapshot;
-use crate::{BackendId, SharedPartitionStore};
+use crate::{
+    BackendId, BigSyncHost, ScopeRef, ScopedIdResolver, ScopedObjRef, ScopedPartRef,
+    SharedPartitionStore,
+};
 
 const TEST_BACKEND_ID: BackendId = 0;
-const TEST_PART_ID: PartId = PartId(Byte32Id::new([9; 32]));
 
-fn test_parts() -> HashMap<PartId, BackendId> {
-    [(TEST_PART_ID, TEST_BACKEND_ID)].into_iter().collect()
+fn test_scope() -> ScopeRef {
+    ScopeRef::new(Url::parse("big-sync-test://drepo_test").expect(ERROR_IMPOSSIBLE))
+}
+
+fn test_part() -> ScopedPartRef {
+    ScopedPartRef::new(test_scope(), "core.docs")
+}
+
+fn test_parts() -> Vec<ScopedPartRef> {
+    vec![test_part()]
 }
 
 #[derive(Default)]
 struct TestWorld {
-    stores: Mutex<HashMap<PeerId, SharedPartitionStore>>,
+    stores: Mutex<HashMap<PeerId, Arc<crate::part_store::MemoryPartStore>>>,
     online: Mutex<HashSet<PeerId>>,
 }
 
 impl TestWorld {
-    fn register_store(&self, peer_id: PeerId, store: SharedPartitionStore) {
+    fn register_store(&self, peer_id: PeerId, store: Arc<crate::part_store::MemoryPartStore>) {
         let mut stores = self.stores.lock().expect(ERROR_MUTEX);
         let old = stores.insert(peer_id, store);
         assert!(old.is_none(), "fishy");
         self.set_online(peer_id, true);
     }
 
-    fn store_for_peer(&self, peer_id: PeerId) -> SharedPartitionStore {
+    fn store_for_peer(&self, peer_id: PeerId) -> Arc<crate::part_store::MemoryPartStore> {
         self.stores
             .lock()
             .expect(ERROR_MUTEX)
@@ -60,21 +70,73 @@ impl TestWorld {
 #[derive(Clone)]
 pub(crate) struct MemoryRpcClient {
     world: Arc<TestWorld>,
+    source_part_store: Arc<crate::part_store::MemoryPartStore>,
     target_peer_id: PeerId,
-    target_part_store: SharedPartitionStore,
+    target_part_store: Arc<crate::part_store::MemoryPartStore>,
 }
 
 impl MemoryRpcClient {
     fn new(
         world: Arc<TestWorld>,
+        source_part_store: Arc<crate::part_store::MemoryPartStore>,
         target_peer_id: PeerId,
-        target_part_store: SharedPartitionStore,
+        target_part_store: Arc<crate::part_store::MemoryPartStore>,
     ) -> Self {
         Self {
             world,
+            source_part_store,
             target_peer_id,
             target_part_store,
         }
+    }
+
+    async fn map_local_summary_req(
+        &self,
+        parts: HashSet<PartId>,
+    ) -> Res<(HashSet<PartId>, HashMap<PartId, PartId>)> {
+        let mut remote_parts = HashSet::new();
+        let mut remote_to_local = HashMap::new();
+        for local_part_id in parts {
+            let scoped_part = self.source_part_store.scoped_part(local_part_id).await?;
+            let remote_part_id = self.target_part_store.resolve_part(&scoped_part).await?;
+            remote_parts.insert(remote_part_id);
+            let old = remote_to_local.insert(remote_part_id, local_part_id);
+            assert!(old.is_none(), "fishy");
+        }
+        Ok((remote_parts, remote_to_local))
+    }
+
+    async fn map_remote_event(&self, evt: SubEvent) -> Res<SubEvent> {
+        let transition = match evt {
+            SubEvent::Upserted(transition) => {
+                let scoped_part = self
+                    .target_part_store
+                    .scoped_part(transition.part_id)
+                    .await?;
+                let scoped_obj = self.target_part_store.scoped_obj(transition.obj_id).await?;
+                let part_id = self.source_part_store.resolve_part(&scoped_part).await?;
+                let obj_id = self.source_part_store.resolve_obj(&scoped_obj).await?;
+                return Ok(SubEvent::Upserted(big_sync_core::rpc::PartTransition {
+                    cursor: transition.cursor,
+                    part_id,
+                    obj_id,
+                }));
+            }
+            SubEvent::Deleted(transition) => transition,
+            SubEvent::ReplayComplete => return Ok(SubEvent::ReplayComplete),
+        };
+        let scoped_part = self
+            .target_part_store
+            .scoped_part(transition.part_id)
+            .await?;
+        let scoped_obj = self.target_part_store.scoped_obj(transition.obj_id).await?;
+        let part_id = self.source_part_store.resolve_part(&scoped_part).await?;
+        let obj_id = self.source_part_store.resolve_obj(&scoped_obj).await?;
+        Ok(SubEvent::Deleted(big_sync_core::rpc::PartTransition {
+            cursor: transition.cursor,
+            part_id,
+            obj_id,
+        }))
     }
 }
 
@@ -87,7 +149,21 @@ impl crate::rpc::HostBigRpcClient for MemoryRpcClient {
         if !self.world.is_online(self.target_peer_id) {
             return Ok(Err(big_sync_core::rpc::RpcError::TransportError));
         }
-        let parts = self.target_part_store.summarize_parts(req.parts).await??;
+        let (remote_parts, remote_to_local) = self.map_local_summary_req(req.parts).await?;
+        let remote_parts = self
+            .target_part_store
+            .summarize_parts(remote_parts)
+            .await??;
+        let parts = remote_parts
+            .into_iter()
+            .map(|(remote_part_id, summary)| {
+                let local_part_id = remote_to_local
+                    .get(&remote_part_id)
+                    .copied()
+                    .expect(ERROR_IMPOSSIBLE);
+                (local_part_id, summary)
+            })
+            .collect();
         Ok(Ok(Ok(PeerSummaryResult { parts })))
     }
 
@@ -98,12 +174,26 @@ impl crate::rpc::HostBigRpcClient for MemoryRpcClient {
         if !self.world.is_online(self.target_peer_id) {
             return Ok(Err(big_sync_core::rpc::RpcError::TransportError));
         }
-        let receiver = self.target_part_store.subscribe(req).await??;
+        let mut remote_reqs = Vec::new();
+        for req in req.parts {
+            let scoped_part = self.source_part_store.scoped_part(req.part_id).await?;
+            let remote_part_id = self.target_part_store.resolve_part(&scoped_part).await?;
+            remote_reqs.push(big_sync_core::rpc::PartStreamCursorRequest {
+                part_id: remote_part_id,
+                cursor: req.cursor,
+            });
+        }
+        let receiver = self
+            .target_part_store
+            .subscribe(SubPartsRequest { parts: remote_reqs })
+            .await??;
         let (forward_tx, forward_rx) =
             mpsc::unbounded("MemoryRpcClient".into(), "BigSyncMachine".into());
+        let client = self.clone();
         tokio::spawn(async move {
             let mut receiver = receiver;
             while let Some(evt) = receiver.recv().await {
+                let evt = client.map_remote_event(evt).await.expect(ERROR_IMPOSSIBLE);
                 if forward_tx.send(evt).await.is_err() {
                     break;
                 }
@@ -115,14 +205,14 @@ impl crate::rpc::HostBigRpcClient for MemoryRpcClient {
 
 struct MemorySyncBackend {
     local_peer_id: PeerId,
-    local_part_store: SharedPartitionStore,
+    local_part_store: Arc<crate::part_store::MemoryPartStore>,
     world: Arc<TestWorld>,
 }
 
 impl MemorySyncBackend {
     fn new(
         local_peer_id: PeerId,
-        local_part_store: SharedPartitionStore,
+        local_part_store: Arc<crate::part_store::MemoryPartStore>,
         world: Arc<TestWorld>,
     ) -> Self {
         Self {
@@ -137,25 +227,34 @@ impl MemorySyncBackend {
 impl crate::SyncBackend for MemorySyncBackend {
     async fn run(&self, task: SyncTaskDeets) -> Res<Vec<SyncCompletion>> {
         let remote_part_store = self.world.store_for_peer(task.peer_id);
+        let local_part_id = task.part_hints.first().copied().expect(ERROR_IMPOSSIBLE);
+        let scoped_part = self.local_part_store.scoped_part(local_part_id).await?;
+        let remote_part_id = remote_part_store.resolve_part(&scoped_part).await?;
+        let scoped_obj = self.local_part_store.scoped_obj(task.obj_id).await?;
+        let remote_obj_id = remote_part_store.resolve_obj(&scoped_obj).await?;
         let mut requested_part = HashSet::new();
-        requested_part.insert(TEST_PART_ID);
+        requested_part.insert(local_part_id);
+        let mut remote_requested_part = HashSet::new();
+        remote_requested_part.insert(remote_part_id);
         let local_summary = self
             .local_part_store
             .summarize_parts(requested_part.clone())
             .await??;
-        let remote_summary = remote_part_store.summarize_parts(requested_part).await??;
+        let remote_summary = remote_part_store
+            .summarize_parts(remote_requested_part)
+            .await??;
         let local_payload = self.local_part_store.obj_payload(task.obj_id).await?;
-        let remote_payload = remote_part_store.obj_payload(task.obj_id).await?;
+        let remote_payload = remote_part_store.obj_payload(remote_obj_id).await?;
         let local_parts = self.local_part_store.obj_parts(task.obj_id).await?;
-        let remote_parts = remote_part_store.obj_parts(task.obj_id).await?;
-        let local_has_part = local_parts.contains(&TEST_PART_ID);
-        let remote_has_part = remote_parts.contains(&TEST_PART_ID);
+        let remote_parts = remote_part_store.obj_parts(remote_obj_id).await?;
+        let local_has_part = local_parts.contains(&local_part_id);
+        let remote_has_part = remote_parts.contains(&remote_part_id);
         let local_latest = local_summary
-            .get(&TEST_PART_ID)
+            .get(&local_part_id)
             .expect(ERROR_IMPOSSIBLE)
             .latest_cursor;
         let remote_latest = remote_summary
-            .get(&TEST_PART_ID)
+            .get(&remote_part_id)
             .expect(ERROR_IMPOSSIBLE)
             .latest_cursor;
 
@@ -228,6 +327,7 @@ struct NodeHarness {
     world: Arc<TestWorld>,
     peer_id: PeerId,
     store: Arc<crate::part_store::MemoryPartStore>,
+    host: BigSyncHost<crate::part_store::MemoryPartStore>,
     handle: crate::BigSyncWorkerHandle,
     stop: crate::StopToken,
 }
@@ -235,19 +335,22 @@ struct NodeHarness {
 impl NodeHarness {
     async fn connect_to(&self, remote: &NodeHarness) -> Res<()> {
         let client = Arc::new(MemoryRpcClient::new(
-            Arc::clone(&remote.world),
+            Arc::clone(&self.world),
+            Arc::clone(&self.store),
             remote.peer_id,
-            Arc::clone(&remote.store) as _,
+            Arc::clone(&remote.store),
         ));
-        self.handle
+        self.host
             .set_peer(remote.peer_id, client, test_parts())
             .await
     }
 
-    async fn seed_obj(&self, obj_id: ObjId, payload: serde_json::Value) -> Res<()> {
-        self.store
-            .upsert_obj(obj_id, payload, vec![TEST_PART_ID])
-            .await
+    async fn seed_obj(&self, obj: &ScopedObjRef, payload: serde_json::Value) -> Res<()> {
+        self.host.upsert_obj(obj, payload, test_parts()).await
+    }
+
+    async fn remove_obj(&self, obj: &ScopedObjRef) -> Res<()> {
+        self.host.remove_obj_from_part(obj, &test_part()).await
     }
 
     async fn snapshot(&self) -> Res<MemoryPartStoreSnapshot> {
@@ -265,8 +368,8 @@ fn peer_id(seed: u8) -> PeerId {
     PeerId(Byte32Id::new([seed; 32]))
 }
 
-fn obj_id(seed: u8) -> ObjId {
-    ObjId(Byte32Id::new([seed; 32]))
+fn scoped_obj(seed: u8) -> ScopedObjRef {
+    ScopedObjRef::new(test_scope(), format!("obj.{seed}"))
 }
 
 fn payload(label: &str) -> serde_json::Value {
@@ -279,20 +382,27 @@ async fn boot_node_with_store(
     store: Arc<crate::part_store::MemoryPartStore>,
 ) -> Res<NodeHarness> {
     world.set_online(peer_id, true);
-    store.ensure_part(TEST_PART_ID).await?;
+    store.resolve_part(&test_part()).await?;
     let store_for_worker: SharedPartitionStore = Arc::clone(&store) as _;
     let backend: Arc<dyn crate::SyncBackend> = Arc::new(MemorySyncBackend::new(
         peer_id,
-        Arc::clone(&store) as _,
+        Arc::clone(&store),
         Arc::clone(&world),
     ));
     let (handle, stop) =
         crate::spawn_big_sync_worker(store_for_worker, [(TEST_BACKEND_ID, backend)].into())?;
+    let host = BigSyncHost::new(
+        Arc::clone(&store) as _,
+        Arc::clone(&store),
+        handle.clone(),
+        TEST_BACKEND_ID,
+    );
 
     Ok(NodeHarness {
         world,
         peer_id,
         store,
+        host,
         handle,
         stop,
     })
@@ -301,7 +411,7 @@ async fn boot_node_with_store(
 async fn boot_node(world: Arc<TestWorld>, peer_seed: u8) -> Res<NodeHarness> {
     let peer_id = peer_id(peer_seed);
     let store = Arc::new(crate::part_store::MemoryPartStore::default());
-    world.register_store(peer_id, Arc::clone(&store) as _);
+    world.register_store(peer_id, Arc::clone(&store));
     boot_node_with_store(world, peer_id, store).await
 }
 
@@ -310,6 +420,7 @@ async fn restart_node(world: Arc<TestWorld>, node: NodeHarness) -> Res<NodeHarne
         world: node_world,
         peer_id,
         store,
+        host: _host,
         handle,
         stop,
     } = node;
@@ -326,30 +437,33 @@ async fn assert_two_node_alignment(
 ) -> Res<(MemoryPartStoreSnapshot, MemoryPartStoreSnapshot)> {
     let worker_left = left.handle.snapshot().await?;
     let worker_right = right.handle.snapshot().await?;
-    let expected_parts = test_parts();
+    let left_part_id = left.host.resolve_part(&test_part()).await?;
+    let right_part_id = right.host.resolve_part(&test_part()).await?;
+    let expected_left_parts = [(left_part_id, TEST_BACKEND_ID)].into_iter().collect();
+    let expected_right_parts = [(right_part_id, TEST_BACKEND_ID)].into_iter().collect();
     assert_eq!(worker_left.peer_parts.len(), 1);
     assert_eq!(worker_right.peer_parts.len(), 1);
     assert_eq!(
         worker_left.peer_parts.get(&right.peer_id),
-        Some(&expected_parts)
+        Some(&expected_left_parts)
     );
     assert_eq!(
         worker_right.peer_parts.get(&left.peer_id),
-        Some(&expected_parts)
+        Some(&expected_right_parts)
     );
 
     let snapshot_left = left.snapshot().await?;
     let snapshot_right = right.snapshot().await?;
-    assert_eq!(snapshot_left.objs, snapshot_right.objs);
-    assert_eq!(snapshot_left.objs.len(), expected_obj_count);
+    assert_eq!(snapshot_left.scoped_objs, snapshot_right.scoped_objs);
+    assert_eq!(snapshot_left.scoped_objs.len(), expected_obj_count);
     assert_eq!(snapshot_left.peer_part_cursors.len(), 1);
     assert_eq!(snapshot_right.peer_part_cursors.len(), 1);
     assert!(snapshot_left
         .peer_part_cursors
-        .contains_key(&(right.peer_id, TEST_PART_ID)));
+        .contains_key(&(right.peer_id, left_part_id)));
     assert!(snapshot_right
         .peer_part_cursors
-        .contains_key(&(left.peer_id, TEST_PART_ID)));
+        .contains_key(&(left.peer_id, right_part_id)));
 
     Ok((snapshot_left, snapshot_right))
 }
@@ -390,11 +504,11 @@ async fn memory_sync_preconnected_seeds_converge() -> Res<()> {
     let node_a = boot_node(Arc::clone(&world), 1).await?;
     let node_b = boot_node(Arc::clone(&world), 2).await?;
 
-    let left_obj = obj_id(10);
-    let right_obj = obj_id(11);
+    let left_obj = scoped_obj(10);
+    let right_obj = scoped_obj(11);
 
-    node_a.seed_obj(left_obj, payload("left-a")).await?;
-    node_b.seed_obj(right_obj, payload("right-b")).await?;
+    node_a.seed_obj(&left_obj, payload("left-a")).await?;
+    node_b.seed_obj(&right_obj, payload("right-b")).await?;
 
     node_a.connect_to(&node_b).await?;
     node_b.connect_to(&node_a).await?;
@@ -403,14 +517,14 @@ async fn memory_sync_preconnected_seeds_converge() -> Res<()> {
     let (snapshot_a, _) = assert_two_node_alignment(&node_a, &node_b, 2).await?;
     assert_eq!(
         snapshot_a
-            .objs
+            .scoped_objs
             .get(&left_obj)
             .and_then(|obj| obj.payload.clone()),
         Some(payload("left-a"))
     );
     assert_eq!(
         snapshot_a
-            .objs
+            .scoped_objs
             .get(&right_obj)
             .and_then(|obj| obj.payload.clone()),
         Some(payload("right-b"))
@@ -433,21 +547,21 @@ async fn memory_sync_single_obj_created_while_connected_replicates() -> Res<()> 
     node_b.connect_to(&node_a).await?;
     wait_for_convergence(&[&node_a, &node_b], Duration::from_secs(30)).await?;
 
-    let obj = obj_id(20);
-    node_b.seed_obj(obj, payload("connected-create")).await?;
+    let obj = scoped_obj(20);
+    node_b.seed_obj(&obj, payload("connected-create")).await?;
 
     wait_for_convergence(&[&node_a, &node_b], Duration::from_secs(30)).await?;
     let (snapshot_a, snapshot_b) = assert_two_node_alignment(&node_a, &node_b, 1).await?;
     assert_eq!(
         snapshot_a
-            .objs
+            .scoped_objs
             .get(&obj)
             .and_then(|obj| obj.payload.clone()),
         Some(payload("connected-create"))
     );
     assert_eq!(
         snapshot_b
-            .objs
+            .scoped_objs
             .get(&obj)
             .and_then(|obj| obj.payload.clone()),
         Some(payload("connected-create"))
@@ -466,27 +580,27 @@ async fn memory_sync_higher_peer_update_propagates_after_convergence() -> Res<()
     let node_a = boot_node(Arc::clone(&world), 2).await?;
     let node_b = boot_node(Arc::clone(&world), 1).await?;
 
-    let obj = obj_id(30);
-    node_b.seed_obj(obj, payload("base")).await?;
+    let obj = scoped_obj(30);
+    node_b.seed_obj(&obj, payload("base")).await?;
 
     node_a.connect_to(&node_b).await?;
     node_b.connect_to(&node_a).await?;
     wait_for_convergence(&[&node_a, &node_b], Duration::from_secs(30)).await?;
 
-    node_a.seed_obj(obj, payload("higher-update")).await?;
+    node_a.seed_obj(&obj, payload("higher-update")).await?;
 
     wait_for_convergence(&[&node_a, &node_b], Duration::from_secs(30)).await?;
     let (snapshot_a, snapshot_b) = assert_two_node_alignment(&node_a, &node_b, 1).await?;
     assert_eq!(
         snapshot_a
-            .objs
+            .scoped_objs
             .get(&obj)
             .and_then(|obj| obj.payload.clone()),
         Some(payload("higher-update"))
     );
     assert_eq!(
         snapshot_b
-            .objs
+            .scoped_objs
             .get(&obj)
             .and_then(|obj| obj.payload.clone()),
         Some(payload("higher-update"))
@@ -505,30 +619,30 @@ async fn memory_sync_concurrent_conflicting_updates_converge_to_higher_peer_valu
     let node_a = boot_node(Arc::clone(&world), 1).await?;
     let node_b = boot_node(Arc::clone(&world), 2).await?;
 
-    let obj = obj_id(40);
-    node_a.seed_obj(obj, payload("base")).await?;
+    let obj = scoped_obj(40);
+    node_a.seed_obj(&obj, payload("base")).await?;
 
     node_a.connect_to(&node_b).await?;
     node_b.connect_to(&node_a).await?;
     wait_for_convergence(&[&node_a, &node_b], Duration::from_secs(30)).await?;
 
     tokio::try_join!(
-        node_a.seed_obj(obj, payload("lower-conflict")),
-        node_b.seed_obj(obj, payload("higher-conflict")),
+        node_a.seed_obj(&obj, payload("lower-conflict")),
+        node_b.seed_obj(&obj, payload("higher-conflict")),
     )?;
 
     wait_for_convergence(&[&node_a, &node_b], Duration::from_secs(30)).await?;
     let (snapshot_a, snapshot_b) = assert_two_node_alignment(&node_a, &node_b, 1).await?;
     assert_eq!(
         snapshot_a
-            .objs
+            .scoped_objs
             .get(&obj)
             .and_then(|obj| obj.payload.clone()),
         Some(payload("higher-conflict"))
     );
     assert_eq!(
         snapshot_b
-            .objs
+            .scoped_objs
             .get(&obj)
             .and_then(|obj| obj.payload.clone()),
         Some(payload("higher-conflict"))
@@ -547,18 +661,18 @@ async fn memory_sync_delete_propagates_to_both_nodes() -> Res<()> {
     let node_a = boot_node(Arc::clone(&world), 1).await?;
     let node_b = boot_node(Arc::clone(&world), 2).await?;
 
-    let obj = obj_id(50);
-    node_a.seed_obj(obj, payload("delete-me")).await?;
+    let obj = scoped_obj(50);
+    node_a.seed_obj(&obj, payload("delete-me")).await?;
 
     tokio::try_join!(node_a.connect_to(&node_b), node_b.connect_to(&node_a))?;
     wait_for_convergence(&[&node_a, &node_b], Duration::from_secs(30)).await?;
 
-    node_a.store.remove_obj_from_part(obj, TEST_PART_ID).await?;
+    node_a.remove_obj(&obj).await?;
     wait_for_convergence(&[&node_a, &node_b], Duration::from_secs(30)).await?;
 
     let (snapshot_a, snapshot_b) = assert_two_node_alignment(&node_a, &node_b, 0).await?;
-    assert!(!snapshot_a.objs.contains_key(&obj));
-    assert!(!snapshot_b.objs.contains_key(&obj));
+    assert!(!snapshot_a.scoped_objs.contains_key(&obj));
+    assert!(!snapshot_b.scoped_objs.contains_key(&obj));
 
     node_a.stop().await?;
     node_b.stop().await?;
@@ -573,14 +687,14 @@ async fn memory_sync_peer_restart_reconnects_cleanly() -> Res<()> {
     let node_a = boot_node(Arc::clone(&world), 1).await?;
     let node_b = boot_node(Arc::clone(&world), 2).await?;
 
-    let obj = obj_id(60);
-    node_a.seed_obj(obj, payload("before-restart")).await?;
+    let obj = scoped_obj(60);
+    node_a.seed_obj(&obj, payload("before-restart")).await?;
     tokio::try_join!(node_a.connect_to(&node_b), node_b.connect_to(&node_a))?;
     wait_for_convergence(&[&node_a, &node_b], Duration::from_secs(30)).await?;
 
     tokio::try_join!(
-        node_a.handle.remove_peer(node_b.peer_id),
-        node_b.handle.remove_peer(node_a.peer_id),
+        node_a.host.remove_peer(node_b.peer_id),
+        node_b.host.remove_peer(node_a.peer_id),
     )?;
     wait_for_convergence(&[&node_a, &node_b], Duration::from_secs(30)).await?;
     let node_b = restart_node(Arc::clone(&world), node_b).await?;
@@ -590,14 +704,14 @@ async fn memory_sync_peer_restart_reconnects_cleanly() -> Res<()> {
     let (snapshot_a, snapshot_b) = assert_two_node_alignment(&node_a, &node_b, 1).await?;
     assert_eq!(
         snapshot_a
-            .objs
+            .scoped_objs
             .get(&obj)
             .and_then(|obj| obj.payload.clone()),
         Some(payload("before-restart"))
     );
     assert_eq!(
         snapshot_b
-            .objs
+            .scoped_objs
             .get(&obj)
             .and_then(|obj| obj.payload.clone()),
         Some(payload("before-restart"))
@@ -616,27 +730,28 @@ async fn memory_sync_offline_edits_catch_up_after_reconnect() -> Res<()> {
     let node_a = boot_node(Arc::clone(&world), 1).await?;
     let node_b = boot_node(Arc::clone(&world), 2).await?;
 
-    let obj = obj_id(70);
-    node_a.seed_obj(obj, payload("online-base")).await?;
+    let obj = scoped_obj(70);
+    node_a.seed_obj(&obj, payload("online-base")).await?;
     tokio::try_join!(node_a.connect_to(&node_b), node_b.connect_to(&node_a))?;
     wait_for_convergence(&[&node_a, &node_b], Duration::from_secs(30)).await?;
 
     tokio::try_join!(
-        node_a.handle.remove_peer(node_b.peer_id),
-        node_b.handle.remove_peer(node_a.peer_id),
+        node_a.host.remove_peer(node_b.peer_id),
+        node_b.host.remove_peer(node_a.peer_id),
     )?;
     wait_for_convergence(&[&node_a, &node_b], Duration::from_secs(30)).await?;
     let NodeHarness {
         world: node_b_world,
         peer_id,
         store,
+        host: _host,
         handle,
         stop,
     } = node_b;
     node_b_world.set_online(peer_id, false);
     stop.stop().await?;
     drop(handle);
-    node_a.seed_obj(obj, payload("offline-a")).await?;
+    node_a.seed_obj(&obj, payload("offline-a")).await?;
     wait_for_convergence(&[&node_a], Duration::from_secs(30)).await?;
 
     let node_b = boot_node_with_store(Arc::clone(&world), peer_id, store).await?;
@@ -646,14 +761,14 @@ async fn memory_sync_offline_edits_catch_up_after_reconnect() -> Res<()> {
     let (snapshot_a, snapshot_b) = assert_two_node_alignment(&node_a, &node_b, 1).await?;
     assert_eq!(
         snapshot_a
-            .objs
+            .scoped_objs
             .get(&obj)
             .and_then(|obj| obj.payload.clone()),
         Some(payload("offline-a"))
     );
     assert_eq!(
         snapshot_b
-            .objs
+            .scoped_objs
             .get(&obj)
             .and_then(|obj| obj.payload.clone()),
         Some(payload("offline-a"))

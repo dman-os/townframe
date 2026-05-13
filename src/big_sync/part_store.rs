@@ -1,15 +1,18 @@
-use std::collections::BTreeMap;
-#[cfg(test)]
-use std::collections::BTreeSet;
-
 use crate::interlude::*;
 
+use crate::{ScopeRef, ScopedIdResolver, ScopedObjRef, ScopedPartRef};
 use big_sync_core::part_store::{CursorIndex, ObjPayload};
 use big_sync_core::rpc::{
     ListPartsError, PartEvent, PartPage, PartSummary, PartTransition, SubEvent, SubPartsRequest,
 };
-use big_sync_core::{ObjId, PartId, PeerId};
-use utils_rs::prelude::tokio::sync::mpsc;
+use big_sync_core::{Byte32Id, ObjId, PartId, PeerId};
+use tokio::sync::mpsc;
+
+use std::collections::BTreeMap;
+#[cfg(test)]
+use std::collections::BTreeSet;
+
+pub mod sqlite;
 
 #[async_trait]
 pub trait HostPartitionStore: Send + Sync {
@@ -54,6 +57,15 @@ structstruck::strike! {
         inner: Arc<surelock::mutex::Mutex<
             #[derive(Default)]
             struct MemoryPartStoreState {
+                next_scope_id: u64,
+                next_part_id: u64,
+                next_obj_id: u64,
+                scopes_by_name: HashMap<ScopeRef, u64>,
+                scope_names_by_id: HashMap<u64, ScopeRef>,
+                parts_by_scoped_ref: HashMap<(u64, Arc<str>), PartId>,
+                scoped_refs_by_part: HashMap<PartId, (u64, Arc<str>)>,
+                objs_by_scoped_ref: HashMap<(u64, Arc<str>), ObjId>,
+                scoped_refs_by_obj: HashMap<ObjId, (u64, Arc<str>)>,
                 global_cursor:
                     #[derive(Default)]
                     struct GlobalCursor {
@@ -107,13 +119,107 @@ impl Default for MemoryPartStore {
     }
 }
 
-#[cfg(test)]
 impl MemoryPartStore {
-    pub(crate) async fn ensure_part(&self, part_id: PartId) -> Res<()> {
+    pub async fn ensure_part(&self, part_id: PartId) -> Res<()> {
         surelock::key::lock_scope(|key| {
             let (mut guard, _key) = key.lock(&self.inner);
             guard.parts.entry(part_id).or_default();
             Ok(())
+        })
+    }
+
+    fn next_byte32_id(counter: &mut u64, domain: u8) -> Byte32Id {
+        *counter = counter.checked_add(1).expect(ERROR_IMPOSSIBLE);
+        let mut bytes = [0; 32];
+        bytes[0] = domain;
+        bytes[1..9].copy_from_slice(&counter.to_be_bytes());
+        Byte32Id::new(bytes)
+    }
+}
+
+impl MemoryPartStoreState {
+    fn scope_id(&mut self, scope: &ScopeRef) -> u64 {
+        if let Some(scope_id) = self.scopes_by_name.get(scope).copied() {
+            return scope_id;
+        }
+        self.next_scope_id = self.next_scope_id.checked_add(1).expect(ERROR_IMPOSSIBLE);
+        let scope_id = self.next_scope_id;
+        let old = self.scopes_by_name.insert(scope.clone(), scope_id);
+        assert!(old.is_none(), "fishy");
+        let old = self.scope_names_by_id.insert(scope_id, scope.clone());
+        assert!(old.is_none(), "fishy");
+        scope_id
+    }
+
+    fn scope_ref(&self, scope_id: u64) -> ScopeRef {
+        self.scope_names_by_id
+            .get(&scope_id)
+            .cloned()
+            .expect(ERROR_IMPOSSIBLE)
+    }
+}
+
+#[async_trait]
+impl ScopedIdResolver for MemoryPartStore {
+    async fn resolve_part(&self, part: &ScopedPartRef) -> Res<PartId> {
+        surelock::key::lock_scope(|key| {
+            let (mut guard, _key) = key.lock(&self.inner);
+            let scope_id = guard.scope_id(&part.scope);
+            let key = (scope_id, Arc::<str>::clone(&part.part));
+            if let Some(part_id) = guard.parts_by_scoped_ref.get(&key).copied() {
+                guard.parts.entry(part_id).or_default();
+                return Ok(part_id);
+            }
+
+            let part_id = PartId(Self::next_byte32_id(&mut guard.next_part_id, 1));
+            let old = guard.parts_by_scoped_ref.insert(key.clone(), part_id);
+            assert!(old.is_none(), "fishy");
+            let old = guard.scoped_refs_by_part.insert(part_id, key);
+            assert!(old.is_none(), "fishy");
+            guard.parts.entry(part_id).or_default();
+            Ok(part_id)
+        })
+    }
+
+    async fn resolve_obj(&self, obj: &ScopedObjRef) -> Res<ObjId> {
+        surelock::key::lock_scope(|key| {
+            let (mut guard, _key) = key.lock(&self.inner);
+            let scope_id = guard.scope_id(&obj.scope);
+            let key = (scope_id, Arc::<str>::clone(&obj.obj));
+            if let Some(obj_id) = guard.objs_by_scoped_ref.get(&key).copied() {
+                return Ok(obj_id);
+            }
+
+            let obj_id = ObjId(Self::next_byte32_id(&mut guard.next_obj_id, 2));
+            let old = guard.objs_by_scoped_ref.insert(key.clone(), obj_id);
+            assert!(old.is_none(), "fishy");
+            let old = guard.scoped_refs_by_obj.insert(obj_id, key);
+            assert!(old.is_none(), "fishy");
+            Ok(obj_id)
+        })
+    }
+
+    async fn scoped_part(&self, part_id: PartId) -> Res<ScopedPartRef> {
+        surelock::key::lock_scope(|key| {
+            let (guard, _key) = key.lock(&self.inner);
+            let (scope_id, part) = guard
+                .scoped_refs_by_part
+                .get(&part_id)
+                .cloned()
+                .ok_or_else(|| ferr!("part id {part_id} is not scoped in memory part store"))?;
+            Ok(ScopedPartRef::new(guard.scope_ref(scope_id), part))
+        })
+    }
+
+    async fn scoped_obj(&self, obj_id: ObjId) -> Res<ScopedObjRef> {
+        surelock::key::lock_scope(|key| {
+            let (guard, _key) = key.lock(&self.inner);
+            let (scope_id, obj) = guard
+                .scoped_refs_by_obj
+                .get(&obj_id)
+                .cloned()
+                .ok_or_else(|| ferr!("obj id {obj_id} is not scoped in memory part store"))?;
+            Ok(ScopedObjRef::new(guard.scope_ref(scope_id), obj))
         })
     }
 }
@@ -131,7 +237,7 @@ impl PartState {
             };
             self.events.insert(cursor, evt);
             for (ii, sub) in self.bus.subs.iter().enumerate() {
-                if let Err(_) = sub.send(sub_evt.clone()) {
+                if sub.send(sub_evt.clone()).is_err() {
                     self.bus.subs_to_drop.push(ii)
                 }
             }
@@ -419,7 +525,7 @@ impl HostPartitionStore for MemoryPartStore {
             let (guard, _key) = key.lock(&self.inner);
             for req in &reqs.parts {
                 let part_id = req.part_id;
-                if let None = guard.parts.get(&part_id) {
+                if !guard.parts.contains_key(&part_id) {
                     return Err(ListPartsError::UnkownParts {
                         unkown_parts: vec![part_id],
                     });
@@ -430,7 +536,7 @@ impl HostPartitionStore for MemoryPartStore {
             return Ok(Err(err));
         }
         let (tx, rx) = mpsc::unbounded_channel();
-        let state = self.inner.clone();
+        let state = Arc::clone(&self.inner);
         let fut = async move {
             let mut replay_done = false;
             let limit = 50;
@@ -450,13 +556,13 @@ impl HostPartitionStore for MemoryPartStore {
                     let guard = &mut *guard;
 
                     for (&ii, part_id) in guard.global_cursor.event_to_part.range(cursor..) {
-                        if events.len() >= limit as usize {
+                        if events.len() >= limit {
                             next_cursor = ii + 1;
                             break;
                         }
-                        let part = guard.parts.get(&part_id).expect(ERROR_IMPOSSIBLE);
+                        let part = guard.parts.get(part_id).expect(ERROR_IMPOSSIBLE);
                         let evt = part.events.get(&ii).expect(ERROR_UNRECONIZED);
-                        if parts.contains(&part_id) {
+                        if parts.contains(part_id) {
                             events.push(evt.clone())
                         }
                         next_cursor = ii + 1;
@@ -464,16 +570,19 @@ impl HostPartitionStore for MemoryPartStore {
                 });
                 replay_done = events.is_empty();
                 for evt in events.drain(..) {
-                    if let Err(_) = tx.send(match evt {
-                        PartEvent::Upserted(inner) => SubEvent::Upserted(inner),
-                        PartEvent::Deleted(inner) => SubEvent::Deleted(inner),
-                    }) {
+                    if tx
+                        .send(match evt {
+                            PartEvent::Upserted(inner) => SubEvent::Upserted(inner),
+                            PartEvent::Deleted(inner) => SubEvent::Deleted(inner),
+                        })
+                        .is_err()
+                    {
                         return;
                     }
                 }
                 cursor = next_cursor;
             }
-            if let Err(_) = tx.send(SubEvent::ReplayComplete) {
+            if tx.send(SubEvent::ReplayComplete).is_err() {
                 return;
             }
             surelock::key::lock_scope(|key| {
@@ -486,7 +595,7 @@ impl HostPartitionStore for MemoryPartStore {
                 }
             });
         };
-        tokio::spawn(async move { fut.await });
+        tokio::spawn(fut);
         Ok(Ok(rx))
     }
 }
@@ -495,6 +604,7 @@ impl HostPartitionStore for MemoryPartStore {
 #[derive(Debug, Clone, PartialEq)]
 pub(crate) struct MemoryPartStoreSnapshot {
     pub objs: BTreeMap<ObjId, MemoryObjSnapshot>,
+    pub scoped_objs: BTreeMap<ScopedObjRef, MemoryScopedObjSnapshot>,
     pub peer_part_cursors: BTreeMap<(PeerId, PartId), CursorIndex>,
 }
 
@@ -503,6 +613,13 @@ pub(crate) struct MemoryPartStoreSnapshot {
 pub(crate) struct MemoryObjSnapshot {
     pub payload: Option<ObjPayload>,
     pub parts: BTreeSet<PartId>,
+}
+
+#[cfg(test)]
+#[derive(Debug, Clone, PartialEq)]
+pub(crate) struct MemoryScopedObjSnapshot {
+    pub payload: Option<ObjPayload>,
+    pub parts: BTreeSet<ScopedPartRef>,
 }
 
 #[cfg(test)]
@@ -523,8 +640,33 @@ impl MemoryPartStore {
                     )
                 })
                 .collect();
+            let scoped_objs = guard
+                .objs
+                .iter()
+                .filter_map(|(&obj_id, obj)| {
+                    let (scope_id, obj_name) = guard.scoped_refs_by_obj.get(&obj_id)?.clone();
+                    let scope = guard.scope_ref(scope_id);
+                    let parts = obj
+                        .parts
+                        .iter()
+                        .filter_map(|part_id| {
+                            let (scope_id, part_name) =
+                                guard.scoped_refs_by_part.get(part_id)?.clone();
+                            Some(ScopedPartRef::new(guard.scope_ref(scope_id), part_name))
+                        })
+                        .collect();
+                    Some((
+                        ScopedObjRef::new(scope, obj_name),
+                        MemoryScopedObjSnapshot {
+                            payload: obj.payload.clone(),
+                            parts,
+                        },
+                    ))
+                })
+                .collect();
             Ok(MemoryPartStoreSnapshot {
                 objs,
+                scoped_objs,
                 peer_part_cursors: guard.peer_part_cursors.clone().into_iter().collect(),
             })
         })

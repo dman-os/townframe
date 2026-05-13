@@ -26,20 +26,15 @@ impl StressJournal {
     }
 }
 
-fn stress_obj(seed: u32) -> ObjId {
-    let bytes = seed.to_le_bytes();
-    let mut out = [0u8; 32];
-    for chunk in out.chunks_mut(bytes.len()) {
-        chunk.copy_from_slice(&bytes);
-    }
-    ObjId(Byte32Id::new(out))
+fn stress_obj(seed: u32) -> ScopedObjRef {
+    ScopedObjRef::new(test_scope(), format!("stress.obj.{seed}"))
 }
 
 fn stress_payload(
     phase: &str,
     step: usize,
     node_idx: usize,
-    obj_id: ObjId,
+    obj_id: &ScopedObjRef,
     nonce: u64,
 ) -> serde_json::Value {
     serde_json::Value::from(format!(
@@ -50,33 +45,33 @@ fn stress_payload(
 #[derive(Default)]
 struct StressState {
     next_obj_seed: u32,
-    live_objs: Vec<ObjId>,
-    retired_objs: HashSet<ObjId>,
+    live_objs: Vec<ScopedObjRef>,
+    retired_objs: HashSet<ScopedObjRef>,
 }
 
 impl StressState {
-    fn fresh_obj(&mut self) -> ObjId {
+    fn fresh_obj(&mut self) -> ScopedObjRef {
         let obj = stress_obj(self.next_obj_seed);
         self.next_obj_seed = self.next_obj_seed.wrapping_add(1);
         obj
     }
 
-    fn choose_live_obj(&self, rng: &mut StdRng) -> Option<ObjId> {
+    fn choose_live_obj(&self, rng: &mut StdRng) -> Option<ScopedObjRef> {
         if self.live_objs.is_empty() {
             return None;
         }
-        Some(self.live_objs[rng.random_range(0..self.live_objs.len())])
+        Some(self.live_objs[rng.random_range(0..self.live_objs.len())].clone())
     }
 
-    fn publish_new_obj(&mut self) -> ObjId {
+    fn publish_new_obj(&mut self) -> ScopedObjRef {
         let obj = self.fresh_obj();
-        self.live_objs.push(obj);
+        self.live_objs.push(obj.clone());
         obj
     }
 
-    fn retire_obj(&mut self, obj: ObjId) {
-        self.retired_objs.insert(obj);
-        self.live_objs.retain(|candidate| *candidate != obj);
+    fn retire_obj(&mut self, obj: ScopedObjRef) {
+        self.retired_objs.insert(obj.clone());
+        self.live_objs.retain(|candidate| candidate != &obj);
     }
 }
 
@@ -105,8 +100,8 @@ async fn connect_full_mesh(nodes: &[Option<NodeHarness>]) -> Res<()> {
         let Some(left) = nodes[left_idx].as_ref() else {
             continue;
         };
-        for right_idx in (left_idx + 1)..nodes.len() {
-            let Some(right) = nodes[right_idx].as_ref() else {
+        for right in nodes.iter().skip(left_idx + 1) {
+            let Some(right) = right.as_ref() else {
                 continue;
             };
             tokio::try_join!(left.connect_to(right), right.connect_to(left))?;
@@ -122,6 +117,7 @@ async fn shutdown_node(
         world,
         peer_id,
         store,
+        host: _host,
         handle,
         stop,
     } = node;
@@ -136,16 +132,16 @@ async fn disconnect_from_node(nodes: &[Option<NodeHarness>], victim_idx: usize) 
         return Ok(());
     };
     let victim_peer_id = victim.peer_id;
-    for other_idx in 0..nodes.len() {
+    for (other_idx, other) in nodes.iter().enumerate() {
         if other_idx == victim_idx {
             continue;
         }
-        let Some(other) = nodes[other_idx].as_ref() else {
+        let Some(other) = other.as_ref() else {
             continue;
         };
         tokio::try_join!(
-            victim.handle.remove_peer(other.peer_id),
-            other.handle.remove_peer(victim_peer_id),
+            victim.host.remove_peer(other.peer_id),
+            other.host.remove_peer(victim_peer_id),
         )?;
     }
     Ok(())
@@ -181,15 +177,15 @@ async fn apply_random_mutation(
         journal.record(format!(
             "{phase}:step={step}:delete node={node_idx} obj={obj:?}"
         ));
-        node.store.remove_obj_from_part(obj, TEST_PART_ID).await?;
+        node.remove_obj(&obj).await?;
         state.retire_obj(obj);
     } else {
         let nonce = rng.random::<u64>();
-        let value = stress_payload(phase, step, node_idx, obj, nonce);
+        let value = stress_payload(phase, step, node_idx, &obj, nonce);
         journal.record(format!(
             "{phase}:step={step}:upsert node={node_idx} obj={obj:?} value={value:?}"
         ));
-        node.seed_obj(obj, value).await?;
+        node.seed_obj(&obj, value).await?;
     }
 
     if rng.random_bool(0.25) {
@@ -218,13 +214,14 @@ async fn assert_cluster_alignment(nodes: &[&NodeHarness]) -> Res<()> {
     if nodes.is_empty() {
         return Ok(());
     }
-    let expected_parts = test_parts();
     let expected_peer_count = nodes.len().saturating_sub(1);
     let mut worker_snaps = Vec::with_capacity(nodes.len());
     let mut store_snaps = Vec::with_capacity(nodes.len());
 
     for node in nodes {
         let worker_snapshot = node.handle.snapshot().await?;
+        let part_id = node.host.resolve_part(&test_part()).await?;
+        let expected_parts = [(part_id, TEST_BACKEND_ID)].into_iter().collect();
         assert_eq!(worker_snapshot.peer_parts.len(), expected_peer_count);
         for other in nodes {
             if node.peer_id == other.peer_id {
@@ -237,14 +234,14 @@ async fn assert_cluster_alignment(nodes: &[&NodeHarness]) -> Res<()> {
         }
         worker_snaps.push(worker_snapshot);
         let snapshot = node.snapshot().await?;
-        for (&(_, part_id), _) in &snapshot.peer_part_cursors {
-            assert_eq!(part_id, TEST_PART_ID);
+        for &(_, part_id) in snapshot.peer_part_cursors.keys() {
+            assert_eq!(part_id, node.host.resolve_part(&test_part()).await?);
         }
         store_snaps.push(snapshot);
     }
 
     for snapshot in store_snaps.iter().skip(1) {
-        assert_eq!(store_snaps[0].objs, snapshot.objs);
+        assert_eq!(store_snaps[0].scoped_objs, snapshot.scoped_objs);
     }
 
     let _ = worker_snaps;
