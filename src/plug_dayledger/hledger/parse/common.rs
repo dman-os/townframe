@@ -3,11 +3,11 @@ use chumsky::prelude::*;
 use super::super::types::*;
 
 pub(crate) fn ws0<'a>() -> impl Parser<'a, &'a str, &'a str, extra::Err<Rich<'a, char>>> {
-    just(' ').repeated().to_slice()
+    one_of([' ', '\t']).repeated().to_slice()
 }
 
 pub(crate) fn ws1<'a>() -> impl Parser<'a, &'a str, &'a str, extra::Err<Rich<'a, char>>> {
-    just(' ').repeated().at_least(1).to_slice()
+    one_of([' ', '\t']).repeated().at_least(1).to_slice()
 }
 
 pub(crate) fn newline_or_eof<'a>() -> impl Parser<'a, &'a str, (), extra::Err<Rich<'a, char>>> {

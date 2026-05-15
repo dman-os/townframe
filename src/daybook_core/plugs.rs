@@ -170,7 +170,7 @@ pub fn system_plugs() -> Vec<manifest::PlugManifest> {
                         },
                         doc_acls: vec![RoutineDocAcl {
                             doc_predicate: DocPredicateClause::HasTag(
-                                WellKnownFacetTag::Note.into(),
+                                WellKnownFacetTag::Blob.into(),
                             ),
                             facet_acl: vec![
                                 RoutineFacetAccess {
@@ -188,7 +188,7 @@ pub fn system_plugs() -> Vec<manifest::PlugManifest> {
                                     key_id: None,
                                     read: true,
                                     write: true,
-                                    create: false,
+                                    create: true,
                                     delete: false,
                                 },
                             ],
@@ -209,7 +209,7 @@ pub fn system_plugs() -> Vec<manifest::PlugManifest> {
                         },
                         doc_acls: vec![RoutineDocAcl {
                             doc_predicate: DocPredicateClause::HasTag(
-                                WellKnownFacetTag::Embedding.into(),
+                                WellKnownFacetTag::Blob.into(),
                             ),
                             facet_acl: vec![
                                 RoutineFacetAccess {
@@ -227,7 +227,7 @@ pub fn system_plugs() -> Vec<manifest::PlugManifest> {
                                     key_id: None,
                                     read: true,
                                     write: true,
-                                    create: false,
+                                    create: true,
                                     delete: false,
                                 },
                             ],
@@ -248,7 +248,7 @@ pub fn system_plugs() -> Vec<manifest::PlugManifest> {
                         },
                         doc_acls: vec![RoutineDocAcl {
                             doc_predicate: DocPredicateClause::HasTag(
-                                WellKnownFacetTag::Embedding.into(),
+                                WellKnownFacetTag::Note.into(),
                             ),
                             facet_acl: vec![
                                 RoutineFacetAccess {
@@ -257,7 +257,7 @@ pub fn system_plugs() -> Vec<manifest::PlugManifest> {
                                     key_id: None,
                                     read: true,
                                     write: false,
-                                    create: false,
+                                    create: true,
                                     delete: false,
                                 },
                                 RoutineFacetAccess {
@@ -266,7 +266,7 @@ pub fn system_plugs() -> Vec<manifest::PlugManifest> {
                                     key_id: None,
                                     read: true,
                                     write: true,
-                                    create: false,
+                                    create: true,
                                     delete: false,
                                 },
                             ],
@@ -319,7 +319,7 @@ pub fn system_plugs() -> Vec<manifest::PlugManifest> {
                         },
                         doc_acls: vec![RoutineDocAcl {
                             doc_predicate: DocPredicateClause::HasTag(
-                                WellKnownFacetTag::LabelGeneric.into(),
+                                WellKnownFacetTag::Note.into(),
                             ),
                             facet_acl: vec![RoutineFacetAccess {
                                 owner_plug_id: None,
@@ -327,7 +327,7 @@ pub fn system_plugs() -> Vec<manifest::PlugManifest> {
                                 key_id: None,
                                 read: true,
                                 write: true,
-                                create: false,
+                                create: true,
                                 delete: false,
                             }],
                         }],

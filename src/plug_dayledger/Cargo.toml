@@ -49,6 +49,7 @@ wit-bindgen.workspace = true
 chumsky = "0.12.0"
 jiff = { version = "0.2.24", features = ["serde"] }
 rust_decimal = "1.41.0"
+blake3.workspace = true
 
 [dev-dependencies]
 automerge.workspace = true

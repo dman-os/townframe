@@ -2,6 +2,7 @@ use crate::interlude::*;
 use wflow_sdk::{JobErrorX, Json, WflowCtx};
 
 pub fn run(cx: &mut WflowCtx) -> Result<(), JobErrorX> {
+    use super::resolve_facet_write_target;
     use crate::wit::townframe::daybook::capabilities::FacetRights;
     use crate::wit::townframe::daybook::facet_routine;
     use crate::wit::townframe::daybook::mltools_ocr;
@@ -10,21 +11,21 @@ pub fn run(cx: &mut WflowCtx) -> Result<(), JobErrorX> {
     let args = facet_routine::get_args();
 
     let note_facet_key = daybook_types::doc::FacetKey::from(WellKnownFacetTag::Note).to_string();
-    let working_facet_token = args
-        .primary_doc
-        .facets
-        .iter()
-        .find(|t| t.key() == note_facet_key && t.rights().contains(FacetRights::UPDATE))
-        .ok_or_else(|| {
-            JobErrorX::Terminal(ferr!("note facet token with update rights not found"))
-        })?;
+    let note_facet_tag = daybook_types::doc::FacetTag::from(WellKnownFacetTag::Note).to_string();
+    let working_facet_target = resolve_facet_write_target(
+        &args.primary_doc.facets,
+        &args.primary_doc.tags,
+        &note_facet_key,
+        &note_facet_tag,
+        "note",
+    )?;
 
     let blob_facet_key = daybook_types::doc::FacetKey::from(WellKnownFacetTag::Blob).to_string();
     let blob_facet_token = args
         .primary_doc
         .facets
         .iter()
-        .find(|t| t.key() == blob_facet_key && t.rights().contains(FacetRights::READ))
+        .find(|token| token.key() == blob_facet_key && token.rights().contains(FacetRights::READ))
         .ok_or_else(|| {
             JobErrorX::Terminal(ferr!(
                 "blob facet key '{}' not found with read rights",
@@ -47,14 +48,11 @@ pub fn run(cx: &mut WflowCtx) -> Result<(), JobErrorX> {
             .into();
 
         let new_facet = serde_json::to_string(&new_facet).expect(ERROR_JSON);
-        working_facet_token
-            .update(&new_facet)
-            .map_err(|err| {
-                JobErrorX::Terminal(ferr!("access error updating note with OCR result: {err:?}"))
-            })?
-            .map_err(|err| {
-                JobErrorX::Terminal(ferr!("error updating note with OCR result: {err:?}"))
-            })?;
+        working_facet_target.write(
+            &new_facet,
+            "access error updating note with OCR result",
+            "access error creating note with OCR result",
+        )?;
 
         Ok(Json(()))
     })?;

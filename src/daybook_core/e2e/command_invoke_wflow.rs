@@ -37,6 +37,7 @@ async fn test_command_invoke_success_reply() -> Res<()> {
                 doc_id: success_doc_id.clone(),
                 branch_path: daybook_types::doc::BranchPath::from("main"),
                 heads: success_heads,
+                invocation: crate::rt::dispatch::RoutineInvocation::Command,
                 changed_facet_keys: vec![],
                 wflow_args_json: None,
             },

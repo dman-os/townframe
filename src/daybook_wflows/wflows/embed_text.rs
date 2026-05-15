@@ -2,6 +2,7 @@ use crate::interlude::*;
 use wflow_sdk::{JobErrorX, Json, WflowCtx};
 
 pub fn run(cx: &mut WflowCtx) -> Result<(), JobErrorX> {
+    use super::resolve_facet_write_target;
     use crate::wit::townframe::daybook::capabilities::FacetRights;
     use crate::wit::townframe::daybook::facet_routine;
     use crate::wit::townframe::daybook::mltools_embed;
@@ -11,21 +12,22 @@ pub fn run(cx: &mut WflowCtx) -> Result<(), JobErrorX> {
 
     let embedding_facet_key =
         daybook_types::doc::FacetKey::from(WellKnownFacetTag::Embedding).to_string();
-    let working_facet_token = args
-        .primary_doc
-        .facets
-        .iter()
-        .find(|t| t.key() == embedding_facet_key && t.rights().contains(FacetRights::UPDATE))
-        .ok_or_else(|| {
-            JobErrorX::Terminal(ferr!("embedding facet token with update rights not found"))
-        })?;
+    let embedding_facet_tag =
+        daybook_types::doc::FacetTag::from(WellKnownFacetTag::Embedding).to_string();
+    let working_facet_target = resolve_facet_write_target(
+        &args.primary_doc.facets,
+        &args.primary_doc.tags,
+        &embedding_facet_key,
+        &embedding_facet_tag,
+        "embedding",
+    )?;
 
     let note_facet_key = daybook_types::doc::FacetKey::from(WellKnownFacetTag::Note).to_string();
     let note_facet_token = args
         .primary_doc
         .facets
         .iter()
-        .find(|t| t.key() == note_facet_key && t.rights().contains(FacetRights::READ))
+        .find(|token| token.key() == note_facet_key && token.rights().contains(FacetRights::READ))
         .ok_or_else(|| {
             JobErrorX::Terminal(ferr!(
                 "note facet key '{}' not found with read rights",
@@ -76,12 +78,11 @@ pub fn run(cx: &mut WflowCtx) -> Result<(), JobErrorX> {
             .into();
 
         let new_facet = serde_json::to_string(&new_facet).expect(ERROR_JSON);
-        working_facet_token
-            .update(&new_facet)
-            .map_err(|err| {
-                JobErrorX::Terminal(ferr!("access error updating embedding facet: {err:?}"))
-            })?
-            .map_err(|err| JobErrorX::Terminal(ferr!("error updating embedding facet: {err:?}")))?;
+        working_facet_target.write(
+            &new_facet,
+            "access error updating embedding facet",
+            "access error creating embedding facet",
+        )?;
 
         Ok(Json(()))
     })?;

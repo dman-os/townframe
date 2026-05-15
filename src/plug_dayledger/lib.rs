@@ -73,9 +73,10 @@ pub mod wflows {
 
 use daybook_types::doc::{Note, WellKnownFacetTag};
 use daybook_types::manifest::{
-    CompareOp, DocPredicateClause, FacetDependencyManifest, FacetManifest, FacetReferenceKind,
-    FacetReferenceManifest, PlugDependencyManifest, PlugManifest, ProcessorDeets,
-    ProcessorManifest, RoutineDocAcl, RoutineFacetAccess, RoutineImpl, RoutineManifest,
+    CompareOp, DocChangePredicate, DocPredicateClause, FacetDependencyManifest, FacetManifest,
+    FacetReferenceKind, FacetReferenceManifest, PlugDependencyManifest, PlugManifest,
+    ProcessorDeets, ProcessorEventPredicate, ProcessorManifest, RoutineDocAcl, RoutineFacetAccess,
+    RoutineImpl, RoutineManifest,
 };
 use std::sync::Arc;
 
@@ -194,7 +195,12 @@ pub fn plug_manifest() -> PlugManifest {
             Arc::new(ProcessorManifest {
                 desc: "Parse hledger journal notes into dayledger claims".into(),
                 deets: ProcessorDeets::DocProcessor {
-                    event_predicate: Default::default(),
+                    event_predicate: ProcessorEventPredicate {
+                        doc_change_predicate: DocChangePredicate::ChangedFacetTags(vec![
+                            note_tag.clone()
+                        ]),
+                        ..Default::default()
+                    },
                     routine_name: "parse-hledger".into(),
                     predicate: DocPredicateClause::And(vec![
                         DocPredicateClause::HasTag(note_tag.clone()),

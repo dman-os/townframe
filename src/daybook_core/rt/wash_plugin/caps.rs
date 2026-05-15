@@ -619,6 +619,7 @@ pub struct FacetCreateToken {
     pub target_branch_path: daybook_types::doc::BranchPath,
     pub heads: ChangeHashSet,
     pub facet_key: daybook_types::doc::FacetKey,
+    pub rights: capabilities::FacetRights,
     pub facet_acl: Vec<daybook_types::manifest::RoutineFacetAccess>,
 }
 
@@ -691,15 +692,32 @@ impl capabilities::HostFacetCreateToken for SharedWashCtx {
             .await
         {
             Ok(_) => {
+                let Some(branches) = plugin
+                    .drawer_repo
+                    .get_doc_branches(&token.doc_id)
+                    .await
+                    .map_err(wasmtime_err)?
+                else {
+                    return Ok(Err(capabilities::UpdateDocError::Other(
+                        "doc not found".into(),
+                    )));
+                };
+                let Some(heads) = branches
+                    .branches
+                    .get(token.target_branch_path.as_str())
+                    .cloned()
+                else {
+                    return Ok(Err(capabilities::UpdateDocError::Other(
+                        "branch not found".into(),
+                    )));
+                };
                 let ftoken = self.table.push(FacetToken {
                     doc_id: token.doc_id.clone(),
                     branch_path: token.target_branch_path.clone(),
                     staging_branch_path: token.target_branch_path.clone(),
-                    heads: token.heads.clone(),
+                    heads,
                     facet_key: token.facet_key.clone(),
-                    rights: capabilities::FacetRights::READ
-                        | capabilities::FacetRights::UPDATE
-                        | capabilities::FacetRights::DELETE,
+                    rights: token.rights,
                 })?;
                 Ok(Ok(ftoken))
             }
@@ -958,15 +976,32 @@ impl capabilities::HostFacetTagToken for SharedWashCtx {
             .await
         {
             Ok(_) => {
+                let Some(branches) = plugin
+                    .drawer_repo
+                    .get_doc_branches(&token.doc_id)
+                    .await
+                    .map_err(wasmtime_err)?
+                else {
+                    return Ok(Err(capabilities::UpdateDocError::Other(
+                        "doc not found".into(),
+                    )));
+                };
+                let Some(heads) = branches
+                    .branches
+                    .get(token.staging_branch_path.as_str())
+                    .cloned()
+                else {
+                    return Ok(Err(capabilities::UpdateDocError::Other(
+                        "branch not found".into(),
+                    )));
+                };
                 let ftoken = self.table.push(FacetToken {
                     doc_id: token.doc_id.clone(),
                     branch_path: token.staging_branch_path.clone(),
                     staging_branch_path: token.staging_branch_path.clone(),
-                    heads: token.heads.clone(),
+                    heads,
                     facet_key,
-                    rights: capabilities::FacetRights::READ
-                        | capabilities::FacetRights::UPDATE
-                        | capabilities::FacetRights::DELETE,
+                    rights: token.rights,
                 })?;
                 Ok(Ok(ftoken))
             }
@@ -1017,6 +1052,7 @@ impl capabilities::HostFacetTagToken for SharedWashCtx {
             target_branch_path: token.staging_branch_path.clone(),
             heads: token.heads.clone(),
             facet_key,
+            rights: token.rights,
             facet_acl: token.facet_acl.clone(),
         })?;
         Ok(Ok(ctoken))
@@ -1187,18 +1223,17 @@ pub(super) async fn get_facet_raw_from_token(
 ) -> wasmtime::Result<Result<(daybook_types::doc::FacetKey, daybook_types::doc::FacetRaw), String>>
 {
     let plugin = DaybookPlugin::from_ctx(ctx);
-    let (doc_id, branch_path, heads, facet_key) = {
-        let token = ctx
-            .table
-            .get(handle)
-            .map_err(|err| wasmtime_err(format!("error locating facet token: {err}")))?;
-        (
-            token.doc_id.clone(),
-            token.branch_path.clone(),
-            token.heads.clone(),
-            token.facet_key.clone(),
-        )
-    };
+    let token = ctx
+        .table
+        .get(handle)
+        .map_err(|err| wasmtime_err(format!("error locating facet token: {err}")))?;
+    if !token.rights.contains(capabilities::FacetRights::READ) {
+        return Ok(Err("missing read permission".to_string()));
+    }
+    let doc_id = token.doc_id.clone();
+    let branch_path = token.branch_path.clone();
+    let heads = token.heads.clone();
+    let facet_key = token.facet_key.clone();
 
     let Some(doc) = plugin
         .get_doc(&doc_id, &branch_path, &heads)

@@ -194,6 +194,7 @@ pub enum DispatchArgs {
         doc_id: String,
         branch_path: daybook_types::doc::BranchPath,
         heads: ChangeHashSet,
+        invocation: dispatch::RoutineInvocation,
         changed_facet_keys: Vec<String>,
         wflow_args_json: Option<String>,
     },
@@ -799,6 +800,7 @@ impl Rt {
                             doc_id: config_doc_id,
                             branch_path: daybook_types::doc::BranchPath::from("main"),
                             heads: config_heads,
+                            invocation: dispatch::RoutineInvocation::Command,
                             changed_facet_keys: vec![],
                             wflow_args_json: None,
                         },
@@ -1517,6 +1519,7 @@ impl Rt {
                 doc_id: doc_id.clone(),
                 branch_path: staging_branch_path.clone(),
                 heads: staging_heads,
+                invocation: dispatch::RoutineInvocation::Command,
                 changed_facet_keys: vec![],
                 wflow_args_json: Some(request.args_json.clone()),
             },
@@ -1602,36 +1605,43 @@ impl Rt {
             doc_id,
             branch_path,
             heads,
+            invocation,
             changed_facet_keys,
             wflow_args_json,
         } = args;
 
-        let invocation = if changed_facet_keys.is_empty() {
-            dispatch::RoutineInvocation::Command
-        } else {
-            dispatch::RoutineInvocation::Processor(dispatch::ProcessorInvocation {
-                trigger_doc_id: doc_id.clone(),
-                changed_facet_keys,
-            })
+        let invocation = match invocation {
+            dispatch::RoutineInvocation::Command => dispatch::RoutineInvocation::Command,
+            dispatch::RoutineInvocation::Processor(mut processor_invocation) => {
+                processor_invocation.trigger_doc_id = doc_id.clone();
+                processor_invocation.changed_facet_keys = changed_facet_keys;
+                dispatch::RoutineInvocation::Processor(processor_invocation)
+            }
         };
 
         let dispatch_id = {
             let mut identity = String::new();
             use std::fmt::Write as _;
+            let invocation_kind = match &invocation {
+                dispatch::RoutineInvocation::Command => "command",
+                dispatch::RoutineInvocation::Processor(_) => "processor",
+            };
             write!(
                 &mut identity,
-                "{}|{}|{}|{}",
+                "{}|{}|{}|{}|{}|{}",
                 doc_id,
+                branch_path,
                 am_utils_rs::serialize_commit_heads(heads.as_ref()).join(","),
                 plug_id,
-                routine_name
+                routine_name,
+                invocation_kind
             )
             .expect("writing to string should never fail");
             utils_rs::hash::blake3_hash_bytes(identity.as_bytes())
         };
         let mut dispatch_id = fixed_dispatch_id
             .clone()
-            .unwrap_or_else(|| format!("{plug_id}/{routine_name}-{dispatch_id}"));
+            .unwrap_or_else(|| format!("{plug_id}/{routine_name}/{branch_path}-{dispatch_id}"));
 
         // Build config_docs from config_facet_acl, grouping by owner_plug_id
         let mut config_docs_by_owner: std::collections::HashMap<

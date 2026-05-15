@@ -935,11 +935,9 @@ fn plug_cmd_to_clap(
                 .after_help(format!(
                     "Command type: DocCommand
 Routine name: {routine_name}
-Routine deets: {routine_deets:?}
 Routine acl: {routine_acl:?}
 Routine impl: {routine_impl:?}
 ",
-                    routine_deets = routine.deets,
                     routine_acl = routine.facet_acl(),
                     routine_impl = routine.r#impl,
                 ))
@@ -984,6 +982,8 @@ Routine impl: {routine_impl:?}
                                     doc_id: doc_id.clone(),
                                     branch_path: branch_path.clone(),
                                     heads: heads.clone(),
+                                    invocation:
+                                        daybook_core::rt::dispatch::RoutineInvocation::Command,
                                     changed_facet_keys: vec![],
                                     wflow_args_json: None,
                                 },

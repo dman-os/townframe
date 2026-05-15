@@ -100,6 +100,7 @@ impl RtFfi {
                         doc_id,
                         branch_path: daybook_types::doc::BranchPath::from(branch_path),
                         heads: daybook_types::doc::ChangeHashSet(vec![].into()),
+                        invocation: daybook_core::rt::dispatch::RoutineInvocation::Command,
                         changed_facet_keys: vec![],
                         wflow_args_json: None,
                     },

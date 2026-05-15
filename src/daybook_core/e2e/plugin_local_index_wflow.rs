@@ -65,6 +65,7 @@ async fn test_embedding_processor_indexes_into_plugin_local_sqlite_state() -> Re
                 doc_id: doc_id.clone(),
                 branch_path: daybook_types::doc::BranchPath::from("main"),
                 heads,
+                invocation: crate::rt::dispatch::RoutineInvocation::Command,
                 changed_facet_keys: vec![],
                 wflow_args_json: None,
             },

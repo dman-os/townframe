@@ -16,6 +16,7 @@ const DOWNSIZE_MAX_SIDE: u32 = 896;
 const DOWNSIZE_JPEG_QUALITY: u8 = 80;
 
 pub fn run(cx: &mut WflowCtx) -> Result<(), JobErrorX> {
+    use super::resolve_facet_write_target;
     use crate::wit::townframe::daybook::capabilities::FacetRights;
     use crate::wit::townframe::daybook::facet_routine;
     use daybook_types::doc::{WellKnownFacet, WellKnownFacetTag};
@@ -41,17 +42,30 @@ pub fn run(cx: &mut WflowCtx) -> Result<(), JobErrorX> {
         })?;
 
     let config_facet_key = pseudo_label_candidates_key(CANDIDATE_SET_CONFIG_FACET_ID).to_string();
-    let rw_config_token = args
-        .config_docs
-        .iter()
-        .flat_map(|cd| cd.facets.iter())
-        .find(|t| t.key() == config_facet_key && t.rights().contains(FacetRights::UPDATE));
+    let config_facet_tag = crate::types::PlabelFacetTag::PseudoLabelCandidatesFacet
+        .as_str()
+        .to_string();
     let ro_config_token = args
         .config_docs
         .iter()
         .flat_map(|cd| cd.facets.iter())
         .find(|t| t.key() == config_facet_key && t.rights().contains(FacetRights::READ));
-    if rw_config_token.is_none() && ro_config_token.is_none() {
+    let rw_config_token = args
+        .config_docs
+        .iter()
+        .flat_map(|cd| cd.facets.iter())
+        .find(|t| t.key() == config_facet_key && t.rights().contains(FacetRights::UPDATE));
+    let config_write_target = args.config_docs.iter().find_map(|cd| {
+        resolve_facet_write_target(
+            &cd.facets,
+            &cd.tags,
+            &config_facet_key,
+            &config_facet_tag,
+            "label candidates config",
+        )
+        .ok()
+    });
+    if rw_config_token.is_none() && ro_config_token.is_none() && config_write_target.is_none() {
         return Ok(());
     }
 
@@ -146,7 +160,7 @@ pub fn run(cx: &mut WflowCtx) -> Result<(), JobErrorX> {
 
         if merged != proposal_set {
             proposal_set = merged;
-            if let Some(token) = rw_config_token {
+            if let Some(target) = config_write_target.as_ref() {
                 let facet_raw: daybook_types::doc::FacetRaw = serde_json::to_value(proposal_set)
                     .map_err(|err| {
                         JobErrorX::Terminal(ferr!(
@@ -154,12 +168,11 @@ pub fn run(cx: &mut WflowCtx) -> Result<(), JobErrorX> {
                         ))
                     })?;
                 let facet_raw = serde_json::to_string(&facet_raw).expect(ERROR_JSON);
-                token
-                    .update(&facet_raw)
-                    .map_err(|err| {
-                        JobErrorX::Terminal(ferr!("error updating learned proposal set: {err:?}"))
-                    })?
-                    .map_err(|err| JobErrorX::Terminal(ferr!("update doc error: {err:?}")))?;
+                target.write(
+                    &facet_raw,
+                    "error updating learned proposal set",
+                    "error creating learned proposal set",
+                )?;
             }
         }
 
@@ -199,7 +212,7 @@ fn load_or_init_proposal_set(
     rw_config_token: Option<&crate::wit::townframe::daybook::capabilities::FacetToken>,
     ro_config_token: Option<&crate::wit::townframe::daybook::capabilities::FacetToken>,
 ) -> Result<PseudoLabelCandidatesFacet, JobErrorX> {
-    if let Some(token) = rw_config_token {
+    if let Some(token) = ro_config_token {
         let raw = token
             .get()
             .map_err(|err| JobErrorX::Terminal(ferr!("error reading config facet: {err:?}")))?;
@@ -210,20 +223,16 @@ fn load_or_init_proposal_set(
         serde_json::from_value::<PseudoLabelCandidatesFacet>(facet_raw).map_err(|err| {
             JobErrorX::Terminal(ferr!("config facet is not pseudo label candidates: {err}"))
         })
-    } else if let Some(token) = ro_config_token {
+    } else if let Some(token) = rw_config_token {
         let raw = token
             .get()
-            .map_err(|err| JobErrorX::Terminal(ferr!("error reading ro config facet: {err:?}")))?;
+            .map_err(|err| JobErrorX::Terminal(ferr!("error reading config facet: {err:?}")))?;
         let facet_raw: daybook_types::doc::FacetRaw =
             serde_json::from_str(&raw).map_err(|err| {
-                JobErrorX::Terminal(ferr!(
-                    "error parsing ro config proposal set facet json: {err}"
-                ))
+                JobErrorX::Terminal(ferr!("error parsing config proposal set facet json: {err}"))
             })?;
         serde_json::from_value::<PseudoLabelCandidatesFacet>(facet_raw).map_err(|err| {
-            JobErrorX::Terminal(ferr!(
-                "ro config facet is not pseudo label candidates: {err}"
-            ))
+            JobErrorX::Terminal(ferr!("config facet is not pseudo label candidates: {err}"))
         })
     } else {
         Ok(PseudoLabelCandidatesFacet { labels: vec![] })

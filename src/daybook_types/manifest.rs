@@ -615,7 +615,7 @@ impl DocChangePredicate {
 }
 
 #[derive(Debug, Serialize, Deserialize, Validate, Clone)]
-#[serde(rename_all = "camelCase")]
+#[serde(rename_all = "camelCase", rename_all_fields = "camelCase")]
 pub enum DocPredicateClause {
     HasTag(#[garde(dive)] FacetTag),
     HasReferenceToTag {
@@ -868,9 +868,8 @@ fn evaluate_facet_field_match(
     operator: CompareOp,
     expected: &serde_json::Value,
 ) -> bool {
-    use jsonpath_rust::JsonPath;
     for (_, raw) in facets {
-        let Ok(found) = raw.query(json_path) else {
+        let Ok(found) = select_json_path_values(raw, json_path) else {
             continue;
         };
         for found_val in found {
@@ -1183,7 +1182,7 @@ mod tests {
         let json = serde_json::json!({
             "facetFieldMatch": {
                 "tag": "org.example.note",
-                "json_path": "$.mime",
+                "jsonPath": "$.mime",
                 "operator": "eq",
                 "value": "text/x-hledger-journal"
             }

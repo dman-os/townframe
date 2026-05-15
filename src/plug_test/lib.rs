@@ -1228,29 +1228,11 @@ pub fn plug_manifest() -> PlugManifest {
                 }),
             ),
             (
-                "report-full-processor".into(),
-                Arc::new(CommandManifest {
-                    desc: "report capabilities (full processor)".into(),
-                    deets: CommandDeets::DocCommand {
-                        routine_name: "report-full-processor".into(),
-                    },
-                }),
-            ),
-            (
                 "report-minimal-command".into(),
                 Arc::new(CommandManifest {
                     desc: "report capabilities (minimal command)".into(),
                     deets: CommandDeets::DocCommand {
                         routine_name: "report-minimal-command".into(),
-                    },
-                }),
-            ),
-            (
-                "report-minimal-processor".into(),
-                Arc::new(CommandManifest {
-                    desc: "report capabilities (minimal processor)".into(),
-                    deets: CommandDeets::DocCommand {
-                        routine_name: "report-minimal-processor".into(),
                     },
                 }),
             ),

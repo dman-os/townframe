@@ -40,6 +40,16 @@ async fn dispatch_and_wait(
                 doc_id: doc_id.clone(),
                 branch_path: daybook_types::doc::BranchPath::from("main"),
                 heads,
+                invocation: if changed_facet_keys.is_empty() {
+                    daybook_core::rt::dispatch::RoutineInvocation::Command
+                } else {
+                    daybook_core::rt::dispatch::RoutineInvocation::Processor(
+                        daybook_core::rt::dispatch::ProcessorInvocation {
+                            trigger_doc_id: doc_id.clone(),
+                            changed_facet_keys: changed_facet_keys.clone(),
+                        },
+                    )
+                },
                 changed_facet_keys,
                 wflow_args_json: None,
             },
@@ -367,7 +377,7 @@ async fn test_minimal_command_capability_report() -> Res<()> {
     );
 
     let tag_keys: Vec<String> = serde_json::from_value(report["primary_tag_keys"].clone())?;
-    assert!(tag_keys.is_empty() || !tag_keys.is_empty());
+    assert!(tag_keys.is_empty(), "minimal should have no primary tags");
 
     let config_facet_keys: Vec<Vec<String>> =
         serde_json::from_value(report["config_doc_facet_keys"].clone())?;
@@ -436,7 +446,7 @@ async fn test_minimal_processor_capability_report() -> Res<()> {
     );
 
     let tag_keys: Vec<String> = serde_json::from_value(report["primary_tag_keys"].clone())?;
-    assert!(tag_keys.is_empty() || !tag_keys.is_empty());
+    assert!(tag_keys.is_empty(), "minimal should have no primary tags");
 
     let config_facet_keys: Vec<Vec<String>> =
         serde_json::from_value(report["config_doc_facet_keys"].clone())?;
@@ -549,12 +559,16 @@ async fn test_create_facet_capability() -> Res<()> {
     );
     let rights = report["created_rights"].as_str().unwrap_or("");
     assert!(
-        rights.contains("READ"),
-        "created facet token should have READ, got: {rights}"
+        rights.contains("CREATE"),
+        "created facet token should have CREATE, got: {rights}"
     );
     assert!(
-        rights.contains("UPDATE"),
-        "created facet token should have UPDATE, got: {rights}"
+        !rights.contains("READ"),
+        "created facet token should not have READ, got: {rights}"
+    );
+    assert!(
+        !rights.contains("UPDATE"),
+        "created facet token should not have UPDATE, got: {rights}"
     );
 
     test_cx.stop().await?;
@@ -582,12 +596,16 @@ async fn test_get_create_token_capability() -> Res<()> {
     );
     let rights = report["created_rights"].as_str().unwrap_or("");
     assert!(
-        rights.contains("READ"),
-        "created facet token should have READ, got: {rights}"
+        rights.contains("CREATE"),
+        "created facet token should have CREATE, got: {rights}"
     );
     assert!(
-        rights.contains("UPDATE"),
-        "created facet token should have UPDATE, got: {rights}"
+        !rights.contains("READ"),
+        "created facet token should not have READ, got: {rights}"
+    );
+    assert!(
+        !rights.contains("UPDATE"),
+        "created facet token should not have UPDATE, got: {rights}"
     );
 
     test_cx.stop().await?;

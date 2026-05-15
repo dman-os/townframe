@@ -14,7 +14,9 @@ pub fn run(cx: &mut WflowCtx) -> Result<(), JobErrorX> {
         .primary_doc
         .facets
         .iter()
-        .find(|t| t.key() == embedding_facet_key && t.rights().contains(FacetRights::READ))
+        .find(|token| {
+            token.key() == embedding_facet_key && token.rights().contains(FacetRights::READ)
+        })
         .ok_or_else(|| {
             JobErrorX::Terminal(ferr!("embedding facet token with read rights not found"))
         })?;

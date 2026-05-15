@@ -46,6 +46,7 @@ async fn test_embed_text_workflow() -> Res<()> {
                 doc_id: doc_id.clone(),
                 branch_path: daybook_types::doc::BranchPath::from("main"),
                 heads,
+                invocation: crate::rt::dispatch::RoutineInvocation::Command,
                 changed_facet_keys: vec![],
                 wflow_args_json: None,
             },

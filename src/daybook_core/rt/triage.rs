@@ -257,21 +257,36 @@ impl DocProcessorTriageListener {
                 heads = ?am_utils_rs::serialize_commit_heads(doc_heads.as_ref()),
                 "dispatching job"
             );
-            let changed_facet_keys: Vec<String> = changed_facet_keys
-                .map(|keys| {
-                    keys.iter()
-                        .filter(|key| {
-                            processor.read_tags.contains(&key.tag.to_string())
+            let changed_facet_keys: Vec<String> = {
+                let mut keys = std::collections::BTreeSet::new();
+                let mut extend_keys = |facet_keys: Option<&HashSet<FacetKey>>| {
+                    if let Some(facet_keys) = facet_keys {
+                        keys.extend(facet_keys.iter().filter_map(|key| {
+                            if processor.read_tags.contains(&key.tag.to_string())
                                 || processor.read_keys.contains(key)
-                        })
-                        .map(|key| key.to_string())
-                        .collect()
-                })
-                .unwrap_or_default();
+                            {
+                                Some(key.to_string())
+                            } else {
+                                None
+                            }
+                        }));
+                    }
+                };
+                extend_keys(changed_facet_keys);
+                extend_keys(added_facet_keys);
+                extend_keys(removed_facet_keys);
+                keys.into_iter().collect()
+            };
             let args = DispatchArgs::DocRoutine {
                 doc_id: doc_id.clone(),
                 branch_path: branch_path.clone(),
                 heads: doc_heads.clone(),
+                invocation: crate::rt::dispatch::RoutineInvocation::Processor(
+                    crate::rt::dispatch::ProcessorInvocation {
+                        trigger_doc_id: doc_id.clone(),
+                        changed_facet_keys: changed_facet_keys.clone(),
+                    },
+                ),
                 changed_facet_keys,
                 wflow_args_json: None,
             };

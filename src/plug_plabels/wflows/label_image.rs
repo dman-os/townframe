@@ -9,22 +9,23 @@ const LOCAL_STATE_KEY: &str = "@daybook/plabels/label-classifier";
 const CANDIDATE_SET_ID: &str = "label-candidates";
 
 pub fn run(cx: &mut WflowCtx) -> Result<(), wflow_sdk::JobErrorX> {
+    use super::resolve_facet_write_target;
     use crate::wit::townframe::daybook::capabilities::FacetRights;
     use crate::wit::townframe::daybook::facet_routine;
     use daybook_types::doc::{WellKnownFacet, WellKnownFacetTag};
 
     let args = facet_routine::get_args();
     let pseudo_label_key = crate::types::pseudo_label_key().to_string();
-    let working_facet_token = args
-        .primary_doc
-        .facets
-        .iter()
-        .find(|t| t.key() == pseudo_label_key && t.rights().contains(FacetRights::UPDATE))
-        .ok_or_else(|| {
-            wflow_sdk::JobErrorX::Terminal(ferr!(
-                "pseudoLabel facet token with update rights not found"
-            ))
-        })?;
+    let pseudo_label_tag = crate::types::PlabelFacetTag::PseudoLabel
+        .as_str()
+        .to_string();
+    let working_facet_target = resolve_facet_write_target(
+        &args.primary_doc.facets,
+        &args.primary_doc.tags,
+        &pseudo_label_key,
+        &pseudo_label_tag,
+        "pseudo-label",
+    )?;
 
     let embedding_facet_key =
         daybook_types::doc::FacetKey::from(WellKnownFacetTag::Embedding).to_string();
@@ -57,14 +58,16 @@ pub fn run(cx: &mut WflowCtx) -> Result<(), wflow_sdk::JobErrorX> {
         .flat_map(|cd| cd.facets.iter())
         .find(|t| t.key() == config_facet_key && t.rights().contains(FacetRights::READ));
     let error_facet_key = crate::types::pseudo_label_error_key().to_string();
-    let error_facet_token = args
-        .primary_doc
-        .facets
-        .iter()
-        .find(|t| t.key() == error_facet_key && t.rights().contains(FacetRights::UPDATE))
-        .ok_or_else(|| {
-            wflow_sdk::JobErrorX::Terminal(ferr!("error facet key '{}' not found", error_facet_key))
-        })?;
+    let error_facet_tag = crate::types::PlabelFacetTag::PseudoLabelErrorFacet
+        .as_str()
+        .to_string();
+    let error_facet_target = resolve_facet_write_target(
+        &args.primary_doc.facets,
+        &args.primary_doc.tags,
+        &error_facet_key,
+        &error_facet_tag,
+        "pseudo-label-error",
+    )?;
 
     let embedding_raw = embedding_facet_token.get().map_err(|err| {
         wflow_sdk::JobErrorX::Terminal(ferr!("error reading embedding facet: {err:?}"))
@@ -109,8 +112,8 @@ pub fn run(cx: &mut WflowCtx) -> Result<(), wflow_sdk::JobErrorX> {
             sqlite_connection,
             rw_config_token,
             ro_config_token,
-            working_facet_token,
-            error_facet_token,
+            working_facet_target,
+            error_facet_target,
             input_vector_json: &vector_json,
             source_ref: &embedding.facet_ref,
             source_ref_heads: Some(am_utils_rs::serialize_commit_heads(&embedding.ref_heads.0)),

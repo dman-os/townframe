@@ -4,6 +4,10 @@ pub fn select_json_path_values<'a>(
     value: &'a serde_json::Value,
     json_path: &str,
 ) -> Res<Vec<&'a serde_json::Value>> {
+    if json_path.starts_with('/') {
+        return select_json_pointer_values(value, json_path);
+    }
+
     use jsonpath_rust::JsonPath;
     let results = value
         .query(json_path)
@@ -66,6 +70,40 @@ fn parse_json_path_segments(json_path: &str) -> Res<Vec<String>> {
         "unsupported json path '{}'; expected JSON pointer '/a/b' or root-dot path '$.a.b'",
         json_path
     )
+}
+
+fn select_json_pointer_values<'a>(
+    value: &'a serde_json::Value,
+    json_path: &str,
+) -> Res<Vec<&'a serde_json::Value>> {
+    let segments = parse_json_path_segments(json_path)?;
+    let mut current = vec![value];
+    for segment in segments {
+        let mut next = Vec::new();
+        for node in current {
+            match node {
+                serde_json::Value::Object(map) => {
+                    if let Some(child) = map.get(&segment) {
+                        next.push(child);
+                    }
+                }
+                serde_json::Value::Array(items) => {
+                    let index = segment.parse::<usize>().map_err(|_| {
+                        eyre::eyre!("invalid array index in json pointer: {segment}")
+                    })?;
+                    if let Some(child) = items.get(index) {
+                        next.push(child);
+                    }
+                }
+                _ => {}
+            }
+        }
+        current = next;
+        if current.is_empty() {
+            break;
+        }
+    }
+    Ok(current)
 }
 
 fn schema_child_for_segment<'a>(

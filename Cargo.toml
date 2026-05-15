@@ -73,7 +73,7 @@ wash_plugin_mltools = { path = "./src/wash_plugin_mltools/" }
 #
 # meta
 syn = { version = "2", features = ["extra-traits"] }
-bon = "3.7.2"
+bon = "3.9"
 
 #
 # futures
@@ -184,8 +184,8 @@ uniffi = { version = "0.31.0" }
 
 #
 # wasm
-wasmtime = "*"
-wash-runtime = "0.2.0"
+wasmtime = "45"
+wash-runtime = { git = "https://github.com/dman-os/wasmCloud", rev = "61235c15f7157cd558f847317eaa4d1d365944f2" }
 wit-bindgen = "0.55.0"
 # wash-runtime = { path = "../wash/crates/wash-runtime/"}
 
@@ -199,8 +199,6 @@ clap_complete = "4.5"
 iroh = "0.97.0"
 
 [patch.crates-io]
-# wash-runtime = { path = "../wash/crates/wash-runtime/"}
-wash-runtime = { git = "https://github.com/wasmcloud/wasmcloud", rev = "1eba3b068dd0ebc9fd45a9daa785bdb4476d8fd2" }
 autosurgeon = { git = "https://github.com/dman-os/autosurgeon", rev = "2896663de0e23f789cffe8e98bbbcbcbf21f23ad" }
 samod = { git = "https://github.com/dman-os/samod", rev = "2cf21c6654c60872080dc73be2bf344f3cf3269f" }
 samod-core = { git = "https://github.com/dman-os/samod", rev = "2cf21c6654c60872080dc73be2bf344f3cf3269f" }

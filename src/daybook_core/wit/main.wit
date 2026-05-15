@@ -51,6 +51,7 @@ interface capabilities {
     variant update-doc-error {
         invalid-patch(string),
         invalid-key(string),
+        access-error(access-error),
         other(string),
     }
 

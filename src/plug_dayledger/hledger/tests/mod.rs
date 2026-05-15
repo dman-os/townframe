@@ -139,6 +139,12 @@ fn test_amount_no_symbol() {
 }
 
 #[test]
+fn test_ws_accepts_tabs() {
+    assert_eq!(parse_ok(ws0(), "\t\t"), "");
+    assert_eq!(parse_ok(ws1(), "\t \t"), "\t \t");
+}
+
+#[test]
 fn test_balance_assertion_single() {
     let ba = parse_ok(balance_assertionp(), "= $100");
     assert!(!ba.is_total);
@@ -187,6 +193,23 @@ fn test_parse_journal_handles_final_comment_without_looping() {
 
     assert_eq!(txns.len(), 1);
     assert_eq!(txns[0].description, "income");
+}
+
+#[test]
+fn test_parse_journal_inline_comments_and_tags() {
+    let txns = parse_journal_ok(
+        "2008/01/01 income ; ttag: val1, note text\n\tassets:bank:checking  $1 ; ptag: val2, posting note\n\tincome:salary\n",
+    );
+
+    assert_eq!(txns.len(), 1);
+    assert_eq!(txns[0].comment, "note text");
+    assert_eq!(txns[0].tags, vec![("ttag".to_string(), "val1".to_string())]);
+    assert_eq!(txns[0].postings.len(), 2);
+    assert_eq!(txns[0].postings[0].comment, "posting note");
+    assert_eq!(
+        txns[0].postings[0].tags,
+        vec![("ptag".to_string(), "val2".to_string())]
+    );
 }
 
 #[test]

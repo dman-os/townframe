@@ -607,20 +607,52 @@ fn build_claim(
     }
 }
 
-// FIXME: use bs58 from utils_rs and also consider hash_obj from there
 pub fn hash_txn(txn: &Transaction) -> String {
-    use std::collections::hash_map::DefaultHasher;
-    use std::hash::{Hash, Hasher};
-    let mut hasher = DefaultHasher::new();
-    txn.date.to_string().hash(&mut hasher);
-    txn.description.hash(&mut hasher);
-    txn.code.hash(&mut hasher);
-    for posting in &txn.postings {
-        posting.account.hash(&mut hasher);
-        posting.amount.quantity.hash(&mut hasher);
-        posting.amount.commodity.hash(&mut hasher);
+    use blake3::Hasher;
+
+    let mut hasher = Hasher::new();
+    hasher.update(txn.date.to_string().as_bytes());
+    hasher.update(&[0]);
+    hasher.update(txn.description.as_bytes());
+    hasher.update(&[0]);
+    if let Some(code) = txn.code.as_deref() {
+        hasher.update(code.as_bytes());
     }
-    format!("{:x}", hasher.finish())
+    hasher.update(&[0]);
+
+    let mut postings = txn.postings.iter().collect::<Vec<_>>();
+    postings.sort_by(|left, right| {
+        (
+            left.account.as_str(),
+            left.amount.quantity.as_str(),
+            left.amount.commodity.as_str(),
+            posting_type_rank(&left.posting_type),
+        )
+            .cmp(&(
+                right.account.as_str(),
+                right.amount.quantity.as_str(),
+                right.amount.commodity.as_str(),
+                posting_type_rank(&right.posting_type),
+            ))
+    });
+    for posting in postings {
+        hasher.update(posting.account.as_bytes());
+        hasher.update(&[0]);
+        hasher.update(posting.amount.quantity.as_bytes());
+        hasher.update(&[0]);
+        hasher.update(posting.amount.commodity.as_bytes());
+        hasher.update(&[0]);
+    }
+
+    utils_rs::hash::encode_base58_multibase(hasher.finalize().as_bytes())
+}
+
+fn posting_type_rank(posting_type: &PostingType) -> u8 {
+    match posting_type {
+        PostingType::Regular => 0,
+        PostingType::Virtual => 1,
+        PostingType::BalancedVirtual => 2,
+    }
 }
 
 #[cfg(test)]
@@ -773,5 +805,13 @@ mod tests {
         let matched = match_claims(&edited, &existing, &src_ref());
 
         assert!(matched.iter().all(|(id, _)| id != &original_id));
+    }
+
+    #[test]
+    fn hash_txn_is_stable_across_posting_order() {
+        let left = txns("2024/01/02 lunch\n  expenses:food  $5\n  assets:cash\n");
+        let right = txns("2024/01/02 lunch\n  assets:cash\n  expenses:food  $5\n");
+
+        assert_eq!(hash_txn(&left[0]), hash_txn(&right[0]));
     }
 }

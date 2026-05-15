@@ -124,6 +124,7 @@ daybook_types::define_enum_and_tag!(
         Claim struct {
             pub ts: String,
             pub posting_hints: Vec<ClaimPostingHint>,
+            // FIXME: two fields here sucks
             pub src_ref: FacetRef,
             pub src_refs: Vec<FacetRef>,
             pub deets_kind: String,
