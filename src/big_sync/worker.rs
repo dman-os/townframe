@@ -3,9 +3,11 @@ use crate::interlude::*;
 use crate::trap;
 
 use big_sync_core::{
-    mpsc, BigSyncEvent, BigSyncMachine, MachineTaskMsg, PartId, PeerId, SyncJobEvt, SyncTask,
-    SyncTaskDeets, TaskCtx, TaskId,
+    mpsc, BigSyncEvent, BigSyncMachine, MachineTask, MachineTaskMsg, PartId, PeerId, SyncJobEvt,
+    SyncTask, SyncTaskDeets, TaskCtx, TaskId,
 };
+use future_form::Sendable;
+use rand::{rngs::StdRng, SeedableRng};
 
 #[cfg(test)]
 use big_sync_core::TaskCounts;
@@ -269,8 +271,8 @@ struct BigSyncWorker {
 
     sync_rx: mpsc::Receiver<BigSyncEvent>,
     sync_tx: mpsc::Sender<BigSyncEvent>,
-    task_rx: mpsc::Receiver<BigSyncMsg>,
-    task_tx: mpsc::Sender<BigSyncMsg>,
+    task_rx: mpsc::Receiver<MachineTaskMsg>,
+    task_tx: mpsc::Sender<MachineTaskMsg>,
 
     tasks: HashMap<TaskId, TaskDeets>,
     peers: HashMap<PeerId, PeerState>,
@@ -322,7 +324,8 @@ impl BigSyncWorker {
                     run_until_cancelled_or_trapped(
                         &self.cancel_token,
                         &mut err_rx,
-                        self.machine.handle_task_msg(msg, &part_store)
+                        self.machine
+                            .handle_task_msg::<Sendable, _>(msg, &part_store)
                     ).await?
                 }
                 evt = self.sync_rx.recv() => {
@@ -330,7 +333,7 @@ impl BigSyncWorker {
                     run_until_cancelled_or_trapped(
                         &self.cancel_token,
                         &mut err_rx,
-                        self.machine.handle_evt(evt, &part_store)
+                        self.machine.handle_evt::<Sendable, _>(evt, &part_store)
                     ).await?
                 }
                 cmd = self.host_rx.recv() => {
@@ -470,6 +473,7 @@ impl BigSyncWorker {
             rpc_clients: Arc::clone(&self.rpc_clients),
             bsm_tx: self.task_tx.clone(),
             cancel_token: self.cancel_token.child_token(),
+            rng: StdRng::from_os_rng(),
             shutdown,
         };
         let handle = self
@@ -512,12 +516,13 @@ impl BigSyncWorker {
 }
 
 struct MachineTaskWorker {
-    task: big_sync_core::MachineTask,
+    task: MachineTask,
     part_store: SharedPartitionStore,
     rpc_clients: SharedRpcClients,
 
-    bsm_tx: mpsc::Sender<BigSyncMsg>,
+    bsm_tx: mpsc::Sender<MachineTaskMsg>,
     cancel_token: CancellationToken,
+    rng: StdRng,
 
     shutdown: Arc<BigRedToken>,
 }
@@ -533,6 +538,7 @@ impl MachineTaskWorker {
             task_id: self.task.id,
             main_tx: self.bsm_tx.clone(),
             part_store,
+            rng: self.rng,
             rpc_clients: self
                 .rpc_clients
                 .lock()
@@ -583,18 +589,11 @@ impl SyncTaskWorker {
         match res {
             Ok(completions) => {
                 for completion in completions {
-                    let (peer_id, obj_id) = match &completion {
-                        SyncJobEvt::AddedMember { peer, obj_id, .. }
-                        | SyncJobEvt::ChangedObject { peer, obj_id }
-                        | SyncJobEvt::DeletedMember { peer, obj_id }
-                        | SyncJobEvt::Noop { peer, obj_id } => (*peer, *obj_id),
-                    };
                     self.host_tx
                         .send(BigSyncEvent::SyncCompleted(
                             big_sync_core::SyncCompletedEvent {
                                 task_id: self.task.id,
-                                peer_id,
-                                obj_id,
+                                peer_id: self.task.deets.peer_id,
                                 completion,
                             },
                         ))

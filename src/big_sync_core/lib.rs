@@ -34,6 +34,11 @@ use tasks::decide_peer_strat::*;
 use tasks::peer_replay::*;
 use tasks::*;
 
+pub use ids::{BuckId, Byte32Id, ObjId, PartId, PeerId};
+pub use tasks::{MachineTask, MachineTaskMsg, SyncTask, SyncTaskDeets, TaskCtx, TaskId};
+#[cfg(any(test, feature = "test-support"))]
+pub use tasks::TaskCounts;
+
 structstruck::strike! {
     pub enum BigSyncEvent {
         SetPeer (

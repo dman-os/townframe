@@ -4,11 +4,11 @@ use big_sync_core::{
     mpsc,
     part_store::{CursorIndex, ObjPayload, PartStore},
     rpc::{
-        BigSyncRpcClient, BigSyncRpcResult, ListPartsError, MerkleBucketsRequest,
-        MerkleBucketsResponse, MerkleLeafItemsRequest, MerkleLeafItemsResponse, PeerSummaryRequest,
+        BigSyncRpcClient, BigSyncRpcResult, BucketSummary, GetChangedBucketsRequest,
+        LeafBucketsError, LeafBucketsRequest, LeafBucketResult, ListPartsError, PeerSummaryRequest,
         PeerSummaryResult, SubEvent, SubPartsRequest,
     },
-    ObjId, PartId, PeerId,
+    BuckId, ObjId, PartId, PeerId,
 };
 use future_form::{FutureForm, Sendable};
 use futures::future::BoxFuture;
@@ -51,7 +51,7 @@ pub struct TrappedPartStore {
     pub inner: Arc<dyn crate::part_store::HostPartitionStore>,
 }
 
-impl PartStore<Sendable> for TrappedPartStore {
+impl big_sync_core::part_store::PartStoreReadOnly<Sendable> for TrappedPartStore {
     fn member_count<'a>(&'a self, part_id: PartId) -> BoxFuture<'a, u64> {
         let fut = self.inner.member_count(part_id);
         Sendable::from_future(self.trap.run_or_trap(fut))
@@ -62,6 +62,35 @@ impl PartStore<Sendable> for TrappedPartStore {
         Sendable::from_future(self.trap.run_or_trap(fut))
     }
 
+    fn obj_parts<'a>(&'a self, obj_id: ObjId) -> BoxFuture<'a, Vec<PartId>> {
+        let fut = self.inner.obj_parts(obj_id);
+        Sendable::from_future(self.trap.run_or_trap(fut))
+    }
+
+    fn get_peer_part_cursor<'a>(
+        &'a self,
+        peer_id: PeerId,
+        part_id: PartId,
+    ) -> BoxFuture<'a, CursorIndex> {
+        let fut = self.inner.get_peer_part_cursor(peer_id, part_id);
+        Sendable::from_future(self.trap.run_or_trap(fut))
+    }
+
+    fn get_bucket_summary<'a>(&'a self, id: BuckId) -> BoxFuture<'a, BucketSummary> {
+        Sendable::from_future(async move {
+            let _ = &self.inner;
+            BucketSummary {
+                id,
+                len: 0,
+                live_count: 0,
+                fp: default(),
+                changed_at: 0,
+            }
+        })
+    }
+}
+
+impl PartStore<Sendable> for TrappedPartStore {
     fn upsert_obj<'a>(
         &'a self,
         obj_id: ObjId,
@@ -69,11 +98,6 @@ impl PartStore<Sendable> for TrappedPartStore {
         parts: &[PartId],
     ) -> BoxFuture<'a, ()> {
         let fut = self.inner.upsert_obj(obj_id, payload.clone(), parts.into());
-        Sendable::from_future(self.trap.run_or_trap(fut))
-    }
-
-    fn obj_parts<'a>(&'a self, obj_id: ObjId) -> BoxFuture<'a, Vec<PartId>> {
-        let fut = self.inner.obj_parts(obj_id);
         Sendable::from_future(self.trap.run_or_trap(fut))
     }
 
@@ -87,15 +111,6 @@ impl PartStore<Sendable> for TrappedPartStore {
         Sendable::from_future(self.trap.run_or_trap(fut))
     }
 
-    fn get_peer_part_cursor<'a>(
-        &'a self,
-        peer_id: PeerId,
-        part_id: PartId,
-    ) -> BoxFuture<'a, CursorIndex> {
-        let fut = self.inner.get_peer_part_cursor(peer_id, part_id);
-        Sendable::from_future(self.trap.run_or_trap(fut))
-    }
-
     fn set_peer_part_cursor<'a>(
         &'a self,
         peer_id: PeerId,
@@ -104,37 +119,6 @@ impl PartStore<Sendable> for TrappedPartStore {
     ) -> BoxFuture<'a, ()> {
         let fut = self.inner.set_peer_part_cursor(peer_id, part_id, cursor);
 
-        Sendable::from_future(self.trap.run_or_trap(fut))
-    }
-
-    fn merkle_bucket<'a>(
-        &'a self,
-        part_id: PartId,
-        path: &big_sync_core::merkle::BucketId,
-    ) -> BoxFuture<'a, big_sync_core::merkle::MerkleBucketSummary> {
-        let fut = self.inner.merkle_bucket(part_id, path.clone());
-        Sendable::from_future(self.trap.run_or_trap(fut))
-    }
-
-    fn merkle_child_buckets<'a>(
-        &'a self,
-        part_id: PartId,
-        path: &big_sync_core::merkle::BucketId,
-        summary_budget: u16,
-    ) -> BoxFuture<'a, Vec<big_sync_core::merkle::MerkleBucketSummary>> {
-        let fut = self
-            .inner
-            .merkle_child_buckets(part_id, path.clone(), summary_budget);
-        Sendable::from_future(self.trap.run_or_trap(fut))
-    }
-
-    fn merkle_leaf_items<'a>(
-        &'a self,
-        part_id: PartId,
-        path: &big_sync_core::merkle::BucketId,
-        seed: big_sync_core::merkle::MerkleFingerprintSeed,
-    ) -> BoxFuture<'a, Vec<big_sync_core::merkle::MerkleLeafItem>> {
-        let fut = self.inner.merkle_leaf_items(part_id, path.clone(), seed);
         Sendable::from_future(self.trap.run_or_trap(fut))
     }
 }
@@ -161,19 +145,19 @@ impl BigSyncRpcClient<Sendable> for TrappedRpcClient {
         Sendable::from_future(self.trap.run_or_trap(fut))
     }
 
-    fn merkle_buckets<'a>(
+    fn get_changed_buckets<'a>(
         &'a self,
-        req: MerkleBucketsRequest,
-    ) -> BoxFuture<'a, BigSyncRpcResult<Result<MerkleBucketsResponse, ListPartsError>>> {
-        let fut = self.inner.merkle_buckets(req);
+        req: GetChangedBucketsRequest,
+    ) -> BoxFuture<'a, BigSyncRpcResult<Result<Vec<BucketSummary>, ListPartsError>>> {
+        let fut = self.inner.get_changed_buckets(req);
         Sendable::from_future(self.trap.run_or_trap(fut))
     }
 
-    fn merkle_leaf_items<'a>(
+    fn leaf_buckets<'a>(
         &'a self,
-        req: MerkleLeafItemsRequest,
-    ) -> BoxFuture<'a, BigSyncRpcResult<Result<MerkleLeafItemsResponse, ListPartsError>>> {
-        let fut = self.inner.merkle_leaf_items(req);
+        req: LeafBucketsRequest,
+    ) -> BoxFuture<'a, BigSyncRpcResult<Result<LeafBucketResult, LeafBucketsError>>> {
+        let fut = self.inner.leaf_buckets(req);
         Sendable::from_future(self.trap.run_or_trap(fut))
     }
 }
