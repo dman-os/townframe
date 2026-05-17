@@ -17,7 +17,8 @@ mod test;
 mod trap;
 mod worker;
 
-pub use part_store::{sqlite::SqlitePartStore, HostPartitionStore, MemoryPartStore};
+// pub use part_store::sqlite::SqlitePartStore;
+pub use part_store::{HostPartitionStore, MemoryPartStore};
 pub use rpc::HostBigRpcClient;
 pub use worker::{
     spawn_big_sync_worker, BackendId, BigSyncWorkerError, BigSyncWorkerHandle, StopToken,

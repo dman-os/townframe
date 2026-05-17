@@ -85,7 +85,8 @@ impl ListBucketsTask {
                 })
                 .await??;
             let filtered =
-                crate::bucket::filter_buckets(self.working_level, buckets, &cx.part_store).await;
+                crate::bucket::filter_buckets(self.part_id, self.working_level, buckets, &cx.part_store)
+                    .await;
             let buckets = match filtered {
                 crate::bucket::FilteredBuckets::Relist(buck_id) => {
                     offset = buck_id;

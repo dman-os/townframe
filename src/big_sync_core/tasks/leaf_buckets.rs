@@ -79,8 +79,13 @@ impl LeafBucketsTask {
             })
             .await??;
         assert_eq!(seed, response.seed);
-        let filtered =
-            crate::bucket::filter_objects(response.bucks, response.seed, &cx.part_store).await;
+        let filtered = crate::bucket::filter_objects(
+            self.part_id,
+            response.bucks,
+            response.seed,
+            &cx.part_store,
+        )
+        .await;
         Ok(TaskResultDeets::LeafBuckets(LeafBucketsResult {
             peer_id: self.peer_id,
             filtered_objs: filtered,

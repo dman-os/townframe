@@ -222,22 +222,28 @@ impl BucketMachine {
         }
         // if we're out of pending_buckets to leaf
         if self.working_set.len() < self.max_working_set as usize {
-            let offset = self.next_page_offset.increment();
-            if offset.level() <= self.working_level {
-                self.done_listing = false;
-                out.push(BucketMachineCommand::ListBuckets {
-                    since: self.last_cursor,
-                    offset,
-                    part_id: self.part_id,
-                    working_level: self.working_level,
-                });
+            if self.next_page_offset.level() == BuckId::MAX_LEVEL {
+                self.done_listing = true;
+            } else {
+                let offset = self.next_page_offset.increment();
+                if offset.level() <= self.working_level {
+                    self.done_listing = false;
+                    out.push(BucketMachineCommand::ListBuckets {
+                        since: self.last_cursor,
+                        offset,
+                        part_id: self.part_id,
+                        working_level: self.working_level,
+                    });
+                } else {
+                    self.done_listing = true;
+                }
             }
         }
         if self.pending_buckets.is_empty()
             && self.active_obj_jobs.is_empty()
             && self.working_set.is_empty()
-            && self.done_listing
         {
+            self.done_listing = true;
             out.push(BucketMachineCommand::UpgradeToCursor {
                 floor: self.latest_cursor,
                 part_id: self.part_id,
@@ -331,6 +337,7 @@ pub enum FilteredBuckets {
 /// Use the part store and the local bucket fingerprins to filter out
 /// buckets that are identical to local.
 pub async fn filter_buckets<K: FutureForm, S: PartStoreReadOnly<K>>(
+    part_id: PartId,
     working_lvl: BuckLevel,
     buckets: Vec<BucketSummary>,
     part_store: &S,
@@ -357,7 +364,7 @@ pub async fn filter_buckets<K: FutureForm, S: PartStoreReadOnly<K>>(
                 continue 'b;
             }
         }
-        let local_summary = part_store.get_bucket_summary(buck.id).await;
+        let local_summary = part_store.get_bucket_summary(part_id, buck.id).await;
         if local_summary.fp == buck.fp {
             clean_bucks.insert(buck.id);
             clean_ctr += 1;
@@ -412,13 +419,14 @@ pub struct BucketObjEntry {
 
 // FIXME: this is too expensive
 pub async fn filter_objects<K: FutureForm, S: PartStoreReadOnly<K>>(
+    part_id: PartId,
     bucks: Map<BuckId, Vec<BucketObjPageEntry>>,
     seed: FingerprintSeed,
     part_store: &S,
 ) -> Map<BuckId, Vec<BucketObjEntry>> {
     let mut out = Map::new();
     for (buck_id, objs) in bucks {
-        let summary = part_store.get_bucket_summary(buck_id).await;
+        let summary = part_store.get_bucket_summary(part_id, buck_id).await;
         let mut out_objs = vec![];
         if summary.len == 0 {
             out_objs.extend(objs.into_iter().filter_map(|ee| {

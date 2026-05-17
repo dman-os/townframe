@@ -20,7 +20,7 @@ use siphasher::sip::SipHasher24;
 /// # Examples
 ///
 /// ```
-/// use sedimentree_core::crypto::fingerprint::FingerprintSeed;
+/// use big_sync_core::FingerprintSeed;
 ///
 /// let seed = FingerprintSeed::new(42, 99);
 /// assert_eq!(seed.key0(), 42);
@@ -155,7 +155,7 @@ impl<T: core::hash::Hash> Fingerprint<T> {
     /// Feeds the value into SipHash-2-4 via its [`Hash`] implementation.
     ///
     /// ```
-    /// use sedimentree_core::crypto::fingerprint::{Fingerprint, FingerprintSeed};
+    /// use big_sync_core::{Fingerprint, FingerprintSeed};
     ///
     /// let seed = FingerprintSeed::new(42, 99);
     /// let fp: Fingerprint<u64> = Fingerprint::new(&seed, &12345u64);

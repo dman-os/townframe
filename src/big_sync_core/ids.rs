@@ -148,8 +148,21 @@ impl BuckId {
 
     #[inline]
     pub const fn new(level: u8, index: u16) -> Self {
-        debug_assert!(level <= Self::MAX_LEVEL);
-        debug_assert!(level == Self::MAX_LEVEL || index < (1u16 << (level * Self::BITS_PER_LEVEL)));
+        let level = if level > Self::MAX_LEVEL {
+            Self::MAX_LEVEL
+        } else {
+            level
+        };
+        let index = if level == Self::MAX_LEVEL {
+            index
+        } else {
+            let max_index = (1u32 << (level as u32 * Self::BITS_PER_LEVEL as u32)) as u16;
+            if index >= max_index {
+                max_index.saturating_sub(1)
+            } else {
+                index
+            }
+        };
         Self(((level as u32) << 16) | index as u32)
     }
 
@@ -172,15 +185,21 @@ impl BuckId {
     /// When going deeper, returns the first child at that level.
     #[inline]
     pub const fn to_level(&self, level: u8) -> Self {
-        debug_assert!(level <= Self::MAX_LEVEL);
+        let level = if level > Self::MAX_LEVEL {
+            Self::MAX_LEVEL
+        } else {
+            level
+        };
         if level == self.level() {
             *self
         } else if level < self.level() {
             let diff = self.level() - level;
-            Self::new(level, self.index() >> diff * Self::BITS_PER_LEVEL)
+            let shift = (diff as u32) * (Self::BITS_PER_LEVEL as u32);
+            Self::new(level, ((self.index() as u32) >> shift) as u16)
         } else {
             let diff = level - self.level();
-            Self::new(level, self.index() << diff * Self::BITS_PER_LEVEL)
+            let shift = (diff as u32) * (Self::BITS_PER_LEVEL as u32);
+            Self::new(level, ((self.index() as u32) << shift) as u16)
         }
     }
 
@@ -193,6 +212,9 @@ impl BuckId {
 
     #[inline]
     pub fn increment(&self) -> Self {
+        if self.level() == Self::MAX_LEVEL {
+            return *self;
+        }
         if self.index() == u16::MAX {
             BuckId::new(self.level() + 1, 0)
         } else {

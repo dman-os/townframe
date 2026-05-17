@@ -76,17 +76,13 @@ impl big_sync_core::part_store::PartStoreReadOnly<Sendable> for TrappedPartStore
         Sendable::from_future(self.trap.run_or_trap(fut))
     }
 
-    fn get_bucket_summary<'a>(&'a self, id: BuckId) -> BoxFuture<'a, BucketSummary> {
-        Sendable::from_future(async move {
-            let _ = &self.inner;
-            BucketSummary {
-                id,
-                len: 0,
-                live_count: 0,
-                fp: default(),
-                changed_at: 0,
-            }
-        })
+    fn get_bucket_summary<'a>(
+        &'a self,
+        part_id: PartId,
+        id: BuckId,
+    ) -> BoxFuture<'a, BucketSummary> {
+        let fut = self.inner.get_bucket_summary(part_id, id);
+        Sendable::from_future(self.trap.run_or_trap(fut))
     }
 }
 

@@ -1,5 +1,17 @@
 # duck-log
 
+## 2026-05-17 | big_sync_core done
+
+Yeah, 8 days ago, I committed to the sans-io rewrite.
+The core entirely handslopped.
+Ngl, I don't hate it yet.
+It is fancy afterall, shiny.
+Why, I could publish it as a crate even.
+
+Oh, did I tell you, I found out xilem over skia is not-crashing on Android.
+Yes, that's exactly what you're thinking.
+I'm predictable like that.
+
 ## 2026-05-07 | yikes
 
 Yeah, still working on the sync stack. What does that make it, almost three months?

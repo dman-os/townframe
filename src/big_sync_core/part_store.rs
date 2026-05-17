@@ -20,7 +20,11 @@ pub trait PartStoreReadOnly<K: FutureForm> {
         part_id: PartId,
     ) -> K::Future<'a, CursorIndex>;
 
-    fn get_bucket_summary<'a>(&'a self, id: BuckId) -> K::Future<'a, BucketSummary>;
+    fn get_bucket_summary<'a>(
+        &'a self,
+        part_id: PartId,
+        id: BuckId,
+    ) -> K::Future<'a, BucketSummary>;
 }
 pub trait PartStore<K: FutureForm>: PartStoreReadOnly<K> {
     fn upsert_obj<'a>(
@@ -176,7 +180,23 @@ mod tests {
                     .peer_part_cursors
                     .get(&(peer_id, part_id))
                     .copied()
-                    .unwrap_or_default()
+                .unwrap_or_default()
+            })
+        }
+
+        fn get_bucket_summary<'a>(
+            &'a self,
+            _part_id: PartId,
+            id: BuckId,
+        ) -> <Sendable as FutureForm>::Future<'a, BucketSummary> {
+            Sendable::from_future(async move {
+                BucketSummary {
+                    id,
+                    len: 0,
+                    live_count: 0,
+                    fp: default(),
+                    changed_at: 0,
+                }
             })
         }
     }

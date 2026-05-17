@@ -3,7 +3,7 @@ use crate::interlude::*;
 use crate::part_store::CursorIndex;
 use crate::rpc::BuckLevel;
 use crate::{
-    bucket::BucketMachine,
+    bucket::{calc_working_level, BucketMachine},
     part_store::PartStore,
     rpc::{
         BigSyncRpcClient, BucketSummary, GetChangedBucketsRequest, ListPartsError,
@@ -109,6 +109,7 @@ impl DecidePeerStrategyTask {
                 continue;
             }
             let mut offset = BuckId::ROOT;
+            let working_level = calc_working_level(part_summary.member_count, summary.deepest_bucket_level);
             loop {
                 let buckets = peer_rpc
                     .get_changed_buckets(GetChangedBucketsRequest {
@@ -119,7 +120,8 @@ impl DecidePeerStrategyTask {
                     })
                     .await??;
                 let filtered = crate::bucket::filter_buckets(
-                    summary.deepest_bucket_level,
+                    part_id,
+                    working_level,
                     buckets,
                     &cx.part_store,
                 )

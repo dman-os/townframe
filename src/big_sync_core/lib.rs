@@ -35,6 +35,7 @@ use tasks::peer_replay::*;
 use tasks::*;
 
 pub use ids::{BuckId, Byte32Id, ObjId, PartId, PeerId};
+pub use fingerprint::{Fingerprint, FingerprintSeed};
 pub use tasks::{MachineTask, MachineTaskMsg, SyncTask, SyncTaskDeets, TaskCtx, TaskId};
 #[cfg(any(test, feature = "test-support"))]
 pub use tasks::TaskCounts;
@@ -57,7 +58,7 @@ structstruck::strike! {
             pub struct SyncCompletedEvent {
                 pub task_id: TaskId,
                 pub peer_id: PeerId,
-                pub completion: SyncJobEvt,
+                pub completion: SyncTaskCompletion,
             }
         ),
         SyncFailed (
@@ -73,16 +74,28 @@ structstruck::strike! {
 
 structstruck::strike! {
     #[derive(Debug, Clone, PartialEq, Eq)]
+    pub enum SyncCompletionDeets {
+        AddedMember,
+        ChangedObject,
+        Noop,
+        // DeletedObj
+    }
+}
+
+structstruck::strike! {
+    #[derive(Debug, Clone, PartialEq, Eq)]
+    pub struct SyncTaskCompletion {
+        pub obj_id: ObjId,
+        pub deets: SyncCompletionDeets,
+    }
+}
+
+structstruck::strike! {
+    #[derive(Debug, Clone, PartialEq, Eq)]
     pub struct SyncJobEvt {
         pub obj_id: ObjId,
         pub cursors: Vec<CursorIndex>,
-        pub deets: pub enum SyncCompletionDeets {
-            #![derive(Debug, Clone, PartialEq, Eq)]
-            AddedMember,
-            ChangedObject,
-            Noop,
-            // DeletedObj
-        }
+        pub deets: SyncCompletionDeets,
     }
 }
 
@@ -92,6 +105,7 @@ structstruck::strike! {
         sync_workers: Map<ObjId, struct SyncWorkerState {
             task_id: TaskId,
             deets: SyncTaskDeets,
+            cursors: Vec<CursorIndex>,
         }>,
         replay_worker: Option<struct PeerReplayWorkerState {
             task_id: TaskId,
@@ -153,6 +167,11 @@ pub struct BigSyncMachine {
 }
 
 impl BigSyncMachine {
+    #[cfg(any(test, feature = "test-support"))]
+    pub fn task_counts(&self) -> TaskCounts {
+        self.tasks.task_counts()
+    }
+
     pub fn pop_sync_spawn_queue(&mut self) -> Option<SyncTask> {
         self.tasks.pop_sync_spawn_queue()
     }
@@ -174,12 +193,14 @@ impl BigSyncMachine {
             BigSyncEvent::SetPeer(evt) => self.handle_set_peer_evt(evt),
             BigSyncEvent::RemovePeer(evt) => self.handle_remove_peer_evt(evt),
             BigSyncEvent::SyncCompleted(evt) => {
-                let _state = self.tasks.stop_task(evt.task_id).expect(ERROR_UNRECONIZED);
-                self.handle_sync_completed(evt, part_store).await;
+                if self.tasks.stop_task(evt.task_id).is_some() {
+                    self.handle_sync_completed(evt, part_store).await;
+                }
             }
             BigSyncEvent::SyncFailed(evt) => {
-                let state = self.tasks.stop_task(evt.task_id).expect(ERROR_UNRECONIZED);
-                self.handle_sync_failed(evt, state.retry);
+                if let Some(state) = self.tasks.stop_task(evt.task_id) {
+                    self.handle_sync_failed(evt, state.retry);
+                }
             }
         }
     }
@@ -635,7 +656,7 @@ impl BigSyncMachine {
                 BucketMachineCommand::SyncObj {
                     obj_id,
                     part_hints,
-                    remote_payload,
+                    remote_payload: _remote_payload,
                     cursors,
                 } => {
                     if let Some(worker) = peer_state.sync_workers.remove(&obj_id) {
@@ -652,7 +673,14 @@ impl BigSyncMachine {
                     let task_id = self.tasks.spawn_task(TaskSeed::Sync(deets.clone()));
                     peer_state
                         .sync_workers
-                        .insert(obj_id, SyncWorkerState { task_id, deets });
+                        .insert(
+                            obj_id,
+                            SyncWorkerState {
+                                task_id,
+                                deets,
+                                cursors,
+                            },
+                        );
                 }
                 BucketMachineCommand::SetPartCursor { part_id, cursor } => {
                     part_store
@@ -897,11 +925,12 @@ mod sync {
             evt: SyncCompletedEvent,
             part_store: &S,
         ) {
+            let completion = evt.completion;
             let Some(peer_state) = self.peers.get(&evt.peer_id) else {
                 assert!(self.all_seen_peer.contains(&evt.peer_id), "fishy");
                 return;
             };
-            let Some(worker) = peer_state.sync_workers.get(&evt.completion.obj_id) else {
+            let Some(worker) = peer_state.sync_workers.get(&completion.obj_id) else {
                 return;
             };
             if worker.task_id != evt.task_id {
@@ -911,22 +940,37 @@ mod sync {
             let Some(peer_state) = self.peers.get_mut(&evt.peer_id) else {
                 return;
             };
-            if evt.completion.cursors.is_empty() {
-                if let Some(cursor_m) = &mut peer_state.cursor_machine {
-                    cursor_m.on_obj_sync_job_evt(&evt.completion, &mut peer_state.cursors_cmd_buf);
-                }
-                self.drain_cursor_machine_cmds(evt.peer_id, part_store)
-                    .await;
-            } else {
+            let Some(worker) = peer_state.sync_workers.remove(&completion.obj_id) else {
+                return;
+            };
+            let completion = SyncJobEvt {
+                obj_id: completion.obj_id,
+                cursors: worker.cursors,
+                deets: completion.deets,
+            };
+            let task_uses_bucket_path = worker.deets.part_hints.iter().any(|part_id| {
+                matches!(
+                    peer_state.parts.get(part_id).map(|part| &part.strat),
+                    Some(PeerPartStrategy::Bucket(_))
+                )
+            });
+            if task_uses_bucket_path {
                 for (&_part_id, part_state) in &mut peer_state.parts {
                     let PeerPartStrategy::Bucket(strat) = &mut part_state.strat else {
                         continue;
                     };
                     strat
                         .machine
-                        .on_obj_sync_completed(&evt.completion, &mut peer_state.bucket_cmd_buf);
+                        .on_obj_sync_completed(&completion, &mut peer_state.bucket_cmd_buf);
                 }
                 self.drain_bucket_machine_cmds(evt.peer_id, part_store)
+                    .await;
+            } else {
+                let Some(cursor_m) = &mut peer_state.cursor_machine else {
+                    unreachable!("cursor completion without cursor machine");
+                };
+                cursor_m.on_obj_sync_job_evt(&completion, &mut peer_state.cursors_cmd_buf);
+                self.drain_cursor_machine_cmds(evt.peer_id, part_store)
                     .await;
             }
         }

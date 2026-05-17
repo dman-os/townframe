@@ -3,8 +3,8 @@ use crate::interlude::*;
 use crate::trap;
 
 use big_sync_core::{
-    mpsc, BigSyncEvent, BigSyncMachine, MachineTask, MachineTaskMsg, PartId, PeerId, SyncJobEvt,
-    SyncTask, SyncTaskDeets, TaskCtx, TaskId,
+    mpsc, BigSyncEvent, BigSyncMachine, MachineTask, MachineTaskMsg, PartId, PeerId,
+    SyncTask, SyncTaskCompletion, SyncTaskDeets, TaskCtx, TaskId,
 };
 use future_form::Sendable;
 use rand::{rngs::StdRng, SeedableRng};
@@ -52,7 +52,7 @@ structstruck::strike! {
 
 #[async_trait]
 pub trait SyncBackend: Send + Sync + 'static {
-    async fn run(&self, task: SyncTaskDeets) -> Res<Vec<SyncJobEvt>>;
+    async fn run(&self, task: SyncTaskDeets) -> Res<Vec<SyncTaskCompletion>>;
 }
 
 pub type BackendId = u64;

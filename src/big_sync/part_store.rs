@@ -1,22 +1,20 @@
 use crate::interlude::*;
 
 use crate::{ScopeRef, ScopedIdResolver, ScopedObjRef, ScopedPartRef};
-use big_sync_core::merkle::{
-    self, BucketId, MerkleBucketKind, MerkleBucketSummary, MerkleFingerprintSeed, MerkleItemKind,
-    MerkleLeafItem,
-};
 use big_sync_core::part_store::{CursorIndex, ObjPayload};
 use big_sync_core::rpc::{
-    ListPartsError, PartEvent, PartPage, PartSummary, PartTransition, SubEvent, SubPartsRequest,
+    BucketObjPageEntry, BucketSummary, GetChangedBucketsRequest, LeafBucketsError,
+    LeafBucketsRequest, LeafBucketResult, ListPartsError, PartEvent, PartPage, PartSummary,
+    SubEvent, SubPartsRequest,
 };
-use big_sync_core::{Byte32Id, ObjId, PartId, PeerId};
+use big_sync_core::{BuckId, Byte32Id, Fingerprint, FingerprintSeed, ObjId, PartId, PeerId};
 use tokio::sync::mpsc;
 
 use std::collections::BTreeMap;
 #[cfg(test)]
 use std::collections::BTreeSet;
 
-pub mod sqlite;
+// pub mod sqlite;
 
 #[async_trait]
 pub trait HostPartitionStore: Send + Sync {
@@ -24,8 +22,17 @@ pub trait HostPartitionStore: Send + Sync {
         &self,
         parts: HashSet<PartId>,
     ) -> Res<Result<HashMap<PartId, PartSummary>, ListPartsError>>;
+    async fn get_changed_buckets(
+        &self,
+        req: GetChangedBucketsRequest,
+    ) -> Res<Result<Vec<BucketSummary>, ListPartsError>>;
+    async fn leaf_buckets(
+        &self,
+        req: LeafBucketsRequest,
+    ) -> Res<Result<LeafBucketResult, LeafBucketsError>>;
     async fn member_count(&self, part_id: PartId) -> Res<u64>;
     async fn obj_payload(&self, obj_id: ObjId) -> Res<Option<ObjPayload>>;
+    async fn get_bucket_summary(&self, part_id: PartId, id: BuckId) -> Res<BucketSummary>;
 
     async fn upsert_obj(&self, obj_id: ObjId, payload: ObjPayload, parts: Vec<PartId>) -> Res<()>;
 
@@ -54,22 +61,6 @@ pub trait HostPartitionStore: Send + Sync {
         &self,
         reqs: SubPartsRequest,
     ) -> Res<Result<mpsc::UnboundedReceiver<SubEvent>, ListPartsError>>;
-
-    async fn merkle_bucket(&self, part_id: PartId, path: BucketId) -> Res<MerkleBucketSummary>;
-
-    async fn merkle_child_buckets(
-        &self,
-        part_id: PartId,
-        path: BucketId,
-        summary_budget: u16,
-    ) -> Res<Vec<MerkleBucketSummary>>;
-
-    async fn merkle_leaf_items(
-        &self,
-        part_id: PartId,
-        path: BucketId,
-        seed: MerkleFingerprintSeed,
-    ) -> Res<Vec<MerkleLeafItem>>;
 }
 
 structstruck::strike! {
@@ -125,6 +116,8 @@ structstruck::strike! {
                         parts: HashSet<PartId>,
                     }
                 >,
+                tombstoned_objs: HashMap<ObjId, CursorIndex>,
+                peer_obj_payloads: HashMap<(PeerId, ObjId), Option<ObjPayload>>,
                 peer_part_cursors: HashMap<(PeerId, PartId), CursorIndex>,
             }
         >>,
@@ -178,71 +171,102 @@ impl MemoryPartStoreState {
             .expect(ERROR_IMPOSSIBLE)
     }
 
-    fn merkle_items_for_path(
+    fn bucket_items_for_path(
         &self,
         part_id: PartId,
-        path: &BucketId,
-    ) -> Vec<(ObjId, MerkleItemKind, CursorIndex, Byte32Id)> {
+        path: BuckId,
+    ) -> Vec<(ObjId, CursorIndex, bool)> {
         let Some(part) = self.parts.get(&part_id) else {
             return Vec::new();
         };
-        part.members
+        let level = path.level();
+        let mut items = Vec::new();
+        for (&obj_id, member) in &part.members {
+            if BuckId::from_obj_id(level, &obj_id) != path {
+                continue;
+            }
+            let cursor = member.removed_at.unwrap_or(member.changed_at);
+            items.push((obj_id, cursor, member.removed_at.is_some()));
+        }
+        items.sort_by_key(|(obj_id, _, _)| *obj_id);
+        items
+    }
+
+    fn bucket_summary(&self, part_id: PartId, path: BuckId) -> BucketSummary {
+        let items = self.bucket_items_for_path(part_id, path);
+        let live_items: Vec<_> = items
             .iter()
-            .filter_map(|(&obj_id, member)| {
-                let key_hash = merkle::obj_key_hash(obj_id);
-                if !key_hash.as_bytes().starts_with(&path.bytes) {
-                    return None;
-                }
-                let (kind, cursor, item_hash) = if let Some(removed_at) = member.removed_at {
-                    (
-                        MerkleItemKind::Removed,
-                        removed_at,
-                        merkle::removed_item_hash(obj_id),
-                    )
+            .filter_map(|(obj_id, _, dead)| {
+                if *dead {
+                    None
                 } else {
                     let payload = self
                         .objs
-                        .get(&obj_id)
-                        .and_then(|obj| obj.payload.as_ref())
+                        .get(obj_id)
+                        .and_then(|obj| obj.payload.clone())
                         .expect(ERROR_IMPOSSIBLE);
-                    (
-                        MerkleItemKind::Present,
-                        member.changed_at,
-                        merkle::present_item_hash(obj_id, payload),
-                    )
-                };
-                Some((obj_id, kind, cursor, item_hash))
+                    Some((*obj_id, payload))
+                }
             })
-            .collect()
+            .collect();
+        let dead_items: Vec<_> = items
+            .iter()
+            .filter_map(|(obj_id, _, dead)| dead.then_some(*obj_id))
+            .collect();
+        let live_fp = Fingerprint::new(&FingerprintSeed::new(0x6c697665, 0x6275636b), &live_items);
+        let dead_fp = Fingerprint::new(&FingerprintSeed::new(0x64656164, 0x6275636b), &dead_items);
+        BucketSummary {
+            id: path,
+            len: items.len() as u32,
+            live_count: live_items.len() as u32,
+            fp: (live_fp.as_u64(), dead_fp.as_u64()),
+            changed_at: items.iter().map(|(_, cursor, _)| *cursor).max().unwrap_or(0),
+        }
     }
 
-    fn merkle_summary(&self, part_id: PartId, path: BucketId) -> MerkleBucketSummary {
-        let items = self.merkle_items_for_path(part_id, &path);
-        let item_count = items.len() as u64;
-        let changed_at = items
-            .iter()
-            .map(|(_, _, cursor, _)| *cursor)
-            .max()
-            .unwrap_or(0);
-        let hash = if items.is_empty() {
-            merkle::empty_hash()
-        } else {
-            merkle::aggregate_hash(items.iter().map(|(_, _, _, hash)| *hash))
+    fn changed_bucket_summaries(
+        &self,
+        part_id: PartId,
+        offset: BuckId,
+        since: CursorIndex,
+        limit_hint: u32,
+    ) -> Result<Vec<BucketSummary>, ListPartsError> {
+        let Some(part) = self.parts.get(&part_id) else {
+            return Err(ListPartsError::UnkownParts {
+                unkown_parts: vec![part_id],
+            });
         };
-        let kind = if item_count == 0 {
-            MerkleBucketKind::Empty
-        } else if item_count <= merkle::DEFAULT_MERKLE_LEAF_ITEM_TARGET || path.bytes.len() >= 4 {
-            MerkleBucketKind::Leaf
+        let mut buckets: BTreeMap<BuckId, BucketSummary> = BTreeMap::new();
+        for &obj_id in part.members.keys() {
+            let buck_id = BuckId::from_obj_id(offset.level(), &obj_id);
+            buckets
+                .entry(buck_id)
+                .or_insert_with(|| self.bucket_summary(part_id, buck_id));
+        }
+        let mut buckets: Vec<_> = buckets
+            .into_iter()
+            .filter(|(buck_id, summary)| *buck_id >= offset && summary.changed_at > since)
+            .map(|(_, summary)| summary)
+            .collect();
+        if buckets.is_empty() {
+            return Ok(buckets);
+        }
+        if limit_hint == 0 {
+            return Ok(Vec::new());
+        }
+        if buckets.len() > limit_hint as usize {
+            let limit = limit_hint as usize;
+            let last_parent = buckets[limit - 1].id.parent();
+            let mut out = buckets.drain(..limit).collect::<Vec<_>>();
+            while let Some(next) = buckets.first() {
+                if next.id.parent() != last_parent {
+                    break;
+                }
+                out.push(buckets.remove(0));
+            }
+            Ok(out)
         } else {
-            MerkleBucketKind::Branch
-        };
-        MerkleBucketSummary {
-            part_id,
-            path,
-            item_count,
-            hash,
-            changed_at,
-            kind,
+            Ok(buckets)
         }
     }
 }
@@ -391,6 +415,63 @@ impl HostPartitionStore for MemoryPartStore {
             Ok(out)
         }))
     }
+    async fn get_bucket_summary(&self, part_id: PartId, id: BuckId) -> Res<BucketSummary> {
+        Ok(surelock::key::lock_scope(|key| {
+            let (guard, _key) = key.lock(&self.inner);
+            guard.bucket_summary(part_id, id)
+        }))
+    }
+    async fn get_changed_buckets(
+        &self,
+        req: GetChangedBucketsRequest,
+    ) -> Res<Result<Vec<BucketSummary>, ListPartsError>> {
+        Ok(surelock::key::lock_scope(|key| {
+            let (guard, _key) = key.lock(&self.inner);
+            guard.changed_bucket_summaries(req.part_id, req.offset, req.since, req.limit_hint)
+        }))
+    }
+
+    async fn leaf_buckets(
+        &self,
+        req: LeafBucketsRequest,
+    ) -> Res<Result<LeafBucketResult, LeafBucketsError>> {
+        Ok(surelock::key::lock_scope(|key| {
+            let (guard, _key) = key.lock(&self.inner);
+            let Some(part) = guard.parts.get(&req.part_id) else {
+                return Err(LeafBucketsError::UnkownPart);
+            };
+            let mut bucks = HashMap::new();
+            for buck_id in req.buckets {
+                let items = guard.bucket_items_for_path(req.part_id, buck_id);
+                let entries = items
+                    .into_iter()
+                    .map(|(obj_id, _cursor, dead)| {
+                        let fp = if dead {
+                            Fingerprint::new(
+                                &req.seed,
+                                &("big-sync-obj-fp-v1", obj_id, serde_json::Value::Null),
+                            )
+                        } else {
+                            let payload = part
+                                .members
+                                .get(&obj_id)
+                                .and_then(|member| member.removed_at.is_none().then_some(()))
+                                .and_then(|_| guard.objs.get(&obj_id))
+                                .and_then(|obj| obj.payload.clone())
+                                .expect(ERROR_IMPOSSIBLE);
+                            Fingerprint::new(&req.seed, &("big-sync-obj-fp-v1", obj_id, payload))
+                        };
+                        BucketObjPageEntry { obj_id, dead, fp }
+                    })
+                    .collect();
+                bucks.insert(buck_id, entries);
+            }
+            Ok(LeafBucketResult {
+                seed: req.seed,
+                bucks,
+            })
+        }))
+    }
     async fn member_count(&self, part_id: PartId) -> Res<u64> {
         surelock::key::lock_scope(|key| {
             let (guard, _key) = key.lock(&self.inner);
@@ -429,6 +510,8 @@ impl HostPartitionStore for MemoryPartStore {
         surelock::key::lock_scope(|key| {
             let (mut guard, _key) = key.lock(&self.inner);
             let guard = &mut *guard;
+            let event_payload = payload.clone();
+            guard.tombstoned_objs.remove(&obj_id);
 
             let obj = guard.objs.entry(obj_id).or_default();
             obj.payload = Some(payload);
@@ -445,10 +528,11 @@ impl HostPartitionStore for MemoryPartStore {
                     let cursor = guard.global_cursor.get(part_id);
                     old.changed_at = cursor;
                     part.latest_cursor = cursor;
-                    part.bus.queue_evt(PartEvent::Upserted(PartTransition {
+                    part.bus.queue_evt(PartEvent::Upserted(big_sync_core::rpc::ObjUpserted {
                         cursor,
                         part_id,
                         obj_id,
+                        payload: event_payload.clone(),
                     }));
                 } else {
                     let state = PartMemberState {
@@ -456,10 +540,11 @@ impl HostPartitionStore for MemoryPartStore {
                         removed_at: None,
                     };
                     part.latest_cursor = state.changed_at;
-                    part.bus.queue_evt(PartEvent::Upserted(PartTransition {
+                    part.bus.queue_evt(PartEvent::Upserted(big_sync_core::rpc::ObjUpserted {
                         cursor: state.changed_at,
                         part_id,
                         obj_id,
+                        payload: event_payload.clone(),
                     }));
                     part.members.insert(obj_id, state);
                 }
@@ -474,6 +559,8 @@ impl HostPartitionStore for MemoryPartStore {
             let (mut guard, _key) = key.lock(&self.inner);
             let guard = &mut *guard;
             let obj = guard.objs.entry(obj_id).or_default();
+            let payload = obj.payload.clone().expect(ERROR_IMPOSSIBLE);
+            guard.tombstoned_objs.remove(&obj_id);
             obj.parts.extend(&parts);
             for &part_id in &parts {
                 let part = guard.parts.entry(part_id).or_default();
@@ -484,10 +571,11 @@ impl HostPartitionStore for MemoryPartStore {
                         }
                         old.changed_at = guard.global_cursor.get(part_id);
                         part.latest_cursor = old.changed_at;
-                        part.bus.queue_evt(PartEvent::Upserted(PartTransition {
+                        part.bus.queue_evt(PartEvent::Upserted(big_sync_core::rpc::ObjUpserted {
                             cursor: old.changed_at,
                             part_id,
                             obj_id,
+                            payload: payload.clone(),
                         }));
                     }
                 } else {
@@ -496,10 +584,11 @@ impl HostPartitionStore for MemoryPartStore {
                         removed_at: None,
                     };
                     part.latest_cursor = state.changed_at;
-                    part.bus.queue_evt(PartEvent::Upserted(PartTransition {
+                    part.bus.queue_evt(PartEvent::Upserted(big_sync_core::rpc::ObjUpserted {
                         cursor: state.changed_at,
                         part_id,
                         obj_id,
+                        payload: payload.clone(),
                     }));
                     part.members.insert(obj_id, state);
                 }
@@ -514,15 +603,14 @@ impl HostPartitionStore for MemoryPartStore {
             let guard = &mut *guard;
             let part = guard.parts.entry(part_id).or_default();
             if let Some(old) = part.members.get_mut(&obj_id) {
-                if let Some(old_removed_at) = old.removed_at.take() {
-                    part.bus.remove_evt(old_removed_at);
-                } else {
-                    part.bus.remove_evt(old.changed_at);
+                if old.removed_at.is_some() {
+                    return Ok(());
                 }
+                part.bus.remove_evt(old.changed_at);
                 let cursor = guard.global_cursor.get(part_id);
                 part.latest_cursor = cursor;
                 old.removed_at = Some(cursor);
-                part.bus.queue_evt(PartEvent::Deleted(PartTransition {
+                part.bus.queue_evt(PartEvent::Deleted(big_sync_core::rpc::ObjRemoved {
                     cursor,
                     part_id,
                     obj_id,
@@ -535,6 +623,8 @@ impl HostPartitionStore for MemoryPartStore {
                 false
             };
             if remove_obj {
+                let cursor = part.latest_cursor;
+                guard.tombstoned_objs.insert(obj_id, cursor);
                 guard.objs.remove(&obj_id);
             }
 
@@ -590,7 +680,10 @@ impl HostPartitionStore for MemoryPartStore {
                         next_cursor = Some(ii);
                         break;
                     }
-                    events.push(evt.clone())
+                    events.push(match evt {
+                        PartEvent::Upserted(inner) => PartEvent::Upserted(inner.clone()),
+                        PartEvent::Deleted(inner) => PartEvent::Deleted(inner.clone()),
+                    })
                 }
                 out.insert(
                     part_id,
@@ -651,7 +744,10 @@ impl HostPartitionStore for MemoryPartStore {
                         let part = guard.parts.get(part_id).expect(ERROR_IMPOSSIBLE);
                         let evt = part.events.get(&ii).expect(ERROR_UNRECONIZED);
                         if parts.contains(part_id) {
-                            events.push(evt.clone())
+                            events.push(match evt {
+                                PartEvent::Upserted(inner) => PartEvent::Upserted(inner.clone()),
+                                PartEvent::Deleted(inner) => PartEvent::Deleted(inner.clone()),
+                            })
                         }
                         next_cursor = ii + 1;
                     }
@@ -660,8 +756,8 @@ impl HostPartitionStore for MemoryPartStore {
                 for evt in events.drain(..) {
                     if tx
                         .send(match evt {
-                            PartEvent::Upserted(inner) => SubEvent::Upserted(inner),
-                            PartEvent::Deleted(inner) => SubEvent::Deleted(inner),
+                            PartEvent::Upserted(inner) => SubEvent::Upserted(inner.clone()),
+                            PartEvent::Deleted(inner) => SubEvent::Deleted(inner.clone()),
                         })
                         .is_err()
                     {
@@ -687,52 +783,50 @@ impl HostPartitionStore for MemoryPartStore {
         Ok(Ok(rx))
     }
 
-    async fn merkle_bucket(&self, part_id: PartId, path: BucketId) -> Res<MerkleBucketSummary> {
+}
+
+impl MemoryPartStore {
+    pub async fn is_tombstoned(&self, obj_id: ObjId) -> Res<bool> {
         surelock::key::lock_scope(|key| {
             let (guard, _key) = key.lock(&self.inner);
-            Ok(guard.merkle_summary(part_id, path))
+            Ok(guard.tombstoned_objs.contains_key(&obj_id))
         })
     }
 
-    async fn merkle_child_buckets(
+    pub async fn get_peer_obj_payload(
         &self,
-        part_id: PartId,
-        path: BucketId,
-        summary_budget: u16,
-    ) -> Res<Vec<MerkleBucketSummary>> {
+        peer_id: PeerId,
+        obj_id: ObjId,
+    ) -> Res<Option<Option<ObjPayload>>> {
         surelock::key::lock_scope(|key| {
             let (guard, _key) = key.lock(&self.inner);
-            let parent = guard.merkle_summary(part_id, path.clone());
-            if !matches!(parent.kind, MerkleBucketKind::Branch) {
-                return Ok(Vec::new());
-            }
-            let limit = usize::from(summary_budget).min(256);
-            Ok((0..=u8::MAX)
-                .take(limit)
-                .map(|child| guard.merkle_summary(part_id, path.child(child)))
-                .filter(|summary| !matches!(summary.kind, MerkleBucketKind::Empty))
-                .collect())
+            Ok(guard.peer_obj_payloads.get(&(peer_id, obj_id)).cloned())
         })
     }
 
-    async fn merkle_leaf_items(
+    pub async fn set_peer_obj_payload(
         &self,
-        part_id: PartId,
-        path: BucketId,
-        seed: MerkleFingerprintSeed,
-    ) -> Res<Vec<MerkleLeafItem>> {
+        peer_id: PeerId,
+        obj_id: ObjId,
+        payload: Option<ObjPayload>,
+    ) -> Res<()> {
         surelock::key::lock_scope(|key| {
-            let (guard, _key) = key.lock(&self.inner);
-            Ok(guard
-                .merkle_items_for_path(part_id, &path)
-                .into_iter()
-                .map(|(obj_id, kind, _, item_hash)| MerkleLeafItem {
-                    obj_id,
-                    kind,
-                    fingerprint: merkle::fingerprint_item(seed, obj_id, kind, item_hash),
-                })
-                .collect())
+            let (mut guard, _key) = key.lock(&self.inner);
+            guard.peer_obj_payloads.insert((peer_id, obj_id), payload);
+            Ok(())
         })
+    }
+
+    pub async fn sync_upsert_obj(
+        &self,
+        obj_id: ObjId,
+        payload: ObjPayload,
+        parts: Vec<PartId>,
+    ) -> Res<()> {
+        if self.is_tombstoned(obj_id).await? {
+            return Ok(());
+        }
+        self.upsert_obj(obj_id, payload, parts).await
     }
 }
 
