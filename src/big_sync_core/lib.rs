@@ -14,8 +14,8 @@ mod interlude {
 }
 
 use crate::interlude::*;
-use crate::tasks::leaf_buckets::LeafBucketsTask;
-use crate::tasks::list_bucket::ListBucketsTask;
+use crate::tasks::leaf_buckets::{LeafBucketsResult, LeafBucketsTask, LeafBucketsTaskError};
+use crate::tasks::list_bucket::{ListBucketsResult, ListBucketsTask, ListBucketsTaskError};
 
 mod bucket;
 use bucket::*;
@@ -104,8 +104,8 @@ structstruck::strike! {
                 Bucket(struct BucketState {
                     latest_cursor: CursorIndex,
                     machine: BucketMachine,
-                    active_list_tasks: Set<TaskId>,
-                    active_leaf_tasks: Set<TaskId>,
+                    active_list_tasks: Map<TaskId, ListBucketsTask>,
+                    active_leaf_tasks: Map<TaskId, LeafBucketsTask>,
                 }),
                 Cursor(struct CursorState {
                     last_cursor: CursorIndex,
@@ -196,8 +196,14 @@ impl BigSyncMachine {
                         self.handle_set_peer_strat(task_id, state.retry, evt, part_store)
                             .await
                     }
-                    TaskResultDeets::ListBuckets(list_buckets_result) => todo!(),
-                    TaskResultDeets::LeafBuckets(leaf_buckets_result) => todo!(),
+                    TaskResultDeets::ListBuckets(list_buckets_result) => {
+                        self.handle_list_buckets_result(task_id, list_buckets_result, part_store)
+                            .await
+                    }
+                    TaskResultDeets::LeafBuckets(leaf_buckets_result) => {
+                        self.handle_leaf_buckets_result(task_id, leaf_buckets_result, part_store)
+                            .await
+                    }
                 }
             }
             MachineTaskMsg::MachineTaskError(MachineTaskError { task_id, deets }) => {
@@ -209,8 +215,12 @@ impl BigSyncMachine {
                     MachineTaskErrDeets::PeerReplayWorkerError(err) => {
                         self.handle_peer_replay_worker_err(task_id, state.retry, err)
                     }
-                    MachineTaskErrDeets::ListBucketsError(err) => todo!(),
-                    MachineTaskErrDeets::LeafBucketsError(err) => todo!(),
+                    MachineTaskErrDeets::ListBucketsError(err) => {
+                        self.handle_list_buckets_err(task_id, state.retry, err)
+                    }
+                    MachineTaskErrDeets::LeafBucketsError(err) => {
+                        self.handle_leaf_buckets_err(task_id, state.retry, err)
+                    }
                 }
             }
             MachineTaskMsg::PeerReplayWorker(msg) => {
@@ -271,8 +281,8 @@ impl BigSyncMachine {
                     PeerPartStrategy::Bucket(strat) => {
                         for task_id in strat
                             .active_leaf_tasks
-                            .into_iter()
-                            .chain(strat.active_list_tasks.into_iter())
+                            .into_keys()
+                            .chain(strat.active_list_tasks.into_keys())
                         {
                             let _state = self.tasks.stop_task(task_id).expect(ERROR_UNRECONIZED);
                         }
@@ -658,18 +668,20 @@ impl BigSyncMachine {
                     part_id,
                     working_level,
                 } => {
-                    let deets = MachineTaskDeets::ListBuckets(ListBucketsTask {
+                    let task = ListBucketsTask {
                         peer_id,
                         part_id,
                         offset,
                         since,
                         working_level,
-                    });
+                    };
+                    let deets = MachineTaskDeets::ListBuckets(task.clone());
                     let part = peer_state.parts.get_mut(&part_id).expect(ERROR_UNRECONIZED);
                     match &mut part.strat {
                         PeerPartStrategy::Bucket(state) => {
                             let task_id = self.tasks.spawn_task(TaskSeed::Machine(deets));
-                            state.active_list_tasks.insert(task_id);
+                            let old = state.active_list_tasks.insert(task_id, task);
+                            assert!(old.is_none(), "fishy");
                         }
                         _ => unreachable!(),
                     }
@@ -679,17 +691,19 @@ impl BigSyncMachine {
                     buckets,
                     part_id,
                 } => {
-                    let deets = MachineTaskDeets::LeafBuckets(LeafBucketsTask {
+                    let task = LeafBucketsTask {
                         peer_id,
                         part_id,
                         since,
                         buckets,
-                    });
+                    };
+                    let deets = MachineTaskDeets::LeafBuckets(task.clone());
                     let part = peer_state.parts.get_mut(&part_id).expect(ERROR_UNRECONIZED);
                     match &mut part.strat {
                         PeerPartStrategy::Bucket(state) => {
                             let task_id = self.tasks.spawn_task(TaskSeed::Machine(deets));
-                            state.active_list_tasks.insert(task_id);
+                            let old = state.active_leaf_tasks.insert(task_id, task);
+                            assert!(old.is_none(), "fishy");
                         }
                         _ => unreachable!(),
                     }
@@ -711,8 +725,8 @@ impl BigSyncMachine {
                         PeerPartStrategy::Bucket(old) => {
                             for task_id in old
                                 .active_leaf_tasks
-                                .into_iter()
-                                .chain(old.active_list_tasks.into_iter())
+                                .into_keys()
+                                .chain(old.active_list_tasks.into_keys())
                             {
                                 let _state =
                                     self.tasks.stop_task(task_id).expect(ERROR_UNRECONIZED);
@@ -727,6 +741,146 @@ impl BigSyncMachine {
         if refresh_peer_replaly {
             self.refres_peer_replay_worker(peer_id);
         }
+    }
+
+    async fn handle_list_buckets_result<K: FutureForm, S: PartStore<K>>(
+        &mut self,
+        task_id: TaskId,
+        ListBucketsResult {
+            peer_id,
+            part_id,
+            filtered_buckets,
+        }: ListBucketsResult,
+        part_store: &S,
+    ) {
+        let mut bucket_cmd_buf = Vec::new();
+        {
+            let Some(peer_state) = self.peers.get_mut(&peer_id) else {
+                assert!(self.all_seen_peer.contains(&peer_id), "fishy");
+                return;
+            };
+            let Some(part_state) = peer_state.parts.get_mut(&part_id) else {
+                return;
+            };
+            let PeerPartStrategy::Bucket(strat) = &mut part_state.strat else {
+                return;
+            };
+            let Some(task) = strat.active_list_tasks.remove(&task_id) else {
+                return;
+            };
+            assert_eq!(task.peer_id, peer_id, "fishy");
+            assert_eq!(task.part_id, part_id, "fishy");
+            strat
+                .machine
+                .on_bucket_page(filtered_buckets, &mut bucket_cmd_buf);
+        }
+        let peer_state = self.peers.get_mut(&peer_id).expect(ERROR_UNRECONIZED);
+        peer_state.bucket_cmd_buf.extend(bucket_cmd_buf);
+        self.drain_bucket_machine_cmds(peer_id, part_store).await;
+    }
+
+    async fn handle_leaf_buckets_result<K: FutureForm, S: PartStore<K>>(
+        &mut self,
+        task_id: TaskId,
+        LeafBucketsResult {
+            peer_id,
+            filtered_objs,
+        }: LeafBucketsResult,
+        part_store: &S,
+    ) {
+        let mut bucket_cmd_buf = Vec::new();
+        let mut handled = false;
+        {
+            let Some(peer_state) = self.peers.get_mut(&peer_id) else {
+                assert!(self.all_seen_peer.contains(&peer_id), "fishy");
+                return;
+            };
+            for part_state in peer_state.parts.values_mut() {
+                let PeerPartStrategy::Bucket(strat) = &mut part_state.strat else {
+                    continue;
+                };
+                let Some(task) = strat.active_leaf_tasks.remove(&task_id) else {
+                    continue;
+                };
+                assert_eq!(task.peer_id, peer_id, "fishy");
+                let _part_id = task.part_id;
+                strat.machine.on_obj_page(filtered_objs, &mut bucket_cmd_buf);
+                handled = true;
+                break;
+            }
+        }
+        if !handled {
+            return;
+        }
+        let peer_state = self.peers.get_mut(&peer_id).expect(ERROR_UNRECONIZED);
+        peer_state.bucket_cmd_buf.extend(bucket_cmd_buf);
+        self.drain_bucket_machine_cmds(peer_id, part_store).await;
+    }
+
+    fn handle_list_buckets_err(
+        &mut self,
+        task_id: TaskId,
+        retry: Retry,
+        ListBucketsTaskError {
+            peer_id,
+            part_id,
+            deets: _,
+        }: ListBucketsTaskError,
+    ) {
+        let Some(peer_state) = self.peers.get_mut(&peer_id) else {
+            assert!(self.all_seen_peer.contains(&peer_id), "fishy");
+            return;
+        };
+        let Some(part_state) = peer_state.parts.get_mut(&part_id) else {
+            return;
+        };
+        let PeerPartStrategy::Bucket(strat) = &mut part_state.strat else {
+            return;
+        };
+        let Some(task) = strat.active_list_tasks.remove(&task_id) else {
+            return;
+        };
+        assert_eq!(task.peer_id, peer_id, "fishy");
+        let task_id = self.tasks.spawn_delayed_task(
+            TaskSeed::Machine(MachineTaskDeets::ListBuckets(task.clone())),
+            retry,
+            Duration::from_secs(2),
+        );
+        let old = strat.active_list_tasks.insert(task_id, task);
+        assert!(old.is_none(), "fishy");
+    }
+
+    fn handle_leaf_buckets_err(
+        &mut self,
+        task_id: TaskId,
+        retry: Retry,
+        LeafBucketsTaskError {
+            peer_id,
+            part_id,
+            deets: _,
+        }: LeafBucketsTaskError,
+    ) {
+        let Some(peer_state) = self.peers.get_mut(&peer_id) else {
+            assert!(self.all_seen_peer.contains(&peer_id), "fishy");
+            return;
+        };
+        let Some(part_state) = peer_state.parts.get_mut(&part_id) else {
+            return;
+        };
+        let PeerPartStrategy::Bucket(strat) = &mut part_state.strat else {
+            return;
+        };
+        let Some(task) = strat.active_leaf_tasks.remove(&task_id) else {
+            return;
+        };
+        assert_eq!(task.peer_id, peer_id, "fishy");
+        let task_id = self.tasks.spawn_delayed_task(
+            TaskSeed::Machine(MachineTaskDeets::LeafBuckets(task.clone())),
+            retry,
+            Duration::from_secs(2),
+        );
+        let old = strat.active_leaf_tasks.insert(task_id, task);
+        assert!(old.is_none(), "fishy");
     }
 }
 

@@ -102,7 +102,7 @@ structstruck::strike! {
     #[derive(Default)]
     pub struct Tasks {
         next_id: TaskId,
-        all: Map<TaskId, struct TaskState {
+        all: Map<TaskId, pub struct TaskState {
             pub retry: Retry,
         }>,
         pending: Map<TaskId, (TaskSeed, Instant)>,

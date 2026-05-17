@@ -81,7 +81,7 @@ structstruck::strike! {
 }
 
 impl BucketMachine {
-    const ACTIVE_SYNC_JOB_TARGET: u8 = 256;
+    const ACTIVE_SYNC_JOB_TARGET: u32 = 256;
     pub const BUCKET_DIFF_THRESHOLD: u64 = 256;
     pub const GET_BUCKET_LIMIT_HINT: u32 = 8 * BuckId::ARITY as u32;
 
@@ -121,7 +121,7 @@ impl BucketMachine {
     ) {
         // special signal when FilteredBuckets::Done is returned from
         // filtered_buckets
-        self.done_listing == filtered_buckets.is_empty();
+        self.done_listing = filtered_buckets.is_empty();
         for buck in filtered_buckets {
             if buck.id < self.next_page_offset {
                 unreachable!("remote RPC should return buckets in order");

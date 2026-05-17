@@ -10,6 +10,7 @@ use crate::{
     tasks::{TaskCtx, TaskResultDeets},
 };
 
+#[derive(Debug, Clone)]
 pub struct ListBucketsTask {
     pub peer_id: PeerId,
     pub part_id: PartId,
