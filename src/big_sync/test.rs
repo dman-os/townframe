@@ -6,8 +6,8 @@ use std::sync::Mutex;
 use big_sync_core::mpsc::{self, Receiver};
 use big_sync_core::rpc::{
     BigSyncRpcResult, BucketObjPageEntry, BucketSummary, GetChangedBucketsRequest,
-    LeafBucketsError, LeafBucketsRequest, LeafBucketResult, ListPartsError, PeerSummaryRequest,
-    PeerSummaryResult, SubEvent, SubPartsRequest,
+    LeafBucketsError, LeafBucketsRequest, LeafBucketPage, LeafBucketResult, ListPartsError,
+    PeerSummaryRequest, PeerSummaryResult, SubEvent, SubPartsRequest,
 };
 use big_sync_core::{
     BuckId, Byte32Id, FingerprintSeed, ObjId, PartId, PeerId, SyncCompletionDeets,
@@ -151,9 +151,9 @@ impl MemoryRpcClient {
         result: LeafBucketResult,
     ) -> Res<LeafBucketResult> {
         let mut bucks = HashMap::new();
-        for (buck_id, items) in result.bucks {
-            let mut out = Vec::with_capacity(items.len());
-            for item in items {
+        for (buck_id, page) in result.bucks {
+            let mut out = Vec::with_capacity(page.entries.len());
+            for item in page.entries {
                 let scoped_obj = self.target_part_store.scoped_obj(item.obj_id).await?;
                 out.push(BucketObjPageEntry {
                     obj_id: self.source_part_store.resolve_obj(&scoped_obj).await?,
@@ -161,7 +161,21 @@ impl MemoryRpcClient {
                     fp: item.fp,
                 });
             }
-            bucks.insert(buck_id, out);
+            let next_after = match page.next_after {
+                Some(obj_id) => {
+                    let scoped_obj = self.target_part_store.scoped_obj(obj_id).await?;
+                    Some(self.source_part_store.resolve_obj(&scoped_obj).await?)
+                }
+                None => None,
+            };
+            bucks.insert(
+                buck_id,
+                LeafBucketPage {
+                    entries: out,
+                    next_after,
+                    done: page.done,
+                },
+            );
         }
         Ok(LeafBucketResult {
             seed: result.seed,
@@ -176,6 +190,11 @@ impl crate::rpc::HostBigRpcClient for MemoryRpcClient {
         &self,
         req: PeerSummaryRequest,
     ) -> Res<BigSyncRpcResult<Result<PeerSummaryResult, ListPartsError>>> {
+        tracing::debug!(
+            target_peer_id = %self.target_peer_id,
+            part_count = req.parts.len(),
+            "memory rpc peer summary"
+        );
         if !self.world.is_online(self.target_peer_id) {
             return Ok(Err(big_sync_core::rpc::RpcError::TransportError));
         }
@@ -204,6 +223,11 @@ impl crate::rpc::HostBigRpcClient for MemoryRpcClient {
         &self,
         req: SubPartsRequest,
     ) -> Res<BigSyncRpcResult<Result<Receiver<SubEvent>, ListPartsError>>> {
+        tracing::debug!(
+            target_peer_id = %self.target_peer_id,
+            part_count = req.parts.len(),
+            "memory rpc sub parts"
+        );
         if !self.world.is_online(self.target_peer_id) {
             return Ok(Err(big_sync_core::rpc::RpcError::TransportError));
         }
@@ -239,6 +263,14 @@ impl crate::rpc::HostBigRpcClient for MemoryRpcClient {
         &self,
         req: GetChangedBucketsRequest,
     ) -> Res<BigSyncRpcResult<Result<Vec<BucketSummary>, ListPartsError>>> {
+        tracing::debug!(
+            target_peer_id = %self.target_peer_id,
+            part_id = %req.part_id,
+            offset = ?req.offset,
+            since = req.since,
+            limit_hint = req.limit_hint,
+            "memory rpc get changed buckets"
+        );
         if !self.world.is_online(self.target_peer_id) {
             return Ok(Err(big_sync_core::rpc::RpcError::TransportError));
         }
@@ -260,18 +292,40 @@ impl crate::rpc::HostBigRpcClient for MemoryRpcClient {
         &self,
         req: LeafBucketsRequest,
     ) -> Res<BigSyncRpcResult<Result<LeafBucketResult, LeafBucketsError>>> {
+        tracing::debug!(
+            target_peer_id = %self.target_peer_id,
+            part_id = %req.part_id,
+            bucket_count = req.buckets.len(),
+            since = req.since,
+            "memory rpc leaf buckets"
+        );
         if !self.world.is_online(self.target_peer_id) {
             return Ok(Err(big_sync_core::rpc::RpcError::TransportError));
         }
         let scoped_part = self.source_part_store.scoped_part(req.part_id).await?;
         let remote_part_id = self.target_part_store.resolve_part(&scoped_part).await?;
+        let mut remote_buckets = Vec::with_capacity(req.buckets.len());
+        for bucket_req in req.buckets {
+            let after = match bucket_req.after {
+                Some(obj_id) => {
+                    let scoped_obj = self.source_part_store.scoped_obj(obj_id).await?;
+                    Some(self.target_part_store.resolve_obj(&scoped_obj).await?)
+                }
+                None => None,
+            };
+            remote_buckets.push(big_sync_core::rpc::LeafBucketRequest {
+                buck_id: bucket_req.buck_id,
+                after,
+            });
+        }
         let items = self
             .target_part_store
             .leaf_buckets(LeafBucketsRequest {
                 part_id: remote_part_id,
                 since: req.since,
-                buckets: req.buckets,
+                buckets: remote_buckets,
                 seed: req.seed,
+                limit_hint: req.limit_hint,
             })
             .await??;
         Ok(Ok(Ok(self.map_remote_leaf_bucket_result(items).await?)))
@@ -504,18 +558,22 @@ async fn memory_part_store_bucket_includes_removed_members() -> Res<()> {
         .into_iter()
         .next()
         .expect(ERROR_IMPOSSIBLE);
-    let removed_items = store
-        .leaf_buckets(LeafBucketsRequest {
-            part_id,
-            since: 0,
-            buckets: vec![BuckId::ROOT],
-            seed: FingerprintSeed::new(1, 2),
-        })
-        .await??;
+        let removed_items = store
+            .leaf_buckets(LeafBucketsRequest {
+                part_id,
+                since: 0,
+                buckets: vec![big_sync_core::rpc::LeafBucketRequest {
+                    buck_id: BuckId::ROOT,
+                    after: None,
+                }],
+                seed: FingerprintSeed::new(1, 2),
+                limit_hint: 8 * u32::from(BuckId::ARITY),
+            })
+            .await??;
     let root_items = removed_items.bucks.get(&BuckId::ROOT).expect(ERROR_IMPOSSIBLE);
-    assert_eq!(root_items.len(), 1);
-    assert_eq!(root_items[0].obj_id, obj_id);
-    assert!(root_items[0].dead);
+    assert_eq!(root_items.entries.len(), 1);
+    assert_eq!(root_items.entries[0].obj_id, obj_id);
+    assert!(root_items.entries[0].dead);
 
     let removed_since = store
         .get_changed_buckets(GetChangedBucketsRequest {
@@ -928,15 +986,6 @@ async fn memory_sync_large_gap_uses_bucket_catchup_for_count(
         tokio::time::sleep(Duration::from_millis(50)).await;
     };
     assert_eq!(snapshot.scoped_objs.len(), obj_count);
-    let stats = collect_stats(&mut stats_rx, Duration::from_millis(200)).await;
-    assert!(stats.iter().any(|evt| matches!(
-        evt,
-        SyncStatEvent::PartFullySynced { part_id: synced_part_id, .. }
-            if *synced_part_id == part_id
-    )));
-    assert!(stats
-        .iter()
-        .any(|evt| matches!(evt, SyncStatEvent::PeerFullySynced { .. })));
     for ii in 0..obj_count {
         let obj = ScopedObjRef::new(test_scope(), format!("bucket.obj.{ii}"));
         let value = snapshot
@@ -967,6 +1016,15 @@ async fn memory_sync_large_gap_uses_bucket_catchup_for_count(
         }
         tokio::time::sleep(Duration::from_millis(50)).await;
     }
+    let stats = collect_stats(&mut stats_rx, Duration::from_millis(200)).await;
+    assert!(stats.iter().any(|evt| matches!(
+        evt,
+        SyncStatEvent::PartFullySynced { part_id: synced_part_id, .. }
+            if *synced_part_id == part_id
+    )));
+    assert!(stats
+        .iter()
+        .any(|evt| matches!(evt, SyncStatEvent::PeerFullySynced { .. })));
 
     node_a.stop().await?;
     node_b.stop().await?;

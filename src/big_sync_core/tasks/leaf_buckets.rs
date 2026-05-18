@@ -1,10 +1,12 @@
-use crate::bucket::BucketObjEntry;
+use crate::bucket::BucketObjLeafPage;
 use crate::interlude::*;
 
 use crate::{
     fingerprint::FingerprintSeed,
     part_store::{CursorIndex, PartStore},
-    rpc::{BigSyncRpcClient, LeafBucketsError, LeafBucketsRequest, RpcError},
+    rpc::{
+        BigSyncRpcClient, LeafBucketRequest, LeafBucketsError, LeafBucketsRequest, RpcError,
+    },
     tasks::{TaskCtx, TaskResultDeets},
 };
 
@@ -13,12 +15,13 @@ pub struct LeafBucketsTask {
     pub peer_id: PeerId,
     pub part_id: PartId,
     pub since: CursorIndex,
-    pub buckets: Vec<BuckId>,
+    pub buckets: Vec<LeafBucketRequest>,
+    pub limit_hint: u32,
 }
 
 pub struct LeafBucketsResult {
     pub peer_id: PeerId,
-    pub filtered_objs: Map<BuckId, Vec<BucketObjEntry>>,
+    pub filtered_objs: Map<BuckId, BucketObjLeafPage>,
 }
 
 structstruck::strike! {
@@ -37,6 +40,7 @@ structstruck::strike! {
 }
 
 impl LeafBucketsTask {
+    #[tracing::instrument(skip(self, cx), fields(peer_id = %self.peer_id, part_id = %self.part_id, since = self.since, bucket_count = self.buckets.len(), limit_hint = self.limit_hint))]
     pub async fn run<K, PStore, Rpc, Rng>(
         self,
         cx: &mut TaskCtx<K, PStore, Rpc, Rng>,
@@ -70,12 +74,13 @@ impl LeafBucketsTask {
     {
         let peer_rpc = cx.rpc_clients.get(&self.peer_id).expect(ERROR_UNRECONIZED);
         let seed = FingerprintSeed::new(cx.rng.next_u64(), cx.rng.next_u64());
-        let response = peer_rpc
+            let response = peer_rpc
             .leaf_buckets(LeafBucketsRequest {
                 part_id: self.part_id,
                 since: self.since,
                 buckets: self.buckets,
                 seed,
+                limit_hint: self.limit_hint,
             })
             .await??;
         assert_eq!(seed, response.seed);
@@ -86,6 +91,12 @@ impl LeafBucketsTask {
             &cx.part_store,
         )
         .await;
+        tracing::debug!(
+            peer_id = %self.peer_id,
+            part_id = %self.part_id,
+            filtered_bucket_count = filtered.len(),
+            "leaf bucket batch"
+        );
         Ok(TaskResultDeets::LeafBuckets(LeafBucketsResult {
             peer_id: self.peer_id,
             filtered_objs: filtered,

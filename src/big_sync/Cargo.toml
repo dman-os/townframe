@@ -46,9 +46,9 @@ sqlx = { workspace = true, features = ["sqlite", "runtime-tokio"] }
 # actors
 irpc.workspace = true
 
-[dev-dependencies]
-big_sync_core = { workspace = true, features = ["test-support"] }
-
 #
 # logging
 tracing.workspace = true
+
+[dev-dependencies]
+big_sync_core = { workspace = true, features = ["test-support"] }

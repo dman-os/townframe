@@ -54,6 +54,7 @@ structstruck::strike! {
 }
 
 impl DecidePeerStrategyTask {
+    #[tracing::instrument(skip(self, cx), fields(peer_id = %self.peer_id, part_count = self.parts.len()))]
     pub async fn run<K, PStore, Rpc, Rng>(
         self,
         cx: &mut TaskCtx<K, PStore, Rpc, Rng>,
@@ -86,6 +87,12 @@ impl DecidePeerStrategyTask {
                 parts: self.parts.clone(),
             })
             .await??;
+        tracing::debug!(
+            peer_id = %self.peer_id,
+            part_count = summary.parts.len(),
+            deepest_bucket_level = summary.deepest_bucket_level,
+            "decide peer strategy summary"
+        );
 
         let mut part_strats: Map<_, _> = default();
         for part_id in self.parts {
@@ -151,6 +158,22 @@ impl DecidePeerStrategyTask {
                 break;
             }
         }
+        tracing::debug!(
+            peer_id = %self.peer_id,
+            bucket_parts = part_strats
+                .values()
+                .filter(|deets| matches!(*deets, PeerPartStratDecision::Bucket(_)))
+                .count(),
+            cursor_parts = part_strats
+                .values()
+                .filter(|deets| matches!(*deets, PeerPartStratDecision::Cursor(_)))
+                .count(),
+            unknown_parts = part_strats
+                .values()
+                .filter(|deets| matches!(*deets, PeerPartStratDecision::Unkown))
+                .count(),
+            "decide peer strategy result"
+        );
         Ok(TaskResultDeets::SetPeerStrategy(SetPeerStrategy {
             peer_id: self.peer_id,
             part_strats,

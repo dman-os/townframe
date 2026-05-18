@@ -50,6 +50,7 @@ pub struct GetChangedBucketsRequest {
     pub limit_hint: u32,
 }
 
+#[derive(Debug, Clone)]
 pub struct BucketSummary {
     pub id: BuckId,
     pub len: u32,
@@ -59,12 +60,21 @@ pub struct BucketSummary {
 }
 
 structstruck::strike! {
+    #[derive(Debug, Clone)]
+    pub struct LeafBucketRequest {
+        pub buck_id: BuckId,
+        pub after: Option<ObjId>,
+    }
+}
+
+structstruck::strike! {
     #[derive(Debug)]
     pub struct LeafBucketsRequest {
         pub part_id: PartId,
         pub since: CursorIndex,
-        pub buckets: Vec<BuckId>,
+        pub buckets: Vec<LeafBucketRequest>,
         pub seed: FingerprintSeed,
+        pub limit_hint: u32,
     }
 }
 
@@ -81,11 +91,15 @@ structstruck::strike! {
         pub seed: FingerprintSeed,
         pub bucks: Map<
             BuckId,
-            Vec<pub struct BucketObjPageEntry {
-                pub obj_id: ObjId,
-                pub dead: bool,
-                pub fp: Fingerprint<(&'static str, ObjId, ObjPayload)>,
-            }>
+            pub struct LeafBucketPage {
+                pub entries: Vec<pub struct BucketObjPageEntry {
+                    pub obj_id: ObjId,
+                    pub dead: bool,
+                    pub fp: Fingerprint<(&'static str, ObjId, ObjPayload)>,
+                }>,
+                pub next_after: Option<ObjId>,
+                pub done: bool,
+            }
         >
     }
 }

@@ -52,21 +52,25 @@ pub struct TrappedPartStore {
 }
 
 impl big_sync_core::part_store::PartStoreReadOnly<Sendable> for TrappedPartStore {
+    #[tracing::instrument(skip(self))]
     fn member_count<'a>(&'a self, part_id: PartId) -> BoxFuture<'a, u64> {
         let fut = self.inner.member_count(part_id);
         Sendable::from_future(self.trap.run_or_trap(fut))
     }
 
+    #[tracing::instrument(skip(self))]
     fn obj_payload<'a>(&'a self, obj_id: ObjId) -> BoxFuture<'a, Option<ObjPayload>> {
         let fut = self.inner.obj_payload(obj_id);
         Sendable::from_future(self.trap.run_or_trap(fut))
     }
 
+    #[tracing::instrument(skip(self))]
     fn obj_parts<'a>(&'a self, obj_id: ObjId) -> BoxFuture<'a, Vec<PartId>> {
         let fut = self.inner.obj_parts(obj_id);
         Sendable::from_future(self.trap.run_or_trap(fut))
     }
 
+    #[tracing::instrument(skip(self))]
     fn get_peer_part_cursor<'a>(
         &'a self,
         peer_id: PeerId,
@@ -76,6 +80,7 @@ impl big_sync_core::part_store::PartStoreReadOnly<Sendable> for TrappedPartStore
         Sendable::from_future(self.trap.run_or_trap(fut))
     }
 
+    #[tracing::instrument(skip(self))]
     fn get_bucket_summary<'a>(
         &'a self,
         part_id: PartId,
@@ -87,6 +92,7 @@ impl big_sync_core::part_store::PartStoreReadOnly<Sendable> for TrappedPartStore
 }
 
 impl PartStore<Sendable> for TrappedPartStore {
+    #[tracing::instrument(skip(self, payload), fields(part_count = parts.len()))]
     fn upsert_obj<'a>(
         &'a self,
         obj_id: ObjId,
@@ -97,16 +103,19 @@ impl PartStore<Sendable> for TrappedPartStore {
         Sendable::from_future(self.trap.run_or_trap(fut))
     }
 
+    #[tracing::instrument(skip(self), fields(part_count = parts.len()))]
     fn add_obj_to_parts<'a>(&'a self, obj_id: ObjId, parts: &[PartId]) -> BoxFuture<'a, ()> {
         let fut = self.inner.add_obj_to_parts(obj_id, parts.into());
         Sendable::from_future(self.trap.run_or_trap(fut))
     }
 
+    #[tracing::instrument(skip(self))]
     fn remove_obj_from_part<'a>(&'a self, obj_id: ObjId, part_id: PartId) -> BoxFuture<'a, ()> {
         let fut = self.inner.remove_obj_from_part(obj_id, part_id);
         Sendable::from_future(self.trap.run_or_trap(fut))
     }
 
+    #[tracing::instrument(skip(self))]
     fn set_peer_part_cursor<'a>(
         &'a self,
         peer_id: PeerId,

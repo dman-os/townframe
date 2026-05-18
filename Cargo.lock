@@ -1067,6 +1067,7 @@ dependencies = [
  "siphasher",
  "structstruck",
  "thiserror 2.0.18",
+ "tracing",
  "utils_rs",
 ]
 

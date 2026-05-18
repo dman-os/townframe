@@ -14,14 +14,17 @@ test-support = []
 
 [dependencies]
 utils_rs = { workspace = true, features = ["hash"] }
-blake3.workspace = true
 
 rand.workspace = true
+
+structstruck.workspace = true
 
 #
 # encoding
 bs58.workspace = true
 serde.workspace = true
+siphasher = "1.0.3"
+blake3.workspace = true
 
 #
 # errors
@@ -32,7 +35,8 @@ thiserror.workspace = true
 # tokio-util.workspace = true
 async-channel.workspace = true
 futures.workspace = true
-
-structstruck.workspace = true
 future_form.workspace = true
-siphasher = "1.0.3"
+
+#
+# logging
+tracing.workspace = true

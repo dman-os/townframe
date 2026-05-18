@@ -7,7 +7,7 @@ use crate::interlude::*;
 use crate::cursor::{CursorMachineCommand, CursorSyncMachine};
 use crate::fingerprint::{Fingerprint, FingerprintSeed};
 use crate::part_store::{CursorIndex, ObjPayload, PartStoreReadOnly};
-use crate::rpc::{BuckLevel, BucketObjPageEntry, BucketSummary};
+use crate::rpc::{BuckLevel, BucketSummary, LeafBucketPage as RawLeafBucketPage, LeafBucketRequest};
 use crate::SyncJobEvt;
 
 use std::collections::BTreeMap;
@@ -37,12 +37,41 @@ structstruck::strike! {
         LeafBuckets {
             part_id: PartId,
             since: CursorIndex,
-            buckets: Vec<BuckId>,
+            limit_hint: u32,
+            buckets: Vec<LeafBucketRequest>,
         }
         UpgradeToCursor {
             part_id: PartId,
             floor: CursorIndex,
         }
+    }
+}
+
+structstruck::strike! {
+    #[derive(Debug, Clone, Default)]
+    pub struct BucketLeafState {
+        pub leaf_after: Option<ObjId>,
+        pub leaf_seen: u64,
+        pub leaf_inflight: bool,
+        pub leaf_exhausted: bool,
+    }
+}
+
+structstruck::strike! {
+    #[derive(Debug, Clone)]
+    pub struct WaitingBucketState {
+        pub summary: BucketSummary,
+        pub leaf: BucketLeafState,
+    }
+}
+
+structstruck::strike! {
+    #[derive(Debug, Clone)]
+    pub struct WorkingBucketState {
+        pub summary: BucketSummary,
+        pub leaf: BucketLeafState,
+        pub pending_objs: Vec<BucketObjEntry>,
+        pub active_objs: Map<ObjId, BucketObjEntry>,
     }
 }
 
@@ -55,20 +84,13 @@ structstruck::strike! {
         working_level: BuckLevel,
         next_page_offset: BuckId,
         pending_buckets: BTreeMap<BuckId, BucketSummary>,
+        waiting_buckets: Map<BuckId, WaitingBucketState>,
+        working_buckets: Map<BuckId, WorkingBucketState>,
 
-        // The number of buckets to be working on at
-        // any time.
-        max_working_set: u64,
-        working_set: Map<BuckId, enum ActiveBucketState {
-            WaitingOnPage {
-                summary: BucketSummary,
-            },
-            Working {
-                summary: BucketSummary,
-                pending_objs: Vec<BucketObjEntry>,
-                active_objs: Map<ObjId, BucketObjEntry>,
-            }
-        }>,
+        // Bound the initial number of buckets we admit to the active
+        // leafing set before low-watermark refill takes over.
+        initial_working_set: u64,
+        leaf_watermark: u64,
 
         active_obj_jobs: Map<ObjId, BuckId>,
 
@@ -95,9 +117,10 @@ impl BucketMachine {
     ) -> Self {
         let working_level = calc_working_level(remote_size, remote_depth);
         let bucket_width = remote_size / (BuckId::ARITY.pow(working_level as _) as u64);
-        let max_working_set = (Self::ACTIVE_SYNC_JOB_TARGET as u64)
-            .div_ceil(bucket_width)
+        let initial_working_set = (Self::ACTIVE_SYNC_JOB_TARGET as u64)
+            .div_ceil(bucket_width.max(1))
             .max(1) as _;
+        let leaf_watermark = bucket_width.max(1);
         Self {
             // remote_depth,
             active_obj_jobs: default(),
@@ -106,12 +129,14 @@ impl BucketMachine {
             done_listing: true,
             last_cursor,
             latest_cursor,
-            max_working_set,
+            initial_working_set,
+            leaf_watermark,
             next_page_offset: BuckId::ROOT,
             part_id,
             pending_buckets: default(),
+            waiting_buckets: default(),
+            working_buckets: default(),
             working_level,
-            working_set: default(),
         }
     }
 
@@ -122,7 +147,7 @@ impl BucketMachine {
     ) {
         // special signal when FilteredBuckets::Done is returned from
         // filtered_buckets
-        self.done_listing = filtered_buckets.is_empty();
+        self.done_listing = filtered_buckets.is_empty() || self.working_level == 0;
         for buck in filtered_buckets {
             if buck.id < self.next_page_offset {
                 unreachable!("remote RPC should return buckets in order");
@@ -136,62 +161,127 @@ impl BucketMachine {
             }
             self.pending_buckets.insert(buck.id, buck);
         }
-        self.queue_pending_bucks(out);
+        self.schedule_leaf_requests(out);
     }
 
     pub fn on_obj_page(
         &mut self,
-        objs: Map<BuckId, Vec<BucketObjEntry>>,
+        pages: Map<BuckId, BucketObjLeafPage>,
         out: &mut Vec<BucketMachineCommand>,
     ) {
-        for (buck_id, objs) in objs {
-            let Some(old) = self.working_set.remove(&buck_id) else {
+        for (buck_id, page) in pages {
+            if let Some(waiting) = self.waiting_buckets.remove(&buck_id) {
+                let leaf_seen = waiting.leaf.leaf_seen + page.entries.len() as u64;
+                let leaf_exhausted =
+                    page.done || waiting.leaf.leaf_exhausted || (leaf_seen >= waiting.summary.len as u64);
+                self.working_buckets.insert(
+                    buck_id,
+                    WorkingBucketState {
+                        summary: waiting.summary,
+                        leaf: BucketLeafState {
+                            leaf_after: page.next_after.or(waiting.leaf.leaf_after),
+                            leaf_seen,
+                            leaf_inflight: false,
+                            leaf_exhausted,
+                        },
+                        pending_objs: page.entries,
+                        active_objs: default(),
+                    },
+                );
+                continue;
+            }
+            let Some(state) = self.working_buckets.get_mut(&buck_id) else {
                 warn!("on_obj_page on an unexpected bucket: {buck_id:?}");
                 continue;
             };
-            match old {
-                ActiveBucketState::Working { .. } => {
-                    warn!("on_obj_page on an already active bucket: {buck_id:?}");
-                    continue;
-                }
-                ActiveBucketState::WaitingOnPage { summary } => {
-                    self.working_set.insert(
-                        buck_id,
-                        ActiveBucketState::Working {
-                            summary,
-                            pending_objs: objs,
-                            active_objs: default(),
-                        },
-                    );
-                }
-            }
+            state.leaf.leaf_after = page.next_after;
+            state.leaf.leaf_seen += page.entries.len() as u64;
+            state.leaf.leaf_inflight = false;
+            state.leaf.leaf_exhausted =
+                page.done || state.leaf.leaf_seen >= state.summary.len as u64;
+            let mut seen = HashSet::new();
+            seen.extend(state.pending_objs.iter().map(|obj| obj.obj_id));
+            seen.extend(state.active_objs.keys().copied());
+            seen.extend(self.active_obj_jobs.keys().copied());
+            state.pending_objs.extend(page.entries.into_iter().filter(|obj| seen.insert(obj.obj_id)));
         }
         self.queue_pending_objs(out);
+        self.schedule_leaf_requests(out);
     }
 
     pub fn on_obj_sync_completed(&mut self, evt: &SyncJobEvt, out: &mut Vec<BucketMachineCommand>) {
-        if evt.cursors.is_empty() {
-            let buck_id = BuckId::from_obj_id(self.working_level, &evt.obj_id);
-            if let Some(ActiveBucketState::Working {
-                active_objs,
-                pending_objs,
-                ..
-            }) = self.working_set.get_mut(&buck_id)
-            {
-                if let Some(_obj) = active_objs.remove(&evt.obj_id) {
-                    assert!(self.active_obj_jobs.remove(&evt.obj_id).is_some());
-                    if pending_objs.is_empty() && active_objs.is_empty() {
-                        self.working_set.remove(&buck_id);
-                        self.queue_pending_bucks(out);
-                    }
+        let buck_id = BuckId::from_obj_id(self.working_level, &evt.obj_id);
+        let mut forward_to_cursor = false;
+        let state_kind = match self.waiting_buckets.get(&buck_id) {
+            Some(_) => "waiting_on_page",
+            None if self.working_buckets.contains_key(&buck_id) => "working",
+            None => "missing",
+        };
+        tracing::debug!(
+            buck_id = ?buck_id,
+            state_kind,
+            "bucket completion state"
+        );
+        let mut remove_bucket = false;
+        if let Some(state) = self.working_buckets.get_mut(&buck_id) {
+            let had_active_obj = self.active_obj_jobs.remove(&evt.obj_id).is_some();
+            tracing::debug!(
+                buck_id = ?buck_id,
+                obj_id = %evt.obj_id,
+                had_active_obj,
+                "bucket completion active obj lookup"
+            );
+            if had_active_obj {
+                let old = state.active_objs.remove(&evt.obj_id);
+                if old.is_none() {
+                    warn!(
+                        buck_id = ?buck_id,
+                        obj_id = %evt.obj_id,
+                        "bucket completion missing active bucket entry"
+                    );
+                } else {
+                    forward_to_cursor = !evt.cursors.is_empty();
                 }
+                remove_bucket = state.pending_objs.is_empty()
+                    && state.active_objs.is_empty()
+                    && state.leaf.leaf_exhausted;
+            } else {
+                warn!(
+                    buck_id = ?buck_id,
+                    obj_id = %evt.obj_id,
+                    active_obj_job_count = self.active_obj_jobs.len(),
+                    working_bucket_count = self.working_buckets.len(),
+                    waiting_bucket_count = self.waiting_buckets.len(),
+                    pending_bucket_count = self.pending_buckets.len(),
+                    "bucket completion for inactive object"
+                );
             }
-            self.queue_pending_objs(out);
-        } else {
+        } else if self.waiting_buckets.contains_key(&buck_id) {
+            warn!(
+                buck_id = ?buck_id,
+                obj_id = %evt.obj_id,
+                "bucket completion arrived while bucket still waiting on first page"
+            );
+        }
+        if remove_bucket {
+            self.working_buckets.remove(&buck_id);
+        }
+        tracing::debug!(
+            buck_id = ?buck_id,
+            cursor_count = evt.cursors.len(),
+            active_obj_job_count = self.active_obj_jobs.len(),
+            working_bucket_count = self.working_buckets.len(),
+            waiting_bucket_count = self.waiting_buckets.len(),
+            pending_bucket_count = self.pending_buckets.len(),
+            "bucket obj completion"
+        );
+        if forward_to_cursor {
             self.cursor_machine
                 .on_obj_sync_job_evt(evt, &mut self.cursors_cmd_buf);
             self.drain_cursor_cmd_buf(out);
         }
+        self.queue_pending_objs(out);
+        self.schedule_leaf_requests(out);
     }
 
     pub fn on_subscription_evt(
@@ -204,26 +294,107 @@ impl BucketMachine {
         self.drain_cursor_cmd_buf(out);
     }
 
-    fn queue_pending_bucks(&mut self, out: &mut Vec<BucketMachineCommand>) {
-        let mut buckets_to_leaf = vec![];
-        while self.working_set.len() < self.max_working_set as usize {
+    fn schedule_leaf_requests(&mut self, out: &mut Vec<BucketMachineCommand>) {
+        if self.active_obj_jobs.len() >= Self::ACTIVE_SYNC_JOB_TARGET as usize {
+            return;
+        }
+        let budget = (Self::ACTIVE_SYNC_JOB_TARGET as usize)
+            .saturating_sub(self.active_obj_jobs.len());
+        if budget == 0 {
+            return;
+        }
+
+        let mut selected = Vec::new();
+        let mut estimated = 0usize;
+
+        let mut eligible_partials = self
+            .working_buckets
+            .iter()
+            .filter_map(|(&buck_id, state)| {
+                if state.leaf.leaf_inflight || state.leaf.leaf_exhausted || state.leaf.leaf_seen == 0 {
+                    None
+                } else {
+                    Some((
+                        buck_id,
+                        state.summary.len.saturating_sub(state.leaf.leaf_seen as u32) as usize,
+                        state.leaf.leaf_after,
+                    ))
+                }
+            })
+            .collect::<Vec<_>>();
+        eligible_partials.sort_by_key(|(_, remaining, _)| *remaining);
+
+        for (buck_id, remaining, leaf_after) in eligible_partials {
+            if estimated >= budget {
+                break;
+            }
+            let Some(state) = self.working_buckets.get_mut(&buck_id) else {
+                continue;
+            };
+            if state.leaf.leaf_inflight || state.leaf.leaf_exhausted {
+                continue;
+            }
+            state.leaf.leaf_inflight = true;
+            selected.push((buck_id, leaf_after));
+            estimated += remaining;
+        }
+
+        while estimated < budget
+            && self.waiting_buckets.len() + self.working_buckets.len()
+                < self.initial_working_set as usize
+        {
+            if estimated > 0
+                && budget.saturating_sub(estimated) < self.leaf_watermark as usize
+            {
+                break;
+            }
             let Some((buck_id, summary)) = self.pending_buckets.pop_first() else {
                 break;
             };
-            buckets_to_leaf.push(buck_id);
-            self.working_set
-                .insert(buck_id, ActiveBucketState::WaitingOnPage { summary });
+            estimated += summary.len as usize;
+            self.waiting_buckets.insert(
+                buck_id,
+                WaitingBucketState {
+                    summary,
+                    leaf: BucketLeafState::default(),
+                },
+            );
+            selected.push((buck_id, None));
         }
-        if !buckets_to_leaf.is_empty() {
+
+        if !selected.is_empty() {
+            let limit_hint = (budget / selected.len()).max(1) as u32;
             out.push(BucketMachineCommand::LeafBuckets {
                 part_id: self.part_id,
                 since: self.last_cursor,
-                buckets: buckets_to_leaf,
+                limit_hint,
+                buckets: selected
+                    .into_iter()
+                    .map(|(buck_id, after)| LeafBucketRequest { buck_id, after })
+                    .collect(),
             });
         }
-        // if we're out of pending_buckets to leaf
-        if self.working_set.len() < self.max_working_set as usize {
-            if self.next_page_offset.level() == BuckId::MAX_LEVEL {
+
+        if self.pending_buckets.is_empty()
+            && self.active_obj_jobs.is_empty()
+            && self.waiting_buckets.is_empty()
+            && self.working_buckets.is_empty()
+        {
+            tracing::debug!(
+                part_id = %self.part_id,
+                latest_cursor = self.latest_cursor,
+                "bucket machine upgrading to cursor"
+            );
+            self.done_listing = true;
+            out.push(BucketMachineCommand::UpgradeToCursor {
+                floor: self.latest_cursor,
+                part_id: self.part_id,
+            });
+        } else if self.waiting_buckets.len() + self.working_buckets.len()
+            < self.initial_working_set as usize
+            && !self.done_listing
+        {
+            if self.working_level == 0 || self.next_page_offset.level() == BuckId::MAX_LEVEL {
                 self.done_listing = true;
             } else {
                 let offset = self.next_page_offset.increment();
@@ -240,30 +411,14 @@ impl BucketMachine {
                 }
             }
         }
-        if self.pending_buckets.is_empty()
-            && self.active_obj_jobs.is_empty()
-            && self.working_set.is_empty()
-        {
-            self.done_listing = true;
-            out.push(BucketMachineCommand::UpgradeToCursor {
-                floor: self.latest_cursor,
-                part_id: self.part_id,
-            });
-        }
     }
 
     fn queue_pending_objs(&mut self, out: &mut Vec<BucketMachineCommand>) {
-        for (buck_id, buck) in &mut self.working_set {
-            let ActiveBucketState::Working {
-                pending_objs,
-                active_objs,
-                ..
-            } = buck
-            else {
-                continue;
-            };
+        for (buck_id, buck) in &mut self.working_buckets {
+            let pending_objs = &mut buck.pending_objs;
+            let active_objs = &mut buck.active_objs;
             loop {
-                if self.active_obj_jobs.len() >= Self::ACTIVE_SYNC_JOB_TARGET as _ {
+                if self.active_obj_jobs.len() >= Self::ACTIVE_SYNC_JOB_TARGET as usize {
                     return;
                 }
                 let Some(obj) = pending_objs.pop() else {
@@ -278,7 +433,8 @@ impl BucketMachine {
                             remote_payload: None,
                         });
                         self.active_obj_jobs.insert(obj.obj_id, *buck_id);
-                        active_objs.insert(obj.obj_id, obj);
+                        let old = active_objs.insert(obj.obj_id, obj);
+                        assert!(old.is_none(), "fishy");
                     }
                     PartObjDelta::Delete => {
                         out.push(BucketMachineCommand::RemoveObjFromPart {
@@ -288,6 +444,12 @@ impl BucketMachine {
                     }
                 }
             }
+            tracing::debug!(
+                buck_id = ?buck_id,
+                active_obj_count = active_objs.len(),
+                pending_obj_count = pending_objs.len(),
+                "bucket queue pending objs"
+            );
         }
     }
 
@@ -381,23 +543,15 @@ pub async fn filter_buckets<K: FutureForm, S: PartStoreReadOnly<K>>(
             // dirty buckets seen but none
             // on the working level: dive
             FilteredBuckets::Relist(dirty.to_level(dirty.level() + 1))
+        } else if working_lvl == 0 {
+            FilteredBuckets::Done
         } else {
             let offset = last_id.increment();
             if offset.level() > working_lvl {
                 assert_eq!(in_len, clean_ctr);
                 FilteredBuckets::Done
-            }
-            // all the buckets we saw were clean
-            else if in_len == clean_ctr
-                // the next offset is in another parent
-                && offset.parent() != last_id.parent()
-            {
-                // climb another level
-                // WARN: this trick will not work if the limit
-                // is less than the arity
-                assert!(BucketMachine::GET_BUCKET_LIMIT_HINT > BuckId::ARITY as _);
-                FilteredBuckets::Relist(offset.parent())
             } else {
+                // all the buckets we saw were clean
                 FilteredBuckets::Relist(offset)
             }
         }
@@ -413,24 +567,32 @@ enum PartObjDelta {
     Delete,
 }
 
+#[derive(Debug, Clone)]
 pub struct BucketObjEntry {
     obj_id: ObjId,
     delta: PartObjDelta,
 }
 
+#[derive(Debug, Clone)]
+pub struct BucketObjLeafPage {
+    pub entries: Vec<BucketObjEntry>,
+    pub next_after: Option<ObjId>,
+    pub done: bool,
+}
+
 // FIXME: this is too expensive
 pub async fn filter_objects<K: FutureForm, S: PartStoreReadOnly<K>>(
     part_id: PartId,
-    bucks: Map<BuckId, Vec<BucketObjPageEntry>>,
+    bucks: Map<BuckId, RawLeafBucketPage>,
     seed: FingerprintSeed,
     part_store: &S,
-) -> Map<BuckId, Vec<BucketObjEntry>> {
+) -> Map<BuckId, BucketObjLeafPage> {
     let mut out = Map::new();
-    for (buck_id, objs) in bucks {
+    for (buck_id, page) in bucks {
         let summary = part_store.get_bucket_summary(part_id, buck_id).await;
         let mut out_objs = vec![];
         if summary.len == 0 {
-            out_objs.extend(objs.into_iter().filter_map(|ee| {
+            out_objs.extend(page.entries.into_iter().filter_map(|ee| {
                 if !ee.dead {
                     Some(BucketObjEntry {
                         obj_id: ee.obj_id,
@@ -440,10 +602,17 @@ pub async fn filter_objects<K: FutureForm, S: PartStoreReadOnly<K>>(
                     None
                 }
             }));
-            out.insert(buck_id, out_objs);
+            out.insert(
+                buck_id,
+                BucketObjLeafPage {
+                    entries: out_objs,
+                    next_after: page.next_after,
+                    done: page.done,
+                },
+            );
             continue;
         }
-        for obj in objs {
+        for obj in page.entries {
             match part_store.obj_payload(obj.obj_id).await {
                 Some(payload) => {
                     if !obj.dead {
@@ -472,6 +641,14 @@ pub async fn filter_objects<K: FutureForm, S: PartStoreReadOnly<K>>(
                 }
             }
         }
+        out.insert(
+            buck_id,
+            BucketObjLeafPage {
+                entries: out_objs,
+                next_after: page.next_after,
+                done: page.done,
+            },
+        );
     }
     out
 }

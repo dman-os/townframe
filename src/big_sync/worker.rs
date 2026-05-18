@@ -109,6 +109,7 @@ impl BigSyncWorkerHandle {
         client: Arc<dyn crate::rpc::HostBigRpcClient>,
         parts: HashMap<PartId, BackendId>,
     ) -> Res<()> {
+        let part_count = parts.len();
         let (resp_tx, resp_rx) = tokio::sync::oneshot::channel();
         self.host_tx
             .send(BigSyncWorkerMsg::SetPeer {
@@ -119,6 +120,7 @@ impl BigSyncWorkerHandle {
             })
             .await
             .wrap_err(ERROR_CHANNEL)?;
+        tracing::debug!(peer_id = %peer_id, part_count, "queue set peer");
         resp_rx.await.wrap_err(ERROR_CHANNEL)??;
         Ok(())
     }
@@ -132,6 +134,7 @@ impl BigSyncWorkerHandle {
             })
             .await
             .wrap_err(ERROR_CHANNEL)?;
+        tracing::debug!(peer_id = %peer_id, "queue remove peer");
         resp_rx.await.wrap_err(ERROR_CHANNEL)?;
         Ok(())
     }
@@ -140,6 +143,7 @@ impl BigSyncWorkerHandle {
         if parts.is_empty() {
             return Ok(());
         }
+        let part_count = parts.len();
         let (resp_tx, resp_rx) = tokio::sync::oneshot::channel();
         self.host_tx
             .send(BigSyncWorkerMsg::LocalPartsChanged {
@@ -148,6 +152,7 @@ impl BigSyncWorkerHandle {
             })
             .await
             .wrap_err(ERROR_CHANNEL)?;
+        tracing::debug!(part_count, "queue local parts changed");
         resp_rx.await.wrap_err(ERROR_CHANNEL)?;
         Ok(())
     }
@@ -330,6 +335,7 @@ enum LoopAction {
     Break,
 }
 impl BigSyncWorker {
+    #[tracing::instrument(skip(self, shutdown))]
     async fn machine_loop(&mut self, shutdown: Arc<BigRedToken>) -> Res<()> {
         let mut janitor_tick = tokio::time::interval(Duration::from_millis(500));
         let (trap, mut err_rx) = trap::TaskTrap::new();
@@ -438,24 +444,29 @@ impl BigSyncWorker {
                         parts: parts.clone(),
                     },
                 );
+                let part_count = parts.len();
                 let evt = BigSyncEvent::SetPeer(big_sync_core::SetPeerEvent {
                     peer_id,
                     parts: parts.into_keys().collect(),
                 });
                 let _ = resp.send(Ok(()));
+                tracing::debug!(peer_id = %peer_id, part_count, "accept set peer");
                 evt
             }
             BigSyncWorkerMsg::RemovePeer { peer_id, resp } => {
                 self.peers.remove(&peer_id);
                 let evt = BigSyncEvent::RemovePeer(big_sync_core::RemovePeerEvent { peer_id });
                 let _ = resp.send(());
+                tracing::debug!(peer_id = %peer_id, "accept remove peer");
                 evt
             }
             BigSyncWorkerMsg::LocalPartsChanged { parts, resp } => {
+                let part_count = parts.len();
                 let evt = BigSyncEvent::LocalPartsChanged(big_sync_core::LocalPartsChangedEvent {
                     parts,
                 });
                 let _ = resp.send(());
+                tracing::debug!(part_count, "accept local parts changed");
                 evt
             }
             #[cfg(test)]
@@ -485,7 +496,12 @@ impl BigSyncWorker {
     async fn batch_stop_tasks(&mut self) -> Res<()> {
         // NOTE: we exclusivley rely on the machine's
         // internal task tracking to clean up tasks
-        for task_id in self.machine.drain_stop_queue() {
+        let task_ids: Vec<_> = self.machine.drain_stop_queue().collect();
+        let stop_count = task_ids.len();
+        if stop_count > 0 {
+            tracing::debug!(stop_count, "draining stop queue");
+        }
+        for task_id in task_ids {
             if let Some(task) = self.tasks.remove(&task_id) {
                 task.cancel_token.cancel();
                 task.handle
@@ -514,6 +530,7 @@ impl BigSyncWorker {
     ) -> Res<()> {
         let cancel_token = self.cancel_token.child_token();
         let task_id = task.id;
+        tracing::debug!(task_id, "spawn machine task");
         let worker = MachineTaskWorker {
             task,
             part_store: Arc::clone(&self.part_store),
@@ -541,6 +558,13 @@ impl BigSyncWorker {
         let backend = Arc::clone(self.sync_backends.values().next().expect(ERROR_UNRECONIZED));
         let cancel_token = self.cancel_token.child_token();
         let task_id = task.id;
+        tracing::debug!(
+            task_id,
+            peer_id = %task.deets.peer_id,
+            obj_id = %task.deets.obj_id,
+            part_hint_count = task.deets.part_hints.len(),
+            "spawn sync task"
+        );
         let worker = SyncTaskWorker {
             task: task.clone(),
             backend,
@@ -575,6 +599,7 @@ struct MachineTaskWorker {
 }
 
 impl MachineTaskWorker {
+    #[tracing::instrument(skip(self))]
     async fn run(self) {
         let (trap, mut err_rx) = trap::TaskTrap::new();
         let part_store = trap::TrappedPartStore {
@@ -625,6 +650,7 @@ struct SyncTaskWorker {
 }
 
 impl SyncTaskWorker {
+    #[tracing::instrument(skip(self))]
     async fn run(self) {
         let res = tokio::select! {
             biased;

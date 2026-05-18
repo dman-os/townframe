@@ -42,6 +42,7 @@ structstruck::strike! {
 }
 
 impl ListBucketsTask {
+    #[tracing::instrument(skip(self, cx), fields(peer_id = %self.peer_id, part_id = %self.part_id, offset = ?self.offset, since = self.since, working_level = %self.working_level))]
     pub async fn run<K, PStore, Rpc, Rng>(
         self,
         cx: &mut TaskCtx<K, PStore, Rpc, Rng>,
@@ -95,6 +96,13 @@ impl ListBucketsTask {
                 crate::bucket::FilteredBuckets::Done => default(),
                 crate::bucket::FilteredBuckets::Handoff(buckets) => buckets,
             };
+            tracing::debug!(
+                peer_id = %self.peer_id,
+                part_id = %self.part_id,
+                offset = ?offset,
+                filtered_bucket_count = buckets.len(),
+                "list bucket batch"
+            );
             return Ok(TaskResultDeets::ListBuckets(ListBucketsResult {
                 peer_id: self.peer_id,
                 part_id: self.part_id,

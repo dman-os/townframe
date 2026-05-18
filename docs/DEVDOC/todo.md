@@ -75,6 +75,7 @@
 
 - [ ] Cleanup and show it to people
  
+- [ ] Move to https://en.wikipedia.org/wiki/International_Atomic_Time
 - [ ] Remove all async Mutexes and dashmap
   - [ ] Convert DHashMap to be wrapper around RwLock<HashMap>
 - [ ] Interesting queries

@@ -1,5 +1,19 @@
 # duck-log
 
+## 2026-05-18 | willow, willow, willow
+
+So I finally sat down and read most of the https://willowprotocol.org/.
+It may be the c ase they have *the shape* for P2P software.
+
+Everytime I look at a P2P specific problem for too long, I'm led back to their work which tells you something.
+This reminds me of Nix while I was working on build systems.
+There are only so many ways to solve a specific problem afterall.
+
+Random thoughts:
+- One awkward issue they have is cross-device from a single user. Think Obsidian. You'll need CRDTS there me thinks since you'll want to use mutable "payloads" as they call them.
+  - But again, CRDTS are only useful for a specific kinds of data.
+  - It might be prudent to use non-CRDT data for most documents/facets
+
 ## 2026-05-17 | big_sync_core done
 
 Yeah, 8 days ago, I committed to the sans-io rewrite.

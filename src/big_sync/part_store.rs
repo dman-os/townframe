@@ -4,8 +4,8 @@ use crate::{ScopeRef, ScopedIdResolver, ScopedObjRef, ScopedPartRef};
 use big_sync_core::part_store::{CursorIndex, ObjPayload};
 use big_sync_core::rpc::{
     BucketObjPageEntry, BucketSummary, GetChangedBucketsRequest, LeafBucketsError,
-    LeafBucketsRequest, LeafBucketResult, ListPartsError, PartEvent, PartPage, PartSummary,
-    SubEvent, SubPartsRequest,
+    LeafBucketsRequest, LeafBucketPage, LeafBucketResult, ListPartsError, PartEvent, PartPage,
+    PartSummary, SubEvent, SubPartsRequest,
 };
 use big_sync_core::{BuckId, Byte32Id, Fingerprint, FingerprintSeed, ObjId, PartId, PeerId};
 use tokio::sync::mpsc;
@@ -425,26 +425,53 @@ impl HostPartitionStore for MemoryPartStore {
         &self,
         req: GetChangedBucketsRequest,
     ) -> Res<Result<Vec<BucketSummary>, ListPartsError>> {
-        Ok(surelock::key::lock_scope(|key| {
+        let result = surelock::key::lock_scope(|key| {
             let (guard, _key) = key.lock(&self.inner);
             guard.changed_bucket_summaries(req.part_id, req.offset, req.since, req.limit_hint)
-        }))
+        });
+        tracing::debug!(
+            part_id = %req.part_id,
+            offset = ?req.offset,
+            since = req.since,
+            limit_hint = req.limit_hint,
+            bucket_count = result.as_ref().map(|b| b.len()).unwrap_or(0),
+            "memory store get changed buckets"
+        );
+        Ok(result)
     }
 
     async fn leaf_buckets(
         &self,
         req: LeafBucketsRequest,
     ) -> Res<Result<LeafBucketResult, LeafBucketsError>> {
-        Ok(surelock::key::lock_scope(|key| {
+        let result = surelock::key::lock_scope(|key| {
             let (guard, _key) = key.lock(&self.inner);
             let Some(part) = guard.parts.get(&req.part_id) else {
                 return Err(LeafBucketsError::UnkownPart);
             };
             let mut bucks = HashMap::new();
-            for buck_id in req.buckets {
+            for buck_req in req.buckets {
+                let buck_id = buck_req.buck_id;
                 let items = guard.bucket_items_for_path(req.part_id, buck_id);
+                let start = match buck_req.after {
+                    Some(after) => items
+                        .iter()
+                        .position(|(obj_id, _, _)| *obj_id > after)
+                        .unwrap_or(items.len()),
+                    None => 0,
+                };
+                let take = req.limit_hint.max(1) as usize;
+                let end = (start + take).min(items.len());
+                let done = end == items.len();
+                let next_after = if done || start >= end {
+                    None
+                } else {
+                    Some(items[end - 1].0)
+                };
                 let entries = items
                     .into_iter()
+                    .skip(start)
+                    .take(take)
                     .map(|(obj_id, _cursor, dead)| {
                         let fp = if dead {
                             Fingerprint::new(
@@ -464,13 +491,26 @@ impl HostPartitionStore for MemoryPartStore {
                         BucketObjPageEntry { obj_id, dead, fp }
                     })
                     .collect();
-                bucks.insert(buck_id, entries);
+                bucks.insert(
+                    buck_id,
+                    LeafBucketPage {
+                        entries,
+                        next_after,
+                        done,
+                    },
+                );
             }
             Ok(LeafBucketResult {
                 seed: req.seed,
                 bucks,
             })
-        }))
+        });
+        tracing::debug!(
+            part_id = %req.part_id,
+            bucket_count = result.as_ref().map(|r| r.bucks.len()).unwrap_or(0),
+            "memory store leaf buckets"
+        );
+        Ok(result)
     }
     async fn member_count(&self, part_id: PartId) -> Res<u64> {
         surelock::key::lock_scope(|key| {
@@ -507,6 +547,7 @@ impl HostPartitionStore for MemoryPartStore {
     }
 
     async fn upsert_obj(&self, obj_id: ObjId, payload: ObjPayload, parts: Vec<PartId>) -> Res<()> {
+        tracing::debug!(obj_id = %obj_id, part_count = parts.len(), "memory store upsert obj");
         surelock::key::lock_scope(|key| {
             let (mut guard, _key) = key.lock(&self.inner);
             let guard = &mut *guard;
@@ -555,6 +596,7 @@ impl HostPartitionStore for MemoryPartStore {
     }
 
     async fn add_obj_to_parts(&self, obj_id: ObjId, parts: Vec<PartId>) -> Res<()> {
+        tracing::debug!(obj_id = %obj_id, part_count = parts.len(), "memory store add obj to parts");
         surelock::key::lock_scope(|key| {
             let (mut guard, _key) = key.lock(&self.inner);
             let guard = &mut *guard;
@@ -598,6 +640,7 @@ impl HostPartitionStore for MemoryPartStore {
         })
     }
     async fn remove_obj_from_part(&self, obj_id: ObjId, part_id: PartId) -> Res<()> {
+        tracing::debug!(obj_id = %obj_id, part_id = %part_id, "memory store remove obj from part");
         surelock::key::lock_scope(|key| {
             let (mut guard, _key) = key.lock(&self.inner);
             let guard = &mut *guard;
@@ -651,6 +694,7 @@ impl HostPartitionStore for MemoryPartStore {
         part_id: PartId,
         cursor: CursorIndex,
     ) -> Res<()> {
+        tracing::debug!(peer_id = %peer_id, part_id = %part_id, cursor, "memory store set peer part cursor");
         surelock::key::lock_scope(|key| {
             let (mut guard, _key) = key.lock(&self.inner);
             guard.peer_part_cursors.insert((peer_id, part_id), cursor);
@@ -664,7 +708,8 @@ impl HostPartitionStore for MemoryPartStore {
         cursor: CursorIndex,
         limit: u32,
     ) -> Res<Result<HashMap<PartId, PartPage>, ListPartsError>> {
-        Ok(surelock::key::lock_scope(|key| {
+        let part_count = parts.len();
+        let result = surelock::key::lock_scope(|key| {
             let (guard, _key) = key.lock(&self.inner);
             let mut out = HashMap::new();
             for part_id in parts {
@@ -694,13 +739,22 @@ impl HostPartitionStore for MemoryPartStore {
                 );
             }
             Ok(out)
-        }))
+        });
+        tracing::debug!(
+            part_count,
+            cursor,
+            limit,
+            page_count = result.as_ref().map(|r| r.len()).unwrap_or(0),
+            "memory store list events"
+        );
+        Ok(result)
     }
 
     async fn subscribe(
         &self,
         reqs: SubPartsRequest,
     ) -> Res<Result<mpsc::UnboundedReceiver<SubEvent>, ListPartsError>> {
+        tracing::debug!(part_count = reqs.parts.len(), "memory store subscribe");
         // make sure the parts exist first
         if let Err(err) = surelock::key::lock_scope(|key| {
             let (guard, _key) = key.lock(&self.inner);
