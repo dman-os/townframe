@@ -11,7 +11,7 @@ use big_sync_core::rpc::{
 };
 use big_sync_core::{
     BuckId, Byte32Id, FingerprintSeed, ObjId, PartId, PeerId, SyncCompletionDeets,
-    SyncTaskCompletion, SyncTaskDeets,
+    SyncStatEvent, SyncTaskCompletion, SyncTaskDeets,
 };
 use big_sync_core::part_store::ObjPayload;
 
@@ -653,6 +653,26 @@ async fn wait_for_convergence(nodes: &[&NodeHarness], timeout: Duration) -> Res<
     }
 }
 
+fn drain_stats(stats_rx: &mut tokio::sync::broadcast::Receiver<SyncStatEvent>) {
+    while stats_rx.try_recv().is_ok() {}
+}
+
+async fn collect_stats(
+    stats_rx: &mut tokio::sync::broadcast::Receiver<SyncStatEvent>,
+    timeout: Duration,
+) -> Vec<SyncStatEvent> {
+    let mut out = Vec::new();
+    loop {
+        match tokio::time::timeout(timeout, stats_rx.recv()).await {
+            Ok(Ok(evt)) => out.push(evt),
+            Ok(Err(tokio::sync::broadcast::error::RecvError::Lagged(_))) => continue,
+            Ok(Err(tokio::sync::broadcast::error::RecvError::Closed)) => break,
+            Err(_) => break,
+        }
+    }
+    out
+}
+
 #[tokio::test(flavor = "multi_thread")]
 async fn memory_sync_preconnected_seeds_converge() -> Res<()> {
     utils_rs::testing::setup_tracing_once();
@@ -699,15 +719,27 @@ async fn memory_sync_single_obj_created_while_connected_replicates() -> Res<()> 
     let world = Arc::new(TestWorld::default());
     let node_a = boot_node(Arc::clone(&world), 1).await?;
     let node_b = boot_node(Arc::clone(&world), 2).await?;
+    let part_id = node_a.store.resolve_part(&test_part()).await?;
+    let mut stats_rx = node_a.handle.subscribe_stats();
 
     node_a.connect_to(&node_b).await?;
     node_b.connect_to(&node_a).await?;
     wait_for_convergence(&[&node_a, &node_b], Duration::from_secs(30)).await?;
+    drain_stats(&mut stats_rx);
 
     let obj = scoped_obj(20);
     node_b.seed_obj(&obj, payload("connected-create")).await?;
 
     wait_for_convergence(&[&node_a, &node_b], Duration::from_secs(30)).await?;
+    let stats = collect_stats(&mut stats_rx, Duration::from_millis(200)).await;
+    assert!(stats.iter().any(|evt| matches!(
+        evt,
+        SyncStatEvent::PartFullySynced { part_id: synced_part_id, .. }
+            if *synced_part_id == part_id
+    )));
+    assert!(stats
+        .iter()
+        .any(|evt| matches!(evt, SyncStatEvent::PeerFullySynced { .. })));
     let (snapshot_a, snapshot_b) = assert_two_node_alignment(&node_a, &node_b, 1).await?;
     assert_eq!(
         snapshot_a
@@ -775,6 +807,8 @@ async fn memory_sync_concurrent_conflicting_updates_converge_to_higher_peer_valu
     let world = Arc::new(TestWorld::default());
     let node_a = boot_node(Arc::clone(&world), 1).await?;
     let node_b = boot_node(Arc::clone(&world), 2).await?;
+    let part_id = node_a.store.resolve_part(&test_part()).await?;
+    let mut stats_rx = node_a.handle.subscribe_stats();
 
     let obj = scoped_obj(40);
     node_a.seed_obj(&obj, payload("base")).await?;
@@ -782,6 +816,7 @@ async fn memory_sync_concurrent_conflicting_updates_converge_to_higher_peer_valu
     node_a.connect_to(&node_b).await?;
     node_b.connect_to(&node_a).await?;
     wait_for_convergence(&[&node_a, &node_b], Duration::from_secs(30)).await?;
+    drain_stats(&mut stats_rx);
 
     tokio::try_join!(
         node_a.seed_obj(&obj, payload("lower-conflict")),
@@ -789,6 +824,24 @@ async fn memory_sync_concurrent_conflicting_updates_converge_to_higher_peer_valu
     )?;
 
     wait_for_convergence(&[&node_a, &node_b], Duration::from_secs(30)).await?;
+    let stats = collect_stats(&mut stats_rx, Duration::from_millis(200)).await;
+    assert!(stats.iter().any(|evt| matches!(
+        evt,
+        SyncStatEvent::PartStale { part_id: stale_part_id, .. }
+            if *stale_part_id == part_id
+    )));
+    assert!(stats.iter().any(|evt| matches!(
+        evt,
+        SyncStatEvent::PeerStale { .. }
+    )));
+    assert!(stats.iter().any(|evt| matches!(
+        evt,
+        SyncStatEvent::PartFullySynced { part_id: synced_part_id, .. }
+            if *synced_part_id == part_id
+    )));
+    assert!(stats
+        .iter()
+        .any(|evt| matches!(evt, SyncStatEvent::PeerFullySynced { .. })));
     let (snapshot_a, snapshot_b) = assert_two_node_alignment(&node_a, &node_b, 1).await?;
     assert_eq!(
         snapshot_a
@@ -838,12 +891,21 @@ async fn memory_sync_delete_propagates_to_both_nodes() -> Res<()> {
 
 #[tokio::test(flavor = "multi_thread")]
 async fn memory_sync_large_gap_uses_bucket_catchup() -> Res<()> {
+    memory_sync_large_gap_uses_bucket_catchup_for_count(300, Duration::from_secs(15)).await
+}
+
+async fn memory_sync_large_gap_uses_bucket_catchup_for_count(
+    obj_count: usize,
+    timeout: Duration,
+) -> Res<()> {
     utils_rs::testing::setup_tracing_once();
     let world = Arc::new(TestWorld::default());
     let node_a = boot_node(Arc::clone(&world), 1).await?;
     let node_b = boot_node(Arc::clone(&world), 2).await?;
+    let part_id = node_a.store.resolve_part(&test_part()).await?;
+    let mut stats_rx = node_a.handle.subscribe_stats();
 
-    for ii in 0..300 {
+    for ii in 0..obj_count {
         let obj = ScopedObjRef::new(test_scope(), format!("bucket.obj.{ii}"));
         node_b
             .seed_obj(&obj, serde_json::json!({ "ii": ii }))
@@ -851,10 +913,10 @@ async fn memory_sync_large_gap_uses_bucket_catchup() -> Res<()> {
     }
 
     node_a.connect_to(&node_b).await?;
-    let deadline = std::time::Instant::now() + Duration::from_secs(15);
+    let deadline = std::time::Instant::now() + timeout;
     let snapshot = loop {
         let snapshot = node_a.snapshot().await?;
-        if snapshot.scoped_objs.len() == 300 {
+        if snapshot.scoped_objs.len() == obj_count {
             break snapshot;
         }
         if std::time::Instant::now() >= deadline {
@@ -865,8 +927,17 @@ async fn memory_sync_large_gap_uses_bucket_catchup() -> Res<()> {
         }
         tokio::time::sleep(Duration::from_millis(50)).await;
     };
-    assert_eq!(snapshot.scoped_objs.len(), 300);
-    for ii in 0..300 {
+    assert_eq!(snapshot.scoped_objs.len(), obj_count);
+    let stats = collect_stats(&mut stats_rx, Duration::from_millis(200)).await;
+    assert!(stats.iter().any(|evt| matches!(
+        evt,
+        SyncStatEvent::PartFullySynced { part_id: synced_part_id, .. }
+            if *synced_part_id == part_id
+    )));
+    assert!(stats
+        .iter()
+        .any(|evt| matches!(evt, SyncStatEvent::PeerFullySynced { .. })));
+    for ii in 0..obj_count {
         let obj = ScopedObjRef::new(test_scope(), format!("bucket.obj.{ii}"));
         let value = snapshot
             .scoped_objs
@@ -877,20 +948,21 @@ async fn memory_sync_large_gap_uses_bucket_catchup() -> Res<()> {
     }
 
     let part_id = node_a.store.resolve_part(&test_part()).await?;
-    let cursor_deadline = std::time::Instant::now() + Duration::from_secs(15);
+    let cursor_deadline = std::time::Instant::now() + timeout;
     loop {
         let snapshot = node_a.snapshot().await?;
         if snapshot
             .peer_part_cursors
             .get(&(node_b.peer_id, part_id))
             .copied()
-            == Some(300)
+            == Some(obj_count as u64)
         {
             break;
         }
         if std::time::Instant::now() >= cursor_deadline {
             return Err(ferr!(
-                "timed out waiting for bucket cursor advance to 300"
+                "timed out waiting for bucket cursor advance to {}",
+                obj_count
             ));
         }
         tokio::time::sleep(Duration::from_millis(50)).await;
@@ -899,6 +971,28 @@ async fn memory_sync_large_gap_uses_bucket_catchup() -> Res<()> {
     node_a.stop().await?;
     node_b.stop().await?;
     Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn memory_sync_large_gap_uses_bucket_catchup_1k() -> Res<()> {
+    memory_sync_large_gap_uses_bucket_catchup_for_count(1_000, Duration::from_secs(30)).await
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn memory_sync_large_gap_uses_bucket_catchup_10k() -> Res<()> {
+    memory_sync_large_gap_uses_bucket_catchup_for_count(10_000, Duration::from_secs(90)).await
+}
+
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "slow bucket catchup case"]
+async fn memory_sync_large_gap_uses_bucket_catchup_100k() -> Res<()> {
+    memory_sync_large_gap_uses_bucket_catchup_for_count(100_000, Duration::from_secs(300)).await
+}
+
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "slow bucket catchup case"]
+async fn memory_sync_large_gap_uses_bucket_catchup_1m() -> Res<()> {
+    memory_sync_large_gap_uses_bucket_catchup_for_count(1_000_000, Duration::from_secs(900)).await
 }
 
 #[tokio::test(flavor = "multi_thread")]
@@ -951,11 +1045,14 @@ async fn memory_sync_offline_edits_catch_up_after_reconnect() -> Res<()> {
     let world = Arc::new(TestWorld::default());
     let node_a = boot_node(Arc::clone(&world), 1).await?;
     let node_b = boot_node(Arc::clone(&world), 2).await?;
+    let part_id = node_a.store.resolve_part(&test_part()).await?;
+    let mut stats_rx = node_a.handle.subscribe_stats();
 
     let obj = scoped_obj(70);
     node_a.seed_obj(&obj, payload("online-base")).await?;
     tokio::try_join!(node_a.connect_to(&node_b), node_b.connect_to(&node_a))?;
     wait_for_convergence(&[&node_a, &node_b], Duration::from_secs(30)).await?;
+    drain_stats(&mut stats_rx);
 
     tokio::try_join!(
         node_a.host.remove_peer(node_b.peer_id),
@@ -979,6 +1076,21 @@ async fn memory_sync_offline_edits_catch_up_after_reconnect() -> Res<()> {
     let node_b = boot_node_with_store(Arc::clone(&world), peer_id, store).await?;
     tokio::try_join!(node_a.connect_to(&node_b), node_b.connect_to(&node_a))?;
     wait_for_convergence(&[&node_a, &node_b], Duration::from_secs(30)).await?;
+    let stats = collect_stats(&mut stats_rx, Duration::from_millis(200)).await;
+    assert!(stats.iter().any(|evt| matches!(
+        evt,
+        SyncStatEvent::PartStale { part_id: stale_part_id, .. }
+            if *stale_part_id == part_id
+    )));
+    assert!(stats.iter().any(|evt| matches!(evt, SyncStatEvent::PeerStale { .. })));
+    assert!(stats.iter().any(|evt| matches!(
+        evt,
+        SyncStatEvent::PartFullySynced { part_id: synced_part_id, .. }
+            if *synced_part_id == part_id
+    )));
+    assert!(stats
+        .iter()
+        .any(|evt| matches!(evt, SyncStatEvent::PeerFullySynced { .. })));
 
     let (snapshot_a, snapshot_b) = assert_two_node_alignment(&node_a, &node_b, 1).await?;
     assert_eq!(
@@ -998,6 +1110,65 @@ async fn memory_sync_offline_edits_catch_up_after_reconnect() -> Res<()> {
 
     node_a.stop().await?;
     node_b.stop().await?;
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn memory_sync_same_state_via_third_peer_stays_quiet() -> Res<()> {
+    utils_rs::testing::setup_tracing_once();
+
+    let world = Arc::new(TestWorld::default());
+    let node_a = boot_node(Arc::clone(&world), 1).await?;
+    let node_b = boot_node(Arc::clone(&world), 2).await?;
+    let node_c = boot_node(Arc::clone(&world), 3).await?;
+
+    let obj = scoped_obj(80);
+    node_c.seed_obj(&obj, payload("shared-from-third")).await?;
+
+    tokio::try_join!(node_a.connect_to(&node_c), node_c.connect_to(&node_a))?;
+    tokio::try_join!(node_b.connect_to(&node_c), node_c.connect_to(&node_b))?;
+    wait_for_convergence(&[&node_a, &node_b, &node_c], Duration::from_secs(30)).await?;
+
+    let mut stats_rx = node_a.handle.subscribe_stats();
+    drain_stats(&mut stats_rx);
+
+    tokio::try_join!(node_a.connect_to(&node_b), node_b.connect_to(&node_a))?;
+    wait_for_convergence(&[&node_a, &node_b, &node_c], Duration::from_secs(30)).await?;
+    let stats = collect_stats(&mut stats_rx, Duration::from_millis(200)).await;
+    assert!(stats
+        .iter()
+        .any(|evt| matches!(evt, SyncStatEvent::PartStale { .. })));
+    assert!(stats
+        .iter()
+        .any(|evt| matches!(evt, SyncStatEvent::PeerStale { .. })));
+    assert!(stats
+        .iter()
+        .any(|evt| matches!(evt, SyncStatEvent::PartFullySynced { .. })));
+    assert!(stats
+        .iter()
+        .any(|evt| matches!(evt, SyncStatEvent::PeerFullySynced { .. })));
+
+    let (snapshot_a, snapshot_b, snapshot_c) = (
+        node_a.snapshot().await?,
+        node_b.snapshot().await?,
+        node_c.snapshot().await?,
+    );
+    assert_eq!(
+        snapshot_a.scoped_objs.get(&obj).and_then(|obj| obj.payload.clone()),
+        Some(payload("shared-from-third"))
+    );
+    assert_eq!(
+        snapshot_b.scoped_objs.get(&obj).and_then(|obj| obj.payload.clone()),
+        Some(payload("shared-from-third"))
+    );
+    assert_eq!(
+        snapshot_c.scoped_objs.get(&obj).and_then(|obj| obj.payload.clone()),
+        Some(payload("shared-from-third"))
+    );
+
+    node_a.stop().await?;
+    node_b.stop().await?;
+    node_c.stop().await?;
     Ok(())
 }
 

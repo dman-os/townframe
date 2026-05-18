@@ -1,6 +1,7 @@
 /// FIXME: this machine is per part which is not great if we have
 /// large overlapping parts from a peer? They'll share buckets anyways.
 /// It should be per peer like CursorSyncMachine
+/// - Use batched Leafing to minimize RPC
 use crate::interlude::*;
 
 use crate::cursor::{CursorMachineCommand, CursorSyncMachine};
@@ -81,7 +82,7 @@ structstruck::strike! {
 }
 
 impl BucketMachine {
-    const ACTIVE_SYNC_JOB_TARGET: u32 = 256;
+    const ACTIVE_SYNC_JOB_TARGET: u32 = 1024;
     pub const BUCKET_DIFF_THRESHOLD: u64 = 256;
     pub const GET_BUCKET_LIMIT_HINT: u32 = 8 * BuckId::ARITY as u32;
 

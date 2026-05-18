@@ -15,6 +15,7 @@ use big_sync_core::TaskCounts;
 #[derive(Clone)]
 pub struct BigSyncWorkerHandle {
     host_tx: tokio::sync::mpsc::Sender<BigSyncWorkerMsg>,
+    stats_tx: tokio::sync::broadcast::Sender<big_sync_core::SyncStatEvent>,
 }
 
 type SharedPartitionStore = Arc<dyn crate::part_store::HostPartitionStore>;
@@ -31,7 +32,7 @@ pub enum BigSyncWorkerError {
 }
 
 structstruck::strike! {
-    enum BigSyncWorkerMsg {
+enum BigSyncWorkerMsg {
         SetPeer {
             peer_id: PeerId,
             client: SharedPeerRpcClient,
@@ -41,6 +42,10 @@ structstruck::strike! {
         },
         RemovePeer {
             peer_id: PeerId,
+            resp: tokio::sync::oneshot::Sender<()>,
+        },
+        LocalPartsChanged {
+            parts: HashSet<PartId>,
             resp: tokio::sync::oneshot::Sender<()>,
         },
         #[cfg(test)]
@@ -94,6 +99,10 @@ impl StopToken {
 }
 
 impl BigSyncWorkerHandle {
+    pub fn subscribe_stats(&self) -> tokio::sync::broadcast::Receiver<big_sync_core::SyncStatEvent> {
+        self.stats_tx.subscribe()
+    }
+
     pub async fn set_peer(
         &self,
         peer_id: PeerId,
@@ -119,6 +128,22 @@ impl BigSyncWorkerHandle {
         self.host_tx
             .send(BigSyncWorkerMsg::RemovePeer {
                 peer_id,
+                resp: resp_tx,
+            })
+            .await
+            .wrap_err(ERROR_CHANNEL)?;
+        resp_rx.await.wrap_err(ERROR_CHANNEL)?;
+        Ok(())
+    }
+
+    pub async fn notify_local_parts_changed(&self, parts: HashSet<PartId>) -> Res<()> {
+        if parts.is_empty() {
+            return Ok(());
+        }
+        let (resp_tx, resp_rx) = tokio::sync::oneshot::channel();
+        self.host_tx
+            .send(BigSyncWorkerMsg::LocalPartsChanged {
+                parts,
                 resp: resp_tx,
             })
             .await
@@ -168,6 +193,7 @@ pub fn spawn_big_sync_worker(
 ) -> Res<(BigSyncWorkerHandle, StopToken)> {
     let cancel_token = CancellationToken::new();
     let task_set = utils_rs::AbortableJoinSet::new();
+    let (stats_tx, _) = tokio::sync::broadcast::channel(1024);
 
     let machine = big_sync_core::BigSyncMachine::default();
     let (host_tx, host_rx) = tokio::sync::mpsc::channel(64);
@@ -185,6 +211,7 @@ pub fn spawn_big_sync_worker(
         sync_rx,
         task_tx,
         task_rx,
+        stats_tx: stats_tx.clone(),
 
         rpc_clients: default(),
         tasks: default(),
@@ -236,7 +263,7 @@ pub fn spawn_big_sync_worker(
     let join_handle = tokio::task::spawn(async move { fut.await.unwrap() }.in_current_span());
 
     Ok((
-        BigSyncWorkerHandle { host_tx },
+        BigSyncWorkerHandle { host_tx, stats_tx },
         StopToken {
             cancel_token,
             join_handle,
@@ -273,6 +300,7 @@ struct BigSyncWorker {
     sync_tx: mpsc::Sender<BigSyncEvent>,
     task_rx: mpsc::Receiver<MachineTaskMsg>,
     task_tx: mpsc::Sender<MachineTaskMsg>,
+    stats_tx: tokio::sync::broadcast::Sender<big_sync_core::SyncStatEvent>,
 
     tasks: HashMap<TaskId, TaskDeets>,
     peers: HashMap<PeerId, PeerState>,
@@ -305,6 +333,7 @@ impl BigSyncWorker {
     async fn machine_loop(&mut self, shutdown: Arc<BigRedToken>) -> Res<()> {
         let mut janitor_tick = tokio::time::interval(Duration::from_millis(500));
         let (trap, mut err_rx) = trap::TaskTrap::new();
+        let mut stats_out = Vec::new();
         loop {
             let part_store = trap::TrappedPartStore {
                 trap: trap.clone(),
@@ -324,8 +353,11 @@ impl BigSyncWorker {
                     run_until_cancelled_or_trapped(
                         &self.cancel_token,
                         &mut err_rx,
-                        self.machine
-                            .handle_task_msg::<Sendable, _>(msg, &part_store)
+                        self.machine.handle_task_msg::<Sendable, _>(
+                            msg,
+                            &part_store,
+                            &mut stats_out,
+                        )
                     ).await?
                 }
                 evt = self.sync_rx.recv() => {
@@ -333,18 +365,25 @@ impl BigSyncWorker {
                     run_until_cancelled_or_trapped(
                         &self.cancel_token,
                         &mut err_rx,
-                        self.machine.handle_evt::<Sendable, _>(evt, &part_store)
+                        self.machine.handle_evt::<Sendable, _>(
+                            evt,
+                            &part_store,
+                            &mut stats_out,
+                        )
                     ).await?
                 }
                 cmd = self.host_rx.recv() => {
                     let msg = cmd.expect(ERROR_CALLER);
-                    self.handle_msg(msg, &mut err_rx, &part_store).await?
+                    self.handle_msg(msg, &mut err_rx, &part_store, &mut stats_out).await?
                 }
                 _ = janitor_tick.tick() => {
                     self.machine.handle_tick(std::time::Instant::now());
                     LoopAction::Cont
                 }
             };
+            for event in stats_out.drain(..) {
+                let _ = self.stats_tx.send(event);
+            }
             if matches!(loop_action, LoopAction::Break) {
                 break;
             }
@@ -369,6 +408,7 @@ impl BigSyncWorker {
         msg: BigSyncWorkerMsg,
         err_rx: &mut tokio::sync::mpsc::Receiver<eyre::Report>,
         part_store: &trap::TrappedPartStore,
+        stats_out: &mut Vec<big_sync_core::SyncStatEvent>,
     ) -> Res<LoopAction> {
         let evt = match msg {
             BigSyncWorkerMsg::SetPeer {
@@ -411,6 +451,13 @@ impl BigSyncWorker {
                 let _ = resp.send(());
                 evt
             }
+            BigSyncWorkerMsg::LocalPartsChanged { parts, resp } => {
+                let evt = BigSyncEvent::LocalPartsChanged(big_sync_core::LocalPartsChangedEvent {
+                    parts,
+                });
+                let _ = resp.send(());
+                evt
+            }
             #[cfg(test)]
             BigSyncWorkerMsg::Snapshot { resp } => {
                 let snapshot = WorkerSnapshot {
@@ -430,7 +477,7 @@ impl BigSyncWorker {
         run_until_cancelled_or_trapped(
             &self.cancel_token,
             err_rx,
-            self.machine.handle_evt(evt, part_store),
+            self.machine.handle_evt(evt, part_store, stats_out),
         )
         .await
     }
