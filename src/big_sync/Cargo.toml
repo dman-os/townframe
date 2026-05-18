@@ -37,6 +37,7 @@ tokio-util.workspace = true
 async-channel.workspace = true
 future_form.workspace = true
 rand.workspace = true
+futures-buffered.workspace = true
 
 #
 # db

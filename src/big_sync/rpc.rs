@@ -3,8 +3,8 @@ use crate::interlude::*;
 use big_sync_core::{
     mpsc::Receiver,
     rpc::{
-        BigSyncRpcResult, BucketSummary, GetChangedBucketsRequest, LeafBucketsError,
-        LeafBucketsRequest, LeafBucketResult, ListPartsError, PeerSummaryRequest,
+        BigSyncRpcResult, BucketSummary, GetChangedBucketsRequest, LeafBucketResult,
+        LeafBucketsError, LeafBucketsRequest, ListPartsError, PeerSummaryRequest,
         PeerSummaryResult, SubEvent, SubPartsRequest,
     },
 };

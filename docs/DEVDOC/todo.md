@@ -65,6 +65,7 @@
   - [ ] `WflowNotFound`
     - `HostEvent(WflowRegistered)``?
 - [ ] Cancellation and shutdown
+  - [ ] We're misusing cancel tokens. CancellationToken::run_until_cancelled != cancel branc on select.
   - [ ] Kotlin repo's should call close on Activity teardown
   - [ ] Assert samod fsyncs reliably
   - [ ] Notification handling
@@ -214,6 +215,7 @@
   - [ ] Status bar/Gesture bar insets for puck and widgets
   - [ ] Puck drop required to be on center bug
 - [ ] WYSIWYG editor
+- [ ] Embed NVIM?
 - [ ] FUSE
   - [ ] Make it feature complete
 - [ ] PgLite

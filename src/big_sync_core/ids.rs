@@ -130,7 +130,7 @@ impl<'de> serde::Deserialize<'de> for Byte32Id {
                     Ok(buf)
                 }
             }
-            deserializer.deserialize_str(MyVisitor).map(|buf| Self(buf))
+            deserializer.deserialize_str(MyVisitor).map(Self)
         }
     }
 }

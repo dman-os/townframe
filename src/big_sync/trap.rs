@@ -5,7 +5,7 @@ use big_sync_core::{
     part_store::{CursorIndex, ObjPayload, PartStore},
     rpc::{
         BigSyncRpcClient, BigSyncRpcResult, BucketSummary, GetChangedBucketsRequest,
-        LeafBucketsError, LeafBucketsRequest, LeafBucketResult, ListPartsError, PeerSummaryRequest,
+        LeafBucketResult, LeafBucketsError, LeafBucketsRequest, ListPartsError, PeerSummaryRequest,
         PeerSummaryResult, SubEvent, SubPartsRequest,
     },
     BuckId, ObjId, PartId, PeerId,

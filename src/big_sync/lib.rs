@@ -22,7 +22,7 @@ pub use part_store::{HostPartitionStore, MemoryPartStore};
 pub use rpc::HostBigRpcClient;
 pub use worker::{
     spawn_big_sync_worker, BackendId, BigSyncWorkerError, BigSyncWorkerHandle, StopToken,
-    SyncBackend,
+    SyncBackend, SyncTaskRunOutcome,
 };
 
 pub type SharedPartitionStore = Arc<dyn HostPartitionStore>;
@@ -123,18 +123,15 @@ where
         for part in parts {
             part_ids.push(self.resolver.resolve_part(&part).await?);
         }
-        let changed_parts = part_ids.iter().copied().collect();
         self.store.upsert_obj(obj_id, payload, part_ids).await?;
-        self.worker.notify_local_parts_changed(changed_parts).await
+        Ok(())
     }
 
     pub async fn remove_obj_from_part(&self, obj: &ScopedObjRef, part: &ScopedPartRef) -> Res<()> {
         let obj_id = self.resolver.resolve_obj(obj).await?;
         let part_id = self.resolver.resolve_part(part).await?;
         self.store.remove_obj_from_part(obj_id, part_id).await?;
-        self.worker
-            .notify_local_parts_changed([part_id].into_iter().collect())
-            .await
+        Ok(())
     }
 
     pub async fn set_peer(

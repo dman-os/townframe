@@ -16,7 +16,7 @@ structstruck::strike! {
     pub enum MachineTaskMsg {
         MachineTaskResult (pub struct {
             pub task_id: TaskId,
-            pub deets: pub(crate) enum TaskResultDeets {
+            pub(crate) deets: pub(crate) enum TaskResultDeets {
                 SetPeerStrategy (SetPeerStrategy),
                 ListBuckets (ListBucketsResult),
                 LeafBuckets (LeafBucketsResult),
@@ -24,7 +24,7 @@ structstruck::strike! {
         }),
         MachineTaskError (pub struct {
             pub task_id: TaskId,
-            pub deets: pub(crate) enum MachineTaskErrDeets{
+            pub(crate) deets: pub(crate) enum MachineTaskErrDeets {
                 DecidePeerStrategyError(DecidePeerStrategyTaskError)
                 PeerReplayWorkerError(PeerReplayWorkerError)
                 ListBucketsError(ListBucketsTaskError)
@@ -43,7 +43,7 @@ structstruck::strike! {
         /// by the sync machine and is supposed run concurrently
         /// to the main event loop
         pub id: TaskId,
-        pub deets: pub(crate) enum MachineTaskDeets {
+        pub(crate) deets: pub(crate) enum MachineTaskDeets {
             DecidePeerStrategy (DecidePeerStrategyTask)
             PeerReplay(PeerReplayTask)
             ListBuckets(ListBucketsTask)
@@ -60,7 +60,7 @@ structstruck::strike! {
 
             pub peer_id: PeerId,
             pub obj_id: ObjId,
-            pub part_hints: Vec<PartId>,
+            pub part_hints: Set<PartId>,
         }
     }
 }
@@ -212,16 +212,8 @@ impl Tasks {
         self.sync_spawn_queue.pop_front()
     }
 
-    pub fn peek_sync_spawn_queue(&self) -> Option<&SyncTask> {
-        self.sync_spawn_queue.front()
-    }
-
     pub fn pop_machine_spawn_queue(&mut self) -> Option<MachineTask> {
         self.machine_spawn_queue.pop_front()
-    }
-
-    pub fn peek_machine_spawn_queue(&self) -> Option<&MachineTask> {
-        self.machine_spawn_queue.front()
     }
 
     pub fn drain_stop_queue(&mut self) -> std::collections::hash_set::Drain<'_, u64> {
@@ -250,19 +242,19 @@ impl MachineTask {
             MachineTaskDeets::DecidePeerStrategy(inner) => inner
                 .run(&mut cx)
                 .await
-                .map_err(|err| MachineTaskErrDeets::DecidePeerStrategyError(err)),
+                .map_err(MachineTaskErrDeets::DecidePeerStrategyError),
             MachineTaskDeets::PeerReplay(inner) => inner
                 .run(&mut cx)
                 .await
-                .map_err(|err| MachineTaskErrDeets::PeerReplayWorkerError(err)),
+                .map_err(MachineTaskErrDeets::PeerReplayWorkerError),
             MachineTaskDeets::ListBuckets(inner) => inner
                 .run(&mut cx)
                 .await
-                .map_err(|err| MachineTaskErrDeets::ListBucketsError(err)),
+                .map_err(MachineTaskErrDeets::ListBucketsError),
             MachineTaskDeets::LeafBuckets(inner) => inner
                 .run(&mut cx)
                 .await
-                .map_err(|err| MachineTaskErrDeets::LeafBucketsError(err)),
+                .map_err(MachineTaskErrDeets::LeafBucketsError),
         };
         let msg = match res {
             Ok(deets) => MachineTaskMsg::MachineTaskResult(MachineTaskResult {

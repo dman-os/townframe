@@ -69,7 +69,6 @@ impl FingerprintSeed {
     //     let key1 = u64::from_be_bytes(bytes[8..].try_into().expect("checked length"));
     //     Self::new(key0, key1)
     // }
-
     /// Create a new SipHash-2-4 hasher seeded with this value.
     #[must_use]
     pub fn hasher(&self) -> SipHasher24 {

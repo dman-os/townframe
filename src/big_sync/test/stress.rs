@@ -1,14 +1,15 @@
 use super::*;
 
 use rand::rngs::StdRng;
-use rand::{Rng, SeedableRng};
+use rand::{seq::SliceRandom, Rng, SeedableRng};
 use std::collections::HashSet;
+use std::fmt::Write as _;
 use std::sync::Mutex;
 
 const STRESS_NODE_COUNT: usize = 4;
-const PHASE1_MUTATIONS: usize = 48;
-const PHASE2_MUTATIONS: usize = 24;
-const PHASE3_MUTATIONS: usize = 32;
+const PHASE1_MUTATIONS: usize = 48 * 1;
+const PHASE2_MUTATIONS: usize = 24 * 1;
+const PHASE3_MUTATIONS: usize = 32 * 1;
 const DEFAULT_STRESS_SEED: u64 = 0xB1A0_5EED_5EED_0001;
 
 #[derive(Default)]
@@ -87,6 +88,87 @@ fn live_refs(nodes: &[Option<NodeHarness>]) -> Vec<&NodeHarness> {
     nodes.iter().filter_map(|node| node.as_ref()).collect()
 }
 
+fn diff_scoped_obj_snapshots(
+    left_peer: PeerId,
+    left: &ObservedStoreSnapshot,
+    right_peer: PeerId,
+    right: &ObservedStoreSnapshot,
+) -> String {
+    let mut out = String::new();
+    let _ = writeln!(
+        out,
+        "scoped_objs differ: left_peer={left_peer:?} left_count={} right_peer={right_peer:?} right_count={}",
+        left.scoped_objs.len(),
+        right.scoped_objs.len()
+    );
+
+    let mut only_left = Vec::new();
+    let mut only_right = Vec::new();
+    let mut differing = Vec::new();
+
+    for (obj, snapshot) in &left.scoped_objs {
+        match right.scoped_objs.get(obj) {
+            None => only_left.push((obj, snapshot)),
+            Some(other) if other != snapshot => differing.push((obj, snapshot, other)),
+            Some(_) => {}
+        }
+    }
+    for (obj, snapshot) in &right.scoped_objs {
+        if !left.scoped_objs.contains_key(obj) {
+            only_right.push((obj, snapshot));
+        }
+    }
+
+    let max_items = 20usize;
+
+    let only_left_count = only_left.len();
+    let only_right_count = only_right.len();
+    let differing_count = differing.len();
+
+    if only_left_count > 0 {
+        let _ = writeln!(out, "only in left (showing up to {max_items}):");
+        for (obj, snapshot) in only_left.into_iter().take(max_items) {
+            let _ = writeln!(
+                out,
+                "  - {obj:?} => payload={:?} parts={:?}",
+                snapshot.payload, snapshot.parts
+            );
+        }
+    }
+    if only_right_count > 0 {
+        let _ = writeln!(out, "only in right (showing up to {max_items}):");
+        for (obj, snapshot) in only_right.into_iter().take(max_items) {
+            let _ = writeln!(
+                out,
+                "  - {obj:?} => payload={:?} parts={:?}",
+                snapshot.payload, snapshot.parts
+            );
+        }
+    }
+    if differing_count > 0 {
+        let _ = writeln!(out, "differing entries (showing up to {max_items}):");
+        for (obj, left_snapshot, right_snapshot) in differing.into_iter().take(max_items) {
+            let _ = writeln!(out, "  - {obj:?}:");
+            let _ = writeln!(
+                out,
+                "      left : payload={:?} parts={:?}",
+                left_snapshot.payload, left_snapshot.parts
+            );
+            let _ = writeln!(
+                out,
+                "      right: payload={:?} parts={:?}",
+                right_snapshot.payload, right_snapshot.parts
+            );
+        }
+    }
+
+    if only_left_count == 0 && only_right_count == 0 && differing_count == 0 {
+        let _ = writeln!(out, "snapshots differ for an unknown reason");
+    }
+
+    out
+}
+
 async fn boot_cluster(world: Arc<TestWorld>) -> Res<Vec<Option<NodeHarness>>> {
     let mut nodes = Vec::with_capacity(STRESS_NODE_COUNT);
     for peer_seed in 1..=(STRESS_NODE_COUNT as u8) {
@@ -110,39 +192,62 @@ async fn connect_full_mesh(nodes: &[Option<NodeHarness>]) -> Res<()> {
     Ok(())
 }
 
-async fn shutdown_node(
-    node: NodeHarness,
-) -> Res<(PeerId, Arc<crate::part_store::MemoryPartStore>)> {
-    let NodeHarness {
-        world,
-        peer_id,
-        store,
-        host: _host,
-        handle,
-        stop,
-    } = node;
-    world.set_online(peer_id, false);
-    stop.stop().await?;
-    drop(handle);
-    Ok((peer_id, store))
-}
-
-async fn disconnect_from_node(nodes: &[Option<NodeHarness>], victim_idx: usize) -> Res<()> {
-    let Some(victim) = nodes[victim_idx].as_ref() else {
-        return Ok(());
-    };
-    let victim_peer_id = victim.peer_id;
-    for (other_idx, other) in nodes.iter().enumerate() {
-        if other_idx == victim_idx {
-            continue;
-        }
-        let Some(other) = other.as_ref() else {
+async fn disconnect_all(nodes: &[Option<NodeHarness>]) -> Res<()> {
+    for left_idx in 0..nodes.len() {
+        let Some(left) = nodes[left_idx].as_ref() else {
             continue;
         };
-        tokio::try_join!(
-            victim.host.remove_peer(other.peer_id),
-            other.host.remove_peer(victim_peer_id),
-        )?;
+        for right in nodes.iter().skip(left_idx + 1) {
+            let Some(right) = right.as_ref() else {
+                continue;
+            };
+            tokio::try_join!(
+                left.host.remove_peer(right.peer_id),
+                right.host.remove_peer(left.peer_id),
+            )?;
+        }
+    }
+    Ok(())
+}
+
+fn choose_active_topology(rng: &mut StdRng, nodes: &[Option<NodeHarness>]) -> Vec<usize> {
+    let mut live = live_indices(nodes);
+    if live.len() <= 2 {
+        return live;
+    }
+    live.shuffle(rng);
+    let active_len = rng.random_range(2..=live.len());
+    live.truncate(active_len);
+    live.sort_unstable();
+    live
+}
+
+async fn connect_active_topology(
+    rng: &mut StdRng,
+    nodes: &[Option<NodeHarness>],
+    active_idxs: &[usize],
+) -> Res<()> {
+    disconnect_all(nodes).await?;
+    if active_idxs.len() < 2 {
+        return Ok(());
+    }
+
+    let mut chain = active_idxs.to_vec();
+    chain.shuffle(rng);
+    for pair in chain.windows(2) {
+        let left = nodes[pair[0]].as_ref().expect(ERROR_IMPOSSIBLE);
+        let right = nodes[pair[1]].as_ref().expect(ERROR_IMPOSSIBLE);
+        tokio::try_join!(left.connect_to(right), right.connect_to(left))?;
+    }
+
+    for i in 0..chain.len() {
+        for j in (i + 2)..chain.len() {
+            if rng.random_bool(0.35) {
+                let left = nodes[chain[i]].as_ref().expect(ERROR_IMPOSSIBLE);
+                let right = nodes[chain[j]].as_ref().expect(ERROR_IMPOSSIBLE);
+                tokio::try_join!(left.connect_to(right), right.connect_to(left))?;
+            }
+        }
     }
     Ok(())
 }
@@ -177,6 +282,15 @@ async fn apply_random_mutation(
         journal.record(format!(
             "{phase}:step={step}:delete node={node_idx} obj={obj:?}"
         ));
+        if obj == stress_obj(120) {
+            tracing::debug!(
+                phase,
+                step,
+                node_idx,
+                obj = ?obj,
+                "stress target delete"
+            );
+        }
         node.remove_obj(&obj).await?;
         state.retire_obj(obj);
     } else {
@@ -185,6 +299,16 @@ async fn apply_random_mutation(
         journal.record(format!(
             "{phase}:step={step}:upsert node={node_idx} obj={obj:?} value={value:?}"
         ));
+        if obj == stress_obj(120) {
+            tracing::debug!(
+                phase,
+                step,
+                node_idx,
+                obj = ?obj,
+                value = ?value,
+                "stress target upsert"
+            );
+        }
         node.seed_obj(&obj, value).await?;
     }
 
@@ -237,11 +361,21 @@ async fn assert_cluster_alignment(nodes: &[&NodeHarness]) -> Res<()> {
         for &(_, part_id) in snapshot.peer_part_cursors.keys() {
             assert_eq!(part_id, node.host.resolve_part(&test_part()).await?);
         }
-        store_snaps.push(snapshot);
+        store_snaps.push((node.peer_id, snapshot));
     }
 
     for snapshot in store_snaps.iter().skip(1) {
-        assert_eq!(store_snaps[0].scoped_objs, snapshot.scoped_objs);
+        if store_snaps[0].1.scoped_objs != snapshot.1.scoped_objs {
+            panic!(
+                "{}",
+                diff_scoped_obj_snapshots(
+                    store_snaps[0].0,
+                    &store_snaps[0].1,
+                    snapshot.0,
+                    &snapshot.1
+                )
+            );
+        }
     }
 
     let _ = worker_snaps;
@@ -250,8 +384,59 @@ async fn assert_cluster_alignment(nodes: &[&NodeHarness]) -> Res<()> {
 
 async fn wait_for_cluster_convergence(nodes: &[Option<NodeHarness>], timeout: Duration) -> Res<()> {
     let refs = live_refs(nodes);
-    wait_for_convergence(&refs, timeout).await?;
+    drain_cluster_zombies(nodes, timeout).await?;
+    wait_for_cluster_settled(&refs, timeout).await?;
+    drain_cluster_zombies(nodes, timeout).await?;
+    wait_for_cluster_settled(&refs, timeout).await?;
     assert_cluster_alignment(&refs).await
+}
+
+async fn wait_for_cluster_settled(nodes: &[&NodeHarness], timeout: Duration) -> Res<()> {
+    let deadline = std::time::Instant::now() + timeout;
+    let mut last_snapshot = None;
+    let mut stable_rounds = 0usize;
+
+    loop {
+        let mut current = Vec::with_capacity(nodes.len());
+        for node in nodes {
+            current.push((node.handle.snapshot().await?, node.snapshot().await?));
+        }
+
+        if last_snapshot.as_ref().is_some_and(|prev| prev == &current) {
+            stable_rounds += 1;
+            if stable_rounds >= 100 {
+                return Ok(());
+            }
+        } else {
+            stable_rounds = 1;
+        }
+
+        last_snapshot = Some(current);
+        if std::time::Instant::now() >= deadline {
+            return Err(ferr!(
+                "timed out waiting for stress cluster to settle: last_snapshot={last_snapshot:?}"
+            ));
+        }
+
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
+}
+
+async fn drain_cluster_zombies(nodes: &[Option<NodeHarness>], timeout: Duration) -> Res<()> {
+    let handles: Vec<_> = live_refs(nodes)
+        .into_iter()
+        .map(|node| node.handle.clone())
+        .collect();
+    let mut joins = Vec::with_capacity(handles.len());
+    for handle in handles {
+        joins.push(tokio::spawn(async move {
+            handle.drain_zombie_tasks(timeout).await
+        }));
+    }
+    for join in joins {
+        join.await.expect(ERROR_IMPOSSIBLE)?;
+    }
+    Ok(())
 }
 
 #[tokio::test(flavor = "multi_thread")]
@@ -268,12 +453,12 @@ async fn memory_sync_randomized_four_node_stress_converges() -> Res<()> {
     journal.record(format!("seed={seed}"));
 
     let world = Arc::new(TestWorld::default());
-    let mut nodes = boot_cluster(Arc::clone(&world)).await?;
-
-    connect_full_mesh(&nodes).await?;
-    wait_for_cluster_convergence(&nodes, Duration::from_secs(30)).await?;
+    let nodes = boot_cluster(Arc::clone(&world)).await?;
 
     journal.record("phase1:start");
+    let phase1_topology = choose_active_topology(&mut rng, &nodes);
+    journal.record(format!("phase1:topology active={phase1_topology:?}"));
+    connect_active_topology(&mut rng, &nodes, &phase1_topology).await?;
     run_phase(
         &mut rng,
         &mut state,
@@ -283,21 +468,13 @@ async fn memory_sync_randomized_four_node_stress_converges() -> Res<()> {
         &journal,
     )
     .await?;
+    connect_full_mesh(&nodes).await?;
     wait_for_cluster_convergence(&nodes, Duration::from_secs(30)).await?;
 
-    let offline_idx = {
-        let live = live_indices(&nodes);
-        live[rng.random_range(0..live.len())]
-    };
-    journal.record(format!("phase2:offline idx={offline_idx}"));
-    disconnect_from_node(&nodes, offline_idx).await?;
-    let offline_node = nodes[offline_idx].take().expect(ERROR_IMPOSSIBLE);
-    let (peer_id, store) = shutdown_node(offline_node).await?;
-
-    let live_nodes = live_refs(&nodes);
-    wait_for_convergence(&live_nodes, Duration::from_secs(30)).await?;
-
     journal.record("phase2:start");
+    let phase2_topology = choose_active_topology(&mut rng, &nodes);
+    journal.record(format!("phase2:topology active={phase2_topology:?}"));
+    connect_active_topology(&mut rng, &nodes, &phase2_topology).await?;
     run_phase(
         &mut rng,
         &mut state,
@@ -307,14 +484,13 @@ async fn memory_sync_randomized_four_node_stress_converges() -> Res<()> {
         &journal,
     )
     .await?;
-    wait_for_cluster_convergence(&nodes, Duration::from_secs(30)).await?;
-
-    let restarted = boot_node_with_store(Arc::clone(&world), peer_id, store).await?;
-    nodes[offline_idx] = Some(restarted);
     connect_full_mesh(&nodes).await?;
     wait_for_cluster_convergence(&nodes, Duration::from_secs(30)).await?;
 
     journal.record("phase3:start");
+    let phase3_topology = choose_active_topology(&mut rng, &nodes);
+    journal.record(format!("phase3:topology active={phase3_topology:?}"));
+    connect_active_topology(&mut rng, &nodes, &phase3_topology).await?;
     run_phase(
         &mut rng,
         &mut state,
@@ -324,6 +500,7 @@ async fn memory_sync_randomized_four_node_stress_converges() -> Res<()> {
         &journal,
     )
     .await?;
+    connect_full_mesh(&nodes).await?;
     wait_for_cluster_convergence(&nodes, Duration::from_secs(30)).await?;
 
     let refs = live_refs(&nodes);

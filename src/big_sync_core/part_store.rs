@@ -180,7 +180,7 @@ mod tests {
                     .peer_part_cursors
                     .get(&(peer_id, part_id))
                     .copied()
-                .unwrap_or_default()
+                    .unwrap_or_default()
             })
         }
 

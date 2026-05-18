@@ -2,11 +2,10 @@ use crate::bucket::BucketObjLeafPage;
 use crate::interlude::*;
 
 use crate::{
+    bucket::BucketMachine,
     fingerprint::FingerprintSeed,
     part_store::{CursorIndex, PartStore},
-    rpc::{
-        BigSyncRpcClient, LeafBucketRequest, LeafBucketsError, LeafBucketsRequest, RpcError,
-    },
+    rpc::{BigSyncRpcClient, LeafBucketRequest, LeafBucketsError, LeafBucketsRequest, RpcError},
     tasks::{TaskCtx, TaskResultDeets},
 };
 
@@ -16,7 +15,6 @@ pub struct LeafBucketsTask {
     pub part_id: PartId,
     pub since: CursorIndex,
     pub buckets: Vec<LeafBucketRequest>,
-    pub limit_hint: u32,
 }
 
 pub struct LeafBucketsResult {
@@ -40,7 +38,7 @@ structstruck::strike! {
 }
 
 impl LeafBucketsTask {
-    #[tracing::instrument(skip(self, cx), fields(peer_id = %self.peer_id, part_id = %self.part_id, since = self.since, bucket_count = self.buckets.len(), limit_hint = self.limit_hint))]
+    #[tracing::instrument(skip(self, cx), fields(peer_id = %self.peer_id, part_id = %self.part_id, since = self.since, bucket_count = self.buckets.len()))]
     pub async fn run<K, PStore, Rpc, Rng>(
         self,
         cx: &mut TaskCtx<K, PStore, Rpc, Rng>,
@@ -74,13 +72,13 @@ impl LeafBucketsTask {
     {
         let peer_rpc = cx.rpc_clients.get(&self.peer_id).expect(ERROR_UNRECONIZED);
         let seed = FingerprintSeed::new(cx.rng.next_u64(), cx.rng.next_u64());
-            let response = peer_rpc
+        let response = peer_rpc
             .leaf_buckets(LeafBucketsRequest {
                 part_id: self.part_id,
                 since: self.since,
                 buckets: self.buckets,
                 seed,
-                limit_hint: self.limit_hint,
+                limit_hint: BucketMachine::LEAF_BUCKET_LIMIT_HINT,
             })
             .await??;
         assert_eq!(seed, response.seed);

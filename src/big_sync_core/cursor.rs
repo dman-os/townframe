@@ -14,10 +14,10 @@ structstruck::strike! {
         SyncObj {
             obj_id: ObjId,
             remote_payload: ObjPayload,
-            cursors: Vec<CursorIndex>,
+            cursor: CursorIndex,
             /// Upsert the object at the sync backend to these
             /// parts
-            part_hints: Vec<PartId>,
+            part_hint: PartId,
         },
         SetPartCursor {
             part_id: PartId,
@@ -26,19 +26,20 @@ structstruck::strike! {
         RemoveObjFromPart {
             obj_id: ObjId,
             part_id: PartId,
+        },
+        PartIdle {
+            part_id: PartId,
         }
     }
 }
 
 structstruck::strike! {
-    #[derive(Debug, Default)]
-    pub struct CursorSyncMachine {
-        cursor_state: HashMap<
-            PartId,
-            struct CursorStreamState {
+#[derive(Debug, Default)]
+pub struct CursorSyncMachine {
+    cursor_state: HashMap<
+        PartId,
+        struct CursorStreamState {
                 #![derive(Debug, Default)]
-                // FIXME: last_emitted_cursor and persisted_cursor are identical
-                persisted_cursor: Option<CursorIndex>,
                 last_emitted_cursor: Option<CursorIndex>,
                 slots: BTreeMap<
                     CursorIndex,
@@ -75,14 +76,6 @@ structstruck::strike! {
     }
 }
 
-impl CursorStreamState {
-    fn floor(&self) -> CursorIndex {
-        self.persisted_cursor
-            .unwrap_or(0)
-            .max(self.last_emitted_cursor.unwrap_or(0))
-    }
-}
-
 impl CursorSyncMachine {
     pub fn on_subscription_evt(
         &mut self,
@@ -97,26 +90,26 @@ impl CursorSyncMachine {
             SubEvent::Upserted(event) => (event.obj_id, event.part_id, event.cursor),
         };
         let state = self.cursor_state.entry(part_id).or_default();
-        if cursor <= state.floor() {
+        if cursor <= state.last_emitted_cursor.unwrap_or_default() {
             panic!(
-                "cursority trap: cursor ({cursor}) seen below floor ({})",
-                state.floor()
+                "cursority trap: cursor ({cursor}) seen below floor ({:?})",
+                state.last_emitted_cursor
             );
         }
-        let old = state.slots.insert(cursor, CursorSlotState::Pending);
-        if let Some(old) = old {
-            panic!("duplicate cursor {cursor} for part {part_id}: {old:?}");
+        if let Some(_old) = state.slots.get_mut(&cursor) {
+            // duplicate cursor
+            return;
         }
+        state.slots.insert(cursor, CursorSlotState::Pending);
 
         let job = self.active_obj_jobs.entry(obj_id).or_default();
         let cmd = match evt {
             SubEvent::Upserted(evt) => {
                 job.waiters.insert(cursor, CursorWaiter { part_id });
-                let part_hints = job.waiters.values().map(|ww| ww.part_id).collect();
                 CursorMachineCommand::SyncObj {
-                    obj_id: obj_id,
-                    part_hints,
-                    cursors: vec![cursor],
+                    obj_id,
+                    part_hint: part_id,
+                    cursor,
                     remote_payload: evt.payload,
                 }
             }
@@ -169,8 +162,7 @@ impl CursorSyncMachine {
         // calculate Ready highmark
         let latest_ready = {
             let mut latest_ready = None;
-            let floor = state.floor();
-            for (cursor, slot) in state.slots.range(floor.saturating_add(1)..) {
+            for (cursor, slot) in state.slots.range(..) {
                 match slot {
                     CursorSlotState::Ready => latest_ready = Some(*cursor),
                     CursorSlotState::Pending => break,
@@ -193,6 +185,8 @@ impl CursorSyncMachine {
             state.slots.pop_first();
         }
         state.last_emitted_cursor = Some(cursor);
-        state.persisted_cursor = Some(cursor);
+        if state.slots.is_empty() {
+            out.push(CursorMachineCommand::PartIdle { part_id });
+        }
     }
 }

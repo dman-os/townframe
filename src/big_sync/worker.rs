@@ -3,8 +3,8 @@ use crate::interlude::*;
 use crate::trap;
 
 use big_sync_core::{
-    mpsc, BigSyncEvent, BigSyncMachine, MachineTask, MachineTaskMsg, PartId, PeerId,
-    SyncTask, SyncTaskCompletion, SyncTaskDeets, TaskCtx, TaskId,
+    mpsc, BigSyncEvent, BigSyncMachine, MachineTask, MachineTaskMsg, PartId, PeerId, SyncTask,
+    SyncTaskCompletion, SyncTaskDeets, TaskCtx, TaskId,
 };
 use future_form::Sendable;
 use rand::{rngs::StdRng, SeedableRng};
@@ -44,8 +44,9 @@ enum BigSyncWorkerMsg {
             peer_id: PeerId,
             resp: tokio::sync::oneshot::Sender<()>,
         },
-        LocalPartsChanged {
-            parts: HashSet<PartId>,
+        #[cfg(test)]
+        ReapZombieTasks {
+            timeout: Duration,
             resp: tokio::sync::oneshot::Sender<()>,
         },
         #[cfg(test)]
@@ -57,7 +58,13 @@ enum BigSyncWorkerMsg {
 
 #[async_trait]
 pub trait SyncBackend: Send + Sync + 'static {
-    async fn run(&self, task: SyncTaskDeets) -> Res<Vec<SyncTaskCompletion>>;
+    async fn run(&self, task: SyncTaskDeets) -> Res<SyncTaskRunOutcome>;
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum SyncTaskRunOutcome {
+    Completions(Vec<SyncTaskCompletion>),
+    Stale,
 }
 
 pub type BackendId = u64;
@@ -74,6 +81,7 @@ pub struct WorkerSnapshot {
     pub task_counts: TaskCounts,
     pub active_machine_tasks: usize,
     pub active_sync_tasks: usize,
+    pub zombie_tasks: usize,
 }
 
 #[cfg(test)]
@@ -84,6 +92,7 @@ impl WorkerSnapshot {
             && self.task_counts.machine_spawn_queue == 0
             && self.task_counts.stop_queue == 0
             && self.active_sync_tasks == 0
+            && self.zombie_tasks == 0
     }
 }
 
@@ -99,7 +108,9 @@ impl StopToken {
 }
 
 impl BigSyncWorkerHandle {
-    pub fn subscribe_stats(&self) -> tokio::sync::broadcast::Receiver<big_sync_core::SyncStatEvent> {
+    pub fn subscribe_stats(
+        &self,
+    ) -> tokio::sync::broadcast::Receiver<big_sync_core::SyncStatEvent> {
         self.stats_tx.subscribe()
     }
 
@@ -139,22 +150,17 @@ impl BigSyncWorkerHandle {
         Ok(())
     }
 
-    pub async fn notify_local_parts_changed(&self, parts: HashSet<PartId>) -> Res<()> {
-        if parts.is_empty() {
-            return Ok(());
-        }
-        let part_count = parts.len();
+    #[cfg(test)]
+    pub async fn drain_zombie_tasks(&self, timeout: Duration) -> Res<()> {
         let (resp_tx, resp_rx) = tokio::sync::oneshot::channel();
         self.host_tx
-            .send(BigSyncWorkerMsg::LocalPartsChanged {
-                parts,
+            .send(BigSyncWorkerMsg::ReapZombieTasks {
+                timeout,
                 resp: resp_tx,
             })
             .await
             .wrap_err(ERROR_CHANNEL)?;
-        tracing::debug!(part_count, "queue local parts changed");
-        resp_rx.await.wrap_err(ERROR_CHANNEL)?;
-        Ok(())
+        resp_rx.await.wrap_err(ERROR_CHANNEL)
     }
 
     #[cfg(test)]
@@ -192,6 +198,8 @@ impl BigSyncWorkerHandle {
     }
 }
 
+const ABORT_DURATION_SECS: u64 = 2;
+
 pub fn spawn_big_sync_worker(
     part_store: SharedPartitionStore,
     sync_backends: HashMap<BackendId, Arc<dyn SyncBackend>>,
@@ -221,6 +229,7 @@ pub fn spawn_big_sync_worker(
         rpc_clients: default(),
         tasks: default(),
         sync_tasks: default(),
+        zombie_tasks: default(),
         peers: default(),
     };
     let fut = {
@@ -235,25 +244,35 @@ pub fn spawn_big_sync_worker(
                 .run_until_cancelled(worker.machine_loop(Arc::clone(&shutdown)))
                 .await;
 
-            for (_id, task) in worker.tasks.drain() {
+            for (task_id, task) in std::mem::take(&mut worker.tasks) {
                 task.cancel_token.cancel();
-                task.handle
-                    .join(Duration::from_secs(2))
-                    .await
-                    .wrap_err("error joining task")
-                    .inspect_err(|err| error!(?err))
-                    .ok();
+                let old = worker.zombie_tasks.insert(
+                    task_id,
+                    ZombieTaskDeets {
+                        kind: ZombieTaskKind::Machine,
+                        cancel_token: task.cancel_token,
+                        handle: task.handle,
+                    },
+                );
+                assert!(old.is_none(), "fishy");
             }
-            let sync_tasks = std::mem::take(&mut worker.sync_tasks);
-            for (_id, task) in sync_tasks {
+            for (task_id, task) in std::mem::take(&mut worker.sync_tasks) {
                 task.cancel_token.cancel();
-                task.handle
-                    .join(Duration::from_secs(2))
-                    .await
-                    .wrap_err("error joining task")
-                    .inspect_err(|err| error!(?err))
-                    .ok();
+                let old = worker.zombie_tasks.insert(
+                    task_id,
+                    ZombieTaskDeets {
+                        kind: ZombieTaskKind::Sync,
+                        cancel_token: task.cancel_token,
+                        handle: task.handle,
+                    },
+                );
+                assert!(old.is_none(), "fishy");
             }
+            worker
+                .reap_zombie_tasks(Duration::from_secs(ABORT_DURATION_SECS))
+                .await
+                .inspect_err(|err| error!(%err))
+                .ok();
             if let Some(Err(err)) = maybe_res {
                 return Err(err);
             }
@@ -310,6 +329,7 @@ struct BigSyncWorker {
     tasks: HashMap<TaskId, TaskDeets>,
     peers: HashMap<PeerId, PeerState>,
     sync_tasks: HashMap<TaskId, ActiveSyncTaskDeets>,
+    zombie_tasks: HashMap<TaskId, ZombieTaskDeets>,
     rpc_clients: SharedRpcClients,
     part_store: SharedPartitionStore,
 }
@@ -328,6 +348,18 @@ struct ActiveSyncTaskDeets {
     handle: utils_rs::TaskHandle,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ZombieTaskKind {
+    Machine,
+    Sync,
+}
+
+struct ZombieTaskDeets {
+    kind: ZombieTaskKind,
+    cancel_token: CancellationToken,
+    handle: utils_rs::TaskHandle,
+}
+
 const MAX_ACTIVE_SYNC_TASKS: usize = 32;
 
 enum LoopAction {
@@ -339,7 +371,6 @@ impl BigSyncWorker {
     async fn machine_loop(&mut self, shutdown: Arc<BigRedToken>) -> Res<()> {
         let mut janitor_tick = tokio::time::interval(Duration::from_millis(500));
         let (trap, mut err_rx) = trap::TaskTrap::new();
-        let mut stats_out = Vec::new();
         loop {
             let part_store = trap::TrappedPartStore {
                 trap: trap.clone(),
@@ -355,41 +386,42 @@ impl BigSyncWorker {
                     return Err(err);
                 },
                 msg = self.task_rx.recv() => {
-                    let msg = msg.expect(ERROR_CALLER);
-                    run_until_cancelled_or_trapped(
-                        &self.cancel_token,
-                        &mut err_rx,
-                        self.machine.handle_task_msg::<Sendable, _>(
-                            msg,
-                            &part_store,
-                            &mut stats_out,
-                        )
-                    ).await?
+                    match msg {
+                        Ok(msg) => run_until_cancelled_or_trapped(
+                            &self.cancel_token,
+                            &mut err_rx,
+                            self.machine.handle_task_msg::<Sendable, _>(
+                                msg,
+                                &part_store,
+                            )
+                        ).await?,
+                        Err(_) => LoopAction::Break,
+                    }
                 }
                 evt = self.sync_rx.recv() => {
-                    let evt = evt.expect(ERROR_CALLER);
-                    run_until_cancelled_or_trapped(
-                        &self.cancel_token,
-                        &mut err_rx,
-                        self.machine.handle_evt::<Sendable, _>(
-                            evt,
-                            &part_store,
-                            &mut stats_out,
-                        )
-                    ).await?
+                    match evt {
+                        Ok(evt) => run_until_cancelled_or_trapped(
+                            &self.cancel_token,
+                            &mut err_rx,
+                            self.machine.handle_evt::<Sendable, _>(
+                                evt,
+                                &part_store,
+                            )
+                        ).await?,
+                        Err(_) => LoopAction::Break,
+                    }
                 }
                 cmd = self.host_rx.recv() => {
-                    let msg = cmd.expect(ERROR_CALLER);
-                    self.handle_msg(msg, &mut err_rx, &part_store, &mut stats_out).await?
+                    match cmd {
+                        Some(msg) => self.handle_msg(msg, &mut err_rx, &part_store).await?,
+                        None => LoopAction::Break,
+                    }
                 }
                 _ = janitor_tick.tick() => {
                     self.machine.handle_tick(std::time::Instant::now());
                     LoopAction::Cont
                 }
             };
-            for event in stats_out.drain(..) {
-                let _ = self.stats_tx.send(event);
-            }
             if matches!(loop_action, LoopAction::Break) {
                 break;
             }
@@ -405,6 +437,10 @@ impl BigSyncWorker {
                 };
                 self.spawn_sync_task(task).await?;
             }
+            self.sweep_finished_zombies();
+            for event in self.machine.drain_stat_evts() {
+                let _ = self.stats_tx.send(event);
+            }
         }
         Ok(())
     }
@@ -414,7 +450,6 @@ impl BigSyncWorker {
         msg: BigSyncWorkerMsg,
         err_rx: &mut tokio::sync::mpsc::Receiver<eyre::Report>,
         part_store: &trap::TrappedPartStore,
-        stats_out: &mut Vec<big_sync_core::SyncStatEvent>,
     ) -> Res<LoopAction> {
         let evt = match msg {
             BigSyncWorkerMsg::SetPeer {
@@ -449,25 +484,27 @@ impl BigSyncWorker {
                     peer_id,
                     parts: parts.into_keys().collect(),
                 });
-                let _ = resp.send(Ok(()));
+                resp.send(Ok(())).inspect_err(|_| warn!(ERROR_CALLER)).ok();
                 tracing::debug!(peer_id = %peer_id, part_count, "accept set peer");
                 evt
             }
             BigSyncWorkerMsg::RemovePeer { peer_id, resp } => {
                 self.peers.remove(&peer_id);
                 let evt = BigSyncEvent::RemovePeer(big_sync_core::RemovePeerEvent { peer_id });
-                let _ = resp.send(());
+                resp.send(()).inspect_err(|_| warn!(ERROR_CALLER)).ok();
                 tracing::debug!(peer_id = %peer_id, "accept remove peer");
                 evt
             }
-            BigSyncWorkerMsg::LocalPartsChanged { parts, resp } => {
-                let part_count = parts.len();
-                let evt = BigSyncEvent::LocalPartsChanged(big_sync_core::LocalPartsChangedEvent {
-                    parts,
-                });
-                let _ = resp.send(());
-                tracing::debug!(part_count, "accept local parts changed");
-                evt
+            #[cfg(test)]
+            BigSyncWorkerMsg::ReapZombieTasks { timeout, resp } => {
+                tracing::debug!(
+                    zombie_count = self.zombie_tasks.len(),
+                    ?timeout,
+                    "drain zombie request"
+                );
+                self.reap_zombie_tasks(timeout).await?;
+                resp.send(()).inspect_err(|_| warn!(ERROR_CALLER)).ok();
+                return Ok(LoopAction::Cont);
             }
             #[cfg(test)]
             BigSyncWorkerMsg::Snapshot { resp } => {
@@ -480,22 +517,23 @@ impl BigSyncWorker {
                     task_counts: self.machine.task_counts(),
                     active_machine_tasks: self.tasks.len(),
                     active_sync_tasks: self.sync_tasks.len(),
+                    zombie_tasks: self.zombie_tasks.len(),
                 };
-                let _ = resp.send(snapshot);
+                resp.send(snapshot)
+                    .inspect_err(|_| warn!(ERROR_CALLER))
+                    .ok();
                 return Ok(LoopAction::Cont);
             }
         };
         run_until_cancelled_or_trapped(
             &self.cancel_token,
             err_rx,
-            self.machine.handle_evt(evt, part_store, stats_out),
+            self.machine.handle_evt(evt, part_store),
         )
         .await
     }
 
     async fn batch_stop_tasks(&mut self) -> Res<()> {
-        // NOTE: we exclusivley rely on the machine's
-        // internal task tracking to clean up tasks
         let task_ids: Vec<_> = self.machine.drain_stop_queue().collect();
         let stop_count = task_ids.len();
         if stop_count > 0 {
@@ -504,22 +542,69 @@ impl BigSyncWorker {
         for task_id in task_ids {
             if let Some(task) = self.tasks.remove(&task_id) {
                 task.cancel_token.cancel();
-                task.handle
-                    .join(Duration::from_secs(2))
-                    .await
-                    .inspect_err(|err| error!(?err))
-                    .ok();
-                continue;
-            }
-            if let Some(task) = self.sync_tasks.remove(&task_id) {
+                // task.handle
+                //     .join(Duration::from_millis(2000))
+                //     .await
+                //     .inspect_err(|err| error!(%err))
+                //     .ok();
+                let old = self.zombie_tasks.insert(
+                    task_id,
+                    ZombieTaskDeets {
+                        kind: ZombieTaskKind::Machine,
+                        cancel_token: task.cancel_token,
+                        handle: task.handle,
+                    },
+                );
+                assert!(old.is_none(), "fishy");
+            } else if let Some(task) = self.sync_tasks.remove(&task_id) {
                 task.cancel_token.cancel();
-                task.handle
-                    .join(Duration::from_secs(2))
-                    .await
-                    .inspect_err(|err| error!(?err))
-                    .ok();
+                // task.handle
+                //     .join(Duration::from_millis(2000))
+                //     .await
+                //     .inspect_err(|err| error!(%err))
+                //     .ok();
+                let old = self.zombie_tasks.insert(
+                    task_id,
+                    ZombieTaskDeets {
+                        kind: ZombieTaskKind::Sync,
+                        cancel_token: task.cancel_token,
+                        handle: task.handle,
+                    },
+                );
+                assert!(old.is_none(), "fishy");
             }
         }
+        Ok(())
+    }
+
+    fn sweep_finished_zombies(&mut self) {
+        for (task_id, task) in self
+            .zombie_tasks
+            .extract_if(|_task_id, task| task.handle.is_finished())
+        {
+            tracing::debug!(task_id, kind = ?task.kind, "sweeping finished zombie task");
+        }
+    }
+
+    async fn reap_zombie_tasks(&mut self, timeout: Duration) -> Res<()> {
+        self.sweep_finished_zombies();
+        let zombie_count = self.zombie_tasks.len();
+        if zombie_count > 0 {
+            tracing::debug!(zombie_count, "aborting zombie tasks at drain timeout");
+        }
+        use futures_buffered::BufferedStreamExt;
+        futures::stream::iter(self.zombie_tasks.drain().map(|(task_id, task)| async move {
+            tracing::debug!(task_id, kind = ?task.kind, "draining zombie task");
+            task.cancel_token.cancel();
+            task.handle
+                .join(timeout)
+                .await
+                .inspect_err(|err| error!(%err, "error reaping zombie task"))
+                .ok();
+        }))
+        .buffered_unordered(16)
+        .collect::<()>()
+        .await;
         Ok(())
     }
 
@@ -536,7 +621,7 @@ impl BigSyncWorker {
             part_store: Arc::clone(&self.part_store),
             rpc_clients: Arc::clone(&self.rpc_clients),
             bsm_tx: self.task_tx.clone(),
-            cancel_token: self.cancel_token.child_token(),
+            cancel_token: cancel_token.clone(),
             rng: StdRng::from_os_rng(),
             shutdown,
         };
@@ -569,7 +654,7 @@ impl BigSyncWorker {
             task: task.clone(),
             backend,
             host_tx: self.sync_tx.clone(),
-            cancel_token: self.cancel_token.child_token(),
+            cancel_token: cancel_token.clone(),
         };
         let handle = self
             .task_set
@@ -601,44 +686,46 @@ struct MachineTaskWorker {
 impl MachineTaskWorker {
     #[tracing::instrument(skip(self))]
     async fn run(self) {
-        let (trap, mut err_rx) = trap::TaskTrap::new();
-        let part_store = trap::TrappedPartStore {
-            trap: trap.clone(),
-            inner: Arc::clone(&self.part_store),
-        };
-        let tcx = TaskCtx {
-            task_id: self.task.id,
-            main_tx: self.bsm_tx.clone(),
-            part_store,
-            rng: self.rng,
-            rpc_clients: self
-                .rpc_clients
-                .lock()
-                .expect(ERROR_MUTEX)
-                .iter()
-                .map(|(&peer_id, client)| {
-                    (
-                        peer_id,
-                        trap::TrappedRpcClient {
-                            trap: trap.clone(),
-                            inner: Arc::clone(client),
-                        },
-                    )
-                })
-                .collect(),
-            _phantom: default(),
-        };
-        tokio::select! {
-            biased;
-            () = self.cancel_token.cancelled() => {
-            },
-            res = err_rx.recv() => {
-                let err = res.expect(ERROR_IMPOSSIBLE);
-                self.shutdown.set_err(err);
-            },
-            () = self.task.run(tcx) => {
-            }
-        };
+        let _ = self
+            .cancel_token
+            .run_until_cancelled(async move {
+                let (trap, mut err_rx) = trap::TaskTrap::new();
+                let part_store = trap::TrappedPartStore {
+                    trap: trap.clone(),
+                    inner: Arc::clone(&self.part_store),
+                };
+                let tcx = TaskCtx {
+                    task_id: self.task.id,
+                    main_tx: self.bsm_tx.clone(),
+                    part_store,
+                    rng: self.rng,
+                    rpc_clients: self
+                        .rpc_clients
+                        .lock()
+                        .expect(ERROR_MUTEX)
+                        .iter()
+                        .map(|(&peer_id, client)| {
+                            (
+                                peer_id,
+                                trap::TrappedRpcClient {
+                                    trap: trap.clone(),
+                                    inner: Arc::clone(client),
+                                },
+                            )
+                        })
+                        .collect(),
+                    _phantom: default(),
+                };
+                tokio::select! {
+                    res = err_rx.recv() => {
+                        let err = res.expect(ERROR_IMPOSSIBLE);
+                        self.shutdown.set_err(err);
+                    },
+                    () = self.task.run(tcx) => {
+                    }
+                };
+            })
+            .await;
     }
 }
 
@@ -652,40 +739,49 @@ struct SyncTaskWorker {
 impl SyncTaskWorker {
     #[tracing::instrument(skip(self))]
     async fn run(self) {
-        let res = tokio::select! {
-            biased;
-            () = self.cancel_token.cancelled() => {
-                return;
-            }
-            res = self.backend.run(self.task.deets.clone()) => res,
-        };
-        match res {
-            Ok(completions) => {
-                for completion in completions {
-                    self.host_tx
-                        .send(BigSyncEvent::SyncCompleted(
-                            big_sync_core::SyncCompletedEvent {
+        let _ = self
+            .cancel_token
+            .run_until_cancelled(async move {
+                let res = self.backend.run(self.task.deets.clone()).await;
+                match res {
+                    Ok(SyncTaskRunOutcome::Completions(completions)) => {
+                        for completion in completions {
+                            self.host_tx
+                                .send(BigSyncEvent::SyncCompleted(
+                                    big_sync_core::SyncCompletedEvent {
+                                        task_id: self.task.id,
+                                        peer_id: self.task.deets.peer_id,
+                                        completion,
+                                    },
+                                ))
+                                .await
+                                .expect(ERROR_CHANNEL);
+                        }
+                    }
+                    Ok(SyncTaskRunOutcome::Stale) => {
+                        self.host_tx
+                            .send(BigSyncEvent::SyncStale(big_sync_core::SyncStaleEvent {
                                 task_id: self.task.id,
                                 peer_id: self.task.deets.peer_id,
-                                completion,
-                            },
-                        ))
-                        .await
-                        .expect(ERROR_CHANNEL);
+                                obj_id: self.task.deets.obj_id,
+                            }))
+                            .await
+                            .expect(ERROR_CHANNEL);
+                    }
+                    Err(err) => {
+                        self.host_tx
+                            .send(BigSyncEvent::SyncFailed(big_sync_core::SyncFailedEvent {
+                                task_id: self.task.id,
+                                peer_id: self.task.deets.peer_id,
+                                obj_id: self.task.deets.obj_id,
+                                err,
+                            }))
+                            .await
+                            .expect(ERROR_CHANNEL);
+                    }
                 }
-            }
-            Err(err) => {
-                self.host_tx
-                    .send(BigSyncEvent::SyncFailed(big_sync_core::SyncFailedEvent {
-                        task_id: self.task.id,
-                        peer_id: self.task.deets.peer_id,
-                        obj_id: self.task.deets.obj_id,
-                        err,
-                    }))
-                    .await
-                    .expect(ERROR_CHANNEL);
-            }
-        }
+            })
+            .await;
     }
 }
 

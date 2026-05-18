@@ -3,11 +3,12 @@ use crate::interlude::*;
 use crate::{ScopeRef, ScopedIdResolver, ScopedObjRef, ScopedPartRef};
 use big_sync_core::part_store::{CursorIndex, ObjPayload};
 use big_sync_core::rpc::{
-    BucketObjPageEntry, BucketSummary, GetChangedBucketsRequest, LeafBucketsError,
-    LeafBucketsRequest, LeafBucketPage, LeafBucketResult, ListPartsError, PartEvent, PartPage,
-    PartSummary, SubEvent, SubPartsRequest,
+    BucketMemberKind, BucketObjPageEntry, BucketSummary, BucketSummaryState,
+    GetChangedBucketsRequest, LeafBucketPage, LeafBucketResult, LeafBucketsError,
+    LeafBucketsRequest, ListPartsError, PartEvent, PartPage, PartSummary, SubEvent,
+    SubPartsRequest,
 };
-use big_sync_core::{BuckId, Byte32Id, Fingerprint, FingerprintSeed, ObjId, PartId, PeerId};
+use big_sync_core::{BuckId, Byte32Id, Fingerprint, ObjId, PartId, PeerId};
 use tokio::sync::mpsc;
 
 use std::collections::BTreeMap;
@@ -15,6 +16,34 @@ use std::collections::BTreeMap;
 use std::collections::BTreeSet;
 
 // pub mod sqlite;
+
+fn obj_id_bounds_for_bucket(bucket_id: BuckId) -> (ObjId, Option<ObjId>) {
+    let level = bucket_id.level();
+    let prefix_bits = u32::from(level) * u32::from(BuckId::BITS_PER_LEVEL);
+    debug_assert!(prefix_bits <= u32::from(u16::BITS));
+
+    if prefix_bits == 0 {
+        return (ObjId(Byte32Id::new([0; 32])), None);
+    }
+
+    let shift = u32::from(u16::BITS) - prefix_bits;
+    let start_prefix = (u32::from(bucket_id.index())) << shift;
+    let start = {
+        let mut bytes = [0; 32];
+        bytes[..2].copy_from_slice(&(start_prefix as u16).to_be_bytes());
+        ObjId(Byte32Id::new(bytes))
+    };
+    if prefix_bits == u32::from(u16::BITS) || bucket_id.index() == u16::MAX {
+        return (start, None);
+    }
+    let end = Some({
+        let next_prefix = (u32::from(bucket_id.index()) + 1) << shift;
+        let mut bytes = [0; 32];
+        bytes[..2].copy_from_slice(&(next_prefix as u16).to_be_bytes());
+        ObjId(Byte32Id::new(bytes))
+    });
+    (start, end)
+}
 
 #[async_trait]
 pub trait HostPartitionStore: Send + Sync {
@@ -63,8 +92,30 @@ pub trait HostPartitionStore: Send + Sync {
     ) -> Res<Result<mpsc::UnboundedReceiver<SubEvent>, ListPartsError>>;
 }
 
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
+pub(crate) struct ObjSyncStamp {
+    pub(crate) seq: u64,
+    pub(crate) origin: PeerId,
+}
+
+impl Default for ObjSyncStamp {
+    fn default() -> Self {
+        Self {
+            seq: 0,
+            origin: PeerId(Byte32Id::new([0; 32])),
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum SyncMutationOutcome {
+    Applied,
+    Stale,
+}
+
 structstruck::strike! {
     pub struct MemoryPartStore {
+        pub(crate) owner_peer_id: PeerId,
         inner: Arc<surelock::mutex::Mutex<
             #[derive(Default)]
             struct MemoryPartStoreState {
@@ -91,13 +142,16 @@ structstruck::strike! {
 
                         events: BTreeMap<CursorIndex, PartEvent>,
 
-                        members: HashMap<
+                        members: BTreeMap<
                             ObjId,
+                            #[derive(Clone)]
                             struct PartMemberState {
+                                payload: Option<ObjPayload>,
                                 changed_at: CursorIndex,
                                 removed_at: Option<CursorIndex>,
                             }
                         >,
+                        bucket_stats: BTreeMap<BuckId, BucketSummaryState>,
 
                         bus: struct MemorySubsBus {
                             #![derive(Default)]
@@ -114,9 +168,11 @@ structstruck::strike! {
                         #![derive(Default)]
                         payload: Option<ObjPayload>,
                         parts: HashSet<PartId>,
+                        sync_version: u64,
+                        sync_stamp: ObjSyncStamp,
                     }
                 >,
-                tombstoned_objs: HashMap<ObjId, CursorIndex>,
+                tombstoned_objs: HashMap<ObjId, (CursorIndex, u64, ObjSyncStamp)>,
                 peer_obj_payloads: HashMap<(PeerId, ObjId), Option<ObjPayload>>,
                 peer_part_cursors: HashMap<(PeerId, PartId), CursorIndex>,
             }
@@ -127,12 +183,20 @@ structstruck::strike! {
 impl Default for MemoryPartStore {
     fn default() -> Self {
         Self {
+            owner_peer_id: zero_peer_id(),
             inner: Arc::new(surelock::mutex::Mutex::new(default())),
         }
     }
 }
 
 impl MemoryPartStore {
+    pub fn with_owner(owner_peer_id: PeerId) -> Self {
+        Self {
+            owner_peer_id,
+            inner: Arc::new(surelock::mutex::Mutex::new(default())),
+        }
+    }
+
     pub async fn ensure_part(&self, part_id: PartId) -> Res<()> {
         surelock::key::lock_scope(|key| {
             let (mut guard, _key) = key.lock(&self.inner);
@@ -148,6 +212,10 @@ impl MemoryPartStore {
         bytes[1..9].copy_from_slice(&counter.to_be_bytes());
         Byte32Id::new(bytes)
     }
+}
+
+fn zero_peer_id() -> PeerId {
+    PeerId(Byte32Id::new([0; 32]))
 }
 
 impl MemoryPartStoreState {
@@ -179,49 +247,31 @@ impl MemoryPartStoreState {
         let Some(part) = self.parts.get(&part_id) else {
             return Vec::new();
         };
-        let level = path.level();
+        let (lower, upper) = obj_id_bounds_for_bucket(path);
         let mut items = Vec::new();
-        for (&obj_id, member) in &part.members {
-            if BuckId::from_obj_id(level, &obj_id) != path {
-                continue;
+        match upper {
+            Some(upper) => {
+                for (&obj_id, member) in part.members.range(lower..upper) {
+                    let cursor = member.removed_at.unwrap_or(member.changed_at);
+                    items.push((obj_id, cursor, member.removed_at.is_some()));
+                }
             }
-            let cursor = member.removed_at.unwrap_or(member.changed_at);
-            items.push((obj_id, cursor, member.removed_at.is_some()));
+            None => {
+                for (&obj_id, member) in part.members.range(lower..) {
+                    let cursor = member.removed_at.unwrap_or(member.changed_at);
+                    items.push((obj_id, cursor, member.removed_at.is_some()));
+                }
+            }
         }
-        items.sort_by_key(|(obj_id, _, _)| *obj_id);
         items
     }
 
     fn bucket_summary(&self, part_id: PartId, path: BuckId) -> BucketSummary {
-        let items = self.bucket_items_for_path(part_id, path);
-        let live_items: Vec<_> = items
-            .iter()
-            .filter_map(|(obj_id, _, dead)| {
-                if *dead {
-                    None
-                } else {
-                    let payload = self
-                        .objs
-                        .get(obj_id)
-                        .and_then(|obj| obj.payload.clone())
-                        .expect(ERROR_IMPOSSIBLE);
-                    Some((*obj_id, payload))
-                }
-            })
-            .collect();
-        let dead_items: Vec<_> = items
-            .iter()
-            .filter_map(|(obj_id, _, dead)| dead.then_some(*obj_id))
-            .collect();
-        let live_fp = Fingerprint::new(&FingerprintSeed::new(0x6c697665, 0x6275636b), &live_items);
-        let dead_fp = Fingerprint::new(&FingerprintSeed::new(0x64656164, 0x6275636b), &dead_items);
-        BucketSummary {
-            id: path,
-            len: items.len() as u32,
-            live_count: live_items.len() as u32,
-            fp: (live_fp.as_u64(), dead_fp.as_u64()),
-            changed_at: items.iter().map(|(_, cursor, _)| *cursor).max().unwrap_or(0),
-        }
+        self.parts
+            .get(&part_id)
+            .and_then(|part| part.bucket_stats.get(&path).cloned())
+            .unwrap_or_default()
+            .summary(path)
     }
 
     fn changed_bucket_summaries(
@@ -236,17 +286,13 @@ impl MemoryPartStoreState {
                 unkown_parts: vec![part_id],
             });
         };
-        let mut buckets: BTreeMap<BuckId, BucketSummary> = BTreeMap::new();
-        for &obj_id in part.members.keys() {
-            let buck_id = BuckId::from_obj_id(offset.level(), &obj_id);
-            buckets
-                .entry(buck_id)
-                .or_insert_with(|| self.bucket_summary(part_id, buck_id));
-        }
-        let mut buckets: Vec<_> = buckets
-            .into_iter()
-            .filter(|(buck_id, summary)| *buck_id >= offset && summary.changed_at > since)
-            .map(|(_, summary)| summary)
+        let mut buckets: Vec<_> = part
+            .bucket_stats
+            .range(offset..)
+            .filter(|(buck_id, summary)| {
+                buck_id.level() == offset.level() && summary.changed_at() > since
+            })
+            .map(|(&buck_id, summary)| summary.summary(buck_id))
             .collect();
         if buckets.is_empty() {
             return Ok(buckets);
@@ -269,6 +315,187 @@ impl MemoryPartStoreState {
             Ok(buckets)
         }
     }
+}
+
+fn apply_bucket_transition(
+    part: &mut PartState,
+    obj_id: ObjId,
+    cursor: CursorIndex,
+    old: BucketMemberKind<'_>,
+    new: BucketMemberKind<'_>,
+) {
+    for level in 0..=BuckId::MAX_LEVEL {
+        let buck_id = BuckId::from_obj_id(level, &obj_id);
+        let agg = part.bucket_stats.entry(buck_id).or_default();
+        agg.apply_transition(buck_id, obj_id, cursor, old, new);
+    }
+}
+
+fn obj_sync_version_locked(guard: &MemoryPartStoreState, obj_id: ObjId) -> u64 {
+    if let Some(obj) = guard.objs.get(&obj_id) {
+        return obj.sync_version;
+    }
+    guard
+        .tombstoned_objs
+        .get(&obj_id)
+        .map(|(_, version, _)| *version)
+        .unwrap_or_default()
+}
+
+fn obj_sync_stamp_locked(guard: &MemoryPartStoreState, obj_id: ObjId) -> ObjSyncStamp {
+    if let Some(obj) = guard.objs.get(&obj_id) {
+        return obj.sync_stamp.clone();
+    }
+    guard
+        .tombstoned_objs
+        .get(&obj_id)
+        .map(|(_, _, stamp)| stamp.clone())
+        .unwrap_or_default()
+}
+
+fn next_obj_sync_stamp_locked(
+    guard: &MemoryPartStoreState,
+    owner_peer_id: PeerId,
+    obj_id: ObjId,
+) -> ObjSyncStamp {
+    let current = obj_sync_stamp_locked(guard, obj_id);
+    ObjSyncStamp {
+        seq: current.seq.saturating_add(1),
+        origin: owner_peer_id,
+    }
+}
+
+fn upsert_obj_locked(
+    guard: &mut MemoryPartStoreState,
+    owner_peer_id: PeerId,
+    obj_id: ObjId,
+    payload: ObjPayload,
+    parts: Vec<PartId>,
+    sync_version: Option<u64>,
+    sync_stamp: Option<ObjSyncStamp>,
+) {
+    let event_payload = payload.clone();
+    guard.tombstoned_objs.remove(&obj_id);
+    let stamp =
+        sync_stamp.unwrap_or_else(|| next_obj_sync_stamp_locked(guard, owner_peer_id, obj_id));
+    let version = sync_version.unwrap_or(stamp.seq);
+
+    let obj = guard.objs.entry(obj_id).or_default();
+    obj.payload = Some(payload);
+    obj.parts.extend(&parts);
+    obj.sync_version = version;
+    obj.sync_stamp = stamp.clone();
+
+    for &part_id in &parts {
+        let part = guard.parts.entry(part_id).or_default();
+        let cursor = guard.global_cursor.get(part_id);
+        let old_state = part.members.get(&obj_id).cloned();
+        let old_kind = match old_state.as_ref() {
+            Some(state) if state.removed_at.is_some() => BucketMemberKind::Dead,
+            Some(state) => BucketMemberKind::Live(
+                state
+                    .payload
+                    .as_ref()
+                    .expect("live member must still have payload"),
+            ),
+            None => BucketMemberKind::Absent,
+        };
+        apply_bucket_transition(
+            part,
+            obj_id,
+            cursor,
+            old_kind,
+            BucketMemberKind::Live(&event_payload),
+        );
+        if let Some(old) = part.members.get_mut(&obj_id) {
+            if let Some(old_removed_at) = old.removed_at.take() {
+                part.bus.remove_evt(old_removed_at);
+            } else {
+                part.bus.remove_evt(old.changed_at);
+            }
+            old.changed_at = cursor;
+            old.payload = Some(event_payload.clone());
+        } else {
+            part.members.insert(
+                obj_id,
+                PartMemberState {
+                    payload: Some(event_payload.clone()),
+                    changed_at: cursor,
+                    removed_at: None,
+                },
+            );
+        }
+        part.latest_cursor = cursor;
+        part.bus
+            .queue_evt(PartEvent::Upserted(big_sync_core::rpc::ObjUpserted {
+                cursor,
+                part_id,
+                obj_id,
+                payload: event_payload.clone(),
+            }));
+        part.flush(&mut guard.global_cursor);
+    }
+}
+
+fn remove_obj_from_part_locked(
+    guard: &mut MemoryPartStoreState,
+    owner_peer_id: PeerId,
+    obj_id: ObjId,
+    part_id: PartId,
+    sync_version: Option<u64>,
+    sync_stamp: Option<ObjSyncStamp>,
+) {
+    let stamp =
+        sync_stamp.unwrap_or_else(|| next_obj_sync_stamp_locked(guard, owner_peer_id, obj_id));
+    let version = sync_version.unwrap_or(stamp.seq);
+    let part = guard.parts.entry(part_id).or_default();
+    let Some(old_state) = part.members.get(&obj_id).cloned() else {
+        return;
+    };
+    if old_state.removed_at.is_some() {
+        return;
+    }
+    let cursor = guard.global_cursor.get(part_id);
+    let old_payload = old_state
+        .payload
+        .as_ref()
+        .expect("live member must still have payload");
+    if let Some(old) = part.members.get_mut(&obj_id) {
+        part.bus.remove_evt(old.changed_at);
+        old.removed_at = Some(cursor);
+        old.changed_at = cursor;
+    }
+    apply_bucket_transition(
+        part,
+        obj_id,
+        cursor,
+        BucketMemberKind::Live(&old_payload),
+        BucketMemberKind::Dead,
+    );
+    part.latest_cursor = cursor;
+    part.bus
+        .queue_evt(PartEvent::Deleted(big_sync_core::rpc::ObjRemoved {
+            cursor,
+            part_id,
+            obj_id,
+        }));
+    let remove_obj = if let Some(obj) = guard.objs.get_mut(&obj_id) {
+        obj.parts.remove(&part_id);
+        obj.sync_version = version;
+        obj.sync_stamp = stamp.clone();
+        obj.parts.is_empty()
+    } else {
+        false
+    };
+    if remove_obj {
+        let cursor = part.latest_cursor;
+        guard
+            .tombstoned_objs
+            .insert(obj_id, (cursor, version, stamp));
+        guard.objs.remove(&obj_id);
+    }
+
+    part.flush(&mut guard.global_cursor);
 }
 
 #[async_trait]
@@ -550,47 +777,15 @@ impl HostPartitionStore for MemoryPartStore {
         tracing::debug!(obj_id = %obj_id, part_count = parts.len(), "memory store upsert obj");
         surelock::key::lock_scope(|key| {
             let (mut guard, _key) = key.lock(&self.inner);
-            let guard = &mut *guard;
-            let event_payload = payload.clone();
-            guard.tombstoned_objs.remove(&obj_id);
-
-            let obj = guard.objs.entry(obj_id).or_default();
-            obj.payload = Some(payload);
-            obj.parts.extend(&parts);
-
-            for &part_id in &parts {
-                let part = guard.parts.entry(part_id).or_default();
-                if let Some(old) = part.members.get_mut(&obj_id) {
-                    if let Some(old_removed_at) = old.removed_at.take() {
-                        part.bus.remove_evt(old_removed_at);
-                    } else {
-                        part.bus.remove_evt(old.changed_at);
-                    }
-                    let cursor = guard.global_cursor.get(part_id);
-                    old.changed_at = cursor;
-                    part.latest_cursor = cursor;
-                    part.bus.queue_evt(PartEvent::Upserted(big_sync_core::rpc::ObjUpserted {
-                        cursor,
-                        part_id,
-                        obj_id,
-                        payload: event_payload.clone(),
-                    }));
-                } else {
-                    let state = PartMemberState {
-                        changed_at: guard.global_cursor.get(part_id),
-                        removed_at: None,
-                    };
-                    part.latest_cursor = state.changed_at;
-                    part.bus.queue_evt(PartEvent::Upserted(big_sync_core::rpc::ObjUpserted {
-                        cursor: state.changed_at,
-                        part_id,
-                        obj_id,
-                        payload: event_payload.clone(),
-                    }));
-                    part.members.insert(obj_id, state);
-                }
-                part.flush(&mut guard.global_cursor);
-            }
+            upsert_obj_locked(
+                &mut *guard,
+                self.owner_peer_id,
+                obj_id,
+                payload,
+                parts,
+                None,
+                None,
+            );
             Ok(())
         })
     }
@@ -600,40 +795,63 @@ impl HostPartitionStore for MemoryPartStore {
         surelock::key::lock_scope(|key| {
             let (mut guard, _key) = key.lock(&self.inner);
             let guard = &mut *guard;
+            let stamp = next_obj_sync_stamp_locked(guard, self.owner_peer_id, obj_id);
+            let version = stamp.seq;
+            guard.tombstoned_objs.remove(&obj_id);
             let obj = guard.objs.entry(obj_id).or_default();
             let payload = obj.payload.clone().expect(ERROR_IMPOSSIBLE);
-            guard.tombstoned_objs.remove(&obj_id);
+            obj.sync_version = version;
+            obj.sync_stamp = stamp;
             obj.parts.extend(&parts);
             for &part_id in &parts {
                 let part = guard.parts.entry(part_id).or_default();
-                if let Some(old) = part.members.get_mut(&obj_id) {
-                    if old.removed_at.is_some() {
-                        if let Some(old_removed_at) = old.removed_at.take() {
+                let cursor = guard.global_cursor.get(part_id);
+                let old_state = part.members.get(&obj_id).cloned();
+                match old_state {
+                    Some(state) if state.removed_at.is_none() => continue,
+                    Some(state) => {
+                        if let Some(old_removed_at) = state.removed_at {
                             part.bus.remove_evt(old_removed_at);
                         }
-                        old.changed_at = guard.global_cursor.get(part_id);
-                        part.latest_cursor = old.changed_at;
-                        part.bus.queue_evt(PartEvent::Upserted(big_sync_core::rpc::ObjUpserted {
-                            cursor: old.changed_at,
-                            part_id,
+                        apply_bucket_transition(
+                            part,
                             obj_id,
-                            payload: payload.clone(),
-                        }));
+                            cursor,
+                            BucketMemberKind::Dead,
+                            BucketMemberKind::Live(&payload),
+                        );
+                        if let Some(old) = part.members.get_mut(&obj_id) {
+                            old.changed_at = cursor;
+                            old.removed_at = None;
+                            old.payload = Some(payload.clone());
+                        }
                     }
-                } else {
-                    let state = PartMemberState {
-                        changed_at: guard.global_cursor.get(part_id),
-                        removed_at: None,
-                    };
-                    part.latest_cursor = state.changed_at;
-                    part.bus.queue_evt(PartEvent::Upserted(big_sync_core::rpc::ObjUpserted {
-                        cursor: state.changed_at,
+                    None => {
+                        apply_bucket_transition(
+                            part,
+                            obj_id,
+                            cursor,
+                            BucketMemberKind::Absent,
+                            BucketMemberKind::Live(&payload),
+                        );
+                        part.members.insert(
+                            obj_id,
+                            PartMemberState {
+                                payload: Some(payload.clone()),
+                                changed_at: cursor,
+                                removed_at: None,
+                            },
+                        );
+                    }
+                }
+                part.latest_cursor = cursor;
+                part.bus
+                    .queue_evt(PartEvent::Upserted(big_sync_core::rpc::ObjUpserted {
+                        cursor,
                         part_id,
                         obj_id,
                         payload: payload.clone(),
                     }));
-                    part.members.insert(obj_id, state);
-                }
                 part.flush(&mut guard.global_cursor);
             }
             Ok(())
@@ -643,35 +861,14 @@ impl HostPartitionStore for MemoryPartStore {
         tracing::debug!(obj_id = %obj_id, part_id = %part_id, "memory store remove obj from part");
         surelock::key::lock_scope(|key| {
             let (mut guard, _key) = key.lock(&self.inner);
-            let guard = &mut *guard;
-            let part = guard.parts.entry(part_id).or_default();
-            if let Some(old) = part.members.get_mut(&obj_id) {
-                if old.removed_at.is_some() {
-                    return Ok(());
-                }
-                part.bus.remove_evt(old.changed_at);
-                let cursor = guard.global_cursor.get(part_id);
-                part.latest_cursor = cursor;
-                old.removed_at = Some(cursor);
-                part.bus.queue_evt(PartEvent::Deleted(big_sync_core::rpc::ObjRemoved {
-                    cursor,
-                    part_id,
-                    obj_id,
-                }));
-            }
-            let remove_obj = if let Some(obj) = guard.objs.get_mut(&obj_id) {
-                obj.parts.remove(&part_id);
-                obj.parts.is_empty()
-            } else {
-                false
-            };
-            if remove_obj {
-                let cursor = part.latest_cursor;
-                guard.tombstoned_objs.insert(obj_id, cursor);
-                guard.objs.remove(&obj_id);
-            }
-
-            part.flush(&mut guard.global_cursor);
+            remove_obj_from_part_locked(
+                &mut *guard,
+                self.owner_peer_id,
+                obj_id,
+                part_id,
+                None,
+                None,
+            );
             Ok(())
         })
     }
@@ -836,7 +1033,6 @@ impl HostPartitionStore for MemoryPartStore {
         tokio::spawn(fut);
         Ok(Ok(rx))
     }
-
 }
 
 impl MemoryPartStore {
@@ -844,6 +1040,20 @@ impl MemoryPartStore {
         surelock::key::lock_scope(|key| {
             let (guard, _key) = key.lock(&self.inner);
             Ok(guard.tombstoned_objs.contains_key(&obj_id))
+        })
+    }
+
+    pub async fn obj_sync_version(&self, obj_id: ObjId) -> Res<u64> {
+        surelock::key::lock_scope(|key| {
+            let (guard, _key) = key.lock(&self.inner);
+            Ok(obj_sync_version_locked(&guard, obj_id))
+        })
+    }
+
+    pub(crate) async fn obj_sync_stamp(&self, obj_id: ObjId) -> Res<ObjSyncStamp> {
+        surelock::key::lock_scope(|key| {
+            let (guard, _key) = key.lock(&self.inner);
+            Ok(obj_sync_stamp_locked(&guard, obj_id))
         })
     }
 
@@ -871,16 +1081,167 @@ impl MemoryPartStore {
         })
     }
 
-    pub async fn sync_upsert_obj(
+    #[tracing::instrument(
+        skip(self, payload, parts),
+        fields(obj_id = %obj_id, part_count = parts.len())
+    )]
+    pub(crate) async fn sync_upsert_obj(
         &self,
         obj_id: ObjId,
         payload: ObjPayload,
         parts: Vec<PartId>,
-    ) -> Res<()> {
-        if self.is_tombstoned(obj_id).await? {
-            return Ok(());
-        }
-        self.upsert_obj(obj_id, payload, parts).await
+        expected_stamp: ObjSyncStamp,
+        sync_version: u64,
+        sync_stamp: ObjSyncStamp,
+    ) -> Res<SyncMutationOutcome> {
+        surelock::key::lock_scope(|key| {
+            let (mut guard, _key) = key.lock(&self.inner);
+            let guard = &mut *guard;
+            if obj_sync_stamp_locked(guard, obj_id) != expected_stamp {
+                tracing::trace!(
+                    obj_id = %obj_id,
+                    part_count = parts.len(),
+                    expected_stamp = ?expected_stamp,
+                    "sync upsert stale"
+                );
+                return Ok(SyncMutationOutcome::Stale);
+            }
+            upsert_obj_locked(
+                guard,
+                self.owner_peer_id,
+                obj_id,
+                payload,
+                parts,
+                Some(sync_version),
+                Some(sync_stamp),
+            );
+            tracing::trace!(
+                obj_id = %obj_id,
+                part_count = guard
+                    .objs
+                    .get(&obj_id)
+                    .map(|obj| obj.parts.len())
+                    .unwrap_or_default(),
+                expected_stamp = ?expected_stamp,
+                "sync upsert applied"
+            );
+            Ok(SyncMutationOutcome::Applied)
+        })
+    }
+
+    #[tracing::instrument(
+        skip(self),
+        fields(obj_id = %obj_id, part_id = %part_id)
+    )]
+    pub(crate) async fn sync_remove_obj_from_part(
+        &self,
+        obj_id: ObjId,
+        part_id: PartId,
+        expected_stamp: ObjSyncStamp,
+        sync_version: u64,
+        sync_stamp: ObjSyncStamp,
+    ) -> Res<SyncMutationOutcome> {
+        surelock::key::lock_scope(|key| {
+            let (mut guard, _key) = key.lock(&self.inner);
+            let guard = &mut *guard;
+            if obj_sync_stamp_locked(guard, obj_id) != expected_stamp {
+                tracing::trace!(
+                    obj_id = %obj_id,
+                    part_id = %part_id,
+                    expected_stamp = ?expected_stamp,
+                    "sync remove stale"
+                );
+                return Ok(SyncMutationOutcome::Stale);
+            }
+            let Some(part) = guard.parts.get(&part_id) else {
+                tracing::trace!(
+                    obj_id = %obj_id,
+                    part_id = %part_id,
+                    expected_stamp = ?expected_stamp,
+                    "sync remove stale missing part"
+                );
+                return Ok(SyncMutationOutcome::Stale);
+            };
+            let Some(state) = part.members.get(&obj_id) else {
+                tracing::trace!(
+                    obj_id = %obj_id,
+                    part_id = %part_id,
+                    expected_stamp = ?expected_stamp,
+                    "sync remove stale missing member"
+                );
+                return Ok(SyncMutationOutcome::Stale);
+            };
+            if state.removed_at.is_some() {
+                tracing::trace!(
+                    obj_id = %obj_id,
+                    part_id = %part_id,
+                    expected_stamp = ?expected_stamp,
+                    "sync remove stale already removed"
+                );
+                return Ok(SyncMutationOutcome::Stale);
+            }
+            remove_obj_from_part_locked(
+                guard,
+                self.owner_peer_id,
+                obj_id,
+                part_id,
+                Some(sync_version),
+                Some(sync_stamp),
+            );
+            tracing::trace!(
+                obj_id = %obj_id,
+                part_id = %part_id,
+                expected_stamp = ?expected_stamp,
+                "sync remove applied"
+            );
+            Ok(SyncMutationOutcome::Applied)
+        })
+    }
+
+    #[tracing::instrument(
+        skip(self),
+        fields(obj_id = %obj_id)
+    )]
+    pub(crate) async fn sync_tombstone_obj(
+        &self,
+        obj_id: ObjId,
+        expected_stamp: ObjSyncStamp,
+        sync_version: u64,
+        sync_stamp: ObjSyncStamp,
+    ) -> Res<SyncMutationOutcome> {
+        surelock::key::lock_scope(|key| {
+            let (mut guard, _key) = key.lock(&self.inner);
+            let guard = &mut *guard;
+            if obj_sync_stamp_locked(guard, obj_id) != expected_stamp {
+                tracing::trace!(
+                    obj_id = %obj_id,
+                    expected_stamp = ?expected_stamp,
+                    "sync tombstone stale"
+                );
+                return Ok(SyncMutationOutcome::Stale);
+            }
+            let Some(parts) = guard
+                .objs
+                .get(&obj_id)
+                .map(|obj| obj.parts.iter().copied().collect::<Vec<_>>())
+            else {
+                if guard.tombstoned_objs.contains_key(&obj_id) {
+                    return Ok(SyncMutationOutcome::Applied);
+                }
+                return Ok(SyncMutationOutcome::Stale);
+            };
+            for part_id in parts {
+                remove_obj_from_part_locked(
+                    guard,
+                    self.owner_peer_id,
+                    obj_id,
+                    part_id,
+                    Some(sync_version),
+                    Some(sync_stamp.clone()),
+                );
+            }
+            Ok(SyncMutationOutcome::Applied)
+        })
     }
 }
 

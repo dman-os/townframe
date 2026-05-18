@@ -116,7 +116,8 @@ impl DecidePeerStrategyTask {
                 continue;
             }
             let mut offset = BuckId::ROOT;
-            let working_level = calc_working_level(part_summary.member_count, summary.deepest_bucket_level);
+            let working_level =
+                calc_working_level(part_summary.member_count, summary.deepest_bucket_level);
             loop {
                 let buckets = peer_rpc
                     .get_changed_buckets(GetChangedBucketsRequest {
@@ -126,13 +127,9 @@ impl DecidePeerStrategyTask {
                         since: last_peer_cursor,
                     })
                     .await??;
-                let filtered = crate::bucket::filter_buckets(
-                    part_id,
-                    working_level,
-                    buckets,
-                    &cx.part_store,
-                )
-                .await;
+                let filtered =
+                    crate::bucket::filter_buckets(part_id, working_level, buckets, &cx.part_store)
+                        .await;
                 let strat = match filtered {
                     crate::bucket::FilteredBuckets::Relist(buck_id) => {
                         offset = buck_id;
