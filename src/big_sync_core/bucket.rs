@@ -14,6 +14,7 @@ use crate::SyncJobEvt;
 use std::collections::BTreeMap;
 
 structstruck::strike! {
+    #[derive(Debug)]
     pub enum BucketMachineCommand {
         SyncObj {
             obj_id: ObjId,
@@ -50,6 +51,7 @@ structstruck::strike! {
         done_listing: bool,
         working_level: BuckLevel,
         next_page_offset: BuckId,
+        list_dispatched: bool,
         pending_buckets: BTreeMap<BuckId, BucketSummary>,
         working_buckets: Map<BuckId, struct WorkingBucketState {
             #![derive(Debug, Clone)]
@@ -68,8 +70,6 @@ structstruck::strike! {
         leaf_watermark: u64,
 
         active_obj_jobs: Map<ObjId, BuckId>,
-
-
 
         latest_cursor: u64,
         last_cursor: u64,
@@ -95,6 +95,11 @@ impl BucketMachine {
             .div_ceil(bucket_width.max(1))
             .max(1) as _;
         let leaf_watermark = bucket_width.max(1);
+        info!(
+            %part_id, %working_level, %bucket_width, %leaf_watermark,
+            %initial_working_set, %remote_size, %remote_size, 
+            "starting bucket sync machine"
+        );
         Self {
             // remote_depth,
             active_obj_jobs: default(),
@@ -108,9 +113,11 @@ impl BucketMachine {
             pending_buckets: default(),
             working_buckets: default(),
             working_level,
+            list_dispatched: default(),
         }
     }
 
+    #[tracing::instrument(skip_all)]
     pub fn on_bucket_page(
         &mut self,
         filtered_buckets: Vec<BucketSummary>,
@@ -119,6 +126,11 @@ impl BucketMachine {
         // special signal when FilteredBuckets::Done is returned from
         // filtered_buckets
         self.done_listing = filtered_buckets.is_empty() || self.working_level == 0;
+        self.list_dispatched = false;
+        info!(
+            len = %filtered_buckets.len(),
+            "XXX paged in buckets",
+        );
         for buck in filtered_buckets {
             if buck.id < self.next_page_offset {
                 unreachable!("remote RPC should return buckets in order");
@@ -126,7 +138,7 @@ impl BucketMachine {
             if buck.id.level() != self.working_level {
                 unreachable!("filtered_buckets must ensure that we get calc_working_level buckets");
             }
-            self.next_page_offset = buck.id;
+            self.next_page_offset = buck.id.increment();
             if buck.changed_at < self.last_cursor {
                 unreachable!("curiousity trap: the RPC should have prevented this");
             }
@@ -135,6 +147,7 @@ impl BucketMachine {
         self.schedule_leaf_requests(out);
     }
 
+    #[tracing::instrument(skip_all)]
     pub fn on_obj_page(
         &mut self,
         pages: Map<BuckId, BucketObjLeafPage>,
@@ -145,28 +158,39 @@ impl BucketMachine {
                 warn!("on_obj_page on an unexpected bucket: {buck_id:?}");
                 continue;
             };
+            info!(
+                "XXX paged in objects: {buck_id:?} {}  next_after={:?}",
+                page.entries.len(),
+                page.next_after
+            );
             state.leaf_after = page.next_after;
             state.leaf_seen += page.entries.len() as u64;
             state.leaf_inflight = false;
             state.leaf_exhausted = page.done || state.leaf_seen >= state.summary.len as u64;
-            state.pending_objs.extend(page.entries);
+            // state.pending_objs.extend(page.entries);
             // FIXME: the following code is uncessary and is too defensive
             // we should trust that the remote only returns items after the requested offset
-            //
-            // let mut seen = HashSet::new();
-            // seen.extend(state.pending_objs.iter().map(|obj| obj.obj_id));
-            // seen.extend(state.active_objs.keys().copied());
-            // seen.extend(self.active_obj_jobs.keys().copied());
-            // state.pending_objs.extend(
-            //     page.entries
-            //         .into_iter()
-            //         .filter(|obj| seen.insert(obj.obj_id)),
-            // );
+            // basically, we can get the same page twice if a failing leaf job
+            // is retried
+            let mut seen = HashSet::new();
+            seen.extend(state.pending_objs.iter().map(|obj| obj.obj_id));
+            seen.extend(state.active_objs.keys().copied());
+            seen.extend(self.active_obj_jobs.keys().copied());
+            state
+                .pending_objs
+                .extend(page.entries.into_iter().filter(|obj| {
+                    let allow = seen.insert(obj.obj_id);
+                    if !allow {
+                        // warn!("dupe obj_id seen");
+                    }
+                    allow
+                }));
         }
         self.queue_pending_objs(out);
         self.schedule_leaf_requests(out);
     }
 
+    #[tracing::instrument(skip_all)]
     pub fn on_obj_sync_completed(&mut self, evt: &SyncJobEvt, out: &mut Vec<BucketMachineCommand>) {
         let buck_id = BuckId::from_obj_id(self.working_level, &evt.obj_id);
         if let Some(state) = self.working_buckets.get_mut(&buck_id) {
@@ -215,17 +239,18 @@ impl BucketMachine {
         self.schedule_leaf_requests(out);
     }
 
+    #[tracing::instrument(skip_all)]
     fn schedule_leaf_requests(&mut self, out: &mut Vec<BucketMachineCommand>) {
         let budget =
             (Self::ACTIVE_SYNC_JOB_TARGET as usize).saturating_sub(self.active_obj_jobs.len());
 
         let mut selected = Vec::new();
         let mut estimated = 0usize;
-        self.working_buckets
-            .extract_if(|_, buck| {
-                buck.leaf_exhausted && buck.pending_objs.is_empty() && buck.active_objs.is_empty()
-            })
-            .last();
+        for (buck_id, buck) in self.working_buckets.extract_if(|_, buck| {
+            buck.leaf_exhausted && buck.pending_objs.is_empty() && buck.active_objs.is_empty()
+        }) {
+            info!(?buck_id, len = %buck.summary.len, "done with buck");
+        }
 
         let mut eligible_partials = self
             .working_buckets
@@ -269,7 +294,7 @@ impl BucketMachine {
                     summary,
                     leaf_after: default(),
                     leaf_seen: default(),
-                    leaf_inflight: default(),
+                    leaf_inflight: true,
                     leaf_exhausted: default(),
                     pending_objs: default(),
                     active_objs: default(),
@@ -279,13 +304,15 @@ impl BucketMachine {
         }
 
         if !selected.is_empty() {
+            let buckets = selected
+                    .into_iter()
+                    .map(|(buck_id, after)| LeafBucketRequest { buck_id, after })
+                    .collect();
+            info!(?buckets, "XXX leafing buckets");
             out.push(BucketMachineCommand::LeafBuckets {
                 part_id: self.part_id,
                 since: self.last_cursor,
-                buckets: selected
-                    .into_iter()
-                    .map(|(buck_id, after)| LeafBucketRequest { buck_id, after })
-                    .collect(),
+                buckets,
             });
         }
 
@@ -303,14 +330,17 @@ impl BucketMachine {
                 floor: self.latest_cursor,
                 part_id: self.part_id,
             });
-        } else if !self.done_listing
-            && self.working_buckets.len() < self.initial_working_set as usize
+        } else if !self.list_dispatched 
+            && !self.done_listing
+            && (self.working_buckets.len() + self.pending_buckets.len()) < self.initial_working_set as usize
         {
-            let offset = self.next_page_offset.increment();
+            let offset = self.next_page_offset;
             if offset.level() > self.working_level {
                 self.done_listing = true;
             } else {
                 self.done_listing = false;
+                self.list_dispatched = true;
+                info!(?offset, "XXX listing buckets");
                 out.push(BucketMachineCommand::ListBuckets {
                     since: self.last_cursor,
                     offset,

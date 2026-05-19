@@ -1040,6 +1040,7 @@ version = "0.1.0"
 dependencies = [
  "async-channel",
  "big_sync_core",
+ "blake3",
  "future_form",
  "futures-buffered",
  "irpc 0.12.0",
@@ -1052,6 +1053,7 @@ dependencies = [
  "tokio-util",
  "tracing",
  "utils_rs",
+ "uuid",
 ]
 
 [[package]]

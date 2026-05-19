@@ -402,8 +402,8 @@ impl BigSyncMachine {
                 }
             }
             BigSyncEvent::SyncStale(evt) => {
-                if self.tasks.stop_task(evt.task_id).is_some() {
-                    self.handle_sync_stale(evt);
+                if let Some(state) = self.tasks.stop_task(evt.task_id) {
+                    self.handle_sync_stale(evt, state.retry);
                 }
             }
         }
@@ -539,6 +539,13 @@ impl BigSyncMachine {
         }
     }
 
+    #[tracing::instrument(
+        skip_all, 
+        fields(
+            peer_id = %peer_id, 
+            task_id = %task_id,
+        )
+    )]
     async fn handle_set_peer_strat<K: FutureForm, S: PartStore<K>>(
         &mut self,
         task_id: TaskId,
@@ -622,8 +629,7 @@ impl BigSyncMachine {
                     PeerPartStrategy::Pending(old_task_id) => {
                         assert!(task_id == old_task_id, "fishy");
                     }
-                    _ => {
-                        // NOTE:
+                    PeerPartStrategy::Bucket(_) | PeerPartStrategy::Cursor(_) => {
                     }
                 }
             }
@@ -1031,14 +1037,12 @@ impl BigSyncMachine {
                     };
                     let deets = MachineTaskDeets::ListBuckets(task.clone());
                     let part = peer_state.parts.get_mut(&part_id).expect(ERROR_UNRECONIZED);
-                    match &mut part.strat {
-                        PeerPartStrategy::Bucket(state) => {
-                            let task_id = self.tasks.spawn_task(TaskSeed::Machine(deets));
-                            let old = state.active_list_tasks.insert(task_id, task);
-                            assert!(old.is_none(), "fishy");
-                        }
-                        _ => unreachable!(),
-                    }
+                    let PeerPartStrategy::Bucket(state) = &mut part.strat else {
+                        unreachable!()
+                    };
+                    let task_id = self.tasks.spawn_task(TaskSeed::Machine(deets));
+                    let old = state.active_list_tasks.insert(task_id, task);
+                    assert!(old.is_none(), "fishy");
                 }
                 BucketMachineCommand::LeafBuckets {
                     since,
@@ -1053,14 +1057,12 @@ impl BigSyncMachine {
                     };
                     let deets = MachineTaskDeets::LeafBuckets(task.clone());
                     let part = peer_state.parts.get_mut(&part_id).expect(ERROR_UNRECONIZED);
-                    match &mut part.strat {
-                        PeerPartStrategy::Bucket(state) => {
-                            let task_id = self.tasks.spawn_task(TaskSeed::Machine(deets));
-                            let old = state.active_leaf_tasks.insert(task_id, task);
-                            assert!(old.is_none(), "fishy");
-                        }
-                        _ => unreachable!(),
-                    }
+                    let PeerPartStrategy::Bucket(state) = &mut part.strat else {
+                        unreachable!()
+                    };
+                    let task_id = self.tasks.spawn_task(TaskSeed::Machine(deets));
+                    let old = state.active_leaf_tasks.insert(task_id, task);
+                    assert!(old.is_none(), "fishy");
                 }
                 BucketMachineCommand::UpgradeToCursor { floor: _, part_id } => {
                     let Some(PeerPartState {
@@ -1074,17 +1076,14 @@ impl BigSyncMachine {
                     part_store
                         .set_peer_part_cursor(peer_id, part_id, old.replay_cursor)
                         .await;
-                    peer_state
-                        .parts
-                        .insert(
-                            part_id,
-                            PeerPartState {
-                                strat: PeerPartStrategy::Cursor(CursorState {
-                                    replay_cursor: old.replay_cursor,
-                                }),
-                            },
-                        )
-                        .expect(ERROR_UNRECONIZED);
+                    peer_state.parts.insert(
+                        part_id,
+                        PeerPartState {
+                            strat: PeerPartStrategy::Cursor(CursorState {
+                                replay_cursor: old.replay_cursor,
+                            }),
+                        },
+                    );
                     self.stat_machine
                         .mark_peer_part_only_cursor_strat(peer_id, part_id, true);
                     refresh_peer_replaly = true;
@@ -1096,6 +1095,13 @@ impl BigSyncMachine {
         }
     }
 
+    #[tracing::instrument(
+        skip_all,
+        fields(
+            peer_id = %peer_id, 
+            task_id = %task_id,
+        )
+    )]
     async fn handle_list_buckets_result<K: FutureForm, S: PartStore<K>>(
         &mut self,
         task_id: TaskId,
@@ -1138,6 +1144,13 @@ impl BigSyncMachine {
         self.drain_bucket_machine_cmds(peer_id, part_store).await;
     }
 
+    #[tracing::instrument(
+        skip_all,
+        fields(
+            peer_id = %peer_id, 
+            task_id = %task_id,
+        )
+    )]
     async fn handle_leaf_buckets_result<K: FutureForm, S: PartStore<K>>(
         &mut self,
         task_id: TaskId,
@@ -1344,20 +1357,33 @@ impl BigSyncMachine {
         }
     }
 
-    fn handle_sync_stale(&mut self, evt: SyncStaleEvent) {
+    fn handle_sync_stale(&mut self, evt: SyncStaleEvent, retry: Retry) {
+        let deets = {
+            let Some(peer_state) = self.peers.get(&evt.peer_id) else {
+                assert!(self.all_seen_peer.contains(&evt.peer_id), "fishy");
+                return;
+            };
+            let Some(worker) = peer_state.sync_workers.get(&evt.obj_id) else {
+                return;
+            };
+            if worker.task_id != evt.task_id {
+                return;
+            }
+            SyncTaskDeets {
+                peer_id: evt.peer_id,
+                obj_id: evt.obj_id,
+                part_hints: worker.part_hints.clone(),
+            }
+        };
+
         let Some(peer_state) = self.peers.get_mut(&evt.peer_id) else {
-            assert!(self.all_seen_peer.contains(&evt.peer_id), "fishy");
             return;
         };
-        let Some(worker) = peer_state.sync_workers.get_mut(&evt.obj_id) else {
-            return;
-        };
-        if worker.task_id != evt.task_id {
-            return;
+        if let Some(worker) = peer_state.sync_workers.get_mut(&evt.obj_id) {
+            let task_id =
+                self.tasks
+                    .spawn_delayed_task(TaskSeed::Sync(deets), retry, Duration::from_secs(2));
+            worker.task_id = task_id;
         }
-        // the staleness must have happened due to external
-        // changes on the object?
-        panic!("curiosity trap");
-        // worker.task_id = self.tasks.spawn_task(TaskSeed::Sync(worker.deets.clone()));
     }
 }

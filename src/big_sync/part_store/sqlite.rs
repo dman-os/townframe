@@ -12,6 +12,8 @@ use future_form::{FutureForm, Sendable};
 use futures::future::BoxFuture;
 use sqlx::Row;
 use tokio::sync::mpsc;
+#[cfg(test)]
+use uuid::Uuid;
 
 #[derive(Clone)]
 pub struct SqlitePartStore {
@@ -192,7 +194,11 @@ impl SqlitePartStore {
             return Ok(Self::obj_from_blob(obj_id));
         }
 
+        #[cfg(test)]
+        let obj_id = crate::part_store::test_scoped_obj_id(obj);
+        #[cfg(not(test))]
         let id_value = Self::next_id(tx, "next_obj_id").await?;
+        #[cfg(not(test))]
         let obj_id = ObjId(Self::generated_id(2, id_value));
         sqlx::query(
             "INSERT INTO big_sync_objs(obj_id, scope_id, scoped_obj_id, payload_json)
@@ -924,6 +930,57 @@ mod tests {
             .await?;
         contract::assert_peer_cursor_roundtrip(&store, PeerId(Byte32Id::new([42; 32])), part_id)
             .await;
+        Ok(())
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn sqlite_part_store_root_bucket_contract() -> Res<()> {
+        let store = test_store().await?;
+        let part_id = store
+            .resolve_part(&ScopedPartRef::new(scope(), "core.docs"))
+            .await?;
+        let seed = big_sync_core::FingerprintSeed::new(1, 2);
+
+        let mut obj_ids = Vec::new();
+        for ii in 0..5u8 {
+            let obj = ScopedObjRef::new(scope(), format!("docs/{ii}"));
+            let obj_id = store.resolve_obj(&obj).await?;
+            HostPartitionStore::upsert_obj(
+                &store,
+                obj_id,
+                serde_json::json!({"phase": "present", "ii": ii}),
+                vec![part_id],
+            )
+            .await?;
+            obj_ids.push(obj_id);
+        }
+
+        crate::part_store::contract::assert_root_bucket_contract(
+            &store,
+            part_id,
+            seed,
+            &obj_ids,
+            &[],
+            2,
+        )
+        .await?;
+
+        let removed_obj_id = obj_ids[1];
+        HostPartitionStore::remove_obj_from_part(&store, removed_obj_id, part_id).await?;
+        let live_ids: Vec<_> = obj_ids
+            .iter()
+            .copied()
+            .filter(|obj_id| *obj_id != removed_obj_id)
+            .collect();
+        crate::part_store::contract::assert_root_bucket_contract(
+            &store,
+            part_id,
+            seed,
+            &live_ids,
+            &[removed_obj_id],
+            2,
+        )
+        .await?;
         Ok(())
     }
 

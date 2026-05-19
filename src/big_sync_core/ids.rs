@@ -212,13 +212,10 @@ impl BuckId {
 
     #[inline]
     pub fn increment(&self) -> Self {
-        if self.level() == Self::MAX_LEVEL {
-            return *self;
-        }
-        if self.index() == u16::MAX {
-            BuckId::new(self.level() + 1, 0)
+        if *self == Self::new(Self::MAX_LEVEL, u16::MAX) {
+            *self
         } else {
-            BuckId::new(self.level(), self.index() + 1)
+            Self(self.0 + 1)
         }
     }
 }

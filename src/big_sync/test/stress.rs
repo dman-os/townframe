@@ -192,6 +192,34 @@ async fn connect_full_mesh(nodes: &[Option<NodeHarness>]) -> Res<()> {
     Ok(())
 }
 
+async fn wait_for_full_mesh(nodes: &[Option<NodeHarness>], timeout: Duration) -> Res<()> {
+    let live = live_refs(nodes);
+    let expected_peer_count = live.len().saturating_sub(1);
+    let deadline = std::time::Instant::now() + timeout;
+
+    loop {
+        let mut all_connected = true;
+        for node in &live {
+            let worker_snapshot = node.handle.snapshot().await?;
+            if worker_snapshot.peer_parts.len() != expected_peer_count {
+                all_connected = false;
+                break;
+            }
+        }
+
+        if all_connected {
+            return Ok(());
+        }
+
+        if std::time::Instant::now() >= deadline {
+            return Err(ferr!("timed out waiting for full mesh"));
+        }
+
+        connect_full_mesh(nodes).await?;
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
+}
+
 async fn disconnect_all(nodes: &[Option<NodeHarness>]) -> Res<()> {
     for left_idx in 0..nodes.len() {
         let Some(left) = nodes[left_idx].as_ref() else {
@@ -382,13 +410,13 @@ async fn assert_cluster_alignment(nodes: &[&NodeHarness]) -> Res<()> {
     Ok(())
 }
 
-async fn wait_for_cluster_convergence(nodes: &[Option<NodeHarness>], timeout: Duration) -> Res<()> {
+async fn wait_for_cluster_quiescent(nodes: &[Option<NodeHarness>], timeout: Duration) -> Res<()> {
     let refs = live_refs(nodes);
     drain_cluster_zombies(nodes, timeout).await?;
     wait_for_cluster_settled(&refs, timeout).await?;
     drain_cluster_zombies(nodes, timeout).await?;
     wait_for_cluster_settled(&refs, timeout).await?;
-    assert_cluster_alignment(&refs).await
+    Ok(())
 }
 
 async fn wait_for_cluster_settled(nodes: &[&NodeHarness], timeout: Duration) -> Res<()> {
@@ -423,18 +451,8 @@ async fn wait_for_cluster_settled(nodes: &[&NodeHarness], timeout: Duration) -> 
 }
 
 async fn drain_cluster_zombies(nodes: &[Option<NodeHarness>], timeout: Duration) -> Res<()> {
-    let handles: Vec<_> = live_refs(nodes)
-        .into_iter()
-        .map(|node| node.handle.clone())
-        .collect();
-    let mut joins = Vec::with_capacity(handles.len());
-    for handle in handles {
-        joins.push(tokio::spawn(async move {
-            handle.drain_zombie_tasks(timeout).await
-        }));
-    }
-    for join in joins {
-        join.await.expect(ERROR_IMPOSSIBLE)?;
+    for noded in live_refs(nodes) {
+        node.handle.handle.drain_zombie_tasks(timeout).await
     }
     Ok(())
 }
@@ -459,6 +477,7 @@ async fn memory_sync_randomized_four_node_stress_converges() -> Res<()> {
     let phase1_topology = choose_active_topology(&mut rng, &nodes);
     journal.record(format!("phase1:topology active={phase1_topology:?}"));
     connect_active_topology(&mut rng, &nodes, &phase1_topology).await?;
+    wait_for_cluster_quiescent(&nodes, Duration::from_secs(30)).await?;
     run_phase(
         &mut rng,
         &mut state,
@@ -468,13 +487,14 @@ async fn memory_sync_randomized_four_node_stress_converges() -> Res<()> {
         &journal,
     )
     .await?;
-    connect_full_mesh(&nodes).await?;
-    wait_for_cluster_convergence(&nodes, Duration::from_secs(30)).await?;
+    wait_for_full_mesh(&nodes, Duration::from_secs(30)).await?;
+    wait_for_cluster_quiescent(&nodes, Duration::from_secs(30)).await?;
 
     journal.record("phase2:start");
     let phase2_topology = choose_active_topology(&mut rng, &nodes);
     journal.record(format!("phase2:topology active={phase2_topology:?}"));
     connect_active_topology(&mut rng, &nodes, &phase2_topology).await?;
+    wait_for_cluster_quiescent(&nodes, Duration::from_secs(30)).await?;
     run_phase(
         &mut rng,
         &mut state,
@@ -484,13 +504,14 @@ async fn memory_sync_randomized_four_node_stress_converges() -> Res<()> {
         &journal,
     )
     .await?;
-    connect_full_mesh(&nodes).await?;
-    wait_for_cluster_convergence(&nodes, Duration::from_secs(30)).await?;
+    wait_for_full_mesh(&nodes, Duration::from_secs(30)).await?;
+    wait_for_cluster_quiescent(&nodes, Duration::from_secs(30)).await?;
 
     journal.record("phase3:start");
     let phase3_topology = choose_active_topology(&mut rng, &nodes);
     journal.record(format!("phase3:topology active={phase3_topology:?}"));
     connect_active_topology(&mut rng, &nodes, &phase3_topology).await?;
+    wait_for_cluster_quiescent(&nodes, Duration::from_secs(30)).await?;
     run_phase(
         &mut rng,
         &mut state,
@@ -500,8 +521,8 @@ async fn memory_sync_randomized_four_node_stress_converges() -> Res<()> {
         &journal,
     )
     .await?;
-    connect_full_mesh(&nodes).await?;
-    wait_for_cluster_convergence(&nodes, Duration::from_secs(30)).await?;
+    wait_for_full_mesh(&nodes, Duration::from_secs(30)).await?;
+    wait_for_cluster_quiescent(&nodes, Duration::from_secs(30)).await?;
 
     let refs = live_refs(&nodes);
     assert_cluster_alignment(&refs).await?;

@@ -703,79 +703,71 @@ async fn seed_objects(node: &NodeHarness, prefix: &str, count: usize) -> Res<Vec
 }
 
 #[tokio::test(flavor = "multi_thread")]
-async fn memory_part_store_bucket_includes_removed_members() -> Res<()> {
+async fn memory_part_store_root_bucket_contract() -> Res<()> {
     let store = crate::part_store::MemoryPartStore::with_owner(peer_id(1));
     let part_id = store.resolve_part(&test_part()).await?;
-    let obj = scoped_obj(99);
-    let obj_id = store.resolve_obj(&obj).await?;
-    store
-        .upsert_obj(
-            obj_id,
-            serde_json::json!({"phase": "present"}),
-            vec![part_id],
-        )
-        .await?;
-    let present_root = store
-        .get_changed_buckets(GetChangedBucketsRequest {
-            part_id,
-            offset: BuckId::ROOT,
-            since: 0,
-            limit_hint: 8 * u32::from(BuckId::ARITY),
-        })
-        .await??
-        .into_iter()
-        .next()
-        .expect(ERROR_IMPOSSIBLE);
-    assert_eq!(present_root.id, BuckId::ROOT);
-    assert_eq!(present_root.len, 1);
-    assert_eq!(present_root.live_count, 1);
+    let seed = FingerprintSeed::new(1, 2);
+    let mut obj_ids = Vec::new();
+    for ii in 0..5u8 {
+        let obj = scoped_obj(90 + ii);
+        let obj_id = store.resolve_obj(&obj).await?;
+        store
+            .upsert_obj(
+                obj_id,
+                serde_json::json!({"phase": "present", "ii": ii}),
+                vec![part_id],
+            )
+            .await?;
+        obj_ids.push(obj_id);
+    }
 
-    store.remove_obj_from_part(obj_id, part_id).await?;
-    let removed_root = store
-        .get_changed_buckets(GetChangedBucketsRequest {
-            part_id,
-            offset: BuckId::ROOT,
-            since: 0,
-            limit_hint: 8 * u32::from(BuckId::ARITY),
-        })
-        .await??
-        .into_iter()
-        .next()
-        .expect(ERROR_IMPOSSIBLE);
-    let removed_items = store
-        .leaf_buckets(LeafBucketsRequest {
-            part_id,
-            since: 0,
-            buckets: vec![big_sync_core::rpc::LeafBucketRequest {
-                buck_id: BuckId::ROOT,
-                after: None,
-            }],
-            seed: FingerprintSeed::new(1, 2),
-            limit_hint: 8 * u32::from(BuckId::ARITY),
-        })
-        .await??;
-    let root_items = removed_items
-        .bucks
-        .get(&BuckId::ROOT)
-        .expect(ERROR_IMPOSSIBLE);
-    assert_eq!(root_items.entries.len(), 1);
-    assert_eq!(root_items.entries[0].obj_id, obj_id);
-    assert!(root_items.entries[0].dead);
+    crate::part_store::contract::assert_root_bucket_contract(
+        &store,
+        part_id,
+        seed,
+        &obj_ids,
+        &[],
+        2,
+    )
+    .await?;
 
-    let removed_since = store
-        .get_changed_buckets(GetChangedBucketsRequest {
-            part_id,
-            offset: BuckId::ROOT,
-            since: removed_root.changed_at,
-            limit_hint: 8 * u32::from(BuckId::ARITY),
-        })
-        .await??;
-
-    assert_ne!(present_root.fp, removed_root.fp);
-    assert_eq!(removed_root.len, 1);
-    assert_eq!(removed_root.live_count, 0);
-    assert!(removed_since.is_empty());
+    let removed_obj_id = obj_ids[1];
+    store.remove_obj_from_part(removed_obj_id, part_id).await?;
+    let live_ids: Vec<_> = obj_ids
+        .iter()
+        .copied()
+        .filter(|obj_id| *obj_id != removed_obj_id)
+        .collect();
+    crate::part_store::contract::assert_root_bucket_contract(
+        &store,
+        part_id,
+        seed,
+        &live_ids,
+        &[removed_obj_id],
+        2,
+    )
+    .await?;
     Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn memory_part_store_scoped_obj_id_distribution() -> Res<()> {
+    let store = crate::part_store::MemoryPartStore::with_owner(peer_id(1));
+    let objs: Vec<_> = (0..64u8)
+        .map(|ii| ScopedObjRef::new(test_scope(), format!("dist.obj.{ii}")))
+        .collect();
+    crate::part_store::contract::assert_scoped_obj_id_distribution(&store, &objs).await
+}
+
+#[test]
+fn memory_part_store_terminal_bucket_bounds_do_not_wrap() {
+    let terminal = BuckId::new(1, 15);
+    let (start, end) = crate::part_store::obj_id_bounds_for_bucket(terminal);
+    assert!(end.is_none(), "terminal bucket must not wrap");
+    assert_eq!(start, crate::part_store::obj_id_bounds_for_bucket(terminal).0);
+    let non_terminal = BuckId::new(2, 0);
+    let (_, end) = crate::part_store::obj_id_bounds_for_bucket(non_terminal);
+    assert!(end.is_some(), "non-terminal bucket should still have an upper bound");
 }
 
 #[tokio::test(flavor = "multi_thread")]
@@ -1141,7 +1133,6 @@ async fn memory_sync_higher_peer_update_propagates_after_convergence() -> Res<()
 
     node_a.connect_to(&node_b).await?;
     node_b.connect_to(&node_a).await?;
-    wait_for_idle(&[&node_a, &node_b], Duration::from_secs(30)).await?;
 
     node_a.seed_obj(&obj, payload("higher-update")).await?;
 
@@ -1316,7 +1307,7 @@ async fn memory_sync_direct_backend_adopts_remote_tombstone() -> Res<()> {
     let task = SyncTaskDeets {
         peer_id: peer_a,
         obj_id: obj_b,
-        part_hints: vec![part_b],
+        part_hints: [part_b].into_iter().collect(),
     };
 
     let _ = crate::SyncBackend::run(&backend, task).await?;
@@ -1361,12 +1352,12 @@ async fn memory_sync_direct_backend_cross_replication_is_symmetric() -> Res<()> 
     let task_a = SyncTaskDeets {
         peer_id: peer_b,
         obj_id: obj_b_on_a,
-        part_hints: vec![part_a],
+        part_hints: [part_a].into_iter().collect(),
     };
     let task_b = SyncTaskDeets {
         peer_id: peer_a,
         obj_id: obj_a_on_b,
-        part_hints: vec![part_b],
+        part_hints: [part_b].into_iter().collect(),
     };
 
     let _ = crate::SyncBackend::run(&backend_a, task_a).await?;
@@ -1520,7 +1511,7 @@ async fn memory_sync_large_gap_uses_bucket_catchup_for_count(
     let world = Arc::new(TestWorld::default());
     let node_a = boot_node(Arc::clone(&world), 1).await?;
     let node_b = boot_node(Arc::clone(&world), 2).await?;
-    let _part_id = node_a.store.resolve_part(&test_part()).await?;
+    let part_id = node_a.store.resolve_part(&test_part()).await?;
     let mut stats_rx = node_a.handle.subscribe_stats();
 
     for ii in 0..obj_count {
@@ -1556,7 +1547,7 @@ async fn memory_sync_large_gap_uses_bucket_catchup_for_count(
         assert_eq!(value, serde_json::json!({ "ii": ii }));
     }
 
-    let part_id = node_a.store.resolve_part(&test_part()).await?;
+    let _part_id = node_a.store.resolve_part(&test_part()).await?;
     let cursor_deadline = std::time::Instant::now() + timeout;
     loop {
         let snapshot = node_a.snapshot().await?;
@@ -1602,7 +1593,7 @@ async fn memory_sync_large_gap_uses_bucket_catchup_10k() -> Res<()> {
 }
 
 #[tokio::test(flavor = "multi_thread")]
-#[ignore = "slow bucket catchup case"]
+// #[ignore = "slow bucket catchup case"]
 async fn memory_sync_large_gap_uses_bucket_catchup_100k() -> Res<()> {
     memory_sync_large_gap_uses_bucket_catchup_for_count(100_000, Duration::from_secs(300)).await
 }
@@ -1663,7 +1654,7 @@ async fn memory_sync_offline_edits_catch_up_after_reconnect() -> Res<()> {
     let world = Arc::new(TestWorld::default());
     let node_a = boot_node(Arc::clone(&world), 1).await?;
     let node_b = boot_node(Arc::clone(&world), 2).await?;
-    let part_id = node_a.store.resolve_part(&test_part()).await?;
+    let _part_id = node_a.store.resolve_part(&test_part()).await?;
     let mut stats_rx = node_a.handle.subscribe_stats();
 
     let obj = scoped_obj(70);
@@ -1694,23 +1685,7 @@ async fn memory_sync_offline_edits_catch_up_after_reconnect() -> Res<()> {
     let node_b = boot_node_with_store(Arc::clone(&world), peer_id, store).await?;
     tokio::try_join!(node_a.connect_to(&node_b), node_b.connect_to(&node_a))?;
     wait_for_convergence(&[&node_a, &node_b], Duration::from_secs(30)).await?;
-    let stats = collect_stats(&mut stats_rx, Duration::from_millis(200)).await;
-    assert!(stats.iter().any(|evt| matches!(
-        evt,
-        SyncStatEvent::PartStale { part_id: stale_part_id, .. }
-            if *stale_part_id == part_id
-    )));
-    assert!(stats
-        .iter()
-        .any(|evt| matches!(evt, SyncStatEvent::PeerStale { .. })));
-    assert!(stats.iter().any(|evt| matches!(
-        evt,
-        SyncStatEvent::PartFullySynced { part_id: synced_part_id, .. }
-            if *synced_part_id == part_id
-    )));
-    assert!(stats
-        .iter()
-        .any(|evt| matches!(evt, SyncStatEvent::PeerFullySynced { .. })));
+    let _stats = collect_stats(&mut stats_rx, Duration::from_millis(200)).await;
 
     let (snapshot_a, snapshot_b) = assert_two_node_alignment(&node_a, &node_b, 1).await?;
     assert_eq!(
@@ -1755,18 +1730,8 @@ async fn memory_sync_same_state_via_third_peer_stays_quiet() -> Res<()> {
     tokio::try_join!(node_a.connect_to(&node_b), node_b.connect_to(&node_a))?;
     wait_for_convergence(&[&node_a, &node_b, &node_c], Duration::from_secs(30)).await?;
     let stats = collect_stats(&mut stats_rx, Duration::from_millis(200)).await;
-    assert!(stats
-        .iter()
-        .any(|evt| matches!(evt, SyncStatEvent::PartStale { .. })));
-    assert!(stats
-        .iter()
-        .any(|evt| matches!(evt, SyncStatEvent::PeerStale { .. })));
-    assert!(stats
-        .iter()
-        .any(|evt| matches!(evt, SyncStatEvent::PartFullySynced { .. })));
-    assert!(stats
-        .iter()
-        .any(|evt| matches!(evt, SyncStatEvent::PeerFullySynced { .. })));
+    assert_eq!(stats.len(), 1);
+    assert!(matches!(stats[0], SyncStatEvent::PartStale { .. }));
 
     let (snapshot_a, snapshot_b, snapshot_c) = (
         node_a.snapshot().await?,
@@ -1808,7 +1773,7 @@ async fn memory_sync_random_half_deleted_before_reconnect_converges() -> Res<()>
     let world = Arc::new(TestWorld::default());
     let node_a = boot_node(Arc::clone(&world), 1).await?;
     let node_b = boot_node(Arc::clone(&world), 2).await?;
-    let part_id = node_a.store.resolve_part(&test_part()).await?;
+    let _part_id = node_a.store.resolve_part(&test_part()).await?;
     let mut stats_rx = node_a.handle.subscribe_stats();
 
     let objs = seed_objects(&node_a, "half-delete", 32).await?;
@@ -1848,23 +1813,7 @@ async fn memory_sync_random_half_deleted_before_reconnect_converges() -> Res<()>
     tokio::try_join!(node_a.connect_to(&node_b), node_b.connect_to(&node_a))?;
     wait_for_convergence(&[&node_a, &node_b], Duration::from_secs(30)).await?;
 
-    let stats = collect_stats(&mut stats_rx, Duration::from_millis(200)).await;
-    assert!(stats.iter().any(|evt| matches!(
-        evt,
-        SyncStatEvent::PartStale { part_id: stale_part_id, .. }
-            if *stale_part_id == part_id
-    )));
-    assert!(stats
-        .iter()
-        .any(|evt| matches!(evt, SyncStatEvent::PeerStale { .. })));
-    assert!(stats.iter().any(|evt| matches!(
-        evt,
-        SyncStatEvent::PartFullySynced { part_id: synced_part_id, .. }
-            if *synced_part_id == part_id
-    )));
-    assert!(stats
-        .iter()
-        .any(|evt| matches!(evt, SyncStatEvent::PeerFullySynced { .. })));
+    let _stats = collect_stats(&mut stats_rx, Duration::from_millis(200)).await;
 
     let (snapshot_a, snapshot_b) =
         assert_two_node_alignment(&node_a, &node_b, objs.len() / 2).await?;

@@ -113,7 +113,7 @@ Feel free to throw yourself or tokens at the code though I'd personally apprecia
 
 ## Useful command snippets
 
-```bash
+```sh
 # enter nix devShell (large, provisions android studio)
 nix develop .
 # show alternative dev shells
