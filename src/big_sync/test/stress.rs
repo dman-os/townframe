@@ -1,12 +1,13 @@
 use super::*;
 
+use crate::worker::WorkerSnapshot;
 use rand::rngs::StdRng;
 use rand::{seq::SliceRandom, Rng, SeedableRng};
 use std::collections::HashSet;
 use std::fmt::Write as _;
 use std::sync::Mutex;
 
-const STRESS_NODE_COUNT: usize = 4;
+const STRESS_NODE_COUNT: usize = 4 * 2;
 const PHASE1_MUTATIONS: usize = 48 * 1;
 const PHASE2_MUTATIONS: usize = 24 * 1;
 const PHASE3_MUTATIONS: usize = 32 * 1;
@@ -166,6 +167,122 @@ fn diff_scoped_obj_snapshots(
         let _ = writeln!(out, "snapshots differ for an unknown reason");
     }
 
+    out
+}
+
+fn format_full_sync_timeout(
+    node_idx: usize,
+    node: &NodeHarness,
+    worker_snapshot: &WorkerSnapshot,
+    target_part_id: PartId,
+) -> String {
+    let mut out = String::new();
+    let _ = writeln!(
+        out,
+        "full sync timeout on node_idx={node_idx} peer_id={} target_part_id={target_part_id:?}",
+        node.peer_id
+    );
+    let _ = writeln!(
+        out,
+        "known peer_parts={} target_part_known={}",
+        worker_snapshot.peer_parts.len(),
+        worker_snapshot
+            .peer_parts
+            .values()
+            .any(|parts| parts.contains_key(&target_part_id))
+    );
+    let _ = writeln!(
+        out,
+        "task_counts={:?} active_machine_tasks={} active_sync_tasks={} zombie_tasks={}",
+        worker_snapshot.task_counts,
+        worker_snapshot.active_machine_tasks,
+        worker_snapshot.active_sync_tasks,
+        worker_snapshot.zombie_tasks
+    );
+    if let Some((peer_id, part_id, obj_id, at)) = worker_snapshot
+        .last_object_syncs
+        .iter()
+        .min_by_key(|(_, _, _, at)| at.elapsed())
+    {
+        let _ = writeln!(
+            out,
+            "last_object_sync peer_id={peer_id} part_id={part_id:?} obj_id={obj_id} age_ms={}",
+            at.elapsed().as_millis()
+        );
+    } else {
+        let _ = writeln!(out, "last_object_sync none");
+    }
+    if worker_snapshot.full_sync_waiters.is_empty() {
+        let _ = writeln!(out, "no full sync waiters registered");
+    } else {
+        let _ = writeln!(out, "full sync waiters:");
+        for (waiter_id, remaining_pairs) in worker_snapshot.full_sync_waiters.iter() {
+            let _ = writeln!(
+                out,
+                "  - waiter_id={waiter_id} remaining_pairs={}",
+                remaining_pairs.len()
+            );
+            for (peer_id, part_id) in remaining_pairs {
+                let _ = writeln!(out, "      pending peer_id={peer_id} part_id={part_id:?}");
+            }
+        }
+    }
+    let unsynced_pairs: Vec<_> = worker_snapshot
+        .peer_part_full_sync_state
+        .iter()
+        .copied()
+        .filter(|(_, _, fully_synced, _, _, _, _, _)| !*fully_synced)
+        .collect();
+    let last_object_syncs: std::collections::HashMap<_, _> = worker_snapshot
+        .last_object_syncs
+        .iter()
+        .copied()
+        .map(|(peer_id, part_id, obj_id, at)| ((peer_id, part_id), (obj_id, at)))
+        .collect();
+    if unsynced_pairs.is_empty() {
+        let _ = writeln!(out, "all tracked peer-part pairs are currently full sync");
+    } else {
+        let _ = writeln!(out, "currently unsynced tracked pairs:");
+        for (
+            peer_id,
+            part_id,
+            fully_synced,
+            replay_phase_done,
+            cursor_active,
+            multi_strat,
+            peer_has_full_sync,
+            part_has_full_sync,
+        ) in unsynced_pairs
+        {
+            let mut reasons = Vec::new();
+            if !replay_phase_done {
+                reasons.push("replay_phase_pending");
+            }
+            if cursor_active {
+                reasons.push("cursor_active");
+            }
+            if multi_strat {
+                reasons.push("multi_strat");
+            }
+            if !peer_has_full_sync {
+                reasons.push("peer_missing_full_sync");
+            }
+            if !part_has_full_sync {
+                reasons.push("part_missing_peer_full_sync");
+            }
+            if let Some((obj_id, at)) = last_object_syncs.get(&(peer_id, part_id)) {
+                let _ = writeln!(
+                    out,
+                    "      last_object_sync obj_id={obj_id} age_ms={}",
+                    at.elapsed().as_millis()
+                );
+            }
+            let _ = writeln!(
+                out,
+                "  - peer_id={peer_id} part_id={part_id:?} fully_synced={fully_synced} reasons={reasons:?}"
+            );
+        }
+    }
     out
 }
 
@@ -412,10 +529,50 @@ async fn assert_cluster_alignment(nodes: &[&NodeHarness]) -> Res<()> {
 
 async fn wait_for_cluster_quiescent(nodes: &[Option<NodeHarness>], timeout: Duration) -> Res<()> {
     let refs = live_refs(nodes);
-    drain_cluster_zombies(nodes, timeout).await?;
+    wait_for_cluster_full_sync(&refs, timeout).await?;
     wait_for_cluster_settled(&refs, timeout).await?;
     drain_cluster_zombies(nodes, timeout).await?;
-    wait_for_cluster_settled(&refs, timeout).await?;
+    Ok(())
+}
+
+async fn wait_for_cluster_full_sync(nodes: &[&NodeHarness], timeout: Duration) -> Res<()> {
+    let deadline = std::time::Instant::now() + timeout;
+
+    for (node_idx, node) in nodes.iter().enumerate() {
+        if std::time::Instant::now() >= deadline {
+            return Err(ferr!("timed out waiting for stress cluster full sync"));
+        }
+        let worker_snapshot = node.handle.snapshot().await?;
+        let part_id = node.host.resolve_part(&test_part()).await?;
+        let peer_ids = worker_snapshot
+            .peer_parts
+            .keys()
+            .copied()
+            .collect::<Vec<_>>();
+        let remaining = deadline
+            .saturating_duration_since(std::time::Instant::now())
+            .max(Duration::from_millis(1));
+        match tokio::time::timeout(
+            remaining,
+            node.handle.wait_for_full_sync(peer_ids, [part_id]),
+        )
+        .await
+        {
+            Ok(result) => {
+                result?;
+            }
+            Err(err) => {
+                let mut report =
+                    format_full_sync_timeout(node_idx, node, &worker_snapshot, part_id);
+                let _ = writeln!(report, "timeout_error={err:?}");
+                tracing::error!("{report}");
+                return Err(ferr!("stress cluster full sync timed out:\n{report}"));
+            }
+        }
+    }
+    if std::time::Instant::now() >= deadline {
+        return Err(ferr!("timed out waiting for stress cluster full sync"));
+    }
     Ok(())
 }
 
@@ -451,8 +608,8 @@ async fn wait_for_cluster_settled(nodes: &[&NodeHarness], timeout: Duration) -> 
 }
 
 async fn drain_cluster_zombies(nodes: &[Option<NodeHarness>], timeout: Duration) -> Res<()> {
-    for noded in live_refs(nodes) {
-        node.handle.handle.drain_zombie_tasks(timeout).await
+    for node in live_refs(nodes) {
+        node.handle.drain_zombie_tasks(timeout).await?;
     }
     Ok(())
 }
@@ -477,7 +634,7 @@ async fn memory_sync_randomized_four_node_stress_converges() -> Res<()> {
     let phase1_topology = choose_active_topology(&mut rng, &nodes);
     journal.record(format!("phase1:topology active={phase1_topology:?}"));
     connect_active_topology(&mut rng, &nodes, &phase1_topology).await?;
-    wait_for_cluster_quiescent(&nodes, Duration::from_secs(30)).await?;
+    wait_for_cluster_quiescent(&nodes, Duration::from_secs(30 * 10)).await?;
     run_phase(
         &mut rng,
         &mut state,

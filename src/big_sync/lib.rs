@@ -154,4 +154,12 @@ where
     pub async fn remove_peer(&self, peer_id: PeerId) -> Res<()> {
         self.worker.remove_peer(peer_id).await
     }
+
+    pub async fn wait_for_full_sync(
+        &self,
+        peer_ids: impl IntoIterator<Item = PeerId>,
+        part_ids: impl IntoIterator<Item = PartId>,
+    ) -> Res<()> {
+        self.worker.wait_for_full_sync(peer_ids, part_ids).await
+    }
 }

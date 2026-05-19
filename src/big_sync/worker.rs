@@ -29,6 +29,15 @@ pub enum BigSyncWorkerError {
         backend_id: BackendId,
         part_id: PartId,
     },
+    /// Unknown peer {peer_id} in full sync waiter request
+    UnknownPeer {
+        peer_id: PeerId,
+    },
+    /// Unknown part {part_id} for peer {peer_id} in full sync waiter request
+    UnknownPart {
+        peer_id: PeerId,
+        part_id: PartId,
+    },
 }
 
 structstruck::strike! {
@@ -43,6 +52,12 @@ enum BigSyncWorkerMsg {
         RemovePeer {
             peer_id: PeerId,
             resp: tokio::sync::oneshot::Sender<()>,
+        },
+        WaitForFullSync {
+            waiter_id: u64,
+            peer_ids: std::collections::HashSet<PeerId>,
+            part_ids: std::collections::HashSet<PartId>,
+            resp: tokio::sync::oneshot::Sender<Result<(), BigSyncWorkerError>>,
         },
         #[cfg(test)]
         ReapZombieTasks {
@@ -63,7 +78,7 @@ pub trait SyncBackend: Send + Sync + 'static {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum SyncTaskRunOutcome {
-    Completions(Vec<SyncTaskCompletion>),
+    Completion(SyncTaskCompletion),
     Stale,
 }
 
@@ -78,6 +93,9 @@ pub struct StopToken {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct WorkerSnapshot {
     pub peer_parts: HashMap<PeerId, HashMap<PartId, BackendId>>,
+    pub full_sync_waiters: HashMap<u64, Vec<(PeerId, PartId)>>,
+    pub peer_part_full_sync_state: Vec<(PeerId, PartId, bool, bool, bool, bool, bool, bool)>,
+    pub last_object_syncs: Vec<(PeerId, PartId, big_sync_core::ObjId, std::time::Instant)>,
     pub task_counts: TaskCounts,
     pub active_machine_tasks: usize,
     pub active_sync_tasks: usize,
@@ -147,6 +165,27 @@ impl BigSyncWorkerHandle {
             .wrap_err(ERROR_CHANNEL)?;
         tracing::debug!(peer_id = %peer_id, "queue remove peer");
         resp_rx.await.wrap_err(ERROR_CHANNEL)?;
+        Ok(())
+    }
+
+    pub async fn wait_for_full_sync(
+        &self,
+        peer_ids: impl IntoIterator<Item = PeerId>,
+        part_ids: impl IntoIterator<Item = PartId>,
+    ) -> Res<()> {
+        let peer_ids: std::collections::HashSet<_> = peer_ids.into_iter().collect();
+        let part_ids: std::collections::HashSet<_> = part_ids.into_iter().collect();
+        let (resp_tx, resp_rx) = tokio::sync::oneshot::channel();
+        self.host_tx
+            .send(BigSyncWorkerMsg::WaitForFullSync {
+                waiter_id: rand::random(),
+                peer_ids,
+                part_ids,
+                resp: resp_tx,
+            })
+            .await
+            .wrap_err(ERROR_CHANNEL)?;
+        resp_rx.await.wrap_err(ERROR_CHANNEL)??;
         Ok(())
     }
 
@@ -225,6 +264,7 @@ pub fn spawn_big_sync_worker(
         task_tx,
         task_rx,
         stats_tx: stats_tx.clone(),
+        full_sync_waiters: default(),
 
         rpc_clients: default(),
         tasks: default(),
@@ -325,6 +365,8 @@ struct BigSyncWorker {
     task_rx: mpsc::Receiver<MachineTaskMsg>,
     task_tx: mpsc::Sender<MachineTaskMsg>,
     stats_tx: tokio::sync::broadcast::Sender<big_sync_core::SyncStatEvent>,
+    full_sync_waiters:
+        HashMap<u64, tokio::sync::oneshot::Sender<Result<(), BigSyncWorkerError>>>,
 
     tasks: HashMap<TaskId, TaskDeets>,
     peers: HashMap<PeerId, PeerState>,
@@ -439,6 +481,11 @@ impl BigSyncWorker {
             }
             self.sweep_finished_zombies();
             for event in self.machine.drain_stat_evts() {
+                if let big_sync_core::SyncStatEvent::FullSyncWaiterSatisfied { waiter_id } = event {
+                    if let Some(resp) = self.full_sync_waiters.remove(&waiter_id) {
+                        let _ = resp.send(Ok(()));
+                    }
+                }
                 let _ = self.stats_tx.send(event);
             }
         }
@@ -495,6 +542,41 @@ impl BigSyncWorker {
                 tracing::debug!(peer_id = %peer_id, "accept remove peer");
                 evt
             }
+            BigSyncWorkerMsg::WaitForFullSync {
+                waiter_id,
+                peer_ids,
+                part_ids,
+                resp,
+            } => {
+                for peer_id in &peer_ids {
+                    let Some(peer_state) = self.peers.get(peer_id) else {
+                        resp.send(Err(BigSyncWorkerError::UnknownPeer {
+                            peer_id: *peer_id,
+                        }))
+                        .inspect_err(|_| warn!(ERROR_CALLER))
+                        .ok();
+                        return Ok(LoopAction::Cont);
+                    };
+                    for part_id in &part_ids {
+                        if !peer_state.parts.contains_key(part_id) {
+                            resp.send(Err(BigSyncWorkerError::UnknownPart {
+                                peer_id: *peer_id,
+                                part_id: *part_id,
+                            }))
+                            .inspect_err(|_| warn!(ERROR_CALLER))
+                            .ok();
+                            return Ok(LoopAction::Cont);
+                        }
+                    }
+                }
+                let old = self.full_sync_waiters.insert(waiter_id, resp);
+                assert!(old.is_none(), "fishy");
+                BigSyncEvent::WaitForFullSync(big_sync_core::WaitForFullSyncEvent {
+                    waiter_id,
+                    peer_ids,
+                    part_ids,
+                })
+            }
             #[cfg(test)]
             BigSyncWorkerMsg::ReapZombieTasks { timeout, resp } => {
                 tracing::debug!(
@@ -514,6 +596,9 @@ impl BigSyncWorker {
                         .iter()
                         .map(|(&peer_id, peer_state)| (peer_id, peer_state.parts.clone()))
                         .collect(),
+                    full_sync_waiters: self.machine.debug_full_sync_waiters(),
+                    peer_part_full_sync_state: self.machine.debug_peer_part_full_sync_state(),
+                    last_object_syncs: self.machine.debug_last_object_syncs(),
                     task_counts: self.machine.task_counts(),
                     active_machine_tasks: self.tasks.len(),
                     active_sync_tasks: self.sync_tasks.len(),
@@ -742,23 +827,56 @@ impl SyncTaskWorker {
         let _ = self
             .cancel_token
             .run_until_cancelled(async move {
+                tracing::info!(
+                    task_id = self.task.id,
+                    peer_id = %self.task.deets.peer_id,
+                    obj_id = %self.task.deets.obj_id,
+                    part_hint_count = self.task.deets.part_hints.len(),
+                    "XXX enter sync worker"
+                );
+                let started_at = std::time::Instant::now();
                 let res = self.backend.run(self.task.deets.clone()).await;
-                match res {
-                    Ok(SyncTaskRunOutcome::Completions(completions)) => {
-                        for completion in completions {
-                            self.host_tx
-                                .send(BigSyncEvent::SyncCompleted(
-                                    big_sync_core::SyncCompletedEvent {
-                                        task_id: self.task.id,
-                                        peer_id: self.task.deets.peer_id,
-                                        completion,
-                                    },
-                                ))
-                                .await
-                                .expect(ERROR_CHANNEL);
+                tracing::info!(
+                    task_id = self.task.id,
+                    peer_id = %self.task.deets.peer_id,
+                    obj_id = %self.task.deets.obj_id,
+                    elapsed_ms = started_at.elapsed().as_millis(),
+                    result = match &res {
+                        Ok(SyncTaskRunOutcome::Completion(completion)) => {
+                            format!("completion={:?}", completion.deets)
                         }
+                        Ok(SyncTaskRunOutcome::Stale) => "stale".to_string(),
+                        Err(err) => format!("error={err}"),
+                    },
+                    "XXX exit sync worker backend"
+                );
+                match res {
+                    Ok(SyncTaskRunOutcome::Completion(completion)) => {
+                        tracing::info!(
+                            task_id = self.task.id,
+                            peer_id = %self.task.deets.peer_id,
+                            obj_id = %completion.obj_id,
+                            deets = ?completion.deets,
+                            "XXX sync worker send completion"
+                        );
+                        self.host_tx
+                            .send(BigSyncEvent::SyncCompleted(
+                                big_sync_core::SyncCompletedEvent {
+                                    task_id: self.task.id,
+                                    peer_id: self.task.deets.peer_id,
+                                    completion,
+                                },
+                            ))
+                            .await
+                            .expect(ERROR_CHANNEL);
                     }
                     Ok(SyncTaskRunOutcome::Stale) => {
+                        tracing::info!(
+                            task_id = self.task.id,
+                            peer_id = %self.task.deets.peer_id,
+                            obj_id = %self.task.deets.obj_id,
+                            "XXX sync worker send stale"
+                        );
                         self.host_tx
                             .send(BigSyncEvent::SyncStale(big_sync_core::SyncStaleEvent {
                                 task_id: self.task.id,
@@ -769,6 +887,13 @@ impl SyncTaskWorker {
                             .expect(ERROR_CHANNEL);
                     }
                     Err(err) => {
+                        tracing::info!(
+                            task_id = self.task.id,
+                            peer_id = %self.task.deets.peer_id,
+                            obj_id = %self.task.deets.obj_id,
+                            error = %err,
+                            "XXX sync worker send failure"
+                        );
                         self.host_tx
                             .send(BigSyncEvent::SyncFailed(big_sync_core::SyncFailedEvent {
                                 task_id: self.task.id,

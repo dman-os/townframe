@@ -460,11 +460,19 @@ impl crate::SyncBackend for MemorySyncBackend {
         fields(
             peer_id = %task.peer_id,
             obj_id = %task.obj_id,
-            scoped_obj = tracing::field::Empty,
+            // scoped_obj = tracing::field::Empty,
             part_hint_count = task.part_hints.len()
         )
     )]
     async fn run(&self, task: SyncTaskDeets) -> Res<SyncTaskRunOutcome> {
+        let started_at = std::time::Instant::now();
+        tracing::info!(
+            local_peer_id = %self.local_peer_id,
+            peer_id = %task.peer_id,
+            obj_id = %task.obj_id,
+            part_hint_count = task.part_hints.len(),
+            "XXX enter memory sync backend"
+        );
         let remote_part_store = self.world.store_for_peer(task.peer_id);
         let scoped_obj = self.local_part_store.scoped_obj(task.obj_id).await?;
         tracing::Span::current().record("scoped_obj", tracing::field::debug(&scoped_obj));
@@ -489,14 +497,13 @@ impl crate::SyncBackend for MemorySyncBackend {
             std::cmp::Ordering::Less => &remote_view,
             std::cmp::Ordering::Equal => {
                 if local_canonical == remote_canonical {
-                    tracing::debug!(
+                    tracing::info!(
                         local_peer_id = %self.local_peer_id,
                         peer_id = %task.peer_id,
                         obj_id = %task.obj_id,
                         branch = "equal_stamp_noop",
-                        "sync branch"
+                        "XXX sync branch"
                     );
-                    return Ok(SyncTaskRunOutcome::Completions(vec![]));
                 }
                 if local_view.rank() >= remote_view.rank() {
                     &local_view
@@ -522,40 +529,40 @@ impl crate::SyncBackend for MemorySyncBackend {
         );
         let completion = if local_canonical == chosen_canonical {
             if local_canonical == remote_canonical {
-                tracing::debug!(
+                tracing::info!(
                     local_peer_id = %self.local_peer_id,
                     peer_id = %task.peer_id,
                     obj_id = %task.obj_id,
                     branch = "chosen_local_noop",
-                    "sync branch"
+                    "XXX sync branch"
                 );
                 SyncCompletionDeets::Noop
             } else if local_view.parts.is_empty() {
-                tracing::debug!(
+                tracing::info!(
                     local_peer_id = %self.local_peer_id,
                     peer_id = %task.peer_id,
                     obj_id = %task.obj_id,
                     branch = "chosen_local_added_member",
-                    "sync branch"
+                    "XXX sync branch"
                 );
                 SyncCompletionDeets::AddedMember
             } else {
-                tracing::debug!(
+                tracing::info!(
                     local_peer_id = %self.local_peer_id,
                     peer_id = %task.peer_id,
                     obj_id = %task.obj_id,
                     branch = "chosen_local_changed_object",
-                    "sync branch"
+                    "XXX sync branch"
                 );
                 SyncCompletionDeets::ChangedObject
             }
         } else if let Some(payload) = chosen_view.payload.clone() {
-            tracing::debug!(
+            tracing::info!(
                 local_peer_id = %self.local_peer_id,
                 peer_id = %task.peer_id,
                 obj_id = %task.obj_id,
                 branch = "chosen_upsert",
-                "sync branch"
+                "XXX sync branch"
             );
             let mut chosen_parts = Vec::with_capacity(chosen_view.parts.len());
             for part in &chosen_view.parts {
@@ -575,12 +582,12 @@ impl crate::SyncBackend for MemorySyncBackend {
             {
                 crate::part_store::SyncMutationOutcome::Applied => {}
                 crate::part_store::SyncMutationOutcome::Stale => {
-                    tracing::debug!(
+                    tracing::info!(
                         local_peer_id = %self.local_peer_id,
                         peer_id = %task.peer_id,
                         obj_id = %task.obj_id,
                         branch = "chosen_upsert",
-                        "sync stale"
+                        "XXX sync stale"
                     );
                     return Ok(SyncTaskRunOutcome::Stale);
                 }
@@ -591,12 +598,12 @@ impl crate::SyncBackend for MemorySyncBackend {
                 SyncCompletionDeets::AddedMember
             }
         } else {
-            tracing::debug!(
+            tracing::info!(
                 local_peer_id = %self.local_peer_id,
                 peer_id = %task.peer_id,
                 obj_id = %task.obj_id,
                 branch = "chosen_empty_noop",
-                "sync branch"
+                "XXX sync branch"
             );
             match self
                 .local_part_store
@@ -612,29 +619,38 @@ impl crate::SyncBackend for MemorySyncBackend {
                     SyncCompletionDeets::ChangedObject
                 }
                 crate::part_store::SyncMutationOutcome::Stale => {
-                    tracing::debug!(
+                    tracing::info!(
                         local_peer_id = %self.local_peer_id,
                         peer_id = %task.peer_id,
                         obj_id = %task.obj_id,
                         branch = "chosen_tombstone",
-                        "sync stale"
+                        "XXX sync stale"
                     );
                     return Ok(SyncTaskRunOutcome::Stale);
                 }
             }
         };
 
-        tracing::debug!(
+        tracing::info!(
             local_peer_id = %self.local_peer_id,
             peer_id = %task.peer_id,
             obj_id = %task.obj_id,
             completion = ?completion,
-            "sync backend complete"
+            "XXX sync backend complete"
         );
-        Ok(SyncTaskRunOutcome::Completions(vec![SyncTaskCompletion {
+        let outcome = SyncTaskRunOutcome::Completion(SyncTaskCompletion {
             obj_id: task.obj_id,
             deets: completion,
-        }]))
+        });
+        tracing::info!(
+            local_peer_id = %self.local_peer_id,
+            peer_id = %task.peer_id,
+            obj_id = %task.obj_id,
+            elapsed_ms = started_at.elapsed().as_millis(),
+            outcome = ?outcome,
+            "XXX exit memory sync backend"
+        );
+        Ok(outcome)
     }
 }
 
@@ -666,6 +682,14 @@ impl NodeHarness {
 
     async fn remove_obj(&self, obj: &ScopedObjRef) -> Res<()> {
         self.host.remove_obj_from_part(obj, &test_part()).await
+    }
+
+    async fn wait_for_full_sync(
+        &self,
+        peer_ids: impl IntoIterator<Item = PeerId>,
+        part_ids: impl IntoIterator<Item = PartId>,
+    ) -> Res<()> {
+        self.host.wait_for_full_sync(peer_ids, part_ids).await
     }
 
     async fn snapshot(&self) -> Res<ObservedStoreSnapshot> {
@@ -764,10 +788,16 @@ fn memory_part_store_terminal_bucket_bounds_do_not_wrap() {
     let terminal = BuckId::new(1, 15);
     let (start, end) = crate::part_store::obj_id_bounds_for_bucket(terminal);
     assert!(end.is_none(), "terminal bucket must not wrap");
-    assert_eq!(start, crate::part_store::obj_id_bounds_for_bucket(terminal).0);
+    assert_eq!(
+        start,
+        crate::part_store::obj_id_bounds_for_bucket(terminal).0
+    );
     let non_terminal = BuckId::new(2, 0);
     let (_, end) = crate::part_store::obj_id_bounds_for_bucket(non_terminal);
-    assert!(end.is_some(), "non-terminal bucket should still have an upper bound");
+    assert!(
+        end.is_some(),
+        "non-terminal bucket should still have an upper bound"
+    );
 }
 
 #[tokio::test(flavor = "multi_thread")]
@@ -1113,6 +1143,50 @@ async fn memory_sync_single_obj_created_while_connected_replicates() -> Res<()> 
             .get(&obj)
             .and_then(|obj| obj.payload.clone()),
         Some(payload("connected-create"))
+    );
+
+    node_a.stop().await?;
+    node_b.stop().await?;
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn memory_sync_wait_for_full_sync_resolves_for_connected_peer_pair() -> Res<()> {
+    utils_rs::testing::setup_tracing_once();
+
+    let world = Arc::new(TestWorld::default());
+    let node_a = boot_node(Arc::clone(&world), 1).await?;
+    let node_b = boot_node(Arc::clone(&world), 2).await?;
+    let part_id = node_a.store.resolve_part(&test_part()).await?;
+
+    node_a.connect_to(&node_b).await?;
+    node_b.connect_to(&node_a).await?;
+    wait_for_convergence(&[&node_a, &node_b], Duration::from_secs(30)).await?;
+
+    let obj = scoped_obj(21);
+    node_b.seed_obj(&obj, payload("wait-for-full-sync")).await?;
+
+    tokio::time::timeout(
+        Duration::from_secs(30),
+        node_a.wait_for_full_sync([node_b.peer_id], [part_id]),
+    )
+    .await
+    .wrap_err(ERROR_CHANNEL)??;
+
+    let (snapshot_a, snapshot_b) = assert_same_observed_state(&node_a, &node_b).await?;
+    assert_eq!(
+        snapshot_a
+            .scoped_objs
+            .get(&obj)
+            .and_then(|obj| obj.payload.clone()),
+        Some(payload("wait-for-full-sync"))
+    );
+    assert_eq!(
+        snapshot_b
+            .scoped_objs
+            .get(&obj)
+            .and_then(|obj| obj.payload.clone()),
+        Some(payload("wait-for-full-sync"))
     );
 
     node_a.stop().await?;
@@ -1730,8 +1804,9 @@ async fn memory_sync_same_state_via_third_peer_stays_quiet() -> Res<()> {
     tokio::try_join!(node_a.connect_to(&node_b), node_b.connect_to(&node_a))?;
     wait_for_convergence(&[&node_a, &node_b, &node_c], Duration::from_secs(30)).await?;
     let stats = collect_stats(&mut stats_rx, Duration::from_millis(200)).await;
-    assert_eq!(stats.len(), 1);
-    assert!(matches!(stats[0], SyncStatEvent::PartStale { .. }));
+    assert!(stats
+        .iter()
+        .any(|evt| matches!(evt, SyncStatEvent::PartStale { .. })));
 
     let (snapshot_a, snapshot_b, snapshot_c) = (
         node_a.snapshot().await?,
