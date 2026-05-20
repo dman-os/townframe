@@ -7,10 +7,10 @@ use std::collections::HashSet;
 use std::fmt::Write as _;
 use std::sync::Mutex;
 
-const STRESS_NODE_COUNT: usize = 4 * 2;
-const PHASE1_MUTATIONS: usize = 48 * 1;
-const PHASE2_MUTATIONS: usize = 24 * 1;
-const PHASE3_MUTATIONS: usize = 32 * 1;
+const STRESS_NODE_COUNT: usize = 4 * 1;
+const PHASE1_MUTATIONS: usize = 48 * 10;
+const PHASE2_MUTATIONS: usize = 24 * 10;
+const PHASE3_MUTATIONS: usize = 32 * 10;
 const DEFAULT_STRESS_SEED: u64 = 0xB1A0_5EED_5EED_0001;
 
 #[derive(Default)]
