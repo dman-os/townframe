@@ -6,8 +6,6 @@ pub mod prelude {
     pub use crate::codecs::ThroughJson;
     pub use crate::ids::{DocId32, PeerId32};
 
-    #[cfg(feature = "repo")]
-    pub use crate::repo::{BigRepo, SharedBigRepo};
     pub use automerge;
     pub use autosurgeon;
 }
@@ -19,13 +17,7 @@ pub mod ids;
 #[cfg(feature = "repo")]
 pub mod partition;
 #[cfg(feature = "repo")]
-pub mod repo;
-#[cfg(feature = "repo")]
 pub mod sync;
-#[cfg(feature = "repo")]
-pub use repo::{
-    BigDocHandle, BigRepo, BigRepoConnection, BigRepoStopToken, DocumentId, SharedBigRepo,
-};
 
 use automerge::ChangeHash;
 

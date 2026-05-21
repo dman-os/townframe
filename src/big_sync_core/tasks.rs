@@ -9,7 +9,7 @@ use list_bucket::{ListBucketsResult, ListBucketsTask, ListBucketsTaskError};
 pub mod leaf_buckets;
 use leaf_buckets::{LeafBucketsResult, LeafBucketsTask, LeafBucketsTaskError};
 
-use crate::{mpsc, part_store::PartStore, rpc::BigSyncRpcClient};
+use crate::{mpsc, part_store::PartStoreReadOnly, rpc::BigSyncRpcClient};
 use std::time::Instant;
 
 structstruck::strike! {
@@ -106,8 +106,8 @@ structstruck::strike! {
             pub retry: Retry,
         }>,
         pending: Map<TaskId, (TaskSeed, Instant)>,
-        sync_spawn_queue: VecDeque<SyncTask>,
-        machine_spawn_queue: VecDeque<MachineTask>,
+        sync_spawn_queue: Vec<SyncTask>,
+        machine_spawn_queue: Vec<MachineTask>,
         stop_queue: Set<TaskId>,
     }
 }
@@ -150,10 +150,8 @@ impl Tasks {
             },
         );
         match seed {
-            TaskSeed::Sync(deets) => self.sync_spawn_queue.push_back(SyncTask { id, deets }),
-            TaskSeed::Machine(deets) => self
-                .machine_spawn_queue
-                .push_back(MachineTask { id, deets }),
+            TaskSeed::Sync(deets) => self.sync_spawn_queue.push(SyncTask { id, deets }),
+            TaskSeed::Machine(deets) => self.machine_spawn_queue.push(MachineTask { id, deets }),
         }
         id
     }
@@ -200,20 +198,20 @@ impl Tasks {
                 continue;
             };
             match seed {
-                TaskSeed::Sync(deets) => self.sync_spawn_queue.push_back(SyncTask { id, deets }),
-                TaskSeed::Machine(deets) => self
-                    .machine_spawn_queue
-                    .push_back(MachineTask { id, deets }),
+                TaskSeed::Sync(deets) => self.sync_spawn_queue.push(SyncTask { id, deets }),
+                TaskSeed::Machine(deets) => {
+                    self.machine_spawn_queue.push(MachineTask { id, deets })
+                }
             }
         }
     }
 
-    pub fn pop_sync_spawn_queue(&mut self) -> Option<SyncTask> {
-        self.sync_spawn_queue.pop_front()
+    pub fn drain_sync_spawn_queue(&mut self) -> std::vec::Drain<'_, SyncTask> {
+        self.sync_spawn_queue.drain(..)
     }
 
-    pub fn pop_machine_spawn_queue(&mut self) -> Option<MachineTask> {
-        self.machine_spawn_queue.pop_front()
+    pub fn drain_machine_spawn_queue(&mut self) -> std::vec::Drain<'_, MachineTask> {
+        self.machine_spawn_queue.drain(..)
     }
 
     pub fn drain_stop_queue(&mut self) -> std::collections::hash_set::Drain<'_, u64> {
@@ -221,7 +219,7 @@ impl Tasks {
     }
 }
 
-pub struct TaskCtx<K: FutureForm, PStore: PartStore<K>, Rpc: BigSyncRpcClient<K>, Rng: rand::Rng> {
+pub struct TaskCtx<K, PStore, Rpc, Rng> {
     pub task_id: TaskId,
     pub main_tx: mpsc::Sender<MachineTaskMsg>,
     pub rpc_clients: Map<PeerId, Rpc>,
@@ -234,7 +232,7 @@ impl MachineTask {
     pub async fn run<K, PStore, Rpc, Rng>(self, mut cx: TaskCtx<K, PStore, Rpc, Rng>)
     where
         K: FutureForm,
-        PStore: PartStore<K>,
+        PStore: PartStoreReadOnly<K>,
         Rpc: BigSyncRpcClient<K>,
         Rng: rand::Rng,
     {

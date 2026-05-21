@@ -1,9 +1,10 @@
 //! This is just a crappy reimpl of samod to get subduction working
 
 use crate::interlude::*;
-use crate::partition::PartitionStore;
-use crate::repo::{BigRepoChangeOrigin, ConnFinishSignal, DocumentId, PeerId};
 
+use crate::{BigRepoChangeOrigin, ConnFinishSignal, DocumentId, PeerId};
+
+use big_sync::Ctx;
 use core::convert::Infallible;
 use futures::future::BoxFuture;
 use sedimentree_core::commit::{CommitStore, CountLeadingZeroBytes, FragmentState};
@@ -401,7 +402,7 @@ impl subduction_core::sync_session::SyncSessionObserver for BigRepoSyncSessionBr
 pub fn spawn_big_repo_runtime<S>(
     signer: subduction_crypto::signer::memory::MemorySigner,
     storage: S,
-    partition_store: Arc<PartitionStore>,
+    bsh: Arc<Ctx>,
     change_manager: Arc<changes::ChangeListenerManager>,
 ) -> Res<(BigRepoRuntimeHandle, BigRepoRuntimeStopToken)>
 where
@@ -476,7 +477,7 @@ where
         subduction: subduction_handle,
         sedimentrees: Arc::clone(&sedimentrees),
         storage_for_reads,
-        partition_store,
+        big_sync: bsh,
         change_manager,
         runtime_tasks: Arc::clone(&runtime_tasks),
         connect_signer,
@@ -572,7 +573,7 @@ where
     subduction: Arc<BigRepoSubduction<S>>,
     sedimentrees: SubductionSedimentrees,
     storage_for_reads: S,
-    partition_store: Arc<PartitionStore>,
+    big_sync: Arc<Ctx>,
     change_manager: Arc<changes::ChangeListenerManager>,
     runtime_tasks: Arc<utils_rs::AbortableJoinSet>,
     connect_signer: subduction_crypto::signer::memory::MemorySigner,
@@ -813,7 +814,7 @@ where
             subduction: Arc::clone(&self.subduction),
             sedimentrees: Arc::clone(&self.sedimentrees),
             storage_for_reads: self.storage_for_reads.clone(),
-            partition_store: Arc::clone(&self.partition_store),
+            big_sync: Arc::clone(&self.big_sync),
             change_manager: Arc::clone(&self.change_manager),
             runtime_handle: BigRepoRuntimeHandle {
                 cmd_tx: self.cmd_tx.clone(),
@@ -1225,7 +1226,7 @@ where
     subduction: Arc<BigRepoSubduction<S>>,
     sedimentrees: SubductionSedimentrees,
     storage_for_reads: S,
-    partition_store: Arc<PartitionStore>,
+    big_sync: Arc<Ctx>,
     change_manager: Arc<changes::ChangeListenerManager>,
     runtime_handle: BigRepoRuntimeHandle,
     runtime_evt_tx: mpsc::UnboundedSender<RuntimeEvt>,
@@ -1330,7 +1331,7 @@ where
         let (item_payload, heads) = {
             let heads = Arc::<[automerge::ChangeHash]>::from(doc.get_heads());
             let item_payload = serde_json::json!({
-                "heads": crate::serialize_commit_heads(&heads),
+                "heads": am_utils_rs::serialize_commit_heads(&heads),
             });
             (item_payload, heads)
         };
@@ -1669,7 +1670,6 @@ where
             &self.partition_store,
             &self.change_manager,
             self.doc_id,
-            Arc::clone(&self.doc_id_str),
             after_heads,
             patches,
             BigRepoChangeOrigin::Remote {
@@ -1737,16 +1737,16 @@ where
 }
 
 async fn commit_delta_bookkeep(
-    partition_store: &Arc<PartitionStore>,
+    big_sync: &Arc<Ctx>,
     change_manager: &Arc<changes::ChangeListenerManager>,
     doc_id: DocumentId,
-    doc_id_str: Arc<str>,
+    scoped_doc_ref: big_sync::ScopedObjRef,
     heads: Vec<automerge::ChangeHash>,
     patches: Vec<automerge::Patch>,
     origin: BigRepoChangeOrigin,
 ) -> Res<()> {
     let item_payload = serde_json::json!({
-        "heads": crate::serialize_commit_heads(&heads),
+        "heads": am_utils_rs::serialize_commit_heads(&heads),
     });
     let has_change_listener_interest = change_manager.has_change_listener_interest(doc_id, &origin);
     info!(
@@ -1757,8 +1757,8 @@ async fn commit_delta_bookkeep(
         has_change_listener_interest,
         "bookkeeping committed delta"
     );
-    partition_store
-        .upsert_item(doc_id_str, &item_payload, &[])
+    big_sync
+        .upsert_obj(&scoped_doc_ref, item_payload, &[])
         .await?;
 
     let heads_arc = Arc::<[automerge::ChangeHash]>::from(heads);

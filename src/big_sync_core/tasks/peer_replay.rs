@@ -2,7 +2,7 @@ use crate::interlude::*;
 
 use crate::{
     mpsc,
-    part_store::{CursorIndex, PartStore},
+    part_store::{CursorIndex, PartStoreReadOnly},
     rpc,
     rpc::BigSyncRpcClient,
     tasks::{MachineTaskMsg, TaskCtx, TaskId, TaskResultDeets},
@@ -45,7 +45,7 @@ impl PeerReplayTask {
     ) -> Result<TaskResultDeets, PeerReplayWorkerError>
     where
         K: FutureForm,
-        PStore: PartStore<K>,
+        PStore: PartStoreReadOnly<K>,
         Rpc: BigSyncRpcClient<K>,
         Rng: rand::Rng,
     {
@@ -61,7 +61,7 @@ impl PeerReplayTask {
     ) -> Result<TaskResultDeets, PeerReplayWorkerErrorDeets>
     where
         K: FutureForm,
-        PStore: PartStore<K>,
+        PStore: PartStoreReadOnly<K>,
         Rpc: BigSyncRpcClient<K>,
         Rng: rand::Rng,
     {

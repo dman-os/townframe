@@ -1,16 +1,15 @@
 use crate::interlude::*;
 
-use crate::part_store::CursorIndex;
-use crate::rpc::BuckLevel;
 use crate::{
     bucket::{calc_working_level, BucketMachine},
-    part_store::PartStore,
+    part_store::{CursorIndex, PartStoreReadOnly},
     rpc::{
-        BigSyncRpcClient, BucketSummary, GetChangedBucketsRequest, ListPartsError,
+        BigSyncRpcClient, BuckLevel, BucketSummary, GetChangedBucketsRequest, ListPartsError,
         PeerSummaryRequest, RpcError,
     },
     tasks::{TaskCtx, TaskResultDeets},
 };
+
 pub struct DecidePeerStrategyTask {
     pub peer_id: PeerId,
     pub parts: Set<PartId>,
@@ -61,7 +60,7 @@ impl DecidePeerStrategyTask {
     ) -> Result<TaskResultDeets, DecidePeerStrategyTaskError>
     where
         K: FutureForm,
-        PStore: PartStore<K>,
+        PStore: PartStoreReadOnly<K>,
         Rpc: BigSyncRpcClient<K>,
         Rng: rand::Rng,
     {
@@ -76,7 +75,7 @@ impl DecidePeerStrategyTask {
     ) -> Result<TaskResultDeets, DecidePeerStrategyErrorDeets>
     where
         K: FutureForm,
-        PStore: PartStore<K>,
+        PStore: PartStoreReadOnly<K>,
         Rpc: BigSyncRpcClient<K>,
         Rng: rand::Rng,
     {

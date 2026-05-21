@@ -56,6 +56,11 @@ impl<T> Sender<T> {
             to: Arc::clone(&self.to),
         })
     }
+    pub fn try_send(&self, val: T) -> Result<(), SendError> {
+        self.inner.try_send(val).map_err(|_| SendError {
+            to: Arc::clone(&self.to),
+        })
+    }
 }
 
 pub fn bounded<T>(cap: usize, from: Arc<str>, to: Arc<str>) -> (Sender<T>, Receiver<T>) {

@@ -1,12 +1,14 @@
+use std::collections::VecDeque;
+
 use crate::interlude::*;
 
+use crate::part_store::ObjStoreLease;
 use crate::trap;
 
 use big_sync_core::{
-    mpsc, BigSyncEvent, BigSyncMachine, MachineTask, MachineTaskMsg, PartId, PeerId, SyncTask,
-    SyncTaskCompletion, SyncTaskDeets, TaskCtx, TaskId,
+    mpsc, BigSyncEvent, BigSyncMachine, BigSyncMachineCommand, MachineTask, MachineTaskMsg, ObjId,
+    PartId, PeerId, SyncTask, SyncTaskCompletion, TaskCtx, TaskId,
 };
-use future_form::Sendable;
 use rand::{rngs::StdRng, SeedableRng};
 
 #[cfg(test)]
@@ -30,14 +32,9 @@ pub enum BigSyncWorkerError {
         part_id: PartId,
     },
     /// Unknown peer {peer_id} in full sync waiter request
-    UnknownPeer {
-        peer_id: PeerId,
-    },
+    UnknownPeer { peer_id: PeerId },
     /// Unknown part {part_id} for peer {peer_id} in full sync waiter request
-    UnknownPart {
-        peer_id: PeerId,
-        part_id: PartId,
-    },
+    UnknownPart { peer_id: PeerId, part_id: PartId },
 }
 
 structstruck::strike! {
@@ -73,7 +70,13 @@ enum BigSyncWorkerMsg {
 
 #[async_trait]
 pub trait SyncBackend: Send + Sync + 'static {
-    async fn run(&self, task: SyncTaskDeets) -> Res<SyncTaskRunOutcome>;
+    async fn sync_obj(
+        &self,
+        peer_id: PeerId,
+        lease: ObjStoreLease,
+        obj_id: ObjId,
+        part_hints: Vec<PartId>,
+    ) -> Res<SyncTaskRunOutcome>;
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -258,6 +261,9 @@ pub fn spawn_big_sync_worker(
         sync_backends,
         machine,
 
+        machine_spawn_queue: default(),
+        sync_spawn_queue: default(),
+
         host_rx,
         sync_tx,
         sync_rx,
@@ -360,13 +366,15 @@ struct BigSyncWorker {
     host_rx: tokio::sync::mpsc::Receiver<BigSyncWorkerMsg>,
     machine: BigSyncMachine,
 
+    machine_spawn_queue: VecDeque<MachineTask>,
+    sync_spawn_queue: VecDeque<(SyncTask, ObjStoreLease)>,
+
     sync_rx: mpsc::Receiver<BigSyncEvent>,
     sync_tx: mpsc::Sender<BigSyncEvent>,
     task_rx: mpsc::Receiver<MachineTaskMsg>,
     task_tx: mpsc::Sender<MachineTaskMsg>,
     stats_tx: tokio::sync::broadcast::Sender<big_sync_core::SyncStatEvent>,
-    full_sync_waiters:
-        HashMap<u64, tokio::sync::oneshot::Sender<Result<(), BigSyncWorkerError>>>,
+    full_sync_waiters: HashMap<u64, tokio::sync::oneshot::Sender<Result<(), BigSyncWorkerError>>>,
 
     tasks: HashMap<TaskId, TaskDeets>,
     peers: HashMap<PeerId, PeerState>,
@@ -404,80 +412,73 @@ struct ZombieTaskDeets {
 
 const MAX_ACTIVE_SYNC_TASKS: usize = 32;
 
-enum LoopAction {
-    Cont,
-    Break,
-}
 impl BigSyncWorker {
     #[tracing::instrument(skip(self, shutdown))]
     async fn machine_loop(&mut self, shutdown: Arc<BigRedToken>) -> Res<()> {
         let mut janitor_tick = tokio::time::interval(Duration::from_millis(500));
-        let (trap, mut err_rx) = trap::TaskTrap::new();
         loop {
-            let part_store = trap::TrappedPartStore {
-                trap: trap.clone(),
-                inner: Arc::clone(&self.part_store),
-            };
-            let loop_action = tokio::select! {
+            tokio::select! {
                 biased;
                 _ = self.cancel_token.cancelled() => {
-                    LoopAction::Break
+                    break;
                 }
-                res = err_rx.recv() => {
-                    let err = res.expect(ERROR_IMPOSSIBLE);
-                    return Err(err);
-                },
                 msg = self.task_rx.recv() => {
-                    match msg {
-                        Ok(msg) => run_until_cancelled_or_trapped(
-                            &self.cancel_token,
-                            &mut err_rx,
-                            self.machine.handle_task_msg::<Sendable, _>(
-                                msg,
-                                &part_store,
-                            )
-                        ).await?,
-                        Err(_) => LoopAction::Break,
-                    }
+                    let Ok(msg) = msg else {
+                        break;
+                    };
+                    self.machine.handle_task_msg(msg);
                 }
                 evt = self.sync_rx.recv() => {
-                    match evt {
-                        Ok(evt) => run_until_cancelled_or_trapped(
-                            &self.cancel_token,
-                            &mut err_rx,
-                            self.machine.handle_evt::<Sendable, _>(
-                                evt,
-                                &part_store,
-                            )
-                        ).await?,
-                        Err(_) => LoopAction::Break,
-                    }
+                    let Ok(evt) = evt else {
+                        break;
+                    };
+                    self.machine.handle_evt(evt);
                 }
-                cmd = self.host_rx.recv() => {
-                    match cmd {
-                        Some(msg) => self.handle_msg(msg, &mut err_rx, &part_store).await?,
-                        None => LoopAction::Break,
-                    }
+                msg = self.host_rx.recv() => {
+                    let Some(msg) = msg else {
+                        break;
+                    };
+                    self.handle_msg(msg).await?;
                 }
                 _ = janitor_tick.tick() => {
                     self.machine.handle_tick(std::time::Instant::now());
-                    LoopAction::Cont
                 }
             };
-            if matches!(loop_action, LoopAction::Break) {
-                break;
+            for cmd in self.machine.drain_cmds() {
+                match cmd {
+                    BigSyncMachineCommand::RemoveObjFromPart { obj_id, part_id } => {
+                        self.part_store
+                            .remove_obj_from_part(obj_id, part_id, None)
+                            .await?;
+                    }
+                    BigSyncMachineCommand::SetPartCursor {
+                        peer_id,
+                        part_id,
+                        cursor,
+                    } => {
+                        self.part_store
+                            .set_peer_part_cursor(peer_id, part_id, cursor)
+                            .await?;
+                    }
+                }
             }
 
             self.batch_stop_tasks().await?;
-            while let Some(task) = self.machine.pop_machine_spawn_queue() {
+            self.machine_spawn_queue
+                .extend(self.machine.drain_machine_spawn_queue());
+            while let Some(task) = self.machine_spawn_queue.pop_front() {
                 self.spawn_machine_task(task, Arc::clone(&shutdown)).await?;
             }
 
+            for task in self.machine.drain_sync_spawn_queue() {
+                let lease = self.part_store.get_obj_lease(task.deets.obj_id).await?;
+                self.sync_spawn_queue.push_front((task, lease));
+            }
             while self.sync_tasks.len() < MAX_ACTIVE_SYNC_TASKS {
-                let Some(task) = self.machine.pop_sync_spawn_queue() else {
+                let Some((task, lease)) = self.sync_spawn_queue.pop_front() else {
                     break;
                 };
-                self.spawn_sync_task(task).await?;
+                self.spawn_sync_task(task, lease).await?;
             }
             self.sweep_finished_zombies();
             for event in self.machine.drain_stat_evts() {
@@ -492,13 +493,8 @@ impl BigSyncWorker {
         Ok(())
     }
 
-    async fn handle_msg(
-        &mut self,
-        msg: BigSyncWorkerMsg,
-        err_rx: &mut tokio::sync::mpsc::Receiver<eyre::Report>,
-        part_store: &trap::TrappedPartStore,
-    ) -> Res<LoopAction> {
-        let evt = match msg {
+    async fn handle_msg(&mut self, msg: BigSyncWorkerMsg) -> Res<()> {
+        match msg {
             BigSyncWorkerMsg::SetPeer {
                 peer_id,
                 client,
@@ -513,7 +509,7 @@ impl BigSyncWorker {
                         }))
                         .inspect_err(|_| warn!(ERROR_CALLER))
                         .ok();
-                        return Ok(LoopAction::Cont);
+                        return Ok(());
                     }
                 }
                 self.rpc_clients
@@ -533,14 +529,14 @@ impl BigSyncWorker {
                 });
                 resp.send(Ok(())).inspect_err(|_| warn!(ERROR_CALLER)).ok();
                 tracing::debug!(peer_id = %peer_id, part_count, "accept set peer");
-                evt
+                self.machine.handle_evt(evt);
             }
             BigSyncWorkerMsg::RemovePeer { peer_id, resp } => {
                 self.peers.remove(&peer_id);
                 let evt = BigSyncEvent::RemovePeer(big_sync_core::RemovePeerEvent { peer_id });
                 resp.send(()).inspect_err(|_| warn!(ERROR_CALLER)).ok();
                 tracing::debug!(peer_id = %peer_id, "accept remove peer");
-                evt
+                self.machine.handle_evt(evt);
             }
             BigSyncWorkerMsg::WaitForFullSync {
                 waiter_id,
@@ -550,12 +546,10 @@ impl BigSyncWorker {
             } => {
                 for peer_id in &peer_ids {
                     let Some(peer_state) = self.peers.get(peer_id) else {
-                        resp.send(Err(BigSyncWorkerError::UnknownPeer {
-                            peer_id: *peer_id,
-                        }))
-                        .inspect_err(|_| warn!(ERROR_CALLER))
-                        .ok();
-                        return Ok(LoopAction::Cont);
+                        resp.send(Err(BigSyncWorkerError::UnknownPeer { peer_id: *peer_id }))
+                            .inspect_err(|_| warn!(ERROR_CALLER))
+                            .ok();
+                        return Ok(());
                     };
                     for part_id in &part_ids {
                         if !peer_state.parts.contains_key(part_id) {
@@ -565,17 +559,19 @@ impl BigSyncWorker {
                             }))
                             .inspect_err(|_| warn!(ERROR_CALLER))
                             .ok();
-                            return Ok(LoopAction::Cont);
+                            return Ok(());
                         }
                     }
                 }
                 let old = self.full_sync_waiters.insert(waiter_id, resp);
                 assert!(old.is_none(), "fishy");
-                BigSyncEvent::WaitForFullSync(big_sync_core::WaitForFullSyncEvent {
-                    waiter_id,
-                    peer_ids,
-                    part_ids,
-                })
+                self.machine.handle_evt(BigSyncEvent::WaitForFullSync(
+                    big_sync_core::WaitForFullSyncEvent {
+                        waiter_id,
+                        peer_ids,
+                        part_ids,
+                    },
+                ));
             }
             #[cfg(test)]
             BigSyncWorkerMsg::ReapZombieTasks { timeout, resp } => {
@@ -586,7 +582,6 @@ impl BigSyncWorker {
                 );
                 self.reap_zombie_tasks(timeout).await?;
                 resp.send(()).inspect_err(|_| warn!(ERROR_CALLER)).ok();
-                return Ok(LoopAction::Cont);
             }
             #[cfg(test)]
             BigSyncWorkerMsg::Snapshot { resp } => {
@@ -607,15 +602,9 @@ impl BigSyncWorker {
                 resp.send(snapshot)
                     .inspect_err(|_| warn!(ERROR_CALLER))
                     .ok();
-                return Ok(LoopAction::Cont);
             }
-        };
-        run_until_cancelled_or_trapped(
-            &self.cancel_token,
-            err_rx,
-            self.machine.handle_evt(evt, part_store),
-        )
-        .await
+        }
+        Ok(())
     }
 
     async fn batch_stop_tasks(&mut self) -> Res<()> {
@@ -724,7 +713,7 @@ impl BigSyncWorker {
         Ok(())
     }
 
-    async fn spawn_sync_task(&mut self, task: SyncTask) -> Res<()> {
+    async fn spawn_sync_task(&mut self, task: SyncTask, lease: ObjStoreLease) -> Res<()> {
         let backend = Arc::clone(self.sync_backends.values().next().expect(ERROR_UNRECONIZED));
         let cancel_token = self.cancel_token.child_token();
         let task_id = task.id;
@@ -738,6 +727,7 @@ impl BigSyncWorker {
         let worker = SyncTaskWorker {
             task: task.clone(),
             backend,
+            lease,
             host_tx: self.sync_tx.clone(),
             cancel_token: cancel_token.clone(),
         };
@@ -816,111 +806,112 @@ impl MachineTaskWorker {
 
 struct SyncTaskWorker {
     task: SyncTask,
+    lease: ObjStoreLease,
     backend: Arc<dyn SyncBackend>,
     host_tx: mpsc::Sender<BigSyncEvent>,
     cancel_token: CancellationToken,
 }
 
 impl SyncTaskWorker {
-    #[tracing::instrument(skip(self))]
+    #[tracing::instrument(
+        skip(self),
+        fields(
+            task_id = self.task.id,
+            peer_id = %self.task.deets.peer_id,
+            obj_id = %self.task.deets.obj_id,
+        )
+    )]
     async fn run(self) {
-        let _ = self
-            .cancel_token
-            .run_until_cancelled(async move {
-                tracing::info!(
-                    task_id = self.task.id,
-                    peer_id = %self.task.deets.peer_id,
-                    obj_id = %self.task.deets.obj_id,
-                    part_hint_count = self.task.deets.part_hints.len(),
-                    "XXX enter sync worker"
-                );
-                let started_at = std::time::Instant::now();
-                let res = self.backend.run(self.task.deets.clone()).await;
-                tracing::info!(
-                    task_id = self.task.id,
-                    peer_id = %self.task.deets.peer_id,
-                    obj_id = %self.task.deets.obj_id,
-                    elapsed_ms = started_at.elapsed().as_millis(),
-                    result = match &res {
-                        Ok(SyncTaskRunOutcome::Completion(completion)) => {
-                            format!("completion={:?}", completion.deets)
-                        }
-                        Ok(SyncTaskRunOutcome::Stale) => "stale".to_string(),
-                        Err(err) => format!("error={err}"),
-                    },
-                    "XXX exit sync worker backend"
-                );
-                match res {
+        let fut = async move {
+            tracing::info!(
+                part_hint_count = self.task.deets.part_hints.len(),
+                "XXX enter sync worker"
+            );
+            let started_at = std::time::Instant::now();
+            let res = self
+                .backend
+                .sync_obj(
+                    self.task.deets.peer_id,
+                    self.lease,
+                    self.task.deets.obj_id,
+                    self.task.deets.part_hints.into_iter().collect(),
+                )
+                .await;
+            tracing::info!(
+                elapsed_ms = started_at.elapsed().as_millis(),
+                result = match &res {
                     Ok(SyncTaskRunOutcome::Completion(completion)) => {
-                        tracing::info!(
-                            task_id = self.task.id,
-                            peer_id = %self.task.deets.peer_id,
-                            obj_id = %completion.obj_id,
-                            deets = ?completion.deets,
-                            "XXX sync worker send completion"
-                        );
-                        self.host_tx
-                            .send(BigSyncEvent::SyncCompleted(
-                                big_sync_core::SyncCompletedEvent {
-                                    task_id: self.task.id,
-                                    peer_id: self.task.deets.peer_id,
-                                    completion,
-                                },
-                            ))
-                            .await
-                            .expect(ERROR_CHANNEL);
+                        format!("completion={:?}", completion.deets)
                     }
-                    Ok(SyncTaskRunOutcome::Stale) => {
-                        tracing::info!(
-                            task_id = self.task.id,
-                            peer_id = %self.task.deets.peer_id,
-                            obj_id = %self.task.deets.obj_id,
-                            "XXX sync worker send stale"
-                        );
-                        self.host_tx
-                            .send(BigSyncEvent::SyncStale(big_sync_core::SyncStaleEvent {
+                    Ok(SyncTaskRunOutcome::Stale) => "stale".to_string(),
+                    Err(err) => format!("error={err}"),
+                },
+                "XXX exit sync worker backend"
+            );
+            match res {
+                Ok(SyncTaskRunOutcome::Completion(completion)) => {
+                    tracing::info!(
+                        deets = ?completion.deets,
+                        "XXX sync worker send completion"
+                    );
+                    self.host_tx
+                        .send(BigSyncEvent::SyncCompleted(
+                            big_sync_core::SyncCompletedEvent {
                                 task_id: self.task.id,
                                 peer_id: self.task.deets.peer_id,
-                                obj_id: self.task.deets.obj_id,
-                            }))
-                            .await
-                            .expect(ERROR_CHANNEL);
-                    }
-                    Err(err) => {
-                        tracing::info!(
-                            task_id = self.task.id,
-                            peer_id = %self.task.deets.peer_id,
-                            obj_id = %self.task.deets.obj_id,
-                            error = %err,
-                            "XXX sync worker send failure"
-                        );
-                        self.host_tx
-                            .send(BigSyncEvent::SyncFailed(big_sync_core::SyncFailedEvent {
-                                task_id: self.task.id,
-                                peer_id: self.task.deets.peer_id,
-                                obj_id: self.task.deets.obj_id,
-                                err,
-                            }))
-                            .await
-                            .expect(ERROR_CHANNEL);
-                    }
+                                completion,
+                            },
+                        ))
+                        .await
+                        .expect(ERROR_CHANNEL);
                 }
-            })
-            .await;
+                Ok(SyncTaskRunOutcome::Stale) => {
+                    tracing::info!("XXX sync worker send stale");
+                    self.host_tx
+                        .send(BigSyncEvent::SyncStale(big_sync_core::SyncStaleEvent {
+                            task_id: self.task.id,
+                            peer_id: self.task.deets.peer_id,
+                            obj_id: self.task.deets.obj_id,
+                        }))
+                        .await
+                        .expect(ERROR_CHANNEL);
+                }
+                Err(err) => {
+                    tracing::info!(
+                        error = %err,
+                        "XXX sync worker send failure"
+                    );
+                    self.host_tx
+                        .send(BigSyncEvent::SyncFailed(big_sync_core::SyncFailedEvent {
+                            task_id: self.task.id,
+                            peer_id: self.task.deets.peer_id,
+                            obj_id: self.task.deets.obj_id,
+                            err,
+                        }))
+                        .await
+                        .expect(ERROR_CHANNEL);
+                }
+            }
+        };
+        let _ = self.cancel_token.run_until_cancelled(fut).await;
     }
 }
 
-async fn run_until_cancelled_or_trapped<E>(
-    cancel_token: &CancellationToken,
-    err_rx: &mut tokio::sync::mpsc::Receiver<E>,
-    fut: impl std::future::Future<Output = ()>,
-) -> Result<LoopAction, E> {
-    tokio::select! {
-        _ = cancel_token.cancelled() => Ok(LoopAction::Break),
-        res = err_rx.recv() => {
-            let err = res.expect(ERROR_IMPOSSIBLE);
-            Err(err)
-        },
-        () = fut => Ok(LoopAction::Cont)
-    }
-}
+// enum LoopAction {
+//     Cont,
+//     Break,
+// }
+// async fn run_until_cancelled_or_trapped<E>(
+//     cancel_token: &CancellationToken,
+//     err_rx: &mut tokio::sync::mpsc::Receiver<E>,
+//     fut: impl std::future::Future<Output = ()>,
+// ) -> Result<LoopAction, E> {
+//     tokio::select! {
+//         _ = cancel_token.cancelled() => Ok(LoopAction::Break),
+//         res = err_rx.recv() => {
+//             let err = res.expect(ERROR_IMPOSSIBLE);
+//             Err(err)
+//         },
+//         () = fut => Ok(LoopAction::Cont)
+//     }
+// }

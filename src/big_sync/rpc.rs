@@ -1,12 +1,9 @@
 use crate::interlude::*;
 
-use big_sync_core::{
-    mpsc::Receiver,
-    rpc::{
-        BigSyncRpcResult, BucketSummary, GetChangedBucketsRequest, LeafBucketResult,
-        LeafBucketsError, LeafBucketsRequest, ListPartsError, PeerSummaryRequest,
-        PeerSummaryResult, SubEvent, SubPartsRequest,
-    },
+use big_sync_core::rpc::{
+    BigSyncRpcResult, BucketSummary, GetChangedBucketsRequest, LeafBucketResult, LeafBucketsError,
+    LeafBucketsRequest, ListPartsError, PeerSummaryRequest, PeerSummaryResult, SubEvent,
+    SubPartsRequest,
 };
 
 #[async_trait]
@@ -19,7 +16,7 @@ pub trait HostBigRpcClient: Send + Sync {
     async fn sub_parts(
         &self,
         req: SubPartsRequest,
-    ) -> Res<BigSyncRpcResult<Result<Receiver<SubEvent>, ListPartsError>>>;
+    ) -> Res<BigSyncRpcResult<Result<big_sync_core::mpsc::Receiver<SubEvent>, ListPartsError>>>;
 
     async fn get_changed_buckets(
         &self,

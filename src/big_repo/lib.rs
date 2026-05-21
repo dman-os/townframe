@@ -1,3 +1,8 @@
+mod interlude {
+    pub use big_sync_core::{ObjId, PartId, PeerId};
+    pub use utils_rs::prelude::*;
+}
+
 use crate::interlude::*;
 
 use std::collections::BTreeSet;
@@ -6,6 +11,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 
 use automerge::ChangeHash;
 use autosurgeon::{Hydrate, Prop, Reconcile};
+use big_sync::Ctx;
 use sedimentree_core::loose_commit::id::CommitId;
 
 // FIXME: properly test the changes impl and investigate
@@ -16,9 +22,6 @@ pub mod rpc;
 mod runtime;
 pub use runtime::{PutDocError, SyncDocOutcome};
 
-use crate::partition::PartitionStore;
-use crate::sync::protocol::*;
-
 pub use changes::{
     path_prefix_matches as big_repo_path_prefix_matches, BigRepoChangeNotification,
     BigRepoChangeOrigin, ChangeFilter as BigRepoChangeFilter,
@@ -26,8 +29,8 @@ pub use changes::{
     DocIdFilter as BigRepoDocIdFilter, OriginFilter as BigRepoOriginFilter,
 };
 
-pub type DocumentId = crate::ids::DocId32;
-pub type PeerId = crate::ids::PeerId32;
+pub type DocumentId = ObjId;
+pub type PartitionId = Arc<str>;
 
 #[derive(Debug, Clone)]
 pub struct Config {
@@ -47,7 +50,7 @@ pub enum StorageConfig {
 pub struct BigRepo {
     local_peer_id: PeerId,
     #[educe(Debug(ignore))]
-    partition_store: Arc<PartitionStore>,
+    big_sync: Arc<Ctx>,
     #[educe(Debug(ignore))]
     runtime: runtime::BigRepoRuntimeHandle,
     #[educe(Debug(ignore))]
@@ -59,10 +62,7 @@ pub struct BigRepo {
 pub type SharedBigRepo = Arc<BigRepo>;
 
 impl BigRepo {
-    pub async fn boot(
-        config: Config,
-        partition_store: Arc<PartitionStore>,
-    ) -> Res<(Arc<Self>, BigRepoStopToken)> {
+    pub async fn boot(config: Config, big_sync: Arc<Ctx>) -> Res<(Arc<Self>, BigRepoStopToken)> {
         let Config {
             peer_id,
             secret_key_bytes,
@@ -75,7 +75,7 @@ impl BigRepo {
             StorageConfig::Memory => runtime::spawn_big_repo_runtime(
                 signer,
                 subduction_core::storage::memory::MemoryStorage::new(),
-                Arc::clone(&partition_store),
+                Arc::clone(&big_sync),
                 Arc::clone(&change_manager),
             )?,
             StorageConfig::Disk { path } => {
@@ -91,7 +91,7 @@ impl BigRepo {
                 runtime::spawn_big_repo_runtime(
                     signer,
                     fs_storage,
-                    Arc::clone(&partition_store),
+                    Arc::clone(&big_sync),
                     Arc::clone(&change_manager),
                 )?
             }
@@ -99,7 +99,7 @@ impl BigRepo {
 
         let out = Arc::new(Self {
             local_peer_id: peer_id,
-            partition_store,
+            big_sync,
             runtime,
             change_manager,
             change_manager_stop: std::sync::Mutex::new(Some(change_manager_stop)),

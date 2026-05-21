@@ -5,6 +5,7 @@ members = [
   "./src/api_utils_rs",
   "./src/big_sync/",
   "./src/big_sync_core/",
+  "./src/big_repo/",
   "./src/daybook_cli",
   "./src/daybook_core",
   "./src/daybook_ffi",
@@ -12,7 +13,7 @@ members = [
   "./src/daybook_pdk",
   "./src/daybook_types",
   "./src/daybook_wflows/",
-  "./src/daybook_willow/",
+  # "./src/daybook_willow/",
   "./src/macros",
   "./src/mltools/",
   "./src/pauperfuse/",
@@ -122,6 +123,7 @@ data-encoding = "2.10"
 bs58 = "0.5.1"
 blake3 = "1.8"
 zstd = "0.13"
+camino = { version = "1.2.2", features = ["serde1"] }
 
 #
 # web

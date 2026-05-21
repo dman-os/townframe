@@ -99,23 +99,23 @@ fn diff_scoped_obj_snapshots(
     let _ = writeln!(
         out,
         "scoped_objs differ: left_peer={left_peer:?} left_count={} right_peer={right_peer:?} right_count={}",
-        left.scoped_objs.len(),
-        right.scoped_objs.len()
+        left.objs.len(),
+        right.objs.len()
     );
 
     let mut only_left = Vec::new();
     let mut only_right = Vec::new();
     let mut differing = Vec::new();
 
-    for (obj, snapshot) in &left.scoped_objs {
-        match right.scoped_objs.get(obj) {
+    for (obj, snapshot) in &left.objs {
+        match right.objs.get(obj) {
             None => only_left.push((obj, snapshot)),
             Some(other) if other != snapshot => differing.push((obj, snapshot, other)),
             Some(_) => {}
         }
     }
-    for (obj, snapshot) in &right.scoped_objs {
-        if !left.scoped_objs.contains_key(obj) {
+    for (obj, snapshot) in &right.objs {
+        if !left.objs.contains_key(obj) {
             only_right.push((obj, snapshot));
         }
     }
@@ -510,7 +510,7 @@ async fn assert_cluster_alignment(nodes: &[&NodeHarness]) -> Res<()> {
     }
 
     for snapshot in store_snaps.iter().skip(1) {
-        if store_snaps[0].1.scoped_objs != snapshot.1.scoped_objs {
+        if store_snaps[0].1.objs != snapshot.1.objs {
             panic!(
                 "{}",
                 diff_scoped_obj_snapshots(

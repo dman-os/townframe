@@ -38,7 +38,6 @@ structstruck::strike! {
         }
         UpgradeToCursor {
             part_id: PartId,
-            floor: CursorIndex,
         }
     }
 }
@@ -71,7 +70,6 @@ structstruck::strike! {
 
         active_obj_jobs: Map<ObjId, BuckId>,
 
-        latest_cursor: u64,
         last_cursor: u64,
     }
 }
@@ -86,7 +84,6 @@ impl BucketMachine {
         part_id: PartId,
         remote_depth: BuckLevel,
         remote_size: u64,
-        latest_cursor: CursorIndex,
         last_cursor: CursorIndex,
     ) -> Self {
         let working_level = calc_working_level(remote_size, remote_depth);
@@ -97,7 +94,7 @@ impl BucketMachine {
         let leaf_watermark = bucket_width.max(1);
         info!(
             %part_id, %working_level, %bucket_width, %leaf_watermark,
-            %initial_working_set, %remote_size, %remote_size, 
+            %initial_working_set, %remote_size, %remote_size,
             "starting bucket sync machine"
         );
         Self {
@@ -105,7 +102,6 @@ impl BucketMachine {
             active_obj_jobs: default(),
             done_listing: true,
             last_cursor,
-            latest_cursor,
             initial_working_set,
             leaf_watermark,
             next_page_offset: BuckId::ROOT,
@@ -305,9 +301,9 @@ impl BucketMachine {
 
         if !selected.is_empty() {
             let buckets = selected
-                    .into_iter()
-                    .map(|(buck_id, after)| LeafBucketRequest { buck_id, after })
-                    .collect();
+                .into_iter()
+                .map(|(buck_id, after)| LeafBucketRequest { buck_id, after })
+                .collect();
             info!(?buckets, "XXX leafing buckets");
             out.push(BucketMachineCommand::LeafBuckets {
                 part_id: self.part_id,
@@ -323,16 +319,15 @@ impl BucketMachine {
         {
             tracing::debug!(
                 part_id = %self.part_id,
-                latest_cursor = self.latest_cursor,
                 "bucket machine upgrading to cursor"
             );
             out.push(BucketMachineCommand::UpgradeToCursor {
-                floor: self.latest_cursor,
                 part_id: self.part_id,
             });
-        } else if !self.list_dispatched 
+        } else if !self.list_dispatched
             && !self.done_listing
-            && (self.working_buckets.len() + self.pending_buckets.len()) < self.initial_working_set as usize
+            && (self.working_buckets.len() + self.pending_buckets.len())
+                < self.initial_working_set as usize
         {
             let offset = self.next_page_offset;
             if offset.level() > self.working_level {

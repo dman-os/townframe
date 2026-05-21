@@ -1,8 +1,6 @@
 use crate::interlude::*;
 
-use crate::repo::SharedBigRepo;
-use crate::sync::store::SyncStoreHandle;
-use crate::sync::{protocol::PartitionSyncError, PartitionAccessPolicy};
+use crate::SharedBigRepo;
 use irpc::{channel, rpc_requests, WithChannels};
 use tokio::sync::mpsc;
 use tokio_util::sync::CancellationToken;

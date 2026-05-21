@@ -21,6 +21,7 @@ big_sync_core.workspace = true
 #
 # ds
 surelock.workspace = true
+atomic-take = "1.1.0"
 
 #
 # encoding
@@ -57,4 +58,3 @@ tracing.workspace = true
 [dev-dependencies]
 big_sync_core = { workspace = true, features = ["test-support"] }
 blake3.workspace = true
-uuid.workspace = true

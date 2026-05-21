@@ -2,7 +2,7 @@ use crate::interlude::*;
 
 use crate::{
     bucket::BucketMachine,
-    part_store::{CursorIndex, PartStore},
+    part_store::{CursorIndex, PartStoreReadOnly},
     rpc::{
         BigSyncRpcClient, BuckLevel, BucketSummary, GetChangedBucketsRequest, ListPartsError,
         RpcError,
@@ -49,7 +49,7 @@ impl ListBucketsTask {
     ) -> Result<TaskResultDeets, ListBucketsTaskError>
     where
         K: FutureForm,
-        PStore: PartStore<K>,
+        PStore: PartStoreReadOnly<K>,
         Rpc: BigSyncRpcClient<K>,
         Rng: rand::Rng,
     {
@@ -70,7 +70,7 @@ impl ListBucketsTask {
     ) -> Result<TaskResultDeets, ListBucketsTaskErrorDeets>
     where
         K: FutureForm,
-        PStore: PartStore<K>,
+        PStore: PartStoreReadOnly<K>,
         Rpc: BigSyncRpcClient<K>,
         Rng: rand::Rng,
     {

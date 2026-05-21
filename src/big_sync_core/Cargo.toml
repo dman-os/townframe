@@ -24,7 +24,6 @@ structstruck.workspace = true
 bs58.workspace = true
 serde.workspace = true
 siphasher = "1.0.3"
-blake3.workspace = true
 
 #
 # errors

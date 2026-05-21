@@ -1,0 +1,70 @@
+[package]
+name = "big_repo"
+version.workspace = true
+edition.workspace = true
+
+[lints]
+workspace = true
+
+[lib]
+path = "lib.rs"
+
+[dependencies]
+#
+# internal
+utils_rs = { workspace = true, features = ["hash"] }
+big_sync_core.workspace = true
+big_sync.workspace = true
+am_utils_rs.workspace = true
+
+#
+# async
+tokio = { workspace = true, features = ["sync", "macros", "rt", "rt-multi-thread", "time", "tracing"] }
+tokio-util = { workspace = true }
+async-lock = { workspace = true }
+tokio-tungstenite = { version = "0.27.0", features = ["url"] }
+async-trait.workspace = true
+futures-buffered.workspace = true
+futures = { workspace = true }
+
+#
+# automerge
+automerge = { workspace = true }
+autosurgeon = { workspace = true }
+
+#
+# encoding
+serde.workspace = true
+serde_json = { workspace = true }
+data-encoding.workspace = true
+bytes.workspace = true
+camino = "1.2.2"
+sqlx = { workspace = true, features = ["sqlite", "runtime-tokio"] }
+rand.workspace = true
+blake3.workspace = true
+tempfile.workspace = true
+
+#
+# errors
+thiserror.workspace = true
+iroh = { workspace = true, }
+irpc = { workspace = true }
+
+#
+# sync
+automerge_sedimentree = { workspace = true, features = ["rayon"] }
+future_form = { version = "0.3.0", }
+keyhive_core = { version = "0.3.0", }
+keyhive_crypto = { version = "0.1.0", }
+sedimentree_core = { workspace = true, features = ["rayon"] }
+sedimentree_fs_storage = { workspace = true }
+subduction_core = { workspace = true  }
+subduction_crypto = { workspace = true, }
+subduction_iroh = { workspace = true }
+subduction_keyhive = { workspace = true, }
+subduction_keyhive_policy = { workspace = true, }
+subduction_websocket = { workspace = true, features = ["tokio_base"], }
+
+#
+# logging
+tracing.workspace = true

@@ -4,7 +4,7 @@ use crate::interlude::*;
 use crate::{
     bucket::BucketMachine,
     fingerprint::FingerprintSeed,
-    part_store::{CursorIndex, PartStore},
+    part_store::{CursorIndex, PartStoreReadOnly},
     rpc::{BigSyncRpcClient, LeafBucketRequest, LeafBucketsError, LeafBucketsRequest, RpcError},
     tasks::{TaskCtx, TaskResultDeets},
 };
@@ -45,7 +45,7 @@ impl LeafBucketsTask {
     ) -> Result<TaskResultDeets, LeafBucketsTaskError>
     where
         K: FutureForm,
-        PStore: PartStore<K>,
+        PStore: PartStoreReadOnly<K>,
         Rpc: BigSyncRpcClient<K>,
         Rng: rand::Rng,
     {
@@ -66,7 +66,7 @@ impl LeafBucketsTask {
     ) -> Result<TaskResultDeets, LeafBucketsErrorDeets>
     where
         K: FutureForm,
-        PStore: PartStore<K>,
+        PStore: PartStoreReadOnly<K>,
         Rpc: BigSyncRpcClient<K>,
         Rng: rand::Rng,
     {
