@@ -8,7 +8,7 @@ use big_sync_core::rpc::{
 use big_sync_core::{mpsc, BuckId, Byte32Id, ObjId, PartId, PeerId};
 
 pub mod memory;
-// pub mod sqlite;
+pub mod sqlite;
 
 pub type ObjStoreLease = u64;
 

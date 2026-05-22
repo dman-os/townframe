@@ -1,9 +1,11 @@
 use super::*;
 
+use crate::part_store::sqlite::SqlitePartStore;
 use crate::worker::WorkerSnapshot;
 use rand::rngs::StdRng;
 use rand::{seq::SliceRandom, Rng, SeedableRng};
 use std::fmt::Write as _;
+use std::str::FromStr;
 use std::sync::Mutex;
 
 const STRESS_NODE_COUNT: usize = 4 * 1;
@@ -11,6 +13,21 @@ const PHASE1_MUTATIONS: usize = 48 * 10;
 const PHASE2_MUTATIONS: usize = 24 * 10;
 const PHASE3_MUTATIONS: usize = 32 * 10;
 const DEFAULT_STRESS_SEED: u64 = 0xB1A0_5EED_5EED_0001;
+
+#[derive(Clone, Copy, Debug)]
+enum StressBackend {
+    Memory,
+    Sqlite,
+}
+
+impl StressBackend {
+    fn label(self) -> &'static str {
+        match self {
+            Self::Memory => "memory",
+            Self::Sqlite => "sqlite",
+        }
+    }
+}
 
 #[derive(Default)]
 struct StressJournal {
@@ -290,12 +307,46 @@ fn format_full_sync_timeout(
     out
 }
 
-async fn boot_cluster(world: Arc<TestWorld>) -> Res<Vec<Option<NodeHarness>>> {
+async fn boot_cluster_for_backend(
+    world: Arc<TestWorld>,
+    backend: StressBackend,
+) -> Res<Vec<Option<NodeHarness>>> {
     let mut nodes = Vec::with_capacity(STRESS_NODE_COUNT);
     for peer_seed in 1..=(STRESS_NODE_COUNT as u8) {
-        nodes.push(Some(boot_node(Arc::clone(&world), peer_seed).await?));
+        let node = match backend {
+            StressBackend::Memory => boot_node(Arc::clone(&world), peer_seed).await?,
+            StressBackend::Sqlite => boot_sqlite_node(Arc::clone(&world), peer_seed).await?,
+        };
+        nodes.push(Some(node));
     }
     Ok(nodes)
+}
+
+async fn boot_sqlite_node(world: Arc<TestWorld>, peer_seed: u8) -> Res<NodeHarness> {
+    let peer_id = peer_id(peer_seed);
+    let temp_dir = tempfile::tempdir()?;
+    let db_path = temp_dir.path().join("big_sync.sqlite");
+    let db_url = format!("sqlite://{}", db_path.display());
+    let options = sqlx::sqlite::SqliteConnectOptions::from_str(&db_url)?
+        .journal_mode(sqlx::sqlite::SqliteJournalMode::Wal)
+        .create_if_missing(true);
+    let pool = sqlx::sqlite::SqlitePoolOptions::new()
+        .max_connections(1)
+        .connect_with(options)
+        .await?;
+    let store = Arc::new(
+        SqlitePartStore::new(
+            pool.clone(),
+            pool,
+            format!("big-sync-stress://peer/{peer_seed}"),
+        )
+        .await?,
+    );
+    let node = boot_node_with_store(world, peer_id, store, None).await?;
+    Ok(NodeHarness {
+        sqlite_temp_dir: Some(temp_dir),
+        ..node
+    })
 }
 
 async fn connect_full_mesh(nodes: &[Option<NodeHarness>]) -> Res<()> {
@@ -604,6 +655,32 @@ async fn drain_cluster_zombies(nodes: &[Option<NodeHarness>], timeout: Duration)
 
 #[tokio::test(flavor = "multi_thread")]
 async fn memory_sync_randomized_four_node_stress_converges() -> Res<()> {
+    run_randomized_four_node_stress(
+        StressBackend::Memory,
+        PHASE1_MUTATIONS,
+        PHASE2_MUTATIONS,
+        PHASE3_MUTATIONS,
+    )
+    .await
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn sqlite_sync_randomized_four_node_stress_converges() -> Res<()> {
+    run_randomized_four_node_stress(
+        StressBackend::Sqlite,
+        PHASE1_MUTATIONS / 4,
+        PHASE2_MUTATIONS / 4,
+        PHASE3_MUTATIONS / 4,
+    )
+    .await
+}
+
+async fn run_randomized_four_node_stress(
+    backend: StressBackend,
+    phase1_mutations: usize,
+    phase2_mutations: usize,
+    phase3_mutations: usize,
+) -> Res<()> {
     utils_rs::testing::setup_tracing_once();
 
     let seed = std::env::var("BIG_SYNC_STRESS_SEED")
@@ -614,9 +691,10 @@ async fn memory_sync_randomized_four_node_stress_converges() -> Res<()> {
     let journal = StressJournal::default();
     let mut state = StressState::default();
     journal.record(format!("seed={seed}"));
+    journal.record(format!("backend={}", backend.label()));
 
     let world = Arc::new(TestWorld::default());
-    let nodes = boot_cluster(Arc::clone(&world)).await?;
+    let nodes = boot_cluster_for_backend(Arc::clone(&world), backend).await?;
 
     journal.record("phase1:start");
     let phase1_topology = choose_active_topology(&mut rng, &nodes);
@@ -628,7 +706,7 @@ async fn memory_sync_randomized_four_node_stress_converges() -> Res<()> {
         &mut state,
         &nodes,
         "phase1",
-        PHASE1_MUTATIONS,
+        phase1_mutations,
         &journal,
     )
     .await?;
@@ -645,7 +723,7 @@ async fn memory_sync_randomized_four_node_stress_converges() -> Res<()> {
         &mut state,
         &nodes,
         "phase2",
-        PHASE2_MUTATIONS,
+        phase2_mutations,
         &journal,
     )
     .await?;
@@ -662,7 +740,7 @@ async fn memory_sync_randomized_four_node_stress_converges() -> Res<()> {
         &mut state,
         &nodes,
         "phase3",
-        PHASE3_MUTATIONS,
+        phase3_mutations,
         &journal,
     )
     .await?;

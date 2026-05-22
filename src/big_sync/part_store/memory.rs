@@ -11,6 +11,10 @@ use big_sync_core::rpc::{
 use big_sync_core::{mpsc, BuckId, Byte32Id, Fingerprint, ObjId, PartId, PeerId};
 
 use super::{obj_id_bounds_for_bucket, HostPartitionStore};
+#[cfg(test)]
+use crate::test_support::{
+    ObservedObjSnapshot, ObservedStore, ObservedStoreSnapshot, TestStoreSetup,
+};
 
 use std::collections::BTreeMap;
 #[cfg(test)]
@@ -1034,5 +1038,43 @@ impl MemoryPartStore {
                 peer_part_cursors: guard.peer_part_cursors.clone().into_iter().collect(),
             })
         })
+    }
+}
+
+#[cfg(test)]
+impl From<MemoryPartStoreSnapshot> for ObservedStoreSnapshot {
+    fn from(value: MemoryPartStoreSnapshot) -> Self {
+        Self {
+            objs: value
+                .objs
+                .into_iter()
+                .map(|(obj_id, snapshot)| {
+                    (
+                        obj_id,
+                        ObservedObjSnapshot {
+                            payload: snapshot.payload,
+                            parts: snapshot.parts,
+                        },
+                    )
+                })
+                .collect(),
+            peer_part_cursors: value.peer_part_cursors,
+        }
+    }
+}
+
+#[cfg(test)]
+#[async_trait]
+impl ObservedStore for MemoryPartStore {
+    async fn observed_snapshot(&self) -> Res<ObservedStoreSnapshot> {
+        Ok(self.snapshot().await?.into())
+    }
+}
+
+#[cfg(test)]
+#[async_trait]
+impl TestStoreSetup for MemoryPartStore {
+    async fn ensure_test_part(&self, part_id: PartId) -> Res<()> {
+        self.ensure_part(part_id).await
     }
 }

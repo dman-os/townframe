@@ -1447,10 +1447,9 @@ where
             }
         }
         commit_delta_bookkeep(
-            &self.partition_store,
+            &self.big_sync,
             &self.change_manager,
             self.doc_id,
-            Arc::clone(&self.doc_id_str),
             heads,
             patches,
             origin,
@@ -1740,7 +1739,6 @@ async fn commit_delta_bookkeep(
     big_sync: &Arc<Ctx>,
     change_manager: &Arc<changes::ChangeListenerManager>,
     doc_id: DocumentId,
-    scoped_doc_ref: big_sync::ScopedObjRef,
     heads: Vec<automerge::ChangeHash>,
     patches: Vec<automerge::Patch>,
     origin: BigRepoChangeOrigin,
@@ -1758,7 +1756,8 @@ async fn commit_delta_bookkeep(
         "bookkeeping committed delta"
     );
     big_sync
-        .upsert_obj(&scoped_doc_ref, item_payload, &[])
+        .store
+        .upsert_obj(doc_id, item_payload, vec![], None)
         .await?;
 
     let heads_arc = Arc::<[automerge::ChangeHash]>::from(heads);

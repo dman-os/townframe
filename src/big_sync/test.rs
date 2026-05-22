@@ -1,11 +1,9 @@
 use crate::{interlude::*, SyncBackend};
 
 use std::cmp::Ordering;
-use std::collections::{BTreeMap, BTreeSet, HashMap};
+use std::collections::HashMap;
 use std::sync::Mutex;
 
-use big_sync_core::part_store::CursorIndex;
-use big_sync_core::part_store::ObjPayload;
 use big_sync_core::rpc::{
     BigSyncRpcResult, BucketSummary, GetChangedBucketsRequest, LeafBucketResult, LeafBucketsError,
     LeafBucketsRequest, ListPartsError, PeerSummaryRequest, PeerSummaryResult, SubEvent,
@@ -18,8 +16,9 @@ use rand::rngs::StdRng;
 use rand::{seq::SliceRandom, Rng, SeedableRng};
 use serde::{Deserialize, Serialize};
 
-use crate::part_store::memory::{MemoryPartStore, MemoryPartStoreSnapshot};
+use crate::part_store::memory::MemoryPartStore;
 use crate::part_store::{HostPartitionStore, ObjStoreLease, StoreMutationOutcome};
+use crate::test_support::{ObservedStore, ObservedStoreSnapshot, TestStoreSetup};
 use crate::{BackendId, Ctx, SyncTaskRunOutcome};
 
 const TEST_BACKEND_ID: BackendId = 0;
@@ -70,47 +69,6 @@ fn compare_lww_payloads(left: &serde_json::Value, right: &serde_json::Value) -> 
     }
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
-struct ObservedObjSnapshot {
-    payload: Option<ObjPayload>,
-    parts: BTreeSet<PartId>,
-}
-
-#[derive(Debug, Clone)]
-struct ObservedStoreSnapshot {
-    objs: BTreeMap<ObjId, ObservedObjSnapshot>,
-    peer_part_cursors: BTreeMap<(PeerId, PartId), CursorIndex>,
-}
-
-impl PartialEq for ObservedStoreSnapshot {
-    fn eq(&self, other: &Self) -> bool {
-        self.objs == other.objs
-    }
-}
-
-impl Eq for ObservedStoreSnapshot {}
-
-impl From<MemoryPartStoreSnapshot> for ObservedStoreSnapshot {
-    fn from(value: MemoryPartStoreSnapshot) -> Self {
-        Self {
-            objs: value
-                .objs
-                .into_iter()
-                .map(|(obj, snapshot)| {
-                    (
-                        obj,
-                        ObservedObjSnapshot {
-                            payload: snapshot.payload,
-                            parts: snapshot.parts,
-                        },
-                    )
-                })
-                .collect(),
-            peer_part_cursors: value.peer_part_cursors,
-        }
-    }
-}
-
 fn test_part() -> PartId {
     PartId(Byte32Id::new([
         32, 12, 54, 54, 65, 112, 213, 43, 12, 54, 123, 123, 54, 23, 68, 12, //
@@ -124,19 +82,23 @@ fn test_parts() -> Vec<PartId> {
 
 #[derive(Default)]
 struct TestWorld {
-    stores: Mutex<HashMap<PeerId, Arc<MemoryPartStore>>>,
+    stores: Mutex<HashMap<PeerId, Arc<dyn HostPartitionStore>>>,
     online: Mutex<HashSet<PeerId>>,
 }
 
 impl TestWorld {
-    fn register_store(&self, peer_id: PeerId, store: Arc<MemoryPartStore>) {
+    fn register_store<S>(&self, peer_id: PeerId, store: Arc<S>)
+    where
+        S: HostPartitionStore + 'static,
+    {
         let mut stores = self.stores.lock().expect(ERROR_MUTEX);
+        let store: Arc<dyn HostPartitionStore> = store;
         let old = stores.insert(peer_id, store);
         assert!(old.is_none(), "fishy");
         self.set_online(peer_id, true);
     }
 
-    fn store_for_peer(&self, peer_id: PeerId) -> Arc<MemoryPartStore> {
+    fn store_for_peer(&self, peer_id: PeerId) -> Arc<dyn HostPartitionStore> {
         self.stores
             .lock()
             .expect(ERROR_MUTEX)
@@ -162,21 +124,21 @@ impl TestWorld {
 #[derive(Clone)]
 pub(crate) struct MemoryRpcClient {
     world: Arc<TestWorld>,
-    source_part_store: Arc<MemoryPartStore>,
+    _source_part_store: Arc<dyn HostPartitionStore>,
     target_peer_id: PeerId,
-    target_part_store: Arc<MemoryPartStore>,
+    target_part_store: Arc<dyn HostPartitionStore>,
 }
 
 impl MemoryRpcClient {
     fn new(
         world: Arc<TestWorld>,
-        source_part_store: Arc<MemoryPartStore>,
+        source_part_store: Arc<dyn HostPartitionStore>,
         target_peer_id: PeerId,
-        target_part_store: Arc<MemoryPartStore>,
+        target_part_store: Arc<dyn HostPartitionStore>,
     ) -> Self {
         Self {
             world,
-            source_part_store,
+            _source_part_store: source_part_store,
             target_peer_id,
             target_part_store,
         }
@@ -260,19 +222,19 @@ impl crate::rpc::HostBigRpcClient for MemoryRpcClient {
 }
 
 struct MemorySyncBackend {
-    local_peer_id: PeerId,
-    local_part_store: Arc<MemoryPartStore>,
+    _local_peer_id: PeerId,
+    local_part_store: Arc<dyn HostPartitionStore>,
     world: Arc<TestWorld>,
 }
 
 impl MemorySyncBackend {
     fn new(
         local_peer_id: PeerId,
-        local_part_store: Arc<MemoryPartStore>,
+        local_part_store: Arc<dyn HostPartitionStore>,
         world: Arc<TestWorld>,
     ) -> Self {
         Self {
-            local_peer_id,
+            _local_peer_id: local_peer_id,
             local_part_store,
             world,
         }
@@ -352,7 +314,10 @@ struct NodeHarness {
     host: Ctx,
     handle: crate::BigSyncWorkerHandle,
     stop: crate::StopToken,
-    store: Arc<MemoryPartStore>,
+    store: Arc<dyn HostPartitionStore>,
+    observed_store: Arc<dyn ObservedStore>,
+    restart_memory_store: Option<Arc<MemoryPartStore>>,
+    sqlite_temp_dir: Option<tempfile::TempDir>,
 }
 
 impl NodeHarness {
@@ -404,7 +369,7 @@ impl NodeHarness {
     }
 
     async fn snapshot(&self) -> Res<ObservedStoreSnapshot> {
-        Ok(self.store.snapshot().await?.into())
+        self.observed_store.observed_snapshot().await
     }
 
     async fn stop(self) -> Res<()> {
@@ -628,30 +593,41 @@ async fn memory_part_store_bucket_summary_is_order_independent() -> Res<()> {
     Ok(())
 }
 
-async fn boot_node_with_store(
+async fn boot_node_with_store<S>(
     world: Arc<TestWorld>,
     peer_id: PeerId,
-    store: Arc<MemoryPartStore>,
-) -> Res<NodeHarness> {
-    store.ensure_part(test_part()).await?;
+    store: Arc<S>,
+    restart_memory_store: Option<Arc<MemoryPartStore>>,
+) -> Res<NodeHarness>
+where
+    S: ObservedStore + TestStoreSetup + HostPartitionStore + 'static,
+{
+    store.ensure_test_part(test_part()).await?;
     world.set_online(peer_id, true);
-    let store_for_worker = Arc::clone(&store) as _;
+    world.register_store(peer_id, Arc::clone(&store));
+    let store_for_worker: Arc<dyn HostPartitionStore> = store.clone();
+    let observed_store: Arc<dyn ObservedStore> = store.clone();
     let backend: Arc<dyn SyncBackend> = Arc::new(MemorySyncBackend::new(
         peer_id,
-        Arc::clone(&store),
+        Arc::clone(&store_for_worker),
         Arc::clone(&world),
     ));
-    let (handle, stop) =
-        crate::spawn_big_sync_worker(store_for_worker, [(TEST_BACKEND_ID, backend)].into())?;
+    let (handle, stop) = crate::spawn_big_sync_worker(
+        Arc::clone(&store_for_worker),
+        [(TEST_BACKEND_ID, backend)].into(),
+    )?;
     let host = Ctx {
-        store: Arc::clone(&store) as _,
+        store: Arc::clone(&store_for_worker),
         worker: handle.clone(),
     };
 
     Ok(NodeHarness {
         world,
         peer_id,
-        store,
+        store: store_for_worker,
+        observed_store,
+        restart_memory_store,
+        sqlite_temp_dir: None,
         host,
         handle,
         stop,
@@ -661,23 +637,26 @@ async fn boot_node_with_store(
 async fn boot_node(world: Arc<TestWorld>, peer_seed: u8) -> Res<NodeHarness> {
     let peer_id = peer_id(peer_seed);
     let store = Arc::new(MemoryPartStore::new(peer_id));
-    world.register_store(peer_id, Arc::clone(&store));
-    boot_node_with_store(world, peer_id, store).await
+    boot_node_with_store(world, peer_id, store.clone(), Some(store)).await
 }
 
 async fn restart_node(world: Arc<TestWorld>, node: NodeHarness) -> Res<NodeHarness> {
     let NodeHarness {
         world: node_world,
         peer_id,
-        store,
+        restart_memory_store,
         host: _host,
-        handle,
+        handle: _handle,
         stop,
+        sqlite_temp_dir: _sqlite_temp_dir,
+        ..
     } = node;
     node_world.set_online(peer_id, false);
     stop.stop().await?;
-    drop(handle);
-    boot_node_with_store(world, peer_id, store).await
+    let Some(memory_store) = restart_memory_store else {
+        eyre::bail!("node is not restartable with a memory store");
+    };
+    boot_node_with_store(world, peer_id, memory_store.clone(), Some(memory_store)).await
 }
 
 async fn assert_two_node_alignment(
@@ -1123,6 +1102,7 @@ async fn memory_sync_direct_backend_adopts_remote_tombstone() -> Res<()> {
     let peer_b = peer_id(2);
     let store_a = Arc::new(MemoryPartStore::new(peer_a));
     let store_b = Arc::new(MemoryPartStore::new(peer_b));
+    let store_b_dyn: Arc<dyn HostPartitionStore> = store_b.clone();
 
     world.register_store(peer_a, Arc::clone(&store_a));
     world.register_store(peer_b, Arc::clone(&store_b));
@@ -1139,7 +1119,7 @@ async fn memory_sync_direct_backend_adopts_remote_tombstone() -> Res<()> {
         .await?;
     store_a.remove_obj_from_part(obj, part, None).await?;
 
-    let backend = MemorySyncBackend::new(peer_b, Arc::clone(&store_b), Arc::clone(&world));
+    let backend = MemorySyncBackend::new(peer_b, Arc::clone(&store_b_dyn), Arc::clone(&world));
 
     let err = backend
         .sync_obj(
@@ -1167,6 +1147,8 @@ async fn memory_sync_direct_backend_cross_replication_is_symmetric() -> Res<()> 
     let peer_b = peer_id(2);
     let store_a = Arc::new(MemoryPartStore::new(peer_a));
     let store_b = Arc::new(MemoryPartStore::new(peer_b));
+    let store_a_dyn: Arc<dyn HostPartitionStore> = store_a.clone();
+    let store_b_dyn: Arc<dyn HostPartitionStore> = store_b.clone();
 
     world.register_store(peer_a, Arc::clone(&store_a));
     world.register_store(peer_b, Arc::clone(&store_b));
@@ -1184,8 +1166,8 @@ async fn memory_sync_direct_backend_cross_replication_is_symmetric() -> Res<()> 
         .upsert_obj(obj_b, right_payload.clone(), vec![part], None)
         .await?;
 
-    let backend_a = MemorySyncBackend::new(peer_a, Arc::clone(&store_a), Arc::clone(&world));
-    let backend_b = MemorySyncBackend::new(peer_b, Arc::clone(&store_b), Arc::clone(&world));
+    let backend_a = MemorySyncBackend::new(peer_a, Arc::clone(&store_a_dyn), Arc::clone(&world));
+    let backend_b = MemorySyncBackend::new(peer_b, Arc::clone(&store_b_dyn), Arc::clone(&world));
 
     let _ = backend_a
         .sync_obj(
@@ -1530,21 +1512,9 @@ async fn memory_sync_offline_edits_catch_up_after_reconnect() -> Res<()> {
         node_b.host.worker.remove_peer(node_a.peer_id),
     )?;
     wait_for_convergence(&[&node_a, &node_b], Duration::from_secs(30)).await?;
-    let NodeHarness {
-        world: node_b_world,
-        peer_id,
-        store,
-        host: _host,
-        handle,
-        stop,
-    } = node_b;
-    node_b_world.set_online(peer_id, false);
-    stop.stop().await?;
-    drop(handle);
     node_a.seed_obj(obj, offline_a.clone()).await?;
     wait_for_convergence(&[&node_a], Duration::from_secs(30)).await?;
-
-    let node_b = boot_node_with_store(Arc::clone(&world), peer_id, store).await?;
+    let node_b = restart_node(Arc::clone(&world), node_b).await?;
     tokio::try_join!(node_a.connect_to(&node_b), node_b.connect_to(&node_a))?;
     wait_for_convergence(&[&node_a, &node_b], Duration::from_secs(30)).await?;
     let _stats = collect_stats(&mut stats_rx, Duration::from_millis(200)).await;
@@ -1650,18 +1620,6 @@ async fn memory_sync_random_half_deleted_before_reconnect_converges() -> Res<()>
     )?;
     wait_for_convergence(&[&node_a, &node_b], Duration::from_secs(30)).await?;
 
-    let NodeHarness {
-        world: node_b_world,
-        peer_id,
-        store,
-        host: _host,
-        handle,
-        stop,
-    } = node_b;
-    node_b_world.set_online(peer_id, false);
-    stop.stop().await?;
-    drop(handle);
-
     let mut rng = StdRng::seed_from_u64(0x3b1a_5eed);
     let mut deleted_mask = vec![false; objs.len()];
     let mut delete_idxs: Vec<_> = (0..objs.len()).collect();
@@ -1672,7 +1630,7 @@ async fn memory_sync_random_half_deleted_before_reconnect_converges() -> Res<()>
     }
 
     wait_for_idle(&[&node_a], Duration::from_secs(30)).await?;
-    let node_b = boot_node_with_store(Arc::clone(&world), peer_id, store).await?;
+    let node_b = restart_node(Arc::clone(&world), node_b).await?;
     tokio::try_join!(node_a.connect_to(&node_b), node_b.connect_to(&node_a))?;
     wait_for_convergence(&[&node_a, &node_b], Duration::from_secs(30)).await?;
 
