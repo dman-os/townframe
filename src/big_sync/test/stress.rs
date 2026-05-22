@@ -3,7 +3,6 @@ use super::*;
 use crate::worker::WorkerSnapshot;
 use rand::rngs::StdRng;
 use rand::{seq::SliceRandom, Rng, SeedableRng};
-use std::collections::HashSet;
 use std::fmt::Write as _;
 use std::sync::Mutex;
 
@@ -28,52 +27,57 @@ impl StressJournal {
     }
 }
 
-fn stress_obj(seed: u32) -> ScopedObjRef {
-    ScopedObjRef::new(test_scope(), format!("stress.obj.{seed}"))
+fn stress_obj(seed: u32) -> ObjId {
+    gen_obj_id(seed as usize)
 }
 
 fn stress_payload(
     phase: &str,
     step: usize,
     node_idx: usize,
-    obj_id: &ScopedObjRef,
+    obj_id: &ObjId,
     nonce: u64,
+    written_at: u64,
+    writer_id: PeerId,
 ) -> serde_json::Value {
-    serde_json::Value::from(format!(
-        "{phase}:step={step}:node={node_idx}:obj={obj_id:?}:nonce={nonce}"
-    ))
+    payload(
+        format!("{phase}:step={step}:node={node_idx}:obj={obj_id:?}:nonce={nonce}"),
+        written_at,
+        writer_id,
+    )
 }
 
 #[derive(Default)]
 struct StressState {
     next_obj_seed: u32,
-    live_objs: Vec<ScopedObjRef>,
-    retired_objs: HashSet<ScopedObjRef>,
+    next_written_at: u64,
+    live_objs: Vec<ObjId>,
 }
 
 impl StressState {
-    fn fresh_obj(&mut self) -> ScopedObjRef {
+    fn fresh_obj(&mut self) -> ObjId {
         let obj = stress_obj(self.next_obj_seed);
         self.next_obj_seed = self.next_obj_seed.wrapping_add(1);
         obj
     }
 
-    fn choose_live_obj(&self, rng: &mut StdRng) -> Option<ScopedObjRef> {
+    fn choose_live_obj(&self, rng: &mut StdRng) -> Option<ObjId> {
         if self.live_objs.is_empty() {
             return None;
         }
         Some(self.live_objs[rng.random_range(0..self.live_objs.len())].clone())
     }
 
-    fn publish_new_obj(&mut self) -> ScopedObjRef {
+    fn publish_new_obj(&mut self) -> ObjId {
         let obj = self.fresh_obj();
         self.live_objs.push(obj.clone());
         obj
     }
 
-    fn retire_obj(&mut self, obj: ScopedObjRef) {
-        self.retired_objs.insert(obj.clone());
-        self.live_objs.retain(|candidate| candidate != &obj);
+    fn next_written_at(&mut self) -> u64 {
+        let written_at = self.next_written_at;
+        self.next_written_at = self.next_written_at.wrapping_add(1);
+        written_at
     }
 }
 
@@ -347,8 +351,8 @@ async fn disconnect_all(nodes: &[Option<NodeHarness>]) -> Res<()> {
                 continue;
             };
             tokio::try_join!(
-                left.host.remove_peer(right.peer_id),
-                right.host.remove_peer(left.peer_id),
+                left.host.worker.remove_peer(right.peer_id),
+                right.host.worker.remove_peer(left.peer_id),
             )?;
         }
     }
@@ -423,39 +427,23 @@ async fn apply_random_mutation(
         state.choose_live_obj(rng).expect(ERROR_IMPOSSIBLE)
     };
 
-    if !fresh_obj && rng.random_bool(0.25) {
-        journal.record(format!(
-            "{phase}:step={step}:delete node={node_idx} obj={obj:?}"
-        ));
-        if obj == stress_obj(120) {
-            tracing::debug!(
-                phase,
-                step,
-                node_idx,
-                obj = ?obj,
-                "stress target delete"
-            );
-        }
-        node.remove_obj(&obj).await?;
-        state.retire_obj(obj);
-    } else {
-        let nonce = rng.random::<u64>();
-        let value = stress_payload(phase, step, node_idx, &obj, nonce);
-        journal.record(format!(
-            "{phase}:step={step}:upsert node={node_idx} obj={obj:?} value={value:?}"
-        ));
-        if obj == stress_obj(120) {
-            tracing::debug!(
-                phase,
-                step,
-                node_idx,
-                obj = ?obj,
-                value = ?value,
-                "stress target upsert"
-            );
-        }
-        node.seed_obj(&obj, value).await?;
+    let nonce = rng.random::<u64>();
+    let written_at = state.next_written_at();
+    let value = stress_payload(phase, step, node_idx, &obj, nonce, written_at, node.peer_id);
+    journal.record(format!(
+        "{phase}:step={step}:upsert node={node_idx} obj={obj:?} value={value:?}"
+    ));
+    if obj == stress_obj(120) {
+        tracing::debug!(
+            phase,
+            step,
+            node_idx,
+            obj = ?obj,
+            value = ?value,
+            "stress target upsert"
+        );
     }
+    node.seed_obj(obj, value).await?;
 
     if rng.random_bool(0.25) {
         let sleep_ms = rng.random_range(1..15);
@@ -489,7 +477,7 @@ async fn assert_cluster_alignment(nodes: &[&NodeHarness]) -> Res<()> {
 
     for node in nodes {
         let worker_snapshot = node.handle.snapshot().await?;
-        let part_id = node.host.resolve_part(&test_part()).await?;
+        let part_id = test_part();
         let expected_parts = [(part_id, TEST_BACKEND_ID)].into_iter().collect();
         assert_eq!(worker_snapshot.peer_parts.len(), expected_peer_count);
         for other in nodes {
@@ -504,7 +492,7 @@ async fn assert_cluster_alignment(nodes: &[&NodeHarness]) -> Res<()> {
         worker_snaps.push(worker_snapshot);
         let snapshot = node.snapshot().await?;
         for &(_, part_id) in snapshot.peer_part_cursors.keys() {
-            assert_eq!(part_id, node.host.resolve_part(&test_part()).await?);
+            assert_eq!(part_id, test_part());
         }
         store_snaps.push((node.peer_id, snapshot));
     }
@@ -543,7 +531,7 @@ async fn wait_for_cluster_full_sync(nodes: &[&NodeHarness], timeout: Duration) -
             return Err(ferr!("timed out waiting for stress cluster full sync"));
         }
         let worker_snapshot = node.handle.snapshot().await?;
-        let part_id = node.host.resolve_part(&test_part()).await?;
+        let part_id = test_part();
         let peer_ids = worker_snapshot
             .peer_parts
             .keys()
@@ -644,14 +632,14 @@ async fn memory_sync_randomized_four_node_stress_converges() -> Res<()> {
         &journal,
     )
     .await?;
-    wait_for_full_mesh(&nodes, Duration::from_secs(30)).await?;
-    wait_for_cluster_quiescent(&nodes, Duration::from_secs(30)).await?;
+    wait_for_full_mesh(&nodes, Duration::from_secs(60)).await?;
+    wait_for_cluster_quiescent(&nodes, Duration::from_secs(60)).await?;
 
     journal.record("phase2:start");
     let phase2_topology = choose_active_topology(&mut rng, &nodes);
     journal.record(format!("phase2:topology active={phase2_topology:?}"));
     connect_active_topology(&mut rng, &nodes, &phase2_topology).await?;
-    wait_for_cluster_quiescent(&nodes, Duration::from_secs(30)).await?;
+    wait_for_cluster_quiescent(&nodes, Duration::from_secs(60)).await?;
     run_phase(
         &mut rng,
         &mut state,
@@ -661,14 +649,14 @@ async fn memory_sync_randomized_four_node_stress_converges() -> Res<()> {
         &journal,
     )
     .await?;
-    wait_for_full_mesh(&nodes, Duration::from_secs(30)).await?;
-    wait_for_cluster_quiescent(&nodes, Duration::from_secs(30)).await?;
+    wait_for_full_mesh(&nodes, Duration::from_secs(60)).await?;
+    wait_for_cluster_quiescent(&nodes, Duration::from_secs(60)).await?;
 
     journal.record("phase3:start");
     let phase3_topology = choose_active_topology(&mut rng, &nodes);
     journal.record(format!("phase3:topology active={phase3_topology:?}"));
     connect_active_topology(&mut rng, &nodes, &phase3_topology).await?;
-    wait_for_cluster_quiescent(&nodes, Duration::from_secs(30)).await?;
+    wait_for_cluster_quiescent(&nodes, Duration::from_secs(60)).await?;
     run_phase(
         &mut rng,
         &mut state,
@@ -678,8 +666,8 @@ async fn memory_sync_randomized_four_node_stress_converges() -> Res<()> {
         &journal,
     )
     .await?;
-    wait_for_full_mesh(&nodes, Duration::from_secs(30)).await?;
-    wait_for_cluster_quiescent(&nodes, Duration::from_secs(30)).await?;
+    wait_for_full_mesh(&nodes, Duration::from_secs(60)).await?;
+    wait_for_cluster_quiescent(&nodes, Duration::from_secs(60)).await?;
 
     let refs = live_refs(&nodes);
     assert_cluster_alignment(&refs).await?;

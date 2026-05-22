@@ -720,9 +720,9 @@ impl BigSyncMachine {
     }
 
     #[tracing::instrument(
-        skip_all, 
+        skip_all,
         fields(
-            peer_id = %peer_id, 
+            peer_id = %peer_id,
             task_id = %task_id,
         )
     )]
@@ -1245,7 +1245,7 @@ impl BigSyncMachine {
     #[tracing::instrument(
         skip_all,
         fields(
-            peer_id = %peer_id, 
+            peer_id = %peer_id,
             task_id = %task_id,
         )
     )]
@@ -1293,7 +1293,7 @@ impl BigSyncMachine {
     #[tracing::instrument(
         skip_all,
         fields(
-            peer_id = %peer_id, 
+            peer_id = %peer_id,
             task_id = %task_id,
         )
     )]
