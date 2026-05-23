@@ -1,9 +1,11 @@
 mod interlude {
-    pub use big_sync_core::{ObjId, PartId, PeerId};
+    pub use am_utils_rs::prelude::ThroughJson;
+    pub use big_sync_core::{ObjId, PeerId};
     pub use utils_rs::prelude::*;
 }
 
 use crate::interlude::*;
+use crate::rpc::FullDoc;
 
 use std::collections::BTreeSet;
 use std::str::FromStr;
@@ -11,7 +13,6 @@ use std::sync::atomic::{AtomicBool, Ordering};
 
 use automerge::ChangeHash;
 use autosurgeon::{Hydrate, Prop, Reconcile};
-use big_sync::Ctx;
 use sedimentree_core::loose_commit::id::CommitId;
 
 // FIXME: properly test the changes impl and investigate
@@ -50,7 +51,7 @@ pub enum StorageConfig {
 pub struct BigRepo {
     local_peer_id: PeerId,
     #[educe(Debug(ignore))]
-    big_sync: Arc<Ctx>,
+    big_sync_host: Arc<big_sync::Ctx>,
     #[educe(Debug(ignore))]
     runtime: runtime::BigRepoRuntimeHandle,
     #[educe(Debug(ignore))]
@@ -62,7 +63,10 @@ pub struct BigRepo {
 pub type SharedBigRepo = Arc<BigRepo>;
 
 impl BigRepo {
-    pub async fn boot(config: Config, big_sync: Arc<Ctx>) -> Res<(Arc<Self>, BigRepoStopToken)> {
+    pub async fn boot(
+        config: Config,
+        big_sync_host: Arc<big_sync::Ctx>,
+    ) -> Res<(Arc<Self>, BigRepoStopToken)> {
         let Config {
             peer_id,
             secret_key_bytes,
@@ -75,7 +79,7 @@ impl BigRepo {
             StorageConfig::Memory => runtime::spawn_big_repo_runtime(
                 signer,
                 subduction_core::storage::memory::MemoryStorage::new(),
-                Arc::clone(&big_sync),
+                Arc::clone(&big_sync_host),
                 Arc::clone(&change_manager),
             )?,
             StorageConfig::Disk { path } => {
@@ -91,7 +95,7 @@ impl BigRepo {
                 runtime::spawn_big_repo_runtime(
                     signer,
                     fs_storage,
-                    Arc::clone(&big_sync),
+                    Arc::clone(&big_sync_host),
                     Arc::clone(&change_manager),
                 )?
             }
@@ -99,7 +103,7 @@ impl BigRepo {
 
         let out = Arc::new(Self {
             local_peer_id: peer_id,
-            big_sync,
+            big_sync_host,
             runtime,
             change_manager,
             change_manager_stop: std::sync::Mutex::new(Some(change_manager_stop)),
@@ -278,21 +282,17 @@ impl BigRepo {
 
 // partition support
 impl BigRepo {
-    pub async fn doc_payload_heads(&self, doc_id: &str) -> Res<Arc<[ChangeHash]>> {
-        partition_doc_heads_payload(&self.partition_store, doc_id).await
+    pub async fn doc_payload_heads(&self, doc_id: DocumentId) -> Res<Arc<[ChangeHash]>> {
+        partition_doc_heads_payload(&self.big_sync_host, doc_id).await
     }
 
-    pub async fn get_docs_full_in_partitions(
-        &self,
-        doc_ids: &[String],
-        allowed_partitions: &[PartitionId],
-    ) -> Res<Vec<crate::repo::rpc::FullDoc>> {
-        if doc_ids.len() > crate::repo::rpc::MAX_GET_DOCS_FULL_DOC_IDS {
-            return Err(PartitionSyncError::Internal {
+    pub async fn get_docs_full(&self, doc_ids: &[String]) -> Res<Vec<FullDoc>> {
+        if doc_ids.len() > crate::rpc::MAX_GET_DOCS_FULL_DOC_IDS {
+            return Err(crate::rpc::BigRepoRpcError::Internal {
                 message: format!(
                     "requested too many docs: {} exceeds max {}",
                     doc_ids.len(),
-                    crate::repo::rpc::MAX_GET_DOCS_FULL_DOC_IDS
+                    crate::rpc::MAX_GET_DOCS_FULL_DOC_IDS
                 ),
             }
             .into());
@@ -304,19 +304,6 @@ impl BigRepo {
             .filter(|doc_id| dedup.insert((*doc_id).clone()))
             .cloned()
             .collect();
-        let denied_doc_id = self
-            .partition_store
-            .find_first_item_missing_membership_in_partitions(
-                &requested_doc_ids,
-                allowed_partitions,
-            )
-            .await?;
-        if let Some(denied) = denied_doc_id {
-            return Err(PartitionSyncError::Internal {
-                message: format!("access denied for doc {denied}"),
-            }
-            .into());
-        }
 
         use futures::StreamExt;
         use futures_buffered::BufferedStreamExt;
@@ -328,13 +315,13 @@ impl BigRepo {
             let Some(automerge_save) = self.export_doc(&parsed).await? else {
                 return Ok(None);
             };
-            Ok(Some(crate::repo::rpc::FullDoc {
+            Ok(Some(FullDoc {
                 doc_id,
                 automerge_save,
             }))
         }))
         .buffered_unordered(16)
-        .collect::<Vec<Res<Option<crate::repo::rpc::FullDoc>>>>()
+        .collect::<Vec<Res<Option<FullDoc>>>>()
         .await;
 
         let mut out = Vec::new();
@@ -528,12 +515,12 @@ impl BigDocHandle {
 }
 
 async fn partition_doc_heads_payload(
-    part_store: &PartitionStore,
-    doc_id: &str,
+    big_sync_host: &Arc<big_sync::Ctx>,
+    doc_id: DocumentId,
 ) -> Res<Arc<[ChangeHash]>> {
-    tracing::info!(doc_id, "loading partition doc heads payload");
-    let mut before_heads = part_store
-        .item_payload(doc_id)
+    let mut before_heads = big_sync_host
+        .store
+        .obj_payload(doc_id)
         .await?
         .expect("doc was not in partition previously");
     let before_heads = before_heads
@@ -543,70 +530,83 @@ async fn partition_doc_heads_payload(
         .expect(ERROR_IMPOSSIBLE);
     let before_heads: Vec<String> = serde_json::from_value(before_heads).expect(ERROR_IMPOSSIBLE);
 
-    tracing::info!(
-        doc_id,
-        heads = before_heads.len(),
-        "loaded partition doc heads payload"
-    );
-    Ok(crate::parse_commit_heads(&before_heads).expect(ERROR_IMPOSSIBLE))
+    Ok(am_utils_rs::parse_commit_heads(&before_heads).expect(ERROR_IMPOSSIBLE))
 }
 
 #[cfg(test)]
 pub(crate) mod tests {
     use super::*;
-    use crate::partition::{PartitionStore, PartitionStoreStopToken};
     use automerge::{transaction::Transactable, ReadDoc, ScalarValue};
     use autosurgeon::Prop;
     use sqlx::sqlite::SqliteConnectOptions;
-    use std::path::PathBuf;
-    use std::sync::{
-        atomic::{AtomicUsize, Ordering},
-        Arc,
-    };
+    use std::collections::HashMap;
+    use std::sync::atomic::{AtomicUsize, Ordering};
     use tempfile::tempdir;
-    use tokio::{
-        sync::Notify,
-        time::{timeout, Duration},
-    };
+    use tokio::{sync::Notify, time::timeout};
 
     pub async fn boot_part_store(
         sqlite_url: &str,
-    ) -> Res<(Arc<PartitionStore>, PartitionStoreStopToken)> {
-        let state_pool = {
+    ) -> Res<(Arc<big_sync::Ctx>, big_sync::StopToken)> {
+        let (read_pool, write_pool) = {
             let connect_options = SqliteConnectOptions::from_str(sqlite_url)
                 .expect(ERROR_IMPOSSIBLE)
+                .journal_mode(sqlx::sqlite::SqliteJournalMode::Wal)
                 .create_if_missing(true);
-            sqlx::sqlite::SqlitePoolOptions::new()
+            let read_pool = sqlx::sqlite::SqlitePoolOptions::new()
+                .max_connections(4)
+                .connect_with(connect_options.clone())
+                .await
+                .wrap_err("failed connecting big repo sqlite read pool")?;
+            let write_pool = sqlx::sqlite::SqlitePoolOptions::new()
                 .max_connections(1)
                 .connect_with(connect_options)
                 .await
-                .wrap_err("failed connecting big repo sqlite")?
+                .wrap_err("failed connecting big repo sqlite write pool")?;
+            (read_pool, write_pool)
         };
 
-        PartitionStore::boot(state_pool).await
+        let store = Arc::new(
+            big_sync::SqlitePartStore::new(
+                read_pool,
+                write_pool,
+                sqlite_url.to_owned(),
+                big_sync_core::BuckId::MAX_LEVEL,
+            )
+            .await?,
+        );
+        let store_for_worker: Arc<dyn big_sync::HostPartitionStore> = store.clone();
+        let (worker, stop) =
+            big_sync::spawn_big_sync_worker(store_for_worker.clone(), HashMap::new())?;
+        Ok((
+            Arc::new(big_sync::Ctx {
+                store: store_for_worker,
+                worker,
+            }),
+            stop,
+        ))
     }
     pub async fn boot_repo() -> Res<(
         Arc<BigRepo>,
-        Arc<PartitionStore>,
+        Arc<big_sync::Ctx>,
         Box<dyn FnOnce() -> futures::future::BoxFuture<'static, Res<()>>>,
     )> {
-        let (partition_store, partition_store_stop) = boot_part_store("sqlite::memory:").await?;
+        let (big_sync_host, big_sync_stop) = boot_part_store("sqlite::memory:").await?;
         let (repo, stop) = BigRepo::boot(
             Config {
                 peer_id: PeerId::new([7_u8; 32]),
                 secret_key_bytes: [7_u8; 32],
                 storage: StorageConfig::Memory,
             },
-            Arc::clone(&partition_store),
+            Arc::clone(&big_sync_host),
         )
         .await?;
         Ok((
             repo,
-            partition_store,
+            big_sync_host,
             Box::new(move || {
                 async move {
                     stop.stop().await?;
-                    partition_store_stop.stop().await?;
+                    big_sync_stop.stop().await?;
                     eyre::Ok(())
                 }
                 .boxed()
@@ -618,10 +618,10 @@ pub(crate) mod tests {
         path: PathBuf,
     ) -> Res<(
         Arc<BigRepo>,
-        Arc<PartitionStore>,
+        Arc<big_sync::Ctx>,
         Box<dyn FnOnce() -> futures::future::BoxFuture<'static, Res<()>>>,
     )> {
-        let (partition_store, partition_store_stop) = boot_part_store(&format!(
+        let (big_sync_host, big_sync_stop) = boot_part_store(&format!(
             "sqlite://{}",
             path.join("part_store.db").display()
         ))
@@ -632,16 +632,16 @@ pub(crate) mod tests {
                 secret_key_bytes: [7_u8; 32],
                 storage: StorageConfig::Disk { path },
             },
-            Arc::clone(&partition_store),
+            Arc::clone(&big_sync_host),
         )
         .await?;
         Ok((
             repo,
-            partition_store,
+            big_sync_host,
             Box::new(move || {
                 async move {
                     stop.stop().await?;
-                    partition_store_stop.stop().await?;
+                    big_sync_stop.stop().await?;
                     eyre::Ok(())
                 }
                 .boxed()
@@ -675,6 +675,10 @@ pub(crate) mod tests {
             ScalarValue::Str(value) => value.to_string(),
             _ => panic!("expected string scalar"),
         }
+    }
+
+    fn random_doc_id() -> DocumentId {
+        DocumentId::new(rand::random())
     }
 
     async fn recv_change_batch(
@@ -714,7 +718,7 @@ pub(crate) mod tests {
     #[tokio::test]
     async fn put_doc_get_doc_and_export_roundtrip() -> Res<()> {
         let (repo, _part_store, _stop_token) = boot_repo().await?;
-        let doc_id = DocumentId::random();
+        let doc_id = random_doc_id();
         let mut doc = automerge::Automerge::new();
         doc.transact(|tx| tx.put(automerge::ROOT, "title", "seed"))
             .expect("failed seeding doc");
@@ -741,7 +745,7 @@ pub(crate) mod tests {
     async fn reopened_doc_rehydrates_fragment_state_store() -> Res<()> {
         let temp_root = tempdir()?;
         let repo_path = temp_root.path().join("repo");
-        let doc_id = DocumentId::random();
+        let doc_id = random_doc_id();
         let payload = uuid::Uuid::new_v4().to_string();
         let value = make_sync_doc_value_with_payload("base", 1024, &payload);
 
@@ -766,7 +770,7 @@ pub(crate) mod tests {
     #[tokio::test]
     async fn put_doc_rejects_existing_local_doc_id() -> Res<()> {
         let (repo, _part_store, _stop_token) = boot_repo().await?;
-        let doc_id = DocumentId::random();
+        let doc_id = random_doc_id();
         let _ = repo.put_doc(doc_id, automerge::Automerge::new()).await?;
         let err = repo
             .put_doc(doc_id, automerge::Automerge::new())
@@ -852,7 +856,7 @@ pub(crate) mod tests {
         doc.transact(|tx| tx.put(automerge::ROOT, "title", "before"))
             .expect("failed initializing title");
 
-        let doc_id = DocumentId::random();
+        let doc_id = random_doc_id();
         let handle = repo.put_doc(doc_id, doc).await?;
         handle
             .with_document(|doc| {
@@ -874,11 +878,11 @@ pub(crate) mod tests {
     async fn change_listener_doc_id_filter_only_receives_target_doc() -> Res<()> {
         let (repo, _part_store, _stop_token) = boot_repo().await?;
         let first_handle = repo
-            .put_doc(DocumentId::random(), automerge::Automerge::new())
+            .put_doc(random_doc_id(), automerge::Automerge::new())
             .await?;
         let first_doc_id = *first_handle.document_id();
         let second_handle = repo
-            .put_doc(DocumentId::random(), automerge::Automerge::new())
+            .put_doc(random_doc_id(), automerge::Automerge::new())
             .await?;
 
         let (_registration, mut rx) = repo
@@ -916,7 +920,7 @@ pub(crate) mod tests {
     async fn change_listener_path_filter_matches_only_prefix() -> Res<()> {
         let (repo, _part_store, _stop_token) = boot_repo().await?;
         let handle = repo
-            .put_doc(DocumentId::random(), automerge::Automerge::new())
+            .put_doc(random_doc_id(), automerge::Automerge::new())
             .await?;
         let doc_id = *handle.document_id();
 
@@ -1001,7 +1005,7 @@ pub(crate) mod tests {
             .await?;
 
         let handle = repo
-            .put_doc(DocumentId::random(), automerge::Automerge::new())
+            .put_doc(random_doc_id(), automerge::Automerge::new())
             .await?;
         let doc_id = *handle.document_id();
 
@@ -1023,7 +1027,7 @@ pub(crate) mod tests {
     async fn change_and_head_listeners_ignore_noop_mutation() -> Res<()> {
         let (repo, _part_store, _stop_token) = boot_repo().await?;
         let handle = repo
-            .put_doc(DocumentId::random(), automerge::Automerge::new())
+            .put_doc(random_doc_id(), automerge::Automerge::new())
             .await?;
         let doc_id = *handle.document_id();
 
@@ -1059,7 +1063,7 @@ pub(crate) mod tests {
     #[tokio::test]
     async fn remote_change_and_head_notifications_survive_handle_reopen() -> Res<()> {
         let (repo, _part_store, _stop_token) = boot_repo().await?;
-        let doc_id = DocumentId::random();
+        let doc_id = random_doc_id();
         let mut doc = automerge::Automerge::new();
         doc.transact(|tx| tx.put(automerge::ROOT, "title", "seed"))
             .expect("failed seeding title");
@@ -1129,7 +1133,7 @@ pub(crate) mod tests {
     async fn with_document_handles_concurrent_writers() -> Res<()> {
         let (repo, _part_store, _stop_token) = boot_repo().await?;
         let handle = repo
-            .put_doc(DocumentId::random(), automerge::Automerge::new())
+            .put_doc(random_doc_id(), automerge::Automerge::new())
             .await?;
         let doc_id = *handle.document_id();
         handle
@@ -1389,7 +1393,7 @@ pub(crate) mod tests {
     async fn read_json_doc(handle: &BigDocHandle) -> serde_json::Value {
         handle
             .with_document(|doc| {
-                autosurgeon::hydrate::<_, crate::codecs::ThroughJson<serde_json::Value>>(doc)
+                autosurgeon::hydrate::<_, ThroughJson<serde_json::Value>>(doc)
                     .expect("failed hydrating sync doc")
                     .0
             })
@@ -1423,14 +1427,14 @@ pub(crate) mod tests {
         accept_notify: Arc<Notify>,
         accepted_connection: Arc<tokio::sync::Mutex<Option<BigRepoConnection>>>,
         accept_task: Option<tokio::task::JoinHandle<()>>,
-        partition_store_stop: PartitionStoreStopToken,
+        big_sync_stop: big_sync::StopToken,
     }
 
     impl SyncRepoNode {
         #[tracing::instrument(skip(path), fields(seed, accept_incoming))]
         async fn boot(path: PathBuf, seed: u8, accept_incoming: bool) -> Res<Self> {
             tracing::info!(path = %path.display(), "booting sync repo node");
-            let (partition_store, partition_store_stop) = boot_part_store(&format!(
+            let (big_sync_host, big_sync_stop) = boot_part_store(&format!(
                 "sqlite://{}",
                 path.join("part_store.db").display()
             ))
@@ -1441,7 +1445,7 @@ pub(crate) mod tests {
                     secret_key_bytes: [seed; 32],
                     storage: StorageConfig::Disk { path },
                 },
-                partition_store,
+                big_sync_host,
             )
             .await?;
             let endpoint = iroh::Endpoint::builder()
@@ -1491,7 +1495,7 @@ pub(crate) mod tests {
             Ok(Self {
                 repo,
                 stop_token,
-                partition_store_stop,
+                big_sync_stop,
                 endpoint,
                 accept_count,
                 accept_notify,
@@ -1537,7 +1541,7 @@ pub(crate) mod tests {
                 task.await.expect("accept loop panicked");
             }
             self.stop_token.stop().await?;
-            self.partition_store_stop.stop().await?;
+            self.big_sync_stop.stop().await?;
             Ok(())
         }
     }
@@ -1565,7 +1569,7 @@ pub(crate) mod tests {
         tracing::info!("booting server and client repos");
         let server = SyncRepoNode::boot(server_path, 51, true).await?;
         let client = SyncRepoNode::boot(client_path, 61, false).await?;
-        let doc_id = DocumentId::random();
+        let doc_id = random_doc_id();
 
         tracing::info!(%doc_id, "seeding initial docs");
         let server_doc = server.repo.put_doc(doc_id, base_doc.clone()).await?;
@@ -1714,7 +1718,7 @@ pub(crate) mod tests {
         write_sync_doc_value(&mut base_doc, &expected_doc);
         let server = SyncRepoNode::boot(server_path.clone(), 71, true).await?;
         let client = SyncRepoNode::boot(client_path, 81, false).await?;
-        let doc_id = DocumentId::random();
+        let doc_id = random_doc_id();
         let server_doc = server.repo.put_doc(doc_id, base_doc.clone()).await?;
         let client_doc = client.repo.put_doc(doc_id, base_doc).await?;
         set_doc_actor(&server_doc, automerge::ActorId::from([71_u8; 16])).await?;
@@ -1823,7 +1827,7 @@ pub(crate) mod tests {
 
         let server = SyncRepoNode::boot(server_path, 91, true).await?;
         let client = SyncRepoNode::boot(client_path, 92, false).await?;
-        let doc_id = DocumentId::random();
+        let doc_id = random_doc_id();
 
         let server_doc = server.repo.put_doc(doc_id, base_doc.clone()).await?;
         let client_doc = client.repo.put_doc(doc_id, base_doc).await?;
@@ -2113,7 +2117,7 @@ pub(crate) mod tests {
 
             let server = SyncRepoNode::boot(server_path, 101, true).await?;
             let client = SyncRepoNode::boot(client_path, 102, false).await?;
-            let doc_id = DocumentId::random();
+            let doc_id = random_doc_id();
             let server_doc = server.repo.put_doc(doc_id, base_doc.clone()).await?;
             let client_doc = client.repo.put_doc(doc_id, base_doc).await?;
             set_doc_actor(&server_doc, automerge::ActorId::from([101_u8; 16])).await?;
@@ -2191,7 +2195,7 @@ pub(crate) mod tests {
 
             let server = SyncRepoNode::boot(server_path, 111, true).await?;
             let client = SyncRepoNode::boot(client_path, 112, false).await?;
-            let doc_id = DocumentId::random();
+            let doc_id = random_doc_id();
             let server_doc = server.repo.put_doc(doc_id, base_doc.clone()).await?;
             let client_doc = client.repo.put_doc(doc_id, base_doc).await?;
             set_doc_actor(&server_doc, automerge::ActorId::from([111_u8; 16])).await?;
@@ -2295,7 +2299,7 @@ pub(crate) mod tests {
 
             let server = SyncRepoNode::boot(server_path, 121, true).await?;
             let client = SyncRepoNode::boot(client_path, 122, false).await?;
-            let doc_id = DocumentId::random();
+            let doc_id = random_doc_id();
             let server_doc = server.repo.put_doc(doc_id, base_doc.clone()).await?;
             let client_doc = client.repo.put_doc(doc_id, base_doc).await?;
             set_doc_actor(&server_doc, automerge::ActorId::from([121_u8; 16])).await?;

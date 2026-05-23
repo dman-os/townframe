@@ -16,6 +16,12 @@ macro_rules! alias_byte32id {
                 &self.0
             }
         }
+        impl $name {
+            #[must_use]
+            pub const fn new(bytes: [u8; 32]) -> Self {
+                Self(Byte32Id::new(bytes))
+            }
+        }
         impl std::fmt::Display for $name {
             fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
                 std::fmt::Display::fmt(&self.0, formatter)
@@ -24,6 +30,13 @@ macro_rules! alias_byte32id {
         impl std::fmt::Debug for $name {
             fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
                 std::fmt::Debug::fmt(&self.0, formatter)
+            }
+        }
+        impl std::str::FromStr for $name {
+            type Err = DecodeError;
+
+            fn from_str(value: &str) -> Result<Self, Self::Err> {
+                Ok(Self(Byte32Id::from_str(value)?))
             }
         }
     };

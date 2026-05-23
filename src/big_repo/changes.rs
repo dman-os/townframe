@@ -1,6 +1,6 @@
 use crate::interlude::*;
 
-use crate::repo::DocumentId;
+use crate::DocumentId;
 use automerge::ChangeHash;
 use autosurgeon::Prop;
 use std::sync::Mutex;
@@ -10,7 +10,7 @@ use tokio_util::sync::CancellationToken;
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum BigRepoChangeOrigin {
     Local,
-    Remote { peer_id: crate::repo::PeerId },
+    Remote { peer_id: PeerId },
     Bootstrap,
 }
 
@@ -721,7 +721,7 @@ mod tests {
     use tokio::time::{timeout, Duration};
 
     fn make_change_fixture() -> (DocumentId, Arc<[ChangeHash]>, Arc<automerge::Patch>) {
-        let doc_id = DocumentId::random();
+        let doc_id = DocumentId::new(rand::random());
         let mut doc = automerge::Automerge::new();
         let before_heads = doc.get_heads();
         doc.transact(|tx| {
@@ -868,7 +868,7 @@ mod tests {
             doc_id,
             heads,
             BigRepoChangeOrigin::Remote {
-                peer_id: crate::repo::PeerId::new([42_u8; 32]),
+                peer_id: PeerId::new([42_u8; 32]),
             },
         )?;
         let batch = recv_batch(&mut rx).await;
@@ -907,7 +907,7 @@ mod tests {
             Arc::clone(&patch),
             Arc::clone(&heads),
             BigRepoChangeOrigin::Remote {
-                peer_id: crate::repo::PeerId::new([11_u8; 32]),
+                peer_id: PeerId::new([11_u8; 32]),
             },
         )?;
         manager.notify_doc_changed(doc_id, patch, heads, BigRepoChangeOrigin::Bootstrap)?;

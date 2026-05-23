@@ -15,7 +15,7 @@ mod test_support;
 mod trap;
 mod worker;
 
-// pub use part_store::sqlite::SqlitePartStore;
+pub use part_store::sqlite::SqlitePartStore;
 pub use part_store::HostPartitionStore;
 pub use rpc::HostBigRpcClient;
 pub use worker::{

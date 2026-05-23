@@ -4,7 +4,6 @@ use crate::interlude::*;
 
 use crate::{BigRepoChangeOrigin, ConnFinishSignal, DocumentId, PeerId};
 
-use big_sync::Ctx;
 use core::convert::Infallible;
 use futures::future::BoxFuture;
 use sedimentree_core::commit::{CommitStore, CountLeadingZeroBytes, FragmentState};
@@ -402,7 +401,7 @@ impl subduction_core::sync_session::SyncSessionObserver for BigRepoSyncSessionBr
 pub fn spawn_big_repo_runtime<S>(
     signer: subduction_crypto::signer::memory::MemorySigner,
     storage: S,
-    bsh: Arc<Ctx>,
+    bsh: Arc<big_sync::Ctx>,
     change_manager: Arc<changes::ChangeListenerManager>,
 ) -> Res<(BigRepoRuntimeHandle, BigRepoRuntimeStopToken)>
 where
@@ -477,7 +476,7 @@ where
         subduction: subduction_handle,
         sedimentrees: Arc::clone(&sedimentrees),
         storage_for_reads,
-        big_sync: bsh,
+        big_sync_host: bsh,
         change_manager,
         runtime_tasks: Arc::clone(&runtime_tasks),
         connect_signer,
@@ -490,7 +489,7 @@ where
         doc_workers: default(),
     };
 
-    let peer_id: PeerId = runtime_worker.local_peer_id.into();
+    let peer_id = runtime_worker.local_peer_id;
 
     runtime_tasks
         .spawn({
@@ -573,7 +572,7 @@ where
     subduction: Arc<BigRepoSubduction<S>>,
     sedimentrees: SubductionSedimentrees,
     storage_for_reads: S,
-    big_sync: Arc<Ctx>,
+    big_sync_host: Arc<big_sync::Ctx>,
     change_manager: Arc<changes::ChangeListenerManager>,
     runtime_tasks: Arc<utils_rs::AbortableJoinSet>,
     connect_signer: subduction_crypto::signer::memory::MemorySigner,
@@ -805,16 +804,16 @@ where
         let worker_cancel = cancel_token.clone();
         let runtime_evt_tx = self.evt_tx.clone();
         let runtime_tasks = Arc::clone(&self.runtime_tasks);
+        let doc_id_subduction = SedimentreeId::new(doc_id.into_bytes());
         let mut worker = DocWorker {
-            doc_id_str: doc_id.to_string().into(),
-            doc_id_subduction: doc_id.into(),
+            doc_id_subduction,
             doc_id,
             state: DocWorkerDocState::Unloaded,
             pending_fragment_requests: BTreeSet::new(),
             subduction: Arc::clone(&self.subduction),
             sedimentrees: Arc::clone(&self.sedimentrees),
             storage_for_reads: self.storage_for_reads.clone(),
-            big_sync: Arc::clone(&self.big_sync),
+            big_sync_host: Arc::clone(&self.big_sync_host),
             change_manager: Arc::clone(&self.change_manager),
             runtime_handle: BigRepoRuntimeHandle {
                 cmd_tx: self.cmd_tx.clone(),
@@ -899,7 +898,7 @@ where
         &mut self,
         session: subduction_core::sync_session::SyncSession,
     ) {
-        let doc_id: DocumentId = session.sedimentree_id.into();
+        let doc_id = DocumentId::new(*session.sedimentree_id.as_bytes());
         debug!(
             peer_id = %session.peer_id,
             kind = ?session.kind,
@@ -942,7 +941,7 @@ where
                 return Ok((peer_id, Arc::clone(&deets.closed)));
             }
             let connect = connect_outgoing(endpoint, endpoint_addr, &connect_signer).await?;
-            let peer_id = PeerId::from(connect.authenticated.peer_id());
+            let peer_id = PeerId::new(*connect.authenticated.peer_id().as_bytes());
             for (fut, src_task) in [
                 (connect.listener_task, ConnTask::Listener),
                 (connect.sender_task, ConnTask::Sender),
@@ -1025,7 +1024,7 @@ where
             // do handshake
             let accepted =
                 accept_incoming(conn, &connect_signer, nonce_cache.as_ref(), local_peer_id).await?;
-            let peer_id = PeerId::from(accepted.authenticated.peer_id());
+            let peer_id = PeerId::new(*accepted.authenticated.peer_id().as_bytes());
 
             // WARN: should we block incoming when there's already a connection?
             // if let Some(deets) = connected_peers.lock().await.get(&peer_id) {
@@ -1104,7 +1103,8 @@ where
                 let deets = connected_peers.lock().await.remove(&peer_id);
                 if let Some(deets) = deets {
                     deets.cancel_token.cancel();
-                    let remote_peer_id: subduction_core::peer::id::PeerId = peer_id.into();
+                    let remote_peer_id =
+                        subduction_core::peer::id::PeerId::new(peer_id.into_bytes());
                     subduction
                         .disconnect_from_peer(&remote_peer_id)
                         .await
@@ -1129,7 +1129,7 @@ where
         let deets = self.connected_peers.lock().await.remove(&peer_id);
         if let Some(deets) = deets {
             deets.cancel_token.cancel();
-            let remote_peer_id: subduction_core::peer::id::PeerId = peer_id.into();
+            let remote_peer_id = subduction_core::peer::id::PeerId::new(peer_id.into_bytes());
             self.subduction
                 .disconnect_from_peer(&remote_peer_id)
                 .await
@@ -1219,14 +1219,13 @@ where
     S: BigRepoSubductionStorage,
 {
     doc_id: DocumentId,
-    doc_id_str: Arc<str>,
     doc_id_subduction: SedimentreeId,
     state: DocWorkerDocState,
     pending_fragment_requests: BTreeSet<FragmentRequested>,
     subduction: Arc<BigRepoSubduction<S>>,
     sedimentrees: SubductionSedimentrees,
     storage_for_reads: S,
-    big_sync: Arc<Ctx>,
+    big_sync_host: Arc<big_sync::Ctx>,
     change_manager: Arc<changes::ChangeListenerManager>,
     runtime_handle: BigRepoRuntimeHandle,
     runtime_evt_tx: mpsc::UnboundedSender<RuntimeEvt>,
@@ -1344,8 +1343,9 @@ where
                 doc_id: self.doc_id,
             },
         ));
-        self.partition_store
-            .upsert_item(Arc::clone(&self.doc_id_str), &item_payload, &[])
+        self.big_sync_host
+            .store
+            .upsert_obj(self.doc_id, item_payload, vec![], None)
             .await?;
         self.change_manager
             .notify_doc_created(self.doc_id, Arc::clone(&heads))?;
@@ -1447,7 +1447,7 @@ where
             }
         }
         commit_delta_bookkeep(
-            &self.big_sync,
+            &self.big_sync_host,
             &self.change_manager,
             self.doc_id,
             heads,
@@ -1516,8 +1516,7 @@ where
                     "unloaded sync session loading partition heads"
                 );
                 let before_heads =
-                    super::partition_doc_heads_payload(&self.partition_store, &self.doc_id_str)
-                        .await?;
+                    super::partition_doc_heads_payload(&self.big_sync_host, self.doc_id).await?;
                 info!(
                     doc_id = %self.doc_id,
                     peer_id = %session.peer_id,
@@ -1633,7 +1632,7 @@ where
                         "live bundle expired; recovering sync delta from partition heads"
                     );
                     let before_heads =
-                        super::partition_doc_heads_payload(&self.partition_store, &self.doc_id_str)
+                        super::partition_doc_heads_payload(&self.big_sync_host, self.doc_id)
                             .await?;
                     let mut doc =
                         load_doc_snapshot(&self.sedimentrees, &self.storage_for_reads, self.doc_id)
@@ -1666,13 +1665,13 @@ where
             return Ok(());
         };
         commit_delta_bookkeep(
-            &self.partition_store,
+            &self.big_sync_host,
             &self.change_manager,
             self.doc_id,
             after_heads,
             patches,
             BigRepoChangeOrigin::Remote {
-                peer_id: session.peer_id.into(),
+                peer_id: PeerId::new(*session.peer_id.as_bytes()),
             },
         )
         .await
@@ -1683,8 +1682,8 @@ where
         peer_id: PeerId,
         timeout: Option<Duration>,
     ) -> Res<SyncDocOutcome> {
-        let sedimentree_id: SedimentreeId = self.doc_id.into();
-        let remote_peer_id: subduction_core::peer::id::PeerId = peer_id.into();
+        let sedimentree_id = self.doc_id_subduction;
+        let remote_peer_id = subduction_core::peer::id::PeerId::new(peer_id.into_bytes());
         let result = self
             .subduction
             .sync_with_peer(&remote_peer_id, sedimentree_id, false, timeout)
@@ -1736,7 +1735,7 @@ where
 }
 
 async fn commit_delta_bookkeep(
-    big_sync: &Arc<Ctx>,
+    big_sync_host: &Arc<big_sync::Ctx>,
     change_manager: &Arc<changes::ChangeListenerManager>,
     doc_id: DocumentId,
     heads: Vec<automerge::ChangeHash>,
@@ -1755,7 +1754,7 @@ async fn commit_delta_bookkeep(
         has_change_listener_interest,
         "bookkeeping committed delta"
     );
-    big_sync
+    big_sync_host
         .store
         .upsert_obj(doc_id, item_payload, vec![], None)
         .await?;
@@ -1834,7 +1833,7 @@ where
     for item in work {
         subduction
             .add_fragment(
-                doc_id.into(),
+                SedimentreeId::new(doc_id.into_bytes()),
                 item.head,
                 item.boundary,
                 &item.checkpoints,
@@ -1960,7 +1959,7 @@ where
     D: Into<DocumentId>,
 {
     let doc_id: DocumentId = doc_id.into();
-    let sedimentree_id: SedimentreeId = doc_id.into();
+    let sedimentree_id = SedimentreeId::new(doc_id.into_bytes());
     info!(%doc_id, sedimentree_id = %sedimentree_id, "loading doc snapshot");
 
     let loose_commits =

@@ -13,7 +13,7 @@ pub mod sqlite;
 pub type ObjStoreLease = u64;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) enum StoreMutationOutcome {
+pub enum StoreMutationOutcome {
     Applied,
     Stale,
 }

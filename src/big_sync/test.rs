@@ -107,6 +107,12 @@ impl TestWorld {
             .expect(ERROR_IMPOSSIBLE)
     }
 
+    fn remove_store(&self, peer_id: PeerId) {
+        let mut stores = self.stores.lock().expect(ERROR_MUTEX);
+        let old = stores.remove(&peer_id);
+        assert!(old.is_some(), "fishy");
+    }
+
     fn set_online(&self, peer_id: PeerId, online: bool) {
         let mut online_state = self.online.lock().expect(ERROR_MUTEX);
         if online {
@@ -375,6 +381,7 @@ impl NodeHarness {
     async fn stop(self) -> Res<()> {
         self.world.set_online(self.peer_id, false);
         self.stop.stop().await?;
+        self.world.remove_store(self.peer_id);
         Ok(())
     }
 }
@@ -653,6 +660,7 @@ async fn restart_node(world: Arc<TestWorld>, node: NodeHarness) -> Res<NodeHarne
     } = node;
     node_world.set_online(peer_id, false);
     stop.stop().await?;
+    node_world.remove_store(peer_id);
     let Some(memory_store) = restart_memory_store else {
         eyre::bail!("node is not restartable with a memory store");
     };

@@ -330,15 +330,20 @@ async fn boot_sqlite_node(world: Arc<TestWorld>, peer_seed: u8) -> Res<NodeHarne
     let options = sqlx::sqlite::SqliteConnectOptions::from_str(&db_url)?
         .journal_mode(sqlx::sqlite::SqliteJournalMode::Wal)
         .create_if_missing(true);
-    let pool = sqlx::sqlite::SqlitePoolOptions::new()
+    let read_pool = sqlx::sqlite::SqlitePoolOptions::new()
+        .max_connections(4)
+        .connect_with(options.clone())
+        .await?;
+    let write_pool = sqlx::sqlite::SqlitePoolOptions::new()
         .max_connections(1)
         .connect_with(options)
         .await?;
     let store = Arc::new(
         SqlitePartStore::new(
-            pool.clone(),
-            pool,
+            read_pool,
+            write_pool,
             format!("big-sync-stress://peer/{peer_seed}"),
+            BuckId::MAX_LEVEL,
         )
         .await?,
     );

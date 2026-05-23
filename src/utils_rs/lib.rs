@@ -49,6 +49,8 @@ mod interlude {
 
     pub use futures::FutureExt;
     pub use futures::StreamExt;
+
+    pub use structstruck::strike;
 }
 
 use crate::interlude::*;

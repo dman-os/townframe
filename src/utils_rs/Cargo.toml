@@ -61,6 +61,7 @@ anyhow.workspace = true
 # macros
 displaydoc.workspace = true
 educe.workspace = true
+structstruck.workspace = true
 
 # utoipa-swagger-ui = "9"
 

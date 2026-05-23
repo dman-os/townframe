@@ -28,24 +28,30 @@ pub struct GetDocsFullRpcReq {
     pub req: GetDocsFullRequest,
 }
 
+#[derive(
+    Debug, thiserror::Error, displaydoc::Display, Clone, serde::Serialize, serde::Deserialize,
+)]
+pub enum BigRepoRpcError {
+    /// internal error: {message}
+    Internal { message: String },
+}
+
 // NOTE: this is used over an 0rtt iroh irpc impl wihch is
 // only safe when all the requests are idempotent. if this
 // changes for our requests, amend the 0rtt usage
 #[rpc_requests(message = RepoSyncRpcMessage)]
 #[derive(Debug, serde::Serialize, serde::Deserialize)]
 pub enum RepoSyncRpc {
-    #[rpc(tx = channel::oneshot::Sender<Result<GetDocsFullResponse, PartitionSyncError>>)]
+    #[rpc(tx = channel::oneshot::Sender<Result<GetDocsFullResponse, BigRepoRpcError>>)]
     GetDocsFull(GetDocsFullRpcReq),
 }
 
 pub struct RepoRpcHandle {
-    rpc_tx: mpsc::Sender<(crate::sync::protocol::PeerKey, RepoSyncRpcMessage)>,
+    rpc_tx: mpsc::Sender<(PeerId, RepoSyncRpcMessage)>,
 }
 
 impl RepoRpcHandle {
-    pub fn local_sender(
-        &self,
-    ) -> mpsc::Sender<(crate::sync::protocol::PeerKey, RepoSyncRpcMessage)> {
+    pub fn local_sender(&self) -> mpsc::Sender<(PeerId, RepoSyncRpcMessage)> {
         self.rpc_tx.clone()
     }
 }
@@ -66,8 +72,7 @@ impl RepoRpcStopToken {
 
 pub async fn spawn_repo_rpc(
     big_repo: SharedBigRepo,
-    sync_store: SyncStoreHandle,
-    access_policy: Arc<dyn PartitionAccessPolicy>,
+    big_sync_host: Arc<big_sync::Ctx>,
 ) -> Res<(RepoRpcHandle, RepoRpcStopToken)> {
     let (rpc_tx, mut rpc_rx) = mpsc::channel(1024);
 
@@ -83,7 +88,7 @@ pub async fn spawn_repo_rpc(
                         let Some((peer, msg)) = msg else {
                             break;
                         };
-                        handle_rpc_message(&big_repo, &sync_store, access_policy.as_ref(), peer, msg).await;
+                        handle_rpc_message(&big_repo, &big_sync_host, peer, msg).await;
                     }
                 }
             }
@@ -102,33 +107,20 @@ pub async fn spawn_repo_rpc(
 
 async fn handle_rpc_message(
     big_repo: &SharedBigRepo,
-    sync_store: &SyncStoreHandle,
-    access_policy: &dyn PartitionAccessPolicy,
-    peer: crate::sync::protocol::PeerKey,
+    big_sync_host: &Arc<big_sync::Ctx>,
+    peer: PeerId,
     msg: RepoSyncRpcMessage,
 ) {
     match msg {
         RepoSyncRpcMessage::GetDocsFull(req) => {
             let WithChannels { inner, tx, .. } = req;
             let out = (async {
-                ensure_known_peer(sync_store, &peer).await?;
-                let mut allowed_partitions = big_repo
-                    .partition_store
-                    .list_partitions()
-                    .await
-                    .map_err(map_repo_err)?
-                    .partitions;
-                allowed_partitions
-                    .retain(|part| access_policy.can_access_partition(&peer, &part.partition_id));
-                let allowed_partition_ids = allowed_partitions
-                    .into_iter()
-                    .map(|part| part.partition_id)
-                    .collect::<Vec<_>>();
+                ensure_known_peer(&big_sync_host, &peer).await?;
                 let docs = big_repo
-                    .get_docs_full_in_partitions(&inner.req.doc_ids, &allowed_partition_ids)
+                    .get_docs_full(&inner.req.doc_ids)
                     .await
                     .map_err(map_repo_err)?;
-                Ok::<_, PartitionSyncError>(GetDocsFullResponse { docs })
+                Ok::<_, BigRepoRpcError>(GetDocsFullResponse { docs })
             })
             .await;
             tx.send(out).await.inspect_err(|_| warn!(ERROR_CALLER)).ok();
@@ -137,23 +129,15 @@ async fn handle_rpc_message(
 }
 
 async fn ensure_known_peer(
-    sync_store: &SyncStoreHandle,
-    peer: &crate::sync::protocol::PeerKey,
-) -> Result<(), PartitionSyncError> {
-    let known = sync_store
-        .is_peer_allowed(Arc::clone(peer))
-        .await
-        .map_err(map_repo_err)?;
-    if known {
-        return Ok(());
-    }
-    Err(PartitionSyncError::Internal {
-        message: format!("peer {peer:?} is not allowed in repo rpc"),
-    })
+    _big_sync_host: &Arc<big_sync::Ctx>,
+    _peer: &PeerId,
+) -> Result<(), BigRepoRpcError> {
+    // TODO: permissioning
+    Ok(())
 }
 
-fn map_repo_err(err: eyre::Report) -> PartitionSyncError {
-    PartitionSyncError::Internal {
+fn map_repo_err(err: eyre::Report) -> BigRepoRpcError {
+    BigRepoRpcError::Internal {
         message: err.to_string(),
     }
 }
