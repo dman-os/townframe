@@ -5,6 +5,8 @@ use irpc::{channel, rpc_requests, WithChannels};
 use tokio::sync::mpsc;
 use tokio_util::sync::CancellationToken;
 
+pub const REPO_SYNC_ALPN: &[u8] = b"townframe/repo-sync/0";
+
 pub const MAX_GET_DOCS_FULL_DOC_IDS: usize = 256;
 
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
@@ -70,10 +72,7 @@ impl RepoRpcStopToken {
     }
 }
 
-pub async fn spawn_repo_rpc(
-    big_repo: SharedBigRepo,
-    big_sync_host: Arc<big_sync::Ctx>,
-) -> Res<(RepoRpcHandle, RepoRpcStopToken)> {
+pub async fn spawn_repo_rpc(big_repo: SharedBigRepo) -> Res<(RepoRpcHandle, RepoRpcStopToken)> {
     let (rpc_tx, mut rpc_rx) = mpsc::channel(1024);
 
     let cancel_token = CancellationToken::new();
@@ -88,7 +87,7 @@ pub async fn spawn_repo_rpc(
                         let Some((peer, msg)) = msg else {
                             break;
                         };
-                        handle_rpc_message(&big_repo, &big_sync_host, peer, msg).await;
+                        handle_rpc_message(&big_repo, peer, msg).await;
                     }
                 }
             }
@@ -105,17 +104,12 @@ pub async fn spawn_repo_rpc(
     ))
 }
 
-async fn handle_rpc_message(
-    big_repo: &SharedBigRepo,
-    big_sync_host: &Arc<big_sync::Ctx>,
-    peer: PeerId,
-    msg: RepoSyncRpcMessage,
-) {
+async fn handle_rpc_message(big_repo: &SharedBigRepo, peer: PeerId, msg: RepoSyncRpcMessage) {
     match msg {
         RepoSyncRpcMessage::GetDocsFull(req) => {
             let WithChannels { inner, tx, .. } = req;
             let out = (async {
-                ensure_known_peer(&big_sync_host, &peer).await?;
+                ensure_known_peer(&peer).await?;
                 let docs = big_repo
                     .get_docs_full(&inner.req.doc_ids)
                     .await
@@ -128,10 +122,7 @@ async fn handle_rpc_message(
     }
 }
 
-async fn ensure_known_peer(
-    _big_sync_host: &Arc<big_sync::Ctx>,
-    _peer: &PeerId,
-) -> Result<(), BigRepoRpcError> {
+async fn ensure_known_peer(_peer: &PeerId) -> Result<(), BigRepoRpcError> {
     // TODO: permissioning
     Ok(())
 }

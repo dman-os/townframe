@@ -256,11 +256,24 @@ async fn pull_required_partitions_via_full_sync_worker(
     )
     .await?;
 
+    let (repo_rpc, repo_rpc_stop_token) =
+        am_utils_rs::repo::rpc::spawn_repo_rpc(Arc::clone(big_repo), partition_sync_store.clone())
+            .await?;
+
     let _sync_router = iroh::protocol::Router::builder(endpoint.clone())
         .accept(
             super::PARTITION_SYNC_ALPN,
             super::AuthenticatedIrohProtocol::<am_utils_rs::sync::protocol::PartitionSyncRpc> {
                 tx: sync_node_handle.local_sender(),
+                peer_key_fn: Arc::new(|endpoint_id| {
+                    daybook_types::doc::format_peer_key(endpoint_id.as_bytes())
+                }),
+            },
+        )
+        .accept(
+            super::REPO_SYNC_ALPN,
+            super::AuthenticatedIrohProtocol::<am_utils_rs::repo::rpc::RepoSyncRpc> {
+                tx: repo_rpc.local_sender(),
                 peer_key_fn: Arc::new(|endpoint_id| {
                     daybook_types::doc::format_peer_key(endpoint_id.as_bytes())
                 }),

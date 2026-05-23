@@ -164,6 +164,7 @@ structstruck::strike! {
             task_id: TaskId,
             cursors: Set<CursorIndex>,
             part_hints: Set<PartId>,
+            remote_payload: Option<crate::part_store::ObjPayload>,
         }>,
         replay_worker: Option<struct PeerReplayWorkerState {
             task_id: TaskId,
@@ -1056,11 +1057,11 @@ impl BigSyncMachine {
             match cmd {
                 CursorMachineCommand::SyncObj {
                     obj_id,
-                    remote_payload: _remote_payload,
+                    remote_payload,
                     part_hint,
                     cursor,
                 } => {
-                    let (cursors, part_hints) =
+                    let (cursors, part_hints, remote_payload) =
                         if let Some(mut worker) = peer_state.sync_workers.remove(&obj_id) {
                             let _state = self
                                 .tasks
@@ -1069,14 +1070,19 @@ impl BigSyncMachine {
 
                             worker.part_hints.insert(part_hint);
                             worker.cursors.insert(cursor);
-                            (worker.cursors, worker.part_hints)
+                            (
+                                worker.cursors,
+                                worker.part_hints,
+                                Some(remote_payload).or(worker.remote_payload),
+                            )
                         } else {
-                            ([cursor].into(), [part_hint].into())
+                            ([cursor].into(), [part_hint].into(), Some(remote_payload))
                         };
                     let deets = SyncTaskDeets {
                         peer_id,
                         obj_id,
                         part_hints: part_hints.iter().copied().collect(),
+                        remote_payload: remote_payload.clone(),
                     };
                     let task_id = self.tasks.spawn_task(TaskSeed::Sync(deets.clone()));
                     peer_state.sync_workers.insert(
@@ -1085,6 +1091,7 @@ impl BigSyncMachine {
                             task_id,
                             cursors,
                             part_hints,
+                            remote_payload,
                         },
                     );
                     self.stat_machine
@@ -1134,9 +1141,9 @@ impl BigSyncMachine {
                 BucketMachineCommand::SyncObj {
                     obj_id,
                     part_id,
-                    remote_payload: _remote_payload,
+                    remote_payload,
                 } => {
-                    let (cursors, part_hints) =
+                    let (cursors, part_hints, remote_payload) =
                         if let Some(mut worker) = peer_state.sync_workers.remove(&obj_id) {
                             let _state = self
                                 .tasks
@@ -1144,14 +1151,19 @@ impl BigSyncMachine {
                                 .expect(ERROR_UNRECONIZED);
 
                             worker.part_hints.insert(part_id);
-                            (worker.cursors, worker.part_hints)
+                            (
+                                worker.cursors,
+                                worker.part_hints,
+                                remote_payload.or(worker.remote_payload),
+                            )
                         } else {
-                            (default(), [part_id].into())
+                            (default(), [part_id].into(), remote_payload)
                         };
                     let deets = SyncTaskDeets {
                         peer_id,
                         obj_id,
                         part_hints: part_hints.iter().copied().collect(),
+                        remote_payload: remote_payload.clone(),
                     };
                     let task_id = self.tasks.spawn_task(TaskSeed::Sync(deets.clone()));
                     peer_state.sync_workers.insert(
@@ -1160,6 +1172,7 @@ impl BigSyncMachine {
                             task_id,
                             cursors,
                             part_hints,
+                            remote_payload,
                         },
                     );
                 }
@@ -1508,6 +1521,7 @@ impl BigSyncMachine {
                 peer_id: evt.peer_id,
                 obj_id: evt.obj_id,
                 part_hints: worker.part_hints.clone(),
+                remote_payload: worker.remote_payload.clone(),
             }
         };
 
@@ -1544,6 +1558,7 @@ impl BigSyncMachine {
                 peer_id: evt.peer_id,
                 obj_id: evt.obj_id,
                 part_hints: worker.part_hints.clone(),
+                remote_payload: worker.remote_payload.clone(),
             }
         };
 

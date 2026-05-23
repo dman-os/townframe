@@ -5,9 +5,10 @@ use crate::interlude::*;
 use crate::part_store::ObjStoreLease;
 use crate::trap;
 
+use big_sync_core::part_store::ObjPayload;
 use big_sync_core::{
     mpsc, BigSyncEvent, BigSyncMachine, BigSyncMachineCommand, MachineTask, MachineTaskMsg, ObjId,
-    PartId, PeerId, SyncTask, SyncTaskCompletion, TaskCtx, TaskId,
+    PartId, PeerId, SyncTask, SyncTaskCompletion, SyncTaskDeets, TaskCtx, TaskId,
 };
 use rand::{rngs::StdRng, SeedableRng};
 
@@ -76,6 +77,7 @@ pub trait SyncBackend: Send + Sync + 'static {
         lease: ObjStoreLease,
         obj_id: ObjId,
         part_hints: Vec<PartId>,
+        remote_payload: Option<ObjPayload>,
     ) -> Res<SyncTaskRunOutcome>;
 }
 
@@ -133,6 +135,15 @@ impl BigSyncWorkerHandle {
         &self,
     ) -> tokio::sync::broadcast::Receiver<big_sync_core::SyncStatEvent> {
         self.stats_tx.subscribe()
+    }
+
+    pub async fn set_sync_backend(
+        &self,
+        backend_id: BackendId,
+        backend: Arc<dyn SyncBackend>,
+    ) -> Res<()> {
+        let _ = (backend_id, backend);
+        eyre::bail!("set_sync_backend is not supported");
     }
 
     pub async fn set_peer(
@@ -823,18 +834,26 @@ impl SyncTaskWorker {
     )]
     async fn run(self) {
         let fut = async move {
-            tracing::info!(
-                part_hint_count = self.task.deets.part_hints.len(),
-                "XXX enter sync worker"
-            );
+            let SyncTask {
+                id: _task_id,
+                deets,
+            } = self.task;
+            let SyncTaskDeets {
+                peer_id,
+                obj_id,
+                part_hints,
+                remote_payload,
+            } = deets;
+            tracing::info!(part_hint_count = part_hints.len(), "XXX enter sync worker");
             let started_at = std::time::Instant::now();
             let res = self
                 .backend
                 .sync_obj(
-                    self.task.deets.peer_id,
+                    peer_id,
                     self.lease,
-                    self.task.deets.obj_id,
-                    self.task.deets.part_hints.into_iter().collect(),
+                    obj_id,
+                    part_hints.into_iter().collect(),
+                    remote_payload,
                 )
                 .await;
             tracing::info!(
@@ -857,8 +876,8 @@ impl SyncTaskWorker {
                     self.host_tx
                         .send(BigSyncEvent::SyncCompleted(
                             big_sync_core::SyncCompletedEvent {
-                                task_id: self.task.id,
-                                peer_id: self.task.deets.peer_id,
+                                task_id: _task_id,
+                                peer_id,
                                 completion,
                             },
                         ))
@@ -869,9 +888,9 @@ impl SyncTaskWorker {
                     tracing::info!("XXX sync worker send stale");
                     self.host_tx
                         .send(BigSyncEvent::SyncStale(big_sync_core::SyncStaleEvent {
-                            task_id: self.task.id,
-                            peer_id: self.task.deets.peer_id,
-                            obj_id: self.task.deets.obj_id,
+                            task_id: _task_id,
+                            peer_id,
+                            obj_id,
                         }))
                         .await
                         .expect(ERROR_CHANNEL);
@@ -883,9 +902,9 @@ impl SyncTaskWorker {
                     );
                     self.host_tx
                         .send(BigSyncEvent::SyncFailed(big_sync_core::SyncFailedEvent {
-                            task_id: self.task.id,
-                            peer_id: self.task.deets.peer_id,
-                            obj_id: self.task.deets.obj_id,
+                            task_id: _task_id,
+                            peer_id,
+                            obj_id,
                             err,
                         }))
                         .await

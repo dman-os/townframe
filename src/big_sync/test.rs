@@ -261,15 +261,19 @@ impl SyncBackend for MemorySyncBackend {
         lease: ObjStoreLease,
         obj_id: ObjId,
         part_hints: Vec<PartId>,
+        remote_payload: Option<serde_json::Value>,
     ) -> Res<SyncTaskRunOutcome> {
-        if !self.world.is_online(peer_id) {
-            eyre::bail!("peer is offline");
-        }
-        let remote_part_store = self.world.store_for_peer(peer_id);
-        let (local_payload, remote_payload) = tokio::try_join!(
-            self.local_part_store.obj_payload(obj_id),
-            remote_part_store.obj_payload(obj_id)
-        )?;
+        let local_payload = self.local_part_store.obj_payload(obj_id).await?;
+        let remote_payload = match remote_payload {
+            Some(remote_payload) => Some(remote_payload),
+            None => {
+                if !self.world.is_online(peer_id) {
+                    eyre::bail!("peer is offline");
+                }
+                let remote_part_store = self.world.store_for_peer(peer_id);
+                remote_part_store.obj_payload(obj_id).await?
+            }
+        };
         match (local_payload, remote_payload) {
             (Some(local), Some(remote)) => match compare_lww_payloads(&local, &remote) {
                 Ordering::Less => {
@@ -1135,6 +1139,7 @@ async fn memory_sync_direct_backend_adopts_remote_tombstone() -> Res<()> {
             store_b.get_obj_lease(obj).await?,
             obj,
             [part].into(),
+            None,
         )
         .await
         .expect_err("remote absence should be treated as a hard error for now");
@@ -1183,6 +1188,7 @@ async fn memory_sync_direct_backend_cross_replication_is_symmetric() -> Res<()> 
             store_a.get_obj_lease(obj_b).await?,
             obj_b,
             [part].into_iter().collect(),
+            Some(right_payload.clone()),
         )
         .await?;
     let _ = backend_b
@@ -1191,6 +1197,7 @@ async fn memory_sync_direct_backend_cross_replication_is_symmetric() -> Res<()> 
             store_b.get_obj_lease(obj_a).await?,
             obj_a,
             [part].into_iter().collect(),
+            Some(left_payload.clone()),
         )
         .await?;
 

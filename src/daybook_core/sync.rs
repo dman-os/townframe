@@ -249,7 +249,6 @@ impl IrohSyncRepo {
         let (repo_rpc, repo_rpc_stop_token) = am_utils_rs::repo::rpc::spawn_repo_rpc(
             Arc::clone(&rcx.big_repo),
             partition_sync_store.clone(),
-            Arc::new(am_utils_rs::sync::AllowAllPartitionAccessPolicy),
         )
         .await?;
 

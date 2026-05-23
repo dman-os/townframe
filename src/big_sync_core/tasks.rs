@@ -61,6 +61,7 @@ structstruck::strike! {
             pub peer_id: PeerId,
             pub obj_id: ObjId,
             pub part_hints: Set<PartId>,
+            pub remote_payload: Option<crate::part_store::ObjPayload>,
         }
     }
 }

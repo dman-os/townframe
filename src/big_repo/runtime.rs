@@ -21,6 +21,7 @@ use automerge_sedimentree::indexed::OwnedParents;
 use subduction_core::subduction::request::FragmentRequested;
 
 const DOC_WORKER_IDLE_TTL: Duration = Duration::from_secs(3);
+type SharedPartitionStore = Arc<dyn big_sync::HostPartitionStore>;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum SyncDocOutcome {
@@ -401,7 +402,7 @@ impl subduction_core::sync_session::SyncSessionObserver for BigRepoSyncSessionBr
 pub fn spawn_big_repo_runtime<S>(
     signer: subduction_crypto::signer::memory::MemorySigner,
     storage: S,
-    bsh: Arc<big_sync::Ctx>,
+    big_sync_store: SharedPartitionStore,
     change_manager: Arc<changes::ChangeListenerManager>,
 ) -> Res<(BigRepoRuntimeHandle, BigRepoRuntimeStopToken)>
 where
@@ -476,7 +477,7 @@ where
         subduction: subduction_handle,
         sedimentrees: Arc::clone(&sedimentrees),
         storage_for_reads,
-        big_sync_host: bsh,
+        big_sync_store,
         change_manager,
         runtime_tasks: Arc::clone(&runtime_tasks),
         connect_signer,
@@ -572,7 +573,7 @@ where
     subduction: Arc<BigRepoSubduction<S>>,
     sedimentrees: SubductionSedimentrees,
     storage_for_reads: S,
-    big_sync_host: Arc<big_sync::Ctx>,
+    big_sync_store: SharedPartitionStore,
     change_manager: Arc<changes::ChangeListenerManager>,
     runtime_tasks: Arc<utils_rs::AbortableJoinSet>,
     connect_signer: subduction_crypto::signer::memory::MemorySigner,
@@ -813,7 +814,7 @@ where
             subduction: Arc::clone(&self.subduction),
             sedimentrees: Arc::clone(&self.sedimentrees),
             storage_for_reads: self.storage_for_reads.clone(),
-            big_sync_host: Arc::clone(&self.big_sync_host),
+            big_sync_store: Arc::clone(&self.big_sync_store),
             change_manager: Arc::clone(&self.change_manager),
             runtime_handle: BigRepoRuntimeHandle {
                 cmd_tx: self.cmd_tx.clone(),
@@ -1225,7 +1226,7 @@ where
     subduction: Arc<BigRepoSubduction<S>>,
     sedimentrees: SubductionSedimentrees,
     storage_for_reads: S,
-    big_sync_host: Arc<big_sync::Ctx>,
+    big_sync_store: SharedPartitionStore,
     change_manager: Arc<changes::ChangeListenerManager>,
     runtime_handle: BigRepoRuntimeHandle,
     runtime_evt_tx: mpsc::UnboundedSender<RuntimeEvt>,
@@ -1343,8 +1344,7 @@ where
                 doc_id: self.doc_id,
             },
         ));
-        self.big_sync_host
-            .store
+        self.big_sync_store
             .upsert_obj(self.doc_id, item_payload, vec![], None)
             .await?;
         self.change_manager
@@ -1447,7 +1447,7 @@ where
             }
         }
         commit_delta_bookkeep(
-            &self.big_sync_host,
+            &self.big_sync_store,
             &self.change_manager,
             self.doc_id,
             heads,
@@ -1516,7 +1516,7 @@ where
                     "unloaded sync session loading partition heads"
                 );
                 let before_heads =
-                    super::partition_doc_heads_payload(&self.big_sync_host, self.doc_id).await?;
+                    super::partition_doc_heads_payload(&self.big_sync_store, self.doc_id).await?;
                 info!(
                     doc_id = %self.doc_id,
                     peer_id = %session.peer_id,
@@ -1632,7 +1632,7 @@ where
                         "live bundle expired; recovering sync delta from partition heads"
                     );
                     let before_heads =
-                        super::partition_doc_heads_payload(&self.big_sync_host, self.doc_id)
+                        super::partition_doc_heads_payload(&self.big_sync_store, self.doc_id)
                             .await?;
                     let mut doc =
                         load_doc_snapshot(&self.sedimentrees, &self.storage_for_reads, self.doc_id)
@@ -1665,7 +1665,7 @@ where
             return Ok(());
         };
         commit_delta_bookkeep(
-            &self.big_sync_host,
+            &self.big_sync_store,
             &self.change_manager,
             self.doc_id,
             after_heads,
@@ -1735,7 +1735,7 @@ where
 }
 
 async fn commit_delta_bookkeep(
-    big_sync_host: &Arc<big_sync::Ctx>,
+    big_sync_store: &SharedPartitionStore,
     change_manager: &Arc<changes::ChangeListenerManager>,
     doc_id: DocumentId,
     heads: Vec<automerge::ChangeHash>,
@@ -1754,8 +1754,7 @@ async fn commit_delta_bookkeep(
         has_change_listener_interest,
         "bookkeeping committed delta"
     );
-    big_sync_host
-        .store
+    big_sync_store
         .upsert_obj(doc_id, item_payload, vec![], None)
         .await?;
 
