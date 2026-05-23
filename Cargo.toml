@@ -95,9 +95,6 @@ tokio-util = { version = "0.7.17", features = [] }
 async-lock = "3.4.2"
 future_form = "0.3.1"
 
-#
-# actors
-irpc = { version = "0.12.0", features = ["derive"] }
 
 #
 # ds
@@ -189,15 +186,14 @@ gloo = { version = "0.11.0", default-features = false }
 automerge = "0.8.0"
 autosurgeon = "0.11.0"
 automerge-test = "0.6"
-subduction_core = { git = "https://github.com/dman-os/subduction", rev = "7ef06707ca3cac0d1ad11c290c5a6743f1e80a3a" }
-subduction_iroh = { git = "https://github.com/dman-os/subduction", rev = "7ef06707ca3cac0d1ad11c290c5a6743f1e80a3a"  }
-subduction_websocket = { git = "https://github.com/dman-os/subduction", rev = "7ef06707ca3cac0d1ad11c290c5a6743f1e80a3a"  }
-sedimentree_core = { git = "https://github.com/dman-os/subduction", rev = "7ef06707ca3cac0d1ad11c290c5a6743f1e80a3a"  }
-automerge_sedimentree = { git = "https://github.com/dman-os/subduction", rev = "7ef06707ca3cac0d1ad11c290c5a6743f1e80a3a"  }
-sedimentree_fs_storage = { git = "https://github.com/dman-os/subduction", rev = "7ef06707ca3cac0d1ad11c290c5a6743f1e80a3a"  }
-subduction_crypto = { git = "https://github.com/dman-os/subduction", rev = "7ef06707ca3cac0d1ad11c290c5a6743f1e80a3a"  }
-subduction_keyhive = { git = "https://github.com/dman-os/subduction", rev = "7ef06707ca3cac0d1ad11c290c5a6743f1e80a3a"  }
-subduction_keyhive_policy = { git = "https://github.com/dman-os/subduction", rev = "7ef06707ca3cac0d1ad11c290c5a6743f1e80a3a"  }
+subduction_core = { git = "https://github.com/dman-os/subduction", rev = "ff4e9e058595dc2f86f90e9541d6ff34abffcc3f" }
+subduction_iroh = { git = "https://github.com/dman-os/subduction", rev = "ff4e9e058595dc2f86f90e9541d6ff34abffcc3f" }
+subduction_websocket = { git = "https://github.com/dman-os/subduction", rev = "ff4e9e058595dc2f86f90e9541d6ff34abffcc3f" }
+sedimentree_core = { git = "https://github.com/dman-os/subduction", rev = "ff4e9e058595dc2f86f90e9541d6ff34abffcc3f" }
+automerge_sedimentree = { git = "https://github.com/dman-os/subduction", rev = "ff4e9e058595dc2f86f90e9541d6ff34abffcc3f" }
+sedimentree_fs_storage = { git = "https://github.com/dman-os/subduction", rev = "ff4e9e058595dc2f86f90e9541d6ff34abffcc3f" }
+subduction_crypto = { git = "https://github.com/dman-os/subduction", rev = "ff4e9e058595dc2f86f90e9541d6ff34abffcc3f" }
+subduction_keyhive = { git = "https://github.com/dman-os/subduction", rev = "ff4e9e058595dc2f86f90e9541d6ff34abffcc3f" }
 async-channel = "2.5.0"
 qrcode = { version = "0.14.1", default-features = false }
 
@@ -210,7 +206,7 @@ loom = "0.7.2"
 #
 # db
 sqlite-vec = "0.1.6" # "0.2.4-alpha"
-sqlx = { version = "0.8.6", features = [
+sqlx = { version = "0.9.0", features = [
   "runtime-tokio",
   # "tls-rustls-ring-webpki",
   "time",
@@ -241,7 +237,16 @@ clap_complete = "4.5"
 
 # 
 # networks
-iroh = "0.96.1"
+iroh = "1.0.0-rc.0"
+iroh-tickets = "1.0.0-rc.0"
+iroh-blobs = "0.101.0"
+iroh-docs = "0.99.0"
+iroh-gossip = "0.99.0"
+
+#
+# actors
+irpc = { version = "0.15.0", features = ["derive"] }
+irpc-iroh = "0.15.0"
 
 [patch.crates-io]
 # wash-runtime = { path = "../wash/crates/wash-runtime/"}
@@ -250,7 +255,7 @@ autosurgeon = { git = "https://github.com/dman-os/autosurgeon", rev = "682646998
 autosurgeon-derive = { git = "https://github.com/dman-os/autosurgeon", rev = "6826469986b150e6b736dc8e24619aa01a03ecef" }
 # sqlite-vec = { git = "https://github.com/vlasky/sqlite-vec", rev = "9facf1ab84f2a360c0f1e62db3a7f3eca5bc099a" }
 
-# [patch."https://github.com/inkandswitch/subduction"]
+# [patch."https://github.com/dman-os/subduction"]
 # subduction_core = { path = "/home/asdf/repos/rust/subduction/subduction_core" }
 # subduction_iroh = { path = "/home/asdf/repos/rust/subduction/subduction_iroh" }
 # subduction_websocket = { path = "/home/asdf/repos/rust/subduction/subduction_websocket" }
@@ -259,7 +264,6 @@ autosurgeon-derive = { git = "https://github.com/dman-os/autosurgeon", rev = "68
 # sedimentree_fs_storage = { path = "/home/asdf/repos/rust/subduction/sedimentree_fs_storage" }
 # subduction_crypto = { path = "/home/asdf/repos/rust/subduction/subduction_crypto" }
 # subduction_keyhive = { path = "/home/asdf/repos/rust/subduction/subduction_keyhive" }
-# subduction_keyhive_policy = { path = "/home/asdf/repos/rust/subduction/subduction_keyhive_policy" }
 
 
 # The default profile is optimized for Wasm builds because

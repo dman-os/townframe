@@ -49,7 +49,7 @@ tempfile.workspace = true
 thiserror.workspace = true
 iroh = { workspace = true, }
 irpc = { workspace = true }
-irpc-iroh = "0.12.0"
+irpc-iroh.workspace = true
 
 #
 # sync
@@ -63,7 +63,6 @@ subduction_core = { workspace = true  }
 subduction_crypto = { workspace = true, }
 subduction_iroh = { workspace = true }
 subduction_keyhive = { workspace = true, }
-subduction_keyhive_policy = { workspace = true, }
 subduction_websocket = { workspace = true, features = ["tokio_base"], }
 
 #

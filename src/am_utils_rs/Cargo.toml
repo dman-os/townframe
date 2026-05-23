@@ -26,7 +26,6 @@ repo = [
     "dep:subduction_crypto",
     "dep:subduction_iroh",
     "dep:subduction_keyhive",
-    "dep:subduction_keyhive_policy",
     "dep:subduction_websocket",
 ]
 
@@ -78,7 +77,6 @@ subduction_core = { workspace = true, optional = true }
 subduction_crypto = { workspace = true, optional = true }
 subduction_iroh = { workspace = true, optional = true }
 subduction_keyhive = { workspace = true, optional = true }
-subduction_keyhive_policy = { workspace = true, optional = true }
 subduction_websocket = { workspace = true, features = ["tokio_base"], optional = true }
 
 #
