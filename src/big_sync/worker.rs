@@ -12,7 +12,7 @@ use big_sync_core::{
 };
 use rand::{rngs::StdRng, SeedableRng};
 
-#[cfg(test)]
+#[cfg(any(test, feature = "test-support"))]
 use big_sync_core::TaskCounts;
 
 #[derive(Clone)]
@@ -57,12 +57,12 @@ enum BigSyncWorkerMsg {
             part_ids: std::collections::HashSet<PartId>,
             resp: tokio::sync::oneshot::Sender<Result<(), BigSyncWorkerError>>,
         },
-        #[cfg(test)]
+        #[cfg(any(test, feature = "test-support"))]
         ReapZombieTasks {
             timeout: Duration,
             resp: tokio::sync::oneshot::Sender<()>,
         },
-        #[cfg(test)]
+        #[cfg(any(test, feature = "test-support"))]
         Snapshot {
             resp: tokio::sync::oneshot::Sender<WorkerSnapshot>,
         },
@@ -94,7 +94,7 @@ pub struct StopToken {
     join_handle: tokio::task::JoinHandle<()>,
 }
 
-#[cfg(test)]
+#[cfg(any(test, feature = "test-support"))]
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct WorkerSnapshot {
     pub peer_parts: HashMap<PeerId, HashMap<PartId, BackendId>>,
@@ -107,7 +107,7 @@ pub struct WorkerSnapshot {
     pub zombie_tasks: usize,
 }
 
-#[cfg(test)]
+#[cfg(any(test, feature = "test-support"))]
 impl WorkerSnapshot {
     pub fn is_idle(&self) -> bool {
         self.task_counts.pending == 0
@@ -203,7 +203,7 @@ impl BigSyncWorkerHandle {
         Ok(())
     }
 
-    #[cfg(test)]
+    #[cfg(any(test, feature = "test-support"))]
     pub async fn drain_zombie_tasks(&self, timeout: Duration) -> Res<()> {
         let (resp_tx, resp_rx) = tokio::sync::oneshot::channel();
         self.host_tx
@@ -216,7 +216,7 @@ impl BigSyncWorkerHandle {
         resp_rx.await.wrap_err(ERROR_CHANNEL)
     }
 
-    #[cfg(test)]
+    #[cfg(any(test, feature = "test-support"))]
     pub async fn snapshot(&self) -> Res<WorkerSnapshot> {
         let (resp_tx, resp_rx) = tokio::sync::oneshot::channel();
         self.host_tx
@@ -226,7 +226,7 @@ impl BigSyncWorkerHandle {
         resp_rx.await.wrap_err(ERROR_CHANNEL)
     }
 
-    #[cfg(test)]
+    #[cfg(any(test, feature = "test-support"))]
     pub async fn wait_for_idle(&self, timeout: Duration) -> Res<()> {
         let deadline = std::time::Instant::now() + timeout;
         let mut last_snapshot = None;
@@ -584,7 +584,7 @@ impl BigSyncWorker {
                     },
                 ));
             }
-            #[cfg(test)]
+            #[cfg(any(test, feature = "test-support"))]
             BigSyncWorkerMsg::ReapZombieTasks { timeout, resp } => {
                 tracing::debug!(
                     zombie_count = self.zombie_tasks.len(),
@@ -594,7 +594,7 @@ impl BigSyncWorker {
                 self.reap_zombie_tasks(timeout).await?;
                 resp.send(()).inspect_err(|_| warn!(ERROR_CALLER)).ok();
             }
-            #[cfg(test)]
+            #[cfg(any(test, feature = "test-support"))]
             BigSyncWorkerMsg::Snapshot { resp } => {
                 let snapshot = WorkerSnapshot {
                     peer_parts: self
@@ -724,8 +724,44 @@ impl BigSyncWorker {
         Ok(())
     }
 
-    async fn spawn_sync_task(&mut self, task: SyncTask, lease: ObjStoreLease) -> Res<()> {
-        let backend = Arc::clone(self.sync_backends.values().next().expect(ERROR_UNRECONIZED));
+    async fn spawn_sync_task(&mut self, mut task: SyncTask, lease: ObjStoreLease) -> Res<()> {
+        let peer_state = self.peers.get(&task.deets.peer_id).expect(ERROR_UNRECONIZED);
+        let mut part_ids: Vec<PartId> = if task.deets.part_hints.is_empty() {
+            self.part_store.obj_parts(task.deets.obj_id).await?
+        } else {
+            task.deets.part_hints.iter().copied().collect()
+        };
+        part_ids.sort_unstable();
+        part_ids.dedup();
+        assert!(
+            !part_ids.is_empty(),
+            "sync task for obj {:?} had no parts to resolve a backend",
+            task.deets.obj_id
+        );
+        let mut backend_id = None;
+        for part_id in &part_ids {
+            let Some(&part_backend_id) = peer_state.parts.get(part_id) else {
+                panic!(
+                    "sync task requested unknown part {part_id:?} for peer {}",
+                    task.deets.peer_id
+                );
+            };
+            match backend_id {
+                None => backend_id = Some(part_backend_id),
+                Some(existing) => assert_eq!(
+                    existing, part_backend_id,
+                    "sync task parts mapped to different backend ids for peer {} obj {:?}",
+                    task.deets.peer_id, task.deets.obj_id
+                ),
+            }
+        }
+        let backend_id = backend_id.expect(ERROR_IMPOSSIBLE);
+        task.deets.part_hints = part_ids.iter().copied().collect();
+        let backend = Arc::clone(
+            self.sync_backends
+                .get(&backend_id)
+                .unwrap_or_else(|| panic!("unknown backend {backend_id} for sync task")),
+        );
         let cancel_token = self.cancel_token.child_token();
         let task_id = task.id;
         tracing::debug!(

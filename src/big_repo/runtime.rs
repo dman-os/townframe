@@ -11,7 +11,7 @@ use sedimentree_core::crypto::digest::Digest;
 use sedimentree_core::sedimentree::{Sedimentree, SedimentreeItem};
 use sedimentree_core::{blob::Blob, id::SedimentreeId, loose_commit::id::CommitId};
 use std::collections::{BTreeSet, HashMap};
-use std::sync::atomic::AtomicBool;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::{Duration, Instant};
 use tokio::sync::{mpsc, oneshot};
 use tokio_util::sync::CancellationToken;
@@ -1103,6 +1103,7 @@ where
             let out = async {
                 let deets = connected_peers.lock().await.remove(&peer_id);
                 if let Some(deets) = deets {
+                    deets.closed.store(true, Ordering::SeqCst);
                     deets.cancel_token.cancel();
                     let remote_peer_id =
                         subduction_core::peer::id::PeerId::new(peer_id.into_bytes());
@@ -1129,6 +1130,7 @@ where
     ) -> Res<()> {
         let deets = self.connected_peers.lock().await.remove(&peer_id);
         if let Some(deets) = deets {
+            deets.closed.store(true, Ordering::SeqCst);
             deets.cancel_token.cancel();
             let remote_peer_id = subduction_core::peer::id::PeerId::new(peer_id.into_bytes());
             self.subduction
@@ -1513,21 +1515,6 @@ where
                     doc_id = %self.doc_id,
                     peer_id = %session.peer_id,
                     kind = ?session.kind,
-                    "unloaded sync session loading partition heads"
-                );
-                let before_heads =
-                    super::partition_doc_heads_payload(&self.big_sync_store, self.doc_id).await?;
-                info!(
-                    doc_id = %self.doc_id,
-                    peer_id = %session.peer_id,
-                    kind = ?session.kind,
-                    heads = before_heads.len(),
-                    "unloaded sync session loaded partition heads"
-                );
-                info!(
-                    doc_id = %self.doc_id,
-                    peer_id = %session.peer_id,
-                    kind = ?session.kind,
                     "unloaded sync session loading doc snapshot"
                 );
                 let mut doc =
@@ -1538,7 +1525,20 @@ where
                     doc_id = %self.doc_id,
                     peer_id = %session.peer_id,
                     kind = ?session.kind,
-                    heads = doc.get_heads().len(),
+                    "unloaded sync session loading partition heads"
+                );
+                let before_heads = super::partition_doc_heads_payload(
+                    &self.big_sync_store,
+                    self.doc_id,
+                )
+                .await?
+                .unwrap_or_else(|| doc.get_heads().into());
+                info!(
+                    doc_id = %self.doc_id,
+                    peer_id = %session.peer_id,
+                    kind = ?session.kind,
+                    heads = before_heads.len(),
+                    loaded_heads = doc.get_heads().len(),
                     "unloaded sync session loaded doc snapshot"
                 );
                 let loaded_heads = doc.get_heads();
@@ -1631,14 +1631,15 @@ where
                         kind = ?session.kind,
                         "live bundle expired; recovering sync delta from partition heads"
                     );
-                    let before_heads =
-                        super::partition_doc_heads_payload(&self.big_sync_store, self.doc_id)
-                            .await?;
                     let mut doc =
                         load_doc_snapshot(&self.sedimentrees, &self.storage_for_reads, self.doc_id)
                             .await?
                             .unwrap_or_else(automerge::Automerge::new);
                     let loaded_heads = doc.get_heads();
+                    let before_heads =
+                        super::partition_doc_heads_payload(&self.big_sync_store, self.doc_id)
+                            .await?
+                            .unwrap_or_else(|| loaded_heads.clone().into());
                     let out = if before_heads[..] == loaded_heads[..] {
                         for blob in blobs {
                             doc.load_incremental(&blob).map_err(|err| {

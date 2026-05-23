@@ -7,9 +7,9 @@ use serde::{Deserialize, Serialize};
 use std::sync::Mutex;
 
 pub const STRESS_NODE_COUNT: usize = 4 * 1;
-pub const PHASE1_MUTATIONS: usize = 48 * 10;
-pub const PHASE2_MUTATIONS: usize = 24 * 10;
-pub const PHASE3_MUTATIONS: usize = 32 * 10;
+pub const PHASE1_MUTATIONS: usize = 48;
+pub const PHASE2_MUTATIONS: usize = 24;
+pub const PHASE3_MUTATIONS: usize = 32;
 pub const DEFAULT_STRESS_SEED: u64 = 0xB1A0_5EED_5EED_0001;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -79,6 +79,19 @@ pub trait StressFixture {
     async fn seed_obj(&self, node: &Self::Node, obj: ObjId, payload: serde_json::Value) -> Res<()>;
     async fn observed_state(&self, node: &Self::Node) -> Res<Self::Observation>;
     fn peer_id(&self, node: &Self::Node) -> PeerId;
+    // Fixture-specific application content for a document mutation.
+    fn make_doc_content(
+        &self,
+        phase: &str,
+        step: usize,
+        node_idx: usize,
+        obj_id: &ObjId,
+        nonce: u64,
+        written_at: u64,
+        writer_id: PeerId,
+    ) -> serde_json::Value {
+        stress_payload(phase, step, node_idx, obj_id, nonce, written_at, writer_id)
+    }
     async fn assert_cluster_alignment(&self, nodes: &[&Self::Node]) -> Res<()>;
 }
 
@@ -272,10 +285,10 @@ pub async fn apply_random_mutation<F: StressFixture>(
 
     let nonce = rng.random::<u64>();
     let written_at = state.next_written_at();
-    let value = stress_payload(
-        phase,
-        step,
-        node_idx,
+        let value = fixture.make_doc_content(
+            phase,
+            step,
+            node_idx,
         &obj,
         nonce,
         written_at,

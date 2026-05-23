@@ -19,12 +19,14 @@ mod worker;
 
 pub use big_sync_core::part_store::ObjPayload;
 pub use part_store::sqlite::SqlitePartStore;
-pub use part_store::{HostPartitionStore, ObjStoreLease};
+pub use part_store::{HostPartitionStore, ObjStoreLease, StoreMutationOutcome};
 pub use rpc::HostBigRpcClient;
 pub use worker::{
     spawn_big_sync_worker, BackendId, BigSyncWorkerError, BigSyncWorkerHandle, StopToken,
     SyncBackend, SyncTaskRunOutcome,
 };
+#[cfg(any(test, feature = "test-support"))]
+pub use worker::WorkerSnapshot;
 
 #[derive(Clone)]
 pub struct Ctx {

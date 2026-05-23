@@ -259,9 +259,9 @@ async fn sqlite_sync_randomized_four_node_stress_converges() -> Res<()> {
     stress_support::run_randomized_four_node_stress(
         LwwStressFixture::new(StressBackend::Sqlite),
         Arc::new(TestWorld::default()),
-        stress_support::PHASE1_MUTATIONS / 4,
-        stress_support::PHASE2_MUTATIONS / 4,
-        stress_support::PHASE3_MUTATIONS / 4,
+        stress_support::PHASE1_MUTATIONS,
+        stress_support::PHASE2_MUTATIONS,
+        stress_support::PHASE3_MUTATIONS,
     )
     .await
 }

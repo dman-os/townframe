@@ -7,6 +7,7 @@ mod interlude {
 use crate::interlude::*;
 use crate::rpc::FullDoc;
 
+use async_lock::Mutex as AsyncMutex;
 use std::collections::BTreeSet;
 use std::str::FromStr;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -59,6 +60,8 @@ pub struct BigRepo {
     change_manager: Arc<changes::ChangeListenerManager>,
     #[educe(Debug(ignore))]
     change_manager_stop: std::sync::Mutex<Option<changes::ChangeListenerManagerStopToken>>,
+    #[educe(Debug(ignore))]
+    sync_backend: tokio::sync::OnceCell<Arc<BigRepoSyncBackend>>,
 }
 
 pub type SharedBigRepo = Arc<BigRepo>;
@@ -108,7 +111,17 @@ impl BigRepo {
             runtime,
             change_manager,
             change_manager_stop: std::sync::Mutex::new(Some(change_manager_stop)),
+            sync_backend: tokio::sync::OnceCell::new(),
         });
+
+        let sync_backend = Arc::new(
+            BigRepoSyncBackend::boot(Arc::downgrade(&out))
+                .await
+                .wrap_err("failed booting big repo sync backend")?,
+        );
+        out.sync_backend
+            .set(Arc::clone(&sync_backend))
+            .unwrap_or_else(|_| panic!("big repo sync backend already initialized"));
 
         let change_manager_stop = out
             .change_manager_stop
@@ -131,9 +144,24 @@ impl BigRepo {
     }
 
     pub fn sync_backend(self: &Arc<Self>) -> Arc<dyn big_sync::SyncBackend> {
-        Arc::new(BigRepoSyncBackend {
-            repo: Arc::clone(self),
-        })
+        let backend = self
+            .sync_backend
+            .get()
+            .expect("big repo sync backend not initialized");
+        let backend: Arc<dyn big_sync::SyncBackend> = backend.clone();
+        backend
+    }
+
+    async fn register_remote_repo_peer(
+        self: &Arc<Self>,
+        peer_id: PeerId,
+        endpoint_addr: iroh::EndpointAddr,
+    ) -> Res<()> {
+        let backend = self
+            .sync_backend
+            .get()
+            .expect("big repo sync backend not initialized");
+        backend.register_remote_peer(peer_id, endpoint_addr).await
     }
 }
 
@@ -194,9 +222,12 @@ impl BigRepo {
         end_signal_tx: Option<tokio::sync::mpsc::UnboundedSender<ConnFinishSignal>>,
     ) -> Res<BigRepoConnection> {
         debug!("XXX open_connection_iroh");
+        let register_endpoint_addr = endpoint_addr.clone();
         let (peer_id, closed) = self
             .runtime
             .open_connection_iroh(endpoint, endpoint_addr, peer_id, end_signal_tx)
+            .await?;
+        self.register_remote_repo_peer(peer_id, register_endpoint_addr)
             .await?;
         Ok(BigRepoConnection {
             repo: Arc::clone(self),
@@ -219,6 +250,11 @@ impl BigRepo {
             .runtime
             .accept_connection_iroh(conn, end_signal_tx)
             .await?;
+        let endpoint_addr = iroh::EndpointAddr::new(
+            iroh::PublicKey::from_bytes(peer_id.as_bytes())
+                .expect("big repo peer id must be a valid iroh public key"),
+        );
+        self.register_remote_repo_peer(peer_id, endpoint_addr).await?;
         Ok(BigRepoConnection {
             repo: Arc::clone(self),
             peer_id,
@@ -289,7 +325,7 @@ impl BigRepo {
 
 // partition support
 impl BigRepo {
-    pub async fn doc_payload_heads(&self, doc_id: DocumentId) -> Res<Arc<[ChangeHash]>> {
+    pub async fn doc_payload_heads(&self, doc_id: DocumentId) -> Res<Option<Arc<[ChangeHash]>>> {
         partition_doc_heads_payload(&self.big_sync_store, doc_id).await
     }
 
@@ -524,12 +560,11 @@ impl BigDocHandle {
 async fn partition_doc_heads_payload(
     big_sync_store: &SharedPartitionStore,
     doc_id: DocumentId,
-) -> Res<Arc<[ChangeHash]>> {
-    let before_heads = big_sync_store
+) -> Res<Option<Arc<[ChangeHash]>>> {
+    Ok(big_sync_store
         .obj_payload(doc_id)
         .await?
-        .expect("doc was not in partition previously");
-    Ok(doc_heads_from_payload(before_heads))
+        .map(doc_heads_from_payload))
 }
 
 fn doc_heads_from_payload(payload: serde_json::Value) -> Arc<[ChangeHash]> {
@@ -545,7 +580,138 @@ fn doc_heads_from_payload(payload: serde_json::Value) -> Arc<[ChangeHash]> {
 
 #[derive(Clone)]
 struct BigRepoSyncBackend {
-    repo: Arc<BigRepo>,
+    repo: std::sync::Weak<BigRepo>,
+    repo_rpc_endpoint: iroh::Endpoint,
+    remote_repo_clients: Arc<AsyncMutex<std::collections::HashMap<PeerId, Arc<RepoRpcClient>>>>,
+}
+
+#[derive(Clone)]
+struct RepoRpcClient {
+    endpoint: iroh::Endpoint,
+    endpoint_addr: iroh::EndpointAddr,
+}
+
+impl RepoRpcClient {
+    fn new(endpoint: iroh::Endpoint, endpoint_addr: iroh::EndpointAddr) -> Self {
+        Self {
+            endpoint,
+            endpoint_addr,
+        }
+    }
+
+    async fn get_docs_full(&self, doc_ids: Vec<String>) -> Res<Vec<FullDoc>> {
+        let client = irpc_iroh::client::<crate::rpc::RepoSyncRpc>(
+            self.endpoint.clone(),
+            self.endpoint_addr.clone(),
+            crate::rpc::REPO_SYNC_ALPN,
+        );
+        let response = client.rpc(crate::rpc::GetDocsFullRpcReq {
+            req: crate::rpc::GetDocsFullRequest { doc_ids },
+        })
+        .await
+        .wrap_err("GetDocsFull rpc failure")?
+        .wrap_err("GetDocsFull rejected")?;
+        Ok(response.docs)
+    }
+}
+
+impl BigRepoSyncBackend {
+    async fn boot(repo: std::sync::Weak<BigRepo>) -> Res<Self> {
+        let endpoint = iroh::Endpoint::builder(iroh::endpoint::presets::Minimal)
+            .bind()
+            .await
+            .wrap_err("failed binding big repo sync backend endpoint")?;
+        Ok(Self {
+            repo,
+            repo_rpc_endpoint: endpoint,
+            remote_repo_clients: Arc::new(AsyncMutex::new(std::collections::HashMap::new())),
+        })
+    }
+
+    async fn register_remote_peer(
+        &self,
+        peer_id: PeerId,
+        endpoint_addr: iroh::EndpointAddr,
+    ) -> Res<()> {
+        let mut remote_repo_clients = self.remote_repo_clients.lock().await;
+        if endpoint_addr.addrs.is_empty()
+            && remote_repo_clients
+                .get(&peer_id)
+                .is_some_and(|existing| !existing.endpoint_addr.addrs.is_empty())
+        {
+            return Ok(());
+        }
+        let client = Arc::new(RepoRpcClient::new(
+            self.repo_rpc_endpoint.clone(),
+            endpoint_addr,
+        ));
+        remote_repo_clients.insert(peer_id, client);
+        Ok(())
+    }
+
+    async fn remote_repo_client(&self, peer_id: PeerId) -> Res<Arc<RepoRpcClient>> {
+        self.remote_repo_clients
+            .lock()
+            .await
+            .get(&peer_id)
+            .cloned()
+            .ok_or_else(|| ferr!("missing repo rpc client for peer {peer_id:?}"))
+    }
+
+    async fn materialize_existing_doc_heads(
+        repo: &Arc<BigRepo>,
+        obj_id: DocumentId,
+        part_hints: Vec<big_sync_core::PartId>,
+    ) -> Res<Option<big_sync_core::SyncCompletionDeets>> {
+        let Some(save) = repo.export_doc(&obj_id).await? else {
+            return Ok(None);
+        };
+        let doc = automerge::Automerge::load(&save)
+            .wrap_err("invalid automerge payload from existing big repo doc")?;
+        let item_payload = serde_json::json!({
+            "heads": am_utils_rs::serialize_commit_heads(&doc.get_heads()),
+        });
+        repo.big_sync_store
+            .upsert_obj(obj_id, item_payload, part_hints, None)
+            .await?;
+        Ok(Some(big_sync_core::SyncCompletionDeets::AddedMember))
+    }
+
+    async fn import_missing_doc(
+        &self,
+        peer_id: PeerId,
+        obj_id: DocumentId,
+        part_hints: Vec<big_sync_core::PartId>,
+    ) -> Res<Option<big_sync_core::SyncCompletionDeets>> {
+        let repo = self
+            .repo
+            .upgrade()
+            .ok_or_else(|| eyre::eyre!("big repo dropped while sync backend was active"))?;
+        let client = self.remote_repo_client(peer_id).await?;
+        let doc_id = obj_id.to_string();
+        let Some(full_doc) = client
+            .get_docs_full(vec![doc_id.clone()])
+            .await?
+            .into_iter()
+            .find(|doc| doc.doc_id == doc_id)
+        else {
+            eyre::bail!("missing on remote");
+        };
+        let loaded = automerge::Automerge::load(&full_doc.automerge_save)
+            .wrap_err("invalid automerge payload from GetDocsFull")?;
+        match repo.put_doc(obj_id, loaded).await {
+            Ok(_) => {
+                repo.big_sync_store
+                    .add_obj_to_parts(obj_id, part_hints, None)
+                    .await?;
+                Ok(Some(big_sync_core::SyncCompletionDeets::AddedMember))
+            }
+            Err(runtime::PutDocError::IdOccpuied { .. }) => {
+                Self::materialize_existing_doc_heads(&repo, obj_id, part_hints).await
+            }
+            Err(err) => Err(err).wrap_err("put_doc failed"),
+        }
+    }
 }
 
 #[async_trait::async_trait]
@@ -558,15 +724,70 @@ impl big_sync::SyncBackend for BigRepoSyncBackend {
         part_hints: Vec<big_sync_core::PartId>,
         remote_payload: Option<big_sync::ObjPayload>,
     ) -> Res<big_sync::SyncTaskRunOutcome> {
-        let _ = lease;
-        let _ = part_hints;
-
-        let local_heads = self
+        let repo = self
             .repo
+            .upgrade()
+            .ok_or_else(|| eyre::eyre!("big repo dropped while sync backend was active"))?;
+
+        let local_heads = repo
             .big_sync_store
             .obj_payload(obj_id)
             .await?
             .map(doc_heads_from_payload);
+        if local_heads.is_none() {
+            if let Some(deets) = self
+                .import_missing_doc(peer_id, obj_id, part_hints.clone())
+                .await?
+            {
+                return Ok(big_sync::SyncTaskRunOutcome::Completion(
+                    big_sync_core::SyncTaskCompletion { obj_id, deets },
+                ));
+            }
+            let local_heads = repo
+                .big_sync_store
+                .obj_payload(obj_id)
+                .await?
+                .map(doc_heads_from_payload);
+            if let (Some(local_heads), Some(remote_payload)) = (&local_heads, &remote_payload) {
+                let remote_heads = doc_heads_from_payload(remote_payload.clone());
+                if local_heads.as_ref() == remote_heads.as_ref() {
+                    return Ok(big_sync::SyncTaskRunOutcome::Completion(
+                        big_sync_core::SyncTaskCompletion {
+                            obj_id,
+                            deets: big_sync_core::SyncCompletionDeets::Noop,
+                        },
+                    ));
+                }
+            }
+            let sync_outcome = repo
+                .runtime
+                .sync_doc_with_peer(obj_id, peer_id, Some(Duration::from_secs(10)))
+                .await?;
+            return match sync_outcome {
+                SyncDocOutcome::Success => {
+                    Self::materialize_existing_doc_heads(&repo, obj_id, part_hints).await?;
+                    Ok(big_sync::SyncTaskRunOutcome::Completion(
+                        big_sync_core::SyncTaskCompletion {
+                            obj_id,
+                            deets: big_sync_core::SyncCompletionDeets::ChangedObject,
+                        },
+                    ))
+                }
+                SyncDocOutcome::NotFoundOrUnauthorized => {
+                    eyre::bail!("remote doc was not found or unauthorized")
+                }
+                SyncDocOutcome::TransportError => eyre::bail!("transport error syncing doc"),
+                SyncDocOutcome::IoError => eyre::bail!("i/o error syncing doc"),
+            };
+        }
+        match repo
+            .big_sync_store
+            .add_obj_to_parts(obj_id, part_hints.clone(), Some(lease))
+            .await?
+        {
+            big_sync::StoreMutationOutcome::Applied => {}
+            big_sync::StoreMutationOutcome::Stale => return Ok(big_sync::SyncTaskRunOutcome::Stale),
+        }
         if let (Some(local_heads), Some(remote_payload)) = (&local_heads, &remote_payload) {
             let remote_heads = doc_heads_from_payload(remote_payload.clone());
             if local_heads.as_ref() == remote_heads.as_ref() {
@@ -579,13 +800,13 @@ impl big_sync::SyncBackend for BigRepoSyncBackend {
             }
         }
 
-        let sync_outcome = self
-            .repo
+        let sync_outcome = repo
             .runtime
             .sync_doc_with_peer(obj_id, peer_id, Some(Duration::from_secs(10)))
             .await?;
         match sync_outcome {
             SyncDocOutcome::Success => {
+                Self::materialize_existing_doc_heads(&repo, obj_id, part_hints).await?;
                 let deets = if local_heads.is_some() {
                     big_sync_core::SyncCompletionDeets::ChangedObject
                 } else {
@@ -615,6 +836,8 @@ pub(crate) mod tests {
     use std::sync::atomic::{AtomicUsize, Ordering};
     use tempfile::tempdir;
     use tokio::{sync::Notify, time::timeout};
+
+    const BIG_REPO_STRESS_BACKEND_ID: big_sync::BackendId = 0;
 
     pub async fn boot_part_store(
         sqlite_url: &str,
@@ -1549,9 +1772,85 @@ pub(crate) mod tests {
         }
     }
 
+    struct StressBigSyncRpcClient {
+        target_part_store: SharedPartitionStore,
+    }
+
+    #[async_trait::async_trait]
+    impl big_sync::HostBigRpcClient for StressBigSyncRpcClient {
+        async fn peer_summary(
+            &self,
+            req: big_sync_core::rpc::PeerSummaryRequest,
+        ) -> Res<
+            big_sync_core::rpc::BigSyncRpcResult<
+                Result<big_sync_core::rpc::PeerSummaryResult, big_sync_core::rpc::ListPartsError>,
+            >,
+        > {
+            let parts = self.target_part_store.summarize_parts(req.parts).await??;
+            Ok(Ok(Ok(big_sync_core::rpc::PeerSummaryResult {
+                parts,
+                deepest_bucket_level: big_sync_core::BuckId::MAX_LEVEL,
+            })))
+        }
+
+        async fn sub_parts(
+            &self,
+            req: big_sync_core::rpc::SubPartsRequest,
+        ) -> Res<
+            big_sync_core::rpc::BigSyncRpcResult<
+                Result<
+                    big_sync_core::mpsc::Receiver<big_sync_core::rpc::SubEvent>,
+                    big_sync_core::rpc::ListPartsError,
+                >,
+            >,
+        > {
+            Ok(Ok(self.target_part_store.subscribe(req).await?))
+        }
+
+        async fn get_changed_buckets(
+            &self,
+            req: big_sync_core::rpc::GetChangedBucketsRequest,
+        ) -> Res<
+            big_sync_core::rpc::BigSyncRpcResult<
+                Result<Vec<big_sync_core::rpc::BucketSummary>, big_sync_core::rpc::ListPartsError>,
+            >,
+        > {
+            Ok(Ok(self.target_part_store.get_changed_buckets(req).await?))
+        }
+
+        async fn leaf_buckets(
+            &self,
+            req: big_sync_core::rpc::LeafBucketsRequest,
+        ) -> Res<
+            big_sync_core::rpc::BigSyncRpcResult<
+                Result<
+                    big_sync_core::rpc::LeafBucketResult,
+                    big_sync_core::rpc::LeafBucketsError,
+                >,
+            >,
+        > {
+            Ok(Ok(self.target_part_store.leaf_buckets(req).await?))
+        }
+    }
+
+    async fn endpoint_addr_from_remote_info(
+        endpoint: &iroh::Endpoint,
+        endpoint_id: iroh::PublicKey,
+    ) -> Res<iroh::EndpointAddr> {
+        let remote_info = endpoint
+            .remote_info(endpoint_id)
+            .await
+            .ok_or_eyre("unable to get remote endpoint info")?;
+        Ok(iroh::EndpointAddr::from_parts(
+            remote_info.id(),
+            remote_info.into_addrs().map(|addr| addr.into_addr()),
+        ))
+    }
+
     struct SyncRepoNode {
         repo: Arc<BigRepo>,
         big_sync_store: SharedPartitionStore,
+        big_sync_worker: big_sync::BigSyncWorkerHandle,
         docs: Arc<tokio::sync::Mutex<HashMap<ObjId, Arc<BigDocHandle>>>>,
         connections: Arc<tokio::sync::Mutex<HashMap<PeerId, BigRepoConnection>>>,
         stop_token: BigRepoStopToken,
@@ -1575,16 +1874,39 @@ pub(crate) mod tests {
                 path.join("part_store.db").display()
             ))
             .await?;
+            let part_init_obj = ObjId(big_sync_core::Byte32Id::new([255_u8.wrapping_sub(seed); 32]));
+            big_sync_host
+                .store
+                .upsert_obj(
+                    part_init_obj,
+                    serde_json::json!({ "heads": Vec::<String>::new() }),
+                    stress_support::test_parts(),
+                    None,
+                )
+                .await?;
+            big_sync_host
+                .store
+                .remove_obj_from_part(part_init_obj, stress_support::test_part(), None)
+                .await?;
+            let secret_key_bytes = [seed; 32];
+            let signer =
+                subduction_crypto::signer::memory::MemorySigner::from_bytes(&secret_key_bytes);
+            let peer_id = PeerId::new(*signer.verifying_key().as_bytes());
             let (repo, stop_token) = BigRepo::boot(
                 Config {
-                    peer_id: PeerId::new([seed; 32]),
-                    secret_key_bytes: [seed; 32],
+                    peer_id,
+                    secret_key_bytes,
                     storage: StorageConfig::Disk { path },
                 },
                 Arc::clone(&big_sync_host.store),
             )
             .await?;
-            let endpoint = iroh::Endpoint::builder()
+            big_sync_stop.stop().await?;
+            let mut sync_backends = HashMap::new();
+            sync_backends.insert(BIG_REPO_STRESS_BACKEND_ID, repo.sync_backend());
+            let (big_sync_worker, big_sync_stop) =
+                big_sync::spawn_big_sync_worker(Arc::clone(&big_sync_host.store), sync_backends)?;
+            let endpoint = iroh::Endpoint::builder(iroh::endpoint::presets::Minimal)
                 .clear_ip_transports()
                 .bind_addr((std::net::Ipv4Addr::LOCALHOST, 0))?
                 .relay_mode(iroh::RelayMode::Disabled)
@@ -1627,6 +1949,7 @@ pub(crate) mod tests {
             Ok(Self {
                 repo,
                 big_sync_store: Arc::clone(&big_sync_host.store),
+                big_sync_worker,
                 docs,
                 connections,
                 stop_token,
@@ -1667,13 +1990,15 @@ pub(crate) mod tests {
         }
 
         async fn connect_to(&self, remote: &SyncRepoNode) -> Res<()> {
-            if self
-                .connections
-                .lock()
-                .await
-                .contains_key(&remote.peer_id())
             {
-                return Ok(());
+                let mut connections = self.connections.lock().await;
+                if connections
+                    .get(&remote.peer_id())
+                    .is_some_and(|conn| !conn.is_closed())
+                {
+                    return Ok(());
+                }
+                connections.remove(&remote.peer_id());
             }
             let conn = self
                 .repo
@@ -1684,6 +2009,46 @@ pub(crate) mod tests {
                     None,
                 )
                 .await?;
+            let remote_addr = endpoint_addr_from_remote_info(&self.endpoint, remote.endpoint.id())
+                .await
+                .unwrap_or_else(|_| remote.endpoint.addr());
+            self.repo
+                .register_remote_repo_peer(remote.peer_id(), remote_addr)
+                .await?;
+            let self_addr = endpoint_addr_from_remote_info(&remote.endpoint, self.endpoint.id())
+                .await
+                .unwrap_or_else(|_| self.endpoint.addr());
+            remote
+                .repo
+                .register_remote_repo_peer(self.peer_id(), self_addr)
+                .await?;
+            let parts = stress_support::test_parts()
+                .into_iter()
+                .map(|part_id| (part_id, BIG_REPO_STRESS_BACKEND_ID))
+                .collect();
+            self.big_sync_worker
+                .set_peer(
+                    remote.peer_id(),
+                    Arc::new(StressBigSyncRpcClient {
+                        target_part_store: Arc::clone(&remote.big_sync_store),
+                    }),
+                    parts,
+                )
+                .await?;
+            let parts = stress_support::test_parts()
+                .into_iter()
+                .map(|part_id| (part_id, BIG_REPO_STRESS_BACKEND_ID))
+                .collect();
+            remote
+                .big_sync_worker
+                .set_peer(
+                    self.peer_id(),
+                    Arc::new(StressBigSyncRpcClient {
+                        target_part_store: Arc::clone(&self.big_sync_store),
+                    }),
+                    parts,
+                )
+                .await?;
             self.connections.lock().await.insert(remote.peer_id(), conn);
             Ok(())
         }
@@ -1692,6 +2057,8 @@ pub(crate) mod tests {
             if let Some(conn) = self.connections.lock().await.remove(&remote.peer_id()) {
                 conn.stop().await?;
             }
+            self.big_sync_worker.remove_peer(remote.peer_id()).await?;
+            remote.big_sync_worker.remove_peer(self.peer_id()).await?;
             Ok(())
         }
 
@@ -1729,21 +2096,39 @@ pub(crate) mod tests {
                     .expect("failed updating big repo stress doc");
                 })
                 .await?;
+            self.repo
+                .big_sync_store
+                .add_obj_to_parts(obj_id, stress_support::test_parts(), None)
+                .await?;
             Ok(())
         }
 
         async fn snapshot_docs(&self, all_docs: &[ObjId]) -> Res<BigRepoStressObservation> {
+            let worker = self.big_sync_worker.snapshot().await?;
+            let mut sync_store = BTreeMap::new();
             let mut docs = BTreeMap::new();
             for obj_id in all_docs {
-                let value = match self.repo.get_doc(obj_id).await? {
-                    Some(handle) => Some(read_json_doc(&handle).await),
+                let heads = self.repo.big_sync_store.obj_payload(*obj_id).await?;
+                let value = match self.repo.export_doc(obj_id).await? {
+                    Some(save) => {
+                        let doc = automerge::Automerge::load(&save)
+                            .wrap_err("failed loading snapshot doc")?;
+                        Some(
+                            autosurgeon::hydrate::<_, ThroughJson<serde_json::Value>>(&doc)
+                                .expect("failed hydrating snapshot doc")
+                                .0,
+                        )
+                    }
                     None => None,
                 };
+                sync_store.insert(*obj_id, heads);
                 docs.insert(*obj_id, value);
             }
             let connected_peers = self.connections.lock().await.keys().copied().collect();
             Ok(BigRepoStressObservation {
                 connected_peers,
+                worker,
+                sync_store,
                 docs,
             })
         }
@@ -1768,12 +2153,17 @@ pub(crate) mod tests {
     #[derive(Clone, Debug)]
     struct BigRepoStressObservation {
         connected_peers: BTreeSet<PeerId>,
+        worker: big_sync::WorkerSnapshot,
+        sync_store: BTreeMap<ObjId, Option<serde_json::Value>>,
         docs: BTreeMap<ObjId, Option<serde_json::Value>>,
     }
 
     impl PartialEq for BigRepoStressObservation {
         fn eq(&self, other: &Self) -> bool {
-            self.connected_peers == other.connected_peers && self.docs == other.docs
+            self.connected_peers == other.connected_peers
+                && self.worker == other.worker
+                && self.sync_store == other.sync_store
+                && self.docs == other.docs
         }
     }
 
@@ -1800,6 +2190,25 @@ pub(crate) mod tests {
 
         fn label(&self) -> &'static str {
             "big_repo"
+        }
+
+        fn make_doc_content(
+            &self,
+            phase: &str,
+            step: usize,
+            node_idx: usize,
+            obj_id: &ObjId,
+            nonce: u64,
+            _written_at: u64,
+            _writer_id: PeerId,
+        ) -> serde_json::Value {
+            serde_json::json!({
+                "phase": phase,
+                "step": step,
+                "node": node_idx,
+                "obj": format!("{obj_id:?}"),
+                "nonce": nonce,
+            })
         }
 
         async fn boot_node(&self, _world: Arc<Self::World>, peer_seed: u8) -> Res<Self::Node> {
@@ -1863,11 +2272,15 @@ pub(crate) mod tests {
                 snapshots.push((node.peer_id(), self.observed_state(node).await?));
             }
 
-            let baseline = &snapshots[0].1.docs;
+            let baseline = &snapshots[0].1.sync_store;
             for (peer_id, snapshot) in snapshots.iter().skip(1) {
                 assert_eq!(
-                    baseline, &snapshot.docs,
-                    "big repo stress snapshots diverged for peer {peer_id:?}"
+                    baseline, &snapshot.sync_store,
+                    "big repo stress sync-store snapshots diverged for peer {peer_id:?}"
+                );
+                assert_eq!(
+                    snapshots[0].1.docs, snapshot.docs,
+                    "big repo stress exported docs diverged for peer {peer_id:?}"
                 );
             }
 
@@ -2816,9 +3229,9 @@ pub(crate) mod tests {
         stress_support::run_randomized_four_node_stress(
             BigRepoStressFixture::default(),
             Arc::new(()),
-            stress_support::PHASE1_MUTATIONS / 4,
-            stress_support::PHASE2_MUTATIONS / 4,
-            stress_support::PHASE3_MUTATIONS / 4,
+            stress_support::PHASE1_MUTATIONS,
+            stress_support::PHASE2_MUTATIONS,
+            stress_support::PHASE3_MUTATIONS,
         )
         .await
     }

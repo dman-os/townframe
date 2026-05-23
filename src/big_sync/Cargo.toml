@@ -10,7 +10,7 @@ workspace = true
 path = "lib.rs"
 
 [features]
-test-support = []
+test-support = ["big_sync_core/test-support"]
 
 [dependencies]
 #
