@@ -244,7 +244,10 @@ pub async fn connect_active_topology<F: StressFixture>(
     Ok(())
 }
 
-pub async fn connect_full_mesh<F: StressFixture>(fixture: &F, nodes: &[Option<F::Node>]) -> Res<()> {
+pub async fn connect_full_mesh<F: StressFixture>(
+    fixture: &F,
+    nodes: &[Option<F::Node>],
+) -> Res<()> {
     let live = live_indices(nodes);
     for left_idx in 0..live.len() {
         let left = nodes[live[left_idx]].as_ref().expect(ERROR_IMPOSSIBLE);
@@ -285,10 +288,10 @@ pub async fn apply_random_mutation<F: StressFixture>(
 
     let nonce = rng.random::<u64>();
     let written_at = state.next_written_at();
-        let value = fixture.make_doc_content(
-            phase,
-            step,
-            node_idx,
+    let value = fixture.make_doc_content(
+        phase,
+        step,
+        node_idx,
         &obj,
         nonce,
         written_at,

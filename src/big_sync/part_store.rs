@@ -10,13 +10,13 @@ use big_sync_core::{mpsc, BuckId, Byte32Id, ObjId, PartId, PeerId};
 pub mod memory;
 pub mod sqlite;
 
-pub type ObjStoreLease = u64;
+// pub type ObjStoreLease = u64;
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum StoreMutationOutcome {
-    Applied,
-    Stale,
-}
+// #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+// pub enum StoreMutationOutcome {
+//     Applied,
+//     Stale,
+// }
 
 #[async_trait]
 pub trait HostPartStore: Send + Sync {
@@ -33,34 +33,21 @@ pub trait HostPartStore: Send + Sync {
         req: LeafBucketsRequest,
     ) -> Res<Result<LeafBucketResult, LeafBucketsError>>;
     async fn member_count(&self, part_id: PartId) -> Res<u64>;
-    async fn obj_payload(&self, obj_id: ObjId) -> Res<Option<ObjPayload>>;
     async fn get_bucket_summary(&self, part_id: PartId, id: BuckId) -> Res<BucketSummary>;
 
     async fn obj_parts(&self, obj_id: ObjId) -> Res<Vec<PartId>>;
 
-    async fn get_obj_lease(&self, obj_id: ObjId) -> Res<ObjStoreLease>;
+    // NOTE: upsert_obj doesn't take/invalidate leases since
+    // it doesn't affect part membership
+    async fn set_obj_payload(&self, obj_id: ObjId, payload: ObjPayload) -> Res<()>;
 
-    async fn upsert_obj(
-        &self,
-        obj_id: ObjId,
-        payload: ObjPayload,
-        parts: Vec<PartId>,
-        lease: Option<ObjStoreLease>,
-    ) -> Res<StoreMutationOutcome>;
+    async fn obj_payload(&self, obj_id: ObjId) -> Res<Option<ObjPayload>>;
 
-    async fn add_obj_to_parts(
-        &self,
-        obj_id: ObjId,
-        parts: Vec<PartId>,
-        lease: Option<ObjStoreLease>,
-    ) -> Res<StoreMutationOutcome>;
+    // async fn get_obj_lease(&self, obj_id: ObjId) -> Res<ObjStoreLease>;
 
-    async fn remove_obj_from_part(
-        &self,
-        obj_id: ObjId,
-        part_id: PartId,
-        lease: Option<ObjStoreLease>,
-    ) -> Res<StoreMutationOutcome>;
+    async fn add_obj_to_parts(&self, obj_id: ObjId, parts: Vec<PartId>) -> Res<()>;
+
+    async fn remove_obj_from_part(&self, obj_id: ObjId, part_id: PartId) -> Res<()>;
 
     async fn set_peer_part_cursor(
         &self,
@@ -73,7 +60,6 @@ pub trait HostPartStore: Send + Sync {
 
     async fn list_events(
         &self,
-
         parts: HashSet<PartId>,
         cursor: CursorIndex,
         limit: u32,

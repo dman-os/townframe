@@ -108,9 +108,9 @@ structstruck::strike! {
     #[derive(Debug, Clone, PartialEq, Eq)]
     pub enum SyncCompletionDeets {
         AddedMember,
+        RemovedMember,
         ChangedObject,
         Noop,
-        // DeletedObj
     }
 }
 
@@ -132,7 +132,15 @@ structstruck::strike! {
 }
 
 structstruck::strike! {
+    /// Commands must be done immediately blocking the machine and the next response
+    /// must be the command result. Failing commands are not recoverable.
+    /// This is different from tasks which can be retried are scheduled concurrently to machine.
+    #[derive(Clone)]
     pub enum BigSyncMachineCommand {
+        AddObjToPart {
+            obj_id: ObjId,
+            part_id: PartId,
+        },
         RemoveObjFromPart {
             obj_id: ObjId,
             part_id: PartId,
@@ -521,7 +529,7 @@ structstruck::strike! {
         peers: Map<PeerId, PeerState>,
         stat_machine: SyncStatMachine,
 
-        cmds: Vec<BigSyncMachineCommand>,
+        last_cmd: Option<struct LastCmd(BigSyncMachineCommand, Option<CursorIndex>, PeerId)>,
         tasks: Tasks,
     }
 }
@@ -588,8 +596,11 @@ impl BigSyncMachine {
         self.stat_machine.stat_evts.drain(..)
     }
 
-    pub fn drain_cmds(&mut self) -> std::vec::Drain<'_, BigSyncMachineCommand> {
-        self.cmds.drain(..)
+    pub fn get_cmd(&mut self) -> Option<BigSyncMachineCommand> {
+        let Some(LastCmd(cmd, _, _)) = &self.last_cmd else {
+            return None;
+        };
+        Some(cmd.clone())
     }
 
     pub fn handle_evt(&mut self, evt: BigSyncEvent) {
@@ -613,6 +624,28 @@ impl BigSyncMachine {
             BigSyncEvent::SyncStale(evt) => {
                 if let Some(state) = self.tasks.stop_task(evt.task_id) {
                     self.handle_sync_stale(evt, state.retry);
+                }
+            }
+        }
+    }
+
+    pub fn handle_cmd_success(&mut self) {
+        let LastCmd(last_cmd, cursor, peer_id) = self
+            .last_cmd
+            .take()
+            .expect("success for a cmd that wasn't sent");
+        if let Some(cursor) = cursor {
+            match last_cmd {
+                BigSyncMachineCommand::SetPartCursor { .. } => unreachable!(),
+                BigSyncMachineCommand::RemoveObjFromPart { obj_id, .. }
+                | BigSyncMachineCommand::AddObjToPart { obj_id, .. } => {
+                    let peer_state = self.peers.get_mut(&peer_id).expect(ERROR_UNRECONIZED);
+                    peer_state.cursor_machine.on_obj_sync_job_evt(
+                        obj_id,
+                        cursor,
+                        &mut peer_state.cursors_cmd_buf,
+                    );
+                    self.drain_cursor_machine_cmds(peer_id);
                 }
             }
         }
@@ -1074,10 +1107,13 @@ impl BigSyncMachine {
         for cmd in peer_state.cursors_cmd_buf.drain(..) {
             trace!(peer_id = %peer_id, ?cmd,"processing cursor cmd");
             match cmd {
+                CursorMachineCommand::PartIdle { part_id } => {
+                    self.stat_machine.mark_peer_part_idle(peer_id, part_id);
+                }
                 CursorMachineCommand::SyncObj {
                     obj_id,
                     remote_payload,
-                    part_hint,
+                    parts,
                     cursor,
                 } => {
                     let (cursors, part_hints, remote_payload) =
@@ -1087,7 +1123,7 @@ impl BigSyncMachine {
                                 .stop_task(worker.task_id)
                                 .expect(ERROR_UNRECONIZED);
 
-                            worker.part_hints.insert(part_hint);
+                            worker.part_hints.extend(parts.iter().copied());
                             worker.cursors.insert(cursor);
                             (
                                 worker.cursors,
@@ -1095,7 +1131,11 @@ impl BigSyncMachine {
                                 Some(remote_payload).or(worker.remote_payload),
                             )
                         } else {
-                            ([cursor].into(), [part_hint].into(), Some(remote_payload))
+                            (
+                                [cursor].into(),
+                                parts.iter().copied().collect(),
+                                Some(remote_payload),
+                            )
                         };
                     let deets = SyncTaskDeets {
                         peer_id,
@@ -1113,8 +1153,10 @@ impl BigSyncMachine {
                             remote_payload,
                         },
                     );
-                    self.stat_machine
-                        .mark_peer_part_cursor_active(peer_id, part_hint);
+                    for part_id in parts {
+                        self.stat_machine
+                            .mark_peer_part_cursor_active(peer_id, part_id);
+                    }
                 }
                 CursorMachineCommand::SetPartCursor { part_id, cursor } => {
                     let part = peer_state.parts.get_mut(&part_id).expect(ERROR_UNRECONIZED);
@@ -1125,23 +1167,53 @@ impl BigSyncMachine {
                         PeerPartStrategy::Cursor(state) => {
                             // we only update the peer part cursor
                             // in the cursor phase
-                            self.cmds.push(BigSyncMachineCommand::SetPartCursor {
-                                peer_id,
-                                part_id,
-                                cursor,
-                            });
+                            assert!(
+                                self.last_cmd
+                                    .replace(LastCmd(
+                                        BigSyncMachineCommand::SetPartCursor {
+                                            peer_id,
+                                            part_id,
+                                            cursor
+                                        },
+                                        None,
+                                        peer_id
+                                    ))
+                                    .is_none(),
+                                "double cmd"
+                            );
                             state.replay_cursor = cursor;
                         }
                         _ => unreachable!(),
                     }
                 }
-                CursorMachineCommand::RemoveObjFromPart { obj_id, part_id } => {
-                    self.cmds
-                        .push(BigSyncMachineCommand::RemoveObjFromPart { obj_id, part_id });
-                }
-                CursorMachineCommand::PartIdle { part_id } => {
-                    self.stat_machine.mark_peer_part_idle(peer_id, part_id);
-                }
+                CursorMachineCommand::RemoveObjFromPart {
+                    obj_id,
+                    part_id,
+                    cursor,
+                } => assert!(
+                    self.last_cmd
+                        .replace(LastCmd(
+                            BigSyncMachineCommand::RemoveObjFromPart { obj_id, part_id },
+                            Some(cursor),
+                            peer_id
+                        ))
+                        .is_none(),
+                    "double cmd"
+                ),
+                CursorMachineCommand::AddObjToPart {
+                    obj_id,
+                    part_id,
+                    cursor,
+                } => assert!(
+                    self.last_cmd
+                        .replace(LastCmd(
+                            BigSyncMachineCommand::AddObjToPart { obj_id, part_id },
+                            Some(cursor),
+                            peer_id
+                        ))
+                        .is_none(),
+                    "double cmd"
+                ),
             }
         }
     }
@@ -1196,8 +1268,16 @@ impl BigSyncMachine {
                     );
                 }
                 BucketMachineCommand::RemoveObjFromPart { obj_id, part_id } => {
-                    self.cmds
-                        .push(BigSyncMachineCommand::RemoveObjFromPart { obj_id, part_id });
+                    assert!(
+                        self.last_cmd
+                            .replace(LastCmd(
+                                BigSyncMachineCommand::RemoveObjFromPart { obj_id, part_id },
+                                None,
+                                peer_id
+                            ))
+                            .is_none(),
+                        "double cmd"
+                    );
                 }
                 BucketMachineCommand::ListBuckets {
                     offset,
@@ -1250,11 +1330,20 @@ impl BigSyncMachine {
                     };
                     assert!(old.active_list_tasks.is_empty());
                     assert!(old.active_leaf_tasks.is_empty());
-                    self.cmds.push(BigSyncMachineCommand::SetPartCursor {
-                        peer_id,
-                        part_id,
-                        cursor: old.replay_cursor,
-                    });
+                    assert!(
+                        self.last_cmd
+                            .replace(LastCmd(
+                                BigSyncMachineCommand::SetPartCursor {
+                                    peer_id,
+                                    part_id,
+                                    cursor: old.replay_cursor,
+                                },
+                                None,
+                                peer_id
+                            ))
+                            .is_none(),
+                        "double cmd"
+                    );
                     peer_state.parts.insert(
                         part_id,
                         PeerPartState {
@@ -1491,10 +1580,12 @@ impl BigSyncMachine {
                     PeerPartStrategy::Cursor(_state) => {}
                 }
             }
-            if !completion.cursors.is_empty() {
-                peer_state
-                    .cursor_machine
-                    .on_obj_sync_job_evt(&completion, &mut peer_state.cursors_cmd_buf);
+            for &cursor in &completion.cursors {
+                peer_state.cursor_machine.on_obj_sync_job_evt(
+                    completion.obj_id,
+                    cursor,
+                    &mut peer_state.cursors_cmd_buf,
+                );
             }
             (completion, part_hints)
         };

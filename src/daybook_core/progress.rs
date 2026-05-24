@@ -1105,9 +1105,9 @@ impl ProgressWorker {
         .fetch_one(&self.repo_sql.write_pool)
         .await?;
         if exists == 0 {
-            sqlx::query(&format!(
+            sqlx::query(sqlx::AssertSqlSafe(format!(
                 "ALTER TABLE progress_tasks ADD COLUMN {name} {ty}"
-            ))
+            )))
             .execute(&self.repo_sql.write_pool)
             .await?;
         }

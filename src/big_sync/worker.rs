@@ -2,13 +2,12 @@ use std::collections::VecDeque;
 
 use crate::interlude::*;
 
-use crate::part_store::ObjStoreLease;
 use crate::trap;
+use crate::SyncBackend;
 
-use big_sync_core::part_store::ObjPayload;
 use big_sync_core::{
-    mpsc, BigSyncEvent, BigSyncMachine, BigSyncMachineCommand, MachineTask, MachineTaskMsg, ObjId,
-    PartId, PeerId, SyncTask, SyncTaskCompletion, SyncTaskDeets, TaskCtx, TaskId,
+    mpsc, BigSyncEvent, BigSyncMachine, BigSyncMachineCommand, MachineTask, MachineTaskMsg, PartId,
+    PeerId, SyncTask, SyncTaskCompletion, SyncTaskDeets, TaskCtx, TaskId,
 };
 use rand::{rngs::StdRng, SeedableRng};
 
@@ -69,25 +68,13 @@ enum BigSyncWorkerMsg {
     }
 }
 
-#[async_trait]
-pub trait SyncBackend: Send + Sync + 'static {
-    async fn sync_obj(
-        &self,
-        peer_id: PeerId,
-        lease: ObjStoreLease,
-        obj_id: ObjId,
-        part_hints: Vec<PartId>,
-        remote_payload: Option<ObjPayload>,
-    ) -> Res<SyncTaskRunOutcome>;
-}
-
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum SyncTaskRunOutcome {
     Completion(SyncTaskCompletion),
     Stale,
 }
 
-pub type BackendId = u64;
+pub type BackendId = Arc<str>;
 
 pub struct StopToken {
     pub cancel_token: CancellationToken,
@@ -135,15 +122,6 @@ impl BigSyncWorkerHandle {
         &self,
     ) -> tokio::sync::broadcast::Receiver<big_sync_core::SyncStatEvent> {
         self.stats_tx.subscribe()
-    }
-
-    pub async fn set_sync_backend(
-        &self,
-        backend_id: BackendId,
-        backend: Arc<dyn SyncBackend>,
-    ) -> Res<()> {
-        let _ = (backend_id, backend);
-        eyre::bail!("set_sync_backend is not supported");
     }
 
     pub async fn set_peer(
@@ -378,7 +356,7 @@ struct BigSyncWorker {
     machine: BigSyncMachine,
 
     machine_spawn_queue: VecDeque<MachineTask>,
-    sync_spawn_queue: VecDeque<(SyncTask, ObjStoreLease)>,
+    sync_spawn_queue: VecDeque<SyncTask>,
 
     sync_rx: mpsc::Receiver<BigSyncEvent>,
     sync_tx: mpsc::Sender<BigSyncEvent>,
@@ -455,11 +433,16 @@ impl BigSyncWorker {
                     self.machine.handle_tick(std::time::Instant::now());
                 }
             };
-            for cmd in self.machine.drain_cmds() {
+            while let Some(cmd) = self.machine.get_cmd() {
                 match cmd {
                     BigSyncMachineCommand::RemoveObjFromPart { obj_id, part_id } => {
                         self.part_store
-                            .remove_obj_from_part(obj_id, part_id, None)
+                            .remove_obj_from_part(obj_id, part_id)
+                            .await?;
+                    }
+                    BigSyncMachineCommand::AddObjToPart { obj_id, part_id } => {
+                        self.part_store
+                            .add_obj_to_parts(obj_id, vec![part_id])
                             .await?;
                     }
                     BigSyncMachineCommand::SetPartCursor {
@@ -472,6 +455,7 @@ impl BigSyncWorker {
                             .await?;
                     }
                 }
+                self.machine.handle_cmd_success();
             }
 
             self.batch_stop_tasks().await?;
@@ -482,14 +466,13 @@ impl BigSyncWorker {
             }
 
             for task in self.machine.drain_sync_spawn_queue() {
-                let lease = self.part_store.get_obj_lease(task.deets.obj_id).await?;
-                self.sync_spawn_queue.push_front((task, lease));
+                self.sync_spawn_queue.push_front(task);
             }
             while self.sync_tasks.len() < MAX_ACTIVE_SYNC_TASKS {
-                let Some((task, lease)) = self.sync_spawn_queue.pop_front() else {
+                let Some(task) = self.sync_spawn_queue.pop_front() else {
                     break;
                 };
-                self.spawn_sync_task(task, lease).await?;
+                self.spawn_sync_task(task).await?;
             }
             self.sweep_finished_zombies();
             for event in self.machine.drain_stat_evts() {
@@ -512,10 +495,10 @@ impl BigSyncWorker {
                 parts,
                 resp,
             } => {
-                for (&part_id, &backend_id) in &parts {
-                    if !self.sync_backends.contains_key(&backend_id) {
+                for (&part_id, backend_id) in &parts {
+                    if !self.sync_backends.contains_key(backend_id) {
                         resp.send(Err(BigSyncWorkerError::UnknownBackend {
-                            backend_id,
+                            backend_id: Arc::clone(backend_id),
                             part_id,
                         }))
                         .inspect_err(|_| warn!(ERROR_CALLER))
@@ -724,7 +707,7 @@ impl BigSyncWorker {
         Ok(())
     }
 
-    async fn spawn_sync_task(&mut self, mut task: SyncTask, lease: ObjStoreLease) -> Res<()> {
+    async fn spawn_sync_task(&mut self, mut task: SyncTask) -> Res<()> {
         let peer_state = self
             .peers
             .get(&task.deets.peer_id)
@@ -743,15 +726,15 @@ impl BigSyncWorker {
         );
         let mut backend_id = None;
         for part_id in &part_ids {
-            let Some(&part_backend_id) = peer_state.parts.get(part_id) else {
+            let Some(part_backend_id) = peer_state.parts.get(part_id) else {
                 panic!(
                     "sync task requested unknown part {part_id:?} for peer {}",
                     task.deets.peer_id
                 );
             };
             match backend_id {
-                None => backend_id = Some(part_backend_id),
-                Some(existing) => assert_eq!(
+                None => backend_id = Some(Arc::clone(part_backend_id)),
+                Some(ref existing) => assert_eq!(
                     existing, part_backend_id,
                     "sync task parts mapped to different backend ids for peer {} obj {:?}",
                     task.deets.peer_id, task.deets.obj_id
@@ -777,7 +760,6 @@ impl BigSyncWorker {
         let worker = SyncTaskWorker {
             task: task.clone(),
             backend,
-            lease,
             host_tx: self.sync_tx.clone(),
             cancel_token: cancel_token.clone(),
         };
@@ -856,7 +838,6 @@ impl MachineTaskWorker {
 
 struct SyncTaskWorker {
     task: SyncTask,
-    lease: ObjStoreLease,
     backend: Arc<dyn SyncBackend>,
     host_tx: mpsc::Sender<BigSyncEvent>,
     cancel_token: CancellationToken,
@@ -889,7 +870,6 @@ impl SyncTaskWorker {
                 .backend
                 .sync_obj(
                     peer_id,
-                    self.lease,
                     obj_id,
                     part_hints.into_iter().collect(),
                     remote_payload,

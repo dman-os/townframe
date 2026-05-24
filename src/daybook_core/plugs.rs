@@ -1497,8 +1497,9 @@ impl PlugsRepo {
                 Self::validate_sha256_digest(&layer.digest, &layer_bytes)?;
             }
             let repo_hash = self.blobs.put(&layer_bytes).await?;
-            oci_digest_to_repo_hash.insert(layer.digest.clone(), repo_hash.clone());
-            imported_blob_hashes.push(repo_hash);
+            let repo_hash_str = crate::blobs::blob_hash_from_id(repo_hash);
+            oci_digest_to_repo_hash.insert(layer.digest.clone(), repo_hash_str.clone());
+            imported_blob_hashes.push(repo_hash_str);
             if layer.media_type == OCI_PLUG_MANIFEST_LAYER_MEDIA_TYPE {
                 if manifest_layer.is_some() {
                     eyre::bail!(
@@ -1622,7 +1623,7 @@ impl PlugsRepo {
                 );
                 let hash = component_url.path().trim_start_matches('/');
                 eyre::ensure!(!hash.is_empty(), "empty blob hash in plug manifest URL");
-                utils_rs::hash::decode_base58_multibase(hash)?;
+                hash.parse::<crate::blobs::BlobId>()?;
                 hashes.insert(hash.into());
             }
         }
@@ -1636,8 +1637,11 @@ impl PlugsRepo {
         next_hashes: &HashSet<Arc<str>>,
     ) -> Res<()> {
         for hash in next_hashes.difference(prev_hashes) {
+            let blob_id = hash
+                .parse::<crate::blobs::BlobId>()
+                .wrap_err("invalid blob id in plug manifest")?;
             self.blobs
-                .add_hash_to_scope(crate::blobs::BlobScope::Plugs, Arc::clone(hash))
+                .add_hash_to_scope(crate::blobs::BlobScope::Plugs, blob_id)
                 .await?;
         }
         for hash in prev_hashes.difference(next_hashes) {
@@ -1645,8 +1649,11 @@ impl PlugsRepo {
                 .is_blob_hash_referenced_by_any_plug_excluding(hash, plug_id)
                 .await
             {
+                let blob_id = hash
+                    .parse::<crate::blobs::BlobId>()
+                    .wrap_err("invalid blob id in plug manifest")?;
                 self.blobs
-                    .remove_hash_from_scope(crate::blobs::BlobScope::Plugs, Arc::clone(hash))
+                    .remove_hash_from_scope(crate::blobs::BlobScope::Plugs, blob_id)
                     .await?;
             }
         }
@@ -1922,7 +1929,15 @@ impl PlugsRepo {
                     },
                     scheme if scheme == crate::blobs::BLOB_SCHEME => {
                         let hash = url.path().trim_start_matches('/');
-                        if self.blobs.get_path(hash).await.is_err() {
+                        let blob_id = match hash.parse::<crate::blobs::BlobId>() {
+                            Ok(value) => value,
+                            Err(_) => {
+                                eyre::bail!(
+                                    "Blob not found in BlobsRepo for bundle {bundle_name:?}: {hash:?}",
+                                );
+                            }
+                        };
+                        if self.blobs.get_path(blob_id).await.is_err() {
                             eyre::bail!(
                                 "Blob not found in BlobsRepo for bundle {bundle_name:?}: {hash:?}",
                             );
@@ -2982,7 +2997,10 @@ mod tests {
 
         // Verify the blob exists and contains the correct content
         let hash = converted_url.path().trim_start_matches('/');
-        let blob_path = repo.blobs.get_path(hash).await?;
+        let blob_path = repo
+            .blobs
+            .get_path(hash.parse::<crate::blobs::BlobId>()?)
+            .await?;
         let blob_content = tokio::fs::read(&blob_path).await?;
         assert_eq!(blob_content, wasm_content);
 
@@ -2992,7 +3010,7 @@ mod tests {
     #[tokio::test(flavor = "multi_thread")]
     async fn test_plug_blob_scope_partition_tracks_add_and_remove() -> Res<()> {
         let (_big_repo, part_store, repo, _doc_id, _temp_dir) = setup_repo().await?;
-        let partition_id = crate::blobs::BLOB_SCOPE_PLUGS_PARTITION_ID.into();
+        let partition_id = crate::part_id_from_label(crate::blobs::BLOB_SCOPE_PLUGS_PARTITION_ID);
 
         let temp_dir = tempfile::tempdir()?;
         let temp_path = temp_dir.path().join("component.wasm");
@@ -3022,21 +3040,23 @@ mod tests {
             .map(|url| url.path().trim_start_matches('/').to_string())
             .ok_or_eyre("expected converted blob URL in bundle1")?;
         assert_eq!(part_store.member_count(partition_id).await?, 1);
-        assert!(
+        assert_eq!(
             part_store
-                .is_item_member_of_partitions(&hash, &[Arc::clone(partition_id)],)
-                .await?
+                .obj_parts(crate::blobs::blob_id_from_hash(&hash))
+                .await?,
+            vec![partition_id]
         );
 
         let mut plug_update = mock_plug("scope-membership");
         plug_update.version = "0.2.0".parse().unwrap();
         repo.add(plug_update).await?;
 
-        assert_eq!(part_store.member_count(&partition_id).await?, 0);
-        assert!(
-            !part_store
-                .is_item_member_of_partitions(&hash, &[Arc::clone(partition_id)],)
-                .await?
+        assert_eq!(part_store.member_count(partition_id).await?, 0);
+        assert_eq!(
+            part_store
+                .obj_parts(crate::blobs::blob_id_from_hash(&hash))
+                .await?,
+            Vec::<PartId>::new()
         );
         Ok(())
     }

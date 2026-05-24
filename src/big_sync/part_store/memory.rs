@@ -1,5 +1,4 @@
 use crate::interlude::*;
-use crate::part_store::{ObjStoreLease, StoreMutationOutcome};
 
 use big_sync_core::part_store::{CursorIndex, ObjPayload};
 use big_sync_core::rpc::{
@@ -30,48 +29,43 @@ structstruck::strike! {
                     #[derive(Default)]
                     struct GlobalCursor {
                         counter: std::sync::atomic::AtomicU64,
-                        event_to_part: BTreeMap<CursorIndex, PartId>,
                     },
                 parts: HashMap<
                     PartId,
                     struct PartState {
                         #![derive(Default)]
                         latest_cursor: CursorIndex,
-
-                        events: BTreeMap<CursorIndex, PartEvent>,
-
                         members: BTreeMap<
                             ObjId,
                             #[derive(Clone)]
                             struct PartMemberState {
-                                payload: Option<ObjPayload>,
+                                added_at: CursorIndex,
                                 changed_at: CursorIndex,
                                 removed_at: Option<CursorIndex>,
                             }
                         >,
                         bucket_stats: BTreeMap<BuckId, BucketSummaryState>,
-
-                        bus: struct MemorySubsBus {
-                            #![derive(Default)]
-                            events_to_drop: Vec<CursorIndex>,
-                            buf: Vec<PartEvent>,
-                            subs_to_drop: Vec<usize>,
-                            subs: Vec<big_sync_core::mpsc::Sender<SubEvent>>
-                        },
                     }
                 >,
+                events: BTreeMap<CursorIndex, PartEvent>,
+                bus: struct MemorySubsBus {
+                    #![derive(Default)]
+                    events_to_drop: Vec<CursorIndex>,
+                    buf: Vec<PartEvent>,
+                    subs_to_drop: Vec<Uuid>,
+                    subs_by_part: HashMap<PartId, HashSet<Uuid>>,
+                    part_by_sub: HashMap<Uuid, HashSet<PartId>>,
+                    subs: HashMap<Uuid, big_sync_core::mpsc::Sender<SubEvent>>
+                },
                 objs: HashMap<
                     ObjId,
                     struct ObjDeets {
                         #![derive(Default)]
                         payload: Option<ObjPayload>,
                         parts: HashSet<PartId>,
-                        sync_version: u64,
-                        lease: Option<ObjStoreLease>,
                     }
                 >,
-                lease_counter: std::sync::atomic::AtomicU64,
-                tombstoned_objs: HashMap<ObjId, (CursorIndex, u64)>,
+                tombstoned_objs: HashMap<ObjId, CursorIndex>,
                 peer_obj_payloads: HashMap<(PeerId, ObjId), Option<ObjPayload>>,
                 peer_part_cursors: HashMap<(PeerId, PartId), CursorIndex>,
             }
@@ -197,32 +191,65 @@ impl PartState {
             agg.apply_transition(buck_id, obj_id, cursor, old, new);
         }
     }
-
-    fn flush(&mut self, global_cursor: &mut GlobalCursor) {
+}
+impl MemoryPartStoreScopeState {
+    fn flush(&mut self) {
         for ii in self.bus.events_to_drop.drain(..) {
             self.events.remove(&ii);
-            global_cursor.drop_cur(ii);
         }
         for evt in self.bus.buf.drain(..) {
-            let (cursor, sub_evt) = match &evt {
-                PartEvent::Upserted(inner) => (inner.cursor, SubEvent::Upserted(inner.clone())),
-                PartEvent::Deleted(inner) => (inner.cursor, SubEvent::Deleted(inner.clone())),
+            let (parts, cursor, sub_evt) = match &evt {
+                // PartEvent::Upserted(inner) => (inner.cursor, SubEvent::Upserted(inner.clone())),
+                // PartEvent::Deleted(inner) => (inner.cursor, SubEvent::Deleted(inner.clone())),
+                PartEvent::Changed(inner) => (
+                    inner.part_ids.clone(),
+                    inner.cursor,
+                    SubEvent::Changed(inner.clone()),
+                ),
+                PartEvent::Added(inner) => (
+                    vec![inner.part_id],
+                    inner.cursor,
+                    SubEvent::Added(inner.clone()),
+                ),
+                PartEvent::Removed(inner) => (
+                    vec![inner.part_id],
+                    inner.cursor,
+                    SubEvent::Removed(inner.clone()),
+                ),
             };
-            self.events.insert(cursor, evt);
-            for (ii, sub) in self.bus.subs.iter().enumerate() {
-                if sub.try_send(sub_evt.clone()).is_err() {
-                    self.bus.subs_to_drop.push(ii)
+            for part_id in parts {
+                let Some(subs) = self.bus.subs_by_part.get(&part_id) else {
+                    continue;
+                };
+                for sub_id in subs {
+                    let sub = self.bus.subs.get(sub_id).expect(ERROR_IMPOSSIBLE);
+                    if sub.try_send(sub_evt.clone()).is_err() {
+                        self.bus.subs_to_drop.push(*sub_id)
+                    }
                 }
             }
+            self.events.insert(cursor, evt);
             self.bus.subs_to_drop.sort_unstable();
             self.bus.subs_to_drop.dedup();
             self.bus.subs_to_drop.reverse();
-            for ii in self.bus.subs_to_drop.drain(..) {
-                self.bus.subs.swap_remove(ii);
+            for sub_id in self.bus.subs_to_drop.drain(..) {
+                self.bus.subs.remove(&sub_id);
+                let parts = self
+                    .bus
+                    .part_by_sub
+                    .remove(&sub_id)
+                    .expect(ERROR_IMPOSSIBLE);
+                for part_id in parts {
+                    let Some(set) = self.bus.subs_by_part.get_mut(&part_id) else {
+                        continue;
+                    };
+                    set.remove(&sub_id);
+                }
             }
         }
     }
 }
+
 impl MemorySubsBus {
     fn queue_evt(&mut self, evt: PartEvent) {
         self.buf.push(evt);
@@ -232,17 +259,12 @@ impl MemorySubsBus {
     }
 }
 impl GlobalCursor {
-    fn get(&mut self, part_id: PartId) -> CursorIndex {
+    fn get(&mut self) -> CursorIndex {
         let ii = self
             .counter
             .fetch_add(1, std::sync::atomic::Ordering::SeqCst)
             + 1;
-        self.event_to_part.insert(ii, part_id);
         ii
-    }
-
-    fn drop_cur(&mut self, ii: CursorIndex) {
-        self.event_to_part.remove(&ii);
     }
 }
 
@@ -407,122 +429,54 @@ impl HostPartStore for MemoryPartStore {
         })
     }
 
-    async fn get_obj_lease(&self, obj_id: ObjId) -> Res<ObjStoreLease> {
-        surelock::key::lock_scope(|key| {
-            let (mut guard, _key) = key.lock(&self.inner);
-            let guard = &mut *guard;
-            let obj_state = guard.objs.entry(obj_id).or_default();
-            let lease = guard
-                .lease_counter
-                .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
-            obj_state.lease = Some(lease);
-            Ok(lease)
-        })
-    }
-    async fn upsert_obj(
-        &self,
-        obj_id: ObjId,
-        payload: ObjPayload,
-        parts: Vec<PartId>,
-        lease: Option<ObjStoreLease>,
-    ) -> Res<StoreMutationOutcome> {
-        tracing::debug!(obj_id = %obj_id, part_count = parts.len(), "memory store upsert obj");
+    async fn set_obj_payload(&self, obj_id: ObjId, payload: ObjPayload) -> Res<()> {
         surelock::key::lock_scope(|key| {
             let (mut guard, _key) = key.lock(&self.inner);
             let guard = &mut *guard;
             guard.tombstoned_objs.remove(&obj_id);
             let obj_state = guard.objs.entry(obj_id).or_default();
-            if let Some(lease) = lease {
-                if Some(lease) != obj_state.lease {
-                    return Ok(StoreMutationOutcome::Stale);
-                }
-            }
-            obj_state.lease = None;
             let event_payload = payload.clone();
             obj_state.payload = Some(payload);
-            obj_state.parts.extend(&parts);
 
-            for &part_id in &parts {
+            let cursor = guard.global_cursor.get();
+            for &part_id in &obj_state.parts {
                 let part = guard.parts.entry(part_id).or_default();
-                let cursor = guard.global_cursor.get(part_id);
-                let old_state = part.members.get(&obj_id).cloned();
-                let old_kind = match old_state.as_ref() {
-                    Some(state) if state.removed_at.is_some() => BucketMemberKind::Dead,
-                    Some(state) => BucketMemberKind::Live(
-                        state
-                            .payload
-                            .as_ref()
-                            .expect("live member must still have payload"),
-                    ),
-                    None => BucketMemberKind::Absent,
-                };
-                part.apply_bucket_transition(
-                    obj_id,
-                    cursor,
-                    old_kind,
-                    BucketMemberKind::Live(&event_payload),
-                );
-                if let Some(old) = part.members.get_mut(&obj_id) {
-                    if let Some(old_removed_at) = old.removed_at.take() {
-                        part.bus.remove_evt(old_removed_at);
-                    } else {
-                        part.bus.remove_evt(old.changed_at);
-                    }
-                    old.changed_at = cursor;
-                    old.payload = Some(event_payload.clone());
-                } else {
-                    part.members.insert(
-                        obj_id,
-                        PartMemberState {
-                            payload: Some(event_payload.clone()),
-                            changed_at: cursor,
-                            removed_at: None,
-                        },
-                    );
-                }
+                let part_obj_state = part.members.get_mut(&obj_id).expect(ERROR_IMPOSSIBLE);
+                assert!(part_obj_state.removed_at.is_none());
+                part_obj_state.changed_at = cursor;
                 part.latest_cursor = cursor;
-                part.bus
-                    .queue_evt(PartEvent::Upserted(big_sync_core::rpc::ObjUpserted {
-                        cursor,
-                        part_id,
-                        obj_id,
-                        payload: event_payload.clone(),
-                    }));
-                part.flush(&mut guard.global_cursor);
             }
-            Ok(StoreMutationOutcome::Applied)
+            guard
+                .bus
+                .queue_evt(PartEvent::Changed(big_sync_core::rpc::ObjChanged {
+                    cursor,
+                    part_ids: obj_state.parts.iter().copied().collect(),
+                    obj_id,
+                    payload: event_payload.clone(),
+                }));
+            guard.flush();
+            Ok(())
         })
     }
-    async fn add_obj_to_parts(
-        &self,
-        obj_id: ObjId,
-        parts: Vec<PartId>,
-        lease: Option<ObjStoreLease>,
-    ) -> Res<StoreMutationOutcome> {
+    async fn add_obj_to_parts(&self, obj_id: ObjId, parts: Vec<PartId>) -> Res<()> {
         tracing::debug!(obj_id = %obj_id, part_count = parts.len(), "memory store add obj to parts");
         surelock::key::lock_scope(|key| {
             let (mut guard, _key) = key.lock(&self.inner);
             let guard = &mut *guard;
             let obj_state = guard.objs.entry(obj_id).or_default();
-            if let Some(lease) = lease {
-                if Some(lease) != obj_state.lease {
-                    return Ok(StoreMutationOutcome::Stale);
-                }
-            }
-            obj_state.lease = None;
 
             guard.tombstoned_objs.remove(&obj_id);
             let payload = obj_state.payload.clone().expect(ERROR_IMPOSSIBLE);
             obj_state.parts.extend(&parts);
+            let cursor = guard.global_cursor.get();
             for &part_id in &parts {
                 let part = guard.parts.entry(part_id).or_default();
-                let cursor = guard.global_cursor.get(part_id);
                 let old_state = part.members.get(&obj_id).cloned();
                 match old_state {
                     Some(state) if state.removed_at.is_none() => continue,
                     Some(state) => {
                         if let Some(old_removed_at) = state.removed_at {
-                            part.bus.remove_evt(old_removed_at);
+                            guard.bus.remove_evt(old_removed_at);
                         }
                         part.apply_bucket_transition(
                             obj_id,
@@ -533,7 +487,6 @@ impl HostPartStore for MemoryPartStore {
                         if let Some(old) = part.members.get_mut(&obj_id) {
                             old.changed_at = cursor;
                             old.removed_at = None;
-                            old.payload = Some(payload.clone());
                         }
                     }
                     None => {
@@ -546,7 +499,7 @@ impl HostPartStore for MemoryPartStore {
                         part.members.insert(
                             obj_id,
                             PartMemberState {
-                                payload: Some(payload.clone()),
+                                added_at: cursor,
                                 changed_at: cursor,
                                 removed_at: None,
                             },
@@ -554,53 +507,43 @@ impl HostPartStore for MemoryPartStore {
                     }
                 }
                 part.latest_cursor = cursor;
-                part.bus
-                    .queue_evt(PartEvent::Upserted(big_sync_core::rpc::ObjUpserted {
+                guard
+                    .bus
+                    .queue_evt(PartEvent::Added(big_sync_core::rpc::ObjAddedToPart {
                         cursor,
                         part_id,
                         obj_id,
-                        payload: payload.clone(),
                     }));
-                part.flush(&mut guard.global_cursor);
             }
-            Ok(StoreMutationOutcome::Applied)
+            guard.flush();
+            Ok(())
         })
     }
-    async fn remove_obj_from_part(
-        &self,
-        obj_id: ObjId,
-        part_id: PartId,
-        lease: Option<ObjStoreLease>,
-    ) -> Res<StoreMutationOutcome> {
+    async fn remove_obj_from_part(&self, obj_id: ObjId, part_id: PartId) -> Res<()> {
         tracing::debug!(obj_id = %obj_id, part_id = %part_id, "memory store remove obj from part");
         surelock::key::lock_scope(|key| {
             let (mut guard, _key) = key.lock(&self.inner);
             let guard = &mut *guard;
 
             let Some(obj_state) = guard.objs.get_mut(&obj_id) else {
-                return Ok(StoreMutationOutcome::Applied);
+                return Ok(());
             };
-            if let Some(lease) = lease {
-                if Some(lease) != obj_state.lease {
-                    return Ok(StoreMutationOutcome::Stale);
-                }
-            }
-            obj_state.lease = None;
 
             let part = guard.parts.entry(part_id).or_default();
             let Some(old_state) = part.members.get(&obj_id).cloned() else {
-                return Ok(StoreMutationOutcome::Applied);
+                return Ok(());
             };
             if old_state.removed_at.is_some() {
-                return Ok(StoreMutationOutcome::Applied);
+                return Ok(());
             }
-            let cursor = guard.global_cursor.get(part_id);
-            let old_payload = old_state
+            let cursor = guard.global_cursor.get();
+            let old_payload = obj_state
                 .payload
                 .as_ref()
                 .expect("live member must still have payload");
             if let Some(old) = part.members.get_mut(&obj_id) {
-                part.bus.remove_evt(old.changed_at);
+                guard.bus.remove_evt(old.changed_at);
+                guard.bus.remove_evt(old.added_at);
                 old.removed_at = Some(cursor);
                 old.changed_at = cursor;
             }
@@ -612,24 +555,22 @@ impl HostPartStore for MemoryPartStore {
             );
             part.latest_cursor = cursor;
             obj_state.parts.remove(&part_id);
-            obj_state.sync_version += 1;
-            part.bus
-                .queue_evt(PartEvent::Deleted(big_sync_core::rpc::ObjRemoved {
+            guard
+                .bus
+                .queue_evt(PartEvent::Removed(big_sync_core::rpc::ObjRemovedFromPart {
                     cursor,
                     part_id,
                     obj_id,
                 }));
             if obj_state.parts.is_empty() {
                 let cursor = part.latest_cursor;
-                guard
-                    .tombstoned_objs
-                    .insert(obj_id, (cursor, obj_state.sync_version));
+                guard.tombstoned_objs.insert(obj_id, cursor);
                 guard.objs.remove(&obj_id);
             }
 
-            part.flush(&mut guard.global_cursor);
+            guard.flush();
 
-            Ok(StoreMutationOutcome::Applied)
+            Ok(())
         })
     }
 
@@ -672,20 +613,12 @@ impl HostPartStore for MemoryPartStore {
             for part_id in parts {
                 let mut next_cursor = None;
                 let mut events = vec![];
-                let Some(part) = guard.parts.get(&part_id) else {
-                    return Err(ListPartsError::UnkownParts {
-                        unkown_parts: vec![part_id],
-                    });
-                };
-                for (&ii, evt) in part.events.range(cursor.saturating_add(1)..) {
+                for (&ii, evt) in guard.events.range(cursor.saturating_add(1)..) {
                     if events.len() >= limit as usize {
                         next_cursor = Some(ii);
                         break;
                     }
-                    events.push(match evt {
-                        PartEvent::Upserted(inner) => PartEvent::Upserted(inner.clone()),
-                        PartEvent::Deleted(inner) => PartEvent::Deleted(inner.clone()),
-                    })
+                    events.push(evt.clone())
                 }
                 out.insert(
                     part_id,
@@ -748,18 +681,20 @@ impl HostPartStore for MemoryPartStore {
                     let (mut guard, _key) = key.lock(&state);
                     let guard = &mut *guard;
 
-                    for (&ii, part_id) in guard.global_cursor.event_to_part.range(cursor..) {
+                    for (&ii, evt) in guard.events.range(cursor..) {
                         if events.len() >= limit {
                             next_cursor = ii + 1;
                             break;
                         }
-                        let part = guard.parts.get(part_id).expect(ERROR_IMPOSSIBLE);
-                        let evt = part.events.get(&ii).expect(ERROR_UNRECONIZED);
-                        if parts.contains(part_id) {
-                            events.push(match evt {
-                                PartEvent::Upserted(inner) => PartEvent::Upserted(inner.clone()),
-                                PartEvent::Deleted(inner) => PartEvent::Deleted(inner.clone()),
-                            })
+                        let push = match evt {
+                            PartEvent::Changed(inner) => {
+                                inner.part_ids.iter().any(|id| parts.contains(id))
+                            }
+                            PartEvent::Added(inner) => parts.contains(&inner.part_id),
+                            PartEvent::Removed(inner) => parts.contains(&inner.part_id),
+                        };
+                        if push {
+                            events.push(evt.clone())
                         }
                         next_cursor = ii + 1;
                     }
@@ -768,8 +703,9 @@ impl HostPartStore for MemoryPartStore {
                 for evt in events.drain(..) {
                     if tx
                         .send(match evt {
-                            PartEvent::Upserted(inner) => SubEvent::Upserted(inner.clone()),
-                            PartEvent::Deleted(inner) => SubEvent::Deleted(inner.clone()),
+                            PartEvent::Changed(inner) => SubEvent::Changed(inner),
+                            PartEvent::Added(inner) => SubEvent::Added(inner),
+                            PartEvent::Removed(inner) => SubEvent::Removed(inner),
                         })
                         .await
                         .is_err()
@@ -786,10 +722,13 @@ impl HostPartStore for MemoryPartStore {
                 let (mut guard, _key) = key.lock(&state);
                 let guard = &mut *guard;
 
-                for part_id in parts {
-                    let part = guard.parts.get_mut(&part_id).expect(ERROR_IMPOSSIBLE);
-                    part.bus.subs.push(tx.clone());
+                let sub_id = Uuid::new_v4();
+                guard.bus.subs.insert(sub_id, tx);
+                for &part_id in &parts {
+                    let subs = guard.bus.subs_by_part.entry(part_id).or_default();
+                    subs.insert(sub_id);
                 }
+                guard.bus.part_by_sub.insert(sub_id, parts);
             });
         };
         tokio::spawn(fut);

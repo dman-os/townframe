@@ -52,7 +52,8 @@ impl SqlCtx {
         .await?;
 
         Ok(Self {
-            write_pool: db_pool,
+            write_pool: db_pool.clone(),
+            read_pool: db_pool,
         })
     }
 }

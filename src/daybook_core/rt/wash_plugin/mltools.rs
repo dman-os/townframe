@@ -85,6 +85,10 @@ impl mltools_embed::Host for SharedWashCtx {
             Ok(value) => value,
             Err(err) => return Ok(Err(err)),
         };
+        let blob_id = match blob_hash.parse::<crate::blobs::BlobId>() {
+            Ok(value) => value,
+            Err(err) => return Ok(Err(err.to_string())),
+        };
         let requested_ext = match extension_for_blob_mime(blob.mime.as_str()) {
             Ok(value) => value,
             Err(err) => return Ok(Err(err)),
@@ -92,7 +96,7 @@ impl mltools_embed::Host for SharedWashCtx {
         let image_path = match plugin
             .blobs_repo
             .materialize(
-                &blob_hash,
+                blob_id,
                 crate::blobs::BlobMaterializeRequest::Extension(requested_ext.to_string()),
             )
             .await

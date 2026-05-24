@@ -583,7 +583,7 @@ async fn boot_big_repo(
         storage: big_repo::StorageConfig::Disk {
             path: layout.samod_root.clone(),
         },
-        peer_id: identity.iroh_public_key.into(),
+        peer_id: PeerId::new(*identity.iroh_public_key.as_bytes()),
         secret_key_bytes: identity.iroh_secret_key.to_bytes(),
     };
     let (big_repo, big_repo_stop) = big_repo::BigRepo::boot(am_config, partition_store).await?;
@@ -642,27 +642,22 @@ pub(crate) async fn ensure_expected_partitions_for_docs(
     doc_app_id: DocumentId,
     doc_drawer_id: DocumentId,
 ) -> Res<()> {
-    for partition_id in [
-        crate::drawer::DrawerRepo::replicated_partition_id_for_drawer(doc_drawer_id),
-        crate::sync::CORE_DOCS_PARTITION_ID.into(),
-        crate::blobs::BLOB_SCOPE_DOCS_PARTITION_ID.into(),
-        crate::blobs::BLOB_SCOPE_PLUGS_PARTITION_ID.into(),
-        crate::rt::PROCESSOR_RUNLOG_PARTITION_ID.into(),
-    ] {
-        partition_store.ensure_partition(&partition_id).await?;
-    }
+    let core_docs_partition_id = crate::part_id_from_label(crate::sync::CORE_DOCS_PARTITION_ID);
+
     partition_store
-        .upsert_item(
-            doc_drawer_id.to_string().into(),
-            &serde_json::json!({}),
-            &[crate::sync::CORE_DOCS_PARTITION_ID.into()],
+        .set_obj_payload(
+            doc_drawer_id,
+            serde_json::json!({}),
+            vec![core_docs_partition_id],
+            None,
         )
         .await?;
     partition_store
-        .upsert_item(
-            doc_app_id.to_string().into(),
-            &serde_json::json!({}),
-            &[crate::sync::CORE_DOCS_PARTITION_ID.into()],
+        .set_obj_payload(
+            doc_app_id,
+            serde_json::json!({}),
+            vec![core_docs_partition_id],
+            None,
         )
         .await?;
     Ok(())

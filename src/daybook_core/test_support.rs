@@ -1,14 +1,16 @@
 use crate::interlude::*;
 use automerge::transaction::Transactable;
 
-use big_repo::{BigRepo, BigRepoStopToken, SharedBigRepo, SharedPartStore};
+use big_repo::{BigRepo, SharedBigRepo};
 use sqlx::sqlite::SqliteConnectOptions;
+use std::str::FromStr;
 
 use crate::drawer::DrawerRepo;
 use crate::plugs::PlugsRepo;
 
 pub struct DaybookTestContext {
     pub _acx: SharedBigRepo,
+    pub big_sync_stop: big_sync::StopToken,
     pub drawer_repo: Arc<DrawerRepo>,
     pub dispatch_repo: Arc<crate::rt::dispatch::DispatchRepo>,
     pub _config_repo: Arc<crate::config::ConfigRepo>,
@@ -19,7 +21,6 @@ pub struct DaybookTestContext {
     pub progress_stop: crate::repos::RepoStopToken,
     pub init_stop: crate::repos::RepoStopToken,
     pub sqlite_local_state_stop: crate::repos::RepoStopToken,
-    pub acx_stop: BigRepoStopToken,
     pub rt_stop: crate::rt::RtStopToken,
     pub rt: Arc<crate::rt::Rt>,
     pub _temp_dir: tempfile::TempDir,
@@ -109,6 +110,7 @@ impl DaybookTestContext {
 
     pub async fn stop(self) -> Res<()> {
         self.rt_stop.stop().await?;
+        Arc::clone(&self.rt.rcx).shutdown().await?;
         self.drawer_stop.stop().await?;
         self.progress_stop.stop().await?;
         self.dispatch_stop.stop().await?;
@@ -116,7 +118,7 @@ impl DaybookTestContext {
         self.plugs_stop.stop().await?;
         self.init_stop.stop().await?;
         self.sqlite_local_state_stop.stop().await?;
-        self.acx_stop.stop().await?;
+        self.big_sync_stop.stop().await?;
         Ok(())
     }
 }
@@ -172,6 +174,7 @@ pub async fn test_cx_with_options(
     let local_user_path = daybook_types::doc::UserPathBuf::from("/test-user");
     let local_actor_id = daybook_types::doc::user_path::to_actor_id(&local_user_path);
     let temp_dir = tempfile::tempdir()?;
+    let part_store = Arc::clone(&big_sync_host.store);
     let blobs = crate::blobs::BlobsRepo::new(
         temp_dir.path().join("blobs"),
         local_user_path.clone(),
@@ -287,9 +290,8 @@ pub async fn test_cx_with_options(
             lock_guard,
             sql: sql_ctx.clone(),
             part_store: Arc::clone(&part_store),
-            partition_store_stop: part_store_stop,
             big_repo: Arc::clone(&big_repo),
-            big_repo_stop: std::sync::Mutex::new(None),
+            big_repo_stop: std::sync::Mutex::new(Some(acx_stop)),
             local_peer_key,
             local_actor_id: local_actor_id.clone(),
             local_user_path: local_user_path.clone(),
@@ -340,6 +342,7 @@ pub async fn test_cx_with_options(
 
     Ok(DaybookTestContext {
         _acx: big_repo,
+        big_sync_stop,
         drawer_repo,
         rt,
         dispatch_repo,
@@ -351,7 +354,6 @@ pub async fn test_cx_with_options(
         progress_stop,
         init_stop,
         sqlite_local_state_stop,
-        acx_stop,
         rt_stop,
         _temp_dir: temp_dir,
     })

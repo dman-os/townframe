@@ -465,10 +465,13 @@ impl DocBlobsIndexRepo {
     ) -> Res<()> {
         const MAX_ATTEMPTS: usize = 3;
         for hash in hashes_to_add {
+            let blob_id = hash
+                .parse::<crate::blobs::BlobId>()
+                .wrap_err("invalid blob id in doc blob delta")?;
             for attempt in 1..=MAX_ATTEMPTS {
                 let result = self
                     .blobs_repo
-                    .add_hash_to_scope(BlobScope::Docs, Arc::clone(hash))
+                    .add_hash_to_scope(BlobScope::Docs, blob_id)
                     .await;
                 match result {
                     Ok(()) => break,
@@ -480,10 +483,13 @@ impl DocBlobsIndexRepo {
             }
         }
         for hash in hashes_to_remove {
+            let blob_id = hash
+                .parse::<crate::blobs::BlobId>()
+                .wrap_err("invalid blob id in doc blob delta")?;
             for attempt in 1..=MAX_ATTEMPTS {
                 let result = self
                     .blobs_repo
-                    .remove_hash_from_scope(BlobScope::Docs, Arc::clone(hash))
+                    .remove_hash_from_scope(BlobScope::Docs, blob_id)
                     .await;
                 match result {
                     Ok(()) => break,
@@ -783,7 +789,7 @@ fn parse_db_blob_hash(raw_url: &str) -> Option<String> {
     if hash.is_empty() {
         return None;
     }
-    if utils_rs::hash::decode_base58_multibase(hash).is_err() {
+    if hash.parse::<crate::blobs::BlobId>().is_err() {
         return None;
     }
     Some(hash.to_string())
@@ -898,6 +904,7 @@ mod tests {
     use super::*;
     use crate::e2e::test_cx;
     use crate::repos::SubscribeOpts;
+    use big_repo::SharedPartStore;
     use daybook_types::doc::{AddDocArgs, FacetRaw};
 
     async fn wait_for_hash(repo: &DocBlobsIndexRepo, doc_id: &DocId, hash: &str) -> Res<()> {
@@ -913,9 +920,9 @@ mod tests {
     }
 
     async fn wait_for_partition_member_count(
-        part_store: &Arc<am_utils_rs::partition::PartitionStore>,
-        partition_id: &Arc<str>,
-        expected: i64,
+        part_store: &SharedPartStore,
+        partition_id: PartId,
+        expected: u64,
     ) -> Res<()> {
         let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(10);
         while tokio::time::Instant::now() < deadline {
@@ -1060,7 +1067,7 @@ mod tests {
         )
         .await?;
 
-        let partition_id: Arc<str> = crate::blobs::BLOB_SCOPE_DOCS_PARTITION_ID.into();
+        let partition_id = crate::part_id_from_label(crate::blobs::BLOB_SCOPE_DOCS_PARTITION_ID);
         let hash = utils_rs::hash::encode_base58_multibase(b"docs-scope-hash");
         let doc_id = drawer_repo
             .add(AddDocArgs {
@@ -1087,19 +1094,21 @@ mod tests {
         repo.enqueue_upsert(doc_id.clone(), BranchPathBuf::from("main"), heads)?;
 
         wait_for_partition_member_count(&part_store, &partition_id, 1).await?;
-        assert!(
+        assert_eq!(
             part_store
-                .is_item_member_of_partitions(&hash, &[Arc::clone(&partition_id)],)
-                .await?
+                .obj_parts(crate::blobs::blob_id_from_hash(&hash))
+                .await?,
+            vec![partition_id]
         );
 
         drawer_repo.del(&doc_id).await?;
         repo.enqueue_delete(doc_id.clone())?;
         wait_for_partition_member_count(&part_store, &partition_id, 0).await?;
-        assert!(
+        assert_eq!(
             part_store
-                .is_item_member_of_partitions(&hash, &[Arc::clone(&partition_id)],)
-                .await?
+                .obj_parts(crate::blobs::blob_id_from_hash(&hash))
+                .await?,
+            Vec::<PartId>::new()
         );
 
         repo_stop.stop().await?;

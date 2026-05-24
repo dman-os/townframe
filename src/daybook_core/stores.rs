@@ -1,7 +1,10 @@
 use crate::interlude::*;
 
-use am_utils_rs::BigDocHandle;
 use automerge::ActorId;
+use big_repo::{
+    BigDocHandle, BigRepoChangeFilter, BigRepoChangeListenerRegistration,
+    BigRepoChangeNotification, BigRepoDocIdFilter,
+};
 use futures::future::BoxFuture;
 
 #[async_trait]
@@ -46,8 +49,8 @@ pub trait AmStore: Hydrate + Reconcile + Send + Sync + 'static {
         doc_id: &DocumentId,
         path: Vec<autosurgeon::Prop<'static>>,
     ) -> Res<(
-        am_utils_rs::repo::BigRepoChangeListenerRegistration,
-        tokio::sync::mpsc::UnboundedReceiver<Vec<am_utils_rs::repo::BigRepoChangeNotification>>,
+        BigRepoChangeListenerRegistration,
+        tokio::sync::mpsc::UnboundedReceiver<Vec<BigRepoChangeNotification>>,
     )> {
         Self::register_change_listener_for_prop(big_repo, doc_id, Self::prop(), path).await
     }
@@ -58,14 +61,14 @@ pub trait AmStore: Hydrate + Reconcile + Send + Sync + 'static {
         prop: Cow<'static, str>,
         mut path: Vec<autosurgeon::Prop<'static>>,
     ) -> Res<(
-        am_utils_rs::repo::BigRepoChangeListenerRegistration,
-        tokio::sync::mpsc::UnboundedReceiver<Vec<am_utils_rs::repo::BigRepoChangeNotification>>,
+        BigRepoChangeListenerRegistration,
+        tokio::sync::mpsc::UnboundedReceiver<Vec<BigRepoChangeNotification>>,
     )> {
         path.insert(0, prop.into());
         big_repo
-            .subscribe_change_listener(am_utils_rs::repo::BigRepoChangeFilter {
+            .subscribe_change_listener(BigRepoChangeFilter {
                 path,
-                doc_id: Some(am_utils_rs::repo::BigRepoDocIdFilter::new(*doc_id)),
+                doc_id: Some(BigRepoDocIdFilter::new(*doc_id)),
                 origin: None,
             })
             .await

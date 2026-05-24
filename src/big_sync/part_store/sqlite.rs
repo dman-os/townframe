@@ -675,7 +675,7 @@ impl HostPartStore for SqlitePartStore {
             .transpose()
     }
 
-    async fn upsert_obj(
+    async fn set_obj_payload(
         &self,
         obj_id: ObjId,
         payload: ObjPayload,
@@ -1189,11 +1189,13 @@ impl HostPartStore for SqlitePartStore {
         }
 
         tx.commit().await?;
-        self.publish(vec![SubEvent::Deleted(big_sync_core::rpc::ObjRemoved {
-            cursor,
-            part_id,
-            obj_id,
-        })]);
+        self.publish(vec![SubEvent::Deleted(
+            big_sync_core::rpc::ObjRemovedFromPart {
+                cursor,
+                part_id,
+                obj_id,
+            },
+        )]);
         Ok(StoreMutationOutcome::Applied)
     }
 
@@ -1284,7 +1286,7 @@ impl HostPartStore for SqlitePartStore {
                 let removed_after_change = removed_at
                     .is_some_and(|removed_at| removed_at >= changed_at && removed_at == row_cursor);
                 events.push(if removed_after_change {
-                    PartEvent::Deleted(big_sync_core::rpc::ObjRemoved {
+                    PartEvent::Deleted(big_sync_core::rpc::ObjRemovedFromPart {
                         cursor: u64::try_from(row_cursor).expect(ERROR_IMPOSSIBLE),
                         part_id,
                         obj_id,
@@ -1417,7 +1419,7 @@ impl big_sync_core::part_store::PartStore<Sendable> for SqlitePartStore {
         let payload = payload.clone();
         let parts = parts.to_vec();
         Sendable::from_future(async move {
-            HostPartStore::upsert_obj(self, obj_id, payload, parts, None)
+            HostPartStore::set_obj_payload(self, obj_id, payload, parts, None)
                 .await
                 .expect(ERROR_IMPOSSIBLE);
         })
@@ -1600,7 +1602,7 @@ mod tests {
         let mut obj_ids = Vec::new();
         for ii in 0..5u8 {
             let obj_id = test_obj_id(10 + ii);
-            HostPartStore::upsert_obj(
+            HostPartStore::set_obj_payload(
                 &store,
                 obj_id,
                 serde_json::json!({"phase": "present", "ii": ii}),
@@ -1646,7 +1648,7 @@ mod tests {
         let part_id = test_part_id(7);
         let obj_id = test_obj_id(8);
 
-        HostPartStore::upsert_obj(
+        HostPartStore::set_obj_payload(
             &store,
             obj_id,
             serde_json::json!({"phase": "created"}),
@@ -1668,7 +1670,7 @@ mod tests {
         assert_eq!(transition.part_id, part_id);
         assert_eq!(transition.obj_id, obj_id);
 
-        HostPartStore::upsert_obj(
+        HostPartStore::set_obj_payload(
             &store,
             obj_id,
             serde_json::json!({"phase": "recreated"}),
@@ -1705,7 +1707,7 @@ mod tests {
         let part_id = test_part_id(9);
         let obj_id = test_obj_id(10);
 
-        HostPartStore::upsert_obj(
+        HostPartStore::set_obj_payload(
             &store_a,
             obj_id,
             serde_json::json!({"scope": "a"}),
@@ -1713,7 +1715,7 @@ mod tests {
             None,
         )
         .await?;
-        HostPartStore::upsert_obj(
+        HostPartStore::set_obj_payload(
             &store_b,
             obj_id,
             serde_json::json!({"scope": "b"}),
@@ -1767,7 +1769,7 @@ mod tests {
             i64::try_from(lease_two).expect(ERROR_IMPOSSIBLE)
         );
 
-        let stale = HostPartStore::upsert_obj(
+        let stale = HostPartStore::set_obj_payload(
             &store,
             obj_id,
             serde_json::json!({"lease": "stale"}),
@@ -1789,7 +1791,7 @@ mod tests {
             i64::try_from(lease_two).expect(ERROR_IMPOSSIBLE)
         );
 
-        let applied = HostPartStore::upsert_obj(
+        let applied = HostPartStore::set_obj_payload(
             &store,
             obj_id,
             serde_json::json!({"lease": "applied"}),

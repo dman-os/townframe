@@ -8,6 +8,7 @@ use crate::blobs::BlobsRepo;
 use crate::drawer::DrawerRepo;
 use crate::plugs::PlugsRepo;
 use crate::repo::RepoCtx;
+use big_repo::SharedPartStore;
 use daybook_types::manifest;
 
 use daybook_types::doc::{FacetKey, FacetTag};
@@ -402,8 +403,10 @@ impl Rt {
             },
         ))
     }
-    pub fn processor_runlog_item_id(doc_id: &str, processor_full_id: &str) -> Arc<str> {
-        format!("v1|doc:{doc_id}|proc:{processor_full_id}").into()
+    pub fn processor_runlog_item_id(doc_id: &str, processor_full_id: &str) -> ObjId {
+        let bytes = format!("v1|doc:{doc_id}|proc:{processor_full_id}");
+        let digest = blake3::hash(bytes.as_bytes());
+        ObjId::new(*digest.as_bytes())
     }
 
     pub async fn get_processor_runlog_done(
@@ -412,7 +415,7 @@ impl Rt {
         processor_full_id: &str,
     ) -> Res<Option<ProcessorRunlogDone>> {
         let item_id = Self::processor_runlog_item_id(doc_id, processor_full_id);
-        let payload = self.rcx.part_store.item_payload(&item_id).await?;
+        let payload = self.rcx.part_store.obj_payload(item_id).await?;
         let Some(payload) = payload else {
             return Ok(None);
         };
@@ -1071,7 +1074,7 @@ impl Rt {
         done_token: &str,
     ) -> Res<()> {
         upsert_processor_runlog_item(
-            self.rcx.part_store.as_ref(),
+            &self.rcx.part_store,
             &self.config.device_id,
             doc_id,
             processor_full_id,
@@ -1780,12 +1783,14 @@ async fn upsert_processor_runlog_item(
         "done_at": jiff::Timestamp::now().to_string(),
     });
     partition_store
-        .upsert_item(
-            Arc::clone(&item_id),
-            &payload,
-            &[PROCESSOR_RUNLOG_PARTITION_ID.into()],
+        .set_obj_payload(
+            item_id,
+            payload,
+            vec![crate::part_id_from_label(PROCESSOR_RUNLOG_PARTITION_ID)],
+            None,
         )
-        .await
+        .await?;
+    Ok(())
 }
 
 fn dispatch_stable_identity(dispatch: &ActiveDispatch) -> String {
@@ -1971,8 +1976,11 @@ async fn start_bundle_workload(
             }
             scheme if scheme == crate::blobs::BLOB_SCHEME => {
                 let hash = url.path().trim_start_matches('/');
+                let blob_id = hash
+                    .parse::<crate::blobs::BlobId>()
+                    .wrap_err_with(|| format!("invalid blob hash in component URL: {hash}"))?;
                 let path = blobs_repo
-                    .get_path(hash)
+                    .get_path(blob_id)
                     .await
                     .wrap_err_with(|| format!("blob not found in BlobsRepo: {}", hash))?;
                 tokio::fs::read(&path)
@@ -2037,26 +2045,33 @@ async fn start_bundle_workload(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use big_sync::HostPartStore;
     use sqlx::sqlite::SqlitePoolOptions;
 
-    async fn make_partition_store() -> Res<(
-        std::sync::Arc<am_utils_rs::partition::PartitionStore>,
-        am_utils_rs::partition::PartitionStoreStopToken,
-    )> {
-        let pool = SqlitePoolOptions::new()
+    async fn make_partition_store(
+    ) -> Res<(std::sync::Arc<dyn HostPartStore>, big_sync_core::PartId)> {
+        let read_pool = SqlitePoolOptions::new()
             .max_connections(1)
             .connect("sqlite::memory:")
             .await?;
-        let (store, stop_token) = am_utils_rs::partition::PartitionStore::boot(pool).await?;
-        store
-            .ensure_partition(&PROCESSOR_RUNLOG_PARTITION_ID.into())
+        let write_pool = SqlitePoolOptions::new()
+            .max_connections(1)
+            .connect("sqlite::memory:")
             .await?;
-        Ok((store, stop_token))
+        let part_id = crate::part_id_from_label(PROCESSOR_RUNLOG_PARTITION_ID);
+        let store = big_sync::SqlitePartStore::new(
+            read_pool,
+            write_pool,
+            "rt-test",
+            big_sync_core::BuckId::MAX_LEVEL,
+        )
+        .await?;
+        Ok((std::sync::Arc::new(store), part_id))
     }
 
     #[tokio::test]
     async fn processor_runlog_upsert_is_bounded_for_same_doc_processor() -> Res<()> {
-        let (store, stop_token) = make_partition_store().await?;
+        let (store, part_id) = make_partition_store().await?;
         let item_id = Rt::processor_runlog_item_id("doc-1", "@daybook/plabels/label-note");
 
         upsert_processor_runlog_item(
@@ -2076,21 +2091,14 @@ mod tests {
         )
         .await?;
 
-        assert!(
-            store
-                .is_item_member_of_partitions(&item_id, &[PROCESSOR_RUNLOG_PARTITION_ID.into()])
-                .await?,
-            "runlog should overwrite in-place for same key"
-        );
+        assert_eq!(store.obj_parts(item_id).await?, vec![part_id]);
 
         let payload = store
-            .item_payload(&item_id)
+            .obj_payload(item_id)
             .await?
             .ok_or_eyre("expected runlog payload row")?;
         assert_eq!(payload["done_by_peer_id"], serde_json::json!("peer-a"));
         assert_eq!(payload["done_token"], serde_json::json!("token-2"));
-
-        stop_token.stop().await?;
         Ok(())
     }
 }

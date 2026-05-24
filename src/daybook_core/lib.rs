@@ -58,6 +58,7 @@ daybook_types::custom_type_set!();
 
 #[cfg(feature = "uniffi")]
 use crate::stores::VersionTag;
+use big_sync_core::{PartId, PeerId};
 
 #[cfg(feature = "uniffi")]
 uniffi::custom_type!(VersionTag, String, {
@@ -106,6 +107,11 @@ pub(crate) fn peer_id_from_label(label: &str) -> PeerId {
     let mut bytes = [0_u8; 32];
     bytes.copy_from_slice(&digest[..32]);
     PeerId::new(bytes)
+}
+
+pub(crate) fn part_id_from_label(label: &str) -> PartId {
+    let digest = blake3::hash(label.as_bytes());
+    PartId::new(*digest.as_bytes())
 }
 
 pub mod app;

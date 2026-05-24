@@ -30,7 +30,12 @@ impl BlobsRepoFfi {
     pub async fn put(&self, data: Vec<u8>) -> Result<String, FfiError> {
         let this = Arc::clone(&self.repo);
         self.fcx
-            .do_on_rt(async move { this.put(&data).await.map_err(FfiError::from) })
+            .do_on_rt(async move {
+                this.put(&data)
+                    .await
+                    .map(|blob_id| blob_id.to_string())
+                    .map_err(FfiError::from)
+            })
             .await
     }
 
@@ -39,7 +44,10 @@ impl BlobsRepoFfi {
         let this = Arc::clone(&self.repo);
         self.fcx
             .do_on_rt(async move {
-                this.get_path(&hash)
+                let blob_id = hash
+                    .parse::<daybook_core::blobs::BlobId>()
+                    .map_err(FfiError::from)?;
+                this.get_path(blob_id)
                     .await
                     .map(|path| path.to_string_lossy().to_string())
                     .map_err(FfiError::from)

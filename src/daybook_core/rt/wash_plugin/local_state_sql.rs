@@ -191,9 +191,9 @@ fn query_error_from_sqlx_error(err: sqlx::Error) -> binds_guest::townframe::sql:
 }
 
 fn bind_sql_value<'query>(
-    query: sqlx::query::Query<'query, sqlx::Sqlite, sqlx::sqlite::SqliteArguments<'query>>,
+    query: sqlx::query::Query<'query, sqlx::Sqlite, sqlx::sqlite::SqliteArguments>,
     value: binds_guest::townframe::sql::types::SqlValue,
-) -> sqlx::query::Query<'query, sqlx::Sqlite, sqlx::sqlite::SqliteArguments<'query>> {
+) -> sqlx::query::Query<'query, sqlx::Sqlite, sqlx::sqlite::SqliteArguments> {
     match value {
         binds_guest::townframe::sql::types::SqlValue::Null => query.bind(None::<String>),
         binds_guest::townframe::sql::types::SqlValue::Integer(value) => query.bind(value),

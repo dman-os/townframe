@@ -1,5 +1,7 @@
 //! TODO: rate limiting
 
+use serde::{Deserializer, Serializer};
+
 use crate::interlude::*;
 
 use crate::fingerprint::{Fingerprint, FingerprintSeed};
@@ -186,7 +188,9 @@ structstruck::strike! {
     }
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, thiserror::Error, displaydoc::Display)]
+#[derive(
+    Debug, Clone, PartialEq, Eq, Serialize, Deserialize, thiserror::Error, displaydoc::Display,
+)]
 pub enum LeafBucketsError {
     /// UnkownPart
     UnkownPart,
@@ -255,13 +259,23 @@ structstruck::strike! {
     #[structstruck::each[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]]
     pub struct PartPage {
         pub events: Vec<pub enum PartEvent {
-            Upserted(pub struct ObjUpserted {
+            Changed(pub struct ObjChanged {
+                pub cursor: CursorIndex,
+                pub part_ids: Vec<PartId>,
+                pub obj_id: ObjId,
+                #[serde(
+                    serialize_with = "value_as_string",
+                    deserialize_with = "value_from_string"
+                )]
+                pub payload: ObjPayload,
+            }),
+            Added(pub struct ObjAddedToPart {
                 pub cursor: CursorIndex,
                 pub part_id: PartId,
                 pub obj_id: ObjId,
-                pub payload: ObjPayload,
+                // pub payload: ObjPayload,
             }),
-            Deleted(pub struct ObjRemoved {
+            Removed(pub struct ObjRemovedFromPart {
                 pub cursor: CursorIndex,
                 pub part_id: PartId,
                 pub obj_id: ObjId,
@@ -270,23 +284,42 @@ structstruck::strike! {
         pub next_cursor: Option<CursorIndex>,
     }
 }
+fn value_as_string<S>(v: &serde_json::Value, s: S) -> Result<S::Ok, S::Error>
+where
+    S: Serializer,
+{
+    s.serialize_str(&serde_json::to_string(v).map_err(serde::ser::Error::custom)?)
+}
+
+fn value_from_string<'de, D>(d: D) -> Result<serde_json::Value, D::Error>
+where
+    D: Deserializer<'de>,
+{
+    let s = String::deserialize(d)?;
+    serde_json::from_str(&s).map_err(serde::de::Error::custom)
+}
 
 structstruck::strike! {
     #[structstruck::each[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]]
     pub enum SubEvent {
-        Upserted(ObjUpserted),
-        Deleted(ObjRemoved),
+        Changed(ObjChanged),
+        Added(ObjAddedToPart),
+        Removed(ObjRemovedFromPart),
         ReplayComplete ,
     }
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, thiserror::Error, displaydoc::Display)]
+#[derive(
+    Debug, Clone, PartialEq, Eq, Serialize, Deserialize, thiserror::Error, displaydoc::Display,
+)]
 pub enum RpcError {
     /// TransportError
     TransportError,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, thiserror::Error, displaydoc::Display)]
+#[derive(
+    Debug, Clone, PartialEq, Eq, Serialize, Deserialize, thiserror::Error, displaydoc::Display,
+)]
 pub enum ListPartsError {
     /// UnkownParts {unkown_parts:?}
     UnkownParts { unkown_parts: Vec<PartId> },

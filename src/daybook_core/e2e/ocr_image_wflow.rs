@@ -1,4 +1,4 @@
-use crate::interlude::*;
+use crate::{blobs::blob_id_to_digest_str, interlude::*};
 
 use daybook_types::doc::{AddDocArgs, Blob, FacetKey, WellKnownFacet, WellKnownFacetTag};
 
@@ -13,14 +13,15 @@ async fn test_ocr_image_workflow() -> Res<()> {
     .await?;
 
     let image_bytes = include_bytes!("./sample.jpg");
-    let blob_hash = test_cx.rt.blobs_repo.put(image_bytes).await?;
+    let blob_id = test_cx.rt.blobs_repo.put(image_bytes).await?;
+    let digest = blob_id_to_digest_str(blob_id);
 
     let blob_facet = Blob {
         mime: "image/jpeg".to_string(),
         length_octets: image_bytes.len() as u64,
-        digest: blob_hash.clone(),
+        digest,
         inline: None,
-        urls: Some(vec![format!("db+blob:///{blob_hash}")]),
+        urls: Some(vec![format!("db+blob:///{blob_id}")]),
     };
 
     let new_doc = AddDocArgs {

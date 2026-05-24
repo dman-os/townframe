@@ -300,6 +300,13 @@ pub mod hash {
         Ok(hash)
     }
 
+    #[cfg(feature = "hash")]
+    pub fn encode_base58_multibase_blake3(hash_bytes: [u8; 32]) -> String {
+        let hash =
+            multihash::Multihash::<32>::wrap(BLAKE3, &hash_bytes).expect("error multihashing");
+        encode_base58_multibase(hash.to_bytes())
+    }
+
     pub fn encode_base58_multibase<T: AsRef<[u8]>>(source: T) -> String {
         let mut string = "z".into();
         bs58::encode(source)

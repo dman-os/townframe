@@ -16,12 +16,13 @@ use rand::rngs::StdRng;
 use rand::{seq::SliceRandom, Rng, SeedableRng};
 use serde::{Deserialize, Serialize};
 
+use crate::backend::contract::{self, SyncBackendHarness, SyncBackendScenario};
 use crate::part_store::memory::MemoryPartStore;
 use crate::part_store::{HostPartStore, ObjStoreLease, StoreMutationOutcome};
 use crate::test_support::{ObservedStore, ObservedStoreSnapshot, TestStoreSetup};
-use crate::{BackendId, Ctx, SyncTaskRunOutcome};
+use crate::{Ctx, SyncTaskRunOutcome};
 
-const TEST_BACKEND_ID: BackendId = 0;
+const TEST_BACKEND_ID: &'static str = "MemorySyncBackend";
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 struct LwwPayload {
@@ -69,19 +70,19 @@ fn compare_lww_payloads(left: &serde_json::Value, right: &serde_json::Value) -> 
     }
 }
 
-fn test_part() -> PartId {
+pub(crate) fn test_part() -> PartId {
     PartId(Byte32Id::new([
         32, 12, 54, 54, 65, 112, 213, 43, 12, 54, 123, 123, 54, 23, 68, 12, //
         32, 12, 54, 54, 65, 112, 213, 43, 12, 54, 123, 123, 54, 23, 68, 12,
     ]))
 }
 
-fn test_parts() -> Vec<PartId> {
+pub(crate) fn test_parts() -> Vec<PartId> {
     vec![test_part()]
 }
 
 #[derive(Default)]
-struct TestWorld {
+pub(crate) struct TestWorld {
     stores: Mutex<HashMap<PeerId, Arc<dyn HostPartStore>>>,
     online: Mutex<HashSet<PeerId>>,
 }
@@ -227,14 +228,14 @@ impl crate::rpc::HostBigRpcClient for MemoryRpcClient {
     }
 }
 
-struct MemorySyncBackend {
+pub(crate) struct MemorySyncBackend {
     _local_peer_id: PeerId,
     local_part_store: Arc<dyn HostPartStore>,
     world: Arc<TestWorld>,
 }
 
 impl MemorySyncBackend {
-    fn new(
+    pub(crate) fn new(
         local_peer_id: PeerId,
         local_part_store: Arc<dyn HostPartStore>,
         world: Arc<TestWorld>,
@@ -279,7 +280,7 @@ impl SyncBackend for MemorySyncBackend {
                 Ordering::Less => {
                     match self
                         .local_part_store
-                        .upsert_obj(obj_id, remote, part_hints, Some(lease))
+                        .set_obj_payload(obj_id, remote, part_hints, Some(lease))
                         .await?
                     {
                         StoreMutationOutcome::Applied => {
@@ -301,7 +302,7 @@ impl SyncBackend for MemorySyncBackend {
             (None, Some(payload)) => {
                 match self
                     .local_part_store
-                    .upsert_obj(obj_id, payload, part_hints, Some(lease))
+                    .set_obj_payload(obj_id, payload, part_hints, Some(lease))
                     .await?
                 {
                     StoreMutationOutcome::Applied => {
@@ -316,6 +317,174 @@ impl SyncBackend for MemorySyncBackend {
             (Some(_), None) | (None, None) => eyre::bail!("missing on remote"),
         }
     }
+}
+
+struct MemorySyncBackendContractHarness {
+    world: Arc<TestWorld>,
+    backend: Arc<dyn SyncBackend>,
+    store: Arc<dyn HostPartStore>,
+}
+
+#[async_trait]
+impl SyncBackendHarness for MemorySyncBackendContractHarness {
+    fn backend(&self) -> &dyn SyncBackend {
+        self.backend.as_ref()
+    }
+
+    fn store(&self) -> &dyn HostPartStore {
+        self.store.as_ref()
+    }
+
+    async fn prepare_case(&self, case: &SyncBackendScenario) -> Res<()> {
+        if case.remote_payload.is_none() {
+            let remote_store = Arc::new(MemoryPartStore::new(case.peer_id));
+            if let Some(payload) = &case.expected_payload {
+                remote_store
+                    .set_obj_payload(
+                        case.obj_id,
+                        payload.clone(),
+                        case.expected_parts.clone(),
+                        None,
+                    )
+                    .await?;
+            }
+            self.world
+                .register_store(case.peer_id, Arc::clone(&remote_store));
+        }
+        Ok(())
+    }
+
+    async fn assert_case(&self, case: &SyncBackendScenario) -> Res<()> {
+        if case.remote_payload.is_none() {
+            self.world.remove_store(case.peer_id);
+        }
+        Ok(())
+    }
+}
+
+fn memory_sync_backend_cases() -> Vec<SyncBackendScenario> {
+    let part = test_part();
+    let extra_part = PartId(Byte32Id::new([7; 32]));
+    let updated_payload = payload(serde_json::json!({"kind": "updated"}), 3, peer_id(2));
+    vec![
+        SyncBackendScenario::noop(
+            "noop_when_payloads_match",
+            peer_id(2),
+            gen_obj_id(10),
+            payload(serde_json::json!({"kind": "noop"}), 1, peer_id(2)),
+            vec![part],
+        ),
+        SyncBackendScenario::noop(
+            "noop_when_remote_payload_is_missing",
+            peer_id(2),
+            gen_obj_id(1010),
+            payload(serde_json::json!({"kind": "noop-none"}), 1, peer_id(2)),
+            vec![part],
+        )
+        .with_remote_payload(None),
+        SyncBackendScenario::changed_object(
+            "changed_object_when_remote_payload_is_missing",
+            peer_id(2),
+            gen_obj_id(1011),
+            payload(serde_json::json!({"kind": "old-none"}), 1, peer_id(1)),
+            payload(serde_json::json!({"kind": "new-none"}), 2, peer_id(2)),
+            vec![part],
+        )
+        .with_remote_payload(None),
+        SyncBackendScenario::added_member(
+            "added_member_when_remote_payload_is_missing",
+            peer_id(2),
+            gen_obj_id(1012),
+            payload(serde_json::json!({"kind": "new-added-none"}), 2, peer_id(2)),
+            vec![part],
+        )
+        .with_remote_payload(None),
+        SyncBackendScenario::changed_object(
+            "changed_object_applies_remote",
+            peer_id(2),
+            gen_obj_id(11),
+            payload(serde_json::json!({"kind": "old"}), 1, peer_id(1)),
+            payload(serde_json::json!({"kind": "new"}), 2, peer_id(2)),
+            vec![part],
+        ),
+        SyncBackendScenario::changed_object(
+            "changed_object_with_empty_part_hints",
+            peer_id(2),
+            gen_obj_id(1101),
+            payload(serde_json::json!({"kind": "old-empty"}), 1, peer_id(1)),
+            payload(serde_json::json!({"kind": "new-empty"}), 2, peer_id(2)),
+            vec![],
+        ),
+        SyncBackendScenario::changed_object(
+            "changed_object_with_multiple_part_hints",
+            peer_id(2),
+            gen_obj_id(1102),
+            payload(serde_json::json!({"kind": "old-multi"}), 1, peer_id(1)),
+            payload(serde_json::json!({"kind": "new-multi"}), 2, peer_id(2)),
+            vec![part, extra_part],
+        ),
+        SyncBackendScenario::added_member(
+            "added_member_materializes_missing_obj",
+            peer_id(2),
+            gen_obj_id(12),
+            payload(serde_json::json!({"kind": "new"}), 2, peer_id(2)),
+            vec![part],
+        ),
+        SyncBackendScenario::stale(
+            "stale_lease_is_reported",
+            peer_id(2),
+            gen_obj_id(13),
+            payload(serde_json::json!({"kind": "old"}), 1, peer_id(1)),
+            vec![part],
+            payload(serde_json::json!({"kind": "new"}), 2, peer_id(2)),
+        ),
+        SyncBackendScenario::stale_after_remove_from_part(
+            "stale_after_remove_from_part",
+            peer_id(2),
+            gen_obj_id(14),
+            payload(serde_json::json!({"kind": "remove"}), 1, peer_id(1)),
+            part,
+            payload(serde_json::json!({"kind": "remove-remote"}), 2, peer_id(2)),
+        ),
+        SyncBackendScenario::stale_after_add_obj_to_parts(
+            "stale_after_add_obj_to_parts",
+            peer_id(2),
+            gen_obj_id(15),
+            payload(serde_json::json!({"kind": "add"}), 1, peer_id(1)),
+            vec![part],
+            vec![extra_part],
+            payload(serde_json::json!({"kind": "add-remote"}), 2, peer_id(2)),
+        ),
+        SyncBackendScenario::stale_after_upsert_obj(
+            "stale_after_upsert_obj",
+            peer_id(2),
+            gen_obj_id(16),
+            payload(serde_json::json!({"kind": "upsert-old"}), 1, peer_id(1)),
+            vec![part],
+            updated_payload,
+            vec![part, extra_part],
+            payload(serde_json::json!({"kind": "upsert-remote"}), 2, peer_id(2)),
+        ),
+    ]
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn memory_sync_backend_contract() -> Res<()> {
+    let world = Arc::new(TestWorld::default());
+    let local = Arc::new(MemoryPartStore::new(peer_id(1)));
+    let local_part_store: Arc<dyn HostPartStore> = Arc::clone(&local) as _;
+    let backend: Arc<dyn SyncBackend> = Arc::new(MemorySyncBackend::new(
+        peer_id(1),
+        Arc::clone(&local_part_store),
+        Arc::clone(&world),
+    ));
+    let harness = MemorySyncBackendContractHarness {
+        world,
+        backend,
+        store: local_part_store,
+    };
+
+    contract::assert_sync_backend_scenarios(&harness, &memory_sync_backend_cases()).await
 }
 
 struct NodeHarness {
@@ -345,7 +514,7 @@ impl NodeHarness {
                 client,
                 test_parts()
                     .iter()
-                    .map(|&part| (part, TEST_BACKEND_ID))
+                    .map(|&part| (part, TEST_BACKEND_ID.into()))
                     .collect(),
             )
             .await
@@ -354,7 +523,7 @@ impl NodeHarness {
     async fn seed_obj(&self, obj: ObjId, payload: serde_json::Value) -> Res<()> {
         self.host
             .store
-            .upsert_obj(obj, payload, test_parts(), None)
+            .set_obj_payload(obj, payload, test_parts(), None)
             .await
             .map(|outcome| assert_eq!(outcome, StoreMutationOutcome::Applied))
     }
@@ -390,11 +559,11 @@ impl NodeHarness {
     }
 }
 
-fn peer_id(seed: u8) -> PeerId {
+pub(crate) fn peer_id(seed: u8) -> PeerId {
     PeerId(Byte32Id::new([seed; 32]))
 }
 
-fn payload(
+pub(crate) fn payload(
     value: impl Into<serde_json::Value>,
     written_at: u64,
     writer_id: PeerId,
@@ -402,7 +571,7 @@ fn payload(
     lww_payload(value, written_at, writer_id)
 }
 
-fn gen_obj_id(seed: usize) -> ObjId {
+pub(crate) fn gen_obj_id(seed: usize) -> ObjId {
     ObjId(Byte32Id::new(
         *blake3::hash(format!("test.{seed}").as_bytes()).as_bytes(),
     ))
@@ -437,7 +606,7 @@ async fn memory_part_store_root_bucket_contract() -> Res<()> {
     for ii in 0..5u8 {
         let obj_id = gen_obj_id((90 + ii) as usize);
         store
-            .upsert_obj(
+            .set_obj_payload(
                 obj_id,
                 payload(
                     serde_json::json!({"phase": "present", "ii": ii}),
@@ -533,12 +702,12 @@ async fn memory_part_store_bucket_summary_is_order_independent() -> Res<()> {
     }
     for ((_, payload), &obj_id) in objs.iter().zip(obj_ids_a.iter()) {
         store_a
-            .upsert_obj(obj_id, payload.clone(), vec![test_part()], None)
+            .set_obj_payload(obj_id, payload.clone(), vec![test_part()], None)
             .await?;
     }
     for ((_, payload), &obj_id) in objs.iter().rev().zip(obj_ids_b.iter().rev()) {
         store_b
-            .upsert_obj(obj_id, payload.clone(), vec![test_part()], None)
+            .set_obj_payload(obj_id, payload.clone(), vec![test_part()], None)
             .await?;
     }
 
@@ -625,7 +794,7 @@ where
     ));
     let (handle, stop) = crate::spawn_big_sync_worker(
         Arc::clone(&store_for_worker),
-        [(TEST_BACKEND_ID, backend)].into(),
+        [(TEST_BACKEND_ID.into(), backend)].into(),
     )?;
     let host = Ctx {
         store: Arc::clone(&store_for_worker),
@@ -679,8 +848,8 @@ async fn assert_two_node_alignment(
     let worker_left = left.handle.snapshot().await?;
     let worker_right = right.handle.snapshot().await?;
     let part_id = test_part();
-    let expected_left_parts = [(part_id, TEST_BACKEND_ID)].into_iter().collect();
-    let expected_right_parts = [(part_id, TEST_BACKEND_ID)].into_iter().collect();
+    let expected_left_parts = [(part_id, TEST_BACKEND_ID.into())].into_iter().collect();
+    let expected_right_parts = [(part_id, TEST_BACKEND_ID.into())].into_iter().collect();
     assert_eq!(worker_left.peer_parts.len(), 1);
     assert_eq!(worker_right.peer_parts.len(), 1);
     assert_eq!(
@@ -1124,10 +1293,10 @@ async fn memory_sync_direct_backend_adopts_remote_tombstone() -> Res<()> {
     let live_payload = payload("live", 1, peer_a);
 
     store_a
-        .upsert_obj(obj, live_payload.clone(), vec![part], None)
+        .set_obj_payload(obj, live_payload.clone(), vec![part], None)
         .await?;
     store_b
-        .upsert_obj(obj, live_payload, vec![part], None)
+        .set_obj_payload(obj, live_payload, vec![part], None)
         .await?;
     store_a.remove_obj_from_part(obj, part, None).await?;
 
@@ -1173,10 +1342,10 @@ async fn memory_sync_direct_backend_cross_replication_is_symmetric() -> Res<()> 
     let right_payload = payload("right-b", 1, peer_b);
 
     store_a
-        .upsert_obj(obj_a, left_payload.clone(), vec![part], None)
+        .set_obj_payload(obj_a, left_payload.clone(), vec![part], None)
         .await?;
     store_b
-        .upsert_obj(obj_b, right_payload.clone(), vec![part], None)
+        .set_obj_payload(obj_b, right_payload.clone(), vec![part], None)
         .await?;
 
     let backend_a = MemorySyncBackend::new(peer_a, Arc::clone(&store_a_dyn), Arc::clone(&world));

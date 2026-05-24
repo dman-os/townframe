@@ -4,8 +4,8 @@ use crate::part_store::HostPartStore;
 
 use big_sync_core::rpc::{
     BigSyncRpcResult, BucketSummary, GetChangedBucketsRequest, LeafBucketResult, LeafBucketsError,
-    LeafBucketsRequest, ListPartsError, ObjRemoved, ObjUpserted, PeerSummaryRequest,
-    PeerSummaryResult, SubEvent, SubPartsRequest,
+    LeafBucketsRequest, ListPartsError, PeerSummaryRequest, PeerSummaryResult, SubEvent,
+    SubPartsRequest,
 };
 use irpc::{channel, rpc_requests, WithChannels};
 use tokio::sync::mpsc;
@@ -40,77 +40,12 @@ pub trait HostBigRpcClient: Send + Sync {
 pub enum BigSyncIrpc {
     #[rpc(tx = channel::oneshot::Sender<Result<PeerSummaryResult, ListPartsError>>)]
     PeerSummary(PeerSummaryRequest),
-    #[rpc(tx = channel::mpsc::Sender<SubEventWire>)]
+    #[rpc(tx = channel::mpsc::Sender<SubEvent>)]
     SubParts(SubPartsRequest),
     #[rpc(tx = channel::oneshot::Sender<Result<Vec<BucketSummary>, ListPartsError>>)]
     GetChangedBuckets(GetChangedBucketsRequest),
     #[rpc(tx = channel::oneshot::Sender<Result<LeafBucketResult, LeafBucketsError>>)]
     LeafBuckets(LeafBucketsRequest),
-}
-
-#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
-pub enum SubEventWire {
-    Upserted {
-        cursor: big_sync_core::part_store::CursorIndex,
-        part_id: big_sync_core::PartId,
-        obj_id: big_sync_core::ObjId,
-        payload_json: String,
-    },
-    Deleted {
-        cursor: big_sync_core::part_store::CursorIndex,
-        part_id: big_sync_core::PartId,
-        obj_id: big_sync_core::ObjId,
-    },
-    ReplayComplete,
-}
-
-impl From<SubEvent> for SubEventWire {
-    fn from(value: SubEvent) -> Self {
-        match value {
-            SubEvent::Upserted(inner) => Self::Upserted {
-                cursor: inner.cursor,
-                part_id: inner.part_id,
-                obj_id: inner.obj_id,
-                payload_json: serde_json::to_string(&inner.payload).expect(ERROR_JSON),
-            },
-            SubEvent::Deleted(inner) => Self::Deleted {
-                cursor: inner.cursor,
-                part_id: inner.part_id,
-                obj_id: inner.obj_id,
-            },
-            SubEvent::ReplayComplete => Self::ReplayComplete,
-        }
-    }
-}
-
-impl TryFrom<SubEventWire> for SubEvent {
-    type Error = serde_json::Error;
-
-    fn try_from(value: SubEventWire) -> Result<Self, Self::Error> {
-        Ok(match value {
-            SubEventWire::Upserted {
-                cursor,
-                part_id,
-                obj_id,
-                payload_json,
-            } => Self::Upserted(ObjUpserted {
-                cursor,
-                part_id,
-                obj_id,
-                payload: serde_json::from_str(&payload_json)?,
-            }),
-            SubEventWire::Deleted {
-                cursor,
-                part_id,
-                obj_id,
-            } => Self::Deleted(ObjRemoved {
-                cursor,
-                part_id,
-                obj_id,
-            }),
-            SubEventWire::ReplayComplete => Self::ReplayComplete,
-        })
-    }
 }
 
 #[derive(Clone)]
@@ -383,7 +318,7 @@ impl BigSyncRpcWorker {
                                             Ok(evt) => evt,
                                             Err(_) => break,
                                         };
-                                        if tx.send(SubEventWire::from(evt)).await.is_err() {
+                                        if tx.send(evt).await.is_err() {
                                             break;
                                         }
                                     }
@@ -462,12 +397,14 @@ mod tests {
         let payload_dead = serde_json::json!({"kind":"dead","value":2});
 
         store
-            .upsert_obj(live_obj, payload_live.clone(), vec![part_id], None)
+            .set_obj_payload(live_obj, payload_live.clone())
             .await?;
+        store.add_obj_to_parts(live_obj, vec![part_id]).await?;
         store
-            .upsert_obj(dead_obj, payload_dead.clone(), vec![part_id], None)
+            .set_obj_payload(dead_obj, payload_dead.clone())
             .await?;
-        store.remove_obj_from_part(dead_obj, part_id, None).await?;
+        store.add_obj_to_parts(dead_obj, vec![part_id]).await?;
+        store.remove_obj_from_part(dead_obj, part_id).await?;
         Ok(())
     }
 

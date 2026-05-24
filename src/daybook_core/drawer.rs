@@ -31,7 +31,6 @@ use automerge::ReadDoc;
 use daybook_types::doc::{ChangeHashSet, DocId, FacetKey, FacetRaw};
 use daybook_types::url::{parse_facet_ref, FACET_SELF_DOC_ID};
 
-use std::str::FromStr;
 use tokio_util::sync::CancellationToken;
 
 const DRAWER_REPLICATED_PARTITION_PREFIX: &str = "drawer.replicated";
@@ -193,7 +192,7 @@ impl DrawerRepo {
     }
 
     pub(crate) fn replicated_partition_id_for_drawer(_drawer_doc_id: &DocumentId) -> PartId {
-        DRAWER_REPLICATED_PARTITION_PREFIX.into()
+        crate::part_id_from_label(DRAWER_REPLICATED_PARTITION_PREFIX)
     }
 
     pub(crate) fn replicated_partition_id(&self) -> PartId {
@@ -209,7 +208,7 @@ impl DrawerRepo {
         if branch_kind == BranchKind::Replicated {
             let heads = am_utils_rs::serialize_commit_heads(heads);
             self.partition_store
-                .upsert_obj(
+                .set_obj_payload(
                     branch_doc_id,
                     serde_json::json!({
                         "heads": heads
@@ -241,7 +240,9 @@ impl DrawerRepo {
         branch_doc_id: DocumentId,
     ) -> ActorId {
         let base_user_path = user_path.unwrap_or_else(|| &self.local_user_path);
-        let scoped_user_path = base_user_path.join("branches").join(branch_doc_id);
+        let scoped_user_path = base_user_path
+            .join("branches")
+            .join(branch_doc_id.to_string());
         daybook_types::doc::user_path::to_actor_id(&scoped_user_path)
     }
 
@@ -354,8 +355,7 @@ impl DrawerRepo {
         _doc_id: &DocId,
         snapshot: &BranchSnapshot,
     ) -> Res<HashSet<FacetKey>> {
-        let branch_doc_id = DocumentId::from_str(&snapshot.branch_doc_id)
-            .wrap_err_with(|| format!("invalid branch doc id '{}'", snapshot.branch_doc_id))?;
+        let branch_doc_id = snapshot.branch_doc_id.clone();
         let handle = self
             .big_repo
             .get_doc(&branch_doc_id)

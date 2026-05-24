@@ -6,7 +6,7 @@ use crate::drawer::DrawerEvent;
 use crate::plugs::PlugsEvent;
 use crate::rt::dispatch::DispatchEvent;
 use crate::rt::Rt;
-use am_utils_rs::sync::protocol::{PartitionItemEvent, PartitionItemEventDeets};
+use big_sync_core::rpc::{PartStreamCursorRequest, SubEvent, SubPartsRequest};
 use daybook_types::doc::BranchPathBuf;
 use daybook_types::doc::{Doc, DocId, FacetKey, WellKnownFacet, WellKnownFacetTag};
 use daybook_types::manifest::{
@@ -293,20 +293,22 @@ pub async fn spawn_switch_worker(
             }
 
             let docs_partition_id = worker.rt.drawer.replicated_partition_id();
+            let docs_partition_id_text = docs_partition_id.to_string();
             let mut cursor = worker
                 .store
-                .get_partition_cursor(&docs_partition_id)
+                .get_partition_cursor(&docs_partition_id_text)
                 .await?;
             let mut partition_listener = worker
                 .rt
                 .rcx
                 .part_store
-                .subscribe_partition_item_events_local(
-                    &docs_partition_id,
-                    Some(cursor),
-                    SUBSCRIPTION_CAPACITY,
-                )
-                .await?;
+                .subscribe(SubPartsRequest {
+                    parts: vec![PartStreamCursorRequest {
+                        part_id: docs_partition_id,
+                        cursor,
+                    }],
+                })
+                .await??;
 
             loop {
                 tokio::select! {
@@ -392,18 +394,23 @@ pub async fn spawn_switch_worker(
                         }
                     }
                     doc_evt = partition_listener.recv() => {
-                        let Some(doc_evt) = doc_evt else {
-                            break;
+                        let doc_evt = match doc_evt {
+                            Ok(doc_evt) => doc_evt,
+                            Err(error) => {
+                                trace!(?error, "SwitchWorker partition_listener recv closed");
+                                break;
+                            }
                         };
-                        if doc_evt.cursor <= cursor {
-                            continue;
-                        }
                         let commit = worker.handle_partition_doc_event(&doc_evt).await?;
-                        cursor = doc_evt.cursor;
+                        cursor = match &doc_evt {
+                            SubEvent::Upserted(inner) => inner.cursor,
+                            SubEvent::Deleted(inner) => inner.cursor,
+                            SubEvent::ReplayComplete => cursor,
+                        };
                         worker
                             .store
                             .commit_partition_event(
-                                &docs_partition_id,
+                                &docs_partition_id_text,
                                 cursor,
                                 commit
                                     .as_ref()
@@ -498,7 +505,7 @@ impl SwitchWorker {
             };
             for (branch_name, branch_ref) in entry.branches {
                 out.insert(
-                    branch_ref.branch_doc_id,
+                    branch_ref.branch_doc_id.to_string(),
                     BranchRef {
                         doc_id: doc_id.clone(),
                         branch_name,
@@ -520,11 +527,12 @@ impl SwitchWorker {
 
     async fn handle_partition_doc_event(
         &mut self,
-        event: &PartitionItemEvent,
+        event: &SubEvent,
     ) -> Res<Option<(Arc<str>, SwitchDocState)>> {
-        let branch_doc_id = match &event.deets {
-            PartitionItemEventDeets::ItemChanged { item_id, .. }
-            | PartitionItemEventDeets::ItemDeleted { item_id, .. } => item_id.clone(),
+        let branch_doc_id: Arc<str> = match event {
+            SubEvent::Upserted(inner) => inner.obj_id.to_string().into(),
+            SubEvent::Deleted(inner) => inner.obj_id.to_string().into(),
+            SubEvent::ReplayComplete => return Ok(None),
         };
         let stored_state = self
             .store
@@ -550,8 +558,8 @@ impl SwitchWorker {
         next_state.doc_id = doc_id.clone();
         next_state.branch_name = branch_name.clone();
 
-        match &event.deets {
-            PartitionItemEventDeets::ItemChanged { .. } => {
+        match event {
+            SubEvent::Upserted(_) => {
                 let Some((_, new_heads)) = self
                     .rt
                     .drawer
@@ -603,7 +611,7 @@ impl SwitchWorker {
                 next_state.last_heads = Some(new_heads);
                 let _ = deleted_facet_keys;
             }
-            PartitionItemEventDeets::ItemDeleted { .. } => {
+            SubEvent::Deleted(_) => {
                 if !next_state.present {
                     return Ok(Some((branch_doc_id, next_state)));
                 }
@@ -630,6 +638,7 @@ impl SwitchWorker {
                 next_state.present = false;
                 next_state.last_heads = None;
             }
+            SubEvent::ReplayComplete => return Ok(None),
         }
         Ok(Some((branch_doc_id, next_state)))
     }

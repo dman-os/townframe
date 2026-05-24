@@ -284,9 +284,12 @@ pub(super) async fn resolve_blob_path_from_blob_facet(
     blob: &daybook_types::doc::Blob,
 ) -> Result<std::path::PathBuf, String> {
     let hash = blob_hash_from_blob_facet(blob)?;
+    let blob_id = hash
+        .parse::<crate::blobs::BlobId>()
+        .map_err(|err| err.to_string())?;
     plugin
         .blobs_repo
-        .get_path(&hash)
+        .get_path(blob_id)
         .await
         .map_err(|err| err.to_string())
 }

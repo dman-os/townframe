@@ -2698,6 +2698,7 @@ dependencies = [
  "big_repo",
  "big_sync",
  "big_sync_core",
+ "blake3",
  "bs58",
  "color-eyre",
  "data-encoding",

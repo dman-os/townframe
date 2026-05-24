@@ -4,7 +4,6 @@
 use crate::interlude::*;
 
 use crate::part_store::{CursorIndex, ObjPayload};
-use crate::SyncJobEvt;
 
 use std::collections::{BTreeMap, HashMap};
 
@@ -17,15 +16,21 @@ structstruck::strike! {
             cursor: CursorIndex,
             /// Upsert the object at the sync backend to these
             /// parts
-            part_hint: PartId,
+            parts: Vec<PartId>,
         },
         SetPartCursor {
             part_id: PartId,
             cursor: CursorIndex
         },
+        AddObjToPart {
+            obj_id: ObjId,
+            part_id: PartId,
+            cursor: CursorIndex,
+        },
         RemoveObjFromPart {
             obj_id: ObjId,
             part_id: PartId,
+            cursor: CursorIndex,
         },
         PartIdle {
             part_id: PartId,
@@ -69,7 +74,7 @@ pub struct CursorSyncMachine {
                         pub part_id: PartId,
                     }
                 >,
-                removed_from_parts: Set<PartId>,
+                // removed_from_parts: Set<PartId>,
             }
 
         >,
@@ -77,18 +82,7 @@ pub struct CursorSyncMachine {
 }
 
 impl CursorSyncMachine {
-    pub fn on_subscription_evt(
-        &mut self,
-        evt: crate::rpc::SubEvent,
-        out: &mut Vec<CursorMachineCommand>,
-    ) {
-        use crate::rpc::*;
-
-        let (obj_id, part_id, cursor) = match &evt {
-            SubEvent::ReplayComplete => return,
-            SubEvent::Deleted(event) => (event.obj_id, event.part_id, event.cursor),
-            SubEvent::Upserted(event) => (event.obj_id, event.part_id, event.cursor),
-        };
+    fn mark_pending_cursor(&mut self, part_id: PartId, cursor: CursorIndex) -> bool {
         let state = self.cursor_state.entry(part_id).or_default();
         if cursor <= state.last_emitted_cursor.unwrap_or_default() {
             panic!(
@@ -98,59 +92,91 @@ impl CursorSyncMachine {
         }
         if let Some(_old) = state.slots.get_mut(&cursor) {
             // duplicate cursor
-            return;
+            return false;
         }
         state.slots.insert(cursor, CursorSlotState::Pending);
+        true
+    }
+    pub fn on_subscription_evt(
+        &mut self,
+        evt: crate::rpc::SubEvent,
+        out: &mut Vec<CursorMachineCommand>,
+    ) {
+        use crate::rpc::*;
 
-        let job = self.active_obj_jobs.entry(obj_id).or_default();
         let cmd = match evt {
-            SubEvent::Upserted(evt) => {
-                job.waiters.insert(cursor, CursorWaiter { part_id });
+            SubEvent::Changed(evt) => {
+                let mut parts = vec![];
+                for &part_id in &evt.part_ids {
+                    if !self.mark_pending_cursor(part_id, evt.cursor) {
+                        continue;
+                    }
+                    let job = self.active_obj_jobs.entry(evt.obj_id).or_default();
+                    job.waiters.insert(evt.cursor, CursorWaiter { part_id });
+                    parts.push(part_id);
+                }
                 CursorMachineCommand::SyncObj {
-                    obj_id,
-                    part_hint: part_id,
-                    cursor,
+                    obj_id: evt.obj_id,
+                    parts,
+                    cursor: evt.cursor,
                     remote_payload: evt.payload,
                 }
             }
-            SubEvent::Deleted(_) => {
-                job.removed_from_parts.insert(part_id);
-                state.slots.insert(cursor, CursorSlotState::Ready);
-                self.drain_ready_cursor_advances(part_id, out);
-                CursorMachineCommand::RemoveObjFromPart { obj_id, part_id }
+            SubEvent::Added(evt) => {
+                if !self.mark_pending_cursor(evt.part_id, evt.cursor) {
+                    return;
+                }
+                let job = self.active_obj_jobs.entry(evt.obj_id).or_default();
+                job.waiters.insert(
+                    evt.cursor,
+                    CursorWaiter {
+                        part_id: evt.part_id,
+                    },
+                );
+                CursorMachineCommand::AddObjToPart {
+                    cursor: evt.cursor,
+                    obj_id: evt.obj_id,
+                    part_id: evt.part_id,
+                }
+            }
+            SubEvent::Removed(evt) => {
+                if !self.mark_pending_cursor(evt.part_id, evt.cursor) {
+                    return;
+                }
+                let job = self.active_obj_jobs.entry(evt.obj_id).or_default();
+                job.waiters.insert(
+                    evt.cursor,
+                    CursorWaiter {
+                        part_id: evt.part_id,
+                    },
+                );
+                CursorMachineCommand::RemoveObjFromPart {
+                    cursor: evt.cursor,
+                    obj_id: evt.obj_id,
+                    part_id: evt.part_id,
+                }
             }
             SubEvent::ReplayComplete => unreachable!(),
         };
         out.push(cmd);
     }
 
-    pub fn on_obj_sync_job_evt(&mut self, evt: &SyncJobEvt, out: &mut Vec<CursorMachineCommand>) {
+    pub fn on_obj_sync_job_evt(
+        &mut self,
+        obj_id: ObjId,
+        cursor: CursorIndex,
+        out: &mut Vec<CursorMachineCommand>,
+    ) {
         // remove it temporarily to allow mutable borrows
         // on self
-        let Some(mut job) = self.active_obj_jobs.remove(&evt.obj_id) else {
+        let Some(mut job) = self.active_obj_jobs.remove(&obj_id) else {
             return;
         };
-        let mut affected_parts = vec![];
-        for &ii in &evt.cursors {
-            let waiter = job.waiters.remove(&ii).expect(ERROR_UNRECONIZED);
-            if job.removed_from_parts.contains(&waiter.part_id) {
-                // remove from part again incase the sync job
-                // re-added it
-                out.push(CursorMachineCommand::RemoveObjFromPart {
-                    obj_id: evt.obj_id,
-                    part_id: waiter.part_id,
-                });
-            }
-            let state = self.cursor_state.entry(waiter.part_id).or_default();
-            state.slots.insert(ii, CursorSlotState::Ready);
-            affected_parts.push(waiter.part_id);
-        }
-        for part_id in affected_parts {
-            self.drain_ready_cursor_advances(part_id, out);
-        }
-        if !job.waiters.is_empty() {
-            self.active_obj_jobs.insert(evt.obj_id, job);
-        }
+        let waiter = job.waiters.remove(&cursor).expect(ERROR_UNRECONIZED);
+        let state = self.cursor_state.entry(waiter.part_id).or_default();
+        state.slots.insert(cursor, CursorSlotState::Ready);
+        self.drain_ready_cursor_advances(waiter.part_id, out);
+        self.active_obj_jobs.insert(obj_id, job);
     }
 
     fn drain_ready_cursor_advances(
