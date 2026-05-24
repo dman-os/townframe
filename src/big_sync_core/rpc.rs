@@ -146,6 +146,7 @@ impl BucketFingerprint {
     }
 }
 
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct GetChangedBucketsRequest {
     pub part_id: PartId,
     pub offset: BuckId,
@@ -157,7 +158,7 @@ pub struct GetChangedBucketsRequest {
     pub limit_hint: u32,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct BucketSummary {
     pub id: BuckId,
     pub len: u32,
@@ -167,7 +168,7 @@ pub struct BucketSummary {
 }
 
 structstruck::strike! {
-    #[derive(Debug, Clone)]
+    #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
     pub struct LeafBucketRequest {
         pub buck_id: BuckId,
         pub after: Option<ObjId>,
@@ -175,7 +176,7 @@ structstruck::strike! {
 }
 
 structstruck::strike! {
-    #[derive(Debug)]
+    #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
     pub struct LeafBucketsRequest {
         pub part_id: PartId,
         pub since: CursorIndex,
@@ -185,7 +186,7 @@ structstruck::strike! {
     }
 }
 
-#[derive(Debug, thiserror::Error, displaydoc::Display)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, thiserror::Error, displaydoc::Display)]
 pub enum LeafBucketsError {
     /// UnkownPart
     UnkownPart,
@@ -194,6 +195,7 @@ pub enum LeafBucketsError {
 }
 
 structstruck::strike! {
+    #[structstruck::each[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]]
     pub struct LeafBucketResult {
         pub seed: FingerprintSeed,
         pub bucks: Map<
@@ -212,12 +214,14 @@ structstruck::strike! {
 }
 
 structstruck::strike! {
+    #[structstruck::each[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]]
     pub struct PeerSummaryRequest {
         pub parts: Set<PartId>,
     }
 }
 
 structstruck::strike! {
+    #[structstruck::each[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]]
     pub struct PeerSummaryResult {
         /// Only known partitions where the requestor has
         /// accessed are returned here. If an expected partition
@@ -236,6 +240,7 @@ structstruck::strike! {
 }
 
 structstruck::strike! {
+    #[structstruck::each[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]]
     pub struct SubPartsRequest {
         pub parts: Vec<
             pub struct PartStreamCursorRequest {
@@ -247,17 +252,16 @@ structstruck::strike! {
 }
 
 structstruck::strike! {
+    #[structstruck::each[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]]
     pub struct PartPage {
         pub events: Vec<pub enum PartEvent {
             Upserted(pub struct ObjUpserted {
-                #![derive(Debug, Clone, Serialize, Deserialize)]
                 pub cursor: CursorIndex,
                 pub part_id: PartId,
                 pub obj_id: ObjId,
                 pub payload: ObjPayload,
             }),
             Deleted(pub struct ObjRemoved {
-                #![derive(Debug, Clone, Serialize, Deserialize)]
                 pub cursor: CursorIndex,
                 pub part_id: PartId,
                 pub obj_id: ObjId,
@@ -268,7 +272,7 @@ structstruck::strike! {
 }
 
 structstruck::strike! {
-    #[structstruck::each[derive(Debug, Clone, Serialize, Deserialize)]]
+    #[structstruck::each[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]]
     pub enum SubEvent {
         Upserted(ObjUpserted),
         Deleted(ObjRemoved),
@@ -276,13 +280,13 @@ structstruck::strike! {
     }
 }
 
-#[derive(Debug, thiserror::Error, displaydoc::Display)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, thiserror::Error, displaydoc::Display)]
 pub enum RpcError {
     /// TransportError
     TransportError,
 }
 
-#[derive(Debug, thiserror::Error, displaydoc::Display)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, thiserror::Error, displaydoc::Display)]
 pub enum ListPartsError {
     /// UnkownParts {unkown_parts:?}
     UnkownParts { unkown_parts: Vec<PartId> },

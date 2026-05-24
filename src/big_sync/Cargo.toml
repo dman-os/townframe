@@ -42,6 +42,7 @@ async-channel.workspace = true
 future_form.workspace = true
 rand.workspace = true
 futures-buffered.workspace = true
+tokio = { workspace = true, features = ["sync", "macros", "rt", "rt-multi-thread", "time", "tracing"] }
 
 #
 # db
@@ -50,6 +51,8 @@ sqlx = { workspace = true, features = ["sqlite", "runtime-tokio"] }
 #
 # actors
 irpc.workspace = true
+iroh = { workspace = true }
+irpc-iroh.workspace = true
 
 #
 # logging

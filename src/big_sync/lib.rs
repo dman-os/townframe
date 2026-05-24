@@ -20,7 +20,10 @@ mod worker;
 pub use big_sync_core::part_store::ObjPayload;
 pub use part_store::sqlite::SqlitePartStore;
 pub use part_store::{HostPartitionStore, ObjStoreLease, StoreMutationOutcome};
-pub use rpc::HostBigRpcClient;
+pub use rpc::{
+    BigSyncRpcHandle, BigSyncRpcStopToken, HostBigRpcClient, IrohBigSyncRpcClient,
+    BIG_SYNC_RPC_ALPN, spawn_big_sync_rpc,
+};
 pub use worker::{
     spawn_big_sync_worker, BackendId, BigSyncWorkerError, BigSyncWorkerHandle, StopToken,
     SyncBackend, SyncTaskRunOutcome,

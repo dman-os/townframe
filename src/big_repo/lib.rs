@@ -1043,13 +1043,27 @@ pub(crate) mod tests {
         let temp_root = tempdir()?;
         let repo_path = temp_root.path().join("repo");
         let doc_id = random_doc_id();
-        let payload = uuid::Uuid::new_v4().to_string();
-        let value = make_sync_doc_value_with_payload("base", 1024, &payload);
+        let doc = {
+            let mut out = None;
+            for _ in 0..64 {
+                let payload = uuid::Uuid::new_v4().to_string();
+                let value = make_sync_doc_value_with_payload("base", 1024, &payload);
+                let mut doc = automerge::Automerge::new();
+                write_sync_doc_value_as_transactions(&mut doc, &value);
+                if sync_doc_fragment_state_count(&doc) > 0 {
+                    out = Some(doc);
+                    break;
+                }
+            }
+            out.expect("test fixture should generate a fragmented doc")
+        };
 
         let (repo, _part_store, stop_token) = boot_disk_repo(repo_path.clone()).await?;
-        let mut doc = automerge::Automerge::new();
-        write_sync_doc_value_as_transactions(&mut doc, &value);
         let handle = repo.put_doc(doc_id, doc).await?;
+        assert!(
+            handle.fragment_state_store_len().await > 0,
+            "test fixture should start with fragment state"
+        );
         drop(handle);
         stop_token().await?;
 
@@ -1062,6 +1076,30 @@ pub(crate) mod tests {
         drop(reopened);
         stop_token().await?;
         Ok(())
+    }
+
+    fn sync_doc_fragment_state_count(doc: &automerge::Automerge) -> usize {
+        use automerge_sedimentree::indexed::IndexedSedimentreeAutomerge;
+        use sedimentree_core::{
+            collections::Map,
+            commit::{CommitStore, CountLeadingZeroBytes, FragmentState},
+        };
+
+        let metadata = doc.get_changes_meta(&[]);
+        let heads: Vec<_> = doc
+            .get_heads()
+            .iter()
+            .map(|hash| sedimentree_core::loose_commit::id::CommitId::new(hash.0))
+            .collect();
+        let store = IndexedSedimentreeAutomerge::from_metadata(&metadata);
+        let mut known: Map<
+            sedimentree_core::loose_commit::id::CommitId,
+            FragmentState<automerge_sedimentree::indexed::OwnedParents>,
+        > = Map::new();
+        store
+            .build_fragment_store(&heads, &mut known, &CountLeadingZeroBytes)
+            .expect("build_fragment_store")
+            .len()
     }
 
     #[tokio::test]
