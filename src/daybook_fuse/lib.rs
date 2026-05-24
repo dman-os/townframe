@@ -489,7 +489,7 @@ mod tests {
             })
             .await?;
             daybook_core::app::globals::set_local_user_path(
-                &sql_ctx.db_pool,
+                &sql_ctx.write_pool,
                 "/test-user/test-device",
             )
             .await?;
@@ -508,7 +508,7 @@ mod tests {
             let doc_drawer = tokio::sync::OnceCell::new();
             daybook_core::app::init_from_globals(
                 &big_repo,
-                &sql_ctx.db_pool,
+                &sql_ctx.write_pool,
                 &doc_app,
                 &doc_drawer,
                 daybook_core::app::InitFromGlobalsMode::CreateFresh,

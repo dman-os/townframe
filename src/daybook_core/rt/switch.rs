@@ -44,7 +44,7 @@ impl SwitchStore {
     async fn get_partition_cursor(&self, partition_id: &str) -> Res<u64> {
         let row = sqlx::query("SELECT cursor FROM switch_partition_cursor WHERE partition_id = ?1")
             .bind(partition_id)
-            .fetch_optional(&self.repo_sql.db_pool)
+            .fetch_optional(&self.repo_sql.write_pool)
             .await?;
         Ok(row
             .map(|rowv| rowv.get::<i64, _>("cursor"))
@@ -59,7 +59,7 @@ impl SwitchStore {
         branch_doc_id: Option<&str>,
         state: Option<&SwitchDocState>,
     ) -> Res<()> {
-        let mut tx = self.repo_sql.db_pool.begin().await?;
+        let mut tx = self.repo_sql.write_pool.begin().await?;
         sqlx::query(
             "INSERT INTO switch_partition_cursor(partition_id, cursor, updated_at)\n             VALUES (?1, ?2, unixepoch())\n             ON CONFLICT(partition_id) DO UPDATE SET\n                 cursor = excluded.cursor,\n                 updated_at = excluded.updated_at",
         )
@@ -95,7 +95,7 @@ impl SwitchStore {
             "SELECT doc_id, branch_name, present, last_heads_json FROM switch_doc_state WHERE branch_doc_id = ?1",
         )
         .bind(branch_doc_id)
-        .fetch_optional(&self.repo_sql.db_pool)
+        .fetch_optional(&self.repo_sql.write_pool)
         .await?;
         let Some(row) = row else {
             return Ok(None);
@@ -121,12 +121,12 @@ async fn init_schema(repo_sql: &SqlCtx) -> Res<()> {
     sqlx::query(
         "CREATE TABLE IF NOT EXISTS switch_partition_cursor (\n             partition_id TEXT PRIMARY KEY,\n             cursor INTEGER NOT NULL,\n             updated_at INTEGER NOT NULL\n         )",
     )
-    .execute(&repo_sql.db_pool)
+    .execute(&repo_sql.write_pool)
     .await?;
     sqlx::query(
         "CREATE TABLE IF NOT EXISTS switch_doc_state (\n             branch_doc_id TEXT PRIMARY KEY,\n             doc_id TEXT NOT NULL,\n             branch_name TEXT NOT NULL,\n             present INTEGER NOT NULL,\n             last_heads_json TEXT,\n             updated_at INTEGER NOT NULL\n         )",
     )
-    .execute(&repo_sql.db_pool)
+    .execute(&repo_sql.write_pool)
     .await?;
     Ok(())
 }
@@ -300,7 +300,7 @@ pub async fn spawn_switch_worker(
             let mut partition_listener = worker
                 .rt
                 .rcx
-                .partition_store
+                .part_store
                 .subscribe_partition_item_events_local(
                     &docs_partition_id,
                     Some(cursor),

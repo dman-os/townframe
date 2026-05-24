@@ -58,12 +58,12 @@ impl RepoRpcHandle {
     }
 }
 
-pub struct RepoRpcStopToken {
+pub struct BigRepoRpcStopToken {
     cancel_token: CancellationToken,
     join_handle: tokio::task::JoinHandle<()>,
 }
 
-impl RepoRpcStopToken {
+impl BigRepoRpcStopToken {
     pub async fn stop(self) -> Res<()> {
         self.cancel_token.cancel();
         utils_rs::wait_on_handle_with_timeout(self.join_handle, Duration::from_secs(5))
@@ -72,7 +72,7 @@ impl RepoRpcStopToken {
     }
 }
 
-pub async fn spawn_repo_rpc(big_repo: SharedBigRepo) -> Res<(RepoRpcHandle, RepoRpcStopToken)> {
+pub async fn spawn_repo_rpc(big_repo: SharedBigRepo) -> Res<(RepoRpcHandle, BigRepoRpcStopToken)> {
     let (rpc_tx, mut rpc_rx) = mpsc::channel(1024);
 
     let cancel_token = CancellationToken::new();
@@ -97,7 +97,7 @@ pub async fn spawn_repo_rpc(big_repo: SharedBigRepo) -> Res<(RepoRpcHandle, Repo
     let join_handle = tokio::spawn(async { fut.await.unwrap() });
     Ok((
         RepoRpcHandle { rpc_tx },
-        RepoRpcStopToken {
+        BigRepoRpcStopToken {
             cancel_token,
             join_handle,
         },

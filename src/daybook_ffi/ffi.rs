@@ -261,7 +261,7 @@ impl AppFfiCtx {
     ) -> Result<daybook_core::app::globals::RepoConfig, FfiError> {
         let this = Arc::clone(&self);
         self.do_on_rt(async move {
-            daybook_core::app::globals::get_repo_config(&this.inner.sql.db_pool).await
+            daybook_core::app::globals::get_repo_config(&this.inner.sql.write_pool).await
         })
         .await
         .map_err(Into::into)
@@ -285,7 +285,7 @@ impl AppFfiCtx {
                 )
                 .await?;
             let entry =
-                daybook_core::app::globals::upsert_known_repo(&this.inner.sql.db_pool, &rcx)
+                daybook_core::app::globals::upsert_known_repo(&this.inner.sql.write_pool, &rcx)
                     .await?;
             rcx.shutdown().await?;
             eyre::Ok(entry)
@@ -299,12 +299,12 @@ impl AppFfiCtx {
         let this = Arc::clone(&self);
         self.do_on_rt(async move {
             let mut repo_config =
-                daybook_core::app::globals::get_repo_config(&this.inner.sql.db_pool).await?;
+                daybook_core::app::globals::get_repo_config(&this.inner.sql.write_pool).await?;
             repo_config.known_repos.retain(|repo| repo.id != repo_id);
             if repo_config.last_used_repo_id.as_deref() == Some(repo_id.as_str()) {
                 repo_config.last_used_repo_id = None;
             }
-            daybook_core::app::globals::set_repo_config(&this.inner.sql.db_pool, &repo_config)
+            daybook_core::app::globals::set_repo_config(&this.inner.sql.write_pool, &repo_config)
                 .await?;
             Ok::<(), eyre::Report>(())
         })

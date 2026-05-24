@@ -24,7 +24,7 @@ pub(super) enum SyncDocOutcome {
 pub fn spawn_doc_sync_worker(
     doc_id: DocumentId,
     peer_id: PeerId,
-    connection: am_utils_rs::repo::BigRepoConnection,
+    connection: big_repo::BigRepoConnection,
     iroh_endpoint: iroh::Endpoint,
     big_repo: SharedBigRepo,
     msg_tx: mpsc::UnboundedSender<Msg>,
@@ -78,7 +78,7 @@ impl DocSyncWorker {
     async fn run(
         &self,
         peer_id: PeerId,
-        connection: am_utils_rs::repo::BigRepoConnection,
+        connection: big_repo::BigRepoConnection,
         iroh_endpoint: iroh::Endpoint,
     ) -> Res<SyncDocOutcome> {
         if self.big_repo.get_doc(&self.doc_id).await?.is_some() {
@@ -86,26 +86,26 @@ impl DocSyncWorker {
                 .sync_with_peer(self.doc_id, Some(Duration::from_secs(10)))
                 .await?;
             match outcome {
-                am_utils_rs::repo::SyncDocOutcome::Success => {
+                big_repo::SyncDocOutcome::Success => {
                     return Ok(SyncDocOutcome::Synced);
                 }
-                am_utils_rs::repo::SyncDocOutcome::NotFoundOrUnauthorized
-                | am_utils_rs::repo::SyncDocOutcome::TransportError
-                | am_utils_rs::repo::SyncDocOutcome::IoError => {
+                big_repo::SyncDocOutcome::NotFoundOrUnauthorized
+                | big_repo::SyncDocOutcome::TransportError
+                | big_repo::SyncDocOutcome::IoError => {
                     eyre::bail!("error during big_repo sync: {outcome:?}")
                 }
             }
         }
 
-        let rpc_client = irpc_iroh::client::<am_utils_rs::repo::rpc::RepoSyncRpc>(
+        let rpc_client = irpc_iroh::client::<big_repo::rpc::RepoSyncRpc>(
             iroh_endpoint.clone(),
             iroh::EndpointAddr::new(peer_id.into()),
             crate::sync::REPO_SYNC_ALPN,
         );
         let doc_id_string = self.doc_id.to_string();
         let response = rpc_client
-            .rpc(am_utils_rs::repo::rpc::GetDocsFullRpcReq {
-                req: am_utils_rs::repo::rpc::GetDocsFullRequest {
+            .rpc(big_repo::rpc::GetDocsFullRpcReq {
+                req: big_repo::rpc::GetDocsFullRequest {
                     doc_ids: vec![doc_id_string.clone()],
                 },
             })
@@ -126,12 +126,12 @@ impl DocSyncWorker {
                 .sync_with_peer(self.doc_id, Some(Duration::from_secs(10)))
                 .await?;
             match outcome {
-                am_utils_rs::repo::SyncDocOutcome::Success => {
+                big_repo::SyncDocOutcome::Success => {
                     return Ok(SyncDocOutcome::Synced);
                 }
-                am_utils_rs::repo::SyncDocOutcome::NotFoundOrUnauthorized
-                | am_utils_rs::repo::SyncDocOutcome::TransportError
-                | am_utils_rs::repo::SyncDocOutcome::IoError => {
+                big_repo::SyncDocOutcome::NotFoundOrUnauthorized
+                | big_repo::SyncDocOutcome::TransportError
+                | big_repo::SyncDocOutcome::IoError => {
                     eyre::bail!("error during big_repo sync: {outcome:?}")
                 }
             }
@@ -140,15 +140,15 @@ impl DocSyncWorker {
         let heads = ChangeHashSet(loaded.get_heads().into());
         match self.big_repo.put_doc(self.doc_id, loaded).await {
             Ok(_) => Ok(SyncDocOutcome::Imported { heads }),
-            Err(am_utils_rs::repo::PutDocError::IdOccpuied { .. }) => {
+            Err(big_repo::PutDocError::IdOccpuied { .. }) => {
                 let outcome = connection
                     .sync_with_peer(self.doc_id, Some(Duration::from_secs(10)))
                     .await?;
                 match outcome {
-                    am_utils_rs::repo::SyncDocOutcome::Success => Ok(SyncDocOutcome::Synced),
-                    am_utils_rs::repo::SyncDocOutcome::NotFoundOrUnauthorized
-                    | am_utils_rs::repo::SyncDocOutcome::TransportError
-                    | am_utils_rs::repo::SyncDocOutcome::IoError => {
+                    big_repo::SyncDocOutcome::Success => Ok(SyncDocOutcome::Synced),
+                    big_repo::SyncDocOutcome::NotFoundOrUnauthorized
+                    | big_repo::SyncDocOutcome::TransportError
+                    | big_repo::SyncDocOutcome::IoError => {
                         eyre::bail!("error during big_repo sync: {outcome:?}")
                     }
                 }

@@ -412,7 +412,7 @@ impl Rt {
         processor_full_id: &str,
     ) -> Res<Option<ProcessorRunlogDone>> {
         let item_id = Self::processor_runlog_item_id(doc_id, processor_full_id);
-        let payload = self.rcx.partition_store.item_payload(&item_id).await?;
+        let payload = self.rcx.part_store.item_payload(&item_id).await?;
         let Some(payload) = payload else {
             return Ok(None);
         };
@@ -1071,7 +1071,7 @@ impl Rt {
         done_token: &str,
     ) -> Res<()> {
         upsert_processor_runlog_item(
-            self.rcx.partition_store.as_ref(),
+            self.rcx.part_store.as_ref(),
             &self.config.device_id,
             doc_id,
             processor_full_id,

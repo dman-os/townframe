@@ -26,7 +26,7 @@ impl DrawerRepo {
             )
             "#,
         )
-        .execute(&self.meta_store_sql.db_pool)
+        .execute(&self.meta_store_sql.write_pool)
         .await?;
         sqlx::query(
             r#"
@@ -42,17 +42,17 @@ impl DrawerRepo {
             )
             "#,
         )
-        .execute(&self.meta_store_sql.db_pool)
+        .execute(&self.meta_store_sql.write_pool)
         .await?;
         sqlx::query(
             "CREATE INDEX IF NOT EXISTS idx_drawer_local_branches_doc_id ON drawer_local_branches(doc_id)",
         )
-        .execute(&self.meta_store_sql.db_pool)
+        .execute(&self.meta_store_sql.write_pool)
         .await?;
         sqlx::query(
             "CREATE INDEX IF NOT EXISTS idx_drawer_local_branches_deleted_doc_path ON drawer_local_branches_deleted(doc_id, branch_path, deleted_at DESC)",
         )
-        .execute(&self.meta_store_sql.db_pool)
+        .execute(&self.meta_store_sql.write_pool)
         .await?;
         Ok(())
     }
@@ -83,7 +83,7 @@ impl DrawerRepo {
         .bind(vtag.version.to_string())
         .bind(vtag.actor_id.to_string())
         .bind(updated_at)
-        .execute(&self.meta_store_sql.db_pool)
+        .execute(&self.meta_store_sql.write_pool)
         .await?;
         Ok(())
     }
@@ -98,7 +98,7 @@ impl DrawerRepo {
         )
         .bind(doc_id)
         .bind(branch_path.to_string())
-        .fetch_optional(&self.meta_store_sql.db_pool)
+        .fetch_optional(&self.meta_store_sql.write_pool)
         .await?;
 
         Ok(rec.map(|blob| DocumentId::new(blob.try_into().expect(ERROR_IMPOSSIBLE))))
@@ -114,7 +114,7 @@ impl DrawerRepo {
                 WHERE doc_id = ?1 ORDER BY branch_path ASC"#,
         )
         .bind(doc_id)
-        .fetch_all(&self.meta_store_sql.db_pool)
+        .fetch_all(&self.meta_store_sql.write_pool)
         .await?
         .into_iter()
         .map(|(path, id)| {
@@ -139,7 +139,7 @@ impl DrawerRepo {
             serde_json::to_string(&am_utils_rs::serialize_commit_heads(branch_heads.as_ref()))
                 .expect(ERROR_JSON);
 
-        let mut tx = self.meta_store_sql.db_pool.begin().await?;
+        let mut tx = self.meta_store_sql.write_pool.begin().await?;
         sqlx::query(
             r#"
             INSERT INTO "drawer_local_branches_deleted" (

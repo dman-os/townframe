@@ -1080,6 +1080,7 @@ dependencies = [
  "subduction_iroh",
  "subduction_keyhive",
  "subduction_websocket",
+ "surelock",
  "tempfile",
  "thiserror 2.0.18",
  "tokio",

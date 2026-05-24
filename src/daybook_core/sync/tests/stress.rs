@@ -191,8 +191,8 @@ async fn init_and_copy_repo_cluster(root: &std::path::Path) -> Res<Vec<PathBuf>>
     )
     .await?;
     let source_repo_id = rtx.repo_id.clone();
-    let source_app_doc_id = *rtx.doc_app.document_id();
-    let source_drawer_doc_id = *rtx.doc_drawer.document_id();
+    let source_app_doc_id = rtx.doc_app.document_id();
+    let source_drawer_doc_id = rtx.doc_drawer.document_id();
     rtx.shutdown().await?;
 
     let seed_node = open_sync_node(&paths[0]).await?;
@@ -210,14 +210,14 @@ async fn init_and_copy_repo_cluster(root: &std::path::Path) -> Res<Vec<PathBuf>>
                     ctx.repo_id
                 );
             }
-            if ctx.doc_app.document_id() != &source_app_doc_id {
+            if ctx.doc_app.document_id() != source_app_doc_id {
                 eyre::bail!(
                     "stress init app doc mismatch after clone (source={}, cloned={})",
                     source_app_doc_id,
                     ctx.doc_app.document_id()
                 );
             }
-            if ctx.doc_drawer.document_id() != &source_drawer_doc_id {
+            if ctx.doc_drawer.document_id() != source_drawer_doc_id {
                 eyre::bail!(
                     "stress init drawer doc mismatch after clone (source={}, cloned={})",
                     source_drawer_doc_id,
@@ -287,7 +287,7 @@ async fn connect_topology(
 
 async fn wait_network_rest(
     nodes: &[Option<SyncTestNode>],
-    endpoint_sets: &[HashSet<EndpointId>],
+    peers_set: &[HashSet<PeerId>],
     timeout: Duration,
     blob_timeout: Duration,
 ) -> Res<()> {
@@ -295,9 +295,11 @@ async fn wait_network_rest(
         let Some(node) = node_opt.as_ref() else {
             continue;
         };
-        let peers = endpoint_sets[idx].iter().cloned().collect::<Vec<_>>();
+        let peers = peers_set[idx].iter().cloned().collect::<Vec<_>>();
         if !peers.is_empty() {
-            node.sync_repo.wait_until_peers_sync(&peers).await?;
+            node.sync_repo
+                .wait_until_peers_sync(&peers, timeout)
+                .await?;
         }
     }
 

@@ -1108,7 +1108,7 @@ mod tests {
             ctx.doc_app.document_id().clone(),
             Arc::clone(&plugs_repo),
             daybook_types::doc::UserPathBuf::from(ctx.local_user_path.clone()),
-            ctx.sql.db_pool.clone(),
+            ctx.sql.write_pool.clone(),
         )
         .await?;
         let (sqlite_local_state_repo, sqlite_local_state_stop) =
@@ -1119,7 +1119,7 @@ mod tests {
             Arc::clone(&sqlite_local_state_repo),
         )
         .await?;
-        let (progress_repo, progress_stop) = ProgressRepo::boot(ctx.sql.db_pool.clone()).await?;
+        let (progress_repo, progress_stop) = ProgressRepo::boot(ctx.sql.write_pool.clone()).await?;
         let (sync_repo, sync_stop) = IrohSyncRepo::boot(
             Arc::clone(&ctx),
             Arc::clone(&config_repo),
@@ -1412,7 +1412,7 @@ mod lazy {
                     ctx.doc_app.document_id().clone(),
                     Arc::clone(&plugs),
                     daybook_types::doc::UserPathBuf::from(ctx.local_user_path.clone()),
-                    ctx.sql.db_pool.clone(),
+                    ctx.sql.write_pool.clone(),
                 )
                 .await?;
                 register_shutdown(move || async move { config_stop.stop().await });
@@ -1435,7 +1435,7 @@ mod lazy {
                     Arc::clone(&ctx.big_repo),
                     ctx.doc_app.document_id().clone(),
                     daybook_types::doc::UserPathBuf::from(ctx.local_user_path.clone()),
-                    ctx.sql.db_pool.clone(),
+                    ctx.sql.write_pool.clone(),
                 )
                 .await?;
                 register_shutdown(move || async move { dispatch_stop.stop().await });
@@ -1496,7 +1496,7 @@ mod lazy {
         match PROGRESS
             .get_or_try_init(|| async {
                 let ctx = repo_ctx().await?;
-                let (repo, stop) = ProgressRepo::boot(ctx.sql.db_pool.clone()).await?;
+                let (repo, stop) = ProgressRepo::boot(ctx.sql.write_pool.clone()).await?;
                 register_shutdown(move || async move { stop.stop().await });
                 Ok(repo)
             })

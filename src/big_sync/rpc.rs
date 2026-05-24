@@ -37,7 +37,7 @@ pub trait HostBigRpcClient: Send + Sync {
 
 #[rpc_requests(message = BigSyncRpcMessage)]
 #[derive(Debug, serde::Serialize, serde::Deserialize)]
-enum BigSyncRpc {
+pub enum BigSyncIrpc {
     #[rpc(tx = channel::oneshot::Sender<Result<PeerSummaryResult, ListPartsError>>)]
     PeerSummary(PeerSummaryRequest),
     #[rpc(tx = channel::mpsc::Sender<SubEventWire>)]
@@ -49,7 +49,7 @@ enum BigSyncRpc {
 }
 
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
-enum SubEventWire {
+pub enum SubEventWire {
     Upserted {
         cursor: big_sync_core::part_store::CursorIndex,
         part_id: big_sync_core::PartId,
@@ -115,11 +115,11 @@ impl TryFrom<SubEventWire> for SubEvent {
 
 #[derive(Clone)]
 pub struct BigSyncRpcHandle {
-    client: irpc::Client<BigSyncRpc>,
+    client: irpc::Client<BigSyncIrpc>,
 }
 
 impl BigSyncRpcHandle {
-    fn local_sender(&self) -> irpc::LocalSender<BigSyncRpc> {
+    pub fn local_sender(&self) -> irpc::LocalSender<BigSyncIrpc> {
         self.client.as_local().expect(ERROR_IMPOSSIBLE)
     }
 
@@ -132,7 +132,7 @@ impl BigSyncRpcHandle {
 
 #[derive(Clone)]
 pub struct BigSyncRpcProtocolHandler {
-    tx: irpc::LocalSender<BigSyncRpc>,
+    tx: irpc::LocalSender<BigSyncIrpc>,
 }
 
 impl std::fmt::Debug for BigSyncRpcProtocolHandler {
@@ -149,7 +149,7 @@ impl iroh::protocol::ProtocolHandler for BigSyncRpcProtocolHandler {
         conn: iroh::endpoint::Connection,
     ) -> Result<(), iroh::protocol::AcceptError> {
         loop {
-            let msg = match irpc_iroh::read_request::<BigSyncRpc>(&conn).await {
+            let msg = match irpc_iroh::read_request::<BigSyncIrpc>(&conn).await {
                 Ok(Some(msg)) => msg,
                 Ok(None) => break,
                 Err(err) => {
@@ -188,7 +188,7 @@ pub async fn spawn_big_sync_rpc(
     store: Arc<dyn HostPartStore>,
 ) -> Res<(BigSyncRpcHandle, BigSyncRpcStopToken)> {
     let (rpc_tx, mut rpc_rx) = mpsc::channel(1024);
-    let client = irpc::Client::<BigSyncRpc>::local(rpc_tx);
+    let client = irpc::Client::<BigSyncIrpc>::local(rpc_tx);
 
     let cancel_token = CancellationToken::new();
     let subscription_tasks = Arc::new(utils_rs::AbortableJoinSet::new());
@@ -230,13 +230,13 @@ pub async fn spawn_big_sync_rpc(
 
 #[derive(Clone)]
 pub struct IrohBigSyncRpcClient {
-    client: irpc::Client<BigSyncRpc>,
+    client: irpc::Client<BigSyncIrpc>,
 }
 
 impl IrohBigSyncRpcClient {
     pub fn new(endpoint: iroh::Endpoint, endpoint_addr: iroh::EndpointAddr) -> Self {
         Self {
-            client: irpc_iroh::client::<BigSyncRpc>(endpoint, endpoint_addr, BIG_SYNC_RPC_ALPN),
+            client: irpc_iroh::client::<BigSyncIrpc>(endpoint, endpoint_addr, BIG_SYNC_RPC_ALPN),
         }
     }
 }

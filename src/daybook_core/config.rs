@@ -726,7 +726,7 @@ mod tests {
 
         let app_doc = automerge::Automerge::load(&crate::app::version_updates::version_latest()?)?;
         let app_doc_handle = big_repo.put_doc(DocumentId::random(), app_doc).await?;
-        let app_doc_id = *app_doc_handle.document_id();
+        let app_doc_id = app_doc_handle.document_id();
 
         let temp = tempfile::tempdir()?;
         let blobs_repo = crate::blobs::BlobsRepo::new(

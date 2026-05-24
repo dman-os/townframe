@@ -1,8 +1,8 @@
 use crate::interlude::*;
 
 use crate::app::*;
+use crate::sync::PeerKey;
 
-use am_utils_rs::partition::PartitionStore;
 use big_repo::BigDocHandle;
 use big_repo::SharedPartStore;
 use daybook_types::doc::{UserPath, UserPathBuf};
@@ -87,16 +87,15 @@ pub struct RepoCtx {
     pub lock_guard: RepoLockGuard,
 
     pub sql: SqlCtx,
-    pub partition_store: SharedPartStore,
-    partition_store_stop: am_utils_rs::partition::PartitionStoreStopToken,
+    pub part_store: SharedPartStore,
 
     pub big_repo: SharedBigRepo,
-    big_repo_stop: std::sync::Mutex<Option<am_utils_rs::BigRepoStopToken>>,
+    big_repo_stop: std::sync::Mutex<Option<big_repo::BigRepoStopToken>>,
 
     pub doc_app: BigDocHandle,
     pub doc_drawer: BigDocHandle,
 
-    pub local_peer_key: am_utils_rs::sync::protocol::PeerKey,
+    pub local_peer_key: PeerKey,
     pub local_actor_id: automerge::ActorId,
     pub local_user_path: UserPathBuf,
     pub local_device_name: String,
@@ -113,11 +112,10 @@ pub(crate) struct RepoCtxParts {
     pub layout: RepoLayout,
     pub lock_guard: RepoLockGuard,
     pub sql: SqlCtx,
-    pub partition_store: SharedPartStore,
-    pub partition_store_stop: am_utils_rs::partition::PartitionStoreStopToken,
+    pub part_store: SharedPartStore,
     pub big_repo: SharedBigRepo,
-    pub big_repo_stop: std::sync::Mutex<Option<am_utils_rs::BigRepoStopToken>>,
-    pub local_peer_key: am_utils_rs::sync::protocol::PeerKey,
+    pub big_repo_stop: std::sync::Mutex<Option<big_repo::BigRepoStopToken>>,
+    pub local_peer_key: PeerKey,
     pub local_actor_id: automerge::ActorId,
     pub local_user_path: UserPathBuf,
     pub local_device_name: String,
@@ -142,8 +140,7 @@ impl RepoCtx {
             layout: parts.layout,
             lock_guard: parts.lock_guard,
             sql: parts.sql,
-            partition_store: parts.partition_store,
-            partition_store_stop: parts.partition_store_stop,
+            part_store: parts.part_store,
             big_repo: parts.big_repo,
             big_repo_stop: parts.big_repo_stop,
             doc_app,
@@ -225,13 +222,19 @@ impl RepoCtx {
             local_user_path,
             local_actor_id,
         } = compute_user_info(&repo_id, &user_id, &identity);
-        let (partition_store, partition_store_stop) =
-            PartitionStore::boot(sql.db_pool.clone()).await?;
+        let part_store = big_sync::SqlitePartStore::new(
+            sql.read_pool.clone(),
+            sql.write_pool.clone(),
+            &repo_id[..],
+            big_sync_core::BuckId::MAX_LEVEL,
+        )
+        .await?;
+        let part_store: Arc<dyn big_sync::HostPartStore> = Arc::new(part_store) as _;
         let (big_repo, big_repo_stop) =
-            boot_big_repo(&layout, &identity, Arc::clone(&partition_store)).await?;
+            boot_big_repo(&layout, &identity, Arc::clone(&part_store)).await?;
         let (doc_app, doc_drawer) = load_core_docs(&big_repo, &sql).await?;
         ensure_expected_partitions_for_docs(
-            &partition_store,
+            &part_store,
             doc_app.document_id(),
             doc_drawer.document_id(),
         )
@@ -240,9 +243,8 @@ impl RepoCtx {
             layout,
             lock_guard,
             sql,
-            partition_store,
+            part_store,
             big_repo,
-            partition_store_stop,
             big_repo_stop: std::sync::Mutex::new(Some(big_repo_stop)),
             local_peer_key,
             local_actor_id,
@@ -300,7 +302,7 @@ impl RepoCtx {
             globals::set_string_global(&sql, "global.user_id", &user_id),
         )?;
         let identity = {
-            let secret = iroh::SecretKey::generate(&mut rand::rng());
+            let secret = iroh::SecretKey::generate();
             secret_repo.set_identity(&checkout_id, secret).await?
         };
         let UserInfo {
@@ -308,20 +310,26 @@ impl RepoCtx {
             local_user_path,
             local_actor_id,
         } = compute_user_info(&repo_id, &user_id, &identity);
-        let (partition_store, partition_store_stop) =
-            PartitionStore::boot(sql.db_pool.clone()).await?;
+        let part_store = big_sync::SqlitePartStore::new(
+            sql.read_pool.clone(),
+            sql.write_pool.clone(),
+            &repo_id[..],
+            big_sync_core::BuckId::MAX_LEVEL,
+        )
+        .await?;
+        let part_store: Arc<dyn big_sync::HostPartStore> = Arc::new(part_store) as _;
         let (big_repo, big_repo_stop) =
-            boot_big_repo(&layout, &identity, Arc::clone(&partition_store)).await?;
+            boot_big_repo(&layout, &identity, Arc::clone(&part_store)).await?;
         let (doc_app, doc_drawer) = init_core_docs(&big_repo, &sql).await?;
         ensure_expected_partitions_for_docs(
-            &partition_store,
+            &part_store,
             doc_app.document_id(),
             doc_drawer.document_id(),
         )
         .await?;
         Self::run_repo_init_dance(
             &big_repo,
-            &partition_store,
+            &part_store,
             &doc_app,
             &doc_drawer,
             &local_user_path,
@@ -334,8 +342,7 @@ impl RepoCtx {
             layout,
             lock_guard,
             sql,
-            partition_store,
-            partition_store_stop,
+            part_store,
             big_repo,
             big_repo_stop: std::sync::Mutex::new(Some(big_repo_stop)),
             local_peer_key,
@@ -387,7 +394,7 @@ impl RepoCtx {
             let (repo, stop) = PlugsRepo::load(
                 Arc::clone(big_repo),
                 Arc::clone(&blobs_repo),
-                *doc_app.document_id(),
+                doc_app.document_id(),
                 local_user_path.to_owned(),
             )
             .await
@@ -397,7 +404,7 @@ impl RepoCtx {
 
             let (config_repo, stop) = ConfigRepo::load(
                 Arc::clone(big_repo),
-                *doc_app.document_id(),
+                doc_app.document_id(),
                 Arc::clone(plugs_repo.as_ref().expect("plugs repo must be loaded")),
                 local_user_path.to_owned(),
                 sql.clone(),
@@ -421,7 +428,7 @@ impl RepoCtx {
 
             let (_tables_repo, stop) = TablesRepo::load(
                 Arc::clone(big_repo),
-                *doc_app.document_id(),
+                doc_app.document_id(),
                 local_user_path.to_owned(),
             )
             .await?;
@@ -435,7 +442,7 @@ impl RepoCtx {
 
             let (_dispatch_repo, stop) = DispatchRepo::load(
                 Arc::clone(big_repo),
-                *doc_app.document_id(),
+                doc_app.document_id(),
                 UserPathBuf::from(local_user_path.to_string()),
                 sql.clone(),
             )
@@ -453,7 +460,7 @@ impl RepoCtx {
             let (_drawer_repo, stop) = DrawerRepo::load(
                 Arc::clone(big_repo),
                 Arc::clone(partition_store),
-                *doc_drawer.document_id(),
+                doc_drawer.document_id(),
                 UserPathBuf::from(local_user_path.to_string()),
                 sql.clone(),
                 blobs_root
@@ -540,7 +547,7 @@ impl RepoCtx {
 }
 
 struct UserInfo {
-    local_peer_key: am_utils_rs::sync::protocol::PeerKey,
+    local_peer_key: PeerKey,
     local_user_path: UserPathBuf,
     local_actor_id: automerge::ActorId,
 }
@@ -616,11 +623,10 @@ pub(crate) async fn finish_clone_init(
         .get_doc(&doc_id_drawer)
         .await?
         .ok_or_eyre("clone init: drawer doc missing from BigRepo")?;
-    ensure_expected_partitions_for_docs(&parts.partition_store, &doc_id_app, &doc_id_drawer)
-        .await?;
+    ensure_expected_partitions_for_docs(&parts.part_store, doc_id_app, doc_id_drawer).await?;
     RepoCtx::run_repo_init_dance(
         &parts.big_repo,
-        &parts.partition_store,
+        &parts.part_store,
         &doc_app,
         &doc_drawer,
         local_user_path,
@@ -633,8 +639,8 @@ pub(crate) async fn finish_clone_init(
 
 pub(crate) async fn ensure_expected_partitions_for_docs(
     partition_store: &SharedPartStore,
-    doc_app_id: &DocumentId,
-    doc_drawer_id: &DocumentId,
+    doc_app_id: DocumentId,
+    doc_drawer_id: DocumentId,
 ) -> Res<()> {
     for partition_id in [
         crate::drawer::DrawerRepo::replicated_partition_id_for_drawer(doc_drawer_id),
@@ -785,7 +791,7 @@ pub mod globals {
     pub async fn get_init_state(sql: &SqlCtx) -> Res<InitState> {
         let rec = sqlx::query_scalar::<_, String>("SELECT value FROM kvstore WHERE key = ?1")
             .bind(INIT_STATE_KEY)
-            .fetch_optional(&sql.db_pool)
+            .fetch_optional(&sql.write_pool)
             .await?;
         let state = match rec {
             Some(json) => serde_json::from_str::<InitState>(&json)?,
@@ -798,7 +804,7 @@ pub mod globals {
         sqlx::query("INSERT INTO kvstore(key, value) VALUES (?1, ?2) ON CONFLICT(key) DO UPDATE SET value = excluded.value")
         .bind(INIT_STATE_KEY)
         .bind(&json)
-        .execute(&sql.db_pool)
+        .execute(&sql.write_pool)
         .await?;
         Ok(())
     }
@@ -806,13 +812,13 @@ pub mod globals {
     pub async fn get_string_global(sql: &SqlCtx, key: &str) -> Res<Option<String>> {
         let rec = sqlx::query_scalar::<_, String>("SELECT value FROM kvstore WHERE key = ?1")
             .bind(key)
-            .fetch_optional(&sql.db_pool)
+            .fetch_optional(&sql.write_pool)
             .await?;
         Ok(rec)
     }
 
     pub async fn set_string_global(sql: &SqlCtx, key: &str, value: &str) -> Res<()> {
-        let mut tx = sql.db_pool.begin().await?;
+        let mut tx = sql.write_pool.begin().await?;
 
         if let Some(existing) =
             sqlx::query_scalar::<_, String>("SELECT value FROM kvstore WHERE key = ?1")
@@ -839,7 +845,7 @@ pub mod globals {
         )
         .bind(key)
         .bind(value)
-        .execute(&sql.db_pool)
+        .execute(&sql.write_pool)
         .await?;
         Ok(())
     }
@@ -859,7 +865,7 @@ pub mod globals {
     pub async fn get_sync_config(sql: &SqlCtx) -> Res<SyncConfig> {
         let rec = sqlx::query_scalar::<_, String>("SELECT value FROM kvstore WHERE key = ?1")
             .bind(SYNC_CONFIG_KEY)
-            .fetch_optional(&sql.db_pool)
+            .fetch_optional(&sql.write_pool)
             .await?;
         let state = match rec {
             Some(json) => serde_json::from_str::<SyncConfig>(&json)?,
@@ -873,7 +879,7 @@ pub mod globals {
         sqlx::query("INSERT INTO kvstore(key, value) VALUES (?1, ?2) ON CONFLICT(key) DO UPDATE SET value = excluded.value")
             .bind(SYNC_CONFIG_KEY)
             .bind(&json)
-            .execute(&sql.db_pool)
+            .execute(&sql.write_pool)
             .await?;
         Ok(())
     }

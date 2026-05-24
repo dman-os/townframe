@@ -8,7 +8,8 @@ use std::str::FromStr;
 
 #[derive(Clone)]
 pub struct SqlCtx {
-    pub db_pool: SqlitePool,
+    pub write_pool: SqlitePool,
+    pub read_pool: SqlitePool,
 }
 
 #[derive(Debug, Clone)]
@@ -50,7 +51,9 @@ impl SqlCtx {
         .execute(&db_pool)
         .await?;
 
-        Ok(Self { db_pool })
+        Ok(Self {
+            write_pool: db_pool,
+        })
     }
 }
 
@@ -121,7 +124,7 @@ impl AppCtx {
         local_device_name: String,
     ) -> Res<Arc<RepoCtx>> {
         let rcx = RepoCtx::init(repo_root, options, repo_name, local_device_name).await?;
-        if let Err(err) = crate::app::globals::upsert_known_repo(&self.sql.db_pool, &rcx).await {
+        if let Err(err) = crate::app::globals::upsert_known_repo(&self.sql.write_pool, &rcx).await {
             let _ = rcx.shutdown().await;
             return Err(err);
         }
@@ -135,7 +138,7 @@ impl AppCtx {
         local_device_name: String,
     ) -> Res<Arc<RepoCtx>> {
         let rcx = RepoCtx::open(repo_root, options, local_device_name).await?;
-        if let Err(err) = crate::app::globals::upsert_known_repo(&self.sql.db_pool, &rcx).await {
+        if let Err(err) = crate::app::globals::upsert_known_repo(&self.sql.write_pool, &rcx).await {
             let _ = rcx.shutdown().await;
             return Err(err);
         }

@@ -74,7 +74,7 @@ impl InitRepo {
             )
             "#,
         )
-        .execute(&repo_sql.db_pool)
+        .execute(&repo_sql.write_pool)
         .await?;
 
         let registry = crate::repos::ListenersRegistry::new();
@@ -272,7 +272,7 @@ impl InitRepo {
                     "SELECT init_id FROM init_per_node WHERE init_id = ?1",
                 )
                 .bind(init_id)
-                .fetch_optional(&self.repo_sql.db_pool)
+                .fetch_optional(&self.repo_sql.write_pool)
                 .await?;
                 rec.is_some()
             }
@@ -318,7 +318,7 @@ impl InitRepo {
                 )
                 .bind(init_id)
                 .bind(jiff::Timestamp::now().to_string())
-                .execute(&self.repo_sql.db_pool)
+                .execute(&self.repo_sql.write_pool)
                 .await?;
             }
             daybook_types::manifest::InitRunMode::PerBoot => {

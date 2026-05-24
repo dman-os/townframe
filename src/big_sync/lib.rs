@@ -7,7 +7,7 @@ mod interlude {
 use crate::interlude::*;
 
 mod part_store;
-mod rpc;
+pub mod rpc;
 #[cfg(any(test, feature = "test-support"))]
 pub mod stress_support;
 #[cfg(test)]
@@ -20,10 +20,6 @@ mod worker;
 pub use big_sync_core::part_store::ObjPayload;
 pub use part_store::sqlite::SqlitePartStore;
 pub use part_store::{HostPartStore, ObjStoreLease, StoreMutationOutcome};
-pub use rpc::{
-    spawn_big_sync_rpc, BigSyncRpcHandle, BigSyncRpcStopToken, HostBigRpcClient,
-    IrohBigSyncRpcClient, BIG_SYNC_RPC_ALPN,
-};
 #[cfg(any(test, feature = "test-support"))]
 pub use worker::WorkerSnapshot;
 pub use worker::{

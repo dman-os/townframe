@@ -1018,7 +1018,7 @@ mod tests {
             tx.put(automerge::ROOT, "version", "0")?;
             tx.commit();
         }
-        let drawer_doc_id = *big_repo
+        let drawer_doc_id = big_repo
             .put_doc(DocumentId::random(), drawer_doc)
             .await?
             .document_id();

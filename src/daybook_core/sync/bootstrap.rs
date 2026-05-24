@@ -250,7 +250,7 @@ async fn pull_required_partitions_via_full_sync_worker(
     let peer_id: am_utils_rs::repo::PeerId = bootstrap.endpoint_id.into();
 
     let (sync_store, sync_store_stop) =
-        am_utils_rs::sync::store::spawn_sync_store(sql.db_pool.clone()).await?;
+        am_utils_rs::sync::store::spawn_sync_store(sql.write_pool.clone()).await?;
     sync_store.allow_peer(source_peer_key.clone()).await?;
 
     let (sync_node_handle, sync_node_stop) = am_utils_rs::sync::node::spawn_sync_node(
@@ -495,7 +495,7 @@ pub async fn clone_repo_init_from_url(
         }
 
         let (partition_store, partition_store_stop) =
-            am_utils_rs::partition::PartitionStore::boot(sql.db_pool.clone()).await?;
+            am_utils_rs::partition::PartitionStore::boot(sql.write_pool.clone()).await?;
         let (big_repo, big_repo_stop) = am_utils_rs::BigRepo::boot(
             am_utils_rs::repo::Config {
                 storage: am_utils_rs::repo::StorageConfig::Disk {
@@ -544,7 +544,7 @@ pub async fn clone_repo_init_from_url(
                 layout,
                 lock_guard,
                 sql: sql.clone(),
-                partition_store: Arc::clone(&partition_store),
+                part_store: Arc::clone(&partition_store),
                 partition_store_stop,
                 big_repo: big_repo.clone(),
                 big_repo_stop: std::sync::Mutex::new(Some(big_repo_stop)),

@@ -904,8 +904,8 @@ async fn iroh_sync_shutdown_peer_updates_catch_up_after_reconnect() -> Res<()> {
             .await?;
 
         // Debug: list what each node knows after full sync
-        let reopened_a_items = reopened_a.ctx.partition_store.list_known_item_ids().await?;
-        let node_b_items = node_b.ctx.partition_store.list_known_item_ids().await?;
+        let reopened_a_items = reopened_a.ctx.part_store.list_known_item_ids().await?;
+        let node_b_items = node_b.ctx.part_store.list_known_item_ids().await?;
         let reopened_a_branches = reopened_a.drawer.list().await?;
         let node_b_branches = node_b.drawer.list().await?;
         eprintln!("=== POST FULL-SYNC DEBUG ===");
@@ -959,14 +959,14 @@ async fn iroh_sync_shutdown_peer_updates_catch_up_after_reconnect() -> Res<()> {
                 "SELECT partition_id, present FROM partition_membership_state WHERE item_id = ?",
             )
             .bind(&main_branch.branch_doc_id)
-            .fetch_all(node_b.ctx.partition_store.state_pool())
+            .fetch_all(node_b.ctx.part_store.state_pool())
             .await?;
                 eprintln!("node_b branch doc partitions: {:?}", partitions_for_branch);
                 let partitions_for_branch_a: Vec<(String, i64)> = sqlx::query_as(
                 "SELECT partition_id, present FROM partition_membership_state WHERE item_id = ?",
             )
             .bind(&main_branch.branch_doc_id)
-            .fetch_all(reopened_a.ctx.partition_store.state_pool())
+            .fetch_all(reopened_a.ctx.part_store.state_pool())
             .await?;
                 eprintln!(
                     "reopened_a branch doc partitions: {:?}",

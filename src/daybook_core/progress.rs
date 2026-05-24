@@ -533,7 +533,7 @@ impl ProgressWorker {
             )
             "#,
         )
-        .execute(&self.repo_sql.db_pool)
+        .execute(&self.repo_sql.write_pool)
         .await?;
 
         sqlx::query(
@@ -547,7 +547,7 @@ impl ProgressWorker {
             )
             "#,
         )
-        .execute(&self.repo_sql.db_pool)
+        .execute(&self.repo_sql.write_pool)
         .await?;
 
         sqlx::query(
@@ -560,28 +560,28 @@ impl ProgressWorker {
             )
             "#,
         )
-        .execute(&self.repo_sql.db_pool)
+        .execute(&self.repo_sql.write_pool)
         .await?;
 
         sqlx::query(
             "CREATE INDEX IF NOT EXISTS idx_progress_tasks_state ON progress_tasks(state_json)",
         )
-        .execute(&self.repo_sql.db_pool)
+        .execute(&self.repo_sql.write_pool)
         .await?;
         sqlx::query(
             "CREATE INDEX IF NOT EXISTS idx_progress_tasks_updated ON progress_tasks(updated_at_unix_secs DESC)",
         )
-        .execute(&self.repo_sql.db_pool)
+        .execute(&self.repo_sql.write_pool)
         .await?;
         sqlx::query(
             "CREATE INDEX IF NOT EXISTS idx_progress_task_tags_path ON progress_task_tags(tag_path)",
         )
-        .execute(&self.repo_sql.db_pool)
+        .execute(&self.repo_sql.write_pool)
         .await?;
         sqlx::query(
             "CREATE INDEX IF NOT EXISTS idx_progress_task_updates_task_seq ON progress_task_updates(task_id, sequence DESC)",
         )
-        .execute(&self.repo_sql.db_pool)
+        .execute(&self.repo_sql.write_pool)
         .await?;
 
         self.ensure_progress_tasks_column("latest_update_sequence", "INTEGER")
@@ -618,7 +618,7 @@ impl ProgressWorker {
             FROM progress_tasks
             "#,
         )
-        .fetch_all(&self.repo_sql.db_pool)
+        .fetch_all(&self.repo_sql.write_pool)
         .await?;
 
         for row in rows {
@@ -641,7 +641,7 @@ impl ProgressWorker {
                 "SELECT tag_path FROM progress_task_tags WHERE task_id = ?1 ORDER BY tag_path ASC",
             )
             .bind(&id)
-            .fetch_all(&self.repo_sql.db_pool)
+            .fetch_all(&self.repo_sql.write_pool)
             .await?;
 
             let latest_update = match (
@@ -685,7 +685,7 @@ impl ProgressWorker {
 
         let max_sequence: Option<i64> =
             sqlx::query_scalar("SELECT MAX(sequence) FROM progress_task_updates")
-                .fetch_one(&self.repo_sql.db_pool)
+                .fetch_one(&self.repo_sql.write_pool)
                 .await?;
         self.cache.next_sequence = max_sequence.unwrap_or(0) + 1;
 
@@ -921,7 +921,7 @@ impl ProgressWorker {
         )
         .bind(task_id)
         .bind(MAX_UPDATES_PER_TASK as i64)
-        .fetch_all(&self.repo_sql.db_pool)
+        .fetch_all(&self.repo_sql.write_pool)
         .await?;
 
         let mut from_db: Vec<ProgressUpdateEntry> = rows
@@ -969,7 +969,7 @@ impl ProgressWorker {
             return Ok(());
         }
 
-        let mut tx = self.repo_sql.db_pool.begin().await?;
+        let mut tx = self.repo_sql.write_pool.begin().await?;
 
         let deleted_tasks: Vec<String> = self.persist.deleted_tasks.drain().collect();
         for task_id in deleted_tasks {
@@ -1102,13 +1102,13 @@ impl ProgressWorker {
             "SELECT COUNT(*) FROM pragma_table_info('progress_tasks') WHERE name = ?1",
         )
         .bind(name)
-        .fetch_one(&self.repo_sql.db_pool)
+        .fetch_one(&self.repo_sql.write_pool)
         .await?;
         if exists == 0 {
             sqlx::query(&format!(
                 "ALTER TABLE progress_tasks ADD COLUMN {name} {ty}"
             ))
-            .execute(&self.repo_sql.db_pool)
+            .execute(&self.repo_sql.write_pool)
             .await?;
         }
         Ok(())

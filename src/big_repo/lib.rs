@@ -6,7 +6,6 @@ mod interlude {
 use crate::interlude::*;
 use crate::rpc::FullDoc;
 
-use async_lock::Mutex as AsyncMutex;
 use std::collections::BTreeSet;
 use std::str::FromStr;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -142,24 +141,21 @@ impl BigRepo {
     }
 
     pub fn sync_backend(self: &Arc<Self>) -> Arc<dyn big_sync::SyncBackend> {
-        let backend = self
-            .sync_backend
-            .get()
-            .expect("big repo sync backend not initialized");
+        let backend = self.sync_backend.get().expect(ERROR_IMPOSSIBLE);
         let backend: Arc<dyn big_sync::SyncBackend> = backend.clone();
         backend
     }
 
-    async fn register_remote_repo_peer(
+    fn register_remote_repo_peer(
         self: &Arc<Self>,
         peer_id: PeerId,
         endpoint_addr: iroh::EndpointAddr,
-    ) -> Res<()> {
+    ) {
         let backend = self
             .sync_backend
             .get()
             .expect("big repo sync backend not initialized");
-        backend.register_remote_peer(peer_id, endpoint_addr).await
+        backend.register_remote_peer(peer_id, endpoint_addr)
     }
 }
 
@@ -225,8 +221,7 @@ impl BigRepo {
             .runtime
             .open_connection_iroh(endpoint, endpoint_addr, peer_id, end_signal_tx)
             .await?;
-        self.register_remote_repo_peer(peer_id, register_endpoint_addr)
-            .await?;
+        self.register_remote_repo_peer(peer_id, register_endpoint_addr);
         Ok(BigRepoConnection {
             repo: Arc::clone(self),
             peer_id,
@@ -252,8 +247,7 @@ impl BigRepo {
             iroh::PublicKey::from_bytes(peer_id.as_bytes())
                 .expect("big repo peer id must be a valid iroh public key"),
         );
-        self.register_remote_repo_peer(peer_id, endpoint_addr)
-            .await?;
+        self.register_remote_repo_peer(peer_id, endpoint_addr);
         Ok(BigRepoConnection {
             repo: Arc::clone(self),
             peer_id,
@@ -581,7 +575,8 @@ fn doc_heads_from_payload(payload: serde_json::Value) -> Arc<[ChangeHash]> {
 struct BigRepoSyncBackend {
     repo: std::sync::Weak<BigRepo>,
     repo_rpc_endpoint: iroh::Endpoint,
-    remote_repo_clients: Arc<AsyncMutex<std::collections::HashMap<PeerId, Arc<RepoRpcClient>>>>,
+    remote_repo_clients:
+        Arc<surelock::mutex::Mutex<std::collections::HashMap<PeerId, Arc<RepoRpcClient>>>>,
 }
 
 #[derive(Clone)]
@@ -624,38 +619,36 @@ impl BigRepoSyncBackend {
         Ok(Self {
             repo,
             repo_rpc_endpoint: endpoint,
-            remote_repo_clients: Arc::new(AsyncMutex::new(std::collections::HashMap::new())),
+            remote_repo_clients: surelock::mutex::Mutex::new(default()).into(),
         })
     }
 
-    async fn register_remote_peer(
-        &self,
-        peer_id: PeerId,
-        endpoint_addr: iroh::EndpointAddr,
-    ) -> Res<()> {
-        let mut remote_repo_clients = self.remote_repo_clients.lock().await;
-        if endpoint_addr.addrs.is_empty()
-            && remote_repo_clients
-                .get(&peer_id)
-                .is_some_and(|existing| !existing.endpoint_addr.addrs.is_empty())
-        {
-            return Ok(());
-        }
-        let client = Arc::new(RepoRpcClient::new(
-            self.repo_rpc_endpoint.clone(),
-            endpoint_addr,
-        ));
-        remote_repo_clients.insert(peer_id, client);
-        Ok(())
+    fn register_remote_peer(&self, peer_id: PeerId, endpoint_addr: iroh::EndpointAddr) {
+        surelock::key::lock_scope(|key| {
+            let (mut remote_repo_clients, _key) = key.lock(&self.remote_repo_clients);
+            if endpoint_addr.addrs.is_empty()
+                && remote_repo_clients
+                    .get(&peer_id)
+                    .is_some_and(|existing| !existing.endpoint_addr.addrs.is_empty())
+            {
+                return;
+            }
+            let client = Arc::new(RepoRpcClient::new(
+                self.repo_rpc_endpoint.clone(),
+                endpoint_addr,
+            ));
+            remote_repo_clients.insert(peer_id, client);
+        })
     }
 
-    async fn remote_repo_client(&self, peer_id: PeerId) -> Res<Arc<RepoRpcClient>> {
-        self.remote_repo_clients
-            .lock()
-            .await
-            .get(&peer_id)
-            .cloned()
-            .ok_or_else(|| ferr!("missing repo rpc client for peer {peer_id:?}"))
+    fn remote_repo_client(&self, peer_id: PeerId) -> Res<Arc<RepoRpcClient>> {
+        surelock::key::lock_scope(|key| {
+            let (remote_repo_clients, _key) = key.lock(&self.remote_repo_clients);
+            remote_repo_clients
+                .get(&peer_id)
+                .cloned()
+                .ok_or_else(|| ferr!("missing repo rpc client for peer {peer_id:?}"))
+        })
     }
 
     async fn materialize_existing_doc_heads(
@@ -687,7 +680,7 @@ impl BigRepoSyncBackend {
             .repo
             .upgrade()
             .ok_or_else(|| eyre::eyre!("big repo dropped while sync backend was active"))?;
-        let client = self.remote_repo_client(peer_id).await?;
+        let client = self.remote_repo_client(peer_id)?;
         let doc_id = obj_id.to_string();
         let Some(full_doc) = client
             .get_docs_full(vec![doc_id.clone()])
@@ -841,7 +834,7 @@ pub(crate) mod tests {
     use tempfile::tempdir;
     use tokio::{sync::Notify, time::timeout};
 
-    const BIG_REPO_STRESS_BACKEND_ID: big_sync::BackendId = 0;
+    const BIG_REPO_BACKEND_ID: big_sync::BackendId = 0;
 
     pub async fn boot_part_store(
         sqlite_url: &str,
@@ -1819,7 +1812,7 @@ pub(crate) mod tests {
     }
 
     #[async_trait::async_trait]
-    impl big_sync::HostBigRpcClient for StressBigSyncRpcClient {
+    impl big_sync::rpc::HostBigRpcClient for StressBigSyncRpcClient {
         async fn peer_summary(
             &self,
             req: big_sync_core::rpc::PeerSummaryRequest,
@@ -1895,7 +1888,7 @@ pub(crate) mod tests {
         stop_token: BigRepoStopToken,
         endpoint: iroh::Endpoint,
         router: iroh::protocol::Router,
-        repo_rpc_stop: Option<crate::rpc::RepoRpcStopToken>,
+        repo_rpc_stop: Option<crate::rpc::BigRepoRpcStopToken>,
         accept_count: Arc<AtomicUsize>,
         accept_notify: Arc<Notify>,
         accepted_connection: Arc<tokio::sync::Mutex<Option<BigRepoConnection>>>,
@@ -1944,7 +1937,7 @@ pub(crate) mod tests {
             .await?;
             big_sync_stop.stop().await?;
             let mut sync_backends = HashMap::new();
-            sync_backends.insert(BIG_REPO_STRESS_BACKEND_ID, repo.sync_backend());
+            sync_backends.insert(BIG_REPO_BACKEND_ID, repo.sync_backend());
             let (big_sync_worker, big_sync_stop) =
                 big_sync::spawn_big_sync_worker(Arc::clone(&big_sync_host.store), sync_backends)?;
             let endpoint = iroh::Endpoint::builder(iroh::endpoint::presets::Minimal)
@@ -2054,18 +2047,16 @@ pub(crate) mod tests {
                 .await
                 .unwrap_or_else(|_| remote.endpoint.addr());
             self.repo
-                .register_remote_repo_peer(remote.peer_id(), remote_addr)
-                .await?;
+                .register_remote_repo_peer(remote.peer_id(), remote_addr);
             let self_addr = endpoint_addr_from_remote_info(&remote.endpoint, self.endpoint.id())
                 .await
                 .unwrap_or_else(|_| self.endpoint.addr());
             remote
                 .repo
-                .register_remote_repo_peer(self.peer_id(), self_addr)
-                .await?;
+                .register_remote_repo_peer(self.peer_id(), self_addr);
             let parts = stress_support::test_parts()
                 .into_iter()
-                .map(|part_id| (part_id, BIG_REPO_STRESS_BACKEND_ID))
+                .map(|part_id| (part_id, BIG_REPO_BACKEND_ID))
                 .collect();
             self.big_sync_worker
                 .set_peer(
@@ -2078,7 +2069,7 @@ pub(crate) mod tests {
                 .await?;
             let parts = stress_support::test_parts()
                 .into_iter()
-                .map(|part_id| (part_id, BIG_REPO_STRESS_BACKEND_ID))
+                .map(|part_id| (part_id, BIG_REPO_BACKEND_ID))
                 .collect();
             remote
                 .big_sync_worker

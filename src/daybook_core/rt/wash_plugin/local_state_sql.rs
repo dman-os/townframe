@@ -34,7 +34,7 @@ impl sqlite_connection::HostConnection for SharedWashCtx {
             }
         };
 
-        let mut sql_query = sqlx::query(&query);
+        let mut sql_query = sqlx::query(sqlx::AssertSqlSafe(query));
         for param in params {
             sql_query = bind_sql_value(sql_query, param);
         }
@@ -66,7 +66,10 @@ impl sqlite_connection::HostConnection for SharedWashCtx {
                 ))
             }
         };
-        match sqlx::query(&query).execute(&db_pool).await {
+        match sqlx::query(sqlx::AssertSqlSafe(query))
+            .execute(&db_pool)
+            .await
+        {
             Ok(_) => Ok(Ok(())),
             Err(err) => Ok(Err(query_error_from_sqlx_error(err))),
         }

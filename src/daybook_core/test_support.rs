@@ -286,7 +286,7 @@ pub async fn test_cx_with_options(
             layout,
             lock_guard,
             sql: sql_ctx.clone(),
-            partition_store: Arc::clone(&part_store),
+            part_store: Arc::clone(&part_store),
             partition_store_stop: part_store_stop,
             big_repo: Arc::clone(&big_repo),
             big_repo_stop: std::sync::Mutex::new(None),
@@ -403,15 +403,9 @@ pub async fn boot_part_store(sqlite_url: &str) -> Res<(big_sync::Ctx, big_sync::
         )
         .await?,
     );
-    let store_for_worker: Arc<dyn big_sync::HostPartStore> = store.clone();
-    let (worker, stop) = big_sync::spawn_big_sync_worker(store_for_worker.clone(), HashMap::new())?;
-    Ok((
-        big_sync::Ctx {
-            store: store_for_worker,
-            worker,
-        },
-        stop,
-    ))
+    let store: Arc<dyn big_sync::HostPartStore> = store as _;
+    let (worker, stop) = big_sync::spawn_big_sync_worker(store.clone(), HashMap::new())?;
+    Ok((big_sync::Ctx { store, worker }, stop))
 }
 
 pub async fn boot_repo() -> Res<(

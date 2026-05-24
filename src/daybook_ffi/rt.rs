@@ -45,7 +45,7 @@ impl RtFfi {
                 daybook_core::rt::RtConfig { device_id },
                 cx.doc_app.document_id().clone(),
                 wflow_db_url,
-                cx.sql.db_pool.clone(),
+                cx.sql.write_pool.clone(),
                 Arc::clone(&cx.big_repo),
                 Arc::clone(&drawer_repo.repo),
                 Arc::clone(&plugs_repo.repo),
