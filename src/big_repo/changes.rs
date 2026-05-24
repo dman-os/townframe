@@ -721,7 +721,7 @@ mod tests {
     use tokio::time::{timeout, Duration};
 
     fn make_change_fixture() -> (DocumentId, Arc<[ChangeHash]>, Arc<automerge::Patch>) {
-        let doc_id = DocumentId::new(rand::random());
+        let doc_id = DocumentId::random();
         let mut doc = automerge::Automerge::new();
         let before_heads = doc.get_heads();
         doc.transact(|tx| {

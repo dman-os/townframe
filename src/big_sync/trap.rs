@@ -48,7 +48,7 @@ impl TaskTrap {
 
 pub struct TrappedPartStore {
     pub trap: TaskTrap,
-    pub inner: Arc<dyn crate::part_store::HostPartitionStore>,
+    pub inner: Arc<dyn crate::part_store::HostPartStore>,
 }
 
 impl PartStoreReadOnly<Sendable> for TrappedPartStore {

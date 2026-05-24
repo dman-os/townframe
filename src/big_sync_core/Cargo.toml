@@ -10,6 +10,9 @@ workspace = true
 path = "lib.rs"
 
 [features]
+default = ["uniffi", "test-support", "automerge"]
+uniffi = ["dep:uniffi"]
+automerge = ["dep:autosurgeon"]
 test-support = []
 
 [dependencies]
@@ -24,6 +27,7 @@ structstruck.workspace = true
 bs58.workspace = true
 serde.workspace = true
 siphasher = "1.0.3"
+autosurgeon = { workspace = true, optional = true }
 
 #
 # errors
@@ -39,3 +43,7 @@ future_form.workspace = true
 #
 # logging
 tracing.workspace = true
+
+#
+# ffi
+uniffi = { workspace = true, optional = true }

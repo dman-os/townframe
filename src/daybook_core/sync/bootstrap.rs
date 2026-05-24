@@ -145,7 +145,9 @@ pub async fn resolve_clone_info_from_url(source_url: &str) -> Res<CloneInfoRespo
             .map_err(|err| eyre::eyre!("clone info rpc failed: {err}"))?;
         return Ok(response);
     }
-    let endpoint = iroh::Endpoint::builder().bind().await?;
+    let endpoint = iroh::Endpoint::builder(iroh::endpoint::presets::Minimal)
+        .bind()
+        .await?;
     let client = irpc_iroh::client::<CloneProvisionRpc>(
         endpoint.clone(),
         endpoint_addr,
@@ -176,7 +178,9 @@ pub async fn request_clone_provision_from_url(
             .map_err(|err| eyre::eyre!("clone provision rpc failed: {err}"))?;
         return Ok(response);
     }
-    let endpoint = iroh::Endpoint::builder().bind().await?;
+    let endpoint = iroh::Endpoint::builder(iroh::endpoint::presets::Minimal)
+        .bind()
+        .await?;
     let client = irpc_iroh::client::<CloneProvisionRpc>(
         endpoint.clone(),
         endpoint_addr,
@@ -201,7 +205,7 @@ pub async fn request_clone_provision_from_url(
 ))]
 pub async fn connect_and_pull_required_partitions_once(
     big_repo: &SharedBigRepo,
-    partition_store: &Arc<am_utils_rs::partition::PartitionStore>,
+    partition_store: &SharedPartStore,
     blobs_repo: &Arc<crate::blobs::BlobsRepo>,
     local_peer_key: &str,
     iroh_secret_key: iroh::SecretKey,

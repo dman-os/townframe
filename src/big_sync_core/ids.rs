@@ -1,7 +1,8 @@
 // FIXME: consdier using u64 or u128 for ObjIds since they'll
 // be repo scoped
 
-use crate::{interlude::*, rpc::BuckLevel};
+use crate::interlude::*;
+use crate::rpc::BuckLevel;
 
 macro_rules! alias_byte32id {
     ($name:ident) => {
@@ -21,6 +22,10 @@ macro_rules! alias_byte32id {
             pub const fn new(bytes: [u8; 32]) -> Self {
                 Self(Byte32Id::new(bytes))
             }
+
+            pub fn random() -> Self {
+                Self(Byte32Id::random())
+            }
         }
         impl std::fmt::Display for $name {
             fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
@@ -39,6 +44,33 @@ macro_rules! alias_byte32id {
                 Ok(Self(Byte32Id::from_str(value)?))
             }
         }
+
+        #[cfg(feature = "automerge")]
+        impl autosurgeon::Reconcile for $name {
+            type Key<'a> = autosurgeon::reconcile::NoKey;
+
+            fn reconcile<R: autosurgeon::Reconciler>(
+                &self,
+                mut reconciler: R,
+            ) -> Result<(), R::Error> {
+                reconciler.bytes(self.0 .0)
+            }
+        }
+
+        #[cfg(feature = "automerge")]
+        impl autosurgeon::Hydrate for $name {
+            fn hydrate_bytes(bytes: &[u8]) -> Result<Self, autosurgeon::HydrateError> {
+                if bytes.len() != 32 {
+                    return Err(autosurgeon::HydrateError::unexpected(
+                        "version tag in 32 length byte array",
+                        format!("version tags has byte length of {}", bytes.len()),
+                    ));
+                }
+                let mut buf = [0_u8; 32];
+                buf.copy_from_slice(&bytes[0..16]);
+                Ok(Self(Byte32Id(buf)))
+            }
+        }
     };
 }
 
@@ -53,6 +85,10 @@ impl Byte32Id {
     #[must_use]
     pub const fn new(bytes: [u8; 32]) -> Self {
         Self(bytes)
+    }
+
+    pub fn random() -> Self {
+        Self(rand::random())
     }
 
     #[must_use]
@@ -145,6 +181,30 @@ impl<'de> serde::Deserialize<'de> for Byte32Id {
             }
             deserializer.deserialize_bytes(MyVisitor).map(Self)
         }
+    }
+}
+
+#[cfg(feature = "automerge")]
+impl autosurgeon::Reconcile for Byte32Id {
+    type Key<'a> = autosurgeon::reconcile::NoKey;
+
+    fn reconcile<R: autosurgeon::Reconciler>(&self, mut reconciler: R) -> Result<(), R::Error> {
+        reconciler.bytes(self.0)
+    }
+}
+
+#[cfg(feature = "automerge")]
+impl autosurgeon::Hydrate for Byte32Id {
+    fn hydrate_bytes(bytes: &[u8]) -> Result<Self, autosurgeon::HydrateError> {
+        if bytes.len() != 32 {
+            return Err(autosurgeon::HydrateError::unexpected(
+                "version tag in 32 length byte array",
+                format!("version tags has byte length of {}", bytes.len()),
+            ));
+        }
+        let mut buf = [0_u8; 32];
+        buf.copy_from_slice(&bytes[0..16]);
+        Ok(Self(buf))
     }
 }
 

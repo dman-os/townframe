@@ -21,7 +21,7 @@ pub mod types;
 
 pub use crate::drawer::types::{DocBundle, DocEntry, DocEntryDiff, DocNBranches, DrawerEvent};
 
-use am_utils_rs::partition::PartitionStore;
+use big_repo::{SharedBigRepo, SharedPartStore};
 use cache::FacetCacheKey;
 use cache::*;
 use lru::SharedKeyedLruPool;
@@ -43,10 +43,10 @@ enum BranchKind {
 }
 pub struct DrawerRepo {
     pub big_repo: SharedBigRepo,
-    partition_store: Arc<PartitionStore>,
+    partition_store: SharedPartStore,
     drawer_doc_id: DocumentId,
     local_actor_id: ActorId,
-    local_peer_id: am_utils_rs::repo::PeerId,
+    local_peer_id: PeerId,
     local_user_path: daybook_types::doc::UserPathBuf,
 
     // LRU Caches
@@ -54,7 +54,7 @@ pub struct DrawerRepo {
     facet_cache: surelock::mutex::Mutex<FacetCacheState>,
     facet_schema_validators:
         surelock::mutex::Mutex<HashMap<(String, String), Arc<jsonschema::Validator>>>,
-    branch_handles: surelock::mutex::Mutex<HashMap<Arc<str>, am_utils_rs::repo::BigDocHandle>>,
+    branch_handles: surelock::mutex::Mutex<HashMap<DocumentId, big_repo::BigDocHandle>>,
 
     // LRU Pools (Policy only)
     entry_pool: SharedKeyedLruPool<DocId>,
@@ -62,9 +62,9 @@ pub struct DrawerRepo {
 
     pub registry: Arc<crate::repos::ListenersRegistry>,
     cancel_token: CancellationToken,
-    _change_listener_tickets: Vec<am_utils_rs::repo::BigRepoChangeListenerRegistration>,
+    _change_listener_tickets: Vec<big_repo::BigRepoChangeListenerRegistration>,
     current_heads: surelock::mutex::Mutex<ChangeHashSet>,
-    drawer_doc_handle: am_utils_rs::repo::BigDocHandle,
+    drawer_doc_handle: big_repo::BigDocHandle,
     meta_store_sql: SqlCtx,
     plugs_repo: Option<Arc<crate::plugs::PlugsRepo>>,
 }
@@ -77,7 +77,7 @@ struct ValidatedReference {
 
 #[derive(Debug, Clone)]
 struct BranchRefRow {
-    branch_doc_id: Arc<str>,
+    branch_doc_id: DocumentId,
     branch_kind: BranchKind,
 }
 
@@ -86,7 +86,7 @@ struct BranchRefRow {
 #[derive(Debug, Clone)]
 struct BranchStateRow {
     branch_path: String,
-    branch_doc_id: Arc<str>,
+    branch_doc_id: DocumentId,
     latest_heads: ChangeHashSet,
     branch_kind: BranchKind,
 }
@@ -99,7 +99,7 @@ impl DrawerRepo {
     #[expect(clippy::too_many_arguments)]
     pub async fn load(
         big_repo: SharedBigRepo,
-        partition_store: Arc<PartitionStore>,
+        partition_store: SharedPartStore,
         drawer_doc_id: DocumentId,
         local_user_path: daybook_types::doc::UserPathBuf,
         meta_db_pool: SqlCtx,
@@ -123,8 +123,8 @@ impl DrawerRepo {
 
         // Listen for changes to docs.map
         let (ticket, notif_rx) = big_repo
-            .subscribe_change_listener(am_utils_rs::repo::BigRepoChangeFilter {
-                doc_id: Some(am_utils_rs::repo::BigRepoDocIdFilter::new(drawer_doc_id)),
+            .subscribe_change_listener(big_repo::BigRepoChangeFilter {
+                doc_id: Some(big_repo::BigRepoDocIdFilter::new(drawer_doc_id)),
                 path: vec!["docs".into(), "map".into()],
                 origin: None,
             })
@@ -192,31 +192,30 @@ impl DrawerRepo {
         eyre::bail!("invalid branch path '{}'", branch_path)
     }
 
-    pub(crate) fn replicated_partition_id_for_drawer(
-        _drawer_doc_id: &DocumentId,
-    ) -> am_utils_rs::sync::protocol::PartitionId {
+    pub(crate) fn replicated_partition_id_for_drawer(_drawer_doc_id: &DocumentId) -> PartId {
         DRAWER_REPLICATED_PARTITION_PREFIX.into()
     }
 
-    pub(crate) fn replicated_partition_id(&self) -> am_utils_rs::sync::protocol::PartitionId {
+    pub(crate) fn replicated_partition_id(&self) -> PartId {
         Self::replicated_partition_id_for_drawer(&self.drawer_doc_id)
     }
 
     async fn add_branch_to_partitions_if_needed(
         &self,
         branch_kind: BranchKind,
-        branch_doc_id: Arc<str>,
+        branch_doc_id: DocumentId,
         heads: &ChangeHashSet,
     ) -> Res<()> {
         if branch_kind == BranchKind::Replicated {
             let heads = am_utils_rs::serialize_commit_heads(heads);
             self.partition_store
-                .upsert_item(
+                .upsert_obj(
                     branch_doc_id,
-                    &serde_json::json!({
+                    serde_json::json!({
                         "heads": heads
                     }),
-                    &[self.replicated_partition_id()],
+                    vec![self.replicated_partition_id()],
+                    None,
                 )
                 .await?;
         }
@@ -226,14 +225,11 @@ impl DrawerRepo {
     async fn remove_branch_from_partitions_if_needed(
         &self,
         branch_kind: BranchKind,
-        branch_doc_id: &Arc<str>,
+        branch_doc_id: DocumentId,
     ) -> Res<()> {
         if branch_kind == BranchKind::Replicated {
             self.partition_store
-                .remove_item_from_partition(
-                    self.replicated_partition_id(),
-                    Arc::clone(branch_doc_id),
-                )
+                .remove_obj_from_part(branch_doc_id, self.replicated_partition_id(), None)
                 .await?;
         }
         Ok(())
@@ -242,14 +238,17 @@ impl DrawerRepo {
     fn content_actor_id(
         &self,
         user_path: Option<&daybook_types::doc::UserPath>,
-        branch_doc_id: &str,
+        branch_doc_id: DocumentId,
     ) -> ActorId {
         let base_user_path = user_path.unwrap_or_else(|| &self.local_user_path);
         let scoped_user_path = base_user_path.join("branches").join(branch_doc_id);
         daybook_types::doc::user_path::to_actor_id(&scoped_user_path)
     }
 
-    async fn get_branch_heads_by_doc_id(&self, branch_doc_id: &str) -> Res<Option<ChangeHashSet>> {
+    async fn get_branch_heads_by_doc_id(
+        &self,
+        branch_doc_id: DocumentId,
+    ) -> Res<Option<ChangeHashSet>> {
         let Some(handle) = self.get_handle_by_branch_doc_id(branch_doc_id).await? else {
             return Ok(None);
         };
@@ -267,21 +266,20 @@ impl DrawerRepo {
         let Some(branch_ref) = self.get_branch_ref(doc_id, branch_path).await? else {
             return Ok(None);
         };
-        self.get_branch_heads_by_doc_id(&branch_ref.branch_doc_id)
+        self.get_branch_heads_by_doc_id(branch_ref.branch_doc_id)
             .await
     }
 
     async fn get_handle_by_branch_doc_id(
         &self,
-        branch_doc_id: &str,
-    ) -> Res<Option<am_utils_rs::repo::BigDocHandle>> {
+        document_id: DocumentId,
+    ) -> Res<Option<big_repo::BigDocHandle>> {
         if let Some(handle) = surelock::key::lock_scope(|key| {
             let (handles, _key) = key.lock(&self.branch_handles);
-            handles.get(branch_doc_id).cloned()
+            handles.get(&document_id).cloned()
         }) {
             return Ok(Some(handle));
         }
-        let document_id = DocumentId::from_str(branch_doc_id)?;
         let has_local = self.big_repo.get_doc(&document_id).await?.is_some();
         if !has_local {
             return Ok(None);
@@ -291,7 +289,7 @@ impl DrawerRepo {
         };
         surelock::key::lock_scope(|key| {
             let (mut handles, _key) = key.lock(&self.branch_handles);
-            handles.insert(branch_doc_id.into(), handle.clone());
+            handles.insert(document_id, handle.clone());
         });
         Ok(Some(handle))
     }
@@ -301,12 +299,12 @@ impl DrawerRepo {
         doc_id: &DocId,
         branch_path: &daybook_types::doc::BranchPath,
         heads: &ChangeHashSet,
-    ) -> Res<Option<am_utils_rs::repo::BigDocHandle>> {
+    ) -> Res<Option<big_repo::BigDocHandle>> {
         let Some(branch_ref) = self.get_branch_ref(doc_id, branch_path).await? else {
             return Ok(None);
         };
         let Some(handle) = self
-            .get_handle_by_branch_doc_id(&branch_ref.branch_doc_id)
+            .get_handle_by_branch_doc_id(branch_ref.branch_doc_id)
             .await?
         else {
             return Ok(None);
@@ -400,7 +398,7 @@ impl DrawerRepo {
                 continue;
             }
             let Some(branch_heads) = self
-                .get_branch_heads_by_doc_id(&branch_ref.branch_doc_id)
+                .get_branch_heads_by_doc_id(branch_ref.branch_doc_id)
                 .await?
             else {
                 continue;

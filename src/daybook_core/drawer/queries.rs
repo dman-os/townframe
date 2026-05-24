@@ -285,7 +285,7 @@ impl DrawerRepo {
             return Ok(None);
         };
         let Some(handle) = self
-            .get_handle_by_branch_doc_id(&branch_ref.branch_doc_id)
+            .get_handle_by_branch_doc_id(branch_ref.branch_doc_id)
             .await?
         else {
             return Ok(None);
@@ -464,11 +464,11 @@ impl DrawerRepo {
         else {
             return Ok(HashSet::new());
         };
-        let branch_doc_id = handle.document_id().to_string();
+        let branch_doc_id = handle.document_id();
         let local_user_path = self.local_user_path.clone();
         let mut local_actor_ids = HashSet::from([
             self.local_actor_id.clone(),
-            self.content_actor_id(None, &branch_doc_id),
+            self.content_actor_id(None, branch_doc_id),
         ]);
         if let Some(doc) = self
             .get_doc_with_facets_at_branch_heads(
@@ -503,7 +503,7 @@ impl DrawerRepo {
                             && local_segments.get(1) == user_segments.get(1)
                         {
                             local_actor_ids.insert(
-                                self.content_actor_id(Some(&user_meta.user_path), &branch_doc_id),
+                                self.content_actor_id(Some(&user_meta.user_path), branch_doc_id),
                             );
                         }
                     }

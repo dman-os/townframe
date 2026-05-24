@@ -16,10 +16,10 @@ use daybook_types::doc::{AddDocArgs, ChangeHashSet, DocId, DocPatch, FacetKey};
 
 struct PreparedAddDoc {
     doc_id: DocId,
-    handle: am_utils_rs::repo::BigDocHandle,
+    handle: big_repo::BigDocHandle,
     entry: DocEntry,
     branch_heads: ChangeHashSet,
-    branch_doc_id: Arc<str>,
+    branch_doc_id: DocumentId,
 }
 
 // mutations
@@ -31,14 +31,14 @@ impl DrawerRepo {
         let doc_am = automerge::Automerge::new();
         let handle = match self.big_repo.put_doc(DocumentId::random(), doc_am).await {
             Ok(val) => val,
-            Err(am_utils_rs::repo::PutDocError::IdOccpuied { .. }) => panic!("uuid conflict lol"),
-            Err(am_utils_rs::repo::PutDocError::Other(err)) => {
+            Err(big_repo::PutDocError::IdOccpuied { .. }) => panic!("uuid conflict lol"),
+            Err(big_repo::PutDocError::Other(err)) => {
                 return Err(err).wrap_err("error putting doc in big repo")?;
             }
         };
         let doc_id = DocId::from(Uuid::new_v4().bs58());
-        let branch_doc_id: Arc<str> = handle.document_id().to_string().into();
-        let mutation_actor_id = self.content_actor_id(args.user_path.as_deref(), &branch_doc_id);
+        let branch_doc_id = handle.document_id();
+        let mutation_actor_id = self.content_actor_id(args.user_path.as_deref(), branch_doc_id);
         let now = Timestamp::now();
 
         let facet_keys: Vec<_> = args.facets.keys().cloned().collect();
@@ -81,9 +81,7 @@ impl DrawerRepo {
         let entry = DocEntry {
             branches: [(
                 args.branch_path.to_string(),
-                StoredBranchRef {
-                    branch_doc_id: branch_doc_id.to_string(),
-                },
+                StoredBranchRef { branch_doc_id },
             )]
             .into(),
             branches_deleted: HashMap::new(),
@@ -169,14 +167,14 @@ impl DrawerRepo {
         for prepared in prepared_docs {
             self.add_branch_to_partitions_if_needed(
                 BranchKind::Replicated,
-                Arc::clone(&prepared.branch_doc_id),
+                prepared.branch_doc_id,
                 &prepared.branch_heads,
             )
             .await?;
             doc_ids.push(prepared.doc_id.clone());
             surelock::key::lock_scope(|key| {
                 let (mut handles, _key) = key.lock(&self.branch_handles);
-                handles.insert(Arc::clone(&prepared.branch_doc_id), prepared.handle);
+                handles.insert(prepared.branch_doc_id, prepared.handle);
             });
             events.push(DrawerEvent::DocAdded {
                 id: prepared.doc_id.clone(),
@@ -226,7 +224,7 @@ impl DrawerRepo {
         let heads = match (heads, existing_branch_ref.as_ref()) {
             (Some(selected_heads), _) => selected_heads,
             (None, Some(branch_ref)) => self
-                .get_branch_heads_by_doc_id(&branch_ref.branch_doc_id)
+                .get_branch_heads_by_doc_id(branch_ref.branch_doc_id)
                 .await?
                 .ok_or_else(|| ferr!("missing branch doc '{}'", branch_ref.branch_doc_id))?,
             (None, None) => {
@@ -242,7 +240,7 @@ impl DrawerRepo {
 
         let (handle, branch_doc_id) = if let Some(branch_ref) = existing_branch_ref {
             (
-                self.get_handle_by_branch_doc_id(&branch_ref.branch_doc_id)
+                self.get_handle_by_branch_doc_id(branch_ref.branch_doc_id)
                     .await?
                     .ok_or_else(|| ferr!("missing branch doc '{}'", branch_ref.branch_doc_id))?,
                 branch_ref.branch_doc_id,
@@ -252,7 +250,7 @@ impl DrawerRepo {
                 name: branch_path.to_string(),
             });
         };
-        let mutation_actor_id = self.content_actor_id(patch.user_path.as_deref(), &branch_doc_id);
+        let mutation_actor_id = self.content_actor_id(patch.user_path.as_deref(), branch_doc_id);
         let existing_facet_keys = handle
             .with_document_read(|am_doc| {
                 let facets_obj =
@@ -327,7 +325,7 @@ impl DrawerRepo {
 
         surelock::key::lock_scope(|key| {
             let (mut handles, _key) = key.lock(&self.branch_handles);
-            handles.insert(handle.document_id().to_string().into(), handle);
+            handles.insert(handle.document_id(), handle);
         });
 
         Ok(())
@@ -448,20 +446,20 @@ impl DrawerRepo {
             .await
         {
             Ok(val) => val,
-            Err(am_utils_rs::repo::PutDocError::IdOccpuied { .. }) => panic!("uuid conflict lol"),
-            Err(am_utils_rs::repo::PutDocError::Other(err)) => {
+            Err(big_repo::PutDocError::IdOccpuied { .. }) => panic!("uuid conflict lol"),
+            Err(big_repo::PutDocError::Other(err)) => {
                 return Err(err).wrap_err("error putting doc in big repo")?;
             }
         };
-        let branch_doc_id = handle.document_id().to_string().into();
+        let branch_doc_id = handle.document_id();
         let branch_kind = self.branch_kind_for_path(to_branch)?;
-        self.add_branch_to_partitions_if_needed(branch_kind, Arc::clone(&branch_doc_id), &heads)
+        self.add_branch_to_partitions_if_needed(branch_kind, branch_doc_id, &heads)
             .await?;
 
         let _ = user_path;
         let drawer_heads = if branch_kind == BranchKind::Local {
             let vtag = VersionTag::update(self.local_actor_id.clone());
-            self.upsert_local_branch_ref(id, to_branch, &branch_doc_id, &vtag)
+            self.upsert_local_branch_ref(id, to_branch, branch_doc_id, &vtag)
                 .await?;
             self.invalidate_entry_cache(id);
             self.get_drawer_heads()
@@ -475,12 +473,9 @@ impl DrawerRepo {
                 .await?
                 .ok_or_else(|| DrawerError::DocNotFound { id: id.clone() })?;
             let mut new_entry = entry.clone();
-            new_entry.branches.insert(
-                to_branch.to_string(),
-                StoredBranchRef {
-                    branch_doc_id: branch_doc_id.to_string(),
-                },
-            );
+            new_entry
+                .branches
+                .insert(to_branch.to_string(), StoredBranchRef { branch_doc_id });
             new_entry.vtag = VersionTag::update(self.local_actor_id.clone());
 
             let drawer_heads = self
@@ -576,17 +571,17 @@ impl DrawerRepo {
             }
         })?;
         let handle = self
-            .get_handle_by_branch_doc_id(&to_branch_ref.branch_doc_id)
+            .get_handle_by_branch_doc_id(to_branch_ref.branch_doc_id)
             .await?
             .ok_or_else(|| DrawerError::DocNotFound { id: id.clone() })?;
-        let mutation_actor_id = self.content_actor_id(user_path, &to_branch_ref.branch_doc_id);
+        let mutation_actor_id = self.content_actor_id(user_path, to_branch_ref.branch_doc_id);
         let from_branch_ref = self.get_branch_ref(id, from_branch).await?.ok_or_else(|| {
             DrawerError::BranchNotFound {
                 name: from_branch.to_string(),
             }
         })?;
         let from_handle = self
-            .get_handle_by_branch_doc_id(&from_branch_ref.branch_doc_id)
+            .get_handle_by_branch_doc_id(from_branch_ref.branch_doc_id)
             .await?
             .ok_or_else(|| DrawerError::DocNotFound { id: id.clone() })?;
 
@@ -850,18 +845,13 @@ impl DrawerRepo {
                     "deleted drawer entry must be returned with deletion result"
                 ))?;
             };
-            let local_branch_refs = self
-                .list_local_branch_refs(id)
-                .await?
-                .into_iter()
-                .map(|(path, id)| (path, id.into()))
-                .collect::<Vec<(_, Arc<str>)>>();
+            let local_branch_refs = self.list_local_branch_refs(id).await?;
             for (branch_path, branch_ref) in &entry.branches {
                 self.remove_branch_from_partitions_if_needed(
                     self.branch_kind_for_path(daybook_types::doc::BranchPath::new(
                         &branch_path[..],
                     ))?,
-                    &branch_ref.branch_doc_id.clone().into(),
+                    branch_ref.branch_doc_id,
                 )
                 .await?;
             }
@@ -869,24 +859,24 @@ impl DrawerRepo {
             surelock::key::lock_scope(|key| {
                 let (mut handles, _key) = key.lock(&self.branch_handles);
                 for branch_ref in entry.branches.values() {
-                    handles.remove(&branch_ref.branch_doc_id[..]);
+                    handles.remove(&branch_ref.branch_doc_id);
                 }
             });
             for (branch_path, branch_doc_id) in local_branch_refs {
                 let branch_path = daybook_types::doc::BranchPath::new(&branch_path);
                 self.remove_branch_from_partitions_if_needed(
                     self.branch_kind_for_path(branch_path)?,
-                    &branch_doc_id,
+                    branch_doc_id,
                 )
                 .await?;
                 let branch_heads = self
-                    .get_branch_heads_by_doc_id(&branch_doc_id)
+                    .get_branch_heads_by_doc_id(branch_doc_id)
                     .await?
                     .unwrap_or_default();
                 self.delete_local_branch_ref_with_tombstone(
                     id,
                     branch_path,
-                    &branch_doc_id,
+                    branch_doc_id,
                     &branch_heads,
                 )
                 .await?;
@@ -982,13 +972,13 @@ impl DrawerRepo {
             return Ok(false);
         };
         let branch_heads = self
-            .get_branch_heads_by_doc_id(&branch_ref.branch_doc_id)
+            .get_branch_heads_by_doc_id(branch_ref.branch_doc_id)
             .await?
             .ok_or_else(|| ferr!("missing branch doc '{}'", branch_ref.branch_doc_id))?;
 
         self.remove_branch_from_partitions_if_needed(
             branch_ref.branch_kind,
-            &branch_ref.branch_doc_id,
+            branch_ref.branch_doc_id,
         )
         .await?;
         surelock::key::lock_scope(|key| {
@@ -1000,7 +990,7 @@ impl DrawerRepo {
             self.delete_local_branch_ref_with_tombstone(
                 id,
                 branch_path,
-                &branch_ref.branch_doc_id,
+                branch_ref.branch_doc_id,
                 &branch_heads,
             )
             .await?;

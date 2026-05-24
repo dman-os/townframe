@@ -39,6 +39,25 @@ pub use ids::{BuckId, Byte32Id, ObjId, PartId, PeerId};
 pub use tasks::TaskCounts;
 pub use tasks::{MachineTask, MachineTaskMsg, SyncTask, SyncTaskDeets, TaskCtx, TaskId};
 
+#[cfg(feature = "uniffi")]
+uniffi::setup_scaffolding!();
+
+#[cfg(feature = "uniffi")]
+uniffi::custom_type!(Byte32Id, String, {
+    remote,
+    lower: |id| format!("{id}"),
+    try_lift: |str| {
+        use std::str::FromStr;
+        Byte32Id::from_str(&str).map_err(|err| uniffi::deps::anyhow::anyhow!("unable to parse Byte32Id from {str:?}: {err:?}"))
+    }
+});
+#[cfg(feature = "uniffi")]
+uniffi::custom_newtype!(PeerId, Byte32Id);
+#[cfg(feature = "uniffi")]
+uniffi::custom_newtype!(PartId, Byte32Id);
+#[cfg(feature = "uniffi")]
+uniffi::custom_newtype!(ObjId, Byte32Id);
+
 structstruck::strike! {
     pub enum BigSyncEvent {
         SetPeer (

@@ -34,6 +34,9 @@ wash_plugin_mltools.workspace = true
 wash_plugin_utils.workspace = true
 wash_plugin_wflow.workspace = true
 wflow = { workspace = true }
+big_sync.workspace = true
+big_sync_core = { workspace = true, features = ["automerge", "uniffi"] }
+big_repo.workspace = true
 
 #
 # encoding

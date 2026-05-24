@@ -18,7 +18,7 @@ impl DrawerRepo {
             CREATE TABLE IF NOT EXISTS drawer_local_branches (
                 doc_id TEXT NOT NULL,
                 branch_path TEXT NOT NULL,
-                branch_doc_id TEXT NOT NULL,
+                branch_doc_id BLOB NOT NULL,
                 vtag_version TEXT NOT NULL,
                 vtag_actor_id TEXT NOT NULL,
                 updated_at INTEGER NOT NULL,
@@ -34,7 +34,7 @@ impl DrawerRepo {
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
                 doc_id TEXT NOT NULL,
                 branch_path TEXT NOT NULL,
-                branch_doc_id TEXT NOT NULL,
+                branch_doc_id BLOB NOT NULL,
                 branch_heads_json TEXT NOT NULL,
                 vtag_version TEXT NOT NULL,
                 vtag_actor_id TEXT NOT NULL,
@@ -61,13 +61,13 @@ impl DrawerRepo {
         &self,
         doc_id: &DocId,
         branch_path: &daybook_types::doc::BranchPath,
-        branch_doc_id: &str,
+        branch_doc_id: DocumentId,
         vtag: &VersionTag,
     ) -> Res<()> {
         let updated_at = jiff::Timestamp::now().as_microsecond();
-        sqlx::query(&format!(
+        sqlx::query(
             r#"
-            INSERT INTO {LOCAL_BRANCH_TABLE} (
+            INSERT INTO "drawer_local_branches" (
                 doc_id, branch_path, branch_doc_id, vtag_version, vtag_actor_id, updated_at
             ) VALUES (?1, ?2, ?3, ?4, ?5, ?6)
             ON CONFLICT(doc_id, branch_path) DO UPDATE SET
@@ -75,11 +75,11 @@ impl DrawerRepo {
                 vtag_version = excluded.vtag_version,
                 vtag_actor_id = excluded.vtag_actor_id,
                 updated_at = excluded.updated_at
-            "#
-        ))
+            "#,
+        )
         .bind(doc_id)
         .bind(branch_path.to_string())
-        .bind(branch_doc_id)
+        .bind(&branch_doc_id.as_bytes()[..])
         .bind(vtag.version.to_string())
         .bind(vtag.actor_id.to_string())
         .bind(updated_at)
@@ -92,35 +92,45 @@ impl DrawerRepo {
         &self,
         doc_id: &DocId,
         branch_path: &daybook_types::doc::BranchPath,
-    ) -> Res<Option<String>> {
-        let rec = sqlx::query_scalar::<_, String>(&format!(
-            "SELECT branch_doc_id FROM {LOCAL_BRANCH_TABLE} WHERE doc_id = ?1 AND branch_path = ?2"
-        ))
+    ) -> Res<Option<DocumentId>> {
+        let rec = sqlx::query_scalar::<_, Vec<u8>>(
+            r#"SELECT branch_doc_id FROM "drawer_local_branches" WHERE doc_id = ?1 AND branch_path = ?2"#
+        )
         .bind(doc_id)
         .bind(branch_path.to_string())
         .fetch_optional(&self.meta_store_sql.db_pool)
         .await?;
-        Ok(rec)
+
+        Ok(rec.map(|blob| DocumentId::new(blob.try_into().expect(ERROR_IMPOSSIBLE))))
     }
 
     pub(super) async fn list_local_branch_refs(
         &self,
         doc_id: &DocId,
-    ) -> Res<Vec<(String, String)>> {
-        let rows = sqlx::query_as::<_, (String, String)>(&format!(
-            "SELECT branch_path, branch_doc_id FROM {LOCAL_BRANCH_TABLE} WHERE doc_id = ?1 ORDER BY branch_path ASC"
-        ))
+    ) -> Res<Vec<(String, DocumentId)>> {
+        Ok(sqlx::query_as::<_, (String, Vec<u8>)>(
+            r#"SELECT branch_path, branch_doc_id 
+                FROM "drawer_local_branches" 
+                WHERE doc_id = ?1 ORDER BY branch_path ASC"#,
+        )
         .bind(doc_id)
         .fetch_all(&self.meta_store_sql.db_pool)
-        .await?;
-        Ok(rows)
+        .await?
+        .into_iter()
+        .map(|(path, id)| {
+            (
+                path,
+                DocumentId::new(id.try_into().expect(ERROR_IMPOSSIBLE)),
+            )
+        })
+        .collect())
     }
 
     pub(super) async fn delete_local_branch_ref_with_tombstone(
         &self,
         doc_id: &DocId,
         branch_path: &daybook_types::doc::BranchPath,
-        branch_doc_id: &str,
+        branch_doc_id: DocumentId,
         branch_heads: &ChangeHashSet,
     ) -> Res<()> {
         let deleted_at = jiff::Timestamp::now().as_microsecond();
@@ -130,25 +140,25 @@ impl DrawerRepo {
                 .expect(ERROR_JSON);
 
         let mut tx = self.meta_store_sql.db_pool.begin().await?;
-        sqlx::query(&format!(
+        sqlx::query(
             r#"
-            INSERT INTO {LOCAL_BRANCH_DELETED_TABLE} (
+            INSERT INTO "drawer_local_branches_deleted" (
                 doc_id, branch_path, branch_doc_id, branch_heads_json, vtag_version, vtag_actor_id, deleted_at
             ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)
             "#
-        ))
+        )
         .bind(doc_id)
         .bind(branch_path.to_string())
-        .bind(branch_doc_id)
+        .bind(&branch_doc_id.as_bytes()[..])
         .bind(branch_heads_json)
         .bind(vtag.version.to_string())
         .bind(vtag.actor_id.to_string())
         .bind(deleted_at)
         .execute(tx.as_mut())
         .await?;
-        sqlx::query(&format!(
-            "DELETE FROM {LOCAL_BRANCH_TABLE} WHERE doc_id = ?1 AND branch_path = ?2"
-        ))
+        sqlx::query(
+            r#"DELETE FROM "drawer_local_branches" WHERE doc_id = ?1 AND branch_path = ?2"#,
+        )
         .bind(doc_id)
         .bind(branch_path.to_string())
         .execute(tx.as_mut())
@@ -206,7 +216,7 @@ impl DrawerRepo {
             return Ok(None);
         };
         let Some(latest_heads) = self
-            .get_branch_heads_by_doc_id(&branch_ref.branch_doc_id)
+            .get_branch_heads_by_doc_id(branch_ref.branch_doc_id)
             .await?
         else {
             return Ok(None);
@@ -236,7 +246,7 @@ impl DrawerRepo {
                 continue;
             };
             let Some(latest_heads) = self
-                .get_branch_heads_by_doc_id(&branch_ref.branch_doc_id)
+                .get_branch_heads_by_doc_id(branch_ref.branch_doc_id)
                 .await?
             else {
                 tracing::warn!(
@@ -249,8 +259,7 @@ impl DrawerRepo {
             branches.insert(branch_name, latest_heads);
         }
         for (branch_path, branch_doc_id) in self.list_local_branch_refs(doc_id).await? {
-            let branch_doc_id: Arc<str> = branch_doc_id.into();
-            let Some(latest_heads) = self.get_branch_heads_by_doc_id(&branch_doc_id).await? else {
+            let Some(latest_heads) = self.get_branch_heads_by_doc_id(branch_doc_id).await? else {
                 tracing::warn!(
                     branch_path = %branch_path,
                     branch_doc_id = %branch_doc_id,

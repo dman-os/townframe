@@ -329,13 +329,13 @@ impl TablesStore {
 pub struct TablesRepo {
     pub big_repo: SharedBigRepo,
     pub app_doc_id: DocumentId,
-    pub app_doc_handle: am_utils_rs::repo::BigDocHandle,
+    pub app_doc_handle: big_repo::BigDocHandle,
     store: crate::stores::AmStoreHandle<TablesStore>,
     pub registry: Arc<crate::repos::ListenersRegistry>,
     pub local_actor_id: ActorId,
-    local_peer_id: am_utils_rs::repo::PeerId,
+    local_peer_id: PeerId,
     cancel_token: CancellationToken,
-    _change_listener_tickets: Vec<am_utils_rs::repo::BigRepoChangeListenerRegistration>,
+    _change_listener_tickets: Vec<big_repo::BigRepoChangeListenerRegistration>,
 }
 
 impl crate::repos::Repo for TablesRepo {
@@ -587,7 +587,7 @@ impl TablesRepo {
     async fn notifs_loop(
         &self,
         mut notif_rx: tokio::sync::mpsc::UnboundedReceiver<
-            Vec<am_utils_rs::repo::BigRepoChangeNotification>,
+            Vec<big_repo::BigRepoChangeNotification>,
         >,
         cancel_token: CancellationToken,
     ) -> Res<()> {
@@ -608,7 +608,7 @@ impl TablesRepo {
 
             events.clear();
             for notif in notifs {
-                let am_utils_rs::repo::BigRepoChangeNotification::DocChanged {
+                let big_repo::BigRepoChangeNotification::DocChanged {
                     patch,
                     heads,
                     origin,
@@ -848,8 +848,8 @@ impl TablesRepo {
         patch: &automerge::Patch,
         patch_heads: &Arc<[automerge::ChangeHash]>,
         out: &mut Vec<TablesEvent>,
-        live_origin: Option<&am_utils_rs::repo::BigRepoChangeOrigin>,
-        exclude_peer_id: Option<&am_utils_rs::repo::PeerId>,
+        live_origin: Option<&big_repo::BigRepoChangeOrigin>,
+        exclude_peer_id: Option<&PeerId>,
     ) -> Res<()> {
         if crate::repos::should_skip_live_patch(live_origin, exclude_peer_id) {
             return Ok(());
@@ -1648,7 +1648,7 @@ mod tests {
             let doc_bytes = crate::app::version_updates::version_latest()?;
             let doc = automerge::Automerge::load(&doc_bytes)?;
             let handle = big_repo.put_doc(DocumentId::random(), doc).await?;
-            *handle.document_id()
+            handle.document_id()
         };
 
         let (repo, stop_token) = TablesRepo::load(

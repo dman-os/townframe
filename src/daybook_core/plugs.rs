@@ -580,15 +580,15 @@ pub struct PlugsRepo {
     pub registry: Arc<crate::repos::ListenersRegistry>,
     big_repo: SharedBigRepo,
     app_doc_id: DocumentId,
-    app_doc_handle: am_utils_rs::repo::BigDocHandle,
+    app_doc_handle: big_repo::BigDocHandle,
     store: crate::stores::AmStoreHandle<PlugsStore>,
     blobs: Arc<crate::blobs::BlobsRepo>,
     mutation_mutex: tokio::sync::Mutex<()>,
     plug_config_doc_init_lock: tokio::sync::Mutex<()>,
     local_actor_id: ActorId,
-    local_peer_id: am_utils_rs::repo::PeerId,
+    local_peer_id: PeerId,
     cancel_token: CancellationToken,
-    _change_listener_tickets: Vec<am_utils_rs::repo::BigRepoChangeListenerRegistration>,
+    _change_listener_tickets: Vec<big_repo::BigRepoChangeListenerRegistration>,
 }
 
 // Granular event enum for specific changes
@@ -774,7 +774,7 @@ impl PlugsRepo {
     async fn notifs_loop(
         &self,
         mut notif_rx: tokio::sync::mpsc::UnboundedReceiver<
-            Vec<am_utils_rs::repo::BigRepoChangeNotification>,
+            Vec<big_repo::BigRepoChangeNotification>,
         >,
         cancel_token: CancellationToken,
     ) -> Res<()> {
@@ -795,7 +795,7 @@ impl PlugsRepo {
 
             events.clear();
             for notif in notifs {
-                let am_utils_rs::repo::BigRepoChangeNotification::DocChanged {
+                let big_repo::BigRepoChangeNotification::DocChanged {
                     patch,
                     heads,
                     origin,
@@ -1017,8 +1017,8 @@ impl PlugsRepo {
         patch: &automerge::Patch,
         patch_heads: &Arc<[automerge::ChangeHash]>,
         out: &mut Vec<PlugsEvent>,
-        live_origin: Option<&am_utils_rs::repo::BigRepoChangeOrigin>,
-        exclude_peer_id: Option<&am_utils_rs::repo::PeerId>,
+        live_origin: Option<&big_repo::BigRepoChangeOrigin>,
+        exclude_peer_id: Option<&PeerId>,
     ) -> Res<()> {
         let is_config_docs_vtag_patch = matches!(
             &patch.action,
@@ -2262,36 +2262,38 @@ fn validate_facet_reference_manifests(
 
 #[cfg(test)]
 mod tests {
+    use big_repo::SharedPartStore;
+
     use super::*;
     use crate::repos::{Repo, SubscribeOpts, TryRecvError};
 
     async fn setup_repo() -> Res<(
         SharedBigRepo,
-        Arc<am_utils_rs::partition::PartitionStore>,
+        SharedPartStore,
         Arc<PlugsRepo>,
         DocumentId,
         tempfile::TempDir,
     )> {
         let local_user_path = daybook_types::doc::UserPathBuf::from("/test-user/test-device");
-        let (big_repo, part_store, _acx_stop) = crate::test_support::boot_repo().await?;
+        let (big_repo, big_sync_host, _acx_stop) = crate::test_support::boot_repo().await?;
 
         let doc = automerge::Automerge::load(&version_updates::version_latest()?)?;
         let handle = big_repo.put_doc(DocumentId::random(), doc).await?;
-        let doc_id = *handle.document_id();
+        let doc_id = handle.document_id();
 
         let temp_dir = tempfile::tempdir()?;
         let blobs = crate::blobs::BlobsRepo::new(
             temp_dir.path().to_path_buf(),
             "/test-user".into(),
             Arc::new(crate::blobs::PartitionStoreMembershipWriter::new(
-                Arc::clone(&part_store),
+                Arc::clone(&big_sync_host.store),
             )),
         )
         .await?;
 
         let (repo, _repo_stop) =
             PlugsRepo::load(Arc::clone(&big_repo), blobs, doc_id, local_user_path).await?;
-        Ok((big_repo, part_store, repo, doc_id, temp_dir))
+        Ok((big_repo, big_sync_host.store, repo, doc_id, temp_dir))
     }
 
     fn mock_plug(name: &str) -> manifest::PlugManifest {
@@ -3019,10 +3021,10 @@ mod tests {
             .and_then(|bundle| bundle.component_urls.first())
             .map(|url| url.path().trim_start_matches('/').to_string())
             .ok_or_eyre("expected converted blob URL in bundle1")?;
-        assert_eq!(part_store.member_count(&partition_id).await?, 1);
+        assert_eq!(part_store.member_count(partition_id).await?, 1);
         assert!(
             part_store
-                .is_item_member_of_partitions(&hash, &[Arc::clone(&partition_id)],)
+                .is_item_member_of_partitions(&hash, &[Arc::clone(partition_id)],)
                 .await?
         );
 
@@ -3033,7 +3035,7 @@ mod tests {
         assert_eq!(part_store.member_count(&partition_id).await?, 0);
         assert!(
             !part_store
-                .is_item_member_of_partitions(&hash, &[Arc::clone(&partition_id)],)
+                .is_item_member_of_partitions(&hash, &[Arc::clone(partition_id)],)
                 .await?
         );
         Ok(())

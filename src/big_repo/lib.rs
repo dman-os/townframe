@@ -1,5 +1,4 @@
 mod interlude {
-    pub use am_utils_rs::prelude::ThroughJson;
     pub use big_sync_core::{ObjId, PeerId};
     pub use utils_rs::prelude::*;
 }
@@ -32,8 +31,7 @@ pub use changes::{
 };
 
 pub type DocumentId = ObjId;
-pub type PartitionId = Arc<str>;
-pub type SharedPartitionStore = Arc<dyn big_sync::HostPartitionStore>;
+pub type SharedPartStore = Arc<dyn big_sync::HostPartStore>;
 
 #[derive(Debug, Clone)]
 pub struct Config {
@@ -53,7 +51,7 @@ pub enum StorageConfig {
 pub struct BigRepo {
     local_peer_id: PeerId,
     #[educe(Debug(ignore))]
-    big_sync_store: SharedPartitionStore,
+    big_sync_store: SharedPartStore,
     #[educe(Debug(ignore))]
     runtime: runtime::BigRepoRuntimeHandle,
     #[educe(Debug(ignore))]
@@ -69,7 +67,7 @@ pub type SharedBigRepo = Arc<BigRepo>;
 impl BigRepo {
     pub async fn boot(
         config: Config,
-        big_sync_store: SharedPartitionStore,
+        big_sync_store: SharedPartStore,
     ) -> Res<(Arc<Self>, BigRepoStopToken)> {
         let Config {
             peer_id,
@@ -254,7 +252,8 @@ impl BigRepo {
             iroh::PublicKey::from_bytes(peer_id.as_bytes())
                 .expect("big repo peer id must be a valid iroh public key"),
         );
-        self.register_remote_repo_peer(peer_id, endpoint_addr).await?;
+        self.register_remote_repo_peer(peer_id, endpoint_addr)
+            .await?;
         Ok(BigRepoConnection {
             repo: Arc::clone(self),
             peer_id,
@@ -402,14 +401,14 @@ impl std::fmt::Debug for BigDocHandle {
     fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         formatter
             .debug_struct("BigDocHandle")
-            .field("document_id", self.document_id())
+            .field("document_id", &self.document_id())
             .finish()
     }
 }
 
 impl BigDocHandle {
-    pub fn document_id(&self) -> &DocumentId {
-        &self.bundle.doc_id
+    pub fn document_id(&self) -> DocumentId {
+        self.bundle.doc_id
     }
 
     #[cfg(test)]
@@ -467,7 +466,7 @@ impl BigDocHandle {
         let patches = if self
             .repo
             .change_manager
-            .has_change_listener_interest(*self.document_id(), &origin)
+            .has_change_listener_interest(self.document_id(), &origin)
         {
             doc.diff(&before_heads, &after_heads)
         } else {
@@ -477,7 +476,7 @@ impl BigDocHandle {
 
         self.repo
             .runtime
-            .commit_delta(*self.document_id(), changes, after_heads, patches, origin)
+            .commit_delta(self.document_id(), changes, after_heads, patches, origin)
             .await?;
 
         Ok(out)
@@ -558,7 +557,7 @@ impl BigDocHandle {
 }
 
 async fn partition_doc_heads_payload(
-    big_sync_store: &SharedPartitionStore,
+    big_sync_store: &SharedPartStore,
     doc_id: DocumentId,
 ) -> Res<Option<Arc<[ChangeHash]>>> {
     Ok(big_sync_store
@@ -605,12 +604,13 @@ impl RepoRpcClient {
             self.endpoint_addr.clone(),
             crate::rpc::REPO_SYNC_ALPN,
         );
-        let response = client.rpc(crate::rpc::GetDocsFullRpcReq {
-            req: crate::rpc::GetDocsFullRequest { doc_ids },
-        })
-        .await
-        .wrap_err("GetDocsFull rpc failure")?
-        .wrap_err("GetDocsFull rejected")?;
+        let response = client
+            .rpc(crate::rpc::GetDocsFullRpcReq {
+                req: crate::rpc::GetDocsFullRequest { doc_ids },
+            })
+            .await
+            .wrap_err("GetDocsFull rpc failure")?
+            .wrap_err("GetDocsFull rejected")?;
         Ok(response.docs)
     }
 }
@@ -786,7 +786,9 @@ impl big_sync::SyncBackend for BigRepoSyncBackend {
             .await?
         {
             big_sync::StoreMutationOutcome::Applied => {}
-            big_sync::StoreMutationOutcome::Stale => return Ok(big_sync::SyncTaskRunOutcome::Stale),
+            big_sync::StoreMutationOutcome::Stale => {
+                return Ok(big_sync::SyncTaskRunOutcome::Stale)
+            }
         }
         if let (Some(local_heads), Some(remote_payload)) = (&local_heads, &remote_payload) {
             let remote_heads = doc_heads_from_payload(remote_payload.clone());
@@ -828,6 +830,8 @@ impl big_sync::SyncBackend for BigRepoSyncBackend {
 #[cfg(test)]
 pub(crate) mod tests {
     use super::*;
+
+    use am_utils_rs::codecs::ThroughJson;
     use automerge::{transaction::Transactable, ReadDoc, ScalarValue};
     use autosurgeon::Prop;
     use big_sync::stress_support::{self, StressFixture};
@@ -869,7 +873,7 @@ pub(crate) mod tests {
             )
             .await?,
         );
-        let store_for_worker: Arc<dyn big_sync::HostPartitionStore> = store.clone();
+        let store_for_worker: Arc<dyn big_sync::HostPartStore> = store.clone();
         let (worker, stop) =
             big_sync::spawn_big_sync_worker(store_for_worker.clone(), HashMap::new())?;
         Ok((
@@ -975,7 +979,7 @@ pub(crate) mod tests {
     }
 
     fn random_doc_id() -> DocumentId {
-        DocumentId::new(rand::random())
+        DocumentId::random()
     }
 
     async fn recv_change_batch(
@@ -1022,7 +1026,7 @@ pub(crate) mod tests {
 
         let handle = repo.put_doc(doc_id, doc).await?;
         let fetched = repo.get_doc(&doc_id).await?.expect("doc should exist");
-        assert_eq!(fetched.document_id(), &doc_id);
+        assert_eq!(fetched.document_id(), doc_id);
         assert_eq!(
             fetched
                 .with_document_read(|doc| get_str_at_root(doc, "title"))
@@ -1215,7 +1219,7 @@ pub(crate) mod tests {
         let first_handle = repo
             .put_doc(random_doc_id(), automerge::Automerge::new())
             .await?;
-        let first_doc_id = *first_handle.document_id();
+        let first_doc_id = first_handle.document_id();
         let second_handle = repo
             .put_doc(random_doc_id(), automerge::Automerge::new())
             .await?;
@@ -1257,7 +1261,7 @@ pub(crate) mod tests {
         let handle = repo
             .put_doc(random_doc_id(), automerge::Automerge::new())
             .await?;
-        let doc_id = *handle.document_id();
+        let doc_id = handle.document_id();
 
         handle
             .with_document(|doc| {
@@ -1342,7 +1346,7 @@ pub(crate) mod tests {
         let handle = repo
             .put_doc(random_doc_id(), automerge::Automerge::new())
             .await?;
-        let doc_id = *handle.document_id();
+        let doc_id = handle.document_id();
 
         let batch = recv_change_batch(&mut rx).await;
         assert!(batch.iter().any(|item| matches!(
@@ -1364,7 +1368,7 @@ pub(crate) mod tests {
         let handle = repo
             .put_doc(random_doc_id(), automerge::Automerge::new())
             .await?;
-        let doc_id = *handle.document_id();
+        let doc_id = handle.document_id();
 
         let (_change_registration, mut change_rx) = repo
             .subscribe_change_listener(BigRepoChangeFilter {
@@ -1470,7 +1474,7 @@ pub(crate) mod tests {
         let handle = repo
             .put_doc(random_doc_id(), automerge::Automerge::new())
             .await?;
-        let doc_id = *handle.document_id();
+        let doc_id = handle.document_id();
         handle
             .with_document(|doc| {
                 doc.transact(|tx| tx.put(automerge::ROOT, "count", 0))
@@ -1811,7 +1815,7 @@ pub(crate) mod tests {
     }
 
     struct StressBigSyncRpcClient {
-        target_part_store: SharedPartitionStore,
+        target_part_store: SharedPartStore,
     }
 
     #[async_trait::async_trait]
@@ -1861,10 +1865,7 @@ pub(crate) mod tests {
             req: big_sync_core::rpc::LeafBucketsRequest,
         ) -> Res<
             big_sync_core::rpc::BigSyncRpcResult<
-                Result<
-                    big_sync_core::rpc::LeafBucketResult,
-                    big_sync_core::rpc::LeafBucketsError,
-                >,
+                Result<big_sync_core::rpc::LeafBucketResult, big_sync_core::rpc::LeafBucketsError>,
             >,
         > {
             Ok(Ok(self.target_part_store.leaf_buckets(req).await?))
@@ -1887,7 +1888,7 @@ pub(crate) mod tests {
 
     struct SyncRepoNode {
         repo: Arc<BigRepo>,
-        big_sync_store: SharedPartitionStore,
+        big_sync_store: SharedPartStore,
         big_sync_worker: big_sync::BigSyncWorkerHandle,
         docs: Arc<tokio::sync::Mutex<HashMap<ObjId, Arc<BigDocHandle>>>>,
         connections: Arc<tokio::sync::Mutex<HashMap<PeerId, BigRepoConnection>>>,
@@ -1912,7 +1913,9 @@ pub(crate) mod tests {
                 path.join("part_store.db").display()
             ))
             .await?;
-            let part_init_obj = ObjId(big_sync_core::Byte32Id::new([255_u8.wrapping_sub(seed); 32]));
+            let part_init_obj = ObjId(big_sync_core::Byte32Id::new(
+                [255_u8.wrapping_sub(seed); 32],
+            ));
             big_sync_host
                 .store
                 .upsert_obj(

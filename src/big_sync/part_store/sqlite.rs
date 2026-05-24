@@ -1,4 +1,4 @@
-use super::{HostPartitionStore, ObjStoreLease, StoreMutationOutcome};
+use super::{HostPartStore, ObjStoreLease, StoreMutationOutcome};
 use crate::interlude::*;
 #[cfg(test)]
 use crate::test_support::{
@@ -585,7 +585,7 @@ async fn init_schema(pool: &sqlx::SqlitePool, bucket_depth: u8) -> Res<()> {
 }
 
 #[async_trait]
-impl HostPartitionStore for SqlitePartStore {
+impl HostPartStore for SqlitePartStore {
     async fn summarize_parts(
         &self,
         parts: HashSet<PartId>,
@@ -1360,7 +1360,7 @@ impl HostPartitionStore for SqlitePartStore {
 impl PartStoreReadOnly<Sendable> for SqlitePartStore {
     fn member_count<'a>(&'a self, part_id: PartId) -> BoxFuture<'a, u64> {
         Sendable::from_future(async move {
-            HostPartitionStore::member_count(self, part_id)
+            HostPartStore::member_count(self, part_id)
                 .await
                 .expect(ERROR_IMPOSSIBLE)
         })
@@ -1368,7 +1368,7 @@ impl PartStoreReadOnly<Sendable> for SqlitePartStore {
 
     fn obj_payload<'a>(&'a self, obj_id: ObjId) -> BoxFuture<'a, Option<ObjPayload>> {
         Sendable::from_future(async move {
-            HostPartitionStore::obj_payload(self, obj_id)
+            HostPartStore::obj_payload(self, obj_id)
                 .await
                 .expect(ERROR_IMPOSSIBLE)
         })
@@ -1380,7 +1380,7 @@ impl PartStoreReadOnly<Sendable> for SqlitePartStore {
         id: BuckId,
     ) -> BoxFuture<'a, BucketSummary> {
         Sendable::from_future(async move {
-            HostPartitionStore::get_bucket_summary(self, part_id, id)
+            HostPartStore::get_bucket_summary(self, part_id, id)
                 .await
                 .expect(ERROR_IMPOSSIBLE)
         })
@@ -1388,7 +1388,7 @@ impl PartStoreReadOnly<Sendable> for SqlitePartStore {
 
     fn obj_parts<'a>(&'a self, obj_id: ObjId) -> BoxFuture<'a, Vec<PartId>> {
         Sendable::from_future(async move {
-            HostPartitionStore::obj_parts(self, obj_id)
+            HostPartStore::obj_parts(self, obj_id)
                 .await
                 .expect(ERROR_IMPOSSIBLE)
         })
@@ -1400,7 +1400,7 @@ impl PartStoreReadOnly<Sendable> for SqlitePartStore {
         part_id: PartId,
     ) -> BoxFuture<'a, CursorIndex> {
         Sendable::from_future(async move {
-            HostPartitionStore::get_peer_part_cursor(self, peer_id, part_id)
+            HostPartStore::get_peer_part_cursor(self, peer_id, part_id)
                 .await
                 .expect(ERROR_IMPOSSIBLE)
         })
@@ -1417,7 +1417,7 @@ impl big_sync_core::part_store::PartStore<Sendable> for SqlitePartStore {
         let payload = payload.clone();
         let parts = parts.to_vec();
         Sendable::from_future(async move {
-            HostPartitionStore::upsert_obj(self, obj_id, payload, parts, None)
+            HostPartStore::upsert_obj(self, obj_id, payload, parts, None)
                 .await
                 .expect(ERROR_IMPOSSIBLE);
         })
@@ -1426,7 +1426,7 @@ impl big_sync_core::part_store::PartStore<Sendable> for SqlitePartStore {
     fn add_obj_to_parts<'a>(&'a self, obj_id: ObjId, parts: &[PartId]) -> BoxFuture<'a, ()> {
         let parts = parts.to_vec();
         Sendable::from_future(async move {
-            HostPartitionStore::add_obj_to_parts(self, obj_id, parts, None)
+            HostPartStore::add_obj_to_parts(self, obj_id, parts, None)
                 .await
                 .expect(ERROR_IMPOSSIBLE);
         })
@@ -1434,7 +1434,7 @@ impl big_sync_core::part_store::PartStore<Sendable> for SqlitePartStore {
 
     fn remove_obj_from_part<'a>(&'a self, obj_id: ObjId, part_id: PartId) -> BoxFuture<'a, ()> {
         Sendable::from_future(async move {
-            HostPartitionStore::remove_obj_from_part(self, obj_id, part_id, None)
+            HostPartStore::remove_obj_from_part(self, obj_id, part_id, None)
                 .await
                 .expect(ERROR_IMPOSSIBLE);
         })
@@ -1447,7 +1447,7 @@ impl big_sync_core::part_store::PartStore<Sendable> for SqlitePartStore {
         cursor: CursorIndex,
     ) -> BoxFuture<'a, ()> {
         Sendable::from_future(async move {
-            HostPartitionStore::set_peer_part_cursor(self, peer_id, part_id, cursor)
+            HostPartStore::set_peer_part_cursor(self, peer_id, part_id, cursor)
                 .await
                 .expect(ERROR_IMPOSSIBLE);
         })
@@ -1600,7 +1600,7 @@ mod tests {
         let mut obj_ids = Vec::new();
         for ii in 0..5u8 {
             let obj_id = test_obj_id(10 + ii);
-            HostPartitionStore::upsert_obj(
+            HostPartStore::upsert_obj(
                 &store,
                 obj_id,
                 serde_json::json!({"phase": "present", "ii": ii}),
@@ -1622,7 +1622,7 @@ mod tests {
         .await?;
 
         let removed_obj_id = obj_ids[1];
-        HostPartitionStore::remove_obj_from_part(&store, removed_obj_id, part_id, None).await?;
+        HostPartStore::remove_obj_from_part(&store, removed_obj_id, part_id, None).await?;
         let live_ids: Vec<_> = obj_ids
             .iter()
             .copied()
@@ -1646,7 +1646,7 @@ mod tests {
         let part_id = test_part_id(7);
         let obj_id = test_obj_id(8);
 
-        HostPartitionStore::upsert_obj(
+        HostPartStore::upsert_obj(
             &store,
             obj_id,
             serde_json::json!({"phase": "created"}),
@@ -1654,9 +1654,9 @@ mod tests {
             None,
         )
         .await?;
-        HostPartitionStore::remove_obj_from_part(&store, obj_id, part_id, None).await?;
+        HostPartStore::remove_obj_from_part(&store, obj_id, part_id, None).await?;
 
-        let deleted_page = HostPartitionStore::list_events(&store, HashSet::from([part_id]), 0, 10)
+        let deleted_page = HostPartStore::list_events(&store, HashSet::from([part_id]), 0, 10)
             .await?
             .expect(ERROR_IMPOSSIBLE);
         let deleted_events = &deleted_page.get(&part_id).expect(ERROR_IMPOSSIBLE).events;
@@ -1668,7 +1668,7 @@ mod tests {
         assert_eq!(transition.part_id, part_id);
         assert_eq!(transition.obj_id, obj_id);
 
-        HostPartitionStore::upsert_obj(
+        HostPartStore::upsert_obj(
             &store,
             obj_id,
             serde_json::json!({"phase": "recreated"}),
@@ -1677,10 +1677,9 @@ mod tests {
         )
         .await?;
 
-        let upserted_page =
-            HostPartitionStore::list_events(&store, HashSet::from([part_id]), 0, 10)
-                .await?
-                .expect(ERROR_IMPOSSIBLE);
+        let upserted_page = HostPartStore::list_events(&store, HashSet::from([part_id]), 0, 10)
+            .await?
+            .expect(ERROR_IMPOSSIBLE);
         let upserted_events = &upserted_page.get(&part_id).expect(ERROR_IMPOSSIBLE).events;
         assert_eq!(upserted_events.len(), 1);
         let PartEvent::Upserted(transition) = &upserted_events[0] else {
@@ -1706,7 +1705,7 @@ mod tests {
         let part_id = test_part_id(9);
         let obj_id = test_obj_id(10);
 
-        HostPartitionStore::upsert_obj(
+        HostPartStore::upsert_obj(
             &store_a,
             obj_id,
             serde_json::json!({"scope": "a"}),
@@ -1714,7 +1713,7 @@ mod tests {
             None,
         )
         .await?;
-        HostPartitionStore::upsert_obj(
+        HostPartStore::upsert_obj(
             &store_b,
             obj_id,
             serde_json::json!({"scope": "b"}),
@@ -1724,21 +1723,15 @@ mod tests {
         .await?;
 
         assert_eq!(
-            HostPartitionStore::obj_payload(&store_a, obj_id).await?,
+            HostPartStore::obj_payload(&store_a, obj_id).await?,
             Some(serde_json::json!({"scope": "a"}))
         );
         assert_eq!(
-            HostPartitionStore::obj_payload(&store_b, obj_id).await?,
+            HostPartStore::obj_payload(&store_b, obj_id).await?,
             Some(serde_json::json!({"scope": "b"}))
         );
-        assert_eq!(
-            HostPartitionStore::member_count(&store_a, part_id).await?,
-            1
-        );
-        assert_eq!(
-            HostPartitionStore::member_count(&store_b, part_id).await?,
-            1
-        );
+        assert_eq!(HostPartStore::member_count(&store_a, part_id).await?, 1);
+        assert_eq!(HostPartStore::member_count(&store_b, part_id).await?, 1);
         Ok(())
     }
 
@@ -1748,7 +1741,7 @@ mod tests {
         let obj_id = test_obj_id(11);
         let part_id = test_part_id(12);
 
-        let lease_one = HostPartitionStore::get_obj_lease(&store, obj_id).await?;
+        let lease_one = HostPartStore::get_obj_lease(&store, obj_id).await?;
         let lease_count: i64 = sqlx::query_scalar(
             "SELECT COUNT(*) FROM big_sync_obj_leases
              WHERE scope_id = ?1 AND obj_id = ?2",
@@ -1759,7 +1752,7 @@ mod tests {
         .await?;
         assert_eq!(lease_count, 1);
 
-        let lease_two = HostPartitionStore::get_obj_lease(&store, obj_id).await?;
+        let lease_two = HostPartStore::get_obj_lease(&store, obj_id).await?;
         assert_ne!(lease_one, lease_two);
         let stored_lease: i64 = sqlx::query_scalar(
             "SELECT lease FROM big_sync_obj_leases
@@ -1774,7 +1767,7 @@ mod tests {
             i64::try_from(lease_two).expect(ERROR_IMPOSSIBLE)
         );
 
-        let stale = HostPartitionStore::upsert_obj(
+        let stale = HostPartStore::upsert_obj(
             &store,
             obj_id,
             serde_json::json!({"lease": "stale"}),
@@ -1796,7 +1789,7 @@ mod tests {
             i64::try_from(lease_two).expect(ERROR_IMPOSSIBLE)
         );
 
-        let applied = HostPartitionStore::upsert_obj(
+        let applied = HostPartStore::upsert_obj(
             &store,
             obj_id,
             serde_json::json!({"lease": "applied"}),

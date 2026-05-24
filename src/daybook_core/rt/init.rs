@@ -38,15 +38,15 @@ pub struct InitRepo {
     pub registry: Arc<crate::repos::ListenersRegistry>,
     big_repo: SharedBigRepo,
     app_doc_id: DocumentId,
-    app_am_handle: am_utils_rs::repo::BigDocHandle,
+    app_am_handle: big_repo::BigDocHandle,
     store: crate::stores::AmStoreHandle<InitStore>,
     local_actor_id: ActorId,
     repo_sql: SqlCtx,
     running_dispatches: tokio::sync::RwLock<HashMap<String, String>>,
     per_boot_done: tokio::sync::RwLock<HashSet<String>>,
     cancel_token: CancellationToken,
-    local_peer_id: am_utils_rs::repo::PeerId,
-    _change_listener_tickets: Vec<am_utils_rs::repo::BigRepoChangeListenerRegistration>,
+    local_peer_id: PeerId,
+    _change_listener_tickets: Vec<big_repo::BigRepoChangeListenerRegistration>,
 }
 
 impl crate::repos::Repo for InitRepo {
@@ -135,7 +135,7 @@ impl InitRepo {
     async fn notifs_loop(
         &self,
         mut notif_rx: tokio::sync::mpsc::UnboundedReceiver<
-            Vec<am_utils_rs::repo::BigRepoChangeNotification>,
+            Vec<big_repo::BigRepoChangeNotification>,
         >,
         cancel_token: CancellationToken,
     ) -> Res<()> {
@@ -150,7 +150,7 @@ impl InitRepo {
             };
             let mut events = vec![];
             for notif in notifs {
-                let am_utils_rs::repo::BigRepoChangeNotification::DocChanged {
+                let big_repo::BigRepoChangeNotification::DocChanged {
                     patch,
                     heads,
                     origin,
@@ -239,18 +239,15 @@ impl InitRepo {
         patch: &automerge::Patch,
         patch_heads: &Arc<[automerge::ChangeHash]>,
         out: &mut Vec<InitEvent>,
-        live_origin: Option<&am_utils_rs::repo::BigRepoChangeOrigin>,
-        exclude_peer_id: Option<&am_utils_rs::repo::PeerId>,
+        live_origin: Option<&big_repo::BigRepoChangeOrigin>,
+        exclude_peer_id: Option<&PeerId>,
     ) -> Res<()> {
         // Live notification path only: skip local self-echoes here.
         // Replay/diff calls pass `live_origin = None` and are never skipped.
         if crate::repos::should_skip_live_patch(live_origin, exclude_peer_id) {
             return Ok(());
         }
-        if !am_utils_rs::repo::big_repo_path_prefix_matches(
-            &[InitStore::prop().into()],
-            &patch.path,
-        ) {
+        if !big_repo::big_repo_path_prefix_matches(&[InitStore::prop().into()], &patch.path) {
             return Ok(());
         }
         out.push(InitEvent::Changed {

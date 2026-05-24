@@ -17,7 +17,7 @@ use rand::{seq::SliceRandom, Rng, SeedableRng};
 use serde::{Deserialize, Serialize};
 
 use crate::part_store::memory::MemoryPartStore;
-use crate::part_store::{HostPartitionStore, ObjStoreLease, StoreMutationOutcome};
+use crate::part_store::{HostPartStore, ObjStoreLease, StoreMutationOutcome};
 use crate::test_support::{ObservedStore, ObservedStoreSnapshot, TestStoreSetup};
 use crate::{BackendId, Ctx, SyncTaskRunOutcome};
 
@@ -82,23 +82,23 @@ fn test_parts() -> Vec<PartId> {
 
 #[derive(Default)]
 struct TestWorld {
-    stores: Mutex<HashMap<PeerId, Arc<dyn HostPartitionStore>>>,
+    stores: Mutex<HashMap<PeerId, Arc<dyn HostPartStore>>>,
     online: Mutex<HashSet<PeerId>>,
 }
 
 impl TestWorld {
     fn register_store<S>(&self, peer_id: PeerId, store: Arc<S>)
     where
-        S: HostPartitionStore + 'static,
+        S: HostPartStore + 'static,
     {
         let mut stores = self.stores.lock().expect(ERROR_MUTEX);
-        let store: Arc<dyn HostPartitionStore> = store;
+        let store: Arc<dyn HostPartStore> = store;
         let old = stores.insert(peer_id, store);
         assert!(old.is_none(), "fishy");
         self.set_online(peer_id, true);
     }
 
-    fn store_for_peer(&self, peer_id: PeerId) -> Arc<dyn HostPartitionStore> {
+    fn store_for_peer(&self, peer_id: PeerId) -> Arc<dyn HostPartStore> {
         self.stores
             .lock()
             .expect(ERROR_MUTEX)
@@ -130,17 +130,17 @@ impl TestWorld {
 #[derive(Clone)]
 pub(crate) struct MemoryRpcClient {
     world: Arc<TestWorld>,
-    _source_part_store: Arc<dyn HostPartitionStore>,
+    _source_part_store: Arc<dyn HostPartStore>,
     target_peer_id: PeerId,
-    target_part_store: Arc<dyn HostPartitionStore>,
+    target_part_store: Arc<dyn HostPartStore>,
 }
 
 impl MemoryRpcClient {
     fn new(
         world: Arc<TestWorld>,
-        source_part_store: Arc<dyn HostPartitionStore>,
+        source_part_store: Arc<dyn HostPartStore>,
         target_peer_id: PeerId,
-        target_part_store: Arc<dyn HostPartitionStore>,
+        target_part_store: Arc<dyn HostPartStore>,
     ) -> Self {
         Self {
             world,
@@ -229,14 +229,14 @@ impl crate::rpc::HostBigRpcClient for MemoryRpcClient {
 
 struct MemorySyncBackend {
     _local_peer_id: PeerId,
-    local_part_store: Arc<dyn HostPartitionStore>,
+    local_part_store: Arc<dyn HostPartStore>,
     world: Arc<TestWorld>,
 }
 
 impl MemorySyncBackend {
     fn new(
         local_peer_id: PeerId,
-        local_part_store: Arc<dyn HostPartitionStore>,
+        local_part_store: Arc<dyn HostPartStore>,
         world: Arc<TestWorld>,
     ) -> Self {
         Self {
@@ -324,7 +324,7 @@ struct NodeHarness {
     host: Ctx,
     handle: crate::BigSyncWorkerHandle,
     stop: crate::StopToken,
-    store: Arc<dyn HostPartitionStore>,
+    store: Arc<dyn HostPartStore>,
     observed_store: Arc<dyn ObservedStore>,
     restart_memory_store: Option<Arc<MemoryPartStore>>,
     sqlite_temp_dir: Option<tempfile::TempDir>,
@@ -611,12 +611,12 @@ async fn boot_node_with_store<S>(
     restart_memory_store: Option<Arc<MemoryPartStore>>,
 ) -> Res<NodeHarness>
 where
-    S: ObservedStore + TestStoreSetup + HostPartitionStore + 'static,
+    S: ObservedStore + TestStoreSetup + HostPartStore + 'static,
 {
     store.ensure_test_part(test_part()).await?;
     world.set_online(peer_id, true);
     world.register_store(peer_id, Arc::clone(&store));
-    let store_for_worker: Arc<dyn HostPartitionStore> = store.clone();
+    let store_for_worker: Arc<dyn HostPartStore> = store.clone();
     let observed_store: Arc<dyn ObservedStore> = store.clone();
     let backend: Arc<dyn SyncBackend> = Arc::new(MemorySyncBackend::new(
         peer_id,
@@ -1114,7 +1114,7 @@ async fn memory_sync_direct_backend_adopts_remote_tombstone() -> Res<()> {
     let peer_b = peer_id(2);
     let store_a = Arc::new(MemoryPartStore::new(peer_a));
     let store_b = Arc::new(MemoryPartStore::new(peer_b));
-    let store_b_dyn: Arc<dyn HostPartitionStore> = store_b.clone();
+    let store_b_dyn: Arc<dyn HostPartStore> = store_b.clone();
 
     world.register_store(peer_a, Arc::clone(&store_a));
     world.register_store(peer_b, Arc::clone(&store_b));
@@ -1160,8 +1160,8 @@ async fn memory_sync_direct_backend_cross_replication_is_symmetric() -> Res<()> 
     let peer_b = peer_id(2);
     let store_a = Arc::new(MemoryPartStore::new(peer_a));
     let store_b = Arc::new(MemoryPartStore::new(peer_b));
-    let store_a_dyn: Arc<dyn HostPartitionStore> = store_a.clone();
-    let store_b_dyn: Arc<dyn HostPartitionStore> = store_b.clone();
+    let store_a_dyn: Arc<dyn HostPartStore> = store_a.clone();
+    let store_b_dyn: Arc<dyn HostPartStore> = store_b.clone();
 
     world.register_store(peer_a, Arc::clone(&store_a));
     world.register_store(peer_b, Arc::clone(&store_b));

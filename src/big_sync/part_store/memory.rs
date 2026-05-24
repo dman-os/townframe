@@ -10,7 +10,7 @@ use big_sync_core::rpc::{
 };
 use big_sync_core::{mpsc, BuckId, Byte32Id, Fingerprint, ObjId, PartId, PeerId};
 
-use super::{obj_id_bounds_for_bucket, HostPartitionStore};
+use super::{obj_id_bounds_for_bucket, HostPartStore};
 #[cfg(test)]
 use crate::test_support::{
     ObservedObjSnapshot, ObservedStore, ObservedStoreSnapshot, TestStoreSetup,
@@ -247,7 +247,7 @@ impl GlobalCursor {
 }
 
 #[async_trait]
-impl HostPartitionStore for MemoryPartStore {
+impl HostPartStore for MemoryPartStore {
     async fn summarize_parts(
         &self,
         parts: HashSet<PartId>,

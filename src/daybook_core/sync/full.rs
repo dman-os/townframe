@@ -87,7 +87,7 @@ enum Msg {
         endpoint_addr: iroh::EndpointAddr,
         partitions: HashSet<PartitionId>,
         peer_key: PeerKey,
-        connection: am_utils_rs::repo::BigRepoConnection,
+        connection: big_repo::BigRepoConnection,
         resp: tokio::sync::oneshot::Sender<()>,
     },
     // OutgoingConn {
@@ -178,7 +178,7 @@ enum SyncProgressMsg {
 impl WorkerHandle {
     pub async fn set_connection(
         &self,
-        connection: am_utils_rs::repo::BigRepoConnection,
+        connection: big_repo::BigRepoConnection,
         endpoint_addr: iroh::EndpointAddr,
         peer_key: PeerKey,
         partitions: HashSet<PartitionId>,
@@ -469,7 +469,7 @@ struct PeerSyncState {
     peer_key: PeerKey,
     endpoint_addr: iroh::EndpointAddr,
     partitions: HashSet<PartitionId>,
-    connection: am_utils_rs::repo::BigRepoConnection,
+    connection: big_repo::BigRepoConnection,
     bootstrap_ready: bool,
     live_ready: bool,
     bootstrap_synced_docs: u64,

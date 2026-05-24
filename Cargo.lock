@@ -1120,6 +1120,7 @@ name = "big_sync_core"
 version = "0.1.0"
 dependencies = [
  "async-channel",
+ "autosurgeon",
  "bs58",
  "future_form",
  "futures",
@@ -1129,6 +1130,7 @@ dependencies = [
  "structstruck",
  "thiserror 2.0.18",
  "tracing",
+ "uniffi",
  "utils_rs",
 ]
 
@@ -2692,6 +2694,9 @@ dependencies = [
  "async-trait",
  "automerge",
  "autosurgeon",
+ "big_repo",
+ "big_sync",
+ "big_sync_core",
  "bs58",
  "color-eyre",
  "data-encoding",

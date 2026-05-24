@@ -3,7 +3,8 @@ use crate::interlude::*;
 use crate::app::*;
 
 use am_utils_rs::partition::PartitionStore;
-use am_utils_rs::repo::BigDocHandle;
+use big_repo::BigDocHandle;
+use big_repo::SharedPartStore;
 use daybook_types::doc::{UserPath, UserPathBuf};
 use fs4::fs_std::FileExt;
 
@@ -86,7 +87,7 @@ pub struct RepoCtx {
     pub lock_guard: RepoLockGuard,
 
     pub sql: SqlCtx,
-    pub partition_store: Arc<PartitionStore>,
+    pub partition_store: SharedPartStore,
     partition_store_stop: am_utils_rs::partition::PartitionStoreStopToken,
 
     pub big_repo: SharedBigRepo,
@@ -112,7 +113,7 @@ pub(crate) struct RepoCtxParts {
     pub layout: RepoLayout,
     pub lock_guard: RepoLockGuard,
     pub sql: SqlCtx,
-    pub partition_store: Arc<PartitionStore>,
+    pub partition_store: SharedPartStore,
     pub partition_store_stop: am_utils_rs::partition::PartitionStoreStopToken,
     pub big_repo: SharedBigRepo,
     pub big_repo_stop: std::sync::Mutex<Option<am_utils_rs::BigRepoStopToken>>,
@@ -353,7 +354,7 @@ impl RepoCtx {
 
     async fn run_repo_init_dance(
         big_repo: &SharedBigRepo,
-        partition_store: &Arc<PartitionStore>,
+        partition_store: &SharedPartStore,
         doc_app: &BigDocHandle,
         doc_drawer: &BigDocHandle,
         local_user_path: &UserPath,
@@ -569,16 +570,16 @@ fn compute_user_info(
 async fn boot_big_repo(
     layout: &RepoLayout,
     identity: &crate::secrets::RepoIdentity,
-    partition_store: Arc<PartitionStore>,
-) -> Res<(SharedBigRepo, am_utils_rs::BigRepoStopToken)> {
-    let am_config = am_utils_rs::repo::Config {
-        storage: am_utils_rs::repo::StorageConfig::Disk {
+    partition_store: SharedPartStore,
+) -> Res<(SharedBigRepo, big_repo::BigRepoStopToken)> {
+    let am_config = big_repo::Config {
+        storage: big_repo::StorageConfig::Disk {
             path: layout.samod_root.clone(),
         },
         peer_id: identity.iroh_public_key.into(),
         secret_key_bytes: identity.iroh_secret_key.to_bytes(),
     };
-    let (big_repo, big_repo_stop) = am_utils_rs::BigRepo::boot(am_config, partition_store).await?;
+    let (big_repo, big_repo_stop) = big_repo::BigRepo::boot(am_config, partition_store).await?;
     Ok((big_repo, big_repo_stop))
 }
 
@@ -631,7 +632,7 @@ pub(crate) async fn finish_clone_init(
 }
 
 pub(crate) async fn ensure_expected_partitions_for_docs(
-    partition_store: &Arc<PartitionStore>,
+    partition_store: &SharedPartStore,
     doc_app_id: &DocumentId,
     doc_drawer_id: &DocumentId,
 ) -> Res<()> {
@@ -760,8 +761,8 @@ async fn init_core_docs(
     globals::set_init_state(
         repo_sql,
         &globals::InitState::Created {
-            doc_id_app: *app_doc.document_id(),
-            doc_id_drawer: *drawer_doc.document_id(),
+            doc_id_app: app_doc.document_id(),
+            doc_id_drawer: drawer_doc.document_id(),
         },
     )
     .await?;

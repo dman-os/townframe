@@ -68,6 +68,7 @@ pub mod expect_tags {
     pub const ERROR_JSON: &str = "json error: oom?";
     pub const ERROR_UTF8: &str = "utf8 error";
     pub const ERROR_MUTEX: &str = "poisioned mutex";
+    pub const ERROR_PARSE: &str = "stringly type bites again";
     // Preferred over ERROR_CHANNEL when sending a message
     // to an actor like task that's doing an event loop.
     // ERROR_CHANNEL is preferred for oneshots or bespoke channel

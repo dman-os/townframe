@@ -100,16 +100,16 @@ pub enum ConfigEvent {
 pub struct ConfigRepo {
     big_repo: SharedBigRepo,
     app_doc_id: DocumentId,
-    app_doc_handle: am_utils_rs::repo::BigDocHandle,
+    app_doc_handle: big_repo::BigDocHandle,
     store: crate::stores::AmStoreHandle<ConfigStore>,
     pub registry: Arc<crate::repos::ListenersRegistry>,
     plug_repo: Arc<PlugsRepo>,
     local_actor_id: ActorId,
-    local_peer_id: am_utils_rs::repo::PeerId,
+    local_peer_id: PeerId,
     repo_sql: crate::app::SqlCtx,
     cancel_token: CancellationToken,
     sync_config_lock: tokio::sync::Mutex<()>,
-    _change_listener_tickets: Vec<am_utils_rs::repo::BigRepoChangeListenerRegistration>,
+    _change_listener_tickets: Vec<big_repo::BigRepoChangeListenerRegistration>,
 }
 
 impl crate::repos::Repo for ConfigRepo {
@@ -131,16 +131,16 @@ impl ConfigRepo {
 
     fn origin_from_live(
         &self,
-        live_origin: Option<&am_utils_rs::repo::BigRepoChangeOrigin>,
+        live_origin: Option<&big_repo::BigRepoChangeOrigin>,
     ) -> crate::event_origin::SwitchEventOrigin {
         match live_origin {
-            Some(am_utils_rs::repo::BigRepoChangeOrigin::Local) => self.local_origin(),
-            Some(am_utils_rs::repo::BigRepoChangeOrigin::Remote { peer_id, .. }) => {
+            Some(big_repo::BigRepoChangeOrigin::Local) => self.local_origin(),
+            Some(big_repo::BigRepoChangeOrigin::Remote { peer_id, .. }) => {
                 crate::event_origin::SwitchEventOrigin::Remote {
                     peer_id: peer_id.to_string(),
                 }
             }
-            Some(am_utils_rs::repo::BigRepoChangeOrigin::Bootstrap) => {
+            Some(big_repo::BigRepoChangeOrigin::Bootstrap) => {
                 crate::event_origin::SwitchEventOrigin::Bootstrap
             }
             None => crate::event_origin::SwitchEventOrigin::Remote {
@@ -259,7 +259,7 @@ impl ConfigRepo {
     async fn notifs_loop(
         &self,
         mut notif_rx: tokio::sync::mpsc::UnboundedReceiver<
-            Vec<am_utils_rs::repo::BigRepoChangeNotification>,
+            Vec<big_repo::BigRepoChangeNotification>,
         >,
         cancel_token: CancellationToken,
     ) -> Res<()> {
@@ -282,7 +282,7 @@ impl ConfigRepo {
             events.clear();
             let mut last_heads = None;
             for notif in notifs {
-                let am_utils_rs::repo::BigRepoChangeNotification::DocChanged {
+                let big_repo::BigRepoChangeNotification::DocChanged {
                     patch,
                     heads,
                     origin,
@@ -416,8 +416,8 @@ impl ConfigRepo {
         patch: &automerge::Patch,
         patch_heads: &Arc<[automerge::ChangeHash]>,
         out: &mut Vec<ConfigEvent>,
-        live_origin: Option<&am_utils_rs::repo::BigRepoChangeOrigin>,
-        exclude_peer_id: Option<&am_utils_rs::repo::PeerId>,
+        live_origin: Option<&big_repo::BigRepoChangeOrigin>,
+        exclude_peer_id: Option<&PeerId>,
     ) -> Res<()> {
         // Live notification path: local writes are emitted directly by mutators.
         // Historical replay passes `live_origin = None` and must not be skipped.

@@ -4,7 +4,9 @@ use super::DrawerRepo;
 
 use crate::drawer::types::{DocEntry, DrawerEvent};
 
+use big_repo::{BigRepoChangeNotification, BigRepoChangeOrigin};
 use daybook_types::doc::{ChangeHashSet, DocId, FacetKey};
+use tokio::sync::mpsc::UnboundedReceiver;
 use tokio_util::sync::CancellationToken;
 
 // observability support
@@ -12,9 +14,7 @@ impl DrawerRepo {
     #[tracing::instrument(skip(self, notif_rx, cancel_token))]
     pub(super) async fn notifs_loop(
         &self,
-        mut notif_rx: tokio::sync::mpsc::UnboundedReceiver<
-            Vec<am_utils_rs::repo::BigRepoChangeNotification>,
-        >,
+        mut notif_rx: UnboundedReceiver<Vec<BigRepoChangeNotification>>,
         cancel_token: CancellationToken,
     ) -> Res<()> {
         let mut events = vec![];
@@ -36,7 +36,7 @@ impl DrawerRepo {
             events.clear();
 
             for notif in notifs {
-                let am_utils_rs::repo::BigRepoChangeNotification::DocChanged {
+                let BigRepoChangeNotification::DocChanged {
                     doc_id,
                     patch,
                     heads,
@@ -168,8 +168,8 @@ impl DrawerRepo {
         patch: &automerge::Patch,
         patch_heads: &Arc<[automerge::ChangeHash]>,
         out: &mut Vec<DrawerEvent>,
-        live_origin: Option<&am_utils_rs::repo::BigRepoChangeOrigin>,
-        exclude_peer_id: Option<&am_utils_rs::repo::PeerId>,
+        live_origin: Option<&BigRepoChangeOrigin>,
+        exclude_peer_id: Option<&PeerId>,
     ) -> Res<()> {
         // Live notification path: local writes are emitted by mutators.
         // Replay/diff paths pass `live_origin = None`.
@@ -177,10 +177,7 @@ impl DrawerRepo {
             return Ok(());
         }
         // Prefix: docs.map
-        if !am_utils_rs::repo::big_repo_path_prefix_matches(
-            &["docs".into(), "map".into()],
-            &patch.path,
-        ) {
+        if !big_repo::big_repo_path_prefix_matches(&["docs".into(), "map".into()], &patch.path) {
             return Ok(());
         }
 

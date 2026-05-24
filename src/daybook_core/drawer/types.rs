@@ -39,13 +39,13 @@ pub struct UpdateDocBatchErrV2 {
 #[derive(Debug, Clone, PartialEq, Eq, Reconcile, Hydrate)]
 #[cfg_attr(feature = "uniffi", derive(uniffi::Record))]
 pub struct StoredBranchRef {
-    pub branch_doc_id: String,
+    pub branch_doc_id: DocumentId,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Reconcile, Hydrate)]
 #[cfg_attr(feature = "uniffi", derive(uniffi::Record))]
 pub struct BranchSnapshot {
-    pub branch_doc_id: String,
+    pub branch_doc_id: DocumentId,
     pub branch_heads: ChangeHashSet,
 }
 
@@ -53,7 +53,7 @@ pub struct BranchSnapshot {
 #[cfg_attr(feature = "uniffi", derive(uniffi::Record))]
 pub struct BranchDeleteTombstone {
     pub vtag: VersionTag,
-    pub branch_doc_id: String,
+    pub branch_doc_id: DocumentId,
     pub branch_heads: ChangeHashSet,
 }
 

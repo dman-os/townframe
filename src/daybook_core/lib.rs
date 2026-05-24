@@ -10,10 +10,11 @@ mod interlude {
     pub use daybook_types::doc::{BranchPath, BranchPathBuf, ChangeHashSet, UserPath, UserPathBuf};
 
     pub use am_utils_rs::prelude::*;
-    pub use am_utils_rs::DocumentId;
     pub use api_utils_rs::prelude::*;
     pub use automerge::ActorId;
     pub use autosurgeon::{Hydrate, Reconcile};
+    pub use big_repo::{DocumentId, SharedBigRepo};
+    pub use big_sync_core::{ObjId, PartId, PeerId};
     pub use std::{
         borrow::Cow,
         collections::{HashMap, HashSet},

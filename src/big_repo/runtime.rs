@@ -21,7 +21,7 @@ use automerge_sedimentree::indexed::OwnedParents;
 use subduction_core::subduction::request::FragmentRequested;
 
 const DOC_WORKER_IDLE_TTL: Duration = Duration::from_secs(3);
-type SharedPartitionStore = Arc<dyn big_sync::HostPartitionStore>;
+type SharedPartitionStore = Arc<dyn big_sync::HostPartStore>;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum SyncDocOutcome {
@@ -1527,12 +1527,10 @@ where
                     kind = ?session.kind,
                     "unloaded sync session loading partition heads"
                 );
-                let before_heads = super::partition_doc_heads_payload(
-                    &self.big_sync_store,
-                    self.doc_id,
-                )
-                .await?
-                .unwrap_or_else(|| doc.get_heads().into());
+                let before_heads =
+                    super::partition_doc_heads_payload(&self.big_sync_store, self.doc_id)
+                        .await?
+                        .unwrap_or_else(|| doc.get_heads().into());
                 info!(
                     doc_id = %self.doc_id,
                     peer_id = %session.peer_id,

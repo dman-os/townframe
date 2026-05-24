@@ -21,7 +21,7 @@ pub struct BigSyncWorkerHandle {
     stats_tx: tokio::sync::broadcast::Sender<big_sync_core::SyncStatEvent>,
 }
 
-type SharedPartitionStore = Arc<dyn crate::part_store::HostPartitionStore>;
+type SharedPartitionStore = Arc<dyn crate::part_store::HostPartStore>;
 type SharedPeerRpcClient = Arc<dyn crate::rpc::HostBigRpcClient>;
 type SharedRpcClients = Arc<std::sync::Mutex<HashMap<PeerId, SharedPeerRpcClient>>>;
 
@@ -725,7 +725,10 @@ impl BigSyncWorker {
     }
 
     async fn spawn_sync_task(&mut self, mut task: SyncTask, lease: ObjStoreLease) -> Res<()> {
-        let peer_state = self.peers.get(&task.deets.peer_id).expect(ERROR_UNRECONIZED);
+        let peer_state = self
+            .peers
+            .get(&task.deets.peer_id)
+            .expect(ERROR_UNRECONIZED);
         let mut part_ids: Vec<PartId> = if task.deets.part_hints.is_empty() {
             self.part_store.obj_parts(task.deets.obj_id).await?
         } else {

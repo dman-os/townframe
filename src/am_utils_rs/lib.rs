@@ -4,7 +4,6 @@ mod interlude {
 
 pub mod prelude {
     pub use crate::codecs::ThroughJson;
-    pub use crate::ids::{DocId32, PeerId32};
 
     pub use automerge;
     pub use autosurgeon;
@@ -13,11 +12,6 @@ pub mod prelude {
 use crate::interlude::*;
 
 pub mod codecs;
-pub mod ids;
-#[cfg(feature = "repo")]
-pub mod partition;
-#[cfg(feature = "repo")]
-pub mod sync;
 
 use automerge::ChangeHash;
 

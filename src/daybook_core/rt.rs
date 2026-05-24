@@ -1,6 +1,7 @@
+use crate::interlude::*;
+
 use crate::config::ConfigRepo;
 use crate::index::{DocBlobsIndexRepo, DocFacetRefIndexRepo, DocFacetSetIndexRepo};
-use crate::interlude::*;
 use crate::local_state::SqliteLocalStateRepo;
 
 use crate::blobs::BlobsRepo;
@@ -1766,7 +1767,7 @@ impl Rt {
 }
 
 async fn upsert_processor_runlog_item(
-    partition_store: &am_utils_rs::partition::PartitionStore,
+    partition_store: &SharedPartStore,
     done_by_peer_id: &str,
     doc_id: &str,
     processor_full_id: &str,

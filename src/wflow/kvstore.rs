@@ -6,39 +6,39 @@ use wflow_core::kvstore::*;
 
 enum KvMsg {
     BootTable {
-        table: Arc<str>,
+        table: &'static str,
         resp: oneshot::Sender<Res<()>>,
     },
     Get {
-        table: Arc<str>,
+        table: &'static str,
         key: Vec<u8>,
         resp: oneshot::Sender<Res<Option<Arc<[u8]>>>>,
     },
     Set {
-        table: Arc<str>,
+        table: &'static str,
         key: Arc<[u8]>,
         value: Arc<[u8]>,
         resp: oneshot::Sender<Res<Option<Arc<[u8]>>>>,
     },
     Del {
-        table: Arc<str>,
+        table: &'static str,
         key: Vec<u8>,
         resp: oneshot::Sender<Res<Option<Arc<[u8]>>>>,
     },
     Increment {
-        table: Arc<str>,
+        table: &'static str,
         key: Vec<u8>,
         delta: i64,
         resp: oneshot::Sender<Res<i64>>,
     },
     NewCas {
-        table: Arc<str>,
+        table: &'static str,
         key: Vec<u8>,
         #[expect(clippy::type_complexity)]
         resp: oneshot::Sender<Res<(Option<Arc<[u8]>>, i64)>>,
     },
     Swap {
-        table: Arc<str>,
+        table: &'static str,
         key: Arc<[u8]>,
         value: Arc<[u8]>,
         snapshot_version: i64,
@@ -69,19 +69,18 @@ impl SqliteKvFactory {
         Ok(Self { sender: tx })
     }
 
-    pub async fn open_store(&self, table_name: &str) -> Res<SqliteKvStore> {
-        let table: Arc<str> = table_name.into();
+    pub async fn open_store(&self, table_name: &'static str) -> Res<SqliteKvStore> {
         let (tx, rx) = oneshot::channel();
         self.sender
             .send(KvMsg::BootTable {
-                table: Arc::clone(&table),
+                table: table_name,
                 resp: tx,
             })
             .map_err(|_| ferr!("factory gone"))?;
         rx.await.wrap_err(ERROR_CHANNEL)??;
 
         Ok(SqliteKvStore {
-            table_name: table,
+            table_name,
             sender: self.sender.clone(),
         })
     }
@@ -90,7 +89,7 @@ impl SqliteKvFactory {
 /// A SQLite-backed key-value store implementation.
 #[derive(Clone)]
 pub struct SqliteKvStore {
-    table_name: Arc<str>,
+    table_name: &'static str,
     sender: mpsc::UnboundedSender<KvMsg>,
 }
 
@@ -115,7 +114,7 @@ impl SqliteKvStore {
                 store
                     .sender
                     .send(KvMsg::Swap {
-                        table: Arc::clone(&store.table_name),
+                        table: store.table_name,
                         key: Arc::clone(&key),
                         value: new_value,
                         snapshot_version: version,
@@ -265,7 +264,7 @@ impl SqliteKvWorker {
         Ok(())
     }
 
-    async fn handle_boot(&self, table: &str) -> Res<()> {
+    async fn handle_boot(&self, table: &'static str) -> Res<()> {
         // Sanitize table name
         if !table
             .chars()
@@ -274,7 +273,7 @@ impl SqliteKvWorker {
             return Err(ferr!("invalid table name: {}", table));
         }
 
-        sqlx::query(&format!(
+        sqlx::query(sqlx::AssertSqlSafe(format!(
             r#"
                 CREATE TABLE IF NOT EXISTS "{table}" (
                     key     BLOB PRIMARY KEY,
@@ -282,17 +281,17 @@ impl SqliteKvWorker {
                     version INTEGER NOT NULL
                 )
                 "#
-        ))
+        )))
         .execute(&self.db_pool)
         .await
         .wrap_err_with(|| format!("failed to create table: {}", table))?;
         Ok(())
     }
 
-    async fn handle_get(&self, table: &str, key: &[u8]) -> Res<Option<Arc<[u8]>>> {
-        let row = sqlx::query_scalar::<_, Vec<u8>>(&format!(
+    async fn handle_get(&self, table: &'static str, key: &[u8]) -> Res<Option<Arc<[u8]>>> {
+        let row = sqlx::query_scalar::<_, Vec<u8>>(sqlx::AssertSqlSafe(format!(
             r#"SELECT value FROM "{table}" WHERE key = ?1"#
-        ))
+        )))
         .bind(key)
         .fetch_optional(&self.db_pool)
         .await?;
@@ -302,20 +301,20 @@ impl SqliteKvWorker {
 
     async fn handle_set(
         &self,
-        table: &str,
+        table: &'static str,
         key: Arc<[u8]>,
         value: Arc<[u8]>,
     ) -> Res<Option<Arc<[u8]>>> {
         let mut tx = self.db_pool.begin().await?;
 
-        let old = sqlx::query_scalar::<_, Vec<u8>>(&format!(
+        let old = sqlx::query_scalar::<_, Vec<u8>>(sqlx::AssertSqlSafe(format!(
             r#"SELECT value FROM "{table}" WHERE key = ?1"#
-        ))
+        )))
         .bind(key.as_ref())
         .fetch_optional(&mut *tx)
         .await?;
 
-        sqlx::query(&format!(
+        sqlx::query(sqlx::AssertSqlSafe(format!(
             r#"
             INSERT INTO "{table}"(key, value, version)
             VALUES (?1, ?2, 1)
@@ -323,7 +322,7 @@ impl SqliteKvWorker {
             SET value = excluded.value,
                 version = version + 1
             "#
-        ))
+        )))
         .bind(key.as_ref())
         .bind(value.as_ref())
         .execute(&mut *tx)
@@ -333,33 +332,36 @@ impl SqliteKvWorker {
         Ok(old.map(|value| value.into_boxed_slice().into()))
     }
 
-    async fn handle_del(&self, table: &str, key: &[u8]) -> Res<Option<Arc<[u8]>>> {
+    async fn handle_del(&self, table: &'static str, key: &[u8]) -> Res<Option<Arc<[u8]>>> {
         let mut tx = self.db_pool.begin().await?;
 
-        let old = sqlx::query_scalar::<_, Vec<u8>>(&format!(
+        let old = sqlx::query_scalar::<_, Vec<u8>>(sqlx::AssertSqlSafe(format!(
             r#"SELECT value FROM "{table}" WHERE key = ?1"#
-        ))
+        )))
         .bind(key)
         .fetch_optional(&mut *tx)
         .await?;
 
-        sqlx::query(&format!(r#"DELETE FROM "{table}" WHERE key = ?1"#))
-            .bind(key)
-            .execute(&mut *tx)
-            .await?;
+        sqlx::query(sqlx::AssertSqlSafe(format!(
+            r#"DELETE FROM "{table}" WHERE key = ?1"#
+        )))
+        .bind(key)
+        .execute(&mut *tx)
+        .await?;
 
         tx.commit().await?;
         Ok(old.map(|value| value.into_boxed_slice().into()))
     }
 
-    async fn handle_increment(&self, table: &str, key: &[u8], delta: i64) -> Res<i64> {
+    async fn handle_increment(&self, table: &'static str, key: &[u8], delta: i64) -> Res<i64> {
         let mut tx = self.db_pool.begin().await?;
 
-        let current: Option<Vec<u8>> =
-            sqlx::query_scalar(&format!(r#"SELECT value FROM "{table}" WHERE key = ?1"#))
-                .bind(key)
-                .fetch_optional(&mut *tx)
-                .await?;
+        let current: Option<Vec<u8>> = sqlx::query_scalar(sqlx::AssertSqlSafe(format!(
+            r#"SELECT value FROM "{table}" WHERE key = ?1"#
+        )))
+        .bind(key)
+        .fetch_optional(&mut *tx)
+        .await?;
 
         let current_val = if let Some(bytes) = current {
             if bytes.len() != 8 {
@@ -378,7 +380,7 @@ impl SqliteKvWorker {
 
         let encoded = next.to_le_bytes();
 
-        sqlx::query(&format!(
+        sqlx::query(sqlx::AssertSqlSafe(format!(
             r#"
             INSERT INTO "{table}"(key, value, version)
             VALUES (?1, ?2, 1)
@@ -386,7 +388,7 @@ impl SqliteKvWorker {
             SET value = excluded.value,
                 version = version + 1
             "#
-        ))
+        )))
         .bind(key)
         .bind(&encoded[..])
         .execute(&mut *tx)
@@ -396,10 +398,14 @@ impl SqliteKvWorker {
         Ok(next)
     }
 
-    async fn handle_new_cas(&self, table: &str, key: &[u8]) -> Res<(Option<Arc<[u8]>>, i64)> {
-        let row = sqlx::query_as::<_, (Vec<u8>, i64)>(&format!(
+    async fn handle_new_cas(
+        &self,
+        table: &'static str,
+        key: &[u8],
+    ) -> Res<(Option<Arc<[u8]>>, i64)> {
+        let row = sqlx::query_as::<_, (Vec<u8>, i64)>(sqlx::AssertSqlSafe(format!(
             r#"SELECT value, version FROM "{table}" WHERE key = ?1"#
-        ))
+        )))
         .bind(key)
         .fetch_optional(&self.db_pool)
         .await?;
@@ -414,7 +420,7 @@ impl SqliteKvWorker {
 
     async fn handle_swap(
         &self,
-        table: &str,
+        table: &'static str,
         key: Arc<[u8]>,
         value: Arc<[u8]>,
         snapshot_version: i64,
@@ -422,26 +428,26 @@ impl SqliteKvWorker {
         let mut tx = self.db_pool.begin().await?;
 
         let result = if snapshot_version == 0 {
-            sqlx::query(&format!(
+            sqlx::query(sqlx::AssertSqlSafe(format!(
                 r#"
                 INSERT INTO "{table}"(key, value, version)
                 SELECT ?1, ?2, 1
                 WHERE NOT EXISTS (SELECT 1 FROM "{table}" WHERE key = ?1)
                 "#
-            ))
+            )))
             .bind(key.as_ref())
             .bind(value.as_ref())
             .execute(&mut *tx)
             .await
         } else {
-            sqlx::query(&format!(
+            sqlx::query(sqlx::AssertSqlSafe(format!(
                 r#"
                 UPDATE "{table}"
                 SET value = ?2,
                     version = version + 1
                 WHERE key = ?1 AND version = ?3
                 "#
-            ))
+            )))
             .bind(key.as_ref())
             .bind(value.as_ref())
             .bind(snapshot_version)
@@ -474,7 +480,7 @@ impl KvStore for SqliteKvStore {
         let (tx, rx) = oneshot::channel();
         self.sender
             .send(KvMsg::Get {
-                table: Arc::clone(&self.table_name),
+                table: self.table_name,
                 key: key.to_vec(),
                 resp: tx,
             })
@@ -486,7 +492,7 @@ impl KvStore for SqliteKvStore {
         let (tx, rx) = oneshot::channel();
         self.sender
             .send(KvMsg::Set {
-                table: Arc::clone(&self.table_name),
+                table: self.table_name,
                 key,
                 value,
                 resp: tx,
@@ -499,7 +505,7 @@ impl KvStore for SqliteKvStore {
         let (tx, rx) = oneshot::channel();
         self.sender
             .send(KvMsg::Del {
-                table: Arc::clone(&self.table_name),
+                table: self.table_name,
                 key: key.to_vec(),
                 resp: tx,
             })
@@ -511,7 +517,7 @@ impl KvStore for SqliteKvStore {
         let (tx, rx) = oneshot::channel();
         self.sender
             .send(KvMsg::Increment {
-                table: Arc::clone(&self.table_name),
+                table: self.table_name,
                 key: key.to_vec(),
                 delta,
                 resp: tx,
@@ -524,7 +530,7 @@ impl KvStore for SqliteKvStore {
         let (tx, rx) = oneshot::channel();
         self.sender
             .send(KvMsg::NewCas {
-                table: Arc::clone(&self.table_name),
+                table: self.table_name,
                 key: key.to_vec(),
                 resp: tx,
             })

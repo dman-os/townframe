@@ -1,5 +1,5 @@
 use crate::interlude::*;
-use crate::part_store::HostPartitionStore;
+use crate::part_store::HostPartStore;
 
 use big_sync_core::part_store::CursorIndex;
 use big_sync_core::{ObjId, PartId, PeerId};
@@ -27,7 +27,7 @@ impl PartialEq for ObservedStoreSnapshot {
 impl Eq for ObservedStoreSnapshot {}
 
 #[async_trait]
-pub(crate) trait ObservedStore: HostPartitionStore {
+pub(crate) trait ObservedStore: HostPartStore {
     async fn observed_snapshot(&self) -> Res<ObservedStoreSnapshot>;
 }
 

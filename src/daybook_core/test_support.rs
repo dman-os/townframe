@@ -1,9 +1,8 @@
 use crate::interlude::*;
 use automerge::transaction::Transactable;
 
-use am_utils_rs::partition::{PartitionStore, PartitionStoreStopToken};
-use am_utils_rs::repo::PeerId;
-use am_utils_rs::SharedBigRepo;
+use big_repo::{BigRepo, BigRepoStopToken, SharedBigRepo, SharedPartStore};
+use sqlx::sqlite::SqliteConnectOptions;
 
 use crate::drawer::DrawerRepo;
 use crate::plugs::PlugsRepo;
@@ -20,7 +19,7 @@ pub struct DaybookTestContext {
     pub progress_stop: crate::repos::RepoStopToken,
     pub init_stop: crate::repos::RepoStopToken,
     pub sqlite_local_state_stop: crate::repos::RepoStopToken,
-    pub acx_stop: am_utils_rs::BigRepoStopToken,
+    pub acx_stop: BigRepoStopToken,
     pub rt_stop: crate::rt::RtStopToken,
     pub rt: Arc<crate::rt::Rt>,
     pub _temp_dir: tempfile::TempDir,
@@ -140,15 +139,15 @@ pub async fn test_cx_with_options(
     let peer_id = crate::peer_id_from_label(&format!("test_{}", uuid::Uuid::new_v4().simple()));
 
     // Initialize SharedBigRepo with memory storage
-    let (part_store, part_store_stop) =
+    let (big_sync_host, big_sync_stop) =
         crate::test_support::boot_part_store("sqlite::memory:").await?;
     let (big_repo, acx_stop) = BigRepo::boot(
-        am_utils_rs::repo::Config {
+        big_repo::Config {
             peer_id,
             secret_key_bytes: rand::random::<[u8; 32]>(),
-            storage: am_utils_rs::repo::StorageConfig::Memory,
+            storage: big_repo::StorageConfig::Memory,
         },
-        Arc::clone(&part_store),
+        Arc::clone(&big_sync_host.store),
     )
     .await?;
 
@@ -159,14 +158,14 @@ pub async fn test_cx_with_options(
         tx.put(automerge::ROOT, "version", "0")?;
         tx.commit();
         let handle = big_repo.put_doc(DocumentId::random(), doc).await?;
-        *handle.document_id()
+        handle.document_id()
     };
 
     // Create an app document for all stores (config, plugs, dispatch, triage)
     let app_doc_id = {
         let doc = automerge::Automerge::load(&crate::app::version_updates::version_latest()?)?;
         let handle = big_repo.put_doc(DocumentId::random(), doc).await?;
-        *handle.document_id()
+        handle.document_id()
     };
 
     // Load config first to get local identity
@@ -280,7 +279,7 @@ pub async fn test_cx_with_options(
     };
     let lock_guard = crate::repo::RepoLockGuard::acquire(&layout.lock_path)?;
     let secret_repo = Arc::new(crate::secrets::SecretRepo::boot().await?);
-    let iroh_secret_key = iroh::SecretKey::generate(&mut rand::rng());
+    let iroh_secret_key = iroh::SecretKey::generate();
     let local_peer_key = daybook_types::doc::format_peer_key(peer_id.as_bytes());
     let rcx = crate::repo::RepoCtx::from_parts(
         crate::repo::RepoCtxParts {
@@ -376,46 +375,67 @@ pub async fn import_test_plug_oci(test_cx: &DaybookTestContext) -> Res<()> {
     Ok(())
 }
 
-pub async fn boot_part_store(
-    sqlite_url: &str,
-) -> Res<(Arc<PartitionStore>, PartitionStoreStopToken)> {
-    let state_pool = {
-        use std::str::FromStr;
-        let connect_options = sqlx::sqlite::SqliteConnectOptions::from_str(sqlite_url)
+pub async fn boot_part_store(sqlite_url: &str) -> Res<(big_sync::Ctx, big_sync::StopToken)> {
+    let (read_pool, write_pool) = {
+        let connect_options = SqliteConnectOptions::from_str(sqlite_url)
             .expect(ERROR_IMPOSSIBLE)
+            .journal_mode(sqlx::sqlite::SqliteJournalMode::Wal)
             .create_if_missing(true);
-        sqlx::sqlite::SqlitePoolOptions::new()
+        let read_pool = sqlx::sqlite::SqlitePoolOptions::new()
+            .max_connections(4)
+            .connect_with(connect_options.clone())
+            .await
+            .wrap_err("failed connecting big repo sqlite read pool")?;
+        let write_pool = sqlx::sqlite::SqlitePoolOptions::new()
             .max_connections(1)
             .connect_with(connect_options)
             .await
-            .wrap_err("failed connecting big repo sqlite")?
+            .wrap_err("failed connecting big repo sqlite write pool")?;
+        (read_pool, write_pool)
     };
 
-    PartitionStore::boot(state_pool).await
+    let store = Arc::new(
+        big_sync::SqlitePartStore::new(
+            read_pool,
+            write_pool,
+            sqlite_url.to_owned(),
+            big_sync_core::BuckId::MAX_LEVEL,
+        )
+        .await?,
+    );
+    let store_for_worker: Arc<dyn big_sync::HostPartStore> = store.clone();
+    let (worker, stop) = big_sync::spawn_big_sync_worker(store_for_worker.clone(), HashMap::new())?;
+    Ok((
+        big_sync::Ctx {
+            store: store_for_worker,
+            worker,
+        },
+        stop,
+    ))
 }
 
 pub async fn boot_repo() -> Res<(
     Arc<BigRepo>,
-    Arc<PartitionStore>,
+    big_sync::Ctx,
     Box<dyn FnOnce() -> futures::future::BoxFuture<'static, Res<()>>>,
 )> {
-    let (partition_store, partition_store_stop) = boot_part_store("sqlite::memory:").await?;
+    let (big_sync_host, big_sync_stop) = boot_part_store("sqlite::memory:").await?;
     let (repo, stop) = BigRepo::boot(
-        am_utils_rs::repo::Config {
-            peer_id: crate::peer_id_from_label("test-v2"),
-            secret_key_bytes: rand::random::<[u8; 32]>(),
-            storage: am_utils_rs::repo::StorageConfig::Memory,
+        big_repo::Config {
+            peer_id: PeerId::new([7_u8; 32]),
+            secret_key_bytes: [7_u8; 32],
+            storage: big_repo::StorageConfig::Memory,
         },
-        Arc::clone(&partition_store),
+        Arc::clone(&big_sync_host.store),
     )
     .await?;
     Ok((
         repo,
-        partition_store,
+        big_sync_host,
         Box::new(move || {
             async move {
                 stop.stop().await?;
-                partition_store_stop.stop().await?;
+                big_sync_stop.stop().await?;
                 eyre::Ok(())
             }
             .boxed()
@@ -427,30 +447,32 @@ pub async fn boot_disk_repo(
     path: PathBuf,
 ) -> Res<(
     Arc<BigRepo>,
-    Arc<PartitionStore>,
+    big_sync::Ctx,
     Box<dyn FnOnce() -> futures::future::BoxFuture<'static, Res<()>>>,
 )> {
-    let (partition_store, partition_store_stop) = boot_part_store(&format!(
+    std::fs::create_dir_all(&path)
+        .wrap_err_with(|| format!("failed creating disk repo path: {}", path.display()))?;
+    let (big_sync_host, big_sync_stop) = boot_part_store(&format!(
         "sqlite://{}",
         path.join("part_store.db").display()
     ))
     .await?;
     let (repo, stop) = BigRepo::boot(
-        am_utils_rs::repo::Config {
+        big_repo::Config {
             peer_id: PeerId::new([7_u8; 32]),
-            secret_key_bytes: rand::random::<[u8; 32]>(),
-            storage: am_utils_rs::repo::StorageConfig::Disk { path },
+            secret_key_bytes: [7_u8; 32],
+            storage: big_repo::StorageConfig::Disk { path },
         },
-        Arc::clone(&partition_store),
+        Arc::clone(&big_sync_host.store),
     )
     .await?;
     Ok((
         repo,
-        partition_store,
+        big_sync_host,
         Box::new(move || {
             async move {
                 stop.stop().await?;
-                partition_store_stop.stop().await?;
+                big_sync_stop.stop().await?;
                 eyre::Ok(())
             }
             .boxed()

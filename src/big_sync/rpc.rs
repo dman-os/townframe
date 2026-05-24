@@ -1,6 +1,6 @@
 use crate::interlude::*;
 
-use crate::part_store::HostPartitionStore;
+use crate::part_store::HostPartStore;
 
 use big_sync_core::rpc::{
     BigSyncRpcResult, BucketSummary, GetChangedBucketsRequest, LeafBucketResult, LeafBucketsError,
@@ -185,7 +185,7 @@ impl BigSyncRpcStopToken {
 }
 
 pub async fn spawn_big_sync_rpc(
-    store: Arc<dyn HostPartitionStore>,
+    store: Arc<dyn HostPartStore>,
 ) -> Res<(BigSyncRpcHandle, BigSyncRpcStopToken)> {
     let (rpc_tx, mut rpc_rx) = mpsc::channel(1024);
     let client = irpc::Client::<BigSyncRpc>::local(rpc_tx);
@@ -236,11 +236,7 @@ pub struct IrohBigSyncRpcClient {
 impl IrohBigSyncRpcClient {
     pub fn new(endpoint: iroh::Endpoint, endpoint_addr: iroh::EndpointAddr) -> Self {
         Self {
-            client: irpc_iroh::client::<BigSyncRpc>(
-                endpoint,
-                endpoint_addr,
-                BIG_SYNC_RPC_ALPN,
-            ),
+            client: irpc_iroh::client::<BigSyncRpc>(endpoint, endpoint_addr, BIG_SYNC_RPC_ALPN),
         }
     }
 }
@@ -264,10 +260,14 @@ impl HostBigRpcClient for IrohBigSyncRpcClient {
     async fn sub_parts(
         &self,
         req: SubPartsRequest,
-    ) -> Res<BigSyncRpcResult<Result<big_sync_core::mpsc::Receiver<SubEvent>, ListPartsError>>> {
+    ) -> Res<BigSyncRpcResult<Result<big_sync_core::mpsc::Receiver<SubEvent>, ListPartsError>>>
+    {
         let part_ids: std::collections::HashSet<_> =
             req.parts.iter().map(|part| part.part_id).collect();
-        match self.peer_summary(PeerSummaryRequest { parts: part_ids }).await? {
+        match self
+            .peer_summary(PeerSummaryRequest { parts: part_ids })
+            .await?
+        {
             Ok(Ok(_)) => {}
             Ok(Err(err)) => return Ok(Ok(Err(err))),
             Err(err) => return Ok(Err(err)),
@@ -343,7 +343,7 @@ impl HostBigRpcClient for IrohBigSyncRpcClient {
 }
 
 struct BigSyncRpcWorker {
-    store: Arc<dyn HostPartitionStore>,
+    store: Arc<dyn HostPartStore>,
     cancel_token: CancellationToken,
     subscription_tasks: Arc<utils_rs::AbortableJoinSet>,
 }
@@ -414,7 +414,7 @@ mod tests {
     use super::*;
 
     use crate::part_store::memory::MemoryPartStore;
-    use crate::part_store::HostPartitionStore;
+    use crate::part_store::HostPartStore;
     use big_sync_core::rpc::SubEvent;
     use big_sync_core::{BuckId, Byte32Id, FingerprintSeed, ObjId, PartId, PeerId};
     use iroh::protocol::Router;
@@ -510,10 +510,7 @@ mod tests {
         let expected_sub_events = collect_sub_events(
             store
                 .subscribe(SubPartsRequest {
-                    parts: vec![big_sync_core::rpc::PartStreamCursorRequest {
-                        part_id,
-                        cursor: 0,
-                    }],
+                    parts: vec![big_sync_core::rpc::PartStreamCursorRequest { part_id, cursor: 0 }],
                 })
                 .await?
                 .unwrap(),
@@ -521,7 +518,7 @@ mod tests {
         .await?;
 
         let rpc_store = Arc::<MemoryPartStore>::clone(&store);
-        let rpc_store: Arc<dyn HostPartitionStore> = rpc_store;
+        let rpc_store: Arc<dyn HostPartStore> = rpc_store;
         let (rpc_handle, rpc_stop) = spawn_big_sync_rpc(rpc_store).await?;
         let local_peer_summary: Result<PeerSummaryResult, ListPartsError> = rpc_handle
             .client
@@ -584,17 +581,11 @@ mod tests {
 
         let sub_events = client
             .sub_parts(SubPartsRequest {
-                parts: vec![big_sync_core::rpc::PartStreamCursorRequest {
-                    part_id,
-                    cursor: 0,
-                }],
+                parts: vec![big_sync_core::rpc::PartStreamCursorRequest { part_id, cursor: 0 }],
             })
             .await???;
-        let sub_events = tokio::time::timeout(
-            Duration::from_secs(10),
-            collect_sub_events(sub_events),
-        )
-        .await??;
+        let sub_events =
+            tokio::time::timeout(Duration::from_secs(10), collect_sub_events(sub_events)).await??;
         assert_eq!(sub_events, expected_sub_events);
 
         drop(client);

@@ -1,4 +1,4 @@
-//! FIXME: fuck me, we have a name clash with the core::repo module
+//! FIXME: we have a name clash with the core::repo module
 
 use crate::interlude::*;
 use std::collections::VecDeque;
@@ -37,15 +37,15 @@ pub trait Repo {
 /// This is intentionally only for live notification handling. Historical replay paths
 /// (for example `diff_events`) should pass `live_origin = None` and must not be skipped.
 pub fn should_skip_live_patch(
-    live_origin: Option<&am_utils_rs::repo::BigRepoChangeOrigin>,
-    exclude_peer_id: Option<&am_utils_rs::repo::PeerId>,
+    live_origin: Option<&big_repo::BigRepoChangeOrigin>,
+    exclude_peer_id: Option<&PeerId>,
 ) -> bool {
     match live_origin {
-        Some(am_utils_rs::repo::BigRepoChangeOrigin::Local) => true,
-        Some(am_utils_rs::repo::BigRepoChangeOrigin::Remote { peer_id, .. }) => {
+        Some(big_repo::BigRepoChangeOrigin::Local) => true,
+        Some(big_repo::BigRepoChangeOrigin::Remote { peer_id, .. }) => {
             exclude_peer_id.is_some_and(|exclude| peer_id == exclude)
         }
-        Some(am_utils_rs::repo::BigRepoChangeOrigin::Bootstrap) | None => false,
+        Some(big_repo::BigRepoChangeOrigin::Bootstrap) | None => false,
     }
 }
 
@@ -56,18 +56,18 @@ pub fn should_skip_live_patch(
 pub fn resolve_origin_from_vtag_actor(
     local_actor_id: &automerge::ActorId,
     vtag_actor_id: &automerge::ActorId,
-    live_origin: Option<&am_utils_rs::repo::BigRepoChangeOrigin>,
+    live_origin: Option<&big_repo::BigRepoChangeOrigin>,
 ) -> crate::event_origin::SwitchEventOrigin {
     match live_origin {
-        Some(am_utils_rs::repo::BigRepoChangeOrigin::Bootstrap) => {
+        Some(big_repo::BigRepoChangeOrigin::Bootstrap) => {
             crate::event_origin::SwitchEventOrigin::Bootstrap
         }
-        Some(am_utils_rs::repo::BigRepoChangeOrigin::Remote { peer_id, .. }) => {
+        Some(big_repo::BigRepoChangeOrigin::Remote { peer_id, .. }) => {
             crate::event_origin::SwitchEventOrigin::Remote {
                 peer_id: peer_id.to_string(),
             }
         }
-        Some(am_utils_rs::repo::BigRepoChangeOrigin::Local) => {
+        Some(big_repo::BigRepoChangeOrigin::Local) => {
             if vtag_actor_id == local_actor_id {
                 crate::event_origin::SwitchEventOrigin::Local {
                     actor_id: vtag_actor_id.to_string(),
@@ -90,21 +90,21 @@ pub fn resolve_origin_from_vtag_actor(
 /// for local-vs-nonlocal inference; otherwise this falls back to non-local/unknown.
 pub fn resolve_origin_for_delete(
     local_actor_id: &automerge::ActorId,
-    live_origin: Option<&am_utils_rs::repo::BigRepoChangeOrigin>,
+    live_origin: Option<&big_repo::BigRepoChangeOrigin>,
     tombstone_actor_id: Option<&automerge::ActorId>,
 ) -> crate::event_origin::SwitchEventOrigin {
     match live_origin {
-        Some(am_utils_rs::repo::BigRepoChangeOrigin::Local) => {
+        Some(big_repo::BigRepoChangeOrigin::Local) => {
             crate::event_origin::SwitchEventOrigin::Local {
                 actor_id: local_actor_id.to_string(),
             }
         }
-        Some(am_utils_rs::repo::BigRepoChangeOrigin::Remote { peer_id, .. }) => {
+        Some(big_repo::BigRepoChangeOrigin::Remote { peer_id, .. }) => {
             crate::event_origin::SwitchEventOrigin::Remote {
                 peer_id: peer_id.to_string(),
             }
         }
-        Some(am_utils_rs::repo::BigRepoChangeOrigin::Bootstrap) => {
+        Some(big_repo::BigRepoChangeOrigin::Bootstrap) => {
             crate::event_origin::SwitchEventOrigin::Bootstrap
         }
         None => {
@@ -697,7 +697,7 @@ mod loom_tests {
 #[cfg(test)]
 mod origin_tests {
     use super::*;
-    use am_utils_rs::repo::BigRepoChangeOrigin;
+    use big_repo::BigRepoChangeOrigin;
 
     #[test]
     fn should_skip_live_patch_skips_local_and_keeps_unrelated_remote() {

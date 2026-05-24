@@ -19,7 +19,7 @@ pub enum StoreMutationOutcome {
 }
 
 #[async_trait]
-pub trait HostPartitionStore: Send + Sync {
+pub trait HostPartStore: Send + Sync {
     async fn summarize_parts(
         &self,
         parts: HashSet<PartId>,
@@ -170,7 +170,7 @@ pub mod contract {
         dead_ids: &BTreeSet<ObjId>,
     ) -> Res<BucketSummary>
     where
-        S: HostPartitionStore + Sync,
+        S: HostPartStore + Sync,
     {
         let mut live_fp = 0u64;
         let mut dead_fp = 0u64;
@@ -228,7 +228,7 @@ pub mod contract {
         dead_ids: &[ObjId],
     ) -> Res<()>
     where
-        S: HostPartitionStore + Sync,
+        S: HostPartStore + Sync,
     {
         assert_eq!(
             live_ids.len(),
@@ -288,7 +288,7 @@ pub mod contract {
         limit_hint: u32,
     ) -> Res<()>
     where
-        S: HostPartitionStore + Sync,
+        S: HostPartStore + Sync,
     {
         assert_eq!(
             live_ids.len(),
@@ -392,7 +392,7 @@ pub mod contract {
         limit_hint: u32,
     ) -> Res<()>
     where
-        S: HostPartitionStore + Sync,
+        S: HostPartStore + Sync,
     {
         assert_root_bucket_summary(store, part_id, live_ids, dead_ids).await?;
         assert_root_leaf_pagination(store, part_id, seed, live_ids, dead_ids, limit_hint).await?;
