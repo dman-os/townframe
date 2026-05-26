@@ -328,6 +328,17 @@ impl HostPartStore for MemoryPartStore {
             let mut bucks = HashMap::new();
             for buck_req in req.buckets {
                 let buck_id = buck_req.buck_id;
+                if guard.bucket_summary(req.part_id, buck_id).changed_at <= req.since {
+                    bucks.insert(
+                        buck_id,
+                        LeafBucketPage {
+                            entries: Vec::new(),
+                            next_after: None,
+                            done: true,
+                        },
+                    );
+                    continue;
+                }
                 let items = guard.bucket_items_for_path(req.part_id, buck_id);
                 let start = match buck_req.after {
                     Some(after) => items
@@ -435,17 +446,25 @@ impl HostPartStore for MemoryPartStore {
             let guard = &mut *guard;
             guard.tombstoned_objs.remove(&obj_id);
             let obj_state = guard.objs.entry(obj_id).or_default();
-            let old_payload = obj_state
-                .payload
-                .clone()
-                .unwrap_or(serde_json::Value::Null);
+            let old_payload = obj_state.payload.clone().unwrap_or(serde_json::Value::Null);
             let event_payload = payload.clone();
             obj_state.payload = Some(payload);
+            if obj_state.parts.is_empty() {
+                guard.flush();
+                return Ok(());
+            }
             let new_payload = obj_state.payload.as_ref().expect(ERROR_IMPOSSIBLE);
 
             let cursor = guard.global_cursor.get();
             for &part_id in &obj_state.parts {
                 let part = guard.parts.entry(part_id).or_default();
+                let (added_at, changed_at) = {
+                    let part_obj_state = part.members.get(&obj_id).expect(ERROR_IMPOSSIBLE);
+                    assert!(part_obj_state.removed_at.is_none());
+                    (part_obj_state.added_at, part_obj_state.changed_at)
+                };
+                guard.bus.remove_evt(added_at);
+                guard.bus.remove_evt(changed_at);
                 part.apply_bucket_transition(
                     obj_id,
                     cursor,
@@ -477,10 +496,8 @@ impl HostPartStore for MemoryPartStore {
             let obj_state = guard.objs.entry(obj_id).or_default();
 
             guard.tombstoned_objs.remove(&obj_id);
-            let payload = obj_state
-                .payload
-                .clone()
-                .unwrap_or(serde_json::Value::Null);
+            let payload = obj_state.payload.clone();
+            let bucket_payload = payload.clone().unwrap_or(serde_json::Value::Null);
             obj_state.parts.extend(&parts);
             let cursor = guard.global_cursor.get();
             for &part_id in &parts {
@@ -496,7 +513,7 @@ impl HostPartStore for MemoryPartStore {
                             obj_id,
                             cursor,
                             BucketMemberKind::Dead,
-                            BucketMemberKind::Live(&payload),
+                            BucketMemberKind::Live(&bucket_payload),
                         );
                         if let Some(old) = part.members.get_mut(&obj_id) {
                             old.changed_at = cursor;
@@ -508,7 +525,7 @@ impl HostPartStore for MemoryPartStore {
                             obj_id,
                             cursor,
                             BucketMemberKind::Absent,
-                            BucketMemberKind::Live(&payload),
+                            BucketMemberKind::Live(&bucket_payload),
                         );
                         part.members.insert(
                             obj_id,
@@ -527,6 +544,7 @@ impl HostPartStore for MemoryPartStore {
                         cursor,
                         part_id,
                         obj_id,
+                        payload: payload.clone(),
                     }));
             }
             guard.flush();
@@ -644,7 +662,13 @@ impl HostPartStore for MemoryPartStore {
                         events.push(evt.clone());
                     }
                 }
-                out.insert(part_id, PartPage { events, next_cursor });
+                out.insert(
+                    part_id,
+                    PartPage {
+                        events,
+                        next_cursor,
+                    },
+                );
             }
             Ok(out)
         });

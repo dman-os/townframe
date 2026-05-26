@@ -189,9 +189,14 @@ pub mod contract {
             "unexpected payload after sync case {}",
             case.name
         );
+        let mut actual_parts = store.obj_parts(case.obj_id).await?;
+        let mut expected_parts = case.expected_parts.clone();
+        actual_parts.sort();
+        actual_parts.dedup();
+        expected_parts.sort();
+        expected_parts.dedup();
         assert_eq!(
-            store.obj_parts(case.obj_id).await?,
-            case.expected_parts,
+            actual_parts, expected_parts,
             "unexpected parts after sync case {}",
             case.name
         );

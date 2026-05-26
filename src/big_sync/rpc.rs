@@ -236,7 +236,9 @@ impl HostBigRpcClient for IrohBigSyncRpcClient {
                             break;
                         }
                     }
-                    Ok(None) => break,
+                    Ok(None) => {
+                        break;
+                    }
                     Err(err) => {
                         warn!(?err, "big sync sub_parts bridge failed");
                         break;
@@ -316,7 +318,9 @@ impl BigSyncRpcWorker {
                                     evt = sub.recv() => {
                                         let evt = match evt {
                                             Ok(evt) => evt,
-                                            Err(_) => break,
+                                            Err(_err) => {
+                                                break;
+                                            }
                                         };
                                         if tx.send(evt).await.is_err() {
                                             break;

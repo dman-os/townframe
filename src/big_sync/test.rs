@@ -277,7 +277,9 @@ impl SyncBackend for MemorySyncBackend {
         match (local_payload, remote_payload) {
             (Some(local), Some(remote)) => match compare_lww_payloads(&local, &remote) {
                 Ordering::Less => {
-                    self.local_part_store.set_obj_payload(obj_id, remote).await?;
+                    self.local_part_store
+                        .set_obj_payload(obj_id, remote)
+                        .await?;
                     if !part_hints.is_empty() {
                         self.local_part_store
                             .add_obj_to_parts(obj_id, part_hints)
@@ -296,7 +298,9 @@ impl SyncBackend for MemorySyncBackend {
                 }
             },
             (None, Some(payload)) => {
-                self.local_part_store.set_obj_payload(obj_id, payload).await?;
+                self.local_part_store
+                    .set_obj_payload(obj_id, payload)
+                    .await?;
                 if !part_hints.is_empty() {
                     self.local_part_store
                         .add_obj_to_parts(obj_id, part_hints)
@@ -332,7 +336,9 @@ impl SyncBackendHarness for MemorySyncBackendContractHarness {
         if case.remote_payload.is_none() {
             let remote_store = Arc::new(MemoryPartStore::new(case.peer_id));
             if let Some(payload) = &case.expected_payload {
-                remote_store.set_obj_payload(case.obj_id, payload.clone()).await?;
+                remote_store
+                    .set_obj_payload(case.obj_id, payload.clone())
+                    .await?;
                 if !case.expected_parts.is_empty() {
                     remote_store
                         .add_obj_to_parts(case.obj_id, case.expected_parts.clone())
@@ -477,15 +483,15 @@ impl NodeHarness {
 
     async fn seed_obj(&self, obj: ObjId, payload: serde_json::Value) -> Res<()> {
         self.host.store.set_obj_payload(obj, payload).await?;
-        self.host
-            .store
-            .add_obj_to_parts(obj, test_parts())
-            .await?;
+        self.host.store.add_obj_to_parts(obj, test_parts()).await?;
         Ok(())
     }
 
     async fn remove_obj(&self, obj: ObjId) -> Res<()> {
-        self.host.store.remove_obj_from_part(obj, test_part()).await?;
+        self.host
+            .store
+            .remove_obj_from_part(obj, test_part())
+            .await?;
         Ok(())
     }
 
@@ -651,15 +657,11 @@ async fn memory_part_store_bucket_summary_is_order_independent() -> Res<()> {
         obj_ids_b.push(*obj);
     }
     for ((_, payload), &obj_id) in objs.iter().zip(obj_ids_a.iter()) {
-        store_a
-            .set_obj_payload(obj_id, payload.clone())
-            .await?;
+        store_a.set_obj_payload(obj_id, payload.clone()).await?;
         store_a.add_obj_to_parts(obj_id, vec![test_part()]).await?;
     }
     for ((_, payload), &obj_id) in objs.iter().rev().zip(obj_ids_b.iter().rev()) {
-        store_b
-            .set_obj_payload(obj_id, payload.clone())
-            .await?;
+        store_b.set_obj_payload(obj_id, payload.clone()).await?;
         store_b.add_obj_to_parts(obj_id, vec![test_part()]).await?;
     }
 
@@ -691,8 +693,12 @@ async fn memory_part_store_bucket_summary_is_order_independent() -> Res<()> {
     assert_eq!(a_initial.fp, b_initial.fp);
     assert_eq!(a_initial.changed_at, b_initial.changed_at);
 
-    store_a.remove_obj_from_part(obj_ids_a[1], test_part()).await?;
-    store_b.remove_obj_from_part(obj_ids_b[1], test_part()).await?;
+    store_a
+        .remove_obj_from_part(obj_ids_a[1], test_part())
+        .await?;
+    store_b
+        .remove_obj_from_part(obj_ids_b[1], test_part())
+        .await?;
 
     let a_final = store_a
         .get_changed_buckets(GetChangedBucketsRequest {
@@ -828,13 +834,18 @@ async fn wait_for_convergence(nodes: &[&NodeHarness], timeout: Duration) -> Res<
             current.push((node.handle.snapshot().await?, node.snapshot().await?));
         }
 
-        if last_snapshot.as_ref().is_some_and(|prev| prev == &current) {
+        let stores_equal = current
+            .iter()
+            .map(|(_, snapshot)| snapshot)
+            .all(|snapshot| snapshot == &current[0].1);
+
+        if stores_equal && last_snapshot.as_ref().is_some_and(|prev| prev == &current) {
             stable_rounds += 1;
             if stable_rounds >= 8 {
                 return Ok(());
             }
         } else {
-            stable_rounds = 1;
+            stable_rounds = if stores_equal { 1 } else { 0 };
         }
 
         last_snapshot = Some(current);
@@ -1240,25 +1251,16 @@ async fn memory_sync_direct_backend_adopts_remote_tombstone() -> Res<()> {
     let obj = gen_obj_id(51);
     let live_payload = payload("live", 1, peer_a);
 
-    store_a
-        .set_obj_payload(obj, live_payload.clone())
-        .await?;
+    store_a.set_obj_payload(obj, live_payload.clone()).await?;
     store_a.add_obj_to_parts(obj, vec![part]).await?;
-    store_b
-        .set_obj_payload(obj, live_payload)
-        .await?;
+    store_b.set_obj_payload(obj, live_payload).await?;
     store_b.add_obj_to_parts(obj, vec![part]).await?;
     store_a.remove_obj_from_part(obj, part).await?;
 
     let backend = MemorySyncBackend::new(peer_b, Arc::clone(&store_b_dyn), Arc::clone(&world));
 
     let err = backend
-        .sync_obj(
-            peer_a,
-            obj,
-            vec![part],
-            None,
-        )
+        .sync_obj(peer_a, obj, vec![part], None)
         .await
         .expect_err("remote absence should be treated as a hard error for now");
 
@@ -1290,9 +1292,7 @@ async fn memory_sync_direct_backend_cross_replication_is_symmetric() -> Res<()> 
     let left_payload = payload("left-a", 1, peer_a);
     let right_payload = payload("right-b", 1, peer_b);
 
-    store_a
-        .set_obj_payload(obj_a, left_payload.clone())
-        .await?;
+    store_a.set_obj_payload(obj_a, left_payload.clone()).await?;
     store_a.add_obj_to_parts(obj_a, vec![part]).await?;
     store_b
         .set_obj_payload(obj_b, right_payload.clone())
@@ -1303,20 +1303,10 @@ async fn memory_sync_direct_backend_cross_replication_is_symmetric() -> Res<()> 
     let backend_b = MemorySyncBackend::new(peer_b, Arc::clone(&store_b_dyn), Arc::clone(&world));
 
     let _ = backend_a
-        .sync_obj(
-            peer_b,
-            obj_b,
-            vec![part],
-            Some(right_payload.clone()),
-        )
+        .sync_obj(peer_b, obj_b, vec![part], Some(right_payload.clone()))
         .await?;
     let _ = backend_b
-        .sync_obj(
-            peer_a,
-            obj_a,
-            vec![part],
-            Some(left_payload.clone()),
-        )
+        .sync_obj(peer_a, obj_a, vec![part], Some(left_payload.clone()))
         .await?;
 
     let snapshot_a = store_a.snapshot().await?;

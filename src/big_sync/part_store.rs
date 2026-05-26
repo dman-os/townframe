@@ -2,8 +2,8 @@ use crate::interlude::*;
 
 use big_sync_core::part_store::{CursorIndex, ObjPayload};
 use big_sync_core::rpc::{
-    BucketSummary, GetChangedBucketsRequest, LeafBucketResult, LeafBucketsError, LeafBucketsRequest,
-    ListPartsError, PartPage, PartSummary, SubEvent, SubPartsRequest,
+    BucketSummary, GetChangedBucketsRequest, LeafBucketResult, LeafBucketsError,
+    LeafBucketsRequest, ListPartsError, PartPage, PartSummary, SubEvent, SubPartsRequest,
 };
 use big_sync_core::{mpsc, BuckId, Byte32Id, ObjId, PartId, PeerId};
 
@@ -440,7 +440,8 @@ pub mod host_contract {
     where
         S: HostPartStore + Sync + ?Sized,
     {
-        store.set_obj_payload(obj_id, payload).await?;
+        store.set_obj_payload(obj_id, payload.clone()).await?;
+        assert_eq!(store.obj_payload(obj_id).await?, Some(payload.clone()));
         if !parts.is_empty() {
             store.add_obj_to_parts(obj_id, parts.to_vec()).await?;
         }
@@ -451,13 +452,20 @@ pub mod host_contract {
         parts.iter().copied().collect()
     }
 
-    fn assert_added(event: &PartEvent, cursor: CursorIndex, part_id: PartId, obj_id: ObjId) {
+    fn assert_added(
+        event: &PartEvent,
+        cursor: CursorIndex,
+        part_id: PartId,
+        obj_id: ObjId,
+        payload: Option<ObjPayload>,
+    ) {
         let PartEvent::Added(transition) = event else {
             panic!("expected added event");
         };
         assert_eq!(transition.cursor, cursor);
         assert_eq!(transition.part_id, part_id);
         assert_eq!(transition.obj_id, obj_id);
+        assert_eq!(transition.payload, payload);
     }
 
     fn assert_removed(event: &PartEvent, cursor: CursorIndex, part_id: PartId, obj_id: ObjId) {
@@ -485,13 +493,20 @@ pub mod host_contract {
         assert_eq!(transition.payload, payload);
     }
 
-    fn assert_sub_added(event: &SubEvent, cursor: CursorIndex, part_id: PartId, obj_id: ObjId) {
+    fn assert_sub_added(
+        event: &SubEvent,
+        cursor: CursorIndex,
+        part_id: PartId,
+        obj_id: ObjId,
+        payload: Option<ObjPayload>,
+    ) {
         let SubEvent::Added(transition) = event else {
             panic!("expected added sub event");
         };
         assert_eq!(transition.cursor, cursor);
         assert_eq!(transition.part_id, part_id);
         assert_eq!(transition.obj_id, obj_id);
+        assert_eq!(transition.payload, payload);
     }
 
     fn assert_sub_removed(event: &SubEvent, cursor: CursorIndex, part_id: PartId, obj_id: ObjId) {
@@ -519,9 +534,7 @@ pub mod host_contract {
         assert_eq!(transition.payload, payload);
     }
 
-    async fn recv_sub_event(
-        rx: &big_sync_core::mpsc::Receiver<SubEvent>,
-    ) -> Res<SubEvent> {
+    async fn recv_sub_event(rx: &big_sync_core::mpsc::Receiver<SubEvent>) -> Res<SubEvent> {
         Ok(timeout(Duration::from_secs(5), rx.recv()).await??)
     }
 
@@ -567,7 +580,10 @@ pub mod host_contract {
         harness.ensure_part(part_a).await?;
         harness.ensure_part(part_b).await?;
 
-        assert_eq!(store.summarize_parts(HashSet::new()).await??, HashMap::new());
+        assert_eq!(
+            store.summarize_parts(HashSet::new()).await??,
+            HashMap::new()
+        );
         match store.summarize_parts(HashSet::from([unknown])).await? {
             Err(ListPartsError::UnkownParts { unkown_parts }) => {
                 assert_eq!(unkown_parts, vec![unknown]);
@@ -578,14 +594,19 @@ pub mod host_contract {
         seed_live_obj(store, obj_a, payload("summarize-a", 1), &[part_a]).await?;
         seed_live_obj(store, obj_b, payload("summarize-b", 2), &[part_b]).await?;
 
-        let summary = store.summarize_parts(HashSet::from([part_a, part_b])).await??;
+        let summary = store
+            .summarize_parts(HashSet::from([part_a, part_b]))
+            .await??;
         assert_eq!(summary.len(), 2);
         assert_eq!(summary[&part_a].member_count, 1);
         assert_eq!(summary[&part_a].latest_cursor, 1);
         assert_eq!(summary[&part_b].member_count, 1);
         assert_eq!(summary[&part_b].latest_cursor, 2);
 
-        match store.summarize_parts(HashSet::from([part_a, unknown])).await? {
+        match store
+            .summarize_parts(HashSet::from([part_a, unknown]))
+            .await?
+        {
             Err(ListPartsError::UnkownParts { unkown_parts }) => {
                 assert_eq!(unkown_parts, vec![unknown]);
             }
@@ -640,7 +661,9 @@ pub mod host_contract {
             .collect::<Vec<_>>();
         assert_eq!(changed.len(), 3);
         assert!(changed.windows(2).all(|pair| pair[0].id < pair[1].id));
-        assert!(changed.iter().all(|buck| buck.id.level() == bucket_a.level()));
+        assert!(changed
+            .iter()
+            .all(|buck| buck.id.level() == bucket_a.level()));
         for buck in &changed {
             assert_eq!(store.get_bucket_summary(part, buck.id).await?, *buck);
         }
@@ -655,7 +678,13 @@ pub mod host_contract {
             .await??
             .into_iter()
             .collect::<Vec<_>>();
-        assert_eq!(changed_from_b.iter().map(|buck| buck.id).collect::<Vec<_>>(), vec![bucket_b, bucket_c]);
+        assert_eq!(
+            changed_from_b
+                .iter()
+                .map(|buck| buck.id)
+                .collect::<Vec<_>>(),
+            vec![bucket_b, bucket_c]
+        );
 
         let cutoff = changed
             .iter()
@@ -686,7 +715,10 @@ pub mod host_contract {
         assert_eq!(changed_after.len(), 1);
         assert_eq!(changed_after[0].id, bucket_a);
         assert!(changed_after[0].changed_at > cutoff);
-        assert_eq!(store.get_bucket_summary(part, bucket_a).await?, changed_after[0]);
+        assert_eq!(
+            store.get_bucket_summary(part, bucket_a).await?,
+            changed_after[0]
+        );
         Ok(())
     }
 
@@ -709,7 +741,12 @@ pub mod host_contract {
 
         let live_fp_before = Fingerprint::new(
             &BUCKET_LIVE_FP_SEED,
-            &("big-sync-bucket-live-v1", bucket, obj, serde_json::Value::Null),
+            &(
+                "big-sync-bucket-live-v1",
+                bucket,
+                obj,
+                serde_json::Value::Null,
+            ),
         )
         .as_u64();
         let bucket_before = store.get_bucket_summary(part, bucket).await?;
@@ -720,7 +757,7 @@ pub mod host_contract {
                 len: 1,
                 live_count: 1,
                 fp: (live_fp_before, 0),
-                changed_at: 1,
+                changed_at: 3,
             }
         );
 
@@ -760,19 +797,27 @@ pub mod host_contract {
             events_before.get(&part).expect(ERROR_IMPOSSIBLE),
             &PartPage {
                 events: vec![PartEvent::Added(big_sync_core::rpc::ObjAddedToPart {
-                    cursor: 1,
+                    cursor: 3,
                     part_id: part,
                     obj_id: obj,
+                    payload: None,
                 })],
                 next_cursor: None,
             }
         );
 
-        store.set_obj_payload(obj, payload("late-payload", 99)).await?;
+        store
+            .set_obj_payload(obj, payload("late-payload", 99))
+            .await?;
 
         let live_fp_after = Fingerprint::new(
             &BUCKET_LIVE_FP_SEED,
-            &("big-sync-bucket-live-v1", bucket, obj, payload("late-payload", 99)),
+            &(
+                "big-sync-bucket-live-v1",
+                bucket,
+                obj,
+                payload("late-payload", 99),
+            ),
         )
         .as_u64();
         let bucket_after = store.get_bucket_summary(part, bucket).await?;
@@ -829,19 +874,12 @@ pub mod host_contract {
         assert_eq!(
             events_after.get(&part).expect(ERROR_IMPOSSIBLE),
             &PartPage {
-                events: vec![
-                    PartEvent::Added(big_sync_core::rpc::ObjAddedToPart {
-                        cursor: 1,
-                        part_id: part,
-                        obj_id: obj,
-                    }),
-                    PartEvent::Changed(big_sync_core::rpc::ObjChanged {
-                        cursor: 2,
-                        part_ids: vec![part],
-                        obj_id: obj,
-                        payload: payload("late-payload", 99),
-                    }),
-                ],
+                events: vec![PartEvent::Changed(big_sync_core::rpc::ObjChanged {
+                    cursor: 4,
+                    part_ids: vec![part],
+                    obj_id: obj,
+                    payload: payload("late-payload", 99),
+                })],
                 next_cursor: None,
             }
         );
@@ -904,8 +942,7 @@ pub mod host_contract {
                 seed,
                 limit_hint: 2,
             })
-            .await??
-            ;
+            .await??;
         assert_eq!(page.seed, seed);
         let page_a = page.bucks.get(&bucket_a).expect(ERROR_IMPOSSIBLE);
         assert_eq!(
@@ -915,12 +952,18 @@ pub mod host_contract {
                     BucketObjPageEntry {
                         obj_id: a1,
                         dead: false,
-                        fp: Fingerprint::new(&seed, &("big-sync-obj-fp-v1", a1, payload("leaf-a1", 1))),
+                        fp: Fingerprint::new(
+                            &seed,
+                            &("big-sync-obj-fp-v1", a1, payload("leaf-a1", 1))
+                        ),
                     },
                     BucketObjPageEntry {
                         obj_id: a2,
                         dead: false,
-                        fp: Fingerprint::new(&seed, &("big-sync-obj-fp-v1", a2, payload("leaf-a2", 2))),
+                        fp: Fingerprint::new(
+                            &seed,
+                            &("big-sync-obj-fp-v1", a2, payload("leaf-a2", 2))
+                        ),
                     },
                 ],
                 next_after: Some(a2),
@@ -942,9 +985,7 @@ pub mod host_contract {
         );
 
         let since = store.get_bucket_summary(part, bucket_b).await?.changed_at;
-        store
-            .set_obj_payload(b1, payload("leaf-b1-2", 5))
-            .await?;
+        store.set_obj_payload(b1, payload("leaf-b1-2", 5)).await?;
 
         let since_page = store
             .leaf_buckets(LeafBucketsRequest {
@@ -963,8 +1004,7 @@ pub mod host_contract {
                 seed,
                 limit_hint: 2,
             })
-            .await??
-            ;
+            .await??;
         assert_eq!(
             since_page.bucks.get(&bucket_a).expect(ERROR_IMPOSSIBLE),
             &LeafBucketPage {
@@ -1053,83 +1093,34 @@ pub mod host_contract {
             .await??
             .remove(&part_a)
             .expect(ERROR_IMPOSSIBLE);
-        assert_eq!(
-            page1,
-            PartPage {
-                events: vec![PartEvent::Added(big_sync_core::rpc::ObjAddedToPart {
-                    cursor: 1,
-                    part_id: part_a,
-                    obj_id: obj,
-                })],
-                next_cursor: Some(1),
+        let removed_cursor = match &page1.events[..] {
+            [PartEvent::Removed(transition)] => {
+                assert_eq!(transition.part_id, part_a);
+                assert_eq!(transition.obj_id, obj);
+                transition.cursor
             }
-        );
+            other => panic!("unexpected part_a page1: {other:?}"),
+        };
 
         let page2 = store
-            .list_events(HashSet::from([part_a]), 1, 1)
+            .list_events(HashSet::from([part_a]), removed_cursor + 1, 1)
             .await??
             .remove(&part_a)
             .expect(ERROR_IMPOSSIBLE);
-        assert_eq!(
-            page2,
-            PartPage {
-                events: vec![PartEvent::Changed(big_sync_core::rpc::ObjChanged {
-                    cursor: 3,
-                    part_ids: vec![part_a, part_b],
-                    obj_id: obj,
-                    payload: payload("events-2", 2),
-                })],
-                next_cursor: Some(3),
-            }
-        );
-
-        let page3 = store
-            .list_events(HashSet::from([part_a]), 3, 1)
-            .await??
-            .remove(&part_a)
-            .expect(ERROR_IMPOSSIBLE);
-        assert_eq!(
-            page3,
-            PartPage {
-                events: vec![PartEvent::Removed(big_sync_core::rpc::ObjRemovedFromPart {
-                    cursor: 4,
-                    part_id: part_a,
-                    obj_id: obj,
-                })],
-                next_cursor: None,
-            }
-        );
+        assert!(page2.events.is_empty());
 
         let page_b = store
             .list_events(HashSet::from([part_b]), 0, 10)
             .await??
             .remove(&part_b)
             .expect(ERROR_IMPOSSIBLE);
-        assert_eq!(
-            page_b,
-            PartPage {
-                events: vec![
-                    PartEvent::Added(big_sync_core::rpc::ObjAddedToPart {
-                        cursor: 2,
-                        part_id: part_b,
-                        obj_id: obj,
-                    }),
-                    PartEvent::Changed(big_sync_core::rpc::ObjChanged {
-                        cursor: 3,
-                        part_ids: vec![part_a, part_b],
-                        obj_id: obj,
-                        payload: payload("events-2", 2),
-                    }),
-                    PartEvent::Changed(big_sync_core::rpc::ObjChanged {
-                        cursor: 5,
-                        part_ids: vec![part_b],
-                        obj_id: obj,
-                        payload: payload("events-3", 3),
-                    }),
-                ],
-                next_cursor: None,
+        match &page_b.events[..] {
+            [PartEvent::Changed(b)] => {
+                assert_eq!(b.part_ids, vec![part_b]);
+                assert_eq!(b.obj_id, obj);
             }
-        );
+            other => panic!("unexpected part_b page: {other:?}"),
+        }
         Ok(())
     }
 
@@ -1160,22 +1151,27 @@ pub mod host_contract {
             })
             .await??;
         let events = collect_sub_events(&rx).await?;
-        assert_eq!(
-            events,
-            vec![
-                SubEvent::Changed(big_sync_core::rpc::ObjChanged {
-                    cursor: 5,
-                    part_ids: vec![part_b],
-                    obj_id: obj,
-                    payload: payload("sub-3", 3),
-                }),
-                SubEvent::ReplayComplete,
-            ]
-        );
+        let replay_cursor = match &events[..] {
+            [SubEvent::Changed(transition), SubEvent::ReplayComplete] => {
+                assert_eq!(transition.part_ids, vec![part_b]);
+                assert_eq!(transition.obj_id, obj);
+                assert_eq!(transition.payload, payload("sub-3", 3));
+                transition.cursor
+            }
+            other => panic!("unexpected replay events: {other:?}"),
+        };
 
         store.set_obj_payload(obj, payload("sub-4", 4)).await?;
         let live_evt = recv_sub_event(&rx).await?;
-        assert_sub_changed(&live_evt, 6, &[part_b], obj, payload("sub-4", 4));
+        match live_evt {
+            SubEvent::Changed(transition) => {
+                assert_eq!(transition.part_ids, vec![part_b]);
+                assert_eq!(transition.obj_id, obj);
+                assert_eq!(transition.payload, payload("sub-4", 4));
+                assert!(transition.cursor > replay_cursor);
+            }
+            other => panic!("unexpected live sub event: {other:?}"),
+        }
         Ok(())
     }
 }

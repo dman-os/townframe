@@ -648,6 +648,7 @@ impl BigSyncMachine {
                     peer_state.cursor_machine.on_obj_sync_job_evt(
                         obj_id,
                         cursor,
+                        CursorJobCompletionKind::Membership,
                         &mut peer_state.cursors_cmd_buf,
                     );
                     self.drain_cursor_machine_cmds(peer_id);
@@ -1573,6 +1574,7 @@ impl BigSyncMachine {
                 peer_state.cursor_machine.on_obj_sync_job_evt(
                     completion.obj_id,
                     cursor,
+                    CursorJobCompletionKind::Sync,
                     &mut peer_state.cursors_cmd_buf,
                 );
             }

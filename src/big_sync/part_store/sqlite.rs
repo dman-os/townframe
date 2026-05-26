@@ -207,7 +207,9 @@ impl SqlitePartStore {
         }
         let payload_json: Option<String> = row.try_get("payload_json")?;
         let payload = payload_json
-            .map(|payload_json| serde_json::from_str(&payload_json).wrap_err(ERROR_JSON))
+            .as_deref()
+            .filter(|payload_json| !payload_json.is_empty())
+            .map(|payload_json| serde_json::from_str(payload_json).wrap_err(ERROR_JSON))
             .transpose()?
             .unwrap_or(serde_json::Value::Null);
         Ok(MemberState::Live(payload))
@@ -445,7 +447,7 @@ async fn init_schema(pool: &sqlx::SqlitePool, bucket_depth: u8) -> Res<()> {
             part_id BLOB NOT NULL,
             latest_cursor INTEGER NOT NULL DEFAULT 0,
             PRIMARY KEY(scope_id, part_id)
-        )",
+        ) STRICT",
     )
     .execute(&mut *tx)
     .await?;
@@ -454,8 +456,9 @@ async fn init_schema(pool: &sqlx::SqlitePool, bucket_depth: u8) -> Res<()> {
             scope_id INTEGER NOT NULL REFERENCES big_sync_scopes(scope_id),
             obj_id BLOB NOT NULL,
             payload_json TEXT,
-            PRIMARY KEY(scope_id, obj_id)
-        )",
+            PRIMARY KEY(scope_id, obj_id),
+            CHECK(payload_json IS NULL OR json_valid(payload_json))
+        ) STRICT",
     )
     .execute(&mut *tx)
     .await?;
@@ -472,7 +475,7 @@ async fn init_schema(pool: &sqlx::SqlitePool, bucket_depth: u8) -> Res<()> {
             dead_fp INTEGER NOT NULL DEFAULT 0,
             PRIMARY KEY(scope_id, part_id, buck_id),
             FOREIGN KEY(scope_id, part_id) REFERENCES big_sync_parts(scope_id, part_id)
-        )",
+        ) STRICT",
     )
     .execute(&mut *tx)
     .await?;
@@ -494,7 +497,7 @@ async fn init_schema(pool: &sqlx::SqlitePool, bucket_depth: u8) -> Res<()> {
             PRIMARY KEY(scope_id, part_id, obj_id),
             FOREIGN KEY(scope_id, part_id) REFERENCES big_sync_parts(scope_id, part_id),
             FOREIGN KEY(scope_id, obj_id) REFERENCES big_sync_objs(scope_id, obj_id)
-        )",
+        ) STRICT",
     )
     .execute(&mut *tx)
     .await?;
@@ -613,7 +616,9 @@ impl HostPartStore for SqlitePartStore {
         };
         let payload: Option<String> = row.try_get("payload_json")?;
         payload
-            .map(|payload| serde_json::from_str(&payload).wrap_err(ERROR_JSON))
+            .as_deref()
+            .filter(|payload| !payload.is_empty())
+            .map(|payload| serde_json::from_str(payload).wrap_err(ERROR_JSON))
             .transpose()
     }
 
@@ -656,7 +661,9 @@ impl HostPartStore for SqlitePartStore {
             return Ok(());
         }
         let old_payload: ObjPayload = old_payload_json
-            .map(|payload_json| serde_json::from_str(&payload_json).wrap_err(ERROR_JSON))
+            .as_deref()
+            .filter(|payload_json| !payload_json.is_empty())
+            .map(|payload_json| serde_json::from_str(payload_json).wrap_err(ERROR_JSON))
             .transpose()?
             .unwrap_or(serde_json::Value::Null);
         let cursor = Self::next_cursor(&mut tx).await?;
@@ -885,6 +892,8 @@ impl HostPartStore for SqlitePartStore {
         query.push_bind(self.scope_id);
         query.push(" AND m.part_id = ");
         query.push_bind(Self::part_blob(req.part_id));
+        query.push(" JOIN big_sync_buckets s ON s.scope_id = m.scope_id AND s.part_id = m.part_id AND s.buck_id = r.buck_id AND s.changed_at > ");
+        query.push_bind(i64::try_from(req.since).expect(ERROR_IMPOSSIBLE));
         query.push(" AND m.obj_id >= r.lower_id");
         query.push(" AND (r.upper_id IS NULL OR m.obj_id < r.upper_id)");
         query.push(" AND (r.after_id IS NULL OR m.obj_id > r.after_id)");
@@ -926,6 +935,7 @@ impl HostPartStore for SqlitePartStore {
             } else {
                 let payload_json: Option<String> = row.try_get("payload_json")?;
                 let payload = payload_json
+                    .filter(|payload_json| !payload_json.is_empty())
                     .map(|payload_json| serde_json::from_str(&payload_json).wrap_err(ERROR_JSON))
                     .transpose()?
                     .unwrap_or(serde_json::Value::Null);
@@ -979,9 +989,27 @@ impl HostPartStore for SqlitePartStore {
         .fetch_optional(&mut *tx)
         .await?;
         let payload: ObjPayload = payload_json
-            .map(|payload_json| serde_json::from_str(&payload_json).wrap_err(ERROR_JSON))
+            .as_deref()
+            .filter(|payload_json| !payload_json.is_empty())
+            .map(|payload_json| serde_json::from_str(payload_json).wrap_err(ERROR_JSON))
             .transpose()?
             .unwrap_or(serde_json::Value::Null);
+        let event_payload: Option<ObjPayload> = payload_json
+            .as_deref()
+            .filter(|payload_json| !payload_json.is_empty())
+            .map(|payload_json| serde_json::from_str(payload_json).wrap_err(ERROR_JSON))
+            .transpose()?;
+        let payload_json = payload_json.filter(|payload_json| !payload_json.is_empty());
+        sqlx::query(
+            "INSERT INTO big_sync_objs(scope_id, obj_id, payload_json)
+             VALUES (?1, ?2, ?3)
+             ON CONFLICT(scope_id, obj_id) DO NOTHING",
+        )
+        .bind(self.scope_id)
+        .bind(Self::obj_blob(obj_id))
+        .bind(payload_json.as_deref())
+        .execute(&mut *tx)
+        .await?;
         let changed_parts: Vec<_> = part_states
             .into_iter()
             .filter(|(_, old_state)| !matches!(old_state, MemberState::Live(_)))
@@ -1040,6 +1068,7 @@ impl HostPartStore for SqlitePartStore {
                 cursor,
                 part_id,
                 obj_id,
+                payload: event_payload.clone(),
             }));
         }
         tx.commit().await?;
@@ -1225,17 +1254,31 @@ impl HostPartStore for SqlitePartStore {
                         cursor: u64::try_from(row_cursor).expect(ERROR_IMPOSSIBLE),
                         part_id,
                         obj_id,
+                        payload: {
+                            let payload_json: Option<String> = row.try_get("payload_json")?;
+                            payload_json
+                                .as_deref()
+                                .filter(|payload_json| !payload_json.is_empty())
+                                .map(|payload_json| {
+                                    serde_json::from_str(payload_json).wrap_err(ERROR_JSON)
+                                })
+                                .transpose()?
+                        },
                     })
                 } else {
                     PartEvent::Changed(big_sync_core::rpc::ObjChanged {
                         cursor: u64::try_from(row_cursor).expect(ERROR_IMPOSSIBLE),
                         part_ids: vec![part_id],
                         obj_id,
-                        payload: serde_json::from_str(
-                            &row.try_get::<Option<String>, _>("payload_json")?
-                                .expect(ERROR_IMPOSSIBLE),
-                        )
-                        .wrap_err(ERROR_JSON)?,
+                        payload: {
+                            let payload_json: Option<String> =
+                                row.try_get::<Option<String>, _>("payload_json")?;
+                            let payload_json = payload_json
+                                .as_deref()
+                                .filter(|payload_json| !payload_json.is_empty())
+                                .expect(ERROR_IMPOSSIBLE);
+                            serde_json::from_str(payload_json).wrap_err(ERROR_JSON)?
+                        },
                     })
                 });
             }
@@ -1346,11 +1389,7 @@ impl PartStoreReadOnly<Sendable> for SqlitePartStore {
 }
 
 impl big_sync_core::part_store::PartStore<Sendable> for SqlitePartStore {
-    fn upsert_obj<'a>(
-        &'a self,
-        obj_id: ObjId,
-        payload: &ObjPayload,
-    ) -> BoxFuture<'a, ()> {
+    fn upsert_obj<'a>(&'a self, obj_id: ObjId, payload: &ObjPayload) -> BoxFuture<'a, ()> {
         let payload = payload.clone();
         Sendable::from_future(async move {
             HostPartStore::set_obj_payload(self, obj_id, payload)
@@ -1411,7 +1450,9 @@ impl ObservedStore for SqlitePartStore {
             let part_id = Self::part_from_blob(row.try_get("part_id")?);
             let payload_json: Option<String> = row.try_get("payload_json")?;
             let payload = payload_json
-                .map(|payload| serde_json::from_str(&payload).wrap_err(ERROR_JSON))
+                .as_deref()
+                .filter(|payload| !payload.is_empty())
+                .map(|payload| serde_json::from_str(payload).wrap_err(ERROR_JSON))
                 .transpose()?;
             let entry = objs.entry(obj_id).or_insert_with(|| ObservedObjSnapshot {
                 payload: payload.clone(),
@@ -1468,8 +1509,8 @@ impl TestStoreSetup for SqlitePartStore {
 mod tests {
     use super::*;
     use crate::part_store::host_contract::{self, HostPartStoreContractHarness};
-    use big_sync_core::part_store::contract;
     use crate::test_support::TestStoreSetup;
+    use big_sync_core::part_store::contract;
     use std::str::FromStr;
 
     async fn test_pools() -> Res<(sqlx::SqlitePool, sqlx::SqlitePool)> {
@@ -1583,12 +1624,8 @@ mod tests {
         let part_id = test_part_id(7);
         let obj_id = test_obj_id(8);
 
-        HostPartStore::set_obj_payload(
-            &store,
-            obj_id,
-            serde_json::json!({"phase": "created"}),
-        )
-        .await?;
+        HostPartStore::set_obj_payload(&store, obj_id, serde_json::json!({"phase": "created"}))
+            .await?;
         HostPartStore::add_obj_to_parts(&store, obj_id, vec![part_id]).await?;
         HostPartStore::remove_obj_from_part(&store, obj_id, part_id).await?;
 
@@ -1604,12 +1641,8 @@ mod tests {
         assert_eq!(transition.part_id, part_id);
         assert_eq!(transition.obj_id, obj_id);
 
-        HostPartStore::set_obj_payload(
-            &store,
-            obj_id,
-            serde_json::json!({"phase": "recreated"}),
-        )
-        .await?;
+        HostPartStore::set_obj_payload(&store, obj_id, serde_json::json!({"phase": "recreated"}))
+            .await?;
         HostPartStore::add_obj_to_parts(&store, obj_id, vec![part_id]).await?;
 
         let upserted_page = HostPartStore::list_events(&store, HashSet::from([part_id]), 0, 10)
@@ -1623,6 +1656,10 @@ mod tests {
         assert_eq!(transition.cursor, 3);
         assert_eq!(transition.part_id, part_id);
         assert_eq!(transition.obj_id, obj_id);
+        assert_eq!(
+            transition.payload,
+            Some(serde_json::json!({"phase": "recreated"}))
+        );
         Ok(())
     }
 
@@ -1640,19 +1677,9 @@ mod tests {
         let part_id = test_part_id(9);
         let obj_id = test_obj_id(10);
 
-        HostPartStore::set_obj_payload(
-            &store_a,
-            obj_id,
-            serde_json::json!({"scope": "a"}),
-        )
-        .await?;
+        HostPartStore::set_obj_payload(&store_a, obj_id, serde_json::json!({"scope": "a"})).await?;
         HostPartStore::add_obj_to_parts(&store_a, obj_id, vec![part_id]).await?;
-        HostPartStore::set_obj_payload(
-            &store_b,
-            obj_id,
-            serde_json::json!({"scope": "b"}),
-        )
-        .await?;
+        HostPartStore::set_obj_payload(&store_b, obj_id, serde_json::json!({"scope": "b"})).await?;
         HostPartStore::add_obj_to_parts(&store_b, obj_id, vec![part_id]).await?;
 
         assert_eq!(
@@ -1690,5 +1717,4 @@ mod tests {
         };
         host_contract::assert_host_part_store_contract(&harness).await
     }
-
 }

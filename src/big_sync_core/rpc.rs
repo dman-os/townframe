@@ -274,7 +274,11 @@ structstruck::strike! {
                 pub cursor: CursorIndex,
                 pub part_id: PartId,
                 pub obj_id: ObjId,
-                // pub payload: ObjPayload,
+                #[serde(
+                    serialize_with = "option_value_as_string",
+                    deserialize_with = "option_value_from_string"
+                )]
+                pub payload: Option<ObjPayload>,
             }),
             Removed(pub struct ObjRemovedFromPart {
                 pub cursor: CursorIndex,
@@ -298,6 +302,25 @@ where
 {
     let s = String::deserialize(d)?;
     serde_json::from_str(&s).map_err(serde::de::Error::custom)
+}
+
+fn option_value_as_string<S>(v: &Option<serde_json::Value>, s: S) -> Result<S::Ok, S::Error>
+where
+    S: Serializer,
+{
+    match v {
+        Some(v) => s.serialize_some(&serde_json::to_string(v).map_err(serde::ser::Error::custom)?),
+        None => s.serialize_none(),
+    }
+}
+
+fn option_value_from_string<'de, D>(d: D) -> Result<Option<serde_json::Value>, D::Error>
+where
+    D: Deserializer<'de>,
+{
+    let s = Option::<String>::deserialize(d)?;
+    s.map(|s| serde_json::from_str(&s).map_err(serde::de::Error::custom))
+        .transpose()
 }
 
 structstruck::strike! {
