@@ -2,8 +2,8 @@ use crate::interlude::*;
 
 use big_sync_core::part_store::{CursorIndex, ObjPayload};
 use big_sync_core::rpc::{
-    BucketSummary, GetChangedBucketsRequest, LeafBucketResult, LeafBucketsError,
-    LeafBucketsRequest, ListPartsError, PartPage, PartSummary, SubEvent, SubPartsRequest,
+    BucketSummary, GetChangedBucketsRequest, LeafBucketResult, LeafBucketsError, LeafBucketsRequest,
+    ListPartsError, PartPage, PartSummary, SubEvent, SubPartsRequest,
 };
 use big_sync_core::{mpsc, BuckId, Byte32Id, ObjId, PartId, PeerId};
 
@@ -382,6 +382,800 @@ pub mod contract {
     {
         assert_root_bucket_summary(store, part_id, live_ids, dead_ids).await?;
         assert_root_leaf_pagination(store, part_id, seed, live_ids, dead_ids, limit_hint).await?;
+        Ok(())
+    }
+}
+
+#[cfg(any(test, feature = "test-support"))]
+pub mod host_contract {
+    use super::*;
+    use big_sync_core::rpc::{
+        BucketObjPageEntry, BucketSummary, LeafBucketPage, LeafBucketRequest, LeafBucketsRequest,
+        ListPartsError, PartEvent, PartPage, SubEvent, SubPartsRequest, BUCKET_LIVE_FP_SEED,
+    };
+    use big_sync_core::{Fingerprint, FingerprintSeed};
+    use tokio::time::{timeout, Duration};
+
+    #[async_trait]
+    pub trait HostPartStoreContractHarness {
+        fn store(&self) -> &dyn HostPartStore;
+
+        async fn ensure_part(&self, part_id: PartId) -> Res<()>;
+    }
+
+    fn test_peer(seed: u8) -> PeerId {
+        PeerId(Byte32Id::new([seed; 32]))
+    }
+
+    fn test_part(seed: u8) -> PartId {
+        PartId(Byte32Id::new([seed; 32]))
+    }
+
+    fn test_obj(seed: u8) -> ObjId {
+        let mut bytes = [0; 32];
+        bytes[0] = seed;
+        ObjId(Byte32Id::new(bytes))
+    }
+
+    fn payload(tag: &'static str, idx: u64) -> ObjPayload {
+        serde_json::json!({
+            "tag": tag,
+            "idx": idx,
+        })
+    }
+
+    fn obj_in_bucket(bucket_id: BuckId, salt: u8) -> ObjId {
+        let (start, _) = super::obj_id_bounds_for_bucket(bucket_id);
+        let mut bytes = start.0.into_bytes();
+        bytes[31] = salt;
+        ObjId(Byte32Id::new(bytes))
+    }
+
+    async fn seed_live_obj<S>(
+        store: &S,
+        obj_id: ObjId,
+        payload: ObjPayload,
+        parts: &[PartId],
+    ) -> Res<()>
+    where
+        S: HostPartStore + Sync + ?Sized,
+    {
+        store.set_obj_payload(obj_id, payload).await?;
+        if !parts.is_empty() {
+            store.add_obj_to_parts(obj_id, parts.to_vec()).await?;
+        }
+        Ok(())
+    }
+
+    fn part_ids(parts: &[PartId]) -> HashSet<PartId> {
+        parts.iter().copied().collect()
+    }
+
+    fn assert_added(event: &PartEvent, cursor: CursorIndex, part_id: PartId, obj_id: ObjId) {
+        let PartEvent::Added(transition) = event else {
+            panic!("expected added event");
+        };
+        assert_eq!(transition.cursor, cursor);
+        assert_eq!(transition.part_id, part_id);
+        assert_eq!(transition.obj_id, obj_id);
+    }
+
+    fn assert_removed(event: &PartEvent, cursor: CursorIndex, part_id: PartId, obj_id: ObjId) {
+        let PartEvent::Removed(transition) = event else {
+            panic!("expected removed event");
+        };
+        assert_eq!(transition.cursor, cursor);
+        assert_eq!(transition.part_id, part_id);
+        assert_eq!(transition.obj_id, obj_id);
+    }
+
+    fn assert_changed(
+        event: &PartEvent,
+        cursor: CursorIndex,
+        part_ids: &[PartId],
+        obj_id: ObjId,
+        payload: ObjPayload,
+    ) {
+        let PartEvent::Changed(transition) = event else {
+            panic!("expected changed event");
+        };
+        assert_eq!(transition.cursor, cursor);
+        assert_eq!(transition.part_ids, part_ids);
+        assert_eq!(transition.obj_id, obj_id);
+        assert_eq!(transition.payload, payload);
+    }
+
+    fn assert_sub_added(event: &SubEvent, cursor: CursorIndex, part_id: PartId, obj_id: ObjId) {
+        let SubEvent::Added(transition) = event else {
+            panic!("expected added sub event");
+        };
+        assert_eq!(transition.cursor, cursor);
+        assert_eq!(transition.part_id, part_id);
+        assert_eq!(transition.obj_id, obj_id);
+    }
+
+    fn assert_sub_removed(event: &SubEvent, cursor: CursorIndex, part_id: PartId, obj_id: ObjId) {
+        let SubEvent::Removed(transition) = event else {
+            panic!("expected removed sub event");
+        };
+        assert_eq!(transition.cursor, cursor);
+        assert_eq!(transition.part_id, part_id);
+        assert_eq!(transition.obj_id, obj_id);
+    }
+
+    fn assert_sub_changed(
+        event: &SubEvent,
+        cursor: CursorIndex,
+        part_ids: &[PartId],
+        obj_id: ObjId,
+        payload: ObjPayload,
+    ) {
+        let SubEvent::Changed(transition) = event else {
+            panic!("expected changed sub event");
+        };
+        assert_eq!(transition.cursor, cursor);
+        assert_eq!(transition.part_ids, part_ids);
+        assert_eq!(transition.obj_id, obj_id);
+        assert_eq!(transition.payload, payload);
+    }
+
+    async fn recv_sub_event(
+        rx: &big_sync_core::mpsc::Receiver<SubEvent>,
+    ) -> Res<SubEvent> {
+        Ok(timeout(Duration::from_secs(5), rx.recv()).await??)
+    }
+
+    async fn collect_sub_events(
+        rx: &big_sync_core::mpsc::Receiver<SubEvent>,
+    ) -> Res<Vec<SubEvent>> {
+        let mut out = Vec::new();
+        loop {
+            let evt = recv_sub_event(rx).await?;
+            let done = matches!(evt, SubEvent::ReplayComplete);
+            out.push(evt);
+            if done {
+                break;
+            }
+        }
+        Ok(out)
+    }
+
+    pub async fn assert_host_part_store_contract<H>(harness: &H) -> Res<()>
+    where
+        H: HostPartStoreContractHarness + Sync,
+    {
+        assert_summarize_parts_contract(harness).await?;
+        assert_payload_can_trail_membership_contract(harness).await?;
+        assert_changed_buckets_contract(harness).await?;
+        assert_leaf_buckets_contract(harness).await?;
+        assert_list_events_contract(harness).await?;
+        assert_subscribe_contract(harness).await?;
+        Ok(())
+    }
+
+    pub async fn assert_summarize_parts_contract<H>(harness: &H) -> Res<()>
+    where
+        H: HostPartStoreContractHarness + Sync,
+    {
+        let store = harness.store();
+        let part_a = test_part(11);
+        let part_b = test_part(12);
+        let unknown = test_part(13);
+        let obj_a = test_obj(1);
+        let obj_b = test_obj(2);
+
+        harness.ensure_part(part_a).await?;
+        harness.ensure_part(part_b).await?;
+
+        assert_eq!(store.summarize_parts(HashSet::new()).await??, HashMap::new());
+        match store.summarize_parts(HashSet::from([unknown])).await? {
+            Err(ListPartsError::UnkownParts { unkown_parts }) => {
+                assert_eq!(unkown_parts, vec![unknown]);
+            }
+            other => panic!("unexpected summarize_parts result: {other:?}"),
+        }
+
+        seed_live_obj(store, obj_a, payload("summarize-a", 1), &[part_a]).await?;
+        seed_live_obj(store, obj_b, payload("summarize-b", 2), &[part_b]).await?;
+
+        let summary = store.summarize_parts(HashSet::from([part_a, part_b])).await??;
+        assert_eq!(summary.len(), 2);
+        assert_eq!(summary[&part_a].member_count, 1);
+        assert_eq!(summary[&part_a].latest_cursor, 1);
+        assert_eq!(summary[&part_b].member_count, 1);
+        assert_eq!(summary[&part_b].latest_cursor, 2);
+
+        match store.summarize_parts(HashSet::from([part_a, unknown])).await? {
+            Err(ListPartsError::UnkownParts { unkown_parts }) => {
+                assert_eq!(unkown_parts, vec![unknown]);
+            }
+            other => panic!("unexpected summarize_parts result: {other:?}"),
+        }
+        Ok(())
+    }
+
+    pub async fn assert_changed_buckets_contract<H>(harness: &H) -> Res<()>
+    where
+        H: HostPartStoreContractHarness + Sync,
+    {
+        let store = harness.store();
+        let part = test_part(21);
+        let unknown = test_part(22);
+        let bucket_a = BuckId::new(1, 0);
+        let bucket_b = BuckId::new(1, 1);
+        let bucket_c = BuckId::new(1, 2);
+        let obj_a = obj_in_bucket(bucket_a, 1);
+        let obj_b = obj_in_bucket(bucket_b, 2);
+        let obj_c = obj_in_bucket(bucket_c, 3);
+
+        harness.ensure_part(part).await?;
+        seed_live_obj(store, obj_a, payload("changed-a", 1), &[part]).await?;
+        seed_live_obj(store, obj_b, payload("changed-b", 2), &[part]).await?;
+        seed_live_obj(store, obj_c, payload("changed-c", 3), &[part]).await?;
+
+        match store
+            .get_changed_buckets(GetChangedBucketsRequest {
+                part_id: unknown,
+                offset: bucket_a,
+                since: 0,
+                limit_hint: 16,
+            })
+            .await?
+        {
+            Err(ListPartsError::UnkownParts { unkown_parts }) => {
+                assert_eq!(unkown_parts, vec![unknown]);
+            }
+            other => panic!("unexpected get_changed_buckets result: {other:?}"),
+        }
+
+        let changed = store
+            .get_changed_buckets(GetChangedBucketsRequest {
+                part_id: part,
+                offset: bucket_a,
+                since: 0,
+                limit_hint: 16,
+            })
+            .await??
+            .into_iter()
+            .collect::<Vec<_>>();
+        assert_eq!(changed.len(), 3);
+        assert!(changed.windows(2).all(|pair| pair[0].id < pair[1].id));
+        assert!(changed.iter().all(|buck| buck.id.level() == bucket_a.level()));
+        for buck in &changed {
+            assert_eq!(store.get_bucket_summary(part, buck.id).await?, *buck);
+        }
+
+        let changed_from_b = store
+            .get_changed_buckets(GetChangedBucketsRequest {
+                part_id: part,
+                offset: bucket_b,
+                since: 0,
+                limit_hint: 16,
+            })
+            .await??
+            .into_iter()
+            .collect::<Vec<_>>();
+        assert_eq!(changed_from_b.iter().map(|buck| buck.id).collect::<Vec<_>>(), vec![bucket_b, bucket_c]);
+
+        let cutoff = changed
+            .iter()
+            .map(|buck| buck.changed_at)
+            .max()
+            .expect(ERROR_IMPOSSIBLE);
+        let nothing = store
+            .get_changed_buckets(GetChangedBucketsRequest {
+                part_id: part,
+                offset: bucket_a,
+                since: cutoff,
+                limit_hint: 16,
+            })
+            .await??;
+        assert!(nothing.is_empty());
+
+        seed_live_obj(store, obj_a, payload("changed-a-2", 4), &[part]).await?;
+        let changed_after = store
+            .get_changed_buckets(GetChangedBucketsRequest {
+                part_id: part,
+                offset: bucket_a,
+                since: cutoff,
+                limit_hint: 16,
+            })
+            .await??
+            .into_iter()
+            .collect::<Vec<_>>();
+        assert_eq!(changed_after.len(), 1);
+        assert_eq!(changed_after[0].id, bucket_a);
+        assert!(changed_after[0].changed_at > cutoff);
+        assert_eq!(store.get_bucket_summary(part, bucket_a).await?, changed_after[0]);
+        Ok(())
+    }
+
+    pub async fn assert_payload_can_trail_membership_contract<H>(harness: &H) -> Res<()>
+    where
+        H: HostPartStoreContractHarness + Sync,
+    {
+        let store = harness.store();
+        let part = test_part(24);
+        let bucket = BuckId::new(1, 6);
+        let obj = obj_in_bucket(bucket, 9);
+        let seed = FingerprintSeed::new(0x4444_5555, 0x6666_7777);
+
+        harness.ensure_part(part).await?;
+        store.add_obj_to_parts(obj, vec![part]).await?;
+
+        assert_eq!(store.obj_payload(obj).await?, None);
+        assert_eq!(store.obj_parts(obj).await?, vec![part]);
+        assert_eq!(store.member_count(part).await?, 1);
+
+        let live_fp_before = Fingerprint::new(
+            &BUCKET_LIVE_FP_SEED,
+            &("big-sync-bucket-live-v1", bucket, obj, serde_json::Value::Null),
+        )
+        .as_u64();
+        let bucket_before = store.get_bucket_summary(part, bucket).await?;
+        assert_eq!(
+            bucket_before,
+            BucketSummary {
+                id: bucket,
+                len: 1,
+                live_count: 1,
+                fp: (live_fp_before, 0),
+                changed_at: 1,
+            }
+        );
+
+        let leaf_before = store
+            .leaf_buckets(LeafBucketsRequest {
+                part_id: part,
+                since: 0,
+                buckets: vec![LeafBucketRequest {
+                    buck_id: bucket,
+                    after: None,
+                }],
+                seed,
+                limit_hint: 8,
+            })
+            .await??
+            .bucks
+            .remove(&bucket)
+            .expect(ERROR_IMPOSSIBLE);
+        assert_eq!(
+            leaf_before,
+            LeafBucketPage {
+                entries: vec![BucketObjPageEntry {
+                    obj_id: obj,
+                    dead: false,
+                    fp: Fingerprint::new(
+                        &seed,
+                        &("big-sync-obj-fp-v1", obj, serde_json::Value::Null),
+                    ),
+                }],
+                next_after: None,
+                done: true,
+            }
+        );
+
+        let events_before = store.list_events(HashSet::from([part]), 0, 8).await??;
+        assert_eq!(
+            events_before.get(&part).expect(ERROR_IMPOSSIBLE),
+            &PartPage {
+                events: vec![PartEvent::Added(big_sync_core::rpc::ObjAddedToPart {
+                    cursor: 1,
+                    part_id: part,
+                    obj_id: obj,
+                })],
+                next_cursor: None,
+            }
+        );
+
+        store.set_obj_payload(obj, payload("late-payload", 99)).await?;
+
+        let live_fp_after = Fingerprint::new(
+            &BUCKET_LIVE_FP_SEED,
+            &("big-sync-bucket-live-v1", bucket, obj, payload("late-payload", 99)),
+        )
+        .as_u64();
+        let bucket_after = store.get_bucket_summary(part, bucket).await?;
+        assert_eq!(bucket_after.id, bucket);
+        assert_eq!(bucket_after.len, 1);
+        assert_eq!(bucket_after.live_count, 1);
+        assert_eq!(bucket_after.fp, (live_fp_after, 0));
+        assert!(bucket_after.changed_at > bucket_before.changed_at);
+
+        let changed = store
+            .get_changed_buckets(GetChangedBucketsRequest {
+                part_id: part,
+                offset: bucket,
+                since: bucket_before.changed_at,
+                limit_hint: 16,
+            })
+            .await??
+            .into_iter()
+            .collect::<Vec<_>>();
+        assert_eq!(changed, vec![bucket_after]);
+
+        let leaf_after = store
+            .leaf_buckets(LeafBucketsRequest {
+                part_id: part,
+                since: bucket_before.changed_at,
+                buckets: vec![LeafBucketRequest {
+                    buck_id: bucket,
+                    after: None,
+                }],
+                seed,
+                limit_hint: 8,
+            })
+            .await??
+            .bucks
+            .remove(&bucket)
+            .expect(ERROR_IMPOSSIBLE);
+        assert_eq!(
+            leaf_after,
+            LeafBucketPage {
+                entries: vec![BucketObjPageEntry {
+                    obj_id: obj,
+                    dead: false,
+                    fp: Fingerprint::new(
+                        &seed,
+                        &("big-sync-obj-fp-v1", obj, payload("late-payload", 99)),
+                    ),
+                }],
+                next_after: None,
+                done: true,
+            }
+        );
+
+        let events_after = store.list_events(HashSet::from([part]), 0, 8).await??;
+        assert_eq!(
+            events_after.get(&part).expect(ERROR_IMPOSSIBLE),
+            &PartPage {
+                events: vec![
+                    PartEvent::Added(big_sync_core::rpc::ObjAddedToPart {
+                        cursor: 1,
+                        part_id: part,
+                        obj_id: obj,
+                    }),
+                    PartEvent::Changed(big_sync_core::rpc::ObjChanged {
+                        cursor: 2,
+                        part_ids: vec![part],
+                        obj_id: obj,
+                        payload: payload("late-payload", 99),
+                    }),
+                ],
+                next_cursor: None,
+            }
+        );
+        Ok(())
+    }
+
+    pub async fn assert_leaf_buckets_contract<H>(harness: &H) -> Res<()>
+    where
+        H: HostPartStoreContractHarness + Sync,
+    {
+        let store = harness.store();
+        let part = test_part(31);
+        let unknown = test_part(32);
+        let bucket_a = BuckId::new(1, 3);
+        let bucket_b = BuckId::new(1, 4);
+        let a1 = obj_in_bucket(bucket_a, 1);
+        let a2 = obj_in_bucket(bucket_a, 2);
+        let a3 = obj_in_bucket(bucket_a, 3);
+        let b1 = obj_in_bucket(bucket_b, 1);
+        let seed = FingerprintSeed::new(0xaaaa_bbbb, 0xcccc_dddd);
+
+        harness.ensure_part(part).await?;
+        seed_live_obj(store, a2, payload("leaf-a2", 2), &[part]).await?;
+        seed_live_obj(store, a1, payload("leaf-a1", 1), &[part]).await?;
+        seed_live_obj(store, a3, payload("leaf-a3", 3), &[part]).await?;
+        store.remove_obj_from_part(a3, part).await?;
+        seed_live_obj(store, b1, payload("leaf-b1", 4), &[part]).await?;
+
+        match store
+            .leaf_buckets(LeafBucketsRequest {
+                part_id: unknown,
+                since: 0,
+                buckets: vec![LeafBucketRequest {
+                    buck_id: bucket_a,
+                    after: None,
+                }],
+                seed,
+                limit_hint: 2,
+            })
+            .await?
+        {
+            Err(LeafBucketsError::UnkownPart) => {}
+            other => panic!("unexpected leaf_buckets result: {other:?}"),
+        }
+
+        let page = store
+            .leaf_buckets(LeafBucketsRequest {
+                part_id: part,
+                since: 0,
+                buckets: vec![
+                    LeafBucketRequest {
+                        buck_id: bucket_a,
+                        after: None,
+                    },
+                    LeafBucketRequest {
+                        buck_id: bucket_b,
+                        after: None,
+                    },
+                ],
+                seed,
+                limit_hint: 2,
+            })
+            .await??
+            ;
+        assert_eq!(page.seed, seed);
+        let page_a = page.bucks.get(&bucket_a).expect(ERROR_IMPOSSIBLE);
+        assert_eq!(
+            page_a,
+            &LeafBucketPage {
+                entries: vec![
+                    BucketObjPageEntry {
+                        obj_id: a1,
+                        dead: false,
+                        fp: Fingerprint::new(&seed, &("big-sync-obj-fp-v1", a1, payload("leaf-a1", 1))),
+                    },
+                    BucketObjPageEntry {
+                        obj_id: a2,
+                        dead: false,
+                        fp: Fingerprint::new(&seed, &("big-sync-obj-fp-v1", a2, payload("leaf-a2", 2))),
+                    },
+                ],
+                next_after: Some(a2),
+                done: false,
+            }
+        );
+        let page_b = page.bucks.get(&bucket_b).expect(ERROR_IMPOSSIBLE);
+        assert_eq!(
+            page_b,
+            &LeafBucketPage {
+                entries: vec![BucketObjPageEntry {
+                    obj_id: b1,
+                    dead: false,
+                    fp: Fingerprint::new(&seed, &("big-sync-obj-fp-v1", b1, payload("leaf-b1", 4))),
+                }],
+                next_after: None,
+                done: true,
+            }
+        );
+
+        let since = store.get_bucket_summary(part, bucket_b).await?.changed_at;
+        store
+            .set_obj_payload(b1, payload("leaf-b1-2", 5))
+            .await?;
+
+        let since_page = store
+            .leaf_buckets(LeafBucketsRequest {
+                part_id: part,
+                since,
+                buckets: vec![
+                    LeafBucketRequest {
+                        buck_id: bucket_a,
+                        after: None,
+                    },
+                    LeafBucketRequest {
+                        buck_id: bucket_b,
+                        after: None,
+                    },
+                ],
+                seed,
+                limit_hint: 2,
+            })
+            .await??
+            ;
+        assert_eq!(
+            since_page.bucks.get(&bucket_a).expect(ERROR_IMPOSSIBLE),
+            &LeafBucketPage {
+                entries: vec![],
+                next_after: None,
+                done: true,
+            }
+        );
+        assert_eq!(
+            since_page.bucks.get(&bucket_b).expect(ERROR_IMPOSSIBLE),
+            &LeafBucketPage {
+                entries: vec![BucketObjPageEntry {
+                    obj_id: b1,
+                    dead: false,
+                    fp: Fingerprint::new(
+                        &seed,
+                        &("big-sync-obj-fp-v1", b1, payload("leaf-b1-2", 5)),
+                    ),
+                }],
+                next_after: None,
+                done: true,
+            }
+        );
+
+        let page_a_tail = store
+            .leaf_buckets(LeafBucketsRequest {
+                part_id: part,
+                since: 0,
+                buckets: vec![LeafBucketRequest {
+                    buck_id: bucket_a,
+                    after: Some(a2),
+                }],
+                seed,
+                limit_hint: 2,
+            })
+            .await??
+            .bucks
+            .remove(&bucket_a)
+            .expect(ERROR_IMPOSSIBLE);
+        assert_eq!(
+            page_a_tail,
+            LeafBucketPage {
+                entries: vec![BucketObjPageEntry {
+                    obj_id: a3,
+                    dead: true,
+                    fp: Fingerprint::new(
+                        &seed,
+                        &("big-sync-obj-fp-v1", a3, serde_json::Value::Null),
+                    ),
+                }],
+                next_after: None,
+                done: true,
+            }
+        );
+        Ok(())
+    }
+
+    pub async fn assert_list_events_contract<H>(harness: &H) -> Res<()>
+    where
+        H: HostPartStoreContractHarness + Sync,
+    {
+        let store = harness.store();
+        let part_a = test_part(41);
+        let part_b = test_part(42);
+        let unknown = test_part(43);
+        let obj = test_obj(44);
+
+        harness.ensure_part(part_a).await?;
+        harness.ensure_part(part_b).await?;
+
+        seed_live_obj(store, obj, payload("events-1", 1), &[part_a]).await?;
+        store.add_obj_to_parts(obj, vec![part_b]).await?;
+        store.set_obj_payload(obj, payload("events-2", 2)).await?;
+        store.remove_obj_from_part(obj, part_a).await?;
+        store.set_obj_payload(obj, payload("events-3", 3)).await?;
+
+        match store.list_events(HashSet::from([unknown]), 0, 10).await? {
+            Err(ListPartsError::UnkownParts { unkown_parts }) => {
+                assert_eq!(unkown_parts, vec![unknown]);
+            }
+            other => panic!("unexpected list_events result: {other:?}"),
+        }
+
+        let page1 = store
+            .list_events(HashSet::from([part_a]), 0, 1)
+            .await??
+            .remove(&part_a)
+            .expect(ERROR_IMPOSSIBLE);
+        assert_eq!(
+            page1,
+            PartPage {
+                events: vec![PartEvent::Added(big_sync_core::rpc::ObjAddedToPart {
+                    cursor: 1,
+                    part_id: part_a,
+                    obj_id: obj,
+                })],
+                next_cursor: Some(1),
+            }
+        );
+
+        let page2 = store
+            .list_events(HashSet::from([part_a]), 1, 1)
+            .await??
+            .remove(&part_a)
+            .expect(ERROR_IMPOSSIBLE);
+        assert_eq!(
+            page2,
+            PartPage {
+                events: vec![PartEvent::Changed(big_sync_core::rpc::ObjChanged {
+                    cursor: 3,
+                    part_ids: vec![part_a, part_b],
+                    obj_id: obj,
+                    payload: payload("events-2", 2),
+                })],
+                next_cursor: Some(3),
+            }
+        );
+
+        let page3 = store
+            .list_events(HashSet::from([part_a]), 3, 1)
+            .await??
+            .remove(&part_a)
+            .expect(ERROR_IMPOSSIBLE);
+        assert_eq!(
+            page3,
+            PartPage {
+                events: vec![PartEvent::Removed(big_sync_core::rpc::ObjRemovedFromPart {
+                    cursor: 4,
+                    part_id: part_a,
+                    obj_id: obj,
+                })],
+                next_cursor: None,
+            }
+        );
+
+        let page_b = store
+            .list_events(HashSet::from([part_b]), 0, 10)
+            .await??
+            .remove(&part_b)
+            .expect(ERROR_IMPOSSIBLE);
+        assert_eq!(
+            page_b,
+            PartPage {
+                events: vec![
+                    PartEvent::Added(big_sync_core::rpc::ObjAddedToPart {
+                        cursor: 2,
+                        part_id: part_b,
+                        obj_id: obj,
+                    }),
+                    PartEvent::Changed(big_sync_core::rpc::ObjChanged {
+                        cursor: 3,
+                        part_ids: vec![part_a, part_b],
+                        obj_id: obj,
+                        payload: payload("events-2", 2),
+                    }),
+                    PartEvent::Changed(big_sync_core::rpc::ObjChanged {
+                        cursor: 5,
+                        part_ids: vec![part_b],
+                        obj_id: obj,
+                        payload: payload("events-3", 3),
+                    }),
+                ],
+                next_cursor: None,
+            }
+        );
+        Ok(())
+    }
+
+    pub async fn assert_subscribe_contract<H>(harness: &H) -> Res<()>
+    where
+        H: HostPartStoreContractHarness + Sync,
+    {
+        let store = harness.store();
+        let part_a = test_part(51);
+        let part_b = test_part(52);
+        let obj = test_obj(53);
+
+        harness.ensure_part(part_a).await?;
+        harness.ensure_part(part_b).await?;
+
+        seed_live_obj(store, obj, payload("sub-1", 1), &[part_a]).await?;
+        store.add_obj_to_parts(obj, vec![part_b]).await?;
+        store.set_obj_payload(obj, payload("sub-2", 2)).await?;
+        store.remove_obj_from_part(obj, part_a).await?;
+        store.set_obj_payload(obj, payload("sub-3", 3)).await?;
+
+        let rx = store
+            .subscribe(SubPartsRequest {
+                parts: vec![big_sync_core::rpc::PartStreamCursorRequest {
+                    part_id: part_b,
+                    cursor: 3,
+                }],
+            })
+            .await??;
+        let events = collect_sub_events(&rx).await?;
+        assert_eq!(
+            events,
+            vec![
+                SubEvent::Changed(big_sync_core::rpc::ObjChanged {
+                    cursor: 5,
+                    part_ids: vec![part_b],
+                    obj_id: obj,
+                    payload: payload("sub-3", 3),
+                }),
+                SubEvent::ReplayComplete,
+            ]
+        );
+
+        store.set_obj_payload(obj, payload("sub-4", 4)).await?;
+        let live_evt = recv_sub_event(&rx).await?;
+        assert_sub_changed(&live_evt, 6, &[part_b], obj, payload("sub-4", 4));
         Ok(())
     }
 }

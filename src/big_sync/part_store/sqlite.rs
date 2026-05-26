@@ -206,9 +206,10 @@ impl SqlitePartStore {
             return Ok(MemberState::Dead);
         }
         let payload_json: Option<String> = row.try_get("payload_json")?;
-        let payload =
-            serde_json::from_str(&payload_json.expect("live member must still have payload"))
-                .wrap_err(ERROR_JSON)?;
+        let payload = payload_json
+            .map(|payload_json| serde_json::from_str(&payload_json).wrap_err(ERROR_JSON))
+            .transpose()?
+            .unwrap_or(serde_json::Value::Null);
         Ok(MemberState::Live(payload))
     }
 
@@ -654,10 +655,10 @@ impl HostPartStore for SqlitePartStore {
             tx.commit().await?;
             return Ok(());
         }
-        let old_payload: ObjPayload = serde_json::from_str(
-            &old_payload_json.expect("live members must still have payload"),
-        )
-        .wrap_err(ERROR_JSON)?;
+        let old_payload: ObjPayload = old_payload_json
+            .map(|payload_json| serde_json::from_str(&payload_json).wrap_err(ERROR_JSON))
+            .transpose()?
+            .unwrap_or(serde_json::Value::Null);
         let cursor = Self::next_cursor(&mut tx).await?;
         for part_id in &live_part_ids {
             sqlx::query(
@@ -924,8 +925,10 @@ impl HostPartStore for SqlitePartStore {
                 )
             } else {
                 let payload_json: Option<String> = row.try_get("payload_json")?;
-                let payload = serde_json::from_str(&payload_json.expect(ERROR_IMPOSSIBLE))
-                    .wrap_err(ERROR_JSON)?;
+                let payload = payload_json
+                    .map(|payload_json| serde_json::from_str(&payload_json).wrap_err(ERROR_JSON))
+                    .transpose()?
+                    .unwrap_or(serde_json::Value::Null);
                 Fingerprint::new(&req.seed, &("big-sync-obj-fp-v1", obj_id, payload))
             };
             page.entries.push(BucketObjPageEntry { obj_id, dead, fp });
@@ -975,9 +978,10 @@ impl HostPartStore for SqlitePartStore {
         .bind(Self::obj_blob(obj_id))
         .fetch_optional(&mut *tx)
         .await?;
-        let payload: ObjPayload =
-            serde_json::from_str(&payload_json.expect("add_obj_to_parts requires an existing payload"))
-                .wrap_err(ERROR_JSON)?;
+        let payload: ObjPayload = payload_json
+            .map(|payload_json| serde_json::from_str(&payload_json).wrap_err(ERROR_JSON))
+            .transpose()?
+            .unwrap_or(serde_json::Value::Null);
         let changed_parts: Vec<_> = part_states
             .into_iter()
             .filter(|(_, old_state)| !matches!(old_state, MemberState::Live(_)))
@@ -1463,7 +1467,9 @@ impl TestStoreSetup for SqlitePartStore {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::part_store::host_contract::{self, HostPartStoreContractHarness};
     use big_sync_core::part_store::contract;
+    use crate::test_support::TestStoreSetup;
     use std::str::FromStr;
 
     async fn test_pools() -> Res<(sqlx::SqlitePool, sqlx::SqlitePool)> {
@@ -1660,6 +1666,29 @@ mod tests {
         assert_eq!(HostPartStore::member_count(&store_a, part_id).await?, 1);
         assert_eq!(HostPartStore::member_count(&store_b, part_id).await?, 1);
         Ok(())
+    }
+
+    struct SqliteHostHarness {
+        store: SqlitePartStore,
+    }
+
+    #[async_trait]
+    impl HostPartStoreContractHarness for SqliteHostHarness {
+        fn store(&self) -> &dyn HostPartStore {
+            &self.store
+        }
+
+        async fn ensure_part(&self, part_id: PartId) -> Res<()> {
+            self.store.ensure_test_part(part_id).await
+        }
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn sqlite_host_part_store_contract() -> Res<()> {
+        let harness = SqliteHostHarness {
+            store: test_store("big-sync-sqlite-test://host-contract").await?,
+        };
+        host_contract::assert_host_part_store_contract(&harness).await
     }
 
 }

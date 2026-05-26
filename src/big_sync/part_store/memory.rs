@@ -361,7 +361,7 @@ impl HostPartStore for MemoryPartStore {
                                 .and_then(|member| member.removed_at.is_none().then_some(()))
                                 .and_then(|_| guard.objs.get(&obj_id))
                                 .and_then(|obj| obj.payload.clone())
-                                .expect(ERROR_IMPOSSIBLE);
+                                .unwrap_or(serde_json::Value::Null);
                             Fingerprint::new(&req.seed, &("big-sync-obj-fp-v1", obj_id, payload))
                         };
                         BucketObjPageEntry { obj_id, dead, fp }
@@ -435,12 +435,23 @@ impl HostPartStore for MemoryPartStore {
             let guard = &mut *guard;
             guard.tombstoned_objs.remove(&obj_id);
             let obj_state = guard.objs.entry(obj_id).or_default();
+            let old_payload = obj_state
+                .payload
+                .clone()
+                .unwrap_or(serde_json::Value::Null);
             let event_payload = payload.clone();
             obj_state.payload = Some(payload);
+            let new_payload = obj_state.payload.as_ref().expect(ERROR_IMPOSSIBLE);
 
             let cursor = guard.global_cursor.get();
             for &part_id in &obj_state.parts {
                 let part = guard.parts.entry(part_id).or_default();
+                part.apply_bucket_transition(
+                    obj_id,
+                    cursor,
+                    BucketMemberKind::Live(&old_payload),
+                    BucketMemberKind::Live(new_payload),
+                );
                 let part_obj_state = part.members.get_mut(&obj_id).expect(ERROR_IMPOSSIBLE);
                 assert!(part_obj_state.removed_at.is_none());
                 part_obj_state.changed_at = cursor;
@@ -466,7 +477,10 @@ impl HostPartStore for MemoryPartStore {
             let obj_state = guard.objs.entry(obj_id).or_default();
 
             guard.tombstoned_objs.remove(&obj_id);
-            let payload = obj_state.payload.clone().expect(ERROR_IMPOSSIBLE);
+            let payload = obj_state
+                .payload
+                .clone()
+                .unwrap_or(serde_json::Value::Null);
             obj_state.parts.extend(&parts);
             let cursor = guard.global_cursor.get();
             for &part_id in &parts {
@@ -537,10 +551,8 @@ impl HostPartStore for MemoryPartStore {
                 return Ok(());
             }
             let cursor = guard.global_cursor.get();
-            let old_payload = obj_state
-                .payload
-                .as_ref()
-                .expect("live member must still have payload");
+            let null_payload = serde_json::Value::Null;
+            let old_payload = obj_state.payload.as_ref().unwrap_or(&null_payload);
             if let Some(old) = part.members.get_mut(&obj_id) {
                 guard.bus.remove_evt(old.changed_at);
                 guard.bus.remove_evt(old.added_at);
@@ -1021,5 +1033,38 @@ impl ObservedStore for MemoryPartStore {
 impl TestStoreSetup for MemoryPartStore {
     async fn ensure_test_part(&self, part_id: PartId) -> Res<()> {
         self.ensure_part(part_id).await
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::part_store::host_contract::{self, HostPartStoreContractHarness};
+
+    struct MemoryHostHarness {
+        store: MemoryPartStore,
+    }
+
+    #[async_trait]
+    impl HostPartStoreContractHarness for MemoryHostHarness {
+        fn store(&self) -> &dyn HostPartStore {
+            &self.store
+        }
+
+        async fn ensure_part(&self, part_id: PartId) -> Res<()> {
+            self.store.ensure_part(part_id).await
+        }
+    }
+
+    fn test_store() -> MemoryPartStore {
+        MemoryPartStore::new(PeerId(Byte32Id::new([7; 32])))
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn memory_host_part_store_contract() -> Res<()> {
+        let harness = MemoryHostHarness {
+            store: test_store(),
+        };
+        host_contract::assert_host_part_store_contract(&harness).await
     }
 }
