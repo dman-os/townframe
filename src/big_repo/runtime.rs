@@ -1347,7 +1347,7 @@ where
             },
         ));
         self.big_sync_store
-            .set_obj_payload(self.doc_id, item_payload, vec![], None)
+            .set_obj_payload(self.doc_id, item_payload)
             .await?;
         self.change_manager
             .notify_doc_created(self.doc_id, Arc::clone(&heads))?;
@@ -1754,7 +1754,7 @@ async fn commit_delta_bookkeep(
         "bookkeeping committed delta"
     );
     big_sync_store
-        .set_obj_payload(doc_id, item_payload, vec![], None)
+        .set_obj_payload(doc_id, item_payload)
         .await?;
 
     let heads_arc = Arc::<[automerge::ChangeHash]>::from(heads);

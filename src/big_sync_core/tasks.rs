@@ -55,14 +55,21 @@ structstruck::strike! {
     #[derive(Clone)]
     pub struct SyncTask {
         pub id: TaskId,
+        pub part_hints: Set<PartId>,
         pub deets: struct SyncTaskDeets {
             #![derive(Clone)]
 
             pub peer_id: PeerId,
             pub obj_id: ObjId,
-            pub part_hints: Set<PartId>,
             pub remote_payload: Option<crate::part_store::ObjPayload>,
         }
+    }
+}
+
+structstruck::strike! {
+    pub struct SyncTaskSeed {
+        pub part_hints: Set<PartId>,
+        pub deets: SyncTaskDeets,
     }
 }
 
@@ -75,7 +82,7 @@ pub struct Retry {
 
 pub enum TaskSeed {
     Machine(MachineTaskDeets),
-    Sync(SyncTaskDeets),
+    Sync(SyncTaskSeed),
 }
 
 #[cfg(any(test, feature = "test-support"))]
@@ -151,7 +158,11 @@ impl Tasks {
             },
         );
         match seed {
-            TaskSeed::Sync(deets) => self.sync_spawn_queue.push(SyncTask { id, deets }),
+            TaskSeed::Sync(seed) => self.sync_spawn_queue.push(SyncTask {
+                id,
+                part_hints: seed.part_hints,
+                deets: seed.deets,
+            }),
             TaskSeed::Machine(deets) => self.machine_spawn_queue.push(MachineTask { id, deets }),
         }
         id
@@ -199,7 +210,11 @@ impl Tasks {
                 continue;
             };
             match seed {
-                TaskSeed::Sync(deets) => self.sync_spawn_queue.push(SyncTask { id, deets }),
+                TaskSeed::Sync(seed) => self.sync_spawn_queue.push(SyncTask {
+                    id,
+                    part_hints: seed.part_hints,
+                    deets: seed.deets,
+                }),
                 TaskSeed::Machine(deets) => {
                     self.machine_spawn_queue.push(MachineTask { id, deets })
                 }

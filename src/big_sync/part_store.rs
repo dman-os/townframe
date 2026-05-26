@@ -871,18 +871,23 @@ pub mod host_contract {
         );
 
         let events_after = store.list_events(HashSet::from([part]), 0, 8).await??;
-        assert_eq!(
-            events_after.get(&part).expect(ERROR_IMPOSSIBLE),
-            &PartPage {
-                events: vec![PartEvent::Changed(big_sync_core::rpc::ObjChanged {
-                    cursor: 4,
-                    part_ids: vec![part],
-                    obj_id: obj,
-                    payload: payload("late-payload", 99),
-                })],
-                next_cursor: None,
-            }
+        let page_after = events_after.get(&part).expect(ERROR_IMPOSSIBLE);
+        assert_eq!(page_after.events.len(), 2);
+        assert_added(
+            &page_after.events[0],
+            3,
+            part,
+            obj,
+            None,
         );
+        assert_changed(
+            &page_after.events[1],
+            4,
+            &[part],
+            obj,
+            payload("late-payload", 99),
+        );
+        assert_eq!(page_after.next_cursor, None);
         Ok(())
     }
 
@@ -1089,25 +1094,17 @@ pub mod host_contract {
         }
 
         let page1 = store
-            .list_events(HashSet::from([part_a]), 0, 1)
+            .list_events(HashSet::from([part_a]), 0, 10)
             .await??
             .remove(&part_a)
             .expect(ERROR_IMPOSSIBLE);
-        let removed_cursor = match &page1.events[..] {
-            [PartEvent::Removed(transition)] => {
-                assert_eq!(transition.part_id, part_a);
-                assert_eq!(transition.obj_id, obj);
-                transition.cursor
+        match &page1.events[..] {
+            [PartEvent::Removed(removed)] => {
+                assert_eq!(removed.part_id, part_a);
+                assert_eq!(removed.obj_id, obj);
             }
             other => panic!("unexpected part_a page1: {other:?}"),
-        };
-
-        let page2 = store
-            .list_events(HashSet::from([part_a]), removed_cursor + 1, 1)
-            .await??
-            .remove(&part_a)
-            .expect(ERROR_IMPOSSIBLE);
-        assert!(page2.events.is_empty());
+        }
 
         let page_b = store
             .list_events(HashSet::from([part_b]), 0, 10)
@@ -1115,9 +1112,17 @@ pub mod host_contract {
             .remove(&part_b)
             .expect(ERROR_IMPOSSIBLE);
         match &page_b.events[..] {
-            [PartEvent::Changed(b)] => {
-                assert_eq!(b.part_ids, vec![part_b]);
-                assert_eq!(b.obj_id, obj);
+            [
+                PartEvent::Added(added),
+                PartEvent::Changed(changed),
+            ] => {
+                assert_eq!(added.part_id, part_b);
+                assert_eq!(added.obj_id, obj);
+                assert_eq!(added.payload, Some(payload("events-1", 1)));
+                assert_eq!(changed.part_ids, vec![part_b]);
+                assert_eq!(changed.obj_id, obj);
+                assert_eq!(changed.payload, payload("events-3", 3));
+                assert!(added.cursor < changed.cursor);
             }
             other => panic!("unexpected part_b page: {other:?}"),
         }
@@ -1152,11 +1157,19 @@ pub mod host_contract {
             .await??;
         let events = collect_sub_events(&rx).await?;
         let replay_cursor = match &events[..] {
-            [SubEvent::Changed(transition), SubEvent::ReplayComplete] => {
-                assert_eq!(transition.part_ids, vec![part_b]);
-                assert_eq!(transition.obj_id, obj);
-                assert_eq!(transition.payload, payload("sub-3", 3));
-                transition.cursor
+            [
+                SubEvent::Added(added),
+                SubEvent::Changed(changed),
+                SubEvent::ReplayComplete,
+            ] => {
+                assert_eq!(added.part_id, part_b);
+                assert_eq!(added.obj_id, obj);
+                assert_eq!(added.payload, Some(payload("sub-1", 1)));
+                assert_eq!(changed.part_ids, vec![part_b]);
+                assert_eq!(changed.obj_id, obj);
+                assert_eq!(changed.payload, payload("sub-3", 3));
+                assert!(added.cursor < changed.cursor);
+                changed.cursor
             }
             other => panic!("unexpected replay events: {other:?}"),
         };

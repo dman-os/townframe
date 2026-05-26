@@ -102,9 +102,7 @@ impl big_sync::SyncBackend for BigRepoSyncBackend {
     async fn sync_obj(
         &self,
         peer_id: PeerId,
-        lease: big_sync::ObjStoreLease,
         obj_id: crate::DocumentId,
-        part_hints: Vec<big_sync_core::PartId>,
         remote_payload: Option<big_sync::ObjPayload>,
     ) -> Res<big_sync::SyncTaskRunOutcome> {
         let repo = self
@@ -132,7 +130,7 @@ impl big_sync::SyncBackend for BigRepoSyncBackend {
                     let heads = handle.with_document_read(|doc| doc.get_heads()).await;
                     let item_payload = Self::doc_heads_payload(&heads);
                     repo.big_sync_store
-                        .upsert_obj(obj_id, item_payload, part_hints, Some(lease))
+                        .set_obj_payload(obj_id, item_payload)
                         .await?;
                     return Ok(big_sync::SyncTaskRunOutcome::Completion(
                         big_sync_core::SyncTaskCompletion {
@@ -154,7 +152,7 @@ impl big_sync::SyncBackend for BigRepoSyncBackend {
                             let heads = current_doc.with_document_read(|doc| doc.get_heads()).await;
                             let item_payload = Self::doc_heads_payload(&heads);
                             repo.big_sync_store
-                                .upsert_obj(obj_id, item_payload, part_hints, Some(lease))
+                                .set_obj_payload(obj_id, item_payload)
                                 .await?;
                             return Ok(big_sync::SyncTaskRunOutcome::Completion(
                                 big_sync_core::SyncTaskCompletion {
@@ -176,16 +174,6 @@ impl big_sync::SyncBackend for BigRepoSyncBackend {
             }
         }
         let local_heads = local_heads.expect("checked above");
-        match repo
-            .big_sync_store
-            .add_obj_to_parts(obj_id, part_hints.clone(), Some(lease))
-            .await?
-        {
-            big_sync::StoreMutationOutcome::Applied => {}
-            big_sync::StoreMutationOutcome::Stale => {
-                return Ok(big_sync::SyncTaskRunOutcome::Stale)
-            }
-        }
         if let Some(remote_payload) = &remote_payload {
             let remote_heads = super::doc_heads_from_payload(remote_payload.clone());
             if local_heads.as_ref() == remote_heads.as_ref() {
@@ -210,7 +198,7 @@ impl big_sync::SyncBackend for BigRepoSyncBackend {
                 let heads = current_doc.with_document_read(|doc| doc.get_heads()).await;
                 let item_payload = Self::doc_heads_payload(&heads);
                 repo.big_sync_store
-                    .upsert_obj(obj_id, item_payload, part_hints, None)
+                    .set_obj_payload(obj_id, item_payload)
                     .await?;
                 let deets = if remote_payload.is_none() && heads.as_slice() == local_heads.as_ref()
                 {

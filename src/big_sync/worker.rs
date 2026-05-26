@@ -707,15 +707,15 @@ impl BigSyncWorker {
         Ok(())
     }
 
-    async fn spawn_sync_task(&mut self, mut task: SyncTask) -> Res<()> {
+    async fn spawn_sync_task(&mut self, task: SyncTask) -> Res<()> {
         let peer_state = self
             .peers
             .get(&task.deets.peer_id)
             .expect(ERROR_UNRECONIZED);
-        let mut part_ids: Vec<PartId> = if task.deets.part_hints.is_empty() {
+        let mut part_ids: Vec<PartId> = if task.part_hints.is_empty() {
             self.part_store.obj_parts(task.deets.obj_id).await?
         } else {
-            task.deets.part_hints.iter().copied().collect()
+            task.part_hints.iter().copied().collect()
         };
         part_ids.sort_unstable();
         part_ids.dedup();
@@ -742,7 +742,6 @@ impl BigSyncWorker {
             }
         }
         let backend_id = backend_id.expect(ERROR_IMPOSSIBLE);
-        task.deets.part_hints = part_ids.iter().copied().collect();
         let backend = Arc::clone(
             self.sync_backends
                 .get(&backend_id)
@@ -754,7 +753,7 @@ impl BigSyncWorker {
             task_id,
             peer_id = %task.deets.peer_id,
             obj_id = %task.deets.obj_id,
-            part_hint_count = task.deets.part_hints.len(),
+            part_hint_count = part_ids.len(),
             "spawn sync task"
         );
         let worker = SyncTaskWorker {
@@ -856,24 +855,19 @@ impl SyncTaskWorker {
         let fut = async move {
             let SyncTask {
                 id: _task_id,
+                part_hints: _part_hints,
                 deets,
             } = self.task;
             let SyncTaskDeets {
                 peer_id,
                 obj_id,
-                part_hints,
                 remote_payload,
             } = deets;
-            tracing::info!(part_hint_count = part_hints.len(), "XXX enter sync worker");
+            tracing::info!("XXX enter sync worker");
             let started_at = std::time::Instant::now();
             let res = self
                 .backend
-                .sync_obj(
-                    peer_id,
-                    obj_id,
-                    part_hints.into_iter().collect(),
-                    remote_payload,
-                )
+                .sync_obj(peer_id, obj_id, remote_payload)
                 .await;
             tracing::info!(
                 elapsed_ms = started_at.elapsed().as_millis(),

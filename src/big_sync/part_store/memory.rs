@@ -463,8 +463,9 @@ impl HostPartStore for MemoryPartStore {
                     assert!(part_obj_state.removed_at.is_none());
                     (part_obj_state.added_at, part_obj_state.changed_at)
                 };
-                guard.bus.remove_evt(added_at);
-                guard.bus.remove_evt(changed_at);
+                if changed_at != added_at {
+                    guard.bus.remove_evt(changed_at);
+                }
                 part.apply_bucket_transition(
                     obj_id,
                     cursor,

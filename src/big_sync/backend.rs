@@ -8,7 +8,6 @@ pub trait SyncBackend: Send + Sync + 'static {
         &self,
         peer_id: PeerId,
         obj_id: ObjId,
-        part_hints: Vec<PartId>,
         remote_payload: Option<ObjPayload>,
     ) -> Res<crate::SyncTaskRunOutcome>;
 }
@@ -30,7 +29,6 @@ pub mod contract {
         pub obj_id: ObjId,
         pub initial_payload: Option<ObjPayload>,
         pub initial_parts: Vec<PartId>,
-        pub sync_part_hints: Vec<PartId>,
         pub remote_payload: Option<ObjPayload>,
         pub expected_outcome: SyncBackendOutcome,
         pub expected_payload: Option<ObjPayload>,
@@ -40,11 +38,6 @@ pub mod contract {
     impl SyncBackendScenario {
         pub fn with_remote_payload(mut self, remote_payload: Option<ObjPayload>) -> Self {
             self.remote_payload = remote_payload;
-            self
-        }
-
-        pub fn with_sync_part_hints(mut self, sync_part_hints: Vec<PartId>) -> Self {
-            self.sync_part_hints = sync_part_hints;
             self
         }
 
@@ -61,7 +54,6 @@ pub mod contract {
                 obj_id,
                 initial_payload: Some(payload.clone()),
                 initial_parts: parts.clone(),
-                sync_part_hints: parts.clone(),
                 remote_payload: Some(payload.clone()),
                 expected_outcome: SyncBackendOutcome::Completion(SyncCompletionDeets::Noop),
                 expected_payload: Some(payload),
@@ -83,7 +75,6 @@ pub mod contract {
                 obj_id,
                 initial_payload: Some(initial_payload),
                 initial_parts: parts.clone(),
-                sync_part_hints: parts.clone(),
                 remote_payload: Some(remote_payload.clone()),
                 expected_outcome: SyncBackendOutcome::Completion(
                     SyncCompletionDeets::ChangedObject,
@@ -105,8 +96,7 @@ pub mod contract {
                 peer_id,
                 obj_id,
                 initial_payload: None,
-                initial_parts: vec![],
-                sync_part_hints: parts.clone(),
+                initial_parts: parts.clone(),
                 remote_payload: Some(remote_payload.clone()),
                 expected_outcome: SyncBackendOutcome::Completion(SyncCompletionDeets::AddedMember),
                 expected_payload: Some(remote_payload),
@@ -155,12 +145,7 @@ pub mod contract {
 
         let outcome = harness
             .backend()
-            .sync_obj(
-                case.peer_id,
-                case.obj_id,
-                case.sync_part_hints.clone(),
-                case.remote_payload.clone(),
-            )
+            .sync_obj(case.peer_id, case.obj_id, case.remote_payload.clone())
             .await?;
 
         match (&case.expected_outcome, outcome) {

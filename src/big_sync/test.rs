@@ -250,17 +250,11 @@ impl MemorySyncBackend {
 
 #[async_trait]
 impl SyncBackend for MemorySyncBackend {
-    #[tracing::instrument(
-        skip(self, part_hints),
-        fields(
-            part_hint_count = part_hints.len()
-        )
-    )]
+    #[tracing::instrument(skip(self))]
     async fn sync_obj(
         &self,
         peer_id: PeerId,
         obj_id: ObjId,
-        part_hints: Vec<PartId>,
         remote_payload: Option<serde_json::Value>,
     ) -> Res<SyncTaskRunOutcome> {
         let local_payload = self.local_part_store.obj_payload(obj_id).await?;
@@ -280,11 +274,6 @@ impl SyncBackend for MemorySyncBackend {
                     self.local_part_store
                         .set_obj_payload(obj_id, remote)
                         .await?;
-                    if !part_hints.is_empty() {
-                        self.local_part_store
-                            .add_obj_to_parts(obj_id, part_hints)
-                            .await?;
-                    }
                     Ok(SyncTaskRunOutcome::Completion(SyncTaskCompletion {
                         obj_id,
                         deets: big_sync_core::SyncCompletionDeets::ChangedObject,
@@ -301,11 +290,6 @@ impl SyncBackend for MemorySyncBackend {
                 self.local_part_store
                     .set_obj_payload(obj_id, payload)
                     .await?;
-                if !part_hints.is_empty() {
-                    self.local_part_store
-                        .add_obj_to_parts(obj_id, part_hints)
-                        .await?;
-                }
                 Ok(SyncTaskRunOutcome::Completion(SyncTaskCompletion {
                     obj_id,
                     deets: big_sync_core::SyncCompletionDeets::AddedMember,
@@ -339,11 +323,6 @@ impl SyncBackendHarness for MemorySyncBackendContractHarness {
                 remote_store
                     .set_obj_payload(case.obj_id, payload.clone())
                     .await?;
-                if !case.expected_parts.is_empty() {
-                    remote_store
-                        .add_obj_to_parts(case.obj_id, case.expected_parts.clone())
-                        .await?;
-                }
             }
             self.world
                 .register_store(case.peer_id, Arc::clone(&remote_store));
@@ -1260,7 +1239,7 @@ async fn memory_sync_direct_backend_adopts_remote_tombstone() -> Res<()> {
     let backend = MemorySyncBackend::new(peer_b, Arc::clone(&store_b_dyn), Arc::clone(&world));
 
     let err = backend
-        .sync_obj(peer_a, obj, vec![part], None)
+        .sync_obj(peer_a, obj, None)
         .await
         .expect_err("remote absence should be treated as a hard error for now");
 
@@ -1303,10 +1282,10 @@ async fn memory_sync_direct_backend_cross_replication_is_symmetric() -> Res<()> 
     let backend_b = MemorySyncBackend::new(peer_b, Arc::clone(&store_b_dyn), Arc::clone(&world));
 
     let _ = backend_a
-        .sync_obj(peer_b, obj_b, vec![part], Some(right_payload.clone()))
+        .sync_obj(peer_b, obj_b, Some(right_payload.clone()))
         .await?;
     let _ = backend_b
-        .sync_obj(peer_a, obj_a, vec![part], Some(left_payload.clone()))
+        .sync_obj(peer_a, obj_a, Some(left_payload.clone()))
         .await?;
 
     let snapshot_a = store_a.snapshot().await?;

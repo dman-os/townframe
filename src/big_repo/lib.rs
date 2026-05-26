@@ -596,10 +596,10 @@ pub(crate) mod tests {
     use automerge::{transaction::Transactable, ReadDoc, ScalarValue};
     use autosurgeon::Prop;
     use big_sync::backend::contract::{
-        self, SyncBackendHarness, SyncBackendLeaseKind, SyncBackendOutcome, SyncBackendScenario,
+        self, SyncBackendHarness, SyncBackendOutcome, SyncBackendScenario,
     };
     use big_sync::stress_support::{self, StressFixture};
-    use big_sync::{HostPartStore, StoreMutationOutcome, SyncBackend};
+    use big_sync::{HostPartStore, SyncBackend};
     use big_sync_core::{Byte32Id, PartId, SyncCompletionDeets};
     use sqlx::sqlite::SqliteConnectOptions;
     use std::collections::{BTreeMap, BTreeSet, HashMap};
@@ -1716,13 +1716,11 @@ pub(crate) mod tests {
                 .set_obj_payload(
                     part_init_obj,
                     serde_json::json!({ "heads": Vec::<String>::new() }),
-                    stress_support::test_parts(),
-                    None,
                 )
                 .await?;
             big_sync_host
                 .store
-                .remove_obj_from_part(part_init_obj, stress_support::test_part(), None)
+                .remove_obj_from_part(part_init_obj, stress_support::test_part())
                 .await?;
             let secret_key_bytes = [seed; 32];
             let signer =
@@ -1932,7 +1930,7 @@ pub(crate) mod tests {
                 .await?;
             self.repo
                 .big_sync_store
-                .add_obj_to_parts(obj_id, stress_support::test_parts(), None)
+                .add_obj_to_parts(obj_id, stress_support::test_parts())
                 .await?;
             Ok(())
         }
@@ -2568,12 +2566,11 @@ pub(crate) mod tests {
 
     #[tracing::instrument(
         skip_all,
-        fields(?local_mutation, ?remote_mutation, ?lease_kind, ?expected_deets, expect_client_doc)
+        fields(?local_mutation, ?remote_mutation, ?expected_deets, expect_client_doc)
     )]
     async fn run_sync_backend_case(
         local_mutation: Option<SyncMutation>,
         remote_mutation: Option<SyncMutation>,
-        lease_kind: SyncBackendLeaseKind,
         expected_deets: SyncCompletionDeets,
         expect_client_doc: bool,
         sync_part_hints: Vec<PartId>,
@@ -2635,26 +2632,23 @@ pub(crate) mod tests {
             peer_id: client_conn.peer_id(),
             obj_id: doc_id,
             initial_payload: local_payload.clone(),
-            initial_parts: vec![],
-            sync_part_hints: sync_part_hints.clone(),
+            initial_parts: sync_part_hints.clone(),
             remote_payload: if remote_payload_missing {
                 None
             } else {
                 remote_payload.clone()
             },
-            lease_kind,
-            lease_mutation: None,
             expected_outcome: SyncBackendOutcome::Completion(expected_deets.clone()),
             expected_payload: match &expected_deets {
                 SyncCompletionDeets::Noop => local_payload.clone(),
                 SyncCompletionDeets::ChangedObject | SyncCompletionDeets::AddedMember => {
                     remote_payload.clone()
                 }
+                SyncCompletionDeets::RemovedMember => {
+                    unreachable!("big repo sync backend should not report RemovedMember")
+                }
             },
-            expected_parts: match lease_kind {
-                SyncBackendLeaseKind::Fresh => sync_part_hints.clone(),
-                SyncBackendLeaseKind::Stale => vec![],
-            },
+            expected_parts: sync_part_hints.clone(),
         };
         let harness = BigRepoSyncBackendContractHarness {
             backend,
@@ -2684,7 +2678,6 @@ pub(crate) mod tests {
         run_sync_backend_case(
             None,
             remote_mutation,
-            SyncBackendLeaseKind::Fresh,
             SyncCompletionDeets::AddedMember,
             false,
             sync_test_parts(),
@@ -2697,7 +2690,6 @@ pub(crate) mod tests {
         run_sync_backend_case(
             None,
             None,
-            SyncBackendLeaseKind::Fresh,
             SyncCompletionDeets::Noop,
             true,
             sync_test_parts(),
@@ -2716,78 +2708,12 @@ pub(crate) mod tests {
                 note_key: "remote_missing",
                 side_label: "remote",
             }),
-            SyncBackendLeaseKind::Fresh,
             SyncCompletionDeets::ChangedObject,
             true,
             sync_part_hints,
             true,
         )
         .await
-    }
-
-    async fn run_sync_backend_stale_case() -> Res<()> {
-        run_sync_backend_case(
-            None,
-            None,
-            SyncBackendLeaseKind::Stale,
-            SyncCompletionDeets::Noop,
-            true,
-            sync_test_parts(),
-            false,
-        )
-        .await
-    }
-
-    async fn run_sync_backend_remove_lease_case() -> Res<()> {
-        utils_rs::testing::setup_tracing_once();
-        tracing::info!("starting sync backend remove-lease case");
-        let temp_root = tempdir()?;
-        let server_path = temp_root.path().join("server");
-        let client_path = temp_root.path().join("client");
-
-        let mut expected_doc = make_sync_doc_value("base", SYNC_DOC_ITEMS, SYNC_DOC_PAYLOAD_LEN);
-        let mut base_doc = automerge::Automerge::new();
-        write_sync_doc_value(&mut base_doc, &expected_doc);
-
-        let server = SyncRepoNode::boot(server_path, 131, true).await?;
-        let client = SyncRepoNode::boot(client_path, 132, false).await?;
-        let doc_id = random_doc_id();
-        let server_doc = server.repo.put_doc(doc_id, base_doc.clone()).await?;
-        let client_doc = client.repo.put_doc(doc_id, base_doc).await?;
-        set_doc_actor(&server_doc, automerge::ActorId::from([131_u8; 16])).await?;
-        set_doc_actor(&client_doc, automerge::ActorId::from([132_u8; 16])).await?;
-
-        let client_conn = connect_sync_pair(&client, &server).await?;
-        server.wait_for_accepts(1).await;
-
-        let backend = client.repo.sync_backend();
-        let local_payload = client.big_sync_store.obj_payload(doc_id).await?;
-        let remote_payload = server.big_sync_store.obj_payload(doc_id).await?;
-        let scenario = SyncBackendScenario::stale_after_remove_from_part(
-            "remove_obj_from_part_invalidates_lease",
-            client_conn.peer_id(),
-            doc_id,
-            local_payload
-                .clone()
-                .expect("client doc should seed payload"),
-            sync_test_part(),
-            remote_payload
-                .clone()
-                .expect("server doc should seed payload"),
-        );
-        let harness = BigRepoSyncBackendContractHarness {
-            backend,
-            store: Arc::clone(&client.big_sync_store),
-        };
-        contract::assert_sync_backend_case(&harness, &scenario).await?;
-
-        wait_for_json_doc(&client_doc, &expected_doc, SYNC_CASE_TIMEOUT).await;
-        wait_for_json_doc(&server_doc, &expected_doc, SYNC_CASE_TIMEOUT).await;
-
-        client_conn.stop().await?;
-        server.shutdown().await?;
-        client.shutdown().await?;
-        Ok(())
     }
 
     async fn run_sync_backend_put_doc_conflict_case() -> Res<()> {
@@ -2824,12 +2750,10 @@ pub(crate) mod tests {
         let client_conn = connect_sync_pair(&client, &server).await?;
         server.wait_for_accepts(1).await;
 
-        let lease = client.big_sync_store.get_obj_lease(doc_id).await?;
-        let removal = client
+        client
             .big_sync_store
-            .remove_obj_from_part(doc_id, sync_test_part(), Some(lease))
+            .remove_obj_from_part(doc_id, sync_test_part())
             .await?;
-        assert_eq!(removal, StoreMutationOutcome::Applied);
 
         let backend = client.repo.sync_backend();
         let remote_payload = server.big_sync_store.obj_payload(doc_id).await?;
@@ -2838,12 +2762,11 @@ pub(crate) mod tests {
             peer_id: client_conn.peer_id(),
             obj_id: doc_id,
             initial_payload: None,
-            initial_parts: vec![],
-            sync_part_hints: sync_test_parts(),
+            initial_parts: sync_test_parts(),
             remote_payload,
-            lease_kind: SyncBackendLeaseKind::Fresh,
-            lease_mutation: None,
-            expected_outcome: SyncBackendOutcome::Completion(SyncCompletionDeets::AddedMember),
+            expected_outcome: SyncBackendOutcome::Completion(
+                SyncCompletionDeets::ChangedObject,
+            ),
             expected_payload: server.big_sync_store.obj_payload(doc_id).await?,
             expected_parts: sync_test_parts(),
         };
@@ -2869,7 +2792,6 @@ pub(crate) mod tests {
             run_sync_backend_case(
                 None,
                 None,
-                SyncBackendLeaseKind::Fresh,
                 SyncCompletionDeets::Noop,
                 true,
                 sync_test_parts(),
@@ -2892,7 +2814,6 @@ pub(crate) mod tests {
                     note_key: "remote_backend",
                     side_label: "remote",
                 }),
-                SyncBackendLeaseKind::Fresh,
                 SyncCompletionDeets::ChangedObject,
                 true,
                 sync_test_parts(),
@@ -2915,7 +2836,6 @@ pub(crate) mod tests {
                     note_key: "remote_backend_empty",
                     side_label: "remote",
                 }),
-                SyncBackendLeaseKind::Fresh,
                 SyncCompletionDeets::ChangedObject,
                 true,
                 vec![],
@@ -2938,7 +2858,6 @@ pub(crate) mod tests {
                     note_key: "remote_backend_multi",
                     side_label: "remote",
                 }),
-                SyncBackendLeaseKind::Fresh,
                 SyncCompletionDeets::ChangedObject,
                 true,
                 sync_test_parts_multi(),
@@ -2989,24 +2908,8 @@ pub(crate) mod tests {
     }
 
     #[tokio::test(flavor = "multi_thread")]
-    async fn big_repo_sync_backend_returns_stale_for_outdated_lease() -> Res<()> {
-        timeout(SYNC_CASE_TIMEOUT, run_sync_backend_stale_case())
-            .await
-            .expect("sync backend test timed out")?;
-        Ok(())
-    }
-
-    #[tokio::test(flavor = "multi_thread")]
     async fn big_repo_sync_backend_recovers_from_put_doc_conflict() -> Res<()> {
         timeout(SYNC_CASE_TIMEOUT, run_sync_backend_put_doc_conflict_case())
-            .await
-            .expect("sync backend test timed out")?;
-        Ok(())
-    }
-
-    #[tokio::test(flavor = "multi_thread")]
-    async fn big_repo_sync_backend_returns_stale_after_remove_obj_from_part() -> Res<()> {
-        timeout(SYNC_CASE_TIMEOUT, run_sync_backend_remove_lease_case())
             .await
             .expect("sync backend test timed out")?;
         Ok(())

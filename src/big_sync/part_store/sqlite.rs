@@ -491,6 +491,7 @@ async fn init_schema(pool: &sqlx::SqlitePool, bucket_depth: u8) -> Res<()> {
             part_id BLOB NOT NULL,
             obj_id BLOB NOT NULL,
             added_at INTEGER NOT NULL,
+            added_payload_json TEXT,
             changed_at INTEGER NOT NULL,
             removed_at INTEGER,
             latest_cursor INTEGER NOT NULL,
@@ -1010,6 +1011,7 @@ impl HostPartStore for SqlitePartStore {
         .bind(payload_json.as_deref())
         .execute(&mut *tx)
         .await?;
+        let added_payload_json = payload_json.clone();
         let changed_parts: Vec<_> = part_states
             .into_iter()
             .filter(|(_, old_state)| !matches!(old_state, MemberState::Live(_)))
@@ -1031,10 +1033,11 @@ impl HostPartStore for SqlitePartStore {
             .execute(&mut *tx)
             .await?;
             sqlx::query(
-                "INSERT INTO big_sync_members(scope_id, part_id, obj_id, added_at, changed_at, removed_at, latest_cursor)
-                 VALUES (?1, ?2, ?3, ?4, ?4, NULL, ?4)
+                "INSERT INTO big_sync_members(scope_id, part_id, obj_id, added_at, added_payload_json, changed_at, removed_at, latest_cursor)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?4, NULL, ?4)
                  ON CONFLICT(scope_id, part_id, obj_id) DO UPDATE SET
                     added_at = excluded.added_at,
+                    added_payload_json = excluded.added_payload_json,
                     changed_at = excluded.changed_at,
                     removed_at = NULL,
                     latest_cursor = excluded.latest_cursor",
@@ -1043,6 +1046,7 @@ impl HostPartStore for SqlitePartStore {
             .bind(Self::part_blob(part_id))
             .bind(Self::obj_blob(obj_id))
             .bind(i64::try_from(cursor).expect(ERROR_IMPOSSIBLE))
+            .bind(added_payload_json.as_deref())
             .execute(&mut *tx)
             .await?;
             self.apply_bucket_transition(
@@ -1218,7 +1222,7 @@ impl HostPartStore for SqlitePartStore {
         let mut out = HashMap::new();
         for part_id in parts {
             let rows = sqlx::query(
-                "SELECT members.obj_id, members.added_at, members.changed_at, members.removed_at, members.latest_cursor, objs.payload_json
+                "SELECT members.obj_id, members.added_at, members.added_payload_json, members.changed_at, members.removed_at, members.latest_cursor, objs.payload_json
                  FROM big_sync_members members
                  LEFT JOIN big_sync_objs objs
                    ON objs.scope_id = members.scope_id AND objs.obj_id = members.obj_id
@@ -1232,56 +1236,71 @@ impl HostPartStore for SqlitePartStore {
             .bind(i64::from(limit) + 1)
             .fetch_all(&self.read_pool)
             .await?;
-            let mut next_cursor = None;
             let mut events = Vec::new();
             for row in rows {
                 let row_cursor: i64 = row.try_get("latest_cursor")?;
-                if events.len() >= usize::try_from(limit).expect(ERROR_IMPOSSIBLE) {
-                    next_cursor = Some(u64::try_from(row_cursor).expect(ERROR_IMPOSSIBLE));
-                    break;
-                }
                 let added_at: i64 = row.try_get("added_at")?;
                 let removed_at: Option<i64> = row.try_get("removed_at")?;
                 let obj_id = Self::obj_from_blob(row.try_get("obj_id")?);
-                events.push(if removed_at == Some(row_cursor) {
-                    PartEvent::Removed(big_sync_core::rpc::ObjRemovedFromPart {
-                        cursor: u64::try_from(row_cursor).expect(ERROR_IMPOSSIBLE),
-                        part_id,
-                        obj_id,
-                    })
-                } else if added_at == row_cursor {
-                    PartEvent::Added(big_sync_core::rpc::ObjAddedToPart {
-                        cursor: u64::try_from(row_cursor).expect(ERROR_IMPOSSIBLE),
-                        part_id,
-                        obj_id,
-                        payload: {
-                            let payload_json: Option<String> = row.try_get("payload_json")?;
-                            payload_json
-                                .as_deref()
-                                .filter(|payload_json| !payload_json.is_empty())
-                                .map(|payload_json| {
-                                    serde_json::from_str(payload_json).wrap_err(ERROR_JSON)
-                                })
-                                .transpose()?
-                        },
-                    })
-                } else {
-                    PartEvent::Changed(big_sync_core::rpc::ObjChanged {
-                        cursor: u64::try_from(row_cursor).expect(ERROR_IMPOSSIBLE),
-                        part_ids: vec![part_id],
-                        obj_id,
-                        payload: {
-                            let payload_json: Option<String> =
-                                row.try_get::<Option<String>, _>("payload_json")?;
-                            let payload_json = payload_json
-                                .as_deref()
-                                .filter(|payload_json| !payload_json.is_empty())
-                                .expect(ERROR_IMPOSSIBLE);
-                            serde_json::from_str(payload_json).wrap_err(ERROR_JSON)?
-                        },
-                    })
-                });
+                let added_payload_json: Option<String> = row.try_get("added_payload_json")?;
+                let added_payload = added_payload_json
+                    .as_deref()
+                    .filter(|payload_json| !payload_json.is_empty())
+                    .map(|payload_json| serde_json::from_str(payload_json).wrap_err(ERROR_JSON))
+                    .transpose()?;
+                let payload_json: Option<String> = row.try_get("payload_json")?;
+                let payload = payload_json
+                    .as_deref()
+                    .filter(|payload_json| !payload_json.is_empty())
+                    .map(|payload_json| serde_json::from_str(payload_json).wrap_err(ERROR_JSON))
+                    .transpose()?;
+                if let Some(removed_at) = removed_at {
+                    if removed_at > i64::try_from(cursor).expect(ERROR_IMPOSSIBLE) {
+                        events.push((
+                            removed_at,
+                            PartEvent::Removed(big_sync_core::rpc::ObjRemovedFromPart {
+                                cursor: u64::try_from(removed_at).expect(ERROR_IMPOSSIBLE),
+                                part_id,
+                                obj_id,
+                            }),
+                        ));
+                    }
+                    continue;
+                }
+                if added_at > i64::try_from(cursor).expect(ERROR_IMPOSSIBLE) {
+                    events.push((
+                        added_at,
+                        PartEvent::Added(big_sync_core::rpc::ObjAddedToPart {
+                            cursor: u64::try_from(added_at).expect(ERROR_IMPOSSIBLE),
+                            part_id,
+                            obj_id,
+                            payload: added_payload.clone(),
+                        }),
+                    ));
+                }
+                if row_cursor > added_at && row_cursor > i64::try_from(cursor).expect(ERROR_IMPOSSIBLE) {
+                    events.push((
+                        row_cursor,
+                        PartEvent::Changed(big_sync_core::rpc::ObjChanged {
+                            cursor: u64::try_from(row_cursor).expect(ERROR_IMPOSSIBLE),
+                            part_ids: vec![part_id],
+                            obj_id,
+                            payload: payload.expect(ERROR_IMPOSSIBLE),
+                        }),
+                    ));
+                }
             }
+            events.sort_by_key(|(cursor, _)| *cursor);
+            let mut next_cursor = None;
+            if events.len() > usize::try_from(limit).expect(ERROR_IMPOSSIBLE) {
+                let next = events[usize::try_from(limit).expect(ERROR_IMPOSSIBLE)].0;
+                next_cursor = Some(u64::try_from(next).expect(ERROR_IMPOSSIBLE));
+            }
+            let events = events
+                .into_iter()
+                .take(usize::try_from(limit).expect(ERROR_IMPOSSIBLE))
+                .map(|(_, event)| event)
+                .collect();
             out.insert(
                 part_id,
                 PartPage {
@@ -1650,14 +1669,14 @@ mod tests {
             .expect(ERROR_IMPOSSIBLE);
         let upserted_events = &upserted_page.get(&part_id).expect(ERROR_IMPOSSIBLE).events;
         assert_eq!(upserted_events.len(), 1);
-        let PartEvent::Added(transition) = &upserted_events[0] else {
-            panic!("expected added event");
+        let PartEvent::Added(second_added) = &upserted_events[0] else {
+            panic!("expected second added event");
         };
-        assert_eq!(transition.cursor, 3);
-        assert_eq!(transition.part_id, part_id);
-        assert_eq!(transition.obj_id, obj_id);
+        assert_eq!(second_added.cursor, 3);
+        assert_eq!(second_added.part_id, part_id);
+        assert_eq!(second_added.obj_id, obj_id);
         assert_eq!(
-            transition.payload,
+            second_added.payload,
             Some(serde_json::json!({"phase": "recreated"}))
         );
         Ok(())

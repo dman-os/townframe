@@ -1146,10 +1146,12 @@ impl BigSyncMachine {
                     let deets = SyncTaskDeets {
                         peer_id,
                         obj_id,
-                        part_hints: part_hints.iter().copied().collect(),
                         remote_payload: remote_payload.clone(),
                     };
-                    let task_id = self.tasks.spawn_task(TaskSeed::Sync(deets.clone()));
+                    let task_id = self.tasks.spawn_task(TaskSeed::Sync(SyncTaskSeed {
+                        part_hints: part_hints.iter().copied().collect(),
+                        deets: deets.clone(),
+                    }));
                     peer_state.sync_workers.insert(
                         obj_id,
                         SyncWorkerState {
@@ -1251,10 +1253,12 @@ impl BigSyncMachine {
                     let deets = SyncTaskDeets {
                         peer_id,
                         obj_id,
-                        part_hints: part_hints.iter().copied().collect(),
                         remote_payload: remote_payload.clone(),
                     };
-                    let task_id = self.tasks.spawn_task(TaskSeed::Sync(deets.clone()));
+                    let task_id = self.tasks.spawn_task(TaskSeed::Sync(SyncTaskSeed {
+                        part_hints: part_hints.iter().copied().collect(),
+                        deets: deets.clone(),
+                    }));
                     peer_state.sync_workers.insert(
                         obj_id,
                         SyncWorkerState {
@@ -1607,7 +1611,7 @@ impl BigSyncMachine {
             obj_id = %evt.obj_id,
             "XXX sync failed received"
         );
-        let deets = {
+        let (deets, part_hints) = {
             let Some(peer_state) = self.peers.get(&evt.peer_id) else {
                 assert!(self.all_seen_peer.contains(&evt.peer_id), "fishy");
                 return;
@@ -1618,21 +1622,28 @@ impl BigSyncMachine {
             if worker.task_id != evt.task_id {
                 return;
             }
-            SyncTaskDeets {
-                peer_id: evt.peer_id,
-                obj_id: evt.obj_id,
-                part_hints: worker.part_hints.clone(),
-                remote_payload: worker.remote_payload.clone(),
-            }
+            (
+                SyncTaskDeets {
+                    peer_id: evt.peer_id,
+                    obj_id: evt.obj_id,
+                    remote_payload: worker.remote_payload.clone(),
+                },
+                worker.part_hints.clone(),
+            )
         };
 
         let Some(peer_state) = self.peers.get_mut(&evt.peer_id) else {
             return;
         };
         if let Some(worker) = peer_state.sync_workers.get_mut(&evt.obj_id) {
-            let task_id =
-                self.tasks
-                    .spawn_delayed_task(TaskSeed::Sync(deets), retry, Duration::from_secs(2));
+            let task_id = self.tasks.spawn_delayed_task(
+                TaskSeed::Sync(SyncTaskSeed {
+                    part_hints: part_hints.clone(),
+                    deets,
+                }),
+                retry,
+                Duration::from_secs(2),
+            );
             worker.task_id = task_id;
         }
     }
@@ -1644,7 +1655,7 @@ impl BigSyncMachine {
             obj_id = %evt.obj_id,
             "XXX sync stale received"
         );
-        let deets = {
+        let (deets, part_hints) = {
             let Some(peer_state) = self.peers.get(&evt.peer_id) else {
                 assert!(self.all_seen_peer.contains(&evt.peer_id), "fishy");
                 return;
@@ -1655,21 +1666,28 @@ impl BigSyncMachine {
             if worker.task_id != evt.task_id {
                 return;
             }
-            SyncTaskDeets {
-                peer_id: evt.peer_id,
-                obj_id: evt.obj_id,
-                part_hints: worker.part_hints.clone(),
-                remote_payload: worker.remote_payload.clone(),
-            }
+            (
+                SyncTaskDeets {
+                    peer_id: evt.peer_id,
+                    obj_id: evt.obj_id,
+                    remote_payload: worker.remote_payload.clone(),
+                },
+                worker.part_hints.clone(),
+            )
         };
 
         let Some(peer_state) = self.peers.get_mut(&evt.peer_id) else {
             return;
         };
         if let Some(worker) = peer_state.sync_workers.get_mut(&evt.obj_id) {
-            let task_id =
-                self.tasks
-                    .spawn_delayed_task(TaskSeed::Sync(deets), retry, Duration::from_secs(2));
+            let task_id = self.tasks.spawn_delayed_task(
+                TaskSeed::Sync(SyncTaskSeed {
+                    part_hints: part_hints.clone(),
+                    deets,
+                }),
+                retry,
+                Duration::from_secs(2),
+            );
             worker.task_id = task_id;
         }
     }
