@@ -17,30 +17,10 @@ pub mod contract {
     use super::*;
     use big_sync_core::SyncCompletionDeets;
 
-    #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-    pub enum SyncBackendLeaseKind {
-        Fresh,
-        Stale,
-    }
-
     #[derive(Debug, Clone, PartialEq, Eq)]
     pub enum SyncBackendOutcome {
         Completion(SyncCompletionDeets),
         Stale,
-    }
-
-    #[derive(Debug, Clone, PartialEq, Eq)]
-    pub enum SyncBackendLeaseMutation {
-        RemoveObjFromPart {
-            part_id: PartId,
-        },
-        AddObjToParts {
-            parts: Vec<PartId>,
-        },
-        UpsertObj {
-            payload: ObjPayload,
-            parts: Vec<PartId>,
-        },
     }
 
     #[derive(Debug, Clone, PartialEq, Eq)]
@@ -52,8 +32,6 @@ pub mod contract {
         pub initial_parts: Vec<PartId>,
         pub sync_part_hints: Vec<PartId>,
         pub remote_payload: Option<ObjPayload>,
-        pub lease_kind: SyncBackendLeaseKind,
-        pub lease_mutation: Option<SyncBackendLeaseMutation>,
         pub expected_outcome: SyncBackendOutcome,
         pub expected_payload: Option<ObjPayload>,
         pub expected_parts: Vec<PartId>,
@@ -67,14 +45,6 @@ pub mod contract {
 
         pub fn with_sync_part_hints(mut self, sync_part_hints: Vec<PartId>) -> Self {
             self.sync_part_hints = sync_part_hints;
-            self
-        }
-
-        pub fn with_lease_mutation(
-            mut self,
-            lease_mutation: Option<SyncBackendLeaseMutation>,
-        ) -> Self {
-            self.lease_mutation = lease_mutation;
             self
         }
 
@@ -93,8 +63,6 @@ pub mod contract {
                 initial_parts: parts.clone(),
                 sync_part_hints: parts.clone(),
                 remote_payload: Some(payload.clone()),
-                lease_kind: SyncBackendLeaseKind::Fresh,
-                lease_mutation: None,
                 expected_outcome: SyncBackendOutcome::Completion(SyncCompletionDeets::Noop),
                 expected_payload: Some(payload),
                 expected_parts: parts,
@@ -117,8 +85,6 @@ pub mod contract {
                 initial_parts: parts.clone(),
                 sync_part_hints: parts.clone(),
                 remote_payload: Some(remote_payload.clone()),
-                lease_kind: SyncBackendLeaseKind::Fresh,
-                lease_mutation: None,
                 expected_outcome: SyncBackendOutcome::Completion(
                     SyncCompletionDeets::ChangedObject,
                 ),
@@ -142,117 +108,9 @@ pub mod contract {
                 initial_parts: vec![],
                 sync_part_hints: parts.clone(),
                 remote_payload: Some(remote_payload.clone()),
-                lease_kind: SyncBackendLeaseKind::Fresh,
-                lease_mutation: None,
                 expected_outcome: SyncBackendOutcome::Completion(SyncCompletionDeets::AddedMember),
                 expected_payload: Some(remote_payload),
                 expected_parts: parts,
-            }
-        }
-
-        pub fn stale(
-            name: &'static str,
-            peer_id: PeerId,
-            obj_id: ObjId,
-            initial_payload: ObjPayload,
-            parts: Vec<PartId>,
-            remote_payload: ObjPayload,
-        ) -> Self {
-            Self {
-                name,
-                peer_id,
-                obj_id,
-                initial_payload: Some(initial_payload.clone()),
-                initial_parts: parts.clone(),
-                sync_part_hints: parts.clone(),
-                remote_payload: Some(remote_payload),
-                lease_kind: SyncBackendLeaseKind::Stale,
-                lease_mutation: None,
-                expected_outcome: SyncBackendOutcome::Stale,
-                expected_payload: Some(initial_payload),
-                expected_parts: parts,
-            }
-        }
-
-        pub fn stale_after_remove_from_part(
-            name: &'static str,
-            peer_id: PeerId,
-            obj_id: ObjId,
-            payload: ObjPayload,
-            part_id: PartId,
-            remote_payload: ObjPayload,
-        ) -> Self {
-            Self {
-                name,
-                peer_id,
-                obj_id,
-                initial_payload: Some(payload.clone()),
-                initial_parts: vec![part_id],
-                sync_part_hints: vec![part_id],
-                remote_payload: Some(remote_payload),
-                lease_kind: SyncBackendLeaseKind::Fresh,
-                lease_mutation: Some(SyncBackendLeaseMutation::RemoveObjFromPart { part_id }),
-                expected_outcome: SyncBackendOutcome::Stale,
-                expected_payload: Some(payload),
-                expected_parts: vec![],
-            }
-        }
-
-        pub fn stale_after_add_obj_to_parts(
-            name: &'static str,
-            peer_id: PeerId,
-            obj_id: ObjId,
-            payload: ObjPayload,
-            initial_parts: Vec<PartId>,
-            added_parts: Vec<PartId>,
-            remote_payload: ObjPayload,
-        ) -> Self {
-            let mut expected_parts = initial_parts.clone();
-            expected_parts.extend(added_parts.clone());
-            Self {
-                name,
-                peer_id,
-                obj_id,
-                initial_payload: Some(payload.clone()),
-                initial_parts,
-                sync_part_hints: expected_parts.clone(),
-                remote_payload: Some(remote_payload),
-                lease_kind: SyncBackendLeaseKind::Fresh,
-                lease_mutation: Some(SyncBackendLeaseMutation::AddObjToParts {
-                    parts: added_parts,
-                }),
-                expected_outcome: SyncBackendOutcome::Stale,
-                expected_payload: Some(payload),
-                expected_parts,
-            }
-        }
-
-        pub fn stale_after_upsert_obj(
-            name: &'static str,
-            peer_id: PeerId,
-            obj_id: ObjId,
-            initial_payload: ObjPayload,
-            initial_parts: Vec<PartId>,
-            updated_payload: ObjPayload,
-            updated_parts: Vec<PartId>,
-            remote_payload: ObjPayload,
-        ) -> Self {
-            Self {
-                name,
-                peer_id,
-                obj_id,
-                initial_payload: Some(initial_payload.clone()),
-                initial_parts,
-                sync_part_hints: updated_parts.clone(),
-                remote_payload: Some(remote_payload),
-                lease_kind: SyncBackendLeaseKind::Fresh,
-                lease_mutation: Some(SyncBackendLeaseMutation::UpsertObj {
-                    payload: updated_payload.clone(),
-                    parts: updated_parts.clone(),
-                }),
-                expected_outcome: SyncBackendOutcome::Stale,
-                expected_payload: Some(updated_payload),
-                expected_parts: updated_parts,
             }
         }
     }
@@ -280,57 +138,25 @@ pub mod contract {
 
         match &case.initial_payload {
             Some(payload) => {
-                store
-                    .set_obj_payload(
-                        case.obj_id,
-                        payload.clone(),
-                        case.initial_parts.clone(),
-                        None,
-                    )
-                    .await?;
+                store.set_obj_payload(case.obj_id, payload.clone()).await?;
+                if !case.initial_parts.is_empty() {
+                    store
+                        .add_obj_to_parts(case.obj_id, case.initial_parts.clone())
+                        .await?;
+                }
             }
             None if !case.initial_parts.is_empty() => {
                 store
-                    .add_obj_to_parts(case.obj_id, case.initial_parts.clone(), None)
+                    .add_obj_to_parts(case.obj_id, case.initial_parts.clone())
                     .await?;
             }
             None => {}
-        }
-
-        let lease = match case.lease_kind {
-            SyncBackendLeaseKind::Fresh => store.get_obj_lease(case.obj_id).await?,
-            SyncBackendLeaseKind::Stale => {
-                let stale_lease = store.get_obj_lease(case.obj_id).await?;
-                let _fresh_lease = store.get_obj_lease(case.obj_id).await?;
-                stale_lease
-            }
-        };
-
-        if let Some(lease_mutation) = &case.lease_mutation {
-            match lease_mutation {
-                SyncBackendLeaseMutation::RemoveObjFromPart { part_id } => {
-                    store
-                        .remove_obj_from_part(case.obj_id, *part_id, Some(lease))
-                        .await?;
-                }
-                SyncBackendLeaseMutation::AddObjToParts { parts } => {
-                    store
-                        .add_obj_to_parts(case.obj_id, parts.clone(), Some(lease))
-                        .await?;
-                }
-                SyncBackendLeaseMutation::UpsertObj { payload, parts } => {
-                    store
-                        .set_obj_payload(case.obj_id, payload.clone(), parts.clone(), Some(lease))
-                        .await?;
-                }
-            }
         }
 
         let outcome = harness
             .backend()
             .sync_obj(
                 case.peer_id,
-                lease,
                 case.obj_id,
                 case.sync_part_hints.clone(),
                 case.remote_payload.clone(),

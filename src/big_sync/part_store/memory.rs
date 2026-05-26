@@ -609,8 +609,13 @@ impl HostPartStore for MemoryPartStore {
         let part_count = parts.len();
         let result = surelock::key::lock_scope(|key| {
             let (guard, _key) = key.lock(&self.inner);
-            let mut out = HashMap::new();
+            let mut out: HashMap<PartId, PartPage> = default();
             for part_id in parts {
+                let Some(_part) = guard.parts.get(&part_id) else {
+                    return Err(ListPartsError::UnkownParts {
+                        unkown_parts: vec![part_id],
+                    });
+                };
                 let mut next_cursor = None;
                 let mut events = vec![];
                 for (&ii, evt) in guard.events.range(cursor.saturating_add(1)..) {
@@ -618,15 +623,16 @@ impl HostPartStore for MemoryPartStore {
                         next_cursor = Some(ii);
                         break;
                     }
-                    events.push(evt.clone())
+                    let push = match evt {
+                        PartEvent::Changed(inner) => inner.part_ids.contains(&part_id),
+                        PartEvent::Added(inner) => inner.part_id == part_id,
+                        PartEvent::Removed(inner) => inner.part_id == part_id,
+                    };
+                    if push {
+                        events.push(evt.clone());
+                    }
                 }
-                out.insert(
-                    part_id,
-                    PartPage {
-                        events,
-                        next_cursor,
-                    },
-                );
+                out.insert(part_id, PartPage { events, next_cursor });
             }
             Ok(out)
         });

@@ -257,6 +257,7 @@ structstruck::strike! {
 
 structstruck::strike! {
     #[structstruck::each[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]]
+    #[derive(Default)]
     pub struct PartPage {
         pub events: Vec<pub enum PartEvent {
             Changed(pub struct ObjChanged {

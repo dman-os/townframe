@@ -12,6 +12,8 @@ mod interlude {
     pub use crate::ids::{BuckId, ObjId, PartId, PeerId};
 }
 
+use std::collections::VecDeque;
+
 use crate::interlude::*;
 
 mod bucket;
@@ -529,7 +531,7 @@ structstruck::strike! {
         peers: Map<PeerId, PeerState>,
         stat_machine: SyncStatMachine,
 
-        last_cmd: Option<struct LastCmd(BigSyncMachineCommand, Option<CursorIndex>, PeerId)>,
+        cmds: VecDeque<(Uuid, BigSyncMachineCommand, Option<CursorIndex>, PeerId)>,
         tasks: Tasks,
     }
 }
@@ -596,11 +598,11 @@ impl BigSyncMachine {
         self.stat_machine.stat_evts.drain(..)
     }
 
-    pub fn get_cmd(&mut self) -> Option<BigSyncMachineCommand> {
-        let Some(LastCmd(cmd, _, _)) = &self.last_cmd else {
+    pub fn get_cmd(&mut self) -> Option<(Uuid, BigSyncMachineCommand)> {
+        let Some((id, cmd, _, _)) = self.cmds.front() else {
             return None;
         };
-        Some(cmd.clone())
+        Some((*id, cmd.clone()))
     }
 
     pub fn handle_evt(&mut self, evt: BigSyncEvent) {
@@ -629,11 +631,14 @@ impl BigSyncMachine {
         }
     }
 
-    pub fn handle_cmd_success(&mut self) {
-        let LastCmd(last_cmd, cursor, peer_id) = self
-            .last_cmd
-            .take()
+    pub fn handle_cmd_success(&mut self, id: Uuid) {
+        let (found_id, last_cmd, cursor, peer_id) = self
+            .cmds
+            .pop_front()
             .expect("success for a cmd that wasn't sent");
+        if id != found_id {
+            panic!("unexpected cmd success, cmds must be performed serially");
+        }
         if let Some(cursor) = cursor {
             match last_cmd {
                 BigSyncMachineCommand::SetPartCursor { .. } => unreachable!(),
@@ -1167,20 +1172,16 @@ impl BigSyncMachine {
                         PeerPartStrategy::Cursor(state) => {
                             // we only update the peer part cursor
                             // in the cursor phase
-                            assert!(
-                                self.last_cmd
-                                    .replace(LastCmd(
-                                        BigSyncMachineCommand::SetPartCursor {
-                                            peer_id,
-                                            part_id,
-                                            cursor
-                                        },
-                                        None,
-                                        peer_id
-                                    ))
-                                    .is_none(),
-                                "double cmd"
-                            );
+                            self.cmds.push_back((
+                                Uuid::new_v4(),
+                                BigSyncMachineCommand::SetPartCursor {
+                                    peer_id,
+                                    part_id,
+                                    cursor,
+                                },
+                                None,
+                                peer_id,
+                            ));
                             state.replay_cursor = cursor;
                         }
                         _ => unreachable!(),
@@ -1190,30 +1191,26 @@ impl BigSyncMachine {
                     obj_id,
                     part_id,
                     cursor,
-                } => assert!(
-                    self.last_cmd
-                        .replace(LastCmd(
-                            BigSyncMachineCommand::RemoveObjFromPart { obj_id, part_id },
-                            Some(cursor),
-                            peer_id
-                        ))
-                        .is_none(),
-                    "double cmd"
-                ),
+                } => {
+                    self.cmds.push_back((
+                        Uuid::new_v4(),
+                        BigSyncMachineCommand::RemoveObjFromPart { obj_id, part_id },
+                        Some(cursor),
+                        peer_id,
+                    ));
+                }
                 CursorMachineCommand::AddObjToPart {
                     obj_id,
                     part_id,
                     cursor,
-                } => assert!(
-                    self.last_cmd
-                        .replace(LastCmd(
-                            BigSyncMachineCommand::AddObjToPart { obj_id, part_id },
-                            Some(cursor),
-                            peer_id
-                        ))
-                        .is_none(),
-                    "double cmd"
-                ),
+                } => {
+                    self.cmds.push_back((
+                        Uuid::new_v4(),
+                        BigSyncMachineCommand::AddObjToPart { obj_id, part_id },
+                        Some(cursor),
+                        peer_id,
+                    ));
+                }
             }
         }
     }
@@ -1268,16 +1265,12 @@ impl BigSyncMachine {
                     );
                 }
                 BucketMachineCommand::RemoveObjFromPart { obj_id, part_id } => {
-                    assert!(
-                        self.last_cmd
-                            .replace(LastCmd(
-                                BigSyncMachineCommand::RemoveObjFromPart { obj_id, part_id },
-                                None,
-                                peer_id
-                            ))
-                            .is_none(),
-                        "double cmd"
-                    );
+                    self.cmds.push_back((
+                        Uuid::new_v4(),
+                        BigSyncMachineCommand::RemoveObjFromPart { obj_id, part_id },
+                        None,
+                        peer_id,
+                    ));
                 }
                 BucketMachineCommand::ListBuckets {
                     offset,
@@ -1330,20 +1323,16 @@ impl BigSyncMachine {
                     };
                     assert!(old.active_list_tasks.is_empty());
                     assert!(old.active_leaf_tasks.is_empty());
-                    assert!(
-                        self.last_cmd
-                            .replace(LastCmd(
-                                BigSyncMachineCommand::SetPartCursor {
-                                    peer_id,
-                                    part_id,
-                                    cursor: old.replay_cursor,
-                                },
-                                None,
-                                peer_id
-                            ))
-                            .is_none(),
-                        "double cmd"
-                    );
+                    self.cmds.push_back((
+                        Uuid::new_v4(),
+                        BigSyncMachineCommand::SetPartCursor {
+                            peer_id,
+                            part_id,
+                            cursor: old.replay_cursor,
+                        },
+                        None,
+                        peer_id,
+                    ));
                     peer_state.parts.insert(
                         part_id,
                         PeerPartState {

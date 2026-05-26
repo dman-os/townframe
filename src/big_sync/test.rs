@@ -18,7 +18,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::backend::contract::{self, SyncBackendHarness, SyncBackendScenario};
 use crate::part_store::memory::MemoryPartStore;
-use crate::part_store::{HostPartStore, ObjStoreLease, StoreMutationOutcome};
+use crate::part_store::HostPartStore;
 use crate::test_support::{ObservedStore, ObservedStoreSnapshot, TestStoreSetup};
 use crate::{Ctx, SyncTaskRunOutcome};
 
@@ -251,7 +251,7 @@ impl MemorySyncBackend {
 #[async_trait]
 impl SyncBackend for MemorySyncBackend {
     #[tracing::instrument(
-        skip(self, part_hints, lease),
+        skip(self, part_hints),
         fields(
             part_hint_count = part_hints.len()
         )
@@ -259,7 +259,6 @@ impl SyncBackend for MemorySyncBackend {
     async fn sync_obj(
         &self,
         peer_id: PeerId,
-        lease: ObjStoreLease,
         obj_id: ObjId,
         part_hints: Vec<PartId>,
         remote_payload: Option<serde_json::Value>,
@@ -278,19 +277,16 @@ impl SyncBackend for MemorySyncBackend {
         match (local_payload, remote_payload) {
             (Some(local), Some(remote)) => match compare_lww_payloads(&local, &remote) {
                 Ordering::Less => {
-                    match self
-                        .local_part_store
-                        .set_obj_payload(obj_id, remote, part_hints, Some(lease))
-                        .await?
-                    {
-                        StoreMutationOutcome::Applied => {
-                            Ok(SyncTaskRunOutcome::Completion(SyncTaskCompletion {
-                                obj_id,
-                                deets: big_sync_core::SyncCompletionDeets::ChangedObject,
-                            }))
-                        }
-                        StoreMutationOutcome::Stale => Ok(SyncTaskRunOutcome::Stale),
+                    self.local_part_store.set_obj_payload(obj_id, remote).await?;
+                    if !part_hints.is_empty() {
+                        self.local_part_store
+                            .add_obj_to_parts(obj_id, part_hints)
+                            .await?;
                     }
+                    Ok(SyncTaskRunOutcome::Completion(SyncTaskCompletion {
+                        obj_id,
+                        deets: big_sync_core::SyncCompletionDeets::ChangedObject,
+                    }))
                 }
                 Ordering::Equal | Ordering::Greater => {
                     Ok(SyncTaskRunOutcome::Completion(SyncTaskCompletion {
@@ -300,19 +296,16 @@ impl SyncBackend for MemorySyncBackend {
                 }
             },
             (None, Some(payload)) => {
-                match self
-                    .local_part_store
-                    .set_obj_payload(obj_id, payload, part_hints, Some(lease))
-                    .await?
-                {
-                    StoreMutationOutcome::Applied => {
-                        Ok(SyncTaskRunOutcome::Completion(SyncTaskCompletion {
-                            obj_id,
-                            deets: big_sync_core::SyncCompletionDeets::AddedMember,
-                        }))
-                    }
-                    StoreMutationOutcome::Stale => Ok(SyncTaskRunOutcome::Stale),
+                self.local_part_store.set_obj_payload(obj_id, payload).await?;
+                if !part_hints.is_empty() {
+                    self.local_part_store
+                        .add_obj_to_parts(obj_id, part_hints)
+                        .await?;
                 }
+                Ok(SyncTaskRunOutcome::Completion(SyncTaskCompletion {
+                    obj_id,
+                    deets: big_sync_core::SyncCompletionDeets::AddedMember,
+                }))
             }
             (Some(_), None) | (None, None) => eyre::bail!("missing on remote"),
         }
@@ -339,14 +332,12 @@ impl SyncBackendHarness for MemorySyncBackendContractHarness {
         if case.remote_payload.is_none() {
             let remote_store = Arc::new(MemoryPartStore::new(case.peer_id));
             if let Some(payload) = &case.expected_payload {
-                remote_store
-                    .set_obj_payload(
-                        case.obj_id,
-                        payload.clone(),
-                        case.expected_parts.clone(),
-                        None,
-                    )
-                    .await?;
+                remote_store.set_obj_payload(case.obj_id, payload.clone()).await?;
+                if !case.expected_parts.is_empty() {
+                    remote_store
+                        .add_obj_to_parts(case.obj_id, case.expected_parts.clone())
+                        .await?;
+                }
             }
             self.world
                 .register_store(case.peer_id, Arc::clone(&remote_store));
@@ -365,7 +356,6 @@ impl SyncBackendHarness for MemorySyncBackendContractHarness {
 fn memory_sync_backend_cases() -> Vec<SyncBackendScenario> {
     let part = test_part();
     let extra_part = PartId(Byte32Id::new([7; 32]));
-    let updated_payload = payload(serde_json::json!({"kind": "updated"}), 3, peer_id(2));
     vec![
         SyncBackendScenario::noop(
             "noop_when_payloads_match",
@@ -430,41 +420,6 @@ fn memory_sync_backend_cases() -> Vec<SyncBackendScenario> {
             payload(serde_json::json!({"kind": "new"}), 2, peer_id(2)),
             vec![part],
         ),
-        SyncBackendScenario::stale(
-            "stale_lease_is_reported",
-            peer_id(2),
-            gen_obj_id(13),
-            payload(serde_json::json!({"kind": "old"}), 1, peer_id(1)),
-            vec![part],
-            payload(serde_json::json!({"kind": "new"}), 2, peer_id(2)),
-        ),
-        SyncBackendScenario::stale_after_remove_from_part(
-            "stale_after_remove_from_part",
-            peer_id(2),
-            gen_obj_id(14),
-            payload(serde_json::json!({"kind": "remove"}), 1, peer_id(1)),
-            part,
-            payload(serde_json::json!({"kind": "remove-remote"}), 2, peer_id(2)),
-        ),
-        SyncBackendScenario::stale_after_add_obj_to_parts(
-            "stale_after_add_obj_to_parts",
-            peer_id(2),
-            gen_obj_id(15),
-            payload(serde_json::json!({"kind": "add"}), 1, peer_id(1)),
-            vec![part],
-            vec![extra_part],
-            payload(serde_json::json!({"kind": "add-remote"}), 2, peer_id(2)),
-        ),
-        SyncBackendScenario::stale_after_upsert_obj(
-            "stale_after_upsert_obj",
-            peer_id(2),
-            gen_obj_id(16),
-            payload(serde_json::json!({"kind": "upsert-old"}), 1, peer_id(1)),
-            vec![part],
-            updated_payload,
-            vec![part, extra_part],
-            payload(serde_json::json!({"kind": "upsert-remote"}), 2, peer_id(2)),
-        ),
     ]
 }
 
@@ -521,19 +476,17 @@ impl NodeHarness {
     }
 
     async fn seed_obj(&self, obj: ObjId, payload: serde_json::Value) -> Res<()> {
+        self.host.store.set_obj_payload(obj, payload).await?;
         self.host
             .store
-            .set_obj_payload(obj, payload, test_parts(), None)
-            .await
-            .map(|outcome| assert_eq!(outcome, StoreMutationOutcome::Applied))
+            .add_obj_to_parts(obj, test_parts())
+            .await?;
+        Ok(())
     }
 
     async fn remove_obj(&self, obj: ObjId) -> Res<()> {
-        self.host
-            .store
-            .remove_obj_from_part(obj, test_part(), None)
-            .await
-            .map(|outcome| assert_eq!(outcome, StoreMutationOutcome::Applied))
+        self.host.store.remove_obj_from_part(obj, test_part()).await?;
+        Ok(())
     }
 
     async fn wait_for_full_sync(
@@ -613,10 +566,9 @@ async fn memory_part_store_root_bucket_contract() -> Res<()> {
                     ii as u64,
                     peer_id(1),
                 ),
-                vec![part_id],
-                None,
             )
             .await?;
+        store.add_obj_to_parts(obj_id, vec![part_id]).await?;
         obj_ids.push(obj_id);
     }
 
@@ -631,9 +583,7 @@ async fn memory_part_store_root_bucket_contract() -> Res<()> {
     .await?;
 
     let removed_obj_id = obj_ids[1];
-    store
-        .remove_obj_from_part(removed_obj_id, part_id, None)
-        .await?;
+    store.remove_obj_from_part(removed_obj_id, part_id).await?;
     let live_ids: Vec<_> = obj_ids
         .iter()
         .copied()
@@ -702,13 +652,15 @@ async fn memory_part_store_bucket_summary_is_order_independent() -> Res<()> {
     }
     for ((_, payload), &obj_id) in objs.iter().zip(obj_ids_a.iter()) {
         store_a
-            .set_obj_payload(obj_id, payload.clone(), vec![test_part()], None)
+            .set_obj_payload(obj_id, payload.clone())
             .await?;
+        store_a.add_obj_to_parts(obj_id, vec![test_part()]).await?;
     }
     for ((_, payload), &obj_id) in objs.iter().rev().zip(obj_ids_b.iter().rev()) {
         store_b
-            .set_obj_payload(obj_id, payload.clone(), vec![test_part()], None)
+            .set_obj_payload(obj_id, payload.clone())
             .await?;
+        store_b.add_obj_to_parts(obj_id, vec![test_part()]).await?;
     }
 
     let a_initial = store_a
@@ -739,12 +691,8 @@ async fn memory_part_store_bucket_summary_is_order_independent() -> Res<()> {
     assert_eq!(a_initial.fp, b_initial.fp);
     assert_eq!(a_initial.changed_at, b_initial.changed_at);
 
-    store_a
-        .remove_obj_from_part(obj_ids_a[1], test_part(), None)
-        .await?;
-    store_b
-        .remove_obj_from_part(obj_ids_b[1], test_part(), None)
-        .await?;
+    store_a.remove_obj_from_part(obj_ids_a[1], test_part()).await?;
+    store_b.remove_obj_from_part(obj_ids_b[1], test_part()).await?;
 
     let a_final = store_a
         .get_changed_buckets(GetChangedBucketsRequest {
@@ -1293,21 +1241,22 @@ async fn memory_sync_direct_backend_adopts_remote_tombstone() -> Res<()> {
     let live_payload = payload("live", 1, peer_a);
 
     store_a
-        .set_obj_payload(obj, live_payload.clone(), vec![part], None)
+        .set_obj_payload(obj, live_payload.clone())
         .await?;
+    store_a.add_obj_to_parts(obj, vec![part]).await?;
     store_b
-        .set_obj_payload(obj, live_payload, vec![part], None)
+        .set_obj_payload(obj, live_payload)
         .await?;
-    store_a.remove_obj_from_part(obj, part, None).await?;
+    store_b.add_obj_to_parts(obj, vec![part]).await?;
+    store_a.remove_obj_from_part(obj, part).await?;
 
     let backend = MemorySyncBackend::new(peer_b, Arc::clone(&store_b_dyn), Arc::clone(&world));
 
     let err = backend
         .sync_obj(
             peer_a,
-            store_b.get_obj_lease(obj).await?,
             obj,
-            [part].into(),
+            vec![part],
             None,
         )
         .await
@@ -1342,11 +1291,13 @@ async fn memory_sync_direct_backend_cross_replication_is_symmetric() -> Res<()> 
     let right_payload = payload("right-b", 1, peer_b);
 
     store_a
-        .set_obj_payload(obj_a, left_payload.clone(), vec![part], None)
+        .set_obj_payload(obj_a, left_payload.clone())
         .await?;
+    store_a.add_obj_to_parts(obj_a, vec![part]).await?;
     store_b
-        .set_obj_payload(obj_b, right_payload.clone(), vec![part], None)
+        .set_obj_payload(obj_b, right_payload.clone())
         .await?;
+    store_b.add_obj_to_parts(obj_b, vec![part]).await?;
 
     let backend_a = MemorySyncBackend::new(peer_a, Arc::clone(&store_a_dyn), Arc::clone(&world));
     let backend_b = MemorySyncBackend::new(peer_b, Arc::clone(&store_b_dyn), Arc::clone(&world));
@@ -1354,18 +1305,16 @@ async fn memory_sync_direct_backend_cross_replication_is_symmetric() -> Res<()> 
     let _ = backend_a
         .sync_obj(
             peer_b,
-            store_a.get_obj_lease(obj_b).await?,
             obj_b,
-            [part].into_iter().collect(),
+            vec![part],
             Some(right_payload.clone()),
         )
         .await?;
     let _ = backend_b
         .sync_obj(
             peer_a,
-            store_b.get_obj_lease(obj_a).await?,
             obj_a,
-            [part].into_iter().collect(),
+            vec![part],
             Some(left_payload.clone()),
         )
         .await?;

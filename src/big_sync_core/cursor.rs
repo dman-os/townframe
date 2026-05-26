@@ -70,8 +70,8 @@ pub struct CursorSyncMachine {
                 waiters: BTreeMap<
                     CursorIndex,
                     struct CursorWaiter {
-                        #![derive(Debug, Clone)]
-                        pub part_id: PartId,
+                        #![derive(Debug, Default, Clone)]
+                        pub parts: Vec<PartId>,
                     }
                 >,
                 // removed_from_parts: Set<PartId>,
@@ -111,10 +111,17 @@ impl CursorSyncMachine {
                     if !self.mark_pending_cursor(part_id, evt.cursor) {
                         continue;
                     }
-                    let job = self.active_obj_jobs.entry(evt.obj_id).or_default();
-                    job.waiters.insert(evt.cursor, CursorWaiter { part_id });
                     parts.push(part_id);
                 }
+                if parts.is_empty() {
+                    return;
+                }
+                let job = self.active_obj_jobs.entry(evt.obj_id).or_default();
+                job.waiters
+                    .entry(evt.cursor)
+                    .or_default()
+                    .parts
+                    .extend(parts.iter().copied());
                 CursorMachineCommand::SyncObj {
                     obj_id: evt.obj_id,
                     parts,
@@ -127,12 +134,11 @@ impl CursorSyncMachine {
                     return;
                 }
                 let job = self.active_obj_jobs.entry(evt.obj_id).or_default();
-                job.waiters.insert(
-                    evt.cursor,
-                    CursorWaiter {
-                        part_id: evt.part_id,
-                    },
-                );
+                job.waiters
+                    .entry(evt.cursor)
+                    .or_default()
+                    .parts
+                    .push(evt.part_id);
                 CursorMachineCommand::AddObjToPart {
                     cursor: evt.cursor,
                     obj_id: evt.obj_id,
@@ -144,12 +150,11 @@ impl CursorSyncMachine {
                     return;
                 }
                 let job = self.active_obj_jobs.entry(evt.obj_id).or_default();
-                job.waiters.insert(
-                    evt.cursor,
-                    CursorWaiter {
-                        part_id: evt.part_id,
-                    },
-                );
+                job.waiters
+                    .entry(evt.cursor)
+                    .or_default()
+                    .parts
+                    .push(evt.part_id);
                 CursorMachineCommand::RemoveObjFromPart {
                     cursor: evt.cursor,
                     obj_id: evt.obj_id,
@@ -167,16 +172,18 @@ impl CursorSyncMachine {
         cursor: CursorIndex,
         out: &mut Vec<CursorMachineCommand>,
     ) {
-        // remove it temporarily to allow mutable borrows
-        // on self
         let Some(mut job) = self.active_obj_jobs.remove(&obj_id) else {
             return;
         };
         let waiter = job.waiters.remove(&cursor).expect(ERROR_UNRECONIZED);
-        let state = self.cursor_state.entry(waiter.part_id).or_default();
-        state.slots.insert(cursor, CursorSlotState::Ready);
-        self.drain_ready_cursor_advances(waiter.part_id, out);
-        self.active_obj_jobs.insert(obj_id, job);
+        for part_id in waiter.parts {
+            let state = self.cursor_state.entry(part_id).or_default();
+            state.slots.insert(cursor, CursorSlotState::Ready);
+            self.drain_ready_cursor_advances(part_id, out);
+        }
+        if !job.waiters.is_empty() {
+            self.active_obj_jobs.insert(obj_id, job);
+        }
     }
 
     fn drain_ready_cursor_advances(

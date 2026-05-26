@@ -433,7 +433,7 @@ impl BigSyncWorker {
                     self.machine.handle_tick(std::time::Instant::now());
                 }
             };
-            while let Some(cmd) = self.machine.get_cmd() {
+            while let Some((id, cmd)) = self.machine.get_cmd() {
                 match cmd {
                     BigSyncMachineCommand::RemoveObjFromPart { obj_id, part_id } => {
                         self.part_store
@@ -455,7 +455,7 @@ impl BigSyncWorker {
                             .await?;
                     }
                 }
-                self.machine.handle_cmd_success();
+                self.machine.handle_cmd_success(id);
             }
 
             self.batch_stop_tasks().await?;
