@@ -643,22 +643,11 @@ pub(crate) async fn ensure_expected_partitions_for_docs(
     doc_drawer_id: DocumentId,
 ) -> Res<()> {
     let core_docs_partition_id = crate::part_id_from_label(crate::sync::CORE_DOCS_PARTITION_ID);
-
     partition_store
-        .set_obj_payload(
-            doc_drawer_id,
-            serde_json::json!({}),
-            vec![core_docs_partition_id],
-            None,
-        )
+        .add_obj_to_parts(doc_drawer_id, vec![core_docs_partition_id])
         .await?;
     partition_store
-        .set_obj_payload(
-            doc_app_id,
-            serde_json::json!({}),
-            vec![core_docs_partition_id],
-            None,
-        )
+        .add_obj_to_parts(doc_app_id, vec![core_docs_partition_id])
         .await?;
     Ok(())
 }

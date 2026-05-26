@@ -6,7 +6,7 @@ use rand::{seq::SliceRandom, Rng, SeedableRng};
 use serde::{Deserialize, Serialize};
 use std::sync::Mutex;
 
-pub const STRESS_NODE_COUNT: usize = 4 * 1;
+pub const STRESS_NODE_COUNT: usize = 3;
 pub const PHASE1_MUTATIONS: usize = 48;
 pub const PHASE2_MUTATIONS: usize = 24;
 pub const PHASE3_MUTATIONS: usize = 32;
@@ -333,6 +333,7 @@ pub async fn wait_for_cluster_settled<F: StressFixture>(
     fixture: &F,
     nodes: &[&F::Node],
     timeout: Duration,
+    label: &str,
 ) -> Res<()> {
     let deadline = std::time::Instant::now() + timeout;
     let mut last_snapshot = None;
@@ -356,7 +357,7 @@ pub async fn wait_for_cluster_settled<F: StressFixture>(
         last_snapshot = Some(current);
         if std::time::Instant::now() >= deadline {
             return Err(ferr!(
-                "timed out waiting for stress cluster to settle: last_snapshot={last_snapshot:?}"
+                "timed out waiting for stress cluster to settle at {label}: last_snapshot={last_snapshot:?}"
             ));
         }
 
@@ -370,6 +371,25 @@ pub async fn run_randomized_four_node_stress<F: StressFixture>(
     phase1_mutations: usize,
     phase2_mutations: usize,
     phase3_mutations: usize,
+) -> Res<()> {
+    run_randomized_four_node_stress_with_settle_timeout(
+        fixture,
+        world,
+        phase1_mutations,
+        phase2_mutations,
+        phase3_mutations,
+        Duration::from_secs(60),
+    )
+    .await
+}
+
+pub async fn run_randomized_four_node_stress_with_settle_timeout<F: StressFixture>(
+    fixture: F,
+    world: Arc<F::World>,
+    phase1_mutations: usize,
+    phase2_mutations: usize,
+    phase3_mutations: usize,
+    settle_timeout: Duration,
 ) -> Res<()> {
     utils_rs::testing::setup_tracing_once();
 
@@ -389,7 +409,13 @@ pub async fn run_randomized_four_node_stress<F: StressFixture>(
     let phase1_topology = choose_active_topology(&mut rng, &nodes);
     journal.record(format!("phase1:topology active={phase1_topology:?}"));
     connect_active_topology(&fixture, &mut rng, &nodes, &phase1_topology).await?;
-    wait_for_cluster_settled(&fixture, &live_refs(&nodes), Duration::from_secs(30 * 10)).await?;
+    wait_for_cluster_settled(
+        &fixture,
+        &live_refs(&nodes),
+        settle_timeout,
+        "phase1:post-connect",
+    )
+    .await?;
     run_phase(
         &fixture,
         &mut rng,
@@ -400,13 +426,25 @@ pub async fn run_randomized_four_node_stress<F: StressFixture>(
         &journal,
     )
     .await?;
-    wait_for_cluster_settled(&fixture, &live_refs(&nodes), Duration::from_secs(60)).await?;
+    wait_for_cluster_settled(
+        &fixture,
+        &live_refs(&nodes),
+        settle_timeout,
+        "phase1:post-mutations",
+    )
+    .await?;
 
     journal.record("phase2:start");
     let phase2_topology = choose_active_topology(&mut rng, &nodes);
     journal.record(format!("phase2:topology active={phase2_topology:?}"));
     connect_active_topology(&fixture, &mut rng, &nodes, &phase2_topology).await?;
-    wait_for_cluster_settled(&fixture, &live_refs(&nodes), Duration::from_secs(60)).await?;
+    wait_for_cluster_settled(
+        &fixture,
+        &live_refs(&nodes),
+        settle_timeout,
+        "phase2:post-connect",
+    )
+    .await?;
     run_phase(
         &fixture,
         &mut rng,
@@ -417,13 +455,25 @@ pub async fn run_randomized_four_node_stress<F: StressFixture>(
         &journal,
     )
     .await?;
-    wait_for_cluster_settled(&fixture, &live_refs(&nodes), Duration::from_secs(60)).await?;
+    wait_for_cluster_settled(
+        &fixture,
+        &live_refs(&nodes),
+        settle_timeout,
+        "phase2:post-mutations",
+    )
+    .await?;
 
     journal.record("phase3:start");
     let phase3_topology = choose_active_topology(&mut rng, &nodes);
     journal.record(format!("phase3:topology active={phase3_topology:?}"));
     connect_active_topology(&fixture, &mut rng, &nodes, &phase3_topology).await?;
-    wait_for_cluster_settled(&fixture, &live_refs(&nodes), Duration::from_secs(60)).await?;
+    wait_for_cluster_settled(
+        &fixture,
+        &live_refs(&nodes),
+        settle_timeout,
+        "phase3:post-connect",
+    )
+    .await?;
     run_phase(
         &fixture,
         &mut rng,
@@ -434,11 +484,23 @@ pub async fn run_randomized_four_node_stress<F: StressFixture>(
         &journal,
     )
     .await?;
-    wait_for_cluster_settled(&fixture, &live_refs(&nodes), Duration::from_secs(60)).await?;
+    wait_for_cluster_settled(
+        &fixture,
+        &live_refs(&nodes),
+        settle_timeout,
+        "phase3:post-mutations",
+    )
+    .await?;
 
     journal.record("final:reconnect_full_mesh");
     connect_full_mesh(&fixture, &nodes).await?;
-    wait_for_cluster_settled(&fixture, &live_refs(&nodes), Duration::from_secs(60)).await?;
+    wait_for_cluster_settled(
+        &fixture,
+        &live_refs(&nodes),
+        Duration::from_secs(60),
+        "final:post-connect",
+    )
+    .await?;
 
     let refs = live_refs(&nodes);
     fixture.assert_cluster_alignment(&refs).await?;

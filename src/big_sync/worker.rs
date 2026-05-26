@@ -863,29 +863,9 @@ impl SyncTaskWorker {
                 obj_id,
                 remote_payload,
             } = deets;
-            tracing::info!("XXX enter sync worker");
-            let started_at = std::time::Instant::now();
-            let res = self
-                .backend
-                .sync_obj(peer_id, obj_id, remote_payload)
-                .await;
-            tracing::info!(
-                elapsed_ms = started_at.elapsed().as_millis(),
-                result = match &res {
-                    Ok(SyncTaskRunOutcome::Completion(completion)) => {
-                        format!("completion={:?}", completion.deets)
-                    }
-                    Ok(SyncTaskRunOutcome::Stale) => "stale".to_string(),
-                    Err(err) => format!("error={err}"),
-                },
-                "XXX exit sync worker backend"
-            );
+            let res = self.backend.sync_obj(peer_id, obj_id, remote_payload).await;
             match res {
                 Ok(SyncTaskRunOutcome::Completion(completion)) => {
-                    tracing::info!(
-                        deets = ?completion.deets,
-                        "XXX sync worker send completion"
-                    );
                     self.host_tx
                         .send(BigSyncEvent::SyncCompleted(
                             big_sync_core::SyncCompletedEvent {
@@ -898,7 +878,6 @@ impl SyncTaskWorker {
                         .expect(ERROR_CHANNEL);
                 }
                 Ok(SyncTaskRunOutcome::Stale) => {
-                    tracing::info!("XXX sync worker send stale");
                     self.host_tx
                         .send(BigSyncEvent::SyncStale(big_sync_core::SyncStaleEvent {
                             task_id: _task_id,
@@ -909,10 +888,6 @@ impl SyncTaskWorker {
                         .expect(ERROR_CHANNEL);
                 }
                 Err(err) => {
-                    tracing::info!(
-                        error = %err,
-                        "XXX sync worker send failure"
-                    );
                     self.host_tx
                         .send(BigSyncEvent::SyncFailed(big_sync_core::SyncFailedEvent {
                             task_id: _task_id,

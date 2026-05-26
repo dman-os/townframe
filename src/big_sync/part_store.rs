@@ -873,13 +873,7 @@ pub mod host_contract {
         let events_after = store.list_events(HashSet::from([part]), 0, 8).await??;
         let page_after = events_after.get(&part).expect(ERROR_IMPOSSIBLE);
         assert_eq!(page_after.events.len(), 2);
-        assert_added(
-            &page_after.events[0],
-            3,
-            part,
-            obj,
-            None,
-        );
+        assert_added(&page_after.events[0], 3, part, obj, None);
         assert_changed(
             &page_after.events[1],
             4,
@@ -1112,10 +1106,7 @@ pub mod host_contract {
             .remove(&part_b)
             .expect(ERROR_IMPOSSIBLE);
         match &page_b.events[..] {
-            [
-                PartEvent::Added(added),
-                PartEvent::Changed(changed),
-            ] => {
+            [PartEvent::Added(added), PartEvent::Changed(changed)] => {
                 assert_eq!(added.part_id, part_b);
                 assert_eq!(added.obj_id, obj);
                 assert_eq!(added.payload, Some(payload("events-1", 1)));
@@ -1157,11 +1148,7 @@ pub mod host_contract {
             .await??;
         let events = collect_sub_events(&rx).await?;
         let replay_cursor = match &events[..] {
-            [
-                SubEvent::Added(added),
-                SubEvent::Changed(changed),
-                SubEvent::ReplayComplete,
-            ] => {
+            [SubEvent::Added(added), SubEvent::Changed(changed), SubEvent::ReplayComplete] => {
                 assert_eq!(added.part_id, part_b);
                 assert_eq!(added.obj_id, obj);
                 assert_eq!(added.payload, Some(payload("sub-1", 1)));

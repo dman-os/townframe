@@ -131,6 +131,85 @@ impl Tasks {
             stop_queue: self.stop_queue.len(),
         }
     }
+
+    fn log_task_scheduled(
+        task_id: TaskId,
+        seed: &TaskSeed,
+        stage: &'static str,
+        retry: Option<&Retry>,
+    ) {
+        match seed {
+            TaskSeed::Machine(deets) => match deets {
+                MachineTaskDeets::DecidePeerStrategy(task) => {
+                    tracing::info!(
+                        task_id,
+                        stage,
+                        task_kind = "decide_peer_strategy",
+                        peer_id = %task.peer_id,
+                        part_count = task.parts.len(),
+                        retry_attempt = retry.map(|retry| retry.attempt_no),
+                        backoff_ms = retry.map(|retry| retry.backoff.as_millis() as u64),
+                        "scheduled machine task"
+                    );
+                }
+                MachineTaskDeets::PeerReplay(task) => {
+                    tracing::info!(
+                        task_id,
+                        stage,
+                        task_kind = "peer_replay",
+                        peer_id = %task.peer_id,
+                        part_count = task.parts.len(),
+                        retry_attempt = retry.map(|retry| retry.attempt_no),
+                        backoff_ms = retry.map(|retry| retry.backoff.as_millis() as u64),
+                        "scheduled machine task"
+                    );
+                }
+                MachineTaskDeets::ListBuckets(task) => {
+                    tracing::info!(
+                        task_id,
+                        stage,
+                        task_kind = "list_buckets",
+                        peer_id = %task.peer_id,
+                        part_id = %task.part_id,
+                        offset = ?task.offset,
+                        since = task.since,
+                        working_level = ?task.working_level,
+                        retry_attempt = retry.map(|retry| retry.attempt_no),
+                        backoff_ms = retry.map(|retry| retry.backoff.as_millis() as u64),
+                        "scheduled machine task"
+                    );
+                }
+                MachineTaskDeets::LeafBuckets(task) => {
+                    tracing::info!(
+                        task_id,
+                        stage,
+                        task_kind = "leaf_buckets",
+                        peer_id = %task.peer_id,
+                        part_id = %task.part_id,
+                        bucket_count = task.buckets.len(),
+                        since = task.since,
+                        retry_attempt = retry.map(|retry| retry.attempt_no),
+                        backoff_ms = retry.map(|retry| retry.backoff.as_millis() as u64),
+                        "scheduled machine task"
+                    );
+                }
+            },
+            TaskSeed::Sync(seed) => {
+                tracing::info!(
+                    task_id,
+                    stage,
+                    task_kind = "sync_obj",
+                    peer_id = %seed.deets.peer_id,
+                    obj_id = %seed.deets.obj_id,
+                    part_hint_count = seed.part_hints.len(),
+                    retry_attempt = retry.map(|retry| retry.attempt_no),
+                    backoff_ms = retry.map(|retry| retry.backoff.as_millis() as u64),
+                    "scheduled sync task"
+                );
+            }
+        }
+    }
+
     pub fn stop_task(&mut self, id: TaskId) -> Option<TaskState> {
         let old = self.all.remove(&id);
         if self.pending.remove(&id).is_some() {
@@ -157,6 +236,7 @@ impl Tasks {
                 },
             },
         );
+        Self::log_task_scheduled(id, &seed, "immediate", None);
         match seed {
             TaskSeed::Sync(seed) => self.sync_spawn_queue.push(SyncTask {
                 id,
@@ -195,6 +275,7 @@ impl Tasks {
         let id = self.next_id;
         self.next_id += 1;
         self.all.insert(id, TaskState { retry });
+        Self::log_task_scheduled(id, &seed, "delayed", Some(&retry));
         self.pending.insert(id, (seed, due_at));
         id
     }
@@ -209,6 +290,7 @@ impl Tasks {
             let Some((seed, _)) = self.pending.remove(&id) else {
                 continue;
             };
+            Self::log_task_scheduled(id, &seed, "due", None);
             match seed {
                 TaskSeed::Sync(seed) => self.sync_spawn_queue.push(SyncTask {
                     id,

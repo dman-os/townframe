@@ -963,7 +963,8 @@ where
                                         error: None,
                                         src_task,
                                     })
-                                    .expect(ERROR_CHANNEL);
+                                    .inspect_err(|_| warn!(ERROR_CALLER))
+                                    .ok();
                             }
                             Err(err) => {
                                 evt_tx
@@ -972,7 +973,8 @@ where
                                         error: Some(err),
                                         src_task,
                                     })
-                                    .expect(ERROR_CHANNEL);
+                                    .inspect_err(|_| warn!(ERROR_CALLER))
+                                    .ok();
                             }
                         }
                     }
@@ -996,7 +998,8 @@ where
                         closed: Arc::clone(&closed),
                     },
                 })
-                .expect(ERROR_CHANNEL);
+                .inspect_err(|_| warn!(ERROR_CALLER))
+                .ok();
             Ok((peer_id, closed))
         };
         self.spawn_background(async move {
@@ -1052,7 +1055,8 @@ where
                                         error: None,
                                         src_task,
                                     })
-                                    .expect(ERROR_CHANNEL);
+                                    .inspect_err(|_| warn!(ERROR_CALLER))
+                                    .ok();
                             }
                             Err(err) => {
                                 evt_tx
@@ -1061,7 +1065,8 @@ where
                                         error: Some(err),
                                         src_task,
                                     })
-                                    .expect(ERROR_CHANNEL);
+                                    .inspect_err(|_| warn!(ERROR_CALLER))
+                                    .ok();
                             }
                         }
                     }
@@ -1085,7 +1090,8 @@ where
                         closed: Arc::clone(&closed),
                     },
                 })
-                .expect(ERROR_CHANNEL);
+                .inspect_err(|_| warn!(ERROR_CALLER))
+                .ok();
             Ok((peer_id, closed))
         };
         self.spawn_background(async move {
@@ -1527,10 +1533,12 @@ where
                     kind = ?session.kind,
                     "unloaded sync session loading partition heads"
                 );
-                let before_heads =
-                    super::partition_doc_heads_payload(&self.big_sync_store, self.doc_id)
-                        .await?
-                        .unwrap_or_else(|| doc.get_heads().into());
+                let cached_before_heads =
+                    super::partition_doc_heads_payload(&self.big_sync_store, self.doc_id).await?;
+                let before_heads = cached_before_heads
+                    .clone()
+                    .unwrap_or_else(|| doc.get_heads().into());
+                let had_cached_before_heads = cached_before_heads.is_some();
                 info!(
                     doc_id = %self.doc_id,
                     peer_id = %session.peer_id,
@@ -1554,7 +1562,11 @@ where
                             kind = ?session.kind,
                             "unloaded sync session produced no delta after applying blobs"
                         );
-                        None
+                        if had_cached_before_heads {
+                            None
+                        } else {
+                            Some((after_heads, Vec::new()))
+                        }
                     } else {
                         let patches = doc.diff(&before_heads, &after_heads);
                         info!(
@@ -1634,10 +1646,13 @@ where
                             .await?
                             .unwrap_or_else(automerge::Automerge::new);
                     let loaded_heads = doc.get_heads();
-                    let before_heads =
+                    let cached_before_heads =
                         super::partition_doc_heads_payload(&self.big_sync_store, self.doc_id)
-                            .await?
-                            .unwrap_or_else(|| loaded_heads.clone().into());
+                            .await?;
+                    let before_heads = cached_before_heads
+                        .clone()
+                        .unwrap_or_else(|| loaded_heads.clone().into());
+                    let had_cached_before_heads = cached_before_heads.is_some();
                     let out = if before_heads[..] == loaded_heads[..] {
                         for blob in blobs {
                             doc.load_incremental(&blob).map_err(|err| {
@@ -1646,7 +1661,11 @@ where
                         }
                         let after_heads = doc.get_heads();
                         if before_heads[..] == after_heads[..] {
-                            None
+                            if had_cached_before_heads {
+                                None
+                            } else {
+                                Some((after_heads, Vec::new()))
+                            }
                         } else {
                             let patches = doc.diff(&before_heads, &after_heads);
                             Some((after_heads, patches))
@@ -1753,9 +1772,7 @@ async fn commit_delta_bookkeep(
         has_change_listener_interest,
         "bookkeeping committed delta"
     );
-    big_sync_store
-        .set_obj_payload(doc_id, item_payload)
-        .await?;
+    big_sync_store.set_obj_payload(doc_id, item_payload).await?;
 
     let heads_arc = Arc::<[automerge::ChangeHash]>::from(heads);
     change_manager.notify_doc_heads_changed(doc_id, Arc::clone(&heads_arc), origin.clone())?;

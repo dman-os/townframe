@@ -1782,14 +1782,7 @@ async fn upsert_processor_runlog_item(
         "done_token": done_token,
         "done_at": jiff::Timestamp::now().to_string(),
     });
-    partition_store
-        .set_obj_payload(
-            item_id,
-            payload,
-            vec![crate::part_id_from_label(PROCESSOR_RUNLOG_PARTITION_ID)],
-            None,
-        )
-        .await?;
+    partition_store.set_obj_payload(item_id, payload).await?;
     Ok(())
 }
 

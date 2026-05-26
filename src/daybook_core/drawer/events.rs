@@ -1,11 +1,11 @@
 use crate::interlude::*;
 
-use super::DrawerRepo;
+use super::{BranchKind, DrawerRepo};
 
 use crate::drawer::types::{DocEntry, DrawerEvent};
 
 use big_repo::{BigRepoChangeNotification, BigRepoChangeOrigin};
-use daybook_types::doc::{ChangeHashSet, DocId, FacetKey};
+use daybook_types::doc::{BranchPathBuf, ChangeHashSet, DocId, FacetKey};
 use tokio::sync::mpsc::UnboundedReceiver;
 use tokio_util::sync::CancellationToken;
 
@@ -129,6 +129,26 @@ impl DrawerRepo {
         }
 
         let (drawer_heads, entries) = self.current_drawer_entries().await?;
+
+        for (doc_id, entry) in &entries {
+            for (branch_path, branch_ref) in &entry.branches {
+                let branch_path = BranchPathBuf::from(branch_path.as_str());
+                if self.branch_kind_for_path(&branch_path)? != BranchKind::Replicated {
+                    continue;
+                }
+                let Some((_, branch_heads)) =
+                    self.get_with_heads(doc_id, &branch_path, None).await?
+                else {
+                    continue;
+                };
+                self.add_branch_to_partitions_if_needed(
+                    BranchKind::Replicated,
+                    branch_ref.branch_doc_id,
+                    &branch_heads,
+                )
+                .await?;
+            }
+        }
 
         {
             surelock::key::lock_scope(|key| {

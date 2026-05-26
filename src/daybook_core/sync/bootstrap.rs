@@ -244,12 +244,6 @@ async fn pull_required_partitions_via_big_sync_worker(
     let core_docs_partition_id = crate::part_id_from_label(CORE_DOCS_PARTITION_ID);
     let drawer_partition_id =
         crate::drawer::DrawerRepo::replicated_partition_id_for_drawer(&bootstrap.drawer_doc_id);
-    let processor_runlog_partition_id =
-        crate::part_id_from_label(crate::rt::PROCESSOR_RUNLOG_PARTITION_ID);
-    let blob_scope_docs_partition_id =
-        crate::part_id_from_label(crate::blobs::BLOB_SCOPE_DOCS_PARTITION_ID);
-    let blob_scope_plugs_partition_id =
-        crate::part_id_from_label(crate::blobs::BLOB_SCOPE_PLUGS_PARTITION_ID);
 
     let blob_sync_backend = Arc::new(crate::blobs::sync::BlobSyncBackend::new(
         Arc::clone(blobs_repo),
@@ -295,26 +289,27 @@ async fn pull_required_partitions_via_big_sync_worker(
         big_sync::rpc::IrohBigSyncRpcClient::new(endpoint.clone(), bootstrap.endpoint_addr.clone());
     let big_sync_rpc_client = Arc::new(big_sync_rpc_client);
 
-    let partitions: HashMap<PartId, big_sync::BackendId> = [
+    let initial_partitions: HashMap<PartId, big_sync::BackendId> = [
         (core_docs_partition_id, Arc::clone(&repo_backend_id)),
         (drawer_partition_id, Arc::clone(&repo_backend_id)),
-        // (processor_runlog_partition_id, repo_backend_id),
-        (blob_scope_docs_partition_id, super::BLOBS_BACKEND_ID.into()),
-        (
-            blob_scope_plugs_partition_id,
-            super::BLOBS_BACKEND_ID.into(),
-        ),
+        // The blob-scope partitions are populated lazily once the repo has fully
+        // booted and loaded the blob stores; they are not part of the initial clone
+        // barrier.
     ]
     .into_iter()
     .collect();
 
     big_sync_worker
-        .set_peer(peer_id, big_sync_rpc_client, partitions.clone())
+        .set_peer(peer_id, big_sync_rpc_client, initial_partitions.clone())
         .await?;
     blob_sync_backend.register_remote_peer(peer_id, bootstrap.endpoint_addr.clone());
 
     let timeout_result = tokio::time::timeout(timeout, async {
-        let required_partitions = partitions.keys().copied();
+        // Only wait on the partitions that are guaranteed to exist during clone bootstrap.
+        // Blob-scope partitions are populated lazily as blobs/plugs appear after the repo
+        // finishes booting, so requiring them here would make clone bootstrap race normal
+        // repo initialization.
+        let required_partitions = [core_docs_partition_id, drawer_partition_id];
         big_sync_worker
             .wait_for_full_sync(vec![peer_id], required_partitions)
             .await
@@ -325,6 +320,21 @@ async fn pull_required_partitions_via_big_sync_worker(
         Ok(Ok(())) => {}
         Ok(Err(err)) => return Err(err),
         Err(_) => {
+            #[cfg(any(test, feature = "test-support"))]
+            {
+                let snapshot = big_sync_worker.snapshot().await?;
+                tracing::warn!(
+                    ?snapshot.peer_parts,
+                    ?snapshot.full_sync_waiters,
+                    ?snapshot.peer_part_full_sync_state,
+                    ?snapshot.last_object_syncs,
+                    ?snapshot.task_counts,
+                    active_machine_tasks = snapshot.active_machine_tasks,
+                    active_sync_tasks = snapshot.active_sync_tasks,
+                    zombie_tasks = snapshot.zombie_tasks,
+                    "clone bootstrap timeout snapshot"
+                );
+            }
             eyre::bail!("timed out waiting for required partitions during clone");
         }
     }

@@ -43,7 +43,10 @@ impl PartitionMembershipWriter for PartitionStoreMembershipWriter {
     ) -> Res<()> {
         let part_id = crate::part_id_from_label(&partition_id);
         self.partition_store
-            .set_obj_payload(member_id, payload.clone(), vec![part_id], None)
+            .set_obj_payload(member_id, payload.clone())
+            .await?;
+        self.partition_store
+            .add_obj_to_parts(member_id, vec![part_id])
             .await?;
         Ok(())
     }
@@ -51,7 +54,7 @@ impl PartitionMembershipWriter for PartitionStoreMembershipWriter {
     async fn remove_item(&self, partition_id: Arc<str>, member_id: BlobId) -> Res<()> {
         let part_id = crate::part_id_from_label(&partition_id);
         self.partition_store
-            .remove_obj_from_part(member_id, part_id, None)
+            .remove_obj_from_part(member_id, part_id)
             .await?;
         Ok(())
     }
@@ -1022,7 +1025,7 @@ mod tests {
     #[tokio::test]
     async fn test_blobs_missing() -> Res<()> {
         let (repo, _temp) = setup().await;
-        assert!("nonexistent".parse::<BlobId>().is_err());
+        assert!("not_base58_hash".parse::<BlobId>().is_err());
         Ok(())
     }
 
@@ -1086,7 +1089,7 @@ mod tests {
 
     #[tokio::test]
     async fn blob_hash_must_be_valid_base58() -> Res<()> {
-        assert!("bafakehash".parse::<BlobId>().is_err());
+        assert!("not_base58_hash".parse::<BlobId>().is_err());
         Ok(())
     }
 

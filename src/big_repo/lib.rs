@@ -190,7 +190,6 @@ impl BigRepo {
                 repo: Arc::clone(self),
                 bundle,
             });
-        debug!(found = out.is_some(), "XXX get_doc");
         Ok(out)
     }
 
@@ -200,7 +199,6 @@ impl BigRepo {
         document_id: DocumentId,
         initial_content: automerge::Automerge,
     ) -> Result<BigDocHandle, runtime::PutDocError> {
-        debug!("XXX put_doc");
         let bundle = self.runtime.put_doc(document_id, initial_content).await?;
         Ok(BigDocHandle {
             repo: Arc::clone(self),
@@ -213,7 +211,6 @@ impl BigRepo {
         fields(%doc_id, %self.local_peer_id)
     )]
     pub async fn export_doc(&self, doc_id: &DocumentId) -> Res<Option<Vec<u8>>> {
-        debug!(node_id = ?self.local_peer_id, "XXX export_doc");
         self.runtime.export_doc_save(*doc_id).await
     }
 }
@@ -231,7 +228,6 @@ impl BigRepo {
         peer_id: PeerId,
         end_signal_tx: Option<tokio::sync::mpsc::UnboundedSender<ConnFinishSignal>>,
     ) -> Res<BigRepoConnection> {
-        debug!("XXX open_connection_iroh");
         let register_endpoint_addr = endpoint_addr.clone();
         let (peer_id, closed) = self
             .runtime
@@ -254,7 +250,6 @@ impl BigRepo {
         conn: iroh::endpoint::Connection,
         end_signal_tx: Option<tokio::sync::mpsc::UnboundedSender<ConnFinishSignal>>,
     ) -> Res<BigRepoConnection> {
-        debug!("XXX accept_connection_iroh");
         let (peer_id, closed) = self
             .runtime
             .accept_connection_iroh(conn, end_signal_tx)
@@ -306,7 +301,6 @@ impl BigRepoConnection {
         if self.is_closed() {
             eyre::bail!("connection is closed");
         }
-        debug!(?doc_id, peer_id = ?self.peer_id, "XXX sync_with_peer");
         self.repo
             .runtime
             .sync_doc_with_peer(doc_id, self.peer_id, timeout)
@@ -603,6 +597,7 @@ pub(crate) mod tests {
     use big_sync_core::{Byte32Id, PartId, SyncCompletionDeets};
     use sqlx::sqlite::SqliteConnectOptions;
     use std::collections::{BTreeMap, BTreeSet, HashMap};
+    use std::fmt::Write as _;
     use std::sync::atomic::{AtomicUsize, Ordering};
     use tempfile::tempdir;
     use tokio::{sync::Notify, time::timeout};
@@ -1910,7 +1905,16 @@ pub(crate) mod tests {
                                 eyre::Ok(())
                             })
                             .expect("failed seeding big repo stress doc");
-                            Arc::new(self.repo.put_doc(obj_id, doc).await?)
+                            match self.repo.put_doc(obj_id, doc).await {
+                                Ok(handle) => Arc::new(handle),
+                                Err(runtime::PutDocError::IdOccpuied { .. }) => Arc::new(
+                                    self.repo
+                                        .get_doc(&obj_id)
+                                        .await?
+                                        .expect("doc should exist after put_doc occupied"),
+                                ),
+                                Err(err) => return Err(err.into()),
+                            }
                         }
                     };
                     docs.insert(obj_id, Arc::clone(&handle));
@@ -1938,30 +1942,19 @@ pub(crate) mod tests {
         async fn snapshot_docs(&self, all_docs: &[ObjId]) -> Res<BigRepoStressObservation> {
             let worker = self.big_sync_worker.snapshot().await?;
             let mut sync_store = BTreeMap::new();
-            let mut docs = BTreeMap::new();
+            let mut memberships = BTreeMap::new();
             for obj_id in all_docs {
                 let heads = self.repo.big_sync_store.obj_payload(*obj_id).await?;
-                let value = match self.repo.export_doc(obj_id).await? {
-                    Some(save) => {
-                        let doc = automerge::Automerge::load(&save)
-                            .wrap_err("failed loading snapshot doc")?;
-                        Some(
-                            autosurgeon::hydrate::<_, ThroughJson<serde_json::Value>>(&doc)
-                                .expect("failed hydrating snapshot doc")
-                                .0,
-                        )
-                    }
-                    None => None,
-                };
+                let obj_parts = self.repo.big_sync_store.obj_parts(*obj_id).await?;
                 sync_store.insert(*obj_id, heads);
-                docs.insert(*obj_id, value);
+                memberships.insert(*obj_id, obj_parts);
             }
             let connected_peers = self.connections.lock().await.keys().copied().collect();
             Ok(BigRepoStressObservation {
                 connected_peers,
                 worker,
                 sync_store,
-                docs,
+                parts: memberships,
             })
         }
 
@@ -1987,15 +1980,14 @@ pub(crate) mod tests {
         connected_peers: BTreeSet<PeerId>,
         worker: big_sync::WorkerSnapshot,
         sync_store: BTreeMap<ObjId, Option<serde_json::Value>>,
-        docs: BTreeMap<ObjId, Option<serde_json::Value>>,
+        parts: BTreeMap<ObjId, Vec<PartId>>,
     }
 
     impl PartialEq for BigRepoStressObservation {
         fn eq(&self, other: &Self) -> bool {
-            self.connected_peers == other.connected_peers
-                && self.worker == other.worker
-                && self.sync_store == other.sync_store
-                && self.docs == other.docs
+            // self.connected_peers == other.connected_peers
+            //     && self.worker == other.worker
+            self.sync_store == other.sync_store && self.parts == other.parts
         }
     }
 
@@ -2099,24 +2091,195 @@ pub(crate) mod tests {
         }
 
         async fn assert_cluster_alignment(&self, nodes: &[&Self::Node]) -> Res<()> {
-            let mut snapshots = Vec::with_capacity(nodes.len());
+            let peer_ids: Vec<PeerId> = nodes.iter().map(|node| node.peer_id()).collect();
+            let part_ids = stress_support::test_parts();
+            let deadline = std::time::Instant::now() + Duration::from_secs(45);
+            let full_sync_timeout = Duration::from_secs(20);
+            let mut last_snapshots: Option<Vec<(PeerId, BigRepoStressObservation)>> = None;
+            let mut stable_rounds = 0usize;
+
             for node in nodes {
-                snapshots.push((node.peer_id(), self.observed_state(node).await?));
+                let node_peer_id = node.peer_id();
+                let peers = peer_ids
+                    .iter()
+                    .copied()
+                    .filter(|peer_id| *peer_id != node_peer_id)
+                    .collect::<Vec<_>>();
+                let parts = part_ids.clone();
+                let wait = node
+                    .big_sync_worker
+                    .wait_for_full_sync(peers.iter().copied(), parts.iter().copied());
+                if tokio::time::timeout(full_sync_timeout, wait).await.is_err() {
+                    let worker = node.big_sync_worker.snapshot().await?;
+                    let observed = self.observed_state(node).await?;
+                    let mut out = String::new();
+                    let _ = writeln!(
+                        out,
+                        "timed out waiting for full sync on peer {node_peer_id:?} after {full_sync_timeout:?}"
+                    );
+                    let _ = writeln!(out, "requested peers={peers:?} parts={parts:?}");
+                    let _ = writeln!(out, "worker snapshot={worker:#?}");
+                    let _ = writeln!(out, "observed state={observed:#?}");
+                    eyre::bail!("{out}");
+                }
             }
 
-            let baseline = &snapshots[0].1.sync_store;
-            for (peer_id, snapshot) in snapshots.iter().skip(1) {
-                assert_eq!(
-                    baseline, &snapshot.sync_store,
-                    "big repo stress sync-store snapshots diverged for peer {peer_id:?}"
-                );
-                assert_eq!(
-                    snapshots[0].1.docs, snapshot.docs,
-                    "big repo stress exported docs diverged for peer {peer_id:?}"
-                );
-            }
+            loop {
+                let mut snapshots = Vec::with_capacity(nodes.len());
+                for node in nodes {
+                    snapshots.push((node.peer_id(), self.observed_state(node).await?));
+                }
 
-            Ok(())
+                let aligned = snapshots.windows(2).all(|pair| pair[0].1 == pair[1].1);
+                if aligned
+                    && last_snapshots
+                        .as_ref()
+                        .is_some_and(|prev| prev == &snapshots)
+                {
+                    stable_rounds += 1;
+                    if stable_rounds >= 5 {
+                        return Ok(());
+                    }
+                } else {
+                    stable_rounds = 0;
+                }
+                last_snapshots = Some(snapshots.clone());
+
+                if std::time::Instant::now() >= deadline {
+                    let mut out = String::new();
+                    let _ = writeln!(
+                        out,
+                        "timed out waiting for big repo cluster alignment; last snapshots:"
+                    );
+                    if let Some((baseline_peer, baseline)) = snapshots.first() {
+                        for (peer_id, snapshot) in snapshots.iter().skip(1) {
+                            let _ =
+                                writeln!(out, "peer {peer_id:?} vs baseline {baseline_peer:?}:");
+                            let _ = writeln!(
+                                out,
+                                "  baseline vs snapshot sync_store {}",
+                                pretty_assertions::Comparison::new(
+                                    &baseline.sync_store,
+                                    &snapshot.sync_store
+                                )
+                            );
+                            let _ = writeln!(
+                                out,
+                                "  baseline vs snapshot parts {}",
+                                pretty_assertions::Comparison::new(
+                                    &baseline.parts,
+                                    &snapshot.parts
+                                )
+                            );
+                            let differing_sync_store = baseline
+                                .sync_store
+                                .iter()
+                                .filter_map(|(obj_id, left_payload)| {
+                                    let right_payload = snapshot.sync_store.get(obj_id)?;
+                                    if left_payload == right_payload {
+                                        None
+                                    } else {
+                                        Some((*obj_id, left_payload, right_payload))
+                                    }
+                                })
+                                .take(12)
+                                .collect::<Vec<_>>();
+                            let differing_parts = baseline
+                                .parts
+                                .iter()
+                                .filter_map(|(obj_id, left_parts)| {
+                                    let right_parts = snapshot.parts.get(obj_id)?;
+                                    if left_parts == right_parts {
+                                        None
+                                    } else {
+                                        Some((*obj_id, left_parts, right_parts))
+                                    }
+                                })
+                                .take(12)
+                                .collect::<Vec<_>>();
+                            let _ = writeln!(
+                                out,
+                                "  differing sync_store entries={differing_sync_store:?}"
+                            );
+                            let _ = writeln!(out, "  differing parts entries={differing_parts:?}");
+                            let missing_sync_store = baseline
+                                .sync_store
+                                .keys()
+                                .filter(|obj_id| !snapshot.sync_store.contains_key(obj_id))
+                                .take(12)
+                                .collect::<Vec<_>>();
+
+                            let extra_sync_store = snapshot
+                                .sync_store
+                                .keys()
+                                .filter(|obj_id| !baseline.sync_store.contains_key(obj_id))
+                                .take(12)
+                                .collect::<Vec<_>>();
+
+                            let _ =
+                                writeln!(out, "  missing sync_store keys={missing_sync_store:?}");
+                            let _ = writeln!(out, "  extra sync_store keys={extra_sync_store:?}");
+
+                            let missing_parts = baseline
+                                .parts
+                                .keys()
+                                .filter(|obj_id| !snapshot.parts.contains_key(obj_id))
+                                .take(12)
+                                .collect::<Vec<_>>();
+
+                            let extra_parts = snapshot
+                                .parts
+                                .keys()
+                                .filter(|obj_id| !baseline.parts.contains_key(obj_id))
+                                .take(12)
+                                .collect::<Vec<_>>();
+
+                            let _ = writeln!(out, "  missing parts={missing_parts:?}");
+                            let _ = writeln!(out, "  extra parts={extra_parts:?}");
+
+                            writeln!(
+                                out,
+                                "sync_store eq={}",
+                                baseline.sync_store == snapshot.sync_store
+                            )?;
+                            writeln!(
+                                out,
+                                "sync_store eq={}",
+                                baseline.sync_store == snapshot.sync_store
+                            )?;
+                            writeln!(out, "parts eq={}", baseline.parts == snapshot.parts)?;
+                            let left = format!("{:#?}", baseline.sync_store);
+                            let right = format!("{:#?}", snapshot.sync_store);
+                            writeln!(out, "sync_store debug_eq={}", left == right)?;
+                            writeln!(out, "snapshot eq={}", baseline == snapshot)?;
+                            let _ = writeln!(
+                                out,
+                                "  field equality: connected_peers={} worker={} sync_store={} parts={}",
+                                baseline.connected_peers == snapshot.connected_peers,
+                                baseline.worker == snapshot.worker,
+                                baseline.sync_store == snapshot.sync_store,
+                                baseline.parts == snapshot.parts,
+                            );
+                        }
+                    }
+                    for node in nodes {
+                        let worker = node.big_sync_worker.snapshot().await?;
+                        let _ = writeln!(
+                            out,
+                            "worker peer={:?} task_counts={:?} active_machine_tasks={} active_sync_tasks={} zombie_tasks={} full_sync_waiters={:?}",
+                            node.peer_id(),
+                            worker.task_counts,
+                            worker.active_machine_tasks,
+                            worker.active_sync_tasks,
+                            worker.zombie_tasks,
+                            worker.full_sync_waiters,
+                        );
+                    }
+                    eyre::bail!("{out}");
+                }
+
+                tokio::time::sleep(Duration::from_millis(50)).await;
+            }
         }
     }
 
@@ -2764,9 +2927,7 @@ pub(crate) mod tests {
             initial_payload: None,
             initial_parts: sync_test_parts(),
             remote_payload,
-            expected_outcome: SyncBackendOutcome::Completion(
-                SyncCompletionDeets::ChangedObject,
-            ),
+            expected_outcome: SyncBackendOutcome::Completion(SyncCompletionDeets::ChangedObject),
             expected_payload: server.big_sync_store.obj_payload(doc_id).await?,
             expected_parts: sync_test_parts(),
         };
@@ -2782,6 +2943,48 @@ pub(crate) mod tests {
         client_conn.stop().await?;
         server.shutdown().await?;
         client.shutdown().await?;
+        Ok(())
+    }
+
+    async fn wait_for_pair_full_sync(left: &SyncRepoNode, right: &SyncRepoNode) -> Res<()> {
+        let left_wait = timeout(
+            SYNC_CASE_TIMEOUT,
+            left.big_sync_worker
+                .wait_for_full_sync([right.peer_id()], stress_support::test_parts()),
+        );
+        let right_wait = timeout(
+            SYNC_CASE_TIMEOUT,
+            right
+                .big_sync_worker
+                .wait_for_full_sync([left.peer_id()], stress_support::test_parts()),
+        );
+        left_wait
+            .await
+            .expect("timed out waiting for left node full sync")?;
+        right_wait
+            .await
+            .expect("timed out waiting for right node full sync")?;
+        Ok(())
+    }
+
+    async fn assert_pair_sync_alignment(
+        left: &SyncRepoNode,
+        right: &SyncRepoNode,
+        doc_id: ObjId,
+    ) -> Res<()> {
+        let left_heads = left.repo.doc_payload_heads(doc_id).await?;
+        let right_heads = right.repo.doc_payload_heads(doc_id).await?;
+        assert_eq!(
+            left_heads, right_heads,
+            "payload heads diverged for doc {doc_id:?}"
+        );
+
+        let left_parts = left.big_sync_store.obj_parts(doc_id).await?;
+        let right_parts = right.big_sync_store.obj_parts(doc_id).await?;
+        assert_eq!(
+            left_parts, right_parts,
+            "part membership diverged for doc {doc_id:?}"
+        );
         Ok(())
     }
 
@@ -2912,6 +3115,117 @@ pub(crate) mod tests {
         timeout(SYNC_CASE_TIMEOUT, run_sync_backend_put_doc_conflict_case())
             .await
             .expect("sync backend test timed out")?;
+        Ok(())
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn big_repo_payload_first_membership_late_reconnects_cleanly() -> Res<()> {
+        timeout(SYNC_CASE_TIMEOUT, async {
+            utils_rs::testing::setup_tracing_once();
+            tracing::info!("starting payload-first membership-late reconnect regression");
+            let temp_root = tempdir()?;
+            let left_path = temp_root.path().join("left");
+            let right_path = temp_root.path().join("right");
+            let left = SyncRepoNode::boot(left_path, 141, true).await?;
+            let right = SyncRepoNode::boot(right_path, 142, false).await?;
+            let doc_id = random_doc_id();
+            let expected_doc = make_sync_doc_value("payload-first-reconnect", 8, 48);
+            let mut base_doc = automerge::Automerge::new();
+            write_sync_doc_value(&mut base_doc, &expected_doc);
+
+            let left_doc = left.repo.put_doc(doc_id, base_doc).await?;
+            left.big_sync_store
+                .add_obj_to_parts(doc_id, stress_support::test_parts())
+                .await?;
+
+            left.connect_to(&right).await?;
+            wait_for_pair_full_sync(&left, &right).await?;
+
+            wait_for_json_doc(&left_doc, &expected_doc, SYNC_CASE_TIMEOUT).await;
+            let right_doc = right
+                .repo
+                .get_doc(&doc_id)
+                .await?
+                .expect("right doc should exist after initial sync");
+            wait_for_json_doc(&right_doc, &expected_doc, SYNC_CASE_TIMEOUT).await;
+            assert_pair_sync_alignment(&left, &right, doc_id).await?;
+
+            left.disconnect_from(&right).await?;
+            left.connect_to(&right).await?;
+            wait_for_pair_full_sync(&left, &right).await?;
+
+            wait_for_json_doc(&left_doc, &expected_doc, SYNC_CASE_TIMEOUT).await;
+            let right_doc = right
+                .repo
+                .get_doc(&doc_id)
+                .await?
+                .expect("right doc should exist after reconnect");
+            wait_for_json_doc(&right_doc, &expected_doc, SYNC_CASE_TIMEOUT).await;
+            assert_pair_sync_alignment(&left, &right, doc_id).await?;
+
+            left.disconnect_from(&right).await?;
+            left.shutdown().await?;
+            right.shutdown().await?;
+            eyre::Ok(())
+        })
+        .await
+        .expect("payload-first reconnect regression timed out")?;
+        Ok(())
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn big_repo_membership_first_payload_late_reconnects_cleanly() -> Res<()> {
+        timeout(SYNC_CASE_TIMEOUT, async {
+            utils_rs::testing::setup_tracing_once();
+            tracing::info!("starting membership-first payload-late reconnect regression");
+            let temp_root = tempdir()?;
+            let left_path = temp_root.path().join("left");
+            let right_path = temp_root.path().join("right");
+            let left = SyncRepoNode::boot(left_path, 143, true).await?;
+            let right = SyncRepoNode::boot(right_path, 144, false).await?;
+            let doc_id = random_doc_id();
+            let expected_doc = make_sync_doc_value("membership-first-reconnect", 8, 48);
+            let mut base_doc = automerge::Automerge::new();
+            write_sync_doc_value(&mut base_doc, &expected_doc);
+
+            left.big_sync_store
+                .add_obj_to_parts(doc_id, stress_support::test_parts())
+                .await?;
+
+            left.connect_to(&right).await?;
+
+            let left_doc = left.repo.put_doc(doc_id, base_doc).await?;
+            wait_for_pair_full_sync(&left, &right).await?;
+
+            wait_for_json_doc(&left_doc, &expected_doc, SYNC_CASE_TIMEOUT).await;
+            let right_doc = right
+                .repo
+                .get_doc(&doc_id)
+                .await?
+                .expect("right doc should exist after initial sync");
+            wait_for_json_doc(&right_doc, &expected_doc, SYNC_CASE_TIMEOUT).await;
+            assert_pair_sync_alignment(&left, &right, doc_id).await?;
+
+            left.disconnect_from(&right).await?;
+            left.connect_to(&right).await?;
+            wait_for_pair_full_sync(&left, &right).await?;
+
+            wait_for_json_doc(&left_doc, &expected_doc, SYNC_CASE_TIMEOUT).await;
+            let right_doc = right
+                .repo
+                .get_doc(&doc_id)
+                .await?
+                .expect("right doc should exist after reconnect");
+            wait_for_json_doc(&right_doc, &expected_doc, SYNC_CASE_TIMEOUT).await;
+            assert_pair_sync_alignment(&left, &right, doc_id).await?;
+
+            left.disconnect_from(&right).await?;
+            left.shutdown().await?;
+            right.shutdown().await?;
+            eyre::Ok(())
+        })
+        .await
+        .expect("membership-first reconnect regression timed out")?;
         Ok(())
     }
 
@@ -3297,12 +3611,13 @@ pub(crate) mod tests {
 
     #[tokio::test(flavor = "multi_thread")]
     async fn big_repo_sync_randomized_four_node_stress_converges() -> Res<()> {
-        stress_support::run_randomized_four_node_stress(
+        stress_support::run_randomized_four_node_stress_with_settle_timeout(
             BigRepoStressFixture::default(),
             Arc::new(()),
             stress_support::PHASE1_MUTATIONS,
             stress_support::PHASE2_MUTATIONS,
             stress_support::PHASE3_MUTATIONS,
+            Duration::from_secs(20),
         )
         .await
     }

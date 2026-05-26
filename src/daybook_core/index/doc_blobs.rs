@@ -1017,7 +1017,7 @@ mod tests {
     #[tokio::test(flavor = "multi_thread")]
     async fn doc_blobs_index_publishes_docs_scope_partition_membership() -> Res<()> {
         let local_user_path = daybook_types::doc::UserPathBuf::from("/test-user/test-device");
-        let (big_repo, part_store, big_repo_stop) = crate::test_support::boot_repo().await?;
+        let (big_repo, big_sync_host, big_repo_stop) = crate::test_support::boot_repo().await?;
         let mut drawer_doc = automerge::Automerge::new();
         {
             use automerge::transaction::Transactable;
@@ -1034,13 +1034,13 @@ mod tests {
             temp_dir.path().join("blobs"),
             "/test-user".into(),
             Arc::new(crate::blobs::PartitionStoreMembershipWriter::new(
-                Arc::clone(&part_store),
+                Arc::clone(&big_sync_host.store),
             )),
         )
         .await?;
         let (drawer_repo, drawer_stop) = crate::drawer::DrawerRepo::load(
             Arc::clone(&big_repo),
-            Arc::clone(&part_store),
+            Arc::clone(&big_sync_host.store),
             drawer_doc_id,
             local_user_path.clone(),
             crate::app::SqlCtx::new(crate::app::SqlConfig {
@@ -1093,9 +1093,10 @@ mod tests {
             .ok_or_eyre("expected main branch heads for test doc")?;
         repo.enqueue_upsert(doc_id.clone(), BranchPathBuf::from("main"), heads)?;
 
-        wait_for_partition_member_count(&part_store, &partition_id, 1).await?;
+        wait_for_partition_member_count(&big_sync_host.store, partition_id, 1).await?;
         assert_eq!(
-            part_store
+            big_sync_host
+                .store
                 .obj_parts(crate::blobs::blob_id_from_hash(&hash))
                 .await?,
             vec![partition_id]
@@ -1103,9 +1104,10 @@ mod tests {
 
         drawer_repo.del(&doc_id).await?;
         repo.enqueue_delete(doc_id.clone())?;
-        wait_for_partition_member_count(&part_store, &partition_id, 0).await?;
+        wait_for_partition_member_count(&big_sync_host.store, partition_id, 0).await?;
         assert_eq!(
-            part_store
+            big_sync_host
+                .store
                 .obj_parts(crate::blobs::blob_id_from_hash(&hash))
                 .await?,
             Vec::<PartId>::new()

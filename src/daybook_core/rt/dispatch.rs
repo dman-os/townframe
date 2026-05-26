@@ -319,6 +319,32 @@ impl DispatchRepo {
         found
     }
 
+    pub async fn get_any_by_wflow_key(
+        &self,
+        wflow_key: &str,
+    ) -> Option<(String, Arc<ActiveDispatch>)> {
+        let state = self.state.lock().await;
+
+        if let Some((dispatch_id, dispatch)) =
+            state.active_dispatches.iter().find(|(_, dispatch)| {
+                matches!(
+                    &dispatch.deets,
+                    ActiveDispatchDeets::Wflow { wflow_key: key, .. } if key == wflow_key
+                )
+            })
+        {
+            return Some((dispatch_id.clone(), Arc::clone(dispatch)));
+        }
+
+        state.dispatches.iter().find_map(|(dispatch_id, dispatch)| {
+            matches!(
+                &dispatch.deets,
+                ActiveDispatchDeets::Wflow { wflow_key: key, .. } if key == wflow_key
+            )
+            .then(|| (dispatch_id.clone(), Arc::clone(dispatch)))
+        })
+    }
+
     pub async fn add(&self, id: String, dispatch: Arc<ActiveDispatch>) -> Res<()> {
         debug!(?id, "adding dispatch to repo");
         let _transition_guard = self.transition_mutex.lock().await;

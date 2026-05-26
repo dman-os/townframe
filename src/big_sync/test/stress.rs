@@ -188,7 +188,7 @@ async fn assert_cluster_alignment_lww(nodes: &[&NodeHarness]) -> Res<()> {
                 .filter(|peer_id| *peer_id != node.peer_id),
             part_ids.iter().copied(),
         )
-            .await?;
+        .await?;
     }
     let mut worker_snaps = Vec::with_capacity(nodes.len());
     let mut store_snaps = Vec::with_capacity(nodes.len());

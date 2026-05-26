@@ -6,7 +6,8 @@ use crate::drawer::DrawerEvent;
 use crate::plugs::PlugsEvent;
 use crate::rt::dispatch::DispatchEvent;
 use crate::rt::Rt;
-use big_sync_core::rpc::{PartStreamCursorRequest, SubEvent, SubPartsRequest};
+use big_sync_core::part_store::CursorIndex;
+use big_sync_core::rpc::{ListPartsError, PartStreamCursorRequest, SubEvent, SubPartsRequest};
 use daybook_types::doc::BranchPathBuf;
 use daybook_types::doc::{Doc, DocId, FacetKey, WellKnownFacet, WellKnownFacetTag};
 use daybook_types::manifest::{
@@ -299,16 +300,8 @@ pub async fn spawn_switch_worker(
                 .get_partition_cursor(&docs_partition_id_text)
                 .await?;
             let mut partition_listener = worker
-                .rt
-                .rcx
-                .part_store
-                .subscribe(SubPartsRequest {
-                    parts: vec![PartStreamCursorRequest {
-                        part_id: docs_partition_id,
-                        cursor,
-                    }],
-                })
-                .await??;
+                .try_open_partition_listener(docs_partition_id, cursor)
+                .await?;
 
             loop {
                 tokio::select! {
@@ -392,19 +385,32 @@ pub async fn spawn_switch_worker(
                             }
                             return Err(error);
                         }
+                        if partition_listener.is_none() {
+                            partition_listener = worker
+                                .try_open_partition_listener(docs_partition_id, cursor)
+                                .await?;
+                        }
                     }
-                    doc_evt = partition_listener.recv() => {
+                    doc_evt = async {
+                        partition_listener
+                            .as_mut()
+                            .expect("partition listener branch disabled by select guard")
+                            .recv()
+                            .await
+                    }, if partition_listener.is_some() => {
                         let doc_evt = match doc_evt {
                             Ok(doc_evt) => doc_evt,
                             Err(error) => {
                                 trace!(?error, "SwitchWorker partition_listener recv closed");
-                                break;
+                                partition_listener = None;
+                                continue;
                             }
                         };
                         let commit = worker.handle_partition_doc_event(&doc_evt).await?;
                         cursor = match &doc_evt {
-                            SubEvent::Upserted(inner) => inner.cursor,
-                            SubEvent::Deleted(inner) => inner.cursor,
+                            SubEvent::Added(inner) => inner.cursor,
+                            SubEvent::Changed(inner) => inner.cursor,
+                            SubEvent::Removed(inner) => inner.cursor,
                             SubEvent::ReplayComplete => cursor,
                         };
                         worker
@@ -517,6 +523,26 @@ impl SwitchWorker {
         Ok(())
     }
 
+    async fn try_open_partition_listener(
+        &self,
+        part_id: PartId,
+        cursor: CursorIndex,
+    ) -> Res<Option<big_sync_core::mpsc::Receiver<SubEvent>>> {
+        match self
+            .rt
+            .rcx
+            .part_store
+            .subscribe(SubPartsRequest {
+                parts: vec![PartStreamCursorRequest { part_id, cursor }],
+            })
+            .await?
+        {
+            Ok(listener) => Ok(Some(listener)),
+            Err(ListPartsError::UnkownParts { .. }) => Ok(None),
+            Err(error) => Err(error.into()),
+        }
+    }
+
     async fn resolve_branch_ref(&mut self, branch_doc_id: &str) -> Res<Option<BranchRef>> {
         if let Some(found) = self.branch_index.get(branch_doc_id) {
             return Ok(Some(found.clone()));
@@ -530,8 +556,9 @@ impl SwitchWorker {
         event: &SubEvent,
     ) -> Res<Option<(Arc<str>, SwitchDocState)>> {
         let branch_doc_id: Arc<str> = match event {
-            SubEvent::Upserted(inner) => inner.obj_id.to_string().into(),
-            SubEvent::Deleted(inner) => inner.obj_id.to_string().into(),
+            SubEvent::Added(inner) => inner.obj_id.to_string().into(),
+            SubEvent::Changed(inner) => inner.obj_id.to_string().into(),
+            SubEvent::Removed(inner) => inner.obj_id.to_string().into(),
             SubEvent::ReplayComplete => return Ok(None),
         };
         let stored_state = self
@@ -559,7 +586,7 @@ impl SwitchWorker {
         next_state.branch_name = branch_name.clone();
 
         match event {
-            SubEvent::Upserted(_) => {
+            SubEvent::Added(_) | SubEvent::Changed(_) => {
                 let Some((_, new_heads)) = self
                     .rt
                     .drawer
@@ -611,7 +638,7 @@ impl SwitchWorker {
                 next_state.last_heads = Some(new_heads);
                 let _ = deleted_facet_keys;
             }
-            SubEvent::Deleted(_) => {
+            SubEvent::Removed(_) => {
                 if !next_state.present {
                     return Ok(Some((branch_doc_id, next_state)));
                 }
@@ -1173,13 +1200,9 @@ mod tests {
         // Wait for the dispatch to be created
         let mut dispatch_id: Option<String> = None;
         for _ in 0..300 {
-            let dispatches = ctx.dispatch_repo.list().await;
-            if let Some((id, _d)) = dispatches.iter().find(|(_, d)| {
-                matches!(
-                    &d.deets,
-                    crate::rt::dispatch::ActiveDispatchDeets::Wflow { wflow_key, .. } if wflow_key == "test-label"
-                )
-            }) {
+            if let Some((id, _dispatch)) =
+                ctx.dispatch_repo.get_any_by_wflow_key("test-label").await
+            {
                 dispatch_id = Some(id.clone());
                 break;
             }
@@ -1220,13 +1243,9 @@ mod tests {
         let mut initial_dispatch_id: Option<String> = None;
         let mut initial_done_seen = false;
         for _ in 0..300 {
-            let dispatches = ctx.dispatch_repo.list().await;
-            if let Some((dispatch_id, _dispatch)) = dispatches.iter().find(|(_, dispatch)| {
-                matches!(
-                    &dispatch.deets,
-                    crate::rt::dispatch::ActiveDispatchDeets::Wflow { wflow_key, .. } if wflow_key == "test-label"
-                )
-            }) {
+            if let Some((dispatch_id, _dispatch)) =
+                ctx.dispatch_repo.get_any_by_wflow_key("test-label").await
+            {
                 initial_dispatch_id = Some(dispatch_id.clone());
                 break;
             }
@@ -1307,13 +1326,9 @@ mod tests {
 
         let mut dispatch_id: Option<String> = None;
         for _ in 0..300 {
-            let dispatches = ctx.dispatch_repo.list().await;
-            if let Some((id, _)) = dispatches.iter().find(|(_, d)| {
-                matches!(
-                    &d.deets,
-                    crate::rt::dispatch::ActiveDispatchDeets::Wflow { wflow_key, .. } if wflow_key == "test-label"
-                )
-            }) {
+            if let Some((id, _dispatch)) =
+                ctx.dispatch_repo.get_any_by_wflow_key("test-label").await
+            {
                 dispatch_id = Some(id.clone());
                 break;
             }

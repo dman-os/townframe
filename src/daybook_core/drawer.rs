@@ -213,9 +213,10 @@ impl DrawerRepo {
                     serde_json::json!({
                         "heads": heads
                     }),
-                    vec![self.replicated_partition_id()],
-                    None,
                 )
+                .await?;
+            self.partition_store
+                .add_obj_to_parts(branch_doc_id, vec![self.replicated_partition_id()])
                 .await?;
         }
         Ok(())
@@ -228,7 +229,7 @@ impl DrawerRepo {
     ) -> Res<()> {
         if branch_kind == BranchKind::Replicated {
             self.partition_store
-                .remove_obj_from_part(branch_doc_id, self.replicated_partition_id(), None)
+                .remove_obj_from_part(branch_doc_id, self.replicated_partition_id())
                 .await?;
         }
         Ok(())

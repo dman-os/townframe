@@ -737,7 +737,6 @@ async fn dynamic_cli(static_res: StaticCliResult) -> Res<ExitCode> {
     match matches.subcommand() {
         Some(("exec", sub_matches)) => match sub_matches.subcommand() {
             Some((name, sub_matches)) => {
-                info!(?name, "XXX");
                 let details = command_details.remove(name).unwrap();
                 let rt = Box::pin(lazy::daybook_rt()).await?;
                 let ecx = ExecCtx {
@@ -1587,7 +1586,7 @@ mod lazy {
                 let local_state_sqlite_repo = sqlite_local_state_repo().await?;
                 let (rt, stop) = daybook_core::rt::Rt::boot(
                     daybook_core::rt::RtConfig {
-                        device_id: "main_TODO_XXX".into(),
+                        device_id: "main_todo".into(),
                     },
                     Arc::clone(&ctx),
                     Arc::clone(&drawer),

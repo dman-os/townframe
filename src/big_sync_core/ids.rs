@@ -67,7 +67,7 @@ macro_rules! alias_byte32id {
                     ));
                 }
                 let mut buf = [0_u8; 32];
-                buf.copy_from_slice(&bytes[0..16]);
+                buf.copy_from_slice(&bytes[0..32]);
                 Ok(Self(Byte32Id(buf)))
             }
         }
@@ -203,7 +203,7 @@ impl autosurgeon::Hydrate for Byte32Id {
             ));
         }
         let mut buf = [0_u8; 32];
-        buf.copy_from_slice(&bytes[0..16]);
+        buf.copy_from_slice(&bytes[0..32]);
         Ok(Self(buf))
     }
 }

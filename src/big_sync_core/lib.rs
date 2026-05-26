@@ -922,17 +922,26 @@ impl BigSyncMachine {
         retry: Retry,
         DecidePeerStrategyTaskError { peer_id, deets }: DecidePeerStrategyTaskError,
     ) {
-        match deets {
-            DecidePeerStrategyErrorDeets::ListError(_) | DecidePeerStrategyErrorDeets::Rpc(_) => {
-                // noop, retry with backoff
-                // TODO: consider narrowing part set
-            }
-        }
-
+        tracing::warn!(peer_id = %peer_id, task_id, ?deets, "decide peer strategy failed");
         let Some(peer_state) = self.peers.get_mut(&peer_id) else {
             assert!(self.all_seen_peer.contains(&peer_id), "fishy");
             return;
         };
+        match deets {
+            DecidePeerStrategyErrorDeets::ListError(ListPartsError::UnkownParts {
+                unkown_parts,
+            }) => {
+                for part_id in unkown_parts {
+                    peer_state.parts.remove(&part_id);
+                }
+                let parts = peer_state.parts.keys().copied().collect();
+                self.handle_set_peer_evt(SetPeerEvent { peer_id, parts });
+                return;
+            }
+            DecidePeerStrategyErrorDeets::ListError(_) | DecidePeerStrategyErrorDeets::Rpc(_) => {
+                // noop, retry with backoff
+            }
+        }
         let mut parts_retry = Set::new();
 
         for (part_id, state) in &peer_state.parts {
@@ -1526,12 +1535,6 @@ impl BigSyncMachine {
 // sync support
 impl BigSyncMachine {
     fn handle_sync_completed(&mut self, evt: SyncCompletedEvent) {
-        tracing::info!(
-            peer_id = %evt.peer_id,
-            task_id = evt.task_id,
-            obj_id = %evt.completion.obj_id,
-            "XXX sync completed received"
-        );
         let completion = evt.completion;
         let Some(peer_state) = self.peers.get(&evt.peer_id) else {
             assert!(self.all_seen_peer.contains(&evt.peer_id), "fishy");
@@ -1565,7 +1568,9 @@ impl BigSyncMachine {
                     continue;
                 };
                 match &mut part.strat {
-                    PeerPartStrategy::Pending(_) => unreachable!("XXX reall?"),
+                    PeerPartStrategy::Pending(_) => {
+                        unreachable!("unexpected pending peer part strategy")
+                    }
                     PeerPartStrategy::Bucket(state) => {
                         state
                             .machine
@@ -1596,21 +1601,9 @@ impl BigSyncMachine {
             });
         self.drain_cursor_machine_cmds(evt.peer_id);
         self.drain_bucket_machine_cmds(evt.peer_id);
-        tracing::info!(
-            peer_id = %evt.peer_id,
-            task_id = evt.task_id,
-            obj_id = %completion.obj_id,
-            "XXX sync completed handled"
-        );
     }
 
     fn handle_sync_failed(&mut self, evt: SyncFailedEvent, retry: Retry) {
-        tracing::info!(
-            peer_id = %evt.peer_id,
-            task_id = evt.task_id,
-            obj_id = %evt.obj_id,
-            "XXX sync failed received"
-        );
         let (deets, part_hints) = {
             let Some(peer_state) = self.peers.get(&evt.peer_id) else {
                 assert!(self.all_seen_peer.contains(&evt.peer_id), "fishy");
@@ -1649,12 +1642,6 @@ impl BigSyncMachine {
     }
 
     fn handle_sync_stale(&mut self, evt: SyncStaleEvent, retry: Retry) {
-        tracing::info!(
-            peer_id = %evt.peer_id,
-            task_id = evt.task_id,
-            obj_id = %evt.obj_id,
-            "XXX sync stale received"
-        );
         let (deets, part_hints) = {
             let Some(peer_state) = self.peers.get(&evt.peer_id) else {
                 assert!(self.all_seen_peer.contains(&evt.peer_id), "fishy");

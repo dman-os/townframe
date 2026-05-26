@@ -1278,7 +1278,9 @@ impl HostPartStore for SqlitePartStore {
                         }),
                     ));
                 }
-                if row_cursor > added_at && row_cursor > i64::try_from(cursor).expect(ERROR_IMPOSSIBLE) {
+                if row_cursor > added_at
+                    && row_cursor > i64::try_from(cursor).expect(ERROR_IMPOSSIBLE)
+                {
                     events.push((
                         row_cursor,
                         PartEvent::Changed(big_sync_core::rpc::ObjChanged {

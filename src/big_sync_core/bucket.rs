@@ -123,10 +123,6 @@ impl BucketMachine {
         // filtered_buckets
         self.done_listing = filtered_buckets.is_empty() || self.working_level == 0;
         self.list_dispatched = false;
-        info!(
-            len = %filtered_buckets.len(),
-            "XXX paged in buckets",
-        );
         for buck in filtered_buckets {
             if buck.id < self.next_page_offset {
                 unreachable!("remote RPC should return buckets in order");
@@ -154,11 +150,6 @@ impl BucketMachine {
                 warn!("on_obj_page on an unexpected bucket: {buck_id:?}");
                 continue;
             };
-            info!(
-                "XXX paged in objects: {buck_id:?} {}  next_after={:?}",
-                page.entries.len(),
-                page.next_after
-            );
             state.leaf_after = page.next_after;
             state.leaf_seen += page.entries.len() as u64;
             state.leaf_inflight = false;
@@ -304,7 +295,6 @@ impl BucketMachine {
                 .into_iter()
                 .map(|(buck_id, after)| LeafBucketRequest { buck_id, after })
                 .collect();
-            info!(?buckets, "XXX leafing buckets");
             out.push(BucketMachineCommand::LeafBuckets {
                 part_id: self.part_id,
                 since: self.last_cursor,
@@ -335,7 +325,6 @@ impl BucketMachine {
             } else {
                 self.done_listing = false;
                 self.list_dispatched = true;
-                info!(?offset, "XXX listing buckets");
                 out.push(BucketMachineCommand::ListBuckets {
                     since: self.last_cursor,
                     offset,

@@ -323,6 +323,7 @@ async fn iroh_sync_single_blob_created_before_connect_replicates() -> Res<()> {
 
     let payload = b"pre-connect sync blob".to_vec();
     let hash = node_a.blobs_repo.put(&payload).await?;
+    let hash = hash.to_string();
     let blob_key = FacetKey::from(WellKnownFacetTag::Blob);
     {
         let doc_id = node_a
@@ -491,6 +492,7 @@ async fn iroh_sync_single_blob_created_while_connected_replicates() -> Res<()> {
     {
         let payload = b"connected sync blob".to_vec();
         let hash = node_a.blobs_repo.put(&payload).await?;
+        let hash = hash.to_string();
         let blob_key = FacetKey::from(WellKnownFacetTag::Blob);
         let doc_id = node_a
             .drawer
@@ -892,89 +894,17 @@ async fn iroh_sync_shutdown_peer_updates_catch_up_after_reconnect() -> Res<()> {
         let required_partitions = node_b
             .sync_repo
             .peer_partition_ids("")
-            .into_iter()
+            .into_keys()
             .collect::<Vec<_>>();
+        let reopened_peer_id = PeerId::new(*reopened_endpoint_id.as_bytes());
         node_b
             .sync_repo
             .wait_for_full_sync(
-                std::slice::from_ref(&reopened_endpoint_id),
+                std::slice::from_ref(&reopened_peer_id),
                 &required_partitions,
                 Duration::from_secs(120),
             )
             .await?;
-
-        // Debug: list what each node knows after full sync
-        let reopened_a_items = reopened_a.ctx.part_store.list_known_item_ids().await?;
-        let node_b_items = node_b.ctx.part_store.list_known_item_ids().await?;
-        let reopened_a_branches = reopened_a.drawer.list().await?;
-        let node_b_branches = node_b.drawer.list().await?;
-        eprintln!("=== POST FULL-SYNC DEBUG ===");
-        eprintln!("reopened_a partition items: {:?}", reopened_a_items);
-        eprintln!("node_b partition items: {:?}", node_b_items);
-        eprintln!(
-            "reopened_a drawer docs: {:?}",
-            reopened_a_branches
-                .iter()
-                .map(|d| &d.doc_id)
-                .collect::<Vec<_>>()
-        );
-        eprintln!(
-            "node_b drawer docs: {:?}",
-            node_b_branches
-                .iter()
-                .map(|d| &d.doc_id)
-                .collect::<Vec<_>>()
-        );
-        // Check branch doc for doc_on_b
-        if let Some(entry_b) = node_b.drawer.get_entry(&doc_on_b).await? {
-            eprintln!(
-                "node_b doc_on_b entry branches: {:?}",
-                entry_b.branches.keys().collect::<Vec<_>>()
-            );
-            if let Some(main_branch) = entry_b.branches.get("main") {
-                eprintln!(
-                    "node_b doc_on_b main branch_doc_id: {}",
-                    main_branch.branch_doc_id
-                );
-                let branch_doc_in_a = reopened_a
-                    .ctx
-                    .big_repo
-                    .get_doc(&main_branch.branch_doc_id.parse().unwrap())
-                    .await?;
-                let branch_doc_in_b = node_b
-                    .ctx
-                    .big_repo
-                    .get_doc(&main_branch.branch_doc_id.parse().unwrap())
-                    .await?;
-                eprintln!(
-                    "branch doc in reopened_a big_repo: {}",
-                    branch_doc_in_a.is_some()
-                );
-                eprintln!(
-                    "branch doc in node_b big_repo: {}",
-                    branch_doc_in_b.is_some()
-                );
-                // Check which partitions contain the branch doc via SQL
-                let partitions_for_branch: Vec<(String, i64)> = sqlx::query_as(
-                "SELECT partition_id, present FROM partition_membership_state WHERE item_id = ?",
-            )
-            .bind(&main_branch.branch_doc_id)
-            .fetch_all(node_b.ctx.part_store.state_pool())
-            .await?;
-                eprintln!("node_b branch doc partitions: {:?}", partitions_for_branch);
-                let partitions_for_branch_a: Vec<(String, i64)> = sqlx::query_as(
-                "SELECT partition_id, present FROM partition_membership_state WHERE item_id = ?",
-            )
-            .bind(&main_branch.branch_doc_id)
-            .fetch_all(reopened_a.ctx.part_store.state_pool())
-            .await?;
-                eprintln!(
-                    "reopened_a branch doc partitions: {:?}",
-                    partitions_for_branch_a
-                );
-            }
-        }
-        eprintln!("=== END DEBUG ===");
 
         let branch = BranchPathBuf::from("main");
         let (doc_a_on_reopened_a, doc_a_on_b) = wait_for_synced_doc_on_both_sides(
@@ -1076,12 +1006,12 @@ async fn clone_bootstrap_populates_all_globals_and_can_open() -> Res<()> {
 
     assert_eq!(
         cloned.doc_app.document_id(),
-        &source_doc_app,
+        ObjId::new(*source_doc_app.as_bytes()),
         "cloned app_doc must reference the source's app doc id"
     );
     assert_eq!(
         cloned.doc_drawer.document_id(),
-        &source_doc_drawer,
+        ObjId::new(*source_doc_drawer.as_bytes()),
         "cloned drawer_doc must reference the source's drawer doc id"
     );
 

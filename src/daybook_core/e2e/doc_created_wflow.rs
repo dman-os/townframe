@@ -27,13 +27,11 @@ async fn test_labeler_workflow() -> Res<()> {
     // Find the test-label dispatch and wait for it to complete
     let mut dispatch_id: Option<String> = None;
     for _ in 0..600 {
-        let dispatches = test_cx.dispatch_repo.list().await;
-        if let Some((id, _d)) = dispatches.iter().find(|(_, d)| {
-            matches!(
-                &d.deets,
-                crate::rt::dispatch::ActiveDispatchDeets::Wflow { wflow_key, .. } if wflow_key == "test-label"
-            )
-        }) {
+        if let Some((id, _dispatch)) = test_cx
+            .dispatch_repo
+            .get_any_by_wflow_key("test-label")
+            .await
+        {
             dispatch_id = Some(id.clone());
             break;
         }
@@ -106,16 +104,18 @@ async fn test_staging_branch_workflow() -> Res<()> {
     let mut staging_branch_path: Option<daybook_types::doc::BranchPathBuf> = None;
 
     for _ in 0..600 {
-        let dispatches = test_cx.dispatch_repo.list().await;
-        if let Some((id, dispatch)) = dispatches.iter().find(|(_, d)| {
-            matches!(
-                &d.args,
+        if let Some((id, dispatch)) = test_cx
+            .dispatch_repo
+            .get_any_by_wflow_key("test-label")
+            .await
+        {
+            if !matches!(
+                &dispatch.args,
                 crate::rt::dispatch::ActiveDispatchArgs::FacetRoutine(_)
-            ) && matches!(
-                &d.deets,
-                crate::rt::dispatch::ActiveDispatchDeets::Wflow { wflow_key, .. } if wflow_key == "test-label"
-            )
-        }) {
+            ) {
+                tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+                continue;
+            }
             dispatch_id = Some(id.clone());
             let crate::rt::dispatch::ActiveDispatchArgs::FacetRoutine(FacetRoutineArgs {
                 staging_branch_path: path,

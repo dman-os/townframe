@@ -88,13 +88,6 @@ impl BigRepoSyncBackend {
                 .ok_or_else(|| ferr!("missing repo rpc client for peer {peer_id:?}"))
         })
     }
-
-    fn doc_heads_payload(heads: &[automerge::ChangeHash]) -> big_sync::ObjPayload {
-        let item_payload = serde_json::json!({
-            "heads": am_utils_rs::serialize_commit_heads(heads),
-        });
-        item_payload
-    }
 }
 
 #[async_trait::async_trait]
@@ -126,12 +119,7 @@ impl big_sync::SyncBackend for BigRepoSyncBackend {
                 .wrap_err("invalid automerge payload from GetDocsFull")?;
             let put_outcome = repo.put_doc(obj_id, loaded).await;
             match put_outcome {
-                Ok(handle) => {
-                    let heads = handle.with_document_read(|doc| doc.get_heads()).await;
-                    let item_payload = Self::doc_heads_payload(&heads);
-                    repo.big_sync_store
-                        .set_obj_payload(obj_id, item_payload)
-                        .await?;
+                Ok(_handle) => {
                     return Ok(big_sync::SyncTaskRunOutcome::Completion(
                         big_sync_core::SyncTaskCompletion {
                             obj_id,
@@ -146,14 +134,6 @@ impl big_sync::SyncBackend for BigRepoSyncBackend {
                         .await?;
                     match sync_outcome {
                         crate::SyncDocOutcome::Success => {
-                            let current_doc = repo.get_doc(&obj_id).await?.ok_or_else(|| {
-                                eyre::eyre!("local doc missing after successful sync")
-                            })?;
-                            let heads = current_doc.with_document_read(|doc| doc.get_heads()).await;
-                            let item_payload = Self::doc_heads_payload(&heads);
-                            repo.big_sync_store
-                                .set_obj_payload(obj_id, item_payload)
-                                .await?;
                             return Ok(big_sync::SyncTaskRunOutcome::Completion(
                                 big_sync_core::SyncTaskCompletion {
                                     obj_id,
@@ -196,10 +176,6 @@ impl big_sync::SyncBackend for BigRepoSyncBackend {
                     .await?
                     .ok_or_else(|| eyre::eyre!("local doc missing after successful sync"))?;
                 let heads = current_doc.with_document_read(|doc| doc.get_heads()).await;
-                let item_payload = Self::doc_heads_payload(&heads);
-                repo.big_sync_store
-                    .set_obj_payload(obj_id, item_payload)
-                    .await?;
                 let deets = if remote_payload.is_none() && heads.as_slice() == local_heads.as_ref()
                 {
                     big_sync_core::SyncCompletionDeets::Noop

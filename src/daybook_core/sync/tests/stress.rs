@@ -244,7 +244,7 @@ async fn open_cluster_nodes(paths: &[PathBuf]) -> Res<Vec<Option<SyncTestNode>>>
 async fn connect_topology(
     nodes: &[Option<SyncTestNode>],
     edges: &[(usize, usize)],
-) -> Res<Vec<HashSet<EndpointId>>> {
+) -> Res<Vec<HashSet<PeerId>>> {
     // Pre-provision all active nodes with each other's endpoint IDs
     // so that auth doesn't block connections in the mesh topology.
     let active_nodes: Vec<(usize, &SyncTestNode)> = nodes
@@ -265,7 +265,7 @@ async fn connect_topology(
         }
     }
 
-    let mut endpoint_sets = vec![HashSet::<EndpointId>::new(); NODE_COUNT];
+    let mut endpoint_sets = vec![HashSet::<PeerId>::new(); NODE_COUNT];
     for (a, b) in edges {
         let node_a = nodes[*a]
             .as_ref()
@@ -276,11 +276,11 @@ async fn connect_topology(
 
         let ticket_b = node_b.sync_repo.get_clone_ticket_url().await?;
         let endpoint_addr_ab = node_a.sync_repo.connect_url(&ticket_b).await?;
-        endpoint_sets[*a].insert(endpoint_addr_ab.id);
+        endpoint_sets[*a].insert(PeerId::new(*endpoint_addr_ab.id.as_bytes()));
 
         let ticket_a = node_a.sync_repo.get_clone_ticket_url().await?;
         let endpoint_addr_ba = node_b.sync_repo.connect_url(&ticket_a).await?;
-        endpoint_sets[*b].insert(endpoint_addr_ba.id);
+        endpoint_sets[*b].insert(PeerId::new(*endpoint_addr_ba.id.as_bytes()));
     }
     Ok(endpoint_sets)
 }
@@ -649,6 +649,7 @@ async fn apply_event(
             };
             let payload = format!("blob-stress-{idx}-{}", rng.random::<u64>()).into_bytes();
             let hash = node.blobs_repo.put(&payload).await?;
+            let hash = hash.to_string();
             let mut facets_set = std::collections::HashMap::new();
             facets_set.insert(
                 FacetKey::from(WellKnownFacetTag::Blob),

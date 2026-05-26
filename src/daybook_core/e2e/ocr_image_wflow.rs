@@ -38,13 +38,11 @@ async fn test_ocr_image_workflow() -> Res<()> {
 
     let mut dispatch_id: Option<String> = None;
     for _ in 0..600 {
-        let dispatches = test_cx.dispatch_repo.list().await;
-        if let Some((found_dispatch_id, _dispatch)) = dispatches.iter().find(|(_, dispatch)| {
-            matches!(
-                &dispatch.deets,
-                crate::rt::dispatch::ActiveDispatchDeets::Wflow { wflow_key, .. } if wflow_key == "ocr-image"
-            )
-        }) {
+        if let Some((found_dispatch_id, _dispatch)) = test_cx
+            .dispatch_repo
+            .get_any_by_wflow_key("ocr-image")
+            .await
+        {
             dispatch_id = Some(found_dispatch_id.clone());
             break;
         }

@@ -1192,10 +1192,13 @@ mod tests {
         node_a.stop().await?;
 
         let node_b = open_sync_node(&repo_b_path).await?;
-        let partitions = node_b.ctx.part_store.list_partitions().await?.partitions;
-        let core_partition = partitions
-            .iter()
-            .find(|summary| &summary.partition_id[..] == CORE_DOCS_PARTITION_ID);
+        let core_partition_id = crate::part_id_from_label(CORE_DOCS_PARTITION_ID);
+        let partitions = node_b
+            .ctx
+            .part_store
+            .summarize_parts(HashSet::from([core_partition_id]))
+            .await??;
+        let core_partition = partitions.get(&core_partition_id);
         assert!(
             core_partition.is_some(),
             "cloned repo should register core docs partition on open: {partitions:?}"
@@ -1250,6 +1253,7 @@ mod tests {
         for idx in 0..100usize {
             let payload = format!("blob-payload-{idx:03}").into_bytes();
             let hash = node_a.blobs_repo.put(&payload).await?;
+            let hash = hash.to_string();
             args_batch.push(AddDocArgs {
                 branch_path: daybook_types::doc::BranchPathBuf::from("main"),
                 facets: [(
@@ -1303,6 +1307,7 @@ mod tests {
         for idx in 0..8usize {
             let payload = format!("blob-bytes-validation-{idx:03}").into_bytes();
             let hash = node_a.blobs_repo.put(&payload).await?;
+            let hash = hash.to_string();
             blob_payloads.push((hash.clone(), payload));
             args_batch.push(AddDocArgs {
                 branch_path: daybook_types::doc::BranchPathBuf::from("main"),
@@ -1716,13 +1721,14 @@ mod tests {
         let required_partitions = source
             .sync_repo
             .peer_partition_ids("")
-            .into_iter()
+            .into_keys()
             .collect::<Vec<_>>();
+        let peer_id = PeerId::new(*endpoint_id.as_bytes());
         tokio::try_join!(
             target.sync_repo.wait_for_full_sync(
-                std::slice::from_ref(&endpoint_id),
+                std::slice::from_ref(&peer_id),
                 &required_partitions,
-                timeout,
+                timeout
             ),
             wait_for_doc_set_parity(&source.drawer, &target.drawer, timeout),
         )?;
@@ -1757,12 +1763,13 @@ mod tests {
         let required_partitions = node_b
             .sync_repo
             .peer_partition_ids("")
-            .into_iter()
+            .into_keys()
             .collect::<Vec<_>>();
+        let peer_id = PeerId::new(*endpoint_addr_ba.id.as_bytes());
         node_b
             .sync_repo
             .wait_for_full_sync(
-                std::slice::from_ref(&endpoint_addr_ba.id),
+                std::slice::from_ref(&peer_id),
                 &required_partitions,
                 Duration::from_secs(5),
             )

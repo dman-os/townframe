@@ -345,14 +345,14 @@ pub async fn spawn_full_sync_worker(
                             warn!("FullSyncWorkerHandle dropped, closing loop");
                             break;
                         };
-                        info!(?msg, "XXX msg");
+                        info!(?msg, "worker msg");
                         worker.handle_msg(msg).await?;
                     }
                     count = sync_progress_rx.recv_many(&mut sync_progress_buf, 512) => {
                         if count == 0 {
                             continue;
                         }
-                        info!(?count, "XXX sync progress");
+                        info!(?count, "sync progress");
                         worker.handle_sync_progress_batch(&mut sync_progress_buf).await?;
                     }
                     val = peer_worker_msg_rx.recv() => {
@@ -760,7 +760,7 @@ mod peer {
             Ok(())
         }
         pub async fn handle_peer_sync_worker_msg(&mut self, msg: PeerSyncWorkerMsg) -> Res<()> {
-            info!(?msg, "XXX peer worker msg");
+            info!(?msg, "peer worker msg");
             let peer_key = match &msg {
                 PeerSyncWorkerMsg::Progress { peer, .. }
                 | PeerSyncWorkerMsg::SubscriptionItem { peer, .. } => Arc::clone(peer),
@@ -1104,7 +1104,7 @@ mod machine {
             &mut self,
             commands: Vec<SyncMachineCommand>,
         ) -> Res<()> {
-            info!(?commands, "XXX");
+                        info!(?commands, "sync commands");
             let mut pending = commands;
             while let Some(command) = pending.pop() {
                 pending.extend(self.dispatch_sync_command(command).await?);

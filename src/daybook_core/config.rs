@@ -722,7 +722,7 @@ mod tests {
     #[tokio::test]
     async fn upsert_actor_user_path_registers_directory_entries() -> Res<()> {
         let local_user_path = daybook_types::doc::UserPathBuf::from("/test-user/test-device");
-        let (big_repo, part_store, _acx_stop) = crate::test_support::boot_repo().await?;
+        let (big_repo, big_sync_host, _acx_stop) = crate::test_support::boot_repo().await?;
 
         let app_doc = automerge::Automerge::load(&crate::app::version_updates::version_latest()?)?;
         let app_doc_handle = big_repo.put_doc(DocumentId::random(), app_doc).await?;
@@ -733,7 +733,7 @@ mod tests {
             temp.path().join("blobs"),
             local_user_path.clone(),
             Arc::new(crate::blobs::PartitionStoreMembershipWriter::new(
-                Arc::clone(&part_store),
+                Arc::clone(&big_sync_host.store),
             )),
         )
         .await?;

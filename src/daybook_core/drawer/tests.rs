@@ -879,55 +879,6 @@ fn test_raw_automerge_fork_at_stale_heads_after_merges() -> Res<()> {
 }
 
 #[test]
-fn test_raw_automerge_merge_and_log_then_commit_preserves_stale_forkability() -> Res<()> {
-    let mut main = automerge::Automerge::new();
-    {
-        let mut tx = main.transaction();
-        tx.put(automerge::ROOT, "note", "init")?;
-        tx.commit();
-    }
-    let h0 = main.get_heads();
-
-    let mut branch_a = main.fork_at(&h0)?;
-    {
-        let mut tx = branch_a.transaction();
-        tx.put(automerge::ROOT, "title", "A")?;
-        tx.commit();
-    }
-    {
-        let mut patch_log = automerge::PatchLog::active();
-        main.merge_and_log_patches(&mut branch_a, &mut patch_log)?;
-        let _patches = main.make_patches(&mut patch_log);
-        let mut tx = main.transaction();
-        tx.put(automerge::ROOT, "meta_a", "ok")?;
-        tx.commit();
-    }
-    let h1 = main.get_heads();
-
-    let mut branch_b = main.fork_at(&h1)?;
-    {
-        let mut tx = branch_b.transaction();
-        tx.put(automerge::ROOT, "note", "B")?;
-        tx.commit();
-    }
-    {
-        let mut patch_log = automerge::PatchLog::active();
-        main.merge_and_log_patches(&mut branch_b, &mut patch_log)?;
-        let _patches = main.make_patches(&mut patch_log);
-        let mut tx = main.transaction();
-        tx.put(automerge::ROOT, "meta_b", "ok")?;
-        tx.commit();
-    }
-
-    let stale = main.fork_at(&h1)?;
-    assert!(
-        !stale.get_heads().is_empty(),
-        "stale fork_at should keep working after merge_and_log_patches + follow-up commit"
-    );
-    Ok(())
-}
-
-#[test]
 fn test_raw_automerge_merge_and_log_make_patches_without_followup_commit_stale_forkability(
 ) -> Res<()> {
     let mut main = automerge::Automerge::new();

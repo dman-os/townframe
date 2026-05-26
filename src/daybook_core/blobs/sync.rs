@@ -3,8 +3,8 @@ use crate::interlude::*;
 use crate::blobs::{blob_hash_from_id, blob_id_to_iroh_hash, BlobId, BlobsRepo};
 use big_repo::SharedPartStore;
 
-use big_sync::{ObjStoreLease, StoreMutationOutcome, SyncBackend, SyncTaskRunOutcome};
-use big_sync_core::{ObjId, PartId, PeerId, SyncCompletionDeets, SyncTaskCompletion};
+use big_sync::{SyncBackend, SyncTaskRunOutcome};
+use big_sync_core::{ObjId, PeerId, SyncCompletionDeets, SyncTaskCompletion};
 use futures::StreamExt;
 use surelock::key::lock_scope;
 
@@ -107,54 +107,49 @@ impl SyncBackend for BlobSyncBackend {
     async fn sync_obj(
         &self,
         peer_id: PeerId,
-        lease: ObjStoreLease,
         obj_id: ObjId,
-        part_hints: Vec<PartId>,
         remote_payload: Option<big_sync_core::part_store::ObjPayload>,
     ) -> Res<SyncTaskRunOutcome> {
         let blob_id = Self::blob_id_from_obj_id(obj_id);
         let local_has_blob = self.blobs_repo.has_hash(blob_id).await?;
         let local_payload = self.part_store.obj_payload(obj_id).await?;
-        let local_parts = self.part_store.obj_parts(obj_id).await?;
-        let has_all_part_hints = part_hints
-            .iter()
-            .all(|part_id| local_parts.contains(part_id));
-        if local_has_blob && has_all_part_hints {
-            return Ok(SyncTaskRunOutcome::Completion(SyncTaskCompletion {
-                obj_id,
-                deets: SyncCompletionDeets::Noop,
-            }));
+        if local_has_blob {
+            match &remote_payload {
+                Some(remote_payload) if local_payload.as_ref() == Some(remote_payload) => {
+                    return Ok(SyncTaskRunOutcome::Completion(SyncTaskCompletion {
+                        obj_id,
+                        deets: SyncCompletionDeets::Noop,
+                    }));
+                }
+                None if local_payload.is_some() => {
+                    return Ok(SyncTaskRunOutcome::Completion(SyncTaskCompletion {
+                        obj_id,
+                        deets: SyncCompletionDeets::Noop,
+                    }));
+                }
+                _ => {}
+            }
         }
 
         self.ensure_local_blob(peer_id, blob_id).await?;
-        let payload = match remote_payload.clone() {
-            Some(remote_payload) => remote_payload,
-            None => local_payload
-                .clone()
-                .unwrap_or_else(|| serde_json::json!({})),
+        let payload = remote_payload
+            .clone()
+            .or_else(|| local_payload.clone())
+            .unwrap_or_else(|| serde_json::json!({}));
+        self.part_store.set_obj_payload(obj_id, payload).await?;
+        let deets = if remote_payload.is_none() {
+            SyncCompletionDeets::Noop
+        } else if local_payload.is_none() {
+            SyncCompletionDeets::AddedMember
+        } else if local_payload.as_ref() != remote_payload.as_ref() {
+            SyncCompletionDeets::ChangedObject
+        } else {
+            SyncCompletionDeets::Noop
         };
-        match self
-            .part_store
-            .set_obj_payload(obj_id, payload, part_hints, Some(lease))
-            .await?
-        {
-            StoreMutationOutcome::Applied => {
-                let deets = match (&local_payload, &remote_payload) {
-                    (Some(local_payload), Some(remote_payload))
-                        if local_payload != remote_payload =>
-                    {
-                        SyncCompletionDeets::ChangedObject
-                    }
-                    (None, _) => SyncCompletionDeets::AddedMember,
-                    _ => SyncCompletionDeets::AddedMember,
-                };
-                Ok(SyncTaskRunOutcome::Completion(SyncTaskCompletion {
-                    obj_id,
-                    deets,
-                }))
-            }
-            StoreMutationOutcome::Stale => Ok(SyncTaskRunOutcome::Stale),
-        }
+        Ok(SyncTaskRunOutcome::Completion(SyncTaskCompletion {
+            obj_id,
+            deets,
+        }))
     }
 }
 
@@ -164,7 +159,7 @@ mod tests {
 
     use crate::blobs::NoopPartitionMembershipWriter;
     use big_sync::backend::contract::{
-        self, SyncBackendHarness, SyncBackendLeaseKind, SyncBackendOutcome, SyncBackendScenario,
+        self, SyncBackendHarness, SyncBackendOutcome, SyncBackendScenario,
     };
     use big_sync::HostPartStore;
     use big_sync::MemoryPartStore;
@@ -176,6 +171,10 @@ mod tests {
 
     fn test_parts() -> Vec<PartId> {
         vec![test_part()]
+    }
+
+    fn extra_part() -> PartId {
+        PartId::new([8; 32])
     }
 
     async fn build_blob_backend() -> Res<(
@@ -227,154 +226,63 @@ mod tests {
         changed_empty_hints_blob_id: BlobId,
         changed_multi_hints_blob_id: BlobId,
         added_blob_id: BlobId,
-        stale_blob_id: BlobId,
-        removed_blob_id: BlobId,
-        added_parts_blob_id: BlobId,
-        upserted_blob_id: BlobId,
     ) -> Vec<SyncBackendScenario> {
         let parts = test_parts();
-        let extra_part = PartId::new([8; 32]);
+        let extra_part = extra_part();
         let noop_payload = serde_json::json!({"kind": "noop"});
         let old_payload = serde_json::json!({"kind": "old"});
         let new_payload = serde_json::json!({"kind": "new"});
-        let updated_payload = serde_json::json!({"kind": "updated"});
         vec![
-            SyncBackendScenario {
-                name: "noop_when_membership_and_payload_match",
-                peer_id: PeerId::new([2; 32]),
-                obj_id: noop_blob_id,
-                initial_payload: Some(noop_payload.clone()),
-                initial_parts: parts.clone(),
-                sync_part_hints: parts.clone(),
-                remote_payload: Some(noop_payload.clone()),
-                lease_kind: SyncBackendLeaseKind::Fresh,
-                lease_mutation: None,
-                expected_outcome: SyncBackendOutcome::Completion(
-                    big_sync_core::SyncCompletionDeets::Noop,
-                ),
-                expected_payload: Some(noop_payload.clone()),
-                expected_parts: parts.clone(),
-            },
+            SyncBackendScenario::noop(
+                "noop_when_membership_and_payload_match",
+                PeerId::new([2; 32]),
+                noop_blob_id,
+                noop_payload.clone(),
+                parts.clone(),
+            ),
             SyncBackendScenario {
                 name: "noop_when_remote_payload_is_missing_and_blob_exists",
                 peer_id: PeerId::new([2; 32]),
                 obj_id: noop_missing_remote_blob_id,
                 initial_payload: Some(noop_payload.clone()),
                 initial_parts: parts.clone(),
-                sync_part_hints: parts.clone(),
                 remote_payload: None,
-                lease_kind: SyncBackendLeaseKind::Fresh,
-                lease_mutation: None,
                 expected_outcome: SyncBackendOutcome::Completion(
                     big_sync_core::SyncCompletionDeets::Noop,
                 ),
                 expected_payload: Some(noop_payload.clone()),
                 expected_parts: parts.clone(),
             },
-            SyncBackendScenario {
-                name: "changed_object_applies_remote_payload",
-                peer_id: PeerId::new([2; 32]),
-                obj_id: changed_blob_id,
-                initial_payload: Some(old_payload.clone()),
-                initial_parts: vec![],
-                sync_part_hints: parts.clone(),
-                remote_payload: Some(new_payload.clone()),
-                lease_kind: SyncBackendLeaseKind::Fresh,
-                lease_mutation: None,
-                expected_outcome: SyncBackendOutcome::Completion(
-                    big_sync_core::SyncCompletionDeets::ChangedObject,
-                ),
-                expected_payload: Some(new_payload.clone()),
-                expected_parts: parts.clone(),
-            },
-            SyncBackendScenario {
-                name: "changed_object_with_empty_part_hints",
-                peer_id: PeerId::new([2; 32]),
-                obj_id: changed_empty_hints_blob_id,
-                initial_payload: Some(old_payload.clone()),
-                initial_parts: vec![],
-                sync_part_hints: vec![],
-                remote_payload: Some(new_payload.clone()),
-                lease_kind: SyncBackendLeaseKind::Fresh,
-                lease_mutation: None,
-                expected_outcome: SyncBackendOutcome::Completion(
-                    big_sync_core::SyncCompletionDeets::ChangedObject,
-                ),
-                expected_payload: Some(new_payload.clone()),
-                expected_parts: vec![],
-            },
-            SyncBackendScenario {
-                name: "changed_object_with_multiple_part_hints",
-                peer_id: PeerId::new([2; 32]),
-                obj_id: changed_multi_hints_blob_id,
-                initial_payload: Some(old_payload.clone()),
-                initial_parts: vec![parts[0]],
-                sync_part_hints: vec![parts[0], extra_part],
-                remote_payload: Some(new_payload.clone()),
-                lease_kind: SyncBackendLeaseKind::Fresh,
-                lease_mutation: None,
-                expected_outcome: SyncBackendOutcome::Completion(
-                    big_sync_core::SyncCompletionDeets::ChangedObject,
-                ),
-                expected_payload: Some(new_payload.clone()),
-                expected_parts: vec![parts[0], extra_part],
-            },
-            SyncBackendScenario {
-                name: "added_member_materializes_missing_blob",
-                peer_id: PeerId::new([2; 32]),
-                obj_id: added_blob_id,
-                initial_payload: None,
-                initial_parts: vec![],
-                sync_part_hints: parts.clone(),
-                remote_payload: Some(new_payload.clone()),
-                lease_kind: SyncBackendLeaseKind::Fresh,
-                lease_mutation: None,
-                expected_outcome: SyncBackendOutcome::Completion(
-                    big_sync_core::SyncCompletionDeets::AddedMember,
-                ),
-                expected_payload: Some(new_payload.clone()),
-                expected_parts: parts.clone(),
-            },
-            SyncBackendScenario {
-                name: "stale_lease_is_reported",
-                peer_id: PeerId::new([2; 32]),
-                obj_id: stale_blob_id,
-                initial_payload: Some(old_payload.clone()),
-                initial_parts: vec![],
-                sync_part_hints: parts.clone(),
-                remote_payload: Some(new_payload),
-                lease_kind: SyncBackendLeaseKind::Stale,
-                lease_mutation: None,
-                expected_outcome: SyncBackendOutcome::Stale,
-                expected_payload: Some(old_payload),
-                expected_parts: vec![],
-            },
-            SyncBackendScenario::stale_after_remove_from_part(
-                "stale_after_remove_from_part",
+            SyncBackendScenario::changed_object(
+                "changed_object_applies_remote_payload",
                 PeerId::new([2; 32]),
-                removed_blob_id,
-                serde_json::json!({"kind": "remove"}),
-                parts[0],
-                serde_json::json!({"kind": "remove-remote"}),
+                changed_blob_id,
+                old_payload.clone(),
+                new_payload.clone(),
+                parts.clone(),
             ),
-            SyncBackendScenario::stale_after_add_obj_to_parts(
-                "stale_after_add_obj_to_parts",
+            SyncBackendScenario::changed_object(
+                "changed_object_with_empty_part_hints",
                 PeerId::new([2; 32]),
-                added_parts_blob_id,
-                serde_json::json!({"kind": "add"}),
-                vec![parts[0]],
-                vec![extra_part],
-                serde_json::json!({"kind": "add-remote"}),
+                changed_empty_hints_blob_id,
+                old_payload.clone(),
+                new_payload.clone(),
+                vec![],
             ),
-            SyncBackendScenario::stale_after_upsert_obj(
-                "stale_after_upsert_obj",
+            SyncBackendScenario::changed_object(
+                "changed_object_with_multiple_part_hints",
                 PeerId::new([2; 32]),
-                upserted_blob_id,
-                serde_json::json!({"kind": "upsert-old"}),
-                vec![parts[0]],
-                updated_payload,
+                changed_multi_hints_blob_id,
+                old_payload.clone(),
+                new_payload.clone(),
                 vec![parts[0], extra_part],
-                serde_json::json!({"kind": "upsert-remote"}),
+            ),
+            SyncBackendScenario::added_member(
+                "added_member_materializes_missing_blob",
+                PeerId::new([2; 32]),
+                added_blob_id,
+                new_payload.clone(),
+                parts.clone(),
             ),
         ]
     }
@@ -394,10 +302,6 @@ mod tests {
             .put(b"blob-sync-contract-changed-multi-hints")
             .await?;
         let added_blob_id = blobs_repo.put(b"blob-sync-contract-added").await?;
-        let stale_blob_id = blobs_repo.put(b"blob-sync-contract-stale").await?;
-        let removed_blob_id = blobs_repo.put(b"blob-sync-contract-removed").await?;
-        let added_parts_blob_id = blobs_repo.put(b"blob-sync-contract-added-parts").await?;
-        let upserted_blob_id = blobs_repo.put(b"blob-sync-contract-upserted").await?;
         let harness = BlobSyncBackendContractHarness {
             backend,
             store: part_store,
@@ -411,10 +315,6 @@ mod tests {
                 changed_empty_hints_blob_id,
                 changed_multi_hints_blob_id,
                 added_blob_id,
-                stale_blob_id,
-                removed_blob_id,
-                added_parts_blob_id,
-                upserted_blob_id,
             ),
         )
         .await
