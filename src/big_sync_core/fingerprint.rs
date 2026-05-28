@@ -1,3 +1,4 @@
+#![expect(clippy::disallowed_names)]
 // Copied from https://github.com/inkandswitch/subduction/blob/e31e208a079d7e3b0bba792e55210bc5cef63bbc/sedimentree_core/src/crypto/fingerprint.rs
 // Apache License 2.0 or MIT Copyright (c) 2024 Ink & Switch
 

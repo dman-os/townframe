@@ -115,7 +115,7 @@ pub struct IrohSyncRepo {
     // sync_store: am_utils_rs::sync::store::SyncStoreHandle,
     reconnect_task: Arc<std::sync::Mutex<Option<JoinHandle<()>>>>,
     big_sync_worker: big_sync::BigSyncWorkerHandle,
-    big_sync_rpc: big_sync::rpc::BigSyncRpcHandle,
+    _big_sync_rpc: big_sync::rpc::BigSyncRpcHandle,
 }
 
 #[derive(Debug, Clone)]
@@ -255,7 +255,7 @@ impl IrohSyncRepo {
             big_repo::rpc::spawn_repo_rpc(Arc::clone(&rcx.big_repo)).await?;
 
         let repo_sync_backend = rcx.big_repo.sync_backend();
-        let blob_sync_backend: Arc<dyn big_sync::SyncBackend> = blobs_sync_backend.clone();
+        let blob_sync_backend: Arc<dyn big_sync::SyncBackend> = Arc::clone(&blobs_sync_backend) as _;
         let mut sync_backends = std::collections::HashMap::new();
         sync_backends.insert(big_repo::BigRepo::BACKEND_ID.into(), repo_sync_backend);
         sync_backends.insert(BLOBS_BACKEND_ID.into(), blob_sync_backend);
@@ -323,7 +323,7 @@ impl IrohSyncRepo {
             conn_end_signal_tx: conn_end_tx,
             reconnect_task: Arc::clone(&reconnect_task),
             big_sync_worker,
-            big_sync_rpc, // active_endpoint_ids: tokio::sync::RwLock::new(HashMap::new()),
+            _big_sync_rpc: big_sync_rpc, // active_endpoint_ids: tokio::sync::RwLock::new(HashMap::new()),
         });
         #[cfg(test)]
         bootstrap::register_test_clone_rpc_sender(router.endpoint().id(), clone_rpc_tx.clone())
@@ -414,13 +414,17 @@ impl IrohSyncRepo {
         // }
         let repo = Arc::clone(self);
         let handle = tokio::spawn(async move {
-            let _ = repo.cancel_token.clone().run_until_cancelled(async move {
-                if let Err(err) = repo.connect_known_devices_once().await {
-                    if !repo.cancel_token.is_cancelled() {
-                        warn!(?err, trigger, "known-device reconnect failed");
+            let _ = repo
+                .cancel_token
+                .clone()
+                .run_until_cancelled(async move {
+                    if let Err(err) = repo.connect_known_devices_once().await {
+                        if !repo.cancel_token.is_cancelled() {
+                            warn!(?err, trigger, "known-device reconnect failed");
+                        }
                     }
-                }
-            });
+                })
+                .await;
         });
         *reconnect_task = Some(handle);
     }
@@ -801,7 +805,7 @@ impl IrohSyncRepo {
         timeout: Duration,
     ) -> Res<()> {
         self.ensure_repo_live()?;
-        let Some(progress_repo) = self.progress_repo.clone() else {
+        let Some(_progress_repo) = self.progress_repo.clone() else {
             eyre::bail!("wait_for_full_sync requires a progress-enabled IrohSyncRepo");
         };
         if peer_ids.is_empty() {

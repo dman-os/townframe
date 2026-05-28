@@ -86,7 +86,6 @@ pub struct StopToken {
 pub struct WorkerSnapshot {
     pub peer_parts: HashMap<PeerId, HashMap<PartId, BackendId>>,
     pub full_sync_waiters: HashMap<u64, Vec<(PeerId, PartId)>>,
-    pub peer_part_full_sync_state: Vec<(PeerId, PartId, bool, bool, bool, bool, bool, bool)>,
     pub last_object_syncs: Vec<(PeerId, PartId, big_sync_core::ObjId, std::time::Instant)>,
     pub task_counts: TaskCounts,
     pub active_machine_tasks: usize,
@@ -586,7 +585,6 @@ impl BigSyncWorker {
                         .map(|(&peer_id, peer_state)| (peer_id, peer_state.parts.clone()))
                         .collect(),
                     full_sync_waiters: self.machine.debug_full_sync_waiters(),
-                    peer_part_full_sync_state: self.machine.debug_peer_part_full_sync_state(),
                     last_object_syncs: self.machine.debug_last_object_syncs(),
                     task_counts: self.machine.task_counts(),
                     active_machine_tasks: self.tasks.len(),

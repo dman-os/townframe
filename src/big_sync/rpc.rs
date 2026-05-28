@@ -225,13 +225,6 @@ impl HostBigRpcClient for IrohBigSyncRpcClient {
             loop {
                 match remote_rx.recv().await {
                     Ok(Some(evt)) => {
-                        let evt = match SubEvent::try_from(evt) {
-                            Ok(evt) => evt,
-                            Err(err) => {
-                                warn!(?err, "big sync sub_parts payload decode failed");
-                                break;
-                            }
-                        };
                         if local_tx.send(evt).await.is_err() {
                             break;
                         }
@@ -355,16 +348,9 @@ mod tests {
     use crate::part_store::memory::MemoryPartStore;
     use crate::part_store::HostPartStore;
     use big_sync_core::rpc::SubEvent;
-    use big_sync_core::{BuckId, Byte32Id, FingerprintSeed, ObjId, PartId, PeerId};
+    use big_sync_core::{BuckId, Byte32Id, FingerprintSeed, ObjId, PartId};
     use iroh::protocol::Router;
     use std::net::Ipv4Addr;
-
-    fn test_peer() -> PeerId {
-        PeerId::new([
-            32, 12, 54, 54, 65, 112, 213, 43, 12, 54, 123, 123, 54, 23, 68, 12, //
-            32, 12, 54, 54, 65, 112, 213, 43, 12, 54, 123, 123, 54, 23, 68, 12,
-        ])
-    }
 
     fn test_part() -> PartId {
         PartId(Byte32Id::new([
@@ -414,9 +400,8 @@ mod tests {
 
     #[tokio::test(flavor = "multi_thread")]
     async fn real_iroh_rpc_roundtrip_matches_store() -> Res<()> {
-        let peer = test_peer();
         let part_id = test_part();
-        let store = Arc::new(MemoryPartStore::new(peer));
+        let store = Arc::new(MemoryPartStore::new());
         seed_test_store(&store, part_id).await?;
 
         let expected_peer_summary = PeerSummaryResult {

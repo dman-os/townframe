@@ -29,7 +29,7 @@ structstruck::strike! {
     pub struct ListBucketsTaskError {
         pub peer_id: PeerId,
         pub part_id: PartId,
-        pub deets:
+        pub _deets:
             pub enum ListBucketsTaskErrorDeets {
                 #![derive(Debug, thiserror::Error, displaydoc::Display)]
                 /// {0}
@@ -60,7 +60,7 @@ impl ListBucketsTask {
             .map_err(|deets| ListBucketsTaskError {
                 peer_id,
                 part_id,
-                deets,
+                _deets: deets,
             })
     }
 

@@ -7,7 +7,7 @@ use big_sync_core::rpc::{
     LeafBucketsRequest, ListPartsError, PartEvent, PartPage, PartSummary, SubEvent,
     SubPartsRequest,
 };
-use big_sync_core::{mpsc, BuckId, Byte32Id, Fingerprint, ObjId, PartId, PeerId};
+use big_sync_core::{mpsc, BuckId, Fingerprint, ObjId, PartId, PeerId};
 
 use super::{obj_id_bounds_for_bucket, HostPartStore};
 #[cfg(test)]
@@ -21,7 +21,6 @@ use std::collections::BTreeSet;
 
 structstruck::strike! {
     pub struct MemoryPartStore {
-        pub(crate) owner_peer_id: PeerId,
         inner: Arc<surelock::mutex::Mutex<
             #[derive(Default)]
             struct MemoryPartStoreScopeState {
@@ -66,17 +65,21 @@ structstruck::strike! {
                     }
                 >,
                 tombstoned_objs: HashMap<ObjId, CursorIndex>,
-                peer_obj_payloads: HashMap<(PeerId, ObjId), Option<ObjPayload>>,
                 peer_part_cursors: HashMap<(PeerId, PartId), CursorIndex>,
             }
         >>,
     }
 }
 
+impl Default for MemoryPartStore {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl MemoryPartStore {
-    pub fn new(owner_peer_id: PeerId) -> Self {
+    pub fn new() -> Self {
         Self {
-            owner_peer_id,
             inner: Arc::new(surelock::mutex::Mutex::new(default())),
         }
     }
@@ -87,14 +90,6 @@ impl MemoryPartStore {
             guard.parts.entry(part_id).or_default();
             Ok(())
         })
-    }
-
-    fn next_byte32_id(counter: &mut u64, domain: u8) -> Byte32Id {
-        *counter = counter.checked_add(1).expect(ERROR_IMPOSSIBLE);
-        let mut bytes = [0; 32];
-        bytes[0] = domain;
-        bytes[1..9].copy_from_slice(&counter.to_be_bytes());
-        Byte32Id::new(bytes)
     }
 }
 
@@ -260,11 +255,9 @@ impl MemorySubsBus {
 }
 impl GlobalCursor {
     fn get(&mut self) -> CursorIndex {
-        let ii = self
-            .counter
+        self.counter
             .fetch_add(1, std::sync::atomic::Ordering::SeqCst)
-            + 1;
-        ii
+            + 1
     }
 }
 
@@ -311,7 +304,7 @@ impl HostPartStore for MemoryPartStore {
             offset = ?req.offset,
             since = req.since,
             limit_hint = req.limit_hint,
-            bucket_count = result.as_ref().map(|b| b.len()).unwrap_or(0),
+            bucket_count = result.as_ref().map(|buck| buck.len()).unwrap_or(0),
             "memory store get changed buckets"
         );
         Ok(result)
@@ -394,7 +387,7 @@ impl HostPartStore for MemoryPartStore {
         });
         tracing::debug!(
             part_id = %req.part_id,
-            bucket_count = result.as_ref().map(|r| r.bucks.len()).unwrap_or(0),
+            bucket_count = result.as_ref().map(|res| res.bucks.len()).unwrap_or(0),
             "memory store leaf buckets"
         );
         Ok(result)
@@ -581,7 +574,7 @@ impl HostPartStore for MemoryPartStore {
             part.apply_bucket_transition(
                 obj_id,
                 cursor,
-                BucketMemberKind::Live(&old_payload),
+                BucketMemberKind::Live(old_payload),
                 BucketMemberKind::Dead,
             );
             part.latest_cursor = cursor;
@@ -677,7 +670,7 @@ impl HostPartStore for MemoryPartStore {
             part_count,
             cursor,
             limit,
-            page_count = result.as_ref().map(|r| r.len()).unwrap_or(0),
+            page_count = result.as_ref().map(|res| res.len()).unwrap_or(0),
             "memory store list events"
         );
         Ok(result)
@@ -1081,14 +1074,10 @@ mod tests {
         }
     }
 
-    fn test_store() -> MemoryPartStore {
-        MemoryPartStore::new(PeerId(Byte32Id::new([7; 32])))
-    }
-
     #[tokio::test(flavor = "multi_thread")]
     async fn memory_host_part_store_contract() -> Res<()> {
         let harness = MemoryHostHarness {
-            store: test_store(),
+            store: MemoryPartStore::new(),
         };
         host_contract::assert_host_part_store_contract(&harness).await
     }

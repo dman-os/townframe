@@ -356,7 +356,7 @@ impl DrawerRepo {
         _doc_id: &DocId,
         snapshot: &BranchSnapshot,
     ) -> Res<HashSet<FacetKey>> {
-        let branch_doc_id = snapshot.branch_doc_id.clone();
+        let branch_doc_id = snapshot.branch_doc_id;
         let handle = self
             .big_repo
             .get_doc(&branch_doc_id)

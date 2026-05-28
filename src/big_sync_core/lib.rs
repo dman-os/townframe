@@ -1,5 +1,6 @@
-//! FIXME: minimize awaits on the BigSyncMachine lest it block work
-//! for example, talking to the part store
+//! FIXME: find a way to avoid blocking on BigSyncMachineCommands
+//! FIXME: wire up reporting for UnkownParts errors
+//! FIXME: the machine will break on UnkownParts actually
 
 mod interlude {
     pub use utils_rs::prelude::*;
@@ -210,7 +211,7 @@ structstruck::strike! {
                 Pending(TaskId),
                 Bucket(struct BucketState {
                     replay_cursor: CursorIndex,
-                    machine: BucketMachine,
+                    machine: Box<BucketMachine>,
                     active_list_tasks: Map<TaskId, ListBucketsTask>,
                     active_leaf_tasks: Map<TaskId, LeafBucketsTask>,
                 }),
@@ -448,7 +449,7 @@ impl SyncStatMachine {
         peer_state.fully_synced_parts.insert(part_id);
         part_state.fully_synced_peers.insert(peer_id);
 
-        for (_id, waiter) in &mut self.waiters {
+        for waiter in self.waiters.values_mut() {
             if waiter.need_set.contains(&(peer_id, part_id)) {
                 waiter.done_set.insert((peer_id, part_id));
             }
@@ -466,12 +467,12 @@ impl SyncStatMachine {
             self.stat_evts
                 .push(SyncStatEvent::PeerPartFullySynced { peer_id, part_id });
         }
-        if peer_state.fully_synced_parts.len() == peer_state.parts.len() {
-            if !peer_state.emitted_full_synced {
-                peer_state.emitted_full_synced = true;
-                self.stat_evts
-                    .push(SyncStatEvent::PeerFullySynced { peer_id });
-            }
+        if peer_state.fully_synced_parts.len() == peer_state.parts.len()
+            && !peer_state.emitted_full_synced
+        {
+            peer_state.emitted_full_synced = true;
+            self.stat_evts
+                .push(SyncStatEvent::PeerFullySynced { peer_id });
         }
         if part_state.peers.len() == part_state.fully_synced_peers.len()
             && !part_state.emitted_full_synced
@@ -498,7 +499,7 @@ impl SyncStatMachine {
         peer_state.fully_synced_parts.remove(&part_id);
         part_state.fully_synced_peers.remove(&peer_id);
 
-        for (_id, waiter) in &mut self.waiters {
+        for waiter in self.waiters.values_mut() {
             waiter.done_set.remove(&(peer_id, part_id));
         }
 
@@ -549,35 +550,6 @@ impl BigSyncMachine {
     }
 
     #[cfg(any(test, feature = "test-support"))]
-    pub fn debug_peer_part_full_sync_state(
-        &self,
-    ) -> Vec<(PeerId, PartId, bool, bool, bool, bool, bool, bool)> {
-        self.stat_machine
-            .peers
-            .iter()
-            .flat_map(|(&peer_id, peer_state)| {
-                peer_state.parts.keys().copied().map(move |part_id| {
-                    let part_state = self.stat_machine.parts.get(&part_id);
-                    let peer_part_state = peer_state.parts.get(&part_id).expect(ERROR_IMPOSSIBLE);
-                    (
-                        peer_id,
-                        part_id,
-                        self.stat_machine
-                            .peer_part_is_fully_synced(peer_id, part_id),
-                        peer_state.replay_phase_done,
-                        peer_part_state.cursor_active,
-                        peer_part_state.multi_strat,
-                        peer_state.fully_synced_parts.contains(&part_id),
-                        part_state
-                            .map(|part_state| part_state.fully_synced_peers.contains(&peer_id))
-                            .unwrap_or(false),
-                    )
-                })
-            })
-            .collect()
-    }
-
-    #[cfg(any(test, feature = "test-support"))]
     pub fn debug_last_object_syncs(&self) -> Vec<(PeerId, PartId, ObjId, std::time::Instant)> {
         self.stat_machine.debug_last_object_syncs()
     }
@@ -599,9 +571,7 @@ impl BigSyncMachine {
     }
 
     pub fn get_cmd(&mut self) -> Option<(Uuid, BigSyncMachineCommand)> {
-        let Some((id, cmd, _, _)) = self.cmds.front() else {
-            return None;
-        };
+        let (id, cmd, _, _) = self.cmds.front()?;
         Some((*id, cmd.clone()))
     }
 
@@ -684,16 +654,16 @@ impl BigSyncMachine {
                     return;
                 };
                 match deets {
-                    MachineTaskErrDeets::DecidePeerStrategyError(err) => {
+                    MachineTaskErrDeets::DecidePeerStrategy(err) => {
                         self.handle_decide_peer_strat_err(task_id, state.retry, err)
                     }
-                    MachineTaskErrDeets::PeerReplayWorkerError(err) => {
+                    MachineTaskErrDeets::PeerReplayWorker(err) => {
                         self.handle_peer_replay_worker_err(task_id, state.retry, err)
                     }
-                    MachineTaskErrDeets::ListBucketsError(err) => {
+                    MachineTaskErrDeets::ListBuckets(err) => {
                         self.handle_list_buckets_err(task_id, state.retry, err)
                     }
-                    MachineTaskErrDeets::LeafBucketsError(err) => {
+                    MachineTaskErrDeets::LeafBuckets(err) => {
                         self.handle_leaf_buckets_err(task_id, state.retry, err)
                     }
                 }
@@ -831,12 +801,12 @@ impl BigSyncMachine {
                     continue;
                 }
                 PeerPartStratDecision::Bucket(strat) => {
-                    let mut machine = BucketMachine::new(
+                    let mut machine = Box::new(BucketMachine::new(
                         part_id,
                         strat.remote_depth,
                         strat.remote_len,
                         strat.last_cursor,
-                    );
+                    ));
                     machine.on_bucket_page(
                         strat.initial_filtered_buckets,
                         &mut peer_state.bucket_cmd_buf,
@@ -938,7 +908,7 @@ impl BigSyncMachine {
                 self.handle_set_peer_evt(SetPeerEvent { peer_id, parts });
                 return;
             }
-            DecidePeerStrategyErrorDeets::ListError(_) | DecidePeerStrategyErrorDeets::Rpc(_) => {
+            DecidePeerStrategyErrorDeets::Rpc(_) => {
                 // noop, retry with backoff
             }
         }
@@ -1472,7 +1442,7 @@ impl BigSyncMachine {
         ListBucketsTaskError {
             peer_id,
             part_id,
-            deets: _,
+            _deets: _,
         }: ListBucketsTaskError,
     ) {
         let Some(peer_state) = self.peers.get_mut(&peer_id) else {
@@ -1505,7 +1475,7 @@ impl BigSyncMachine {
         LeafBucketsTaskError {
             peer_id,
             part_id,
-            deets: _,
+            _deets: _,
         }: LeafBucketsTaskError,
     ) {
         let Some(peer_state) = self.peers.get_mut(&peer_id) else {

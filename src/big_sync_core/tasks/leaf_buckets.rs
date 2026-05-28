@@ -26,7 +26,7 @@ structstruck::strike! {
     pub struct LeafBucketsTaskError {
         pub peer_id: PeerId,
         pub part_id: PartId,
-        pub deets:
+        pub _deets:
             pub enum LeafBucketsErrorDeets {
                 #![derive(Debug, thiserror::Error, displaydoc::Display)]
                 /// {0}
@@ -56,7 +56,7 @@ impl LeafBucketsTask {
             .map_err(|deets| LeafBucketsTaskError {
                 peer_id,
                 part_id,
-                deets,
+                _deets: deets,
             })
     }
 

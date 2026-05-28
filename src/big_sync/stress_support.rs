@@ -80,6 +80,7 @@ pub trait StressFixture {
     async fn observed_state(&self, node: &Self::Node) -> Res<Self::Observation>;
     fn peer_id(&self, node: &Self::Node) -> PeerId;
     // Fixture-specific application content for a document mutation.
+    #[expect(clippy::too_many_arguments)]
     fn make_doc_content(
         &self,
         phase: &str,
@@ -118,20 +119,19 @@ pub struct StressState {
 
 impl StressState {
     pub fn fresh_obj(&mut self, rng: &mut impl Rng) -> ObjId {
-        let obj = stress_obj(rng);
-        obj
+        stress_obj(rng)
     }
 
     pub fn choose_live_obj(&self, rng: &mut StdRng) -> Option<ObjId> {
         if self.live_objs.is_empty() {
             return None;
         }
-        Some(self.live_objs[rng.random_range(0..self.live_objs.len())].clone())
+        Some(self.live_objs[rng.random_range(0..self.live_objs.len())])
     }
 
     pub fn publish_new_obj(&mut self, rng: &mut impl Rng) -> ObjId {
         let obj = self.fresh_obj(rng);
-        self.live_objs.push(obj.clone());
+        self.live_objs.push(obj);
         obj
     }
 
@@ -232,11 +232,11 @@ pub async fn connect_active_topology<F: StressFixture>(
         fixture.connect_pair(left, right).await?;
     }
 
-    for i in 0..chain.len() {
-        for j in (i + 2)..chain.len() {
+    for ii in 0..chain.len() {
+        for jjj in (ii + 2)..chain.len() {
             if rng.random_bool(0.35) {
-                let left = nodes[chain[i]].as_ref().expect(ERROR_IMPOSSIBLE);
-                let right = nodes[chain[j]].as_ref().expect(ERROR_IMPOSSIBLE);
+                let left = nodes[chain[ii]].as_ref().expect(ERROR_IMPOSSIBLE);
+                let right = nodes[chain[jjj]].as_ref().expect(ERROR_IMPOSSIBLE);
                 fixture.connect_pair(left, right).await?;
             }
         }

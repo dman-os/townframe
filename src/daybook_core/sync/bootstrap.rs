@@ -253,7 +253,10 @@ async fn pull_required_partitions_via_big_sync_worker(
     let mut sync_backends = HashMap::new();
     let repo_backend_id = big_repo::BigRepo::BACKEND_ID.into();
     sync_backends.insert(Arc::clone(&repo_backend_id), big_repo.sync_backend());
-    sync_backends.insert(super::BLOBS_BACKEND_ID.into(), blob_sync_backend.clone());
+    sync_backends.insert(
+        super::BLOBS_BACKEND_ID.into(),
+        Arc::clone(&blob_sync_backend) as _,
+    );
     let (big_sync_worker, big_sync_worker_stop) =
         big_sync::spawn_big_sync_worker(Arc::clone(partition_store), sync_backends)?;
     let (big_sync_rpc, big_sync_rpc_stop) =
@@ -326,7 +329,6 @@ async fn pull_required_partitions_via_big_sync_worker(
                 tracing::warn!(
                     ?snapshot.peer_parts,
                     ?snapshot.full_sync_waiters,
-                    ?snapshot.peer_part_full_sync_state,
                     ?snapshot.last_object_syncs,
                     ?snapshot.task_counts,
                     active_machine_tasks = snapshot.active_machine_tasks,
@@ -524,7 +526,7 @@ pub async fn clone_repo_init_from_url(
                 lock_guard,
                 sql: sql.clone(),
                 part_store: Arc::clone(&part_store),
-                big_repo: big_repo.clone(),
+                big_repo: Arc::clone(&big_repo),
                 big_repo_stop: std::sync::Mutex::new(Some(big_repo_stop)),
                 local_peer_key,
                 local_actor_id,

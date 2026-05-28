@@ -74,20 +74,20 @@ pub trait HostPartStore: Send + Sync {
 pub(crate) fn obj_id_bounds_for_bucket(bucket_id: BuckId) -> (ObjId, Option<ObjId>) {
     let level = bucket_id.level();
     let prefix_bits = u32::from(level) * u32::from(BuckId::BITS_PER_LEVEL);
-    debug_assert!(prefix_bits <= u32::from(u16::BITS));
+    debug_assert!(prefix_bits <= u16::BITS);
 
     if prefix_bits == 0 {
         return (ObjId(Byte32Id::new([0; 32])), None);
     }
 
-    let shift = u32::from(u16::BITS) - prefix_bits;
+    let shift = u16::BITS - prefix_bits;
     let start_prefix = (u32::from(bucket_id.index())) << shift;
     let start = {
         let mut bytes = [0; 32];
         bytes[..2].copy_from_slice(&(start_prefix as u16).to_be_bytes());
         ObjId(Byte32Id::new(bytes))
     };
-    if prefix_bits == u32::from(u16::BITS) || bucket_id.index() == u16::MAX {
+    if prefix_bits == u16::BITS || bucket_id.index() == u16::MAX {
         return (start, None);
     }
     let next_prefix = (u32::from(bucket_id.index()) + 1) << shift;
@@ -102,7 +102,8 @@ pub(crate) fn obj_id_bounds_for_bucket(bucket_id: BuckId) -> (ObjId, Option<ObjI
     (start, end)
 }
 
-#[cfg(any(test, feature = "test-support"))]
+// #[cfg(any(test, feature = "test-support"))]
+#[cfg(test)]
 pub mod contract {
     use super::*;
     use big_sync_core::rpc::{
@@ -386,7 +387,8 @@ pub mod contract {
     }
 }
 
-#[cfg(any(test, feature = "test-support"))]
+// #[cfg(any(test, feature = "test-support"))]
+#[cfg(test)]
 pub mod host_contract {
     use super::*;
     use big_sync_core::rpc::{
@@ -401,10 +403,6 @@ pub mod host_contract {
         fn store(&self) -> &dyn HostPartStore;
 
         async fn ensure_part(&self, part_id: PartId) -> Res<()>;
-    }
-
-    fn test_peer(seed: u8) -> PeerId {
-        PeerId(Byte32Id::new([seed; 32]))
     }
 
     fn test_part(seed: u8) -> PartId {
@@ -448,10 +446,6 @@ pub mod host_contract {
         Ok(())
     }
 
-    fn part_ids(parts: &[PartId]) -> HashSet<PartId> {
-        parts.iter().copied().collect()
-    }
-
     fn assert_added(
         event: &PartEvent,
         cursor: CursorIndex,
@@ -468,15 +462,6 @@ pub mod host_contract {
         assert_eq!(transition.payload, payload);
     }
 
-    fn assert_removed(event: &PartEvent, cursor: CursorIndex, part_id: PartId, obj_id: ObjId) {
-        let PartEvent::Removed(transition) = event else {
-            panic!("expected removed event");
-        };
-        assert_eq!(transition.cursor, cursor);
-        assert_eq!(transition.part_id, part_id);
-        assert_eq!(transition.obj_id, obj_id);
-    }
-
     fn assert_changed(
         event: &PartEvent,
         cursor: CursorIndex,
@@ -486,47 +471,6 @@ pub mod host_contract {
     ) {
         let PartEvent::Changed(transition) = event else {
             panic!("expected changed event");
-        };
-        assert_eq!(transition.cursor, cursor);
-        assert_eq!(transition.part_ids, part_ids);
-        assert_eq!(transition.obj_id, obj_id);
-        assert_eq!(transition.payload, payload);
-    }
-
-    fn assert_sub_added(
-        event: &SubEvent,
-        cursor: CursorIndex,
-        part_id: PartId,
-        obj_id: ObjId,
-        payload: Option<ObjPayload>,
-    ) {
-        let SubEvent::Added(transition) = event else {
-            panic!("expected added sub event");
-        };
-        assert_eq!(transition.cursor, cursor);
-        assert_eq!(transition.part_id, part_id);
-        assert_eq!(transition.obj_id, obj_id);
-        assert_eq!(transition.payload, payload);
-    }
-
-    fn assert_sub_removed(event: &SubEvent, cursor: CursorIndex, part_id: PartId, obj_id: ObjId) {
-        let SubEvent::Removed(transition) = event else {
-            panic!("expected removed sub event");
-        };
-        assert_eq!(transition.cursor, cursor);
-        assert_eq!(transition.part_id, part_id);
-        assert_eq!(transition.obj_id, obj_id);
-    }
-
-    fn assert_sub_changed(
-        event: &SubEvent,
-        cursor: CursorIndex,
-        part_ids: &[PartId],
-        obj_id: ObjId,
-        payload: ObjPayload,
-    ) {
-        let SubEvent::Changed(transition) = event else {
-            panic!("expected changed sub event");
         };
         assert_eq!(transition.cursor, cursor);
         assert_eq!(transition.part_ids, part_ids);

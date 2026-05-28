@@ -11,7 +11,7 @@ pub struct Receiver<T> {
 impl<T> Clone for Receiver<T> {
     fn clone(&self) -> Self {
         Self {
-            from: self.from.clone(),
+            from: Arc::clone(&self.from),
             inner: self.inner.clone(),
         }
     }
@@ -38,7 +38,7 @@ pub struct Sender<T> {
 impl<T> Clone for Sender<T> {
     fn clone(&self) -> Self {
         Self {
-            to: self.to.clone(),
+            to: Arc::clone(&self.to),
             inner: self.inner.clone(),
         }
     }

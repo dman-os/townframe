@@ -36,8 +36,6 @@ pub enum InitEvent {
 
 pub struct InitRepo {
     pub registry: Arc<crate::repos::ListenersRegistry>,
-    big_repo: SharedBigRepo,
-    app_doc_id: DocumentId,
     app_am_handle: big_repo::BigDocHandle,
     store: crate::stores::AmStoreHandle<InitStore>,
     local_actor_id: ActorId,
@@ -96,8 +94,6 @@ impl InitRepo {
 
         let repo = Arc::new(Self {
             registry: Arc::clone(&registry),
-            big_repo: Arc::clone(&big_repo),
-            app_doc_id,
             app_am_handle,
             store,
             local_actor_id,

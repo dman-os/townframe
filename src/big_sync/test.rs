@@ -22,7 +22,7 @@ use crate::part_store::HostPartStore;
 use crate::test_support::{ObservedStore, ObservedStoreSnapshot, TestStoreSetup};
 use crate::{Ctx, SyncTaskRunOutcome};
 
-const TEST_BACKEND_ID: &'static str = "MemorySyncBackend";
+const TEST_BACKEND_ID: &str = "MemorySyncBackend";
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 struct LwwPayload {
@@ -318,7 +318,7 @@ impl SyncBackendHarness for MemorySyncBackendContractHarness {
 
     async fn prepare_case(&self, case: &SyncBackendScenario) -> Res<()> {
         if case.remote_payload.is_none() {
-            let remote_store = Arc::new(MemoryPartStore::new(case.peer_id));
+            let remote_store = Arc::new(MemoryPartStore::new());
             if let Some(payload) = &case.expected_payload {
                 remote_store
                     .set_obj_payload(case.obj_id, payload.clone())
@@ -411,7 +411,7 @@ fn memory_sync_backend_cases() -> Vec<SyncBackendScenario> {
 #[tokio::test(flavor = "multi_thread")]
 async fn memory_sync_backend_contract() -> Res<()> {
     let world = Arc::new(TestWorld::default());
-    let local = Arc::new(MemoryPartStore::new(peer_id(1)));
+    let local = Arc::new(MemoryPartStore::new());
     let local_part_store: Arc<dyn HostPartStore> = Arc::clone(&local) as _;
     let backend: Arc<dyn SyncBackend> = Arc::new(MemorySyncBackend::new(
         peer_id(1),
@@ -537,7 +537,7 @@ async fn seed_objects(node: &NodeHarness, prefix: &str, count: usize) -> Res<Vec
 
 #[tokio::test(flavor = "multi_thread")]
 async fn memory_part_store_root_bucket_contract() -> Res<()> {
-    let store = crate::part_store::memory::MemoryPartStore::new(peer_id(1));
+    let store = crate::part_store::memory::MemoryPartStore::new();
     let part_id = test_part();
     let seed = FingerprintSeed::new(1, 2);
     let mut obj_ids = Vec::new();
@@ -612,8 +612,8 @@ fn memory_part_store_terminal_bucket_bounds_do_not_wrap() {
 
 #[tokio::test(flavor = "multi_thread")]
 async fn memory_part_store_bucket_summary_is_order_independent() -> Res<()> {
-    let store_a = MemoryPartStore::new(peer_id(1));
-    let store_b = MemoryPartStore::new(peer_id(2));
+    let store_a = MemoryPartStore::new();
+    let store_b = MemoryPartStore::new();
 
     let objs = [
         (
@@ -718,8 +718,8 @@ where
     store.ensure_test_part(test_part()).await?;
     world.set_online(peer_id, true);
     world.register_store(peer_id, Arc::clone(&store));
-    let store_for_worker: Arc<dyn HostPartStore> = store.clone();
-    let observed_store: Arc<dyn ObservedStore> = store.clone();
+    let store_for_worker: Arc<dyn HostPartStore> = Arc::clone(&store) as _;
+    let observed_store: Arc<dyn ObservedStore> = Arc::clone(&store) as _;
     let backend: Arc<dyn SyncBackend> = Arc::new(MemorySyncBackend::new(
         peer_id,
         Arc::clone(&store_for_worker),
@@ -749,8 +749,8 @@ where
 
 async fn boot_node(world: Arc<TestWorld>, peer_seed: u8) -> Res<NodeHarness> {
     let peer_id = peer_id(peer_seed);
-    let store = Arc::new(MemoryPartStore::new(peer_id));
-    boot_node_with_store(world, peer_id, store.clone(), Some(store)).await
+    let store = Arc::new(MemoryPartStore::new());
+    boot_node_with_store(world, peer_id, Arc::clone(&store), Some(store)).await
 }
 
 async fn restart_node(world: Arc<TestWorld>, node: NodeHarness) -> Res<NodeHarness> {
@@ -770,7 +770,13 @@ async fn restart_node(world: Arc<TestWorld>, node: NodeHarness) -> Res<NodeHarne
     let Some(memory_store) = restart_memory_store else {
         eyre::bail!("node is not restartable with a memory store");
     };
-    boot_node_with_store(world, peer_id, memory_store.clone(), Some(memory_store)).await
+    boot_node_with_store(
+        world,
+        peer_id,
+        Arc::clone(&memory_store),
+        Some(memory_store),
+    )
+    .await
 }
 
 async fn assert_two_node_alignment(
@@ -1219,9 +1225,9 @@ async fn memory_sync_direct_backend_adopts_remote_tombstone() -> Res<()> {
     let world = Arc::new(TestWorld::default());
     let peer_a = peer_id(1);
     let peer_b = peer_id(2);
-    let store_a = Arc::new(MemoryPartStore::new(peer_a));
-    let store_b = Arc::new(MemoryPartStore::new(peer_b));
-    let store_b_dyn: Arc<dyn HostPartStore> = store_b.clone();
+    let store_a = Arc::new(MemoryPartStore::new());
+    let store_b = Arc::new(MemoryPartStore::new());
+    let store_b_dyn: Arc<dyn HostPartStore> = Arc::clone(&store_b) as _;
 
     world.register_store(peer_a, Arc::clone(&store_a));
     world.register_store(peer_b, Arc::clone(&store_b));
@@ -1257,10 +1263,10 @@ async fn memory_sync_direct_backend_cross_replication_is_symmetric() -> Res<()> 
     let world = Arc::new(TestWorld::default());
     let peer_a = peer_id(1);
     let peer_b = peer_id(2);
-    let store_a = Arc::new(MemoryPartStore::new(peer_a));
-    let store_b = Arc::new(MemoryPartStore::new(peer_b));
-    let store_a_dyn: Arc<dyn HostPartStore> = store_a.clone();
-    let store_b_dyn: Arc<dyn HostPartStore> = store_b.clone();
+    let store_a = Arc::new(MemoryPartStore::new());
+    let store_b = Arc::new(MemoryPartStore::new());
+    let store_a_dyn: Arc<dyn HostPartStore> = Arc::clone(&store_a) as _;
+    let store_b_dyn: Arc<dyn HostPartStore> = Arc::clone(&store_b) as _;
 
     world.register_store(peer_a, Arc::clone(&store_a));
     world.register_store(peer_b, Arc::clone(&store_b));

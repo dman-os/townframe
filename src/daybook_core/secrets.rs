@@ -17,10 +17,11 @@ impl SecretRepo {
         let store: Arc<keyring_core::CredentialStore> = if std::cfg!(test) {
             static TEST_STORE: tokio::sync::OnceCell<Arc<keyring_core::mock::Store>> =
                 tokio::sync::OnceCell::const_new();
-            TEST_STORE
-                .get_or_try_init(|| async { keyring_core::mock::Store::new() })
-                .await?
-                .clone()
+            Arc::clone(
+                TEST_STORE
+                    .get_or_try_init(|| async { keyring_core::mock::Store::new() })
+                    .await?,
+            ) as _
         } else {
             tokio::task::spawn_blocking(move || {
                 let store;
@@ -48,7 +49,7 @@ impl SecretRepo {
         Ok(Self { store })
     }
     pub async fn load_identity(&self, checkout_id: &str) -> Res<Option<RepoIdentity>> {
-        let store = self.store.clone();
+        let store = Arc::clone(&self.store);
         let user = format!("daybook.checkout.{checkout_id}.{}", Self::KEYRING_USERNAME);
         tokio::task::spawn_blocking(move || {
             let entry = store
@@ -86,7 +87,7 @@ impl SecretRepo {
         checkout_id: &str,
         secret: iroh::SecretKey,
     ) -> Res<RepoIdentity> {
-        let store = self.store.clone();
+        let store = Arc::clone(&self.store);
         let user = format!("daybook.checkout.{checkout_id}.{}", Self::KEYRING_USERNAME);
         tokio::task::spawn_blocking(move || {
             let entry = store

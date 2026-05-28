@@ -6,7 +6,6 @@ use iroh_blobs::store::fs::FsStore;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::path::{Component, Path};
-use std::str::FromStr;
 use tokio::io::AsyncWriteExt;
 
 pub mod sync;
@@ -125,7 +124,9 @@ pub const BLOB_SCOPE_PLUGS_PARTITION_ID: &str = "blob_scope/plugs";
 
 pub type BlobId = ObjId;
 
+#[cfg(test)]
 pub(crate) fn blob_id_from_hash(hash: &str) -> BlobId {
+    use std::str::FromStr;
     BlobId::from_str(hash).expect("invalid blob hash")
 }
 
@@ -773,15 +774,18 @@ impl BlobsRepo {
     }
 }
 
-pub(crate) fn daybook_hash_to_iroh_hash(hash: &str) -> Res<iroh_blobs::Hash> {
-    let blob_id = BlobId::from_str(hash).wrap_err("invalid daybook blob hash")?;
-    Ok(blob_id_to_iroh_hash(blob_id))
-}
+// #[cfg(test)]
+// pub(crate) fn daybook_hash_to_iroh_hash(hash: &str) -> Res<iroh_blobs::Hash> {
+//     use std::str::FromStr;
+//     let blob_id = BlobId::from_str(hash).wrap_err("invalid daybook blob hash")?;
+//     Ok(blob_id_to_iroh_hash(blob_id))
+// }
 
 pub(crate) fn blob_id_to_iroh_hash(blob_id: BlobId) -> iroh_blobs::Hash {
     iroh_blobs::Hash::from_bytes(*blob_id.as_bytes())
 }
 
+#[cfg(test)]
 pub(crate) fn blob_id_to_digest_str(blob_id: BlobId) -> String {
     utils_rs::hash::encode_base58_multibase_blake3(*blob_id.as_bytes())
 }
@@ -1025,7 +1029,8 @@ mod tests {
     #[tokio::test]
     async fn test_blobs_missing() -> Res<()> {
         let (repo, _temp) = setup().await;
-        assert!("not_base58_hash".parse::<BlobId>().is_err());
+        let res = repo.get_path(BlobId::random()).await;
+        assert!(res.is_err());
         Ok(())
     }
 

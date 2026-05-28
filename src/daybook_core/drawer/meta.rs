@@ -8,9 +8,6 @@ use crate::stores::VersionTag;
 use automerge::ReadDoc;
 use daybook_types::doc::{ChangeHashSet, DocId};
 
-const LOCAL_BRANCH_TABLE: &str = "drawer_local_branches";
-const LOCAL_BRANCH_DELETED_TABLE: &str = "drawer_local_branches_deleted";
-
 impl DrawerRepo {
     pub(super) async fn ensure_local_branch_schema(&self) -> Res<()> {
         sqlx::query(
@@ -23,7 +20,7 @@ impl DrawerRepo {
                 vtag_actor_id TEXT NOT NULL,
                 updated_at INTEGER NOT NULL,
                 PRIMARY KEY (doc_id, branch_path)
-            )
+            ) STRICT
             "#,
         )
         .execute(&self.meta_store_sql.write_pool)
@@ -39,7 +36,7 @@ impl DrawerRepo {
                 vtag_version TEXT NOT NULL,
                 vtag_actor_id TEXT NOT NULL,
                 deleted_at INTEGER NOT NULL
-            )
+            ) STRICT
             "#,
         )
         .execute(&self.meta_store_sql.write_pool)
@@ -201,7 +198,7 @@ impl DrawerRepo {
             return Ok(None);
         };
         Ok(Some(BranchRefRow {
-            branch_doc_id: branch_ref.branch_doc_id.into(),
+            branch_doc_id: branch_ref.branch_doc_id,
             branch_kind,
         }))
     }

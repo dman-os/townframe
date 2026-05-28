@@ -406,7 +406,7 @@ pub async fn boot_part_store(sqlite_url: &str) -> Res<(big_sync::Ctx, big_sync::
         .await?,
     );
     let store: Arc<dyn big_sync::HostPartStore> = store as _;
-    let (worker, stop) = big_sync::spawn_big_sync_worker(store.clone(), HashMap::new())?;
+    let (worker, stop) = big_sync::spawn_big_sync_worker(Arc::clone(&store), HashMap::new())?;
     Ok((big_sync::Ctx { store, worker }, stop))
 }
 

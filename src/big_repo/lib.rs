@@ -579,7 +579,7 @@ fn doc_heads_from_payload(payload: serde_json::Value) -> Arc<[ChangeHash]> {
         .cloned()
         .expect(ERROR_IMPOSSIBLE);
     let heads: Vec<String> = serde_json::from_value(heads).expect(ERROR_IMPOSSIBLE);
-    Arc::from(am_utils_rs::parse_commit_heads(&heads).expect(ERROR_IMPOSSIBLE))
+    am_utils_rs::parse_commit_heads(&heads).expect(ERROR_IMPOSSIBLE)
 }
 
 #[cfg(test)]
@@ -632,9 +632,9 @@ pub(crate) mod tests {
             )
             .await?,
         );
-        let store_for_worker: Arc<dyn big_sync::HostPartStore> = store.clone();
+        let store_for_worker: Arc<dyn big_sync::HostPartStore> = Arc::clone(&store) as _;
         let (worker, stop) =
-            big_sync::spawn_big_sync_worker(store_for_worker.clone(), HashMap::new())?;
+            big_sync::spawn_big_sync_worker(Arc::clone(&store_for_worker), HashMap::new())?;
         Ok((
             Arc::new(big_sync::Ctx {
                 store: store_for_worker,

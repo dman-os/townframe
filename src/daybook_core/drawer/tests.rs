@@ -2599,7 +2599,7 @@ async fn perf_samod_disk_add_like_drawer_baseline() -> Res<()> {
                     branches: [(
                         "main".to_string(),
                         StoredBranchRef {
-                            branch_doc_id: content_doc_id.clone(),
+                            branch_doc_id: content_doc_id,
                         },
                     )]
                     .into(),

@@ -264,6 +264,9 @@ structstruck::strike! {
                 pub cursor: CursorIndex,
                 pub part_ids: Vec<PartId>,
                 pub obj_id: ObjId,
+                // NOTE: IRPC uses postcard encoding
+                // which doesn't support serde_json::Value
+                // types
                 #[serde(
                     serialize_with = "value_as_string",
                     deserialize_with = "value_from_string"
@@ -289,37 +292,41 @@ structstruck::strike! {
         pub next_cursor: Option<CursorIndex>,
     }
 }
-fn value_as_string<S>(v: &serde_json::Value, s: S) -> Result<S::Ok, S::Error>
+fn value_as_string<S>(val: &serde_json::Value, serializer: S) -> Result<S::Ok, S::Error>
 where
     S: Serializer,
 {
-    s.serialize_str(&serde_json::to_string(v).map_err(serde::ser::Error::custom)?)
+    serializer.serialize_str(&serde_json::to_string(val).map_err(serde::ser::Error::custom)?)
 }
 
-fn value_from_string<'de, D>(d: D) -> Result<serde_json::Value, D::Error>
+fn value_from_string<'de, D>(deserializer: D) -> Result<serde_json::Value, D::Error>
 where
     D: Deserializer<'de>,
 {
-    let s = String::deserialize(d)?;
-    serde_json::from_str(&s).map_err(serde::de::Error::custom)
+    let str = String::deserialize(deserializer)?;
+    serde_json::from_str(&str).map_err(serde::de::Error::custom)
 }
 
-fn option_value_as_string<S>(v: &Option<serde_json::Value>, s: S) -> Result<S::Ok, S::Error>
+fn option_value_as_string<S>(
+    val: &Option<serde_json::Value>,
+    serializer: S,
+) -> Result<S::Ok, S::Error>
 where
     S: Serializer,
 {
-    match v {
-        Some(v) => s.serialize_some(&serde_json::to_string(v).map_err(serde::ser::Error::custom)?),
-        None => s.serialize_none(),
+    match val {
+        Some(val) => serializer
+            .serialize_some(&serde_json::to_string(val).map_err(serde::ser::Error::custom)?),
+        None => serializer.serialize_none(),
     }
 }
 
-fn option_value_from_string<'de, D>(d: D) -> Result<Option<serde_json::Value>, D::Error>
+fn option_value_from_string<'de, D>(deserializer: D) -> Result<Option<serde_json::Value>, D::Error>
 where
     D: Deserializer<'de>,
 {
-    let s = Option::<String>::deserialize(d)?;
-    s.map(|s| serde_json::from_str(&s).map_err(serde::de::Error::custom))
+    let str = Option::<String>::deserialize(deserializer)?;
+    str.map(|str| serde_json::from_str(&str).map_err(serde::de::Error::custom))
         .transpose()
 }
 

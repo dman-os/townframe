@@ -578,8 +578,6 @@ pub mod version_updates {
 
 pub struct PlugsRepo {
     pub registry: Arc<crate::repos::ListenersRegistry>,
-    big_repo: SharedBigRepo,
-    app_doc_id: DocumentId,
     app_doc_handle: big_repo::BigDocHandle,
     store: crate::stores::AmStoreHandle<PlugsStore>,
     blobs: Arc<crate::blobs::BlobsRepo>,
@@ -708,8 +706,6 @@ impl PlugsRepo {
             PlugsStore::register_change_listener(&big_repo, &app_doc_id, vec![]).await?;
 
         let repo = Self {
-            big_repo: Arc::clone(&big_repo),
-            app_doc_id,
             app_doc_handle,
             store,
             blobs,

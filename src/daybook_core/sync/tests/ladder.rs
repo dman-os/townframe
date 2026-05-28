@@ -56,7 +56,7 @@ async fn update_title_at_main_branch(node: &SyncTestNode, doc_id: &String, title
 
 async fn update_title_at_heads(
     node: &SyncTestNode,
-    doc_id: &String,
+    doc_id: &str,
     heads: &ChangeHashSet,
     title: &str,
 ) -> Res<()> {
@@ -64,7 +64,7 @@ async fn update_title_at_heads(
     node.drawer
         .update_at_heads(
             daybook_types::doc::DocPatch {
-                id: doc_id.clone(),
+                id: doc_id.to_owned(),
                 facets_set: [(title_key, WellKnownFacet::TitleGeneric(title.into()).into())].into(),
                 facets_remove: vec![],
                 user_path: Some(daybook_types::doc::UserPathBuf::from(
@@ -80,7 +80,7 @@ async fn update_title_at_heads(
 
 async fn update_note_at_heads(
     node: &SyncTestNode,
-    doc_id: &String,
+    doc_id: &str,
     heads: &ChangeHashSet,
     note: &str,
 ) -> Res<()> {
@@ -88,7 +88,7 @@ async fn update_note_at_heads(
     node.drawer
         .update_at_heads(
             daybook_types::doc::DocPatch {
-                id: doc_id.clone(),
+                id: doc_id.to_owned(),
                 facets_set: [(
                     note_key,
                     WellKnownFacet::Note(daybook_types::doc::Note {

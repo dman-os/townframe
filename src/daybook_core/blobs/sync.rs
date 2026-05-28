@@ -189,8 +189,7 @@ mod tests {
             Arc::new(NoopPartitionMembershipWriter),
         )
         .await?;
-        let part_store: big_repo::SharedPartStore =
-            Arc::new(MemoryPartStore::new(PeerId::new([1; 32])));
+        let part_store: big_repo::SharedPartStore = Arc::new(MemoryPartStore::new());
         let endpoint = iroh::Endpoint::builder(iroh::endpoint::presets::Minimal)
             .bind()
             .await

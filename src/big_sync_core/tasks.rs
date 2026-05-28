@@ -25,10 +25,10 @@ structstruck::strike! {
         MachineTaskError (pub struct {
             pub task_id: TaskId,
             pub(crate) deets: pub(crate) enum MachineTaskErrDeets {
-                DecidePeerStrategyError(DecidePeerStrategyTaskError)
-                PeerReplayWorkerError(PeerReplayWorkerError)
-                ListBucketsError(ListBucketsTaskError)
-                LeafBucketsError(LeafBucketsTaskError)
+                DecidePeerStrategy(DecidePeerStrategyTaskError)
+                PeerReplayWorker(PeerReplayWorkerError)
+                ListBuckets(ListBucketsTaskError)
+                LeafBuckets(LeafBucketsTaskError)
             },
         })
         PeerReplayWorker (PeerReplayWorkerMsg)
@@ -338,19 +338,19 @@ impl MachineTask {
             MachineTaskDeets::DecidePeerStrategy(inner) => inner
                 .run(&mut cx)
                 .await
-                .map_err(MachineTaskErrDeets::DecidePeerStrategyError),
+                .map_err(MachineTaskErrDeets::DecidePeerStrategy),
             MachineTaskDeets::PeerReplay(inner) => inner
                 .run(&mut cx)
                 .await
-                .map_err(MachineTaskErrDeets::PeerReplayWorkerError),
+                .map_err(MachineTaskErrDeets::PeerReplayWorker),
             MachineTaskDeets::ListBuckets(inner) => inner
                 .run(&mut cx)
                 .await
-                .map_err(MachineTaskErrDeets::ListBucketsError),
+                .map_err(MachineTaskErrDeets::ListBuckets),
             MachineTaskDeets::LeafBuckets(inner) => inner
                 .run(&mut cx)
                 .await
-                .map_err(MachineTaskErrDeets::LeafBucketsError),
+                .map_err(MachineTaskErrDeets::LeafBuckets),
         };
         let msg = match res {
             Ok(deets) => MachineTaskMsg::MachineTaskResult(MachineTaskResult {

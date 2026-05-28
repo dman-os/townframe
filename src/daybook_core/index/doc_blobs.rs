@@ -325,7 +325,7 @@ impl DocBlobsIndexRepo {
                 .hash_is_unused_excluding_doc_branch_tx(tx.as_mut(), hash, doc_id, branch_path)
                 .await?
             {
-                hashes_to_remove.insert(hash.clone());
+                hashes_to_remove.insert(Arc::clone(hash));
             }
         }
         let hashes_to_add: HashSet<Arc<str>> =
@@ -393,7 +393,7 @@ impl DocBlobsIndexRepo {
                 .hash_is_unused_excluding_doc_tx(tx.as_mut(), hash, doc_id)
                 .await?
             {
-                hashes_to_remove.insert(hash.clone());
+                hashes_to_remove.insert(Arc::clone(hash));
             }
         }
         self.publish_hash_delta_with_retry(&HashSet::new(), &hashes_to_remove)
@@ -424,7 +424,7 @@ impl DocBlobsIndexRepo {
                 .hash_is_unused_excluding_doc_branch_tx(tx.as_mut(), hash, doc_id, branch_path)
                 .await?
             {
-                hashes_to_remove.insert(hash.clone());
+                hashes_to_remove.insert(Arc::clone(hash));
             }
         }
         self.publish_hash_delta_with_retry(&HashSet::new(), &hashes_to_remove)

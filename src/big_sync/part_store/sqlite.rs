@@ -176,6 +176,7 @@ impl SqlitePartStore {
         ObjId(Byte32Id::new(blob.try_into().expect(ERROR_IMPOSSIBLE)))
     }
 
+    #[cfg(test)]
     fn peer_from_blob(blob: Vec<u8>) -> PeerId {
         PeerId(Byte32Id::new(blob.try_into().expect(ERROR_IMPOSSIBLE)))
     }
@@ -321,26 +322,6 @@ impl SqlitePartStore {
                 .fetch_one(&mut **tx)
                 .await?;
         Ok(scope_id)
-    }
-
-    async fn queue_transition(
-        &self,
-        tx: &mut sqlx::Transaction<'_, sqlx::Sqlite>,
-        part_id: PartId,
-    ) -> Res<CursorIndex> {
-        let cursor = Self::next_cursor(tx).await?;
-        let cursor_i64 = i64::try_from(cursor).expect(ERROR_IMPOSSIBLE);
-        sqlx::query(
-            "UPDATE big_sync_parts
-             SET latest_cursor = ?1
-             WHERE scope_id = ?2 AND part_id = ?3",
-        )
-        .bind(cursor_i64)
-        .bind(self.scope_id)
-        .bind(Self::part_blob(part_id))
-        .execute(&mut **tx)
-        .await?;
-        Ok(cursor)
     }
 
     fn publish(&self, events: Vec<SubEvent>) {
