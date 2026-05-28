@@ -319,6 +319,7 @@ impl DispatchRepo {
         found
     }
 
+    #[cfg(test)]
     pub async fn get_any_by_wflow_key(
         &self,
         wflow_key: &str,

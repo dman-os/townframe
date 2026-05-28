@@ -2,6 +2,33 @@
 
 Feel free to throw yourself or tokens at the code though I'd personally appreciate help the most in design and research.
 
+## Useful command snippets
+
+```sh
+# enter nix devShell (large, provisions android studio)
+nix develop .
+# show alternative dev shells
+nix flake show
+# run a hot reload instance daybook desktop
+./x/dev-d-dayb.ts
+# build and install to connected android device
+./x/build-a-dayb.ts
+# run the daybook cli
+DAYB_REPO_PATH=/tmp/repo1 cargo r -p daybook_cli --help
+# run the xtask CLI
+cargo x --help
+
+# test rust code
+# CRITICAL: nextest is preferred test runner
+RUST_LOG_TEST=info cargo nextest run
+# lint rust code
+cargo clippy --all-targets --all-features
+# run pre commit hooks
+prek -a
+# type check kotlin app 
+./x/check-dayb.ts
+```
+
 ## Repo guide
 
 - `./src/daybook_core/`: Rust core for daybook.
@@ -110,30 +137,3 @@ Feel free to throw yourself or tokens at the code though I'd personally apprecia
 - Newly added traits should include doc comments that explain their role and how implementations are expected to use them.
 - When writing tests, prefer comparing the equality of entire objects over fields one by one.
 - Adding a key to a hash map that shouldn't have seen that key before, add an `assert!(old.is_none(), "fishy")`
-
-## Useful command snippets
-
-```sh
-# enter nix devShell (large, provisions android studio)
-nix develop .
-# show alternative dev shells
-nix flake show
-# run a hot reload instance daybook desktop
-./x/dev-d-dayb.ts
-# build and install to connected android device
-./x/build-a-dayb.ts
-# run the daybook cli
-DAYB_REPO_PATH=/tmp/repo1 cargo r -p daybook_cli --help
-# run the xtask CLI
-cargo x --help
-
-# test rust code
-# CRITICAL: nextest is preferred test runner
-RUST_LOG_TEST=info cargo nextest run
-# lint rust code
-cargo clippy --all-targets --all-features
-# run pre commit hooks
-prek -a
-# type check kotlin app 
-./x/check-dayb.ts
-```

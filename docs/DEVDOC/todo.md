@@ -64,15 +64,16 @@
 - [ ] Bugs
   - [ ] `WflowNotFound`
     - `HostEvent(WflowRegistered)``?
-- [ ] Cancellation and shutdown
-  - [ ] We're misusing cancel tokens. CancellationToken::run_until_cancelled != cancel branc on select.
-  - [ ] Kotlin repo's should call close on Activity teardown
-  - [ ] Assert samod fsyncs reliably
-  - [ ] Notification handling
-    - [ ] How to avoid missing triage work?
+  - [ ] Cancellation and shutdown
+    - [ ] We're misusing cancel tokens. CancellationToken::run_until_cancelled != cancel branc on select.
+    - [ ] Kotlin repo's should call close on Activity teardown
+    - [ ] Assert samod fsyncs reliably
+    - [ ] Notification handling
+      - [ ] How to avoid missing triage work?
+    - [ ] Abort/cancel on StopToken Drop
+    - [ ] Drop warning on stop tokens
 - [x] Keychains for secrets
 - [ ] Predicates for losing/gaining facets
-- [ ] Drop warning on stop tokens
 
 - [ ] Cleanup and show it to people
  
