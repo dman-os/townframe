@@ -16,9 +16,7 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 use tempfile::tempdir;
 use tokio::{sync::Notify, time::timeout};
 
-pub async fn boot_part_store(
-    sqlite_url: &str,
-) -> Res<(Arc<big_sync::Ctx>, big_sync::StopToken)> {
+pub async fn boot_part_store(sqlite_url: &str) -> Res<(Arc<big_sync::Ctx>, big_sync::StopToken)> {
     let (read_pool, write_pool) = {
         let connect_options = SqliteConnectOptions::from_str(sqlite_url)
             .expect(ERROR_IMPOSSIBLE)
@@ -718,11 +716,7 @@ struct SyncMutation {
     side_label: &'static str,
 }
 
-fn make_sync_doc_value(
-    title: &str,
-    item_count: usize,
-    payload_len: usize,
-) -> serde_json::Value {
+fn make_sync_doc_value(title: &str, item_count: usize, payload_len: usize) -> serde_json::Value {
     let payload = "v".repeat(payload_len.max(1));
     make_sync_doc_value_with_payload(title, item_count, &payload)
 }
@@ -743,11 +737,7 @@ fn make_sync_doc_value_with_payload(
     })
 }
 
-fn apply_sync_mutation(
-    doc: &mut serde_json::Value,
-    mutation: SyncMutation,
-    payload_len: usize,
-) {
+fn apply_sync_mutation(doc: &mut serde_json::Value, mutation: SyncMutation, payload_len: usize) {
     let items = doc
         .get_mut("items")
         .and_then(serde_json::Value::as_array_mut)
@@ -851,10 +841,7 @@ fn write_sync_doc_value(doc: &mut automerge::Automerge, value: &serde_json::Valu
     .expect("failed writing sync doc");
 }
 
-fn write_sync_doc_value_as_transactions(
-    doc: &mut automerge::Automerge,
-    value: &serde_json::Value,
-) {
+fn write_sync_doc_value_as_transactions(doc: &mut automerge::Automerge, value: &serde_json::Value) {
     let title = value
         .get("title")
         .and_then(serde_json::Value::as_str)
@@ -1104,6 +1091,7 @@ struct SyncRepoNode {
     accept_notify: Arc<Notify>,
     accepted_connection: Arc<tokio::sync::Mutex<Option<BigRepoConnection>>>,
     big_sync_stop: big_sync::StopToken,
+    sync_backend: Arc<BigRepoSyncBackend>,
 }
 
 impl SyncRepoNode {
@@ -1132,8 +1120,7 @@ impl SyncRepoNode {
             .remove_obj_from_part(part_init_obj, stress_support::test_part())
             .await?;
         let secret_key_bytes = [seed; 32];
-        let signer =
-            subduction_crypto::signer::memory::MemorySigner::from_bytes(&secret_key_bytes);
+        let signer = subduction_crypto::signer::memory::MemorySigner::from_bytes(&secret_key_bytes);
         let peer_id = PeerId::new(*signer.verifying_key().as_bytes());
         let (repo, stop_token) = BigRepo::boot(
             Config {
@@ -1145,10 +1132,7 @@ impl SyncRepoNode {
         )
         .await?;
         big_sync_stop.stop().await?;
-        let mut sync_backends = HashMap::new();
-        sync_backends.insert(BigRepo::BACKEND_ID.into(), repo.sync_backend());
-        let (big_sync_worker, big_sync_stop) =
-            big_sync::spawn_big_sync_worker(Arc::clone(&big_sync_host.store), sync_backends)?;
+
         let endpoint = iroh::Endpoint::builder(iroh::endpoint::presets::Minimal)
             .clear_ip_transports()
             .bind_addr((std::net::Ipv4Addr::LOCALHOST, 0))?
@@ -1156,6 +1140,16 @@ impl SyncRepoNode {
             .bind()
             .await
             .wrap_err("failed binding iroh endpoint")?;
+
+        let sync_backend = Arc::new(
+            BigRepoSyncBackend::boot(Arc::downgrade(&repo), endpoint.clone())
+                .await
+                .wrap_err("failed booting big repo sync backend")?,
+        );
+        let mut sync_backends = HashMap::new();
+        sync_backends.insert(BigRepo::BACKEND_ID.into(), Arc::clone(&sync_backend) as _);
+        let (big_sync_worker, big_sync_stop) =
+            big_sync::spawn_big_sync_worker(Arc::clone(&big_sync_host.store), sync_backends)?;
 
         let (repo_rpc, repo_rpc_stop) = crate::rpc::spawn_repo_rpc(Arc::clone(&repo)).await?;
         let accept_count = Arc::new(AtomicUsize::new(0));
@@ -1203,6 +1197,7 @@ impl SyncRepoNode {
             accept_count,
             accept_notify,
             accepted_connection,
+            sync_backend,
         })
     }
 
@@ -1255,14 +1250,14 @@ impl SyncRepoNode {
         let remote_addr = endpoint_addr_from_remote_info(&self.endpoint, remote.endpoint.id())
             .await
             .unwrap_or_else(|_| remote.endpoint.addr());
-        self.repo
-            .register_remote_repo_peer(remote.peer_id(), remote_addr);
+        self.sync_backend
+            .register_remote_peer(remote.peer_id(), remote_addr);
         let self_addr = endpoint_addr_from_remote_info(&remote.endpoint, self.endpoint.id())
             .await
             .unwrap_or_else(|_| self.endpoint.addr());
         remote
-            .repo
-            .register_remote_repo_peer(self.peer_id(), self_addr);
+            .sync_backend
+            .register_remote_peer(self.peer_id(), self_addr);
         let parts = stress_support::test_parts()
             .into_iter()
             .map(|part_id| (part_id, BigRepo::BACKEND_ID.into()))
@@ -1298,6 +1293,8 @@ impl SyncRepoNode {
         if let Some(conn) = self.connections.lock().await.remove(&remote.peer_id()) {
             conn.stop().await?;
         }
+        self.sync_backend.unregister_remote_peer(remote.peer_id());
+        remote.sync_backend.unregister_remote_peer(self.peer_id());
         self.big_sync_worker.remove_peer(remote.peer_id()).await?;
         remote.big_sync_worker.remove_peer(self.peer_id()).await?;
         Ok(())
@@ -1485,12 +1482,7 @@ impl StressFixture for BigRepoStressFixture {
         node.upsert_payload(obj, payload).await
     }
 
-    async fn seed_obj(
-        &self,
-        node: &Self::Node,
-        obj: ObjId,
-        payload: serde_json::Value,
-    ) -> Res<()> {
+    async fn seed_obj(&self, node: &Self::Node, obj: ObjId, payload: serde_json::Value) -> Res<()> {
         self.track_doc(obj).await;
         node.upsert_payload(obj, payload).await
     }
@@ -1567,8 +1559,7 @@ impl StressFixture for BigRepoStressFixture {
                 );
                 if let Some((baseline_peer, baseline)) = snapshots.first() {
                     for (peer_id, snapshot) in snapshots.iter().skip(1) {
-                        let _ =
-                            writeln!(out, "peer {peer_id:?} vs baseline {baseline_peer:?}:");
+                        let _ = writeln!(out, "peer {peer_id:?} vs baseline {baseline_peer:?}:");
                         let _ = writeln!(
                             out,
                             "  baseline vs snapshot sync_store {}",
@@ -1580,10 +1571,7 @@ impl StressFixture for BigRepoStressFixture {
                         let _ = writeln!(
                             out,
                             "  baseline vs snapshot parts {}",
-                            pretty_assertions::Comparison::new(
-                                &baseline.parts,
-                                &snapshot.parts
-                            )
+                            pretty_assertions::Comparison::new(&baseline.parts, &snapshot.parts)
                         );
                         let differing_sync_store = baseline
                             .sync_store
@@ -1630,8 +1618,7 @@ impl StressFixture for BigRepoStressFixture {
                             .take(12)
                             .collect::<Vec<_>>();
 
-                        let _ =
-                            writeln!(out, "  missing sync_store keys={missing_sync_store:?}");
+                        let _ = writeln!(out, "  missing sync_store keys={missing_sync_store:?}");
                         let _ = writeln!(out, "  extra sync_store keys={extra_sync_store:?}");
 
                         let missing_parts = baseline
@@ -1786,8 +1773,7 @@ async fn run_sync_case(
                 server_conn.sync_with_peer(doc_id, Some(SYNC_PROPAGATION_TIMEOUT),),
             ),
         );
-        let client_outcome =
-            client_result.expect("timed out waiting for sync_doc_with_peer")?;
+        let client_outcome = client_result.expect("timed out waiting for sync_doc_with_peer")?;
         let server_outcome =
             server_result.expect("timed out waiting for reverse sync_doc_with_peer")?;
         assert_eq!(client_outcome, SyncDocOutcome::Success);
@@ -2126,11 +2112,16 @@ async fn apply_local_sync_mutation_and_assert_notifications(
     Ok(())
 }
 
-async fn connect_sync_pair(
-    client: &SyncRepoNode,
-    server: &SyncRepoNode,
-) -> Res<BigRepoConnection> {
-    client
+async fn connect_sync_pair(client: &SyncRepoNode, server: &SyncRepoNode) -> Res<BigRepoConnection> {
+    // client.connect_to(server).await?;
+    // Ok(client
+    //     .connections
+    //     .lock()
+    //     .await
+    //     .get(&server.peer_id())
+    //     .cloned()
+    //     .expect(ERROR_IMPOSSIBLE))
+    let conn = client
         .repo
         .open_connection_iroh(
             client.endpoint.clone(),
@@ -2138,7 +2129,14 @@ async fn connect_sync_pair(
             server.peer_id(),
             None,
         )
-        .await
+        .await?;
+    client
+        .sync_backend
+        .register_remote_peer(server.peer_id(), server.endpoint.addr());
+    server
+        .sync_backend
+        .register_remote_peer(client.peer_id(), client.endpoint.addr());
+    Ok(conn)
 }
 
 #[tracing::instrument(
@@ -2201,7 +2199,7 @@ async fn run_sync_backend_case(
     let client_conn = connect_sync_pair(&client, &server).await?;
     server.wait_for_accepts(1).await;
 
-    let backend = client.repo.sync_backend();
+    let backend = Arc::clone(&client.sync_backend);
     let local_payload = client.big_sync_store.obj_payload(doc_id).await?;
     let remote_payload = server.big_sync_store.obj_payload(doc_id).await?;
     let scenario = SyncBackendScenario {
@@ -2332,7 +2330,7 @@ async fn run_sync_backend_put_doc_conflict_case() -> Res<()> {
         .remove_obj_from_part(doc_id, sync_test_part())
         .await?;
 
-    let backend = client.repo.sync_backend();
+    let backend = Arc::clone(&client.sync_backend);
     let remote_payload = server.big_sync_store.obj_payload(doc_id).await?;
     let scenario = SyncBackendScenario {
         name: "put_doc_conflict_retries_sync_and_materializes_heads",
@@ -2498,8 +2496,7 @@ async fn big_repo_sync_backend_returns_noop_when_remote_payload_is_missing() -> 
 }
 
 #[tokio::test(flavor = "multi_thread")]
-async fn big_repo_sync_backend_applies_remote_update_when_remote_payload_is_missing() -> Res<()>
-{
+async fn big_repo_sync_backend_applies_remote_update_when_remote_payload_is_missing() -> Res<()> {
     timeout(
         SYNC_CASE_TIMEOUT,
         run_sync_backend_remote_payload_missing_changed_case(sync_test_parts()),
@@ -2763,8 +2760,7 @@ async fn sync_with_peer_local_write_emits_notifications_while_connected() -> Res
         let server_path = temp_root.path().join("server");
         let client_path = temp_root.path().join("client");
 
-        let mut expected_doc =
-            make_sync_doc_value("base", SYNC_DOC_ITEMS, SYNC_DOC_PAYLOAD_LEN);
+        let mut expected_doc = make_sync_doc_value("base", SYNC_DOC_ITEMS, SYNC_DOC_PAYLOAD_LEN);
         let mut base_doc = automerge::Automerge::new();
         write_sync_doc_value(&mut base_doc, &expected_doc);
 
@@ -2841,8 +2837,7 @@ async fn sync_with_peer_remote_change_notifies_with_live_handle_and_listeners() 
         let server_path = temp_root.path().join("server");
         let client_path = temp_root.path().join("client");
 
-        let mut expected_doc =
-            make_sync_doc_value("base", SYNC_DOC_ITEMS, SYNC_DOC_PAYLOAD_LEN);
+        let mut expected_doc = make_sync_doc_value("base", SYNC_DOC_ITEMS, SYNC_DOC_PAYLOAD_LEN);
         let mut base_doc = automerge::Automerge::new();
         write_sync_doc_value(&mut base_doc, &expected_doc);
 
@@ -2945,8 +2940,7 @@ async fn sync_with_peer_local_change_without_change_listener_only_emits_heads() 
         let server_path = temp_root.path().join("server");
         let client_path = temp_root.path().join("client");
 
-        let mut expected_doc =
-            make_sync_doc_value("base", SYNC_DOC_ITEMS, SYNC_DOC_PAYLOAD_LEN);
+        let mut expected_doc = make_sync_doc_value("base", SYNC_DOC_ITEMS, SYNC_DOC_PAYLOAD_LEN);
         let mut base_doc = automerge::Automerge::new();
         write_sync_doc_value(&mut base_doc, &expected_doc);
 

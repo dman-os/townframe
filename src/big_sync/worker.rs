@@ -38,9 +38,12 @@ pub enum BigSyncWorkerError {
 }
 
 structstruck::strike! {
-enum BigSyncWorkerMsg {
+    #[derive(educe::Educe)]
+    #[educe(Debug)]
+    enum BigSyncWorkerMsg {
         SetPeer {
             peer_id: PeerId,
+            #[educe(Debug(ignore))]
             client: SharedPeerRpcClient,
             /// Partitions to sync from the peer
             parts: HashMap<PartId, BackendId>,
@@ -408,31 +411,37 @@ impl BigSyncWorker {
             tokio::select! {
                 biased;
                 _ = self.cancel_token.cancelled() => {
+                    info!("XXX cancelled");
                     break;
                 }
                 msg = self.task_rx.recv() => {
                     let Ok(msg) = msg else {
                         break;
                     };
+                    info!(?msg, "XXX task msg");
                     self.machine.handle_task_msg(msg);
                 }
                 evt = self.sync_rx.recv() => {
                     let Ok(evt) = evt else {
                         break;
                     };
+                    info!(?evt, "XXX sync msg");
                     self.machine.handle_evt(evt);
                 }
                 msg = self.host_rx.recv() => {
                     let Some(msg) = msg else {
                         break;
                     };
+                    info!(?msg, "XXX host msg");
                     self.handle_msg(msg).await?;
                 }
                 _ = janitor_tick.tick() => {
+                    // info!("XXX jainator tick");
                     self.machine.handle_tick(std::time::Instant::now());
                 }
             };
             while let Some((id, cmd)) = self.machine.get_cmd() {
+                info!(?cmd, "XXX cmd");
                 match cmd {
                     BigSyncMachineCommand::RemoveObjFromPart { obj_id, part_id } => {
                         self.part_store
@@ -461,6 +470,7 @@ impl BigSyncWorker {
             self.machine_spawn_queue
                 .extend(self.machine.drain_machine_spawn_queue());
             while let Some(task) = self.machine_spawn_queue.pop_front() {
+                info!(?task, "XXX machine task");
                 self.spawn_machine_task(task, Arc::clone(&shutdown)).await?;
             }
 
@@ -471,10 +481,12 @@ impl BigSyncWorker {
                 let Some(task) = self.sync_spawn_queue.pop_front() else {
                     break;
                 };
+                info!(?task, "XXX sync task");
                 self.spawn_sync_task(task).await?;
             }
             self.sweep_finished_zombies();
             for event in self.machine.drain_stat_evts() {
+                info!(?event, "XXX stat event");
                 if let big_sync_core::SyncStatEvent::FullSyncWaiterSatisfied { waiter_id } = event {
                     if let Some(resp) = self.full_sync_waiters.remove(&waiter_id) {
                         let _ = resp.send(Ok(()));

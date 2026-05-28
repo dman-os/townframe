@@ -69,6 +69,8 @@ pub trait HostPartStore: Send + Sync {
         &self,
         reqs: SubPartsRequest,
     ) -> Res<Result<mpsc::Receiver<SubEvent>, ListPartsError>>;
+
+    async fn ensure_part(&self, part_id: PartId) -> Res<()>;
 }
 
 pub(crate) fn obj_id_bounds_for_bucket(bucket_id: BuckId) -> (ObjId, Option<ObjId>) {
@@ -401,8 +403,6 @@ pub mod host_contract {
     #[async_trait]
     pub trait HostPartStoreContractHarness {
         fn store(&self) -> &dyn HostPartStore;
-
-        async fn ensure_part(&self, part_id: PartId) -> Res<()>;
     }
 
     fn test_part(seed: u8) -> PartId {
@@ -521,8 +521,8 @@ pub mod host_contract {
         let obj_a = test_obj(1);
         let obj_b = test_obj(2);
 
-        harness.ensure_part(part_a).await?;
-        harness.ensure_part(part_b).await?;
+        store.ensure_part(part_a).await?;
+        store.ensure_part(part_b).await?;
 
         assert_eq!(
             store.summarize_parts(HashSet::new()).await??,
@@ -573,7 +573,7 @@ pub mod host_contract {
         let obj_b = obj_in_bucket(bucket_b, 2);
         let obj_c = obj_in_bucket(bucket_c, 3);
 
-        harness.ensure_part(part).await?;
+        store.ensure_part(part).await?;
         seed_live_obj(store, obj_a, payload("changed-a", 1), &[part]).await?;
         seed_live_obj(store, obj_b, payload("changed-b", 2), &[part]).await?;
         seed_live_obj(store, obj_c, payload("changed-c", 3), &[part]).await?;
@@ -676,7 +676,7 @@ pub mod host_contract {
         let obj = obj_in_bucket(bucket, 9);
         let seed = FingerprintSeed::new(0x4444_5555, 0x6666_7777);
 
-        harness.ensure_part(part).await?;
+        store.ensure_part(part).await?;
         store.add_obj_to_parts(obj, vec![part]).await?;
 
         assert_eq!(store.obj_payload(obj).await?, None);
@@ -844,7 +844,7 @@ pub mod host_contract {
         let b1 = obj_in_bucket(bucket_b, 1);
         let seed = FingerprintSeed::new(0xaaaa_bbbb, 0xcccc_dddd);
 
-        harness.ensure_part(part).await?;
+        store.ensure_part(part).await?;
         seed_live_obj(store, a2, payload("leaf-a2", 2), &[part]).await?;
         seed_live_obj(store, a1, payload("leaf-a1", 1), &[part]).await?;
         seed_live_obj(store, a3, payload("leaf-a3", 3), &[part]).await?;
@@ -1015,8 +1015,8 @@ pub mod host_contract {
         let unknown = test_part(43);
         let obj = test_obj(44);
 
-        harness.ensure_part(part_a).await?;
-        harness.ensure_part(part_b).await?;
+        store.ensure_part(part_a).await?;
+        store.ensure_part(part_b).await?;
 
         seed_live_obj(store, obj, payload("events-1", 1), &[part_a]).await?;
         store.add_obj_to_parts(obj, vec![part_b]).await?;
@@ -1073,8 +1073,8 @@ pub mod host_contract {
         let part_b = test_part(52);
         let obj = test_obj(53);
 
-        harness.ensure_part(part_a).await?;
-        harness.ensure_part(part_b).await?;
+        store.ensure_part(part_a).await?;
+        store.ensure_part(part_b).await?;
 
         seed_live_obj(store, obj, payload("sub-1", 1), &[part_a]).await?;
         store.add_obj_to_parts(obj, vec![part_b]).await?;

@@ -17,18 +17,20 @@ pub struct LeafBucketsTask {
     pub buckets: Vec<LeafBucketRequest>,
 }
 
+#[derive(Debug)]
 pub struct LeafBucketsResult {
     pub peer_id: PeerId,
     pub filtered_objs: Map<BuckId, BucketObjLeafPage>,
 }
 
 structstruck::strike! {
+    #[structstruck::each[derive(Debug)]]
     pub struct LeafBucketsTaskError {
         pub peer_id: PeerId,
         pub part_id: PartId,
         pub _deets:
             pub enum LeafBucketsErrorDeets {
-                #![derive(Debug, thiserror::Error, displaydoc::Display)]
+                #![derive(thiserror::Error, displaydoc::Display)]
                 /// {0}
                 LeafErrror(#[from] LeafBucketsError)
                 /// {0}

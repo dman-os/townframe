@@ -1,18 +1,20 @@
 use super::HostPartStore;
 use crate::interlude::*;
 #[cfg(test)]
-use crate::test_support::{
-    ObservedObjSnapshot, ObservedStore, ObservedStoreSnapshot, TestStoreSetup,
-};
+use crate::test_support::{ObservedObjSnapshot, ObservedStore, ObservedStoreSnapshot};
 
-use big_sync_core::part_store::{CursorIndex, ObjPayload, PartStoreReadOnly};
+#[cfg(test)]
+use big_sync_core::part_store::PartStoreReadOnly;
+use big_sync_core::part_store::{CursorIndex, ObjPayload};
 use big_sync_core::rpc::{
     BucketObjPageEntry, BucketSummary, GetChangedBucketsRequest, LeafBucketPage, LeafBucketResult,
     LeafBucketsError, LeafBucketsRequest, ListPartsError, PartEvent, PartPage, PartSummary,
     SubEvent, SubPartsRequest, BUCKET_DEAD_FP_SEED, BUCKET_LIVE_FP_SEED,
 };
 use big_sync_core::{mpsc, BuckId, Byte32Id, Fingerprint, ObjId, PartId, PeerId};
+#[cfg(test)]
 use future_form::{FutureForm, Sendable};
+#[cfg(test)]
 use futures::future::BoxFuture;
 use sqlx::{QueryBuilder, Row};
 #[cfg(test)]
@@ -1338,8 +1340,22 @@ impl HostPartStore for SqlitePartStore {
         }
         Ok(Ok(rx))
     }
+
+    async fn ensure_part(&self, part_id: PartId) -> Res<()> {
+        sqlx::query(
+            "INSERT INTO big_sync_parts(scope_id, part_id, latest_cursor)
+             VALUES (?1, ?2, 0)
+             ON CONFLICT(scope_id, part_id) DO NOTHING",
+        )
+        .bind(self.scope_id)
+        .bind(Self::part_blob(part_id))
+        .execute(&self.write_pool)
+        .await?;
+        Ok(())
+    }
 }
 
+#[cfg(test)]
 impl PartStoreReadOnly<Sendable> for SqlitePartStore {
     fn member_count<'a>(&'a self, part_id: PartId) -> BoxFuture<'a, u64> {
         Sendable::from_future(async move {
@@ -1390,6 +1406,7 @@ impl PartStoreReadOnly<Sendable> for SqlitePartStore {
     }
 }
 
+#[cfg(test)]
 impl big_sync_core::part_store::PartStore<Sendable> for SqlitePartStore {
     fn upsert_obj<'a>(&'a self, obj_id: ObjId, payload: &ObjPayload) -> BoxFuture<'a, ()> {
         let payload = payload.clone();
@@ -1491,27 +1508,9 @@ impl ObservedStore for SqlitePartStore {
 }
 
 #[cfg(test)]
-#[async_trait]
-impl TestStoreSetup for SqlitePartStore {
-    async fn ensure_test_part(&self, part_id: PartId) -> Res<()> {
-        sqlx::query(
-            "INSERT INTO big_sync_parts(scope_id, part_id, latest_cursor)
-             VALUES (?1, ?2, 0)
-             ON CONFLICT(scope_id, part_id) DO NOTHING",
-        )
-        .bind(self.scope_id)
-        .bind(Self::part_blob(part_id))
-        .execute(&self.write_pool)
-        .await?;
-        Ok(())
-    }
-}
-
-#[cfg(test)]
 mod tests {
     use super::*;
     use crate::part_store::host_contract::{self, HostPartStoreContractHarness};
-    use crate::test_support::TestStoreSetup;
     use big_sync_core::part_store::contract;
     use std::str::FromStr;
 
@@ -1705,10 +1704,6 @@ mod tests {
     impl HostPartStoreContractHarness for SqliteHostHarness {
         fn store(&self) -> &dyn HostPartStore {
             &self.store
-        }
-
-        async fn ensure_part(&self, part_id: PartId) -> Res<()> {
-            self.store.ensure_test_part(part_id).await
         }
     }
 

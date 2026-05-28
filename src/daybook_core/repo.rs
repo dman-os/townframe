@@ -643,6 +643,15 @@ pub(crate) async fn ensure_expected_partitions_for_docs(
     doc_drawer_id: DocumentId,
 ) -> Res<()> {
     let core_docs_partition_id = crate::part_id_from_label(crate::sync::CORE_DOCS_PARTITION_ID);
+    for part_id in [
+        core_docs_partition_id,
+        crate::drawer::DrawerRepo::replicated_partition_id_for_drawer(&doc_drawer_id),
+        //     crate::part_id_from_label(crate::rt::PROCESSOR_RUNLOG_PARTITION_ID),
+        crate::part_id_from_label(crate::blobs::BLOB_SCOPE_DOCS_PARTITION_ID),
+        crate::part_id_from_label(crate::blobs::BLOB_SCOPE_PLUGS_PARTITION_ID),
+    ] {
+        partition_store.ensure_part(part_id).await?;
+    }
     partition_store
         .add_obj_to_parts(doc_drawer_id, vec![core_docs_partition_id])
         .await?;

@@ -233,6 +233,7 @@ pub async fn connect_and_pull_required_partitions_once(
     result
 }
 
+#[tracing::instrument(skip_all)]
 async fn pull_required_partitions_via_big_sync_worker(
     big_repo: &SharedBigRepo,
     blobs_repo: &Arc<crate::blobs::BlobsRepo>,
@@ -252,7 +253,15 @@ async fn pull_required_partitions_via_big_sync_worker(
     ));
     let mut sync_backends = HashMap::new();
     let repo_backend_id = big_repo::BigRepo::BACKEND_ID.into();
-    sync_backends.insert(Arc::clone(&repo_backend_id), big_repo.sync_backend());
+    let repo_sync_backend = Arc::new(
+        big_repo::BigRepoSyncBackend::boot(Arc::downgrade(big_repo), endpoint.clone())
+            .await
+            .wrap_err("failed booting big repo sync backend")?,
+    );
+    sync_backends.insert(
+        Arc::clone(&repo_backend_id),
+        Arc::clone(&repo_sync_backend) as _,
+    );
     sync_backends.insert(
         super::BLOBS_BACKEND_ID.into(),
         Arc::clone(&blob_sync_backend) as _,
@@ -305,8 +314,10 @@ async fn pull_required_partitions_via_big_sync_worker(
     big_sync_worker
         .set_peer(peer_id, big_sync_rpc_client, initial_partitions.clone())
         .await?;
+    repo_sync_backend.register_remote_peer(peer_id, bootstrap.endpoint_addr.clone());
     blob_sync_backend.register_remote_peer(peer_id, bootstrap.endpoint_addr.clone());
 
+    info!("XXX onto wait_for_full_sync");
     let timeout_result = tokio::time::timeout(timeout, async {
         // Only wait on the partitions that are guaranteed to exist during clone bootstrap.
         // Blob-scope partitions are populated lazily as blobs/plugs appear after the repo
@@ -497,8 +508,10 @@ pub async fn clone_repo_init_from_url(
         )
         .await?;
 
+        info!("XXX onto ensure_bootstrap_local_partitions");
         ensure_bootstrap_local_partitions(&part_store, &bootstrap).await?;
 
+        info!("XXX onto connect_and_pull_required_partitions_once");
         connect_and_pull_required_partitions_once(
             &big_repo,
             &blobs_repo,

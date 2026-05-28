@@ -19,7 +19,7 @@ use serde::{Deserialize, Serialize};
 use crate::backend::contract::{self, SyncBackendHarness, SyncBackendScenario};
 use crate::part_store::memory::MemoryPartStore;
 use crate::part_store::HostPartStore;
-use crate::test_support::{ObservedStore, ObservedStoreSnapshot, TestStoreSetup};
+use crate::test_support::{ObservedStore, ObservedStoreSnapshot};
 use crate::{Ctx, SyncTaskRunOutcome};
 
 const TEST_BACKEND_ID: &str = "MemorySyncBackend";
@@ -713,9 +713,9 @@ async fn boot_node_with_store<S>(
     restart_memory_store: Option<Arc<MemoryPartStore>>,
 ) -> Res<NodeHarness>
 where
-    S: ObservedStore + TestStoreSetup + HostPartStore + 'static,
+    S: ObservedStore + HostPartStore + 'static,
 {
-    store.ensure_test_part(test_part()).await?;
+    store.ensure_part(test_part()).await?;
     world.set_online(peer_id, true);
     world.register_store(peer_id, Arc::clone(&store));
     let store_for_worker: Arc<dyn HostPartStore> = Arc::clone(&store) as _;

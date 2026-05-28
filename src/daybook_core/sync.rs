@@ -116,6 +116,7 @@ pub struct IrohSyncRepo {
     reconnect_task: Arc<std::sync::Mutex<Option<JoinHandle<()>>>>,
     big_sync_worker: big_sync::BigSyncWorkerHandle,
     _big_sync_rpc: big_sync::rpc::BigSyncRpcHandle,
+    repo_sync_backend: Arc<big_repo::BigRepoSyncBackend>,
 }
 
 #[derive(Debug, Clone)]
@@ -192,9 +193,9 @@ impl IrohSyncRepoStopToken {
             utils_rs::scale_timeout(Duration::from_secs(10)),
         )
         .await?;
+        self.big_sync_worker_stop.stop().await?;
         self.big_sync_rpc_stop.stop().await?;
         self.big_repo_rpc_stop_token.stop().await?;
-        self.big_sync_worker_stop.stop().await?;
         // NOTE: we only add timeouts for stop tokens that don't have internal
         // timeouts
         tokio::time::timeout(
@@ -241,24 +242,22 @@ impl IrohSyncRepo {
         let (conn_end_tx, conn_end_rx) = mpsc::unbounded_channel();
         let (clone_rpc_tx, clone_rpc_rx) = mpsc::channel(128);
 
-        // let (partition_sync_store, partition_sync_store_stop_token) =
-        //     am_utils_rs::sync::store::spawn_sync_store(rcx.sql.db_pool.clone()).await?;
-        // let (partition_sync_node, partition_sync_stop_token) =
-        //     am_utils_rs::sync::node::spawn_sync_node(
-        //         Arc::clone(&rcx.partition_store),
-        //         partition_sync_store.clone(),
-        //         Arc::new(am_utils_rs::sync::AllowAllPartitionAccessPolicy),
-        //     )
-        //     .await?;
-        // let partition_sync_node = Arc::new(partition_sync_node);
         let (big_repo_rpc, repo_rpc_stop_token) =
             big_repo::rpc::spawn_repo_rpc(Arc::clone(&rcx.big_repo)).await?;
 
-        let repo_sync_backend = rcx.big_repo.sync_backend();
-        let blob_sync_backend: Arc<dyn big_sync::SyncBackend> = Arc::clone(&blobs_sync_backend) as _;
+        let repo_sync_backend = Arc::new(
+            big_repo::BigRepoSyncBackend::boot(Arc::downgrade(&rcx.big_repo), endpoint.clone())
+                .await
+                .wrap_err("failed booting big repo sync backend")?,
+        );
+        let blob_sync_backend: Arc<dyn big_sync::SyncBackend> =
+            Arc::clone(&blobs_sync_backend) as _;
         let mut sync_backends = std::collections::HashMap::new();
-        sync_backends.insert(big_repo::BigRepo::BACKEND_ID.into(), repo_sync_backend);
         sync_backends.insert(BLOBS_BACKEND_ID.into(), blob_sync_backend);
+        sync_backends.insert(
+            big_repo::BigRepo::BACKEND_ID.into(),
+            Arc::clone(&repo_sync_backend) as _,
+        );
         let (big_sync_worker, big_sync_worker_stop) =
             big_sync::spawn_big_sync_worker(Arc::clone(&rcx.part_store), sync_backends)?;
 
@@ -323,6 +322,7 @@ impl IrohSyncRepo {
             conn_end_signal_tx: conn_end_tx,
             reconnect_task: Arc::clone(&reconnect_task),
             big_sync_worker,
+            repo_sync_backend,
             _big_sync_rpc: big_sync_rpc, // active_endpoint_ids: tokio::sync::RwLock::new(HashMap::new()),
         });
         #[cfg(test)]
@@ -533,7 +533,7 @@ impl IrohSyncRepo {
             .copied()
             .collect::<Vec<_>>();
         for peer_id in active_peers {
-            self.rcx.big_repo.unregister_remote_repo_peer(peer_id);
+            self.repo_sync_backend.unregister_remote_peer(peer_id);
             self.blobs_sync_backend.unregister_remote_peer(peer_id);
             self.big_sync_worker.remove_peer(peer_id).await.ok();
         }
@@ -570,11 +570,13 @@ impl IrohSyncRepo {
                 big_sync::rpc::IrohBigSyncRpcClient::new(endpoint, addr.clone());
             let big_sync_rpc_client = Arc::new(big_sync_rpc_client);
 
+            self.blobs_sync_backend
+                .register_remote_peer(conn.peer_id, addr.clone());
+            self.repo_sync_backend
+                .register_remote_peer(conn.peer_id, addr.clone());
             self.big_sync_worker
                 .set_peer(conn.peer_id, big_sync_rpc_client, partition_ids)
                 .await?;
-            self.blobs_sync_backend
-                .register_remote_peer(conn.peer_id, addr.clone());
 
             let old = self
                 .active_peers
@@ -599,9 +601,8 @@ impl IrohSyncRepo {
         self: &Arc<Self>,
         signal: big_repo::ConnFinishSignal,
     ) -> Res<()> {
-        self.rcx
-            .big_repo
-            .unregister_remote_repo_peer(signal.peer_id);
+        self.repo_sync_backend
+            .unregister_remote_peer(signal.peer_id);
         self.blobs_sync_backend
             .unregister_remote_peer(signal.peer_id);
         self.big_sync_worker.remove_peer(signal.peer_id).await?;
@@ -741,11 +742,13 @@ impl IrohSyncRepo {
                 big_sync::rpc::IrohBigSyncRpcClient::new(endpoint, endpoint_addr.clone());
             let big_sync_rpc_client = Arc::new(big_sync_rpc_client);
 
+            self.blobs_sync_backend
+                .register_remote_peer(conn.peer_id, endpoint_addr.clone());
+            self.repo_sync_backend
+                .register_remote_peer(conn.peer_id, endpoint_addr.clone());
             self.big_sync_worker
                 .set_peer(conn.peer_id, big_sync_rpc_client, partition_ids)
                 .await?;
-            self.blobs_sync_backend
-                .register_remote_peer(conn.peer_id, endpoint_addr.clone());
 
             let old = self
                 .active_peers

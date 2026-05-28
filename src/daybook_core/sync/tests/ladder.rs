@@ -4,6 +4,7 @@ use super::*;
 
 async fn boot_connected_sync_pair(
 ) -> Res<(tempfile::TempDir, SyncTestNode, SyncTestNode, EndpointId)> {
+    info!("XXX boot_connected_sync_pair");
     let temp_root = tempfile::tempdir()?;
     let repo_a_path = temp_root.path().join("repo-a");
     let repo_b_path = temp_root.path().join("repo-b");
@@ -18,14 +19,19 @@ async fn boot_connected_sync_pair(
     .await?;
     rtx.shutdown().await?;
 
+    info!("XXX opening node a");
     let node_a = open_sync_node(&repo_a_path).await?;
     let ticket_a = node_a.sync_repo.get_clone_ticket_url().await?;
+    info!("XXX cloning node");
     bootstrap_clone_repo_from_url_for_tests(&ticket_a, &repo_b_path).await?;
+    info!("XXX opening node b");
     let node_b = open_sync_node(&repo_b_path).await?;
 
+    info!("XXX connecting");
     let addr_a = node_a.sync_repo.endpoint_addr();
     let endpoint_id_a = addr_a.id;
     node_b.sync_repo.connect_endpoint_addr(addr_a).await?;
+    info!("XXX waiting");
     wait_for_sync_convergence(&node_a, &node_b, endpoint_id_a, Duration::from_secs(20)).await?;
 
     Ok((temp_root, node_a, node_b, endpoint_id_a))

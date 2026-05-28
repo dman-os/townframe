@@ -1,5 +1,10 @@
 # duck-log
 
+## 2026-05-29 | shoddy
+
+I'm confused about my engineering approach here.
+Vibecoding and trying to ship fast means it's all shoddy, somewhat okay bones but with a lot of documented broken mirrors.
+
 ## 2026-05-18 | willow, willow, willow
 
 So I finally sat down and read most of the https://willowprotocol.org/.

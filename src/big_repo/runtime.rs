@@ -825,22 +825,19 @@ where
         runtime_tasks
             .spawn(
                 async move {
-                    let res: Res<()> = async {
-                        loop {
-                            tokio::select! {
-                                biased;
-                                _ = worker_cancel.cancelled() => break,
-                                msg = msg_rx.recv() => {
-                                    let Some(msg) = msg else { break; };
-                                    worker.handle_msg(msg).await?;
-                                }
+                    let res = worker_cancel
+                        .run_until_cancelled(async {
+                            loop {
+                                let Some(msg) = msg_rx.recv().await else {
+                                    break;
+                                };
+                                worker.handle_msg(msg).await?;
                             }
-                        }
-                        Ok(())
-                    }
-                    .await;
+                            eyre::Ok(())
+                        })
+                        .await;
                     // FIXME: why two errors instead of stopped with error variant
-                    if let Err(err) = res {
+                    if let Some(Err(err)) = res {
                         worker
                             .runtime_evt_tx
                             .send(RuntimeEvt::FatalWorkerError {
@@ -1315,6 +1312,7 @@ where
         Ok(())
     }
 
+    #[tracing::instrument(skip_all)]
     async fn handle_put_doc(
         &mut self,
         doc: Box<automerge::Automerge>,
@@ -1331,7 +1329,6 @@ where
         let sedimentree_id: SedimentreeId = self.doc_id_subduction;
         let ingested = automerge_sedimentree::ingest::ingest_automerge(&doc, sedimentree_id)
             .map_err(|err| ferr!("failed ingesting automerge doc: {err}"))?;
-        info!("adding sedimentree");
         self.subduction
             .add_sedimentree(sedimentree_id, ingested.sedimentree, ingested.blobs)
             .await
@@ -1402,6 +1399,7 @@ where
         Ok(Some(bundle))
     }
 
+    #[tracing::instrument(skip_all)]
     async fn handle_export_doc_save(&mut self) -> Res<Option<Vec<u8>>> {
         match &self.state {
             DocWorkerDocState::Live(bundle) => match bundle.upgrade() {
@@ -1737,6 +1735,7 @@ where
         process_fragment_requests(Arc::clone(&bundle), requests, Arc::clone(&self.subduction)).await
     }
 
+    #[tracing::instrument(skip_all)]
     async fn take_or_load_transient_doc(&mut self) -> Res<Option<automerge::Automerge>> {
         let out = match std::mem::replace(&mut self.state, DocWorkerDocState::Unloaded) {
             DocWorkerDocState::Transient(doc) => Ok(Some(*doc)),
@@ -1763,15 +1762,6 @@ async fn commit_delta_bookkeep(
     let item_payload = serde_json::json!({
         "heads": am_utils_rs::serialize_commit_heads(&heads),
     });
-    let has_change_listener_interest = change_manager.has_change_listener_interest(doc_id, &origin);
-    info!(
-        %doc_id,
-        ?origin,
-        heads = heads.len(),
-        patches = patches.len(),
-        has_change_listener_interest,
-        "bookkeeping committed delta"
-    );
     big_sync_store.set_obj_payload(doc_id, item_payload).await?;
 
     let heads_arc = Arc::<[automerge::ChangeHash]>::from(heads);
@@ -1975,7 +1965,6 @@ where
 {
     let doc_id: DocumentId = doc_id.into();
     let sedimentree_id = SedimentreeId::new(doc_id.into_bytes());
-    info!(%doc_id, sedimentree_id = %sedimentree_id, "loading doc snapshot");
 
     let loose_commits =
         <S as subduction_core::storage::traits::Storage<future_form::Sendable>>::load_loose_commits(
@@ -1990,12 +1979,6 @@ where
     let (loose_commits, fragments) = futures::future::try_join(loose_commits, fragments)
         .await
         .wrap_err("failed reading blobs from storage")?;
-    info!(
-        %doc_id,
-        loose_commits = loose_commits.len(),
-        fragments = fragments.len(),
-        "loaded doc snapshot blobs"
-    );
     if loose_commits.is_empty() && fragments.is_empty() {
         return Ok(None);
     }
@@ -2021,7 +2004,6 @@ where
             (tree, true)
         }
     };
-    info!(%doc_id, fresh, blobs = blobs.len(), "building sedimentree order");
     let blob_by_digest = blobs
         .iter()
         .map(|blob| (Digest::hash(blob), blob.as_slice()))
@@ -2029,7 +2011,6 @@ where
     let order = tree
         .topsorted_blob_order()
         .map_err(|err| ferr!("failed ordering sedimentree blobs: {err}"))?;
-    info!(%doc_id, items = order.len(), "built sedimentree order");
     let fragments: Vec<_> = tree.fragments().collect();
     let loose: Vec<_> = tree.loose_commits().collect();
 
@@ -2045,11 +2026,9 @@ where
         buf.extend_from_slice(raw);
     }
 
-    info!(%doc_id, buf_len = buf.len(), "loading doc snapshot into automerge");
     let mut doc = automerge::Automerge::new();
     doc.load_incremental(&buf)
         .map_err(|err| ferr!("failed reconstructing automerge doc from ordered blobs: {err}"))?;
-    info!(%doc_id, heads = doc.get_heads().len(), "loaded doc snapshot");
 
     if fresh {
         sedimentrees.insert(sedimentree_id, tree).await;

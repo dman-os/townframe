@@ -7,11 +7,14 @@ use crate::{
     rpc::BigSyncRpcClient,
     tasks::{MachineTaskMsg, TaskCtx, TaskId, TaskResultDeets},
 };
+
+#[derive(Debug)]
 pub struct PeerReplayTask {
     pub peer_id: PeerId,
     pub parts: Map<PartId, CursorIndex>,
 }
 
+#[derive(Debug)]
 pub struct PeerReplayWorkerMsg {
     pub task_id: TaskId,
     pub peer_id: PeerId,
@@ -19,11 +22,12 @@ pub struct PeerReplayWorkerMsg {
 }
 
 structstruck::strike! {
+    #[structstruck::each[derive(Debug)]]
     pub struct PeerReplayWorkerError {
         pub peer_id: PeerId,
         pub deets:
             pub enum PeerReplayWorkerErrorDeets {
-                #![derive(Debug, thiserror::Error, displaydoc::Display)]
+                #![derive(thiserror::Error, displaydoc::Display)]
                 /// StreamClosed
                 StreamClosed,
                 /// {0}

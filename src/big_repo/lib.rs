@@ -28,7 +28,7 @@ pub use runtime::{PutDocError, SyncDocOutcome};
 #[cfg(test)]
 pub(crate) mod test;
 
-use backend::BigRepoSyncBackend;
+pub use backend::BigRepoSyncBackend;
 
 pub use changes::{
     path_prefix_matches as big_repo_path_prefix_matches, BigRepoChangeNotification,
@@ -65,8 +65,6 @@ pub struct BigRepo {
     change_manager: Arc<changes::ChangeListenerManager>,
     #[educe(Debug(ignore))]
     change_manager_stop: std::sync::Mutex<Option<changes::ChangeListenerManagerStopToken>>,
-    #[educe(Debug(ignore))]
-    sync_backend: tokio::sync::OnceCell<Arc<BigRepoSyncBackend>>,
 }
 
 pub type SharedBigRepo = Arc<BigRepo>;
@@ -118,17 +116,7 @@ impl BigRepo {
             runtime,
             change_manager,
             change_manager_stop: std::sync::Mutex::new(Some(change_manager_stop)),
-            sync_backend: tokio::sync::OnceCell::new(),
         });
-
-        let sync_backend = Arc::new(
-            BigRepoSyncBackend::boot(Arc::downgrade(&out))
-                .await
-                .wrap_err("failed booting big repo sync backend")?,
-        );
-        out.sync_backend
-            .set(Arc::clone(&sync_backend))
-            .unwrap_or_else(|_| panic!("big repo sync backend already initialized"));
 
         let change_manager_stop = out
             .change_manager_stop
@@ -148,32 +136,6 @@ impl BigRepo {
 
     pub fn local_peer_id(&self) -> PeerId {
         self.local_peer_id
-    }
-
-    pub fn sync_backend(self: &Arc<Self>) -> Arc<dyn big_sync::SyncBackend> {
-        let backend = self.sync_backend.get().expect(ERROR_IMPOSSIBLE);
-        let backend: Arc<dyn big_sync::SyncBackend> = Arc::clone(backend) as _;
-        backend
-    }
-
-    fn register_remote_repo_peer(
-        self: &Arc<Self>,
-        peer_id: PeerId,
-        endpoint_addr: iroh::EndpointAddr,
-    ) {
-        let backend = self
-            .sync_backend
-            .get()
-            .expect("big repo sync backend not initialized");
-        backend.register_remote_peer(peer_id, endpoint_addr)
-    }
-
-    pub fn unregister_remote_repo_peer(self: &Arc<Self>, peer_id: PeerId) {
-        let backend = self
-            .sync_backend
-            .get()
-            .expect("big repo sync backend not initialized");
-        backend.unregister_remote_peer(peer_id)
     }
 }
 
@@ -230,12 +192,10 @@ impl BigRepo {
         peer_id: PeerId,
         end_signal_tx: Option<tokio::sync::mpsc::UnboundedSender<ConnFinishSignal>>,
     ) -> Res<BigRepoConnection> {
-        let register_endpoint_addr = endpoint_addr.clone();
         let (peer_id, closed) = self
             .runtime
             .open_connection_iroh(endpoint, endpoint_addr, peer_id, end_signal_tx)
             .await?;
-        self.register_remote_repo_peer(peer_id, register_endpoint_addr);
         Ok(BigRepoConnection {
             repo: Arc::clone(self),
             peer_id,
@@ -256,11 +216,6 @@ impl BigRepo {
             .runtime
             .accept_connection_iroh(conn, end_signal_tx)
             .await?;
-        let endpoint_addr = iroh::EndpointAddr::new(
-            iroh::PublicKey::from_bytes(peer_id.as_bytes())
-                .expect("big repo peer id must be a valid iroh public key"),
-        );
-        self.register_remote_repo_peer(peer_id, endpoint_addr);
         Ok(BigRepoConnection {
             repo: Arc::clone(self),
             peer_id,
@@ -310,7 +265,6 @@ impl BigRepoConnection {
     }
 
     pub async fn stop(self) -> Res<()> {
-        self.repo.unregister_remote_repo_peer(self.peer_id);
         self.repo.runtime.close_peer_connection(self.peer_id).await
     }
 }

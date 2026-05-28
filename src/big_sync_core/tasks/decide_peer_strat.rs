@@ -10,12 +10,14 @@ use crate::{
     tasks::{TaskCtx, TaskResultDeets},
 };
 
+#[derive(Debug)]
 pub struct DecidePeerStrategyTask {
     pub peer_id: PeerId,
     pub parts: Set<PartId>,
 }
 
 structstruck::strike! {
+    #[structstruck::each[derive(Debug)]]
     pub struct SetPeerStrategy {
         pub peer_id: PeerId,
         pub part_strats: Map<PartId, pub enum PeerPartStratDecision{
@@ -38,11 +40,12 @@ structstruck::strike! {
     }
 }
 structstruck::strike! {
+    #[structstruck::each[derive(Debug)]]
     pub struct DecidePeerStrategyTaskError {
         pub peer_id: PeerId,
         pub deets:
             enum DecidePeerStrategyErrorDeets {
-                #![derive(Debug, thiserror::Error, displaydoc::Display)]
+                #![derive(thiserror::Error, displaydoc::Display)]
                 /// {0}
                 ListError(#[from] ListPartsError)
                 /// {0}

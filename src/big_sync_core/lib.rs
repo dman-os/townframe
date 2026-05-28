@@ -62,6 +62,7 @@ uniffi::custom_newtype!(PartId, Byte32Id);
 uniffi::custom_newtype!(ObjId, Byte32Id);
 
 structstruck::strike! {
+    #[structstruck::each[derive(Debug)]]
     pub enum BigSyncEvent {
         SetPeer (
             pub struct SetPeerEvent {
@@ -138,7 +139,7 @@ structstruck::strike! {
     /// Commands must be done immediately blocking the machine and the next response
     /// must be the command result. Failing commands are not recoverable.
     /// This is different from tasks which can be retried are scheduled concurrently to machine.
-    #[derive(Clone)]
+    #[derive(Clone, Debug)]
     pub enum BigSyncMachineCommand {
         AddObjToPart {
             obj_id: ObjId,
@@ -351,6 +352,14 @@ impl SyncStatMachine {
         assert!(old.is_none(), "fishy");
     }
 
+    fn set_peer(&mut self, peer_id: PeerId, parts: impl Iterator<Item = PartId>) {
+        let peer_state = self.peers.entry(peer_id).or_default();
+        for part_id in parts {
+            let _part_state = self.parts.entry(part_id).or_default();
+            let _peer_part_state = peer_state.parts.entry(part_id).or_default();
+        }
+    }
+
     fn remove_peer(&mut self, peer_id: PeerId) {
         let Some(peer_state) = self.peers.remove(&peer_id) else {
             return;
@@ -362,10 +371,12 @@ impl SyncStatMachine {
             };
             part_state.peers.remove(&peer_id);
             part_state.fully_synced_peers.remove(&peer_id);
-            for waiter in self.waiters.values_mut() {
-                waiter.done_set.remove(&(peer_id, part_id));
-                waiter.need_set.remove(&(peer_id, part_id));
-            }
+            // FIXME: track removed peers to avoid blocking WaitForFullSync
+            // when peers disconnect
+            // for waiter in self.waiters.values_mut() {
+            //     waiter.done_set.remove(&(peer_id, part_id));
+            //     waiter.need_set.remove(&(peer_id, part_id));
+            // }
             if part_state.peers.is_empty() {
                 self.parts.remove(&part_id);
             } else if part_state.peers.len() == part_state.fully_synced_peers.len() {
@@ -686,6 +697,7 @@ impl BigSyncMachine {
             parts: parts.iter().copied().collect(),
         });
         let decide_task = self.tasks.spawn_task(TaskSeed::Machine(deets));
+        self.stat_machine.set_peer(peer_id, parts.iter().copied());
         self.peers.insert(
             peer_id,
             PeerState {

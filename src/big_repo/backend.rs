@@ -3,7 +3,7 @@ use crate::interlude::*;
 use crate::rpc::FullDoc;
 
 #[derive(Clone)]
-pub(crate) struct BigRepoSyncBackend {
+pub struct BigRepoSyncBackend {
     repo: std::sync::Weak<crate::BigRepo>,
     repo_rpc_endpoint: iroh::Endpoint,
     remote_repo_clients:
@@ -42,11 +42,10 @@ impl RepoRpcClient {
 }
 
 impl BigRepoSyncBackend {
-    pub(crate) async fn boot(repo: std::sync::Weak<crate::BigRepo>) -> Res<Self> {
-        let endpoint = iroh::Endpoint::builder(iroh::endpoint::presets::Minimal)
-            .bind()
-            .await
-            .wrap_err("failed binding big repo sync backend endpoint")?;
+    pub async fn boot(
+        repo: std::sync::Weak<crate::BigRepo>,
+        endpoint: iroh::Endpoint,
+    ) -> Res<Self> {
         Ok(Self {
             repo,
             repo_rpc_endpoint: endpoint,
@@ -54,7 +53,7 @@ impl BigRepoSyncBackend {
         })
     }
 
-    pub(crate) fn register_remote_peer(&self, peer_id: PeerId, endpoint_addr: iroh::EndpointAddr) {
+    pub fn register_remote_peer(&self, peer_id: PeerId, endpoint_addr: iroh::EndpointAddr) {
         surelock::key::lock_scope(|key| {
             let (mut remote_repo_clients, _key) = key.lock(&self.remote_repo_clients);
             if endpoint_addr.addrs.is_empty()
@@ -72,7 +71,7 @@ impl BigRepoSyncBackend {
         })
     }
 
-    pub(crate) fn unregister_remote_peer(&self, peer_id: PeerId) {
+    pub fn unregister_remote_peer(&self, peer_id: PeerId) {
         surelock::key::lock_scope(|key| {
             let (mut remote_repo_clients, _key) = key.lock(&self.remote_repo_clients);
             remote_repo_clients.remove(&peer_id);

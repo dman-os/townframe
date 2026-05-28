@@ -30,8 +30,3 @@ impl Eq for ObservedStoreSnapshot {}
 pub(crate) trait ObservedStore: HostPartStore {
     async fn observed_snapshot(&self) -> Res<ObservedStoreSnapshot>;
 }
-
-#[async_trait]
-pub(crate) trait TestStoreSetup {
-    async fn ensure_test_part(&self, part_id: PartId) -> Res<()>;
-}

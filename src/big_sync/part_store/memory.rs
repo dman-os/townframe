@@ -11,9 +11,7 @@ use big_sync_core::{mpsc, BuckId, Fingerprint, ObjId, PartId, PeerId};
 
 use super::{obj_id_bounds_for_bucket, HostPartStore};
 #[cfg(test)]
-use crate::test_support::{
-    ObservedObjSnapshot, ObservedStore, ObservedStoreSnapshot, TestStoreSetup,
-};
+use crate::test_support::{ObservedObjSnapshot, ObservedStore, ObservedStoreSnapshot};
 
 use std::collections::BTreeMap;
 #[cfg(test)]
@@ -82,14 +80,6 @@ impl MemoryPartStore {
         Self {
             inner: Arc::new(surelock::mutex::Mutex::new(default())),
         }
-    }
-
-    pub async fn ensure_part(&self, part_id: PartId) -> Res<()> {
-        surelock::key::lock_scope(|key| {
-            let (mut guard, _key) = key.lock(&self.inner);
-            guard.parts.entry(part_id).or_default();
-            Ok(())
-        })
     }
 }
 
@@ -770,6 +760,14 @@ impl HostPartStore for MemoryPartStore {
         tokio::spawn(fut);
         Ok(Ok(rx))
     }
+
+    async fn ensure_part(&self, part_id: PartId) -> Res<()> {
+        surelock::key::lock_scope(|key| {
+            let (mut guard, _key) = key.lock(&self.inner);
+            guard.parts.entry(part_id).or_default();
+            Ok(())
+        })
+    }
 }
 
 // impl MemoryPartStore {
@@ -1047,14 +1045,6 @@ impl ObservedStore for MemoryPartStore {
 }
 
 #[cfg(test)]
-#[async_trait]
-impl TestStoreSetup for MemoryPartStore {
-    async fn ensure_test_part(&self, part_id: PartId) -> Res<()> {
-        self.ensure_part(part_id).await
-    }
-}
-
-#[cfg(test)]
 mod tests {
     use super::*;
     use crate::part_store::host_contract::{self, HostPartStoreContractHarness};
@@ -1067,10 +1057,6 @@ mod tests {
     impl HostPartStoreContractHarness for MemoryHostHarness {
         fn store(&self) -> &dyn HostPartStore {
             &self.store
-        }
-
-        async fn ensure_part(&self, part_id: PartId) -> Res<()> {
-            self.store.ensure_part(part_id).await
         }
     }
 

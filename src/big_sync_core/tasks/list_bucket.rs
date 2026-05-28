@@ -19,6 +19,7 @@ pub struct ListBucketsTask {
     pub working_level: BuckLevel,
 }
 
+#[derive(Debug)]
 pub struct ListBucketsResult {
     pub peer_id: PeerId,
     pub part_id: PartId,
@@ -26,12 +27,13 @@ pub struct ListBucketsResult {
 }
 
 structstruck::strike! {
+    #[structstruck::each[derive(Debug)]]
     pub struct ListBucketsTaskError {
         pub peer_id: PeerId,
         pub part_id: PartId,
         pub _deets:
             pub enum ListBucketsTaskErrorDeets {
-                #![derive(Debug, thiserror::Error, displaydoc::Display)]
+                #![derive(thiserror::Error, displaydoc::Display)]
                 /// {0}
                 ListError(#[from] ListPartsError)
                 /// {0}
