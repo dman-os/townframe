@@ -1477,9 +1477,10 @@ where
             received_fragment_ids = session.received_fragment_ids.len(),
             "applying sync session"
         );
-        if session.received_commit_ids.is_empty() && session.received_fragment_ids.is_empty() {
-            return Ok(());
-        }
+        // FIXME: enabling this quick exit breaks things
+        // if session.received_commit_ids.is_empty() && session.received_fragment_ids.is_empty() {
+        //     return Ok(());
+        // }
         let mut blobs = Vec::new();
         for commit_id in &session.received_commit_ids {
             let verified = self
@@ -1702,21 +1703,11 @@ where
             .sync_with_peer(&remote_peer_id, sedimentree_id, false, timeout)
             .await;
         let res = match result {
-            Ok((had_success, stats, conn_errs)) => {
-                info!("XXX {stats:?}");
-                info!(
-                    "XXX heads={:?}",
-                    am_utils_rs::serialize_commit_heads(
-                        &stats
-                            .remote_heads
-                            .heads
-                            .iter()
-                            .map(|head| automerge::ChangeHash(*head.as_bytes()))
-                            .collect::<Vec<_>>()
-                    )
-                );
+            Ok((had_success, _stats, conn_errs)) => {
                 if had_success {
-                    if stats.commits_received > 0 || stats.fragments_received > 0 {
+                    // NOTE: we pre-optimize when stats says we recieved
+                    // 0 incoming but this might be a flakeout
+                    if _stats.commits_received > 0 || _stats.fragments_received > 0 {
                         self.pending_sync_jobs
                             .entry(peer_id)
                             .or_default()

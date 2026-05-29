@@ -258,14 +258,14 @@ automerge = { git = "https://github.com/automerge/automerge", branch = "fragment
 # autosurgeon-derive = { path = "../autosurgeon/autosurgeon-derive/" }
 # sqlite-vec = { git = "https://github.com/vlasky/sqlite-vec", rev = "9facf1ab84f2a360c0f1e62db3a7f3eca5bc099a" }
 
-# [patch."https://github.com/dman-os/subduction"]
-# subduction_core = { path = "/home/asdf/repos/rust/subduction/subduction_core" }
-# subduction_iroh = { path = "/home/asdf/repos/rust/subduction/subduction_iroh" }
-# subduction_websocket = { path = "/home/asdf/repos/rust/subduction/subduction_websocket" }
-# sedimentree_core = { path = "/home/asdf/repos/rust/subduction/sedimentree_core" }
-# sedimentree_fs_storage = { path = "/home/asdf/repos/rust/subduction/sedimentree_fs_storage" }
-# subduction_crypto = { path = "/home/asdf/repos/rust/subduction/subduction_crypto" }
-# subduction_keyhive = { path = "/home/asdf/repos/rust/subduction/subduction_keyhive" }
+[patch."https://github.com/dman-os/subduction"]
+subduction_core = { path = "../subduction/subduction_core" }
+subduction_iroh = { path = "../subduction/subduction_iroh" }
+subduction_websocket = { path = "../subduction/subduction_websocket" }
+sedimentree_core = { path = "../subduction/sedimentree_core" }
+sedimentree_fs_storage = { path = "../subduction/sedimentree_fs_storage" }
+subduction_crypto = { path = "../subduction/subduction_crypto" }
+subduction_keyhive = { path = "../subduction/subduction_keyhive" }
 
 
 # The default profile is optimized for Wasm builds because

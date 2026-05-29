@@ -908,15 +908,7 @@ mod tests {
                 sync_repo,
                 sync_stop,
             } = self;
-            // NOTE: do early cancellation before waiting on actual stops.
             sync_stop.cancel_token.cancel();
-            doc_blobs_bridge_cancel.cancel();
-            doc_blobs_index_stop.cancel_token.cancel();
-            sqlite_local_state_stop.cancel_token.cancel();
-            config_stop.cancel_token.cancel();
-            drawer_stop.cancel_token.cancel();
-            plugs_stop.cancel_token.cancel();
-
             tokio::time::timeout(
                 utils_rs::scale_timeout(Duration::from_secs(30)),
                 sync_stop.stop(),
@@ -930,6 +922,7 @@ mod tests {
             )
             .await
             .map_err(|_| eyre::eyre!("timeout waiting progress stop"))??;
+            doc_blobs_bridge_cancel.cancel();
             if let Some(handle) = doc_blobs_bridge_handle {
                 tokio::time::timeout(
                     utils_rs::scale_timeout(Duration::from_secs(5)),
@@ -941,30 +934,35 @@ mod tests {
                 .await
                 .map_err(|_| eyre::eyre!("timeout waiting doc blobs bridge join"))??;
             }
+            doc_blobs_index_stop.cancel_token.cancel();
             tokio::time::timeout(
                 utils_rs::scale_timeout(Duration::from_secs(10)),
                 doc_blobs_index_stop.stop(),
             )
             .await
             .map_err(|_| eyre::eyre!("timeout waiting doc blobs index stop"))??;
+            sqlite_local_state_stop.cancel_token.cancel();
             tokio::time::timeout(
                 utils_rs::scale_timeout(Duration::from_secs(10)),
                 sqlite_local_state_stop.stop(),
             )
             .await
             .map_err(|_| eyre::eyre!("timeout waiting sqlite local state stop"))??;
+            config_stop.cancel_token.cancel();
             tokio::time::timeout(
                 utils_rs::scale_timeout(Duration::from_secs(10)),
                 config_stop.stop(),
             )
             .await
             .map_err(|_| eyre::eyre!("timeout waiting config stop"))??;
+            drawer_stop.cancel_token.cancel();
             tokio::time::timeout(
                 utils_rs::scale_timeout(Duration::from_secs(10)),
                 drawer_stop.stop(),
             )
             .await
             .map_err(|_| eyre::eyre!("timeout waiting drawer stop"))??;
+            plugs_stop.cancel_token.cancel();
             tokio::time::timeout(
                 utils_rs::scale_timeout(Duration::from_secs(10)),
                 plugs_stop.stop(),
@@ -1260,7 +1258,7 @@ mod tests {
         for idx in 0..100usize {
             let payload = format!("blob-payload-{idx:03}").into_bytes();
             let hash = node_a.blobs_repo.put(&payload).await?;
-            let hash = hash.to_string();
+            let hash = crate::blobs::blob_id_to_digest_str(hash);
             args_batch.push(AddDocArgs {
                 branch_path: daybook_types::doc::BranchPathBuf::from("main"),
                 facets: [(

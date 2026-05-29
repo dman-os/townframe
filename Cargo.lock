@@ -3540,7 +3540,6 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "59a3f841f27a44bcc32214f8df75cc9b6cea55dbbebbfe546735690eab5bb2d2"
 dependencies = [
  "anyhow",
- "hf-hub",
  "image",
  "ndarray",
  "ort",
@@ -4473,7 +4472,6 @@ checksum = "629d8f3bbeda9d148036d6b0de0a3ab947abd08ce90626327fc3547a49d59d97"
 dependencies = [
  "dirs",
  "futures",
- "http",
  "indicatif 0.17.11",
  "libc",
  "log",
@@ -4484,7 +4482,6 @@ dependencies = [
  "serde_json",
  "thiserror 2.0.18",
  "tokio",
- "ureq 2.12.1",
  "windows-sys 0.60.2",
 ]
 
@@ -7589,7 +7586,7 @@ dependencies = [
  "ort-sys",
  "smallvec",
  "tracing",
- "ureq 3.2.0",
+ "ureq",
 ]
 
 [[package]]
@@ -7600,7 +7597,7 @@ checksum = "06503bb33f294c5f1ba484011e053bfa6ae227074bdb841e9863492dc5960d4b"
 dependencies = [
  "hmac-sha256",
  "lzma-rust2",
- "ureq 3.2.0",
+ "ureq",
 ]
 
 [[package]]
@@ -9486,7 +9483,6 @@ dependencies = [
 [[package]]
 name = "sedimentree_core"
 version = "0.12.1"
-source = "git+https://github.com/dman-os/subduction?rev=53ff9867f4d50255846d0ca8469b9145b0ae0766#53ff9867f4d50255846d0ca8469b9145b0ae0766"
 dependencies = [
  "async-lock",
  "bijou64",
@@ -9507,7 +9503,6 @@ dependencies = [
 [[package]]
 name = "sedimentree_fs_storage"
 version = "0.10.1"
-source = "git+https://github.com/dman-os/subduction?rev=53ff9867f4d50255846d0ca8469b9145b0ae0766#53ff9867f4d50255846d0ca8469b9145b0ae0766"
 dependencies = [
  "async-lock",
  "future_form",
@@ -10339,7 +10334,6 @@ dependencies = [
 [[package]]
 name = "subduction_core"
 version = "0.15.1"
-source = "git+https://github.com/dman-os/subduction?rev=53ff9867f4d50255846d0ca8469b9145b0ae0766#53ff9867f4d50255846d0ca8469b9145b0ae0766"
 dependencies = [
  "async-channel",
  "async-lock",
@@ -10360,7 +10354,6 @@ dependencies = [
 [[package]]
 name = "subduction_crypto"
 version = "0.7.1"
-source = "git+https://github.com/dman-os/subduction?rev=53ff9867f4d50255846d0ca8469b9145b0ae0766#53ff9867f4d50255846d0ca8469b9145b0ae0766"
 dependencies = [
  "ed25519-dalek 2.2.0",
  "future_form",
@@ -10374,7 +10367,6 @@ dependencies = [
 [[package]]
 name = "subduction_iroh"
 version = "0.8.1"
-source = "git+https://github.com/dman-os/subduction?rev=53ff9867f4d50255846d0ca8469b9145b0ae0766#53ff9867f4d50255846d0ca8469b9145b0ae0766"
 dependencies = [
  "async-channel",
  "async-lock",
@@ -10393,7 +10385,6 @@ dependencies = [
 [[package]]
 name = "subduction_keyhive"
 version = "0.6.0"
-source = "git+https://github.com/dman-os/subduction?rev=53ff9867f4d50255846d0ca8469b9145b0ae0766#53ff9867f4d50255846d0ca8469b9145b0ae0766"
 dependencies = [
  "async-lock",
  "base64 0.22.1",
@@ -10415,7 +10406,6 @@ dependencies = [
 [[package]]
 name = "subduction_websocket"
 version = "0.10.1"
-source = "git+https://github.com/dman-os/subduction?rev=53ff9867f4d50255846d0ca8469b9145b0ae0766#53ff9867f4d50255846d0ca8469b9145b0ae0766"
 dependencies = [
  "async-channel",
  "async-lock",
@@ -11616,25 +11606,6 @@ name = "untrusted"
 version = "0.9.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "8ecb6da28b8a351d773b68d5825ac39017e680750f980f3a1a85cd8dd28a47c1"
-
-[[package]]
-name = "ureq"
-version = "2.12.1"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "02d1a66277ed75f640d608235660df48c8e3c19f3b4edb6a263315626cc3c01d"
-dependencies = [
- "base64 0.22.1",
- "flate2",
- "log",
- "once_cell",
- "rustls 0.23.37",
- "rustls-pki-types",
- "serde",
- "serde_json",
- "socks",
- "url",
- "webpki-roots 0.26.11",
-]
 
 [[package]]
 name = "ureq"
@@ -13856,30 +13827,16 @@ dependencies = [
  "data-encoding",
  "daybook_types",
  "dotenv-flow",
- "fastembed",
- "future_form",
  "futures",
  "heck",
  "http",
  "indenter",
- "iroh",
- "irpc",
- "irpc-iroh",
- "libsqlite3-sys",
- "mltools",
  "oci-spec",
  "oci-wasm",
- "sedimentree_core",
  "serde",
  "serde_json",
  "sha2 0.10.9",
- "sqlite-vec",
- "sqlx",
- "subduction_core",
- "subduction_crypto",
- "subduction_websocket",
  "tokio",
- "tracing",
  "url",
  "utils_rs",
  "zstd",

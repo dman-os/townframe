@@ -650,7 +650,7 @@ async fn apply_event(
             };
             let payload = format!("blob-stress-{idx}-{}", rng.random::<u64>()).into_bytes();
             let hash = node.blobs_repo.put(&payload).await?;
-            let hash = hash.to_string();
+            let hash = crate::blobs::blob_id_to_digest_str(hash);
             let mut facets_set = std::collections::HashMap::new();
             facets_set.insert(
                 FacetKey::from(WellKnownFacetTag::Blob),
