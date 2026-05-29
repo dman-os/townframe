@@ -701,18 +701,17 @@ checksum = "c08606f8c3cbf4ce6ec8e28fb0014a2c086708fe954eaa885384a6165172e7e8"
 
 [[package]]
 name = "automerge"
-version = "0.8.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "2aab56635599ee2e9df28d9ce180c155b8dbcdd96e4c3f62895fc6a44137d328"
+version = "0.9.0"
+source = "git+https://github.com/automerge/automerge?branch=fragments#a57688012b93c29d5ceb1d26735608955c40a4ca"
 dependencies = [
  "cfg-if 1.0.4",
  "flate2",
- "getrandom 0.3.4",
+ "getrandom 0.4.1",
  "hex",
  "hexane",
  "itertools 0.14.0",
  "leb128",
- "rand 0.9.2",
+ "rand 0.10.1",
  "rustc-hash 2.1.1",
  "serde",
  "sha2 0.11.0",
@@ -724,20 +723,9 @@ dependencies = [
 ]
 
 [[package]]
-name = "automerge_sedimentree"
-version = "0.10.1"
-source = "git+https://github.com/dman-os/subduction?rev=ff4e9e058595dc2f86f90e9541d6ff34abffcc3f#ff4e9e058595dc2f86f90e9541d6ff34abffcc3f"
-dependencies = [
- "automerge",
- "rayon",
- "sedimentree_core",
- "thiserror 2.0.18",
-]
-
-[[package]]
 name = "autosurgeon"
 version = "0.11.0"
-source = "git+https://github.com/dman-os/autosurgeon?rev=73e424a51132e430473e59722b6c351c4a63c4a4#73e424a51132e430473e59722b6c351c4a63c4a4"
+source = "git+https://github.com/dman-os/autosurgeon?rev=274285c6007cccf4e5eb21a96bd1152ee0c6576c#274285c6007cccf4e5eb21a96bd1152ee0c6576c"
 dependencies = [
  "automerge",
  "autosurgeon-derive",
@@ -750,7 +738,7 @@ dependencies = [
 [[package]]
 name = "autosurgeon-derive"
 version = "0.11.0"
-source = "git+https://github.com/dman-os/autosurgeon?rev=73e424a51132e430473e59722b6c351c4a63c4a4#73e424a51132e430473e59722b6c351c4a63c4a4"
+source = "git+https://github.com/dman-os/autosurgeon?rev=274285c6007cccf4e5eb21a96bd1152ee0c6576c#274285c6007cccf4e5eb21a96bd1152ee0c6576c"
 dependencies = [
  "proc-macro2",
  "quote",
@@ -1038,7 +1026,6 @@ dependencies = [
  "async-lock",
  "async-trait",
  "automerge",
- "automerge_sedimentree",
  "autosurgeon",
  "big_sync",
  "big_sync_core",
@@ -4472,8 +4459,7 @@ checksum = "7f24254aa9a54b5c858eaee2f5bccdb46aaf0e486a595ed5fd8f86ba55232a70"
 [[package]]
 name = "hexane"
 version = "0.2.1"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "8f4ecba0bb4e14df997df7cab6d1b584c6432d8865cf2adfced814706d715a7b"
+source = "git+https://github.com/automerge/automerge?branch=fragments#a57688012b93c29d5ceb1d26735608955c40a4ca"
 dependencies = [
  "leb128",
  "thiserror 2.0.18",
@@ -9500,7 +9486,7 @@ dependencies = [
 [[package]]
 name = "sedimentree_core"
 version = "0.12.1"
-source = "git+https://github.com/dman-os/subduction?rev=ff4e9e058595dc2f86f90e9541d6ff34abffcc3f#ff4e9e058595dc2f86f90e9541d6ff34abffcc3f"
+source = "git+https://github.com/dman-os/subduction?rev=53ff9867f4d50255846d0ca8469b9145b0ae0766#53ff9867f4d50255846d0ca8469b9145b0ae0766"
 dependencies = [
  "async-lock",
  "bijou64",
@@ -9521,7 +9507,7 @@ dependencies = [
 [[package]]
 name = "sedimentree_fs_storage"
 version = "0.10.1"
-source = "git+https://github.com/dman-os/subduction?rev=ff4e9e058595dc2f86f90e9541d6ff34abffcc3f#ff4e9e058595dc2f86f90e9541d6ff34abffcc3f"
+source = "git+https://github.com/dman-os/subduction?rev=53ff9867f4d50255846d0ca8469b9145b0ae0766#53ff9867f4d50255846d0ca8469b9145b0ae0766"
 dependencies = [
  "async-lock",
  "future_form",
@@ -10353,7 +10339,7 @@ dependencies = [
 [[package]]
 name = "subduction_core"
 version = "0.15.1"
-source = "git+https://github.com/dman-os/subduction?rev=ff4e9e058595dc2f86f90e9541d6ff34abffcc3f#ff4e9e058595dc2f86f90e9541d6ff34abffcc3f"
+source = "git+https://github.com/dman-os/subduction?rev=53ff9867f4d50255846d0ca8469b9145b0ae0766#53ff9867f4d50255846d0ca8469b9145b0ae0766"
 dependencies = [
  "async-channel",
  "async-lock",
@@ -10374,7 +10360,7 @@ dependencies = [
 [[package]]
 name = "subduction_crypto"
 version = "0.7.1"
-source = "git+https://github.com/dman-os/subduction?rev=ff4e9e058595dc2f86f90e9541d6ff34abffcc3f#ff4e9e058595dc2f86f90e9541d6ff34abffcc3f"
+source = "git+https://github.com/dman-os/subduction?rev=53ff9867f4d50255846d0ca8469b9145b0ae0766#53ff9867f4d50255846d0ca8469b9145b0ae0766"
 dependencies = [
  "ed25519-dalek 2.2.0",
  "future_form",
@@ -10388,7 +10374,7 @@ dependencies = [
 [[package]]
 name = "subduction_iroh"
 version = "0.8.1"
-source = "git+https://github.com/dman-os/subduction?rev=ff4e9e058595dc2f86f90e9541d6ff34abffcc3f#ff4e9e058595dc2f86f90e9541d6ff34abffcc3f"
+source = "git+https://github.com/dman-os/subduction?rev=53ff9867f4d50255846d0ca8469b9145b0ae0766#53ff9867f4d50255846d0ca8469b9145b0ae0766"
 dependencies = [
  "async-channel",
  "async-lock",
@@ -10407,7 +10393,7 @@ dependencies = [
 [[package]]
 name = "subduction_keyhive"
 version = "0.6.0"
-source = "git+https://github.com/dman-os/subduction?rev=ff4e9e058595dc2f86f90e9541d6ff34abffcc3f#ff4e9e058595dc2f86f90e9541d6ff34abffcc3f"
+source = "git+https://github.com/dman-os/subduction?rev=53ff9867f4d50255846d0ca8469b9145b0ae0766#53ff9867f4d50255846d0ca8469b9145b0ae0766"
 dependencies = [
  "async-lock",
  "base64 0.22.1",
@@ -10421,6 +10407,7 @@ dependencies = [
  "keyhive_crypto 0.2.0",
  "rand 0.8.5",
  "sedimentree_core",
+ "subduction_core",
  "thiserror 2.0.18",
  "tracing",
 ]
@@ -10428,7 +10415,7 @@ dependencies = [
 [[package]]
 name = "subduction_websocket"
 version = "0.10.1"
-source = "git+https://github.com/dman-os/subduction?rev=ff4e9e058595dc2f86f90e9541d6ff34abffcc3f#ff4e9e058595dc2f86f90e9541d6ff34abffcc3f"
+source = "git+https://github.com/dman-os/subduction?rev=53ff9867f4d50255846d0ca8469b9145b0ae0766#53ff9867f4d50255846d0ca8469b9145b0ae0766"
 dependencies = [
  "async-channel",
  "async-lock",
@@ -13864,8 +13851,6 @@ dependencies = [
 name = "xtask"
 version = "0.1.0"
 dependencies = [
- "automerge",
- "automerge_sedimentree",
  "bon",
  "clap",
  "data-encoding",

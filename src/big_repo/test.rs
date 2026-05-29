@@ -84,7 +84,7 @@ pub async fn boot_repo() -> Res<(
     ))
 }
 
-pub async fn boot_disk_repo(
+pub async fn _boot_disk_repo(
     path: PathBuf,
 ) -> Res<(
     Arc<BigRepo>,
@@ -171,22 +171,6 @@ async fn recv_head_batch(
         .expect("head listener closed unexpectedly")
 }
 
-fn read_proc_status_value(label: &str) -> Option<u64> {
-    let status = std::fs::read_to_string("/proc/self/status").ok()?;
-    status.lines().find_map(|line| {
-        let rest = line.strip_prefix(label)?;
-        rest.split_whitespace().next()?.parse().ok()
-    })
-}
-
-fn rss_kib() -> Option<u64> {
-    read_proc_status_value("VmRSS:")
-}
-
-fn hwm_kib() -> Option<u64> {
-    read_proc_status_value("VmHWM:")
-}
-
 #[tokio::test]
 async fn put_doc_get_doc_and_export_roundtrip() -> Res<()> {
     let (repo, _part_store, _stop_token) = boot_repo().await?;
@@ -214,70 +198,6 @@ async fn put_doc_get_doc_and_export_roundtrip() -> Res<()> {
 }
 
 #[tokio::test]
-async fn reopened_doc_rehydrates_fragment_state_store() -> Res<()> {
-    let temp_root = tempdir()?;
-    let repo_path = temp_root.path().join("repo");
-    let doc_id = random_doc_id();
-    let doc = {
-        let mut out = None;
-        for _ in 0..64 {
-            let payload = uuid::Uuid::new_v4().to_string();
-            let value = make_sync_doc_value_with_payload("base", 1024, &payload);
-            let mut doc = automerge::Automerge::new();
-            write_sync_doc_value_as_transactions(&mut doc, &value);
-            if sync_doc_fragment_state_count(&doc) > 0 {
-                out = Some(doc);
-                break;
-            }
-        }
-        out.expect("test fixture should generate a fragmented doc")
-    };
-
-    let (repo, _part_store, stop_token) = boot_disk_repo(repo_path.clone()).await?;
-    let handle = repo.put_doc(doc_id, doc).await?;
-    assert!(
-        handle.fragment_state_store_len().await > 0,
-        "test fixture should start with fragment state"
-    );
-    drop(handle);
-    stop_token().await?;
-
-    let (repo, _part_store, stop_token) = boot_disk_repo(repo_path).await?;
-    let reopened = repo.get_doc(&doc_id).await?.expect("doc should exist");
-    assert!(
-        reopened.fragment_state_store_len().await > 0,
-        "reopened docs should rebuild fragment state"
-    );
-    drop(reopened);
-    stop_token().await?;
-    Ok(())
-}
-
-fn sync_doc_fragment_state_count(doc: &automerge::Automerge) -> usize {
-    use automerge_sedimentree::indexed::IndexedSedimentreeAutomerge;
-    use sedimentree_core::{
-        collections::Map,
-        commit::{CommitStore, CountLeadingZeroBytes, FragmentState},
-    };
-
-    let metadata = doc.get_changes_meta(&[]);
-    let heads: Vec<_> = doc
-        .get_heads()
-        .iter()
-        .map(|hash| sedimentree_core::loose_commit::id::CommitId::new(hash.0))
-        .collect();
-    let store = IndexedSedimentreeAutomerge::from_metadata(&metadata);
-    let mut known: Map<
-        sedimentree_core::loose_commit::id::CommitId,
-        FragmentState<automerge_sedimentree::indexed::OwnedParents>,
-    > = Map::new();
-    store
-        .build_fragment_store(&heads, &mut known, &CountLeadingZeroBytes)
-        .expect("build_fragment_store")
-        .len()
-}
-
-#[tokio::test]
 async fn put_doc_rejects_existing_local_doc_id() -> Res<()> {
     let (repo, _part_store, _stop_token) = boot_repo().await?;
     let doc_id = random_doc_id();
@@ -290,72 +210,6 @@ async fn put_doc_rejects_existing_local_doc_id() -> Res<()> {
         err,
         runtime::PutDocError::IdOccpuied { id } if id == doc_id
     ));
-    Ok(())
-}
-
-#[test]
-#[ignore]
-fn large_fragment_store_build_profile_par() -> Res<()> {
-    use automerge_sedimentree::indexed::IndexedSedimentreeAutomerge;
-    use sedimentree_core::{
-        collections::Map,
-        commit::{CommitStore, CountLeadingZeroBytes, FragmentState},
-    };
-    use std::time::Instant;
-
-    const SWEEP_COUNTS: &[usize] = &[128, 256, 512, 1024, 2048, 4096];
-
-    for &item_count in SWEEP_COUNTS {
-        let payload = uuid::Uuid::new_v4().to_string();
-        let value_started = Instant::now();
-        let value = make_sync_doc_value_with_payload("base", item_count, &payload);
-        let value_elapsed = value_started.elapsed();
-
-        let mut doc = automerge::Automerge::new();
-        let write_started = Instant::now();
-        write_sync_doc_value_as_transactions(&mut doc, &value);
-        let write_elapsed = write_started.elapsed();
-
-        let meta_started = Instant::now();
-        let metadata = doc.get_changes_meta(&[]);
-        let meta_elapsed = meta_started.elapsed();
-        let heads: Vec<_> = doc
-            .get_heads()
-            .iter()
-            .map(|hash| sedimentree_core::loose_commit::id::CommitId::new(hash.0))
-            .collect();
-        let store = IndexedSedimentreeAutomerge::from_metadata(&metadata);
-        let mut known: Map<
-            sedimentree_core::loose_commit::id::CommitId,
-            FragmentState<automerge_sedimentree::indexed::OwnedParents>,
-        > = Map::new();
-
-        let rss_before = rss_kib();
-        let hwm_before = hwm_kib();
-        let start = Instant::now();
-        let fresh = store
-            .build_fragment_store_par(&heads, &mut known, &CountLeadingZeroBytes)
-            .expect("build_fragment_store");
-        let elapsed = start.elapsed();
-        let rss_after = rss_kib();
-        let hwm_after = hwm_kib();
-
-        eprintln!(
-            "large_fragment_store_profile_par item_count={} value_ms={} write_ms={} metadata_ms={} build_ms={} changes={} heads={} fragments={} rss_kib_before={:?} rss_kib_after={:?} hwm_kib_before={:?} hwm_kib_after={:?}",
-            item_count,
-            value_elapsed.as_millis(),
-            write_elapsed.as_millis(),
-            meta_elapsed.as_millis(),
-            elapsed.as_millis(),
-            metadata.len(),
-            heads.len(),
-            fresh.len(),
-            rss_before,
-            rss_after,
-            hwm_before,
-            hwm_after,
-        );
-    }
     Ok(())
 }
 
@@ -839,53 +693,6 @@ fn write_sync_doc_value(doc: &mut automerge::Automerge, value: &serde_json::Valu
         eyre::Ok(())
     })
     .expect("failed writing sync doc");
-}
-
-fn write_sync_doc_value_as_transactions(doc: &mut automerge::Automerge, value: &serde_json::Value) {
-    let title = value
-        .get("title")
-        .and_then(serde_json::Value::as_str)
-        .expect("sync doc should contain a title");
-    let items = value
-        .get("items")
-        .and_then(serde_json::Value::as_array)
-        .expect("sync doc should contain an items array");
-    doc.transact(|tx| {
-        tx.put(automerge::ROOT, "title", title)
-            .expect("failed writing sync title");
-        tx.put_object(automerge::ROOT, "items", automerge::ObjType::List)
-            .expect("failed creating sync items list");
-        eyre::Ok(())
-    })
-    .expect("failed creating sync doc root");
-
-    let items_obj = doc
-        .get(automerge::ROOT, "items")
-        .expect("sync doc should contain an items list")
-        .unwrap()
-        .1;
-
-    for (idx, item) in items.iter().enumerate() {
-        let item_value = item
-            .get("value")
-            .and_then(serde_json::Value::as_str)
-            .expect("sync item should contain a string value");
-        let item_note = item
-            .get("note")
-            .and_then(serde_json::Value::as_str)
-            .expect("sync item should contain a string note");
-        doc.transact(|tx| {
-            let item_obj = tx
-                .insert_object(&items_obj, idx, automerge::ObjType::Map)
-                .expect("failed inserting sync item");
-            tx.put(&item_obj, "value", item_value)
-                .expect("failed writing sync item value");
-            tx.put(&item_obj, "note", item_note)
-                .expect("failed writing sync item note");
-            eyre::Ok(())
-        })
-        .expect("failed writing sync item");
-    }
 }
 
 fn sync_test_part() -> PartId {
@@ -1766,18 +1573,15 @@ async fn run_sync_case(
         let (client_result, server_result) = tokio::join!(
             timeout(
                 SYNC_CASE_TIMEOUT,
-                client_conn.sync_with_peer(doc_id, Some(SYNC_PROPAGATION_TIMEOUT),),
+                client_conn.sync_doc_with_peer(doc_id, Some(SYNC_PROPAGATION_TIMEOUT),),
             ),
             timeout(
                 SYNC_CASE_TIMEOUT,
-                server_conn.sync_with_peer(doc_id, Some(SYNC_PROPAGATION_TIMEOUT),),
+                server_conn.sync_doc_with_peer(doc_id, Some(SYNC_PROPAGATION_TIMEOUT),),
             ),
         );
-        let client_outcome = client_result.expect("timed out waiting for sync_doc_with_peer")?;
-        let server_outcome =
-            server_result.expect("timed out waiting for reverse sync_doc_with_peer")?;
-        assert_eq!(client_outcome, SyncDocOutcome::Success);
-        assert_eq!(server_outcome, SyncDocOutcome::Success);
+        let () = client_result.expect("timed out waiting for sync_doc_with_peer")?;
+        let () = server_result.expect("timed out waiting for reverse sync_doc_with_peer")?;
 
         drop(client_doc);
         drop(server_doc);
@@ -1814,13 +1618,12 @@ async fn run_sync_case(
             peer_id = %client_conn.peer_id(),
             "running sync_doc_with_peer"
         );
-        let outcome = timeout(
+        let () = timeout(
             SYNC_CASE_TIMEOUT,
-            client_conn.sync_with_peer(doc_id, Some(SYNC_PROPAGATION_TIMEOUT)),
+            client_conn.sync_doc_with_peer(doc_id, Some(SYNC_PROPAGATION_TIMEOUT)),
         )
         .await
         .expect("timed out waiting for sync_doc_with_peer")?;
-        assert_eq!(outcome, SyncDocOutcome::Success);
 
         tracing::info!("verifying doc convergence");
         wait_for_json_doc(&client_doc, &expected_doc, SYNC_CASE_TIMEOUT).await;
@@ -1884,13 +1687,12 @@ async fn run_restart_reconnect_case(
     server.wait_for_accepts(1).await;
 
     tracing::info!("running initial sync before server shutdown");
-    let outcome = timeout(
+    let () = timeout(
         SYNC_CASE_TIMEOUT,
-        client_conn.sync_with_peer(doc_id, Some(SYNC_PROPAGATION_TIMEOUT)),
+        client_conn.sync_doc_with_peer(doc_id, Some(SYNC_PROPAGATION_TIMEOUT)),
     )
     .await
     .expect("timed out waiting for initial sync_doc_with_peer")?;
-    assert_eq!(outcome, SyncDocOutcome::Success);
     wait_for_json_doc(&client_doc, &expected_doc, SYNC_CASE_TIMEOUT).await;
     wait_for_json_doc(&server_doc, &expected_doc, SYNC_CASE_TIMEOUT).await;
 
@@ -1930,13 +1732,12 @@ async fn run_restart_reconnect_case(
     server.wait_for_accepts(1).await;
 
     tracing::info!("running sync after restart");
-    let outcome = timeout(
+    let () = timeout(
         SYNC_CASE_TIMEOUT,
-        client_conn.sync_with_peer(doc_id, Some(SYNC_PROPAGATION_TIMEOUT)),
+        client_conn.sync_doc_with_peer(doc_id, Some(SYNC_PROPAGATION_TIMEOUT)),
     )
     .await
     .expect("timed out waiting for reconnect sync_doc_with_peer")?;
-    assert_eq!(outcome, SyncDocOutcome::Success);
     wait_for_json_doc(&client_doc, &expected_doc, SYNC_CASE_TIMEOUT).await;
     wait_for_json_doc(&server_doc, &expected_doc, SYNC_CASE_TIMEOUT).await;
 
@@ -2000,13 +1801,12 @@ async fn run_remote_change_listener_without_live_handle_case(
     let client_conn = connect_sync_pair(&client, &server).await?;
     server.wait_for_accepts(1).await;
 
-    let outcome = timeout(
+    let () = timeout(
         SYNC_CASE_TIMEOUT,
-        client_conn.sync_with_peer(doc_id, Some(SYNC_PROPAGATION_TIMEOUT)),
+        client_conn.sync_doc_with_peer(doc_id, Some(SYNC_PROPAGATION_TIMEOUT)),
     )
     .await
     .expect("timed out waiting for remote sync_doc_with_peer")?;
-    assert_eq!(outcome, SyncDocOutcome::Success);
 
     let change_batch = recv_change_batch(&mut change_rx).await;
     assert!(matches!(
@@ -2102,13 +1902,12 @@ async fn apply_local_sync_mutation_and_assert_notifications(
         }] if *seen_doc_id == doc_id
     ));
 
-    let outcome = timeout(
+    let () = timeout(
         SYNC_CASE_TIMEOUT,
-        conn.sync_with_peer(doc_id, Some(SYNC_PROPAGATION_TIMEOUT)),
+        conn.sync_doc_with_peer(doc_id, Some(SYNC_PROPAGATION_TIMEOUT)),
     )
     .await
     .expect("timed out waiting for local sync_doc_with_peer")?;
-    assert_eq!(outcome, SyncDocOutcome::Success);
     Ok(())
 }
 
@@ -2891,13 +2690,12 @@ async fn sync_with_peer_remote_change_notifies_with_live_handle_and_listeners() 
             SYNC_DOC_PAYLOAD_LEN,
         );
 
-        let outcome = timeout(
+        timeout(
             SYNC_CASE_TIMEOUT,
-            client_conn.sync_with_peer(doc_id, Some(SYNC_PROPAGATION_TIMEOUT)),
+            client_conn.sync_doc_with_peer(doc_id, Some(SYNC_PROPAGATION_TIMEOUT)),
         )
         .await
         .expect("timed out waiting for remote sync_doc_with_peer")?;
-        assert_eq!(outcome, SyncDocOutcome::Success);
 
         let change_batch = recv_change_batch(&mut change_rx).await;
         assert!(matches!(

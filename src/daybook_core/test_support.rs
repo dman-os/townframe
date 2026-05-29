@@ -2,8 +2,6 @@ use crate::interlude::*;
 use automerge::transaction::Transactable;
 
 use big_repo::{BigRepo, SharedBigRepo};
-use sqlx::sqlite::SqliteConnectOptions;
-use std::str::FromStr;
 
 use crate::drawer::DrawerRepo;
 use crate::plugs::PlugsRepo;
@@ -284,6 +282,8 @@ pub async fn test_cx_with_options(
     let secret_repo = Arc::new(crate::secrets::SecretRepo::boot().await?);
     let iroh_secret_key = iroh::SecretKey::generate();
     let local_peer_key = daybook_types::doc::format_peer_key(peer_id.as_bytes());
+    crate::repo::ensure_expected_partitions_for_docs(&part_store, app_doc_id, drawer_doc_id)
+        .await?;
     let rcx = crate::repo::RepoCtx::from_parts(
         crate::repo::RepoCtxParts {
             layout,
@@ -378,28 +378,15 @@ pub async fn import_test_plug_oci(test_cx: &DaybookTestContext) -> Res<()> {
 }
 
 pub async fn boot_part_store(sqlite_url: &str) -> Res<(big_sync::Ctx, big_sync::StopToken)> {
-    let (read_pool, write_pool) = {
-        let connect_options = SqliteConnectOptions::from_str(sqlite_url)
-            .expect(ERROR_IMPOSSIBLE)
-            .journal_mode(sqlx::sqlite::SqliteJournalMode::Wal)
-            .create_if_missing(true);
-        let read_pool = sqlx::sqlite::SqlitePoolOptions::new()
-            .max_connections(4)
-            .connect_with(connect_options.clone())
-            .await
-            .wrap_err("failed connecting big repo sqlite read pool")?;
-        let write_pool = sqlx::sqlite::SqlitePoolOptions::new()
-            .max_connections(1)
-            .connect_with(connect_options)
-            .await
-            .wrap_err("failed connecting big repo sqlite write pool")?;
-        (read_pool, write_pool)
-    };
+    let sql = crate::app::SqlCtx::new(crate::app::SqlConfig {
+        database_url: "sqlite::memory:".into(),
+    })
+    .await?;
 
     let store = Arc::new(
         big_sync::SqlitePartStore::new(
-            read_pool,
-            write_pool,
+            sql.read_pool,
+            sql.write_pool,
             sqlite_url.to_owned(),
             big_sync_core::BuckId::MAX_LEVEL,
         )

@@ -24,7 +24,7 @@ mod backend;
 mod changes;
 pub mod rpc;
 mod runtime;
-pub use runtime::{PutDocError, SyncDocOutcome};
+pub use runtime::{PutDocError, SyncDocError};
 #[cfg(test)]
 pub(crate) mod test;
 
@@ -250,13 +250,13 @@ impl BigRepoConnection {
 
     /// NOTE: a succesful outcome doesn't correspond to doc
     /// handles having the latest heads
-    pub async fn sync_with_peer(
+    pub async fn sync_doc_with_peer(
         &self,
         doc_id: DocumentId,
         timeout: Option<std::time::Duration>,
-    ) -> Res<SyncDocOutcome> {
+    ) -> Result<(), SyncDocError> {
         if self.is_closed() {
-            eyre::bail!("connection is closed");
+            return Err(SyncDocError::IoError(ferr!("connection is closed")));
         }
         self.repo
             .runtime
@@ -370,11 +370,6 @@ impl std::fmt::Debug for BigDocHandle {
 impl BigDocHandle {
     pub fn document_id(&self) -> DocumentId {
         self.bundle.doc_id
-    }
-
-    #[cfg(test)]
-    async fn fragment_state_store_len(&self) -> usize {
-        self.bundle.fragment_state_store.lock().await.len()
     }
 
     pub async fn with_document_read<F, R>(&self, operation: F) -> R

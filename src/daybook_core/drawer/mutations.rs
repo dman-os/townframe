@@ -279,7 +279,9 @@ impl DrawerRepo {
         let (_new_heads, invalidated_uuids) = handle
             .with_document(|am_doc| {
                 am_doc.set_actor(mutation_actor_id.clone());
-                let mut tx = am_doc.transaction_at(automerge::PatchLog::null(), &heads);
+                let mut tx = am_doc
+                    .transaction_at(automerge::PatchLog::null(), &heads)
+                    .expect(ERROR_IMPOSSIBLE);
 
                 let facets_obj = match tx.get(automerge::ROOT, "facets")? {
                     Some((automerge::Value::Object(automerge::ObjType::Map), id)) => id,
@@ -712,7 +714,7 @@ impl DrawerRepo {
                     // current heads with an inactive patch log.
                     let heads_now = am_doc.get_heads();
                     let mut tx =
-                        am_doc.transaction_at(automerge::PatchLog::inactive(), &heads_now);
+                        am_doc.transaction_at(automerge::PatchLog::inactive(), &heads_now).expect(ERROR_IMPOSSIBLE);
                     let facets_obj = match tx.get(automerge::ROOT, "facets")? {
                         Some((automerge::Value::Object(automerge::ObjType::Map), id)) => id,
                         _ => eyre::bail!("facets object not found in content doc"),

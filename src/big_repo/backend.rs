@@ -97,7 +97,7 @@ impl big_sync::SyncBackend for BigRepoSyncBackend {
         obj_id: crate::DocumentId,
         remote_payload: Option<big_sync::ObjPayload>,
     ) -> Res<big_sync::SyncTaskRunOutcome> {
-        let repo = self
+        let repo: Arc<crate::BigRepo> = self
             .repo
             .upgrade()
             .ok_or_else(|| eyre::eyre!("big repo dropped while sync backend was active"))?;
@@ -127,12 +127,12 @@ impl big_sync::SyncBackend for BigRepoSyncBackend {
                     ));
                 }
                 Err(crate::runtime::PutDocError::IdOccpuied { .. }) => {
-                    let sync_outcome = repo
+                    match repo
                         .runtime
                         .sync_doc_with_peer(obj_id, peer_id, Some(Duration::from_secs(10)))
-                        .await?;
-                    match sync_outcome {
-                        crate::SyncDocOutcome::Success => {
+                        .await
+                    {
+                        Ok(_) => {
                             return Ok(big_sync::SyncTaskRunOutcome::Completion(
                                 big_sync_core::SyncTaskCompletion {
                                     obj_id,
@@ -140,13 +140,18 @@ impl big_sync::SyncBackend for BigRepoSyncBackend {
                                 },
                             ));
                         }
-                        crate::SyncDocOutcome::NotFoundOrUnauthorized => {
-                            eyre::bail!("remote doc was not found or unauthorized")
+                        Err(crate::SyncDocError::Other(inner)) => {
+                            return Err(inner);
                         }
-                        crate::SyncDocOutcome::TransportError => {
+                        Err(crate::SyncDocError::IoError(inner)) => {
+                            Err(inner).wrap_err("i/o error syncing doc")?;
+                        }
+                        Err(crate::SyncDocError::TransportError) => {
                             eyre::bail!("transport error syncing doc")
                         }
-                        crate::SyncDocOutcome::IoError => eyre::bail!("i/o error syncing doc"),
+                        Err(crate::SyncDocError::NotFoundOrUnauthorized) => {
+                            eyre::bail!("remote doc was not found or unauthorized")
+                        }
                     }
                 }
                 Err(err) => return Err(err).wrap_err("put_doc failed"),
@@ -164,12 +169,12 @@ impl big_sync::SyncBackend for BigRepoSyncBackend {
                 ));
             }
         }
-        let sync_outcome = repo
+        match repo
             .runtime
             .sync_doc_with_peer(obj_id, peer_id, Some(Duration::from_secs(10)))
-            .await?;
-        match sync_outcome {
-            crate::SyncDocOutcome::Success => {
+            .await
+        {
+            Ok(()) => {
                 let current_doc = repo
                     .get_doc(&obj_id)
                     .await?
@@ -185,11 +190,16 @@ impl big_sync::SyncBackend for BigRepoSyncBackend {
                     big_sync_core::SyncTaskCompletion { obj_id, deets },
                 ))
             }
-            crate::SyncDocOutcome::NotFoundOrUnauthorized => {
+            Err(crate::SyncDocError::Other(inner)) => Err(inner),
+            Err(crate::SyncDocError::IoError(inner)) => {
+                Err(inner).wrap_err("i/o error syncing doc")
+            }
+            Err(crate::SyncDocError::TransportError) => {
+                eyre::bail!("transport error syncing doc")
+            }
+            Err(crate::SyncDocError::NotFoundOrUnauthorized) => {
                 eyre::bail!("remote doc was not found or unauthorized")
             }
-            crate::SyncDocOutcome::TransportError => eyre::bail!("transport error syncing doc"),
-            crate::SyncDocOutcome::IoError => eyre::bail!("i/o error syncing doc"),
         }
     }
 }

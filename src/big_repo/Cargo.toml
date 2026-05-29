@@ -57,7 +57,6 @@ irpc-iroh.workspace = true
 
 #
 # sync
-automerge_sedimentree = { workspace = true, features = ["rayon"] }
 future_form = { version = "0.3.0", }
 keyhive_core = { version = "0.3.0", }
 keyhive_crypto = { version = "0.1.0", }

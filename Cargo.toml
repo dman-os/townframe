@@ -184,17 +184,16 @@ gloo = { version = "0.11.0", default-features = false }
 
 #
 # sync
-automerge = "0.8.0"
+automerge = "0.9.0"
 autosurgeon = "0.11.0"
-automerge-test = "0.6"
-subduction_core = { git = "https://github.com/dman-os/subduction", rev = "ff4e9e058595dc2f86f90e9541d6ff34abffcc3f" }
-subduction_iroh = { git = "https://github.com/dman-os/subduction", rev = "ff4e9e058595dc2f86f90e9541d6ff34abffcc3f" }
-subduction_websocket = { git = "https://github.com/dman-os/subduction", rev = "ff4e9e058595dc2f86f90e9541d6ff34abffcc3f" }
-sedimentree_core = { git = "https://github.com/dman-os/subduction", rev = "ff4e9e058595dc2f86f90e9541d6ff34abffcc3f" }
-automerge_sedimentree = { git = "https://github.com/dman-os/subduction", rev = "ff4e9e058595dc2f86f90e9541d6ff34abffcc3f" }
-sedimentree_fs_storage = { git = "https://github.com/dman-os/subduction", rev = "ff4e9e058595dc2f86f90e9541d6ff34abffcc3f" }
-subduction_crypto = { git = "https://github.com/dman-os/subduction", rev = "ff4e9e058595dc2f86f90e9541d6ff34abffcc3f" }
-subduction_keyhive = { git = "https://github.com/dman-os/subduction", rev = "ff4e9e058595dc2f86f90e9541d6ff34abffcc3f" }
+automerge-test = "0.9"
+subduction_core = { git = "https://github.com/dman-os/subduction", rev = "53ff9867f4d50255846d0ca8469b9145b0ae0766" }
+subduction_iroh = { git = "https://github.com/dman-os/subduction", rev = "53ff9867f4d50255846d0ca8469b9145b0ae0766" }
+subduction_websocket = { git = "https://github.com/dman-os/subduction", rev = "53ff9867f4d50255846d0ca8469b9145b0ae0766" }
+sedimentree_core = { git = "https://github.com/dman-os/subduction", rev = "53ff9867f4d50255846d0ca8469b9145b0ae0766" }
+sedimentree_fs_storage = { git = "https://github.com/dman-os/subduction", rev = "53ff9867f4d50255846d0ca8469b9145b0ae0766" }
+subduction_crypto = { git = "https://github.com/dman-os/subduction", rev = "53ff9867f4d50255846d0ca8469b9145b0ae0766" }
+subduction_keyhive = { git = "https://github.com/dman-os/subduction", rev = "53ff9867f4d50255846d0ca8469b9145b0ae0766" }
 async-channel = "2.5.0"
 qrcode = { version = "0.14.1", default-features = false }
 
@@ -252,8 +251,9 @@ irpc-iroh = "0.15.0"
 [patch.crates-io]
 # wash-runtime = { path = "../wash/crates/wash-runtime/"}
 wash-runtime = { git = "https://github.com/wasmcloud/wasmcloud", rev = "33fa1990f9d4fbc85cac2a2b5f7f8be7b4fab83e" }
-autosurgeon = { git = "https://github.com/dman-os/autosurgeon", rev = "73e424a51132e430473e59722b6c351c4a63c4a4" }
-autosurgeon-derive = { git = "https://github.com/dman-os/autosurgeon", rev = "73e424a51132e430473e59722b6c351c4a63c4a4" }
+autosurgeon = { git = "https://github.com/dman-os/autosurgeon", rev = "274285c6007cccf4e5eb21a96bd1152ee0c6576c" }
+autosurgeon-derive = { git = "https://github.com/dman-os/autosurgeon", rev = "274285c6007cccf4e5eb21a96bd1152ee0c6576c" }
+automerge = { git = "https://github.com/automerge/automerge", branch = "fragments" }
 # autosurgeon = { path = "../autosurgeon/autosurgeon/" }
 # autosurgeon-derive = { path = "../autosurgeon/autosurgeon-derive/" }
 # sqlite-vec = { git = "https://github.com/vlasky/sqlite-vec", rev = "9facf1ab84f2a360c0f1e62db3a7f3eca5bc099a" }
@@ -263,7 +263,6 @@ autosurgeon-derive = { git = "https://github.com/dman-os/autosurgeon", rev = "73
 # subduction_iroh = { path = "/home/asdf/repos/rust/subduction/subduction_iroh" }
 # subduction_websocket = { path = "/home/asdf/repos/rust/subduction/subduction_websocket" }
 # sedimentree_core = { path = "/home/asdf/repos/rust/subduction/sedimentree_core" }
-# automerge_sedimentree = { path = "/home/asdf/repos/rust/subduction/automerge_sedimentree" }
 # sedimentree_fs_storage = { path = "/home/asdf/repos/rust/subduction/sedimentree_fs_storage" }
 # subduction_crypto = { path = "/home/asdf/repos/rust/subduction/subduction_crypto" }
 # subduction_keyhive = { path = "/home/asdf/repos/rust/subduction/subduction_keyhive" }

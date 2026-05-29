@@ -1783,6 +1783,14 @@ async fn upsert_processor_runlog_item(
         "done_at": jiff::Timestamp::now().to_string(),
     });
     partition_store.set_obj_payload(item_id, payload).await?;
+    partition_store
+        .add_obj_to_parts(
+            item_id,
+            vec![crate::part_id_from_label(
+                crate::rt::PROCESSOR_RUNLOG_PARTITION_ID,
+            )],
+        )
+        .await?;
     Ok(())
 }
 
@@ -2039,22 +2047,17 @@ async fn start_bundle_workload(
 mod tests {
     use super::*;
     use big_sync::HostPartStore;
-    use sqlx::sqlite::SqlitePoolOptions;
 
     async fn make_partition_store(
     ) -> Res<(std::sync::Arc<dyn HostPartStore>, big_sync_core::PartId)> {
-        let read_pool = SqlitePoolOptions::new()
-            .max_connections(1)
-            .connect("sqlite::memory:")
-            .await?;
-        let write_pool = SqlitePoolOptions::new()
-            .max_connections(1)
-            .connect("sqlite::memory:")
-            .await?;
+        let sql = crate::app::SqlCtx::new(crate::app::SqlConfig {
+            database_url: "sqlite::memory:".into(),
+        })
+        .await?;
         let part_id = crate::part_id_from_label(PROCESSOR_RUNLOG_PARTITION_ID);
         let store = big_sync::SqlitePartStore::new(
-            read_pool,
-            write_pool,
+            sql.read_pool,
+            sql.write_pool,
             "rt-test",
             big_sync_core::BuckId::MAX_LEVEL,
         )
@@ -2064,7 +2067,13 @@ mod tests {
 
     #[tokio::test]
     async fn processor_runlog_upsert_is_bounded_for_same_doc_processor() -> Res<()> {
+        utils_rs::testing::setup_tracing_once();
         let (store, part_id) = make_partition_store().await?;
+        store
+            .ensure_part(crate::part_id_from_label(
+                crate::rt::PROCESSOR_RUNLOG_PARTITION_ID,
+            ))
+            .await?;
         let item_id = Rt::processor_runlog_item_id("doc-1", "@daybook/plabels/label-note");
 
         upsert_processor_runlog_item(
