@@ -152,7 +152,7 @@ impl SqliteKvWorker {
             match msg {
                 KvMsg::BootTable { table, resp } => {
                     let result = self
-                        .handle_boot(&table)
+                        .handle_boot(table)
                         .await
                         .inspect_err(|err| error!(?err, ?table, "handle_boot failed"));
                     resp.send(result)
@@ -167,7 +167,7 @@ impl SqliteKvWorker {
                 }
                 KvMsg::Get { table, key, resp } => {
                     let result = self
-                        .handle_get(&table, &key)
+                        .handle_get(table, &key)
                         .await
                         .inspect_err(|err| error!(?err, ?table, "handle_get failed"));
                     resp.send(result)
@@ -183,7 +183,7 @@ impl SqliteKvWorker {
                     resp,
                 } => {
                     let result = self
-                        .handle_set(&table, key, value)
+                        .handle_set(table, key, value)
                         .await
                         .inspect_err(|err| error!(?err, ?table, "handle_set failed"));
                     resp.send(result)
@@ -194,7 +194,7 @@ impl SqliteKvWorker {
                 }
                 KvMsg::Del { table, key, resp } => {
                     let result = self
-                        .handle_del(&table, &key)
+                        .handle_del(table, &key)
                         .await
                         .inspect_err(|err| error!(?err, ?table, "handle_del failed"));
                     resp.send(result)
@@ -210,7 +210,7 @@ impl SqliteKvWorker {
                     resp,
                 } => {
                     let result = self
-                        .handle_increment(&table, &key, delta)
+                        .handle_increment(table, &key, delta)
                         .await
                         .inspect_err(|err| error!(?err, ?table, "handle_increment failed"));
                     resp.send(result)
@@ -225,7 +225,7 @@ impl SqliteKvWorker {
                 }
                 KvMsg::NewCas { table, key, resp } => {
                     let result = self
-                        .handle_new_cas(&table, &key)
+                        .handle_new_cas(table, &key)
                         .await
                         .inspect_err(|err| error!(?err, ?table, "handle_new_cas failed"));
                     resp.send(result)
@@ -246,7 +246,7 @@ impl SqliteKvWorker {
                     resp,
                 } => {
                     let result = self
-                        .handle_swap(&table, key, value, snapshot_version)
+                        .handle_swap(table, key, value, snapshot_version)
                         .await
                         .inspect_err(|err| error!(?err, ?table, "handle_swap failed"));
                     resp.send(result)

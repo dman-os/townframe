@@ -4,6 +4,7 @@ use std::str::FromStr;
 use tokio_util::sync::CancellationToken;
 
 #[derive(Debug, Clone)]
+#[cfg_attr(feature = "uniffi", derive(uniffi::Enum))]
 pub enum LocalStateEvent {
     ListChanged,
 }

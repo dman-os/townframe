@@ -389,6 +389,7 @@ impl RepoCtx {
         let mut tables_stop: Option<crate::repos::RepoStopToken> = None;
         let mut dispatch_stop: Option<crate::repos::RepoStopToken> = None;
         let mut drawer_stop: Option<crate::repos::RepoStopToken> = None;
+        let mut init_stop: Option<crate::repos::RepoStopToken> = None;
 
         let init_result: Res<()> = async {
             let (repo, stop) = PlugsRepo::load(
@@ -490,6 +491,21 @@ impl RepoCtx {
                 .upsert_actor_user_path(drawer_actor_id, drawer_user_path)
                 .await?;
 
+            let (_init_repo, stop) = crate::rt::init::InitRepo::load(
+                Arc::clone(&big_repo),
+                doc_app.document_id(),
+                local_user_path.to_owned(),
+                sql.clone(),
+            )
+            .await?;
+            init_stop = Some(stop);
+            let init_user_path =
+                daybook_types::doc::user_path::for_repo(local_user_path.to_owned(), "init-repo")?;
+            let init_actor_id = daybook_types::doc::user_path::to_actor_id(&init_user_path);
+            config_repo
+                .upsert_actor_user_path(init_actor_id, init_user_path)
+                .await?;
+
             plugs_repo
                 .as_ref()
                 .expect("plugs repo must be loaded")
@@ -514,6 +530,9 @@ impl RepoCtx {
                 let _ = stop.stop().await;
             }
             if let Some(stop) = dispatch_stop.take() {
+                let _ = stop.stop().await;
+            }
+            if let Some(stop) = init_stop.take() {
                 let _ = stop.stop().await;
             }
             if let Err(shutdown_err) = blobs_repo.shutdown().await {

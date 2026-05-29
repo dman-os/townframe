@@ -21,7 +21,9 @@ impl RtFfi {
             dispatch_repo,
             progress_repo,
             blobs_repo,
-            config_repo
+            config_repo,
+            init_repo,
+            sqlite_ls_repo,
         )
     )]
     pub async fn load(
@@ -32,29 +34,27 @@ impl RtFfi {
         progress_repo: Arc<crate::repos::progress::ProgressRepoFfi>,
         blobs_repo: Arc<crate::repos::blobs::BlobsRepoFfi>,
         config_repo: Arc<crate::repos::config::ConfigRepoFfi>,
+        init_repo: Arc<crate::repos::init::InitRepoFfi>,
+        sqlite_ls_repo: Arc<crate::repos::sqlite_local_state::SqliteLocalStateRepoFfi>,
         device_id: String,
     ) -> Result<Arc<Self>, FfiError> {
         let cx = Arc::clone(&fcx.rcx);
         let repo_root = cx.layout.repo_root.to_path_buf();
         let wflow_db_url = format!("sqlite:{}?mode=rwc", repo_root.join("wflow.db").display());
-        let local_state_root = repo_root.join("local_states");
         plugs_repo.repo.ensure_system_plugs().await?;
 
         let (rt, stop_token) = fcx
             .do_on_rt(daybook_core::rt::Rt::boot(
                 daybook_core::rt::RtConfig { device_id },
-                cx.doc_app.document_id().clone(),
-                wflow_db_url,
-                cx.sql.write_pool.clone(),
-                Arc::clone(&cx.big_repo),
+                cx,
                 Arc::clone(&drawer_repo.repo),
                 Arc::clone(&plugs_repo.repo),
                 Arc::clone(&dispatch_repo.repo),
                 Arc::clone(&progress_repo.repo),
                 Arc::clone(&blobs_repo.repo),
                 Arc::clone(&config_repo.repo),
-                cx.local_actor_id.clone(),
-                local_state_root,
+                Arc::clone(&init_repo.repo),
+                Arc::clone(&sqlite_ls_repo.repo),
             ))
             .await
             .inspect_err(|err| tracing::error!(?err))?;

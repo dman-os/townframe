@@ -1,4 +1,5 @@
-#[expect(unused)]
+#![recursion_limit = "256"]
+
 mod interlude {
     pub use api_utils_rs::prelude::*;
 

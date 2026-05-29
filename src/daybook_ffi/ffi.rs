@@ -110,22 +110,6 @@ fn resolve_clone_destination_for_app(acx: &AppCtx, destination: &str) -> Res<std
     }
 
     #[cfg(target_os = "android")]
-    fn canonicalize_existing_ancestor(path: &std::path::Path) -> Res<std::path::PathBuf> {
-        let mut cursor = path.to_path_buf();
-        loop {
-            if cursor.exists() {
-                return std::fs::canonicalize(&cursor).wrap_err_with(|| {
-                    format!("failed resolving clone destination {}", cursor.display())
-                });
-            }
-            let parent = cursor
-                .parent()
-                .ok_or_eyre("clone destination missing canonicalizable ancestor")?;
-            cursor = parent.to_path_buf();
-        }
-    }
-
-    #[cfg(target_os = "android")]
     {
         let parent = app_private_clone_parent_dir(acx);
         std::fs::create_dir_all(&parent).wrap_err_with(|| {
@@ -158,7 +142,22 @@ fn resolve_clone_destination_for_app(acx: &AppCtx, destination: &str) -> Res<std
                 parent_canon.display()
             );
         }
-        Ok(destination_abs)
+        return Ok(destination_abs);
+
+        fn canonicalize_existing_ancestor(path: &std::path::Path) -> Res<std::path::PathBuf> {
+            let mut cursor = path.to_path_buf();
+            loop {
+                if cursor.exists() {
+                    return std::fs::canonicalize(&cursor).wrap_err_with(|| {
+                        format!("failed resolving clone destination {}", cursor.display())
+                    });
+                }
+                let parent = cursor
+                    .parent()
+                    .ok_or_eyre("clone destination missing canonicalizable ancestor")?;
+                cursor = parent.to_path_buf();
+            }
+        }
     }
 }
 
@@ -202,7 +201,6 @@ impl FfiCtx {
                 )
                 .await?
             };
-            let rcx = Arc::new(rcx);
 
             eyre::Ok((rcx, acx))
         })

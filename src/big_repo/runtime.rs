@@ -1825,12 +1825,12 @@ where
                 fragment
                     .boundary
                     .iter()
-                    .map(|h| CommitId::new(h.0))
+                    .map(|head| CommitId::new(head.0))
                     .collect::<BTreeSet<_>>(),
                 fragment
                     .checkpoints
                     .iter()
-                    .map(|h| CommitId::new(h.0))
+                    .map(|head| CommitId::new(head.0))
                     .collect::<Vec<_>>(),
                 Blob::new(raw),
             ));
@@ -2032,17 +2032,17 @@ fn ingest_automerge(doc: &automerge::Automerge, sedimentree_id: SedimentreeId) -
     let mut fragments = Vec::with_capacity(cached.len());
     let mut blobs = Vec::with_capacity(cached.len() + loose.len());
     let mut covered: sedimentree_core::collections::Set<CommitId> = default();
-    for (f, raw) in cached.iter().zip(cached_bytes) {
-        for m in &f.members {
-            covered.insert(CommitId::new(m.0));
+    for (fragment, raw) in cached.iter().zip(cached_bytes) {
+        for member in &fragment.members {
+            covered.insert(CommitId::new(member.0));
         }
         let blob = Blob::new(raw);
-        let boundary: BTreeSet<CommitId> = f.boundary.iter().map(|h| CommitId::new(h.0)).collect();
-        let checkpoints: Vec<CommitId> = f.checkpoints.iter().map(|h| CommitId::new(h.0)).collect();
+        let boundary: BTreeSet<CommitId> = fragment.boundary.iter().map(|head| CommitId::new(head.0)).collect();
+        let checkpoints: Vec<CommitId> = fragment.checkpoints.iter().map(|head| CommitId::new(head.0)).collect();
         let meta = BlobMeta::new(&blob);
         fragments.push(Fragment::new(
             sedimentree_id,
-            CommitId::new(f.head.0),
+            CommitId::new(fragment.head.0),
             boundary,
             &checkpoints,
             meta,
@@ -2051,9 +2051,9 @@ fn ingest_automerge(doc: &automerge::Automerge, sedimentree_id: SedimentreeId) -
     }
 
     let mut loose_commits = Vec::with_capacity(loose.len());
-    for (f, raw) in loose.iter().zip(loose_bytes) {
-        let head = CommitId::new(f.head.0);
-        let parents: BTreeSet<CommitId> = f.boundary.iter().map(|p| CommitId::new(p.0)).collect();
+    for (fragment, raw) in loose.iter().zip(loose_bytes) {
+        let head = CommitId::new(fragment.head.0);
+        let parents: BTreeSet<CommitId> = fragment.boundary.iter().map(|pp| CommitId::new(pp.0)).collect();
         let blob = Blob::new(raw);
         let meta = BlobMeta::new(&blob);
         loose_commits.push(LooseCommit::new(sedimentree_id, head, parents, meta));

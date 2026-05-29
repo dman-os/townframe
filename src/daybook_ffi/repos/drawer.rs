@@ -36,13 +36,15 @@ impl DrawerRepoFfi {
         let (repo, stop_token) = fcx
             .do_on_rt(DrawerRepo::load(
                 Arc::clone(&fcx.rcx.big_repo),
+                Arc::clone(&fcx.rcx.part_store),
                 fcx.rcx.doc_drawer.document_id().clone(),
                 fcx.rcx.local_user_path.clone().into(),
+                fcx.rcx.sql.clone(),
                 fcx.rcx.layout.repo_root.join("local_state"),
-                Arc::new(std::sync::Mutex::new(
+                Arc::new(surelock::mutex::Mutex::new(
                     daybook_core::drawer::lru::KeyedLruPool::new(1000),
                 )),
-                Arc::new(std::sync::Mutex::new(
+                Arc::new(surelock::mutex::Mutex::new(
                     daybook_core::drawer::lru::KeyedLruPool::new(1000),
                 )),
                 Arc::clone(&plugs_repo.repo),
@@ -146,7 +148,7 @@ impl DrawerRepoFfi {
             .fcx
             .do_on_rt(async move {
                 this.repo
-                    .update_at_heads(patch, branch_path, heads)
+                    .update_at_heads(patch, &branch_path, heads)
                     .await
                     .wrap_err("error applying patch")
             })

@@ -30,6 +30,7 @@ impl crate::stores::AmStore for InitStore {
 }
 
 #[derive(Debug, Clone)]
+#[cfg_attr(feature = "uniffi", derive(uniffi::Enum))]
 pub enum InitEvent {
     Changed { heads: ChangeHashSet },
 }
@@ -61,9 +62,12 @@ impl InitRepo {
     pub async fn load(
         big_repo: SharedBigRepo,
         app_doc_id: DocumentId,
-        local_actor_id: ActorId,
+        local_user_path: daybook_types::doc::UserPathBuf,
         repo_sql: SqlCtx,
     ) -> Res<(Arc<Self>, crate::repos::RepoStopToken)> {
+        let local_user_path =
+            daybook_types::doc::user_path::for_repo(local_user_path, "plugs-repo")?;
+        let local_actor_id = daybook_types::doc::user_path::to_actor_id(&local_user_path);
         sqlx::query(
             r#"
             CREATE TABLE IF NOT EXISTS init_per_node (

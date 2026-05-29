@@ -34,7 +34,7 @@ impl DispatchRepoFfi {
                 Arc::clone(&fcx.rcx.big_repo),
                 fcx.rcx.doc_app.document_id().clone(),
                 daybook_types::doc::UserPathBuf::from(fcx.rcx.local_user_path.clone()),
-                fcx.rcx.sql.write_pool.clone(),
+                fcx.rcx.sql.clone(),
             ))
             .await
             .inspect_err(|err| tracing::error!(?err))?;

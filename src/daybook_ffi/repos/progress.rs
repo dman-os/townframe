@@ -33,7 +33,7 @@ impl ProgressRepoFfi {
     #[tracing::instrument(err, skip(fcx))]
     pub async fn load(fcx: SharedFfiCtx) -> Result<Arc<Self>, FfiError> {
         let (repo, stop_token) = fcx
-            .do_on_rt(ProgressRepo::boot(fcx.rcx.sql.write_pool.clone()))
+            .do_on_rt(ProgressRepo::boot(fcx.rcx.sql.clone()))
             .await
             .inspect_err(|err| tracing::error!(?err))?;
         Ok(Arc::new(Self {

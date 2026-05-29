@@ -55,7 +55,6 @@ use wit::exports::wasi::http::incoming_handler::{
 use wit::wasi::http::types::{Headers, OutgoingBody, OutgoingResponse};
 
 impl HttpIncomingGuest for Component {
-    #[expect(async_fn_in_trait)]
     fn handle(wasi_req: IncomingRequest, res_handle: ResponseOutparam) {
         utils_rs::setup_tracing().expect("error setting up tracing");
 
@@ -158,7 +157,6 @@ async fn invoke_route(
 }
 
 impl ingress::Guest for Component {
-    #[expect(async_fn_in_trait)]
     fn invoke(args: ingress::InvokeArgs) -> Result<JobId, ingress::InvokeError> {
         let meta = match metastore::get_wflow(&args.wflow_key) {
             None => Err(ingress::InvokeError::WflowNotFound),

@@ -811,7 +811,6 @@ impl TablesRepo {
                 ],
             )
             .await
-            .map(|value| value.map(|deleted| deleted))
     }
 
     pub async fn diff_events(

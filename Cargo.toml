@@ -9,7 +9,7 @@ members = [
   "./src/daybook_cli",
   "./src/daybook_core",
   "./src/daybook_ffi",
-  "./src/daybook_fuse",
+  # "./src/daybook_fuse",
   "./src/daybook_pdk",
   "./src/daybook_types",
   "./src/daybook_wflows/",
@@ -187,13 +187,13 @@ gloo = { version = "0.11.0", default-features = false }
 automerge = "0.9.0"
 autosurgeon = "0.11.0"
 automerge-test = "0.9"
-subduction_core = { git = "https://github.com/dman-os/subduction", rev = "53ff9867f4d50255846d0ca8469b9145b0ae0766" }
-subduction_iroh = { git = "https://github.com/dman-os/subduction", rev = "53ff9867f4d50255846d0ca8469b9145b0ae0766" }
-subduction_websocket = { git = "https://github.com/dman-os/subduction", rev = "53ff9867f4d50255846d0ca8469b9145b0ae0766" }
-sedimentree_core = { git = "https://github.com/dman-os/subduction", rev = "53ff9867f4d50255846d0ca8469b9145b0ae0766" }
-sedimentree_fs_storage = { git = "https://github.com/dman-os/subduction", rev = "53ff9867f4d50255846d0ca8469b9145b0ae0766" }
-subduction_crypto = { git = "https://github.com/dman-os/subduction", rev = "53ff9867f4d50255846d0ca8469b9145b0ae0766" }
-subduction_keyhive = { git = "https://github.com/dman-os/subduction", rev = "53ff9867f4d50255846d0ca8469b9145b0ae0766" }
+subduction_core = { git = "https://github.com/dman-os/subduction", rev = "4de6e00b49ddcf1b84872afea24f928e7063249a" }
+subduction_iroh = { git = "https://github.com/dman-os/subduction", rev = "4de6e00b49ddcf1b84872afea24f928e7063249a" }
+subduction_websocket = { git = "https://github.com/dman-os/subduction", rev = "4de6e00b49ddcf1b84872afea24f928e7063249a" }
+sedimentree_core = { git = "https://github.com/dman-os/subduction", rev = "4de6e00b49ddcf1b84872afea24f928e7063249a" }
+sedimentree_fs_storage = { git = "https://github.com/dman-os/subduction", rev = "4de6e00b49ddcf1b84872afea24f928e7063249a" }
+subduction_crypto = { git = "https://github.com/dman-os/subduction", rev = "4de6e00b49ddcf1b84872afea24f928e7063249a" }
+subduction_keyhive = { git = "https://github.com/dman-os/subduction", rev = "4de6e00b49ddcf1b84872afea24f928e7063249a" }
 async-channel = "2.5.0"
 qrcode = { version = "0.14.1", default-features = false }
 
@@ -257,15 +257,15 @@ automerge = { git = "https://github.com/automerge/automerge", branch = "fragment
 # autosurgeon = { path = "../autosurgeon/autosurgeon/" }
 # autosurgeon-derive = { path = "../autosurgeon/autosurgeon-derive/" }
 # sqlite-vec = { git = "https://github.com/vlasky/sqlite-vec", rev = "9facf1ab84f2a360c0f1e62db3a7f3eca5bc099a" }
-
-[patch."https://github.com/dman-os/subduction"]
-subduction_core = { path = "../subduction/subduction_core" }
-subduction_iroh = { path = "../subduction/subduction_iroh" }
-subduction_websocket = { path = "../subduction/subduction_websocket" }
-sedimentree_core = { path = "../subduction/sedimentree_core" }
-sedimentree_fs_storage = { path = "../subduction/sedimentree_fs_storage" }
-subduction_crypto = { path = "../subduction/subduction_crypto" }
-subduction_keyhive = { path = "../subduction/subduction_keyhive" }
+#
+# [patch."https://github.com/dman-os/subduction"]
+# subduction_core = { path = "../subduction/subduction_core" }
+# subduction_iroh = { path = "../subduction/subduction_iroh" }
+# subduction_websocket = { path = "../subduction/subduction_websocket" }
+# sedimentree_core = { path = "../subduction/sedimentree_core" }
+# sedimentree_fs_storage = { path = "../subduction/sedimentree_fs_storage" }
+# subduction_crypto = { path = "../subduction/subduction_crypto" }
+# subduction_keyhive = { path = "../subduction/subduction_keyhive" }
 
 
 # The default profile is optimized for Wasm builds because

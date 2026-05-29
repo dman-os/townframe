@@ -327,6 +327,6 @@ impl DrawerRepo {
             .drawer_doc_handle
             .hydrate_path_at_heads::<DocEntry>(heads, automerge::ROOT, path)
             .await?;
-        Ok(entry.map(|entry_value| entry_value))
+        Ok(entry)
     }
 }

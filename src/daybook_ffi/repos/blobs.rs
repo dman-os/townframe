@@ -19,7 +19,7 @@ impl BlobsRepoFfi {
                 fcx.rcx.layout.blobs_root.to_path_buf(),
                 fcx.rcx.local_user_path.clone(),
                 Arc::new(daybook_core::blobs::PartitionStoreMembershipWriter::new(
-                    fcx.rcx.big_repo.partition_store(),
+                    Arc::clone(&fcx.rcx.part_store),
                 )),
             ))
             .await?;
@@ -46,6 +46,7 @@ impl BlobsRepoFfi {
             .do_on_rt(async move {
                 let blob_id = hash
                     .parse::<daybook_core::blobs::BlobId>()
+                    .wrap_err("error decoding blob hash")
                     .map_err(FfiError::from)?;
                 this.get_path(blob_id)
                     .await

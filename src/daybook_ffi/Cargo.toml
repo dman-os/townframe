@@ -16,6 +16,11 @@ crate-type = ["cdylib", "staticlib"]
 name = "daybook_ffi"
 path = "lib.rs"
 
+[features]
+default = ["nokhwa"]
+nokhwa = ["dep:nokhwa"]
+
+
 [dependencies]
 # internal
 utils_rs = { workspace = true, features = ["hash"] }
@@ -44,16 +49,13 @@ time.workspace = true
 parking_lot.workspace = true
 url.workspace = true
 garde.workspace = true
-
+surelock.workspace = true
 
 # async
 tokio = { workspace = true, features = ["rt-multi-thread","sync", "macros", "fs", "tracing"] }
 tokio-util.workspace = true
 futures = { workspace = true }
 regex = "1"
-rqrr = "0.10.1"
-image = { version = "0.25", default-features = true, features = ["jpeg", "png"] }
-qrcode = { workspace = true, features = ["image"] }
 
 # ffi
 uniffi = { workspace = true, features = ["cli"] }
@@ -67,12 +69,12 @@ sqlx = { workspace = true, features = ["sqlite"] }
 pastey.workspace = true
 directories.workspace = true
 
-[build-dependencies]
-uniffi = { workspace = true, features = [ "build" ] }
-
-[features]
-default = ["nokhwa"]
-nokhwa = ["dep:nokhwa"]
+rqrr = "0.10.1"
+image = { version = "0.25", default-features = true, features = ["jpeg", "png"] }
+qrcode = { workspace = true, features = ["image"] }
 
 [target.'cfg(any(target_os = "linux", target_os = "macos", target_os = "windows"))'.dependencies]
 nokhwa = { version = "0.10.10", default-features = false, features = ["input-native", "output-threaded", "decoding"], optional = true }
+
+[build-dependencies]
+uniffi = { workspace = true, features = [ "build" ] }

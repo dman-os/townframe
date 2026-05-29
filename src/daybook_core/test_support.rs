@@ -236,7 +236,7 @@ pub async fn test_cx_with_options(
         drawer_doc_id,
         local_user_path.clone(),
         sql_ctx.clone(),
-        temp_dir.path().join("local_states"),
+        temp_dir.path().join("local_state"),
         Arc::new(surelock::mutex::Mutex::new(
             crate::drawer::lru::KeyedLruPool::new(1000),
         )),
@@ -316,13 +316,19 @@ pub async fn test_cx_with_options(
     let (init_repo, init_stop) = crate::rt::init::InitRepo::load(
         Arc::clone(&big_repo),
         app_doc_id,
-        local_actor_id,
+        local_user_path.clone(),
         sql_ctx.clone(),
     )
     .await?;
+    let init_user_path =
+        daybook_types::doc::user_path::for_repo(local_user_path.clone(), "init-repo")?;
+    let init_actor_id = daybook_types::doc::user_path::to_actor_id(&init_user_path);
+    config_repo
+        .upsert_actor_user_path(init_actor_id, init_user_path)
+        .await?;
+
     let (sqlite_local_state_repo, sqlite_local_state_stop) =
-        crate::local_state::SqliteLocalStateRepo::boot(temp_dir.path().join("local_states"))
-            .await?;
+        crate::local_state::SqliteLocalStateRepo::boot(temp_dir.path().join("local_state")).await?;
 
     let (rt, rt_stop) = crate::rt::Rt::boot(
         crate::rt::RtConfig {
