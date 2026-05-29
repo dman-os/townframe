@@ -9,26 +9,6 @@ workspace = true
 [lib]
 path = "lib.rs"
 
-[features]
-default = ["repo", "iroh"]
-repo = [
-    "dep:tokio-tungstenite",
-    "dep:sqlx",
-    "dep:serde_json",
-    "dep:irpc",
-    "dep:automerge_sedimentree",
-    "dep:future_form",
-    "dep:keyhive_core",
-    "dep:keyhive_crypto",
-    "dep:sedimentree_core",
-    "dep:sedimentree_fs_storage",
-    "dep:subduction_core",
-    "dep:subduction_crypto",
-    "dep:subduction_iroh",
-    "dep:subduction_keyhive",
-    "dep:subduction_websocket",
-]
-
 [dependencies]
 utils_rs = { workspace = true, features = ["hash"] }
 futures = { workspace = true }
@@ -50,11 +30,9 @@ autosurgeon = { workspace = true }
 #
 # encoding
 serde.workspace = true
-serde_json = { workspace = true, optional = true }
 data-encoding.workspace = true
 bytes.workspace = true
 camino = "1.2.2"
-sqlx = { workspace = true, optional = true, features = ["sqlite", "runtime-tokio"] }
 rand.workspace = true
 blake3.workspace = true
 tempfile.workspace = true
@@ -62,22 +40,6 @@ tempfile.workspace = true
 #
 # errors
 thiserror.workspace = true
-iroh = { workspace = true, optional = true }
-irpc = { workspace = true, optional = true }
-
-#
-# sync
-automerge_sedimentree = { workspace = true, optional = true, features = ["rayon"] }
-future_form = { version = "0.3.0", optional = true }
-keyhive_core = { version = "0.3.0", optional = true }
-keyhive_crypto = { version = "0.1.0", optional = true}
-sedimentree_core = { workspace = true, optional = true, features = ["rayon"] }
-sedimentree_fs_storage = { workspace = true, optional = true }
-subduction_core = { workspace = true, optional = true }
-subduction_crypto = { workspace = true, optional = true }
-subduction_iroh = { workspace = true, optional = true }
-subduction_keyhive = { workspace = true, optional = true }
-subduction_websocket = { workspace = true, features = ["tokio_base"], optional = true }
 
 #
 # logging

@@ -631,7 +631,7 @@ impl TablesRepo {
                 match &event {
                     TablesEvent::WindowAdded { id, heads }
                     | TablesEvent::WindowChanged { id, heads } => {
-                        let Some((new_window, _)) = self
+                        let Some(new_window) = self
                             .app_doc_handle
                             .hydrate_path_at_heads::<Versioned<Window>>(
                                 &heads.0,
@@ -669,7 +669,7 @@ impl TablesRepo {
                             .await?;
                     }
                     TablesEvent::TabAdded { id, heads } | TablesEvent::TabChanged { id, heads } => {
-                        let Some((new_tab, _)) = self
+                        let Some(new_tab) = self
                             .app_doc_handle
                             .hydrate_path_at_heads::<Versioned<Tab>>(
                                 &heads.0,
@@ -708,7 +708,7 @@ impl TablesRepo {
                     }
                     TablesEvent::PanelAdded { id, heads }
                     | TablesEvent::PanelChanged { id, heads } => {
-                        let Some((new_panel, _)) = self
+                        let Some(new_panel) = self
                             .app_doc_handle
                             .hydrate_path_at_heads::<Versioned<Panel>>(
                                 &heads.0,
@@ -747,7 +747,7 @@ impl TablesRepo {
                     }
                     TablesEvent::TableAdded { id, heads }
                     | TablesEvent::TableChanged { id, heads } => {
-                        let Some((new_table, _)) = self
+                        let Some(new_table) = self
                             .app_doc_handle
                             .hydrate_path_at_heads::<Versioned<Table>>(
                                 &heads.0,
@@ -811,7 +811,7 @@ impl TablesRepo {
                 ],
             )
             .await
-            .map(|value| value.map(|(deleted, _)| deleted))
+            .map(|value| value.map(|deleted| deleted))
     }
 
     pub async fn diff_events(

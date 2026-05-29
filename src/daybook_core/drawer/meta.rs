@@ -312,6 +312,7 @@ impl DrawerRepo {
             .await
     }
 
+    #[tracing::instrument(skip_all)]
     pub(super) async fn hydrate_entry_at_heads(
         &self,
         doc_id: &DocId,
@@ -326,6 +327,6 @@ impl DrawerRepo {
             .drawer_doc_handle
             .hydrate_path_at_heads::<DocEntry>(heads, automerge::ROOT, path)
             .await?;
-        Ok(entry.map(|(entry_value, _)| entry_value))
+        Ok(entry.map(|entry_value| entry_value))
     }
 }

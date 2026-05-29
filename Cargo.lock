@@ -147,30 +147,15 @@ dependencies = [
  "async-lock",
  "async-trait",
  "automerge",
- "automerge_sedimentree",
  "autosurgeon",
  "blake3",
  "bytes",
  "camino",
  "data-encoding",
- "future_form",
  "futures",
  "futures-buffered",
- "iroh",
- "irpc",
- "keyhive_core 0.3.0",
- "keyhive_crypto 0.1.0",
  "rand 0.9.2",
- "sedimentree_core",
- "sedimentree_fs_storage",
  "serde",
- "serde_json",
- "sqlx",
- "subduction_core",
- "subduction_crypto",
- "subduction_iroh",
- "subduction_keyhive",
- "subduction_websocket",
  "tempfile",
  "thiserror 2.0.18",
  "tokio",
@@ -752,7 +737,7 @@ dependencies = [
 [[package]]
 name = "autosurgeon"
 version = "0.11.0"
-source = "git+https://github.com/dman-os/autosurgeon?rev=6826469986b150e6b736dc8e24619aa01a03ecef#6826469986b150e6b736dc8e24619aa01a03ecef"
+source = "git+https://github.com/dman-os/autosurgeon?rev=73e424a51132e430473e59722b6c351c4a63c4a4#73e424a51132e430473e59722b6c351c4a63c4a4"
 dependencies = [
  "automerge",
  "autosurgeon-derive",
@@ -765,7 +750,7 @@ dependencies = [
 [[package]]
 name = "autosurgeon-derive"
 version = "0.11.0"
-source = "git+https://github.com/dman-os/autosurgeon?rev=6826469986b150e6b736dc8e24619aa01a03ecef#6826469986b150e6b736dc8e24619aa01a03ecef"
+source = "git+https://github.com/dman-os/autosurgeon?rev=73e424a51132e430473e59722b6c351c4a63c4a4#73e424a51132e430473e59722b6c351c4a63c4a4"
 dependencies = [
  "proc-macro2",
  "quote",

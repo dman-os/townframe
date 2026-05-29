@@ -333,7 +333,7 @@ impl DrawerRepo {
         doc_id: &DocId,
         heads: &Arc<[automerge::ChangeHash]>,
     ) -> Res<Option<DocDeleteTombstone>> {
-        let Some((tags, _)) = self
+        let Some(tags) = self
             .drawer_doc_handle
             .hydrate_path_at_heads::<Vec<DocDeleteTombstone>>(
                 heads,

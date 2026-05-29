@@ -411,14 +411,15 @@ async fn assert_blob_parity(nodes: &[Option<SyncTestNode>], timeout: Duration) -
         }
     }
     for node in active {
-        for hash in &expected {
+        for digest in &expected {
+            let hash = crate::blobs::digest_str_to_blob_id(digest)?;
             wait_for_blob_bytes(&node.blobs_repo, hash, timeout)
                 .await
                 .map_err(|err| {
                     eyre::eyre!(
                         "blob bytes missing after parity check: endpoint_id={} hash={} err={}",
                         node.sync_repo.router.endpoint().id(),
-                        hash,
+                        digest,
                         err
                     )
                 })?;

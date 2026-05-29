@@ -857,7 +857,7 @@ mod tests {
     mod ladder;
     mod stress;
 
-    use crate::blobs::BlobsRepo;
+    use crate::blobs::{BlobId, BlobsRepo};
     use crate::drawer::DrawerRepo;
     use crate::index::DocBlobsIndexRepo;
     use crate::local_state::SqliteLocalStateRepo;
@@ -1314,8 +1314,7 @@ mod tests {
         for idx in 0..8usize {
             let payload = format!("blob-bytes-validation-{idx:03}").into_bytes();
             let hash = node_a.blobs_repo.put(&payload).await?;
-            let hash = hash.to_string();
-            blob_payloads.push((hash.clone(), payload));
+            blob_payloads.push((hash, payload));
             args_batch.push(AddDocArgs {
                 branch_path: daybook_types::doc::BranchPathBuf::from("main"),
                 facets: [(
@@ -1323,7 +1322,7 @@ mod tests {
                     FacetRaw::from(WellKnownFacet::Blob(daybook_types::doc::Blob {
                         mime: "application/octet-stream".to_string(),
                         length_octets: blob_payloads.last().expect("just pushed").1.len() as u64,
-                        digest: hash.clone(),
+                        digest: crate::blobs::blob_id_to_digest_str(hash),
                         inline: None,
                         urls: Some(vec![format!("db+blob:///{hash}")]),
                     })),
@@ -1343,9 +1342,9 @@ mod tests {
 
         for (hash, expected) in &blob_payloads {
             let got =
-                wait_for_blob_bytes(&node_b.blobs_repo, hash, Duration::from_secs(60)).await?;
+                wait_for_blob_bytes(&node_b.blobs_repo, *hash, Duration::from_secs(60)).await?;
             assert_eq!(
-                got, *expected,
+                &got, expected,
                 "blob content mismatch after sync for hash={hash}"
             );
         }
@@ -1902,12 +1901,9 @@ mod tests {
 
     async fn wait_for_blob_bytes(
         blobs_repo: &BlobsRepo,
-        hash: &str,
+        blob_id: BlobId,
         timeout: Duration,
     ) -> Res<Vec<u8>> {
-        let blob_id = hash
-            .parse::<crate::blobs::BlobId>()
-            .wrap_err("invalid blob hash")?;
         tokio::time::timeout(timeout, async {
             loop {
                 let path = match blobs_repo.get_path(blob_id).await {
@@ -1930,7 +1926,7 @@ mod tests {
             }
         })
         .await
-        .map_err(|_| eyre::eyre!("timed out waiting for blob bytes: {hash}"))?
+        .map_err(|_| eyre::eyre!("timed out waiting for blob bytes: {blob_id}"))?
     }
 
     #[tokio::test(flavor = "multi_thread")]
@@ -1945,7 +1941,7 @@ mod tests {
         )
         .await?;
         let payload = b"delayed-blob-arrival".to_vec();
-        let expected_hash = utils_rs::hash::blake3_hash_bytes(&payload);
+        let expected_hash = crate::blobs::BlobId::new(*blake3::hash(&payload).as_bytes());
 
         let repo_bg = Arc::clone(&blobs_repo);
         let payload_bg = payload.clone();
@@ -1954,7 +1950,7 @@ mod tests {
             repo_bg.put(&payload_bg).await.expect("put should succeed");
         });
 
-        let got = wait_for_blob_bytes(&blobs_repo, &expected_hash, Duration::from_secs(5)).await?;
+        let got = wait_for_blob_bytes(&blobs_repo, expected_hash, Duration::from_secs(5)).await?;
         assert_eq!(got, payload);
 
         blobs_repo.shutdown().await?;

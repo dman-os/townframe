@@ -134,10 +134,6 @@ pub(crate) fn blob_hash_from_id(blob_id: BlobId) -> String {
     blob_id.to_string()
 }
 
-fn blob_id_from_bytes(bytes: [u8; 32]) -> BlobId {
-    BlobId::new(bytes)
-}
-
 async fn blob_id_from_reader(reader: tokio::fs::File) -> Result<BlobId, eyre::Report> {
     use tokio::io::AsyncReadExt;
 
@@ -151,7 +147,7 @@ async fn blob_id_from_reader(reader: tokio::fs::File) -> Result<BlobId, eyre::Re
         }
         hasher.update(&buf[..read]);
     }
-    Ok(blob_id_from_bytes(*hasher.finalize().as_bytes()))
+    Ok(BlobId::new(*hasher.finalize().as_bytes()))
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
@@ -302,7 +298,7 @@ impl BlobsRepo {
 
     /// Compatibility alias that ingests bytes as an owned blob.
     pub async fn put(&self, data: &[u8]) -> Result<BlobId, eyre::Report> {
-        let hash = blob_id_from_bytes(*blake3::hash(data).as_bytes());
+        let hash = BlobId::new(*blake3::hash(data).as_bytes());
         let object_paths = self.object_paths(hash)?;
 
         tokio::fs::create_dir_all(&object_paths.dir).await?;
@@ -327,7 +323,6 @@ impl BlobsRepo {
     }
 
     pub async fn get_path(&self, blob_id: BlobId) -> Result<PathBuf, eyre::Report> {
-        let hash = blob_hash_from_id(blob_id);
         let object_paths = self.object_paths(blob_id)?;
         if tokio::fs::try_exists(&object_paths.blob).await? {
             if self.read_meta(&object_paths.meta).await?.is_none() {
@@ -345,11 +340,11 @@ impl BlobsRepo {
         }
 
         let Some(meta) = self.read_meta(&object_paths.meta).await? else {
-            eyre::bail!("Blob not found: {hash}");
+            eyre::bail!("Blob not found: {blob_id}");
         };
 
         match meta.mode {
-            BlobMode::OwnedCopy => eyre::bail!("Blob not found: {hash}"),
+            BlobMode::OwnedCopy => eyre::bail!("Blob not found: {blob_id}"),
             BlobMode::Reference => {
                 if meta.source_paths.is_empty() {
                     eyre::bail!("reference metadata missing source_paths");
@@ -378,7 +373,7 @@ impl BlobsRepo {
                 if let Some(err) = drift_error {
                     eyre::bail!(err);
                 }
-                eyre::bail!("Referenced blob source missing for hash {hash}");
+                eyre::bail!("Referenced blob source missing for hash {blob_id}");
             }
         }
     }
@@ -789,6 +784,11 @@ pub(crate) fn blob_id_to_iroh_hash(blob_id: BlobId) -> iroh_blobs::Hash {
 pub(crate) fn blob_id_to_digest_str(blob_id: BlobId) -> String {
     utils_rs::hash::encode_base58_multibase_blake3(*blob_id.as_bytes())
 }
+#[cfg(test)]
+pub(crate) fn digest_str_to_blob_id(digest: &str) -> Res<BlobId> {
+    let bytes = utils_rs::hash::decode_base58_multibase_blake3(digest)?;
+    Ok(BlobId::new(bytes))
+}
 
 #[cfg(test)]
 mod tests {
@@ -834,7 +834,7 @@ mod tests {
         let data = b"hello world";
 
         let hash = repo.put(data).await?;
-        let expected_hash = blob_id_from_bytes(*blake3::hash(data).as_bytes());
+        let expected_hash = BlobId::new(*blake3::hash(data).as_bytes());
         assert_eq!(hash, expected_hash);
 
         let path = repo.get_path(hash).await?;
@@ -986,7 +986,7 @@ mod tests {
     async fn put_from_store_materializes_owned_blob() -> Res<()> {
         let (repo, _temp) = setup().await;
         let data = b"materialize-from-store";
-        let hash = blob_id_from_bytes(*blake3::hash(data).as_bytes());
+        let hash = BlobId::new(*blake3::hash(data).as_bytes());
 
         repo.iroh_store
             .blobs()

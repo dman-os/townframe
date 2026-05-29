@@ -499,17 +499,29 @@ impl BigDocHandle {
         heads: &[automerge::ChangeHash],
         obj_id: automerge::ObjId,
         path: Vec<Prop<'static>>,
-    ) -> Res<Option<(T, Arc<[automerge::ChangeHash]>)>> {
-        self.with_document_read(|doc| -> Res<Option<(T, Arc<[automerge::ChangeHash]>)>> {
-            let heads: Arc<[automerge::ChangeHash]> = Arc::from(heads.to_vec());
+    ) -> Res<Option<T>> {
+        self.with_document_read(|doc| -> Res<Option<T>> {
             if path.is_empty() && obj_id == automerge::ROOT {
                 let value: T = autosurgeon::hydrate_at(doc, &heads).wrap_err("error hydrating")?;
-                Ok(Some((value, heads)))
+                Ok(Some(value))
             } else {
                 match autosurgeon::hydrate_path_at(doc, &obj_id, path.clone(), &heads) {
-                    Ok(Some(value)) => Ok(Some((value, heads))),
+                    Ok(Some(value)) => Ok(Some(value)),
                     Ok(None) => Ok(None),
-                    Err(err) => Err(ferr!("error hydrating: {err:?}")),
+                    Err(err) => {
+                        {
+                            let deb_val: am_utils_rs::codecs::ThroughJson<serde_json::Value> =
+                                autosurgeon::hydrate_at(doc, &heads)
+                                    .expect("ERROR DEBUG HYDRATING");
+                            info!("XXX {:#?}", deb_val.0);
+                            let deb_val: Option<
+                                am_utils_rs::codecs::ThroughJson<serde_json::Value>,
+                            > = autosurgeon::hydrate_path_at(doc, &obj_id, path.clone(), &heads)
+                                .expect("ERROR DEBUG HYDRATING");
+                            info!("XXX {:#?}", deb_val);
+                        }
+                        Err(ferr!("error hydrating: {err:?}"))
+                    }
                 }
             }
         })

@@ -1266,7 +1266,7 @@ where
                     .send(RuntimeEvt::DocWorkerTransientFinished {
                         doc_id: self.doc_id,
                     })
-                    .expect(ERROR_CHANNEL);
+                    .wrap_err(ERROR_CHANNEL)?;
                 done.send(res).inspect_err(|_| warn!(ERROR_CALLER)).ok();
             }
             DocWorkerMsg::CommitDelta {
@@ -1283,7 +1283,7 @@ where
                     .send(RuntimeEvt::DocWorkerTransientFinished {
                         doc_id: self.doc_id,
                     })
-                    .expect(ERROR_CHANNEL);
+                    .wrap_err(ERROR_CHANNEL)?;
                 done.send(res).inspect_err(|_| warn!(ERROR_CALLER)).ok();
             }
             DocWorkerMsg::ApplySyncSession { session } => {
@@ -1292,7 +1292,7 @@ where
                     .send(RuntimeEvt::DocWorkerTransientFinished {
                         doc_id: self.doc_id,
                     })
-                    .expect(ERROR_CHANNEL);
+                    .wrap_err(ERROR_CHANNEL)?;
             }
             DocWorkerMsg::SyncWithPeer {
                 peer_id,
@@ -1300,11 +1300,10 @@ where
                 done,
             } => {
                 let res = self.handle_sync_with_peer(peer_id, timeout).await;
-                let evt_tx: &mpsc::UnboundedSender<RuntimeEvt> = &self.runtime_evt_tx;
                 let evt = RuntimeEvt::DocWorkerTransientFinished {
                     doc_id: self.doc_id,
                 };
-                evt_tx.send(evt).expect(ERROR_CHANNEL);
+                self.runtime_evt_tx.send(evt).wrap_err(ERROR_CHANNEL)?;
                 done.send(res).inspect_err(|_| warn!(ERROR_CALLER)).ok();
             }
             DocWorkerMsg::ReleaseHandleLease => {}

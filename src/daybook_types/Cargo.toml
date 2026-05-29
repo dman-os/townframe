@@ -24,7 +24,7 @@ manifest = ["dep:garde", "dep:semver"]
 # internal
 api_utils_rs = { workspace = true, default-features = false }
 utils_rs = { workspace = true, default-features = false }
-am_utils_rs = { workspace = true, default-features = false }
+am_utils_rs = { workspace = true }
 
 #
 # encoding

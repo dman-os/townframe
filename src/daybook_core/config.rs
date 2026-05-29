@@ -155,7 +155,7 @@ impl ConfigRepo {
         key: &str,
         heads: &Arc<[automerge::ChangeHash]>,
     ) -> Res<Option<ActorId>> {
-        let Some((tags, _)) = self
+        let Some(tags) = self
             .app_doc_handle
             .hydrate_path_at_heads::<Vec<VersionTag>>(
                 heads,
@@ -313,7 +313,7 @@ impl ConfigRepo {
             // }
 
             if let Some(heads) = last_heads {
-                let (new_store, _) = self
+                let new_store = self
                     .app_doc_handle
                     .hydrate_path_at_heads::<ConfigStore>(
                         &heads,

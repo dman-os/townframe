@@ -168,7 +168,7 @@ impl InitRepo {
                 continue;
             }
             if let Some(InitEvent::Changed { heads }) = events.last().cloned() {
-                let Some((new_store, _)) = self
+                let Some(new_store) = self
                     .app_am_handle
                     .hydrate_path_at_heads::<InitStore>(
                         &heads.0,

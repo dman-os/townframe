@@ -242,7 +242,7 @@ impl DrawerRepo {
                     "map".into(),
                     autosurgeon::Prop::Key(doc_id.to_string().into()),
                 ];
-                let (new_entry, drawer_heads) = self
+                let new_entry = self
                     .drawer_doc_handle
                     .hydrate_path_at_heads::<DocEntry>(
                         patch_heads,
@@ -258,7 +258,7 @@ impl DrawerRepo {
                             patch_heads.len()
                         )
                     })?;
-                let drawer_heads = ChangeHashSet(drawer_heads);
+                let drawer_heads = ChangeHashSet(Arc::clone(patch_heads));
 
                 if new_entry.previous_version_heads.is_none() {
                     let entry = self

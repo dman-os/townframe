@@ -18,7 +18,7 @@ test-support = ["dep:tempfile"]
 [dependencies]
 #
 # internal
-am_utils_rs = { workspace = true, features = ["repo", "iroh"] }
+am_utils_rs = { workspace = true }
 api_utils_rs = { workspace = true, features = ["automerge"] }
 daybook_types = { workspace = true, features = [
     "automerge",

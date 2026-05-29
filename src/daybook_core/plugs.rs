@@ -749,7 +749,7 @@ impl PlugsRepo {
         plug_id: &str,
         heads: &Arc<[automerge::ChangeHash]>,
     ) -> Res<Option<ActorId>> {
-        let Some((tags, _)) = self
+        let Some(tags) = self
             .app_doc_handle
             .hydrate_path_at_heads::<Vec<VersionTag>>(
                 heads,
@@ -817,7 +817,7 @@ impl PlugsRepo {
                 match event {
                     PlugsEvent::PlugAdded { id, heads, origin }
                     | PlugsEvent::PlugChanged { id, heads, origin } => {
-                        let Some((new_versioned, _)) = self
+                        let Some(new_versioned) = self
                             .app_doc_handle
                             .hydrate_path_at_heads::<Versioned<ThroughJson<Arc<manifest::PlugManifest>>>>(
                                 &heads.0,
@@ -935,7 +935,7 @@ impl PlugsRepo {
                         }
                     }
                     PlugsEvent::ConfigDocsChanged { heads, origin } => {
-                        let Some((new_versioned, _)) = self
+                        let Some(new_versioned) = self
                             .app_doc_handle
                             .hydrate_path_at_heads::<Versioned<ThroughJson<HashMap<String, String>>>>(
                                 &heads.0,

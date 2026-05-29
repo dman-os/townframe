@@ -307,6 +307,22 @@ pub mod hash {
         encode_base58_multibase(hash.to_bytes())
     }
 
+    #[cfg(feature = "hash")]
+    pub fn decode_base58_multibase_blake3(digest: &str) -> Res<[u8; 32]> {
+        if digest.len() != 34 {
+            eyre::bail!("expected length 34 multibase blake3 digest");
+        }
+        let mut buf = [0; 33];
+        let len = decode_base58_multibase_onto(digest, &mut buf)?;
+        assert_eq!(len, 33);
+        if buf[0] != BLAKE3 as u8 {
+            eyre::bail!("multibase not blake3");
+        }
+        let mut buf2 = [0; 32];
+        buf2.copy_from_slice(&buf[1..]);
+        Ok(buf2)
+    }
+
     pub fn encode_base58_multibase<T: AsRef<[u8]>>(source: T) -> String {
         let mut string = "z".into();
         bs58::encode(source)
