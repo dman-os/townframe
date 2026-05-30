@@ -659,7 +659,7 @@ pub fn plug_manifest() -> PlugManifest {
                         facet_acl: vec![RoutineFacetAccess {
                             owner_plug_id: None,
                             tag: WellKnownFacetTag::LabelGeneric.into(),
-                            key_id: None,
+                            key_id: Some(daybook_types::doc::DEFAULT_FACET_ID.into()),
                             read: true,
                             write: true,
                             create: false,
@@ -690,7 +690,7 @@ pub fn plug_manifest() -> PlugManifest {
                         facet_acl: vec![RoutineFacetAccess {
                             owner_plug_id: None,
                             tag: WellKnownFacetTag::LabelGeneric.into(),
-                            key_id: None,
+                            key_id: Some(daybook_types::doc::DEFAULT_FACET_ID.into()),
                             read: true,
                             write: true,
                             create: false,
@@ -721,7 +721,7 @@ pub fn plug_manifest() -> PlugManifest {
                         facet_acl: vec![RoutineFacetAccess {
                             owner_plug_id: None,
                             tag: WellKnownFacetTag::LabelGeneric.into(),
-                            key_id: None,
+                            key_id: Some(daybook_types::doc::DEFAULT_FACET_ID.into()),
                             read: true,
                             write: true,
                             create: false,
@@ -748,7 +748,7 @@ pub fn plug_manifest() -> PlugManifest {
                         facet_acl: vec![RoutineFacetAccess {
                             owner_plug_id: None,
                             tag: WellKnownFacetTag::LabelGeneric.into(),
-                            key_id: None,
+                            key_id: Some(daybook_types::doc::DEFAULT_FACET_ID.into()),
                             read: true,
                             write: true,
                             create: false,
@@ -899,7 +899,7 @@ pub fn plug_manifest() -> PlugManifest {
                         facet_acl: vec![RoutineFacetAccess {
                             owner_plug_id: None,
                             tag: WellKnownFacetTag::LabelGeneric.into(),
-                            key_id: None,
+                            key_id: Some(daybook_types::doc::DEFAULT_FACET_ID.into()),
                             read: true,
                             write: true,
                             create: false,
@@ -929,7 +929,7 @@ pub fn plug_manifest() -> PlugManifest {
                         facet_acl: vec![RoutineFacetAccess {
                             owner_plug_id: None,
                             tag: WellKnownFacetTag::LabelGeneric.into(),
-                            key_id: None,
+                            key_id: Some(daybook_types::doc::DEFAULT_FACET_ID.into()),
                             read: true,
                             write: true,
                             create: false,

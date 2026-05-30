@@ -140,7 +140,7 @@ fn test_amount_no_symbol() {
 
 #[test]
 fn test_ws_accepts_tabs() {
-    assert_eq!(parse_ok(ws0(), "\t\t"), "");
+    assert_eq!(parse_ok(ws0(), "\t\t"), "\t\t");
     assert_eq!(parse_ok(ws1(), "\t \t"), "\t \t");
 }
 
