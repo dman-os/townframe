@@ -131,7 +131,11 @@ async fn add_blob_image_doc(
     test_cx: &daybook_core::test_support::DaybookTestContext,
     image_bytes: &[u8],
 ) -> Res<daybook_types::doc::DocId> {
-    let blob_hash = test_cx.rt.blobs_repo.put(image_bytes).await?;
+    let blob_hash = test_cx
+        .rt
+        .blobs_repo
+        .put(image_bytes, daybook_core::blobs::BlobUseHints::Docs)
+        .await?;
     let blob_facet = Blob {
         mime: "image/jpeg".to_string(),
         length_octets: image_bytes.len() as u64,

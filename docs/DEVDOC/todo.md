@@ -6,6 +6,7 @@
       - [ ] OCI based
     - [x] Un-previlaged processors should go in their own branch
   - [ ] Backup ATProto PD
+      - [ ] Use pascal case in facet tags
   - [ ] Chatbot
   - [ ] Generated UI
   - [ ] FUSE/dpath
@@ -23,6 +24,9 @@
 
 ## Stack
 
+- [ ] Good and local document classification
+  - [ ] Receipt parsing
+  - [ ] Collators
 - [ ] Sync panel
 - [ ] P2P
   - [x] iroh
@@ -35,9 +39,6 @@
 - [ ] Blobs server
   - [x] Iroh blobs?
   - [x] Chunked hashing for transfers
-- [ ] Good and local document classification
-  - [ ] Receipt parsing
-  - [ ] Collators
 - [ ] daybook_server
   - [ ] Decide on wrpc vs json
 - [ ] DrawerScreen
@@ -45,14 +46,14 @@
   - [ ] Press again to change views
 - [ ] Mltools config should be per device
 - [ ] Processors should only run on device that created the doc
-- [ ] use a env var or an env! var to set global multipliers for our test timeouts
+- [x] use a env var or an env! var to set global multipliers for our test timeouts
 - [ ] File locks on repo
 - [ ] Store plugin info in drawer??
 - [ ] Js execution
   - [ ] https://json-render.dev/ based display
 - [ ] DocEditor
 - [x] Progress system
-  - [ ] Blob download
+  - [x] Blob download
 - [x] Overhaul bottom bar
   - [ ] Change color when in different modes.
   - [ ] Experiment with floating bottom bar
@@ -121,6 +122,7 @@
   - [ ] write vs read pool
   - [ ] Begin immediate
   - [ ] STRICT
+    - [ ] If not, fix the build to work on Android https://github.com/asg017/sqlite-vec/issues/68
 - [x] Replace Path with camino at certain places
 - [ ] Explore multi doc drawer
   - [ ] Drawer doc migration where a drawer is marked as deprecated and all devices that have seen it must merge it into the active docs. This allows eventually consistent garbage collection

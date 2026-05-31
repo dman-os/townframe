@@ -3,7 +3,6 @@
 //! FIXME: use ctrl_c handlers aross major await points
 //! FIXME: make each command a submodule
 
-#[expect(unused)]
 mod interlude {
     pub use am_utils_rs::prelude::*;
     pub use utils_rs::prelude::*;
@@ -344,76 +343,6 @@ async fn static_cli(cli: Cli) -> Res<ExitCode> {
             // Cleanup
             tokio::fs::remove_file(&tmp_path).await?;
         }
-        StaticCommands::Livetree { command } => {
-            let root_path = conf.cli_config.repo_path.join("livetree");
-            let metadata_db_path = conf
-                .cli_config
-                .repo_path
-                .join("pauperfuse")
-                .join("livetree.sqlite");
-            let mut livetree_cx = daybook_fuse::DaybookFuseCtx::new(
-                daybook_fuse::Config {
-                    root_path,
-                    metadata_db_path,
-                    branch_path: daybook_types::doc::BranchPathBuf::from("main"),
-                    poll_interval: std::time::Duration::from_millis(250),
-                },
-                Arc::clone(&drawer_repo),
-            );
-
-            match command {
-                LivetreeCommands::Init {} => {
-                    daybook_fuse::bootstrap_livetree(&mut livetree_cx).await?;
-                    println!(
-                        "livetree initialized at {}",
-                        livetree_cx.config.root_path.display()
-                    );
-                }
-                LivetreeCommands::Status {} => {
-                    let status = daybook_fuse::status(&mut livetree_cx).await?;
-                    println!(
-                        "in-sync: {}, provider-only: {}, backend-only: {}, diverged: {}, scanned: {}, changed: {}",
-                        status.in_sync_count,
-                        status.provider_only_count,
-                        status.backend_only_count,
-                        status.diverged_count,
-                        status.scanned_doc_count,
-                        status.changed_doc_count
-                    );
-                }
-                LivetreeCommands::Pull {} => {
-                    let report = daybook_fuse::pull_changes(&mut livetree_cx).await?;
-                    println!(
-                        "pull complete: provider_deltas={}, effects={}, scanned={}, changed={}",
-                        report.provider_delta_count,
-                        report.effect_count,
-                        report.scanned_doc_count,
-                        report.changed_doc_count
-                    );
-                }
-                LivetreeCommands::Push {} => {
-                    let report = daybook_fuse::push_changes(&mut livetree_cx).await?;
-                    println!(
-                        "push complete: backend_deltas={}, effects={}, scanned={}, changed={}",
-                        report.backend_delta_count,
-                        report.effect_count,
-                        report.scanned_doc_count,
-                        report.changed_doc_count
-                    );
-                }
-                LivetreeCommands::Reconcile {} => {
-                    let report = daybook_fuse::reconcile_once(&mut livetree_cx).await?;
-                    println!(
-                        "reconcile complete: backend_deltas={}, provider_deltas={}, effects={}, scanned={}, changed={}",
-                        report.backend_delta_count,
-                        report.provider_delta_count,
-                        report.effect_count,
-                        report.scanned_doc_count,
-                        report.changed_doc_count
-                    );
-                }
-            }
-        }
         StaticCommands::Sync {
             sync_urls,
             exit_when_synced,
@@ -446,10 +375,13 @@ async fn static_cli(cli: Cli) -> Res<ExitCode> {
             }
             let config_repo = lazy::config_repo().await?;
             let devices = config_repo.list_known_sync_devices().await?;
-            let endpoint_ids: Vec<_> = devices.into_iter().map(|d| d.endpoint_id).collect();
+            let peer_ids: Vec<_> = devices
+                .into_iter()
+                .map(|dev| big_sync_core::PeerId::new(*dev.endpoint_id.as_bytes()))
+                .collect();
 
             if exit_when_synced {
-                if endpoint_ids.is_empty() {
+                if peer_ids.is_empty() {
                     error!("--exit-when-synced requires at least one sync URL");
                     return Ok(ExitCode::FAILURE);
                 }
@@ -459,7 +391,7 @@ async fn static_cli(cli: Cli) -> Res<ExitCode> {
                     }
                     res = sync_repo
                             // TODO: parametrize timeout
-                            .wait_until_peers_sync(&endpoint_ids) => {
+                            .wait_until_peers_sync(&peer_ids, std::time::Duration::from_secs(120)) => {
                         res?;
                     }
                 }
@@ -506,8 +438,8 @@ async fn static_cli(cli: Cli) -> Res<ExitCode> {
                                         } => {
                                             info!(%peer_key, ?doc_id, "doc synced with peer");
                                         }
-                                        IrohSyncEvent::BlobSynced { hash, peer_key } => {
-                                            info!(?peer_key, %hash, "blob synced");
+                                        IrohSyncEvent::BlobSynced { hash } => {
+                                            info!(%hash, "blob synced");
                                         }
                                         IrohSyncEvent::BlobSyncBackoff {
                                             hash,
@@ -516,20 +448,11 @@ async fn static_cli(cli: Cli) -> Res<ExitCode> {
                                         } => {
                                             info!(%hash, ?delay, ?attempt_no, "blob sync backoff");
                                         }
-                                        IrohSyncEvent::BlobDownloadStarted {
-                                            peer_key,
-                                            partition,
-                                            hash,
-                                        } => {
-                                            info!(%peer_key, ?partition, %hash, "blob download started");
+                                        IrohSyncEvent::BlobDownloadStarted { hash } => {
+                                            info!(%hash, "blob download started");
                                         }
-                                        IrohSyncEvent::BlobDownloadFinished {
-                                            peer_key,
-                                            partition,
-                                            hash,
-                                            success,
-                                        } => {
-                                            info!(%peer_key, ?partition, %hash, ?success, "blob download finished");
+                                        IrohSyncEvent::BlobDownloadFinished { hash, success } => {
+                                            info!(%hash, ?success, "blob download finished");
                                         }
                                         IrohSyncEvent::StalePeer { peer_key } => {
                                             warn!(%peer_key, "stale sync peer");
@@ -729,8 +652,7 @@ async fn dynamic_cli(static_res: StaticCliResult) -> Res<ExitCode> {
         | Ok(StaticCommands::Cat { .. })
         | Ok(StaticCommands::Ed { .. })
         | Ok(StaticCommands::Devices { .. })
-        | Ok(StaticCommands::Sync { .. })
-        | Ok(StaticCommands::Livetree { .. }) => {
+        | Ok(StaticCommands::Sync { .. }) => {
             unreachable!("static_cli will prevent these");
         }
     }
@@ -808,11 +730,6 @@ enum StaticCommands {
         #[arg(short, long)]
         branch: Option<String>,
     },
-    /// Work with the pauperfuse livetree materialization
-    Livetree {
-        #[clap(subcommand)]
-        command: LivetreeCommands,
-    },
     /// Run one-shot iroh sync session
     Sync {
         /// Additional sync URLs to connect to (not persisted)
@@ -846,21 +763,6 @@ enum DevicesCommands {
         name: Option<String>,
     },
 }
-
-#[derive(Debug, clap::Subcommand)]
-enum LivetreeCommands {
-    /// Initialize/materialize the livetree from drawer state
-    Init {},
-    /// Show sync state between drawer and livetree files
-    Status {},
-    /// Apply provider (drawer) changes into livetree files
-    Pull {},
-    /// Apply livetree file changes into provider (drawer)
-    Push {},
-    /// Push then pull in one cycle
-    Reconcile {},
-}
-
 enum StaticCliResult {
     ClapErr(clap::Error),
     Exit(ExitCode),
@@ -936,11 +838,9 @@ fn plug_cmd_to_clap(
                 .after_help(format!(
                     "Command type: DocCommand
 Routine name: {routine_name}
-Routine deets: {routine_deets:?}
 Routine acl: {routine_acl:?}
 Routine impl: {routine_impl:?}
 ",
-                    routine_deets = routine.deets,
                     routine_acl = routine.facet_acl(),
                     routine_impl = routine.r#impl,
                 ))
@@ -981,11 +881,13 @@ Routine impl: {routine_impl:?}
                             .dispatch(
                                 &plug_id,
                                 &routine_name[..],
-                                daybook_core::rt::DispatchArgs::DocFacet {
+                                daybook_core::rt::DispatchArgs::DocRoutine {
                                     doc_id: doc_id.clone(),
                                     branch_path: branch_path.clone(),
                                     heads: heads.clone(),
-                                    facet_key: None,
+                                    invocation:
+                                        daybook_core::rt::dispatch::RoutineInvocation::Command,
+                                    changed_facet_keys: vec![],
                                     wflow_args_json: None,
                                 },
                             )
@@ -1077,26 +979,28 @@ mod tests {
             ctx.layout.blobs_root.clone(),
             ctx.local_user_path.clone(),
             Arc::new(daybook_core::blobs::PartitionStoreMembershipWriter::new(
-                ctx.big_repo.partition_store(),
+                Arc::clone(&ctx.part_store),
             )),
         )
         .await?;
         let (plugs_repo, plugs_stop) = PlugsRepo::load(
             Arc::clone(&ctx.big_repo),
             Arc::clone(&blobs_repo),
-            ctx.doc_app.document_id().clone(),
+            ctx.doc_app.document_id(),
             daybook_types::doc::UserPathBuf::from(ctx.local_user_path.clone()),
         )
         .await?;
         let (drawer_repo, drawer_stop) = DrawerRepo::load(
             Arc::clone(&ctx.big_repo),
-            ctx.doc_drawer.document_id().clone(),
-            ctx.local_user_path.clone().into(),
+            Arc::clone(&ctx.part_store),
+            ctx.doc_drawer.document_id(),
+            ctx.local_user_path.clone(),
+            ctx.sql.clone(),
             ctx.layout.repo_root.join("local_state"),
-            Arc::new(std::sync::Mutex::new(
+            Arc::new(surelock::mutex::Mutex::new(
                 daybook_core::drawer::lru::KeyedLruPool::new(1000),
             )),
-            Arc::new(std::sync::Mutex::new(
+            Arc::new(surelock::mutex::Mutex::new(
                 daybook_core::drawer::lru::KeyedLruPool::new(1000),
             )),
             Arc::clone(&plugs_repo),
@@ -1104,10 +1008,10 @@ mod tests {
         .await?;
         let (config_repo, config_stop) = ConfigRepo::load(
             Arc::clone(&ctx.big_repo),
-            ctx.doc_app.document_id().clone(),
+            ctx.doc_app.document_id(),
             Arc::clone(&plugs_repo),
             daybook_types::doc::UserPathBuf::from(ctx.local_user_path.clone()),
-            ctx.sql.write_pool.clone(),
+            ctx.sql.clone(),
         )
         .await?;
         let (sqlite_local_state_repo, sqlite_local_state_stop) =
@@ -1118,7 +1022,7 @@ mod tests {
             Arc::clone(&sqlite_local_state_repo),
         )
         .await?;
-        let (progress_repo, progress_stop) = ProgressRepo::boot(ctx.sql.write_pool.clone()).await?;
+        let (progress_repo, progress_stop) = ProgressRepo::boot(ctx.sql.clone()).await?;
         let (sync_repo, sync_stop) = IrohSyncRepo::boot(
             Arc::clone(&ctx),
             Arc::clone(&config_repo),
@@ -1154,10 +1058,14 @@ mod tests {
         let repo_b_path = temp_root.join("repo-b");
 
         tokio::fs::create_dir_all(&repo_a_path).await?;
-        let init =
-            RepoCtx::init(&repo_a_path, RepoOpenOptions {}, "cli-test-device".into()).await?;
+        let init = RepoCtx::init(
+            &repo_a_path,
+            RepoOpenOptions {},
+            "cli-test-repo".into(),
+            "cli-test-device".into(),
+        )
+        .await?;
         init.shutdown().await?;
-        drop(init);
 
         let node_a = open_cli_sync_node(&repo_a_path).await?;
         for _ in 0..4 {
@@ -1180,7 +1088,10 @@ mod tests {
         let bootstrap = node_b.sync_repo.connect_url(&ticket).await?;
         node_b
             .sync_repo
-            .wait_until_peers_sync(std::slice::from_ref(&bootstrap.endpoint_id))
+            .wait_until_peers_sync(
+                std::slice::from_ref(&big_sync_core::PeerId::new(*bootstrap.id.as_bytes())),
+                std::time::Duration::from_secs(120),
+            )
             .await?;
 
         let ids_a = list_doc_ids(&node_a.drawer).await?;
@@ -1328,7 +1239,7 @@ mod lazy {
                     ctx.layout.blobs_root.clone(),
                     ctx.local_user_path.clone(),
                     Arc::new(daybook_core::blobs::PartitionStoreMembershipWriter::new(
-                        ctx.big_repo.partition_store(),
+                        Arc::clone(&ctx.part_store),
                     )),
                 )
                 .await?;
@@ -1354,7 +1265,7 @@ mod lazy {
                 let (plugs, plugs_stop) = PlugsRepo::load(
                     Arc::clone(&ctx.big_repo),
                     Arc::clone(&blobs),
-                    ctx.doc_app.document_id().clone(),
+                    ctx.doc_app.document_id(),
                     daybook_types::doc::UserPathBuf::from(ctx.local_user_path.clone()),
                 )
                 .await?;
@@ -1377,13 +1288,15 @@ mod lazy {
                 let plugs = plugs_repo().await?;
                 let (drawer, drawer_stop) = DrawerRepo::load(
                     Arc::clone(&ctx.big_repo),
-                    ctx.doc_drawer.document_id().clone(),
-                    ctx.local_user_path.clone().into(),
+                    Arc::clone(&ctx.part_store),
+                    ctx.doc_drawer.document_id(),
+                    ctx.local_user_path.clone(),
+                    ctx.sql.clone(),
                     ctx.layout.repo_root.join("local_state"),
-                    Arc::new(std::sync::Mutex::new(
+                    Arc::new(surelock::mutex::Mutex::new(
                         daybook_core::drawer::lru::KeyedLruPool::new(1000),
                     )),
-                    Arc::new(std::sync::Mutex::new(
+                    Arc::new(surelock::mutex::Mutex::new(
                         daybook_core::drawer::lru::KeyedLruPool::new(1000),
                     )),
                     Arc::clone(&plugs),
@@ -1408,10 +1321,10 @@ mod lazy {
                 let plugs = plugs_repo().await?;
                 let (config_repo, config_stop) = ConfigRepo::load(
                     Arc::clone(&ctx.big_repo),
-                    ctx.doc_app.document_id().clone(),
+                    ctx.doc_app.document_id(),
                     Arc::clone(&plugs),
                     daybook_types::doc::UserPathBuf::from(ctx.local_user_path.clone()),
-                    ctx.sql.write_pool.clone(),
+                    ctx.sql.clone(),
                 )
                 .await?;
                 register_shutdown(move || async move { config_stop.stop().await });
@@ -1432,9 +1345,9 @@ mod lazy {
                 let ctx = repo_ctx().await?;
                 let (dispatch, dispatch_stop) = DispatchRepo::load(
                     Arc::clone(&ctx.big_repo),
-                    ctx.doc_app.document_id().clone(),
+                    ctx.doc_app.document_id(),
                     daybook_types::doc::UserPathBuf::from(ctx.local_user_path.clone()),
-                    ctx.sql.write_pool.clone(),
+                    ctx.sql.clone(),
                 )
                 .await?;
                 register_shutdown(move || async move { dispatch_stop.stop().await });
@@ -1495,7 +1408,7 @@ mod lazy {
         match PROGRESS
             .get_or_try_init(|| async {
                 let ctx = repo_ctx().await?;
-                let (repo, stop) = ProgressRepo::boot(ctx.sql.write_pool.clone()).await?;
+                let (repo, stop) = ProgressRepo::boot(ctx.sql.clone()).await?;
                 register_shutdown(move || async move { stop.stop().await });
                 Ok(repo)
             })
@@ -1534,33 +1447,20 @@ mod lazy {
     }
 
     pub async fn init_repo() -> Res<Arc<InitRepo>> {
-        static SYNC: tokio::sync::OnceCell<Arc<IrohSyncRepo>> = tokio::sync::OnceCell::const_new();
+        static SYNC: tokio::sync::OnceCell<Arc<InitRepo>> = tokio::sync::OnceCell::const_new();
         match SYNC
             .get_or_try_init(|| async {
                 let rcx = repo_ctx().await?;
+                let progress = progress_repo().await?;
                 let (repo, stop) = InitRepo::load(
                     Arc::clone(&rcx.big_repo),
-                    rcx.doc_app.document_id().clone(),
-                    rcx.local_actor_id.clone(),
+                    rcx.doc_app.document_id(),
+                    rcx.local_user_path.clone(),
                     rcx.sql.clone(),
+                    Arc::clone(&progress),
+                    None,
                 )
                 .await?;
-                register_shutdown(move || async move { stop.stop().await });
-                Ok(repo)
-            })
-            .await
-        {
-            Ok(repo) => Ok(Arc::clone(repo)),
-            Err(err) => Err(err),
-        }
-    }
-    pub async fn sqlite_local_state_repo() -> Res<Arc<SqliteLocalStateRepo>> {
-        static SYNC: tokio::sync::OnceCell<Arc<IrohSyncRepo>> = tokio::sync::OnceCell::const_new();
-        match SYNC
-            .get_or_try_init(|| async {
-                let rcx = repo_ctx().await?;
-                let (repo, stop) =
-                    SqliteLocalStateRepo::boot(rcx.layout.repo_root.join("local_state")).await?;
                 register_shutdown(move || async move { stop.stop().await });
                 Ok(repo)
             })
@@ -1587,6 +1487,7 @@ mod lazy {
                 let (rt, stop) = daybook_core::rt::Rt::boot(
                     daybook_core::rt::RtConfig {
                         device_id: "main_todo".into(),
+                        startup_progress_task_id: None,
                     },
                     Arc::clone(&ctx),
                     Arc::clone(&drawer),

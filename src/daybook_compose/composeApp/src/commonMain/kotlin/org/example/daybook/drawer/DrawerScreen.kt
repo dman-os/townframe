@@ -10,26 +10,19 @@ import androidx.compose.foundation.gestures.Orientation
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.rememberLazyListState
+import androidx.compose.foundation.background
 import androidx.compose.material3.*
 import androidx.compose.runtime.*
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.unit.dp
-import androidx.lifecycle.ViewModel
-import androidx.lifecycle.viewModelScope
-import androidx.lifecycle.viewmodel.compose.viewModel
-import kotlinx.coroutines.flow.SharingStarted
-import kotlinx.coroutines.flow.map
-import kotlinx.coroutines.flow.stateIn
-import kotlinx.coroutines.launch
 import org.example.daybook.ChromeState
 import org.example.daybook.DaybookContentType
 import org.example.daybook.DocListState
+import org.example.daybook.DocEditorStoreViewModel
 import org.example.daybook.DrawerViewModel
-import org.example.daybook.LocalContainer
+import org.example.daybook.LocalDocEditorStore
 import org.example.daybook.ProvideChromeState
-import org.example.daybook.TablesState
-import org.example.daybook.TablesViewModel
 import org.example.daybook.tables.DockableRegion
 import org.example.daybook.ui.DocEditor
 import org.example.daybook.ui.DocFacetSidebar
@@ -37,189 +30,124 @@ import org.example.daybook.ui.buildSelfFacetRefUrl
 import org.example.daybook.ui.decodeJsonStringOrRaw
 import org.example.daybook.ui.decodeWellKnownFacet
 import org.example.daybook.ui.stripFacetRefFragment
-import org.example.daybook.ui.editor.EditorSessionController
 import org.example.daybook.ui.editor.bodyFacetKey
 import org.example.daybook.ui.editor.noteFacetKey
 import org.example.daybook.ui.editor.titleFacetKey
-import org.example.daybook.uniffi.TablesRepoFfi
-import org.example.daybook.uniffi.core.*
 import org.example.daybook.uniffi.types.Doc
 import org.example.daybook.uniffi.types.FacetKey
 import org.example.daybook.uniffi.types.FacetTag
 import org.example.daybook.uniffi.types.WellKnownFacet
 
-class DrawerScreenViewModel(
-    val drawerVm: DrawerViewModel,
-    val tablesRepo: TablesRepoFfi,
-    val blobsRepo: org.example.daybook.uniffi.BlobsRepoFfi,
-    val tablesVm: TablesViewModel
-) : ViewModel() {
-    val editorController =
-        EditorSessionController(
-            drawerRepo = drawerVm.drawerRepo,
-            scope = viewModelScope,
-            onDocCreated = { docId -> drawerVm.selectDoc(docId) }
-        )
-
-    val listSizeExpanded =
-        tablesVm.tablesState
-            .map { state ->
-                if (state is TablesState.Data) {
-                    val selectedTableId = tablesVm.selectedTableId.value
-                    val windowId =
-                        selectedTableId?.let { id ->
-                            state.tables[id]?.window?.let { windowPolicy ->
-                                when (windowPolicy) {
-                                    is TableWindow.Specific -> windowPolicy.id
-                                    is TableWindow.AllWindows -> state.windows.keys.firstOrNull()
-                                }
-                            }
-                        }
-                    windowId?.let { id ->
-                        state.windows[id]?.documentsScreenListSizeExpanded
-                    } ?: WindowLayoutRegionSize.Weight(0.4f)
-                } else {
-                    WindowLayoutRegionSize.Weight(0.4f)
+@Composable
+private fun DrawerDocEditorContent(
+    controller: org.example.daybook.ui.editor.EditorSessionController?,
+    selectedDocId: String?,
+    modifier: Modifier = Modifier,
+    showFacetSidebar: Boolean,
+    showInlineFacetRack: Boolean = false
+) {
+    Box(modifier = modifier.fillMaxSize()) {
+        if (selectedDocId != null) {
+            if (controller == null) {
+                Box(
+                    modifier = Modifier.fillMaxSize(),
+                    contentAlignment = Alignment.Center
+                ) {
+                    CircularProgressIndicator()
                 }
-            }.stateIn(
-                viewModelScope,
-                SharingStarted.WhileSubscribed(5000),
-                WindowLayoutRegionSize.Weight(0.4f)
-            )
-
-    fun updateListSize(weight: Float) {
-        viewModelScope.launch {
-            val state = tablesVm.tablesState.value
-            val selectedTableId = tablesVm.selectedTableId.value
-            if (state is TablesState.Data && selectedTableId != null) {
-                val windowId =
-                    state.tables[selectedTableId]?.window?.let { windowPolicy ->
-                        when (windowPolicy) {
-                            is TableWindow.Specific -> windowPolicy.id
-                            is TableWindow.AllWindows -> state.windows.keys.firstOrNull()
-                        }
+                return@Box
+            }
+            if (showFacetSidebar) {
+                DockableRegion(
+                    modifier = Modifier.fillMaxSize().padding(16.dp),
+                    orientation = Orientation.Horizontal,
+                    initialWeights = mapOf("doc-main" to 0.72f, "doc-facets" to 0.28f)
+                ) {
+                    pane("doc-main") {
+                        DocEditor(
+                            controller = controller,
+                            modifier = Modifier.fillMaxSize()
+                        )
                     }
-                windowId?.let { id ->
-                    state.windows[id]?.let { window ->
-                        tablesRepo.setWindow(
-                            id,
-                            window.copy(
-                                documentsScreenListSizeExpanded = WindowLayoutRegionSize.Weight(
-                                    weight
-                                )
-                            )
+                    pane("doc-facets") {
+                        DocFacetSidebar(
+                            controller = controller,
+                            modifier = Modifier.fillMaxSize()
                         )
                     }
                 }
+            } else {
+                DocEditor(
+                    controller = controller,
+                    showInlineFacetRack = showInlineFacetRack,
+                    modifier = Modifier.padding(16.dp),
+                )
+            }
+        } else {
+            Box(
+                modifier = Modifier.fillMaxSize(),
+                contentAlignment = Alignment.Center
+            ) {
+                Text("Select a document to view details")
             }
         }
     }
-
 }
 
 @Composable
-fun DrawerScreen(contentType: DaybookContentType, modifier: Modifier = Modifier) {
-    val container = LocalContainer.current
-    val tablesVm: TablesViewModel = viewModel { TablesViewModel(container.tablesRepo) }
-    val drawerVm: DrawerViewModel = viewModel { DrawerViewModel(container.drawerRepo) }
-    val vm =
-        viewModel {
-            DrawerScreenViewModel(drawerVm, container.tablesRepo, container.blobsRepo, tablesVm)
-        }
+fun DrawerScreen(
+    drawerVm: DrawerViewModel,
+    onOpenDoc: (String) -> Unit,
+    modifier: Modifier = Modifier
+) {
+    val docEditorStore: DocEditorStoreViewModel = LocalDocEditorStore.current
+    val selectedDocId by docEditorStore.selectedDocId.collectAsState()
+    ProvideChromeState(ChromeState(title = "Drawer")) {
+        DocList(
+            drawerViewModel = drawerVm,
+            selectedDocId = selectedDocId,
+            onDocClick = { docId ->
+                docEditorStore.selectDoc(docId)
+                onOpenDoc(docId)
+            },
+            modifier = modifier
+        )
+    }
+}
 
-    val selectedDocId by drawerVm.selectedDocId.collectAsState()
-    val selectedDoc by drawerVm.selectedDoc.collectAsState()
-    val selectedDocBundle by drawerVm.selectedDocBundle.collectAsState()
-    LaunchedEffect(selectedDoc?.id, selectedDocBundle) {
-        vm.editorController.bindDoc(selectedDoc, selectedDocBundle)
+@Composable
+fun DocEditorScreen(
+    contentType: DaybookContentType,
+    modifier: Modifier = Modifier
+) {
+    val docEditorStore: DocEditorStoreViewModel = LocalDocEditorStore.current
+    val selectedDocId by docEditorStore.selectedDocId.collectAsState()
+    val selectedController by docEditorStore.selectedController.collectAsState()
+
+    DisposableEffect(selectedDocId) {
+        if (selectedDocId != null) {
+            docEditorStore.attachHost(selectedDocId!!)
+        }
+        onDispose {
+            if (selectedDocId != null) {
+                docEditorStore.detachHost(selectedDocId!!)
+            }
+        }
     }
 
-    if (contentType == DaybookContentType.LIST_AND_DETAIL) {
-        val listSize by vm.listSizeExpanded.collectAsState()
-        val weight =
-            when (val s = listSize) {
-                is WindowLayoutRegionSize.Weight -> s.v1
-            }
-
-        ProvideChromeState(ChromeState(title = "Drawer")) {
-            DockableRegion(
-                modifier = modifier.fillMaxSize(),
-                orientation = Orientation.Horizontal,
-                initialWeights = mapOf("list" to weight, "editor" to 1f - weight),
-                onWeightsChanged = { newWeights ->
-                    newWeights["list"]?.let { vm.updateListSize(it) }
-                }
-            ) {
-                pane("list") {
-                    Box(modifier = Modifier.fillMaxSize()) {
-                        DocList(
-                            drawerViewModel = drawerVm,
-                            selectedDocId = selectedDocId,
-                            onDocClick = { drawerVm.selectDoc(it) }
-                        )
-                    }
-                }
-
-                pane("editor") {
-                    Box(modifier = Modifier.fillMaxSize()) {
-                        if (selectedDocId != null) {
-                            DockableRegion(
-                                modifier = Modifier.fillMaxSize().padding(16.dp),
-                                orientation = Orientation.Horizontal,
-                                initialWeights = mapOf("doc-main" to 0.72f, "doc-facets" to 0.28f)
-                            ) {
-                                pane("doc-main") {
-                                    DocEditor(
-                                        controller = vm.editorController,
-                                        modifier = Modifier.fillMaxSize()
-                                    )
-                                }
-                                pane("doc-facets") {
-                                    DocFacetSidebar(
-                                        controller = vm.editorController,
-                                        modifier = Modifier.fillMaxSize()
-                                    )
-                                }
-                            }
-                        } else {
-                            Box(
-                                modifier = Modifier.fillMaxSize(),
-                                contentAlignment = Alignment.Center
-                            ) {
-                                Text("Select a document to view details")
-                            }
-                        }
-                    }
-                }
-            }
-        }
-    } else {
-        if (selectedDocId != null) {
-            ProvideChromeState(
-                ChromeState(
-                    title = "Edit Document",
-                    onBack = { drawerVm.selectDoc(null) }
-                )
-            ) {
-                Box(modifier = modifier.fillMaxSize()) {
-                    DocEditor(
-                        controller = vm.editorController,
-                        showInlineFacetRack = true,
-                        modifier = Modifier.padding(16.dp),
-                    )
-                }
-            }
-        } else {
-            ProvideChromeState(ChromeState(title = "Drawer")) {
-                // Observe drawerState reactively
-                DocList(
-                    drawerViewModel = drawerVm,
-                    selectedDocId = null,
-                    onDocClick = { drawerVm.selectDoc(it) },
-                    modifier = modifier
-                )
-            }
-        }
+    Box(
+        modifier =
+            modifier
+                .fillMaxSize()
+                .background(MaterialTheme.colorScheme.surface)
+    ) {
+        DrawerDocEditorContent(
+            controller = selectedController,
+            selectedDocId = selectedDocId,
+            modifier = Modifier.fillMaxSize(),
+            showFacetSidebar = contentType == DaybookContentType.LIST_AND_DETAIL,
+            showInlineFacetRack = contentType != DaybookContentType.LIST_AND_DETAIL
+        )
     }
 }
 

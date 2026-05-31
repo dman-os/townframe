@@ -9,6 +9,7 @@ use big_sync::backend::contract::{
 use big_sync::stress_support::{self, StressFixture};
 use big_sync::{HostPartStore, SyncBackend};
 use big_sync_core::{Byte32Id, PartId, SyncCompletionDeets};
+use rand::rngs::StdRng;
 use sqlx::sqlite::SqliteConnectOptions;
 use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::fmt::Write as _;
@@ -885,6 +886,7 @@ async fn endpoint_addr_from_remote_info(
 }
 
 struct SyncRepoNode {
+    path: PathBuf,
     repo: Arc<BigRepo>,
     big_sync_store: SharedPartStore,
     big_sync_worker: big_sync::BigSyncWorkerHandle,
@@ -933,7 +935,7 @@ impl SyncRepoNode {
             Config {
                 peer_id,
                 secret_key_bytes,
-                storage: StorageConfig::Disk { path },
+                storage: StorageConfig::Disk { path: path.clone() },
             },
             Arc::clone(&big_sync_host.store),
         )
@@ -991,6 +993,7 @@ impl SyncRepoNode {
         );
 
         Ok(Self {
+            path,
             repo,
             big_sync_store: Arc::clone(&big_sync_host.store),
             big_sync_worker,
@@ -1228,10 +1231,15 @@ impl BigRepoStressFixture {
 impl StressFixture for BigRepoStressFixture {
     type World = ();
     type Node = SyncRepoNode;
+    type StressObj = ObjId;
     type Observation = BigRepoStressObservation;
 
     fn label(&self) -> &'static str {
         "big_repo"
+    }
+
+    fn make_stress_obj(&self, rng: &mut StdRng) -> Self::StressObj {
+        stress_support::stress_obj(rng)
     }
 
     fn make_doc_content(
@@ -1239,7 +1247,7 @@ impl StressFixture for BigRepoStressFixture {
         phase: &str,
         step: usize,
         node_idx: usize,
-        obj_id: &ObjId,
+        obj: &Self::StressObj,
         nonce: u64,
         _written_at: u64,
         _writer_id: PeerId,
@@ -1248,7 +1256,7 @@ impl StressFixture for BigRepoStressFixture {
             "phase": phase,
             "step": step,
             "node": node_idx,
-            "obj": format!("{obj_id:?}"),
+            "obj": format!("{obj:?}"),
             "nonce": nonce,
         })
     }
@@ -1260,6 +1268,17 @@ impl StressFixture for BigRepoStressFixture {
 
     async fn stop_node(&self, node: Self::Node) -> Res<()> {
         node.shutdown().await
+    }
+
+    async fn restart_node(
+        &self,
+        _world: Arc<Self::World>,
+        peer_seed: u8,
+        node: Self::Node,
+    ) -> Res<Self::Node> {
+        let path = node.path.clone();
+        node.shutdown().await?;
+        SyncRepoNode::boot(path, peer_seed, true).await
     }
 
     async fn connect_pair(&self, left: &Self::Node, right: &Self::Node) -> Res<()> {
@@ -1282,16 +1301,21 @@ impl StressFixture for BigRepoStressFixture {
         &self,
         node: &Self::Node,
         _nodes: &[Option<Self::Node>],
-        obj: ObjId,
+        obj: &Self::StressObj,
         payload: serde_json::Value,
     ) -> Res<()> {
-        self.track_doc(obj).await;
-        node.upsert_payload(obj, payload).await
+        self.track_doc(*obj).await;
+        node.upsert_payload(*obj, payload).await
     }
 
-    async fn seed_obj(&self, node: &Self::Node, obj: ObjId, payload: serde_json::Value) -> Res<()> {
-        self.track_doc(obj).await;
-        node.upsert_payload(obj, payload).await
+    async fn seed_obj(
+        &self,
+        node: &Self::Node,
+        obj: &Self::StressObj,
+        payload: serde_json::Value,
+    ) -> Res<()> {
+        self.track_doc(*obj).await;
+        node.upsert_payload(*obj, payload).await
     }
 
     async fn observed_state(&self, node: &Self::Node) -> Res<Self::Observation> {

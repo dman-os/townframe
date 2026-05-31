@@ -7,6 +7,7 @@ import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
+import androidx.compose.foundation.layout.PaddingValues
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxHeight
@@ -18,6 +19,7 @@ import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
+import androidx.compose.foundation.lazy.rememberLazyListState
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.CheckCircle
@@ -40,8 +42,10 @@ import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
+import androidx.compose.runtime.derivedStateOf
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableIntStateOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
@@ -50,6 +54,8 @@ import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.text.TextStyle
 import androidx.compose.ui.text.style.TextOverflow
+import androidx.compose.ui.layout.onSizeChanged
+import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.unit.dp
 import androidx.lifecycle.viewmodel.compose.viewModel
 import kotlinx.coroutines.delay
@@ -128,6 +134,7 @@ fun ProgressList(modifier: Modifier = Modifier) {
                 }
                 if (selectedTask != null) {
                     ProgressDetailScreen(
+                        modifier = Modifier.fillMaxWidth().weight(1f),
                         task = selectedTask,
                         updates = data.selectedTaskUpdates,
                         onBack = { vm.selectTask(null) }
@@ -319,108 +326,170 @@ private fun TimelineUpdateRow(at: Long, deets: ProgressUpdateDeets) {
 
 @Composable
 private fun ProgressDetailScreen(
+    modifier: Modifier = Modifier,
     task: ProgressTask,
     updates: List<ProgressUpdateEntry>,
     onBack: () -> Unit
 ) {
     val amountEntry = latestAmountEntry(task, updates)
-    val timelineUpdates = updates.filter { it.update.deets !is ProgressUpdateDeets.Amount }
+    val timelineUpdates =
+        updates
+            .asSequence()
+            .filter { it.update.deets !is ProgressUpdateDeets.Amount }
+            .sortedByDescending { it.sequence }
+            .toList()
+    val listState = rememberLazyListState()
+    val timelineHeaderIndex =
+        2 + (if (task.tags.isNotEmpty()) 1 else 0) + (if (amountEntry != null) 1 else 0)
+    val density = LocalDensity.current
+    var pinnedHeaderHeightPx by remember { mutableIntStateOf(0) }
+    val showPinnedTimelineHeader by remember(listState, timelineHeaderIndex) {
+        derivedStateOf {
+            listState.firstVisibleItemIndex > timelineHeaderIndex ||
+                (listState.firstVisibleItemIndex == timelineHeaderIndex && listState.firstVisibleItemScrollOffset > 0)
+        }
+    }
 
     ElevatedCard(
-        modifier = Modifier.fillMaxWidth(),
+        modifier = modifier.fillMaxSize(),
         shape = RoundedCornerShape(12.dp)
     ) {
-        Column(
-            modifier = Modifier
-                .fillMaxWidth()
-                .padding(12.dp),
-            verticalArrangement = Arrangement.spacedBy(8.dp)
-        ) {
-            val typeInfo = progressTypeInfo(task)
-            Row(verticalAlignment = Alignment.CenterVertically) {
-                Icon(typeInfo.icon, contentDescription = null, tint = MaterialTheme.colorScheme.primary)
-                Spacer(Modifier.size(8.dp))
-                Column(Modifier.weight(1f)) {
-                    Text(
-                        typeInfo.label,
-                        style = MaterialTheme.typography.titleMedium,
-                        maxLines = 1,
-                        overflow = TextOverflow.Ellipsis
-                    )
+        Box(modifier = Modifier.fillMaxSize()) {
+            LazyColumn(
+                state = listState,
+                modifier = Modifier
+                    .fillMaxSize()
+                    .padding(12.dp),
+                contentPadding =
+                    if (showPinnedTimelineHeader) {
+                        PaddingValues(top = with(density) { pinnedHeaderHeightPx.toDp() })
+                    } else {
+                        PaddingValues(0.dp)
+                    },
+                verticalArrangement = Arrangement.spacedBy(8.dp)
+            ) {
+                val typeInfo = progressTypeInfo(task)
+                item(key = "header-main") {
                     Row(verticalAlignment = Alignment.CenterVertically) {
-                        LiveDurationText(
-                            createdAtSecs = task.createdAt.epochSeconds,
-                            endAtSecs = taskEndTimestamp(task),
-                            style = MaterialTheme.typography.bodySmall,
-                            color = MaterialTheme.colorScheme.onSurfaceVariant
-                        )
-                        Spacer(Modifier.size(6.dp))
+                        Icon(typeInfo.icon, contentDescription = null, tint = MaterialTheme.colorScheme.primary)
+                        Spacer(Modifier.size(8.dp))
+                        Column(Modifier.weight(1f)) {
+                            Text(
+                                typeInfo.label,
+                                style = MaterialTheme.typography.titleMedium,
+                                maxLines = 1,
+                                overflow = TextOverflow.Ellipsis
+                            )
+                            Row(verticalAlignment = Alignment.CenterVertically) {
+                                LiveDurationText(
+                                    createdAtSecs = task.createdAt.epochSeconds,
+                                    endAtSecs = taskEndTimestamp(task),
+                                    style = MaterialTheme.typography.bodySmall,
+                                    color = MaterialTheme.colorScheme.onSurfaceVariant
+                                )
+                                Spacer(Modifier.size(6.dp))
+                                Text(
+                                    task.title ?: task.id,
+                                    style = MaterialTheme.typography.bodySmall,
+                                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                                    maxLines = 1,
+                                    overflow = TextOverflow.Ellipsis
+                                )
+                            }
+                        }
+                        IconButton(onClick = onBack) {
+                            Icon(Icons.Default.Close, contentDescription = "Back to list")
+                        }
+                    }
+                }
+
+                item(key = "header-state") {
+                    Row(
+                        modifier = Modifier.fillMaxWidth(),
+                        verticalAlignment = Alignment.CenterVertically
+                    ) {
+                        TaskStateIcon(task.state)
+                        Spacer(Modifier.size(8.dp))
                         Text(
-                            task.title ?: task.id,
-                            style = MaterialTheme.typography.bodySmall,
-                            color = MaterialTheme.colorScheme.onSurfaceVariant,
-                            maxLines = 1,
-                            overflow = TextOverflow.Ellipsis
+                            task.state.name.lowercase()
+                                .replaceFirstChar { it.uppercase() },
+                            style = MaterialTheme.typography.bodyMedium,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant
                         )
                     }
                 }
-                IconButton(onClick = onBack) {
-                    Icon(Icons.Default.Close, contentDescription = "Back to list")
-                }
-            }
-            Row(
-                modifier = Modifier.fillMaxWidth(),
-                verticalAlignment = Alignment.CenterVertically
-            ) {
-                TaskStateIcon(task.state)
-                Spacer(Modifier.size(8.dp))
-                Text(
-                    task.state.name.lowercase()
-                        .replaceFirstChar { it.uppercase() },
-                    style = MaterialTheme.typography.bodyMedium,
-                    color = MaterialTheme.colorScheme.onSurfaceVariant
-                )
-            }
-            if (task.tags.isNotEmpty()) {
-                Column(
-                    modifier = Modifier.fillMaxWidth(),
-                    verticalArrangement = Arrangement.spacedBy(6.dp)
-                ) {
-                    task.tags.forEach { tag ->
-                        Surface(
-                            shape = RoundedCornerShape(100.dp),
-                            color = MaterialTheme.colorScheme.secondaryContainer
+
+                if (task.tags.isNotEmpty()) {
+                    item(key = "header-tags") {
+                        Column(
+                            modifier = Modifier.fillMaxWidth(),
+                            verticalArrangement = Arrangement.spacedBy(6.dp)
                         ) {
+                            task.tags.forEach { tag ->
+                                Surface(
+                                    shape = RoundedCornerShape(100.dp),
+                                    color = MaterialTheme.colorScheme.secondaryContainer
+                                ) {
+                                    Text(
+                                        text = tag,
+                                        style = MaterialTheme.typography.labelSmall,
+                                        modifier = Modifier.padding(horizontal = 8.dp, vertical = 4.dp)
+                                    )
+                                }
+                            }
+                        }
+                    }
+                }
+
+                if (amountEntry != null) {
+                    item(key = "header-progress") {
+                        Column(verticalArrangement = Arrangement.spacedBy(4.dp)) {
+                            Text("Progress", style = MaterialTheme.typography.titleSmall)
+                            val amount = amountEntry.update.deets as ProgressUpdateDeets.Amount
+                            ProgressAmountBlock(amount, modifier = Modifier.fillMaxWidth())
                             Text(
-                                text = tag,
+                                "Updated ${formatClock(amountEntry.at.epochSeconds)}",
                                 style = MaterialTheme.typography.labelSmall,
-                                modifier = Modifier.padding(horizontal = 8.dp, vertical = 4.dp)
+                                color = MaterialTheme.colorScheme.onSurfaceVariant
                             )
                         }
                     }
                 }
+
+                item(key = "timeline-header") {
+                    Text("Timeline", style = MaterialTheme.typography.titleSmall)
+                    Spacer(Modifier.height(6.dp))
+                }
+
+                if (timelineUpdates.isEmpty()) {
+                    item(key = "timeline-empty") {
+                        Text(
+                            "No timeline updates",
+                            style = MaterialTheme.typography.bodySmall,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant
+                        )
+                    }
+                } else {
+                    items(timelineUpdates, key = { it.sequence }) { update ->
+                        TimelineUpdateRow(at = update.at.epochSeconds, deets = update.update.deets)
+                    }
+                }
             }
-            if (amountEntry != null) {
-                Spacer(Modifier.height(4.dp))
-                Text("Progress", style = MaterialTheme.typography.titleSmall)
-                Spacer(Modifier.height(4.dp))
-                val amount = amountEntry.update.deets as ProgressUpdateDeets.Amount
-                ProgressAmountBlock(amount, modifier = Modifier.fillMaxWidth())
-                Text(
-                    "Updated ${formatClock(amountEntry.at.epochSeconds)}",
-                    style = MaterialTheme.typography.labelSmall,
-                    color = MaterialTheme.colorScheme.onSurfaceVariant
-                )
-            }
-            Spacer(Modifier.height(4.dp))
-            Text("Timeline", style = MaterialTheme.typography.titleSmall)
-            Spacer(Modifier.height(4.dp))
-            LazyColumn(
-                modifier = Modifier.fillMaxWidth().heightIn(max = 220.dp),
-                verticalArrangement = Arrangement.spacedBy(6.dp)
-            ) {
-                items(timelineUpdates, key = { it.sequence }) { update ->
-                    TimelineUpdateRow(at = update.at.epochSeconds, deets = update.update.deets)
+
+            if (showPinnedTimelineHeader) {
+                Surface(
+                    color = MaterialTheme.colorScheme.surface,
+                    modifier =
+                        Modifier
+                            .fillMaxWidth()
+                            .align(Alignment.TopStart)
+                            .onSizeChanged { pinnedHeaderHeightPx = it.height }
+                ) {
+                    Column(modifier = Modifier.fillMaxWidth().padding(horizontal = 12.dp, vertical = 12.dp)) {
+                        Text("Timeline", style = MaterialTheme.typography.titleSmall)
+                        Spacer(Modifier.height(6.dp))
+                        HorizontalDivider()
+                    }
                 }
             }
         }
@@ -513,14 +582,9 @@ private fun progressTypeInfo(task: ProgressTask): ProgressTypeInfo {
 }
 
 private fun latestAmountEntry(task: ProgressTask, updates: List<ProgressUpdateEntry>): ProgressUpdateEntry? {
-    val latestFromTimeline = updates.lastOrNull { it.update.deets is ProgressUpdateDeets.Amount }
+    val amountUpdates = updates.filter { it.update.deets is ProgressUpdateDeets.Amount }
     val latestTask = task.latestUpdate?.takeIf { it.update.deets is ProgressUpdateDeets.Amount }
-    return when {
-        latestTask == null -> latestFromTimeline
-        latestFromTimeline == null -> latestTask
-        latestTask.sequence >= latestFromTimeline.sequence -> latestTask
-        else -> latestFromTimeline
-    }
+    return (amountUpdates + listOfNotNull(latestTask)).maxByOrNull { it.sequence }
 }
 
 private fun formatClock(unixSecs: Long): String {

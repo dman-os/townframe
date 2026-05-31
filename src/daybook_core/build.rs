@@ -43,6 +43,20 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             .unwrap()
             .display()
     );
+    println!(
+        "cargo:rerun-if-changed={}",
+        cwd.join("../am_utils_rs/")
+            .canonicalize()
+            .unwrap()
+            .display()
+    );
+    println!(
+        "cargo:rerun-if-changed={}",
+        cwd.join("../daybook_types/")
+            .canonicalize()
+            .unwrap()
+            .display()
+    );
     build_wasm_crate(&cwd, &wflows_target_dir, "daybook_wflows");
 
     // let cwasm_path = out_dir.join("daybook_wflows.cwasm");

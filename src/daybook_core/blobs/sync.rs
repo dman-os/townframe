@@ -1,6 +1,6 @@
 use crate::interlude::*;
 
-use crate::blobs::{blob_hash_from_id, blob_id_to_iroh_hash, BlobId, BlobsRepo};
+use crate::blobs::{blob_hash_from_id, blob_id_to_iroh_hash, BlobId, BlobUseHints, BlobsRepo};
 use big_repo::SharedPartStore;
 
 use big_sync::{SyncBackend, SyncTaskRunOutcome};
@@ -55,7 +55,9 @@ impl BlobSyncBackend {
 
         let iroh_hash = blob_id_to_iroh_hash(blob_id);
         if self.blobs_repo.iroh_store().blobs().has(iroh_hash).await? {
-            self.blobs_repo.put_from_store(blob_id).await?;
+            self.blobs_repo
+                .put_from_store(blob_id, BlobUseHints::Unknown)
+                .await?;
             return Ok(());
         }
 
@@ -97,7 +99,9 @@ impl BlobSyncBackend {
             eyre::bail!("download completed but blob missing from store");
         }
 
-        self.blobs_repo.put_from_store(blob_id).await?;
+        self.blobs_repo
+            .put_from_store(blob_id, BlobUseHints::Unknown)
+            .await?;
         Ok(())
     }
 }
@@ -289,18 +293,33 @@ mod tests {
     #[tokio::test(flavor = "multi_thread")]
     async fn blob_sync_backend_contract() -> Res<()> {
         let (backend, part_store, blobs_repo) = build_blob_backend().await?;
-        let noop_blob_id = blobs_repo.put(b"blob-sync-contract-noop").await?;
-        let noop_missing_remote_blob_id = blobs_repo
-            .put(b"blob-sync-contract-noop-missing-remote")
+        let noop_blob_id = blobs_repo
+            .put(b"blob-sync-contract-noop", BlobUseHints::Unknown)
             .await?;
-        let changed_blob_id = blobs_repo.put(b"blob-sync-contract-changed").await?;
+        let noop_missing_remote_blob_id = blobs_repo
+            .put(
+                b"blob-sync-contract-noop-missing-remote",
+                BlobUseHints::Unknown,
+            )
+            .await?;
+        let changed_blob_id = blobs_repo
+            .put(b"blob-sync-contract-changed", BlobUseHints::Unknown)
+            .await?;
         let changed_empty_hints_blob_id = blobs_repo
-            .put(b"blob-sync-contract-changed-empty-hints")
+            .put(
+                b"blob-sync-contract-changed-empty-hints",
+                BlobUseHints::Unknown,
+            )
             .await?;
         let changed_multi_hints_blob_id = blobs_repo
-            .put(b"blob-sync-contract-changed-multi-hints")
+            .put(
+                b"blob-sync-contract-changed-multi-hints",
+                BlobUseHints::Unknown,
+            )
             .await?;
-        let added_blob_id = blobs_repo.put(b"blob-sync-contract-added").await?;
+        let added_blob_id = blobs_repo
+            .put(b"blob-sync-contract-added", BlobUseHints::Unknown)
+            .await?;
         let harness = BlobSyncBackendContractHarness {
             backend,
             store: part_store,

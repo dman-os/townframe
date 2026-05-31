@@ -959,6 +959,29 @@ public object FfiConverterFloat: FfiConverter<Float, Float> {
 /**
  * @suppress
  */
+public object FfiConverterBoolean: FfiConverter<Boolean, Byte> {
+    override fun lift(value: Byte): Boolean {
+        return value.toInt() != 0
+    }
+
+    override fun read(buf: ByteBuffer): Boolean {
+        return lift(buf.get())
+    }
+
+    override fun lower(value: Boolean): Byte {
+        return if (value) 1.toByte() else 0.toByte()
+    }
+
+    override fun allocationSize(value: Boolean) = 1UL
+
+    override fun write(value: Boolean, buf: ByteBuffer) {
+        buf.put(lower(value))
+    }
+}
+
+/**
+ * @suppress
+ */
 public object FfiConverterString: FfiConverter<String, RustBuffer.ByValue> {
     // Note: we don't inherit from FfiConverterRustBuffer, because we use a
     // special encoding when lowering/lifting.  We can use `RustBuffer.len` to
@@ -1429,6 +1452,49 @@ public object FfiConverterTypeEmbedding: FfiConverterRustBuffer<Embedding> {
 
 
 
+data class FacetDisplayHint (
+    var `alwaysVisible`: kotlin.Boolean
+    , 
+    var `displayTitle`: kotlin.String?
+    , 
+    var `deets`: FacetKeyDisplayDeets
+    
+){
+    
+
+    
+
+    
+    companion object
+}
+
+/**
+ * @suppress
+ */
+public object FfiConverterTypeFacetDisplayHint: FfiConverterRustBuffer<FacetDisplayHint> {
+    override fun read(buf: ByteBuffer): FacetDisplayHint {
+        return FacetDisplayHint(
+            FfiConverterBoolean.read(buf),
+            FfiConverterOptionalString.read(buf),
+            FfiConverterTypeFacetKeyDisplayDeets.read(buf),
+        )
+    }
+
+    override fun allocationSize(value: FacetDisplayHint) = (
+            FfiConverterBoolean.allocationSize(value.`alwaysVisible`) +
+            FfiConverterOptionalString.allocationSize(value.`displayTitle`) +
+            FfiConverterTypeFacetKeyDisplayDeets.allocationSize(value.`deets`)
+    )
+
+    override fun write(value: FacetDisplayHint, buf: ByteBuffer) {
+            FfiConverterBoolean.write(value.`alwaysVisible`, buf)
+            FfiConverterOptionalString.write(value.`displayTitle`, buf)
+            FfiConverterTypeFacetKeyDisplayDeets.write(value.`deets`, buf)
+    }
+}
+
+
+
 data class FacetKey (
     var `tag`: FacetTag
     , 
@@ -1473,6 +1539,8 @@ data class FacetMeta (
     var `uuid`: List<Uuid>
     , 
     var `updatedAt`: List<Timestamp>
+    , 
+    var `deletedAt`: List<Timestamp>
     
 ){
     
@@ -1492,19 +1560,22 @@ public object FfiConverterTypeFacetMeta: FfiConverterRustBuffer<FacetMeta> {
             FfiConverterTypeTimestamp.read(buf),
             FfiConverterSequenceTypeUuid.read(buf),
             FfiConverterSequenceTypeTimestamp.read(buf),
+            FfiConverterSequenceTypeTimestamp.read(buf),
         )
     }
 
     override fun allocationSize(value: FacetMeta) = (
             FfiConverterTypeTimestamp.allocationSize(value.`createdAt`) +
             FfiConverterSequenceTypeUuid.allocationSize(value.`uuid`) +
-            FfiConverterSequenceTypeTimestamp.allocationSize(value.`updatedAt`)
+            FfiConverterSequenceTypeTimestamp.allocationSize(value.`updatedAt`) +
+            FfiConverterSequenceTypeTimestamp.allocationSize(value.`deletedAt`)
     )
 
     override fun write(value: FacetMeta, buf: ByteBuffer) {
             FfiConverterTypeTimestamp.write(value.`createdAt`, buf)
             FfiConverterSequenceTypeUuid.write(value.`uuid`, buf)
             FfiConverterSequenceTypeTimestamp.write(value.`updatedAt`, buf)
+            FfiConverterSequenceTypeTimestamp.write(value.`deletedAt`, buf)
     }
 }
 
@@ -1776,82 +1847,6 @@ public object FfiConverterTypePoint: FfiConverterRustBuffer<Point> {
 
 
 
-data class PseudoLabelCandidate (
-    var `label`: kotlin.String
-    , 
-    var `prompts`: List<kotlin.String>
-    , 
-    var `negativePrompts`: List<kotlin.String>
-    
-){
-    
-
-    
-
-    
-    companion object
-}
-
-/**
- * @suppress
- */
-public object FfiConverterTypePseudoLabelCandidate: FfiConverterRustBuffer<PseudoLabelCandidate> {
-    override fun read(buf: ByteBuffer): PseudoLabelCandidate {
-        return PseudoLabelCandidate(
-            FfiConverterString.read(buf),
-            FfiConverterSequenceString.read(buf),
-            FfiConverterSequenceString.read(buf),
-        )
-    }
-
-    override fun allocationSize(value: PseudoLabelCandidate) = (
-            FfiConverterString.allocationSize(value.`label`) +
-            FfiConverterSequenceString.allocationSize(value.`prompts`) +
-            FfiConverterSequenceString.allocationSize(value.`negativePrompts`)
-    )
-
-    override fun write(value: PseudoLabelCandidate, buf: ByteBuffer) {
-            FfiConverterString.write(value.`label`, buf)
-            FfiConverterSequenceString.write(value.`prompts`, buf)
-            FfiConverterSequenceString.write(value.`negativePrompts`, buf)
-    }
-}
-
-
-
-data class PseudoLabelCandidatesFacet (
-    var `labels`: List<PseudoLabelCandidate>
-    
-){
-    
-
-    
-
-    
-    companion object
-}
-
-/**
- * @suppress
- */
-public object FfiConverterTypePseudoLabelCandidatesFacet: FfiConverterRustBuffer<PseudoLabelCandidatesFacet> {
-    override fun read(buf: ByteBuffer): PseudoLabelCandidatesFacet {
-        return PseudoLabelCandidatesFacet(
-            FfiConverterSequenceTypePseudoLabelCandidate.read(buf),
-        )
-    }
-
-    override fun allocationSize(value: PseudoLabelCandidatesFacet) = (
-            FfiConverterSequenceTypePseudoLabelCandidate.allocationSize(value.`labels`)
-    )
-
-    override fun write(value: PseudoLabelCandidatesFacet, buf: ByteBuffer) {
-            FfiConverterSequenceTypePseudoLabelCandidate.write(value.`labels`, buf)
-    }
-}
-
-
-
 data class UserMeta (
     var `userPath`: Utf8PathBuf
     
@@ -1882,6 +1877,42 @@ public object FfiConverterTypeUserMeta: FfiConverterRustBuffer<UserMeta> {
             FfiConverterTypeUtf8PathBuf.write(value.`userPath`, buf)
     }
 }
+
+
+
+
+enum class DateTimeFacetDisplayType {
+    
+    TIME_AND_DATE,
+    RELATIVE,
+    TIME_ONLY,
+    DATE_ONLY;
+
+    
+
+
+    companion object
+}
+
+
+/**
+ * @suppress
+ */
+public object FfiConverterTypeDateTimeFacetDisplayType: FfiConverterRustBuffer<DateTimeFacetDisplayType> {
+    override fun read(buf: ByteBuffer) = try {
+        DateTimeFacetDisplayType.values()[buf.getInt() - 1]
+    } catch (e: IndexOutOfBoundsException) {
+        throw RuntimeException("invalid enum value, something is very wrong!!", e)
+    }
+
+    override fun allocationSize(value: DateTimeFacetDisplayType) = 4UL
+
+    override fun write(value: DateTimeFacetDisplayType, buf: ByteBuffer) {
+        buf.putInt(value.ordinal + 1)
+    }
+}
+
+
 
 
 
@@ -1947,6 +1978,117 @@ public object FfiConverterTypeEmbeddingDtype: FfiConverterRustBuffer<EmbeddingDt
 
     override fun write(value: EmbeddingDtype, buf: ByteBuffer) {
         buf.putInt(value.ordinal + 1)
+    }
+}
+
+
+
+
+
+sealed class FacetKeyDisplayDeets {
+    
+    object DebugPrint : FacetKeyDisplayDeets()
+    
+    
+    data class DateTime(
+        val `displayType`: org.example.daybook.uniffi.types.DateTimeFacetDisplayType) : FacetKeyDisplayDeets()
+        
+    {
+        
+
+        companion object
+    }
+    
+    object UnixPath : FacetKeyDisplayDeets()
+    
+    
+    data class Title(
+        val `showEditor`: kotlin.Boolean) : FacetKeyDisplayDeets()
+        
+    {
+        
+
+        companion object
+    }
+    
+
+    
+
+    
+    
+
+
+    companion object
+}
+
+/**
+ * @suppress
+ */
+public object FfiConverterTypeFacetKeyDisplayDeets : FfiConverterRustBuffer<FacetKeyDisplayDeets>{
+    override fun read(buf: ByteBuffer): FacetKeyDisplayDeets {
+        return when(buf.getInt()) {
+            1 -> FacetKeyDisplayDeets.DebugPrint
+            2 -> FacetKeyDisplayDeets.DateTime(
+                FfiConverterTypeDateTimeFacetDisplayType.read(buf),
+                )
+            3 -> FacetKeyDisplayDeets.UnixPath
+            4 -> FacetKeyDisplayDeets.Title(
+                FfiConverterBoolean.read(buf),
+                )
+            else -> throw RuntimeException("invalid enum value, something is very wrong!!")
+        }
+    }
+
+    override fun allocationSize(value: FacetKeyDisplayDeets) = when(value) {
+        is FacetKeyDisplayDeets.DebugPrint -> {
+            // Add the size for the Int that specifies the variant plus the size needed for all fields
+            (
+                4UL
+            )
+        }
+        is FacetKeyDisplayDeets.DateTime -> {
+            // Add the size for the Int that specifies the variant plus the size needed for all fields
+            (
+                4UL
+                + FfiConverterTypeDateTimeFacetDisplayType.allocationSize(value.`displayType`)
+            )
+        }
+        is FacetKeyDisplayDeets.UnixPath -> {
+            // Add the size for the Int that specifies the variant plus the size needed for all fields
+            (
+                4UL
+            )
+        }
+        is FacetKeyDisplayDeets.Title -> {
+            // Add the size for the Int that specifies the variant plus the size needed for all fields
+            (
+                4UL
+                + FfiConverterBoolean.allocationSize(value.`showEditor`)
+            )
+        }
+    }
+
+    override fun write(value: FacetKeyDisplayDeets, buf: ByteBuffer) {
+        when(value) {
+            is FacetKeyDisplayDeets.DebugPrint -> {
+                buf.putInt(1)
+                Unit
+            }
+            is FacetKeyDisplayDeets.DateTime -> {
+                buf.putInt(2)
+                FfiConverterTypeDateTimeFacetDisplayType.write(value.`displayType`, buf)
+                Unit
+            }
+            is FacetKeyDisplayDeets.UnixPath -> {
+                buf.putInt(3)
+                Unit
+            }
+            is FacetKeyDisplayDeets.Title -> {
+                buf.putInt(4)
+                FfiConverterBoolean.write(value.`showEditor`, buf)
+                Unit
+            }
+        }.let { /* this makes the `when` an expression, which ensures it is exhaustive */ }
     }
 }
 
@@ -2066,24 +2208,6 @@ sealed class WellKnownFacet {
         companion object
     }
     
-    data class PseudoLabel(
-        val v1: List<kotlin.String>) : WellKnownFacet()
-        
-    {
-        
-
-        companion object
-    }
-    
-    data class PseudoLabelCandidates(
-        val v1: org.example.daybook.uniffi.types.PseudoLabelCandidatesFacet) : WellKnownFacet()
-        
-    {
-        
-
-        companion object
-    }
-    
     data class TitleGeneric(
         val v1: kotlin.String) : WellKnownFacet()
         
@@ -2190,37 +2314,31 @@ public object FfiConverterTypeWellKnownFacet : FfiConverterRustBuffer<WellKnownF
             3 -> WellKnownFacet.LabelGeneric(
                 FfiConverterString.read(buf),
                 )
-            4 -> WellKnownFacet.PseudoLabel(
-                FfiConverterSequenceString.read(buf),
-                )
-            5 -> WellKnownFacet.PseudoLabelCandidates(
-                FfiConverterTypePseudoLabelCandidatesFacet.read(buf),
-                )
-            6 -> WellKnownFacet.TitleGeneric(
+            4 -> WellKnownFacet.TitleGeneric(
                 FfiConverterString.read(buf),
                 )
-            7 -> WellKnownFacet.PathGeneric(
+            5 -> WellKnownFacet.PathGeneric(
                 FfiConverterString.read(buf),
                 )
-            8 -> WellKnownFacet.Pending(
+            6 -> WellKnownFacet.Pending(
                 FfiConverterTypePending.read(buf),
                 )
-            9 -> WellKnownFacet.Body(
+            7 -> WellKnownFacet.Body(
                 FfiConverterTypeBody.read(buf),
                 )
-            10 -> WellKnownFacet.Note(
+            8 -> WellKnownFacet.Note(
                 FfiConverterTypeNote.read(buf),
                 )
-            11 -> WellKnownFacet.Blob(
+            9 -> WellKnownFacet.Blob(
                 FfiConverterTypeBlob.read(buf),
                 )
-            12 -> WellKnownFacet.ImageMetadata(
+            10 -> WellKnownFacet.ImageMetadata(
                 FfiConverterTypeImageMetadata.read(buf),
                 )
-            13 -> WellKnownFacet.OcrResult(
+            11 -> WellKnownFacet.OcrResult(
                 FfiConverterTypeOcrResult.read(buf),
                 )
-            14 -> WellKnownFacet.Embedding(
+            12 -> WellKnownFacet.Embedding(
                 FfiConverterTypeEmbedding.read(buf),
                 )
             else -> throw RuntimeException("invalid enum value, something is very wrong!!")
@@ -2247,20 +2365,6 @@ public object FfiConverterTypeWellKnownFacet : FfiConverterRustBuffer<WellKnownF
             (
                 4UL
                 + FfiConverterString.allocationSize(value.v1)
-            )
-        }
-        is WellKnownFacet.PseudoLabel -> {
-            // Add the size for the Int that specifies the variant plus the size needed for all fields
-            (
-                4UL
-                + FfiConverterSequenceString.allocationSize(value.v1)
-            )
-        }
-        is WellKnownFacet.PseudoLabelCandidates -> {
-            // Add the size for the Int that specifies the variant plus the size needed for all fields
-            (
-                4UL
-                + FfiConverterTypePseudoLabelCandidatesFacet.allocationSize(value.v1)
             )
         }
         is WellKnownFacet.TitleGeneric -> {
@@ -2345,58 +2449,48 @@ public object FfiConverterTypeWellKnownFacet : FfiConverterRustBuffer<WellKnownF
                 FfiConverterString.write(value.v1, buf)
                 Unit
             }
-            is WellKnownFacet.PseudoLabel -> {
-                buf.putInt(4)
-                FfiConverterSequenceString.write(value.v1, buf)
-                Unit
-            }
-            is WellKnownFacet.PseudoLabelCandidates -> {
-                buf.putInt(5)
-                FfiConverterTypePseudoLabelCandidatesFacet.write(value.v1, buf)
-                Unit
-            }
             is WellKnownFacet.TitleGeneric -> {
-                buf.putInt(6)
+                buf.putInt(4)
                 FfiConverterString.write(value.v1, buf)
                 Unit
             }
             is WellKnownFacet.PathGeneric -> {
-                buf.putInt(7)
+                buf.putInt(5)
                 FfiConverterString.write(value.v1, buf)
                 Unit
             }
             is WellKnownFacet.Pending -> {
-                buf.putInt(8)
+                buf.putInt(6)
                 FfiConverterTypePending.write(value.v1, buf)
                 Unit
             }
             is WellKnownFacet.Body -> {
-                buf.putInt(9)
+                buf.putInt(7)
                 FfiConverterTypeBody.write(value.v1, buf)
                 Unit
             }
             is WellKnownFacet.Note -> {
-                buf.putInt(10)
+                buf.putInt(8)
                 FfiConverterTypeNote.write(value.v1, buf)
                 Unit
             }
             is WellKnownFacet.Blob -> {
-                buf.putInt(11)
+                buf.putInt(9)
                 FfiConverterTypeBlob.write(value.v1, buf)
                 Unit
             }
             is WellKnownFacet.ImageMetadata -> {
-                buf.putInt(12)
+                buf.putInt(10)
                 FfiConverterTypeImageMetadata.write(value.v1, buf)
                 Unit
             }
             is WellKnownFacet.OcrResult -> {
-                buf.putInt(13)
+                buf.putInt(11)
                 FfiConverterTypeOcrResult.write(value.v1, buf)
                 Unit
             }
             is WellKnownFacet.Embedding -> {
-                buf.putInt(14)
+                buf.putInt(12)
                 FfiConverterTypeEmbedding.write(value.v1, buf)
                 Unit
             }
@@ -2414,8 +2508,6 @@ enum class WellKnownFacetTag {
     DMETA,
     REF_GENERIC,
     LABEL_GENERIC,
-    PSEUDO_LABEL,
-    PSEUDO_LABEL_CANDIDATES,
     TITLE_GENERIC,
     PATH_GENERIC,
     PENDING,
@@ -2784,34 +2876,6 @@ public object FfiConverterSequenceTypePoint: FfiConverterRustBuffer<List<Point>>
         buf.putInt(value.size)
         value.iterator().forEach {
             FfiConverterTypePoint.write(it, buf)
-        }
-    }
-}
-
-
-
-
-/**
- * @suppress
- */
-public object FfiConverterSequenceTypePseudoLabelCandidate: FfiConverterRustBuffer<List<PseudoLabelCandidate>> {
-    override fun read(buf: ByteBuffer): List<PseudoLabelCandidate> {
-        val len = buf.getInt()
-        return List<PseudoLabelCandidate>(len) {
-            FfiConverterTypePseudoLabelCandidate.read(buf)
-        }
-    }
-
-    override fun allocationSize(value: List<PseudoLabelCandidate>): ULong {
-        val sizeForLength = 4UL
-        val sizeForItems = value.map { FfiConverterTypePseudoLabelCandidate.allocationSize(it) }.sum()
-        return sizeForLength + sizeForItems
-    }
-
-    override fun write(value: List<PseudoLabelCandidate>, buf: ByteBuffer) {
-        buf.putInt(value.size)
-        value.iterator().forEach {
-            FfiConverterTypePseudoLabelCandidate.write(it, buf)
         }
     }
 }

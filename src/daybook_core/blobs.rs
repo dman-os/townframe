@@ -173,6 +173,23 @@ impl BlobScope {
     }
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum BlobUseHints {
+    Docs,
+    Plugs,
+    Unknown,
+}
+
+impl BlobUseHints {
+    fn scopes(self) -> &'static [BlobScope] {
+        match self {
+            Self::Docs => &[BlobScope::Docs],
+            Self::Plugs => &[BlobScope::Plugs],
+            Self::Unknown => &[],
+        }
+    }
+}
+
 impl BlobsRepo {
     pub async fn new(
         root: PathBuf,
@@ -209,7 +226,7 @@ impl BlobsRepo {
             .await
     }
 
-    pub async fn put_path_copy(&self, source_path: &Path) -> Res<BlobId> {
+    pub async fn put_path_copy(&self, source_path: &Path, use_hints: BlobUseHints) -> Res<BlobId> {
         let source_path = source_path.canonicalize()?;
         let source_meta = tokio::fs::metadata(&source_path).await?;
         if !source_meta.is_file() {
@@ -239,6 +256,7 @@ impl BlobsRepo {
             self.ingest_path_with_iroh(&object_paths.blob, hash).await?;
             meta.iroh_ingested = true;
             self.write_meta(&object_paths.meta, &meta).await?;
+            self.publish_use_hints(hash, use_hints).await?;
 
             Ok(hash)
         }
@@ -247,7 +265,11 @@ impl BlobsRepo {
         result
     }
 
-    pub async fn put_path_reference(&self, source_path: &Path) -> Res<BlobId> {
+    pub async fn put_path_reference(
+        &self,
+        source_path: &Path,
+        use_hints: BlobUseHints,
+    ) -> Res<BlobId> {
         if !source_path.is_absolute() {
             eyre::bail!("reference path must be absolute: {}", source_path.display());
         }
@@ -289,6 +311,7 @@ impl BlobsRepo {
             self.ingest_path_with_iroh(&source_snapshot, hash).await?;
             meta.iroh_ingested = true;
             self.write_meta(&object_paths.meta, &meta).await?;
+            self.publish_use_hints(hash, use_hints).await?;
             Ok(hash)
         }
         .await;
@@ -297,7 +320,7 @@ impl BlobsRepo {
     }
 
     /// Compatibility alias that ingests bytes as an owned blob.
-    pub async fn put(&self, data: &[u8]) -> Result<BlobId, eyre::Report> {
+    pub async fn put(&self, data: &[u8], use_hints: BlobUseHints) -> Result<BlobId, eyre::Report> {
         let hash = BlobId::new(*blake3::hash(data).as_bytes());
         let object_paths = self.object_paths(hash)?;
 
@@ -318,6 +341,7 @@ impl BlobsRepo {
         self.ingest_path_with_iroh(&object_paths.blob, hash).await?;
         meta.iroh_ingested = true;
         self.write_meta(&object_paths.meta, &meta).await?;
+        self.publish_use_hints(hash, use_hints).await?;
 
         Ok(hash)
     }
@@ -466,7 +490,7 @@ impl BlobsRepo {
         .await
     }
 
-    pub async fn put_from_store(&self, blob_id: BlobId) -> Res<BlobId> {
+    pub async fn put_from_store(&self, blob_id: BlobId, use_hints: BlobUseHints) -> Res<BlobId> {
         let object_paths = self.object_paths(blob_id)?;
         tokio::fs::create_dir_all(&object_paths.dir).await?;
 
@@ -488,6 +512,7 @@ impl BlobsRepo {
             true,
         );
         self.write_meta(&object_paths.meta, &meta).await?;
+        self.publish_use_hints(blob_id, use_hints).await?;
 
         Ok(blob_id)
     }
@@ -665,6 +690,13 @@ impl BlobsRepo {
         Ok(())
     }
 
+    async fn publish_use_hints(&self, blob_id: BlobId, use_hints: BlobUseHints) -> Res<()> {
+        for scope in use_hints.scopes() {
+            self.add_hash_to_scope(*scope, blob_id).await?;
+        }
+        Ok(())
+    }
+
     fn lock_for_hash(&self, blob_id: BlobId) -> Arc<tokio::sync::Mutex<()>> {
         let mut guard = self.hash_locks.lock().expect(ERROR_MUTEX);
         Arc::clone(
@@ -783,6 +815,8 @@ pub(crate) fn blob_id_to_iroh_hash(blob_id: BlobId) -> iroh_blobs::Hash {
 pub fn blob_id_to_digest_str(blob_id: BlobId) -> String {
     utils_rs::hash::encode_base58_multibase_blake3(*blob_id.as_bytes())
 }
+
+#[tracing::instrument]
 pub fn digest_str_to_blob_id(digest: &str) -> Res<BlobId> {
     let bytes = utils_rs::hash::decode_base58_multibase_blake3(digest)?;
     Ok(BlobId::new(bytes))
@@ -831,7 +865,7 @@ mod tests {
         let (repo, _temp) = setup().await;
         let data = b"hello world";
 
-        let hash = repo.put(data).await?;
+        let hash = repo.put(data, BlobUseHints::Unknown).await?;
         let expected_hash = BlobId::new(*blake3::hash(data).as_bytes());
         assert_eq!(hash, expected_hash);
 
@@ -852,8 +886,8 @@ mod tests {
         let (repo, _temp) = setup().await;
         let data = b"duplicate data";
 
-        let hash1 = repo.put(data).await?;
-        let hash2 = repo.put(data).await?;
+        let hash1 = repo.put(data, BlobUseHints::Unknown).await?;
+        let hash2 = repo.put(data, BlobUseHints::Unknown).await?;
 
         assert_eq!(hash1, hash2);
 
@@ -869,7 +903,7 @@ mod tests {
         let source = temp.path().join("source.bin");
         tokio::fs::write(&source, b"copy me").await?;
 
-        let hash = repo.put_path_copy(&source).await?;
+        let hash = repo.put_path_copy(&source, BlobUseHints::Unknown).await?;
         tokio::fs::remove_file(&source).await?;
 
         let path = repo.get_path(hash).await?;
@@ -885,7 +919,9 @@ mod tests {
         tokio::fs::write(&source, b"ref me").await?;
 
         let source_abs = source.canonicalize()?;
-        let hash = repo.put_path_reference(&source_abs).await?;
+        let hash = repo
+            .put_path_reference(&source_abs, BlobUseHints::Unknown)
+            .await?;
         tokio::fs::remove_file(&source_abs).await?;
 
         let err = repo.get_path(hash).await.unwrap_err();
@@ -902,7 +938,7 @@ mod tests {
         let source = temp.path().join("owned.bin");
         tokio::fs::write(&source, b"owned wins").await?;
 
-        let hash = repo.put_path_copy(&source).await?;
+        let hash = repo.put_path_copy(&source, BlobUseHints::Unknown).await?;
         let object_paths = repo.object_paths(hash)?;
 
         let bogus_ref = BlobMetaV1 {
@@ -928,7 +964,7 @@ mod tests {
         let (repo, _temp) = setup().await;
         let data = b"roundtrip";
 
-        let hash = repo.put(data).await?;
+        let hash = repo.put(data, BlobUseHints::Unknown).await?;
         let object_paths = repo.object_paths(hash)?;
         let meta: BlobMetaV1 = serde_json::from_slice(&tokio::fs::read(&object_paths.meta).await?)?;
 
@@ -945,7 +981,7 @@ mod tests {
     async fn iroh_ingest_presence_smoke() -> Res<()> {
         let (repo, temp) = setup().await;
 
-        let hash_a = repo.put(b"bytes-path").await?;
+        let hash_a = repo.put(b"bytes-path", BlobUseHints::Unknown).await?;
         let has_a = repo
             .iroh_store
             .blobs()
@@ -956,7 +992,7 @@ mod tests {
 
         let copy_src = temp.path().join("copy-src.bin");
         tokio::fs::write(&copy_src, b"copy-path").await?;
-        repo.put_path_copy(&copy_src).await?;
+        repo.put_path_copy(&copy_src, BlobUseHints::Unknown).await?;
         let has_b = repo
             .iroh_store
             .blobs()
@@ -968,7 +1004,8 @@ mod tests {
         let ref_src = temp.path().join("ref-src.bin");
         tokio::fs::write(&ref_src, b"ref-path").await?;
         let ref_src_abs = ref_src.canonicalize()?;
-        repo.put_path_reference(&ref_src_abs).await?;
+        repo.put_path_reference(&ref_src_abs, BlobUseHints::Unknown)
+            .await?;
         let has_c = repo
             .iroh_store
             .blobs()
@@ -994,7 +1031,7 @@ mod tests {
 
         assert!(repo.get_path(hash).await.is_err());
 
-        repo.put_from_store(hash).await?;
+        repo.put_from_store(hash, BlobUseHints::Unknown).await?;
         let path = repo.get_path(hash).await?;
         let got = tokio::fs::read(path).await?;
         assert_eq!(got, data);
@@ -1005,7 +1042,7 @@ mod tests {
     #[tokio::test]
     async fn legacy_put_api_still_works() -> Res<()> {
         let (repo, _temp) = setup().await;
-        let hash = repo.put(b"legacy").await?;
+        let hash = repo.put(b"legacy", BlobUseHints::Unknown).await?;
         let path = repo.get_path(hash).await?;
         assert_eq!(tokio::fs::read(path).await?, b"legacy");
         Ok(())
@@ -1014,7 +1051,7 @@ mod tests {
     #[tokio::test]
     async fn blob_url_contract_unchanged() -> Res<()> {
         let (repo, _temp) = setup().await;
-        let hash = repo.put(b"url").await?;
+        let hash = repo.put(b"url", BlobUseHints::Unknown).await?;
         let url = format!("{BLOB_SCHEME}:///{hash}");
         let parsed_hash = url
             .strip_prefix(&format!("{BLOB_SCHEME}:///"))
@@ -1042,8 +1079,12 @@ mod tests {
         let source_a_abs = source_a.canonicalize()?;
         let source_b_abs = source_b.canonicalize()?;
 
-        let hash_a = repo.put_path_reference(&source_a_abs).await?;
-        let hash_b = repo.put_path_reference(&source_b_abs).await?;
+        let hash_a = repo
+            .put_path_reference(&source_a_abs, BlobUseHints::Unknown)
+            .await?;
+        let hash_b = repo
+            .put_path_reference(&source_b_abs, BlobUseHints::Unknown)
+            .await?;
         assert_eq!(hash_a, hash_b);
 
         tokio::fs::remove_file(&source_a_abs).await?;
@@ -1065,8 +1106,8 @@ mod tests {
         let repo_a = Arc::clone(&repo);
         let repo_b = Arc::clone(&repo);
         let (hash_a, hash_b) = tokio::try_join!(
-            repo_a.put_path_reference(&source_a_abs),
-            repo_b.put_path_reference(&source_b_abs)
+            repo_a.put_path_reference(&source_a_abs, BlobUseHints::Unknown),
+            repo_b.put_path_reference(&source_b_abs, BlobUseHints::Unknown)
         )?;
         assert_eq!(hash_a, hash_b);
 
@@ -1099,7 +1140,9 @@ mod tests {
     #[tokio::test]
     async fn materialize_uses_hash_filename_layout() -> Res<()> {
         let (repo, _temp) = setup().await;
-        let hash = repo.put(b"materialize-layout").await?;
+        let hash = repo
+            .put(b"materialize-layout", BlobUseHints::Unknown)
+            .await?;
         let out = repo
             .materialize(
                 hash,
@@ -1119,7 +1162,7 @@ mod tests {
     #[tokio::test]
     async fn cleanup_staging_removes_materialized_files() -> Res<()> {
         let (repo, _temp) = setup().await;
-        let hash = repo.put(b"cleanup-me").await?;
+        let hash = repo.put(b"cleanup-me", BlobUseHints::Unknown).await?;
         let out = repo
             .materialize(hash, BlobMaterializeRequest::Extension("jpg".into()))
             .await?;
@@ -1136,7 +1179,9 @@ mod tests {
         tokio::fs::write(&source, b"original-reference-bytes").await?;
         let source_abs = source.canonicalize()?;
 
-        let hash = repo.put_path_reference(&source_abs).await?;
+        let hash = repo
+            .put_path_reference(&source_abs, BlobUseHints::Unknown)
+            .await?;
         let out = repo
             .materialize(
                 hash,

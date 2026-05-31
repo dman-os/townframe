@@ -105,4 +105,12 @@ impl SecretRepo {
         .await
         .expect(ERROR_TOKIO)
     }
+
+    pub async fn stop(self) -> Res<()> {
+        let store = self.store;
+        tokio::task::spawn_blocking(move || drop(store))
+            .await
+            .expect(ERROR_TOKIO);
+        Ok(())
+    }
 }

@@ -107,16 +107,36 @@ impl DaybookTestContext {
     }
 
     pub async fn stop(self) -> Res<()> {
-        self.rt_stop.stop().await?;
-        Arc::clone(&self.rt.rcx).shutdown().await?;
-        self.drawer_stop.stop().await?;
-        self.progress_stop.stop().await?;
-        self.dispatch_stop.stop().await?;
-        self.config_stop.stop().await?;
-        self.plugs_stop.stop().await?;
-        self.init_stop.stop().await?;
-        self.sqlite_local_state_stop.stop().await?;
-        self.big_sync_stop.stop().await?;
+        let Self {
+            _acx: _,
+            big_sync_stop,
+            drawer_repo: _,
+            dispatch_repo: _,
+            _config_repo: _,
+            drawer_stop,
+            plugs_stop,
+            config_stop,
+            dispatch_stop,
+            progress_stop,
+            init_stop,
+            sqlite_local_state_stop,
+            rt_stop,
+            rt,
+            _temp_dir: _,
+        } = self;
+
+        rt_stop.stop().await?;
+        let rcx = Arc::clone(&rt.rcx);
+        drop(rt);
+        rcx.shutdown().await?;
+        drawer_stop.stop().await?;
+        progress_stop.stop().await?;
+        dispatch_stop.stop().await?;
+        config_stop.stop().await?;
+        plugs_stop.stop().await?;
+        init_stop.stop().await?;
+        sqlite_local_state_stop.stop().await?;
+        big_sync_stop.stop().await?;
         Ok(())
     }
 }
@@ -279,7 +299,7 @@ pub async fn test_cx_with_options(
         lock_path: repo_root.join("repo.lock"),
     };
     let lock_guard = crate::repo::RepoLockGuard::acquire(&layout.lock_path)?;
-    let secret_repo = Arc::new(crate::secrets::SecretRepo::boot().await?);
+    let secret_repo = crate::secrets::SecretRepo::boot().await?;
     let iroh_secret_key = iroh::SecretKey::generate();
     let local_peer_key = daybook_types::doc::format_peer_key(peer_id.as_bytes());
     crate::repo::ensure_expected_partitions_for_docs(&part_store, app_doc_id, drawer_doc_id)
@@ -301,7 +321,7 @@ pub async fn test_cx_with_options(
             repo_name: format!("test-repo-{}", uuid::Uuid::new_v4().simple()),
             iroh_public_key: peer_id.to_string(),
             iroh_secret_key,
-            secret_repo: Arc::clone(&secret_repo),
+            secret_repo,
         },
         big_repo
             .get_doc(&app_doc_id)
@@ -318,6 +338,8 @@ pub async fn test_cx_with_options(
         app_doc_id,
         local_user_path.clone(),
         sql_ctx.clone(),
+        Arc::clone(&progress_repo),
+        None,
     )
     .await?;
     let init_user_path =
@@ -333,6 +355,7 @@ pub async fn test_cx_with_options(
     let (rt, rt_stop) = crate::rt::Rt::boot(
         crate::rt::RtConfig {
             device_id: device_id.clone(),
+            startup_progress_task_id: None,
         },
         rcx,
         Arc::clone(&drawer_repo),

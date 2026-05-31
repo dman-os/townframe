@@ -503,9 +503,7 @@ impl BigDocHandle {
                 match autosurgeon::hydrate_path_at(doc, &obj_id, path, heads) {
                     Ok(Some(value)) => Ok(Some(value)),
                     Ok(None) => Ok(None),
-                    Err(err) => {
-                        Err(ferr!("error hydrating: {err:?}"))
-                    }
+                    Err(err) => Err(ferr!("error hydrating: {err:?}")),
                 }
             }
         })

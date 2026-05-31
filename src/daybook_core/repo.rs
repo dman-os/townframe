@@ -7,8 +7,11 @@ use big_repo::BigDocHandle;
 use big_repo::SharedPartStore;
 use daybook_types::doc::{UserPath, UserPathBuf};
 use fs4::fs_std::FileExt;
+use sqlx::sqlite::{SqliteConnectOptions, SqlitePoolOptions};
+use std::str::FromStr;
 
 const REPO_MARKER_FILE: &str = "db.repo.txt";
+const SQLITE_POOL_ACQUIRE_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(90);
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct RepoLayout {
@@ -105,7 +108,7 @@ pub struct RepoCtx {
 
     pub iroh_public_key: String,
     pub iroh_secret_key: iroh::SecretKey,
-    pub secret_repo: Arc<crate::secrets::SecretRepo>,
+    pub secret_repo: crate::secrets::SecretRepo,
 }
 
 pub(crate) struct RepoCtxParts {
@@ -124,7 +127,7 @@ pub(crate) struct RepoCtxParts {
     pub repo_name: String,
     pub iroh_public_key: String,
     pub iroh_secret_key: iroh::SecretKey,
-    pub secret_repo: Arc<crate::secrets::SecretRepo>,
+    pub secret_repo: crate::secrets::SecretRepo,
 }
 
 impl RepoCtx {
@@ -158,11 +161,19 @@ impl RepoCtx {
     pub async fn shutdown(self: Arc<Self>) -> Res<()> {
         match Arc::try_unwrap(self) {
             Ok(self2) => {
-                drop(self2.doc_app);
-                drop(self2.doc_drawer);
+                let RepoCtx {
+                    doc_app,
+                    doc_drawer,
+                    secret_repo,
+                    big_repo_stop,
+                    ..
+                } = self2;
 
-                let stop = self2
-                    .big_repo_stop
+                drop(doc_app);
+                drop(doc_drawer);
+                secret_repo.stop().await?;
+
+                let stop = big_repo_stop
                     .lock()
                     .expect(ERROR_MUTEX)
                     .take()
@@ -185,11 +196,13 @@ impl RepoCtx {
 
     pub async fn open(
         repo_root: &std::path::Path,
-        _options: RepoOpenOptions,
+        options: RepoOpenOptions,
         local_device_name: String,
     ) -> Res<Arc<Self>> {
         let layout = repo_layout(repo_root)?;
+        info!(repo_root = %layout.repo_root.display(), lock_path = %layout.lock_path.display(), "repo open: acquiring lock");
         let lock_guard = RepoLockGuard::acquire(&layout.lock_path)?;
+        info!(repo_root = %layout.repo_root.display(), "repo open: lock acquired");
         if !is_repo_initialized(&layout.repo_root).await? {
             eyre::bail!(
                 "repo not initialized at path {} (missing marker {})",
@@ -197,147 +210,197 @@ impl RepoCtx {
                 layout.marker_path.display()
             );
         }
-        let secret_repo = Arc::new(crate::secrets::SecretRepo::boot().await?);
-        cleanup_blobs_staging_dir(&layout.blobs_root).await?;
-        let sql = SqlCtx::new(SqlConfig {
-            database_url: format!("sqlite://{}", layout.sqlite_path.display()),
-        })
-        .await?;
-        let (repo_id, repo_name, user_id, checkout_id) = tokio::try_join!(
-            globals::get_string_global(&sql, "global.repo_id"),
-            globals::get_string_global(&sql, "global.repo_name"),
-            globals::get_string_global(&sql, "global.user_id"),
-            globals::get_string_global(&sql, "global.checkout_id"),
-        )?;
-        let repo_id = repo_id.ok_or_eyre("missing global from repo: repo_id")?;
-        let repo_name = repo_name.ok_or_eyre("missing global from repo: repo_name")?;
-        let user_id = user_id.ok_or_eyre("missing global from repo: user_id")?;
-        let checkout_id = checkout_id.ok_or_eyre("missing global from repo: checkout_id")?;
-        let identity = secret_repo
-            .load_identity(&checkout_id)
-            .await?
-            .ok_or_eyre("missing secret from keyring")?;
-        let UserInfo {
-            local_peer_key,
-            local_user_path,
-            local_actor_id,
-        } = compute_user_info(&repo_id, &user_id, &identity);
-        let part_store = big_sync::SqlitePartStore::new(
-            sql.read_pool.clone(),
-            sql.write_pool.clone(),
-            &repo_id[..],
-            big_sync_core::BuckId::MAX_LEVEL,
-        )
-        .await?;
-        let part_store: Arc<dyn big_sync::HostPartStore> = Arc::new(part_store) as _;
-        let (big_repo, big_repo_stop) =
-            boot_big_repo(&layout, &identity, Arc::clone(&part_store)).await?;
-        let (doc_app, doc_drawer) = load_core_docs(&big_repo, &sql).await?;
-        ensure_expected_partitions_for_docs(
-            &part_store,
-            doc_app.document_id(),
-            doc_drawer.document_id(),
-        )
-        .await?;
-        let parts = RepoCtxParts {
-            layout,
-            lock_guard,
-            sql,
-            part_store,
-            big_repo,
-            big_repo_stop: std::sync::Mutex::new(Some(big_repo_stop)),
-            local_peer_key,
-            local_actor_id,
-            local_user_path,
-            local_device_name,
-            repo_id,
-            checkout_id,
-            repo_name,
-            iroh_public_key: identity.iroh_public_key.to_string(),
-            iroh_secret_key: identity.iroh_secret_key,
-            secret_repo,
-        };
-        Ok(Self::from_parts(parts, doc_app, doc_drawer))
+        info!(repo_root = %layout.repo_root.display(), "repo open: marker check passed");
+        Self::open_inner(layout, lock_guard, options, local_device_name, false, None).await
     }
 
     pub async fn init(
         repo_root: &std::path::Path,
-        _options: RepoOpenOptions,
+        options: RepoOpenOptions,
         repo_name: String,
         local_device_name: String,
     ) -> Res<Arc<Self>> {
         let layout = repo_layout(repo_root)?;
+        info!(repo_root = %layout.repo_root.display(), lock_path = %layout.lock_path.display(), "repo init: acquiring lock");
         let lock_guard = RepoLockGuard::acquire(&layout.lock_path)?;
+        info!(repo_root = %layout.repo_root.display(), "repo init: lock acquired");
         if is_repo_initialized(&layout.repo_root).await? {
             eyre::bail!(
                 "repo already initialized at path {}",
                 layout.repo_root.display()
             );
         }
-        let secret_repo = Arc::new(crate::secrets::SecretRepo::boot().await?);
+        info!(repo_root = %layout.repo_root.display(), "repo init: marker absent, continuing");
+        Self::open_inner(
+            layout,
+            lock_guard,
+            options,
+            local_device_name,
+            true,
+            Some(repo_name),
+        )
+        .await
+    }
+
+    async fn open_inner(
+        layout: RepoLayout,
+        lock_guard: RepoLockGuard,
+        _options: RepoOpenOptions,
+        local_device_name: String,
+        initialize_repo: bool,
+        repo_name: Option<String>,
+    ) -> Res<Arc<Self>> {
+        info!(
+            repo_root = %layout.repo_root.display(),
+            initialize_repo,
+            "repo open_inner: begin"
+        );
         cleanup_blobs_staging_dir(&layout.blobs_root).await?;
+        info!(repo_root = %layout.repo_root.display(), "repo open_inner: blobs staging cleaned");
+
         let sql = SqlCtx::new(SqlConfig {
             database_url: format!("sqlite://{}", layout.sqlite_path.display()),
         })
         .await?;
-        let repo_id = {
-            let id = Uuid::new_v4();
-            let id = utils_rs::hash::encode_base58_multibase(id);
-            format!("drepo_{id}")
-        };
-        let checkout_id = {
-            let id = Uuid::new_v4();
-            let id = utils_rs::hash::encode_base58_multibase(id);
-            format!("dcheckout_{id}")
-        };
-        let user_id = format!(
-            "{}{}",
-            daybook_types::doc::user_path::USER_ID_PREFIX,
-            Uuid::new_v4().bs58()
+        info!(
+            repo_root = %layout.repo_root.display(),
+            sqlite_path = %layout.sqlite_path.display(),
+            "repo open_inner: sqlite ready"
         );
-        tokio::try_join!(
-            globals::set_string_global(&sql, "global.repo_id", &repo_id),
-            globals::set_string_global(&sql, "global.checkout_id", &checkout_id),
-            globals::set_string_global(&sql, "global.repo_name", &repo_name),
-            globals::set_string_global(&sql, "global.user_id", &user_id),
-        )?;
-        let identity = {
+
+        let secret_repo = crate::secrets::SecretRepo::boot().await?;
+        let repo_id = if initialize_repo {
+            format!("repo-{}", Uuid::new_v4().simple())
+        } else {
+            globals::get_string_global(&sql, "global.repo_id")
+                .await?
+                .ok_or_eyre("global.repo_id missing in initialized repo")?
+        };
+        info!(repo_root = %layout.repo_root.display(), repo_id, "repo open_inner: repo id ready");
+
+        let repo_name = if initialize_repo {
+            repo_name.ok_or_eyre("missing repo_name for repo init")?
+        } else {
+            globals::get_string_global(&sql, "global.repo_name")
+                .await?
+                .ok_or_eyre("missing global from repo: repo_name")?
+        };
+
+        let repo_user_id = if initialize_repo {
+            format!(
+                "{}{}",
+                daybook_types::doc::user_path::USER_ID_PREFIX,
+                Uuid::new_v4().bs58()
+            )
+        } else {
+            globals::get_string_global(&sql, "global.user_id")
+                .await?
+                .ok_or_eyre("global.user_id missing in initialized repo")?
+        };
+
+        let checkout_id = if initialize_repo {
+            format!("dcheckout_{}", Uuid::new_v4().bs58())
+        } else {
+            globals::get_string_global(&sql, "global.checkout_id")
+                .await?
+                .ok_or_eyre("missing global from repo: checkout_id")?
+        };
+
+        if initialize_repo {
+            tokio::try_join!(
+                globals::set_string_global(&sql, "global.repo_id", &repo_id),
+                globals::set_string_global(&sql, "global.checkout_id", &checkout_id),
+                globals::set_string_global(&sql, "global.repo_name", &repo_name),
+                globals::set_string_global(&sql, "global.user_id", &repo_user_id),
+            )?;
+        }
+
+        let identity = if initialize_repo {
             let secret = iroh::SecretKey::generate();
             secret_repo.set_identity(&checkout_id, secret).await?
+        } else {
+            secret_repo
+                .load_identity(&checkout_id)
+                .await?
+                .ok_or_eyre("missing secret from keyring")?
         };
+
         let UserInfo {
             local_peer_key,
             local_user_path,
             local_actor_id,
-        } = compute_user_info(&repo_id, &user_id, &identity);
+        } = compute_user_info(&repo_id, &repo_user_id, &identity);
+
+        let big_repo_sqlite_url = format!(
+            "sqlite://{}",
+            layout.repo_root.join("big_repo.sqlite").display()
+        );
+        let connect_options = SqliteConnectOptions::from_str(&big_repo_sqlite_url)
+            .wrap_err_with(|| format!("invalid sqlite url: {big_repo_sqlite_url}"))?
+            .create_if_missing(true);
+        let big_repo_read_pool = SqlitePoolOptions::new()
+            .max_connections(4)
+            .acquire_timeout(SQLITE_POOL_ACQUIRE_TIMEOUT)
+            .connect_with(connect_options.clone())
+            .await
+            .wrap_err("failed connecting big repo sqlite read pool")?;
+        let big_repo_write_pool = SqlitePoolOptions::new()
+            .max_connections(1)
+            .acquire_timeout(SQLITE_POOL_ACQUIRE_TIMEOUT)
+            .connect_with(connect_options)
+            .await
+            .wrap_err("failed connecting big repo sqlite write pool")?;
         let part_store = big_sync::SqlitePartStore::new(
-            sql.read_pool.clone(),
-            sql.write_pool.clone(),
-            &repo_id[..],
+            big_repo_read_pool,
+            big_repo_write_pool,
+            repo_id.clone(),
             big_sync_core::BuckId::MAX_LEVEL,
         )
         .await?;
-        let part_store: Arc<dyn big_sync::HostPartStore> = Arc::new(part_store) as _;
+        let part_store: SharedPartStore = Arc::new(part_store) as _;
+        info!(repo_root = %layout.repo_root.display(), "repo open_inner: partition store ready");
+
         let (big_repo, big_repo_stop) =
             boot_big_repo(&layout, &identity, Arc::clone(&part_store)).await?;
-        let (doc_app, doc_drawer) = init_core_docs(&big_repo, &sql).await?;
+        info!(repo_root = %layout.repo_root.display(), "repo open_inner: big repo booted");
+
+        let (doc_app, doc_drawer) = if initialize_repo {
+            init_core_docs(&big_repo, &sql).await?
+        } else {
+            load_core_docs(&big_repo, &sql).await?
+        };
+        info!(
+            repo_root = %layout.repo_root.display(),
+            doc_app_id = %doc_app.document_id(),
+            doc_drawer_id = %doc_drawer.document_id(),
+            "repo open_inner: core docs ready"
+        );
+
         ensure_expected_partitions_for_docs(
             &part_store,
             doc_app.document_id(),
             doc_drawer.document_id(),
         )
         .await?;
-        Self::run_repo_init_dance(
-            &big_repo,
-            &part_store,
-            &doc_app,
-            &doc_drawer,
-            &local_user_path,
-            &sql,
-            layout.blobs_root.clone(),
-        )
-        .await?;
-        mark_repo_initialized(&layout.repo_root).await?;
+        info!(repo_root = %layout.repo_root.display(), "repo open_inner: core partitions ensured");
+
+        if initialize_repo {
+            info!(repo_root = %layout.repo_root.display(), "repo open_inner: running init dance");
+            Self::run_repo_init_dance(
+                &big_repo,
+                &part_store,
+                &doc_app,
+                &doc_drawer,
+                &local_user_path,
+                &sql,
+                layout.blobs_root.clone(),
+            )
+            .await?;
+            mark_repo_initialized(&layout.repo_root).await?;
+            info!(repo_root = %layout.repo_root.display(), "repo open_inner: init marker written");
+        }
+
+        info!(repo_root = %layout.repo_root.display(), initialize_repo, "repo open_inner: completed");
         let parts = RepoCtxParts {
             layout,
             lock_guard,
@@ -356,7 +419,7 @@ impl RepoCtx {
             iroh_secret_key: identity.iroh_secret_key,
             secret_repo,
         };
-        Ok(Self::from_parts(parts, doc_app, doc_drawer))
+        Ok(RepoCtx::from_parts(parts, doc_app, doc_drawer))
     }
 
     async fn run_repo_init_dance(
@@ -368,6 +431,11 @@ impl RepoCtx {
         sql: &SqlCtx,
         blobs_root: PathBuf,
     ) -> Res<()> {
+        info!(
+            doc_app_id = %doc_app.document_id(),
+            doc_drawer_id = %doc_drawer.document_id(),
+            "repo init dance: starting"
+        );
         use crate::blobs::BlobsRepo;
         use crate::config::ConfigRepo;
         use crate::drawer::DrawerRepo;
@@ -383,6 +451,7 @@ impl RepoCtx {
             )),
         )
         .await?;
+        info!("repo init dance: blobs repo loaded");
         let mut plugs_repo: Option<Arc<PlugsRepo>> = None;
         let mut plugs_stop: Option<crate::repos::RepoStopToken> = None;
         let mut config_stop: Option<crate::repos::RepoStopToken> = None;
@@ -392,6 +461,7 @@ impl RepoCtx {
         let mut init_stop: Option<crate::repos::RepoStopToken> = None;
 
         let init_result: Res<()> = async {
+            info!("repo init dance: loading plugs repo");
             let (repo, stop) = PlugsRepo::load(
                 Arc::clone(big_repo),
                 Arc::clone(&blobs_repo),
@@ -403,6 +473,7 @@ impl RepoCtx {
             plugs_repo = Some(repo);
             plugs_stop = Some(stop);
 
+            info!("repo init dance: loading config repo");
             let (config_repo, stop) = ConfigRepo::load(
                 Arc::clone(big_repo),
                 doc_app.document_id(),
@@ -427,6 +498,7 @@ impl RepoCtx {
                 .upsert_actor_user_path(plugs_actor_id, plugs_user_path)
                 .await?;
 
+            info!("repo init dance: loading tables repo");
             let (_tables_repo, stop) = TablesRepo::load(
                 Arc::clone(big_repo),
                 doc_app.document_id(),
@@ -441,6 +513,7 @@ impl RepoCtx {
                 .upsert_actor_user_path(tables_actor_id, tables_user_path)
                 .await?;
 
+            info!("repo init dance: loading dispatch repo");
             let (_dispatch_repo, stop) = DispatchRepo::load(
                 Arc::clone(big_repo),
                 doc_app.document_id(),
@@ -458,6 +531,7 @@ impl RepoCtx {
                 .upsert_actor_user_path(dispatch_actor_id, dispatch_user_path)
                 .await?;
 
+            info!("repo init dance: loading drawer repo");
             let (_drawer_repo, stop) = DrawerRepo::load(
                 Arc::clone(big_repo),
                 Arc::clone(partition_store),
@@ -491,32 +565,20 @@ impl RepoCtx {
                 .upsert_actor_user_path(drawer_actor_id, drawer_user_path)
                 .await?;
 
-            let (_init_repo, stop) = crate::rt::init::InitRepo::load(
-                Arc::clone(&big_repo),
-                doc_app.document_id(),
-                local_user_path.to_owned(),
-                sql.clone(),
-            )
-            .await?;
-            init_stop = Some(stop);
-            let init_user_path =
-                daybook_types::doc::user_path::for_repo(local_user_path.to_owned(), "init-repo")?;
-            let init_actor_id = daybook_types::doc::user_path::to_actor_id(&init_user_path);
-            config_repo
-                .upsert_actor_user_path(init_actor_id, init_user_path)
-                .await?;
-
+            info!("repo init dance: ensuring system plugs");
             plugs_repo
                 .as_ref()
                 .expect("plugs repo must be loaded")
                 .ensure_system_plugs()
                 .await?;
+            info!("repo init dance: system plugs ensured");
 
             Ok(())
         }
         .await;
 
         if let Err(err) = init_result {
+            info!(?err, "repo init dance: failed, starting cleanup");
             if let Some(stop) = drawer_stop.take() {
                 let _ = stop.stop().await;
             }
@@ -540,9 +602,11 @@ impl RepoCtx {
                     "error shutting down blobs repo during init cleanup: {shutdown_err:?}"
                 )));
             }
+            info!("repo init dance: cleanup finished after failure");
             return Err(err);
         }
 
+        info!("repo init dance: stopping repos");
         drawer_stop
             .expect("drawer stop token missing")
             .stop()
@@ -561,6 +625,7 @@ impl RepoCtx {
             .stop()
             .await?;
         blobs_repo.shutdown().await?;
+        info!("repo init dance: completed");
         Ok(())
     }
 }

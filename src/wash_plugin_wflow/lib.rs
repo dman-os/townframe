@@ -23,6 +23,7 @@ pub mod binds_partition_host {
         imports: { default: async | trappable | tracing },
         exports: { default: async | trappable | tracing },
         additional_derives: [serde::Serialize, serde::Deserialize],
+        anyhow: false
     });
 }
 use binds_partition_host::townframe::wflow::partition_host;

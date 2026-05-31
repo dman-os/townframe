@@ -15,7 +15,6 @@ path = "main.rs"
 utils_rs = { workspace = true, features = ["native"] }
 am_utils_rs.workspace = true
 daybook_core = { workspace = true }
-daybook_fuse = { workspace = true }
 daybook_types = { workspace = true }
 wflow = { workspace = true }
 
@@ -63,3 +62,5 @@ color-eyre.workspace = true
 # sync
 iroh = { workspace = true }
 qrcode.workspace = true
+big_sync_core = { workspace = true }
+surelock = { workspace = true }

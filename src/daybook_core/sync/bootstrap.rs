@@ -334,20 +334,6 @@ async fn pull_required_partitions_via_big_sync_worker(
         Ok(Ok(())) => {}
         Ok(Err(err)) => return Err(err),
         Err(_) => {
-            #[cfg(any(test, feature = "test-support"))]
-            {
-                let snapshot = big_sync_worker.snapshot().await?;
-                tracing::warn!(
-                    ?snapshot.peer_parts,
-                    ?snapshot.full_sync_waiters,
-                    ?snapshot.last_object_syncs,
-                    ?snapshot.task_counts,
-                    active_machine_tasks = snapshot.active_machine_tasks,
-                    active_sync_tasks = snapshot.active_sync_tasks,
-                    zombie_tasks = snapshot.zombie_tasks,
-                    "clone bootstrap timeout snapshot"
-                );
-            }
             eyre::bail!("timed out waiting for required partitions during clone");
         }
     }
@@ -401,7 +387,7 @@ pub async fn clone_repo_init_from_url(
     let lock_guard = crate::repo::RepoLockGuard::acquire(&staging.join("repo.lock"))?;
 
     let cloned = async {
-        let secret_repo = Arc::new(crate::secrets::SecretRepo::boot().await?);
+        let secret_repo = crate::secrets::SecretRepo::boot().await?;
 
         // Generate identity locally — secret keys never leave the device.
         let local_secret = iroh::SecretKey::generate();
@@ -550,7 +536,7 @@ pub async fn clone_repo_init_from_url(
                 repo_name: bootstrap.repo_name.clone(),
                 iroh_public_key: identity.iroh_public_key.to_string(),
                 iroh_secret_key: identity.iroh_secret_key,
-                secret_repo: Arc::clone(&secret_repo),
+                secret_repo,
             },
             staging.join("blobs"),
         )

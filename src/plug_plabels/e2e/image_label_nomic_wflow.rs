@@ -14,7 +14,11 @@ async fn test_image_label_fallback_nomic_pipeline() -> Res<()> {
     super::common::import_plabels_oci(&test_cx).await?;
 
     let image_bytes = include_bytes!("../../daybook_core/e2e/sample-receipt.jpg");
-    let blob_hash = test_cx.rt.blobs_repo.put(image_bytes).await?;
+    let blob_hash = test_cx
+        .rt
+        .blobs_repo
+        .put(image_bytes, daybook_core::blobs::BlobUseHints::Docs)
+        .await?;
 
     let blob_facet = Blob {
         mime: "image/jpeg".to_string(),

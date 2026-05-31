@@ -17,7 +17,7 @@ automerge = ["dep:autosurgeon", "dep:automerge"]
 uniffi = ["dep:uniffi", "dep:uuid"]
 wit = ["dep:wit-bindgen"]
 schemars = ["dep:schemars"]
-manifest = ["dep:garde", "dep:semver"]
+manifest = ["dep:garde", "dep:semver", "schemars"]
 
 [dependencies]
 #
@@ -74,3 +74,4 @@ pastey.workspace = true
 addr.workspace = true
 blake3.workspace = true
 camino.workspace = true
+jsonpath-rust = "1.0.4"

@@ -449,7 +449,7 @@ async fn apply_effect(ctx: &mut DaybookFuseCtx, effect: pauperfuse::Effect) -> R
             let patch = daybook_types::doc::Doc::diff(&existing_doc, &parsed_doc);
             if !patch.is_empty() {
                 ctx.drawer_repo
-                    .update_at_heads(patch, branch_path, None)
+                    .update_at_heads(patch, &branch_path, None)
                     .await?;
             }
         }
@@ -472,77 +472,56 @@ mod tests {
         drawer_stop: Option<daybook_core::repos::RepoStopToken>,
         plugs_repo: Arc<PlugsRepo>,
         plugs_stop: Option<daybook_core::repos::RepoStopToken>,
-        big_repo_stop: Option<am_utils_rs::BigRepoStopToken>,
+        repo_ctx: Arc<daybook_core::repo::RepoCtx>,
         temp_dir: tempfile::TempDir,
     }
 
     impl TestHarness {
-        // FIXME: use core::app for repo init
         async fn new() -> Res<Self> {
             let temp_dir = tempfile::tempdir()?;
-            let am_path = temp_dir.path().join("samod");
-            tokio::fs::create_dir_all(&am_path).await?;
-
             let sql_path = temp_dir.path().join("sqlite.db");
-            let sql_ctx = daybook_core::app::SqlCtx::new(daybook_core::app::SqlConfig {
-                database_url: format!("sqlite://{}", sql_path.display()),
-            })
-            .await?;
-            daybook_core::app::globals::set_local_user_path(
-                &sql_ctx.write_pool,
-                "/test-user/test-device",
-            )
-            .await?;
-
-            let (big_repo, big_repo_stop) = am_utils_rs::BigRepo::boot(am_utils_rs::repo::Config {
-                storage: am_utils_rs::repo::StorageConfig::Disk {
-                    path: am_path,
-                    big_repo_sqlite_url: None,
+            let app_ctx = daybook_core::app::AppCtx::new(daybook_core::app::AppConfig {
+                app_data_dir: temp_dir.path().join("app-data"),
+                sql: daybook_core::app::SqlConfig {
+                    database_url: format!("sqlite://{}", sql_path.display()),
                 },
-                peer_id: "daybook_fuse_test".to_string(),
-                secret_key_bytes: [0u8; 32],
+                default_repo_root: temp_dir.path().join("repo"),
             })
             .await?;
-
-            let doc_app = tokio::sync::OnceCell::new();
-            let doc_drawer = tokio::sync::OnceCell::new();
-            daybook_core::app::init_from_globals(
-                &big_repo,
-                &sql_ctx.write_pool,
-                &doc_app,
-                &doc_drawer,
-                daybook_core::app::InitFromGlobalsMode::CreateFresh,
-            )
-            .await?;
-
-            let local_user_path = daybook_types::doc::UserPathBuf::from("/test-user/test-device");
+            let repo_ctx = app_ctx
+                .init_repo(
+                    temp_dir.path().join("repo").as_path(),
+                    daybook_core::repo::RepoOpenOptions::default(),
+                    "daybook_fuse_test".to_string(),
+                    "/test-user/test-device".to_string(),
+                )
+                .await?;
+            let local_user_path = repo_ctx.local_user_path.clone();
             let blobs_repo = BlobsRepo::new(
                 temp_dir.path().join("blobs"),
-                local_user_path.to_string(),
+                local_user_path.clone(),
                 Arc::new(daybook_core::blobs::PartitionStoreMembershipWriter::new(
-                    big_repo.partition_store(),
+                    Arc::clone(&repo_ctx.part_store),
                 )),
             )
             .await?;
             let (plugs_repo, plugs_stop) = PlugsRepo::load(
-                Arc::clone(&big_repo),
+                Arc::clone(&repo_ctx.big_repo),
                 blobs_repo,
-                doc_app.get().unwrap().document_id().clone(),
+                repo_ctx.doc_app.document_id().clone(),
                 local_user_path.clone(),
             )
             .await?;
 
             let (drawer_repo, drawer_stop) = DrawerRepo::load(
-                big_repo,
-                doc_drawer
-                    .get()
-                    .expect("drawer doc init")
-                    .document_id()
-                    .clone(),
+                Arc::clone(&repo_ctx.big_repo),
+                Arc::clone(&repo_ctx.part_store),
+                repo_ctx.doc_drawer.document_id().clone(),
                 local_user_path,
+                repo_ctx.sql.clone(),
                 temp_dir.path().join("local_state"),
-                Arc::new(std::sync::Mutex::new(KeyedLruPool::new(1000))),
-                Arc::new(std::sync::Mutex::new(KeyedLruPool::new(1000))),
+                Arc::new(surelock::mutex::Mutex::new(KeyedLruPool::new(1000))),
+                Arc::new(surelock::mutex::Mutex::new(KeyedLruPool::new(1000))),
                 Arc::clone(&plugs_repo),
             )
             .await?;
@@ -554,7 +533,7 @@ mod tests {
                 plugs_stop: Some(plugs_stop),
                 drawer_repo,
                 drawer_stop: Some(drawer_stop),
-                big_repo_stop: Some(big_repo_stop),
+                repo_ctx,
                 temp_dir,
             })
         }
@@ -566,9 +545,7 @@ mod tests {
             if let Some(stop) = self.plugs_stop.take() {
                 stop.stop().await?;
             }
-            if let Some(stop) = self.big_repo_stop.take() {
-                stop.stop().await?;
-            }
+            Arc::clone(&self.repo_ctx).shutdown().await?;
             Ok(())
         }
 
@@ -733,7 +710,11 @@ mod tests {
         let patch = Doc::diff(&current_doc, &edited_doc);
         harness
             .drawer_repo
-            .update_at_heads(patch, daybook_types::doc::BranchPathBuf::from("main"), None)
+            .update_at_heads(
+                patch,
+                &daybook_types::doc::BranchPathBuf::from("main"),
+                None,
+            )
             .await?;
 
         let report = pull_changes(&mut fuse_ctx).await?;

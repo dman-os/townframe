@@ -45,7 +45,7 @@ impl ConfigRepoFfi {
         let (repo, stop_token) = fcx
             .do_on_rt(ConfigRepo::load(
                 Arc::clone(&fcx.rcx.big_repo),
-                fcx.rcx.doc_app.document_id().clone(),
+                fcx.rcx.doc_app.document_id(),
                 Arc::clone(&plug_repo.repo),
                 daybook_types::doc::UserPathBuf::from(fcx.rcx.local_user_path.to_string()),
                 fcx.rcx.sql.clone(),
@@ -60,10 +60,15 @@ impl ConfigRepoFfi {
     }
 
     async fn stop(&self) -> Result<(), FfiError> {
-        if let Some(token) = self.stop_token.lock().await.take() {
-            token.stop().await?;
-        }
-        Ok(())
+        let stop_token = self.stop_token.lock().await.take();
+        self.fcx
+            .do_on_rt(async move {
+                if let Some(token) = stop_token {
+                    token.stop().await?;
+                }
+                Ok::<(), FfiError>(())
+            })
+            .await
     }
 
     #[tracing::instrument(skip(self))]

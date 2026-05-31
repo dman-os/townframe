@@ -27,14 +27,19 @@ crate::uniffi_repo_listeners!(InitRepoFfi, InitEvent);
 #[uniffi::export]
 impl InitRepoFfi {
     #[uniffi::constructor]
-    #[tracing::instrument(err, skip(fcx))]
-    async fn load(fcx: SharedFfiCtx) -> Result<Arc<Self>, FfiError> {
+    #[tracing::instrument(err, skip(fcx, progress_repo))]
+    async fn load(
+        fcx: SharedFfiCtx,
+        progress_repo: Arc<crate::repos::progress::ProgressRepoFfi>,
+    ) -> Result<Arc<Self>, FfiError> {
         let (repo, stop_token) = fcx
             .do_on_rt(InitRepo::load(
                 Arc::clone(&fcx.rcx.big_repo),
                 fcx.rcx.doc_app.document_id(),
-                fcx.rcx.local_user_path.clone().into(),
+                fcx.rcx.local_user_path.clone(),
                 fcx.rcx.sql.clone(),
+                Arc::clone(&progress_repo.repo),
+                None,
             ))
             .await
             .inspect_err(|err| tracing::error!(?err))?;

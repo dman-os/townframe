@@ -34,5 +34,5 @@ pub async fn open_repo_ctx(config: &Config, ensure_initialized: bool) -> Res<Sha
         daybook_core::repo::RepoCtx::open(&config.cli_config.repo_path, options, local_device_name)
             .await?
     };
-    Ok(Arc::new(rcx))
+    Ok(rcx)
 }

@@ -61,7 +61,10 @@ const androidApiLevel = $.env.ANDROID_API_LEVEL ?? "31";
 const androidNdkRoot = $.env.ANDROID_NDK_ROOT;
 if (!androidNdkRoot) throw new Error("ANDROID_NDK_ROOT must be set");
 const ndkRevision = $.env.ANDROID_NDK_REVISION ??
-  androidNdkRoot.split(/[\\/]/).filter((part) => part.length > 0).at(-1) ??
+  androidNdkRoot
+    .split(/[\\/]/)
+    .filter((part) => part.length > 0)
+    .at(-1) ??
   "unknown-ndk";
 const buildKeySuffix = `api${androidApiLevel}-ndk${ndkRevision}`.replaceAll(
   /[^\w.-]+/g,
@@ -72,6 +75,10 @@ const ortRootDir = $.relativeDir("../target/ort");
 const sourceArchivePath = ortRootDir.join(`onnxruntime-${ortSourceTag}.tar.gz`);
 const sourceDir = ortRootDir.join(`onnxruntime-src-${ortSourceTag}`);
 const sourceCompleteFile = ortRootDir.join(`.source-${ortSourceTag}.complete`);
+const fetchcontentCacheDir = ortRootDir.join(
+  "fetchcontent-cache",
+  ortSourceTag,
+);
 const distDir = ortRootDir.join(
   "dist",
   ortSourceTag,
@@ -87,6 +94,7 @@ const libDirFile = ortRootDir.join(
 );
 
 await ortRootDir.ensureDir();
+await fetchcontentCacheDir.ensureDir();
 
 if (!((await distCompleteFile.exists()) && (await libDirFile.exists()))) {
   const needsSourceExtract = !(await sourceDir.exists());
@@ -98,7 +106,7 @@ if (!((await distCompleteFile.exists()) && (await libDirFile.exists()))) {
         .showProgress()
         .pipeToPath(sourceArchivePath);
     }
-    if (needsSourceExtract && await sourceCompleteFile.exists()) {
+    if (needsSourceExtract && (await sourceCompleteFile.exists())) {
       await Deno.remove(sourceCompleteFile.toString());
     }
     await removeTreeIfExists(sourceDir.toString());
@@ -107,7 +115,7 @@ if (!((await distCompleteFile.exists()) && (await libDirFile.exists()))) {
     await sourceCompleteFile.writeText("ok\n");
   }
 
-  await $`bash ./build.sh --update --build --config ${ortBuildConfig} --parallel --compile_no_warning_as_error --skip_submodule_sync --build_shared_lib --android --android_abi=${abi} --android_api=${androidApiLevel} --android_ndk_path=${androidNdkRoot}`
+  await $`bash ./build.sh --update --build --config ${ortBuildConfig} --parallel --compile_no_warning_as_error --skip_submodule_sync --build_shared_lib --android --android_abi=${abi} --android_api=${androidApiLevel} --android_ndk_path=${androidNdkRoot} --cmake_extra_defines FETCHCONTENT_BASE_DIR=${fetchcontentCacheDir}`
     .cwd(
       sourceDir,
     );
@@ -137,12 +145,18 @@ if (!((await distCompleteFile.exists()) && (await libDirFile.exists()))) {
   await distCompleteFile.writeText("ok\n");
 }
 
-if (await sourceDir.exists()) {
+if (
+  (await sourceDir.exists()) &&
+  $.env.DAYBOOK_CLEAN_ORT_ANDROID_BUILD !== "0"
+) {
+  // Default cleanup keeps disk use low. Set DAYBOOK_CLEAN_ORT_ANDROID_BUILD=0 to keep intermediates.
   await cleanupOrtBuildArtifacts(sourceDir);
 }
 
 await $`./gradlew ${gradleTask} -PdaybookProfile=${composeProfile} -PortLibLocation=${
-  (await libDirFile.readText()).trim()
+  (
+    await libDirFile.readText()
+  ).trim()
 } -PortLibProfile=${
   $.env.ORT_LIB_PROFILE ?? ortBuildConfig
 } -PortPreferDynamicLink=${$.env.ORT_PREFER_DYNAMIC_LINK ?? "1"}`

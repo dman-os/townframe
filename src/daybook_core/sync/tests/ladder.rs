@@ -328,7 +328,10 @@ async fn iroh_sync_single_blob_created_before_connect_replicates() -> Res<()> {
     let node_b = open_sync_node(&repo_b_path).await?;
 
     let payload = b"pre-connect sync blob".to_vec();
-    let hash = node_a.blobs_repo.put(&payload).await?;
+    let hash = node_a
+        .blobs_repo
+        .put(&payload, crate::blobs::BlobUseHints::Docs)
+        .await?;
     let blob_key = FacetKey::from(WellKnownFacetTag::Blob);
     {
         let doc_id = node_a
@@ -496,7 +499,10 @@ async fn iroh_sync_single_blob_created_while_connected_replicates() -> Res<()> {
 
     {
         let payload = b"connected sync blob".to_vec();
-        let hash = node_a.blobs_repo.put(&payload).await?;
+        let hash = node_a
+            .blobs_repo
+            .put(&payload, crate::blobs::BlobUseHints::Docs)
+            .await?;
         let blob_key = FacetKey::from(WellKnownFacetTag::Blob);
         let doc_id = node_a
             .drawer

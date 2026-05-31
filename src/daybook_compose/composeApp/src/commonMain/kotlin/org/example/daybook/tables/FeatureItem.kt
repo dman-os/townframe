@@ -18,10 +18,12 @@ object FeatureKeys {
 data class FeatureItem(
     val key: String,
     val icon: @Composable () -> Unit,
+    val selectedIcon: (@Composable () -> Unit)? = null,
     val label: String,
     val labelContent: (@Composable () -> Unit)? = null,
     val enabled: Boolean = true,
-    val onActivate: suspend () -> Unit
+    val onActivate: suspend () -> Unit,
+    val onReselect: (suspend () -> Unit)? = null
 )
 
 fun AdditionalFeatureButton.toFeatureItem(): FeatureItem =
@@ -31,7 +33,8 @@ fun AdditionalFeatureButton.toFeatureItem(): FeatureItem =
         label = "",
         labelContent = { label() },
         enabled = enabled,
-        onActivate = { onClick() }
+        onActivate = { onClick() },
+        onReselect = { onClick() }
     )
 
 fun List<FeatureItem>.withAdditionalFeatureButtons(buttons: List<AdditionalFeatureButton>): List<FeatureItem> =

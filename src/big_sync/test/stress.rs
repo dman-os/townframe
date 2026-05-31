@@ -36,10 +36,15 @@ impl LwwStressFixture {
 impl StressFixture for LwwStressFixture {
     type World = TestWorld;
     type Node = NodeHarness;
+    type StressObj = ObjId;
     type Observation = (WorkerSnapshot, ObservedStoreSnapshot);
 
     fn label(&self) -> &'static str {
         self.backend.label()
+    }
+
+    fn make_stress_obj(&self, rng: &mut StdRng) -> Self::StressObj {
+        stress_support::stress_obj(rng)
     }
 
     async fn boot_node(&self, world: Arc<Self::World>, peer_seed: u8) -> Res<Self::Node> {
@@ -51,6 +56,18 @@ impl StressFixture for LwwStressFixture {
 
     async fn stop_node(&self, node: Self::Node) -> Res<()> {
         node.stop().await
+    }
+
+    async fn restart_node(
+        &self,
+        world: Arc<Self::World>,
+        _peer_seed: u8,
+        node: Self::Node,
+    ) -> Res<Self::Node> {
+        match self.backend {
+            StressBackend::Memory => super::restart_node(world, node).await,
+            StressBackend::Sqlite => restart_sqlite_node(world, node).await,
+        }
     }
 
     async fn connect_pair(&self, left: &Self::Node, right: &Self::Node) -> Res<()> {
@@ -70,14 +87,19 @@ impl StressFixture for LwwStressFixture {
         &self,
         node: &Self::Node,
         _nodes: &[Option<Self::Node>],
-        obj: ObjId,
+        obj: &Self::StressObj,
         payload: serde_json::Value,
     ) -> Res<()> {
         self.seed_obj(node, obj, payload).await
     }
 
-    async fn seed_obj(&self, node: &Self::Node, obj: ObjId, payload: serde_json::Value) -> Res<()> {
-        node.seed_obj(obj, payload).await
+    async fn seed_obj(
+        &self,
+        node: &Self::Node,
+        obj: &Self::StressObj,
+        payload: serde_json::Value,
+    ) -> Res<()> {
+        node.seed_obj(*obj, payload).await
     }
 
     async fn observed_state(&self, node: &Self::Node) -> Res<Self::Observation> {
@@ -223,8 +245,16 @@ async fn assert_cluster_alignment_lww(nodes: &[&NodeHarness]) -> Res<()> {
 }
 
 async fn boot_sqlite_node(world: Arc<TestWorld>, peer_seed: u8) -> Res<NodeHarness> {
-    let peer_id = peer_id(peer_seed);
     let temp_dir = tempfile::tempdir()?;
+    boot_sqlite_node_at(world, peer_seed, temp_dir).await
+}
+
+async fn boot_sqlite_node_at(
+    world: Arc<TestWorld>,
+    peer_seed: u8,
+    temp_dir: tempfile::TempDir,
+) -> Res<NodeHarness> {
+    let peer_id = peer_id(peer_seed);
     let db_path = temp_dir.path().join("big_sync.sqlite");
     let db_url = format!("sqlite://{}", db_path.display());
     let options = sqlx::sqlite::SqliteConnectOptions::from_str(&db_url)?
@@ -252,6 +282,22 @@ async fn boot_sqlite_node(world: Arc<TestWorld>, peer_seed: u8) -> Res<NodeHarne
         sqlite_temp_dir: Some(temp_dir),
         ..node
     })
+}
+
+async fn restart_sqlite_node(world: Arc<TestWorld>, node: NodeHarness) -> Res<NodeHarness> {
+    let NodeHarness {
+        world: node_world,
+        peer_id,
+        stop,
+        sqlite_temp_dir,
+        ..
+    } = node;
+    node_world.set_online(peer_id, false);
+    stop.stop().await?;
+    node_world.remove_store(peer_id);
+    let temp_dir = sqlite_temp_dir.ok_or_eyre("sqlite stress node is missing its temp dir")?;
+    let peer_seed = peer_id.as_bytes()[0];
+    boot_sqlite_node_at(world, peer_seed, temp_dir).await
 }
 
 #[tokio::test(flavor = "multi_thread")]

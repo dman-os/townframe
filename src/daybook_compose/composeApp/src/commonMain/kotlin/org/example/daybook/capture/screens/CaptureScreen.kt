@@ -16,7 +16,10 @@ import androidx.compose.ui.unit.dp
 import androidx.lifecycle.ViewModel
 import androidx.lifecycle.viewModelScope
 import androidx.lifecycle.viewmodel.compose.viewModel
+import kotlinx.coroutines.flow.MutableSharedFlow
 import kotlinx.coroutines.flow.MutableStateFlow
+import kotlinx.coroutines.flow.SharedFlow
+import kotlinx.coroutines.flow.asSharedFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.launch
 import org.example.daybook.ChromeState
@@ -25,6 +28,7 @@ import org.example.daybook.MainFeatureActionButton
 import org.example.daybook.ProvideChromeState
 import org.example.daybook.TablesState
 import org.example.daybook.TablesViewModel
+import org.example.daybook.capture.CaptureNavActions
 import org.example.daybook.capture.LocalCameraCaptureContext
 import org.example.daybook.capture.ui.DaybookCameraViewport
 import org.example.daybook.ui.DocEditor
@@ -46,14 +50,6 @@ import org.example.daybook.uniffi.core.*
 import org.example.daybook.uniffi.types.AddDocArgs
 import org.example.daybook.uniffi.types.Doc
 
-sealed interface DocsListState {
-    data class Data(val docs: List<Doc>) : DocsListState
-
-    data class Error(val error: FfiException) : DocsListState
-
-    object Loading : DocsListState
-}
-
 class CaptureScreenViewModel(
     val drawerRepo: DrawerRepoFfi,
     val tablesRepo: TablesRepoFfi,
@@ -70,8 +66,8 @@ class CaptureScreenViewModel(
     private val _currentDoc = MutableStateFlow<Doc?>(null)
     val currentDoc = _currentDoc.asStateFlow()
 
-    private val _message = MutableStateFlow<String?>(null)
-    val message = _message.asStateFlow()
+    private val _message = MutableSharedFlow<String>(extraBufferCapacity = 1, replay = 0)
+    val message: SharedFlow<String> = _message.asSharedFlow()
 
     val editorController =
         EditorSessionController(
@@ -89,23 +85,53 @@ class CaptureScreenViewModel(
         persistCaptureMode(mode)
     }
 
+    fun cycleCaptureMode() {
+        val next =
+            when (_captureMode.value) {
+                CaptureMode.TEXT -> CaptureMode.CAMERA
+                CaptureMode.CAMERA -> CaptureMode.MIC
+                CaptureMode.MIC -> CaptureMode.TEXT
+            }
+        setCaptureMode(next)
+    }
+
     private fun persistCaptureMode(mode: CaptureMode) {
         viewModelScope.launch {
-            val state = tablesVm.tablesState.value
-            val selectedTableId = tablesVm.selectedTableId.value
-            if (state is TablesState.Data && selectedTableId != null) {
-                val windowId =
-                    state.tables[selectedTableId]?.window?.let { windowPolicy ->
-                        when (windowPolicy) {
-                            is TableWindow.Specific -> windowPolicy.id
-                            is TableWindow.AllWindows -> state.windows.keys.firstOrNull()
+            try {
+                val state = tablesVm.tablesState.value
+                val selectedTableId = tablesVm.selectedTableId.value
+                if (state is TablesState.Data && selectedTableId != null) {
+                    val windowId =
+                        state.tables[selectedTableId]?.window?.let { windowPolicy ->
+                            when (windowPolicy) {
+                                is TableWindow.Specific -> windowPolicy.id
+                                is TableWindow.AllWindows -> state.windows.keys.firstOrNull()
+                            }
+                        }
+                    windowId?.let { id ->
+                        state.windows[id]?.let { window ->
+                            tablesRepo.setWindow(id, window.copy(lastCaptureMode = mode))
                         }
                     }
-                windowId?.let { id ->
-                    state.windows[id]?.let { window ->
-                        tablesRepo.setWindow(id, window.copy(lastCaptureMode = mode))
-                    }
                 }
+            } catch (e: FfiException) {
+                val selectedTableId = tablesVm.selectedTableId.value
+                val state = tablesVm.tablesState.value
+                val windowId =
+                    if (state is TablesState.Data && selectedTableId != null) {
+                        state.tables[selectedTableId]?.window?.let { windowPolicy ->
+                            when (windowPolicy) {
+                                is TableWindow.Specific -> windowPolicy.id
+                                is TableWindow.AllWindows -> state.windows.keys.firstOrNull()
+                            }
+                        }
+                    } else {
+                        null
+                    }
+                println(
+                    "[CAPTURE] persistCaptureMode failed mode=$mode selectedTableId=$selectedTableId windowId=$windowId err=${e.message}"
+                )
+                _message.tryEmit("Failed to persist capture mode")
             }
         }
     }
@@ -148,16 +174,12 @@ class CaptureScreenViewModel(
                     )
 
                 drawerRepo.add(args)
-                _message.value = "Photo saved successfully"
+                _message.tryEmit("Photo saved successfully")
             } catch (e: FfiException) {
                 println("Error saving image: $e")
-                _message.value = "Error saving photo: ${e.message}"
+                _message.tryEmit("Error saving photo: ${e.message}")
             }
         }
-    }
-
-    fun clearMessage() {
-        _message.value = null
     }
 
     fun loadDoc(id: String) {
@@ -169,9 +191,6 @@ class CaptureScreenViewModel(
         }
     }
 
-    private val _docsList = MutableStateFlow(DocsListState.Loading as DocsListState)
-    val docsList = _docsList.asStateFlow()
-
     // Registration handle to auto-unregister
     private var listenerRegistration: ListenerRegistration? = null
 
@@ -181,17 +200,17 @@ class CaptureScreenViewModel(
             override fun onDrawerEvent(event: DrawerEvent) {
                 viewModelScope.launch {
                     when (event) {
-                        is DrawerEvent.ListChanged -> {
-                            refreshDocs()
-                        }
-
-                        is DrawerEvent.DocAdded -> {
-                            refreshDocs()
-                        }
-
                         is DrawerEvent.DocUpdated -> {
                             if (event.id == _currentDocId.value) {
                                 loadDoc(event.id)
+                            }
+                        }
+
+                        is DrawerEvent.DocDeleted -> {
+                            if (event.id == _currentDocId.value) {
+                                _currentDocId.value = null
+                                _currentDoc.value = null
+                                editorController.bindDoc(null)
                             }
                         }
 
@@ -202,7 +221,6 @@ class CaptureScreenViewModel(
         }
 
     init {
-        loadLatestDocs()
         if (initialDocId != null) {
             loadDoc(initialDocId)
         } else {
@@ -234,30 +252,6 @@ class CaptureScreenViewModel(
         }
     }
 
-    private suspend fun refreshDocs() {
-        _docsList.value = DocsListState.Loading
-        try {
-            val branches = drawerRepo.list()
-            val docs =
-                branches.mapNotNull { b ->
-                    try {
-                        drawerRepo.get(b.docId, "main")
-                    } catch (e: FfiException) {
-                        null
-                    }
-                }
-            _docsList.value = DocsListState.Data(docs)
-        } catch (err: FfiException) {
-            _docsList.value = DocsListState.Error(err)
-        }
-    }
-
-    fun loadLatestDocs() {
-        viewModelScope.launch {
-            refreshDocs()
-        }
-    }
-
     override fun onCleared() {
         listenerRegistration?.unregister()
         super.onCleared()
@@ -281,6 +275,12 @@ fun CaptureScreen(modifier: Modifier = Modifier, initialDocId: String? = null) {
 
     val captureMode by vm.captureMode.collectAsState()
 
+    LaunchedEffect(vm) {
+        CaptureNavActions.modeCycleRequests.collect {
+            vm.cycleCaptureMode()
+        }
+    }
+
     val captureContext = LocalCameraCaptureContext.current
     val canCapture =
         if (captureContext != null && captureMode == CaptureMode.CAMERA) {
@@ -296,12 +296,10 @@ fun CaptureScreen(modifier: Modifier = Modifier, initialDocId: String? = null) {
         }
 
     val snackbarHostState = remember { SnackbarHostState() }
-    val message by vm.message.collectAsState()
 
-    LaunchedEffect(message) {
-        message?.let {
-            snackbarHostState.showSnackbar(it)
-            vm.clearMessage()
+    LaunchedEffect(vm) {
+        vm.message.collect { msg ->
+            snackbarHostState.showSnackbar(msg)
         }
     }
 

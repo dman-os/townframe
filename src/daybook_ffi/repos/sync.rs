@@ -21,17 +21,6 @@ pub struct SyncRepoFfi {
     sqlite_local_state_stop_token: tokio::sync::Mutex<Option<RepoStopToken>>,
 }
 
-fn bootstrap_to_ffi(bootstrap: daybook_core::sync::SyncBootstrapState) -> CloneBootstrapInfo {
-    CloneBootstrapInfo {
-        endpoint_id: bootstrap.endpoint_id.to_string(),
-        repo_id: bootstrap.repo_id,
-        repo_name: bootstrap.repo_name,
-        app_doc_id: bootstrap.app_doc_id.to_string(),
-        drawer_doc_id: bootstrap.drawer_doc_id.to_string(),
-        device_name: bootstrap.device_name,
-    }
-}
-
 #[uniffi::export]
 impl SyncRepoFfi {
     #[uniffi::constructor]
@@ -76,16 +65,23 @@ impl SyncRepoFfi {
     }
 
     async fn stop(&self) -> Result<(), FfiError> {
-        if let Some(token) = self.sync_stop_token.lock().await.take() {
-            token.stop().await?;
-        }
-        if let Some(token) = self.doc_blobs_index_stop_token.lock().await.take() {
-            token.stop().await?;
-        }
-        if let Some(token) = self.sqlite_local_state_stop_token.lock().await.take() {
-            token.stop().await?;
-        }
-        Ok(())
+        let sync_stop_token = self.sync_stop_token.lock().await.take();
+        let doc_blobs_index_stop_token = self.doc_blobs_index_stop_token.lock().await.take();
+        let sqlite_local_state_stop_token = self.sqlite_local_state_stop_token.lock().await.take();
+        self.fcx
+            .do_on_rt(async move {
+                if let Some(token) = sync_stop_token {
+                    token.stop().await?;
+                }
+                if let Some(token) = doc_blobs_index_stop_token {
+                    token.stop().await?;
+                }
+                if let Some(token) = sqlite_local_state_stop_token {
+                    token.stop().await?;
+                }
+                Ok::<(), FfiError>(())
+            })
+            .await
     }
 
     async fn get_ticket_url(self: Arc<Self>) -> Result<String, FfiError> {

@@ -51,32 +51,42 @@ pub fn test_parts() -> Vec<PartId> {
     vec![test_part()]
 }
 
-pub fn gen_obj_id(rng: &mut impl Rng) -> ObjId {
-    let mut bytes = [0u8; 32];
-    rng.fill(&mut bytes);
-    ObjId(Byte32Id::new(bytes))
-}
-
 #[async_trait]
-pub trait StressFixture {
+pub trait StressFixture: Sync {
     type World: Send + Sync + 'static;
-    type Node;
+    type Node: Send + 'static;
+    type StressObj: Clone + Send + Sync + std::fmt::Debug + 'static;
     type Observation: PartialEq + std::fmt::Debug;
 
     fn label(&self) -> &'static str;
 
+    fn make_stress_obj(&self, rng: &mut StdRng) -> Self::StressObj;
     async fn boot_node(&self, world: Arc<Self::World>, peer_seed: u8) -> Res<Self::Node>;
     async fn stop_node(&self, node: Self::Node) -> Res<()>;
+    async fn restart_node(
+        &self,
+        world: Arc<Self::World>,
+        peer_seed: u8,
+        node: Self::Node,
+    ) -> Res<Self::Node> {
+        self.stop_node(node).await?;
+        self.boot_node(world, peer_seed).await
+    }
     async fn connect_pair(&self, left: &Self::Node, right: &Self::Node) -> Res<()>;
     async fn disconnect_pair(&self, left: &Self::Node, right: &Self::Node) -> Res<()>;
     async fn seed_new_obj(
         &self,
         node: &Self::Node,
         nodes: &[Option<Self::Node>],
-        obj: ObjId,
+        obj: &Self::StressObj,
         payload: serde_json::Value,
     ) -> Res<()>;
-    async fn seed_obj(&self, node: &Self::Node, obj: ObjId, payload: serde_json::Value) -> Res<()>;
+    async fn seed_obj(
+        &self,
+        node: &Self::Node,
+        obj: &Self::StressObj,
+        payload: serde_json::Value,
+    ) -> Res<()>;
     async fn observed_state(&self, node: &Self::Node) -> Res<Self::Observation>;
     fn peer_id(&self, node: &Self::Node) -> PeerId;
     // Fixture-specific application content for a document mutation.
@@ -86,12 +96,12 @@ pub trait StressFixture {
         phase: &str,
         step: usize,
         node_idx: usize,
-        obj_id: &ObjId,
+        obj: &Self::StressObj,
         nonce: u64,
         written_at: u64,
         writer_id: PeerId,
     ) -> serde_json::Value {
-        stress_payload(phase, step, node_idx, obj_id, nonce, written_at, writer_id)
+        stress_payload(phase, step, node_idx, obj, nonce, written_at, writer_id)
     }
     async fn assert_cluster_alignment(&self, nodes: &[&Self::Node]) -> Res<()>;
 }
@@ -111,27 +121,30 @@ impl StressJournal {
     }
 }
 
-#[derive(Default)]
-pub struct StressState {
+pub struct StressState<Obj> {
     next_written_at: u64,
-    pub live_objs: Vec<ObjId>,
+    pub live_objs: Vec<Obj>,
 }
 
-impl StressState {
-    pub fn fresh_obj(&mut self, rng: &mut impl Rng) -> ObjId {
-        stress_obj(rng)
+impl<Obj> Default for StressState<Obj> {
+    fn default() -> Self {
+        Self {
+            next_written_at: 0,
+            live_objs: Vec::new(),
+        }
     }
+}
 
-    pub fn choose_live_obj(&self, rng: &mut StdRng) -> Option<ObjId> {
+impl<Obj: Clone> StressState<Obj> {
+    pub fn choose_live_obj(&self, rng: &mut StdRng) -> Option<Obj> {
         if self.live_objs.is_empty() {
             return None;
         }
-        Some(self.live_objs[rng.random_range(0..self.live_objs.len())])
+        Some(self.live_objs[rng.random_range(0..self.live_objs.len())].clone())
     }
 
-    pub fn publish_new_obj(&mut self, rng: &mut impl Rng) -> ObjId {
-        let obj = self.fresh_obj(rng);
-        self.live_objs.push(obj);
+    pub fn publish_new_obj(&mut self, obj: Obj) -> Obj {
+        self.live_objs.push(obj.clone());
         obj
     }
 
@@ -143,20 +156,22 @@ impl StressState {
 }
 
 pub fn stress_obj(rng: &mut impl Rng) -> ObjId {
-    gen_obj_id(rng)
+    let mut bytes = [0u8; 32];
+    rng.fill(&mut bytes);
+    ObjId(Byte32Id::new(bytes))
 }
 
 pub fn stress_payload(
     phase: &str,
     step: usize,
     node_idx: usize,
-    obj_id: &ObjId,
+    obj: &impl std::fmt::Debug,
     nonce: u64,
     written_at: u64,
     writer_id: PeerId,
 ) -> serde_json::Value {
     payload(
-        format!("{phase}:step={step}:node={node_idx}:obj={obj_id:?}:nonce={nonce}"),
+        format!("{phase}:step={step}:node={node_idx}:obj={obj:?}:nonce={nonce}"),
         written_at,
         writer_id,
     )
@@ -262,7 +277,7 @@ pub async fn connect_full_mesh<F: StressFixture>(
 pub async fn apply_random_mutation<F: StressFixture>(
     fixture: &F,
     rng: &mut StdRng,
-    state: &mut StressState,
+    state: &mut StressState<F::StressObj>,
     nodes: &[Option<F::Node>],
     phase: &str,
     step: usize,
@@ -277,7 +292,8 @@ pub async fn apply_random_mutation<F: StressFixture>(
     let node = nodes[node_idx].as_ref().expect(ERROR_IMPOSSIBLE);
     let fresh_obj = state.live_objs.is_empty() || rng.random_bool(0.30);
     let obj = if fresh_obj {
-        let obj = state.publish_new_obj(rng);
+        let obj = fixture.make_stress_obj(rng);
+        let obj = state.publish_new_obj(obj);
         journal.record(format!(
             "{phase}:step={step}:create node={node_idx} obj={obj:?}"
         ));
@@ -301,9 +317,9 @@ pub async fn apply_random_mutation<F: StressFixture>(
         "{phase}:step={step}:upsert node={node_idx} obj={obj:?} value={value:?}"
     ));
     if fresh_obj {
-        fixture.seed_new_obj(node, nodes, obj, value).await?;
+        fixture.seed_new_obj(node, nodes, &obj, value).await?;
     } else {
-        fixture.seed_obj(node, obj, value).await?;
+        fixture.seed_obj(node, &obj, value).await?;
     }
 
     if rng.random_bool(0.25) {
@@ -314,19 +330,66 @@ pub async fn apply_random_mutation<F: StressFixture>(
     Ok(())
 }
 
+#[expect(clippy::too_many_arguments)]
 pub async fn run_phase<F: StressFixture>(
     fixture: &F,
+    world: Arc<F::World>,
     rng: &mut StdRng,
-    state: &mut StressState,
-    nodes: &[Option<F::Node>],
+    state: &mut StressState<F::StressObj>,
+    nodes: &mut [Option<F::Node>],
     phase: &str,
     mutations: usize,
     journal: &StressJournal,
 ) -> Res<()> {
     for step in 0..mutations {
         apply_random_mutation(fixture, rng, state, nodes, phase, step, journal).await?;
+        maybe_restart_node(
+            fixture,
+            Arc::clone(&world),
+            rng,
+            nodes,
+            phase,
+            step,
+            journal,
+        )
+        .await?;
     }
     Ok(())
+}
+
+pub async fn maybe_restart_node<F: StressFixture>(
+    fixture: &F,
+    world: Arc<F::World>,
+    rng: &mut StdRng,
+    nodes: &mut [Option<F::Node>],
+    phase: &str,
+    step: usize,
+    journal: &StressJournal,
+) -> Res<()> {
+    if !rng.random_bool(0.08) {
+        return Ok(());
+    }
+    let live = live_indices(nodes);
+    if live.len() < 2 {
+        return Ok(());
+    }
+
+    let node_idx = live[rng.random_range(0..live.len())];
+    let peer_seed = u8::try_from(node_idx + 1).expect("stress node index should fit in u8");
+    journal.record(format!("{phase}:step={step}:restart node={node_idx}"));
+
+    disconnect_all(fixture, nodes).await?;
+    let node = nodes[node_idx]
+        .take()
+        .expect("restart target should be live");
+    let restarted = fixture.restart_node(world, peer_seed, node).await?;
+    nodes[node_idx] = Some(restarted);
+
+    let active = choose_active_topology(rng, nodes);
+    journal.record(format!(
+        "{phase}:step={step}:post-restart-topology active={active:?}"
+    ));
+    connect_active_topology(fixture, rng, nodes, &active).await
 }
 
 pub async fn wait_for_cluster_settled<F: StressFixture>(
@@ -399,11 +462,11 @@ pub async fn run_randomized_four_node_stress_with_settle_timeout<F: StressFixtur
         .unwrap_or(DEFAULT_STRESS_SEED);
     let mut rng = StdRng::seed_from_u64(seed);
     let journal = StressJournal::default();
-    let mut state = StressState::default();
+    let mut state: StressState<F::StressObj> = StressState::default();
     journal.record(format!("seed={seed}"));
     journal.record(format!("backend={}", fixture.label()));
 
-    let nodes = boot_cluster_for_fixture(&fixture, Arc::clone(&world)).await?;
+    let mut nodes = boot_cluster_for_fixture(&fixture, Arc::clone(&world)).await?;
 
     journal.record("phase1:start");
     let phase1_topology = choose_active_topology(&mut rng, &nodes);
@@ -418,9 +481,10 @@ pub async fn run_randomized_four_node_stress_with_settle_timeout<F: StressFixtur
     .await?;
     run_phase(
         &fixture,
+        Arc::clone(&world),
         &mut rng,
         &mut state,
-        &nodes,
+        &mut nodes,
         "phase1",
         phase1_mutations,
         &journal,
@@ -447,9 +511,10 @@ pub async fn run_randomized_four_node_stress_with_settle_timeout<F: StressFixtur
     .await?;
     run_phase(
         &fixture,
+        Arc::clone(&world),
         &mut rng,
         &mut state,
-        &nodes,
+        &mut nodes,
         "phase2",
         phase2_mutations,
         &journal,
@@ -476,9 +541,10 @@ pub async fn run_randomized_four_node_stress_with_settle_timeout<F: StressFixtur
     .await?;
     run_phase(
         &fixture,
+        Arc::clone(&world),
         &mut rng,
         &mut state,
-        &nodes,
+        &mut nodes,
         "phase3",
         phase3_mutations,
         &journal,

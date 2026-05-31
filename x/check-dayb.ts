@@ -2,7 +2,9 @@
 
 import { $ } from "./utils.ts";
 
-await $`${$.path(import.meta.resolve("./gen-ffi-dayb.ts"))}`;
+if ($.argv.includes("--quick")) {
+  await $`${$.path(import.meta.resolve("./gen-ffi-dayb.ts"))}`;
+}
 
 const failurePattern = /(^|\n)(FAILED|FAILURE:|^e:|\bFAILED\b|\bException\b)/im;
 

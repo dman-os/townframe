@@ -182,6 +182,7 @@ impl FacetCacheState {
     }
 
     fn remove_without_pool(&mut self, key: &FacetCacheKey) {
+        self.seen_order.retain(|queued_key| queued_key != key);
         let removed = self.entries.remove(key);
         self.seen_once.remove(key);
         if removed.is_none() {

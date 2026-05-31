@@ -31,7 +31,7 @@ impl BlobsRepoFfi {
         let this = Arc::clone(&self.repo);
         self.fcx
             .do_on_rt(async move {
-                this.put(&data)
+                this.put(&data, daybook_core::blobs::BlobUseHints::Unknown)
                     .await
                     .map(|blob_id| blob_id.to_string())
                     .map_err(FfiError::from)

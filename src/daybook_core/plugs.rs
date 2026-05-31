@@ -64,20 +64,18 @@ pub fn system_plugs() -> Vec<manifest::PlugManifest> {
                     key_tag: WellKnownFacetTag::ImageMetadata.into(),
                     value_schema: schemars::schema_for!(ImageMetadata),
                     display_config: default(),
-                    references: vec![FacetReferenceManifest {
-                        reference_kind: FacetReferenceKind::UrlFacet,
+                    references: vec![FacetReferenceManifest::UrlStringSplit {
                         json_path: "/facetRef".into(),
-                        at_commit_json_path: Some("/refHeads".into()),
+                        at_commit_json_path: "/refHeads".into(),
                     }],
                 },
                 FacetManifest {
                     key_tag: WellKnownFacetTag::Embedding.into(),
                     value_schema: schemars::schema_for!(daybook_types::doc::Embedding),
                     display_config: default(),
-                    references: vec![FacetReferenceManifest {
-                        reference_kind: FacetReferenceKind::UrlFacet,
+                    references: vec![FacetReferenceManifest::UrlStringSplit {
                         json_path: "/facetRef".into(),
-                        at_commit_json_path: Some("/refHeads".into()),
+                        at_commit_json_path: "/refHeads".into(),
                     }],
                 },
                 FacetManifest {
@@ -102,10 +100,8 @@ pub fn system_plugs() -> Vec<manifest::PlugManifest> {
                     key_tag: WellKnownFacetTag::Body.into(),
                     value_schema: schemars::schema_for!(Body),
                     display_config: default(),
-                    references: vec![FacetReferenceManifest {
-                        reference_kind: FacetReferenceKind::UrlFacet,
+                    references: vec![FacetReferenceManifest::UrlStringMany {
                         json_path: "/order".into(),
-                        at_commit_json_path: None,
                     }],
                 },
             ],
@@ -168,8 +164,10 @@ pub fn system_plugs() -> Vec<manifest::PlugManifest> {
                             key: "ocr-image".into(),
                             bundle: "daybook_wflows".into(),
                         },
-                        deets: RoutineManifestDeets::DocFacet {
-                            working_facet_tag: WellKnownFacetTag::Note.into(),
+                        doc_acls: vec![RoutineDocAcl {
+                            doc_predicate: DocPredicateClause::HasTag(
+                                WellKnownFacetTag::Blob.into(),
+                            ),
                             facet_acl: vec![
                                 RoutineFacetAccess {
                                     owner_plug_id: None,
@@ -177,6 +175,8 @@ pub fn system_plugs() -> Vec<manifest::PlugManifest> {
                                     key_id: None,
                                     read: true,
                                     write: false,
+                                    create: false,
+                                    delete: false,
                                 },
                                 RoutineFacetAccess {
                                     owner_plug_id: None,
@@ -184,10 +184,13 @@ pub fn system_plugs() -> Vec<manifest::PlugManifest> {
                                     key_id: None,
                                     read: true,
                                     write: true,
+                                    create: true,
+                                    delete: false,
                                 },
                             ],
-                            config_facet_acl: vec![],
-                        },
+                        }],
+                        query_acls: vec![],
+                        config_facet_acl: vec![],
                         local_state_acl: vec![],
                         command_invoke_acl: vec![],
                     }
@@ -200,8 +203,10 @@ pub fn system_plugs() -> Vec<manifest::PlugManifest> {
                             key: "embed-image".into(),
                             bundle: "daybook_wflows".into(),
                         },
-                        deets: RoutineManifestDeets::DocFacet {
-                            working_facet_tag: WellKnownFacetTag::Embedding.into(),
+                        doc_acls: vec![RoutineDocAcl {
+                            doc_predicate: DocPredicateClause::HasTag(
+                                WellKnownFacetTag::Blob.into(),
+                            ),
                             facet_acl: vec![
                                 RoutineFacetAccess {
                                     owner_plug_id: None,
@@ -209,6 +214,8 @@ pub fn system_plugs() -> Vec<manifest::PlugManifest> {
                                     key_id: None,
                                     read: true,
                                     write: false,
+                                    create: false,
+                                    delete: false,
                                 },
                                 RoutineFacetAccess {
                                     owner_plug_id: None,
@@ -216,10 +223,13 @@ pub fn system_plugs() -> Vec<manifest::PlugManifest> {
                                     key_id: None,
                                     read: true,
                                     write: true,
+                                    create: true,
+                                    delete: false,
                                 },
                             ],
-                            config_facet_acl: vec![],
-                        },
+                        }],
+                        query_acls: vec![],
+                        config_facet_acl: vec![],
                         local_state_acl: vec![],
                         command_invoke_acl: vec![],
                     }
@@ -232,8 +242,10 @@ pub fn system_plugs() -> Vec<manifest::PlugManifest> {
                             key: "embed-text".into(),
                             bundle: "daybook_wflows".into(),
                         },
-                        deets: RoutineManifestDeets::DocFacet {
-                            working_facet_tag: WellKnownFacetTag::Embedding.into(),
+                        doc_acls: vec![RoutineDocAcl {
+                            doc_predicate: DocPredicateClause::HasTag(
+                                WellKnownFacetTag::Note.into(),
+                            ),
                             facet_acl: vec![
                                 RoutineFacetAccess {
                                     owner_plug_id: None,
@@ -241,6 +253,8 @@ pub fn system_plugs() -> Vec<manifest::PlugManifest> {
                                     key_id: None,
                                     read: true,
                                     write: false,
+                                    create: true,
+                                    delete: false,
                                 },
                                 RoutineFacetAccess {
                                     owner_plug_id: None,
@@ -248,10 +262,13 @@ pub fn system_plugs() -> Vec<manifest::PlugManifest> {
                                     key_id: None,
                                     read: true,
                                     write: true,
+                                    create: true,
+                                    delete: false,
                                 },
                             ],
-                            config_facet_acl: vec![],
-                        },
+                        }],
+                        query_acls: vec![],
+                        config_facet_acl: vec![],
                         local_state_acl: vec![],
                         command_invoke_acl: vec![],
                     }
@@ -264,17 +281,22 @@ pub fn system_plugs() -> Vec<manifest::PlugManifest> {
                             key: "index-embedding".into(),
                             bundle: "daybook_wflows".into(),
                         },
-                        deets: RoutineManifestDeets::DocFacet {
-                            working_facet_tag: WellKnownFacetTag::Embedding.into(),
+                        doc_acls: vec![RoutineDocAcl {
+                            doc_predicate: DocPredicateClause::HasTag(
+                                WellKnownFacetTag::Embedding.into(),
+                            ),
                             facet_acl: vec![RoutineFacetAccess {
                                 owner_plug_id: None,
                                 tag: WellKnownFacetTag::Embedding.into(),
                                 key_id: None,
                                 read: true,
                                 write: false,
+                                create: false,
+                                delete: false,
                             }],
-                            config_facet_acl: vec![],
-                        },
+                        }],
+                        query_acls: vec![],
+                        config_facet_acl: vec![],
                         local_state_acl: vec![RoutineLocalStateAccess {
                             plug_id: "@daybook/wip".into(),
                             local_state_key: "doc-embedding-index".into(),
@@ -291,17 +313,22 @@ pub fn system_plugs() -> Vec<manifest::PlugManifest> {
                             key: "test-label".into(),
                             bundle: "daybook_wflows".into(),
                         },
-                        deets: RoutineManifestDeets::DocFacet {
-                            working_facet_tag: WellKnownFacetTag::LabelGeneric.into(),
+                        doc_acls: vec![RoutineDocAcl {
+                            doc_predicate: DocPredicateClause::HasTag(
+                                WellKnownFacetTag::Note.into(),
+                            ),
                             facet_acl: vec![RoutineFacetAccess {
                                 owner_plug_id: None,
                                 tag: WellKnownFacetTag::LabelGeneric.into(),
                                 key_id: None,
                                 read: true,
                                 write: true,
+                                create: true,
+                                delete: false,
                             }],
-                            config_facet_acl: vec![],
-                        },
+                        }],
+                        query_acls: vec![],
+                        config_facet_acl: vec![],
                         local_state_acl: vec![],
                         command_invoke_acl: vec![],
                     }
@@ -1020,12 +1047,11 @@ impl PlugsRepo {
             &patch.action,
             automerge::PatchAction::PutMap {
                 key,
-                value: (automerge::Value::Scalar(scalar), _),
+                value: (_val, _),
                 ..
             } if patch.path.len() == 2
                 && patch.path[1].1 == automerge::Prop::Map("plug_config_doc_ids".into())
                 && key == "vtag"
-                && matches!(&**scalar, automerge::ScalarValue::Bytes(_))
         );
         // Live notification path: local writes are emitted by mutators.
         // Replay/diff paths pass `live_origin = None`.
@@ -1040,22 +1066,27 @@ impl PlugsRepo {
                 key,
                 value: (val, _),
                 ..
-            } if patch.path.len() == 3
-                && patch.path[1].1 == automerge::Prop::Map("manifests".into())
-                && key == "vtag" =>
+            } if key == "vtag"
+                && patch.path.len() == 3
+                && patch.path[1].1 == automerge::Prop::Map("manifests".into()) =>
             {
                 let Some((_obj, automerge::Prop::Map(plug_id))) = patch.path.get(2) else {
                     return Ok(());
                 };
 
-                let vtag_bytes = match val {
-                    automerge::Value::Scalar(scalar) => match &**scalar {
-                        automerge::ScalarValue::Bytes(bytes) => bytes,
-                        _ => return Ok(()),
-                    },
-                    _ => return Ok(()),
+                let automerge::Value::Scalar(scalar) = val else {
+                    warn!(?patch.path, key = %key, "ignoring malformed plug vtag patch");
+                    return Ok(());
                 };
-                let vtag = VersionTag::hydrate_bytes(vtag_bytes)?;
+                let automerge::ScalarValue::Bytes(vtag_bytes) = &**scalar else {
+                    warn!(?patch.path, key = %key, "ignoring malformed plug vtag patch");
+                    return Ok(());
+                };
+                let Some(vtag) =
+                    VersionTag::hydrate_bytes_or_warn(vtag_bytes, &patch.path, key, "plug")
+                else {
+                    return Ok(());
+                };
                 let event_origin = crate::repos::resolve_origin_from_vtag_actor(
                     &self.local_actor_id,
                     &vtag.actor_id,
@@ -1095,17 +1126,28 @@ impl PlugsRepo {
             }
             automerge::PatchAction::PutMap {
                 key,
-                value: (automerge::Value::Scalar(scalar), _),
+                value: (val, _),
                 ..
             } if patch.path.len() == 2
                 && patch.path[1].1 == automerge::Prop::Map("plug_config_doc_ids".into())
-                && key == "vtag"
-                && matches!(&**scalar, automerge::ScalarValue::Bytes(_)) =>
+                && key == "vtag" =>
             {
-                let automerge::ScalarValue::Bytes(vtag_bytes) = &**scalar else {
-                    unreachable!("guard above ensures bytes")
+                let automerge::Value::Scalar(scalar) = val else {
+                    warn!(?patch.path, key = %key, "ignoring malformed plug config-docs vtag patch");
+                    return Ok(());
                 };
-                let vtag = VersionTag::hydrate_bytes(vtag_bytes)?;
+                let automerge::ScalarValue::Bytes(vtag_bytes) = &**scalar else {
+                    warn!(?patch.path, key = %key, "ignoring malformed plug config-docs vtag patch");
+                    return Ok(());
+                };
+                let Some(vtag) = VersionTag::hydrate_bytes_or_warn(
+                    vtag_bytes,
+                    &patch.path,
+                    key,
+                    "plug_config_docs",
+                ) else {
+                    return Ok(());
+                };
                 let event_origin = crate::repos::resolve_origin_from_vtag_actor(
                     &self.local_actor_id,
                     &vtag.actor_id,
@@ -1367,7 +1409,10 @@ impl PlugsRepo {
                             let data = tokio::fs::read(&path).await.wrap_err_with(|| {
                                 format!("failed to read component file: {}", path.display())
                             })?;
-                            let hash = self.blobs.put(&data).await?;
+                            let hash = self
+                                .blobs
+                                .put(&data, crate::blobs::BlobUseHints::Plugs)
+                                .await?;
                             *url = url::Url::parse(&format!(
                                 "{}:///{}",
                                 crate::blobs::BLOB_SCHEME,
@@ -1392,7 +1437,10 @@ impl PlugsRepo {
                                 eyre::Ok(wasm_bytes)
                             })
                             .await??;
-                            let hash = self.blobs.put(&data).await?;
+                            let hash = self
+                                .blobs
+                                .put(&data, crate::blobs::BlobUseHints::Plugs)
+                                .await?;
                             *url = url::Url::parse(&format!(
                                 "{}:///{}",
                                 crate::blobs::BLOB_SCHEME,
@@ -1492,7 +1540,10 @@ impl PlugsRepo {
             if opts.strict {
                 Self::validate_sha256_digest(&layer.digest, &layer_bytes)?;
             }
-            let repo_hash = self.blobs.put(&layer_bytes).await?;
+            let repo_hash = self
+                .blobs
+                .put(&layer_bytes, crate::blobs::BlobUseHints::Plugs)
+                .await?;
             let repo_hash_str = crate::blobs::blob_hash_from_id(repo_hash);
             oci_digest_to_repo_hash.insert(layer.digest.clone(), repo_hash_str.clone());
             imported_blob_hashes.push(repo_hash_str);
@@ -2075,16 +2126,13 @@ impl PlugsRepo {
                 }
             }
 
-            // If it's a DocProp routine, the 'working_prop_tag' must also be accessible.
-            if let manifest::RoutineManifestDeets::DocFacet {
-                working_facet_tag, ..
-            } = &routine.deets
-            {
-                if !available_tags.contains(&working_facet_tag.to_string()) {
+            // Validate all tags referenced by doc_acls are in scope.
+            for tag in routine.referenced_tags() {
+                if !available_tags.contains(&tag.to_string()) {
                     eyre::bail!(
-                        "Invalid routine deets for '{}': working_facet_tag '{}' not in scope",
+                        "Invalid routine ACL for '{}': tag '{}' is neither declared nor depended on by this plug. Avail tags {available_tags:?}",
                         routine_name,
-                        working_facet_tag
+                        tag
                     );
                 }
             }
@@ -2223,31 +2271,50 @@ fn validate_facet_reference_manifests(
 ) -> Res<()> {
     let schema_json = serde_json::to_value(value_schema)?;
     for reference_manifest in references {
-        let Some(reference_node) = daybook_types::reference::schema_node_for_json_path(
-            &schema_json,
-            &reference_manifest.json_path,
-        )?
+        let reference_path = reference_manifest.json_path();
+        let Some(reference_node) =
+            daybook_types::reference::schema_node_for_json_path(&schema_json, reference_path)?
         else {
             eyre::bail!(
                 "invalid reference json_path '{}' for facet tag '{}': path does not exist in schema",
-                reference_manifest.json_path,
+                reference_path,
                 facet_tag
             );
         };
 
-        match reference_manifest.reference_kind {
-            manifest::FacetReferenceKind::UrlFacet => {
-                if !daybook_types::reference::schema_allows_url_reference(reference_node) {
+        match reference_manifest {
+            manifest::FacetReferenceManifest::UrlString { .. }
+            | manifest::FacetReferenceManifest::UrlStringSplit { .. } => {
+                if !daybook_types::reference::schema_allows_string(reference_node) {
                     eyre::bail!(
-                        "invalid reference json_path '{}' for facet tag '{}': schema node must allow a URL string or an array of URL strings",
-                        reference_manifest.json_path,
+                        "invalid reference json_path '{}' for facet tag '{}': schema node must allow a URL string",
+                        reference_path,
+                        facet_tag
+                    );
+                }
+            }
+            manifest::FacetReferenceManifest::UrlStringMany { .. } => {
+                if !daybook_types::reference::schema_allows_array_of_strings(reference_node) {
+                    eyre::bail!(
+                        "invalid reference json_path '{}' for facet tag '{}': schema node must allow an array of URL strings",
+                        reference_path,
+                        facet_tag
+                    );
+                }
+            }
+            manifest::FacetReferenceManifest::UrlObject { .. }
+            | manifest::FacetReferenceManifest::UrlObjectMany { .. } => {
+                if !daybook_types::reference::schema_allows_reference_object(reference_node) {
+                    eyre::bail!(
+                        "invalid reference json_path '{}' for facet tag '{}': schema node must allow a reference object",
+                        reference_path,
                         facet_tag
                     );
                 }
             }
         }
 
-        if let Some(at_commit_json_path) = &reference_manifest.at_commit_json_path {
+        if let Some(at_commit_json_path) = reference_manifest.at_commit_json_path() {
             let Some(at_commit_node) = daybook_types::reference::schema_node_for_json_path(
                 &schema_json,
                 at_commit_json_path,
@@ -2476,7 +2543,9 @@ mod tests {
                     key: "wflow1".into(),
                     bundle: "bundle1".into(),
                 },
-                deets: manifest::RoutineManifestDeets::DocInvoke {},
+                doc_acls: vec![],
+                query_acls: vec![],
+                config_facet_acl: vec![],
                 local_state_acl: vec![],
                 command_invoke_acl: vec![],
             }
@@ -2564,7 +2633,9 @@ mod tests {
                     key: "wflow1".into(),
                     bundle: "missing_bundle".into(),
                 },
-                deets: manifest::RoutineManifestDeets::DocInvoke {},
+                doc_acls: vec![],
+                query_acls: vec![],
+                config_facet_acl: vec![],
                 local_state_acl: vec![],
                 command_invoke_acl: vec![],
             }
@@ -2595,7 +2666,9 @@ mod tests {
                     key: "missing_key".into(),
                     bundle: "bundle1".into(),
                 },
-                deets: manifest::RoutineManifestDeets::DocInvoke {},
+                doc_acls: vec![],
+                query_acls: vec![],
+                config_facet_acl: vec![],
                 local_state_acl: vec![],
                 command_invoke_acl: vec![],
             }
@@ -2689,10 +2762,9 @@ mod tests {
             key_tag: "org.test.image".into(),
             value_schema: schemars::schema_for!(daybook_types::doc::ImageMetadata),
             display_config: default(),
-            references: vec![manifest::FacetReferenceManifest {
-                reference_kind: manifest::FacetReferenceKind::UrlFacet,
+            references: vec![manifest::FacetReferenceManifest::UrlStringSplit {
                 json_path: "/doesNotExist".into(),
-                at_commit_json_path: Some("/refHeads".into()),
+                at_commit_json_path: "/refHeads".into(),
             }],
         });
 
@@ -2715,10 +2787,9 @@ mod tests {
             key_tag: "org.test.image".into(),
             value_schema: schemars::schema_for!(daybook_types::doc::ImageMetadata),
             display_config: default(),
-            references: vec![manifest::FacetReferenceManifest {
-                reference_kind: manifest::FacetReferenceKind::UrlFacet,
+            references: vec![manifest::FacetReferenceManifest::UrlStringSplit {
                 json_path: "/facetRef".into(),
-                at_commit_json_path: Some("/mime".into()),
+                at_commit_json_path: "/mime".into(),
             }],
         });
 
@@ -2777,7 +2848,9 @@ mod tests {
                     key: "wflow1".into(),
                     bundle: "bundle1".into(),
                 },
-                deets: manifest::RoutineManifestDeets::DocInvoke {},
+                doc_acls: vec![],
+                query_acls: vec![],
+                config_facet_acl: vec![],
                 local_state_acl: vec![],
                 command_invoke_acl: vec![],
             }
@@ -2831,7 +2904,9 @@ mod tests {
                     key: "wflow1".into(),
                     bundle: "bundle1".into(),
                 },
-                deets: manifest::RoutineManifestDeets::DocInvoke {},
+                doc_acls: vec![],
+                query_acls: vec![],
+                config_facet_acl: vec![],
                 local_state_acl: vec![],
                 command_invoke_acl: vec![],
             }
@@ -2865,7 +2940,9 @@ mod tests {
                     key: "wflow1".into(),
                     bundle: "bundle1".into(),
                 },
-                deets: manifest::RoutineManifestDeets::DocInvoke {},
+                doc_acls: vec![],
+                query_acls: vec![],
+                config_facet_acl: vec![],
                 local_state_acl: vec![],
                 command_invoke_acl: vec!["db+command:///@test/target/cmd1".parse().unwrap()],
             }
@@ -2906,7 +2983,9 @@ mod tests {
                     key: "wflow1".into(),
                     bundle: "bundle1".into(),
                 },
-                deets: manifest::RoutineManifestDeets::DocInvoke {},
+                doc_acls: vec![],
+                query_acls: vec![],
+                config_facet_acl: vec![],
                 local_state_acl: vec![],
                 command_invoke_acl: vec![],
             }
@@ -2938,7 +3017,9 @@ mod tests {
                     key: "wflow1".into(),
                     bundle: "bundle1".into(),
                 },
-                deets: manifest::RoutineManifestDeets::DocInvoke {},
+                doc_acls: vec![],
+                query_acls: vec![],
+                config_facet_acl: vec![],
                 local_state_acl: vec![],
                 command_invoke_acl: vec!["db+command:///@test/provider/nope".parse().unwrap()],
             }

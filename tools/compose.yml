@@ -133,7 +133,7 @@ services:
       FLYWAY_URL: jdbc:postgresql://postgres:5432/${DB_NAME}?user=${PGUSER}&password=${PGPASSWORD}
     # network_mode: host
     volumes:
-      - ..:/flyway/conf:ro,Z
+      - .:/flyway/conf:ro,Z
       - ${MIG_DIR:-./migrations/}:/migrations:ro,Z
 
   restate-cli:

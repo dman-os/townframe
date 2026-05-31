@@ -37,16 +37,17 @@ impl RtFfi {
         init_repo: Arc<crate::repos::init::InitRepoFfi>,
         sqlite_ls_repo: Arc<crate::repos::sqlite_local_state::SqliteLocalStateRepoFfi>,
         device_id: String,
+        startup_progress_task_id: Option<String>,
     ) -> Result<Arc<Self>, FfiError> {
-        let cx = Arc::clone(&fcx.rcx);
-        let repo_root = cx.layout.repo_root.to_path_buf();
-        let wflow_db_url = format!("sqlite:{}?mode=rwc", repo_root.join("wflow.db").display());
         plugs_repo.repo.ensure_system_plugs().await?;
 
         let (rt, stop_token) = fcx
             .do_on_rt(daybook_core::rt::Rt::boot(
-                daybook_core::rt::RtConfig { device_id },
-                cx,
+                daybook_core::rt::RtConfig {
+                    device_id,
+                    startup_progress_task_id,
+                },
+                Arc::clone(&fcx.rcx),
                 Arc::clone(&drawer_repo.repo),
                 Arc::clone(&plugs_repo.repo),
                 Arc::clone(&dispatch_repo.repo),
@@ -67,10 +68,15 @@ impl RtFfi {
     }
 
     pub async fn stop(&self) -> Result<(), FfiError> {
-        if let Some(token) = self.stop_token.lock().await.take() {
-            token.stop().await?;
-        }
-        Ok(())
+        let stop_token = self.stop_token.lock().await.take();
+        self.fcx
+            .do_on_rt(async move {
+                if let Some(token) = stop_token {
+                    token.stop().await?;
+                }
+                Ok::<(), FfiError>(())
+            })
+            .await
     }
 
     pub async fn dispatch_doc_facet(
@@ -87,11 +93,12 @@ impl RtFfi {
                 rt.dispatch(
                     &plug_id,
                     &routine_name,
-                    daybook_core::rt::DispatchArgs::DocFacet {
+                    daybook_core::rt::DispatchArgs::DocRoutine {
                         doc_id,
                         branch_path: daybook_types::doc::BranchPathBuf::from(branch_path),
                         heads: daybook_types::doc::ChangeHashSet(vec![].into()),
-                        facet_key: None,
+                        invocation: daybook_core::rt::dispatch::RoutineInvocation::Command,
+                        changed_facet_keys: vec![],
                         wflow_args_json: None,
                     },
                 )

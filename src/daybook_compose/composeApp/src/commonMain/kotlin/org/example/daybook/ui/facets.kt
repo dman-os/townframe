@@ -34,7 +34,6 @@ fun encodeWellKnownFacet(facet: WellKnownFacet): String =
         is WellKnownFacet.Dmeta -> facetJsonCodec.encodeToString(facet.v1)
         is WellKnownFacet.RefGeneric -> facetJsonCodec.encodeToString(facet.v1)
         is WellKnownFacet.LabelGeneric -> facetJsonCodec.encodeToString(facet.v1)
-        is WellKnownFacet.PseudoLabel -> facetJsonCodec.encodeToString(facet.v1)
         is WellKnownFacet.TitleGeneric -> facetJsonCodec.encodeToString(facet.v1)
         is WellKnownFacet.PathGeneric -> facetJsonCodec.encodeToString(facet.v1)
         is WellKnownFacet.Pending -> facetJsonCodec.encodeToString(facet.v1)
@@ -44,7 +43,6 @@ fun encodeWellKnownFacet(facet: WellKnownFacet): String =
         is WellKnownFacet.ImageMetadata -> facetJsonCodec.encodeToString(facet.v1)
         is WellKnownFacet.OcrResult -> facetJsonCodec.encodeToString(facet.v1)
         is WellKnownFacet.Embedding -> facetJsonCodec.encodeToString(facet.v1)
-        is WellKnownFacet.PseudoLabelCandidates -> facetJsonCodec.encodeToString(facet.v1)
     }
 
 @Suppress("UNCHECKED_CAST")
@@ -58,8 +56,6 @@ inline fun <reified T : WellKnownFacet> decodeWellKnownFacet(value: String): Res
                     WellKnownFacet.RefGeneric(facetJsonCodec.decodeFromString(value))
                 WellKnownFacet.LabelGeneric::class ->
                     WellKnownFacet.LabelGeneric(facetJsonCodec.decodeFromString(value))
-                WellKnownFacet.PseudoLabel::class ->
-                    WellKnownFacet.PseudoLabel(facetJsonCodec.decodeFromString(value))
                 WellKnownFacet.TitleGeneric::class ->
                     WellKnownFacet.TitleGeneric(facetJsonCodec.decodeFromString(value))
                 WellKnownFacet.PathGeneric::class ->
@@ -78,8 +74,6 @@ inline fun <reified T : WellKnownFacet> decodeWellKnownFacet(value: String): Res
                     WellKnownFacet.OcrResult(facetJsonCodec.decodeFromString(value))
                 WellKnownFacet.Embedding::class ->
                     WellKnownFacet.Embedding(facetJsonCodec.decodeFromString(value))
-                WellKnownFacet.PseudoLabelCandidates::class ->
-                    WellKnownFacet.PseudoLabelCandidates(facetJsonCodec.decodeFromString(value))
                 else -> error("Unsupported WellKnownFacet type: ${T::class.qualifiedName}")
             }
         facetValue as T
@@ -106,7 +100,6 @@ fun buildSelfFacetRefUrl(key: FacetKey): String {
                 org.example.daybook.uniffi.types.WellKnownFacetTag.DMETA -> "org.example.daybook.dmeta"
                 org.example.daybook.uniffi.types.WellKnownFacetTag.REF_GENERIC -> "org.example.daybook.refgeneric"
                 org.example.daybook.uniffi.types.WellKnownFacetTag.LABEL_GENERIC -> "org.example.daybook.labelgeneric"
-                org.example.daybook.uniffi.types.WellKnownFacetTag.PSEUDO_LABEL -> "org.example.daybook.pseudolabel"
                 org.example.daybook.uniffi.types.WellKnownFacetTag.TITLE_GENERIC -> "org.example.daybook.titlegeneric"
                 org.example.daybook.uniffi.types.WellKnownFacetTag.PATH_GENERIC -> "org.example.daybook.pathgeneric"
                 org.example.daybook.uniffi.types.WellKnownFacetTag.PENDING -> "org.example.daybook.pending"
@@ -116,7 +109,6 @@ fun buildSelfFacetRefUrl(key: FacetKey): String {
                 org.example.daybook.uniffi.types.WellKnownFacetTag.IMAGE_METADATA -> "org.example.daybook.imagemetadata"
                 org.example.daybook.uniffi.types.WellKnownFacetTag.OCR_RESULT -> "org.example.daybook.ocrresult"
                 org.example.daybook.uniffi.types.WellKnownFacetTag.EMBEDDING -> "org.example.daybook.embedding"
-                org.example.daybook.uniffi.types.WellKnownFacetTag.PSEUDO_LABEL_CANDIDATES -> "org.example.daybook.pseudolabelcandidates"
             }
             is FacetTag.Any -> tag.v1
         }

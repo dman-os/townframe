@@ -11,7 +11,6 @@ use crate::repo::RepoCtx;
 use big_repo::SharedPartStore;
 use daybook_types::manifest;
 
-use daybook_types::doc::{FacetKey, FacetTag};
 use std::collections::BTreeMap;
 use wash_runtime::{
     host::{Host as WashHost, HostApi},
@@ -52,6 +51,7 @@ pub struct ProcessorRunlogDone {
 
 pub struct RtConfig {
     pub device_id: String,
+    pub startup_progress_task_id: Option<String>,
 }
 
 pub struct Rt {
@@ -98,7 +98,7 @@ impl RtStopToken {
         if let Err(err) = self.switch_worker.stop().await {
             warn!(
                 ?err,
-                "error stopping doc_changes_worker during shutdown - continuing"
+                "error stopping switch_worker during shutdown - continuing"
             );
         }
 
@@ -188,6 +188,13 @@ pub enum DispatchArgs {
         branch_path: daybook_types::doc::BranchPathBuf,
         heads: ChangeHashSet,
         facet_key: Option<String>,
+    },
+    DocRoutine {
+        doc_id: String,
+        branch_path: daybook_types::doc::BranchPathBuf,
+        heads: ChangeHashSet,
+        invocation: dispatch::RoutineInvocation,
+        changed_facet_keys: Vec<String>,
         wflow_args_json: Option<String>,
     },
 }
@@ -201,6 +208,39 @@ pub enum InvokeCommandFromWflowError {
 }
 
 impl Rt {
+    async fn emit_startup_progress_status(
+        progress_repo: &Arc<crate::progress::ProgressRepo>,
+        startup_progress_task_id: Option<&str>,
+        message: String,
+    ) -> Res<()> {
+        let Some(task_id) = startup_progress_task_id else {
+            return Ok(());
+        };
+        progress_repo
+            .add_update(
+                task_id,
+                crate::progress::ProgressUpdate {
+                    at: jiff::Timestamp::now(),
+                    title: Some("App startup".to_string()),
+                    deets: crate::progress::ProgressUpdateDeets::Status {
+                        severity: crate::progress::ProgressSeverity::Info,
+                        message,
+                    },
+                },
+            )
+            .await
+    }
+
+    fn startup_timing_note(
+        stage_started: std::time::Instant,
+        total_started: std::time::Instant,
+    ) -> String {
+        let stage_ms = stage_started.elapsed().as_millis();
+        let total_ms = total_started.elapsed().as_millis();
+        let from_app_start = format!(" from_app_start_ms={}", utils_rs::app_startup_elapsed_ms());
+        format!("stage_ms={stage_ms} total_ms={total_ms}{from_app_start}")
+    }
+
     #[expect(clippy::too_many_arguments)]
     pub async fn boot(
         config: RtConfig,
@@ -214,24 +254,72 @@ impl Rt {
         init_repo: Arc<InitRepo>,
         sqlite_local_state_repo: Arc<SqliteLocalStateRepo>,
     ) -> Res<(Arc<Self>, RtStopToken)> {
-        let wcx = wflow::Ctx::init(&format!(
-            "sqlite://{}",
-            rcx.layout.repo_root.join("wflows.db").display()
-        ))
+        let total_started = std::time::Instant::now();
+        let startup_progress_task_id = config.startup_progress_task_id.clone();
+        crate::repo::ensure_expected_partitions_for_docs(
+            &rcx.part_store,
+            rcx.doc_app.document_id(),
+            rcx.doc_drawer.document_id(),
+        )
+        .await?;
+        Self::emit_startup_progress_status(
+            &progress_repo,
+            startup_progress_task_id.as_deref(),
+            "rt boot: ensured partitions".to_string(),
+        )
         .await?;
 
+        let wflow_db_url = format!(
+            "sqlite://{}",
+            rcx.layout.repo_root.join("wflows.db").display()
+        );
+        let wcx = wflow::Ctx::init(&wflow_db_url).await?;
+        Self::emit_startup_progress_status(
+            &progress_repo,
+            startup_progress_task_id.as_deref(),
+            "rt boot: initialized wflow ctx".to_string(),
+        )
+        .await?;
+        Self::emit_startup_progress_status(
+            &progress_repo,
+            startup_progress_task_id.as_deref(),
+            "rt boot: init repo and local-state repos ready".to_string(),
+        )
+        .await?;
+
+        let stage_started = std::time::Instant::now();
         let (doc_facet_set_index_repo, doc_facet_set_index_stop) =
             crate::index::DocFacetSetIndexRepo::boot(
                 Arc::clone(&drawer),
                 Arc::clone(&sqlite_local_state_repo),
             )
             .await?;
+        Self::emit_startup_progress_status(
+            &progress_repo,
+            startup_progress_task_id.as_deref(),
+            format!(
+                "rt boot: loaded facet-set index ({})",
+                Self::startup_timing_note(stage_started, total_started)
+            ),
+        )
+        .await?;
+        let stage_started = std::time::Instant::now();
         let (doc_blobs_index_repo, doc_blobs_index_stop) = crate::index::DocBlobsIndexRepo::boot(
             Arc::clone(&drawer),
             Arc::clone(&blobs_repo),
             Arc::clone(&sqlite_local_state_repo),
         )
         .await?;
+        Self::emit_startup_progress_status(
+            &progress_repo,
+            startup_progress_task_id.as_deref(),
+            format!(
+                "rt boot: loaded doc-blobs index ({})",
+                Self::startup_timing_note(stage_started, total_started)
+            ),
+        )
+        .await?;
+        let stage_started = std::time::Instant::now();
         let (doc_facet_ref_index_repo, doc_facet_ref_index_stop) =
             crate::index::DocFacetRefIndexRepo::boot(
                 Arc::clone(&drawer),
@@ -239,6 +327,15 @@ impl Rt {
                 Arc::clone(&sqlite_local_state_repo),
             )
             .await?;
+        Self::emit_startup_progress_status(
+            &progress_repo,
+            startup_progress_task_id.as_deref(),
+            format!(
+                "rt boot: loaded facet-ref index ({})",
+                Self::startup_timing_note(stage_started, total_started)
+            ),
+        )
+        .await?;
 
         let wflow_plugin = Arc::new(wash_plugin_wflow::WflowPlugin::new(Arc::clone(
             &wcx.metastore,
@@ -274,6 +371,12 @@ impl Rt {
             .await
             .to_eyre()
             .wrap_err("error starting wash host")?;
+        Self::emit_startup_progress_status(
+            &progress_repo,
+            startup_progress_task_id.as_deref(),
+            "rt boot: wash host started".to_string(),
+        )
+        .await?;
 
         let mut bundles_to_load: HashSet<(String, String)> = default();
         for (_dispatch_id, dispach) in dispatch_repo.list().await {
@@ -288,6 +391,8 @@ impl Rt {
             }
         }
         for (plug_id, bundle_name) in bundles_to_load {
+            let plug_id_for_log = plug_id.clone();
+            let bundle_name_for_log = bundle_name.clone();
             let plug_man = plugs_repo.get(&plug_id).await.ok_or_else(|| {
                 ferr!("plug with active dispatch not found in repo: plug={plug_id} bundle={bundle_name}")
             })?;
@@ -304,11 +409,25 @@ impl Rt {
                 bundle_man,
             )
             .await?;
+            Self::emit_startup_progress_status(
+                &progress_repo,
+                startup_progress_task_id.as_deref(),
+                format!(
+                    "rt boot: resumed workload plug={plug_id_for_log} bundle={bundle_name_for_log}"
+                ),
+            )
+            .await?;
         }
 
         let part_idx = 0;
         let (wflow_part_handle, wflow_part_state) =
             wflow::start_partition_worker(&wcx, Arc::clone(&wflow_plugin), part_idx).await?;
+        Self::emit_startup_progress_status(
+            &progress_repo,
+            startup_progress_task_id.as_deref(),
+            "rt boot: partition worker started".to_string(),
+        )
+        .await?;
         let part_log = PartitionLogRef::new(Arc::clone(&wcx.logstore));
         let wflow_ingress = Arc::new(wflow::ingress::PartitionLogIngress::new(
             part_log,
@@ -352,9 +471,25 @@ impl Rt {
             .map(|plug| plug.id())
             .collect::<Vec<_>>();
         plug_ids.sort();
+        let stage_started = std::time::Instant::now();
         for plug_id in plug_ids {
-            let _ = rt.ensure_plug_init_dispatches(&plug_id).await?;
+            let _ = rt
+                .ensure_plug_init_dispatches(
+                    &plug_id,
+                    startup_progress_task_id.as_deref(),
+                    Some(total_started),
+                )
+                .await?;
         }
+        Self::emit_startup_progress_status(
+            &rt.progress_repo,
+            startup_progress_task_id.as_deref(),
+            format!(
+                "rt boot: plug init queue complete ({})",
+                Self::startup_timing_note(stage_started, total_started)
+            ),
+        )
+        .await?;
 
         // Start the DocTriageWorker to automatically queue jobs when docs are added
         let switch_sinks: BTreeMap<String, Box<dyn crate::rt::switch::SwitchSink + Send + Sync>> =
@@ -556,7 +691,13 @@ impl Rt {
         Ok(out)
     }
 
-    async fn ensure_plug_init_dispatches(&self, plug_id: &str) -> Res<Vec<String>> {
+    async fn ensure_plug_init_dispatches(
+        &self,
+        plug_id: &str,
+        startup_progress_task_id: Option<&str>,
+        total_started: Option<std::time::Instant>,
+    ) -> Res<Vec<String>> {
+        let stage_started = std::time::Instant::now();
         let order = self.collect_plug_and_dependency_order(plug_id).await?;
         let mut unresolved_init_dispatch_ids = vec![];
         for plug_id in order {
@@ -578,12 +719,40 @@ impl Rt {
                     .is_done(&init_manifest.run_mode, &init_id)
                     .await?
                 {
+                    self.init_repo
+                        .report_boot_init_stage(
+                            &init_manifest.run_mode,
+                            &plug_id,
+                            &init_key.0,
+                            "already done",
+                            init::BootInitProgressContext {
+                                startup_progress_task_id_override: startup_progress_task_id
+                                    .map(str::to_owned),
+                                stage_started,
+                                total_started,
+                            },
+                        )
+                        .await?;
                     continue;
                 }
                 if let Some(running_dispatch_id) =
                     self.init_repo.get_running_dispatch(&init_id).await
                 {
                     unresolved_init_dispatch_ids.push(running_dispatch_id);
+                    self.init_repo
+                        .report_boot_init_stage(
+                            &init_manifest.run_mode,
+                            &plug_id,
+                            &init_key.0,
+                            "running",
+                            init::BootInitProgressContext {
+                                startup_progress_task_id_override: startup_progress_task_id
+                                    .map(str::to_owned),
+                                stage_started,
+                                total_started,
+                            },
+                        )
+                        .await?;
                     continue;
                 }
                 let daybook_types::manifest::InitDeets::InvokeRoutine { routine_name } =
@@ -602,11 +771,12 @@ impl Rt {
                     .dispatch_no_gate(
                         &plug_id,
                         &routine_name.0,
-                        DispatchArgs::DocFacet {
+                        DispatchArgs::DocRoutine {
                             doc_id: config_doc_id,
                             branch_path: daybook_types::doc::BranchPathBuf::from("main"),
                             heads: config_heads,
-                            facet_key: None,
+                            invocation: dispatch::RoutineInvocation::Command,
+                            changed_facet_keys: vec![],
                             wflow_args_json: None,
                         },
                         vec![DispatchOnSuccessHook::InitMarkDone {
@@ -620,6 +790,20 @@ impl Rt {
                     .set_running_dispatch(&init_id, &dispatch_id)
                     .await?;
                 unresolved_init_dispatch_ids.push(dispatch_id);
+                self.init_repo
+                    .report_boot_init_stage(
+                        &init_manifest.run_mode,
+                        &plug_id,
+                        &init_key.0,
+                        "queued",
+                        init::BootInitProgressContext {
+                            startup_progress_task_id_override: startup_progress_task_id
+                                .map(str::to_owned),
+                            stage_started,
+                            total_started,
+                        },
+                    )
+                    .await?;
             }
         }
         Ok(unresolved_init_dispatch_ids)
@@ -763,7 +947,7 @@ impl Rt {
                 ..
             }) = &dispatch.args;
 
-            let mut merged_successfully = matches!(&event.result, JobRunResult::Success { .. });
+            let merged_successfully = matches!(&event.result, JobRunResult::Success { .. });
 
             if merged_successfully {
                 // Merge staging branch into target branch
@@ -782,16 +966,15 @@ impl Rt {
                 {
                     Ok(()) => {}
                     Err(crate::drawer::types::DrawerError::BranchNotFound { name }) => {
-                        warn!(
+                        debug!(
                             %dispatch_id,
                             %entry_id,
                             ?doc_id,
                             ?name,
                             ?staging_branch_path,
                             ?target_branch_path,
-                            "staging branch missing during merge; treating dispatch as failed"
+                            "staging branch missing during merge; wflow made no facet changes"
                         );
-                        merged_successfully = false;
                     }
                     Err(err) => {
                         error!(
@@ -1219,7 +1402,6 @@ impl Rt {
             doc_id,
             staging_branch_path,
             command_invoke_acl_snapshot,
-            facet_key: _,
             ..
         }) = &parent_dispatch.args;
         let ActiveDispatchDeets::Wflow {
@@ -1291,7 +1473,7 @@ impl Rt {
             format!("cmdinvoke-{encoded}")
         };
         let waiting_on_dispatch_ids = self
-            .ensure_plug_init_dispatches(&target_ref.plug_id)
+            .ensure_plug_init_dispatches(&target_ref.plug_id, None, None)
             .await?;
         let staging_heads = self
             .drawer
@@ -1308,11 +1490,12 @@ impl Rt {
         self.dispatch_no_gate_internal(
             &target_ref.plug_id,
             &target_routine_name.0,
-            DispatchArgs::DocFacet {
+            DispatchArgs::DocRoutine {
                 doc_id: doc_id.clone(),
                 branch_path: staging_branch_path.clone(),
                 heads: staging_heads,
-                facet_key: None,
+                invocation: dispatch::RoutineInvocation::Command,
+                changed_facet_keys: vec![],
                 wflow_args_json: Some(request.args_json.clone()),
             },
             vec![DispatchOnSuccessHook::CommandInvokeReply {
@@ -1335,7 +1518,9 @@ impl Rt {
         on_success_hooks: Vec<DispatchOnSuccessHook>,
     ) -> Res<String> {
         self.ensure_rt_live()?;
-        let waiting_on_dispatch_ids = self.ensure_plug_init_dispatches(plug_id).await?;
+        let waiting_on_dispatch_ids = self
+            .ensure_plug_init_dispatches(plug_id, None, None)
+            .await?;
         self.dispatch_no_gate_internal(
             plug_id,
             routine_name,
@@ -1391,52 +1576,174 @@ impl Rt {
             .get(routine_name)
             .ok_or_else(|| ferr!("routine not found in plug manifest: {plug_id}/{routine_name}"))?;
 
-        use daybook_types::manifest::RoutineManifestDeets;
-        let (mut dispatch_id, mut args) = match (&routine_man.deets, args) {
-            (
-                RoutineManifestDeets::DocFacet {
-                    working_facet_tag, ..
-                },
-                DispatchArgs::DocFacet {
-                    doc_id,
-                    heads,
-                    branch_path,
-                    facet_key,
-                    wflow_args_json,
-                },
-            ) => {
-                let tag: FacetTag = working_facet_tag.0.clone().into();
-                let facet_key = match facet_key {
-                    Some(id) => FacetKey { tag, id },
-                    None => tag.into(),
-                };
-                let facet_key = facet_key.to_string();
+        let (mut dispatch_id, mut args) = match args {
+            DispatchArgs::DocFacet {
+                doc_id,
+                heads,
+                branch_path,
+                facet_key,
+            } => {
+                let facet_key =
+                    facet_key.ok_or_else(|| ferr!("missing facet_key for doc facet dispatch"))?;
                 let dispatch_id = {
                     let mut identity = String::new();
                     use std::fmt::Write as _;
                     write!(
                         &mut identity,
-                        "{}|{}|{}|{}",
+                        "{}|{}|{}|{}|{}",
                         doc_id,
+                        branch_path,
                         am_utils_rs::serialize_commit_heads(heads.as_ref()).join(","),
                         plug_id,
-                        routine_name
+                        routine_name,
                     )
                     .expect("writing to string should never fail");
+                    write!(&mut identity, "|{facet_key}")
+                        .expect("writing to string should never fail");
                     utils_rs::hash::blake3_hash_bytes(identity.as_bytes())
                 };
                 let dispatch_id = fixed_dispatch_id
                     .clone()
                     .unwrap_or_else(|| format!("{plug_id}/{routine_name}-{dispatch_id}"));
+
+                let mut config_docs_by_owner: std::collections::HashMap<
+                    String,
+                    Vec<daybook_types::manifest::RoutineFacetAccess>,
+                > = std::collections::HashMap::new();
+                for access in routine_man.config_facet_acl() {
+                    let owner = access
+                        .owner_plug_id
+                        .clone()
+                        .unwrap_or_else(|| plug_id.to_string());
+                    config_docs_by_owner
+                        .entry(owner)
+                        .or_default()
+                        .push(access.clone());
+                }
+                let config_docs: Vec<dispatch::DocFacetTokens> = config_docs_by_owner
+                    .into_values()
+                    .map(|facet_acl| dispatch::DocFacetTokens {
+                        doc_id: String::new(),
+                        branch_path: daybook_types::doc::BranchPathBuf::from("main"),
+                        staging_branch_path: daybook_types::doc::BranchPathBuf::from("main"),
+                        heads: daybook_types::doc::ChangeHashSet(Vec::new().into()),
+                        facet_acl,
+                    })
+                    .collect();
+
+                let primary_doc = dispatch::DocFacetTokens {
+                    doc_id: doc_id.clone(),
+                    branch_path: daybook_types::doc::BranchPathBuf::from(branch_path.as_str()),
+                    staging_branch_path: daybook_types::doc::BranchPathBuf::from(
+                        "/tmp/placeholder",
+                    ),
+                    heads: heads.clone(),
+                    facet_acl: routine_man.facet_acl().to_vec(),
+                };
+
                 (
                     dispatch_id,
                     ActiveDispatchArgs::FacetRoutine(FacetRoutineArgs {
                         doc_id,
                         branch_path,
                         heads,
-                        facet_key,
-                        facet_acl: routine_man.facet_acl().to_vec(),
-                        config_facet_acl: routine_man.config_facet_acl().to_vec(),
+                        invocation: dispatch::RoutineInvocation::Command,
+                        primary_doc,
+                        config_docs,
+                        local_state_acl: routine_man.local_state_acl.clone(),
+                        command_invoke_acl_snapshot: routine_man.command_invoke_acl().to_vec(),
+                        wflow_args_json: None,
+                        staging_branch_path: daybook_types::doc::BranchPathBuf::from(
+                            "/tmp/placeholder",
+                        ), // Will be set when job is created
+                    }),
+                )
+            }
+            DispatchArgs::DocRoutine {
+                doc_id,
+                branch_path,
+                heads,
+                invocation,
+                changed_facet_keys,
+                wflow_args_json,
+            } => {
+                let invocation = match invocation {
+                    dispatch::RoutineInvocation::Command => dispatch::RoutineInvocation::Command,
+                    dispatch::RoutineInvocation::Processor(mut processor_invocation) => {
+                        processor_invocation.trigger_doc_id = doc_id.clone();
+                        processor_invocation.changed_facet_keys = changed_facet_keys;
+                        dispatch::RoutineInvocation::Processor(processor_invocation)
+                    }
+                };
+
+                let dispatch_id = {
+                    let mut identity = String::new();
+                    use std::fmt::Write as _;
+                    let invocation_kind = match &invocation {
+                        dispatch::RoutineInvocation::Command => "command",
+                        dispatch::RoutineInvocation::Processor(_) => "processor",
+                    };
+                    write!(
+                        &mut identity,
+                        "{}|{}|{}|{}|{}|{}",
+                        doc_id,
+                        branch_path,
+                        am_utils_rs::serialize_commit_heads(heads.as_ref()).join(","),
+                        plug_id,
+                        routine_name,
+                        invocation_kind
+                    )
+                    .expect("writing to string should never fail");
+                    utils_rs::hash::blake3_hash_bytes(identity.as_bytes())
+                };
+                let dispatch_id = fixed_dispatch_id.clone().unwrap_or_else(|| {
+                    format!("{plug_id}/{routine_name}/{branch_path}-{dispatch_id}")
+                });
+
+                let mut config_docs_by_owner: std::collections::HashMap<
+                    String,
+                    Vec<daybook_types::manifest::RoutineFacetAccess>,
+                > = std::collections::HashMap::new();
+                for access in routine_man.config_facet_acl() {
+                    let owner = access
+                        .owner_plug_id
+                        .clone()
+                        .unwrap_or_else(|| plug_id.to_string());
+                    config_docs_by_owner
+                        .entry(owner)
+                        .or_default()
+                        .push(access.clone());
+                }
+                let config_docs: Vec<dispatch::DocFacetTokens> = config_docs_by_owner
+                    .into_values()
+                    .map(|facet_acl| dispatch::DocFacetTokens {
+                        doc_id: String::new(),
+                        branch_path: daybook_types::doc::BranchPathBuf::from("main"),
+                        staging_branch_path: daybook_types::doc::BranchPathBuf::from("main"),
+                        heads: daybook_types::doc::ChangeHashSet(Vec::new().into()),
+                        facet_acl,
+                    })
+                    .collect();
+
+                let primary_doc = dispatch::DocFacetTokens {
+                    doc_id: doc_id.clone(),
+                    branch_path: daybook_types::doc::BranchPathBuf::from(branch_path.as_str()),
+                    staging_branch_path: daybook_types::doc::BranchPathBuf::from(
+                        "/tmp/placeholder",
+                    ),
+                    heads: heads.clone(),
+                    facet_acl: routine_man.facet_acl().to_vec(),
+                };
+
+                (
+                    dispatch_id,
+                    ActiveDispatchArgs::FacetRoutine(FacetRoutineArgs {
+                        doc_id: doc_id.clone(),
+                        branch_path: branch_path.clone(),
+                        heads: heads.clone(),
+                        invocation,
+                        primary_doc,
+                        config_docs,
                         local_state_acl: routine_man.local_state_acl.clone(),
                         command_invoke_acl_snapshot: routine_man.command_invoke_acl().to_vec(),
                         wflow_args_json,
@@ -1446,10 +1753,8 @@ impl Rt {
                     }),
                 )
             }
-            (deets, args) => {
-                return Err(ferr!(
-                    "routine type and args don't match: {deets:?}, {args:?}"
-                ));
+            DispatchArgs::DocInvoke { .. } => {
+                return Err(ferr!("doc-invoke dispatch is not supported for routines"));
             }
         };
         if let Some(existing) = self.dispatch_repo.get_any(&dispatch_id).await {
@@ -1476,7 +1781,7 @@ impl Rt {
 
         let is_waiting = !waiting_on_dispatch_ids.is_empty();
 
-        let deets = match &routine_man.r#impl {
+        let (job_id, _staging_branch_path, bundle_name, wflow_key) = match &routine_man.r#impl {
             manifest::RoutineImpl::Wflow {
                 key,
                 bundle: bundle_name,
@@ -1489,53 +1794,24 @@ impl Rt {
                 // Update args with staging branch path
                 let ActiveDispatchArgs::FacetRoutine(ref mut facet_args) = args;
                 facet_args.staging_branch_path = staging_branch_path.clone();
+                facet_args.primary_doc.staging_branch_path = staging_branch_path.clone();
 
-                let mut entry_id = None;
-                let mut wflow_partition_id = None;
-                if !is_waiting {
-                    let bundle_man = plug_man.wflow_bundles.get(bundle_name).ok_or_else(|| {
-                        ferr!(
-                            "bundle not found in plug manifest: routine={plug_id}/{routine_name} bundle={bundle_name} key={key}"
-                        )
-                    })?;
-                    let _workload_id = ensure_bundle_workload_running(
-                        &self.wcx,
-                        &self.wash_host,
-                        &self.blobs_repo,
-                        plug_id.into(),
-                        bundle_name.0.clone(),
-                        bundle_man,
-                    )
-                    .await?;
-
-                    let wflow_args_json = {
-                        let ActiveDispatchArgs::FacetRoutine(ref facet_args) = args;
-                        facet_args
-                            .wflow_args_json
-                            .clone()
-                            .unwrap_or_else(|| serde_json::to_string(&()).expect(ERROR_JSON))
-                    };
-                    entry_id = Some(
-                        self.wflow_ingress
-                            .add_job(job_id.clone().into(), key, wflow_args_json, None)
-                            .await
-                            .wrap_err_with(|| {
-                                format!("error scheduling job for {plug_id}/{routine_name}")
-                            })?,
-                    );
-                    wflow_partition_id = Some(self.local_wflow_part_id.clone());
-                }
-
-                ActiveDispatchDeets::Wflow {
-                    wflow_partition_id,
-                    entry_id,
-                    plug_id: plug_id.into(),
-                    routine_name: routine_name.to_string(),
-                    bundle_name: bundle_name.0.clone(),
-                    wflow_key: key.0.clone(),
-                    wflow_job_id: Some(job_id),
-                }
+                (
+                    job_id,
+                    staging_branch_path,
+                    bundle_name.0.clone(),
+                    key.0.clone(),
+                )
             }
+        };
+        let deets = ActiveDispatchDeets::Wflow {
+            wflow_partition_id: None,
+            entry_id: None,
+            plug_id: plug_id.into(),
+            routine_name: routine_name.to_string(),
+            bundle_name: bundle_name.clone(),
+            wflow_key: wflow_key.clone(),
+            wflow_job_id: Some(job_id.clone()),
         };
         let active_dispatch = Arc::new(ActiveDispatch {
             args,
@@ -1590,6 +1866,126 @@ impl Rt {
                 }
             }
             return Err(add_err);
+        }
+
+        if !is_waiting {
+            let Some(bundle_man) = plug_man.wflow_bundles.get(bundle_name.as_str()) else {
+                if let Err(cleanup_err) = self
+                    .dispatch_repo
+                    .complete(dispatch_id.clone(), dispatch::DispatchStatus::Failed)
+                    .await
+                {
+                    warn!(
+                        %dispatch_id,
+                        ?cleanup_err,
+                        "failed to mark dispatch failed after missing bundle error"
+                    );
+                }
+                return Err(ferr!(
+                    "bundle not found in plug manifest: routine={plug_id}/{routine_name} bundle={bundle_name} key={wflow_key}"
+                ));
+            };
+            if let Err(err) = ensure_bundle_workload_running(
+                &self.wcx,
+                &self.wash_host,
+                &self.blobs_repo,
+                plug_id.into(),
+                bundle_name.clone(),
+                bundle_man,
+            )
+            .await
+            {
+                if let Err(cleanup_err) = self
+                    .dispatch_repo
+                    .complete(dispatch_id.clone(), dispatch::DispatchStatus::Failed)
+                    .await
+                {
+                    warn!(
+                        %dispatch_id,
+                        ?cleanup_err,
+                        "failed to mark dispatch failed after workload start error"
+                    );
+                }
+                return Err(err);
+            }
+
+            let wflow_args_json = {
+                let ActiveDispatchArgs::FacetRoutine(ref facet_args) = active_dispatch.args;
+                facet_args
+                    .wflow_args_json
+                    .clone()
+                    .unwrap_or_else(|| serde_json::to_string(&()).expect(ERROR_JSON))
+            };
+            let entry_id = match self
+                .wflow_ingress
+                .add_job(
+                    job_id.clone().into(),
+                    wflow_key.as_str(),
+                    wflow_args_json,
+                    None,
+                )
+                .await
+            {
+                Ok(value) => value,
+                Err(err) => {
+                    if let Err(cleanup_err) = self
+                        .dispatch_repo
+                        .complete(dispatch_id.clone(), dispatch::DispatchStatus::Failed)
+                        .await
+                    {
+                        warn!(
+                            %dispatch_id,
+                            ?cleanup_err,
+                            "failed to mark dispatch failed after job scheduling error"
+                        );
+                    }
+                    return Err(err).wrap_err_with(|| {
+                        format!("error scheduling job for {plug_id}/{routine_name}")
+                    });
+                }
+            };
+            let deets = ActiveDispatchDeets::Wflow {
+                wflow_partition_id: Some(self.local_wflow_part_id.clone()),
+                entry_id: Some(entry_id),
+                plug_id: plug_id.into(),
+                routine_name: routine_name.to_string(),
+                bundle_name: bundle_name.clone(),
+                wflow_key: wflow_key.clone(),
+                wflow_job_id: Some(job_id.clone()),
+            };
+            if let Err(err) = self
+                .dispatch_repo
+                .update_active_deets(&dispatch_id, deets)
+                .await
+            {
+                if let Err(cancel_err) = self
+                    .wflow_ingress
+                    .cancel_job(
+                        Arc::from(job_id.as_str()),
+                        format!("rollback scheduling for dispatch {dispatch_id}"),
+                    )
+                    .await
+                {
+                    warn!(
+                        %dispatch_id,
+                        %job_id,
+                        ?cancel_err,
+                        "failed to rollback queued wflow job after dispatch deets update failure"
+                    );
+                }
+                if let Err(cleanup_err) = self
+                    .dispatch_repo
+                    .complete(dispatch_id.clone(), dispatch::DispatchStatus::Failed)
+                    .await
+                {
+                    warn!(
+                        %dispatch_id,
+                        ?cleanup_err,
+                        "failed to mark dispatch failed after deets update error"
+                    );
+                }
+                return Err(err);
+            }
         }
         let mut tags = vec![
             "/type/dispatch".to_string(),
@@ -1806,11 +2202,10 @@ fn dispatch_stable_identity(dispatch: &ActiveDispatch) -> String {
                 doc_id,
                 branch_path,
                 heads,
-                facet_key,
                 ..
             }),
         ) => format!(
-            "{plug_id}/{routine_name}|{doc_id}|{}|{}|{facet_key}",
+            "{plug_id}/{routine_name}|{doc_id}|{}|{}",
             branch_path.as_str(),
             serde_json::to_string(heads).expect(ERROR_JSON)
         ),

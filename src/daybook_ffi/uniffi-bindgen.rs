@@ -43,10 +43,7 @@ fn apply_kotlin_modifications(out_dir: &str) {
 
     let mut kotlin_files: Vec<PathBuf> = vec![];
     let mut dirs = vec![real_out_dir];
-    loop {
-        let Some(dir_path) = dirs.pop() else {
-            break;
-        };
+    while let Some(dir_path) = dirs.pop() {
         for file in std::fs::read_dir(dir_path).expect("dir not found") {
             let file = file.expect("error iterating dir");
             let path = file.path();

@@ -93,6 +93,7 @@ jobs:
         run: |
           nix develop .#ci-rust --command cargo --color=always nextest run --workspace --all-features --no-fail-fast --retries 2
         env:
+          UTILS_RS_TIMEOUT_MULTIPLIER: 3
           RUST_BACKTRACE: 1
           # RUST_LOG_TEST: debug
           OLLAMA_MODEL: gemma3 

@@ -37,8 +37,8 @@ impl DrawerRepoFfi {
             .do_on_rt(DrawerRepo::load(
                 Arc::clone(&fcx.rcx.big_repo),
                 Arc::clone(&fcx.rcx.part_store),
-                fcx.rcx.doc_drawer.document_id().clone(),
-                fcx.rcx.local_user_path.clone().into(),
+                fcx.rcx.doc_drawer.document_id(),
+                fcx.rcx.local_user_path.clone(),
                 fcx.rcx.sql.clone(),
                 fcx.rcx.layout.repo_root.join("local_state"),
                 Arc::new(surelock::mutex::Mutex::new(
@@ -60,10 +60,15 @@ impl DrawerRepoFfi {
     }
 
     async fn stop(&self) -> Result<(), FfiError> {
-        if let Some(token) = self.stop_token.lock().await.take() {
-            token.stop().await?;
-        }
-        Ok(())
+        let stop_token = self.stop_token.lock().await.take();
+        self.fcx
+            .do_on_rt(async move {
+                if let Some(token) = stop_token {
+                    token.stop().await?;
+                }
+                Ok::<(), FfiError>(())
+            })
+            .await
     }
 
     #[tracing::instrument(skip(self))]

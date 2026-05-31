@@ -56,14 +56,12 @@ daybook_types::define_enum_and_tag!(
     }
 );
 
-#[expect(dead_code)]
 pub fn pseudo_label_key() -> daybook_types::doc::FacetKey {
     daybook_types::doc::FacetKey::from(daybook_types::doc::FacetTag::Any(
         PlabelFacetTag::PseudoLabel.as_str().into(),
     ))
 }
 
-#[expect(dead_code)]
 pub fn pseudo_label_candidates_key(id: &str) -> daybook_types::doc::FacetKey {
     daybook_types::doc::FacetKey {
         tag: daybook_types::doc::FacetTag::Any(

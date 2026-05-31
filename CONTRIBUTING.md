@@ -27,6 +27,9 @@ cargo clippy --all-targets --all-features
 prek -a
 # type check kotlin app 
 ./x/check-dayb.ts
+
+# build a plug OCI package
+cargo x build-plug-oci --plug-root ./src/plug_test/
 ```
 
 ## Repo guide
@@ -95,6 +98,12 @@ prek -a
 
   - Scripts `./x/compose-up.ts` and `./x/compose-logs.ts` operate on this file.
 
+- `./src/plug_test/`: plug used for testing.
+
+- `./src/plug_plabels/`: plug providign pseudo-labelling and classification utils.
+
+- `./src/plug_dayledger/`: personal finance plug.
+
 ## Style guide
 
 - Avoid crates with a `src/` directory. 
@@ -137,3 +146,29 @@ prek -a
 - Newly added traits should include doc comments that explain their role and how implementations are expected to use them.
 - When writing tests, prefer comparing the equality of entire objects over fields one by one.
 - Adding a key to a hash map that shouldn't have seen that key before, add an `assert!(old.is_none(), "fishy")`
+ 
+ ## Useful command snippets
+ 
+ ```bash
+ # enter nix devShell (large, provisions android studio)
+ nix develop .
+ # show alternative dev shells
+ nix flake show
+ # run a hot reload instance daybook desktop
+ ./x/dev-d-dayb.ts
+ # build and install to connected android device
+ ./x/build-a-dayb.ts
+ # run the daybook cli
+ DAYB_REPO_PATH=/tmp/repo1 cargo r -p daybook_cli --help
+ # run the xtask CLI
+ cargo x --help
+ 
+ # test rust code
+ # nextest is preferred test runner
+ RUST_LOG_TEST=info cargo nextest run
+ # lint rust code
+ cargo clippy --all-targets --all-features
+ # run pre commit hooks
+ prek -a
+ # type check kotlin app 
+ ./x/check-dayb.ts

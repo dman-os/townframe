@@ -1463,20 +1463,20 @@ where
 
     #[tracing::instrument(
         skip_all,
-        fields(peer_id = %session.peer_id,kind = ?session.kind)
+        fields(
+            peer_id = %session.peer_id,
+            kind = ?session.kind,
+            received_commit_ids = session.received_commit_ids.len(),
+            received_fragment_ids = session.received_fragment_ids.len(),
+            is_unloaded = matches!(self.state, DocWorkerDocState::Unloaded),
+            is_transient = matches!(self.state, DocWorkerDocState::Transient(_)),
+            is_live = matches!(self.state, DocWorkerDocState::Live(_)),
+        )
     )]
     async fn handle_apply_sync_session(
         &mut self,
         session: subduction_core::sync_session::SyncSession,
     ) -> Res<()> {
-        info!(
-            doc_id = %self.doc_id,
-            peer_id = %session.peer_id,
-            kind = ?session.kind,
-            received_commit_ids = session.received_commit_ids.len(),
-            received_fragment_ids = session.received_fragment_ids.len(),
-            "applying sync session"
-        );
         // FIXME: enabling this quick exit breaks things
         // if session.received_commit_ids.is_empty() && session.received_fragment_ids.is_empty() {
         //     return Ok(());
@@ -1498,50 +1498,20 @@ where
                 .ok_or_eyre("synced fragment missing")?;
             blobs.push(verified.blob().clone().into_contents());
         }
-        info!(
-            doc_id = %self.doc_id,
-            peer_id = %session.peer_id,
-            kind = ?session.kind,
-            blobs = blobs.len(),
-            is_unloaded = matches!(self.state, DocWorkerDocState::Unloaded),
-            is_transient = matches!(self.state, DocWorkerDocState::Transient(_)),
-            is_live = matches!(self.state, DocWorkerDocState::Live(_)),
-            "sync session applied blobs and is selecting doc state path"
-        );
         let maybe_delta = match std::mem::replace(&mut self.state, DocWorkerDocState::Unloaded) {
             DocWorkerDocState::Unloaded => {
                 // since the doc in storage will have the latest blobs,
                 // we must load the before_heads from the partition payloads
-                info!(
-                    doc_id = %self.doc_id,
-                    peer_id = %session.peer_id,
-                    kind = ?session.kind,
-                    "unloaded sync session loading doc snapshot"
-                );
                 let mut doc =
                     load_doc_snapshot(&self.sedimentrees, &self.storage_for_reads, self.doc_id)
                         .await?
                         .unwrap_or_else(automerge::Automerge::new);
-                info!(
-                    doc_id = %self.doc_id,
-                    peer_id = %session.peer_id,
-                    kind = ?session.kind,
-                    "unloaded sync session loading partition heads"
-                );
                 let cached_before_heads =
                     super::partition_doc_heads_payload(&self.big_sync_store, self.doc_id).await?;
                 let before_heads = cached_before_heads
                     .clone()
                     .unwrap_or_else(|| doc.get_heads().into());
                 let had_cached_before_heads = cached_before_heads.is_some();
-                info!(
-                    doc_id = %self.doc_id,
-                    peer_id = %session.peer_id,
-                    kind = ?session.kind,
-                    heads = before_heads.len(),
-                    loaded_heads = doc.get_heads().len(),
-                    "unloaded sync session loaded doc snapshot"
-                );
                 let loaded_heads = doc.get_heads();
                 let out = if before_heads[..] == loaded_heads[..] {
                     for blob in blobs {
@@ -1551,12 +1521,6 @@ where
                     }
                     let after_heads = doc.get_heads();
                     if before_heads[..] == after_heads[..] {
-                        info!(
-                            doc_id = %self.doc_id,
-                            peer_id = %session.peer_id,
-                            kind = ?session.kind,
-                            "unloaded sync session produced no delta after applying blobs"
-                        );
                         if had_cached_before_heads {
                             None
                         } else {
@@ -1564,26 +1528,10 @@ where
                         }
                     } else {
                         let patches = doc.diff(&before_heads, &after_heads);
-                        info!(
-                            doc_id = %self.doc_id,
-                            peer_id = %session.peer_id,
-                            kind = ?session.kind,
-                            heads = after_heads.len(),
-                            patches = patches.len(),
-                            "unloaded sync session produced delta after applying blobs"
-                        );
                         Some((after_heads, patches))
                     }
                 } else {
                     let patches = doc.diff(&before_heads, &loaded_heads);
-                    info!(
-                        doc_id = %self.doc_id,
-                        peer_id = %session.peer_id,
-                        kind = ?session.kind,
-                        heads = loaded_heads.len(),
-                        patches = patches.len(),
-                        "unloaded sync session used loaded snapshot delta"
-                    );
                     Some((loaded_heads, patches))
                 };
                 self.state = DocWorkerDocState::Transient(doc.into());
@@ -1610,7 +1558,6 @@ where
             }
             DocWorkerDocState::Live(bundle) => match bundle.upgrade() {
                 Some(bundle) => {
-                    info!(doc_id = %self.doc_id, "current doc mut using live bundle");
                     let mut doc = bundle.doc.lock().await;
                     let before_heads = doc.get_heads();
                     for blob in blobs {
@@ -1630,12 +1577,6 @@ where
                     out
                 }
                 None => {
-                    info!(
-                        doc_id = %self.doc_id,
-                        peer_id = %session.peer_id,
-                        kind = ?session.kind,
-                        "live bundle expired; recovering sync delta from partition heads"
-                    );
                     let mut doc =
                         load_doc_snapshot(&self.sedimentrees, &self.storage_for_reads, self.doc_id)
                             .await?
@@ -1956,17 +1897,30 @@ where
         .map(|verified| verified.blob().clone())
         .chain(fragments.iter().map(|verified| verified.blob().clone()))
         .collect::<Vec<_>>();
+    let loaded_items = loose_commits
+        .iter()
+        .map(|verified| LoadedOrderedBlob {
+            kind: OrderedBlobKind::LooseCommit,
+            head: verified.payload().head(),
+            blob_digest: verified.payload().blob_meta().digest(),
+        })
+        .chain(fragments.iter().map(|verified| LoadedOrderedBlob {
+            kind: OrderedBlobKind::Fragment,
+            head: verified.payload().head(),
+            blob_digest: verified.payload().summary().blob_meta().digest(),
+        }))
+        .collect::<Vec<_>>();
 
     let (tree, fresh) = match sedimentrees.get_cloned(&sedimentree_id).await {
         Some(tree) => (tree, false),
         None => {
             let tree = Sedimentree::new(
                 fragments
-                    .into_iter()
+                    .iter()
                     .map(|verified| verified.payload().clone())
                     .collect(),
                 loose_commits
-                    .into_iter()
+                    .iter()
                     .map(|verified| verified.payload().clone())
                     .collect(),
             );
@@ -1985,13 +1939,24 @@ where
 
     let mut buf = Vec::new();
     for item in &order {
-        let digest = match item {
-            SedimentreeItem::Fragment(ii) => fragments[*ii].summary().blob_meta().digest(),
-            SedimentreeItem::LooseCommit(ii) => loose[*ii].blob_meta().digest(),
+        let wanted = match item {
+            SedimentreeItem::Fragment(ii) => OrderedBlobIdentity {
+                kind: OrderedBlobKind::Fragment,
+                head: fragments[*ii].head(),
+                blob_digest: fragments[*ii].summary().blob_meta().digest(),
+            },
+            SedimentreeItem::LooseCommit(ii) => OrderedBlobIdentity {
+                kind: OrderedBlobKind::LooseCommit,
+                head: loose[*ii].head(),
+                blob_digest: loose[*ii].blob_meta().digest(),
+            },
         };
-        let raw = blob_by_digest
-            .get(&digest)
-            .ok_or_eyre("blob not found for ordered sedimentree item")?;
+        let raw = blob_by_digest.get(&wanted.blob_digest).ok_or_else(|| {
+            ferr!(
+                "blob not found for ordered sedimentree item fresh={fresh}: {}",
+                missing_ordered_blob_context(wanted, &loaded_items)
+            )
+        })?;
         buf.extend_from_slice(raw);
     }
 
@@ -2003,6 +1968,67 @@ where
         sedimentrees.insert(sedimentree_id, tree).await;
     }
     Ok(Some(doc))
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum OrderedBlobKind {
+    Fragment,
+    LooseCommit,
+}
+
+impl OrderedBlobKind {
+    const fn label(self) -> &'static str {
+        match self {
+            Self::Fragment => "fragment",
+            Self::LooseCommit => "loose_commit",
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug)]
+struct OrderedBlobIdentity {
+    kind: OrderedBlobKind,
+    head: CommitId,
+    blob_digest: Digest<Blob>,
+}
+
+type LoadedOrderedBlob = OrderedBlobIdentity;
+
+fn missing_ordered_blob_context(
+    wanted: OrderedBlobIdentity,
+    loaded_items: &[LoadedOrderedBlob],
+) -> String {
+    let same_kind_head = loaded_items
+        .iter()
+        .filter(|item| item.kind == wanted.kind && item.head == wanted.head)
+        .map(|item| blob_digest_hex(item.blob_digest))
+        .collect::<Vec<_>>();
+    let loaded_kind_count = loaded_items
+        .iter()
+        .filter(|item| item.kind == wanted.kind)
+        .count();
+
+    if same_kind_head.is_empty() {
+        format!(
+            "wanted_kind={} wanted_head={:?} wanted_blob_digest={} loaded_kind_count={} same_head_loaded_blob_digests=[]",
+            wanted.kind.label(),
+            wanted.head,
+            blob_digest_hex(wanted.blob_digest),
+            loaded_kind_count,
+        )
+    } else {
+        format!(
+            "wanted_kind={} wanted_head={:?} wanted_blob_digest={} loaded_kind_count={} same_head_loaded_blob_digests={same_kind_head:?}",
+            wanted.kind.label(),
+            wanted.head,
+            blob_digest_hex(wanted.blob_digest),
+            loaded_kind_count,
+        )
+    }
+}
+
+fn blob_digest_hex(digest: Digest<Blob>) -> String {
+    format!("{digest:?}")
 }
 
 /// Result of ingesting an Automerge document.
@@ -2037,8 +2063,16 @@ fn ingest_automerge(doc: &automerge::Automerge, sedimentree_id: SedimentreeId) -
             covered.insert(CommitId::new(member.0));
         }
         let blob = Blob::new(raw);
-        let boundary: BTreeSet<CommitId> = fragment.boundary.iter().map(|head| CommitId::new(head.0)).collect();
-        let checkpoints: Vec<CommitId> = fragment.checkpoints.iter().map(|head| CommitId::new(head.0)).collect();
+        let boundary: BTreeSet<CommitId> = fragment
+            .boundary
+            .iter()
+            .map(|head| CommitId::new(head.0))
+            .collect();
+        let checkpoints: Vec<CommitId> = fragment
+            .checkpoints
+            .iter()
+            .map(|head| CommitId::new(head.0))
+            .collect();
         let meta = BlobMeta::new(&blob);
         fragments.push(Fragment::new(
             sedimentree_id,
@@ -2053,7 +2087,11 @@ fn ingest_automerge(doc: &automerge::Automerge, sedimentree_id: SedimentreeId) -
     let mut loose_commits = Vec::with_capacity(loose.len());
     for (fragment, raw) in loose.iter().zip(loose_bytes) {
         let head = CommitId::new(fragment.head.0);
-        let parents: BTreeSet<CommitId> = fragment.boundary.iter().map(|pp| CommitId::new(pp.0)).collect();
+        let parents: BTreeSet<CommitId> = fragment
+            .boundary
+            .iter()
+            .map(|pp| CommitId::new(pp.0))
+            .collect();
         let blob = Blob::new(raw);
         let meta = BlobMeta::new(&blob);
         loose_commits.push(LooseCommit::new(sedimentree_id, head, parents, meta));
@@ -2071,5 +2109,36 @@ fn ingest_automerge(doc: &automerge::Automerge, sedimentree_id: SedimentreeId) -
         _covered_count: covered_count,
         _loose_count: loose_count,
         _fragment_count: fragment_count,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use sedimentree_core::blob::Blob;
+
+    #[test]
+    fn missing_ordered_blob_context_reports_same_head_digest_mismatch() {
+        let head = CommitId::new([7; 32]);
+        let wanted_blob = Blob::new(b"wanted-fragment-bytes".to_vec());
+        let loaded_blob = Blob::new(b"loaded-fragment-bytes".to_vec());
+        let wanted = OrderedBlobIdentity {
+            kind: OrderedBlobKind::Fragment,
+            head,
+            blob_digest: Digest::hash(&wanted_blob),
+        };
+        let loaded_items = [LoadedOrderedBlob {
+            kind: OrderedBlobKind::Fragment,
+            head,
+            blob_digest: Digest::hash(&loaded_blob),
+        }];
+
+        let context = missing_ordered_blob_context(wanted, &loaded_items);
+
+        assert!(context.contains("wanted_kind=fragment"));
+        assert!(context.contains("loaded_kind_count=1"));
+        assert!(context.contains("same_head_loaded_blob_digests=["));
+        assert!(context.contains(&blob_digest_hex(Digest::hash(&wanted_blob))));
+        assert!(context.contains(&blob_digest_hex(Digest::hash(&loaded_blob))));
     }
 }
