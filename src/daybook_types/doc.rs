@@ -544,6 +544,15 @@ pub struct DocAddedEvent {
     pub heads: Vec<String>,
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Hash)]
+#[cfg_attr(feature = "uniffi", derive(uniffi::Record))]
+#[serde(rename_all = "camelCase")]
+#[cfg_attr(feature = "schemars", derive(schemars::JsonSchema))]
+pub struct FacetRef {
+    pub r#ref: Url,
+    pub heads: Vec<String>,
+}
+
 #[cfg(feature = "automerge")]
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Default)]
 pub struct ChangeHashSet(pub Arc<[automerge::ChangeHash]>);

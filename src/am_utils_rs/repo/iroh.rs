@@ -234,12 +234,12 @@ impl Dialer for IrohDialer {
                 if let Some(close_reason) = conn.close_reason() {
                     error!(?close_reason, "connection was closed");
                     match close_reason {
-                        iroh::endpoint::ConnectionError::ApplicationClosed(application_close) => {
-                            if application_close.error_code == 220_u32.into() {
-                                warn!("the peer signalled that they're shutting down");
-                                shutdown_confirmed.store(true, Ordering::SeqCst);
-                                return Err("dial aborted: peer is shutting down".into());
-                            }
+                        iroh::endpoint::ConnectionError::ApplicationClosed(application_close)
+                            if application_close.error_code == 220_u32.into() =>
+                        {
+                            warn!("the peer signalled that they're shutting down");
+                            shutdown_confirmed.store(true, Ordering::SeqCst);
+                            return Err("dial aborted: peer is shutting down".into());
                         }
                         iroh::endpoint::ConnectionError::LocallyClosed => {
                             debug!("we're shutting down locally");

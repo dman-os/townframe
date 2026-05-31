@@ -1,5 +1,18 @@
 # duck-log
 
+## 2026-04-25 | first feature, i'll be damned v2
+
+Fuck my life, first feature is happening.
+I need to lock in.
+
+Anyways, plug_dayledger. I'll worry about the schema later, first order of business is the...is the....
+
+Idk.
+
+The UI? I suppose it's not a bad idea to work from the UI in.
+I think we can do the smart stuff later, first is I want to support manual entry and hledger.
+That's simple enough.
+
 ## 2026-03-31 | first feature, i'll be damned
 
 Okay, time to implement the personal ledger plugin for this shitshow.

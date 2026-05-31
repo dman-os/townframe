@@ -1,0 +1,11 @@
+package townframe:daybook-wflows;
+
+world bundle {
+    include townframe:api-utils/imports;
+
+    import townframe:wflow/host;
+    import townframe:daybook/facet-routine;
+    import townframe:daybook/drawer;
+
+    export townframe:wflow/bundle;
+}

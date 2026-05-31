@@ -56,18 +56,6 @@ wit::export!(Component with_types_in wit);
 
 struct Component;
 
-fn tuple_list_get<'a, T>(pairs: &'a [(String, T)], key: &str) -> Option<&'a T> {
-    pairs
-        .iter()
-        .find(|(entry_key, _)| entry_key == key)
-        .map(|(_, entry_value)| entry_value)
-}
-
-fn tuple_list_take<T>(pairs: &mut Vec<(String, T)>, key: &str) -> Option<T> {
-    let ix = pairs.iter().position(|(entry_key, _)| entry_key == key)?;
-    Some(pairs.swap_remove(ix).1)
-}
-
 /*
 pub(crate) fn row_text(
     row: &crate::wit::townframe::sql::types::ResultRow,

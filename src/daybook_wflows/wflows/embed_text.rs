@@ -1,32 +1,43 @@
-use super::super::*;
 use crate::interlude::*;
 use wflow_sdk::{JobErrorX, Json, WflowCtx};
 
 pub fn run(cx: &mut WflowCtx) -> Result<(), JobErrorX> {
+    use super::resolve_facet_write_target;
+    use crate::wit::townframe::daybook::capabilities::FacetRights;
     use crate::wit::townframe::daybook::facet_routine;
     use crate::wit::townframe::daybook::mltools_embed;
     use daybook_types::doc::{WellKnownFacet, WellKnownFacetTag};
 
     let args = facet_routine::get_args();
 
-    let working_facet_token =
-        tuple_list_get(&args.rw_facet_tokens, &args.facet_key).ok_or_else(|| {
-            JobErrorX::Terminal(ferr!(
-                "working facet key '{}' not found in rw_facet_tokens",
-                args.facet_key
-            ))
-        })?;
+    let embedding_facet_key =
+        daybook_types::doc::FacetKey::from(WellKnownFacetTag::Embedding).to_string();
+    let embedding_facet_tag =
+        daybook_types::doc::FacetTag::from(WellKnownFacetTag::Embedding).to_string();
+    let working_facet_target = resolve_facet_write_target(
+        &args.primary_doc.facets,
+        &args.primary_doc.tags,
+        &embedding_facet_key,
+        &embedding_facet_tag,
+        "embedding",
+    )?;
 
     let note_facet_key = daybook_types::doc::FacetKey::from(WellKnownFacetTag::Note).to_string();
-    let note_facet_token =
-        tuple_list_get(&args.ro_facet_tokens, &note_facet_key).ok_or_else(|| {
+    let note_facet_token = args
+        .primary_doc
+        .facets
+        .iter()
+        .find(|token| token.key() == note_facet_key && token.rights().contains(FacetRights::READ))
+        .ok_or_else(|| {
             JobErrorX::Terminal(ferr!(
-                "note facet key '{}' not found in ro_facet_tokens",
+                "note facet key '{}' not found with read rights",
                 note_facet_key
             ))
         })?;
 
-    let current_facet_raw = note_facet_token.get();
+    let current_facet_raw = note_facet_token
+        .get()
+        .map_err(|err| JobErrorX::Terminal(ferr!("access error reading note facet: {err:?}")))?;
 
     let current_facet_json: daybook_types::doc::FacetRaw = serde_json::from_str(&current_facet_raw)
         .map_err(|err| JobErrorX::Terminal(ferr!("error parsing working facet json: {err}")))?;
@@ -37,7 +48,6 @@ pub fn run(cx: &mut WflowCtx) -> Result<(), JobErrorX> {
         return Err(JobErrorX::Terminal(ferr!("input facet is not note")));
     };
 
-    // FIXME: put this in an effect
     let embed_result = mltools_embed::embed_text(&note.content)
         .map_err(|err| JobErrorX::Terminal(ferr!("error running embed-text: {err}")))?;
     let heads = am_utils_rs::parse_commit_heads(&args.heads)
@@ -68,10 +78,11 @@ pub fn run(cx: &mut WflowCtx) -> Result<(), JobErrorX> {
             .into();
 
         let new_facet = serde_json::to_string(&new_facet).expect(ERROR_JSON);
-        working_facet_token
-            .update(&new_facet)
-            .wrap_err("error updating embedding facet")
-            .map_err(JobErrorX::Terminal)?;
+        working_facet_target.write(
+            &new_facet,
+            "access error updating embedding facet",
+            "access error creating embedding facet",
+        )?;
 
         Ok(Json(()))
     })?;

@@ -61,11 +61,12 @@ async fn test_embedding_processor_indexes_into_plugin_local_sqlite_state() -> Re
         .dispatch(
             "@daybook/wip",
             "index-embedding",
-            crate::rt::DispatchArgs::DocFacet {
+            crate::rt::DispatchArgs::DocRoutine {
                 doc_id: doc_id.clone(),
                 branch_path: daybook_types::doc::BranchPath::from("main"),
                 heads,
-                facet_key: None,
+                invocation: crate::rt::dispatch::RoutineInvocation::Command,
+                changed_facet_keys: vec![],
                 wflow_args_json: None,
             },
         )

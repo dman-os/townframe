@@ -456,7 +456,7 @@ pub struct EndpointType {
 }
 
 #[derive(Default, PartialEq, Eq, Hash, Clone, Copy)]
-enum InputFieldSource {
+pub enum InputFieldSource {
     #[default]
     JsonBody,
     Query,

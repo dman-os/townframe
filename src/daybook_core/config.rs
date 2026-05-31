@@ -438,19 +438,18 @@ impl ConfigRepo {
                 let Some((_obj, automerge::Prop::Map(section_key))) = patch.path.get(1) else {
                     return Ok(());
                 };
-                if !matches!(
-                    val,
-                    automerge::Value::Scalar(scalar)
-                    if matches!(&**scalar, automerge::ScalarValue::Bytes(_))
-                ) {
+                let automerge::Value::Scalar(scalar) = val else {
+                    warn!(?patch.path, key = %key, "ignoring malformed config vtag patch");
                     return Ok(());
-                }
-                let vtag = match val {
-                    automerge::Value::Scalar(scalar) => match &**scalar {
-                        automerge::ScalarValue::Bytes(bytes) => VersionTag::hydrate_bytes(bytes)?,
-                        _ => unreachable!("guard above ensures bytes"),
-                    },
-                    _ => unreachable!("guard above ensures scalar"),
+                };
+                let automerge::ScalarValue::Bytes(bytes) = &**scalar else {
+                    warn!(?patch.path, key = %key, "ignoring malformed config vtag patch");
+                    return Ok(());
+                };
+                let Some(vtag) =
+                    VersionTag::hydrate_bytes_or_warn(bytes, &patch.path, key, "config")
+                else {
+                    return Ok(());
                 };
                 let event_origin = crate::repos::resolve_origin_from_vtag_actor(
                     &self.local_actor_id,
