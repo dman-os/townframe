@@ -57,7 +57,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             .unwrap()
             .display()
     );
-    // build_wasm_crate(&cwd, &wflows_target_dir, "daybook_wflows");
+    build_wasm_crate(&cwd, &wflows_target_dir, "daybook_wflows");
 
     // let cwasm_path = out_dir.join("daybook_wflows.cwasm");
     // assert!(

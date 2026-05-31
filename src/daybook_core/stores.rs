@@ -312,29 +312,6 @@ impl Hydrate for VersionTag {
     }
 }
 
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn hydrate_bytes_or_warn_skips_invalid_length() {
-        let patch_path = vec!["root".to_string(), "vtag".to_string()];
-        assert!(
-            VersionTag::hydrate_bytes_or_warn(&[0_u8; 31], &patch_path, "vtag", "config").is_none()
-        );
-    }
-
-    #[test]
-    fn hydrate_bytes_or_warn_parses_valid_version_tag() {
-        let patch_path = vec!["root".to_string(), "vtag".to_string()];
-        let bytes = [0_u8; 32];
-        let vtag =
-            VersionTag::hydrate_bytes_or_warn(&bytes, &patch_path, "vtag", "config").unwrap();
-        assert_eq!(vtag.version, Uuid::nil());
-        assert_eq!(vtag.actor_id, [0_u8; 16].into());
-    }
-}
-
 impl<T> std::ops::Deref for Versioned<T> {
     type Target = T;
 
@@ -370,5 +347,28 @@ impl<T> Versioned<T> {
 
     pub fn get_val(&self) -> &T {
         &self.val
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn hydrate_bytes_or_warn_skips_invalid_length() {
+        let patch_path = vec!["root".to_string(), "vtag".to_string()];
+        assert!(
+            VersionTag::hydrate_bytes_or_warn(&[0_u8; 31], &patch_path, "vtag", "config").is_none()
+        );
+    }
+
+    #[test]
+    fn hydrate_bytes_or_warn_parses_valid_version_tag() {
+        let patch_path = vec!["root".to_string(), "vtag".to_string()];
+        let bytes = [0_u8; 32];
+        let vtag =
+            VersionTag::hydrate_bytes_or_warn(&bytes, &patch_path, "vtag", "config").unwrap();
+        assert_eq!(vtag.version, Uuid::nil());
+        assert_eq!(vtag.actor_id, [0_u8; 16].into());
     }
 }

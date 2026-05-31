@@ -52,14 +52,14 @@ pub fn match_claims(
     let existing = existing
         .iter()
         .filter(|(_, claim)| claim.deets_kind == "hledger")
-        .filter_map(|(claim_id, claim)| {
+        .map(|(claim_id, claim)| {
             let deets = serde_json::from_value::<HledgerTxnDeets>(claim.deets.clone())
                 .expect("malformed hledger claim deets");
-            Some(ExistingClaimTxn {
+            ExistingClaimTxn {
                 claim_id: claim_id.clone(),
                 claim,
                 deets,
-            })
+            }
         })
         .collect::<Vec<_>>();
 
