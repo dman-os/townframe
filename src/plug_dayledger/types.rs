@@ -86,6 +86,7 @@ pub enum PostingSign {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, schemars::JsonSchema)]
+#[serde(deny_unknown_fields)]
 #[serde(rename_all = "camelCase")]
 pub struct ClaimPostingHint {
     pub account_hint: String,
@@ -95,6 +96,7 @@ pub struct ClaimPostingHint {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, schemars::JsonSchema)]
+#[serde(deny_unknown_fields)]
 #[serde(rename_all = "camelCase")]
 pub struct HledgerTxnDeets {
     /// 0-based index of this transaction in the parsed hledger file.
@@ -120,7 +122,7 @@ daybook_types::define_enum_and_tag!(
     #[serde(rename_all = "camelCase", untagged)]
     DayledgerFacet {
         #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, schemars::JsonSchema)]
-        #[serde(rename_all = "camelCase")]
+        #[serde(rename_all = "camelCase", deny_unknown_fields)]
         Claim struct {
             pub ts: String,
             pub posting_hints: Vec<ClaimPostingHint>,

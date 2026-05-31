@@ -446,7 +446,11 @@ impl ConfigRepo {
                     warn!(?patch.path, key = %key, "ignoring malformed config vtag patch");
                     return Ok(());
                 };
-                let vtag = VersionTag::hydrate_bytes(bytes)?;
+                let Some(vtag) =
+                    VersionTag::hydrate_bytes_or_warn(bytes, &patch.path, key, "config")
+                else {
+                    return Ok(());
+                };
                 let event_origin = crate::repos::resolve_origin_from_vtag_actor(
                     &self.local_actor_id,
                     &vtag.actor_id,

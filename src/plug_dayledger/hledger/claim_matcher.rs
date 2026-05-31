@@ -1,3 +1,5 @@
+use crate::interlude::*;
+
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 use std::str::FromStr;
 
@@ -51,17 +53,13 @@ pub fn match_claims(
         .iter()
         .filter(|(_, claim)| claim.deets_kind == "hledger")
         .filter_map(|(claim_id, claim)| {
-            match serde_json::from_value::<HledgerTxnDeets>(claim.deets.clone()) {
-                Ok(deets) => Some(ExistingClaimTxn {
-                    claim_id: claim_id.clone(),
-                    claim,
-                    deets,
-                }),
-                Err(err) => {
-                    warn!(%claim_id, ?err, "skipping malformed hledger claim deets");
-                    None
-                }
-            }
+            let deets = serde_json::from_value::<HledgerTxnDeets>(claim.deets.clone())
+                .expect("malformed hledger claim deets");
+            Some(ExistingClaimTxn {
+                claim_id: claim_id.clone(),
+                claim,
+                deets,
+            })
         })
         .collect::<Vec<_>>();
 
@@ -784,10 +782,10 @@ mod tests {
     }
 
     #[test]
-    fn malformed_existing_hledger_claim_is_skipped() {
+    #[should_panic(expected = "malformed hledger claim deets")]
+    fn malformed_existing_hledger_claim_panics() {
         let original = txns("2024/01/02 coffee\n  expenses:food  $5\n  assets:cash\n");
         let mut existing = existing_from(&original);
-        let valid_id = existing.keys().next().unwrap().clone();
         existing.insert(
             "malformed".into(),
             Claim {
@@ -799,10 +797,7 @@ mod tests {
             },
         );
 
-        let matched = match_claims(&original, &existing, &src_ref());
-
-        assert_eq!(matched.len(), 1);
-        assert_eq!(matched[0].0, valid_id);
+        let _ = match_claims(&original, &existing, &src_ref());
     }
 
     #[test]

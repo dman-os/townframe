@@ -135,7 +135,7 @@ async fn setup_doc(test_cx: &daybook_core::test_support::DaybookTestContext) -> 
 }
 
 async fn setup_and_dispatch_case(
-    test_name: &str,
+    test_name: &'static str,
     routine_name: &str,
     changed_facet_keys: Vec<String>,
 ) -> Res<(daybook_core::test_support::DaybookTestContext, String)> {

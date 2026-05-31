@@ -152,7 +152,7 @@ pub struct FacetManifest {
 }
 
 #[derive(Debug, Serialize, Deserialize, Validate, Clone, PartialEq, Eq, Hash)]
-#[serde(tag = "ty", rename_all = "camelCase")]
+#[serde(tag = "ty", rename_all = "camelCase", rename_all_fields = "camelCase")]
 pub enum FacetReferenceManifest {
     UrlString {
         /// JSON pointer (e.g. `/facetRef`) or root-dot path (e.g. `$.facetRef`)
@@ -185,6 +185,10 @@ pub enum FacetReferenceManifest {
 }
 
 impl FacetReferenceManifest {
+    pub fn reference_kind(&self) -> FacetReferenceKind {
+        FacetReferenceKind::UrlFacet
+    }
+
     pub fn json_path(&self) -> &str {
         match self {
             Self::UrlString { json_path }

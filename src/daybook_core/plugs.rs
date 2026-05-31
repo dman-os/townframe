@@ -1090,7 +1090,11 @@ impl PlugsRepo {
                     warn!(?patch.path, key = %key, "ignoring malformed plug vtag patch");
                     return Ok(());
                 };
-                let vtag = VersionTag::hydrate_bytes(vtag_bytes)?;
+                let Some(vtag) =
+                    VersionTag::hydrate_bytes_or_warn(vtag_bytes, &patch.path, key, "plug")
+                else {
+                    return Ok(());
+                };
                 let event_origin = crate::repos::resolve_origin_from_vtag_actor(
                     &self.local_actor_id,
                     &vtag.actor_id,
@@ -1144,7 +1148,14 @@ impl PlugsRepo {
                     warn!(?patch.path, key = %key, "ignoring malformed plug config-docs vtag patch");
                     return Ok(());
                 };
-                let vtag = VersionTag::hydrate_bytes(vtag_bytes)?;
+                let Some(vtag) = VersionTag::hydrate_bytes_or_warn(
+                    vtag_bytes,
+                    &patch.path,
+                    key,
+                    "plug_config_docs",
+                ) else {
+                    return Ok(());
+                };
                 let event_origin = crate::repos::resolve_origin_from_vtag_actor(
                     &self.local_actor_id,
                     &vtag.actor_id,

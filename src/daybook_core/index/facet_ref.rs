@@ -333,7 +333,7 @@ impl DocFacetRefIndexRepo {
                     .bind(facet_key.to_string())
                     .bind(reference.target_doc_id)
                     .bind(reference.target_facet_key.to_string())
-                    .bind(reference_kind_to_db_value(&spec.reference_kind))
+                    .bind(reference_kind_to_db_value(&spec.reference_kind()))
                     .bind(&serialized_heads)
                     .execute(&self.db_pool)
                     .await?;

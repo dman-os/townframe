@@ -886,7 +886,11 @@ impl TablesRepo {
                     warn!(?patch.path, key = %key, "ignoring malformed table vtag patch");
                     return Ok(());
                 };
-                let vtag = VersionTag::hydrate_bytes(vtag_bytes)?;
+                let Some(vtag) =
+                    VersionTag::hydrate_bytes_or_warn(vtag_bytes, &patch.path, key, "table")
+                else {
+                    return Ok(());
+                };
 
                 match collection.as_ref() {
                     "windows" => out.push(if vtag.version.is_nil() {
