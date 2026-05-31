@@ -134,13 +134,53 @@ async fn setup_doc(test_cx: &daybook_core::test_support::DaybookTestContext) -> 
     Ok(doc_id)
 }
 
-#[tokio::test(flavor = "multi_thread")]
-async fn test_full_command_capability_report() -> Res<()> {
-    let test_cx = daybook_core::test_support::test_cx("cap_reg_full_cmd").await?;
+async fn setup_and_dispatch_case(
+    test_name: &str,
+    routine_name: &str,
+    changed_facet_keys: Vec<String>,
+) -> Res<(daybook_core::test_support::DaybookTestContext, String)> {
+    let test_cx = daybook_core::test_support::test_cx(test_name).await?;
     super::common::import_test_plug_oci(&test_cx).await?;
 
     let doc_id = setup_doc(&test_cx).await?;
-    dispatch_and_wait(&test_cx, "report-full-command", &doc_id, vec![]).await?;
+    dispatch_and_wait(&test_cx, routine_name, &doc_id, changed_facet_keys).await?;
+    Ok((test_cx, doc_id))
+}
+
+fn assert_config_tag_rights(
+    tag_keys: &[Vec<String>],
+    tag_rights: &[std::collections::BTreeMap<String, String>],
+    doc_index: usize,
+    tag: &str,
+    expect_update: bool,
+    context: &str,
+) {
+    let tag_key = tag_keys[doc_index]
+        .iter()
+        .find(|k| k.as_str() == tag)
+        .unwrap_or_else(|| panic!("{context} tag must exist"));
+    let rights = &tag_rights[doc_index][tag_key];
+    assert!(
+        rights.contains("READ"),
+        "{context} should have READ rights, got: {rights}"
+    );
+    if expect_update {
+        assert!(
+            rights.contains("UPDATE"),
+            "{context} should have READ+UPDATE, got: {rights}"
+        );
+    } else {
+        assert!(
+            !rights.contains("UPDATE"),
+            "{context} should have READ-only, got: {rights}"
+        );
+    }
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn test_full_command_capability_report() -> Res<()> {
+    let (test_cx, doc_id) =
+        setup_and_dispatch_case("cap_reg_full_cmd", "report-full-command", vec![]).await?;
 
     let db_pool = open_plug_test_local_state(&test_cx).await?;
     let report = fetch_capability_report(&db_pool, &doc_id).await?;
@@ -197,25 +237,21 @@ async fn test_full_command_capability_report() -> Res<()> {
         "full command should have config doc tag rights"
     );
 
-    let config_rw_tag = config_tag_keys[0]
-        .iter()
-        .find(|k| k == &"org.example.test.config")
-        .expect("config-rw tag must exist");
-    assert!(
-        config_tag_rights[0][config_rw_tag].contains("READ")
-            && config_tag_rights[0][config_rw_tag].contains("UPDATE"),
-        "config tag should have READ+UPDATE, got: {}",
-        config_tag_rights[0][config_rw_tag]
+    assert_config_tag_rights(
+        &config_tag_keys,
+        &config_tag_rights,
+        0,
+        "org.example.test.config",
+        true,
+        "config tag",
     );
-    let config_ro_tag = config_tag_keys[0]
-        .iter()
-        .find(|k| k == &"org.example.test.config-ro")
-        .expect("config-ro tag must exist");
-    assert!(
-        config_tag_rights[0][config_ro_tag].contains("READ")
-            && !config_tag_rights[0][config_ro_tag].contains("UPDATE"),
-        "config-ro tag should have READ-only, got: {}",
-        config_tag_rights[0][config_ro_tag]
+    assert_config_tag_rights(
+        &config_tag_keys,
+        &config_tag_rights,
+        0,
+        "org.example.test.config-ro",
+        false,
+        "config-ro tag",
     );
 
     let sqlite_conns: Vec<String> = serde_json::from_value(report["sqlite_connections"].clone())?;
@@ -227,15 +263,10 @@ async fn test_full_command_capability_report() -> Res<()> {
 
 #[tokio::test(flavor = "multi_thread")]
 async fn test_full_processor_capability_report() -> Res<()> {
-    let test_cx = daybook_core::test_support::test_cx("cap_reg_full_proc").await?;
-    super::common::import_test_plug_oci(&test_cx).await?;
-
-    let doc_id = setup_doc(&test_cx).await?;
     let changed_key = "org.example.daybook.note/main".to_string();
-    dispatch_and_wait(
-        &test_cx,
+    let (test_cx, doc_id) = setup_and_dispatch_case(
+        "cap_reg_full_proc",
         "report-full-processor",
-        &doc_id,
         vec![changed_key.clone()],
     )
     .await?;
@@ -307,25 +338,21 @@ async fn test_full_processor_capability_report() -> Res<()> {
         "full processor should have config doc tag rights"
     );
 
-    let config_rw_tag = config_tag_keys[0]
-        .iter()
-        .find(|k| k == &"org.example.test.config")
-        .expect("config-rw tag must exist");
-    assert!(
-        config_tag_rights[0][config_rw_tag].contains("READ")
-            && config_tag_rights[0][config_rw_tag].contains("UPDATE"),
-        "config tag should have READ+UPDATE, got: {}",
-        config_tag_rights[0][config_rw_tag]
+    assert_config_tag_rights(
+        &config_tag_keys,
+        &config_tag_rights,
+        0,
+        "org.example.test.config",
+        true,
+        "config tag",
     );
-    let config_ro_tag = config_tag_keys[0]
-        .iter()
-        .find(|k| k == &"org.example.test.config-ro")
-        .expect("config-ro tag must exist");
-    assert!(
-        config_tag_rights[0][config_ro_tag].contains("READ")
-            && !config_tag_rights[0][config_ro_tag].contains("UPDATE"),
-        "config-ro tag should have READ-only, got: {}",
-        config_tag_rights[0][config_ro_tag]
+    assert_config_tag_rights(
+        &config_tag_keys,
+        &config_tag_rights,
+        0,
+        "org.example.test.config-ro",
+        false,
+        "config-ro tag",
     );
 
     let cmd_urls: Vec<String> = serde_json::from_value(report["command_invoke_urls"].clone())?;
@@ -343,11 +370,8 @@ async fn test_full_processor_capability_report() -> Res<()> {
 
 #[tokio::test(flavor = "multi_thread")]
 async fn test_minimal_command_capability_report() -> Res<()> {
-    let test_cx = daybook_core::test_support::test_cx("cap_reg_min_cmd").await?;
-    super::common::import_test_plug_oci(&test_cx).await?;
-
-    let doc_id = setup_doc(&test_cx).await?;
-    dispatch_and_wait(&test_cx, "report-minimal-command", &doc_id, vec![]).await?;
+    let (test_cx, doc_id) =
+        setup_and_dispatch_case("cap_reg_min_cmd", "report-minimal-command", vec![]).await?;
 
     let db_pool = open_plug_test_local_state(&test_cx).await?;
     let report = fetch_capability_report(&db_pool, &doc_id).await?;
@@ -401,15 +425,10 @@ async fn test_minimal_command_capability_report() -> Res<()> {
 
 #[tokio::test(flavor = "multi_thread")]
 async fn test_minimal_processor_capability_report() -> Res<()> {
-    let test_cx = daybook_core::test_support::test_cx("cap_reg_min_proc").await?;
-    super::common::import_test_plug_oci(&test_cx).await?;
-
-    let doc_id = setup_doc(&test_cx).await?;
     let changed_key = "org.example.daybook.note/main".to_string();
-    dispatch_and_wait(
-        &test_cx,
+    let (test_cx, doc_id) = setup_and_dispatch_case(
+        "cap_reg_min_proc",
         "report-minimal-processor",
-        &doc_id,
         vec![changed_key.clone()],
     )
     .await?;
@@ -464,11 +483,8 @@ async fn test_minimal_processor_capability_report() -> Res<()> {
 
 #[tokio::test(flavor = "multi_thread")]
 async fn test_downscope_capability() -> Res<()> {
-    let test_cx = daybook_core::test_support::test_cx("cap_reg_downscope").await?;
-    super::common::import_test_plug_oci(&test_cx).await?;
-
-    let doc_id = setup_doc(&test_cx).await?;
-    dispatch_and_wait(&test_cx, "test-downscope", &doc_id, vec![]).await?;
+    let (test_cx, doc_id) =
+        setup_and_dispatch_case("cap_reg_downscope", "test-downscope", vec![]).await?;
 
     let db_pool = open_plug_test_local_state(&test_cx).await?;
     let report = fetch_capability_report_v2(&db_pool, &doc_id, "test_downscope").await?;
@@ -492,11 +508,8 @@ async fn test_downscope_capability() -> Res<()> {
 
 #[tokio::test(flavor = "multi_thread")]
 async fn test_denied_update_capability() -> Res<()> {
-    let test_cx = daybook_core::test_support::test_cx("cap_reg_denied").await?;
-    super::common::import_test_plug_oci(&test_cx).await?;
-
-    let doc_id = setup_doc(&test_cx).await?;
-    dispatch_and_wait(&test_cx, "test-denied-update", &doc_id, vec![]).await?;
+    let (test_cx, doc_id) =
+        setup_and_dispatch_case("cap_reg_denied", "test-denied-update", vec![]).await?;
 
     let db_pool = open_plug_test_local_state(&test_cx).await?;
     let report = fetch_capability_report_v2(&db_pool, &doc_id, "test_denied_update").await?;
@@ -512,11 +525,8 @@ async fn test_denied_update_capability() -> Res<()> {
 
 #[tokio::test(flavor = "multi_thread")]
 async fn test_acl_aggregate_capability() -> Res<()> {
-    let test_cx = daybook_core::test_support::test_cx("cap_reg_acl_agg").await?;
-    super::common::import_test_plug_oci(&test_cx).await?;
-
-    let doc_id = setup_doc(&test_cx).await?;
-    dispatch_and_wait(&test_cx, "test-acl-aggregate", &doc_id, vec![]).await?;
+    let (test_cx, doc_id) =
+        setup_and_dispatch_case("cap_reg_acl_agg", "test-acl-aggregate", vec![]).await?;
 
     let db_pool = open_plug_test_local_state(&test_cx).await?;
     let report = fetch_capability_report_v2(&db_pool, &doc_id, "test_acl_aggregate").await?;
@@ -544,11 +554,8 @@ async fn test_acl_aggregate_capability() -> Res<()> {
 
 #[tokio::test(flavor = "multi_thread")]
 async fn test_create_facet_capability() -> Res<()> {
-    let test_cx = daybook_core::test_support::test_cx("cap_reg_create").await?;
-    super::common::import_test_plug_oci(&test_cx).await?;
-
-    let doc_id = setup_doc(&test_cx).await?;
-    dispatch_and_wait(&test_cx, "test-create-facet", &doc_id, vec![]).await?;
+    let (test_cx, doc_id) =
+        setup_and_dispatch_case("cap_reg_create", "test-create-facet", vec![]).await?;
 
     let db_pool = open_plug_test_local_state(&test_cx).await?;
     let report = fetch_capability_report_v2(&db_pool, &doc_id, "test_create_facet").await?;
@@ -577,11 +584,8 @@ async fn test_create_facet_capability() -> Res<()> {
 
 #[tokio::test(flavor = "multi_thread")]
 async fn test_get_create_token_capability() -> Res<()> {
-    let test_cx = daybook_core::test_support::test_cx("cap_reg_get_create").await?;
-    super::common::import_test_plug_oci(&test_cx).await?;
-
-    let doc_id = setup_doc(&test_cx).await?;
-    dispatch_and_wait(&test_cx, "test-get-create-token", &doc_id, vec![]).await?;
+    let (test_cx, doc_id) =
+        setup_and_dispatch_case("cap_reg_get_create", "test-get-create-token", vec![]).await?;
 
     let db_pool = open_plug_test_local_state(&test_cx).await?;
     let report = fetch_capability_report_v2(&db_pool, &doc_id, "test_get_create_token").await?;
@@ -614,11 +618,8 @@ async fn test_get_create_token_capability() -> Res<()> {
 
 #[tokio::test(flavor = "multi_thread")]
 async fn test_delete_facet_capability() -> Res<()> {
-    let test_cx = daybook_core::test_support::test_cx("cap_reg_delete").await?;
-    super::common::import_test_plug_oci(&test_cx).await?;
-
-    let doc_id = setup_doc(&test_cx).await?;
-    dispatch_and_wait(&test_cx, "test-delete-facet", &doc_id, vec![]).await?;
+    let (test_cx, doc_id) =
+        setup_and_dispatch_case("cap_reg_delete", "test-delete-facet", vec![]).await?;
 
     let db_pool = open_plug_test_local_state(&test_cx).await?;
     let report = fetch_capability_report_v2(&db_pool, &doc_id, "test_delete_facet").await?;

@@ -100,17 +100,18 @@ async fn test_parse_hledger_writes_one_claim_per_transaction() -> Res<()> {
         );
         assert_eq!(*txn_index, deets.txn_index);
         assert_eq!(claim.deets_kind, "hledger");
-        assert_eq!(
-            claim.src_ref.r#ref.scheme(),
-            daybook_types::url::FACET_SCHEME
-        );
+        let src_ref = claim
+            .src_refs
+            .first()
+            .expect("claim should record a source ref");
+        assert_eq!(src_ref.r#ref.scheme(), daybook_types::url::FACET_SCHEME);
         assert!(
-            !claim.src_ref.heads.is_empty(),
+            !src_ref.heads.is_empty(),
             "expected source heads to be recorded"
         );
         assert!(
-            claim.src_refs.is_empty(),
-            "first parse should not carry prior src refs"
+            claim.src_refs.len() == 1,
+            "first parse should record exactly one source ref"
         );
         assert!(seen_indexes.insert(deets.txn_index), "duplicate txn index");
         let expected_posting_count = match deets.txn_index {

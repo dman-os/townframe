@@ -23,10 +23,15 @@ impl Date {
 
 impl std::fmt::Display for Date {
     fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let year = i32::from(self.0.year());
+        let year = if year < 0 {
+            format!("-{:04}", year.unsigned_abs())
+        } else {
+            format!("{:04}", year)
+        };
         write!(
             formatter,
-            "{:04}-{:02}-{:02}",
-            self.0.year(),
+            "{year}-{:02}-{:02}",
             self.0.month(),
             self.0.day()
         )
@@ -154,4 +159,15 @@ pub struct AccountDeclaration {
     pub account_type: Option<AccountType>,
     pub comment: String,
     pub tags: Vec<Tag>,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn date_formats_negative_years_with_zero_padding() {
+        let date = Date::new(-44, 3, 15).expect("valid date");
+        assert_eq!(date.to_string(), "-0044-03-15");
+    }
 }

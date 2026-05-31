@@ -74,9 +74,9 @@ pub mod wflows {
 use daybook_types::doc::{Note, WellKnownFacetTag};
 use daybook_types::manifest::{
     CompareOp, DocChangePredicate, DocPredicateClause, FacetDependencyManifest, FacetManifest,
-    FacetReferenceKind, FacetReferenceManifest, PlugDependencyManifest, PlugManifest,
-    ProcessorDeets, ProcessorEventPredicate, ProcessorManifest, RoutineDocAcl, RoutineFacetAccess,
-    RoutineImpl, RoutineManifest,
+    FacetReferenceManifest, PlugDependencyManifest, PlugManifest, ProcessorDeets,
+    ProcessorEventPredicate, ProcessorManifest, RoutineDocAcl, RoutineFacetAccess, RoutineImpl,
+    RoutineManifest,
 };
 use std::sync::Arc;
 
@@ -97,10 +97,8 @@ pub fn plug_manifest() -> PlugManifest {
                 key_tag: claim_tag.clone(),
                 value_schema: schemars::schema_for!(Claim),
                 display_config: Default::default(),
-                references: vec![FacetReferenceManifest {
-                    reference_kind: FacetReferenceKind::UrlFacet,
-                    json_path: "$.srcRef.ref".into(),
-                    at_commit_json_path: Some("$.srcRef.heads".into()),
+                references: vec![FacetReferenceManifest::UrlObjectMany {
+                    json_path: "$.srcRefs[*]".into(),
                 }],
             },
             FacetManifest {

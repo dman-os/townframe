@@ -63,8 +63,14 @@ pub fn run(cx: &mut WflowCtx) -> Result<(), JobErrorX> {
         )
         .ok()
     });
-    if rw_config_token.is_none() && ro_config_token.is_none() && config_write_target.is_none() {
-        return Ok(());
+    if rw_config_token.is_none() && ro_config_token.is_none() {
+        warn!(
+            has_write_target = config_write_target.is_some(),
+            "no readable label-candidates config token available"
+        );
+        if config_write_target.is_none() {
+            return Ok(());
+        }
     }
 
     let note_raw = note_facet_token
@@ -119,6 +125,10 @@ pub fn run(cx: &mut WflowCtx) -> Result<(), JobErrorX> {
                     "error updating learned proposal set",
                     "error creating learned proposal set",
                 )?;
+            } else if ro_config_token.is_some() && rw_config_token.is_none() {
+                warn!(
+                    "merged learned proposal set but only read-only config is available; skipping write"
+                );
             }
         }
 

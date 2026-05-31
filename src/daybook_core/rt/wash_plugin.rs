@@ -786,11 +786,8 @@ impl facet_routine::Host for SharedWashCtx {
         if !config_docs.is_empty() {
             let mut owner_config_docs: HashMap<String, (String, ChangeHashSet)> = HashMap::new();
             for config_doc_meta in config_docs {
-                let owner_plug_id = config_doc_meta
-                    .facet_acl
-                    .first()
-                    .and_then(|access| access.owner_plug_id.clone())
-                    .unwrap_or_else(|| plug_id.clone());
+                let owner_plug_id =
+                    config_doc_owner_plug_id(&config_doc_meta.facet_acl, plug_id.as_str())?;
                 let (config_doc_id, config_heads) = if let Some(found) =
                     owner_config_docs.get(&owner_plug_id)
                 {
@@ -892,4 +889,28 @@ impl facet_routine::Host for SharedWashCtx {
             sqlite_connections,
         })
     }
+}
+
+fn config_doc_owner_plug_id(
+    facet_acl: &[daybook_types::manifest::RoutineFacetAccess],
+    default_owner_plug_id: &str,
+) -> wasmtime::Result<String> {
+    let mut owner_plug_id: Option<String> = None;
+    for access in facet_acl {
+        let access_owner = access
+            .owner_plug_id
+            .as_deref()
+            .unwrap_or(default_owner_plug_id);
+        match owner_plug_id.as_deref() {
+            None => owner_plug_id = Some(access_owner.to_string()),
+            Some(existing) if existing == access_owner => {}
+            Some(existing) => {
+                return Err(wasmtime_err(format!(
+                    "config doc facet ACL mixes owner_plug_id values: expected {existing}, found {access_owner}"
+                )));
+            }
+        }
+    }
+
+    Ok(owner_plug_id.unwrap_or_else(|| default_owner_plug_id.to_string()))
 }

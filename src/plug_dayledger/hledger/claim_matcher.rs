@@ -49,14 +49,19 @@ pub fn match_claims(
 ) -> Vec<(String, Claim)> {
     let existing = existing
         .iter()
+        .filter(|(_, claim)| claim.deets_kind == "hledger")
         .filter_map(|(claim_id, claim)| {
-            serde_json::from_value::<HledgerTxnDeets>(claim.deets.clone())
-                .ok()
-                .map(|deets| ExistingClaimTxn {
+            match serde_json::from_value::<HledgerTxnDeets>(claim.deets.clone()) {
+                Ok(deets) => Some(ExistingClaimTxn {
                     claim_id: claim_id.clone(),
                     claim,
                     deets,
-                })
+                }),
+                Err(err) => {
+                    warn!(%claim_id, ?err, "skipping malformed hledger claim deets");
+                    None
+                }
+            }
         })
         .collect::<Vec<_>>();
 
@@ -598,13 +603,23 @@ fn build_claim(
     Claim {
         ts: txn.date.to_string(),
         posting_hints,
-        src_ref: src_ref.clone(),
-        src_refs: existing
-            .map(|existing_claim| existing_claim.src_refs.clone())
-            .unwrap_or_default(),
+        src_refs: claim_src_refs(existing, src_ref),
         deets_kind: "hledger".into(),
         deets: serde_json::to_value(deets).unwrap(),
     }
+}
+
+fn claim_src_refs(
+    existing: Option<&Claim>,
+    src_ref: &daybook_types::doc::FacetRef,
+) -> Vec<daybook_types::doc::FacetRef> {
+    let mut src_refs = existing
+        .map(|existing_claim| existing_claim.src_refs.clone())
+        .unwrap_or_default();
+    if !src_refs.iter().any(|existing_ref| existing_ref == src_ref) {
+        src_refs.push(src_ref.clone());
+    }
+    src_refs
 }
 
 pub fn hash_txn(txn: &Transaction) -> String {
@@ -766,6 +781,47 @@ mod tests {
         assert_eq!(matched[0].0, original_ids[0]);
         assert_eq!(matched[1].0, original_ids[1]);
         assert_eq!(matched[2].0, original_ids[2]);
+    }
+
+    #[test]
+    fn malformed_existing_hledger_claim_is_skipped() {
+        let original = txns("2024/01/02 coffee\n  expenses:food  $5\n  assets:cash\n");
+        let mut existing = existing_from(&original);
+        let valid_id = existing.keys().next().unwrap().clone();
+        existing.insert(
+            "malformed".into(),
+            Claim {
+                ts: "2024-01-02".into(),
+                posting_hints: vec![],
+                src_refs: vec![],
+                deets_kind: "hledger".into(),
+                deets: serde_json::Value::Null,
+            },
+        );
+
+        let matched = match_claims(&original, &existing, &src_ref());
+
+        assert_eq!(matched.len(), 1);
+        assert_eq!(matched[0].0, valid_id);
+    }
+
+    #[test]
+    fn matched_claim_preserves_multi_source_provenance() {
+        let original = txns("2024/01/02 coffee\n  expenses:food  $5\n  assets:cash\n");
+        let mut existing = existing_from(&original);
+        let existing_id = existing.keys().next().unwrap().clone();
+        let second_source = daybook_types::doc::FacetRef {
+            r#ref: "db+facet:///doc/note/secondary".parse().unwrap(),
+            heads: vec!["head-2".into()],
+        };
+        let preserved_src_refs = vec![src_ref(), second_source.clone()];
+        existing.get_mut(&existing_id).unwrap().src_refs = preserved_src_refs.clone();
+
+        let matched = match_claims(&original, &existing, &src_ref());
+
+        assert_eq!(matched.len(), 1);
+        assert_eq!(matched[0].0, existing_id);
+        assert_eq!(matched[0].1.src_refs, preserved_src_refs);
     }
 
     #[test]

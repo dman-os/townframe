@@ -57,8 +57,8 @@ mod wflows;
 
 use daybook_types::manifest::{
     CommandDeets, CommandManifest, DocPredicateClause, FacetDependencyManifest, FacetManifest,
-    FacetReferenceKind, FacetReferenceManifest, PlugManifest, ProcessorDeets, ProcessorManifest,
-    RoutineDocAcl, RoutineFacetAccess, RoutineImpl, RoutineLocalStateAccess, RoutineManifest,
+    FacetReferenceManifest, PlugManifest, ProcessorDeets, ProcessorManifest, RoutineDocAcl,
+    RoutineFacetAccess, RoutineImpl, RoutineLocalStateAccess, RoutineManifest,
 };
 use std::sync::Arc;
 
@@ -571,15 +571,11 @@ pub fn plug_manifest() -> PlugManifest {
                 value_schema: schemars::schema_for!(PseudoLabel),
                 display_config: Default::default(),
                 references: vec![
-                    FacetReferenceManifest {
-                        reference_kind: FacetReferenceKind::UrlFacet,
+                    FacetReferenceManifest::UrlString {
                         json_path: "$.sourceRef".into(),
-                        at_commit_json_path: None,
                     },
-                    FacetReferenceManifest {
-                        reference_kind: FacetReferenceKind::UrlFacet,
+                    FacetReferenceManifest::UrlString {
                         json_path: "$.candidateSetRef".into(),
-                        at_commit_json_path: None,
                     },
                 ],
             },

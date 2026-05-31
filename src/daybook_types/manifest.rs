@@ -1,5 +1,6 @@
 use crate::interlude::*;
 
+use crate::doc::FacetRef;
 use crate::reference::select_json_path_values;
 
 #[cfg(feature = "automerge")]
@@ -151,23 +152,65 @@ pub struct FacetManifest {
 }
 
 #[derive(Debug, Serialize, Deserialize, Validate, Clone, PartialEq, Eq, Hash)]
-#[serde(rename_all = "camelCase")]
-pub struct FacetReferenceManifest {
-    #[garde(dive)]
-    pub reference_kind: FacetReferenceKind,
-    /// JSON pointer (e.g. `/facetRef`) or root-dot path (e.g. `$.facetRef`)
-    #[garde(length(min = 1))]
-    pub json_path: String,
-    /// Optional JSON path for commit-heads associated with this reference.
-    ///
-    /// Convention:
-    /// - When present and the selected value is exactly `[]`, this means "self":
-    ///   the referenced facet must be in the same validated facet set.
-    /// - When absent, commit heads must be encoded in the reference URL fragment
-    ///   as pipe-separated hashes (e.g. `#h1|h2|h3`).
-    #[serde(default)]
-    #[garde(inner(length(min = 1)))]
-    pub at_commit_json_path: Option<String>,
+#[serde(tag = "ty", rename_all = "camelCase")]
+pub enum FacetReferenceManifest {
+    UrlString {
+        /// JSON pointer (e.g. `/facetRef`) or root-dot path (e.g. `$.facetRef`)
+        #[garde(length(min = 1))]
+        json_path: String,
+    },
+    UrlStringSplit {
+        /// JSON pointer (e.g. `/facetRef`) or root-dot path (e.g. `$.facetRef`)
+        #[garde(length(min = 1))]
+        json_path: String,
+        /// Optional JSON path for commit-heads associated with this reference.
+        #[garde(length(min = 1))]
+        at_commit_json_path: String,
+    },
+    UrlStringMany {
+        /// JSON pointer (e.g. `/order`) or root-dot path (e.g. `$.order`)
+        #[garde(length(min = 1))]
+        json_path: String,
+    },
+    UrlObject {
+        /// JSON pointer (e.g. `/srcRef`) or root-dot path (e.g. `$.srcRef`)
+        #[garde(length(min = 1))]
+        json_path: String,
+    },
+    UrlObjectMany {
+        /// JSON pointer (e.g. `/srcRefs`) or root-dot path (e.g. `$.srcRefs[*]`)
+        #[garde(length(min = 1))]
+        json_path: String,
+    },
+}
+
+impl FacetReferenceManifest {
+    pub fn json_path(&self) -> &str {
+        match self {
+            Self::UrlString { json_path }
+            | Self::UrlStringSplit { json_path, .. }
+            | Self::UrlStringMany { json_path }
+            | Self::UrlObject { json_path }
+            | Self::UrlObjectMany { json_path } => json_path,
+        }
+    }
+
+    pub fn is_many(&self) -> bool {
+        matches!(
+            self,
+            Self::UrlStringMany { .. } | Self::UrlObjectMany { .. }
+        )
+    }
+
+    pub fn at_commit_json_path(&self) -> Option<&str> {
+        match self {
+            Self::UrlStringSplit {
+                at_commit_json_path,
+                ..
+            } => Some(at_commit_json_path),
+            _ => None,
+        }
+    }
 }
 
 #[derive(Debug, Serialize, Deserialize, Validate, Clone, PartialEq, Eq, Hash)]
@@ -825,36 +868,53 @@ fn facet_has_reference_to_tag(
     reference_specs: &[FacetReferenceManifest],
 ) -> bool {
     for reference_spec in reference_specs {
-        match reference_spec.reference_kind {
-            FacetReferenceKind::UrlFacet => {}
-        }
-
-        let selected_values = match select_json_path_values(facet_raw, &reference_spec.json_path) {
+        let selected_values = match select_json_path_values(facet_raw, reference_spec.json_path()) {
             Ok(values) => values,
             Err(err) => {
-                debug!(error = %err, json_path = %reference_spec.json_path, "invalid facet reference json_path");
+                debug!(error = %err, json_path = %reference_spec.json_path(), "invalid facet reference json_path");
                 continue;
             }
         };
 
         for selected in selected_values {
-            let url_strings: Vec<&str> = match selected {
-                serde_json::Value::String(value) => vec![value.as_str()],
-                serde_json::Value::Array(items) => {
-                    items.iter().filter_map(|item| item.as_str()).collect()
-                }
-                _ => Vec::new(),
-            };
+            match reference_spec {
+                FacetReferenceManifest::UrlString { .. }
+                | FacetReferenceManifest::UrlStringSplit { .. }
+                | FacetReferenceManifest::UrlStringMany { .. } => {
+                    let url_strings: Vec<&str> = match selected {
+                        serde_json::Value::String(value) => vec![value.as_str()],
+                        serde_json::Value::Array(items) => {
+                            items.iter().filter_map(|item| item.as_str()).collect()
+                        }
+                        _ => Vec::new(),
+                    };
 
-            for url_str in url_strings {
-                let Ok(matches_target) = crate::url::facet_ref_str_targets_tag(
-                    url_str,
-                    &crate::doc::FacetTag::from(target_tag),
-                ) else {
-                    continue;
-                };
-                if matches_target {
-                    return true;
+                    for url_str in url_strings {
+                        let Ok(matches_target) = crate::url::facet_ref_str_targets_tag(
+                            url_str,
+                            &crate::doc::FacetTag::from(target_tag),
+                        ) else {
+                            continue;
+                        };
+                        if matches_target {
+                            return true;
+                        }
+                    }
+                }
+                FacetReferenceManifest::UrlObject { .. }
+                | FacetReferenceManifest::UrlObjectMany { .. } => {
+                    let Ok(facet_ref) = serde_json::from_value::<FacetRef>(selected.clone()) else {
+                        continue;
+                    };
+                    let Ok(matches_target) = crate::url::facet_ref_targets_tag(
+                        &facet_ref.r#ref,
+                        &crate::doc::FacetTag::from(target_tag),
+                    ) else {
+                        continue;
+                    };
+                    if matches_target {
+                        return true;
+                    }
                 }
             }
         }
@@ -883,17 +943,28 @@ fn evaluate_facet_field_match(
 
 fn compare_json_values(lhs: &serde_json::Value, op: CompareOp, rhs: &serde_json::Value) -> bool {
     match op {
-        CompareOp::Eq => lhs == rhs,
-        CompareOp::Ne => lhs != rhs,
+        CompareOp::Eq => compare_json_values_eq(lhs, rhs),
+        CompareOp::Ne => !compare_json_values_eq(lhs, rhs),
         CompareOp::Gt | CompareOp::Gte | CompareOp::Lt | CompareOp::Lte => {
-            if let (Some(lhs), Some(rhs)) = (lhs.as_f64(), rhs.as_f64()) {
+            if let Some(ordering) = compare_json_values_ordering(lhs, rhs) {
                 return match op {
-                    CompareOp::Gt => lhs > rhs,
-                    CompareOp::Gte => lhs >= rhs,
-                    CompareOp::Lt => lhs < rhs,
-                    CompareOp::Lte => lhs <= rhs,
+                    CompareOp::Gt => ordering.is_gt(),
+                    CompareOp::Gte => ordering.is_ge(),
+                    CompareOp::Lt => ordering.is_lt(),
+                    CompareOp::Lte => ordering.is_le(),
                     _ => unreachable!(),
                 };
+            }
+            if let (serde_json::Value::Number(lhs), serde_json::Value::Number(rhs)) = (lhs, rhs) {
+                if let (Some(lhs), Some(rhs)) = (lhs.as_f64(), rhs.as_f64()) {
+                    return match op {
+                        CompareOp::Gt => lhs > rhs,
+                        CompareOp::Gte => lhs >= rhs,
+                        CompareOp::Lt => lhs < rhs,
+                        CompareOp::Lte => lhs <= rhs,
+                        _ => unreachable!(),
+                    };
+                }
             }
             if let (Some(lhs), Some(rhs)) = (lhs.as_str(), rhs.as_str()) {
                 return match op {
@@ -907,6 +978,77 @@ fn compare_json_values(lhs: &serde_json::Value, op: CompareOp, rhs: &serde_json:
             false
         }
     }
+}
+
+fn compare_json_values_eq(lhs: &serde_json::Value, rhs: &serde_json::Value) -> bool {
+    match (lhs, rhs) {
+        (serde_json::Value::Number(lhs), serde_json::Value::Number(rhs)) => {
+            compare_json_numbers_eq(lhs, rhs)
+        }
+        _ => lhs == rhs,
+    }
+}
+
+fn compare_json_numbers_eq(lhs: &serde_json::Number, rhs: &serde_json::Number) -> bool {
+    if let Some(ordering) = compare_json_numbers_ordering(lhs, rhs) {
+        return ordering.is_eq();
+    }
+    match (lhs.as_f64(), rhs.as_f64()) {
+        (Some(lhs), Some(rhs)) => lhs == rhs,
+        _ => false,
+    }
+}
+
+fn compare_json_values_ordering(
+    lhs: &serde_json::Value,
+    rhs: &serde_json::Value,
+) -> Option<std::cmp::Ordering> {
+    match (lhs, rhs) {
+        (serde_json::Value::Number(lhs), serde_json::Value::Number(rhs)) => {
+            compare_json_numbers_ordering(lhs, rhs)
+        }
+        (serde_json::Value::String(lhs), serde_json::Value::String(rhs)) => Some(lhs.cmp(rhs)),
+        _ => None,
+    }
+}
+
+fn compare_json_numbers_ordering(
+    lhs: &serde_json::Number,
+    rhs: &serde_json::Number,
+) -> Option<std::cmp::Ordering> {
+    enum IntegerNumber {
+        Signed(i64),
+        Unsigned(u64),
+    }
+
+    fn integer_number(number: &serde_json::Number) -> Option<IntegerNumber> {
+        number
+            .as_i64()
+            .map(IntegerNumber::Signed)
+            .or_else(|| number.as_u64().map(IntegerNumber::Unsigned))
+    }
+
+    let lhs = integer_number(lhs)?;
+    let rhs = integer_number(rhs)?;
+
+    Some(match (lhs, rhs) {
+        (IntegerNumber::Signed(lhs), IntegerNumber::Signed(rhs)) => lhs.cmp(&rhs),
+        (IntegerNumber::Unsigned(lhs), IntegerNumber::Unsigned(rhs)) => lhs.cmp(&rhs),
+        (IntegerNumber::Signed(lhs), IntegerNumber::Unsigned(rhs)) => {
+            if lhs < 0 {
+                std::cmp::Ordering::Less
+            } else {
+                (lhs as u64).cmp(&rhs)
+            }
+        }
+        (IntegerNumber::Unsigned(lhs), IntegerNumber::Signed(rhs)) => {
+            if rhs < 0 {
+                std::cmp::Ordering::Greater
+            } else {
+                lhs.cmp(&(rhs as u64))
+            }
+        }
+    })
 }
 
 #[derive(Debug, Serialize, Deserialize, Validate, Clone, PartialEq, Eq, Hash)]
@@ -1211,6 +1353,16 @@ mod tests {
             CompareOp::Ne,
             &serde_json::json!("world"),
         ));
+        assert!(compare_json_values(
+            &serde_json::json!(1),
+            CompareOp::Eq,
+            &serde_json::json!(1.0),
+        ));
+        assert!(!compare_json_values(
+            &serde_json::json!(1),
+            CompareOp::Ne,
+            &serde_json::json!(1.0),
+        ));
     }
 
     #[test]
@@ -1219,6 +1371,16 @@ mod tests {
             &serde_json::json!(10.0),
             CompareOp::Gt,
             &serde_json::json!(5.0),
+        ));
+        assert!(compare_json_values(
+            &serde_json::json!(18446744073709551615u64),
+            CompareOp::Gt,
+            &serde_json::json!(18446744073709551614u64),
+        ));
+        assert!(compare_json_values(
+            &serde_json::json!(18446744073709551615u64),
+            CompareOp::Eq,
+            &serde_json::json!(18446744073709551615u64),
         ));
         assert!(!compare_json_values(
             &serde_json::json!(3.0),

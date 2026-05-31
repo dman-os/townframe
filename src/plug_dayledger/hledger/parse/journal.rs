@@ -155,9 +155,15 @@ pub fn transactionp<'a>() -> impl Parser<'a, &'a str, Transaction, extra::Err<Ri
 
     header
         .then(posting.repeated().collect::<Vec<_>>())
-        .map(|(header, postings)| {
+        .try_map(|(header, postings), span| {
+            if postings.is_empty() {
+                return Err(Rich::custom(
+                    span,
+                    "transaction header must be followed by at least one posting",
+                ));
+            }
             let (date, date2, status, code, description, comment, tags) = header;
-            Transaction {
+            Ok(Transaction {
                 date,
                 date2,
                 status,
@@ -166,7 +172,7 @@ pub fn transactionp<'a>() -> impl Parser<'a, &'a str, Transaction, extra::Err<Ri
                 comment,
                 tags,
                 postings,
-            }
+            })
         })
         .labelled("transaction")
 }

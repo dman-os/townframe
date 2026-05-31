@@ -4,7 +4,7 @@ use crate::drawer::DrawerRepo;
 use crate::plugs::PlugsRepo;
 use crate::repos::Repo;
 
-use daybook_types::doc::{BranchPath, ChangeHashSet, DocId, FacetKey};
+use daybook_types::doc::{BranchPath, ChangeHashSet, DocId, FacetKey, FacetRef};
 use daybook_types::manifest::{DocPredicateClause, FacetReferenceKind, FacetReferenceManifest};
 use daybook_types::reference::select_json_path_values;
 use daybook_types::url::{parse_facet_ref, FACET_SELF_DOC_ID};
@@ -454,17 +454,29 @@ fn extract_references(
     origin_doc_id: &DocId,
     origin_facet_key: &FacetKey,
 ) -> Res<Vec<ExtractedReference>> {
-    let selected_values = select_json_path_values(facet_value, &spec.json_path)?;
+    let selected_values = select_json_path_values(facet_value, spec.json_path())?;
     let mut out = Vec::new();
     for selected_value in selected_values {
-        match &spec.reference_kind {
-            FacetReferenceKind::UrlFacet => {
+        match spec {
+            FacetReferenceManifest::UrlString { .. }
+            | FacetReferenceManifest::UrlStringSplit { .. }
+            | FacetReferenceManifest::UrlStringMany { .. } => {
                 append_url_references(
                     &mut out,
                     selected_value,
                     origin_doc_id,
                     origin_facet_key,
-                    &spec.json_path,
+                    spec.json_path(),
+                )?;
+            }
+            FacetReferenceManifest::UrlObject { .. }
+            | FacetReferenceManifest::UrlObjectMany { .. } => {
+                append_object_references(
+                    &mut out,
+                    selected_value,
+                    origin_doc_id,
+                    origin_facet_key,
+                    spec.json_path(),
                 )?;
             }
         }
@@ -517,6 +529,29 @@ fn append_url_references(
     Ok(())
 }
 
+fn append_object_references(
+    out: &mut Vec<ExtractedReference>,
+    selected_value: &serde_json::Value,
+    origin_doc_id: &DocId,
+    origin_facet_key: &FacetKey,
+    json_path: &str,
+) -> Res<()> {
+    let facet_ref: FacetRef =
+        serde_json::from_value(selected_value.clone()).wrap_err_with(|| {
+            format!(
+                "expected reference object at path '{}' for facet '{}' but found {}",
+                json_path, origin_facet_key, selected_value
+            )
+        })?;
+    out.push(parse_object_reference(
+        facet_ref,
+        origin_doc_id,
+        origin_facet_key,
+        json_path,
+    )?);
+    Ok(())
+}
+
 fn parse_url_reference(
     url_value: &str,
     origin_doc_id: &DocId,
@@ -533,6 +568,31 @@ fn parse_url_reference(
         format!(
             "invalid facet reference URL '{}' at path '{}' for facet '{}'",
             url_value, json_path, origin_facet_key
+        )
+    })?;
+
+    let target_doc_id = if parsed_ref.doc_id == FACET_SELF_DOC_ID {
+        origin_doc_id.clone()
+    } else {
+        parsed_ref.doc_id
+    };
+
+    Ok(ExtractedReference {
+        target_doc_id,
+        target_facet_key: parsed_ref.facet_key,
+    })
+}
+
+fn parse_object_reference(
+    facet_ref: FacetRef,
+    origin_doc_id: &DocId,
+    origin_facet_key: &FacetKey,
+    json_path: &str,
+) -> Res<ExtractedReference> {
+    let parsed_ref = parse_facet_ref(&facet_ref.r#ref).wrap_err_with(|| {
+        format!(
+            "invalid facet reference URL '{}' at path '{}' for facet '{}'",
+            facet_ref.r#ref, json_path, origin_facet_key
         )
     })?;
 

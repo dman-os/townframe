@@ -124,8 +124,7 @@ daybook_types::define_enum_and_tag!(
         Claim struct {
             pub ts: String,
             pub posting_hints: Vec<ClaimPostingHint>,
-            // FIXME: two fields here sucks
-            pub src_ref: FacetRef,
+            #[serde(default)]
             pub src_refs: Vec<FacetRef>,
             pub deets_kind: String,
             pub deets: serde_json::Value,
@@ -166,3 +165,51 @@ daybook_types::define_enum_and_tag!(
         }
     }
 );
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn facet_ref(id: &str) -> FacetRef {
+        FacetRef {
+            r#ref: format!("db+facet:///doc/{id}/main").parse().unwrap(),
+            heads: vec!["head".into()],
+        }
+    }
+
+    fn base_claim_json() -> serde_json::Value {
+        serde_json::json!({
+            "ts": "2024-01-02",
+            "postingHints": [],
+            "deetsKind": "hledger",
+            "deets": {}
+        })
+    }
+
+    #[test]
+    fn claim_defaults_missing_src_refs_to_empty() {
+        let claim: Claim = serde_json::from_value(base_claim_json()).unwrap();
+        assert!(claim.src_refs.is_empty());
+    }
+
+    #[test]
+    fn claim_rejects_legacy_single_source_field() {
+        let mut claim_json = base_claim_json();
+        claim_json["srcRef"] = serde_json::to_value(facet_ref("note")).unwrap();
+
+        assert!(serde_json::from_value::<Claim>(claim_json).is_err());
+    }
+
+    #[test]
+    fn claim_deserializes_multi_source_provenance() {
+        let mut claim_json = base_claim_json();
+        claim_json["srcRefs"] = serde_json::json!([facet_ref("note"), facet_ref("secondary")]);
+
+        let claim: Claim = serde_json::from_value(claim_json).unwrap();
+
+        assert_eq!(
+            claim.src_refs,
+            vec![facet_ref("note"), facet_ref("secondary")]
+        );
+    }
+}

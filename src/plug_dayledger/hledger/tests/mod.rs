@@ -4,8 +4,6 @@ use super::parse::common::*;
 use super::parse::journal::parse_journal;
 use super::types::*;
 
-mod fixtures;
-
 fn parse_ok<'a, P, T>(parser: P, input: &'a str) -> T
 where
     P: Parser<'a, &'a str, T, extra::Err<Rich<'a, char>>>,
@@ -120,7 +118,7 @@ fn test_account_name() {
 fn test_amount_left_symbol() {
     let amt = parse_ok(amountp(), "$47.18");
     assert_eq!(amt.commodity, "$");
-    assert!(amt.quantity.contains("47.18"));
+    assert_eq!(amt.quantity, "47.18");
     assert_eq!(amt.style.commodity_side, CommoditySide::Left);
 }
 
@@ -135,7 +133,7 @@ fn test_amount_left_symbol_spaced() {
 fn test_amount_no_symbol() {
     let amt = parse_ok(amountp(), "47.18");
     assert!(amt.commodity.is_empty());
-    assert!(amt.quantity.contains("47.18"));
+    assert_eq!(amt.quantity, "47.18");
 }
 
 #[test]
@@ -166,12 +164,6 @@ fn test_balance_assertion_star() {
 }
 
 #[test]
-fn test_sample_journal_not_empty() {
-    let input = include_str!("fixtures/sample.journal");
-    assert!(!input.is_empty());
-}
-
-#[test]
 fn test_parse_sample_journal_fixture() {
     let input = include_str!("fixtures/sample.journal");
     let txns = parse_journal_ok(input);
@@ -183,6 +175,14 @@ fn test_parse_sample_journal_fixture() {
     assert_eq!(txns[3].status, Status::Cleared);
     assert_eq!(txns[3].description, "eat & shop");
     assert_eq!(txns[3].postings.len(), 3);
+}
+
+#[test]
+fn test_parse_journal_rejects_header_only_transaction() {
+    assert!(
+        parse_journal("2008/01/01 income\n").is_err(),
+        "expected parser error for header-only txn"
+    );
 }
 
 #[test]

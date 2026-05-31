@@ -878,14 +878,15 @@ impl TablesRepo {
                     return Ok(());
                 };
 
-                let vtag = match val {
-                    automerge::Value::Scalar(scalar) => match &**scalar {
-                        automerge::ScalarValue::Bytes(bytes) => bytes,
-                        _ => return Ok(()),
-                    },
-                    _ => return Ok(()),
+                let automerge::Value::Scalar(scalar) = val else {
+                    warn!(?patch.path, key = %key, "ignoring malformed table vtag patch");
+                    return Ok(());
                 };
-                let vtag = VersionTag::hydrate_bytes(vtag)?;
+                let automerge::ScalarValue::Bytes(vtag_bytes) = &**scalar else {
+                    warn!(?patch.path, key = %key, "ignoring malformed table vtag patch");
+                    return Ok(());
+                };
+                let vtag = VersionTag::hydrate_bytes(vtag_bytes)?;
 
                 match collection.as_ref() {
                     "windows" => out.push(if vtag.version.is_nil() {

@@ -25,7 +25,7 @@ use lru::SharedKeyedLruPool;
 use types::{BranchSnapshot, DocDeleteTombstone};
 
 use automerge::ReadDoc;
-use daybook_types::doc::{ChangeHashSet, DocId, FacetKey, FacetRaw};
+use daybook_types::doc::{ChangeHashSet, DocId, FacetKey, FacetRaw, FacetRef};
 use daybook_types::url::{parse_facet_ref, FACET_SELF_DOC_ID};
 
 use std::str::FromStr;
@@ -69,6 +69,7 @@ struct ValidatedReference {
     doc_id: DocId,
     facet_key: FacetKey,
     url_value: String,
+    heads: Vec<String>,
 }
 
 #[derive(Debug, Clone)]
@@ -524,47 +525,69 @@ impl DrawerRepo {
     ) -> Res<()> {
         let selected_values = daybook_types::reference::select_json_path_values(
             origin_facet_value,
-            &reference_manifest.json_path,
+            reference_manifest.json_path(),
         )?;
         if selected_values.is_empty() {
             eyre::bail!(
                 "facet '{}' reference path '{}' is missing",
                 origin_facet_key,
-                reference_manifest.json_path
+                reference_manifest.json_path()
             );
         }
 
         let mut referenced_facets = Vec::new();
-        for selected_value in selected_values {
-            match selected_value {
-                serde_json::Value::String(url_value) => {
-                    referenced_facets
-                        .push(self.validate_reference_url(url_value, origin_facet_key)?);
-                }
-                serde_json::Value::Array(url_values) => {
-                    for url_value in url_values {
-                        let serde_json::Value::String(url_string) = url_value else {
+        match reference_manifest {
+            daybook_types::manifest::FacetReferenceManifest::UrlString { .. }
+            | daybook_types::manifest::FacetReferenceManifest::UrlStringSplit { .. }
+            | daybook_types::manifest::FacetReferenceManifest::UrlStringMany { .. } => {
+                for selected_value in selected_values {
+                    match selected_value {
+                        serde_json::Value::String(url_value) => {
+                            referenced_facets
+                                .push(self.validate_reference_url(url_value, origin_facet_key)?);
+                        }
+                        serde_json::Value::Array(url_values) => {
+                            for url_value in url_values {
+                                let serde_json::Value::String(url_string) = url_value else {
+                                    eyre::bail!(
+                                        "facet '{}' reference path '{}' must contain URL strings",
+                                        origin_facet_key,
+                                        reference_manifest.json_path()
+                                    );
+                                };
+                                referenced_facets.push(
+                                    self.validate_reference_url(url_string, origin_facet_key)?,
+                                );
+                            }
+                        }
+                        _ => {
                             eyre::bail!(
                                 "facet '{}' reference path '{}' must contain URL strings",
                                 origin_facet_key,
-                                reference_manifest.json_path
+                                reference_manifest.json_path()
                             );
-                        };
-                        referenced_facets
-                            .push(self.validate_reference_url(url_string, origin_facet_key)?);
+                        }
                     }
                 }
-                _ => {
-                    eyre::bail!(
-                        "facet '{}' reference path '{}' must contain URL strings",
-                        origin_facet_key,
-                        reference_manifest.json_path
-                    );
+            }
+            daybook_types::manifest::FacetReferenceManifest::UrlObject { .. }
+            | daybook_types::manifest::FacetReferenceManifest::UrlObjectMany { .. } => {
+                for selected_value in selected_values {
+                    let facet_ref: FacetRef = serde_json::from_value(selected_value.clone())
+                        .wrap_err_with(|| {
+                            format!(
+                                "facet '{}' reference path '{}' must contain reference objects",
+                                origin_facet_key,
+                                reference_manifest.json_path()
+                            )
+                        })?;
+                    referenced_facets
+                        .push(self.validate_reference_object(&facet_ref, origin_facet_key)?);
                 }
             }
         }
 
-        if let Some(at_commit_json_path) = &reference_manifest.at_commit_json_path {
+        if let Some(at_commit_json_path) = reference_manifest.at_commit_json_path() {
             let at_commit_values = daybook_types::reference::select_json_path_values(
                 origin_facet_value,
                 at_commit_json_path,
@@ -628,36 +651,39 @@ impl DrawerRepo {
             }
         } else {
             for referenced_facet in referenced_facets {
-                let parsed_url = url::Url::parse(&referenced_facet.url_value)?;
-                let Some(fragment) = parsed_url.fragment() else {
-                    eyre::bail!(
-                        "facet '{}' reference '{}' must include commit heads in URL fragment when at_commit_json_path is not declared",
-                        origin_facet_key,
-                        referenced_facet.url_value
-                    );
-                };
-                let commit_head_strings: Vec<String> = fragment
-                    .split('|')
-                    .filter(|segment| !segment.is_empty())
-                    .map(ToString::to_string)
-                    .collect();
-                if commit_head_strings.is_empty() {
+                let commit_head_strings = if referenced_facet.heads.is_empty() {
                     if referenced_facet.doc_id == FACET_SELF_DOC_ID
                         && resulting_facet_keys.contains(&referenced_facet.facet_key)
                     {
-                        // Empty fragment means "self in this validated facet set" for URL refs
-                        // when at_commit_json_path is omitted (e.g. Body.order).
+                        // Empty heads means "self in this validated facet set".
                         continue;
                     }
+                    let parsed_url = url::Url::parse(&referenced_facet.url_value)?;
+                    let Some(fragment) = parsed_url.fragment() else {
+                        eyre::bail!(
+                            "facet '{}' reference '{}' must include commit heads in URL fragment when at_commit_json_path is not declared",
+                            origin_facet_key,
+                            referenced_facet.url_value
+                        );
+                    };
+                    fragment
+                        .split('|')
+                        .filter(|segment| !segment.is_empty())
+                        .map(ToString::to_string)
+                        .collect::<Vec<_>>()
+                } else {
+                    referenced_facet.heads.clone()
+                };
+                if commit_head_strings.is_empty() {
                     eyre::bail!(
-                        "facet '{}' reference '{}' has empty commit-head fragment",
+                        "facet '{}' reference '{}' has empty commit-heads",
                         origin_facet_key,
                         referenced_facet.url_value
                     );
                 }
                 am_utils_rs::parse_commit_heads(&commit_head_strings).wrap_err_with(|| {
                     format!(
-                        "facet '{}' reference '{}' has invalid commit-head fragment",
+                        "facet '{}' reference '{}' has invalid commit-heads",
                         origin_facet_key, referenced_facet.url_value
                     )
                 })?;
@@ -688,6 +714,26 @@ impl DrawerRepo {
             doc_id: parsed_facet_ref.doc_id,
             facet_key: parsed_facet_ref.facet_key,
             url_value: url_value.to_string(),
+            heads: vec![],
+        })
+    }
+
+    fn validate_reference_object(
+        &self,
+        facet_ref: &FacetRef,
+        origin_facet_key: &FacetKey,
+    ) -> Res<ValidatedReference> {
+        let parsed_facet_ref = parse_facet_ref(&facet_ref.r#ref).wrap_err_with(|| {
+            format!(
+                "facet '{}' contains invalid facet reference URL '{}'",
+                origin_facet_key, facet_ref.r#ref
+            )
+        })?;
+        Ok(ValidatedReference {
+            doc_id: parsed_facet_ref.doc_id,
+            facet_key: parsed_facet_ref.facet_key,
+            url_value: facet_ref.r#ref.to_string(),
+            heads: facet_ref.heads.clone(),
         })
     }
 

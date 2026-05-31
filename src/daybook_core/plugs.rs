@@ -64,20 +64,18 @@ pub fn system_plugs() -> Vec<manifest::PlugManifest> {
                     key_tag: WellKnownFacetTag::ImageMetadata.into(),
                     value_schema: schemars::schema_for!(ImageMetadata),
                     display_config: default(),
-                    references: vec![FacetReferenceManifest {
-                        reference_kind: FacetReferenceKind::UrlFacet,
+                    references: vec![FacetReferenceManifest::UrlStringSplit {
                         json_path: "/facetRef".into(),
-                        at_commit_json_path: Some("/refHeads".into()),
+                        at_commit_json_path: "/refHeads".into(),
                     }],
                 },
                 FacetManifest {
                     key_tag: WellKnownFacetTag::Embedding.into(),
                     value_schema: schemars::schema_for!(daybook_types::doc::Embedding),
                     display_config: default(),
-                    references: vec![FacetReferenceManifest {
-                        reference_kind: FacetReferenceKind::UrlFacet,
+                    references: vec![FacetReferenceManifest::UrlStringSplit {
                         json_path: "/facetRef".into(),
-                        at_commit_json_path: Some("/refHeads".into()),
+                        at_commit_json_path: "/refHeads".into(),
                     }],
                 },
                 FacetManifest {
@@ -102,10 +100,8 @@ pub fn system_plugs() -> Vec<manifest::PlugManifest> {
                     key_tag: WellKnownFacetTag::Body.into(),
                     value_schema: schemars::schema_for!(Body),
                     display_config: default(),
-                    references: vec![FacetReferenceManifest {
-                        reference_kind: FacetReferenceKind::UrlFacet,
+                    references: vec![FacetReferenceManifest::UrlStringMany {
                         json_path: "/order".into(),
-                        at_commit_json_path: None,
                     }],
                 },
             ],
@@ -1059,12 +1055,11 @@ impl PlugsRepo {
             &patch.action,
             automerge::PatchAction::PutMap {
                 key,
-                value: (automerge::Value::Scalar(scalar), _),
+                value: (_val, _),
                 ..
             } if patch.path.len() == 2
                 && patch.path[1].1 == automerge::Prop::Map("plug_config_doc_ids".into())
                 && key == "vtag"
-                && matches!(&**scalar, automerge::ScalarValue::Bytes(_))
         );
         // Live notification path: local writes are emitted by mutators.
         // Replay/diff paths pass `live_origin = None`.
@@ -1087,12 +1082,13 @@ impl PlugsRepo {
                     return Ok(());
                 };
 
-                let vtag_bytes = match val {
-                    automerge::Value::Scalar(scalar) => match &**scalar {
-                        automerge::ScalarValue::Bytes(bytes) => bytes,
-                        _ => return Ok(()),
-                    },
-                    _ => return Ok(()),
+                let automerge::Value::Scalar(scalar) = val else {
+                    warn!(?patch.path, key = %key, "ignoring malformed plug vtag patch");
+                    return Ok(());
+                };
+                let automerge::ScalarValue::Bytes(vtag_bytes) = &**scalar else {
+                    warn!(?patch.path, key = %key, "ignoring malformed plug vtag patch");
+                    return Ok(());
                 };
                 let vtag = VersionTag::hydrate_bytes(vtag_bytes)?;
                 let event_origin = crate::repos::resolve_origin_from_vtag_actor(
@@ -1134,15 +1130,19 @@ impl PlugsRepo {
             }
             automerge::PatchAction::PutMap {
                 key,
-                value: (automerge::Value::Scalar(scalar), _),
+                value: (val, _),
                 ..
             } if patch.path.len() == 2
                 && patch.path[1].1 == automerge::Prop::Map("plug_config_doc_ids".into())
-                && key == "vtag"
-                && matches!(&**scalar, automerge::ScalarValue::Bytes(_)) =>
+                && key == "vtag" =>
             {
+                let automerge::Value::Scalar(scalar) = val else {
+                    warn!(?patch.path, key = %key, "ignoring malformed plug config-docs vtag patch");
+                    return Ok(());
+                };
                 let automerge::ScalarValue::Bytes(vtag_bytes) = &**scalar else {
-                    unreachable!("guard above ensures bytes")
+                    warn!(?patch.path, key = %key, "ignoring malformed plug config-docs vtag patch");
+                    return Ok(());
                 };
                 let vtag = VersionTag::hydrate_bytes(vtag_bytes)?;
                 let event_origin = crate::repos::resolve_origin_from_vtag_actor(
@@ -2244,31 +2244,50 @@ fn validate_facet_reference_manifests(
 ) -> Res<()> {
     let schema_json = serde_json::to_value(value_schema)?;
     for reference_manifest in references {
-        let Some(reference_node) = daybook_types::reference::schema_node_for_json_path(
-            &schema_json,
-            &reference_manifest.json_path,
-        )?
+        let reference_path = reference_manifest.json_path();
+        let Some(reference_node) =
+            daybook_types::reference::schema_node_for_json_path(&schema_json, reference_path)?
         else {
             eyre::bail!(
                 "invalid reference json_path '{}' for facet tag '{}': path does not exist in schema",
-                reference_manifest.json_path,
+                reference_path,
                 facet_tag
             );
         };
 
-        match reference_manifest.reference_kind {
-            manifest::FacetReferenceKind::UrlFacet => {
-                if !daybook_types::reference::schema_allows_url_reference(reference_node) {
+        match reference_manifest {
+            manifest::FacetReferenceManifest::UrlString { .. }
+            | manifest::FacetReferenceManifest::UrlStringSplit { .. } => {
+                if !daybook_types::reference::schema_allows_string(reference_node) {
                     eyre::bail!(
-                        "invalid reference json_path '{}' for facet tag '{}': schema node must allow a URL string or an array of URL strings",
-                        reference_manifest.json_path,
+                        "invalid reference json_path '{}' for facet tag '{}': schema node must allow a URL string",
+                        reference_path,
+                        facet_tag
+                    );
+                }
+            }
+            manifest::FacetReferenceManifest::UrlStringMany { .. } => {
+                if !daybook_types::reference::schema_allows_array_of_strings(reference_node) {
+                    eyre::bail!(
+                        "invalid reference json_path '{}' for facet tag '{}': schema node must allow an array of URL strings",
+                        reference_path,
+                        facet_tag
+                    );
+                }
+            }
+            manifest::FacetReferenceManifest::UrlObject { .. }
+            | manifest::FacetReferenceManifest::UrlObjectMany { .. } => {
+                if !daybook_types::reference::schema_allows_reference_object(reference_node) {
+                    eyre::bail!(
+                        "invalid reference json_path '{}' for facet tag '{}': schema node must allow a reference object",
+                        reference_path,
                         facet_tag
                     );
                 }
             }
         }
 
-        if let Some(at_commit_json_path) = &reference_manifest.at_commit_json_path {
+        if let Some(at_commit_json_path) = reference_manifest.at_commit_json_path() {
             let Some(at_commit_node) = daybook_types::reference::schema_node_for_json_path(
                 &schema_json,
                 at_commit_json_path,
@@ -2717,10 +2736,9 @@ mod tests {
             key_tag: "org.test.image".into(),
             value_schema: schemars::schema_for!(daybook_types::doc::ImageMetadata),
             display_config: default(),
-            references: vec![manifest::FacetReferenceManifest {
-                reference_kind: manifest::FacetReferenceKind::UrlFacet,
+            references: vec![manifest::FacetReferenceManifest::UrlStringSplit {
                 json_path: "/doesNotExist".into(),
-                at_commit_json_path: Some("/refHeads".into()),
+                at_commit_json_path: "/refHeads".into(),
             }],
         });
 
@@ -2743,10 +2761,9 @@ mod tests {
             key_tag: "org.test.image".into(),
             value_schema: schemars::schema_for!(daybook_types::doc::ImageMetadata),
             display_config: default(),
-            references: vec![manifest::FacetReferenceManifest {
-                reference_kind: manifest::FacetReferenceKind::UrlFacet,
+            references: vec![manifest::FacetReferenceManifest::UrlStringSplit {
                 json_path: "/facetRef".into(),
-                at_commit_json_path: Some("/mime".into()),
+                at_commit_json_path: "/mime".into(),
             }],
         });
 
