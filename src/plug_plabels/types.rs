@@ -56,12 +56,14 @@ daybook_types::define_enum_and_tag!(
     }
 );
 
+#[allow(unused)]
 pub fn pseudo_label_key() -> daybook_types::doc::FacetKey {
     daybook_types::doc::FacetKey::from(daybook_types::doc::FacetTag::Any(
         PlabelFacetTag::PseudoLabel.as_str().into(),
     ))
 }
 
+#[allow(unused)]
 pub fn pseudo_label_candidates_key(id: &str) -> daybook_types::doc::FacetKey {
     daybook_types::doc::FacetKey {
         tag: daybook_types::doc::FacetTag::Any(
@@ -71,7 +73,7 @@ pub fn pseudo_label_candidates_key(id: &str) -> daybook_types::doc::FacetKey {
     }
 }
 
-#[expect(dead_code)]
+#[allow(unused)]
 pub fn pseudo_label_error_key() -> daybook_types::doc::FacetKey {
     daybook_types::doc::FacetKey::from(daybook_types::doc::FacetTag::Any(
         PlabelFacetTag::PseudoLabelErrorFacet.as_str().into(),

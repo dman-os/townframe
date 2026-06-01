@@ -1,4 +1,4 @@
-use crate::ffi::{CloneBootstrapInfo, CloneTicketWithQr, FfiError, SharedFfiCtx};
+use crate::ffi::{CloneTicketWithQr, FfiError, SharedFfiCtx};
 use crate::interlude::*;
 
 use crate::repos::blobs::BlobsRepoFfi;

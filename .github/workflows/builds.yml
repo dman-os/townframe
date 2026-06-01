@@ -41,6 +41,7 @@ env:
   OLLAMA_PASSWORD: ${{ secrets.OLLAMA_PASSWORD }}
   DAYBOOK_ANDROID_CLI_TARGET: aarch64-linux-android
   DAYBOOK_PRERELEASE_TAG: dev
+  RUST_VERSION: 2026-04-16
 
 jobs:
   resolve-release-meta:
@@ -203,7 +204,7 @@ jobs:
       - uses: actions-rust-lang/setup-rust-toolchain@v1
         with:
           cache: false
-          toolchain: nightly-2026-01-01
+          toolchain: nightly-${{ env.RUST_VERSION }}
           target: wasm32-wasip2
 
       - uses: Swatinem/rust-cache@v2
@@ -425,7 +426,7 @@ jobs:
       - uses: actions-rust-lang/setup-rust-toolchain@v1
         with:
           cache: false
-          toolchain: nightly-2026-01-01
+          toolchain: nightly-${{ env.RUST_VERSION }}
           target: wasm32-wasip2
 
       - uses: Swatinem/rust-cache@v2
@@ -570,7 +571,7 @@ jobs:
       - uses: actions-rust-lang/setup-rust-toolchain@v1
         with:
           cache: false
-          toolchain: nightly-2026-01-01
+          toolchain: nightly-${{ env.RUST_VERSION }}
           target: wasm32-wasip2
 
       - uses: Swatinem/rust-cache@v2
