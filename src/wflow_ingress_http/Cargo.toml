@@ -18,23 +18,28 @@ path = "lib.rs"
 crate-type = ["cdylib"]
 
 [dependencies]
-# wasmcloud-component = "0.2.0"
-wit-bindgen.workspace = true
+#
+# internal
 utils_rs.workspace = true
 api_utils_rs.workspace = true
-macros.workspace = true
 
-serde.workspace = true
+#
+# encoding
 serde_json.workspace = true
 
+#
+# error
 thiserror.workspace = true
-displaydoc.workspace = true
-parking_lot.workspace = true
 
+#
+# wit
+wit-bindgen.workspace = true
+
+#
+# http
 axum = { workspace = true, features = [
   "form", "json", "macros", "multipart", "query", "original-uri",
   "query", "tower-log", "tracing", "matched-path", 
   ] }
-axum-extra = { workspace = true, features = ["typed-header"] }
 tower.workspace = true
 http.workspace = true

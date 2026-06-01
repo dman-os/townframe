@@ -26,7 +26,6 @@ surelock.workspace = true
 tokio = { workspace = true, features = ["sync", "macros", "rt", "rt-multi-thread", "time", "tracing"] }
 tokio-util = { workspace = true }
 async-lock = { workspace = true }
-tokio-tungstenite = { version = "0.27.0", features = ["url"] }
 async-trait.workspace = true
 futures-buffered.workspace = true
 futures = { workspace = true }
@@ -40,12 +39,8 @@ autosurgeon = { workspace = true }
 # encoding
 serde.workspace = true
 serde_json = { workspace = true }
-data-encoding.workspace = true
-bytes.workspace = true
-camino = "1.2.2"
 sqlx = { workspace = true, features = ["sqlite", "runtime-tokio"] }
 rand.workspace = true
-blake3.workspace = true
 tempfile.workspace = true
 
 #
@@ -58,14 +53,11 @@ irpc-iroh.workspace = true
 #
 # sync
 future_form = { version = "0.3.0", }
-keyhive_core = { version = "0.3.0", }
-keyhive_crypto = { version = "0.1.0", }
 sedimentree_core = { workspace = true, features = ["rayon"] }
 sedimentree_fs_storage = { workspace = true }
 subduction_core = { workspace = true  }
 subduction_crypto = { workspace = true, }
 subduction_iroh = { workspace = true }
-subduction_keyhive = { workspace = true, }
 subduction_websocket = { workspace = true, features = ["tokio_base"], }
 
 #

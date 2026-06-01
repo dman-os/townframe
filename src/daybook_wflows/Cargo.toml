@@ -3,6 +3,9 @@ name = "daybook_wflows"
 version.workspace = true
 edition.workspace = true
 
+[package.metadata.cargo-machete]
+ignored = ["color-eyre"]
+
 [lints]
 workspace = true
 
@@ -11,7 +14,8 @@ crate-type = ["cdylib"]
 path = "lib.rs"
 
 [dependencies]
-utils_rs = { workspace = true }
+#
+# internal
 api_utils_rs.workspace = true
 am_utils_rs.workspace = true
 wflow_sdk.workspace = true
@@ -20,15 +24,10 @@ daybook_types = { workspace = true, features = ["wit", "automerge"] }
 # genai = "0.4.1"
 # llm = "1.3.4"
 
-# ds
-multihash.workspace = true
-
-# serde
-serde.workspace = true
-
+#
 # error
 color-eyre.workspace = true
-thiserror.workspace = true
-displaydoc.workspace = true
 
+#
+# wit
 wit-bindgen.workspace = true

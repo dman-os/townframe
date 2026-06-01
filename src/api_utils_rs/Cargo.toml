@@ -3,6 +3,9 @@ name = "api_utils_rs"
 version.workspace = true
 edition.workspace = true
 
+[package.metadata.cargo-machete]
+ignored = ["automerge", "async-trait"]
+
 [lints]
 workspace = true
 
@@ -14,27 +17,32 @@ default = ["automerge"]
 automerge = ["dep:autosurgeon", "dep:automerge"]
 
 [dependencies]
+#
+# internal
 utils_rs.workspace = true
-
 autosurgeon = { workspace = true, optional = true }
 automerge = { workspace = true, optional = true }
 
-# futures
+#
+# async
 async-trait.workspace = true
 tokio = { workspace = true, features = ["macros", "rt", "sync", "time", "io-util", "tracing"] }
 
-# serde
+#
+# encoding
 serde.workspace = true
-serde_json.workspace = true
 
-# errors
-color-eyre.workspace = true
+#
+# error
 garde.workspace = true
 thiserror.workspace = true
 displaydoc.workspace = true
 
+#
+# wit
 wit-bindgen.workspace = true
 
+#
 # http
 utoipa.workspace = true
 http.workspace = true

@@ -3,6 +3,9 @@ name = "daybook_cli"
 version.workspace = true
 edition.workspace = true
 
+[package.metadata.cargo-machete]
+ignored = ["serde"]
+
 [lints]
 workspace = true
 
@@ -11,56 +14,50 @@ name = "daybook_cli"
 path = "main.rs"
 
 [dependencies]
+#
 # internal
 utils_rs = { workspace = true, features = ["native"] }
 am_utils_rs.workspace = true
 daybook_core = { workspace = true }
 daybook_types = { workspace = true }
-wflow = { workspace = true }
 
+#
 # cli
 clap = { workspace = true, features = ["derive", "env", "string"] }
 clap_complete.workspace = true
 comfy-table = "7.2"
-colored = "2"
 
-dotenv-flow.workspace = true
-
+#
 # async 
 tokio = { workspace = true, features = ["rt-multi-thread", "fs", "time", "tracing"] }
 
-sqlx = { workspace = true, features = ["sqlite", "runtime-tokio"] }
-
+#
 # encoding
 serde = { workspace = true }
 serde_json.workspace = true
 
+#
 # automerge
-automerge.workspace = true
 autosurgeon = { workspace = true, features = ["uuid"] }
 
 # parking_lot = "0.12"
 # libc = "0.2"
 # struct-patch = "0.10"
 
+#
 # fs
 directories.workspace = true
 # fuser = { version = "0.16", features = ["abi-7-31"] }
 
-scopeguard.workspace = true
-
+#
 # error
 # FIXME: make this work
 # run into https://github.com/zkat/miette/issues/384
 # and I'm not willing to replace eyre
 # miette = { version = "7.6.0", features = ["fancy"] }
-thiserror.workspace = true
-displaydoc.workspace = true
-color-eyre.workspace = true
 
 #
 # sync
-iroh = { workspace = true }
 qrcode.workspace = true
 big_sync_core = { workspace = true }
 surelock = { workspace = true }

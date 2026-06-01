@@ -21,7 +21,6 @@ daybook_types = { workspace = true, features = ["automerge", "schemars", "manife
 tokio = { workspace = true, features = ["rt-multi-thread", "fs", "time", "tracing", "process"] }
 serde = { workspace = true, features = ["derive"] }
 serde_json.workspace = true
-futures = { workspace = true }
 http.workspace = true
 
 # generator
@@ -33,5 +32,4 @@ data-encoding.workspace = true
 oci-spec = "0.8.4"
 oci-wasm = { version = "0.3.0", default-features = false, features = ["rustls-tls"] }
 sha2 = "0.10.9"
-zstd.workspace = true
 url.workspace = true

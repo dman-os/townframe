@@ -21,14 +21,13 @@ big_sync_core.workspace = true
 #
 # ds
 surelock.workspace = true
-atomic-take = "1.1.0"
 
 #
 # encoding
 serde.workspace = true
 
 #
-# errors
+# error
 thiserror.workspace = true
 
 #
@@ -38,7 +37,6 @@ structstruck.workspace = true
 #
 # async
 tokio-util.workspace = true
-async-channel.workspace = true
 future_form.workspace = true
 rand.workspace = true
 futures-buffered.workspace = true
@@ -55,7 +53,7 @@ iroh = { workspace = true }
 irpc-iroh.workspace = true
 
 #
-# logging
+# log
 tracing.workspace = true
 
 [dev-dependencies]

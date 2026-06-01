@@ -3,6 +3,9 @@ name = "daybook_ffi"
 version.workspace = true
 edition.workspace = true
 
+[package.metadata.cargo-machete]
+ignored = ["am_utils_rs"]
+
 [lints]
 workspace = true
 
@@ -20,8 +23,8 @@ path = "lib.rs"
 default = ["nokhwa"]
 nokhwa = ["dep:nokhwa"]
 
-
 [dependencies]
+#
 # internal
 utils_rs = { workspace = true, features = ["hash"] }
 am_utils_rs = { workspace = true }
@@ -29,46 +32,43 @@ daybook_core = { workspace = true, features = ["uniffi"] }
 daybook_types = { workspace = true, features = ["uniffi"] }
 mltools = { workspace = true, features = ["hf_hub"] }
 
-# serde
-serde.workspace = true
+#
+# encoding
 serde_json.workspace = true
 api_utils_rs.workspace = true
 
+#
 # error
 thiserror.workspace = true
-displaydoc.workspace = true
 
+#
 # log
 tracing.workspace = true
-tracing-subscriber.workspace = true
-tracing-unwrap.workspace = true
 
+#
 # ds
-once_cell.workspace = true
-time.workspace = true
-parking_lot.workspace = true
-url.workspace = true
-garde.workspace = true
 surelock.workspace = true
 
+#
 # async
 tokio = { workspace = true, features = ["rt-multi-thread","sync", "macros", "fs", "tracing"] }
 tokio-util.workspace = true
-futures = { workspace = true }
 regex = "1"
 
+#
 # ffi
 uniffi = { workspace = true, features = ["cli"] }
 
+#
 # sync
 autosurgeon = { workspace = true, features = ["uuid"] }
-automerge = { workspace = true }
 
-sqlx = { workspace = true, features = ["sqlite"] }
-
+#
+# macros
 pastey.workspace = true
-directories.workspace = true
 
+#
+# misc
 rqrr = "0.10.1"
 image = { version = "0.25", default-features = true, features = ["jpeg", "png"] }
 qrcode = { workspace = true, features = ["image"] }

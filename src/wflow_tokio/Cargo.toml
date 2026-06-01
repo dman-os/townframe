@@ -3,6 +3,9 @@ name = "wflow_tokio"
 version.workspace = true
 edition.workspace = true
 
+[package.metadata.cargo-machete]
+ignored = ["async-trait"]
+
 [lints]
 workspace = true
 
@@ -14,28 +17,25 @@ serde = []
 path = "lib.rs"
 
 [dependencies]
+#
 # internal
 wflow_core.workspace = true
 utils_rs.workspace = true
-macros.workspace = true
 
+#
 # encoding
-serde.workspace = true
 serde_json.workspace = true
 
+#
 # async
 async-trait.workspace = true
 tokio-util.workspace = true
 async-channel.workspace = true
 
-# error
-anyhow.workspace = true
-thiserror.workspace = true
-displaydoc.workspace = true
-parking_lot.workspace = true
-
+#
 # tokio
 tokio.workspace = true
 
-# logging
+#
+# log
 tracing.workspace = true

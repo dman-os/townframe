@@ -37,7 +37,6 @@ thiserror.workspace = true
 # async
 # tokio-util.workspace = true
 async-channel.workspace = true
-futures.workspace = true
 future_form.workspace = true
 
 #

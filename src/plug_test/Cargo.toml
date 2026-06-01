@@ -15,15 +15,26 @@ name = "manifest"
 path = "manifest.rs"
 
 [dependencies]
+#
+# internal
+utils_rs.workspace = true
 api_utils_rs = { workspace = true }
 daybook_pdk = { workspace = true }
 daybook_types = { workspace = true, features = ["automerge", "manifest", "wit", "schemars"] }
+wflow_sdk = { workspace = true }
+
+#
+# encoding
 serde.workspace = true
 serde_json.workspace = true
+
+#
+# schema
 schemars = { version = "1.2", features = ["url2"] }
-wflow_sdk = { workspace = true }
+
+#
+# wit
 wit-bindgen = { workspace = true }
-color-eyre.workspace = true
 
 [dev-dependencies]
 daybook_core = { workspace = true, features = ["test-support"] }

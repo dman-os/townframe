@@ -10,16 +10,21 @@ workspace = true
 path = "lib.rs"
 
 [dependencies]
+#
+# internal
 api_utils_rs.workspace = true
-utils_rs = { workspace = true, features = ["hash"] }
 
-# serde
+#
+# encoding
 serde.workspace = true
 serde_json.workspace = true
 
-# errors
+#
+# error
 color-eyre.workspace = true
 thiserror.workspace = true
 displaydoc.workspace = true
 
+#
+# wit
 wit-bindgen.workspace = true

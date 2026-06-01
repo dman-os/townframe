@@ -43,6 +43,7 @@ exclude = [
   "./src/tests_http",
   "./src/granary_web",
   "./src/leptos_wasi/",
+  "./src/daybook_xilem/",
 ]
 
 [workspace.package]
@@ -224,6 +225,10 @@ iroh-gossip = "0.99.0"
 # actors
 irpc = { version = "0.15.0", features = ["derive"] }
 irpc-iroh = "0.15.0"
+
+#
+# gui
+# xilem = { path = "../xilem/xilem/" }
 
 [patch.crates-io]
 autosurgeon = { git = "https://github.com/dman-os/autosurgeon", rev = "274285c6007cccf4e5eb21a96bd1152ee0c6576c" }

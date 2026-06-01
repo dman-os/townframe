@@ -1,6 +1,10 @@
 #![recursion_limit = "256"]
 
-mod interlude {}
+mod interlude {
+    pub use utils_rs::prelude::*;
+}
+
+use crate::interlude::*;
 
 use std::sync::Arc;
 

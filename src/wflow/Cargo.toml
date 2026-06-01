@@ -14,43 +14,43 @@ default = ["test-harness"]
 test-harness = ["wasmtime", "insta", "tempfile"]
 
 [dependencies]
+#
 # internal
 wflow_core = { workspace = true, features = ["test-harness"] }
 wflow_tokio.workspace = true
 wash_plugin_wflow.workspace = true
 utils_rs = { workspace = true, features = ["hash"] }
 
-# encodign
-serde.workspace = true
+#
+# encoding
 serde_json.workspace = true
 
-# ds
-time.workspace = true
-parking_lot.workspace = true
-async-channel.workspace = true
-
-# errors
+#
+# error
 anyhow.workspace = true
-thiserror.workspace = true
-displaydoc.workspace = true
 
+#
 # async
 async-trait.workspace = true
 tokio = { workspace = true, features = ["rt-multi-thread", "sync", "macros", "fs", "tracing"] }
-tokio-util.workspace = true
 futures.workspace = true
 
+#
 # db
 sqlx = { workspace = true, features = ["sqlite"] }
 
+#
 # wasm
 wash-runtime.workspace = true
 wasmtime = { workspace = true, optional = true }
 
+#
 # testing
 insta = { workspace = true, optional = true, features = ["json"] }
 tempfile = { workspace = true, optional = true }
 
+#
+# log
 tracing.workspace = true
 
 [dev-dependencies]
