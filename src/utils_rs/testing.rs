@@ -10,6 +10,7 @@ pub fn setup_tracing_once() {
     });
 }
 
+#[allow(clippy::unnecessary_literal_unwrap)]
 fn setup_tracing() -> Res<()> {
     #[cfg(not(target_arch = "wasm32"))]
     let filter = {
