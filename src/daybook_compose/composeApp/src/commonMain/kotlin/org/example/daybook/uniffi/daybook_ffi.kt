@@ -55,8 +55,10 @@ import org.example.daybook.uniffi.core.FfiConverterTypeDocBundle
 import org.example.daybook.uniffi.core.FfiConverterTypeDocEntry
 import org.example.daybook.uniffi.core.FfiConverterTypeDocNBranches
 import org.example.daybook.uniffi.core.FfiConverterTypeDrawerEvent
+import org.example.daybook.uniffi.core.FfiConverterTypeInitEvent
 import org.example.daybook.uniffi.core.FfiConverterTypeKnownRepoEntry
 import org.example.daybook.uniffi.core.FfiConverterTypeListenerRegistration
+import org.example.daybook.uniffi.core.FfiConverterTypeLocalStateEvent
 import org.example.daybook.uniffi.core.FfiConverterTypePanel
 import org.example.daybook.uniffi.core.FfiConverterTypePlugsEvent
 import org.example.daybook.uniffi.core.FfiConverterTypeProgressEvent
@@ -71,8 +73,10 @@ import org.example.daybook.uniffi.core.FfiConverterTypeTablesEvent
 import org.example.daybook.uniffi.core.FfiConverterTypeTablesPatches
 import org.example.daybook.uniffi.core.FfiConverterTypeUpdateDocArgsV2
 import org.example.daybook.uniffi.core.FfiConverterTypeWindow
+import org.example.daybook.uniffi.core.InitEvent
 import org.example.daybook.uniffi.core.KnownRepoEntry
 import org.example.daybook.uniffi.core.ListenerRegistration
+import org.example.daybook.uniffi.core.LocalStateEvent
 import org.example.daybook.uniffi.core.Panel
 import org.example.daybook.uniffi.core.PlugsEvent
 import org.example.daybook.uniffi.core.ProgressEvent
@@ -102,8 +106,10 @@ import org.example.daybook.uniffi.core.RustBuffer as RustBufferDocBundle
 import org.example.daybook.uniffi.core.RustBuffer as RustBufferDocEntry
 import org.example.daybook.uniffi.core.RustBuffer as RustBufferDocNBranches
 import org.example.daybook.uniffi.core.RustBuffer as RustBufferDrawerEvent
+import org.example.daybook.uniffi.core.RustBuffer as RustBufferInitEvent
 import org.example.daybook.uniffi.core.RustBuffer as RustBufferKnownRepoEntry
 import org.example.daybook.uniffi.core.RustBuffer as RustBufferListenerRegistration
+import org.example.daybook.uniffi.core.RustBuffer as RustBufferLocalStateEvent
 import org.example.daybook.uniffi.core.RustBuffer as RustBufferPanel
 import org.example.daybook.uniffi.core.RustBuffer as RustBufferPlugsEvent
 import org.example.daybook.uniffi.core.RustBuffer as RustBufferProgressEvent
@@ -725,11 +731,17 @@ internal interface UniffiCallbackInterfaceDispatchEventListenerMethod0 : com.sun
 internal interface UniffiCallbackInterfaceDrawerEventListenerMethod0 : com.sun.jna.Callback {
     fun callback(`uniffiHandle`: Long,`event`: RustBufferDrawerEvent.ByValue,`uniffiOutReturn`: Pointer,uniffiCallStatus: UniffiRustCallStatus,)
 }
+internal interface UniffiCallbackInterfaceInitEventListenerMethod0 : com.sun.jna.Callback {
+    fun callback(`uniffiHandle`: Long,`event`: RustBufferInitEvent.ByValue,`uniffiOutReturn`: Pointer,uniffiCallStatus: UniffiRustCallStatus,)
+}
 internal interface UniffiCallbackInterfacePlugsEventListenerMethod0 : com.sun.jna.Callback {
     fun callback(`uniffiHandle`: Long,`event`: RustBufferPlugsEvent.ByValue,`uniffiOutReturn`: Pointer,uniffiCallStatus: UniffiRustCallStatus,)
 }
 internal interface UniffiCallbackInterfaceProgressEventListenerMethod0 : com.sun.jna.Callback {
     fun callback(`uniffiHandle`: Long,`event`: RustBufferProgressEvent.ByValue,`uniffiOutReturn`: Pointer,uniffiCallStatus: UniffiRustCallStatus,)
+}
+internal interface UniffiCallbackInterfaceLocalStateEventListenerMethod0 : com.sun.jna.Callback {
+    fun callback(`uniffiHandle`: Long,`event`: RustBufferLocalStateEvent.ByValue,`uniffiOutReturn`: Pointer,uniffiCallStatus: UniffiRustCallStatus,)
 }
 internal interface UniffiCallbackInterfaceTablesEventListenerMethod0 : com.sun.jna.Callback {
     fun callback(`uniffiHandle`: Long,`event`: RustBufferTablesEvent.ByValue,`uniffiOutReturn`: Pointer,uniffiCallStatus: UniffiRustCallStatus,)
@@ -835,6 +847,25 @@ internal open class UniffiVTableCallbackInterfaceDrawerEventListener(
     }
 
 }
+@Structure.FieldOrder("uniffiFree", "uniffiClone", "onInitEvent")
+internal open class UniffiVTableCallbackInterfaceInitEventListener(
+    @JvmField internal var `uniffiFree`: UniffiCallbackInterfaceFree? = null,
+    @JvmField internal var `uniffiClone`: UniffiCallbackInterfaceClone? = null,
+    @JvmField internal var `onInitEvent`: UniffiCallbackInterfaceInitEventListenerMethod0? = null,
+) : Structure() {
+    class UniffiByValue(
+        `uniffiFree`: UniffiCallbackInterfaceFree? = null,
+        `uniffiClone`: UniffiCallbackInterfaceClone? = null,
+        `onInitEvent`: UniffiCallbackInterfaceInitEventListenerMethod0? = null,
+    ): UniffiVTableCallbackInterfaceInitEventListener(`uniffiFree`,`uniffiClone`,`onInitEvent`,), Structure.ByValue
+
+   internal fun uniffiSetValue(other: UniffiVTableCallbackInterfaceInitEventListener) {
+        `uniffiFree` = other.`uniffiFree`
+        `uniffiClone` = other.`uniffiClone`
+        `onInitEvent` = other.`onInitEvent`
+    }
+
+}
 @Structure.FieldOrder("uniffiFree", "uniffiClone", "onPlugsEvent")
 internal open class UniffiVTableCallbackInterfacePlugsEventListener(
     @JvmField internal var `uniffiFree`: UniffiCallbackInterfaceFree? = null,
@@ -870,6 +901,25 @@ internal open class UniffiVTableCallbackInterfaceProgressEventListener(
         `uniffiFree` = other.`uniffiFree`
         `uniffiClone` = other.`uniffiClone`
         `onProgressEvent` = other.`onProgressEvent`
+    }
+
+}
+@Structure.FieldOrder("uniffiFree", "uniffiClone", "onLocalStateEvent")
+internal open class UniffiVTableCallbackInterfaceLocalStateEventListener(
+    @JvmField internal var `uniffiFree`: UniffiCallbackInterfaceFree? = null,
+    @JvmField internal var `uniffiClone`: UniffiCallbackInterfaceClone? = null,
+    @JvmField internal var `onLocalStateEvent`: UniffiCallbackInterfaceLocalStateEventListenerMethod0? = null,
+) : Structure() {
+    class UniffiByValue(
+        `uniffiFree`: UniffiCallbackInterfaceFree? = null,
+        `uniffiClone`: UniffiCallbackInterfaceClone? = null,
+        `onLocalStateEvent`: UniffiCallbackInterfaceLocalStateEventListenerMethod0? = null,
+    ): UniffiVTableCallbackInterfaceLocalStateEventListener(`uniffiFree`,`uniffiClone`,`onLocalStateEvent`,), Structure.ByValue
+
+   internal fun uniffiSetValue(other: UniffiVTableCallbackInterfaceLocalStateEventListener) {
+        `uniffiFree` = other.`uniffiFree`
+        `uniffiClone` = other.`uniffiClone`
+        `onLocalStateEvent` = other.`onLocalStateEvent`
     }
 
 }
@@ -916,227 +966,243 @@ internal object IntegrityCheckingUniffiLib {
         uniffiCheckApiChecksums(this)
     }
     external fun uniffi_daybook_ffi_checksum_method_camerapreviewffi_clear_qr_listener(
-    ): Short
-    external fun uniffi_daybook_ffi_checksum_method_camerapreviewffi_latest_frame(
-    ): Short
-    external fun uniffi_daybook_ffi_checksum_method_camerapreviewffi_list_devices(
-    ): Short
-    external fun uniffi_daybook_ffi_checksum_method_camerapreviewffi_set_qr_analysis_enabled(
-    ): Short
-    external fun uniffi_daybook_ffi_checksum_method_camerapreviewffi_set_qr_listener(
-    ): Short
-    external fun uniffi_daybook_ffi_checksum_method_camerapreviewffi_start_stream(
-    ): Short
-    external fun uniffi_daybook_ffi_checksum_method_camerapreviewffi_stop_stream(
-    ): Short
-    external fun uniffi_daybook_ffi_checksum_method_camerapreviewffi_supports_native_qr_analysis(
-    ): Short
-    external fun uniffi_daybook_ffi_checksum_method_camerapreviewffi_take_latest_frame(
-    ): Short
-    external fun uniffi_daybook_ffi_checksum_method_camerapreviewframelistener_on_camera_preview_frame(
-    ): Short
-    external fun uniffi_daybook_ffi_checksum_method_cameraqranalyzerffi_clear_listener(
-    ): Short
-    external fun uniffi_daybook_ffi_checksum_method_cameraqranalyzerffi_set_listener(
-    ): Short
-    external fun uniffi_daybook_ffi_checksum_method_cameraqranalyzerffi_submit_jpeg_frame(
-    ): Short
-    external fun uniffi_daybook_ffi_checksum_method_cameraqreventlistener_on_camera_qr_overlays_updated(
-    ): Short
-    external fun uniffi_daybook_ffi_checksum_method_cameraqreventlistener_on_camera_qr_detected(
-    ): Short
-    external fun uniffi_daybook_ffi_checksum_method_cameraqreventlistener_on_camera_qr_error(
-    ): Short
-    external fun uniffi_daybook_ffi_checksum_method_appffictx_check_clone_destination(
-    ): Short
-    external fun uniffi_daybook_ffi_checksum_method_appffictx_clone_repo_init_from_url(
-    ): Short
-    external fun uniffi_daybook_ffi_checksum_method_appffictx_default_clone_parent_dir(
-    ): Short
-    external fun uniffi_daybook_ffi_checksum_method_appffictx_forget_known_repo(
-    ): Short
-    external fun uniffi_daybook_ffi_checksum_method_appffictx_get_repo_config(
-    ): Short
-    external fun uniffi_daybook_ffi_checksum_method_appffictx_is_repo_usable(
-    ): Short
-    external fun uniffi_daybook_ffi_checksum_method_appffictx_register_repo_path(
-    ): Short
-    external fun uniffi_daybook_ffi_checksum_method_appffictx_resolve_clone_url(
-    ): Short
-    external fun uniffi_daybook_ffi_checksum_method_ffierror_message(
-    ): Short
-    external fun uniffi_daybook_ffi_checksum_method_blobsrepoffi_get_path(
-    ): Short
-    external fun uniffi_daybook_ffi_checksum_method_blobsrepoffi_put(
-    ): Short
-    external fun uniffi_daybook_ffi_checksum_method_configeventlistener_on_config_event(
-    ): Short
-    external fun uniffi_daybook_ffi_checksum_method_configrepoffi_ffi_register_listener(
-    ): Short
-    external fun uniffi_daybook_ffi_checksum_method_configrepoffi_get_facet_display_hint(
-    ): Short
-    external fun uniffi_daybook_ffi_checksum_method_configrepoffi_get_mltools_config_json(
-    ): Short
-    external fun uniffi_daybook_ffi_checksum_method_configrepoffi_list_display_hints(
-    ): Short
-    external fun uniffi_daybook_ffi_checksum_method_configrepoffi_provision_mobile_default_mltools(
-    ): Short
-    external fun uniffi_daybook_ffi_checksum_method_configrepoffi_set_facet_display_hint(
-    ): Short
-    external fun uniffi_daybook_ffi_checksum_method_configrepoffi_set_mltools_config_json(
-    ): Short
-    external fun uniffi_daybook_ffi_checksum_method_configrepoffi_stop(
-    ): Short
-    external fun uniffi_daybook_ffi_checksum_method_dispatcheventlistener_on_dispatch_event(
-    ): Short
-    external fun uniffi_daybook_ffi_checksum_method_dispatchrepoffi_ffi_register_listener(
-    ): Short
-    external fun uniffi_daybook_ffi_checksum_method_dispatchrepoffi_list(
-    ): Short
-    external fun uniffi_daybook_ffi_checksum_method_dispatchrepoffi_stop(
-    ): Short
-    external fun uniffi_daybook_ffi_checksum_method_drawereventlistener_on_drawer_event(
-    ): Short
-    external fun uniffi_daybook_ffi_checksum_method_drawerrepoffi_add(
-    ): Short
-    external fun uniffi_daybook_ffi_checksum_method_drawerrepoffi_batch_add(
-    ): Short
-    external fun uniffi_daybook_ffi_checksum_method_drawerrepoffi_del(
-    ): Short
-    external fun uniffi_daybook_ffi_checksum_method_drawerrepoffi_ffi_register_listener(
-    ): Short
-    external fun uniffi_daybook_ffi_checksum_method_drawerrepoffi_get(
-    ): Short
-    external fun uniffi_daybook_ffi_checksum_method_drawerrepoffi_get_bundle(
-    ): Short
-    external fun uniffi_daybook_ffi_checksum_method_drawerrepoffi_get_entry(
-    ): Short
-    external fun uniffi_daybook_ffi_checksum_method_drawerrepoffi_list(
-    ): Short
-    external fun uniffi_daybook_ffi_checksum_method_drawerrepoffi_stop(
-    ): Short
-    external fun uniffi_daybook_ffi_checksum_method_drawerrepoffi_update(
-    ): Short
-    external fun uniffi_daybook_ffi_checksum_method_drawerrepoffi_update_batch(
-    ): Short
-    external fun uniffi_daybook_ffi_checksum_method_plugseventlistener_on_plugs_event(
-    ): Short
-    external fun uniffi_daybook_ffi_checksum_method_plugsrepoffi_ffi_register_listener(
-    ): Short
-    external fun uniffi_daybook_ffi_checksum_method_plugsrepoffi_stop(
-    ): Short
-    external fun uniffi_daybook_ffi_checksum_method_progresseventlistener_on_progress_event(
-    ): Short
-    external fun uniffi_daybook_ffi_checksum_method_progressrepoffi_add_update(
-    ): Short
-    external fun uniffi_daybook_ffi_checksum_method_progressrepoffi_clear_completed(
-    ): Short
-    external fun uniffi_daybook_ffi_checksum_method_progressrepoffi_dismiss(
-    ): Short
-    external fun uniffi_daybook_ffi_checksum_method_progressrepoffi_ffi_register_listener(
-    ): Short
-    external fun uniffi_daybook_ffi_checksum_method_progressrepoffi_get(
-    ): Short
-    external fun uniffi_daybook_ffi_checksum_method_progressrepoffi_list(
-    ): Short
-    external fun uniffi_daybook_ffi_checksum_method_progressrepoffi_list_by_tag_prefix(
-    ): Short
-    external fun uniffi_daybook_ffi_checksum_method_progressrepoffi_list_updates(
-    ): Short
-    external fun uniffi_daybook_ffi_checksum_method_progressrepoffi_mark_viewed(
-    ): Short
-    external fun uniffi_daybook_ffi_checksum_method_progressrepoffi_set_retention_override(
-    ): Short
-    external fun uniffi_daybook_ffi_checksum_method_progressrepoffi_stop(
-    ): Short
-    external fun uniffi_daybook_ffi_checksum_method_progressrepoffi_upsert_task(
-    ): Short
-    external fun uniffi_daybook_ffi_checksum_method_syncrepoffi_connect_known_devices_once(
-    ): Short
-    external fun uniffi_daybook_ffi_checksum_method_syncrepoffi_connect_url(
-    ): Short
-    external fun uniffi_daybook_ffi_checksum_method_syncrepoffi_get_ticket_qr_png(
-    ): Short
-    external fun uniffi_daybook_ffi_checksum_method_syncrepoffi_get_ticket_url(
-    ): Short
-    external fun uniffi_daybook_ffi_checksum_method_syncrepoffi_get_ticket_with_qr_png(
-    ): Short
-    external fun uniffi_daybook_ffi_checksum_method_syncrepoffi_stop(
-    ): Short
-    external fun uniffi_daybook_ffi_checksum_method_tableseventlistener_on_tables_event(
-    ): Short
-    external fun uniffi_daybook_ffi_checksum_method_tablesrepoffi_create_new_tab(
-    ): Short
-    external fun uniffi_daybook_ffi_checksum_method_tablesrepoffi_create_new_table(
-    ): Short
-    external fun uniffi_daybook_ffi_checksum_method_tablesrepoffi_ffi_register_listener(
-    ): Short
-    external fun uniffi_daybook_ffi_checksum_method_tablesrepoffi_get_panel(
-    ): Short
-    external fun uniffi_daybook_ffi_checksum_method_tablesrepoffi_get_selected_table(
-    ): Short
-    external fun uniffi_daybook_ffi_checksum_method_tablesrepoffi_get_tab(
-    ): Short
-    external fun uniffi_daybook_ffi_checksum_method_tablesrepoffi_get_table(
-    ): Short
-    external fun uniffi_daybook_ffi_checksum_method_tablesrepoffi_get_window(
-    ): Short
-    external fun uniffi_daybook_ffi_checksum_method_tablesrepoffi_list_panels(
-    ): Short
-    external fun uniffi_daybook_ffi_checksum_method_tablesrepoffi_list_tables(
-    ): Short
-    external fun uniffi_daybook_ffi_checksum_method_tablesrepoffi_list_tabs(
-    ): Short
-    external fun uniffi_daybook_ffi_checksum_method_tablesrepoffi_list_windows(
-    ): Short
-    external fun uniffi_daybook_ffi_checksum_method_tablesrepoffi_remove_tab(
-    ): Short
-    external fun uniffi_daybook_ffi_checksum_method_tablesrepoffi_set_panel(
-    ): Short
-    external fun uniffi_daybook_ffi_checksum_method_tablesrepoffi_set_tab(
-    ): Short
-    external fun uniffi_daybook_ffi_checksum_method_tablesrepoffi_set_table(
-    ): Short
-    external fun uniffi_daybook_ffi_checksum_method_tablesrepoffi_set_window(
-    ): Short
-    external fun uniffi_daybook_ffi_checksum_method_tablesrepoffi_stop(
-    ): Short
-    external fun uniffi_daybook_ffi_checksum_method_tablesrepoffi_update_batch(
-    ): Short
-    external fun uniffi_daybook_ffi_checksum_method_rtffi_dispatch_doc_facet(
-    ): Short
-    external fun uniffi_daybook_ffi_checksum_method_rtffi_stop(
-    ): Short
-    external fun uniffi_daybook_ffi_checksum_constructor_camerapreviewffi_load(
-    ): Short
-    external fun uniffi_daybook_ffi_checksum_constructor_cameraqranalyzerffi_load(
-    ): Short
-    external fun uniffi_daybook_ffi_checksum_constructor_appffictx_init(
-    ): Short
-    external fun uniffi_daybook_ffi_checksum_constructor_ffictx_init(
-    ): Short
-    external fun uniffi_daybook_ffi_checksum_constructor_blobsrepoffi_load(
-    ): Short
-    external fun uniffi_daybook_ffi_checksum_constructor_configrepoffi_load(
-    ): Short
-    external fun uniffi_daybook_ffi_checksum_constructor_dispatchrepoffi_load(
-    ): Short
-    external fun uniffi_daybook_ffi_checksum_constructor_drawerrepoffi_load(
-    ): Short
-    external fun uniffi_daybook_ffi_checksum_constructor_plugsrepoffi_load(
-    ): Short
-    external fun uniffi_daybook_ffi_checksum_constructor_progressrepoffi_load(
-    ): Short
-    external fun uniffi_daybook_ffi_checksum_constructor_syncrepoffi_load(
-    ): Short
-    external fun uniffi_daybook_ffi_checksum_constructor_tablesrepoffi_load(
-    ): Short
-    external fun uniffi_daybook_ffi_checksum_constructor_rtffi_load(
-    ): Short
-    external fun ffi_daybook_ffi_uniffi_contract_version(
-    ): Int
+): Short
+external fun uniffi_daybook_ffi_checksum_method_camerapreviewffi_latest_frame(
+): Short
+external fun uniffi_daybook_ffi_checksum_method_camerapreviewffi_list_devices(
+): Short
+external fun uniffi_daybook_ffi_checksum_method_camerapreviewffi_set_qr_analysis_enabled(
+): Short
+external fun uniffi_daybook_ffi_checksum_method_camerapreviewffi_set_qr_listener(
+): Short
+external fun uniffi_daybook_ffi_checksum_method_camerapreviewffi_start_stream(
+): Short
+external fun uniffi_daybook_ffi_checksum_method_camerapreviewffi_stop_stream(
+): Short
+external fun uniffi_daybook_ffi_checksum_method_camerapreviewffi_supports_native_qr_analysis(
+): Short
+external fun uniffi_daybook_ffi_checksum_method_camerapreviewffi_take_latest_frame(
+): Short
+external fun uniffi_daybook_ffi_checksum_method_camerapreviewframelistener_on_camera_preview_frame(
+): Short
+external fun uniffi_daybook_ffi_checksum_method_cameraqranalyzerffi_clear_listener(
+): Short
+external fun uniffi_daybook_ffi_checksum_method_cameraqranalyzerffi_set_listener(
+): Short
+external fun uniffi_daybook_ffi_checksum_method_cameraqranalyzerffi_submit_jpeg_frame(
+): Short
+external fun uniffi_daybook_ffi_checksum_method_cameraqreventlistener_on_camera_qr_overlays_updated(
+): Short
+external fun uniffi_daybook_ffi_checksum_method_cameraqreventlistener_on_camera_qr_detected(
+): Short
+external fun uniffi_daybook_ffi_checksum_method_cameraqreventlistener_on_camera_qr_error(
+): Short
+external fun uniffi_daybook_ffi_checksum_method_appffictx_check_clone_destination(
+): Short
+external fun uniffi_daybook_ffi_checksum_method_appffictx_clone_repo_init_from_url(
+): Short
+external fun uniffi_daybook_ffi_checksum_method_appffictx_default_clone_parent_dir(
+): Short
+external fun uniffi_daybook_ffi_checksum_method_appffictx_forget_known_repo(
+): Short
+external fun uniffi_daybook_ffi_checksum_method_appffictx_get_repo_config(
+): Short
+external fun uniffi_daybook_ffi_checksum_method_appffictx_is_repo_usable(
+): Short
+external fun uniffi_daybook_ffi_checksum_method_appffictx_register_repo_path(
+): Short
+external fun uniffi_daybook_ffi_checksum_method_appffictx_resolve_clone_url(
+): Short
+external fun uniffi_daybook_ffi_checksum_method_ffierror_message(
+): Short
+external fun uniffi_daybook_ffi_checksum_method_blobsrepoffi_get_path(
+): Short
+external fun uniffi_daybook_ffi_checksum_method_blobsrepoffi_put(
+): Short
+external fun uniffi_daybook_ffi_checksum_method_configeventlistener_on_config_event(
+): Short
+external fun uniffi_daybook_ffi_checksum_method_configrepoffi_ffi_register_listener(
+): Short
+external fun uniffi_daybook_ffi_checksum_method_configrepoffi_get_facet_display_hint(
+): Short
+external fun uniffi_daybook_ffi_checksum_method_configrepoffi_get_mltools_config_json(
+): Short
+external fun uniffi_daybook_ffi_checksum_method_configrepoffi_list_display_hints(
+): Short
+external fun uniffi_daybook_ffi_checksum_method_configrepoffi_provision_mobile_default_mltools(
+): Short
+external fun uniffi_daybook_ffi_checksum_method_configrepoffi_set_facet_display_hint(
+): Short
+external fun uniffi_daybook_ffi_checksum_method_configrepoffi_set_mltools_config_json(
+): Short
+external fun uniffi_daybook_ffi_checksum_method_configrepoffi_stop(
+): Short
+external fun uniffi_daybook_ffi_checksum_method_dispatcheventlistener_on_dispatch_event(
+): Short
+external fun uniffi_daybook_ffi_checksum_method_dispatchrepoffi_ffi_register_listener(
+): Short
+external fun uniffi_daybook_ffi_checksum_method_dispatchrepoffi_list(
+): Short
+external fun uniffi_daybook_ffi_checksum_method_dispatchrepoffi_stop(
+): Short
+external fun uniffi_daybook_ffi_checksum_method_drawereventlistener_on_drawer_event(
+): Short
+external fun uniffi_daybook_ffi_checksum_method_drawerrepoffi_add(
+): Short
+external fun uniffi_daybook_ffi_checksum_method_drawerrepoffi_batch_add(
+): Short
+external fun uniffi_daybook_ffi_checksum_method_drawerrepoffi_del(
+): Short
+external fun uniffi_daybook_ffi_checksum_method_drawerrepoffi_ffi_register_listener(
+): Short
+external fun uniffi_daybook_ffi_checksum_method_drawerrepoffi_get(
+): Short
+external fun uniffi_daybook_ffi_checksum_method_drawerrepoffi_get_bundle(
+): Short
+external fun uniffi_daybook_ffi_checksum_method_drawerrepoffi_get_entry(
+): Short
+external fun uniffi_daybook_ffi_checksum_method_drawerrepoffi_list(
+): Short
+external fun uniffi_daybook_ffi_checksum_method_drawerrepoffi_stop(
+): Short
+external fun uniffi_daybook_ffi_checksum_method_drawerrepoffi_update(
+): Short
+external fun uniffi_daybook_ffi_checksum_method_drawerrepoffi_update_batch(
+): Short
+external fun uniffi_daybook_ffi_checksum_method_initeventlistener_on_init_event(
+): Short
+external fun uniffi_daybook_ffi_checksum_method_initrepoffi_ffi_register_listener(
+): Short
+external fun uniffi_daybook_ffi_checksum_method_initrepoffi_stop(
+): Short
+external fun uniffi_daybook_ffi_checksum_method_plugseventlistener_on_plugs_event(
+): Short
+external fun uniffi_daybook_ffi_checksum_method_plugsrepoffi_ffi_register_listener(
+): Short
+external fun uniffi_daybook_ffi_checksum_method_plugsrepoffi_stop(
+): Short
+external fun uniffi_daybook_ffi_checksum_method_progresseventlistener_on_progress_event(
+): Short
+external fun uniffi_daybook_ffi_checksum_method_progressrepoffi_add_update(
+): Short
+external fun uniffi_daybook_ffi_checksum_method_progressrepoffi_clear_completed(
+): Short
+external fun uniffi_daybook_ffi_checksum_method_progressrepoffi_dismiss(
+): Short
+external fun uniffi_daybook_ffi_checksum_method_progressrepoffi_ffi_register_listener(
+): Short
+external fun uniffi_daybook_ffi_checksum_method_progressrepoffi_get(
+): Short
+external fun uniffi_daybook_ffi_checksum_method_progressrepoffi_list(
+): Short
+external fun uniffi_daybook_ffi_checksum_method_progressrepoffi_list_by_tag_prefix(
+): Short
+external fun uniffi_daybook_ffi_checksum_method_progressrepoffi_list_updates(
+): Short
+external fun uniffi_daybook_ffi_checksum_method_progressrepoffi_mark_viewed(
+): Short
+external fun uniffi_daybook_ffi_checksum_method_progressrepoffi_set_retention_override(
+): Short
+external fun uniffi_daybook_ffi_checksum_method_progressrepoffi_stop(
+): Short
+external fun uniffi_daybook_ffi_checksum_method_progressrepoffi_upsert_task(
+): Short
+external fun uniffi_daybook_ffi_checksum_method_localstateeventlistener_on_local_state_event(
+): Short
+external fun uniffi_daybook_ffi_checksum_method_sqlitelocalstaterepoffi_ffi_register_listener(
+): Short
+external fun uniffi_daybook_ffi_checksum_method_sqlitelocalstaterepoffi_stop(
+): Short
+external fun uniffi_daybook_ffi_checksum_method_syncrepoffi_connect_known_devices_once(
+): Short
+external fun uniffi_daybook_ffi_checksum_method_syncrepoffi_connect_url(
+): Short
+external fun uniffi_daybook_ffi_checksum_method_syncrepoffi_get_ticket_qr_png(
+): Short
+external fun uniffi_daybook_ffi_checksum_method_syncrepoffi_get_ticket_url(
+): Short
+external fun uniffi_daybook_ffi_checksum_method_syncrepoffi_get_ticket_with_qr_png(
+): Short
+external fun uniffi_daybook_ffi_checksum_method_syncrepoffi_stop(
+): Short
+external fun uniffi_daybook_ffi_checksum_method_tableseventlistener_on_tables_event(
+): Short
+external fun uniffi_daybook_ffi_checksum_method_tablesrepoffi_create_new_tab(
+): Short
+external fun uniffi_daybook_ffi_checksum_method_tablesrepoffi_create_new_table(
+): Short
+external fun uniffi_daybook_ffi_checksum_method_tablesrepoffi_ffi_register_listener(
+): Short
+external fun uniffi_daybook_ffi_checksum_method_tablesrepoffi_get_panel(
+): Short
+external fun uniffi_daybook_ffi_checksum_method_tablesrepoffi_get_selected_table(
+): Short
+external fun uniffi_daybook_ffi_checksum_method_tablesrepoffi_get_tab(
+): Short
+external fun uniffi_daybook_ffi_checksum_method_tablesrepoffi_get_table(
+): Short
+external fun uniffi_daybook_ffi_checksum_method_tablesrepoffi_get_window(
+): Short
+external fun uniffi_daybook_ffi_checksum_method_tablesrepoffi_list_panels(
+): Short
+external fun uniffi_daybook_ffi_checksum_method_tablesrepoffi_list_tables(
+): Short
+external fun uniffi_daybook_ffi_checksum_method_tablesrepoffi_list_tabs(
+): Short
+external fun uniffi_daybook_ffi_checksum_method_tablesrepoffi_list_windows(
+): Short
+external fun uniffi_daybook_ffi_checksum_method_tablesrepoffi_remove_tab(
+): Short
+external fun uniffi_daybook_ffi_checksum_method_tablesrepoffi_set_panel(
+): Short
+external fun uniffi_daybook_ffi_checksum_method_tablesrepoffi_set_tab(
+): Short
+external fun uniffi_daybook_ffi_checksum_method_tablesrepoffi_set_table(
+): Short
+external fun uniffi_daybook_ffi_checksum_method_tablesrepoffi_set_window(
+): Short
+external fun uniffi_daybook_ffi_checksum_method_tablesrepoffi_stop(
+): Short
+external fun uniffi_daybook_ffi_checksum_method_tablesrepoffi_update_batch(
+): Short
+external fun uniffi_daybook_ffi_checksum_method_rtffi_dispatch_doc_facet(
+): Short
+external fun uniffi_daybook_ffi_checksum_method_rtffi_stop(
+): Short
+external fun uniffi_daybook_ffi_checksum_constructor_camerapreviewffi_load(
+): Short
+external fun uniffi_daybook_ffi_checksum_constructor_cameraqranalyzerffi_load(
+): Short
+external fun uniffi_daybook_ffi_checksum_constructor_appffictx_init(
+): Short
+external fun uniffi_daybook_ffi_checksum_constructor_ffictx_init(
+): Short
+external fun uniffi_daybook_ffi_checksum_constructor_blobsrepoffi_load(
+): Short
+external fun uniffi_daybook_ffi_checksum_constructor_configrepoffi_load(
+): Short
+external fun uniffi_daybook_ffi_checksum_constructor_dispatchrepoffi_load(
+): Short
+external fun uniffi_daybook_ffi_checksum_constructor_drawerrepoffi_load(
+): Short
+external fun uniffi_daybook_ffi_checksum_constructor_initrepoffi_load(
+): Short
+external fun uniffi_daybook_ffi_checksum_constructor_plugsrepoffi_load(
+): Short
+external fun uniffi_daybook_ffi_checksum_constructor_progressrepoffi_load(
+): Short
+external fun uniffi_daybook_ffi_checksum_constructor_sqlitelocalstaterepoffi_load(
+): Short
+external fun uniffi_daybook_ffi_checksum_constructor_syncrepoffi_load(
+): Short
+external fun uniffi_daybook_ffi_checksum_constructor_tablesrepoffi_load(
+): Short
+external fun uniffi_daybook_ffi_checksum_constructor_rtffi_load(
+): Short
+external fun ffi_daybook_ffi_uniffi_contract_version(
+): Int
 
-        
+    
 }
 
 internal object UniffiLib {
@@ -1154,6 +1220,8 @@ internal object UniffiLib {
         uniffiCallbackInterfaceConfigEventListener.register(this)
         uniffiCallbackInterfaceDispatchEventListener.register(this)
         uniffiCallbackInterfaceDrawerEventListener.register(this)
+        uniffiCallbackInterfaceInitEventListener.register(this)
+        uniffiCallbackInterfaceLocalStateEventListener.register(this)
         uniffiCallbackInterfacePlugsEventListener.register(this)
         uniffiCallbackInterfaceProgressEventListener.register(this)
         uniffiCallbackInterfaceTablesEventListener.register(this)
@@ -1347,6 +1415,24 @@ external fun uniffi_daybook_ffi_fn_method_drawerrepoffi_update(`ptr`: Long,`patc
 ): Long
 external fun uniffi_daybook_ffi_fn_method_drawerrepoffi_update_batch(`ptr`: Long,`patches`: RustBuffer.ByValue,
 ): Long
+external fun uniffi_daybook_ffi_fn_clone_initeventlistener(`handle`: Long,uniffi_out_err: UniffiRustCallStatus, 
+): Long
+external fun uniffi_daybook_ffi_fn_free_initeventlistener(`handle`: Long,uniffi_out_err: UniffiRustCallStatus, 
+): Unit
+external fun uniffi_daybook_ffi_fn_init_callback_vtable_initeventlistener(`vtable`: UniffiVTableCallbackInterfaceInitEventListener,
+): Unit
+external fun uniffi_daybook_ffi_fn_method_initeventlistener_on_init_event(`ptr`: Long,`event`: RustBufferInitEvent.ByValue,uniffi_out_err: UniffiRustCallStatus, 
+): Unit
+external fun uniffi_daybook_ffi_fn_clone_initrepoffi(`handle`: Long,uniffi_out_err: UniffiRustCallStatus, 
+): Long
+external fun uniffi_daybook_ffi_fn_free_initrepoffi(`handle`: Long,uniffi_out_err: UniffiRustCallStatus, 
+): Unit
+external fun uniffi_daybook_ffi_fn_constructor_initrepoffi_load(`fcx`: Long,`progressRepo`: Long,
+): Long
+external fun uniffi_daybook_ffi_fn_method_initrepoffi_ffi_register_listener(`ptr`: Long,`listener`: Long,uniffi_out_err: UniffiRustCallStatus, 
+): Long
+external fun uniffi_daybook_ffi_fn_method_initrepoffi_stop(`ptr`: Long,
+): Long
 external fun uniffi_daybook_ffi_fn_clone_plugseventlistener(`handle`: Long,uniffi_out_err: UniffiRustCallStatus, 
 ): Long
 external fun uniffi_daybook_ffi_fn_free_plugseventlistener(`handle`: Long,uniffi_out_err: UniffiRustCallStatus, 
@@ -1402,6 +1488,24 @@ external fun uniffi_daybook_ffi_fn_method_progressrepoffi_set_retention_override
 external fun uniffi_daybook_ffi_fn_method_progressrepoffi_stop(`ptr`: Long,
 ): Long
 external fun uniffi_daybook_ffi_fn_method_progressrepoffi_upsert_task(`ptr`: Long,`args`: RustBufferCreateProgressTaskArgs.ByValue,
+): Long
+external fun uniffi_daybook_ffi_fn_clone_localstateeventlistener(`handle`: Long,uniffi_out_err: UniffiRustCallStatus, 
+): Long
+external fun uniffi_daybook_ffi_fn_free_localstateeventlistener(`handle`: Long,uniffi_out_err: UniffiRustCallStatus, 
+): Unit
+external fun uniffi_daybook_ffi_fn_init_callback_vtable_localstateeventlistener(`vtable`: UniffiVTableCallbackInterfaceLocalStateEventListener,
+): Unit
+external fun uniffi_daybook_ffi_fn_method_localstateeventlistener_on_local_state_event(`ptr`: Long,`event`: RustBufferLocalStateEvent.ByValue,uniffi_out_err: UniffiRustCallStatus, 
+): Unit
+external fun uniffi_daybook_ffi_fn_clone_sqlitelocalstaterepoffi(`handle`: Long,uniffi_out_err: UniffiRustCallStatus, 
+): Long
+external fun uniffi_daybook_ffi_fn_free_sqlitelocalstaterepoffi(`handle`: Long,uniffi_out_err: UniffiRustCallStatus, 
+): Unit
+external fun uniffi_daybook_ffi_fn_constructor_sqlitelocalstaterepoffi_load(`fcx`: Long,
+): Long
+external fun uniffi_daybook_ffi_fn_method_sqlitelocalstaterepoffi_ffi_register_listener(`ptr`: Long,`listener`: Long,uniffi_out_err: UniffiRustCallStatus, 
+): Long
+external fun uniffi_daybook_ffi_fn_method_sqlitelocalstaterepoffi_stop(`ptr`: Long,
 ): Long
 external fun uniffi_daybook_ffi_fn_clone_syncrepoffi(`handle`: Long,uniffi_out_err: UniffiRustCallStatus, 
 ): Long
@@ -1477,7 +1581,7 @@ external fun uniffi_daybook_ffi_fn_clone_rtffi(`handle`: Long,uniffi_out_err: Un
 ): Long
 external fun uniffi_daybook_ffi_fn_free_rtffi(`handle`: Long,uniffi_out_err: UniffiRustCallStatus, 
 ): Unit
-external fun uniffi_daybook_ffi_fn_constructor_rtffi_load(`fcx`: Long,`drawerRepo`: Long,`plugsRepo`: Long,`dispatchRepo`: Long,`progressRepo`: Long,`blobsRepo`: Long,`configRepo`: Long,`deviceId`: RustBuffer.ByValue,`startupProgressTaskId`: RustBuffer.ByValue,
+external fun uniffi_daybook_ffi_fn_constructor_rtffi_load(`fcx`: Long,`drawerRepo`: Long,`plugsRepo`: Long,`dispatchRepo`: Long,`progressRepo`: Long,`blobsRepo`: Long,`configRepo`: Long,`initRepo`: Long,`sqliteLsRepo`: Long,`deviceId`: RustBuffer.ByValue,`startupProgressTaskId`: RustBuffer.ByValue,
 ): Long
 external fun uniffi_daybook_ffi_fn_method_rtffi_dispatch_doc_facet(`ptr`: Long,`plugId`: RustBuffer.ByValue,`routineName`: RustBuffer.ByValue,`docId`: RustBuffer.ByValue,`branchPath`: RustBuffer.ByValue,
 ): Long
@@ -1671,7 +1775,7 @@ private fun uniffiCheckApiChecksums(lib: IntegrityCheckingUniffiLib) {
     if (lib.uniffi_daybook_ffi_checksum_method_appffictx_register_repo_path() != 49011.toShort()) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
-    if (lib.uniffi_daybook_ffi_checksum_method_appffictx_resolve_clone_url() != 20269.toShort()) {
+    if (lib.uniffi_daybook_ffi_checksum_method_appffictx_resolve_clone_url() != 43700.toShort()) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
     if (lib.uniffi_daybook_ffi_checksum_method_ffierror_message() != 61441.toShort()) {
@@ -1758,6 +1862,15 @@ private fun uniffiCheckApiChecksums(lib: IntegrityCheckingUniffiLib) {
     if (lib.uniffi_daybook_ffi_checksum_method_drawerrepoffi_update_batch() != 32707.toShort()) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
+    if (lib.uniffi_daybook_ffi_checksum_method_initeventlistener_on_init_event() != 3703.toShort()) {
+        throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
+    }
+    if (lib.uniffi_daybook_ffi_checksum_method_initrepoffi_ffi_register_listener() != 34459.toShort()) {
+        throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
+    }
+    if (lib.uniffi_daybook_ffi_checksum_method_initrepoffi_stop() != 18178.toShort()) {
+        throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
+    }
     if (lib.uniffi_daybook_ffi_checksum_method_plugseventlistener_on_plugs_event() != 23122.toShort()) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
@@ -1806,10 +1919,19 @@ private fun uniffiCheckApiChecksums(lib: IntegrityCheckingUniffiLib) {
     if (lib.uniffi_daybook_ffi_checksum_method_progressrepoffi_upsert_task() != 16899.toShort()) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
+    if (lib.uniffi_daybook_ffi_checksum_method_localstateeventlistener_on_local_state_event() != 14945.toShort()) {
+        throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
+    }
+    if (lib.uniffi_daybook_ffi_checksum_method_sqlitelocalstaterepoffi_ffi_register_listener() != 28883.toShort()) {
+        throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
+    }
+    if (lib.uniffi_daybook_ffi_checksum_method_sqlitelocalstaterepoffi_stop() != 49596.toShort()) {
+        throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
+    }
     if (lib.uniffi_daybook_ffi_checksum_method_syncrepoffi_connect_known_devices_once() != 2255.toShort()) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
-    if (lib.uniffi_daybook_ffi_checksum_method_syncrepoffi_connect_url() != 27752.toShort()) {
+    if (lib.uniffi_daybook_ffi_checksum_method_syncrepoffi_connect_url() != 41796.toShort()) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
     if (lib.uniffi_daybook_ffi_checksum_method_syncrepoffi_get_ticket_qr_png() != 4719.toShort()) {
@@ -1914,10 +2036,16 @@ private fun uniffiCheckApiChecksums(lib: IntegrityCheckingUniffiLib) {
     if (lib.uniffi_daybook_ffi_checksum_constructor_drawerrepoffi_load() != 49207.toShort()) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
+    if (lib.uniffi_daybook_ffi_checksum_constructor_initrepoffi_load() != 54114.toShort()) {
+        throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
+    }
     if (lib.uniffi_daybook_ffi_checksum_constructor_plugsrepoffi_load() != 22500.toShort()) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
     if (lib.uniffi_daybook_ffi_checksum_constructor_progressrepoffi_load() != 4008.toShort()) {
+        throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
+    }
+    if (lib.uniffi_daybook_ffi_checksum_constructor_sqlitelocalstaterepoffi_load() != 56346.toShort()) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
     if (lib.uniffi_daybook_ffi_checksum_constructor_syncrepoffi_load() != 47066.toShort()) {
@@ -1926,7 +2054,7 @@ private fun uniffiCheckApiChecksums(lib: IntegrityCheckingUniffiLib) {
     if (lib.uniffi_daybook_ffi_checksum_constructor_tablesrepoffi_load() != 40277.toShort()) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
-    if (lib.uniffi_daybook_ffi_checksum_constructor_rtffi_load() != 48058.toShort()) {
+    if (lib.uniffi_daybook_ffi_checksum_constructor_rtffi_load() != 31565.toShort()) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
 }
@@ -2460,7 +2588,7 @@ public interface AppFfiCtxInterface {
     
     suspend fun `registerRepoPath`(`repoRoot`: kotlin.String): KnownRepoEntry
     
-    suspend fun `resolveCloneUrl`(`sourceUrl`: kotlin.String): CloneBootstrapInfo
+    suspend fun `resolveCloneUrl`(`sourceUrl`: kotlin.String): CloneInfo
     
     companion object
 }
@@ -2712,7 +2840,7 @@ open class AppFfiCtx: Disposable, AutoCloseable, AppFfiCtxInterface
     
     @Throws(FfiException::class)
     @Suppress("ASSIGNED_BUT_NEVER_ACCESSED_VARIABLE")
-    override suspend fun `resolveCloneUrl`(`sourceUrl`: kotlin.String) : CloneBootstrapInfo {
+    override suspend fun `resolveCloneUrl`(`sourceUrl`: kotlin.String) : CloneInfo {
         return uniffiRustCallAsync(
         callWithHandle { uniffiHandle ->
             UniffiLib.uniffi_daybook_ffi_fn_method_appffictx_resolve_clone_url(
@@ -2724,7 +2852,7 @@ open class AppFfiCtx: Disposable, AutoCloseable, AppFfiCtxInterface
         { future, continuation -> UniffiLib.ffi_daybook_ffi_rust_future_complete_rust_buffer(future, continuation) },
         { future -> UniffiLib.ffi_daybook_ffi_rust_future_free_rust_buffer(future) },
         // lift function
-        { FfiConverterTypeCloneBootstrapInfo.lift(it) },
+        { FfiConverterTypeCloneInfo.lift(it) },
         // Error FFI converter
         FfiException.ErrorHandler,
     )
@@ -7156,6 +7284,904 @@ public object FfiConverterTypeFfiError: FfiConverter<FfiException, Long> {
 //
 
 
+public interface InitEventListener {
+    
+    fun `onInitEvent`(`event`: InitEvent)
+    
+    companion object
+}
+
+open class InitEventListenerImpl: Disposable, AutoCloseable, InitEventListener
+{
+
+    @Suppress("UNUSED_PARAMETER")
+    /**
+     * @suppress
+     */
+    constructor(withHandle: UniffiWithHandle, handle: Long) {
+        this.handle = handle
+        this.cleanable = UniffiLib.CLEANER.register(this, UniffiCleanAction(handle))
+    }
+
+    /**
+     * @suppress
+     *
+     * This constructor can be used to instantiate a fake object. Only used for tests. Any
+     * attempt to actually use an object constructed this way will fail as there is no
+     * connected Rust object.
+     */
+    @Suppress("UNUSED_PARAMETER")
+    constructor(noHandle: NoHandle) {
+        this.handle = 0
+        this.cleanable = null
+    }
+
+    protected val handle: Long
+    protected val cleanable: UniffiCleaner.Cleanable?
+
+    private val wasDestroyed = AtomicBoolean(false)
+    private val callCounter = AtomicLong(1)
+
+    override fun destroy() {
+        // Only allow a single call to this method.
+        // TODO: maybe we should log a warning if called more than once?
+        if (this.wasDestroyed.compareAndSet(false, true)) {
+            // This decrement always matches the initial count of 1 given at creation time.
+            if (this.callCounter.decrementAndGet() == 0L) {
+                cleanable?.clean()
+            }
+        }
+    }
+
+    @Synchronized
+    override fun close() {
+        this.destroy()
+    }
+
+    internal inline fun <R> callWithHandle(block: (handle: Long) -> R): R {
+        // Check and increment the call counter, to keep the object alive.
+        // This needs a compare-and-set retry loop in case of concurrent updates.
+        do {
+            val c = this.callCounter.get()
+            if (c == 0L) {
+                throw IllegalStateException("${this.javaClass.simpleName} object has already been destroyed")
+            }
+            if (c == Long.MAX_VALUE) {
+                throw IllegalStateException("${this.javaClass.simpleName} call counter would overflow")
+            }
+        } while (! this.callCounter.compareAndSet(c, c + 1L))
+        // Now we can safely do the method call without the handle being freed concurrently.
+        try {
+            return block(this.uniffiCloneHandle())
+        } finally {
+            // This decrement always matches the increment we performed above.
+            if (this.callCounter.decrementAndGet() == 0L) {
+                cleanable?.clean()
+            }
+        }
+    }
+
+    // Use a static inner class instead of a closure so as not to accidentally
+    // capture `this` as part of the cleanable's action.
+    private class UniffiCleanAction(private val handle: Long) : Runnable {
+        override fun run() {
+            if (handle == 0.toLong()) {
+                // Fake object created with `NoHandle`, don't try to free.
+                return;
+            }
+            uniffiRustCall { status ->
+                UniffiLib.uniffi_daybook_ffi_fn_free_initeventlistener(handle, status)
+            }
+        }
+    }
+
+    /**
+     * @suppress
+     */
+    fun uniffiCloneHandle(): Long {
+        if (handle == 0.toLong()) {
+            throw InternalException("uniffiCloneHandle() called on NoHandle object");
+        }
+        return uniffiRustCall() { status ->
+            UniffiLib.uniffi_daybook_ffi_fn_clone_initeventlistener(handle, status)
+        }
+    }
+
+    override fun `onInitEvent`(`event`: InitEvent)
+        = 
+    callWithHandle {
+    uniffiRustCall() { _status ->
+    UniffiLib.uniffi_daybook_ffi_fn_method_initeventlistener_on_init_event(
+        it,
+        FfiConverterTypeInitEvent.lower(`event`),_status)
+}
+    }
+    
+    
+
+    
+
+    
+
+
+    
+    
+    /**
+     * @suppress
+     */
+    companion object
+    
+}
+
+
+
+// Put the implementation in an object so we don't pollute the top-level namespace
+internal object uniffiCallbackInterfaceInitEventListener {
+    internal object `onInitEvent`: UniffiCallbackInterfaceInitEventListenerMethod0 {
+        override fun callback(`uniffiHandle`: Long,`event`: RustBufferInitEvent.ByValue,`uniffiOutReturn`: Pointer,uniffiCallStatus: UniffiRustCallStatus,) {
+            val uniffiObj = FfiConverterTypeInitEventListener.handleMap.get(uniffiHandle)
+            val makeCall = { ->
+                uniffiObj.`onInitEvent`(
+                    FfiConverterTypeInitEvent.lift(`event`),
+                )
+            }
+            val writeReturn = { _: Unit -> Unit }
+            uniffiTraitInterfaceCall(uniffiCallStatus, makeCall, writeReturn)
+        }
+    }
+
+    internal object uniffiFree: UniffiCallbackInterfaceFree {
+        override fun callback(handle: Long) {
+            FfiConverterTypeInitEventListener.handleMap.remove(handle)
+        }
+    }
+
+    internal object uniffiClone: UniffiCallbackInterfaceClone {
+        override fun callback(handle: Long): Long {
+            return FfiConverterTypeInitEventListener.handleMap.clone(handle)
+        }
+    }
+
+    internal var vtable = UniffiVTableCallbackInterfaceInitEventListener.UniffiByValue(
+        uniffiFree,
+        uniffiClone,
+        `onInitEvent`,
+    )
+
+    // Registers the foreign callback with the Rust side.
+    // This method is generated for each callback interface.
+    internal fun register(lib: UniffiLib) {
+        lib.uniffi_daybook_ffi_fn_init_callback_vtable_initeventlistener(vtable)
+    }
+}
+
+/**
+ * @suppress
+ */
+public object FfiConverterTypeInitEventListener: FfiConverter<InitEventListener, Long> {
+    internal val handleMap = UniffiHandleMap<InitEventListener>()
+
+    override fun lower(value: InitEventListener): Long {
+        if (value is InitEventListenerImpl) {
+             // Rust-implemented object.  Clone the handle and return it
+            return value.uniffiCloneHandle()
+         } else {
+            // Kotlin object, generate a new vtable handle and return that.
+            return handleMap.insert(value)
+         }
+    }
+
+    override fun lift(value: Long): InitEventListener {
+        if ((value and 1.toLong()) == 0.toLong()) {
+            // Rust-generated handle, construct a new class that uses the handle to implement the
+            // interface
+            return InitEventListenerImpl(UniffiWithHandle, value)
+        } else {
+            // Kotlin-generated handle, get the object from the handle map
+            return handleMap.remove(value)
+        }
+    }
+
+    override fun read(buf: ByteBuffer): InitEventListener {
+        return lift(buf.getLong())
+    }
+
+    override fun allocationSize(value: InitEventListener) = 8UL
+
+    override fun write(value: InitEventListener, buf: ByteBuffer) {
+        buf.putLong(lower(value))
+    }
+}
+
+
+// This template implements a class for working with a Rust struct via a handle
+// to the live Rust struct on the other side of the FFI.
+//
+// There's some subtlety here, because we have to be careful not to operate on a Rust
+// struct after it has been dropped, and because we must expose a public API for freeing
+// theq Kotlin wrapper object in lieu of reliable finalizers. The core requirements are:
+//
+//   * Each instance holds an opaque handle to the underlying Rust struct.
+//     Method calls need to read this handle from the object's state and pass it in to
+//     the Rust FFI.
+//
+//   * When an instance is no longer needed, its handle should be passed to a
+//     special destructor function provided by the Rust FFI, which will drop the
+//     underlying Rust struct.
+//
+//   * Given an instance, calling code is expected to call the special
+//     `destroy` method in order to free it after use, either by calling it explicitly
+//     or by using a higher-level helper like the `use` method. Failing to do so risks
+//     leaking the underlying Rust struct.
+//
+//   * We can't assume that calling code will do the right thing, and must be prepared
+//     to handle Kotlin method calls executing concurrently with or even after a call to
+//     `destroy`, and to handle multiple (possibly concurrent!) calls to `destroy`.
+//
+//   * We must never allow Rust code to operate on the underlying Rust struct after
+//     the destructor has been called, and must never call the destructor more than once.
+//     Doing so may trigger memory unsafety.
+//
+//   * To mitigate many of the risks of leaking memory and use-after-free unsafety, a `Cleaner`
+//     is implemented to call the destructor when the Kotlin object becomes unreachable.
+//     This is done in a background thread. This is not a panacea, and client code should be aware that
+//      1. the thread may starve if some there are objects that have poorly performing
+//     `drop` methods or do significant work in their `drop` methods.
+//      2. the thread is shared across the whole library. This can be tuned by using `android_cleaner = true`,
+//         or `android = true` in the [`kotlin` section of the `uniffi.toml` file](https://mozilla.github.io/uniffi-rs/kotlin/configuration.html).
+//
+// If we try to implement this with mutual exclusion on access to the handle, there is the
+// possibility of a race between a method call and a concurrent call to `destroy`:
+//
+//    * Thread A starts a method call, reads the value of the handle, but is interrupted
+//      before it can pass the handle over the FFI to Rust.
+//    * Thread B calls `destroy` and frees the underlying Rust struct.
+//    * Thread A resumes, passing the already-read handle value to Rust and triggering
+//      a use-after-free.
+//
+// One possible solution would be to use a `ReadWriteLock`, with each method call taking
+// a read lock (and thus allowed to run concurrently) and the special `destroy` method
+// taking a write lock (and thus blocking on live method calls). However, we aim not to
+// generate methods with any hidden blocking semantics, and a `destroy` method that might
+// block if called incorrectly seems to meet that bar.
+//
+// So, we achieve our goals by giving each instance an associated `AtomicLong` counter to track
+// the number of in-flight method calls, and an `AtomicBoolean` flag to indicate whether `destroy`
+// has been called. These are updated according to the following rules:
+//
+//    * The initial value of the counter is 1, indicating a live object with no in-flight calls.
+//      The initial value for the flag is false.
+//
+//    * At the start of each method call, we atomically check the counter.
+//      If it is 0 then the underlying Rust struct has already been destroyed and the call is aborted.
+//      If it is nonzero them we atomically increment it by 1 and proceed with the method call.
+//
+//    * At the end of each method call, we atomically decrement and check the counter.
+//      If it has reached zero then we destroy the underlying Rust struct.
+//
+//    * When `destroy` is called, we atomically flip the flag from false to true.
+//      If the flag was already true we silently fail.
+//      Otherwise we atomically decrement and check the counter.
+//      If it has reached zero then we destroy the underlying Rust struct.
+//
+// Astute readers may observe that this all sounds very similar to the way that Rust's `Arc<T>` works,
+// and indeed it is, with the addition of a flag to guard against multiple calls to `destroy`.
+//
+// The overall effect is that the underlying Rust struct is destroyed only when `destroy` has been
+// called *and* all in-flight method calls have completed, avoiding violating any of the expectations
+// of the underlying Rust code.
+//
+// This makes a cleaner a better alternative to _not_ calling `destroy()` as
+// and when the object is finished with, but the abstraction is not perfect: if the Rust object's `drop`
+// method is slow, and/or there are many objects to cleanup, and it's on a low end Android device, then the cleaner
+// thread may be starved, and the app will leak memory.
+//
+// In this case, `destroy`ing manually may be a better solution.
+//
+// The cleaner can live side by side with the manual calling of `destroy`. In the order of responsiveness, uniffi objects
+// with Rust peers are reclaimed:
+//
+// 1. By calling the `destroy` method of the object, which calls `rustObject.free()`. If that doesn't happen:
+// 2. When the object becomes unreachable, AND the Cleaner thread gets to call `rustObject.free()`. If the thread is starved then:
+// 3. The memory is reclaimed when the process terminates.
+//
+// [1] https://stackoverflow.com/questions/24376768/can-java-finalize-an-object-when-it-is-still-in-scope/24380219
+//
+
+
+public interface InitRepoFfiInterface {
+    
+    fun `ffiRegisterListener`(`listener`: InitEventListener): ListenerRegistration
+    
+    suspend fun `stop`()
+    
+    companion object
+}
+
+open class InitRepoFfi: Disposable, AutoCloseable, InitRepoFfiInterface
+{
+
+    @Suppress("UNUSED_PARAMETER")
+    /**
+     * @suppress
+     */
+    constructor(withHandle: UniffiWithHandle, handle: Long) {
+        this.handle = handle
+        this.cleanable = UniffiLib.CLEANER.register(this, UniffiCleanAction(handle))
+    }
+
+    /**
+     * @suppress
+     *
+     * This constructor can be used to instantiate a fake object. Only used for tests. Any
+     * attempt to actually use an object constructed this way will fail as there is no
+     * connected Rust object.
+     */
+    @Suppress("UNUSED_PARAMETER")
+    constructor(noHandle: NoHandle) {
+        this.handle = 0
+        this.cleanable = null
+    }
+
+    protected val handle: Long
+    protected val cleanable: UniffiCleaner.Cleanable?
+
+    private val wasDestroyed = AtomicBoolean(false)
+    private val callCounter = AtomicLong(1)
+
+    override fun destroy() {
+        // Only allow a single call to this method.
+        // TODO: maybe we should log a warning if called more than once?
+        if (this.wasDestroyed.compareAndSet(false, true)) {
+            // This decrement always matches the initial count of 1 given at creation time.
+            if (this.callCounter.decrementAndGet() == 0L) {
+                cleanable?.clean()
+            }
+        }
+    }
+
+    @Synchronized
+    override fun close() {
+        this.destroy()
+    }
+
+    internal inline fun <R> callWithHandle(block: (handle: Long) -> R): R {
+        // Check and increment the call counter, to keep the object alive.
+        // This needs a compare-and-set retry loop in case of concurrent updates.
+        do {
+            val c = this.callCounter.get()
+            if (c == 0L) {
+                throw IllegalStateException("${this.javaClass.simpleName} object has already been destroyed")
+            }
+            if (c == Long.MAX_VALUE) {
+                throw IllegalStateException("${this.javaClass.simpleName} call counter would overflow")
+            }
+        } while (! this.callCounter.compareAndSet(c, c + 1L))
+        // Now we can safely do the method call without the handle being freed concurrently.
+        try {
+            return block(this.uniffiCloneHandle())
+        } finally {
+            // This decrement always matches the increment we performed above.
+            if (this.callCounter.decrementAndGet() == 0L) {
+                cleanable?.clean()
+            }
+        }
+    }
+
+    // Use a static inner class instead of a closure so as not to accidentally
+    // capture `this` as part of the cleanable's action.
+    private class UniffiCleanAction(private val handle: Long) : Runnable {
+        override fun run() {
+            if (handle == 0.toLong()) {
+                // Fake object created with `NoHandle`, don't try to free.
+                return;
+            }
+            uniffiRustCall { status ->
+                UniffiLib.uniffi_daybook_ffi_fn_free_initrepoffi(handle, status)
+            }
+        }
+    }
+
+    /**
+     * @suppress
+     */
+    fun uniffiCloneHandle(): Long {
+        if (handle == 0.toLong()) {
+            throw InternalException("uniffiCloneHandle() called on NoHandle object");
+        }
+        return uniffiRustCall() { status ->
+            UniffiLib.uniffi_daybook_ffi_fn_clone_initrepoffi(handle, status)
+        }
+    }
+
+    override fun `ffiRegisterListener`(`listener`: InitEventListener): ListenerRegistration {
+            return FfiConverterTypeListenerRegistration.lift(
+    callWithHandle {
+    uniffiRustCall() { _status ->
+    UniffiLib.uniffi_daybook_ffi_fn_method_initrepoffi_ffi_register_listener(
+        it,
+        FfiConverterTypeInitEventListener.lower(`listener`),_status)
+}
+    }
+    )
+    }
+    
+
+    
+    @Throws(FfiException::class)
+    @Suppress("ASSIGNED_BUT_NEVER_ACCESSED_VARIABLE")
+    override suspend fun `stop`() {
+        return uniffiRustCallAsync(
+        callWithHandle { uniffiHandle ->
+            UniffiLib.uniffi_daybook_ffi_fn_method_initrepoffi_stop(
+                uniffiHandle,
+                
+            )
+        },
+        { future, callback, continuation -> UniffiLib.ffi_daybook_ffi_rust_future_poll_void(future, callback, continuation) },
+        { future, continuation -> UniffiLib.ffi_daybook_ffi_rust_future_complete_void(future, continuation) },
+        { future -> UniffiLib.ffi_daybook_ffi_rust_future_free_void(future) },
+        // lift function
+        { Unit },
+        
+        // Error FFI converter
+        FfiException.ErrorHandler,
+    )
+    }
+
+    
+
+    
+
+
+    
+    companion object {
+        
+    @Throws(FfiException::class)
+    @Suppress("ASSIGNED_BUT_NEVER_ACCESSED_VARIABLE")
+     suspend fun `load`(`fcx`: FfiCtx, `progressRepo`: ProgressRepoFfi) : InitRepoFfi {
+        return uniffiRustCallAsync(
+        UniffiLib.uniffi_daybook_ffi_fn_constructor_initrepoffi_load(FfiConverterTypeFfiCtx.lower(`fcx`),FfiConverterTypeProgressRepoFfi.lower(`progressRepo`),),
+        { future, callback, continuation -> UniffiLib.ffi_daybook_ffi_rust_future_poll_u64(future, callback, continuation) },
+        { future, continuation -> UniffiLib.ffi_daybook_ffi_rust_future_complete_u64(future, continuation) },
+        { future -> UniffiLib.ffi_daybook_ffi_rust_future_free_u64(future) },
+        // lift function
+        { FfiConverterTypeInitRepoFfi.lift(it) },
+        // Error FFI converter
+        FfiException.ErrorHandler,
+    )
+    }
+
+        
+    }
+    
+}
+
+
+/**
+ * @suppress
+ */
+public object FfiConverterTypeInitRepoFfi: FfiConverter<InitRepoFfi, Long> {
+    override fun lower(value: InitRepoFfi): Long {
+        return value.uniffiCloneHandle()
+    }
+
+    override fun lift(value: Long): InitRepoFfi {
+        return InitRepoFfi(UniffiWithHandle, value)
+    }
+
+    override fun read(buf: ByteBuffer): InitRepoFfi {
+        return lift(buf.getLong())
+    }
+
+    override fun allocationSize(value: InitRepoFfi) = 8UL
+
+    override fun write(value: InitRepoFfi, buf: ByteBuffer) {
+        buf.putLong(lower(value))
+    }
+}
+
+
+// This template implements a class for working with a Rust struct via a handle
+// to the live Rust struct on the other side of the FFI.
+//
+// There's some subtlety here, because we have to be careful not to operate on a Rust
+// struct after it has been dropped, and because we must expose a public API for freeing
+// theq Kotlin wrapper object in lieu of reliable finalizers. The core requirements are:
+//
+//   * Each instance holds an opaque handle to the underlying Rust struct.
+//     Method calls need to read this handle from the object's state and pass it in to
+//     the Rust FFI.
+//
+//   * When an instance is no longer needed, its handle should be passed to a
+//     special destructor function provided by the Rust FFI, which will drop the
+//     underlying Rust struct.
+//
+//   * Given an instance, calling code is expected to call the special
+//     `destroy` method in order to free it after use, either by calling it explicitly
+//     or by using a higher-level helper like the `use` method. Failing to do so risks
+//     leaking the underlying Rust struct.
+//
+//   * We can't assume that calling code will do the right thing, and must be prepared
+//     to handle Kotlin method calls executing concurrently with or even after a call to
+//     `destroy`, and to handle multiple (possibly concurrent!) calls to `destroy`.
+//
+//   * We must never allow Rust code to operate on the underlying Rust struct after
+//     the destructor has been called, and must never call the destructor more than once.
+//     Doing so may trigger memory unsafety.
+//
+//   * To mitigate many of the risks of leaking memory and use-after-free unsafety, a `Cleaner`
+//     is implemented to call the destructor when the Kotlin object becomes unreachable.
+//     This is done in a background thread. This is not a panacea, and client code should be aware that
+//      1. the thread may starve if some there are objects that have poorly performing
+//     `drop` methods or do significant work in their `drop` methods.
+//      2. the thread is shared across the whole library. This can be tuned by using `android_cleaner = true`,
+//         or `android = true` in the [`kotlin` section of the `uniffi.toml` file](https://mozilla.github.io/uniffi-rs/kotlin/configuration.html).
+//
+// If we try to implement this with mutual exclusion on access to the handle, there is the
+// possibility of a race between a method call and a concurrent call to `destroy`:
+//
+//    * Thread A starts a method call, reads the value of the handle, but is interrupted
+//      before it can pass the handle over the FFI to Rust.
+//    * Thread B calls `destroy` and frees the underlying Rust struct.
+//    * Thread A resumes, passing the already-read handle value to Rust and triggering
+//      a use-after-free.
+//
+// One possible solution would be to use a `ReadWriteLock`, with each method call taking
+// a read lock (and thus allowed to run concurrently) and the special `destroy` method
+// taking a write lock (and thus blocking on live method calls). However, we aim not to
+// generate methods with any hidden blocking semantics, and a `destroy` method that might
+// block if called incorrectly seems to meet that bar.
+//
+// So, we achieve our goals by giving each instance an associated `AtomicLong` counter to track
+// the number of in-flight method calls, and an `AtomicBoolean` flag to indicate whether `destroy`
+// has been called. These are updated according to the following rules:
+//
+//    * The initial value of the counter is 1, indicating a live object with no in-flight calls.
+//      The initial value for the flag is false.
+//
+//    * At the start of each method call, we atomically check the counter.
+//      If it is 0 then the underlying Rust struct has already been destroyed and the call is aborted.
+//      If it is nonzero them we atomically increment it by 1 and proceed with the method call.
+//
+//    * At the end of each method call, we atomically decrement and check the counter.
+//      If it has reached zero then we destroy the underlying Rust struct.
+//
+//    * When `destroy` is called, we atomically flip the flag from false to true.
+//      If the flag was already true we silently fail.
+//      Otherwise we atomically decrement and check the counter.
+//      If it has reached zero then we destroy the underlying Rust struct.
+//
+// Astute readers may observe that this all sounds very similar to the way that Rust's `Arc<T>` works,
+// and indeed it is, with the addition of a flag to guard against multiple calls to `destroy`.
+//
+// The overall effect is that the underlying Rust struct is destroyed only when `destroy` has been
+// called *and* all in-flight method calls have completed, avoiding violating any of the expectations
+// of the underlying Rust code.
+//
+// This makes a cleaner a better alternative to _not_ calling `destroy()` as
+// and when the object is finished with, but the abstraction is not perfect: if the Rust object's `drop`
+// method is slow, and/or there are many objects to cleanup, and it's on a low end Android device, then the cleaner
+// thread may be starved, and the app will leak memory.
+//
+// In this case, `destroy`ing manually may be a better solution.
+//
+// The cleaner can live side by side with the manual calling of `destroy`. In the order of responsiveness, uniffi objects
+// with Rust peers are reclaimed:
+//
+// 1. By calling the `destroy` method of the object, which calls `rustObject.free()`. If that doesn't happen:
+// 2. When the object becomes unreachable, AND the Cleaner thread gets to call `rustObject.free()`. If the thread is starved then:
+// 3. The memory is reclaimed when the process terminates.
+//
+// [1] https://stackoverflow.com/questions/24376768/can-java-finalize-an-object-when-it-is-still-in-scope/24380219
+//
+
+
+public interface LocalStateEventListener {
+    
+    fun `onLocalStateEvent`(`event`: LocalStateEvent)
+    
+    companion object
+}
+
+open class LocalStateEventListenerImpl: Disposable, AutoCloseable, LocalStateEventListener
+{
+
+    @Suppress("UNUSED_PARAMETER")
+    /**
+     * @suppress
+     */
+    constructor(withHandle: UniffiWithHandle, handle: Long) {
+        this.handle = handle
+        this.cleanable = UniffiLib.CLEANER.register(this, UniffiCleanAction(handle))
+    }
+
+    /**
+     * @suppress
+     *
+     * This constructor can be used to instantiate a fake object. Only used for tests. Any
+     * attempt to actually use an object constructed this way will fail as there is no
+     * connected Rust object.
+     */
+    @Suppress("UNUSED_PARAMETER")
+    constructor(noHandle: NoHandle) {
+        this.handle = 0
+        this.cleanable = null
+    }
+
+    protected val handle: Long
+    protected val cleanable: UniffiCleaner.Cleanable?
+
+    private val wasDestroyed = AtomicBoolean(false)
+    private val callCounter = AtomicLong(1)
+
+    override fun destroy() {
+        // Only allow a single call to this method.
+        // TODO: maybe we should log a warning if called more than once?
+        if (this.wasDestroyed.compareAndSet(false, true)) {
+            // This decrement always matches the initial count of 1 given at creation time.
+            if (this.callCounter.decrementAndGet() == 0L) {
+                cleanable?.clean()
+            }
+        }
+    }
+
+    @Synchronized
+    override fun close() {
+        this.destroy()
+    }
+
+    internal inline fun <R> callWithHandle(block: (handle: Long) -> R): R {
+        // Check and increment the call counter, to keep the object alive.
+        // This needs a compare-and-set retry loop in case of concurrent updates.
+        do {
+            val c = this.callCounter.get()
+            if (c == 0L) {
+                throw IllegalStateException("${this.javaClass.simpleName} object has already been destroyed")
+            }
+            if (c == Long.MAX_VALUE) {
+                throw IllegalStateException("${this.javaClass.simpleName} call counter would overflow")
+            }
+        } while (! this.callCounter.compareAndSet(c, c + 1L))
+        // Now we can safely do the method call without the handle being freed concurrently.
+        try {
+            return block(this.uniffiCloneHandle())
+        } finally {
+            // This decrement always matches the increment we performed above.
+            if (this.callCounter.decrementAndGet() == 0L) {
+                cleanable?.clean()
+            }
+        }
+    }
+
+    // Use a static inner class instead of a closure so as not to accidentally
+    // capture `this` as part of the cleanable's action.
+    private class UniffiCleanAction(private val handle: Long) : Runnable {
+        override fun run() {
+            if (handle == 0.toLong()) {
+                // Fake object created with `NoHandle`, don't try to free.
+                return;
+            }
+            uniffiRustCall { status ->
+                UniffiLib.uniffi_daybook_ffi_fn_free_localstateeventlistener(handle, status)
+            }
+        }
+    }
+
+    /**
+     * @suppress
+     */
+    fun uniffiCloneHandle(): Long {
+        if (handle == 0.toLong()) {
+            throw InternalException("uniffiCloneHandle() called on NoHandle object");
+        }
+        return uniffiRustCall() { status ->
+            UniffiLib.uniffi_daybook_ffi_fn_clone_localstateeventlistener(handle, status)
+        }
+    }
+
+    override fun `onLocalStateEvent`(`event`: LocalStateEvent)
+        = 
+    callWithHandle {
+    uniffiRustCall() { _status ->
+    UniffiLib.uniffi_daybook_ffi_fn_method_localstateeventlistener_on_local_state_event(
+        it,
+        FfiConverterTypeLocalStateEvent.lower(`event`),_status)
+}
+    }
+    
+    
+
+    
+
+    
+
+
+    
+    
+    /**
+     * @suppress
+     */
+    companion object
+    
+}
+
+
+
+// Put the implementation in an object so we don't pollute the top-level namespace
+internal object uniffiCallbackInterfaceLocalStateEventListener {
+    internal object `onLocalStateEvent`: UniffiCallbackInterfaceLocalStateEventListenerMethod0 {
+        override fun callback(`uniffiHandle`: Long,`event`: RustBufferLocalStateEvent.ByValue,`uniffiOutReturn`: Pointer,uniffiCallStatus: UniffiRustCallStatus,) {
+            val uniffiObj = FfiConverterTypeLocalStateEventListener.handleMap.get(uniffiHandle)
+            val makeCall = { ->
+                uniffiObj.`onLocalStateEvent`(
+                    FfiConverterTypeLocalStateEvent.lift(`event`),
+                )
+            }
+            val writeReturn = { _: Unit -> Unit }
+            uniffiTraitInterfaceCall(uniffiCallStatus, makeCall, writeReturn)
+        }
+    }
+
+    internal object uniffiFree: UniffiCallbackInterfaceFree {
+        override fun callback(handle: Long) {
+            FfiConverterTypeLocalStateEventListener.handleMap.remove(handle)
+        }
+    }
+
+    internal object uniffiClone: UniffiCallbackInterfaceClone {
+        override fun callback(handle: Long): Long {
+            return FfiConverterTypeLocalStateEventListener.handleMap.clone(handle)
+        }
+    }
+
+    internal var vtable = UniffiVTableCallbackInterfaceLocalStateEventListener.UniffiByValue(
+        uniffiFree,
+        uniffiClone,
+        `onLocalStateEvent`,
+    )
+
+    // Registers the foreign callback with the Rust side.
+    // This method is generated for each callback interface.
+    internal fun register(lib: UniffiLib) {
+        lib.uniffi_daybook_ffi_fn_init_callback_vtable_localstateeventlistener(vtable)
+    }
+}
+
+/**
+ * @suppress
+ */
+public object FfiConverterTypeLocalStateEventListener: FfiConverter<LocalStateEventListener, Long> {
+    internal val handleMap = UniffiHandleMap<LocalStateEventListener>()
+
+    override fun lower(value: LocalStateEventListener): Long {
+        if (value is LocalStateEventListenerImpl) {
+             // Rust-implemented object.  Clone the handle and return it
+            return value.uniffiCloneHandle()
+         } else {
+            // Kotlin object, generate a new vtable handle and return that.
+            return handleMap.insert(value)
+         }
+    }
+
+    override fun lift(value: Long): LocalStateEventListener {
+        if ((value and 1.toLong()) == 0.toLong()) {
+            // Rust-generated handle, construct a new class that uses the handle to implement the
+            // interface
+            return LocalStateEventListenerImpl(UniffiWithHandle, value)
+        } else {
+            // Kotlin-generated handle, get the object from the handle map
+            return handleMap.remove(value)
+        }
+    }
+
+    override fun read(buf: ByteBuffer): LocalStateEventListener {
+        return lift(buf.getLong())
+    }
+
+    override fun allocationSize(value: LocalStateEventListener) = 8UL
+
+    override fun write(value: LocalStateEventListener, buf: ByteBuffer) {
+        buf.putLong(lower(value))
+    }
+}
+
+
+// This template implements a class for working with a Rust struct via a handle
+// to the live Rust struct on the other side of the FFI.
+//
+// There's some subtlety here, because we have to be careful not to operate on a Rust
+// struct after it has been dropped, and because we must expose a public API for freeing
+// theq Kotlin wrapper object in lieu of reliable finalizers. The core requirements are:
+//
+//   * Each instance holds an opaque handle to the underlying Rust struct.
+//     Method calls need to read this handle from the object's state and pass it in to
+//     the Rust FFI.
+//
+//   * When an instance is no longer needed, its handle should be passed to a
+//     special destructor function provided by the Rust FFI, which will drop the
+//     underlying Rust struct.
+//
+//   * Given an instance, calling code is expected to call the special
+//     `destroy` method in order to free it after use, either by calling it explicitly
+//     or by using a higher-level helper like the `use` method. Failing to do so risks
+//     leaking the underlying Rust struct.
+//
+//   * We can't assume that calling code will do the right thing, and must be prepared
+//     to handle Kotlin method calls executing concurrently with or even after a call to
+//     `destroy`, and to handle multiple (possibly concurrent!) calls to `destroy`.
+//
+//   * We must never allow Rust code to operate on the underlying Rust struct after
+//     the destructor has been called, and must never call the destructor more than once.
+//     Doing so may trigger memory unsafety.
+//
+//   * To mitigate many of the risks of leaking memory and use-after-free unsafety, a `Cleaner`
+//     is implemented to call the destructor when the Kotlin object becomes unreachable.
+//     This is done in a background thread. This is not a panacea, and client code should be aware that
+//      1. the thread may starve if some there are objects that have poorly performing
+//     `drop` methods or do significant work in their `drop` methods.
+//      2. the thread is shared across the whole library. This can be tuned by using `android_cleaner = true`,
+//         or `android = true` in the [`kotlin` section of the `uniffi.toml` file](https://mozilla.github.io/uniffi-rs/kotlin/configuration.html).
+//
+// If we try to implement this with mutual exclusion on access to the handle, there is the
+// possibility of a race between a method call and a concurrent call to `destroy`:
+//
+//    * Thread A starts a method call, reads the value of the handle, but is interrupted
+//      before it can pass the handle over the FFI to Rust.
+//    * Thread B calls `destroy` and frees the underlying Rust struct.
+//    * Thread A resumes, passing the already-read handle value to Rust and triggering
+//      a use-after-free.
+//
+// One possible solution would be to use a `ReadWriteLock`, with each method call taking
+// a read lock (and thus allowed to run concurrently) and the special `destroy` method
+// taking a write lock (and thus blocking on live method calls). However, we aim not to
+// generate methods with any hidden blocking semantics, and a `destroy` method that might
+// block if called incorrectly seems to meet that bar.
+//
+// So, we achieve our goals by giving each instance an associated `AtomicLong` counter to track
+// the number of in-flight method calls, and an `AtomicBoolean` flag to indicate whether `destroy`
+// has been called. These are updated according to the following rules:
+//
+//    * The initial value of the counter is 1, indicating a live object with no in-flight calls.
+//      The initial value for the flag is false.
+//
+//    * At the start of each method call, we atomically check the counter.
+//      If it is 0 then the underlying Rust struct has already been destroyed and the call is aborted.
+//      If it is nonzero them we atomically increment it by 1 and proceed with the method call.
+//
+//    * At the end of each method call, we atomically decrement and check the counter.
+//      If it has reached zero then we destroy the underlying Rust struct.
+//
+//    * When `destroy` is called, we atomically flip the flag from false to true.
+//      If the flag was already true we silently fail.
+//      Otherwise we atomically decrement and check the counter.
+//      If it has reached zero then we destroy the underlying Rust struct.
+//
+// Astute readers may observe that this all sounds very similar to the way that Rust's `Arc<T>` works,
+// and indeed it is, with the addition of a flag to guard against multiple calls to `destroy`.
+//
+// The overall effect is that the underlying Rust struct is destroyed only when `destroy` has been
+// called *and* all in-flight method calls have completed, avoiding violating any of the expectations
+// of the underlying Rust code.
+//
+// This makes a cleaner a better alternative to _not_ calling `destroy()` as
+// and when the object is finished with, but the abstraction is not perfect: if the Rust object's `drop`
+// method is slow, and/or there are many objects to cleanup, and it's on a low end Android device, then the cleaner
+// thread may be starved, and the app will leak memory.
+//
+// In this case, `destroy`ing manually may be a better solution.
+//
+// The cleaner can live side by side with the manual calling of `destroy`. In the order of responsiveness, uniffi objects
+// with Rust peers are reclaimed:
+//
+// 1. By calling the `destroy` method of the object, which calls `rustObject.free()`. If that doesn't happen:
+// 2. When the object becomes unreachable, AND the Cleaner thread gets to call `rustObject.free()`. If the thread is starved then:
+// 3. The memory is reclaimed when the process terminates.
+//
+// [1] https://stackoverflow.com/questions/24376768/can-java-finalize-an-object-when-it-is-still-in-scope/24380219
+//
+
+
 public interface PlugsEventListener {
     
     fun `onPlugsEvent`(`event`: PlugsEvent)
@@ -8735,9 +9761,9 @@ open class RtFfi: Disposable, AutoCloseable, RtFfiInterface
         
     @Throws(FfiException::class)
     @Suppress("ASSIGNED_BUT_NEVER_ACCESSED_VARIABLE")
-     suspend fun `load`(`fcx`: FfiCtx, `drawerRepo`: DrawerRepoFfi, `plugsRepo`: PlugsRepoFfi, `dispatchRepo`: DispatchRepoFfi, `progressRepo`: ProgressRepoFfi, `blobsRepo`: BlobsRepoFfi, `configRepo`: ConfigRepoFfi, `deviceId`: kotlin.String, `startupProgressTaskId`: kotlin.String?) : RtFfi {
+     suspend fun `load`(`fcx`: FfiCtx, `drawerRepo`: DrawerRepoFfi, `plugsRepo`: PlugsRepoFfi, `dispatchRepo`: DispatchRepoFfi, `progressRepo`: ProgressRepoFfi, `blobsRepo`: BlobsRepoFfi, `configRepo`: ConfigRepoFfi, `initRepo`: InitRepoFfi, `sqliteLsRepo`: SqliteLocalStateRepoFfi, `deviceId`: kotlin.String, `startupProgressTaskId`: kotlin.String?) : RtFfi {
         return uniffiRustCallAsync(
-        UniffiLib.uniffi_daybook_ffi_fn_constructor_rtffi_load(FfiConverterTypeFfiCtx.lower(`fcx`),FfiConverterTypeDrawerRepoFfi.lower(`drawerRepo`),FfiConverterTypePlugsRepoFfi.lower(`plugsRepo`),FfiConverterTypeDispatchRepoFfi.lower(`dispatchRepo`),FfiConverterTypeProgressRepoFfi.lower(`progressRepo`),FfiConverterTypeBlobsRepoFfi.lower(`blobsRepo`),FfiConverterTypeConfigRepoFfi.lower(`configRepo`),FfiConverterString.lower(`deviceId`),FfiConverterOptionalString.lower(`startupProgressTaskId`),),
+        UniffiLib.uniffi_daybook_ffi_fn_constructor_rtffi_load(FfiConverterTypeFfiCtx.lower(`fcx`),FfiConverterTypeDrawerRepoFfi.lower(`drawerRepo`),FfiConverterTypePlugsRepoFfi.lower(`plugsRepo`),FfiConverterTypeDispatchRepoFfi.lower(`dispatchRepo`),FfiConverterTypeProgressRepoFfi.lower(`progressRepo`),FfiConverterTypeBlobsRepoFfi.lower(`blobsRepo`),FfiConverterTypeConfigRepoFfi.lower(`configRepo`),FfiConverterTypeInitRepoFfi.lower(`initRepo`),FfiConverterTypeSqliteLocalStateRepoFfi.lower(`sqliteLsRepo`),FfiConverterString.lower(`deviceId`),FfiConverterOptionalString.lower(`startupProgressTaskId`),),
         { future, callback, continuation -> UniffiLib.ffi_daybook_ffi_rust_future_poll_u64(future, callback, continuation) },
         { future, continuation -> UniffiLib.ffi_daybook_ffi_rust_future_complete_u64(future, continuation) },
         { future -> UniffiLib.ffi_daybook_ffi_rust_future_free_u64(future) },
@@ -8873,11 +9899,299 @@ public object FfiConverterTypeRtFfi: FfiConverter<RtFfi, Long> {
 //
 
 
+public interface SqliteLocalStateRepoFfiInterface {
+    
+    fun `ffiRegisterListener`(`listener`: LocalStateEventListener): ListenerRegistration
+    
+    suspend fun `stop`()
+    
+    companion object
+}
+
+open class SqliteLocalStateRepoFfi: Disposable, AutoCloseable, SqliteLocalStateRepoFfiInterface
+{
+
+    @Suppress("UNUSED_PARAMETER")
+    /**
+     * @suppress
+     */
+    constructor(withHandle: UniffiWithHandle, handle: Long) {
+        this.handle = handle
+        this.cleanable = UniffiLib.CLEANER.register(this, UniffiCleanAction(handle))
+    }
+
+    /**
+     * @suppress
+     *
+     * This constructor can be used to instantiate a fake object. Only used for tests. Any
+     * attempt to actually use an object constructed this way will fail as there is no
+     * connected Rust object.
+     */
+    @Suppress("UNUSED_PARAMETER")
+    constructor(noHandle: NoHandle) {
+        this.handle = 0
+        this.cleanable = null
+    }
+
+    protected val handle: Long
+    protected val cleanable: UniffiCleaner.Cleanable?
+
+    private val wasDestroyed = AtomicBoolean(false)
+    private val callCounter = AtomicLong(1)
+
+    override fun destroy() {
+        // Only allow a single call to this method.
+        // TODO: maybe we should log a warning if called more than once?
+        if (this.wasDestroyed.compareAndSet(false, true)) {
+            // This decrement always matches the initial count of 1 given at creation time.
+            if (this.callCounter.decrementAndGet() == 0L) {
+                cleanable?.clean()
+            }
+        }
+    }
+
+    @Synchronized
+    override fun close() {
+        this.destroy()
+    }
+
+    internal inline fun <R> callWithHandle(block: (handle: Long) -> R): R {
+        // Check and increment the call counter, to keep the object alive.
+        // This needs a compare-and-set retry loop in case of concurrent updates.
+        do {
+            val c = this.callCounter.get()
+            if (c == 0L) {
+                throw IllegalStateException("${this.javaClass.simpleName} object has already been destroyed")
+            }
+            if (c == Long.MAX_VALUE) {
+                throw IllegalStateException("${this.javaClass.simpleName} call counter would overflow")
+            }
+        } while (! this.callCounter.compareAndSet(c, c + 1L))
+        // Now we can safely do the method call without the handle being freed concurrently.
+        try {
+            return block(this.uniffiCloneHandle())
+        } finally {
+            // This decrement always matches the increment we performed above.
+            if (this.callCounter.decrementAndGet() == 0L) {
+                cleanable?.clean()
+            }
+        }
+    }
+
+    // Use a static inner class instead of a closure so as not to accidentally
+    // capture `this` as part of the cleanable's action.
+    private class UniffiCleanAction(private val handle: Long) : Runnable {
+        override fun run() {
+            if (handle == 0.toLong()) {
+                // Fake object created with `NoHandle`, don't try to free.
+                return;
+            }
+            uniffiRustCall { status ->
+                UniffiLib.uniffi_daybook_ffi_fn_free_sqlitelocalstaterepoffi(handle, status)
+            }
+        }
+    }
+
+    /**
+     * @suppress
+     */
+    fun uniffiCloneHandle(): Long {
+        if (handle == 0.toLong()) {
+            throw InternalException("uniffiCloneHandle() called on NoHandle object");
+        }
+        return uniffiRustCall() { status ->
+            UniffiLib.uniffi_daybook_ffi_fn_clone_sqlitelocalstaterepoffi(handle, status)
+        }
+    }
+
+    override fun `ffiRegisterListener`(`listener`: LocalStateEventListener): ListenerRegistration {
+            return FfiConverterTypeListenerRegistration.lift(
+    callWithHandle {
+    uniffiRustCall() { _status ->
+    UniffiLib.uniffi_daybook_ffi_fn_method_sqlitelocalstaterepoffi_ffi_register_listener(
+        it,
+        FfiConverterTypeLocalStateEventListener.lower(`listener`),_status)
+}
+    }
+    )
+    }
+    
+
+    
+    @Throws(FfiException::class)
+    @Suppress("ASSIGNED_BUT_NEVER_ACCESSED_VARIABLE")
+    override suspend fun `stop`() {
+        return uniffiRustCallAsync(
+        callWithHandle { uniffiHandle ->
+            UniffiLib.uniffi_daybook_ffi_fn_method_sqlitelocalstaterepoffi_stop(
+                uniffiHandle,
+                
+            )
+        },
+        { future, callback, continuation -> UniffiLib.ffi_daybook_ffi_rust_future_poll_void(future, callback, continuation) },
+        { future, continuation -> UniffiLib.ffi_daybook_ffi_rust_future_complete_void(future, continuation) },
+        { future -> UniffiLib.ffi_daybook_ffi_rust_future_free_void(future) },
+        // lift function
+        { Unit },
+        
+        // Error FFI converter
+        FfiException.ErrorHandler,
+    )
+    }
+
+    
+
+    
+
+
+    
+    companion object {
+        
+    @Throws(FfiException::class)
+    @Suppress("ASSIGNED_BUT_NEVER_ACCESSED_VARIABLE")
+     suspend fun `load`(`fcx`: FfiCtx) : SqliteLocalStateRepoFfi {
+        return uniffiRustCallAsync(
+        UniffiLib.uniffi_daybook_ffi_fn_constructor_sqlitelocalstaterepoffi_load(FfiConverterTypeFfiCtx.lower(`fcx`),),
+        { future, callback, continuation -> UniffiLib.ffi_daybook_ffi_rust_future_poll_u64(future, callback, continuation) },
+        { future, continuation -> UniffiLib.ffi_daybook_ffi_rust_future_complete_u64(future, continuation) },
+        { future -> UniffiLib.ffi_daybook_ffi_rust_future_free_u64(future) },
+        // lift function
+        { FfiConverterTypeSqliteLocalStateRepoFfi.lift(it) },
+        // Error FFI converter
+        FfiException.ErrorHandler,
+    )
+    }
+
+        
+    }
+    
+}
+
+
+/**
+ * @suppress
+ */
+public object FfiConverterTypeSqliteLocalStateRepoFfi: FfiConverter<SqliteLocalStateRepoFfi, Long> {
+    override fun lower(value: SqliteLocalStateRepoFfi): Long {
+        return value.uniffiCloneHandle()
+    }
+
+    override fun lift(value: Long): SqliteLocalStateRepoFfi {
+        return SqliteLocalStateRepoFfi(UniffiWithHandle, value)
+    }
+
+    override fun read(buf: ByteBuffer): SqliteLocalStateRepoFfi {
+        return lift(buf.getLong())
+    }
+
+    override fun allocationSize(value: SqliteLocalStateRepoFfi) = 8UL
+
+    override fun write(value: SqliteLocalStateRepoFfi, buf: ByteBuffer) {
+        buf.putLong(lower(value))
+    }
+}
+
+
+// This template implements a class for working with a Rust struct via a handle
+// to the live Rust struct on the other side of the FFI.
+//
+// There's some subtlety here, because we have to be careful not to operate on a Rust
+// struct after it has been dropped, and because we must expose a public API for freeing
+// theq Kotlin wrapper object in lieu of reliable finalizers. The core requirements are:
+//
+//   * Each instance holds an opaque handle to the underlying Rust struct.
+//     Method calls need to read this handle from the object's state and pass it in to
+//     the Rust FFI.
+//
+//   * When an instance is no longer needed, its handle should be passed to a
+//     special destructor function provided by the Rust FFI, which will drop the
+//     underlying Rust struct.
+//
+//   * Given an instance, calling code is expected to call the special
+//     `destroy` method in order to free it after use, either by calling it explicitly
+//     or by using a higher-level helper like the `use` method. Failing to do so risks
+//     leaking the underlying Rust struct.
+//
+//   * We can't assume that calling code will do the right thing, and must be prepared
+//     to handle Kotlin method calls executing concurrently with or even after a call to
+//     `destroy`, and to handle multiple (possibly concurrent!) calls to `destroy`.
+//
+//   * We must never allow Rust code to operate on the underlying Rust struct after
+//     the destructor has been called, and must never call the destructor more than once.
+//     Doing so may trigger memory unsafety.
+//
+//   * To mitigate many of the risks of leaking memory and use-after-free unsafety, a `Cleaner`
+//     is implemented to call the destructor when the Kotlin object becomes unreachable.
+//     This is done in a background thread. This is not a panacea, and client code should be aware that
+//      1. the thread may starve if some there are objects that have poorly performing
+//     `drop` methods or do significant work in their `drop` methods.
+//      2. the thread is shared across the whole library. This can be tuned by using `android_cleaner = true`,
+//         or `android = true` in the [`kotlin` section of the `uniffi.toml` file](https://mozilla.github.io/uniffi-rs/kotlin/configuration.html).
+//
+// If we try to implement this with mutual exclusion on access to the handle, there is the
+// possibility of a race between a method call and a concurrent call to `destroy`:
+//
+//    * Thread A starts a method call, reads the value of the handle, but is interrupted
+//      before it can pass the handle over the FFI to Rust.
+//    * Thread B calls `destroy` and frees the underlying Rust struct.
+//    * Thread A resumes, passing the already-read handle value to Rust and triggering
+//      a use-after-free.
+//
+// One possible solution would be to use a `ReadWriteLock`, with each method call taking
+// a read lock (and thus allowed to run concurrently) and the special `destroy` method
+// taking a write lock (and thus blocking on live method calls). However, we aim not to
+// generate methods with any hidden blocking semantics, and a `destroy` method that might
+// block if called incorrectly seems to meet that bar.
+//
+// So, we achieve our goals by giving each instance an associated `AtomicLong` counter to track
+// the number of in-flight method calls, and an `AtomicBoolean` flag to indicate whether `destroy`
+// has been called. These are updated according to the following rules:
+//
+//    * The initial value of the counter is 1, indicating a live object with no in-flight calls.
+//      The initial value for the flag is false.
+//
+//    * At the start of each method call, we atomically check the counter.
+//      If it is 0 then the underlying Rust struct has already been destroyed and the call is aborted.
+//      If it is nonzero them we atomically increment it by 1 and proceed with the method call.
+//
+//    * At the end of each method call, we atomically decrement and check the counter.
+//      If it has reached zero then we destroy the underlying Rust struct.
+//
+//    * When `destroy` is called, we atomically flip the flag from false to true.
+//      If the flag was already true we silently fail.
+//      Otherwise we atomically decrement and check the counter.
+//      If it has reached zero then we destroy the underlying Rust struct.
+//
+// Astute readers may observe that this all sounds very similar to the way that Rust's `Arc<T>` works,
+// and indeed it is, with the addition of a flag to guard against multiple calls to `destroy`.
+//
+// The overall effect is that the underlying Rust struct is destroyed only when `destroy` has been
+// called *and* all in-flight method calls have completed, avoiding violating any of the expectations
+// of the underlying Rust code.
+//
+// This makes a cleaner a better alternative to _not_ calling `destroy()` as
+// and when the object is finished with, but the abstraction is not perfect: if the Rust object's `drop`
+// method is slow, and/or there are many objects to cleanup, and it's on a low end Android device, then the cleaner
+// thread may be starved, and the app will leak memory.
+//
+// In this case, `destroy`ing manually may be a better solution.
+//
+// The cleaner can live side by side with the manual calling of `destroy`. In the order of responsiveness, uniffi objects
+// with Rust peers are reclaimed:
+//
+// 1. By calling the `destroy` method of the object, which calls `rustObject.free()`. If that doesn't happen:
+// 2. When the object becomes unreachable, AND the Cleaner thread gets to call `rustObject.free()`. If the thread is starved then:
+// 3. The memory is reclaimed when the process terminates.
+//
+// [1] https://stackoverflow.com/questions/24376768/can-java-finalize-an-object-when-it-is-still-in-scope/24380219
+//
+
+
 public interface SyncRepoFfiInterface {
     
     suspend fun `connectKnownDevicesOnce`()
     
-    suspend fun `connectUrl`(`sourceUrl`: kotlin.String): CloneBootstrapInfo
+    suspend fun `connectUrl`(`sourceUrl`: kotlin.String)
     
     suspend fun `getTicketQrPng`(`sizePx`: kotlin.UInt): kotlin.ByteArray
     
@@ -9011,7 +10325,7 @@ open class SyncRepoFfi: Disposable, AutoCloseable, SyncRepoFfiInterface
     
     @Throws(FfiException::class)
     @Suppress("ASSIGNED_BUT_NEVER_ACCESSED_VARIABLE")
-    override suspend fun `connectUrl`(`sourceUrl`: kotlin.String) : CloneBootstrapInfo {
+    override suspend fun `connectUrl`(`sourceUrl`: kotlin.String) {
         return uniffiRustCallAsync(
         callWithHandle { uniffiHandle ->
             UniffiLib.uniffi_daybook_ffi_fn_method_syncrepoffi_connect_url(
@@ -9019,11 +10333,12 @@ open class SyncRepoFfi: Disposable, AutoCloseable, SyncRepoFfiInterface
                 FfiConverterString.lower(`sourceUrl`),
             )
         },
-        { future, callback, continuation -> UniffiLib.ffi_daybook_ffi_rust_future_poll_rust_buffer(future, callback, continuation) },
-        { future, continuation -> UniffiLib.ffi_daybook_ffi_rust_future_complete_rust_buffer(future, continuation) },
-        { future -> UniffiLib.ffi_daybook_ffi_rust_future_free_rust_buffer(future) },
+        { future, callback, continuation -> UniffiLib.ffi_daybook_ffi_rust_future_poll_void(future, callback, continuation) },
+        { future, continuation -> UniffiLib.ffi_daybook_ffi_rust_future_complete_void(future, continuation) },
+        { future -> UniffiLib.ffi_daybook_ffi_rust_future_free_void(future) },
         // lift function
-        { FfiConverterTypeCloneBootstrapInfo.lift(it) },
+        { Unit },
+        
         // Error FFI converter
         FfiException.ErrorHandler,
     )
@@ -10382,6 +11697,44 @@ public object FfiConverterTypeCloneDestinationCheck: FfiConverterRustBuffer<Clon
             FfiConverterBoolean.write(value.`exists`, buf)
             FfiConverterBoolean.write(value.`isDir`, buf)
             FfiConverterBoolean.write(value.`isEmpty`, buf)
+    }
+}
+
+
+
+data class CloneInfo (
+    var `repoName`: kotlin.String
+    , 
+    var `deviceName`: kotlin.String?
+    
+){
+    
+
+    
+
+    
+    companion object
+}
+
+/**
+ * @suppress
+ */
+public object FfiConverterTypeCloneInfo: FfiConverterRustBuffer<CloneInfo> {
+    override fun read(buf: ByteBuffer): CloneInfo {
+        return CloneInfo(
+            FfiConverterString.read(buf),
+            FfiConverterOptionalString.read(buf),
+        )
+    }
+
+    override fun allocationSize(value: CloneInfo) = (
+            FfiConverterString.allocationSize(value.`repoName`) +
+            FfiConverterOptionalString.allocationSize(value.`deviceName`)
+    )
+
+    override fun write(value: CloneInfo, buf: ByteBuffer) {
+            FfiConverterString.write(value.`repoName`, buf)
+            FfiConverterOptionalString.write(value.`deviceName`, buf)
     }
 }
 

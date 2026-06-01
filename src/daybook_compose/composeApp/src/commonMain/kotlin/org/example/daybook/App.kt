@@ -113,14 +113,15 @@ import org.example.daybook.theme.DaybookTheme
 import org.example.daybook.theme.ThemeConfig
 import org.example.daybook.uniffi.CameraPreviewFfi
 import org.example.daybook.uniffi.CameraQrAnalyzerFfi
-import org.example.daybook.uniffi.CloneBootstrapInfo
 import org.example.daybook.uniffi.ConfigRepoFfi
 import org.example.daybook.uniffi.DispatchRepoFfi
 import org.example.daybook.uniffi.DrawerRepoFfi
 import org.example.daybook.uniffi.FfiCtx
 import org.example.daybook.uniffi.FfiException
+import org.example.daybook.uniffi.InitRepoFfi
 import org.example.daybook.uniffi.ProgressRepoFfi
 import org.example.daybook.uniffi.RtFfi
+import org.example.daybook.uniffi.SqliteLocalStateRepoFfi
 import org.example.daybook.uniffi.SyncRepoFfi
 import org.example.daybook.uniffi.TablesEventListener
 import org.example.daybook.uniffi.TablesRepoFfi
@@ -187,6 +188,8 @@ data class AppContainer(
     val tablesRepo: TablesRepoFfi,
     val dispatchRepo: DispatchRepoFfi,
     val progressRepo: ProgressRepoFfi,
+    val initRepo: InitRepoFfi,
+    val sqliteLsRepo: SqliteLocalStateRepoFfi,
     val rtFfi: RtFfi?,
     val plugsRepo: org.example.daybook.uniffi.PlugsRepoFfi,
     val configRepo: ConfigRepoFfi,
@@ -808,7 +811,7 @@ fun App(
         val repoPath = pendingOpenRepoPath ?: return@LaunchedEffect
         val startupMark = TimeSource.Monotonic.markNow()
         val startupPhaseId = Clock.System.now().toEpochMilliseconds().toString()
-        val startupStageCount = 7
+        val startupStageCount = 10
         try {
             initState = AppInitState.OpeningRepo(repoPath = repoPath)
             val container = withContext(Dispatchers.IO) {
@@ -820,6 +823,8 @@ fun App(
                 var configRepo: ConfigRepoFfi? = null
                 var dispatchRepo: DispatchRepoFfi? = null
                 var progressRepo: ProgressRepoFfi? = null
+                var initRepo: InitRepoFfi? = null
+                var sqliteLsRepo: SqliteLocalStateRepoFfi? = null
                 var cameraPreviewFfi: CameraPreviewFfi? = null
                 var startupProgress: StartupProgressTask? = null
                 try {
@@ -881,6 +886,22 @@ fun App(
                         withStartupStage("DispatchRepoFfi.load", startupMark, startupProgress) {
                             DispatchRepoFfi.load(fcx = fcxReady)
                         }
+                    initRepo =
+                        withStartupStage("InitRepoFfi.load", startupMark, startupProgress) {
+                            InitRepoFfi.load(
+                                fcx = fcxReady,
+                                progressRepo =
+                                    progressRepo ?: error("progress repo failed to load")
+                            )
+                        }
+                    sqliteLsRepo =
+                        withStartupStage(
+                            "SqliteLocalStateRepoFfi.load",
+                            startupMark,
+                            startupProgress
+                        ) {
+                            SqliteLocalStateRepoFfi.load(fcx = fcxReady)
+                        }
                     cameraPreviewFfi =
                         withStartupStage("CameraPreviewFfi.load", startupMark, startupProgress) {
                             CameraPreviewFfi.load()
@@ -894,6 +915,9 @@ fun App(
                         tablesRepo = tablesRepo ?: error("tables repo failed to load"),
                         dispatchRepo = dispatchRepo ?: error("dispatch repo failed to load"),
                         progressRepo = progressRepo ?: error("progress repo failed to load"),
+                        initRepo = initRepo ?: error("init repo failed to load"),
+                        sqliteLsRepo =
+                            sqliteLsRepo ?: error("sqlite local state repo failed to load"),
                         rtFfi = null,
                         plugsRepo = plugsRepo ?: error("plugs repo failed to load"),
                         configRepo = configRepo ?: error("config repo failed to load"),
@@ -908,6 +932,8 @@ fun App(
                         throwable.message ?: throwable::class.simpleName ?: "unknown error"
                     startupProgress?.fail(startupErrorMessage, startupMark.elapsedNow().toString())
                     cameraPreviewFfi?.close()
+                    sqliteLsRepo?.close()
+                    initRepo?.close()
                     progressRepo?.close()
                     dispatchRepo?.close()
                     drawerRepo?.close()
@@ -972,6 +998,8 @@ fun App(
                     progressRepo = current.progressRepo,
                     blobsRepo = current.blobsRepo,
                     configRepo = current.configRepo,
+                    initRepo = current.initRepo,
+                    sqliteLsRepo = current.sqliteLsRepo,
                     deviceId = "compose-client",
                     startupProgressTaskId = STARTUP_PROGRESS_TASK_ID
                 )
@@ -1003,6 +1031,8 @@ fun App(
                 runCatching { current.tablesRepo.close() }
                 runCatching { current.dispatchRepo.close() }
                 runCatching { current.blobsRepo.close() }
+                runCatching { current.sqliteLsRepo.close() }
+                runCatching { current.initRepo.close() }
                 runCatching { current.plugsRepo.close() }
                 runCatching { current.configRepo.close() }
                 runCatching { current.cameraPreviewFfi.close() }
@@ -1276,12 +1306,16 @@ private suspend fun shutdownAppContainer(appContainer: AppContainer) {
     if (rtFfi != null) {
         stopOnIo("runtime repo") { rtFfi.stop() }
     }
+    stopOnIo("init repo") { appContainer.initRepo.stop() }
+    stopOnIo("sqlite local state repo") { appContainer.sqliteLsRepo.stop() }
     stopOnIo("progress repo") { appContainer.progressRepo.stop() }
     closeSafely("drawer repo") { appContainer.drawerRepo.close() }
     closeSafely("tables repo") { appContainer.tablesRepo.close() }
     closeSafely("dispatch repo") { appContainer.dispatchRepo.close() }
     closeSafely("progress repo") { appContainer.progressRepo.close() }
     rtFfi?.let { closeSafely("runtime ffi") { it.close() } }
+    closeSafely("init repo") { appContainer.initRepo.close() }
+    closeSafely("sqlite local state repo") { appContainer.sqliteLsRepo.close() }
     closeSafely("plugs repo") { appContainer.plugsRepo.close() }
     closeSafely("config repo") { appContainer.configRepo.close() }
     closeSafely("blobs repo") { appContainer.blobsRepo.close() }

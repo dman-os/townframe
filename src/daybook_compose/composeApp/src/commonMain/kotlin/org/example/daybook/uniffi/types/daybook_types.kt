@@ -1581,6 +1581,44 @@ public object FfiConverterTypeFacetMeta: FfiConverterRustBuffer<FacetMeta> {
 
 
 
+data class FacetRef (
+    var `ref`: Url
+    , 
+    var `heads`: List<kotlin.String>
+    
+){
+    
+
+    
+
+    
+    companion object
+}
+
+/**
+ * @suppress
+ */
+public object FfiConverterTypeFacetRef: FfiConverterRustBuffer<FacetRef> {
+    override fun read(buf: ByteBuffer): FacetRef {
+        return FacetRef(
+            FfiConverterTypeUrl.read(buf),
+            FfiConverterSequenceString.read(buf),
+        )
+    }
+
+    override fun allocationSize(value: FacetRef) = (
+            FfiConverterTypeUrl.allocationSize(value.`ref`) +
+            FfiConverterSequenceString.allocationSize(value.`heads`)
+    )
+
+    override fun write(value: FacetRef, buf: ByteBuffer) {
+            FfiConverterTypeUrl.write(value.`ref`, buf)
+            FfiConverterSequenceString.write(value.`heads`, buf)
+    }
+}
+
+
+
 @Serializable
 data class ImageMetadata (
     var `facetRef`: Url

@@ -40,9 +40,15 @@ import org.example.daybook.uniffi.types.FacetKey
 import org.example.daybook.uniffi.types.FfiConverterTypeDoc
 import org.example.daybook.uniffi.types.FfiConverterTypeDocPatch
 import org.example.daybook.uniffi.types.FfiConverterTypeFacetKey
+import uniffi.big_sync_core.Byte32Id
+import uniffi.big_sync_core.FfiConverterTypeByte32Id
+import uniffi.big_sync_core.FfiConverterTypeObjId
+import uniffi.big_sync_core.ObjId
 import org.example.daybook.uniffi.types.RustBuffer as RustBufferDoc
 import org.example.daybook.uniffi.types.RustBuffer as RustBufferDocPatch
 import org.example.daybook.uniffi.types.RustBuffer as RustBufferFacetKey
+import uniffi.big_sync_core.RustBuffer as RustBufferByte32Id
+import uniffi.big_sync_core.RustBuffer as RustBufferObjId
 
 // This is a helper for safely working with byte buffers returned from the Rust code.
 // A rust-owned buffer is represented by its capacity, its current length, and a
@@ -667,6 +673,7 @@ internal object UniffiLib {
     init {
         Native.register(UniffiLib::class.java, findLibraryName(componentName = "daybook_core"))
         org.example.daybook.uniffi.types.uniffiEnsureInitialized()
+        uniffi.big_sync_core.uniffiEnsureInitialized()
         
     }
     external fun uniffi_daybook_core_fn_clone_listenerregistration(`handle`: Long,uniffi_out_err: UniffiRustCallStatus, 
@@ -1376,7 +1383,7 @@ public object FfiConverterTypeListenerRegistration: FfiConverter<ListenerRegistr
 data class BranchDeleteTombstone (
     var `vtag`: VersionTag
     , 
-    var `branchDocId`: kotlin.String
+    var `branchDocId`: ObjId
     , 
     var `branchHeads`: ChangeHashSet
     
@@ -1396,20 +1403,20 @@ public object FfiConverterTypeBranchDeleteTombstone: FfiConverterRustBuffer<Bran
     override fun read(buf: ByteBuffer): BranchDeleteTombstone {
         return BranchDeleteTombstone(
             FfiConverterTypeVersionTag.read(buf),
-            FfiConverterString.read(buf),
+            FfiConverterTypeObjId.read(buf),
             FfiConverterTypeChangeHashSet.read(buf),
         )
     }
 
     override fun allocationSize(value: BranchDeleteTombstone) = (
             FfiConverterTypeVersionTag.allocationSize(value.`vtag`) +
-            FfiConverterString.allocationSize(value.`branchDocId`) +
+            FfiConverterTypeObjId.allocationSize(value.`branchDocId`) +
             FfiConverterTypeChangeHashSet.allocationSize(value.`branchHeads`)
     )
 
     override fun write(value: BranchDeleteTombstone, buf: ByteBuffer) {
             FfiConverterTypeVersionTag.write(value.`vtag`, buf)
-            FfiConverterString.write(value.`branchDocId`, buf)
+            FfiConverterTypeObjId.write(value.`branchDocId`, buf)
             FfiConverterTypeChangeHashSet.write(value.`branchHeads`, buf)
     }
 }
@@ -1417,7 +1424,7 @@ public object FfiConverterTypeBranchDeleteTombstone: FfiConverterRustBuffer<Bran
 
 
 data class BranchSnapshot (
-    var `branchDocId`: kotlin.String
+    var `branchDocId`: ObjId
     , 
     var `branchHeads`: ChangeHashSet
     
@@ -1436,18 +1443,18 @@ data class BranchSnapshot (
 public object FfiConverterTypeBranchSnapshot: FfiConverterRustBuffer<BranchSnapshot> {
     override fun read(buf: ByteBuffer): BranchSnapshot {
         return BranchSnapshot(
-            FfiConverterString.read(buf),
+            FfiConverterTypeObjId.read(buf),
             FfiConverterTypeChangeHashSet.read(buf),
         )
     }
 
     override fun allocationSize(value: BranchSnapshot) = (
-            FfiConverterString.allocationSize(value.`branchDocId`) +
+            FfiConverterTypeObjId.allocationSize(value.`branchDocId`) +
             FfiConverterTypeChangeHashSet.allocationSize(value.`branchHeads`)
     )
 
     override fun write(value: BranchSnapshot, buf: ByteBuffer) {
-            FfiConverterString.write(value.`branchDocId`, buf)
+            FfiConverterTypeObjId.write(value.`branchDocId`, buf)
             FfiConverterTypeChangeHashSet.write(value.`branchHeads`, buf)
     }
 }
@@ -1720,6 +1727,8 @@ public object FfiConverterTypeDocNBranches: FfiConverterRustBuffer<DocNBranches>
 data class KnownRepoEntry (
     var `id`: kotlin.String
     , 
+    var `checkoutId`: kotlin.String
+    , 
     var `name`: kotlin.String
     , 
     var `path`: kotlin.String
@@ -1746,6 +1755,7 @@ public object FfiConverterTypeKnownRepoEntry: FfiConverterRustBuffer<KnownRepoEn
             FfiConverterString.read(buf),
             FfiConverterString.read(buf),
             FfiConverterString.read(buf),
+            FfiConverterString.read(buf),
             FfiConverterLong.read(buf),
             FfiConverterLong.read(buf),
         )
@@ -1753,6 +1763,7 @@ public object FfiConverterTypeKnownRepoEntry: FfiConverterRustBuffer<KnownRepoEn
 
     override fun allocationSize(value: KnownRepoEntry) = (
             FfiConverterString.allocationSize(value.`id`) +
+            FfiConverterString.allocationSize(value.`checkoutId`) +
             FfiConverterString.allocationSize(value.`name`) +
             FfiConverterString.allocationSize(value.`path`) +
             FfiConverterLong.allocationSize(value.`createdAtUnixSecs`) +
@@ -1761,6 +1772,7 @@ public object FfiConverterTypeKnownRepoEntry: FfiConverterRustBuffer<KnownRepoEn
 
     override fun write(value: KnownRepoEntry, buf: ByteBuffer) {
             FfiConverterString.write(value.`id`, buf)
+            FfiConverterString.write(value.`checkoutId`, buf)
             FfiConverterString.write(value.`name`, buf)
             FfiConverterString.write(value.`path`, buf)
             FfiConverterLong.write(value.`createdAtUnixSecs`, buf)
@@ -2054,7 +2066,7 @@ public object FfiConverterTypeRepoConfig: FfiConverterRustBuffer<RepoConfig> {
 
 
 data class StoredBranchRef (
-    var `branchDocId`: kotlin.String
+    var `branchDocId`: ObjId
     
 ){
     
@@ -2071,16 +2083,16 @@ data class StoredBranchRef (
 public object FfiConverterTypeStoredBranchRef: FfiConverterRustBuffer<StoredBranchRef> {
     override fun read(buf: ByteBuffer): StoredBranchRef {
         return StoredBranchRef(
-            FfiConverterString.read(buf),
+            FfiConverterTypeObjId.read(buf),
         )
     }
 
     override fun allocationSize(value: StoredBranchRef) = (
-            FfiConverterString.allocationSize(value.`branchDocId`)
+            FfiConverterTypeObjId.allocationSize(value.`branchDocId`)
     )
 
     override fun write(value: StoredBranchRef, buf: ByteBuffer) {
-            FfiConverterString.write(value.`branchDocId`, buf)
+            FfiConverterTypeObjId.write(value.`branchDocId`, buf)
     }
 }
 
@@ -3168,6 +3180,98 @@ public object FfiConverterTypeDrawerEvent : FfiConverterRustBuffer<DrawerEvent>{
                 Unit
             }
         }.let { /* this makes the `when` an expression, which ensures it is exhaustive */ }
+    }
+}
+
+
+
+
+
+sealed class InitEvent {
+    
+    data class Changed(
+        val `heads`: org.example.daybook.uniffi.core.ChangeHashSet) : InitEvent()
+        
+    {
+        
+
+        companion object
+    }
+    
+
+    
+
+    
+    
+
+
+    companion object
+}
+
+/**
+ * @suppress
+ */
+public object FfiConverterTypeInitEvent : FfiConverterRustBuffer<InitEvent>{
+    override fun read(buf: ByteBuffer): InitEvent {
+        return when(buf.getInt()) {
+            1 -> InitEvent.Changed(
+                FfiConverterTypeChangeHashSet.read(buf),
+                )
+            else -> throw RuntimeException("invalid enum value, something is very wrong!!")
+        }
+    }
+
+    override fun allocationSize(value: InitEvent) = when(value) {
+        is InitEvent.Changed -> {
+            // Add the size for the Int that specifies the variant plus the size needed for all fields
+            (
+                4UL
+                + FfiConverterTypeChangeHashSet.allocationSize(value.`heads`)
+            )
+        }
+    }
+
+    override fun write(value: InitEvent, buf: ByteBuffer) {
+        when(value) {
+            is InitEvent.Changed -> {
+                buf.putInt(1)
+                FfiConverterTypeChangeHashSet.write(value.`heads`, buf)
+                Unit
+            }
+        }.let { /* this makes the `when` an expression, which ensures it is exhaustive */ }
+    }
+}
+
+
+
+
+
+
+enum class LocalStateEvent {
+    
+    LIST_CHANGED;
+
+    
+
+
+    companion object
+}
+
+
+/**
+ * @suppress
+ */
+public object FfiConverterTypeLocalStateEvent: FfiConverterRustBuffer<LocalStateEvent> {
+    override fun read(buf: ByteBuffer) = try {
+        LocalStateEvent.values()[buf.getInt() - 1]
+    } catch (e: IndexOutOfBoundsException) {
+        throw RuntimeException("invalid enum value, something is very wrong!!", e)
+    }
+
+    override fun allocationSize(value: LocalStateEvent) = 4UL
+
+    override fun write(value: LocalStateEvent, buf: ByteBuffer) {
+        buf.putInt(value.ordinal + 1)
     }
 }
 

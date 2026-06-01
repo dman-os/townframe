@@ -1,9 +1,6 @@
 #![recursion_limit = "256"]
 
-mod interlude {
-    
-    
-}
+mod interlude {}
 
 use std::sync::Arc;
 

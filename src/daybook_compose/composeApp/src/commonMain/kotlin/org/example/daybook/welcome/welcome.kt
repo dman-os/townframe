@@ -120,7 +120,7 @@ import org.example.daybook.uniffi.FfiException
 import org.example.daybook.uniffi.ProgressRepoFfi
 import org.example.daybook.uniffi.RtFfi
 import org.example.daybook.uniffi.SyncRepoFfi
-import org.example.daybook.uniffi.CloneBootstrapInfo
+import org.example.daybook.uniffi.CloneInfo
 import org.example.daybook.uniffi.TablesEventListener
 import org.example.daybook.uniffi.TablesRepoFfi
 import org.example.daybook.uniffi.core.KnownRepoEntry
@@ -151,7 +151,7 @@ sealed interface CloneUiState {
 
     data class PickingLocation(
         val sourceUrl: String,
-        val info: CloneBootstrapInfo,
+        val info: CloneInfo,
         val destinationPath: String,
         val isCloning: Boolean = false,
         val errorMessage: String? = null,
@@ -1233,8 +1233,9 @@ private fun CloneLocationScreen(
                     verticalArrangement = Arrangement.spacedBy(12.dp)
                 ) {
                     Text("Repo: ${state.info.repoName}")
-                    Text("Repo ID: ${state.info.repoId}")
-                    Text("Endpoint: ${state.info.endpointId}")
+                    state.info.deviceName?.let { deviceName ->
+                        Text("Device: $deviceName")
+                    }
                     if (isAndroidPlatform) {
                         Text(
                             text = "Clone path: ${state.destinationPath}",
