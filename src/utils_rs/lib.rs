@@ -131,6 +131,7 @@ pub type DHashMapMutRef<'a, K, V> = dashmap::mapref::one::RefMut<'a, K, V>;
 pub use cheapstr::CHeapStr;
 
 // FIXME: why this take 7ms on debug builds?
+#[allow(clippy::unnecessary_literal_unwrap)]
 pub fn setup_tracing() -> Res<()> {
     #[cfg(not(target_arch = "wasm32"))]
     let filter = {
