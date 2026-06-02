@@ -1021,23 +1021,21 @@ fun DockableRegion(
                         if (sizeA >= sizeB) {
                             val targetWeightA = sizeDpToWeight(sizeA, totalSizeDp, totalWeight)
                             val targetWeightB = sizeDpToWeight(sizeB, totalSizeDp, totalWeight)
-                            val newWeightA = targetWeightA.coerceAtLeast(
+                            val newWeightA = targetWeightA.coerceIn(
                                 SidebarLayoutConstants.MIN_PANE_WEIGHT,
+                                totalCurrentWeight - SidebarLayoutConstants.MIN_PANE_WEIGHT,
                             )
-                            val newWeightB = (totalCurrentWeight - newWeightA).coerceAtLeast(
-                                SidebarLayoutConstants.MIN_PANE_WEIGHT,
-                            )
+                            val newWeightB = totalCurrentWeight - newWeightA
                             weightMap[keyA] = newWeightA
                             weightMap[keyB] = newWeightB
                         } else {
                             val targetWeightA = sizeDpToWeight(sizeA, totalSizeDp, totalWeight)
                             val targetWeightB = sizeDpToWeight(sizeB, totalSizeDp, totalWeight)
-                            val newWeightB = targetWeightB.coerceAtLeast(
+                            val newWeightB = targetWeightB.coerceIn(
                                 SidebarLayoutConstants.MIN_PANE_WEIGHT,
+                                totalCurrentWeight - SidebarLayoutConstants.MIN_PANE_WEIGHT,
                             )
-                            val newWeightA = (totalCurrentWeight - newWeightB).coerceAtLeast(
-                                SidebarLayoutConstants.MIN_PANE_WEIGHT,
-                            )
+                            val newWeightA = totalCurrentWeight - newWeightB
                             weightMap[keyA] = newWeightA
                             weightMap[keyB] = newWeightB
                         }
@@ -1045,16 +1043,11 @@ fun DockableRegion(
                         // One or both outside discrete range - use virtual sizes
                         val targetSizeDpA = resolveDiscreteTargetSizeDp(regimeA, virtualSizeDpA)
                         val targetWeightA = sizeDpToWeight(targetSizeDpA, totalSizeDp, totalWeight)
-                        val newWeightA =
-                            targetWeightA
-                                .coerceAtLeast(
-                                    SidebarLayoutConstants.MIN_PANE_WEIGHT,
-                                ).coerceAtMost(
-                                    totalCurrentWeight - SidebarLayoutConstants.MIN_PANE_WEIGHT,
-                                )
-                        val newWeightB = (totalCurrentWeight - newWeightA).coerceAtLeast(
+                        val newWeightA = targetWeightA.coerceIn(
                             SidebarLayoutConstants.MIN_PANE_WEIGHT,
+                            totalCurrentWeight - SidebarLayoutConstants.MIN_PANE_WEIGHT,
                         )
+                        val newWeightB = totalCurrentWeight - newWeightA
                         weightMap[keyA] = newWeightA
                         weightMap[keyB] = newWeightB
                     }
@@ -1067,28 +1060,22 @@ fun DockableRegion(
                     if (inRangeA) {
                         val targetWeightA = sizeDpToWeight(regimeA.sizeDp, totalSizeDp, totalWeight)
                         val targetWeightB = sizeDpToWeight(virtualSizeDpB, totalSizeDp, totalWeight)
-                        val newWeightA = targetWeightA.coerceAtLeast(
+                        val newWeightA = targetWeightA.coerceIn(
                             SidebarLayoutConstants.MIN_PANE_WEIGHT,
+                            totalCurrentWeight - SidebarLayoutConstants.MIN_PANE_WEIGHT,
                         )
-                        val newWeightB = (totalCurrentWeight - newWeightA).coerceAtLeast(
-                            SidebarLayoutConstants.MIN_PANE_WEIGHT,
-                        )
+                        val newWeightB = totalCurrentWeight - newWeightA
                         weightMap[keyA] = newWeightA
                         weightMap[keyB] = newWeightB
                     } else {
                         // Outside discrete range - use virtual size
                         val targetSizeDpA = resolveDiscreteTargetSizeDp(regimeA, virtualSizeDpA)
                         val targetWeightA = sizeDpToWeight(targetSizeDpA, totalSizeDp, totalWeight)
-                        val newWeightA =
-                            targetWeightA
-                                .coerceAtLeast(
-                                    SidebarLayoutConstants.MIN_PANE_WEIGHT,
-                                ).coerceAtMost(
-                                    totalCurrentWeight - SidebarLayoutConstants.MIN_PANE_WEIGHT,
-                                )
-                        val newWeightB = (totalCurrentWeight - newWeightA).coerceAtLeast(
+                        val newWeightA = targetWeightA.coerceIn(
                             SidebarLayoutConstants.MIN_PANE_WEIGHT,
+                            totalCurrentWeight - SidebarLayoutConstants.MIN_PANE_WEIGHT,
                         )
+                        val newWeightB = totalCurrentWeight - newWeightA
                         weightMap[keyA] = newWeightA
                         weightMap[keyB] = newWeightB
                     }
@@ -1101,28 +1088,22 @@ fun DockableRegion(
                     if (inRangeB) {
                         val targetWeightA = sizeDpToWeight(virtualSizeDpA, totalSizeDp, totalWeight)
                         val targetWeightB = sizeDpToWeight(regimeB.sizeDp, totalSizeDp, totalWeight)
-                        val newWeightB = targetWeightB.coerceAtLeast(
+                        val newWeightB = targetWeightB.coerceIn(
                             SidebarLayoutConstants.MIN_PANE_WEIGHT,
+                            totalCurrentWeight - SidebarLayoutConstants.MIN_PANE_WEIGHT,
                         )
-                        val newWeightA = (totalCurrentWeight - newWeightB).coerceAtLeast(
-                            SidebarLayoutConstants.MIN_PANE_WEIGHT,
-                        )
+                        val newWeightA = totalCurrentWeight - newWeightB
                         weightMap[keyA] = newWeightA
                         weightMap[keyB] = newWeightB
                     } else {
                         // Outside discrete range - use virtual size
                         val targetSizeDpB = resolveDiscreteTargetSizeDp(regimeB, virtualSizeDpB)
                         val targetWeightB = sizeDpToWeight(targetSizeDpB, totalSizeDp, totalWeight)
-                        val newWeightB =
-                            targetWeightB
-                                .coerceAtLeast(
-                                    SidebarLayoutConstants.MIN_PANE_WEIGHT,
-                                ).coerceAtMost(
-                                    totalCurrentWeight - SidebarLayoutConstants.MIN_PANE_WEIGHT,
-                                )
-                        val newWeightA = (totalCurrentWeight - newWeightB).coerceAtLeast(
+                        val newWeightB = targetWeightB.coerceIn(
                             SidebarLayoutConstants.MIN_PANE_WEIGHT,
+                            totalCurrentWeight - SidebarLayoutConstants.MIN_PANE_WEIGHT,
                         )
+                        val newWeightA = totalCurrentWeight - newWeightB
                         weightMap[keyA] = newWeightA
                         weightMap[keyB] = newWeightB
                     }
@@ -1131,16 +1112,11 @@ fun DockableRegion(
                 // Both continuous: use virtual sizes
                 else -> {
                     val targetWeightA = sizeDpToWeight(virtualSizeDpA, totalSizeDp, totalWeight)
-                    val newWeightA =
-                        targetWeightA
-                            .coerceAtLeast(
-                                SidebarLayoutConstants.MIN_PANE_WEIGHT,
-                            ).coerceAtMost(
-                                totalCurrentWeight - SidebarLayoutConstants.MIN_PANE_WEIGHT,
-                            )
-                    val newWeightB = (totalCurrentWeight - newWeightA).coerceAtLeast(
+                    val newWeightA = targetWeightA.coerceIn(
                         SidebarLayoutConstants.MIN_PANE_WEIGHT,
+                        totalCurrentWeight - SidebarLayoutConstants.MIN_PANE_WEIGHT,
                     )
+                    val newWeightB = totalCurrentWeight - newWeightA
                     weightMap[keyA] = newWeightA
                     weightMap[keyB] = newWeightB
                 }
@@ -1256,12 +1232,11 @@ fun DockableRegion(
                         val weightA = getWeight(keyA)
                         val weightB = getWeight(keyB)
                         val totalCurrentWeight = weightA + weightB
-                        val newWeightA = targetWeightA.coerceAtLeast(
+                        val newWeightA = targetWeightA.coerceIn(
                             SidebarLayoutConstants.MIN_PANE_WEIGHT,
+                            totalCurrentWeight - SidebarLayoutConstants.MIN_PANE_WEIGHT,
                         )
-                        val newWeightB = (totalCurrentWeight - newWeightA).coerceAtLeast(
-                            SidebarLayoutConstants.MIN_PANE_WEIGHT,
-                        )
+                        val newWeightB = totalCurrentWeight - newWeightA
                         weightMap[keyA] = newWeightA
                         weightMap[keyB] = newWeightB
                         return true
@@ -1274,12 +1249,11 @@ fun DockableRegion(
                         val weightA = getWeight(keyA)
                         val weightB = getWeight(keyB)
                         val totalCurrentWeight = weightA + weightB
-                        val newWeightB = targetWeightB.coerceAtLeast(
+                        val newWeightB = targetWeightB.coerceIn(
                             SidebarLayoutConstants.MIN_PANE_WEIGHT,
+                            totalCurrentWeight - SidebarLayoutConstants.MIN_PANE_WEIGHT,
                         )
-                        val newWeightA = (totalCurrentWeight - newWeightB).coerceAtLeast(
-                            SidebarLayoutConstants.MIN_PANE_WEIGHT,
-                        )
+                        val newWeightA = totalCurrentWeight - newWeightB
                         weightMap[keyA] = newWeightA
                         weightMap[keyB] = newWeightB
                         return true
@@ -1299,13 +1273,11 @@ fun DockableRegion(
             val totalCurrentWeight = weightA + weightB
 
             val newWeightA =
-                targetWeightA
-                    .coerceAtLeast(
-                        SidebarLayoutConstants.MIN_PANE_WEIGHT,
-                    ).coerceAtMost(totalCurrentWeight - SidebarLayoutConstants.MIN_PANE_WEIGHT)
-            val newWeightB = (totalCurrentWeight - newWeightA).coerceAtLeast(
-                SidebarLayoutConstants.MIN_PANE_WEIGHT,
-            )
+                targetWeightA.coerceIn(
+                    SidebarLayoutConstants.MIN_PANE_WEIGHT,
+                    totalCurrentWeight - SidebarLayoutConstants.MIN_PANE_WEIGHT,
+                )
+            val newWeightB = totalCurrentWeight - newWeightA
 
             // Update state
             weightMap[keyA] = newWeightA

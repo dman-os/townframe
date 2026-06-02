@@ -67,7 +67,6 @@ jobs:
 
       - name: pre-commit hooks
         run: |
-          export SKIP=format-kotlin,lint-kotlin
           nix develop .#ci-rust --command prek --color=always run --all-files
 
       - name: builds
@@ -79,10 +78,6 @@ jobs:
           nix develop .#ci-rust --command cargo --color=always run -p xtask -- build-plug-oci --plug-root ./src/plug_test
           nix develop .#ci-rust --command cargo --color=always run -p xtask -- build-plug-oci --plug-root ./src/plug_plabels
           nix develop .#ci-rust --command cargo --color=always run -p xtask -- build-plug-oci --plug-root ./src/plug_dayledger
-
-      - name: kotlin lint
-        run: |
-          nix develop .#ci-desktop --command ./x/lint-kt.ts
 
       - name: kotlin tests
         run: |

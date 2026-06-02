@@ -32,16 +32,10 @@ repos:
           - commit-msg
   - repo: local
     hooks:
-      - id: format-kotlin
-        name: Format Kotlin
+      - id: detekt-kotlin
+        name: Detekt Kotlin
         language: system
         entry: ./x/gradle.ts detektMainDesktop --auto-correct
-        pass_filenames: false
-        files: \.kt$
-      - id: lint-kotlin
-        name: Lint Kotlin
-        language: system
-        entry: ./x/gradle.ts detektMainDesktop
         pass_filenames: false
         files: \.kt$
       - id: deno-fmt-x
