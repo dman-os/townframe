@@ -136,7 +136,7 @@ impl DrawerRepo {
             serde_json::to_string(&am_utils_rs::serialize_commit_heads(branch_heads.as_ref()))
                 .expect(ERROR_JSON);
 
-        let mut tx = self.meta_store_sql.write_pool.begin().await?;
+        let mut tx = self.meta_store_sql.write_pool.begin_with("BEGIN IMMEDIATE").await?;
         sqlx::query(
             r#"
             INSERT INTO "drawer_local_branches_deleted" (

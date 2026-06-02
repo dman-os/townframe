@@ -142,7 +142,7 @@ impl DocBlobsIndexRepo {
         .fetch_optional(db_pool)
         .await?;
         if has_branch_path_col.is_none() {
-            let mut tx = db_pool.begin().await?;
+            let mut tx = db_pool.begin_with("BEGIN IMMEDIATE").await?;
             sqlx::query("ALTER TABLE doc_blob_refs RENAME TO doc_blob_refs_old")
                 .execute(&mut *tx)
                 .await?;
@@ -310,7 +310,7 @@ impl DocBlobsIndexRepo {
         heads: &ChangeHashSet,
         blobs: &HashMap<Arc<str>, u64>,
     ) -> Res<ReindexDocOutcome> {
-        let mut tx = self.db_pool.begin().await?;
+        let mut tx = self.db_pool.begin_with("BEGIN IMMEDIATE").await?;
         let prev_hashes: HashSet<Arc<str>> = self
             .list_hashes_for_doc_branch_tx(tx.as_mut(), doc_id, branch_path)
             .await?
@@ -380,7 +380,7 @@ impl DocBlobsIndexRepo {
     }
 
     pub async fn delete_doc(&self, doc_id: &DocId) -> Res<()> {
-        let mut tx = self.db_pool.begin().await?;
+        let mut tx = self.db_pool.begin_with("BEGIN IMMEDIATE").await?;
         let prev_hashes: HashSet<Arc<str>> = self
             .list_hashes_for_doc_tx(tx.as_mut(), doc_id)
             .await?
@@ -411,7 +411,7 @@ impl DocBlobsIndexRepo {
         doc_id: &DocId,
         branch_path: &BranchPathBuf,
     ) -> Res<ReindexDocOutcome> {
-        let mut tx = self.db_pool.begin().await?;
+        let mut tx = self.db_pool.begin_with("BEGIN IMMEDIATE").await?;
         let prev_hashes: HashSet<Arc<str>> = self
             .list_hashes_for_doc_branch_tx(tx.as_mut(), doc_id, branch_path)
             .await?

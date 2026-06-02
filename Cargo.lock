@@ -956,6 +956,7 @@ dependencies = [
  "serde",
  "serde_json",
  "sqlx",
+ "sqlx_utils_rs",
  "subduction_core",
  "subduction_crypto",
  "subduction_iroh",
@@ -983,6 +984,7 @@ dependencies = [
  "rand 0.9.2",
  "serde",
  "sqlx",
+ "sqlx_utils_rs",
  "structstruck",
  "surelock",
  "tempfile",
@@ -2561,6 +2563,7 @@ dependencies = [
  "sha2 0.10.9",
  "sqlite-vec",
  "sqlx",
+ "sqlx_utils_rs",
  "struct-patch",
  "surelock",
  "tempfile",
@@ -7285,6 +7288,7 @@ dependencies = [
  "async-trait",
  "blake3",
  "sqlx",
+ "sqlx_utils_rs",
  "tempfile",
  "tokio",
  "utils_rs",
@@ -7607,6 +7611,7 @@ dependencies = [
  "serde",
  "serde_json",
  "sqlx",
+ "sqlx_utils_rs",
  "tokio",
  "utils_rs",
  "wflow_sdk",
@@ -9874,6 +9879,14 @@ dependencies = [
  "tracing",
  "url",
  "uuid",
+]
+
+[[package]]
+name = "sqlx_utils_rs"
+version = "0.1.0"
+dependencies = [
+ "color-eyre",
+ "sqlx",
 ]
 
 [[package]]
@@ -12346,6 +12359,7 @@ dependencies = [
  "insta",
  "serde_json",
  "sqlx",
+ "sqlx_utils_rs",
  "tempfile",
  "tokio",
  "tracing",

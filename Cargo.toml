@@ -20,6 +20,7 @@ members = [
   "./src/plug_dayledger/",
   "./src/plug_plabels/",
   "./src/plug_test/",
+  "./src/sqlx_utils_rs/",
   "./src/test_wflows",
   "./src/utils_rs",
   "./src/wash_plugin_mltools/",
@@ -58,6 +59,7 @@ repository = ""
 #
 # internal
 utils_rs = { path = "./src/utils_rs", default-features = false }
+sqlx_utils_rs = { path = "./src/sqlx_utils_rs", default-features = false }
 api_utils_rs = { path = "./src/api_utils_rs", default-features = false  }
 am_utils_rs = { path = "./src/am_utils_rs", default-features = false  }
 # btress_api = { path = "./src/btress_api" }

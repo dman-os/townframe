@@ -8,14 +8,11 @@ pub struct SqliteStateStore {
 
 impl SqliteStateStore {
     pub async fn open(path: &Path) -> Res<Self> {
-        use std::str::FromStr;
-
         if let Some(parent) = path.parent() {
             tokio::fs::create_dir_all(parent).await?;
         }
-        let database_url = format!("sqlite://{}", path.display());
-        let options =
-            sqlx::sqlite::SqliteConnectOptions::from_str(&database_url)?.create_if_missing(true);
+        let database_url = sqlx_utils_rs::sqlite_file_url(path);
+        let options = sqlx_utils_rs::sqlite_file_connect_options(&database_url)?;
         let pool = sqlx::SqlitePool::connect_with(options).await?;
 
         sqlx::query(

@@ -139,3 +139,9 @@ If it looks or inelegant what you're doing, you're very liekly misalinged and wa
 Make sure to get more confirmations if unsure.
 
 Does the task graze by a FIXME seen in code, flag those ahead of time in case the current work is a good opportunit to resolve them.
+
+## Cargo
+
+Never specify your own custom target dir like /tmp/target. Always use the target dir that is configured by default.
+Always prefer cargo-nextest of carg-test.
+Always prefer cargo-clippy over cargo-check.

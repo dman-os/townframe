@@ -2,12 +2,10 @@ use crate::interlude::*;
 
 use crate::repo::RepoCtx;
 
-use sqlx::sqlite::{SqliteConnectOptions, SqliteJournalMode, SqlitePoolOptions};
 use sqlx::SqlitePool;
-use std::str::FromStr;
+use std::time::Duration;
 
-const SQLITE_POOL_ACQUIRE_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(90);
-const SQLITE_BUSY_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(90);
+const SQLITE_BUSY_TIMEOUT: Duration = Duration::from_secs(90);
 
 #[derive(Clone)]
 pub struct SqlCtx {
@@ -32,17 +30,12 @@ impl SqlCtx {
             }
         }
 
-        let db_pool = SqlitePoolOptions::new()
-            .max_connections(1)
-            .acquire_timeout(SQLITE_POOL_ACQUIRE_TIMEOUT)
-            .connect_with(
-                SqliteConnectOptions::from_str(&config.database_url)?
-                    .journal_mode(SqliteJournalMode::Wal)
-                    .busy_timeout(SQLITE_BUSY_TIMEOUT)
-                    .create_if_missing(true),
-            )
-            .await
-            .wrap_err("error initializing sqlite db")?;
+        let connect_options = sqlx_utils_rs::sqlite_file_connect_options_with_wal_busy(
+            &config.database_url,
+            SQLITE_BUSY_TIMEOUT,
+        )?;
+        let db_pool = sqlx_utils_rs::open_sqlite_pool(&config.database_url, connect_options, 1)
+            .await?;
 
         sqlx::query(
             r#"
@@ -73,10 +66,7 @@ impl AppConfig {
     pub fn load() -> Res<Self> {
         let app_data_dir = app_data_dir()?;
         let sql = SqlConfig {
-            database_url: format!(
-                "sqlite://{}",
-                app_data_dir.join("globals.sqlite.db").display()
-            ),
+            database_url: sqlx_utils_rs::sqlite_file_url(app_data_dir.join("globals.sqlite.db")),
         };
         Ok(Self {
             app_data_dir: app_data_dir.clone(),

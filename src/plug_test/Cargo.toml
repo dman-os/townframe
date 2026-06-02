@@ -46,3 +46,4 @@ tokio = { workspace = true }
 sqlx = { workspace = true }
 utils_rs = { workspace = true }
 api_utils_rs = { workspace = true }
+sqlx_utils_rs.workspace = true

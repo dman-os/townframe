@@ -207,7 +207,7 @@ impl DocFacetSetIndexRepo {
             .collect();
         desired_tags.remove(WellKnownFacetTag::Dmeta.as_str());
 
-        let mut tx = self.db_pool.begin().await?;
+        let mut tx = self.db_pool.begin_with("BEGIN IMMEDIATE").await?;
         sqlx::query("INSERT OR IGNORE INTO facet_set_docs (doc_id) VALUES (?1)")
             .bind(doc_id)
             .execute(tx.as_mut())

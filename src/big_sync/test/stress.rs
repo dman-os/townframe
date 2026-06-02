@@ -4,7 +4,6 @@ use crate::part_store::sqlite::SqlitePartStore;
 use crate::stress_support::{self, StressFixture};
 use crate::worker::WorkerSnapshot;
 use std::fmt::Write as _;
-use std::str::FromStr;
 
 #[derive(Clone, Copy, Debug)]
 enum StressBackend {
@@ -256,18 +255,11 @@ async fn boot_sqlite_node_at(
 ) -> Res<NodeHarness> {
     let peer_id = peer_id(peer_seed);
     let db_path = temp_dir.path().join("big_sync.sqlite");
-    let db_url = format!("sqlite://{}", db_path.display());
-    let options = sqlx::sqlite::SqliteConnectOptions::from_str(&db_url)?
-        .journal_mode(sqlx::sqlite::SqliteJournalMode::Wal)
-        .create_if_missing(true);
-    let read_pool = sqlx::sqlite::SqlitePoolOptions::new()
-        .max_connections(4)
-        .connect_with(options.clone())
-        .await?;
-    let write_pool = sqlx::sqlite::SqlitePoolOptions::new()
-        .max_connections(1)
-        .connect_with(options)
-        .await?;
+    let db_url = sqlx_utils_rs::sqlite_file_url(&db_path);
+    let options = sqlx_utils_rs::sqlite_file_connect_options(&db_url)?
+        .journal_mode(sqlx::sqlite::SqliteJournalMode::Wal);
+    let (read_pool, write_pool) =
+        sqlx_utils_rs::open_sqlite_rw_pools(&db_url, options, 4, 1).await?;
     let store = Arc::new(
         SqlitePartStore::new(
             read_pool,

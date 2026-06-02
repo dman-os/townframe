@@ -60,3 +60,4 @@ tracing.workspace = true
 big_sync_core = { workspace = true, features = ["test-support"] }
 blake3.workspace = true
 tempfile.workspace = true
+sqlx_utils_rs.workspace = true

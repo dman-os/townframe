@@ -1,6 +1,5 @@
 use crate::interlude::*;
 
-use std::str::FromStr;
 use tokio::sync::{mpsc, oneshot};
 use wflow_core::kvstore::*;
 
@@ -54,12 +53,9 @@ pub struct SqliteKvFactory {
 
 impl SqliteKvFactory {
     pub async fn boot(db_url: &str) -> Res<Self> {
-        let opts = sqlx::sqlite::SqliteConnectOptions::from_str(db_url)?
-            .create_if_missing(true)
+        let opts = sqlx_utils_rs::sqlite_file_connect_options(db_url)?
             .journal_mode(sqlx::sqlite::SqliteJournalMode::Wal);
-        let db_pool = sqlx::sqlite::SqlitePoolOptions::new()
-            .connect_with(opts)
-            .await?;
+        let db_pool = sqlx::SqlitePool::connect_with(opts).await?;
         // Use unbounded channel since the worker is single-threaded and processes messages sequentially
         let (tx, mut rx) = mpsc::unbounded_channel();
         let worker = SqliteKvWorker { db_pool };

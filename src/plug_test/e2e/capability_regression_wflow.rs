@@ -1,8 +1,6 @@
 use api_utils_rs::prelude::*;
 use daybook_types::doc::{AddDocArgs, FacetKey, FacetRaw, WellKnownFacet, WellKnownFacetTag};
-use sqlx::sqlite::SqliteConnectOptions;
 use sqlx::{ConnectOptions, SqlitePool};
-use std::str::FromStr;
 
 async fn open_plug_test_local_state(
     test_cx: &daybook_core::test_support::DaybookTestContext,
@@ -12,9 +10,8 @@ async fn open_plug_test_local_state(
         .sqlite_local_state_repo
         .get_sqlite_file_path("@daybook/test/capability-report")
         .await?;
-    let db_url = format!("sqlite:{}?mode=rwc", sqlite_file_path.display());
-    let connect_options = SqliteConnectOptions::from_str(&db_url)?
-        .create_if_missing(true)
+    let db_url = sqlx_utils_rs::sqlite_file_url(&sqlite_file_path);
+    let connect_options = sqlx_utils_rs::sqlite_file_connect_options(&db_url)?
         .disable_statement_logging();
     Ok(SqlitePool::connect_with(connect_options).await?)
 }
