@@ -13,8 +13,6 @@ pub struct SecretRepo {
 impl SecretRepo {
     const KEYRING_USERNAME: &'static str = "iroh_secret_key_v1";
 
-    fn use_mock_store() -> bool {}
-
     pub async fn boot() -> Res<Self> {
         // `cfg(test)` is only set for this crate's own unit tests. Integration/e2e
         // tests build `daybook_core` as a normal dependency, so we also honor CI
