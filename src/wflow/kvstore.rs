@@ -275,7 +275,7 @@ impl SqliteKvWorker {
                     key     BLOB PRIMARY KEY,
                     value   BLOB NOT NULL,
                     version INTEGER NOT NULL
-                )
+                ) STRICT
                 "#
         )))
         .execute(&self.db_pool)

@@ -132,7 +132,7 @@ impl DocFacetRefIndexRepo {
                 reference_kind TEXT NOT NULL,
                 origin_heads TEXT NOT NULL,
                 PRIMARY KEY(origin_doc_id, origin_facet_key, target_doc_id, target_facet_key, reference_kind)
-            )
+            ) STRICT
             "#,
         )
         .execute(db_pool)

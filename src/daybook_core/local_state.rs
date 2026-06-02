@@ -1,9 +1,6 @@
 use crate::interlude::*;
-use sqlx::sqlite::{SqliteConnectOptions, SqliteJournalMode, SqlitePoolOptions};
-use std::str::FromStr;
 use tokio_util::sync::CancellationToken;
 
-const SQLITE_POOL_ACQUIRE_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(90);
 const SQLITE_BUSY_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(90);
 
 #[derive(Debug, Clone)]
@@ -112,22 +109,15 @@ impl SqliteLocalStateRepo {
             return Ok((path, pool));
         }
 
-        let sqlite_file_path = self
-            .get_sqlite_file_path(local_state_id)
-            .await?
-            .to_string_lossy()
-            .to_string();
+        let sqlite_file_path = self.get_sqlite_file_path(local_state_id).await?;
+        let sqlite_file_url = sqlx_utils_rs::sqlite_file_url(&sqlite_file_path);
 
         crate::init_sqlite_vec();
-        let connect_options =
-            SqliteConnectOptions::from_str(&format!("sqlite://{sqlite_file_path}"))?
-                .journal_mode(SqliteJournalMode::Wal)
-                .busy_timeout(SQLITE_BUSY_TIMEOUT)
-                .create_if_missing(true);
-        let db_pool = SqlitePoolOptions::new()
-            .max_connections(1)
-            .acquire_timeout(SQLITE_POOL_ACQUIRE_TIMEOUT)
-            .connect_with(connect_options)
+        let connect_options = sqlx_utils_rs::sqlite_file_connect_options_with_wal_busy(
+            &sqlite_file_url,
+            SQLITE_BUSY_TIMEOUT,
+        )?;
+        let db_pool = sqlx_utils_rs::open_sqlite_pool(&sqlite_file_url, connect_options, 1)
             .await
             .wrap_err("error initializing sqlite local state connection")?;
 
@@ -141,6 +131,6 @@ impl SqliteLocalStateRepo {
             .entry(local_state_id.to_string())
             .or_insert_with(|| db_pool.clone())
             .clone();
-        Ok((sqlite_file_path, pooled))
+        Ok((sqlite_file_path.to_string_lossy().to_string(), pooled))
     }
 }

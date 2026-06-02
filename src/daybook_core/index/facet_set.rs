@@ -109,7 +109,7 @@ impl DocFacetSetIndexRepo {
             r#"
             CREATE TABLE IF NOT EXISTS facet_set_docs (
                 doc_id TEXT PRIMARY KEY
-            )
+            ) STRICT
             "#,
         )
         .execute(db_pool)
@@ -120,7 +120,7 @@ impl DocFacetSetIndexRepo {
             CREATE TABLE IF NOT EXISTS facet_set_tags (
                 tag_id INTEGER PRIMARY KEY AUTOINCREMENT,
                 facet_tag TEXT NOT NULL UNIQUE
-            )
+            ) STRICT
             "#,
         )
         .execute(db_pool)
@@ -135,7 +135,7 @@ impl DocFacetSetIndexRepo {
                 PRIMARY KEY(doc_id, tag_id),
                 FOREIGN KEY(doc_id) REFERENCES facet_set_docs(doc_id) ON DELETE CASCADE,
                 FOREIGN KEY(tag_id) REFERENCES facet_set_tags(tag_id)
-            )
+            ) STRICT
             "#,
         )
         .execute(db_pool)

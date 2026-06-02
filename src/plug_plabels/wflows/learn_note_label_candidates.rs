@@ -216,7 +216,7 @@ fn ensure_embedding_cache_schema(
                 model_tag TEXT NOT NULL,
                 dim INTEGER NOT NULL,
                 vector BLOB NOT NULL
-            );
+            ) STRICT;
             "#,
         )
         .map_err(|err| {

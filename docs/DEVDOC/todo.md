@@ -131,10 +131,10 @@
 - [ ] sqlite
   - [ ] SQL table schema/data update path
   - [ ] Replace sqlite-vec
+    - [ ] If not, fix the build to work on Android https://github.com/asg017/sqlite-vec/issues/68
   - [ ] write vs read pool
   - [ ] Begin immediate
   - [ ] STRICT
-    - [ ] If not, fix the build to work on Android https://github.com/asg017/sqlite-vec/issues/68
 - [x] Replace Path with camino at certain places
 - [ ] Explore multi doc drawer
   - [ ] Drawer doc migration where a drawer is marked as deprecated and all devices that have seen it must merge it into the active docs. This allows eventually consistent garbage collection

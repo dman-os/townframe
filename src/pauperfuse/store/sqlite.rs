@@ -16,7 +16,7 @@ impl SqliteStateStore {
         let pool = sqlx::SqlitePool::connect_with(options).await?;
 
         sqlx::query(
-            "CREATE TABLE IF NOT EXISTS pauperfuse_meta (key TEXT PRIMARY KEY, value TEXT NOT NULL)",
+            "CREATE TABLE IF NOT EXISTS pauperfuse_meta (key TEXT PRIMARY KEY, value TEXT NOT NULL) STRICT",
         )
         .execute(&pool)
         .await?;
@@ -27,7 +27,7 @@ impl SqliteStateStore {
                 relative_path TEXT NOT NULL, \
                 provider_hash TEXT, \
                 backend_hash TEXT\
-            )",
+            ) STRICT",
         )
         .execute(&pool)
         .await?;

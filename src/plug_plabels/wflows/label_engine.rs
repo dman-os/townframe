@@ -228,7 +228,7 @@ pub fn apply_labeling(req: LabelRequest<'_>) -> Result<(), JobErrorX> {
                 query_text TEXT NOT NULL,
                 model_tag TEXT NOT NULL,
                 active INTEGER NOT NULL DEFAULT 1
-            );
+            ) STRICT;
             CREATE TABLE IF NOT EXISTS image_label_label_set_versions (
                 version_id INTEGER PRIMARY KEY,
                 facet_key TEXT NOT NULL,
@@ -237,7 +237,7 @@ pub fn apply_labeling(req: LabelRequest<'_>) -> Result<(), JobErrorX> {
                 model_tag TEXT NOT NULL,
                 embedding_dim INTEGER NOT NULL,
                 is_current INTEGER NOT NULL DEFAULT 0
-            );
+            ) STRICT;
             CREATE INDEX IF NOT EXISTS idx_image_label_prompt_meta_version
             ON image_label_prompt_meta(label_set_version_id, row_kind, label);
             "#,

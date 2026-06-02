@@ -390,7 +390,7 @@ async fn init_schema(pool: &sqlx::SqlitePool, bucket_depth: u8) -> Res<()> {
         "CREATE TABLE IF NOT EXISTS big_sync_meta (
             key TEXT PRIMARY KEY NOT NULL,
             value INTEGER NOT NULL
-        )",
+        ) STRICT",
     )
     .execute(&mut *tx)
     .await?;
@@ -420,7 +420,7 @@ async fn init_schema(pool: &sqlx::SqlitePool, bucket_depth: u8) -> Res<()> {
         "CREATE TABLE IF NOT EXISTS big_sync_scopes (
             scope_id INTEGER PRIMARY KEY AUTOINCREMENT,
             scope_key TEXT NOT NULL UNIQUE
-        )",
+        ) STRICT",
     )
     .execute(&mut *tx)
     .await?;
@@ -505,7 +505,7 @@ async fn init_schema(pool: &sqlx::SqlitePool, bucket_depth: u8) -> Res<()> {
             cursor INTEGER NOT NULL,
             PRIMARY KEY(scope_id, peer_id, part_id),
             FOREIGN KEY(scope_id, part_id) REFERENCES big_sync_parts(scope_id, part_id)
-        )",
+        ) STRICT",
     )
     .execute(&mut *tx)
     .await?;

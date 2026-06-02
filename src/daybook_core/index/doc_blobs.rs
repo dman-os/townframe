@@ -117,7 +117,7 @@ impl DocBlobsIndexRepo {
                 length_octets INTEGER NOT NULL DEFAULT 0,
                 origin_heads TEXT NOT NULL,
                 PRIMARY KEY(doc_id, branch_path, blob_hash)
-            )
+            ) STRICT
             "#,
         )
         .execute(db_pool)
@@ -155,7 +155,7 @@ impl DocBlobsIndexRepo {
                     length_octets INTEGER NOT NULL DEFAULT 0,
                     origin_heads TEXT NOT NULL,
                     PRIMARY KEY(doc_id, branch_path, blob_hash)
-                )
+                ) STRICT
                 "#,
             )
             .execute(&mut *tx)

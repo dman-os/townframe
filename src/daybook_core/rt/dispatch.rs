@@ -842,7 +842,7 @@ async fn init_schema(repo_sql: &SqlCtx) -> Res<()> {
             payload_json TEXT NOT NULL,
             wflow_job_id TEXT,
             updated_at INTEGER NOT NULL
-        )",
+        ) STRICT",
     )
     .execute(&repo_sql.write_pool)
     .await?;
@@ -858,7 +858,7 @@ async fn init_schema(repo_sql: &SqlCtx) -> Res<()> {
         "CREATE TABLE IF NOT EXISTS dispatch_cancelled_marks (
             dispatch_id TEXT PRIMARY KEY NOT NULL,
             created_at INTEGER NOT NULL
-        )",
+        ) STRICT",
     )
     .execute(&repo_sql.write_pool)
     .await?;
@@ -868,7 +868,7 @@ async fn init_schema(repo_sql: &SqlCtx) -> Res<()> {
             wflow_partition_id TEXT PRIMARY KEY NOT NULL,
             frontier INTEGER NOT NULL,
             updated_at INTEGER NOT NULL
-        )",
+        ) STRICT",
     )
     .execute(&repo_sql.write_pool)
     .await?;

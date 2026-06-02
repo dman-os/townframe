@@ -84,7 +84,7 @@ impl InitRepo {
             CREATE TABLE IF NOT EXISTS init_per_node (
                 init_id TEXT PRIMARY KEY,
                 completed_at TEXT NOT NULL
-            )
+            ) STRICT
             "#,
         )
         .execute(&repo_sql.write_pool)
