@@ -36,6 +36,10 @@ schemars = { version = "1.2", features = ["url2"] }
 # wit
 wit-bindgen = { workspace = true }
 
+#
+# error
+color-eyre.workspace = true
+
 [dev-dependencies]
 daybook_core = { workspace = true, features = ["test-support"] }
 tokio = { workspace = true }

@@ -77,7 +77,7 @@ mod wasm_runtime {
         args.primary_doc
             .facets
             .iter()
-            .find(|t| t.key() == key && t.rights().contains(required_right))
+            .find(|tag| tag.key() == key && tag.rights().contains(required_right))
             .ok_or_else(|| {
                 JobErrorX::Terminal(ferr!(
                     "facet token '{}' with required rights not found",
@@ -93,7 +93,7 @@ mod wasm_runtime {
         args.primary_doc
             .facets
             .iter()
-            .find(|t| t.key() == key)
+            .find(|tag| tag.key() == key)
             .ok_or_else(|| JobErrorX::Terminal(ferr!("facet token '{}' not found", key)))
     }
 
@@ -304,7 +304,7 @@ mod wasm_runtime {
             "downscope-read-only".into(),
         ))
         .expect(ERROR_JSON);
-        let update_denied = matches!(read_only.update(&facet_json), Err(_));
+        let update_denied = read_only.update(&facet_json).is_err();
 
         let summary = serde_json::json!({
             "has_read": has_read,
@@ -326,7 +326,7 @@ mod wasm_runtime {
             "should-fail".into(),
         ))
         .expect(ERROR_JSON);
-        let update_denied = matches!(token.update(&facet_json), Err(_));
+        let update_denied = token.update(&facet_json).is_err();
 
         let summary = serde_json::json!({ "update_denied": update_denied });
         write_report_v2(&args, "test_denied_update", &summary)?;
@@ -340,7 +340,7 @@ mod wasm_runtime {
             .primary_doc
             .tags
             .iter()
-            .find(|t| t.tag() == "org.example.daybook.labelgeneric")
+            .find(|keyid| keyid.tag() == "org.example.daybook.labelgeneric")
             .ok_or_else(|| JobErrorX::Terminal(ferr!("labelgeneric tag token not found")))?;
         let tag_has_read = tag_token
             .rights()
@@ -380,7 +380,7 @@ mod wasm_runtime {
             .primary_doc
             .tags
             .iter()
-            .find(|t| t.tag() == "org.example.test.createable")
+            .find(|keyid| keyid.tag() == "org.example.test.createable")
             .ok_or_else(|| JobErrorX::Terminal(ferr!("createable tag token not found")))?;
 
         if !tag_token
@@ -412,7 +412,7 @@ mod wasm_runtime {
             .primary_doc
             .tags
             .iter()
-            .find(|t| t.tag() == "org.example.test.createable")
+            .find(|tag| tag.tag() == "org.example.test.createable")
             .ok_or_else(|| JobErrorX::Terminal(ferr!("createable tag token not found")))?;
 
         let ctoken = tag_token
@@ -487,13 +487,13 @@ mod wasm_runtime {
             .primary_doc
             .facets
             .iter()
-            .map(|t| (t.key(), format!("{:?}", t.rights())))
+            .map(|tag| (tag.key(), format!("{:?}", tag.rights())))
             .collect();
         let tag_keys_and_rights: Vec<(String, String)> = args
             .primary_doc
             .tags
             .iter()
-            .map(|t| (t.tag(), format!("{:?}", t.rights())))
+            .map(|tag| (tag.tag(), format!("{:?}", tag.rights())))
             .collect();
         let config_doc_facet_keys_and_rights: Vec<Vec<(String, String)>> = args
             .config_docs
@@ -501,7 +501,7 @@ mod wasm_runtime {
             .map(|cd| {
                 cd.facets
                     .iter()
-                    .map(|t| (t.key(), format!("{:?}", t.rights())))
+                    .map(|tag| (tag.key(), format!("{:?}", tag.rights())))
                     .collect()
             })
             .collect();
@@ -511,23 +511,26 @@ mod wasm_runtime {
             .map(|cd| {
                 cd.tags
                     .iter()
-                    .map(|t| (t.tag(), format!("{:?}", t.rights())))
+                    .map(|tag| (tag.tag(), format!("{:?}", tag.rights())))
                     .collect()
             })
             .collect();
 
         let facet_keys: Vec<String> = facet_keys_and_rights
             .iter()
-            .map(|(k, _)| k.clone())
+            .map(|(key, _)| key.clone())
             .collect();
-        let tag_keys: Vec<String> = tag_keys_and_rights.iter().map(|(k, _)| k.clone()).collect();
+        let tag_keys: Vec<String> = tag_keys_and_rights
+            .iter()
+            .map(|(key, _)| key.clone())
+            .collect();
         let config_doc_facet_keys: Vec<Vec<String>> = config_doc_facet_keys_and_rights
             .iter()
-            .map(|v| v.iter().map(|(k, _)| k.clone()).collect())
+            .map(|vals| vals.iter().map(|(key, _)| key.clone()).collect())
             .collect();
         let config_doc_tag_keys: Vec<Vec<String>> = config_doc_tag_keys_and_rights
             .iter()
-            .map(|v| v.iter().map(|(k, _)| k.clone()).collect())
+            .map(|val| val.iter().map(|(key, _)| key.clone()).collect())
             .collect();
         let facet_rights_map: std::collections::BTreeMap<String, String> =
             facet_keys_and_rights.into_iter().collect();
@@ -536,12 +539,12 @@ mod wasm_runtime {
         let config_facet_rights: Vec<std::collections::BTreeMap<String, String>> =
             config_doc_facet_keys_and_rights
                 .into_iter()
-                .map(|v| v.into_iter().collect())
+                .map(|val| val.into_iter().collect())
                 .collect();
         let config_tag_rights: Vec<std::collections::BTreeMap<String, String>> =
             config_doc_tag_keys_and_rights
                 .into_iter()
-                .map(|v| v.into_iter().collect())
+                .map(|val| val.into_iter().collect())
                 .collect();
 
         let summary = serde_json::json!({
@@ -554,8 +557,8 @@ mod wasm_runtime {
             "config_doc_tag_keys": config_doc_tag_keys,
             "config_doc_facet_rights": config_facet_rights,
             "config_doc_tag_rights": config_tag_rights,
-            "command_invoke_urls": args.command_invoke_tokens.iter().map(|(k, _)| k.clone()).collect::<Vec<_>>(),
-            "sqlite_connections": args.sqlite_connections.iter().map(|(k, _)| k.clone()).collect::<Vec<_>>(),
+            "command_invoke_urls": args.command_invoke_tokens.iter().map(|(key, _)| key.clone()).collect::<Vec<_>>(),
+            "sqlite_connections": args.sqlite_connections.iter().map(|(key, _)| key.clone()).collect::<Vec<_>>(),
         });
 
         let local_state_key = "@daybook/test/capability-report";

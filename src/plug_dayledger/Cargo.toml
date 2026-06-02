@@ -56,6 +56,10 @@ rust_decimal = "1.41.0"
 blake3.workspace = true
 
 #
+# error
+color-eyre.workspace = true
+
+#
 # macros
 pastey.workspace = true
 

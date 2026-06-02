@@ -15,7 +15,7 @@ pub fn run(_cx: &mut WflowCtx) -> Result<(), wflow_sdk::JobErrorX> {
         .primary_doc
         .facets
         .iter()
-        .find(|t| t.key() == note_facet_key_str && t.rights().contains(FacetRights::READ))
+        .find(|tag| tag.key() == note_facet_key_str && tag.rights().contains(FacetRights::READ))
         .ok_or_else(|| {
             wflow_sdk::JobErrorX::Terminal(ferr!("note facet token with read rights not found"))
         })?;
@@ -60,7 +60,7 @@ pub fn run(_cx: &mut WflowCtx) -> Result<(), wflow_sdk::JobErrorX> {
         .primary_doc
         .tags
         .iter()
-        .find(|t| t.tag() == claim_tag_str && t.rights().contains(FacetRights::CREATE))
+        .find(|tag| tag.tag() == claim_tag_str && tag.rights().contains(FacetRights::CREATE))
         .ok_or_else(|| {
             wflow_sdk::JobErrorX::Terminal(ferr!("claim tag token with create rights not found"))
         })?;
@@ -68,7 +68,7 @@ pub fn run(_cx: &mut WflowCtx) -> Result<(), wflow_sdk::JobErrorX> {
     let mut existing_claims: HashMap<String, Claim> = HashMap::new();
     for claim_token in args.primary_doc.facets.iter() {
         let facet_key = daybook_types::doc::FacetKey::from(claim_token.key().as_str());
-        if &facet_key.tag != &claim_tag || !claim_token.rights().contains(FacetRights::READ) {
+        if facet_key.tag != claim_tag || !claim_token.rights().contains(FacetRights::READ) {
             continue;
         }
 

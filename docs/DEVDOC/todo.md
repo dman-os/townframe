@@ -24,8 +24,14 @@
 
 ## Stack
 
+- [ ] Change manifest/types module structure for plugs
+- [ ] daybook_server
+  - [ ] Decide on wrpc vs json
 - [ ] Home screen and visual identity
   - [ ] Avoid reinvention
+- [ ] Figure out key mgmt
+- [ ] Keyhive
+- [ ] Encrypted blobs
 - [ ] Decide on wether to adopt Lexicons
 - [ ] Hledger editor
 - [ ] Good and local document classification
@@ -43,8 +49,6 @@
 - [ ] Blobs server
   - [x] Iroh blobs?
   - [x] Chunked hashing for transfers
-- [ ] daybook_server
-  - [ ] Decide on wrpc vs json
 - [ ] DrawerScreen
   - [ ] Search FAB
   - [ ] Press again to change views
@@ -60,7 +64,7 @@
   - [x] Blob download
 - [x] Overhaul bottom bar
   - [ ] Change color when in different modes.
-  - [ ] Experiment with floating bottom bar
+  - [x] Experiment with floating bottom bar
 - [ ] Repos
   - [ ] Profiles
   - [x] CLI support
@@ -79,6 +83,9 @@
     - [ ] Drop warning on stop tokens
 - [x] Keychains for secrets
 - [ ] Predicates for losing/gaining facets
+- [ ] Local app doc
+- [ ] Figure out how multi-processed repo access 
+  - [ ] Daemon?
 
 - [ ] Cleanup and show it to people
  

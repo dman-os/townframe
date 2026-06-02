@@ -33,7 +33,7 @@ pub fn run(cx: &mut WflowCtx) -> Result<(), wflow_sdk::JobErrorX> {
         .primary_doc
         .facets
         .iter()
-        .find(|t| t.key() == embedding_facet_key && t.rights().contains(FacetRights::READ))
+        .find(|tag| tag.key() == embedding_facet_key && tag.rights().contains(FacetRights::READ))
         .ok_or_else(|| {
             wflow_sdk::JobErrorX::Terminal(ferr!(
                 "embedding facet key '{}' not found with read rights",
@@ -51,12 +51,12 @@ pub fn run(cx: &mut WflowCtx) -> Result<(), wflow_sdk::JobErrorX> {
         .config_docs
         .iter()
         .flat_map(|cd| cd.facets.iter())
-        .find(|t| t.key() == config_facet_key && t.rights().contains(FacetRights::UPDATE));
+        .find(|tag| tag.key() == config_facet_key && tag.rights().contains(FacetRights::UPDATE));
     let ro_config_token = args
         .config_docs
         .iter()
         .flat_map(|cd| cd.facets.iter())
-        .find(|t| t.key() == config_facet_key && t.rights().contains(FacetRights::READ));
+        .find(|tag| tag.key() == config_facet_key && tag.rights().contains(FacetRights::READ));
     let error_facet_key = crate::types::pseudo_label_error_key().to_string();
     let error_facet_tag = crate::types::PlabelFacetTag::PseudoLabelErrorFacet
         .as_str()
