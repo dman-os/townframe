@@ -12,8 +12,7 @@ path = "lib.rs"
 crate-type = ["rlib"]
 
 [features]
-default = ["automerge", "uniffi", "wit", "manifest"]
-automerge = ["dep:autosurgeon", "dep:automerge"]
+default = ["uniffi", "wit", "manifest"]
 uniffi = ["dep:uniffi", "dep:uuid"]
 wit = []
 schemars = ["dep:schemars"]
@@ -52,8 +51,8 @@ semver = { workspace = true, optional = true }
 
 #
 # automerge
-autosurgeon = { workspace = true, features = ["uuid"], optional = true }
-automerge = { workspace = true, optional = true }
+autosurgeon = { workspace = true, features = ["uuid"] }
+automerge = { workspace = true }
 
 #
 # ffi

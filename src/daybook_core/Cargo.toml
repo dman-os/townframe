@@ -24,7 +24,6 @@ test-support = ["dep:tempfile"]
 am_utils_rs = { workspace = true }
 api_utils_rs = { workspace = true, features = ["automerge"] }
 daybook_types = { workspace = true, features = [
-    "automerge",
     "uniffi",
     "wit",
     "schemars",

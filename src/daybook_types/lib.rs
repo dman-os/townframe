@@ -10,7 +10,7 @@ mod interlude {
 }
 
 pub mod doc;
-#[cfg(test)]
+#[cfg(all(test, feature = "wit"))]
 mod test;
 pub mod url;
 

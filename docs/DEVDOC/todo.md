@@ -24,6 +24,10 @@
 
 ## Stack
 
+- [ ] Home screen and visual identity
+  - [ ] Avoid reinvention
+- [ ] Decide on wether to adopt Lexicons
+- [ ] Hledger editor
 - [ ] Good and local document classification
   - [ ] Receipt parsing
   - [ ] Collators

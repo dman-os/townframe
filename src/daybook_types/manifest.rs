@@ -3,7 +3,6 @@ use crate::interlude::*;
 use crate::doc::FacetRef;
 use crate::reference::select_json_path_values;
 
-#[cfg(feature = "automerge")]
 use autosurgeon::{Hydrate, Reconcile};
 
 use garde::Validate;
@@ -261,7 +260,7 @@ pub struct FacetDisplayHint {
 #[derive(Debug, Clone, Serialize, Deserialize, Default, PartialEq)]
 #[serde(rename_all = "camelCase")]
 #[cfg_attr(feature = "uniffi", derive(uniffi::Enum))]
-#[cfg_attr(feature = "automerge", derive(Reconcile, Hydrate))]
+#[derive(Reconcile, Hydrate)]
 pub enum FacetKeyDisplayDeets {
     #[default]
     DebugPrint,
@@ -277,7 +276,7 @@ pub enum FacetKeyDisplayDeets {
 #[derive(Debug, Clone, Serialize, Default, Deserialize, PartialEq)]
 #[serde(rename_all = "camelCase")]
 #[cfg_attr(feature = "uniffi", derive(uniffi::Enum))]
-#[cfg_attr(feature = "automerge", derive(Reconcile, Hydrate))]
+#[derive(Reconcile, Hydrate)]
 pub enum DateTimeFacetDisplayType {
     #[default]
     TimeAndDate,
@@ -476,7 +475,7 @@ pub struct InitManifest {
 
 #[derive(Debug, Serialize, Deserialize, Validate, Clone)]
 #[serde(rename_all = "camelCase")]
-#[cfg_attr(feature = "automerge", derive(Reconcile, Hydrate))]
+#[derive(Reconcile, Hydrate)]
 pub enum InitRunMode {
     PerInstall,
     PerBoot,

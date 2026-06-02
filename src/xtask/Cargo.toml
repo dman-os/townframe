@@ -16,7 +16,7 @@ clap = { workspace = true, features = ["derive", "env"] }
 dotenv-flow.workspace = true
 
 utils_rs = { workspace = true, features = ["native", "hash"] }
-daybook_types = { workspace = true, features = ["automerge", "schemars", "manifest"] }
+daybook_types = { workspace = true, features = ["schemars", "manifest"] }
 
 tokio = { workspace = true, features = ["rt-multi-thread", "fs", "time", "tracing", "process"] }
 serde = { workspace = true, features = ["derive"] }

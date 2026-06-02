@@ -54,4 +54,11 @@ tempfile = { workspace = true, optional = true }
 tracing.workspace = true
 
 [dev-dependencies]
+#
+# testing
+insta = { workspace = true, features = ["json"] }
+tempfile.workspace = true
+
+#
+# wasm
 wasmtime.workspace = true

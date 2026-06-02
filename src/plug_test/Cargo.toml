@@ -20,7 +20,7 @@ path = "manifest.rs"
 utils_rs.workspace = true
 api_utils_rs = { workspace = true }
 daybook_pdk = { workspace = true }
-daybook_types = { workspace = true, features = ["automerge", "manifest", "wit", "schemars"] }
+daybook_types = { workspace = true, features = ["manifest", "wit", "schemars"] }
 wflow_sdk = { workspace = true }
 
 #

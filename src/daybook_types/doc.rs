@@ -570,11 +570,9 @@ pub struct FacetRef {
     pub heads: Vec<String>,
 }
 
-#[cfg(feature = "automerge")]
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Default)]
 pub struct ChangeHashSet(pub Arc<[automerge::ChangeHash]>);
 
-#[cfg(feature = "automerge")]
 #[cfg(feature = "schemars")]
 impl schemars::JsonSchema for ChangeHashSet {
     fn schema_name() -> std::borrow::Cow<'static, str> {
@@ -586,7 +584,6 @@ impl schemars::JsonSchema for ChangeHashSet {
     }
 }
 
-#[cfg(feature = "automerge")]
 impl autosurgeon::Hydrate for ChangeHashSet {
     fn hydrate_seq<D: autosurgeon::ReadDoc>(
         doc: &D,
@@ -597,7 +594,6 @@ impl autosurgeon::Hydrate for ChangeHashSet {
     }
 }
 
-#[cfg(feature = "automerge")]
 impl autosurgeon::Reconcile for ChangeHashSet {
     type Key<'a> = ();
 
@@ -606,7 +602,6 @@ impl autosurgeon::Reconcile for ChangeHashSet {
     }
 }
 
-#[cfg(feature = "automerge")]
 impl std::ops::Deref for ChangeHashSet {
     type Target = [automerge::ChangeHash];
 

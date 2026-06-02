@@ -937,6 +937,16 @@ mod tests {
         std::env::var("OLLAMA_URL").expect("OLLAMA_URL must be set for cloud mltools tests")
     }
 
+    fn test_ollama_username() -> String {
+        std::env::var("OLLAMA_USERNAME")
+            .expect("OLLAMA_USERNAME must be set for cloud mltools tests")
+    }
+
+    fn test_ollama_password() -> String {
+        std::env::var("OLLAMA_PASSWORD")
+            .expect("OLLAMA_PASSWORD must be set for cloud mltools tests")
+    }
+
     #[cfg(feature = "hf_hub")]
     fn test_model_cache_dir() -> PathBuf {
         crate::models::test_cache_dir()
@@ -1138,8 +1148,8 @@ mod tests {
                     url: test_ollama_url(),
                     model: embed_model_name.clone(),
                     auth: Some(crate::CloudAuth::Basic {
-                        username: crate::models::OLLAMA_USERNAME.to_string(),
-                        password: crate::models::OLLAMA_PASSWORD.to_string(),
+                        username: test_ollama_username(),
+                        password: test_ollama_password(),
                     }),
                 }],
                 vec![],
@@ -1170,8 +1180,8 @@ mod tests {
                     url: test_ollama_url(),
                     model: llm_model_name,
                     auth: Some(crate::CloudAuth::Basic {
-                        username: crate::models::OLLAMA_USERNAME.to_string(),
-                        password: crate::models::OLLAMA_PASSWORD.to_string(),
+                        username: test_ollama_username(),
+                        password: test_ollama_password(),
                     }),
                 }],
             );
