@@ -11,7 +11,7 @@ internal class CoalescingIntentRunner<T>(
     private val scope: CoroutineScope,
     private val debounceMs: Long,
     private val merge: (T, T) -> T,
-    private val onIntent: suspend (T) -> Unit
+    private val onIntent: suspend (T) -> Unit,
 ) {
     private val lock = Mutex()
     private var pending: T? = null

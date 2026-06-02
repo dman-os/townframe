@@ -35,7 +35,7 @@ fun rememberAllFeatures(navController: NavHostController): List<FeatureItem> = l
         selectedIcon = { Icon(Icons.Default.Home, contentDescription = "Home") },
         label = "Home",
         onActivate = { navController.navigate(AppScreens.Home.name) },
-        onReselect = { navController.navigate(AppScreens.Home.name) }
+        onReselect = { navController.navigate(AppScreens.Home.name) },
     ),
     FeatureItem(
         key = FeatureKeys.Capture,
@@ -43,7 +43,7 @@ fun rememberAllFeatures(navController: NavHostController): List<FeatureItem> = l
         selectedIcon = { Icon(Icons.Default.EditNote, contentDescription = "Capture") },
         label = "Capture",
         onActivate = { navController.navigate(AppScreens.Capture.name) },
-        onReselect = { CaptureNavActions.requestModeCycle() }
+        onReselect = { CaptureNavActions.requestModeCycle() },
     ),
     FeatureItem(
         key = FeatureKeys.Drawer,
@@ -53,7 +53,7 @@ fun rememberAllFeatures(navController: NavHostController): List<FeatureItem> = l
         },
         label = "Drawer",
         onActivate = { navController.navigate(AppScreens.Drawer.name) },
-        onReselect = { navController.navigate(AppScreens.Drawer.name) }
+        onReselect = { navController.navigate(AppScreens.Drawer.name) },
     ),
     FeatureItem(
         key = FeatureKeys.Progress,
@@ -61,8 +61,8 @@ fun rememberAllFeatures(navController: NavHostController): List<FeatureItem> = l
         selectedIcon = { Icon(Icons.Default.Notifications, contentDescription = "Progress") },
         label = "Progress",
         onActivate = { navController.navigate(AppScreens.Progress.name) },
-        onReselect = { navController.navigate(AppScreens.Progress.name) }
-    )
+        onReselect = { navController.navigate(AppScreens.Progress.name) },
+    ),
 )
 
 /**
@@ -77,7 +77,7 @@ fun rememberNavBarFeatures(navController: NavHostController): List<FeatureItem> 
     return listOfNotNull(
         allFeatures.find { it.key == FeatureKeys.Home },
         allFeatures.find { it.key == FeatureKeys.Capture },
-        allFeatures.find { it.key == FeatureKeys.Drawer }
+        allFeatures.find { it.key == FeatureKeys.Drawer },
     )
 }
 
@@ -93,7 +93,7 @@ fun rememberSidebarFeatures(navController: NavHostController): List<FeatureItem>
     return listOfNotNull(
         allFeatures.find { it.key == FeatureKeys.Capture },
         allFeatures.find { it.key == FeatureKeys.Home },
-        allFeatures.find { it.key == FeatureKeys.Drawer }
+        allFeatures.find { it.key == FeatureKeys.Drawer },
     )
 }
 
@@ -103,10 +103,7 @@ fun rememberSidebarFeatures(navController: NavHostController): List<FeatureItem>
  * For compact layout: everything except Home, Capture, Documents goes in the menu.
  */
 @Composable
-fun rememberMenuFeatures(
-    navController: NavHostController,
-    onShowCloneShare: () -> Unit = {}
-): List<FeatureItem> {
+fun rememberMenuFeatures(navController: NavHostController, onShowCloneShare: () -> Unit = {}): List<FeatureItem> {
     val allFeatures = rememberAllFeatures(navController)
 
     // Get the bottom bar features (Home, Capture, Documents)
@@ -123,7 +120,7 @@ fun rememberMenuFeatures(
                 selectedIcon = { Icon(Icons.Default.QrCode2, contentDescription = "Clone") },
                 label = "Clone",
                 onActivate = { onShowCloneShare() },
-                onReselect = { onShowCloneShare() }
+                onReselect = { onShowCloneShare() },
             ),
             FeatureItem(
                 key = FeatureKeys.Settings,
@@ -131,7 +128,7 @@ fun rememberMenuFeatures(
                 selectedIcon = { Icon(Icons.Default.Settings, contentDescription = "Settings") },
                 label = "Settings",
                 onActivate = { navController.navigate(AppScreens.Settings.name) },
-                onReselect = { navController.navigate(AppScreens.Settings.name) }
-            )
+                onReselect = { navController.navigate(AppScreens.Settings.name) },
+            ),
         )
 }

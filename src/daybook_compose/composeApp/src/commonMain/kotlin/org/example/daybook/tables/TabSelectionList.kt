@@ -52,7 +52,7 @@ fun TabSelectionList(
     modifier: Modifier = Modifier,
     growUpward: Boolean = false,
     onItemLayout: ((Uuid, Rect) -> Unit)? = null,
-    highlightedTab: Uuid? = null
+    highlightedTab: Uuid? = null,
 ) {
     val tablesRepo = LocalContainer.current.tablesRepo
     val vm = viewModel { TablesViewModel(tablesRepo) }
@@ -94,11 +94,7 @@ fun TabSelectionList(
                     return Offset.Zero
                 }
 
-                override fun onPostScroll(
-                    consumed: Offset,
-                    available: Offset,
-                    source: NestedScrollSource
-                ): Offset {
+                override fun onPostScroll(consumed: Offset, available: Offset, source: NestedScrollSource): Offset {
                     val dy = available.y
                     if (dy == 0f) return Offset.Zero
 
@@ -123,16 +119,16 @@ fun TabSelectionList(
     // Fill available height and render tabs
     Column(
         modifier =
-            modifier
-                .fillMaxHeight()
-                .nestedScroll(tabListNestedScroll)
-                .verticalScroll(scrollState),
+        modifier
+            .fillMaxHeight()
+            .nestedScroll(tabListNestedScroll)
+            .verticalScroll(scrollState),
         verticalArrangement =
-            if (growUpward) {
-                Arrangement.spacedBy(4.dp, Alignment.Bottom)
-            } else {
-                Arrangement.spacedBy(4.dp)
-            }
+        if (growUpward) {
+            Arrangement.spacedBy(4.dp, Alignment.Bottom)
+        } else {
+            Arrangement.spacedBy(4.dp)
+        },
     ) {
         if (tabsForSelectedTable.isEmpty()) {
             Text("No tabs in this table.", modifier = Modifier.padding(16.dp))
@@ -151,25 +147,25 @@ fun TabSelectionList(
                     icon = {
                         Icon(
                             imageVector = Icons.Default.Description,
-                            contentDescription = "Tab"
+                            contentDescription = "Tab",
                         )
                     },
                     label = { Text(tab.title) },
                     modifier =
-                        Modifier
-                            .fillMaxWidth()
-                            .then(
-                                if (onItemLayout != null) {
-                                    Modifier.onGloballyPositioned {
-                                        onItemLayout(tab.id, it.boundsInWindow())
-                                    }
-                                } else {
-                                    Modifier
+                    Modifier
+                        .fillMaxWidth()
+                        .then(
+                            if (onItemLayout != null) {
+                                Modifier.onGloballyPositioned {
+                                    onItemLayout(tab.id, it.boundsInWindow())
                                 }
-                            ).combinedClickable(
-                                onClick = { onTabSelected(tab) },
-                                onLongClick = { menuExpandedState.value = true }
-                            ),
+                            } else {
+                                Modifier
+                            },
+                        ).combinedClickable(
+                            onClick = { onTabSelected(tab) },
+                            onLongClick = { menuExpandedState.value = true },
+                        ),
                     badge = {
                         // place close action in the badge area
                         IconButton(onClick = {
@@ -177,15 +173,15 @@ fun TabSelectionList(
                         }) {
                             Icon(
                                 imageVector = Icons.Default.Close,
-                                contentDescription = "Close tab"
+                                contentDescription = "Close tab",
                             )
                         }
-                    }
+                    },
                 )
 
                 DropdownMenu(
                     expanded = menuExpandedState.value,
-                    onDismissRequest = { menuExpandedState.value = false }
+                    onDismissRequest = { menuExpandedState.value = false },
                 ) {
                     DropdownMenuItem(text = { Text("Close") }, onClick = {
                         menuExpandedState.value = false

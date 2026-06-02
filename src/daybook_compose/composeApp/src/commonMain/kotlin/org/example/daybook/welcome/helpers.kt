@@ -41,15 +41,12 @@ internal fun describeThrowable(error: Throwable): String {
     return parts.distinct().joinToString(" | ").ifBlank { error.toString() }
 }
 
-internal data class DestinationResolution(
-    val path: String,
-    val note: String? = null
-)
+internal data class DestinationResolution(val path: String, val note: String? = null)
 
 internal suspend fun resolveNonClashingDestination(
     gcx: AppFfiCtx,
     requestedPath: String,
-    autoRename: Boolean
+    autoRename: Boolean,
 ): DestinationResolution {
     val base = requestedPath.trim()
     if (base.isBlank()) return DestinationResolution(path = base)
@@ -69,13 +66,13 @@ internal suspend fun resolveNonClashingDestination(
         if (!candidateCheck.exists || (candidateCheck.isDir && candidateCheck.isEmpty)) {
             return DestinationResolution(
                 path = candidate,
-                note = "Destination existed; using $candidateLeaf."
+                note = "Destination existed; using $candidateLeaf.",
             )
         }
     }
 
     error(
-        "Unable to allocate non-clashing destination under '$parent' for base '$leaf' after trying suffixes 2..9999"
+        "Unable to allocate non-clashing destination under '$parent' for base '$leaf' after trying suffixes 2..9999",
     )
 }
 
@@ -85,7 +82,7 @@ internal fun parentPathOf(path: String): String {
     return composePath(
         root = parsed.root,
         parts = parsed.parts.dropLast(1),
-        separator = parsed.separator
+        separator = parsed.separator,
     )
 }
 
@@ -100,21 +97,19 @@ internal fun joinPath(parent: String, leaf: String): String {
     val leafParts = leafTrimmed.replace('\\', '/').split('/').filter { it.isNotBlank() }
     return when {
         parentParsed.root.isBlank() && parentParsed.parts.isEmpty() -> leafTrimmed
+
         leafParts.isEmpty() -> composePath(parentParsed.root, parentParsed.parts, parentParsed.separator)
+
         else ->
             composePath(
                 root = parentParsed.root,
                 parts = parentParsed.parts + leafParts,
-                separator = parentParsed.separator
+                separator = parentParsed.separator,
             )
     }
 }
 
-private data class ParsedPath(
-    val root: String,
-    val parts: List<String>,
-    val separator: Char
-)
+private data class ParsedPath(val root: String, val parts: List<String>, val separator: Char)
 
 private fun parsePath(path: String): ParsedPath {
     val trimmed = path.trim()
@@ -136,9 +131,12 @@ private fun parsePath(path: String): ParsedPath {
     val root =
         when {
             normalized.startsWith("/") -> "/"
+
             drivePrefix.isNotBlank() && hasAbsoluteSlashAfterDrive ->
                 if (separator == '\\') "$drivePrefix\\" else "$drivePrefix/"
+
             drivePrefix.isNotBlank() -> drivePrefix
+
             else -> ""
         }
     val body =

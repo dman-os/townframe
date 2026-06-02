@@ -10,7 +10,6 @@ import kotlinx.serialization.json.Json
 import kotlinx.serialization.json.JsonArray
 import kotlinx.serialization.json.JsonElement
 import kotlinx.serialization.json.JsonObject
-import kotlinx.serialization.json.jsonArray
 import kotlinx.serialization.json.jsonObject
 import org.example.daybook.uniffi.ConfigRepoFfi
 import org.example.daybook.uniffi.FfiException
@@ -19,9 +18,9 @@ import org.example.daybook.uniffi.ProgressEventListener
 import org.example.daybook.uniffi.ProgressRepoFfi
 import org.example.daybook.uniffi.core.ListenerRegistration
 import org.example.daybook.uniffi.core.ProgressEvent
+import org.example.daybook.uniffi.core.ProgressTask
 import org.example.daybook.uniffi.core.ProgressTaskState
 import org.example.daybook.uniffi.core.ProgressUpdateDeets
-import org.example.daybook.uniffi.core.ProgressTask
 import org.example.daybook.uniffi.types.FacetDisplayHint
 
 data class ConfigError(val message: String, val exception: FfiException)
@@ -31,7 +30,7 @@ data class MltoolsBackendRow(val backend: String, val details: String)
 data class MltoolsConfigSummary(
     val ocr: List<MltoolsBackendRow> = emptyList(),
     val embed: List<MltoolsBackendRow> = emptyList(),
-    val llm: List<MltoolsBackendRow> = emptyList()
+    val llm: List<MltoolsBackendRow> = emptyList(),
 )
 
 sealed interface MltoolsProvisionState {
@@ -44,10 +43,7 @@ sealed interface MltoolsProvisionState {
     data object Succeeded : MltoolsProvisionState
 }
 
-class ConfigViewModel(
-    val configRepo: ConfigRepoFfi,
-    private val progressRepo: ProgressRepoFfi
-) : ViewModel() {
+class ConfigViewModel(val configRepo: ConfigRepoFfi, private val progressRepo: ProgressRepoFfi) : ViewModel() {
     private val _error = MutableStateFlow<ConfigError?>(null)
     val error = _error.asStateFlow()
 
@@ -76,7 +72,7 @@ class ConfigViewModel(
                             override fun onConfigEvent(event: org.example.daybook.uniffi.core.ConfigEvent) {
                                 loadAllSettings()
                             }
-                        }
+                        },
                     )
             } catch (e: FfiException) {
                 _error.value = ConfigError("Failed to register config listener: ${e.message}", e)
@@ -93,10 +89,11 @@ class ConfigViewModel(
                                     is ProgressEvent.ListChanged,
                                     is ProgressEvent.TaskRemoved,
                                     is ProgressEvent.TaskUpserted,
-                                    is ProgressEvent.UpdateAdded -> refreshMltoolsDownloadTasks()
+                                    is ProgressEvent.UpdateAdded,
+                                    -> refreshMltoolsDownloadTasks()
                                 }
                             }
-                        }
+                        },
                     )
             } catch (e: FfiException) {
                 _error.value =
@@ -170,36 +167,34 @@ class ConfigViewModel(
         }
     }
 
-    private fun parseMltoolsConfig(configJson: String): MltoolsConfigSummary {
-        return try {
-            val root = Json.parseToJsonElement(configJson).jsonObject
-            MltoolsConfigSummary(
-                ocr = parseBackendRows(root, "ocr"),
-                embed = parseBackendRows(root, "embed"),
-                llm = parseBackendRows(root, "llm")
+    private fun parseMltoolsConfig(configJson: String): MltoolsConfigSummary = try {
+        val root = Json.parseToJsonElement(configJson).jsonObject
+        MltoolsConfigSummary(
+            ocr = parseBackendRows(root, "ocr"),
+            embed = parseBackendRows(root, "embed"),
+            llm = parseBackendRows(root, "llm"),
+        )
+    } catch (e: SerializationException) {
+        _error.value =
+            ConfigError(
+                "Failed to parse MLTools config JSON: ${e.message}",
+                FfiException(NoHandle),
             )
-        } catch (e: SerializationException) {
-            _error.value =
-                ConfigError(
-                    "Failed to parse MLTools config JSON: ${e.message}",
-                    FfiException(NoHandle)
-                )
-            MltoolsConfigSummary(emptyList(), emptyList(), emptyList())
-        } catch (e: IllegalStateException) {
-            _error.value =
-                ConfigError(
-                    "Invalid MLTools config shape: ${e.message}",
-                    FfiException(NoHandle)
-                )
-            MltoolsConfigSummary(emptyList(), emptyList(), emptyList())
-        } catch (e: Exception) {
-            _error.value =
-                ConfigError(
-                    "Unexpected MLTools config parse error: ${e.message}",
-                    FfiException(NoHandle)
-                )
-            MltoolsConfigSummary(emptyList(), emptyList(), emptyList())
-        }
+        MltoolsConfigSummary(emptyList(), emptyList(), emptyList())
+    } catch (e: IllegalStateException) {
+        _error.value =
+            ConfigError(
+                "Invalid MLTools config shape: ${e.message}",
+                FfiException(NoHandle),
+            )
+        MltoolsConfigSummary(emptyList(), emptyList(), emptyList())
+    } catch (e: Exception) {
+        _error.value =
+            ConfigError(
+                "Unexpected MLTools config parse error: ${e.message}",
+                FfiException(NoHandle),
+            )
+        MltoolsConfigSummary(emptyList(), emptyList(), emptyList())
     }
 
     private fun parseBackendRows(root: JsonObject, section: String): List<MltoolsBackendRow> {
@@ -212,7 +207,7 @@ class ConfigViewModel(
                 ?: return@map MltoolsBackendRow("Unknown", "")
             MltoolsBackendRow(
                 backend = backendType,
-                details = backendSummary(backendValue)
+                details = backendSummary(backendValue),
             )
         }
     }
@@ -234,7 +229,7 @@ class ConfigViewModel(
 
     private fun reconcileMltoolsProvisionState(
         current: MltoolsProvisionState,
-        tasks: List<ProgressTask>
+        tasks: List<ProgressTask>,
     ): MltoolsProvisionState {
         if (tasks.any { it.state == ProgressTaskState.ACTIVE }) {
             return MltoolsProvisionState.Running

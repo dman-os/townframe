@@ -14,10 +14,10 @@ import androidx.compose.ui.unit.dp
 import androidx.compose.ui.window.Window
 import androidx.compose.ui.window.application
 import androidx.compose.ui.window.rememberWindowState
-import java.awt.EventQueue
-import java.util.concurrent.atomic.AtomicBoolean
 import kotlinx.coroutines.delay
 import sun.misc.Signal
+import java.awt.EventQueue
+import java.util.concurrent.atomic.AtomicBoolean
 
 private val signalShutdownRequested = AtomicBoolean(false)
 
@@ -30,7 +30,7 @@ private fun installSignalHandler(signalName: String) {
         println("[APP_SHUTDOWN] installed signal handler name=$signalName")
     }.onFailure { error ->
         println(
-            "[APP_SHUTDOWN] failed to install signal handler name=$signalName err=${error.message}"
+            "[APP_SHUTDOWN] failed to install signal handler name=$signalName err=${error.message}",
         )
         throw error
     }
@@ -48,7 +48,7 @@ fun main() = application {
             // so we explicitly set it
             // size = DpSize((0.2 * 2560).dp, (1600 * 0.75).dp)
             // size = DpSize((0.75 * 2560).dp, (1600 - 20).dp)
-            size = DpSize((0.75 * 1600).dp, (900 - 20).dp)
+            size = DpSize((0.75 * 1600).dp, (900 - 20).dp),
         )
     DisposableEffect(Unit) {
         val hook =
@@ -68,7 +68,7 @@ fun main() = application {
             signalShutdownRequested.set(true)
         },
         title = "Daybook",
-        state = windowState
+        state = windowState,
     ) {
         var shutdownRequested by remember { mutableStateOf(false) }
         var shutdownDone by remember { mutableStateOf(false) }
@@ -85,7 +85,7 @@ fun main() = application {
         CompositionLocalProvider(
             LocalDensity provides
                 Density(
-                    density = LocalDensity.current.density
+                    density = LocalDensity.current.density,
                 ),
             LocalPermCtx provides
                 PermissionsContext(
@@ -95,9 +95,9 @@ fun main() = application {
                     hasNotifications = true,
                     hasStorageRead = true,
                     hasStorageWrite = true,
-                    requestPermissions = {}
+                    requestPermissions = {},
                 ),
-            LocalPlatform provides createReactiveJVMPlatform(windowState)
+            LocalPlatform provides createReactiveJVMPlatform(windowState),
         ) {
             App(
                 extraAction = {
@@ -110,7 +110,7 @@ fun main() = application {
                 autoShutdownOnDispose = false,
                 onExitRequest = {
                     signalShutdownRequested.set(true)
-                }
+                },
             )
         }
     }

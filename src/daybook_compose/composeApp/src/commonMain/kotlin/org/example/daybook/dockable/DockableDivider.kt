@@ -38,7 +38,7 @@ fun DockableDivider(
     modifier: Modifier = Modifier,
     pillInvisibleWhenNotHovered: Boolean = true,
     centerContentVisibleOnlyOnHover: Boolean = false,
-    centerContent: (@Composable () -> Unit)? = null
+    centerContent: (@Composable () -> Unit)? = null,
 ) {
     val density = LocalDensity.current
     val interactionSource = remember { MutableInteractionSource() }
@@ -79,7 +79,7 @@ fun DockableDivider(
                 when (orientation) {
                     Orientation.Horizontal -> Modifier.width(4.dp).fillMaxHeight()
                     Orientation.Vertical -> Modifier.height(4.dp).fillMaxWidth()
-                }
+                },
             )
             .pointerHoverIcon(PointerIcon.Hand)
             .background(glowColor)
@@ -94,7 +94,7 @@ fun DockableDivider(
                                 onDrag(dragAmount)
                             },
                             onDragEnd = { endDrag() },
-                            onDragCancel = { cancelDrag() }
+                            onDragCancel = { cancelDrag() },
                         )
                     }
 
@@ -106,7 +106,7 @@ fun DockableDivider(
                                 onDrag(dragAmount)
                             },
                             onDragEnd = { endDrag() },
-                            onDragCancel = { cancelDrag() }
+                            onDragCancel = { cancelDrag() },
                         )
                     }
                 }
@@ -117,50 +117,50 @@ fun DockableDivider(
         content = {
             Box(
                 modifier =
-                    when (orientation) {
-                        Orientation.Horizontal ->
-                            Modifier
-                                .width(8.dp)
-                                .height(18.dp)
-                                .pointerHoverIcon(PointerIcon.Hand)
-                                .hoverable(interactionSource)
-                                .pointerInput(Unit) {
-                                    detectHorizontalDragGestures(
-                                        onDragStart = {
-                                            startDrag()
-                                        },
-                                        onHorizontalDrag = { change, dragAmount ->
-                                            change.consume()
-                                            onDrag(dragAmount)
-                                        },
-                                        onDragEnd = { endDrag() },
-                                        onDragCancel = { cancelDrag() }
-                                    )
-                                }
+                when (orientation) {
+                    Orientation.Horizontal ->
+                        Modifier
+                            .width(8.dp)
+                            .height(18.dp)
+                            .pointerHoverIcon(PointerIcon.Hand)
+                            .hoverable(interactionSource)
+                            .pointerInput(Unit) {
+                                detectHorizontalDragGestures(
+                                    onDragStart = {
+                                        startDrag()
+                                    },
+                                    onHorizontalDrag = { change, dragAmount ->
+                                        change.consume()
+                                        onDrag(dragAmount)
+                                    },
+                                    onDragEnd = { endDrag() },
+                                    onDragCancel = { cancelDrag() },
+                                )
+                            }
 
-                        Orientation.Vertical ->
-                            Modifier
-                                .width(18.dp)
-                                .height(8.dp)
-                                .pointerHoverIcon(PointerIcon.Hand)
-                                .hoverable(interactionSource)
-                                .pointerInput(Unit) {
-                                    detectVerticalDragGestures(
-                                        onDragStart = {
-                                            startDrag()
-                                        },
-                                        onVerticalDrag = { change, dragAmount ->
-                                            change.consume()
-                                            onDrag(dragAmount)
-                                        },
-                                        onDragEnd = { endDrag() },
-                                        onDragCancel = { cancelDrag() }
-                                    )
-                                }
-                    }.background(
-                        color = lineColor,
-                        shape = RoundedCornerShape(4.dp)
-                    )
+                    Orientation.Vertical ->
+                        Modifier
+                            .width(18.dp)
+                            .height(8.dp)
+                            .pointerHoverIcon(PointerIcon.Hand)
+                            .hoverable(interactionSource)
+                            .pointerInput(Unit) {
+                                detectVerticalDragGestures(
+                                    onDragStart = {
+                                        startDrag()
+                                    },
+                                    onVerticalDrag = { change, dragAmount ->
+                                        change.consume()
+                                        onDrag(dragAmount)
+                                    },
+                                    onDragEnd = { endDrag() },
+                                    onDragCancel = { cancelDrag() },
+                                )
+                            }
+                }.background(
+                    color = lineColor,
+                    shape = RoundedCornerShape(4.dp),
+                ),
             )
             val showCenterContent =
                 centerContent != null &&
@@ -170,12 +170,12 @@ fun DockableDivider(
                         )
             if (showCenterContent) {
                 Box(
-                    modifier = Modifier.hoverable(interactionSource)
+                    modifier = Modifier.hoverable(interactionSource),
                 ) {
                     centerContent()
                 }
             }
-        }
+        },
     ) { measurables, constraints ->
         val fallbackLengthPx = with(density) { 18.dp.roundToPx() }
         val lineThicknessPx = with(density) { 8.dp.roundToPx() }
@@ -195,7 +195,7 @@ fun DockableDivider(
             when (orientation) {
                 Orientation.Horizontal -> maxOf(
                     fallbackLengthPx,
-                    (layoutHeight * 0.5f).roundToInt()
+                    (layoutHeight * 0.5f).roundToInt(),
                 )
 
                 Orientation.Vertical -> maxOf(fallbackLengthPx, (layoutWidth * 0.5f).roundToInt())
@@ -206,27 +206,27 @@ fun DockableDivider(
                 when (orientation) {
                     Orientation.Horizontal -> androidx.compose.ui.unit.Constraints.fixed(
                         lineThicknessPx,
-                        lineLengthPx
+                        lineLengthPx,
                     )
 
                     Orientation.Vertical -> androidx.compose.ui.unit.Constraints.fixed(
                         lineLengthPx,
-                        lineThicknessPx
+                        lineThicknessPx,
                     )
-                }
+                },
             )
         val centerPlaceable = measurables.getOrNull(
-            1
+            1,
         )?.measure(androidx.compose.ui.unit.Constraints())
 
         layout(layoutWidth, layoutHeight) {
             linePlaceable.place(
                 (layoutWidth - linePlaceable.width) / 2,
-                (layoutHeight - linePlaceable.height) / 2
+                (layoutHeight - linePlaceable.height) / 2,
             )
             centerPlaceable?.place(
                 (layoutWidth - centerPlaceable.width) / 2,
-                (layoutHeight - centerPlaceable.height) / 2
+                (layoutHeight - centerPlaceable.height) / 2,
             )
         }
     }

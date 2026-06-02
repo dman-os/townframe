@@ -10,11 +10,9 @@ import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.PaddingValues
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
-import androidx.compose.foundation.layout.fillMaxHeight
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
-import androidx.compose.foundation.layout.heightIn
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.lazy.LazyColumn
@@ -26,36 +24,35 @@ import androidx.compose.material.icons.filled.CheckCircle
 import androidx.compose.material.icons.filled.Circle
 import androidx.compose.material.icons.filled.Close
 import androidx.compose.material.icons.filled.Delete
-import androidx.compose.material.icons.filled.Sync
 import androidx.compose.material.icons.filled.Error
 import androidx.compose.material.icons.filled.Info
 import androidx.compose.material.icons.filled.Refresh
+import androidx.compose.material.icons.filled.Sync
 import androidx.compose.material.icons.filled.Warning
 import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.ElevatedCard
 import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
-import androidx.compose.material3.LinearProgressIndicator
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
-import androidx.compose.runtime.derivedStateOf
 import androidx.compose.runtime.collectAsState
+import androidx.compose.runtime.derivedStateOf
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableIntStateOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
-import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.Modifier
-import androidx.compose.ui.text.TextStyle
-import androidx.compose.ui.text.style.TextOverflow
+import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.layout.onSizeChanged
 import androidx.compose.ui.platform.LocalDensity
+import androidx.compose.ui.text.TextStyle
+import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.lifecycle.viewmodel.compose.viewModel
 import kotlinx.coroutines.delay
@@ -77,7 +74,7 @@ fun ProgressList(modifier: Modifier = Modifier) {
             Column(
                 modifier = modifier.fillMaxSize(),
                 horizontalAlignment = Alignment.CenterHorizontally,
-                verticalArrangement = Arrangement.Center
+                verticalArrangement = Arrangement.Center,
             ) {
                 CircularProgressIndicator()
                 Spacer(Modifier.height(12.dp))
@@ -88,7 +85,7 @@ fun ProgressList(modifier: Modifier = Modifier) {
         is ProgressState.Error -> {
             Column(
                 modifier = modifier.fillMaxSize().padding(16.dp),
-                verticalArrangement = Arrangement.Center
+                verticalArrangement = Arrangement.Center,
             ) {
                 ElevatedCard {
                     Column(Modifier.fillMaxWidth().padding(16.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
@@ -104,7 +101,7 @@ fun ProgressList(modifier: Modifier = Modifier) {
                         Text(
                             data.error.message(),
                             style = MaterialTheme.typography.bodyMedium,
-                            color = MaterialTheme.colorScheme.onSurfaceVariant
+                            color = MaterialTheme.colorScheme.onSurfaceVariant,
                         )
                     }
                 }
@@ -117,12 +114,12 @@ fun ProgressList(modifier: Modifier = Modifier) {
             Column(modifier = modifier.fillMaxSize().padding(12.dp)) {
                 Row(
                     modifier = Modifier.fillMaxWidth(),
-                    verticalAlignment = Alignment.CenterVertically
+                    verticalAlignment = Alignment.CenterVertically,
                 ) {
                     Text(
                         "$activeCount active • ${data.tasks.size} total",
                         style = MaterialTheme.typography.bodyMedium,
-                        color = MaterialTheme.colorScheme.onSurfaceVariant
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
                     )
                     Spacer(Modifier.weight(1f))
                     IconButton(onClick = { vm.refresh() }) {
@@ -137,18 +134,18 @@ fun ProgressList(modifier: Modifier = Modifier) {
                         modifier = Modifier.fillMaxWidth().weight(1f),
                         task = selectedTask,
                         updates = data.selectedTaskUpdates,
-                        onBack = { vm.selectTask(null) }
+                        onBack = { vm.selectTask(null) },
                     )
                 } else {
                     LazyColumn(
                         modifier = Modifier.fillMaxWidth().weight(1f),
-                        verticalArrangement = Arrangement.spacedBy(8.dp)
+                        verticalArrangement = Arrangement.spacedBy(8.dp),
                     ) {
                         items(data.tasks, key = { it.id }) { task ->
                             ProgressTaskRow(
                                 task = task,
                                 onClick = { vm.selectTask(task.id) },
-                                onDismiss = { vm.dismiss(task.id) }
+                                onDismiss = { vm.dismiss(task.id) },
                             )
                         }
                     }
@@ -159,11 +156,7 @@ fun ProgressList(modifier: Modifier = Modifier) {
 }
 
 @Composable
-private fun ProgressTaskRow(
-    task: ProgressTask,
-    onClick: () -> Unit,
-    onDismiss: () -> Unit
-) {
+private fun ProgressTaskRow(task: ProgressTask, onClick: () -> Unit, onDismiss: () -> Unit) {
     val containerColor =
         MaterialTheme.colorScheme.surfaceContainerLow
     ElevatedCard(
@@ -171,56 +164,57 @@ private fun ProgressTaskRow(
     ) {
         Column(
             modifier = Modifier.fillMaxWidth().background(containerColor).padding(12.dp),
-            verticalArrangement = Arrangement.spacedBy(8.dp)
+            verticalArrangement = Arrangement.spacedBy(8.dp),
         ) {
-                Row(modifier = Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
-                    val typeInfo = progressTypeInfo(task)
-                    Icon(typeInfo.icon, contentDescription = null, tint = MaterialTheme.colorScheme.primary)
-                    Spacer(Modifier.size(8.dp))
-                    val endAtSecs = taskEndTimestamp(task)
-                    Column(Modifier.weight(1f)) {
-                        Text(
-                            typeInfo.label,
-                            style = MaterialTheme.typography.titleSmall,
-                            maxLines = 1,
-                            overflow = TextOverflow.Ellipsis
+            Row(modifier = Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
+                val typeInfo = progressTypeInfo(task)
+                Icon(typeInfo.icon, contentDescription = null, tint = MaterialTheme.colorScheme.primary)
+                Spacer(Modifier.size(8.dp))
+                val endAtSecs = taskEndTimestamp(task)
+                Column(Modifier.weight(1f)) {
+                    Text(
+                        typeInfo.label,
+                        style = MaterialTheme.typography.titleSmall,
+                        maxLines = 1,
+                        overflow = TextOverflow.Ellipsis,
+                    )
+                    Row(verticalAlignment = Alignment.CenterVertically) {
+                        LiveDurationText(
+                            createdAtSecs = task.createdAt.epochSeconds,
+                            endAtSecs = endAtSecs,
+                            style = MaterialTheme.typography.bodySmall,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant,
                         )
-                        Row(verticalAlignment = Alignment.CenterVertically) {
-                            LiveDurationText(
-                                createdAtSecs = task.createdAt.epochSeconds,
-                                endAtSecs = endAtSecs,
-                                style = MaterialTheme.typography.bodySmall,
-                                color = MaterialTheme.colorScheme.onSurfaceVariant
-                            )
-                            Spacer(Modifier.size(6.dp))
-                            Text(
-                                task.title ?: task.id,
-                                style = MaterialTheme.typography.bodySmall,
-                                color = MaterialTheme.colorScheme.onSurfaceVariant,
-                                maxLines = 1,
-                                overflow = TextOverflow.Ellipsis
-                            )
-                        }
-                    }
-                    IconButton(onClick = onDismiss) {
-                        Icon(Icons.Default.Delete, contentDescription = "Dismiss")
+                        Spacer(Modifier.size(6.dp))
+                        Text(
+                            task.title ?: task.id,
+                            style = MaterialTheme.typography.bodySmall,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant,
+                            maxLines = 1,
+                            overflow = TextOverflow.Ellipsis,
+                        )
                     }
                 }
+                IconButton(onClick = onDismiss) {
+                    Icon(Icons.Default.Delete, contentDescription = "Dismiss")
+                }
+            }
             when (val updateEntry = task.latestUpdate?.update?.deets) {
-            is ProgressUpdateDeets.Amount -> {
-                ProgressAmountBlock(updateEntry, modifier = Modifier.fillMaxWidth())
+                is ProgressUpdateDeets.Amount -> {
+                    ProgressAmountBlock(updateEntry, modifier = Modifier.fillMaxWidth())
                 }
+
                 is ProgressUpdateDeets.Status -> {
                     TimelineUpdateRow(
                         at = task.latestUpdate?.at?.epochSeconds ?: task.updatedAt.epochSeconds,
-                        deets = updateEntry
+                        deets = updateEntry,
                     )
                 }
 
                 is ProgressUpdateDeets.Completed -> {
                     TimelineUpdateRow(
                         at = task.latestUpdate?.at?.epochSeconds ?: task.updatedAt.epochSeconds,
-                        deets = updateEntry
+                        deets = updateEntry,
                     )
                 }
 
@@ -228,7 +222,7 @@ private fun ProgressTaskRow(
                     Text(
                         "No updates yet",
                         style = MaterialTheme.typography.bodySmall,
-                        color = MaterialTheme.colorScheme.onSurfaceVariant
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
                     )
                 }
             }
@@ -270,7 +264,7 @@ private fun TimelineUpdateRow(at: Long, deets: ProgressUpdateDeets) {
             title = "Progress"
             body =
                 formatAmountSummary(deets.done, deets.total, deets.unit) +
-                    if (deets.message != null) " • ${deets.message}" else ""
+                if (deets.message != null) " • ${deets.message}" else ""
         }
 
         is ProgressUpdateDeets.Completed -> {
@@ -281,14 +275,17 @@ private fun TimelineUpdateRow(at: Long, deets: ProgressUpdateDeets) {
                     icon = Icons.Default.CheckCircle
                     tint = MaterialTheme.colorScheme.primary
                 }
+
                 ProgressFinalState.FAILED -> {
                     icon = Icons.Default.Error
                     tint = MaterialTheme.colorScheme.error
                 }
+
                 ProgressFinalState.CANCELLED -> {
                     icon = Icons.Default.Warning
                     tint = Color(0xFFE18D00)
                 }
+
                 ProgressFinalState.DISMISSED -> {
                     icon = Icons.Default.Close
                     tint = MaterialTheme.colorScheme.onSurfaceVariant
@@ -301,7 +298,7 @@ private fun TimelineUpdateRow(at: Long, deets: ProgressUpdateDeets) {
 
     Row(
         modifier = Modifier.fillMaxWidth(),
-        verticalAlignment = Alignment.Top
+        verticalAlignment = Alignment.Top,
     ) {
         Icon(icon, contentDescription = null, tint = tint, modifier = Modifier.padding(top = 2.dp))
         Spacer(Modifier.size(8.dp))
@@ -312,13 +309,13 @@ private fun TimelineUpdateRow(at: Long, deets: ProgressUpdateDeets) {
                 Text(
                     formatClock(at),
                     style = MaterialTheme.typography.labelSmall,
-                    color = MaterialTheme.colorScheme.onSurfaceVariant
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
                 )
             }
             Text(
                 body,
                 style = MaterialTheme.typography.bodySmall,
-                color = MaterialTheme.colorScheme.onSurfaceVariant
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
             )
         }
     }
@@ -329,7 +326,7 @@ private fun ProgressDetailScreen(
     modifier: Modifier = Modifier,
     task: ProgressTask,
     updates: List<ProgressUpdateEntry>,
-    onBack: () -> Unit
+    onBack: () -> Unit,
 ) {
     val amountEntry = latestAmountEntry(task, updates)
     val timelineUpdates =
@@ -352,7 +349,7 @@ private fun ProgressDetailScreen(
 
     ElevatedCard(
         modifier = modifier.fillMaxSize(),
-        shape = RoundedCornerShape(12.dp)
+        shape = RoundedCornerShape(12.dp),
     ) {
         Box(modifier = Modifier.fillMaxSize()) {
             LazyColumn(
@@ -361,12 +358,12 @@ private fun ProgressDetailScreen(
                     .fillMaxSize()
                     .padding(12.dp),
                 contentPadding =
-                    if (showPinnedTimelineHeader) {
-                        PaddingValues(top = with(density) { pinnedHeaderHeightPx.toDp() })
-                    } else {
-                        PaddingValues(0.dp)
-                    },
-                verticalArrangement = Arrangement.spacedBy(8.dp)
+                if (showPinnedTimelineHeader) {
+                    PaddingValues(top = with(density) { pinnedHeaderHeightPx.toDp() })
+                } else {
+                    PaddingValues(0.dp)
+                },
+                verticalArrangement = Arrangement.spacedBy(8.dp),
             ) {
                 val typeInfo = progressTypeInfo(task)
                 item(key = "header-main") {
@@ -378,14 +375,14 @@ private fun ProgressDetailScreen(
                                 typeInfo.label,
                                 style = MaterialTheme.typography.titleMedium,
                                 maxLines = 1,
-                                overflow = TextOverflow.Ellipsis
+                                overflow = TextOverflow.Ellipsis,
                             )
                             Row(verticalAlignment = Alignment.CenterVertically) {
                                 LiveDurationText(
                                     createdAtSecs = task.createdAt.epochSeconds,
                                     endAtSecs = taskEndTimestamp(task),
                                     style = MaterialTheme.typography.bodySmall,
-                                    color = MaterialTheme.colorScheme.onSurfaceVariant
+                                    color = MaterialTheme.colorScheme.onSurfaceVariant,
                                 )
                                 Spacer(Modifier.size(6.dp))
                                 Text(
@@ -393,7 +390,7 @@ private fun ProgressDetailScreen(
                                     style = MaterialTheme.typography.bodySmall,
                                     color = MaterialTheme.colorScheme.onSurfaceVariant,
                                     maxLines = 1,
-                                    overflow = TextOverflow.Ellipsis
+                                    overflow = TextOverflow.Ellipsis,
                                 )
                             }
                         }
@@ -406,7 +403,7 @@ private fun ProgressDetailScreen(
                 item(key = "header-state") {
                     Row(
                         modifier = Modifier.fillMaxWidth(),
-                        verticalAlignment = Alignment.CenterVertically
+                        verticalAlignment = Alignment.CenterVertically,
                     ) {
                         TaskStateIcon(task.state)
                         Spacer(Modifier.size(8.dp))
@@ -414,7 +411,7 @@ private fun ProgressDetailScreen(
                             task.state.name.lowercase()
                                 .replaceFirstChar { it.uppercase() },
                             style = MaterialTheme.typography.bodyMedium,
-                            color = MaterialTheme.colorScheme.onSurfaceVariant
+                            color = MaterialTheme.colorScheme.onSurfaceVariant,
                         )
                     }
                 }
@@ -423,17 +420,17 @@ private fun ProgressDetailScreen(
                     item(key = "header-tags") {
                         Column(
                             modifier = Modifier.fillMaxWidth(),
-                            verticalArrangement = Arrangement.spacedBy(6.dp)
+                            verticalArrangement = Arrangement.spacedBy(6.dp),
                         ) {
                             task.tags.forEach { tag ->
                                 Surface(
                                     shape = RoundedCornerShape(100.dp),
-                                    color = MaterialTheme.colorScheme.secondaryContainer
+                                    color = MaterialTheme.colorScheme.secondaryContainer,
                                 ) {
                                     Text(
                                         text = tag,
                                         style = MaterialTheme.typography.labelSmall,
-                                        modifier = Modifier.padding(horizontal = 8.dp, vertical = 4.dp)
+                                        modifier = Modifier.padding(horizontal = 8.dp, vertical = 4.dp),
                                     )
                                 }
                             }
@@ -450,7 +447,7 @@ private fun ProgressDetailScreen(
                             Text(
                                 "Updated ${formatClock(amountEntry.at.epochSeconds)}",
                                 style = MaterialTheme.typography.labelSmall,
-                                color = MaterialTheme.colorScheme.onSurfaceVariant
+                                color = MaterialTheme.colorScheme.onSurfaceVariant,
                             )
                         }
                     }
@@ -466,7 +463,7 @@ private fun ProgressDetailScreen(
                         Text(
                             "No timeline updates",
                             style = MaterialTheme.typography.bodySmall,
-                            color = MaterialTheme.colorScheme.onSurfaceVariant
+                            color = MaterialTheme.colorScheme.onSurfaceVariant,
                         )
                     }
                 } else {
@@ -480,10 +477,10 @@ private fun ProgressDetailScreen(
                 Surface(
                     color = MaterialTheme.colorScheme.surface,
                     modifier =
-                        Modifier
-                            .fillMaxWidth()
-                            .align(Alignment.TopStart)
-                            .onSizeChanged { pinnedHeaderHeightPx = it.height }
+                    Modifier
+                        .fillMaxWidth()
+                        .align(Alignment.TopStart)
+                        .onSizeChanged { pinnedHeaderHeightPx = it.height },
                 ) {
                     Column(modifier = Modifier.fillMaxWidth().padding(horizontal = 12.dp, vertical = 12.dp)) {
                         Text("Timeline", style = MaterialTheme.typography.titleSmall)
@@ -514,7 +511,7 @@ private fun LiveDurationText(
     endAtSecs: Long? = null,
     modifier: Modifier = Modifier,
     style: TextStyle = MaterialTheme.typography.bodySmall,
-    color: Color = MaterialTheme.colorScheme.onSurfaceVariant
+    color: Color = MaterialTheme.colorScheme.onSurfaceVariant,
 ) {
     if (endAtSecs != null) {
         val elapsed = (endAtSecs - createdAtSecs).coerceAtLeast(0)
@@ -522,7 +519,7 @@ private fun LiveDurationText(
             text = formatDuration(elapsed),
             modifier = modifier,
             style = style,
-            color = color
+            color = color,
         )
         return
     }
@@ -542,10 +539,9 @@ private fun LiveDurationText(
         text = formatDuration(elapsedSeconds),
         modifier = modifier,
         style = style,
-        color = color
+        color = color,
     )
 }
-
 
 private fun formatDuration(secondsRaw: Long): String {
     val seconds = secondsRaw.coerceAtLeast(0)
@@ -561,16 +557,12 @@ private fun formatDuration(secondsRaw: Long): String {
     }
 }
 
-private fun taskEndTimestamp(task: ProgressTask): Long? =
-    when (task.state) {
-        ProgressTaskState.ACTIVE -> null
-        else -> task.latestUpdate?.at?.epochSeconds ?: task.updatedAt.epochSeconds
-    }
+private fun taskEndTimestamp(task: ProgressTask): Long? = when (task.state) {
+    ProgressTaskState.ACTIVE -> null
+    else -> task.latestUpdate?.at?.epochSeconds ?: task.updatedAt.epochSeconds
+}
 
-private data class ProgressTypeInfo(
-    val label: String,
-    val icon: androidx.compose.ui.graphics.vector.ImageVector
-)
+private data class ProgressTypeInfo(val label: String, val icon: androidx.compose.ui.graphics.vector.ImageVector)
 
 private fun progressTypeInfo(task: ProgressTask): ProgressTypeInfo {
     val typeTag = task.tags.firstOrNull { it.startsWith("/type/") }

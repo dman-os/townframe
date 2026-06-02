@@ -13,10 +13,7 @@ import org.example.daybook.uniffi.core.ProgressUnit
 import org.example.daybook.uniffi.core.ProgressUpdateDeets
 
 @Composable
-fun ProgressAmountBlock(
-    amount: ProgressUpdateDeets.Amount,
-    modifier: Modifier = Modifier,
-) {
+fun ProgressAmountBlock(amount: ProgressUpdateDeets.Amount, modifier: Modifier = Modifier) {
     Column(modifier = modifier) {
         val progress = progressFraction(amount)
         if (progress != null) {
@@ -56,11 +53,10 @@ fun formatAmountSummary(done: ULong, total: ULong?, unit: ProgressUnit): String 
     return "$doneLabel / $totalLabel"
 }
 
-fun formatUnitValue(value: ULong, unit: ProgressUnit): String =
-    when (unit) {
-        is ProgressUnit.Bytes -> formatBytes(value)
-        is ProgressUnit.Generic -> "${value.toString()} ${unit.label}"
-    }
+fun formatUnitValue(value: ULong, unit: ProgressUnit): String = when (unit) {
+    is ProgressUnit.Bytes -> formatBytes(value)
+    is ProgressUnit.Generic -> "$value ${unit.label}"
+}
 
 fun formatBytes(bytes: ULong): String {
     if (bytes < 1024UL) {

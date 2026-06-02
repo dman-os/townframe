@@ -20,17 +20,13 @@ import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.KeyboardArrowLeft
 import androidx.compose.material.icons.automirrored.filled.KeyboardArrowRight
 import androidx.compose.material.icons.filled.FolderOpen
-import androidx.compose.material.icons.filled.Menu
 import androidx.compose.material.icons.filled.MoreVert
 import androidx.compose.material3.*
-import androidx.compose.material3.DropdownMenu
-import androidx.compose.material3.DropdownMenuItem
 import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.IconButton
 import androidx.compose.material3.IconButtonDefaults
 import androidx.compose.material3.MaterialTheme
-import androidx.compose.material3.NavigationDrawerItem
 import androidx.compose.material3.NavigationRail
 import androidx.compose.material3.NavigationRailItem
 import androidx.compose.material3.PermanentDrawerSheet
@@ -78,11 +74,11 @@ import org.example.daybook.progress.ProgressList
 import org.example.daybook.uniffi.core.Uuid
 import org.example.daybook.uniffi.core.Window
 import org.example.daybook.uniffi.core.WindowLayout
-import org.example.daybook.uniffi.core.WindowLayoutOrientation as ConfigOrientation
 import org.example.daybook.uniffi.core.WindowLayoutPane
 import org.example.daybook.uniffi.core.WindowLayoutPaneVariant
 import org.example.daybook.uniffi.core.WindowLayoutRegion
 import org.example.daybook.uniffi.core.WindowLayoutRegionSize
+import org.example.daybook.uniffi.core.WindowLayoutOrientation as ConfigOrientation
 
 /**
  * Constants for sidebar layout weights and sizes
@@ -114,7 +110,7 @@ fun ExpandedLayout(
     navController: NavHostController,
     extraAction: (() -> Unit)? = null,
     contentType: DaybookContentType,
-    onShowCloneShare: () -> Unit = {}
+    onShowCloneShare: () -> Unit = {},
 ) {
     val menuFeatures = rememberMenuFeatures(navController, onShowCloneShare = onShowCloneShare)
 
@@ -179,12 +175,12 @@ fun ExpandedLayout(
                 // Screen actions first, then layout actions
                 screenChromeState.actions?.invoke()
             },
-            showTopBar = if (isScreenChromeEmpty) true else screenChromeState.showTopBar
+            showTopBar = if (isScreenChromeEmpty) true else screenChromeState.showTopBar,
         )
 
     Scaffold(
         modifier = modifier,
-        snackbarHost = { SnackbarHost(snackbarHostState) }
+        snackbarHost = { SnackbarHost(snackbarHostState) },
     ) { innerPadding ->
         if (layoutConfig != null) {
             LayoutFromConfig(
@@ -195,7 +191,7 @@ fun ExpandedLayout(
                 chromeState = mergedChromeState,
                 menuFeatures = menuFeatures,
                 modifier = Modifier.padding(innerPadding).fillMaxSize(),
-                contentType = contentType
+                contentType = contentType,
             )
         } else {
             // Loading state - show empty or default layout
@@ -215,7 +211,7 @@ fun LayoutFromConfig(
     chromeState: ChromeState,
     menuFeatures: List<FeatureItem>,
     modifier: Modifier = Modifier,
-    contentType: DaybookContentType
+    contentType: DaybookContentType,
 ) {
     val scope = rememberCoroutineScope()
     val tablesState by tablesVm.tablesState.collectAsState()
@@ -228,32 +224,32 @@ fun LayoutFromConfig(
         val newLayout =
             currentLayout.copy(
                 leftRegion =
-                    currentLayout.leftRegion.copy(
-                        size =
-                            WindowLayoutRegionSize.Weight(
-                                newWeights[currentLayout.leftRegion.deets.key]
-                                    ?: (currentLayout.leftRegion.size as? WindowLayoutRegionSize.Weight)?.v1
-                                    ?: SidebarLayoutConstants.DEFAULT_SIDEBAR_WEIGHT
-                            )
+                currentLayout.leftRegion.copy(
+                    size =
+                    WindowLayoutRegionSize.Weight(
+                        newWeights[currentLayout.leftRegion.deets.key]
+                            ?: (currentLayout.leftRegion.size as? WindowLayoutRegionSize.Weight)?.v1
+                            ?: SidebarLayoutConstants.DEFAULT_SIDEBAR_WEIGHT,
                     ),
+                ),
                 centerRegion =
-                    currentLayout.centerRegion.copy(
-                        size =
-                            WindowLayoutRegionSize.Weight(
-                                newWeights[currentLayout.centerRegion.deets.key]
-                                    ?: (currentLayout.centerRegion.size as? WindowLayoutRegionSize.Weight)?.v1
-                                    ?: 1.0f
-                            )
+                currentLayout.centerRegion.copy(
+                    size =
+                    WindowLayoutRegionSize.Weight(
+                        newWeights[currentLayout.centerRegion.deets.key]
+                            ?: (currentLayout.centerRegion.size as? WindowLayoutRegionSize.Weight)?.v1
+                            ?: 1.0f,
                     ),
+                ),
                 rightRegion =
-                    currentLayout.rightRegion.copy(
-                        size =
-                            WindowLayoutRegionSize.Weight(
-                                newWeights[currentLayout.rightRegion.deets.key]
-                                    ?: (currentLayout.rightRegion.size as? WindowLayoutRegionSize.Weight)?.v1
-                                    ?: SidebarLayoutConstants.DEFAULT_SIDEBAR_WEIGHT
-                            )
-                    )
+                currentLayout.rightRegion.copy(
+                    size =
+                    WindowLayoutRegionSize.Weight(
+                        newWeights[currentLayout.rightRegion.deets.key]
+                            ?: (currentLayout.rightRegion.size as? WindowLayoutRegionSize.Weight)?.v1
+                            ?: SidebarLayoutConstants.DEFAULT_SIDEBAR_WEIGHT,
+                    ),
+                ),
             )
         scope.launch {
             tablesVm.tablesRepo.setWindow(windowId, window.copy(layout = newLayout))
@@ -278,7 +274,7 @@ fun LayoutFromConfig(
         orientation = Orientation.Horizontal,
         initialWeights = initialWeights,
         onWeightsChanged = { updateWeights(it) },
-        modifier = modifier
+        modifier = modifier,
     ) {
         // Left region (if visible)
         if (layoutConfig.leftVisible) {
@@ -290,9 +286,9 @@ fun LayoutFromConfig(
                         PaneSizeRegime.Discrete(
                             minDp = 0f,
                             maxDp = SidebarLayoutConstants.DISCRETE_REGIME_MAX_DP,
-                            sizeDp = SidebarLayoutConstants.RAIL_TRANSITION_DP
+                            sizeDp = SidebarLayoutConstants.RAIL_TRANSITION_DP,
                         ),
-                        PaneSizeRegime.Continuous(minDp = SidebarLayoutConstants.RAIL_TRANSITION_DP)
+                        PaneSizeRegime.Continuous(minDp = SidebarLayoutConstants.RAIL_TRANSITION_DP),
                     )
                 } else {
                     // Default: continuous
@@ -302,13 +298,13 @@ fun LayoutFromConfig(
                 key = leftPane.key,
                 regimes = leftRegimes,
                 dividerContent =
-                    {
-                        SidebarPaneDividerToggleButton(
-                            tablesVm = tablesVm,
-                            tablesState = tablesState,
-                            selectedTableId = selectedTableId
-                        )
-                    }
+                {
+                    SidebarPaneDividerToggleButton(
+                        tablesVm = tablesVm,
+                        tablesState = tablesState,
+                        selectedTableId = selectedTableId,
+                    )
+                },
             ) {
                 RenderLayoutPane(
                     pane = leftPane,
@@ -316,7 +312,7 @@ fun LayoutFromConfig(
                     extraAction = extraAction,
                     menuFeatures = menuFeatures,
                     modifier = Modifier.fillMaxSize(),
-                    contentType = contentType
+                    contentType = contentType,
                 )
             }
         }
@@ -331,7 +327,7 @@ fun LayoutFromConfig(
                     extraAction = extraAction,
                     menuFeatures = menuFeatures,
                     modifier = Modifier.weight(1f).fillMaxWidth(),
-                    contentType = contentType
+                    contentType = contentType,
                 )
             }
         }
@@ -345,17 +341,14 @@ fun LayoutFromConfig(
                     extraAction = extraAction,
                     menuFeatures = menuFeatures,
                     modifier = Modifier.fillMaxSize(),
-                    contentType = contentType
+                    contentType = contentType,
                 )
             }
         }
     }
 }
 
-private fun resolveSelectedWindow(
-    tablesState: TablesState,
-    selectedTableId: Uuid?
-): Pair<Uuid, Window>? {
+private fun resolveSelectedWindow(tablesState: TablesState, selectedTableId: Uuid?): Pair<Uuid, Window>? {
     if (tablesState !is TablesState.Data || selectedTableId == null) return null
     val windowId =
         tablesState.tables[selectedTableId]?.window?.let { windowPolicy ->
@@ -373,7 +366,7 @@ private fun SidebarPaneDividerToggleButton(
     tablesVm: TablesViewModel,
     tablesState: TablesState,
     selectedTableId: Uuid?,
-    modifier: Modifier = Modifier
+    modifier: Modifier = Modifier,
 ) {
     val scope = rememberCoroutineScope()
     val selection = resolveSelectedWindow(tablesState, selectedTableId) ?: return
@@ -394,23 +387,23 @@ private fun SidebarPaneDividerToggleButton(
                     windowId,
                     window.copy(
                         layout =
-                            window.layout.copy(
-                                leftVisible = true,
-                                leftRegion =
-                                    window.layout.leftRegion.copy(
-                                        size =
-                                            WindowLayoutRegionSize.Weight(nextWeight)
-                                    )
-                            )
-                    )
+                        window.layout.copy(
+                            leftVisible = true,
+                            leftRegion =
+                            window.layout.leftRegion.copy(
+                                size =
+                                WindowLayoutRegionSize.Weight(nextWeight),
+                            ),
+                        ),
+                    ),
                 )
             }
         },
         modifier = modifier.width(32.dp).height(32.dp),
         colors = IconButtonDefaults.iconButtonColors(
             containerColor = MaterialTheme.colorScheme.surfaceContainer,
-            contentColor = MaterialTheme.colorScheme.onSurface
-        )
+            contentColor = MaterialTheme.colorScheme.onSurface,
+        ),
     ) {
         Icon(
             imageVector = if (currentWeight > SidebarLayoutConstants.SIDEBAR_EXPANDED_THRESHOLD) {
@@ -418,18 +411,14 @@ private fun SidebarPaneDividerToggleButton(
             } else {
                 Icons.AutoMirrored.Filled.KeyboardArrowRight
             },
-            contentDescription = "Toggle sidebar"
+            contentDescription = "Toggle sidebar",
         )
     }
 }
 
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
-fun SidebarContent(
-    navController: NavHostController,
-    menuFeatures: List<FeatureItem>,
-    modifier: Modifier = Modifier
-) {
+fun SidebarContent(navController: NavHostController, menuFeatures: List<FeatureItem>, modifier: Modifier = Modifier) {
     val density = LocalDensity.current
     var widthPx by remember { mutableIntStateOf(0) }
     val widthDp = with(density) { widthPx.toDp() }
@@ -468,35 +457,35 @@ fun SidebarContent(
 
     Box(
         modifier =
-            modifier.onSizeChanged {
-                widthPx = it.width
-            }
+        modifier.onSizeChanged {
+            widthPx = it.width
+        },
     ) {
         Column(
-            modifier = Modifier.fillMaxSize()
+            modifier = Modifier.fillMaxSize(),
         ) {
             if (isWide) {
                 var selectedSidebarPane by remember { mutableIntStateOf(1) }
                 // Wide mode: navigation row + tabbed pane (tabs/progress)
                 PermanentDrawerSheet(
                     modifier =
-                        Modifier
-                            .widthIn(min = 240.dp)
-                            .fillMaxSize()
+                    Modifier
+                        .widthIn(min = 240.dp)
+                        .fillMaxSize(),
                 ) {
                     Column(
-                        modifier = Modifier.fillMaxSize()
+                        modifier = Modifier.fillMaxSize(),
                     ) {
                         Row(
                             modifier = Modifier.fillMaxWidth().padding(
                                 horizontal = 16.dp,
-                                vertical = 8.dp
-                            )
+                                vertical = 8.dp,
+                            ),
                         ) {
                             SidebarMenuButton(menuItems = menuFeatures)
                             Row(
                                 modifier = Modifier.fillMaxWidth(),
-                                horizontalArrangement = Arrangement.SpaceAround
+                                horizontalArrangement = Arrangement.SpaceAround,
                             ) {
                                 allSidebarFeatures.forEach { item ->
                                     val featureRoute = getRouteForFeature(item)
@@ -520,17 +509,17 @@ fun SidebarContent(
                                         enabled = item.enabled,
                                         icon = { item.icon() },
                                         label = { item.labelContent?.invoke() ?: Text(item.label) },
-                                        alwaysShowLabel = true
+                                        alwaysShowLabel = true,
                                     )
                                 }
                             }
                         }
                         HorizontalDivider()
                         Row(
-                            modifier = Modifier.fillMaxWidth().weight(1f)
+                            modifier = Modifier.fillMaxWidth().weight(1f),
                         ) {
                             NavigationRail(
-                                modifier = Modifier.fillMaxHeight().padding(top = 8.dp)
+                                modifier = Modifier.fillMaxHeight().padding(top = 8.dp),
                             ) {
                                 NavigationRailItem(
                                     selected = selectedSidebarPane == 2,
@@ -538,11 +527,11 @@ fun SidebarContent(
                                     icon = {
                                         Icon(
                                             Icons.Default.FolderOpen,
-                                            contentDescription = "Drawer"
+                                            contentDescription = "Drawer",
                                         )
                                     },
                                     label = { Text("Drawer") },
-                                    alwaysShowLabel = true
+                                    alwaysShowLabel = true,
                                 )
                                 NavigationRailItem(
                                     selected = selectedSidebarPane == 1,
@@ -550,16 +539,16 @@ fun SidebarContent(
                                     icon = {
                                         Icon(
                                             Icons.Default.MoreVert,
-                                            contentDescription = "Progress"
+                                            contentDescription = "Progress",
                                         )
                                     },
                                     label = { Text("Progress") },
-                                    alwaysShowLabel = true
+                                    alwaysShowLabel = true,
                                 )
                             }
                             VerticalDivider()
                             Column(
-                                modifier = Modifier.weight(1f).fillMaxHeight()
+                                modifier = Modifier.weight(1f).fillMaxHeight(),
                             ) {
                                 val paneTitle =
                                     when (selectedSidebarPane) {
@@ -569,13 +558,13 @@ fun SidebarContent(
                                 Row(
                                     modifier = Modifier.fillMaxWidth().padding(
                                         horizontal = 12.dp,
-                                        vertical = 8.dp
+                                        vertical = 8.dp,
                                     ),
-                                    verticalAlignment = Alignment.CenterVertically
+                                    verticalAlignment = Alignment.CenterVertically,
                                 ) {
                                     Text(
                                         text = paneTitle,
-                                        style = MaterialTheme.typography.titleSmall
+                                        style = MaterialTheme.typography.titleSmall,
                                     )
                                 }
                                 HorizontalDivider()
@@ -592,13 +581,13 @@ fun SidebarContent(
                                                 docEditorStore.selectDoc(docId)
                                                 if (currentRoute != AppScreens.DocEditor.name) {
                                                     navController.navigate(
-                                                        AppScreens.DocEditor.name
+                                                        AppScreens.DocEditor.name,
                                                     ) {
                                                         launchSingleTop = true
                                                     }
                                                 }
                                             },
-                                            modifier = Modifier.weight(1f).fillMaxWidth()
+                                            modifier = Modifier.weight(1f).fillMaxWidth(),
                                         )
                                     }
                                 }
@@ -610,13 +599,13 @@ fun SidebarContent(
                 Box(
                     modifier = Modifier.fillMaxWidth()
                         .padding(horizontal = 16.dp, vertical = 8.dp)
-                        .align(Alignment.Start)
+                        .align(Alignment.Start),
                 ) {
                     SidebarMenuButton(menuItems = menuFeatures)
                 }
                 // Narrow mode: NavigationRail with features only
                 NavigationRail(
-                    modifier = Modifier.fillMaxHeight()
+                    modifier = Modifier.fillMaxHeight(),
                 ) {
                     allSidebarFeatures.forEach { item ->
                         val featureRoute = getRouteForFeature(item)
@@ -642,7 +631,7 @@ fun SidebarContent(
                             icon = {
                                 item.icon()
                             },
-                            label = null // Rail mode: icon-only, no labels
+                            label = null, // Rail mode: icon-only, no labels
                         )
                     }
                 }
@@ -658,7 +647,7 @@ fun RenderLayoutPane(
     extraAction: (() -> Unit)? = null,
     menuFeatures: List<FeatureItem>,
     modifier: Modifier = Modifier,
-    contentType: DaybookContentType
+    contentType: DaybookContentType,
 ) {
     when (val variant = pane.variant) {
         is WindowLayoutPaneVariant.Sidebar -> {
@@ -666,7 +655,7 @@ fun RenderLayoutPane(
             SidebarContent(
                 navController = navController,
                 menuFeatures = menuFeatures,
-                modifier = modifier
+                modifier = modifier,
             )
         }
 
@@ -676,7 +665,7 @@ fun RenderLayoutPane(
                 extraAction = extraAction,
                 navController = navController,
                 modifier = modifier,
-                contentType = contentType
+                contentType = contentType,
             )
         }
 
@@ -688,7 +677,7 @@ fun RenderLayoutPane(
                 extraAction = extraAction,
                 menuFeatures = menuFeatures,
                 modifier = modifier,
-                contentType = contentType
+                contentType = contentType,
             )
         }
     }
@@ -701,7 +690,7 @@ fun RenderLayoutRegion(
     extraAction: (() -> Unit)? = null,
     menuFeatures: List<FeatureItem>,
     modifier: Modifier = Modifier,
-    contentType: DaybookContentType
+    contentType: DaybookContentType,
 ) {
     val orientation =
         when (region.orientation) {
@@ -721,7 +710,7 @@ fun RenderLayoutRegion(
         orientation = orientation,
         initialWeights = initialWeights,
         onWeightsChanged = { /* TODO: Implement persistence for nested regions */ },
-        modifier = modifier
+        modifier = modifier,
     ) {
         region.children.forEach { child ->
             val childPane = child.deets
@@ -732,9 +721,9 @@ fun RenderLayoutRegion(
                         PaneSizeRegime.Discrete(
                             minDp = 0f,
                             maxDp = SidebarLayoutConstants.DISCRETE_REGIME_MAX_DP,
-                            sizeDp = SidebarLayoutConstants.RAIL_TRANSITION_DP
+                            sizeDp = SidebarLayoutConstants.RAIL_TRANSITION_DP,
                         ),
-                        PaneSizeRegime.Continuous(minDp = SidebarLayoutConstants.RAIL_TRANSITION_DP)
+                        PaneSizeRegime.Continuous(minDp = SidebarLayoutConstants.RAIL_TRANSITION_DP),
                     )
                 } else {
                     // Default: continuous
@@ -747,7 +736,7 @@ fun RenderLayoutRegion(
                     extraAction = extraAction,
                     menuFeatures = menuFeatures,
                     modifier = Modifier.fillMaxSize(),
-                    contentType = contentType
+                    contentType = contentType,
                 )
             }
         }
@@ -761,8 +750,7 @@ sealed class PaneSizeRegime {
     /**
      * Continuous sizing - pane can be resized to any size within the regime range.
      */
-    data class Continuous(val minDp: Float = 0f, val maxDp: Float = Float.MAX_VALUE) :
-        PaneSizeRegime()
+    data class Continuous(val minDp: Float = 0f, val maxDp: Float = Float.MAX_VALUE) : PaneSizeRegime()
 
     /**
      * Discrete sizing - pane has a fixed explicit size that must fall within the range.
@@ -783,7 +771,7 @@ interface DockedRegionScope {
         modifier: Modifier = Modifier,
         regimes: List<PaneSizeRegime> = listOf(PaneSizeRegime.Continuous()),
         dividerContent: (@Composable () -> Unit)? = null,
-        content: @Composable (() -> Unit)
+        content: @Composable (() -> Unit),
     )
 }
 
@@ -797,14 +785,14 @@ fun DockableRegion(
     orientation: Orientation,
     initialWeights: Map<Any, Float> = emptyMap(),
     onWeightsChanged: ((Map<Any, Float>) -> Unit)? = null,
-    block: DockedRegionScope.() -> Unit
+    block: DockedRegionScope.() -> Unit,
 ) {
     data class RegionPaneData(
         val key: Any,
         val modifier: Modifier,
         val regimes: List<PaneSizeRegime>,
         val dividerContent: (@Composable () -> Unit)?,
-        val content: @Composable (() -> Unit)
+        val content: @Composable (() -> Unit),
     )
 
     class DockedRegionScopeImpl : DockedRegionScope {
@@ -815,7 +803,7 @@ fun DockableRegion(
             modifier: Modifier,
             regimes: List<PaneSizeRegime>,
             dividerContent: (@Composable () -> Unit)?,
-            content: @Composable (() -> Unit)
+            content: @Composable (() -> Unit),
         ) {
             items.add(RegionPaneData(key, modifier, regimes, dividerContent, content))
         }
@@ -826,7 +814,7 @@ fun DockableRegion(
         private val density: androidx.compose.ui.unit.Density,
         private val paneRegimes: Map<Any, List<PaneSizeRegime>>,
         initialWeights: Map<Any, Float>,
-        private val onWeightsChanged: ((Map<Any, Float>) -> Unit)? = null
+        private val onWeightsChanged: ((Map<Any, Float>) -> Unit)? = null,
     ) {
         // We map Keys to Weights.
         // This ensures if you reorder items, their size travels with them.
@@ -852,10 +840,7 @@ fun DockableRegion(
         private fun sizeDpToWeight(sizeDp: Float, totalSizeDp: Float, totalWeight: Float): Float =
             if (totalSizeDp <= 0f) 0f else (sizeDp / totalSizeDp) * totalWeight
 
-        private fun resolveDiscreteTargetSizeDp(
-            regime: PaneSizeRegime.Discrete,
-            virtualSizeDp: Float
-        ): Float = when {
+        private fun resolveDiscreteTargetSizeDp(regime: PaneSizeRegime.Discrete, virtualSizeDp: Float): Float = when {
             virtualSizeDp < regime.minDp -> regime.sizeDp
             virtualSizeDp <= regime.maxDp -> regime.sizeDp
             else -> virtualSizeDp
@@ -1037,10 +1022,10 @@ fun DockableRegion(
                             val targetWeightA = sizeDpToWeight(sizeA, totalSizeDp, totalWeight)
                             val targetWeightB = sizeDpToWeight(sizeB, totalSizeDp, totalWeight)
                             val newWeightA = targetWeightA.coerceAtLeast(
-                                SidebarLayoutConstants.MIN_PANE_WEIGHT
+                                SidebarLayoutConstants.MIN_PANE_WEIGHT,
                             )
                             val newWeightB = (totalCurrentWeight - newWeightA).coerceAtLeast(
-                                SidebarLayoutConstants.MIN_PANE_WEIGHT
+                                SidebarLayoutConstants.MIN_PANE_WEIGHT,
                             )
                             weightMap[keyA] = newWeightA
                             weightMap[keyB] = newWeightB
@@ -1048,10 +1033,10 @@ fun DockableRegion(
                             val targetWeightA = sizeDpToWeight(sizeA, totalSizeDp, totalWeight)
                             val targetWeightB = sizeDpToWeight(sizeB, totalSizeDp, totalWeight)
                             val newWeightB = targetWeightB.coerceAtLeast(
-                                SidebarLayoutConstants.MIN_PANE_WEIGHT
+                                SidebarLayoutConstants.MIN_PANE_WEIGHT,
                             )
                             val newWeightA = (totalCurrentWeight - newWeightB).coerceAtLeast(
-                                SidebarLayoutConstants.MIN_PANE_WEIGHT
+                                SidebarLayoutConstants.MIN_PANE_WEIGHT,
                             )
                             weightMap[keyA] = newWeightA
                             weightMap[keyB] = newWeightB
@@ -1063,12 +1048,12 @@ fun DockableRegion(
                         val newWeightA =
                             targetWeightA
                                 .coerceAtLeast(
-                                    SidebarLayoutConstants.MIN_PANE_WEIGHT
+                                    SidebarLayoutConstants.MIN_PANE_WEIGHT,
                                 ).coerceAtMost(
-                                    totalCurrentWeight - SidebarLayoutConstants.MIN_PANE_WEIGHT
+                                    totalCurrentWeight - SidebarLayoutConstants.MIN_PANE_WEIGHT,
                                 )
                         val newWeightB = (totalCurrentWeight - newWeightA).coerceAtLeast(
-                            SidebarLayoutConstants.MIN_PANE_WEIGHT
+                            SidebarLayoutConstants.MIN_PANE_WEIGHT,
                         )
                         weightMap[keyA] = newWeightA
                         weightMap[keyB] = newWeightB
@@ -1083,10 +1068,10 @@ fun DockableRegion(
                         val targetWeightA = sizeDpToWeight(regimeA.sizeDp, totalSizeDp, totalWeight)
                         val targetWeightB = sizeDpToWeight(virtualSizeDpB, totalSizeDp, totalWeight)
                         val newWeightA = targetWeightA.coerceAtLeast(
-                            SidebarLayoutConstants.MIN_PANE_WEIGHT
+                            SidebarLayoutConstants.MIN_PANE_WEIGHT,
                         )
                         val newWeightB = (totalCurrentWeight - newWeightA).coerceAtLeast(
-                            SidebarLayoutConstants.MIN_PANE_WEIGHT
+                            SidebarLayoutConstants.MIN_PANE_WEIGHT,
                         )
                         weightMap[keyA] = newWeightA
                         weightMap[keyB] = newWeightB
@@ -1097,12 +1082,12 @@ fun DockableRegion(
                         val newWeightA =
                             targetWeightA
                                 .coerceAtLeast(
-                                    SidebarLayoutConstants.MIN_PANE_WEIGHT
+                                    SidebarLayoutConstants.MIN_PANE_WEIGHT,
                                 ).coerceAtMost(
-                                    totalCurrentWeight - SidebarLayoutConstants.MIN_PANE_WEIGHT
+                                    totalCurrentWeight - SidebarLayoutConstants.MIN_PANE_WEIGHT,
                                 )
                         val newWeightB = (totalCurrentWeight - newWeightA).coerceAtLeast(
-                            SidebarLayoutConstants.MIN_PANE_WEIGHT
+                            SidebarLayoutConstants.MIN_PANE_WEIGHT,
                         )
                         weightMap[keyA] = newWeightA
                         weightMap[keyB] = newWeightB
@@ -1117,10 +1102,10 @@ fun DockableRegion(
                         val targetWeightA = sizeDpToWeight(virtualSizeDpA, totalSizeDp, totalWeight)
                         val targetWeightB = sizeDpToWeight(regimeB.sizeDp, totalSizeDp, totalWeight)
                         val newWeightB = targetWeightB.coerceAtLeast(
-                            SidebarLayoutConstants.MIN_PANE_WEIGHT
+                            SidebarLayoutConstants.MIN_PANE_WEIGHT,
                         )
                         val newWeightA = (totalCurrentWeight - newWeightB).coerceAtLeast(
-                            SidebarLayoutConstants.MIN_PANE_WEIGHT
+                            SidebarLayoutConstants.MIN_PANE_WEIGHT,
                         )
                         weightMap[keyA] = newWeightA
                         weightMap[keyB] = newWeightB
@@ -1131,12 +1116,12 @@ fun DockableRegion(
                         val newWeightB =
                             targetWeightB
                                 .coerceAtLeast(
-                                    SidebarLayoutConstants.MIN_PANE_WEIGHT
+                                    SidebarLayoutConstants.MIN_PANE_WEIGHT,
                                 ).coerceAtMost(
-                                    totalCurrentWeight - SidebarLayoutConstants.MIN_PANE_WEIGHT
+                                    totalCurrentWeight - SidebarLayoutConstants.MIN_PANE_WEIGHT,
                                 )
                         val newWeightA = (totalCurrentWeight - newWeightB).coerceAtLeast(
-                            SidebarLayoutConstants.MIN_PANE_WEIGHT
+                            SidebarLayoutConstants.MIN_PANE_WEIGHT,
                         )
                         weightMap[keyA] = newWeightA
                         weightMap[keyB] = newWeightB
@@ -1149,12 +1134,12 @@ fun DockableRegion(
                     val newWeightA =
                         targetWeightA
                             .coerceAtLeast(
-                                SidebarLayoutConstants.MIN_PANE_WEIGHT
+                                SidebarLayoutConstants.MIN_PANE_WEIGHT,
                             ).coerceAtMost(
-                                totalCurrentWeight - SidebarLayoutConstants.MIN_PANE_WEIGHT
+                                totalCurrentWeight - SidebarLayoutConstants.MIN_PANE_WEIGHT,
                             )
                     val newWeightB = (totalCurrentWeight - newWeightA).coerceAtLeast(
-                        SidebarLayoutConstants.MIN_PANE_WEIGHT
+                        SidebarLayoutConstants.MIN_PANE_WEIGHT,
                     )
                     weightMap[keyA] = newWeightA
                     weightMap[keyB] = newWeightB
@@ -1272,10 +1257,10 @@ fun DockableRegion(
                         val weightB = getWeight(keyB)
                         val totalCurrentWeight = weightA + weightB
                         val newWeightA = targetWeightA.coerceAtLeast(
-                            SidebarLayoutConstants.MIN_PANE_WEIGHT
+                            SidebarLayoutConstants.MIN_PANE_WEIGHT,
                         )
                         val newWeightB = (totalCurrentWeight - newWeightA).coerceAtLeast(
-                            SidebarLayoutConstants.MIN_PANE_WEIGHT
+                            SidebarLayoutConstants.MIN_PANE_WEIGHT,
                         )
                         weightMap[keyA] = newWeightA
                         weightMap[keyB] = newWeightB
@@ -1290,10 +1275,10 @@ fun DockableRegion(
                         val weightB = getWeight(keyB)
                         val totalCurrentWeight = weightA + weightB
                         val newWeightB = targetWeightB.coerceAtLeast(
-                            SidebarLayoutConstants.MIN_PANE_WEIGHT
+                            SidebarLayoutConstants.MIN_PANE_WEIGHT,
                         )
                         val newWeightA = (totalCurrentWeight - newWeightB).coerceAtLeast(
-                            SidebarLayoutConstants.MIN_PANE_WEIGHT
+                            SidebarLayoutConstants.MIN_PANE_WEIGHT,
                         )
                         weightMap[keyA] = newWeightA
                         weightMap[keyB] = newWeightB
@@ -1316,10 +1301,10 @@ fun DockableRegion(
             val newWeightA =
                 targetWeightA
                     .coerceAtLeast(
-                        SidebarLayoutConstants.MIN_PANE_WEIGHT
+                        SidebarLayoutConstants.MIN_PANE_WEIGHT,
                     ).coerceAtMost(totalCurrentWeight - SidebarLayoutConstants.MIN_PANE_WEIGHT)
             val newWeightB = (totalCurrentWeight - newWeightA).coerceAtLeast(
-                SidebarLayoutConstants.MIN_PANE_WEIGHT
+                SidebarLayoutConstants.MIN_PANE_WEIGHT,
             )
 
             // Update state
@@ -1366,7 +1351,7 @@ fun DockableRegion(
     val draw: @Composable GenericLayoutScope.() -> Unit = @Composable {
         scope.items.forEachIndexed { index, item ->
             Box(
-                modifier = item.modifier.weight(state.getWeight(item.key))
+                modifier = item.modifier.weight(state.getWeight(item.key)),
             ) {
                 item.content()
             }
@@ -1381,7 +1366,7 @@ fun DockableRegion(
                         state.startDrag(
                             currentKeys[index],
                             currentKeys[index + 1],
-                            totalSizePx
+                            totalSizePx,
                         )
                     },
                     onDrag = { dragAmount ->
@@ -1399,7 +1384,7 @@ fun DockableRegion(
                             dragStarted = false
                         }
                     },
-                    centerContent = scope.items[index].dividerContent
+                    centerContent = scope.items[index].dividerContent,
                 )
             }
         }
@@ -1413,9 +1398,9 @@ fun DockableRegion(
             }
             Row(
                 modifier =
-                    modifier.onSizeChanged {
-                        totalSizePx = it.width
-                    }
+                modifier.onSizeChanged {
+                    totalSizePx = it.width
+                },
             ) {
                 val adapter = remember(this) { RowScopeAdapter(this) }
                 draw(adapter)
@@ -1429,9 +1414,9 @@ fun DockableRegion(
             }
             Column(
                 modifier =
-                    modifier.onSizeChanged {
-                        totalSizePx = it.height
-                    }
+                modifier.onSizeChanged {
+                    totalSizePx = it.height
+                },
             ) {
                 val adapter = remember(this) { ColumnScopeAdapter(this) }
                 draw(adapter)

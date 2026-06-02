@@ -63,7 +63,7 @@ class RevealBottomSheetState(
     private val scope: CoroutineScope,
     initialVisible: Boolean,
     initialProgress: Float,
-    initialAnchors: List<Float> = listOf(0f, 0.5f, 1f)
+    initialAnchors: List<Float> = listOf(0f, 0.5f, 1f),
 ) {
     private val anim = Animatable(initialProgress)
     var isVisible by mutableStateOf(initialVisible)
@@ -132,11 +132,7 @@ class RevealBottomSheetState(
         }
     }
 
-    fun settle(
-        velocity: Float,
-        animationSpec: AnimationSpec<Float> = spring(),
-        onSettled: ((Float) -> Unit)? = null
-    ) {
+    fun settle(velocity: Float, animationSpec: AnimationSpec<Float> = spring(), onSettled: ((Float) -> Unit)? = null) {
         scope.launch {
             val current = progress
             val anchors = this@RevealBottomSheetState.anchors
@@ -175,7 +171,7 @@ internal fun Modifier.verticalScaleUp(state: RevealBottomSheetState) = this.then
     graphicsLayer {
         // No-op safe implementation for now; placeholder for future scale logic
         transformOrigin = TransformOrigin(pivotFractionX = 0.5f, pivotFractionY = 0f)
-    }
+    },
 )
 
 @OptIn(ExperimentalMaterial3Api::class)
@@ -183,13 +179,13 @@ internal fun Modifier.verticalScaleDown(state: RevealBottomSheetState) = this.th
     graphicsLayer {
         // Placeholder: no-op for now
         transformOrigin = TransformOrigin(pivotFractionX = 0.5f, pivotFractionY = 0f)
-    }
+    },
 )
 
 @Composable
 fun rememberRevealBottomSheetState(
     initiallyVisible: Boolean = false,
-    initialProgress: Float = if (initiallyVisible) 1f else 0f
+    initialProgress: Float = if (initiallyVisible) 1f else 0f,
 ): RevealBottomSheetState {
     val scope = rememberCoroutineScope()
     return remember(scope, initiallyVisible, initialProgress) {
@@ -221,7 +217,7 @@ fun RevealBottomSheetScaffold(
     containerColor: Color = MaterialTheme.colorScheme.surface,
     contentColor: Color = contentColorFor(containerColor),
     sheetAnchors: List<Float>? = null,
-    content: @Composable (PaddingValues) -> Unit
+    content: @Composable (PaddingValues) -> Unit,
 ) {
     val density = LocalDensity.current
     val scope = rememberCoroutineScope()
@@ -245,63 +241,130 @@ fun RevealBottomSheetScaffold(
         val headerSlotModifier = headerSlotModifierBase
         Layout(
             contents =
-                listOf<@Composable () -> Unit>(
-                    { if (topBar != null) topBar() else TopAppBar(title = {}) },
-                    { content(PaddingValues(bottom = sheetPeekHeight)) },
-                    {
-                        // nested-scroll connection: convert nested pre-scroll into sheet progress
-                        // Use onPostScroll instead of onPreScroll to allow children to consume scroll first
-                        val sheetNestedScroll =
-                            remember(sheetState, sheetHeightPx, peekPx) {
-                                object : NestedScrollConnection {
-                                    override fun onPostScroll(
-                                        consumed: Offset,
-                                        available: Offset,
-                                        source: NestedScrollSource
-                                    ): Offset {
-                                        // Only consume scroll if children didn't consume it (available.y != 0)
-                                        val dy = available.y
-                                        if (dy == 0f) return Offset.Zero
+            listOf<@Composable () -> Unit>(
+                { if (topBar != null) topBar() else TopAppBar(title = {}) },
+                { content(PaddingValues(bottom = sheetPeekHeight)) },
+                {
+                    // nested-scroll connection: convert nested pre-scroll into sheet progress
+                    // Use onPostScroll instead of onPreScroll to allow children to consume scroll first
+                    val sheetNestedScroll =
+                        remember(sheetState, sheetHeightPx, peekPx) {
+                            object : NestedScrollConnection {
+                                override fun onPostScroll(
+                                    consumed: Offset,
+                                    available: Offset,
+                                    source: NestedScrollSource,
+                                ): Offset {
+                                    // Only consume scroll if children didn't consume it (available.y != 0)
+                                    val dy = available.y
+                                    if (dy == 0f) return Offset.Zero
 
-                                        val total = (sheetHeightPx - peekPx).coerceAtLeast(1f)
-                                        if (total <= 0f) return Offset.Zero
-                                        val currentVisible = peekPx + total * sheetState.progress
-                                        val nextVisible =
-                                            (currentVisible - dy).coerceIn(
-                                                0f,
-                                                sheetHeightPx.toFloat()
-                                            )
-                                        val nextProgress = ((nextVisible - peekPx) / total).coerceIn(
+                                    val total = (sheetHeightPx - peekPx).coerceAtLeast(1f)
+                                    if (total <= 0f) return Offset.Zero
+                                    val currentVisible = peekPx + total * sheetState.progress
+                                    val nextVisible =
+                                        (currentVisible - dy).coerceIn(
                                             0f,
-                                            1f
+                                            sheetHeightPx.toFloat(),
                                         )
-                                        // synchronous update via suspend scope in pointer handler; here we launch
-                                        scope.launch { sheetState.snapToProgress(nextProgress) }
-                                        return Offset(0f, dy)
-                                    }
+                                    val nextProgress = ((nextVisible - peekPx) / total).coerceIn(
+                                        0f,
+                                        1f,
+                                    )
+                                    // synchronous update via suspend scope in pointer handler; here we launch
+                                    scope.launch { sheetState.snapToProgress(nextProgress) }
+                                    return Offset(0f, dy)
+                                }
 
-                                    override suspend fun onPostFling(
-                                        consumed: Velocity,
-                                        available: Velocity
-                                    ): Velocity {
-                                        val vy = available.y.toFloat()
-                                        sheetState.settle(vy)
-                                        return available
-                                    }
+                                override suspend fun onPostFling(consumed: Velocity, available: Velocity): Velocity {
+                                    val vy = available.y.toFloat()
+                                    sheetState.settle(vy)
+                                    return available
                                 }
                             }
+                        }
 
-                        // drawWithContent on Surface to clip background and content to the reveal edge
-                        if (sheetState.isVisible) {
-                            Surface(
-                                modifier =
+                    // drawWithContent on Surface to clip background and content to the reveal edge
+                    if (sheetState.isVisible) {
+                        Surface(
+                            modifier =
+                            Modifier
+                                .widthIn(max = sheetMaxWidth)
+                                .fillMaxWidth()
+                                .requiredHeightIn(min = sheetPeekHeight)
+                                .onSizeChanged { sheetHeightPx = it.height }
+                                .drawWithContent {
+                                    val total = (sheetHeightPx - peekPx).coerceAtLeast(1f)
+                                    val visible =
+                                        if (sheetState.isVisible) {
+                                            (
+                                                peekPx +
+                                                    total * sheetState.progress
+                                                )
+                                        } else {
+                                            0f
+                                        }
+                                    val revealTop = size.height - visible
+                                    clipRect(top = revealTop.coerceAtLeast(0f)) {
+                                        this@drawWithContent.drawContent()
+                                    }
+                                }.verticalScaleUp(sheetState)
+                                .nestedScroll(sheetNestedScroll)
+                                .pointerInput(sheetState, sheetHeightPx, peekPx) {
+                                    detectVerticalDragGestures(
+                                        onDragStart = { /* no-op */ },
+                                        onDragEnd = {
+                                            scope.launch { sheetState.settle(0f) }
+                                        },
+                                        onDragCancel = {
+                                            scope.launch { sheetState.settle(0f) }
+                                        },
+                                    ) { change, dragAmount ->
+                                        // pointerInput is a suspend scope; update progress synchronously
+                                        val total = (sheetHeightPx - peekPx).coerceAtLeast(
+                                            1f,
+                                        )
+                                        if (total <= 0f) return@detectVerticalDragGestures
+                                        val currentVisible =
+                                            peekPx + total * sheetState.progress
+                                        val nextVisible =
+                                            (currentVisible - dragAmount).coerceIn(
+                                                0f,
+                                                sheetHeightPx.toFloat(),
+                                            )
+                                        val nextProgress =
+                                            ((nextVisible - peekPx) / total).coerceIn(
+                                                0f,
+                                                1f,
+                                            )
+                                        change.consume()
+                                        // update backing progress immediately for tight finger follow
+                                        sheetState.setProgressImmediate(nextProgress)
+                                    }
+                                },
+                            color = sheetContainerColor,
+                            contentColor = sheetContentColor,
+                        ) {
+                            // compute reveal geometry (pixels)
+                            val total = (sheetHeightPx - peekPx).coerceAtLeast(1f)
+                            val visiblePx =
+                                if (sheetState.isVisible) (peekPx + total * sheetState.progress) else 0f
+                            val revealTopPx = (sheetHeightPx - visiblePx).coerceAtLeast(0f)
+
+                            // Layout: header/handle sit above the clipped content but inside the Surface.
+                            // The clipped content is revealed from the bottom by clipping its top edge.
+                            Box(Modifier.fillMaxWidth().fillMaxHeight()) {
+                                // header/handle area removed here; header is provided by the header slot and
+                                // will be positioned by the parent Layout so it participates in hit testing.
+
+                                // clipped content region (revealed from bottom)
+                                Box(
                                     Modifier
-                                        .widthIn(max = sheetMaxWidth)
-                                        .fillMaxWidth()
-                                        .requiredHeightIn(min = sheetPeekHeight)
-                                        .onSizeChanged { sheetHeightPx = it.height }
+                                        .matchParentSize()
                                         .drawWithContent {
-                                            val total = (sheetHeightPx - peekPx).coerceAtLeast(1f)
+                                            val total = (sheetHeightPx - peekPx).coerceAtLeast(
+                                                1f,
+                                            )
                                             val visible =
                                                 if (sheetState.isVisible) {
                                                     (
@@ -315,142 +378,72 @@ fun RevealBottomSheetScaffold(
                                             clipRect(top = revealTop.coerceAtLeast(0f)) {
                                                 this@drawWithContent.drawContent()
                                             }
-                                        }.verticalScaleUp(sheetState)
-                                        .nestedScroll(sheetNestedScroll)
-                                        .pointerInput(sheetState, sheetHeightPx, peekPx) {
-                                            detectVerticalDragGestures(
-                                                onDragStart = { /* no-op */ },
-                                                onDragEnd = {
-                                                    scope.launch { sheetState.settle(0f) }
-                                                },
-                                                onDragCancel = {
-                                                    scope.launch { sheetState.settle(0f) }
-                                                }
-                                            ) { change, dragAmount ->
-                                                // pointerInput is a suspend scope; update progress synchronously
-                                                val total = (sheetHeightPx - peekPx).coerceAtLeast(
-                                                    1f
-                                                )
-                                                if (total <= 0f) return@detectVerticalDragGestures
-                                                val currentVisible =
-                                                    peekPx + total * sheetState.progress
-                                                val nextVisible =
-                                                    (currentVisible - dragAmount).coerceIn(
-                                                        0f,
-                                                        sheetHeightPx.toFloat()
-                                                    )
-                                                val nextProgress =
-                                                    ((nextVisible - peekPx) / total).coerceIn(
-                                                        0f,
-                                                        1f
-                                                    )
-                                                change.consume()
-                                                // update backing progress immediately for tight finger follow
-                                                sheetState.setProgressImmediate(nextProgress)
-                                            }
                                         },
-                                color = sheetContainerColor,
-                                contentColor = sheetContentColor
-                            ) {
-                                // compute reveal geometry (pixels)
-                                val total = (sheetHeightPx - peekPx).coerceAtLeast(1f)
-                                val visiblePx =
-                                    if (sheetState.isVisible) (peekPx + total * sheetState.progress) else 0f
-                                val revealTopPx = (sheetHeightPx - visiblePx).coerceAtLeast(0f)
-
-                                // Layout: header/handle sit above the clipped content but inside the Surface.
-                                // The clipped content is revealed from the bottom by clipping its top edge.
-                                Box(Modifier.fillMaxWidth().fillMaxHeight()) {
-                                    // header/handle area removed here; header is provided by the header slot and
-                                    // will be positioned by the parent Layout so it participates in hit testing.
-
-                                    // clipped content region (revealed from bottom)
-                                    Box(
+                                ) {
+                                    Column(
                                         Modifier
-                                            .matchParentSize()
-                                            .drawWithContent {
-                                                val total = (sheetHeightPx - peekPx).coerceAtLeast(
-                                                    1f
-                                                )
-                                                val visible =
-                                                    if (sheetState.isVisible) {
-                                                        (
-                                                            peekPx +
-                                                                total * sheetState.progress
-                                                            )
-                                                    } else {
-                                                        0f
-                                                    }
-                                                val revealTop = size.height - visible
-                                                clipRect(top = revealTop.coerceAtLeast(0f)) {
-                                                    this@drawWithContent.drawContent()
-                                                }
-                                            }
+                                            .fillMaxWidth()
+                                            .fillMaxHeight(),
+                                        verticalArrangement = Arrangement.Bottom,
                                     ) {
-                                        Column(
-                                            Modifier
-                                                .fillMaxWidth()
-                                                .fillMaxHeight(),
-                                            verticalArrangement = Arrangement.Bottom
-                                        ) {
-                                            sheetContent()
-                                        }
+                                        sheetContent()
                                     }
                                 }
                             }
                         }
-                    },
-                    // underlay slot measured separately and anchored to the header reveal position
-                    {
-                        if (sheetHeaderUnderlay != null) {
-                            sheetHeaderUnderlay(Modifier)
-                        }
-                    },
-                    // header slot measured separately so we can position it relative to the reveal edge
-                    {
-                        if (sheetHeader != null) {
-                            sheetHeader(
-                                headerSlotModifier.then(
-                                    Modifier
-                                        .pointerInput(Unit) {
-                                            // forward vertical drags from header into the same draggable state
-                                            detectVerticalDragGestures(
-                                                onDragStart = { /* no-op */ },
-                                                onDragEnd = {
-                                                    scope.launch { sheetState.settle(0f) }
-                                                },
-                                                onDragCancel = {
-                                                    scope.launch { sheetState.settle(0f) }
-                                                }
-                                            ) { change, dragAmount ->
-                                                // convert drag into sheet progress updates - reuse the same logic
-                                                val total = (sheetHeightPx - peekPx).coerceAtLeast(
-                                                    1f
+                    }
+                },
+                // underlay slot measured separately and anchored to the header reveal position
+                {
+                    if (sheetHeaderUnderlay != null) {
+                        sheetHeaderUnderlay(Modifier)
+                    }
+                },
+                // header slot measured separately so we can position it relative to the reveal edge
+                {
+                    if (sheetHeader != null) {
+                        sheetHeader(
+                            headerSlotModifier.then(
+                                Modifier
+                                    .pointerInput(Unit) {
+                                        // forward vertical drags from header into the same draggable state
+                                        detectVerticalDragGestures(
+                                            onDragStart = { /* no-op */ },
+                                            onDragEnd = {
+                                                scope.launch { sheetState.settle(0f) }
+                                            },
+                                            onDragCancel = {
+                                                scope.launch { sheetState.settle(0f) }
+                                            },
+                                        ) { change, dragAmount ->
+                                            // convert drag into sheet progress updates - reuse the same logic
+                                            val total = (sheetHeightPx - peekPx).coerceAtLeast(
+                                                1f,
+                                            )
+                                            val currentVisible =
+                                                peekPx + total * sheetState.progress
+                                            val nextVisible =
+                                                (currentVisible - dragAmount).coerceIn(
+                                                    0f,
+                                                    sheetHeightPx.toFloat(),
                                                 )
-                                                val currentVisible =
-                                                    peekPx + total * sheetState.progress
-                                                val nextVisible =
-                                                    (currentVisible - dragAmount).coerceIn(
-                                                        0f,
-                                                        sheetHeightPx.toFloat()
-                                                    )
-                                                val nextProgress =
-                                                    ((nextVisible - peekPx) / total).coerceIn(
-                                                        0f,
-                                                        1f
-                                                    )
-                                                change.consume()
-                                                scope.launch {
-                                                    sheetState.snapToProgress(nextProgress)
-                                                }
+                                            val nextProgress =
+                                                ((nextVisible - peekPx) / total).coerceIn(
+                                                    0f,
+                                                    1f,
+                                                )
+                                            change.consume()
+                                            scope.launch {
+                                                sheetState.snapToProgress(nextProgress)
                                             }
                                         }
-                                )
-                            )
-                        }
-                    },
-                    { snackBarHost(remember { SnackbarHostState() }) }
-                )
+                                    },
+                            ),
+                        )
+                    }
+                },
+                { snackBarHost(remember { SnackbarHostState() }) },
+            ),
         ) { measurables, constraints ->
             val topBarMeasurables = measurables[0]
             val bodyMeasurables = measurables[1]

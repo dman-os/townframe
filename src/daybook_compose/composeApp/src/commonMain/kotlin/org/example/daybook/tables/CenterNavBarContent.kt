@@ -1,16 +1,10 @@
 @file:OptIn(
     kotlin.uuid.ExperimentalUuidApi::class,
-    androidx.compose.material3.ExperimentalMaterial3Api::class
+    androidx.compose.material3.ExperimentalMaterial3Api::class,
 )
 
 package org.example.daybook.tables
 
-import androidx.compose.animation.AnimatedVisibility
-import androidx.compose.animation.core.tween
-import androidx.compose.animation.fadeIn
-import androidx.compose.animation.fadeOut
-import androidx.compose.animation.slideInHorizontally
-import androidx.compose.animation.slideOutHorizontally
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
 import androidx.compose.foundation.interaction.MutableInteractionSource
@@ -19,12 +13,12 @@ import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.RowScope
-import androidx.compose.foundation.layout.fillMaxWidth
-import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.width
+import androidx.compose.foundation.selection.selectable
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material3.Button
+import androidx.compose.material3.LocalTextStyle
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
@@ -38,9 +32,7 @@ import androidx.compose.ui.draw.clip
 import androidx.compose.ui.geometry.Rect
 import androidx.compose.ui.layout.boundsInWindow
 import androidx.compose.ui.layout.onGloballyPositioned
-import androidx.compose.foundation.selection.selectable
 import androidx.compose.ui.semantics.Role
-import androidx.compose.material3.LocalTextStyle
 import androidx.compose.ui.unit.dp
 import androidx.navigation.NavHostController
 import androidx.navigation.compose.currentBackStackEntryAsState
@@ -63,7 +55,7 @@ fun RowScope.CenterNavBarContent(
     lastDragWindowPos: androidx.compose.ui.geometry.Offset?,
     onFeatureButtonLayout: (String, Rect) -> Unit,
     onFeatureActivate: suspend (FeatureItem) -> Unit,
-    modifier: Modifier = Modifier
+    modifier: Modifier = Modifier,
 ) {
     val scope = rememberCoroutineScope()
     val navBackStackEntry by navController.currentBackStackEntryAsState()
@@ -85,10 +77,10 @@ fun RowScope.CenterNavBarContent(
         // 2. No main feature action button exists (show prominent buttons always)
         Row(
             modifier =
-                modifier
-                    .weight(1f)
-                    .padding(horizontal = 8.dp),
-            horizontalArrangement = Arrangement.SpaceBetween
+            modifier
+                .weight(1f)
+                .padding(horizontal = 8.dp),
+            horizontalArrangement = Arrangement.SpaceBetween,
         ) {
             prominentButtons.forEachIndexed { idx, button ->
                 // Get ready state for this prominent button
@@ -97,7 +89,7 @@ fun RowScope.CenterNavBarContent(
                 val readyState =
                     featureReadyStates
                         .getOrNull(
-                            features.size + idx
+                            features.size + idx,
                         )?.value ?: false
                 val hoverOver =
                     lastDragWindowPos?.let { pw ->
@@ -107,14 +99,14 @@ fun RowScope.CenterNavBarContent(
                 val selected = isFeatureRouteSelected(button.key, currentRoute)
                 CustomBottomBarItem(
                     modifier =
-                        Modifier
-                            .padding(vertical = 3.dp)
-                            .onGloballyPositioned { layoutCoordinates ->
-                                onFeatureButtonLayout(
-                                    button.key,
-                                    layoutCoordinates.boundsInWindow()
-                                )
-                            },
+                    Modifier
+                        .padding(vertical = 3.dp)
+                        .onGloballyPositioned { layoutCoordinates ->
+                            onFeatureButtonLayout(
+                                button.key,
+                                layoutCoordinates.boundsInWindow(),
+                            )
+                        },
                     selected = selected,
                     hover = hoverOver,
                     armed = hoverOver && readyState,
@@ -125,7 +117,7 @@ fun RowScope.CenterNavBarContent(
                     icon = button.icon,
                     label = {
                         androidx.compose.runtime.CompositionLocalProvider(
-                            LocalTextStyle provides MaterialTheme.typography.labelSmall
+                            LocalTextStyle provides MaterialTheme.typography.labelSmall,
                         ) {
                             button.label()
                         }
@@ -134,7 +126,7 @@ fun RowScope.CenterNavBarContent(
                         if (button.enabled) {
                             scope.launch { button.onClick() }
                         }
-                    }
+                    },
                 )
             }
         }
@@ -148,11 +140,11 @@ fun RowScope.CenterNavBarContent(
                 }
             },
             modifier = modifier.weight(1f),
-            enabled = button.enabled
+            enabled = button.enabled,
         ) {
             Row(
                 horizontalArrangement = Arrangement.spacedBy(8.dp),
-                verticalAlignment = Alignment.CenterVertically
+                verticalAlignment = Alignment.CenterVertically,
             ) {
                 button.icon()
                 button.label()
@@ -162,10 +154,10 @@ fun RowScope.CenterNavBarContent(
         // Show default nav bar features (Home, Capture, Documents) in the center
         Row(
             modifier =
-                Modifier
-                    .weight(1f)
-                    .padding(horizontal = 8.dp),
-            horizontalArrangement = Arrangement.SpaceBetween
+            Modifier
+                .weight(1f)
+                .padding(horizontal = 8.dp),
+            horizontalArrangement = Arrangement.SpaceBetween,
         ) {
             features.forEachIndexed { idx, feature ->
                 val hoverOver =
@@ -176,14 +168,14 @@ fun RowScope.CenterNavBarContent(
                 val selected = isFeatureRouteSelected(feature.key, currentRoute)
                 CustomBottomBarItem(
                     modifier =
-                        Modifier
-                            .padding(vertical = 3.dp)
-                            .onGloballyPositioned { layoutCoordinates ->
-                                onFeatureButtonLayout(
-                                    feature.key,
-                                    layoutCoordinates.boundsInWindow()
-                                )
-                            },
+                    Modifier
+                        .padding(vertical = 3.dp)
+                        .onGloballyPositioned { layoutCoordinates ->
+                            onFeatureButtonLayout(
+                                feature.key,
+                                layoutCoordinates.boundsInWindow(),
+                            )
+                        },
                     selected = selected,
                     hover = hoverOver,
                     armed = hoverOver && ready,
@@ -201,7 +193,7 @@ fun RowScope.CenterNavBarContent(
                                 onFeatureActivate(feature)
                             }
                         }
-                    }
+                    },
                 )
             }
         }
@@ -220,7 +212,7 @@ private fun CustomBottomBarItem(
     icon: @Composable () -> Unit,
     label: @Composable () -> Unit,
     onClick: () -> Unit,
-    modifier: Modifier = Modifier
+    modifier: Modifier = Modifier,
 ) {
     val itemShape = RoundedCornerShape(20.dp)
     val outerInteraction = remember { MutableInteractionSource() }
@@ -233,38 +225,38 @@ private fun CustomBottomBarItem(
 
     Box(
         modifier =
-            modifier
-                .selectable(
-                    selected = selected,
-                    onClick = onClick,
-                    enabled = enabled,
-                    interactionSource = outerInteraction,
-                    indication = null,
-                    role = Role.Tab
-                )
-                .padding(vertical = 2.dp),
-        contentAlignment = Alignment.Center
+        modifier
+            .selectable(
+                selected = selected,
+                onClick = onClick,
+                enabled = enabled,
+                interactionSource = outerInteraction,
+                indication = null,
+                role = Role.Tab,
+            )
+            .padding(vertical = 2.dp),
+        contentAlignment = Alignment.Center,
     ) {
         Column(
             modifier = Modifier.padding(vertical = 2.dp),
             horizontalAlignment = Alignment.CenterHorizontally,
-            verticalArrangement = Arrangement.spacedBy(4.dp)
+            verticalArrangement = Arrangement.spacedBy(4.dp),
         ) {
             Box(
                 modifier =
-                    Modifier
-                        .width(56.dp)
-                        .clip(itemShape)
-                        .background(background)
-                        .then(
-                            if (armed) {
-                                Modifier.border(width = 1.5.dp, color = armedIndicatorColor, shape = itemShape)
-                            } else {
-                                Modifier
-                            }
-                        )
-                        .padding(horizontal = 10.dp, vertical = 6.dp),
-                contentAlignment = Alignment.Center
+                Modifier
+                    .width(56.dp)
+                    .clip(itemShape)
+                    .background(background)
+                    .then(
+                        if (armed) {
+                            Modifier.border(width = 1.5.dp, color = armedIndicatorColor, shape = itemShape)
+                        } else {
+                            Modifier
+                        },
+                    )
+                    .padding(horizontal = 10.dp, vertical = 6.dp),
+                contentAlignment = Alignment.Center,
             ) {
                 Box { icon() }
             }

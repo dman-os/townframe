@@ -5,7 +5,6 @@ package org.example.daybook.settings
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
-import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.rememberScrollState
@@ -49,66 +48,66 @@ fun SettingsScreen(modifier: Modifier = Modifier) {
 
     Column(
         modifier =
-            modifier
-                .verticalScroll(rememberScrollState())
-                .padding(16.dp)
+        modifier
+            .verticalScroll(rememberScrollState())
+            .padding(16.dp),
     ) {
         Text(
             text = "Layout",
             style = MaterialTheme.typography.titleLarge,
-            modifier = Modifier.padding(bottom = 8.dp)
+            modifier = Modifier.padding(bottom = 8.dp),
         )
 
         HorizontalDivider(modifier = Modifier.padding(bottom = 16.dp))
 
         Row(
             modifier = Modifier.padding(vertical = 8.dp),
-            verticalAlignment = Alignment.CenterVertically
+            verticalAlignment = Alignment.CenterVertically,
         ) {
             Text(
                 text = "Sidebar Position",
                 modifier = Modifier.weight(1f),
-                style = MaterialTheme.typography.bodyLarge
+                style = MaterialTheme.typography.bodyLarge,
             )
             Switch(
                 checked = sidebarPos == "RIGHT",
-                onCheckedChange = { _ -> }
+                onCheckedChange = { _ -> },
             )
             Text(
                 text = if (sidebarPos == "RIGHT") "Right" else "Left",
                 modifier = Modifier.padding(start = 8.dp),
-                style = MaterialTheme.typography.bodyMedium
+                style = MaterialTheme.typography.bodyMedium,
             )
         }
 
         Row(
             modifier = Modifier.padding(vertical = 8.dp),
-            verticalAlignment = Alignment.CenterVertically
+            verticalAlignment = Alignment.CenterVertically,
         ) {
             Text(
                 text = "Sidebar Auto-Hide",
                 modifier = Modifier.weight(1f),
-                style = MaterialTheme.typography.bodyLarge
+                style = MaterialTheme.typography.bodyLarge,
             )
             Switch(
                 checked = sidebarAutoHide,
-                onCheckedChange = { _ -> }
+                onCheckedChange = { _ -> },
             )
             Text(
                 text = if (sidebarAutoHide) "On" else "Off",
                 modifier = Modifier.padding(start = 8.dp),
-                style = MaterialTheme.typography.bodyMedium
+                style = MaterialTheme.typography.bodyMedium,
             )
         }
 
         Row(
             modifier = Modifier.padding(vertical = 8.dp),
-            verticalAlignment = Alignment.CenterVertically
+            verticalAlignment = Alignment.CenterVertically,
         ) {
             Text(
                 text = "Reset Layout Settings",
                 modifier = Modifier.weight(1f),
-                style = MaterialTheme.typography.bodyLarge
+                style = MaterialTheme.typography.bodyLarge,
             )
             ResetLayoutButton(onReset = {})
         }
@@ -116,20 +115,20 @@ fun SettingsScreen(modifier: Modifier = Modifier) {
         Text(
             text = "MLTools",
             style = MaterialTheme.typography.titleLarge,
-            modifier = Modifier.padding(top = 20.dp, bottom = 8.dp)
+            modifier = Modifier.padding(top = 20.dp, bottom = 8.dp),
         )
         HorizontalDivider(modifier = Modifier.padding(bottom = 12.dp))
 
         Row(
             modifier = Modifier.fillMaxWidth().padding(vertical = 8.dp),
             verticalAlignment = Alignment.CenterVertically,
-            horizontalArrangement = Arrangement.spacedBy(12.dp)
+            horizontalArrangement = Arrangement.spacedBy(12.dp),
         ) {
             Column(modifier = Modifier.weight(1f)) {
                 Text(
                     text = "mobile_default",
                     style = MaterialTheme.typography.titleMedium,
-                    fontWeight = FontWeight.SemiBold
+                    fontWeight = FontWeight.SemiBold,
                 )
                 val statusText =
                     when (val state = provisionState) {
@@ -141,7 +140,7 @@ fun SettingsScreen(modifier: Modifier = Modifier) {
                 Text(
                     text = statusText,
                     style = MaterialTheme.typography.bodySmall,
-                    color = MaterialTheme.colorScheme.onSurfaceVariant
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
                 )
             }
             Button(
@@ -156,7 +155,7 @@ fun SettingsScreen(modifier: Modifier = Modifier) {
                         "Retry"
                     } else {
                         "Download"
-                    }
+                    },
                 )
             }
         }
@@ -168,7 +167,7 @@ fun SettingsScreen(modifier: Modifier = Modifier) {
         Text(
             text = "MLTools Download Tasks",
             style = MaterialTheme.typography.titleMedium,
-            modifier = Modifier.padding(top = 12.dp, bottom = 8.dp)
+            modifier = Modifier.padding(top = 12.dp, bottom = 8.dp),
         )
 
         if (downloadTasks.isEmpty()) {
@@ -176,12 +175,12 @@ fun SettingsScreen(modifier: Modifier = Modifier) {
                 text = "No model download tasks yet",
                 style = MaterialTheme.typography.bodySmall,
                 color = MaterialTheme.colorScheme.onSurfaceVariant,
-                modifier = Modifier.padding(vertical = 8.dp)
+                modifier = Modifier.padding(vertical = 8.dp),
             )
         } else {
             Column(
                 modifier = Modifier.fillMaxWidth(),
-                verticalArrangement = Arrangement.spacedBy(8.dp)
+                verticalArrangement = Arrangement.spacedBy(8.dp),
             ) {
                 downloadTasks.forEach { task ->
                     MltoolsDownloadTaskRow(task)
@@ -196,7 +195,7 @@ private fun MltoolsBackendSection(title: String, rows: List<MltoolsBackendRow>) 
     Text(
         text = title,
         style = MaterialTheme.typography.titleSmall,
-        modifier = Modifier.padding(top = 8.dp, bottom = 4.dp)
+        modifier = Modifier.padding(top = 8.dp, bottom = 4.dp),
     )
 
     if (rows.isEmpty()) {
@@ -204,32 +203,32 @@ private fun MltoolsBackendSection(title: String, rows: List<MltoolsBackendRow>) 
             text = "Not configured",
             style = MaterialTheme.typography.bodySmall,
             color = MaterialTheme.colorScheme.onSurfaceVariant,
-            modifier = Modifier.padding(bottom = 4.dp)
+            modifier = Modifier.padding(bottom = 4.dp),
         )
         return
     }
 
     Column(
         modifier = Modifier.fillMaxWidth(),
-        verticalArrangement = Arrangement.spacedBy(4.dp)
+        verticalArrangement = Arrangement.spacedBy(4.dp),
     ) {
         rows.forEach { row ->
             Row(
                 modifier = Modifier.fillMaxWidth(),
                 horizontalArrangement = Arrangement.spacedBy(8.dp),
-                verticalAlignment = Alignment.Top
+                verticalAlignment = Alignment.Top,
             ) {
                 Text(
                     text = row.backend,
                     style = MaterialTheme.typography.bodySmall,
                     fontWeight = FontWeight.SemiBold,
-                    modifier = Modifier.weight(0.3f)
+                    modifier = Modifier.weight(0.3f),
                 )
                 Text(
                     text = row.details,
                     style = MaterialTheme.typography.bodySmall,
                     color = MaterialTheme.colorScheme.onSurfaceVariant,
-                    modifier = Modifier.weight(0.7f)
+                    modifier = Modifier.weight(0.7f),
                 )
             }
         }
@@ -255,17 +254,17 @@ private fun MltoolsDownloadTaskRow(task: ProgressTask) {
 
     Column(
         modifier = Modifier.fillMaxWidth().padding(8.dp),
-        verticalArrangement = Arrangement.spacedBy(4.dp)
+        verticalArrangement = Arrangement.spacedBy(4.dp),
     ) {
         Text(
             text = task.title ?: task.id,
             style = MaterialTheme.typography.bodyMedium,
-            fontWeight = FontWeight.SemiBold
+            fontWeight = FontWeight.SemiBold,
         )
         Text(
             text = stateText,
             style = MaterialTheme.typography.bodySmall,
-            color = MaterialTheme.colorScheme.onSurfaceVariant
+            color = MaterialTheme.colorScheme.onSurfaceVariant,
         )
         if (progress != null) {
             ProgressAmountBlock(progress, modifier = Modifier.fillMaxWidth())
@@ -274,14 +273,14 @@ private fun MltoolsDownloadTaskRow(task: ProgressTask) {
             Text(
                 text = latest.message,
                 style = MaterialTheme.typography.bodySmall,
-                color = MaterialTheme.colorScheme.onSurfaceVariant
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
             )
         }
         if (latest is ProgressUpdateDeets.Completed && latest.message != null) {
             Text(
                 text = latest.message,
                 style = MaterialTheme.typography.bodySmall,
-                color = MaterialTheme.colorScheme.onSurfaceVariant
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
             )
         }
         HorizontalDivider(modifier = Modifier.padding(top = 4.dp))

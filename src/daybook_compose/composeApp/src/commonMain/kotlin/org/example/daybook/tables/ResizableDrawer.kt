@@ -8,7 +8,6 @@ import androidx.compose.foundation.hoverable
 import androidx.compose.foundation.interaction.MutableInteractionSource
 import androidx.compose.foundation.interaction.collectIsHoveredAsState
 import androidx.compose.foundation.layout.Box
-import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.fillMaxHeight
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.width
@@ -37,7 +36,7 @@ fun ResizablePermanentNavigationDrawer(
     initialWidth: Dp = 280.dp,
     minWidth: Dp = 200.dp,
     maxWidth: Dp = 600.dp,
-    content: @Composable () -> Unit
+    content: @Composable () -> Unit,
 ) {
     val density = LocalDensity.current
     var drawerWidth by rememberSaveable { mutableFloatStateOf(initialWidth.value) }
@@ -47,7 +46,7 @@ fun ResizablePermanentNavigationDrawer(
         drawerContent = {
             Box(modifier = Modifier.fillMaxHeight()) {
                 PermanentDrawerSheet(
-                    modifier = Modifier.width(drawerWidthDp)
+                    modifier = Modifier.width(drawerWidthDp),
                 ) {
                     drawerContent()
                 }
@@ -58,30 +57,30 @@ fun ResizablePermanentNavigationDrawer(
 
                 Box(
                     modifier =
-                        Modifier
-                            .width(8.dp)
-                            .fillMaxHeight()
-                            .align(Alignment.CenterEnd)
-                            .background(
-                                if (isHovered) {
-                                    MaterialTheme.colorScheme.primary.copy(alpha = 0.3f)
-                                } else {
-                                    MaterialTheme.colorScheme.outline.copy(alpha = 0.1f)
-                                }
-                            ).hoverable(interactionSource)
-                            .pointerInput(Unit) {
-                                detectHorizontalDragGestures { change, dragAmount ->
-                                    val newWidth =
-                                        (drawerWidth + dragAmount / density.density)
-                                            .coerceIn(minWidth.value, maxWidth.value)
-                                    drawerWidth = newWidth
-                                    change.consume()
-                                }
+                    Modifier
+                        .width(8.dp)
+                        .fillMaxHeight()
+                        .align(Alignment.CenterEnd)
+                        .background(
+                            if (isHovered) {
+                                MaterialTheme.colorScheme.primary.copy(alpha = 0.3f)
+                            } else {
+                                MaterialTheme.colorScheme.outline.copy(alpha = 0.1f)
+                            },
+                        ).hoverable(interactionSource)
+                        .pointerInput(Unit) {
+                            detectHorizontalDragGestures { change, dragAmount ->
+                                val newWidth =
+                                    (drawerWidth + dragAmount / density.density)
+                                        .coerceIn(minWidth.value, maxWidth.value)
+                                drawerWidth = newWidth
+                                change.consume()
                             }
+                        },
                 )
             }
         },
-        modifier = modifier
+        modifier = modifier,
     ) {
         Box(modifier = Modifier.fillMaxSize()) {
             content()

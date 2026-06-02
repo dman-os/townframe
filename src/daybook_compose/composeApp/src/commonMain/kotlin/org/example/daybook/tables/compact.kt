@@ -4,16 +4,13 @@ package org.example.daybook.tables
 
 import androidx.compose.animation.core.animateFloatAsState
 import androidx.compose.animation.core.tween
-import androidx.compose.foundation.BorderStroke
 import androidx.compose.foundation.Canvas
 import androidx.compose.foundation.background
-import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
 import org.example.daybook.DaybookContentType
 import androidx.compose.foundation.gestures.detectDragGestures
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
-import androidx.compose.foundation.layout.BoxWithConstraints
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.RowScope
@@ -23,9 +20,7 @@ import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.offset
-import androidx.compose.foundation.layout.safeContentPadding
 import androidx.compose.foundation.layout.size
-import androidx.compose.foundation.layout.sizeIn
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.RoundedCornerShape
@@ -37,7 +32,6 @@ import androidx.compose.material.icons.filled.Folder
 import androidx.compose.material.icons.filled.Menu
 import androidx.compose.material.icons.filled.Settings
 import androidx.compose.material3.BottomAppBar
-import androidx.compose.material3.Button
 import androidx.compose.material3.DismissibleDrawerSheet
 import androidx.compose.material3.DismissibleNavigationDrawer
 import androidx.compose.material3.DrawerValue
@@ -51,7 +45,6 @@ import androidx.compose.material3.NavigationBar
 import androidx.compose.material3.NavigationDrawerItem
 import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.Scaffold
-import androidx.compose.material3.ScrollableTabRow
 import androidx.compose.material3.rememberDrawerState
 import androidx.compose.material3.SecondaryScrollableTabRow
 import androidx.compose.material3.SnackbarHost
@@ -80,12 +73,9 @@ import androidx.compose.ui.graphics.graphicsLayer
 import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.layout.boundsInWindow
 import androidx.compose.ui.layout.onGloballyPositioned
-import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.semantics.contentDescription
-import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
-import androidx.compose.ui.unit.sp
 import androidx.lifecycle.viewModelScope
 import androidx.lifecycle.viewmodel.compose.viewModel
 import androidx.navigation.NavHostController
@@ -182,7 +172,7 @@ fun CompactLayout(
     navController: NavHostController,
     extraAction: (() -> Unit)? = null,
     contentType: DaybookContentType,
-    onShowCloneShare: () -> Unit = {}
+    onShowCloneShare: () -> Unit = {},
 ) {
     var showFeaturesMenu by remember { mutableStateOf(false) }
     val scope = rememberCoroutineScope()
@@ -326,7 +316,7 @@ fun CompactLayout(
                         val localPos = change.position
                         val windowPos = Offset(
                             surfaceRect.left + localPos.x,
-                            surfaceRect.top + localPos.y
+                            surfaceRect.top + localPos.y,
                         )
                         lastDragWindowPos = windowPos
 
@@ -467,7 +457,7 @@ fun CompactLayout(
                             menuSheetState.hide()
                             showFeaturesMenu = false
                         }
-                    }
+                    },
                 )
             }
 
@@ -535,7 +525,7 @@ fun CompactLayout(
                         menuSheetState.hide()
                     }
                 }
-            }
+            },
         )
     }
 
@@ -569,9 +559,9 @@ fun CompactLayout(
                     scope.launch {
                         leftDrawerState.close()
                     }
-                }
+                },
             )
-        }
+        },
     ) {
         Scaffold(
             modifier = modifier,
@@ -589,106 +579,106 @@ fun CompactLayout(
                         },
                         menuOpenProgress = menuOpenProgress,
                         onBarHeightChanged = { floatingBarHeight = it },
-                        bottomBarModifier = menuGestureModifier
+                        bottomBarModifier = menuGestureModifier,
                     )
                 }
             },
-            snackbarHost = { SnackbarHost(snackbarHostState) }
+            snackbarHost = { SnackbarHost(snackbarHostState) },
         ) { scaffoldPadding ->
             Box(modifier = Modifier.fillMaxSize()) {
                 Box(
                     modifier =
-                        Modifier
-                            .fillMaxSize()
-                            .padding(scaffoldPadding)
+                    Modifier
+                        .fillMaxSize()
+                        .padding(scaffoldPadding),
                 ) {
                     RevealBottomSheetScaffold(
                         sheetState = tabsSheetState,
                         sheetAnchors = SheetConfig.getAnchors(SheetContent.TABS),
                         sheetDragHandle = null,
                         sheetHeader =
-                            if (sheetContent == SheetContent.TABS) {
-                                { headerModifier: Modifier ->
-                                    // Place table title / header when in TABS sheet
-                                    val tablesState = vm.tablesState.collectAsState().value
-                                    val selectedTableId = vm.selectedTableId.collectAsState().value
-                                    val table =
-                                        if (tablesState is TablesState.Data &&
-                                            selectedTableId != null
-                                        ) {
-                                            tablesState.tables[selectedTableId]
-                                        } else {
-                                            null
-                                        }
+                        if (sheetContent == SheetContent.TABS) {
+                            { headerModifier: Modifier ->
+                                // Place table title / header when in TABS sheet
+                                val tablesState = vm.tablesState.collectAsState().value
+                                val selectedTableId = vm.selectedTableId.collectAsState().value
+                                val table =
+                                    if (tablesState is TablesState.Data &&
+                                        selectedTableId != null
+                                    ) {
+                                        tablesState.tables[selectedTableId]
+                                    } else {
+                                        null
+                                    }
 
-                                    if (table != null) {
-                                        Surface(
-                                            modifier = headerModifier.fillMaxWidth(),
-                                            color = Color.Transparent
-                                        ) {
-                                            Column {
-                                                // handle drawn in header
+                                if (table != null) {
+                                    Surface(
+                                        modifier = headerModifier.fillMaxWidth(),
+                                        color = Color.Transparent,
+                                    ) {
+                                        Column {
+                                            // handle drawn in header
+                                            Box(
+                                                modifier =
+                                                Modifier
+                                                    .fillMaxWidth()
+                                                    .padding(top = 8.dp, bottom = 4.dp),
+                                                contentAlignment = Alignment.Center,
+                                            ) {
                                                 Box(
                                                     modifier =
-                                                        Modifier
-                                                            .fillMaxWidth()
-                                                            .padding(top = 8.dp, bottom = 4.dp),
-                                                    contentAlignment = Alignment.Center
+                                                    Modifier
+                                                        .height(4.dp)
+                                                        .width(36.dp)
+                                                        .background(
+                                                            MaterialTheme.colorScheme.onSurface.copy(
+                                                                alpha = 0.12f,
+                                                            ),
+                                                            shape = RoundedCornerShape(2.dp),
+                                                        ),
+                                                )
+                                            }
+                                            Row(
+                                                modifier =
+                                                Modifier
+                                                    .fillMaxWidth()
+                                                    .padding(16.dp),
+                                                horizontalArrangement = Arrangement.SpaceBetween,
+                                                verticalAlignment = Alignment.CenterVertically,
+                                            ) {
+                                                // Toggle button for view mode
+                                                IconButton(
+                                                    onClick = {
+                                                        // TODO: Update to use new LayoutWindowConfig structure
+                                                        // configVm.setTableViewModeCompact(
+                                                        //     when (tableViewMode) {
+                                                        //         TableViewMode.HIDDEN -> TableViewMode.RAIL
+                                                        //         TableViewMode.RAIL -> TableViewMode.TAB_ROW
+                                                        //         TableViewMode.TAB_ROW -> TableViewMode.HIDDEN
+                                                        //     }
+                                                        // )
+                                                    },
                                                 ) {
-                                                    Box(
-                                                        modifier =
-                                                            Modifier
-                                                                .height(4.dp)
-                                                                .width(36.dp)
-                                                                .background(
-                                                                    MaterialTheme.colorScheme.onSurface.copy(
-                                                                        alpha = 0.12f
-                                                                    ),
-                                                                    shape = RoundedCornerShape(2.dp)
-                                                                )
+                                                    Icon(
+                                                        imageVector = Icons.Default.Menu,
+                                                        contentDescription = "Toggle table view mode",
                                                     )
                                                 }
-                                                Row(
-                                                    modifier =
-                                                        Modifier
-                                                            .fillMaxWidth()
-                                                            .padding(16.dp),
-                                                    horizontalArrangement = Arrangement.SpaceBetween,
-                                                    verticalAlignment = Alignment.CenterVertically
-                                                ) {
-                                                    // Toggle button for view mode
-                                                    IconButton(
-                                                        onClick = {
-                                                            // TODO: Update to use new LayoutWindowConfig structure
-                                                            // configVm.setTableViewModeCompact(
-                                                            //     when (tableViewMode) {
-                                                            //         TableViewMode.HIDDEN -> TableViewMode.RAIL
-                                                            //         TableViewMode.RAIL -> TableViewMode.TAB_ROW
-                                                            //         TableViewMode.TAB_ROW -> TableViewMode.HIDDEN
-                                                            //     }
-                                                            // )
-                                                        }
-                                                    ) {
-                                                        Icon(
-                                                            imageVector = Icons.Default.Menu,
-                                                            contentDescription = "Toggle table view mode"
-                                                        )
-                                                    }
 
-                                                    Text(
-                                                        text = table.title,
-                                                        style = MaterialTheme.typography.titleMedium
-                                                    )
+                                                Text(
+                                                    text = table.title,
+                                                    style = MaterialTheme.typography.titleMedium,
+                                                )
 
-                                                    Spacer(Modifier.width(48.dp)) // Balance the toggle button on the left
-                                                }
+                                                Spacer(Modifier.width(48.dp)) // Balance the toggle button on the left
                                             }
                                         }
                                     }
                                 }
-                            } else {
-                                null
-                            },
+                            }
+                        } else {
+                            null
+                        },
                         topBar = {
                             // Get chrome state manager and observe the current state (from the current screen)
                             val chromeStateManager = LocalChromeStateManager.current
@@ -711,7 +701,7 @@ fun CompactLayout(
                                         // Only screen actions in compact view (no layout actions since menu is in bottom bar)
                                         screenChromeState.actions?.invoke()
                                     },
-                                    showTopBar = if (isScreenChromeEmpty) true else screenChromeState.showTopBar
+                                    showTopBar = if (isScreenChromeEmpty) true else screenChromeState.showTopBar,
                                 )
 
                             ChromeStateTopAppBar(mergedChromeState)
@@ -757,18 +747,18 @@ fun CompactLayout(
                                     features = topLeftMenuItems,
                                     onMenuItemLayout = { _, _ -> },
                                     highlightedMenuItem = null,
-                                    tableViewMode = tableViewMode
+                                    tableViewMode = tableViewMode,
                                 )
                             }
                         },
                         sheetPeekHeight = 0.dp,
-                        modifier = Modifier.matchParentSize()
+                        modifier = Modifier.matchParentSize(),
                     ) { contentPadding ->
                         Box(
                             modifier =
-                                Modifier
-                                    .fillMaxSize()
-                                    .padding(contentPadding)
+                            Modifier
+                                .fillMaxSize()
+                                .padding(contentPadding),
                         ) {
                             Row(modifier = Modifier.fillMaxSize()) {
                                 Box(modifier = Modifier.weight(1f, fill = true)) {
@@ -776,7 +766,7 @@ fun CompactLayout(
                                         modifier = Modifier.fillMaxSize(),
                                         navController = navController,
                                         extraAction = extraAction,
-                                        contentType = contentType
+                                        contentType = contentType,
                                     )
                                 }
 
@@ -815,7 +805,7 @@ fun CompactLayout(
                         activationReadyMenuItem = null
                         menuSheetState.hide()
                     },
-                    modifier = Modifier.fillMaxSize()
+                    modifier = Modifier.fillMaxSize(),
                 )
             }
         }
@@ -827,7 +817,7 @@ fun CompactLayout(
 fun DaybookBottomNavigationBar(
     centerContent: @Composable RowScope.() -> Unit,
     showLeftDrawerHint: Boolean = false,
-    bottomBarModifier: Modifier = Modifier
+    bottomBarModifier: Modifier = Modifier,
 ) {
     /*
      * New simplified, extensible bottom bar implementation:
@@ -840,35 +830,35 @@ fun DaybookBottomNavigationBar(
     // }
 
     NavigationBar(
-        modifier = bottomBarModifier.fillMaxWidth() // .height(70.dp),
+        modifier = bottomBarModifier.fillMaxWidth(), // .height(70.dp),
     ) {
         Box(modifier = Modifier.fillMaxWidth()) {
             if (showLeftDrawerHint) {
                 Box(
                     modifier =
-                        Modifier
-                            .align(Alignment.BottomEnd)
-                            .offset(x = 16.dp)
+                    Modifier
+                        .align(Alignment.BottomEnd)
+                        .offset(x = 16.dp),
                 ) {
                     LeftDrawerEdgeHint(
                         modifier =
-                            Modifier
-                                .size(width = 90.dp, height = 90.dp)
-                                .graphicsLayer(
-                                    rotationZ = -90f,
-                                    alpha = 0.85f
-                                )
+                        Modifier
+                            .size(width = 90.dp, height = 90.dp)
+                            .graphicsLayer(
+                                rotationZ = -90f,
+                                alpha = 0.85f,
+                            ),
                     )
                 }
                 Box(
                     modifier =
-                        Modifier
-                            .align(Alignment.CenterStart)
-                            // .offset(x = -5.dp)
-                            .graphicsLayer(alpha = 0.85f)
+                    Modifier
+                        .align(Alignment.CenterStart)
+                        // .offset(x = -5.dp)
+                        .graphicsLayer(alpha = 0.85f),
                 ) {
                     LeftDrawerEdgeHint(
-                        modifier = Modifier.size(width = 90.dp, height = 90.dp)
+                        modifier = Modifier.size(width = 90.dp, height = 90.dp),
                     )
                 }
             }
@@ -891,7 +881,7 @@ private fun LeftDrawerEdgeHint(modifier: Modifier = Modifier) {
             colorScheme.surfaceContainerHighest,
             colorScheme.onSurfaceVariant,
             colorScheme.onSurface,
-            colorScheme.surfaceVariant
+            colorScheme.surfaceVariant,
         )
 
     Canvas(modifier = modifier) {
@@ -906,7 +896,7 @@ private fun LeftDrawerEdgeHint(modifier: Modifier = Modifier) {
                 drawRect(
                     color = layerColor,
                     topLeft = Offset(x, y),
-                    size = Size(rectSize, rectSize)
+                    size = Size(rectSize, rectSize),
                 )
             }
         }
@@ -918,7 +908,7 @@ fun LeftDrawer(
     onDismiss: () -> Unit,
     onAddTab: suspend () -> Unit,
     onTabSelected: (Tab) -> Unit,
-    modifier: Modifier = Modifier
+    modifier: Modifier = Modifier,
 ) {
     val tablesRepo = LocalContainer.current.tablesRepo
     val viewModel = viewModel { TablesViewModel(tablesRepo) }
@@ -933,17 +923,17 @@ fun LeftDrawer(
 
     DismissibleDrawerSheet(
         modifier = modifier.width(320.dp),
-        drawerContainerColor = MaterialTheme.colorScheme.surfaceContainer
+        drawerContainerColor = MaterialTheme.colorScheme.surfaceContainer,
     ) {
         var selectedPane by remember { mutableIntStateOf(1) }
 
         Row(
             modifier = Modifier.fillMaxWidth().padding(horizontal = 16.dp, vertical = 12.dp),
-            verticalAlignment = Alignment.CenterVertically
+            verticalAlignment = Alignment.CenterVertically,
         ) {
             Text(
                 text = "Daybook",
-                style = MaterialTheme.typography.titleMedium
+                style = MaterialTheme.typography.titleMedium,
             )
         }
         HorizontalDivider()
@@ -958,14 +948,14 @@ fun LeftDrawer(
                     Text(
                         text = table.title,
                         style = MaterialTheme.typography.bodyMedium,
-                        modifier = Modifier.padding(horizontal = 16.dp, vertical = 8.dp)
+                        modifier = Modifier.padding(horizontal = 16.dp, vertical = 8.dp),
                     )
                     HorizontalDivider()
                 }
                 TabSelectionList(
                     onTabSelected = onTabSelected,
                     modifier = Modifier.weight(1f),
-                    growUpward = false
+                    growUpward = false,
                 )
             }
         }
@@ -974,7 +964,7 @@ fun LeftDrawer(
             Tab(
                 selected = selectedPane == 1,
                 onClick = { selectedPane = 1 },
-                text = { Text("Progress") }
+                text = { Text("Progress") },
             )
             // Tab(
             //     selected = selectedPane == 2,
@@ -990,11 +980,11 @@ fun LeftDrawer(
 fun NavDrawerBottomBar(onClose: () -> Unit, modifier: Modifier = Modifier) {
     BottomAppBar(
         modifier = modifier.fillMaxWidth(), // .height(70.dp),
-        containerColor = MaterialTheme.colorScheme.surfaceContainerLow
+        containerColor = MaterialTheme.colorScheme.surfaceContainerLow,
     ) {
         OutlinedButton(
             onClick = onClose,
-            modifier = Modifier.fillMaxWidth().padding(horizontal = 8.dp)
+            modifier = Modifier.fillMaxWidth().padding(horizontal = 8.dp),
         ) {
             Text("Close")
         }
@@ -1020,10 +1010,7 @@ private object SheetConfig {
 }
 
 // Helper functions for sheet state management
-private fun RevealBottomSheetState.openToContent(
-    content: SheetContent,
-    scope: kotlinx.coroutines.CoroutineScope
-) {
+private fun RevealBottomSheetState.openToContent(content: SheetContent, scope: kotlinx.coroutines.CoroutineScope) {
     scope.launch {
         showToProgress(SheetConfig.getMaxAnchor(content))
     }
@@ -1032,17 +1019,14 @@ private fun RevealBottomSheetState.openToContent(
 private fun RevealBottomSheetState.switchContent(
     from: SheetContent,
     to: SheetContent,
-    scope: kotlinx.coroutines.CoroutineScope
+    scope: kotlinx.coroutines.CoroutineScope,
 ) {
     scope.launch {
         snapToProgress(SheetConfig.getMaxAnchor(to))
     }
 }
 
-private fun RevealBottomSheetState.ensureValidAnchor(
-    content: SheetContent,
-    scope: kotlinx.coroutines.CoroutineScope
-) {
+private fun RevealBottomSheetState.ensureValidAnchor(content: SheetContent, scope: kotlinx.coroutines.CoroutineScope) {
     scope.launch {
         val current = progress
         val maxAnchor = SheetConfig.getMaxAnchor(content)
@@ -1057,7 +1041,7 @@ private fun handleSheetToggle(
     currentContent: SheetContent,
     sheetState: RevealBottomSheetState,
     scope: kotlinx.coroutines.CoroutineScope,
-    onContentChange: (SheetContent) -> Unit
+    onContentChange: (SheetContent) -> Unit,
 ) {
     if (sheetState.isVisible && currentContent == targetContent) {
         // Same content and already open - toggle close
@@ -1097,7 +1081,7 @@ fun SheetContentHost(
     onMenuItemLayout: (key: String, rect: Rect) -> Unit,
     highlightedMenuItem: String?,
     tableViewMode: String, // TODO: Update to use new LayoutWindowConfig structure (was TableViewMode)
-    onFeatureActivate: (() -> Unit)? = null // Callback when a feature is activated from the menu
+    onFeatureActivate: (() -> Unit)? = null, // Callback when a feature is activated from the menu
 ) {
     // Action buttons: allow quick creation of tabs/tables from the sheet
     val tablesRepo = LocalContainer.current.tablesRepo
@@ -1119,9 +1103,9 @@ fun SheetContentHost(
         }
     Column(
         modifier =
-            modifier
-                .fillMaxSize()
-                .padding(top = 16.dp)
+        modifier
+            .fillMaxSize()
+            .padding(top = 16.dp),
     ) {
         // debug: SheetContentHost mounted selectedTableId=$selectedTableId tableCount=${tablesState.let { if (it is TablesState.Data) it.tables.size else 0 }} tabCount=${tablesState.let { if (it is TablesState.Data) it.tabs.size else 0 }}
         // Fixed spacer to prevent content from being hidden by sheetHeader
@@ -1144,22 +1128,22 @@ fun SheetContentHost(
                                 onTableLayout = onTableLayout,
                                 highlightedTable = highlightedTable,
                                 onAddTableLayout = onAddTableLayout,
-                                addTableReadyState = addTableReadyState
+                                addTableReadyState = addTableReadyState,
                             )
                         }
 
                         TabSelectionList(
                             onTabSelected = onTabSelected,
                             modifier =
-                                Modifier
-                                    .weight(1f)
-                                    .padding(
-                                        start = if (tableViewMode == "RAIL") 16.dp else 16.dp,
-                                        end = 8.dp
-                                    ),
+                            Modifier
+                                .weight(1f)
+                                .padding(
+                                    start = if (tableViewMode == "RAIL") 16.dp else 16.dp,
+                                    end = 8.dp,
+                                ),
                             growUpward = true,
                             onItemLayout = onTabLayout,
-                            highlightedTab = highlightedTab
+                            highlightedTab = highlightedTab,
                         )
                     }
 
@@ -1193,7 +1177,7 @@ fun SheetContentHost(
 
                         Row(
                             modifier = Modifier.fillMaxWidth(),
-                            verticalAlignment = Alignment.CenterVertically
+                            verticalAlignment = Alignment.CenterVertically,
                         ) {
                             // Add table button on the left (fixed, doesn't scroll)
                             IconButton(
@@ -1202,11 +1186,11 @@ fun SheetContentHost(
                                         vm.createNewTable()
                                     }
                                 },
-                                modifier = Modifier.padding(horizontal = 8.dp)
+                                modifier = Modifier.padding(horizontal = 8.dp),
                             ) {
                                 Icon(
                                     imageVector = Icons.Default.Add,
-                                    contentDescription = "Add table"
+                                    contentDescription = "Add table",
                                 )
                             }
 
@@ -1217,40 +1201,40 @@ fun SheetContentHost(
                                 SecondaryScrollableTabRow(
                                     selectedTabIndex = selectedTabIndexState.coerceIn(0, maxIndex),
                                     modifier = Modifier.weight(1f),
-                                    edgePadding = 0.dp
+                                    edgePadding = 0.dp,
                                 ) {
                                     // Tabs for each table - use snapshot to ensure consistency
                                     tablesListSnapshot.forEachIndexed { index, table ->
                                         val tabCount = table.tabs.size
                                         Tab(
                                             selected =
-                                                (selectedTableId == table.id) ||
-                                                    (highlightedTable == table.id),
+                                            (selectedTableId == table.id) ||
+                                                (highlightedTable == table.id),
                                             onClick = { onTableSelected(table) },
                                             modifier =
-                                                Modifier.onGloballyPositioned {
-                                                    onTableLayout(table.id, it.boundsInWindow())
-                                                },
+                                            Modifier.onGloballyPositioned {
+                                                onTableLayout(table.id, it.boundsInWindow())
+                                            },
                                             text = {
                                                 Row(
                                                     verticalAlignment = Alignment.CenterVertically,
                                                     horizontalArrangement = Arrangement.spacedBy(
-                                                        4.dp
-                                                    )
+                                                        4.dp,
+                                                    ),
                                                 ) {
                                                     Text(
                                                         table.title,
                                                         maxLines = 1,
-                                                        overflow = TextOverflow.Ellipsis
+                                                        overflow = TextOverflow.Ellipsis,
                                                     )
                                                     if (tabCount > 0) {
                                                         Text(
                                                             "($tabCount)",
-                                                            style = MaterialTheme.typography.labelSmall
+                                                            style = MaterialTheme.typography.labelSmall,
                                                         )
                                                     }
                                                 }
-                                            }
+                                            },
                                         )
                                     }
                                 }
@@ -1267,11 +1251,11 @@ fun SheetContentHost(
                 // Show list of navigation buttons from features and non-prominent chrome buttons
                 Column(
                     modifier =
-                        Modifier
-                            .fillMaxWidth()
-                            .padding(horizontal = 16.dp)
-                            .verticalScroll(rememberScrollState()),
-                    verticalArrangement = Arrangement.spacedBy(8.dp)
+                    Modifier
+                        .fillMaxWidth()
+                        .padding(horizontal = 16.dp)
+                        .verticalScroll(rememberScrollState()),
+                    verticalArrangement = Arrangement.spacedBy(8.dp),
                 ) {
                     allMenuItems.forEach { item ->
                         val isHighlighted = item.key == highlightedMenuItem
@@ -1293,11 +1277,11 @@ fun SheetContentHost(
                                 item.labelContent?.invoke() ?: Text(item.label)
                             },
                             modifier =
-                                Modifier
-                                    .fillMaxWidth()
-                                    .onGloballyPositioned {
-                                        onMenuItemLayout(item.key, it.boundsInWindow())
-                                    }
+                            Modifier
+                                .fillMaxWidth()
+                                .onGloballyPositioned {
+                                    onMenuItemLayout(item.key, it.boundsInWindow())
+                                },
                         )
                     }
                 }
@@ -1311,26 +1295,26 @@ fun FeaturesFAB(onDismiss: () -> Unit, modifier: Modifier = Modifier) {
     val animationProgress by animateFloatAsState(
         targetValue = 1f,
         animationSpec = tween(durationMillis = 300),
-        label = "features_menu_animation"
+        label = "features_menu_animation",
     )
 
     Box(
         modifier = modifier.fillMaxSize(),
-        contentAlignment = Alignment.BottomEnd
+        contentAlignment = Alignment.BottomEnd,
     ) {
         // Background overlay with click handling
         Box(
             modifier =
-                Modifier
-                    .fillMaxSize()
-                    .background(Color.Black.copy(alpha = 0.3f * animationProgress))
-                    .clickable { onDismiss() }
+            Modifier
+                .fillMaxSize()
+                .background(Color.Black.copy(alpha = 0.3f * animationProgress))
+                .clickable { onDismiss() },
         )
 
         // Floating action buttons
         Column(
             modifier = Modifier.padding(16.dp),
-            verticalArrangement = Arrangement.spacedBy(8.dp)
+            verticalArrangement = Arrangement.spacedBy(8.dp),
         ) {
             // Add Table FAB
             FloatingActionButton(
@@ -1338,7 +1322,7 @@ fun FeaturesFAB(onDismiss: () -> Unit, modifier: Modifier = Modifier) {
                     // TODO: Handle add table
                     onDismiss()
                 },
-                modifier = Modifier.size(56.dp)
+                modifier = Modifier.size(56.dp),
             ) {
                 Icon(Icons.Default.Folder, contentDescription = "Add table")
             }
@@ -1349,7 +1333,7 @@ fun FeaturesFAB(onDismiss: () -> Unit, modifier: Modifier = Modifier) {
                     // TODO: Handle add tab
                     onDismiss()
                 },
-                modifier = Modifier.size(56.dp)
+                modifier = Modifier.size(56.dp),
             ) {
                 Icon(Icons.Default.Description, contentDescription = "Add tab")
             }
@@ -1360,7 +1344,7 @@ fun FeaturesFAB(onDismiss: () -> Unit, modifier: Modifier = Modifier) {
                     // TODO: Handle settings
                     onDismiss()
                 },
-                modifier = Modifier.size(56.dp)
+                modifier = Modifier.size(56.dp),
             ) {
                 Icon(Icons.Default.Settings, contentDescription = "Settings")
             }

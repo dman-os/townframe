@@ -20,7 +20,7 @@ sealed interface ProgressState {
     data class Data(
         val tasks: List<ProgressTask>,
         val selectedTaskId: String? = null,
-        val selectedTaskUpdates: List<ProgressUpdateEntry> = emptyList()
+        val selectedTaskUpdates: List<ProgressUpdateEntry> = emptyList(),
     ) : ProgressState
 
     data class Error(val error: FfiException) : ProgressState
@@ -28,13 +28,12 @@ sealed interface ProgressState {
 
 private data class ProgressRefreshIntent(
     val listChanged: Boolean = false,
-    val touchedTaskIds: Set<String> = emptySet()
+    val touchedTaskIds: Set<String> = emptySet(),
 ) {
-    fun merge(other: ProgressRefreshIntent): ProgressRefreshIntent =
-        ProgressRefreshIntent(
-            listChanged = listChanged || other.listChanged,
-            touchedTaskIds = touchedTaskIds + other.touchedTaskIds
-        )
+    fun merge(other: ProgressRefreshIntent): ProgressRefreshIntent = ProgressRefreshIntent(
+        listChanged = listChanged || other.listChanged,
+        touchedTaskIds = touchedTaskIds + other.touchedTaskIds,
+    )
 
     companion object {
         val ListOnly = ProgressRefreshIntent(listChanged = true)
@@ -52,7 +51,7 @@ class ProgressViewModel(private val progressRepo: ProgressRepoFfi) : ViewModel()
             scope = viewModelScope,
             debounceMs = 80,
             merge = { left: ProgressRefreshIntent, right: ProgressRefreshIntent -> left.merge(right) },
-            onIntent = { intent: ProgressRefreshIntent -> applyRefreshIntent(intent) }
+            onIntent = { intent: ProgressRefreshIntent -> applyRefreshIntent(intent) },
         )
 
     private val listener =
@@ -60,26 +59,27 @@ class ProgressViewModel(private val progressRepo: ProgressRepoFfi) : ViewModel()
             override fun onProgressEvent(event: ProgressEvent) {
                 when (event) {
                     is ProgressEvent.ListChanged -> refreshRunner.submit(ProgressRefreshIntent.ListOnly)
+
                     is ProgressEvent.TaskRemoved ->
                         refreshRunner.submit(
                             ProgressRefreshIntent(
                                 listChanged = true,
-                                touchedTaskIds = setOf(event.id)
-                            )
+                                touchedTaskIds = setOf(event.id),
+                            ),
                         )
 
                     is ProgressEvent.TaskUpserted ->
                         refreshRunner.submit(
                             ProgressRefreshIntent(
-                                touchedTaskIds = setOf(event.id)
-                            )
+                                touchedTaskIds = setOf(event.id),
+                            ),
                         )
 
                     is ProgressEvent.UpdateAdded ->
                         refreshRunner.submit(
                             ProgressRefreshIntent(
-                                touchedTaskIds = setOf(event.id)
-                            )
+                                touchedTaskIds = setOf(event.id),
+                            ),
                         )
                 }
             }
@@ -110,7 +110,7 @@ class ProgressViewModel(private val progressRepo: ProgressRepoFfi) : ViewModel()
                 ProgressState.Data(
                     tasks = tasks,
                     selectedTaskId = selectedTaskId,
-                    selectedTaskUpdates = updates
+                    selectedTaskUpdates = updates,
                 )
         } catch (error: FfiException) {
             _state.value = ProgressState.Error(error)
@@ -132,7 +132,7 @@ class ProgressViewModel(private val progressRepo: ProgressRepoFfi) : ViewModel()
             _state.value =
                 current.copy(
                     selectedTaskId = taskId,
-                    selectedTaskUpdates = if (taskId == null) emptyList() else current.selectedTaskUpdates
+                    selectedTaskUpdates = if (taskId == null) emptyList() else current.selectedTaskUpdates,
                 )
 
             if (taskId == null) {

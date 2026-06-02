@@ -2,7 +2,6 @@
 
 package org.example.daybook.ui.editor
 
-import kotlin.uuid.Uuid
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Job
@@ -32,12 +31,9 @@ import org.example.daybook.uniffi.types.FacetKey
 import org.example.daybook.uniffi.types.FacetTag
 import org.example.daybook.uniffi.types.WellKnownFacet
 import org.example.daybook.uniffi.types.WellKnownFacetTag
+import kotlin.uuid.Uuid
 
-data class NoteFacetEditorState(
-    val draft: String,
-    val editable: Boolean,
-    val notice: String?,
-)
+data class NoteFacetEditorState(val draft: String, val editable: Boolean, val notice: String?)
 
 enum class FacetEditorKind {
     ImageMetadata,
@@ -52,10 +48,7 @@ data class FacetViewDescriptor(
     val isPrimary: Boolean = false,
 )
 
-data class ScrollToFacetRequest(
-    val facetKey: FacetKey,
-    val seq: Long,
-)
+data class ScrollToFacetRequest(val facetKey: FacetKey, val seq: Long)
 
 data class EditorSessionState(
     val doc: Doc?,
@@ -93,25 +86,21 @@ class EditorSessionController(
                 noteEditors = mapOf(noteFacetKey() to NoteFacetEditorState("", true, null)),
                 facetRows = emptyList(),
                 contentFacetViews = listOf(
-                    FacetViewDescriptor(noteFacetKey(), FacetEditorKind.Note, "")
+                    FacetViewDescriptor(noteFacetKey(), FacetEditorKind.Note, ""),
                 ),
                 docWarnings = emptyList(),
                 scrollToFacetRequest = null,
                 isDirty = false,
                 isSaving = false,
                 saveError = null,
-            )
+            ),
         )
     val state: StateFlow<EditorSessionState> = _state.asStateFlow()
 
     private var saveDebounceJob: Job? = null
     private var nextScrollRequestSeq: Long = 1
 
-    fun bindDoc(
-        doc: Doc?,
-        bundle: DocBundle? = null,
-        allowOverwriteDirtySameDoc: Boolean = false,
-    ) {
+    fun bindDoc(doc: Doc?, bundle: DocBundle? = null, allowOverwriteDirtySameDoc: Boolean = false) {
         val currentState = _state.value
         val incomingDocId = doc?.id
         if (
@@ -124,7 +113,11 @@ class EditorSessionController(
         }
         saveDebounceJob?.cancel()
         persistedDocSnapshot = doc
-        facetHeadsByKeyString = bundle?.facetHeadsByKey?.mapKeys { (facetKey, _) -> facetKeyRefPathString(facetKey) } ?: emptyMap()
+        facetHeadsByKeyString = bundle?.facetHeadsByKey?.mapKeys { (facetKey, _) ->
+            facetKeyRefPathString(
+                facetKey,
+            )
+        } ?: emptyMap()
         mainBranchHeads = bundle?.branchHeads.orEmpty()
         val nextState = buildBoundState(doc)
         _state.value = nextState
@@ -252,7 +245,7 @@ class EditorSessionController(
                             branchPath = "main",
                             facets = nextFacets,
                             userPath = null,
-                        )
+                        ),
                     )
                 onDocCreated?.invoke(addedId)
                 val bundle = drawerRepo.getBundle(addedId, "main")
@@ -432,18 +425,17 @@ class EditorSessionController(
         }
     }
 
-    private fun hasSupportedFacetView(key: FacetKey): Boolean =
-        when (facetKindForKey(key)) {
-            FacetEditorKind.Note, FacetEditorKind.ImageMetadata -> true
-            FacetEditorKind.GenericJson -> false
-        }
+    private fun hasSupportedFacetView(key: FacetKey): Boolean = when (facetKindForKey(key)) {
+        FacetEditorKind.Note, FacetEditorKind.ImageMetadata -> true
+        FacetEditorKind.GenericJson -> false
+    }
 
     private fun decodeBodyOrderUrls(doc: Doc): List<String>? {
         val raw = doc.facets[bodyFacetKey()] ?: return null
         val decoded = decodeWellKnownFacet<WellKnownFacet.Body>(raw)
         if (decoded.isFailure) {
             println(
-                "Failed to decode Body facet in editor ordering: docId=${doc.id} facetKey=${bodyFacetKey()} error=${decoded.exceptionOrNull()}"
+                "Failed to decode Body facet in editor ordering: docId=${doc.id} facetKey=${bodyFacetKey()} error=${decoded.exceptionOrNull()}",
             )
             return null
         }
@@ -512,7 +504,9 @@ class EditorSessionController(
                     if (blobDecoded.isFailure) {
                         val message = blobDecoded.exceptionOrNull()?.message ?: "unknown error"
                         warnings +=
-                            "Failed to parse referenced blob facet '${facetKeyString(blobKey)}' for image '${facetKeyString(facetKey)}'. $message"
+                            "Failed to parse referenced blob facet '${facetKeyString(
+                                blobKey,
+                            )}' for image '${facetKeyString(facetKey)}'. $message"
                     }
                 }
 
@@ -522,10 +516,7 @@ class EditorSessionController(
         return warnings
     }
 
-    private fun primaryFacetKeyForDisplay(
-        displayableKeys: List<FacetKey>,
-        bodyOrderUrls: List<String>,
-    ): FacetKey? {
+    private fun primaryFacetKeyForDisplay(displayableKeys: List<FacetKey>, bodyOrderUrls: List<String>): FacetKey? {
         val availableByRef =
             displayableKeys.associateBy { key -> stripFacetRefFragment(buildSelfFacetRefUrl(key)) }
         for (url in bodyOrderUrls) {
@@ -535,12 +526,11 @@ class EditorSessionController(
         return displayableKeys.firstOrNull()
     }
 
-    private fun defaultBodyOrderUrls(doc: Doc, currentFacets: Map<FacetKey, String> = doc.facets): List<String> {
-        return currentFacets.keys
+    private fun defaultBodyOrderUrls(doc: Doc, currentFacets: Map<FacetKey, String> = doc.facets): List<String> =
+        currentFacets.keys
             .filter { key -> key != titleFacetKey() && key != bodyFacetKey() }
             .sortedBy(::facetKeyString)
             .map(::bodyFacetRefUrlForWrite)
-    }
 
     private fun writeBodyOrder(facets: MutableMap<FacetKey, String>, orderUrls: List<String>) {
         putWellKnownFacet(facets, bodyFacetKey(), buildBodyFacet(orderUrls))
@@ -616,21 +606,16 @@ class EditorSessionController(
 
 private fun bs58UuidId(): String = encodeBase58(Uuid.random().toByteArray())
 
-internal fun makePrimaryOrderUrls(selectedRef: String, currentUrls: List<String>): List<String> =
-    buildList {
-        val seen = mutableSetOf<String>()
-        val selectedCanonical = stripFacetRefFragment(selectedRef)
-        if (seen.add(selectedCanonical)) add(selectedRef)
-        for (url in currentUrls) {
-            if (seen.add(stripFacetRefFragment(url))) add(url)
-        }
+internal fun makePrimaryOrderUrls(selectedRef: String, currentUrls: List<String>): List<String> = buildList {
+    val seen = mutableSetOf<String>()
+    val selectedCanonical = stripFacetRefFragment(selectedRef)
+    if (seen.add(selectedCanonical)) add(selectedRef)
+    for (url in currentUrls) {
+        if (seen.add(stripFacetRefFragment(url))) add(url)
     }
+}
 
-internal fun insertRefAfterOrderUrls(
-    baseUrls: List<String>,
-    anchorRef: String,
-    newRef: String,
-): List<String> {
+internal fun insertRefAfterOrderUrls(baseUrls: List<String>, anchorRef: String, newRef: String): List<String> {
     val out = mutableListOf<String>()
     var inserted = false
     val seen = mutableSetOf<String>()
@@ -654,10 +639,7 @@ internal fun insertRefAfterOrderUrls(
     return out
 }
 
-internal fun orderFacetKeysForDisplay(
-    displayableKeys: List<FacetKey>,
-    bodyOrderUrls: List<String>,
-): List<FacetKey> {
+internal fun orderFacetKeysForDisplay(displayableKeys: List<FacetKey>, bodyOrderUrls: List<String>): List<FacetKey> {
     val availableByRef = displayableKeys.associateBy { key -> stripFacetRefFragment(buildSelfFacetRefUrl(key)) }
     val orderedKeys = mutableListOf<FacetKey>()
     val seen = mutableSetOf<FacetKey>()

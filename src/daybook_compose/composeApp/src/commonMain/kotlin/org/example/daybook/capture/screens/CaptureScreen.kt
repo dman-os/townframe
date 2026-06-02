@@ -32,16 +32,16 @@ import org.example.daybook.capture.CaptureNavActions
 import org.example.daybook.capture.LocalCameraCaptureContext
 import org.example.daybook.capture.ui.DaybookCameraViewport
 import org.example.daybook.ui.DocEditor
-import org.example.daybook.ui.buildBodyFacet
-import org.example.daybook.ui.buildSelfFacetRefUrl
 import org.example.daybook.ui.buildBlobFacetFromDigest
+import org.example.daybook.ui.buildBodyFacet
 import org.example.daybook.ui.buildImageMetadataFacet
+import org.example.daybook.ui.buildSelfFacetRefUrl
+import org.example.daybook.ui.editor.EditorSessionController
+import org.example.daybook.ui.editor.blobFacetKey
+import org.example.daybook.ui.editor.bodyFacetKey
+import org.example.daybook.ui.editor.imageMetadataFacetKey
 import org.example.daybook.ui.putWellKnownFacet
 import org.example.daybook.ui.withFacetRefCommitHeads
-import org.example.daybook.ui.editor.EditorSessionController
-import org.example.daybook.ui.editor.bodyFacetKey
-import org.example.daybook.ui.editor.blobFacetKey
-import org.example.daybook.ui.editor.imageMetadataFacetKey
 import org.example.daybook.uniffi.DrawerEventListener
 import org.example.daybook.uniffi.DrawerRepoFfi
 import org.example.daybook.uniffi.FfiException
@@ -55,7 +55,7 @@ class CaptureScreenViewModel(
     val tablesRepo: TablesRepoFfi,
     val blobsRepo: org.example.daybook.uniffi.BlobsRepoFfi,
     val tablesVm: TablesViewModel,
-    val initialDocId: String? = null
+    val initialDocId: String? = null,
 ) : ViewModel() {
     private val _captureMode = MutableStateFlow(CaptureMode.TEXT)
     val captureMode = _captureMode.asStateFlow()
@@ -76,7 +76,7 @@ class CaptureScreenViewModel(
             onDocCreated = { createdDocId ->
                 _currentDocId.value = createdDocId
                 loadDoc(createdDocId)
-            }
+            },
         )
 
     fun setCaptureMode(mode: CaptureMode) {
@@ -129,7 +129,7 @@ class CaptureScreenViewModel(
                         null
                     }
                 println(
-                    "[CAPTURE] persistCaptureMode failed mode=$mode selectedTableId=$selectedTableId windowId=$windowId err=${e.message}"
+                    "[CAPTURE] persistCaptureMode failed mode=$mode selectedTableId=$selectedTableId windowId=$windowId err=${e.message}",
                 )
                 _message.tryEmit("Failed to persist capture mode")
             }
@@ -155,14 +155,14 @@ class CaptureScreenViewModel(
                     facets = facets,
                     key = bodyFacetKey(),
                     facet =
-                        buildBodyFacet(
-                            listOf(
-                                withFacetRefCommitHeads(
-                                    buildSelfFacetRefUrl(imageMetadataFacetKey()),
-                                    emptyList(),
-                                )
-                            )
+                    buildBodyFacet(
+                        listOf(
+                            withFacetRefCommitHeads(
+                                buildSelfFacetRefUrl(imageMetadataFacetKey()),
+                                emptyList(),
+                            ),
                         ),
+                    ),
                 )
 
                 // Create AddDocArgs
@@ -170,7 +170,7 @@ class CaptureScreenViewModel(
                     AddDocArgs(
                         branchPath = "main",
                         facets = facets,
-                        userPath = null
+                        userPath = null,
                     )
 
                 drawerRepo.add(args)
@@ -269,7 +269,7 @@ fun CaptureScreen(modifier: Modifier = Modifier, initialDocId: String? = null) {
                 tablesRepo = container.tablesRepo,
                 blobsRepo = container.blobsRepo,
                 tablesVm = tablesVm,
-                initialDocId = initialDocId
+                initialDocId = initialDocId,
             )
         }
 
@@ -309,17 +309,17 @@ fun CaptureScreen(modifier: Modifier = Modifier, initialDocId: String? = null) {
                 val ctx = captureContext
                 ChromeState(
                     mainFeatureActionButton =
-                        MainFeatureActionButton.Button(
-                            icon = {
-                                Icon(
-                                    imageVector = Icons.Default.CameraAlt,
-                                    contentDescription = "Save Photo"
-                                )
-                            },
-                            label = { Text(if (isCapturing) "Capturing..." else "Save Photo") },
-                            enabled = canCapture && !isCapturing,
-                            onClick = { ctx.requestCapture() }
-                        )
+                    MainFeatureActionButton.Button(
+                        icon = {
+                            Icon(
+                                imageVector = Icons.Default.CameraAlt,
+                                contentDescription = "Save Photo",
+                            )
+                        },
+                        label = { Text(if (isCapturing) "Capturing..." else "Save Photo") },
+                        enabled = canCapture && !isCapturing,
+                        onClick = { ctx.requestCapture() },
+                    ),
                 )
             } else {
                 ChromeState.Empty
@@ -334,14 +334,14 @@ fun CaptureScreen(modifier: Modifier = Modifier, initialDocId: String? = null) {
                         cameraPreviewFfi = container.cameraPreviewFfi,
                         onImageSaved = { byteArray ->
                             vm.saveImage(byteArray)
-                        }
+                        },
                     )
                 }
 
                 CaptureMode.TEXT -> {
                     DocEditor(
                         controller = vm.editorController,
-                        modifier = Modifier.padding(16.dp)
+                        modifier = Modifier.padding(16.dp),
                     )
                 }
 
@@ -351,11 +351,11 @@ fun CaptureScreen(modifier: Modifier = Modifier, initialDocId: String? = null) {
                             Icon(
                                 imageVector = Icons.Default.Mic,
                                 contentDescription = "Microphone",
-                                modifier = Modifier.size(64.dp)
+                                modifier = Modifier.size(64.dp),
                             )
                             Text(
                                 "Mic mode placeholder",
-                                style = MaterialTheme.typography.headlineMedium
+                                style = MaterialTheme.typography.headlineMedium,
                             )
                         }
                     }
@@ -365,31 +365,31 @@ fun CaptureScreen(modifier: Modifier = Modifier, initialDocId: String? = null) {
             // Floating Action Buttons for mode switching
             Column(
                 modifier =
-                    Modifier
-                        .align(Alignment.BottomEnd)
-                        .padding(16.dp),
-                verticalArrangement = Arrangement.spacedBy(16.dp)
+                Modifier
+                    .align(Alignment.BottomEnd)
+                    .padding(16.dp),
+                verticalArrangement = Arrangement.spacedBy(16.dp),
             ) {
                 ModeFab(
                     icon = Icons.Default.TextFields,
                     selected = captureMode == CaptureMode.TEXT,
-                    onClick = { vm.setCaptureMode(CaptureMode.TEXT) }
+                    onClick = { vm.setCaptureMode(CaptureMode.TEXT) },
                 )
                 ModeFab(
                     icon = Icons.Default.CameraAlt,
                     selected = captureMode == CaptureMode.CAMERA,
-                    onClick = { vm.setCaptureMode(CaptureMode.CAMERA) }
+                    onClick = { vm.setCaptureMode(CaptureMode.CAMERA) },
                 )
                 ModeFab(
                     icon = Icons.Default.Mic,
                     selected = captureMode == CaptureMode.MIC,
-                    onClick = { vm.setCaptureMode(CaptureMode.MIC) }
+                    onClick = { vm.setCaptureMode(CaptureMode.MIC) },
                 )
             }
 
             SnackbarHost(
                 hostState = snackbarHostState,
-                modifier = Modifier.align(Alignment.BottomCenter).padding(bottom = 80.dp)
+                modifier = Modifier.align(Alignment.BottomCenter).padding(bottom = 80.dp),
             )
         }
     }
@@ -400,7 +400,7 @@ fun ModeFab(icon: ImageVector, selected: Boolean, onClick: () -> Unit) {
     FloatingActionButton(
         onClick = onClick,
         containerColor = if (selected) MaterialTheme.colorScheme.primaryContainer else MaterialTheme.colorScheme.secondaryContainer,
-        contentColor = if (selected) MaterialTheme.colorScheme.onPrimaryContainer else MaterialTheme.colorScheme.onSecondaryContainer
+        contentColor = if (selected) MaterialTheme.colorScheme.onPrimaryContainer else MaterialTheme.colorScheme.onSecondaryContainer,
     ) {
         Icon(icon, contentDescription = null)
     }
