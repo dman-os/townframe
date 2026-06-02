@@ -374,7 +374,11 @@ impl DispatchRepo {
         let _transition_guard = self.transition_mutex.lock().await;
         let ActiveDispatchArgs::FacetRoutine(_args) = &dispatch.args;
 
-        let mut tx = self.repo_sql.write_pool.begin_with("BEGIN IMMEDIATE").await?;
+        let mut tx = self
+            .repo_sql
+            .write_pool
+            .begin_with("BEGIN IMMEDIATE")
+            .await?;
         persist_dispatch_tx(&mut tx, &id, &dispatch).await?;
         clear_cancelled_mark_tx(&mut tx, &id).await?;
         tx.commit().await?;
@@ -446,7 +450,11 @@ impl DispatchRepo {
         next.status = status;
         let next = Arc::new(next);
 
-        let mut tx = self.repo_sql.write_pool.begin_with("BEGIN IMMEDIATE").await?;
+        let mut tx = self
+            .repo_sql
+            .write_pool
+            .begin_with("BEGIN IMMEDIATE")
+            .await?;
         persist_dispatch_tx(&mut tx, &id, &next).await?;
         clear_cancelled_mark_tx(&mut tx, &id).await?;
         tx.commit().await?;
@@ -518,7 +526,11 @@ impl DispatchRepo {
         }
         drop(state);
 
-        let mut tx = self.repo_sql.write_pool.begin_with("BEGIN IMMEDIATE").await?;
+        let mut tx = self
+            .repo_sql
+            .write_pool
+            .begin_with("BEGIN IMMEDIATE")
+            .await?;
         let inserted = sqlx::query(
             "INSERT OR IGNORE INTO dispatch_cancelled_marks(dispatch_id, created_at)\n             VALUES (?1, unixepoch())",
         )
@@ -589,7 +601,11 @@ impl DispatchRepo {
         let ready = updated.waiting_on_dispatch_ids.is_empty();
         let updated = Arc::new(updated);
 
-        let mut tx = self.repo_sql.write_pool.begin_with("BEGIN IMMEDIATE").await?;
+        let mut tx = self
+            .repo_sql
+            .write_pool
+            .begin_with("BEGIN IMMEDIATE")
+            .await?;
         persist_dispatch_tx(&mut tx, dispatch_id, &updated).await?;
         tx.commit().await?;
 
@@ -643,7 +659,11 @@ impl DispatchRepo {
         updated.deets = deets;
         let updated = Arc::new(updated);
 
-        let mut tx = self.repo_sql.write_pool.begin_with("BEGIN IMMEDIATE").await?;
+        let mut tx = self
+            .repo_sql
+            .write_pool
+            .begin_with("BEGIN IMMEDIATE")
+            .await?;
         persist_dispatch_tx(&mut tx, dispatch_id, &updated).await?;
         tx.commit().await?;
 
@@ -708,7 +728,11 @@ impl DispatchRepo {
         updated.deets = deets;
         let updated = Arc::new(updated);
 
-        let mut tx = self.repo_sql.write_pool.begin_with("BEGIN IMMEDIATE").await?;
+        let mut tx = self
+            .repo_sql
+            .write_pool
+            .begin_with("BEGIN IMMEDIATE")
+            .await?;
         persist_dispatch_tx(&mut tx, dispatch_id, &updated).await?;
         tx.commit().await?;
 
@@ -772,7 +796,11 @@ impl DispatchRepo {
         updated.status = DispatchStatus::Failed;
         let updated = Arc::new(updated);
 
-        let mut tx = self.repo_sql.write_pool.begin_with("BEGIN IMMEDIATE").await?;
+        let mut tx = self
+            .repo_sql
+            .write_pool
+            .begin_with("BEGIN IMMEDIATE")
+            .await?;
         persist_dispatch_tx(&mut tx, dispatch_id, &updated).await?;
         clear_cancelled_mark_tx(&mut tx, dispatch_id).await?;
         tx.commit().await?;

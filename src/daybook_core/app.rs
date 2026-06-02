@@ -34,8 +34,8 @@ impl SqlCtx {
             &config.database_url,
             SQLITE_BUSY_TIMEOUT,
         )?;
-        let db_pool = sqlx_utils_rs::open_sqlite_pool(&config.database_url, connect_options, 1)
-            .await?;
+        let db_pool =
+            sqlx_utils_rs::open_sqlite_pool(&config.database_url, connect_options, 1).await?;
 
         sqlx::query(
             r#"

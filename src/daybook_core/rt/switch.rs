@@ -61,7 +61,11 @@ impl SwitchStore {
         branch_doc_id: Option<&str>,
         state: Option<&SwitchDocState>,
     ) -> Res<()> {
-        let mut tx = self.repo_sql.write_pool.begin_with("BEGIN IMMEDIATE").await?;
+        let mut tx = self
+            .repo_sql
+            .write_pool
+            .begin_with("BEGIN IMMEDIATE")
+            .await?;
         sqlx::query(
             r#"
             INSERT INTO switch_partition_cursor(partition_id, cursor, updated_at)

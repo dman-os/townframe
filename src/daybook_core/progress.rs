@@ -969,7 +969,11 @@ impl ProgressWorker {
             return Ok(());
         }
 
-        let mut tx = self.repo_sql.write_pool.begin_with("BEGIN IMMEDIATE").await?;
+        let mut tx = self
+            .repo_sql
+            .write_pool
+            .begin_with("BEGIN IMMEDIATE")
+            .await?;
 
         let deleted_tasks: Vec<String> = self.persist.deleted_tasks.drain().collect();
         for task_id in deleted_tasks {

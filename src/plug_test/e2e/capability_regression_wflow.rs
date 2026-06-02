@@ -11,8 +11,8 @@ async fn open_plug_test_local_state(
         .get_sqlite_file_path("@daybook/test/capability-report")
         .await?;
     let db_url = sqlx_utils_rs::sqlite_file_url(&sqlite_file_path);
-    let connect_options = sqlx_utils_rs::sqlite_file_connect_options(&db_url)?
-        .disable_statement_logging();
+    let connect_options =
+        sqlx_utils_rs::sqlite_file_connect_options(&db_url)?.disable_statement_logging();
     Ok(SqlitePool::connect_with(connect_options).await?)
 }
 
