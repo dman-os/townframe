@@ -10,7 +10,6 @@ use big_sync::stress_support::{self, StressFixture};
 use big_sync::{HostPartStore, SyncBackend};
 use big_sync_core::{Byte32Id, PartId, SyncCompletionDeets};
 use rand::rngs::StdRng;
-use sqlx::ConnectOptions;
 use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::fmt::Write as _;
 use std::path::PathBuf;
@@ -24,10 +23,10 @@ pub async fn boot_part_store(
 ) -> Res<(Arc<big_sync::Ctx>, big_sync::StopToken)> {
     let (read_pool, write_pool, scope_id) = match sqlite_path {
         Some(sqlite_path) => {
-            let connect_options = sqlx_utils_rs::sqlite_file_connect_options(sqlite_path)?
+            let connect_options = sqlx_utils_rs::sqlite_file_connect_options(&sqlite_path)?
                 .journal_mode(sqlx::sqlite::SqliteJournalMode::Wal);
             let (read_pool, write_pool) =
-                sqlx_utils_rs::open_sqlite_rw_pools(sqlite_path, connect_options, 4, 1).await?;
+                sqlx_utils_rs::open_sqlite_rw_pools(&sqlite_path, connect_options, 4, 1).await?;
             (
                 read_pool,
                 write_pool,
