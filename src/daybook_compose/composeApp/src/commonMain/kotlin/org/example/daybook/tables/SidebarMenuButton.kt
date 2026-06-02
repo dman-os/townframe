@@ -7,6 +7,7 @@ import androidx.compose.material3.DropdownMenu
 import androidx.compose.material3.DropdownMenuItem
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
+import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.getValue
@@ -15,15 +16,11 @@ import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Modifier
-import androidx.compose.material3.MaterialTheme
-import org.example.daybook.LocalAppExitRequest
 import kotlinx.coroutines.launch
+import org.example.daybook.LocalAppExitRequest
 
 @Composable
-fun SidebarMenuButton(
-    menuItems: List<FeatureItem> = emptyList(),
-    modifier: Modifier = Modifier
-) {
+fun SidebarMenuButton(menuItems: List<FeatureItem> = emptyList(), modifier: Modifier = Modifier) {
     val exitRequest = LocalAppExitRequest.current
     val scope = rememberCoroutineScope()
     var showMenu by remember { mutableStateOf(false) }
@@ -34,7 +31,7 @@ fun SidebarMenuButton(
         }
         DropdownMenu(
             expanded = showMenu,
-            onDismissRequest = { showMenu = false }
+            onDismissRequest = { showMenu = false },
         ) {
             menuItems.forEach { item ->
                 DropdownMenuItem(
@@ -44,7 +41,7 @@ fun SidebarMenuButton(
                     onClick = {
                         showMenu = false
                         scope.launch { item.onActivate() }
-                    }
+                    },
                 )
             }
             DropdownMenuItem(
@@ -54,7 +51,7 @@ fun SidebarMenuButton(
                 onClick = {
                     showMenu = false
                     exitRequest?.invoke()
-                }
+                },
             )
         }
     }

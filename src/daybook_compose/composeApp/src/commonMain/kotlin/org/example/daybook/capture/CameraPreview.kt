@@ -13,5 +13,5 @@ expect fun DaybookCameraPreview(
     selectedDeviceId: Int? = null,
     onAvailableDevicesChanged: ((List<CameraDeviceInfo>, Int?) -> Unit)? = null,
     onImageSaved: ((ByteArray) -> Unit)? = null,
-    onFrameAvailable: ((CameraFrameSample) -> Unit)? = null
+    onFrameAvailable: ((CameraFrameSample) -> Unit)? = null,
 )

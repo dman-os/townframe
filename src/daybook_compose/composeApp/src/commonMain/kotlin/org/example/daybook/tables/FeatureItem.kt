@@ -23,19 +23,18 @@ data class FeatureItem(
     val labelContent: (@Composable () -> Unit)? = null,
     val enabled: Boolean = true,
     val onActivate: suspend () -> Unit,
-    val onReselect: (suspend () -> Unit)? = null
+    val onReselect: (suspend () -> Unit)? = null,
 )
 
-fun AdditionalFeatureButton.toFeatureItem(): FeatureItem =
-    FeatureItem(
-        key = key,
-        icon = { icon() },
-        label = "",
-        labelContent = { label() },
-        enabled = enabled,
-        onActivate = { onClick() },
-        onReselect = { onClick() }
-    )
+fun AdditionalFeatureButton.toFeatureItem(): FeatureItem = FeatureItem(
+    key = key,
+    icon = { icon() },
+    label = "",
+    labelContent = { label() },
+    enabled = enabled,
+    onActivate = { onClick() },
+    onReselect = { onClick() },
+)
 
 fun List<FeatureItem>.withAdditionalFeatureButtons(buttons: List<AdditionalFeatureButton>): List<FeatureItem> =
     this + buttons.map { it.toFeatureItem() }

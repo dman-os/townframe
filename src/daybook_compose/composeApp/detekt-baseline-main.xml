@@ -1,0 +1,521 @@
+<?xml version="1.0" ?>
+<SmellBaseline>
+  <ManuallySuppressedIssues/>
+  <CurrentIssues>
+    <ID>AbstractClassCanBeInterface:Region.kt:RegionItem$RegionItem</ID>
+    <ID>AbstractClassCanBeInterface:expanded.kt:PaneSizeRegime$PaneSizeRegime</ID>
+    <ID>ArgumentListWrapping:Res.kt:Res$("composeResources/daybook.composeapp.generated.resources/" + path)</ID>
+    <ID>ArgumentListWrapping:daybook_ffi.kt:AppFfiCtx$(future, continuation)</ID>
+    <ID>ArgumentListWrapping:daybook_ffi.kt:DrawerRepoFfi$(future, continuation)</ID>
+    <ID>ArgumentListWrapping:daybook_ffi.kt:SqliteLocalStateRepoFfi.Companion$(FfiConverterTypeFfiCtx.lower(`fcx`))</ID>
+    <ID>ArgumentListWrapping:daybook_ffi.kt:SqliteLocalStateRepoFfi.Companion$(`fcx`)</ID>
+    <ID>BackingPropertyNaming:DrawerViewModel.kt:DrawerViewModel$// Internal access for optimistic updates internal val _selectedDocMutable = _selectedDoc</ID>
+    <ID>BackingPropertyNaming:RevealBottomSheetScaffold.kt:RevealBottomSheetState$// backing progress used for immediate, non-suspending updates during pointer drag private val _progressBacking = mutableFloatStateOf(initialProgress)</ID>
+    <ID>BinaryExpressionWrapping:Res.kt:Res$"composeResources/daybook.composeapp.generated.resources/" + path</ID>
+    <ID>BinaryExpressionWrapping:welcome.kt:cloneUiState as? CloneUiState.PickingLocation ?: return@CloneLocationScreen</ID>
+    <ID>ClassSignature:daybook_core.kt:BranchDeleteTombstone</ID>
+    <ID>ClassSignature:daybook_core.kt:ProgressUpdate</ID>
+    <ID>ClassSignature:daybook_core.kt:ProgressUpdateEntry</ID>
+    <ID>ClassSignature:daybook_core.kt:Tab</ID>
+    <ID>ClassSignature:daybook_core.kt:UpdateDocArgsV2</ID>
+    <ID>ClassSignature:daybook_core.kt:WindowLayoutPaneVariant$Region : WindowLayoutPaneVariant</ID>
+    <ID>ClassSignature:daybook_core.kt:WindowLayoutPaneVariant$Routes : WindowLayoutPaneVariant</ID>
+    <ID>ClassSignature:daybook_types.kt:AddDocArgs</ID>
+    <ID>ComplexCondition:EditorSessionController.kt:EditorSessionController$!allowOverwriteDirtySameDoc &amp;&amp; currentState.isDirty &amp;&amp; currentState.docId != null &amp;&amp; currentState.docId == incomingDocId</ID>
+    <ID>CyclomaticComplexMethod:App.kt:@Composable @Preview fun App</ID>
+    <ID>CyclomaticComplexMethod:CameraPreview.jvm.kt:@Composable actual fun DaybookCameraPreview</ID>
+    <ID>CyclomaticComplexMethod:CenterNavBarContent.kt:@Composable fun RowScope.CenterNavBarContent</ID>
+    <ID>CyclomaticComplexMethod:DockableDivider.kt:@Composable fun DockableDivider</ID>
+    <ID>CyclomaticComplexMethod:DrawerScreen.kt:@Composable fun DocList</ID>
+    <ID>CyclomaticComplexMethod:EditorSessionController.kt:EditorSessionController$private fun collectDocWarnings: List&lt;String&gt;</ID>
+    <ID>CyclomaticComplexMethod:EditorSessionController.kt:EditorSessionController$private suspend fun persist</ID>
+    <ID>CyclomaticComplexMethod:EditorSessionController.kt:internal fun reorderBodyOrderPreservingUnseen: List&lt;String&gt;?</ID>
+    <ID>CyclomaticComplexMethod:Region.kt:@Composable fun Region</ID>
+    <ID>CyclomaticComplexMethod:RevealBottomSheetScaffold.kt:@OptIn(ExperimentalMaterial3Api::class) @Composable fun RevealBottomSheetScaffold</ID>
+    <ID>CyclomaticComplexMethod:compact.kt:@Composable fun SheetContentHost</ID>
+    <ID>CyclomaticComplexMethod:compact.kt:@OptIn(ExperimentalMaterial3Api::class) @Composable fun CompactLayout</ID>
+    <ID>CyclomaticComplexMethod:expanded.kt:@Composable fun DockableRegion</ID>
+    <ID>CyclomaticComplexMethod:expanded.kt:@Composable fun LayoutFromConfig</ID>
+    <ID>CyclomaticComplexMethod:expanded.kt:@OptIn(ExperimentalMaterial3Api::class) @Composable fun SidebarContent</ID>
+    <ID>CyclomaticComplexMethod:facets.kt:fun buildSelfFacetRefUrl: String</ID>
+    <ID>CyclomaticComplexMethod:helpers.kt:private fun parsePath: ParsedPath</ID>
+    <ID>CyclomaticComplexMethod:welcome.kt:@Composable fun CloneSyncScreen</ID>
+    <ID>CyclomaticComplexMethod:welcome.kt:@Composable fun WelcomeFlowNavHost</ID>
+    <ID>CyclomaticComplexMethod:welcome.kt:@Composable private fun CloneQrScannerScreen</ID>
+    <ID>Filename:big_sync_core.kt:uniffi.big_sync_core.big_sync_core.kt</ID>
+    <ID>Filename:compact.kt:org.example.daybook.tables.compact.kt</ID>
+    <ID>Filename:composables.kt:org.example.daybook.capture.ui.composables.kt</ID>
+    <ID>Filename:daybook_core.kt:org.example.daybook.uniffi.core.daybook_core.kt</ID>
+    <ID>Filename:daybook_ffi.kt:org.example.daybook.uniffi.daybook_ffi.kt</ID>
+    <ID>Filename:daybook_types.kt:org.example.daybook.uniffi.types.daybook_types.kt</ID>
+    <ID>Filename:expanded.kt:org.example.daybook.tables.expanded.kt</ID>
+    <ID>Filename:facets.kt:org.example.daybook.ui.facets.kt</ID>
+    <ID>Filename:helpers.kt:org.example.daybook.helpers.kt</ID>
+    <ID>Filename:main.kt:org.example.daybook.main.kt</ID>
+    <ID>Filename:models.kt:org.example.daybook.capture.data.models.kt</ID>
+    <ID>Filename:repos.kt:org.example.daybook.capture.data.repos.kt</ID>
+    <ID>Filename:runtime.kt:org.example.daybook.runtime.kt</ID>
+    <ID>Filename:welcome.kt:org.example.daybook.welcome.kt</ID>
+    <ID>FunctionLiteral:daybook_ffi.kt:AppFfiCtx$&lt;anonymous&gt;</ID>
+    <ID>FunctionLiteral:daybook_ffi.kt:DrawerRepoFfi$&lt;anonymous&gt;</ID>
+    <ID>FunctionNaming:App.kt:@Composable @Preview fun App</ID>
+    <ID>FunctionNaming:App.kt:@Composable fun AdaptiveAppLayout</ID>
+    <ID>FunctionNaming:App.kt:@Composable fun Routes</ID>
+    <ID>FunctionNaming:App.kt:@Composable fun TablesScreen</ID>
+    <ID>FunctionNaming:App.kt:@Composable private fun ErrorScreen</ID>
+    <ID>FunctionNaming:App.kt:@Composable private fun LoadingScreen</ID>
+    <ID>FunctionNaming:App.kt:@OptIn(ExperimentalMaterial3Api::class) @Composable fun DaybookHomeScreen</ID>
+    <ID>FunctionNaming:BigDialog.kt:@OptIn(ExperimentalMaterial3Api::class) @Composable fun BigDialogHost</ID>
+    <ID>FunctionNaming:CameraCaptureContext.kt:@Composable fun ProvideCameraCaptureContext</ID>
+    <ID>FunctionNaming:CameraPreview.jvm.kt:@Composable actual fun DaybookCameraPreview</ID>
+    <ID>FunctionNaming:CameraPreview.kt:@Composable expect fun DaybookCameraPreview</ID>
+    <ID>FunctionNaming:CaptureScreen.kt:@Composable fun CaptureScreen</ID>
+    <ID>FunctionNaming:CaptureScreen.kt:@Composable fun ModeFab</ID>
+    <ID>FunctionNaming:CenterNavBarContent.kt:@Composable fun RowScope.CenterNavBarContent</ID>
+    <ID>FunctionNaming:CenterNavBarContent.kt:@Composable private fun CustomBottomBarItem</ID>
+    <ID>FunctionNaming:ChromeState.kt:@Composable fun ProvideChromeState</ID>
+    <ID>FunctionNaming:ChromeState.kt:@OptIn(ExperimentalMaterial3Api::class) @Composable fun ChromeStateTopAppBar</ID>
+    <ID>FunctionNaming:DocEditor.kt:@Composable @OptIn(ExperimentalMaterial3Api::class) private fun FacetActionIconButton</ID>
+    <ID>FunctionNaming:DocEditor.kt:@Composable fun DocEditor</ID>
+    <ID>FunctionNaming:DocEditor.kt:@Composable fun DocFacetSidebar</ID>
+    <ID>FunctionNaming:DocEditor.kt:@Composable private fun DetailRow</ID>
+    <ID>FunctionNaming:DocEditor.kt:@Composable private fun DocDetailsSidebar</ID>
+    <ID>FunctionNaming:DocEditor.kt:@Composable private fun FacetListItem</ID>
+    <ID>FunctionNaming:DocEditor.kt:@Composable private fun FacetRackList</ID>
+    <ID>FunctionNaming:DocEditor.kt:@Composable private fun GenericFacetView</ID>
+    <ID>FunctionNaming:DocEditor.kt:@Composable private fun ImageFacetError</ID>
+    <ID>FunctionNaming:DocEditor.kt:@Composable private fun ImageFacetView</ID>
+    <ID>FunctionNaming:DocEditor.kt:@Composable private fun InlineFacetRack</ID>
+    <ID>FunctionNaming:DocEditor.kt:@OptIn(ExperimentalMaterial3Api::class) @Composable private fun EditorSaveStatusIndicator</ID>
+    <ID>FunctionNaming:DocEditor.kt:@OptIn(ExperimentalMaterial3Api::class) @Composable private fun FacetHeader</ID>
+    <ID>FunctionNaming:DockableDivider.kt:@Composable fun DockableDivider</ID>
+    <ID>FunctionNaming:DockablePane.kt:@Composable fun EdgeDragZone</ID>
+    <ID>FunctionNaming:DockablePane.kt:@Composable fun HorizontalResizeHandle</ID>
+    <ID>FunctionNaming:DockablePane.kt:@Composable fun PaneContainer</ID>
+    <ID>FunctionNaming:DockablePane.kt:@Composable fun VerticalResizeHandle</ID>
+    <ID>FunctionNaming:Drawable0.commonMain.kt:@InternalResourceApi internal fun _collectCommonMainDrawable0Resources</ID>
+    <ID>FunctionNaming:DrawerScreen.kt:@Composable fun DocEditorScreen</ID>
+    <ID>FunctionNaming:DrawerScreen.kt:@Composable fun DocList</ID>
+    <ID>FunctionNaming:DrawerScreen.kt:@Composable fun DrawerScreen</ID>
+    <ID>FunctionNaming:DrawerScreen.kt:@Composable private fun DrawerDocEditorContent</ID>
+    <ID>FunctionNaming:FloatingBottomBar.kt:@Composable fun FloatingBottomNavigationBar</ID>
+    <ID>FunctionNaming:FloatingBottomBar.kt:@Composable fun FloatingGrowingMenuSheet</ID>
+    <ID>FunctionNaming:ProgressScreen.kt:@Composable fun ProgressList</ID>
+    <ID>FunctionNaming:ProgressScreen.kt:@Composable private fun LiveDurationText</ID>
+    <ID>FunctionNaming:ProgressScreen.kt:@Composable private fun ProgressDetailScreen</ID>
+    <ID>FunctionNaming:ProgressScreen.kt:@Composable private fun ProgressTaskRow</ID>
+    <ID>FunctionNaming:ProgressScreen.kt:@Composable private fun TaskStateIcon</ID>
+    <ID>FunctionNaming:ProgressScreen.kt:@Composable private fun TimelineUpdateRow</ID>
+    <ID>FunctionNaming:ProgressUi.kt:@Composable fun ProgressAmountBlock</ID>
+    <ID>FunctionNaming:Region.kt:@Composable fun Pane</ID>
+    <ID>FunctionNaming:Region.kt:@Composable fun Region</ID>
+    <ID>FunctionNaming:Region.kt:@Composable fun SubRegion</ID>
+    <ID>FunctionNaming:Region.kt:RegionScope$@Composable fun Pane</ID>
+    <ID>FunctionNaming:Region.kt:RegionScope$@Composable fun SubRegion</ID>
+    <ID>FunctionNaming:ResetLayoutButton.kt:@Composable fun ResetLayoutButton</ID>
+    <ID>FunctionNaming:ResizableDrawer.kt:@OptIn(ExperimentalMaterial3Api::class) @Composable fun ResizablePermanentNavigationDrawer</ID>
+    <ID>FunctionNaming:RevealBottomSheetScaffold.kt:@OptIn(ExperimentalMaterial3Api::class) @Composable fun RevealBottomSheetScaffold</ID>
+    <ID>FunctionNaming:SettingsScreen.kt:@Composable private fun MltoolsBackendSection</ID>
+    <ID>FunctionNaming:SettingsScreen.kt:@Composable private fun MltoolsDownloadTaskRow</ID>
+    <ID>FunctionNaming:SettingsScreen.kt:@OptIn(ExperimentalMaterial3Api::class) @Composable fun SettingsScreen</ID>
+    <ID>FunctionNaming:SidebarMenuButton.kt:@Composable fun SidebarMenuButton</ID>
+    <ID>FunctionNaming:TabSelectionList.kt:@OptIn(ExperimentalMaterial3Api::class) @Composable fun TabSelectionList</ID>
+    <ID>FunctionNaming:TablesRail.kt:@OptIn(ExperimentalMaterial3Api::class) @Composable fun TablesRail</ID>
+    <ID>FunctionNaming:Theme.kt:@Composable fun DaybookTheme</ID>
+    <ID>FunctionNaming:compact.kt:@Composable fun FeaturesFAB</ID>
+    <ID>FunctionNaming:compact.kt:@Composable fun LeftDrawer</ID>
+    <ID>FunctionNaming:compact.kt:@Composable fun NavDrawerBottomBar</ID>
+    <ID>FunctionNaming:compact.kt:@Composable fun SheetContentHost</ID>
+    <ID>FunctionNaming:compact.kt:@Composable private fun LeftDrawerEdgeHint</ID>
+    <ID>FunctionNaming:compact.kt:@OptIn(ExperimentalMaterial3Api::class) @Composable fun CompactLayout</ID>
+    <ID>FunctionNaming:compact.kt:@OptIn(ExperimentalMaterial3Api::class) @Composable fun DaybookBottomNavigationBar</ID>
+    <ID>FunctionNaming:composables.kt:@Composable fun DaybookCameraViewport</ID>
+    <ID>FunctionNaming:composables.kt:@Composable private fun CameraOverlayLayer</ID>
+    <ID>FunctionNaming:expanded.kt:@Composable fun DockableRegion</ID>
+    <ID>FunctionNaming:expanded.kt:@Composable fun LayoutFromConfig</ID>
+    <ID>FunctionNaming:expanded.kt:@Composable fun RenderLayoutPane</ID>
+    <ID>FunctionNaming:expanded.kt:@Composable fun RenderLayoutRegion</ID>
+    <ID>FunctionNaming:expanded.kt:@Composable private fun SidebarPaneDividerToggleButton</ID>
+    <ID>FunctionNaming:expanded.kt:@OptIn(ExperimentalMaterial3Api::class) @Composable fun ExpandedLayout</ID>
+    <ID>FunctionNaming:expanded.kt:@OptIn(ExperimentalMaterial3Api::class) @Composable fun SidebarContent</ID>
+    <ID>FunctionNaming:welcome.kt:@Composable fun CloneShareDialogContent</ID>
+    <ID>FunctionNaming:welcome.kt:@Composable fun CloneSyncScreen</ID>
+    <ID>FunctionNaming:welcome.kt:@Composable fun WelcomeFlowNavHost</ID>
+    <ID>FunctionNaming:welcome.kt:@Composable private fun CloneLocationScreen</ID>
+    <ID>FunctionNaming:welcome.kt:@Composable private fun CloneQrScannerScreen</ID>
+    <ID>FunctionNaming:welcome.kt:@Composable private fun CloneUrlScreen</ID>
+    <ID>FunctionNaming:welcome.kt:@Composable private fun CreateRepoScreen</ID>
+    <ID>FunctionNaming:welcome.kt:@Composable private fun WelcomeRepoDetailScreen</ID>
+    <ID>FunctionNaming:welcome.kt:@Composable private fun WelcomeScreen</ID>
+    <ID>FunctionNaming:welcome.kt:@OptIn(ExperimentalMaterial3Api::class) @Composable private fun WelcomeFlowScaffold</ID>
+    <ID>FunctionOnlyReturningConstant:Greeting.kt:Greeting$fun greet: String</ID>
+    <ID>FunctionSignature:Res.kt:Res$public fun getUri: String</ID>
+    <ID>FunctionSignature:Res.kt:Res$public suspend fun readBytes: ByteArray</ID>
+    <ID>FunctionSignature:RevealBottomSheetScaffold.kt:&lt;no name provided&gt;$override suspend fun onPostFling: Velocity</ID>
+    <ID>FunctionSignature:daybook_ffi.kt:CameraPreviewFfi$@Throws(FfiException::class) override fun `startStream`</ID>
+    <ID>FunctionSignature:daybook_ffi.kt:CameraQrAnalyzerFfi$@Throws(FfiException::class) override fun `submitJpegFrame`</ID>
+    <ID>ImplicitDefaultLocale:ProgressScreen.kt:"%02d:%02d:%02d".format(h, m, s)</ID>
+    <ID>ImplicitDefaultLocale:ProgressUi.kt:String.format("%.1f %s", value, units[unitIndex])</ID>
+    <ID>ImportOrdering:ActualResourceCollectors.kt:import kotlin.OptIn import kotlin.String import kotlin.collections.Map import org.jetbrains.compose.resources.DrawableResource import org.jetbrains.compose.resources.FontResource import org.jetbrains.compose.resources.PluralStringResource import org.jetbrains.compose.resources.StringArrayResource import org.jetbrains.compose.resources.StringResource</ID>
+    <ID>ImportOrdering:Drawable0.commonMain.kt:import kotlin.OptIn import kotlin.String import kotlin.collections.MutableMap import org.jetbrains.compose.resources.DrawableResource import org.jetbrains.compose.resources.InternalResourceApi import org.jetbrains.compose.resources.ResourceContentHash import org.jetbrains.compose.resources.ResourceItem</ID>
+    <ID>ImportOrdering:ExpectResourceCollectors.kt:import kotlin.String import kotlin.collections.Map import org.jetbrains.compose.resources.DrawableResource import org.jetbrains.compose.resources.FontResource import org.jetbrains.compose.resources.PluralStringResource import org.jetbrains.compose.resources.StringArrayResource import org.jetbrains.compose.resources.StringResource</ID>
+    <ID>ImportOrdering:Res.kt:import kotlin.ByteArray import kotlin.OptIn import kotlin.String import kotlin.Suppress import org.jetbrains.compose.resources.InternalResourceApi import org.jetbrains.compose.resources.getResourceUri import org.jetbrains.compose.resources.readResourceBytes</ID>
+    <ID>ImportOrdering:compact.kt:import androidx.compose.animation.core.animateFloatAsState import androidx.compose.animation.core.tween import androidx.compose.foundation.Canvas import androidx.compose.foundation.background import androidx.compose.foundation.clickable import org.example.daybook.DaybookContentType import androidx.compose.foundation.gestures.detectDragGestures import androidx.compose.foundation.layout.Arrangement import androidx.compose.foundation.layout.Box import androidx.compose.foundation.layout.Column import androidx.compose.foundation.layout.Row import androidx.compose.foundation.layout.RowScope import androidx.compose.foundation.layout.Spacer import androidx.compose.foundation.layout.fillMaxSize import androidx.compose.foundation.layout.fillMaxWidth import androidx.compose.foundation.layout.height import androidx.compose.foundation.layout.padding import androidx.compose.foundation.layout.offset import androidx.compose.foundation.layout.size import androidx.compose.foundation.layout.width import androidx.compose.foundation.rememberScrollState import androidx.compose.foundation.shape.RoundedCornerShape import androidx.compose.foundation.verticalScroll import androidx.compose.material.icons.Icons import androidx.compose.material.icons.filled.Add import androidx.compose.material.icons.filled.Description import androidx.compose.material.icons.filled.Folder import androidx.compose.material.icons.filled.Menu import androidx.compose.material.icons.filled.Settings import androidx.compose.material3.BottomAppBar import androidx.compose.material3.DismissibleDrawerSheet import androidx.compose.material3.DismissibleNavigationDrawer import androidx.compose.material3.DrawerValue import androidx.compose.material3.ExperimentalMaterial3Api import androidx.compose.material3.FloatingActionButton import androidx.compose.material3.HorizontalDivider import androidx.compose.material3.Icon import androidx.compose.material3.IconButton import androidx.compose.material3.MaterialTheme import androidx.compose.material3.NavigationBar import androidx.compose.material3.NavigationDrawerItem import androidx.compose.material3.OutlinedButton import androidx.compose.material3.Scaffold import androidx.compose.material3.rememberDrawerState import androidx.compose.material3.SecondaryScrollableTabRow import androidx.compose.material3.SnackbarHost import androidx.compose.material3.SnackbarHostState import androidx.compose.material3.Surface import androidx.compose.material3.Tab import androidx.compose.material3.TabRow import androidx.compose.material3.Text import androidx.compose.runtime.Composable import androidx.compose.runtime.LaunchedEffect import androidx.compose.runtime.collectAsState import androidx.compose.runtime.getValue import androidx.compose.runtime.mutableIntStateOf import androidx.compose.runtime.mutableStateOf import androidx.compose.runtime.remember import androidx.compose.runtime.rememberCoroutineScope import androidx.compose.runtime.setValue import androidx.compose.ui.Alignment import androidx.compose.ui.Modifier import androidx.compose.ui.geometry.Offset import androidx.compose.ui.geometry.Rect import androidx.compose.ui.geometry.Size import androidx.compose.ui.graphics.Color import androidx.compose.ui.graphics.drawscope.rotate import androidx.compose.ui.graphics.graphicsLayer import androidx.compose.ui.input.pointer.pointerInput import androidx.compose.ui.layout.boundsInWindow import androidx.compose.ui.layout.onGloballyPositioned import androidx.compose.ui.semantics.contentDescription import androidx.compose.ui.text.style.TextOverflow import androidx.compose.ui.unit.dp import androidx.lifecycle.viewModelScope import androidx.lifecycle.viewmodel.compose.viewModel import androidx.navigation.NavHostController import androidx.navigation.compose.currentBackStackEntryAsState import kotlinx.coroutines.Job import kotlinx.coroutines.delay import kotlinx.coroutines.flow.asStateFlow import kotlinx.coroutines.launch import org.example.daybook.AppScreens import org.example.daybook.ChromeState import org.example.daybook.ChromeStateTopAppBar import org.example.daybook.ConfigViewModel import org.example.daybook.LocalChromeStateManager import org.example.daybook.LocalContainer import org.example.daybook.Routes import org.example.daybook.TablesState import org.example.daybook.TablesViewModel import org.example.daybook.progress.ProgressList import org.example.daybook.uniffi.core.Tab import org.example.daybook.uniffi.core.Table // TODO: Update compact.kt to use new LayoutWindowConfig structure // import org.example.daybook.uniffi.core.TableViewMode import org.example.daybook.uniffi.core.Uuid</ID>
+    <ID>Indentation:ActualResourceCollectors.kt: </ID>
+    <ID>Indentation:DocEditor.kt: </ID>
+    <ID>Indentation:Drawable0.commonMain.kt: </ID>
+    <ID>Indentation:Res.kt: </ID>
+    <ID>Indentation:Res.kt:Res$ </ID>
+    <ID>Indentation:daybook_ffi.kt:RtFfi.Companion$ </ID>
+    <ID>Indentation:daybook_ffi.kt:uniffiCallbackInterfaceCameraPreviewFrameListener.onCameraPreviewFrame$ </ID>
+    <ID>Indentation:daybook_ffi.kt:uniffiCallbackInterfaceCameraQrEventListener.onCameraQrDetected$ </ID>
+    <ID>Indentation:daybook_ffi.kt:uniffiCallbackInterfaceCameraQrEventListener.onCameraQrError$ </ID>
+    <ID>Indentation:daybook_ffi.kt:uniffiCallbackInterfaceCameraQrEventListener.onCameraQrOverlaysUpdated$ </ID>
+    <ID>Indentation:daybook_ffi.kt:uniffiCallbackInterfaceConfigEventListener.onConfigEvent$ </ID>
+    <ID>Indentation:daybook_ffi.kt:uniffiCallbackInterfaceDispatchEventListener.onDispatchEvent$ </ID>
+    <ID>Indentation:daybook_ffi.kt:uniffiCallbackInterfaceDrawerEventListener.onDrawerEvent$ </ID>
+    <ID>Indentation:daybook_ffi.kt:uniffiCallbackInterfaceInitEventListener.onInitEvent$ </ID>
+    <ID>Indentation:daybook_ffi.kt:uniffiCallbackInterfaceLocalStateEventListener.onLocalStateEvent$ </ID>
+    <ID>Indentation:daybook_ffi.kt:uniffiCallbackInterfacePlugsEventListener.onPlugsEvent$ </ID>
+    <ID>Indentation:daybook_ffi.kt:uniffiCallbackInterfaceProgressEventListener.onProgressEvent$ </ID>
+    <ID>Indentation:daybook_ffi.kt:uniffiCallbackInterfaceTablesEventListener.onTablesEvent$ </ID>
+    <ID>Indentation:welcome.kt: </ID>
+    <ID>InjectDispatcher:App.kt:IO</ID>
+    <ID>InjectDispatcher:CameraPreview.jvm.kt:Default</ID>
+    <ID>InjectDispatcher:CameraPreview.jvm.kt:IO</ID>
+    <ID>InjectDispatcher:helpers.kt:IO</ID>
+    <ID>InjectDispatcher:welcome.kt:IO</ID>
+    <ID>InstanceOfCheckForException:App.kt:error is CancellationException</ID>
+    <ID>InstanceOfCheckForException:App.kt:throwable !is TimeoutCancellationException</ID>
+    <ID>InstanceOfCheckForException:App.kt:throwable is CancellationException</ID>
+    <ID>InstanceOfCheckForException:EditorSessionController.kt:EditorSessionController$error is CancellationException</ID>
+    <ID>InstanceOfCheckForException:welcome.kt:error is CancellationException</ID>
+    <ID>InvalidPackageDeclaration:helpers.kt:package org.example.daybook</ID>
+    <ID>InvalidPackageDeclaration:runtime.kt:package org.example.daybook</ID>
+    <ID>InvalidPackageDeclaration:welcome.kt:package org.example.daybook</ID>
+    <ID>LongMethod:App.kt:@Composable @Preview fun App</ID>
+    <ID>LongMethod:App.kt:@Composable fun Routes</ID>
+    <ID>LongMethod:App.kt:@Composable fun TablesScreen</ID>
+    <ID>LongMethod:BigDialog.kt:@OptIn(ExperimentalMaterial3Api::class) @Composable fun BigDialogHost</ID>
+    <ID>LongMethod:CameraPreview.jvm.kt:@Composable actual fun DaybookCameraPreview</ID>
+    <ID>LongMethod:CaptureScreen.kt:@Composable fun CaptureScreen</ID>
+    <ID>LongMethod:CenterNavBarContent.kt:@Composable fun RowScope.CenterNavBarContent</ID>
+    <ID>LongMethod:DocEditor.kt:@Composable fun DocEditor</ID>
+    <ID>LongMethod:DocEditor.kt:@Composable private fun ImageFacetView</ID>
+    <ID>LongMethod:DocEditor.kt:@OptIn(ExperimentalMaterial3Api::class) @Composable private fun FacetHeader</ID>
+    <ID>LongMethod:DockableDivider.kt:@Composable fun DockableDivider</ID>
+    <ID>LongMethod:DrawerScreen.kt:@Composable fun DocList</ID>
+    <ID>LongMethod:EditorSessionController.kt:EditorSessionController$private fun collectDocWarnings: List&lt;String&gt;</ID>
+    <ID>LongMethod:EditorSessionController.kt:internal fun reorderBodyOrderPreservingUnseen: List&lt;String&gt;?</ID>
+    <ID>LongMethod:FloatingBottomBar.kt:@Composable fun FloatingGrowingMenuSheet</ID>
+    <ID>LongMethod:ProgressScreen.kt:@Composable fun ProgressList</ID>
+    <ID>LongMethod:ProgressScreen.kt:@Composable private fun ProgressDetailScreen</ID>
+    <ID>LongMethod:ProgressScreen.kt:@Composable private fun ProgressTaskRow</ID>
+    <ID>LongMethod:ProgressScreen.kt:@Composable private fun TimelineUpdateRow</ID>
+    <ID>LongMethod:Region.kt:@Composable fun Region</ID>
+    <ID>LongMethod:RevealBottomSheetScaffold.kt:@OptIn(ExperimentalMaterial3Api::class) @Composable fun RevealBottomSheetScaffold</ID>
+    <ID>LongMethod:SettingsScreen.kt:@OptIn(ExperimentalMaterial3Api::class) @Composable fun SettingsScreen</ID>
+    <ID>LongMethod:TabSelectionList.kt:@OptIn(ExperimentalMaterial3Api::class) @Composable fun TabSelectionList</ID>
+    <ID>LongMethod:TablesRail.kt:@OptIn(ExperimentalMaterial3Api::class) @Composable fun TablesRail</ID>
+    <ID>LongMethod:compact.kt:@Composable fun SheetContentHost</ID>
+    <ID>LongMethod:compact.kt:@OptIn(ExperimentalMaterial3Api::class) @Composable fun CompactLayout</ID>
+    <ID>LongMethod:expanded.kt:@Composable fun DockableRegion</ID>
+    <ID>LongMethod:expanded.kt:@Composable fun LayoutFromConfig</ID>
+    <ID>LongMethod:expanded.kt:@OptIn(ExperimentalMaterial3Api::class) @Composable fun ExpandedLayout</ID>
+    <ID>LongMethod:expanded.kt:@OptIn(ExperimentalMaterial3Api::class) @Composable fun SidebarContent</ID>
+    <ID>LongMethod:expanded.kt:State$fun endDrag</ID>
+    <ID>LongMethod:expanded.kt:State$fun resize: Boolean</ID>
+    <ID>LongMethod:main.kt:fun main</ID>
+    <ID>LongMethod:welcome.kt:@Composable fun CloneShareDialogContent</ID>
+    <ID>LongMethod:welcome.kt:@Composable fun CloneSyncScreen</ID>
+    <ID>LongMethod:welcome.kt:@Composable fun WelcomeFlowNavHost</ID>
+    <ID>LongMethod:welcome.kt:@Composable private fun CloneLocationScreen</ID>
+    <ID>LongMethod:welcome.kt:@Composable private fun CloneQrScannerScreen</ID>
+    <ID>LongMethod:welcome.kt:@Composable private fun CreateRepoScreen</ID>
+    <ID>LongMethod:welcome.kt:@Composable private fun WelcomeScreen</ID>
+    <ID>LongParameterList:App.kt:@Composable @Preview fun App</ID>
+    <ID>LongParameterList:App.kt:@OptIn(ExperimentalMaterial3Api::class) @Composable fun DaybookHomeScreen</ID>
+    <ID>LongParameterList:CameraPreview.jvm.kt:@Composable actual fun DaybookCameraPreview</ID>
+    <ID>LongParameterList:CameraPreview.kt:@Composable expect fun DaybookCameraPreview</ID>
+    <ID>LongParameterList:CenterNavBarContent.kt:@Composable fun RowScope.CenterNavBarContent</ID>
+    <ID>LongParameterList:CenterNavBarContent.kt:@Composable private fun CustomBottomBarItem</ID>
+    <ID>LongParameterList:DocEditor.kt:@Composable private fun FacetListItem</ID>
+    <ID>LongParameterList:DocEditor.kt:@OptIn(ExperimentalMaterial3Api::class) @Composable private fun FacetHeader</ID>
+    <ID>LongParameterList:DockableDivider.kt:@Composable fun DockableDivider</ID>
+    <ID>LongParameterList:FloatingBottomBar.kt:@Composable fun FloatingGrowingMenuSheet</ID>
+    <ID>LongParameterList:ResizableDrawer.kt:@OptIn(ExperimentalMaterial3Api::class) @Composable fun ResizablePermanentNavigationDrawer</ID>
+    <ID>LongParameterList:RevealBottomSheetScaffold.kt:@OptIn(ExperimentalMaterial3Api::class) @Composable fun RevealBottomSheetScaffold</ID>
+    <ID>LongParameterList:TablesRail.kt:@OptIn(ExperimentalMaterial3Api::class) @Composable fun TablesRail</ID>
+    <ID>LongParameterList:compact.kt:@Composable fun SheetContentHost</ID>
+    <ID>LongParameterList:composables.kt:@Composable fun DaybookCameraViewport</ID>
+    <ID>LongParameterList:expanded.kt:@Composable fun LayoutFromConfig</ID>
+    <ID>LongParameterList:expanded.kt:@Composable fun RenderLayoutPane</ID>
+    <ID>LongParameterList:expanded.kt:@Composable fun RenderLayoutRegion</ID>
+    <ID>LongParameterList:welcome.kt:@Composable fun WelcomeFlowNavHost</ID>
+    <ID>LoopWithTooManyJumpStatements:DocEditorStoreViewModel.kt:DocEditorStoreViewModel$for</ID>
+    <ID>LoopWithTooManyJumpStatements:DrawerScreen.kt:for</ID>
+    <ID>LoopWithTooManyJumpStatements:EditorSessionController.kt:EditorSessionController$for</ID>
+    <ID>MagicNumber:App.kt:10</ID>
+    <ID>MagicNumber:App.kt:20_000</ID>
+    <ID>MagicNumber:App.kt:240</ID>
+    <ID>MagicNumber:App.kt:600</ID>
+    <ID>MagicNumber:App.kt:600f</ID>
+    <ID>MagicNumber:App.kt:840f</ID>
+    <ID>MagicNumber:CameraPreview.jvm.kt:0xFF</ID>
+    <ID>MagicNumber:CameraPreview.jvm.kt:12</ID>
+    <ID>MagicNumber:CameraPreview.jvm.kt:16</ID>
+    <ID>MagicNumber:CameraPreview.jvm.kt:3</ID>
+    <ID>MagicNumber:CameraPreview.jvm.kt:5</ID>
+    <ID>MagicNumber:CameraPreview.jvm.kt:8</ID>
+    <ID>MagicNumber:ConfigViewModel.kt:ConfigViewModel$3</ID>
+    <ID>MagicNumber:DocEditor.kt:0.45f</ID>
+    <ID>MagicNumber:DocEditor.kt:0.55f</ID>
+    <ID>MagicNumber:DocEditor.kt:6</ID>
+    <ID>MagicNumber:DocEditorStoreViewModel.kt:DocEditorStoreViewModel$30_000</ID>
+    <ID>MagicNumber:DockableDivider.kt:0.5f</ID>
+    <ID>MagicNumber:Drawable0.commonMain.kt:1_133_138_414</ID>
+    <ID>MagicNumber:DrawerScreen.kt:0.28f</ID>
+    <ID>MagicNumber:DrawerScreen.kt:0.72f</ID>
+    <ID>MagicNumber:DrawerScreen.kt:10</ID>
+    <ID>MagicNumber:DrawerScreen.kt:50</ID>
+    <ID>MagicNumber:DrawerScreen.kt:8</ID>
+    <ID>MagicNumber:DrawerViewModel.kt:DrawerViewModel$500</ID>
+    <ID>MagicNumber:EditorSessionController.kt:0xff</ID>
+    <ID>MagicNumber:EditorSessionController.kt:256</ID>
+    <ID>MagicNumber:EditorSessionController.kt:58</ID>
+    <ID>MagicNumber:EditorSessionController.kt:EditorSessionController$500</ID>
+    <ID>MagicNumber:FloatingBottomBar.kt:0.38f</ID>
+    <ID>MagicNumber:FloatingBottomBar.kt:1e-6f</ID>
+    <ID>MagicNumber:FloatingBottomBar.kt:220f</ID>
+    <ID>MagicNumber:FloatingBottomBar.kt:NippleBarShape$0.16f</ID>
+    <ID>MagicNumber:Platform.jvm.kt:JVMPlatform$160f</ID>
+    <ID>MagicNumber:Platform.jvm.kt:JVMPlatform$96f</ID>
+    <ID>MagicNumber:ProgressScreen.kt:0xFFE18D00</ID>
+    <ID>MagicNumber:ProgressScreen.kt:1000</ID>
+    <ID>MagicNumber:ProgressScreen.kt:3600</ID>
+    <ID>MagicNumber:ProgressScreen.kt:60</ID>
+    <ID>MagicNumber:ProgressScreen.kt:86_400</ID>
+    <ID>MagicNumber:ProgressUi.kt:100</ID>
+    <ID>MagicNumber:ProgressUi.kt:1024.0</ID>
+    <ID>MagicNumber:ProgressUi.kt:1024UL</ID>
+    <ID>MagicNumber:ResetLayoutButton.kt:0xFFD32F2F</ID>
+    <ID>MagicNumber:ResetLayoutButton.kt:1000</ID>
+    <ID>MagicNumber:RevealBottomSheetScaffold.kt:3</ID>
+    <ID>MagicNumber:RevealBottomSheetScaffold.kt:4</ID>
+    <ID>MagicNumber:RevealBottomSheetScaffold.kt:5</ID>
+    <ID>MagicNumber:RevealBottomSheetScaffold.kt:RevealBottomSheetState$0.5f</ID>
+    <ID>MagicNumber:RevealBottomSheetScaffold.kt:RevealBottomSheetState$300f</ID>
+    <ID>MagicNumber:SettingsScreen.kt:0.3f</ID>
+    <ID>MagicNumber:SettingsScreen.kt:0.7f</ID>
+    <ID>MagicNumber:compact.kt:133.157f</ID>
+    <ID>MagicNumber:compact.kt:183.157f</ID>
+    <ID>MagicNumber:compact.kt:233.157f</ID>
+    <ID>MagicNumber:compact.kt:250L</ID>
+    <ID>MagicNumber:compact.kt:400f</ID>
+    <ID>MagicNumber:compact.kt:56f</ID>
+    <ID>MagicNumber:compact.kt:83.1573f</ID>
+    <ID>MagicNumber:compact.kt:83f</ID>
+    <ID>MagicNumber:compact.kt:HoverHoldControllerViewModel$250L</ID>
+    <ID>MagicNumber:composables.kt:0.5f</ID>
+    <ID>MagicNumber:composables.kt:0xFF4DD0E1</ID>
+    <ID>MagicNumber:composables.kt:3f</ID>
+    <ID>MagicNumber:facets.kt:120</ID>
+    <ID>MagicNumber:helpers.kt:3</ID>
+    <ID>MagicNumber:helpers.kt:4</ID>
+    <ID>MagicNumber:helpers.kt:9999</ID>
+    <ID>MagicNumber:main.kt:0.75</ID>
+    <ID>MagicNumber:main.kt:100</ID>
+    <ID>MagicNumber:main.kt:1600</ID>
+    <ID>MagicNumber:main.kt:20</ID>
+    <ID>MagicNumber:main.kt:900</ID>
+    <ID>MagicNumber:repos.kt:CameraQrOverlayBridge$200L</ID>
+    <ID>MagicNumber:welcome.kt:0.6f</ID>
+    <ID>MagicNumber:welcome.kt:0.7f</ID>
+    <ID>MagicNumber:welcome.kt:1000</ID>
+    <ID>MagicNumber:welcome.kt:1000f</ID>
+    <ID>MagicNumber:welcome.kt:1400</ID>
+    <ID>MagicNumber:welcome.kt:768u</ID>
+    <ID>MatchingDeclarationName:BigDialog.kt:BigDialogState</ID>
+    <ID>MatchingDeclarationName:CaptureScreen.kt:CaptureScreenViewModel : ViewModel</ID>
+    <ID>MatchingDeclarationName:Platform.jvm.kt:JVMPlatform : Platform</ID>
+    <ID>MatchingDeclarationName:RevealBottomSheetScaffold.kt:RevealBottomSheetState</ID>
+    <ID>MatchingDeclarationName:Theme.kt:ThemeConfig</ID>
+    <ID>MatchingDeclarationName:runtime.kt:AppFfiServices</ID>
+    <ID>MaxLineLength:App.kt:"startup failed during deferred runtime load: ${throwable.message ?: "unknown error"} (from_app_start_ms=${appStartMark.elapsedNow().inWholeMilliseconds})"</ID>
+    <ID>MaxLineLength:App.kt:StartupProgressTask$"$stage done in $stageElapsed (open_elapsed=$startupElapsed from_app_start_ms=${appElapsedMillis()})"</ID>
+    <ID>MaxLineLength:App.kt:StartupProgressTask$"startup phase begin phase=$phaseId (open_elapsed=$startupElapsed from_app_start_ms=${appElapsedMillis()})"</ID>
+    <ID>MaxLineLength:CaptureScreen.kt:CaptureScreenViewModel$"[CAPTURE] persistCaptureMode failed mode=$mode selectedTableId=$selectedTableId windowId=$windowId err=${e.message}"</ID>
+    <ID>MaxLineLength:CaptureScreen.kt:containerColor = if (selected) MaterialTheme.colorScheme.primaryContainer else MaterialTheme.colorScheme.secondaryContainer</ID>
+    <ID>MaxLineLength:CaptureScreen.kt:contentColor = if (selected) MaterialTheme.colorScheme.onPrimaryContainer else MaterialTheme.colorScheme.onSecondaryContainer</ID>
+    <ID>MaxLineLength:DrawerScreen.kt:"Failed to decode Body facet for drawer main type: docId=${doc.id} facetKey=${bodyFacetKey()} error=${decoded.exceptionOrNull()}"</ID>
+    <ID>MaxLineLength:EditorSessionController.kt:EditorSessionController$"Failed to decode Body facet in editor ordering: docId=${doc.id} facetKey=${bodyFacetKey()} error=${decoded.exceptionOrNull()}"</ID>
+    <ID>MaxLineLength:EditorSessionController.kt:EditorSessionController$notice = "Unsupported note mime '${note.mime}'; editing disabled to avoid destructive writes."</ID>
+    <ID>MaxLineLength:Res.kt:Res$public</ID>
+    <ID>MaxLineLength:Res.kt:Res$public suspend</ID>
+    <ID>MaxLineLength:compact.kt:// Check if screen chrome is empty (no title, no navigation icon, no actions, and showTopBar is false)</ID>
+    <ID>MaxLineLength:compact.kt:// Only screen actions in compact view (no layout actions since menu is in bottom bar)</ID>
+    <ID>MaxLineLength:compact.kt:// debug: SheetContentHost mounted selectedTableId=$selectedTableId tableCount=${tablesState.let { if (it is TablesState.Data) it.tables.size else 0 }} tabCount=${tablesState.let { if (it is TablesState.Data) it.tabs.size else 0 }}</ID>
+    <ID>MaxLineLength:expanded.kt:is org.example.daybook.uniffi.core.TableWindow.AllWindows -&gt; state.windows.keys.firstOrNull()</ID>
+    <ID>MaxLineLength:welcome.kt:errorMessage = "Destination directory is not empty. Choose an empty directory."</ID>
+    <ID>MaxLineLength:welcome.kt:val current = cloneUiState as? CloneUiState.PickingLocation ?: return@CloneLocationScreen</ID>
+    <ID>MaximumLineLength:CaptureScreen.kt:,</ID>
+    <ID>MaximumLineLength:EditorSessionController.kt:EditorSessionController$,</ID>
+    <ID>MaximumLineLength:Res.kt:Res$)</ID>
+    <ID>MaximumLineLength:daybook_core.kt:FfiConverterMapStringSequenceTypeBranchDeleteTombstone${</ID>
+    <ID>MaximumLineLength:daybook_ffi.kt:AppFfiCtx$,</ID>
+    <ID>MaximumLineLength:daybook_ffi.kt:DrawerRepoFfi$,</ID>
+    <ID>MaximumLineLength:daybook_ffi.kt:SqliteLocalStateRepoFfi.Companion$,</ID>
+    <ID>MaximumLineLength:expanded.kt:)</ID>
+    <ID>MaximumLineLength:welcome.kt:,</ID>
+    <ID>MaximumLineLength:welcome.kt:CloneLocationScreen</ID>
+    <ID>NoEmptyFile:Dockable.kt:org.example.daybook.dockable.Dockable.kt</ID>
+    <ID>NoWildcardImports:CaptureScreen.kt:import androidx.compose.foundation.layout.*</ID>
+    <ID>NoWildcardImports:CaptureScreen.kt:import androidx.compose.material3.*</ID>
+    <ID>NoWildcardImports:CaptureScreen.kt:import androidx.compose.runtime.*</ID>
+    <ID>NoWildcardImports:CaptureScreen.kt:import org.example.daybook.uniffi.core.*</ID>
+    <ID>NoWildcardImports:DrawerScreen.kt:import androidx.compose.foundation.layout.*</ID>
+    <ID>NoWildcardImports:DrawerScreen.kt:import androidx.compose.material3.*</ID>
+    <ID>NoWildcardImports:DrawerScreen.kt:import androidx.compose.runtime.*</ID>
+    <ID>NoWildcardImports:big_sync_core.kt:import com.sun.jna.ptr.*</ID>
+    <ID>NoWildcardImports:daybook_core.kt:import com.sun.jna.ptr.*</ID>
+    <ID>NoWildcardImports:daybook_ffi.kt:import com.sun.jna.ptr.*</ID>
+    <ID>NoWildcardImports:daybook_types.kt:import com.sun.jna.ptr.*</ID>
+    <ID>NoWildcardImports:expanded.kt:import androidx.compose.material3.*</ID>
+    <ID>PackageName:big_sync_core.kt:package uniffi.big_sync_core</ID>
+    <ID>ParameterListWrapping:Res.kt:Res$(path: String)</ID>
+    <ID>PropertyName:FeatureItem.kt:FeatureKeys$const val Capture = "nav_capture"</ID>
+    <ID>PropertyName:FeatureItem.kt:FeatureKeys$const val CloneShare = "nav_clone_share"</ID>
+    <ID>PropertyName:FeatureItem.kt:FeatureKeys$const val Drawer = "nav_drawer"</ID>
+    <ID>PropertyName:FeatureItem.kt:FeatureKeys$const val Home = "nav_home"</ID>
+    <ID>PropertyName:FeatureItem.kt:FeatureKeys$const val Progress = "nav_progress"</ID>
+    <ID>PropertyName:FeatureItem.kt:FeatureKeys$const val Settings = "nav_settings"</ID>
+    <ID>PropertyName:FeatureItem.kt:FeatureKeys$const val Tables = "nav_tables"</ID>
+    <ID>PropertyName:big_sync_core.kt:UniffiRustCallStatus$@JvmField var error_buf: RustBuffer.ByValue = RustBuffer.ByValue()</ID>
+    <ID>PropertyName:big_sync_core.kt:val bindings_contract_version = 30</ID>
+    <ID>PropertyName:big_sync_core.kt:val return_value = callback(status)</ID>
+    <ID>PropertyName:big_sync_core.kt:val scaffolding_contract_version = lib.ffi_big_sync_core_uniffi_contract_version()</ID>
+    <ID>PropertyName:daybook_core.kt:UniffiRustCallStatus$@JvmField var error_buf: RustBuffer.ByValue = RustBuffer.ByValue()</ID>
+    <ID>PropertyName:daybook_core.kt:val bindings_contract_version = 30</ID>
+    <ID>PropertyName:daybook_core.kt:val return_value = callback(status)</ID>
+    <ID>PropertyName:daybook_core.kt:val scaffolding_contract_version = lib.ffi_daybook_core_uniffi_contract_version()</ID>
+    <ID>PropertyName:daybook_ffi.kt:UniffiRustCallStatus$@JvmField var error_buf: RustBuffer.ByValue = RustBuffer.ByValue()</ID>
+    <ID>PropertyName:daybook_ffi.kt:val bindings_contract_version = 30</ID>
+    <ID>PropertyName:daybook_ffi.kt:val return_value = callback(status)</ID>
+    <ID>PropertyName:daybook_ffi.kt:val scaffolding_contract_version = lib.ffi_daybook_ffi_uniffi_contract_version()</ID>
+    <ID>PropertyName:daybook_types.kt:UniffiRustCallStatus$@JvmField var error_buf: RustBuffer.ByValue = RustBuffer.ByValue()</ID>
+    <ID>PropertyName:daybook_types.kt:val bindings_contract_version = 30</ID>
+    <ID>PropertyName:daybook_types.kt:val return_value = callback(status)</ID>
+    <ID>PropertyName:daybook_types.kt:val scaffolding_contract_version = lib.ffi_daybook_types_uniffi_contract_version()</ID>
+    <ID>PropertyName:welcome.kt:WelcomeRoute$const val CloneLocation = "welcome_clone_location"</ID>
+    <ID>PropertyName:welcome.kt:WelcomeRoute$const val CloneScanner = "welcome_clone_scanner"</ID>
+    <ID>PropertyName:welcome.kt:WelcomeRoute$const val CloneUrl = "welcome_clone_url"</ID>
+    <ID>PropertyName:welcome.kt:WelcomeRoute$const val CreateRepo = "welcome_create_repo"</ID>
+    <ID>PropertyName:welcome.kt:WelcomeRoute$const val Menu = "welcome_menu"</ID>
+    <ID>PropertyName:welcome.kt:WelcomeRoute$const val RepoDetail = "welcome_repo_detail"</ID>
+    <ID>ReturnCount:ConfigViewModel.kt:ConfigViewModel$private fun parseBackendRows: List&lt;MltoolsBackendRow&gt;</ID>
+    <ID>ReturnCount:ConfigViewModel.kt:ConfigViewModel$private fun reconcileMltoolsProvisionState: MltoolsProvisionState</ID>
+    <ID>ReturnCount:DocEditor.kt:@Composable private fun ImageFacetView</ID>
+    <ID>ReturnCount:EditorSessionController.kt:EditorSessionController$private fun decodeBodyOrderUrls: List&lt;String&gt;?</ID>
+    <ID>ReturnCount:EditorSessionController.kt:internal fun reorderBodyOrderPreservingUnseen: List&lt;String&gt;?</ID>
+    <ID>ReturnCount:ProgressUi.kt:fun progressFraction: Float?</ID>
+    <ID>ReturnCount:RevealBottomSheetScaffold.kt:&lt;no name provided&gt;$override fun onPostScroll: Offset</ID>
+    <ID>ReturnCount:expanded.kt:State$fun resize: Boolean</ID>
+    <ID>ReturnCount:expanded.kt:State$private fun getCurrentRegime: PaneSizeRegime?</ID>
+    <ID>ReturnCount:expanded.kt:State$private fun rebalanceDiscreteWeights</ID>
+    <ID>ReturnCount:expanded.kt:private fun resolveSelectedWindow: Pair&lt;Uuid, Window&gt;?</ID>
+    <ID>ReturnCount:facets.kt:fun previewFacetValue: String</ID>
+    <ID>ReturnCount:helpers.kt:internal suspend fun resolveNonClashingDestination: DestinationResolution</ID>
+    <ID>ReturnCount:helpers.kt:private fun composePath: String</ID>
+    <ID>ReturnCount:helpers.kt:private fun parsePath: ParsedPath</ID>
+    <ID>SwallowedException:ImageDecode.desktop.kt:error: IllegalArgumentException</ID>
+    <ID>ThrowsCount:App.kt:@Composable @Preview fun App</ID>
+    <ID>ThrowsCount:welcome.kt:@Composable fun WelcomeFlowNavHost</ID>
+    <ID>TooGenericExceptionCaught:App.kt:error: Throwable</ID>
+    <ID>TooGenericExceptionCaught:App.kt:t: Throwable</ID>
+    <ID>TooGenericExceptionCaught:App.kt:throwable: Throwable</ID>
+    <ID>TooGenericExceptionCaught:CameraPreview.jvm.kt:error: Throwable</ID>
+    <ID>TooGenericExceptionCaught:ConfigViewModel.kt:ConfigViewModel$e: Exception</ID>
+    <ID>TooGenericExceptionCaught:DocEditor.kt:error: Throwable</ID>
+    <ID>TooGenericExceptionCaught:EditorSessionController.kt:EditorSessionController$error: Throwable</ID>
+    <ID>TooGenericExceptionCaught:welcome.kt:error: Throwable</ID>
+    <ID>TooManyFunctions:App.kt:TablesViewModel : ViewModel</ID>
+    <ID>TooManyFunctions:DocEditor.kt:org.example.daybook.ui.DocEditor.kt</ID>
+    <ID>TooManyFunctions:DrawerViewModel.kt:DrawerViewModel : ViewModel</ID>
+    <ID>TooManyFunctions:EditorSessionController.kt:EditorSessionController</ID>
+    <ID>TooManyFunctions:facets.kt:org.example.daybook.ui.facets.kt</ID>
+    <ID>TrailingCommaOnCallSite:daybook_ffi.kt:RtFfi.Companion$( FfiConverterTypeFfiCtx.lower( `fcx`, ), FfiConverterTypeDrawerRepoFfi.lower( `drawerRepo`, ), FfiConverterTypePlugsRepoFfi.lower( `plugsRepo`, ), FfiConverterTypeDispatchRepoFfi.lower( `dispatchRepo`, ), FfiConverterTypeProgressRepoFfi.lower( `progressRepo`, ), FfiConverterTypeBlobsRepoFfi.lower( `blobsRepo`, ), FfiConverterTypeConfigRepoFfi.lower( `configRepo`, ), FfiConverterTypeInitRepoFfi.lower( `initRepo`, ), FfiConverterTypeSqliteLocalStateRepoFfi.lower( `sqliteLsRepo`, ), FfiConverterString.lower(`deviceId`), FfiConverterOptionalString.lower(`startupProgressTaskId`) )</ID>
+    <ID>UnnecessarySafeCall:App.kt:selectedTableId?.let { tableId -&gt; vm.createNewTab(tableId) }</ID>
+    <ID>UnreachableCode:App.kt:blobsRepo ?: error("blobs repo failed to load")</ID>
+    <ID>UnreachableCode:App.kt:cameraPreviewFfi ?: error("camera preview ffi failed to load")</ID>
+    <ID>UnreachableCode:App.kt:configRepo ?: error("config repo failed to load")</ID>
+    <ID>UnreachableCode:App.kt:dispatchRepo ?: error("dispatch repo failed to load")</ID>
+    <ID>UnreachableCode:App.kt:drawerRepo ?: error("drawer repo failed to load")</ID>
+    <ID>UnreachableCode:App.kt:fcx ?: error("ffi context initialization failed")</ID>
+    <ID>UnreachableCode:App.kt:initRepo ?: error("init repo failed to load")</ID>
+    <ID>UnreachableCode:App.kt:plugsRepo ?: error("plugs repo failed to load")</ID>
+    <ID>UnreachableCode:App.kt:progressRepo ?: error("progress repo failed to load")</ID>
+    <ID>UnreachableCode:App.kt:sqliteLsRepo ?: error("sqlite local state repo failed to load")</ID>
+    <ID>UnreachableCode:App.kt:tablesRepo ?: error("tables repo failed to load")</ID>
+    <ID>UnreachableCode:TablesRail.kt:table.tabs.size ?: 0</ID>
+    <ID>UnreachableCode:welcome.kt:cloneInitRequest ?: return@LaunchedEffect</ID>
+    <ID>UnreachableCode:welcome.kt:cloneSourceUrlPendingOpen ?: return@LaunchedEffect</ID>
+    <ID>UnreachableCode:welcome.kt:createRepoInitRequest ?: return@LaunchedEffect</ID>
+    <ID>UnsafeCallOnNullableType:CameraPreview.jvm.kt:latestImageBitmap!!</ID>
+    <ID>UnsafeCallOnNullableType:CameraPreview.jvm.kt:message!!</ID>
+    <ID>UnsafeCallOnNullableType:DrawerScreen.kt:selectedDocId!!</ID>
+    <ID>UnusedParameter:DockablePane.kt:edge: Alignment.Horizontal = Alignment.CenterHorizontally</ID>
+    <ID>UnusedParameter:DockablePane.kt:edge: Alignment.Vertical = Alignment.CenterVertically</ID>
+    <ID>UnusedParameter:RevealBottomSheetScaffold.kt:contentColor: Color = contentColorFor(containerColor)</ID>
+    <ID>UnusedParameter:RevealBottomSheetScaffold.kt:hideAnimationSpec: AnimationSpec&lt;Float&gt; = tween()</ID>
+    <ID>UnusedParameter:RevealBottomSheetScaffold.kt:settleAnimationSpec: AnimationSpec&lt;Float&gt; = spring()</ID>
+    <ID>UnusedParameter:RevealBottomSheetScaffold.kt:sheetDragHandle: (@Composable () -&gt; Unit)? = { BottomSheetDefaults.DragHandle() }</ID>
+    <ID>UnusedParameter:RevealBottomSheetScaffold.kt:sheetShadowElevation: Dp = BottomSheetDefaults.Elevation</ID>
+    <ID>UnusedParameter:RevealBottomSheetScaffold.kt:sheetShape: Shape = BottomSheetDefaults.ExpandedShape</ID>
+    <ID>UnusedParameter:RevealBottomSheetScaffold.kt:sheetTonalElevation: Dp = 0.dp</ID>
+    <ID>UnusedParameter:RevealBottomSheetScaffold.kt:showAnimationSpec: AnimationSpec&lt;Float&gt; = tween()</ID>
+    <ID>UnusedParameter:RevealBottomSheetScaffold.kt:state: RevealBottomSheetState</ID>
+    <ID>UnusedParameter:compact.kt:from: SheetContent</ID>
+    <ID>UnusedParameter:compact.kt:onAddTab: suspend () -&gt; Unit</ID>
+    <ID>UnusedPrivateClass:RevealBottomSheetScaffold.kt:RevealSheetValue</ID>
+    <ID>UnusedPrivateFunction:DocEditor.kt:@Composable private fun FacetRackList</ID>
+    <ID>UnusedPrivateFunction:DocEditor.kt:@Composable private fun InlineFacetRack</ID>
+    <ID>UnusedPrivateFunction:compact.kt:private fun handleSheetToggle</ID>
+    <ID>UnusedPrivateProperty:expanded.kt:State$private val onWeightsChanged: ((Map&lt;Any, Float&gt;) -&gt; Unit)? = null</ID>
+    <ID>UnusedVariable:DockablePane.kt:val density = LocalDensity.current</ID>
+    <ID>UnusedVariable:RevealBottomSheetScaffold.kt:val handleColor = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.12f)</ID>
+    <ID>UnusedVariable:RevealBottomSheetScaffold.kt:val handleHeightPx = with(density) { 4.dp.toPx() }</ID>
+    <ID>UnusedVariable:RevealBottomSheetScaffold.kt:val handleWidthPx = with(density) { 36.dp.toPx() }</ID>
+    <ID>UnusedVariable:RevealBottomSheetScaffold.kt:val revealTopPx = (sheetHeightPx - visiblePx).coerceAtLeast(0f)</ID>
+    <ID>UnusedVariable:compact.kt:val addTabReadyState = addTabController.ready.collectAsState()</ID>
+    <ID>UnusedVariable:compact.kt:val addTableReadyState = addTableController.ready.collectAsState()</ID>
+    <ID>UnusedVariable:compact.kt:val listSize = tablesListSnapshot.size</ID>
+    <ID>UnusedVariable:compact.kt:var addButtonWindowRect by remember { mutableStateOf&lt;Rect?&gt;(null) }</ID>
+    <ID>UnusedVariable:expanded.kt:State$val targetWeightA = sizeDpToWeight(sizeA, totalSizeDp, totalWeight)</ID>
+    <ID>UnusedVariable:expanded.kt:State$val targetWeightA = sizeDpToWeight(virtualSizeDpA, totalSizeDp, totalWeight)</ID>
+    <ID>UnusedVariable:expanded.kt:State$val targetWeightB = sizeDpToWeight(sizeB, totalSizeDp, totalWeight)</ID>
+    <ID>UnusedVariable:expanded.kt:State$val targetWeightB = sizeDpToWeight(targetSizeDpB, totalSizeDp, totalWeight)</ID>
+    <ID>UnusedVariable:expanded.kt:State$val targetWeightB = sizeDpToWeight(virtualSizeDpB, totalSizeDp, totalWeight)</ID>
+    <ID>UseOrEmpty:DocEditor.kt:noteDraft ?: ""</ID>
+    <ID>UseOrEmpty:DrawerScreen.kt:mainType?.let { type -&gt; " • $type" } ?: ""</ID>
+    <ID>UseOrEmpty:DrawerScreen.kt:noteJson?.let { value -&gt; decodeWellKnownFacet&lt;WellKnownFacet.Note&gt;(value) .getOrNull() ?.v1 ?.content } ?: ""</ID>
+    <ID>UseOrEmpty:EditorSessionController.kt:EditorSessionController$bundle?.facetHeadsByKey?.mapKeys { (facetKey, _) -&gt; facetKeyRefPathString( facetKey, ) } ?: emptyMap()</ID>
+    <ID>UseOrEmpty:ProgressViewModel.kt:ProgressViewModel$current?.selectedTaskUpdates ?: emptyList()</ID>
+    <ID>UseOrEmpty:TabSelectionList.kt:selectedTable?.tabs?.mapNotNull { tabId -&gt; tablesState.tabs[tabId] } ?: emptyList()</ID>
+    <ID>UseOrEmpty:facets.kt:updatedAt?.asSequence() ?: emptySequence()</ID>
+    <ID>UseOrEmpty:helpers.kt:parsed.parts.lastOrNull() ?: ""</ID>
+    <ID>UseOrEmpty:welcome.kt:errorMessage ?: ""</ID>
+    <ID>UseOrEmpty:welcome.kt:ticketUrl ?: ""</ID>
+    <ID>VarCouldBeVal:compact.kt:var addButtonWindowRect by remember { mutableStateOf&lt;Rect?&gt;(null) }</ID>
+    <ID>VariableNaming:DrawerViewModel.kt:DrawerViewModel$// Internal access for optimistic updates internal val _selectedDocMutable = _selectedDoc</ID>
+    <ID>WildcardImport:CaptureScreen.kt:import androidx.compose.foundation.layout.*</ID>
+    <ID>WildcardImport:CaptureScreen.kt:import androidx.compose.material3.*</ID>
+    <ID>WildcardImport:CaptureScreen.kt:import androidx.compose.runtime.*</ID>
+    <ID>WildcardImport:CaptureScreen.kt:import org.example.daybook.uniffi.core.*</ID>
+    <ID>WildcardImport:DrawerScreen.kt:import androidx.compose.foundation.layout.*</ID>
+    <ID>WildcardImport:DrawerScreen.kt:import androidx.compose.material3.*</ID>
+    <ID>WildcardImport:DrawerScreen.kt:import androidx.compose.runtime.*</ID>
+    <ID>WildcardImport:expanded.kt:import androidx.compose.material3.*</ID>
+    <ID>Wrapping:Drawable0.commonMain.kt:(</ID>
+    <ID>Wrapping:Drawable0.commonMain.kt:("drawable:compose_multiplatform", setOf( ResourceItem(setOf(), "${MD}drawable/compose-multiplatform.xml", -1, -1), ))</ID>
+  </CurrentIssues>
+</SmellBaseline>

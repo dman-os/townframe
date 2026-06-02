@@ -19,10 +19,6 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.ImageBitmap
 import androidx.compose.ui.graphics.toComposeImageBitmap
 import androidx.compose.ui.layout.ContentScale
-import java.awt.image.BufferedImage
-import java.io.ByteArrayOutputStream
-import java.util.logging.Logger
-import javax.imageio.ImageIO
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.awaitCancellation
 import kotlinx.coroutines.delay
@@ -36,23 +32,25 @@ import org.example.daybook.uniffi.CameraPreviewFrame
 import org.example.daybook.uniffi.CameraPreviewFrameEncoding
 import org.example.daybook.uniffi.CameraPreviewFrameListener
 import org.example.daybook.uniffi.FfiException
+import java.awt.image.BufferedImage
+import java.io.ByteArrayOutputStream
+import java.util.logging.Logger
+import javax.imageio.ImageIO
 import org.jetbrains.skia.Image as SkiaImage
 
 private val previewLogger: Logger = Logger.getLogger("DaybookCameraPreviewJvm")
 
-private fun CameraPreviewFrame.toImageBitmap(): ImageBitmap {
-    return when (encoding) {
-        CameraPreviewFrameEncoding.JPEG -> {
-            val skiaImage = SkiaImage.makeFromEncoded(frameBytes)
-            skiaImage.toComposeImageBitmap()
-        }
+private fun CameraPreviewFrame.toImageBitmap(): ImageBitmap = when (encoding) {
+    CameraPreviewFrameEncoding.JPEG -> {
+        val skiaImage = SkiaImage.makeFromEncoded(frameBytes)
+        skiaImage.toComposeImageBitmap()
+    }
 
-        CameraPreviewFrameEncoding.RGB24 -> {
-            val outputBuffer = ByteArrayOutputStream()
-            val wroteImage = ImageIO.write(toRgbBufferedImage(), "jpg", outputBuffer)
-            check(wroteImage) { "failed to encode RGB frame as JPEG for preview" }
-            SkiaImage.makeFromEncoded(outputBuffer.toByteArray()).toComposeImageBitmap()
-        }
+    CameraPreviewFrameEncoding.RGB24 -> {
+        val outputBuffer = ByteArrayOutputStream()
+        val wroteImage = ImageIO.write(toRgbBufferedImage(), "jpg", outputBuffer)
+        check(wroteImage) { "failed to encode RGB frame as JPEG for preview" }
+        SkiaImage.makeFromEncoded(outputBuffer.toByteArray()).toComposeImageBitmap()
     }
 }
 
@@ -81,29 +79,25 @@ private fun CameraPreviewFrame.toRgbBufferedImage(): BufferedImage {
     }
 }
 
-private fun CameraPreviewFrame.toJpegBytes(): ByteArray {
-    return when (encoding) {
-        CameraPreviewFrameEncoding.JPEG -> frameBytes
-        CameraPreviewFrameEncoding.RGB24 -> {
-            val outputBuffer = ByteArrayOutputStream()
-            val wroteImage = ImageIO.write(toRgbBufferedImage(), "jpg", outputBuffer)
-            check(wroteImage) { "failed to encode camera frame as JPEG" }
-            outputBuffer.toByteArray()
-        }
+private fun CameraPreviewFrame.toJpegBytes(): ByteArray = when (encoding) {
+    CameraPreviewFrameEncoding.JPEG -> frameBytes
+
+    CameraPreviewFrameEncoding.RGB24 -> {
+        val outputBuffer = ByteArrayOutputStream()
+        val wroteImage = ImageIO.write(toRgbBufferedImage(), "jpg", outputBuffer)
+        check(wroteImage) { "failed to encode camera frame as JPEG" }
+        outputBuffer.toByteArray()
     }
 }
 
-private fun jpegToImageBitmap(jpegBytes: ByteArray): ImageBitmap {
-    return SkiaImage.makeFromEncoded(jpegBytes).toComposeImageBitmap()
-}
+private fun jpegToImageBitmap(jpegBytes: ByteArray): ImageBitmap =
+    SkiaImage.makeFromEncoded(jpegBytes).toComposeImageBitmap()
 
-private fun CameraPreviewFrame.toFrameSample(): CameraFrameSample {
-    return CameraFrameSample(
-        widthPx = widthPx.toInt(),
-        heightPx = heightPx.toInt(),
-        jpegBytes = toJpegBytes()
-    )
-}
+private fun CameraPreviewFrame.toFrameSample(): CameraFrameSample = CameraFrameSample(
+    widthPx = widthPx.toInt(),
+    heightPx = heightPx.toInt(),
+    jpegBytes = toJpegBytes(),
+)
 
 @Composable
 actual fun DaybookCameraPreview(
@@ -112,7 +106,7 @@ actual fun DaybookCameraPreview(
     selectedDeviceId: Int?,
     onAvailableDevicesChanged: ((List<CameraDeviceInfo>, Int?) -> Unit)?,
     onImageSaved: ((ByteArray) -> Unit)?,
-    onFrameAvailable: ((CameraFrameSample) -> Unit)?
+    onFrameAvailable: ((CameraFrameSample) -> Unit)?,
 ) {
     val captureContext = LocalCameraCaptureContext.current
     val coroutineScope = rememberCoroutineScope()
@@ -191,7 +185,7 @@ actual fun DaybookCameraPreview(
                                 CameraFrameSample(
                                     widthPx = nextFrame.widthPx.toInt(),
                                     heightPx = nextFrame.heightPx.toInt(),
-                                    jpegBytes = jpegBytes
+                                    jpegBytes = jpegBytes,
                                 )
                             withContext(Dispatchers.Default) {
                                 onFrameAvailable.invoke(sample)
@@ -253,16 +247,16 @@ actual fun DaybookCameraPreview(
         if (devices.isEmpty()) {
             Box(
                 modifier = Modifier.fillMaxSize(),
-                contentAlignment = Alignment.Center
+                contentAlignment = Alignment.Center,
             ) {
                 Text(text = errorText ?: "Loading camera devices...")
             }
         } else {
             Box(
                 modifier =
-                    Modifier
-                        .fillMaxSize()
-                        .background(MaterialTheme.colorScheme.surface)
+                Modifier
+                    .fillMaxSize()
+                    .background(MaterialTheme.colorScheme.surface),
             ) {
                 if (latestImageBitmap != null) {
                     Image(
@@ -270,7 +264,7 @@ actual fun DaybookCameraPreview(
                         contentDescription = "Camera preview",
                         modifier = Modifier.fillMaxSize(),
                         contentScale = ContentScale.Crop,
-                        alignment = Alignment.Center
+                        alignment = Alignment.Center,
                     )
                 }
 
@@ -278,7 +272,7 @@ actual fun DaybookCameraPreview(
                     val message = errorText
                     Box(
                         modifier = Modifier.fillMaxSize(),
-                        contentAlignment = Alignment.Center
+                        contentAlignment = Alignment.Center,
                     ) {
                         Text(text = message!!)
                     }

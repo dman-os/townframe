@@ -24,6 +24,7 @@
 
 ## Stack
 
+- [ ] Fix secret store for CI
 - [ ] Change manifest/types module structure for plugs
 - [ ] daybook_server
   - [ ] Decide on wrpc vs json
@@ -45,7 +46,7 @@
   - [x] QR based clone
   - [ ] RPC api versioning scheme
 - [ ] Deterministic doc ids for main docs [LOST]
-- [ ] Prune dependencies
+- [x] Prune dependencies
 - [ ] Blobs server
   - [x] Iroh blobs?
   - [x] Chunked hashing for transfers

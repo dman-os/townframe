@@ -83,29 +83,29 @@ fun BigDialogHost(
             }
         }
         Box(
-            modifier = modifier.fillMaxSize()
+            modifier = modifier.fillMaxSize(),
         ) {
             Box(
                 modifier =
-                    Modifier
-                        .fillMaxSize()
-                        .background(MaterialTheme.colorScheme.scrim.copy(alpha = 0.32f))
-                        .clickable(onClick = { state.dismiss() })
+                Modifier
+                    .fillMaxSize()
+                    .background(MaterialTheme.colorScheme.scrim.copy(alpha = 0.32f))
+                    .clickable(onClick = { state.dismiss() }),
             )
             AnimatedVisibility(
                 visibleState = visibilityState,
                 enter = slideInHorizontally { it } + fadeIn(),
                 exit = slideOutHorizontally { it } + fadeOut(),
-                modifier = Modifier.align(Alignment.CenterEnd)
+                modifier = Modifier.align(Alignment.CenterEnd),
             ) {
                 Surface(
                     shape = RectangleShape,
                     tonalElevation = 2.dp,
                     shadowElevation = 8.dp,
                     modifier =
-                        Modifier
-                            .fillMaxHeight()
-                            .widthIn(min = 420.dp, max = 560.dp),
+                    Modifier
+                        .fillMaxHeight()
+                        .widthIn(min = 420.dp, max = 560.dp),
                 ) {
                     content()
                 }

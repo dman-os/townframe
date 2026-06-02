@@ -2,6 +2,9 @@
 
 package org.example.daybook.ui
 
+import androidx.compose.foundation.hoverable
+import androidx.compose.foundation.interaction.MutableInteractionSource
+import androidx.compose.foundation.interaction.collectIsHoveredAsState
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.BoxWithConstraints
@@ -16,9 +19,6 @@ import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
-import androidx.compose.foundation.hoverable
-import androidx.compose.foundation.interaction.MutableInteractionSource
-import androidx.compose.foundation.interaction.collectIsHoveredAsState
 import androidx.compose.foundation.relocation.BringIntoViewRequester
 import androidx.compose.foundation.relocation.bringIntoViewRequester
 import androidx.compose.foundation.rememberScrollState
@@ -26,11 +26,10 @@ import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.ArrowDownward
 import androidx.compose.material.icons.filled.ArrowUpward
-import androidx.compose.material.icons.filled.CheckCircle
 import androidx.compose.material.icons.filled.Error
 import androidx.compose.material.icons.filled.MoreVert
-import androidx.compose.material.icons.filled.Sync
 import androidx.compose.material.icons.filled.Star
+import androidx.compose.material.icons.filled.Sync
 import androidx.compose.material.icons.outlined.StarOutline
 import androidx.compose.material3.DropdownMenu
 import androidx.compose.material3.DropdownMenuItem
@@ -40,9 +39,9 @@ import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.PlainTooltip
-import androidx.compose.material3.Surface
 import androidx.compose.material3.SnackbarHost
 import androidx.compose.material3.SnackbarHostState
+import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextField
 import androidx.compose.material3.TextFieldDefaults
@@ -59,14 +58,14 @@ import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.draw.clip
+import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.graphics.vector.ImageVector
 import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
-import androidx.compose.ui.graphics.Color
-import androidx.compose.ui.graphics.vector.ImageVector
 import androidx.compose.ui.unit.dp
-import androidx.compose.ui.draw.clip
 import coil3.compose.AsyncImage
 import org.example.daybook.LocalContainer
 import org.example.daybook.ui.editor.EditorSessionController
@@ -82,14 +81,10 @@ import org.example.daybook.uniffi.types.WellKnownFacet
 private enum class EditorSaveStatus {
     Idle,
     Saving,
-    Error
+    Error,
 }
 
-private data class SaveStatusUi(
-    val icon: ImageVector,
-    val tint: Color,
-    val label: String,
-)
+private data class SaveStatusUi(val icon: ImageVector, val tint: Color, val label: String)
 
 @Composable
 fun DocEditor(
@@ -127,13 +122,13 @@ fun DocEditor(
                 placeholder = { Text("Title") },
                 textStyle = MaterialTheme.typography.titleLarge.copy(fontWeight = FontWeight.Bold),
                 colors =
-                    TextFieldDefaults.colors(
-                        focusedContainerColor = androidx.compose.ui.graphics.Color.Transparent,
-                        unfocusedContainerColor = androidx.compose.ui.graphics.Color.Transparent,
-                        disabledContainerColor = androidx.compose.ui.graphics.Color.Transparent,
-                        focusedIndicatorColor = androidx.compose.ui.graphics.Color.Transparent,
-                        unfocusedIndicatorColor = androidx.compose.ui.graphics.Color.Transparent,
-                    )
+                TextFieldDefaults.colors(
+                    focusedContainerColor = androidx.compose.ui.graphics.Color.Transparent,
+                    unfocusedContainerColor = androidx.compose.ui.graphics.Color.Transparent,
+                    disabledContainerColor = androidx.compose.ui.graphics.Color.Transparent,
+                    focusedIndicatorColor = androidx.compose.ui.graphics.Color.Transparent,
+                    unfocusedIndicatorColor = androidx.compose.ui.graphics.Color.Transparent,
+                ),
             )
             state.titleNotice?.let { titleNotice ->
                 Text(
@@ -148,7 +143,7 @@ fun DocEditor(
             BoxWithConstraints(modifier = Modifier.weight(1f).fillMaxWidth()) {
                 val facetViewportHeight = maxHeight
                 Column(
-                    modifier = Modifier.fillMaxWidth().verticalScroll(rememberScrollState())
+                    modifier = Modifier.fillMaxWidth().verticalScroll(rememberScrollState()),
                 ) {
                     if (state.contentFacetViews.isEmpty()) {
                         Text(
@@ -190,12 +185,12 @@ fun DocEditor(
                         Text(
                             text = "Details",
                             style = MaterialTheme.typography.titleSmall,
-                            modifier = Modifier.padding(bottom = 8.dp)
+                            modifier = Modifier.padding(bottom = 8.dp),
                         )
                         DocDetailsSidebar(
                             doc = state.doc,
                             warnings = state.docWarnings,
-                            modifier = Modifier.fillMaxWidth()
+                            modifier = Modifier.fillMaxWidth(),
                         )
                     }
                 }
@@ -204,7 +199,7 @@ fun DocEditor(
 
         SnackbarHost(
             hostState = snackbarHostState,
-            modifier = Modifier.align(Alignment.BottomCenter).padding(8.dp)
+            modifier = Modifier.align(Alignment.BottomCenter).padding(8.dp),
         )
     }
 }
@@ -252,13 +247,13 @@ private fun FacetListItem(
                     maxLines = noteMaxLines,
                     placeholder = { Text("Start typing...") },
                     colors =
-                        TextFieldDefaults.colors(
-                            focusedContainerColor = androidx.compose.ui.graphics.Color.Transparent,
-                            unfocusedContainerColor = androidx.compose.ui.graphics.Color.Transparent,
-                            disabledContainerColor = androidx.compose.ui.graphics.Color.Transparent,
-                            focusedIndicatorColor = androidx.compose.ui.graphics.Color.Transparent,
-                            unfocusedIndicatorColor = androidx.compose.ui.graphics.Color.Transparent,
-                        )
+                    TextFieldDefaults.colors(
+                        focusedContainerColor = androidx.compose.ui.graphics.Color.Transparent,
+                        unfocusedContainerColor = androidx.compose.ui.graphics.Color.Transparent,
+                        disabledContainerColor = androidx.compose.ui.graphics.Color.Transparent,
+                        focusedIndicatorColor = androidx.compose.ui.graphics.Color.Transparent,
+                        unfocusedIndicatorColor = androidx.compose.ui.graphics.Color.Transparent,
+                    ),
                 )
                 noteNotice?.let {
                     Text(
@@ -268,6 +263,7 @@ private fun FacetListItem(
                     )
                 }
             }
+
             FacetEditorKind.ImageMetadata -> {
                 ImageFacetView(
                     descriptor = descriptor,
@@ -275,6 +271,7 @@ private fun FacetListItem(
                     onError = onUiError,
                 )
             }
+
             FacetEditorKind.GenericJson -> {
                 GenericFacetView(rawValue = descriptor.rawValue)
             }
@@ -366,22 +363,23 @@ private fun FacetHeader(
 }
 
 @Composable
-private fun toSaveStatusUi(saveStatus: EditorSaveStatus): SaveStatusUi? =
-    when (saveStatus) {
-        EditorSaveStatus.Idle -> null
-        EditorSaveStatus.Saving ->
-            SaveStatusUi(
-                icon = Icons.Filled.Sync,
-                tint = MaterialTheme.colorScheme.primary,
-                label = "Saving"
-            )
-        EditorSaveStatus.Error ->
-            SaveStatusUi(
-                icon = Icons.Filled.Error,
-                tint = MaterialTheme.colorScheme.error,
-                label = "Save failed"
-            )
-    }
+private fun toSaveStatusUi(saveStatus: EditorSaveStatus): SaveStatusUi? = when (saveStatus) {
+    EditorSaveStatus.Idle -> null
+
+    EditorSaveStatus.Saving ->
+        SaveStatusUi(
+            icon = Icons.Filled.Sync,
+            tint = MaterialTheme.colorScheme.primary,
+            label = "Saving",
+        )
+
+    EditorSaveStatus.Error ->
+        SaveStatusUi(
+            icon = Icons.Filled.Error,
+            tint = MaterialTheme.colorScheme.error,
+            label = "Save failed",
+        )
+}
 
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
@@ -390,7 +388,7 @@ private fun EditorSaveStatusIndicator(saveStatus: EditorSaveStatus, modifier: Mo
     Row(
         modifier = modifier.padding(horizontal = 12.dp, vertical = 4.dp),
         horizontalArrangement = Arrangement.End,
-        verticalAlignment = Alignment.CenterVertically
+        verticalAlignment = Alignment.CenterVertically,
     ) {
         TooltipBox(
             positionProvider = TooltipDefaults.rememberPlainTooltipPositionProvider(),
@@ -443,17 +441,13 @@ private fun GenericFacetView(rawValue: String) {
 }
 
 @Composable
-private fun ImageFacetView(
-    descriptor: FacetViewDescriptor,
-    doc: Doc?,
-    onError: (String) -> Unit,
-) {
+private fun ImageFacetView(descriptor: FacetViewDescriptor, doc: Doc?, onError: (String) -> Unit) {
     val blobsRepo = LocalContainer.current.blobsRepo
     val imageMeta =
         decodeWellKnownFacet<WellKnownFacet.ImageMetadata>(descriptor.rawValue)
             .getOrElse {
                 ImageFacetError(
-                    "Invalid image metadata facet payload; image preview disabled to avoid destructive edits."
+                    "Invalid image metadata facet payload; image preview disabled to avoid destructive edits.",
                 )
                 return
             }
@@ -484,7 +478,7 @@ private fun ImageFacetView(
         decodeWellKnownFacet<WellKnownFacet.Blob>(blobValue)
             .getOrElse {
                 ImageFacetError(
-                    "Invalid blob facet payload; image preview disabled to avoid destructive edits."
+                    "Invalid blob facet payload; image preview disabled to avoid destructive edits.",
                 )
                 return
             }
@@ -532,7 +526,7 @@ private fun ImageFacetView(
                     modifier = Modifier.align(Alignment.BottomEnd).padding(8.dp),
                 ) {
                     Text(
-                        text = "${width}×${height}",
+                        text = "$width×$height",
                         style = MaterialTheme.typography.labelSmall,
                         modifier = Modifier.padding(horizontal = 8.dp, vertical = 4.dp),
                     )
@@ -542,7 +536,7 @@ private fun ImageFacetView(
             Text(
                 "Image path unavailable",
                 style = MaterialTheme.typography.bodySmall,
-                color = MaterialTheme.colorScheme.onSurfaceVariant
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
             )
         }
     }
@@ -559,27 +553,20 @@ private fun ImageFacetError(message: String) {
 }
 
 @Composable
-fun DocFacetSidebar(
-    controller: EditorSessionController,
-    modifier: Modifier = Modifier,
-) {
+fun DocFacetSidebar(controller: EditorSessionController, modifier: Modifier = Modifier) {
     val state by controller.state.collectAsState()
     Column(modifier = modifier.fillMaxSize().padding(8.dp)) {
         Text(
             text = "Details",
             style = MaterialTheme.typography.titleSmall,
-            modifier = Modifier.padding(bottom = 8.dp)
+            modifier = Modifier.padding(bottom = 8.dp),
         )
         DocDetailsSidebar(doc = state.doc, warnings = state.docWarnings, modifier = Modifier.fillMaxSize())
     }
 }
 
 @Composable
-private fun DocDetailsSidebar(
-    doc: Doc?,
-    warnings: List<String> = emptyList(),
-    modifier: Modifier = Modifier,
-) {
+private fun DocDetailsSidebar(doc: Doc?, warnings: List<String> = emptyList(), modifier: Modifier = Modifier) {
     val dmetaParseWarning = mutableListOf<String>()
     val dmetaDetails = run {
         val raw = doc?.facets?.get(dmetaFacetKey()) ?: return@run null
@@ -616,14 +603,18 @@ private fun DocDetailsSidebar(
         DetailRow("Last modified", dmetaDetails?.lastModifiedAt ?: "Unknown")
         DetailRow(
             "Supported facets",
-            (doc?.facets?.keys
-                ?.count { key ->
-                    when ((key.tag as? org.example.daybook.uniffi.types.FacetTag.WellKnown)?.v1) {
-                        org.example.daybook.uniffi.types.WellKnownFacetTag.NOTE,
-                        org.example.daybook.uniffi.types.WellKnownFacetTag.IMAGE_METADATA -> true
-                        else -> false
-                    }
-                } ?: 0).toString()
+            (
+                doc?.facets?.keys
+                    ?.count { key ->
+                        when ((key.tag as? org.example.daybook.uniffi.types.FacetTag.WellKnown)?.v1) {
+                            org.example.daybook.uniffi.types.WellKnownFacetTag.NOTE,
+                            org.example.daybook.uniffi.types.WellKnownFacetTag.IMAGE_METADATA,
+                            -> true
+
+                            else -> false
+                        }
+                    } ?: 0
+                ).toString(),
         )
     }
 }
@@ -646,27 +637,24 @@ private fun DetailRow(label: String, value: String) {
 }
 
 @Composable
-private fun InlineFacetRack(
-    facetRows: List<Pair<FacetKey, String>>,
-    modifier: Modifier = Modifier,
-) {
+private fun InlineFacetRack(facetRows: List<Pair<FacetKey, String>>, modifier: Modifier = Modifier) {
     Column(modifier = modifier) {
         facetRows.forEach { facetRow ->
             Row(
                 modifier = Modifier.fillMaxWidth().padding(vertical = 4.dp),
-                horizontalArrangement = Arrangement.SpaceBetween
+                horizontalArrangement = Arrangement.SpaceBetween,
             ) {
                 Text(
                     text = facetKeyString(facetRow.first),
                     style = MaterialTheme.typography.bodySmall,
-                    modifier = Modifier.weight(0.45f)
+                    modifier = Modifier.weight(0.45f),
                 )
                 Text(
                     text = previewFacetValue(facetRow.second),
                     style = MaterialTheme.typography.bodySmall,
                     maxLines = 2,
                     overflow = TextOverflow.Ellipsis,
-                    modifier = Modifier.weight(0.55f)
+                    modifier = Modifier.weight(0.55f),
                 )
             }
         }
@@ -674,27 +662,24 @@ private fun InlineFacetRack(
 }
 
 @Composable
-private fun FacetRackList(
-    facetRows: List<Pair<FacetKey, String>>,
-    modifier: Modifier = Modifier,
-) {
+private fun FacetRackList(facetRows: List<Pair<FacetKey, String>>, modifier: Modifier = Modifier) {
     LazyColumn(modifier = modifier) {
         items(facetRows) { facetRow ->
             Row(
                 modifier = Modifier.fillMaxWidth().padding(vertical = 4.dp),
-                horizontalArrangement = Arrangement.SpaceBetween
+                horizontalArrangement = Arrangement.SpaceBetween,
             ) {
                 Text(
                     text = facetKeyString(facetRow.first),
                     style = MaterialTheme.typography.bodySmall,
-                    modifier = Modifier.weight(0.45f)
+                    modifier = Modifier.weight(0.45f),
                 )
                 Text(
                     text = previewFacetValue(facetRow.second),
                     style = MaterialTheme.typography.bodySmall,
                     maxLines = 2,
                     overflow = TextOverflow.Ellipsis,
-                    modifier = Modifier.weight(0.55f)
+                    modifier = Modifier.weight(0.55f),
                 )
             }
         }

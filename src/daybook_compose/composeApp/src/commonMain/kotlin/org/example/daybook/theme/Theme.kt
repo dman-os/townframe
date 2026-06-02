@@ -1,6 +1,5 @@
 package org.example.daybook.theme
 
-import androidx.compose.foundation.isSystemInDarkTheme
 import androidx.compose.material3.ColorScheme
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.darkColorScheme
@@ -19,6 +18,6 @@ sealed class ThemeConfig(val colorsScheme: ColorScheme) {
 fun DaybookTheme(themeConfig: ThemeConfig, content: @Composable () -> Unit) {
     MaterialTheme(
         colorScheme = themeConfig.colorsScheme,
-        content = content
+        content = content,
     )
 }

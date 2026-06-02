@@ -5,8 +5,6 @@
 package org.example.daybook
 
 import androidx.compose.animation.AnimatedVisibility
-import androidx.compose.animation.EnterTransition
-import androidx.compose.animation.ExitTransition
 import androidx.compose.animation.core.FastOutSlowInEasing
 import androidx.compose.animation.core.RepeatMode
 import androidx.compose.animation.core.animateFloat
@@ -17,43 +15,25 @@ import androidx.compose.animation.slideInHorizontally
 import androidx.compose.animation.slideOutHorizontally
 import androidx.compose.foundation.Image
 import androidx.compose.foundation.background
-import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
-import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
-import androidx.compose.foundation.layout.fillMaxHeight
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
-import androidx.compose.foundation.layout.width
-import androidx.compose.foundation.lazy.LazyColumn
-import androidx.compose.foundation.lazy.items
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.Add
-import androidx.compose.material.icons.filled.ArrowBack
-import androidx.compose.material.icons.filled.CreateNewFolder
 import androidx.compose.material.icons.filled.Description
-import androidx.compose.material.icons.filled.FolderOpen
-import androidx.compose.material.icons.filled.QrCodeScanner
 import androidx.compose.material.icons.filled.Settings
 import androidx.compose.material3.Button
 import androidx.compose.material3.CircularProgressIndicator
-import androidx.compose.material3.ElevatedCard
 import androidx.compose.material3.ExperimentalMaterial3Api
-import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.Icon
-import androidx.compose.material3.IconButton
-import androidx.compose.material3.LargeTopAppBar
 import androidx.compose.material3.MaterialTheme
-import androidx.compose.material3.OutlinedButton
-import androidx.compose.material3.OutlinedTextField
-import androidx.compose.material3.Scaffold
 import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
-import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.CompositionLocalProvider
 import androidx.compose.runtime.LaunchedEffect
@@ -62,7 +42,6 @@ import androidx.compose.runtime.compositionLocalOf
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
-import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.setValue
 import androidx.compose.runtime.staticCompositionLocalOf
 import androidx.compose.ui.Alignment
@@ -76,17 +55,11 @@ import androidx.lifecycle.viewmodel.compose.viewModel
 import androidx.navigation.NavHostController
 import androidx.navigation.compose.NavHost
 import androidx.navigation.compose.composable
-import androidx.navigation.compose.currentBackStackEntryAsState
 import androidx.navigation.compose.rememberNavController
 import daybook.composeapp.generated.resources.Res
 import daybook.composeapp.generated.resources.compose_multiplatform
-import io.github.vinceglb.filekit.dialogs.compose.rememberDirectoryPickerLauncher
 import io.github.vinceglb.filekit.path
-import kotlin.time.Clock
-import kotlin.time.TimeMark
-import kotlin.time.TimeSource
 import kotlinx.coroutines.CancellationException
-import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.TimeoutCancellationException
 import kotlinx.coroutines.flow.MutableStateFlow
@@ -97,14 +70,9 @@ import kotlinx.coroutines.withContext
 import kotlinx.coroutines.withTimeout
 import org.example.daybook.capture.CameraCaptureContext
 import org.example.daybook.capture.ProvideCameraCaptureContext
-import org.example.daybook.capture.data.CameraOverlay
-import org.example.daybook.capture.data.CameraPreviewQrBridge
-import org.example.daybook.capture.data.CameraQrOverlayBridge
 import org.example.daybook.capture.screens.CaptureScreen
-import org.example.daybook.capture.ui.DaybookCameraViewport
 import org.example.daybook.drawer.DocEditorScreen
 import org.example.daybook.drawer.DrawerScreen
-import org.example.daybook.progress.ProgressAmountBlock
 import org.example.daybook.progress.ProgressList
 import org.example.daybook.settings.SettingsScreen
 import org.example.daybook.tables.CompactLayout
@@ -112,7 +80,6 @@ import org.example.daybook.tables.ExpandedLayout
 import org.example.daybook.theme.DaybookTheme
 import org.example.daybook.theme.ThemeConfig
 import org.example.daybook.uniffi.CameraPreviewFfi
-import org.example.daybook.uniffi.CameraQrAnalyzerFfi
 import org.example.daybook.uniffi.ConfigRepoFfi
 import org.example.daybook.uniffi.DispatchRepoFfi
 import org.example.daybook.uniffi.DrawerRepoFfi
@@ -132,8 +99,6 @@ import org.example.daybook.uniffi.core.Panel
 import org.example.daybook.uniffi.core.ProgressFinalState
 import org.example.daybook.uniffi.core.ProgressRetentionPolicy
 import org.example.daybook.uniffi.core.ProgressSeverity
-import org.example.daybook.uniffi.core.ProgressTask
-import org.example.daybook.uniffi.core.ProgressTaskState
 import org.example.daybook.uniffi.core.ProgressUnit
 import org.example.daybook.uniffi.core.ProgressUpdate
 import org.example.daybook.uniffi.core.ProgressUpdateDeets
@@ -144,16 +109,19 @@ import org.example.daybook.uniffi.core.Uuid
 import org.example.daybook.uniffi.core.Window
 import org.jetbrains.compose.resources.painterResource
 import org.jetbrains.compose.ui.tooling.preview.Preview
+import kotlin.time.Clock
+import kotlin.time.TimeMark
+import kotlin.time.TimeSource
 
 enum class DaybookNavigationType {
     BOTTOM_NAVIGATION,
     NAVIGATION_RAIL,
-    PERMANENT_NAVIGATION_DRAWER
+    PERMANENT_NAVIGATION_DRAWER,
 }
 
 enum class DaybookContentType {
     LIST_ONLY,
-    LIST_AND_DETAIL
+    LIST_AND_DETAIL,
 }
 
 val LocalPermCtx = compositionLocalOf<PermissionsContext?> { null }
@@ -166,7 +134,7 @@ data class PermissionsContext(
     val hasOverlay: Boolean = false,
     val hasStorageRead: Boolean = false,
     val hasStorageWrite: Boolean = false,
-    val requestPermissions: (PermissionRequest) -> Unit = {}
+    val requestPermissions: (PermissionRequest) -> Unit = {},
 ) {
     val hasAll =
         hasCamera and hasNotifications and hasMicrophone and hasOverlay and hasStorageRead and
@@ -179,7 +147,7 @@ data class PermissionRequest(
     val microphone: Boolean = false,
     val overlay: Boolean = false,
     val storageRead: Boolean = false,
-    val storageWrite: Boolean = false
+    val storageWrite: Boolean = false,
 )
 
 data class AppContainer(
@@ -195,7 +163,7 @@ data class AppContainer(
     val configRepo: ConfigRepoFfi,
     val blobsRepo: org.example.daybook.uniffi.BlobsRepoFfi,
     val syncRepo: SyncRepoFfi?,
-    val cameraPreviewFfi: CameraPreviewFfi
+    val cameraPreviewFfi: CameraPreviewFfi,
 )
 
 val LocalContainer =
@@ -222,7 +190,7 @@ enum class AppScreens {
     Progress,
     Settings,
     Drawer,
-    DocEditor
+    DocEditor,
 }
 
 private sealed interface AppInitState {
@@ -242,7 +210,7 @@ sealed interface TablesState {
         val windows: Map<Uuid, Window>,
         val tabs: Map<Uuid, Tab>,
         val panels: Map<Uuid, Panel>,
-        val tables: Map<Uuid, Table>
+        val tables: Map<Uuid, Table>,
     ) : TablesState {
         // Convenience properties for UI
         val windowsList: List<Window> get() = windows.values.toList()
@@ -261,14 +229,14 @@ private data class TablesRefreshIntent(
     val windows: Set<Uuid> = emptySet(),
     val tabs: Set<Uuid> = emptySet(),
     val panels: Set<Uuid> = emptySet(),
-    val tables: Set<Uuid> = emptySet()
+    val tables: Set<Uuid> = emptySet(),
 ) {
     fun merge(other: TablesRefreshIntent): TablesRefreshIntent = TablesRefreshIntent(
         refreshAll = refreshAll || other.refreshAll,
         windows = windows + other.windows,
         tabs = tabs + other.tabs,
         panels = panels + other.panels,
-        tables = tables + other.tables
+        tables = tables + other.tables,
     )
 
     companion object {
@@ -292,7 +260,7 @@ class TablesViewModel(val tablesRepo: TablesRepoFfi) : ViewModel() {
             scope = viewModelScope,
             debounceMs = 60,
             merge = { left: TablesRefreshIntent, right: TablesRefreshIntent -> left.merge(right) },
-            onIntent = { intent: TablesRefreshIntent -> applyRefreshIntent(intent) }
+            onIntent = { intent: TablesRefreshIntent -> applyRefreshIntent(intent) },
         )
 
     // Listener instance implemented on Kotlin side
@@ -374,7 +342,7 @@ class TablesViewModel(val tablesRepo: TablesRepoFfi) : ViewModel() {
                     windows = windows.associateBy { it.id },
                     tabs = tabs.associateBy { it.id },
                     panels = panels.associateBy { it.id },
-                    tables = tables.associateBy { it.id }
+                    tables = tables.associateBy { it.id },
                 )
 
             // Auto-select first table if none is selected
@@ -577,7 +545,7 @@ private class StartupProgressTask(
     private val progressRepo: ProgressRepoFfi,
     val taskId: String,
     private val appElapsedMillis: () -> Long,
-    private val totalStages: Int
+    private val totalStages: Int,
 ) {
     private var doneStages = 0
 
@@ -586,8 +554,8 @@ private class StartupProgressTask(
             CreateProgressTaskArgs(
                 id = taskId,
                 tags = listOf("/app/init", "/app/init/open-repo"),
-                retention = ProgressRetentionPolicy.UserDismissable
-            )
+                retention = ProgressRetentionPolicy.UserDismissable,
+            ),
         )
         progressRepo.addUpdate(
             taskId,
@@ -595,12 +563,12 @@ private class StartupProgressTask(
                 at = Clock.System.now(),
                 title = "App startup",
                 deets =
-                    ProgressUpdateDeets.Status(
-                        severity = ProgressSeverity.INFO,
-                        message =
-                            "startup phase begin phase=$phaseId (open_elapsed=$startupElapsed from_app_start_ms=${appElapsedMillis()})"
-                    )
-            )
+                ProgressUpdateDeets.Status(
+                    severity = ProgressSeverity.INFO,
+                    message =
+                    "startup phase begin phase=$phaseId (open_elapsed=$startupElapsed from_app_start_ms=${appElapsedMillis()})",
+                ),
+            ),
         )
         progressRepo.addUpdate(
             taskId,
@@ -608,12 +576,12 @@ private class StartupProgressTask(
                 at = Clock.System.now(),
                 title = "App startup",
                 deets =
-                    ProgressUpdateDeets.Status(
-                        severity = ProgressSeverity.INFO,
-                        message =
-                            "opening repo $repoPath (open_elapsed=$startupElapsed from_app_start_ms=${appElapsedMillis()})"
-                    )
-            )
+                ProgressUpdateDeets.Status(
+                    severity = ProgressSeverity.INFO,
+                    message =
+                    "opening repo $repoPath (open_elapsed=$startupElapsed from_app_start_ms=${appElapsedMillis()})",
+                ),
+            ),
         )
     }
 
@@ -624,12 +592,12 @@ private class StartupProgressTask(
                 at = Clock.System.now(),
                 title = "App startup",
                 deets =
-                    ProgressUpdateDeets.Status(
-                        severity = ProgressSeverity.INFO,
-                        message =
-                            "starting $stage (open_elapsed=$startupElapsed from_app_start_ms=${appElapsedMillis()})"
-                    )
-            )
+                ProgressUpdateDeets.Status(
+                    severity = ProgressSeverity.INFO,
+                    message =
+                    "starting $stage (open_elapsed=$startupElapsed from_app_start_ms=${appElapsedMillis()})",
+                ),
+            ),
         )
     }
 
@@ -641,15 +609,15 @@ private class StartupProgressTask(
                 at = Clock.System.now(),
                 title = "App startup",
                 deets =
-                    ProgressUpdateDeets.Amount(
-                        severity = ProgressSeverity.INFO,
-                        done = doneStages.toULong(),
-                        total = totalStages.toULong(),
-                        unit = ProgressUnit.Generic("stage"),
-                        message =
-                            "$stage done in $stageElapsed (open_elapsed=$startupElapsed from_app_start_ms=${appElapsedMillis()})"
-                    )
-            )
+                ProgressUpdateDeets.Amount(
+                    severity = ProgressSeverity.INFO,
+                    done = doneStages.toULong(),
+                    total = totalStages.toULong(),
+                    unit = ProgressUnit.Generic("stage"),
+                    message =
+                    "$stage done in $stageElapsed (open_elapsed=$startupElapsed from_app_start_ms=${appElapsedMillis()})",
+                ),
+            ),
         )
     }
 
@@ -660,12 +628,12 @@ private class StartupProgressTask(
                 at = Clock.System.now(),
                 title = "App startup",
                 deets =
-                    ProgressUpdateDeets.Completed(
-                        state = ProgressFinalState.FAILED,
-                        message =
-                            "$message (open_elapsed=$startupElapsed from_app_start_ms=${appElapsedMillis()})"
-                    )
-            )
+                ProgressUpdateDeets.Completed(
+                    state = ProgressFinalState.FAILED,
+                    message =
+                    "$message (open_elapsed=$startupElapsed from_app_start_ms=${appElapsedMillis()})",
+                ),
+            ),
         )
     }
 
@@ -676,12 +644,12 @@ private class StartupProgressTask(
                 at = Clock.System.now(),
                 title = "App startup",
                 deets =
-                    ProgressUpdateDeets.Completed(
-                        state = ProgressFinalState.SUCCEEDED,
-                        message =
-                            "startup complete (open_elapsed=$startupElapsed from_app_start_ms=${appElapsedMillis()})"
-                    )
-            )
+                ProgressUpdateDeets.Completed(
+                    state = ProgressFinalState.SUCCEEDED,
+                    message =
+                    "startup complete (open_elapsed=$startupElapsed from_app_start_ms=${appElapsedMillis()})",
+                ),
+            ),
         )
     }
 }
@@ -690,7 +658,7 @@ private suspend fun <T> withStartupStage(
     stage: String,
     startupMark: TimeMark,
     progress: StartupProgressTask?,
-    block: suspend () -> T
+    block: suspend () -> T,
 ): T {
     val stageMark = TimeSource.Monotonic.markNow()
     progress?.stageStart(stage, startupMark.elapsedNow().toString())
@@ -699,13 +667,13 @@ private suspend fun <T> withStartupStage(
         progress?.stageDone(
             stage,
             stageMark.elapsedNow().toString(),
-            startupMark.elapsedNow().toString()
+            startupMark.elapsedNow().toString(),
         )
         return out
     } catch (t: Throwable) {
         progress?.fail(
             "stage $stage failed: ${t.message ?: "unknown error"}",
-            startupMark.elapsedNow().toString()
+            startupMark.elapsedNow().toString(),
         )
         throw t
     }
@@ -721,7 +689,7 @@ fun App(
     shutdownRequested: Boolean = false,
     onShutdownCompleted: (() -> Unit)? = null,
     autoShutdownOnDispose: Boolean = true,
-    onExitRequest: (() -> Unit)? = null
+    onExitRequest: (() -> Unit)? = null,
 ) {
     val permCtx = LocalPermCtx.current
     val appStartMark = remember { TimeSource.Monotonic.markNow() }
@@ -842,12 +810,12 @@ fun App(
                             progressRepo = progressRepo ?: error("progress repo failed to load"),
                             taskId = STARTUP_PROGRESS_TASK_ID,
                             appElapsedMillis = { appStartMark.elapsedNow().inWholeMilliseconds },
-                            totalStages = startupStageCount
+                            totalStages = startupStageCount,
                         )
                     startupProgress.begin(
                         repoPath,
                         startupMark.elapsedNow().toString(),
-                        startupPhaseId
+                        startupPhaseId,
                     )
                     tablesRepo =
                         withStartupStage("TablesRepoFfi.load", startupMark, startupProgress) {
@@ -863,7 +831,7 @@ fun App(
                                 .load(
                                     fcx = fcxReady,
                                     blobsRepo =
-                                        blobsRepo ?: error("blobs repo failed to load")
+                                    blobsRepo ?: error("blobs repo failed to load"),
                                 )
                         }
                     drawerRepo =
@@ -871,7 +839,7 @@ fun App(
                             DrawerRepoFfi.load(
                                 fcx = fcxReady,
                                 plugsRepo =
-                                    plugsRepo ?: error("plugs repo failed to load")
+                                plugsRepo ?: error("plugs repo failed to load"),
                             )
                         }
                     configRepo =
@@ -879,7 +847,7 @@ fun App(
                             ConfigRepoFfi.load(
                                 fcx = fcxReady,
                                 plugRepo =
-                                    plugsRepo ?: error("plugs repo failed to load")
+                                plugsRepo ?: error("plugs repo failed to load"),
                             )
                         }
                     dispatchRepo =
@@ -891,14 +859,14 @@ fun App(
                             InitRepoFfi.load(
                                 fcx = fcxReady,
                                 progressRepo =
-                                    progressRepo ?: error("progress repo failed to load")
+                                progressRepo ?: error("progress repo failed to load"),
                             )
                         }
                     sqliteLsRepo =
                         withStartupStage(
                             "SqliteLocalStateRepoFfi.load",
                             startupMark,
-                            startupProgress
+                            startupProgress,
                         ) {
                             SqliteLocalStateRepoFfi.load(fcx = fcxReady)
                         }
@@ -917,14 +885,14 @@ fun App(
                         progressRepo = progressRepo ?: error("progress repo failed to load"),
                         initRepo = initRepo ?: error("init repo failed to load"),
                         sqliteLsRepo =
-                            sqliteLsRepo ?: error("sqlite local state repo failed to load"),
+                        sqliteLsRepo ?: error("sqlite local state repo failed to load"),
                         rtFfi = null,
                         plugsRepo = plugsRepo ?: error("plugs repo failed to load"),
                         configRepo = configRepo ?: error("config repo failed to load"),
                         blobsRepo = blobsRepo ?: error("blobs repo failed to load"),
                         syncRepo = null,
                         cameraPreviewFfi =
-                            cameraPreviewFfi ?: error("camera preview ffi failed to load")
+                        cameraPreviewFfi ?: error("camera preview ffi failed to load"),
                     )
                 } catch (throwable: Throwable) {
                     if (throwable is CancellationException) throw throwable
@@ -983,7 +951,7 @@ fun App(
                     configRepo = current.configRepo,
                     blobsRepo = current.blobsRepo,
                     drawerRepo = current.drawerRepo,
-                    progressRepo = current.progressRepo
+                    progressRepo = current.progressRepo,
                 )
             }
             println("[APP_INIT] stage=deferred SyncRepoFfi.load done")
@@ -1001,7 +969,7 @@ fun App(
                     initRepo = current.initRepo,
                     sqliteLsRepo = current.sqliteLsRepo,
                     deviceId = "compose-client",
-                    startupProgressTaskId = STARTUP_PROGRESS_TASK_ID
+                    startupProgressTaskId = STARTUP_PROGRESS_TASK_ID,
                 )
             }
             println("[APP_INIT] stage=deferred RtFfi.load done")
@@ -1012,12 +980,12 @@ fun App(
                         at = Clock.System.now(),
                         title = "App startup",
                         deets =
-                            ProgressUpdateDeets.Completed(
-                                state = ProgressFinalState.SUCCEEDED,
-                                message =
-                                    "startup complete (from_app_start_ms=${appStartMark.elapsedNow().inWholeMilliseconds})"
-                            )
-                    )
+                        ProgressUpdateDeets.Completed(
+                            state = ProgressFinalState.SUCCEEDED,
+                            message =
+                            "startup complete (from_app_start_ms=${appStartMark.elapsedNow().inWholeMilliseconds})",
+                        ),
+                    ),
                 )
             }
             initState = AppInitState.Ready(current.copy(syncRepo = loadedSyncRepo, rtFfi = rtFfi))
@@ -1043,12 +1011,12 @@ fun App(
                         at = Clock.System.now(),
                         title = "App startup",
                         deets =
-                            ProgressUpdateDeets.Completed(
-                                state = ProgressFinalState.FAILED,
-                                message =
-                                    "startup failed during deferred runtime load: ${throwable.message ?: "unknown error"} (from_app_start_ms=${appStartMark.elapsedNow().inWholeMilliseconds})"
-                            )
-                    )
+                        ProgressUpdateDeets.Completed(
+                            state = ProgressFinalState.FAILED,
+                            message =
+                            "startup failed during deferred runtime load: ${throwable.message ?: "unknown error"} (from_app_start_ms=${appStartMark.elapsedNow().inWholeMilliseconds})",
+                        ),
+                    ),
                 )
                 runCatching { current.progressRepo.close() }
             }
@@ -1081,7 +1049,7 @@ fun App(
                     onCloneInitRequestChange = { cloneInitRequest = it },
                     onCreateRepoInitRequestChange = { createRepoInitRequest = it },
                     onPendingOpenRepoPath = { pendingOpenRepoPath = it },
-                    onPendingForgetRepoId = { pendingForgetRepoId = it }
+                    onPendingForgetRepoId = { pendingForgetRepoId = it },
                 )
             }
 
@@ -1095,7 +1063,7 @@ fun App(
                         onRetry = {
                             cloneSourceUrlPendingOpen = syncingState.sourceUrl
                             pendingOpenRepoPath = state.repoPath
-                        }
+                        },
                     )
                 } else {
                     LoadingScreen(message = "Opening repo: ${state.repoPath}")
@@ -1106,7 +1074,7 @@ fun App(
                 ErrorScreen(
                     title = "Failed to initialize",
                     message = state.throwable.message ?: "Unknown error",
-                    onRetry = { initAttempt += 1 }
+                    onRetry = { initAttempt += 1 },
                 )
             }
 
@@ -1149,7 +1117,7 @@ fun App(
                     CompositionLocalProvider(
                         LocalContainer provides appContainer,
                         LocalDrawerViewModel provides drawerVm,
-                        LocalDocEditorStore provides docEditorStore
+                        LocalDocEditorStore provides docEditorStore,
                     ) {
                         val syncingState = cloneUiState as? CloneUiState.Syncing
                         if (syncingState != null) {
@@ -1163,7 +1131,7 @@ fun App(
                                 },
                                 onRetry = {
                                     cloneSourceUrlPendingOpen = syncingState.sourceUrl
-                                }
+                                },
                             )
                         } else {
                             // Provide camera capture context for coordination between camera and bottom bar
@@ -1172,14 +1140,14 @@ fun App(
                             ProvideCameraCaptureContext(cameraCaptureContext) {
                                 CompositionLocalProvider(
                                     LocalChromeStateManager provides chromeStateManager,
-                                    LocalAppExitRequest provides onExitRequest
+                                    LocalAppExitRequest provides onExitRequest,
                                 ) {
                                     val bigDialogState = remember { BigDialogState() }
                                     AdaptiveAppLayout(
                                         modifier = surfaceModifier,
                                         navController = navController,
                                         extraAction = extraAction,
-                                        bigDialogState = bigDialogState
+                                        bigDialogState = bigDialogState,
                                     )
                                 }
                             }
@@ -1188,20 +1156,20 @@ fun App(
                     if (shutdownRequested && !shutdownDone) {
                         Surface(
                             modifier = Modifier.fillMaxSize(),
-                            color = MaterialTheme.colorScheme.surface
+                            color = MaterialTheme.colorScheme.surface,
                         ) {
                             Box(
                                 modifier = Modifier.fillMaxSize(),
-                                contentAlignment = Alignment.Center
+                                contentAlignment = Alignment.Center,
                             ) {
                                 Column(
                                     horizontalAlignment = Alignment.CenterHorizontally,
-                                    verticalArrangement = Arrangement.spacedBy(12.dp)
+                                    verticalArrangement = Arrangement.spacedBy(12.dp),
                                 ) {
                                     CircularProgressIndicator()
                                     Text(
                                         "Shutting down…",
-                                        style = MaterialTheme.typography.bodyLarge
+                                        style = MaterialTheme.typography.bodyLarge,
                                     )
                                 }
                             }
@@ -1223,7 +1191,7 @@ fun App(
                     sourceUrl = sourceUrl,
                     initialSyncComplete = false,
                     phaseMessage = "Starting sync services…",
-                    errorMessage = null
+                    errorMessage = null,
                 )
             return@LaunchedEffect
         }
@@ -1232,7 +1200,7 @@ fun App(
                 sourceUrl = sourceUrl,
                 initialSyncComplete = false,
                 phaseMessage = "Pulling required docs…",
-                errorMessage = null
+                errorMessage = null,
             )
         try {
             syncRepo.connectUrl(sourceUrl)
@@ -1242,7 +1210,7 @@ fun App(
                     current.copy(
                         initialSyncComplete = true,
                         phaseMessage = "Required docs synced. Remaining sync is running.",
-                        errorMessage = null
+                        errorMessage = null,
                     )
             }
         } catch (error: Throwable) {
@@ -1258,7 +1226,7 @@ fun App(
                     current.copy(
                         initialSyncComplete = false,
                         phaseMessage = "Failed while pulling required docs.",
-                        errorMessage = "Connect failed: ${describeThrowable(error)}"
+                        errorMessage = "Connect failed: ${describeThrowable(error)}",
                     )
             }
         } finally {
@@ -1335,7 +1303,7 @@ fun AdaptiveAppLayout(
     modifier: Modifier = Modifier,
     navController: NavHostController,
     extraAction: (() -> Unit)? = null,
-    bigDialogState: BigDialogState
+    bigDialogState: BigDialogState,
 ) {
     val platform = getPlatform()
     val screenWidth = platform.getScreenWidthDp()
@@ -1369,7 +1337,7 @@ fun AdaptiveAppLayout(
         navController = navController,
         extraAction = extraAction,
         bigDialogState = bigDialogState,
-        modifier = modifier
+        modifier = modifier,
     )
 }
 
@@ -1381,7 +1349,7 @@ fun DaybookHomeScreen(
     navController: NavHostController,
     extraAction: (() -> Unit)? = null,
     bigDialogState: BigDialogState,
-    modifier: Modifier = Modifier
+    modifier: Modifier = Modifier,
 ) {
     Box(modifier = modifier.fillMaxSize()) {
         when (navigationType) {
@@ -1391,7 +1359,7 @@ fun DaybookHomeScreen(
                     navController = navController,
                     extraAction = extraAction,
                     contentType = contentType,
-                    onShowCloneShare = { bigDialogState.show() }
+                    onShowCloneShare = { bigDialogState.show() },
                 )
             }
 
@@ -1401,7 +1369,7 @@ fun DaybookHomeScreen(
                     navController = navController,
                     extraAction = extraAction,
                     contentType = contentType,
-                    onShowCloneShare = { bigDialogState.show() }
+                    onShowCloneShare = { bigDialogState.show() },
                 )
             }
 
@@ -1411,7 +1379,7 @@ fun DaybookHomeScreen(
                     navController = navController,
                     extraAction = extraAction,
                     contentType = contentType,
-                    onShowCloneShare = { bigDialogState.show() }
+                    onShowCloneShare = { bigDialogState.show() },
                 )
             }
         }
@@ -1419,7 +1387,7 @@ fun DaybookHomeScreen(
         BigDialogHost(
             state = bigDialogState,
             narrowScreen = navigationType == DaybookNavigationType.BOTTOM_NAVIGATION,
-            modifier = Modifier.fillMaxSize()
+            modifier = Modifier.fillMaxSize(),
         ) {
             CloneShareDialogContent(onClose = { bigDialogState.dismiss() })
         }
@@ -1457,63 +1425,63 @@ fun TablesScreen(modifier: Modifier = Modifier) {
         remember(selectedTableId, tablesState) {
             ChromeState(
                 additionalFeatureButtons =
-                    listOf(
-                        // Prominent button for creating new table
+                listOf(
+                    // Prominent button for creating new table
+                    AdditionalFeatureButton(
+                        key = "tables_new_table",
+                        icon = {
+                            Icon(
+                                imageVector = Icons.Default.Add,
+                                contentDescription = "New Table",
+                            )
+                        },
+                        label = { Text("New Table") },
+                        prominent = true,
+                        onClick = {
+                            vm.viewModelScope.launch {
+                                vm.createNewTable()
+                            }
+                        },
+                    ),
+                    // Prominent button for creating new tab (if table is selected)
+                    if (selectedTableId != null) {
                         AdditionalFeatureButton(
-                            key = "tables_new_table",
+                            key = "tables_new_tab",
                             icon = {
                                 Icon(
-                                    imageVector = Icons.Default.Add,
-                                    contentDescription = "New Table"
+                                    imageVector = Icons.Default.Description,
+                                    contentDescription = "New Tab",
                                 )
                             },
-                            label = { Text("New Table") },
+                            label = { Text("New Tab") },
                             prominent = true,
                             onClick = {
                                 vm.viewModelScope.launch {
-                                    vm.createNewTable()
-                                }
-                            }
-                        ),
-                        // Prominent button for creating new tab (if table is selected)
-                        if (selectedTableId != null) {
-                            AdditionalFeatureButton(
-                                key = "tables_new_tab",
-                                icon = {
-                                    Icon(
-                                        imageVector = Icons.Default.Description,
-                                        contentDescription = "New Tab"
-                                    )
-                                },
-                                label = { Text("New Tab") },
-                                prominent = true,
-                                onClick = {
-                                    vm.viewModelScope.launch {
-                                        selectedTableId?.let { tableId ->
-                                            vm.createNewTab(tableId)
-                                        }
+                                    selectedTableId?.let { tableId ->
+                                        vm.createNewTab(tableId)
                                     }
                                 }
-                            )
-                        } else {
-                            null
-                        },
-                        // Non-prominent button for table settings
-                        AdditionalFeatureButton(
-                            key = "tables_settings",
-                            icon = {
-                                Icon(
-                                    imageVector = Icons.Default.Settings,
-                                    contentDescription = "Table Settings"
-                                )
                             },
-                            label = { Text("Table Settings") },
-                            prominent = false,
-                            onClick = {
-                                // TODO: Open table settings
-                            }
                         )
-                    ).filterNotNull()
+                    } else {
+                        null
+                    },
+                    // Non-prominent button for table settings
+                    AdditionalFeatureButton(
+                        key = "tables_settings",
+                        icon = {
+                            Icon(
+                                imageVector = Icons.Default.Settings,
+                                contentDescription = "Table Settings",
+                            )
+                        },
+                        label = { Text("Table Settings") },
+                        prominent = false,
+                        onClick = {
+                            // TODO: Open table settings
+                        },
+                    ),
+                ).filterNotNull(),
             )
         }
 
@@ -1522,7 +1490,7 @@ fun TablesScreen(modifier: Modifier = Modifier) {
             is TablesState.Error -> {
                 Column(
                     modifier = modifier,
-                    horizontalAlignment = Alignment.CenterHorizontally
+                    horizontalAlignment = Alignment.CenterHorizontally,
                 ) {
                     Text("Error loading tables: ${tablesState.error.message()}")
                 }
@@ -1531,7 +1499,7 @@ fun TablesScreen(modifier: Modifier = Modifier) {
             is TablesState.Loading -> {
                 Column(
                     modifier = modifier,
-                    horizontalAlignment = Alignment.CenterHorizontally
+                    horizontalAlignment = Alignment.CenterHorizontally,
                 ) {
                     CircularProgressIndicator()
                     Text("Loading tables...")
@@ -1540,25 +1508,25 @@ fun TablesScreen(modifier: Modifier = Modifier) {
 
             is TablesState.Data -> {
                 Column(
-                    modifier = modifier.padding(16.dp)
+                    modifier = modifier.padding(16.dp),
                 ) {
                     // Selected Table Info
                     if (selectedTable != null) {
                         Text(
                             text = "Selected Table: ${selectedTable.title}",
-                            modifier = Modifier.padding(bottom = 16.dp)
+                            modifier = Modifier.padding(bottom = 16.dp),
                         )
 
                         Text(
                             text = "Tabs in this table: ${tabsForSelectedTable.size}",
-                            modifier = Modifier.padding(bottom = 8.dp)
+                            modifier = Modifier.padding(bottom = 8.dp),
                         )
 
                         // Show tabs for selected table
                         tabsForSelectedTable.forEach { tab ->
                             Text(
                                 text = "  • ${tab.title} (${tab.panels.size} panels)",
-                                modifier = Modifier.padding(start = 16.dp, bottom = 4.dp)
+                                modifier = Modifier.padding(start = 16.dp, bottom = 4.dp),
                             )
                         }
 
@@ -1568,7 +1536,7 @@ fun TablesScreen(modifier: Modifier = Modifier) {
                     // Overall State Summary
                     Text(
                         text = "Overall State:",
-                        modifier = Modifier.padding(bottom = 8.dp)
+                        modifier = Modifier.padding(bottom = 8.dp),
                     )
                     Text("  • Windows: ${tablesState.windows.size}")
                     Text("  • Tables: ${tablesState.tables.size}")
@@ -1580,13 +1548,13 @@ fun TablesScreen(modifier: Modifier = Modifier) {
                     // All Tables List
                     Text(
                         text = "All Tables:",
-                        modifier = Modifier.padding(bottom = 8.dp)
+                        modifier = Modifier.padding(bottom = 8.dp),
                     )
                     tablesState.tablesList.forEach { table ->
                         val isSelected = table.id == selectedTableId
                         Text(
                             text = "  ${if (isSelected) "→" else "•"} ${table.title} (${table.tabs.size} tabs)",
-                            modifier = Modifier.padding(start = 16.dp, bottom = 4.dp)
+                            modifier = Modifier.padding(start = 16.dp, bottom = 4.dp),
                         )
                     }
                 }
@@ -1600,13 +1568,13 @@ fun Routes(
     modifier: Modifier = Modifier,
     contentType: DaybookContentType,
     extraAction: (() -> Unit)? = null,
-    navController: NavHostController
+    navController: NavHostController,
 ) {
     val drawerVm = LocalDrawerViewModel.current
 
     NavHost(
         startDestination = AppScreens.Home.name,
-        navController = navController
+        navController = navController,
     ) {
         composable(route = AppScreens.Capture.name) {
             // CaptureScreen provides its own chrome state internally
@@ -1626,7 +1594,7 @@ fun Routes(
             }
         }
         composable(
-            route = AppScreens.Drawer.name
+            route = AppScreens.Drawer.name,
         ) {
             ProvideChromeState(ChromeState(title = "Drawer")) {
                 DrawerScreen(
@@ -1634,7 +1602,7 @@ fun Routes(
                     onOpenDoc = {
                         navController.navigate(AppScreens.DocEditor.name) { launchSingleTop = true }
                     },
-                    modifier = modifier
+                    modifier = modifier,
                 )
             }
         }
@@ -1643,25 +1611,25 @@ fun Routes(
             enterTransition = {
                 slideInHorizontally(
                     animationSpec = tween(240),
-                    initialOffsetX = { fullWidth -> fullWidth }
+                    initialOffsetX = { fullWidth -> fullWidth },
                 )
             },
             popExitTransition = {
                 slideOutHorizontally(
                     animationSpec = tween(240),
-                    targetOffsetX = { fullWidth -> fullWidth }
+                    targetOffsetX = { fullWidth -> fullWidth },
                 )
-            }
+            },
         ) {
             ProvideChromeState(
                 ChromeState(
                     title = "Doc Editor",
-                    onBack = { navController.popBackStack() }
-                )
+                    onBack = { navController.popBackStack() },
+                ),
             ) {
                 DocEditorScreen(
                     contentType = contentType,
-                    modifier = modifier
+                    modifier = modifier,
                 )
             }
         }
@@ -1670,7 +1638,7 @@ fun Routes(
                 var showContent by remember { mutableStateOf(false) }
                 Column(
                     modifier = modifier,
-                    horizontalAlignment = Alignment.CenterHorizontally
+                    horizontalAlignment = Alignment.CenterHorizontally,
                 ) {
                     Button(onClick = {
                         showContent = !showContent
@@ -1692,8 +1660,8 @@ fun Routes(
                                             microphone = true,
                                             overlay = true,
                                             storageRead = true,
-                                            storageWrite = true
-                                        )
+                                            storageWrite = true,
+                                        ),
                                     )
                                 }) {
                                     Text("Ask for permissions")
@@ -1705,7 +1673,7 @@ fun Routes(
                         val greeting = remember { Greeting().greet() }
                         Column(
                             Modifier.fillMaxWidth(),
-                            horizontalAlignment = Alignment.CenterHorizontally
+                            horizontalAlignment = Alignment.CenterHorizontally,
                         ) {
                             Image(painterResource(Res.drawable.compose_multiplatform), null)
                             Text("Compose: $greeting")
@@ -1724,31 +1692,31 @@ private fun LoadingScreen(message: String = "Preparing Daybook…") {
         initialValue = 1f,
         targetValue = 1.1f,
         animationSpec =
-            infiniteRepeatable(
-                animation = tween(600, easing = FastOutSlowInEasing),
-                repeatMode = RepeatMode.Reverse
-            ),
-        label = "loading_scale"
+        infiniteRepeatable(
+            animation = tween(600, easing = FastOutSlowInEasing),
+            repeatMode = RepeatMode.Reverse,
+        ),
+        label = "loading_scale",
     )
 
     Box(
         modifier = Modifier.fillMaxSize().background(MaterialTheme.colorScheme.surface),
-        contentAlignment = Alignment.Center
+        contentAlignment = Alignment.Center,
     ) {
         Column(
             horizontalAlignment = Alignment.CenterHorizontally,
-            verticalArrangement = Arrangement.Center
+            verticalArrangement = Arrangement.Center,
         ) {
             Text(
                 text = "🌞",
                 fontSize = 80.sp,
-                modifier = Modifier.scale(scale)
+                modifier = Modifier.scale(scale),
             )
             Spacer(Modifier.height(24.dp))
             Text(
                 message,
                 style = MaterialTheme.typography.titleMedium,
-                color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.8f)
+                color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.8f),
             )
         }
     }
@@ -1758,10 +1726,10 @@ private fun LoadingScreen(message: String = "Preparing Daybook…") {
 private fun ErrorScreen(title: String, message: String, onRetry: () -> Unit) {
     Box(
         modifier = Modifier.fillMaxSize(),
-        contentAlignment = Alignment.Center
+        contentAlignment = Alignment.Center,
     ) {
         Column(
-            horizontalAlignment = Alignment.CenterHorizontally
+            horizontalAlignment = Alignment.CenterHorizontally,
         ) {
             Text(title)
             Spacer(Modifier.height(8.dp))

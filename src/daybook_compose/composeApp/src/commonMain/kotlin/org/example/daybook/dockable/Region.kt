@@ -46,7 +46,7 @@ fun Region(
     orientation: RegionOrientation,
     modifier: Modifier = Modifier,
     onPaneResize: (String, Float) -> Unit = { _, _ -> },
-    content: @Composable RegionScope.() -> Unit
+    content: @Composable RegionScope.() -> Unit,
 ) {
     val density = LocalDensity.current
 
@@ -58,7 +58,7 @@ fun Region(
     // For now, we'll re-collect but minimize work by using keys
     CompositionLocalProvider(
         LocalRegionScope provides scope,
-        LocalPaneResize provides onPaneResize
+        LocalPaneResize provides onPaneResize,
     ) {
         // Only clear and re-collect if items list is empty or structure might have changed
         // We can't easily detect structure changes, so we'll optimize by:
@@ -102,7 +102,7 @@ fun Region(
                                 when (item) {
                                     is RegionItem.Pane -> item.id
                                     is RegionItem.SubRegion -> "subregion_${item.orientation}_$index"
-                                }
+                                },
                             ) {
                                 when (item) {
                                     is RegionItem.Pane -> {
@@ -112,21 +112,21 @@ fun Region(
                                                 override val id = item.id
                                                 override val state = item.state
                                                 override val content: @Composable (
-                                                    Dp
+                                                    Dp,
                                                 ) -> Unit = item.content
                                             }
                                         PaneContainer(
                                             pane = paneItem,
                                             onResize =
-                                                if (resizeEdge != null) {
-                                                    { dragAmount ->
-                                                        onPaneResize(item.id, dragAmount)
-                                                    }
-                                                } else {
-                                                    null
-                                                },
+                                            if (resizeEdge != null) {
+                                                { dragAmount ->
+                                                    onPaneResize(item.id, dragAmount)
+                                                }
+                                            } else {
+                                                null
+                                            },
                                             resizeEdge = resizeEdge,
-                                            density = density
+                                            density = density,
                                         )
                                     }
 
@@ -137,7 +137,7 @@ fun Region(
                                                 orientation = item.orientation,
                                                 modifier = Modifier.fillMaxSize(),
                                                 onPaneResize = onPaneResize,
-                                                content = item.content
+                                                content = item.content,
                                             )
                                             if (resizeEdge != null &&
                                                 item.rightmostPaneId != null
@@ -146,13 +146,13 @@ fun Region(
                                                     onResize = { dragAmount ->
                                                         onPaneResize(
                                                             item.rightmostPaneId,
-                                                            dragAmount
+                                                            dragAmount,
                                                         )
                                                     },
                                                     modifier =
-                                                        Modifier
-                                                            .align(resizeEdge)
-                                                            .zIndex(1f)
+                                                    Modifier
+                                                        .align(resizeEdge)
+                                                        .zIndex(1f),
                                                 )
                                             }
                                         }
@@ -180,7 +180,7 @@ fun Region(
                                 when (item) {
                                     is RegionItem.Pane -> item.id
                                     is RegionItem.SubRegion -> "subregion_${item.orientation}_$index"
-                                }
+                                },
                             ) {
                                 when (item) {
                                     is RegionItem.Pane -> {
@@ -190,21 +190,21 @@ fun Region(
                                                 override val id = item.id
                                                 override val state = item.state
                                                 override val content: @Composable (
-                                                    Dp
+                                                    Dp,
                                                 ) -> Unit = item.content
                                             }
                                         PaneContainer(
                                             pane = paneItem,
                                             onResize =
-                                                if (resizeEdge != null) {
-                                                    { dragAmount ->
-                                                        onPaneResize(item.id, dragAmount)
-                                                    }
-                                                } else {
-                                                    null
-                                                },
+                                            if (resizeEdge != null) {
+                                                { dragAmount ->
+                                                    onPaneResize(item.id, dragAmount)
+                                                }
+                                            } else {
+                                                null
+                                            },
                                             resizeEdge = resizeEdge,
-                                            density = density
+                                            density = density,
                                         )
                                     }
 
@@ -215,7 +215,7 @@ fun Region(
                                                 orientation = item.orientation,
                                                 modifier = Modifier.fillMaxSize(),
                                                 onPaneResize = onPaneResize,
-                                                content = item.content
+                                                content = item.content,
                                             )
                                             if (resizeEdge != null &&
                                                 item.bottommostPaneId != null
@@ -224,13 +224,13 @@ fun Region(
                                                     onResize = { dragAmount ->
                                                         onPaneResize(
                                                             item.bottommostPaneId,
-                                                            dragAmount
+                                                            dragAmount,
                                                         )
                                                     },
                                                     modifier =
-                                                        Modifier
-                                                            .align(resizeEdge)
-                                                            .zIndex(1f)
+                                                    Modifier
+                                                        .align(resizeEdge)
+                                                        .zIndex(1f),
                                                 )
                                             }
                                         }
@@ -263,7 +263,7 @@ interface RegionScope {
         orientation: RegionOrientation,
         rightmostPaneId: String? = null, // For horizontal resize handles
         bottommostPaneId: String? = null, // For vertical resize handles
-        content: @Composable RegionScope.() -> Unit
+        content: @Composable RegionScope.() -> Unit,
     )
 }
 
@@ -280,21 +280,20 @@ private class RegionScopeImpl : RegionScope {
         orientation: RegionOrientation,
         rightmostPaneId: String?,
         bottommostPaneId: String?,
-        content: @Composable RegionScope.() -> Unit
+        content: @Composable RegionScope.() -> Unit,
     ) {
         items.add(RegionItem.SubRegion(orientation, rightmostPaneId, bottommostPaneId, content))
     }
 }
 
 private sealed class RegionItem {
-    data class Pane(val id: String, val state: PaneState, val content: @Composable (Dp) -> Unit) :
-        RegionItem()
+    data class Pane(val id: String, val state: PaneState, val content: @Composable (Dp) -> Unit) : RegionItem()
 
     data class SubRegion(
         val orientation: RegionOrientation,
         val rightmostPaneId: String?,
         val bottommostPaneId: String?,
-        val content: @Composable RegionScope.() -> Unit
+        val content: @Composable RegionScope.() -> Unit,
     ) : RegionItem()
 }
 
@@ -311,7 +310,7 @@ fun SubRegion(
     orientation: RegionOrientation,
     rightmostPaneId: String? = null,
     bottommostPaneId: String? = null,
-    content: @Composable RegionScope.() -> Unit
+    content: @Composable RegionScope.() -> Unit,
 ) {
     LocalRegionScope.current.SubRegion(orientation, rightmostPaneId, bottommostPaneId, content)
 }

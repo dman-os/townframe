@@ -13,8 +13,6 @@ import androidx.compose.runtime.Immutable
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.compositionLocalOf
 import androidx.compose.runtime.getValue
-import androidx.compose.runtime.mutableStateOf
-import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
@@ -32,7 +30,7 @@ sealed interface MainFeatureActionButton {
         val icon: @Composable () -> Unit,
         val label: @Composable () -> Unit,
         val enabled: Boolean = true,
-        val onClick: suspend () -> Unit
+        val onClick: suspend () -> Unit,
     ) : MainFeatureActionButton
 }
 
@@ -47,7 +45,7 @@ data class AdditionalFeatureButton(
     val label: @Composable () -> Unit,
     val prominent: Boolean = false,
     val enabled: Boolean = true,
-    val onClick: suspend () -> Unit
+    val onClick: suspend () -> Unit,
 )
 
 /**
@@ -61,7 +59,7 @@ data class ChromeState(
     val actions: (@Composable () -> Unit)? = null,
     val showTopBar: Boolean = true,
     val mainFeatureActionButton: MainFeatureActionButton? = null,
-    val additionalFeatureButtons: List<AdditionalFeatureButton> = emptyList()
+    val additionalFeatureButtons: List<AdditionalFeatureButton> = emptyList(),
 ) {
     companion object {
         val Empty = ChromeState(showTopBar = false)
@@ -143,6 +141,6 @@ fun ChromeStateTopAppBar(chromeState: ChromeState) {
         },
         actions = {
             chromeState.actions?.invoke() ?: Unit
-        }
+        },
     )
 }

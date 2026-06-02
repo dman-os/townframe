@@ -62,7 +62,7 @@ fun TablesRail(
     highlightedTable: Uuid? = null,
     onAddTableLayout: ((androidx.compose.ui.geometry.Rect) -> Unit)? = null,
     addTableReadyState: androidx.compose.runtime.State<Boolean>? = null,
-    onToggleTableRail: (() -> Unit)? = null
+    onToggleTableRail: (() -> Unit)? = null,
 ) {
     val tablesRepo = LocalContainer.current.tablesRepo
     val vm = viewModel { TablesViewModel(tablesRepo) }
@@ -77,25 +77,25 @@ fun TablesRail(
                 }
             },
             modifier =
-                Modifier
-                    .size(48.dp)
-                    .then(
-                        if (onAddTableLayout != null) {
-                            Modifier.onGloballyPositioned { onAddTableLayout(it.boundsInWindow()) }
-                        } else {
-                            Modifier
-                        }
-                    ),
+            Modifier
+                .size(48.dp)
+                .then(
+                    if (onAddTableLayout != null) {
+                        Modifier.onGloballyPositioned { onAddTableLayout(it.boundsInWindow()) }
+                    } else {
+                        Modifier
+                    },
+                ),
             containerColor =
-                if (addTableReadyState?.value == true) {
-                    MaterialTheme.colorScheme.secondary
-                } else {
-                    MaterialTheme.colorScheme.primary
-                }
+            if (addTableReadyState?.value == true) {
+                MaterialTheme.colorScheme.secondary
+            } else {
+                MaterialTheme.colorScheme.primary
+            },
         ) {
             Icon(
                 imageVector = if (addTableReadyState?.value == true) Icons.Default.Check else Icons.Default.Add,
-                contentDescription = "Add table"
+                contentDescription = "Add table",
             )
         }
 
@@ -115,10 +115,7 @@ fun TablesRail(
             val railNestedScroll =
                 remember(scrollState) {
                     object : NestedScrollConnection {
-                        override fun onPreScroll(
-                            available: Offset,
-                            source: NestedScrollSource
-                        ): Offset {
+                        override fun onPreScroll(available: Offset, source: NestedScrollSource): Offset {
                             // Don't consume here - let the child's verticalScroll handle it first
                             return Offset.Zero
                         }
@@ -126,7 +123,7 @@ fun TablesRail(
                         override fun onPostScroll(
                             consumed: Offset,
                             available: Offset,
-                            source: NestedScrollSource
+                            source: NestedScrollSource,
                         ): Offset {
                             val dy = available.y
                             if (dy == 0f) return Offset.Zero
@@ -150,18 +147,18 @@ fun TablesRail(
                 }
             Column(
                 modifier =
-                    Modifier
-                        .weight(1f)
-                        .nestedScroll(railNestedScroll)
-                        .verticalScroll(scrollState),
+                Modifier
+                    .weight(1f)
+                    .nestedScroll(railNestedScroll)
+                    .verticalScroll(scrollState),
                 verticalArrangement =
-                    if (growUpward) {
-                        androidx.compose.foundation.layout.Arrangement
-                            .spacedBy(4.dp, Alignment.Bottom)
-                    } else {
-                        androidx.compose.foundation.layout.Arrangement
-                            .spacedBy(4.dp)
-                    }
+                if (growUpward) {
+                    androidx.compose.foundation.layout.Arrangement
+                        .spacedBy(4.dp, Alignment.Bottom)
+                } else {
+                    androidx.compose.foundation.layout.Arrangement
+                        .spacedBy(4.dp)
+                },
             ) {
                 // Render in normal order - if growUpward, items appear from bottom due to Arrangement.Bottom
                 // Otherwise, items appear from top (normal behavior)
@@ -169,15 +166,15 @@ fun TablesRail(
                     val tabCount = table.tabs.size ?: 0
                     NavigationRailItem(
                         modifier =
-                            Modifier.then(
-                                if (onTableLayout != null) {
-                                    Modifier.onGloballyPositioned {
-                                        onTableLayout(table.id, it.boundsInWindow())
-                                    }
-                                } else {
-                                    Modifier
+                        Modifier.then(
+                            if (onTableLayout != null) {
+                                Modifier.onGloballyPositioned {
+                                    onTableLayout(table.id, it.boundsInWindow())
                                 }
-                            ),
+                            } else {
+                                Modifier
+                            },
+                        ),
                         selected = (selectedTableId == table.id) || (highlightedTable == table.id),
                         onClick = { onTableSelected(table) },
                         icon = {
@@ -185,23 +182,23 @@ fun TablesRail(
                             Row {
                                 Box(
                                     modifier = Modifier.size(36.dp),
-                                    contentAlignment = Alignment.Center
+                                    contentAlignment = Alignment.Center,
                                 ) {
                                     Icon(Icons.Default.Folder, contentDescription = "Table")
                                 }
                                 Spacer(modifier = Modifier.height(4.dp))
                                 Text(
                                     text = tabCount.toString(),
-                                    style = MaterialTheme.typography.bodySmall
+                                    style = MaterialTheme.typography.bodySmall,
                                 )
                             }
                         },
                         label =
-                            if (showTitles) {
-                                { Text(table.title) }
-                            } else {
-                                null
-                            }
+                        if (showTitles) {
+                            { Text(table.title) }
+                        } else {
+                            null
+                        },
                     )
                 }
             }
@@ -214,15 +211,15 @@ fun TablesRail(
         if (onToggleTableRail != null) {
             Row(
                 modifier =
-                    Modifier
-                        .fillMaxWidth()
-                        .padding(8.dp),
-                horizontalArrangement = Arrangement.Start
+                Modifier
+                    .fillMaxWidth()
+                    .padding(8.dp),
+                horizontalArrangement = Arrangement.Start,
             ) {
                 IconButton(onClick = onToggleTableRail) {
                     Icon(
                         imageVector = Icons.AutoMirrored.Filled.KeyboardArrowLeft,
-                        contentDescription = "Hide table rail"
+                        contentDescription = "Hide table rail",
                     )
                 }
             }

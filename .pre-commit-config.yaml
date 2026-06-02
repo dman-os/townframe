@@ -32,11 +32,12 @@ repos:
           - commit-msg
   - repo: local
     hooks:
-      # - id: ktlint-fmt
-      #   name: format kotlin
-      #   language: system
-      #   entry: bash -c 'ktlint -F'
-      #   pass_filenames: false
+      - id: detekt-kotlin
+        name: Detekt Kotlin
+        language: system
+        entry: ./x/gradle.ts detektMainDesktop --auto-correct
+        pass_filenames: false
+        files: \.kt$
       - id: deno-fmt-x
         name: Formt scripts
         language: system

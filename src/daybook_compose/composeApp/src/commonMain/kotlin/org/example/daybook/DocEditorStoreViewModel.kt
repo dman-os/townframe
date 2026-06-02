@@ -10,24 +10,22 @@ import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
-import kotlin.time.Clock
-import kotlin.time.Duration.Companion.minutes
-import java.util.concurrent.ConcurrentHashMap
 import org.example.daybook.ui.editor.EditorSessionController
 import org.example.daybook.uniffi.DrawerEventListener
 import org.example.daybook.uniffi.DrawerRepoFfi
 import org.example.daybook.uniffi.core.DrawerEvent
 import org.example.daybook.uniffi.core.ListenerRegistration
+import java.util.concurrent.ConcurrentHashMap
+import kotlin.time.Clock
+import kotlin.time.Duration.Companion.minutes
 
 private data class DocEditorSessionEntry(
     val controller: EditorSessionController,
     var hostCount: Int = 0,
-    var lastTouchedMs: Long = Clock.System.now().toEpochMilliseconds()
+    var lastTouchedMs: Long = Clock.System.now().toEpochMilliseconds(),
 )
 
-class DocEditorStoreViewModel(
-    private val drawerRepo: DrawerRepoFfi
-) : ViewModel() {
+class DocEditorStoreViewModel(private val drawerRepo: DrawerRepoFfi) : ViewModel() {
     private val sessions = ConcurrentHashMap<String, DocEditorSessionEntry>()
 
     private val _selectedDocId = MutableStateFlow<String?>(null)
@@ -49,6 +47,7 @@ class DocEditorStoreViewModel(
                             viewModelScope.launch { refreshDoc(event.id) }
                         }
                     }
+
                     is DrawerEvent.DocDeleted -> {
                         sessions.remove(event.id)
                         if (_selectedDocId.value == event.id) {
@@ -56,6 +55,7 @@ class DocEditorStoreViewModel(
                             _selectedController.value = null
                         }
                     }
+
                     is DrawerEvent.DocAdded -> {}
                 }
             }
@@ -104,16 +104,14 @@ class DocEditorStoreViewModel(
         entry.lastTouchedMs = nowMs()
     }
 
-    private fun createSession(docId: String): DocEditorSessionEntry {
-        return sessions.computeIfAbsent(docId) {
-            val controller =
-                EditorSessionController(
-                    drawerRepo = drawerRepo,
-                    scope = viewModelScope,
-                    onDocCreated = { createdId -> selectDoc(createdId) }
-                )
-            DocEditorSessionEntry(controller = controller)
-        }
+    private fun createSession(docId: String): DocEditorSessionEntry = sessions.computeIfAbsent(docId) {
+        val controller =
+            EditorSessionController(
+                drawerRepo = drawerRepo,
+                scope = viewModelScope,
+                onDocCreated = { createdId -> selectDoc(createdId) },
+            )
+        DocEditorSessionEntry(controller = controller)
     }
 
     private suspend fun refreshDoc(docId: String) {

@@ -9,15 +9,11 @@ sealed interface CameraOverlay {
         val right: Float,
         val bottom: Float,
         val sourceWidthPx: Int,
-        val sourceHeightPx: Int
+        val sourceHeightPx: Int,
     ) : CameraOverlay
 }
 
-class CameraFrameSample(
-    val widthPx: Int,
-    val heightPx: Int,
-    val jpegBytes: ByteArray
-) {
+class CameraFrameSample(val widthPx: Int, val heightPx: Int, val jpegBytes: ByteArray) {
     override fun equals(other: Any?): Boolean {
         if (this === other) return true
         if (other !is CameraFrameSample) return false
@@ -37,5 +33,5 @@ class CameraFrameSample(
 data class CameraOverlayState(
     val overlays: List<CameraOverlay> = emptyList(),
     val lastDetectedText: String? = null,
-    val latestError: String? = null
+    val latestError: String? = null,
 )

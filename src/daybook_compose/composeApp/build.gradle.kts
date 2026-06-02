@@ -25,7 +25,7 @@ plugins {
 }
 
 detekt {
-    toolVersion = "2.0.0-alpha.1"
+    toolVersion = "2.0.0-alpha.3"
     config.setFrom(file("../config/detekt/detekt.yml"))
     buildUponDefaultConfig = true
 }

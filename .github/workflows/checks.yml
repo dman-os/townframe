@@ -67,7 +67,7 @@ jobs:
 
       - name: pre-commit hooks
         run: |
-          nix develop .#ci-rust --command prek --color=always run --all-files
+          nix develop .#ci-desktop --command prek --color=always run --all-files
 
       - name: builds
         run: |

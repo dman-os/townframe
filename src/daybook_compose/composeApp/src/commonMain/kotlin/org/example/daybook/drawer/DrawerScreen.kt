@@ -1,16 +1,16 @@
 @file:OptIn(
     kotlin.uuid.ExperimentalUuidApi::class,
     androidx.compose.material3.ExperimentalMaterial3Api::class,
-    kotlin.time.ExperimentalTime::class
+    kotlin.time.ExperimentalTime::class,
 )
 
 package org.example.daybook.drawer
 
+import androidx.compose.foundation.background
 import androidx.compose.foundation.gestures.Orientation
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.rememberLazyListState
-import androidx.compose.foundation.background
 import androidx.compose.material3.*
 import androidx.compose.runtime.*
 import androidx.compose.ui.Alignment
@@ -18,8 +18,8 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.unit.dp
 import org.example.daybook.ChromeState
 import org.example.daybook.DaybookContentType
-import org.example.daybook.DocListState
 import org.example.daybook.DocEditorStoreViewModel
+import org.example.daybook.DocListState
 import org.example.daybook.DrawerViewModel
 import org.example.daybook.LocalDocEditorStore
 import org.example.daybook.ProvideChromeState
@@ -29,10 +29,10 @@ import org.example.daybook.ui.DocFacetSidebar
 import org.example.daybook.ui.buildSelfFacetRefUrl
 import org.example.daybook.ui.decodeJsonStringOrRaw
 import org.example.daybook.ui.decodeWellKnownFacet
-import org.example.daybook.ui.stripFacetRefFragment
 import org.example.daybook.ui.editor.bodyFacetKey
 import org.example.daybook.ui.editor.noteFacetKey
 import org.example.daybook.ui.editor.titleFacetKey
+import org.example.daybook.ui.stripFacetRefFragment
 import org.example.daybook.uniffi.types.Doc
 import org.example.daybook.uniffi.types.FacetKey
 import org.example.daybook.uniffi.types.FacetTag
@@ -44,14 +44,14 @@ private fun DrawerDocEditorContent(
     selectedDocId: String?,
     modifier: Modifier = Modifier,
     showFacetSidebar: Boolean,
-    showInlineFacetRack: Boolean = false
+    showInlineFacetRack: Boolean = false,
 ) {
     Box(modifier = modifier.fillMaxSize()) {
         if (selectedDocId != null) {
             if (controller == null) {
                 Box(
                     modifier = Modifier.fillMaxSize(),
-                    contentAlignment = Alignment.Center
+                    contentAlignment = Alignment.Center,
                 ) {
                     CircularProgressIndicator()
                 }
@@ -61,18 +61,18 @@ private fun DrawerDocEditorContent(
                 DockableRegion(
                     modifier = Modifier.fillMaxSize().padding(16.dp),
                     orientation = Orientation.Horizontal,
-                    initialWeights = mapOf("doc-main" to 0.72f, "doc-facets" to 0.28f)
+                    initialWeights = mapOf("doc-main" to 0.72f, "doc-facets" to 0.28f),
                 ) {
                     pane("doc-main") {
                         DocEditor(
                             controller = controller,
-                            modifier = Modifier.fillMaxSize()
+                            modifier = Modifier.fillMaxSize(),
                         )
                     }
                     pane("doc-facets") {
                         DocFacetSidebar(
                             controller = controller,
-                            modifier = Modifier.fillMaxSize()
+                            modifier = Modifier.fillMaxSize(),
                         )
                     }
                 }
@@ -86,7 +86,7 @@ private fun DrawerDocEditorContent(
         } else {
             Box(
                 modifier = Modifier.fillMaxSize(),
-                contentAlignment = Alignment.Center
+                contentAlignment = Alignment.Center,
             ) {
                 Text("Select a document to view details")
             }
@@ -95,11 +95,7 @@ private fun DrawerDocEditorContent(
 }
 
 @Composable
-fun DrawerScreen(
-    drawerVm: DrawerViewModel,
-    onOpenDoc: (String) -> Unit,
-    modifier: Modifier = Modifier
-) {
+fun DrawerScreen(drawerVm: DrawerViewModel, onOpenDoc: (String) -> Unit, modifier: Modifier = Modifier) {
     val docEditorStore: DocEditorStoreViewModel = LocalDocEditorStore.current
     val selectedDocId by docEditorStore.selectedDocId.collectAsState()
     ProvideChromeState(ChromeState(title = "Drawer")) {
@@ -110,16 +106,13 @@ fun DrawerScreen(
                 docEditorStore.selectDoc(docId)
                 onOpenDoc(docId)
             },
-            modifier = modifier
+            modifier = modifier,
         )
     }
 }
 
 @Composable
-fun DocEditorScreen(
-    contentType: DaybookContentType,
-    modifier: Modifier = Modifier
-) {
+fun DocEditorScreen(contentType: DaybookContentType, modifier: Modifier = Modifier) {
     val docEditorStore: DocEditorStoreViewModel = LocalDocEditorStore.current
     val selectedDocId by docEditorStore.selectedDocId.collectAsState()
     val selectedController by docEditorStore.selectedController.collectAsState()
@@ -137,16 +130,16 @@ fun DocEditorScreen(
 
     Box(
         modifier =
-            modifier
-                .fillMaxSize()
-                .background(MaterialTheme.colorScheme.surface)
+        modifier
+            .fillMaxSize()
+            .background(MaterialTheme.colorScheme.surface),
     ) {
         DrawerDocEditorContent(
             controller = selectedController,
             selectedDocId = selectedDocId,
             modifier = Modifier.fillMaxSize(),
             showFacetSidebar = contentType == DaybookContentType.LIST_AND_DETAIL,
-            showInlineFacetRack = contentType != DaybookContentType.LIST_AND_DETAIL
+            showInlineFacetRack = contentType != DaybookContentType.LIST_AND_DETAIL,
         )
     }
 }
@@ -156,7 +149,7 @@ fun DocList(
     drawerViewModel: DrawerViewModel,
     selectedDocId: String?,
     onDocClick: (String) -> Unit,
-    modifier: Modifier = Modifier
+    modifier: Modifier = Modifier,
 ) {
     val docListState by drawerViewModel.docListState.collectAsState()
     val loadedDocs by drawerViewModel.loadedDocs.collectAsState()
@@ -188,7 +181,7 @@ fun DocList(
                 // Track visible items and preload next documents
                 LaunchedEffect(
                     listState.firstVisibleItemIndex,
-                    listState.firstVisibleItemScrollOffset
+                    listState.firstVisibleItemScrollOffset,
                 ) {
                     val layoutInfo = listState.layoutInfo
                     val firstVisible = listState.firstVisibleItemIndex
@@ -203,7 +196,7 @@ fun DocList(
 
                 LazyColumn(
                     state = listState,
-                    modifier = modifier.fillMaxSize()
+                    modifier = modifier.fillMaxSize(),
                 ) {
                     items(docIds.size, key = { idx -> docIds[idx] }) { index ->
                         val docId = docIds[index]
@@ -218,7 +211,7 @@ fun DocList(
                                 ListItem(
                                     headlineContent = {
                                         val titleJson = doc.facets[
-                                            titleFacetKey()
+                                            titleFacetKey(),
                                         ]
                                         val noteJson = doc.facets[noteFacetKey()]
                                         val content =
@@ -230,31 +223,31 @@ fun DocList(
                                             } ?: ""
                                         Text(
                                             text =
-                                                titleJson?.let { decodeJsonStringOrRaw(it) }
-                                                    ?: content.take(50).ifEmpty {
-                                                        "Empty document"
-                                                    },
-                                            maxLines = 1
+                                            titleJson?.let { decodeJsonStringOrRaw(it) }
+                                                ?: content.take(50).ifEmpty {
+                                                    "Empty document"
+                                                },
+                                            maxLines = 1,
                                         )
                                     },
                                     supportingContent = {
                                         val suffix =
                                             mainType?.let { type -> " • $type" } ?: ""
                                         Text("ID: ${doc.id.take(8)}...$suffix")
-                                    }
+                                    },
                                 )
                             }
                             if (isSelected) {
                                 OutlinedCard(
                                     modifier = Modifier.fillMaxWidth(),
-                                    onClick = { onDocClick(docId) }
+                                    onClick = { onDocClick(docId) },
                                 ) {
                                     draw()
                                 }
                             } else {
                                 Card(
                                     modifier = Modifier.fillMaxWidth(),
-                                    onClick = { onDocClick(docId) }
+                                    onClick = { onDocClick(docId) },
                                 ) {
                                     draw()
                                 }
@@ -262,27 +255,27 @@ fun DocList(
                         } else if (isLoading) {
                             // Document is loading, show loading indicator
                             Card(
-                                modifier = Modifier.fillMaxWidth()
+                                modifier = Modifier.fillMaxWidth(),
                             ) {
                                 ListItem(
                                     headlineContent = {
                                         Row(
                                             modifier = Modifier.fillMaxWidth(),
                                             horizontalArrangement = Arrangement.SpaceBetween,
-                                            verticalAlignment = Alignment.CenterVertically
+                                            verticalAlignment = Alignment.CenterVertically,
                                         ) {
                                             Text(
                                                 "Loading...",
-                                                style = MaterialTheme.typography.bodyMedium
+                                                style = MaterialTheme.typography.bodyMedium,
                                             )
                                             CircularProgressIndicator(
-                                                modifier = Modifier.size(16.dp)
+                                                modifier = Modifier.size(16.dp),
                                             )
                                         }
                                     },
                                     supportingContent = {
                                         Text("ID: ${docId.take(8)}...")
-                                    }
+                                    },
                                 )
                             }
                         } else {
@@ -291,18 +284,18 @@ fun DocList(
                                 drawerViewModel.loadDoc(docId)
                             }
                             Card(
-                                modifier = Modifier.fillMaxWidth()
+                                modifier = Modifier.fillMaxWidth(),
                             ) {
                                 ListItem(
                                     headlineContent = {
                                         Text(
                                             "Loading...",
-                                            style = MaterialTheme.typography.bodyMedium
+                                            style = MaterialTheme.typography.bodyMedium,
                                         )
                                     },
                                     supportingContent = {
                                         Text("ID: ${docId.take(8)}...")
-                                    }
+                                    },
                                 )
                             }
                         }
@@ -320,7 +313,7 @@ private fun drawerMainFacetTypeLabel(doc: Doc): String? {
             val decoded = decodeWellKnownFacet<WellKnownFacet.Body>(raw)
             if (decoded.isFailure) {
                 println(
-                    "Failed to decode Body facet for drawer main type: docId=${doc.id} facetKey=${bodyFacetKey()} error=${decoded.exceptionOrNull()}"
+                    "Failed to decode Body facet for drawer main type: docId=${doc.id} facetKey=${bodyFacetKey()} error=${decoded.exceptionOrNull()}",
                 )
                 return@run emptyList()
             }

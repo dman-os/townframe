@@ -9,8 +9,8 @@ import kotlinx.coroutines.launch
 import org.example.daybook.uniffi.DrawerEventListener
 import org.example.daybook.uniffi.DrawerRepoFfi
 import org.example.daybook.uniffi.FfiException
-import org.example.daybook.uniffi.core.DrawerEvent
 import org.example.daybook.uniffi.core.DocBundle
+import org.example.daybook.uniffi.core.DrawerEvent
 import org.example.daybook.uniffi.core.ListenerRegistration
 import org.example.daybook.uniffi.core.UpdateDocArgsV2
 import org.example.daybook.uniffi.types.Doc
@@ -27,14 +27,13 @@ sealed interface DocListState {
 private data class DrawerRefreshIntent(
     val refreshList: Boolean = false,
     val refreshDocIds: Set<String> = emptySet(),
-    val refreshSelectedDoc: Boolean = false
+    val refreshSelectedDoc: Boolean = false,
 ) {
-    fun merge(other: DrawerRefreshIntent): DrawerRefreshIntent =
-        DrawerRefreshIntent(
-            refreshList = refreshList || other.refreshList,
-            refreshDocIds = refreshDocIds + other.refreshDocIds,
-            refreshSelectedDoc = refreshSelectedDoc || other.refreshSelectedDoc
-        )
+    fun merge(other: DrawerRefreshIntent): DrawerRefreshIntent = DrawerRefreshIntent(
+        refreshList = refreshList || other.refreshList,
+        refreshDocIds = refreshDocIds + other.refreshDocIds,
+        refreshSelectedDoc = refreshSelectedDoc || other.refreshSelectedDoc,
+    )
 
     companion object {
         val ListOnly = DrawerRefreshIntent(refreshList = true)
@@ -76,7 +75,7 @@ class DrawerViewModel(val drawerRepo: DrawerRepoFfi) : ViewModel() {
             scope = viewModelScope,
             debounceMs = 120,
             merge = { left: DrawerRefreshIntent, right: DrawerRefreshIntent -> left.merge(right) },
-            onIntent = { intent: DrawerRefreshIntent -> applyRefreshIntent(intent) }
+            onIntent = { intent: DrawerRefreshIntent -> applyRefreshIntent(intent) },
         )
 
     private val listener =
@@ -94,8 +93,8 @@ class DrawerViewModel(val drawerRepo: DrawerRepoFfi) : ViewModel() {
                             refreshRunner.submit(
                                 DrawerRefreshIntent(
                                     refreshDocIds = if (shouldRefreshLoaded) setOf(event.id) else emptySet(),
-                                    refreshSelectedDoc = shouldRefreshSelected
-                                )
+                                    refreshSelectedDoc = shouldRefreshSelected,
+                                ),
                             )
                         }
 

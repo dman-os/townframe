@@ -192,11 +192,11 @@
             mold
             deno
             libarchive
+            prek
           ];
 
           rustLintInputs = with pkgs; [
             cargo-udeps
-            prek
             cargo-nextest
           ];
 

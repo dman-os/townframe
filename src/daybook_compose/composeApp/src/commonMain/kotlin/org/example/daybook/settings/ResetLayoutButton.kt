@@ -42,25 +42,25 @@ fun ResetLayoutButton(onReset: () -> Unit) {
         },
         enabled = !isConfirming || isConfirmEnabled,
         colors =
-            ButtonDefaults.buttonColors(
-                containerColor = if (isConfirming) {
-                    Color(
-                        0xFFD32F2F
-                    )
-                } else {
-                    ButtonDefaults.buttonColors().containerColor
-                },
-                disabledContainerColor = if (isConfirming) {
-                    Color(
-                        0xFFD32F2F
-                    )
-                } else {
-                    ButtonDefaults.buttonColors().disabledContainerColor
-                }
-            )
+        ButtonDefaults.buttonColors(
+            containerColor = if (isConfirming) {
+                Color(
+                    0xFFD32F2F,
+                )
+            } else {
+                ButtonDefaults.buttonColors().containerColor
+            },
+            disabledContainerColor = if (isConfirming) {
+                Color(
+                    0xFFD32F2F,
+                )
+            } else {
+                ButtonDefaults.buttonColors().disabledContainerColor
+            },
+        ),
     ) {
         Text(
-            text = if (isConfirming) "Confirm" else "Reset"
+            text = if (isConfirming) "Confirm" else "Reset",
         )
     }
 }

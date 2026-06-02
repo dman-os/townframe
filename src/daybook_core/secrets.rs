@@ -14,38 +14,42 @@ impl SecretRepo {
     const KEYRING_USERNAME: &'static str = "iroh_secret_key_v1";
 
     pub async fn boot() -> Res<Self> {
-        let store: Arc<keyring_core::CredentialStore> = if std::cfg!(test) {
-            static TEST_STORE: tokio::sync::OnceCell<Arc<keyring_core::mock::Store>> =
-                tokio::sync::OnceCell::const_new();
-            Arc::clone(
-                TEST_STORE
-                    .get_or_try_init(|| async { keyring_core::mock::Store::new() })
-                    .await?,
-            ) as _
-        } else {
-            tokio::task::spawn_blocking(move || {
-                let store;
-                #[cfg(target_os = "linux")]
-                {
-                    store = zbus_secret_service_keyring_store::Store::new()?;
-                }
-                #[cfg(target_os = "android")]
-                {
-                    store = android_native_keyring_store::Store::new()?;
-                }
-                #[cfg(target_os = "windows")]
-                {
-                    store = windows_native_keyring_store::Store::new()?;
-                }
-                #[cfg(any(target_os = "macos", target_os = "ios"))]
-                {
-                    store = apple_native_keyring_store::keychain::Store::new()?;
-                }
-                eyre::Ok(store)
-            })
-            .await
-            .expect(ERROR_TOKIO)?
-        };
+        // `cfg(test)` is only set for this crate's own unit tests. Integration/e2e
+        // tests build `daybook_core` as a normal dependency, so we also honor CI
+        // and the `test-support` feature here.
+        let store: Arc<keyring_core::CredentialStore> =
+            if cfg!(test) || cfg!(feature = "test-support") {
+                static TEST_STORE: tokio::sync::OnceCell<Arc<keyring_core::mock::Store>> =
+                    tokio::sync::OnceCell::const_new();
+                Arc::clone(
+                    TEST_STORE
+                        .get_or_try_init(|| async { keyring_core::mock::Store::new() })
+                        .await?,
+                ) as _
+            } else {
+                tokio::task::spawn_blocking(move || {
+                    let store;
+                    #[cfg(target_os = "linux")]
+                    {
+                        store = zbus_secret_service_keyring_store::Store::new()?;
+                    }
+                    #[cfg(target_os = "android")]
+                    {
+                        store = android_native_keyring_store::Store::new()?;
+                    }
+                    #[cfg(target_os = "windows")]
+                    {
+                        store = windows_native_keyring_store::Store::new()?;
+                    }
+                    #[cfg(any(target_os = "macos", target_os = "ios"))]
+                    {
+                        store = apple_native_keyring_store::keychain::Store::new()?;
+                    }
+                    eyre::Ok(store)
+                })
+                .await
+                .expect(ERROR_TOKIO)?
+            };
         Ok(Self { store })
     }
     pub async fn load_identity(&self, checkout_id: &str) -> Res<Option<RepoIdentity>> {

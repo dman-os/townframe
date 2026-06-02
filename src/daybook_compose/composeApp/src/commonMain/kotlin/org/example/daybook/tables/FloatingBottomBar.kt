@@ -63,12 +63,11 @@ private object FloatingBarDefaults {
     val menuTopRadius = 28.dp
 }
 
-private class NippleBarShape(private val protrusionPx: Float, private val cornerRadiusPx: Float) :
-    Shape {
+private class NippleBarShape(private val protrusionPx: Float, private val cornerRadiusPx: Float) : Shape {
     override fun createOutline(
         size: androidx.compose.ui.geometry.Size,
         layoutDirection: LayoutDirection,
-        density: androidx.compose.ui.unit.Density
+        density: androidx.compose.ui.unit.Density,
     ): Outline {
         val protrusion = protrusionPx.coerceAtLeast(0f)
         val centerY = size.height / 2f
@@ -83,8 +82,8 @@ private class NippleBarShape(private val protrusionPx: Float, private val corner
                     top = 0f,
                     right = bodyRight,
                     bottom = size.height,
-                    cornerRadius = CornerRadius(cornerRadiusPx, cornerRadiusPx)
-                )
+                    cornerRadius = CornerRadius(cornerRadiusPx, cornerRadiusPx),
+                ),
             )
             if (protrusion > 0f) {
                 addOval(
@@ -92,16 +91,16 @@ private class NippleBarShape(private val protrusionPx: Float, private val corner
                         left = 0f,
                         top = centerY - nippleRadius,
                         right = protrusion * 2f,
-                        bottom = centerY + nippleRadius
-                    )
+                        bottom = centerY + nippleRadius,
+                    ),
                 )
                 addOval(
                     Rect(
                         left = size.width - protrusion * 2f,
                         top = centerY - nippleRadius,
                         right = size.width,
-                        bottom = centerY + nippleRadius
-                    )
+                        bottom = centerY + nippleRadius,
+                    ),
                 )
             }
         }
@@ -114,13 +113,13 @@ fun FloatingBottomNavigationBar(
     centerContent: @Composable RowScope.() -> Unit,
     menuOpenProgress: Float,
     onBarHeightChanged: (Dp) -> Unit = {},
-    bottomBarModifier: Modifier = Modifier
+    bottomBarModifier: Modifier = Modifier,
 ) {
     val density = LocalDensity.current
     val animatedOpenProgress by animateFloatAsState(
         targetValue = menuOpenProgress.coerceIn(0f, 1f),
         animationSpec = tween(durationMillis = 180),
-        label = "floating_bar_open_progress"
+        label = "floating_bar_open_progress",
     )
     val protrusionFraction = 1f - animatedOpenProgress
     val protrusionPx = with(density) { 8.dp.toPx() } * protrusionFraction
@@ -129,29 +128,29 @@ fun FloatingBottomNavigationBar(
 
     Box(
         modifier =
-            bottomBarModifier
-                .fillMaxWidth()
-                .safeContentPadding()
-                .padding(
-                    horizontal = FloatingBarDefaults.horizontalPadding,
-                    vertical = FloatingBarDefaults.verticalPadding
-                )
+        bottomBarModifier
+            .fillMaxWidth()
+            .safeContentPadding()
+            .padding(
+                horizontal = FloatingBarDefaults.horizontalPadding,
+                vertical = FloatingBarDefaults.verticalPadding,
+            ),
     ) {
         Surface(
             modifier =
-                Modifier
-                    .fillMaxWidth()
-                    .onSizeChanged {
-                        onBarHeightChanged(with(density) { it.height.toDp() })
-                    },
+            Modifier
+                .fillMaxWidth()
+                .onSizeChanged {
+                    onBarHeightChanged(with(density) { it.height.toDp() })
+                },
             color = MaterialTheme.colorScheme.surfaceContainerLow.copy(alpha = 0.94f),
             shape = NippleBarShape(protrusionPx = protrusionPx, cornerRadiusPx = cornerRadiusPx),
             shadowElevation = 10.dp,
-            tonalElevation = 0.dp
+            tonalElevation = 0.dp,
         ) {
             Row(
                 modifier = Modifier.fillMaxWidth().padding(horizontal = 20.dp),
-                verticalAlignment = Alignment.CenterVertically
+                verticalAlignment = Alignment.CenterVertically,
             ) {
                 centerContent()
             }
@@ -162,16 +161,16 @@ fun FloatingBottomNavigationBar(
             contentDescription = "Swipe right for drawer",
             tint = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.78f * nippleAlpha),
             modifier = Modifier.align(
-                Alignment.CenterStart
-            ).padding(start = 7.dp).width(13.dp).height(13.dp)
+                Alignment.CenterStart,
+            ).padding(start = 7.dp).width(13.dp).height(13.dp),
         )
         Icon(
             imageVector = Icons.Default.KeyboardArrowUp,
             contentDescription = "Swipe up for menu",
             tint = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.78f * nippleAlpha),
             modifier = Modifier.align(
-                Alignment.CenterEnd
-            ).padding(end = 7.dp).width(13.dp).height(13.dp)
+                Alignment.CenterEnd,
+            ).padding(end = 7.dp).width(13.dp).height(13.dp),
         )
     }
 }
@@ -188,7 +187,7 @@ fun FloatingGrowingMenuSheet(
     onMenuItemLayout: (key: String, rect: Rect) -> Unit,
     onDismiss: () -> Unit,
     onItemActivate: suspend (FeatureItem) -> Unit,
-    modifier: Modifier = Modifier
+    modifier: Modifier = Modifier,
 ) {
     if (!sheetState.isVisible) return
 
@@ -203,8 +202,8 @@ fun FloatingGrowingMenuSheet(
 
     Box(
         modifier = modifier.fillMaxSize().padding(
-            horizontal = FloatingBarDefaults.horizontalPadding
-        )
+            horizontal = FloatingBarDefaults.horizontalPadding,
+        ),
     ) {
         val safeMaxAnchor = maxAnchor.coerceAtLeast(1e-6f)
         val openFraction = (sheetState.progress / safeMaxAnchor).coerceIn(0f, 1f)
@@ -212,18 +211,18 @@ fun FloatingGrowingMenuSheet(
         val dragModifier =
             Modifier.draggable(
                 state =
-                    rememberDraggableState { dragAmount ->
-                        val total = maxMenuHeightPx
-                        val boundedProgress = sheetState.progress.coerceIn(0f, maxAnchor)
-                        val currentVisible =
-                            total * (boundedProgress / safeMaxAnchor).coerceIn(0f, 1f)
-                        val nextVisible = (currentVisible - dragAmount).coerceIn(0f, total)
-                        val nextProgress = ((nextVisible / total) * safeMaxAnchor).coerceIn(
-                            0f,
-                            safeMaxAnchor
-                        )
-                        sheetState.setProgressImmediate(nextProgress)
-                    },
+                rememberDraggableState { dragAmount ->
+                    val total = maxMenuHeightPx
+                    val boundedProgress = sheetState.progress.coerceIn(0f, maxAnchor)
+                    val currentVisible =
+                        total * (boundedProgress / safeMaxAnchor).coerceIn(0f, 1f)
+                    val nextVisible = (currentVisible - dragAmount).coerceIn(0f, total)
+                    val nextProgress = ((nextVisible / total) * safeMaxAnchor).coerceIn(
+                        0f,
+                        safeMaxAnchor,
+                    )
+                    sheetState.setProgressImmediate(nextProgress)
+                },
                 orientation = Orientation.Vertical,
                 onDragStopped = { velocityY ->
                     if (velocityY > flingCloseThreshold) {
@@ -242,7 +241,7 @@ fun FloatingGrowingMenuSheet(
                             }
                         }
                     }
-                }
+                },
             )
         val barDragAreaHeight = barHeight + FloatingBarDefaults.verticalPadding * 2
         val surfaceHeight = targetHeight.coerceAtLeast(1.dp)
@@ -250,49 +249,49 @@ fun FloatingGrowingMenuSheet(
 
         Surface(
             modifier =
-                Modifier
-                    .align(Alignment.BottomCenter)
-                    .fillMaxWidth()
-                    .padding(bottom = FloatingBarDefaults.verticalPadding)
-                    .height(surfaceHeight)
-                    .then(effectiveDragModifier),
+            Modifier
+                .align(Alignment.BottomCenter)
+                .fillMaxWidth()
+                .padding(bottom = FloatingBarDefaults.verticalPadding)
+                .height(surfaceHeight)
+                .then(effectiveDragModifier),
             color = MaterialTheme.colorScheme.surfaceContainerLow.copy(alpha = 0.96f),
             shape = RoundedCornerShape(
                 topStart = FloatingBarDefaults.menuTopRadius,
                 topEnd = FloatingBarDefaults.menuTopRadius,
                 bottomStart = 28.dp,
-                bottomEnd = 28.dp
+                bottomEnd = 28.dp,
             ),
             shadowElevation = 12.dp,
-            tonalElevation = 0.dp
+            tonalElevation = 0.dp,
         ) {
             Column(
                 modifier = Modifier.fillMaxSize().padding(horizontal = 16.dp),
-                verticalArrangement = Arrangement.Bottom
+                verticalArrangement = Arrangement.Bottom,
             ) {
                 Box(
                     modifier =
-                        Modifier
-                            .fillMaxWidth()
-                            .padding(top = 8.dp, bottom = 6.dp),
-                    contentAlignment = Alignment.Center
+                    Modifier
+                        .fillMaxWidth()
+                        .padding(top = 8.dp, bottom = 6.dp),
+                    contentAlignment = Alignment.Center,
                 ) {
                     Box(
                         modifier =
-                            Modifier
-                                .height(4.dp)
-                                .width(36.dp)
-                                .clip(RoundedCornerShape(2.dp))
-                                .background(MaterialTheme.colorScheme.onSurface.copy(alpha = 0.18f))
+                        Modifier
+                            .height(4.dp)
+                            .width(36.dp)
+                            .clip(RoundedCornerShape(2.dp))
+                            .background(MaterialTheme.colorScheme.onSurface.copy(alpha = 0.18f)),
                     )
                 }
                 Spacer(Modifier.weight(1f, fill = true))
                 Column(
                     modifier =
-                        Modifier
-                            .fillMaxWidth()
-                            .verticalScroll(rememberScrollState()),
-                    verticalArrangement = Arrangement.spacedBy(8.dp)
+                    Modifier
+                        .fillMaxWidth()
+                        .verticalScroll(rememberScrollState()),
+                    verticalArrangement = Arrangement.spacedBy(8.dp),
                 ) {
                     menuItems.forEach { item ->
                         val isActivationReady = item.key == activationReadyMenuItem
@@ -306,53 +305,53 @@ fun FloatingGrowingMenuSheet(
                                 label = { item.labelContent?.invoke() ?: Text(item.label) },
                                 shape = menuItemShape,
                                 modifier =
-                                    Modifier
-                                        .fillMaxWidth()
-                                        .then(
-                                            if (isActivationReady) {
-                                                Modifier.border(
-                                                    width = 1.5.dp,
-                                                    color = armedIndicatorColor,
-                                                    shape = menuItemShape
-                                                )
-                                            } else {
-                                                Modifier
-                                            }
-                                        )
-                                        .onGloballyPositioned {
-                                            onMenuItemLayout(item.key, it.boundsInWindow())
-                                        }
+                                Modifier
+                                    .fillMaxWidth()
+                                    .then(
+                                        if (isActivationReady) {
+                                            Modifier.border(
+                                                width = 1.5.dp,
+                                                color = armedIndicatorColor,
+                                                shape = menuItemShape,
+                                            )
+                                        } else {
+                                            Modifier
+                                        },
+                                    )
+                                    .onGloballyPositioned {
+                                        onMenuItemLayout(item.key, it.boundsInWindow())
+                                    },
                             )
                         } else {
                             Surface(
                                 modifier =
-                                    Modifier
-                                        .fillMaxWidth()
-                                        .alpha(0.38f)
-                                        .then(
-                                            if (isActivationReady) {
-                                                Modifier.border(
-                                                    width = 1.5.dp,
-                                                    color = armedIndicatorColor,
-                                                    shape = menuItemShape
-                                                )
-                                            } else {
-                                                Modifier
-                                            }
-                                        )
-                                        .onGloballyPositioned {
-                                            onMenuItemLayout(item.key, it.boundsInWindow())
+                                Modifier
+                                    .fillMaxWidth()
+                                    .alpha(0.38f)
+                                    .then(
+                                        if (isActivationReady) {
+                                            Modifier.border(
+                                                width = 1.5.dp,
+                                                color = armedIndicatorColor,
+                                                shape = menuItemShape,
+                                            )
+                                        } else {
+                                            Modifier
                                         },
+                                    )
+                                    .onGloballyPositioned {
+                                        onMenuItemLayout(item.key, it.boundsInWindow())
+                                    },
                                 shape = menuItemShape,
-                                color = MaterialTheme.colorScheme.surfaceContainerLow
+                                color = MaterialTheme.colorScheme.surfaceContainerLow,
                             ) {
                                 Row(
                                     modifier = Modifier.fillMaxWidth().padding(
                                         horizontal = 16.dp,
-                                        vertical = 12.dp
+                                        vertical = 12.dp,
                                     ),
                                     verticalAlignment = Alignment.CenterVertically,
-                                    horizontalArrangement = Arrangement.spacedBy(12.dp)
+                                    horizontalArrangement = Arrangement.spacedBy(12.dp),
                                 ) {
                                     item.icon()
                                     item.labelContent?.invoke() ?: Text(item.label)
@@ -366,11 +365,11 @@ fun FloatingGrowingMenuSheet(
         }
         Box(
             modifier =
-                Modifier
-                    .align(Alignment.BottomCenter)
-                    .fillMaxWidth()
-                    .height(barDragAreaHeight)
-                    .then(effectiveDragModifier)
+            Modifier
+                .align(Alignment.BottomCenter)
+                .fillMaxWidth()
+                .height(barDragAreaHeight)
+                .then(effectiveDragModifier),
         )
     }
 }
