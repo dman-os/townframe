@@ -8,7 +8,6 @@ use daybook_types::doc::{BranchPathBuf, ChangeHashSet, DocId, FacetKey, FacetRef
 use daybook_types::manifest::{DocPredicateClause, FacetReferenceKind, FacetReferenceManifest};
 use daybook_types::reference::select_json_path_values;
 use daybook_types::url::{parse_facet_ref, FACET_SELF_DOC_ID};
-use sqlx::SqlitePool;
 use tokio_util::sync::CancellationToken;
 
 const FACET_REF_LOCAL_STATE_ID: &str = "@daybook/wip/doc-facet-ref-index";
@@ -36,7 +35,7 @@ pub struct DocFacetRefIndexRepo {
     drawer_repo: Arc<DrawerRepo>,
     plugs_repo: Arc<PlugsRepo>,
     work_tx: tokio::sync::mpsc::UnboundedSender<DocFacetRefIndexWorkItem>,
-    db_pool: SqlitePool,
+    sql: SqlCtx,
     reference_specs: tokio::sync::RwLock<HashMap<String, Vec<FacetReferenceManifest>>>,
 }
 
@@ -76,7 +75,8 @@ impl DocFacetRefIndexRepo {
         let (_sqlite_file_path, db_pool) = sqlite_local_state_repo
             .ensure_sqlite_pool(FACET_REF_LOCAL_STATE_ID)
             .await?;
-        Self::init_schema(&db_pool).await?;
+        let sql = SqlCtx::from_single_pool(db_pool);
+        Self::init_schema(&sql).await?;
         let (work_tx, mut work_rx) = tokio::sync::mpsc::unbounded_channel();
 
         let registry = crate::repos::ListenersRegistry::new();
@@ -87,7 +87,7 @@ impl DocFacetRefIndexRepo {
             drawer_repo: Arc::clone(&drawer_repo),
             plugs_repo: Arc::clone(&plugs_repo),
             work_tx,
-            db_pool,
+            sql,
             reference_specs: tokio::sync::RwLock::new(HashMap::new()),
         });
 
@@ -121,7 +121,7 @@ impl DocFacetRefIndexRepo {
         ))
     }
 
-    async fn init_schema(db_pool: &SqlitePool) -> Res<()> {
+    async fn init_schema(sql: &SqlCtx) -> Res<()> {
         sqlx::query(
             r#"
             CREATE TABLE IF NOT EXISTS facet_ref_edges (
@@ -135,19 +135,19 @@ impl DocFacetRefIndexRepo {
             ) STRICT
             "#,
         )
-        .execute(db_pool)
+        .execute(&sql.write_pool)
         .await?;
 
         sqlx::query(
             "CREATE INDEX IF NOT EXISTS idx_facet_ref_edges_target ON facet_ref_edges(target_doc_id, target_facet_key)",
         )
-        .execute(db_pool)
+        .execute(&sql.write_pool)
         .await?;
 
         sqlx::query(
             "CREATE INDEX IF NOT EXISTS idx_facet_ref_edges_origin ON facet_ref_edges(origin_doc_id, origin_facet_key)",
         )
-        .execute(db_pool)
+        .execute(&sql.write_pool)
         .await?;
 
         Ok(())
@@ -200,7 +200,7 @@ impl DocFacetRefIndexRepo {
 
     async fn reindex_all_docs(&self) -> Res<()> {
         sqlx::query("DELETE FROM facet_ref_edges")
-            .execute(&self.db_pool)
+            .execute(&self.sql.write_pool)
             .await?;
 
         let specs = self.reference_specs.read().await.clone();
@@ -302,7 +302,7 @@ impl DocFacetRefIndexRepo {
 
         sqlx::query("DELETE FROM facet_ref_edges WHERE origin_doc_id = ?1")
             .bind(doc_id)
-            .execute(&self.db_pool)
+            .execute(&self.sql.write_pool)
             .await?;
 
         let specs = self.reference_specs.read().await.clone();
@@ -335,7 +335,7 @@ impl DocFacetRefIndexRepo {
                     .bind(reference.target_facet_key.to_string())
                     .bind(reference_kind_to_db_value(&spec.reference_kind()))
                     .bind(&serialized_heads)
-                    .execute(&self.db_pool)
+                    .execute(&self.sql.write_pool)
                     .await?;
                 }
             }
@@ -347,7 +347,7 @@ impl DocFacetRefIndexRepo {
     pub async fn delete_doc(&self, doc_id: &DocId) -> Res<()> {
         sqlx::query("DELETE FROM facet_ref_edges WHERE origin_doc_id = ?1 OR target_doc_id = ?1")
             .bind(doc_id)
-            .execute(&self.db_pool)
+            .execute(&self.sql.write_pool)
             .await?;
         Ok(())
     }
@@ -368,7 +368,7 @@ impl DocFacetRefIndexRepo {
             "#,
         )
         .bind(doc_id)
-        .fetch_all(&self.db_pool)
+        .fetch_all(&self.sql.read_pool)
         .await?;
 
         rows.into_iter().map(row_to_edge).collect()
@@ -395,7 +395,7 @@ impl DocFacetRefIndexRepo {
         )
         .bind(target_doc_id)
         .bind(target_facet_key.to_string())
-        .fetch_all(&self.db_pool)
+        .fetch_all(&self.sql.read_pool)
         .await?;
 
         rows.into_iter().map(row_to_edge).collect()

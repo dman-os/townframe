@@ -405,10 +405,7 @@ pub async fn clone_repo_init_from_url(
         let local_peer_key = daybook_types::doc::format_peer_key(local_public.as_bytes());
 
         let sqlite_path = staging.join("sqlite.db");
-        let sql = crate::app::SqlCtx::new(crate::app::SqlConfig {
-            database_url: format!("sqlite://{}", sqlite_path.display()),
-        })
-        .await?;
+        let sql = crate::app::open_sql_ctx(crate::app::SqlConfig::file(sqlite_path)).await?;
         crate::repo::globals::set_string_global(&sql, "global.repo_id", &bootstrap.repo_id).await?;
         crate::repo::globals::set_string_global(&sql, "global.repo_name", &bootstrap.repo_name)
             .await?;

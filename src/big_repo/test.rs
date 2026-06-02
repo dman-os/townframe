@@ -10,24 +10,42 @@ use big_sync::stress_support::{self, StressFixture};
 use big_sync::{HostPartStore, SyncBackend};
 use big_sync_core::{Byte32Id, PartId, SyncCompletionDeets};
 use rand::rngs::StdRng;
+use sqlx::ConnectOptions;
 use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::fmt::Write as _;
+use std::path::PathBuf;
+use std::str::FromStr;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use tempfile::tempdir;
 use tokio::{sync::Notify, time::timeout};
 
-pub async fn boot_part_store(sqlite_url: &str) -> Res<(Arc<big_sync::Ctx>, big_sync::StopToken)> {
-    let connect_options = sqlx_utils_rs::sqlite_file_connect_options(sqlite_url)
-        .expect(ERROR_IMPOSSIBLE)
-        .journal_mode(sqlx::sqlite::SqliteJournalMode::Wal);
-    let (read_pool, write_pool) =
-        sqlx_utils_rs::open_sqlite_rw_pools(sqlite_url, connect_options, 4, 1).await?;
+pub async fn boot_part_store(
+    sqlite_path: Option<PathBuf>,
+) -> Res<(Arc<big_sync::Ctx>, big_sync::StopToken)> {
+    let (read_pool, write_pool, scope_id) = match sqlite_path {
+        Some(sqlite_path) => {
+            let connect_options = sqlx_utils_rs::sqlite_file_connect_options(sqlite_path)?
+                .journal_mode(sqlx::sqlite::SqliteJournalMode::Wal);
+            let (read_pool, write_pool) =
+                sqlx_utils_rs::open_sqlite_rw_pools(sqlite_path, connect_options, 4, 1).await?;
+            (
+                read_pool,
+                write_pool,
+                sqlite_path.to_string_lossy().to_string(),
+            )
+        }
+        None => {
+            let connect_options = sqlx::sqlite::SqliteConnectOptions::from_str("sqlite::memory:")?;
+            let db_pool = sqlx::SqlitePool::connect_with(connect_options).await?;
+            (db_pool.clone(), db_pool, "sqlite::memory:".to_string())
+        }
+    };
 
     let store = Arc::new(
         big_sync::SqlitePartStore::new(
             read_pool,
             write_pool,
-            sqlite_url.to_owned(),
+            scope_id,
             big_sync_core::BuckId::MAX_LEVEL,
         )
         .await?,
@@ -48,7 +66,7 @@ pub async fn boot_repo() -> Res<(
     Arc<big_sync::Ctx>,
     Box<dyn FnOnce() -> futures::future::BoxFuture<'static, Res<()>>>,
 )> {
-    let (big_sync_host, big_sync_stop) = boot_part_store("sqlite::memory:").await?;
+    let (big_sync_host, big_sync_stop) = boot_part_store(None).await?;
     let (repo, stop) = BigRepo::boot(
         Config {
             peer_id: PeerId::new([7_u8; 32]),
@@ -81,8 +99,7 @@ pub async fn _boot_disk_repo(
 )> {
     std::fs::create_dir_all(&path)
         .wrap_err_with(|| format!("failed creating disk repo path: {}", path.display()))?;
-    let (big_sync_host, big_sync_stop) =
-        boot_part_store(&sqlx_utils_rs::sqlite_file_url(path.join("part_store.db"))).await?;
+    let (big_sync_host, big_sync_stop) = boot_part_store(Some(path.join("part_store.db"))).await?;
     let (repo, stop) = BigRepo::boot(
         Config {
             peer_id: PeerId::new([7_u8; 32]),
@@ -894,7 +911,7 @@ impl SyncRepoNode {
         std::fs::create_dir_all(&path)
             .wrap_err_with(|| format!("failed creating sync repo path: {}", path.display()))?;
         let (big_sync_host, big_sync_stop) =
-            boot_part_store(&sqlx_utils_rs::sqlite_file_url(path.join("part_store.db"))).await?;
+            boot_part_store(Some(path.join("part_store.db"))).await?;
         let part_init_obj = ObjId(big_sync_core::Byte32Id::new(
             [255_u8.wrapping_sub(seed); 32],
         ));

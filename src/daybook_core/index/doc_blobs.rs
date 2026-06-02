@@ -7,7 +7,6 @@ use daybook_types::doc::{
     BranchPathBuf, ChangeHashSet, DocId, FacetKey, WellKnownFacet, WellKnownFacetTag,
 };
 use sqlx::QueryBuilder;
-use sqlx::SqlitePool;
 use tokio_util::sync::CancellationToken;
 
 const DOC_BLOBS_LOCAL_STATE_ID: &str = "@daybook/wip/doc-blobs-index";
@@ -39,7 +38,7 @@ pub struct DocBlobsIndexRepo {
     drawer_repo: Arc<DrawerRepo>,
     blobs_repo: Arc<BlobsRepo>,
     work_tx: tokio::sync::mpsc::UnboundedSender<DocBlobsIndexWorkItem>,
-    db_pool: SqlitePool,
+    sql: SqlCtx,
 }
 
 impl Repo for DocBlobsIndexRepo {
@@ -63,7 +62,8 @@ impl DocBlobsIndexRepo {
         let (_sqlite_file_path, db_pool) = sqlite_local_state_repo
             .ensure_sqlite_pool(DOC_BLOBS_LOCAL_STATE_ID)
             .await?;
-        Self::init_schema(&db_pool).await?;
+        let sql = SqlCtx::from_single_pool(db_pool);
+        Self::init_schema(&sql).await?;
         let (work_tx, mut work_rx) = tokio::sync::mpsc::unbounded_channel();
 
         let registry = crate::repos::ListenersRegistry::new();
@@ -74,7 +74,7 @@ impl DocBlobsIndexRepo {
             drawer_repo: Arc::clone(&drawer_repo),
             blobs_repo,
             work_tx,
-            db_pool,
+            sql,
         });
 
         let worker_handle = tokio::spawn({
@@ -107,7 +107,7 @@ impl DocBlobsIndexRepo {
         ))
     }
 
-    async fn init_schema(db_pool: &SqlitePool) -> Res<()> {
+    async fn init_schema(sql: &SqlCtx) -> Res<()> {
         sqlx::query(
             r#"
             CREATE TABLE IF NOT EXISTS doc_blob_refs (
@@ -120,29 +120,29 @@ impl DocBlobsIndexRepo {
             ) STRICT
             "#,
         )
-        .execute(db_pool)
+        .execute(&sql.write_pool)
         .await?;
 
         let has_length_octets_col: Option<i64> = sqlx::query_scalar(
             "SELECT 1 FROM pragma_table_info('doc_blob_refs') WHERE name = 'length_octets'",
         )
-        .fetch_optional(db_pool)
+        .fetch_optional(&sql.write_pool)
         .await?;
         if has_length_octets_col.is_none() {
             sqlx::query(
                 "ALTER TABLE doc_blob_refs ADD COLUMN length_octets INTEGER NOT NULL DEFAULT 0",
             )
-            .execute(db_pool)
+            .execute(&sql.write_pool)
             .await?;
         }
 
         let has_branch_path_col: Option<i64> = sqlx::query_scalar(
             "SELECT 1 FROM pragma_table_info('doc_blob_refs') WHERE name = 'branch_path'",
         )
-        .fetch_optional(db_pool)
+        .fetch_optional(&sql.write_pool)
         .await?;
         if has_branch_path_col.is_none() {
-            let mut tx = db_pool.begin_with("BEGIN IMMEDIATE").await?;
+            let mut tx = sql.write_pool.begin_with("BEGIN IMMEDIATE").await?;
             sqlx::query("ALTER TABLE doc_blob_refs RENAME TO doc_blob_refs_old")
                 .execute(&mut *tx)
                 .await?;
@@ -178,12 +178,12 @@ impl DocBlobsIndexRepo {
         sqlx::query(
             "CREATE INDEX IF NOT EXISTS idx_doc_blob_refs_blob_hash ON doc_blob_refs(blob_hash)",
         )
-        .execute(db_pool)
+        .execute(&sql.write_pool)
         .await?;
         sqlx::query(
             "CREATE INDEX IF NOT EXISTS idx_doc_blob_refs_doc_branch ON doc_blob_refs(doc_id, branch_path)",
         )
-        .execute(db_pool)
+        .execute(&sql.write_pool)
         .await?;
 
         Ok(())
@@ -310,9 +310,8 @@ impl DocBlobsIndexRepo {
         heads: &ChangeHashSet,
         blobs: &HashMap<Arc<str>, u64>,
     ) -> Res<ReindexDocOutcome> {
-        let mut tx = self.db_pool.begin_with("BEGIN IMMEDIATE").await?;
         let prev_hashes: HashSet<Arc<str>> = self
-            .list_hashes_for_doc_branch_tx(tx.as_mut(), doc_id, branch_path)
+            .list_hashes_for_doc_branch(doc_id, branch_path)
             .await?
             .into_iter()
             .map(|hash| hash.into())
@@ -322,7 +321,7 @@ impl DocBlobsIndexRepo {
         let mut hashes_to_remove = HashSet::new();
         for hash in prev_hashes.difference(&next_hashes) {
             if self
-                .hash_is_unused_excluding_doc_branch_tx(tx.as_mut(), hash, doc_id, branch_path)
+                .hash_is_unused_excluding_doc_branch(hash, doc_id, branch_path)
                 .await?
             {
                 hashes_to_remove.insert(Arc::clone(hash));
@@ -333,6 +332,7 @@ impl DocBlobsIndexRepo {
         self.publish_hash_delta_with_retry(&hashes_to_add, &hashes_to_remove)
             .await?;
 
+        let mut tx = self.sql.write_pool.begin_with("BEGIN IMMEDIATE").await?;
         sqlx::query("DELETE FROM doc_blob_refs WHERE doc_id = ?1 AND branch_path = ?2")
             .bind(doc_id)
             .bind(branch_path.as_str())
@@ -380,24 +380,21 @@ impl DocBlobsIndexRepo {
     }
 
     pub async fn delete_doc(&self, doc_id: &DocId) -> Res<()> {
-        let mut tx = self.db_pool.begin_with("BEGIN IMMEDIATE").await?;
         let prev_hashes: HashSet<Arc<str>> = self
-            .list_hashes_for_doc_tx(tx.as_mut(), doc_id)
+            .list_hashes_for_doc(doc_id)
             .await?
             .into_iter()
             .map(Into::into)
             .collect();
         let mut hashes_to_remove = HashSet::new();
         for hash in &prev_hashes {
-            if self
-                .hash_is_unused_excluding_doc_tx(tx.as_mut(), hash, doc_id)
-                .await?
-            {
+            if self.hash_is_unused_excluding_doc(hash, doc_id).await? {
                 hashes_to_remove.insert(Arc::clone(hash));
             }
         }
         self.publish_hash_delta_with_retry(&HashSet::new(), &hashes_to_remove)
             .await?;
+        let mut tx = self.sql.write_pool.begin_with("BEGIN IMMEDIATE").await?;
         sqlx::query("DELETE FROM doc_blob_refs WHERE doc_id = ?1")
             .bind(doc_id)
             .execute(&mut *tx)
@@ -411,9 +408,8 @@ impl DocBlobsIndexRepo {
         doc_id: &DocId,
         branch_path: &BranchPathBuf,
     ) -> Res<ReindexDocOutcome> {
-        let mut tx = self.db_pool.begin_with("BEGIN IMMEDIATE").await?;
         let prev_hashes: HashSet<Arc<str>> = self
-            .list_hashes_for_doc_branch_tx(tx.as_mut(), doc_id, branch_path)
+            .list_hashes_for_doc_branch(doc_id, branch_path)
             .await?
             .into_iter()
             .map(Into::into)
@@ -421,7 +417,7 @@ impl DocBlobsIndexRepo {
         let mut hashes_to_remove = HashSet::new();
         for hash in &prev_hashes {
             if self
-                .hash_is_unused_excluding_doc_branch_tx(tx.as_mut(), hash, doc_id, branch_path)
+                .hash_is_unused_excluding_doc_branch(hash, doc_id, branch_path)
                 .await?
             {
                 hashes_to_remove.insert(Arc::clone(hash));
@@ -429,6 +425,7 @@ impl DocBlobsIndexRepo {
         }
         self.publish_hash_delta_with_retry(&HashSet::new(), &hashes_to_remove)
             .await?;
+        let mut tx = self.sql.write_pool.begin_with("BEGIN IMMEDIATE").await?;
         sqlx::query("DELETE FROM doc_blob_refs WHERE doc_id = ?1 AND branch_path = ?2")
             .bind(doc_id)
             .bind(branch_path.as_str())
@@ -449,7 +446,7 @@ impl DocBlobsIndexRepo {
             "#,
         )
         .bind(doc_id)
-        .fetch_one(&self.db_pool)
+        .fetch_one(&self.sql.read_pool)
         .await?;
         if exists == 0 {
             Ok(ReindexDocOutcome::Evicted)
@@ -504,6 +501,10 @@ impl DocBlobsIndexRepo {
     }
 
     pub async fn list_hashes_for_doc(&self, doc_id: &DocId) -> Res<Vec<String>> {
+        Self::list_hashes_for_doc_with(&self.sql.read_pool, doc_id).await
+    }
+
+    async fn list_hashes_for_doc_with(pool: &sqlx::SqlitePool, doc_id: &DocId) -> Res<Vec<String>> {
         let hashes: Vec<String> = sqlx::query_scalar(
             r#"
             SELECT DISTINCT blob_hash
@@ -513,33 +514,21 @@ impl DocBlobsIndexRepo {
             "#,
         )
         .bind(doc_id)
-        .fetch_all(&self.db_pool)
+        .fetch_all(pool)
         .await?;
         Ok(hashes)
     }
 
-    async fn list_hashes_for_doc_tx(
+    pub async fn list_hashes_for_doc_branch(
         &self,
-        tx: &mut sqlx::SqliteConnection,
         doc_id: &DocId,
+        branch_path: &BranchPathBuf,
     ) -> Res<Vec<String>> {
-        let hashes: Vec<String> = sqlx::query_scalar(
-            r#"
-            SELECT DISTINCT blob_hash
-            FROM doc_blob_refs
-            WHERE doc_id = ?1
-            ORDER BY blob_hash ASC
-            "#,
-        )
-        .bind(doc_id)
-        .fetch_all(tx)
-        .await?;
-        Ok(hashes)
+        Self::list_hashes_for_doc_branch_with(&self.sql.read_pool, doc_id, branch_path).await
     }
 
-    async fn list_hashes_for_doc_branch_tx(
-        &self,
-        tx: &mut sqlx::SqliteConnection,
+    async fn list_hashes_for_doc_branch_with(
+        pool: &sqlx::SqlitePool,
         doc_id: &DocId,
         branch_path: &BranchPathBuf,
     ) -> Res<Vec<String>> {
@@ -554,14 +543,17 @@ impl DocBlobsIndexRepo {
         )
         .bind(doc_id)
         .bind(branch_path.as_str())
-        .fetch_all(tx)
+        .fetch_all(pool)
         .await?;
         Ok(hashes)
     }
 
-    async fn hash_is_unused_excluding_doc_tx(
-        &self,
-        tx: &mut sqlx::SqliteConnection,
+    async fn hash_is_unused_excluding_doc(&self, hash: &str, doc_id: &DocId) -> Res<bool> {
+        Self::hash_is_unused_excluding_doc_with(&self.sql.read_pool, hash, doc_id).await
+    }
+
+    async fn hash_is_unused_excluding_doc_with(
+        pool: &sqlx::SqlitePool,
         hash: &str,
         doc_id: &DocId,
     ) -> Res<bool> {
@@ -577,14 +569,28 @@ impl DocBlobsIndexRepo {
         )
         .bind(hash)
         .bind(doc_id)
-        .fetch_one(tx)
+        .fetch_one(pool)
         .await?;
         Ok(exists_other == 0)
     }
 
-    async fn hash_is_unused_excluding_doc_branch_tx(
+    async fn hash_is_unused_excluding_doc_branch(
         &self,
-        tx: &mut sqlx::SqliteConnection,
+        hash: &str,
+        doc_id: &DocId,
+        branch_path: &BranchPathBuf,
+    ) -> Res<bool> {
+        Self::hash_is_unused_excluding_doc_branch_with(
+            &self.sql.read_pool,
+            hash,
+            doc_id,
+            branch_path,
+        )
+        .await
+    }
+
+    async fn hash_is_unused_excluding_doc_branch_with(
+        pool: &sqlx::SqlitePool,
         hash: &str,
         doc_id: &DocId,
         branch_path: &BranchPathBuf,
@@ -602,7 +608,7 @@ impl DocBlobsIndexRepo {
         .bind(hash)
         .bind(doc_id)
         .bind(branch_path.as_str())
-        .fetch_one(tx)
+        .fetch_one(pool)
         .await?;
         Ok(exists_other == 0)
     }
@@ -618,7 +624,7 @@ impl DocBlobsIndexRepo {
             "#,
         )
         .bind(doc_id)
-        .fetch_all(&self.db_pool)
+        .fetch_all(&self.sql.read_pool)
         .await?;
         rows.into_iter()
             .map(|(blob_hash, min_length_octets, max_length_octets)| {
@@ -646,7 +652,7 @@ impl DocBlobsIndexRepo {
             "#,
         )
         .bind(hash)
-        .fetch_all(&self.db_pool)
+        .fetch_all(&self.sql.read_pool)
         .await?;
 
         rows.into_iter()
@@ -673,7 +679,7 @@ impl DocBlobsIndexRepo {
             ORDER BY blob_hash ASC
             "#,
         )
-        .fetch_all(&self.db_pool)
+        .fetch_all(&self.sql.read_pool)
         .await?;
         Ok(hashes)
     }
@@ -686,7 +692,7 @@ impl DocBlobsIndexRepo {
             ORDER BY doc_id ASC, branch_path ASC, blob_hash ASC
             "#,
         )
-        .fetch_all(&self.db_pool)
+        .fetch_all(&self.sql.read_pool)
         .await?;
         rows.into_iter()
             .map(|(doc_id, branch_path, blob_hash, length_octets)| {
@@ -762,7 +768,7 @@ impl DocBlobsIndexRepo {
             "#,
         )
         .bind(doc_id)
-        .fetch_all(&self.db_pool)
+        .fetch_all(&self.sql.read_pool)
         .await?;
         let mut outcome = self.doc_presence_outcome(doc_id).await?;
         for branch_path in current {
@@ -1043,10 +1049,7 @@ mod tests {
             Arc::clone(&big_sync_host.store),
             drawer_doc_id,
             local_user_path.clone(),
-            crate::app::SqlCtx::new(crate::app::SqlConfig {
-                database_url: "sqlite::memory:".into(),
-            })
-            .await?,
+            crate::app::open_sql_ctx(crate::app::SqlConfig::memory()).await?,
             temp_dir.path().join("drawer-local-state"),
             Arc::new(surelock::mutex::Mutex::new(
                 crate::drawer::lru::KeyedLruPool::new(1000),

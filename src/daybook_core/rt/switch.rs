@@ -997,10 +997,7 @@ mod tests {
     use std::sync::{Arc as StdArc, Mutex};
 
     async fn test_switch_store() -> Res<SwitchStore> {
-        let sql = SqlCtx::new(crate::app::SqlConfig {
-            database_url: "sqlite::memory:".into(),
-        })
-        .await?;
+        let sql = crate::app::open_sql_ctx(crate::app::SqlConfig::memory()).await?;
         SwitchStore::load(sql).await
     }
 

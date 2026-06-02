@@ -255,11 +255,10 @@ async fn boot_sqlite_node_at(
 ) -> Res<NodeHarness> {
     let peer_id = peer_id(peer_seed);
     let db_path = temp_dir.path().join("big_sync.sqlite");
-    let db_url = sqlx_utils_rs::sqlite_file_url(&db_path);
-    let options = sqlx_utils_rs::sqlite_file_connect_options(&db_url)?
+    let options = sqlx_utils_rs::sqlite_file_connect_options(&db_path)?
         .journal_mode(sqlx::sqlite::SqliteJournalMode::Wal);
     let (read_pool, write_pool) =
-        sqlx_utils_rs::open_sqlite_rw_pools(&db_url, options, 4, 1).await?;
+        sqlx_utils_rs::open_sqlite_rw_pools(&db_path, options, 4, 1).await?;
     let store = Arc::new(
         SqlitePartStore::new(
             read_pool,

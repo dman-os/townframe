@@ -269,11 +269,7 @@ impl Rt {
         )
         .await?;
 
-        let wflow_db_url = format!(
-            "sqlite://{}",
-            rcx.layout.repo_root.join("wflows.db").display()
-        );
-        let wcx = wflow::Ctx::init(&wflow_db_url).await?;
+        let wcx = wflow::Ctx::init(Some(rcx.layout.repo_root.join("wflows.db"))).await?;
         Self::emit_startup_progress_status(
             &progress_repo,
             startup_progress_task_id.as_deref(),
@@ -2445,10 +2441,7 @@ mod tests {
 
     async fn make_partition_store(
     ) -> Res<(std::sync::Arc<dyn HostPartStore>, big_sync_core::PartId)> {
-        let sql = crate::app::SqlCtx::new(crate::app::SqlConfig {
-            database_url: "sqlite::memory:".into(),
-        })
-        .await?;
+        let sql = crate::app::open_sql_ctx(crate::app::SqlConfig::memory()).await?;
         let part_id = crate::part_id_from_label(PROCESSOR_RUNLOG_PARTITION_ID);
         let store = big_sync::SqlitePartStore::new(
             sql.read_pool,

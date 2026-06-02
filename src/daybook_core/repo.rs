@@ -255,10 +255,7 @@ impl RepoCtx {
         cleanup_blobs_staging_dir(&layout.blobs_root).await?;
         info!(repo_root = %layout.repo_root.display(), "repo open_inner: blobs staging cleaned");
 
-        let sql = SqlCtx::new(SqlConfig {
-            database_url: sqlx_utils_rs::sqlite_file_url(&layout.sqlite_path),
-        })
-        .await?;
+        let sql = crate::app::open_sql_ctx(SqlConfig::file(layout.sqlite_path.clone())).await?;
         info!(
             repo_root = %layout.repo_root.display(),
             sqlite_path = %layout.sqlite_path.display(),
@@ -328,11 +325,10 @@ impl RepoCtx {
             local_actor_id,
         } = compute_user_info(&repo_id, &repo_user_id, &identity);
 
-        let big_repo_sqlite_url =
-            sqlx_utils_rs::sqlite_file_url(layout.repo_root.join("big_repo.sqlite"));
-        let connect_options = sqlx_utils_rs::sqlite_file_connect_options(&big_repo_sqlite_url)?;
+        let big_repo_sqlite_path = layout.repo_root.join("big_repo.sqlite");
+        let connect_options = sqlx_utils_rs::sqlite_file_connect_options(&big_repo_sqlite_path)?;
         let (big_repo_read_pool, big_repo_write_pool) =
-            sqlx_utils_rs::open_sqlite_rw_pools(&big_repo_sqlite_url, connect_options, 4, 1)
+            sqlx_utils_rs::open_sqlite_rw_pools(&big_repo_sqlite_path, connect_options, 4, 1)
                 .await?;
         let part_store = big_sync::SqlitePartStore::new(
             big_repo_read_pool,
@@ -762,16 +758,14 @@ pub async fn is_repo_bootstrapped(repo_root: &std::path::Path) -> Res<bool> {
     if !layout.sqlite_path.exists() {
         return Ok(false);
     }
-    let sql = SqlCtx::new(SqlConfig {
-        database_url: sqlx_utils_rs::sqlite_file_url(&layout.sqlite_path),
-    })
-    .await
-    .wrap_err_with(|| {
-        format!(
-            "failed opening repo sqlite while checking bootstrap state: {}",
-            layout.sqlite_path.display()
-        )
-    })?;
+    let sql = crate::app::open_sql_ctx(SqlConfig::file(layout.sqlite_path.clone()))
+        .await
+        .wrap_err_with(|| {
+            format!(
+                "failed opening repo sqlite while checking bootstrap state: {}",
+                layout.sqlite_path.display()
+            )
+        })?;
     let init_state = globals::get_init_state(&sql).await?;
     Ok(matches!(init_state, globals::InitState::Created { .. }))
 }

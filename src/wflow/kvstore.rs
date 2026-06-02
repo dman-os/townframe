@@ -1,5 +1,8 @@
 use crate::interlude::*;
 
+use sqlx_utils_rs::SqlCtx;
+use std::path::PathBuf;
+use std::str::FromStr;
 use tokio::sync::{mpsc, oneshot};
 use wflow_core::kvstore::*;
 
@@ -52,13 +55,23 @@ pub struct SqliteKvFactory {
 }
 
 impl SqliteKvFactory {
-    pub async fn boot(db_url: &str) -> Res<Self> {
-        let opts = sqlx_utils_rs::sqlite_file_connect_options(db_url)?
-            .journal_mode(sqlx::sqlite::SqliteJournalMode::Wal);
-        let db_pool = sqlx::SqlitePool::connect_with(opts).await?;
+    pub async fn boot(db_path: Option<PathBuf>) -> Res<Self> {
+        let db_pool = match db_path {
+            Some(db_path) => {
+                let opts = sqlx_utils_rs::sqlite_file_connect_options(&db_path)?
+                    .journal_mode(sqlx::sqlite::SqliteJournalMode::Wal);
+                sqlx::SqlitePool::connect_with(opts).await?
+            }
+            None => {
+                let opts = sqlx::sqlite::SqliteConnectOptions::from_str("sqlite::memory:")?;
+                sqlx::SqlitePool::connect_with(opts).await?
+            }
+        };
         // Use unbounded channel since the worker is single-threaded and processes messages sequentially
         let (tx, mut rx) = mpsc::unbounded_channel();
-        let worker = SqliteKvWorker { db_pool };
+        let worker = SqliteKvWorker {
+            sql: SqlCtx::from_single_pool(db_pool),
+        };
         tokio::spawn(async move {
             worker.run(&mut rx).await.unwrap_or_log();
         });
@@ -133,7 +146,7 @@ impl SqliteKvStore {
 }
 
 struct SqliteKvWorker {
-    db_pool: sqlx::SqlitePool,
+    sql: SqlCtx,
 }
 
 impl SqliteKvWorker {
@@ -278,7 +291,7 @@ impl SqliteKvWorker {
                 ) STRICT
                 "#
         )))
-        .execute(&self.db_pool)
+        .execute(&self.sql.write_pool)
         .await
         .wrap_err_with(|| format!("failed to create table: {}", table))?;
         Ok(())
@@ -289,7 +302,7 @@ impl SqliteKvWorker {
             r#"SELECT value FROM "{table}" WHERE key = ?1"#
         )))
         .bind(key)
-        .fetch_optional(&self.db_pool)
+        .fetch_optional(&self.sql.read_pool)
         .await?;
 
         Ok(row.map(|val| val.into_boxed_slice().into()))
@@ -301,7 +314,7 @@ impl SqliteKvWorker {
         key: Arc<[u8]>,
         value: Arc<[u8]>,
     ) -> Res<Option<Arc<[u8]>>> {
-        let mut tx = self.db_pool.begin().await?;
+        let mut tx = self.sql.write_pool.begin_with("BEGIN IMMEDIATE").await?;
 
         let old = sqlx::query_scalar::<_, Vec<u8>>(sqlx::AssertSqlSafe(format!(
             r#"SELECT value FROM "{table}" WHERE key = ?1"#
@@ -329,7 +342,7 @@ impl SqliteKvWorker {
     }
 
     async fn handle_del(&self, table: &'static str, key: &[u8]) -> Res<Option<Arc<[u8]>>> {
-        let mut tx = self.db_pool.begin().await?;
+        let mut tx = self.sql.write_pool.begin_with("BEGIN IMMEDIATE").await?;
 
         let old = sqlx::query_scalar::<_, Vec<u8>>(sqlx::AssertSqlSafe(format!(
             r#"SELECT value FROM "{table}" WHERE key = ?1"#
@@ -350,7 +363,7 @@ impl SqliteKvWorker {
     }
 
     async fn handle_increment(&self, table: &'static str, key: &[u8], delta: i64) -> Res<i64> {
-        let mut tx = self.db_pool.begin().await?;
+        let mut tx = self.sql.write_pool.begin_with("BEGIN IMMEDIATE").await?;
 
         let current: Option<Vec<u8>> = sqlx::query_scalar(sqlx::AssertSqlSafe(format!(
             r#"SELECT value FROM "{table}" WHERE key = ?1"#
@@ -403,7 +416,7 @@ impl SqliteKvWorker {
             r#"SELECT value, version FROM "{table}" WHERE key = ?1"#
         )))
         .bind(key)
-        .fetch_optional(&self.db_pool)
+        .fetch_optional(&self.sql.read_pool)
         .await?;
 
         let snapshot_value = row
@@ -421,7 +434,7 @@ impl SqliteKvWorker {
         value: Arc<[u8]>,
         snapshot_version: i64,
     ) -> Res<Result<(), (Option<Arc<[u8]>>, i64)>> {
-        let mut tx = self.db_pool.begin().await?;
+        let mut tx = self.sql.write_pool.begin_with("BEGIN IMMEDIATE").await?;
 
         let result = if snapshot_version == 0 {
             sqlx::query(sqlx::AssertSqlSafe(format!(
@@ -545,7 +558,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_sqlite_kvstore() -> Res<()> {
-        let factory = SqliteKvFactory::boot("sqlite::memory:").await?;
+        let factory = SqliteKvFactory::boot(None).await?;
         let store = factory.open_store("test_kv").await?;
         let store_dyn = Arc::new(store);
         test_kv_store_impl(Arc::clone(&store_dyn) as _).await?;

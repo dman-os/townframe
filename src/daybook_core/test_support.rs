@@ -209,10 +209,7 @@ pub async fn test_cx_with_options(
         local_user_path.clone(),
     )
     .await?;
-    let sql_ctx = crate::app::SqlCtx::new(crate::app::SqlConfig {
-        database_url: "sqlite::memory:".into(),
-    })
-    .await?;
+    let sql_ctx = crate::app::open_sql_ctx(crate::app::SqlConfig::memory()).await?;
     let (config_repo, config_stop) = crate::config::ConfigRepo::load(
         Arc::clone(&big_repo),
         app_doc_id,
@@ -407,10 +404,7 @@ pub async fn import_test_plug_oci(test_cx: &DaybookTestContext) -> Res<()> {
 }
 
 pub async fn boot_part_store(sqlite_url: &str) -> Res<(big_sync::Ctx, big_sync::StopToken)> {
-    let sql = crate::app::SqlCtx::new(crate::app::SqlConfig {
-        database_url: "sqlite::memory:".into(),
-    })
-    .await?;
+    let sql = crate::app::open_sql_ctx(crate::app::SqlConfig::memory()).await?;
 
     let store = Arc::new(
         big_sync::SqlitePartStore::new(

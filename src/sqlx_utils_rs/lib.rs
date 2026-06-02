@@ -2,35 +2,53 @@ use color_eyre::eyre::{Result as Res, WrapErr};
 use sqlx::sqlite::{SqliteConnectOptions, SqliteJournalMode, SqlitePoolOptions};
 use sqlx::SqlitePool;
 use std::path::Path;
-use std::str::FromStr;
 use std::time::Duration;
 
-pub fn sqlite_file_url(path: impl AsRef<Path>) -> String {
-    format!("sqlite://{}", path.as_ref().display())
+#[derive(Clone, Debug)]
+pub struct SqlCtx {
+    pub write_pool: SqlitePool,
+    pub read_pool: SqlitePool,
 }
 
-pub fn sqlite_file_connect_options(database_url: &str) -> Res<SqliteConnectOptions> {
-    Ok(SqliteConnectOptions::from_str(database_url)
-        .wrap_err_with(|| format!("invalid sqlite url: {database_url}"))?
+impl SqlCtx {
+    pub fn from_single_pool(pool: SqlitePool) -> Self {
+        Self {
+            write_pool: pool.clone(),
+            read_pool: pool,
+        }
+    }
+
+    pub fn from_rw_pools(read_pool: SqlitePool, write_pool: SqlitePool) -> Self {
+        Self {
+            write_pool,
+            read_pool,
+        }
+    }
+}
+
+pub fn sqlite_file_connect_options(path: impl AsRef<Path>) -> Res<SqliteConnectOptions> {
+    Ok(SqliteConnectOptions::new()
+        .filename(path.as_ref())
         .create_if_missing(true))
 }
 
 pub fn sqlite_file_connect_options_with_wal_busy(
-    database_url: &str,
+    path: impl AsRef<Path>,
     busy_timeout: Duration,
 ) -> Res<SqliteConnectOptions> {
-    Ok(sqlite_file_connect_options(database_url)?
+    Ok(sqlite_file_connect_options(path)?
         .journal_mode(SqliteJournalMode::Wal)
         .busy_timeout(busy_timeout))
 }
 
 pub async fn open_sqlite_pool(
-    database_url: &str,
+    database_path: impl AsRef<Path>,
     connect_options: SqliteConnectOptions,
     max_connections: u32,
 ) -> Res<SqlitePool> {
+    let database_path = database_path.as_ref().to_path_buf();
     open_sqlite_pool_with_context(
-        database_url,
+        &database_path,
         connect_options,
         max_connections,
         "error initializing sqlite db",
@@ -39,20 +57,21 @@ pub async fn open_sqlite_pool(
 }
 
 pub async fn open_sqlite_rw_pools(
-    database_url: &str,
+    database_path: impl AsRef<Path>,
     connect_options: SqliteConnectOptions,
     read_max_connections: u32,
     write_max_connections: u32,
 ) -> Res<(SqlitePool, SqlitePool)> {
+    let database_path = database_path.as_ref().to_path_buf();
     let read_pool = open_sqlite_pool_with_context(
-        database_url,
+        &database_path,
         connect_options.clone(),
         read_max_connections,
         "failed connecting big repo sqlite read pool",
     )
     .await?;
     let write_pool = open_sqlite_pool_with_context(
-        database_url,
+        &database_path,
         connect_options,
         write_max_connections,
         "failed connecting big repo sqlite write pool",
@@ -63,7 +82,7 @@ pub async fn open_sqlite_rw_pools(
 }
 
 async fn open_sqlite_pool_with_context(
-    database_url: &str,
+    database_path: &Path,
     connect_options: SqliteConnectOptions,
     max_connections: u32,
     context: &'static str,
@@ -72,5 +91,5 @@ async fn open_sqlite_pool_with_context(
         .max_connections(max_connections)
         .connect_with(connect_options)
         .await
-        .wrap_err_with(|| format!("{context}: {database_url}"))
+        .wrap_err_with(|| format!("{context}: {}", database_path.display()))
 }
