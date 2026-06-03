@@ -2,8 +2,9 @@
 // Trust me, you don't want to mess with it!
 
 @file:Suppress("NAME_SHADOWING")
+@file:OptIn(kotlin.time.ExperimentalTime::class, kotlin.uuid.ExperimentalUuidApi::class)
 
-package uniffi.big_sync_core
+package org.example.daybook.uniffi.big_sync
 
 // Common helper code.
 //

@@ -90,7 +90,6 @@ kotlin {
         val desktopMain by getting
 
         androidMain.dependencies {
-            implementation(compose.preview)
             implementation(libs.androidx.activity.compose)
             implementation(libs.androidx.lifecycle.viewmodel)
             implementation(libs.androidx.lifecycle.runtimeCompose)
@@ -114,6 +113,8 @@ kotlin {
             implementation(libs.androidx.lifecycle.viewmodel.compose)
             implementation(libs.androidx.navigation.compose)
             implementation(libs.androidx.navigation.compose)
+            implementation(libs.androidx.navigation3.runtime)
+            implementation(libs.androidx.navigation3.ui)
             implementation(libs.kotlinx.coroutinesCore)
             implementation(libs.kotlinx.serialization.json)
             implementation(libs.coil.compose)

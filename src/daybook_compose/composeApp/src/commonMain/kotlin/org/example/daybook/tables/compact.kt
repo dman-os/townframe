@@ -77,7 +77,9 @@ import androidx.compose.ui.semantics.contentDescription
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.lifecycle.viewModelScope
+import androidx.lifecycle.viewmodel.initializer
 import androidx.lifecycle.viewmodel.compose.viewModel
+import androidx.lifecycle.viewmodel.viewModelFactory
 import androidx.navigation.NavHostController
 import androidx.navigation.compose.currentBackStackEntryAsState
 import kotlinx.coroutines.Job
@@ -165,6 +167,13 @@ class HoverHoldControllerViewModel : androidx.lifecycle.ViewModel() {
     }
 }
 
+private val hoverHoldControllerFactory =
+    viewModelFactory {
+        initializer {
+            HoverHoldControllerViewModel()
+        }
+    }
+
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
 fun CompactLayout(
@@ -215,9 +224,17 @@ fun CompactLayout(
     var lastDragWindowPos by remember { mutableStateOf<Offset?>(null) }
     // Hover-hold controllers (abstracted) -----------------------------
     // Use distinct ViewModel instances for tab vs table controllers by supplying keys
-    val addTabController = viewModel<HoverHoldControllerViewModel>(key = "addTab")
+    val addTabController =
+        viewModel<HoverHoldControllerViewModel>(
+            key = "addTab",
+            factory = hoverHoldControllerFactory,
+        )
     addTabController.label = "addTab"
-    val addTableController = viewModel<HoverHoldControllerViewModel>(key = "addTable")
+    val addTableController =
+        viewModel<HoverHoldControllerViewModel>(
+            key = "addTable",
+            factory = hoverHoldControllerFactory,
+        )
     addTableController.label = "addTable"
     val addTabReadyState = addTabController.ready.collectAsState()
     val addTableReadyState = addTableController.ready.collectAsState()
@@ -257,7 +274,10 @@ fun CompactLayout(
     val navBarFeatureKeys = navBarFeatures.map { it.key }
     val navBarFeatureControllers =
         navBarFeatureKeys.map { k ->
-            viewModel<HoverHoldControllerViewModel>(key = k).also {
+            viewModel<HoverHoldControllerViewModel>(
+                key = k,
+                factory = hoverHoldControllerFactory,
+            ).also {
                 it.label = k
             }
         }
@@ -266,7 +286,10 @@ fun CompactLayout(
     val prominentButtonKeys = prominentButtons.map { it.key }
     val prominentButtonControllers =
         prominentButtonKeys.map { k ->
-            viewModel<HoverHoldControllerViewModel>(key = "prominent_$k").also {
+            viewModel<HoverHoldControllerViewModel>(
+                key = "prominent_$k",
+                factory = hoverHoldControllerFactory,
+            ).also {
                 it.label = "prominent_$k"
             }
         }
@@ -766,6 +789,7 @@ fun CompactLayout(
                                         modifier = Modifier.fillMaxSize(),
                                         navController = navController,
                                         extraAction = extraAction,
+                                        onShowCloneShare = onShowCloneShare,
                                         contentType = contentType,
                                     )
                                 }

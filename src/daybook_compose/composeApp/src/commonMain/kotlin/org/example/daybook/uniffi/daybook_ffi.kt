@@ -2836,12 +2836,7 @@ open class AppFfiCtx :
                     continuation,
                 )
             },
-            { future, continuation ->
-                UniffiLib.ffi_daybook_ffi_rust_future_complete_rust_buffer(
-                    future,
-                    continuation,
-                )
-            },
+            { future, continuation -> UniffiLib.ffi_daybook_ffi_rust_future_complete_rust_buffer(future, continuation) },
             { future -> UniffiLib.ffi_daybook_ffi_rust_future_free_rust_buffer(future) },
             // lift function
             { FfiConverterTypeCloneDestinationCheck.lift(it) },
@@ -3629,16 +3624,17 @@ open class CameraPreviewFfi :
     }
 
     @Throws(FfiException::class)
-    override fun `startStream`(`deviceId`: kotlin.UInt, `listener`: CameraPreviewFrameListener) = callWithHandle {
-        uniffiRustCallWithError(FfiException) { _status ->
-            UniffiLib.uniffi_daybook_ffi_fn_method_camerapreviewffi_start_stream(
-                it,
-                FfiConverterUInt.lower(`deviceId`),
-                FfiConverterTypeCameraPreviewFrameListener.lower(`listener`),
-                _status,
-            )
+    override fun `startStream`(`deviceId`: kotlin.UInt, `listener`: CameraPreviewFrameListener) =
+        callWithHandle {
+            uniffiRustCallWithError(FfiException) { _status ->
+                UniffiLib.uniffi_daybook_ffi_fn_method_camerapreviewffi_start_stream(
+                    it,
+                    FfiConverterUInt.lower(`deviceId`),
+                    FfiConverterTypeCameraPreviewFrameListener.lower(`listener`),
+                    _status,
+                )
+            }
         }
-    }
 
     @Throws(FfiException::class)
     override fun `stopStream`() = callWithHandle {
@@ -3928,8 +3924,8 @@ internal object uniffiCallbackInterfaceCameraPreviewFrameListener {
             val uniffiObj = FfiConverterTypeCameraPreviewFrameListener.handleMap.get(uniffiHandle)
             val makeCall = {
                 uniffiObj.`onCameraPreviewFrame`(
-                    FfiConverterTypeCameraPreviewFrame.lift(`frame`),
-                )
+                FfiConverterTypeCameraPreviewFrame.lift(`frame`),
+            )
             }
             val writeReturn = { _: Unit -> Unit }
             uniffiTraitInterfaceCall(uniffiCallStatus, makeCall, writeReturn)
@@ -4218,18 +4214,21 @@ open class CameraQrAnalyzerFfi :
     }
 
     @Throws(FfiException::class)
-    override fun `submitJpegFrame`(`widthPx`: kotlin.UInt, `heightPx`: kotlin.UInt, `frameBytes`: kotlin.ByteArray) =
-        callWithHandle {
-            uniffiRustCallWithError(FfiException) { _status ->
-                UniffiLib.uniffi_daybook_ffi_fn_method_cameraqranalyzerffi_submit_jpeg_frame(
-                    it,
-                    FfiConverterUInt.lower(`widthPx`),
-                    FfiConverterUInt.lower(`heightPx`),
-                    FfiConverterByteArray.lower(`frameBytes`),
-                    _status,
-                )
-            }
+    override fun `submitJpegFrame`(
+        `widthPx`: kotlin.UInt,
+        `heightPx`: kotlin.UInt,
+        `frameBytes`: kotlin.ByteArray,
+    ) = callWithHandle {
+        uniffiRustCallWithError(FfiException) { _status ->
+            UniffiLib.uniffi_daybook_ffi_fn_method_cameraqranalyzerffi_submit_jpeg_frame(
+                it,
+                FfiConverterUInt.lower(`widthPx`),
+                FfiConverterUInt.lower(`heightPx`),
+                FfiConverterByteArray.lower(`frameBytes`),
+                _status,
+            )
         }
+    }
 
     companion object {
         fun `load`(): CameraQrAnalyzerFfi = FfiConverterTypeCameraQrAnalyzerFfi.lift(
@@ -4511,8 +4510,8 @@ internal object uniffiCallbackInterfaceCameraQrEventListener {
             val uniffiObj = FfiConverterTypeCameraQrEventListener.handleMap.get(uniffiHandle)
             val makeCall = {
                 uniffiObj.`onCameraQrOverlaysUpdated`(
-                    FfiConverterSequenceTypeCameraOverlay.lift(`overlays`),
-                )
+                FfiConverterSequenceTypeCameraOverlay.lift(`overlays`),
+            )
             }
             val writeReturn = { _: Unit -> Unit }
             uniffiTraitInterfaceCall(uniffiCallStatus, makeCall, writeReturn)
@@ -4528,8 +4527,8 @@ internal object uniffiCallbackInterfaceCameraQrEventListener {
             val uniffiObj = FfiConverterTypeCameraQrEventListener.handleMap.get(uniffiHandle)
             val makeCall = {
                 uniffiObj.`onCameraQrDetected`(
-                    FfiConverterString.lift(`decodedText`),
-                )
+                FfiConverterString.lift(`decodedText`),
+            )
             }
             val writeReturn = { _: Unit -> Unit }
             uniffiTraitInterfaceCall(uniffiCallStatus, makeCall, writeReturn)
@@ -4545,8 +4544,8 @@ internal object uniffiCallbackInterfaceCameraQrEventListener {
             val uniffiObj = FfiConverterTypeCameraQrEventListener.handleMap.get(uniffiHandle)
             val makeCall = {
                 uniffiObj.`onCameraQrError`(
-                    FfiConverterString.lift(`message`),
-                )
+                FfiConverterString.lift(`message`),
+            )
             }
             val writeReturn = { _: Unit -> Unit }
             uniffiTraitInterfaceCall(uniffiCallStatus, makeCall, writeReturn)
@@ -4841,8 +4840,8 @@ internal object uniffiCallbackInterfaceConfigEventListener {
             val uniffiObj = FfiConverterTypeConfigEventListener.handleMap.get(uniffiHandle)
             val makeCall = {
                 uniffiObj.`onConfigEvent`(
-                    FfiConverterTypeConfigEvent.lift(`event`),
-                )
+                FfiConverterTypeConfigEvent.lift(`event`),
+            )
             }
             val writeReturn = { _: Unit -> Unit }
             uniffiTraitInterfaceCall(uniffiCallStatus, makeCall, writeReturn)
@@ -5575,8 +5574,8 @@ internal object uniffiCallbackInterfaceDispatchEventListener {
             val uniffiObj = FfiConverterTypeDispatchEventListener.handleMap.get(uniffiHandle)
             val makeCall = {
                 uniffiObj.`onDispatchEvent`(
-                    FfiConverterTypeDispatchEvent.lift(`event`),
-                )
+                FfiConverterTypeDispatchEvent.lift(`event`),
+            )
             }
             val writeReturn = { _: Unit -> Unit }
             uniffiTraitInterfaceCall(uniffiCallStatus, makeCall, writeReturn)
@@ -6174,8 +6173,8 @@ internal object uniffiCallbackInterfaceDrawerEventListener {
             val uniffiObj = FfiConverterTypeDrawerEventListener.handleMap.get(uniffiHandle)
             val makeCall = {
                 uniffiObj.`onDrawerEvent`(
-                    FfiConverterTypeDrawerEvent.lift(`event`),
-                )
+                FfiConverterTypeDrawerEvent.lift(`event`),
+            )
             }
             val writeReturn = { _: Unit -> Unit }
             uniffiTraitInterfaceCall(uniffiCallStatus, makeCall, writeReturn)
@@ -6588,12 +6587,7 @@ open class DrawerRepoFfi :
                     continuation,
                 )
             },
-            { future, continuation ->
-                UniffiLib.ffi_daybook_ffi_rust_future_complete_rust_buffer(
-                    future,
-                    continuation,
-                )
-            },
+            { future, continuation -> UniffiLib.ffi_daybook_ffi_rust_future_complete_rust_buffer(future, continuation) },
             { future -> UniffiLib.ffi_daybook_ffi_rust_future_free_rust_buffer(future) },
             // lift function
             { FfiConverterOptionalTypeDocBundle.lift(it) },
@@ -7476,8 +7470,8 @@ internal object uniffiCallbackInterfaceInitEventListener {
             val uniffiObj = FfiConverterTypeInitEventListener.handleMap.get(uniffiHandle)
             val makeCall = {
                 uniffiObj.`onInitEvent`(
-                    FfiConverterTypeInitEvent.lift(`event`),
-                )
+                FfiConverterTypeInitEvent.lift(`event`),
+            )
             }
             val writeReturn = { _: Unit -> Unit }
             uniffiTraitInterfaceCall(uniffiCallStatus, makeCall, writeReturn)
@@ -8052,8 +8046,8 @@ internal object uniffiCallbackInterfaceLocalStateEventListener {
             val uniffiObj = FfiConverterTypeLocalStateEventListener.handleMap.get(uniffiHandle)
             val makeCall = {
                 uniffiObj.`onLocalStateEvent`(
-                    FfiConverterTypeLocalStateEvent.lift(`event`),
-                )
+                FfiConverterTypeLocalStateEvent.lift(`event`),
+            )
             }
             val writeReturn = { _: Unit -> Unit }
             uniffiTraitInterfaceCall(uniffiCallStatus, makeCall, writeReturn)
@@ -8346,8 +8340,8 @@ internal object uniffiCallbackInterfacePlugsEventListener {
             val uniffiObj = FfiConverterTypePlugsEventListener.handleMap.get(uniffiHandle)
             val makeCall = {
                 uniffiObj.`onPlugsEvent`(
-                    FfiConverterTypePlugsEvent.lift(`event`),
-                )
+                FfiConverterTypePlugsEvent.lift(`event`),
+            )
             }
             val writeReturn = { _: Unit -> Unit }
             uniffiTraitInterfaceCall(uniffiCallStatus, makeCall, writeReturn)
@@ -8922,8 +8916,8 @@ internal object uniffiCallbackInterfaceProgressEventListener {
             val uniffiObj = FfiConverterTypeProgressEventListener.handleMap.get(uniffiHandle)
             val makeCall = {
                 uniffiObj.`onProgressEvent`(
-                    FfiConverterTypeProgressEvent.lift(`event`),
-                )
+                FfiConverterTypeProgressEvent.lift(`event`),
+            )
             }
             val writeReturn = { _: Unit -> Unit }
             uniffiTraitInterfaceCall(uniffiCallStatus, makeCall, writeReturn)
@@ -9820,33 +9814,33 @@ open class RtFfi :
         ): RtFfi = uniffiRustCallAsync(
             UniffiLib.uniffi_daybook_ffi_fn_constructor_rtffi_load(
                 FfiConverterTypeFfiCtx.lower(
-                    `fcx`,
-                ),
+                `fcx`,
+            ),
                 FfiConverterTypeDrawerRepoFfi.lower(
-                    `drawerRepo`,
-                ),
+                `drawerRepo`,
+            ),
                 FfiConverterTypePlugsRepoFfi.lower(
-                    `plugsRepo`,
-                ),
+                `plugsRepo`,
+            ),
                 FfiConverterTypeDispatchRepoFfi.lower(
-                    `dispatchRepo`,
-                ),
+                `dispatchRepo`,
+            ),
                 FfiConverterTypeProgressRepoFfi.lower(
-                    `progressRepo`,
-                ),
+                `progressRepo`,
+            ),
                 FfiConverterTypeBlobsRepoFfi.lower(
-                    `blobsRepo`,
-                ),
+                `blobsRepo`,
+            ),
                 FfiConverterTypeConfigRepoFfi.lower(
-                    `configRepo`,
-                ),
+                `configRepo`,
+            ),
                 FfiConverterTypeInitRepoFfi.lower(
-                    `initRepo`,
-                ),
+                `initRepo`,
+            ),
                 FfiConverterTypeSqliteLocalStateRepoFfi.lower(
-                    `sqliteLsRepo`,
-                ),
-                FfiConverterString.lower(`deviceId`), FfiConverterOptionalString.lower(`startupProgressTaskId`),
+                `sqliteLsRepo`,
+            ),
+                FfiConverterString.lower(`deviceId`), FfiConverterOptionalString.lower(`startupProgressTaskId`)
             ),
             { future, callback, continuation ->
                 UniffiLib.ffi_daybook_ffi_rust_future_poll_u64(
@@ -10126,9 +10120,7 @@ open class SqliteLocalStateRepoFfi :
         @Throws(FfiException::class)
         @Suppress("ASSIGNED_BUT_NEVER_ACCESSED_VARIABLE")
         suspend fun `load`(`fcx`: FfiCtx): SqliteLocalStateRepoFfi = uniffiRustCallAsync(
-            UniffiLib.uniffi_daybook_ffi_fn_constructor_sqlitelocalstaterepoffi_load(
-                FfiConverterTypeFfiCtx.lower(`fcx`),
-            ),
+            UniffiLib.uniffi_daybook_ffi_fn_constructor_sqlitelocalstaterepoffi_load(FfiConverterTypeFfiCtx.lower(`fcx`)),
             { future, callback, continuation ->
                 UniffiLib.ffi_daybook_ffi_rust_future_poll_u64(
                     future,
@@ -10798,8 +10790,8 @@ internal object uniffiCallbackInterfaceTablesEventListener {
             val uniffiObj = FfiConverterTypeTablesEventListener.handleMap.get(uniffiHandle)
             val makeCall = {
                 uniffiObj.`onTablesEvent`(
-                    FfiConverterTypeTablesEvent.lift(`event`),
-                )
+                FfiConverterTypeTablesEvent.lift(`event`),
+            )
             }
             val writeReturn = { _: Unit -> Unit }
             uniffiTraitInterfaceCall(uniffiCallStatus, makeCall, writeReturn)

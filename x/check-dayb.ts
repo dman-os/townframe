@@ -2,7 +2,7 @@
 
 import { $ } from "./utils.ts";
 
-if ($.argv.includes("--quick")) {
+if (!$.argv.includes("--quick")) {
   await $`${$.path(import.meta.resolve("./gen-ffi-dayb.ts"))}`;
 }
 

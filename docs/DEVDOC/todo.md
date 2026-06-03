@@ -72,6 +72,7 @@
     - [ ] Make it nice
   - [ ] GUI support
 - [ ] Bugs
+  - [ ] App open on locked repo
   - [ ] `WflowNotFound`
     - `HostEvent(WflowRegistered)``?
   - [ ] Cancellation and shutdown
@@ -90,6 +91,7 @@
 
 - [ ] Cleanup and show it to people
  
+- [ ] Migrate to annoter Compose navigation lib
 - [ ] Move to https://en.wikipedia.org/wiki/International_Atomic_Time
 - [ ] Remove all async Mutexes and dashmap
   - [ ] Convert DHashMap to be wrapper around RwLock<HashMap>

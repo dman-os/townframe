@@ -4,7 +4,6 @@
 
 package org.example.daybook
 
-import androidx.compose.animation.AnimatedVisibility
 import androidx.compose.animation.core.FastOutSlowInEasing
 import androidx.compose.animation.core.RepeatMode
 import androidx.compose.animation.core.animateFloat
@@ -13,14 +12,12 @@ import androidx.compose.animation.core.rememberInfiniteTransition
 import androidx.compose.animation.core.tween
 import androidx.compose.animation.slideInHorizontally
 import androidx.compose.animation.slideOutHorizontally
-import androidx.compose.foundation.Image
 import androidx.compose.foundation.background
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxSize
-import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
 import androidx.compose.material.icons.Icons
@@ -29,7 +26,6 @@ import androidx.compose.material.icons.filled.Description
 import androidx.compose.material.icons.filled.Settings
 import androidx.compose.material3.Button
 import androidx.compose.material3.CircularProgressIndicator
-import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.Icon
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Surface
@@ -47,6 +43,7 @@ import androidx.compose.runtime.staticCompositionLocalOf
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.scale
+import androidx.compose.ui.tooling.preview.Preview
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.lifecycle.ViewModel
@@ -56,8 +53,6 @@ import androidx.navigation.NavHostController
 import androidx.navigation.compose.NavHost
 import androidx.navigation.compose.composable
 import androidx.navigation.compose.rememberNavController
-import daybook.composeapp.generated.resources.Res
-import daybook.composeapp.generated.resources.compose_multiplatform
 import io.github.vinceglb.filekit.path
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Dispatchers
@@ -73,6 +68,12 @@ import org.example.daybook.capture.ProvideCameraCaptureContext
 import org.example.daybook.capture.screens.CaptureScreen
 import org.example.daybook.drawer.DocEditorScreen
 import org.example.daybook.drawer.DrawerScreen
+import org.example.daybook.home.HomeIcon
+import org.example.daybook.home.HomeMenuWidgetConfig
+import org.example.daybook.home.HomeScreen
+import org.example.daybook.home.HomeScreenConfig
+import org.example.daybook.home.MenuNavItem
+import org.example.daybook.home.WipPermissionsWidgetConfig
 import org.example.daybook.progress.ProgressList
 import org.example.daybook.settings.SettingsScreen
 import org.example.daybook.tables.CompactLayout
@@ -107,8 +108,6 @@ import org.example.daybook.uniffi.core.Table
 import org.example.daybook.uniffi.core.TablesEvent
 import org.example.daybook.uniffi.core.Uuid
 import org.example.daybook.uniffi.core.Window
-import org.jetbrains.compose.resources.painterResource
-import org.jetbrains.compose.ui.tooling.preview.Preview
 import kotlin.time.Clock
 import kotlin.time.TimeMark
 import kotlin.time.TimeSource
@@ -678,6 +677,57 @@ private suspend fun <T> withStartupStage(
         throw t
     }
 }
+
+private fun defaultHomeScreenConfig(navController: NavHostController, onShowCloneShare: () -> Unit): HomeScreenConfig =
+    HomeScreenConfig(
+        widgets =
+        listOf(
+            WipPermissionsWidgetConfig(),
+            HomeMenuWidgetConfig(
+                items =
+                listOf(
+                    MenuNavItem(
+                        id = "settings",
+                        label = "settings",
+                        icon = HomeIcon.Settings,
+                        onClick = {
+                            navController.navigate(AppScreens.Settings.name)
+                        },
+                    ),
+                    MenuNavItem(
+                        id = "clone",
+                        label = "clone",
+                        icon = HomeIcon.Clone,
+                        onClick = onShowCloneShare,
+                    ),
+                    MenuNavItem(
+                        id = "camera",
+                        label = "camera",
+                        icon = HomeIcon.Camera,
+                        onClick = {
+                            navController.navigate(AppScreens.Capture.name)
+                        },
+                    ),
+                    MenuNavItem(
+                        id = "mic",
+                        label = "mic",
+                        icon = HomeIcon.Mic,
+                        onClick = {
+                            navController.navigate(AppScreens.Capture.name)
+                        },
+                    ),
+                    MenuNavItem(
+                        id = "new_doc",
+                        label = "new doc",
+                        icon = HomeIcon.NewDoc,
+                        onClick = {
+                            navController.navigate(AppScreens.Capture.name)
+                        },
+                    ),
+                ),
+            ),
+        ),
+    )
 
 @Composable
 @Preview
@@ -1331,26 +1381,6 @@ fun AdaptiveAppLayout(
         }
     }
 
-    DaybookHomeScreen(
-        navigationType = navigationType,
-        contentType = contentType,
-        navController = navController,
-        extraAction = extraAction,
-        bigDialogState = bigDialogState,
-        modifier = modifier,
-    )
-}
-
-@OptIn(ExperimentalMaterial3Api::class)
-@Composable
-fun DaybookHomeScreen(
-    navigationType: DaybookNavigationType,
-    contentType: DaybookContentType,
-    navController: NavHostController,
-    extraAction: (() -> Unit)? = null,
-    bigDialogState: BigDialogState,
-    modifier: Modifier = Modifier,
-) {
     Box(modifier = modifier.fillMaxSize()) {
         when (navigationType) {
             DaybookNavigationType.PERMANENT_NAVIGATION_DRAWER -> {
@@ -1568,6 +1598,7 @@ fun Routes(
     modifier: Modifier = Modifier,
     contentType: DaybookContentType,
     extraAction: (() -> Unit)? = null,
+    onShowCloneShare: () -> Unit = {},
     navController: NavHostController,
 ) {
     val drawerVm = LocalDrawerViewModel.current
@@ -1635,51 +1666,13 @@ fun Routes(
         }
         composable(route = AppScreens.Home.name) {
             ProvideChromeState(ChromeState.Empty) {
-                var showContent by remember { mutableStateOf(false) }
-                Column(
+                HomeScreen(
+                    config = defaultHomeScreenConfig(
+                        navController = navController,
+                        onShowCloneShare = onShowCloneShare,
+                    ),
                     modifier = modifier,
-                    horizontalAlignment = Alignment.CenterHorizontally,
-                ) {
-                    Button(onClick = {
-                        showContent = !showContent
-                        extraAction?.invoke()
-                    }) {
-                        Text("Click me!")
-                    }
-                    run {
-                        val permCtx = LocalPermCtx.current
-                        if (permCtx != null) {
-                            if (permCtx.hasAll) {
-                                Text("All permissions avail")
-                            } else {
-                                Button(onClick = {
-                                    permCtx.requestPermissions(
-                                        PermissionRequest(
-                                            camera = true,
-                                            notifications = true,
-                                            microphone = true,
-                                            overlay = true,
-                                            storageRead = true,
-                                            storageWrite = true,
-                                        ),
-                                    )
-                                }) {
-                                    Text("Ask for permissions")
-                                }
-                            }
-                        }
-                    }
-                    AnimatedVisibility(showContent) {
-                        val greeting = remember { Greeting().greet() }
-                        Column(
-                            Modifier.fillMaxWidth(),
-                            horizontalAlignment = Alignment.CenterHorizontally,
-                        ) {
-                            Image(painterResource(Res.drawable.compose_multiplatform), null)
-                            Text("Compose: $greeting")
-                        }
-                    }
-                }
+                )
             }
         }
     }

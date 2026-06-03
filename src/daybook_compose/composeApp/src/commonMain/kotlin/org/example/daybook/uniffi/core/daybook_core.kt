@@ -23,14 +23,14 @@ import com.sun.jna.Native
 import com.sun.jna.Pointer
 import com.sun.jna.Structure
 import com.sun.jna.ptr.*
+import org.example.daybook.uniffi.big_sync.FfiConverterTypeObjId
+import org.example.daybook.uniffi.big_sync.ObjId
 import org.example.daybook.uniffi.types.Doc
 import org.example.daybook.uniffi.types.DocPatch
 import org.example.daybook.uniffi.types.FacetKey
 import org.example.daybook.uniffi.types.FfiConverterTypeDoc
 import org.example.daybook.uniffi.types.FfiConverterTypeDocPatch
 import org.example.daybook.uniffi.types.FfiConverterTypeFacetKey
-import uniffi.big_sync_core.FfiConverterTypeObjId
-import uniffi.big_sync_core.ObjId
 import java.nio.ByteBuffer
 import java.nio.ByteOrder
 import java.nio.CharBuffer
@@ -684,8 +684,8 @@ internal object UniffiLib {
 
     init {
         Native.register(UniffiLib::class.java, findLibraryName(componentName = "daybook_core"))
+        org.example.daybook.uniffi.big_sync.uniffiEnsureInitialized()
         org.example.daybook.uniffi.types.uniffiEnsureInitialized()
-        uniffi.big_sync_core.uniffiEnsureInitialized()
     }
     external fun uniffi_daybook_core_fn_clone_listenerregistration(
         `handle`: Long,
@@ -1362,7 +1362,12 @@ public object FfiConverterTypeListenerRegistration : FfiConverter<ListenerRegist
     }
 }
 
-data class BranchDeleteTombstone(var `vtag`: VersionTag, var `branchDocId`: ObjId, var `branchHeads`: ChangeHashSet) {
+data class BranchDeleteTombstone(
+    var `vtag`: VersionTag,
+    var `branchDocId`: ObjId,
+    var `branchHeads`: ChangeHashSet,
+
+) {
 
     companion object
 }
@@ -1769,7 +1774,12 @@ public object FfiConverterTypeProgressTask : FfiConverterRustBuffer<ProgressTask
     }
 }
 
-data class ProgressUpdate(var `at`: Timestamp, var `title`: kotlin.String?, var `deets`: ProgressUpdateDeets) {
+data class ProgressUpdate(
+    var `at`: Timestamp,
+    var `title`: kotlin.String?,
+    var `deets`: ProgressUpdateDeets,
+
+) {
 
     companion object
 }
@@ -1797,7 +1807,12 @@ public object FfiConverterTypeProgressUpdate : FfiConverterRustBuffer<ProgressUp
     }
 }
 
-data class ProgressUpdateEntry(var `sequence`: kotlin.Long, var `at`: Timestamp, var `update`: ProgressUpdate) {
+data class ProgressUpdateEntry(
+    var `sequence`: kotlin.Long,
+    var `at`: Timestamp,
+    var `update`: ProgressUpdate,
+
+) {
 
     companion object
 }
@@ -1872,7 +1887,13 @@ public object FfiConverterTypeStoredBranchRef : FfiConverterRustBuffer<StoredBra
     }
 }
 
-data class Tab(var `id`: Uuid, var `title`: kotlin.String, var `panels`: List<Uuid>, var `selectedPanel`: Uuid?) {
+data class Tab(
+    var `id`: Uuid,
+    var `title`: kotlin.String,
+    var `panels`: List<Uuid>,
+    var `selectedPanel`: Uuid?,
+
+) {
 
     companion object
 }
@@ -2059,7 +2080,12 @@ public object FfiConverterTypeTablesPatches : FfiConverterRustBuffer<TablesPatch
     }
 }
 
-data class UpdateDocArgsV2(var `branchPath`: Utf8PathBuf, var `heads`: ChangeHashSet?, var `patch`: DocPatch) {
+data class UpdateDocArgsV2(
+    var `branchPath`: Utf8PathBuf,
+    var `heads`: ChangeHashSet?,
+    var `patch`: DocPatch,
+
+) {
 
     companion object
 }
@@ -3971,12 +3997,14 @@ sealed class WindowLayoutPaneVariant {
         companion object
     }
 
-    data class Routes(val v1: org.example.daybook.uniffi.core.WindowLayoutRoutes) : WindowLayoutPaneVariant() {
+    data class Routes(val v1: org.example.daybook.uniffi.core.WindowLayoutRoutes) :
+        WindowLayoutPaneVariant() {
 
         companion object
     }
 
-    data class Region(val v1: org.example.daybook.uniffi.core.WindowLayoutRegion) : WindowLayoutPaneVariant() {
+    data class Region(val v1: org.example.daybook.uniffi.core.WindowLayoutRegion) :
+        WindowLayoutPaneVariant() {
 
         companion object
     }
