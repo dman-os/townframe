@@ -4,6 +4,8 @@
 
 package org.example.daybook
 
+import androidx.compose.animation.EnterTransition
+import androidx.compose.animation.ExitTransition
 import androidx.compose.animation.core.FastOutSlowInEasing
 import androidx.compose.animation.core.RepeatMode
 import androidx.compose.animation.core.animateFloat
@@ -51,6 +53,7 @@ import androidx.lifecycle.ViewModel
 import androidx.lifecycle.viewModelScope
 import androidx.lifecycle.viewmodel.compose.viewModel
 import androidx.lifecycle.viewmodel.navigation3.rememberViewModelStoreNavEntryDecorator
+import androidx.navigation3.runtime.NavKey
 import androidx.navigation3.runtime.entryProvider
 import androidx.navigation3.runtime.rememberSaveableStateHolderNavEntryDecorator
 import androidx.navigation3.ui.NavDisplay
@@ -75,13 +78,13 @@ import org.example.daybook.home.HomeScreen
 import org.example.daybook.home.HomeScreenConfig
 import org.example.daybook.home.MenuNavItem
 import org.example.daybook.home.WipPermissionsWidgetConfig
+import org.example.daybook.layouts.CompactLayout
+import org.example.daybook.layouts.ExpandedLayout
 import org.example.daybook.navigation.DaybookNavKey
 import org.example.daybook.navigation.DaybookNavigationState
 import org.example.daybook.navigation.rememberDaybookNavigationState
 import org.example.daybook.progress.ProgressList
 import org.example.daybook.settings.SettingsScreen
-import org.example.daybook.tables.CompactLayout
-import org.example.daybook.tables.ExpandedLayout
 import org.example.daybook.theme.DaybookTheme
 import org.example.daybook.theme.ThemeConfig
 import org.example.daybook.uniffi.CameraPreviewFfi
@@ -1185,13 +1188,11 @@ fun App(
                                     LocalChromeStateManager provides chromeStateManager,
                                     LocalAppExitRequest provides onExitRequest,
                                 ) {
-                                    val bigDialogState = remember { BigDialogState() }
                                     val navState = rememberDaybookNavigationState()
                                     AdaptiveAppLayout(
                                         modifier = surfaceModifier,
                                         navState = navState,
                                         extraAction = extraAction,
-                                        bigDialogState = bigDialogState,
                                     )
                                 }
                             }
@@ -1347,7 +1348,6 @@ fun AdaptiveAppLayout(
     modifier: Modifier = Modifier,
     navState: DaybookNavigationState,
     extraAction: (() -> Unit)? = null,
-    bigDialogState: BigDialogState,
 ) {
     val platform = getPlatform()
     val screenWidth = platform.getScreenWidthDp()
@@ -1383,7 +1383,7 @@ fun AdaptiveAppLayout(
                     navState = navState,
                     extraAction = extraAction,
                     contentType = contentType,
-                    onShowCloneShare = { bigDialogState.show() },
+                    onShowCloneShare = { navState.navigate(DaybookNavKey.CloneShare) },
                 )
             }
 
@@ -1393,7 +1393,7 @@ fun AdaptiveAppLayout(
                     navState = navState,
                     extraAction = extraAction,
                     contentType = contentType,
-                    onShowCloneShare = { bigDialogState.show() },
+                    onShowCloneShare = { navState.navigate(DaybookNavKey.CloneShare) },
                 )
             }
 
@@ -1403,17 +1403,9 @@ fun AdaptiveAppLayout(
                     navState = navState,
                     extraAction = extraAction,
                     contentType = contentType,
-                    onShowCloneShare = { bigDialogState.show() },
+                    onShowCloneShare = { navState.navigate(DaybookNavKey.CloneShare) },
                 )
             }
-        }
-
-        BigDialogHost(
-            state = bigDialogState,
-            narrowScreen = navigationType == DaybookNavigationType.BOTTOM_NAVIGATION,
-            modifier = Modifier.fillMaxSize(),
-        ) {
-            CloneShareDialogContent(onClose = { bigDialogState.dismiss() })
         }
     }
 }
@@ -1597,6 +1589,11 @@ fun Routes(
 ) {
     val drawerVm = LocalDrawerViewModel.current
     val exitRequest = LocalAppExitRequest.current
+    val screenWidth = getPlatform().getScreenWidthDp()
+    val bigDialogStrategy =
+        remember(screenWidth) {
+            BigDialogSceneStrategy<NavKey>(narrowScreen = screenWidth.value < 600f)
+        }
     val onBack: () -> Unit = {
         if (navState.backStack.size > 1) {
             navState.pop()
@@ -1609,6 +1606,16 @@ fun Routes(
     NavDisplay(
         backStack = navState.backStack,
         onBack = onBack,
+        sceneStrategies = listOf(bigDialogStrategy),
+        transitionSpec = {
+            EnterTransition.None togetherWith ExitTransition.None
+        },
+        popTransitionSpec = {
+            EnterTransition.None togetherWith ExitTransition.None
+        },
+        predictivePopTransitionSpec = {
+            EnterTransition.None togetherWith ExitTransition.None
+        },
         entryDecorators = listOf(
             rememberSaveableStateHolderNavEntryDecorator(),
             rememberViewModelStoreNavEntryDecorator(),
@@ -1625,6 +1632,11 @@ fun Routes(
                         modifier = modifier,
                     )
                 }
+            }
+            entry<DaybookNavKey.CloneShare>(
+                metadata = bigDialog(),
+            ) {
+                CloneShareDialogContent(onClose = { navState.pop() })
             }
             entry<DaybookNavKey.Capture> {
                 CaptureScreen(modifier = modifier)

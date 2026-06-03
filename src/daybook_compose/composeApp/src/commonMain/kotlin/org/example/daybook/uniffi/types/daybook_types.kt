@@ -18,20 +18,22 @@ package org.example.daybook.uniffi.types
 // compile the Rust component. The easiest way to ensure this is to bundle the Kotlin
 // helpers directly inline like we're doing here.
 
-import com.sun.jna.Callback
+import com.sun.jna.Library
+import com.sun.jna.IntegerType
 import com.sun.jna.Native
 import com.sun.jna.Pointer
 import com.sun.jna.Structure
+import com.sun.jna.Callback
 import com.sun.jna.ptr.*
-import kotlinx.serialization.Serializable
 import java.nio.ByteBuffer
 import java.nio.ByteOrder
 import java.nio.CharBuffer
 import java.nio.charset.CodingErrorAction
-import java.util.concurrent.ConcurrentHashMap
 import java.util.concurrent.atomic.AtomicLong
+import java.util.concurrent.ConcurrentHashMap
 import kotlin.time.Instant
 import kotlin.uuid.Uuid
+import kotlinx.serialization.Serializable
 
 // This is a helper for safely working with byte buffers returned from the Rust code.
 // A rust-owned buffer is represented by its capacity, its current length, and a
@@ -45,32 +47,26 @@ open class RustBuffer : Structure() {
     // Note: `capacity` and `len` are actually `ULong` values, but JVM only supports signed values.
     // When dealing with these fields, make sure to call `toULong()`.
     @JvmField var capacity: Long = 0
-
     @JvmField var len: Long = 0
-
     @JvmField var data: Pointer? = null
 
-    class ByValue :
-        RustBuffer(),
-        Structure.ByValue
-    class ByReference :
-        RustBuffer(),
-        Structure.ByReference
+    class ByValue: RustBuffer(), Structure.ByValue
+    class ByReference: RustBuffer(), Structure.ByReference
 
-    internal fun setValue(other: RustBuffer) {
+   internal fun setValue(other: RustBuffer) {
         capacity = other.capacity
         len = other.len
         data = other.data
     }
 
     companion object {
-        internal fun alloc(size: ULong = 0UL) = uniffiRustCall { status ->
+        internal fun alloc(size: ULong = 0UL) = uniffiRustCall() { status ->
             // Note: need to convert the size to a `Long` value to make this work with JVM.
             UniffiLib.ffi_daybook_types_rustbuffer_alloc(size.toLong(), status)
         }.also {
-            if (it.data == null) {
-                throw RuntimeException("RustBuffer.alloc() returned null data pointer (size=$size)")
-            }
+            if(it.data == null) {
+               throw RuntimeException("RustBuffer.alloc() returned null data pointer (size=${size})")
+           }
         }
 
         internal fun create(capacity: ULong, len: ULong, data: Pointer?): RustBuffer.ByValue {
@@ -81,15 +77,16 @@ open class RustBuffer : Structure() {
             return buf
         }
 
-        internal fun free(buf: RustBuffer.ByValue) = uniffiRustCall { status ->
+        internal fun free(buf: RustBuffer.ByValue) = uniffiRustCall() { status ->
             UniffiLib.ffi_daybook_types_rustbuffer_free(buf, status)
         }
     }
 
     @Suppress("TooGenericExceptionThrown")
-    fun asByteBuffer() = this.data?.getByteBuffer(0, this.len)?.also {
-        it.order(ByteOrder.BIG_ENDIAN)
-    }
+    fun asByteBuffer() =
+        this.data?.getByteBuffer(0, this.len)?.also {
+            it.order(ByteOrder.BIG_ENDIAN)
+        }
 }
 
 // This is a helper for safely passing byte references into the rust code.
@@ -101,14 +98,10 @@ open class RustBuffer : Structure() {
 @Structure.FieldOrder("len", "data")
 internal open class ForeignBytes : Structure() {
     @JvmField var len: Int = 0
-
     @JvmField var data: Pointer? = null
 
-    class ByValue :
-        ForeignBytes(),
-        Structure.ByValue
+    class ByValue : ForeignBytes(), Structure.ByValue
 }
-
 /**
  * The FfiConverter interface handles converter types to and from the FFI
  *
@@ -168,11 +161,11 @@ public interface FfiConverter<KotlinType, FfiType> {
     fun liftFromRustBuffer(rbuf: RustBuffer.ByValue): KotlinType {
         val byteBuf = rbuf.asByteBuffer()!!
         try {
-            val item = read(byteBuf)
-            if (byteBuf.hasRemaining()) {
-                throw RuntimeException("junk remaining in buffer after lifting, something is very wrong!!")
-            }
-            return item
+           val item = read(byteBuf)
+           if (byteBuf.hasRemaining()) {
+               throw RuntimeException("junk remaining in buffer after lifting, something is very wrong!!")
+           }
+           return item
         } finally {
             RustBuffer.free(rbuf)
         }
@@ -184,7 +177,7 @@ public interface FfiConverter<KotlinType, FfiType> {
  *
  * @suppress
  */
-public interface FfiConverterRustBuffer<KotlinType> : FfiConverter<KotlinType, RustBuffer.ByValue> {
+public interface FfiConverterRustBuffer<KotlinType>: FfiConverter<KotlinType, RustBuffer.ByValue> {
     override fun lift(value: RustBuffer.ByValue) = liftFromRustBuffer(value)
     override fun lower(value: KotlinType) = lowerIntoRustBuffer(value)
 }
@@ -198,18 +191,21 @@ internal const val UNIFFI_CALL_UNEXPECTED_ERROR = 2.toByte()
 @Structure.FieldOrder("code", "error_buf")
 internal open class UniffiRustCallStatus : Structure() {
     @JvmField var code: Byte = 0
-
     @JvmField var error_buf: RustBuffer.ByValue = RustBuffer.ByValue()
 
-    class ByValue :
-        UniffiRustCallStatus(),
-        Structure.ByValue
+    class ByValue: UniffiRustCallStatus(), Structure.ByValue
 
-    fun isSuccess(): Boolean = code == UNIFFI_CALL_SUCCESS
+    fun isSuccess(): Boolean {
+        return code == UNIFFI_CALL_SUCCESS
+    }
 
-    fun isError(): Boolean = code == UNIFFI_CALL_ERROR
+    fun isError(): Boolean {
+        return code == UNIFFI_CALL_ERROR
+    }
 
-    fun isPanic(): Boolean = code == UNIFFI_CALL_UNEXPECTED_ERROR
+    fun isPanic(): Boolean {
+        return code == UNIFFI_CALL_UNEXPECTED_ERROR
+    }
 
     companion object {
         fun create(code: Byte, errorBuf: RustBuffer.ByValue): UniffiRustCallStatus.ByValue {
@@ -229,7 +225,7 @@ class InternalException(message: String) : kotlin.Exception(message)
  * @suppress
  */
 interface UniffiRustCallStatusErrorHandler<E> {
-    fun lift(error_buf: RustBuffer.ByValue): E
+    fun lift(error_buf: RustBuffer.ByValue): E;
 }
 
 // Helpers for calling Rust
@@ -237,10 +233,7 @@ interface UniffiRustCallStatusErrorHandler<E> {
 // synchronize itself
 
 // Call a rust function that returns a Result<>.  Pass in the Error class companion that corresponds to the Err
-private inline fun <U, E : kotlin.Exception> uniffiRustCallWithError(
-    errorHandler: UniffiRustCallStatusErrorHandler<E>,
-    callback: (UniffiRustCallStatus) -> U,
-): U {
+private inline fun <U, E: kotlin.Exception> uniffiRustCallWithError(errorHandler: UniffiRustCallStatusErrorHandler<E>, callback: (UniffiRustCallStatus) -> U): U {
     var status = UniffiRustCallStatus()
     val return_value = callback(status)
     uniffiCheckCallStatus(errorHandler, status)
@@ -248,10 +241,7 @@ private inline fun <U, E : kotlin.Exception> uniffiRustCallWithError(
 }
 
 // Check UniffiRustCallStatus and throw an error if the call wasn't successful
-private fun <E : kotlin.Exception> uniffiCheckCallStatus(
-    errorHandler: UniffiRustCallStatusErrorHandler<E>,
-    status: UniffiRustCallStatus,
-) {
+private fun<E: kotlin.Exception> uniffiCheckCallStatus(errorHandler: UniffiRustCallStatusErrorHandler<E>, status: UniffiRustCallStatus) {
     if (status.isSuccess()) {
         return
     } else if (status.isError()) {
@@ -275,7 +265,7 @@ private fun <E : kotlin.Exception> uniffiCheckCallStatus(
  *
  * @suppress
  */
-object UniffiNullRustCallStatusErrorHandler : UniffiRustCallStatusErrorHandler<InternalException> {
+object UniffiNullRustCallStatusErrorHandler: UniffiRustCallStatusErrorHandler<InternalException> {
     override fun lift(error_buf: RustBuffer.ByValue): InternalException {
         RustBuffer.free(error_buf)
         return InternalException("Unexpected CALL_ERROR")
@@ -283,52 +273,44 @@ object UniffiNullRustCallStatusErrorHandler : UniffiRustCallStatusErrorHandler<I
 }
 
 // Call a rust function that returns a plain value
-private inline fun <U> uniffiRustCall(callback: (UniffiRustCallStatus) -> U): U =
-    uniffiRustCallWithError(UniffiNullRustCallStatusErrorHandler, callback)
+private inline fun <U> uniffiRustCall(callback: (UniffiRustCallStatus) -> U): U {
+    return uniffiRustCallWithError(UniffiNullRustCallStatusErrorHandler, callback)
+}
 
-internal inline fun <T> uniffiTraitInterfaceCall(
+internal inline fun<T> uniffiTraitInterfaceCall(
     callStatus: UniffiRustCallStatus,
     makeCall: () -> T,
     writeReturn: (T) -> Unit,
 ) {
     try {
         writeReturn(makeCall())
-    } catch (e: kotlin.Exception) {
-        val err = try {
-            e.stackTraceToString()
-        } catch (_: Throwable) {
-            ""
-        }
+    } catch(e: kotlin.Exception) {
+        val err = try { e.stackTraceToString() } catch(_: Throwable) { "" }
         callStatus.code = UNIFFI_CALL_UNEXPECTED_ERROR
         callStatus.error_buf = FfiConverterString.lower(err)
     }
 }
 
-internal inline fun <T, reified E : Throwable> uniffiTraitInterfaceCallWithError(
+internal inline fun<T, reified E: Throwable> uniffiTraitInterfaceCallWithError(
     callStatus: UniffiRustCallStatus,
     makeCall: () -> T,
     writeReturn: (T) -> Unit,
-    lowerError: (E) -> RustBuffer.ByValue,
+    lowerError: (E) -> RustBuffer.ByValue
 ) {
     try {
         writeReturn(makeCall())
-    } catch (e: kotlin.Exception) {
+    } catch(e: kotlin.Exception) {
         if (e is E) {
             callStatus.code = UNIFFI_CALL_ERROR
             callStatus.error_buf = lowerError(e)
         } else {
-            val err = try {
-                e.stackTraceToString()
-            } catch (_: Throwable) {
-                ""
-            }
+            val err = try { e.stackTraceToString() } catch(_: Throwable) { "" }
             callStatus.code = UNIFFI_CALL_UNEXPECTED_ERROR
             callStatus.error_buf = FfiConverterString.lower(err)
         }
     }
 }
-
-// Initial value and increment amount for handles.
+// Initial value and increment amount for handles. 
 // These ensure that Kotlin-generated handles always have the lowest bit set
 private const val UNIFFI_HANDLEMAP_INITIAL = 1.toLong()
 private const val UNIFFI_HANDLEMAP_DELTA = 2.toLong()
@@ -336,10 +318,9 @@ private const val UNIFFI_HANDLEMAP_DELTA = 2.toLong()
 // Map handles to objects
 //
 // This is used pass an opaque 64-bit handle representing a foreign object to the Rust code.
-internal class UniffiHandleMap<T : Any> {
+internal class UniffiHandleMap<T: Any> {
     private val map = ConcurrentHashMap<Long, T>()
-
-    // Start
+    // Start 
     private val counter = java.util.concurrent.atomic.AtomicLong(UNIFFI_HANDLEMAP_INITIAL)
 
     val size: Int
@@ -359,10 +340,14 @@ internal class UniffiHandleMap<T : Any> {
     }
 
     // Get an object from the handle map
-    fun get(handle: Long): T = map.get(handle) ?: throw InternalException("UniffiHandleMap.get: Invalid handle")
+    fun get(handle: Long): T {
+        return map.get(handle) ?: throw InternalException("UniffiHandleMap.get: Invalid handle")
+    }
 
     // Remove an entry from the handlemap and get the Kotlin object back
-    fun remove(handle: Long): T = map.remove(handle) ?: throw InternalException("UniffiHandleMap: Invalid handle")
+    fun remove(handle: Long): T {
+        return map.remove(handle) ?: throw InternalException("UniffiHandleMap: Invalid handle")
+    }
 }
 
 // Contains loading, initialization code,
@@ -378,33 +363,34 @@ private fun findLibraryName(componentName: String): String {
 
 // Define FFI callback types
 internal interface UniffiRustFutureContinuationCallback : com.sun.jna.Callback {
-    fun callback(`data`: Long, `pollResult`: Byte)
+    fun callback(`data`: Long,`pollResult`: Byte,)
 }
 internal interface UniffiForeignFutureDroppedCallback : com.sun.jna.Callback {
-    fun callback(`handle`: Long)
+    fun callback(`handle`: Long,)
 }
 internal interface UniffiCallbackInterfaceFree : com.sun.jna.Callback {
-    fun callback(`handle`: Long)
+    fun callback(`handle`: Long,)
 }
 internal interface UniffiCallbackInterfaceClone : com.sun.jna.Callback {
-    fun callback(`handle`: Long): Long
+    fun callback(`handle`: Long,)
+    : Long
 }
-
 @Structure.FieldOrder("handle", "free")
 internal open class UniffiForeignFutureDroppedCallbackStruct(
     @JvmField internal var `handle`: Long = 0.toLong(),
     @JvmField internal var `free`: UniffiForeignFutureDroppedCallback? = null,
 ) : Structure() {
-    class UniffiByValue(`handle`: Long = 0.toLong(), `free`: UniffiForeignFutureDroppedCallback? = null) :
-        UniffiForeignFutureDroppedCallbackStruct(`handle`, `free`),
-        Structure.ByValue
+    class UniffiByValue(
+        `handle`: Long = 0.toLong(),
+        `free`: UniffiForeignFutureDroppedCallback? = null,
+    ): UniffiForeignFutureDroppedCallbackStruct(`handle`,`free`,), Structure.ByValue
 
-    internal fun uniffiSetValue(other: UniffiForeignFutureDroppedCallbackStruct) {
+   internal fun uniffiSetValue(other: UniffiForeignFutureDroppedCallbackStruct) {
         `handle` = other.`handle`
         `free` = other.`free`
     }
-}
 
+}
 @Structure.FieldOrder("returnValue", "callStatus")
 internal open class UniffiForeignFutureResultU8(
     @JvmField internal var `returnValue`: Byte = 0.toByte(),
@@ -413,18 +399,17 @@ internal open class UniffiForeignFutureResultU8(
     class UniffiByValue(
         `returnValue`: Byte = 0.toByte(),
         `callStatus`: UniffiRustCallStatus.ByValue = UniffiRustCallStatus.ByValue(),
-    ) : UniffiForeignFutureResultU8(`returnValue`, `callStatus`),
-        Structure.ByValue
+    ): UniffiForeignFutureResultU8(`returnValue`,`callStatus`,), Structure.ByValue
 
-    internal fun uniffiSetValue(other: UniffiForeignFutureResultU8) {
+   internal fun uniffiSetValue(other: UniffiForeignFutureResultU8) {
         `returnValue` = other.`returnValue`
         `callStatus` = other.`callStatus`
     }
+
 }
 internal interface UniffiForeignFutureCompleteU8 : com.sun.jna.Callback {
-    fun callback(`callbackData`: Long, `result`: UniffiForeignFutureResultU8.UniffiByValue)
+    fun callback(`callbackData`: Long,`result`: UniffiForeignFutureResultU8.UniffiByValue,)
 }
-
 @Structure.FieldOrder("returnValue", "callStatus")
 internal open class UniffiForeignFutureResultI8(
     @JvmField internal var `returnValue`: Byte = 0.toByte(),
@@ -433,18 +418,17 @@ internal open class UniffiForeignFutureResultI8(
     class UniffiByValue(
         `returnValue`: Byte = 0.toByte(),
         `callStatus`: UniffiRustCallStatus.ByValue = UniffiRustCallStatus.ByValue(),
-    ) : UniffiForeignFutureResultI8(`returnValue`, `callStatus`),
-        Structure.ByValue
+    ): UniffiForeignFutureResultI8(`returnValue`,`callStatus`,), Structure.ByValue
 
-    internal fun uniffiSetValue(other: UniffiForeignFutureResultI8) {
+   internal fun uniffiSetValue(other: UniffiForeignFutureResultI8) {
         `returnValue` = other.`returnValue`
         `callStatus` = other.`callStatus`
     }
+
 }
 internal interface UniffiForeignFutureCompleteI8 : com.sun.jna.Callback {
-    fun callback(`callbackData`: Long, `result`: UniffiForeignFutureResultI8.UniffiByValue)
+    fun callback(`callbackData`: Long,`result`: UniffiForeignFutureResultI8.UniffiByValue,)
 }
-
 @Structure.FieldOrder("returnValue", "callStatus")
 internal open class UniffiForeignFutureResultU16(
     @JvmField internal var `returnValue`: Short = 0.toShort(),
@@ -453,18 +437,17 @@ internal open class UniffiForeignFutureResultU16(
     class UniffiByValue(
         `returnValue`: Short = 0.toShort(),
         `callStatus`: UniffiRustCallStatus.ByValue = UniffiRustCallStatus.ByValue(),
-    ) : UniffiForeignFutureResultU16(`returnValue`, `callStatus`),
-        Structure.ByValue
+    ): UniffiForeignFutureResultU16(`returnValue`,`callStatus`,), Structure.ByValue
 
-    internal fun uniffiSetValue(other: UniffiForeignFutureResultU16) {
+   internal fun uniffiSetValue(other: UniffiForeignFutureResultU16) {
         `returnValue` = other.`returnValue`
         `callStatus` = other.`callStatus`
     }
+
 }
 internal interface UniffiForeignFutureCompleteU16 : com.sun.jna.Callback {
-    fun callback(`callbackData`: Long, `result`: UniffiForeignFutureResultU16.UniffiByValue)
+    fun callback(`callbackData`: Long,`result`: UniffiForeignFutureResultU16.UniffiByValue,)
 }
-
 @Structure.FieldOrder("returnValue", "callStatus")
 internal open class UniffiForeignFutureResultI16(
     @JvmField internal var `returnValue`: Short = 0.toShort(),
@@ -473,18 +456,17 @@ internal open class UniffiForeignFutureResultI16(
     class UniffiByValue(
         `returnValue`: Short = 0.toShort(),
         `callStatus`: UniffiRustCallStatus.ByValue = UniffiRustCallStatus.ByValue(),
-    ) : UniffiForeignFutureResultI16(`returnValue`, `callStatus`),
-        Structure.ByValue
+    ): UniffiForeignFutureResultI16(`returnValue`,`callStatus`,), Structure.ByValue
 
-    internal fun uniffiSetValue(other: UniffiForeignFutureResultI16) {
+   internal fun uniffiSetValue(other: UniffiForeignFutureResultI16) {
         `returnValue` = other.`returnValue`
         `callStatus` = other.`callStatus`
     }
+
 }
 internal interface UniffiForeignFutureCompleteI16 : com.sun.jna.Callback {
-    fun callback(`callbackData`: Long, `result`: UniffiForeignFutureResultI16.UniffiByValue)
+    fun callback(`callbackData`: Long,`result`: UniffiForeignFutureResultI16.UniffiByValue,)
 }
-
 @Structure.FieldOrder("returnValue", "callStatus")
 internal open class UniffiForeignFutureResultU32(
     @JvmField internal var `returnValue`: Int = 0,
@@ -493,18 +475,17 @@ internal open class UniffiForeignFutureResultU32(
     class UniffiByValue(
         `returnValue`: Int = 0,
         `callStatus`: UniffiRustCallStatus.ByValue = UniffiRustCallStatus.ByValue(),
-    ) : UniffiForeignFutureResultU32(`returnValue`, `callStatus`),
-        Structure.ByValue
+    ): UniffiForeignFutureResultU32(`returnValue`,`callStatus`,), Structure.ByValue
 
-    internal fun uniffiSetValue(other: UniffiForeignFutureResultU32) {
+   internal fun uniffiSetValue(other: UniffiForeignFutureResultU32) {
         `returnValue` = other.`returnValue`
         `callStatus` = other.`callStatus`
     }
+
 }
 internal interface UniffiForeignFutureCompleteU32 : com.sun.jna.Callback {
-    fun callback(`callbackData`: Long, `result`: UniffiForeignFutureResultU32.UniffiByValue)
+    fun callback(`callbackData`: Long,`result`: UniffiForeignFutureResultU32.UniffiByValue,)
 }
-
 @Structure.FieldOrder("returnValue", "callStatus")
 internal open class UniffiForeignFutureResultI32(
     @JvmField internal var `returnValue`: Int = 0,
@@ -513,18 +494,17 @@ internal open class UniffiForeignFutureResultI32(
     class UniffiByValue(
         `returnValue`: Int = 0,
         `callStatus`: UniffiRustCallStatus.ByValue = UniffiRustCallStatus.ByValue(),
-    ) : UniffiForeignFutureResultI32(`returnValue`, `callStatus`),
-        Structure.ByValue
+    ): UniffiForeignFutureResultI32(`returnValue`,`callStatus`,), Structure.ByValue
 
-    internal fun uniffiSetValue(other: UniffiForeignFutureResultI32) {
+   internal fun uniffiSetValue(other: UniffiForeignFutureResultI32) {
         `returnValue` = other.`returnValue`
         `callStatus` = other.`callStatus`
     }
+
 }
 internal interface UniffiForeignFutureCompleteI32 : com.sun.jna.Callback {
-    fun callback(`callbackData`: Long, `result`: UniffiForeignFutureResultI32.UniffiByValue)
+    fun callback(`callbackData`: Long,`result`: UniffiForeignFutureResultI32.UniffiByValue,)
 }
-
 @Structure.FieldOrder("returnValue", "callStatus")
 internal open class UniffiForeignFutureResultU64(
     @JvmField internal var `returnValue`: Long = 0.toLong(),
@@ -533,18 +513,17 @@ internal open class UniffiForeignFutureResultU64(
     class UniffiByValue(
         `returnValue`: Long = 0.toLong(),
         `callStatus`: UniffiRustCallStatus.ByValue = UniffiRustCallStatus.ByValue(),
-    ) : UniffiForeignFutureResultU64(`returnValue`, `callStatus`),
-        Structure.ByValue
+    ): UniffiForeignFutureResultU64(`returnValue`,`callStatus`,), Structure.ByValue
 
-    internal fun uniffiSetValue(other: UniffiForeignFutureResultU64) {
+   internal fun uniffiSetValue(other: UniffiForeignFutureResultU64) {
         `returnValue` = other.`returnValue`
         `callStatus` = other.`callStatus`
     }
+
 }
 internal interface UniffiForeignFutureCompleteU64 : com.sun.jna.Callback {
-    fun callback(`callbackData`: Long, `result`: UniffiForeignFutureResultU64.UniffiByValue)
+    fun callback(`callbackData`: Long,`result`: UniffiForeignFutureResultU64.UniffiByValue,)
 }
-
 @Structure.FieldOrder("returnValue", "callStatus")
 internal open class UniffiForeignFutureResultI64(
     @JvmField internal var `returnValue`: Long = 0.toLong(),
@@ -553,18 +532,17 @@ internal open class UniffiForeignFutureResultI64(
     class UniffiByValue(
         `returnValue`: Long = 0.toLong(),
         `callStatus`: UniffiRustCallStatus.ByValue = UniffiRustCallStatus.ByValue(),
-    ) : UniffiForeignFutureResultI64(`returnValue`, `callStatus`),
-        Structure.ByValue
+    ): UniffiForeignFutureResultI64(`returnValue`,`callStatus`,), Structure.ByValue
 
-    internal fun uniffiSetValue(other: UniffiForeignFutureResultI64) {
+   internal fun uniffiSetValue(other: UniffiForeignFutureResultI64) {
         `returnValue` = other.`returnValue`
         `callStatus` = other.`callStatus`
     }
+
 }
 internal interface UniffiForeignFutureCompleteI64 : com.sun.jna.Callback {
-    fun callback(`callbackData`: Long, `result`: UniffiForeignFutureResultI64.UniffiByValue)
+    fun callback(`callbackData`: Long,`result`: UniffiForeignFutureResultI64.UniffiByValue,)
 }
-
 @Structure.FieldOrder("returnValue", "callStatus")
 internal open class UniffiForeignFutureResultF32(
     @JvmField internal var `returnValue`: Float = 0.0f,
@@ -573,18 +551,17 @@ internal open class UniffiForeignFutureResultF32(
     class UniffiByValue(
         `returnValue`: Float = 0.0f,
         `callStatus`: UniffiRustCallStatus.ByValue = UniffiRustCallStatus.ByValue(),
-    ) : UniffiForeignFutureResultF32(`returnValue`, `callStatus`),
-        Structure.ByValue
+    ): UniffiForeignFutureResultF32(`returnValue`,`callStatus`,), Structure.ByValue
 
-    internal fun uniffiSetValue(other: UniffiForeignFutureResultF32) {
+   internal fun uniffiSetValue(other: UniffiForeignFutureResultF32) {
         `returnValue` = other.`returnValue`
         `callStatus` = other.`callStatus`
     }
+
 }
 internal interface UniffiForeignFutureCompleteF32 : com.sun.jna.Callback {
-    fun callback(`callbackData`: Long, `result`: UniffiForeignFutureResultF32.UniffiByValue)
+    fun callback(`callbackData`: Long,`result`: UniffiForeignFutureResultF32.UniffiByValue,)
 }
-
 @Structure.FieldOrder("returnValue", "callStatus")
 internal open class UniffiForeignFutureResultF64(
     @JvmField internal var `returnValue`: Double = 0.0,
@@ -593,18 +570,17 @@ internal open class UniffiForeignFutureResultF64(
     class UniffiByValue(
         `returnValue`: Double = 0.0,
         `callStatus`: UniffiRustCallStatus.ByValue = UniffiRustCallStatus.ByValue(),
-    ) : UniffiForeignFutureResultF64(`returnValue`, `callStatus`),
-        Structure.ByValue
+    ): UniffiForeignFutureResultF64(`returnValue`,`callStatus`,), Structure.ByValue
 
-    internal fun uniffiSetValue(other: UniffiForeignFutureResultF64) {
+   internal fun uniffiSetValue(other: UniffiForeignFutureResultF64) {
         `returnValue` = other.`returnValue`
         `callStatus` = other.`callStatus`
     }
+
 }
 internal interface UniffiForeignFutureCompleteF64 : com.sun.jna.Callback {
-    fun callback(`callbackData`: Long, `result`: UniffiForeignFutureResultF64.UniffiByValue)
+    fun callback(`callbackData`: Long,`result`: UniffiForeignFutureResultF64.UniffiByValue,)
 }
-
 @Structure.FieldOrder("returnValue", "callStatus")
 internal open class UniffiForeignFutureResultRustBuffer(
     @JvmField internal var `returnValue`: RustBuffer.ByValue = RustBuffer.ByValue(),
@@ -613,32 +589,32 @@ internal open class UniffiForeignFutureResultRustBuffer(
     class UniffiByValue(
         `returnValue`: RustBuffer.ByValue = RustBuffer.ByValue(),
         `callStatus`: UniffiRustCallStatus.ByValue = UniffiRustCallStatus.ByValue(),
-    ) : UniffiForeignFutureResultRustBuffer(`returnValue`, `callStatus`),
-        Structure.ByValue
+    ): UniffiForeignFutureResultRustBuffer(`returnValue`,`callStatus`,), Structure.ByValue
 
-    internal fun uniffiSetValue(other: UniffiForeignFutureResultRustBuffer) {
+   internal fun uniffiSetValue(other: UniffiForeignFutureResultRustBuffer) {
         `returnValue` = other.`returnValue`
         `callStatus` = other.`callStatus`
     }
+
 }
 internal interface UniffiForeignFutureCompleteRustBuffer : com.sun.jna.Callback {
-    fun callback(`callbackData`: Long, `result`: UniffiForeignFutureResultRustBuffer.UniffiByValue)
+    fun callback(`callbackData`: Long,`result`: UniffiForeignFutureResultRustBuffer.UniffiByValue,)
 }
-
 @Structure.FieldOrder("callStatus")
 internal open class UniffiForeignFutureResultVoid(
     @JvmField internal var `callStatus`: UniffiRustCallStatus.ByValue = UniffiRustCallStatus.ByValue(),
 ) : Structure() {
-    class UniffiByValue(`callStatus`: UniffiRustCallStatus.ByValue = UniffiRustCallStatus.ByValue()) :
-        UniffiForeignFutureResultVoid(`callStatus`),
-        Structure.ByValue
+    class UniffiByValue(
+        `callStatus`: UniffiRustCallStatus.ByValue = UniffiRustCallStatus.ByValue(),
+    ): UniffiForeignFutureResultVoid(`callStatus`,), Structure.ByValue
 
-    internal fun uniffiSetValue(other: UniffiForeignFutureResultVoid) {
+   internal fun uniffiSetValue(other: UniffiForeignFutureResultVoid) {
         `callStatus` = other.`callStatus`
     }
+
 }
 internal interface UniffiForeignFutureCompleteVoid : com.sun.jna.Callback {
-    fun callback(`callbackData`: Long, `result`: UniffiForeignFutureResultVoid.UniffiByValue)
+    fun callback(`callbackData`: Long,`result`: UniffiForeignFutureResultVoid.UniffiByValue,)
 }
 
 // A JNA Library to expose the extern-C FFI definitions.
@@ -663,145 +639,125 @@ internal object IntegrityCheckingUniffiLib {
         uniffiCheckContractApiVersion(this)
         uniffiCheckApiChecksums(this)
     }
-    external fun ffi_daybook_types_uniffi_contract_version(): Int
+    external fun ffi_daybook_types_uniffi_contract_version(
+    ): Int
+
+        
 }
 
 internal object UniffiLib {
+    
 
     init {
         Native.register(UniffiLib::class.java, findLibraryName(componentName = "daybook_types"))
+        
     }
-    external fun ffi_daybook_types_rustbuffer_alloc(
-        `size`: Long,
-        uniffi_out_err: UniffiRustCallStatus,
+    external fun ffi_daybook_types_rustbuffer_alloc(`size`: Long,uniffi_out_err: UniffiRustCallStatus, 
     ): RustBuffer.ByValue
-    external fun ffi_daybook_types_rustbuffer_from_bytes(
-        `bytes`: ForeignBytes.ByValue,
-        uniffi_out_err: UniffiRustCallStatus,
+    external fun ffi_daybook_types_rustbuffer_from_bytes(`bytes`: ForeignBytes.ByValue,uniffi_out_err: UniffiRustCallStatus, 
     ): RustBuffer.ByValue
-    external fun ffi_daybook_types_rustbuffer_free(
-        `buf`: RustBuffer.ByValue,
-        uniffi_out_err: UniffiRustCallStatus,
+    external fun ffi_daybook_types_rustbuffer_free(`buf`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus, 
     ): Unit
-    external fun ffi_daybook_types_rustbuffer_reserve(
-        `buf`: RustBuffer.ByValue,
-        `additional`: Long,
-        uniffi_out_err: UniffiRustCallStatus,
+    external fun ffi_daybook_types_rustbuffer_reserve(`buf`: RustBuffer.ByValue,`additional`: Long,uniffi_out_err: UniffiRustCallStatus, 
     ): RustBuffer.ByValue
-    external fun ffi_daybook_types_rust_future_poll_u8(
-        `handle`: Long,
-        `callback`: UniffiRustFutureContinuationCallback,
-        `callbackData`: Long,
+    external fun ffi_daybook_types_rust_future_poll_u8(`handle`: Long,`callback`: UniffiRustFutureContinuationCallback,`callbackData`: Long,
     ): Unit
-    external fun ffi_daybook_types_rust_future_cancel_u8(`handle`: Long): Unit
-    external fun ffi_daybook_types_rust_future_free_u8(`handle`: Long): Unit
-    external fun ffi_daybook_types_rust_future_complete_u8(`handle`: Long, uniffi_out_err: UniffiRustCallStatus): Byte
-    external fun ffi_daybook_types_rust_future_poll_i8(
-        `handle`: Long,
-        `callback`: UniffiRustFutureContinuationCallback,
-        `callbackData`: Long,
+    external fun ffi_daybook_types_rust_future_cancel_u8(`handle`: Long,
     ): Unit
-    external fun ffi_daybook_types_rust_future_cancel_i8(`handle`: Long): Unit
-    external fun ffi_daybook_types_rust_future_free_i8(`handle`: Long): Unit
-    external fun ffi_daybook_types_rust_future_complete_i8(`handle`: Long, uniffi_out_err: UniffiRustCallStatus): Byte
-    external fun ffi_daybook_types_rust_future_poll_u16(
-        `handle`: Long,
-        `callback`: UniffiRustFutureContinuationCallback,
-        `callbackData`: Long,
+    external fun ffi_daybook_types_rust_future_free_u8(`handle`: Long,
     ): Unit
-    external fun ffi_daybook_types_rust_future_cancel_u16(`handle`: Long): Unit
-    external fun ffi_daybook_types_rust_future_free_u16(`handle`: Long): Unit
-    external fun ffi_daybook_types_rust_future_complete_u16(
-        `handle`: Long,
-        uniffi_out_err: UniffiRustCallStatus,
+    external fun ffi_daybook_types_rust_future_complete_u8(`handle`: Long,uniffi_out_err: UniffiRustCallStatus, 
+    ): Byte
+    external fun ffi_daybook_types_rust_future_poll_i8(`handle`: Long,`callback`: UniffiRustFutureContinuationCallback,`callbackData`: Long,
+    ): Unit
+    external fun ffi_daybook_types_rust_future_cancel_i8(`handle`: Long,
+    ): Unit
+    external fun ffi_daybook_types_rust_future_free_i8(`handle`: Long,
+    ): Unit
+    external fun ffi_daybook_types_rust_future_complete_i8(`handle`: Long,uniffi_out_err: UniffiRustCallStatus, 
+    ): Byte
+    external fun ffi_daybook_types_rust_future_poll_u16(`handle`: Long,`callback`: UniffiRustFutureContinuationCallback,`callbackData`: Long,
+    ): Unit
+    external fun ffi_daybook_types_rust_future_cancel_u16(`handle`: Long,
+    ): Unit
+    external fun ffi_daybook_types_rust_future_free_u16(`handle`: Long,
+    ): Unit
+    external fun ffi_daybook_types_rust_future_complete_u16(`handle`: Long,uniffi_out_err: UniffiRustCallStatus, 
     ): Short
-    external fun ffi_daybook_types_rust_future_poll_i16(
-        `handle`: Long,
-        `callback`: UniffiRustFutureContinuationCallback,
-        `callbackData`: Long,
+    external fun ffi_daybook_types_rust_future_poll_i16(`handle`: Long,`callback`: UniffiRustFutureContinuationCallback,`callbackData`: Long,
     ): Unit
-    external fun ffi_daybook_types_rust_future_cancel_i16(`handle`: Long): Unit
-    external fun ffi_daybook_types_rust_future_free_i16(`handle`: Long): Unit
-    external fun ffi_daybook_types_rust_future_complete_i16(
-        `handle`: Long,
-        uniffi_out_err: UniffiRustCallStatus,
+    external fun ffi_daybook_types_rust_future_cancel_i16(`handle`: Long,
+    ): Unit
+    external fun ffi_daybook_types_rust_future_free_i16(`handle`: Long,
+    ): Unit
+    external fun ffi_daybook_types_rust_future_complete_i16(`handle`: Long,uniffi_out_err: UniffiRustCallStatus, 
     ): Short
-    external fun ffi_daybook_types_rust_future_poll_u32(
-        `handle`: Long,
-        `callback`: UniffiRustFutureContinuationCallback,
-        `callbackData`: Long,
+    external fun ffi_daybook_types_rust_future_poll_u32(`handle`: Long,`callback`: UniffiRustFutureContinuationCallback,`callbackData`: Long,
     ): Unit
-    external fun ffi_daybook_types_rust_future_cancel_u32(`handle`: Long): Unit
-    external fun ffi_daybook_types_rust_future_free_u32(`handle`: Long): Unit
-    external fun ffi_daybook_types_rust_future_complete_u32(`handle`: Long, uniffi_out_err: UniffiRustCallStatus): Int
-    external fun ffi_daybook_types_rust_future_poll_i32(
-        `handle`: Long,
-        `callback`: UniffiRustFutureContinuationCallback,
-        `callbackData`: Long,
+    external fun ffi_daybook_types_rust_future_cancel_u32(`handle`: Long,
     ): Unit
-    external fun ffi_daybook_types_rust_future_cancel_i32(`handle`: Long): Unit
-    external fun ffi_daybook_types_rust_future_free_i32(`handle`: Long): Unit
-    external fun ffi_daybook_types_rust_future_complete_i32(`handle`: Long, uniffi_out_err: UniffiRustCallStatus): Int
-    external fun ffi_daybook_types_rust_future_poll_u64(
-        `handle`: Long,
-        `callback`: UniffiRustFutureContinuationCallback,
-        `callbackData`: Long,
+    external fun ffi_daybook_types_rust_future_free_u32(`handle`: Long,
     ): Unit
-    external fun ffi_daybook_types_rust_future_cancel_u64(`handle`: Long): Unit
-    external fun ffi_daybook_types_rust_future_free_u64(`handle`: Long): Unit
-    external fun ffi_daybook_types_rust_future_complete_u64(`handle`: Long, uniffi_out_err: UniffiRustCallStatus): Long
-    external fun ffi_daybook_types_rust_future_poll_i64(
-        `handle`: Long,
-        `callback`: UniffiRustFutureContinuationCallback,
-        `callbackData`: Long,
+    external fun ffi_daybook_types_rust_future_complete_u32(`handle`: Long,uniffi_out_err: UniffiRustCallStatus, 
+    ): Int
+    external fun ffi_daybook_types_rust_future_poll_i32(`handle`: Long,`callback`: UniffiRustFutureContinuationCallback,`callbackData`: Long,
     ): Unit
-    external fun ffi_daybook_types_rust_future_cancel_i64(`handle`: Long): Unit
-    external fun ffi_daybook_types_rust_future_free_i64(`handle`: Long): Unit
-    external fun ffi_daybook_types_rust_future_complete_i64(`handle`: Long, uniffi_out_err: UniffiRustCallStatus): Long
-    external fun ffi_daybook_types_rust_future_poll_f32(
-        `handle`: Long,
-        `callback`: UniffiRustFutureContinuationCallback,
-        `callbackData`: Long,
+    external fun ffi_daybook_types_rust_future_cancel_i32(`handle`: Long,
     ): Unit
-    external fun ffi_daybook_types_rust_future_cancel_f32(`handle`: Long): Unit
-    external fun ffi_daybook_types_rust_future_free_f32(`handle`: Long): Unit
-    external fun ffi_daybook_types_rust_future_complete_f32(
-        `handle`: Long,
-        uniffi_out_err: UniffiRustCallStatus,
+    external fun ffi_daybook_types_rust_future_free_i32(`handle`: Long,
+    ): Unit
+    external fun ffi_daybook_types_rust_future_complete_i32(`handle`: Long,uniffi_out_err: UniffiRustCallStatus, 
+    ): Int
+    external fun ffi_daybook_types_rust_future_poll_u64(`handle`: Long,`callback`: UniffiRustFutureContinuationCallback,`callbackData`: Long,
+    ): Unit
+    external fun ffi_daybook_types_rust_future_cancel_u64(`handle`: Long,
+    ): Unit
+    external fun ffi_daybook_types_rust_future_free_u64(`handle`: Long,
+    ): Unit
+    external fun ffi_daybook_types_rust_future_complete_u64(`handle`: Long,uniffi_out_err: UniffiRustCallStatus, 
+    ): Long
+    external fun ffi_daybook_types_rust_future_poll_i64(`handle`: Long,`callback`: UniffiRustFutureContinuationCallback,`callbackData`: Long,
+    ): Unit
+    external fun ffi_daybook_types_rust_future_cancel_i64(`handle`: Long,
+    ): Unit
+    external fun ffi_daybook_types_rust_future_free_i64(`handle`: Long,
+    ): Unit
+    external fun ffi_daybook_types_rust_future_complete_i64(`handle`: Long,uniffi_out_err: UniffiRustCallStatus, 
+    ): Long
+    external fun ffi_daybook_types_rust_future_poll_f32(`handle`: Long,`callback`: UniffiRustFutureContinuationCallback,`callbackData`: Long,
+    ): Unit
+    external fun ffi_daybook_types_rust_future_cancel_f32(`handle`: Long,
+    ): Unit
+    external fun ffi_daybook_types_rust_future_free_f32(`handle`: Long,
+    ): Unit
+    external fun ffi_daybook_types_rust_future_complete_f32(`handle`: Long,uniffi_out_err: UniffiRustCallStatus, 
     ): Float
-    external fun ffi_daybook_types_rust_future_poll_f64(
-        `handle`: Long,
-        `callback`: UniffiRustFutureContinuationCallback,
-        `callbackData`: Long,
+    external fun ffi_daybook_types_rust_future_poll_f64(`handle`: Long,`callback`: UniffiRustFutureContinuationCallback,`callbackData`: Long,
     ): Unit
-    external fun ffi_daybook_types_rust_future_cancel_f64(`handle`: Long): Unit
-    external fun ffi_daybook_types_rust_future_free_f64(`handle`: Long): Unit
-    external fun ffi_daybook_types_rust_future_complete_f64(
-        `handle`: Long,
-        uniffi_out_err: UniffiRustCallStatus,
+    external fun ffi_daybook_types_rust_future_cancel_f64(`handle`: Long,
+    ): Unit
+    external fun ffi_daybook_types_rust_future_free_f64(`handle`: Long,
+    ): Unit
+    external fun ffi_daybook_types_rust_future_complete_f64(`handle`: Long,uniffi_out_err: UniffiRustCallStatus, 
     ): Double
-    external fun ffi_daybook_types_rust_future_poll_rust_buffer(
-        `handle`: Long,
-        `callback`: UniffiRustFutureContinuationCallback,
-        `callbackData`: Long,
+    external fun ffi_daybook_types_rust_future_poll_rust_buffer(`handle`: Long,`callback`: UniffiRustFutureContinuationCallback,`callbackData`: Long,
     ): Unit
-    external fun ffi_daybook_types_rust_future_cancel_rust_buffer(`handle`: Long): Unit
-    external fun ffi_daybook_types_rust_future_free_rust_buffer(`handle`: Long): Unit
-    external fun ffi_daybook_types_rust_future_complete_rust_buffer(
-        `handle`: Long,
-        uniffi_out_err: UniffiRustCallStatus,
+    external fun ffi_daybook_types_rust_future_cancel_rust_buffer(`handle`: Long,
+    ): Unit
+    external fun ffi_daybook_types_rust_future_free_rust_buffer(`handle`: Long,
+    ): Unit
+    external fun ffi_daybook_types_rust_future_complete_rust_buffer(`handle`: Long,uniffi_out_err: UniffiRustCallStatus, 
     ): RustBuffer.ByValue
-    external fun ffi_daybook_types_rust_future_poll_void(
-        `handle`: Long,
-        `callback`: UniffiRustFutureContinuationCallback,
-        `callbackData`: Long,
+    external fun ffi_daybook_types_rust_future_poll_void(`handle`: Long,`callback`: UniffiRustFutureContinuationCallback,`callbackData`: Long,
     ): Unit
-    external fun ffi_daybook_types_rust_future_cancel_void(`handle`: Long): Unit
-    external fun ffi_daybook_types_rust_future_free_void(`handle`: Long): Unit
-    external fun ffi_daybook_types_rust_future_complete_void(
-        `handle`: Long,
-        uniffi_out_err: UniffiRustCallStatus,
+    external fun ffi_daybook_types_rust_future_cancel_void(`handle`: Long,
     ): Unit
+    external fun ffi_daybook_types_rust_future_free_void(`handle`: Long,
+    ): Unit
+    external fun ffi_daybook_types_rust_future_complete_void(`handle`: Long,uniffi_out_err: UniffiRustCallStatus, 
+    ): Unit
+
+        
 }
 
 private fun uniffiCheckContractApiVersion(lib: IntegrityCheckingUniffiLib) {
@@ -813,7 +769,6 @@ private fun uniffiCheckContractApiVersion(lib: IntegrityCheckingUniffiLib) {
         throw RuntimeException("UniFFI contract version mismatch: try cleaning and rebuilding your project")
     }
 }
-
 @Suppress("UNUSED_PARAMETER")
 private fun uniffiCheckApiChecksums(lib: IntegrityCheckingUniffiLib) {
 }
@@ -832,6 +787,7 @@ public fun uniffiEnsureInitialized() {
 
 // Public interface members begin here.
 
+
 // Interface implemented by anything that can contain an object reference.
 //
 // Such types expose a `destroy()` method that must be called to cleanly
@@ -847,7 +803,6 @@ interface Disposable {
             for (arg in args) {
                 when (arg) {
                     is Disposable -> arg.destroy()
-
                     is ArrayList<*> -> {
                         for (idx in arg.indices) {
                             val element = arg[idx]
@@ -856,7 +811,6 @@ interface Disposable {
                             }
                         }
                     }
-
                     is Map<*, *> -> {
                         for (element in arg.values) {
                             if (element is Disposable) {
@@ -864,7 +818,6 @@ interface Disposable {
                             }
                         }
                     }
-
                     is Iterable<*> -> {
                         for (element in arg) {
                             if (element is Disposable) {
@@ -881,16 +834,17 @@ interface Disposable {
 /**
  * @suppress
  */
-inline fun <T : Disposable?, R> T.use(block: (T) -> R) = try {
-    block(this)
-} finally {
+inline fun <T : Disposable?, R> T.use(block: (T) -> R) =
     try {
-        // N.B. our implementation is on the nullable type `Disposable?`.
-        this?.destroy()
-    } catch (e: Throwable) {
-        // swallow
+        block(this)
+    } finally {
+        try {
+            // N.B. our implementation is on the nullable type `Disposable?`.
+            this?.destroy()
+        } catch (e: Throwable) {
+            // swallow
+        }
     }
-}
 
 /** 
  * Placeholder object used to signal that we're constructing an interface with a FFI handle.
@@ -913,12 +867,18 @@ object NoHandle
 /**
  * @suppress
  */
-public object FfiConverterUInt : FfiConverter<UInt, Int> {
-    override fun lift(value: Int): UInt = value.toUInt()
+public object FfiConverterUInt: FfiConverter<UInt, Int> {
+    override fun lift(value: Int): UInt {
+        return value.toUInt()
+    }
 
-    override fun read(buf: ByteBuffer): UInt = lift(buf.getInt())
+    override fun read(buf: ByteBuffer): UInt {
+        return lift(buf.getInt())
+    }
 
-    override fun lower(value: UInt): Int = value.toInt()
+    override fun lower(value: UInt): Int {
+        return value.toInt()
+    }
 
     override fun allocationSize(value: UInt) = 4UL
 
@@ -930,12 +890,18 @@ public object FfiConverterUInt : FfiConverter<UInt, Int> {
 /**
  * @suppress
  */
-public object FfiConverterULong : FfiConverter<ULong, Long> {
-    override fun lift(value: Long): ULong = value.toULong()
+public object FfiConverterULong: FfiConverter<ULong, Long> {
+    override fun lift(value: Long): ULong {
+        return value.toULong()
+    }
 
-    override fun read(buf: ByteBuffer): ULong = lift(buf.getLong())
+    override fun read(buf: ByteBuffer): ULong {
+        return lift(buf.getLong())
+    }
 
-    override fun lower(value: ULong): Long = value.toLong()
+    override fun lower(value: ULong): Long {
+        return value.toLong()
+    }
 
     override fun allocationSize(value: ULong) = 8UL
 
@@ -947,12 +913,18 @@ public object FfiConverterULong : FfiConverter<ULong, Long> {
 /**
  * @suppress
  */
-public object FfiConverterLong : FfiConverter<Long, Long> {
-    override fun lift(value: Long): Long = value
+public object FfiConverterLong: FfiConverter<Long, Long> {
+    override fun lift(value: Long): Long {
+        return value
+    }
 
-    override fun read(buf: ByteBuffer): Long = buf.getLong()
+    override fun read(buf: ByteBuffer): Long {
+        return buf.getLong()
+    }
 
-    override fun lower(value: Long): Long = value
+    override fun lower(value: Long): Long {
+        return value
+    }
 
     override fun allocationSize(value: Long) = 8UL
 
@@ -964,12 +936,18 @@ public object FfiConverterLong : FfiConverter<Long, Long> {
 /**
  * @suppress
  */
-public object FfiConverterFloat : FfiConverter<Float, Float> {
-    override fun lift(value: Float): Float = value
+public object FfiConverterFloat: FfiConverter<Float, Float> {
+    override fun lift(value: Float): Float {
+        return value
+    }
 
-    override fun read(buf: ByteBuffer): Float = buf.getFloat()
+    override fun read(buf: ByteBuffer): Float {
+        return buf.getFloat()
+    }
 
-    override fun lower(value: Float): Float = value
+    override fun lower(value: Float): Float {
+        return value
+    }
 
     override fun allocationSize(value: Float) = 4UL
 
@@ -981,12 +959,18 @@ public object FfiConverterFloat : FfiConverter<Float, Float> {
 /**
  * @suppress
  */
-public object FfiConverterBoolean : FfiConverter<Boolean, Byte> {
-    override fun lift(value: Byte): Boolean = value.toInt() != 0
+public object FfiConverterBoolean: FfiConverter<Boolean, Byte> {
+    override fun lift(value: Byte): Boolean {
+        return value.toInt() != 0
+    }
 
-    override fun read(buf: ByteBuffer): Boolean = lift(buf.get())
+    override fun read(buf: ByteBuffer): Boolean {
+        return lift(buf.get())
+    }
 
-    override fun lower(value: Boolean): Byte = if (value) 1.toByte() else 0.toByte()
+    override fun lower(value: Boolean): Byte {
+        return if (value) 1.toByte() else 0.toByte()
+    }
 
     override fun allocationSize(value: Boolean) = 1UL
 
@@ -998,7 +982,7 @@ public object FfiConverterBoolean : FfiConverter<Boolean, Byte> {
 /**
  * @suppress
  */
-public object FfiConverterString : FfiConverter<String, RustBuffer.ByValue> {
+public object FfiConverterString: FfiConverter<String, RustBuffer.ByValue> {
     // Note: we don't inherit from FfiConverterRustBuffer, because we use a
     // special encoding when lowering/lifting.  We can use `RustBuffer.len` to
     // store our length and avoid writing it out to the buffer.
@@ -1055,665 +1039,904 @@ public object FfiConverterString : FfiConverter<String, RustBuffer.ByValue> {
 /**
  * @suppress
  */
-public object FfiConverterByteArray : FfiConverterRustBuffer<ByteArray> {
+public object FfiConverterByteArray: FfiConverterRustBuffer<ByteArray> {
     override fun read(buf: ByteBuffer): ByteArray {
         val len = buf.getInt()
         val byteArr = ByteArray(len)
         buf.get(byteArr)
         return byteArr
     }
-    override fun allocationSize(value: ByteArray): ULong = 4UL + value.size.toULong()
+    override fun allocationSize(value: ByteArray): ULong {
+        return 4UL + value.size.toULong()
+    }
     override fun write(value: ByteArray, buf: ByteBuffer) {
         buf.putInt(value.size)
         buf.put(value)
     }
 }
 
-data class AddDocArgs(var `branchPath`: Utf8PathBuf, var `facets`: Map<FacetKey, Json>, var `userPath`: Utf8PathBuf?) {
 
+
+data class AddDocArgs (
+    var `branchPath`: Utf8PathBuf
+    , 
+    var `facets`: Map<FacetKey, Json>
+    , 
+    var `userPath`: Utf8PathBuf?
+    
+){
+    
+
+    
+
+    
     companion object
 }
 
 /**
  * @suppress
  */
-public object FfiConverterTypeAddDocArgs : FfiConverterRustBuffer<AddDocArgs> {
-    override fun read(buf: ByteBuffer): AddDocArgs = AddDocArgs(
-        FfiConverterTypeUtf8PathBuf.read(buf),
-        FfiConverterMapTypeFacetKeyTypeJson.read(buf),
-        FfiConverterOptionalTypeUtf8PathBuf.read(buf),
-    )
+public object FfiConverterTypeAddDocArgs: FfiConverterRustBuffer<AddDocArgs> {
+    override fun read(buf: ByteBuffer): AddDocArgs {
+        return AddDocArgs(
+            FfiConverterTypeUtf8PathBuf.read(buf),
+            FfiConverterMapTypeFacetKeyTypeJson.read(buf),
+            FfiConverterOptionalTypeUtf8PathBuf.read(buf),
+        )
+    }
 
     override fun allocationSize(value: AddDocArgs) = (
-        FfiConverterTypeUtf8PathBuf.allocationSize(value.`branchPath`) +
+            FfiConverterTypeUtf8PathBuf.allocationSize(value.`branchPath`) +
             FfiConverterMapTypeFacetKeyTypeJson.allocationSize(value.`facets`) +
             FfiConverterOptionalTypeUtf8PathBuf.allocationSize(value.`userPath`)
-        )
+    )
 
     override fun write(value: AddDocArgs, buf: ByteBuffer) {
-        FfiConverterTypeUtf8PathBuf.write(value.`branchPath`, buf)
-        FfiConverterMapTypeFacetKeyTypeJson.write(value.`facets`, buf)
-        FfiConverterOptionalTypeUtf8PathBuf.write(value.`userPath`, buf)
+            FfiConverterTypeUtf8PathBuf.write(value.`branchPath`, buf)
+            FfiConverterMapTypeFacetKeyTypeJson.write(value.`facets`, buf)
+            FfiConverterOptionalTypeUtf8PathBuf.write(value.`userPath`, buf)
     }
 }
 
+
+
 @Serializable
-data class Blob(
-    var `mime`: kotlin.String,
-    var `lengthOctets`: kotlin.ULong,
-    var `digest`: kotlin.String,
+data class Blob (
+    var `mime`: kotlin.String
+    , 
+    var `lengthOctets`: kotlin.ULong
+    , 
+    var `digest`: kotlin.String
+    , 
     /**
      * Only to be used for small blobs
      */
-    var `inline`: kotlin.ByteArray?,
-    var `urls`: List<kotlin.String>?,
+    var `inline`: kotlin.ByteArray?
+    , 
+    var `urls`: List<kotlin.String>?
+    
+){
+    
 
-) {
+    
 
+    
     companion object
 }
 
 /**
  * @suppress
  */
-public object FfiConverterTypeBlob : FfiConverterRustBuffer<Blob> {
-    override fun read(buf: ByteBuffer): Blob = Blob(
-        FfiConverterString.read(buf),
-        FfiConverterULong.read(buf),
-        FfiConverterString.read(buf),
-        FfiConverterOptionalByteArray.read(buf),
-        FfiConverterOptionalSequenceString.read(buf),
-    )
+public object FfiConverterTypeBlob: FfiConverterRustBuffer<Blob> {
+    override fun read(buf: ByteBuffer): Blob {
+        return Blob(
+            FfiConverterString.read(buf),
+            FfiConverterULong.read(buf),
+            FfiConverterString.read(buf),
+            FfiConverterOptionalByteArray.read(buf),
+            FfiConverterOptionalSequenceString.read(buf),
+        )
+    }
 
     override fun allocationSize(value: Blob) = (
-        FfiConverterString.allocationSize(value.`mime`) +
+            FfiConverterString.allocationSize(value.`mime`) +
             FfiConverterULong.allocationSize(value.`lengthOctets`) +
             FfiConverterString.allocationSize(value.`digest`) +
             FfiConverterOptionalByteArray.allocationSize(value.`inline`) +
             FfiConverterOptionalSequenceString.allocationSize(value.`urls`)
-        )
+    )
 
     override fun write(value: Blob, buf: ByteBuffer) {
-        FfiConverterString.write(value.`mime`, buf)
-        FfiConverterULong.write(value.`lengthOctets`, buf)
-        FfiConverterString.write(value.`digest`, buf)
-        FfiConverterOptionalByteArray.write(value.`inline`, buf)
-        FfiConverterOptionalSequenceString.write(value.`urls`, buf)
+            FfiConverterString.write(value.`mime`, buf)
+            FfiConverterULong.write(value.`lengthOctets`, buf)
+            FfiConverterString.write(value.`digest`, buf)
+            FfiConverterOptionalByteArray.write(value.`inline`, buf)
+            FfiConverterOptionalSequenceString.write(value.`urls`, buf)
     }
 }
+
+
 
 @Serializable
-data class Body(var `order`: List<Url>) {
+data class Body (
+    var `order`: List<Url>
+    
+){
+    
 
+    
+
+    
     companion object
 }
 
 /**
  * @suppress
  */
-public object FfiConverterTypeBody : FfiConverterRustBuffer<Body> {
-    override fun read(buf: ByteBuffer): Body = Body(
-        FfiConverterSequenceTypeUrl.read(buf),
-    )
+public object FfiConverterTypeBody: FfiConverterRustBuffer<Body> {
+    override fun read(buf: ByteBuffer): Body {
+        return Body(
+            FfiConverterSequenceTypeUrl.read(buf),
+        )
+    }
 
     override fun allocationSize(value: Body) = (
-        FfiConverterSequenceTypeUrl.allocationSize(value.`order`)
-        )
+            FfiConverterSequenceTypeUrl.allocationSize(value.`order`)
+    )
 
     override fun write(value: Body, buf: ByteBuffer) {
-        FfiConverterSequenceTypeUrl.write(value.`order`, buf)
+            FfiConverterSequenceTypeUrl.write(value.`order`, buf)
     }
 }
 
-data class Dmeta(
-    var `id`: kotlin.String,
-    var `createdAt`: Timestamp,
-    var `updatedAt`: List<Timestamp>,
-    var `actors`: Map<kotlin.String, UserMeta>,
-    var `facetUuids`: Map<Uuid, FacetKey>,
-    var `facets`: Map<FacetKey, FacetMeta>,
 
-) {
 
+data class Dmeta (
+    var `id`: kotlin.String
+    , 
+    var `createdAt`: Timestamp
+    , 
+    var `updatedAt`: List<Timestamp>
+    , 
+    var `actors`: Map<kotlin.String, UserMeta>
+    , 
+    var `facetUuids`: Map<Uuid, FacetKey>
+    , 
+    var `facets`: Map<FacetKey, FacetMeta>
+    
+){
+    
+
+    
+
+    
     companion object
 }
 
 /**
  * @suppress
  */
-public object FfiConverterTypeDmeta : FfiConverterRustBuffer<Dmeta> {
-    override fun read(buf: ByteBuffer): Dmeta = Dmeta(
-        FfiConverterString.read(buf),
-        FfiConverterTypeTimestamp.read(buf),
-        FfiConverterSequenceTypeTimestamp.read(buf),
-        FfiConverterMapStringTypeUserMeta.read(buf),
-        FfiConverterMapTypeUuidTypeFacetKey.read(buf),
-        FfiConverterMapTypeFacetKeyTypeFacetMeta.read(buf),
-    )
+public object FfiConverterTypeDmeta: FfiConverterRustBuffer<Dmeta> {
+    override fun read(buf: ByteBuffer): Dmeta {
+        return Dmeta(
+            FfiConverterString.read(buf),
+            FfiConverterTypeTimestamp.read(buf),
+            FfiConverterSequenceTypeTimestamp.read(buf),
+            FfiConverterMapStringTypeUserMeta.read(buf),
+            FfiConverterMapTypeUuidTypeFacetKey.read(buf),
+            FfiConverterMapTypeFacetKeyTypeFacetMeta.read(buf),
+        )
+    }
 
     override fun allocationSize(value: Dmeta) = (
-        FfiConverterString.allocationSize(value.`id`) +
+            FfiConverterString.allocationSize(value.`id`) +
             FfiConverterTypeTimestamp.allocationSize(value.`createdAt`) +
             FfiConverterSequenceTypeTimestamp.allocationSize(value.`updatedAt`) +
             FfiConverterMapStringTypeUserMeta.allocationSize(value.`actors`) +
             FfiConverterMapTypeUuidTypeFacetKey.allocationSize(value.`facetUuids`) +
             FfiConverterMapTypeFacetKeyTypeFacetMeta.allocationSize(value.`facets`)
-        )
+    )
 
     override fun write(value: Dmeta, buf: ByteBuffer) {
-        FfiConverterString.write(value.`id`, buf)
-        FfiConverterTypeTimestamp.write(value.`createdAt`, buf)
-        FfiConverterSequenceTypeTimestamp.write(value.`updatedAt`, buf)
-        FfiConverterMapStringTypeUserMeta.write(value.`actors`, buf)
-        FfiConverterMapTypeUuidTypeFacetKey.write(value.`facetUuids`, buf)
-        FfiConverterMapTypeFacetKeyTypeFacetMeta.write(value.`facets`, buf)
+            FfiConverterString.write(value.`id`, buf)
+            FfiConverterTypeTimestamp.write(value.`createdAt`, buf)
+            FfiConverterSequenceTypeTimestamp.write(value.`updatedAt`, buf)
+            FfiConverterMapStringTypeUserMeta.write(value.`actors`, buf)
+            FfiConverterMapTypeUuidTypeFacetKey.write(value.`facetUuids`, buf)
+            FfiConverterMapTypeFacetKeyTypeFacetMeta.write(value.`facets`, buf)
     }
 }
 
-data class Doc(var `id`: kotlin.String, var `facets`: Map<FacetKey, Json>) {
 
+
+data class Doc (
+    var `id`: kotlin.String
+    , 
+    var `facets`: Map<FacetKey, Json>
+    
+){
+    
+
+    
+
+    
     companion object
 }
 
 /**
  * @suppress
  */
-public object FfiConverterTypeDoc : FfiConverterRustBuffer<Doc> {
-    override fun read(buf: ByteBuffer): Doc = Doc(
-        FfiConverterString.read(buf),
-        FfiConverterMapTypeFacetKeyTypeJson.read(buf),
-    )
+public object FfiConverterTypeDoc: FfiConverterRustBuffer<Doc> {
+    override fun read(buf: ByteBuffer): Doc {
+        return Doc(
+            FfiConverterString.read(buf),
+            FfiConverterMapTypeFacetKeyTypeJson.read(buf),
+        )
+    }
 
     override fun allocationSize(value: Doc) = (
-        FfiConverterString.allocationSize(value.`id`) +
+            FfiConverterString.allocationSize(value.`id`) +
             FfiConverterMapTypeFacetKeyTypeJson.allocationSize(value.`facets`)
-        )
+    )
 
     override fun write(value: Doc, buf: ByteBuffer) {
-        FfiConverterString.write(value.`id`, buf)
-        FfiConverterMapTypeFacetKeyTypeJson.write(value.`facets`, buf)
+            FfiConverterString.write(value.`id`, buf)
+            FfiConverterMapTypeFacetKeyTypeJson.write(value.`facets`, buf)
     }
 }
 
-data class DocAddedEvent(var `id`: kotlin.String, var `heads`: List<kotlin.String>) {
 
+
+data class DocAddedEvent (
+    var `id`: kotlin.String
+    , 
+    var `heads`: List<kotlin.String>
+    
+){
+    
+
+    
+
+    
     companion object
 }
 
 /**
  * @suppress
  */
-public object FfiConverterTypeDocAddedEvent : FfiConverterRustBuffer<DocAddedEvent> {
-    override fun read(buf: ByteBuffer): DocAddedEvent = DocAddedEvent(
-        FfiConverterString.read(buf),
-        FfiConverterSequenceString.read(buf),
-    )
+public object FfiConverterTypeDocAddedEvent: FfiConverterRustBuffer<DocAddedEvent> {
+    override fun read(buf: ByteBuffer): DocAddedEvent {
+        return DocAddedEvent(
+            FfiConverterString.read(buf),
+            FfiConverterSequenceString.read(buf),
+        )
+    }
 
     override fun allocationSize(value: DocAddedEvent) = (
-        FfiConverterString.allocationSize(value.`id`) +
+            FfiConverterString.allocationSize(value.`id`) +
             FfiConverterSequenceString.allocationSize(value.`heads`)
-        )
+    )
 
     override fun write(value: DocAddedEvent, buf: ByteBuffer) {
-        FfiConverterString.write(value.`id`, buf)
-        FfiConverterSequenceString.write(value.`heads`, buf)
+            FfiConverterString.write(value.`id`, buf)
+            FfiConverterSequenceString.write(value.`heads`, buf)
     }
 }
 
-data class DocPatch(
-    var `id`: kotlin.String,
+
+
+data class DocPatch (
+    var `id`: kotlin.String
+    , 
     /**
      * facets to set (insert or update)
      */
-    var `facetsSet`: Map<FacetKey, Json>,
+    var `facetsSet`: Map<FacetKey, Json>
+    , 
     /**
      * facets to remove (by key)
      */
-    var `facetsRemove`: List<FacetKey>,
+    var `facetsRemove`: List<FacetKey>
+    , 
     /**
      * Optional user path for recording in drawer
      */
-    var `userPath`: Utf8PathBuf?,
+    var `userPath`: Utf8PathBuf?
+    
+){
+    
 
-) {
+    
 
+    
     companion object
 }
 
 /**
  * @suppress
  */
-public object FfiConverterTypeDocPatch : FfiConverterRustBuffer<DocPatch> {
-    override fun read(buf: ByteBuffer): DocPatch = DocPatch(
-        FfiConverterString.read(buf),
-        FfiConverterMapTypeFacetKeyTypeJson.read(buf),
-        FfiConverterSequenceTypeFacetKey.read(buf),
-        FfiConverterOptionalTypeUtf8PathBuf.read(buf),
-    )
+public object FfiConverterTypeDocPatch: FfiConverterRustBuffer<DocPatch> {
+    override fun read(buf: ByteBuffer): DocPatch {
+        return DocPatch(
+            FfiConverterString.read(buf),
+            FfiConverterMapTypeFacetKeyTypeJson.read(buf),
+            FfiConverterSequenceTypeFacetKey.read(buf),
+            FfiConverterOptionalTypeUtf8PathBuf.read(buf),
+        )
+    }
 
     override fun allocationSize(value: DocPatch) = (
-        FfiConverterString.allocationSize(value.`id`) +
+            FfiConverterString.allocationSize(value.`id`) +
             FfiConverterMapTypeFacetKeyTypeJson.allocationSize(value.`facetsSet`) +
             FfiConverterSequenceTypeFacetKey.allocationSize(value.`facetsRemove`) +
             FfiConverterOptionalTypeUtf8PathBuf.allocationSize(value.`userPath`)
-        )
+    )
 
     override fun write(value: DocPatch, buf: ByteBuffer) {
-        FfiConverterString.write(value.`id`, buf)
-        FfiConverterMapTypeFacetKeyTypeJson.write(value.`facetsSet`, buf)
-        FfiConverterSequenceTypeFacetKey.write(value.`facetsRemove`, buf)
-        FfiConverterOptionalTypeUtf8PathBuf.write(value.`userPath`, buf)
+            FfiConverterString.write(value.`id`, buf)
+            FfiConverterMapTypeFacetKeyTypeJson.write(value.`facetsSet`, buf)
+            FfiConverterSequenceTypeFacetKey.write(value.`facetsRemove`, buf)
+            FfiConverterOptionalTypeUtf8PathBuf.write(value.`userPath`, buf)
     }
 }
 
-data class Embedding(
-    var `facetRef`: Url,
-    var `refHeads`: ChangeHashSet,
-    var `modelTag`: kotlin.String,
+
+
+data class Embedding (
+    var `facetRef`: Url
+    , 
+    var `refHeads`: ChangeHashSet
+    , 
+    var `modelTag`: kotlin.String
+    , 
     /**
      * little-endian
      * check that this does translate to bytes
      */
-    var `vector`: kotlin.ByteArray,
-    var `dim`: kotlin.UInt,
-    var `dtype`: EmbeddingDtype,
+    var `vector`: kotlin.ByteArray
+    , 
+    var `dim`: kotlin.UInt
+    , 
+    var `dtype`: EmbeddingDtype
+    , 
     /**
      * method tag
      */
-    var `compression`: EmbeddingCompression?,
+    var `compression`: EmbeddingCompression?
+    
+){
+    
 
-) {
+    
 
+    
     companion object
 }
 
 /**
  * @suppress
  */
-public object FfiConverterTypeEmbedding : FfiConverterRustBuffer<Embedding> {
-    override fun read(buf: ByteBuffer): Embedding = Embedding(
-        FfiConverterTypeUrl.read(buf),
-        FfiConverterTypeChangeHashSet.read(buf),
-        FfiConverterString.read(buf),
-        FfiConverterByteArray.read(buf),
-        FfiConverterUInt.read(buf),
-        FfiConverterTypeEmbeddingDtype.read(buf),
-        FfiConverterOptionalTypeEmbeddingCompression.read(buf),
-    )
+public object FfiConverterTypeEmbedding: FfiConverterRustBuffer<Embedding> {
+    override fun read(buf: ByteBuffer): Embedding {
+        return Embedding(
+            FfiConverterTypeUrl.read(buf),
+            FfiConverterTypeChangeHashSet.read(buf),
+            FfiConverterString.read(buf),
+            FfiConverterByteArray.read(buf),
+            FfiConverterUInt.read(buf),
+            FfiConverterTypeEmbeddingDtype.read(buf),
+            FfiConverterOptionalTypeEmbeddingCompression.read(buf),
+        )
+    }
 
     override fun allocationSize(value: Embedding) = (
-        FfiConverterTypeUrl.allocationSize(value.`facetRef`) +
+            FfiConverterTypeUrl.allocationSize(value.`facetRef`) +
             FfiConverterTypeChangeHashSet.allocationSize(value.`refHeads`) +
             FfiConverterString.allocationSize(value.`modelTag`) +
             FfiConverterByteArray.allocationSize(value.`vector`) +
             FfiConverterUInt.allocationSize(value.`dim`) +
             FfiConverterTypeEmbeddingDtype.allocationSize(value.`dtype`) +
             FfiConverterOptionalTypeEmbeddingCompression.allocationSize(value.`compression`)
-        )
+    )
 
     override fun write(value: Embedding, buf: ByteBuffer) {
-        FfiConverterTypeUrl.write(value.`facetRef`, buf)
-        FfiConverterTypeChangeHashSet.write(value.`refHeads`, buf)
-        FfiConverterString.write(value.`modelTag`, buf)
-        FfiConverterByteArray.write(value.`vector`, buf)
-        FfiConverterUInt.write(value.`dim`, buf)
-        FfiConverterTypeEmbeddingDtype.write(value.`dtype`, buf)
-        FfiConverterOptionalTypeEmbeddingCompression.write(value.`compression`, buf)
+            FfiConverterTypeUrl.write(value.`facetRef`, buf)
+            FfiConverterTypeChangeHashSet.write(value.`refHeads`, buf)
+            FfiConverterString.write(value.`modelTag`, buf)
+            FfiConverterByteArray.write(value.`vector`, buf)
+            FfiConverterUInt.write(value.`dim`, buf)
+            FfiConverterTypeEmbeddingDtype.write(value.`dtype`, buf)
+            FfiConverterOptionalTypeEmbeddingCompression.write(value.`compression`, buf)
     }
 }
 
-data class FacetDisplayHint(
-    var `alwaysVisible`: kotlin.Boolean,
-    var `displayTitle`: kotlin.String?,
-    var `deets`: FacetKeyDisplayDeets,
 
-) {
 
+data class FacetDisplayHint (
+    var `alwaysVisible`: kotlin.Boolean
+    , 
+    var `displayTitle`: kotlin.String?
+    , 
+    var `deets`: FacetKeyDisplayDeets
+    
+){
+    
+
+    
+
+    
     companion object
 }
 
 /**
  * @suppress
  */
-public object FfiConverterTypeFacetDisplayHint : FfiConverterRustBuffer<FacetDisplayHint> {
-    override fun read(buf: ByteBuffer): FacetDisplayHint = FacetDisplayHint(
-        FfiConverterBoolean.read(buf),
-        FfiConverterOptionalString.read(buf),
-        FfiConverterTypeFacetKeyDisplayDeets.read(buf),
-    )
+public object FfiConverterTypeFacetDisplayHint: FfiConverterRustBuffer<FacetDisplayHint> {
+    override fun read(buf: ByteBuffer): FacetDisplayHint {
+        return FacetDisplayHint(
+            FfiConverterBoolean.read(buf),
+            FfiConverterOptionalString.read(buf),
+            FfiConverterTypeFacetKeyDisplayDeets.read(buf),
+        )
+    }
 
     override fun allocationSize(value: FacetDisplayHint) = (
-        FfiConverterBoolean.allocationSize(value.`alwaysVisible`) +
+            FfiConverterBoolean.allocationSize(value.`alwaysVisible`) +
             FfiConverterOptionalString.allocationSize(value.`displayTitle`) +
             FfiConverterTypeFacetKeyDisplayDeets.allocationSize(value.`deets`)
-        )
+    )
 
     override fun write(value: FacetDisplayHint, buf: ByteBuffer) {
-        FfiConverterBoolean.write(value.`alwaysVisible`, buf)
-        FfiConverterOptionalString.write(value.`displayTitle`, buf)
-        FfiConverterTypeFacetKeyDisplayDeets.write(value.`deets`, buf)
+            FfiConverterBoolean.write(value.`alwaysVisible`, buf)
+            FfiConverterOptionalString.write(value.`displayTitle`, buf)
+            FfiConverterTypeFacetKeyDisplayDeets.write(value.`deets`, buf)
     }
 }
 
-data class FacetKey(var `tag`: FacetTag, var `id`: kotlin.String) {
 
+
+data class FacetKey (
+    var `tag`: FacetTag
+    , 
+    var `id`: kotlin.String
+    
+){
+    
+
+    
+
+    
     companion object
 }
 
 /**
  * @suppress
  */
-public object FfiConverterTypeFacetKey : FfiConverterRustBuffer<FacetKey> {
-    override fun read(buf: ByteBuffer): FacetKey = FacetKey(
-        FfiConverterTypeFacetTag.read(buf),
-        FfiConverterString.read(buf),
-    )
+public object FfiConverterTypeFacetKey: FfiConverterRustBuffer<FacetKey> {
+    override fun read(buf: ByteBuffer): FacetKey {
+        return FacetKey(
+            FfiConverterTypeFacetTag.read(buf),
+            FfiConverterString.read(buf),
+        )
+    }
 
     override fun allocationSize(value: FacetKey) = (
-        FfiConverterTypeFacetTag.allocationSize(value.`tag`) +
+            FfiConverterTypeFacetTag.allocationSize(value.`tag`) +
             FfiConverterString.allocationSize(value.`id`)
-        )
+    )
 
     override fun write(value: FacetKey, buf: ByteBuffer) {
-        FfiConverterTypeFacetTag.write(value.`tag`, buf)
-        FfiConverterString.write(value.`id`, buf)
+            FfiConverterTypeFacetTag.write(value.`tag`, buf)
+            FfiConverterString.write(value.`id`, buf)
     }
 }
 
-data class FacetMeta(
-    var `createdAt`: Timestamp,
-    var `uuid`: List<Uuid>,
-    var `updatedAt`: List<Timestamp>,
-    var `deletedAt`: List<Timestamp>,
 
-) {
 
+data class FacetMeta (
+    var `createdAt`: Timestamp
+    , 
+    var `uuid`: List<Uuid>
+    , 
+    var `updatedAt`: List<Timestamp>
+    , 
+    var `deletedAt`: List<Timestamp>
+    
+){
+    
+
+    
+
+    
     companion object
 }
 
 /**
  * @suppress
  */
-public object FfiConverterTypeFacetMeta : FfiConverterRustBuffer<FacetMeta> {
-    override fun read(buf: ByteBuffer): FacetMeta = FacetMeta(
-        FfiConverterTypeTimestamp.read(buf),
-        FfiConverterSequenceTypeUuid.read(buf),
-        FfiConverterSequenceTypeTimestamp.read(buf),
-        FfiConverterSequenceTypeTimestamp.read(buf),
-    )
+public object FfiConverterTypeFacetMeta: FfiConverterRustBuffer<FacetMeta> {
+    override fun read(buf: ByteBuffer): FacetMeta {
+        return FacetMeta(
+            FfiConverterTypeTimestamp.read(buf),
+            FfiConverterSequenceTypeUuid.read(buf),
+            FfiConverterSequenceTypeTimestamp.read(buf),
+            FfiConverterSequenceTypeTimestamp.read(buf),
+        )
+    }
 
     override fun allocationSize(value: FacetMeta) = (
-        FfiConverterTypeTimestamp.allocationSize(value.`createdAt`) +
+            FfiConverterTypeTimestamp.allocationSize(value.`createdAt`) +
             FfiConverterSequenceTypeUuid.allocationSize(value.`uuid`) +
             FfiConverterSequenceTypeTimestamp.allocationSize(value.`updatedAt`) +
             FfiConverterSequenceTypeTimestamp.allocationSize(value.`deletedAt`)
-        )
+    )
 
     override fun write(value: FacetMeta, buf: ByteBuffer) {
-        FfiConverterTypeTimestamp.write(value.`createdAt`, buf)
-        FfiConverterSequenceTypeUuid.write(value.`uuid`, buf)
-        FfiConverterSequenceTypeTimestamp.write(value.`updatedAt`, buf)
-        FfiConverterSequenceTypeTimestamp.write(value.`deletedAt`, buf)
+            FfiConverterTypeTimestamp.write(value.`createdAt`, buf)
+            FfiConverterSequenceTypeUuid.write(value.`uuid`, buf)
+            FfiConverterSequenceTypeTimestamp.write(value.`updatedAt`, buf)
+            FfiConverterSequenceTypeTimestamp.write(value.`deletedAt`, buf)
     }
 }
 
-data class FacetRef(var `ref`: Url, var `heads`: List<kotlin.String>) {
 
+
+data class FacetRef (
+    var `ref`: Url
+    , 
+    var `heads`: List<kotlin.String>
+    
+){
+    
+
+    
+
+    
     companion object
 }
 
 /**
  * @suppress
  */
-public object FfiConverterTypeFacetRef : FfiConverterRustBuffer<FacetRef> {
-    override fun read(buf: ByteBuffer): FacetRef = FacetRef(
-        FfiConverterTypeUrl.read(buf),
-        FfiConverterSequenceString.read(buf),
-    )
+public object FfiConverterTypeFacetRef: FfiConverterRustBuffer<FacetRef> {
+    override fun read(buf: ByteBuffer): FacetRef {
+        return FacetRef(
+            FfiConverterTypeUrl.read(buf),
+            FfiConverterSequenceString.read(buf),
+        )
+    }
 
     override fun allocationSize(value: FacetRef) = (
-        FfiConverterTypeUrl.allocationSize(value.`ref`) +
+            FfiConverterTypeUrl.allocationSize(value.`ref`) +
             FfiConverterSequenceString.allocationSize(value.`heads`)
-        )
+    )
 
     override fun write(value: FacetRef, buf: ByteBuffer) {
-        FfiConverterTypeUrl.write(value.`ref`, buf)
-        FfiConverterSequenceString.write(value.`heads`, buf)
+            FfiConverterTypeUrl.write(value.`ref`, buf)
+            FfiConverterSequenceString.write(value.`heads`, buf)
     }
 }
 
+
+
 @Serializable
-data class ImageMetadata(
-    var `facetRef`: Url,
-    var `refHeads`: ChangeHashSet,
-    var `mime`: kotlin.String,
-    var `widthPx`: kotlin.ULong,
-    var `heightPx`: kotlin.ULong,
+data class ImageMetadata (
+    var `facetRef`: Url
+    , 
+    var `refHeads`: ChangeHashSet
+    , 
+    var `mime`: kotlin.String
+    , 
+    var `widthPx`: kotlin.ULong
+    , 
+    var `heightPx`: kotlin.ULong
+    
+){
+    
 
-) {
+    
 
+    
     companion object
 }
 
 /**
  * @suppress
  */
-public object FfiConverterTypeImageMetadata : FfiConverterRustBuffer<ImageMetadata> {
-    override fun read(buf: ByteBuffer): ImageMetadata = ImageMetadata(
-        FfiConverterTypeUrl.read(buf),
-        FfiConverterTypeChangeHashSet.read(buf),
-        FfiConverterString.read(buf),
-        FfiConverterULong.read(buf),
-        FfiConverterULong.read(buf),
-    )
+public object FfiConverterTypeImageMetadata: FfiConverterRustBuffer<ImageMetadata> {
+    override fun read(buf: ByteBuffer): ImageMetadata {
+        return ImageMetadata(
+            FfiConverterTypeUrl.read(buf),
+            FfiConverterTypeChangeHashSet.read(buf),
+            FfiConverterString.read(buf),
+            FfiConverterULong.read(buf),
+            FfiConverterULong.read(buf),
+        )
+    }
 
     override fun allocationSize(value: ImageMetadata) = (
-        FfiConverterTypeUrl.allocationSize(value.`facetRef`) +
+            FfiConverterTypeUrl.allocationSize(value.`facetRef`) +
             FfiConverterTypeChangeHashSet.allocationSize(value.`refHeads`) +
             FfiConverterString.allocationSize(value.`mime`) +
             FfiConverterULong.allocationSize(value.`widthPx`) +
             FfiConverterULong.allocationSize(value.`heightPx`)
-        )
+    )
 
     override fun write(value: ImageMetadata, buf: ByteBuffer) {
-        FfiConverterTypeUrl.write(value.`facetRef`, buf)
-        FfiConverterTypeChangeHashSet.write(value.`refHeads`, buf)
-        FfiConverterString.write(value.`mime`, buf)
-        FfiConverterULong.write(value.`widthPx`, buf)
-        FfiConverterULong.write(value.`heightPx`, buf)
+            FfiConverterTypeUrl.write(value.`facetRef`, buf)
+            FfiConverterTypeChangeHashSet.write(value.`refHeads`, buf)
+            FfiConverterString.write(value.`mime`, buf)
+            FfiConverterULong.write(value.`widthPx`, buf)
+            FfiConverterULong.write(value.`heightPx`, buf)
     }
 }
+
+
 
 @Serializable
-data class Note(var `mime`: kotlin.String, var `content`: kotlin.String) {
+data class Note (
+    var `mime`: kotlin.String
+    , 
+    var `content`: kotlin.String
+    
+){
+    
 
+    
+
+    
     companion object
 }
 
 /**
  * @suppress
  */
-public object FfiConverterTypeNote : FfiConverterRustBuffer<Note> {
-    override fun read(buf: ByteBuffer): Note = Note(
-        FfiConverterString.read(buf),
-        FfiConverterString.read(buf),
-    )
+public object FfiConverterTypeNote: FfiConverterRustBuffer<Note> {
+    override fun read(buf: ByteBuffer): Note {
+        return Note(
+            FfiConverterString.read(buf),
+            FfiConverterString.read(buf),
+        )
+    }
 
     override fun allocationSize(value: Note) = (
-        FfiConverterString.allocationSize(value.`mime`) +
+            FfiConverterString.allocationSize(value.`mime`) +
             FfiConverterString.allocationSize(value.`content`)
-        )
+    )
 
     override fun write(value: Note, buf: ByteBuffer) {
-        FfiConverterString.write(value.`mime`, buf)
-        FfiConverterString.write(value.`content`, buf)
+            FfiConverterString.write(value.`mime`, buf)
+            FfiConverterString.write(value.`content`, buf)
     }
 }
 
-data class OcrResult(
-    var `facetRef`: Url,
-    var `refHeads`: ChangeHashSet,
-    var `modelTag`: kotlin.String,
-    var `text`: kotlin.String,
-    var `textRegions`: List<OcrTextRegion>?,
 
-) {
 
+data class OcrResult (
+    var `facetRef`: Url
+    , 
+    var `refHeads`: ChangeHashSet
+    , 
+    var `modelTag`: kotlin.String
+    , 
+    var `text`: kotlin.String
+    , 
+    var `textRegions`: List<OcrTextRegion>?
+    
+){
+    
+
+    
+
+    
     companion object
 }
 
 /**
  * @suppress
  */
-public object FfiConverterTypeOcrResult : FfiConverterRustBuffer<OcrResult> {
-    override fun read(buf: ByteBuffer): OcrResult = OcrResult(
-        FfiConverterTypeUrl.read(buf),
-        FfiConverterTypeChangeHashSet.read(buf),
-        FfiConverterString.read(buf),
-        FfiConverterString.read(buf),
-        FfiConverterOptionalSequenceTypeOcrTextRegion.read(buf),
-    )
+public object FfiConverterTypeOcrResult: FfiConverterRustBuffer<OcrResult> {
+    override fun read(buf: ByteBuffer): OcrResult {
+        return OcrResult(
+            FfiConverterTypeUrl.read(buf),
+            FfiConverterTypeChangeHashSet.read(buf),
+            FfiConverterString.read(buf),
+            FfiConverterString.read(buf),
+            FfiConverterOptionalSequenceTypeOcrTextRegion.read(buf),
+        )
+    }
 
     override fun allocationSize(value: OcrResult) = (
-        FfiConverterTypeUrl.allocationSize(value.`facetRef`) +
+            FfiConverterTypeUrl.allocationSize(value.`facetRef`) +
             FfiConverterTypeChangeHashSet.allocationSize(value.`refHeads`) +
             FfiConverterString.allocationSize(value.`modelTag`) +
             FfiConverterString.allocationSize(value.`text`) +
             FfiConverterOptionalSequenceTypeOcrTextRegion.allocationSize(value.`textRegions`)
-        )
+    )
 
     override fun write(value: OcrResult, buf: ByteBuffer) {
-        FfiConverterTypeUrl.write(value.`facetRef`, buf)
-        FfiConverterTypeChangeHashSet.write(value.`refHeads`, buf)
-        FfiConverterString.write(value.`modelTag`, buf)
-        FfiConverterString.write(value.`text`, buf)
-        FfiConverterOptionalSequenceTypeOcrTextRegion.write(value.`textRegions`, buf)
+            FfiConverterTypeUrl.write(value.`facetRef`, buf)
+            FfiConverterTypeChangeHashSet.write(value.`refHeads`, buf)
+            FfiConverterString.write(value.`modelTag`, buf)
+            FfiConverterString.write(value.`text`, buf)
+            FfiConverterOptionalSequenceTypeOcrTextRegion.write(value.`textRegions`, buf)
     }
 }
 
-data class OcrTextRegion(
+
+
+data class OcrTextRegion (
     /**
      * Clockwise
      */
-    var `boundingBox`: List<Point>,
-    var `text`: kotlin.String?,
+    var `boundingBox`: List<Point>
+    , 
+    var `text`: kotlin.String?
+    , 
     /**
      * Normalized to 0-1
      */
-    var `confidenceScore`: kotlin.Float?,
+    var `confidenceScore`: kotlin.Float?
+    
+){
+    
 
-) {
+    
 
+    
     companion object
 }
 
 /**
  * @suppress
  */
-public object FfiConverterTypeOcrTextRegion : FfiConverterRustBuffer<OcrTextRegion> {
-    override fun read(buf: ByteBuffer): OcrTextRegion = OcrTextRegion(
-        FfiConverterSequenceTypePoint.read(buf),
-        FfiConverterOptionalString.read(buf),
-        FfiConverterOptionalFloat.read(buf),
-    )
+public object FfiConverterTypeOcrTextRegion: FfiConverterRustBuffer<OcrTextRegion> {
+    override fun read(buf: ByteBuffer): OcrTextRegion {
+        return OcrTextRegion(
+            FfiConverterSequenceTypePoint.read(buf),
+            FfiConverterOptionalString.read(buf),
+            FfiConverterOptionalFloat.read(buf),
+        )
+    }
 
     override fun allocationSize(value: OcrTextRegion) = (
-        FfiConverterSequenceTypePoint.allocationSize(value.`boundingBox`) +
+            FfiConverterSequenceTypePoint.allocationSize(value.`boundingBox`) +
             FfiConverterOptionalString.allocationSize(value.`text`) +
             FfiConverterOptionalFloat.allocationSize(value.`confidenceScore`)
-        )
+    )
 
     override fun write(value: OcrTextRegion, buf: ByteBuffer) {
-        FfiConverterSequenceTypePoint.write(value.`boundingBox`, buf)
-        FfiConverterOptionalString.write(value.`text`, buf)
-        FfiConverterOptionalFloat.write(value.`confidenceScore`, buf)
+            FfiConverterSequenceTypePoint.write(value.`boundingBox`, buf)
+            FfiConverterOptionalString.write(value.`text`, buf)
+            FfiConverterOptionalFloat.write(value.`confidenceScore`, buf)
     }
 }
 
-data class Pending(var `key`: FacetKey) {
 
+
+data class Pending (
+    var `key`: FacetKey
+    
+){
+    
+
+    
+
+    
     companion object
 }
 
 /**
  * @suppress
  */
-public object FfiConverterTypePending : FfiConverterRustBuffer<Pending> {
-    override fun read(buf: ByteBuffer): Pending = Pending(
-        FfiConverterTypeFacetKey.read(buf),
-    )
+public object FfiConverterTypePending: FfiConverterRustBuffer<Pending> {
+    override fun read(buf: ByteBuffer): Pending {
+        return Pending(
+            FfiConverterTypeFacetKey.read(buf),
+        )
+    }
 
     override fun allocationSize(value: Pending) = (
-        FfiConverterTypeFacetKey.allocationSize(value.`key`)
-        )
+            FfiConverterTypeFacetKey.allocationSize(value.`key`)
+    )
 
     override fun write(value: Pending, buf: ByteBuffer) {
-        FfiConverterTypeFacetKey.write(value.`key`, buf)
+            FfiConverterTypeFacetKey.write(value.`key`, buf)
     }
 }
 
-data class Point(var `x`: kotlin.Float, var `y`: kotlin.Float) {
 
+
+data class Point (
+    var `x`: kotlin.Float
+    , 
+    var `y`: kotlin.Float
+    
+){
+    
+
+    
+
+    
     companion object
 }
 
 /**
  * @suppress
  */
-public object FfiConverterTypePoint : FfiConverterRustBuffer<Point> {
-    override fun read(buf: ByteBuffer): Point = Point(
-        FfiConverterFloat.read(buf),
-        FfiConverterFloat.read(buf),
-    )
+public object FfiConverterTypePoint: FfiConverterRustBuffer<Point> {
+    override fun read(buf: ByteBuffer): Point {
+        return Point(
+            FfiConverterFloat.read(buf),
+            FfiConverterFloat.read(buf),
+        )
+    }
 
     override fun allocationSize(value: Point) = (
-        FfiConverterFloat.allocationSize(value.`x`) +
+            FfiConverterFloat.allocationSize(value.`x`) +
             FfiConverterFloat.allocationSize(value.`y`)
-        )
+    )
 
     override fun write(value: Point, buf: ByteBuffer) {
-        FfiConverterFloat.write(value.`x`, buf)
-        FfiConverterFloat.write(value.`y`, buf)
+            FfiConverterFloat.write(value.`x`, buf)
+            FfiConverterFloat.write(value.`y`, buf)
     }
 }
 
-data class UserMeta(var `userPath`: Utf8PathBuf) {
 
+
+data class UserMeta (
+    var `userPath`: Utf8PathBuf
+    
+){
+    
+
+    
+
+    
     companion object
 }
 
 /**
  * @suppress
  */
-public object FfiConverterTypeUserMeta : FfiConverterRustBuffer<UserMeta> {
-    override fun read(buf: ByteBuffer): UserMeta = UserMeta(
-        FfiConverterTypeUtf8PathBuf.read(buf),
-    )
+public object FfiConverterTypeUserMeta: FfiConverterRustBuffer<UserMeta> {
+    override fun read(buf: ByteBuffer): UserMeta {
+        return UserMeta(
+            FfiConverterTypeUtf8PathBuf.read(buf),
+        )
+    }
 
     override fun allocationSize(value: UserMeta) = (
-        FfiConverterTypeUtf8PathBuf.allocationSize(value.`userPath`)
-        )
+            FfiConverterTypeUtf8PathBuf.allocationSize(value.`userPath`)
+    )
 
     override fun write(value: UserMeta, buf: ByteBuffer) {
-        FfiConverterTypeUtf8PathBuf.write(value.`userPath`, buf)
+            FfiConverterTypeUtf8PathBuf.write(value.`userPath`, buf)
     }
 }
 
-enum class DateTimeFacetDisplayType {
 
+
+
+enum class DateTimeFacetDisplayType {
+    
     TIME_AND_DATE,
     RELATIVE,
     TIME_ONLY,
-    DATE_ONLY,
-    ;
+    DATE_ONLY;
+
+    
+
 
     companion object
 }
 
+
 /**
  * @suppress
  */
-public object FfiConverterTypeDateTimeFacetDisplayType : FfiConverterRustBuffer<DateTimeFacetDisplayType> {
+public object FfiConverterTypeDateTimeFacetDisplayType: FfiConverterRustBuffer<DateTimeFacetDisplayType> {
     override fun read(buf: ByteBuffer) = try {
         DateTimeFacetDisplayType.values()[buf.getInt() - 1]
     } catch (e: IndexOutOfBoundsException) {
@@ -1727,19 +1950,26 @@ public object FfiConverterTypeDateTimeFacetDisplayType : FfiConverterRustBuffer<
     }
 }
 
+
+
+
+
+
 enum class EmbeddingCompression {
+    
+    ZSTD;
 
-    ZSTD,
+    
 
-    ;
 
     companion object
 }
 
+
 /**
  * @suppress
  */
-public object FfiConverterTypeEmbeddingCompression : FfiConverterRustBuffer<EmbeddingCompression> {
+public object FfiConverterTypeEmbeddingCompression: FfiConverterRustBuffer<EmbeddingCompression> {
     override fun read(buf: ByteBuffer) = try {
         EmbeddingCompression.values()[buf.getInt() - 1]
     } catch (e: IndexOutOfBoundsException) {
@@ -1753,21 +1983,29 @@ public object FfiConverterTypeEmbeddingCompression : FfiConverterRustBuffer<Embe
     }
 }
 
-enum class EmbeddingDtype {
 
+
+
+
+
+enum class EmbeddingDtype {
+    
     F32,
     F16,
     I8,
-    BINARY,
-    ;
+    BINARY;
+
+    
+
 
     companion object
 }
 
+
 /**
  * @suppress
  */
-public object FfiConverterTypeEmbeddingDtype : FfiConverterRustBuffer<EmbeddingDtype> {
+public object FfiConverterTypeEmbeddingDtype: FfiConverterRustBuffer<EmbeddingDtype> {
     override fun read(buf: ByteBuffer) = try {
         EmbeddingDtype.values()[buf.getInt() - 1]
     } catch (e: IndexOutOfBoundsException) {
@@ -1781,22 +2019,42 @@ public object FfiConverterTypeEmbeddingDtype : FfiConverterRustBuffer<EmbeddingD
     }
 }
 
+
+
+
+
 sealed class FacetKeyDisplayDeets {
-
+    
     object DebugPrint : FacetKeyDisplayDeets()
-
-    data class DateTime(val `displayType`: org.example.daybook.uniffi.types.DateTimeFacetDisplayType) :
-        FacetKeyDisplayDeets() {
+    
+    
+    data class DateTime(
+        val `displayType`: org.example.daybook.uniffi.types.DateTimeFacetDisplayType) : FacetKeyDisplayDeets()
+        
+    {
+        
 
         companion object
     }
-
+    
     object UnixPath : FacetKeyDisplayDeets()
-
-    data class Title(val `showEditor`: kotlin.Boolean) : FacetKeyDisplayDeets() {
+    
+    
+    data class Title(
+        val `showEditor`: kotlin.Boolean) : FacetKeyDisplayDeets()
+        
+    {
+        
 
         companion object
     }
+    
+
+    
+
+    
+    
+
 
     companion object
 }
@@ -1804,73 +2062,65 @@ sealed class FacetKeyDisplayDeets {
 /**
  * @suppress
  */
-public object FfiConverterTypeFacetKeyDisplayDeets : FfiConverterRustBuffer<FacetKeyDisplayDeets> {
-    override fun read(buf: ByteBuffer): FacetKeyDisplayDeets = when (buf.getInt()) {
-        1 -> FacetKeyDisplayDeets.DebugPrint
-
-        2 -> FacetKeyDisplayDeets.DateTime(
-            FfiConverterTypeDateTimeFacetDisplayType.read(buf),
-        )
-
-        3 -> FacetKeyDisplayDeets.UnixPath
-
-        4 -> FacetKeyDisplayDeets.Title(
-            FfiConverterBoolean.read(buf),
-        )
-
-        else -> throw RuntimeException("invalid enum value, something is very wrong!!")
+public object FfiConverterTypeFacetKeyDisplayDeets : FfiConverterRustBuffer<FacetKeyDisplayDeets>{
+    override fun read(buf: ByteBuffer): FacetKeyDisplayDeets {
+        return when(buf.getInt()) {
+            1 -> FacetKeyDisplayDeets.DebugPrint
+            2 -> FacetKeyDisplayDeets.DateTime(
+                FfiConverterTypeDateTimeFacetDisplayType.read(buf),
+                )
+            3 -> FacetKeyDisplayDeets.UnixPath
+            4 -> FacetKeyDisplayDeets.Title(
+                FfiConverterBoolean.read(buf),
+                )
+            else -> throw RuntimeException("invalid enum value, something is very wrong!!")
+        }
     }
 
-    override fun allocationSize(value: FacetKeyDisplayDeets) = when (value) {
+    override fun allocationSize(value: FacetKeyDisplayDeets) = when(value) {
         is FacetKeyDisplayDeets.DebugPrint -> {
             // Add the size for the Int that specifies the variant plus the size needed for all fields
             (
                 4UL
-                )
+            )
         }
-
         is FacetKeyDisplayDeets.DateTime -> {
             // Add the size for the Int that specifies the variant plus the size needed for all fields
             (
-                4UL +
-                    FfiConverterTypeDateTimeFacetDisplayType.allocationSize(value.`displayType`)
-                )
+                4UL
+                + FfiConverterTypeDateTimeFacetDisplayType.allocationSize(value.`displayType`)
+            )
         }
-
         is FacetKeyDisplayDeets.UnixPath -> {
             // Add the size for the Int that specifies the variant plus the size needed for all fields
             (
                 4UL
-                )
+            )
         }
-
         is FacetKeyDisplayDeets.Title -> {
             // Add the size for the Int that specifies the variant plus the size needed for all fields
             (
-                4UL +
-                    FfiConverterBoolean.allocationSize(value.`showEditor`)
-                )
+                4UL
+                + FfiConverterBoolean.allocationSize(value.`showEditor`)
+            )
         }
     }
 
     override fun write(value: FacetKeyDisplayDeets, buf: ByteBuffer) {
-        when (value) {
+        when(value) {
             is FacetKeyDisplayDeets.DebugPrint -> {
                 buf.putInt(1)
                 Unit
             }
-
             is FacetKeyDisplayDeets.DateTime -> {
                 buf.putInt(2)
                 FfiConverterTypeDateTimeFacetDisplayType.write(value.`displayType`, buf)
                 Unit
             }
-
             is FacetKeyDisplayDeets.UnixPath -> {
                 buf.putInt(3)
                 Unit
             }
-
             is FacetKeyDisplayDeets.Title -> {
                 buf.putInt(4)
                 FfiConverterBoolean.write(value.`showEditor`, buf)
@@ -1880,17 +2130,36 @@ public object FfiConverterTypeFacetKeyDisplayDeets : FfiConverterRustBuffer<Face
     }
 }
 
+
+
+
+
 sealed class FacetTag {
-
-    data class WellKnown(val v1: org.example.daybook.uniffi.types.WellKnownFacetTag) : FacetTag() {
+    
+    data class WellKnown(
+        val v1: org.example.daybook.uniffi.types.WellKnownFacetTag) : FacetTag()
+        
+    {
+        
 
         companion object
     }
-
-    data class Any(val v1: kotlin.String) : FacetTag() {
+    
+    data class Any(
+        val v1: kotlin.String) : FacetTag()
+        
+    {
+        
 
         companion object
     }
+    
+
+    
+
+    
+    
+
 
     companion object
 }
@@ -1898,45 +2167,43 @@ sealed class FacetTag {
 /**
  * @suppress
  */
-public object FfiConverterTypeFacetTag : FfiConverterRustBuffer<FacetTag> {
-    override fun read(buf: ByteBuffer): FacetTag = when (buf.getInt()) {
-        1 -> FacetTag.WellKnown(
-            FfiConverterTypeWellKnownFacetTag.read(buf),
-        )
-
-        2 -> FacetTag.Any(
-            FfiConverterString.read(buf),
-        )
-
-        else -> throw RuntimeException("invalid enum value, something is very wrong!!")
+public object FfiConverterTypeFacetTag : FfiConverterRustBuffer<FacetTag>{
+    override fun read(buf: ByteBuffer): FacetTag {
+        return when(buf.getInt()) {
+            1 -> FacetTag.WellKnown(
+                FfiConverterTypeWellKnownFacetTag.read(buf),
+                )
+            2 -> FacetTag.Any(
+                FfiConverterString.read(buf),
+                )
+            else -> throw RuntimeException("invalid enum value, something is very wrong!!")
+        }
     }
 
-    override fun allocationSize(value: FacetTag) = when (value) {
+    override fun allocationSize(value: FacetTag) = when(value) {
         is FacetTag.WellKnown -> {
             // Add the size for the Int that specifies the variant plus the size needed for all fields
             (
-                4UL +
-                    FfiConverterTypeWellKnownFacetTag.allocationSize(value.v1)
-                )
+                4UL
+                + FfiConverterTypeWellKnownFacetTag.allocationSize(value.v1)
+            )
         }
-
         is FacetTag.Any -> {
             // Add the size for the Int that specifies the variant plus the size needed for all fields
             (
-                4UL +
-                    FfiConverterString.allocationSize(value.v1)
-                )
+                4UL
+                + FfiConverterString.allocationSize(value.v1)
+            )
         }
     }
 
     override fun write(value: FacetTag, buf: ByteBuffer) {
-        when (value) {
+        when(value) {
             is FacetTag.WellKnown -> {
                 buf.putInt(1)
                 FfiConverterTypeWellKnownFacetTag.write(value.v1, buf)
                 Unit
             }
-
             is FacetTag.Any -> {
                 buf.putInt(2)
                 FfiConverterString.write(value.v1, buf)
@@ -1946,67 +2213,126 @@ public object FfiConverterTypeFacetTag : FfiConverterRustBuffer<FacetTag> {
     }
 }
 
+
+
+
+
 sealed class WellKnownFacet {
-
-    data class Dmeta(val v1: org.example.daybook.uniffi.types.Dmeta) : WellKnownFacet() {
-
-        companion object
-    }
-
-    data class RefGeneric(val v1: kotlin.String) : WellKnownFacet() {
-
-        companion object
-    }
-
-    data class LabelGeneric(val v1: kotlin.String) : WellKnownFacet() {
+    
+    data class Dmeta(
+        val v1: org.example.daybook.uniffi.types.Dmeta) : WellKnownFacet()
+        
+    {
+        
 
         companion object
     }
-
-    data class TitleGeneric(val v1: kotlin.String) : WellKnownFacet() {
-
-        companion object
-    }
-
-    data class PathGeneric(val v1: kotlin.String) : WellKnownFacet() {
-
-        companion object
-    }
-
-    data class Pending(val v1: org.example.daybook.uniffi.types.Pending) : WellKnownFacet() {
+    
+    data class RefGeneric(
+        val v1: kotlin.String) : WellKnownFacet()
+        
+    {
+        
 
         companion object
     }
-
-    data class Body(val v1: org.example.daybook.uniffi.types.Body) : WellKnownFacet() {
-
-        companion object
-    }
-
-    data class Note(val v1: org.example.daybook.uniffi.types.Note) : WellKnownFacet() {
-
-        companion object
-    }
-
-    data class Blob(val v1: org.example.daybook.uniffi.types.Blob) : WellKnownFacet() {
+    
+    data class LabelGeneric(
+        val v1: kotlin.String) : WellKnownFacet()
+        
+    {
+        
 
         companion object
     }
-
-    data class ImageMetadata(val v1: org.example.daybook.uniffi.types.ImageMetadata) : WellKnownFacet() {
-
-        companion object
-    }
-
-    data class OcrResult(val v1: org.example.daybook.uniffi.types.OcrResult) : WellKnownFacet() {
-
-        companion object
-    }
-
-    data class Embedding(val v1: org.example.daybook.uniffi.types.Embedding) : WellKnownFacet() {
+    
+    data class TitleGeneric(
+        val v1: kotlin.String) : WellKnownFacet()
+        
+    {
+        
 
         companion object
     }
+    
+    data class PathGeneric(
+        val v1: kotlin.String) : WellKnownFacet()
+        
+    {
+        
+
+        companion object
+    }
+    
+    data class Pending(
+        val v1: org.example.daybook.uniffi.types.Pending) : WellKnownFacet()
+        
+    {
+        
+
+        companion object
+    }
+    
+    data class Body(
+        val v1: org.example.daybook.uniffi.types.Body) : WellKnownFacet()
+        
+    {
+        
+
+        companion object
+    }
+    
+    data class Note(
+        val v1: org.example.daybook.uniffi.types.Note) : WellKnownFacet()
+        
+    {
+        
+
+        companion object
+    }
+    
+    data class Blob(
+        val v1: org.example.daybook.uniffi.types.Blob) : WellKnownFacet()
+        
+    {
+        
+
+        companion object
+    }
+    
+    data class ImageMetadata(
+        val v1: org.example.daybook.uniffi.types.ImageMetadata) : WellKnownFacet()
+        
+    {
+        
+
+        companion object
+    }
+    
+    data class OcrResult(
+        val v1: org.example.daybook.uniffi.types.OcrResult) : WellKnownFacet()
+        
+    {
+        
+
+        companion object
+    }
+    
+    data class Embedding(
+        val v1: org.example.daybook.uniffi.types.Embedding) : WellKnownFacet()
+        
+    {
+        
+
+        companion object
+    }
+    
+
+    
+
+    
+    
+
 
     companion object
 }
@@ -2014,225 +2340,193 @@ sealed class WellKnownFacet {
 /**
  * @suppress
  */
-public object FfiConverterTypeWellKnownFacet : FfiConverterRustBuffer<WellKnownFacet> {
-    override fun read(buf: ByteBuffer): WellKnownFacet = when (buf.getInt()) {
-        1 -> WellKnownFacet.Dmeta(
-            FfiConverterTypeDmeta.read(buf),
-        )
-
-        2 -> WellKnownFacet.RefGeneric(
-            FfiConverterString.read(buf),
-        )
-
-        3 -> WellKnownFacet.LabelGeneric(
-            FfiConverterString.read(buf),
-        )
-
-        4 -> WellKnownFacet.TitleGeneric(
-            FfiConverterString.read(buf),
-        )
-
-        5 -> WellKnownFacet.PathGeneric(
-            FfiConverterString.read(buf),
-        )
-
-        6 -> WellKnownFacet.Pending(
-            FfiConverterTypePending.read(buf),
-        )
-
-        7 -> WellKnownFacet.Body(
-            FfiConverterTypeBody.read(buf),
-        )
-
-        8 -> WellKnownFacet.Note(
-            FfiConverterTypeNote.read(buf),
-        )
-
-        9 -> WellKnownFacet.Blob(
-            FfiConverterTypeBlob.read(buf),
-        )
-
-        10 -> WellKnownFacet.ImageMetadata(
-            FfiConverterTypeImageMetadata.read(buf),
-        )
-
-        11 -> WellKnownFacet.OcrResult(
-            FfiConverterTypeOcrResult.read(buf),
-        )
-
-        12 -> WellKnownFacet.Embedding(
-            FfiConverterTypeEmbedding.read(buf),
-        )
-
-        else -> throw RuntimeException("invalid enum value, something is very wrong!!")
+public object FfiConverterTypeWellKnownFacet : FfiConverterRustBuffer<WellKnownFacet>{
+    override fun read(buf: ByteBuffer): WellKnownFacet {
+        return when(buf.getInt()) {
+            1 -> WellKnownFacet.Dmeta(
+                FfiConverterTypeDmeta.read(buf),
+                )
+            2 -> WellKnownFacet.RefGeneric(
+                FfiConverterString.read(buf),
+                )
+            3 -> WellKnownFacet.LabelGeneric(
+                FfiConverterString.read(buf),
+                )
+            4 -> WellKnownFacet.TitleGeneric(
+                FfiConverterString.read(buf),
+                )
+            5 -> WellKnownFacet.PathGeneric(
+                FfiConverterString.read(buf),
+                )
+            6 -> WellKnownFacet.Pending(
+                FfiConverterTypePending.read(buf),
+                )
+            7 -> WellKnownFacet.Body(
+                FfiConverterTypeBody.read(buf),
+                )
+            8 -> WellKnownFacet.Note(
+                FfiConverterTypeNote.read(buf),
+                )
+            9 -> WellKnownFacet.Blob(
+                FfiConverterTypeBlob.read(buf),
+                )
+            10 -> WellKnownFacet.ImageMetadata(
+                FfiConverterTypeImageMetadata.read(buf),
+                )
+            11 -> WellKnownFacet.OcrResult(
+                FfiConverterTypeOcrResult.read(buf),
+                )
+            12 -> WellKnownFacet.Embedding(
+                FfiConverterTypeEmbedding.read(buf),
+                )
+            else -> throw RuntimeException("invalid enum value, something is very wrong!!")
+        }
     }
 
-    override fun allocationSize(value: WellKnownFacet) = when (value) {
+    override fun allocationSize(value: WellKnownFacet) = when(value) {
         is WellKnownFacet.Dmeta -> {
             // Add the size for the Int that specifies the variant plus the size needed for all fields
             (
-                4UL +
-                    FfiConverterTypeDmeta.allocationSize(value.v1)
-                )
+                4UL
+                + FfiConverterTypeDmeta.allocationSize(value.v1)
+            )
         }
-
         is WellKnownFacet.RefGeneric -> {
             // Add the size for the Int that specifies the variant plus the size needed for all fields
             (
-                4UL +
-                    FfiConverterString.allocationSize(value.v1)
-                )
+                4UL
+                + FfiConverterString.allocationSize(value.v1)
+            )
         }
-
         is WellKnownFacet.LabelGeneric -> {
             // Add the size for the Int that specifies the variant plus the size needed for all fields
             (
-                4UL +
-                    FfiConverterString.allocationSize(value.v1)
-                )
+                4UL
+                + FfiConverterString.allocationSize(value.v1)
+            )
         }
-
         is WellKnownFacet.TitleGeneric -> {
             // Add the size for the Int that specifies the variant plus the size needed for all fields
             (
-                4UL +
-                    FfiConverterString.allocationSize(value.v1)
-                )
+                4UL
+                + FfiConverterString.allocationSize(value.v1)
+            )
         }
-
         is WellKnownFacet.PathGeneric -> {
             // Add the size for the Int that specifies the variant plus the size needed for all fields
             (
-                4UL +
-                    FfiConverterString.allocationSize(value.v1)
-                )
+                4UL
+                + FfiConverterString.allocationSize(value.v1)
+            )
         }
-
         is WellKnownFacet.Pending -> {
             // Add the size for the Int that specifies the variant plus the size needed for all fields
             (
-                4UL +
-                    FfiConverterTypePending.allocationSize(value.v1)
-                )
+                4UL
+                + FfiConverterTypePending.allocationSize(value.v1)
+            )
         }
-
         is WellKnownFacet.Body -> {
             // Add the size for the Int that specifies the variant plus the size needed for all fields
             (
-                4UL +
-                    FfiConverterTypeBody.allocationSize(value.v1)
-                )
+                4UL
+                + FfiConverterTypeBody.allocationSize(value.v1)
+            )
         }
-
         is WellKnownFacet.Note -> {
             // Add the size for the Int that specifies the variant plus the size needed for all fields
             (
-                4UL +
-                    FfiConverterTypeNote.allocationSize(value.v1)
-                )
+                4UL
+                + FfiConverterTypeNote.allocationSize(value.v1)
+            )
         }
-
         is WellKnownFacet.Blob -> {
             // Add the size for the Int that specifies the variant plus the size needed for all fields
             (
-                4UL +
-                    FfiConverterTypeBlob.allocationSize(value.v1)
-                )
+                4UL
+                + FfiConverterTypeBlob.allocationSize(value.v1)
+            )
         }
-
         is WellKnownFacet.ImageMetadata -> {
             // Add the size for the Int that specifies the variant plus the size needed for all fields
             (
-                4UL +
-                    FfiConverterTypeImageMetadata.allocationSize(value.v1)
-                )
+                4UL
+                + FfiConverterTypeImageMetadata.allocationSize(value.v1)
+            )
         }
-
         is WellKnownFacet.OcrResult -> {
             // Add the size for the Int that specifies the variant plus the size needed for all fields
             (
-                4UL +
-                    FfiConverterTypeOcrResult.allocationSize(value.v1)
-                )
+                4UL
+                + FfiConverterTypeOcrResult.allocationSize(value.v1)
+            )
         }
-
         is WellKnownFacet.Embedding -> {
             // Add the size for the Int that specifies the variant plus the size needed for all fields
             (
-                4UL +
-                    FfiConverterTypeEmbedding.allocationSize(value.v1)
-                )
+                4UL
+                + FfiConverterTypeEmbedding.allocationSize(value.v1)
+            )
         }
     }
 
     override fun write(value: WellKnownFacet, buf: ByteBuffer) {
-        when (value) {
+        when(value) {
             is WellKnownFacet.Dmeta -> {
                 buf.putInt(1)
                 FfiConverterTypeDmeta.write(value.v1, buf)
                 Unit
             }
-
             is WellKnownFacet.RefGeneric -> {
                 buf.putInt(2)
                 FfiConverterString.write(value.v1, buf)
                 Unit
             }
-
             is WellKnownFacet.LabelGeneric -> {
                 buf.putInt(3)
                 FfiConverterString.write(value.v1, buf)
                 Unit
             }
-
             is WellKnownFacet.TitleGeneric -> {
                 buf.putInt(4)
                 FfiConverterString.write(value.v1, buf)
                 Unit
             }
-
             is WellKnownFacet.PathGeneric -> {
                 buf.putInt(5)
                 FfiConverterString.write(value.v1, buf)
                 Unit
             }
-
             is WellKnownFacet.Pending -> {
                 buf.putInt(6)
                 FfiConverterTypePending.write(value.v1, buf)
                 Unit
             }
-
             is WellKnownFacet.Body -> {
                 buf.putInt(7)
                 FfiConverterTypeBody.write(value.v1, buf)
                 Unit
             }
-
             is WellKnownFacet.Note -> {
                 buf.putInt(8)
                 FfiConverterTypeNote.write(value.v1, buf)
                 Unit
             }
-
             is WellKnownFacet.Blob -> {
                 buf.putInt(9)
                 FfiConverterTypeBlob.write(value.v1, buf)
                 Unit
             }
-
             is WellKnownFacet.ImageMetadata -> {
                 buf.putInt(10)
                 FfiConverterTypeImageMetadata.write(value.v1, buf)
                 Unit
             }
-
             is WellKnownFacet.OcrResult -> {
                 buf.putInt(11)
                 FfiConverterTypeOcrResult.write(value.v1, buf)
                 Unit
             }
-
             is WellKnownFacet.Embedding -> {
                 buf.putInt(12)
                 FfiConverterTypeEmbedding.write(value.v1, buf)
@@ -2242,8 +2536,13 @@ public object FfiConverterTypeWellKnownFacet : FfiConverterRustBuffer<WellKnownF
     }
 }
 
-enum class WellKnownFacetTag {
 
+
+
+
+
+enum class WellKnownFacetTag {
+    
     DMETA,
     REF_GENERIC,
     LABEL_GENERIC,
@@ -2255,16 +2554,19 @@ enum class WellKnownFacetTag {
     BLOB,
     IMAGE_METADATA,
     OCR_RESULT,
-    EMBEDDING,
-    ;
+    EMBEDDING;
+
+    
+
 
     companion object
 }
 
+
 /**
  * @suppress
  */
-public object FfiConverterTypeWellKnownFacetTag : FfiConverterRustBuffer<WellKnownFacetTag> {
+public object FfiConverterTypeWellKnownFacetTag: FfiConverterRustBuffer<WellKnownFacetTag> {
     override fun read(buf: ByteBuffer) = try {
         WellKnownFacetTag.values()[buf.getInt() - 1]
     } catch (e: IndexOutOfBoundsException) {
@@ -2278,10 +2580,15 @@ public object FfiConverterTypeWellKnownFacetTag : FfiConverterRustBuffer<WellKno
     }
 }
 
+
+
+
+
+
 /**
  * @suppress
  */
-public object FfiConverterOptionalFloat : FfiConverterRustBuffer<kotlin.Float?> {
+public object FfiConverterOptionalFloat: FfiConverterRustBuffer<kotlin.Float?> {
     override fun read(buf: ByteBuffer): kotlin.Float? {
         if (buf.get().toInt() == 0) {
             return null
@@ -2307,10 +2614,13 @@ public object FfiConverterOptionalFloat : FfiConverterRustBuffer<kotlin.Float?> 
     }
 }
 
+
+
+
 /**
  * @suppress
  */
-public object FfiConverterOptionalString : FfiConverterRustBuffer<kotlin.String?> {
+public object FfiConverterOptionalString: FfiConverterRustBuffer<kotlin.String?> {
     override fun read(buf: ByteBuffer): kotlin.String? {
         if (buf.get().toInt() == 0) {
             return null
@@ -2336,10 +2646,13 @@ public object FfiConverterOptionalString : FfiConverterRustBuffer<kotlin.String?
     }
 }
 
+
+
+
 /**
  * @suppress
  */
-public object FfiConverterOptionalByteArray : FfiConverterRustBuffer<kotlin.ByteArray?> {
+public object FfiConverterOptionalByteArray: FfiConverterRustBuffer<kotlin.ByteArray?> {
     override fun read(buf: ByteBuffer): kotlin.ByteArray? {
         if (buf.get().toInt() == 0) {
             return null
@@ -2365,10 +2678,13 @@ public object FfiConverterOptionalByteArray : FfiConverterRustBuffer<kotlin.Byte
     }
 }
 
+
+
+
 /**
  * @suppress
  */
-public object FfiConverterOptionalTypeEmbeddingCompression : FfiConverterRustBuffer<EmbeddingCompression?> {
+public object FfiConverterOptionalTypeEmbeddingCompression: FfiConverterRustBuffer<EmbeddingCompression?> {
     override fun read(buf: ByteBuffer): EmbeddingCompression? {
         if (buf.get().toInt() == 0) {
             return null
@@ -2394,10 +2710,13 @@ public object FfiConverterOptionalTypeEmbeddingCompression : FfiConverterRustBuf
     }
 }
 
+
+
+
 /**
  * @suppress
  */
-public object FfiConverterOptionalSequenceString : FfiConverterRustBuffer<List<kotlin.String>?> {
+public object FfiConverterOptionalSequenceString: FfiConverterRustBuffer<List<kotlin.String>?> {
     override fun read(buf: ByteBuffer): List<kotlin.String>? {
         if (buf.get().toInt() == 0) {
             return null
@@ -2423,10 +2742,13 @@ public object FfiConverterOptionalSequenceString : FfiConverterRustBuffer<List<k
     }
 }
 
+
+
+
 /**
  * @suppress
  */
-public object FfiConverterOptionalSequenceTypeOcrTextRegion : FfiConverterRustBuffer<List<OcrTextRegion>?> {
+public object FfiConverterOptionalSequenceTypeOcrTextRegion: FfiConverterRustBuffer<List<OcrTextRegion>?> {
     override fun read(buf: ByteBuffer): List<OcrTextRegion>? {
         if (buf.get().toInt() == 0) {
             return null
@@ -2452,10 +2774,13 @@ public object FfiConverterOptionalSequenceTypeOcrTextRegion : FfiConverterRustBu
     }
 }
 
+
+
+
 /**
  * @suppress
  */
-public object FfiConverterOptionalTypeUtf8PathBuf : FfiConverterRustBuffer<Utf8PathBuf?> {
+public object FfiConverterOptionalTypeUtf8PathBuf: FfiConverterRustBuffer<Utf8PathBuf?> {
     override fun read(buf: ByteBuffer): Utf8PathBuf? {
         if (buf.get().toInt() == 0) {
             return null
@@ -2481,10 +2806,13 @@ public object FfiConverterOptionalTypeUtf8PathBuf : FfiConverterRustBuffer<Utf8P
     }
 }
 
+
+
+
 /**
  * @suppress
  */
-public object FfiConverterSequenceString : FfiConverterRustBuffer<List<kotlin.String>> {
+public object FfiConverterSequenceString: FfiConverterRustBuffer<List<kotlin.String>> {
     override fun read(buf: ByteBuffer): List<kotlin.String> {
         val len = buf.getInt()
         return List<kotlin.String>(len) {
@@ -2506,10 +2834,13 @@ public object FfiConverterSequenceString : FfiConverterRustBuffer<List<kotlin.St
     }
 }
 
+
+
+
 /**
  * @suppress
  */
-public object FfiConverterSequenceTypeFacetKey : FfiConverterRustBuffer<List<FacetKey>> {
+public object FfiConverterSequenceTypeFacetKey: FfiConverterRustBuffer<List<FacetKey>> {
     override fun read(buf: ByteBuffer): List<FacetKey> {
         val len = buf.getInt()
         return List<FacetKey>(len) {
@@ -2531,10 +2862,13 @@ public object FfiConverterSequenceTypeFacetKey : FfiConverterRustBuffer<List<Fac
     }
 }
 
+
+
+
 /**
  * @suppress
  */
-public object FfiConverterSequenceTypeOcrTextRegion : FfiConverterRustBuffer<List<OcrTextRegion>> {
+public object FfiConverterSequenceTypeOcrTextRegion: FfiConverterRustBuffer<List<OcrTextRegion>> {
     override fun read(buf: ByteBuffer): List<OcrTextRegion> {
         val len = buf.getInt()
         return List<OcrTextRegion>(len) {
@@ -2556,10 +2890,13 @@ public object FfiConverterSequenceTypeOcrTextRegion : FfiConverterRustBuffer<Lis
     }
 }
 
+
+
+
 /**
  * @suppress
  */
-public object FfiConverterSequenceTypePoint : FfiConverterRustBuffer<List<Point>> {
+public object FfiConverterSequenceTypePoint: FfiConverterRustBuffer<List<Point>> {
     override fun read(buf: ByteBuffer): List<Point> {
         val len = buf.getInt()
         return List<Point>(len) {
@@ -2581,10 +2918,13 @@ public object FfiConverterSequenceTypePoint : FfiConverterRustBuffer<List<Point>
     }
 }
 
+
+
+
 /**
  * @suppress
  */
-public object FfiConverterSequenceTypeTimestamp : FfiConverterRustBuffer<List<Timestamp>> {
+public object FfiConverterSequenceTypeTimestamp: FfiConverterRustBuffer<List<Timestamp>> {
     override fun read(buf: ByteBuffer): List<Timestamp> {
         val len = buf.getInt()
         return List<Timestamp>(len) {
@@ -2606,10 +2946,13 @@ public object FfiConverterSequenceTypeTimestamp : FfiConverterRustBuffer<List<Ti
     }
 }
 
+
+
+
 /**
  * @suppress
  */
-public object FfiConverterSequenceTypeUrl : FfiConverterRustBuffer<List<Url>> {
+public object FfiConverterSequenceTypeUrl: FfiConverterRustBuffer<List<Url>> {
     override fun read(buf: ByteBuffer): List<Url> {
         val len = buf.getInt()
         return List<Url>(len) {
@@ -2631,10 +2974,13 @@ public object FfiConverterSequenceTypeUrl : FfiConverterRustBuffer<List<Url>> {
     }
 }
 
+
+
+
 /**
  * @suppress
  */
-public object FfiConverterSequenceTypeUuid : FfiConverterRustBuffer<List<Uuid>> {
+public object FfiConverterSequenceTypeUuid: FfiConverterRustBuffer<List<Uuid>> {
     override fun read(buf: ByteBuffer): List<Uuid> {
         val len = buf.getInt()
         return List<Uuid>(len) {
@@ -2656,10 +3002,13 @@ public object FfiConverterSequenceTypeUuid : FfiConverterRustBuffer<List<Uuid>> 
     }
 }
 
+
+
+
 /**
  * @suppress
  */
-public object FfiConverterMapStringTypeUserMeta : FfiConverterRustBuffer<Map<kotlin.String, UserMeta>> {
+public object FfiConverterMapStringTypeUserMeta: FfiConverterRustBuffer<Map<kotlin.String, UserMeta>> {
     override fun read(buf: ByteBuffer): Map<kotlin.String, UserMeta> {
         val len = buf.getInt()
         return buildMap<kotlin.String, UserMeta>(len) {
@@ -2675,7 +3024,7 @@ public object FfiConverterMapStringTypeUserMeta : FfiConverterRustBuffer<Map<kot
         val spaceForMapSize = 4UL
         val spaceForChildren = value.map { (k, v) ->
             FfiConverterString.allocationSize(k) +
-                FfiConverterTypeUserMeta.allocationSize(v)
+            FfiConverterTypeUserMeta.allocationSize(v)
         }.sum()
         return spaceForMapSize + spaceForChildren
     }
@@ -2692,10 +3041,13 @@ public object FfiConverterMapStringTypeUserMeta : FfiConverterRustBuffer<Map<kot
     }
 }
 
+
+
+
 /**
  * @suppress
  */
-public object FfiConverterMapTypeFacetKeyTypeFacetMeta : FfiConverterRustBuffer<Map<FacetKey, FacetMeta>> {
+public object FfiConverterMapTypeFacetKeyTypeFacetMeta: FfiConverterRustBuffer<Map<FacetKey, FacetMeta>> {
     override fun read(buf: ByteBuffer): Map<FacetKey, FacetMeta> {
         val len = buf.getInt()
         return buildMap<FacetKey, FacetMeta>(len) {
@@ -2711,7 +3063,7 @@ public object FfiConverterMapTypeFacetKeyTypeFacetMeta : FfiConverterRustBuffer<
         val spaceForMapSize = 4UL
         val spaceForChildren = value.map { (k, v) ->
             FfiConverterTypeFacetKey.allocationSize(k) +
-                FfiConverterTypeFacetMeta.allocationSize(v)
+            FfiConverterTypeFacetMeta.allocationSize(v)
         }.sum()
         return spaceForMapSize + spaceForChildren
     }
@@ -2728,10 +3080,13 @@ public object FfiConverterMapTypeFacetKeyTypeFacetMeta : FfiConverterRustBuffer<
     }
 }
 
+
+
+
 /**
  * @suppress
  */
-public object FfiConverterMapTypeFacetKeyTypeJson : FfiConverterRustBuffer<Map<FacetKey, Json>> {
+public object FfiConverterMapTypeFacetKeyTypeJson: FfiConverterRustBuffer<Map<FacetKey, Json>> {
     override fun read(buf: ByteBuffer): Map<FacetKey, Json> {
         val len = buf.getInt()
         return buildMap<FacetKey, Json>(len) {
@@ -2747,7 +3102,7 @@ public object FfiConverterMapTypeFacetKeyTypeJson : FfiConverterRustBuffer<Map<F
         val spaceForMapSize = 4UL
         val spaceForChildren = value.map { (k, v) ->
             FfiConverterTypeFacetKey.allocationSize(k) +
-                FfiConverterTypeJson.allocationSize(v)
+            FfiConverterTypeJson.allocationSize(v)
         }.sum()
         return spaceForMapSize + spaceForChildren
     }
@@ -2764,10 +3119,13 @@ public object FfiConverterMapTypeFacetKeyTypeJson : FfiConverterRustBuffer<Map<F
     }
 }
 
+
+
+
 /**
  * @suppress
  */
-public object FfiConverterMapTypeUuidTypeFacetKey : FfiConverterRustBuffer<Map<Uuid, FacetKey>> {
+public object FfiConverterMapTypeUuidTypeFacetKey: FfiConverterRustBuffer<Map<Uuid, FacetKey>> {
     override fun read(buf: ByteBuffer): Map<Uuid, FacetKey> {
         val len = buf.getInt()
         return buildMap<Uuid, FacetKey>(len) {
@@ -2783,7 +3141,7 @@ public object FfiConverterMapTypeUuidTypeFacetKey : FfiConverterRustBuffer<Map<U
         val spaceForMapSize = 4UL
         val spaceForChildren = value.map { (k, v) ->
             FfiConverterTypeUuid.allocationSize(k) +
-                FfiConverterTypeFacetKey.allocationSize(v)
+            FfiConverterTypeFacetKey.allocationSize(v)
         }.sum()
         return spaceForMapSize + spaceForChildren
     }
@@ -2800,6 +3158,8 @@ public object FfiConverterMapTypeUuidTypeFacetKey : FfiConverterRustBuffer<Map<U
     }
 }
 
+
+
 /**
  * Typealias from the type name used in the UDL file to the builtin type.  This
  * is needed because the UDL type name is used in function/method signatures.
@@ -2807,6 +3167,8 @@ public object FfiConverterMapTypeUuidTypeFacetKey : FfiConverterRustBuffer<Map<U
  */
 public typealias ChangeHashSet = List<kotlin.String>
 public typealias FfiConverterTypeChangeHashSet = FfiConverterSequenceString
+
+
 
 /**
  * Typealias from the type name used in the UDL file to the builtin type.  This
@@ -2816,6 +3178,10 @@ public typealias FfiConverterTypeChangeHashSet = FfiConverterSequenceString
 public typealias Json = kotlin.String
 public typealias FfiConverterTypeJson = FfiConverterString
 
+
+
+
+
 /**
  * Typealias from the type name used in the UDL file to the custom type.  This
  * is needed because the UDL type name is used in function/method signatures.
@@ -2823,10 +3189,11 @@ public typealias FfiConverterTypeJson = FfiConverterString
  */
 public typealias Timestamp = Instant
 
+
 /**
  * @suppress
  */
-public object FfiConverterTypeTimestamp : FfiConverter<Timestamp, Long> {
+public object FfiConverterTypeTimestamp: FfiConverter<Timestamp, Long> {
     override fun lift(value: Long): Timestamp {
         val builtinValue = FfiConverterLong.lift(value)
         return Instant.fromEpochSeconds(builtinValue, 0)
@@ -2853,6 +3220,8 @@ public object FfiConverterTypeTimestamp : FfiConverter<Timestamp, Long> {
     }
 }
 
+
+
 /**
  * Typealias from the type name used in the UDL file to the builtin type.  This
  * is needed because the UDL type name is used in function/method signatures.
@@ -2860,6 +3229,8 @@ public object FfiConverterTypeTimestamp : FfiConverter<Timestamp, Long> {
  */
 public typealias Url = kotlin.String
 public typealias FfiConverterTypeUrl = FfiConverterString
+
+
 
 /**
  * Typealias from the type name used in the UDL file to the builtin type.  This
@@ -2869,6 +3240,10 @@ public typealias FfiConverterTypeUrl = FfiConverterString
 public typealias Utf8PathBuf = kotlin.String
 public typealias FfiConverterTypeUtf8PathBuf = FfiConverterString
 
+
+
+
+
 /**
  * Typealias from the type name used in the UDL file to the custom type.  This
  * is needed because the UDL type name is used in function/method signatures.
@@ -2876,10 +3251,11 @@ public typealias FfiConverterTypeUtf8PathBuf = FfiConverterString
  */
 public typealias Uuid = Uuid
 
+
 /**
  * @suppress
  */
-public object FfiConverterTypeUuid : FfiConverter<Uuid, RustBuffer.ByValue> {
+public object FfiConverterTypeUuid: FfiConverter<Uuid, RustBuffer.ByValue> {
     override fun lift(value: RustBuffer.ByValue): Uuid {
         val builtinValue = FfiConverterByteArray.lift(value)
         return Uuid.fromByteArray(builtinValue)
@@ -2905,3 +3281,4 @@ public object FfiConverterTypeUuid : FfiConverter<Uuid, RustBuffer.ByValue> {
         FfiConverterByteArray.write(builtinValue, buf)
     }
 }
+

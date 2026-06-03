@@ -33,6 +33,9 @@ sealed interface DaybookNavKey : NavKey {
 
     @Serializable
     data object DocEditor : DaybookNavKey
+
+    @Serializable
+    data object CloneShare : DaybookNavKey
 }
 
 private val daybookNavConfig =
@@ -47,6 +50,7 @@ private val daybookNavConfig =
                     subclass(DaybookNavKey.Settings::class, DaybookNavKey.Settings.serializer())
                     subclass(DaybookNavKey.Drawer::class, DaybookNavKey.Drawer.serializer())
                     subclass(DaybookNavKey.DocEditor::class, DaybookNavKey.DocEditor.serializer())
+                    subclass(DaybookNavKey.CloneShare::class, DaybookNavKey.CloneShare.serializer())
                 }
             }
     }

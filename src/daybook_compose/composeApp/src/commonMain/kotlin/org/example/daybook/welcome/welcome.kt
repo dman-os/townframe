@@ -840,109 +840,43 @@ private fun WelcomeScreen(
     }
 
     val isDesktop = getPlatform().getScreenWidthDp().value >= 1000f
-    if (isDesktop) {
-        Row(
-            modifier = Modifier.fillMaxSize().padding(24.dp),
-            horizontalArrangement = Arrangement.spacedBy(16.dp),
-        ) {
-            ElevatedCard(modifier = Modifier.width(360.dp).fillMaxHeight()) {
-                Column(
-                    modifier = Modifier.fillMaxWidth().padding(16.dp),
-                    verticalArrangement = Arrangement.spacedBy(12.dp),
-                ) {
-                    Button(onClick = onStartCreateRepo, modifier = Modifier.fillMaxWidth()) {
-                        Icon(Icons.Default.CreateNewFolder, contentDescription = null)
-                        Spacer(Modifier.width(8.dp))
-                        Text("Create New Repo")
-                    }
-                    if (!isAndroidPlatform) {
-                        Button(onClick = { openRepoLauncher.launch() }, modifier = Modifier.fillMaxWidth()) {
-                            Icon(Icons.Default.FolderOpen, contentDescription = null)
-                            Spacer(Modifier.width(8.dp))
-                            Text("Open Directory")
-                        }
-                    }
-                    Button(onClick = onStartClone, modifier = Modifier.fillMaxWidth()) {
-                        Icon(Icons.Default.Description, contentDescription = null)
-                        Spacer(Modifier.width(8.dp))
-                        Text("Clone Repo")
-                    }
-                }
-            }
-            ElevatedCard(modifier = Modifier.weight(1f).fillMaxHeight()) {
-                Column(
-                    modifier = Modifier.fillMaxSize().padding(16.dp),
-                    verticalArrangement = Arrangement.spacedBy(12.dp),
-                ) {
-                    if (repos.isEmpty()) {
-                        Text(
-                            text = "No known repositories yet.",
-                            style = MaterialTheme.typography.bodyMedium,
-                            color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.6f),
-                        )
-                    } else {
-                        LazyColumn(verticalArrangement = Arrangement.spacedBy(8.dp)) {
-                            items(repos, key = { repo -> repo.id }) { repo ->
-                                Surface(
-                                    modifier = Modifier.fillMaxWidth().clickable { onInspectRepo(repo) },
-                                    shape = MaterialTheme.shapes.medium,
-                                    tonalElevation = 2.dp,
-                                ) {
-                                    Column(modifier = Modifier.fillMaxWidth().padding(12.dp)) {
-                                        Text(
-                                            text = if (repo.name.isNotBlank()) repo.name else repo.path,
-                                            style = MaterialTheme.typography.bodyLarge,
-                                        )
-                                        Text(
-                                            text = repo.path,
-                                            style = MaterialTheme.typography.bodySmall,
-                                            color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.7f),
-                                        )
-                                        Text(
-                                            text = "Last opened: ${repo.lastOpenedAtUnixSecs}",
-                                            style = MaterialTheme.typography.bodySmall,
-                                            color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.7f),
-                                        )
-                                    }
-                                }
-                            }
-                        }
-                    }
-                }
-            }
-        }
-    } else {
+    Box (
+        modifier = Modifier.fillMaxSize().padding(24.dp),
+        contentAlignment = Alignment.Center,
+    ) {
         Column(
-            modifier = Modifier.fillMaxSize().padding(24.dp),
-            verticalArrangement = Arrangement.spacedBy(16.dp),
+            modifier = Modifier.fillMaxHeight(),
+            horizontalAlignment = Alignment.CenterHorizontally,
         ) {
-            Button(onClick = onStartCreateRepo, modifier = Modifier.fillMaxWidth()) {
+            TextButton(onClick = onStartCreateRepo) {
                 Icon(Icons.Default.CreateNewFolder, contentDescription = null)
                 Spacer(Modifier.width(8.dp))
-                Text("Create New Repo")
+                Text("create new repo")
             }
             if (!isAndroidPlatform) {
-                Button(onClick = { openRepoLauncher.launch() }, modifier = Modifier.fillMaxWidth()) {
+                TextButton(onClick = { openRepoLauncher.launch() }) {
                     Icon(Icons.Default.FolderOpen, contentDescription = null)
                     Spacer(Modifier.width(8.dp))
-                    Text("Open Directory")
+                    Text("open directory")
                 }
             }
-            Button(onClick = onStartClone, modifier = Modifier.fillMaxWidth()) {
+            TextButton(onClick = onStartClone) {
                 Icon(Icons.Default.Description, contentDescription = null)
                 Spacer(Modifier.width(8.dp))
-                Text("Clone Repo")
+                Text("clone repo")
             }
 
-            HorizontalDivider()
 
             if (repos.isEmpty()) {
-                Text(
-                    text = "No known repositories yet.",
-                    style = MaterialTheme.typography.bodyMedium,
-                    color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.6f),
-                )
+                // Text(
+                //     text = "No known repositories yet.",
+                //     style = MaterialTheme.typography.bodyMedium,
+                //     color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.6f),
+                // )
             } else {
+                Spacer(Modifier.width(16.dp))
+                HorizontalDivider()
+                Spacer(Modifier.width(15.dp))
                 LazyColumn(verticalArrangement = Arrangement.spacedBy(8.dp)) {
                     items(repos, key = { repo -> repo.id }) { repo ->
                         Surface(

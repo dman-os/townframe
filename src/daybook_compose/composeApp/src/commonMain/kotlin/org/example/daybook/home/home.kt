@@ -1,3 +1,5 @@
+@file:OptIn(androidx.compose.material3.ExperimentalMaterial3Api::class)
+
 package org.example.daybook.home
 
 import androidx.compose.foundation.layout.Arrangement
@@ -13,8 +15,10 @@ import androidx.compose.material.icons.filled.Mic
 import androidx.compose.material.icons.filled.QrCode2
 import androidx.compose.material.icons.filled.Settings
 import androidx.compose.material3.Icon
+import androidx.compose.material3.Scaffold
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
+import androidx.compose.material3.TopAppBar
 import androidx.compose.runtime.Composable
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
@@ -48,16 +52,25 @@ enum class HomeIcon {
 
 @Composable
 fun HomeScreen(config: HomeScreenConfig, modifier: Modifier = Modifier) {
-    Column(
-        modifier = modifier
-            .fillMaxSize()
-            .padding(16.dp),
-        verticalArrangement = Arrangement.spacedBy(16.dp),
-    ) {
-        config.widgets.forEach { widget ->
-            when (widget) {
-                is WipPermissionsWidgetConfig -> WipPermissions(widget = widget)
-                is HomeMenuWidgetConfig -> HomeMenu(widget = widget)
+    Scaffold(
+        topBar = {
+            TopAppBar(
+                title = { Text("Daybook") },
+            )
+        },
+    ) { scaffoldPadding ->
+        Column(
+            modifier = modifier
+                .fillMaxSize()
+                .padding(scaffoldPadding),
+            verticalArrangement = Arrangement.Center,
+            horizontalAlignment = Alignment.CenterHorizontally,
+        ) {
+            config.widgets.forEach { widget ->
+                when (widget) {
+                    is WipPermissionsWidgetConfig -> WipPermissions(widget = widget)
+                    is HomeMenuWidgetConfig -> HomeMenu(widget = widget)
+                }
             }
         }
     }

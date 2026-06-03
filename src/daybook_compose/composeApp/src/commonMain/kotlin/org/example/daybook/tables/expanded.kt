@@ -30,8 +30,6 @@ import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.NavigationRail
 import androidx.compose.material3.NavigationRailItem
 import androidx.compose.material3.PermanentDrawerSheet
-import androidx.compose.material3.Scaffold
-import androidx.compose.material3.SnackbarHost
 import androidx.compose.material3.SnackbarHostState
 import androidx.compose.material3.Text
 import androidx.compose.material3.VerticalDivider
@@ -177,28 +175,28 @@ fun ExpandedLayout(
             showTopBar = if (isScreenChromeEmpty) true else screenChromeState.showTopBar,
         )
 
-    Scaffold(
-        modifier = modifier,
-        snackbarHost = { SnackbarHost(snackbarHostState) },
-    ) { innerPadding ->
-        if (layoutConfig != null) {
-            LayoutFromConfig(
-                layoutConfig = layoutConfig,
-                tablesVm = tablesVm,
-                navState = navState,
-                extraAction = extraAction,
-                chromeState = mergedChromeState,
-                menuFeatures = menuFeatures,
-                modifier = Modifier.padding(innerPadding).fillMaxSize(),
-                contentType = contentType,
-            )
-        } else {
-            // Loading state - show empty or default layout
-            Box(modifier = Modifier.fillMaxSize()) {
-                Text("Loading layout...")
-            }
+    if (layoutConfig != null) {
+        LayoutFromConfig(
+            layoutConfig = layoutConfig,
+            tablesVm = tablesVm,
+            navState = navState,
+            extraAction = extraAction,
+            chromeState = mergedChromeState,
+            menuFeatures = menuFeatures,
+            modifier = Modifier.fillMaxSize(),
+            contentType = contentType,
+        )
+    } else {
+        // Loading state - show empty or default layout
+        Box(modifier = Modifier.fillMaxSize()) {
+            Text("Loading layout...")
         }
     }
+    // Scaffold(
+    //     modifier = modifier,
+    //     snackbarHost = { SnackbarHost(snackbarHostState) },
+    // ) { innerPadding ->
+    // }
 }
 
 @Composable
