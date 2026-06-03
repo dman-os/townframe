@@ -105,17 +105,12 @@ impl BucketSummaryRow {
 }
 
 impl SqlitePartStore {
-    pub async fn new(
-        read_pool: sqlx::SqlitePool,
-        write_pool: sqlx::SqlitePool,
-        scope_key: impl Into<Arc<str>>,
-        bucket_depth: u8,
-    ) -> Res<Self> {
-        init_schema(&write_pool, bucket_depth).await?;
+    pub async fn new(sql: SqlCtx, scope_key: impl Into<Arc<str>>, bucket_depth: u8) -> Res<Self> {
+        init_schema(&sql.write_pool, bucket_depth).await?;
         let scope_key = scope_key.into();
-        let scope_id = Self::ensure_scope_id(&write_pool, &scope_key).await?;
+        let scope_id = Self::ensure_scope_id(&sql.write_pool, &scope_key).await?;
         Ok(Self {
-            sql: SqlCtx::from_rw_pools(read_pool, write_pool),
+            sql,
             scope_id,
             bucket_depth,
             _scope_key: scope_key,
@@ -1512,16 +1507,15 @@ mod tests {
     use crate::part_store::host_contract::{self, HostPartStoreContractHarness};
     use big_sync_core::part_store::contract;
 
-    async fn test_pools() -> Res<(sqlx::SqlitePool, sqlx::SqlitePool)> {
+    async fn test_sql() -> Res<SqlCtx> {
         let db_path = std::env::temp_dir().join(format!("big_sync-{}.sqlite", Uuid::new_v4()));
-        let options = sqlx_utils_rs::sqlite_file_connect_options(&db_path)?
-            .journal_mode(sqlx::sqlite::SqliteJournalMode::Wal);
-        sqlx_utils_rs::open_sqlite_rw_pools(&db_path, options, 4, 1).await
+        let sqlite_url = format!("sqlite://{}", db_path.display());
+        SqlCtx::url(&sqlite_url).await
     }
 
     async fn test_store(scope_key: &str) -> Res<SqlitePartStore> {
-        let (read_pool, write_pool) = test_pools().await?;
-        SqlitePartStore::new(read_pool, write_pool, scope_key, BuckId::MAX_LEVEL).await
+        let sql = test_sql().await?;
+        SqlitePartStore::new(sql, scope_key, BuckId::MAX_LEVEL).await
     }
 
     fn test_part_id(seed: u8) -> PartId {
@@ -1656,8 +1650,7 @@ mod tests {
     async fn sqlite_scopes_are_isolated_by_scope_key() -> Res<()> {
         let store_a = test_store("big-sync-sqlite-test://repo").await?;
         let store_b = SqlitePartStore::new(
-            store_a.sql.read_pool.clone(),
-            store_a.sql.write_pool.clone(),
+            store_a.sql.clone(),
             "big-sync-sqlite-test://other-repo",
             BuckId::MAX_LEVEL,
         )

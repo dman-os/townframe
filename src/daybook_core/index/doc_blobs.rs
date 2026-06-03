@@ -59,10 +59,9 @@ impl DocBlobsIndexRepo {
         blobs_repo: Arc<BlobsRepo>,
         sqlite_local_state_repo: Arc<crate::local_state::SqliteLocalStateRepo>,
     ) -> Res<(Arc<Self>, crate::repos::RepoStopToken)> {
-        let (_sqlite_file_path, db_pool) = sqlite_local_state_repo
-            .ensure_sqlite_pool(DOC_BLOBS_LOCAL_STATE_ID)
+        let sql = sqlite_local_state_repo
+            .ensure_sqlite_ctx(DOC_BLOBS_LOCAL_STATE_ID)
             .await?;
-        let sql = SqlCtx::from_single_pool(db_pool);
         Self::init_schema(&sql).await?;
         let (work_tx, mut work_rx) = tokio::sync::mpsc::unbounded_channel();
 

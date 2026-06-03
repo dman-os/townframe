@@ -12,13 +12,13 @@ impl SqliteStateStore {
         if let Some(parent) = path.parent() {
             tokio::fs::create_dir_all(parent).await?;
         }
-        let options = sqlx_utils_rs::sqlite_file_connect_options(path)?;
-        let pool = sqlx::SqlitePool::connect_with(options).await?;
+        let sqlite_url = format!("sqlite://{}", path.display());
+        let sql = SqlCtx::url(&sqlite_url).await?;
 
         sqlx::query(
             "CREATE TABLE IF NOT EXISTS pauperfuse_meta (key TEXT PRIMARY KEY, value TEXT NOT NULL) STRICT",
         )
-        .execute(&pool)
+        .execute(&sql.write_pool)
         .await?;
 
         sqlx::query(
@@ -29,12 +29,10 @@ impl SqliteStateStore {
                 backend_hash TEXT\
             ) STRICT",
         )
-        .execute(&pool)
+        .execute(&sql.write_pool)
         .await?;
 
-        Ok(Self {
-            sql: SqlCtx::from_single_pool(pool),
-        })
+        Ok(Self { sql })
     }
 
     pub async fn load_state(&self) -> Res<PersistedState> {

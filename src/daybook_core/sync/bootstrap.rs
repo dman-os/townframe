@@ -464,8 +464,7 @@ pub async fn clone_repo_init_from_url(
         }
 
         let part_store = big_sync::SqlitePartStore::new(
-            sql.read_pool.clone(),
-            sql.write_pool.clone(),
+            sql.clone(),
             bootstrap.repo_id.clone(),
             big_sync_core::BuckId::MAX_LEVEL,
         )

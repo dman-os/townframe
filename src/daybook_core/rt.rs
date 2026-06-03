@@ -2443,13 +2443,9 @@ mod tests {
     ) -> Res<(std::sync::Arc<dyn HostPartStore>, big_sync_core::PartId)> {
         let sql = crate::app::open_sql_ctx(crate::app::SqlConfig::memory()).await?;
         let part_id = crate::part_id_from_label(PROCESSOR_RUNLOG_PARTITION_ID);
-        let store = big_sync::SqlitePartStore::new(
-            sql.read_pool,
-            sql.write_pool,
-            "rt-test",
-            big_sync_core::BuckId::MAX_LEVEL,
-        )
-        .await?;
+        let store =
+            big_sync::SqlitePartStore::new(sql, "rt-test", big_sync_core::BuckId::MAX_LEVEL)
+                .await?;
         Ok((std::sync::Arc::new(store), part_id))
     }
 

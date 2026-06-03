@@ -1,8 +1,6 @@
 use crate::interlude::*;
 use tokio_util::sync::CancellationToken;
 
-const SQLITE_BUSY_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(90);
-
 #[derive(Debug, Clone)]
 #[cfg_attr(feature = "uniffi", derive(uniffi::Enum))]
 pub enum LocalStateEvent {
@@ -11,7 +9,7 @@ pub enum LocalStateEvent {
 
 pub struct SqliteLocalStateRepo {
     local_state_root: PathBuf,
-    sqlite_pools: tokio::sync::RwLock<HashMap<String, sqlx::SqlitePool>>,
+    sqlite_ctxs: tokio::sync::RwLock<HashMap<String, sqlx_utils_rs::SqlCtx>>,
     pub registry: Arc<crate::repos::ListenersRegistry>,
     cancel_token: CancellationToken,
 }
@@ -42,7 +40,7 @@ impl SqliteLocalStateRepo {
 
         let repo = Arc::new(Self {
             local_state_root,
-            sqlite_pools: tokio::sync::RwLock::new(HashMap::new()),
+            sqlite_ctxs: tokio::sync::RwLock::new(HashMap::new()),
             registry: crate::repos::ListenersRegistry::new(),
             cancel_token: main_cancel_token.child_token(),
         });
@@ -96,40 +94,29 @@ impl SqliteLocalStateRepo {
         Ok(file_dir.join(format!("{local_state_key}.sqlite")))
     }
 
-    pub async fn ensure_sqlite_pool(
-        &self,
-        local_state_id: &str,
-    ) -> Res<(String, sqlx::SqlitePool)> {
-        if let Some(pool) = self.sqlite_pools.read().await.get(local_state_id).cloned() {
-            let path = self
-                .get_sqlite_file_path(local_state_id)
-                .await?
-                .to_string_lossy()
-                .to_string();
-            return Ok((path, pool));
+    pub async fn ensure_sqlite_ctx(&self, local_state_id: &str) -> Res<sqlx_utils_rs::SqlCtx> {
+        if let Some(sql) = self.sqlite_ctxs.read().await.get(local_state_id).cloned() {
+            return Ok(sql);
         }
 
         let sqlite_file_path = self.get_sqlite_file_path(local_state_id).await?;
+        let sqlite_url = format!("sqlite://{}", sqlite_file_path.display());
 
         crate::init_sqlite_vec();
-        let connect_options = sqlx_utils_rs::sqlite_file_connect_options_with_wal_busy(
-            &sqlite_file_path,
-            SQLITE_BUSY_TIMEOUT,
-        )?;
-        let db_pool = sqlx_utils_rs::open_sqlite_pool(&sqlite_file_path, connect_options, 1)
+        let sql = sqlx_utils_rs::SqlCtx::url(&sqlite_url)
             .await
             .wrap_err("error initializing sqlite local state connection")?;
 
         sqlx::query("select vec_version()")
-            .execute(&db_pool)
+            .execute(&sql.write_pool)
             .await
             .wrap_err("sqlite-vec extension not available")?;
 
-        let mut pools = self.sqlite_pools.write().await;
-        let pooled = pools
+        let mut sql_ctxs = self.sqlite_ctxs.write().await;
+        let pooled = sql_ctxs
             .entry(local_state_id.to_string())
-            .or_insert_with(|| db_pool.clone())
+            .or_insert_with(|| sql.clone())
             .clone();
-        Ok((sqlite_file_path.to_string_lossy().to_string(), pooled))
+        Ok(pooled)
     }
 }

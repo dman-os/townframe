@@ -1,6 +1,7 @@
 use crate::interlude::*;
 
 use sqlx::{Column, Row, TypeInfo, ValueRef};
+use sqlx_utils_rs::SqlCtx;
 use wash_runtime::engine::ctx::SharedCtx as SharedWashCtx;
 
 use super::{binds_guest, sqlite_connection, DaybookPlugin};
@@ -8,7 +9,7 @@ use super::{binds_guest, sqlite_connection, DaybookPlugin};
 pub struct SqliteConnectionToken {
     pub local_state_id: String,
     pub sqlite_file_path: Option<String>,
-    pub db_pool: Option<sqlx::SqlitePool>,
+    pub sql: Option<SqlCtx>,
 }
 
 impl sqlite_connection::Host for SharedWashCtx {}
@@ -25,8 +26,8 @@ impl sqlite_connection::HostConnection for SharedWashCtx {
             binds_guest::townframe::sql::types::QueryError,
         >,
     > {
-        let db_pool = match ensure_sqlite_pool(self, &handle).await {
-            Ok(pool) => pool,
+        let sql = match ensure_sqlite_ctx(self, &handle).await {
+            Ok(sql) => sql,
             Err(err) => {
                 return Ok(Err(
                     binds_guest::townframe::sql::types::QueryError::Unexpected(err.to_string()),
@@ -38,7 +39,7 @@ impl sqlite_connection::HostConnection for SharedWashCtx {
         for param in params {
             sql_query = bind_sql_value(sql_query, param);
         }
-        let rows = match sql_query.fetch_all(&db_pool).await {
+        let rows = match sql_query.fetch_all(&sql.read_pool).await {
             Ok(rows) => rows,
             Err(err) => return Ok(Err(query_error_from_sqlx_error(err))),
         };
@@ -58,8 +59,8 @@ impl sqlite_connection::HostConnection for SharedWashCtx {
         handle: wasmtime::component::Resource<sqlite_connection::Connection>,
         query: String,
     ) -> wasmtime::Result<Result<(), binds_guest::townframe::sql::types::QueryError>> {
-        let db_pool = match ensure_sqlite_pool(self, &handle).await {
-            Ok(pool) => pool,
+        let sql = match ensure_sqlite_ctx(self, &handle).await {
+            Ok(sql) => sql,
             Err(err) => {
                 return Ok(Err(
                     binds_guest::townframe::sql::types::QueryError::Unexpected(err.to_string()),
@@ -67,7 +68,7 @@ impl sqlite_connection::HostConnection for SharedWashCtx {
             }
         };
         match sqlx::query(sqlx::AssertSqlSafe(query))
-            .execute(&db_pool)
+            .execute(&sql.write_pool)
             .await
         {
             Ok(_) => Ok(Ok(())),
@@ -116,10 +117,15 @@ async fn ensure_sqlite_file_path(
     };
 
     let plugin = DaybookPlugin::from_ctx(ctx);
-    let (sqlite_file_path, db_pool) = plugin
+    let sqlite_file_path = plugin
         .sqlite_local_state_repo
-        .ensure_sqlite_pool(&local_state_id)
+        .get_sqlite_file_path(&local_state_id)
         .await?;
+    let sql = plugin
+        .sqlite_local_state_repo
+        .ensure_sqlite_ctx(&local_state_id)
+        .await?;
+    let sqlite_file_path = sqlite_file_path.to_string_lossy().to_string();
 
     {
         let token = ctx
@@ -127,26 +133,26 @@ async fn ensure_sqlite_file_path(
             .get_mut(handle)
             .context("error locating sqlite-connection token")?;
         token.sqlite_file_path = Some(sqlite_file_path.clone());
-        if token.db_pool.is_none() {
-            token.db_pool = Some(db_pool);
+        if token.sql.is_none() {
+            token.sql = Some(sql);
         }
     }
 
     Ok(sqlite_file_path)
 }
 
-async fn ensure_sqlite_pool(
+async fn ensure_sqlite_ctx(
     ctx: &mut SharedWashCtx,
     handle: &wasmtime::component::Resource<sqlite_connection::Connection>,
-) -> Res<sqlx::SqlitePool> {
-    if let Some(pool) = {
+) -> Res<SqlCtx> {
+    if let Some(sql) = {
         let token = ctx
             .table
             .get(handle)
             .context("error locating sqlite-connection token")?;
-        token.db_pool.clone()
+        token.sql.clone()
     } {
-        return Ok(pool);
+        return Ok(sql);
     }
 
     let local_state_id = {
@@ -157,23 +163,28 @@ async fn ensure_sqlite_pool(
         token.local_state_id.clone()
     };
     let plugin = DaybookPlugin::from_ctx(ctx);
-    let (sqlite_file_path, db_pool) = plugin
+    let sqlite_file_path = plugin
         .sqlite_local_state_repo
-        .ensure_sqlite_pool(&local_state_id)
+        .get_sqlite_file_path(&local_state_id)
         .await?;
+    let sql = plugin
+        .sqlite_local_state_repo
+        .ensure_sqlite_ctx(&local_state_id)
+        .await?;
+    let sqlite_file_path = sqlite_file_path.to_string_lossy().to_string();
 
     {
         let token = ctx
             .table
             .get_mut(handle)
             .context("error locating sqlite-connection token")?;
-        if token.db_pool.is_none() {
+        if token.sql.is_none() {
             token.sqlite_file_path = Some(sqlite_file_path);
-            token.db_pool = Some(db_pool.clone());
+            token.sql = Some(sql.clone());
         }
     }
 
-    Ok(db_pool)
+    Ok(sql)
 }
 
 fn query_error_from_sqlx_error(err: sqlx::Error) -> binds_guest::townframe::sql::types::QueryError {

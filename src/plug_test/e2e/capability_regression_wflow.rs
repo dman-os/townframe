@@ -1,18 +1,17 @@
 use api_utils_rs::prelude::*;
 use daybook_types::doc::{AddDocArgs, FacetKey, FacetRaw, WellKnownFacet, WellKnownFacetTag};
-use sqlx::{ConnectOptions, SqlitePool};
+use sqlx_utils_rs::SqlCtx;
 
 async fn open_plug_test_local_state(
     test_cx: &daybook_core::test_support::DaybookTestContext,
-) -> Res<SqlitePool> {
+) -> Res<SqlCtx> {
     let sqlite_file_path = test_cx
         .rt
         .sqlite_local_state_repo
         .get_sqlite_file_path("@daybook/test/capability-report")
         .await?;
-    let connect_options =
-        sqlx_utils_rs::sqlite_file_connect_options(&sqlite_file_path)?.disable_statement_logging();
-    Ok(SqlitePool::connect_with(connect_options).await?)
+    let sqlite_url = format!("sqlite://{}", sqlite_file_path.display());
+    SqlCtx::url(&sqlite_url).await
 }
 
 async fn dispatch_and_wait(
@@ -79,11 +78,11 @@ async fn dispatch_and_wait(
     Ok(dispatch_id)
 }
 
-async fn fetch_capability_report(db_pool: &SqlitePool, doc_id: &str) -> Res<serde_json::Value> {
+async fn fetch_capability_report(db: &SqlCtx, doc_id: &str) -> Res<serde_json::Value> {
     let summary_json: String =
         sqlx::query_scalar("SELECT summary_json FROM capability_report WHERE doc_id = ?1")
             .bind(doc_id)
-            .fetch_one(db_pool)
+            .fetch_one(&db.read_pool)
             .await
             .wrap_err_with(|| format!("no capability_report row for doc_id={doc_id}"))?;
 
@@ -91,7 +90,7 @@ async fn fetch_capability_report(db_pool: &SqlitePool, doc_id: &str) -> Res<serd
 }
 
 async fn fetch_capability_report_v2(
-    db_pool: &SqlitePool,
+    db: &SqlCtx,
     doc_id: &str,
     test_name: &str,
 ) -> Res<serde_json::Value> {
@@ -100,7 +99,7 @@ async fn fetch_capability_report_v2(
     )
     .bind(doc_id)
     .bind(test_name)
-    .fetch_one(db_pool)
+    .fetch_one(&db.read_pool)
     .await
     .wrap_err_with(|| {
         format!("no capability_report_v2 row for doc_id={doc_id} test_name={test_name}")

@@ -60,10 +60,9 @@ impl DocFacetSetIndexRepo {
         drawer_repo: Arc<DrawerRepo>,
         sqlite_local_state_repo: Arc<crate::local_state::SqliteLocalStateRepo>,
     ) -> Res<(Arc<Self>, DocFacetSetIndexStopToken)> {
-        let (_sqlite_file_path, db_pool) = sqlite_local_state_repo
-            .ensure_sqlite_pool(FACET_SET_LOCAL_STATE_ID)
+        let sql = sqlite_local_state_repo
+            .ensure_sqlite_ctx(FACET_SET_LOCAL_STATE_ID)
             .await?;
-        let sql = SqlCtx::from_single_pool(db_pool);
         Self::init_schema(&sql).await?;
         let (work_tx, mut work_rx) = tokio::sync::mpsc::unbounded_channel();
 

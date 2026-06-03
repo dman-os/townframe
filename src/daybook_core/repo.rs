@@ -325,14 +325,8 @@ impl RepoCtx {
             local_actor_id,
         } = compute_user_info(&repo_id, &repo_user_id, &identity);
 
-        let big_repo_sqlite_path = layout.repo_root.join("big_repo.sqlite");
-        let connect_options = sqlx_utils_rs::sqlite_file_connect_options(&big_repo_sqlite_path)?;
-        let (big_repo_read_pool, big_repo_write_pool) =
-            sqlx_utils_rs::open_sqlite_rw_pools(&big_repo_sqlite_path, connect_options, 4, 1)
-                .await?;
         let part_store = big_sync::SqlitePartStore::new(
-            big_repo_read_pool,
-            big_repo_write_pool,
+            sql.clone(),
             repo_id.clone(),
             big_sync_core::BuckId::MAX_LEVEL,
         )

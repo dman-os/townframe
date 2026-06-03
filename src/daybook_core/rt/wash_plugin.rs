@@ -843,7 +843,7 @@ impl facet_routine::Host for SharedWashCtx {
             let handle = self.table.push(local_state_sql::SqliteConnectionToken {
                 local_state_id,
                 sqlite_file_path: None,
-                db_pool: None,
+                sql: None,
             })?;
             sqlite_connections.push((
                 format!(

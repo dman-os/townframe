@@ -2,13 +2,8 @@ use crate::interlude::*;
 
 use crate::repo::RepoCtx;
 
-use sqlx::SqlitePool;
-use std::path::PathBuf;
-use std::str::FromStr;
-use std::time::Duration;
-
-const SQLITE_BUSY_TIMEOUT: Duration = Duration::from_secs(90);
 pub use sqlx_utils_rs::SqlCtx;
+use std::path::PathBuf;
 
 #[derive(Debug, Clone)]
 pub struct SqlConfig {
@@ -30,24 +25,17 @@ impl SqlConfig {
 }
 
 pub async fn open_sql_ctx(config: SqlConfig) -> Res<SqlCtx> {
-    let db_pool = match config.database_path {
+    let sql = match config.database_path {
         Some(database_path) => {
             if let Some(parent) = database_path.parent() {
                 std::fs::create_dir_all(parent).wrap_err_with(|| {
                     format!("Failed to create database directory: {}", parent.display())
                 })?;
             }
-
-            let connect_options = sqlx_utils_rs::sqlite_file_connect_options_with_wal_busy(
-                &database_path,
-                SQLITE_BUSY_TIMEOUT,
-            )?;
-            sqlx_utils_rs::open_sqlite_pool(&database_path, connect_options, 1).await?
+            let database_url = format!("sqlite://{}", database_path.display());
+            SqlCtx::url(&database_url).await?
         }
-        None => {
-            let connect_options = sqlx::sqlite::SqliteConnectOptions::from_str("sqlite::memory:")?;
-            SqlitePool::connect_with(connect_options).await?
-        }
+        None => SqlCtx::memory().await?,
     };
 
     sqlx::query(
@@ -58,10 +46,10 @@ pub async fn open_sql_ctx(config: SqlConfig) -> Res<SqlCtx> {
             ) STRICT
             "#,
     )
-    .execute(&db_pool)
+    .execute(&sql.write_pool)
     .await?;
 
-    Ok(SqlCtx::from_single_pool(db_pool))
+    Ok(sql)
 }
 
 #[derive(Debug, Clone)]

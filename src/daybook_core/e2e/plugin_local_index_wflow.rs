@@ -1,7 +1,7 @@
 use crate::interlude::*;
 
 use daybook_types::doc::{AddDocArgs, FacetKey, WellKnownFacet, WellKnownFacetTag};
-use sqlx::{ConnectOptions, SqlitePool};
+use sqlx_utils_rs::SqlCtx;
 
 #[tokio::test(flavor = "multi_thread")]
 async fn test_embedding_processor_indexes_into_plugin_local_sqlite_state() -> Res<()> {
@@ -83,9 +83,8 @@ async fn test_embedding_processor_indexes_into_plugin_local_sqlite_state() -> Re
         .sqlite_local_state_repo
         .get_sqlite_file_path("@daybook/wip/doc-embedding-index")
         .await?;
-    let connect_options =
-        sqlx_utils_rs::sqlite_file_connect_options(&sqlite_file_path)?.disable_statement_logging();
-    let db_pool = SqlitePool::connect_with(connect_options).await?;
+    let sqlite_url = format!("sqlite://{}", sqlite_file_path.display());
+    let db = SqlCtx::url(&sqlite_url).await?;
 
     let mut found_index_record = false;
     for _ in 0..120 {
@@ -94,7 +93,7 @@ async fn test_embedding_processor_indexes_into_plugin_local_sqlite_state() -> Re
         )
         .bind(&doc_id)
         .bind(FacetKey::from(WellKnownFacetTag::Embedding).to_string())
-        .fetch_one(&db_pool)
+        .fetch_one(&db.read_pool)
         .await;
 
         match row_count_result {

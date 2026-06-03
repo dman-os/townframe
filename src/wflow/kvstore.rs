@@ -2,7 +2,6 @@ use crate::interlude::*;
 
 use sqlx_utils_rs::SqlCtx;
 use std::path::PathBuf;
-use std::str::FromStr;
 use tokio::sync::{mpsc, oneshot};
 use wflow_core::kvstore::*;
 
@@ -56,22 +55,16 @@ pub struct SqliteKvFactory {
 
 impl SqliteKvFactory {
     pub async fn boot(db_path: Option<PathBuf>) -> Res<Self> {
-        let db_pool = match db_path {
+        let sql = match db_path {
             Some(db_path) => {
-                let opts = sqlx_utils_rs::sqlite_file_connect_options(&db_path)?
-                    .journal_mode(sqlx::sqlite::SqliteJournalMode::Wal);
-                sqlx::SqlitePool::connect_with(opts).await?
+                let sqlite_url = format!("sqlite://{}", db_path.display());
+                SqlCtx::url(&sqlite_url).await?
             }
-            None => {
-                let opts = sqlx::sqlite::SqliteConnectOptions::from_str("sqlite::memory:")?;
-                sqlx::SqlitePool::connect_with(opts).await?
-            }
+            None => SqlCtx::memory().await?,
         };
         // Use unbounded channel since the worker is single-threaded and processes messages sequentially
         let (tx, mut rx) = mpsc::unbounded_channel();
-        let worker = SqliteKvWorker {
-            sql: SqlCtx::from_single_pool(db_pool),
-        };
+        let worker = SqliteKvWorker { sql };
         tokio::spawn(async move {
             worker.run(&mut rx).await.unwrap_or_log();
         });
