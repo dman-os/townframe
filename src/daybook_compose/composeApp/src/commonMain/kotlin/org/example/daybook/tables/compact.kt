@@ -80,13 +80,10 @@ import androidx.lifecycle.viewModelScope
 import androidx.lifecycle.viewmodel.initializer
 import androidx.lifecycle.viewmodel.compose.viewModel
 import androidx.lifecycle.viewmodel.viewModelFactory
-import androidx.navigation.NavHostController
-import androidx.navigation.compose.currentBackStackEntryAsState
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.launch
-import org.example.daybook.AppScreens
 import org.example.daybook.ChromeState
 import org.example.daybook.ChromeStateTopAppBar
 import org.example.daybook.ConfigViewModel
@@ -95,6 +92,8 @@ import org.example.daybook.LocalContainer
 import org.example.daybook.Routes
 import org.example.daybook.TablesState
 import org.example.daybook.TablesViewModel
+import org.example.daybook.navigation.DaybookNavKey
+import org.example.daybook.navigation.DaybookNavigationState
 import org.example.daybook.progress.ProgressList
 import org.example.daybook.uniffi.core.Tab
 import org.example.daybook.uniffi.core.Table
@@ -178,7 +177,7 @@ private val hoverHoldControllerFactory =
 @Composable
 fun CompactLayout(
     modifier: Modifier = Modifier,
-    navController: NavHostController,
+    navState: DaybookNavigationState,
     extraAction: (() -> Unit)? = null,
     contentType: DaybookContentType,
     onShowCloneShare: () -> Unit = {},
@@ -244,8 +243,8 @@ fun CompactLayout(
     var featureButtonLayouts by remember { mutableStateOf(mapOf<String, Rect>()) }
 
     // Use separate feature lists: navBar features for center rollout, menu features for menu sheet
-    val navBarFeatures = rememberNavBarFeatures(navController)
-    val baseMenuFeatures = rememberMenuFeatures(navController, onShowCloneShare = onShowCloneShare)
+    val navBarFeatures = rememberNavBarFeatures(navState)
+    val baseMenuFeatures = rememberMenuFeatures(navState, onShowCloneShare = onShowCloneShare)
 
     // Get chrome state to check for prominent buttons
     val chromeStateManager = LocalChromeStateManager.current
@@ -298,9 +297,8 @@ fun CompactLayout(
     val featureControllers = navBarFeatureControllers + prominentButtonControllers
     val featureReadyStates = featureControllers.map { it.ready.collectAsState() }
     var menuGestureSurfaceWindowRect by remember { mutableStateOf<Rect?>(null) }
-    val navBackStackEntry by navController.currentBackStackEntryAsState()
-    val currentRoute = navBackStackEntry?.destination?.route
-    val isDocEditorFullscreen = currentRoute == AppScreens.DocEditor.name
+    val currentDestination = navState.currentDestination
+    val isDocEditorFullscreen = currentDestination == DaybookNavKey.DocEditor
 
     val menuGestureModifier =
         Modifier
@@ -529,7 +527,7 @@ fun CompactLayout(
 
     val centerNavBarContent: @Composable RowScope.() -> Unit = {
         CenterNavBarContent(
-            navController = navController,
+            currentDestination = currentDestination,
             isMenuOpen = menuSheetState.isVisible,
             showFeaturesMenu = showFeaturesMenu,
             featureReadyStates = featureReadyStates,
@@ -787,7 +785,7 @@ fun CompactLayout(
                                 Box(modifier = Modifier.weight(1f, fill = true)) {
                                     Routes(
                                         modifier = Modifier.fillMaxSize(),
-                                        navController = navController,
+                                        navState = navState,
                                         extraAction = extraAction,
                                         onShowCloneShare = onShowCloneShare,
                                         contentType = contentType,
