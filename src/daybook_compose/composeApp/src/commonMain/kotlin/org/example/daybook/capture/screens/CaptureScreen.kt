@@ -23,16 +23,15 @@ import kotlinx.coroutines.flow.asSharedFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.launch
 import org.example.daybook.ChromeState
-import org.example.daybook.DaybookScreenScaffold
 import org.example.daybook.LocalContainer
 import org.example.daybook.MainFeatureActionButton
 import org.example.daybook.ProvideChromeState
-import org.example.daybook.ScreenChromeSpec
 import org.example.daybook.TablesState
 import org.example.daybook.TablesViewModel
 import org.example.daybook.capture.CaptureNavActions
 import org.example.daybook.capture.LocalCameraCaptureContext
 import org.example.daybook.capture.ui.DaybookCameraViewport
+import org.example.daybook.layouts.DaybookScaffold
 import org.example.daybook.ui.DocEditor
 import org.example.daybook.ui.buildBlobFacetFromDigest
 import org.example.daybook.ui.buildBodyFacet
@@ -261,7 +260,7 @@ class CaptureScreenViewModel(
 }
 
 @Composable
-fun CaptureScreen(chrome: ScreenChromeSpec, modifier: Modifier = Modifier, initialDocId: String? = null) {
+fun CaptureScreen(modifier: Modifier = Modifier, initialDocId: String? = null) {
     val container = LocalContainer.current
     val tablesVm = viewModel { TablesViewModel(container.tablesRepo) }
     val vm =
@@ -328,8 +327,7 @@ fun CaptureScreen(chrome: ScreenChromeSpec, modifier: Modifier = Modifier, initi
             }
         }
 
-    DaybookScreenScaffold(
-        chrome = chrome,
+    DaybookScaffold(
         modifier = modifier,
     ) { scaffoldPadding ->
         ProvideChromeState(chromeState) {

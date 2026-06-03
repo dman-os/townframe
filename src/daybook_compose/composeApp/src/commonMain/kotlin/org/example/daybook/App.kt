@@ -77,7 +77,9 @@ import org.example.daybook.home.HomeScreenConfig
 import org.example.daybook.home.MenuNavItem
 import org.example.daybook.home.WipPermissionsWidgetConfig
 import org.example.daybook.layouts.CompactLayout
+import org.example.daybook.layouts.DaybookScaffold
 import org.example.daybook.layouts.ExpandedLayout
+import org.example.daybook.layouts.ProvideScreenChromeSpec
 import org.example.daybook.navigation.DaybookNavKey
 import org.example.daybook.navigation.DaybookNavigationState
 import org.example.daybook.navigation.rememberDaybookNavigationState
@@ -1102,6 +1104,7 @@ fun App(
                     onCreateRepoInitRequestChange = { createRepoInitRequest = it },
                     onPendingOpenRepoPath = { pendingOpenRepoPath = it },
                     onPendingForgetRepoId = { pendingForgetRepoId = it },
+                    onExitRequest = { onExitRequest?.invoke() },
                 )
             }
 
@@ -1415,7 +1418,7 @@ fun AdaptiveAppLayout(
 }
 
 @Composable
-fun TablesScreen(chrome: ScreenChromeSpec, modifier: Modifier = Modifier) {
+fun TablesScreen(modifier: Modifier = Modifier) {
     val tablesRepo = LocalContainer.current.tablesRepo
     val vm =
         viewModel {
@@ -1505,8 +1508,7 @@ fun TablesScreen(chrome: ScreenChromeSpec, modifier: Modifier = Modifier) {
             )
         }
 
-    DaybookScreenScaffold(
-        chrome = chrome,
+    DaybookScaffold(
         modifier = modifier,
     ) { scaffoldPadding ->
         ProvideChromeState(chromeState) {
@@ -1593,7 +1595,6 @@ fun Routes(
     modifier: Modifier = Modifier,
     contentType: DaybookContentType,
     onShowCloneShare: () -> Unit = {},
-    chrome: ScreenChromeSpec,
     navState: DaybookNavigationState,
 ) {
     val drawerVm = LocalDrawerViewModel.current
@@ -1650,14 +1651,20 @@ fun Routes(
         modifier = modifier,
         entryProvider = entryProvider {
             entry<DaybookNavKey.Home> {
-                HomeScreen(
-                    config = defaultHomeScreenConfig(
-                        navState = navState,
-                        onShowCloneShare = onShowCloneShare,
+                ProvideScreenChromeSpec(
+                    navState.chromeSpecFor(
+                        destination = DaybookNavKey.Home,
+                        onBack = onBack,
                     ),
-                    chrome = chrome,
-                    modifier = modifier,
-                )
+                ) {
+                    HomeScreen(
+                        config = defaultHomeScreenConfig(
+                            navState = navState,
+                            onShowCloneShare = onShowCloneShare,
+                        ),
+                        modifier = modifier,
+                    )
+                }
             }
             entry<DaybookNavKey.CloneShare>(
                 metadata = bigDialog(),
@@ -1665,45 +1672,81 @@ fun Routes(
                 CloneShareDialogContent(onClose = { navState.pop() })
             }
             entry<DaybookNavKey.Capture> {
-                CaptureScreen(
-                    chrome = chrome,
-                    modifier = modifier,
-                )
+                ProvideScreenChromeSpec(
+                    navState.chromeSpecFor(
+                        destination = DaybookNavKey.Capture,
+                        onBack = onBack,
+                    ),
+                ) {
+                    CaptureScreen(
+                        modifier = modifier,
+                    )
+                }
             }
             entry<DaybookNavKey.Tables> {
-                TablesScreen(
-                    chrome = chrome,
-                    modifier = modifier,
-                )
+                ProvideScreenChromeSpec(
+                    navState.chromeSpecFor(
+                        destination = DaybookNavKey.Tables,
+                        onBack = onBack,
+                    ),
+                ) {
+                    TablesScreen(
+                        modifier = modifier,
+                    )
+                }
             }
             entry<DaybookNavKey.Progress> {
-                ProgressList(
-                    chrome = chrome,
-                    modifier = modifier,
-                )
+                ProvideScreenChromeSpec(
+                    navState.chromeSpecFor(
+                        destination = DaybookNavKey.Progress,
+                        onBack = onBack,
+                    ),
+                ) {
+                    ProgressList(
+                        modifier = modifier,
+                    )
+                }
             }
             entry<DaybookNavKey.Settings> {
-                SettingsScreen(
-                    chrome = chrome,
-                    modifier = modifier,
-                )
+                ProvideScreenChromeSpec(
+                    navState.chromeSpecFor(
+                        destination = DaybookNavKey.Settings,
+                        onBack = onBack,
+                    ),
+                ) {
+                    SettingsScreen(
+                        modifier = modifier,
+                    )
+                }
             }
             entry<DaybookNavKey.Drawer> {
-                DrawerScreen(
-                    drawerVm = drawerVm,
-                    onOpenDoc = {
-                        navState.navigate(DaybookNavKey.DocEditor)
-                    },
-                    chrome = chrome,
-                    modifier = modifier,
-                )
+                ProvideScreenChromeSpec(
+                    navState.chromeSpecFor(
+                        destination = DaybookNavKey.Drawer,
+                        onBack = onBack,
+                    ),
+                ) {
+                    DrawerScreen(
+                        drawerVm = drawerVm,
+                        onOpenDoc = {
+                            navState.navigate(DaybookNavKey.DocEditor)
+                        },
+                        modifier = modifier,
+                    )
+                }
             }
             entry<DaybookNavKey.DocEditor> {
-                DocEditorScreen(
-                    contentType = contentType,
-                    chrome = chrome,
-                    modifier = modifier,
-                )
+                ProvideScreenChromeSpec(
+                    navState.chromeSpecFor(
+                        destination = DaybookNavKey.DocEditor,
+                        onBack = onBack,
+                    ),
+                ) {
+                    DocEditorScreen(
+                        contentType = contentType,
+                        modifier = modifier,
+                    )
+                }
             }
         },
     )

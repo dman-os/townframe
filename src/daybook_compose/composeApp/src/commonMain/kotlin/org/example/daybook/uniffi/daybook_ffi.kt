@@ -18,12 +18,28 @@ package org.example.daybook.uniffi
 // compile the Rust component. The easiest way to ensure this is to bundle the Kotlin
 // helpers directly inline like we're doing here.
 
-import com.sun.jna.Callback
+import com.sun.jna.Library
+import com.sun.jna.IntegerType
 import com.sun.jna.Native
 import com.sun.jna.Pointer
 import com.sun.jna.Structure
+import com.sun.jna.Callback
 import com.sun.jna.ptr.*
+import java.nio.ByteBuffer
+import java.nio.ByteOrder
+import java.nio.CharBuffer
+import java.nio.charset.CodingErrorAction
+import java.util.concurrent.atomic.AtomicLong
+import java.util.concurrent.ConcurrentHashMap
+import java.util.concurrent.atomic.AtomicBoolean
+import kotlin.coroutines.resume
+import kotlin.time.Instant
+import kotlin.uuid.Uuid
 import kotlinx.coroutines.CancellableContinuation
+import kotlinx.coroutines.DelicateCoroutinesApi
+import kotlinx.coroutines.GlobalScope
+import kotlinx.coroutines.Job
+import kotlinx.coroutines.launch
 import kotlinx.coroutines.suspendCancellableCoroutine
 import org.example.daybook.uniffi.core.ConfigEvent
 import org.example.daybook.uniffi.core.CreateProgressTaskArgs
@@ -83,34 +99,33 @@ import org.example.daybook.uniffi.types.FfiConverterTypeAddDocArgs
 import org.example.daybook.uniffi.types.FfiConverterTypeDoc
 import org.example.daybook.uniffi.types.FfiConverterTypeDocPatch
 import org.example.daybook.uniffi.types.FfiConverterTypeFacetDisplayHint
-import java.nio.ByteBuffer
-import java.nio.ByteOrder
-import java.nio.CharBuffer
-import java.nio.charset.CodingErrorAction
-import java.util.concurrent.ConcurrentHashMap
-import java.util.concurrent.atomic.AtomicBoolean
-import java.util.concurrent.atomic.AtomicLong
-import kotlin.coroutines.resume
-import kotlin.time.Instant
-import kotlin.uuid.Uuid
 import org.example.daybook.uniffi.core.RustBuffer as RustBufferConfigEvent
 import org.example.daybook.uniffi.core.RustBuffer as RustBufferCreateProgressTaskArgs
 import org.example.daybook.uniffi.core.RustBuffer as RustBufferDispatchEvent
+import org.example.daybook.uniffi.core.RustBuffer as RustBufferDocBundle
+import org.example.daybook.uniffi.core.RustBuffer as RustBufferDocEntry
+import org.example.daybook.uniffi.core.RustBuffer as RustBufferDocNBranches
 import org.example.daybook.uniffi.core.RustBuffer as RustBufferDrawerEvent
 import org.example.daybook.uniffi.core.RustBuffer as RustBufferInitEvent
 import org.example.daybook.uniffi.core.RustBuffer as RustBufferKnownRepoEntry
+import org.example.daybook.uniffi.core.RustBuffer as RustBufferListenerRegistration
 import org.example.daybook.uniffi.core.RustBuffer as RustBufferLocalStateEvent
 import org.example.daybook.uniffi.core.RustBuffer as RustBufferPanel
 import org.example.daybook.uniffi.core.RustBuffer as RustBufferPlugsEvent
 import org.example.daybook.uniffi.core.RustBuffer as RustBufferProgressEvent
+import org.example.daybook.uniffi.core.RustBuffer as RustBufferProgressRetentionPolicy
+import org.example.daybook.uniffi.core.RustBuffer as RustBufferProgressTask
 import org.example.daybook.uniffi.core.RustBuffer as RustBufferProgressUpdate
+import org.example.daybook.uniffi.core.RustBuffer as RustBufferProgressUpdateEntry
 import org.example.daybook.uniffi.core.RustBuffer as RustBufferRepoConfig
 import org.example.daybook.uniffi.core.RustBuffer as RustBufferTab
 import org.example.daybook.uniffi.core.RustBuffer as RustBufferTable
 import org.example.daybook.uniffi.core.RustBuffer as RustBufferTablesEvent
 import org.example.daybook.uniffi.core.RustBuffer as RustBufferTablesPatches
+import org.example.daybook.uniffi.core.RustBuffer as RustBufferUpdateDocArgsV2
 import org.example.daybook.uniffi.core.RustBuffer as RustBufferWindow
 import org.example.daybook.uniffi.types.RustBuffer as RustBufferAddDocArgs
+import org.example.daybook.uniffi.types.RustBuffer as RustBufferDoc
 import org.example.daybook.uniffi.types.RustBuffer as RustBufferDocPatch
 import org.example.daybook.uniffi.types.RustBuffer as RustBufferFacetDisplayHint
 
@@ -126,32 +141,26 @@ open class RustBuffer : Structure() {
     // Note: `capacity` and `len` are actually `ULong` values, but JVM only supports signed values.
     // When dealing with these fields, make sure to call `toULong()`.
     @JvmField var capacity: Long = 0
-
     @JvmField var len: Long = 0
-
     @JvmField var data: Pointer? = null
 
-    class ByValue :
-        RustBuffer(),
-        Structure.ByValue
-    class ByReference :
-        RustBuffer(),
-        Structure.ByReference
+    class ByValue: RustBuffer(), Structure.ByValue
+    class ByReference: RustBuffer(), Structure.ByReference
 
-    internal fun setValue(other: RustBuffer) {
+   internal fun setValue(other: RustBuffer) {
         capacity = other.capacity
         len = other.len
         data = other.data
     }
 
     companion object {
-        internal fun alloc(size: ULong = 0UL) = uniffiRustCall { status ->
+        internal fun alloc(size: ULong = 0UL) = uniffiRustCall() { status ->
             // Note: need to convert the size to a `Long` value to make this work with JVM.
             UniffiLib.ffi_daybook_ffi_rustbuffer_alloc(size.toLong(), status)
         }.also {
-            if (it.data == null) {
-                throw RuntimeException("RustBuffer.alloc() returned null data pointer (size=$size)")
-            }
+            if(it.data == null) {
+               throw RuntimeException("RustBuffer.alloc() returned null data pointer (size=${size})")
+           }
         }
 
         internal fun create(capacity: ULong, len: ULong, data: Pointer?): RustBuffer.ByValue {
@@ -162,15 +171,16 @@ open class RustBuffer : Structure() {
             return buf
         }
 
-        internal fun free(buf: RustBuffer.ByValue) = uniffiRustCall { status ->
+        internal fun free(buf: RustBuffer.ByValue) = uniffiRustCall() { status ->
             UniffiLib.ffi_daybook_ffi_rustbuffer_free(buf, status)
         }
     }
 
     @Suppress("TooGenericExceptionThrown")
-    fun asByteBuffer() = this.data?.getByteBuffer(0, this.len)?.also {
-        it.order(ByteOrder.BIG_ENDIAN)
-    }
+    fun asByteBuffer() =
+        this.data?.getByteBuffer(0, this.len)?.also {
+            it.order(ByteOrder.BIG_ENDIAN)
+        }
 }
 
 // This is a helper for safely passing byte references into the rust code.
@@ -182,14 +192,10 @@ open class RustBuffer : Structure() {
 @Structure.FieldOrder("len", "data")
 internal open class ForeignBytes : Structure() {
     @JvmField var len: Int = 0
-
     @JvmField var data: Pointer? = null
 
-    class ByValue :
-        ForeignBytes(),
-        Structure.ByValue
+    class ByValue : ForeignBytes(), Structure.ByValue
 }
-
 /**
  * The FfiConverter interface handles converter types to and from the FFI
  *
@@ -249,11 +255,11 @@ public interface FfiConverter<KotlinType, FfiType> {
     fun liftFromRustBuffer(rbuf: RustBuffer.ByValue): KotlinType {
         val byteBuf = rbuf.asByteBuffer()!!
         try {
-            val item = read(byteBuf)
-            if (byteBuf.hasRemaining()) {
-                throw RuntimeException("junk remaining in buffer after lifting, something is very wrong!!")
-            }
-            return item
+           val item = read(byteBuf)
+           if (byteBuf.hasRemaining()) {
+               throw RuntimeException("junk remaining in buffer after lifting, something is very wrong!!")
+           }
+           return item
         } finally {
             RustBuffer.free(rbuf)
         }
@@ -265,7 +271,7 @@ public interface FfiConverter<KotlinType, FfiType> {
  *
  * @suppress
  */
-public interface FfiConverterRustBuffer<KotlinType> : FfiConverter<KotlinType, RustBuffer.ByValue> {
+public interface FfiConverterRustBuffer<KotlinType>: FfiConverter<KotlinType, RustBuffer.ByValue> {
     override fun lift(value: RustBuffer.ByValue) = liftFromRustBuffer(value)
     override fun lower(value: KotlinType) = lowerIntoRustBuffer(value)
 }
@@ -279,18 +285,21 @@ internal const val UNIFFI_CALL_UNEXPECTED_ERROR = 2.toByte()
 @Structure.FieldOrder("code", "error_buf")
 internal open class UniffiRustCallStatus : Structure() {
     @JvmField var code: Byte = 0
-
     @JvmField var error_buf: RustBuffer.ByValue = RustBuffer.ByValue()
 
-    class ByValue :
-        UniffiRustCallStatus(),
-        Structure.ByValue
+    class ByValue: UniffiRustCallStatus(), Structure.ByValue
 
-    fun isSuccess(): Boolean = code == UNIFFI_CALL_SUCCESS
+    fun isSuccess(): Boolean {
+        return code == UNIFFI_CALL_SUCCESS
+    }
 
-    fun isError(): Boolean = code == UNIFFI_CALL_ERROR
+    fun isError(): Boolean {
+        return code == UNIFFI_CALL_ERROR
+    }
 
-    fun isPanic(): Boolean = code == UNIFFI_CALL_UNEXPECTED_ERROR
+    fun isPanic(): Boolean {
+        return code == UNIFFI_CALL_UNEXPECTED_ERROR
+    }
 
     companion object {
         fun create(code: Byte, errorBuf: RustBuffer.ByValue): UniffiRustCallStatus.ByValue {
@@ -310,7 +319,7 @@ class InternalException(message: String) : kotlin.Exception(message)
  * @suppress
  */
 interface UniffiRustCallStatusErrorHandler<E> {
-    fun lift(error_buf: RustBuffer.ByValue): E
+    fun lift(error_buf: RustBuffer.ByValue): E;
 }
 
 // Helpers for calling Rust
@@ -318,10 +327,7 @@ interface UniffiRustCallStatusErrorHandler<E> {
 // synchronize itself
 
 // Call a rust function that returns a Result<>.  Pass in the Error class companion that corresponds to the Err
-private inline fun <U, E : kotlin.Exception> uniffiRustCallWithError(
-    errorHandler: UniffiRustCallStatusErrorHandler<E>,
-    callback: (UniffiRustCallStatus) -> U,
-): U {
+private inline fun <U, E: kotlin.Exception> uniffiRustCallWithError(errorHandler: UniffiRustCallStatusErrorHandler<E>, callback: (UniffiRustCallStatus) -> U): U {
     var status = UniffiRustCallStatus()
     val return_value = callback(status)
     uniffiCheckCallStatus(errorHandler, status)
@@ -329,10 +335,7 @@ private inline fun <U, E : kotlin.Exception> uniffiRustCallWithError(
 }
 
 // Check UniffiRustCallStatus and throw an error if the call wasn't successful
-private fun <E : kotlin.Exception> uniffiCheckCallStatus(
-    errorHandler: UniffiRustCallStatusErrorHandler<E>,
-    status: UniffiRustCallStatus,
-) {
+private fun<E: kotlin.Exception> uniffiCheckCallStatus(errorHandler: UniffiRustCallStatusErrorHandler<E>, status: UniffiRustCallStatus) {
     if (status.isSuccess()) {
         return
     } else if (status.isError()) {
@@ -356,7 +359,7 @@ private fun <E : kotlin.Exception> uniffiCheckCallStatus(
  *
  * @suppress
  */
-object UniffiNullRustCallStatusErrorHandler : UniffiRustCallStatusErrorHandler<InternalException> {
+object UniffiNullRustCallStatusErrorHandler: UniffiRustCallStatusErrorHandler<InternalException> {
     override fun lift(error_buf: RustBuffer.ByValue): InternalException {
         RustBuffer.free(error_buf)
         return InternalException("Unexpected CALL_ERROR")
@@ -364,52 +367,44 @@ object UniffiNullRustCallStatusErrorHandler : UniffiRustCallStatusErrorHandler<I
 }
 
 // Call a rust function that returns a plain value
-private inline fun <U> uniffiRustCall(callback: (UniffiRustCallStatus) -> U): U =
-    uniffiRustCallWithError(UniffiNullRustCallStatusErrorHandler, callback)
+private inline fun <U> uniffiRustCall(callback: (UniffiRustCallStatus) -> U): U {
+    return uniffiRustCallWithError(UniffiNullRustCallStatusErrorHandler, callback)
+}
 
-internal inline fun <T> uniffiTraitInterfaceCall(
+internal inline fun<T> uniffiTraitInterfaceCall(
     callStatus: UniffiRustCallStatus,
     makeCall: () -> T,
     writeReturn: (T) -> Unit,
 ) {
     try {
         writeReturn(makeCall())
-    } catch (e: kotlin.Exception) {
-        val err = try {
-            e.stackTraceToString()
-        } catch (_: Throwable) {
-            ""
-        }
+    } catch(e: kotlin.Exception) {
+        val err = try { e.stackTraceToString() } catch(_: Throwable) { "" }
         callStatus.code = UNIFFI_CALL_UNEXPECTED_ERROR
         callStatus.error_buf = FfiConverterString.lower(err)
     }
 }
 
-internal inline fun <T, reified E : Throwable> uniffiTraitInterfaceCallWithError(
+internal inline fun<T, reified E: Throwable> uniffiTraitInterfaceCallWithError(
     callStatus: UniffiRustCallStatus,
     makeCall: () -> T,
     writeReturn: (T) -> Unit,
-    lowerError: (E) -> RustBuffer.ByValue,
+    lowerError: (E) -> RustBuffer.ByValue
 ) {
     try {
         writeReturn(makeCall())
-    } catch (e: kotlin.Exception) {
+    } catch(e: kotlin.Exception) {
         if (e is E) {
             callStatus.code = UNIFFI_CALL_ERROR
             callStatus.error_buf = lowerError(e)
         } else {
-            val err = try {
-                e.stackTraceToString()
-            } catch (_: Throwable) {
-                ""
-            }
+            val err = try { e.stackTraceToString() } catch(_: Throwable) { "" }
             callStatus.code = UNIFFI_CALL_UNEXPECTED_ERROR
             callStatus.error_buf = FfiConverterString.lower(err)
         }
     }
 }
-
-// Initial value and increment amount for handles.
+// Initial value and increment amount for handles. 
 // These ensure that Kotlin-generated handles always have the lowest bit set
 private const val UNIFFI_HANDLEMAP_INITIAL = 1.toLong()
 private const val UNIFFI_HANDLEMAP_DELTA = 2.toLong()
@@ -417,10 +412,9 @@ private const val UNIFFI_HANDLEMAP_DELTA = 2.toLong()
 // Map handles to objects
 //
 // This is used pass an opaque 64-bit handle representing a foreign object to the Rust code.
-internal class UniffiHandleMap<T : Any> {
+internal class UniffiHandleMap<T: Any> {
     private val map = ConcurrentHashMap<Long, T>()
-
-    // Start
+    // Start 
     private val counter = java.util.concurrent.atomic.AtomicLong(UNIFFI_HANDLEMAP_INITIAL)
 
     val size: Int
@@ -440,10 +434,14 @@ internal class UniffiHandleMap<T : Any> {
     }
 
     // Get an object from the handle map
-    fun get(handle: Long): T = map.get(handle) ?: throw InternalException("UniffiHandleMap.get: Invalid handle")
+    fun get(handle: Long): T {
+        return map.get(handle) ?: throw InternalException("UniffiHandleMap.get: Invalid handle")
+    }
 
     // Remove an entry from the handlemap and get the Kotlin object back
-    fun remove(handle: Long): T = map.remove(handle) ?: throw InternalException("UniffiHandleMap: Invalid handle")
+    fun remove(handle: Long): T {
+        return map.remove(handle) ?: throw InternalException("UniffiHandleMap: Invalid handle")
+    }
 }
 
 // Contains loading, initialization code,
@@ -459,33 +457,34 @@ private fun findLibraryName(componentName: String): String {
 
 // Define FFI callback types
 internal interface UniffiRustFutureContinuationCallback : com.sun.jna.Callback {
-    fun callback(`data`: Long, `pollResult`: Byte)
+    fun callback(`data`: Long,`pollResult`: Byte,)
 }
 internal interface UniffiForeignFutureDroppedCallback : com.sun.jna.Callback {
-    fun callback(`handle`: Long)
+    fun callback(`handle`: Long,)
 }
 internal interface UniffiCallbackInterfaceFree : com.sun.jna.Callback {
-    fun callback(`handle`: Long)
+    fun callback(`handle`: Long,)
 }
 internal interface UniffiCallbackInterfaceClone : com.sun.jna.Callback {
-    fun callback(`handle`: Long): Long
+    fun callback(`handle`: Long,)
+    : Long
 }
-
 @Structure.FieldOrder("handle", "free")
 internal open class UniffiForeignFutureDroppedCallbackStruct(
     @JvmField internal var `handle`: Long = 0.toLong(),
     @JvmField internal var `free`: UniffiForeignFutureDroppedCallback? = null,
 ) : Structure() {
-    class UniffiByValue(`handle`: Long = 0.toLong(), `free`: UniffiForeignFutureDroppedCallback? = null) :
-        UniffiForeignFutureDroppedCallbackStruct(`handle`, `free`),
-        Structure.ByValue
+    class UniffiByValue(
+        `handle`: Long = 0.toLong(),
+        `free`: UniffiForeignFutureDroppedCallback? = null,
+    ): UniffiForeignFutureDroppedCallbackStruct(`handle`,`free`,), Structure.ByValue
 
-    internal fun uniffiSetValue(other: UniffiForeignFutureDroppedCallbackStruct) {
+   internal fun uniffiSetValue(other: UniffiForeignFutureDroppedCallbackStruct) {
         `handle` = other.`handle`
         `free` = other.`free`
     }
-}
 
+}
 @Structure.FieldOrder("returnValue", "callStatus")
 internal open class UniffiForeignFutureResultU8(
     @JvmField internal var `returnValue`: Byte = 0.toByte(),
@@ -494,18 +493,17 @@ internal open class UniffiForeignFutureResultU8(
     class UniffiByValue(
         `returnValue`: Byte = 0.toByte(),
         `callStatus`: UniffiRustCallStatus.ByValue = UniffiRustCallStatus.ByValue(),
-    ) : UniffiForeignFutureResultU8(`returnValue`, `callStatus`),
-        Structure.ByValue
+    ): UniffiForeignFutureResultU8(`returnValue`,`callStatus`,), Structure.ByValue
 
-    internal fun uniffiSetValue(other: UniffiForeignFutureResultU8) {
+   internal fun uniffiSetValue(other: UniffiForeignFutureResultU8) {
         `returnValue` = other.`returnValue`
         `callStatus` = other.`callStatus`
     }
+
 }
 internal interface UniffiForeignFutureCompleteU8 : com.sun.jna.Callback {
-    fun callback(`callbackData`: Long, `result`: UniffiForeignFutureResultU8.UniffiByValue)
+    fun callback(`callbackData`: Long,`result`: UniffiForeignFutureResultU8.UniffiByValue,)
 }
-
 @Structure.FieldOrder("returnValue", "callStatus")
 internal open class UniffiForeignFutureResultI8(
     @JvmField internal var `returnValue`: Byte = 0.toByte(),
@@ -514,18 +512,17 @@ internal open class UniffiForeignFutureResultI8(
     class UniffiByValue(
         `returnValue`: Byte = 0.toByte(),
         `callStatus`: UniffiRustCallStatus.ByValue = UniffiRustCallStatus.ByValue(),
-    ) : UniffiForeignFutureResultI8(`returnValue`, `callStatus`),
-        Structure.ByValue
+    ): UniffiForeignFutureResultI8(`returnValue`,`callStatus`,), Structure.ByValue
 
-    internal fun uniffiSetValue(other: UniffiForeignFutureResultI8) {
+   internal fun uniffiSetValue(other: UniffiForeignFutureResultI8) {
         `returnValue` = other.`returnValue`
         `callStatus` = other.`callStatus`
     }
+
 }
 internal interface UniffiForeignFutureCompleteI8 : com.sun.jna.Callback {
-    fun callback(`callbackData`: Long, `result`: UniffiForeignFutureResultI8.UniffiByValue)
+    fun callback(`callbackData`: Long,`result`: UniffiForeignFutureResultI8.UniffiByValue,)
 }
-
 @Structure.FieldOrder("returnValue", "callStatus")
 internal open class UniffiForeignFutureResultU16(
     @JvmField internal var `returnValue`: Short = 0.toShort(),
@@ -534,18 +531,17 @@ internal open class UniffiForeignFutureResultU16(
     class UniffiByValue(
         `returnValue`: Short = 0.toShort(),
         `callStatus`: UniffiRustCallStatus.ByValue = UniffiRustCallStatus.ByValue(),
-    ) : UniffiForeignFutureResultU16(`returnValue`, `callStatus`),
-        Structure.ByValue
+    ): UniffiForeignFutureResultU16(`returnValue`,`callStatus`,), Structure.ByValue
 
-    internal fun uniffiSetValue(other: UniffiForeignFutureResultU16) {
+   internal fun uniffiSetValue(other: UniffiForeignFutureResultU16) {
         `returnValue` = other.`returnValue`
         `callStatus` = other.`callStatus`
     }
+
 }
 internal interface UniffiForeignFutureCompleteU16 : com.sun.jna.Callback {
-    fun callback(`callbackData`: Long, `result`: UniffiForeignFutureResultU16.UniffiByValue)
+    fun callback(`callbackData`: Long,`result`: UniffiForeignFutureResultU16.UniffiByValue,)
 }
-
 @Structure.FieldOrder("returnValue", "callStatus")
 internal open class UniffiForeignFutureResultI16(
     @JvmField internal var `returnValue`: Short = 0.toShort(),
@@ -554,18 +550,17 @@ internal open class UniffiForeignFutureResultI16(
     class UniffiByValue(
         `returnValue`: Short = 0.toShort(),
         `callStatus`: UniffiRustCallStatus.ByValue = UniffiRustCallStatus.ByValue(),
-    ) : UniffiForeignFutureResultI16(`returnValue`, `callStatus`),
-        Structure.ByValue
+    ): UniffiForeignFutureResultI16(`returnValue`,`callStatus`,), Structure.ByValue
 
-    internal fun uniffiSetValue(other: UniffiForeignFutureResultI16) {
+   internal fun uniffiSetValue(other: UniffiForeignFutureResultI16) {
         `returnValue` = other.`returnValue`
         `callStatus` = other.`callStatus`
     }
+
 }
 internal interface UniffiForeignFutureCompleteI16 : com.sun.jna.Callback {
-    fun callback(`callbackData`: Long, `result`: UniffiForeignFutureResultI16.UniffiByValue)
+    fun callback(`callbackData`: Long,`result`: UniffiForeignFutureResultI16.UniffiByValue,)
 }
-
 @Structure.FieldOrder("returnValue", "callStatus")
 internal open class UniffiForeignFutureResultU32(
     @JvmField internal var `returnValue`: Int = 0,
@@ -574,18 +569,17 @@ internal open class UniffiForeignFutureResultU32(
     class UniffiByValue(
         `returnValue`: Int = 0,
         `callStatus`: UniffiRustCallStatus.ByValue = UniffiRustCallStatus.ByValue(),
-    ) : UniffiForeignFutureResultU32(`returnValue`, `callStatus`),
-        Structure.ByValue
+    ): UniffiForeignFutureResultU32(`returnValue`,`callStatus`,), Structure.ByValue
 
-    internal fun uniffiSetValue(other: UniffiForeignFutureResultU32) {
+   internal fun uniffiSetValue(other: UniffiForeignFutureResultU32) {
         `returnValue` = other.`returnValue`
         `callStatus` = other.`callStatus`
     }
+
 }
 internal interface UniffiForeignFutureCompleteU32 : com.sun.jna.Callback {
-    fun callback(`callbackData`: Long, `result`: UniffiForeignFutureResultU32.UniffiByValue)
+    fun callback(`callbackData`: Long,`result`: UniffiForeignFutureResultU32.UniffiByValue,)
 }
-
 @Structure.FieldOrder("returnValue", "callStatus")
 internal open class UniffiForeignFutureResultI32(
     @JvmField internal var `returnValue`: Int = 0,
@@ -594,18 +588,17 @@ internal open class UniffiForeignFutureResultI32(
     class UniffiByValue(
         `returnValue`: Int = 0,
         `callStatus`: UniffiRustCallStatus.ByValue = UniffiRustCallStatus.ByValue(),
-    ) : UniffiForeignFutureResultI32(`returnValue`, `callStatus`),
-        Structure.ByValue
+    ): UniffiForeignFutureResultI32(`returnValue`,`callStatus`,), Structure.ByValue
 
-    internal fun uniffiSetValue(other: UniffiForeignFutureResultI32) {
+   internal fun uniffiSetValue(other: UniffiForeignFutureResultI32) {
         `returnValue` = other.`returnValue`
         `callStatus` = other.`callStatus`
     }
+
 }
 internal interface UniffiForeignFutureCompleteI32 : com.sun.jna.Callback {
-    fun callback(`callbackData`: Long, `result`: UniffiForeignFutureResultI32.UniffiByValue)
+    fun callback(`callbackData`: Long,`result`: UniffiForeignFutureResultI32.UniffiByValue,)
 }
-
 @Structure.FieldOrder("returnValue", "callStatus")
 internal open class UniffiForeignFutureResultU64(
     @JvmField internal var `returnValue`: Long = 0.toLong(),
@@ -614,18 +607,17 @@ internal open class UniffiForeignFutureResultU64(
     class UniffiByValue(
         `returnValue`: Long = 0.toLong(),
         `callStatus`: UniffiRustCallStatus.ByValue = UniffiRustCallStatus.ByValue(),
-    ) : UniffiForeignFutureResultU64(`returnValue`, `callStatus`),
-        Structure.ByValue
+    ): UniffiForeignFutureResultU64(`returnValue`,`callStatus`,), Structure.ByValue
 
-    internal fun uniffiSetValue(other: UniffiForeignFutureResultU64) {
+   internal fun uniffiSetValue(other: UniffiForeignFutureResultU64) {
         `returnValue` = other.`returnValue`
         `callStatus` = other.`callStatus`
     }
+
 }
 internal interface UniffiForeignFutureCompleteU64 : com.sun.jna.Callback {
-    fun callback(`callbackData`: Long, `result`: UniffiForeignFutureResultU64.UniffiByValue)
+    fun callback(`callbackData`: Long,`result`: UniffiForeignFutureResultU64.UniffiByValue,)
 }
-
 @Structure.FieldOrder("returnValue", "callStatus")
 internal open class UniffiForeignFutureResultI64(
     @JvmField internal var `returnValue`: Long = 0.toLong(),
@@ -634,18 +626,17 @@ internal open class UniffiForeignFutureResultI64(
     class UniffiByValue(
         `returnValue`: Long = 0.toLong(),
         `callStatus`: UniffiRustCallStatus.ByValue = UniffiRustCallStatus.ByValue(),
-    ) : UniffiForeignFutureResultI64(`returnValue`, `callStatus`),
-        Structure.ByValue
+    ): UniffiForeignFutureResultI64(`returnValue`,`callStatus`,), Structure.ByValue
 
-    internal fun uniffiSetValue(other: UniffiForeignFutureResultI64) {
+   internal fun uniffiSetValue(other: UniffiForeignFutureResultI64) {
         `returnValue` = other.`returnValue`
         `callStatus` = other.`callStatus`
     }
+
 }
 internal interface UniffiForeignFutureCompleteI64 : com.sun.jna.Callback {
-    fun callback(`callbackData`: Long, `result`: UniffiForeignFutureResultI64.UniffiByValue)
+    fun callback(`callbackData`: Long,`result`: UniffiForeignFutureResultI64.UniffiByValue,)
 }
-
 @Structure.FieldOrder("returnValue", "callStatus")
 internal open class UniffiForeignFutureResultF32(
     @JvmField internal var `returnValue`: Float = 0.0f,
@@ -654,18 +645,17 @@ internal open class UniffiForeignFutureResultF32(
     class UniffiByValue(
         `returnValue`: Float = 0.0f,
         `callStatus`: UniffiRustCallStatus.ByValue = UniffiRustCallStatus.ByValue(),
-    ) : UniffiForeignFutureResultF32(`returnValue`, `callStatus`),
-        Structure.ByValue
+    ): UniffiForeignFutureResultF32(`returnValue`,`callStatus`,), Structure.ByValue
 
-    internal fun uniffiSetValue(other: UniffiForeignFutureResultF32) {
+   internal fun uniffiSetValue(other: UniffiForeignFutureResultF32) {
         `returnValue` = other.`returnValue`
         `callStatus` = other.`callStatus`
     }
+
 }
 internal interface UniffiForeignFutureCompleteF32 : com.sun.jna.Callback {
-    fun callback(`callbackData`: Long, `result`: UniffiForeignFutureResultF32.UniffiByValue)
+    fun callback(`callbackData`: Long,`result`: UniffiForeignFutureResultF32.UniffiByValue,)
 }
-
 @Structure.FieldOrder("returnValue", "callStatus")
 internal open class UniffiForeignFutureResultF64(
     @JvmField internal var `returnValue`: Double = 0.0,
@@ -674,18 +664,17 @@ internal open class UniffiForeignFutureResultF64(
     class UniffiByValue(
         `returnValue`: Double = 0.0,
         `callStatus`: UniffiRustCallStatus.ByValue = UniffiRustCallStatus.ByValue(),
-    ) : UniffiForeignFutureResultF64(`returnValue`, `callStatus`),
-        Structure.ByValue
+    ): UniffiForeignFutureResultF64(`returnValue`,`callStatus`,), Structure.ByValue
 
-    internal fun uniffiSetValue(other: UniffiForeignFutureResultF64) {
+   internal fun uniffiSetValue(other: UniffiForeignFutureResultF64) {
         `returnValue` = other.`returnValue`
         `callStatus` = other.`callStatus`
     }
+
 }
 internal interface UniffiForeignFutureCompleteF64 : com.sun.jna.Callback {
-    fun callback(`callbackData`: Long, `result`: UniffiForeignFutureResultF64.UniffiByValue)
+    fun callback(`callbackData`: Long,`result`: UniffiForeignFutureResultF64.UniffiByValue,)
 }
-
 @Structure.FieldOrder("returnValue", "callStatus")
 internal open class UniffiForeignFutureResultRustBuffer(
     @JvmField internal var `returnValue`: RustBuffer.ByValue = RustBuffer.ByValue(),
@@ -694,130 +683,69 @@ internal open class UniffiForeignFutureResultRustBuffer(
     class UniffiByValue(
         `returnValue`: RustBuffer.ByValue = RustBuffer.ByValue(),
         `callStatus`: UniffiRustCallStatus.ByValue = UniffiRustCallStatus.ByValue(),
-    ) : UniffiForeignFutureResultRustBuffer(`returnValue`, `callStatus`),
-        Structure.ByValue
+    ): UniffiForeignFutureResultRustBuffer(`returnValue`,`callStatus`,), Structure.ByValue
 
-    internal fun uniffiSetValue(other: UniffiForeignFutureResultRustBuffer) {
+   internal fun uniffiSetValue(other: UniffiForeignFutureResultRustBuffer) {
         `returnValue` = other.`returnValue`
         `callStatus` = other.`callStatus`
     }
+
 }
 internal interface UniffiForeignFutureCompleteRustBuffer : com.sun.jna.Callback {
-    fun callback(`callbackData`: Long, `result`: UniffiForeignFutureResultRustBuffer.UniffiByValue)
+    fun callback(`callbackData`: Long,`result`: UniffiForeignFutureResultRustBuffer.UniffiByValue,)
 }
-
 @Structure.FieldOrder("callStatus")
 internal open class UniffiForeignFutureResultVoid(
     @JvmField internal var `callStatus`: UniffiRustCallStatus.ByValue = UniffiRustCallStatus.ByValue(),
 ) : Structure() {
-    class UniffiByValue(`callStatus`: UniffiRustCallStatus.ByValue = UniffiRustCallStatus.ByValue()) :
-        UniffiForeignFutureResultVoid(`callStatus`),
-        Structure.ByValue
+    class UniffiByValue(
+        `callStatus`: UniffiRustCallStatus.ByValue = UniffiRustCallStatus.ByValue(),
+    ): UniffiForeignFutureResultVoid(`callStatus`,), Structure.ByValue
 
-    internal fun uniffiSetValue(other: UniffiForeignFutureResultVoid) {
+   internal fun uniffiSetValue(other: UniffiForeignFutureResultVoid) {
         `callStatus` = other.`callStatus`
     }
+
 }
 internal interface UniffiForeignFutureCompleteVoid : com.sun.jna.Callback {
-    fun callback(`callbackData`: Long, `result`: UniffiForeignFutureResultVoid.UniffiByValue)
+    fun callback(`callbackData`: Long,`result`: UniffiForeignFutureResultVoid.UniffiByValue,)
 }
 internal interface UniffiCallbackInterfaceCameraPreviewFrameListenerMethod0 : com.sun.jna.Callback {
-    fun callback(
-        `uniffiHandle`: Long,
-        `frame`: RustBuffer.ByValue,
-        `uniffiOutReturn`: Pointer,
-        uniffiCallStatus: UniffiRustCallStatus,
-    )
+    fun callback(`uniffiHandle`: Long,`frame`: RustBuffer.ByValue,`uniffiOutReturn`: Pointer,uniffiCallStatus: UniffiRustCallStatus,)
 }
 internal interface UniffiCallbackInterfaceCameraQrEventListenerMethod0 : com.sun.jna.Callback {
-    fun callback(
-        `uniffiHandle`: Long,
-        `overlays`: RustBuffer.ByValue,
-        `uniffiOutReturn`: Pointer,
-        uniffiCallStatus: UniffiRustCallStatus,
-    )
+    fun callback(`uniffiHandle`: Long,`overlays`: RustBuffer.ByValue,`uniffiOutReturn`: Pointer,uniffiCallStatus: UniffiRustCallStatus,)
 }
 internal interface UniffiCallbackInterfaceCameraQrEventListenerMethod1 : com.sun.jna.Callback {
-    fun callback(
-        `uniffiHandle`: Long,
-        `decodedText`: RustBuffer.ByValue,
-        `uniffiOutReturn`: Pointer,
-        uniffiCallStatus: UniffiRustCallStatus,
-    )
+    fun callback(`uniffiHandle`: Long,`decodedText`: RustBuffer.ByValue,`uniffiOutReturn`: Pointer,uniffiCallStatus: UniffiRustCallStatus,)
 }
 internal interface UniffiCallbackInterfaceCameraQrEventListenerMethod2 : com.sun.jna.Callback {
-    fun callback(
-        `uniffiHandle`: Long,
-        `message`: RustBuffer.ByValue,
-        `uniffiOutReturn`: Pointer,
-        uniffiCallStatus: UniffiRustCallStatus,
-    )
+    fun callback(`uniffiHandle`: Long,`message`: RustBuffer.ByValue,`uniffiOutReturn`: Pointer,uniffiCallStatus: UniffiRustCallStatus,)
 }
 internal interface UniffiCallbackInterfaceConfigEventListenerMethod0 : com.sun.jna.Callback {
-    fun callback(
-        `uniffiHandle`: Long,
-        `event`: RustBufferConfigEvent.ByValue,
-        `uniffiOutReturn`: Pointer,
-        uniffiCallStatus: UniffiRustCallStatus,
-    )
+    fun callback(`uniffiHandle`: Long,`event`: RustBufferConfigEvent.ByValue,`uniffiOutReturn`: Pointer,uniffiCallStatus: UniffiRustCallStatus,)
 }
 internal interface UniffiCallbackInterfaceDispatchEventListenerMethod0 : com.sun.jna.Callback {
-    fun callback(
-        `uniffiHandle`: Long,
-        `event`: RustBufferDispatchEvent.ByValue,
-        `uniffiOutReturn`: Pointer,
-        uniffiCallStatus: UniffiRustCallStatus,
-    )
+    fun callback(`uniffiHandle`: Long,`event`: RustBufferDispatchEvent.ByValue,`uniffiOutReturn`: Pointer,uniffiCallStatus: UniffiRustCallStatus,)
 }
 internal interface UniffiCallbackInterfaceDrawerEventListenerMethod0 : com.sun.jna.Callback {
-    fun callback(
-        `uniffiHandle`: Long,
-        `event`: RustBufferDrawerEvent.ByValue,
-        `uniffiOutReturn`: Pointer,
-        uniffiCallStatus: UniffiRustCallStatus,
-    )
+    fun callback(`uniffiHandle`: Long,`event`: RustBufferDrawerEvent.ByValue,`uniffiOutReturn`: Pointer,uniffiCallStatus: UniffiRustCallStatus,)
 }
 internal interface UniffiCallbackInterfaceInitEventListenerMethod0 : com.sun.jna.Callback {
-    fun callback(
-        `uniffiHandle`: Long,
-        `event`: RustBufferInitEvent.ByValue,
-        `uniffiOutReturn`: Pointer,
-        uniffiCallStatus: UniffiRustCallStatus,
-    )
+    fun callback(`uniffiHandle`: Long,`event`: RustBufferInitEvent.ByValue,`uniffiOutReturn`: Pointer,uniffiCallStatus: UniffiRustCallStatus,)
 }
 internal interface UniffiCallbackInterfacePlugsEventListenerMethod0 : com.sun.jna.Callback {
-    fun callback(
-        `uniffiHandle`: Long,
-        `event`: RustBufferPlugsEvent.ByValue,
-        `uniffiOutReturn`: Pointer,
-        uniffiCallStatus: UniffiRustCallStatus,
-    )
+    fun callback(`uniffiHandle`: Long,`event`: RustBufferPlugsEvent.ByValue,`uniffiOutReturn`: Pointer,uniffiCallStatus: UniffiRustCallStatus,)
 }
 internal interface UniffiCallbackInterfaceProgressEventListenerMethod0 : com.sun.jna.Callback {
-    fun callback(
-        `uniffiHandle`: Long,
-        `event`: RustBufferProgressEvent.ByValue,
-        `uniffiOutReturn`: Pointer,
-        uniffiCallStatus: UniffiRustCallStatus,
-    )
+    fun callback(`uniffiHandle`: Long,`event`: RustBufferProgressEvent.ByValue,`uniffiOutReturn`: Pointer,uniffiCallStatus: UniffiRustCallStatus,)
 }
 internal interface UniffiCallbackInterfaceLocalStateEventListenerMethod0 : com.sun.jna.Callback {
-    fun callback(
-        `uniffiHandle`: Long,
-        `event`: RustBufferLocalStateEvent.ByValue,
-        `uniffiOutReturn`: Pointer,
-        uniffiCallStatus: UniffiRustCallStatus,
-    )
+    fun callback(`uniffiHandle`: Long,`event`: RustBufferLocalStateEvent.ByValue,`uniffiOutReturn`: Pointer,uniffiCallStatus: UniffiRustCallStatus,)
 }
 internal interface UniffiCallbackInterfaceTablesEventListenerMethod0 : com.sun.jna.Callback {
-    fun callback(
-        `uniffiHandle`: Long,
-        `event`: RustBufferTablesEvent.ByValue,
-        `uniffiOutReturn`: Pointer,
-        uniffiCallStatus: UniffiRustCallStatus,
-    )
+    fun callback(`uniffiHandle`: Long,`event`: RustBufferTablesEvent.ByValue,`uniffiOutReturn`: Pointer,uniffiCallStatus: UniffiRustCallStatus,)
 }
-
 @Structure.FieldOrder("uniffiFree", "uniffiClone", "onCameraPreviewFrame")
 internal open class UniffiVTableCallbackInterfaceCameraPreviewFrameListener(
     @JvmField internal var `uniffiFree`: UniffiCallbackInterfaceFree? = null,
@@ -828,20 +756,15 @@ internal open class UniffiVTableCallbackInterfaceCameraPreviewFrameListener(
         `uniffiFree`: UniffiCallbackInterfaceFree? = null,
         `uniffiClone`: UniffiCallbackInterfaceClone? = null,
         `onCameraPreviewFrame`: UniffiCallbackInterfaceCameraPreviewFrameListenerMethod0? = null,
-    ) : UniffiVTableCallbackInterfaceCameraPreviewFrameListener(
-        `uniffiFree`,
-        `uniffiClone`,
-        `onCameraPreviewFrame`,
-    ),
-        Structure.ByValue
+    ): UniffiVTableCallbackInterfaceCameraPreviewFrameListener(`uniffiFree`,`uniffiClone`,`onCameraPreviewFrame`,), Structure.ByValue
 
-    internal fun uniffiSetValue(other: UniffiVTableCallbackInterfaceCameraPreviewFrameListener) {
+   internal fun uniffiSetValue(other: UniffiVTableCallbackInterfaceCameraPreviewFrameListener) {
         `uniffiFree` = other.`uniffiFree`
         `uniffiClone` = other.`uniffiClone`
         `onCameraPreviewFrame` = other.`onCameraPreviewFrame`
     }
-}
 
+}
 @Structure.FieldOrder("uniffiFree", "uniffiClone", "onCameraQrOverlaysUpdated", "onCameraQrDetected", "onCameraQrError")
 internal open class UniffiVTableCallbackInterfaceCameraQrEventListener(
     @JvmField internal var `uniffiFree`: UniffiCallbackInterfaceFree? = null,
@@ -856,24 +779,17 @@ internal open class UniffiVTableCallbackInterfaceCameraQrEventListener(
         `onCameraQrOverlaysUpdated`: UniffiCallbackInterfaceCameraQrEventListenerMethod0? = null,
         `onCameraQrDetected`: UniffiCallbackInterfaceCameraQrEventListenerMethod1? = null,
         `onCameraQrError`: UniffiCallbackInterfaceCameraQrEventListenerMethod2? = null,
-    ) : UniffiVTableCallbackInterfaceCameraQrEventListener(
-        `uniffiFree`,
-        `uniffiClone`,
-        `onCameraQrOverlaysUpdated`,
-        `onCameraQrDetected`,
-        `onCameraQrError`,
-    ),
-        Structure.ByValue
+    ): UniffiVTableCallbackInterfaceCameraQrEventListener(`uniffiFree`,`uniffiClone`,`onCameraQrOverlaysUpdated`,`onCameraQrDetected`,`onCameraQrError`,), Structure.ByValue
 
-    internal fun uniffiSetValue(other: UniffiVTableCallbackInterfaceCameraQrEventListener) {
+   internal fun uniffiSetValue(other: UniffiVTableCallbackInterfaceCameraQrEventListener) {
         `uniffiFree` = other.`uniffiFree`
         `uniffiClone` = other.`uniffiClone`
         `onCameraQrOverlaysUpdated` = other.`onCameraQrOverlaysUpdated`
         `onCameraQrDetected` = other.`onCameraQrDetected`
         `onCameraQrError` = other.`onCameraQrError`
     }
-}
 
+}
 @Structure.FieldOrder("uniffiFree", "uniffiClone", "onConfigEvent")
 internal open class UniffiVTableCallbackInterfaceConfigEventListener(
     @JvmField internal var `uniffiFree`: UniffiCallbackInterfaceFree? = null,
@@ -884,16 +800,15 @@ internal open class UniffiVTableCallbackInterfaceConfigEventListener(
         `uniffiFree`: UniffiCallbackInterfaceFree? = null,
         `uniffiClone`: UniffiCallbackInterfaceClone? = null,
         `onConfigEvent`: UniffiCallbackInterfaceConfigEventListenerMethod0? = null,
-    ) : UniffiVTableCallbackInterfaceConfigEventListener(`uniffiFree`, `uniffiClone`, `onConfigEvent`),
-        Structure.ByValue
+    ): UniffiVTableCallbackInterfaceConfigEventListener(`uniffiFree`,`uniffiClone`,`onConfigEvent`,), Structure.ByValue
 
-    internal fun uniffiSetValue(other: UniffiVTableCallbackInterfaceConfigEventListener) {
+   internal fun uniffiSetValue(other: UniffiVTableCallbackInterfaceConfigEventListener) {
         `uniffiFree` = other.`uniffiFree`
         `uniffiClone` = other.`uniffiClone`
         `onConfigEvent` = other.`onConfigEvent`
     }
-}
 
+}
 @Structure.FieldOrder("uniffiFree", "uniffiClone", "onDispatchEvent")
 internal open class UniffiVTableCallbackInterfaceDispatchEventListener(
     @JvmField internal var `uniffiFree`: UniffiCallbackInterfaceFree? = null,
@@ -904,20 +819,15 @@ internal open class UniffiVTableCallbackInterfaceDispatchEventListener(
         `uniffiFree`: UniffiCallbackInterfaceFree? = null,
         `uniffiClone`: UniffiCallbackInterfaceClone? = null,
         `onDispatchEvent`: UniffiCallbackInterfaceDispatchEventListenerMethod0? = null,
-    ) : UniffiVTableCallbackInterfaceDispatchEventListener(
-        `uniffiFree`,
-        `uniffiClone`,
-        `onDispatchEvent`,
-    ),
-        Structure.ByValue
+    ): UniffiVTableCallbackInterfaceDispatchEventListener(`uniffiFree`,`uniffiClone`,`onDispatchEvent`,), Structure.ByValue
 
-    internal fun uniffiSetValue(other: UniffiVTableCallbackInterfaceDispatchEventListener) {
+   internal fun uniffiSetValue(other: UniffiVTableCallbackInterfaceDispatchEventListener) {
         `uniffiFree` = other.`uniffiFree`
         `uniffiClone` = other.`uniffiClone`
         `onDispatchEvent` = other.`onDispatchEvent`
     }
-}
 
+}
 @Structure.FieldOrder("uniffiFree", "uniffiClone", "onDrawerEvent")
 internal open class UniffiVTableCallbackInterfaceDrawerEventListener(
     @JvmField internal var `uniffiFree`: UniffiCallbackInterfaceFree? = null,
@@ -928,16 +838,15 @@ internal open class UniffiVTableCallbackInterfaceDrawerEventListener(
         `uniffiFree`: UniffiCallbackInterfaceFree? = null,
         `uniffiClone`: UniffiCallbackInterfaceClone? = null,
         `onDrawerEvent`: UniffiCallbackInterfaceDrawerEventListenerMethod0? = null,
-    ) : UniffiVTableCallbackInterfaceDrawerEventListener(`uniffiFree`, `uniffiClone`, `onDrawerEvent`),
-        Structure.ByValue
+    ): UniffiVTableCallbackInterfaceDrawerEventListener(`uniffiFree`,`uniffiClone`,`onDrawerEvent`,), Structure.ByValue
 
-    internal fun uniffiSetValue(other: UniffiVTableCallbackInterfaceDrawerEventListener) {
+   internal fun uniffiSetValue(other: UniffiVTableCallbackInterfaceDrawerEventListener) {
         `uniffiFree` = other.`uniffiFree`
         `uniffiClone` = other.`uniffiClone`
         `onDrawerEvent` = other.`onDrawerEvent`
     }
-}
 
+}
 @Structure.FieldOrder("uniffiFree", "uniffiClone", "onInitEvent")
 internal open class UniffiVTableCallbackInterfaceInitEventListener(
     @JvmField internal var `uniffiFree`: UniffiCallbackInterfaceFree? = null,
@@ -948,16 +857,15 @@ internal open class UniffiVTableCallbackInterfaceInitEventListener(
         `uniffiFree`: UniffiCallbackInterfaceFree? = null,
         `uniffiClone`: UniffiCallbackInterfaceClone? = null,
         `onInitEvent`: UniffiCallbackInterfaceInitEventListenerMethod0? = null,
-    ) : UniffiVTableCallbackInterfaceInitEventListener(`uniffiFree`, `uniffiClone`, `onInitEvent`),
-        Structure.ByValue
+    ): UniffiVTableCallbackInterfaceInitEventListener(`uniffiFree`,`uniffiClone`,`onInitEvent`,), Structure.ByValue
 
-    internal fun uniffiSetValue(other: UniffiVTableCallbackInterfaceInitEventListener) {
+   internal fun uniffiSetValue(other: UniffiVTableCallbackInterfaceInitEventListener) {
         `uniffiFree` = other.`uniffiFree`
         `uniffiClone` = other.`uniffiClone`
         `onInitEvent` = other.`onInitEvent`
     }
-}
 
+}
 @Structure.FieldOrder("uniffiFree", "uniffiClone", "onPlugsEvent")
 internal open class UniffiVTableCallbackInterfacePlugsEventListener(
     @JvmField internal var `uniffiFree`: UniffiCallbackInterfaceFree? = null,
@@ -968,16 +876,15 @@ internal open class UniffiVTableCallbackInterfacePlugsEventListener(
         `uniffiFree`: UniffiCallbackInterfaceFree? = null,
         `uniffiClone`: UniffiCallbackInterfaceClone? = null,
         `onPlugsEvent`: UniffiCallbackInterfacePlugsEventListenerMethod0? = null,
-    ) : UniffiVTableCallbackInterfacePlugsEventListener(`uniffiFree`, `uniffiClone`, `onPlugsEvent`),
-        Structure.ByValue
+    ): UniffiVTableCallbackInterfacePlugsEventListener(`uniffiFree`,`uniffiClone`,`onPlugsEvent`,), Structure.ByValue
 
-    internal fun uniffiSetValue(other: UniffiVTableCallbackInterfacePlugsEventListener) {
+   internal fun uniffiSetValue(other: UniffiVTableCallbackInterfacePlugsEventListener) {
         `uniffiFree` = other.`uniffiFree`
         `uniffiClone` = other.`uniffiClone`
         `onPlugsEvent` = other.`onPlugsEvent`
     }
-}
 
+}
 @Structure.FieldOrder("uniffiFree", "uniffiClone", "onProgressEvent")
 internal open class UniffiVTableCallbackInterfaceProgressEventListener(
     @JvmField internal var `uniffiFree`: UniffiCallbackInterfaceFree? = null,
@@ -988,20 +895,15 @@ internal open class UniffiVTableCallbackInterfaceProgressEventListener(
         `uniffiFree`: UniffiCallbackInterfaceFree? = null,
         `uniffiClone`: UniffiCallbackInterfaceClone? = null,
         `onProgressEvent`: UniffiCallbackInterfaceProgressEventListenerMethod0? = null,
-    ) : UniffiVTableCallbackInterfaceProgressEventListener(
-        `uniffiFree`,
-        `uniffiClone`,
-        `onProgressEvent`,
-    ),
-        Structure.ByValue
+    ): UniffiVTableCallbackInterfaceProgressEventListener(`uniffiFree`,`uniffiClone`,`onProgressEvent`,), Structure.ByValue
 
-    internal fun uniffiSetValue(other: UniffiVTableCallbackInterfaceProgressEventListener) {
+   internal fun uniffiSetValue(other: UniffiVTableCallbackInterfaceProgressEventListener) {
         `uniffiFree` = other.`uniffiFree`
         `uniffiClone` = other.`uniffiClone`
         `onProgressEvent` = other.`onProgressEvent`
     }
-}
 
+}
 @Structure.FieldOrder("uniffiFree", "uniffiClone", "onLocalStateEvent")
 internal open class UniffiVTableCallbackInterfaceLocalStateEventListener(
     @JvmField internal var `uniffiFree`: UniffiCallbackInterfaceFree? = null,
@@ -1012,20 +914,15 @@ internal open class UniffiVTableCallbackInterfaceLocalStateEventListener(
         `uniffiFree`: UniffiCallbackInterfaceFree? = null,
         `uniffiClone`: UniffiCallbackInterfaceClone? = null,
         `onLocalStateEvent`: UniffiCallbackInterfaceLocalStateEventListenerMethod0? = null,
-    ) : UniffiVTableCallbackInterfaceLocalStateEventListener(
-        `uniffiFree`,
-        `uniffiClone`,
-        `onLocalStateEvent`,
-    ),
-        Structure.ByValue
+    ): UniffiVTableCallbackInterfaceLocalStateEventListener(`uniffiFree`,`uniffiClone`,`onLocalStateEvent`,), Structure.ByValue
 
-    internal fun uniffiSetValue(other: UniffiVTableCallbackInterfaceLocalStateEventListener) {
+   internal fun uniffiSetValue(other: UniffiVTableCallbackInterfaceLocalStateEventListener) {
         `uniffiFree` = other.`uniffiFree`
         `uniffiClone` = other.`uniffiClone`
         `onLocalStateEvent` = other.`onLocalStateEvent`
     }
-}
 
+}
 @Structure.FieldOrder("uniffiFree", "uniffiClone", "onTablesEvent")
 internal open class UniffiVTableCallbackInterfaceTablesEventListener(
     @JvmField internal var `uniffiFree`: UniffiCallbackInterfaceFree? = null,
@@ -1036,14 +933,14 @@ internal open class UniffiVTableCallbackInterfaceTablesEventListener(
         `uniffiFree`: UniffiCallbackInterfaceFree? = null,
         `uniffiClone`: UniffiCallbackInterfaceClone? = null,
         `onTablesEvent`: UniffiCallbackInterfaceTablesEventListenerMethod0? = null,
-    ) : UniffiVTableCallbackInterfaceTablesEventListener(`uniffiFree`, `uniffiClone`, `onTablesEvent`),
-        Structure.ByValue
+    ): UniffiVTableCallbackInterfaceTablesEventListener(`uniffiFree`,`uniffiClone`,`onTablesEvent`,), Structure.ByValue
 
-    internal fun uniffiSetValue(other: UniffiVTableCallbackInterfaceTablesEventListener) {
+   internal fun uniffiSetValue(other: UniffiVTableCallbackInterfaceTablesEventListener) {
         `uniffiFree` = other.`uniffiFree`
         `uniffiClone` = other.`uniffiClone`
         `onTablesEvent` = other.`onTablesEvent`
     }
+
 }
 
 // A JNA Library to expose the extern-C FFI definitions.
@@ -1068,132 +965,253 @@ internal object IntegrityCheckingUniffiLib {
         uniffiCheckContractApiVersion(this)
         uniffiCheckApiChecksums(this)
     }
-    external fun uniffi_daybook_ffi_checksum_method_camerapreviewffi_clear_qr_listener(): Short
-    external fun uniffi_daybook_ffi_checksum_method_camerapreviewffi_latest_frame(): Short
-    external fun uniffi_daybook_ffi_checksum_method_camerapreviewffi_list_devices(): Short
-    external fun uniffi_daybook_ffi_checksum_method_camerapreviewffi_set_qr_analysis_enabled(): Short
-    external fun uniffi_daybook_ffi_checksum_method_camerapreviewffi_set_qr_listener(): Short
-    external fun uniffi_daybook_ffi_checksum_method_camerapreviewffi_start_stream(): Short
-    external fun uniffi_daybook_ffi_checksum_method_camerapreviewffi_stop_stream(): Short
-    external fun uniffi_daybook_ffi_checksum_method_camerapreviewffi_supports_native_qr_analysis(): Short
-    external fun uniffi_daybook_ffi_checksum_method_camerapreviewffi_take_latest_frame(): Short
-    external fun uniffi_daybook_ffi_checksum_method_camerapreviewframelistener_on_camera_preview_frame(): Short
-    external fun uniffi_daybook_ffi_checksum_method_cameraqranalyzerffi_clear_listener(): Short
-    external fun uniffi_daybook_ffi_checksum_method_cameraqranalyzerffi_set_listener(): Short
-    external fun uniffi_daybook_ffi_checksum_method_cameraqranalyzerffi_submit_jpeg_frame(): Short
-    external fun uniffi_daybook_ffi_checksum_method_cameraqreventlistener_on_camera_qr_overlays_updated(): Short
-    external fun uniffi_daybook_ffi_checksum_method_cameraqreventlistener_on_camera_qr_detected(): Short
-    external fun uniffi_daybook_ffi_checksum_method_cameraqreventlistener_on_camera_qr_error(): Short
-    external fun uniffi_daybook_ffi_checksum_method_appffictx_check_clone_destination(): Short
-    external fun uniffi_daybook_ffi_checksum_method_appffictx_clone_repo_init_from_url(): Short
-    external fun uniffi_daybook_ffi_checksum_method_appffictx_default_clone_parent_dir(): Short
-    external fun uniffi_daybook_ffi_checksum_method_appffictx_forget_known_repo(): Short
-    external fun uniffi_daybook_ffi_checksum_method_appffictx_get_repo_config(): Short
-    external fun uniffi_daybook_ffi_checksum_method_appffictx_is_repo_usable(): Short
-    external fun uniffi_daybook_ffi_checksum_method_appffictx_register_repo_path(): Short
-    external fun uniffi_daybook_ffi_checksum_method_appffictx_resolve_clone_url(): Short
-    external fun uniffi_daybook_ffi_checksum_method_ffierror_message(): Short
-    external fun uniffi_daybook_ffi_checksum_method_blobsrepoffi_get_path(): Short
-    external fun uniffi_daybook_ffi_checksum_method_blobsrepoffi_put(): Short
-    external fun uniffi_daybook_ffi_checksum_method_configeventlistener_on_config_event(): Short
-    external fun uniffi_daybook_ffi_checksum_method_configrepoffi_ffi_register_listener(): Short
-    external fun uniffi_daybook_ffi_checksum_method_configrepoffi_get_facet_display_hint(): Short
-    external fun uniffi_daybook_ffi_checksum_method_configrepoffi_get_mltools_config_json(): Short
-    external fun uniffi_daybook_ffi_checksum_method_configrepoffi_list_display_hints(): Short
-    external fun uniffi_daybook_ffi_checksum_method_configrepoffi_provision_mobile_default_mltools(): Short
-    external fun uniffi_daybook_ffi_checksum_method_configrepoffi_set_facet_display_hint(): Short
-    external fun uniffi_daybook_ffi_checksum_method_configrepoffi_set_mltools_config_json(): Short
-    external fun uniffi_daybook_ffi_checksum_method_configrepoffi_stop(): Short
-    external fun uniffi_daybook_ffi_checksum_method_dispatcheventlistener_on_dispatch_event(): Short
-    external fun uniffi_daybook_ffi_checksum_method_dispatchrepoffi_ffi_register_listener(): Short
-    external fun uniffi_daybook_ffi_checksum_method_dispatchrepoffi_list(): Short
-    external fun uniffi_daybook_ffi_checksum_method_dispatchrepoffi_stop(): Short
-    external fun uniffi_daybook_ffi_checksum_method_drawereventlistener_on_drawer_event(): Short
-    external fun uniffi_daybook_ffi_checksum_method_drawerrepoffi_add(): Short
-    external fun uniffi_daybook_ffi_checksum_method_drawerrepoffi_batch_add(): Short
-    external fun uniffi_daybook_ffi_checksum_method_drawerrepoffi_del(): Short
-    external fun uniffi_daybook_ffi_checksum_method_drawerrepoffi_ffi_register_listener(): Short
-    external fun uniffi_daybook_ffi_checksum_method_drawerrepoffi_get(): Short
-    external fun uniffi_daybook_ffi_checksum_method_drawerrepoffi_get_bundle(): Short
-    external fun uniffi_daybook_ffi_checksum_method_drawerrepoffi_get_entry(): Short
-    external fun uniffi_daybook_ffi_checksum_method_drawerrepoffi_list(): Short
-    external fun uniffi_daybook_ffi_checksum_method_drawerrepoffi_stop(): Short
-    external fun uniffi_daybook_ffi_checksum_method_drawerrepoffi_update(): Short
-    external fun uniffi_daybook_ffi_checksum_method_drawerrepoffi_update_batch(): Short
-    external fun uniffi_daybook_ffi_checksum_method_initeventlistener_on_init_event(): Short
-    external fun uniffi_daybook_ffi_checksum_method_initrepoffi_ffi_register_listener(): Short
-    external fun uniffi_daybook_ffi_checksum_method_initrepoffi_stop(): Short
-    external fun uniffi_daybook_ffi_checksum_method_plugseventlistener_on_plugs_event(): Short
-    external fun uniffi_daybook_ffi_checksum_method_plugsrepoffi_ffi_register_listener(): Short
-    external fun uniffi_daybook_ffi_checksum_method_plugsrepoffi_stop(): Short
-    external fun uniffi_daybook_ffi_checksum_method_progresseventlistener_on_progress_event(): Short
-    external fun uniffi_daybook_ffi_checksum_method_progressrepoffi_add_update(): Short
-    external fun uniffi_daybook_ffi_checksum_method_progressrepoffi_clear_completed(): Short
-    external fun uniffi_daybook_ffi_checksum_method_progressrepoffi_dismiss(): Short
-    external fun uniffi_daybook_ffi_checksum_method_progressrepoffi_ffi_register_listener(): Short
-    external fun uniffi_daybook_ffi_checksum_method_progressrepoffi_get(): Short
-    external fun uniffi_daybook_ffi_checksum_method_progressrepoffi_list(): Short
-    external fun uniffi_daybook_ffi_checksum_method_progressrepoffi_list_by_tag_prefix(): Short
-    external fun uniffi_daybook_ffi_checksum_method_progressrepoffi_list_updates(): Short
-    external fun uniffi_daybook_ffi_checksum_method_progressrepoffi_mark_viewed(): Short
-    external fun uniffi_daybook_ffi_checksum_method_progressrepoffi_set_retention_override(): Short
-    external fun uniffi_daybook_ffi_checksum_method_progressrepoffi_stop(): Short
-    external fun uniffi_daybook_ffi_checksum_method_progressrepoffi_upsert_task(): Short
-    external fun uniffi_daybook_ffi_checksum_method_localstateeventlistener_on_local_state_event(): Short
-    external fun uniffi_daybook_ffi_checksum_method_sqlitelocalstaterepoffi_ffi_register_listener(): Short
-    external fun uniffi_daybook_ffi_checksum_method_sqlitelocalstaterepoffi_stop(): Short
-    external fun uniffi_daybook_ffi_checksum_method_syncrepoffi_connect_known_devices_once(): Short
-    external fun uniffi_daybook_ffi_checksum_method_syncrepoffi_connect_url(): Short
-    external fun uniffi_daybook_ffi_checksum_method_syncrepoffi_get_ticket_qr_png(): Short
-    external fun uniffi_daybook_ffi_checksum_method_syncrepoffi_get_ticket_url(): Short
-    external fun uniffi_daybook_ffi_checksum_method_syncrepoffi_get_ticket_with_qr_png(): Short
-    external fun uniffi_daybook_ffi_checksum_method_syncrepoffi_stop(): Short
-    external fun uniffi_daybook_ffi_checksum_method_tableseventlistener_on_tables_event(): Short
-    external fun uniffi_daybook_ffi_checksum_method_tablesrepoffi_create_new_tab(): Short
-    external fun uniffi_daybook_ffi_checksum_method_tablesrepoffi_create_new_table(): Short
-    external fun uniffi_daybook_ffi_checksum_method_tablesrepoffi_ffi_register_listener(): Short
-    external fun uniffi_daybook_ffi_checksum_method_tablesrepoffi_get_panel(): Short
-    external fun uniffi_daybook_ffi_checksum_method_tablesrepoffi_get_selected_table(): Short
-    external fun uniffi_daybook_ffi_checksum_method_tablesrepoffi_get_tab(): Short
-    external fun uniffi_daybook_ffi_checksum_method_tablesrepoffi_get_table(): Short
-    external fun uniffi_daybook_ffi_checksum_method_tablesrepoffi_get_window(): Short
-    external fun uniffi_daybook_ffi_checksum_method_tablesrepoffi_list_panels(): Short
-    external fun uniffi_daybook_ffi_checksum_method_tablesrepoffi_list_tables(): Short
-    external fun uniffi_daybook_ffi_checksum_method_tablesrepoffi_list_tabs(): Short
-    external fun uniffi_daybook_ffi_checksum_method_tablesrepoffi_list_windows(): Short
-    external fun uniffi_daybook_ffi_checksum_method_tablesrepoffi_remove_tab(): Short
-    external fun uniffi_daybook_ffi_checksum_method_tablesrepoffi_set_panel(): Short
-    external fun uniffi_daybook_ffi_checksum_method_tablesrepoffi_set_tab(): Short
-    external fun uniffi_daybook_ffi_checksum_method_tablesrepoffi_set_table(): Short
-    external fun uniffi_daybook_ffi_checksum_method_tablesrepoffi_set_window(): Short
-    external fun uniffi_daybook_ffi_checksum_method_tablesrepoffi_stop(): Short
-    external fun uniffi_daybook_ffi_checksum_method_tablesrepoffi_update_batch(): Short
-    external fun uniffi_daybook_ffi_checksum_method_rtffi_dispatch_doc_facet(): Short
-    external fun uniffi_daybook_ffi_checksum_method_rtffi_stop(): Short
-    external fun uniffi_daybook_ffi_checksum_constructor_camerapreviewffi_load(): Short
-    external fun uniffi_daybook_ffi_checksum_constructor_cameraqranalyzerffi_load(): Short
-    external fun uniffi_daybook_ffi_checksum_constructor_appffictx_init(): Short
-    external fun uniffi_daybook_ffi_checksum_constructor_ffictx_init(): Short
-    external fun uniffi_daybook_ffi_checksum_constructor_blobsrepoffi_load(): Short
-    external fun uniffi_daybook_ffi_checksum_constructor_configrepoffi_load(): Short
-    external fun uniffi_daybook_ffi_checksum_constructor_dispatchrepoffi_load(): Short
-    external fun uniffi_daybook_ffi_checksum_constructor_drawerrepoffi_load(): Short
-    external fun uniffi_daybook_ffi_checksum_constructor_initrepoffi_load(): Short
-    external fun uniffi_daybook_ffi_checksum_constructor_plugsrepoffi_load(): Short
-    external fun uniffi_daybook_ffi_checksum_constructor_progressrepoffi_load(): Short
-    external fun uniffi_daybook_ffi_checksum_constructor_sqlitelocalstaterepoffi_load(): Short
-    external fun uniffi_daybook_ffi_checksum_constructor_syncrepoffi_load(): Short
-    external fun uniffi_daybook_ffi_checksum_constructor_tablesrepoffi_load(): Short
-    external fun uniffi_daybook_ffi_checksum_constructor_rtffi_load(): Short
-    external fun ffi_daybook_ffi_uniffi_contract_version(): Int
+    external fun uniffi_daybook_ffi_checksum_method_camerapreviewffi_clear_qr_listener(
+): Short
+external fun uniffi_daybook_ffi_checksum_method_camerapreviewffi_latest_frame(
+): Short
+external fun uniffi_daybook_ffi_checksum_method_camerapreviewffi_list_devices(
+): Short
+external fun uniffi_daybook_ffi_checksum_method_camerapreviewffi_set_qr_analysis_enabled(
+): Short
+external fun uniffi_daybook_ffi_checksum_method_camerapreviewffi_set_qr_listener(
+): Short
+external fun uniffi_daybook_ffi_checksum_method_camerapreviewffi_start_stream(
+): Short
+external fun uniffi_daybook_ffi_checksum_method_camerapreviewffi_stop_stream(
+): Short
+external fun uniffi_daybook_ffi_checksum_method_camerapreviewffi_supports_native_qr_analysis(
+): Short
+external fun uniffi_daybook_ffi_checksum_method_camerapreviewffi_take_latest_frame(
+): Short
+external fun uniffi_daybook_ffi_checksum_method_camerapreviewframelistener_on_camera_preview_frame(
+): Short
+external fun uniffi_daybook_ffi_checksum_method_cameraqranalyzerffi_clear_listener(
+): Short
+external fun uniffi_daybook_ffi_checksum_method_cameraqranalyzerffi_set_listener(
+): Short
+external fun uniffi_daybook_ffi_checksum_method_cameraqranalyzerffi_submit_jpeg_frame(
+): Short
+external fun uniffi_daybook_ffi_checksum_method_cameraqreventlistener_on_camera_qr_overlays_updated(
+): Short
+external fun uniffi_daybook_ffi_checksum_method_cameraqreventlistener_on_camera_qr_detected(
+): Short
+external fun uniffi_daybook_ffi_checksum_method_cameraqreventlistener_on_camera_qr_error(
+): Short
+external fun uniffi_daybook_ffi_checksum_method_appffictx_check_clone_destination(
+): Short
+external fun uniffi_daybook_ffi_checksum_method_appffictx_clone_repo_init_from_url(
+): Short
+external fun uniffi_daybook_ffi_checksum_method_appffictx_default_clone_parent_dir(
+): Short
+external fun uniffi_daybook_ffi_checksum_method_appffictx_forget_known_repo(
+): Short
+external fun uniffi_daybook_ffi_checksum_method_appffictx_get_repo_config(
+): Short
+external fun uniffi_daybook_ffi_checksum_method_appffictx_is_repo_usable(
+): Short
+external fun uniffi_daybook_ffi_checksum_method_appffictx_register_repo_path(
+): Short
+external fun uniffi_daybook_ffi_checksum_method_appffictx_resolve_clone_url(
+): Short
+external fun uniffi_daybook_ffi_checksum_method_ffierror_message(
+): Short
+external fun uniffi_daybook_ffi_checksum_method_blobsrepoffi_get_path(
+): Short
+external fun uniffi_daybook_ffi_checksum_method_blobsrepoffi_put(
+): Short
+external fun uniffi_daybook_ffi_checksum_method_configeventlistener_on_config_event(
+): Short
+external fun uniffi_daybook_ffi_checksum_method_configrepoffi_ffi_register_listener(
+): Short
+external fun uniffi_daybook_ffi_checksum_method_configrepoffi_get_facet_display_hint(
+): Short
+external fun uniffi_daybook_ffi_checksum_method_configrepoffi_get_mltools_config_json(
+): Short
+external fun uniffi_daybook_ffi_checksum_method_configrepoffi_list_display_hints(
+): Short
+external fun uniffi_daybook_ffi_checksum_method_configrepoffi_provision_mobile_default_mltools(
+): Short
+external fun uniffi_daybook_ffi_checksum_method_configrepoffi_set_facet_display_hint(
+): Short
+external fun uniffi_daybook_ffi_checksum_method_configrepoffi_set_mltools_config_json(
+): Short
+external fun uniffi_daybook_ffi_checksum_method_configrepoffi_stop(
+): Short
+external fun uniffi_daybook_ffi_checksum_method_dispatcheventlistener_on_dispatch_event(
+): Short
+external fun uniffi_daybook_ffi_checksum_method_dispatchrepoffi_ffi_register_listener(
+): Short
+external fun uniffi_daybook_ffi_checksum_method_dispatchrepoffi_list(
+): Short
+external fun uniffi_daybook_ffi_checksum_method_dispatchrepoffi_stop(
+): Short
+external fun uniffi_daybook_ffi_checksum_method_drawereventlistener_on_drawer_event(
+): Short
+external fun uniffi_daybook_ffi_checksum_method_drawerrepoffi_add(
+): Short
+external fun uniffi_daybook_ffi_checksum_method_drawerrepoffi_batch_add(
+): Short
+external fun uniffi_daybook_ffi_checksum_method_drawerrepoffi_del(
+): Short
+external fun uniffi_daybook_ffi_checksum_method_drawerrepoffi_ffi_register_listener(
+): Short
+external fun uniffi_daybook_ffi_checksum_method_drawerrepoffi_get(
+): Short
+external fun uniffi_daybook_ffi_checksum_method_drawerrepoffi_get_bundle(
+): Short
+external fun uniffi_daybook_ffi_checksum_method_drawerrepoffi_get_entry(
+): Short
+external fun uniffi_daybook_ffi_checksum_method_drawerrepoffi_list(
+): Short
+external fun uniffi_daybook_ffi_checksum_method_drawerrepoffi_stop(
+): Short
+external fun uniffi_daybook_ffi_checksum_method_drawerrepoffi_update(
+): Short
+external fun uniffi_daybook_ffi_checksum_method_drawerrepoffi_update_batch(
+): Short
+external fun uniffi_daybook_ffi_checksum_method_initeventlistener_on_init_event(
+): Short
+external fun uniffi_daybook_ffi_checksum_method_initrepoffi_ffi_register_listener(
+): Short
+external fun uniffi_daybook_ffi_checksum_method_initrepoffi_stop(
+): Short
+external fun uniffi_daybook_ffi_checksum_method_plugseventlistener_on_plugs_event(
+): Short
+external fun uniffi_daybook_ffi_checksum_method_plugsrepoffi_ffi_register_listener(
+): Short
+external fun uniffi_daybook_ffi_checksum_method_plugsrepoffi_stop(
+): Short
+external fun uniffi_daybook_ffi_checksum_method_progresseventlistener_on_progress_event(
+): Short
+external fun uniffi_daybook_ffi_checksum_method_progressrepoffi_add_update(
+): Short
+external fun uniffi_daybook_ffi_checksum_method_progressrepoffi_clear_completed(
+): Short
+external fun uniffi_daybook_ffi_checksum_method_progressrepoffi_dismiss(
+): Short
+external fun uniffi_daybook_ffi_checksum_method_progressrepoffi_ffi_register_listener(
+): Short
+external fun uniffi_daybook_ffi_checksum_method_progressrepoffi_get(
+): Short
+external fun uniffi_daybook_ffi_checksum_method_progressrepoffi_list(
+): Short
+external fun uniffi_daybook_ffi_checksum_method_progressrepoffi_list_by_tag_prefix(
+): Short
+external fun uniffi_daybook_ffi_checksum_method_progressrepoffi_list_updates(
+): Short
+external fun uniffi_daybook_ffi_checksum_method_progressrepoffi_mark_viewed(
+): Short
+external fun uniffi_daybook_ffi_checksum_method_progressrepoffi_set_retention_override(
+): Short
+external fun uniffi_daybook_ffi_checksum_method_progressrepoffi_stop(
+): Short
+external fun uniffi_daybook_ffi_checksum_method_progressrepoffi_upsert_task(
+): Short
+external fun uniffi_daybook_ffi_checksum_method_localstateeventlistener_on_local_state_event(
+): Short
+external fun uniffi_daybook_ffi_checksum_method_sqlitelocalstaterepoffi_ffi_register_listener(
+): Short
+external fun uniffi_daybook_ffi_checksum_method_sqlitelocalstaterepoffi_stop(
+): Short
+external fun uniffi_daybook_ffi_checksum_method_syncrepoffi_connect_known_devices_once(
+): Short
+external fun uniffi_daybook_ffi_checksum_method_syncrepoffi_connect_url(
+): Short
+external fun uniffi_daybook_ffi_checksum_method_syncrepoffi_get_ticket_qr_png(
+): Short
+external fun uniffi_daybook_ffi_checksum_method_syncrepoffi_get_ticket_url(
+): Short
+external fun uniffi_daybook_ffi_checksum_method_syncrepoffi_get_ticket_with_qr_png(
+): Short
+external fun uniffi_daybook_ffi_checksum_method_syncrepoffi_stop(
+): Short
+external fun uniffi_daybook_ffi_checksum_method_tableseventlistener_on_tables_event(
+): Short
+external fun uniffi_daybook_ffi_checksum_method_tablesrepoffi_create_new_tab(
+): Short
+external fun uniffi_daybook_ffi_checksum_method_tablesrepoffi_create_new_table(
+): Short
+external fun uniffi_daybook_ffi_checksum_method_tablesrepoffi_ffi_register_listener(
+): Short
+external fun uniffi_daybook_ffi_checksum_method_tablesrepoffi_get_panel(
+): Short
+external fun uniffi_daybook_ffi_checksum_method_tablesrepoffi_get_selected_table(
+): Short
+external fun uniffi_daybook_ffi_checksum_method_tablesrepoffi_get_tab(
+): Short
+external fun uniffi_daybook_ffi_checksum_method_tablesrepoffi_get_table(
+): Short
+external fun uniffi_daybook_ffi_checksum_method_tablesrepoffi_get_window(
+): Short
+external fun uniffi_daybook_ffi_checksum_method_tablesrepoffi_list_panels(
+): Short
+external fun uniffi_daybook_ffi_checksum_method_tablesrepoffi_list_tables(
+): Short
+external fun uniffi_daybook_ffi_checksum_method_tablesrepoffi_list_tabs(
+): Short
+external fun uniffi_daybook_ffi_checksum_method_tablesrepoffi_list_windows(
+): Short
+external fun uniffi_daybook_ffi_checksum_method_tablesrepoffi_remove_tab(
+): Short
+external fun uniffi_daybook_ffi_checksum_method_tablesrepoffi_set_panel(
+): Short
+external fun uniffi_daybook_ffi_checksum_method_tablesrepoffi_set_tab(
+): Short
+external fun uniffi_daybook_ffi_checksum_method_tablesrepoffi_set_table(
+): Short
+external fun uniffi_daybook_ffi_checksum_method_tablesrepoffi_set_window(
+): Short
+external fun uniffi_daybook_ffi_checksum_method_tablesrepoffi_stop(
+): Short
+external fun uniffi_daybook_ffi_checksum_method_tablesrepoffi_update_batch(
+): Short
+external fun uniffi_daybook_ffi_checksum_method_rtffi_dispatch_doc_facet(
+): Short
+external fun uniffi_daybook_ffi_checksum_method_rtffi_stop(
+): Short
+external fun uniffi_daybook_ffi_checksum_constructor_camerapreviewffi_load(
+): Short
+external fun uniffi_daybook_ffi_checksum_constructor_cameraqranalyzerffi_load(
+): Short
+external fun uniffi_daybook_ffi_checksum_constructor_appffictx_init(
+): Short
+external fun uniffi_daybook_ffi_checksum_constructor_ffictx_init(
+): Short
+external fun uniffi_daybook_ffi_checksum_constructor_blobsrepoffi_load(
+): Short
+external fun uniffi_daybook_ffi_checksum_constructor_configrepoffi_load(
+): Short
+external fun uniffi_daybook_ffi_checksum_constructor_dispatchrepoffi_load(
+): Short
+external fun uniffi_daybook_ffi_checksum_constructor_drawerrepoffi_load(
+): Short
+external fun uniffi_daybook_ffi_checksum_constructor_initrepoffi_load(
+): Short
+external fun uniffi_daybook_ffi_checksum_constructor_plugsrepoffi_load(
+): Short
+external fun uniffi_daybook_ffi_checksum_constructor_progressrepoffi_load(
+): Short
+external fun uniffi_daybook_ffi_checksum_constructor_sqlitelocalstaterepoffi_load(
+): Short
+external fun uniffi_daybook_ffi_checksum_constructor_syncrepoffi_load(
+): Short
+external fun uniffi_daybook_ffi_checksum_constructor_tablesrepoffi_load(
+): Short
+external fun uniffi_daybook_ffi_checksum_constructor_rtffi_load(
+): Short
+external fun ffi_daybook_ffi_uniffi_contract_version(
+): Int
+
+    
 }
 
 internal object UniffiLib {
-
+    
     // The Cleaner for the whole library
     internal val CLEANER: UniffiCleaner by lazy {
         UniffiCleaner.create()
     }
+    
 
     init {
         Native.register(UniffiLib::class.java, findLibraryName(componentName = "daybook_ffi"))
@@ -1209,650 +1227,472 @@ internal object UniffiLib {
         uniffiCallbackInterfaceTablesEventListener.register(this)
         org.example.daybook.uniffi.core.uniffiEnsureInitialized()
         org.example.daybook.uniffi.types.uniffiEnsureInitialized()
+        
     }
-    external fun uniffi_daybook_ffi_fn_clone_camerapreviewffi(
-        `handle`: Long,
-        uniffi_out_err: UniffiRustCallStatus,
-    ): Long
-    external fun uniffi_daybook_ffi_fn_free_camerapreviewffi(
-        `handle`: Long,
-        uniffi_out_err: UniffiRustCallStatus,
-    ): Unit
-    external fun uniffi_daybook_ffi_fn_constructor_camerapreviewffi_load(uniffi_out_err: UniffiRustCallStatus): Long
-    external fun uniffi_daybook_ffi_fn_method_camerapreviewffi_clear_qr_listener(
-        `ptr`: Long,
-        uniffi_out_err: UniffiRustCallStatus,
-    ): Unit
-    external fun uniffi_daybook_ffi_fn_method_camerapreviewffi_latest_frame(
-        `ptr`: Long,
-        uniffi_out_err: UniffiRustCallStatus,
-    ): RustBuffer.ByValue
-    external fun uniffi_daybook_ffi_fn_method_camerapreviewffi_list_devices(
-        `ptr`: Long,
-        uniffi_out_err: UniffiRustCallStatus,
-    ): RustBuffer.ByValue
-    external fun uniffi_daybook_ffi_fn_method_camerapreviewffi_set_qr_analysis_enabled(
-        `ptr`: Long,
-        `enabled`: Byte,
-        uniffi_out_err: UniffiRustCallStatus,
-    ): Unit
-    external fun uniffi_daybook_ffi_fn_method_camerapreviewffi_set_qr_listener(
-        `ptr`: Long,
-        `listener`: Long,
-        uniffi_out_err: UniffiRustCallStatus,
-    ): Unit
-    external fun uniffi_daybook_ffi_fn_method_camerapreviewffi_start_stream(
-        `ptr`: Long,
-        `deviceId`: Int,
-        `listener`: Long,
-        uniffi_out_err: UniffiRustCallStatus,
-    ): Unit
-    external fun uniffi_daybook_ffi_fn_method_camerapreviewffi_stop_stream(
-        `ptr`: Long,
-        uniffi_out_err: UniffiRustCallStatus,
-    ): Unit
-    external fun uniffi_daybook_ffi_fn_method_camerapreviewffi_supports_native_qr_analysis(
-        `ptr`: Long,
-        uniffi_out_err: UniffiRustCallStatus,
-    ): Byte
-    external fun uniffi_daybook_ffi_fn_method_camerapreviewffi_take_latest_frame(
-        `ptr`: Long,
-        uniffi_out_err: UniffiRustCallStatus,
-    ): RustBuffer.ByValue
-    external fun uniffi_daybook_ffi_fn_clone_camerapreviewframelistener(
-        `handle`: Long,
-        uniffi_out_err: UniffiRustCallStatus,
-    ): Long
-    external fun uniffi_daybook_ffi_fn_free_camerapreviewframelistener(
-        `handle`: Long,
-        uniffi_out_err: UniffiRustCallStatus,
-    ): Unit
-    external fun uniffi_daybook_ffi_fn_init_callback_vtable_camerapreviewframelistener(
-        `vtable`: UniffiVTableCallbackInterfaceCameraPreviewFrameListener,
-    ): Unit
-    external fun uniffi_daybook_ffi_fn_method_camerapreviewframelistener_on_camera_preview_frame(
-        `ptr`: Long,
-        `frame`: RustBuffer.ByValue,
-        uniffi_out_err: UniffiRustCallStatus,
-    ): Unit
-    external fun uniffi_daybook_ffi_fn_clone_cameraqranalyzerffi(
-        `handle`: Long,
-        uniffi_out_err: UniffiRustCallStatus,
-    ): Long
-    external fun uniffi_daybook_ffi_fn_free_cameraqranalyzerffi(
-        `handle`: Long,
-        uniffi_out_err: UniffiRustCallStatus,
-    ): Unit
-    external fun uniffi_daybook_ffi_fn_constructor_cameraqranalyzerffi_load(uniffi_out_err: UniffiRustCallStatus): Long
-    external fun uniffi_daybook_ffi_fn_method_cameraqranalyzerffi_clear_listener(
-        `ptr`: Long,
-        uniffi_out_err: UniffiRustCallStatus,
-    ): Unit
-    external fun uniffi_daybook_ffi_fn_method_cameraqranalyzerffi_set_listener(
-        `ptr`: Long,
-        `listener`: Long,
-        uniffi_out_err: UniffiRustCallStatus,
-    ): Unit
-    external fun uniffi_daybook_ffi_fn_method_cameraqranalyzerffi_submit_jpeg_frame(
-        `ptr`: Long,
-        `widthPx`: Int,
-        `heightPx`: Int,
-        `frameBytes`: RustBuffer.ByValue,
-        uniffi_out_err: UniffiRustCallStatus,
-    ): Unit
-    external fun uniffi_daybook_ffi_fn_clone_cameraqreventlistener(
-        `handle`: Long,
-        uniffi_out_err: UniffiRustCallStatus,
-    ): Long
-    external fun uniffi_daybook_ffi_fn_free_cameraqreventlistener(
-        `handle`: Long,
-        uniffi_out_err: UniffiRustCallStatus,
-    ): Unit
-    external fun uniffi_daybook_ffi_fn_init_callback_vtable_cameraqreventlistener(
-        `vtable`: UniffiVTableCallbackInterfaceCameraQrEventListener,
-    ): Unit
-    external fun uniffi_daybook_ffi_fn_method_cameraqreventlistener_on_camera_qr_overlays_updated(
-        `ptr`: Long,
-        `overlays`: RustBuffer.ByValue,
-        uniffi_out_err: UniffiRustCallStatus,
-    ): Unit
-    external fun uniffi_daybook_ffi_fn_method_cameraqreventlistener_on_camera_qr_detected(
-        `ptr`: Long,
-        `decodedText`: RustBuffer.ByValue,
-        uniffi_out_err: UniffiRustCallStatus,
-    ): Unit
-    external fun uniffi_daybook_ffi_fn_method_cameraqreventlistener_on_camera_qr_error(
-        `ptr`: Long,
-        `message`: RustBuffer.ByValue,
-        uniffi_out_err: UniffiRustCallStatus,
-    ): Unit
-    external fun uniffi_daybook_ffi_fn_clone_appffictx(`handle`: Long, uniffi_out_err: UniffiRustCallStatus): Long
-    external fun uniffi_daybook_ffi_fn_free_appffictx(`handle`: Long, uniffi_out_err: UniffiRustCallStatus): Unit
-    external fun uniffi_daybook_ffi_fn_constructor_appffictx_init(): Long
-    external fun uniffi_daybook_ffi_fn_method_appffictx_check_clone_destination(
-        `ptr`: Long,
-        `destination`: RustBuffer.ByValue,
-    ): Long
-    external fun uniffi_daybook_ffi_fn_method_appffictx_clone_repo_init_from_url(
-        `ptr`: Long,
-        `sourceUrl`: RustBuffer.ByValue,
-        `destination`: RustBuffer.ByValue,
-    ): Long
-    external fun uniffi_daybook_ffi_fn_method_appffictx_default_clone_parent_dir(`ptr`: Long): Long
-    external fun uniffi_daybook_ffi_fn_method_appffictx_forget_known_repo(
-        `ptr`: Long,
-        `repoId`: RustBuffer.ByValue,
-    ): Long
-    external fun uniffi_daybook_ffi_fn_method_appffictx_get_repo_config(`ptr`: Long): Long
-    external fun uniffi_daybook_ffi_fn_method_appffictx_is_repo_usable(
-        `ptr`: Long,
-        `repoRoot`: RustBuffer.ByValue,
-    ): Long
-    external fun uniffi_daybook_ffi_fn_method_appffictx_register_repo_path(
-        `ptr`: Long,
-        `repoRoot`: RustBuffer.ByValue,
-    ): Long
-    external fun uniffi_daybook_ffi_fn_method_appffictx_resolve_clone_url(
-        `ptr`: Long,
-        `sourceUrl`: RustBuffer.ByValue,
-    ): Long
-    external fun uniffi_daybook_ffi_fn_clone_ffictx(`handle`: Long, uniffi_out_err: UniffiRustCallStatus): Long
-    external fun uniffi_daybook_ffi_fn_free_ffictx(`handle`: Long, uniffi_out_err: UniffiRustCallStatus): Unit
-    external fun uniffi_daybook_ffi_fn_constructor_ffictx_init(`repoRoot`: RustBuffer.ByValue, `acx`: Long): Long
-    external fun uniffi_daybook_ffi_fn_clone_ffierror(`handle`: Long, uniffi_out_err: UniffiRustCallStatus): Long
-    external fun uniffi_daybook_ffi_fn_free_ffierror(`handle`: Long, uniffi_out_err: UniffiRustCallStatus): Unit
-    external fun uniffi_daybook_ffi_fn_method_ffierror_message(
-        `ptr`: Long,
-        uniffi_out_err: UniffiRustCallStatus,
-    ): RustBuffer.ByValue
-    external fun uniffi_daybook_ffi_fn_clone_blobsrepoffi(`handle`: Long, uniffi_out_err: UniffiRustCallStatus): Long
-    external fun uniffi_daybook_ffi_fn_free_blobsrepoffi(`handle`: Long, uniffi_out_err: UniffiRustCallStatus): Unit
-    external fun uniffi_daybook_ffi_fn_constructor_blobsrepoffi_load(`fcx`: Long): Long
-    external fun uniffi_daybook_ffi_fn_method_blobsrepoffi_get_path(`ptr`: Long, `hash`: RustBuffer.ByValue): Long
-    external fun uniffi_daybook_ffi_fn_method_blobsrepoffi_put(`ptr`: Long, `data`: RustBuffer.ByValue): Long
-    external fun uniffi_daybook_ffi_fn_clone_configeventlistener(
-        `handle`: Long,
-        uniffi_out_err: UniffiRustCallStatus,
-    ): Long
-    external fun uniffi_daybook_ffi_fn_free_configeventlistener(
-        `handle`: Long,
-        uniffi_out_err: UniffiRustCallStatus,
-    ): Unit
-    external fun uniffi_daybook_ffi_fn_init_callback_vtable_configeventlistener(
-        `vtable`: UniffiVTableCallbackInterfaceConfigEventListener,
-    ): Unit
-    external fun uniffi_daybook_ffi_fn_method_configeventlistener_on_config_event(
-        `ptr`: Long,
-        `event`: RustBufferConfigEvent.ByValue,
-        uniffi_out_err: UniffiRustCallStatus,
-    ): Unit
-    external fun uniffi_daybook_ffi_fn_clone_configrepoffi(`handle`: Long, uniffi_out_err: UniffiRustCallStatus): Long
-    external fun uniffi_daybook_ffi_fn_free_configrepoffi(`handle`: Long, uniffi_out_err: UniffiRustCallStatus): Unit
-    external fun uniffi_daybook_ffi_fn_constructor_configrepoffi_load(`fcx`: Long, `plugRepo`: Long): Long
-    external fun uniffi_daybook_ffi_fn_method_configrepoffi_ffi_register_listener(
-        `ptr`: Long,
-        `listener`: Long,
-        uniffi_out_err: UniffiRustCallStatus,
-    ): Long
-    external fun uniffi_daybook_ffi_fn_method_configrepoffi_get_facet_display_hint(
-        `ptr`: Long,
-        `id`: RustBuffer.ByValue,
-    ): Long
-    external fun uniffi_daybook_ffi_fn_method_configrepoffi_get_mltools_config_json(`ptr`: Long): Long
-    external fun uniffi_daybook_ffi_fn_method_configrepoffi_list_display_hints(`ptr`: Long): Long
-    external fun uniffi_daybook_ffi_fn_method_configrepoffi_provision_mobile_default_mltools(
-        `ptr`: Long,
-        `progressRepo`: Long,
-    ): Long
-    external fun uniffi_daybook_ffi_fn_method_configrepoffi_set_facet_display_hint(
-        `ptr`: Long,
-        `key`: RustBuffer.ByValue,
-        `config`: RustBufferFacetDisplayHint.ByValue,
-    ): Long
-    external fun uniffi_daybook_ffi_fn_method_configrepoffi_set_mltools_config_json(
-        `ptr`: Long,
-        `configJson`: RustBuffer.ByValue,
-    ): Long
-    external fun uniffi_daybook_ffi_fn_method_configrepoffi_stop(`ptr`: Long): Long
-    external fun uniffi_daybook_ffi_fn_clone_dispatcheventlistener(
-        `handle`: Long,
-        uniffi_out_err: UniffiRustCallStatus,
-    ): Long
-    external fun uniffi_daybook_ffi_fn_free_dispatcheventlistener(
-        `handle`: Long,
-        uniffi_out_err: UniffiRustCallStatus,
-    ): Unit
-    external fun uniffi_daybook_ffi_fn_init_callback_vtable_dispatcheventlistener(
-        `vtable`: UniffiVTableCallbackInterfaceDispatchEventListener,
-    ): Unit
-    external fun uniffi_daybook_ffi_fn_method_dispatcheventlistener_on_dispatch_event(
-        `ptr`: Long,
-        `event`: RustBufferDispatchEvent.ByValue,
-        uniffi_out_err: UniffiRustCallStatus,
-    ): Unit
-    external fun uniffi_daybook_ffi_fn_clone_dispatchrepoffi(
-        `handle`: Long,
-        uniffi_out_err: UniffiRustCallStatus,
-    ): Long
-    external fun uniffi_daybook_ffi_fn_free_dispatchrepoffi(`handle`: Long, uniffi_out_err: UniffiRustCallStatus): Unit
-    external fun uniffi_daybook_ffi_fn_constructor_dispatchrepoffi_load(`fcx`: Long): Long
-    external fun uniffi_daybook_ffi_fn_method_dispatchrepoffi_ffi_register_listener(
-        `ptr`: Long,
-        `listener`: Long,
-        uniffi_out_err: UniffiRustCallStatus,
-    ): Long
-    external fun uniffi_daybook_ffi_fn_method_dispatchrepoffi_list(`ptr`: Long): Long
-    external fun uniffi_daybook_ffi_fn_method_dispatchrepoffi_stop(`ptr`: Long): Long
-    external fun uniffi_daybook_ffi_fn_clone_drawereventlistener(
-        `handle`: Long,
-        uniffi_out_err: UniffiRustCallStatus,
-    ): Long
-    external fun uniffi_daybook_ffi_fn_free_drawereventlistener(
-        `handle`: Long,
-        uniffi_out_err: UniffiRustCallStatus,
-    ): Unit
-    external fun uniffi_daybook_ffi_fn_init_callback_vtable_drawereventlistener(
-        `vtable`: UniffiVTableCallbackInterfaceDrawerEventListener,
-    ): Unit
-    external fun uniffi_daybook_ffi_fn_method_drawereventlistener_on_drawer_event(
-        `ptr`: Long,
-        `event`: RustBufferDrawerEvent.ByValue,
-        uniffi_out_err: UniffiRustCallStatus,
-    ): Unit
-    external fun uniffi_daybook_ffi_fn_clone_drawerrepoffi(`handle`: Long, uniffi_out_err: UniffiRustCallStatus): Long
-    external fun uniffi_daybook_ffi_fn_free_drawerrepoffi(`handle`: Long, uniffi_out_err: UniffiRustCallStatus): Unit
-    external fun uniffi_daybook_ffi_fn_constructor_drawerrepoffi_load(`fcx`: Long, `plugsRepo`: Long): Long
-    external fun uniffi_daybook_ffi_fn_method_drawerrepoffi_add(
-        `ptr`: Long,
-        `args`: RustBufferAddDocArgs.ByValue,
-    ): Long
-    external fun uniffi_daybook_ffi_fn_method_drawerrepoffi_batch_add(`ptr`: Long, `args`: RustBuffer.ByValue): Long
-    external fun uniffi_daybook_ffi_fn_method_drawerrepoffi_del(`ptr`: Long, `id`: RustBuffer.ByValue): Long
-    external fun uniffi_daybook_ffi_fn_method_drawerrepoffi_ffi_register_listener(
-        `ptr`: Long,
-        `listener`: Long,
-        uniffi_out_err: UniffiRustCallStatus,
-    ): Long
-    external fun uniffi_daybook_ffi_fn_method_drawerrepoffi_get(
-        `ptr`: Long,
-        `id`: RustBuffer.ByValue,
-        `branchPath`: RustBuffer.ByValue,
-    ): Long
-    external fun uniffi_daybook_ffi_fn_method_drawerrepoffi_get_bundle(
-        `ptr`: Long,
-        `id`: RustBuffer.ByValue,
-        `branchPath`: RustBuffer.ByValue,
-    ): Long
-    external fun uniffi_daybook_ffi_fn_method_drawerrepoffi_get_entry(`ptr`: Long, `id`: RustBuffer.ByValue): Long
-    external fun uniffi_daybook_ffi_fn_method_drawerrepoffi_list(`ptr`: Long): Long
-    external fun uniffi_daybook_ffi_fn_method_drawerrepoffi_stop(`ptr`: Long): Long
-    external fun uniffi_daybook_ffi_fn_method_drawerrepoffi_update(
-        `ptr`: Long,
-        `patch`: RustBufferDocPatch.ByValue,
-        `branchPath`: RustBuffer.ByValue,
-        `heads`: RustBuffer.ByValue,
-    ): Long
-    external fun uniffi_daybook_ffi_fn_method_drawerrepoffi_update_batch(
-        `ptr`: Long,
-        `patches`: RustBuffer.ByValue,
-    ): Long
-    external fun uniffi_daybook_ffi_fn_clone_initeventlistener(
-        `handle`: Long,
-        uniffi_out_err: UniffiRustCallStatus,
-    ): Long
-    external fun uniffi_daybook_ffi_fn_free_initeventlistener(
-        `handle`: Long,
-        uniffi_out_err: UniffiRustCallStatus,
-    ): Unit
-    external fun uniffi_daybook_ffi_fn_init_callback_vtable_initeventlistener(
-        `vtable`: UniffiVTableCallbackInterfaceInitEventListener,
-    ): Unit
-    external fun uniffi_daybook_ffi_fn_method_initeventlistener_on_init_event(
-        `ptr`: Long,
-        `event`: RustBufferInitEvent.ByValue,
-        uniffi_out_err: UniffiRustCallStatus,
-    ): Unit
-    external fun uniffi_daybook_ffi_fn_clone_initrepoffi(`handle`: Long, uniffi_out_err: UniffiRustCallStatus): Long
-    external fun uniffi_daybook_ffi_fn_free_initrepoffi(`handle`: Long, uniffi_out_err: UniffiRustCallStatus): Unit
-    external fun uniffi_daybook_ffi_fn_constructor_initrepoffi_load(`fcx`: Long, `progressRepo`: Long): Long
-    external fun uniffi_daybook_ffi_fn_method_initrepoffi_ffi_register_listener(
-        `ptr`: Long,
-        `listener`: Long,
-        uniffi_out_err: UniffiRustCallStatus,
-    ): Long
-    external fun uniffi_daybook_ffi_fn_method_initrepoffi_stop(`ptr`: Long): Long
-    external fun uniffi_daybook_ffi_fn_clone_plugseventlistener(
-        `handle`: Long,
-        uniffi_out_err: UniffiRustCallStatus,
-    ): Long
-    external fun uniffi_daybook_ffi_fn_free_plugseventlistener(
-        `handle`: Long,
-        uniffi_out_err: UniffiRustCallStatus,
-    ): Unit
-    external fun uniffi_daybook_ffi_fn_init_callback_vtable_plugseventlistener(
-        `vtable`: UniffiVTableCallbackInterfacePlugsEventListener,
-    ): Unit
-    external fun uniffi_daybook_ffi_fn_method_plugseventlistener_on_plugs_event(
-        `ptr`: Long,
-        `event`: RustBufferPlugsEvent.ByValue,
-        uniffi_out_err: UniffiRustCallStatus,
-    ): Unit
-    external fun uniffi_daybook_ffi_fn_clone_plugsrepoffi(`handle`: Long, uniffi_out_err: UniffiRustCallStatus): Long
-    external fun uniffi_daybook_ffi_fn_free_plugsrepoffi(`handle`: Long, uniffi_out_err: UniffiRustCallStatus): Unit
-    external fun uniffi_daybook_ffi_fn_constructor_plugsrepoffi_load(`fcx`: Long, `blobsRepo`: Long): Long
-    external fun uniffi_daybook_ffi_fn_method_plugsrepoffi_ffi_register_listener(
-        `ptr`: Long,
-        `listener`: Long,
-        uniffi_out_err: UniffiRustCallStatus,
-    ): Long
-    external fun uniffi_daybook_ffi_fn_method_plugsrepoffi_stop(`ptr`: Long): Long
-    external fun uniffi_daybook_ffi_fn_clone_progresseventlistener(
-        `handle`: Long,
-        uniffi_out_err: UniffiRustCallStatus,
-    ): Long
-    external fun uniffi_daybook_ffi_fn_free_progresseventlistener(
-        `handle`: Long,
-        uniffi_out_err: UniffiRustCallStatus,
-    ): Unit
-    external fun uniffi_daybook_ffi_fn_init_callback_vtable_progresseventlistener(
-        `vtable`: UniffiVTableCallbackInterfaceProgressEventListener,
-    ): Unit
-    external fun uniffi_daybook_ffi_fn_method_progresseventlistener_on_progress_event(
-        `ptr`: Long,
-        `event`: RustBufferProgressEvent.ByValue,
-        uniffi_out_err: UniffiRustCallStatus,
-    ): Unit
-    external fun uniffi_daybook_ffi_fn_clone_progressrepoffi(
-        `handle`: Long,
-        uniffi_out_err: UniffiRustCallStatus,
-    ): Long
-    external fun uniffi_daybook_ffi_fn_free_progressrepoffi(`handle`: Long, uniffi_out_err: UniffiRustCallStatus): Unit
-    external fun uniffi_daybook_ffi_fn_constructor_progressrepoffi_load(`fcx`: Long): Long
-    external fun uniffi_daybook_ffi_fn_method_progressrepoffi_add_update(
-        `ptr`: Long,
-        `taskId`: RustBuffer.ByValue,
-        `update`: RustBufferProgressUpdate.ByValue,
-    ): Long
-    external fun uniffi_daybook_ffi_fn_method_progressrepoffi_clear_completed(`ptr`: Long): Long
-    external fun uniffi_daybook_ffi_fn_method_progressrepoffi_dismiss(`ptr`: Long, `taskId`: RustBuffer.ByValue): Long
-    external fun uniffi_daybook_ffi_fn_method_progressrepoffi_ffi_register_listener(
-        `ptr`: Long,
-        `listener`: Long,
-        uniffi_out_err: UniffiRustCallStatus,
-    ): Long
-    external fun uniffi_daybook_ffi_fn_method_progressrepoffi_get(`ptr`: Long, `taskId`: RustBuffer.ByValue): Long
-    external fun uniffi_daybook_ffi_fn_method_progressrepoffi_list(`ptr`: Long): Long
-    external fun uniffi_daybook_ffi_fn_method_progressrepoffi_list_by_tag_prefix(
-        `ptr`: Long,
-        `tagPrefix`: RustBuffer.ByValue,
-    ): Long
-    external fun uniffi_daybook_ffi_fn_method_progressrepoffi_list_updates(
-        `ptr`: Long,
-        `taskId`: RustBuffer.ByValue,
-    ): Long
-    external fun uniffi_daybook_ffi_fn_method_progressrepoffi_mark_viewed(
-        `ptr`: Long,
-        `taskId`: RustBuffer.ByValue,
-    ): Long
-    external fun uniffi_daybook_ffi_fn_method_progressrepoffi_set_retention_override(
-        `ptr`: Long,
-        `taskId`: RustBuffer.ByValue,
-        `retentionOverride`: RustBuffer.ByValue,
-    ): Long
-    external fun uniffi_daybook_ffi_fn_method_progressrepoffi_stop(`ptr`: Long): Long
-    external fun uniffi_daybook_ffi_fn_method_progressrepoffi_upsert_task(
-        `ptr`: Long,
-        `args`: RustBufferCreateProgressTaskArgs.ByValue,
-    ): Long
-    external fun uniffi_daybook_ffi_fn_clone_localstateeventlistener(
-        `handle`: Long,
-        uniffi_out_err: UniffiRustCallStatus,
-    ): Long
-    external fun uniffi_daybook_ffi_fn_free_localstateeventlistener(
-        `handle`: Long,
-        uniffi_out_err: UniffiRustCallStatus,
-    ): Unit
-    external fun uniffi_daybook_ffi_fn_init_callback_vtable_localstateeventlistener(
-        `vtable`: UniffiVTableCallbackInterfaceLocalStateEventListener,
-    ): Unit
-    external fun uniffi_daybook_ffi_fn_method_localstateeventlistener_on_local_state_event(
-        `ptr`: Long,
-        `event`: RustBufferLocalStateEvent.ByValue,
-        uniffi_out_err: UniffiRustCallStatus,
-    ): Unit
-    external fun uniffi_daybook_ffi_fn_clone_sqlitelocalstaterepoffi(
-        `handle`: Long,
-        uniffi_out_err: UniffiRustCallStatus,
-    ): Long
-    external fun uniffi_daybook_ffi_fn_free_sqlitelocalstaterepoffi(
-        `handle`: Long,
-        uniffi_out_err: UniffiRustCallStatus,
-    ): Unit
-    external fun uniffi_daybook_ffi_fn_constructor_sqlitelocalstaterepoffi_load(`fcx`: Long): Long
-    external fun uniffi_daybook_ffi_fn_method_sqlitelocalstaterepoffi_ffi_register_listener(
-        `ptr`: Long,
-        `listener`: Long,
-        uniffi_out_err: UniffiRustCallStatus,
-    ): Long
-    external fun uniffi_daybook_ffi_fn_method_sqlitelocalstaterepoffi_stop(`ptr`: Long): Long
-    external fun uniffi_daybook_ffi_fn_clone_syncrepoffi(`handle`: Long, uniffi_out_err: UniffiRustCallStatus): Long
-    external fun uniffi_daybook_ffi_fn_free_syncrepoffi(`handle`: Long, uniffi_out_err: UniffiRustCallStatus): Unit
-    external fun uniffi_daybook_ffi_fn_constructor_syncrepoffi_load(
-        `fcx`: Long,
-        `configRepo`: Long,
-        `blobsRepo`: Long,
-        `drawerRepo`: Long,
-        `progressRepo`: Long,
-    ): Long
-    external fun uniffi_daybook_ffi_fn_method_syncrepoffi_connect_known_devices_once(`ptr`: Long): Long
-    external fun uniffi_daybook_ffi_fn_method_syncrepoffi_connect_url(
-        `ptr`: Long,
-        `sourceUrl`: RustBuffer.ByValue,
-    ): Long
-    external fun uniffi_daybook_ffi_fn_method_syncrepoffi_get_ticket_qr_png(`ptr`: Long, `sizePx`: Int): Long
-    external fun uniffi_daybook_ffi_fn_method_syncrepoffi_get_ticket_url(`ptr`: Long): Long
-    external fun uniffi_daybook_ffi_fn_method_syncrepoffi_get_ticket_with_qr_png(`ptr`: Long, `sizePx`: Int): Long
-    external fun uniffi_daybook_ffi_fn_method_syncrepoffi_stop(`ptr`: Long): Long
-    external fun uniffi_daybook_ffi_fn_clone_tableseventlistener(
-        `handle`: Long,
-        uniffi_out_err: UniffiRustCallStatus,
-    ): Long
-    external fun uniffi_daybook_ffi_fn_free_tableseventlistener(
-        `handle`: Long,
-        uniffi_out_err: UniffiRustCallStatus,
-    ): Unit
-    external fun uniffi_daybook_ffi_fn_init_callback_vtable_tableseventlistener(
-        `vtable`: UniffiVTableCallbackInterfaceTablesEventListener,
-    ): Unit
-    external fun uniffi_daybook_ffi_fn_method_tableseventlistener_on_tables_event(
-        `ptr`: Long,
-        `event`: RustBufferTablesEvent.ByValue,
-        uniffi_out_err: UniffiRustCallStatus,
-    ): Unit
-    external fun uniffi_daybook_ffi_fn_clone_tablesrepoffi(`handle`: Long, uniffi_out_err: UniffiRustCallStatus): Long
-    external fun uniffi_daybook_ffi_fn_free_tablesrepoffi(`handle`: Long, uniffi_out_err: UniffiRustCallStatus): Unit
-    external fun uniffi_daybook_ffi_fn_constructor_tablesrepoffi_load(`fcx`: Long): Long
-    external fun uniffi_daybook_ffi_fn_method_tablesrepoffi_create_new_tab(
-        `ptr`: Long,
-        `tableId`: RustBuffer.ByValue,
-    ): Long
-    external fun uniffi_daybook_ffi_fn_method_tablesrepoffi_create_new_table(`ptr`: Long): Long
-    external fun uniffi_daybook_ffi_fn_method_tablesrepoffi_ffi_register_listener(
-        `ptr`: Long,
-        `listener`: Long,
-        uniffi_out_err: UniffiRustCallStatus,
-    ): Long
-    external fun uniffi_daybook_ffi_fn_method_tablesrepoffi_get_panel(`ptr`: Long, `id`: RustBuffer.ByValue): Long
-    external fun uniffi_daybook_ffi_fn_method_tablesrepoffi_get_selected_table(`ptr`: Long): Long
-    external fun uniffi_daybook_ffi_fn_method_tablesrepoffi_get_tab(`ptr`: Long, `id`: RustBuffer.ByValue): Long
-    external fun uniffi_daybook_ffi_fn_method_tablesrepoffi_get_table(`ptr`: Long, `id`: RustBuffer.ByValue): Long
-    external fun uniffi_daybook_ffi_fn_method_tablesrepoffi_get_window(`ptr`: Long, `id`: RustBuffer.ByValue): Long
-    external fun uniffi_daybook_ffi_fn_method_tablesrepoffi_list_panels(`ptr`: Long): Long
-    external fun uniffi_daybook_ffi_fn_method_tablesrepoffi_list_tables(`ptr`: Long): Long
-    external fun uniffi_daybook_ffi_fn_method_tablesrepoffi_list_tabs(`ptr`: Long): Long
-    external fun uniffi_daybook_ffi_fn_method_tablesrepoffi_list_windows(`ptr`: Long): Long
-    external fun uniffi_daybook_ffi_fn_method_tablesrepoffi_remove_tab(`ptr`: Long, `tabId`: RustBuffer.ByValue): Long
-    external fun uniffi_daybook_ffi_fn_method_tablesrepoffi_set_panel(
-        `ptr`: Long,
-        `id`: RustBuffer.ByValue,
-        `panel`: RustBufferPanel.ByValue,
-    ): Long
-    external fun uniffi_daybook_ffi_fn_method_tablesrepoffi_set_tab(
-        `ptr`: Long,
-        `id`: RustBuffer.ByValue,
-        `tab`: RustBufferTab.ByValue,
-    ): Long
-    external fun uniffi_daybook_ffi_fn_method_tablesrepoffi_set_table(
-        `ptr`: Long,
-        `id`: RustBuffer.ByValue,
-        `table`: RustBufferTable.ByValue,
-    ): Long
-    external fun uniffi_daybook_ffi_fn_method_tablesrepoffi_set_window(
-        `ptr`: Long,
-        `id`: RustBuffer.ByValue,
-        `window`: RustBufferWindow.ByValue,
-    ): Long
-    external fun uniffi_daybook_ffi_fn_method_tablesrepoffi_stop(`ptr`: Long): Long
-    external fun uniffi_daybook_ffi_fn_method_tablesrepoffi_update_batch(
-        `ptr`: Long,
-        `patches`: RustBufferTablesPatches.ByValue,
-    ): Long
-    external fun uniffi_daybook_ffi_fn_clone_rtffi(`handle`: Long, uniffi_out_err: UniffiRustCallStatus): Long
-    external fun uniffi_daybook_ffi_fn_free_rtffi(`handle`: Long, uniffi_out_err: UniffiRustCallStatus): Unit
-    external fun uniffi_daybook_ffi_fn_constructor_rtffi_load(
-        `fcx`: Long,
-        `drawerRepo`: Long,
-        `plugsRepo`: Long,
-        `dispatchRepo`: Long,
-        `progressRepo`: Long,
-        `blobsRepo`: Long,
-        `configRepo`: Long,
-        `initRepo`: Long,
-        `sqliteLsRepo`: Long,
-        `deviceId`: RustBuffer.ByValue,
-        `startupProgressTaskId`: RustBuffer.ByValue,
-    ): Long
-    external fun uniffi_daybook_ffi_fn_method_rtffi_dispatch_doc_facet(
-        `ptr`: Long,
-        `plugId`: RustBuffer.ByValue,
-        `routineName`: RustBuffer.ByValue,
-        `docId`: RustBuffer.ByValue,
-        `branchPath`: RustBuffer.ByValue,
-    ): Long
-    external fun uniffi_daybook_ffi_fn_method_rtffi_stop(`ptr`: Long): Long
-    external fun ffi_daybook_ffi_rustbuffer_alloc(
-        `size`: Long,
-        uniffi_out_err: UniffiRustCallStatus,
-    ): RustBuffer.ByValue
-    external fun ffi_daybook_ffi_rustbuffer_from_bytes(
-        `bytes`: ForeignBytes.ByValue,
-        uniffi_out_err: UniffiRustCallStatus,
-    ): RustBuffer.ByValue
-    external fun ffi_daybook_ffi_rustbuffer_free(`buf`: RustBuffer.ByValue, uniffi_out_err: UniffiRustCallStatus): Unit
-    external fun ffi_daybook_ffi_rustbuffer_reserve(
-        `buf`: RustBuffer.ByValue,
-        `additional`: Long,
-        uniffi_out_err: UniffiRustCallStatus,
-    ): RustBuffer.ByValue
-    external fun ffi_daybook_ffi_rust_future_poll_u8(
-        `handle`: Long,
-        `callback`: UniffiRustFutureContinuationCallback,
-        `callbackData`: Long,
-    ): Unit
-    external fun ffi_daybook_ffi_rust_future_cancel_u8(`handle`: Long): Unit
-    external fun ffi_daybook_ffi_rust_future_free_u8(`handle`: Long): Unit
-    external fun ffi_daybook_ffi_rust_future_complete_u8(`handle`: Long, uniffi_out_err: UniffiRustCallStatus): Byte
-    external fun ffi_daybook_ffi_rust_future_poll_i8(
-        `handle`: Long,
-        `callback`: UniffiRustFutureContinuationCallback,
-        `callbackData`: Long,
-    ): Unit
-    external fun ffi_daybook_ffi_rust_future_cancel_i8(`handle`: Long): Unit
-    external fun ffi_daybook_ffi_rust_future_free_i8(`handle`: Long): Unit
-    external fun ffi_daybook_ffi_rust_future_complete_i8(`handle`: Long, uniffi_out_err: UniffiRustCallStatus): Byte
-    external fun ffi_daybook_ffi_rust_future_poll_u16(
-        `handle`: Long,
-        `callback`: UniffiRustFutureContinuationCallback,
-        `callbackData`: Long,
-    ): Unit
-    external fun ffi_daybook_ffi_rust_future_cancel_u16(`handle`: Long): Unit
-    external fun ffi_daybook_ffi_rust_future_free_u16(`handle`: Long): Unit
-    external fun ffi_daybook_ffi_rust_future_complete_u16(`handle`: Long, uniffi_out_err: UniffiRustCallStatus): Short
-    external fun ffi_daybook_ffi_rust_future_poll_i16(
-        `handle`: Long,
-        `callback`: UniffiRustFutureContinuationCallback,
-        `callbackData`: Long,
-    ): Unit
-    external fun ffi_daybook_ffi_rust_future_cancel_i16(`handle`: Long): Unit
-    external fun ffi_daybook_ffi_rust_future_free_i16(`handle`: Long): Unit
-    external fun ffi_daybook_ffi_rust_future_complete_i16(`handle`: Long, uniffi_out_err: UniffiRustCallStatus): Short
-    external fun ffi_daybook_ffi_rust_future_poll_u32(
-        `handle`: Long,
-        `callback`: UniffiRustFutureContinuationCallback,
-        `callbackData`: Long,
-    ): Unit
-    external fun ffi_daybook_ffi_rust_future_cancel_u32(`handle`: Long): Unit
-    external fun ffi_daybook_ffi_rust_future_free_u32(`handle`: Long): Unit
-    external fun ffi_daybook_ffi_rust_future_complete_u32(`handle`: Long, uniffi_out_err: UniffiRustCallStatus): Int
-    external fun ffi_daybook_ffi_rust_future_poll_i32(
-        `handle`: Long,
-        `callback`: UniffiRustFutureContinuationCallback,
-        `callbackData`: Long,
-    ): Unit
-    external fun ffi_daybook_ffi_rust_future_cancel_i32(`handle`: Long): Unit
-    external fun ffi_daybook_ffi_rust_future_free_i32(`handle`: Long): Unit
-    external fun ffi_daybook_ffi_rust_future_complete_i32(`handle`: Long, uniffi_out_err: UniffiRustCallStatus): Int
-    external fun ffi_daybook_ffi_rust_future_poll_u64(
-        `handle`: Long,
-        `callback`: UniffiRustFutureContinuationCallback,
-        `callbackData`: Long,
-    ): Unit
-    external fun ffi_daybook_ffi_rust_future_cancel_u64(`handle`: Long): Unit
-    external fun ffi_daybook_ffi_rust_future_free_u64(`handle`: Long): Unit
-    external fun ffi_daybook_ffi_rust_future_complete_u64(`handle`: Long, uniffi_out_err: UniffiRustCallStatus): Long
-    external fun ffi_daybook_ffi_rust_future_poll_i64(
-        `handle`: Long,
-        `callback`: UniffiRustFutureContinuationCallback,
-        `callbackData`: Long,
-    ): Unit
-    external fun ffi_daybook_ffi_rust_future_cancel_i64(`handle`: Long): Unit
-    external fun ffi_daybook_ffi_rust_future_free_i64(`handle`: Long): Unit
-    external fun ffi_daybook_ffi_rust_future_complete_i64(`handle`: Long, uniffi_out_err: UniffiRustCallStatus): Long
-    external fun ffi_daybook_ffi_rust_future_poll_f32(
-        `handle`: Long,
-        `callback`: UniffiRustFutureContinuationCallback,
-        `callbackData`: Long,
-    ): Unit
-    external fun ffi_daybook_ffi_rust_future_cancel_f32(`handle`: Long): Unit
-    external fun ffi_daybook_ffi_rust_future_free_f32(`handle`: Long): Unit
-    external fun ffi_daybook_ffi_rust_future_complete_f32(`handle`: Long, uniffi_out_err: UniffiRustCallStatus): Float
-    external fun ffi_daybook_ffi_rust_future_poll_f64(
-        `handle`: Long,
-        `callback`: UniffiRustFutureContinuationCallback,
-        `callbackData`: Long,
-    ): Unit
-    external fun ffi_daybook_ffi_rust_future_cancel_f64(`handle`: Long): Unit
-    external fun ffi_daybook_ffi_rust_future_free_f64(`handle`: Long): Unit
-    external fun ffi_daybook_ffi_rust_future_complete_f64(`handle`: Long, uniffi_out_err: UniffiRustCallStatus): Double
-    external fun ffi_daybook_ffi_rust_future_poll_rust_buffer(
-        `handle`: Long,
-        `callback`: UniffiRustFutureContinuationCallback,
-        `callbackData`: Long,
-    ): Unit
-    external fun ffi_daybook_ffi_rust_future_cancel_rust_buffer(`handle`: Long): Unit
-    external fun ffi_daybook_ffi_rust_future_free_rust_buffer(`handle`: Long): Unit
-    external fun ffi_daybook_ffi_rust_future_complete_rust_buffer(
-        `handle`: Long,
-        uniffi_out_err: UniffiRustCallStatus,
-    ): RustBuffer.ByValue
-    external fun ffi_daybook_ffi_rust_future_poll_void(
-        `handle`: Long,
-        `callback`: UniffiRustFutureContinuationCallback,
-        `callbackData`: Long,
-    ): Unit
-    external fun ffi_daybook_ffi_rust_future_cancel_void(`handle`: Long): Unit
-    external fun ffi_daybook_ffi_rust_future_free_void(`handle`: Long): Unit
-    external fun ffi_daybook_ffi_rust_future_complete_void(`handle`: Long, uniffi_out_err: UniffiRustCallStatus): Unit
+    external fun uniffi_daybook_ffi_fn_clone_camerapreviewffi(`handle`: Long,uniffi_out_err: UniffiRustCallStatus, 
+): Long
+external fun uniffi_daybook_ffi_fn_free_camerapreviewffi(`handle`: Long,uniffi_out_err: UniffiRustCallStatus, 
+): Unit
+external fun uniffi_daybook_ffi_fn_constructor_camerapreviewffi_load(uniffi_out_err: UniffiRustCallStatus, 
+): Long
+external fun uniffi_daybook_ffi_fn_method_camerapreviewffi_clear_qr_listener(`ptr`: Long,uniffi_out_err: UniffiRustCallStatus, 
+): Unit
+external fun uniffi_daybook_ffi_fn_method_camerapreviewffi_latest_frame(`ptr`: Long,uniffi_out_err: UniffiRustCallStatus, 
+): RustBuffer.ByValue
+external fun uniffi_daybook_ffi_fn_method_camerapreviewffi_list_devices(`ptr`: Long,uniffi_out_err: UniffiRustCallStatus, 
+): RustBuffer.ByValue
+external fun uniffi_daybook_ffi_fn_method_camerapreviewffi_set_qr_analysis_enabled(`ptr`: Long,`enabled`: Byte,uniffi_out_err: UniffiRustCallStatus, 
+): Unit
+external fun uniffi_daybook_ffi_fn_method_camerapreviewffi_set_qr_listener(`ptr`: Long,`listener`: Long,uniffi_out_err: UniffiRustCallStatus, 
+): Unit
+external fun uniffi_daybook_ffi_fn_method_camerapreviewffi_start_stream(`ptr`: Long,`deviceId`: Int,`listener`: Long,uniffi_out_err: UniffiRustCallStatus, 
+): Unit
+external fun uniffi_daybook_ffi_fn_method_camerapreviewffi_stop_stream(`ptr`: Long,uniffi_out_err: UniffiRustCallStatus, 
+): Unit
+external fun uniffi_daybook_ffi_fn_method_camerapreviewffi_supports_native_qr_analysis(`ptr`: Long,uniffi_out_err: UniffiRustCallStatus, 
+): Byte
+external fun uniffi_daybook_ffi_fn_method_camerapreviewffi_take_latest_frame(`ptr`: Long,uniffi_out_err: UniffiRustCallStatus, 
+): RustBuffer.ByValue
+external fun uniffi_daybook_ffi_fn_clone_camerapreviewframelistener(`handle`: Long,uniffi_out_err: UniffiRustCallStatus, 
+): Long
+external fun uniffi_daybook_ffi_fn_free_camerapreviewframelistener(`handle`: Long,uniffi_out_err: UniffiRustCallStatus, 
+): Unit
+external fun uniffi_daybook_ffi_fn_init_callback_vtable_camerapreviewframelistener(`vtable`: UniffiVTableCallbackInterfaceCameraPreviewFrameListener,
+): Unit
+external fun uniffi_daybook_ffi_fn_method_camerapreviewframelistener_on_camera_preview_frame(`ptr`: Long,`frame`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus, 
+): Unit
+external fun uniffi_daybook_ffi_fn_clone_cameraqranalyzerffi(`handle`: Long,uniffi_out_err: UniffiRustCallStatus, 
+): Long
+external fun uniffi_daybook_ffi_fn_free_cameraqranalyzerffi(`handle`: Long,uniffi_out_err: UniffiRustCallStatus, 
+): Unit
+external fun uniffi_daybook_ffi_fn_constructor_cameraqranalyzerffi_load(uniffi_out_err: UniffiRustCallStatus, 
+): Long
+external fun uniffi_daybook_ffi_fn_method_cameraqranalyzerffi_clear_listener(`ptr`: Long,uniffi_out_err: UniffiRustCallStatus, 
+): Unit
+external fun uniffi_daybook_ffi_fn_method_cameraqranalyzerffi_set_listener(`ptr`: Long,`listener`: Long,uniffi_out_err: UniffiRustCallStatus, 
+): Unit
+external fun uniffi_daybook_ffi_fn_method_cameraqranalyzerffi_submit_jpeg_frame(`ptr`: Long,`widthPx`: Int,`heightPx`: Int,`frameBytes`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus, 
+): Unit
+external fun uniffi_daybook_ffi_fn_clone_cameraqreventlistener(`handle`: Long,uniffi_out_err: UniffiRustCallStatus, 
+): Long
+external fun uniffi_daybook_ffi_fn_free_cameraqreventlistener(`handle`: Long,uniffi_out_err: UniffiRustCallStatus, 
+): Unit
+external fun uniffi_daybook_ffi_fn_init_callback_vtable_cameraqreventlistener(`vtable`: UniffiVTableCallbackInterfaceCameraQrEventListener,
+): Unit
+external fun uniffi_daybook_ffi_fn_method_cameraqreventlistener_on_camera_qr_overlays_updated(`ptr`: Long,`overlays`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus, 
+): Unit
+external fun uniffi_daybook_ffi_fn_method_cameraqreventlistener_on_camera_qr_detected(`ptr`: Long,`decodedText`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus, 
+): Unit
+external fun uniffi_daybook_ffi_fn_method_cameraqreventlistener_on_camera_qr_error(`ptr`: Long,`message`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus, 
+): Unit
+external fun uniffi_daybook_ffi_fn_clone_appffictx(`handle`: Long,uniffi_out_err: UniffiRustCallStatus, 
+): Long
+external fun uniffi_daybook_ffi_fn_free_appffictx(`handle`: Long,uniffi_out_err: UniffiRustCallStatus, 
+): Unit
+external fun uniffi_daybook_ffi_fn_constructor_appffictx_init(
+): Long
+external fun uniffi_daybook_ffi_fn_method_appffictx_check_clone_destination(`ptr`: Long,`destination`: RustBuffer.ByValue,
+): Long
+external fun uniffi_daybook_ffi_fn_method_appffictx_clone_repo_init_from_url(`ptr`: Long,`sourceUrl`: RustBuffer.ByValue,`destination`: RustBuffer.ByValue,
+): Long
+external fun uniffi_daybook_ffi_fn_method_appffictx_default_clone_parent_dir(`ptr`: Long,
+): Long
+external fun uniffi_daybook_ffi_fn_method_appffictx_forget_known_repo(`ptr`: Long,`repoId`: RustBuffer.ByValue,
+): Long
+external fun uniffi_daybook_ffi_fn_method_appffictx_get_repo_config(`ptr`: Long,
+): Long
+external fun uniffi_daybook_ffi_fn_method_appffictx_is_repo_usable(`ptr`: Long,`repoRoot`: RustBuffer.ByValue,
+): Long
+external fun uniffi_daybook_ffi_fn_method_appffictx_register_repo_path(`ptr`: Long,`repoRoot`: RustBuffer.ByValue,
+): Long
+external fun uniffi_daybook_ffi_fn_method_appffictx_resolve_clone_url(`ptr`: Long,`sourceUrl`: RustBuffer.ByValue,
+): Long
+external fun uniffi_daybook_ffi_fn_clone_ffictx(`handle`: Long,uniffi_out_err: UniffiRustCallStatus, 
+): Long
+external fun uniffi_daybook_ffi_fn_free_ffictx(`handle`: Long,uniffi_out_err: UniffiRustCallStatus, 
+): Unit
+external fun uniffi_daybook_ffi_fn_constructor_ffictx_init(`repoRoot`: RustBuffer.ByValue,`acx`: Long,
+): Long
+external fun uniffi_daybook_ffi_fn_clone_ffierror(`handle`: Long,uniffi_out_err: UniffiRustCallStatus, 
+): Long
+external fun uniffi_daybook_ffi_fn_free_ffierror(`handle`: Long,uniffi_out_err: UniffiRustCallStatus, 
+): Unit
+external fun uniffi_daybook_ffi_fn_method_ffierror_message(`ptr`: Long,uniffi_out_err: UniffiRustCallStatus, 
+): RustBuffer.ByValue
+external fun uniffi_daybook_ffi_fn_clone_blobsrepoffi(`handle`: Long,uniffi_out_err: UniffiRustCallStatus, 
+): Long
+external fun uniffi_daybook_ffi_fn_free_blobsrepoffi(`handle`: Long,uniffi_out_err: UniffiRustCallStatus, 
+): Unit
+external fun uniffi_daybook_ffi_fn_constructor_blobsrepoffi_load(`fcx`: Long,
+): Long
+external fun uniffi_daybook_ffi_fn_method_blobsrepoffi_get_path(`ptr`: Long,`hash`: RustBuffer.ByValue,
+): Long
+external fun uniffi_daybook_ffi_fn_method_blobsrepoffi_put(`ptr`: Long,`data`: RustBuffer.ByValue,
+): Long
+external fun uniffi_daybook_ffi_fn_clone_configeventlistener(`handle`: Long,uniffi_out_err: UniffiRustCallStatus, 
+): Long
+external fun uniffi_daybook_ffi_fn_free_configeventlistener(`handle`: Long,uniffi_out_err: UniffiRustCallStatus, 
+): Unit
+external fun uniffi_daybook_ffi_fn_init_callback_vtable_configeventlistener(`vtable`: UniffiVTableCallbackInterfaceConfigEventListener,
+): Unit
+external fun uniffi_daybook_ffi_fn_method_configeventlistener_on_config_event(`ptr`: Long,`event`: RustBufferConfigEvent.ByValue,uniffi_out_err: UniffiRustCallStatus, 
+): Unit
+external fun uniffi_daybook_ffi_fn_clone_configrepoffi(`handle`: Long,uniffi_out_err: UniffiRustCallStatus, 
+): Long
+external fun uniffi_daybook_ffi_fn_free_configrepoffi(`handle`: Long,uniffi_out_err: UniffiRustCallStatus, 
+): Unit
+external fun uniffi_daybook_ffi_fn_constructor_configrepoffi_load(`fcx`: Long,`plugRepo`: Long,
+): Long
+external fun uniffi_daybook_ffi_fn_method_configrepoffi_ffi_register_listener(`ptr`: Long,`listener`: Long,uniffi_out_err: UniffiRustCallStatus, 
+): Long
+external fun uniffi_daybook_ffi_fn_method_configrepoffi_get_facet_display_hint(`ptr`: Long,`id`: RustBuffer.ByValue,
+): Long
+external fun uniffi_daybook_ffi_fn_method_configrepoffi_get_mltools_config_json(`ptr`: Long,
+): Long
+external fun uniffi_daybook_ffi_fn_method_configrepoffi_list_display_hints(`ptr`: Long,
+): Long
+external fun uniffi_daybook_ffi_fn_method_configrepoffi_provision_mobile_default_mltools(`ptr`: Long,`progressRepo`: Long,
+): Long
+external fun uniffi_daybook_ffi_fn_method_configrepoffi_set_facet_display_hint(`ptr`: Long,`key`: RustBuffer.ByValue,`config`: RustBufferFacetDisplayHint.ByValue,
+): Long
+external fun uniffi_daybook_ffi_fn_method_configrepoffi_set_mltools_config_json(`ptr`: Long,`configJson`: RustBuffer.ByValue,
+): Long
+external fun uniffi_daybook_ffi_fn_method_configrepoffi_stop(`ptr`: Long,
+): Long
+external fun uniffi_daybook_ffi_fn_clone_dispatcheventlistener(`handle`: Long,uniffi_out_err: UniffiRustCallStatus, 
+): Long
+external fun uniffi_daybook_ffi_fn_free_dispatcheventlistener(`handle`: Long,uniffi_out_err: UniffiRustCallStatus, 
+): Unit
+external fun uniffi_daybook_ffi_fn_init_callback_vtable_dispatcheventlistener(`vtable`: UniffiVTableCallbackInterfaceDispatchEventListener,
+): Unit
+external fun uniffi_daybook_ffi_fn_method_dispatcheventlistener_on_dispatch_event(`ptr`: Long,`event`: RustBufferDispatchEvent.ByValue,uniffi_out_err: UniffiRustCallStatus, 
+): Unit
+external fun uniffi_daybook_ffi_fn_clone_dispatchrepoffi(`handle`: Long,uniffi_out_err: UniffiRustCallStatus, 
+): Long
+external fun uniffi_daybook_ffi_fn_free_dispatchrepoffi(`handle`: Long,uniffi_out_err: UniffiRustCallStatus, 
+): Unit
+external fun uniffi_daybook_ffi_fn_constructor_dispatchrepoffi_load(`fcx`: Long,
+): Long
+external fun uniffi_daybook_ffi_fn_method_dispatchrepoffi_ffi_register_listener(`ptr`: Long,`listener`: Long,uniffi_out_err: UniffiRustCallStatus, 
+): Long
+external fun uniffi_daybook_ffi_fn_method_dispatchrepoffi_list(`ptr`: Long,
+): Long
+external fun uniffi_daybook_ffi_fn_method_dispatchrepoffi_stop(`ptr`: Long,
+): Long
+external fun uniffi_daybook_ffi_fn_clone_drawereventlistener(`handle`: Long,uniffi_out_err: UniffiRustCallStatus, 
+): Long
+external fun uniffi_daybook_ffi_fn_free_drawereventlistener(`handle`: Long,uniffi_out_err: UniffiRustCallStatus, 
+): Unit
+external fun uniffi_daybook_ffi_fn_init_callback_vtable_drawereventlistener(`vtable`: UniffiVTableCallbackInterfaceDrawerEventListener,
+): Unit
+external fun uniffi_daybook_ffi_fn_method_drawereventlistener_on_drawer_event(`ptr`: Long,`event`: RustBufferDrawerEvent.ByValue,uniffi_out_err: UniffiRustCallStatus, 
+): Unit
+external fun uniffi_daybook_ffi_fn_clone_drawerrepoffi(`handle`: Long,uniffi_out_err: UniffiRustCallStatus, 
+): Long
+external fun uniffi_daybook_ffi_fn_free_drawerrepoffi(`handle`: Long,uniffi_out_err: UniffiRustCallStatus, 
+): Unit
+external fun uniffi_daybook_ffi_fn_constructor_drawerrepoffi_load(`fcx`: Long,`plugsRepo`: Long,
+): Long
+external fun uniffi_daybook_ffi_fn_method_drawerrepoffi_add(`ptr`: Long,`args`: RustBufferAddDocArgs.ByValue,
+): Long
+external fun uniffi_daybook_ffi_fn_method_drawerrepoffi_batch_add(`ptr`: Long,`args`: RustBuffer.ByValue,
+): Long
+external fun uniffi_daybook_ffi_fn_method_drawerrepoffi_del(`ptr`: Long,`id`: RustBuffer.ByValue,
+): Long
+external fun uniffi_daybook_ffi_fn_method_drawerrepoffi_ffi_register_listener(`ptr`: Long,`listener`: Long,uniffi_out_err: UniffiRustCallStatus, 
+): Long
+external fun uniffi_daybook_ffi_fn_method_drawerrepoffi_get(`ptr`: Long,`id`: RustBuffer.ByValue,`branchPath`: RustBuffer.ByValue,
+): Long
+external fun uniffi_daybook_ffi_fn_method_drawerrepoffi_get_bundle(`ptr`: Long,`id`: RustBuffer.ByValue,`branchPath`: RustBuffer.ByValue,
+): Long
+external fun uniffi_daybook_ffi_fn_method_drawerrepoffi_get_entry(`ptr`: Long,`id`: RustBuffer.ByValue,
+): Long
+external fun uniffi_daybook_ffi_fn_method_drawerrepoffi_list(`ptr`: Long,
+): Long
+external fun uniffi_daybook_ffi_fn_method_drawerrepoffi_stop(`ptr`: Long,
+): Long
+external fun uniffi_daybook_ffi_fn_method_drawerrepoffi_update(`ptr`: Long,`patch`: RustBufferDocPatch.ByValue,`branchPath`: RustBuffer.ByValue,`heads`: RustBuffer.ByValue,
+): Long
+external fun uniffi_daybook_ffi_fn_method_drawerrepoffi_update_batch(`ptr`: Long,`patches`: RustBuffer.ByValue,
+): Long
+external fun uniffi_daybook_ffi_fn_clone_initeventlistener(`handle`: Long,uniffi_out_err: UniffiRustCallStatus, 
+): Long
+external fun uniffi_daybook_ffi_fn_free_initeventlistener(`handle`: Long,uniffi_out_err: UniffiRustCallStatus, 
+): Unit
+external fun uniffi_daybook_ffi_fn_init_callback_vtable_initeventlistener(`vtable`: UniffiVTableCallbackInterfaceInitEventListener,
+): Unit
+external fun uniffi_daybook_ffi_fn_method_initeventlistener_on_init_event(`ptr`: Long,`event`: RustBufferInitEvent.ByValue,uniffi_out_err: UniffiRustCallStatus, 
+): Unit
+external fun uniffi_daybook_ffi_fn_clone_initrepoffi(`handle`: Long,uniffi_out_err: UniffiRustCallStatus, 
+): Long
+external fun uniffi_daybook_ffi_fn_free_initrepoffi(`handle`: Long,uniffi_out_err: UniffiRustCallStatus, 
+): Unit
+external fun uniffi_daybook_ffi_fn_constructor_initrepoffi_load(`fcx`: Long,`progressRepo`: Long,
+): Long
+external fun uniffi_daybook_ffi_fn_method_initrepoffi_ffi_register_listener(`ptr`: Long,`listener`: Long,uniffi_out_err: UniffiRustCallStatus, 
+): Long
+external fun uniffi_daybook_ffi_fn_method_initrepoffi_stop(`ptr`: Long,
+): Long
+external fun uniffi_daybook_ffi_fn_clone_plugseventlistener(`handle`: Long,uniffi_out_err: UniffiRustCallStatus, 
+): Long
+external fun uniffi_daybook_ffi_fn_free_plugseventlistener(`handle`: Long,uniffi_out_err: UniffiRustCallStatus, 
+): Unit
+external fun uniffi_daybook_ffi_fn_init_callback_vtable_plugseventlistener(`vtable`: UniffiVTableCallbackInterfacePlugsEventListener,
+): Unit
+external fun uniffi_daybook_ffi_fn_method_plugseventlistener_on_plugs_event(`ptr`: Long,`event`: RustBufferPlugsEvent.ByValue,uniffi_out_err: UniffiRustCallStatus, 
+): Unit
+external fun uniffi_daybook_ffi_fn_clone_plugsrepoffi(`handle`: Long,uniffi_out_err: UniffiRustCallStatus, 
+): Long
+external fun uniffi_daybook_ffi_fn_free_plugsrepoffi(`handle`: Long,uniffi_out_err: UniffiRustCallStatus, 
+): Unit
+external fun uniffi_daybook_ffi_fn_constructor_plugsrepoffi_load(`fcx`: Long,`blobsRepo`: Long,
+): Long
+external fun uniffi_daybook_ffi_fn_method_plugsrepoffi_ffi_register_listener(`ptr`: Long,`listener`: Long,uniffi_out_err: UniffiRustCallStatus, 
+): Long
+external fun uniffi_daybook_ffi_fn_method_plugsrepoffi_stop(`ptr`: Long,
+): Long
+external fun uniffi_daybook_ffi_fn_clone_progresseventlistener(`handle`: Long,uniffi_out_err: UniffiRustCallStatus, 
+): Long
+external fun uniffi_daybook_ffi_fn_free_progresseventlistener(`handle`: Long,uniffi_out_err: UniffiRustCallStatus, 
+): Unit
+external fun uniffi_daybook_ffi_fn_init_callback_vtable_progresseventlistener(`vtable`: UniffiVTableCallbackInterfaceProgressEventListener,
+): Unit
+external fun uniffi_daybook_ffi_fn_method_progresseventlistener_on_progress_event(`ptr`: Long,`event`: RustBufferProgressEvent.ByValue,uniffi_out_err: UniffiRustCallStatus, 
+): Unit
+external fun uniffi_daybook_ffi_fn_clone_progressrepoffi(`handle`: Long,uniffi_out_err: UniffiRustCallStatus, 
+): Long
+external fun uniffi_daybook_ffi_fn_free_progressrepoffi(`handle`: Long,uniffi_out_err: UniffiRustCallStatus, 
+): Unit
+external fun uniffi_daybook_ffi_fn_constructor_progressrepoffi_load(`fcx`: Long,
+): Long
+external fun uniffi_daybook_ffi_fn_method_progressrepoffi_add_update(`ptr`: Long,`taskId`: RustBuffer.ByValue,`update`: RustBufferProgressUpdate.ByValue,
+): Long
+external fun uniffi_daybook_ffi_fn_method_progressrepoffi_clear_completed(`ptr`: Long,
+): Long
+external fun uniffi_daybook_ffi_fn_method_progressrepoffi_dismiss(`ptr`: Long,`taskId`: RustBuffer.ByValue,
+): Long
+external fun uniffi_daybook_ffi_fn_method_progressrepoffi_ffi_register_listener(`ptr`: Long,`listener`: Long,uniffi_out_err: UniffiRustCallStatus, 
+): Long
+external fun uniffi_daybook_ffi_fn_method_progressrepoffi_get(`ptr`: Long,`taskId`: RustBuffer.ByValue,
+): Long
+external fun uniffi_daybook_ffi_fn_method_progressrepoffi_list(`ptr`: Long,
+): Long
+external fun uniffi_daybook_ffi_fn_method_progressrepoffi_list_by_tag_prefix(`ptr`: Long,`tagPrefix`: RustBuffer.ByValue,
+): Long
+external fun uniffi_daybook_ffi_fn_method_progressrepoffi_list_updates(`ptr`: Long,`taskId`: RustBuffer.ByValue,
+): Long
+external fun uniffi_daybook_ffi_fn_method_progressrepoffi_mark_viewed(`ptr`: Long,`taskId`: RustBuffer.ByValue,
+): Long
+external fun uniffi_daybook_ffi_fn_method_progressrepoffi_set_retention_override(`ptr`: Long,`taskId`: RustBuffer.ByValue,`retentionOverride`: RustBuffer.ByValue,
+): Long
+external fun uniffi_daybook_ffi_fn_method_progressrepoffi_stop(`ptr`: Long,
+): Long
+external fun uniffi_daybook_ffi_fn_method_progressrepoffi_upsert_task(`ptr`: Long,`args`: RustBufferCreateProgressTaskArgs.ByValue,
+): Long
+external fun uniffi_daybook_ffi_fn_clone_localstateeventlistener(`handle`: Long,uniffi_out_err: UniffiRustCallStatus, 
+): Long
+external fun uniffi_daybook_ffi_fn_free_localstateeventlistener(`handle`: Long,uniffi_out_err: UniffiRustCallStatus, 
+): Unit
+external fun uniffi_daybook_ffi_fn_init_callback_vtable_localstateeventlistener(`vtable`: UniffiVTableCallbackInterfaceLocalStateEventListener,
+): Unit
+external fun uniffi_daybook_ffi_fn_method_localstateeventlistener_on_local_state_event(`ptr`: Long,`event`: RustBufferLocalStateEvent.ByValue,uniffi_out_err: UniffiRustCallStatus, 
+): Unit
+external fun uniffi_daybook_ffi_fn_clone_sqlitelocalstaterepoffi(`handle`: Long,uniffi_out_err: UniffiRustCallStatus, 
+): Long
+external fun uniffi_daybook_ffi_fn_free_sqlitelocalstaterepoffi(`handle`: Long,uniffi_out_err: UniffiRustCallStatus, 
+): Unit
+external fun uniffi_daybook_ffi_fn_constructor_sqlitelocalstaterepoffi_load(`fcx`: Long,
+): Long
+external fun uniffi_daybook_ffi_fn_method_sqlitelocalstaterepoffi_ffi_register_listener(`ptr`: Long,`listener`: Long,uniffi_out_err: UniffiRustCallStatus, 
+): Long
+external fun uniffi_daybook_ffi_fn_method_sqlitelocalstaterepoffi_stop(`ptr`: Long,
+): Long
+external fun uniffi_daybook_ffi_fn_clone_syncrepoffi(`handle`: Long,uniffi_out_err: UniffiRustCallStatus, 
+): Long
+external fun uniffi_daybook_ffi_fn_free_syncrepoffi(`handle`: Long,uniffi_out_err: UniffiRustCallStatus, 
+): Unit
+external fun uniffi_daybook_ffi_fn_constructor_syncrepoffi_load(`fcx`: Long,`configRepo`: Long,`blobsRepo`: Long,`drawerRepo`: Long,`progressRepo`: Long,
+): Long
+external fun uniffi_daybook_ffi_fn_method_syncrepoffi_connect_known_devices_once(`ptr`: Long,
+): Long
+external fun uniffi_daybook_ffi_fn_method_syncrepoffi_connect_url(`ptr`: Long,`sourceUrl`: RustBuffer.ByValue,
+): Long
+external fun uniffi_daybook_ffi_fn_method_syncrepoffi_get_ticket_qr_png(`ptr`: Long,`sizePx`: Int,
+): Long
+external fun uniffi_daybook_ffi_fn_method_syncrepoffi_get_ticket_url(`ptr`: Long,
+): Long
+external fun uniffi_daybook_ffi_fn_method_syncrepoffi_get_ticket_with_qr_png(`ptr`: Long,`sizePx`: Int,
+): Long
+external fun uniffi_daybook_ffi_fn_method_syncrepoffi_stop(`ptr`: Long,
+): Long
+external fun uniffi_daybook_ffi_fn_clone_tableseventlistener(`handle`: Long,uniffi_out_err: UniffiRustCallStatus, 
+): Long
+external fun uniffi_daybook_ffi_fn_free_tableseventlistener(`handle`: Long,uniffi_out_err: UniffiRustCallStatus, 
+): Unit
+external fun uniffi_daybook_ffi_fn_init_callback_vtable_tableseventlistener(`vtable`: UniffiVTableCallbackInterfaceTablesEventListener,
+): Unit
+external fun uniffi_daybook_ffi_fn_method_tableseventlistener_on_tables_event(`ptr`: Long,`event`: RustBufferTablesEvent.ByValue,uniffi_out_err: UniffiRustCallStatus, 
+): Unit
+external fun uniffi_daybook_ffi_fn_clone_tablesrepoffi(`handle`: Long,uniffi_out_err: UniffiRustCallStatus, 
+): Long
+external fun uniffi_daybook_ffi_fn_free_tablesrepoffi(`handle`: Long,uniffi_out_err: UniffiRustCallStatus, 
+): Unit
+external fun uniffi_daybook_ffi_fn_constructor_tablesrepoffi_load(`fcx`: Long,
+): Long
+external fun uniffi_daybook_ffi_fn_method_tablesrepoffi_create_new_tab(`ptr`: Long,`tableId`: RustBuffer.ByValue,
+): Long
+external fun uniffi_daybook_ffi_fn_method_tablesrepoffi_create_new_table(`ptr`: Long,
+): Long
+external fun uniffi_daybook_ffi_fn_method_tablesrepoffi_ffi_register_listener(`ptr`: Long,`listener`: Long,uniffi_out_err: UniffiRustCallStatus, 
+): Long
+external fun uniffi_daybook_ffi_fn_method_tablesrepoffi_get_panel(`ptr`: Long,`id`: RustBuffer.ByValue,
+): Long
+external fun uniffi_daybook_ffi_fn_method_tablesrepoffi_get_selected_table(`ptr`: Long,
+): Long
+external fun uniffi_daybook_ffi_fn_method_tablesrepoffi_get_tab(`ptr`: Long,`id`: RustBuffer.ByValue,
+): Long
+external fun uniffi_daybook_ffi_fn_method_tablesrepoffi_get_table(`ptr`: Long,`id`: RustBuffer.ByValue,
+): Long
+external fun uniffi_daybook_ffi_fn_method_tablesrepoffi_get_window(`ptr`: Long,`id`: RustBuffer.ByValue,
+): Long
+external fun uniffi_daybook_ffi_fn_method_tablesrepoffi_list_panels(`ptr`: Long,
+): Long
+external fun uniffi_daybook_ffi_fn_method_tablesrepoffi_list_tables(`ptr`: Long,
+): Long
+external fun uniffi_daybook_ffi_fn_method_tablesrepoffi_list_tabs(`ptr`: Long,
+): Long
+external fun uniffi_daybook_ffi_fn_method_tablesrepoffi_list_windows(`ptr`: Long,
+): Long
+external fun uniffi_daybook_ffi_fn_method_tablesrepoffi_remove_tab(`ptr`: Long,`tabId`: RustBuffer.ByValue,
+): Long
+external fun uniffi_daybook_ffi_fn_method_tablesrepoffi_set_panel(`ptr`: Long,`id`: RustBuffer.ByValue,`panel`: RustBufferPanel.ByValue,
+): Long
+external fun uniffi_daybook_ffi_fn_method_tablesrepoffi_set_tab(`ptr`: Long,`id`: RustBuffer.ByValue,`tab`: RustBufferTab.ByValue,
+): Long
+external fun uniffi_daybook_ffi_fn_method_tablesrepoffi_set_table(`ptr`: Long,`id`: RustBuffer.ByValue,`table`: RustBufferTable.ByValue,
+): Long
+external fun uniffi_daybook_ffi_fn_method_tablesrepoffi_set_window(`ptr`: Long,`id`: RustBuffer.ByValue,`window`: RustBufferWindow.ByValue,
+): Long
+external fun uniffi_daybook_ffi_fn_method_tablesrepoffi_stop(`ptr`: Long,
+): Long
+external fun uniffi_daybook_ffi_fn_method_tablesrepoffi_update_batch(`ptr`: Long,`patches`: RustBufferTablesPatches.ByValue,
+): Long
+external fun uniffi_daybook_ffi_fn_clone_rtffi(`handle`: Long,uniffi_out_err: UniffiRustCallStatus, 
+): Long
+external fun uniffi_daybook_ffi_fn_free_rtffi(`handle`: Long,uniffi_out_err: UniffiRustCallStatus, 
+): Unit
+external fun uniffi_daybook_ffi_fn_constructor_rtffi_load(`fcx`: Long,`drawerRepo`: Long,`plugsRepo`: Long,`dispatchRepo`: Long,`progressRepo`: Long,`blobsRepo`: Long,`configRepo`: Long,`initRepo`: Long,`sqliteLsRepo`: Long,`deviceId`: RustBuffer.ByValue,`startupProgressTaskId`: RustBuffer.ByValue,
+): Long
+external fun uniffi_daybook_ffi_fn_method_rtffi_dispatch_doc_facet(`ptr`: Long,`plugId`: RustBuffer.ByValue,`routineName`: RustBuffer.ByValue,`docId`: RustBuffer.ByValue,`branchPath`: RustBuffer.ByValue,
+): Long
+external fun uniffi_daybook_ffi_fn_method_rtffi_stop(`ptr`: Long,
+): Long
+external fun ffi_daybook_ffi_rustbuffer_alloc(`size`: Long,uniffi_out_err: UniffiRustCallStatus, 
+): RustBuffer.ByValue
+external fun ffi_daybook_ffi_rustbuffer_from_bytes(`bytes`: ForeignBytes.ByValue,uniffi_out_err: UniffiRustCallStatus, 
+): RustBuffer.ByValue
+external fun ffi_daybook_ffi_rustbuffer_free(`buf`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus, 
+): Unit
+external fun ffi_daybook_ffi_rustbuffer_reserve(`buf`: RustBuffer.ByValue,`additional`: Long,uniffi_out_err: UniffiRustCallStatus, 
+): RustBuffer.ByValue
+external fun ffi_daybook_ffi_rust_future_poll_u8(`handle`: Long,`callback`: UniffiRustFutureContinuationCallback,`callbackData`: Long,
+): Unit
+external fun ffi_daybook_ffi_rust_future_cancel_u8(`handle`: Long,
+): Unit
+external fun ffi_daybook_ffi_rust_future_free_u8(`handle`: Long,
+): Unit
+external fun ffi_daybook_ffi_rust_future_complete_u8(`handle`: Long,uniffi_out_err: UniffiRustCallStatus, 
+): Byte
+external fun ffi_daybook_ffi_rust_future_poll_i8(`handle`: Long,`callback`: UniffiRustFutureContinuationCallback,`callbackData`: Long,
+): Unit
+external fun ffi_daybook_ffi_rust_future_cancel_i8(`handle`: Long,
+): Unit
+external fun ffi_daybook_ffi_rust_future_free_i8(`handle`: Long,
+): Unit
+external fun ffi_daybook_ffi_rust_future_complete_i8(`handle`: Long,uniffi_out_err: UniffiRustCallStatus, 
+): Byte
+external fun ffi_daybook_ffi_rust_future_poll_u16(`handle`: Long,`callback`: UniffiRustFutureContinuationCallback,`callbackData`: Long,
+): Unit
+external fun ffi_daybook_ffi_rust_future_cancel_u16(`handle`: Long,
+): Unit
+external fun ffi_daybook_ffi_rust_future_free_u16(`handle`: Long,
+): Unit
+external fun ffi_daybook_ffi_rust_future_complete_u16(`handle`: Long,uniffi_out_err: UniffiRustCallStatus, 
+): Short
+external fun ffi_daybook_ffi_rust_future_poll_i16(`handle`: Long,`callback`: UniffiRustFutureContinuationCallback,`callbackData`: Long,
+): Unit
+external fun ffi_daybook_ffi_rust_future_cancel_i16(`handle`: Long,
+): Unit
+external fun ffi_daybook_ffi_rust_future_free_i16(`handle`: Long,
+): Unit
+external fun ffi_daybook_ffi_rust_future_complete_i16(`handle`: Long,uniffi_out_err: UniffiRustCallStatus, 
+): Short
+external fun ffi_daybook_ffi_rust_future_poll_u32(`handle`: Long,`callback`: UniffiRustFutureContinuationCallback,`callbackData`: Long,
+): Unit
+external fun ffi_daybook_ffi_rust_future_cancel_u32(`handle`: Long,
+): Unit
+external fun ffi_daybook_ffi_rust_future_free_u32(`handle`: Long,
+): Unit
+external fun ffi_daybook_ffi_rust_future_complete_u32(`handle`: Long,uniffi_out_err: UniffiRustCallStatus, 
+): Int
+external fun ffi_daybook_ffi_rust_future_poll_i32(`handle`: Long,`callback`: UniffiRustFutureContinuationCallback,`callbackData`: Long,
+): Unit
+external fun ffi_daybook_ffi_rust_future_cancel_i32(`handle`: Long,
+): Unit
+external fun ffi_daybook_ffi_rust_future_free_i32(`handle`: Long,
+): Unit
+external fun ffi_daybook_ffi_rust_future_complete_i32(`handle`: Long,uniffi_out_err: UniffiRustCallStatus, 
+): Int
+external fun ffi_daybook_ffi_rust_future_poll_u64(`handle`: Long,`callback`: UniffiRustFutureContinuationCallback,`callbackData`: Long,
+): Unit
+external fun ffi_daybook_ffi_rust_future_cancel_u64(`handle`: Long,
+): Unit
+external fun ffi_daybook_ffi_rust_future_free_u64(`handle`: Long,
+): Unit
+external fun ffi_daybook_ffi_rust_future_complete_u64(`handle`: Long,uniffi_out_err: UniffiRustCallStatus, 
+): Long
+external fun ffi_daybook_ffi_rust_future_poll_i64(`handle`: Long,`callback`: UniffiRustFutureContinuationCallback,`callbackData`: Long,
+): Unit
+external fun ffi_daybook_ffi_rust_future_cancel_i64(`handle`: Long,
+): Unit
+external fun ffi_daybook_ffi_rust_future_free_i64(`handle`: Long,
+): Unit
+external fun ffi_daybook_ffi_rust_future_complete_i64(`handle`: Long,uniffi_out_err: UniffiRustCallStatus, 
+): Long
+external fun ffi_daybook_ffi_rust_future_poll_f32(`handle`: Long,`callback`: UniffiRustFutureContinuationCallback,`callbackData`: Long,
+): Unit
+external fun ffi_daybook_ffi_rust_future_cancel_f32(`handle`: Long,
+): Unit
+external fun ffi_daybook_ffi_rust_future_free_f32(`handle`: Long,
+): Unit
+external fun ffi_daybook_ffi_rust_future_complete_f32(`handle`: Long,uniffi_out_err: UniffiRustCallStatus, 
+): Float
+external fun ffi_daybook_ffi_rust_future_poll_f64(`handle`: Long,`callback`: UniffiRustFutureContinuationCallback,`callbackData`: Long,
+): Unit
+external fun ffi_daybook_ffi_rust_future_cancel_f64(`handle`: Long,
+): Unit
+external fun ffi_daybook_ffi_rust_future_free_f64(`handle`: Long,
+): Unit
+external fun ffi_daybook_ffi_rust_future_complete_f64(`handle`: Long,uniffi_out_err: UniffiRustCallStatus, 
+): Double
+external fun ffi_daybook_ffi_rust_future_poll_rust_buffer(`handle`: Long,`callback`: UniffiRustFutureContinuationCallback,`callbackData`: Long,
+): Unit
+external fun ffi_daybook_ffi_rust_future_cancel_rust_buffer(`handle`: Long,
+): Unit
+external fun ffi_daybook_ffi_rust_future_free_rust_buffer(`handle`: Long,
+): Unit
+external fun ffi_daybook_ffi_rust_future_complete_rust_buffer(`handle`: Long,uniffi_out_err: UniffiRustCallStatus, 
+): RustBuffer.ByValue
+external fun ffi_daybook_ffi_rust_future_poll_void(`handle`: Long,`callback`: UniffiRustFutureContinuationCallback,`callbackData`: Long,
+): Unit
+external fun ffi_daybook_ffi_rust_future_cancel_void(`handle`: Long,
+): Unit
+external fun ffi_daybook_ffi_rust_future_free_void(`handle`: Long,
+): Unit
+external fun ffi_daybook_ffi_rust_future_complete_void(`handle`: Long,uniffi_out_err: UniffiRustCallStatus, 
+): Unit
+
+    
 }
 
 private fun uniffiCheckContractApiVersion(lib: IntegrityCheckingUniffiLib) {
@@ -1864,7 +1704,6 @@ private fun uniffiCheckContractApiVersion(lib: IntegrityCheckingUniffiLib) {
         throw RuntimeException("UniFFI contract version mismatch: try cleaning and rebuilding your project")
     }
 }
-
 @Suppress("UNUSED_PARAMETER")
 private fun uniffiCheckApiChecksums(lib: IntegrityCheckingUniffiLib) {
     if (lib.uniffi_daybook_ffi_checksum_method_camerapreviewffi_clear_qr_listener() != 24531.toShort()) {
@@ -1894,9 +1733,7 @@ private fun uniffiCheckApiChecksums(lib: IntegrityCheckingUniffiLib) {
     if (lib.uniffi_daybook_ffi_checksum_method_camerapreviewffi_take_latest_frame() != 63251.toShort()) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
-    if (lib.uniffi_daybook_ffi_checksum_method_camerapreviewframelistener_on_camera_preview_frame() !=
-        54052.toShort()
-    ) {
+    if (lib.uniffi_daybook_ffi_checksum_method_camerapreviewframelistener_on_camera_preview_frame() != 54052.toShort()) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
     if (lib.uniffi_daybook_ffi_checksum_method_cameraqranalyzerffi_clear_listener() != 45119.toShort()) {
@@ -1908,9 +1745,7 @@ private fun uniffiCheckApiChecksums(lib: IntegrityCheckingUniffiLib) {
     if (lib.uniffi_daybook_ffi_checksum_method_cameraqranalyzerffi_submit_jpeg_frame() != 36663.toShort()) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
-    if (lib.uniffi_daybook_ffi_checksum_method_cameraqreventlistener_on_camera_qr_overlays_updated() !=
-        1239.toShort()
-    ) {
+    if (lib.uniffi_daybook_ffi_checksum_method_cameraqreventlistener_on_camera_qr_overlays_updated() != 1239.toShort()) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
     if (lib.uniffi_daybook_ffi_checksum_method_cameraqreventlistener_on_camera_qr_detected() != 65532.toShort()) {
@@ -2243,19 +2078,19 @@ internal const val UNIFFI_RUST_FUTURE_POLL_WAKE = 1.toByte()
 internal val uniffiContinuationHandleMap = UniffiHandleMap<CancellableContinuation<Byte>>()
 
 // FFI type for Rust future continuations
-internal object uniffiRustFutureContinuationCallbackImpl : UniffiRustFutureContinuationCallback {
+internal object uniffiRustFutureContinuationCallbackImpl: UniffiRustFutureContinuationCallback {
     override fun callback(data: Long, pollResult: Byte) {
         uniffiContinuationHandleMap.remove(data).resume(pollResult)
     }
 }
 
-internal suspend fun <T, F, E : kotlin.Exception> uniffiRustCallAsync(
+internal suspend fun<T, F, E: kotlin.Exception> uniffiRustCallAsync(
     rustFuture: Long,
     pollFunc: (Long, UniffiRustFutureContinuationCallback, Long) -> Unit,
     completeFunc: (Long, UniffiRustCallStatus) -> F,
     freeFunc: (Long) -> Unit,
     liftFunc: (F) -> T,
-    errorHandler: UniffiRustCallStatusErrorHandler<E>,
+    errorHandler: UniffiRustCallStatusErrorHandler<E>
 ): T {
     try {
         do {
@@ -2263,13 +2098,13 @@ internal suspend fun <T, F, E : kotlin.Exception> uniffiRustCallAsync(
                 pollFunc(
                     rustFuture,
                     uniffiRustFutureContinuationCallbackImpl,
-                    uniffiContinuationHandleMap.insert(continuation),
+                    uniffiContinuationHandleMap.insert(continuation)
                 )
             }
-        } while (pollResult != UNIFFI_RUST_FUTURE_POLL_READY)
+        } while (pollResult != UNIFFI_RUST_FUTURE_POLL_READY);
 
         return liftFunc(
-            uniffiRustCallWithError(errorHandler, { status -> completeFunc(rustFuture, status) }),
+            uniffiRustCallWithError(errorHandler, { status -> completeFunc(rustFuture, status) })
         )
     } finally {
         freeFunc(rustFuture)
@@ -2277,6 +2112,7 @@ internal suspend fun <T, F, E : kotlin.Exception> uniffiRustCallAsync(
 }
 
 // Public interface members begin here.
+
 
 // Interface implemented by anything that can contain an object reference.
 //
@@ -2293,7 +2129,6 @@ interface Disposable {
             for (arg in args) {
                 when (arg) {
                     is Disposable -> arg.destroy()
-
                     is ArrayList<*> -> {
                         for (idx in arg.indices) {
                             val element = arg[idx]
@@ -2302,7 +2137,6 @@ interface Disposable {
                             }
                         }
                     }
-
                     is Map<*, *> -> {
                         for (element in arg.values) {
                             if (element is Disposable) {
@@ -2310,7 +2144,6 @@ interface Disposable {
                             }
                         }
                     }
-
                     is Iterable<*> -> {
                         for (element in arg) {
                             if (element is Disposable) {
@@ -2327,16 +2160,17 @@ interface Disposable {
 /**
  * @suppress
  */
-inline fun <T : Disposable?, R> T.use(block: (T) -> R) = try {
-    block(this)
-} finally {
+inline fun <T : Disposable?, R> T.use(block: (T) -> R) =
     try {
-        // N.B. our implementation is on the nullable type `Disposable?`.
-        this?.destroy()
-    } catch (e: Throwable) {
-        // swallow
+        block(this)
+    } finally {
+        try {
+            // N.B. our implementation is on the nullable type `Disposable?`.
+            this?.destroy()
+        } catch (e: Throwable) {
+            // swallow
+        }
     }
-}
 
 /** 
  * Placeholder object used to signal that we're constructing an interface with a FFI handle.
@@ -2354,11 +2188,9 @@ object UniffiWithHandle
  *
  * @suppress
  * */
-object NoHandle // Magic number for the Rust proxy to call using the same mechanism as every other method,
-
+object NoHandle// Magic number for the Rust proxy to call using the same mechanism as every other method,
 // to free the callback once it's dropped by Rust.
 internal const val IDX_CALLBACK_FREE = 0
-
 // Callback return codes
 internal const val UNIFFI_CALLBACK_SUCCESS = 0
 internal const val UNIFFI_CALLBACK_ERROR = 1
@@ -2367,14 +2199,16 @@ internal const val UNIFFI_CALLBACK_UNEXPECTED_ERROR = 2
 /**
  * @suppress
  */
-public abstract class FfiConverterCallbackInterface<CallbackInterface : Any> : FfiConverter<CallbackInterface, Long> {
+public abstract class FfiConverterCallbackInterface<CallbackInterface: Any>: FfiConverter<CallbackInterface, Long> {
     internal val handleMap = UniffiHandleMap<CallbackInterface>()
 
     internal fun drop(handle: Long) {
         handleMap.remove(handle)
     }
 
-    override fun lift(value: Long): CallbackInterface = handleMap.get(value)
+    override fun lift(value: Long): CallbackInterface {
+        return handleMap.get(value)
+    }
 
     override fun read(buf: ByteBuffer) = lift(buf.getLong())
 
@@ -2386,7 +2220,6 @@ public abstract class FfiConverterCallbackInterface<CallbackInterface : Any> : F
         buf.putLong(lower(value))
     }
 }
-
 /**
  * The cleaner interface for Object finalization code to run.
  * This is the entry point to any implementation that we're using.
@@ -2415,26 +2248,29 @@ private class UniffiJnaCleaner : UniffiCleaner {
         UniffiJnaCleanable(cleaner.register(value, cleanUpTask))
 }
 
-private class UniffiJnaCleanable(private val cleanable: com.sun.jna.internal.Cleaner.Cleanable) :
-    UniffiCleaner.Cleanable {
+private class UniffiJnaCleanable(
+    private val cleanable: com.sun.jna.internal.Cleaner.Cleanable,
+) : UniffiCleaner.Cleanable {
     override fun clean() = cleanable.clean()
 }
+
 
 // We decide at uniffi binding generation time whether we were
 // using Android or not.
 // There are further runtime checks to chose the correct implementation
 // of the cleaner.
-private fun UniffiCleaner.Companion.create(): UniffiCleaner = try {
-    // For safety's sake: if the library hasn't been run in android_cleaner = true
-    // mode, but is being run on Android, then we still need to think about
-    // Android API versions.
-    // So we check if java.lang.ref.Cleaner is there, and use that…
-    java.lang.Class.forName("java.lang.ref.Cleaner")
-    JavaLangRefCleaner()
-} catch (e: ClassNotFoundException) {
-    // … otherwise, fallback to the JNA cleaner.
-    UniffiJnaCleaner()
-}
+private fun UniffiCleaner.Companion.create(): UniffiCleaner =
+    try {
+        // For safety's sake: if the library hasn't been run in android_cleaner = true
+        // mode, but is being run on Android, then we still need to think about
+        // Android API versions.
+        // So we check if java.lang.ref.Cleaner is there, and use that…
+        java.lang.Class.forName("java.lang.ref.Cleaner")
+        JavaLangRefCleaner()
+    } catch (e: ClassNotFoundException) {
+        // … otherwise, fallback to the JNA cleaner.
+        UniffiJnaCleaner()
+    }
 
 private class JavaLangRefCleaner : UniffiCleaner {
     val cleaner = java.lang.ref.Cleaner.create()
@@ -2443,19 +2279,27 @@ private class JavaLangRefCleaner : UniffiCleaner {
         JavaLangRefCleanable(cleaner.register(value, cleanUpTask))
 }
 
-private class JavaLangRefCleanable(val cleanable: java.lang.ref.Cleaner.Cleanable) : UniffiCleaner.Cleanable {
+private class JavaLangRefCleanable(
+    val cleanable: java.lang.ref.Cleaner.Cleanable
+) : UniffiCleaner.Cleanable {
     override fun clean() = cleanable.clean()
 }
 
 /**
  * @suppress
  */
-public object FfiConverterUInt : FfiConverter<UInt, Int> {
-    override fun lift(value: Int): UInt = value.toUInt()
+public object FfiConverterUInt: FfiConverter<UInt, Int> {
+    override fun lift(value: Int): UInt {
+        return value.toUInt()
+    }
 
-    override fun read(buf: ByteBuffer): UInt = lift(buf.getInt())
+    override fun read(buf: ByteBuffer): UInt {
+        return lift(buf.getInt())
+    }
 
-    override fun lower(value: UInt): Int = value.toInt()
+    override fun lower(value: UInt): Int {
+        return value.toInt()
+    }
 
     override fun allocationSize(value: UInt) = 4UL
 
@@ -2467,12 +2311,18 @@ public object FfiConverterUInt : FfiConverter<UInt, Int> {
 /**
  * @suppress
  */
-public object FfiConverterULong : FfiConverter<ULong, Long> {
-    override fun lift(value: Long): ULong = value.toULong()
+public object FfiConverterULong: FfiConverter<ULong, Long> {
+    override fun lift(value: Long): ULong {
+        return value.toULong()
+    }
 
-    override fun read(buf: ByteBuffer): ULong = lift(buf.getLong())
+    override fun read(buf: ByteBuffer): ULong {
+        return lift(buf.getLong())
+    }
 
-    override fun lower(value: ULong): Long = value.toLong()
+    override fun lower(value: ULong): Long {
+        return value.toLong()
+    }
 
     override fun allocationSize(value: ULong) = 8UL
 
@@ -2484,12 +2334,18 @@ public object FfiConverterULong : FfiConverter<ULong, Long> {
 /**
  * @suppress
  */
-public object FfiConverterLong : FfiConverter<Long, Long> {
-    override fun lift(value: Long): Long = value
+public object FfiConverterLong: FfiConverter<Long, Long> {
+    override fun lift(value: Long): Long {
+        return value
+    }
 
-    override fun read(buf: ByteBuffer): Long = buf.getLong()
+    override fun read(buf: ByteBuffer): Long {
+        return buf.getLong()
+    }
 
-    override fun lower(value: Long): Long = value
+    override fun lower(value: Long): Long {
+        return value
+    }
 
     override fun allocationSize(value: Long) = 8UL
 
@@ -2501,12 +2357,18 @@ public object FfiConverterLong : FfiConverter<Long, Long> {
 /**
  * @suppress
  */
-public object FfiConverterFloat : FfiConverter<Float, Float> {
-    override fun lift(value: Float): Float = value
+public object FfiConverterFloat: FfiConverter<Float, Float> {
+    override fun lift(value: Float): Float {
+        return value
+    }
 
-    override fun read(buf: ByteBuffer): Float = buf.getFloat()
+    override fun read(buf: ByteBuffer): Float {
+        return buf.getFloat()
+    }
 
-    override fun lower(value: Float): Float = value
+    override fun lower(value: Float): Float {
+        return value
+    }
 
     override fun allocationSize(value: Float) = 4UL
 
@@ -2518,12 +2380,18 @@ public object FfiConverterFloat : FfiConverter<Float, Float> {
 /**
  * @suppress
  */
-public object FfiConverterBoolean : FfiConverter<Boolean, Byte> {
-    override fun lift(value: Byte): Boolean = value.toInt() != 0
+public object FfiConverterBoolean: FfiConverter<Boolean, Byte> {
+    override fun lift(value: Byte): Boolean {
+        return value.toInt() != 0
+    }
 
-    override fun read(buf: ByteBuffer): Boolean = lift(buf.get())
+    override fun read(buf: ByteBuffer): Boolean {
+        return lift(buf.get())
+    }
 
-    override fun lower(value: Boolean): Byte = if (value) 1.toByte() else 0.toByte()
+    override fun lower(value: Boolean): Byte {
+        return if (value) 1.toByte() else 0.toByte()
+    }
 
     override fun allocationSize(value: Boolean) = 1UL
 
@@ -2535,7 +2403,7 @@ public object FfiConverterBoolean : FfiConverter<Boolean, Byte> {
 /**
  * @suppress
  */
-public object FfiConverterString : FfiConverter<String, RustBuffer.ByValue> {
+public object FfiConverterString: FfiConverter<String, RustBuffer.ByValue> {
     // Note: we don't inherit from FfiConverterRustBuffer, because we use a
     // special encoding when lowering/lifting.  We can use `RustBuffer.len` to
     // store our length and avoid writing it out to the buffer.
@@ -2592,19 +2460,22 @@ public object FfiConverterString : FfiConverter<String, RustBuffer.ByValue> {
 /**
  * @suppress
  */
-public object FfiConverterByteArray : FfiConverterRustBuffer<ByteArray> {
+public object FfiConverterByteArray: FfiConverterRustBuffer<ByteArray> {
     override fun read(buf: ByteBuffer): ByteArray {
         val len = buf.getInt()
         val byteArr = ByteArray(len)
         buf.get(byteArr)
         return byteArr
     }
-    override fun allocationSize(value: ByteArray): ULong = 4UL + value.size.toULong()
+    override fun allocationSize(value: ByteArray): ULong {
+        return 4UL + value.size.toULong()
+    }
     override fun write(value: ByteArray, buf: ByteBuffer) {
         buf.putInt(value.size)
         buf.put(value)
     }
 }
+
 
 // This template implements a class for working with a Rust struct via a handle
 // to the live Rust struct on the other side of the FFI.
@@ -2700,36 +2571,35 @@ public object FfiConverterByteArray : FfiConverterRustBuffer<ByteArray> {
 // [1] https://stackoverflow.com/questions/24376768/can-java-finalize-an-object-when-it-is-still-in-scope/24380219
 //
 
+
 public interface AppFfiCtxInterface {
-
+    
     suspend fun `checkCloneDestination`(`destination`: kotlin.String): CloneDestinationCheck
-
+    
     suspend fun `cloneRepoInitFromUrl`(`sourceUrl`: kotlin.String, `destination`: kotlin.String): CloneInitResult
-
+    
     suspend fun `defaultCloneParentDir`(): kotlin.String
-
+    
     suspend fun `forgetKnownRepo`(`repoId`: kotlin.String)
-
+    
     suspend fun `getRepoConfig`(): RepoConfig
-
+    
     suspend fun `isRepoUsable`(`repoRoot`: kotlin.String): kotlin.Boolean
-
+    
     suspend fun `registerRepoPath`(`repoRoot`: kotlin.String): KnownRepoEntry
-
+    
     suspend fun `resolveCloneUrl`(`sourceUrl`: kotlin.String): CloneInfo
-
+    
     companion object
 }
 
-open class AppFfiCtx :
-    Disposable,
-    AutoCloseable,
-    AppFfiCtxInterface {
+open class AppFfiCtx: Disposable, AutoCloseable, AppFfiCtxInterface
+{
 
+    @Suppress("UNUSED_PARAMETER")
     /**
      * @suppress
      */
-    @Suppress("UNUSED_PARAMETER")
     constructor(withHandle: UniffiWithHandle, handle: Long) {
         this.handle = handle
         this.cleanable = UniffiLib.CLEANER.register(this, UniffiCleanAction(handle))
@@ -2781,7 +2651,7 @@ open class AppFfiCtx :
             if (c == Long.MAX_VALUE) {
                 throw IllegalStateException("${this.javaClass.simpleName} call counter would overflow")
             }
-        } while (!this.callCounter.compareAndSet(c, c + 1L))
+        } while (! this.callCounter.compareAndSet(c, c + 1L))
         // Now we can safely do the method call without the handle being freed concurrently.
         try {
             return block(this.uniffiCloneHandle())
@@ -2799,7 +2669,7 @@ open class AppFfiCtx :
         override fun run() {
             if (handle == 0.toLong()) {
                 // Fake object created with `NoHandle`, don't try to free.
-                return
+                return;
             }
             uniffiRustCall { status ->
                 UniffiLib.uniffi_daybook_ffi_fn_free_appffictx(handle, status)
@@ -2812,63 +2682,46 @@ open class AppFfiCtx :
      */
     fun uniffiCloneHandle(): Long {
         if (handle == 0.toLong()) {
-            throw InternalException("uniffiCloneHandle() called on NoHandle object")
+            throw InternalException("uniffiCloneHandle() called on NoHandle object");
         }
-        return uniffiRustCall { status ->
+        return uniffiRustCall() { status ->
             UniffiLib.uniffi_daybook_ffi_fn_clone_appffictx(handle, status)
         }
     }
 
+    
     @Throws(FfiException::class)
     @Suppress("ASSIGNED_BUT_NEVER_ACCESSED_VARIABLE")
-    override suspend fun `checkCloneDestination`(`destination`: kotlin.String): CloneDestinationCheck =
-        uniffiRustCallAsync(
-            callWithHandle { uniffiHandle ->
-                UniffiLib.uniffi_daybook_ffi_fn_method_appffictx_check_clone_destination(
-                    uniffiHandle,
-                    FfiConverterString.lower(`destination`),
-                )
-            },
-            { future, callback, continuation ->
-                UniffiLib.ffi_daybook_ffi_rust_future_poll_rust_buffer(
-                    future,
-                    callback,
-                    continuation,
-                )
-            },
-            { future, continuation ->
-                UniffiLib.ffi_daybook_ffi_rust_future_complete_rust_buffer(
-                    future,
-                    continuation,
-                )
-            },
-            { future -> UniffiLib.ffi_daybook_ffi_rust_future_free_rust_buffer(future) },
-            // lift function
-            { FfiConverterTypeCloneDestinationCheck.lift(it) },
-            // Error FFI converter
-            FfiException.ErrorHandler,
-        )
-
-    @Throws(FfiException::class)
-    @Suppress("ASSIGNED_BUT_NEVER_ACCESSED_VARIABLE")
-    override suspend fun `cloneRepoInitFromUrl`(
-        `sourceUrl`: kotlin.String,
-        `destination`: kotlin.String,
-    ): CloneInitResult = uniffiRustCallAsync(
+    override suspend fun `checkCloneDestination`(`destination`: kotlin.String) : CloneDestinationCheck {
+        return uniffiRustCallAsync(
         callWithHandle { uniffiHandle ->
-            UniffiLib.uniffi_daybook_ffi_fn_method_appffictx_clone_repo_init_from_url(
+            UniffiLib.uniffi_daybook_ffi_fn_method_appffictx_check_clone_destination(
                 uniffiHandle,
-                FfiConverterString.lower(`sourceUrl`),
                 FfiConverterString.lower(`destination`),
             )
         },
-        { future, callback, continuation ->
-            UniffiLib.ffi_daybook_ffi_rust_future_poll_rust_buffer(
-                future,
-                callback,
-                continuation,
+        { future, callback, continuation -> UniffiLib.ffi_daybook_ffi_rust_future_poll_rust_buffer(future, callback, continuation) },
+        { future, continuation -> UniffiLib.ffi_daybook_ffi_rust_future_complete_rust_buffer(future, continuation) },
+        { future -> UniffiLib.ffi_daybook_ffi_rust_future_free_rust_buffer(future) },
+        // lift function
+        { FfiConverterTypeCloneDestinationCheck.lift(it) },
+        // Error FFI converter
+        FfiException.ErrorHandler,
+    )
+    }
+
+    
+    @Throws(FfiException::class)
+    @Suppress("ASSIGNED_BUT_NEVER_ACCESSED_VARIABLE")
+    override suspend fun `cloneRepoInitFromUrl`(`sourceUrl`: kotlin.String, `destination`: kotlin.String) : CloneInitResult {
+        return uniffiRustCallAsync(
+        callWithHandle { uniffiHandle ->
+            UniffiLib.uniffi_daybook_ffi_fn_method_appffictx_clone_repo_init_from_url(
+                uniffiHandle,
+                FfiConverterString.lower(`sourceUrl`),FfiConverterString.lower(`destination`),
             )
         },
+        { future, callback, continuation -> UniffiLib.ffi_daybook_ffi_rust_future_poll_rust_buffer(future, callback, continuation) },
         { future, continuation -> UniffiLib.ffi_daybook_ffi_rust_future_complete_rust_buffer(future, continuation) },
         { future -> UniffiLib.ffi_daybook_ffi_rust_future_free_rust_buffer(future) },
         // lift function
@@ -2876,23 +2729,20 @@ open class AppFfiCtx :
         // Error FFI converter
         FfiException.ErrorHandler,
     )
+    }
 
+    
     @Throws(FfiException::class)
     @Suppress("ASSIGNED_BUT_NEVER_ACCESSED_VARIABLE")
-    override suspend fun `defaultCloneParentDir`(): kotlin.String = uniffiRustCallAsync(
+    override suspend fun `defaultCloneParentDir`() : kotlin.String {
+        return uniffiRustCallAsync(
         callWithHandle { uniffiHandle ->
             UniffiLib.uniffi_daybook_ffi_fn_method_appffictx_default_clone_parent_dir(
                 uniffiHandle,
-
+                
             )
         },
-        { future, callback, continuation ->
-            UniffiLib.ffi_daybook_ffi_rust_future_poll_rust_buffer(
-                future,
-                callback,
-                continuation,
-            )
-        },
+        { future, callback, continuation -> UniffiLib.ffi_daybook_ffi_rust_future_poll_rust_buffer(future, callback, continuation) },
         { future, continuation -> UniffiLib.ffi_daybook_ffi_rust_future_complete_rust_buffer(future, continuation) },
         { future -> UniffiLib.ffi_daybook_ffi_rust_future_free_rust_buffer(future) },
         // lift function
@@ -2900,77 +2750,63 @@ open class AppFfiCtx :
         // Error FFI converter
         FfiException.ErrorHandler,
     )
+    }
 
+    
     @Throws(FfiException::class)
     @Suppress("ASSIGNED_BUT_NEVER_ACCESSED_VARIABLE")
-    override suspend fun `forgetKnownRepo`(`repoId`: kotlin.String) = uniffiRustCallAsync(
+    override suspend fun `forgetKnownRepo`(`repoId`: kotlin.String) {
+        return uniffiRustCallAsync(
         callWithHandle { uniffiHandle ->
             UniffiLib.uniffi_daybook_ffi_fn_method_appffictx_forget_known_repo(
                 uniffiHandle,
                 FfiConverterString.lower(`repoId`),
             )
         },
-        { future, callback, continuation ->
-            UniffiLib.ffi_daybook_ffi_rust_future_poll_void(
-                future,
-                callback,
-                continuation,
-            )
-        },
+        { future, callback, continuation -> UniffiLib.ffi_daybook_ffi_rust_future_poll_void(future, callback, continuation) },
         { future, continuation -> UniffiLib.ffi_daybook_ffi_rust_future_complete_void(future, continuation) },
         { future -> UniffiLib.ffi_daybook_ffi_rust_future_free_void(future) },
         // lift function
         { Unit },
-
+        
         // Error FFI converter
         FfiException.ErrorHandler,
     )
+    }
 
+    
     @Throws(FfiException::class)
     @Suppress("ASSIGNED_BUT_NEVER_ACCESSED_VARIABLE")
-    override suspend fun `getRepoConfig`(): RepoConfig = uniffiRustCallAsync(
+    override suspend fun `getRepoConfig`() : RepoConfig {
+        return uniffiRustCallAsync(
         callWithHandle { uniffiHandle ->
             UniffiLib.uniffi_daybook_ffi_fn_method_appffictx_get_repo_config(
                 uniffiHandle,
-
+                
             )
         },
-        { future, callback, continuation ->
-            UniffiLib.ffi_daybook_ffi_rust_future_poll_rust_buffer(
-                future,
-                callback,
-                continuation,
-            )
-        },
-        { future, continuation ->
-            UniffiLib.ffi_daybook_ffi_rust_future_complete_rust_buffer(
-                future,
-                continuation,
-            ).let { RustBufferRepoConfig.create(it.capacity.toULong(), it.len.toULong(), it.data) }
-        },
+        { future, callback, continuation -> UniffiLib.ffi_daybook_ffi_rust_future_poll_rust_buffer(future, callback, continuation) },
+        { future, continuation -> UniffiLib.ffi_daybook_ffi_rust_future_complete_rust_buffer(future, continuation).let { RustBufferRepoConfig.create(it.capacity.toULong(), it.len.toULong(), it.data) } },
         { future -> UniffiLib.ffi_daybook_ffi_rust_future_free_rust_buffer(future) },
         // lift function
         { FfiConverterTypeRepoConfig.lift(it) },
         // Error FFI converter
         FfiException.ErrorHandler,
     )
+    }
 
+    
     @Throws(FfiException::class)
     @Suppress("ASSIGNED_BUT_NEVER_ACCESSED_VARIABLE")
-    override suspend fun `isRepoUsable`(`repoRoot`: kotlin.String): kotlin.Boolean = uniffiRustCallAsync(
+    override suspend fun `isRepoUsable`(`repoRoot`: kotlin.String) : kotlin.Boolean {
+        return uniffiRustCallAsync(
         callWithHandle { uniffiHandle ->
             UniffiLib.uniffi_daybook_ffi_fn_method_appffictx_is_repo_usable(
                 uniffiHandle,
                 FfiConverterString.lower(`repoRoot`),
             )
         },
-        { future, callback, continuation ->
-            UniffiLib.ffi_daybook_ffi_rust_future_poll_i8(
-                future,
-                callback,
-                continuation,
-            )
-        },
+        { future, callback, continuation -> UniffiLib.ffi_daybook_ffi_rust_future_poll_i8(future, callback, continuation) },
         { future, continuation -> UniffiLib.ffi_daybook_ffi_rust_future_complete_i8(future, continuation) },
         { future -> UniffiLib.ffi_daybook_ffi_rust_future_free_i8(future) },
         // lift function
@@ -2978,52 +2814,41 @@ open class AppFfiCtx :
         // Error FFI converter
         FfiException.ErrorHandler,
     )
+    }
 
+    
     @Throws(FfiException::class)
     @Suppress("ASSIGNED_BUT_NEVER_ACCESSED_VARIABLE")
-    override suspend fun `registerRepoPath`(`repoRoot`: kotlin.String): KnownRepoEntry = uniffiRustCallAsync(
+    override suspend fun `registerRepoPath`(`repoRoot`: kotlin.String) : KnownRepoEntry {
+        return uniffiRustCallAsync(
         callWithHandle { uniffiHandle ->
             UniffiLib.uniffi_daybook_ffi_fn_method_appffictx_register_repo_path(
                 uniffiHandle,
                 FfiConverterString.lower(`repoRoot`),
             )
         },
-        { future, callback, continuation ->
-            UniffiLib.ffi_daybook_ffi_rust_future_poll_rust_buffer(
-                future,
-                callback,
-                continuation,
-            )
-        },
-        { future, continuation ->
-            UniffiLib.ffi_daybook_ffi_rust_future_complete_rust_buffer(
-                future,
-                continuation,
-            ).let { RustBufferKnownRepoEntry.create(it.capacity.toULong(), it.len.toULong(), it.data) }
-        },
+        { future, callback, continuation -> UniffiLib.ffi_daybook_ffi_rust_future_poll_rust_buffer(future, callback, continuation) },
+        { future, continuation -> UniffiLib.ffi_daybook_ffi_rust_future_complete_rust_buffer(future, continuation).let { RustBufferKnownRepoEntry.create(it.capacity.toULong(), it.len.toULong(), it.data) } },
         { future -> UniffiLib.ffi_daybook_ffi_rust_future_free_rust_buffer(future) },
         // lift function
         { FfiConverterTypeKnownRepoEntry.lift(it) },
         // Error FFI converter
         FfiException.ErrorHandler,
     )
+    }
 
+    
     @Throws(FfiException::class)
     @Suppress("ASSIGNED_BUT_NEVER_ACCESSED_VARIABLE")
-    override suspend fun `resolveCloneUrl`(`sourceUrl`: kotlin.String): CloneInfo = uniffiRustCallAsync(
+    override suspend fun `resolveCloneUrl`(`sourceUrl`: kotlin.String) : CloneInfo {
+        return uniffiRustCallAsync(
         callWithHandle { uniffiHandle ->
             UniffiLib.uniffi_daybook_ffi_fn_method_appffictx_resolve_clone_url(
                 uniffiHandle,
                 FfiConverterString.lower(`sourceUrl`),
             )
         },
-        { future, callback, continuation ->
-            UniffiLib.ffi_daybook_ffi_rust_future_poll_rust_buffer(
-                future,
-                callback,
-                continuation,
-            )
-        },
+        { future, callback, continuation -> UniffiLib.ffi_daybook_ffi_rust_future_poll_rust_buffer(future, callback, continuation) },
         { future, continuation -> UniffiLib.ffi_daybook_ffi_rust_future_complete_rust_buffer(future, continuation) },
         { future -> UniffiLib.ffi_daybook_ffi_rust_future_free_rust_buffer(future) },
         // lift function
@@ -3031,39 +2856,52 @@ open class AppFfiCtx :
         // Error FFI converter
         FfiException.ErrorHandler,
     )
-
-    companion object {
-
-        @Throws(FfiException::class)
-        @Suppress("ASSIGNED_BUT_NEVER_ACCESSED_VARIABLE")
-        suspend fun `init`(): AppFfiCtx = uniffiRustCallAsync(
-            UniffiLib.uniffi_daybook_ffi_fn_constructor_appffictx_init(),
-            { future, callback, continuation ->
-                UniffiLib.ffi_daybook_ffi_rust_future_poll_u64(
-                    future,
-                    callback,
-                    continuation,
-                )
-            },
-            { future, continuation -> UniffiLib.ffi_daybook_ffi_rust_future_complete_u64(future, continuation) },
-            { future -> UniffiLib.ffi_daybook_ffi_rust_future_free_u64(future) },
-            // lift function
-            { FfiConverterTypeAppFfiCtx.lift(it) },
-            // Error FFI converter
-            FfiException.ErrorHandler,
-        )
     }
+
+    
+
+    
+
+
+    
+    companion object {
+        
+    @Throws(FfiException::class)
+    @Suppress("ASSIGNED_BUT_NEVER_ACCESSED_VARIABLE")
+     suspend fun `init`() : AppFfiCtx {
+        return uniffiRustCallAsync(
+        UniffiLib.uniffi_daybook_ffi_fn_constructor_appffictx_init(),
+        { future, callback, continuation -> UniffiLib.ffi_daybook_ffi_rust_future_poll_u64(future, callback, continuation) },
+        { future, continuation -> UniffiLib.ffi_daybook_ffi_rust_future_complete_u64(future, continuation) },
+        { future -> UniffiLib.ffi_daybook_ffi_rust_future_free_u64(future) },
+        // lift function
+        { FfiConverterTypeAppFfiCtx.lift(it) },
+        // Error FFI converter
+        FfiException.ErrorHandler,
+    )
+    }
+
+        
+    }
+    
 }
+
 
 /**
  * @suppress
  */
-public object FfiConverterTypeAppFfiCtx : FfiConverter<AppFfiCtx, Long> {
-    override fun lower(value: AppFfiCtx): Long = value.uniffiCloneHandle()
+public object FfiConverterTypeAppFfiCtx: FfiConverter<AppFfiCtx, Long> {
+    override fun lower(value: AppFfiCtx): Long {
+        return value.uniffiCloneHandle()
+    }
 
-    override fun lift(value: Long): AppFfiCtx = AppFfiCtx(UniffiWithHandle, value)
+    override fun lift(value: Long): AppFfiCtx {
+        return AppFfiCtx(UniffiWithHandle, value)
+    }
 
-    override fun read(buf: ByteBuffer): AppFfiCtx = lift(buf.getLong())
+    override fun read(buf: ByteBuffer): AppFfiCtx {
+        return lift(buf.getLong())
+    }
 
     override fun allocationSize(value: AppFfiCtx) = 8UL
 
@@ -3071,6 +2909,7 @@ public object FfiConverterTypeAppFfiCtx : FfiConverter<AppFfiCtx, Long> {
         buf.putLong(lower(value))
     }
 }
+
 
 // This template implements a class for working with a Rust struct via a handle
 // to the live Rust struct on the other side of the FFI.
@@ -3166,24 +3005,23 @@ public object FfiConverterTypeAppFfiCtx : FfiConverter<AppFfiCtx, Long> {
 // [1] https://stackoverflow.com/questions/24376768/can-java-finalize-an-object-when-it-is-still-in-scope/24380219
 //
 
+
 public interface BlobsRepoFfiInterface {
-
+    
     suspend fun `getPath`(`hash`: kotlin.String): kotlin.String
-
+    
     suspend fun `put`(`data`: kotlin.ByteArray): kotlin.String
-
+    
     companion object
 }
 
-open class BlobsRepoFfi :
-    Disposable,
-    AutoCloseable,
-    BlobsRepoFfiInterface {
+open class BlobsRepoFfi: Disposable, AutoCloseable, BlobsRepoFfiInterface
+{
 
+    @Suppress("UNUSED_PARAMETER")
     /**
      * @suppress
      */
-    @Suppress("UNUSED_PARAMETER")
     constructor(withHandle: UniffiWithHandle, handle: Long) {
         this.handle = handle
         this.cleanable = UniffiLib.CLEANER.register(this, UniffiCleanAction(handle))
@@ -3235,7 +3073,7 @@ open class BlobsRepoFfi :
             if (c == Long.MAX_VALUE) {
                 throw IllegalStateException("${this.javaClass.simpleName} call counter would overflow")
             }
-        } while (!this.callCounter.compareAndSet(c, c + 1L))
+        } while (! this.callCounter.compareAndSet(c, c + 1L))
         // Now we can safely do the method call without the handle being freed concurrently.
         try {
             return block(this.uniffiCloneHandle())
@@ -3253,7 +3091,7 @@ open class BlobsRepoFfi :
         override fun run() {
             if (handle == 0.toLong()) {
                 // Fake object created with `NoHandle`, don't try to free.
-                return
+                return;
             }
             uniffiRustCall { status ->
                 UniffiLib.uniffi_daybook_ffi_fn_free_blobsrepoffi(handle, status)
@@ -3266,29 +3104,25 @@ open class BlobsRepoFfi :
      */
     fun uniffiCloneHandle(): Long {
         if (handle == 0.toLong()) {
-            throw InternalException("uniffiCloneHandle() called on NoHandle object")
+            throw InternalException("uniffiCloneHandle() called on NoHandle object");
         }
-        return uniffiRustCall { status ->
+        return uniffiRustCall() { status ->
             UniffiLib.uniffi_daybook_ffi_fn_clone_blobsrepoffi(handle, status)
         }
     }
 
+    
     @Throws(FfiException::class)
     @Suppress("ASSIGNED_BUT_NEVER_ACCESSED_VARIABLE")
-    override suspend fun `getPath`(`hash`: kotlin.String): kotlin.String = uniffiRustCallAsync(
+    override suspend fun `getPath`(`hash`: kotlin.String) : kotlin.String {
+        return uniffiRustCallAsync(
         callWithHandle { uniffiHandle ->
             UniffiLib.uniffi_daybook_ffi_fn_method_blobsrepoffi_get_path(
                 uniffiHandle,
                 FfiConverterString.lower(`hash`),
             )
         },
-        { future, callback, continuation ->
-            UniffiLib.ffi_daybook_ffi_rust_future_poll_rust_buffer(
-                future,
-                callback,
-                continuation,
-            )
-        },
+        { future, callback, continuation -> UniffiLib.ffi_daybook_ffi_rust_future_poll_rust_buffer(future, callback, continuation) },
         { future, continuation -> UniffiLib.ffi_daybook_ffi_rust_future_complete_rust_buffer(future, continuation) },
         { future -> UniffiLib.ffi_daybook_ffi_rust_future_free_rust_buffer(future) },
         // lift function
@@ -3296,23 +3130,20 @@ open class BlobsRepoFfi :
         // Error FFI converter
         FfiException.ErrorHandler,
     )
+    }
 
+    
     @Throws(FfiException::class)
     @Suppress("ASSIGNED_BUT_NEVER_ACCESSED_VARIABLE")
-    override suspend fun `put`(`data`: kotlin.ByteArray): kotlin.String = uniffiRustCallAsync(
+    override suspend fun `put`(`data`: kotlin.ByteArray) : kotlin.String {
+        return uniffiRustCallAsync(
         callWithHandle { uniffiHandle ->
             UniffiLib.uniffi_daybook_ffi_fn_method_blobsrepoffi_put(
                 uniffiHandle,
                 FfiConverterByteArray.lower(`data`),
             )
         },
-        { future, callback, continuation ->
-            UniffiLib.ffi_daybook_ffi_rust_future_poll_rust_buffer(
-                future,
-                callback,
-                continuation,
-            )
-        },
+        { future, callback, continuation -> UniffiLib.ffi_daybook_ffi_rust_future_poll_rust_buffer(future, callback, continuation) },
         { future, continuation -> UniffiLib.ffi_daybook_ffi_rust_future_complete_rust_buffer(future, continuation) },
         { future -> UniffiLib.ffi_daybook_ffi_rust_future_free_rust_buffer(future) },
         // lift function
@@ -3320,39 +3151,52 @@ open class BlobsRepoFfi :
         // Error FFI converter
         FfiException.ErrorHandler,
     )
-
-    companion object {
-
-        @Throws(FfiException::class)
-        @Suppress("ASSIGNED_BUT_NEVER_ACCESSED_VARIABLE")
-        suspend fun `load`(`fcx`: FfiCtx): BlobsRepoFfi = uniffiRustCallAsync(
-            UniffiLib.uniffi_daybook_ffi_fn_constructor_blobsrepoffi_load(FfiConverterTypeFfiCtx.lower(`fcx`)),
-            { future, callback, continuation ->
-                UniffiLib.ffi_daybook_ffi_rust_future_poll_u64(
-                    future,
-                    callback,
-                    continuation,
-                )
-            },
-            { future, continuation -> UniffiLib.ffi_daybook_ffi_rust_future_complete_u64(future, continuation) },
-            { future -> UniffiLib.ffi_daybook_ffi_rust_future_free_u64(future) },
-            // lift function
-            { FfiConverterTypeBlobsRepoFfi.lift(it) },
-            // Error FFI converter
-            FfiException.ErrorHandler,
-        )
     }
+
+    
+
+    
+
+
+    
+    companion object {
+        
+    @Throws(FfiException::class)
+    @Suppress("ASSIGNED_BUT_NEVER_ACCESSED_VARIABLE")
+     suspend fun `load`(`fcx`: FfiCtx) : BlobsRepoFfi {
+        return uniffiRustCallAsync(
+        UniffiLib.uniffi_daybook_ffi_fn_constructor_blobsrepoffi_load(FfiConverterTypeFfiCtx.lower(`fcx`),),
+        { future, callback, continuation -> UniffiLib.ffi_daybook_ffi_rust_future_poll_u64(future, callback, continuation) },
+        { future, continuation -> UniffiLib.ffi_daybook_ffi_rust_future_complete_u64(future, continuation) },
+        { future -> UniffiLib.ffi_daybook_ffi_rust_future_free_u64(future) },
+        // lift function
+        { FfiConverterTypeBlobsRepoFfi.lift(it) },
+        // Error FFI converter
+        FfiException.ErrorHandler,
+    )
+    }
+
+        
+    }
+    
 }
+
 
 /**
  * @suppress
  */
-public object FfiConverterTypeBlobsRepoFfi : FfiConverter<BlobsRepoFfi, Long> {
-    override fun lower(value: BlobsRepoFfi): Long = value.uniffiCloneHandle()
+public object FfiConverterTypeBlobsRepoFfi: FfiConverter<BlobsRepoFfi, Long> {
+    override fun lower(value: BlobsRepoFfi): Long {
+        return value.uniffiCloneHandle()
+    }
 
-    override fun lift(value: Long): BlobsRepoFfi = BlobsRepoFfi(UniffiWithHandle, value)
+    override fun lift(value: Long): BlobsRepoFfi {
+        return BlobsRepoFfi(UniffiWithHandle, value)
+    }
 
-    override fun read(buf: ByteBuffer): BlobsRepoFfi = lift(buf.getLong())
+    override fun read(buf: ByteBuffer): BlobsRepoFfi {
+        return lift(buf.getLong())
+    }
 
     override fun allocationSize(value: BlobsRepoFfi) = 8UL
 
@@ -3360,6 +3204,7 @@ public object FfiConverterTypeBlobsRepoFfi : FfiConverter<BlobsRepoFfi, Long> {
         buf.putLong(lower(value))
     }
 }
+
 
 // This template implements a class for working with a Rust struct via a handle
 // to the live Rust struct on the other side of the FFI.
@@ -3455,38 +3300,37 @@ public object FfiConverterTypeBlobsRepoFfi : FfiConverter<BlobsRepoFfi, Long> {
 // [1] https://stackoverflow.com/questions/24376768/can-java-finalize-an-object-when-it-is-still-in-scope/24380219
 //
 
+
 public interface CameraPreviewFfiInterface {
-
+    
     fun `clearQrListener`()
-
+    
     fun `latestFrame`(): CameraPreviewFrame?
-
+    
     fun `listDevices`(): List<CameraDeviceInfo>
-
+    
     fun `setQrAnalysisEnabled`(`enabled`: kotlin.Boolean)
-
+    
     fun `setQrListener`(`listener`: CameraQrEventListener)
-
+    
     fun `startStream`(`deviceId`: kotlin.UInt, `listener`: CameraPreviewFrameListener)
-
+    
     fun `stopStream`()
-
+    
     fun `supportsNativeQrAnalysis`(): kotlin.Boolean
-
+    
     fun `takeLatestFrame`(): CameraPreviewFrame?
-
+    
     companion object
 }
 
-open class CameraPreviewFfi :
-    Disposable,
-    AutoCloseable,
-    CameraPreviewFfiInterface {
+open class CameraPreviewFfi: Disposable, AutoCloseable, CameraPreviewFfiInterface
+{
 
+    @Suppress("UNUSED_PARAMETER")
     /**
      * @suppress
      */
-    @Suppress("UNUSED_PARAMETER")
     constructor(withHandle: UniffiWithHandle, handle: Long) {
         this.handle = handle
         this.cleanable = UniffiLib.CLEANER.register(this, UniffiCleanAction(handle))
@@ -3538,7 +3382,7 @@ open class CameraPreviewFfi :
             if (c == Long.MAX_VALUE) {
                 throw IllegalStateException("${this.javaClass.simpleName} call counter would overflow")
             }
-        } while (!this.callCounter.compareAndSet(c, c + 1L))
+        } while (! this.callCounter.compareAndSet(c, c + 1L))
         // Now we can safely do the method call without the handle being freed concurrently.
         try {
             return block(this.uniffiCloneHandle())
@@ -3556,7 +3400,7 @@ open class CameraPreviewFfi :
         override fun run() {
             if (handle == 0.toLong()) {
                 // Fake object created with `NoHandle`, don't try to free.
-                return
+                return;
             }
             uniffiRustCall { status ->
                 UniffiLib.uniffi_daybook_ffi_fn_free_camerapreviewffi(handle, status)
@@ -3569,130 +3413,167 @@ open class CameraPreviewFfi :
      */
     fun uniffiCloneHandle(): Long {
         if (handle == 0.toLong()) {
-            throw InternalException("uniffiCloneHandle() called on NoHandle object")
+            throw InternalException("uniffiCloneHandle() called on NoHandle object");
         }
-        return uniffiRustCall { status ->
+        return uniffiRustCall() { status ->
             UniffiLib.uniffi_daybook_ffi_fn_clone_camerapreviewffi(handle, status)
         }
     }
 
-    override fun `clearQrListener`() = callWithHandle {
-        uniffiRustCall { _status ->
-            UniffiLib.uniffi_daybook_ffi_fn_method_camerapreviewffi_clear_qr_listener(
-                it,
-                _status,
-            )
-        }
-    }
-
-    override fun `latestFrame`(): CameraPreviewFrame? = FfiConverterOptionalTypeCameraPreviewFrame.lift(
-        callWithHandle {
-            uniffiRustCall { _status ->
-                UniffiLib.uniffi_daybook_ffi_fn_method_camerapreviewffi_latest_frame(
-                    it,
-                    _status,
-                )
-            }
-        },
-    )
-
-    @Throws(FfiException::class)
-    override fun `listDevices`(): List<CameraDeviceInfo> = FfiConverterSequenceTypeCameraDeviceInfo.lift(
-        callWithHandle {
-            uniffiRustCallWithError(FfiException) { _status ->
-                UniffiLib.uniffi_daybook_ffi_fn_method_camerapreviewffi_list_devices(
-                    it,
-                    _status,
-                )
-            }
-        },
-    )
-
-    override fun `setQrAnalysisEnabled`(`enabled`: kotlin.Boolean) = callWithHandle {
-        uniffiRustCall { _status ->
-            UniffiLib.uniffi_daybook_ffi_fn_method_camerapreviewffi_set_qr_analysis_enabled(
-                it,
-                FfiConverterBoolean.lower(`enabled`),
-                _status,
-            )
-        }
-    }
-
-    override fun `setQrListener`(`listener`: CameraQrEventListener) = callWithHandle {
-        uniffiRustCall { _status ->
-            UniffiLib.uniffi_daybook_ffi_fn_method_camerapreviewffi_set_qr_listener(
-                it,
-                FfiConverterTypeCameraQrEventListener.lower(`listener`),
-                _status,
-            )
-        }
-    }
-
-    @Throws(FfiException::class)
-    override fun `startStream`(`deviceId`: kotlin.UInt, `listener`: CameraPreviewFrameListener) = callWithHandle {
-        uniffiRustCallWithError(FfiException) { _status ->
-            UniffiLib.uniffi_daybook_ffi_fn_method_camerapreviewffi_start_stream(
-                it,
-                FfiConverterUInt.lower(`deviceId`),
-                FfiConverterTypeCameraPreviewFrameListener.lower(`listener`),
-                _status,
-            )
-        }
-    }
-
-    @Throws(FfiException::class)
-    override fun `stopStream`() = callWithHandle {
-        uniffiRustCallWithError(FfiException) { _status ->
-            UniffiLib.uniffi_daybook_ffi_fn_method_camerapreviewffi_stop_stream(
-                it,
-                _status,
-            )
-        }
-    }
-
-    override fun `supportsNativeQrAnalysis`(): kotlin.Boolean = FfiConverterBoolean.lift(
-        callWithHandle {
-            uniffiRustCall { _status ->
-                UniffiLib.uniffi_daybook_ffi_fn_method_camerapreviewffi_supports_native_qr_analysis(
-                    it,
-                    _status,
-                )
-            }
-        },
-    )
-
-    override fun `takeLatestFrame`(): CameraPreviewFrame? = FfiConverterOptionalTypeCameraPreviewFrame.lift(
-        callWithHandle {
-            uniffiRustCall { _status ->
-                UniffiLib.uniffi_daybook_ffi_fn_method_camerapreviewffi_take_latest_frame(
-                    it,
-                    _status,
-                )
-            }
-        },
-    )
-
-    companion object {
-        fun `load`(): CameraPreviewFfi = FfiConverterTypeCameraPreviewFfi.lift(
-            uniffiRustCall { _status ->
-                UniffiLib.uniffi_daybook_ffi_fn_constructor_camerapreviewffi_load(
-
-                    _status,
-                )
-            },
-        )
-    }
+    override fun `clearQrListener`()
+        = 
+    callWithHandle {
+    uniffiRustCall() { _status ->
+    UniffiLib.uniffi_daybook_ffi_fn_method_camerapreviewffi_clear_qr_listener(
+        it,
+        _status)
 }
+    }
+    
+    
+
+    override fun `latestFrame`(): CameraPreviewFrame? {
+            return FfiConverterOptionalTypeCameraPreviewFrame.lift(
+    callWithHandle {
+    uniffiRustCall() { _status ->
+    UniffiLib.uniffi_daybook_ffi_fn_method_camerapreviewffi_latest_frame(
+        it,
+        _status)
+}
+    }
+    )
+    }
+    
+
+    
+    @Throws(FfiException::class)override fun `listDevices`(): List<CameraDeviceInfo> {
+            return FfiConverterSequenceTypeCameraDeviceInfo.lift(
+    callWithHandle {
+    uniffiRustCallWithError(FfiException) { _status ->
+    UniffiLib.uniffi_daybook_ffi_fn_method_camerapreviewffi_list_devices(
+        it,
+        _status)
+}
+    }
+    )
+    }
+    
+
+    override fun `setQrAnalysisEnabled`(`enabled`: kotlin.Boolean)
+        = 
+    callWithHandle {
+    uniffiRustCall() { _status ->
+    UniffiLib.uniffi_daybook_ffi_fn_method_camerapreviewffi_set_qr_analysis_enabled(
+        it,
+        FfiConverterBoolean.lower(`enabled`),_status)
+}
+    }
+    
+    
+
+    override fun `setQrListener`(`listener`: CameraQrEventListener)
+        = 
+    callWithHandle {
+    uniffiRustCall() { _status ->
+    UniffiLib.uniffi_daybook_ffi_fn_method_camerapreviewffi_set_qr_listener(
+        it,
+        FfiConverterTypeCameraQrEventListener.lower(`listener`),_status)
+}
+    }
+    
+    
+
+    
+    @Throws(FfiException::class)override fun `startStream`(`deviceId`: kotlin.UInt, `listener`: CameraPreviewFrameListener)
+        = 
+    callWithHandle {
+    uniffiRustCallWithError(FfiException) { _status ->
+    UniffiLib.uniffi_daybook_ffi_fn_method_camerapreviewffi_start_stream(
+        it,
+        FfiConverterUInt.lower(`deviceId`),FfiConverterTypeCameraPreviewFrameListener.lower(`listener`),_status)
+}
+    }
+    
+    
+
+    
+    @Throws(FfiException::class)override fun `stopStream`()
+        = 
+    callWithHandle {
+    uniffiRustCallWithError(FfiException) { _status ->
+    UniffiLib.uniffi_daybook_ffi_fn_method_camerapreviewffi_stop_stream(
+        it,
+        _status)
+}
+    }
+    
+    
+
+    override fun `supportsNativeQrAnalysis`(): kotlin.Boolean {
+            return FfiConverterBoolean.lift(
+    callWithHandle {
+    uniffiRustCall() { _status ->
+    UniffiLib.uniffi_daybook_ffi_fn_method_camerapreviewffi_supports_native_qr_analysis(
+        it,
+        _status)
+}
+    }
+    )
+    }
+    
+
+    override fun `takeLatestFrame`(): CameraPreviewFrame? {
+            return FfiConverterOptionalTypeCameraPreviewFrame.lift(
+    callWithHandle {
+    uniffiRustCall() { _status ->
+    UniffiLib.uniffi_daybook_ffi_fn_method_camerapreviewffi_take_latest_frame(
+        it,
+        _status)
+}
+    }
+    )
+    }
+    
+
+    
+
+    
+
+
+    
+    companion object {
+         fun `load`(): CameraPreviewFfi {
+            return FfiConverterTypeCameraPreviewFfi.lift(
+    uniffiRustCall() { _status ->
+    UniffiLib.uniffi_daybook_ffi_fn_constructor_camerapreviewffi_load(
+    
+        _status)
+}
+    )
+    }
+    
+
+        
+    }
+    
+}
+
 
 /**
  * @suppress
  */
-public object FfiConverterTypeCameraPreviewFfi : FfiConverter<CameraPreviewFfi, Long> {
-    override fun lower(value: CameraPreviewFfi): Long = value.uniffiCloneHandle()
+public object FfiConverterTypeCameraPreviewFfi: FfiConverter<CameraPreviewFfi, Long> {
+    override fun lower(value: CameraPreviewFfi): Long {
+        return value.uniffiCloneHandle()
+    }
 
-    override fun lift(value: Long): CameraPreviewFfi = CameraPreviewFfi(UniffiWithHandle, value)
+    override fun lift(value: Long): CameraPreviewFfi {
+        return CameraPreviewFfi(UniffiWithHandle, value)
+    }
 
-    override fun read(buf: ByteBuffer): CameraPreviewFfi = lift(buf.getLong())
+    override fun read(buf: ByteBuffer): CameraPreviewFfi {
+        return lift(buf.getLong())
+    }
 
     override fun allocationSize(value: CameraPreviewFfi) = 8UL
 
@@ -3700,6 +3581,7 @@ public object FfiConverterTypeCameraPreviewFfi : FfiConverter<CameraPreviewFfi, 
         buf.putLong(lower(value))
     }
 }
+
 
 // This template implements a class for working with a Rust struct via a handle
 // to the live Rust struct on the other side of the FFI.
@@ -3795,22 +3677,21 @@ public object FfiConverterTypeCameraPreviewFfi : FfiConverter<CameraPreviewFfi, 
 // [1] https://stackoverflow.com/questions/24376768/can-java-finalize-an-object-when-it-is-still-in-scope/24380219
 //
 
+
 public interface CameraPreviewFrameListener {
-
+    
     fun `onCameraPreviewFrame`(`frame`: CameraPreviewFrame)
-
+    
     companion object
 }
 
-open class CameraPreviewFrameListenerImpl :
-    Disposable,
-    AutoCloseable,
-    CameraPreviewFrameListener {
+open class CameraPreviewFrameListenerImpl: Disposable, AutoCloseable, CameraPreviewFrameListener
+{
 
+    @Suppress("UNUSED_PARAMETER")
     /**
      * @suppress
      */
-    @Suppress("UNUSED_PARAMETER")
     constructor(withHandle: UniffiWithHandle, handle: Long) {
         this.handle = handle
         this.cleanable = UniffiLib.CLEANER.register(this, UniffiCleanAction(handle))
@@ -3862,7 +3743,7 @@ open class CameraPreviewFrameListenerImpl :
             if (c == Long.MAX_VALUE) {
                 throw IllegalStateException("${this.javaClass.simpleName} call counter would overflow")
             }
-        } while (!this.callCounter.compareAndSet(c, c + 1L))
+        } while (! this.callCounter.compareAndSet(c, c + 1L))
         // Now we can safely do the method call without the handle being freed concurrently.
         try {
             return block(this.uniffiCloneHandle())
@@ -3880,7 +3761,7 @@ open class CameraPreviewFrameListenerImpl :
         override fun run() {
             if (handle == 0.toLong()) {
                 // Fake object created with `NoHandle`, don't try to free.
-                return
+                return;
             }
             uniffiRustCall { status ->
                 UniffiLib.uniffi_daybook_ffi_fn_free_camerapreviewframelistener(handle, status)
@@ -3893,40 +3774,47 @@ open class CameraPreviewFrameListenerImpl :
      */
     fun uniffiCloneHandle(): Long {
         if (handle == 0.toLong()) {
-            throw InternalException("uniffiCloneHandle() called on NoHandle object")
+            throw InternalException("uniffiCloneHandle() called on NoHandle object");
         }
-        return uniffiRustCall { status ->
+        return uniffiRustCall() { status ->
             UniffiLib.uniffi_daybook_ffi_fn_clone_camerapreviewframelistener(handle, status)
         }
     }
 
-    override fun `onCameraPreviewFrame`(`frame`: CameraPreviewFrame) = callWithHandle {
-        uniffiRustCall { _status ->
-            UniffiLib.uniffi_daybook_ffi_fn_method_camerapreviewframelistener_on_camera_preview_frame(
-                it,
-                FfiConverterTypeCameraPreviewFrame.lower(`frame`),
-                _status,
-            )
-        }
+    override fun `onCameraPreviewFrame`(`frame`: CameraPreviewFrame)
+        = 
+    callWithHandle {
+    uniffiRustCall() { _status ->
+    UniffiLib.uniffi_daybook_ffi_fn_method_camerapreviewframelistener_on_camera_preview_frame(
+        it,
+        FfiConverterTypeCameraPreviewFrame.lower(`frame`),_status)
+}
     }
+    
+    
 
+    
+
+    
+
+
+    
+    
     /**
      * @suppress
      */
     companion object
+    
 }
+
+
 
 // Put the implementation in an object so we don't pollute the top-level namespace
 internal object uniffiCallbackInterfaceCameraPreviewFrameListener {
-    internal object `onCameraPreviewFrame` : UniffiCallbackInterfaceCameraPreviewFrameListenerMethod0 {
-        override fun callback(
-            `uniffiHandle`: Long,
-            `frame`: RustBuffer.ByValue,
-            `uniffiOutReturn`: Pointer,
-            uniffiCallStatus: UniffiRustCallStatus,
-        ) {
+    internal object `onCameraPreviewFrame`: UniffiCallbackInterfaceCameraPreviewFrameListenerMethod0 {
+        override fun callback(`uniffiHandle`: Long,`frame`: RustBuffer.ByValue,`uniffiOutReturn`: Pointer,uniffiCallStatus: UniffiRustCallStatus,) {
             val uniffiObj = FfiConverterTypeCameraPreviewFrameListener.handleMap.get(uniffiHandle)
-            val makeCall = {
+            val makeCall = { ->
                 uniffiObj.`onCameraPreviewFrame`(
                     FfiConverterTypeCameraPreviewFrame.lift(`frame`),
                 )
@@ -3936,14 +3824,16 @@ internal object uniffiCallbackInterfaceCameraPreviewFrameListener {
         }
     }
 
-    internal object uniffiFree : UniffiCallbackInterfaceFree {
+    internal object uniffiFree: UniffiCallbackInterfaceFree {
         override fun callback(handle: Long) {
             FfiConverterTypeCameraPreviewFrameListener.handleMap.remove(handle)
         }
     }
 
-    internal object uniffiClone : UniffiCallbackInterfaceClone {
-        override fun callback(handle: Long): Long = FfiConverterTypeCameraPreviewFrameListener.handleMap.clone(handle)
+    internal object uniffiClone: UniffiCallbackInterfaceClone {
+        override fun callback(handle: Long): Long {
+            return FfiConverterTypeCameraPreviewFrameListener.handleMap.clone(handle)
+        }
     }
 
     internal var vtable = UniffiVTableCallbackInterfaceCameraPreviewFrameListener.UniffiByValue(
@@ -3962,17 +3852,17 @@ internal object uniffiCallbackInterfaceCameraPreviewFrameListener {
 /**
  * @suppress
  */
-public object FfiConverterTypeCameraPreviewFrameListener : FfiConverter<CameraPreviewFrameListener, Long> {
+public object FfiConverterTypeCameraPreviewFrameListener: FfiConverter<CameraPreviewFrameListener, Long> {
     internal val handleMap = UniffiHandleMap<CameraPreviewFrameListener>()
 
     override fun lower(value: CameraPreviewFrameListener): Long {
         if (value is CameraPreviewFrameListenerImpl) {
-            // Rust-implemented object.  Clone the handle and return it
+             // Rust-implemented object.  Clone the handle and return it
             return value.uniffiCloneHandle()
-        } else {
+         } else {
             // Kotlin object, generate a new vtable handle and return that.
             return handleMap.insert(value)
-        }
+         }
     }
 
     override fun lift(value: Long): CameraPreviewFrameListener {
@@ -3986,7 +3876,9 @@ public object FfiConverterTypeCameraPreviewFrameListener : FfiConverter<CameraPr
         }
     }
 
-    override fun read(buf: ByteBuffer): CameraPreviewFrameListener = lift(buf.getLong())
+    override fun read(buf: ByteBuffer): CameraPreviewFrameListener {
+        return lift(buf.getLong())
+    }
 
     override fun allocationSize(value: CameraPreviewFrameListener) = 8UL
 
@@ -3994,6 +3886,7 @@ public object FfiConverterTypeCameraPreviewFrameListener : FfiConverter<CameraPr
         buf.putLong(lower(value))
     }
 }
+
 
 // This template implements a class for working with a Rust struct via a handle
 // to the live Rust struct on the other side of the FFI.
@@ -4089,26 +3982,25 @@ public object FfiConverterTypeCameraPreviewFrameListener : FfiConverter<CameraPr
 // [1] https://stackoverflow.com/questions/24376768/can-java-finalize-an-object-when-it-is-still-in-scope/24380219
 //
 
+
 public interface CameraQrAnalyzerFfiInterface {
-
+    
     fun `clearListener`()
-
+    
     fun `setListener`(`listener`: CameraQrEventListener)
-
+    
     fun `submitJpegFrame`(`widthPx`: kotlin.UInt, `heightPx`: kotlin.UInt, `frameBytes`: kotlin.ByteArray)
-
+    
     companion object
 }
 
-open class CameraQrAnalyzerFfi :
-    Disposable,
-    AutoCloseable,
-    CameraQrAnalyzerFfiInterface {
+open class CameraQrAnalyzerFfi: Disposable, AutoCloseable, CameraQrAnalyzerFfiInterface
+{
 
+    @Suppress("UNUSED_PARAMETER")
     /**
      * @suppress
      */
-    @Suppress("UNUSED_PARAMETER")
     constructor(withHandle: UniffiWithHandle, handle: Long) {
         this.handle = handle
         this.cleanable = UniffiLib.CLEANER.register(this, UniffiCleanAction(handle))
@@ -4160,7 +4052,7 @@ open class CameraQrAnalyzerFfi :
             if (c == Long.MAX_VALUE) {
                 throw IllegalStateException("${this.javaClass.simpleName} call counter would overflow")
             }
-        } while (!this.callCounter.compareAndSet(c, c + 1L))
+        } while (! this.callCounter.compareAndSet(c, c + 1L))
         // Now we can safely do the method call without the handle being freed concurrently.
         try {
             return block(this.uniffiCloneHandle())
@@ -4178,7 +4070,7 @@ open class CameraQrAnalyzerFfi :
         override fun run() {
             if (handle == 0.toLong()) {
                 // Fake object created with `NoHandle`, don't try to free.
-                return
+                return;
             }
             uniffiRustCall { status ->
                 UniffiLib.uniffi_daybook_ffi_fn_free_cameraqranalyzerffi(handle, status)
@@ -4191,67 +4083,89 @@ open class CameraQrAnalyzerFfi :
      */
     fun uniffiCloneHandle(): Long {
         if (handle == 0.toLong()) {
-            throw InternalException("uniffiCloneHandle() called on NoHandle object")
+            throw InternalException("uniffiCloneHandle() called on NoHandle object");
         }
-        return uniffiRustCall { status ->
+        return uniffiRustCall() { status ->
             UniffiLib.uniffi_daybook_ffi_fn_clone_cameraqranalyzerffi(handle, status)
         }
     }
 
-    override fun `clearListener`() = callWithHandle {
-        uniffiRustCall { _status ->
-            UniffiLib.uniffi_daybook_ffi_fn_method_cameraqranalyzerffi_clear_listener(
-                it,
-                _status,
-            )
-        }
-    }
-
-    override fun `setListener`(`listener`: CameraQrEventListener) = callWithHandle {
-        uniffiRustCall { _status ->
-            UniffiLib.uniffi_daybook_ffi_fn_method_cameraqranalyzerffi_set_listener(
-                it,
-                FfiConverterTypeCameraQrEventListener.lower(`listener`),
-                _status,
-            )
-        }
-    }
-
-    @Throws(FfiException::class)
-    override fun `submitJpegFrame`(`widthPx`: kotlin.UInt, `heightPx`: kotlin.UInt, `frameBytes`: kotlin.ByteArray) =
-        callWithHandle {
-            uniffiRustCallWithError(FfiException) { _status ->
-                UniffiLib.uniffi_daybook_ffi_fn_method_cameraqranalyzerffi_submit_jpeg_frame(
-                    it,
-                    FfiConverterUInt.lower(`widthPx`),
-                    FfiConverterUInt.lower(`heightPx`),
-                    FfiConverterByteArray.lower(`frameBytes`),
-                    _status,
-                )
-            }
-        }
-
-    companion object {
-        fun `load`(): CameraQrAnalyzerFfi = FfiConverterTypeCameraQrAnalyzerFfi.lift(
-            uniffiRustCall { _status ->
-                UniffiLib.uniffi_daybook_ffi_fn_constructor_cameraqranalyzerffi_load(
-
-                    _status,
-                )
-            },
-        )
-    }
+    override fun `clearListener`()
+        = 
+    callWithHandle {
+    uniffiRustCall() { _status ->
+    UniffiLib.uniffi_daybook_ffi_fn_method_cameraqranalyzerffi_clear_listener(
+        it,
+        _status)
 }
+    }
+    
+    
+
+    override fun `setListener`(`listener`: CameraQrEventListener)
+        = 
+    callWithHandle {
+    uniffiRustCall() { _status ->
+    UniffiLib.uniffi_daybook_ffi_fn_method_cameraqranalyzerffi_set_listener(
+        it,
+        FfiConverterTypeCameraQrEventListener.lower(`listener`),_status)
+}
+    }
+    
+    
+
+    
+    @Throws(FfiException::class)override fun `submitJpegFrame`(`widthPx`: kotlin.UInt, `heightPx`: kotlin.UInt, `frameBytes`: kotlin.ByteArray)
+        = 
+    callWithHandle {
+    uniffiRustCallWithError(FfiException) { _status ->
+    UniffiLib.uniffi_daybook_ffi_fn_method_cameraqranalyzerffi_submit_jpeg_frame(
+        it,
+        FfiConverterUInt.lower(`widthPx`),FfiConverterUInt.lower(`heightPx`),FfiConverterByteArray.lower(`frameBytes`),_status)
+}
+    }
+    
+    
+
+    
+
+    
+
+
+    
+    companion object {
+         fun `load`(): CameraQrAnalyzerFfi {
+            return FfiConverterTypeCameraQrAnalyzerFfi.lift(
+    uniffiRustCall() { _status ->
+    UniffiLib.uniffi_daybook_ffi_fn_constructor_cameraqranalyzerffi_load(
+    
+        _status)
+}
+    )
+    }
+    
+
+        
+    }
+    
+}
+
 
 /**
  * @suppress
  */
-public object FfiConverterTypeCameraQrAnalyzerFfi : FfiConverter<CameraQrAnalyzerFfi, Long> {
-    override fun lower(value: CameraQrAnalyzerFfi): Long = value.uniffiCloneHandle()
+public object FfiConverterTypeCameraQrAnalyzerFfi: FfiConverter<CameraQrAnalyzerFfi, Long> {
+    override fun lower(value: CameraQrAnalyzerFfi): Long {
+        return value.uniffiCloneHandle()
+    }
 
-    override fun lift(value: Long): CameraQrAnalyzerFfi = CameraQrAnalyzerFfi(UniffiWithHandle, value)
+    override fun lift(value: Long): CameraQrAnalyzerFfi {
+        return CameraQrAnalyzerFfi(UniffiWithHandle, value)
+    }
 
-    override fun read(buf: ByteBuffer): CameraQrAnalyzerFfi = lift(buf.getLong())
+    override fun read(buf: ByteBuffer): CameraQrAnalyzerFfi {
+        return lift(buf.getLong())
+    }
 
     override fun allocationSize(value: CameraQrAnalyzerFfi) = 8UL
 
@@ -4259,6 +4173,7 @@ public object FfiConverterTypeCameraQrAnalyzerFfi : FfiConverter<CameraQrAnalyze
         buf.putLong(lower(value))
     }
 }
+
 
 // This template implements a class for working with a Rust struct via a handle
 // to the live Rust struct on the other side of the FFI.
@@ -4354,26 +4269,25 @@ public object FfiConverterTypeCameraQrAnalyzerFfi : FfiConverter<CameraQrAnalyze
 // [1] https://stackoverflow.com/questions/24376768/can-java-finalize-an-object-when-it-is-still-in-scope/24380219
 //
 
+
 public interface CameraQrEventListener {
-
+    
     fun `onCameraQrOverlaysUpdated`(`overlays`: List<CameraOverlay>)
-
+    
     fun `onCameraQrDetected`(`decodedText`: kotlin.String)
-
+    
     fun `onCameraQrError`(`message`: kotlin.String)
-
+    
     companion object
 }
 
-open class CameraQrEventListenerImpl :
-    Disposable,
-    AutoCloseable,
-    CameraQrEventListener {
+open class CameraQrEventListenerImpl: Disposable, AutoCloseable, CameraQrEventListener
+{
 
+    @Suppress("UNUSED_PARAMETER")
     /**
      * @suppress
      */
-    @Suppress("UNUSED_PARAMETER")
     constructor(withHandle: UniffiWithHandle, handle: Long) {
         this.handle = handle
         this.cleanable = UniffiLib.CLEANER.register(this, UniffiCleanAction(handle))
@@ -4425,7 +4339,7 @@ open class CameraQrEventListenerImpl :
             if (c == Long.MAX_VALUE) {
                 throw IllegalStateException("${this.javaClass.simpleName} call counter would overflow")
             }
-        } while (!this.callCounter.compareAndSet(c, c + 1L))
+        } while (! this.callCounter.compareAndSet(c, c + 1L))
         // Now we can safely do the method call without the handle being freed concurrently.
         try {
             return block(this.uniffiCloneHandle())
@@ -4443,7 +4357,7 @@ open class CameraQrEventListenerImpl :
         override fun run() {
             if (handle == 0.toLong()) {
                 // Fake object created with `NoHandle`, don't try to free.
-                return
+                return;
             }
             uniffiRustCall { status ->
                 UniffiLib.uniffi_daybook_ffi_fn_free_cameraqreventlistener(handle, status)
@@ -4456,60 +4370,71 @@ open class CameraQrEventListenerImpl :
      */
     fun uniffiCloneHandle(): Long {
         if (handle == 0.toLong()) {
-            throw InternalException("uniffiCloneHandle() called on NoHandle object")
+            throw InternalException("uniffiCloneHandle() called on NoHandle object");
         }
-        return uniffiRustCall { status ->
+        return uniffiRustCall() { status ->
             UniffiLib.uniffi_daybook_ffi_fn_clone_cameraqreventlistener(handle, status)
         }
     }
 
-    override fun `onCameraQrOverlaysUpdated`(`overlays`: List<CameraOverlay>) = callWithHandle {
-        uniffiRustCall { _status ->
-            UniffiLib.uniffi_daybook_ffi_fn_method_cameraqreventlistener_on_camera_qr_overlays_updated(
-                it,
-                FfiConverterSequenceTypeCameraOverlay.lower(`overlays`),
-                _status,
-            )
-        }
+    override fun `onCameraQrOverlaysUpdated`(`overlays`: List<CameraOverlay>)
+        = 
+    callWithHandle {
+    uniffiRustCall() { _status ->
+    UniffiLib.uniffi_daybook_ffi_fn_method_cameraqreventlistener_on_camera_qr_overlays_updated(
+        it,
+        FfiConverterSequenceTypeCameraOverlay.lower(`overlays`),_status)
+}
     }
+    
+    
 
-    override fun `onCameraQrDetected`(`decodedText`: kotlin.String) = callWithHandle {
-        uniffiRustCall { _status ->
-            UniffiLib.uniffi_daybook_ffi_fn_method_cameraqreventlistener_on_camera_qr_detected(
-                it,
-                FfiConverterString.lower(`decodedText`),
-                _status,
-            )
-        }
+    override fun `onCameraQrDetected`(`decodedText`: kotlin.String)
+        = 
+    callWithHandle {
+    uniffiRustCall() { _status ->
+    UniffiLib.uniffi_daybook_ffi_fn_method_cameraqreventlistener_on_camera_qr_detected(
+        it,
+        FfiConverterString.lower(`decodedText`),_status)
+}
     }
+    
+    
 
-    override fun `onCameraQrError`(`message`: kotlin.String) = callWithHandle {
-        uniffiRustCall { _status ->
-            UniffiLib.uniffi_daybook_ffi_fn_method_cameraqreventlistener_on_camera_qr_error(
-                it,
-                FfiConverterString.lower(`message`),
-                _status,
-            )
-        }
+    override fun `onCameraQrError`(`message`: kotlin.String)
+        = 
+    callWithHandle {
+    uniffiRustCall() { _status ->
+    UniffiLib.uniffi_daybook_ffi_fn_method_cameraqreventlistener_on_camera_qr_error(
+        it,
+        FfiConverterString.lower(`message`),_status)
+}
     }
+    
+    
 
+    
+
+    
+
+
+    
+    
     /**
      * @suppress
      */
     companion object
+    
 }
+
+
 
 // Put the implementation in an object so we don't pollute the top-level namespace
 internal object uniffiCallbackInterfaceCameraQrEventListener {
-    internal object `onCameraQrOverlaysUpdated` : UniffiCallbackInterfaceCameraQrEventListenerMethod0 {
-        override fun callback(
-            `uniffiHandle`: Long,
-            `overlays`: RustBuffer.ByValue,
-            `uniffiOutReturn`: Pointer,
-            uniffiCallStatus: UniffiRustCallStatus,
-        ) {
+    internal object `onCameraQrOverlaysUpdated`: UniffiCallbackInterfaceCameraQrEventListenerMethod0 {
+        override fun callback(`uniffiHandle`: Long,`overlays`: RustBuffer.ByValue,`uniffiOutReturn`: Pointer,uniffiCallStatus: UniffiRustCallStatus,) {
             val uniffiObj = FfiConverterTypeCameraQrEventListener.handleMap.get(uniffiHandle)
-            val makeCall = {
+            val makeCall = { ->
                 uniffiObj.`onCameraQrOverlaysUpdated`(
                     FfiConverterSequenceTypeCameraOverlay.lift(`overlays`),
                 )
@@ -4518,15 +4443,10 @@ internal object uniffiCallbackInterfaceCameraQrEventListener {
             uniffiTraitInterfaceCall(uniffiCallStatus, makeCall, writeReturn)
         }
     }
-    internal object `onCameraQrDetected` : UniffiCallbackInterfaceCameraQrEventListenerMethod1 {
-        override fun callback(
-            `uniffiHandle`: Long,
-            `decodedText`: RustBuffer.ByValue,
-            `uniffiOutReturn`: Pointer,
-            uniffiCallStatus: UniffiRustCallStatus,
-        ) {
+    internal object `onCameraQrDetected`: UniffiCallbackInterfaceCameraQrEventListenerMethod1 {
+        override fun callback(`uniffiHandle`: Long,`decodedText`: RustBuffer.ByValue,`uniffiOutReturn`: Pointer,uniffiCallStatus: UniffiRustCallStatus,) {
             val uniffiObj = FfiConverterTypeCameraQrEventListener.handleMap.get(uniffiHandle)
-            val makeCall = {
+            val makeCall = { ->
                 uniffiObj.`onCameraQrDetected`(
                     FfiConverterString.lift(`decodedText`),
                 )
@@ -4535,15 +4455,10 @@ internal object uniffiCallbackInterfaceCameraQrEventListener {
             uniffiTraitInterfaceCall(uniffiCallStatus, makeCall, writeReturn)
         }
     }
-    internal object `onCameraQrError` : UniffiCallbackInterfaceCameraQrEventListenerMethod2 {
-        override fun callback(
-            `uniffiHandle`: Long,
-            `message`: RustBuffer.ByValue,
-            `uniffiOutReturn`: Pointer,
-            uniffiCallStatus: UniffiRustCallStatus,
-        ) {
+    internal object `onCameraQrError`: UniffiCallbackInterfaceCameraQrEventListenerMethod2 {
+        override fun callback(`uniffiHandle`: Long,`message`: RustBuffer.ByValue,`uniffiOutReturn`: Pointer,uniffiCallStatus: UniffiRustCallStatus,) {
             val uniffiObj = FfiConverterTypeCameraQrEventListener.handleMap.get(uniffiHandle)
-            val makeCall = {
+            val makeCall = { ->
                 uniffiObj.`onCameraQrError`(
                     FfiConverterString.lift(`message`),
                 )
@@ -4553,14 +4468,16 @@ internal object uniffiCallbackInterfaceCameraQrEventListener {
         }
     }
 
-    internal object uniffiFree : UniffiCallbackInterfaceFree {
+    internal object uniffiFree: UniffiCallbackInterfaceFree {
         override fun callback(handle: Long) {
             FfiConverterTypeCameraQrEventListener.handleMap.remove(handle)
         }
     }
 
-    internal object uniffiClone : UniffiCallbackInterfaceClone {
-        override fun callback(handle: Long): Long = FfiConverterTypeCameraQrEventListener.handleMap.clone(handle)
+    internal object uniffiClone: UniffiCallbackInterfaceClone {
+        override fun callback(handle: Long): Long {
+            return FfiConverterTypeCameraQrEventListener.handleMap.clone(handle)
+        }
     }
 
     internal var vtable = UniffiVTableCallbackInterfaceCameraQrEventListener.UniffiByValue(
@@ -4581,17 +4498,17 @@ internal object uniffiCallbackInterfaceCameraQrEventListener {
 /**
  * @suppress
  */
-public object FfiConverterTypeCameraQrEventListener : FfiConverter<CameraQrEventListener, Long> {
+public object FfiConverterTypeCameraQrEventListener: FfiConverter<CameraQrEventListener, Long> {
     internal val handleMap = UniffiHandleMap<CameraQrEventListener>()
 
     override fun lower(value: CameraQrEventListener): Long {
         if (value is CameraQrEventListenerImpl) {
-            // Rust-implemented object.  Clone the handle and return it
+             // Rust-implemented object.  Clone the handle and return it
             return value.uniffiCloneHandle()
-        } else {
+         } else {
             // Kotlin object, generate a new vtable handle and return that.
             return handleMap.insert(value)
-        }
+         }
     }
 
     override fun lift(value: Long): CameraQrEventListener {
@@ -4605,7 +4522,9 @@ public object FfiConverterTypeCameraQrEventListener : FfiConverter<CameraQrEvent
         }
     }
 
-    override fun read(buf: ByteBuffer): CameraQrEventListener = lift(buf.getLong())
+    override fun read(buf: ByteBuffer): CameraQrEventListener {
+        return lift(buf.getLong())
+    }
 
     override fun allocationSize(value: CameraQrEventListener) = 8UL
 
@@ -4613,6 +4532,7 @@ public object FfiConverterTypeCameraQrEventListener : FfiConverter<CameraQrEvent
         buf.putLong(lower(value))
     }
 }
+
 
 // This template implements a class for working with a Rust struct via a handle
 // to the live Rust struct on the other side of the FFI.
@@ -4708,22 +4628,21 @@ public object FfiConverterTypeCameraQrEventListener : FfiConverter<CameraQrEvent
 // [1] https://stackoverflow.com/questions/24376768/can-java-finalize-an-object-when-it-is-still-in-scope/24380219
 //
 
+
 public interface ConfigEventListener {
-
+    
     fun `onConfigEvent`(`event`: ConfigEvent)
-
+    
     companion object
 }
 
-open class ConfigEventListenerImpl :
-    Disposable,
-    AutoCloseable,
-    ConfigEventListener {
+open class ConfigEventListenerImpl: Disposable, AutoCloseable, ConfigEventListener
+{
 
+    @Suppress("UNUSED_PARAMETER")
     /**
      * @suppress
      */
-    @Suppress("UNUSED_PARAMETER")
     constructor(withHandle: UniffiWithHandle, handle: Long) {
         this.handle = handle
         this.cleanable = UniffiLib.CLEANER.register(this, UniffiCleanAction(handle))
@@ -4775,7 +4694,7 @@ open class ConfigEventListenerImpl :
             if (c == Long.MAX_VALUE) {
                 throw IllegalStateException("${this.javaClass.simpleName} call counter would overflow")
             }
-        } while (!this.callCounter.compareAndSet(c, c + 1L))
+        } while (! this.callCounter.compareAndSet(c, c + 1L))
         // Now we can safely do the method call without the handle being freed concurrently.
         try {
             return block(this.uniffiCloneHandle())
@@ -4793,7 +4712,7 @@ open class ConfigEventListenerImpl :
         override fun run() {
             if (handle == 0.toLong()) {
                 // Fake object created with `NoHandle`, don't try to free.
-                return
+                return;
             }
             uniffiRustCall { status ->
                 UniffiLib.uniffi_daybook_ffi_fn_free_configeventlistener(handle, status)
@@ -4806,40 +4725,47 @@ open class ConfigEventListenerImpl :
      */
     fun uniffiCloneHandle(): Long {
         if (handle == 0.toLong()) {
-            throw InternalException("uniffiCloneHandle() called on NoHandle object")
+            throw InternalException("uniffiCloneHandle() called on NoHandle object");
         }
-        return uniffiRustCall { status ->
+        return uniffiRustCall() { status ->
             UniffiLib.uniffi_daybook_ffi_fn_clone_configeventlistener(handle, status)
         }
     }
 
-    override fun `onConfigEvent`(`event`: ConfigEvent) = callWithHandle {
-        uniffiRustCall { _status ->
-            UniffiLib.uniffi_daybook_ffi_fn_method_configeventlistener_on_config_event(
-                it,
-                FfiConverterTypeConfigEvent.lower(`event`),
-                _status,
-            )
-        }
+    override fun `onConfigEvent`(`event`: ConfigEvent)
+        = 
+    callWithHandle {
+    uniffiRustCall() { _status ->
+    UniffiLib.uniffi_daybook_ffi_fn_method_configeventlistener_on_config_event(
+        it,
+        FfiConverterTypeConfigEvent.lower(`event`),_status)
+}
     }
+    
+    
 
+    
+
+    
+
+
+    
+    
     /**
      * @suppress
      */
     companion object
+    
 }
+
+
 
 // Put the implementation in an object so we don't pollute the top-level namespace
 internal object uniffiCallbackInterfaceConfigEventListener {
-    internal object `onConfigEvent` : UniffiCallbackInterfaceConfigEventListenerMethod0 {
-        override fun callback(
-            `uniffiHandle`: Long,
-            `event`: RustBufferConfigEvent.ByValue,
-            `uniffiOutReturn`: Pointer,
-            uniffiCallStatus: UniffiRustCallStatus,
-        ) {
+    internal object `onConfigEvent`: UniffiCallbackInterfaceConfigEventListenerMethod0 {
+        override fun callback(`uniffiHandle`: Long,`event`: RustBufferConfigEvent.ByValue,`uniffiOutReturn`: Pointer,uniffiCallStatus: UniffiRustCallStatus,) {
             val uniffiObj = FfiConverterTypeConfigEventListener.handleMap.get(uniffiHandle)
-            val makeCall = {
+            val makeCall = { ->
                 uniffiObj.`onConfigEvent`(
                     FfiConverterTypeConfigEvent.lift(`event`),
                 )
@@ -4849,14 +4775,16 @@ internal object uniffiCallbackInterfaceConfigEventListener {
         }
     }
 
-    internal object uniffiFree : UniffiCallbackInterfaceFree {
+    internal object uniffiFree: UniffiCallbackInterfaceFree {
         override fun callback(handle: Long) {
             FfiConverterTypeConfigEventListener.handleMap.remove(handle)
         }
     }
 
-    internal object uniffiClone : UniffiCallbackInterfaceClone {
-        override fun callback(handle: Long): Long = FfiConverterTypeConfigEventListener.handleMap.clone(handle)
+    internal object uniffiClone: UniffiCallbackInterfaceClone {
+        override fun callback(handle: Long): Long {
+            return FfiConverterTypeConfigEventListener.handleMap.clone(handle)
+        }
     }
 
     internal var vtable = UniffiVTableCallbackInterfaceConfigEventListener.UniffiByValue(
@@ -4875,17 +4803,17 @@ internal object uniffiCallbackInterfaceConfigEventListener {
 /**
  * @suppress
  */
-public object FfiConverterTypeConfigEventListener : FfiConverter<ConfigEventListener, Long> {
+public object FfiConverterTypeConfigEventListener: FfiConverter<ConfigEventListener, Long> {
     internal val handleMap = UniffiHandleMap<ConfigEventListener>()
 
     override fun lower(value: ConfigEventListener): Long {
         if (value is ConfigEventListenerImpl) {
-            // Rust-implemented object.  Clone the handle and return it
+             // Rust-implemented object.  Clone the handle and return it
             return value.uniffiCloneHandle()
-        } else {
+         } else {
             // Kotlin object, generate a new vtable handle and return that.
             return handleMap.insert(value)
-        }
+         }
     }
 
     override fun lift(value: Long): ConfigEventListener {
@@ -4899,7 +4827,9 @@ public object FfiConverterTypeConfigEventListener : FfiConverter<ConfigEventList
         }
     }
 
-    override fun read(buf: ByteBuffer): ConfigEventListener = lift(buf.getLong())
+    override fun read(buf: ByteBuffer): ConfigEventListener {
+        return lift(buf.getLong())
+    }
 
     override fun allocationSize(value: ConfigEventListener) = 8UL
 
@@ -4907,6 +4837,7 @@ public object FfiConverterTypeConfigEventListener : FfiConverter<ConfigEventList
         buf.putLong(lower(value))
     }
 }
+
 
 // This template implements a class for working with a Rust struct via a handle
 // to the live Rust struct on the other side of the FFI.
@@ -5002,36 +4933,35 @@ public object FfiConverterTypeConfigEventListener : FfiConverter<ConfigEventList
 // [1] https://stackoverflow.com/questions/24376768/can-java-finalize-an-object-when-it-is-still-in-scope/24380219
 //
 
+
 public interface ConfigRepoFfiInterface {
-
+    
     fun `ffiRegisterListener`(`listener`: ConfigEventListener): ListenerRegistration
-
+    
     suspend fun `getFacetDisplayHint`(`id`: kotlin.String): FacetDisplayHint?
-
+    
     suspend fun `getMltoolsConfigJson`(): kotlin.String
-
+    
     suspend fun `listDisplayHints`(): Map<kotlin.String, FacetDisplayHint>
-
+    
     suspend fun `provisionMobileDefaultMltools`(`progressRepo`: ProgressRepoFfi)
-
+    
     suspend fun `setFacetDisplayHint`(`key`: kotlin.String, `config`: FacetDisplayHint)
-
+    
     suspend fun `setMltoolsConfigJson`(`configJson`: kotlin.String)
-
+    
     suspend fun `stop`()
-
+    
     companion object
 }
 
-open class ConfigRepoFfi :
-    Disposable,
-    AutoCloseable,
-    ConfigRepoFfiInterface {
+open class ConfigRepoFfi: Disposable, AutoCloseable, ConfigRepoFfiInterface
+{
 
+    @Suppress("UNUSED_PARAMETER")
     /**
      * @suppress
      */
-    @Suppress("UNUSED_PARAMETER")
     constructor(withHandle: UniffiWithHandle, handle: Long) {
         this.handle = handle
         this.cleanable = UniffiLib.CLEANER.register(this, UniffiCleanAction(handle))
@@ -5083,7 +5013,7 @@ open class ConfigRepoFfi :
             if (c == Long.MAX_VALUE) {
                 throw IllegalStateException("${this.javaClass.simpleName} call counter would overflow")
             }
-        } while (!this.callCounter.compareAndSet(c, c + 1L))
+        } while (! this.callCounter.compareAndSet(c, c + 1L))
         // Now we can safely do the method call without the handle being freed concurrently.
         try {
             return block(this.uniffiCloneHandle())
@@ -5101,7 +5031,7 @@ open class ConfigRepoFfi :
         override fun run() {
             if (handle == 0.toLong()) {
                 // Fake object created with `NoHandle`, don't try to free.
-                return
+                return;
             }
             uniffiRustCall { status ->
                 UniffiLib.uniffi_daybook_ffi_fn_free_configrepoffi(handle, status)
@@ -5114,41 +5044,37 @@ open class ConfigRepoFfi :
      */
     fun uniffiCloneHandle(): Long {
         if (handle == 0.toLong()) {
-            throw InternalException("uniffiCloneHandle() called on NoHandle object")
+            throw InternalException("uniffiCloneHandle() called on NoHandle object");
         }
-        return uniffiRustCall { status ->
+        return uniffiRustCall() { status ->
             UniffiLib.uniffi_daybook_ffi_fn_clone_configrepoffi(handle, status)
         }
     }
 
-    override fun `ffiRegisterListener`(`listener`: ConfigEventListener): ListenerRegistration =
-        FfiConverterTypeListenerRegistration.lift(
-            callWithHandle {
-                uniffiRustCall { _status ->
-                    UniffiLib.uniffi_daybook_ffi_fn_method_configrepoffi_ffi_register_listener(
-                        it,
-                        FfiConverterTypeConfigEventListener.lower(`listener`),
-                        _status,
-                    )
-                }
-            },
-        )
+    override fun `ffiRegisterListener`(`listener`: ConfigEventListener): ListenerRegistration {
+            return FfiConverterTypeListenerRegistration.lift(
+    callWithHandle {
+    uniffiRustCall() { _status ->
+    UniffiLib.uniffi_daybook_ffi_fn_method_configrepoffi_ffi_register_listener(
+        it,
+        FfiConverterTypeConfigEventListener.lower(`listener`),_status)
+}
+    }
+    )
+    }
+    
 
+    
     @Suppress("ASSIGNED_BUT_NEVER_ACCESSED_VARIABLE")
-    override suspend fun `getFacetDisplayHint`(`id`: kotlin.String): FacetDisplayHint? = uniffiRustCallAsync(
+    override suspend fun `getFacetDisplayHint`(`id`: kotlin.String) : FacetDisplayHint? {
+        return uniffiRustCallAsync(
         callWithHandle { uniffiHandle ->
             UniffiLib.uniffi_daybook_ffi_fn_method_configrepoffi_get_facet_display_hint(
                 uniffiHandle,
                 FfiConverterString.lower(`id`),
             )
         },
-        { future, callback, continuation ->
-            UniffiLib.ffi_daybook_ffi_rust_future_poll_rust_buffer(
-                future,
-                callback,
-                continuation,
-            )
-        },
+        { future, callback, continuation -> UniffiLib.ffi_daybook_ffi_rust_future_poll_rust_buffer(future, callback, continuation) },
         { future, continuation -> UniffiLib.ffi_daybook_ffi_rust_future_complete_rust_buffer(future, continuation) },
         { future -> UniffiLib.ffi_daybook_ffi_rust_future_free_rust_buffer(future) },
         // lift function
@@ -5156,23 +5082,20 @@ open class ConfigRepoFfi :
         // Error FFI converter
         UniffiNullRustCallStatusErrorHandler,
     )
+    }
 
+    
     @Throws(FfiException::class)
     @Suppress("ASSIGNED_BUT_NEVER_ACCESSED_VARIABLE")
-    override suspend fun `getMltoolsConfigJson`(): kotlin.String = uniffiRustCallAsync(
+    override suspend fun `getMltoolsConfigJson`() : kotlin.String {
+        return uniffiRustCallAsync(
         callWithHandle { uniffiHandle ->
             UniffiLib.uniffi_daybook_ffi_fn_method_configrepoffi_get_mltools_config_json(
                 uniffiHandle,
-
+                
             )
         },
-        { future, callback, continuation ->
-            UniffiLib.ffi_daybook_ffi_rust_future_poll_rust_buffer(
-                future,
-                callback,
-                continuation,
-            )
-        },
+        { future, callback, continuation -> UniffiLib.ffi_daybook_ffi_rust_future_poll_rust_buffer(future, callback, continuation) },
         { future, continuation -> UniffiLib.ffi_daybook_ffi_rust_future_complete_rust_buffer(future, continuation) },
         { future -> UniffiLib.ffi_daybook_ffi_rust_future_free_rust_buffer(future) },
         // lift function
@@ -5180,22 +5103,19 @@ open class ConfigRepoFfi :
         // Error FFI converter
         FfiException.ErrorHandler,
     )
+    }
 
+    
     @Suppress("ASSIGNED_BUT_NEVER_ACCESSED_VARIABLE")
-    override suspend fun `listDisplayHints`(): Map<kotlin.String, FacetDisplayHint> = uniffiRustCallAsync(
+    override suspend fun `listDisplayHints`() : Map<kotlin.String, FacetDisplayHint> {
+        return uniffiRustCallAsync(
         callWithHandle { uniffiHandle ->
             UniffiLib.uniffi_daybook_ffi_fn_method_configrepoffi_list_display_hints(
                 uniffiHandle,
-
+                
             )
         },
-        { future, callback, continuation ->
-            UniffiLib.ffi_daybook_ffi_rust_future_poll_rust_buffer(
-                future,
-                callback,
-                continuation,
-            )
-        },
+        { future, callback, continuation -> UniffiLib.ffi_daybook_ffi_rust_future_poll_rust_buffer(future, callback, continuation) },
         { future, continuation -> UniffiLib.ffi_daybook_ffi_rust_future_complete_rust_buffer(future, continuation) },
         { future -> UniffiLib.ffi_daybook_ffi_rust_future_free_rust_buffer(future) },
         // lift function
@@ -5203,143 +5123,140 @@ open class ConfigRepoFfi :
         // Error FFI converter
         UniffiNullRustCallStatusErrorHandler,
     )
+    }
 
+    
     @Throws(FfiException::class)
     @Suppress("ASSIGNED_BUT_NEVER_ACCESSED_VARIABLE")
-    override suspend fun `provisionMobileDefaultMltools`(`progressRepo`: ProgressRepoFfi) = uniffiRustCallAsync(
+    override suspend fun `provisionMobileDefaultMltools`(`progressRepo`: ProgressRepoFfi) {
+        return uniffiRustCallAsync(
         callWithHandle { uniffiHandle ->
             UniffiLib.uniffi_daybook_ffi_fn_method_configrepoffi_provision_mobile_default_mltools(
                 uniffiHandle,
                 FfiConverterTypeProgressRepoFfi.lower(`progressRepo`),
             )
         },
-        { future, callback, continuation ->
-            UniffiLib.ffi_daybook_ffi_rust_future_poll_void(
-                future,
-                callback,
-                continuation,
-            )
-        },
+        { future, callback, continuation -> UniffiLib.ffi_daybook_ffi_rust_future_poll_void(future, callback, continuation) },
         { future, continuation -> UniffiLib.ffi_daybook_ffi_rust_future_complete_void(future, continuation) },
         { future -> UniffiLib.ffi_daybook_ffi_rust_future_free_void(future) },
         // lift function
         { Unit },
-
+        
         // Error FFI converter
         FfiException.ErrorHandler,
     )
+    }
 
+    
     @Throws(FfiException::class)
     @Suppress("ASSIGNED_BUT_NEVER_ACCESSED_VARIABLE")
-    override suspend fun `setFacetDisplayHint`(`key`: kotlin.String, `config`: FacetDisplayHint) = uniffiRustCallAsync(
+    override suspend fun `setFacetDisplayHint`(`key`: kotlin.String, `config`: FacetDisplayHint) {
+        return uniffiRustCallAsync(
         callWithHandle { uniffiHandle ->
             UniffiLib.uniffi_daybook_ffi_fn_method_configrepoffi_set_facet_display_hint(
                 uniffiHandle,
-                FfiConverterString.lower(`key`),
-                FfiConverterTypeFacetDisplayHint.lower(`config`),
+                FfiConverterString.lower(`key`),FfiConverterTypeFacetDisplayHint.lower(`config`),
             )
         },
-        { future, callback, continuation ->
-            UniffiLib.ffi_daybook_ffi_rust_future_poll_void(
-                future,
-                callback,
-                continuation,
-            )
-        },
+        { future, callback, continuation -> UniffiLib.ffi_daybook_ffi_rust_future_poll_void(future, callback, continuation) },
         { future, continuation -> UniffiLib.ffi_daybook_ffi_rust_future_complete_void(future, continuation) },
         { future -> UniffiLib.ffi_daybook_ffi_rust_future_free_void(future) },
         // lift function
         { Unit },
-
+        
         // Error FFI converter
         FfiException.ErrorHandler,
     )
+    }
 
+    
     @Throws(FfiException::class)
     @Suppress("ASSIGNED_BUT_NEVER_ACCESSED_VARIABLE")
-    override suspend fun `setMltoolsConfigJson`(`configJson`: kotlin.String) = uniffiRustCallAsync(
+    override suspend fun `setMltoolsConfigJson`(`configJson`: kotlin.String) {
+        return uniffiRustCallAsync(
         callWithHandle { uniffiHandle ->
             UniffiLib.uniffi_daybook_ffi_fn_method_configrepoffi_set_mltools_config_json(
                 uniffiHandle,
                 FfiConverterString.lower(`configJson`),
             )
         },
-        { future, callback, continuation ->
-            UniffiLib.ffi_daybook_ffi_rust_future_poll_void(
-                future,
-                callback,
-                continuation,
-            )
-        },
+        { future, callback, continuation -> UniffiLib.ffi_daybook_ffi_rust_future_poll_void(future, callback, continuation) },
         { future, continuation -> UniffiLib.ffi_daybook_ffi_rust_future_complete_void(future, continuation) },
         { future -> UniffiLib.ffi_daybook_ffi_rust_future_free_void(future) },
         // lift function
         { Unit },
-
+        
         // Error FFI converter
         FfiException.ErrorHandler,
     )
+    }
 
+    
     @Throws(FfiException::class)
     @Suppress("ASSIGNED_BUT_NEVER_ACCESSED_VARIABLE")
-    override suspend fun `stop`() = uniffiRustCallAsync(
+    override suspend fun `stop`() {
+        return uniffiRustCallAsync(
         callWithHandle { uniffiHandle ->
             UniffiLib.uniffi_daybook_ffi_fn_method_configrepoffi_stop(
                 uniffiHandle,
-
+                
             )
         },
-        { future, callback, continuation ->
-            UniffiLib.ffi_daybook_ffi_rust_future_poll_void(
-                future,
-                callback,
-                continuation,
-            )
-        },
+        { future, callback, continuation -> UniffiLib.ffi_daybook_ffi_rust_future_poll_void(future, callback, continuation) },
         { future, continuation -> UniffiLib.ffi_daybook_ffi_rust_future_complete_void(future, continuation) },
         { future -> UniffiLib.ffi_daybook_ffi_rust_future_free_void(future) },
         // lift function
         { Unit },
-
+        
         // Error FFI converter
         FfiException.ErrorHandler,
     )
-
-    companion object {
-
-        @Throws(FfiException::class)
-        @Suppress("ASSIGNED_BUT_NEVER_ACCESSED_VARIABLE")
-        suspend fun `load`(`fcx`: FfiCtx, `plugRepo`: PlugsRepoFfi): ConfigRepoFfi = uniffiRustCallAsync(
-            UniffiLib.uniffi_daybook_ffi_fn_constructor_configrepoffi_load(
-                FfiConverterTypeFfiCtx.lower(`fcx`),
-                FfiConverterTypePlugsRepoFfi.lower(`plugRepo`),
-            ),
-            { future, callback, continuation ->
-                UniffiLib.ffi_daybook_ffi_rust_future_poll_u64(
-                    future,
-                    callback,
-                    continuation,
-                )
-            },
-            { future, continuation -> UniffiLib.ffi_daybook_ffi_rust_future_complete_u64(future, continuation) },
-            { future -> UniffiLib.ffi_daybook_ffi_rust_future_free_u64(future) },
-            // lift function
-            { FfiConverterTypeConfigRepoFfi.lift(it) },
-            // Error FFI converter
-            FfiException.ErrorHandler,
-        )
     }
+
+    
+
+    
+
+
+    
+    companion object {
+        
+    @Throws(FfiException::class)
+    @Suppress("ASSIGNED_BUT_NEVER_ACCESSED_VARIABLE")
+     suspend fun `load`(`fcx`: FfiCtx, `plugRepo`: PlugsRepoFfi) : ConfigRepoFfi {
+        return uniffiRustCallAsync(
+        UniffiLib.uniffi_daybook_ffi_fn_constructor_configrepoffi_load(FfiConverterTypeFfiCtx.lower(`fcx`),FfiConverterTypePlugsRepoFfi.lower(`plugRepo`),),
+        { future, callback, continuation -> UniffiLib.ffi_daybook_ffi_rust_future_poll_u64(future, callback, continuation) },
+        { future, continuation -> UniffiLib.ffi_daybook_ffi_rust_future_complete_u64(future, continuation) },
+        { future -> UniffiLib.ffi_daybook_ffi_rust_future_free_u64(future) },
+        // lift function
+        { FfiConverterTypeConfigRepoFfi.lift(it) },
+        // Error FFI converter
+        FfiException.ErrorHandler,
+    )
+    }
+
+        
+    }
+    
 }
+
 
 /**
  * @suppress
  */
-public object FfiConverterTypeConfigRepoFfi : FfiConverter<ConfigRepoFfi, Long> {
-    override fun lower(value: ConfigRepoFfi): Long = value.uniffiCloneHandle()
+public object FfiConverterTypeConfigRepoFfi: FfiConverter<ConfigRepoFfi, Long> {
+    override fun lower(value: ConfigRepoFfi): Long {
+        return value.uniffiCloneHandle()
+    }
 
-    override fun lift(value: Long): ConfigRepoFfi = ConfigRepoFfi(UniffiWithHandle, value)
+    override fun lift(value: Long): ConfigRepoFfi {
+        return ConfigRepoFfi(UniffiWithHandle, value)
+    }
 
-    override fun read(buf: ByteBuffer): ConfigRepoFfi = lift(buf.getLong())
+    override fun read(buf: ByteBuffer): ConfigRepoFfi {
+        return lift(buf.getLong())
+    }
 
     override fun allocationSize(value: ConfigRepoFfi) = 8UL
 
@@ -5347,6 +5264,7 @@ public object FfiConverterTypeConfigRepoFfi : FfiConverter<ConfigRepoFfi, Long> 
         buf.putLong(lower(value))
     }
 }
+
 
 // This template implements a class for working with a Rust struct via a handle
 // to the live Rust struct on the other side of the FFI.
@@ -5442,22 +5360,21 @@ public object FfiConverterTypeConfigRepoFfi : FfiConverter<ConfigRepoFfi, Long> 
 // [1] https://stackoverflow.com/questions/24376768/can-java-finalize-an-object-when-it-is-still-in-scope/24380219
 //
 
+
 public interface DispatchEventListener {
-
+    
     fun `onDispatchEvent`(`event`: DispatchEvent)
-
+    
     companion object
 }
 
-open class DispatchEventListenerImpl :
-    Disposable,
-    AutoCloseable,
-    DispatchEventListener {
+open class DispatchEventListenerImpl: Disposable, AutoCloseable, DispatchEventListener
+{
 
+    @Suppress("UNUSED_PARAMETER")
     /**
      * @suppress
      */
-    @Suppress("UNUSED_PARAMETER")
     constructor(withHandle: UniffiWithHandle, handle: Long) {
         this.handle = handle
         this.cleanable = UniffiLib.CLEANER.register(this, UniffiCleanAction(handle))
@@ -5509,7 +5426,7 @@ open class DispatchEventListenerImpl :
             if (c == Long.MAX_VALUE) {
                 throw IllegalStateException("${this.javaClass.simpleName} call counter would overflow")
             }
-        } while (!this.callCounter.compareAndSet(c, c + 1L))
+        } while (! this.callCounter.compareAndSet(c, c + 1L))
         // Now we can safely do the method call without the handle being freed concurrently.
         try {
             return block(this.uniffiCloneHandle())
@@ -5527,7 +5444,7 @@ open class DispatchEventListenerImpl :
         override fun run() {
             if (handle == 0.toLong()) {
                 // Fake object created with `NoHandle`, don't try to free.
-                return
+                return;
             }
             uniffiRustCall { status ->
                 UniffiLib.uniffi_daybook_ffi_fn_free_dispatcheventlistener(handle, status)
@@ -5540,40 +5457,47 @@ open class DispatchEventListenerImpl :
      */
     fun uniffiCloneHandle(): Long {
         if (handle == 0.toLong()) {
-            throw InternalException("uniffiCloneHandle() called on NoHandle object")
+            throw InternalException("uniffiCloneHandle() called on NoHandle object");
         }
-        return uniffiRustCall { status ->
+        return uniffiRustCall() { status ->
             UniffiLib.uniffi_daybook_ffi_fn_clone_dispatcheventlistener(handle, status)
         }
     }
 
-    override fun `onDispatchEvent`(`event`: DispatchEvent) = callWithHandle {
-        uniffiRustCall { _status ->
-            UniffiLib.uniffi_daybook_ffi_fn_method_dispatcheventlistener_on_dispatch_event(
-                it,
-                FfiConverterTypeDispatchEvent.lower(`event`),
-                _status,
-            )
-        }
+    override fun `onDispatchEvent`(`event`: DispatchEvent)
+        = 
+    callWithHandle {
+    uniffiRustCall() { _status ->
+    UniffiLib.uniffi_daybook_ffi_fn_method_dispatcheventlistener_on_dispatch_event(
+        it,
+        FfiConverterTypeDispatchEvent.lower(`event`),_status)
+}
     }
+    
+    
 
+    
+
+    
+
+
+    
+    
     /**
      * @suppress
      */
     companion object
+    
 }
+
+
 
 // Put the implementation in an object so we don't pollute the top-level namespace
 internal object uniffiCallbackInterfaceDispatchEventListener {
-    internal object `onDispatchEvent` : UniffiCallbackInterfaceDispatchEventListenerMethod0 {
-        override fun callback(
-            `uniffiHandle`: Long,
-            `event`: RustBufferDispatchEvent.ByValue,
-            `uniffiOutReturn`: Pointer,
-            uniffiCallStatus: UniffiRustCallStatus,
-        ) {
+    internal object `onDispatchEvent`: UniffiCallbackInterfaceDispatchEventListenerMethod0 {
+        override fun callback(`uniffiHandle`: Long,`event`: RustBufferDispatchEvent.ByValue,`uniffiOutReturn`: Pointer,uniffiCallStatus: UniffiRustCallStatus,) {
             val uniffiObj = FfiConverterTypeDispatchEventListener.handleMap.get(uniffiHandle)
-            val makeCall = {
+            val makeCall = { ->
                 uniffiObj.`onDispatchEvent`(
                     FfiConverterTypeDispatchEvent.lift(`event`),
                 )
@@ -5583,14 +5507,16 @@ internal object uniffiCallbackInterfaceDispatchEventListener {
         }
     }
 
-    internal object uniffiFree : UniffiCallbackInterfaceFree {
+    internal object uniffiFree: UniffiCallbackInterfaceFree {
         override fun callback(handle: Long) {
             FfiConverterTypeDispatchEventListener.handleMap.remove(handle)
         }
     }
 
-    internal object uniffiClone : UniffiCallbackInterfaceClone {
-        override fun callback(handle: Long): Long = FfiConverterTypeDispatchEventListener.handleMap.clone(handle)
+    internal object uniffiClone: UniffiCallbackInterfaceClone {
+        override fun callback(handle: Long): Long {
+            return FfiConverterTypeDispatchEventListener.handleMap.clone(handle)
+        }
     }
 
     internal var vtable = UniffiVTableCallbackInterfaceDispatchEventListener.UniffiByValue(
@@ -5609,17 +5535,17 @@ internal object uniffiCallbackInterfaceDispatchEventListener {
 /**
  * @suppress
  */
-public object FfiConverterTypeDispatchEventListener : FfiConverter<DispatchEventListener, Long> {
+public object FfiConverterTypeDispatchEventListener: FfiConverter<DispatchEventListener, Long> {
     internal val handleMap = UniffiHandleMap<DispatchEventListener>()
 
     override fun lower(value: DispatchEventListener): Long {
         if (value is DispatchEventListenerImpl) {
-            // Rust-implemented object.  Clone the handle and return it
+             // Rust-implemented object.  Clone the handle and return it
             return value.uniffiCloneHandle()
-        } else {
+         } else {
             // Kotlin object, generate a new vtable handle and return that.
             return handleMap.insert(value)
-        }
+         }
     }
 
     override fun lift(value: Long): DispatchEventListener {
@@ -5633,7 +5559,9 @@ public object FfiConverterTypeDispatchEventListener : FfiConverter<DispatchEvent
         }
     }
 
-    override fun read(buf: ByteBuffer): DispatchEventListener = lift(buf.getLong())
+    override fun read(buf: ByteBuffer): DispatchEventListener {
+        return lift(buf.getLong())
+    }
 
     override fun allocationSize(value: DispatchEventListener) = 8UL
 
@@ -5641,6 +5569,7 @@ public object FfiConverterTypeDispatchEventListener : FfiConverter<DispatchEvent
         buf.putLong(lower(value))
     }
 }
+
 
 // This template implements a class for working with a Rust struct via a handle
 // to the live Rust struct on the other side of the FFI.
@@ -5736,26 +5665,25 @@ public object FfiConverterTypeDispatchEventListener : FfiConverter<DispatchEvent
 // [1] https://stackoverflow.com/questions/24376768/can-java-finalize-an-object-when-it-is-still-in-scope/24380219
 //
 
+
 public interface DispatchRepoFfiInterface {
-
+    
     fun `ffiRegisterListener`(`listener`: DispatchEventListener): ListenerRegistration
-
+    
     suspend fun `list`(): List<kotlin.String>
-
+    
     suspend fun `stop`()
-
+    
     companion object
 }
 
-open class DispatchRepoFfi :
-    Disposable,
-    AutoCloseable,
-    DispatchRepoFfiInterface {
+open class DispatchRepoFfi: Disposable, AutoCloseable, DispatchRepoFfiInterface
+{
 
+    @Suppress("UNUSED_PARAMETER")
     /**
      * @suppress
      */
-    @Suppress("UNUSED_PARAMETER")
     constructor(withHandle: UniffiWithHandle, handle: Long) {
         this.handle = handle
         this.cleanable = UniffiLib.CLEANER.register(this, UniffiCleanAction(handle))
@@ -5807,7 +5735,7 @@ open class DispatchRepoFfi :
             if (c == Long.MAX_VALUE) {
                 throw IllegalStateException("${this.javaClass.simpleName} call counter would overflow")
             }
-        } while (!this.callCounter.compareAndSet(c, c + 1L))
+        } while (! this.callCounter.compareAndSet(c, c + 1L))
         // Now we can safely do the method call without the handle being freed concurrently.
         try {
             return block(this.uniffiCloneHandle())
@@ -5825,7 +5753,7 @@ open class DispatchRepoFfi :
         override fun run() {
             if (handle == 0.toLong()) {
                 // Fake object created with `NoHandle`, don't try to free.
-                return
+                return;
             }
             uniffiRustCall { status ->
                 UniffiLib.uniffi_daybook_ffi_fn_free_dispatchrepoffi(handle, status)
@@ -5838,42 +5766,38 @@ open class DispatchRepoFfi :
      */
     fun uniffiCloneHandle(): Long {
         if (handle == 0.toLong()) {
-            throw InternalException("uniffiCloneHandle() called on NoHandle object")
+            throw InternalException("uniffiCloneHandle() called on NoHandle object");
         }
-        return uniffiRustCall { status ->
+        return uniffiRustCall() { status ->
             UniffiLib.uniffi_daybook_ffi_fn_clone_dispatchrepoffi(handle, status)
         }
     }
 
-    override fun `ffiRegisterListener`(`listener`: DispatchEventListener): ListenerRegistration =
-        FfiConverterTypeListenerRegistration.lift(
-            callWithHandle {
-                uniffiRustCall { _status ->
-                    UniffiLib.uniffi_daybook_ffi_fn_method_dispatchrepoffi_ffi_register_listener(
-                        it,
-                        FfiConverterTypeDispatchEventListener.lower(`listener`),
-                        _status,
-                    )
-                }
-            },
-        )
+    override fun `ffiRegisterListener`(`listener`: DispatchEventListener): ListenerRegistration {
+            return FfiConverterTypeListenerRegistration.lift(
+    callWithHandle {
+    uniffiRustCall() { _status ->
+    UniffiLib.uniffi_daybook_ffi_fn_method_dispatchrepoffi_ffi_register_listener(
+        it,
+        FfiConverterTypeDispatchEventListener.lower(`listener`),_status)
+}
+    }
+    )
+    }
+    
 
+    
     @Throws(FfiException::class)
     @Suppress("ASSIGNED_BUT_NEVER_ACCESSED_VARIABLE")
-    override suspend fun `list`(): List<kotlin.String> = uniffiRustCallAsync(
+    override suspend fun `list`() : List<kotlin.String> {
+        return uniffiRustCallAsync(
         callWithHandle { uniffiHandle ->
             UniffiLib.uniffi_daybook_ffi_fn_method_dispatchrepoffi_list(
                 uniffiHandle,
-
+                
             )
         },
-        { future, callback, continuation ->
-            UniffiLib.ffi_daybook_ffi_rust_future_poll_rust_buffer(
-                future,
-                callback,
-                continuation,
-            )
-        },
+        { future, callback, continuation -> UniffiLib.ffi_daybook_ffi_rust_future_poll_rust_buffer(future, callback, continuation) },
         { future, continuation -> UniffiLib.ffi_daybook_ffi_rust_future_complete_rust_buffer(future, continuation) },
         { future -> UniffiLib.ffi_daybook_ffi_rust_future_free_rust_buffer(future) },
         // lift function
@@ -5881,64 +5805,74 @@ open class DispatchRepoFfi :
         // Error FFI converter
         FfiException.ErrorHandler,
     )
+    }
 
+    
     @Throws(FfiException::class)
     @Suppress("ASSIGNED_BUT_NEVER_ACCESSED_VARIABLE")
-    override suspend fun `stop`() = uniffiRustCallAsync(
+    override suspend fun `stop`() {
+        return uniffiRustCallAsync(
         callWithHandle { uniffiHandle ->
             UniffiLib.uniffi_daybook_ffi_fn_method_dispatchrepoffi_stop(
                 uniffiHandle,
-
+                
             )
         },
-        { future, callback, continuation ->
-            UniffiLib.ffi_daybook_ffi_rust_future_poll_void(
-                future,
-                callback,
-                continuation,
-            )
-        },
+        { future, callback, continuation -> UniffiLib.ffi_daybook_ffi_rust_future_poll_void(future, callback, continuation) },
         { future, continuation -> UniffiLib.ffi_daybook_ffi_rust_future_complete_void(future, continuation) },
         { future -> UniffiLib.ffi_daybook_ffi_rust_future_free_void(future) },
         // lift function
         { Unit },
-
+        
         // Error FFI converter
         FfiException.ErrorHandler,
     )
-
-    companion object {
-
-        @Throws(FfiException::class)
-        @Suppress("ASSIGNED_BUT_NEVER_ACCESSED_VARIABLE")
-        suspend fun `load`(`fcx`: FfiCtx): DispatchRepoFfi = uniffiRustCallAsync(
-            UniffiLib.uniffi_daybook_ffi_fn_constructor_dispatchrepoffi_load(FfiConverterTypeFfiCtx.lower(`fcx`)),
-            { future, callback, continuation ->
-                UniffiLib.ffi_daybook_ffi_rust_future_poll_u64(
-                    future,
-                    callback,
-                    continuation,
-                )
-            },
-            { future, continuation -> UniffiLib.ffi_daybook_ffi_rust_future_complete_u64(future, continuation) },
-            { future -> UniffiLib.ffi_daybook_ffi_rust_future_free_u64(future) },
-            // lift function
-            { FfiConverterTypeDispatchRepoFfi.lift(it) },
-            // Error FFI converter
-            FfiException.ErrorHandler,
-        )
     }
+
+    
+
+    
+
+
+    
+    companion object {
+        
+    @Throws(FfiException::class)
+    @Suppress("ASSIGNED_BUT_NEVER_ACCESSED_VARIABLE")
+     suspend fun `load`(`fcx`: FfiCtx) : DispatchRepoFfi {
+        return uniffiRustCallAsync(
+        UniffiLib.uniffi_daybook_ffi_fn_constructor_dispatchrepoffi_load(FfiConverterTypeFfiCtx.lower(`fcx`),),
+        { future, callback, continuation -> UniffiLib.ffi_daybook_ffi_rust_future_poll_u64(future, callback, continuation) },
+        { future, continuation -> UniffiLib.ffi_daybook_ffi_rust_future_complete_u64(future, continuation) },
+        { future -> UniffiLib.ffi_daybook_ffi_rust_future_free_u64(future) },
+        // lift function
+        { FfiConverterTypeDispatchRepoFfi.lift(it) },
+        // Error FFI converter
+        FfiException.ErrorHandler,
+    )
+    }
+
+        
+    }
+    
 }
+
 
 /**
  * @suppress
  */
-public object FfiConverterTypeDispatchRepoFfi : FfiConverter<DispatchRepoFfi, Long> {
-    override fun lower(value: DispatchRepoFfi): Long = value.uniffiCloneHandle()
+public object FfiConverterTypeDispatchRepoFfi: FfiConverter<DispatchRepoFfi, Long> {
+    override fun lower(value: DispatchRepoFfi): Long {
+        return value.uniffiCloneHandle()
+    }
 
-    override fun lift(value: Long): DispatchRepoFfi = DispatchRepoFfi(UniffiWithHandle, value)
+    override fun lift(value: Long): DispatchRepoFfi {
+        return DispatchRepoFfi(UniffiWithHandle, value)
+    }
 
-    override fun read(buf: ByteBuffer): DispatchRepoFfi = lift(buf.getLong())
+    override fun read(buf: ByteBuffer): DispatchRepoFfi {
+        return lift(buf.getLong())
+    }
 
     override fun allocationSize(value: DispatchRepoFfi) = 8UL
 
@@ -5946,6 +5880,7 @@ public object FfiConverterTypeDispatchRepoFfi : FfiConverter<DispatchRepoFfi, Lo
         buf.putLong(lower(value))
     }
 }
+
 
 // This template implements a class for working with a Rust struct via a handle
 // to the live Rust struct on the other side of the FFI.
@@ -6041,22 +5976,21 @@ public object FfiConverterTypeDispatchRepoFfi : FfiConverter<DispatchRepoFfi, Lo
 // [1] https://stackoverflow.com/questions/24376768/can-java-finalize-an-object-when-it-is-still-in-scope/24380219
 //
 
+
 public interface DrawerEventListener {
-
+    
     fun `onDrawerEvent`(`event`: DrawerEvent)
-
+    
     companion object
 }
 
-open class DrawerEventListenerImpl :
-    Disposable,
-    AutoCloseable,
-    DrawerEventListener {
+open class DrawerEventListenerImpl: Disposable, AutoCloseable, DrawerEventListener
+{
 
+    @Suppress("UNUSED_PARAMETER")
     /**
      * @suppress
      */
-    @Suppress("UNUSED_PARAMETER")
     constructor(withHandle: UniffiWithHandle, handle: Long) {
         this.handle = handle
         this.cleanable = UniffiLib.CLEANER.register(this, UniffiCleanAction(handle))
@@ -6108,7 +6042,7 @@ open class DrawerEventListenerImpl :
             if (c == Long.MAX_VALUE) {
                 throw IllegalStateException("${this.javaClass.simpleName} call counter would overflow")
             }
-        } while (!this.callCounter.compareAndSet(c, c + 1L))
+        } while (! this.callCounter.compareAndSet(c, c + 1L))
         // Now we can safely do the method call without the handle being freed concurrently.
         try {
             return block(this.uniffiCloneHandle())
@@ -6126,7 +6060,7 @@ open class DrawerEventListenerImpl :
         override fun run() {
             if (handle == 0.toLong()) {
                 // Fake object created with `NoHandle`, don't try to free.
-                return
+                return;
             }
             uniffiRustCall { status ->
                 UniffiLib.uniffi_daybook_ffi_fn_free_drawereventlistener(handle, status)
@@ -6139,40 +6073,47 @@ open class DrawerEventListenerImpl :
      */
     fun uniffiCloneHandle(): Long {
         if (handle == 0.toLong()) {
-            throw InternalException("uniffiCloneHandle() called on NoHandle object")
+            throw InternalException("uniffiCloneHandle() called on NoHandle object");
         }
-        return uniffiRustCall { status ->
+        return uniffiRustCall() { status ->
             UniffiLib.uniffi_daybook_ffi_fn_clone_drawereventlistener(handle, status)
         }
     }
 
-    override fun `onDrawerEvent`(`event`: DrawerEvent) = callWithHandle {
-        uniffiRustCall { _status ->
-            UniffiLib.uniffi_daybook_ffi_fn_method_drawereventlistener_on_drawer_event(
-                it,
-                FfiConverterTypeDrawerEvent.lower(`event`),
-                _status,
-            )
-        }
+    override fun `onDrawerEvent`(`event`: DrawerEvent)
+        = 
+    callWithHandle {
+    uniffiRustCall() { _status ->
+    UniffiLib.uniffi_daybook_ffi_fn_method_drawereventlistener_on_drawer_event(
+        it,
+        FfiConverterTypeDrawerEvent.lower(`event`),_status)
+}
     }
+    
+    
 
+    
+
+    
+
+
+    
+    
     /**
      * @suppress
      */
     companion object
+    
 }
+
+
 
 // Put the implementation in an object so we don't pollute the top-level namespace
 internal object uniffiCallbackInterfaceDrawerEventListener {
-    internal object `onDrawerEvent` : UniffiCallbackInterfaceDrawerEventListenerMethod0 {
-        override fun callback(
-            `uniffiHandle`: Long,
-            `event`: RustBufferDrawerEvent.ByValue,
-            `uniffiOutReturn`: Pointer,
-            uniffiCallStatus: UniffiRustCallStatus,
-        ) {
+    internal object `onDrawerEvent`: UniffiCallbackInterfaceDrawerEventListenerMethod0 {
+        override fun callback(`uniffiHandle`: Long,`event`: RustBufferDrawerEvent.ByValue,`uniffiOutReturn`: Pointer,uniffiCallStatus: UniffiRustCallStatus,) {
             val uniffiObj = FfiConverterTypeDrawerEventListener.handleMap.get(uniffiHandle)
-            val makeCall = {
+            val makeCall = { ->
                 uniffiObj.`onDrawerEvent`(
                     FfiConverterTypeDrawerEvent.lift(`event`),
                 )
@@ -6182,14 +6123,16 @@ internal object uniffiCallbackInterfaceDrawerEventListener {
         }
     }
 
-    internal object uniffiFree : UniffiCallbackInterfaceFree {
+    internal object uniffiFree: UniffiCallbackInterfaceFree {
         override fun callback(handle: Long) {
             FfiConverterTypeDrawerEventListener.handleMap.remove(handle)
         }
     }
 
-    internal object uniffiClone : UniffiCallbackInterfaceClone {
-        override fun callback(handle: Long): Long = FfiConverterTypeDrawerEventListener.handleMap.clone(handle)
+    internal object uniffiClone: UniffiCallbackInterfaceClone {
+        override fun callback(handle: Long): Long {
+            return FfiConverterTypeDrawerEventListener.handleMap.clone(handle)
+        }
     }
 
     internal var vtable = UniffiVTableCallbackInterfaceDrawerEventListener.UniffiByValue(
@@ -6208,17 +6151,17 @@ internal object uniffiCallbackInterfaceDrawerEventListener {
 /**
  * @suppress
  */
-public object FfiConverterTypeDrawerEventListener : FfiConverter<DrawerEventListener, Long> {
+public object FfiConverterTypeDrawerEventListener: FfiConverter<DrawerEventListener, Long> {
     internal val handleMap = UniffiHandleMap<DrawerEventListener>()
 
     override fun lower(value: DrawerEventListener): Long {
         if (value is DrawerEventListenerImpl) {
-            // Rust-implemented object.  Clone the handle and return it
+             // Rust-implemented object.  Clone the handle and return it
             return value.uniffiCloneHandle()
-        } else {
+         } else {
             // Kotlin object, generate a new vtable handle and return that.
             return handleMap.insert(value)
-        }
+         }
     }
 
     override fun lift(value: Long): DrawerEventListener {
@@ -6232,7 +6175,9 @@ public object FfiConverterTypeDrawerEventListener : FfiConverter<DrawerEventList
         }
     }
 
-    override fun read(buf: ByteBuffer): DrawerEventListener = lift(buf.getLong())
+    override fun read(buf: ByteBuffer): DrawerEventListener {
+        return lift(buf.getLong())
+    }
 
     override fun allocationSize(value: DrawerEventListener) = 8UL
 
@@ -6240,6 +6185,7 @@ public object FfiConverterTypeDrawerEventListener : FfiConverter<DrawerEventList
         buf.putLong(lower(value))
     }
 }
+
 
 // This template implements a class for working with a Rust struct via a handle
 // to the live Rust struct on the other side of the FFI.
@@ -6335,42 +6281,41 @@ public object FfiConverterTypeDrawerEventListener : FfiConverter<DrawerEventList
 // [1] https://stackoverflow.com/questions/24376768/can-java-finalize-an-object-when-it-is-still-in-scope/24380219
 //
 
+
 public interface DrawerRepoFfiInterface {
-
+    
     suspend fun `add`(`args`: AddDocArgs): kotlin.String
-
+    
     suspend fun `batchAdd`(`args`: List<AddDocArgs>): List<kotlin.String>
-
+    
     suspend fun `del`(`id`: kotlin.String): kotlin.Boolean
-
+    
     fun `ffiRegisterListener`(`listener`: DrawerEventListener): ListenerRegistration
-
+    
     suspend fun `get`(`id`: kotlin.String, `branchPath`: kotlin.String): Doc?
-
+    
     suspend fun `getBundle`(`id`: kotlin.String, `branchPath`: kotlin.String): DocBundle?
-
+    
     suspend fun `getEntry`(`id`: kotlin.String): DocEntry?
-
+    
     suspend fun `list`(): List<DocNBranches>
-
+    
     suspend fun `stop`()
-
+    
     suspend fun `update`(`patch`: DocPatch, `branchPath`: kotlin.String, `heads`: ChangeHashSet?)
-
+    
     suspend fun `updateBatch`(`patches`: List<UpdateDocArgsV2>)
-
+    
     companion object
 }
 
-open class DrawerRepoFfi :
-    Disposable,
-    AutoCloseable,
-    DrawerRepoFfiInterface {
+open class DrawerRepoFfi: Disposable, AutoCloseable, DrawerRepoFfiInterface
+{
 
+    @Suppress("UNUSED_PARAMETER")
     /**
      * @suppress
      */
-    @Suppress("UNUSED_PARAMETER")
     constructor(withHandle: UniffiWithHandle, handle: Long) {
         this.handle = handle
         this.cleanable = UniffiLib.CLEANER.register(this, UniffiCleanAction(handle))
@@ -6422,7 +6367,7 @@ open class DrawerRepoFfi :
             if (c == Long.MAX_VALUE) {
                 throw IllegalStateException("${this.javaClass.simpleName} call counter would overflow")
             }
-        } while (!this.callCounter.compareAndSet(c, c + 1L))
+        } while (! this.callCounter.compareAndSet(c, c + 1L))
         // Now we can safely do the method call without the handle being freed concurrently.
         try {
             return block(this.uniffiCloneHandle())
@@ -6440,7 +6385,7 @@ open class DrawerRepoFfi :
         override fun run() {
             if (handle == 0.toLong()) {
                 // Fake object created with `NoHandle`, don't try to free.
-                return
+                return;
             }
             uniffiRustCall { status ->
                 UniffiLib.uniffi_daybook_ffi_fn_free_drawerrepoffi(handle, status)
@@ -6453,29 +6398,25 @@ open class DrawerRepoFfi :
      */
     fun uniffiCloneHandle(): Long {
         if (handle == 0.toLong()) {
-            throw InternalException("uniffiCloneHandle() called on NoHandle object")
+            throw InternalException("uniffiCloneHandle() called on NoHandle object");
         }
-        return uniffiRustCall { status ->
+        return uniffiRustCall() { status ->
             UniffiLib.uniffi_daybook_ffi_fn_clone_drawerrepoffi(handle, status)
         }
     }
 
+    
     @Throws(FfiException::class)
     @Suppress("ASSIGNED_BUT_NEVER_ACCESSED_VARIABLE")
-    override suspend fun `add`(`args`: AddDocArgs): kotlin.String = uniffiRustCallAsync(
+    override suspend fun `add`(`args`: AddDocArgs) : kotlin.String {
+        return uniffiRustCallAsync(
         callWithHandle { uniffiHandle ->
             UniffiLib.uniffi_daybook_ffi_fn_method_drawerrepoffi_add(
                 uniffiHandle,
                 FfiConverterTypeAddDocArgs.lower(`args`),
             )
         },
-        { future, callback, continuation ->
-            UniffiLib.ffi_daybook_ffi_rust_future_poll_rust_buffer(
-                future,
-                callback,
-                continuation,
-            )
-        },
+        { future, callback, continuation -> UniffiLib.ffi_daybook_ffi_rust_future_poll_rust_buffer(future, callback, continuation) },
         { future, continuation -> UniffiLib.ffi_daybook_ffi_rust_future_complete_rust_buffer(future, continuation) },
         { future -> UniffiLib.ffi_daybook_ffi_rust_future_free_rust_buffer(future) },
         // lift function
@@ -6483,23 +6424,20 @@ open class DrawerRepoFfi :
         // Error FFI converter
         FfiException.ErrorHandler,
     )
+    }
 
+    
     @Throws(FfiException::class)
     @Suppress("ASSIGNED_BUT_NEVER_ACCESSED_VARIABLE")
-    override suspend fun `batchAdd`(`args`: List<AddDocArgs>): List<kotlin.String> = uniffiRustCallAsync(
+    override suspend fun `batchAdd`(`args`: List<AddDocArgs>) : List<kotlin.String> {
+        return uniffiRustCallAsync(
         callWithHandle { uniffiHandle ->
             UniffiLib.uniffi_daybook_ffi_fn_method_drawerrepoffi_batch_add(
                 uniffiHandle,
                 FfiConverterSequenceTypeAddDocArgs.lower(`args`),
             )
         },
-        { future, callback, continuation ->
-            UniffiLib.ffi_daybook_ffi_rust_future_poll_rust_buffer(
-                future,
-                callback,
-                continuation,
-            )
-        },
+        { future, callback, continuation -> UniffiLib.ffi_daybook_ffi_rust_future_poll_rust_buffer(future, callback, continuation) },
         { future, continuation -> UniffiLib.ffi_daybook_ffi_rust_future_complete_rust_buffer(future, continuation) },
         { future -> UniffiLib.ffi_daybook_ffi_rust_future_free_rust_buffer(future) },
         // lift function
@@ -6507,23 +6445,20 @@ open class DrawerRepoFfi :
         // Error FFI converter
         FfiException.ErrorHandler,
     )
+    }
 
+    
     @Throws(FfiException::class)
     @Suppress("ASSIGNED_BUT_NEVER_ACCESSED_VARIABLE")
-    override suspend fun `del`(`id`: kotlin.String): kotlin.Boolean = uniffiRustCallAsync(
+    override suspend fun `del`(`id`: kotlin.String) : kotlin.Boolean {
+        return uniffiRustCallAsync(
         callWithHandle { uniffiHandle ->
             UniffiLib.uniffi_daybook_ffi_fn_method_drawerrepoffi_del(
                 uniffiHandle,
                 FfiConverterString.lower(`id`),
             )
         },
-        { future, callback, continuation ->
-            UniffiLib.ffi_daybook_ffi_rust_future_poll_i8(
-                future,
-                callback,
-                continuation,
-            )
-        },
+        { future, callback, continuation -> UniffiLib.ffi_daybook_ffi_rust_future_poll_i8(future, callback, continuation) },
         { future, continuation -> UniffiLib.ffi_daybook_ffi_rust_future_complete_i8(future, continuation) },
         { future -> UniffiLib.ffi_daybook_ffi_rust_future_free_i8(future) },
         // lift function
@@ -6531,37 +6466,33 @@ open class DrawerRepoFfi :
         // Error FFI converter
         FfiException.ErrorHandler,
     )
+    }
 
-    override fun `ffiRegisterListener`(`listener`: DrawerEventListener): ListenerRegistration =
-        FfiConverterTypeListenerRegistration.lift(
-            callWithHandle {
-                uniffiRustCall { _status ->
-                    UniffiLib.uniffi_daybook_ffi_fn_method_drawerrepoffi_ffi_register_listener(
-                        it,
-                        FfiConverterTypeDrawerEventListener.lower(`listener`),
-                        _status,
-                    )
-                }
-            },
-        )
+    override fun `ffiRegisterListener`(`listener`: DrawerEventListener): ListenerRegistration {
+            return FfiConverterTypeListenerRegistration.lift(
+    callWithHandle {
+    uniffiRustCall() { _status ->
+    UniffiLib.uniffi_daybook_ffi_fn_method_drawerrepoffi_ffi_register_listener(
+        it,
+        FfiConverterTypeDrawerEventListener.lower(`listener`),_status)
+}
+    }
+    )
+    }
+    
 
+    
     @Throws(FfiException::class)
     @Suppress("ASSIGNED_BUT_NEVER_ACCESSED_VARIABLE")
-    override suspend fun `get`(`id`: kotlin.String, `branchPath`: kotlin.String): Doc? = uniffiRustCallAsync(
+    override suspend fun `get`(`id`: kotlin.String, `branchPath`: kotlin.String) : Doc? {
+        return uniffiRustCallAsync(
         callWithHandle { uniffiHandle ->
             UniffiLib.uniffi_daybook_ffi_fn_method_drawerrepoffi_get(
                 uniffiHandle,
-                FfiConverterString.lower(`id`),
-                FfiConverterString.lower(`branchPath`),
+                FfiConverterString.lower(`id`),FfiConverterString.lower(`branchPath`),
             )
         },
-        { future, callback, continuation ->
-            UniffiLib.ffi_daybook_ffi_rust_future_poll_rust_buffer(
-                future,
-                callback,
-                continuation,
-            )
-        },
+        { future, callback, continuation -> UniffiLib.ffi_daybook_ffi_rust_future_poll_rust_buffer(future, callback, continuation) },
         { future, continuation -> UniffiLib.ffi_daybook_ffi_rust_future_complete_rust_buffer(future, continuation) },
         { future -> UniffiLib.ffi_daybook_ffi_rust_future_free_rust_buffer(future) },
         // lift function
@@ -6569,54 +6500,41 @@ open class DrawerRepoFfi :
         // Error FFI converter
         FfiException.ErrorHandler,
     )
+    }
 
+    
     @Throws(FfiException::class)
     @Suppress("ASSIGNED_BUT_NEVER_ACCESSED_VARIABLE")
-    override suspend fun `getBundle`(`id`: kotlin.String, `branchPath`: kotlin.String): DocBundle? =
-        uniffiRustCallAsync(
-            callWithHandle { uniffiHandle ->
-                UniffiLib.uniffi_daybook_ffi_fn_method_drawerrepoffi_get_bundle(
-                    uniffiHandle,
-                    FfiConverterString.lower(`id`),
-                    FfiConverterString.lower(`branchPath`),
-                )
-            },
-            { future, callback, continuation ->
-                UniffiLib.ffi_daybook_ffi_rust_future_poll_rust_buffer(
-                    future,
-                    callback,
-                    continuation,
-                )
-            },
-            { future, continuation ->
-                UniffiLib.ffi_daybook_ffi_rust_future_complete_rust_buffer(
-                    future,
-                    continuation,
-                )
-            },
-            { future -> UniffiLib.ffi_daybook_ffi_rust_future_free_rust_buffer(future) },
-            // lift function
-            { FfiConverterOptionalTypeDocBundle.lift(it) },
-            // Error FFI converter
-            FfiException.ErrorHandler,
-        )
+    override suspend fun `getBundle`(`id`: kotlin.String, `branchPath`: kotlin.String) : DocBundle? {
+        return uniffiRustCallAsync(
+        callWithHandle { uniffiHandle ->
+            UniffiLib.uniffi_daybook_ffi_fn_method_drawerrepoffi_get_bundle(
+                uniffiHandle,
+                FfiConverterString.lower(`id`),FfiConverterString.lower(`branchPath`),
+            )
+        },
+        { future, callback, continuation -> UniffiLib.ffi_daybook_ffi_rust_future_poll_rust_buffer(future, callback, continuation) },
+        { future, continuation -> UniffiLib.ffi_daybook_ffi_rust_future_complete_rust_buffer(future, continuation) },
+        { future -> UniffiLib.ffi_daybook_ffi_rust_future_free_rust_buffer(future) },
+        // lift function
+        { FfiConverterOptionalTypeDocBundle.lift(it) },
+        // Error FFI converter
+        FfiException.ErrorHandler,
+    )
+    }
 
+    
     @Throws(FfiException::class)
     @Suppress("ASSIGNED_BUT_NEVER_ACCESSED_VARIABLE")
-    override suspend fun `getEntry`(`id`: kotlin.String): DocEntry? = uniffiRustCallAsync(
+    override suspend fun `getEntry`(`id`: kotlin.String) : DocEntry? {
+        return uniffiRustCallAsync(
         callWithHandle { uniffiHandle ->
             UniffiLib.uniffi_daybook_ffi_fn_method_drawerrepoffi_get_entry(
                 uniffiHandle,
                 FfiConverterString.lower(`id`),
             )
         },
-        { future, callback, continuation ->
-            UniffiLib.ffi_daybook_ffi_rust_future_poll_rust_buffer(
-                future,
-                callback,
-                continuation,
-            )
-        },
+        { future, callback, continuation -> UniffiLib.ffi_daybook_ffi_rust_future_poll_rust_buffer(future, callback, continuation) },
         { future, continuation -> UniffiLib.ffi_daybook_ffi_rust_future_complete_rust_buffer(future, continuation) },
         { future -> UniffiLib.ffi_daybook_ffi_rust_future_free_rust_buffer(future) },
         // lift function
@@ -6624,22 +6542,19 @@ open class DrawerRepoFfi :
         // Error FFI converter
         FfiException.ErrorHandler,
     )
+    }
 
+    
     @Suppress("ASSIGNED_BUT_NEVER_ACCESSED_VARIABLE")
-    override suspend fun `list`(): List<DocNBranches> = uniffiRustCallAsync(
+    override suspend fun `list`() : List<DocNBranches> {
+        return uniffiRustCallAsync(
         callWithHandle { uniffiHandle ->
             UniffiLib.uniffi_daybook_ffi_fn_method_drawerrepoffi_list(
                 uniffiHandle,
-
+                
             )
         },
-        { future, callback, continuation ->
-            UniffiLib.ffi_daybook_ffi_rust_future_poll_rust_buffer(
-                future,
-                callback,
-                continuation,
-            )
-        },
+        { future, callback, continuation -> UniffiLib.ffi_daybook_ffi_rust_future_poll_rust_buffer(future, callback, continuation) },
         { future, continuation -> UniffiLib.ffi_daybook_ffi_rust_future_complete_rust_buffer(future, continuation) },
         { future -> UniffiLib.ffi_daybook_ffi_rust_future_free_rust_buffer(future) },
         // lift function
@@ -6647,120 +6562,118 @@ open class DrawerRepoFfi :
         // Error FFI converter
         UniffiNullRustCallStatusErrorHandler,
     )
+    }
 
+    
     @Throws(FfiException::class)
     @Suppress("ASSIGNED_BUT_NEVER_ACCESSED_VARIABLE")
-    override suspend fun `stop`() = uniffiRustCallAsync(
+    override suspend fun `stop`() {
+        return uniffiRustCallAsync(
         callWithHandle { uniffiHandle ->
             UniffiLib.uniffi_daybook_ffi_fn_method_drawerrepoffi_stop(
                 uniffiHandle,
-
+                
             )
         },
-        { future, callback, continuation ->
-            UniffiLib.ffi_daybook_ffi_rust_future_poll_void(
-                future,
-                callback,
-                continuation,
-            )
-        },
+        { future, callback, continuation -> UniffiLib.ffi_daybook_ffi_rust_future_poll_void(future, callback, continuation) },
         { future, continuation -> UniffiLib.ffi_daybook_ffi_rust_future_complete_void(future, continuation) },
         { future -> UniffiLib.ffi_daybook_ffi_rust_future_free_void(future) },
         // lift function
         { Unit },
-
+        
         // Error FFI converter
         FfiException.ErrorHandler,
     )
+    }
 
+    
     @Throws(FfiException::class)
     @Suppress("ASSIGNED_BUT_NEVER_ACCESSED_VARIABLE")
-    override suspend fun `update`(`patch`: DocPatch, `branchPath`: kotlin.String, `heads`: ChangeHashSet?) =
-        uniffiRustCallAsync(
-            callWithHandle { uniffiHandle ->
-                UniffiLib.uniffi_daybook_ffi_fn_method_drawerrepoffi_update(
-                    uniffiHandle,
-                    FfiConverterTypeDocPatch.lower(`patch`),
-                    FfiConverterString.lower(`branchPath`),
-                    FfiConverterOptionalTypeChangeHashSet.lower(`heads`),
-                )
-            },
-            { future, callback, continuation ->
-                UniffiLib.ffi_daybook_ffi_rust_future_poll_void(
-                    future,
-                    callback,
-                    continuation,
-                )
-            },
-            { future, continuation -> UniffiLib.ffi_daybook_ffi_rust_future_complete_void(future, continuation) },
-            { future -> UniffiLib.ffi_daybook_ffi_rust_future_free_void(future) },
-            // lift function
-            { Unit },
+    override suspend fun `update`(`patch`: DocPatch, `branchPath`: kotlin.String, `heads`: ChangeHashSet?) {
+        return uniffiRustCallAsync(
+        callWithHandle { uniffiHandle ->
+            UniffiLib.uniffi_daybook_ffi_fn_method_drawerrepoffi_update(
+                uniffiHandle,
+                FfiConverterTypeDocPatch.lower(`patch`),FfiConverterString.lower(`branchPath`),FfiConverterOptionalTypeChangeHashSet.lower(`heads`),
+            )
+        },
+        { future, callback, continuation -> UniffiLib.ffi_daybook_ffi_rust_future_poll_void(future, callback, continuation) },
+        { future, continuation -> UniffiLib.ffi_daybook_ffi_rust_future_complete_void(future, continuation) },
+        { future -> UniffiLib.ffi_daybook_ffi_rust_future_free_void(future) },
+        // lift function
+        { Unit },
+        
+        // Error FFI converter
+        FfiException.ErrorHandler,
+    )
+    }
 
-            // Error FFI converter
-            FfiException.ErrorHandler,
-        )
-
+    
     @Throws(FfiException::class)
     @Suppress("ASSIGNED_BUT_NEVER_ACCESSED_VARIABLE")
-    override suspend fun `updateBatch`(`patches`: List<UpdateDocArgsV2>) = uniffiRustCallAsync(
+    override suspend fun `updateBatch`(`patches`: List<UpdateDocArgsV2>) {
+        return uniffiRustCallAsync(
         callWithHandle { uniffiHandle ->
             UniffiLib.uniffi_daybook_ffi_fn_method_drawerrepoffi_update_batch(
                 uniffiHandle,
                 FfiConverterSequenceTypeUpdateDocArgsV2.lower(`patches`),
             )
         },
-        { future, callback, continuation ->
-            UniffiLib.ffi_daybook_ffi_rust_future_poll_void(
-                future,
-                callback,
-                continuation,
-            )
-        },
+        { future, callback, continuation -> UniffiLib.ffi_daybook_ffi_rust_future_poll_void(future, callback, continuation) },
         { future, continuation -> UniffiLib.ffi_daybook_ffi_rust_future_complete_void(future, continuation) },
         { future -> UniffiLib.ffi_daybook_ffi_rust_future_free_void(future) },
         // lift function
         { Unit },
-
+        
         // Error FFI converter
         FfiException.ErrorHandler,
     )
-
-    companion object {
-
-        @Throws(FfiException::class)
-        @Suppress("ASSIGNED_BUT_NEVER_ACCESSED_VARIABLE")
-        suspend fun `load`(`fcx`: FfiCtx, `plugsRepo`: PlugsRepoFfi): DrawerRepoFfi = uniffiRustCallAsync(
-            UniffiLib.uniffi_daybook_ffi_fn_constructor_drawerrepoffi_load(
-                FfiConverterTypeFfiCtx.lower(`fcx`),
-                FfiConverterTypePlugsRepoFfi.lower(`plugsRepo`),
-            ),
-            { future, callback, continuation ->
-                UniffiLib.ffi_daybook_ffi_rust_future_poll_u64(
-                    future,
-                    callback,
-                    continuation,
-                )
-            },
-            { future, continuation -> UniffiLib.ffi_daybook_ffi_rust_future_complete_u64(future, continuation) },
-            { future -> UniffiLib.ffi_daybook_ffi_rust_future_free_u64(future) },
-            // lift function
-            { FfiConverterTypeDrawerRepoFfi.lift(it) },
-            // Error FFI converter
-            FfiException.ErrorHandler,
-        )
     }
+
+    
+
+    
+
+
+    
+    companion object {
+        
+    @Throws(FfiException::class)
+    @Suppress("ASSIGNED_BUT_NEVER_ACCESSED_VARIABLE")
+     suspend fun `load`(`fcx`: FfiCtx, `plugsRepo`: PlugsRepoFfi) : DrawerRepoFfi {
+        return uniffiRustCallAsync(
+        UniffiLib.uniffi_daybook_ffi_fn_constructor_drawerrepoffi_load(FfiConverterTypeFfiCtx.lower(`fcx`),FfiConverterTypePlugsRepoFfi.lower(`plugsRepo`),),
+        { future, callback, continuation -> UniffiLib.ffi_daybook_ffi_rust_future_poll_u64(future, callback, continuation) },
+        { future, continuation -> UniffiLib.ffi_daybook_ffi_rust_future_complete_u64(future, continuation) },
+        { future -> UniffiLib.ffi_daybook_ffi_rust_future_free_u64(future) },
+        // lift function
+        { FfiConverterTypeDrawerRepoFfi.lift(it) },
+        // Error FFI converter
+        FfiException.ErrorHandler,
+    )
+    }
+
+        
+    }
+    
 }
+
 
 /**
  * @suppress
  */
-public object FfiConverterTypeDrawerRepoFfi : FfiConverter<DrawerRepoFfi, Long> {
-    override fun lower(value: DrawerRepoFfi): Long = value.uniffiCloneHandle()
+public object FfiConverterTypeDrawerRepoFfi: FfiConverter<DrawerRepoFfi, Long> {
+    override fun lower(value: DrawerRepoFfi): Long {
+        return value.uniffiCloneHandle()
+    }
 
-    override fun lift(value: Long): DrawerRepoFfi = DrawerRepoFfi(UniffiWithHandle, value)
+    override fun lift(value: Long): DrawerRepoFfi {
+        return DrawerRepoFfi(UniffiWithHandle, value)
+    }
 
-    override fun read(buf: ByteBuffer): DrawerRepoFfi = lift(buf.getLong())
+    override fun read(buf: ByteBuffer): DrawerRepoFfi {
+        return lift(buf.getLong())
+    }
 
     override fun allocationSize(value: DrawerRepoFfi) = 8UL
 
@@ -6768,6 +6681,7 @@ public object FfiConverterTypeDrawerRepoFfi : FfiConverter<DrawerRepoFfi, Long> 
         buf.putLong(lower(value))
     }
 }
+
 
 // This template implements a class for working with a Rust struct via a handle
 // to the live Rust struct on the other side of the FFI.
@@ -6863,20 +6777,19 @@ public object FfiConverterTypeDrawerRepoFfi : FfiConverter<DrawerRepoFfi, Long> 
 // [1] https://stackoverflow.com/questions/24376768/can-java-finalize-an-object-when-it-is-still-in-scope/24380219
 //
 
-public interface FfiCtxInterface {
 
+public interface FfiCtxInterface {
+    
     companion object
 }
 
-open class FfiCtx :
-    Disposable,
-    AutoCloseable,
-    FfiCtxInterface {
+open class FfiCtx: Disposable, AutoCloseable, FfiCtxInterface
+{
 
+    @Suppress("UNUSED_PARAMETER")
     /**
      * @suppress
      */
-    @Suppress("UNUSED_PARAMETER")
     constructor(withHandle: UniffiWithHandle, handle: Long) {
         this.handle = handle
         this.cleanable = UniffiLib.CLEANER.register(this, UniffiCleanAction(handle))
@@ -6928,7 +6841,7 @@ open class FfiCtx :
             if (c == Long.MAX_VALUE) {
                 throw IllegalStateException("${this.javaClass.simpleName} call counter would overflow")
             }
-        } while (!this.callCounter.compareAndSet(c, c + 1L))
+        } while (! this.callCounter.compareAndSet(c, c + 1L))
         // Now we can safely do the method call without the handle being freed concurrently.
         try {
             return block(this.uniffiCloneHandle())
@@ -6946,7 +6859,7 @@ open class FfiCtx :
         override fun run() {
             if (handle == 0.toLong()) {
                 // Fake object created with `NoHandle`, don't try to free.
-                return
+                return;
             }
             uniffiRustCall { status ->
                 UniffiLib.uniffi_daybook_ffi_fn_free_ffictx(handle, status)
@@ -6959,48 +6872,57 @@ open class FfiCtx :
      */
     fun uniffiCloneHandle(): Long {
         if (handle == 0.toLong()) {
-            throw InternalException("uniffiCloneHandle() called on NoHandle object")
+            throw InternalException("uniffiCloneHandle() called on NoHandle object");
         }
-        return uniffiRustCall { status ->
+        return uniffiRustCall() { status ->
             UniffiLib.uniffi_daybook_ffi_fn_clone_ffictx(handle, status)
         }
     }
 
-    companion object {
+    
 
-        @Throws(FfiException::class)
-        @Suppress("ASSIGNED_BUT_NEVER_ACCESSED_VARIABLE")
-        suspend fun `init`(`repoRoot`: kotlin.String, `acx`: AppFfiCtx): FfiCtx = uniffiRustCallAsync(
-            UniffiLib.uniffi_daybook_ffi_fn_constructor_ffictx_init(
-                FfiConverterString.lower(`repoRoot`),
-                FfiConverterTypeAppFfiCtx.lower(`acx`),
-            ),
-            { future, callback, continuation ->
-                UniffiLib.ffi_daybook_ffi_rust_future_poll_u64(
-                    future,
-                    callback,
-                    continuation,
-                )
-            },
-            { future, continuation -> UniffiLib.ffi_daybook_ffi_rust_future_complete_u64(future, continuation) },
-            { future -> UniffiLib.ffi_daybook_ffi_rust_future_free_u64(future) },
-            // lift function
-            { FfiConverterTypeFfiCtx.lift(it) },
-            // Error FFI converter
-            FfiException.ErrorHandler,
-        )
+    
+
+
+    
+    companion object {
+        
+    @Throws(FfiException::class)
+    @Suppress("ASSIGNED_BUT_NEVER_ACCESSED_VARIABLE")
+     suspend fun `init`(`repoRoot`: kotlin.String, `acx`: AppFfiCtx) : FfiCtx {
+        return uniffiRustCallAsync(
+        UniffiLib.uniffi_daybook_ffi_fn_constructor_ffictx_init(FfiConverterString.lower(`repoRoot`),FfiConverterTypeAppFfiCtx.lower(`acx`),),
+        { future, callback, continuation -> UniffiLib.ffi_daybook_ffi_rust_future_poll_u64(future, callback, continuation) },
+        { future, continuation -> UniffiLib.ffi_daybook_ffi_rust_future_complete_u64(future, continuation) },
+        { future -> UniffiLib.ffi_daybook_ffi_rust_future_free_u64(future) },
+        // lift function
+        { FfiConverterTypeFfiCtx.lift(it) },
+        // Error FFI converter
+        FfiException.ErrorHandler,
+    )
     }
+
+        
+    }
+    
 }
+
 
 /**
  * @suppress
  */
-public object FfiConverterTypeFfiCtx : FfiConverter<FfiCtx, Long> {
-    override fun lower(value: FfiCtx): Long = value.uniffiCloneHandle()
+public object FfiConverterTypeFfiCtx: FfiConverter<FfiCtx, Long> {
+    override fun lower(value: FfiCtx): Long {
+        return value.uniffiCloneHandle()
+    }
 
-    override fun lift(value: Long): FfiCtx = FfiCtx(UniffiWithHandle, value)
+    override fun lift(value: Long): FfiCtx {
+        return FfiCtx(UniffiWithHandle, value)
+    }
 
-    override fun read(buf: ByteBuffer): FfiCtx = lift(buf.getLong())
+    override fun read(buf: ByteBuffer): FfiCtx {
+        return lift(buf.getLong())
+    }
 
     override fun allocationSize(value: FfiCtx) = 8UL
 
@@ -7008,6 +6930,7 @@ public object FfiConverterTypeFfiCtx : FfiConverter<FfiCtx, Long> {
         buf.putLong(lower(value))
     }
 }
+
 
 // This template implements a class for working with a Rust struct via a handle
 // to the live Rust struct on the other side of the FFI.
@@ -7103,23 +7026,22 @@ public object FfiConverterTypeFfiCtx : FfiConverter<FfiCtx, Long> {
 // [1] https://stackoverflow.com/questions/24376768/can-java-finalize-an-object-when-it-is-still-in-scope/24380219
 //
 
+
 public interface FfiExceptionInterface {
-
+    
     fun `message`(): kotlin.String
-
+    
     companion object
 }
 
-open class FfiException :
-    kotlin.Exception,
-    Disposable,
-    AutoCloseable,
-    FfiExceptionInterface {
 
+open class FfiException : kotlin.Exception, Disposable, AutoCloseable, FfiExceptionInterface {
+
+
+    @Suppress("UNUSED_PARAMETER")
     /**
      * @suppress
      */
-    @Suppress("UNUSED_PARAMETER")
     constructor(withHandle: UniffiWithHandle, handle: Long) {
         this.handle = handle
         this.cleanable = UniffiLib.CLEANER.register(this, UniffiCleanAction(handle))
@@ -7171,7 +7093,7 @@ open class FfiException :
             if (c == Long.MAX_VALUE) {
                 throw IllegalStateException("${this.javaClass.simpleName} call counter would overflow")
             }
-        } while (!this.callCounter.compareAndSet(c, c + 1L))
+        } while (! this.callCounter.compareAndSet(c, c + 1L))
         // Now we can safely do the method call without the handle being freed concurrently.
         try {
             return block(this.uniffiCloneHandle())
@@ -7189,7 +7111,7 @@ open class FfiException :
         override fun run() {
             if (handle == 0.toLong()) {
                 // Fake object created with `NoHandle`, don't try to free.
-                return
+                return;
             }
             uniffiRustCall { status ->
                 UniffiLib.uniffi_daybook_ffi_fn_free_ffierror(handle, status)
@@ -7202,24 +7124,33 @@ open class FfiException :
      */
     fun uniffiCloneHandle(): Long {
         if (handle == 0.toLong()) {
-            throw InternalException("uniffiCloneHandle() called on NoHandle object")
+            throw InternalException("uniffiCloneHandle() called on NoHandle object");
         }
-        return uniffiRustCall { status ->
+        return uniffiRustCall() { status ->
             UniffiLib.uniffi_daybook_ffi_fn_clone_ffierror(handle, status)
         }
     }
 
-    override fun `message`(): kotlin.String = FfiConverterString.lift(
-        callWithHandle {
-            uniffiRustCall { _status ->
-                UniffiLib.uniffi_daybook_ffi_fn_method_ffierror_message(
-                    it,
-                    _status,
-                )
-            }
-        },
+    override fun `message`(): kotlin.String {
+            return FfiConverterString.lift(
+    callWithHandle {
+    uniffiRustCall() { _status ->
+    UniffiLib.uniffi_daybook_ffi_fn_method_ffierror_message(
+        it,
+        _status)
+}
+    }
     )
+    }
+    
 
+    
+
+    
+
+
+    
+    
     companion object ErrorHandler : UniffiRustCallStatusErrorHandler<FfiException> {
         override fun lift(error_buf: RustBuffer.ByValue): FfiException {
             // Due to some mismatches in the ffi converter mechanisms, errors are a RustBuffer.
@@ -7230,17 +7161,25 @@ open class FfiException :
             return FfiConverterTypeFfiError.read(bb)
         }
     }
+    
 }
+
 
 /**
  * @suppress
  */
-public object FfiConverterTypeFfiError : FfiConverter<FfiException, Long> {
-    override fun lower(value: FfiException): Long = value.uniffiCloneHandle()
+public object FfiConverterTypeFfiError: FfiConverter<FfiException, Long> {
+    override fun lower(value: FfiException): Long {
+        return value.uniffiCloneHandle()
+    }
 
-    override fun lift(value: Long): FfiException = FfiException(UniffiWithHandle, value)
+    override fun lift(value: Long): FfiException {
+        return FfiException(UniffiWithHandle, value)
+    }
 
-    override fun read(buf: ByteBuffer): FfiException = lift(buf.getLong())
+    override fun read(buf: ByteBuffer): FfiException {
+        return lift(buf.getLong())
+    }
 
     override fun allocationSize(value: FfiException) = 8UL
 
@@ -7248,6 +7187,7 @@ public object FfiConverterTypeFfiError : FfiConverter<FfiException, Long> {
         buf.putLong(lower(value))
     }
 }
+
 
 // This template implements a class for working with a Rust struct via a handle
 // to the live Rust struct on the other side of the FFI.
@@ -7343,22 +7283,21 @@ public object FfiConverterTypeFfiError : FfiConverter<FfiException, Long> {
 // [1] https://stackoverflow.com/questions/24376768/can-java-finalize-an-object-when-it-is-still-in-scope/24380219
 //
 
+
 public interface InitEventListener {
-
+    
     fun `onInitEvent`(`event`: InitEvent)
-
+    
     companion object
 }
 
-open class InitEventListenerImpl :
-    Disposable,
-    AutoCloseable,
-    InitEventListener {
+open class InitEventListenerImpl: Disposable, AutoCloseable, InitEventListener
+{
 
+    @Suppress("UNUSED_PARAMETER")
     /**
      * @suppress
      */
-    @Suppress("UNUSED_PARAMETER")
     constructor(withHandle: UniffiWithHandle, handle: Long) {
         this.handle = handle
         this.cleanable = UniffiLib.CLEANER.register(this, UniffiCleanAction(handle))
@@ -7410,7 +7349,7 @@ open class InitEventListenerImpl :
             if (c == Long.MAX_VALUE) {
                 throw IllegalStateException("${this.javaClass.simpleName} call counter would overflow")
             }
-        } while (!this.callCounter.compareAndSet(c, c + 1L))
+        } while (! this.callCounter.compareAndSet(c, c + 1L))
         // Now we can safely do the method call without the handle being freed concurrently.
         try {
             return block(this.uniffiCloneHandle())
@@ -7428,7 +7367,7 @@ open class InitEventListenerImpl :
         override fun run() {
             if (handle == 0.toLong()) {
                 // Fake object created with `NoHandle`, don't try to free.
-                return
+                return;
             }
             uniffiRustCall { status ->
                 UniffiLib.uniffi_daybook_ffi_fn_free_initeventlistener(handle, status)
@@ -7441,40 +7380,47 @@ open class InitEventListenerImpl :
      */
     fun uniffiCloneHandle(): Long {
         if (handle == 0.toLong()) {
-            throw InternalException("uniffiCloneHandle() called on NoHandle object")
+            throw InternalException("uniffiCloneHandle() called on NoHandle object");
         }
-        return uniffiRustCall { status ->
+        return uniffiRustCall() { status ->
             UniffiLib.uniffi_daybook_ffi_fn_clone_initeventlistener(handle, status)
         }
     }
 
-    override fun `onInitEvent`(`event`: InitEvent) = callWithHandle {
-        uniffiRustCall { _status ->
-            UniffiLib.uniffi_daybook_ffi_fn_method_initeventlistener_on_init_event(
-                it,
-                FfiConverterTypeInitEvent.lower(`event`),
-                _status,
-            )
-        }
+    override fun `onInitEvent`(`event`: InitEvent)
+        = 
+    callWithHandle {
+    uniffiRustCall() { _status ->
+    UniffiLib.uniffi_daybook_ffi_fn_method_initeventlistener_on_init_event(
+        it,
+        FfiConverterTypeInitEvent.lower(`event`),_status)
+}
     }
+    
+    
 
+    
+
+    
+
+
+    
+    
     /**
      * @suppress
      */
     companion object
+    
 }
+
+
 
 // Put the implementation in an object so we don't pollute the top-level namespace
 internal object uniffiCallbackInterfaceInitEventListener {
-    internal object `onInitEvent` : UniffiCallbackInterfaceInitEventListenerMethod0 {
-        override fun callback(
-            `uniffiHandle`: Long,
-            `event`: RustBufferInitEvent.ByValue,
-            `uniffiOutReturn`: Pointer,
-            uniffiCallStatus: UniffiRustCallStatus,
-        ) {
+    internal object `onInitEvent`: UniffiCallbackInterfaceInitEventListenerMethod0 {
+        override fun callback(`uniffiHandle`: Long,`event`: RustBufferInitEvent.ByValue,`uniffiOutReturn`: Pointer,uniffiCallStatus: UniffiRustCallStatus,) {
             val uniffiObj = FfiConverterTypeInitEventListener.handleMap.get(uniffiHandle)
-            val makeCall = {
+            val makeCall = { ->
                 uniffiObj.`onInitEvent`(
                     FfiConverterTypeInitEvent.lift(`event`),
                 )
@@ -7484,14 +7430,16 @@ internal object uniffiCallbackInterfaceInitEventListener {
         }
     }
 
-    internal object uniffiFree : UniffiCallbackInterfaceFree {
+    internal object uniffiFree: UniffiCallbackInterfaceFree {
         override fun callback(handle: Long) {
             FfiConverterTypeInitEventListener.handleMap.remove(handle)
         }
     }
 
-    internal object uniffiClone : UniffiCallbackInterfaceClone {
-        override fun callback(handle: Long): Long = FfiConverterTypeInitEventListener.handleMap.clone(handle)
+    internal object uniffiClone: UniffiCallbackInterfaceClone {
+        override fun callback(handle: Long): Long {
+            return FfiConverterTypeInitEventListener.handleMap.clone(handle)
+        }
     }
 
     internal var vtable = UniffiVTableCallbackInterfaceInitEventListener.UniffiByValue(
@@ -7510,17 +7458,17 @@ internal object uniffiCallbackInterfaceInitEventListener {
 /**
  * @suppress
  */
-public object FfiConverterTypeInitEventListener : FfiConverter<InitEventListener, Long> {
+public object FfiConverterTypeInitEventListener: FfiConverter<InitEventListener, Long> {
     internal val handleMap = UniffiHandleMap<InitEventListener>()
 
     override fun lower(value: InitEventListener): Long {
         if (value is InitEventListenerImpl) {
-            // Rust-implemented object.  Clone the handle and return it
+             // Rust-implemented object.  Clone the handle and return it
             return value.uniffiCloneHandle()
-        } else {
+         } else {
             // Kotlin object, generate a new vtable handle and return that.
             return handleMap.insert(value)
-        }
+         }
     }
 
     override fun lift(value: Long): InitEventListener {
@@ -7534,7 +7482,9 @@ public object FfiConverterTypeInitEventListener : FfiConverter<InitEventListener
         }
     }
 
-    override fun read(buf: ByteBuffer): InitEventListener = lift(buf.getLong())
+    override fun read(buf: ByteBuffer): InitEventListener {
+        return lift(buf.getLong())
+    }
 
     override fun allocationSize(value: InitEventListener) = 8UL
 
@@ -7542,6 +7492,7 @@ public object FfiConverterTypeInitEventListener : FfiConverter<InitEventListener
         buf.putLong(lower(value))
     }
 }
+
 
 // This template implements a class for working with a Rust struct via a handle
 // to the live Rust struct on the other side of the FFI.
@@ -7637,24 +7588,23 @@ public object FfiConverterTypeInitEventListener : FfiConverter<InitEventListener
 // [1] https://stackoverflow.com/questions/24376768/can-java-finalize-an-object-when-it-is-still-in-scope/24380219
 //
 
+
 public interface InitRepoFfiInterface {
-
+    
     fun `ffiRegisterListener`(`listener`: InitEventListener): ListenerRegistration
-
+    
     suspend fun `stop`()
-
+    
     companion object
 }
 
-open class InitRepoFfi :
-    Disposable,
-    AutoCloseable,
-    InitRepoFfiInterface {
+open class InitRepoFfi: Disposable, AutoCloseable, InitRepoFfiInterface
+{
 
+    @Suppress("UNUSED_PARAMETER")
     /**
      * @suppress
      */
-    @Suppress("UNUSED_PARAMETER")
     constructor(withHandle: UniffiWithHandle, handle: Long) {
         this.handle = handle
         this.cleanable = UniffiLib.CLEANER.register(this, UniffiCleanAction(handle))
@@ -7706,7 +7656,7 @@ open class InitRepoFfi :
             if (c == Long.MAX_VALUE) {
                 throw IllegalStateException("${this.javaClass.simpleName} call counter would overflow")
             }
-        } while (!this.callCounter.compareAndSet(c, c + 1L))
+        } while (! this.callCounter.compareAndSet(c, c + 1L))
         // Now we can safely do the method call without the handle being freed concurrently.
         try {
             return block(this.uniffiCloneHandle())
@@ -7724,7 +7674,7 @@ open class InitRepoFfi :
         override fun run() {
             if (handle == 0.toLong()) {
                 // Fake object created with `NoHandle`, don't try to free.
-                return
+                return;
             }
             uniffiRustCall { status ->
                 UniffiLib.uniffi_daybook_ffi_fn_free_initrepoffi(handle, status)
@@ -7737,86 +7687,92 @@ open class InitRepoFfi :
      */
     fun uniffiCloneHandle(): Long {
         if (handle == 0.toLong()) {
-            throw InternalException("uniffiCloneHandle() called on NoHandle object")
+            throw InternalException("uniffiCloneHandle() called on NoHandle object");
         }
-        return uniffiRustCall { status ->
+        return uniffiRustCall() { status ->
             UniffiLib.uniffi_daybook_ffi_fn_clone_initrepoffi(handle, status)
         }
     }
 
-    override fun `ffiRegisterListener`(`listener`: InitEventListener): ListenerRegistration =
-        FfiConverterTypeListenerRegistration.lift(
-            callWithHandle {
-                uniffiRustCall { _status ->
-                    UniffiLib.uniffi_daybook_ffi_fn_method_initrepoffi_ffi_register_listener(
-                        it,
-                        FfiConverterTypeInitEventListener.lower(`listener`),
-                        _status,
-                    )
-                }
-            },
-        )
+    override fun `ffiRegisterListener`(`listener`: InitEventListener): ListenerRegistration {
+            return FfiConverterTypeListenerRegistration.lift(
+    callWithHandle {
+    uniffiRustCall() { _status ->
+    UniffiLib.uniffi_daybook_ffi_fn_method_initrepoffi_ffi_register_listener(
+        it,
+        FfiConverterTypeInitEventListener.lower(`listener`),_status)
+}
+    }
+    )
+    }
+    
 
+    
     @Throws(FfiException::class)
     @Suppress("ASSIGNED_BUT_NEVER_ACCESSED_VARIABLE")
-    override suspend fun `stop`() = uniffiRustCallAsync(
+    override suspend fun `stop`() {
+        return uniffiRustCallAsync(
         callWithHandle { uniffiHandle ->
             UniffiLib.uniffi_daybook_ffi_fn_method_initrepoffi_stop(
                 uniffiHandle,
-
+                
             )
         },
-        { future, callback, continuation ->
-            UniffiLib.ffi_daybook_ffi_rust_future_poll_void(
-                future,
-                callback,
-                continuation,
-            )
-        },
+        { future, callback, continuation -> UniffiLib.ffi_daybook_ffi_rust_future_poll_void(future, callback, continuation) },
         { future, continuation -> UniffiLib.ffi_daybook_ffi_rust_future_complete_void(future, continuation) },
         { future -> UniffiLib.ffi_daybook_ffi_rust_future_free_void(future) },
         // lift function
         { Unit },
-
+        
         // Error FFI converter
         FfiException.ErrorHandler,
     )
-
-    companion object {
-
-        @Throws(FfiException::class)
-        @Suppress("ASSIGNED_BUT_NEVER_ACCESSED_VARIABLE")
-        suspend fun `load`(`fcx`: FfiCtx, `progressRepo`: ProgressRepoFfi): InitRepoFfi = uniffiRustCallAsync(
-            UniffiLib.uniffi_daybook_ffi_fn_constructor_initrepoffi_load(
-                FfiConverterTypeFfiCtx.lower(`fcx`),
-                FfiConverterTypeProgressRepoFfi.lower(`progressRepo`),
-            ),
-            { future, callback, continuation ->
-                UniffiLib.ffi_daybook_ffi_rust_future_poll_u64(
-                    future,
-                    callback,
-                    continuation,
-                )
-            },
-            { future, continuation -> UniffiLib.ffi_daybook_ffi_rust_future_complete_u64(future, continuation) },
-            { future -> UniffiLib.ffi_daybook_ffi_rust_future_free_u64(future) },
-            // lift function
-            { FfiConverterTypeInitRepoFfi.lift(it) },
-            // Error FFI converter
-            FfiException.ErrorHandler,
-        )
     }
+
+    
+
+    
+
+
+    
+    companion object {
+        
+    @Throws(FfiException::class)
+    @Suppress("ASSIGNED_BUT_NEVER_ACCESSED_VARIABLE")
+     suspend fun `load`(`fcx`: FfiCtx, `progressRepo`: ProgressRepoFfi) : InitRepoFfi {
+        return uniffiRustCallAsync(
+        UniffiLib.uniffi_daybook_ffi_fn_constructor_initrepoffi_load(FfiConverterTypeFfiCtx.lower(`fcx`),FfiConverterTypeProgressRepoFfi.lower(`progressRepo`),),
+        { future, callback, continuation -> UniffiLib.ffi_daybook_ffi_rust_future_poll_u64(future, callback, continuation) },
+        { future, continuation -> UniffiLib.ffi_daybook_ffi_rust_future_complete_u64(future, continuation) },
+        { future -> UniffiLib.ffi_daybook_ffi_rust_future_free_u64(future) },
+        // lift function
+        { FfiConverterTypeInitRepoFfi.lift(it) },
+        // Error FFI converter
+        FfiException.ErrorHandler,
+    )
+    }
+
+        
+    }
+    
 }
+
 
 /**
  * @suppress
  */
-public object FfiConverterTypeInitRepoFfi : FfiConverter<InitRepoFfi, Long> {
-    override fun lower(value: InitRepoFfi): Long = value.uniffiCloneHandle()
+public object FfiConverterTypeInitRepoFfi: FfiConverter<InitRepoFfi, Long> {
+    override fun lower(value: InitRepoFfi): Long {
+        return value.uniffiCloneHandle()
+    }
 
-    override fun lift(value: Long): InitRepoFfi = InitRepoFfi(UniffiWithHandle, value)
+    override fun lift(value: Long): InitRepoFfi {
+        return InitRepoFfi(UniffiWithHandle, value)
+    }
 
-    override fun read(buf: ByteBuffer): InitRepoFfi = lift(buf.getLong())
+    override fun read(buf: ByteBuffer): InitRepoFfi {
+        return lift(buf.getLong())
+    }
 
     override fun allocationSize(value: InitRepoFfi) = 8UL
 
@@ -7824,6 +7780,7 @@ public object FfiConverterTypeInitRepoFfi : FfiConverter<InitRepoFfi, Long> {
         buf.putLong(lower(value))
     }
 }
+
 
 // This template implements a class for working with a Rust struct via a handle
 // to the live Rust struct on the other side of the FFI.
@@ -7919,22 +7876,21 @@ public object FfiConverterTypeInitRepoFfi : FfiConverter<InitRepoFfi, Long> {
 // [1] https://stackoverflow.com/questions/24376768/can-java-finalize-an-object-when-it-is-still-in-scope/24380219
 //
 
+
 public interface LocalStateEventListener {
-
+    
     fun `onLocalStateEvent`(`event`: LocalStateEvent)
-
+    
     companion object
 }
 
-open class LocalStateEventListenerImpl :
-    Disposable,
-    AutoCloseable,
-    LocalStateEventListener {
+open class LocalStateEventListenerImpl: Disposable, AutoCloseable, LocalStateEventListener
+{
 
+    @Suppress("UNUSED_PARAMETER")
     /**
      * @suppress
      */
-    @Suppress("UNUSED_PARAMETER")
     constructor(withHandle: UniffiWithHandle, handle: Long) {
         this.handle = handle
         this.cleanable = UniffiLib.CLEANER.register(this, UniffiCleanAction(handle))
@@ -7986,7 +7942,7 @@ open class LocalStateEventListenerImpl :
             if (c == Long.MAX_VALUE) {
                 throw IllegalStateException("${this.javaClass.simpleName} call counter would overflow")
             }
-        } while (!this.callCounter.compareAndSet(c, c + 1L))
+        } while (! this.callCounter.compareAndSet(c, c + 1L))
         // Now we can safely do the method call without the handle being freed concurrently.
         try {
             return block(this.uniffiCloneHandle())
@@ -8004,7 +7960,7 @@ open class LocalStateEventListenerImpl :
         override fun run() {
             if (handle == 0.toLong()) {
                 // Fake object created with `NoHandle`, don't try to free.
-                return
+                return;
             }
             uniffiRustCall { status ->
                 UniffiLib.uniffi_daybook_ffi_fn_free_localstateeventlistener(handle, status)
@@ -8017,40 +7973,47 @@ open class LocalStateEventListenerImpl :
      */
     fun uniffiCloneHandle(): Long {
         if (handle == 0.toLong()) {
-            throw InternalException("uniffiCloneHandle() called on NoHandle object")
+            throw InternalException("uniffiCloneHandle() called on NoHandle object");
         }
-        return uniffiRustCall { status ->
+        return uniffiRustCall() { status ->
             UniffiLib.uniffi_daybook_ffi_fn_clone_localstateeventlistener(handle, status)
         }
     }
 
-    override fun `onLocalStateEvent`(`event`: LocalStateEvent) = callWithHandle {
-        uniffiRustCall { _status ->
-            UniffiLib.uniffi_daybook_ffi_fn_method_localstateeventlistener_on_local_state_event(
-                it,
-                FfiConverterTypeLocalStateEvent.lower(`event`),
-                _status,
-            )
-        }
+    override fun `onLocalStateEvent`(`event`: LocalStateEvent)
+        = 
+    callWithHandle {
+    uniffiRustCall() { _status ->
+    UniffiLib.uniffi_daybook_ffi_fn_method_localstateeventlistener_on_local_state_event(
+        it,
+        FfiConverterTypeLocalStateEvent.lower(`event`),_status)
+}
     }
+    
+    
 
+    
+
+    
+
+
+    
+    
     /**
      * @suppress
      */
     companion object
+    
 }
+
+
 
 // Put the implementation in an object so we don't pollute the top-level namespace
 internal object uniffiCallbackInterfaceLocalStateEventListener {
-    internal object `onLocalStateEvent` : UniffiCallbackInterfaceLocalStateEventListenerMethod0 {
-        override fun callback(
-            `uniffiHandle`: Long,
-            `event`: RustBufferLocalStateEvent.ByValue,
-            `uniffiOutReturn`: Pointer,
-            uniffiCallStatus: UniffiRustCallStatus,
-        ) {
+    internal object `onLocalStateEvent`: UniffiCallbackInterfaceLocalStateEventListenerMethod0 {
+        override fun callback(`uniffiHandle`: Long,`event`: RustBufferLocalStateEvent.ByValue,`uniffiOutReturn`: Pointer,uniffiCallStatus: UniffiRustCallStatus,) {
             val uniffiObj = FfiConverterTypeLocalStateEventListener.handleMap.get(uniffiHandle)
-            val makeCall = {
+            val makeCall = { ->
                 uniffiObj.`onLocalStateEvent`(
                     FfiConverterTypeLocalStateEvent.lift(`event`),
                 )
@@ -8060,14 +8023,16 @@ internal object uniffiCallbackInterfaceLocalStateEventListener {
         }
     }
 
-    internal object uniffiFree : UniffiCallbackInterfaceFree {
+    internal object uniffiFree: UniffiCallbackInterfaceFree {
         override fun callback(handle: Long) {
             FfiConverterTypeLocalStateEventListener.handleMap.remove(handle)
         }
     }
 
-    internal object uniffiClone : UniffiCallbackInterfaceClone {
-        override fun callback(handle: Long): Long = FfiConverterTypeLocalStateEventListener.handleMap.clone(handle)
+    internal object uniffiClone: UniffiCallbackInterfaceClone {
+        override fun callback(handle: Long): Long {
+            return FfiConverterTypeLocalStateEventListener.handleMap.clone(handle)
+        }
     }
 
     internal var vtable = UniffiVTableCallbackInterfaceLocalStateEventListener.UniffiByValue(
@@ -8086,17 +8051,17 @@ internal object uniffiCallbackInterfaceLocalStateEventListener {
 /**
  * @suppress
  */
-public object FfiConverterTypeLocalStateEventListener : FfiConverter<LocalStateEventListener, Long> {
+public object FfiConverterTypeLocalStateEventListener: FfiConverter<LocalStateEventListener, Long> {
     internal val handleMap = UniffiHandleMap<LocalStateEventListener>()
 
     override fun lower(value: LocalStateEventListener): Long {
         if (value is LocalStateEventListenerImpl) {
-            // Rust-implemented object.  Clone the handle and return it
+             // Rust-implemented object.  Clone the handle and return it
             return value.uniffiCloneHandle()
-        } else {
+         } else {
             // Kotlin object, generate a new vtable handle and return that.
             return handleMap.insert(value)
-        }
+         }
     }
 
     override fun lift(value: Long): LocalStateEventListener {
@@ -8110,7 +8075,9 @@ public object FfiConverterTypeLocalStateEventListener : FfiConverter<LocalStateE
         }
     }
 
-    override fun read(buf: ByteBuffer): LocalStateEventListener = lift(buf.getLong())
+    override fun read(buf: ByteBuffer): LocalStateEventListener {
+        return lift(buf.getLong())
+    }
 
     override fun allocationSize(value: LocalStateEventListener) = 8UL
 
@@ -8118,6 +8085,7 @@ public object FfiConverterTypeLocalStateEventListener : FfiConverter<LocalStateE
         buf.putLong(lower(value))
     }
 }
+
 
 // This template implements a class for working with a Rust struct via a handle
 // to the live Rust struct on the other side of the FFI.
@@ -8213,22 +8181,21 @@ public object FfiConverterTypeLocalStateEventListener : FfiConverter<LocalStateE
 // [1] https://stackoverflow.com/questions/24376768/can-java-finalize-an-object-when-it-is-still-in-scope/24380219
 //
 
+
 public interface PlugsEventListener {
-
+    
     fun `onPlugsEvent`(`event`: PlugsEvent)
-
+    
     companion object
 }
 
-open class PlugsEventListenerImpl :
-    Disposable,
-    AutoCloseable,
-    PlugsEventListener {
+open class PlugsEventListenerImpl: Disposable, AutoCloseable, PlugsEventListener
+{
 
+    @Suppress("UNUSED_PARAMETER")
     /**
      * @suppress
      */
-    @Suppress("UNUSED_PARAMETER")
     constructor(withHandle: UniffiWithHandle, handle: Long) {
         this.handle = handle
         this.cleanable = UniffiLib.CLEANER.register(this, UniffiCleanAction(handle))
@@ -8280,7 +8247,7 @@ open class PlugsEventListenerImpl :
             if (c == Long.MAX_VALUE) {
                 throw IllegalStateException("${this.javaClass.simpleName} call counter would overflow")
             }
-        } while (!this.callCounter.compareAndSet(c, c + 1L))
+        } while (! this.callCounter.compareAndSet(c, c + 1L))
         // Now we can safely do the method call without the handle being freed concurrently.
         try {
             return block(this.uniffiCloneHandle())
@@ -8298,7 +8265,7 @@ open class PlugsEventListenerImpl :
         override fun run() {
             if (handle == 0.toLong()) {
                 // Fake object created with `NoHandle`, don't try to free.
-                return
+                return;
             }
             uniffiRustCall { status ->
                 UniffiLib.uniffi_daybook_ffi_fn_free_plugseventlistener(handle, status)
@@ -8311,40 +8278,47 @@ open class PlugsEventListenerImpl :
      */
     fun uniffiCloneHandle(): Long {
         if (handle == 0.toLong()) {
-            throw InternalException("uniffiCloneHandle() called on NoHandle object")
+            throw InternalException("uniffiCloneHandle() called on NoHandle object");
         }
-        return uniffiRustCall { status ->
+        return uniffiRustCall() { status ->
             UniffiLib.uniffi_daybook_ffi_fn_clone_plugseventlistener(handle, status)
         }
     }
 
-    override fun `onPlugsEvent`(`event`: PlugsEvent) = callWithHandle {
-        uniffiRustCall { _status ->
-            UniffiLib.uniffi_daybook_ffi_fn_method_plugseventlistener_on_plugs_event(
-                it,
-                FfiConverterTypePlugsEvent.lower(`event`),
-                _status,
-            )
-        }
+    override fun `onPlugsEvent`(`event`: PlugsEvent)
+        = 
+    callWithHandle {
+    uniffiRustCall() { _status ->
+    UniffiLib.uniffi_daybook_ffi_fn_method_plugseventlistener_on_plugs_event(
+        it,
+        FfiConverterTypePlugsEvent.lower(`event`),_status)
+}
     }
+    
+    
 
+    
+
+    
+
+
+    
+    
     /**
      * @suppress
      */
     companion object
+    
 }
+
+
 
 // Put the implementation in an object so we don't pollute the top-level namespace
 internal object uniffiCallbackInterfacePlugsEventListener {
-    internal object `onPlugsEvent` : UniffiCallbackInterfacePlugsEventListenerMethod0 {
-        override fun callback(
-            `uniffiHandle`: Long,
-            `event`: RustBufferPlugsEvent.ByValue,
-            `uniffiOutReturn`: Pointer,
-            uniffiCallStatus: UniffiRustCallStatus,
-        ) {
+    internal object `onPlugsEvent`: UniffiCallbackInterfacePlugsEventListenerMethod0 {
+        override fun callback(`uniffiHandle`: Long,`event`: RustBufferPlugsEvent.ByValue,`uniffiOutReturn`: Pointer,uniffiCallStatus: UniffiRustCallStatus,) {
             val uniffiObj = FfiConverterTypePlugsEventListener.handleMap.get(uniffiHandle)
-            val makeCall = {
+            val makeCall = { ->
                 uniffiObj.`onPlugsEvent`(
                     FfiConverterTypePlugsEvent.lift(`event`),
                 )
@@ -8354,14 +8328,16 @@ internal object uniffiCallbackInterfacePlugsEventListener {
         }
     }
 
-    internal object uniffiFree : UniffiCallbackInterfaceFree {
+    internal object uniffiFree: UniffiCallbackInterfaceFree {
         override fun callback(handle: Long) {
             FfiConverterTypePlugsEventListener.handleMap.remove(handle)
         }
     }
 
-    internal object uniffiClone : UniffiCallbackInterfaceClone {
-        override fun callback(handle: Long): Long = FfiConverterTypePlugsEventListener.handleMap.clone(handle)
+    internal object uniffiClone: UniffiCallbackInterfaceClone {
+        override fun callback(handle: Long): Long {
+            return FfiConverterTypePlugsEventListener.handleMap.clone(handle)
+        }
     }
 
     internal var vtable = UniffiVTableCallbackInterfacePlugsEventListener.UniffiByValue(
@@ -8380,17 +8356,17 @@ internal object uniffiCallbackInterfacePlugsEventListener {
 /**
  * @suppress
  */
-public object FfiConverterTypePlugsEventListener : FfiConverter<PlugsEventListener, Long> {
+public object FfiConverterTypePlugsEventListener: FfiConverter<PlugsEventListener, Long> {
     internal val handleMap = UniffiHandleMap<PlugsEventListener>()
 
     override fun lower(value: PlugsEventListener): Long {
         if (value is PlugsEventListenerImpl) {
-            // Rust-implemented object.  Clone the handle and return it
+             // Rust-implemented object.  Clone the handle and return it
             return value.uniffiCloneHandle()
-        } else {
+         } else {
             // Kotlin object, generate a new vtable handle and return that.
             return handleMap.insert(value)
-        }
+         }
     }
 
     override fun lift(value: Long): PlugsEventListener {
@@ -8404,7 +8380,9 @@ public object FfiConverterTypePlugsEventListener : FfiConverter<PlugsEventListen
         }
     }
 
-    override fun read(buf: ByteBuffer): PlugsEventListener = lift(buf.getLong())
+    override fun read(buf: ByteBuffer): PlugsEventListener {
+        return lift(buf.getLong())
+    }
 
     override fun allocationSize(value: PlugsEventListener) = 8UL
 
@@ -8412,6 +8390,7 @@ public object FfiConverterTypePlugsEventListener : FfiConverter<PlugsEventListen
         buf.putLong(lower(value))
     }
 }
+
 
 // This template implements a class for working with a Rust struct via a handle
 // to the live Rust struct on the other side of the FFI.
@@ -8507,24 +8486,23 @@ public object FfiConverterTypePlugsEventListener : FfiConverter<PlugsEventListen
 // [1] https://stackoverflow.com/questions/24376768/can-java-finalize-an-object-when-it-is-still-in-scope/24380219
 //
 
+
 public interface PlugsRepoFfiInterface {
-
+    
     fun `ffiRegisterListener`(`listener`: PlugsEventListener): ListenerRegistration
-
+    
     suspend fun `stop`()
-
+    
     companion object
 }
 
-open class PlugsRepoFfi :
-    Disposable,
-    AutoCloseable,
-    PlugsRepoFfiInterface {
+open class PlugsRepoFfi: Disposable, AutoCloseable, PlugsRepoFfiInterface
+{
 
+    @Suppress("UNUSED_PARAMETER")
     /**
      * @suppress
      */
-    @Suppress("UNUSED_PARAMETER")
     constructor(withHandle: UniffiWithHandle, handle: Long) {
         this.handle = handle
         this.cleanable = UniffiLib.CLEANER.register(this, UniffiCleanAction(handle))
@@ -8576,7 +8554,7 @@ open class PlugsRepoFfi :
             if (c == Long.MAX_VALUE) {
                 throw IllegalStateException("${this.javaClass.simpleName} call counter would overflow")
             }
-        } while (!this.callCounter.compareAndSet(c, c + 1L))
+        } while (! this.callCounter.compareAndSet(c, c + 1L))
         // Now we can safely do the method call without the handle being freed concurrently.
         try {
             return block(this.uniffiCloneHandle())
@@ -8594,7 +8572,7 @@ open class PlugsRepoFfi :
         override fun run() {
             if (handle == 0.toLong()) {
                 // Fake object created with `NoHandle`, don't try to free.
-                return
+                return;
             }
             uniffiRustCall { status ->
                 UniffiLib.uniffi_daybook_ffi_fn_free_plugsrepoffi(handle, status)
@@ -8607,86 +8585,92 @@ open class PlugsRepoFfi :
      */
     fun uniffiCloneHandle(): Long {
         if (handle == 0.toLong()) {
-            throw InternalException("uniffiCloneHandle() called on NoHandle object")
+            throw InternalException("uniffiCloneHandle() called on NoHandle object");
         }
-        return uniffiRustCall { status ->
+        return uniffiRustCall() { status ->
             UniffiLib.uniffi_daybook_ffi_fn_clone_plugsrepoffi(handle, status)
         }
     }
 
-    override fun `ffiRegisterListener`(`listener`: PlugsEventListener): ListenerRegistration =
-        FfiConverterTypeListenerRegistration.lift(
-            callWithHandle {
-                uniffiRustCall { _status ->
-                    UniffiLib.uniffi_daybook_ffi_fn_method_plugsrepoffi_ffi_register_listener(
-                        it,
-                        FfiConverterTypePlugsEventListener.lower(`listener`),
-                        _status,
-                    )
-                }
-            },
-        )
+    override fun `ffiRegisterListener`(`listener`: PlugsEventListener): ListenerRegistration {
+            return FfiConverterTypeListenerRegistration.lift(
+    callWithHandle {
+    uniffiRustCall() { _status ->
+    UniffiLib.uniffi_daybook_ffi_fn_method_plugsrepoffi_ffi_register_listener(
+        it,
+        FfiConverterTypePlugsEventListener.lower(`listener`),_status)
+}
+    }
+    )
+    }
+    
 
+    
     @Throws(FfiException::class)
     @Suppress("ASSIGNED_BUT_NEVER_ACCESSED_VARIABLE")
-    override suspend fun `stop`() = uniffiRustCallAsync(
+    override suspend fun `stop`() {
+        return uniffiRustCallAsync(
         callWithHandle { uniffiHandle ->
             UniffiLib.uniffi_daybook_ffi_fn_method_plugsrepoffi_stop(
                 uniffiHandle,
-
+                
             )
         },
-        { future, callback, continuation ->
-            UniffiLib.ffi_daybook_ffi_rust_future_poll_void(
-                future,
-                callback,
-                continuation,
-            )
-        },
+        { future, callback, continuation -> UniffiLib.ffi_daybook_ffi_rust_future_poll_void(future, callback, continuation) },
         { future, continuation -> UniffiLib.ffi_daybook_ffi_rust_future_complete_void(future, continuation) },
         { future -> UniffiLib.ffi_daybook_ffi_rust_future_free_void(future) },
         // lift function
         { Unit },
-
+        
         // Error FFI converter
         FfiException.ErrorHandler,
     )
-
-    companion object {
-
-        @Throws(FfiException::class)
-        @Suppress("ASSIGNED_BUT_NEVER_ACCESSED_VARIABLE")
-        suspend fun `load`(`fcx`: FfiCtx, `blobsRepo`: BlobsRepoFfi): PlugsRepoFfi = uniffiRustCallAsync(
-            UniffiLib.uniffi_daybook_ffi_fn_constructor_plugsrepoffi_load(
-                FfiConverterTypeFfiCtx.lower(`fcx`),
-                FfiConverterTypeBlobsRepoFfi.lower(`blobsRepo`),
-            ),
-            { future, callback, continuation ->
-                UniffiLib.ffi_daybook_ffi_rust_future_poll_u64(
-                    future,
-                    callback,
-                    continuation,
-                )
-            },
-            { future, continuation -> UniffiLib.ffi_daybook_ffi_rust_future_complete_u64(future, continuation) },
-            { future -> UniffiLib.ffi_daybook_ffi_rust_future_free_u64(future) },
-            // lift function
-            { FfiConverterTypePlugsRepoFfi.lift(it) },
-            // Error FFI converter
-            FfiException.ErrorHandler,
-        )
     }
+
+    
+
+    
+
+
+    
+    companion object {
+        
+    @Throws(FfiException::class)
+    @Suppress("ASSIGNED_BUT_NEVER_ACCESSED_VARIABLE")
+     suspend fun `load`(`fcx`: FfiCtx, `blobsRepo`: BlobsRepoFfi) : PlugsRepoFfi {
+        return uniffiRustCallAsync(
+        UniffiLib.uniffi_daybook_ffi_fn_constructor_plugsrepoffi_load(FfiConverterTypeFfiCtx.lower(`fcx`),FfiConverterTypeBlobsRepoFfi.lower(`blobsRepo`),),
+        { future, callback, continuation -> UniffiLib.ffi_daybook_ffi_rust_future_poll_u64(future, callback, continuation) },
+        { future, continuation -> UniffiLib.ffi_daybook_ffi_rust_future_complete_u64(future, continuation) },
+        { future -> UniffiLib.ffi_daybook_ffi_rust_future_free_u64(future) },
+        // lift function
+        { FfiConverterTypePlugsRepoFfi.lift(it) },
+        // Error FFI converter
+        FfiException.ErrorHandler,
+    )
+    }
+
+        
+    }
+    
 }
+
 
 /**
  * @suppress
  */
-public object FfiConverterTypePlugsRepoFfi : FfiConverter<PlugsRepoFfi, Long> {
-    override fun lower(value: PlugsRepoFfi): Long = value.uniffiCloneHandle()
+public object FfiConverterTypePlugsRepoFfi: FfiConverter<PlugsRepoFfi, Long> {
+    override fun lower(value: PlugsRepoFfi): Long {
+        return value.uniffiCloneHandle()
+    }
 
-    override fun lift(value: Long): PlugsRepoFfi = PlugsRepoFfi(UniffiWithHandle, value)
+    override fun lift(value: Long): PlugsRepoFfi {
+        return PlugsRepoFfi(UniffiWithHandle, value)
+    }
 
-    override fun read(buf: ByteBuffer): PlugsRepoFfi = lift(buf.getLong())
+    override fun read(buf: ByteBuffer): PlugsRepoFfi {
+        return lift(buf.getLong())
+    }
 
     override fun allocationSize(value: PlugsRepoFfi) = 8UL
 
@@ -8694,6 +8678,7 @@ public object FfiConverterTypePlugsRepoFfi : FfiConverter<PlugsRepoFfi, Long> {
         buf.putLong(lower(value))
     }
 }
+
 
 // This template implements a class for working with a Rust struct via a handle
 // to the live Rust struct on the other side of the FFI.
@@ -8789,22 +8774,21 @@ public object FfiConverterTypePlugsRepoFfi : FfiConverter<PlugsRepoFfi, Long> {
 // [1] https://stackoverflow.com/questions/24376768/can-java-finalize-an-object-when-it-is-still-in-scope/24380219
 //
 
+
 public interface ProgressEventListener {
-
+    
     fun `onProgressEvent`(`event`: ProgressEvent)
-
+    
     companion object
 }
 
-open class ProgressEventListenerImpl :
-    Disposable,
-    AutoCloseable,
-    ProgressEventListener {
+open class ProgressEventListenerImpl: Disposable, AutoCloseable, ProgressEventListener
+{
 
+    @Suppress("UNUSED_PARAMETER")
     /**
      * @suppress
      */
-    @Suppress("UNUSED_PARAMETER")
     constructor(withHandle: UniffiWithHandle, handle: Long) {
         this.handle = handle
         this.cleanable = UniffiLib.CLEANER.register(this, UniffiCleanAction(handle))
@@ -8856,7 +8840,7 @@ open class ProgressEventListenerImpl :
             if (c == Long.MAX_VALUE) {
                 throw IllegalStateException("${this.javaClass.simpleName} call counter would overflow")
             }
-        } while (!this.callCounter.compareAndSet(c, c + 1L))
+        } while (! this.callCounter.compareAndSet(c, c + 1L))
         // Now we can safely do the method call without the handle being freed concurrently.
         try {
             return block(this.uniffiCloneHandle())
@@ -8874,7 +8858,7 @@ open class ProgressEventListenerImpl :
         override fun run() {
             if (handle == 0.toLong()) {
                 // Fake object created with `NoHandle`, don't try to free.
-                return
+                return;
             }
             uniffiRustCall { status ->
                 UniffiLib.uniffi_daybook_ffi_fn_free_progresseventlistener(handle, status)
@@ -8887,40 +8871,47 @@ open class ProgressEventListenerImpl :
      */
     fun uniffiCloneHandle(): Long {
         if (handle == 0.toLong()) {
-            throw InternalException("uniffiCloneHandle() called on NoHandle object")
+            throw InternalException("uniffiCloneHandle() called on NoHandle object");
         }
-        return uniffiRustCall { status ->
+        return uniffiRustCall() { status ->
             UniffiLib.uniffi_daybook_ffi_fn_clone_progresseventlistener(handle, status)
         }
     }
 
-    override fun `onProgressEvent`(`event`: ProgressEvent) = callWithHandle {
-        uniffiRustCall { _status ->
-            UniffiLib.uniffi_daybook_ffi_fn_method_progresseventlistener_on_progress_event(
-                it,
-                FfiConverterTypeProgressEvent.lower(`event`),
-                _status,
-            )
-        }
+    override fun `onProgressEvent`(`event`: ProgressEvent)
+        = 
+    callWithHandle {
+    uniffiRustCall() { _status ->
+    UniffiLib.uniffi_daybook_ffi_fn_method_progresseventlistener_on_progress_event(
+        it,
+        FfiConverterTypeProgressEvent.lower(`event`),_status)
+}
     }
+    
+    
 
+    
+
+    
+
+
+    
+    
     /**
      * @suppress
      */
     companion object
+    
 }
+
+
 
 // Put the implementation in an object so we don't pollute the top-level namespace
 internal object uniffiCallbackInterfaceProgressEventListener {
-    internal object `onProgressEvent` : UniffiCallbackInterfaceProgressEventListenerMethod0 {
-        override fun callback(
-            `uniffiHandle`: Long,
-            `event`: RustBufferProgressEvent.ByValue,
-            `uniffiOutReturn`: Pointer,
-            uniffiCallStatus: UniffiRustCallStatus,
-        ) {
+    internal object `onProgressEvent`: UniffiCallbackInterfaceProgressEventListenerMethod0 {
+        override fun callback(`uniffiHandle`: Long,`event`: RustBufferProgressEvent.ByValue,`uniffiOutReturn`: Pointer,uniffiCallStatus: UniffiRustCallStatus,) {
             val uniffiObj = FfiConverterTypeProgressEventListener.handleMap.get(uniffiHandle)
-            val makeCall = {
+            val makeCall = { ->
                 uniffiObj.`onProgressEvent`(
                     FfiConverterTypeProgressEvent.lift(`event`),
                 )
@@ -8930,14 +8921,16 @@ internal object uniffiCallbackInterfaceProgressEventListener {
         }
     }
 
-    internal object uniffiFree : UniffiCallbackInterfaceFree {
+    internal object uniffiFree: UniffiCallbackInterfaceFree {
         override fun callback(handle: Long) {
             FfiConverterTypeProgressEventListener.handleMap.remove(handle)
         }
     }
 
-    internal object uniffiClone : UniffiCallbackInterfaceClone {
-        override fun callback(handle: Long): Long = FfiConverterTypeProgressEventListener.handleMap.clone(handle)
+    internal object uniffiClone: UniffiCallbackInterfaceClone {
+        override fun callback(handle: Long): Long {
+            return FfiConverterTypeProgressEventListener.handleMap.clone(handle)
+        }
     }
 
     internal var vtable = UniffiVTableCallbackInterfaceProgressEventListener.UniffiByValue(
@@ -8956,17 +8949,17 @@ internal object uniffiCallbackInterfaceProgressEventListener {
 /**
  * @suppress
  */
-public object FfiConverterTypeProgressEventListener : FfiConverter<ProgressEventListener, Long> {
+public object FfiConverterTypeProgressEventListener: FfiConverter<ProgressEventListener, Long> {
     internal val handleMap = UniffiHandleMap<ProgressEventListener>()
 
     override fun lower(value: ProgressEventListener): Long {
         if (value is ProgressEventListenerImpl) {
-            // Rust-implemented object.  Clone the handle and return it
+             // Rust-implemented object.  Clone the handle and return it
             return value.uniffiCloneHandle()
-        } else {
+         } else {
             // Kotlin object, generate a new vtable handle and return that.
             return handleMap.insert(value)
-        }
+         }
     }
 
     override fun lift(value: Long): ProgressEventListener {
@@ -8980,7 +8973,9 @@ public object FfiConverterTypeProgressEventListener : FfiConverter<ProgressEvent
         }
     }
 
-    override fun read(buf: ByteBuffer): ProgressEventListener = lift(buf.getLong())
+    override fun read(buf: ByteBuffer): ProgressEventListener {
+        return lift(buf.getLong())
+    }
 
     override fun allocationSize(value: ProgressEventListener) = 8UL
 
@@ -8988,6 +8983,7 @@ public object FfiConverterTypeProgressEventListener : FfiConverter<ProgressEvent
         buf.putLong(lower(value))
     }
 }
+
 
 // This template implements a class for working with a Rust struct via a handle
 // to the live Rust struct on the other side of the FFI.
@@ -9083,44 +9079,43 @@ public object FfiConverterTypeProgressEventListener : FfiConverter<ProgressEvent
 // [1] https://stackoverflow.com/questions/24376768/can-java-finalize-an-object-when-it-is-still-in-scope/24380219
 //
 
+
 public interface ProgressRepoFfiInterface {
-
+    
     suspend fun `addUpdate`(`taskId`: kotlin.String, `update`: ProgressUpdate)
-
+    
     suspend fun `clearCompleted`(): kotlin.ULong
-
+    
     suspend fun `dismiss`(`taskId`: kotlin.String)
-
+    
     fun `ffiRegisterListener`(`listener`: ProgressEventListener): ListenerRegistration
-
+    
     suspend fun `get`(`taskId`: kotlin.String): ProgressTask?
-
+    
     suspend fun `list`(): List<ProgressTask>
-
+    
     suspend fun `listByTagPrefix`(`tagPrefix`: kotlin.String): List<ProgressTask>
-
+    
     suspend fun `listUpdates`(`taskId`: kotlin.String): List<ProgressUpdateEntry>
-
+    
     suspend fun `markViewed`(`taskId`: kotlin.String)
-
+    
     suspend fun `setRetentionOverride`(`taskId`: kotlin.String, `retentionOverride`: ProgressRetentionPolicy?)
-
+    
     suspend fun `stop`()
-
+    
     suspend fun `upsertTask`(`args`: CreateProgressTaskArgs)
-
+    
     companion object
 }
 
-open class ProgressRepoFfi :
-    Disposable,
-    AutoCloseable,
-    ProgressRepoFfiInterface {
+open class ProgressRepoFfi: Disposable, AutoCloseable, ProgressRepoFfiInterface
+{
 
+    @Suppress("UNUSED_PARAMETER")
     /**
      * @suppress
      */
-    @Suppress("UNUSED_PARAMETER")
     constructor(withHandle: UniffiWithHandle, handle: Long) {
         this.handle = handle
         this.cleanable = UniffiLib.CLEANER.register(this, UniffiCleanAction(handle))
@@ -9172,7 +9167,7 @@ open class ProgressRepoFfi :
             if (c == Long.MAX_VALUE) {
                 throw IllegalStateException("${this.javaClass.simpleName} call counter would overflow")
             }
-        } while (!this.callCounter.compareAndSet(c, c + 1L))
+        } while (! this.callCounter.compareAndSet(c, c + 1L))
         // Now we can safely do the method call without the handle being freed concurrently.
         try {
             return block(this.uniffiCloneHandle())
@@ -9190,7 +9185,7 @@ open class ProgressRepoFfi :
         override fun run() {
             if (handle == 0.toLong()) {
                 // Fake object created with `NoHandle`, don't try to free.
-                return
+                return;
             }
             uniffiRustCall { status ->
                 UniffiLib.uniffi_daybook_ffi_fn_free_progressrepoffi(handle, status)
@@ -9203,55 +9198,47 @@ open class ProgressRepoFfi :
      */
     fun uniffiCloneHandle(): Long {
         if (handle == 0.toLong()) {
-            throw InternalException("uniffiCloneHandle() called on NoHandle object")
+            throw InternalException("uniffiCloneHandle() called on NoHandle object");
         }
-        return uniffiRustCall { status ->
+        return uniffiRustCall() { status ->
             UniffiLib.uniffi_daybook_ffi_fn_clone_progressrepoffi(handle, status)
         }
     }
 
+    
     @Throws(FfiException::class)
     @Suppress("ASSIGNED_BUT_NEVER_ACCESSED_VARIABLE")
-    override suspend fun `addUpdate`(`taskId`: kotlin.String, `update`: ProgressUpdate) = uniffiRustCallAsync(
+    override suspend fun `addUpdate`(`taskId`: kotlin.String, `update`: ProgressUpdate) {
+        return uniffiRustCallAsync(
         callWithHandle { uniffiHandle ->
             UniffiLib.uniffi_daybook_ffi_fn_method_progressrepoffi_add_update(
                 uniffiHandle,
-                FfiConverterString.lower(`taskId`),
-                FfiConverterTypeProgressUpdate.lower(`update`),
+                FfiConverterString.lower(`taskId`),FfiConverterTypeProgressUpdate.lower(`update`),
             )
         },
-        { future, callback, continuation ->
-            UniffiLib.ffi_daybook_ffi_rust_future_poll_void(
-                future,
-                callback,
-                continuation,
-            )
-        },
+        { future, callback, continuation -> UniffiLib.ffi_daybook_ffi_rust_future_poll_void(future, callback, continuation) },
         { future, continuation -> UniffiLib.ffi_daybook_ffi_rust_future_complete_void(future, continuation) },
         { future -> UniffiLib.ffi_daybook_ffi_rust_future_free_void(future) },
         // lift function
         { Unit },
-
+        
         // Error FFI converter
         FfiException.ErrorHandler,
     )
+    }
 
+    
     @Throws(FfiException::class)
     @Suppress("ASSIGNED_BUT_NEVER_ACCESSED_VARIABLE")
-    override suspend fun `clearCompleted`(): kotlin.ULong = uniffiRustCallAsync(
+    override suspend fun `clearCompleted`() : kotlin.ULong {
+        return uniffiRustCallAsync(
         callWithHandle { uniffiHandle ->
             UniffiLib.uniffi_daybook_ffi_fn_method_progressrepoffi_clear_completed(
                 uniffiHandle,
-
+                
             )
         },
-        { future, callback, continuation ->
-            UniffiLib.ffi_daybook_ffi_rust_future_poll_u64(
-                future,
-                callback,
-                continuation,
-            )
-        },
+        { future, callback, continuation -> UniffiLib.ffi_daybook_ffi_rust_future_poll_u64(future, callback, continuation) },
         { future, continuation -> UniffiLib.ffi_daybook_ffi_rust_future_complete_u64(future, continuation) },
         { future -> UniffiLib.ffi_daybook_ffi_rust_future_free_u64(future) },
         // lift function
@@ -9259,61 +9246,55 @@ open class ProgressRepoFfi :
         // Error FFI converter
         FfiException.ErrorHandler,
     )
+    }
 
+    
     @Throws(FfiException::class)
     @Suppress("ASSIGNED_BUT_NEVER_ACCESSED_VARIABLE")
-    override suspend fun `dismiss`(`taskId`: kotlin.String) = uniffiRustCallAsync(
+    override suspend fun `dismiss`(`taskId`: kotlin.String) {
+        return uniffiRustCallAsync(
         callWithHandle { uniffiHandle ->
             UniffiLib.uniffi_daybook_ffi_fn_method_progressrepoffi_dismiss(
                 uniffiHandle,
                 FfiConverterString.lower(`taskId`),
             )
         },
-        { future, callback, continuation ->
-            UniffiLib.ffi_daybook_ffi_rust_future_poll_void(
-                future,
-                callback,
-                continuation,
-            )
-        },
+        { future, callback, continuation -> UniffiLib.ffi_daybook_ffi_rust_future_poll_void(future, callback, continuation) },
         { future, continuation -> UniffiLib.ffi_daybook_ffi_rust_future_complete_void(future, continuation) },
         { future -> UniffiLib.ffi_daybook_ffi_rust_future_free_void(future) },
         // lift function
         { Unit },
-
+        
         // Error FFI converter
         FfiException.ErrorHandler,
     )
+    }
 
-    override fun `ffiRegisterListener`(`listener`: ProgressEventListener): ListenerRegistration =
-        FfiConverterTypeListenerRegistration.lift(
-            callWithHandle {
-                uniffiRustCall { _status ->
-                    UniffiLib.uniffi_daybook_ffi_fn_method_progressrepoffi_ffi_register_listener(
-                        it,
-                        FfiConverterTypeProgressEventListener.lower(`listener`),
-                        _status,
-                    )
-                }
-            },
-        )
+    override fun `ffiRegisterListener`(`listener`: ProgressEventListener): ListenerRegistration {
+            return FfiConverterTypeListenerRegistration.lift(
+    callWithHandle {
+    uniffiRustCall() { _status ->
+    UniffiLib.uniffi_daybook_ffi_fn_method_progressrepoffi_ffi_register_listener(
+        it,
+        FfiConverterTypeProgressEventListener.lower(`listener`),_status)
+}
+    }
+    )
+    }
+    
 
+    
     @Throws(FfiException::class)
     @Suppress("ASSIGNED_BUT_NEVER_ACCESSED_VARIABLE")
-    override suspend fun `get`(`taskId`: kotlin.String): ProgressTask? = uniffiRustCallAsync(
+    override suspend fun `get`(`taskId`: kotlin.String) : ProgressTask? {
+        return uniffiRustCallAsync(
         callWithHandle { uniffiHandle ->
             UniffiLib.uniffi_daybook_ffi_fn_method_progressrepoffi_get(
                 uniffiHandle,
                 FfiConverterString.lower(`taskId`),
             )
         },
-        { future, callback, continuation ->
-            UniffiLib.ffi_daybook_ffi_rust_future_poll_rust_buffer(
-                future,
-                callback,
-                continuation,
-            )
-        },
+        { future, callback, continuation -> UniffiLib.ffi_daybook_ffi_rust_future_poll_rust_buffer(future, callback, continuation) },
         { future, continuation -> UniffiLib.ffi_daybook_ffi_rust_future_complete_rust_buffer(future, continuation) },
         { future -> UniffiLib.ffi_daybook_ffi_rust_future_free_rust_buffer(future) },
         // lift function
@@ -9321,23 +9302,20 @@ open class ProgressRepoFfi :
         // Error FFI converter
         FfiException.ErrorHandler,
     )
+    }
 
+    
     @Throws(FfiException::class)
     @Suppress("ASSIGNED_BUT_NEVER_ACCESSED_VARIABLE")
-    override suspend fun `list`(): List<ProgressTask> = uniffiRustCallAsync(
+    override suspend fun `list`() : List<ProgressTask> {
+        return uniffiRustCallAsync(
         callWithHandle { uniffiHandle ->
             UniffiLib.uniffi_daybook_ffi_fn_method_progressrepoffi_list(
                 uniffiHandle,
-
+                
             )
         },
-        { future, callback, continuation ->
-            UniffiLib.ffi_daybook_ffi_rust_future_poll_rust_buffer(
-                future,
-                callback,
-                continuation,
-            )
-        },
+        { future, callback, continuation -> UniffiLib.ffi_daybook_ffi_rust_future_poll_rust_buffer(future, callback, continuation) },
         { future, continuation -> UniffiLib.ffi_daybook_ffi_rust_future_complete_rust_buffer(future, continuation) },
         { future -> UniffiLib.ffi_daybook_ffi_rust_future_free_rust_buffer(future) },
         // lift function
@@ -9345,23 +9323,20 @@ open class ProgressRepoFfi :
         // Error FFI converter
         FfiException.ErrorHandler,
     )
+    }
 
+    
     @Throws(FfiException::class)
     @Suppress("ASSIGNED_BUT_NEVER_ACCESSED_VARIABLE")
-    override suspend fun `listByTagPrefix`(`tagPrefix`: kotlin.String): List<ProgressTask> = uniffiRustCallAsync(
+    override suspend fun `listByTagPrefix`(`tagPrefix`: kotlin.String) : List<ProgressTask> {
+        return uniffiRustCallAsync(
         callWithHandle { uniffiHandle ->
             UniffiLib.uniffi_daybook_ffi_fn_method_progressrepoffi_list_by_tag_prefix(
                 uniffiHandle,
                 FfiConverterString.lower(`tagPrefix`),
             )
         },
-        { future, callback, continuation ->
-            UniffiLib.ffi_daybook_ffi_rust_future_poll_rust_buffer(
-                future,
-                callback,
-                continuation,
-            )
-        },
+        { future, callback, continuation -> UniffiLib.ffi_daybook_ffi_rust_future_poll_rust_buffer(future, callback, continuation) },
         { future, continuation -> UniffiLib.ffi_daybook_ffi_rust_future_complete_rust_buffer(future, continuation) },
         { future -> UniffiLib.ffi_daybook_ffi_rust_future_free_rust_buffer(future) },
         // lift function
@@ -9369,23 +9344,20 @@ open class ProgressRepoFfi :
         // Error FFI converter
         FfiException.ErrorHandler,
     )
+    }
 
+    
     @Throws(FfiException::class)
     @Suppress("ASSIGNED_BUT_NEVER_ACCESSED_VARIABLE")
-    override suspend fun `listUpdates`(`taskId`: kotlin.String): List<ProgressUpdateEntry> = uniffiRustCallAsync(
+    override suspend fun `listUpdates`(`taskId`: kotlin.String) : List<ProgressUpdateEntry> {
+        return uniffiRustCallAsync(
         callWithHandle { uniffiHandle ->
             UniffiLib.uniffi_daybook_ffi_fn_method_progressrepoffi_list_updates(
                 uniffiHandle,
                 FfiConverterString.lower(`taskId`),
             )
         },
-        { future, callback, continuation ->
-            UniffiLib.ffi_daybook_ffi_rust_future_poll_rust_buffer(
-                future,
-                callback,
-                continuation,
-            )
-        },
+        { future, callback, continuation -> UniffiLib.ffi_daybook_ffi_rust_future_poll_rust_buffer(future, callback, continuation) },
         { future, continuation -> UniffiLib.ffi_daybook_ffi_rust_future_complete_rust_buffer(future, continuation) },
         { future -> UniffiLib.ffi_daybook_ffi_rust_future_free_rust_buffer(future) },
         // lift function
@@ -9393,143 +9365,140 @@ open class ProgressRepoFfi :
         // Error FFI converter
         FfiException.ErrorHandler,
     )
+    }
 
+    
     @Throws(FfiException::class)
     @Suppress("ASSIGNED_BUT_NEVER_ACCESSED_VARIABLE")
-    override suspend fun `markViewed`(`taskId`: kotlin.String) = uniffiRustCallAsync(
+    override suspend fun `markViewed`(`taskId`: kotlin.String) {
+        return uniffiRustCallAsync(
         callWithHandle { uniffiHandle ->
             UniffiLib.uniffi_daybook_ffi_fn_method_progressrepoffi_mark_viewed(
                 uniffiHandle,
                 FfiConverterString.lower(`taskId`),
             )
         },
-        { future, callback, continuation ->
-            UniffiLib.ffi_daybook_ffi_rust_future_poll_void(
-                future,
-                callback,
-                continuation,
-            )
-        },
+        { future, callback, continuation -> UniffiLib.ffi_daybook_ffi_rust_future_poll_void(future, callback, continuation) },
         { future, continuation -> UniffiLib.ffi_daybook_ffi_rust_future_complete_void(future, continuation) },
         { future -> UniffiLib.ffi_daybook_ffi_rust_future_free_void(future) },
         // lift function
         { Unit },
-
+        
         // Error FFI converter
         FfiException.ErrorHandler,
     )
+    }
 
+    
     @Throws(FfiException::class)
     @Suppress("ASSIGNED_BUT_NEVER_ACCESSED_VARIABLE")
-    override suspend fun `setRetentionOverride`(
-        `taskId`: kotlin.String,
-        `retentionOverride`: ProgressRetentionPolicy?,
-    ) = uniffiRustCallAsync(
+    override suspend fun `setRetentionOverride`(`taskId`: kotlin.String, `retentionOverride`: ProgressRetentionPolicy?) {
+        return uniffiRustCallAsync(
         callWithHandle { uniffiHandle ->
             UniffiLib.uniffi_daybook_ffi_fn_method_progressrepoffi_set_retention_override(
                 uniffiHandle,
-                FfiConverterString.lower(`taskId`),
-                FfiConverterOptionalTypeProgressRetentionPolicy.lower(`retentionOverride`),
+                FfiConverterString.lower(`taskId`),FfiConverterOptionalTypeProgressRetentionPolicy.lower(`retentionOverride`),
             )
         },
-        { future, callback, continuation ->
-            UniffiLib.ffi_daybook_ffi_rust_future_poll_void(
-                future,
-                callback,
-                continuation,
-            )
-        },
+        { future, callback, continuation -> UniffiLib.ffi_daybook_ffi_rust_future_poll_void(future, callback, continuation) },
         { future, continuation -> UniffiLib.ffi_daybook_ffi_rust_future_complete_void(future, continuation) },
         { future -> UniffiLib.ffi_daybook_ffi_rust_future_free_void(future) },
         // lift function
         { Unit },
-
+        
         // Error FFI converter
         FfiException.ErrorHandler,
     )
+    }
 
+    
     @Throws(FfiException::class)
     @Suppress("ASSIGNED_BUT_NEVER_ACCESSED_VARIABLE")
-    override suspend fun `stop`() = uniffiRustCallAsync(
+    override suspend fun `stop`() {
+        return uniffiRustCallAsync(
         callWithHandle { uniffiHandle ->
             UniffiLib.uniffi_daybook_ffi_fn_method_progressrepoffi_stop(
                 uniffiHandle,
-
+                
             )
         },
-        { future, callback, continuation ->
-            UniffiLib.ffi_daybook_ffi_rust_future_poll_void(
-                future,
-                callback,
-                continuation,
-            )
-        },
+        { future, callback, continuation -> UniffiLib.ffi_daybook_ffi_rust_future_poll_void(future, callback, continuation) },
         { future, continuation -> UniffiLib.ffi_daybook_ffi_rust_future_complete_void(future, continuation) },
         { future -> UniffiLib.ffi_daybook_ffi_rust_future_free_void(future) },
         // lift function
         { Unit },
-
+        
         // Error FFI converter
         FfiException.ErrorHandler,
     )
+    }
 
+    
     @Throws(FfiException::class)
     @Suppress("ASSIGNED_BUT_NEVER_ACCESSED_VARIABLE")
-    override suspend fun `upsertTask`(`args`: CreateProgressTaskArgs) = uniffiRustCallAsync(
+    override suspend fun `upsertTask`(`args`: CreateProgressTaskArgs) {
+        return uniffiRustCallAsync(
         callWithHandle { uniffiHandle ->
             UniffiLib.uniffi_daybook_ffi_fn_method_progressrepoffi_upsert_task(
                 uniffiHandle,
                 FfiConverterTypeCreateProgressTaskArgs.lower(`args`),
             )
         },
-        { future, callback, continuation ->
-            UniffiLib.ffi_daybook_ffi_rust_future_poll_void(
-                future,
-                callback,
-                continuation,
-            )
-        },
+        { future, callback, continuation -> UniffiLib.ffi_daybook_ffi_rust_future_poll_void(future, callback, continuation) },
         { future, continuation -> UniffiLib.ffi_daybook_ffi_rust_future_complete_void(future, continuation) },
         { future -> UniffiLib.ffi_daybook_ffi_rust_future_free_void(future) },
         // lift function
         { Unit },
-
+        
         // Error FFI converter
         FfiException.ErrorHandler,
     )
-
-    companion object {
-
-        @Throws(FfiException::class)
-        @Suppress("ASSIGNED_BUT_NEVER_ACCESSED_VARIABLE")
-        suspend fun `load`(`fcx`: FfiCtx): ProgressRepoFfi = uniffiRustCallAsync(
-            UniffiLib.uniffi_daybook_ffi_fn_constructor_progressrepoffi_load(FfiConverterTypeFfiCtx.lower(`fcx`)),
-            { future, callback, continuation ->
-                UniffiLib.ffi_daybook_ffi_rust_future_poll_u64(
-                    future,
-                    callback,
-                    continuation,
-                )
-            },
-            { future, continuation -> UniffiLib.ffi_daybook_ffi_rust_future_complete_u64(future, continuation) },
-            { future -> UniffiLib.ffi_daybook_ffi_rust_future_free_u64(future) },
-            // lift function
-            { FfiConverterTypeProgressRepoFfi.lift(it) },
-            // Error FFI converter
-            FfiException.ErrorHandler,
-        )
     }
+
+    
+
+    
+
+
+    
+    companion object {
+        
+    @Throws(FfiException::class)
+    @Suppress("ASSIGNED_BUT_NEVER_ACCESSED_VARIABLE")
+     suspend fun `load`(`fcx`: FfiCtx) : ProgressRepoFfi {
+        return uniffiRustCallAsync(
+        UniffiLib.uniffi_daybook_ffi_fn_constructor_progressrepoffi_load(FfiConverterTypeFfiCtx.lower(`fcx`),),
+        { future, callback, continuation -> UniffiLib.ffi_daybook_ffi_rust_future_poll_u64(future, callback, continuation) },
+        { future, continuation -> UniffiLib.ffi_daybook_ffi_rust_future_complete_u64(future, continuation) },
+        { future -> UniffiLib.ffi_daybook_ffi_rust_future_free_u64(future) },
+        // lift function
+        { FfiConverterTypeProgressRepoFfi.lift(it) },
+        // Error FFI converter
+        FfiException.ErrorHandler,
+    )
+    }
+
+        
+    }
+    
 }
+
 
 /**
  * @suppress
  */
-public object FfiConverterTypeProgressRepoFfi : FfiConverter<ProgressRepoFfi, Long> {
-    override fun lower(value: ProgressRepoFfi): Long = value.uniffiCloneHandle()
+public object FfiConverterTypeProgressRepoFfi: FfiConverter<ProgressRepoFfi, Long> {
+    override fun lower(value: ProgressRepoFfi): Long {
+        return value.uniffiCloneHandle()
+    }
 
-    override fun lift(value: Long): ProgressRepoFfi = ProgressRepoFfi(UniffiWithHandle, value)
+    override fun lift(value: Long): ProgressRepoFfi {
+        return ProgressRepoFfi(UniffiWithHandle, value)
+    }
 
-    override fun read(buf: ByteBuffer): ProgressRepoFfi = lift(buf.getLong())
+    override fun read(buf: ByteBuffer): ProgressRepoFfi {
+        return lift(buf.getLong())
+    }
 
     override fun allocationSize(value: ProgressRepoFfi) = 8UL
 
@@ -9537,6 +9506,7 @@ public object FfiConverterTypeProgressRepoFfi : FfiConverter<ProgressRepoFfi, Lo
         buf.putLong(lower(value))
     }
 }
+
 
 // This template implements a class for working with a Rust struct via a handle
 // to the live Rust struct on the other side of the FFI.
@@ -9632,29 +9602,23 @@ public object FfiConverterTypeProgressRepoFfi : FfiConverter<ProgressRepoFfi, Lo
 // [1] https://stackoverflow.com/questions/24376768/can-java-finalize-an-object-when-it-is-still-in-scope/24380219
 //
 
+
 public interface RtFfiInterface {
-
-    suspend fun `dispatchDocFacet`(
-        `plugId`: kotlin.String,
-        `routineName`: kotlin.String,
-        `docId`: kotlin.String,
-        `branchPath`: kotlin.String,
-    ): kotlin.String
-
+    
+    suspend fun `dispatchDocFacet`(`plugId`: kotlin.String, `routineName`: kotlin.String, `docId`: kotlin.String, `branchPath`: kotlin.String): kotlin.String
+    
     suspend fun `stop`()
-
+    
     companion object
 }
 
-open class RtFfi :
-    Disposable,
-    AutoCloseable,
-    RtFfiInterface {
+open class RtFfi: Disposable, AutoCloseable, RtFfiInterface
+{
 
+    @Suppress("UNUSED_PARAMETER")
     /**
      * @suppress
      */
-    @Suppress("UNUSED_PARAMETER")
     constructor(withHandle: UniffiWithHandle, handle: Long) {
         this.handle = handle
         this.cleanable = UniffiLib.CLEANER.register(this, UniffiCleanAction(handle))
@@ -9706,7 +9670,7 @@ open class RtFfi :
             if (c == Long.MAX_VALUE) {
                 throw IllegalStateException("${this.javaClass.simpleName} call counter would overflow")
             }
-        } while (!this.callCounter.compareAndSet(c, c + 1L))
+        } while (! this.callCounter.compareAndSet(c, c + 1L))
         // Now we can safely do the method call without the handle being freed concurrently.
         try {
             return block(this.uniffiCloneHandle())
@@ -9724,7 +9688,7 @@ open class RtFfi :
         override fun run() {
             if (handle == 0.toLong()) {
                 // Fake object created with `NoHandle`, don't try to free.
-                return
+                return;
             }
             uniffiRustCall { status ->
                 UniffiLib.uniffi_daybook_ffi_fn_free_rtffi(handle, status)
@@ -9737,37 +9701,25 @@ open class RtFfi :
      */
     fun uniffiCloneHandle(): Long {
         if (handle == 0.toLong()) {
-            throw InternalException("uniffiCloneHandle() called on NoHandle object")
+            throw InternalException("uniffiCloneHandle() called on NoHandle object");
         }
-        return uniffiRustCall { status ->
+        return uniffiRustCall() { status ->
             UniffiLib.uniffi_daybook_ffi_fn_clone_rtffi(handle, status)
         }
     }
 
+    
     @Throws(FfiException::class)
     @Suppress("ASSIGNED_BUT_NEVER_ACCESSED_VARIABLE")
-    override suspend fun `dispatchDocFacet`(
-        `plugId`: kotlin.String,
-        `routineName`: kotlin.String,
-        `docId`: kotlin.String,
-        `branchPath`: kotlin.String,
-    ): kotlin.String = uniffiRustCallAsync(
+    override suspend fun `dispatchDocFacet`(`plugId`: kotlin.String, `routineName`: kotlin.String, `docId`: kotlin.String, `branchPath`: kotlin.String) : kotlin.String {
+        return uniffiRustCallAsync(
         callWithHandle { uniffiHandle ->
             UniffiLib.uniffi_daybook_ffi_fn_method_rtffi_dispatch_doc_facet(
                 uniffiHandle,
-                FfiConverterString.lower(`plugId`),
-                FfiConverterString.lower(`routineName`),
-                FfiConverterString.lower(`docId`),
-                FfiConverterString.lower(`branchPath`),
+                FfiConverterString.lower(`plugId`),FfiConverterString.lower(`routineName`),FfiConverterString.lower(`docId`),FfiConverterString.lower(`branchPath`),
             )
         },
-        { future, callback, continuation ->
-            UniffiLib.ffi_daybook_ffi_rust_future_poll_rust_buffer(
-                future,
-                callback,
-                continuation,
-            )
-        },
+        { future, callback, continuation -> UniffiLib.ffi_daybook_ffi_rust_future_poll_rust_buffer(future, callback, continuation) },
         { future, continuation -> UniffiLib.ffi_daybook_ffi_rust_future_complete_rust_buffer(future, continuation) },
         { future -> UniffiLib.ffi_daybook_ffi_rust_future_free_rust_buffer(future) },
         // lift function
@@ -9775,105 +9727,74 @@ open class RtFfi :
         // Error FFI converter
         FfiException.ErrorHandler,
     )
+    }
 
+    
     @Throws(FfiException::class)
     @Suppress("ASSIGNED_BUT_NEVER_ACCESSED_VARIABLE")
-    override suspend fun `stop`() = uniffiRustCallAsync(
+    override suspend fun `stop`() {
+        return uniffiRustCallAsync(
         callWithHandle { uniffiHandle ->
             UniffiLib.uniffi_daybook_ffi_fn_method_rtffi_stop(
                 uniffiHandle,
-
+                
             )
         },
-        { future, callback, continuation ->
-            UniffiLib.ffi_daybook_ffi_rust_future_poll_void(
-                future,
-                callback,
-                continuation,
-            )
-        },
+        { future, callback, continuation -> UniffiLib.ffi_daybook_ffi_rust_future_poll_void(future, callback, continuation) },
         { future, continuation -> UniffiLib.ffi_daybook_ffi_rust_future_complete_void(future, continuation) },
         { future -> UniffiLib.ffi_daybook_ffi_rust_future_free_void(future) },
         // lift function
         { Unit },
-
+        
         // Error FFI converter
         FfiException.ErrorHandler,
     )
-
-    companion object {
-
-        @Throws(FfiException::class)
-        @Suppress("ASSIGNED_BUT_NEVER_ACCESSED_VARIABLE")
-        suspend fun `load`(
-            `fcx`: FfiCtx,
-            `drawerRepo`: DrawerRepoFfi,
-            `plugsRepo`: PlugsRepoFfi,
-            `dispatchRepo`: DispatchRepoFfi,
-            `progressRepo`: ProgressRepoFfi,
-            `blobsRepo`: BlobsRepoFfi,
-            `configRepo`: ConfigRepoFfi,
-            `initRepo`: InitRepoFfi,
-            `sqliteLsRepo`: SqliteLocalStateRepoFfi,
-            `deviceId`: kotlin.String,
-            `startupProgressTaskId`: kotlin.String?,
-        ): RtFfi = uniffiRustCallAsync(
-            UniffiLib.uniffi_daybook_ffi_fn_constructor_rtffi_load(
-                FfiConverterTypeFfiCtx.lower(
-                    `fcx`,
-                ),
-                FfiConverterTypeDrawerRepoFfi.lower(
-                    `drawerRepo`,
-                ),
-                FfiConverterTypePlugsRepoFfi.lower(
-                    `plugsRepo`,
-                ),
-                FfiConverterTypeDispatchRepoFfi.lower(
-                    `dispatchRepo`,
-                ),
-                FfiConverterTypeProgressRepoFfi.lower(
-                    `progressRepo`,
-                ),
-                FfiConverterTypeBlobsRepoFfi.lower(
-                    `blobsRepo`,
-                ),
-                FfiConverterTypeConfigRepoFfi.lower(
-                    `configRepo`,
-                ),
-                FfiConverterTypeInitRepoFfi.lower(
-                    `initRepo`,
-                ),
-                FfiConverterTypeSqliteLocalStateRepoFfi.lower(
-                    `sqliteLsRepo`,
-                ),
-                FfiConverterString.lower(`deviceId`), FfiConverterOptionalString.lower(`startupProgressTaskId`),
-            ),
-            { future, callback, continuation ->
-                UniffiLib.ffi_daybook_ffi_rust_future_poll_u64(
-                    future,
-                    callback,
-                    continuation,
-                )
-            },
-            { future, continuation -> UniffiLib.ffi_daybook_ffi_rust_future_complete_u64(future, continuation) },
-            { future -> UniffiLib.ffi_daybook_ffi_rust_future_free_u64(future) },
-            // lift function
-            { FfiConverterTypeRtFfi.lift(it) },
-            // Error FFI converter
-            FfiException.ErrorHandler,
-        )
     }
+
+    
+
+    
+
+
+    
+    companion object {
+        
+    @Throws(FfiException::class)
+    @Suppress("ASSIGNED_BUT_NEVER_ACCESSED_VARIABLE")
+     suspend fun `load`(`fcx`: FfiCtx, `drawerRepo`: DrawerRepoFfi, `plugsRepo`: PlugsRepoFfi, `dispatchRepo`: DispatchRepoFfi, `progressRepo`: ProgressRepoFfi, `blobsRepo`: BlobsRepoFfi, `configRepo`: ConfigRepoFfi, `initRepo`: InitRepoFfi, `sqliteLsRepo`: SqliteLocalStateRepoFfi, `deviceId`: kotlin.String, `startupProgressTaskId`: kotlin.String?) : RtFfi {
+        return uniffiRustCallAsync(
+        UniffiLib.uniffi_daybook_ffi_fn_constructor_rtffi_load(FfiConverterTypeFfiCtx.lower(`fcx`),FfiConverterTypeDrawerRepoFfi.lower(`drawerRepo`),FfiConverterTypePlugsRepoFfi.lower(`plugsRepo`),FfiConverterTypeDispatchRepoFfi.lower(`dispatchRepo`),FfiConverterTypeProgressRepoFfi.lower(`progressRepo`),FfiConverterTypeBlobsRepoFfi.lower(`blobsRepo`),FfiConverterTypeConfigRepoFfi.lower(`configRepo`),FfiConverterTypeInitRepoFfi.lower(`initRepo`),FfiConverterTypeSqliteLocalStateRepoFfi.lower(`sqliteLsRepo`),FfiConverterString.lower(`deviceId`),FfiConverterOptionalString.lower(`startupProgressTaskId`),),
+        { future, callback, continuation -> UniffiLib.ffi_daybook_ffi_rust_future_poll_u64(future, callback, continuation) },
+        { future, continuation -> UniffiLib.ffi_daybook_ffi_rust_future_complete_u64(future, continuation) },
+        { future -> UniffiLib.ffi_daybook_ffi_rust_future_free_u64(future) },
+        // lift function
+        { FfiConverterTypeRtFfi.lift(it) },
+        // Error FFI converter
+        FfiException.ErrorHandler,
+    )
+    }
+
+        
+    }
+    
 }
+
 
 /**
  * @suppress
  */
-public object FfiConverterTypeRtFfi : FfiConverter<RtFfi, Long> {
-    override fun lower(value: RtFfi): Long = value.uniffiCloneHandle()
+public object FfiConverterTypeRtFfi: FfiConverter<RtFfi, Long> {
+    override fun lower(value: RtFfi): Long {
+        return value.uniffiCloneHandle()
+    }
 
-    override fun lift(value: Long): RtFfi = RtFfi(UniffiWithHandle, value)
+    override fun lift(value: Long): RtFfi {
+        return RtFfi(UniffiWithHandle, value)
+    }
 
-    override fun read(buf: ByteBuffer): RtFfi = lift(buf.getLong())
+    override fun read(buf: ByteBuffer): RtFfi {
+        return lift(buf.getLong())
+    }
 
     override fun allocationSize(value: RtFfi) = 8UL
 
@@ -9881,6 +9802,7 @@ public object FfiConverterTypeRtFfi : FfiConverter<RtFfi, Long> {
         buf.putLong(lower(value))
     }
 }
+
 
 // This template implements a class for working with a Rust struct via a handle
 // to the live Rust struct on the other side of the FFI.
@@ -9976,24 +9898,23 @@ public object FfiConverterTypeRtFfi : FfiConverter<RtFfi, Long> {
 // [1] https://stackoverflow.com/questions/24376768/can-java-finalize-an-object-when-it-is-still-in-scope/24380219
 //
 
+
 public interface SqliteLocalStateRepoFfiInterface {
-
+    
     fun `ffiRegisterListener`(`listener`: LocalStateEventListener): ListenerRegistration
-
+    
     suspend fun `stop`()
-
+    
     companion object
 }
 
-open class SqliteLocalStateRepoFfi :
-    Disposable,
-    AutoCloseable,
-    SqliteLocalStateRepoFfiInterface {
+open class SqliteLocalStateRepoFfi: Disposable, AutoCloseable, SqliteLocalStateRepoFfiInterface
+{
 
+    @Suppress("UNUSED_PARAMETER")
     /**
      * @suppress
      */
-    @Suppress("UNUSED_PARAMETER")
     constructor(withHandle: UniffiWithHandle, handle: Long) {
         this.handle = handle
         this.cleanable = UniffiLib.CLEANER.register(this, UniffiCleanAction(handle))
@@ -10045,7 +9966,7 @@ open class SqliteLocalStateRepoFfi :
             if (c == Long.MAX_VALUE) {
                 throw IllegalStateException("${this.javaClass.simpleName} call counter would overflow")
             }
-        } while (!this.callCounter.compareAndSet(c, c + 1L))
+        } while (! this.callCounter.compareAndSet(c, c + 1L))
         // Now we can safely do the method call without the handle being freed concurrently.
         try {
             return block(this.uniffiCloneHandle())
@@ -10063,7 +9984,7 @@ open class SqliteLocalStateRepoFfi :
         override fun run() {
             if (handle == 0.toLong()) {
                 // Fake object created with `NoHandle`, don't try to free.
-                return
+                return;
             }
             uniffiRustCall { status ->
                 UniffiLib.uniffi_daybook_ffi_fn_free_sqlitelocalstaterepoffi(handle, status)
@@ -10076,85 +9997,92 @@ open class SqliteLocalStateRepoFfi :
      */
     fun uniffiCloneHandle(): Long {
         if (handle == 0.toLong()) {
-            throw InternalException("uniffiCloneHandle() called on NoHandle object")
+            throw InternalException("uniffiCloneHandle() called on NoHandle object");
         }
-        return uniffiRustCall { status ->
+        return uniffiRustCall() { status ->
             UniffiLib.uniffi_daybook_ffi_fn_clone_sqlitelocalstaterepoffi(handle, status)
         }
     }
 
-    override fun `ffiRegisterListener`(`listener`: LocalStateEventListener): ListenerRegistration =
-        FfiConverterTypeListenerRegistration.lift(
-            callWithHandle {
-                uniffiRustCall { _status ->
-                    UniffiLib.uniffi_daybook_ffi_fn_method_sqlitelocalstaterepoffi_ffi_register_listener(
-                        it,
-                        FfiConverterTypeLocalStateEventListener.lower(`listener`),
-                        _status,
-                    )
-                }
-            },
-        )
+    override fun `ffiRegisterListener`(`listener`: LocalStateEventListener): ListenerRegistration {
+            return FfiConverterTypeListenerRegistration.lift(
+    callWithHandle {
+    uniffiRustCall() { _status ->
+    UniffiLib.uniffi_daybook_ffi_fn_method_sqlitelocalstaterepoffi_ffi_register_listener(
+        it,
+        FfiConverterTypeLocalStateEventListener.lower(`listener`),_status)
+}
+    }
+    )
+    }
+    
 
+    
     @Throws(FfiException::class)
     @Suppress("ASSIGNED_BUT_NEVER_ACCESSED_VARIABLE")
-    override suspend fun `stop`() = uniffiRustCallAsync(
+    override suspend fun `stop`() {
+        return uniffiRustCallAsync(
         callWithHandle { uniffiHandle ->
             UniffiLib.uniffi_daybook_ffi_fn_method_sqlitelocalstaterepoffi_stop(
                 uniffiHandle,
-
+                
             )
         },
-        { future, callback, continuation ->
-            UniffiLib.ffi_daybook_ffi_rust_future_poll_void(
-                future,
-                callback,
-                continuation,
-            )
-        },
+        { future, callback, continuation -> UniffiLib.ffi_daybook_ffi_rust_future_poll_void(future, callback, continuation) },
         { future, continuation -> UniffiLib.ffi_daybook_ffi_rust_future_complete_void(future, continuation) },
         { future -> UniffiLib.ffi_daybook_ffi_rust_future_free_void(future) },
         // lift function
         { Unit },
-
+        
         // Error FFI converter
         FfiException.ErrorHandler,
     )
-
-    companion object {
-
-        @Throws(FfiException::class)
-        @Suppress("ASSIGNED_BUT_NEVER_ACCESSED_VARIABLE")
-        suspend fun `load`(`fcx`: FfiCtx): SqliteLocalStateRepoFfi = uniffiRustCallAsync(
-            UniffiLib.uniffi_daybook_ffi_fn_constructor_sqlitelocalstaterepoffi_load(
-                FfiConverterTypeFfiCtx.lower(`fcx`),
-            ),
-            { future, callback, continuation ->
-                UniffiLib.ffi_daybook_ffi_rust_future_poll_u64(
-                    future,
-                    callback,
-                    continuation,
-                )
-            },
-            { future, continuation -> UniffiLib.ffi_daybook_ffi_rust_future_complete_u64(future, continuation) },
-            { future -> UniffiLib.ffi_daybook_ffi_rust_future_free_u64(future) },
-            // lift function
-            { FfiConverterTypeSqliteLocalStateRepoFfi.lift(it) },
-            // Error FFI converter
-            FfiException.ErrorHandler,
-        )
     }
+
+    
+
+    
+
+
+    
+    companion object {
+        
+    @Throws(FfiException::class)
+    @Suppress("ASSIGNED_BUT_NEVER_ACCESSED_VARIABLE")
+     suspend fun `load`(`fcx`: FfiCtx) : SqliteLocalStateRepoFfi {
+        return uniffiRustCallAsync(
+        UniffiLib.uniffi_daybook_ffi_fn_constructor_sqlitelocalstaterepoffi_load(FfiConverterTypeFfiCtx.lower(`fcx`),),
+        { future, callback, continuation -> UniffiLib.ffi_daybook_ffi_rust_future_poll_u64(future, callback, continuation) },
+        { future, continuation -> UniffiLib.ffi_daybook_ffi_rust_future_complete_u64(future, continuation) },
+        { future -> UniffiLib.ffi_daybook_ffi_rust_future_free_u64(future) },
+        // lift function
+        { FfiConverterTypeSqliteLocalStateRepoFfi.lift(it) },
+        // Error FFI converter
+        FfiException.ErrorHandler,
+    )
+    }
+
+        
+    }
+    
 }
+
 
 /**
  * @suppress
  */
-public object FfiConverterTypeSqliteLocalStateRepoFfi : FfiConverter<SqliteLocalStateRepoFfi, Long> {
-    override fun lower(value: SqliteLocalStateRepoFfi): Long = value.uniffiCloneHandle()
+public object FfiConverterTypeSqliteLocalStateRepoFfi: FfiConverter<SqliteLocalStateRepoFfi, Long> {
+    override fun lower(value: SqliteLocalStateRepoFfi): Long {
+        return value.uniffiCloneHandle()
+    }
 
-    override fun lift(value: Long): SqliteLocalStateRepoFfi = SqliteLocalStateRepoFfi(UniffiWithHandle, value)
+    override fun lift(value: Long): SqliteLocalStateRepoFfi {
+        return SqliteLocalStateRepoFfi(UniffiWithHandle, value)
+    }
 
-    override fun read(buf: ByteBuffer): SqliteLocalStateRepoFfi = lift(buf.getLong())
+    override fun read(buf: ByteBuffer): SqliteLocalStateRepoFfi {
+        return lift(buf.getLong())
+    }
 
     override fun allocationSize(value: SqliteLocalStateRepoFfi) = 8UL
 
@@ -10162,6 +10090,7 @@ public object FfiConverterTypeSqliteLocalStateRepoFfi : FfiConverter<SqliteLocal
         buf.putLong(lower(value))
     }
 }
+
 
 // This template implements a class for working with a Rust struct via a handle
 // to the live Rust struct on the other side of the FFI.
@@ -10257,32 +10186,31 @@ public object FfiConverterTypeSqliteLocalStateRepoFfi : FfiConverter<SqliteLocal
 // [1] https://stackoverflow.com/questions/24376768/can-java-finalize-an-object-when-it-is-still-in-scope/24380219
 //
 
+
 public interface SyncRepoFfiInterface {
-
+    
     suspend fun `connectKnownDevicesOnce`()
-
+    
     suspend fun `connectUrl`(`sourceUrl`: kotlin.String)
-
+    
     suspend fun `getTicketQrPng`(`sizePx`: kotlin.UInt): kotlin.ByteArray
-
+    
     suspend fun `getTicketUrl`(): kotlin.String
-
+    
     suspend fun `getTicketWithQrPng`(`sizePx`: kotlin.UInt): CloneTicketWithQr
-
+    
     suspend fun `stop`()
-
+    
     companion object
 }
 
-open class SyncRepoFfi :
-    Disposable,
-    AutoCloseable,
-    SyncRepoFfiInterface {
+open class SyncRepoFfi: Disposable, AutoCloseable, SyncRepoFfiInterface
+{
 
+    @Suppress("UNUSED_PARAMETER")
     /**
      * @suppress
      */
-    @Suppress("UNUSED_PARAMETER")
     constructor(withHandle: UniffiWithHandle, handle: Long) {
         this.handle = handle
         this.cleanable = UniffiLib.CLEANER.register(this, UniffiCleanAction(handle))
@@ -10334,7 +10262,7 @@ open class SyncRepoFfi :
             if (c == Long.MAX_VALUE) {
                 throw IllegalStateException("${this.javaClass.simpleName} call counter would overflow")
             }
-        } while (!this.callCounter.compareAndSet(c, c + 1L))
+        } while (! this.callCounter.compareAndSet(c, c + 1L))
         // Now we can safely do the method call without the handle being freed concurrently.
         try {
             return block(this.uniffiCloneHandle())
@@ -10352,7 +10280,7 @@ open class SyncRepoFfi :
         override fun run() {
             if (handle == 0.toLong()) {
                 // Fake object created with `NoHandle`, don't try to free.
-                return
+                return;
             }
             uniffiRustCall { status ->
                 UniffiLib.uniffi_daybook_ffi_fn_free_syncrepoffi(handle, status)
@@ -10365,79 +10293,69 @@ open class SyncRepoFfi :
      */
     fun uniffiCloneHandle(): Long {
         if (handle == 0.toLong()) {
-            throw InternalException("uniffiCloneHandle() called on NoHandle object")
+            throw InternalException("uniffiCloneHandle() called on NoHandle object");
         }
-        return uniffiRustCall { status ->
+        return uniffiRustCall() { status ->
             UniffiLib.uniffi_daybook_ffi_fn_clone_syncrepoffi(handle, status)
         }
     }
 
+    
     @Throws(FfiException::class)
     @Suppress("ASSIGNED_BUT_NEVER_ACCESSED_VARIABLE")
-    override suspend fun `connectKnownDevicesOnce`() = uniffiRustCallAsync(
+    override suspend fun `connectKnownDevicesOnce`() {
+        return uniffiRustCallAsync(
         callWithHandle { uniffiHandle ->
             UniffiLib.uniffi_daybook_ffi_fn_method_syncrepoffi_connect_known_devices_once(
                 uniffiHandle,
-
+                
             )
         },
-        { future, callback, continuation ->
-            UniffiLib.ffi_daybook_ffi_rust_future_poll_void(
-                future,
-                callback,
-                continuation,
-            )
-        },
+        { future, callback, continuation -> UniffiLib.ffi_daybook_ffi_rust_future_poll_void(future, callback, continuation) },
         { future, continuation -> UniffiLib.ffi_daybook_ffi_rust_future_complete_void(future, continuation) },
         { future -> UniffiLib.ffi_daybook_ffi_rust_future_free_void(future) },
         // lift function
         { Unit },
-
+        
         // Error FFI converter
         FfiException.ErrorHandler,
     )
+    }
 
+    
     @Throws(FfiException::class)
     @Suppress("ASSIGNED_BUT_NEVER_ACCESSED_VARIABLE")
-    override suspend fun `connectUrl`(`sourceUrl`: kotlin.String) = uniffiRustCallAsync(
+    override suspend fun `connectUrl`(`sourceUrl`: kotlin.String) {
+        return uniffiRustCallAsync(
         callWithHandle { uniffiHandle ->
             UniffiLib.uniffi_daybook_ffi_fn_method_syncrepoffi_connect_url(
                 uniffiHandle,
                 FfiConverterString.lower(`sourceUrl`),
             )
         },
-        { future, callback, continuation ->
-            UniffiLib.ffi_daybook_ffi_rust_future_poll_void(
-                future,
-                callback,
-                continuation,
-            )
-        },
+        { future, callback, continuation -> UniffiLib.ffi_daybook_ffi_rust_future_poll_void(future, callback, continuation) },
         { future, continuation -> UniffiLib.ffi_daybook_ffi_rust_future_complete_void(future, continuation) },
         { future -> UniffiLib.ffi_daybook_ffi_rust_future_free_void(future) },
         // lift function
         { Unit },
-
+        
         // Error FFI converter
         FfiException.ErrorHandler,
     )
+    }
 
+    
     @Throws(FfiException::class)
     @Suppress("ASSIGNED_BUT_NEVER_ACCESSED_VARIABLE")
-    override suspend fun `getTicketQrPng`(`sizePx`: kotlin.UInt): kotlin.ByteArray = uniffiRustCallAsync(
+    override suspend fun `getTicketQrPng`(`sizePx`: kotlin.UInt) : kotlin.ByteArray {
+        return uniffiRustCallAsync(
         callWithHandle { uniffiHandle ->
             UniffiLib.uniffi_daybook_ffi_fn_method_syncrepoffi_get_ticket_qr_png(
                 uniffiHandle,
                 FfiConverterUInt.lower(`sizePx`),
             )
         },
-        { future, callback, continuation ->
-            UniffiLib.ffi_daybook_ffi_rust_future_poll_rust_buffer(
-                future,
-                callback,
-                continuation,
-            )
-        },
+        { future, callback, continuation -> UniffiLib.ffi_daybook_ffi_rust_future_poll_rust_buffer(future, callback, continuation) },
         { future, continuation -> UniffiLib.ffi_daybook_ffi_rust_future_complete_rust_buffer(future, continuation) },
         { future -> UniffiLib.ffi_daybook_ffi_rust_future_free_rust_buffer(future) },
         // lift function
@@ -10445,23 +10363,20 @@ open class SyncRepoFfi :
         // Error FFI converter
         FfiException.ErrorHandler,
     )
+    }
 
+    
     @Throws(FfiException::class)
     @Suppress("ASSIGNED_BUT_NEVER_ACCESSED_VARIABLE")
-    override suspend fun `getTicketUrl`(): kotlin.String = uniffiRustCallAsync(
+    override suspend fun `getTicketUrl`() : kotlin.String {
+        return uniffiRustCallAsync(
         callWithHandle { uniffiHandle ->
             UniffiLib.uniffi_daybook_ffi_fn_method_syncrepoffi_get_ticket_url(
                 uniffiHandle,
-
+                
             )
         },
-        { future, callback, continuation ->
-            UniffiLib.ffi_daybook_ffi_rust_future_poll_rust_buffer(
-                future,
-                callback,
-                continuation,
-            )
-        },
+        { future, callback, continuation -> UniffiLib.ffi_daybook_ffi_rust_future_poll_rust_buffer(future, callback, continuation) },
         { future, continuation -> UniffiLib.ffi_daybook_ffi_rust_future_complete_rust_buffer(future, continuation) },
         { future -> UniffiLib.ffi_daybook_ffi_rust_future_free_rust_buffer(future) },
         // lift function
@@ -10469,23 +10384,20 @@ open class SyncRepoFfi :
         // Error FFI converter
         FfiException.ErrorHandler,
     )
+    }
 
+    
     @Throws(FfiException::class)
     @Suppress("ASSIGNED_BUT_NEVER_ACCESSED_VARIABLE")
-    override suspend fun `getTicketWithQrPng`(`sizePx`: kotlin.UInt): CloneTicketWithQr = uniffiRustCallAsync(
+    override suspend fun `getTicketWithQrPng`(`sizePx`: kotlin.UInt) : CloneTicketWithQr {
+        return uniffiRustCallAsync(
         callWithHandle { uniffiHandle ->
             UniffiLib.uniffi_daybook_ffi_fn_method_syncrepoffi_get_ticket_with_qr_png(
                 uniffiHandle,
                 FfiConverterUInt.lower(`sizePx`),
             )
         },
-        { future, callback, continuation ->
-            UniffiLib.ffi_daybook_ffi_rust_future_poll_rust_buffer(
-                future,
-                callback,
-                continuation,
-            )
-        },
+        { future, callback, continuation -> UniffiLib.ffi_daybook_ffi_rust_future_poll_rust_buffer(future, callback, continuation) },
         { future, continuation -> UniffiLib.ffi_daybook_ffi_rust_future_complete_rust_buffer(future, continuation) },
         { future -> UniffiLib.ffi_daybook_ffi_rust_future_free_rust_buffer(future) },
         // lift function
@@ -10493,76 +10405,74 @@ open class SyncRepoFfi :
         // Error FFI converter
         FfiException.ErrorHandler,
     )
+    }
 
+    
     @Throws(FfiException::class)
     @Suppress("ASSIGNED_BUT_NEVER_ACCESSED_VARIABLE")
-    override suspend fun `stop`() = uniffiRustCallAsync(
+    override suspend fun `stop`() {
+        return uniffiRustCallAsync(
         callWithHandle { uniffiHandle ->
             UniffiLib.uniffi_daybook_ffi_fn_method_syncrepoffi_stop(
                 uniffiHandle,
-
+                
             )
         },
-        { future, callback, continuation ->
-            UniffiLib.ffi_daybook_ffi_rust_future_poll_void(
-                future,
-                callback,
-                continuation,
-            )
-        },
+        { future, callback, continuation -> UniffiLib.ffi_daybook_ffi_rust_future_poll_void(future, callback, continuation) },
         { future, continuation -> UniffiLib.ffi_daybook_ffi_rust_future_complete_void(future, continuation) },
         { future -> UniffiLib.ffi_daybook_ffi_rust_future_free_void(future) },
         // lift function
         { Unit },
-
+        
         // Error FFI converter
         FfiException.ErrorHandler,
     )
-
-    companion object {
-
-        @Throws(FfiException::class)
-        @Suppress("ASSIGNED_BUT_NEVER_ACCESSED_VARIABLE")
-        suspend fun `load`(
-            `fcx`: FfiCtx,
-            `configRepo`: ConfigRepoFfi,
-            `blobsRepo`: BlobsRepoFfi,
-            `drawerRepo`: DrawerRepoFfi,
-            `progressRepo`: ProgressRepoFfi,
-        ): SyncRepoFfi = uniffiRustCallAsync(
-            UniffiLib.uniffi_daybook_ffi_fn_constructor_syncrepoffi_load(
-                FfiConverterTypeFfiCtx.lower(`fcx`),
-                FfiConverterTypeConfigRepoFfi.lower(`configRepo`),
-                FfiConverterTypeBlobsRepoFfi.lower(`blobsRepo`),
-                FfiConverterTypeDrawerRepoFfi.lower(`drawerRepo`),
-                FfiConverterTypeProgressRepoFfi.lower(`progressRepo`),
-            ),
-            { future, callback, continuation ->
-                UniffiLib.ffi_daybook_ffi_rust_future_poll_u64(
-                    future,
-                    callback,
-                    continuation,
-                )
-            },
-            { future, continuation -> UniffiLib.ffi_daybook_ffi_rust_future_complete_u64(future, continuation) },
-            { future -> UniffiLib.ffi_daybook_ffi_rust_future_free_u64(future) },
-            // lift function
-            { FfiConverterTypeSyncRepoFfi.lift(it) },
-            // Error FFI converter
-            FfiException.ErrorHandler,
-        )
     }
+
+    
+
+    
+
+
+    
+    companion object {
+        
+    @Throws(FfiException::class)
+    @Suppress("ASSIGNED_BUT_NEVER_ACCESSED_VARIABLE")
+     suspend fun `load`(`fcx`: FfiCtx, `configRepo`: ConfigRepoFfi, `blobsRepo`: BlobsRepoFfi, `drawerRepo`: DrawerRepoFfi, `progressRepo`: ProgressRepoFfi) : SyncRepoFfi {
+        return uniffiRustCallAsync(
+        UniffiLib.uniffi_daybook_ffi_fn_constructor_syncrepoffi_load(FfiConverterTypeFfiCtx.lower(`fcx`),FfiConverterTypeConfigRepoFfi.lower(`configRepo`),FfiConverterTypeBlobsRepoFfi.lower(`blobsRepo`),FfiConverterTypeDrawerRepoFfi.lower(`drawerRepo`),FfiConverterTypeProgressRepoFfi.lower(`progressRepo`),),
+        { future, callback, continuation -> UniffiLib.ffi_daybook_ffi_rust_future_poll_u64(future, callback, continuation) },
+        { future, continuation -> UniffiLib.ffi_daybook_ffi_rust_future_complete_u64(future, continuation) },
+        { future -> UniffiLib.ffi_daybook_ffi_rust_future_free_u64(future) },
+        // lift function
+        { FfiConverterTypeSyncRepoFfi.lift(it) },
+        // Error FFI converter
+        FfiException.ErrorHandler,
+    )
+    }
+
+        
+    }
+    
 }
+
 
 /**
  * @suppress
  */
-public object FfiConverterTypeSyncRepoFfi : FfiConverter<SyncRepoFfi, Long> {
-    override fun lower(value: SyncRepoFfi): Long = value.uniffiCloneHandle()
+public object FfiConverterTypeSyncRepoFfi: FfiConverter<SyncRepoFfi, Long> {
+    override fun lower(value: SyncRepoFfi): Long {
+        return value.uniffiCloneHandle()
+    }
 
-    override fun lift(value: Long): SyncRepoFfi = SyncRepoFfi(UniffiWithHandle, value)
+    override fun lift(value: Long): SyncRepoFfi {
+        return SyncRepoFfi(UniffiWithHandle, value)
+    }
 
-    override fun read(buf: ByteBuffer): SyncRepoFfi = lift(buf.getLong())
+    override fun read(buf: ByteBuffer): SyncRepoFfi {
+        return lift(buf.getLong())
+    }
 
     override fun allocationSize(value: SyncRepoFfi) = 8UL
 
@@ -10570,6 +10480,7 @@ public object FfiConverterTypeSyncRepoFfi : FfiConverter<SyncRepoFfi, Long> {
         buf.putLong(lower(value))
     }
 }
+
 
 // This template implements a class for working with a Rust struct via a handle
 // to the live Rust struct on the other side of the FFI.
@@ -10665,22 +10576,21 @@ public object FfiConverterTypeSyncRepoFfi : FfiConverter<SyncRepoFfi, Long> {
 // [1] https://stackoverflow.com/questions/24376768/can-java-finalize-an-object-when-it-is-still-in-scope/24380219
 //
 
+
 public interface TablesEventListener {
-
+    
     fun `onTablesEvent`(`event`: TablesEvent)
-
+    
     companion object
 }
 
-open class TablesEventListenerImpl :
-    Disposable,
-    AutoCloseable,
-    TablesEventListener {
+open class TablesEventListenerImpl: Disposable, AutoCloseable, TablesEventListener
+{
 
+    @Suppress("UNUSED_PARAMETER")
     /**
      * @suppress
      */
-    @Suppress("UNUSED_PARAMETER")
     constructor(withHandle: UniffiWithHandle, handle: Long) {
         this.handle = handle
         this.cleanable = UniffiLib.CLEANER.register(this, UniffiCleanAction(handle))
@@ -10732,7 +10642,7 @@ open class TablesEventListenerImpl :
             if (c == Long.MAX_VALUE) {
                 throw IllegalStateException("${this.javaClass.simpleName} call counter would overflow")
             }
-        } while (!this.callCounter.compareAndSet(c, c + 1L))
+        } while (! this.callCounter.compareAndSet(c, c + 1L))
         // Now we can safely do the method call without the handle being freed concurrently.
         try {
             return block(this.uniffiCloneHandle())
@@ -10750,7 +10660,7 @@ open class TablesEventListenerImpl :
         override fun run() {
             if (handle == 0.toLong()) {
                 // Fake object created with `NoHandle`, don't try to free.
-                return
+                return;
             }
             uniffiRustCall { status ->
                 UniffiLib.uniffi_daybook_ffi_fn_free_tableseventlistener(handle, status)
@@ -10763,40 +10673,47 @@ open class TablesEventListenerImpl :
      */
     fun uniffiCloneHandle(): Long {
         if (handle == 0.toLong()) {
-            throw InternalException("uniffiCloneHandle() called on NoHandle object")
+            throw InternalException("uniffiCloneHandle() called on NoHandle object");
         }
-        return uniffiRustCall { status ->
+        return uniffiRustCall() { status ->
             UniffiLib.uniffi_daybook_ffi_fn_clone_tableseventlistener(handle, status)
         }
     }
 
-    override fun `onTablesEvent`(`event`: TablesEvent) = callWithHandle {
-        uniffiRustCall { _status ->
-            UniffiLib.uniffi_daybook_ffi_fn_method_tableseventlistener_on_tables_event(
-                it,
-                FfiConverterTypeTablesEvent.lower(`event`),
-                _status,
-            )
-        }
+    override fun `onTablesEvent`(`event`: TablesEvent)
+        = 
+    callWithHandle {
+    uniffiRustCall() { _status ->
+    UniffiLib.uniffi_daybook_ffi_fn_method_tableseventlistener_on_tables_event(
+        it,
+        FfiConverterTypeTablesEvent.lower(`event`),_status)
+}
     }
+    
+    
 
+    
+
+    
+
+
+    
+    
     /**
      * @suppress
      */
     companion object
+    
 }
+
+
 
 // Put the implementation in an object so we don't pollute the top-level namespace
 internal object uniffiCallbackInterfaceTablesEventListener {
-    internal object `onTablesEvent` : UniffiCallbackInterfaceTablesEventListenerMethod0 {
-        override fun callback(
-            `uniffiHandle`: Long,
-            `event`: RustBufferTablesEvent.ByValue,
-            `uniffiOutReturn`: Pointer,
-            uniffiCallStatus: UniffiRustCallStatus,
-        ) {
+    internal object `onTablesEvent`: UniffiCallbackInterfaceTablesEventListenerMethod0 {
+        override fun callback(`uniffiHandle`: Long,`event`: RustBufferTablesEvent.ByValue,`uniffiOutReturn`: Pointer,uniffiCallStatus: UniffiRustCallStatus,) {
             val uniffiObj = FfiConverterTypeTablesEventListener.handleMap.get(uniffiHandle)
-            val makeCall = {
+            val makeCall = { ->
                 uniffiObj.`onTablesEvent`(
                     FfiConverterTypeTablesEvent.lift(`event`),
                 )
@@ -10806,14 +10723,16 @@ internal object uniffiCallbackInterfaceTablesEventListener {
         }
     }
 
-    internal object uniffiFree : UniffiCallbackInterfaceFree {
+    internal object uniffiFree: UniffiCallbackInterfaceFree {
         override fun callback(handle: Long) {
             FfiConverterTypeTablesEventListener.handleMap.remove(handle)
         }
     }
 
-    internal object uniffiClone : UniffiCallbackInterfaceClone {
-        override fun callback(handle: Long): Long = FfiConverterTypeTablesEventListener.handleMap.clone(handle)
+    internal object uniffiClone: UniffiCallbackInterfaceClone {
+        override fun callback(handle: Long): Long {
+            return FfiConverterTypeTablesEventListener.handleMap.clone(handle)
+        }
     }
 
     internal var vtable = UniffiVTableCallbackInterfaceTablesEventListener.UniffiByValue(
@@ -10832,17 +10751,17 @@ internal object uniffiCallbackInterfaceTablesEventListener {
 /**
  * @suppress
  */
-public object FfiConverterTypeTablesEventListener : FfiConverter<TablesEventListener, Long> {
+public object FfiConverterTypeTablesEventListener: FfiConverter<TablesEventListener, Long> {
     internal val handleMap = UniffiHandleMap<TablesEventListener>()
 
     override fun lower(value: TablesEventListener): Long {
         if (value is TablesEventListenerImpl) {
-            // Rust-implemented object.  Clone the handle and return it
+             // Rust-implemented object.  Clone the handle and return it
             return value.uniffiCloneHandle()
-        } else {
+         } else {
             // Kotlin object, generate a new vtable handle and return that.
             return handleMap.insert(value)
-        }
+         }
     }
 
     override fun lift(value: Long): TablesEventListener {
@@ -10856,7 +10775,9 @@ public object FfiConverterTypeTablesEventListener : FfiConverter<TablesEventList
         }
     }
 
-    override fun read(buf: ByteBuffer): TablesEventListener = lift(buf.getLong())
+    override fun read(buf: ByteBuffer): TablesEventListener {
+        return lift(buf.getLong())
+    }
 
     override fun allocationSize(value: TablesEventListener) = 8UL
 
@@ -10864,6 +10785,7 @@ public object FfiConverterTypeTablesEventListener : FfiConverter<TablesEventList
         buf.putLong(lower(value))
     }
 }
+
 
 // This template implements a class for working with a Rust struct via a handle
 // to the live Rust struct on the other side of the FFI.
@@ -10959,58 +10881,57 @@ public object FfiConverterTypeTablesEventListener : FfiConverter<TablesEventList
 // [1] https://stackoverflow.com/questions/24376768/can-java-finalize-an-object-when-it-is-still-in-scope/24380219
 //
 
+
 public interface TablesRepoFfiInterface {
-
+    
     suspend fun `createNewTab`(`tableId`: Uuid): Uuid
-
+    
     suspend fun `createNewTable`(): Uuid
-
+    
     fun `ffiRegisterListener`(`listener`: TablesEventListener): ListenerRegistration
-
+    
     suspend fun `getPanel`(`id`: Uuid): Panel?
-
+    
     suspend fun `getSelectedTable`(): Table?
-
+    
     suspend fun `getTab`(`id`: Uuid): Tab?
-
+    
     suspend fun `getTable`(`id`: Uuid): Table?
-
+    
     suspend fun `getWindow`(`id`: Uuid): Window?
-
+    
     suspend fun `listPanels`(): List<Panel>
-
+    
     suspend fun `listTables`(): List<Table>
-
+    
     suspend fun `listTabs`(): List<Tab>
-
+    
     suspend fun `listWindows`(): List<Window>
-
+    
     suspend fun `removeTab`(`tabId`: Uuid)
-
+    
     suspend fun `setPanel`(`id`: Uuid, `panel`: Panel): Panel?
-
+    
     suspend fun `setTab`(`id`: Uuid, `tab`: Tab): Tab?
-
+    
     suspend fun `setTable`(`id`: Uuid, `table`: Table): Table?
-
+    
     suspend fun `setWindow`(`id`: Uuid, `window`: Window): Window?
-
+    
     suspend fun `stop`()
-
+    
     suspend fun `updateBatch`(`patches`: TablesPatches)
-
+    
     companion object
 }
 
-open class TablesRepoFfi :
-    Disposable,
-    AutoCloseable,
-    TablesRepoFfiInterface {
+open class TablesRepoFfi: Disposable, AutoCloseable, TablesRepoFfiInterface
+{
 
+    @Suppress("UNUSED_PARAMETER")
     /**
      * @suppress
      */
-    @Suppress("UNUSED_PARAMETER")
     constructor(withHandle: UniffiWithHandle, handle: Long) {
         this.handle = handle
         this.cleanable = UniffiLib.CLEANER.register(this, UniffiCleanAction(handle))
@@ -11062,7 +10983,7 @@ open class TablesRepoFfi :
             if (c == Long.MAX_VALUE) {
                 throw IllegalStateException("${this.javaClass.simpleName} call counter would overflow")
             }
-        } while (!this.callCounter.compareAndSet(c, c + 1L))
+        } while (! this.callCounter.compareAndSet(c, c + 1L))
         // Now we can safely do the method call without the handle being freed concurrently.
         try {
             return block(this.uniffiCloneHandle())
@@ -11080,7 +11001,7 @@ open class TablesRepoFfi :
         override fun run() {
             if (handle == 0.toLong()) {
                 // Fake object created with `NoHandle`, don't try to free.
-                return
+                return;
             }
             uniffiRustCall { status ->
                 UniffiLib.uniffi_daybook_ffi_fn_free_tablesrepoffi(handle, status)
@@ -11093,29 +11014,25 @@ open class TablesRepoFfi :
      */
     fun uniffiCloneHandle(): Long {
         if (handle == 0.toLong()) {
-            throw InternalException("uniffiCloneHandle() called on NoHandle object")
+            throw InternalException("uniffiCloneHandle() called on NoHandle object");
         }
-        return uniffiRustCall { status ->
+        return uniffiRustCall() { status ->
             UniffiLib.uniffi_daybook_ffi_fn_clone_tablesrepoffi(handle, status)
         }
     }
 
+    
     @Throws(FfiException::class)
     @Suppress("ASSIGNED_BUT_NEVER_ACCESSED_VARIABLE")
-    override suspend fun `createNewTab`(`tableId`: Uuid): Uuid = uniffiRustCallAsync(
+    override suspend fun `createNewTab`(`tableId`: Uuid) : Uuid {
+        return uniffiRustCallAsync(
         callWithHandle { uniffiHandle ->
             UniffiLib.uniffi_daybook_ffi_fn_method_tablesrepoffi_create_new_tab(
                 uniffiHandle,
                 FfiConverterTypeUuid.lower(`tableId`),
             )
         },
-        { future, callback, continuation ->
-            UniffiLib.ffi_daybook_ffi_rust_future_poll_rust_buffer(
-                future,
-                callback,
-                continuation,
-            )
-        },
+        { future, callback, continuation -> UniffiLib.ffi_daybook_ffi_rust_future_poll_rust_buffer(future, callback, continuation) },
         { future, continuation -> UniffiLib.ffi_daybook_ffi_rust_future_complete_rust_buffer(future, continuation) },
         { future -> UniffiLib.ffi_daybook_ffi_rust_future_free_rust_buffer(future) },
         // lift function
@@ -11123,23 +11040,20 @@ open class TablesRepoFfi :
         // Error FFI converter
         FfiException.ErrorHandler,
     )
+    }
 
+    
     @Throws(FfiException::class)
     @Suppress("ASSIGNED_BUT_NEVER_ACCESSED_VARIABLE")
-    override suspend fun `createNewTable`(): Uuid = uniffiRustCallAsync(
+    override suspend fun `createNewTable`() : Uuid {
+        return uniffiRustCallAsync(
         callWithHandle { uniffiHandle ->
             UniffiLib.uniffi_daybook_ffi_fn_method_tablesrepoffi_create_new_table(
                 uniffiHandle,
-
+                
             )
         },
-        { future, callback, continuation ->
-            UniffiLib.ffi_daybook_ffi_rust_future_poll_rust_buffer(
-                future,
-                callback,
-                continuation,
-            )
-        },
+        { future, callback, continuation -> UniffiLib.ffi_daybook_ffi_rust_future_poll_rust_buffer(future, callback, continuation) },
         { future, continuation -> UniffiLib.ffi_daybook_ffi_rust_future_complete_rust_buffer(future, continuation) },
         { future -> UniffiLib.ffi_daybook_ffi_rust_future_free_rust_buffer(future) },
         // lift function
@@ -11147,35 +11061,32 @@ open class TablesRepoFfi :
         // Error FFI converter
         FfiException.ErrorHandler,
     )
+    }
 
-    override fun `ffiRegisterListener`(`listener`: TablesEventListener): ListenerRegistration =
-        FfiConverterTypeListenerRegistration.lift(
-            callWithHandle {
-                uniffiRustCall { _status ->
-                    UniffiLib.uniffi_daybook_ffi_fn_method_tablesrepoffi_ffi_register_listener(
-                        it,
-                        FfiConverterTypeTablesEventListener.lower(`listener`),
-                        _status,
-                    )
-                }
-            },
-        )
+    override fun `ffiRegisterListener`(`listener`: TablesEventListener): ListenerRegistration {
+            return FfiConverterTypeListenerRegistration.lift(
+    callWithHandle {
+    uniffiRustCall() { _status ->
+    UniffiLib.uniffi_daybook_ffi_fn_method_tablesrepoffi_ffi_register_listener(
+        it,
+        FfiConverterTypeTablesEventListener.lower(`listener`),_status)
+}
+    }
+    )
+    }
+    
 
+    
     @Suppress("ASSIGNED_BUT_NEVER_ACCESSED_VARIABLE")
-    override suspend fun `getPanel`(`id`: Uuid): Panel? = uniffiRustCallAsync(
+    override suspend fun `getPanel`(`id`: Uuid) : Panel? {
+        return uniffiRustCallAsync(
         callWithHandle { uniffiHandle ->
             UniffiLib.uniffi_daybook_ffi_fn_method_tablesrepoffi_get_panel(
                 uniffiHandle,
                 FfiConverterTypeUuid.lower(`id`),
             )
         },
-        { future, callback, continuation ->
-            UniffiLib.ffi_daybook_ffi_rust_future_poll_rust_buffer(
-                future,
-                callback,
-                continuation,
-            )
-        },
+        { future, callback, continuation -> UniffiLib.ffi_daybook_ffi_rust_future_poll_rust_buffer(future, callback, continuation) },
         { future, continuation -> UniffiLib.ffi_daybook_ffi_rust_future_complete_rust_buffer(future, continuation) },
         { future -> UniffiLib.ffi_daybook_ffi_rust_future_free_rust_buffer(future) },
         // lift function
@@ -11183,23 +11094,20 @@ open class TablesRepoFfi :
         // Error FFI converter
         UniffiNullRustCallStatusErrorHandler,
     )
+    }
 
+    
     @Throws(FfiException::class)
     @Suppress("ASSIGNED_BUT_NEVER_ACCESSED_VARIABLE")
-    override suspend fun `getSelectedTable`(): Table? = uniffiRustCallAsync(
+    override suspend fun `getSelectedTable`() : Table? {
+        return uniffiRustCallAsync(
         callWithHandle { uniffiHandle ->
             UniffiLib.uniffi_daybook_ffi_fn_method_tablesrepoffi_get_selected_table(
                 uniffiHandle,
-
+                
             )
         },
-        { future, callback, continuation ->
-            UniffiLib.ffi_daybook_ffi_rust_future_poll_rust_buffer(
-                future,
-                callback,
-                continuation,
-            )
-        },
+        { future, callback, continuation -> UniffiLib.ffi_daybook_ffi_rust_future_poll_rust_buffer(future, callback, continuation) },
         { future, continuation -> UniffiLib.ffi_daybook_ffi_rust_future_complete_rust_buffer(future, continuation) },
         { future -> UniffiLib.ffi_daybook_ffi_rust_future_free_rust_buffer(future) },
         // lift function
@@ -11207,23 +11115,20 @@ open class TablesRepoFfi :
         // Error FFI converter
         FfiException.ErrorHandler,
     )
+    }
 
+    
     @Throws(FfiException::class)
     @Suppress("ASSIGNED_BUT_NEVER_ACCESSED_VARIABLE")
-    override suspend fun `getTab`(`id`: Uuid): Tab? = uniffiRustCallAsync(
+    override suspend fun `getTab`(`id`: Uuid) : Tab? {
+        return uniffiRustCallAsync(
         callWithHandle { uniffiHandle ->
             UniffiLib.uniffi_daybook_ffi_fn_method_tablesrepoffi_get_tab(
                 uniffiHandle,
                 FfiConverterTypeUuid.lower(`id`),
             )
         },
-        { future, callback, continuation ->
-            UniffiLib.ffi_daybook_ffi_rust_future_poll_rust_buffer(
-                future,
-                callback,
-                continuation,
-            )
-        },
+        { future, callback, continuation -> UniffiLib.ffi_daybook_ffi_rust_future_poll_rust_buffer(future, callback, continuation) },
         { future, continuation -> UniffiLib.ffi_daybook_ffi_rust_future_complete_rust_buffer(future, continuation) },
         { future -> UniffiLib.ffi_daybook_ffi_rust_future_free_rust_buffer(future) },
         // lift function
@@ -11231,23 +11136,20 @@ open class TablesRepoFfi :
         // Error FFI converter
         FfiException.ErrorHandler,
     )
+    }
 
+    
     @Throws(FfiException::class)
     @Suppress("ASSIGNED_BUT_NEVER_ACCESSED_VARIABLE")
-    override suspend fun `getTable`(`id`: Uuid): Table? = uniffiRustCallAsync(
+    override suspend fun `getTable`(`id`: Uuid) : Table? {
+        return uniffiRustCallAsync(
         callWithHandle { uniffiHandle ->
             UniffiLib.uniffi_daybook_ffi_fn_method_tablesrepoffi_get_table(
                 uniffiHandle,
                 FfiConverterTypeUuid.lower(`id`),
             )
         },
-        { future, callback, continuation ->
-            UniffiLib.ffi_daybook_ffi_rust_future_poll_rust_buffer(
-                future,
-                callback,
-                continuation,
-            )
-        },
+        { future, callback, continuation -> UniffiLib.ffi_daybook_ffi_rust_future_poll_rust_buffer(future, callback, continuation) },
         { future, continuation -> UniffiLib.ffi_daybook_ffi_rust_future_complete_rust_buffer(future, continuation) },
         { future -> UniffiLib.ffi_daybook_ffi_rust_future_free_rust_buffer(future) },
         // lift function
@@ -11255,22 +11157,19 @@ open class TablesRepoFfi :
         // Error FFI converter
         FfiException.ErrorHandler,
     )
+    }
 
+    
     @Suppress("ASSIGNED_BUT_NEVER_ACCESSED_VARIABLE")
-    override suspend fun `getWindow`(`id`: Uuid): Window? = uniffiRustCallAsync(
+    override suspend fun `getWindow`(`id`: Uuid) : Window? {
+        return uniffiRustCallAsync(
         callWithHandle { uniffiHandle ->
             UniffiLib.uniffi_daybook_ffi_fn_method_tablesrepoffi_get_window(
                 uniffiHandle,
                 FfiConverterTypeUuid.lower(`id`),
             )
         },
-        { future, callback, continuation ->
-            UniffiLib.ffi_daybook_ffi_rust_future_poll_rust_buffer(
-                future,
-                callback,
-                continuation,
-            )
-        },
+        { future, callback, continuation -> UniffiLib.ffi_daybook_ffi_rust_future_poll_rust_buffer(future, callback, continuation) },
         { future, continuation -> UniffiLib.ffi_daybook_ffi_rust_future_complete_rust_buffer(future, continuation) },
         { future -> UniffiLib.ffi_daybook_ffi_rust_future_free_rust_buffer(future) },
         // lift function
@@ -11278,23 +11177,20 @@ open class TablesRepoFfi :
         // Error FFI converter
         UniffiNullRustCallStatusErrorHandler,
     )
+    }
 
+    
     @Throws(FfiException::class)
     @Suppress("ASSIGNED_BUT_NEVER_ACCESSED_VARIABLE")
-    override suspend fun `listPanels`(): List<Panel> = uniffiRustCallAsync(
+    override suspend fun `listPanels`() : List<Panel> {
+        return uniffiRustCallAsync(
         callWithHandle { uniffiHandle ->
             UniffiLib.uniffi_daybook_ffi_fn_method_tablesrepoffi_list_panels(
                 uniffiHandle,
-
+                
             )
         },
-        { future, callback, continuation ->
-            UniffiLib.ffi_daybook_ffi_rust_future_poll_rust_buffer(
-                future,
-                callback,
-                continuation,
-            )
-        },
+        { future, callback, continuation -> UniffiLib.ffi_daybook_ffi_rust_future_poll_rust_buffer(future, callback, continuation) },
         { future, continuation -> UniffiLib.ffi_daybook_ffi_rust_future_complete_rust_buffer(future, continuation) },
         { future -> UniffiLib.ffi_daybook_ffi_rust_future_free_rust_buffer(future) },
         // lift function
@@ -11302,23 +11198,20 @@ open class TablesRepoFfi :
         // Error FFI converter
         FfiException.ErrorHandler,
     )
+    }
 
+    
     @Throws(FfiException::class)
     @Suppress("ASSIGNED_BUT_NEVER_ACCESSED_VARIABLE")
-    override suspend fun `listTables`(): List<Table> = uniffiRustCallAsync(
+    override suspend fun `listTables`() : List<Table> {
+        return uniffiRustCallAsync(
         callWithHandle { uniffiHandle ->
             UniffiLib.uniffi_daybook_ffi_fn_method_tablesrepoffi_list_tables(
                 uniffiHandle,
-
+                
             )
         },
-        { future, callback, continuation ->
-            UniffiLib.ffi_daybook_ffi_rust_future_poll_rust_buffer(
-                future,
-                callback,
-                continuation,
-            )
-        },
+        { future, callback, continuation -> UniffiLib.ffi_daybook_ffi_rust_future_poll_rust_buffer(future, callback, continuation) },
         { future, continuation -> UniffiLib.ffi_daybook_ffi_rust_future_complete_rust_buffer(future, continuation) },
         { future -> UniffiLib.ffi_daybook_ffi_rust_future_free_rust_buffer(future) },
         // lift function
@@ -11326,23 +11219,20 @@ open class TablesRepoFfi :
         // Error FFI converter
         FfiException.ErrorHandler,
     )
+    }
 
+    
     @Throws(FfiException::class)
     @Suppress("ASSIGNED_BUT_NEVER_ACCESSED_VARIABLE")
-    override suspend fun `listTabs`(): List<Tab> = uniffiRustCallAsync(
+    override suspend fun `listTabs`() : List<Tab> {
+        return uniffiRustCallAsync(
         callWithHandle { uniffiHandle ->
             UniffiLib.uniffi_daybook_ffi_fn_method_tablesrepoffi_list_tabs(
                 uniffiHandle,
-
+                
             )
         },
-        { future, callback, continuation ->
-            UniffiLib.ffi_daybook_ffi_rust_future_poll_rust_buffer(
-                future,
-                callback,
-                continuation,
-            )
-        },
+        { future, callback, continuation -> UniffiLib.ffi_daybook_ffi_rust_future_poll_rust_buffer(future, callback, continuation) },
         { future, continuation -> UniffiLib.ffi_daybook_ffi_rust_future_complete_rust_buffer(future, continuation) },
         { future -> UniffiLib.ffi_daybook_ffi_rust_future_free_rust_buffer(future) },
         // lift function
@@ -11350,23 +11240,20 @@ open class TablesRepoFfi :
         // Error FFI converter
         FfiException.ErrorHandler,
     )
+    }
 
+    
     @Throws(FfiException::class)
     @Suppress("ASSIGNED_BUT_NEVER_ACCESSED_VARIABLE")
-    override suspend fun `listWindows`(): List<Window> = uniffiRustCallAsync(
+    override suspend fun `listWindows`() : List<Window> {
+        return uniffiRustCallAsync(
         callWithHandle { uniffiHandle ->
             UniffiLib.uniffi_daybook_ffi_fn_method_tablesrepoffi_list_windows(
                 uniffiHandle,
-
+                
             )
         },
-        { future, callback, continuation ->
-            UniffiLib.ffi_daybook_ffi_rust_future_poll_rust_buffer(
-                future,
-                callback,
-                continuation,
-            )
-        },
+        { future, callback, continuation -> UniffiLib.ffi_daybook_ffi_rust_future_poll_rust_buffer(future, callback, continuation) },
         { future, continuation -> UniffiLib.ffi_daybook_ffi_rust_future_complete_rust_buffer(future, continuation) },
         { future -> UniffiLib.ffi_daybook_ffi_rust_future_free_rust_buffer(future) },
         // lift function
@@ -11374,49 +11261,42 @@ open class TablesRepoFfi :
         // Error FFI converter
         FfiException.ErrorHandler,
     )
+    }
 
+    
     @Throws(FfiException::class)
     @Suppress("ASSIGNED_BUT_NEVER_ACCESSED_VARIABLE")
-    override suspend fun `removeTab`(`tabId`: Uuid) = uniffiRustCallAsync(
+    override suspend fun `removeTab`(`tabId`: Uuid) {
+        return uniffiRustCallAsync(
         callWithHandle { uniffiHandle ->
             UniffiLib.uniffi_daybook_ffi_fn_method_tablesrepoffi_remove_tab(
                 uniffiHandle,
                 FfiConverterTypeUuid.lower(`tabId`),
             )
         },
-        { future, callback, continuation ->
-            UniffiLib.ffi_daybook_ffi_rust_future_poll_void(
-                future,
-                callback,
-                continuation,
-            )
-        },
+        { future, callback, continuation -> UniffiLib.ffi_daybook_ffi_rust_future_poll_void(future, callback, continuation) },
         { future, continuation -> UniffiLib.ffi_daybook_ffi_rust_future_complete_void(future, continuation) },
         { future -> UniffiLib.ffi_daybook_ffi_rust_future_free_void(future) },
         // lift function
         { Unit },
-
+        
         // Error FFI converter
         FfiException.ErrorHandler,
     )
+    }
 
+    
     @Throws(FfiException::class)
     @Suppress("ASSIGNED_BUT_NEVER_ACCESSED_VARIABLE")
-    override suspend fun `setPanel`(`id`: Uuid, `panel`: Panel): Panel? = uniffiRustCallAsync(
+    override suspend fun `setPanel`(`id`: Uuid, `panel`: Panel) : Panel? {
+        return uniffiRustCallAsync(
         callWithHandle { uniffiHandle ->
             UniffiLib.uniffi_daybook_ffi_fn_method_tablesrepoffi_set_panel(
                 uniffiHandle,
-                FfiConverterTypeUuid.lower(`id`),
-                FfiConverterTypePanel.lower(`panel`),
+                FfiConverterTypeUuid.lower(`id`),FfiConverterTypePanel.lower(`panel`),
             )
         },
-        { future, callback, continuation ->
-            UniffiLib.ffi_daybook_ffi_rust_future_poll_rust_buffer(
-                future,
-                callback,
-                continuation,
-            )
-        },
+        { future, callback, continuation -> UniffiLib.ffi_daybook_ffi_rust_future_poll_rust_buffer(future, callback, continuation) },
         { future, continuation -> UniffiLib.ffi_daybook_ffi_rust_future_complete_rust_buffer(future, continuation) },
         { future -> UniffiLib.ffi_daybook_ffi_rust_future_free_rust_buffer(future) },
         // lift function
@@ -11424,24 +11304,20 @@ open class TablesRepoFfi :
         // Error FFI converter
         FfiException.ErrorHandler,
     )
+    }
 
+    
     @Throws(FfiException::class)
     @Suppress("ASSIGNED_BUT_NEVER_ACCESSED_VARIABLE")
-    override suspend fun `setTab`(`id`: Uuid, `tab`: Tab): Tab? = uniffiRustCallAsync(
+    override suspend fun `setTab`(`id`: Uuid, `tab`: Tab) : Tab? {
+        return uniffiRustCallAsync(
         callWithHandle { uniffiHandle ->
             UniffiLib.uniffi_daybook_ffi_fn_method_tablesrepoffi_set_tab(
                 uniffiHandle,
-                FfiConverterTypeUuid.lower(`id`),
-                FfiConverterTypeTab.lower(`tab`),
+                FfiConverterTypeUuid.lower(`id`),FfiConverterTypeTab.lower(`tab`),
             )
         },
-        { future, callback, continuation ->
-            UniffiLib.ffi_daybook_ffi_rust_future_poll_rust_buffer(
-                future,
-                callback,
-                continuation,
-            )
-        },
+        { future, callback, continuation -> UniffiLib.ffi_daybook_ffi_rust_future_poll_rust_buffer(future, callback, continuation) },
         { future, continuation -> UniffiLib.ffi_daybook_ffi_rust_future_complete_rust_buffer(future, continuation) },
         { future -> UniffiLib.ffi_daybook_ffi_rust_future_free_rust_buffer(future) },
         // lift function
@@ -11449,24 +11325,20 @@ open class TablesRepoFfi :
         // Error FFI converter
         FfiException.ErrorHandler,
     )
+    }
 
+    
     @Throws(FfiException::class)
     @Suppress("ASSIGNED_BUT_NEVER_ACCESSED_VARIABLE")
-    override suspend fun `setTable`(`id`: Uuid, `table`: Table): Table? = uniffiRustCallAsync(
+    override suspend fun `setTable`(`id`: Uuid, `table`: Table) : Table? {
+        return uniffiRustCallAsync(
         callWithHandle { uniffiHandle ->
             UniffiLib.uniffi_daybook_ffi_fn_method_tablesrepoffi_set_table(
                 uniffiHandle,
-                FfiConverterTypeUuid.lower(`id`),
-                FfiConverterTypeTable.lower(`table`),
+                FfiConverterTypeUuid.lower(`id`),FfiConverterTypeTable.lower(`table`),
             )
         },
-        { future, callback, continuation ->
-            UniffiLib.ffi_daybook_ffi_rust_future_poll_rust_buffer(
-                future,
-                callback,
-                continuation,
-            )
-        },
+        { future, callback, continuation -> UniffiLib.ffi_daybook_ffi_rust_future_poll_rust_buffer(future, callback, continuation) },
         { future, continuation -> UniffiLib.ffi_daybook_ffi_rust_future_complete_rust_buffer(future, continuation) },
         { future -> UniffiLib.ffi_daybook_ffi_rust_future_free_rust_buffer(future) },
         // lift function
@@ -11474,24 +11346,20 @@ open class TablesRepoFfi :
         // Error FFI converter
         FfiException.ErrorHandler,
     )
+    }
 
+    
     @Throws(FfiException::class)
     @Suppress("ASSIGNED_BUT_NEVER_ACCESSED_VARIABLE")
-    override suspend fun `setWindow`(`id`: Uuid, `window`: Window): Window? = uniffiRustCallAsync(
+    override suspend fun `setWindow`(`id`: Uuid, `window`: Window) : Window? {
+        return uniffiRustCallAsync(
         callWithHandle { uniffiHandle ->
             UniffiLib.uniffi_daybook_ffi_fn_method_tablesrepoffi_set_window(
                 uniffiHandle,
-                FfiConverterTypeUuid.lower(`id`),
-                FfiConverterTypeWindow.lower(`window`),
+                FfiConverterTypeUuid.lower(`id`),FfiConverterTypeWindow.lower(`window`),
             )
         },
-        { future, callback, continuation ->
-            UniffiLib.ffi_daybook_ffi_rust_future_poll_rust_buffer(
-                future,
-                callback,
-                continuation,
-            )
-        },
+        { future, callback, continuation -> UniffiLib.ffi_daybook_ffi_rust_future_poll_rust_buffer(future, callback, continuation) },
         { future, continuation -> UniffiLib.ffi_daybook_ffi_rust_future_complete_rust_buffer(future, continuation) },
         { future -> UniffiLib.ffi_daybook_ffi_rust_future_free_rust_buffer(future) },
         // lift function
@@ -11499,89 +11367,96 @@ open class TablesRepoFfi :
         // Error FFI converter
         FfiException.ErrorHandler,
     )
+    }
 
+    
     @Throws(FfiException::class)
     @Suppress("ASSIGNED_BUT_NEVER_ACCESSED_VARIABLE")
-    override suspend fun `stop`() = uniffiRustCallAsync(
+    override suspend fun `stop`() {
+        return uniffiRustCallAsync(
         callWithHandle { uniffiHandle ->
             UniffiLib.uniffi_daybook_ffi_fn_method_tablesrepoffi_stop(
                 uniffiHandle,
-
+                
             )
         },
-        { future, callback, continuation ->
-            UniffiLib.ffi_daybook_ffi_rust_future_poll_void(
-                future,
-                callback,
-                continuation,
-            )
-        },
+        { future, callback, continuation -> UniffiLib.ffi_daybook_ffi_rust_future_poll_void(future, callback, continuation) },
         { future, continuation -> UniffiLib.ffi_daybook_ffi_rust_future_complete_void(future, continuation) },
         { future -> UniffiLib.ffi_daybook_ffi_rust_future_free_void(future) },
         // lift function
         { Unit },
-
+        
         // Error FFI converter
         FfiException.ErrorHandler,
     )
+    }
 
+    
     @Throws(FfiException::class)
     @Suppress("ASSIGNED_BUT_NEVER_ACCESSED_VARIABLE")
-    override suspend fun `updateBatch`(`patches`: TablesPatches) = uniffiRustCallAsync(
+    override suspend fun `updateBatch`(`patches`: TablesPatches) {
+        return uniffiRustCallAsync(
         callWithHandle { uniffiHandle ->
             UniffiLib.uniffi_daybook_ffi_fn_method_tablesrepoffi_update_batch(
                 uniffiHandle,
                 FfiConverterTypeTablesPatches.lower(`patches`),
             )
         },
-        { future, callback, continuation ->
-            UniffiLib.ffi_daybook_ffi_rust_future_poll_void(
-                future,
-                callback,
-                continuation,
-            )
-        },
+        { future, callback, continuation -> UniffiLib.ffi_daybook_ffi_rust_future_poll_void(future, callback, continuation) },
         { future, continuation -> UniffiLib.ffi_daybook_ffi_rust_future_complete_void(future, continuation) },
         { future -> UniffiLib.ffi_daybook_ffi_rust_future_free_void(future) },
         // lift function
         { Unit },
-
+        
         // Error FFI converter
         FfiException.ErrorHandler,
     )
-
-    companion object {
-
-        @Throws(FfiException::class)
-        @Suppress("ASSIGNED_BUT_NEVER_ACCESSED_VARIABLE")
-        suspend fun `load`(`fcx`: FfiCtx): TablesRepoFfi = uniffiRustCallAsync(
-            UniffiLib.uniffi_daybook_ffi_fn_constructor_tablesrepoffi_load(FfiConverterTypeFfiCtx.lower(`fcx`)),
-            { future, callback, continuation ->
-                UniffiLib.ffi_daybook_ffi_rust_future_poll_u64(
-                    future,
-                    callback,
-                    continuation,
-                )
-            },
-            { future, continuation -> UniffiLib.ffi_daybook_ffi_rust_future_complete_u64(future, continuation) },
-            { future -> UniffiLib.ffi_daybook_ffi_rust_future_free_u64(future) },
-            // lift function
-            { FfiConverterTypeTablesRepoFfi.lift(it) },
-            // Error FFI converter
-            FfiException.ErrorHandler,
-        )
     }
+
+    
+
+    
+
+
+    
+    companion object {
+        
+    @Throws(FfiException::class)
+    @Suppress("ASSIGNED_BUT_NEVER_ACCESSED_VARIABLE")
+     suspend fun `load`(`fcx`: FfiCtx) : TablesRepoFfi {
+        return uniffiRustCallAsync(
+        UniffiLib.uniffi_daybook_ffi_fn_constructor_tablesrepoffi_load(FfiConverterTypeFfiCtx.lower(`fcx`),),
+        { future, callback, continuation -> UniffiLib.ffi_daybook_ffi_rust_future_poll_u64(future, callback, continuation) },
+        { future, continuation -> UniffiLib.ffi_daybook_ffi_rust_future_complete_u64(future, continuation) },
+        { future -> UniffiLib.ffi_daybook_ffi_rust_future_free_u64(future) },
+        // lift function
+        { FfiConverterTypeTablesRepoFfi.lift(it) },
+        // Error FFI converter
+        FfiException.ErrorHandler,
+    )
+    }
+
+        
+    }
+    
 }
+
 
 /**
  * @suppress
  */
-public object FfiConverterTypeTablesRepoFfi : FfiConverter<TablesRepoFfi, Long> {
-    override fun lower(value: TablesRepoFfi): Long = value.uniffiCloneHandle()
+public object FfiConverterTypeTablesRepoFfi: FfiConverter<TablesRepoFfi, Long> {
+    override fun lower(value: TablesRepoFfi): Long {
+        return value.uniffiCloneHandle()
+    }
 
-    override fun lift(value: Long): TablesRepoFfi = TablesRepoFfi(UniffiWithHandle, value)
+    override fun lift(value: Long): TablesRepoFfi {
+        return TablesRepoFfi(UniffiWithHandle, value)
+    }
 
-    override fun read(buf: ByteBuffer): TablesRepoFfi = lift(buf.getLong())
+    override fun read(buf: ByteBuffer): TablesRepoFfi {
+        return lift(buf.getLong())
+    }
 
     override fun allocationSize(value: TablesRepoFfi) = 8UL
 
@@ -11590,295 +11465,417 @@ public object FfiConverterTypeTablesRepoFfi : FfiConverter<TablesRepoFfi, Long> 
     }
 }
 
-data class CameraDeviceInfo(var `deviceId`: kotlin.UInt, var `label`: kotlin.String) {
 
+
+data class CameraDeviceInfo (
+    var `deviceId`: kotlin.UInt
+    , 
+    var `label`: kotlin.String
+    
+){
+    
+
+    
+
+    
     companion object
 }
 
 /**
  * @suppress
  */
-public object FfiConverterTypeCameraDeviceInfo : FfiConverterRustBuffer<CameraDeviceInfo> {
-    override fun read(buf: ByteBuffer): CameraDeviceInfo = CameraDeviceInfo(
-        FfiConverterUInt.read(buf),
-        FfiConverterString.read(buf),
-    )
+public object FfiConverterTypeCameraDeviceInfo: FfiConverterRustBuffer<CameraDeviceInfo> {
+    override fun read(buf: ByteBuffer): CameraDeviceInfo {
+        return CameraDeviceInfo(
+            FfiConverterUInt.read(buf),
+            FfiConverterString.read(buf),
+        )
+    }
 
     override fun allocationSize(value: CameraDeviceInfo) = (
-        FfiConverterUInt.allocationSize(value.`deviceId`) +
+            FfiConverterUInt.allocationSize(value.`deviceId`) +
             FfiConverterString.allocationSize(value.`label`)
-        )
+    )
 
     override fun write(value: CameraDeviceInfo, buf: ByteBuffer) {
-        FfiConverterUInt.write(value.`deviceId`, buf)
-        FfiConverterString.write(value.`label`, buf)
+            FfiConverterUInt.write(value.`deviceId`, buf)
+            FfiConverterString.write(value.`label`, buf)
     }
 }
 
-data class CameraNormalizedRect(
-    var `left`: kotlin.Float,
-    var `top`: kotlin.Float,
-    var `right`: kotlin.Float,
-    var `bottom`: kotlin.Float,
 
-) {
 
+data class CameraNormalizedRect (
+    var `left`: kotlin.Float
+    , 
+    var `top`: kotlin.Float
+    , 
+    var `right`: kotlin.Float
+    , 
+    var `bottom`: kotlin.Float
+    
+){
+    
+
+    
+
+    
     companion object
 }
 
 /**
  * @suppress
  */
-public object FfiConverterTypeCameraNormalizedRect : FfiConverterRustBuffer<CameraNormalizedRect> {
-    override fun read(buf: ByteBuffer): CameraNormalizedRect = CameraNormalizedRect(
-        FfiConverterFloat.read(buf),
-        FfiConverterFloat.read(buf),
-        FfiConverterFloat.read(buf),
-        FfiConverterFloat.read(buf),
-    )
+public object FfiConverterTypeCameraNormalizedRect: FfiConverterRustBuffer<CameraNormalizedRect> {
+    override fun read(buf: ByteBuffer): CameraNormalizedRect {
+        return CameraNormalizedRect(
+            FfiConverterFloat.read(buf),
+            FfiConverterFloat.read(buf),
+            FfiConverterFloat.read(buf),
+            FfiConverterFloat.read(buf),
+        )
+    }
 
     override fun allocationSize(value: CameraNormalizedRect) = (
-        FfiConverterFloat.allocationSize(value.`left`) +
+            FfiConverterFloat.allocationSize(value.`left`) +
             FfiConverterFloat.allocationSize(value.`top`) +
             FfiConverterFloat.allocationSize(value.`right`) +
             FfiConverterFloat.allocationSize(value.`bottom`)
-        )
+    )
 
     override fun write(value: CameraNormalizedRect, buf: ByteBuffer) {
-        FfiConverterFloat.write(value.`left`, buf)
-        FfiConverterFloat.write(value.`top`, buf)
-        FfiConverterFloat.write(value.`right`, buf)
-        FfiConverterFloat.write(value.`bottom`, buf)
+            FfiConverterFloat.write(value.`left`, buf)
+            FfiConverterFloat.write(value.`top`, buf)
+            FfiConverterFloat.write(value.`right`, buf)
+            FfiConverterFloat.write(value.`bottom`, buf)
     }
 }
 
-data class CameraPreviewFrame(
-    var `widthPx`: kotlin.UInt,
-    var `heightPx`: kotlin.UInt,
-    var `encoding`: CameraPreviewFrameEncoding,
-    var `frameBytes`: kotlin.ByteArray,
 
-) {
 
+data class CameraPreviewFrame (
+    var `widthPx`: kotlin.UInt
+    , 
+    var `heightPx`: kotlin.UInt
+    , 
+    var `encoding`: CameraPreviewFrameEncoding
+    , 
+    var `frameBytes`: kotlin.ByteArray
+    
+){
+    
+
+    
+
+    
     companion object
 }
 
 /**
  * @suppress
  */
-public object FfiConverterTypeCameraPreviewFrame : FfiConverterRustBuffer<CameraPreviewFrame> {
-    override fun read(buf: ByteBuffer): CameraPreviewFrame = CameraPreviewFrame(
-        FfiConverterUInt.read(buf),
-        FfiConverterUInt.read(buf),
-        FfiConverterTypeCameraPreviewFrameEncoding.read(buf),
-        FfiConverterByteArray.read(buf),
-    )
+public object FfiConverterTypeCameraPreviewFrame: FfiConverterRustBuffer<CameraPreviewFrame> {
+    override fun read(buf: ByteBuffer): CameraPreviewFrame {
+        return CameraPreviewFrame(
+            FfiConverterUInt.read(buf),
+            FfiConverterUInt.read(buf),
+            FfiConverterTypeCameraPreviewFrameEncoding.read(buf),
+            FfiConverterByteArray.read(buf),
+        )
+    }
 
     override fun allocationSize(value: CameraPreviewFrame) = (
-        FfiConverterUInt.allocationSize(value.`widthPx`) +
+            FfiConverterUInt.allocationSize(value.`widthPx`) +
             FfiConverterUInt.allocationSize(value.`heightPx`) +
             FfiConverterTypeCameraPreviewFrameEncoding.allocationSize(value.`encoding`) +
             FfiConverterByteArray.allocationSize(value.`frameBytes`)
-        )
+    )
 
     override fun write(value: CameraPreviewFrame, buf: ByteBuffer) {
-        FfiConverterUInt.write(value.`widthPx`, buf)
-        FfiConverterUInt.write(value.`heightPx`, buf)
-        FfiConverterTypeCameraPreviewFrameEncoding.write(value.`encoding`, buf)
-        FfiConverterByteArray.write(value.`frameBytes`, buf)
+            FfiConverterUInt.write(value.`widthPx`, buf)
+            FfiConverterUInt.write(value.`heightPx`, buf)
+            FfiConverterTypeCameraPreviewFrameEncoding.write(value.`encoding`, buf)
+            FfiConverterByteArray.write(value.`frameBytes`, buf)
     }
 }
 
-data class CloneBootstrapInfo(
-    var `endpointId`: kotlin.String,
-    var `repoId`: kotlin.String,
-    var `repoName`: kotlin.String,
-    var `appDocId`: kotlin.String,
-    var `drawerDocId`: kotlin.String,
-    var `deviceName`: kotlin.String?,
 
-) {
 
+data class CloneBootstrapInfo (
+    var `endpointId`: kotlin.String
+    , 
+    var `repoId`: kotlin.String
+    , 
+    var `repoName`: kotlin.String
+    , 
+    var `appDocId`: kotlin.String
+    , 
+    var `drawerDocId`: kotlin.String
+    , 
+    var `deviceName`: kotlin.String?
+    
+){
+    
+
+    
+
+    
     companion object
 }
 
 /**
  * @suppress
  */
-public object FfiConverterTypeCloneBootstrapInfo : FfiConverterRustBuffer<CloneBootstrapInfo> {
-    override fun read(buf: ByteBuffer): CloneBootstrapInfo = CloneBootstrapInfo(
-        FfiConverterString.read(buf),
-        FfiConverterString.read(buf),
-        FfiConverterString.read(buf),
-        FfiConverterString.read(buf),
-        FfiConverterString.read(buf),
-        FfiConverterOptionalString.read(buf),
-    )
+public object FfiConverterTypeCloneBootstrapInfo: FfiConverterRustBuffer<CloneBootstrapInfo> {
+    override fun read(buf: ByteBuffer): CloneBootstrapInfo {
+        return CloneBootstrapInfo(
+            FfiConverterString.read(buf),
+            FfiConverterString.read(buf),
+            FfiConverterString.read(buf),
+            FfiConverterString.read(buf),
+            FfiConverterString.read(buf),
+            FfiConverterOptionalString.read(buf),
+        )
+    }
 
     override fun allocationSize(value: CloneBootstrapInfo) = (
-        FfiConverterString.allocationSize(value.`endpointId`) +
+            FfiConverterString.allocationSize(value.`endpointId`) +
             FfiConverterString.allocationSize(value.`repoId`) +
             FfiConverterString.allocationSize(value.`repoName`) +
             FfiConverterString.allocationSize(value.`appDocId`) +
             FfiConverterString.allocationSize(value.`drawerDocId`) +
             FfiConverterOptionalString.allocationSize(value.`deviceName`)
-        )
+    )
 
     override fun write(value: CloneBootstrapInfo, buf: ByteBuffer) {
-        FfiConverterString.write(value.`endpointId`, buf)
-        FfiConverterString.write(value.`repoId`, buf)
-        FfiConverterString.write(value.`repoName`, buf)
-        FfiConverterString.write(value.`appDocId`, buf)
-        FfiConverterString.write(value.`drawerDocId`, buf)
-        FfiConverterOptionalString.write(value.`deviceName`, buf)
+            FfiConverterString.write(value.`endpointId`, buf)
+            FfiConverterString.write(value.`repoId`, buf)
+            FfiConverterString.write(value.`repoName`, buf)
+            FfiConverterString.write(value.`appDocId`, buf)
+            FfiConverterString.write(value.`drawerDocId`, buf)
+            FfiConverterOptionalString.write(value.`deviceName`, buf)
     }
 }
 
-data class CloneDestinationCheck(
-    var `exists`: kotlin.Boolean,
-    var `isDir`: kotlin.Boolean,
-    var `isEmpty`: kotlin.Boolean,
 
-) {
 
+data class CloneDestinationCheck (
+    var `exists`: kotlin.Boolean
+    , 
+    var `isDir`: kotlin.Boolean
+    , 
+    var `isEmpty`: kotlin.Boolean
+    
+){
+    
+
+    
+
+    
     companion object
 }
 
 /**
  * @suppress
  */
-public object FfiConverterTypeCloneDestinationCheck : FfiConverterRustBuffer<CloneDestinationCheck> {
-    override fun read(buf: ByteBuffer): CloneDestinationCheck = CloneDestinationCheck(
-        FfiConverterBoolean.read(buf),
-        FfiConverterBoolean.read(buf),
-        FfiConverterBoolean.read(buf),
-    )
+public object FfiConverterTypeCloneDestinationCheck: FfiConverterRustBuffer<CloneDestinationCheck> {
+    override fun read(buf: ByteBuffer): CloneDestinationCheck {
+        return CloneDestinationCheck(
+            FfiConverterBoolean.read(buf),
+            FfiConverterBoolean.read(buf),
+            FfiConverterBoolean.read(buf),
+        )
+    }
 
     override fun allocationSize(value: CloneDestinationCheck) = (
-        FfiConverterBoolean.allocationSize(value.`exists`) +
+            FfiConverterBoolean.allocationSize(value.`exists`) +
             FfiConverterBoolean.allocationSize(value.`isDir`) +
             FfiConverterBoolean.allocationSize(value.`isEmpty`)
-        )
+    )
 
     override fun write(value: CloneDestinationCheck, buf: ByteBuffer) {
-        FfiConverterBoolean.write(value.`exists`, buf)
-        FfiConverterBoolean.write(value.`isDir`, buf)
-        FfiConverterBoolean.write(value.`isEmpty`, buf)
+            FfiConverterBoolean.write(value.`exists`, buf)
+            FfiConverterBoolean.write(value.`isDir`, buf)
+            FfiConverterBoolean.write(value.`isEmpty`, buf)
     }
 }
 
-data class CloneInfo(var `repoName`: kotlin.String, var `deviceName`: kotlin.String?) {
 
+
+data class CloneInfo (
+    var `repoName`: kotlin.String
+    , 
+    var `deviceName`: kotlin.String?
+    
+){
+    
+
+    
+
+    
     companion object
 }
 
 /**
  * @suppress
  */
-public object FfiConverterTypeCloneInfo : FfiConverterRustBuffer<CloneInfo> {
-    override fun read(buf: ByteBuffer): CloneInfo = CloneInfo(
-        FfiConverterString.read(buf),
-        FfiConverterOptionalString.read(buf),
-    )
+public object FfiConverterTypeCloneInfo: FfiConverterRustBuffer<CloneInfo> {
+    override fun read(buf: ByteBuffer): CloneInfo {
+        return CloneInfo(
+            FfiConverterString.read(buf),
+            FfiConverterOptionalString.read(buf),
+        )
+    }
 
     override fun allocationSize(value: CloneInfo) = (
-        FfiConverterString.allocationSize(value.`repoName`) +
+            FfiConverterString.allocationSize(value.`repoName`) +
             FfiConverterOptionalString.allocationSize(value.`deviceName`)
-        )
+    )
 
     override fun write(value: CloneInfo, buf: ByteBuffer) {
-        FfiConverterString.write(value.`repoName`, buf)
-        FfiConverterOptionalString.write(value.`deviceName`, buf)
+            FfiConverterString.write(value.`repoName`, buf)
+            FfiConverterOptionalString.write(value.`deviceName`, buf)
     }
 }
 
-data class CloneInitResult(var `repoPath`: kotlin.String, var `bootstrap`: CloneBootstrapInfo) {
 
+
+data class CloneInitResult (
+    var `repoPath`: kotlin.String
+    , 
+    var `bootstrap`: CloneBootstrapInfo
+    
+){
+    
+
+    
+
+    
     companion object
 }
 
 /**
  * @suppress
  */
-public object FfiConverterTypeCloneInitResult : FfiConverterRustBuffer<CloneInitResult> {
-    override fun read(buf: ByteBuffer): CloneInitResult = CloneInitResult(
-        FfiConverterString.read(buf),
-        FfiConverterTypeCloneBootstrapInfo.read(buf),
-    )
+public object FfiConverterTypeCloneInitResult: FfiConverterRustBuffer<CloneInitResult> {
+    override fun read(buf: ByteBuffer): CloneInitResult {
+        return CloneInitResult(
+            FfiConverterString.read(buf),
+            FfiConverterTypeCloneBootstrapInfo.read(buf),
+        )
+    }
 
     override fun allocationSize(value: CloneInitResult) = (
-        FfiConverterString.allocationSize(value.`repoPath`) +
+            FfiConverterString.allocationSize(value.`repoPath`) +
             FfiConverterTypeCloneBootstrapInfo.allocationSize(value.`bootstrap`)
-        )
+    )
 
     override fun write(value: CloneInitResult, buf: ByteBuffer) {
-        FfiConverterString.write(value.`repoPath`, buf)
-        FfiConverterTypeCloneBootstrapInfo.write(value.`bootstrap`, buf)
+            FfiConverterString.write(value.`repoPath`, buf)
+            FfiConverterTypeCloneBootstrapInfo.write(value.`bootstrap`, buf)
     }
 }
 
-data class CloneTicketWithQr(var `ticketUrl`: kotlin.String, var `qrPngBytes`: kotlin.ByteArray) {
 
+
+data class CloneTicketWithQr (
+    var `ticketUrl`: kotlin.String
+    , 
+    var `qrPngBytes`: kotlin.ByteArray
+    
+){
+    
+
+    
+
+    
     companion object
 }
 
 /**
  * @suppress
  */
-public object FfiConverterTypeCloneTicketWithQr : FfiConverterRustBuffer<CloneTicketWithQr> {
-    override fun read(buf: ByteBuffer): CloneTicketWithQr = CloneTicketWithQr(
-        FfiConverterString.read(buf),
-        FfiConverterByteArray.read(buf),
-    )
+public object FfiConverterTypeCloneTicketWithQr: FfiConverterRustBuffer<CloneTicketWithQr> {
+    override fun read(buf: ByteBuffer): CloneTicketWithQr {
+        return CloneTicketWithQr(
+            FfiConverterString.read(buf),
+            FfiConverterByteArray.read(buf),
+        )
+    }
 
     override fun allocationSize(value: CloneTicketWithQr) = (
-        FfiConverterString.allocationSize(value.`ticketUrl`) +
+            FfiConverterString.allocationSize(value.`ticketUrl`) +
             FfiConverterByteArray.allocationSize(value.`qrPngBytes`)
-        )
+    )
 
     override fun write(value: CloneTicketWithQr, buf: ByteBuffer) {
-        FfiConverterString.write(value.`ticketUrl`, buf)
-        FfiConverterByteArray.write(value.`qrPngBytes`, buf)
+            FfiConverterString.write(value.`ticketUrl`, buf)
+            FfiConverterByteArray.write(value.`qrPngBytes`, buf)
     }
 }
 
-data class FacetKeyDisplayHintEntry(var `key`: kotlin.String, var `config`: FacetDisplayHint) {
 
+
+data class FacetKeyDisplayHintEntry (
+    var `key`: kotlin.String
+    , 
+    var `config`: FacetDisplayHint
+    
+){
+    
+
+    
+
+    
     companion object
 }
 
 /**
  * @suppress
  */
-public object FfiConverterTypeFacetKeyDisplayHintEntry : FfiConverterRustBuffer<FacetKeyDisplayHintEntry> {
-    override fun read(buf: ByteBuffer): FacetKeyDisplayHintEntry = FacetKeyDisplayHintEntry(
-        FfiConverterString.read(buf),
-        FfiConverterTypeFacetDisplayHint.read(buf),
-    )
+public object FfiConverterTypeFacetKeyDisplayHintEntry: FfiConverterRustBuffer<FacetKeyDisplayHintEntry> {
+    override fun read(buf: ByteBuffer): FacetKeyDisplayHintEntry {
+        return FacetKeyDisplayHintEntry(
+            FfiConverterString.read(buf),
+            FfiConverterTypeFacetDisplayHint.read(buf),
+        )
+    }
 
     override fun allocationSize(value: FacetKeyDisplayHintEntry) = (
-        FfiConverterString.allocationSize(value.`key`) +
+            FfiConverterString.allocationSize(value.`key`) +
             FfiConverterTypeFacetDisplayHint.allocationSize(value.`config`)
-        )
+    )
 
     override fun write(value: FacetKeyDisplayHintEntry, buf: ByteBuffer) {
-        FfiConverterString.write(value.`key`, buf)
-        FfiConverterTypeFacetDisplayHint.write(value.`config`, buf)
+            FfiConverterString.write(value.`key`, buf)
+            FfiConverterTypeFacetDisplayHint.write(value.`config`, buf)
     }
 }
 
+
+
 sealed class CameraOverlay {
-
+    
     object Grid : CameraOverlay()
-
+    
+    
     data class QrBounds(
-        val `bounds`: org.example.daybook.uniffi.CameraNormalizedRect,
-        val `frameWidthPx`: kotlin.UInt,
-        val `frameHeightPx`: kotlin.UInt,
-    ) : CameraOverlay() {
+        val `bounds`: org.example.daybook.uniffi.CameraNormalizedRect, 
+        val `frameWidthPx`: kotlin.UInt, 
+        val `frameHeightPx`: kotlin.UInt) : CameraOverlay()
+        
+    {
+        
 
         companion object
     }
+    
+
+    
+
+    
+    
+
 
     companion object
 }
@@ -11886,45 +11883,43 @@ sealed class CameraOverlay {
 /**
  * @suppress
  */
-public object FfiConverterTypeCameraOverlay : FfiConverterRustBuffer<CameraOverlay> {
-    override fun read(buf: ByteBuffer): CameraOverlay = when (buf.getInt()) {
-        1 -> CameraOverlay.Grid
-
-        2 -> CameraOverlay.QrBounds(
-            FfiConverterTypeCameraNormalizedRect.read(buf),
-            FfiConverterUInt.read(buf),
-            FfiConverterUInt.read(buf),
-        )
-
-        else -> throw RuntimeException("invalid enum value, something is very wrong!!")
+public object FfiConverterTypeCameraOverlay : FfiConverterRustBuffer<CameraOverlay>{
+    override fun read(buf: ByteBuffer): CameraOverlay {
+        return when(buf.getInt()) {
+            1 -> CameraOverlay.Grid
+            2 -> CameraOverlay.QrBounds(
+                FfiConverterTypeCameraNormalizedRect.read(buf),
+                FfiConverterUInt.read(buf),
+                FfiConverterUInt.read(buf),
+                )
+            else -> throw RuntimeException("invalid enum value, something is very wrong!!")
+        }
     }
 
-    override fun allocationSize(value: CameraOverlay) = when (value) {
+    override fun allocationSize(value: CameraOverlay) = when(value) {
         is CameraOverlay.Grid -> {
             // Add the size for the Int that specifies the variant plus the size needed for all fields
             (
                 4UL
-                )
+            )
         }
-
         is CameraOverlay.QrBounds -> {
             // Add the size for the Int that specifies the variant plus the size needed for all fields
             (
-                4UL +
-                    FfiConverterTypeCameraNormalizedRect.allocationSize(value.`bounds`) +
-                    FfiConverterUInt.allocationSize(value.`frameWidthPx`) +
-                    FfiConverterUInt.allocationSize(value.`frameHeightPx`)
-                )
+                4UL
+                + FfiConverterTypeCameraNormalizedRect.allocationSize(value.`bounds`)
+                + FfiConverterUInt.allocationSize(value.`frameWidthPx`)
+                + FfiConverterUInt.allocationSize(value.`frameHeightPx`)
+            )
         }
     }
 
     override fun write(value: CameraOverlay, buf: ByteBuffer) {
-        when (value) {
+        when(value) {
             is CameraOverlay.Grid -> {
                 buf.putInt(1)
                 Unit
             }
-
             is CameraOverlay.QrBounds -> {
                 buf.putInt(2)
                 FfiConverterTypeCameraNormalizedRect.write(value.`bounds`, buf)
@@ -11936,19 +11931,27 @@ public object FfiConverterTypeCameraOverlay : FfiConverterRustBuffer<CameraOverl
     }
 }
 
-enum class CameraPreviewFrameEncoding {
 
+
+
+
+
+enum class CameraPreviewFrameEncoding {
+    
     JPEG,
-    RGB24,
-    ;
+    RGB24;
+
+    
+
 
     companion object
 }
 
+
 /**
  * @suppress
  */
-public object FfiConverterTypeCameraPreviewFrameEncoding : FfiConverterRustBuffer<CameraPreviewFrameEncoding> {
+public object FfiConverterTypeCameraPreviewFrameEncoding: FfiConverterRustBuffer<CameraPreviewFrameEncoding> {
     override fun read(buf: ByteBuffer) = try {
         CameraPreviewFrameEncoding.values()[buf.getInt() - 1]
     } catch (e: IndexOutOfBoundsException) {
@@ -11962,10 +11965,15 @@ public object FfiConverterTypeCameraPreviewFrameEncoding : FfiConverterRustBuffe
     }
 }
 
+
+
+
+
+
 /**
  * @suppress
  */
-public object FfiConverterOptionalString : FfiConverterRustBuffer<kotlin.String?> {
+public object FfiConverterOptionalString: FfiConverterRustBuffer<kotlin.String?> {
     override fun read(buf: ByteBuffer): kotlin.String? {
         if (buf.get().toInt() == 0) {
             return null
@@ -11991,10 +11999,13 @@ public object FfiConverterOptionalString : FfiConverterRustBuffer<kotlin.String?
     }
 }
 
+
+
+
 /**
  * @suppress
  */
-public object FfiConverterOptionalTypeDocBundle : FfiConverterRustBuffer<DocBundle?> {
+public object FfiConverterOptionalTypeDocBundle: FfiConverterRustBuffer<DocBundle?> {
     override fun read(buf: ByteBuffer): DocBundle? {
         if (buf.get().toInt() == 0) {
             return null
@@ -12020,10 +12031,13 @@ public object FfiConverterOptionalTypeDocBundle : FfiConverterRustBuffer<DocBund
     }
 }
 
+
+
+
 /**
  * @suppress
  */
-public object FfiConverterOptionalTypeDocEntry : FfiConverterRustBuffer<DocEntry?> {
+public object FfiConverterOptionalTypeDocEntry: FfiConverterRustBuffer<DocEntry?> {
     override fun read(buf: ByteBuffer): DocEntry? {
         if (buf.get().toInt() == 0) {
             return null
@@ -12049,10 +12063,13 @@ public object FfiConverterOptionalTypeDocEntry : FfiConverterRustBuffer<DocEntry
     }
 }
 
+
+
+
 /**
  * @suppress
  */
-public object FfiConverterOptionalTypePanel : FfiConverterRustBuffer<Panel?> {
+public object FfiConverterOptionalTypePanel: FfiConverterRustBuffer<Panel?> {
     override fun read(buf: ByteBuffer): Panel? {
         if (buf.get().toInt() == 0) {
             return null
@@ -12078,10 +12095,13 @@ public object FfiConverterOptionalTypePanel : FfiConverterRustBuffer<Panel?> {
     }
 }
 
+
+
+
 /**
  * @suppress
  */
-public object FfiConverterOptionalTypeProgressTask : FfiConverterRustBuffer<ProgressTask?> {
+public object FfiConverterOptionalTypeProgressTask: FfiConverterRustBuffer<ProgressTask?> {
     override fun read(buf: ByteBuffer): ProgressTask? {
         if (buf.get().toInt() == 0) {
             return null
@@ -12107,10 +12127,13 @@ public object FfiConverterOptionalTypeProgressTask : FfiConverterRustBuffer<Prog
     }
 }
 
+
+
+
 /**
  * @suppress
  */
-public object FfiConverterOptionalTypeTab : FfiConverterRustBuffer<Tab?> {
+public object FfiConverterOptionalTypeTab: FfiConverterRustBuffer<Tab?> {
     override fun read(buf: ByteBuffer): Tab? {
         if (buf.get().toInt() == 0) {
             return null
@@ -12136,10 +12159,13 @@ public object FfiConverterOptionalTypeTab : FfiConverterRustBuffer<Tab?> {
     }
 }
 
+
+
+
 /**
  * @suppress
  */
-public object FfiConverterOptionalTypeTable : FfiConverterRustBuffer<Table?> {
+public object FfiConverterOptionalTypeTable: FfiConverterRustBuffer<Table?> {
     override fun read(buf: ByteBuffer): Table? {
         if (buf.get().toInt() == 0) {
             return null
@@ -12165,10 +12191,13 @@ public object FfiConverterOptionalTypeTable : FfiConverterRustBuffer<Table?> {
     }
 }
 
+
+
+
 /**
  * @suppress
  */
-public object FfiConverterOptionalTypeWindow : FfiConverterRustBuffer<Window?> {
+public object FfiConverterOptionalTypeWindow: FfiConverterRustBuffer<Window?> {
     override fun read(buf: ByteBuffer): Window? {
         if (buf.get().toInt() == 0) {
             return null
@@ -12194,10 +12223,13 @@ public object FfiConverterOptionalTypeWindow : FfiConverterRustBuffer<Window?> {
     }
 }
 
+
+
+
 /**
  * @suppress
  */
-public object FfiConverterOptionalTypeCameraPreviewFrame : FfiConverterRustBuffer<CameraPreviewFrame?> {
+public object FfiConverterOptionalTypeCameraPreviewFrame: FfiConverterRustBuffer<CameraPreviewFrame?> {
     override fun read(buf: ByteBuffer): CameraPreviewFrame? {
         if (buf.get().toInt() == 0) {
             return null
@@ -12223,10 +12255,13 @@ public object FfiConverterOptionalTypeCameraPreviewFrame : FfiConverterRustBuffe
     }
 }
 
+
+
+
 /**
  * @suppress
  */
-public object FfiConverterOptionalTypeDoc : FfiConverterRustBuffer<Doc?> {
+public object FfiConverterOptionalTypeDoc: FfiConverterRustBuffer<Doc?> {
     override fun read(buf: ByteBuffer): Doc? {
         if (buf.get().toInt() == 0) {
             return null
@@ -12252,10 +12287,13 @@ public object FfiConverterOptionalTypeDoc : FfiConverterRustBuffer<Doc?> {
     }
 }
 
+
+
+
 /**
  * @suppress
  */
-public object FfiConverterOptionalTypeFacetDisplayHint : FfiConverterRustBuffer<FacetDisplayHint?> {
+public object FfiConverterOptionalTypeFacetDisplayHint: FfiConverterRustBuffer<FacetDisplayHint?> {
     override fun read(buf: ByteBuffer): FacetDisplayHint? {
         if (buf.get().toInt() == 0) {
             return null
@@ -12281,10 +12319,13 @@ public object FfiConverterOptionalTypeFacetDisplayHint : FfiConverterRustBuffer<
     }
 }
 
+
+
+
 /**
  * @suppress
  */
-public object FfiConverterOptionalTypeProgressRetentionPolicy : FfiConverterRustBuffer<ProgressRetentionPolicy?> {
+public object FfiConverterOptionalTypeProgressRetentionPolicy: FfiConverterRustBuffer<ProgressRetentionPolicy?> {
     override fun read(buf: ByteBuffer): ProgressRetentionPolicy? {
         if (buf.get().toInt() == 0) {
             return null
@@ -12310,10 +12351,13 @@ public object FfiConverterOptionalTypeProgressRetentionPolicy : FfiConverterRust
     }
 }
 
+
+
+
 /**
  * @suppress
  */
-public object FfiConverterOptionalTypeChangeHashSet : FfiConverterRustBuffer<ChangeHashSet?> {
+public object FfiConverterOptionalTypeChangeHashSet: FfiConverterRustBuffer<ChangeHashSet?> {
     override fun read(buf: ByteBuffer): ChangeHashSet? {
         if (buf.get().toInt() == 0) {
             return null
@@ -12339,10 +12383,13 @@ public object FfiConverterOptionalTypeChangeHashSet : FfiConverterRustBuffer<Cha
     }
 }
 
+
+
+
 /**
  * @suppress
  */
-public object FfiConverterSequenceString : FfiConverterRustBuffer<List<kotlin.String>> {
+public object FfiConverterSequenceString: FfiConverterRustBuffer<List<kotlin.String>> {
     override fun read(buf: ByteBuffer): List<kotlin.String> {
         val len = buf.getInt()
         return List<kotlin.String>(len) {
@@ -12364,10 +12411,13 @@ public object FfiConverterSequenceString : FfiConverterRustBuffer<List<kotlin.St
     }
 }
 
+
+
+
 /**
  * @suppress
  */
-public object FfiConverterSequenceTypeDocNBranches : FfiConverterRustBuffer<List<DocNBranches>> {
+public object FfiConverterSequenceTypeDocNBranches: FfiConverterRustBuffer<List<DocNBranches>> {
     override fun read(buf: ByteBuffer): List<DocNBranches> {
         val len = buf.getInt()
         return List<DocNBranches>(len) {
@@ -12389,10 +12439,13 @@ public object FfiConverterSequenceTypeDocNBranches : FfiConverterRustBuffer<List
     }
 }
 
+
+
+
 /**
  * @suppress
  */
-public object FfiConverterSequenceTypePanel : FfiConverterRustBuffer<List<Panel>> {
+public object FfiConverterSequenceTypePanel: FfiConverterRustBuffer<List<Panel>> {
     override fun read(buf: ByteBuffer): List<Panel> {
         val len = buf.getInt()
         return List<Panel>(len) {
@@ -12414,10 +12467,13 @@ public object FfiConverterSequenceTypePanel : FfiConverterRustBuffer<List<Panel>
     }
 }
 
+
+
+
 /**
  * @suppress
  */
-public object FfiConverterSequenceTypeProgressTask : FfiConverterRustBuffer<List<ProgressTask>> {
+public object FfiConverterSequenceTypeProgressTask: FfiConverterRustBuffer<List<ProgressTask>> {
     override fun read(buf: ByteBuffer): List<ProgressTask> {
         val len = buf.getInt()
         return List<ProgressTask>(len) {
@@ -12439,10 +12495,13 @@ public object FfiConverterSequenceTypeProgressTask : FfiConverterRustBuffer<List
     }
 }
 
+
+
+
 /**
  * @suppress
  */
-public object FfiConverterSequenceTypeProgressUpdateEntry : FfiConverterRustBuffer<List<ProgressUpdateEntry>> {
+public object FfiConverterSequenceTypeProgressUpdateEntry: FfiConverterRustBuffer<List<ProgressUpdateEntry>> {
     override fun read(buf: ByteBuffer): List<ProgressUpdateEntry> {
         val len = buf.getInt()
         return List<ProgressUpdateEntry>(len) {
@@ -12464,10 +12523,13 @@ public object FfiConverterSequenceTypeProgressUpdateEntry : FfiConverterRustBuff
     }
 }
 
+
+
+
 /**
  * @suppress
  */
-public object FfiConverterSequenceTypeTab : FfiConverterRustBuffer<List<Tab>> {
+public object FfiConverterSequenceTypeTab: FfiConverterRustBuffer<List<Tab>> {
     override fun read(buf: ByteBuffer): List<Tab> {
         val len = buf.getInt()
         return List<Tab>(len) {
@@ -12489,10 +12551,13 @@ public object FfiConverterSequenceTypeTab : FfiConverterRustBuffer<List<Tab>> {
     }
 }
 
+
+
+
 /**
  * @suppress
  */
-public object FfiConverterSequenceTypeTable : FfiConverterRustBuffer<List<Table>> {
+public object FfiConverterSequenceTypeTable: FfiConverterRustBuffer<List<Table>> {
     override fun read(buf: ByteBuffer): List<Table> {
         val len = buf.getInt()
         return List<Table>(len) {
@@ -12514,10 +12579,13 @@ public object FfiConverterSequenceTypeTable : FfiConverterRustBuffer<List<Table>
     }
 }
 
+
+
+
 /**
  * @suppress
  */
-public object FfiConverterSequenceTypeUpdateDocArgsV2 : FfiConverterRustBuffer<List<UpdateDocArgsV2>> {
+public object FfiConverterSequenceTypeUpdateDocArgsV2: FfiConverterRustBuffer<List<UpdateDocArgsV2>> {
     override fun read(buf: ByteBuffer): List<UpdateDocArgsV2> {
         val len = buf.getInt()
         return List<UpdateDocArgsV2>(len) {
@@ -12539,10 +12607,13 @@ public object FfiConverterSequenceTypeUpdateDocArgsV2 : FfiConverterRustBuffer<L
     }
 }
 
+
+
+
 /**
  * @suppress
  */
-public object FfiConverterSequenceTypeWindow : FfiConverterRustBuffer<List<Window>> {
+public object FfiConverterSequenceTypeWindow: FfiConverterRustBuffer<List<Window>> {
     override fun read(buf: ByteBuffer): List<Window> {
         val len = buf.getInt()
         return List<Window>(len) {
@@ -12564,10 +12635,13 @@ public object FfiConverterSequenceTypeWindow : FfiConverterRustBuffer<List<Windo
     }
 }
 
+
+
+
 /**
  * @suppress
  */
-public object FfiConverterSequenceTypeCameraDeviceInfo : FfiConverterRustBuffer<List<CameraDeviceInfo>> {
+public object FfiConverterSequenceTypeCameraDeviceInfo: FfiConverterRustBuffer<List<CameraDeviceInfo>> {
     override fun read(buf: ByteBuffer): List<CameraDeviceInfo> {
         val len = buf.getInt()
         return List<CameraDeviceInfo>(len) {
@@ -12589,10 +12663,13 @@ public object FfiConverterSequenceTypeCameraDeviceInfo : FfiConverterRustBuffer<
     }
 }
 
+
+
+
 /**
  * @suppress
  */
-public object FfiConverterSequenceTypeAddDocArgs : FfiConverterRustBuffer<List<AddDocArgs>> {
+public object FfiConverterSequenceTypeAddDocArgs: FfiConverterRustBuffer<List<AddDocArgs>> {
     override fun read(buf: ByteBuffer): List<AddDocArgs> {
         val len = buf.getInt()
         return List<AddDocArgs>(len) {
@@ -12614,10 +12691,13 @@ public object FfiConverterSequenceTypeAddDocArgs : FfiConverterRustBuffer<List<A
     }
 }
 
+
+
+
 /**
  * @suppress
  */
-public object FfiConverterSequenceTypeCameraOverlay : FfiConverterRustBuffer<List<CameraOverlay>> {
+public object FfiConverterSequenceTypeCameraOverlay: FfiConverterRustBuffer<List<CameraOverlay>> {
     override fun read(buf: ByteBuffer): List<CameraOverlay> {
         val len = buf.getInt()
         return List<CameraOverlay>(len) {
@@ -12639,10 +12719,13 @@ public object FfiConverterSequenceTypeCameraOverlay : FfiConverterRustBuffer<Lis
     }
 }
 
+
+
+
 /**
  * @suppress
  */
-public object FfiConverterMapStringTypeFacetDisplayHint : FfiConverterRustBuffer<Map<kotlin.String, FacetDisplayHint>> {
+public object FfiConverterMapStringTypeFacetDisplayHint: FfiConverterRustBuffer<Map<kotlin.String, FacetDisplayHint>> {
     override fun read(buf: ByteBuffer): Map<kotlin.String, FacetDisplayHint> {
         val len = buf.getInt()
         return buildMap<kotlin.String, FacetDisplayHint>(len) {
@@ -12658,7 +12741,7 @@ public object FfiConverterMapStringTypeFacetDisplayHint : FfiConverterRustBuffer
         val spaceForMapSize = 4UL
         val spaceForChildren = value.map { (k, v) ->
             FfiConverterString.allocationSize(k) +
-                FfiConverterTypeFacetDisplayHint.allocationSize(v)
+            FfiConverterTypeFacetDisplayHint.allocationSize(v)
         }.sum()
         return spaceForMapSize + spaceForChildren
     }
@@ -12675,6 +12758,8 @@ public object FfiConverterMapStringTypeFacetDisplayHint : FfiConverterRustBuffer
     }
 }
 
+
+
 /**
  * Typealias from the type name used in the UDL file to the builtin type.  This
  * is needed because the UDL type name is used in function/method signatures.
@@ -12682,6 +12767,8 @@ public object FfiConverterMapStringTypeFacetDisplayHint : FfiConverterRustBuffer
  */
 public typealias ChangeHashSet = List<kotlin.String>
 public typealias FfiConverterTypeChangeHashSet = FfiConverterSequenceString
+
+
 
 /**
  * Typealias from the type name used in the UDL file to the builtin type.  This
@@ -12691,6 +12778,10 @@ public typealias FfiConverterTypeChangeHashSet = FfiConverterSequenceString
 public typealias Json = kotlin.String
 public typealias FfiConverterTypeJson = FfiConverterString
 
+
+
+
+
 /**
  * Typealias from the type name used in the UDL file to the custom type.  This
  * is needed because the UDL type name is used in function/method signatures.
@@ -12698,10 +12789,11 @@ public typealias FfiConverterTypeJson = FfiConverterString
  */
 public typealias Timestamp = Instant
 
+
 /**
  * @suppress
  */
-public object FfiConverterTypeTimestamp : FfiConverter<Timestamp, Long> {
+public object FfiConverterTypeTimestamp: FfiConverter<Timestamp, Long> {
     override fun lift(value: Long): Timestamp {
         val builtinValue = FfiConverterLong.lift(value)
         return Instant.fromEpochSeconds(builtinValue, 0)
@@ -12728,6 +12820,8 @@ public object FfiConverterTypeTimestamp : FfiConverter<Timestamp, Long> {
     }
 }
 
+
+
 /**
  * Typealias from the type name used in the UDL file to the builtin type.  This
  * is needed because the UDL type name is used in function/method signatures.
@@ -12735,6 +12829,8 @@ public object FfiConverterTypeTimestamp : FfiConverter<Timestamp, Long> {
  */
 public typealias Url = kotlin.String
 public typealias FfiConverterTypeUrl = FfiConverterString
+
+
 
 /**
  * Typealias from the type name used in the UDL file to the builtin type.  This
@@ -12744,6 +12840,10 @@ public typealias FfiConverterTypeUrl = FfiConverterString
 public typealias Utf8PathBuf = kotlin.String
 public typealias FfiConverterTypeUtf8PathBuf = FfiConverterString
 
+
+
+
+
 /**
  * Typealias from the type name used in the UDL file to the custom type.  This
  * is needed because the UDL type name is used in function/method signatures.
@@ -12751,10 +12851,11 @@ public typealias FfiConverterTypeUtf8PathBuf = FfiConverterString
  */
 public typealias Uuid = Uuid
 
+
 /**
  * @suppress
  */
-public object FfiConverterTypeUuid : FfiConverter<Uuid, RustBuffer.ByValue> {
+public object FfiConverterTypeUuid: FfiConverter<Uuid, RustBuffer.ByValue> {
     override fun lift(value: RustBuffer.ByValue): Uuid {
         val builtinValue = FfiConverterByteArray.lift(value)
         return Uuid.fromByteArray(builtinValue)
@@ -12780,3 +12881,70 @@ public object FfiConverterTypeUuid : FfiConverter<Uuid, RustBuffer.ByValue> {
         FfiConverterByteArray.write(builtinValue, buf)
     }
 }
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+

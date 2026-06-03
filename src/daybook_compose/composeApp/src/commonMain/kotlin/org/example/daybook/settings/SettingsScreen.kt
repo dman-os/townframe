@@ -25,11 +25,10 @@ import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import androidx.lifecycle.viewmodel.compose.viewModel
 import org.example.daybook.ConfigViewModel
-import org.example.daybook.DaybookScreenScaffold
 import org.example.daybook.LocalContainer
 import org.example.daybook.MltoolsBackendRow
 import org.example.daybook.MltoolsProvisionState
-import org.example.daybook.ScreenChromeSpec
+import org.example.daybook.layouts.DaybookScaffold
 import org.example.daybook.progress.ProgressAmountBlock
 import org.example.daybook.uniffi.core.ProgressTask
 import org.example.daybook.uniffi.core.ProgressTaskState
@@ -37,7 +36,7 @@ import org.example.daybook.uniffi.core.ProgressUpdateDeets
 
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
-fun SettingsScreen(chrome: ScreenChromeSpec, modifier: Modifier = Modifier) {
+fun SettingsScreen(modifier: Modifier = Modifier) {
     val container = LocalContainer.current
     val configVm = viewModel { ConfigViewModel(container.configRepo, container.progressRepo) }
 
@@ -48,8 +47,7 @@ fun SettingsScreen(chrome: ScreenChromeSpec, modifier: Modifier = Modifier) {
     val sidebarPos = "RIGHT"
     val sidebarAutoHide = false
 
-    DaybookScreenScaffold(
-        chrome = chrome,
+    DaybookScaffold(
         modifier = modifier,
     ) { scaffoldPadding ->
         Column(

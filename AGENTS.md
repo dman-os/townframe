@@ -145,4 +145,4 @@ Does the task graze by a FIXME seen in code, flag those ahead of time in case th
 - Never specify your own custom target dir like /tmp/target. Always use the target dir that is configured by default.
   - This also applies to GRADLE_HOME.
 - Always prefer cargo-nextest of cargo-test.
-_ Always prefer cargo-clippy over cargo-check.
+- Always prefer cargo-clippy over cargo-check.

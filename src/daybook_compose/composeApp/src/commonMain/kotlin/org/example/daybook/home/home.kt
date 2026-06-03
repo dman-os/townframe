@@ -24,10 +24,9 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.vector.ImageVector
 import androidx.compose.ui.unit.dp
-import org.example.daybook.DaybookScreenScaffold
 import org.example.daybook.LocalPermCtx
 import org.example.daybook.PermissionRequest
-import org.example.daybook.ScreenChromeSpec
+import org.example.daybook.layouts.DaybookScaffold
 
 data class HomeScreenConfig(val widgets: List<HomeWidgetConfig>)
 
@@ -54,9 +53,8 @@ enum class HomeIcon {
 }
 
 @Composable
-fun HomeScreen(config: HomeScreenConfig, chrome: ScreenChromeSpec, modifier: Modifier = Modifier) {
-    DaybookScreenScaffold(
-        chrome = chrome,
+fun HomeScreen(config: HomeScreenConfig, modifier: Modifier = Modifier) {
+    DaybookScaffold(
         modifier = modifier,
     ) { scaffoldPadding ->
         Column(

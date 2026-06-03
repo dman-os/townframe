@@ -185,6 +185,9 @@ private fun rememberWelcomeNavigationState(): WelcomeNavigationState {
 
 private suspend fun fetchDefaultParentDir(): Result<String> = try {
     val defaultParent = withAppFfiCtx { gcx -> gcx.defaultCloneParentDir().trim() }
+    if (defaultParent.isBlank()) {
+        return Result.failure(IllegalStateException("empty default parent"))
+    }
     Result.success(defaultParent)
 } catch (error: Throwable) {
     if (error is CancellationException) throw error
@@ -211,40 +214,14 @@ fun WelcomeFlowNavHost(
     onCreateRepoInitRequestChange: (String?) -> Unit,
     onPendingOpenRepoPath: (String) -> Unit,
     onPendingForgetRepoId: (String) -> Unit,
+    onExitRequest: () -> Unit,
 ) {
     val navState = rememberWelcomeNavigationState()
     val currentDestination = navState.currentDestination
     var pendingScannerOpen by remember { mutableStateOf(false) }
     val isAndroidPlatform = getPlatform().name.startsWith("Android")
-    val exitRequest = LocalAppExitRequest.current
 
-    val onNavBack: () -> Unit =
-        if (navState.backStack.size > 1) {
-            { navState.pop() }
-        } else {
-            { exitRequest?.invoke() }
-        }
-
-    val (title, subtitle) =
-        when (currentDestination) {
-            WelcomeNavKey.RepoDetail -> "Repository Details" to "Review before opening"
-
-            WelcomeNavKey.CreateRepo ->
-                "Create Repository" to
-                    if (isAndroidPlatform) "App-private storage" else "Choose name and location"
-
-            WelcomeNavKey.CloneUrl -> "Clone Repo" to "Enter a URL or scan a code"
-
-            WelcomeNavKey.CloneScanner -> "Scan Clone URL" to "Point camera at a QR code"
-
-            WelcomeNavKey.CloneLocation ->
-                "Clone Destination" to
-                    if (isAndroidPlatform) "App-private storage" else "Choose destination"
-
-            else -> "Welcome to Daybook" to "Select a repository to continue"
-        }
-
-    val onBack: (() -> Unit)? =
+    val currentBackAction: (() -> Unit)? =
         when (currentDestination) {
             WelcomeNavKey.RepoDetail -> {
                 {
@@ -291,6 +268,29 @@ fun WelcomeFlowNavHost(
 
             else -> null
         }
+
+    val onNavBack: () -> Unit = { currentBackAction?.invoke() ?: onExitRequest() }
+
+    val (title, subtitle) =
+        when (currentDestination) {
+            WelcomeNavKey.RepoDetail -> "Repository Details" to "Review before opening"
+
+            WelcomeNavKey.CreateRepo ->
+                "Create Repository" to
+                    if (isAndroidPlatform) "App-private storage" else "Choose name and location"
+
+            WelcomeNavKey.CloneUrl -> "Clone Repo" to "Enter a URL or scan a code"
+
+            WelcomeNavKey.CloneScanner -> "Scan Clone URL" to "Point camera at a QR code"
+
+            WelcomeNavKey.CloneLocation ->
+                "Clone Destination" to
+                    if (isAndroidPlatform) "App-private storage" else "Choose destination"
+
+            else -> "Welcome to Daybook" to "Select a repository to continue"
+        }
+
+    val onBack: (() -> Unit)? = currentBackAction
 
     WelcomeFlowScaffold(
         title = title,
@@ -872,9 +872,9 @@ private fun WelcomeScreen(
                 //     color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.6f),
                 // )
             } else {
-                Spacer(Modifier.width(16.dp))
+                Spacer(Modifier.height(8.dp))
                 HorizontalDivider()
-                Spacer(Modifier.width(15.dp))
+                Spacer(Modifier.height(8.dp))
                 LazyColumn(verticalArrangement = Arrangement.spacedBy(8.dp)) {
                     items(repos, key = { repo -> repo.id }) { repo ->
                         Surface(

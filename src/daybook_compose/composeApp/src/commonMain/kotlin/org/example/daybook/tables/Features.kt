@@ -24,6 +24,12 @@ fun destinationForFeatureKey(featureKey: String): DaybookNavKey? = when (feature
     else -> null
 }
 
+private fun DaybookNavigationState.navigateIfCurrentDiffers(destination: DaybookNavKey) {
+    if (currentDestination != destination) {
+        navigate(destination)
+    }
+}
+
 /**
  * All available features. This is the master list.
  */
@@ -34,8 +40,8 @@ fun rememberAllFeatures(navState: DaybookNavigationState): List<FeatureItem> = l
         icon = { Icon(Icons.Default.Home, contentDescription = "Home") },
         selectedIcon = { Icon(Icons.Default.Home, contentDescription = "Home") },
         label = "Home",
-        onActivate = { navState.navigate(DaybookNavKey.Home) },
-        onReselect = { navState.navigate(DaybookNavKey.Home) },
+        onActivate = { navState.navigateIfCurrentDiffers(DaybookNavKey.Home) },
+        onReselect = { navState.navigateIfCurrentDiffers(DaybookNavKey.Home) },
     ),
     FeatureItem(
         key = FeatureKeys.Capture,
@@ -52,16 +58,16 @@ fun rememberAllFeatures(navState: DaybookNavigationState): List<FeatureItem> = l
             Icon(Icons.AutoMirrored.Filled.LibraryBooks, contentDescription = "Drawer")
         },
         label = "Drawer",
-        onActivate = { navState.navigate(DaybookNavKey.Drawer) },
-        onReselect = { navState.navigate(DaybookNavKey.Drawer) },
+        onActivate = { navState.navigateIfCurrentDiffers(DaybookNavKey.Drawer) },
+        onReselect = { navState.navigateIfCurrentDiffers(DaybookNavKey.Drawer) },
     ),
     FeatureItem(
         key = FeatureKeys.Progress,
         icon = { Icon(Icons.Default.Notifications, contentDescription = "Progress") },
         selectedIcon = { Icon(Icons.Default.Notifications, contentDescription = "Progress") },
         label = "Progress",
-        onActivate = { navState.navigate(DaybookNavKey.Progress) },
-        onReselect = { navState.navigate(DaybookNavKey.Progress) },
+        onActivate = { navState.navigateIfCurrentDiffers(DaybookNavKey.Progress) },
+        onReselect = { navState.navigateIfCurrentDiffers(DaybookNavKey.Progress) },
     ),
 )
 
@@ -127,8 +133,8 @@ fun rememberMenuFeatures(navState: DaybookNavigationState, onShowCloneShare: () 
                 icon = { Icon(Icons.Default.Settings, contentDescription = "Settings") },
                 selectedIcon = { Icon(Icons.Default.Settings, contentDescription = "Settings") },
                 label = "Settings",
-                onActivate = { navState.navigate(DaybookNavKey.Settings) },
-                onReselect = { navState.navigate(DaybookNavKey.Settings) },
+                onActivate = { navState.navigateIfCurrentDiffers(DaybookNavKey.Settings) },
+                onReselect = { navState.navigateIfCurrentDiffers(DaybookNavKey.Settings) },
             ),
         )
 }

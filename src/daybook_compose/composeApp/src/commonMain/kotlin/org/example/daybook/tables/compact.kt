@@ -87,7 +87,8 @@ import kotlinx.coroutines.launch
 import org.example.daybook.DaybookContentType
 import org.example.daybook.ChromeState
 import org.example.daybook.ChromeStateTopAppBar
-import org.example.daybook.ScreenChromeSpec
+import org.example.daybook.layouts.ProvideScreenChromeSpec
+import org.example.daybook.layouts.ScreenChromeSpec
 import org.example.daybook.ConfigViewModel
 import org.example.daybook.LocalChromeStateManager
 import org.example.daybook.LocalContainer
@@ -787,11 +788,6 @@ fun CompactLayout(
                                 Box(modifier = Modifier.weight(1f, fill = true)) {
                                     Routes(
                                         modifier = Modifier.fillMaxSize(),
-                                        chrome = navState.currentChromeSpec(onBack = {
-                                            if (navState.backStack.size > 1) {
-                                                navState.pop()
-                                            }
-                                        }),
                                         navState = navState,
                                         onShowCloneShare = onShowCloneShare,
                                         contentType = contentType,
@@ -969,12 +965,15 @@ fun LeftDrawer(
 
         when (selectedPane) {
             1 -> {
-                ProgressList(
-                    chrome = ScreenChromeSpec(
+                ProvideScreenChromeSpec(
+                    ScreenChromeSpec(
                         topBar = ScreenChromeSpec.TopBarSpec(title = "Progress"),
                     ),
-                    modifier = Modifier.weight(1f).fillMaxWidth(),
-                )
+                ) {
+                    ProgressList(
+                        modifier = Modifier.weight(1f).fillMaxWidth(),
+                    )
+                }
             }
 
             else -> {

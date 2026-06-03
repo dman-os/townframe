@@ -56,9 +56,8 @@ import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.lifecycle.viewmodel.compose.viewModel
 import kotlinx.coroutines.delay
-import org.example.daybook.DaybookScreenScaffold
 import org.example.daybook.LocalContainer
-import org.example.daybook.ScreenChromeSpec
+import org.example.daybook.layouts.DaybookScaffold
 import org.example.daybook.uniffi.core.ProgressFinalState
 import org.example.daybook.uniffi.core.ProgressTask
 import org.example.daybook.uniffi.core.ProgressTaskState
@@ -66,13 +65,12 @@ import org.example.daybook.uniffi.core.ProgressUpdateDeets
 import org.example.daybook.uniffi.core.ProgressUpdateEntry
 
 @Composable
-fun ProgressList(chrome: ScreenChromeSpec, modifier: Modifier = Modifier) {
+fun ProgressList(modifier: Modifier = Modifier) {
     val progressRepo = LocalContainer.current.progressRepo
     val vm = viewModel { ProgressViewModel(progressRepo) }
     val state by vm.state.collectAsState()
 
-    DaybookScreenScaffold(
-        chrome = chrome,
+    DaybookScaffold(
         modifier = modifier,
     ) { scaffoldPadding ->
         val contentModifier = Modifier.fillMaxSize().padding(scaffoldPadding)
