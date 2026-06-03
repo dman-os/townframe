@@ -10,6 +10,7 @@ import androidx.savedstate.serialization.SavedStateConfiguration
 import kotlinx.serialization.Serializable
 import kotlinx.serialization.modules.SerializersModule
 import kotlinx.serialization.modules.polymorphic
+import org.example.daybook.ScreenChromeSpec
 
 @Serializable
 sealed interface DaybookNavKey : NavKey {
@@ -60,6 +61,15 @@ class DaybookNavigationState(val backStack: NavBackStack<NavKey>) {
     val currentDestination: DaybookNavKey?
         get() = backStack.lastOrNull() as? DaybookNavKey
 
+    fun currentChromeSpec(onBack: () -> Unit): ScreenChromeSpec = ScreenChromeSpec(
+        topBar =
+        ScreenChromeSpec.TopBarSpec(
+            title = currentDestination?.screenTitle(),
+            showBack = backStack.size > 1,
+            onBack = if (backStack.size > 1) onBack else null,
+        ),
+    )
+
     fun navigate(destination: DaybookNavKey) {
         backStack.add(destination)
     }
@@ -73,4 +83,15 @@ fun rememberDaybookNavigationState(): DaybookNavigationState {
     return remember(backStack) {
         DaybookNavigationState(backStack)
     }
+}
+
+fun DaybookNavKey.screenTitle(): String = when (this) {
+    DaybookNavKey.Home -> "Daybook"
+    DaybookNavKey.Capture -> "Capture"
+    DaybookNavKey.Tables -> "Tables"
+    DaybookNavKey.Progress -> "Progress"
+    DaybookNavKey.Settings -> "Settings"
+    DaybookNavKey.Drawer -> "Drawer"
+    DaybookNavKey.DocEditor -> "Doc Editor"
+    DaybookNavKey.CloneShare -> "Clone"
 }

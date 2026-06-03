@@ -56,7 +56,9 @@ import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.lifecycle.viewmodel.compose.viewModel
 import kotlinx.coroutines.delay
+import org.example.daybook.DaybookScreenScaffold
 import org.example.daybook.LocalContainer
+import org.example.daybook.ScreenChromeSpec
 import org.example.daybook.uniffi.core.ProgressFinalState
 import org.example.daybook.uniffi.core.ProgressTask
 import org.example.daybook.uniffi.core.ProgressTaskState
@@ -64,89 +66,102 @@ import org.example.daybook.uniffi.core.ProgressUpdateDeets
 import org.example.daybook.uniffi.core.ProgressUpdateEntry
 
 @Composable
-fun ProgressList(modifier: Modifier = Modifier) {
+fun ProgressList(chrome: ScreenChromeSpec, modifier: Modifier = Modifier) {
     val progressRepo = LocalContainer.current.progressRepo
     val vm = viewModel { ProgressViewModel(progressRepo) }
     val state by vm.state.collectAsState()
 
-    when (val data = state) {
-        is ProgressState.Loading -> {
-            Column(
-                modifier = modifier.fillMaxSize(),
-                horizontalAlignment = Alignment.CenterHorizontally,
-                verticalArrangement = Arrangement.Center,
-            ) {
-                CircularProgressIndicator()
-                Spacer(Modifier.height(12.dp))
-                Text("Loading progress", style = MaterialTheme.typography.titleMedium)
+    DaybookScreenScaffold(
+        chrome = chrome,
+        modifier = modifier,
+    ) { scaffoldPadding ->
+        val contentModifier = Modifier.fillMaxSize().padding(scaffoldPadding)
+        when (val data = state) {
+            is ProgressState.Loading -> {
+                Column(
+                    modifier = contentModifier,
+                    horizontalAlignment = Alignment.CenterHorizontally,
+                    verticalArrangement = Arrangement.Center,
+                ) {
+                    CircularProgressIndicator()
+                    Spacer(Modifier.height(12.dp))
+                    Text("Loading progress", style = MaterialTheme.typography.titleMedium)
+                }
             }
-        }
 
-        is ProgressState.Error -> {
-            Column(
-                modifier = modifier.fillMaxSize().padding(16.dp),
-                verticalArrangement = Arrangement.Center,
-            ) {
-                ElevatedCard {
-                    Column(Modifier.fillMaxWidth().padding(16.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
-                        Row(verticalAlignment = Alignment.CenterVertically) {
-                            Icon(Icons.Default.Error, contentDescription = null, tint = MaterialTheme.colorScheme.error)
-                            Spacer(Modifier.size(8.dp))
-                            Text("Progress unavailable", style = MaterialTheme.typography.titleMedium)
-                            Spacer(Modifier.weight(1f))
-                            IconButton(onClick = { vm.refresh() }) {
-                                Icon(Icons.Default.Refresh, contentDescription = "Retry")
+            is ProgressState.Error -> {
+                Column(
+                    modifier = contentModifier.padding(16.dp),
+                    verticalArrangement = Arrangement.Center,
+                ) {
+                    ElevatedCard {
+                        Column(
+                            Modifier.fillMaxWidth().padding(16.dp),
+                            verticalArrangement = Arrangement.spacedBy(8.dp),
+                        ) {
+                            Row(verticalAlignment = Alignment.CenterVertically) {
+                                Icon(
+                                    Icons.Default.Error,
+                                    contentDescription = null,
+                                    tint = MaterialTheme.colorScheme.error,
+                                )
+                                Spacer(Modifier.size(8.dp))
+                                Text("Progress unavailable", style = MaterialTheme.typography.titleMedium)
+                                Spacer(Modifier.weight(1f))
+                                IconButton(onClick = { vm.refresh() }) {
+                                    Icon(Icons.Default.Refresh, contentDescription = "Retry")
+                                }
                             }
+                            Text(
+                                data.error.message(),
+                                style = MaterialTheme.typography.bodyMedium,
+                                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                            )
                         }
+                    }
+                }
+            }
+
+            is ProgressState.Data -> {
+                val selectedTask = data.tasks.firstOrNull { it.id == data.selectedTaskId }
+                val activeCount = data.tasks.count { it.state == ProgressTaskState.ACTIVE }
+                Column(modifier = contentModifier.padding(12.dp)) {
+                    Row(
+                        modifier = Modifier.fillMaxWidth(),
+                        verticalAlignment = Alignment.CenterVertically,
+                    ) {
                         Text(
-                            data.error.message(),
+                            "$activeCount active • ${data.tasks.size} total",
                             style = MaterialTheme.typography.bodyMedium,
                             color = MaterialTheme.colorScheme.onSurfaceVariant,
                         )
+                        Spacer(Modifier.weight(1f))
+                        IconButton(onClick = { vm.refresh() }) {
+                            Icon(Icons.Default.Refresh, contentDescription = "Refresh")
+                        }
+                        IconButton(onClick = { vm.clearCompleted() }) {
+                            Icon(Icons.Default.Delete, contentDescription = "Clear completed")
+                        }
                     }
-                }
-            }
-        }
-
-        is ProgressState.Data -> {
-            val selectedTask = data.tasks.firstOrNull { it.id == data.selectedTaskId }
-            val activeCount = data.tasks.count { it.state == ProgressTaskState.ACTIVE }
-            Column(modifier = modifier.fillMaxSize().padding(12.dp)) {
-                Row(
-                    modifier = Modifier.fillMaxWidth(),
-                    verticalAlignment = Alignment.CenterVertically,
-                ) {
-                    Text(
-                        "$activeCount active • ${data.tasks.size} total",
-                        style = MaterialTheme.typography.bodyMedium,
-                        color = MaterialTheme.colorScheme.onSurfaceVariant,
-                    )
-                    Spacer(Modifier.weight(1f))
-                    IconButton(onClick = { vm.refresh() }) {
-                        Icon(Icons.Default.Refresh, contentDescription = "Refresh")
-                    }
-                    IconButton(onClick = { vm.clearCompleted() }) {
-                        Icon(Icons.Default.Delete, contentDescription = "Clear completed")
-                    }
-                }
-                if (selectedTask != null) {
-                    ProgressDetailScreen(
-                        modifier = Modifier.fillMaxWidth().weight(1f),
-                        task = selectedTask,
-                        updates = data.selectedTaskUpdates,
-                        onBack = { vm.selectTask(null) },
-                    )
-                } else {
-                    LazyColumn(
-                        modifier = Modifier.fillMaxWidth().weight(1f),
-                        verticalArrangement = Arrangement.spacedBy(8.dp),
-                    ) {
-                        items(data.tasks, key = { it.id }) { task ->
-                            ProgressTaskRow(
-                                task = task,
-                                onClick = { vm.selectTask(task.id) },
-                                onDismiss = { vm.dismiss(task.id) },
-                            )
+                    if (selectedTask != null) {
+                        ProgressDetailScreen(
+                            modifier = Modifier.fillMaxWidth().weight(1f),
+                            task = selectedTask,
+                            updates = data.selectedTaskUpdates,
+                            onBack = { vm.selectTask(null) },
+                        )
+                    } else {
+                        LazyColumn(
+                            modifier = Modifier.fillMaxWidth().weight(1f),
+                            verticalArrangement = Arrangement.spacedBy(8.dp),
+                        ) {
+                            items(data.tasks, key = { it.id }) { task ->
+                                ProgressTaskRow(
+                                    task = task,
+                                    onClick = { vm.selectTask(task.id) },
+                                    onDismiss = { vm.dismiss(task.id) },
+                                )
+                            }
                         }
                     }
                 }

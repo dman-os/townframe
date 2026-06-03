@@ -16,13 +16,13 @@ import androidx.compose.runtime.*
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.unit.dp
-import org.example.daybook.ChromeState
 import org.example.daybook.DaybookContentType
+import org.example.daybook.DaybookScreenScaffold
 import org.example.daybook.DocEditorStoreViewModel
 import org.example.daybook.DocListState
 import org.example.daybook.DrawerViewModel
 import org.example.daybook.LocalDocEditorStore
-import org.example.daybook.ProvideChromeState
+import org.example.daybook.ScreenChromeSpec
 import org.example.daybook.tables.DockableRegion
 import org.example.daybook.ui.DocEditor
 import org.example.daybook.ui.DocFacetSidebar
@@ -95,10 +95,18 @@ private fun DrawerDocEditorContent(
 }
 
 @Composable
-fun DrawerScreen(drawerVm: DrawerViewModel, onOpenDoc: (String) -> Unit, modifier: Modifier = Modifier) {
+fun DrawerScreen(
+    drawerVm: DrawerViewModel,
+    onOpenDoc: (String) -> Unit,
+    chrome: ScreenChromeSpec,
+    modifier: Modifier = Modifier,
+) {
     val docEditorStore: DocEditorStoreViewModel = LocalDocEditorStore.current
     val selectedDocId by docEditorStore.selectedDocId.collectAsState()
-    ProvideChromeState(ChromeState(title = "Drawer")) {
+    DaybookScreenScaffold(
+        chrome = chrome,
+        modifier = modifier,
+    ) { scaffoldPadding ->
         DocList(
             drawerViewModel = drawerVm,
             selectedDocId = selectedDocId,
@@ -106,13 +114,15 @@ fun DrawerScreen(drawerVm: DrawerViewModel, onOpenDoc: (String) -> Unit, modifie
                 docEditorStore.selectDoc(docId)
                 onOpenDoc(docId)
             },
-            modifier = modifier,
+            modifier = Modifier
+                .padding(scaffoldPadding)
+                .padding(horizontal = 16.dp, vertical = 12.dp),
         )
     }
 }
 
 @Composable
-fun DocEditorScreen(contentType: DaybookContentType, modifier: Modifier = Modifier) {
+fun DocEditorScreen(contentType: DaybookContentType, chrome: ScreenChromeSpec, modifier: Modifier = Modifier) {
     val docEditorStore: DocEditorStoreViewModel = LocalDocEditorStore.current
     val selectedDocId by docEditorStore.selectedDocId.collectAsState()
     val selectedController by docEditorStore.selectedController.collectAsState()
@@ -128,19 +138,25 @@ fun DocEditorScreen(contentType: DaybookContentType, modifier: Modifier = Modifi
         }
     }
 
-    Box(
-        modifier =
-        modifier
-            .fillMaxSize()
-            .background(MaterialTheme.colorScheme.surface),
-    ) {
-        DrawerDocEditorContent(
-            controller = selectedController,
-            selectedDocId = selectedDocId,
-            modifier = Modifier.fillMaxSize(),
-            showFacetSidebar = contentType == DaybookContentType.LIST_AND_DETAIL,
-            showInlineFacetRack = contentType != DaybookContentType.LIST_AND_DETAIL,
-        )
+    DaybookScreenScaffold(
+        chrome = chrome,
+        modifier = modifier,
+    ) { scaffoldPadding ->
+        Box(
+            modifier =
+            Modifier
+                .fillMaxSize()
+                .padding(scaffoldPadding)
+                .background(MaterialTheme.colorScheme.surface),
+        ) {
+            DrawerDocEditorContent(
+                controller = selectedController,
+                selectedDocId = selectedDocId,
+                modifier = Modifier.fillMaxSize(),
+                showFacetSidebar = contentType == DaybookContentType.LIST_AND_DETAIL,
+                showInlineFacetRack = contentType != DaybookContentType.LIST_AND_DETAIL,
+            )
+        }
     }
 }
 

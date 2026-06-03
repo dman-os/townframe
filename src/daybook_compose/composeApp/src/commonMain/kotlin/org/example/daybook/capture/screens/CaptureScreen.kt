@@ -23,9 +23,11 @@ import kotlinx.coroutines.flow.asSharedFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.launch
 import org.example.daybook.ChromeState
+import org.example.daybook.DaybookScreenScaffold
 import org.example.daybook.LocalContainer
 import org.example.daybook.MainFeatureActionButton
 import org.example.daybook.ProvideChromeState
+import org.example.daybook.ScreenChromeSpec
 import org.example.daybook.TablesState
 import org.example.daybook.TablesViewModel
 import org.example.daybook.capture.CaptureNavActions
@@ -259,7 +261,7 @@ class CaptureScreenViewModel(
 }
 
 @Composable
-fun CaptureScreen(modifier: Modifier = Modifier, initialDocId: String? = null) {
+fun CaptureScreen(chrome: ScreenChromeSpec, modifier: Modifier = Modifier, initialDocId: String? = null) {
     val container = LocalContainer.current
     val tablesVm = viewModel { TablesViewModel(container.tablesRepo) }
     val vm =
@@ -326,71 +328,76 @@ fun CaptureScreen(modifier: Modifier = Modifier, initialDocId: String? = null) {
             }
         }
 
-    ProvideChromeState(chromeState) {
-        Box(modifier = modifier.fillMaxSize()) {
-            when (captureMode) {
-                CaptureMode.CAMERA -> {
-                    DaybookCameraViewport(
-                        cameraPreviewFfi = container.cameraPreviewFfi,
-                        onImageSaved = { byteArray ->
-                            vm.saveImage(byteArray)
-                        },
-                    )
-                }
+    DaybookScreenScaffold(
+        chrome = chrome,
+        modifier = modifier,
+    ) { scaffoldPadding ->
+        ProvideChromeState(chromeState) {
+            Box(modifier = Modifier.fillMaxSize().padding(scaffoldPadding)) {
+                when (captureMode) {
+                    CaptureMode.CAMERA -> {
+                        DaybookCameraViewport(
+                            cameraPreviewFfi = container.cameraPreviewFfi,
+                            onImageSaved = { byteArray ->
+                                vm.saveImage(byteArray)
+                            },
+                        )
+                    }
 
-                CaptureMode.TEXT -> {
-                    DocEditor(
-                        controller = vm.editorController,
-                        modifier = Modifier.padding(16.dp),
-                    )
-                }
+                    CaptureMode.TEXT -> {
+                        DocEditor(
+                            controller = vm.editorController,
+                            modifier = Modifier.padding(16.dp),
+                        )
+                    }
 
-                CaptureMode.MIC -> {
-                    Box(modifier = Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
-                        Column(horizontalAlignment = Alignment.CenterHorizontally) {
-                            Icon(
-                                imageVector = Icons.Default.Mic,
-                                contentDescription = "Microphone",
-                                modifier = Modifier.size(64.dp),
-                            )
-                            Text(
-                                "Mic mode placeholder",
-                                style = MaterialTheme.typography.headlineMedium,
-                            )
+                    CaptureMode.MIC -> {
+                        Box(modifier = Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
+                            Column(horizontalAlignment = Alignment.CenterHorizontally) {
+                                Icon(
+                                    imageVector = Icons.Default.Mic,
+                                    contentDescription = "Microphone",
+                                    modifier = Modifier.size(64.dp),
+                                )
+                                Text(
+                                    "Mic mode placeholder",
+                                    style = MaterialTheme.typography.headlineMedium,
+                                )
+                            }
                         }
                     }
                 }
-            }
 
-            // Floating Action Buttons for mode switching
-            Column(
-                modifier =
-                Modifier
-                    .align(Alignment.BottomEnd)
-                    .padding(16.dp),
-                verticalArrangement = Arrangement.spacedBy(16.dp),
-            ) {
-                ModeFab(
-                    icon = Icons.Default.TextFields,
-                    selected = captureMode == CaptureMode.TEXT,
-                    onClick = { vm.setCaptureMode(CaptureMode.TEXT) },
-                )
-                ModeFab(
-                    icon = Icons.Default.CameraAlt,
-                    selected = captureMode == CaptureMode.CAMERA,
-                    onClick = { vm.setCaptureMode(CaptureMode.CAMERA) },
-                )
-                ModeFab(
-                    icon = Icons.Default.Mic,
-                    selected = captureMode == CaptureMode.MIC,
-                    onClick = { vm.setCaptureMode(CaptureMode.MIC) },
+                // Floating Action Buttons for mode switching
+                Column(
+                    modifier =
+                    Modifier
+                        .align(Alignment.BottomEnd)
+                        .padding(16.dp),
+                    verticalArrangement = Arrangement.spacedBy(16.dp),
+                ) {
+                    ModeFab(
+                        icon = Icons.Default.TextFields,
+                        selected = captureMode == CaptureMode.TEXT,
+                        onClick = { vm.setCaptureMode(CaptureMode.TEXT) },
+                    )
+                    ModeFab(
+                        icon = Icons.Default.CameraAlt,
+                        selected = captureMode == CaptureMode.CAMERA,
+                        onClick = { vm.setCaptureMode(CaptureMode.CAMERA) },
+                    )
+                    ModeFab(
+                        icon = Icons.Default.Mic,
+                        selected = captureMode == CaptureMode.MIC,
+                        onClick = { vm.setCaptureMode(CaptureMode.MIC) },
+                    )
+                }
+
+                SnackbarHost(
+                    hostState = snackbarHostState,
+                    modifier = Modifier.align(Alignment.BottomCenter).padding(bottom = 80.dp),
                 )
             }
-
-            SnackbarHost(
-                hostState = snackbarHostState,
-                modifier = Modifier.align(Alignment.BottomCenter).padding(bottom = 80.dp),
-            )
         }
     }
 }

@@ -4,8 +4,6 @@
 
 package org.example.daybook
 
-import androidx.compose.animation.EnterTransition
-import androidx.compose.animation.ExitTransition
 import androidx.compose.animation.core.FastOutSlowInEasing
 import androidx.compose.animation.core.RepeatMode
 import androidx.compose.animation.core.animateFloat
@@ -721,6 +719,14 @@ private fun defaultHomeScreenConfig(navState: DaybookNavigationState, onShowClon
                             navState.navigate(DaybookNavKey.Capture)
                         },
                     ),
+                    MenuNavItem(
+                        id = "drawer",
+                        label = "drawer",
+                        icon = HomeIcon.Drawer,
+                        onClick = {
+                            navState.navigate(DaybookNavKey.Drawer)
+                        },
+                    ),
                 ),
             ),
         ),
@@ -1411,7 +1417,7 @@ fun AdaptiveAppLayout(
 }
 
 @Composable
-fun TablesScreen(modifier: Modifier = Modifier) {
+fun TablesScreen(chrome: ScreenChromeSpec, modifier: Modifier = Modifier) {
     val tablesRepo = LocalContainer.current.tablesRepo
     val vm =
         viewModel {
@@ -1501,77 +1507,82 @@ fun TablesScreen(modifier: Modifier = Modifier) {
             )
         }
 
-    ProvideChromeState(chromeState) {
-        when (tablesState) {
-            is TablesState.Error -> {
-                Column(
-                    modifier = modifier,
-                    horizontalAlignment = Alignment.CenterHorizontally,
-                ) {
-                    Text("Error loading tables: ${tablesState.error.message()}")
+    DaybookScreenScaffold(
+        chrome = chrome,
+        modifier = modifier,
+    ) { scaffoldPadding ->
+        ProvideChromeState(chromeState) {
+            when (tablesState) {
+                is TablesState.Error -> {
+                    Column(
+                        modifier = Modifier.padding(scaffoldPadding),
+                        horizontalAlignment = Alignment.CenterHorizontally,
+                    ) {
+                        Text("Error loading tables: ${tablesState.error.message()}")
+                    }
                 }
-            }
 
-            is TablesState.Loading -> {
-                Column(
-                    modifier = modifier,
-                    horizontalAlignment = Alignment.CenterHorizontally,
-                ) {
-                    CircularProgressIndicator()
-                    Text("Loading tables...")
+                is TablesState.Loading -> {
+                    Column(
+                        modifier = Modifier.padding(scaffoldPadding),
+                        horizontalAlignment = Alignment.CenterHorizontally,
+                    ) {
+                        CircularProgressIndicator()
+                        Text("Loading tables...")
+                    }
                 }
-            }
 
-            is TablesState.Data -> {
-                Column(
-                    modifier = modifier.padding(16.dp),
-                ) {
-                    // Selected Table Info
-                    if (selectedTable != null) {
-                        Text(
-                            text = "Selected Table: ${selectedTable.title}",
-                            modifier = Modifier.padding(bottom = 16.dp),
-                        )
+                is TablesState.Data -> {
+                    Column(
+                        modifier = Modifier.padding(scaffoldPadding).padding(16.dp),
+                    ) {
+                        // Selected Table Info
+                        if (selectedTable != null) {
+                            Text(
+                                text = "Selected Table: ${selectedTable.title}",
+                                modifier = Modifier.padding(bottom = 16.dp),
+                            )
 
+                            Text(
+                                text = "Tabs in this table: ${tabsForSelectedTable.size}",
+                                modifier = Modifier.padding(bottom = 8.dp),
+                            )
+
+                            // Show tabs for selected table
+                            tabsForSelectedTable.forEach { tab ->
+                                Text(
+                                    text = "  • ${tab.title} (${tab.panels.size} panels)",
+                                    modifier = Modifier.padding(start = 16.dp, bottom = 4.dp),
+                                )
+                            }
+
+                            Spacer(modifier = Modifier.height(24.dp))
+                        }
+
+                        // Overall State Summary
                         Text(
-                            text = "Tabs in this table: ${tabsForSelectedTable.size}",
+                            text = "Overall State:",
                             modifier = Modifier.padding(bottom = 8.dp),
                         )
+                        Text("  • Windows: ${tablesState.windows.size}")
+                        Text("  • Tables: ${tablesState.tables.size}")
+                        Text("  • Tabs: ${tablesState.tabs.size}")
+                        Text("  • Panels: ${tablesState.panels.size}")
 
-                        // Show tabs for selected table
-                        tabsForSelectedTable.forEach { tab ->
+                        Spacer(modifier = Modifier.height(24.dp))
+
+                        // All Tables List
+                        Text(
+                            text = "All Tables:",
+                            modifier = Modifier.padding(bottom = 8.dp),
+                        )
+                        tablesState.tablesList.forEach { table ->
+                            val isSelected = table.id == selectedTableId
                             Text(
-                                text = "  • ${tab.title} (${tab.panels.size} panels)",
+                                text = "  ${if (isSelected) "→" else "•"} ${table.title} (${table.tabs.size} tabs)",
                                 modifier = Modifier.padding(start = 16.dp, bottom = 4.dp),
                             )
                         }
-
-                        Spacer(modifier = Modifier.height(24.dp))
-                    }
-
-                    // Overall State Summary
-                    Text(
-                        text = "Overall State:",
-                        modifier = Modifier.padding(bottom = 8.dp),
-                    )
-                    Text("  • Windows: ${tablesState.windows.size}")
-                    Text("  • Tables: ${tablesState.tables.size}")
-                    Text("  • Tabs: ${tablesState.tabs.size}")
-                    Text("  • Panels: ${tablesState.panels.size}")
-
-                    Spacer(modifier = Modifier.height(24.dp))
-
-                    // All Tables List
-                    Text(
-                        text = "All Tables:",
-                        modifier = Modifier.padding(bottom = 8.dp),
-                    )
-                    tablesState.tablesList.forEach { table ->
-                        val isSelected = table.id == selectedTableId
-                        Text(
-                            text = "  ${if (isSelected) "→" else "•"} ${table.title} (${table.tabs.size} tabs)",
-                            modifier = Modifier.padding(start = 16.dp, bottom = 4.dp),
-                        )
                     }
                 }
             }
@@ -1585,6 +1596,7 @@ fun Routes(
     contentType: DaybookContentType,
     extraAction: (() -> Unit)? = null,
     onShowCloneShare: () -> Unit = {},
+    chrome: ScreenChromeSpec,
     navState: DaybookNavigationState,
 ) {
     val drawerVm = LocalDrawerViewModel.current
@@ -1608,13 +1620,31 @@ fun Routes(
         onBack = onBack,
         sceneStrategies = listOf(bigDialogStrategy),
         transitionSpec = {
-            EnterTransition.None togetherWith ExitTransition.None
+            slideInHorizontally(
+                animationSpec = tween(240),
+                initialOffsetX = { fullWidth -> fullWidth },
+            ) togetherWith slideOutHorizontally(
+                animationSpec = tween(240),
+                targetOffsetX = { fullWidth -> -fullWidth },
+            )
         },
         popTransitionSpec = {
-            EnterTransition.None togetherWith ExitTransition.None
+            slideInHorizontally(
+                animationSpec = tween(240),
+                initialOffsetX = { fullWidth -> -fullWidth },
+            ) togetherWith slideOutHorizontally(
+                animationSpec = tween(240),
+                targetOffsetX = { fullWidth -> fullWidth },
+            )
         },
         predictivePopTransitionSpec = {
-            EnterTransition.None togetherWith ExitTransition.None
+            slideInHorizontally(
+                animationSpec = tween(240),
+                initialOffsetX = { fullWidth -> -fullWidth },
+            ) togetherWith slideOutHorizontally(
+                animationSpec = tween(240),
+                targetOffsetX = { fullWidth -> fullWidth },
+            )
         },
         entryDecorators = listOf(
             rememberSaveableStateHolderNavEntryDecorator(),
@@ -1623,15 +1653,14 @@ fun Routes(
         modifier = modifier,
         entryProvider = entryProvider {
             entry<DaybookNavKey.Home> {
-                ProvideChromeState(ChromeState.Empty) {
-                    HomeScreen(
-                        config = defaultHomeScreenConfig(
-                            navState = navState,
-                            onShowCloneShare = onShowCloneShare,
-                        ),
-                        modifier = modifier,
-                    )
-                }
+                HomeScreen(
+                    config = defaultHomeScreenConfig(
+                        navState = navState,
+                        onShowCloneShare = onShowCloneShare,
+                    ),
+                    chrome = chrome,
+                    modifier = modifier,
+                )
             }
             entry<DaybookNavKey.CloneShare>(
                 metadata = bigDialog(),
@@ -1639,55 +1668,46 @@ fun Routes(
                 CloneShareDialogContent(onClose = { navState.pop() })
             }
             entry<DaybookNavKey.Capture> {
-                CaptureScreen(modifier = modifier)
+                CaptureScreen(
+                    chrome = chrome,
+                    modifier = modifier,
+                )
             }
             entry<DaybookNavKey.Tables> {
-                TablesScreen(modifier = modifier)
+                TablesScreen(
+                    chrome = chrome,
+                    modifier = modifier,
+                )
             }
             entry<DaybookNavKey.Progress> {
-                ProvideChromeState(ChromeState(title = "Progress", onBack = onBack)) {
-                    ProgressList(modifier = modifier)
-                }
+                ProgressList(
+                    chrome = chrome,
+                    modifier = modifier,
+                )
             }
             entry<DaybookNavKey.Settings> {
-                ProvideChromeState(ChromeState(title = "Settings", onBack = onBack)) {
-                    SettingsScreen(modifier = modifier)
-                }
+                SettingsScreen(
+                    chrome = chrome,
+                    modifier = modifier,
+                )
             }
             entry<DaybookNavKey.Drawer> {
-                ProvideChromeState(ChromeState(title = "Drawer", onBack = onBack)) {
-                    DrawerScreen(
-                        drawerVm = drawerVm,
-                        onOpenDoc = {
-                            navState.navigate(DaybookNavKey.DocEditor)
-                        },
-                        modifier = modifier,
-                    )
-                }
+                DrawerScreen(
+                    drawerVm = drawerVm,
+                    onOpenDoc = {
+                        navState.navigate(DaybookNavKey.DocEditor)
+                    },
+                    chrome = chrome,
+                    modifier = modifier,
+                )
             }
             entry<DaybookNavKey.DocEditor>(
-                metadata =
-                NavDisplay.transitionSpec {
-                    slideInHorizontally(
-                        animationSpec = tween(240),
-                        initialOffsetX = { fullWidth -> fullWidth },
-                    ) togetherWith slideOutHorizontally(
-                        animationSpec = tween(240),
-                        targetOffsetX = { fullWidth -> fullWidth },
-                    )
-                },
             ) {
-                ProvideChromeState(
-                    ChromeState(
-                        title = "Doc Editor",
-                        onBack = onBack,
-                    ),
-                ) {
-                    DocEditorScreen(
-                        contentType = contentType,
-                        modifier = modifier,
-                    )
-                }
+                DocEditorScreen(
+                    contentType = contentType,
+                    chrome = chrome,
+                    modifier = modifier,
+                )
             }
         },
     )

@@ -61,6 +61,7 @@ import org.example.daybook.LocalContainer
 import org.example.daybook.LocalDocEditorStore
 import org.example.daybook.LocalDrawerViewModel
 import org.example.daybook.Routes
+import org.example.daybook.ScreenChromeSpec
 import org.example.daybook.TablesState
 import org.example.daybook.TablesViewModel
 import org.example.daybook.dockable.DockableDivider
@@ -564,7 +565,12 @@ fun SidebarContent(navState: DaybookNavigationState, menuFeatures: List<FeatureI
                                 HorizontalDivider()
                                 when (selectedSidebarPane) {
                                     1 -> {
-                                        ProgressList(modifier = Modifier.weight(1f).fillMaxWidth())
+                                        ProgressList(
+                                            chrome = ScreenChromeSpec(
+                                                topBar = ScreenChromeSpec.TopBarSpec(title = "Progress"),
+                                            ),
+                                            modifier = Modifier.weight(1f).fillMaxWidth(),
+                                        )
                                     }
 
                                     else -> {
@@ -655,6 +661,11 @@ fun RenderLayoutPane(
             Routes(
                 extraAction = extraAction,
                 onShowCloneShare = onShowCloneShare,
+                chrome = navState.currentChromeSpec(onBack = {
+                    if (navState.backStack.size > 1) {
+                        navState.pop()
+                    }
+                }),
                 navState = navState,
                 modifier = modifier,
                 contentType = contentType,

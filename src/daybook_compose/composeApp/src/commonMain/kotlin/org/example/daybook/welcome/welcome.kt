@@ -839,8 +839,7 @@ private fun WelcomeScreen(
         onOpenRepo(selectedPath)
     }
 
-    val isDesktop = getPlatform().getScreenWidthDp().value >= 1000f
-    Box (
+    Box(
         modifier = Modifier.fillMaxSize().padding(24.dp),
         contentAlignment = Alignment.Center,
     ) {
@@ -865,7 +864,6 @@ private fun WelcomeScreen(
                 Spacer(Modifier.width(8.dp))
                 Text("clone repo")
             }
-
 
             if (repos.isEmpty()) {
                 // Text(

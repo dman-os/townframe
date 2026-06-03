@@ -9,23 +9,24 @@ import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.automirrored.filled.LibraryBooks
 import androidx.compose.material.icons.filled.CameraAlt
 import androidx.compose.material.icons.filled.EditNote
 import androidx.compose.material.icons.filled.Mic
 import androidx.compose.material.icons.filled.QrCode2
 import androidx.compose.material.icons.filled.Settings
 import androidx.compose.material3.Icon
-import androidx.compose.material3.Scaffold
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
-import androidx.compose.material3.TopAppBar
 import androidx.compose.runtime.Composable
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.vector.ImageVector
 import androidx.compose.ui.unit.dp
+import org.example.daybook.DaybookScreenScaffold
 import org.example.daybook.LocalPermCtx
 import org.example.daybook.PermissionRequest
+import org.example.daybook.ScreenChromeSpec
 
 data class HomeScreenConfig(val widgets: List<HomeWidgetConfig>)
 
@@ -48,19 +49,17 @@ enum class HomeIcon {
     NewDoc,
     Camera,
     Mic,
+    Drawer,
 }
 
 @Composable
-fun HomeScreen(config: HomeScreenConfig, modifier: Modifier = Modifier) {
-    Scaffold(
-        topBar = {
-            TopAppBar(
-                title = { Text("Daybook") },
-            )
-        },
+fun HomeScreen(config: HomeScreenConfig, chrome: ScreenChromeSpec, modifier: Modifier = Modifier) {
+    DaybookScreenScaffold(
+        chrome = chrome,
+        modifier = modifier,
     ) { scaffoldPadding ->
         Column(
-            modifier = modifier
+            modifier = Modifier
                 .fillMaxSize()
                 .padding(scaffoldPadding),
             verticalArrangement = Arrangement.Center,
@@ -130,4 +129,5 @@ private val HomeIcon.vector: ImageVector
             HomeIcon.NewDoc -> Icons.Filled.EditNote
             HomeIcon.Camera -> Icons.Filled.CameraAlt
             HomeIcon.Mic -> Icons.Filled.Mic
+            HomeIcon.Drawer -> Icons.AutoMirrored.Filled.LibraryBooks
         }

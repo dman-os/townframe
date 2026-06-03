@@ -19,6 +19,11 @@ fun ExpandedLayout(
         contentType = contentType,
         extraAction = extraAction,
         onShowCloneShare = onShowCloneShare,
+        chrome = navState.currentChromeSpec(onBack = {
+            if (navState.backStack.size > 1) {
+                navState.pop()
+            }
+        }),
         navState = navState,
     )
 }
