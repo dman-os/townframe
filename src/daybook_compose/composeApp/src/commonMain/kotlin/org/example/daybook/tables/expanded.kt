@@ -184,12 +184,12 @@ fun ExpandedLayout(
             extraAction = extraAction,
             chromeState = mergedChromeState,
             menuFeatures = menuFeatures,
-            modifier = Modifier.fillMaxSize(),
+            modifier = modifier.fillMaxSize(),
             contentType = contentType,
         )
     } else {
         // Loading state - show empty or default layout
-        Box(modifier = Modifier.fillMaxSize()) {
+        Box(modifier = modifier.fillMaxSize()) {
             Text("Loading layout...")
         }
     }
@@ -659,7 +659,6 @@ fun RenderLayoutPane(
         is WindowLayoutPaneVariant.Routes -> {
             // Render routes
             Routes(
-                extraAction = extraAction,
                 onShowCloneShare = onShowCloneShare,
                 chrome = navState.currentChromeSpec(onBack = {
                     if (navState.backStack.size > 1) {

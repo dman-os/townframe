@@ -1069,12 +1069,7 @@ public object FfiConverterByteArray : FfiConverterRustBuffer<ByteArray> {
     }
 }
 
-data class AddDocArgs(
-    var `branchPath`: Utf8PathBuf,
-    var `facets`: Map<FacetKey, Json>,
-    var `userPath`: Utf8PathBuf?,
-
-) {
+data class AddDocArgs(var `branchPath`: Utf8PathBuf, var `facets`: Map<FacetKey, Json>, var `userPath`: Utf8PathBuf?) {
 
     companion object
 }

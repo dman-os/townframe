@@ -1362,12 +1362,7 @@ public object FfiConverterTypeListenerRegistration : FfiConverter<ListenerRegist
     }
 }
 
-data class BranchDeleteTombstone(
-    var `vtag`: VersionTag,
-    var `branchDocId`: ObjId,
-    var `branchHeads`: ChangeHashSet,
-
-) {
+data class BranchDeleteTombstone(var `vtag`: VersionTag, var `branchDocId`: ObjId, var `branchHeads`: ChangeHashSet) {
 
     companion object
 }
@@ -1774,12 +1769,7 @@ public object FfiConverterTypeProgressTask : FfiConverterRustBuffer<ProgressTask
     }
 }
 
-data class ProgressUpdate(
-    var `at`: Timestamp,
-    var `title`: kotlin.String?,
-    var `deets`: ProgressUpdateDeets,
-
-) {
+data class ProgressUpdate(var `at`: Timestamp, var `title`: kotlin.String?, var `deets`: ProgressUpdateDeets) {
 
     companion object
 }
@@ -1807,12 +1797,7 @@ public object FfiConverterTypeProgressUpdate : FfiConverterRustBuffer<ProgressUp
     }
 }
 
-data class ProgressUpdateEntry(
-    var `sequence`: kotlin.Long,
-    var `at`: Timestamp,
-    var `update`: ProgressUpdate,
-
-) {
+data class ProgressUpdateEntry(var `sequence`: kotlin.Long, var `at`: Timestamp, var `update`: ProgressUpdate) {
 
     companion object
 }
@@ -1887,13 +1872,7 @@ public object FfiConverterTypeStoredBranchRef : FfiConverterRustBuffer<StoredBra
     }
 }
 
-data class Tab(
-    var `id`: Uuid,
-    var `title`: kotlin.String,
-    var `panels`: List<Uuid>,
-    var `selectedPanel`: Uuid?,
-
-) {
+data class Tab(var `id`: Uuid, var `title`: kotlin.String, var `panels`: List<Uuid>, var `selectedPanel`: Uuid?) {
 
     companion object
 }
@@ -2080,12 +2059,7 @@ public object FfiConverterTypeTablesPatches : FfiConverterRustBuffer<TablesPatch
     }
 }
 
-data class UpdateDocArgsV2(
-    var `branchPath`: Utf8PathBuf,
-    var `heads`: ChangeHashSet?,
-    var `patch`: DocPatch,
-
-) {
+data class UpdateDocArgsV2(var `branchPath`: Utf8PathBuf, var `heads`: ChangeHashSet?, var `patch`: DocPatch) {
 
     companion object
 }
@@ -3997,14 +3971,12 @@ sealed class WindowLayoutPaneVariant {
         companion object
     }
 
-    data class Routes(val v1: org.example.daybook.uniffi.core.WindowLayoutRoutes) :
-        WindowLayoutPaneVariant() {
+    data class Routes(val v1: org.example.daybook.uniffi.core.WindowLayoutRoutes) : WindowLayoutPaneVariant() {
 
         companion object
     }
 
-    data class Region(val v1: org.example.daybook.uniffi.core.WindowLayoutRegion) :
-        WindowLayoutPaneVariant() {
+    data class Region(val v1: org.example.daybook.uniffi.core.WindowLayoutRegion) : WindowLayoutPaneVariant() {
 
         companion object
     }

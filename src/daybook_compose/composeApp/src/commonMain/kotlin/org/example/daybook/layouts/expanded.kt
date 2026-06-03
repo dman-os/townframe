@@ -1,3 +1,5 @@
+@file:Suppress("FunctionNaming", "Filename")
+
 package org.example.daybook.layouts
 
 import androidx.compose.runtime.Composable
@@ -7,6 +9,7 @@ import org.example.daybook.Routes
 import org.example.daybook.navigation.DaybookNavigationState
 
 @Composable
+@Suppress("UnusedParameter")
 fun ExpandedLayout(
     modifier: Modifier = Modifier,
     navState: DaybookNavigationState,
@@ -17,7 +20,6 @@ fun ExpandedLayout(
     Routes(
         modifier = modifier,
         contentType = contentType,
-        extraAction = extraAction,
         onShowCloneShare = onShowCloneShare,
         chrome = navState.currentChromeSpec(onBack = {
             if (navState.backStack.size > 1) {

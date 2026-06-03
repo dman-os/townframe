@@ -1,4 +1,5 @@
 @file:OptIn(kotlin.time.ExperimentalTime::class, kotlin.uuid.ExperimentalUuidApi::class)
+@file:Suppress("ImportOrdering")
 
 package org.example.daybook.tables
 
@@ -7,7 +8,6 @@ import androidx.compose.animation.core.tween
 import androidx.compose.foundation.Canvas
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
-import org.example.daybook.DaybookContentType
 import androidx.compose.foundation.gestures.detectDragGestures
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
@@ -84,6 +84,7 @@ import kotlinx.coroutines.Job
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.launch
+import org.example.daybook.DaybookContentType
 import org.example.daybook.ChromeState
 import org.example.daybook.ChromeStateTopAppBar
 import org.example.daybook.ScreenChromeSpec
@@ -176,10 +177,10 @@ private val hoverHoldControllerFactory =
 
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
+@Suppress("LongMethod", "FunctionNaming", "CyclomaticComplexMethod")
 fun CompactLayout(
     modifier: Modifier = Modifier,
     navState: DaybookNavigationState,
-    extraAction: (() -> Unit)? = null,
     contentType: DaybookContentType,
     onShowCloneShare: () -> Unit = {},
 ) {
@@ -792,7 +793,6 @@ fun CompactLayout(
                                             }
                                         }),
                                         navState = navState,
-                                        extraAction = extraAction,
                                         onShowCloneShare = onShowCloneShare,
                                         contentType = contentType,
                                     )
@@ -932,6 +932,7 @@ private fun LeftDrawerEdgeHint(modifier: Modifier = Modifier) {
 }
 
 @Composable
+@Suppress("LongMethod", "FunctionNaming")
 fun LeftDrawer(
     onDismiss: () -> Unit,
     onAddTab: suspend () -> Unit,

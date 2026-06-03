@@ -1350,6 +1350,7 @@ private suspend fun shutdownAppContainer(appContainer: AppContainer) {
 }
 
 @Composable
+@Suppress("UnusedParameter", "FunctionNaming")
 fun AdaptiveAppLayout(
     modifier: Modifier = Modifier,
     navState: DaybookNavigationState,
@@ -1387,7 +1388,6 @@ fun AdaptiveAppLayout(
                 ExpandedLayout(
                     modifier = Modifier.fillMaxSize(),
                     navState = navState,
-                    extraAction = extraAction,
                     contentType = contentType,
                     onShowCloneShare = { navState.navigate(DaybookNavKey.CloneShare) },
                 )
@@ -1397,7 +1397,6 @@ fun AdaptiveAppLayout(
                 ExpandedLayout(
                     modifier = Modifier.fillMaxSize(),
                     navState = navState,
-                    extraAction = extraAction,
                     contentType = contentType,
                     onShowCloneShare = { navState.navigate(DaybookNavKey.CloneShare) },
                 )
@@ -1407,7 +1406,6 @@ fun AdaptiveAppLayout(
                 CompactLayout(
                     modifier = Modifier.fillMaxSize(),
                     navState = navState,
-                    extraAction = extraAction,
                     contentType = contentType,
                     onShowCloneShare = { navState.navigate(DaybookNavKey.CloneShare) },
                 )
@@ -1594,7 +1592,6 @@ fun TablesScreen(chrome: ScreenChromeSpec, modifier: Modifier = Modifier) {
 fun Routes(
     modifier: Modifier = Modifier,
     contentType: DaybookContentType,
-    extraAction: (() -> Unit)? = null,
     onShowCloneShare: () -> Unit = {},
     chrome: ScreenChromeSpec,
     navState: DaybookNavigationState,
@@ -1701,8 +1698,7 @@ fun Routes(
                     modifier = modifier,
                 )
             }
-            entry<DaybookNavKey.DocEditor>(
-            ) {
+            entry<DaybookNavKey.DocEditor> {
                 DocEditorScreen(
                     contentType = contentType,
                     chrome = chrome,
