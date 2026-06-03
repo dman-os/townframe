@@ -7,11 +7,8 @@ use big_repo::BigDocHandle;
 use big_repo::SharedPartStore;
 use daybook_types::doc::{UserPath, UserPathBuf};
 use fs4::fs_std::FileExt;
-use sqlx::sqlite::{SqliteConnectOptions, SqlitePoolOptions};
-use std::str::FromStr;
 
 const REPO_MARKER_FILE: &str = "db.repo.txt";
-const SQLITE_POOL_ACQUIRE_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(90);
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct RepoLayout {
@@ -258,10 +255,7 @@ impl RepoCtx {
         cleanup_blobs_staging_dir(&layout.blobs_root).await?;
         info!(repo_root = %layout.repo_root.display(), "repo open_inner: blobs staging cleaned");
 
-        let sql = SqlCtx::new(SqlConfig {
-            database_url: format!("sqlite://{}", layout.sqlite_path.display()),
-        })
-        .await?;
+        let sql = crate::app::open_sql_ctx(SqlConfig::file(layout.sqlite_path.clone())).await?;
         info!(
             repo_root = %layout.repo_root.display(),
             sqlite_path = %layout.sqlite_path.display(),
@@ -331,28 +325,8 @@ impl RepoCtx {
             local_actor_id,
         } = compute_user_info(&repo_id, &repo_user_id, &identity);
 
-        let big_repo_sqlite_url = format!(
-            "sqlite://{}",
-            layout.repo_root.join("big_repo.sqlite").display()
-        );
-        let connect_options = SqliteConnectOptions::from_str(&big_repo_sqlite_url)
-            .wrap_err_with(|| format!("invalid sqlite url: {big_repo_sqlite_url}"))?
-            .create_if_missing(true);
-        let big_repo_read_pool = SqlitePoolOptions::new()
-            .max_connections(4)
-            .acquire_timeout(SQLITE_POOL_ACQUIRE_TIMEOUT)
-            .connect_with(connect_options.clone())
-            .await
-            .wrap_err("failed connecting big repo sqlite read pool")?;
-        let big_repo_write_pool = SqlitePoolOptions::new()
-            .max_connections(1)
-            .acquire_timeout(SQLITE_POOL_ACQUIRE_TIMEOUT)
-            .connect_with(connect_options)
-            .await
-            .wrap_err("failed connecting big repo sqlite write pool")?;
         let part_store = big_sync::SqlitePartStore::new(
-            big_repo_read_pool,
-            big_repo_write_pool,
+            sql.clone(),
             repo_id.clone(),
             big_sync_core::BuckId::MAX_LEVEL,
         )
@@ -778,16 +752,14 @@ pub async fn is_repo_bootstrapped(repo_root: &std::path::Path) -> Res<bool> {
     if !layout.sqlite_path.exists() {
         return Ok(false);
     }
-    let sql = SqlCtx::new(SqlConfig {
-        database_url: format!("sqlite://{}", layout.sqlite_path.display()),
-    })
-    .await
-    .wrap_err_with(|| {
-        format!(
-            "failed opening repo sqlite while checking bootstrap state: {}",
-            layout.sqlite_path.display()
-        )
-    })?;
+    let sql = crate::app::open_sql_ctx(SqlConfig::file(layout.sqlite_path.clone()))
+        .await
+        .wrap_err_with(|| {
+            format!(
+                "failed opening repo sqlite while checking bootstrap state: {}",
+                layout.sqlite_path.display()
+            )
+        })?;
     let init_state = globals::get_init_state(&sql).await?;
     Ok(matches!(init_state, globals::InitState::Created { .. }))
 }
@@ -879,10 +851,10 @@ pub mod globals {
     pub async fn set_init_state(sql: &SqlCtx, state: &InitState) -> Res<()> {
         let json = serde_json::to_string(state)?;
         sqlx::query("INSERT INTO kvstore(key, value) VALUES (?1, ?2) ON CONFLICT(key) DO UPDATE SET value = excluded.value")
-        .bind(INIT_STATE_KEY)
-        .bind(&json)
-        .execute(&sql.write_pool)
-        .await?;
+            .bind(INIT_STATE_KEY)
+            .bind(&json)
+            .execute(&sql.write_pool)
+            .await?;
         Ok(())
     }
 
@@ -895,7 +867,7 @@ pub mod globals {
     }
 
     pub async fn set_string_global(sql: &SqlCtx, key: &str, value: &str) -> Res<()> {
-        let mut tx = sql.write_pool.begin().await?;
+        let mut tx = sql.write_pool.begin_with("BEGIN IMMEDIATE").await?;
 
         if let Some(existing) =
             sqlx::query_scalar::<_, String>("SELECT value FROM kvstore WHERE key = ?1")

@@ -209,10 +209,7 @@ pub async fn test_cx_with_options(
         local_user_path.clone(),
     )
     .await?;
-    let sql_ctx = crate::app::SqlCtx::new(crate::app::SqlConfig {
-        database_url: "sqlite::memory:".into(),
-    })
-    .await?;
+    let sql_ctx = crate::app::open_sql_ctx(crate::app::SqlConfig::memory()).await?;
     let (config_repo, config_stop) = crate::config::ConfigRepo::load(
         Arc::clone(&big_repo),
         app_doc_id,
@@ -407,15 +404,11 @@ pub async fn import_test_plug_oci(test_cx: &DaybookTestContext) -> Res<()> {
 }
 
 pub async fn boot_part_store(sqlite_url: &str) -> Res<(big_sync::Ctx, big_sync::StopToken)> {
-    let sql = crate::app::SqlCtx::new(crate::app::SqlConfig {
-        database_url: "sqlite::memory:".into(),
-    })
-    .await?;
+    let sql = sqlx_utils_rs::SqlCtx::url(sqlite_url).await?;
 
     let store = Arc::new(
         big_sync::SqlitePartStore::new(
-            sql.read_pool,
-            sql.write_pool,
+            sql,
             sqlite_url.to_owned(),
             big_sync_core::BuckId::MAX_LEVEL,
         )
@@ -464,11 +457,8 @@ pub async fn boot_disk_repo(
 )> {
     std::fs::create_dir_all(&path)
         .wrap_err_with(|| format!("failed creating disk repo path: {}", path.display()))?;
-    let (big_sync_host, big_sync_stop) = boot_part_store(&format!(
-        "sqlite://{}",
-        path.join("part_store.db").display()
-    ))
-    .await?;
+    let sqlite_url = format!("sqlite://{}", path.join("part_store.db").display());
+    let (big_sync_host, big_sync_stop) = boot_part_store(&sqlite_url).await?;
     let (repo, stop) = BigRepo::boot(
         big_repo::Config {
             peer_id: PeerId::new([7_u8; 32]),

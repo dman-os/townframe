@@ -71,7 +71,7 @@ pub fn run(cx: &mut WflowCtx) -> Result<(), JobErrorX> {
                     facet_key TEXT NOT NULL,
                     origin_heads TEXT NOT NULL,
                     UNIQUE(doc_id, facet_key)
-                );
+                ) STRICT;
                 "#,
             )
             .map_err(|err| JobErrorX::Terminal(ferr!("error initializing vector index: {err:?}")))?;

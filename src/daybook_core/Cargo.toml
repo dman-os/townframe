@@ -39,6 +39,7 @@ wflow = { workspace = true }
 big_sync.workspace = true
 big_sync_core = { workspace = true, features = ["automerge", "uniffi"] }
 big_repo.workspace = true
+sqlx_utils_rs.workspace = true
 
 #
 # encoding

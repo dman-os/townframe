@@ -41,10 +41,7 @@ fn local_branch(name: &str) -> BranchPathBuf {
 }
 
 async fn new_meta_store_sql() -> Res<crate::app::SqlCtx> {
-    crate::app::SqlCtx::new(crate::app::SqlConfig {
-        database_url: "sqlite::memory:".into(),
-    })
-    .await
+    crate::app::open_sql_ctx(crate::app::SqlConfig::memory()).await
 }
 
 #[tokio::test(flavor = "multi_thread")]

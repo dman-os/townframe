@@ -2,7 +2,7 @@ use crate::drawer::DrawerRepo;
 use crate::interlude::*;
 use crate::repos::Repo;
 use daybook_types::doc::{BranchPathBuf, ChangeHashSet, DocId, WellKnownFacetTag};
-use sqlx::{Sqlite, SqlitePool, Transaction};
+use sqlx::{Sqlite, Transaction};
 use tokio_util::sync::CancellationToken;
 
 const FACET_SET_LOCAL_STATE_ID: &str = "@daybook/wip/doc-facet-set-index";
@@ -25,7 +25,7 @@ pub struct DocFacetSetIndexRepo {
     pub cancel_token: CancellationToken,
     drawer_repo: Arc<DrawerRepo>,
     work_tx: tokio::sync::mpsc::UnboundedSender<DocFacetSetIndexWorkItem>,
-    db_pool: SqlitePool,
+    sql: SqlCtx,
 }
 
 impl Repo for DocFacetSetIndexRepo {
@@ -60,10 +60,10 @@ impl DocFacetSetIndexRepo {
         drawer_repo: Arc<DrawerRepo>,
         sqlite_local_state_repo: Arc<crate::local_state::SqliteLocalStateRepo>,
     ) -> Res<(Arc<Self>, DocFacetSetIndexStopToken)> {
-        let (_sqlite_file_path, db_pool) = sqlite_local_state_repo
-            .ensure_sqlite_pool(FACET_SET_LOCAL_STATE_ID)
+        let sql = sqlite_local_state_repo
+            .ensure_sqlite_ctx(FACET_SET_LOCAL_STATE_ID)
             .await?;
-        Self::init_schema(&db_pool).await?;
+        Self::init_schema(&sql).await?;
         let (work_tx, mut work_rx) = tokio::sync::mpsc::unbounded_channel();
 
         let registry = crate::repos::ListenersRegistry::new();
@@ -73,7 +73,7 @@ impl DocFacetSetIndexRepo {
             cancel_token: cancel_token.child_token(),
             drawer_repo: Arc::clone(&drawer_repo),
             work_tx,
-            db_pool,
+            sql,
         });
 
         let worker_handle = tokio::spawn({
@@ -104,15 +104,15 @@ impl DocFacetSetIndexRepo {
         ))
     }
 
-    async fn init_schema(db_pool: &SqlitePool) -> Res<()> {
+    async fn init_schema(sql: &SqlCtx) -> Res<()> {
         sqlx::query(
             r#"
             CREATE TABLE IF NOT EXISTS facet_set_docs (
                 doc_id TEXT PRIMARY KEY
-            )
+            ) STRICT
             "#,
         )
-        .execute(db_pool)
+        .execute(&sql.write_pool)
         .await?;
 
         sqlx::query(
@@ -120,10 +120,10 @@ impl DocFacetSetIndexRepo {
             CREATE TABLE IF NOT EXISTS facet_set_tags (
                 tag_id INTEGER PRIMARY KEY AUTOINCREMENT,
                 facet_tag TEXT NOT NULL UNIQUE
-            )
+            ) STRICT
             "#,
         )
-        .execute(db_pool)
+        .execute(&sql.write_pool)
         .await?;
 
         sqlx::query(
@@ -135,16 +135,16 @@ impl DocFacetSetIndexRepo {
                 PRIMARY KEY(doc_id, tag_id),
                 FOREIGN KEY(doc_id) REFERENCES facet_set_docs(doc_id) ON DELETE CASCADE,
                 FOREIGN KEY(tag_id) REFERENCES facet_set_tags(tag_id)
-            )
+            ) STRICT
             "#,
         )
-        .execute(db_pool)
+        .execute(&sql.write_pool)
         .await?;
 
         sqlx::query(
             "CREATE INDEX IF NOT EXISTS idx_facet_set_doc_tags_tag_id ON facet_set_doc_tags(tag_id)",
         )
-        .execute(db_pool)
+        .execute(&sql.write_pool)
         .await?;
 
         Ok(())
@@ -207,7 +207,7 @@ impl DocFacetSetIndexRepo {
             .collect();
         desired_tags.remove(WellKnownFacetTag::Dmeta.as_str());
 
-        let mut tx = self.db_pool.begin().await?;
+        let mut tx = self.sql.write_pool.begin_with("BEGIN IMMEDIATE").await?;
         sqlx::query("INSERT OR IGNORE INTO facet_set_docs (doc_id) VALUES (?1)")
             .bind(doc_id)
             .execute(tx.as_mut())
@@ -255,11 +255,11 @@ impl DocFacetSetIndexRepo {
     pub async fn delete_doc(&self, doc_id: &DocId) -> Res<()> {
         sqlx::query("DELETE FROM facet_set_doc_tags WHERE doc_id = ?1")
             .bind(doc_id)
-            .execute(&self.db_pool)
+            .execute(&self.sql.write_pool)
             .await?;
         sqlx::query("DELETE FROM facet_set_docs WHERE doc_id = ?1")
             .bind(doc_id)
-            .execute(&self.db_pool)
+            .execute(&self.sql.write_pool)
             .await?;
         Ok(())
     }
@@ -275,7 +275,7 @@ impl DocFacetSetIndexRepo {
             "#,
         )
         .bind(doc_id)
-        .fetch_all(&self.db_pool)
+        .fetch_all(&self.sql.read_pool)
         .await?;
         Ok(tags)
     }
@@ -291,7 +291,7 @@ impl DocFacetSetIndexRepo {
             "#,
         )
         .bind(facet_tag)
-        .fetch_all(&self.db_pool)
+        .fetch_all(&self.sql.read_pool)
         .await?;
 
         rows.into_iter()
@@ -318,7 +318,7 @@ impl DocFacetSetIndexRepo {
         )
         .bind(doc_id)
         .bind(facet_tag)
-        .fetch_optional(&self.db_pool)
+        .fetch_optional(&self.sql.read_pool)
         .await?;
         Ok(exists.is_some())
     }

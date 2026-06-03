@@ -45,6 +45,7 @@ tokio = { workspace = true, features = ["sync", "macros", "rt", "rt-multi-thread
 #
 # db
 sqlx = { workspace = true, features = ["sqlite", "runtime-tokio"] }
+sqlx_utils_rs.workspace = true
 
 #
 # actors

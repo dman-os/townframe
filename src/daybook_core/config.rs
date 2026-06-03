@@ -743,10 +743,7 @@ mod tests {
             local_user_path.clone(),
         )
         .await?;
-        let sql_ctx = crate::app::SqlCtx::new(crate::app::SqlConfig {
-            database_url: "sqlite::memory:".into(),
-        })
-        .await?;
+        let sql_ctx = crate::app::open_sql_ctx(crate::app::SqlConfig::memory()).await?;
         let (config_repo, config_stop) = ConfigRepo::load(
             Arc::clone(&big_repo),
             app_doc_id,

@@ -1,27 +1,24 @@
 use crate::interlude::*;
 use crate::store::{PersistedObjectState, PersistedState, StateStore};
 use sqlx::Row;
+use sqlx_utils_rs::SqlCtx;
 
 pub struct SqliteStateStore {
-    pool: sqlx::SqlitePool,
+    sql: SqlCtx,
 }
 
 impl SqliteStateStore {
     pub async fn open(path: &Path) -> Res<Self> {
-        use std::str::FromStr;
-
         if let Some(parent) = path.parent() {
             tokio::fs::create_dir_all(parent).await?;
         }
-        let database_url = format!("sqlite://{}", path.display());
-        let options =
-            sqlx::sqlite::SqliteConnectOptions::from_str(&database_url)?.create_if_missing(true);
-        let pool = sqlx::SqlitePool::connect_with(options).await?;
+        let sqlite_url = format!("sqlite://{}", path.display());
+        let sql = SqlCtx::url(&sqlite_url).await?;
 
         sqlx::query(
-            "CREATE TABLE IF NOT EXISTS pauperfuse_meta (key TEXT PRIMARY KEY, value TEXT NOT NULL)",
+            "CREATE TABLE IF NOT EXISTS pauperfuse_meta (key TEXT PRIMARY KEY, value TEXT NOT NULL) STRICT",
         )
-        .execute(&pool)
+        .execute(&sql.write_pool)
         .await?;
 
         sqlx::query(
@@ -30,12 +27,12 @@ impl SqliteStateStore {
                 relative_path TEXT NOT NULL, \
                 provider_hash TEXT, \
                 backend_hash TEXT\
-            )",
+            ) STRICT",
         )
-        .execute(&pool)
+        .execute(&sql.write_pool)
         .await?;
 
-        Ok(Self { pool })
+        Ok(Self { sql })
     }
 
     pub async fn load_state(&self) -> Res<PersistedState> {
@@ -46,7 +43,7 @@ impl SqliteStateStore {
         let rows = sqlx::query(
             "SELECT doc_id, relative_path, provider_hash, backend_hash FROM pauperfuse_object_state",
         )
-        .fetch_all(&self.pool)
+        .fetch_all(&self.sql.read_pool)
         .await?;
 
         for row in rows {
@@ -73,7 +70,7 @@ impl SqliteStateStore {
     }
 
     pub async fn save_state(&self, state: &PersistedState) -> Res<()> {
-        let mut tx = self.pool.begin().await?;
+        let mut tx = self.sql.write_pool.begin_with("BEGIN IMMEDIATE").await?;
 
         sqlx::query(
             "INSERT INTO pauperfuse_meta(key, value) VALUES (?1, ?2) \
@@ -117,7 +114,7 @@ impl SqliteStateStore {
     async fn load_meta_u64(&self, key: &str, fallback: u64) -> Res<u64> {
         let row = sqlx::query("SELECT value FROM pauperfuse_meta WHERE key = ?1")
             .bind(key)
-            .fetch_optional(&self.pool)
+            .fetch_optional(&self.sql.read_pool)
             .await?;
 
         let value = match row {

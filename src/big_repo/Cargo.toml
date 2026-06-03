@@ -67,3 +67,4 @@ pretty_assertions = "1.4.1"
 
 [dev-dependencies]
 big_sync = { workspace = true, features = ["test-support"] }
+sqlx_utils_rs.workspace = true

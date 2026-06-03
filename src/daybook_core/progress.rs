@@ -530,7 +530,7 @@ impl ProgressWorker {
                 latest_update_sequence INTEGER,
                 latest_update_at_unix_secs INTEGER,
                 latest_update_json TEXT
-            )
+            ) STRICT
             "#,
         )
         .execute(&self.repo_sql.write_pool)
@@ -544,7 +544,7 @@ impl ProgressWorker {
                 at_unix_secs INTEGER NOT NULL,
                 update_json TEXT NOT NULL,
                 FOREIGN KEY(task_id) REFERENCES progress_tasks(id) ON DELETE CASCADE
-            )
+            ) STRICT
             "#,
         )
         .execute(&self.repo_sql.write_pool)
@@ -557,7 +557,7 @@ impl ProgressWorker {
                 tag_path TEXT NOT NULL,
                 PRIMARY KEY(task_id, tag_path),
                 FOREIGN KEY(task_id) REFERENCES progress_tasks(id) ON DELETE CASCADE
-            )
+            ) STRICT
             "#,
         )
         .execute(&self.repo_sql.write_pool)
@@ -969,7 +969,11 @@ impl ProgressWorker {
             return Ok(());
         }
 
-        let mut tx = self.repo_sql.write_pool.begin().await?;
+        let mut tx = self
+            .repo_sql
+            .write_pool
+            .begin_with("BEGIN IMMEDIATE")
+            .await?;
 
         let deleted_tasks: Vec<String> = self.persist.deleted_tasks.drain().collect();
         for task_id in deleted_tasks {

@@ -2,64 +2,54 @@ use crate::interlude::*;
 
 use crate::repo::RepoCtx;
 
-use sqlx::sqlite::{SqliteConnectOptions, SqliteJournalMode, SqlitePoolOptions};
-use sqlx::SqlitePool;
-use std::str::FromStr;
-
-const SQLITE_POOL_ACQUIRE_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(90);
-const SQLITE_BUSY_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(90);
-
-#[derive(Clone)]
-pub struct SqlCtx {
-    pub write_pool: SqlitePool,
-    pub read_pool: SqlitePool,
-}
+pub use sqlx_utils_rs::SqlCtx;
+use std::path::PathBuf;
 
 #[derive(Debug, Clone)]
 pub struct SqlConfig {
-    pub database_url: String,
+    database_path: Option<PathBuf>,
 }
 
-impl SqlCtx {
-    pub async fn new(config: SqlConfig) -> Res<Self> {
-        if !config.database_url.starts_with("sqlite::memory:") {
-            if let Some(path) = config.database_url.strip_prefix("sqlite://") {
-                if let Some(parent) = std::path::Path::new(path).parent() {
-                    std::fs::create_dir_all(parent).wrap_err_with(|| {
-                        format!("Failed to create database directory: {}", parent.display())
-                    })?;
-                }
-            }
+impl SqlConfig {
+    pub fn file(database_path: impl Into<PathBuf>) -> Self {
+        Self {
+            database_path: Some(database_path.into()),
         }
-
-        let db_pool = SqlitePoolOptions::new()
-            .max_connections(1)
-            .acquire_timeout(SQLITE_POOL_ACQUIRE_TIMEOUT)
-            .connect_with(
-                SqliteConnectOptions::from_str(&config.database_url)?
-                    .journal_mode(SqliteJournalMode::Wal)
-                    .busy_timeout(SQLITE_BUSY_TIMEOUT)
-                    .create_if_missing(true),
-            )
-            .await
-            .wrap_err("error initializing sqlite db")?;
-
-        sqlx::query(
-            r#"
-                CREATE TABLE IF NOT EXISTS kvstore (
-                    key TEXT PRIMARY KEY,
-                    value TEXT NOT NULL
-                )
-                "#,
-        )
-        .execute(&db_pool)
-        .await?;
-
-        Ok(Self {
-            write_pool: db_pool.clone(),
-            read_pool: db_pool,
-        })
     }
+
+    pub fn memory() -> Self {
+        Self {
+            database_path: None,
+        }
+    }
+}
+
+pub async fn open_sql_ctx(config: SqlConfig) -> Res<SqlCtx> {
+    let sql = match config.database_path {
+        Some(database_path) => {
+            if let Some(parent) = database_path.parent() {
+                std::fs::create_dir_all(parent).wrap_err_with(|| {
+                    format!("Failed to create database directory: {}", parent.display())
+                })?;
+            }
+            let database_url = format!("sqlite://{}", database_path.display());
+            SqlCtx::url(&database_url).await?
+        }
+        None => SqlCtx::memory().await?,
+    };
+
+    sqlx::query(
+        r#"
+            CREATE TABLE IF NOT EXISTS kvstore (
+                key TEXT PRIMARY KEY,
+                value TEXT NOT NULL
+            ) STRICT
+            "#,
+    )
+    .execute(&sql.write_pool)
+    .await?;
+
+    Ok(sql)
 }
 
 #[derive(Debug, Clone)]
@@ -72,12 +62,7 @@ pub struct AppConfig {
 impl AppConfig {
     pub fn load() -> Res<Self> {
         let app_data_dir = app_data_dir()?;
-        let sql = SqlConfig {
-            database_url: format!(
-                "sqlite://{}",
-                app_data_dir.join("globals.sqlite.db").display()
-            ),
-        };
+        let sql = SqlConfig::file(app_data_dir.join("globals.sqlite.db"));
         Ok(Self {
             app_data_dir: app_data_dir.clone(),
             sql,
@@ -114,7 +99,7 @@ pub struct AppCtx {
 
 impl AppCtx {
     pub async fn new(config: AppConfig) -> Res<Self> {
-        let sql = SqlCtx::new(config.sql.clone()).await?;
+        let sql = open_sql_ctx(config.sql.clone()).await?;
         Ok(Self { config, sql })
     }
 

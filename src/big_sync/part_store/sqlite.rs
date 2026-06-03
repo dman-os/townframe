@@ -17,13 +17,13 @@ use future_form::{FutureForm, Sendable};
 #[cfg(test)]
 use futures::future::BoxFuture;
 use sqlx::{QueryBuilder, Row};
+use sqlx_utils_rs::SqlCtx;
 #[cfg(test)]
 use uuid::Uuid;
 
 #[derive(Clone)]
 pub struct SqlitePartStore {
-    read_pool: sqlx::SqlitePool,
-    write_pool: sqlx::SqlitePool,
+    sql: SqlCtx,
     scope_id: i64,
     bucket_depth: u8,
     _scope_key: Arc<str>,
@@ -105,18 +105,12 @@ impl BucketSummaryRow {
 }
 
 impl SqlitePartStore {
-    pub async fn new(
-        read_pool: sqlx::SqlitePool,
-        write_pool: sqlx::SqlitePool,
-        scope_key: impl Into<Arc<str>>,
-        bucket_depth: u8,
-    ) -> Res<Self> {
-        init_schema(&write_pool, bucket_depth).await?;
+    pub async fn new(sql: SqlCtx, scope_key: impl Into<Arc<str>>, bucket_depth: u8) -> Res<Self> {
+        init_schema(&sql.write_pool, bucket_depth).await?;
         let scope_key = scope_key.into();
-        let scope_id = Self::ensure_scope_id(&write_pool, &scope_key).await?;
+        let scope_id = Self::ensure_scope_id(&sql.write_pool, &scope_key).await?;
         Ok(Self {
-            read_pool,
-            write_pool,
+            sql,
             scope_id,
             bucket_depth,
             _scope_key: scope_key,
@@ -354,7 +348,7 @@ impl SqlitePartStore {
         .bind(Self::part_blob(part_id))
         .bind(i64::from(path.level()))
         .bind(Self::buck_i64(path))
-        .fetch_optional(&self.read_pool)
+        .fetch_optional(&self.sql.read_pool)
         .await?;
         let Some(row) = row else {
             return Ok(BucketSummary {
@@ -390,7 +384,7 @@ async fn init_schema(pool: &sqlx::SqlitePool, bucket_depth: u8) -> Res<()> {
         "CREATE TABLE IF NOT EXISTS big_sync_meta (
             key TEXT PRIMARY KEY NOT NULL,
             value INTEGER NOT NULL
-        )",
+        ) STRICT",
     )
     .execute(&mut *tx)
     .await?;
@@ -420,7 +414,7 @@ async fn init_schema(pool: &sqlx::SqlitePool, bucket_depth: u8) -> Res<()> {
         "CREATE TABLE IF NOT EXISTS big_sync_scopes (
             scope_id INTEGER PRIMARY KEY AUTOINCREMENT,
             scope_key TEXT NOT NULL UNIQUE
-        )",
+        ) STRICT",
     )
     .execute(&mut *tx)
     .await?;
@@ -505,7 +499,7 @@ async fn init_schema(pool: &sqlx::SqlitePool, bucket_depth: u8) -> Res<()> {
             cursor INTEGER NOT NULL,
             PRIMARY KEY(scope_id, peer_id, part_id),
             FOREIGN KEY(scope_id, part_id) REFERENCES big_sync_parts(scope_id, part_id)
-        )",
+        ) STRICT",
     )
     .execute(&mut *tx)
     .await?;
@@ -540,7 +534,7 @@ impl HostPartStore for SqlitePartStore {
             separated.push_bind(Self::part_blob(*part_id));
         }
         separated.push_unseparated(")");
-        let rows = query.build().fetch_all(&self.read_pool).await?;
+        let rows = query.build().fetch_all(&self.sql.read_pool).await?;
 
         if rows.len() != parts.len() {
             let found: HashSet<PartId> = rows
@@ -578,7 +572,7 @@ impl HostPartStore for SqlitePartStore {
         )
         .bind(self.scope_id)
         .bind(Self::part_blob(part_id))
-        .fetch_optional(&self.read_pool)
+        .fetch_optional(&self.sql.read_pool)
         .await?;
         Ok(member_count
             .map(|member_count| u64::try_from(member_count).expect(ERROR_IMPOSSIBLE))
@@ -593,7 +587,7 @@ impl HostPartStore for SqlitePartStore {
         )
         .bind(self.scope_id)
         .bind(Self::obj_blob(obj_id))
-        .fetch_optional(&self.read_pool)
+        .fetch_optional(&self.sql.read_pool)
         .await?;
         let Some(row) = row else {
             return Ok(None);
@@ -608,7 +602,7 @@ impl HostPartStore for SqlitePartStore {
 
     async fn set_obj_payload(&self, obj_id: ObjId, payload: ObjPayload) -> Res<()> {
         let payload_json = serde_json::to_string(&payload).wrap_err(ERROR_JSON)?;
-        let mut tx = self.write_pool.begin_with("BEGIN IMMEDIATE").await?;
+        let mut tx = self.sql.write_pool.begin_with("BEGIN IMMEDIATE").await?;
         let old_payload_json: Option<String> = sqlx::query_scalar(
             "SELECT payload_json
              FROM big_sync_objs
@@ -710,7 +704,7 @@ impl HostPartStore for SqlitePartStore {
         )
         .bind(self.scope_id)
         .bind(Self::obj_blob(obj_id))
-        .fetch_all(&self.read_pool)
+        .fetch_all(&self.sql.read_pool)
         .await?;
         Ok(rows
             .into_iter()
@@ -736,7 +730,7 @@ impl HostPartStore for SqlitePartStore {
         )
         .bind(self.scope_id)
         .bind(Self::part_blob(req.part_id))
-        .fetch_optional(&self.read_pool)
+        .fetch_optional(&self.sql.read_pool)
         .await?;
         let Some(_) = part_exists else {
             return Ok(Err(ListPartsError::UnkownParts {
@@ -760,7 +754,7 @@ impl HostPartStore for SqlitePartStore {
         query.push_bind(i64::try_from(req.since).expect(ERROR_IMPOSSIBLE));
         query.push(" ORDER BY buck_id ASC LIMIT ");
         query.push_bind(i64::from(req.limit_hint) + i64::from(BuckId::ARITY));
-        let rows = query.build().fetch_all(&self.read_pool).await?;
+        let rows = query.build().fetch_all(&self.sql.read_pool).await?;
 
         if rows.is_empty() {
             return Ok(Ok(Vec::new()));
@@ -812,7 +806,7 @@ impl HostPartStore for SqlitePartStore {
         )
         .bind(self.scope_id)
         .bind(Self::part_blob(req.part_id))
-        .fetch_optional(&self.read_pool)
+        .fetch_optional(&self.sql.read_pool)
         .await?;
         if part_exists.is_none() {
             return Ok(Err(LeafBucketsError::UnkownPart));
@@ -893,7 +887,7 @@ impl HostPartStore for SqlitePartStore {
         query.push_bind(i64::from(req.limit_hint.max(1)));
         query.push(" ORDER BY req_ord, obj_id ASC");
 
-        let rows = query.build().fetch_all(&self.read_pool).await?;
+        let rows = query.build().fetch_all(&self.sql.read_pool).await?;
         let mut pages: Vec<_> = req
             .buckets
             .iter()
@@ -952,7 +946,7 @@ impl HostPartStore for SqlitePartStore {
     }
 
     async fn add_obj_to_parts(&self, obj_id: ObjId, parts: Vec<PartId>) -> Res<()> {
-        let mut tx = self.write_pool.begin_with("BEGIN IMMEDIATE").await?;
+        let mut tx = self.sql.write_pool.begin_with("BEGIN IMMEDIATE").await?;
         let mut parts = parts;
         parts.sort();
         parts.dedup();
@@ -1064,7 +1058,7 @@ impl HostPartStore for SqlitePartStore {
     }
 
     async fn remove_obj_from_part(&self, obj_id: ObjId, part_id: PartId) -> Res<()> {
-        let mut tx = self.write_pool.begin_with("BEGIN IMMEDIATE").await?;
+        let mut tx = self.sql.write_pool.begin_with("BEGIN IMMEDIATE").await?;
         let obj_exists: Option<i64> = sqlx::query_scalar(
             "SELECT 1
              FROM big_sync_objs
@@ -1155,7 +1149,7 @@ impl HostPartStore for SqlitePartStore {
         .bind(self.scope_id)
         .bind(Self::peer_blob(peer_id))
         .bind(Self::part_blob(part_id))
-        .fetch_optional(&self.read_pool)
+        .fetch_optional(&self.sql.read_pool)
         .await?;
         Ok(cursor
             .map(|cursor| u64::try_from(cursor).expect(ERROR_IMPOSSIBLE))
@@ -1175,7 +1169,7 @@ impl HostPartStore for SqlitePartStore {
         )
         .bind(self.scope_id)
         .bind(Self::part_blob(part_id))
-        .execute(&self.write_pool)
+        .execute(&self.sql.write_pool)
         .await?;
         sqlx::query(
             "INSERT INTO big_sync_peer_cursors(scope_id, peer_id, part_id, cursor)
@@ -1186,7 +1180,7 @@ impl HostPartStore for SqlitePartStore {
         .bind(Self::peer_blob(peer_id))
         .bind(Self::part_blob(part_id))
         .bind(i64::try_from(cursor).expect(ERROR_IMPOSSIBLE))
-        .execute(&self.write_pool)
+        .execute(&self.sql.write_pool)
         .await?;
         Ok(())
     }
@@ -1217,7 +1211,7 @@ impl HostPartStore for SqlitePartStore {
             .bind(Self::part_blob(part_id))
             .bind(i64::try_from(cursor).expect(ERROR_IMPOSSIBLE))
             .bind(i64::from(limit) + 1)
-            .fetch_all(&self.read_pool)
+            .fetch_all(&self.sql.read_pool)
             .await?;
             let mut events = Vec::new();
             for row in rows {
@@ -1349,7 +1343,7 @@ impl HostPartStore for SqlitePartStore {
         )
         .bind(self.scope_id)
         .bind(Self::part_blob(part_id))
-        .execute(&self.write_pool)
+        .execute(&self.sql.write_pool)
         .await?;
         Ok(())
     }
@@ -1461,7 +1455,7 @@ impl ObservedStore for SqlitePartStore {
              ORDER BY members.obj_id ASC, members.part_id ASC",
         )
         .bind(self.scope_id)
-        .fetch_all(&self.read_pool)
+        .fetch_all(&self.sql.read_pool)
         .await?;
         let mut objs = std::collections::BTreeMap::new();
         for row in rows {
@@ -1488,7 +1482,7 @@ impl ObservedStore for SqlitePartStore {
              WHERE scope_id = ?1",
         )
         .bind(self.scope_id)
-        .fetch_all(&self.read_pool)
+        .fetch_all(&self.sql.read_pool)
         .await?;
         let mut peer_part_cursors = std::collections::BTreeMap::new();
         for row in cursors {
@@ -1512,28 +1506,16 @@ mod tests {
     use super::*;
     use crate::part_store::host_contract::{self, HostPartStoreContractHarness};
     use big_sync_core::part_store::contract;
-    use std::str::FromStr;
 
-    async fn test_pools() -> Res<(sqlx::SqlitePool, sqlx::SqlitePool)> {
+    async fn test_sql() -> Res<SqlCtx> {
         let db_path = std::env::temp_dir().join(format!("big_sync-{}.sqlite", Uuid::new_v4()));
-        let db_url = format!("sqlite://{}", db_path.display());
-        let options = sqlx::sqlite::SqliteConnectOptions::from_str(&db_url)?
-            .journal_mode(sqlx::sqlite::SqliteJournalMode::Wal)
-            .create_if_missing(true);
-        let read_pool = sqlx::sqlite::SqlitePoolOptions::new()
-            .max_connections(4)
-            .connect_with(options.clone())
-            .await?;
-        let write_pool = sqlx::sqlite::SqlitePoolOptions::new()
-            .max_connections(1)
-            .connect_with(options)
-            .await?;
-        Ok((read_pool, write_pool))
+        let sqlite_url = format!("sqlite://{}", db_path.display());
+        SqlCtx::url(&sqlite_url).await
     }
 
     async fn test_store(scope_key: &str) -> Res<SqlitePartStore> {
-        let (read_pool, write_pool) = test_pools().await?;
-        SqlitePartStore::new(read_pool, write_pool, scope_key, BuckId::MAX_LEVEL).await
+        let sql = test_sql().await?;
+        SqlitePartStore::new(sql, scope_key, BuckId::MAX_LEVEL).await
     }
 
     fn test_part_id(seed: u8) -> PartId {
@@ -1668,8 +1650,7 @@ mod tests {
     async fn sqlite_scopes_are_isolated_by_scope_key() -> Res<()> {
         let store_a = test_store("big-sync-sqlite-test://repo").await?;
         let store_b = SqlitePartStore::new(
-            store_a.read_pool.clone(),
-            store_a.write_pool.clone(),
+            store_a.sql.clone(),
             "big-sync-sqlite-test://other-repo",
             BuckId::MAX_LEVEL,
         )

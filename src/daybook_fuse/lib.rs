@@ -482,9 +482,7 @@ mod tests {
             let sql_path = temp_dir.path().join("sqlite.db");
             let app_ctx = daybook_core::app::AppCtx::new(daybook_core::app::AppConfig {
                 app_data_dir: temp_dir.path().join("app-data"),
-                sql: daybook_core::app::SqlConfig {
-                    database_url: format!("sqlite://{}", sql_path.display()),
-                },
+                sql: daybook_core::app::SqlConfig::file(sql_path),
                 default_repo_root: temp_dir.path().join("repo"),
             })
             .await?;

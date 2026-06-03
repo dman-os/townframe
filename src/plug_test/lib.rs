@@ -148,7 +148,7 @@ mod wasm_runtime {
 
         sqlite_connection
             .query_batch(
-                "CREATE TABLE IF NOT EXISTS capability_report_v2 (doc_id TEXT NOT NULL, test_name TEXT NOT NULL, summary_json TEXT NOT NULL, PRIMARY KEY (doc_id, test_name))"
+                "CREATE TABLE IF NOT EXISTS capability_report_v2 (doc_id TEXT NOT NULL, test_name TEXT NOT NULL, summary_json TEXT NOT NULL, PRIMARY KEY (doc_id, test_name)) STRICT"
             )
             .map_err(|err| JobErrorX::Terminal(ferr!("error creating capability_report_v2 table: {err:?}")))?;
 
@@ -573,7 +573,7 @@ mod wasm_runtime {
 
         sqlite_connection
             .query_batch(
-                "CREATE TABLE IF NOT EXISTS capability_report (doc_id TEXT PRIMARY KEY, summary_json TEXT NOT NULL)"
+                "CREATE TABLE IF NOT EXISTS capability_report (doc_id TEXT PRIMARY KEY, summary_json TEXT NOT NULL) STRICT"
             )
             .map_err(|err| JobErrorX::Terminal(ferr!("error creating capability_report table: {err:?}")))?;
 

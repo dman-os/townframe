@@ -1,0 +1,14 @@
+[package]
+name = "sqlx_utils_rs"
+version.workspace = true
+edition.workspace = true
+
+[lints]
+workspace = true
+
+[lib]
+path = "lib.rs"
+
+[dependencies]
+color-eyre.workspace = true
+sqlx = { workspace = true, features = ["sqlite"] }
