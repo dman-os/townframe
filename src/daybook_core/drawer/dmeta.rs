@@ -1,3 +1,6 @@
+// FIXME: we're only reading FacetMeta.uuid[0], is there a bug here when trying to resolve
+// multi uuid facets?
+
 use crate::interlude::*;
 
 use automerge::transaction::Transactable;

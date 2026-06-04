@@ -4,6 +4,7 @@
 package org.example.daybook.layouts
 
 import androidx.compose.foundation.layout.PaddingValues
+import androidx.compose.foundation.layout.RowScope
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.ArrowBack
 import androidx.compose.material3.Icon
@@ -13,14 +14,21 @@ import androidx.compose.material3.Scaffold
 import androidx.compose.material3.Text
 import androidx.compose.material3.TopAppBar
 import androidx.compose.material3.TopAppBarDefaults
+import androidx.compose.material3.TopAppBarScrollBehavior
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.CompositionLocalProvider
 import androidx.compose.runtime.compositionLocalOf
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.input.nestedscroll.nestedScroll
 import androidx.compose.ui.graphics.Color as UiColor
 
 data class ScreenChromeSpec(val topBar: TopBarSpec = TopBarSpec()) {
-    data class TopBarSpec(val title: String? = null, val showBack: Boolean = false, val onBack: (() -> Unit)? = null)
+    data class TopBarSpec(
+        val title: String? = null,
+        val showBack: Boolean = false,
+        val onBack: (() -> Unit)? = null,
+        val actions: (@Composable RowScope.() -> Unit)? = null,
+    )
 }
 
 val LocalScreenChromeSpec =
@@ -34,7 +42,7 @@ fun ProvideScreenChromeSpec(chrome: ScreenChromeSpec, content: @Composable () ->
 }
 
 @Composable
-fun DaybookTopBar(chrome: ScreenChromeSpec.TopBarSpec) {
+fun DaybookTopBar(chrome: ScreenChromeSpec.TopBarSpec, scrollBehavior: TopAppBarScrollBehavior? = null) {
     TopAppBar(
         title = {
             if (chrome.title != null) {
@@ -56,6 +64,10 @@ fun DaybookTopBar(chrome: ScreenChromeSpec.TopBarSpec) {
                 }
             }
         },
+        actions = {
+            chrome.actions?.invoke(this)
+        },
+        scrollBehavior = scrollBehavior,
         colors =
         TopAppBarDefaults.topAppBarColors(
             containerColor = UiColor.Transparent,
@@ -70,17 +82,17 @@ fun DaybookTopBar(chrome: ScreenChromeSpec.TopBarSpec) {
 @Composable
 fun DaybookScaffold(
     modifier: Modifier = Modifier,
-    topBar: (@Composable () -> Unit)? = null,
+    topBar: ScreenChromeSpec.TopBarSpec? = null,
     content: @Composable (PaddingValues) -> Unit,
 ) {
+    val scrollBehavior = TopAppBarDefaults.enterAlwaysScrollBehavior()
     Scaffold(
-        modifier = modifier,
+        modifier = modifier.nestedScroll(scrollBehavior.nestedScrollConnection),
         topBar = {
-            if (topBar != null) {
-                topBar()
-            } else {
-                DaybookTopBar(LocalScreenChromeSpec.current.topBar)
-            }
+            DaybookTopBar(
+                chrome = topBar ?: LocalScreenChromeSpec.current.topBar,
+                scrollBehavior = scrollBehavior,
+            )
         },
         content = content,
     )

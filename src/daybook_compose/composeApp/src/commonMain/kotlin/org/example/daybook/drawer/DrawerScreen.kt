@@ -22,6 +22,7 @@ import org.example.daybook.DocListState
 import org.example.daybook.DrawerViewModel
 import org.example.daybook.LocalDocEditorStore
 import org.example.daybook.layouts.DaybookScaffold
+import org.example.daybook.layouts.LocalScreenChromeSpec
 import org.example.daybook.tables.DockableRegion
 import org.example.daybook.ui.DocEditor
 import org.example.daybook.ui.DocFacetSidebar
@@ -119,6 +120,10 @@ fun DocEditorScreen(contentType: DaybookContentType, modifier: Modifier = Modifi
     val docEditorStore: DocEditorStoreViewModel = LocalDocEditorStore.current
     val selectedDocId by docEditorStore.selectedDocId.collectAsState()
     val selectedController by docEditorStore.selectedController.collectAsState()
+    val editorState =
+        selectedController?.let { controller ->
+            controller.state.collectAsState().value
+        }
 
     DisposableEffect(selectedDocId) {
         if (selectedDocId != null) {
@@ -131,8 +136,25 @@ fun DocEditorScreen(contentType: DaybookContentType, modifier: Modifier = Modifi
         }
     }
 
+    val baseChromeSpec = LocalScreenChromeSpec.current
+    val topBarSpec = baseChromeSpec.topBar
+    val baseActions = topBarSpec.actions
+    val savingTopBarSpec =
+        topBarSpec.copy(
+            actions = {
+                if (editorState?.isSaving == true) {
+                    CircularProgressIndicator(
+                        modifier = Modifier.padding(end = 12.dp).size(14.dp),
+                        strokeWidth = 1.25.dp,
+                    )
+                }
+                baseActions?.invoke(this)
+            },
+        )
+
     DaybookScaffold(
         modifier = modifier,
+        topBar = savingTopBarSpec,
     ) { scaffoldPadding ->
         Box(
             modifier =

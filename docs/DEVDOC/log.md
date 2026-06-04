@@ -1,5 +1,40 @@
 # duck-log
 
+## 2026-06-05 | forgery protection
+
+If I were to use the automerge document itself as a public collaboration surface, how could I mark every change with signatures that prove authorship?
+I.e. how to prevent an system from masquereding writes as those from another.
+
+A good option is to add the signature as part of the change.
+We could sign of content ids of the facet shape at that version.
+CID in the DRISL sense.
+Hmm.
+Not bad actually.
+
+## 2026-06-05 | markup
+
+Markup might be the wrong term here.
+I have need of rendering widgets as specified by plugins.
+Not very crisp but I'm also figuring out exactly what it is that I need. 
+
+An early set of needs I've indentified is that the description must support programmatically or statistical (neural?) generation. Hand authoring is a plus.
+
+A good contender for what I'm looking for is https://json-render.dev/.
+JSON is not very nice to write by hand but that's why I said I'm not exactly looking for markup.
+A lightweight declarative UI description lang?
+
+One nice thing about json-render is that it's easy to implement.
+I'm in early stages of experimentation with the app so easy and light is good.
+I'm not yet convinced I yet need a full programmable UI layer (unsure about the implementation cost) here and since the the app is not on the web, I can't just use web rendering.
+
+Though admittedly, HTML is a very attractive option here.
+It supports graceful degradataion, users and LLMs are familiar with it, I can add support for my own supported tags for bespoke components.
+
+But then again, I can use different description at different layers.
+
+---
+
+
 ## 2026-05-29 | shoddy
 
 I'm worried about my engineering approach here.

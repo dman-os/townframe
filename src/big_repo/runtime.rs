@@ -2035,7 +2035,7 @@ fn blob_digest_hex(digest: Digest<Blob>) -> String {
 struct IngestResult {
     sedimentree: Sedimentree,
     blobs: Vec<Blob>,
-    _change_count: usize,
+    // _change_count: usize,
     _covered_count: usize,
     _loose_count: usize,
     _fragment_count: usize,
@@ -2105,7 +2105,7 @@ fn ingest_automerge(doc: &automerge::Automerge, sedimentree_id: SedimentreeId) -
     IngestResult {
         sedimentree: Sedimentree::new(fragments, loose_commits),
         blobs,
-        _change_count: doc.get_changes_meta(&[]).len(),
+        // _change_count: doc.get_changes_meta(&[]).len(),
         _covered_count: covered_count,
         _loose_count: loose_count,
         _fragment_count: fragment_count,

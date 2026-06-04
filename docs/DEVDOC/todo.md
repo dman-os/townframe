@@ -72,11 +72,11 @@
     - [ ] Make it nice
   - [ ] GUI support
 - [ ] Bugs
-  - [ ] App open on locked repo
+  - [ ] App open blocked on locked repo with no feedback
   - [ ] `WflowNotFound`
     - `HostEvent(WflowRegistered)``?
   - [ ] Cancellation and shutdown
-    - [ ] We're misusing cancel tokens. CancellationToken::run_until_cancelled != cancel branc on select.
+    - [ ] We're misusing cancel tokens. CancellationToken::run_until_cancelled != cancel branch on select.
     - [ ] Kotlin repo's should call close on Activity teardown
     - [ ] Assert samod fsyncs reliably
     - [ ] Notification handling
@@ -91,8 +91,11 @@
 
 - [ ] Cleanup and show it to people
  
+- [ ] Telegram
+  - [ ] Export channel
 - [ ] Migrate to annoter Compose navigation lib
-- [ ] Move to https://en.wikipedia.org/wiki/International_Atomic_Time
+- [ ] Considering using https://en.wikipedia.org/wiki/International_Atomic_Time?
+  - This is going to be a pain in the ass in the public surfacing programming interface
 - [ ] Remove all async Mutexes and dashmap
   - [ ] Convert DHashMap to be wrapper around RwLock<HashMap>
 - [ ] Interesting queries
@@ -112,7 +115,7 @@
   - [x] fork_at
     - We don't need to use fork_at for ReadDoc
       - Does autosurgeon support this?
-  - [ ] get_changes
+  - [x] get_changes
 - [ ] Adopt an rust actor framework
   - [x] IRPC!
   - [ ] Consider futures-signals
@@ -140,6 +143,7 @@
 - [x] Replace Path with camino at certain places
 - [ ] Explore multi doc drawer
   - [ ] Drawer doc migration where a drawer is marked as deprecated and all devices that have seen it must merge it into the active docs. This allows eventually consistent garbage collection
+  - [ ] Store a list of drawer docs in the app doc with each one containing max N number of docs, mark those that are full, have new content docs be added in a consistenly chosen winner, content docs are tracked the same drawer
 - [ ] Redirects/Docmerging/Redactions
 - [ ] Cross-routine,cross-plugin risk analysis
   - [ ] Can a routine with previlaged outbound access exfiltrate data by coordinating with another that has previlaged read access?
@@ -248,7 +252,7 @@
     - [ ] Fork with context generic programming?
     - So I've implemented ThroughJson as a solution for this
 - [ ] Lints and pre-commit hooks
-  - [ ] Kotlin formats & lints
+  - [x] Kotlin formats & lints
   - [ ] Triple X comment detector
 - [ ] UI tests
 - [ ] Cross-platform testing

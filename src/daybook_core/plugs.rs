@@ -16,6 +16,7 @@ pub fn system_plugs() -> Vec<manifest::PlugManifest> {
             desc: "Core keys and routines".into(),
             local_states: default(),
             dependencies: default(),
+            views: default(),
             routines: default(),
             wflow_bundles: default(),
             commands: default(),
@@ -45,7 +46,7 @@ pub fn system_plugs() -> Vec<manifest::PlugManifest> {
                     value_schema: schemars::schema_for!(String),
                     display_config: FacetDisplayHint {
                         display_title: Some("Title".to_string()),
-                        deets: FacetKeyDisplayDeets::Title { show_editor: true },
+                        deets: FacetDisplayDeets::Title { show_editor: true },
                         ..default()
                     },
                     references: default(),
@@ -55,7 +56,7 @@ pub fn system_plugs() -> Vec<manifest::PlugManifest> {
                     value_schema: schemars::schema_for!(String),
                     display_config: FacetDisplayHint {
                         display_title: Some("Path".to_string()),
-                        deets: FacetKeyDisplayDeets::UnixPath,
+                        deets: FacetDisplayDeets::UnixPath,
                         ..default()
                     },
                     references: default(),
@@ -156,6 +157,7 @@ pub fn system_plugs() -> Vec<manifest::PlugManifest> {
                 ),
             ]
             .into(),
+            views: default(),
             routines: [
                 (
                     "ocr-image".into(),
@@ -949,7 +951,11 @@ impl PlugsRepo {
                                 )
                                 .await
                             {
-                                warn!(plug_id = id, ?err, "failed publishing removed plug scope hash diff; skipping event");
+                                warn!(
+                                    plug_id = id,
+                                    ?err,
+                                    "failed publishing removed plug scope hash diff; skipping event"
+                                );
                                 continue;
                             }
                             self.store
@@ -1766,6 +1772,13 @@ impl PlugsRepo {
 
         let plug_id = manifest.id();
         let existing = self.get(&plug_id).await;
+        let dependency_base_ids: HashSet<String> = manifest
+            .dependencies
+            .keys()
+            .map(|dep_id_full| parse_dep_base_id(dep_id_full))
+            .collect::<Res<HashSet<_>>>()?;
+        let mut cached_view_target_manifests: HashMap<String, Arc<manifest::PlugManifest>> =
+            HashMap::new();
 
         // -- Versioning and Breaking Change Protection --
         // To maintain stability, we don't allow breaking changes (like removing commands
@@ -1791,10 +1804,16 @@ impl PlugsRepo {
                         // Deets define the routine and parameters; changing them breaks callers.
                         // FIXME: we need a better comparison for CommandDeets if it's complex
                         if format!("{:?}", new_cmd.deets) != format!("{:?}", old_cmd.deets) {
-                            eyre::bail!("Breaking change: command '{}' deets cannot change in non-major version update", old_cmd_name);
+                            eyre::bail!(
+                                "Breaking change: command '{}' deets cannot change in non-major version update",
+                                old_cmd_name
+                            );
                         }
                     } else {
-                        eyre::bail!("Breaking change: command '{}' cannot be removed in non-major version update", old_cmd_name);
+                        eyre::bail!(
+                            "Breaking change: command '{}' cannot be removed in non-major version update",
+                            old_cmd_name
+                        );
                     }
                 }
             }
@@ -2000,6 +2019,21 @@ impl PlugsRepo {
             }
         }
 
+        // -- View Validation --
+        // Stateless wasm views must point at a declared wflow bundle. The manifest model does not
+        // currently carry a separate export registry, so we validate the bundle presence only.
+        for (view_name, view_manifest) in &manifest.views {
+            let manifest::ViewProviderManifest::StatelessWasm { bundle, .. } =
+                &view_manifest.provider;
+            let Some(_) = manifest.wflow_bundles.get(bundle.as_str()) else {
+                eyre::bail!(
+                    "Invalid view '{}': wflow bundle '{}' not found in manifest",
+                    view_name,
+                    bundle
+                );
+            };
+        }
+
         // -- ACL Scope Restriction --
         // Routines must explicitly declare which properties they need access to.
         // To prevent security leaks, a routine can only specify tags that
@@ -2014,11 +2048,6 @@ impl PlugsRepo {
                 available_tags.insert(key.key_tag.to_string());
             }
         }
-        let dependency_base_ids: HashSet<String> = manifest
-            .dependencies
-            .keys()
-            .map(|dep_id_full| parse_dep_base_id(dep_id_full))
-            .collect::<Res<HashSet<_>>>()?;
         let mut cached_command_target_manifests: HashMap<String, Arc<manifest::PlugManifest>> =
             HashMap::new();
         let mut available_local_states: HashSet<(String, String)> = manifest
@@ -2034,10 +2063,66 @@ impl PlugsRepo {
             }
         }
 
+        for facet_manifest in &manifest.facets {
+            let facet_name = facet_manifest.key_tag.to_string();
+            if let manifest::FacetDisplayDeets::CustomView { view, .. } =
+                &facet_manifest.display_config.deets
+            {
+                match view.plug_id.as_deref() {
+                    None => {
+                        if !manifest.views.contains_key(view.view_key.as_str()) {
+                            eyre::bail!(
+                                "Invalid display_config in facet '{}': view '{}' not found in this plug",
+                                facet_name,
+                                view.view_key
+                            );
+                        }
+                    }
+                    Some(view_plug_id) => {
+                        if !dependency_base_ids.contains(view_plug_id) {
+                            eyre::bail!(
+                                "Invalid display_config in facet '{}': view provider plug '{}' is neither this plug nor a declared dependency",
+                                facet_name,
+                                view_plug_id
+                            );
+                        }
+                        let target_manifest = if let Some(cached) =
+                            cached_view_target_manifests.get(view_plug_id)
+                        {
+                            Arc::clone(cached)
+                        } else {
+                            let loaded = self.get(view_plug_id).await.ok_or_else(|| {
+                                    ferr!(
+                                        "Invalid display_config in facet '{}': view provider plug '{}' not found",
+                                        facet_name,
+                                        view_plug_id
+                                    )
+                                })?;
+                            cached_view_target_manifests
+                                .insert(view_plug_id.to_string(), Arc::clone(&loaded));
+                            loaded
+                        };
+                        if !target_manifest.views.contains_key(view.view_key.as_str()) {
+                            eyre::bail!(
+                                "Invalid display_config in facet '{}': view '{}' not found in view provider plug '{}'",
+                                facet_name,
+                                view.view_key,
+                                view_plug_id
+                            );
+                        }
+                    }
+                }
+            }
+        }
+
         for (routine_name, routine) in &manifest.routines {
             for access in routine.facet_acl() {
                 if !available_tags.contains(&access.tag.to_string()) {
-                    eyre::bail!("Invalid ACL in routine '{}': tag '{}' is neither declared nor depended on by this plug. Avail tags {available_tags:?}", routine_name, access.tag);
+                    eyre::bail!(
+                        "Invalid ACL in routine '{}': tag '{}' is neither declared nor depended on by this plug. Avail tags {available_tags:?}",
+                        routine_name,
+                        access.tag
+                    );
                 }
             }
             for access in routine.config_facet_acl() {
@@ -2384,12 +2469,21 @@ mod tests {
             facets: vec![],
             local_states: default(),
             dependencies: default(),
+            views: default(),
             routines: default(),
             wflow_bundles: default(),
             commands: default(),
             inits: default(),
             processors: default(),
         }
+    }
+
+    async fn temp_component_url() -> Res<(tempfile::TempDir, url::Url)> {
+        let temp_dir = tempfile::tempdir()?;
+        let temp_path = temp_dir.path().join("component.wasm");
+        tokio::fs::write(&temp_path, b"dummy wasm").await?;
+        let file_url = url::Url::from_file_path(&temp_path).unwrap();
+        Ok((temp_dir, file_url))
     }
 
     #[tokio::test(flavor = "multi_thread")]
@@ -2619,10 +2713,7 @@ mod tests {
     async fn test_plug_bundle_key_validation() -> Res<()> {
         let (_acx, _part_store, repo, _doc_id, _temp_dir) = setup_repo().await?;
 
-        let temp_dir = tempfile::tempdir()?;
-        let temp_path = temp_dir.path().join("component.wasm");
-        tokio::fs::write(&temp_path, b"dummy wasm").await?;
-        let file_url = url::Url::from_file_path(&temp_path).unwrap();
+        let (_temp_dir, file_url) = temp_component_url().await?;
 
         // Create plug with routine referencing non-existent bundle
         let mut plug = mock_plug("plug1");
@@ -2689,6 +2780,180 @@ mod tests {
             .unwrap_err()
             .to_string()
             .contains("key 'missing_key' not found"));
+
+        Ok(())
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn test_view_provider_bundle_must_exist() -> Res<()> {
+        let (_acx, _part_store, repo, _doc_id, _temp_dir) = setup_repo().await?;
+
+        let mut plug = mock_plug("missing-view-bundle");
+        plug.views.insert(
+            "summary".into(),
+            Arc::new(manifest::ViewManifest {
+                title: "Summary".into(),
+                desc: "Summary view".into(),
+                provider: manifest::ViewProviderManifest::StatelessWasm {
+                    bundle: "missing-bundle".into(),
+                    export: "render-facet-view".into(),
+                },
+            }),
+        );
+
+        let result = repo.add(plug).await;
+        assert!(result.is_err());
+        assert!(result
+            .unwrap_err()
+            .to_string()
+            .contains("wflow bundle 'missing-bundle' not found"));
+
+        Ok(())
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn test_custom_view_local_reference_must_exist() -> Res<()> {
+        let (_acx, _part_store, repo, _doc_id, _temp_dir) = setup_repo().await?;
+        let (_view_temp_dir, file_url) = temp_component_url().await?;
+
+        let mut plug = mock_plug("custom-view-local");
+        plug.wflow_bundles.insert(
+            "bundle1".into(),
+            manifest::WflowBundleManifest {
+                keys: vec![],
+                component_urls: vec![file_url],
+            }
+            .into(),
+        );
+        plug.views.insert(
+            "present-view".into(),
+            Arc::new(manifest::ViewManifest {
+                title: "Present".into(),
+                desc: "Present view".into(),
+                provider: manifest::ViewProviderManifest::StatelessWasm {
+                    bundle: "bundle1".into(),
+                    export: "render-facet-view".into(),
+                },
+            }),
+        );
+        plug.facets.push(manifest::FacetManifest {
+            key_tag: "org.test.customview".into(),
+            value_schema: schemars::schema_for!(serde_json::Value),
+            display_config: manifest::FacetDisplayHint {
+                deets: manifest::FacetDisplayDeets::CustomView {
+                    view: manifest::ViewRef {
+                        plug_id: None,
+                        view_key: "missing-view".into(),
+                    },
+                    mode: manifest::FacetViewMode::Display,
+                    priority: 0,
+                },
+                ..default()
+            },
+            references: vec![],
+        });
+
+        let result = repo.add(plug).await;
+        assert!(result.is_err());
+        assert!(result
+            .unwrap_err()
+            .to_string()
+            .contains("view 'missing-view' not found in this plug"));
+
+        Ok(())
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn test_custom_view_dependency_requires_declared_dependency() -> Res<()> {
+        let (_acx, _part_store, repo, _doc_id, _temp_dir) = setup_repo().await?;
+
+        let mut plug = mock_plug("custom-view-dependency-missing");
+        plug.facets.push(manifest::FacetManifest {
+            key_tag: "org.test.customview".into(),
+            value_schema: schemars::schema_for!(serde_json::Value),
+            display_config: manifest::FacetDisplayHint {
+                deets: manifest::FacetDisplayDeets::CustomView {
+                    view: manifest::ViewRef {
+                        plug_id: Some("@test/provider".into()),
+                        view_key: "provider-view".into(),
+                    },
+                    mode: manifest::FacetViewMode::Display,
+                    priority: 0,
+                },
+                ..default()
+            },
+            references: vec![],
+        });
+
+        let result = repo.add(plug).await;
+        assert!(result.is_err());
+        assert!(result
+            .unwrap_err()
+            .to_string()
+            .contains("neither this plug nor a declared dependency"));
+
+        Ok(())
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn test_custom_view_dependency_requires_target_view() -> Res<()> {
+        let (_acx, _part_store, repo, _doc_id, _temp_dir) = setup_repo().await?;
+        let (_provider_temp_dir, file_url) = temp_component_url().await?;
+
+        let mut provider = mock_plug("provider");
+        provider.wflow_bundles.insert(
+            "bundle1".into(),
+            manifest::WflowBundleManifest {
+                keys: vec![],
+                component_urls: vec![file_url.clone()],
+            }
+            .into(),
+        );
+        provider.views.insert(
+            "provider-view".into(),
+            Arc::new(manifest::ViewManifest {
+                title: "Provider".into(),
+                desc: "Provider view".into(),
+                provider: manifest::ViewProviderManifest::StatelessWasm {
+                    bundle: "bundle1".into(),
+                    export: "render-facet-view".into(),
+                },
+            }),
+        );
+        repo.add(provider).await?;
+
+        let mut caller = mock_plug("custom-view-dependency-missing-view");
+        caller.dependencies.insert(
+            "@test/provider".into(),
+            manifest::PlugDependencyManifest {
+                keys: vec![],
+                local_states: vec![],
+            }
+            .into(),
+        );
+        caller.facets.push(manifest::FacetManifest {
+            key_tag: "org.test.customview".into(),
+            value_schema: schemars::schema_for!(serde_json::Value),
+            display_config: manifest::FacetDisplayHint {
+                deets: manifest::FacetDisplayDeets::CustomView {
+                    view: manifest::ViewRef {
+                        plug_id: Some("@test/provider".into()),
+                        view_key: "missing-view".into(),
+                    },
+                    mode: manifest::FacetViewMode::Display,
+                    priority: 0,
+                },
+                ..default()
+            },
+            references: vec![],
+        });
+
+        let result = repo.add(caller).await;
+        assert!(result.is_err());
+        assert!(result
+            .unwrap_err()
+            .to_string()
+            .contains("not found in view provider plug '@test/provider'"));
 
         Ok(())
     }

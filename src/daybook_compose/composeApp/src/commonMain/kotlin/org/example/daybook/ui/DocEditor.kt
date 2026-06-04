@@ -113,86 +113,84 @@ fun DocEditor(
     }
 
     Box(modifier = modifier.fillMaxSize()) {
-        Column(modifier = Modifier.fillMaxSize()) {
-            TextField(
-                value = state.titleDraft,
-                onValueChange = { value -> controller.setTitleDraft(value) },
-                modifier = Modifier.fillMaxWidth(),
-                enabled = state.titleEditable,
-                placeholder = { Text("Title") },
-                textStyle = MaterialTheme.typography.titleLarge.copy(fontWeight = FontWeight.Bold),
-                colors =
-                TextFieldDefaults.colors(
-                    focusedContainerColor = androidx.compose.ui.graphics.Color.Transparent,
-                    unfocusedContainerColor = androidx.compose.ui.graphics.Color.Transparent,
-                    disabledContainerColor = androidx.compose.ui.graphics.Color.Transparent,
-                    focusedIndicatorColor = androidx.compose.ui.graphics.Color.Transparent,
-                    unfocusedIndicatorColor = androidx.compose.ui.graphics.Color.Transparent,
-                ),
-            )
-            state.titleNotice?.let { titleNotice ->
-                Text(
-                    text = titleNotice,
-                    style = MaterialTheme.typography.bodySmall,
-                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+        BoxWithConstraints(modifier = Modifier.fillMaxSize()) {
+            val facetViewportHeight = maxHeight
+            Column(
+                modifier = Modifier.fillMaxSize().verticalScroll(rememberScrollState()),
+            ) {
+                TextField(
+                    value = state.titleDraft,
+                    onValueChange = { value -> controller.setTitleDraft(value) },
+                    modifier = Modifier.fillMaxWidth(),
+                    enabled = state.titleEditable,
+                    placeholder = { Text("Title") },
+                    textStyle = MaterialTheme.typography.titleLarge.copy(fontWeight = FontWeight.Bold),
+                    colors =
+                    TextFieldDefaults.colors(
+                        focusedContainerColor = androidx.compose.ui.graphics.Color.Transparent,
+                        unfocusedContainerColor = androidx.compose.ui.graphics.Color.Transparent,
+                        disabledContainerColor = androidx.compose.ui.graphics.Color.Transparent,
+                        focusedIndicatorColor = androidx.compose.ui.graphics.Color.Transparent,
+                        unfocusedIndicatorColor = androidx.compose.ui.graphics.Color.Transparent,
+                    ),
                 )
-            }
-            EditorSaveStatusIndicator(saveStatus = saveStatus, modifier = Modifier.fillMaxWidth())
-            HorizontalDivider(modifier = Modifier.padding(vertical = 8.dp))
+                state.titleNotice?.let { titleNotice ->
+                    Text(
+                        text = titleNotice,
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    )
+                }
+                HorizontalDivider(modifier = Modifier.padding(vertical = 8.dp))
 
-            BoxWithConstraints(modifier = Modifier.weight(1f).fillMaxWidth()) {
-                val facetViewportHeight = maxHeight
-                Column(
-                    modifier = Modifier.fillMaxWidth().verticalScroll(rememberScrollState()),
-                ) {
-                    if (state.contentFacetViews.isEmpty()) {
-                        Text(
-                            text = "No facets",
-                            style = MaterialTheme.typography.bodySmall,
-                            color = MaterialTheme.colorScheme.onSurfaceVariant,
-                        )
-                    }
+                if (state.contentFacetViews.isEmpty()) {
+                    Text(
+                        text = "No facets",
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    )
+                }
 
-                    state.contentFacetViews.forEachIndexed { index, descriptor ->
-                        val bringIntoViewRequester = remember(descriptor.facetKey) { BringIntoViewRequester() }
-                        LaunchedEffect(state.scrollToFacetRequest?.seq, descriptor.facetKey) {
-                            val request = state.scrollToFacetRequest ?: return@LaunchedEffect
-                            if (request.facetKey == descriptor.facetKey) {
-                                bringIntoViewRequester.bringIntoView()
-                            }
-                        }
-                        FacetListItem(
-                            descriptor = descriptor,
-                            doc = state.doc,
-                            controller = controller,
-                            modifier = Modifier.bringIntoViewRequester(bringIntoViewRequester),
-                            canShowMenu = state.docId != null,
-                            noteDraft = state.noteEditors[descriptor.facetKey]?.draft,
-                            noteEditable = state.noteEditors[descriptor.facetKey]?.editable ?: false,
-                            noteNotice = state.noteEditors[descriptor.facetKey]?.notice,
-                            canMoveUp = index > 0,
-                            canMoveDown = index < state.contentFacetViews.lastIndex,
-                            noteMinHeight = facetViewportHeight * 0.75f,
-                            onUiError = { message -> uiMessage = message },
-                        )
-                        if (index < state.contentFacetViews.lastIndex) {
-                            HorizontalDivider(modifier = Modifier.padding(vertical = 8.dp))
+                state.contentFacetViews.forEachIndexed { index, descriptor ->
+                    val bringIntoViewRequester = remember(descriptor.facetKey) { BringIntoViewRequester() }
+                    LaunchedEffect(state.scrollToFacetRequest?.seq, descriptor.facetKey) {
+                        val request = state.scrollToFacetRequest ?: return@LaunchedEffect
+                        if (request.facetKey == descriptor.facetKey) {
+                            bringIntoViewRequester.bringIntoView()
                         }
                     }
-
-                    if (showInlineFacetRack) {
+                    FacetListItem(
+                        descriptor = descriptor,
+                        doc = state.doc,
+                        controller = controller,
+                        modifier = Modifier.bringIntoViewRequester(bringIntoViewRequester),
+                        canShowMenu = state.docId != null,
+                        noteDraft = state.noteEditors[descriptor.facetKey]?.draft,
+                        noteEditable = state.noteEditors[descriptor.facetKey]?.editable ?: false,
+                        noteNotice = state.noteEditors[descriptor.facetKey]?.notice,
+                        canMoveUp = index > 0,
+                        canMoveDown = index < state.contentFacetViews.lastIndex,
+                        // FIXME: don't use viewport height but 5 lines of content
+                        noteMinHeight = facetViewportHeight * 0.45f,
+                        onUiError = { message -> uiMessage = message },
+                    )
+                    if (index < state.contentFacetViews.lastIndex) {
                         HorizontalDivider(modifier = Modifier.padding(vertical = 8.dp))
-                        Text(
-                            text = "Details",
-                            style = MaterialTheme.typography.titleSmall,
-                            modifier = Modifier.padding(bottom = 8.dp),
-                        )
-                        DocDetailsSidebar(
-                            doc = state.doc,
-                            warnings = state.docWarnings,
-                            modifier = Modifier.fillMaxWidth(),
-                        )
                     }
+                }
+
+                if (showInlineFacetRack) {
+                    HorizontalDivider(modifier = Modifier.padding(vertical = 8.dp))
+                    Text(
+                        text = "Details",
+                        style = MaterialTheme.typography.titleSmall,
+                        modifier = Modifier.padding(bottom = 8.dp),
+                    )
+                    DocDetailsSidebar(
+                        doc = state.doc,
+                        warnings = state.docWarnings,
+                        modifier = Modifier.fillMaxWidth(),
+                    )
                 }
             }
         }

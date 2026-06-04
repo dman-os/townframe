@@ -163,6 +163,34 @@ interface facet-routine {
     get-args: func() -> facet-routine-args;
 }
 
+interface stateless-view {
+    use facet-routine.{doc-facet-tokens};
+
+    record render-facet-view-args {
+        view-key: string,
+        target-facet-key: string,
+        primary-doc: doc-facet-tokens,
+        config-docs: list<doc-facet-tokens>,
+        ui-state-json: option<string>,
+    }
+
+    record render-view-response {
+        view-json: string,
+        plugin-state-json: option<string>,
+    }
+
+    variant render-view-error {
+        invalid-request(string),
+        denied(string),
+        invalid-view(string),
+        other(string),
+    }
+
+    render-facet-view: func(
+        args: render-facet-view-args,
+    ) -> result<render-view-response, render-view-error>;
+}
+
 // FIXME: rename to local-state-sqlite
 interface sqlite-connection {
     use townframe:sql/types.{sql-value, result-row, query-error};
@@ -225,4 +253,6 @@ world all-guest {
     import mltools-image-tools;
     import mltools-llm-chat;
     import wasi:filesystem/preopens@0.2.6;
+
+    export stateless-view;
 }

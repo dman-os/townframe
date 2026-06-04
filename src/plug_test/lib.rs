@@ -11,7 +11,12 @@ use std::sync::Arc;
 use daybook_types::manifest::{
     CommandDeets, CommandManifest, DocPredicateClause, FacetDependencyManifest,
     PlugDependencyManifest, PlugManifest, RoutineDocAcl, RoutineFacetAccess, RoutineImpl,
-    RoutineManifest,
+    RoutineManifest, ViewManifest, ViewProviderManifest,
+};
+#[cfg(any(test, target_arch = "wasm32"))]
+use daybook_types::view::{
+    EmitViewActionV1, MarkdownNodeV1, ViewActionV1, ViewEventBindingV1, ViewEventKindV1,
+    ViewNodeId, ViewNodeKindV1, ViewNodeV1, ViewSpec, ViewSpecV1,
 };
 
 #[cfg(target_arch = "wasm32")]
@@ -609,10 +614,80 @@ mod wasm_runtime {
             })
         }
     }
+
+    impl crate::wit::exports::townframe::daybook::stateless_view::Guest for Component {
+        fn render_facet_view(
+            args: crate::wit::townframe::daybook::stateless_view::RenderFacetViewArgs,
+        ) -> Result<
+            crate::wit::townframe::daybook::stateless_view::RenderViewResponse,
+            crate::wit::townframe::daybook::stateless_view::RenderViewError,
+        > {
+            let view_key = args.view_key;
+            if view_key != SAMPLE_VIEW_KEY {
+                return Err(
+                    crate::wit::townframe::daybook::stateless_view::RenderViewError::InvalidView(
+                        format!("unknown view key '{}'", view_key),
+                    ),
+                );
+            }
+
+            Ok(
+                crate::wit::townframe::daybook::stateless_view::RenderViewResponse {
+                    view_json: sample_stateless_view_json(),
+                    plugin_state_json: None,
+                },
+            )
+        }
+    }
 }
 
 #[cfg(test)]
 mod e2e;
+
+const SAMPLE_VIEW_KEY: &str = "sample-summary-card";
+const SAMPLE_VIEW_EXPORT: &str = "render-facet-view";
+
+#[cfg(any(test, target_arch = "wasm32"))]
+fn sample_stateless_view_spec() -> ViewSpec {
+    ViewSpec::V1(ViewSpecV1 {
+        root: ViewNodeV1 {
+            id: ViewNodeId::from("root"),
+            kind: ViewNodeKindV1::Card(daybook_types::view::CardNodeV1 {
+                title: Some("Sample summary".into()),
+                children: vec![
+                    ViewNodeV1 {
+                        id: ViewNodeId::from("summary"),
+                        kind: ViewNodeKindV1::Markdown(MarkdownNodeV1 {
+                            markdown: "A tiny sample stateless view from `plug_test`.".into(),
+                        }),
+                        events: vec![],
+                    },
+                    ViewNodeV1 {
+                        id: ViewNodeId::from("action"),
+                        kind: ViewNodeKindV1::Button(daybook_types::view::ButtonNodeV1 {
+                            label: "Emit event".into(),
+                        }),
+                        events: vec![ViewEventBindingV1 {
+                            event: ViewEventKindV1::Click,
+                            action: ViewActionV1::Emit(EmitViewActionV1 {
+                                name: "plug-test.sample-button-clicked".into(),
+                                payload: serde_json::json!({
+                                    "source": "plug_test",
+                                }),
+                            }),
+                        }],
+                    },
+                ],
+            }),
+            events: vec![],
+        },
+    })
+}
+
+#[cfg(target_arch = "wasm32")]
+fn sample_stateless_view_json() -> String {
+    serde_json::to_string(&sample_stateless_view_spec()).expect(ERROR_JSON)
+}
 
 pub fn plug_manifest() -> PlugManifest {
     use daybook_types::doc::WellKnownFacetTag;
@@ -1184,6 +1259,18 @@ pub fn plug_manifest() -> PlugManifest {
             .into(),
         )]
         .into(),
+        views: [(
+            SAMPLE_VIEW_KEY.into(),
+            Arc::new(ViewManifest {
+                title: "Sample Summary".into(),
+                desc: "Sample stateless view for plug_test".into(),
+                provider: ViewProviderManifest::StatelessWasm {
+                    bundle: "plug_test".into(),
+                    export: SAMPLE_VIEW_EXPORT.into(),
+                },
+            }),
+        )]
+        .into(),
         commands: [
             (
                 "invoke-child-success".into(),
@@ -1323,6 +1410,79 @@ mod tests {
                 "routine {name} should have labelgeneric in its facet_acl"
             );
         }
+    }
+
+    #[test]
+    fn plug_manifest_declares_sample_stateless_view() {
+        let manifest = plug_manifest();
+        let view = manifest
+            .views
+            .get(SAMPLE_VIEW_KEY)
+            .expect("sample view should be declared");
+
+        assert_eq!(view.title, "Sample Summary");
+        assert_eq!(view.desc, "Sample stateless view for plug_test");
+
+        match &view.provider {
+            ViewProviderManifest::StatelessWasm { bundle, export } => {
+                assert_eq!(bundle.as_str(), "plug_test");
+                assert_eq!(export.as_str(), SAMPLE_VIEW_EXPORT);
+            }
+        }
+    }
+
+    #[test]
+    fn sample_stateless_view_json_has_expected_schema_shape() {
+        let json = serde_json::to_value(sample_stateless_view_spec()).expect("serialize view");
+        assert_eq!(
+            json,
+            serde_json::json!({
+                "schemaVersion": "v1",
+                "spec": {
+                    "root": {
+                        "id": "root",
+                        "kind": {
+                            "card": {
+                                "title": "Sample summary",
+                                "children": [
+                                    {
+                                        "id": "summary",
+                                        "kind": {
+                                            "markdown": {
+                                                "markdown": "A tiny sample stateless view from `plug_test`."
+                                            }
+                                        },
+                                        "events": []
+                                    },
+                                    {
+                                        "id": "action",
+                                        "kind": {
+                                            "button": {
+                                                "label": "Emit event"
+                                            }
+                                        },
+                                        "events": [
+                                            {
+                                                "event": "click",
+                                                "action": {
+                                                    "emit": {
+                                                        "name": "plug-test.sample-button-clicked",
+                                                        "payload": {
+                                                            "source": "plug_test"
+                                                        }
+                                                    }
+                                                }
+                                            }
+                                        ]
+                                    }
+                                ]
+                            }
+                        },
+                        "events": []
+                    }
+                }
+            })
+        );
     }
 
     #[test]
