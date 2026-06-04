@@ -30,8 +30,6 @@ import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.NavigationRail
 import androidx.compose.material3.NavigationRailItem
 import androidx.compose.material3.PermanentDrawerSheet
-import androidx.compose.material3.Scaffold
-import androidx.compose.material3.SnackbarHost
 import androidx.compose.material3.SnackbarHostState
 import androidx.compose.material3.Text
 import androidx.compose.material3.VerticalDivider
@@ -52,10 +50,7 @@ import androidx.compose.ui.layout.onSizeChanged
 import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.unit.dp
 import androidx.lifecycle.viewmodel.compose.viewModel
-import androidx.navigation.NavHostController
-import androidx.navigation.compose.currentBackStackEntryAsState
 import kotlinx.coroutines.launch
-import org.example.daybook.AppScreens
 import org.example.daybook.ChromeState
 import org.example.daybook.ChromeStateTopAppBar
 import org.example.daybook.ConfigViewModel
@@ -70,6 +65,10 @@ import org.example.daybook.TablesState
 import org.example.daybook.TablesViewModel
 import org.example.daybook.dockable.DockableDivider
 import org.example.daybook.drawer.DocList
+import org.example.daybook.layouts.ProvideScreenChromeSpec
+import org.example.daybook.layouts.ScreenChromeSpec
+import org.example.daybook.navigation.DaybookNavKey
+import org.example.daybook.navigation.DaybookNavigationState
 import org.example.daybook.progress.ProgressList
 import org.example.daybook.uniffi.core.Uuid
 import org.example.daybook.uniffi.core.Window
@@ -107,12 +106,12 @@ private object SidebarLayoutConstants {
 @Composable
 fun ExpandedLayout(
     modifier: Modifier = Modifier,
-    navController: NavHostController,
+    navState: DaybookNavigationState,
     extraAction: (() -> Unit)? = null,
     contentType: DaybookContentType,
     onShowCloneShare: () -> Unit = {},
 ) {
-    val menuFeatures = rememberMenuFeatures(navController, onShowCloneShare = onShowCloneShare)
+    val menuFeatures = rememberMenuFeatures(navState, onShowCloneShare = onShowCloneShare)
 
     // Tables ViewModel
     val tablesRepo = LocalContainer.current.tablesRepo
@@ -178,35 +177,35 @@ fun ExpandedLayout(
             showTopBar = if (isScreenChromeEmpty) true else screenChromeState.showTopBar,
         )
 
-    Scaffold(
-        modifier = modifier,
-        snackbarHost = { SnackbarHost(snackbarHostState) },
-    ) { innerPadding ->
-        if (layoutConfig != null) {
-            LayoutFromConfig(
-                layoutConfig = layoutConfig,
-                tablesVm = tablesVm,
-                navController = navController,
-                extraAction = extraAction,
-                chromeState = mergedChromeState,
-                menuFeatures = menuFeatures,
-                modifier = Modifier.padding(innerPadding).fillMaxSize(),
-                contentType = contentType,
-            )
-        } else {
-            // Loading state - show empty or default layout
-            Box(modifier = Modifier.fillMaxSize()) {
-                Text("Loading layout...")
-            }
+    if (layoutConfig != null) {
+        LayoutFromConfig(
+            layoutConfig = layoutConfig,
+            tablesVm = tablesVm,
+            navState = navState,
+            extraAction = extraAction,
+            chromeState = mergedChromeState,
+            menuFeatures = menuFeatures,
+            modifier = modifier.fillMaxSize(),
+            contentType = contentType,
+        )
+    } else {
+        // Loading state - show empty or default layout
+        Box(modifier = modifier.fillMaxSize()) {
+            Text("Loading layout...")
         }
     }
+    // Scaffold(
+    //     modifier = modifier,
+    //     snackbarHost = { SnackbarHost(snackbarHostState) },
+    // ) { innerPadding ->
+    // }
 }
 
 @Composable
 fun LayoutFromConfig(
     layoutConfig: WindowLayout,
     tablesVm: TablesViewModel,
-    navController: NavHostController,
+    navState: DaybookNavigationState,
     extraAction: (() -> Unit)?,
     chromeState: ChromeState,
     menuFeatures: List<FeatureItem>,
@@ -308,7 +307,7 @@ fun LayoutFromConfig(
             ) {
                 RenderLayoutPane(
                     pane = leftPane,
-                    navController = navController,
+                    navState = navState,
                     extraAction = extraAction,
                     menuFeatures = menuFeatures,
                     modifier = Modifier.fillMaxSize(),
@@ -323,7 +322,7 @@ fun LayoutFromConfig(
                 ChromeStateTopAppBar(chromeState)
                 RenderLayoutPane(
                     pane = layoutConfig.centerRegion.deets,
-                    navController = navController,
+                    navState = navState,
                     extraAction = extraAction,
                     menuFeatures = menuFeatures,
                     modifier = Modifier.weight(1f).fillMaxWidth(),
@@ -337,7 +336,7 @@ fun LayoutFromConfig(
             pane(key = layoutConfig.rightRegion.deets.key) {
                 RenderLayoutPane(
                     pane = layoutConfig.rightRegion.deets,
-                    navController = navController,
+                    navState = navState,
                     extraAction = extraAction,
                     menuFeatures = menuFeatures,
                     modifier = Modifier.fillMaxSize(),
@@ -418,22 +417,19 @@ private fun SidebarPaneDividerToggleButton(
 
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
-fun SidebarContent(navController: NavHostController, menuFeatures: List<FeatureItem>, modifier: Modifier = Modifier) {
+fun SidebarContent(navState: DaybookNavigationState, menuFeatures: List<FeatureItem>, modifier: Modifier = Modifier) {
     val density = LocalDensity.current
     var widthPx by remember { mutableIntStateOf(0) }
     val widthDp = with(density) { widthPx.toDp() }
     val isWide = widthDp >= 200.dp
 
-    val sidebarFeatures = rememberSidebarFeatures(navController)
+    val sidebarFeatures = rememberSidebarFeatures(navState)
     val scope = rememberCoroutineScope()
     val drawerVm: DrawerViewModel = LocalDrawerViewModel.current
     val docEditorStore = LocalDocEditorStore.current
     val selectedDrawerDocId by docEditorStore.selectedDocId.collectAsState()
 
-    // Observe route changes to update selection highlight
-    // Use currentBackStackEntryAsState to reactively observe route changes
-    val navBackStackEntry by navController.currentBackStackEntryAsState()
-    val currentRoute = navBackStackEntry?.destination?.route
+    val currentDestination = navState.currentDestination
 
     // Get chrome state to check for main feature action button and prominent buttons
     val chromeStateManager = LocalChromeStateManager.current
@@ -447,11 +443,11 @@ fun SidebarContent(navController: NavHostController, menuFeatures: List<FeatureI
         }
 
     // Map feature keys to routes for selection
-    fun getRouteForFeature(feature: FeatureItem): String? = when (feature.key) {
-        FeatureKeys.Home -> AppScreens.Home.name
-        FeatureKeys.Capture -> AppScreens.Capture.name
-        FeatureKeys.Drawer -> AppScreens.Drawer.name
-        FeatureKeys.Settings -> AppScreens.Settings.name
+    fun getDestinationForFeature(feature: FeatureItem): DaybookNavKey? = when (feature.key) {
+        FeatureKeys.Home -> DaybookNavKey.Home
+        FeatureKeys.Capture -> DaybookNavKey.Capture
+        FeatureKeys.Drawer -> DaybookNavKey.Drawer
+        FeatureKeys.Settings -> DaybookNavKey.Settings
         else -> null
     }
 
@@ -488,12 +484,12 @@ fun SidebarContent(navController: NavHostController, menuFeatures: List<FeatureI
                                 horizontalArrangement = Arrangement.SpaceAround,
                             ) {
                                 allSidebarFeatures.forEach { item ->
-                                    val featureRoute = getRouteForFeature(item)
-                                    val isDocEditorRoute = currentRoute == AppScreens.DocEditor.name
+                                    val featureDestination = getDestinationForFeature(item)
+                                    val isDocEditorRoute = currentDestination == DaybookNavKey.DocEditor
                                     val isSelected =
                                         when {
-                                            featureRoute == null -> false
-                                            featureRoute == currentRoute -> true
+                                            featureDestination == null -> false
+                                            featureDestination == currentDestination -> true
                                             item.key == FeatureKeys.Drawer && isDocEditorRoute -> true
                                             else -> false
                                         }
@@ -570,7 +566,15 @@ fun SidebarContent(navController: NavHostController, menuFeatures: List<FeatureI
                                 HorizontalDivider()
                                 when (selectedSidebarPane) {
                                     1 -> {
-                                        ProgressList(modifier = Modifier.weight(1f).fillMaxWidth())
+                                        ProvideScreenChromeSpec(
+                                            ScreenChromeSpec(
+                                                topBar = ScreenChromeSpec.TopBarSpec(title = "Progress"),
+                                            ),
+                                        ) {
+                                            ProgressList(
+                                                modifier = Modifier.weight(1f).fillMaxWidth(),
+                                            )
+                                        }
                                     }
 
                                     else -> {
@@ -579,12 +583,8 @@ fun SidebarContent(navController: NavHostController, menuFeatures: List<FeatureI
                                             selectedDocId = selectedDrawerDocId,
                                             onDocClick = { docId ->
                                                 docEditorStore.selectDoc(docId)
-                                                if (currentRoute != AppScreens.DocEditor.name) {
-                                                    navController.navigate(
-                                                        AppScreens.DocEditor.name,
-                                                    ) {
-                                                        launchSingleTop = true
-                                                    }
+                                                if (currentDestination != DaybookNavKey.DocEditor) {
+                                                    navState.navigate(DaybookNavKey.DocEditor)
                                                 }
                                             },
                                             modifier = Modifier.weight(1f).fillMaxWidth(),
@@ -608,12 +608,12 @@ fun SidebarContent(navController: NavHostController, menuFeatures: List<FeatureI
                     modifier = Modifier.fillMaxHeight(),
                 ) {
                     allSidebarFeatures.forEach { item ->
-                        val featureRoute = getRouteForFeature(item)
-                        val isDocEditorRoute = currentRoute == AppScreens.DocEditor.name
+                        val featureDestination = getDestinationForFeature(item)
+                        val isDocEditorRoute = currentDestination == DaybookNavKey.DocEditor
                         val isSelected =
                             when {
-                                featureRoute == null -> false
-                                featureRoute == currentRoute -> true
+                                featureDestination == null -> false
+                                featureDestination == currentDestination -> true
                                 item.key == FeatureKeys.Drawer && isDocEditorRoute -> true
                                 else -> false
                             }
@@ -643,8 +643,9 @@ fun SidebarContent(navController: NavHostController, menuFeatures: List<FeatureI
 @Composable
 fun RenderLayoutPane(
     pane: WindowLayoutPane,
-    navController: NavHostController,
+    navState: DaybookNavigationState,
     extraAction: (() -> Unit)? = null,
+    onShowCloneShare: () -> Unit = {},
     menuFeatures: List<FeatureItem>,
     modifier: Modifier = Modifier,
     contentType: DaybookContentType,
@@ -653,7 +654,7 @@ fun RenderLayoutPane(
         is WindowLayoutPaneVariant.Sidebar -> {
             // Render sidebar UI
             SidebarContent(
-                navController = navController,
+                navState = navState,
                 menuFeatures = menuFeatures,
                 modifier = modifier,
             )
@@ -662,8 +663,8 @@ fun RenderLayoutPane(
         is WindowLayoutPaneVariant.Routes -> {
             // Render routes
             Routes(
-                extraAction = extraAction,
-                navController = navController,
+                onShowCloneShare = onShowCloneShare,
+                navState = navState,
                 modifier = modifier,
                 contentType = contentType,
             )
@@ -673,8 +674,9 @@ fun RenderLayoutPane(
             // Render nested region recursively
             RenderLayoutRegion(
                 region = variant.v1,
-                navController = navController,
+                navState = navState,
                 extraAction = extraAction,
+                onShowCloneShare = onShowCloneShare,
                 menuFeatures = menuFeatures,
                 modifier = modifier,
                 contentType = contentType,
@@ -686,8 +688,9 @@ fun RenderLayoutPane(
 @Composable
 fun RenderLayoutRegion(
     region: WindowLayoutRegion,
-    navController: NavHostController,
+    navState: DaybookNavigationState,
     extraAction: (() -> Unit)? = null,
+    onShowCloneShare: () -> Unit = {},
     menuFeatures: List<FeatureItem>,
     modifier: Modifier = Modifier,
     contentType: DaybookContentType,
@@ -732,8 +735,9 @@ fun RenderLayoutRegion(
             pane(key = childPane.key, regimes = childRegimes) {
                 RenderLayoutPane(
                     pane = child.deets,
-                    navController = navController,
+                    navState = navState,
                     extraAction = extraAction,
+                    onShowCloneShare = onShowCloneShare,
                     menuFeatures = menuFeatures,
                     modifier = Modifier.fillMaxSize(),
                     contentType = contentType,

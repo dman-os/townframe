@@ -11,38 +11,44 @@ import androidx.compose.material.icons.filled.QrCode2
 import androidx.compose.material.icons.filled.Settings
 import androidx.compose.material3.Icon
 import androidx.compose.runtime.Composable
-import androidx.navigation.NavHostController
-import org.example.daybook.AppScreens
 import org.example.daybook.capture.CaptureNavActions
+import org.example.daybook.navigation.DaybookNavKey
+import org.example.daybook.navigation.DaybookNavigationState
 
-fun routeForFeatureKey(featureKey: String): String? = when (featureKey) {
-    FeatureKeys.Home -> AppScreens.Home.name
-    FeatureKeys.Capture -> AppScreens.Capture.name
-    FeatureKeys.Drawer -> AppScreens.Drawer.name
-    FeatureKeys.Progress -> AppScreens.Progress.name
-    FeatureKeys.Settings -> AppScreens.Settings.name
+fun destinationForFeatureKey(featureKey: String): DaybookNavKey? = when (featureKey) {
+    FeatureKeys.Home -> DaybookNavKey.Home
+    FeatureKeys.Capture -> DaybookNavKey.Capture
+    FeatureKeys.Drawer -> DaybookNavKey.Drawer
+    FeatureKeys.Progress -> DaybookNavKey.Progress
+    FeatureKeys.Settings -> DaybookNavKey.Settings
     else -> null
+}
+
+private fun DaybookNavigationState.navigateIfCurrentDiffers(destination: DaybookNavKey) {
+    if (currentDestination != destination) {
+        navigate(destination)
+    }
 }
 
 /**
  * All available features. This is the master list.
  */
 @Composable
-fun rememberAllFeatures(navController: NavHostController): List<FeatureItem> = listOf(
+fun rememberAllFeatures(navState: DaybookNavigationState): List<FeatureItem> = listOf(
     FeatureItem(
         key = FeatureKeys.Home,
         icon = { Icon(Icons.Default.Home, contentDescription = "Home") },
         selectedIcon = { Icon(Icons.Default.Home, contentDescription = "Home") },
         label = "Home",
-        onActivate = { navController.navigate(AppScreens.Home.name) },
-        onReselect = { navController.navigate(AppScreens.Home.name) },
+        onActivate = { navState.navigateIfCurrentDiffers(DaybookNavKey.Home) },
+        onReselect = { navState.navigateIfCurrentDiffers(DaybookNavKey.Home) },
     ),
     FeatureItem(
         key = FeatureKeys.Capture,
         icon = { Icon(Icons.Default.EditNote, contentDescription = "Capture") },
         selectedIcon = { Icon(Icons.Default.EditNote, contentDescription = "Capture") },
         label = "Capture",
-        onActivate = { navController.navigate(AppScreens.Capture.name) },
+        onActivate = { navState.navigate(DaybookNavKey.Capture) },
         onReselect = { CaptureNavActions.requestModeCycle() },
     ),
     FeatureItem(
@@ -52,16 +58,16 @@ fun rememberAllFeatures(navController: NavHostController): List<FeatureItem> = l
             Icon(Icons.AutoMirrored.Filled.LibraryBooks, contentDescription = "Drawer")
         },
         label = "Drawer",
-        onActivate = { navController.navigate(AppScreens.Drawer.name) },
-        onReselect = { navController.navigate(AppScreens.Drawer.name) },
+        onActivate = { navState.navigateIfCurrentDiffers(DaybookNavKey.Drawer) },
+        onReselect = { navState.navigateIfCurrentDiffers(DaybookNavKey.Drawer) },
     ),
     FeatureItem(
         key = FeatureKeys.Progress,
         icon = { Icon(Icons.Default.Notifications, contentDescription = "Progress") },
         selectedIcon = { Icon(Icons.Default.Notifications, contentDescription = "Progress") },
         label = "Progress",
-        onActivate = { navController.navigate(AppScreens.Progress.name) },
-        onReselect = { navController.navigate(AppScreens.Progress.name) },
+        onActivate = { navState.navigateIfCurrentDiffers(DaybookNavKey.Progress) },
+        onReselect = { navState.navigateIfCurrentDiffers(DaybookNavKey.Progress) },
     ),
 )
 
@@ -70,8 +76,8 @@ fun rememberAllFeatures(navController: NavHostController): List<FeatureItem> = l
  * For compact layout: show Home, Capture, Documents in that order in the bottom bar.
  */
 @Composable
-fun rememberNavBarFeatures(navController: NavHostController): List<FeatureItem> {
-    val allFeatures = rememberAllFeatures(navController)
+fun rememberNavBarFeatures(navState: DaybookNavigationState): List<FeatureItem> {
+    val allFeatures = rememberAllFeatures(navState)
 
     // Return Home, Capture, Documents in that order
     return listOfNotNull(
@@ -86,8 +92,8 @@ fun rememberNavBarFeatures(navController: NavHostController): List<FeatureItem> 
  * For sidebar: show Capture first, then Home and Documents.
  */
 @Composable
-fun rememberSidebarFeatures(navController: NavHostController): List<FeatureItem> {
-    val allFeatures = rememberAllFeatures(navController)
+fun rememberSidebarFeatures(navState: DaybookNavigationState): List<FeatureItem> {
+    val allFeatures = rememberAllFeatures(navState)
 
     // Return Capture first so it becomes the primary sidebar action.
     return listOfNotNull(
@@ -103,8 +109,8 @@ fun rememberSidebarFeatures(navController: NavHostController): List<FeatureItem>
  * For compact layout: everything except Home, Capture, Documents goes in the menu.
  */
 @Composable
-fun rememberMenuFeatures(navController: NavHostController, onShowCloneShare: () -> Unit = {}): List<FeatureItem> {
-    val allFeatures = rememberAllFeatures(navController)
+fun rememberMenuFeatures(navState: DaybookNavigationState, onShowCloneShare: () -> Unit = {}): List<FeatureItem> {
+    val allFeatures = rememberAllFeatures(navState)
 
     // Get the bottom bar features (Home, Capture, Documents)
     val bottomBarKeys = setOf(FeatureKeys.Home, FeatureKeys.Capture, FeatureKeys.Drawer)
@@ -127,8 +133,8 @@ fun rememberMenuFeatures(navController: NavHostController, onShowCloneShare: () 
                 icon = { Icon(Icons.Default.Settings, contentDescription = "Settings") },
                 selectedIcon = { Icon(Icons.Default.Settings, contentDescription = "Settings") },
                 label = "Settings",
-                onActivate = { navController.navigate(AppScreens.Settings.name) },
-                onReselect = { navController.navigate(AppScreens.Settings.name) },
+                onActivate = { navState.navigateIfCurrentDiffers(DaybookNavKey.Settings) },
+                onReselect = { navState.navigateIfCurrentDiffers(DaybookNavKey.Settings) },
             ),
         )
 }

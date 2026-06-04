@@ -1,0 +1,31 @@
+[bindings.kotlin]
+package_name = "org.example.daybook.uniffi.big_sync"
+
+# [bindings.kotlin.rename]
+# "Content.Blob" = "BlobV"
+# # ImageMetadata = "ImageMetadataData"
+# Pending = "PendingData"
+
+# [bindings.kotlin.custom_types.PathBuf]
+# type_name = "String"
+# imports = []
+# lift = "{}"
+# lower = "{}"
+
+# [bindings.kotlin.custom_types.Json]
+# type_name = "String"
+# imports = []
+# lift = "{}"
+# lower = "{}"
+
+[bindings.kotlin.custom_types.Timestamp]
+type_name = "Instant"
+imports = ["kotlin.time.Instant"]
+lift = "Instant.fromEpochSeconds({}, 0)"
+lower = "{}.epochSeconds"
+
+[bindings.kotlin.custom_types.Uuid]
+type_name = "Uuid"
+imports = ["kotlin.uuid.Uuid"]
+lift = "Uuid.fromByteArray({})"
+lower = "{}.toByteArray()"

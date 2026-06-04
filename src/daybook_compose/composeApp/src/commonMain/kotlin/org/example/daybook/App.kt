@@ -4,7 +4,6 @@
 
 package org.example.daybook
 
-import androidx.compose.animation.AnimatedVisibility
 import androidx.compose.animation.core.FastOutSlowInEasing
 import androidx.compose.animation.core.RepeatMode
 import androidx.compose.animation.core.animateFloat
@@ -13,14 +12,13 @@ import androidx.compose.animation.core.rememberInfiniteTransition
 import androidx.compose.animation.core.tween
 import androidx.compose.animation.slideInHorizontally
 import androidx.compose.animation.slideOutHorizontally
-import androidx.compose.foundation.Image
+import androidx.compose.animation.togetherWith
 import androidx.compose.foundation.background
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxSize
-import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
 import androidx.compose.material.icons.Icons
@@ -29,7 +27,6 @@ import androidx.compose.material.icons.filled.Description
 import androidx.compose.material.icons.filled.Settings
 import androidx.compose.material3.Button
 import androidx.compose.material3.CircularProgressIndicator
-import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.Icon
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Surface
@@ -47,17 +44,17 @@ import androidx.compose.runtime.staticCompositionLocalOf
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.scale
+import androidx.compose.ui.tooling.preview.Preview
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.lifecycle.ViewModel
 import androidx.lifecycle.viewModelScope
 import androidx.lifecycle.viewmodel.compose.viewModel
-import androidx.navigation.NavHostController
-import androidx.navigation.compose.NavHost
-import androidx.navigation.compose.composable
-import androidx.navigation.compose.rememberNavController
-import daybook.composeapp.generated.resources.Res
-import daybook.composeapp.generated.resources.compose_multiplatform
+import androidx.lifecycle.viewmodel.navigation3.rememberViewModelStoreNavEntryDecorator
+import androidx.navigation3.runtime.NavKey
+import androidx.navigation3.runtime.entryProvider
+import androidx.navigation3.runtime.rememberSaveableStateHolderNavEntryDecorator
+import androidx.navigation3.ui.NavDisplay
 import io.github.vinceglb.filekit.path
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Dispatchers
@@ -73,10 +70,21 @@ import org.example.daybook.capture.ProvideCameraCaptureContext
 import org.example.daybook.capture.screens.CaptureScreen
 import org.example.daybook.drawer.DocEditorScreen
 import org.example.daybook.drawer.DrawerScreen
+import org.example.daybook.home.HomeIcon
+import org.example.daybook.home.HomeMenuWidgetConfig
+import org.example.daybook.home.HomeScreen
+import org.example.daybook.home.HomeScreenConfig
+import org.example.daybook.home.MenuNavItem
+import org.example.daybook.home.WipPermissionsWidgetConfig
+import org.example.daybook.layouts.CompactLayout
+import org.example.daybook.layouts.DaybookScaffold
+import org.example.daybook.layouts.ExpandedLayout
+import org.example.daybook.layouts.ProvideScreenChromeSpec
+import org.example.daybook.navigation.DaybookNavKey
+import org.example.daybook.navigation.DaybookNavigationState
+import org.example.daybook.navigation.rememberDaybookNavigationState
 import org.example.daybook.progress.ProgressList
 import org.example.daybook.settings.SettingsScreen
-import org.example.daybook.tables.CompactLayout
-import org.example.daybook.tables.ExpandedLayout
 import org.example.daybook.theme.DaybookTheme
 import org.example.daybook.theme.ThemeConfig
 import org.example.daybook.uniffi.CameraPreviewFfi
@@ -107,8 +115,6 @@ import org.example.daybook.uniffi.core.Table
 import org.example.daybook.uniffi.core.TablesEvent
 import org.example.daybook.uniffi.core.Uuid
 import org.example.daybook.uniffi.core.Window
-import org.jetbrains.compose.resources.painterResource
-import org.jetbrains.compose.ui.tooling.preview.Preview
 import kotlin.time.Clock
 import kotlin.time.TimeMark
 import kotlin.time.TimeSource
@@ -182,16 +188,6 @@ val LocalDocEditorStore =
     }
 
 data class AppConfig(val theme: ThemeConfig = ThemeConfig.Dark)
-
-enum class AppScreens {
-    Home,
-    Capture,
-    Tables,
-    Progress,
-    Settings,
-    Drawer,
-    DocEditor,
-}
 
 private sealed interface AppInitState {
     data object Loading : AppInitState
@@ -679,13 +675,71 @@ private suspend fun <T> withStartupStage(
     }
 }
 
+private fun defaultHomeScreenConfig(navState: DaybookNavigationState, onShowCloneShare: () -> Unit): HomeScreenConfig =
+    HomeScreenConfig(
+        widgets =
+        listOf(
+            WipPermissionsWidgetConfig(),
+            HomeMenuWidgetConfig(
+                items =
+                listOf(
+                    MenuNavItem(
+                        id = "settings",
+                        label = "settings",
+                        icon = HomeIcon.Settings,
+                        onClick = {
+                            navState.navigate(DaybookNavKey.Settings)
+                        },
+                    ),
+                    MenuNavItem(
+                        id = "clone",
+                        label = "clone",
+                        icon = HomeIcon.Clone,
+                        onClick = onShowCloneShare,
+                    ),
+                    MenuNavItem(
+                        id = "new_doc",
+                        label = "new doc",
+                        icon = HomeIcon.NewDoc,
+                        onClick = {
+                            navState.navigate(DaybookNavKey.Capture)
+                        },
+                    ),
+                    MenuNavItem(
+                        id = "camera",
+                        label = "camera",
+                        icon = HomeIcon.Camera,
+                        onClick = {
+                            navState.navigate(DaybookNavKey.Capture)
+                        },
+                    ),
+                    MenuNavItem(
+                        id = "mic",
+                        label = "mic",
+                        icon = HomeIcon.Mic,
+                        onClick = {
+                            navState.navigate(DaybookNavKey.Capture)
+                        },
+                    ),
+                    MenuNavItem(
+                        id = "drawer",
+                        label = "drawer",
+                        icon = HomeIcon.Drawer,
+                        onClick = {
+                            navState.navigate(DaybookNavKey.Drawer)
+                        },
+                    ),
+                ),
+            ),
+        ),
+    )
+
 @Composable
 @Preview
 fun App(
     config: AppConfig = AppConfig(),
     surfaceModifier: Modifier = Modifier,
     extraAction: (() -> Unit)? = null,
-    navController: NavHostController = rememberNavController(),
     shutdownRequested: Boolean = false,
     onShutdownCompleted: (() -> Unit)? = null,
     autoShutdownOnDispose: Boolean = true,
@@ -1050,6 +1104,7 @@ fun App(
                     onCreateRepoInitRequestChange = { createRepoInitRequest = it },
                     onPendingOpenRepoPath = { pendingOpenRepoPath = it },
                     onPendingForgetRepoId = { pendingForgetRepoId = it },
+                    onExitRequest = { onExitRequest?.invoke() },
                 )
             }
 
@@ -1142,12 +1197,11 @@ fun App(
                                     LocalChromeStateManager provides chromeStateManager,
                                     LocalAppExitRequest provides onExitRequest,
                                 ) {
-                                    val bigDialogState = remember { BigDialogState() }
+                                    val navState = rememberDaybookNavigationState()
                                     AdaptiveAppLayout(
                                         modifier = surfaceModifier,
-                                        navController = navController,
+                                        navState = navState,
                                         extraAction = extraAction,
-                                        bigDialogState = bigDialogState,
                                     )
                                 }
                             }
@@ -1299,11 +1353,11 @@ private suspend fun shutdownAppContainer(appContainer: AppContainer) {
 }
 
 @Composable
+@Suppress("UnusedParameter", "FunctionNaming")
 fun AdaptiveAppLayout(
     modifier: Modifier = Modifier,
-    navController: NavHostController,
+    navState: DaybookNavigationState,
     extraAction: (() -> Unit)? = null,
-    bigDialogState: BigDialogState,
 ) {
     val platform = getPlatform()
     val screenWidth = platform.getScreenWidthDp()
@@ -1331,65 +1385,34 @@ fun AdaptiveAppLayout(
         }
     }
 
-    DaybookHomeScreen(
-        navigationType = navigationType,
-        contentType = contentType,
-        navController = navController,
-        extraAction = extraAction,
-        bigDialogState = bigDialogState,
-        modifier = modifier,
-    )
-}
-
-@OptIn(ExperimentalMaterial3Api::class)
-@Composable
-fun DaybookHomeScreen(
-    navigationType: DaybookNavigationType,
-    contentType: DaybookContentType,
-    navController: NavHostController,
-    extraAction: (() -> Unit)? = null,
-    bigDialogState: BigDialogState,
-    modifier: Modifier = Modifier,
-) {
     Box(modifier = modifier.fillMaxSize()) {
         when (navigationType) {
             DaybookNavigationType.PERMANENT_NAVIGATION_DRAWER -> {
                 ExpandedLayout(
                     modifier = Modifier.fillMaxSize(),
-                    navController = navController,
-                    extraAction = extraAction,
+                    navState = navState,
                     contentType = contentType,
-                    onShowCloneShare = { bigDialogState.show() },
+                    onShowCloneShare = { navState.navigate(DaybookNavKey.CloneShare) },
                 )
             }
 
             DaybookNavigationType.NAVIGATION_RAIL -> {
                 ExpandedLayout(
                     modifier = Modifier.fillMaxSize(),
-                    navController = navController,
-                    extraAction = extraAction,
+                    navState = navState,
                     contentType = contentType,
-                    onShowCloneShare = { bigDialogState.show() },
+                    onShowCloneShare = { navState.navigate(DaybookNavKey.CloneShare) },
                 )
             }
 
             DaybookNavigationType.BOTTOM_NAVIGATION -> {
                 CompactLayout(
                     modifier = Modifier.fillMaxSize(),
-                    navController = navController,
-                    extraAction = extraAction,
+                    navState = navState,
                     contentType = contentType,
-                    onShowCloneShare = { bigDialogState.show() },
+                    onShowCloneShare = { navState.navigate(DaybookNavKey.CloneShare) },
                 )
             }
-        }
-
-        BigDialogHost(
-            state = bigDialogState,
-            narrowScreen = navigationType == DaybookNavigationType.BOTTOM_NAVIGATION,
-            modifier = Modifier.fillMaxSize(),
-        ) {
-            CloneShareDialogContent(onClose = { bigDialogState.dismiss() })
         }
     }
 }
@@ -1485,77 +1508,81 @@ fun TablesScreen(modifier: Modifier = Modifier) {
             )
         }
 
-    ProvideChromeState(chromeState) {
-        when (tablesState) {
-            is TablesState.Error -> {
-                Column(
-                    modifier = modifier,
-                    horizontalAlignment = Alignment.CenterHorizontally,
-                ) {
-                    Text("Error loading tables: ${tablesState.error.message()}")
+    DaybookScaffold(
+        modifier = modifier,
+    ) { scaffoldPadding ->
+        ProvideChromeState(chromeState) {
+            when (tablesState) {
+                is TablesState.Error -> {
+                    Column(
+                        modifier = Modifier.padding(scaffoldPadding),
+                        horizontalAlignment = Alignment.CenterHorizontally,
+                    ) {
+                        Text("Error loading tables: ${tablesState.error.message()}")
+                    }
                 }
-            }
 
-            is TablesState.Loading -> {
-                Column(
-                    modifier = modifier,
-                    horizontalAlignment = Alignment.CenterHorizontally,
-                ) {
-                    CircularProgressIndicator()
-                    Text("Loading tables...")
+                is TablesState.Loading -> {
+                    Column(
+                        modifier = Modifier.padding(scaffoldPadding),
+                        horizontalAlignment = Alignment.CenterHorizontally,
+                    ) {
+                        CircularProgressIndicator()
+                        Text("Loading tables...")
+                    }
                 }
-            }
 
-            is TablesState.Data -> {
-                Column(
-                    modifier = modifier.padding(16.dp),
-                ) {
-                    // Selected Table Info
-                    if (selectedTable != null) {
-                        Text(
-                            text = "Selected Table: ${selectedTable.title}",
-                            modifier = Modifier.padding(bottom = 16.dp),
-                        )
+                is TablesState.Data -> {
+                    Column(
+                        modifier = Modifier.padding(scaffoldPadding).padding(16.dp),
+                    ) {
+                        // Selected Table Info
+                        if (selectedTable != null) {
+                            Text(
+                                text = "Selected Table: ${selectedTable.title}",
+                                modifier = Modifier.padding(bottom = 16.dp),
+                            )
 
+                            Text(
+                                text = "Tabs in this table: ${tabsForSelectedTable.size}",
+                                modifier = Modifier.padding(bottom = 8.dp),
+                            )
+
+                            // Show tabs for selected table
+                            tabsForSelectedTable.forEach { tab ->
+                                Text(
+                                    text = "  • ${tab.title} (${tab.panels.size} panels)",
+                                    modifier = Modifier.padding(start = 16.dp, bottom = 4.dp),
+                                )
+                            }
+
+                            Spacer(modifier = Modifier.height(24.dp))
+                        }
+
+                        // Overall State Summary
                         Text(
-                            text = "Tabs in this table: ${tabsForSelectedTable.size}",
+                            text = "Overall State:",
                             modifier = Modifier.padding(bottom = 8.dp),
                         )
+                        Text("  • Windows: ${tablesState.windows.size}")
+                        Text("  • Tables: ${tablesState.tables.size}")
+                        Text("  • Tabs: ${tablesState.tabs.size}")
+                        Text("  • Panels: ${tablesState.panels.size}")
 
-                        // Show tabs for selected table
-                        tabsForSelectedTable.forEach { tab ->
+                        Spacer(modifier = Modifier.height(24.dp))
+
+                        // All Tables List
+                        Text(
+                            text = "All Tables:",
+                            modifier = Modifier.padding(bottom = 8.dp),
+                        )
+                        tablesState.tablesList.forEach { table ->
+                            val isSelected = table.id == selectedTableId
                             Text(
-                                text = "  • ${tab.title} (${tab.panels.size} panels)",
+                                text = "  ${if (isSelected) "→" else "•"} ${table.title} (${table.tabs.size} tabs)",
                                 modifier = Modifier.padding(start = 16.dp, bottom = 4.dp),
                             )
                         }
-
-                        Spacer(modifier = Modifier.height(24.dp))
-                    }
-
-                    // Overall State Summary
-                    Text(
-                        text = "Overall State:",
-                        modifier = Modifier.padding(bottom = 8.dp),
-                    )
-                    Text("  • Windows: ${tablesState.windows.size}")
-                    Text("  • Tables: ${tablesState.tables.size}")
-                    Text("  • Tabs: ${tablesState.tabs.size}")
-                    Text("  • Panels: ${tablesState.panels.size}")
-
-                    Spacer(modifier = Modifier.height(24.dp))
-
-                    // All Tables List
-                    Text(
-                        text = "All Tables:",
-                        modifier = Modifier.padding(bottom = 8.dp),
-                    )
-                    tablesState.tablesList.forEach { table ->
-                        val isSelected = table.id == selectedTableId
-                        Text(
-                            text = "  ${if (isSelected) "→" else "•"} ${table.title} (${table.tabs.size} tabs)",
-                            modifier = Modifier.padding(start = 16.dp, bottom = 4.dp),
-                        )
                     }
                 }
             }
@@ -1567,122 +1594,162 @@ fun TablesScreen(modifier: Modifier = Modifier) {
 fun Routes(
     modifier: Modifier = Modifier,
     contentType: DaybookContentType,
-    extraAction: (() -> Unit)? = null,
-    navController: NavHostController,
+    onShowCloneShare: () -> Unit = {},
+    navState: DaybookNavigationState,
 ) {
     val drawerVm = LocalDrawerViewModel.current
-
-    NavHost(
-        startDestination = AppScreens.Home.name,
-        navController = navController,
-    ) {
-        composable(route = AppScreens.Capture.name) {
-            // CaptureScreen provides its own chrome state internally
-            CaptureScreen(modifier = modifier)
+    val exitRequest = LocalAppExitRequest.current
+    val screenWidth = getPlatform().getScreenWidthDp()
+    val bigDialogStrategy =
+        remember(screenWidth) {
+            BigDialogSceneStrategy<NavKey>(narrowScreen = screenWidth.value < 600f)
         }
-        composable(route = AppScreens.Tables.name) {
-            TablesScreen(modifier = modifier)
-        }
-        composable(route = AppScreens.Progress.name) {
-            ProvideChromeState(ChromeState(title = "Progress")) {
-                ProgressList(modifier = modifier)
-            }
-        }
-        composable(route = AppScreens.Settings.name) {
-            ProvideChromeState(ChromeState(title = "Settings")) {
-                SettingsScreen(modifier = modifier)
-            }
-        }
-        composable(
-            route = AppScreens.Drawer.name,
-        ) {
-            ProvideChromeState(ChromeState(title = "Drawer")) {
-                DrawerScreen(
-                    drawerVm = drawerVm,
-                    onOpenDoc = {
-                        navController.navigate(AppScreens.DocEditor.name) { launchSingleTop = true }
-                    },
-                    modifier = modifier,
-                )
-            }
-        }
-        composable(
-            route = AppScreens.DocEditor.name,
-            enterTransition = {
-                slideInHorizontally(
-                    animationSpec = tween(240),
-                    initialOffsetX = { fullWidth -> fullWidth },
-                )
-            },
-            popExitTransition = {
-                slideOutHorizontally(
-                    animationSpec = tween(240),
-                    targetOffsetX = { fullWidth -> fullWidth },
-                )
-            },
-        ) {
-            ProvideChromeState(
-                ChromeState(
-                    title = "Doc Editor",
-                    onBack = { navController.popBackStack() },
-                ),
-            ) {
-                DocEditorScreen(
-                    contentType = contentType,
-                    modifier = modifier,
-                )
-            }
-        }
-        composable(route = AppScreens.Home.name) {
-            ProvideChromeState(ChromeState.Empty) {
-                var showContent by remember { mutableStateOf(false) }
-                Column(
-                    modifier = modifier,
-                    horizontalAlignment = Alignment.CenterHorizontally,
-                ) {
-                    Button(onClick = {
-                        showContent = !showContent
-                        extraAction?.invoke()
-                    }) {
-                        Text("Click me!")
-                    }
-                    run {
-                        val permCtx = LocalPermCtx.current
-                        if (permCtx != null) {
-                            if (permCtx.hasAll) {
-                                Text("All permissions avail")
-                            } else {
-                                Button(onClick = {
-                                    permCtx.requestPermissions(
-                                        PermissionRequest(
-                                            camera = true,
-                                            notifications = true,
-                                            microphone = true,
-                                            overlay = true,
-                                            storageRead = true,
-                                            storageWrite = true,
-                                        ),
-                                    )
-                                }) {
-                                    Text("Ask for permissions")
-                                }
-                            }
-                        }
-                    }
-                    AnimatedVisibility(showContent) {
-                        val greeting = remember { Greeting().greet() }
-                        Column(
-                            Modifier.fillMaxWidth(),
-                            horizontalAlignment = Alignment.CenterHorizontally,
-                        ) {
-                            Image(painterResource(Res.drawable.compose_multiplatform), null)
-                            Text("Compose: $greeting")
-                        }
-                    }
-                }
-            }
+    val onBack: () -> Unit = {
+        if (navState.backStack.size > 1) {
+            navState.pop()
+            Unit
+        } else {
+            exitRequest?.invoke()
+            Unit
         }
     }
+    NavDisplay(
+        backStack = navState.backStack,
+        onBack = onBack,
+        sceneStrategies = listOf(bigDialogStrategy),
+        transitionSpec = {
+            slideInHorizontally(
+                animationSpec = tween(240),
+                initialOffsetX = { fullWidth -> fullWidth },
+            ) togetherWith slideOutHorizontally(
+                animationSpec = tween(240),
+                targetOffsetX = { fullWidth -> -fullWidth },
+            )
+        },
+        popTransitionSpec = {
+            slideInHorizontally(
+                animationSpec = tween(240),
+                initialOffsetX = { fullWidth -> -fullWidth },
+            ) togetherWith slideOutHorizontally(
+                animationSpec = tween(240),
+                targetOffsetX = { fullWidth -> fullWidth },
+            )
+        },
+        predictivePopTransitionSpec = {
+            slideInHorizontally(
+                animationSpec = tween(240),
+                initialOffsetX = { fullWidth -> -fullWidth },
+            ) togetherWith slideOutHorizontally(
+                animationSpec = tween(240),
+                targetOffsetX = { fullWidth -> fullWidth },
+            )
+        },
+        entryDecorators = listOf(
+            rememberSaveableStateHolderNavEntryDecorator(),
+            rememberViewModelStoreNavEntryDecorator(),
+        ),
+        modifier = modifier,
+        entryProvider = entryProvider {
+            entry<DaybookNavKey.Home> {
+                ProvideScreenChromeSpec(
+                    navState.chromeSpecFor(
+                        destination = DaybookNavKey.Home,
+                        onBack = onBack,
+                    ),
+                ) {
+                    HomeScreen(
+                        config = defaultHomeScreenConfig(
+                            navState = navState,
+                            onShowCloneShare = onShowCloneShare,
+                        ),
+                        modifier = modifier,
+                    )
+                }
+            }
+            entry<DaybookNavKey.CloneShare>(
+                metadata = bigDialog(),
+            ) {
+                CloneShareDialogContent(onClose = { navState.pop() })
+            }
+            entry<DaybookNavKey.Capture> {
+                ProvideScreenChromeSpec(
+                    navState.chromeSpecFor(
+                        destination = DaybookNavKey.Capture,
+                        onBack = onBack,
+                    ),
+                ) {
+                    CaptureScreen(
+                        modifier = modifier,
+                    )
+                }
+            }
+            entry<DaybookNavKey.Tables> {
+                ProvideScreenChromeSpec(
+                    navState.chromeSpecFor(
+                        destination = DaybookNavKey.Tables,
+                        onBack = onBack,
+                    ),
+                ) {
+                    TablesScreen(
+                        modifier = modifier,
+                    )
+                }
+            }
+            entry<DaybookNavKey.Progress> {
+                ProvideScreenChromeSpec(
+                    navState.chromeSpecFor(
+                        destination = DaybookNavKey.Progress,
+                        onBack = onBack,
+                    ),
+                ) {
+                    ProgressList(
+                        modifier = modifier,
+                    )
+                }
+            }
+            entry<DaybookNavKey.Settings> {
+                ProvideScreenChromeSpec(
+                    navState.chromeSpecFor(
+                        destination = DaybookNavKey.Settings,
+                        onBack = onBack,
+                    ),
+                ) {
+                    SettingsScreen(
+                        modifier = modifier,
+                    )
+                }
+            }
+            entry<DaybookNavKey.Drawer> {
+                ProvideScreenChromeSpec(
+                    navState.chromeSpecFor(
+                        destination = DaybookNavKey.Drawer,
+                        onBack = onBack,
+                    ),
+                ) {
+                    DrawerScreen(
+                        drawerVm = drawerVm,
+                        onOpenDoc = {
+                            navState.navigate(DaybookNavKey.DocEditor)
+                        },
+                        modifier = modifier,
+                    )
+                }
+            }
+            entry<DaybookNavKey.DocEditor> {
+                ProvideScreenChromeSpec(
+                    navState.chromeSpecFor(
+                        destination = DaybookNavKey.DocEditor,
+                        onBack = onBack,
+                    ),
+                ) {
+                    DocEditorScreen(
+                        contentType = contentType,
+                        modifier = modifier,
+                    )
+                }
+            }
+        },
+    )
 }
 
 @Composable

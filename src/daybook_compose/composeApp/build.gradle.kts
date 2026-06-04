@@ -6,6 +6,7 @@ import org.jetbrains.kotlin.gradle.targets.js.webpack.KotlinWebpackConfig
 import org.gradle.api.tasks.Copy
 import org.gradle.api.tasks.Delete
 import org.gradle.api.tasks.Exec
+import org.gradle.api.tasks.SourceTask
 import org.gradle.api.tasks.Sync
 import org.gradle.process.CommandLineArgumentProvider
 import java.io.File
@@ -27,7 +28,14 @@ plugins {
 detekt {
     toolVersion = "2.0.0-alpha.3"
     config.setFrom(file("../config/detekt/detekt.yml"))
+    baseline = file("detekt-baseline-main.xml")
     buildUponDefaultConfig = true
+}
+
+tasks.withType<SourceTask>().configureEach {
+    if (name.startsWith("detekt")) {
+        exclude("**/uniffi/**")
+    }
 }
 
 // cargo {
@@ -90,7 +98,6 @@ kotlin {
         val desktopMain by getting
 
         androidMain.dependencies {
-            implementation(compose.preview)
             implementation(libs.androidx.activity.compose)
             implementation(libs.androidx.lifecycle.viewmodel)
             implementation(libs.androidx.lifecycle.runtimeCompose)
@@ -112,8 +119,11 @@ kotlin {
             implementation(compose.components.uiToolingPreview)
             implementation(libs.androidx.lifecycle.viewmodel)
             implementation(libs.androidx.lifecycle.viewmodel.compose)
+            implementation(libs.lifecycle.viewmodel.navigation3)
             implementation(libs.androidx.navigation.compose)
-            implementation(libs.androidx.navigation.compose)
+            implementation(libs.navigationevent.compose)
+            implementation(libs.navigation3.runtime)
+            implementation(libs.navigation3.ui)
             implementation(libs.kotlinx.coroutinesCore)
             implementation(libs.kotlinx.serialization.json)
             implementation(libs.coil.compose)

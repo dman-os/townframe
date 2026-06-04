@@ -34,11 +34,10 @@ import androidx.compose.ui.layout.boundsInWindow
 import androidx.compose.ui.layout.onGloballyPositioned
 import androidx.compose.ui.semantics.Role
 import androidx.compose.ui.unit.dp
-import androidx.navigation.NavHostController
-import androidx.navigation.compose.currentBackStackEntryAsState
 import kotlinx.coroutines.launch
 import org.example.daybook.LocalChromeStateManager
 import org.example.daybook.MainFeatureActionButton
+import org.example.daybook.navigation.DaybookNavKey
 
 /**
  * Abstraction for center navigation bar content that adapts based on navigation state
@@ -46,7 +45,7 @@ import org.example.daybook.MainFeatureActionButton
  */
 @Composable
 fun RowScope.CenterNavBarContent(
-    navController: NavHostController,
+    currentDestination: DaybookNavKey?,
     isMenuOpen: Boolean,
     showFeaturesMenu: Boolean,
     featureReadyStates: List<androidx.compose.runtime.State<Boolean>>,
@@ -58,8 +57,6 @@ fun RowScope.CenterNavBarContent(
     modifier: Modifier = Modifier,
 ) {
     val scope = rememberCoroutineScope()
-    val navBackStackEntry by navController.currentBackStackEntryAsState()
-    val currentRoute = navBackStackEntry?.destination?.route
     val armedIndicatorColor = MaterialTheme.colorScheme.primary.copy(alpha = 0.95f)
     val hoverFill = MaterialTheme.colorScheme.primary.copy(alpha = 0.12f)
     val selectedFill = MaterialTheme.colorScheme.primary.copy(alpha = 0.24f)
@@ -96,7 +93,7 @@ fun RowScope.CenterNavBarContent(
                         featureButtonLayouts[prominentButtonKey]?.contains(pw)
                     } ?: false
 
-                val selected = isFeatureRouteSelected(button.key, currentRoute)
+                val selected = isFeatureRouteSelected(button.key, currentDestination)
                 CustomBottomBarItem(
                     modifier =
                     Modifier
@@ -165,7 +162,7 @@ fun RowScope.CenterNavBarContent(
                         ?: false
                 val ready = featureReadyStates.getOrNull(idx)?.value ?: false
 
-                val selected = isFeatureRouteSelected(feature.key, currentRoute)
+                val selected = isFeatureRouteSelected(feature.key, currentDestination)
                 CustomBottomBarItem(
                     modifier =
                     Modifier
@@ -265,7 +262,7 @@ private fun CustomBottomBarItem(
     }
 }
 
-private fun isFeatureRouteSelected(featureKey: String, currentRoute: String?): Boolean {
-    val targetRoute = routeForFeatureKey(featureKey)
-    return targetRoute != null && targetRoute == currentRoute
+private fun isFeatureRouteSelected(featureKey: String, currentDestination: DaybookNavKey?): Boolean {
+    val targetDestination = destinationForFeatureKey(featureKey)
+    return targetDestination != null && targetDestination == currentDestination
 }

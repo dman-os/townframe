@@ -35,7 +35,7 @@
             };
           };
 
-          androidBuildToolsVersion = "35.0.0";
+          androidBuildToolsVersion = "36.0.0";
           androidApiLevel = "31";
           rustVersion = "2026-04-16";
 

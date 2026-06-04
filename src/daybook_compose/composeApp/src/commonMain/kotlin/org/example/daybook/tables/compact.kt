@@ -1,4 +1,5 @@
 @file:OptIn(kotlin.time.ExperimentalTime::class, kotlin.uuid.ExperimentalUuidApi::class)
+@file:Suppress("ImportOrdering")
 
 package org.example.daybook.tables
 
@@ -7,7 +8,6 @@ import androidx.compose.animation.core.tween
 import androidx.compose.foundation.Canvas
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
-import org.example.daybook.DaybookContentType
 import androidx.compose.foundation.gestures.detectDragGestures
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
@@ -77,22 +77,26 @@ import androidx.compose.ui.semantics.contentDescription
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.lifecycle.viewModelScope
+import androidx.lifecycle.viewmodel.initializer
 import androidx.lifecycle.viewmodel.compose.viewModel
-import androidx.navigation.NavHostController
-import androidx.navigation.compose.currentBackStackEntryAsState
+import androidx.lifecycle.viewmodel.viewModelFactory
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.launch
-import org.example.daybook.AppScreens
+import org.example.daybook.DaybookContentType
 import org.example.daybook.ChromeState
 import org.example.daybook.ChromeStateTopAppBar
+import org.example.daybook.layouts.ProvideScreenChromeSpec
+import org.example.daybook.layouts.ScreenChromeSpec
 import org.example.daybook.ConfigViewModel
 import org.example.daybook.LocalChromeStateManager
 import org.example.daybook.LocalContainer
 import org.example.daybook.Routes
 import org.example.daybook.TablesState
 import org.example.daybook.TablesViewModel
+import org.example.daybook.navigation.DaybookNavKey
+import org.example.daybook.navigation.DaybookNavigationState
 import org.example.daybook.progress.ProgressList
 import org.example.daybook.uniffi.core.Tab
 import org.example.daybook.uniffi.core.Table
@@ -165,12 +169,19 @@ class HoverHoldControllerViewModel : androidx.lifecycle.ViewModel() {
     }
 }
 
+private val hoverHoldControllerFactory =
+    viewModelFactory {
+        initializer {
+            HoverHoldControllerViewModel()
+        }
+    }
+
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
+@Suppress("LongMethod", "FunctionNaming", "CyclomaticComplexMethod")
 fun CompactLayout(
     modifier: Modifier = Modifier,
-    navController: NavHostController,
-    extraAction: (() -> Unit)? = null,
+    navState: DaybookNavigationState,
     contentType: DaybookContentType,
     onShowCloneShare: () -> Unit = {},
 ) {
@@ -215,9 +226,17 @@ fun CompactLayout(
     var lastDragWindowPos by remember { mutableStateOf<Offset?>(null) }
     // Hover-hold controllers (abstracted) -----------------------------
     // Use distinct ViewModel instances for tab vs table controllers by supplying keys
-    val addTabController = viewModel<HoverHoldControllerViewModel>(key = "addTab")
+    val addTabController =
+        viewModel<HoverHoldControllerViewModel>(
+            key = "addTab",
+            factory = hoverHoldControllerFactory,
+        )
     addTabController.label = "addTab"
-    val addTableController = viewModel<HoverHoldControllerViewModel>(key = "addTable")
+    val addTableController =
+        viewModel<HoverHoldControllerViewModel>(
+            key = "addTable",
+            factory = hoverHoldControllerFactory,
+        )
     addTableController.label = "addTable"
     val addTabReadyState = addTabController.ready.collectAsState()
     val addTableReadyState = addTableController.ready.collectAsState()
@@ -227,8 +246,8 @@ fun CompactLayout(
     var featureButtonLayouts by remember { mutableStateOf(mapOf<String, Rect>()) }
 
     // Use separate feature lists: navBar features for center rollout, menu features for menu sheet
-    val navBarFeatures = rememberNavBarFeatures(navController)
-    val baseMenuFeatures = rememberMenuFeatures(navController, onShowCloneShare = onShowCloneShare)
+    val navBarFeatures = rememberNavBarFeatures(navState)
+    val baseMenuFeatures = rememberMenuFeatures(navState, onShowCloneShare = onShowCloneShare)
 
     // Get chrome state to check for prominent buttons
     val chromeStateManager = LocalChromeStateManager.current
@@ -257,7 +276,10 @@ fun CompactLayout(
     val navBarFeatureKeys = navBarFeatures.map { it.key }
     val navBarFeatureControllers =
         navBarFeatureKeys.map { k ->
-            viewModel<HoverHoldControllerViewModel>(key = k).also {
+            viewModel<HoverHoldControllerViewModel>(
+                key = k,
+                factory = hoverHoldControllerFactory,
+            ).also {
                 it.label = k
             }
         }
@@ -266,7 +288,10 @@ fun CompactLayout(
     val prominentButtonKeys = prominentButtons.map { it.key }
     val prominentButtonControllers =
         prominentButtonKeys.map { k ->
-            viewModel<HoverHoldControllerViewModel>(key = "prominent_$k").also {
+            viewModel<HoverHoldControllerViewModel>(
+                key = "prominent_$k",
+                factory = hoverHoldControllerFactory,
+            ).also {
                 it.label = "prominent_$k"
             }
         }
@@ -275,9 +300,8 @@ fun CompactLayout(
     val featureControllers = navBarFeatureControllers + prominentButtonControllers
     val featureReadyStates = featureControllers.map { it.ready.collectAsState() }
     var menuGestureSurfaceWindowRect by remember { mutableStateOf<Rect?>(null) }
-    val navBackStackEntry by navController.currentBackStackEntryAsState()
-    val currentRoute = navBackStackEntry?.destination?.route
-    val isDocEditorFullscreen = currentRoute == AppScreens.DocEditor.name
+    val currentDestination = navState.currentDestination
+    val isDocEditorFullscreen = currentDestination == DaybookNavKey.DocEditor
 
     val menuGestureModifier =
         Modifier
@@ -506,7 +530,7 @@ fun CompactLayout(
 
     val centerNavBarContent: @Composable RowScope.() -> Unit = {
         CenterNavBarContent(
-            navController = navController,
+            currentDestination = currentDestination,
             isMenuOpen = menuSheetState.isVisible,
             showFeaturesMenu = showFeaturesMenu,
             featureReadyStates = featureReadyStates,
@@ -764,8 +788,8 @@ fun CompactLayout(
                                 Box(modifier = Modifier.weight(1f, fill = true)) {
                                     Routes(
                                         modifier = Modifier.fillMaxSize(),
-                                        navController = navController,
-                                        extraAction = extraAction,
+                                        navState = navState,
+                                        onShowCloneShare = onShowCloneShare,
                                         contentType = contentType,
                                     )
                                 }
@@ -904,6 +928,7 @@ private fun LeftDrawerEdgeHint(modifier: Modifier = Modifier) {
 }
 
 @Composable
+@Suppress("LongMethod", "FunctionNaming")
 fun LeftDrawer(
     onDismiss: () -> Unit,
     onAddTab: suspend () -> Unit,
@@ -940,7 +965,15 @@ fun LeftDrawer(
 
         when (selectedPane) {
             1 -> {
-                ProgressList(modifier = Modifier.weight(1f).fillMaxWidth())
+                ProvideScreenChromeSpec(
+                    ScreenChromeSpec(
+                        topBar = ScreenChromeSpec.TopBarSpec(title = "Progress"),
+                    ),
+                ) {
+                    ProgressList(
+                        modifier = Modifier.weight(1f).fillMaxWidth(),
+                    )
+                }
             }
 
             else -> {

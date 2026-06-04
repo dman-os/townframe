@@ -28,6 +28,7 @@ import org.example.daybook.ConfigViewModel
 import org.example.daybook.LocalContainer
 import org.example.daybook.MltoolsBackendRow
 import org.example.daybook.MltoolsProvisionState
+import org.example.daybook.layouts.DaybookScaffold
 import org.example.daybook.progress.ProgressAmountBlock
 import org.example.daybook.uniffi.core.ProgressTask
 import org.example.daybook.uniffi.core.ProgressTaskState
@@ -46,144 +47,148 @@ fun SettingsScreen(modifier: Modifier = Modifier) {
     val sidebarPos = "RIGHT"
     val sidebarAutoHide = false
 
-    Column(
-        modifier =
-        modifier
-            .verticalScroll(rememberScrollState())
-            .padding(16.dp),
-    ) {
-        Text(
-            text = "Layout",
-            style = MaterialTheme.typography.titleLarge,
-            modifier = Modifier.padding(bottom = 8.dp),
-        )
-
-        HorizontalDivider(modifier = Modifier.padding(bottom = 16.dp))
-
-        Row(
-            modifier = Modifier.padding(vertical = 8.dp),
-            verticalAlignment = Alignment.CenterVertically,
+    DaybookScaffold(
+        modifier = modifier,
+    ) { scaffoldPadding ->
+        Column(
+            modifier = Modifier
+                .padding(scaffoldPadding)
+                .verticalScroll(rememberScrollState())
+                .padding(16.dp),
         ) {
             Text(
-                text = "Sidebar Position",
-                modifier = Modifier.weight(1f),
-                style = MaterialTheme.typography.bodyLarge,
+                text = "Layout",
+                style = MaterialTheme.typography.titleLarge,
+                modifier = Modifier.padding(bottom = 8.dp),
             )
-            Switch(
-                checked = sidebarPos == "RIGHT",
-                onCheckedChange = { _ -> },
-            )
-            Text(
-                text = if (sidebarPos == "RIGHT") "Right" else "Left",
-                modifier = Modifier.padding(start = 8.dp),
-                style = MaterialTheme.typography.bodyMedium,
-            )
-        }
 
-        Row(
-            modifier = Modifier.padding(vertical = 8.dp),
-            verticalAlignment = Alignment.CenterVertically,
-        ) {
-            Text(
-                text = "Sidebar Auto-Hide",
-                modifier = Modifier.weight(1f),
-                style = MaterialTheme.typography.bodyLarge,
-            )
-            Switch(
-                checked = sidebarAutoHide,
-                onCheckedChange = { _ -> },
-            )
-            Text(
-                text = if (sidebarAutoHide) "On" else "Off",
-                modifier = Modifier.padding(start = 8.dp),
-                style = MaterialTheme.typography.bodyMedium,
-            )
-        }
+            HorizontalDivider(modifier = Modifier.padding(bottom = 16.dp))
 
-        Row(
-            modifier = Modifier.padding(vertical = 8.dp),
-            verticalAlignment = Alignment.CenterVertically,
-        ) {
-            Text(
-                text = "Reset Layout Settings",
-                modifier = Modifier.weight(1f),
-                style = MaterialTheme.typography.bodyLarge,
-            )
-            ResetLayoutButton(onReset = {})
-        }
-
-        Text(
-            text = "MLTools",
-            style = MaterialTheme.typography.titleLarge,
-            modifier = Modifier.padding(top = 20.dp, bottom = 8.dp),
-        )
-        HorizontalDivider(modifier = Modifier.padding(bottom = 12.dp))
-
-        Row(
-            modifier = Modifier.fillMaxWidth().padding(vertical = 8.dp),
-            verticalAlignment = Alignment.CenterVertically,
-            horizontalArrangement = Arrangement.spacedBy(12.dp),
-        ) {
-            Column(modifier = Modifier.weight(1f)) {
+            Row(
+                modifier = Modifier.padding(vertical = 8.dp),
+                verticalAlignment = Alignment.CenterVertically,
+            ) {
                 Text(
-                    text = "mobile_default",
-                    style = MaterialTheme.typography.titleMedium,
-                    fontWeight = FontWeight.SemiBold,
+                    text = "Sidebar Position",
+                    modifier = Modifier.weight(1f),
+                    style = MaterialTheme.typography.bodyLarge,
                 )
-                val statusText =
-                    when (val state = provisionState) {
-                        is MltoolsProvisionState.Idle -> "Ready to download"
-                        is MltoolsProvisionState.Running -> "Downloading and configuring models"
-                        is MltoolsProvisionState.Succeeded -> "Provisioned successfully"
-                        is MltoolsProvisionState.Failed -> "Failed: ${state.message}"
-                    }
+                Switch(
+                    checked = sidebarPos == "RIGHT",
+                    onCheckedChange = { _ -> },
+                )
                 Text(
-                    text = statusText,
+                    text = if (sidebarPos == "RIGHT") "Right" else "Left",
+                    modifier = Modifier.padding(start = 8.dp),
+                    style = MaterialTheme.typography.bodyMedium,
+                )
+            }
+
+            Row(
+                modifier = Modifier.padding(vertical = 8.dp),
+                verticalAlignment = Alignment.CenterVertically,
+            ) {
+                Text(
+                    text = "Sidebar Auto-Hide",
+                    modifier = Modifier.weight(1f),
+                    style = MaterialTheme.typography.bodyLarge,
+                )
+                Switch(
+                    checked = sidebarAutoHide,
+                    onCheckedChange = { _ -> },
+                )
+                Text(
+                    text = if (sidebarAutoHide) "On" else "Off",
+                    modifier = Modifier.padding(start = 8.dp),
+                    style = MaterialTheme.typography.bodyMedium,
+                )
+            }
+
+            Row(
+                modifier = Modifier.padding(vertical = 8.dp),
+                verticalAlignment = Alignment.CenterVertically,
+            ) {
+                Text(
+                    text = "Reset Layout Settings",
+                    modifier = Modifier.weight(1f),
+                    style = MaterialTheme.typography.bodyLarge,
+                )
+                ResetLayoutButton(onReset = {})
+            }
+
+            Text(
+                text = "MLTools",
+                style = MaterialTheme.typography.titleLarge,
+                modifier = Modifier.padding(top = 20.dp, bottom = 8.dp),
+            )
+            HorizontalDivider(modifier = Modifier.padding(bottom = 12.dp))
+
+            Row(
+                modifier = Modifier.fillMaxWidth().padding(vertical = 8.dp),
+                verticalAlignment = Alignment.CenterVertically,
+                horizontalArrangement = Arrangement.spacedBy(12.dp),
+            ) {
+                Column(modifier = Modifier.weight(1f)) {
+                    Text(
+                        text = "mobile_default",
+                        style = MaterialTheme.typography.titleMedium,
+                        fontWeight = FontWeight.SemiBold,
+                    )
+                    val statusText =
+                        when (val state = provisionState) {
+                            is MltoolsProvisionState.Idle -> "Ready to download"
+                            is MltoolsProvisionState.Running -> "Downloading and configuring models"
+                            is MltoolsProvisionState.Succeeded -> "Provisioned successfully"
+                            is MltoolsProvisionState.Failed -> "Failed: ${state.message}"
+                        }
+                    Text(
+                        text = statusText,
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    )
+                }
+                Button(
+                    onClick = { configVm.provisionMobileDefaultMltools() },
+                    enabled = provisionState !is MltoolsProvisionState.Running,
+                ) {
+                    if (provisionState is MltoolsProvisionState.Running) {
+                        CircularProgressIndicator(modifier = Modifier.padding(end = 8.dp), strokeWidth = 2.dp)
+                    }
+                    Text(
+                        if (provisionState is MltoolsProvisionState.Failed) {
+                            "Retry"
+                        } else {
+                            "Download"
+                        },
+                    )
+                }
+            }
+
+            MltoolsBackendSection(title = "OCR Backends", rows = mltoolsConfig.ocr)
+            MltoolsBackendSection(title = "Embed Backends", rows = mltoolsConfig.embed)
+            MltoolsBackendSection(title = "LLM Backends", rows = mltoolsConfig.llm)
+
+            Text(
+                text = "MLTools Download Tasks",
+                style = MaterialTheme.typography.titleMedium,
+                modifier = Modifier.padding(top = 12.dp, bottom = 8.dp),
+            )
+
+            if (downloadTasks.isEmpty()) {
+                Text(
+                    text = "No model download tasks yet",
                     style = MaterialTheme.typography.bodySmall,
                     color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    modifier = Modifier.padding(vertical = 8.dp),
                 )
-            }
-            Button(
-                onClick = { configVm.provisionMobileDefaultMltools() },
-                enabled = provisionState !is MltoolsProvisionState.Running,
-            ) {
-                if (provisionState is MltoolsProvisionState.Running) {
-                    CircularProgressIndicator(modifier = Modifier.padding(end = 8.dp), strokeWidth = 2.dp)
-                }
-                Text(
-                    if (provisionState is MltoolsProvisionState.Failed) {
-                        "Retry"
-                    } else {
-                        "Download"
-                    },
-                )
-            }
-        }
-
-        MltoolsBackendSection(title = "OCR Backends", rows = mltoolsConfig.ocr)
-        MltoolsBackendSection(title = "Embed Backends", rows = mltoolsConfig.embed)
-        MltoolsBackendSection(title = "LLM Backends", rows = mltoolsConfig.llm)
-
-        Text(
-            text = "MLTools Download Tasks",
-            style = MaterialTheme.typography.titleMedium,
-            modifier = Modifier.padding(top = 12.dp, bottom = 8.dp),
-        )
-
-        if (downloadTasks.isEmpty()) {
-            Text(
-                text = "No model download tasks yet",
-                style = MaterialTheme.typography.bodySmall,
-                color = MaterialTheme.colorScheme.onSurfaceVariant,
-                modifier = Modifier.padding(vertical = 8.dp),
-            )
-        } else {
-            Column(
-                modifier = Modifier.fillMaxWidth(),
-                verticalArrangement = Arrangement.spacedBy(8.dp),
-            ) {
-                downloadTasks.forEach { task ->
-                    MltoolsDownloadTaskRow(task)
+            } else {
+                Column(
+                    modifier = Modifier.fillMaxWidth(),
+                    verticalArrangement = Arrangement.spacedBy(8.dp),
+                ) {
+                    downloadTasks.forEach { task ->
+                        MltoolsDownloadTaskRow(task)
+                    }
                 }
             }
         }
