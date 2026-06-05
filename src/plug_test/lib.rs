@@ -617,23 +617,23 @@ mod wasm_runtime {
 
     impl crate::wit::exports::townframe::daybook::stateless_view::Guest for Component {
         fn render_facet_view(
-            args: crate::wit::townframe::daybook::stateless_view::RenderFacetViewArgs,
+            args: crate::wit::exports::townframe::daybook::stateless_view::RenderFacetViewArgs,
         ) -> Result<
-            crate::wit::townframe::daybook::stateless_view::RenderViewResponse,
-            crate::wit::townframe::daybook::stateless_view::RenderViewError,
+            crate::wit::exports::townframe::daybook::stateless_view::RenderViewResponse,
+            crate::wit::exports::townframe::daybook::stateless_view::RenderViewError,
         > {
             let view_key = args.view_key;
-            if view_key != SAMPLE_VIEW_KEY {
+            if view_key != crate::SAMPLE_VIEW_KEY {
                 return Err(
-                    crate::wit::townframe::daybook::stateless_view::RenderViewError::InvalidView(
+                    crate::wit::exports::townframe::daybook::stateless_view::RenderViewError::InvalidView(
                         format!("unknown view key '{}'", view_key),
                     ),
                 );
             }
 
             Ok(
-                crate::wit::townframe::daybook::stateless_view::RenderViewResponse {
-                    view_json: sample_stateless_view_json(),
+                crate::wit::exports::townframe::daybook::stateless_view::RenderViewResponse {
+                    view_json: crate::sample_stateless_view_json(),
                     plugin_state_json: None,
                 },
             )
@@ -1442,13 +1442,13 @@ mod tests {
                     "root": {
                         "id": "root",
                         "kind": {
-                            "card": {
+                            "Card": {
                                 "title": "Sample summary",
                                 "children": [
                                     {
                                         "id": "summary",
                                         "kind": {
-                                            "markdown": {
+                                            "Markdown": {
                                                 "markdown": "A tiny sample stateless view from `plug_test`."
                                             }
                                         },
@@ -1457,7 +1457,7 @@ mod tests {
                                     {
                                         "id": "action",
                                         "kind": {
-                                            "button": {
+                                            "Button": {
                                                 "label": "Emit event"
                                             }
                                         },
@@ -1465,7 +1465,7 @@ mod tests {
                                             {
                                                 "event": "click",
                                                 "action": {
-                                                    "emit": {
+                                                    "Emit": {
                                                         "name": "plug-test.sample-button-clicked",
                                                         "payload": {
                                                             "source": "plug_test"

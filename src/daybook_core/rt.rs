@@ -19,12 +19,12 @@ use wash_runtime::{
 };
 use wflow::{
     wflow_core::partition::{
+        RetryPolicy,
         job_events::{JobError, JobRunResult},
         log::PartitionLogEntry,
-        RetryPolicy,
     },
     wflow_tokio::partition::{
-        state::PartitionWorkingState, PartitionLogRef, TokioPartitionWorkerHandle,
+        PartitionLogRef, TokioPartitionWorkerHandle, state::PartitionWorkingState,
     },
 };
 
@@ -35,10 +35,11 @@ pub mod triage;
 pub mod wash_plugin;
 
 use dispatch::{
-    facet_routine_args_fingerprint, ActiveDispatch, ActiveDispatchArgs, ActiveDispatchDeets,
-    DispatchOnSuccessHook, DispatchRepo, FacetRoutineArgs,
+    ActiveDispatch, ActiveDispatchArgs, ActiveDispatchDeets, DispatchOnSuccessHook, DispatchRepo,
+    FacetRoutineArgs, facet_routine_args_fingerprint,
 };
 use init::InitRepo;
+use wash_plugin::stateless_view;
 
 pub const PROCESSOR_RUNLOG_PARTITION_ID: &str = "processor-runlog/v1";
 
@@ -47,6 +48,22 @@ pub struct ProcessorRunlogDone {
     pub done_by_peer_id: String,
     pub done_token: String,
     pub done_at: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct RenderedFacetView {
+    pub plug_id: String,
+    pub view_key: String,
+    pub view_json: String,
+    pub plugin_state_json: Option<String>,
+}
+
+#[derive(Debug, Clone)]
+struct ResolvedStatelessViewProvider {
+    plug_id: String,
+    view_key: String,
+    plug_manifest: Arc<manifest::PlugManifest>,
+    view_manifest: Arc<manifest::ViewManifest>,
 }
 
 pub struct RtConfig {
@@ -70,6 +87,7 @@ pub struct Rt {
     pub wash_host: Arc<WashHost>,
     pub wflow_plugin: Arc<wash_plugin_wflow::WflowPlugin>,
     pub daybook_plugin: Arc<wash_plugin::DaybookPlugin>,
+    pub stateless_view_plugin: Arc<wash_plugin::StatelessViewPlugin>,
     pub utils_plugin: Arc<wash_plugin_utils::UtilsPlugin>,
     pub mltools_plugin: Arc<wash_plugin_mltools::MltoolsPlugin>,
     pub blobs_repo: Arc<BlobsRepo>,
@@ -344,6 +362,7 @@ impl Rt {
             Arc::clone(&config_repo),
             Arc::clone(&plugs_repo),
         ));
+        let stateless_view_plugin = Arc::new(wash_plugin::StatelessViewPlugin::new());
         let utils_plugin = wash_plugin_utils::UtilsPlugin::new(wash_plugin_utils::Config {})
             .wrap_err("error creating utils plugin")?;
         let mltools_plugin =
@@ -355,6 +374,8 @@ impl Rt {
             wflow_plugin.clone(),
             #[expect(clippy::clone_on_ref_ptr)]
             daybook_plugin.clone(),
+            #[expect(clippy::clone_on_ref_ptr)]
+            stateless_view_plugin.clone(),
             #[expect(clippy::clone_on_ref_ptr)]
             utils_plugin.clone(),
             #[expect(clippy::clone_on_ref_ptr)]
@@ -446,6 +467,7 @@ impl Rt {
             wash_host,
             wflow_plugin,
             daybook_plugin,
+            stateless_view_plugin,
             utils_plugin,
             mltools_plugin,
             blobs_repo,
@@ -552,6 +574,293 @@ impl Rt {
         };
         let done = serde_json::from_value::<ProcessorRunlogDone>(payload)?;
         Ok(Some(done))
+    }
+
+    pub async fn render_facet_view(
+        &self,
+        doc_id: &str,
+        branch_path: &daybook_types::doc::BranchPathBuf,
+        facet_key: &daybook_types::doc::FacetKey,
+        requested_view: Option<manifest::ViewRef>,
+        ui_state_json: Option<String>,
+    ) -> Res<RenderedFacetView> {
+        let doc_id = doc_id.to_string();
+        let view = self
+            .resolve_stateless_view_provider(facet_key, requested_view)
+            .await?;
+
+        let view_bundle = match &view.view_manifest.provider {
+            manifest::ViewProviderManifest::StatelessWasm { bundle, export } => {
+                eyre::ensure!(
+                    export.as_str() == "render-facet-view",
+                    "stateless view provider '{}' in plug '{}' uses unsupported export '{}'",
+                    view.view_key,
+                    view.plug_id,
+                    export
+                );
+                bundle.to_string()
+            }
+        };
+        let bundle_man = view
+            .plug_manifest
+            .wflow_bundles
+            .get(view_bundle.as_str())
+            .ok_or_else(|| {
+                ferr!(
+                    "stateless view provider bundle '{}' not found in plug '{}'",
+                    view_bundle,
+                    view.plug_id
+                )
+            })?;
+
+        let result = async {
+            let bundle_components = load_bundle_components(&self.blobs_repo, bundle_man).await?;
+            let component_name = format!("stateless-view-{}", view.view_key);
+            let workload_id: Arc<str> = Arc::from(format!(
+                "stateless-view/{}/{}/{}",
+                view.plug_id,
+                view.view_key,
+                uuid::Uuid::new_v4()
+            ));
+            let engine = wash_runtime::engine::Engine::builder()
+                .build()
+                .map_err(|err| eyre::eyre!(err.to_string()))?;
+            let components = bundle_components
+                .into_iter()
+                .enumerate()
+                .map(|(component_idx, mut component)| {
+                    component.name = format!("{component_name}-{component_idx}");
+                    component
+                })
+                .collect::<Vec<_>>();
+            let unresolved_workload = engine
+                .initialize_workload(
+                    Arc::clone(&workload_id),
+                    wash_runtime::types::Workload {
+                        namespace: view.plug_manifest.namespace.clone(),
+                        name: format!("{}-{}", view.view_key, facet_key),
+                        annotations: HashMap::new(),
+                        service: None,
+                        components,
+                        host_interfaces: stateless_view_host_interfaces(),
+                        volumes: vec![],
+                    },
+                )
+                .map_err(|err| eyre::eyre!(err.to_string()))?;
+
+            let plugins: HashMap<&'static str, Arc<dyn wash_runtime::plugin::HostPlugin>> =
+                HashMap::from([
+                    (
+                        wash_plugin::DaybookPlugin::ID,
+                        Arc::clone(&self.daybook_plugin)
+                            as Arc<dyn wash_runtime::plugin::HostPlugin>,
+                    ),
+                    (
+                        wash_plugin::StatelessViewPlugin::ID,
+                        Arc::clone(&self.stateless_view_plugin)
+                            as Arc<dyn wash_runtime::plugin::HostPlugin>,
+                    ),
+                    (
+                        "townframe:utils",
+                        Arc::clone(&self.utils_plugin) as Arc<dyn wash_runtime::plugin::HostPlugin>,
+                    ),
+                    (
+                        "townframe:mltools",
+                        Arc::clone(&self.mltools_plugin)
+                            as Arc<dyn wash_runtime::plugin::HostPlugin>,
+                    ),
+                ]);
+
+            let resolved_workload = unresolved_workload
+                .resolve(
+                    Some(&plugins),
+                    Arc::new(wash_runtime::host::http::NullServer::default()),
+                )
+                .await
+                .map_err(|err| eyre::eyre!(err.to_string()))?;
+
+            let Some(first_component_id) = resolved_workload
+                .components()
+                .read()
+                .await
+                .keys()
+                .next()
+                .map(|component_id| component_id.to_string())
+            else {
+                return Err(ferr!(
+                    "stateless view bundle for '{}' did not contain any components",
+                    view.view_key
+                ));
+            };
+
+            let Some((doc, heads)) = self
+                .drawer
+                .get_with_heads(&doc_id, branch_path, None)
+                .await
+                .map_err(|err| eyre::eyre!("{err}"))?
+            else {
+                return Err(ferr!(
+                    "doc '{}' not found at branch '{}'",
+                    doc_id,
+                    branch_path
+                ));
+            };
+            eyre::ensure!(
+                doc.facets.contains_key(facet_key),
+                "facet '{}' not found in doc '{}'",
+                facet_key,
+                doc_id
+            );
+
+            let mut store = resolved_workload
+                .new_store(&first_component_id)
+                .await
+                .map_err(|err| eyre::eyre!(err.to_string()))?;
+            let doc_tokens = dispatch::DocFacetTokens {
+                doc_id: doc_id.clone(),
+                branch_path: branch_path.clone(),
+                staging_branch_path: branch_path.clone(),
+                heads,
+                facet_acl: vec![],
+            };
+            let primary_doc = wash_plugin::build_doc_facet_tokens(
+                store.data_mut(),
+                &self.daybook_plugin,
+                &doc_tokens,
+            )
+            .await
+            .map_err(|err| eyre::eyre!("error building doc facet tokens: {err}"))?;
+
+            let args = stateless_view::RenderFacetViewArgs {
+                view_key: view.view_key.clone(),
+                target_facet_key: facet_key.to_string(),
+                primary_doc,
+                config_docs: vec![],
+                ui_state_json,
+            };
+
+            let instance_pre = resolved_workload
+                .instantiate_pre(&first_component_id)
+                .await
+                .map_err(|err| eyre::eyre!(err.to_string()))?;
+            let instance_pre = wash_plugin::AllGuestPre::new(instance_pre).map_err(|err| {
+                eyre::eyre!("error pre instantiating stateless view component: {err}")
+            })?;
+            let instance = instance_pre
+                .instantiate_async(&mut store)
+                .await
+                .map_err(|err| eyre::eyre!(err.to_string()))?;
+            let response = instance
+                .townframe_daybook_stateless_view()
+                .call_render_facet_view(&mut store, &args)
+                .await
+                .map_err(|err| eyre::eyre!("error rendering stateless view: {err}"))?;
+            let response = response.map_err(|err| match err {
+                stateless_view::RenderViewError::InvalidRequest(msg) => {
+                    eyre::eyre!("stateless view rejected request: {msg}")
+                }
+                stateless_view::RenderViewError::Denied(msg) => {
+                    eyre::eyre!("stateless view denied request: {msg}")
+                }
+                stateless_view::RenderViewError::InvalidView(msg) => {
+                    eyre::eyre!("stateless view reported invalid view: {msg}")
+                }
+                stateless_view::RenderViewError::Other(msg) => {
+                    eyre::eyre!("stateless view error: {msg}")
+                }
+            })?;
+            serde_json::from_str::<daybook_types::view::ViewSpec>(&response.view_json)
+                .wrap_err("stateless view returned invalid ViewSpec JSON")?;
+
+            Ok(RenderedFacetView {
+                plug_id: view.plug_id,
+                view_key: view.view_key,
+                view_json: response.view_json,
+                plugin_state_json: response.plugin_state_json,
+            })
+        }
+        .await;
+
+        result
+    }
+
+    async fn resolve_stateless_view_provider(
+        &self,
+        facet_key: &daybook_types::doc::FacetKey,
+        requested_view: Option<manifest::ViewRef>,
+    ) -> Res<ResolvedStatelessViewProvider> {
+        let facet_tag = facet_key.tag.to_string();
+        let (view_ref, owner_plug_id) = if let Some(view_ref) = requested_view {
+            let owner_plug_id = if let Some(plug_id) = view_ref.plug_id.clone() {
+                plug_id
+            } else {
+                self.plugs_repo
+                    .get_owner_plug_id_by_facet_tag(&facet_tag)
+                    .await
+                    .ok_or_else(|| {
+                        ferr!(
+                            "facet '{}' has no owning plug for local view resolution",
+                            facet_tag
+                        )
+                    })?
+            };
+            (view_ref, owner_plug_id)
+        } else {
+            let facet_manifest = self
+                .plugs_repo
+                .get_facet_manifest_by_tag(&facet_tag)
+                .await
+                .ok_or_else(|| ferr!("facet manifest not found for tag '{}'", facet_tag))?;
+            match facet_manifest.display_config.deets {
+                manifest::FacetDisplayDeets::CustomView { view, .. } => {
+                    let owner_plug_id = self
+                        .plugs_repo
+                        .get_owner_plug_id_by_facet_tag(&facet_tag)
+                        .await
+                        .ok_or_else(|| {
+                            ferr!(
+                                "facet '{}' has no owning plug for local view resolution",
+                                facet_tag
+                            )
+                        })?;
+                    (view, owner_plug_id)
+                }
+                _ => {
+                    return Err(ferr!(
+                        "facet '{}' does not declare a custom view and no explicit view was provided",
+                        facet_tag
+                    ));
+                }
+            }
+        };
+
+        let plug_id = view_ref
+            .plug_id
+            .clone()
+            .unwrap_or_else(|| owner_plug_id.clone());
+        let plug_manifest = self
+            .plugs_repo
+            .get(&plug_id)
+            .await
+            .ok_or_else(|| ferr!("view provider plug '{}' not found", plug_id))?;
+        let view_manifest = plug_manifest
+            .views
+            .get(view_ref.view_key.as_str())
+            .cloned()
+            .ok_or_else(|| {
+                ferr!(
+                    "view '{}' not found in view provider plug '{}'",
+                    view_ref.view_key,
+                    plug_id
+                )
+            })?;
+
+        Ok(ResolvedStatelessViewProvider {
+            plug_id,
+            view_key: view_ref.view_key.to_string(),
+            plug_manifest,
+            view_manifest,
+        })
     }
 
     #[tracing::instrument(skip(self))]
@@ -2271,6 +2580,64 @@ fn command_invoke_reply_from_result(
     }
 }
 
+async fn load_bundle_components(
+    blobs_repo: &BlobsRepo,
+    bundle_man: &manifest::WflowBundleManifest,
+) -> Res<Vec<Component>> {
+    let mut components = Vec::new();
+    for url in &bundle_man.component_urls {
+        let wasm_bytes = match url.scheme() {
+            "file" => {
+                let path = url
+                    .to_file_path()
+                    .map_err(|_| eyre::eyre!("invalid file path in url: {}", url))?;
+                tokio::fs::read(&path).await.wrap_err_with(|| {
+                    format!("failed to read component file: {}", path.display())
+                })?
+            }
+            scheme if scheme == crate::blobs::BLOB_SCHEME => {
+                let hash = url.path().trim_start_matches('/');
+                let blob_id = hash
+                    .parse::<crate::blobs::BlobId>()
+                    .wrap_err_with(|| format!("invalid blob hash in component URL: {hash}"))?;
+                let path = blobs_repo
+                    .get_path(blob_id)
+                    .await
+                    .wrap_err_with(|| format!("blob not found in BlobsRepo: {}", hash))?;
+                tokio::fs::read(&path)
+                    .await
+                    .wrap_err_with(|| format!("failed to read blob file: {}", path.display()))?
+            }
+            _ => {
+                return Err(eyre::eyre!(
+                    "Unsupported URL scheme for component: {}",
+                    url.scheme()
+                ));
+            }
+        };
+        components.push(Component {
+            bytes: wasm_bytes.into(),
+            ..default()
+        });
+    }
+    Ok(components)
+}
+
+fn stateless_view_host_interfaces() -> Vec<WitInterface> {
+    vec![
+        WitInterface::from("townframe:wflow/host"),
+        WitInterface::from("townframe:daybook/drawer"),
+        WitInterface::from("townframe:daybook/capabilities"),
+        WitInterface::from("townframe:daybook/facet-routine"),
+        WitInterface::from("townframe:daybook/sqlite-connection"),
+        WitInterface::from("townframe:daybook/mltools-ocr"),
+        WitInterface::from("townframe:daybook/mltools-embed"),
+        WitInterface::from("townframe:daybook/mltools-image-tools"),
+        WitInterface::from("townframe:daybook/mltools-llm-chat"),
+        WitInterface::from("townframe:api-utils/utils"),
+    ]
+}
+
 async fn ensure_bundle_workload_running(
     wcx: &wflow::Ctx,
     wash_host: &WashHost,
@@ -2439,8 +2806,8 @@ mod tests {
     use super::*;
     use big_sync::HostPartStore;
 
-    async fn make_partition_store(
-    ) -> Res<(std::sync::Arc<dyn HostPartStore>, big_sync_core::PartId)> {
+    async fn make_partition_store()
+    -> Res<(std::sync::Arc<dyn HostPartStore>, big_sync_core::PartId)> {
         let sql = crate::app::open_sql_ctx(crate::app::SqlConfig::memory()).await?;
         let part_id = crate::part_id_from_label(PROCESSOR_RUNLOG_PARTITION_ID);
         let store =

@@ -11620,6 +11620,7 @@ name = "wash_plugin_utils"
 version = "0.1.0"
 dependencies = [
  "anyhow",
+ "api_utils_rs",
  "tracing",
  "utils_rs",
  "wash-runtime",

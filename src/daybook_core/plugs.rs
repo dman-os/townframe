@@ -1256,6 +1256,12 @@ impl PlugsRepo {
             .await
     }
 
+    pub async fn get_owner_plug_id_by_facet_tag(&self, facet_tag: &str) -> Option<String> {
+        self.store
+            .query_sync(|store| store.tag_to_plug.get(facet_tag).cloned())
+            .await
+    }
+
     pub async fn list_display_hints(&self) -> Vec<(String, manifest::FacetDisplayHint)> {
         self.store
             .query_sync(|store| {

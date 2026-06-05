@@ -626,11 +626,7 @@ impl DispatchRepo {
             origin: self.local_origin(),
         }]);
 
-        if ready {
-            Ok(Some(updated))
-        } else {
-            Ok(None)
-        }
+        if ready { Ok(Some(updated)) } else { Ok(None) }
     }
 
     pub async fn activate_waiting(

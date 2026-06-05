@@ -4,7 +4,7 @@ use sqlx::{Column, Row, TypeInfo, ValueRef};
 use sqlx_utils_rs::SqlCtx;
 use wash_runtime::engine::ctx::SharedCtx as SharedWashCtx;
 
-use super::{binds_guest, sqlite_connection, DaybookPlugin};
+use super::{DaybookPlugin, binds_guest, sqlite_connection};
 
 pub struct SqliteConnectionToken {
     pub local_state_id: String,
@@ -31,7 +31,7 @@ impl sqlite_connection::HostConnection for SharedWashCtx {
             Err(err) => {
                 return Ok(Err(
                     binds_guest::townframe::sql::types::QueryError::Unexpected(err.to_string()),
-                ))
+                ));
             }
         };
 
@@ -64,7 +64,7 @@ impl sqlite_connection::HostConnection for SharedWashCtx {
             Err(err) => {
                 return Ok(Err(
                     binds_guest::townframe::sql::types::QueryError::Unexpected(err.to_string()),
-                ))
+                ));
             }
         };
         match sqlx::query(sqlx::AssertSqlSafe(query))

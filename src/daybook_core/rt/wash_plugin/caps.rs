@@ -5,7 +5,7 @@ use daybook_types::doc::ChangeHashSet;
 use daybook_types::doc::DocId;
 use wash_runtime::engine::ctx::SharedCtx as SharedWashCtx;
 
-use super::{capabilities, root_doc, wit_doc, DaybookPlugin};
+use super::{DaybookPlugin, capabilities, root_doc, wit_doc};
 
 fn wasmtime_err(msg: impl std::fmt::Display) -> wasmtime::Error {
     wasmtime::Error::msg(msg.to_string())
@@ -473,7 +473,7 @@ impl capabilities::HostFacetToken for SharedWashCtx {
                 _ => {
                     return Ok(Err(capabilities::AccessError::Other(
                         "invalid dmeta facet".into(),
-                    )))
+                    )));
                 }
             },
             None => return Ok(Err(capabilities::AccessError::NotFound)),
@@ -566,7 +566,7 @@ impl capabilities::HostFacetToken for SharedWashCtx {
                     inner: root_doc::FacetTagParseError::NotDomainName { _tag: tag },
                 } => capabilities::UpdateDocError::InvalidKey(tag),
                 crate::drawer::types::DrawerError::Other { inner } => {
-                    return Err(wasmtime_err(format!("unexpected error: {inner}")))
+                    return Err(wasmtime_err(format!("unexpected error: {inner}")));
                 }
                 crate::drawer::types::DrawerError::BranchAlreadyExists { .. } => unreachable!(),
             })));
@@ -672,7 +672,7 @@ impl capabilities::HostFacetCreateToken for SharedWashCtx {
                     inner: root_doc::FacetTagParseError::NotDomainName { _tag: tag },
                 } => capabilities::UpdateDocError::InvalidKey(tag),
                 crate::drawer::types::DrawerError::Other { inner } => {
-                    return Err(wasmtime_err(format!("unexpected error: {inner}")))
+                    return Err(wasmtime_err(format!("unexpected error: {inner}")));
                 }
                 crate::drawer::types::DrawerError::BranchAlreadyExists { .. } => unreachable!(),
             }));
@@ -956,7 +956,7 @@ impl capabilities::HostFacetTagToken for SharedWashCtx {
                     inner: root_doc::FacetTagParseError::NotDomainName { _tag: tag },
                 } => capabilities::UpdateDocError::InvalidKey(tag),
                 crate::drawer::types::DrawerError::Other { inner } => {
-                    return Err(wasmtime_err(format!("unexpected error: {inner}")))
+                    return Err(wasmtime_err(format!("unexpected error: {inner}")));
                 }
                 crate::drawer::types::DrawerError::BranchAlreadyExists { .. } => unreachable!(),
             }));
@@ -1097,7 +1097,7 @@ impl capabilities::Host for SharedWashCtx {
                     capabilities::AccessError::NotFound
                 }
                 crate::drawer::types::DrawerError::Other { inner } => {
-                    return Err(wasmtime_err(format!("unexpected error: {inner}")))
+                    return Err(wasmtime_err(format!("unexpected error: {inner}")));
                 }
                 _ => return Err(wasmtime_err("unexpected error ensuring branch")),
             }));
@@ -1177,7 +1177,7 @@ impl capabilities::HostCommandInvokeToken for SharedWashCtx {
             Err(err) => {
                 return Ok(Err(capabilities::InvokeCommandError::BadRequest(
                     err.to_string(),
-                )))
+                )));
             }
         };
 
@@ -1186,7 +1186,7 @@ impl capabilities::HostCommandInvokeToken for SharedWashCtx {
             Err(err) => {
                 return Ok(Err(capabilities::InvokeCommandError::Other(
                     err.to_string(),
-                )))
+                )));
             }
         };
         let dispatch_id = match rt

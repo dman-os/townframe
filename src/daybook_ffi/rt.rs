@@ -1,6 +1,14 @@
 use crate::ffi::{FfiError, SharedFfiCtx};
 use crate::interlude::*;
 
+#[derive(uniffi::Record)]
+pub struct RenderedFacetViewRecord {
+    pub plug_id: String,
+    pub view_key: String,
+    pub view_json: String,
+    pub plugin_state_json: Option<String>,
+}
+
 #[derive(uniffi::Object)]
 pub struct RtFfi {
     fcx: SharedFfiCtx,
@@ -103,8 +111,42 @@ impl RtFfi {
                     },
                 )
                 .await
+        })
+        .await?;
+        Ok(dispatch_id)
+    }
+
+    pub async fn render_facet_view(
+        self: Arc<Self>,
+        doc_id: String,
+        branch_path: String,
+        facet_key: String,
+        requested_view: Option<daybook_types::manifest::ViewRef>,
+        ui_state_json: Option<String>,
+    ) -> Result<RenderedFacetViewRecord, FfiError> {
+        let fcx = Arc::clone(&self.fcx);
+        let rt = Arc::clone(&self.rt);
+        let branch_path = daybook_types::doc::BranchPathBuf::from(branch_path);
+        let facet_key = daybook_types::doc::FacetKey::from(facet_key);
+        let view = fcx
+            .do_on_rt(async move {
+                rt
+                    .render_facet_view(
+                        &doc_id,
+                        &branch_path,
+                        &facet_key,
+                        requested_view,
+                        ui_state_json,
+                    )
+                    .await
             })
             .await?;
-        Ok(dispatch_id)
+
+        Ok(RenderedFacetViewRecord {
+            plug_id: view.plug_id,
+            view_key: view.view_key,
+            view_json: view.view_json,
+            plugin_state_json: view.plugin_state_json,
+        })
     }
 }

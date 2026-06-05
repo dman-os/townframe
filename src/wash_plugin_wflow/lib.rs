@@ -48,6 +48,9 @@ mod binds_service {
 }
 use binds_service::exports::townframe::wflow::bundle;
 use binds_service::townframe::wflow::host;
+pub use binds_service::townframe::wflow::host as service_host;
+pub use crate::binds_metastore::townframe::wflow::metastore as service_metastore;
+pub use crate::binds_partition_host::townframe::wflow::partition_host as service_partition_host;
 use binds_service::townframe::wflow::types;
 
 #[derive(educe::Educe)]
