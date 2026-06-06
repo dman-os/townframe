@@ -15,7 +15,11 @@ import androidx.compose.material3.*
 import androidx.compose.runtime.*
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.platform.testTag
+import androidx.compose.ui.semantics.contentDescription
+import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.unit.dp
+import org.example.daybook.DaybookEditorSemantics
 import org.example.daybook.DaybookContentType
 import org.example.daybook.DocEditorStoreViewModel
 import org.example.daybook.DocListState
@@ -50,7 +54,13 @@ private fun DrawerDocEditorContent(
         if (selectedDocId != null) {
             if (controller == null) {
                 Box(
-                    modifier = Modifier.fillMaxSize(),
+                    modifier =
+                    Modifier
+                        .fillMaxSize()
+                        .testTag(DaybookEditorSemantics.Loading)
+                        .semantics {
+                            contentDescription = "Loading document"
+                        },
                     contentAlignment = Alignment.Center,
                 ) {
                     CircularProgressIndicator()
@@ -152,24 +162,44 @@ fun DocEditorScreen(contentType: DaybookContentType, modifier: Modifier = Modifi
             },
         )
 
-    DaybookScaffold(
-        modifier = modifier,
-        topBar = savingTopBarSpec,
-    ) { scaffoldPadding ->
-        Box(
-            modifier =
-            Modifier
-                .fillMaxSize()
-                .padding(scaffoldPadding)
-                .background(MaterialTheme.colorScheme.surface),
-        ) {
-            DrawerDocEditorContent(
-                controller = selectedController,
-                selectedDocId = selectedDocId,
-                modifier = Modifier.fillMaxSize(),
-                showFacetSidebar = contentType == DaybookContentType.LIST_AND_DETAIL,
-                showInlineFacetRack = contentType != DaybookContentType.LIST_AND_DETAIL,
-            )
+    Box(modifier = modifier.fillMaxSize().testTag(DaybookEditorSemantics.Screen)) {
+        DaybookScaffold(
+            modifier = Modifier.fillMaxSize(),
+            topBar = savingTopBarSpec,
+        ) { scaffoldPadding ->
+            when (selectedDocId) {
+                null -> {
+                    Box(
+                        modifier =
+                        Modifier
+                            .fillMaxSize()
+                            .padding(scaffoldPadding)
+                            .background(MaterialTheme.colorScheme.surface)
+                            .testTag(DaybookEditorSemantics.EmptyState),
+                        contentAlignment = Alignment.Center,
+                    ) {
+                        Text("Select a document to view details")
+                    }
+                }
+
+                else -> {
+                    Box(
+                        modifier =
+                        Modifier
+                            .fillMaxSize()
+                            .padding(scaffoldPadding)
+                            .background(MaterialTheme.colorScheme.surface),
+                    ) {
+                        DrawerDocEditorContent(
+                            controller = selectedController,
+                            selectedDocId = selectedDocId,
+                            modifier = Modifier.fillMaxSize(),
+                            showFacetSidebar = contentType == DaybookContentType.LIST_AND_DETAIL,
+                            showInlineFacetRack = contentType != DaybookContentType.LIST_AND_DETAIL,
+                        )
+                    }
+                }
+            }
         }
     }
 }

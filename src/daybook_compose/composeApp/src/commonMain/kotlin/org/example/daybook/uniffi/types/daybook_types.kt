@@ -890,6 +890,29 @@ public object FfiConverterUInt: FfiConverter<UInt, Int> {
 /**
  * @suppress
  */
+public object FfiConverterInt: FfiConverter<Int, Int> {
+    override fun lift(value: Int): Int {
+        return value
+    }
+
+    override fun read(buf: ByteBuffer): Int {
+        return buf.getInt()
+    }
+
+    override fun lower(value: Int): Int {
+        return value
+    }
+
+    override fun allocationSize(value: Int) = 4UL
+
+    override fun write(value: Int, buf: ByteBuffer) {
+        buf.putInt(value)
+    }
+}
+
+/**
+ * @suppress
+ */
 public object FfiConverterULong: FfiConverter<ULong, Long> {
     override fun lift(value: Long): ULong {
         return value.toULong()
@@ -1457,7 +1480,7 @@ data class FacetDisplayHint (
     , 
     var `displayTitle`: kotlin.String?
     , 
-    var `deets`: FacetKeyDisplayDeets
+    var `deets`: FacetDisplayDeets
     
 ){
     
@@ -1476,20 +1499,20 @@ public object FfiConverterTypeFacetDisplayHint: FfiConverterRustBuffer<FacetDisp
         return FacetDisplayHint(
             FfiConverterBoolean.read(buf),
             FfiConverterOptionalString.read(buf),
-            FfiConverterTypeFacetKeyDisplayDeets.read(buf),
+            FfiConverterTypeFacetDisplayDeets.read(buf),
         )
     }
 
     override fun allocationSize(value: FacetDisplayHint) = (
             FfiConverterBoolean.allocationSize(value.`alwaysVisible`) +
             FfiConverterOptionalString.allocationSize(value.`displayTitle`) +
-            FfiConverterTypeFacetKeyDisplayDeets.allocationSize(value.`deets`)
+            FfiConverterTypeFacetDisplayDeets.allocationSize(value.`deets`)
     )
 
     override fun write(value: FacetDisplayHint, buf: ByteBuffer) {
             FfiConverterBoolean.write(value.`alwaysVisible`, buf)
             FfiConverterOptionalString.write(value.`displayTitle`, buf)
-            FfiConverterTypeFacetKeyDisplayDeets.write(value.`deets`, buf)
+            FfiConverterTypeFacetDisplayDeets.write(value.`deets`, buf)
     }
 }
 
@@ -1918,6 +1941,44 @@ public object FfiConverterTypeUserMeta: FfiConverterRustBuffer<UserMeta> {
 
 
 
+data class ViewRef (
+    var `plugId`: kotlin.String?
+    , 
+    var `viewKey`: KeyGeneric
+    
+){
+    
+
+    
+
+    
+    companion object
+}
+
+/**
+ * @suppress
+ */
+public object FfiConverterTypeViewRef: FfiConverterRustBuffer<ViewRef> {
+    override fun read(buf: ByteBuffer): ViewRef {
+        return ViewRef(
+            FfiConverterOptionalString.read(buf),
+            FfiConverterTypeKeyGeneric.read(buf),
+        )
+    }
+
+    override fun allocationSize(value: ViewRef) = (
+            FfiConverterOptionalString.allocationSize(value.`plugId`) +
+            FfiConverterTypeKeyGeneric.allocationSize(value.`viewKey`)
+    )
+
+    override fun write(value: ViewRef, buf: ByteBuffer) {
+            FfiConverterOptionalString.write(value.`plugId`, buf)
+            FfiConverterTypeKeyGeneric.write(value.`viewKey`, buf)
+    }
+}
+
+
+
 
 enum class DateTimeFacetDisplayType {
     
@@ -2023,13 +2084,13 @@ public object FfiConverterTypeEmbeddingDtype: FfiConverterRustBuffer<EmbeddingDt
 
 
 
-sealed class FacetKeyDisplayDeets {
+sealed class FacetDisplayDeets {
     
-    object DebugPrint : FacetKeyDisplayDeets()
+    object DebugPrint : FacetDisplayDeets()
     
     
     data class DateTime(
-        val `displayType`: org.example.daybook.uniffi.types.DateTimeFacetDisplayType) : FacetKeyDisplayDeets()
+        val `displayType`: org.example.daybook.uniffi.types.DateTimeFacetDisplayType) : FacetDisplayDeets()
         
     {
         
@@ -2037,11 +2098,22 @@ sealed class FacetKeyDisplayDeets {
         companion object
     }
     
-    object UnixPath : FacetKeyDisplayDeets()
+    object UnixPath : FacetDisplayDeets()
     
     
     data class Title(
-        val `showEditor`: kotlin.Boolean) : FacetKeyDisplayDeets()
+        val `showEditor`: kotlin.Boolean) : FacetDisplayDeets()
+        
+    {
+        
+
+        companion object
+    }
+    
+    data class CustomView(
+        val `view`: org.example.daybook.uniffi.types.ViewRef, 
+        val `mode`: org.example.daybook.uniffi.types.FacetViewMode, 
+        val `priority`: kotlin.Int) : FacetDisplayDeets()
         
     {
         
@@ -2062,68 +2134,89 @@ sealed class FacetKeyDisplayDeets {
 /**
  * @suppress
  */
-public object FfiConverterTypeFacetKeyDisplayDeets : FfiConverterRustBuffer<FacetKeyDisplayDeets>{
-    override fun read(buf: ByteBuffer): FacetKeyDisplayDeets {
+public object FfiConverterTypeFacetDisplayDeets : FfiConverterRustBuffer<FacetDisplayDeets>{
+    override fun read(buf: ByteBuffer): FacetDisplayDeets {
         return when(buf.getInt()) {
-            1 -> FacetKeyDisplayDeets.DebugPrint
-            2 -> FacetKeyDisplayDeets.DateTime(
+            1 -> FacetDisplayDeets.DebugPrint
+            2 -> FacetDisplayDeets.DateTime(
                 FfiConverterTypeDateTimeFacetDisplayType.read(buf),
                 )
-            3 -> FacetKeyDisplayDeets.UnixPath
-            4 -> FacetKeyDisplayDeets.Title(
+            3 -> FacetDisplayDeets.UnixPath
+            4 -> FacetDisplayDeets.Title(
                 FfiConverterBoolean.read(buf),
+                )
+            5 -> FacetDisplayDeets.CustomView(
+                FfiConverterTypeViewRef.read(buf),
+                FfiConverterTypeFacetViewMode.read(buf),
+                FfiConverterInt.read(buf),
                 )
             else -> throw RuntimeException("invalid enum value, something is very wrong!!")
         }
     }
 
-    override fun allocationSize(value: FacetKeyDisplayDeets) = when(value) {
-        is FacetKeyDisplayDeets.DebugPrint -> {
+    override fun allocationSize(value: FacetDisplayDeets) = when(value) {
+        is FacetDisplayDeets.DebugPrint -> {
             // Add the size for the Int that specifies the variant plus the size needed for all fields
             (
                 4UL
             )
         }
-        is FacetKeyDisplayDeets.DateTime -> {
+        is FacetDisplayDeets.DateTime -> {
             // Add the size for the Int that specifies the variant plus the size needed for all fields
             (
                 4UL
                 + FfiConverterTypeDateTimeFacetDisplayType.allocationSize(value.`displayType`)
             )
         }
-        is FacetKeyDisplayDeets.UnixPath -> {
+        is FacetDisplayDeets.UnixPath -> {
             // Add the size for the Int that specifies the variant plus the size needed for all fields
             (
                 4UL
             )
         }
-        is FacetKeyDisplayDeets.Title -> {
+        is FacetDisplayDeets.Title -> {
             // Add the size for the Int that specifies the variant plus the size needed for all fields
             (
                 4UL
                 + FfiConverterBoolean.allocationSize(value.`showEditor`)
             )
         }
+        is FacetDisplayDeets.CustomView -> {
+            // Add the size for the Int that specifies the variant plus the size needed for all fields
+            (
+                4UL
+                + FfiConverterTypeViewRef.allocationSize(value.`view`)
+                + FfiConverterTypeFacetViewMode.allocationSize(value.`mode`)
+                + FfiConverterInt.allocationSize(value.`priority`)
+            )
+        }
     }
 
-    override fun write(value: FacetKeyDisplayDeets, buf: ByteBuffer) {
+    override fun write(value: FacetDisplayDeets, buf: ByteBuffer) {
         when(value) {
-            is FacetKeyDisplayDeets.DebugPrint -> {
+            is FacetDisplayDeets.DebugPrint -> {
                 buf.putInt(1)
                 Unit
             }
-            is FacetKeyDisplayDeets.DateTime -> {
+            is FacetDisplayDeets.DateTime -> {
                 buf.putInt(2)
                 FfiConverterTypeDateTimeFacetDisplayType.write(value.`displayType`, buf)
                 Unit
             }
-            is FacetKeyDisplayDeets.UnixPath -> {
+            is FacetDisplayDeets.UnixPath -> {
                 buf.putInt(3)
                 Unit
             }
-            is FacetKeyDisplayDeets.Title -> {
+            is FacetDisplayDeets.Title -> {
                 buf.putInt(4)
                 FfiConverterBoolean.write(value.`showEditor`, buf)
+                Unit
+            }
+            is FacetDisplayDeets.CustomView -> {
+                buf.putInt(5)
+                FfiConverterTypeViewRef.write(value.`view`, buf)
+                FfiConverterTypeFacetViewMode.write(value.`mode`, buf)
+                FfiConverterInt.write(value.`priority`, buf)
                 Unit
             }
         }.let { /* this makes the `when` an expression, which ensures it is exhaustive */ }
@@ -2210,6 +2303,41 @@ public object FfiConverterTypeFacetTag : FfiConverterRustBuffer<FacetTag>{
                 Unit
             }
         }.let { /* this makes the `when` an expression, which ensures it is exhaustive */ }
+    }
+}
+
+
+
+
+
+
+enum class FacetViewMode {
+    
+    DISPLAY,
+    EDIT,
+    DISPLAY_AND_EDIT;
+
+    
+
+
+    companion object
+}
+
+
+/**
+ * @suppress
+ */
+public object FfiConverterTypeFacetViewMode: FfiConverterRustBuffer<FacetViewMode> {
+    override fun read(buf: ByteBuffer) = try {
+        FacetViewMode.values()[buf.getInt() - 1]
+    } catch (e: IndexOutOfBoundsException) {
+        throw RuntimeException("invalid enum value, something is very wrong!!", e)
+    }
+
+    override fun allocationSize(value: FacetViewMode) = 4UL
+
+    override fun write(value: FacetViewMode, buf: ByteBuffer) {
+        buf.putInt(value.ordinal + 1)
     }
 }
 
@@ -3180,6 +3308,26 @@ public typealias FfiConverterTypeJson = FfiConverterString
 
 
 
+/**
+ * Typealias from the type name used in the UDL file to the builtin type.  This
+ * is needed because the UDL type name is used in function/method signatures.
+ * It's also what we have an external type that references a custom type.
+ */
+public typealias KeyGeneric = kotlin.String
+public typealias FfiConverterTypeKeyGeneric = FfiConverterString
+
+
+
+/**
+ * Typealias from the type name used in the UDL file to the builtin type.  This
+ * is needed because the UDL type name is used in function/method signatures.
+ * It's also what we have an external type that references a custom type.
+ */
+public typealias ManifestFacetTag = kotlin.String
+public typealias FfiConverterTypeManifestFacetTag = FfiConverterString
+
+
+
 
 
 /**
@@ -3281,3 +3429,4 @@ public object FfiConverterTypeUuid: FfiConverter<Uuid, RustBuffer.ByValue> {
         FfiConverterByteArray.write(builtinValue, buf)
     }
 }
+

@@ -15,10 +15,38 @@ And we'll have need of more keys in the future.
 We cant use the same key for everything.
 We'll want to rotate them.
 Probably want to use session keys for iroh.
+Additionally, we'll need to consider the multi-user/hub case for common usage requiring an identitiy layer.
+
+A few easy decisions:
+- Identity and cryptograph are related but not the same
+- Use separate Iroh keys for different contexts.
+  - Use per-session iroh keys for client roles? Does this buy us anything?
 
 ---
 
 Discussion with GPT 5.5: https://chatgpt.com/share/6a237a9d-1d48-83ea-a8ec-962b56e212e1
+
+---
+
+You can find the thought process in gory detail in the chatgpt logs but here's the design.
+- In a repo, we'll have agent keys.
+  - These agent keys will sign user keys for subsystems and so on.
+    - Drawer or plugin user will sign content like facets and blobs.
+- An agent key also acts as the authority root for sync.
+  - Peers will use keys signed by agents for sync or iroh.
+- In the repo will be stored the pubkey log and ACL list for agents.
+  - Each addition to the ACL list will need to be signed by an existing agent.
+  - Genesis agent will ofc sign itself.
+    - How to prevent re-genesis?
+      - Well, all chains of signatures must resolve to the same genesis.
+      - Re-genesis could re sign all keys?
+        - GPT the smart cookie, has the idea that repo_id should be derived from genesis block. Nice and elegant.
+- Additionally, repo can have optional recovery keys
+  - These must be signed by a pre-approved agent
+  - These will only be used to sign new agent additions
+  - Used for adding new agents when all previous keys are lost
+    - I.e. agent keys can be device local but recovery keys can be stored elsewhere
+  - Recovery keys are derived per repo from a master recovery secret that can be encrypted stored in a passkey wallet
 
 ## 2026-06-05 | forgery protection
 

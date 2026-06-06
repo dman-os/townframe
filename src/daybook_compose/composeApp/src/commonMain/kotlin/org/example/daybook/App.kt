@@ -32,7 +32,6 @@ import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
-import androidx.compose.runtime.CompositionLocalProvider
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.compositionLocalOf
@@ -65,8 +64,6 @@ import kotlinx.coroutines.launch
 import kotlinx.coroutines.runBlocking
 import kotlinx.coroutines.withContext
 import kotlinx.coroutines.withTimeout
-import org.example.daybook.capture.CameraCaptureContext
-import org.example.daybook.capture.ProvideCameraCaptureContext
 import org.example.daybook.capture.screens.CaptureScreen
 import org.example.daybook.drawer.DocEditorScreen
 import org.example.daybook.drawer.DrawerScreen
@@ -82,7 +79,6 @@ import org.example.daybook.layouts.ExpandedLayout
 import org.example.daybook.layouts.ProvideScreenChromeSpec
 import org.example.daybook.navigation.DaybookNavKey
 import org.example.daybook.navigation.DaybookNavigationState
-import org.example.daybook.navigation.rememberDaybookNavigationState
 import org.example.daybook.progress.ProgressList
 import org.example.daybook.settings.SettingsScreen
 import org.example.daybook.theme.DaybookTheme
@@ -188,18 +184,6 @@ val LocalDocEditorStore =
     }
 
 data class AppConfig(val theme: ThemeConfig = ThemeConfig.Dark)
-
-private sealed interface AppInitState {
-    data object Loading : AppInitState
-
-    data class Welcome(val repos: List<KnownRepoEntry>) : AppInitState
-
-    data class OpeningRepo(val repoPath: String) : AppInitState
-
-    data class Ready(val container: AppContainer) : AppInitState
-
-    data class Error(val throwable: Throwable) : AppInitState
-}
 
 sealed interface TablesState {
     data class Data(
@@ -528,153 +512,6 @@ class TablesViewModel(val tablesRepo: TablesRepoFfi) : ViewModel() {
     }
 }
 
-private suspend fun warmUpTablesRepo(tablesRepo: TablesRepoFfi) {
-    tablesRepo.listWindows()
-    tablesRepo.listTabs()
-    tablesRepo.listPanels()
-    tablesRepo.listTables()
-}
-
-private const val STARTUP_PROGRESS_TASK_ID = "app/init/startup"
-
-private class StartupProgressTask(
-    private val progressRepo: ProgressRepoFfi,
-    val taskId: String,
-    private val appElapsedMillis: () -> Long,
-    private val totalStages: Int,
-) {
-    private var doneStages = 0
-
-    suspend fun begin(repoPath: String, startupElapsed: String, phaseId: String) {
-        progressRepo.upsertTask(
-            CreateProgressTaskArgs(
-                id = taskId,
-                tags = listOf("/app/init", "/app/init/open-repo"),
-                retention = ProgressRetentionPolicy.UserDismissable,
-            ),
-        )
-        progressRepo.addUpdate(
-            taskId,
-            ProgressUpdate(
-                at = Clock.System.now(),
-                title = "App startup",
-                deets =
-                ProgressUpdateDeets.Status(
-                    severity = ProgressSeverity.INFO,
-                    message =
-                    "startup phase begin phase=$phaseId (open_elapsed=$startupElapsed from_app_start_ms=${appElapsedMillis()})",
-                ),
-            ),
-        )
-        progressRepo.addUpdate(
-            taskId,
-            ProgressUpdate(
-                at = Clock.System.now(),
-                title = "App startup",
-                deets =
-                ProgressUpdateDeets.Status(
-                    severity = ProgressSeverity.INFO,
-                    message =
-                    "opening repo $repoPath (open_elapsed=$startupElapsed from_app_start_ms=${appElapsedMillis()})",
-                ),
-            ),
-        )
-    }
-
-    suspend fun stageStart(stage: String, startupElapsed: String) {
-        progressRepo.addUpdate(
-            taskId,
-            ProgressUpdate(
-                at = Clock.System.now(),
-                title = "App startup",
-                deets =
-                ProgressUpdateDeets.Status(
-                    severity = ProgressSeverity.INFO,
-                    message =
-                    "starting $stage (open_elapsed=$startupElapsed from_app_start_ms=${appElapsedMillis()})",
-                ),
-            ),
-        )
-    }
-
-    suspend fun stageDone(stage: String, stageElapsed: String, startupElapsed: String) {
-        doneStages += 1
-        progressRepo.addUpdate(
-            taskId,
-            ProgressUpdate(
-                at = Clock.System.now(),
-                title = "App startup",
-                deets =
-                ProgressUpdateDeets.Amount(
-                    severity = ProgressSeverity.INFO,
-                    done = doneStages.toULong(),
-                    total = totalStages.toULong(),
-                    unit = ProgressUnit.Generic("stage"),
-                    message =
-                    "$stage done in $stageElapsed (open_elapsed=$startupElapsed from_app_start_ms=${appElapsedMillis()})",
-                ),
-            ),
-        )
-    }
-
-    suspend fun fail(message: String, startupElapsed: String) {
-        progressRepo.addUpdate(
-            taskId,
-            ProgressUpdate(
-                at = Clock.System.now(),
-                title = "App startup",
-                deets =
-                ProgressUpdateDeets.Completed(
-                    state = ProgressFinalState.FAILED,
-                    message =
-                    "$message (open_elapsed=$startupElapsed from_app_start_ms=${appElapsedMillis()})",
-                ),
-            ),
-        )
-    }
-
-    suspend fun complete(startupElapsed: String) {
-        progressRepo.addUpdate(
-            taskId,
-            ProgressUpdate(
-                at = Clock.System.now(),
-                title = "App startup",
-                deets =
-                ProgressUpdateDeets.Completed(
-                    state = ProgressFinalState.SUCCEEDED,
-                    message =
-                    "startup complete (open_elapsed=$startupElapsed from_app_start_ms=${appElapsedMillis()})",
-                ),
-            ),
-        )
-    }
-}
-
-private suspend fun <T> withStartupStage(
-    stage: String,
-    startupMark: TimeMark,
-    progress: StartupProgressTask?,
-    block: suspend () -> T,
-): T {
-    val stageMark = TimeSource.Monotonic.markNow()
-    progress?.stageStart(stage, startupMark.elapsedNow().toString())
-    try {
-        val out = block()
-        progress?.stageDone(
-            stage,
-            stageMark.elapsedNow().toString(),
-            startupMark.elapsedNow().toString(),
-        )
-        return out
-    } catch (t: Throwable) {
-        progress?.fail(
-            "stage $stage failed: ${t.message ?: "unknown error"}",
-            startupMark.elapsedNow().toString(),
-        )
-        throw t
-    }
-}
-
 private fun defaultHomeScreenConfig(navState: DaybookNavigationState, onShowCloneShare: () -> Unit): HomeScreenConfig =
     HomeScreenConfig(
         widgets =
@@ -747,23 +584,26 @@ fun App(
 ) {
     val permCtx = LocalPermCtx.current
     val appStartMark = remember { TimeSource.Monotonic.markNow() }
-    var initAttempt by remember { mutableStateOf(0) }
-    var initState by remember { mutableStateOf<AppInitState>(AppInitState.Loading) }
-    var pendingOpenRepoPath by remember { mutableStateOf<String?>(null) }
     var cloneUiState by remember { mutableStateOf<CloneUiState?>(null) }
     var createRepoUiState by remember { mutableStateOf<CreateRepoUiState?>(null) }
     var cloneSourceUrlPendingOpen by remember { mutableStateOf<String?>(null) }
     var cloneInitRequest by remember { mutableStateOf<Pair<String, String>?>(null) }
     var createRepoInitRequest by remember { mutableStateOf<String?>(null) }
     var selectedWelcomeRepo by remember { mutableStateOf<KnownRepoEntry?>(null) }
-    var pendingForgetRepoId by remember { mutableStateOf<String?>(null) }
     var cloneCameraPreviewFfi by remember { mutableStateOf<CameraPreviewFfi?>(null) }
     val ffiServices = rememberAppFfiServices()
+    val runtimeVm: AppRuntimeViewModel =
+        viewModel(key = "appRuntimeVm") { AppRuntimeViewModel(ffiServices) }
+    val runtimeState by runtimeVm.state.collectAsState()
 
-    LaunchedEffect(initState, cloneCameraPreviewFfi) {
+    LaunchedEffect(runtimeVm) {
+        runtimeVm.start { appStartMark.elapsedNow().inWholeMilliseconds }
+    }
+
+    LaunchedEffect(runtimeState, cloneCameraPreviewFfi) {
         // Defer optional camera preload until after initial app bootstrap to avoid FFI init races.
         val canPreloadCamera =
-            initState is AppInitState.Welcome || initState is AppInitState.Ready
+            runtimeState is FfiRuntimeState.Welcome || runtimeState is FfiRuntimeState.Ready
         if (!canPreloadCamera || cloneCameraPreviewFfi != null) return@LaunchedEffect
         runCatching {
             withContext(Dispatchers.IO) { CameraPreviewFfi.load() }
@@ -779,312 +619,68 @@ fun App(
             cloneCameraPreviewFfi?.close()
         }
     }
-
-    LaunchedEffect(initAttempt) {
-        initState = AppInitState.Loading
-        selectedWelcomeRepo = null
-        try {
-            println("[APP_INIT] stage=getRepoConfig start")
-            val repoConfig =
-                withTimeout(20_000) {
-                    withContext(Dispatchers.IO) { ffiServices.getRepoConfig() }
-                }
-            println("[APP_INIT] stage=getRepoConfig done")
-            val knownRepos = repoConfig.knownRepos
-            val lastUsedRepo =
-                repoConfig.lastUsedRepoId?.let { lastUsedRepoId ->
-                    knownRepos.find { repo -> repo.id == lastUsedRepoId }
-                }
-            val shouldOpenLastUsedRepo =
-                if (lastUsedRepo == null) {
-                    false
-                } else {
-                    val lastUsedRepoPath = lastUsedRepo.path
-                    println("[APP_INIT] stage=isRepoUsable start path=$lastUsedRepoPath")
-                    val usable =
-                        withTimeout(20_000) {
-                            withContext(Dispatchers.IO) {
-                                ffiServices.isRepoUsable(lastUsedRepoPath)
-                            }
-                        }
-                    println("[APP_INIT] stage=isRepoUsable done usable=$usable")
-                    usable
-                }
-
-            if (shouldOpenLastUsedRepo && lastUsedRepo != null) {
-                pendingOpenRepoPath = lastUsedRepo.path
-                initState = AppInitState.OpeningRepo(repoPath = lastUsedRepo.path)
-            } else {
-                initState = AppInitState.Welcome(repos = knownRepos)
-            }
-        } catch (throwable: Throwable) {
-            if (throwable is CancellationException &&
-                throwable !is TimeoutCancellationException
-            ) {
-                throw throwable
-            }
-            cloneSourceUrlPendingOpen = null
-            println("[APP_INIT] stage=bootstrap failed err=${throwable.message}")
-            initState = AppInitState.Error(throwable)
-        }
-    }
-
-    LaunchedEffect(pendingOpenRepoPath) {
-        val repoPath = pendingOpenRepoPath ?: return@LaunchedEffect
-        val startupMark = TimeSource.Monotonic.markNow()
-        val startupPhaseId = Clock.System.now().toEpochMilliseconds().toString()
-        val startupStageCount = 10
-        try {
-            initState = AppInitState.OpeningRepo(repoPath = repoPath)
-            val container = withContext(Dispatchers.IO) {
-                var fcx: FfiCtx? = null
-                var tablesRepo: TablesRepoFfi? = null
-                var blobsRepo: org.example.daybook.uniffi.BlobsRepoFfi? = null
-                var plugsRepo: org.example.daybook.uniffi.PlugsRepoFfi? = null
-                var drawerRepo: DrawerRepoFfi? = null
-                var configRepo: ConfigRepoFfi? = null
-                var dispatchRepo: DispatchRepoFfi? = null
-                var progressRepo: ProgressRepoFfi? = null
-                var initRepo: InitRepoFfi? = null
-                var sqliteLsRepo: SqliteLocalStateRepoFfi? = null
-                var cameraPreviewFfi: CameraPreviewFfi? = null
-                var startupProgress: StartupProgressTask? = null
-                try {
-                    fcx =
-                        withStartupStage("ffiServices.openRepoFfiCtx", startupMark, null) {
-                            ffiServices.openRepoFfiCtx(repoPath)
-                        }
-                    val fcxReady = fcx ?: error("ffi context initialization failed")
-                    progressRepo =
-                        withStartupStage("ProgressRepoFfi.load", startupMark, null) {
-                            ProgressRepoFfi.load(fcx = fcxReady)
-                        }
-                    startupProgress =
-                        StartupProgressTask(
-                            progressRepo = progressRepo ?: error("progress repo failed to load"),
-                            taskId = STARTUP_PROGRESS_TASK_ID,
-                            appElapsedMillis = { appStartMark.elapsedNow().inWholeMilliseconds },
-                            totalStages = startupStageCount,
-                        )
-                    startupProgress.begin(
-                        repoPath,
-                        startupMark.elapsedNow().toString(),
-                        startupPhaseId,
-                    )
-                    tablesRepo =
-                        withStartupStage("TablesRepoFfi.load", startupMark, startupProgress) {
-                            TablesRepoFfi.load(fcx = fcxReady)
-                        }
-                    blobsRepo =
-                        withStartupStage("BlobsRepoFfi.load", startupMark, startupProgress) {
-                            org.example.daybook.uniffi.BlobsRepoFfi.load(fcx = fcxReady)
-                        }
-                    plugsRepo =
-                        withStartupStage("PlugsRepoFfi.load", startupMark, startupProgress) {
-                            org.example.daybook.uniffi.PlugsRepoFfi
-                                .load(
-                                    fcx = fcxReady,
-                                    blobsRepo =
-                                    blobsRepo ?: error("blobs repo failed to load"),
-                                )
-                        }
-                    drawerRepo =
-                        withStartupStage("DrawerRepoFfi.load", startupMark, startupProgress) {
-                            DrawerRepoFfi.load(
-                                fcx = fcxReady,
-                                plugsRepo =
-                                plugsRepo ?: error("plugs repo failed to load"),
-                            )
-                        }
-                    configRepo =
-                        withStartupStage("ConfigRepoFfi.load", startupMark, startupProgress) {
-                            ConfigRepoFfi.load(
-                                fcx = fcxReady,
-                                plugRepo =
-                                plugsRepo ?: error("plugs repo failed to load"),
-                            )
-                        }
-                    dispatchRepo =
-                        withStartupStage("DispatchRepoFfi.load", startupMark, startupProgress) {
-                            DispatchRepoFfi.load(fcx = fcxReady)
-                        }
-                    initRepo =
-                        withStartupStage("InitRepoFfi.load", startupMark, startupProgress) {
-                            InitRepoFfi.load(
-                                fcx = fcxReady,
-                                progressRepo =
-                                progressRepo ?: error("progress repo failed to load"),
-                            )
-                        }
-                    sqliteLsRepo =
-                        withStartupStage(
-                            "SqliteLocalStateRepoFfi.load",
-                            startupMark,
-                            startupProgress,
-                        ) {
-                            SqliteLocalStateRepoFfi.load(fcx = fcxReady)
-                        }
-                    cameraPreviewFfi =
-                        withStartupStage("CameraPreviewFfi.load", startupMark, startupProgress) {
-                            CameraPreviewFfi.load()
-                        }
-                    withStartupStage("warmUpTablesRepo", startupMark, startupProgress) {
-                        warmUpTablesRepo(tablesRepo ?: error("tables repo failed to load"))
-                    }
-                    AppContainer(
-                        ffiCtx = fcxReady,
-                        drawerRepo = drawerRepo ?: error("drawer repo failed to load"),
-                        tablesRepo = tablesRepo ?: error("tables repo failed to load"),
-                        dispatchRepo = dispatchRepo ?: error("dispatch repo failed to load"),
-                        progressRepo = progressRepo ?: error("progress repo failed to load"),
-                        initRepo = initRepo ?: error("init repo failed to load"),
-                        sqliteLsRepo =
-                        sqliteLsRepo ?: error("sqlite local state repo failed to load"),
-                        rtFfi = null,
-                        plugsRepo = plugsRepo ?: error("plugs repo failed to load"),
-                        configRepo = configRepo ?: error("config repo failed to load"),
-                        blobsRepo = blobsRepo ?: error("blobs repo failed to load"),
-                        syncRepo = null,
-                        cameraPreviewFfi =
-                        cameraPreviewFfi ?: error("camera preview ffi failed to load"),
-                    )
-                } catch (throwable: Throwable) {
-                    if (throwable is CancellationException) throw throwable
-                    val startupErrorMessage =
-                        throwable.message ?: throwable::class.simpleName ?: "unknown error"
-                    startupProgress?.fail(startupErrorMessage, startupMark.elapsedNow().toString())
-                    cameraPreviewFfi?.close()
-                    sqliteLsRepo?.close()
-                    initRepo?.close()
-                    progressRepo?.close()
-                    dispatchRepo?.close()
-                    drawerRepo?.close()
-                    tablesRepo?.close()
-                    plugsRepo?.close()
-                    configRepo?.close()
-                    blobsRepo?.close()
-                    fcx?.close()
-                    throw throwable
-                }
-            }
-            initState =
-                AppInitState.Ready(container)
-        } catch (throwable: Throwable) {
-            if (throwable is CancellationException) throw throwable
-            cloneSourceUrlPendingOpen = null
-            initState = AppInitState.Error(throwable)
-        } finally {
-            pendingOpenRepoPath = null
-        }
-    }
-
-    LaunchedEffect(pendingForgetRepoId) {
-        val repoId = pendingForgetRepoId ?: return@LaunchedEffect
-        try {
-            val repoConfig = withContext(Dispatchers.IO) { ffiServices.forgetKnownRepo(repoId) }
-            selectedWelcomeRepo = null
-            initState = AppInitState.Welcome(repos = repoConfig.knownRepos)
-        } catch (throwable: Throwable) {
-            initState = AppInitState.Error(throwable)
-        } finally {
-            pendingForgetRepoId = null
-        }
-    }
-
-    LaunchedEffect(initState) {
-        val ready = initState as? AppInitState.Ready ?: return@LaunchedEffect
-        val current = ready.container
-        if (current.syncRepo != null && current.rtFfi != null) return@LaunchedEffect
-
-        var loadedSyncRepo: SyncRepoFfi? = null
-        try {
-            println("[APP_INIT] stage=deferred SyncRepoFfi.load start")
-            loadedSyncRepo = withContext(Dispatchers.IO) {
-                SyncRepoFfi.load(
-                    fcx = current.ffiCtx,
-                    configRepo = current.configRepo,
-                    blobsRepo = current.blobsRepo,
-                    drawerRepo = current.drawerRepo,
-                    progressRepo = current.progressRepo,
+    val currentRuntimeState = runtimeState
+    LaunchedEffect(currentRuntimeState, cloneSourceUrlPendingOpen) {
+        val ready = currentRuntimeState as? FfiRuntimeState.Ready ?: return@LaunchedEffect
+        val sourceUrl = cloneSourceUrlPendingOpen ?: return@LaunchedEffect
+        val syncRepo = ready.container.syncRepo
+        if (syncRepo == null) {
+            cloneUiState =
+                CloneUiState.Syncing(
+                    sourceUrl = sourceUrl,
+                    initialSyncComplete = false,
+                    phaseMessage = "Starting sync services…",
+                    errorMessage = null,
                 )
-            }
-            println("[APP_INIT] stage=deferred SyncRepoFfi.load done")
-
-            println("[APP_INIT] stage=deferred RtFfi.load start")
-            val rtFfi = withContext(Dispatchers.IO) {
-                RtFfi.load(
-                    fcx = current.ffiCtx,
-                    drawerRepo = current.drawerRepo,
-                    plugsRepo = current.plugsRepo,
-                    dispatchRepo = current.dispatchRepo,
-                    progressRepo = current.progressRepo,
-                    blobsRepo = current.blobsRepo,
-                    configRepo = current.configRepo,
-                    initRepo = current.initRepo,
-                    sqliteLsRepo = current.sqliteLsRepo,
-                    deviceId = "compose-client",
-                    startupProgressTaskId = STARTUP_PROGRESS_TASK_ID,
-                )
-            }
-            println("[APP_INIT] stage=deferred RtFfi.load done")
+            return@LaunchedEffect
+        }
+        cloneUiState =
+            CloneUiState.Syncing(
+                sourceUrl = sourceUrl,
+                initialSyncComplete = false,
+                phaseMessage = "Pulling required docs…",
+                errorMessage = null,
+            )
+        try {
             withContext(Dispatchers.IO) {
-                current.progressRepo.addUpdate(
-                    STARTUP_PROGRESS_TASK_ID,
-                    ProgressUpdate(
-                        at = Clock.System.now(),
-                        title = "App startup",
-                        deets =
-                        ProgressUpdateDeets.Completed(
-                            state = ProgressFinalState.SUCCEEDED,
-                            message =
-                            "startup complete (from_app_start_ms=${appStartMark.elapsedNow().inWholeMilliseconds})",
-                        ),
-                    ),
-                )
+                syncRepo.connectUrl(sourceUrl)
             }
-            initState = AppInitState.Ready(current.copy(syncRepo = loadedSyncRepo, rtFfi = rtFfi))
-        } catch (throwable: Throwable) {
-            if (throwable is CancellationException) throw throwable
-            withContext(Dispatchers.IO) {
-                runCatching { loadedSyncRepo?.close() }
-                runCatching { current.syncRepo?.close() }
-                runCatching { current.rtFfi?.close() }
-                runCatching { current.drawerRepo.close() }
-                runCatching { current.tablesRepo.close() }
-                runCatching { current.dispatchRepo.close() }
-                runCatching { current.blobsRepo.close() }
-                runCatching { current.sqliteLsRepo.close() }
-                runCatching { current.initRepo.close() }
-                runCatching { current.plugsRepo.close() }
-                runCatching { current.configRepo.close() }
-                runCatching { current.cameraPreviewFfi.close() }
-                runCatching { current.ffiCtx.close() }
-                current.progressRepo.addUpdate(
-                    STARTUP_PROGRESS_TASK_ID,
-                    ProgressUpdate(
-                        at = Clock.System.now(),
-                        title = "App startup",
-                        deets =
-                        ProgressUpdateDeets.Completed(
-                            state = ProgressFinalState.FAILED,
-                            message =
-                            "startup failed during deferred runtime load: ${throwable.message ?: "unknown error"} (from_app_start_ms=${appStartMark.elapsedNow().inWholeMilliseconds})",
-                        ),
-                    ),
-                )
-                runCatching { current.progressRepo.close() }
+            val current = cloneUiState as? CloneUiState.Syncing
+            if (current != null && current.sourceUrl == sourceUrl) {
+                cloneUiState =
+                    current.copy(
+                        initialSyncComplete = true,
+                        phaseMessage = "Required docs synced. Remaining sync is running.",
+                        errorMessage = null,
+                    )
             }
-            initState = AppInitState.Error(throwable)
+        } catch (error: Throwable) {
+            if (error is CancellationException) {
+                return@LaunchedEffect
+            }
+            val current = cloneUiState as? CloneUiState.Syncing
+            if (current != null && current.sourceUrl == sourceUrl) {
+                cloneUiState =
+                    current.copy(
+                        initialSyncComplete = false,
+                        phaseMessage = "Failed while pulling required docs.",
+                        errorMessage = "Connect failed: ${describeThrowable(error)}",
+                    )
+            }
+        } finally {
+            if (cloneSourceUrlPendingOpen == sourceUrl) {
+                cloneSourceUrlPendingOpen = null
+            }
         }
     }
 
     DaybookTheme(themeConfig = config.theme) {
-        when (val state = initState) {
-            is AppInitState.Loading -> {
+        when (val state = currentRuntimeState) {
+            is FfiRuntimeState.Loading -> {
                 LoadingScreen()
             }
 
-            is AppInitState.Welcome -> {
+            is FfiRuntimeState.Welcome -> {
                 WelcomeFlowNavHost(
                     repos = state.repos,
                     permCtx = permCtx,
@@ -1095,20 +691,21 @@ fun App(
                     cloneSourceUrlPendingOpen = cloneSourceUrlPendingOpen,
                     cloneInitRequest = cloneInitRequest,
                     createRepoInitRequest = createRepoInitRequest,
-                    pendingForgetRepoId = pendingForgetRepoId,
                     onSelectedWelcomeRepoChange = { selectedWelcomeRepo = it },
                     onCloneUiStateChange = { cloneUiState = it },
                     onCreateRepoUiStateChange = { createRepoUiState = it },
                     onCloneSourceUrlPendingOpenChange = { cloneSourceUrlPendingOpen = it },
                     onCloneInitRequestChange = { cloneInitRequest = it },
                     onCreateRepoInitRequestChange = { createRepoInitRequest = it },
-                    onPendingOpenRepoPath = { pendingOpenRepoPath = it },
-                    onPendingForgetRepoId = { pendingForgetRepoId = it },
+                    onPendingOpenRepoPath = {
+                        runtimeVm.openRepo(it) { appStartMark.elapsedNow().inWholeMilliseconds }
+                    },
+                    onForgetRepo = { runtimeVm.forgetRepo(it) },
                     onExitRequest = { onExitRequest?.invoke() },
                 )
             }
 
-            is AppInitState.OpeningRepo -> {
+            is FfiRuntimeState.OpeningRepo -> {
                 val syncingState = cloneUiState as? CloneUiState.Syncing
                 if (syncingState != null) {
                     CloneSyncScreen(
@@ -1117,7 +714,9 @@ fun App(
                         onSyncInBackground = {},
                         onRetry = {
                             cloneSourceUrlPendingOpen = syncingState.sourceUrl
-                            pendingOpenRepoPath = state.repoPath
+                            runtimeVm.openRepo(state.repoPath) {
+                                appStartMark.elapsedNow().inWholeMilliseconds
+                            }
                         },
                     )
                 } else {
@@ -1125,15 +724,18 @@ fun App(
                 }
             }
 
-            is AppInitState.Error -> {
+            is FfiRuntimeState.Error -> {
                 ErrorScreen(
                     title = "Failed to initialize",
                     message = state.throwable.message ?: "Unknown error",
-                    onRetry = { initAttempt += 1 },
+                    onRetry = {
+                        selectedWelcomeRepo = null
+                        runtimeVm.start { appStartMark.elapsedNow().inWholeMilliseconds }
+                    },
                 )
             }
 
-            is AppInitState.Ready -> {
+            is FfiRuntimeState.Ready -> {
                 val appContainer = state.container
                 val containerKey = "container:${appContainer.ffiCtx}"
                 val drawerVm: DrawerViewModel =
@@ -1148,64 +750,47 @@ fun App(
 
                 LaunchedEffect(shutdownRequested, appContainer.ffiCtx, shutdownDone) {
                     if (shutdownRequested && !shutdownDone) {
-                        shutdownAppContainer(appContainer)
+                        runtimeVm.shutdownReadyContainer()
                         shutdownDone = true
                         onShutdownCompleted?.invoke()
                     }
                 }
 
-                // Ensure FFI resources are closed when the composition leaves
                 androidx.compose.runtime.DisposableEffect(appContainer.ffiCtx) {
                     onDispose {
-                        if (!autoShutdownOnDispose) {
-                            return@onDispose
-                        }
+                        if (!autoShutdownOnDispose) return@onDispose
                         if (!shutdownDone) {
                             runBlocking(Dispatchers.IO) {
-                                shutdownAppContainer(appContainer)
+                                runtimeVm.shutdownReadyContainer()
                             }
                         }
                     }
                 }
 
                 Box(modifier = Modifier.fillMaxSize()) {
-                    CompositionLocalProvider(
-                        LocalContainer provides appContainer,
-                        LocalDrawerViewModel provides drawerVm,
-                        LocalDocEditorStore provides docEditorStore,
-                    ) {
-                        val syncingState = cloneUiState as? CloneUiState.Syncing
-                        if (syncingState != null) {
-                            CloneSyncScreen(
-                                progressRepo = appContainer.progressRepo,
-                                state = syncingState,
-                                onSyncInBackground = {
-                                    if (syncingState.initialSyncComplete) {
-                                        cloneUiState = null
-                                    }
-                                },
-                                onRetry = {
-                                    cloneSourceUrlPendingOpen = syncingState.sourceUrl
-                                },
-                            )
-                        } else {
-                            // Provide camera capture context for coordination between camera and bottom bar
-                            val cameraCaptureContext = remember { CameraCaptureContext() }
-                            val chromeStateManager = remember { ChromeStateManager() }
-                            ProvideCameraCaptureContext(cameraCaptureContext) {
-                                CompositionLocalProvider(
-                                    LocalChromeStateManager provides chromeStateManager,
-                                    LocalAppExitRequest provides onExitRequest,
-                                ) {
-                                    val navState = rememberDaybookNavigationState()
-                                    AdaptiveAppLayout(
-                                        modifier = surfaceModifier,
-                                        navState = navState,
-                                        extraAction = extraAction,
-                                    )
+                    val syncingState = cloneUiState as? CloneUiState.Syncing
+                    if (syncingState != null) {
+                        CloneSyncScreen(
+                            progressRepo = appContainer.progressRepo,
+                            state = syncingState,
+                            onSyncInBackground = {
+                                if (syncingState.initialSyncComplete) {
+                                    cloneUiState = null
                                 }
-                            }
-                        }
+                            },
+                            onRetry = {
+                                cloneSourceUrlPendingOpen = syncingState.sourceUrl
+                            },
+                        )
+                    } else {
+                        DaybookAppReadyContent(
+                            appContainer = appContainer,
+                            drawerVm = drawerVm,
+                            docEditorStore = docEditorStore,
+                            surfaceModifier = surfaceModifier,
+                            extraAction = extraAction,
+                            onExitRequest = onExitRequest,
+                        )
                     }
                     if (shutdownRequested && !shutdownDone) {
                         Surface(
@@ -1233,124 +818,8 @@ fun App(
             }
         }
     }
-
-    // FIXME: does this really need to live at the top level App composable??
-    LaunchedEffect(initState, cloneSourceUrlPendingOpen) {
-        val ready = initState as? AppInitState.Ready ?: return@LaunchedEffect
-        val sourceUrl = cloneSourceUrlPendingOpen ?: return@LaunchedEffect
-        val syncRepo = ready.container.syncRepo
-        if (syncRepo == null) {
-            cloneUiState =
-                CloneUiState.Syncing(
-                    sourceUrl = sourceUrl,
-                    initialSyncComplete = false,
-                    phaseMessage = "Starting sync services…",
-                    errorMessage = null,
-                )
-            return@LaunchedEffect
-        }
-        cloneUiState =
-            CloneUiState.Syncing(
-                sourceUrl = sourceUrl,
-                initialSyncComplete = false,
-                phaseMessage = "Pulling required docs…",
-                errorMessage = null,
-            )
-        try {
-            syncRepo.connectUrl(sourceUrl)
-            val current = cloneUiState as? CloneUiState.Syncing
-            if (current != null && current.sourceUrl == sourceUrl) {
-                cloneUiState =
-                    current.copy(
-                        initialSyncComplete = true,
-                        phaseMessage = "Required docs synced. Remaining sync is running.",
-                        errorMessage = null,
-                    )
-            }
-        } catch (error: Throwable) {
-            // FIXME: connect URL goes through FFI, does it also
-            // drop the rust future?
-            if (error is CancellationException) {
-                // Normal during route/state transitions; not a sync failure.
-                return@LaunchedEffect
-            }
-            val current = cloneUiState as? CloneUiState.Syncing
-            if (current != null && current.sourceUrl == sourceUrl) {
-                cloneUiState =
-                    current.copy(
-                        initialSyncComplete = false,
-                        phaseMessage = "Failed while pulling required docs.",
-                        errorMessage = "Connect failed: ${describeThrowable(error)}",
-                    )
-            }
-        } finally {
-            if (cloneSourceUrlPendingOpen == sourceUrl) {
-                cloneSourceUrlPendingOpen = null
-            }
-        }
-    }
 }
 
-private suspend fun shutdownAppContainer(appContainer: AppContainer) {
-    println("[APP_SHUTDOWN] flushing to disk: begin")
-    val failures = mutableListOf<Throwable>()
-
-    fun recordFailure(throwable: Throwable) {
-        failures += throwable
-        println("[APP_SHUTDOWN] cleanup failed err=${throwable.message}")
-    }
-
-    suspend fun stopOnIo(label: String, block: suspend () -> Unit) {
-        try {
-            withContext(Dispatchers.IO) {
-                println("[APP_SHUTDOWN] flushing to disk: stopping $label")
-                block()
-            }
-        } catch (throwable: Throwable) {
-            recordFailure(throwable)
-        }
-    }
-
-    fun closeSafely(label: String, block: () -> Unit) {
-        try {
-            println("[APP_SHUTDOWN] flushing to disk: closing $label")
-            block()
-        } catch (throwable: Throwable) {
-            recordFailure(throwable)
-        }
-    }
-
-    val rtFfi = appContainer.rtFfi
-    val syncRepo = appContainer.syncRepo
-    if (syncRepo != null) {
-        stopOnIo("sync repo") { syncRepo.stop() }
-    }
-    if (rtFfi != null) {
-        stopOnIo("runtime repo") { rtFfi.stop() }
-    }
-    stopOnIo("init repo") { appContainer.initRepo.stop() }
-    stopOnIo("sqlite local state repo") { appContainer.sqliteLsRepo.stop() }
-    stopOnIo("progress repo") { appContainer.progressRepo.stop() }
-    closeSafely("drawer repo") { appContainer.drawerRepo.close() }
-    closeSafely("tables repo") { appContainer.tablesRepo.close() }
-    closeSafely("dispatch repo") { appContainer.dispatchRepo.close() }
-    closeSafely("progress repo") { appContainer.progressRepo.close() }
-    rtFfi?.let { closeSafely("runtime ffi") { it.close() } }
-    closeSafely("init repo") { appContainer.initRepo.close() }
-    closeSafely("sqlite local state repo") { appContainer.sqliteLsRepo.close() }
-    closeSafely("plugs repo") { appContainer.plugsRepo.close() }
-    closeSafely("config repo") { appContainer.configRepo.close() }
-    closeSafely("blobs repo") { appContainer.blobsRepo.close() }
-    syncRepo?.let { closeSafely("sync repo") { it.close() } }
-    closeSafely("camera preview ffi") { appContainer.cameraPreviewFfi.close() }
-    closeSafely("ffi ctx") { appContainer.ffiCtx.close() }
-    if (failures.isNotEmpty()) {
-        val first = failures.first()
-        failures.drop(1).forEach(first::addSuppressed)
-        throw first
-    }
-    println("[APP_SHUTDOWN] flushing to disk: complete")
-}
 
 @Composable
 @Suppress("UnusedParameter", "FunctionNaming")

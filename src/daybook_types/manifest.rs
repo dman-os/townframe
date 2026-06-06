@@ -25,9 +25,11 @@ pub fn is_domain_name(value: &str, _context: &()) -> garde::Result {
 #[serde(transparent)]
 #[garde(transparent)]
 #[repr(transparent)]
-pub struct FacetTag(#[garde(custom(is_domain_name))] pub String);
+pub struct ManifestFacetTag(#[garde(custom(is_domain_name))] pub String);
 
-impl<T> From<T> for FacetTag
+pub type FacetTag = ManifestFacetTag;
+
+impl<T> From<T> for ManifestFacetTag
 where
     T: Into<String>,
 {
@@ -36,13 +38,13 @@ where
     }
 }
 
-impl std::fmt::Display for FacetTag {
+impl std::fmt::Display for ManifestFacetTag {
     fn fmt(&self, fmt: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         write!(fmt, "{}", self.0)
     }
 }
 
-impl std::ops::Deref for FacetTag {
+impl std::ops::Deref for ManifestFacetTag {
     type Target = String;
 
     fn deref(&self) -> &Self::Target {
@@ -51,7 +53,7 @@ impl std::ops::Deref for FacetTag {
 }
 
 #[cfg(feature = "uniffi")]
-uniffi::custom_newtype!(FacetTag, String);
+uniffi::custom_newtype!(ManifestFacetTag, String);
 
 #[derive(
     Debug,

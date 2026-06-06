@@ -8,6 +8,7 @@ import org.gradle.api.tasks.Delete
 import org.gradle.api.tasks.Exec
 import org.gradle.api.tasks.SourceTask
 import org.gradle.api.tasks.Sync
+import org.gradle.api.tasks.testing.Test
 import org.gradle.process.CommandLineArgumentProvider
 import java.io.File
 
@@ -145,6 +146,8 @@ kotlin {
         }
         val desktopTest by getting {
             dependencies {
+                @OptIn(org.jetbrains.compose.ExperimentalComposeLibrary::class)
+                implementation(compose.uiTest)
                 implementation(compose.desktop.uiTestJUnit4)
                 implementation(compose.desktop.currentOs)
             }
@@ -650,6 +653,15 @@ tasks.matching {
 tasks.matching { it.name == "packageReleaseAppImage" }.configureEach {
     dependsOn("buildRustDesktopRelease")
     dependsOn("copyRustDesktopReleaseToComposeApp")
+}
+
+tasks.named<Test>("desktopTest").configure {
+    dependsOn("buildRustDesktopDebug")
+    val debugLibDir = File(cargoTargetDir, "debug")
+    jvmArgs(
+        "-Djava.library.path=${debugLibDir.absolutePath}",
+        "-Djna.library.path=${debugLibDir.absolutePath}",
+    )
 }
 
 tasks.register("prepareLinuxdeployComposeAppDirDayb") {

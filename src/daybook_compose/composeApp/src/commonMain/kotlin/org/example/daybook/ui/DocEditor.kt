@@ -62,11 +62,15 @@ import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.vector.ImageVector
 import androidx.compose.ui.layout.ContentScale
+import androidx.compose.ui.platform.testTag
+import androidx.compose.ui.semantics.contentDescription
+import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import coil3.compose.AsyncImage
+import org.example.daybook.DaybookEditorSemantics
 import org.example.daybook.LocalContainer
 import org.example.daybook.ui.editor.EditorSessionController
 import org.example.daybook.ui.editor.FacetEditorKind
@@ -112,7 +116,7 @@ fun DocEditor(
         uiMessage = null
     }
 
-    Box(modifier = modifier.fillMaxSize()) {
+    Box(modifier = modifier.fillMaxSize().testTag(DaybookEditorSemantics.Editor)) {
         BoxWithConstraints(modifier = Modifier.fillMaxSize()) {
             val facetViewportHeight = maxHeight
             Column(
@@ -121,7 +125,13 @@ fun DocEditor(
                 TextField(
                     value = state.titleDraft,
                     onValueChange = { value -> controller.setTitleDraft(value) },
-                    modifier = Modifier.fillMaxWidth(),
+                    modifier =
+                    Modifier
+                        .fillMaxWidth()
+                        .testTag(DaybookEditorSemantics.TitleField)
+                        .semantics {
+                            contentDescription = "Document title"
+                        },
                     enabled = state.titleEditable,
                     placeholder = { Text("Title") },
                     textStyle = MaterialTheme.typography.titleLarge.copy(fontWeight = FontWeight.Bold),
@@ -180,17 +190,24 @@ fun DocEditor(
                 }
 
                 if (showInlineFacetRack) {
-                    HorizontalDivider(modifier = Modifier.padding(vertical = 8.dp))
-                    Text(
-                        text = "Details",
-                        style = MaterialTheme.typography.titleSmall,
-                        modifier = Modifier.padding(bottom = 8.dp),
-                    )
-                    DocDetailsSidebar(
-                        doc = state.doc,
-                        warnings = state.docWarnings,
-                        modifier = Modifier.fillMaxWidth(),
-                    )
+                    Column(
+                        modifier =
+                        Modifier
+                            .fillMaxWidth()
+                            .testTag(DaybookEditorSemantics.Details),
+                    ) {
+                        HorizontalDivider(modifier = Modifier.padding(vertical = 8.dp))
+                        Text(
+                            text = "Details",
+                            style = MaterialTheme.typography.titleSmall,
+                            modifier = Modifier.padding(bottom = 8.dp),
+                        )
+                        DocDetailsSidebar(
+                            doc = state.doc,
+                            warnings = state.docWarnings,
+                            modifier = Modifier.fillMaxWidth(),
+                        )
+                    }
                 }
             }
         }
@@ -217,7 +234,12 @@ private fun FacetListItem(
     noteMinHeight: androidx.compose.ui.unit.Dp,
     onUiError: (String) -> Unit,
 ) {
-    Column(modifier = modifier.fillMaxWidth()) {
+    Column(
+        modifier =
+        modifier
+            .fillMaxWidth()
+            .testTag(DaybookEditorSemantics.facetRow(facetKeyString(descriptor.facetKey))),
+    ) {
         FacetHeader(
             descriptor = descriptor,
             canShowMenu = canShowMenu,
@@ -239,7 +261,14 @@ private fun FacetListItem(
                     onValueChange = { nextValue ->
                         controller.setNoteDraft(descriptor.facetKey, nextValue)
                     },
-                    modifier = Modifier.fillMaxWidth().heightIn(min = noteMinHeight),
+                    modifier =
+                    Modifier
+                        .fillMaxWidth()
+                        .heightIn(min = noteMinHeight)
+                        .testTag(DaybookEditorSemantics.noteField(facetKeyString(descriptor.facetKey)))
+                        .semantics {
+                            contentDescription = "Note facet ${facetKeyString(descriptor.facetKey)}"
+                        },
                     enabled = noteEditable,
                     minLines = noteMinLines,
                     maxLines = noteMaxLines,
@@ -553,7 +582,13 @@ private fun ImageFacetError(message: String) {
 @Composable
 fun DocFacetSidebar(controller: EditorSessionController, modifier: Modifier = Modifier) {
     val state by controller.state.collectAsState()
-    Column(modifier = modifier.fillMaxSize().padding(8.dp)) {
+    Column(
+        modifier =
+        modifier
+            .fillMaxSize()
+            .padding(8.dp)
+            .testTag(DaybookEditorSemantics.Details),
+    ) {
         Text(
             text = "Details",
             style = MaterialTheme.typography.titleSmall,

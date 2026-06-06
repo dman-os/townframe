@@ -1460,7 +1460,7 @@ mod tests {
                 outcome: Some(SwitchSinkOutcome {
                     drawer_predicate_update: Some(
                         daybook_types::manifest::DocPredicateClause::HasTag(
-                            daybook_types::manifest::FacetTag("example.tag".into()),
+                            daybook_types::manifest::ManifestFacetTag("example.tag".into()),
                         ),
                     ),
                 }),

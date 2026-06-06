@@ -99,6 +99,8 @@ import org.example.daybook.uniffi.types.FfiConverterTypeAddDocArgs
 import org.example.daybook.uniffi.types.FfiConverterTypeDoc
 import org.example.daybook.uniffi.types.FfiConverterTypeDocPatch
 import org.example.daybook.uniffi.types.FfiConverterTypeFacetDisplayHint
+import org.example.daybook.uniffi.types.FfiConverterTypeViewRef
+import org.example.daybook.uniffi.types.ViewRef
 import org.example.daybook.uniffi.core.RustBuffer as RustBufferConfigEvent
 import org.example.daybook.uniffi.core.RustBuffer as RustBufferCreateProgressTaskArgs
 import org.example.daybook.uniffi.core.RustBuffer as RustBufferDispatchEvent
@@ -128,6 +130,7 @@ import org.example.daybook.uniffi.types.RustBuffer as RustBufferAddDocArgs
 import org.example.daybook.uniffi.types.RustBuffer as RustBufferDoc
 import org.example.daybook.uniffi.types.RustBuffer as RustBufferDocPatch
 import org.example.daybook.uniffi.types.RustBuffer as RustBufferFacetDisplayHint
+import org.example.daybook.uniffi.types.RustBuffer as RustBufferViewRef
 
 // This is a helper for safely working with byte buffers returned from the Rust code.
 // A rust-owned buffer is represented by its capacity, its current length, and a
@@ -1167,6 +1170,8 @@ external fun uniffi_daybook_ffi_checksum_method_tablesrepoffi_update_batch(
 ): Short
 external fun uniffi_daybook_ffi_checksum_method_rtffi_dispatch_doc_facet(
 ): Short
+external fun uniffi_daybook_ffi_checksum_method_rtffi_render_facet_view(
+): Short
 external fun uniffi_daybook_ffi_checksum_method_rtffi_stop(
 ): Short
 external fun uniffi_daybook_ffi_checksum_constructor_camerapreviewffi_load(
@@ -1584,6 +1589,8 @@ external fun uniffi_daybook_ffi_fn_free_rtffi(`handle`: Long,uniffi_out_err: Uni
 external fun uniffi_daybook_ffi_fn_constructor_rtffi_load(`fcx`: Long,`drawerRepo`: Long,`plugsRepo`: Long,`dispatchRepo`: Long,`progressRepo`: Long,`blobsRepo`: Long,`configRepo`: Long,`initRepo`: Long,`sqliteLsRepo`: Long,`deviceId`: RustBuffer.ByValue,`startupProgressTaskId`: RustBuffer.ByValue,
 ): Long
 external fun uniffi_daybook_ffi_fn_method_rtffi_dispatch_doc_facet(`ptr`: Long,`plugId`: RustBuffer.ByValue,`routineName`: RustBuffer.ByValue,`docId`: RustBuffer.ByValue,`branchPath`: RustBuffer.ByValue,
+): Long
+external fun uniffi_daybook_ffi_fn_method_rtffi_render_facet_view(`ptr`: Long,`docId`: RustBuffer.ByValue,`branchPath`: RustBuffer.ByValue,`facetKey`: RustBuffer.ByValue,`requestedView`: RustBuffer.ByValue,`uiStateJson`: RustBuffer.ByValue,
 ): Long
 external fun uniffi_daybook_ffi_fn_method_rtffi_stop(`ptr`: Long,
 ): Long
@@ -2007,6 +2014,9 @@ private fun uniffiCheckApiChecksums(lib: IntegrityCheckingUniffiLib) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
     if (lib.uniffi_daybook_ffi_checksum_method_rtffi_dispatch_doc_facet() != 39849.toShort()) {
+        throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
+    }
+    if (lib.uniffi_daybook_ffi_checksum_method_rtffi_render_facet_view() != 26030.toShort()) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
     if (lib.uniffi_daybook_ffi_checksum_method_rtffi_stop() != 24290.toShort()) {
@@ -9607,6 +9617,8 @@ public interface RtFfiInterface {
     
     suspend fun `dispatchDocFacet`(`plugId`: kotlin.String, `routineName`: kotlin.String, `docId`: kotlin.String, `branchPath`: kotlin.String): kotlin.String
     
+    suspend fun `renderFacetView`(`docId`: kotlin.String, `branchPath`: kotlin.String, `facetKey`: kotlin.String, `requestedView`: ViewRef?, `uiStateJson`: kotlin.String?): RenderedFacetViewRecord
+    
     suspend fun `stop`()
     
     companion object
@@ -9724,6 +9736,27 @@ open class RtFfi: Disposable, AutoCloseable, RtFfiInterface
         { future -> UniffiLib.ffi_daybook_ffi_rust_future_free_rust_buffer(future) },
         // lift function
         { FfiConverterString.lift(it) },
+        // Error FFI converter
+        FfiException.ErrorHandler,
+    )
+    }
+
+    
+    @Throws(FfiException::class)
+    @Suppress("ASSIGNED_BUT_NEVER_ACCESSED_VARIABLE")
+    override suspend fun `renderFacetView`(`docId`: kotlin.String, `branchPath`: kotlin.String, `facetKey`: kotlin.String, `requestedView`: ViewRef?, `uiStateJson`: kotlin.String?) : RenderedFacetViewRecord {
+        return uniffiRustCallAsync(
+        callWithHandle { uniffiHandle ->
+            UniffiLib.uniffi_daybook_ffi_fn_method_rtffi_render_facet_view(
+                uniffiHandle,
+                FfiConverterString.lower(`docId`),FfiConverterString.lower(`branchPath`),FfiConverterString.lower(`facetKey`),FfiConverterOptionalTypeViewRef.lower(`requestedView`),FfiConverterOptionalString.lower(`uiStateJson`),
+            )
+        },
+        { future, callback, continuation -> UniffiLib.ffi_daybook_ffi_rust_future_poll_rust_buffer(future, callback, continuation) },
+        { future, continuation -> UniffiLib.ffi_daybook_ffi_rust_future_complete_rust_buffer(future, continuation) },
+        { future -> UniffiLib.ffi_daybook_ffi_rust_future_free_rust_buffer(future) },
+        // lift function
+        { FfiConverterTypeRenderedFacetViewRecord.lift(it) },
         // Error FFI converter
         FfiException.ErrorHandler,
     )
@@ -11854,6 +11887,54 @@ public object FfiConverterTypeFacetKeyDisplayHintEntry: FfiConverterRustBuffer<F
 
 
 
+data class RenderedFacetViewRecord (
+    var `plugId`: kotlin.String
+    , 
+    var `viewKey`: kotlin.String
+    , 
+    var `viewJson`: kotlin.String
+    , 
+    var `pluginStateJson`: kotlin.String?
+    
+){
+    
+
+    
+
+    
+    companion object
+}
+
+/**
+ * @suppress
+ */
+public object FfiConverterTypeRenderedFacetViewRecord: FfiConverterRustBuffer<RenderedFacetViewRecord> {
+    override fun read(buf: ByteBuffer): RenderedFacetViewRecord {
+        return RenderedFacetViewRecord(
+            FfiConverterString.read(buf),
+            FfiConverterString.read(buf),
+            FfiConverterString.read(buf),
+            FfiConverterOptionalString.read(buf),
+        )
+    }
+
+    override fun allocationSize(value: RenderedFacetViewRecord) = (
+            FfiConverterString.allocationSize(value.`plugId`) +
+            FfiConverterString.allocationSize(value.`viewKey`) +
+            FfiConverterString.allocationSize(value.`viewJson`) +
+            FfiConverterOptionalString.allocationSize(value.`pluginStateJson`)
+    )
+
+    override fun write(value: RenderedFacetViewRecord, buf: ByteBuffer) {
+            FfiConverterString.write(value.`plugId`, buf)
+            FfiConverterString.write(value.`viewKey`, buf)
+            FfiConverterString.write(value.`viewJson`, buf)
+            FfiConverterOptionalString.write(value.`pluginStateJson`, buf)
+    }
+}
+
+
+
 sealed class CameraOverlay {
     
     object Grid : CameraOverlay()
@@ -12315,6 +12396,38 @@ public object FfiConverterOptionalTypeFacetDisplayHint: FfiConverterRustBuffer<F
         } else {
             buf.put(1)
             FfiConverterTypeFacetDisplayHint.write(value, buf)
+        }
+    }
+}
+
+
+
+
+/**
+ * @suppress
+ */
+public object FfiConverterOptionalTypeViewRef: FfiConverterRustBuffer<ViewRef?> {
+    override fun read(buf: ByteBuffer): ViewRef? {
+        if (buf.get().toInt() == 0) {
+            return null
+        }
+        return FfiConverterTypeViewRef.read(buf)
+    }
+
+    override fun allocationSize(value: ViewRef?): ULong {
+        if (value == null) {
+            return 1UL
+        } else {
+            return 1UL + FfiConverterTypeViewRef.allocationSize(value)
+        }
+    }
+
+    override fun write(value: ViewRef?, buf: ByteBuffer) {
+        if (value == null) {
+            buf.put(0)
+        } else {
+            buf.put(1)
+            FfiConverterTypeViewRef.write(value, buf)
         }
     }
 }
@@ -12881,3 +12994,72 @@ public object FfiConverterTypeUuid: FfiConverter<Uuid, RustBuffer.ByValue> {
         FfiConverterByteArray.write(builtinValue, buf)
     }
 }
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
