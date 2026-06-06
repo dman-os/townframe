@@ -5,7 +5,7 @@ use daybook_types::doc::ChangeHashSet;
 use daybook_types::doc::DocId;
 use wash_runtime::engine::ctx::SharedCtx as SharedWashCtx;
 
-use super::{DaybookPlugin, capabilities, root_doc, wit_doc};
+use super::{capabilities, root_doc, wit_doc, DaybookPlugin};
 
 fn wasmtime_err(msg: impl std::fmt::Display) -> wasmtime::Error {
     wasmtime::Error::msg(msg.to_string())

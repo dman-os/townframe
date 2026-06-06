@@ -3,8 +3,8 @@ use crate::interlude::*;
 use crate::drawer::DrawerEvent;
 use crate::rt::dispatch::{DispatchEvent, DispatchOnSuccessHook, DispatchStatus};
 use crate::rt::switch::{
-    SwitchEvent, SwitchSink, SwitchSinkCtx, SwitchSinkOutcome, SwtchSinkInterest,
-    facet_keys_set_to_meta_doc,
+    facet_keys_set_to_meta_doc, SwitchEvent, SwitchSink, SwitchSinkCtx, SwitchSinkOutcome,
+    SwtchSinkInterest,
 };
 use crate::rt::{DispatchArgs, Rt};
 use daybook_types::doc::BranchPathBuf;

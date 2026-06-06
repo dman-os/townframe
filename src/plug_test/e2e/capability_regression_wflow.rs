@@ -193,14 +193,18 @@ async fn test_full_command_capability_report() -> Res<()> {
     assert_eq!(report["invocation"]["kind"], "Command");
 
     let facet_keys: Vec<String> = serde_json::from_value(report["primary_facet_keys"].clone())?;
-    assert!(facet_keys
-        .iter()
-        .any(|k| k.starts_with("org.example.daybook.labelgeneric")));
+    assert!(
+        facet_keys
+            .iter()
+            .any(|k| k.starts_with("org.example.daybook.labelgeneric"))
+    );
 
     let tag_keys: Vec<String> = serde_json::from_value(report["primary_tag_keys"].clone())?;
-    assert!(tag_keys
-        .iter()
-        .any(|k| k == "org.example.daybook.labelgeneric" || k == "org.example.daybook.note"));
+    assert!(
+        tag_keys
+            .iter()
+            .any(|k| k == "org.example.daybook.labelgeneric" || k == "org.example.daybook.note")
+    );
 
     let facet_rights: std::collections::BTreeMap<String, String> =
         serde_json::from_value(report["primary_facet_rights"].clone())?;
@@ -287,9 +291,11 @@ async fn test_full_processor_capability_report() -> Res<()> {
     assert!(changed.contains(&changed_key));
 
     let facet_keys: Vec<String> = serde_json::from_value(report["primary_facet_keys"].clone())?;
-    assert!(facet_keys
-        .iter()
-        .any(|k| k.starts_with("org.example.daybook.labelgeneric")));
+    assert!(
+        facet_keys
+            .iter()
+            .any(|k| k.starts_with("org.example.daybook.labelgeneric"))
+    );
 
     let facet_rights: std::collections::BTreeMap<String, String> =
         serde_json::from_value(report["primary_facet_rights"].clone())?;
@@ -313,9 +319,11 @@ async fn test_full_processor_capability_report() -> Res<()> {
     );
 
     let tag_keys: Vec<String> = serde_json::from_value(report["primary_tag_keys"].clone())?;
-    assert!(tag_keys
-        .iter()
-        .any(|k| k == "org.example.daybook.labelgeneric" || k == "org.example.daybook.note"));
+    assert!(
+        tag_keys
+            .iter()
+            .any(|k| k == "org.example.daybook.labelgeneric" || k == "org.example.daybook.note")
+    );
 
     let config_facet_keys: Vec<Vec<String>> =
         serde_json::from_value(report["config_doc_facet_keys"].clone())?;
@@ -384,9 +392,11 @@ async fn test_minimal_command_capability_report() -> Res<()> {
     assert_eq!(report["invocation"]["kind"], "Command");
 
     let facet_keys: Vec<String> = serde_json::from_value(report["primary_facet_keys"].clone())?;
-    assert!(facet_keys
-        .iter()
-        .any(|k| k.starts_with("org.example.daybook.labelgeneric")));
+    assert!(
+        facet_keys
+            .iter()
+            .any(|k| k.starts_with("org.example.daybook.labelgeneric"))
+    );
 
     let facet_rights: std::collections::BTreeMap<String, String> =
         serde_json::from_value(report["primary_facet_rights"].clone())?;
@@ -448,9 +458,11 @@ async fn test_minimal_processor_capability_report() -> Res<()> {
     assert!(changed.contains(&changed_key));
 
     let facet_keys: Vec<String> = serde_json::from_value(report["primary_facet_keys"].clone())?;
-    assert!(facet_keys
-        .iter()
-        .any(|k| k.starts_with("org.example.daybook.labelgeneric")));
+    assert!(
+        facet_keys
+            .iter()
+            .any(|k| k.starts_with("org.example.daybook.labelgeneric"))
+    );
 
     let facet_rights: std::collections::BTreeMap<String, String> =
         serde_json::from_value(report["primary_facet_rights"].clone())?;

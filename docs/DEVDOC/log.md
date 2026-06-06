@@ -1,5 +1,25 @@
 # duck-log
 
+## 2026-06-06 | keys
+
+So we have a lot of cyrptography in the system
+- Kehive keys
+- Iroh pubkeys
+- Keys to encrypt blobs?
+- Keys to sign facets
+  - Probably multiple keys per actor
+- We'll probably want to add some kind of signing to big sync.
+
+And we'll have need of more keys in the future.
+
+We cant use the same key for everything.
+We'll want to rotate them.
+Probably want to use session keys for iroh.
+
+---
+
+Discussion with GPT 5.5: https://chatgpt.com/share/6a237a9d-1d48-83ea-a8ec-962b56e212e1
+
 ## 2026-06-05 | forgery protection
 
 If I were to use the automerge document itself as a public collaboration surface, how could I mark every change with signatures that prove authorship?
@@ -1649,7 +1669,7 @@ Concerns:
     - Crux provide a nice abstraction here but maybe too much abstraction?
       - I think I'll wait on them to make some progress and see how that shakes out
 
-### 2025-09-18 | Wasmcloud
+## 2025-09-18 | Wasmcloud
 
 After long delays due to some tooling bugs, I was able to complete the wasmcloud based API system.
 Overengineering crap but I do like the result.
@@ -1661,7 +1681,7 @@ Spent the day trying to get it to start on desktop.
 That's like 3 hours of trying to debug the JDK issues and 3 hours of writing a ghjk port for it.
 What a waste but at least I did get it started on desktop.
 
-### 2025-07-20 | daybook
+## 2025-07-20 | daybook
 
 Spent the weekend vibe coding the magic puck stuff. 
 I feel productive somewhat productive.
@@ -1671,7 +1691,7 @@ I have to downscope fast.
 
 I need to make this happen ASAP. Everything depends on it.
 
-### 2025-03-05 | Proc macros
+## 2025-03-05 | Proc macros
 
 Spent today porting glue code from the aggy codebase.
 Cleaned up some of the boilerplates due to new proc macros.
@@ -1680,7 +1700,7 @@ Well, it certainly helped anyways.
 Next time, I'll have to setup the db stuff.
 Can't wait to start on actual feature work lol.
 
-### 2025-03-04 | Ramping up
+## 2025-03-04 | Ramping up
 
 Trying to get the show on the road.
 This is a full stack project in the traditional sense.

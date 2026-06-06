@@ -1,8 +1,8 @@
 use wash_runtime::engine::ctx::SharedCtx as SharedWashCtx;
 
 use super::{
-    DaybookPlugin, binds_guest, capabilities, mltools_embed, mltools_image_tools, mltools_llm_chat,
-    mltools_ocr,
+    binds_guest, capabilities, mltools_embed, mltools_image_tools, mltools_llm_chat, mltools_ocr,
+    DaybookPlugin,
 };
 
 async fn mltools_ctx_from_config_repo(plugin: &DaybookPlugin) -> mltools::Ctx {

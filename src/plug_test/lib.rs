@@ -747,11 +747,9 @@ pub fn plug_manifest() -> PlugManifest {
                     query_acls: vec![],
                     config_facet_acl: vec![],
                     local_state_acl: vec![],
-                    command_invoke_acl: vec![daybook_pdk::build_command_url(
-                        "@daybook/test",
-                        "child-success",
-                    )
-                    .unwrap()],
+                    command_invoke_acl: vec![
+                        daybook_pdk::build_command_url("@daybook/test", "child-success").unwrap(),
+                    ],
                 }),
             ),
             (
@@ -778,11 +776,9 @@ pub fn plug_manifest() -> PlugManifest {
                     query_acls: vec![],
                     config_facet_acl: vec![],
                     local_state_acl: vec![],
-                    command_invoke_acl: vec![daybook_pdk::build_command_url(
-                        "@daybook/test",
-                        "child-failure",
-                    )
-                    .unwrap()],
+                    command_invoke_acl: vec![
+                        daybook_pdk::build_command_url("@daybook/test", "child-failure").unwrap(),
+                    ],
                 }),
             ),
             (
@@ -896,11 +892,9 @@ pub fn plug_manifest() -> PlugManifest {
                         plug_id: "@daybook/test".into(),
                         local_state_key: "capability-report".into(),
                     }],
-                    command_invoke_acl: vec![daybook_pdk::build_command_url(
-                        "@daybook/test",
-                        "child-success",
-                    )
-                    .unwrap()],
+                    command_invoke_acl: vec![
+                        daybook_pdk::build_command_url("@daybook/test", "child-success").unwrap(),
+                    ],
                 }),
             ),
             (
@@ -1442,13 +1436,13 @@ mod tests {
                     "root": {
                         "id": "root",
                         "kind": {
-                            "Card": {
+                            "card": {
                                 "title": "Sample summary",
                                 "children": [
                                     {
                                         "id": "summary",
                                         "kind": {
-                                            "Markdown": {
+                                            "markdown": {
                                                 "markdown": "A tiny sample stateless view from `plug_test`."
                                             }
                                         },
@@ -1457,7 +1451,7 @@ mod tests {
                                     {
                                         "id": "action",
                                         "kind": {
-                                            "Button": {
+                                            "button": {
                                                 "label": "Emit event"
                                             }
                                         },
@@ -1465,7 +1459,7 @@ mod tests {
                                             {
                                                 "event": "click",
                                                 "action": {
-                                                    "Emit": {
+                                                    "emit": {
                                                         "name": "plug-test.sample-button-clicked",
                                                         "payload": {
                                                             "source": "plug_test"

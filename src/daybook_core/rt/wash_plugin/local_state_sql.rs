@@ -4,7 +4,7 @@ use sqlx::{Column, Row, TypeInfo, ValueRef};
 use sqlx_utils_rs::SqlCtx;
 use wash_runtime::engine::ctx::SharedCtx as SharedWashCtx;
 
-use super::{DaybookPlugin, binds_guest, sqlite_connection};
+use super::{binds_guest, sqlite_connection, DaybookPlugin};
 
 pub struct SqliteConnectionToken {
     pub local_state_id: String,

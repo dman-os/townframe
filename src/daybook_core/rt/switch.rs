@@ -5,8 +5,8 @@ use std::collections::BTreeMap;
 
 use crate::drawer::DrawerEvent;
 use crate::plugs::PlugsEvent;
-use crate::rt::Rt;
 use crate::rt::dispatch::DispatchEvent;
+use crate::rt::Rt;
 use big_sync_core::rpc::{PartStreamCursorRequest, SubEvent, SubPartsRequest};
 use daybook_types::doc::BranchPathBuf;
 use daybook_types::doc::{Doc, DocId, FacetKey, WellKnownFacet, WellKnownFacetTag};

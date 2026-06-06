@@ -19,12 +19,12 @@ use wash_runtime::{
 };
 use wflow::{
     wflow_core::partition::{
-        RetryPolicy,
         job_events::{JobError, JobRunResult},
         log::PartitionLogEntry,
+        RetryPolicy,
     },
     wflow_tokio::partition::{
-        PartitionLogRef, TokioPartitionWorkerHandle, state::PartitionWorkingState,
+        state::PartitionWorkingState, PartitionLogRef, TokioPartitionWorkerHandle,
     },
 };
 
@@ -35,8 +35,8 @@ pub mod triage;
 pub mod wash_plugin;
 
 use dispatch::{
-    ActiveDispatch, ActiveDispatchArgs, ActiveDispatchDeets, DispatchOnSuccessHook, DispatchRepo,
-    FacetRoutineArgs, facet_routine_args_fingerprint,
+    facet_routine_args_fingerprint, ActiveDispatch, ActiveDispatchArgs, ActiveDispatchDeets,
+    DispatchOnSuccessHook, DispatchRepo, FacetRoutineArgs,
 };
 use init::InitRepo;
 use wash_plugin::stateless_view;
@@ -769,8 +769,12 @@ impl Rt {
                     eyre::eyre!("stateless view error: {msg}")
                 }
             })?;
-            serde_json::from_str::<daybook_types::view::ViewSpec>(&response.view_json)
-                .wrap_err("stateless view returned invalid ViewSpec JSON")?;
+            let view_spec =
+                serde_json::from_str::<daybook_types::view::ViewSpec>(&response.view_json)
+                    .wrap_err("stateless view returned invalid ViewSpec JSON")?;
+            view_spec
+                .validate()
+                .wrap_err("stateless view returned invalid ViewSpec shape")?;
 
             Ok(RenderedFacetView {
                 plug_id: view.plug_id,
@@ -2806,8 +2810,8 @@ mod tests {
     use super::*;
     use big_sync::HostPartStore;
 
-    async fn make_partition_store()
-    -> Res<(std::sync::Arc<dyn HostPartStore>, big_sync_core::PartId)> {
+    async fn make_partition_store(
+    ) -> Res<(std::sync::Arc<dyn HostPartStore>, big_sync_core::PartId)> {
         let sql = crate::app::open_sql_ctx(crate::app::SqlConfig::memory()).await?;
         let part_id = crate::part_id_from_label(PROCESSOR_RUNLOG_PARTITION_ID);
         let store =
