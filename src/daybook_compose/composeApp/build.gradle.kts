@@ -130,6 +130,7 @@ kotlin {
             implementation(libs.coil.compose)
             implementation(libs.coil.network.ktor)
             implementation(libs.filekit.dialogs.compose)
+            implementation(libs.multiplatform.markdown.renderer.m3)
         }
         commonTest.dependencies {
             implementation(libs.kotlin.test)

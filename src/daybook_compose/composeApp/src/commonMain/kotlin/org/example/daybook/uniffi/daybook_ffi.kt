@@ -100,7 +100,9 @@ import org.example.daybook.uniffi.types.FfiConverterTypeDoc
 import org.example.daybook.uniffi.types.FfiConverterTypeDocPatch
 import org.example.daybook.uniffi.types.FfiConverterTypeFacetDisplayHint
 import org.example.daybook.uniffi.types.FfiConverterTypeViewRef
+import org.example.daybook.uniffi.types.FfiConverterTypeViewSpec
 import org.example.daybook.uniffi.types.ViewRef
+import org.example.daybook.uniffi.types.ViewSpec
 import org.example.daybook.uniffi.core.RustBuffer as RustBufferConfigEvent
 import org.example.daybook.uniffi.core.RustBuffer as RustBufferCreateProgressTaskArgs
 import org.example.daybook.uniffi.core.RustBuffer as RustBufferDispatchEvent
@@ -131,6 +133,7 @@ import org.example.daybook.uniffi.types.RustBuffer as RustBufferDoc
 import org.example.daybook.uniffi.types.RustBuffer as RustBufferDocPatch
 import org.example.daybook.uniffi.types.RustBuffer as RustBufferFacetDisplayHint
 import org.example.daybook.uniffi.types.RustBuffer as RustBufferViewRef
+import org.example.daybook.uniffi.types.RustBuffer as RustBufferViewSpec
 
 // This is a helper for safely working with byte buffers returned from the Rust code.
 // A rust-owned buffer is represented by its capacity, its current length, and a
@@ -1082,6 +1085,8 @@ external fun uniffi_daybook_ffi_checksum_method_plugseventlistener_on_plugs_even
 ): Short
 external fun uniffi_daybook_ffi_checksum_method_plugsrepoffi_ffi_register_listener(
 ): Short
+external fun uniffi_daybook_ffi_checksum_method_plugsrepoffi_import_from_oci_layout(
+): Short
 external fun uniffi_daybook_ffi_checksum_method_plugsrepoffi_stop(
 ): Short
 external fun uniffi_daybook_ffi_checksum_method_progresseventlistener_on_progress_event(
@@ -1453,6 +1458,8 @@ external fun uniffi_daybook_ffi_fn_free_plugsrepoffi(`handle`: Long,uniffi_out_e
 external fun uniffi_daybook_ffi_fn_constructor_plugsrepoffi_load(`fcx`: Long,`blobsRepo`: Long,
 ): Long
 external fun uniffi_daybook_ffi_fn_method_plugsrepoffi_ffi_register_listener(`ptr`: Long,`listener`: Long,uniffi_out_err: UniffiRustCallStatus, 
+): Long
+external fun uniffi_daybook_ffi_fn_method_plugsrepoffi_import_from_oci_layout(`ptr`: Long,`path`: RustBuffer.ByValue,
 ): Long
 external fun uniffi_daybook_ffi_fn_method_plugsrepoffi_stop(`ptr`: Long,
 ): Long
@@ -1882,6 +1889,9 @@ private fun uniffiCheckApiChecksums(lib: IntegrityCheckingUniffiLib) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
     if (lib.uniffi_daybook_ffi_checksum_method_plugsrepoffi_ffi_register_listener() != 42144.toShort()) {
+        throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
+    }
+    if (lib.uniffi_daybook_ffi_checksum_method_plugsrepoffi_import_from_oci_layout() != 34199.toShort()) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
     if (lib.uniffi_daybook_ffi_checksum_method_plugsrepoffi_stop() != 16868.toShort()) {
@@ -8501,6 +8511,8 @@ public interface PlugsRepoFfiInterface {
     
     fun `ffiRegisterListener`(`listener`: PlugsEventListener): ListenerRegistration
     
+    suspend fun `importFromOciLayout`(`path`: kotlin.String)
+    
     suspend fun `stop`()
     
     companion object
@@ -8614,6 +8626,28 @@ open class PlugsRepoFfi: Disposable, AutoCloseable, PlugsRepoFfiInterface
     )
     }
     
+
+    
+    @Throws(FfiException::class)
+    @Suppress("ASSIGNED_BUT_NEVER_ACCESSED_VARIABLE")
+    override suspend fun `importFromOciLayout`(`path`: kotlin.String) {
+        return uniffiRustCallAsync(
+        callWithHandle { uniffiHandle ->
+            UniffiLib.uniffi_daybook_ffi_fn_method_plugsrepoffi_import_from_oci_layout(
+                uniffiHandle,
+                FfiConverterString.lower(`path`),
+            )
+        },
+        { future, callback, continuation -> UniffiLib.ffi_daybook_ffi_rust_future_poll_void(future, callback, continuation) },
+        { future, continuation -> UniffiLib.ffi_daybook_ffi_rust_future_complete_void(future, continuation) },
+        { future -> UniffiLib.ffi_daybook_ffi_rust_future_free_void(future) },
+        // lift function
+        { Unit },
+        
+        // Error FFI converter
+        FfiException.ErrorHandler,
+    )
+    }
 
     
     @Throws(FfiException::class)
@@ -11892,7 +11926,7 @@ data class RenderedFacetViewRecord (
     , 
     var `viewKey`: kotlin.String
     , 
-    var `viewJson`: kotlin.String
+    var `view`: ViewSpec
     , 
     var `pluginStateJson`: kotlin.String?
     
@@ -11913,7 +11947,7 @@ public object FfiConverterTypeRenderedFacetViewRecord: FfiConverterRustBuffer<Re
         return RenderedFacetViewRecord(
             FfiConverterString.read(buf),
             FfiConverterString.read(buf),
-            FfiConverterString.read(buf),
+            FfiConverterTypeViewSpec.read(buf),
             FfiConverterOptionalString.read(buf),
         )
     }
@@ -11921,14 +11955,14 @@ public object FfiConverterTypeRenderedFacetViewRecord: FfiConverterRustBuffer<Re
     override fun allocationSize(value: RenderedFacetViewRecord) = (
             FfiConverterString.allocationSize(value.`plugId`) +
             FfiConverterString.allocationSize(value.`viewKey`) +
-            FfiConverterString.allocationSize(value.`viewJson`) +
+            FfiConverterTypeViewSpec.allocationSize(value.`view`) +
             FfiConverterOptionalString.allocationSize(value.`pluginStateJson`)
     )
 
     override fun write(value: RenderedFacetViewRecord, buf: ByteBuffer) {
             FfiConverterString.write(value.`plugId`, buf)
             FfiConverterString.write(value.`viewKey`, buf)
-            FfiConverterString.write(value.`viewJson`, buf)
+            FfiConverterTypeViewSpec.write(value.`view`, buf)
             FfiConverterOptionalString.write(value.`pluginStateJson`, buf)
     }
 }
@@ -12994,72 +13028,3 @@ public object FfiConverterTypeUuid: FfiConverter<Uuid, RustBuffer.ByValue> {
         FfiConverterByteArray.write(builtinValue, buf)
     }
 }
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-

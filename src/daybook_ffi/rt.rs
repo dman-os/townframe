@@ -5,7 +5,7 @@ use crate::interlude::*;
 pub struct RenderedFacetViewRecord {
     pub plug_id: String,
     pub view_key: String,
-    pub view_json: String,
+    pub view: daybook_types::view::ViewSpec,
     pub plugin_state_json: Option<String>,
 }
 
@@ -142,10 +142,13 @@ impl RtFfi {
             })
             .await?;
 
+        let view_spec = serde_json::from_str::<daybook_types::view::ViewSpec>(&view.view_json)
+            .wrap_err("runtime returned invalid ViewSpec JSON")?;
+
         Ok(RenderedFacetViewRecord {
             plug_id: view.plug_id,
             view_key: view.view_key,
-            view_json: view.view_json,
+            view: view_spec,
             plugin_state_json: view.plugin_state_json,
         })
     }

@@ -10,5 +10,9 @@ object DaybookEditorSemantics {
 
     fun facetRow(facetKey: String): String = "doc-editor-facet-row:$facetKey"
 
+    fun pluginFacet(facetKey: String): String = "doc-editor-plugin-facet:$facetKey"
+
+    fun pluginFacetState(facetKey: String): String = "doc-editor-plugin-facet-state:$facetKey"
+
     fun noteField(facetKey: String): String = "doc-editor-note-field:$facetKey"
 }

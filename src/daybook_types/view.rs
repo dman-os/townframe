@@ -16,6 +16,7 @@ pub const MAX_VIEW_EVENT_NAME_LEN: usize = 128;
 /// smaller than the host renderer's internal model and must not contain authoring conveniences such
 /// as bindings, templates, or layout primitives.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[cfg_attr(feature = "uniffi", derive(uniffi::Enum))]
 #[serde(tag = "schemaVersion", content = "spec", rename_all = "camelCase")]
 #[cfg_attr(feature = "schemars", derive(schemars::JsonSchema))]
 pub enum ViewSpec {
@@ -37,6 +38,7 @@ structstruck::strike! {
     #[structstruck::each[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]]
     #[structstruck::each[cfg_attr(feature = "schemars", derive(schemars::JsonSchema))]]
     #[serde(rename_all = "camelCase")]
+    #[cfg_attr(feature = "uniffi", derive(uniffi::Record))]
     pub struct ViewSpecV1 {
         pub root: ViewNodeV1,
     }
@@ -183,11 +185,16 @@ structstruck::strike! {
     #[structstruck::each[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]]
     #[structstruck::each[cfg_attr(feature = "schemars", derive(schemars::JsonSchema))]]
     #[serde(rename_all = "camelCase")]
+    #[cfg_attr(feature = "uniffi", derive(uniffi::Record))]
     pub struct ViewNodeV1 {
         pub id: ViewNodeId,
         pub kind: pub enum ViewNodeKindV1 {
+            #![cfg_attr(feature = "uniffi", derive(uniffi::Enum))]
+
             #[serde(rename = "card")]
             Card(pub struct CardNodeV1 {
+                #![cfg_attr(feature = "uniffi", derive(uniffi::Record))]
+
                 #[serde(default)]
                 pub title: Option<String>,
                 #[serde(default)]
@@ -195,6 +202,8 @@ structstruck::strike! {
             }),
             #[serde(rename = "section")]
             Section(pub struct SectionNodeV1 {
+                #![cfg_attr(feature = "uniffi", derive(uniffi::Record))]
+
                 #[serde(default)]
                 pub title: Option<String>,
                 #[serde(default)]
@@ -202,34 +211,48 @@ structstruck::strike! {
             }),
             #[serde(rename = "text")]
             Text(pub struct TextNodeV1 {
+                #![cfg_attr(feature = "uniffi", derive(uniffi::Record))]
+
                 pub text: String,
             }),
             #[serde(rename = "markdown")]
             Markdown(pub struct MarkdownNodeV1 {
+                #![cfg_attr(feature = "uniffi", derive(uniffi::Record))]
+
                 pub markdown: String,
             }),
             #[serde(rename = "badge")]
             Badge(pub struct BadgeNodeV1 {
+                #![cfg_attr(feature = "uniffi", derive(uniffi::Record))]
+
                 pub label: String,
                 #[serde(default)]
                 pub tone: BadgeToneV1,
             }),
             #[serde(rename = "amount")]
             Amount(pub struct AmountNodeV1 {
+                #![cfg_attr(feature = "uniffi", derive(uniffi::Record))]
+
                 pub decimal: String,
                 pub commodity: String,
             }),
             #[serde(rename = "list")]
             List(pub struct ListNodeV1 {
+                #![cfg_attr(feature = "uniffi", derive(uniffi::Record))]
+
                 #[serde(default)]
                 pub items: Vec<ViewNodeV1>,
             }),
             #[serde(rename = "button")]
             Button(pub struct ButtonNodeV1 {
+                #![cfg_attr(feature = "uniffi", derive(uniffi::Record))]
+
                 pub label: String,
             }),
             #[serde(rename = "actionGroup")]
             ActionGroup(pub struct ActionGroupNodeV1 {
+                #![cfg_attr(feature = "uniffi", derive(uniffi::Record))]
+
                 #[serde(default)]
                 pub actions: Vec<ViewNodeV1>,
             }),
@@ -257,7 +280,14 @@ where
     }
 }
 
+#[cfg(feature = "uniffi")]
+uniffi::custom_type!(ViewNodeId, String, {
+    lower: |id| id.0,
+    try_lift: |value| Ok(ViewNodeId(value)),
+});
+
 #[derive(Debug, Clone, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[cfg_attr(feature = "uniffi", derive(uniffi::Enum))]
 #[serde(rename_all = "camelCase")]
 #[cfg_attr(feature = "schemars", derive(schemars::JsonSchema))]
 pub enum BadgeToneV1 {
@@ -273,20 +303,52 @@ structstruck::strike! {
     #[structstruck::each[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]]
     #[structstruck::each[cfg_attr(feature = "schemars", derive(schemars::JsonSchema))]]
     #[serde(rename_all = "camelCase")]
+    #[cfg_attr(feature = "uniffi", derive(uniffi::Record))]
     pub struct ViewEventBindingV1 {
         pub event: ViewEventKindV1,
         pub action: pub enum ViewActionV1 {
+            #![cfg_attr(feature = "uniffi", derive(uniffi::Enum))]
+
             #[serde(rename = "emit")]
             Emit(pub struct EmitViewActionV1 {
+                #![cfg_attr(feature = "uniffi", derive(uniffi::Record))]
+
                 pub name: String,
                 #[serde(default)]
-                pub payload: serde_json::Value,
+                pub payload: ViewEventPayloadV1,
             }),
         },
     }
 }
 
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(transparent)]
+#[cfg_attr(feature = "schemars", derive(schemars::JsonSchema))]
+#[cfg_attr(feature = "schemars", schemars(transparent))]
+pub struct ViewEventPayloadV1(pub serde_json::Value);
+
+impl Default for ViewEventPayloadV1 {
+    fn default() -> Self {
+        Self(serde_json::Value::Null)
+    }
+}
+
+impl From<serde_json::Value> for ViewEventPayloadV1 {
+    fn from(value: serde_json::Value) -> Self {
+        Self(value)
+    }
+}
+
+#[cfg(feature = "uniffi")]
+uniffi::custom_type!(ViewEventPayloadV1, String, {
+    lower: |payload| serde_json::to_string(&payload.0).expect(ERROR_JSON),
+    try_lift: |value| serde_json::from_str(&value)
+        .map(ViewEventPayloadV1)
+        .map_err(|err| uniffi::deps::anyhow::anyhow!(err)),
+});
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "uniffi", derive(uniffi::Enum))]
 #[serde(rename_all = "camelCase")]
 #[cfg_attr(feature = "schemars", derive(schemars::JsonSchema))]
 pub enum ViewEventKindV1 {
@@ -439,7 +501,7 @@ mod tests {
                         event: ViewEventKindV1::Click,
                         action: ViewActionV1::Emit(EmitViewActionV1 {
                             name: bad_name.into(),
-                            payload: serde_json::json!({ "ok": true }),
+                            payload: serde_json::json!({ "ok": true }).into(),
                         }),
                     }],
                 },

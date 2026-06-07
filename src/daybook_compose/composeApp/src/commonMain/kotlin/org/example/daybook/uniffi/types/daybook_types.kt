@@ -1080,6 +1080,39 @@ public object FfiConverterByteArray: FfiConverterRustBuffer<ByteArray> {
 
 
 
+data class ActionGroupNodeV1 (
+    var `actions`: List<ViewNodeV1>
+    
+){
+    
+
+    
+
+    
+    companion object
+}
+
+/**
+ * @suppress
+ */
+public object FfiConverterTypeActionGroupNodeV1: FfiConverterRustBuffer<ActionGroupNodeV1> {
+    override fun read(buf: ByteBuffer): ActionGroupNodeV1 {
+        return ActionGroupNodeV1(
+            FfiConverterSequenceTypeViewNodeV1.read(buf),
+        )
+    }
+
+    override fun allocationSize(value: ActionGroupNodeV1) = (
+            FfiConverterSequenceTypeViewNodeV1.allocationSize(value.`actions`)
+    )
+
+    override fun write(value: ActionGroupNodeV1, buf: ByteBuffer) {
+            FfiConverterSequenceTypeViewNodeV1.write(value.`actions`, buf)
+    }
+}
+
+
+
 data class AddDocArgs (
     var `branchPath`: Utf8PathBuf
     , 
@@ -1118,6 +1151,82 @@ public object FfiConverterTypeAddDocArgs: FfiConverterRustBuffer<AddDocArgs> {
             FfiConverterTypeUtf8PathBuf.write(value.`branchPath`, buf)
             FfiConverterMapTypeFacetKeyTypeJson.write(value.`facets`, buf)
             FfiConverterOptionalTypeUtf8PathBuf.write(value.`userPath`, buf)
+    }
+}
+
+
+
+data class AmountNodeV1 (
+    var `decimal`: kotlin.String
+    , 
+    var `commodity`: kotlin.String
+    
+){
+    
+
+    
+
+    
+    companion object
+}
+
+/**
+ * @suppress
+ */
+public object FfiConverterTypeAmountNodeV1: FfiConverterRustBuffer<AmountNodeV1> {
+    override fun read(buf: ByteBuffer): AmountNodeV1 {
+        return AmountNodeV1(
+            FfiConverterString.read(buf),
+            FfiConverterString.read(buf),
+        )
+    }
+
+    override fun allocationSize(value: AmountNodeV1) = (
+            FfiConverterString.allocationSize(value.`decimal`) +
+            FfiConverterString.allocationSize(value.`commodity`)
+    )
+
+    override fun write(value: AmountNodeV1, buf: ByteBuffer) {
+            FfiConverterString.write(value.`decimal`, buf)
+            FfiConverterString.write(value.`commodity`, buf)
+    }
+}
+
+
+
+data class BadgeNodeV1 (
+    var `label`: kotlin.String
+    , 
+    var `tone`: BadgeToneV1
+    
+){
+    
+
+    
+
+    
+    companion object
+}
+
+/**
+ * @suppress
+ */
+public object FfiConverterTypeBadgeNodeV1: FfiConverterRustBuffer<BadgeNodeV1> {
+    override fun read(buf: ByteBuffer): BadgeNodeV1 {
+        return BadgeNodeV1(
+            FfiConverterString.read(buf),
+            FfiConverterTypeBadgeToneV1.read(buf),
+        )
+    }
+
+    override fun allocationSize(value: BadgeNodeV1) = (
+            FfiConverterString.allocationSize(value.`label`) +
+            FfiConverterTypeBadgeToneV1.allocationSize(value.`tone`)
+    )
+
+    override fun write(value: BadgeNodeV1, buf: ByteBuffer) {
+            FfiConverterString.write(value.`label`, buf)
+            FfiConverterTypeBadgeToneV1.write(value.`tone`, buf)
     }
 }
 
@@ -1209,6 +1318,77 @@ public object FfiConverterTypeBody: FfiConverterRustBuffer<Body> {
 
     override fun write(value: Body, buf: ByteBuffer) {
             FfiConverterSequenceTypeUrl.write(value.`order`, buf)
+    }
+}
+
+
+
+data class ButtonNodeV1 (
+    var `label`: kotlin.String
+    
+){
+    
+
+    
+
+    
+    companion object
+}
+
+/**
+ * @suppress
+ */
+public object FfiConverterTypeButtonNodeV1: FfiConverterRustBuffer<ButtonNodeV1> {
+    override fun read(buf: ByteBuffer): ButtonNodeV1 {
+        return ButtonNodeV1(
+            FfiConverterString.read(buf),
+        )
+    }
+
+    override fun allocationSize(value: ButtonNodeV1) = (
+            FfiConverterString.allocationSize(value.`label`)
+    )
+
+    override fun write(value: ButtonNodeV1, buf: ByteBuffer) {
+            FfiConverterString.write(value.`label`, buf)
+    }
+}
+
+
+
+data class CardNodeV1 (
+    var `title`: kotlin.String?
+    , 
+    var `children`: List<ViewNodeV1>
+    
+){
+    
+
+    
+
+    
+    companion object
+}
+
+/**
+ * @suppress
+ */
+public object FfiConverterTypeCardNodeV1: FfiConverterRustBuffer<CardNodeV1> {
+    override fun read(buf: ByteBuffer): CardNodeV1 {
+        return CardNodeV1(
+            FfiConverterOptionalString.read(buf),
+            FfiConverterSequenceTypeViewNodeV1.read(buf),
+        )
+    }
+
+    override fun allocationSize(value: CardNodeV1) = (
+            FfiConverterOptionalString.allocationSize(value.`title`) +
+            FfiConverterSequenceTypeViewNodeV1.allocationSize(value.`children`)
+    )
+
+    override fun write(value: CardNodeV1, buf: ByteBuffer) {
+            FfiConverterOptionalString.write(value.`title`, buf)
+            FfiConverterSequenceTypeViewNodeV1.write(value.`children`, buf)
     }
 }
 
@@ -1475,6 +1655,44 @@ public object FfiConverterTypeEmbedding: FfiConverterRustBuffer<Embedding> {
 
 
 
+data class EmitViewActionV1 (
+    var `name`: kotlin.String
+    , 
+    var `payload`: ViewEventPayloadV1
+    
+){
+    
+
+    
+
+    
+    companion object
+}
+
+/**
+ * @suppress
+ */
+public object FfiConverterTypeEmitViewActionV1: FfiConverterRustBuffer<EmitViewActionV1> {
+    override fun read(buf: ByteBuffer): EmitViewActionV1 {
+        return EmitViewActionV1(
+            FfiConverterString.read(buf),
+            FfiConverterTypeViewEventPayloadV1.read(buf),
+        )
+    }
+
+    override fun allocationSize(value: EmitViewActionV1) = (
+            FfiConverterString.allocationSize(value.`name`) +
+            FfiConverterTypeViewEventPayloadV1.allocationSize(value.`payload`)
+    )
+
+    override fun write(value: EmitViewActionV1, buf: ByteBuffer) {
+            FfiConverterString.write(value.`name`, buf)
+            FfiConverterTypeViewEventPayloadV1.write(value.`payload`, buf)
+    }
+}
+
+
+
 data class FacetDisplayHint (
     var `alwaysVisible`: kotlin.Boolean
     , 
@@ -1696,6 +1914,72 @@ public object FfiConverterTypeImageMetadata: FfiConverterRustBuffer<ImageMetadat
 
 
 
+data class ListNodeV1 (
+    var `items`: List<ViewNodeV1>
+    
+){
+    
+
+    
+
+    
+    companion object
+}
+
+/**
+ * @suppress
+ */
+public object FfiConverterTypeListNodeV1: FfiConverterRustBuffer<ListNodeV1> {
+    override fun read(buf: ByteBuffer): ListNodeV1 {
+        return ListNodeV1(
+            FfiConverterSequenceTypeViewNodeV1.read(buf),
+        )
+    }
+
+    override fun allocationSize(value: ListNodeV1) = (
+            FfiConverterSequenceTypeViewNodeV1.allocationSize(value.`items`)
+    )
+
+    override fun write(value: ListNodeV1, buf: ByteBuffer) {
+            FfiConverterSequenceTypeViewNodeV1.write(value.`items`, buf)
+    }
+}
+
+
+
+data class MarkdownNodeV1 (
+    var `markdown`: kotlin.String
+    
+){
+    
+
+    
+
+    
+    companion object
+}
+
+/**
+ * @suppress
+ */
+public object FfiConverterTypeMarkdownNodeV1: FfiConverterRustBuffer<MarkdownNodeV1> {
+    override fun read(buf: ByteBuffer): MarkdownNodeV1 {
+        return MarkdownNodeV1(
+            FfiConverterString.read(buf),
+        )
+    }
+
+    override fun allocationSize(value: MarkdownNodeV1) = (
+            FfiConverterString.allocationSize(value.`markdown`)
+    )
+
+    override fun write(value: MarkdownNodeV1, buf: ByteBuffer) {
+            FfiConverterString.write(value.`markdown`, buf)
+    }
+}
+
+
+
 @Serializable
 data class Note (
     var `mime`: kotlin.String
@@ -1908,6 +2192,77 @@ public object FfiConverterTypePoint: FfiConverterRustBuffer<Point> {
 
 
 
+data class SectionNodeV1 (
+    var `title`: kotlin.String?
+    , 
+    var `children`: List<ViewNodeV1>
+    
+){
+    
+
+    
+
+    
+    companion object
+}
+
+/**
+ * @suppress
+ */
+public object FfiConverterTypeSectionNodeV1: FfiConverterRustBuffer<SectionNodeV1> {
+    override fun read(buf: ByteBuffer): SectionNodeV1 {
+        return SectionNodeV1(
+            FfiConverterOptionalString.read(buf),
+            FfiConverterSequenceTypeViewNodeV1.read(buf),
+        )
+    }
+
+    override fun allocationSize(value: SectionNodeV1) = (
+            FfiConverterOptionalString.allocationSize(value.`title`) +
+            FfiConverterSequenceTypeViewNodeV1.allocationSize(value.`children`)
+    )
+
+    override fun write(value: SectionNodeV1, buf: ByteBuffer) {
+            FfiConverterOptionalString.write(value.`title`, buf)
+            FfiConverterSequenceTypeViewNodeV1.write(value.`children`, buf)
+    }
+}
+
+
+
+data class TextNodeV1 (
+    var `text`: kotlin.String
+    
+){
+    
+
+    
+
+    
+    companion object
+}
+
+/**
+ * @suppress
+ */
+public object FfiConverterTypeTextNodeV1: FfiConverterRustBuffer<TextNodeV1> {
+    override fun read(buf: ByteBuffer): TextNodeV1 {
+        return TextNodeV1(
+            FfiConverterString.read(buf),
+        )
+    }
+
+    override fun allocationSize(value: TextNodeV1) = (
+            FfiConverterString.allocationSize(value.`text`)
+    )
+
+    override fun write(value: TextNodeV1, buf: ByteBuffer) {
+            FfiConverterString.write(value.`text`, buf)
+    }
+}
+
+
+
 data class UserMeta (
     var `userPath`: Utf8PathBuf
     
@@ -1936,6 +2291,87 @@ public object FfiConverterTypeUserMeta: FfiConverterRustBuffer<UserMeta> {
 
     override fun write(value: UserMeta, buf: ByteBuffer) {
             FfiConverterTypeUtf8PathBuf.write(value.`userPath`, buf)
+    }
+}
+
+
+
+data class ViewEventBindingV1 (
+    var `event`: ViewEventKindV1
+    , 
+    var `action`: ViewActionV1
+    
+){
+    
+
+    
+
+    
+    companion object
+}
+
+/**
+ * @suppress
+ */
+public object FfiConverterTypeViewEventBindingV1: FfiConverterRustBuffer<ViewEventBindingV1> {
+    override fun read(buf: ByteBuffer): ViewEventBindingV1 {
+        return ViewEventBindingV1(
+            FfiConverterTypeViewEventKindV1.read(buf),
+            FfiConverterTypeViewActionV1.read(buf),
+        )
+    }
+
+    override fun allocationSize(value: ViewEventBindingV1) = (
+            FfiConverterTypeViewEventKindV1.allocationSize(value.`event`) +
+            FfiConverterTypeViewActionV1.allocationSize(value.`action`)
+    )
+
+    override fun write(value: ViewEventBindingV1, buf: ByteBuffer) {
+            FfiConverterTypeViewEventKindV1.write(value.`event`, buf)
+            FfiConverterTypeViewActionV1.write(value.`action`, buf)
+    }
+}
+
+
+
+data class ViewNodeV1 (
+    var `id`: ViewNodeId
+    , 
+    var `kind`: ViewNodeKindV1
+    , 
+    var `events`: List<ViewEventBindingV1>
+    
+){
+    
+
+    
+
+    
+    companion object
+}
+
+/**
+ * @suppress
+ */
+public object FfiConverterTypeViewNodeV1: FfiConverterRustBuffer<ViewNodeV1> {
+    override fun read(buf: ByteBuffer): ViewNodeV1 {
+        return ViewNodeV1(
+            FfiConverterTypeViewNodeId.read(buf),
+            FfiConverterTypeViewNodeKindV1.read(buf),
+            FfiConverterSequenceTypeViewEventBindingV1.read(buf),
+        )
+    }
+
+    override fun allocationSize(value: ViewNodeV1) = (
+            FfiConverterTypeViewNodeId.allocationSize(value.`id`) +
+            FfiConverterTypeViewNodeKindV1.allocationSize(value.`kind`) +
+            FfiConverterSequenceTypeViewEventBindingV1.allocationSize(value.`events`)
+    )
+
+    override fun write(value: ViewNodeV1, buf: ByteBuffer) {
+            FfiConverterTypeViewNodeId.write(value.`id`, buf)
+            FfiConverterTypeViewNodeKindV1.write(value.`kind`, buf)
+            FfiConverterSequenceTypeViewEventBindingV1.write(value.`events`, buf)
     }
 }
 
@@ -1976,6 +2412,76 @@ public object FfiConverterTypeViewRef: FfiConverterRustBuffer<ViewRef> {
             FfiConverterTypeKeyGeneric.write(value.`viewKey`, buf)
     }
 }
+
+
+
+data class ViewSpecV1 (
+    var `root`: ViewNodeV1
+    
+){
+    
+
+    
+
+    
+    companion object
+}
+
+/**
+ * @suppress
+ */
+public object FfiConverterTypeViewSpecV1: FfiConverterRustBuffer<ViewSpecV1> {
+    override fun read(buf: ByteBuffer): ViewSpecV1 {
+        return ViewSpecV1(
+            FfiConverterTypeViewNodeV1.read(buf),
+        )
+    }
+
+    override fun allocationSize(value: ViewSpecV1) = (
+            FfiConverterTypeViewNodeV1.allocationSize(value.`root`)
+    )
+
+    override fun write(value: ViewSpecV1, buf: ByteBuffer) {
+            FfiConverterTypeViewNodeV1.write(value.`root`, buf)
+    }
+}
+
+
+
+
+enum class BadgeToneV1 {
+    
+    NEUTRAL,
+    INFO,
+    SUCCESS,
+    WARNING,
+    DANGER;
+
+    
+
+
+    companion object
+}
+
+
+/**
+ * @suppress
+ */
+public object FfiConverterTypeBadgeToneV1: FfiConverterRustBuffer<BadgeToneV1> {
+    override fun read(buf: ByteBuffer) = try {
+        BadgeToneV1.values()[buf.getInt() - 1]
+    } catch (e: IndexOutOfBoundsException) {
+        throw RuntimeException("invalid enum value, something is very wrong!!", e)
+    }
+
+    override fun allocationSize(value: BadgeToneV1) = 4UL
+
+    override fun write(value: BadgeToneV1, buf: ByteBuffer) {
+        buf.putInt(value.ordinal + 1)
+    }
+}
+
+
 
 
 
@@ -2338,6 +2844,417 @@ public object FfiConverterTypeFacetViewMode: FfiConverterRustBuffer<FacetViewMod
 
     override fun write(value: FacetViewMode, buf: ByteBuffer) {
         buf.putInt(value.ordinal + 1)
+    }
+}
+
+
+
+
+
+sealed class ViewActionV1 {
+    
+    data class Emit(
+        val v1: org.example.daybook.uniffi.types.EmitViewActionV1) : ViewActionV1()
+        
+    {
+        
+
+        companion object
+    }
+    
+
+    
+
+    
+    
+
+
+    companion object
+}
+
+/**
+ * @suppress
+ */
+public object FfiConverterTypeViewActionV1 : FfiConverterRustBuffer<ViewActionV1>{
+    override fun read(buf: ByteBuffer): ViewActionV1 {
+        return when(buf.getInt()) {
+            1 -> ViewActionV1.Emit(
+                FfiConverterTypeEmitViewActionV1.read(buf),
+                )
+            else -> throw RuntimeException("invalid enum value, something is very wrong!!")
+        }
+    }
+
+    override fun allocationSize(value: ViewActionV1) = when(value) {
+        is ViewActionV1.Emit -> {
+            // Add the size for the Int that specifies the variant plus the size needed for all fields
+            (
+                4UL
+                + FfiConverterTypeEmitViewActionV1.allocationSize(value.v1)
+            )
+        }
+    }
+
+    override fun write(value: ViewActionV1, buf: ByteBuffer) {
+        when(value) {
+            is ViewActionV1.Emit -> {
+                buf.putInt(1)
+                FfiConverterTypeEmitViewActionV1.write(value.v1, buf)
+                Unit
+            }
+        }.let { /* this makes the `when` an expression, which ensures it is exhaustive */ }
+    }
+}
+
+
+
+
+
+
+enum class ViewEventKindV1 {
+    
+    CLICK,
+    SUBMIT,
+    CHANGE;
+
+    
+
+
+    companion object
+}
+
+
+/**
+ * @suppress
+ */
+public object FfiConverterTypeViewEventKindV1: FfiConverterRustBuffer<ViewEventKindV1> {
+    override fun read(buf: ByteBuffer) = try {
+        ViewEventKindV1.values()[buf.getInt() - 1]
+    } catch (e: IndexOutOfBoundsException) {
+        throw RuntimeException("invalid enum value, something is very wrong!!", e)
+    }
+
+    override fun allocationSize(value: ViewEventKindV1) = 4UL
+
+    override fun write(value: ViewEventKindV1, buf: ByteBuffer) {
+        buf.putInt(value.ordinal + 1)
+    }
+}
+
+
+
+
+
+sealed class ViewNodeKindV1 {
+    
+    data class Card(
+        val v1: org.example.daybook.uniffi.types.CardNodeV1) : ViewNodeKindV1()
+        
+    {
+        
+
+        companion object
+    }
+    
+    data class Section(
+        val v1: org.example.daybook.uniffi.types.SectionNodeV1) : ViewNodeKindV1()
+        
+    {
+        
+
+        companion object
+    }
+    
+    data class Text(
+        val v1: org.example.daybook.uniffi.types.TextNodeV1) : ViewNodeKindV1()
+        
+    {
+        
+
+        companion object
+    }
+    
+    data class Markdown(
+        val v1: org.example.daybook.uniffi.types.MarkdownNodeV1) : ViewNodeKindV1()
+        
+    {
+        
+
+        companion object
+    }
+    
+    data class Badge(
+        val v1: org.example.daybook.uniffi.types.BadgeNodeV1) : ViewNodeKindV1()
+        
+    {
+        
+
+        companion object
+    }
+    
+    data class Amount(
+        val v1: org.example.daybook.uniffi.types.AmountNodeV1) : ViewNodeKindV1()
+        
+    {
+        
+
+        companion object
+    }
+    
+    data class List(
+        val v1: org.example.daybook.uniffi.types.ListNodeV1) : ViewNodeKindV1()
+        
+    {
+        
+
+        companion object
+    }
+    
+    data class Button(
+        val v1: org.example.daybook.uniffi.types.ButtonNodeV1) : ViewNodeKindV1()
+        
+    {
+        
+
+        companion object
+    }
+    
+    data class ActionGroup(
+        val v1: org.example.daybook.uniffi.types.ActionGroupNodeV1) : ViewNodeKindV1()
+        
+    {
+        
+
+        companion object
+    }
+    
+
+    
+
+    
+    
+
+
+    companion object
+}
+
+/**
+ * @suppress
+ */
+public object FfiConverterTypeViewNodeKindV1 : FfiConverterRustBuffer<ViewNodeKindV1>{
+    override fun read(buf: ByteBuffer): ViewNodeKindV1 {
+        return when(buf.getInt()) {
+            1 -> ViewNodeKindV1.Card(
+                FfiConverterTypeCardNodeV1.read(buf),
+                )
+            2 -> ViewNodeKindV1.Section(
+                FfiConverterTypeSectionNodeV1.read(buf),
+                )
+            3 -> ViewNodeKindV1.Text(
+                FfiConverterTypeTextNodeV1.read(buf),
+                )
+            4 -> ViewNodeKindV1.Markdown(
+                FfiConverterTypeMarkdownNodeV1.read(buf),
+                )
+            5 -> ViewNodeKindV1.Badge(
+                FfiConverterTypeBadgeNodeV1.read(buf),
+                )
+            6 -> ViewNodeKindV1.Amount(
+                FfiConverterTypeAmountNodeV1.read(buf),
+                )
+            7 -> ViewNodeKindV1.List(
+                FfiConverterTypeListNodeV1.read(buf),
+                )
+            8 -> ViewNodeKindV1.Button(
+                FfiConverterTypeButtonNodeV1.read(buf),
+                )
+            9 -> ViewNodeKindV1.ActionGroup(
+                FfiConverterTypeActionGroupNodeV1.read(buf),
+                )
+            else -> throw RuntimeException("invalid enum value, something is very wrong!!")
+        }
+    }
+
+    override fun allocationSize(value: ViewNodeKindV1) = when(value) {
+        is ViewNodeKindV1.Card -> {
+            // Add the size for the Int that specifies the variant plus the size needed for all fields
+            (
+                4UL
+                + FfiConverterTypeCardNodeV1.allocationSize(value.v1)
+            )
+        }
+        is ViewNodeKindV1.Section -> {
+            // Add the size for the Int that specifies the variant plus the size needed for all fields
+            (
+                4UL
+                + FfiConverterTypeSectionNodeV1.allocationSize(value.v1)
+            )
+        }
+        is ViewNodeKindV1.Text -> {
+            // Add the size for the Int that specifies the variant plus the size needed for all fields
+            (
+                4UL
+                + FfiConverterTypeTextNodeV1.allocationSize(value.v1)
+            )
+        }
+        is ViewNodeKindV1.Markdown -> {
+            // Add the size for the Int that specifies the variant plus the size needed for all fields
+            (
+                4UL
+                + FfiConverterTypeMarkdownNodeV1.allocationSize(value.v1)
+            )
+        }
+        is ViewNodeKindV1.Badge -> {
+            // Add the size for the Int that specifies the variant plus the size needed for all fields
+            (
+                4UL
+                + FfiConverterTypeBadgeNodeV1.allocationSize(value.v1)
+            )
+        }
+        is ViewNodeKindV1.Amount -> {
+            // Add the size for the Int that specifies the variant plus the size needed for all fields
+            (
+                4UL
+                + FfiConverterTypeAmountNodeV1.allocationSize(value.v1)
+            )
+        }
+        is ViewNodeKindV1.List -> {
+            // Add the size for the Int that specifies the variant plus the size needed for all fields
+            (
+                4UL
+                + FfiConverterTypeListNodeV1.allocationSize(value.v1)
+            )
+        }
+        is ViewNodeKindV1.Button -> {
+            // Add the size for the Int that specifies the variant plus the size needed for all fields
+            (
+                4UL
+                + FfiConverterTypeButtonNodeV1.allocationSize(value.v1)
+            )
+        }
+        is ViewNodeKindV1.ActionGroup -> {
+            // Add the size for the Int that specifies the variant plus the size needed for all fields
+            (
+                4UL
+                + FfiConverterTypeActionGroupNodeV1.allocationSize(value.v1)
+            )
+        }
+    }
+
+    override fun write(value: ViewNodeKindV1, buf: ByteBuffer) {
+        when(value) {
+            is ViewNodeKindV1.Card -> {
+                buf.putInt(1)
+                FfiConverterTypeCardNodeV1.write(value.v1, buf)
+                Unit
+            }
+            is ViewNodeKindV1.Section -> {
+                buf.putInt(2)
+                FfiConverterTypeSectionNodeV1.write(value.v1, buf)
+                Unit
+            }
+            is ViewNodeKindV1.Text -> {
+                buf.putInt(3)
+                FfiConverterTypeTextNodeV1.write(value.v1, buf)
+                Unit
+            }
+            is ViewNodeKindV1.Markdown -> {
+                buf.putInt(4)
+                FfiConverterTypeMarkdownNodeV1.write(value.v1, buf)
+                Unit
+            }
+            is ViewNodeKindV1.Badge -> {
+                buf.putInt(5)
+                FfiConverterTypeBadgeNodeV1.write(value.v1, buf)
+                Unit
+            }
+            is ViewNodeKindV1.Amount -> {
+                buf.putInt(6)
+                FfiConverterTypeAmountNodeV1.write(value.v1, buf)
+                Unit
+            }
+            is ViewNodeKindV1.List -> {
+                buf.putInt(7)
+                FfiConverterTypeListNodeV1.write(value.v1, buf)
+                Unit
+            }
+            is ViewNodeKindV1.Button -> {
+                buf.putInt(8)
+                FfiConverterTypeButtonNodeV1.write(value.v1, buf)
+                Unit
+            }
+            is ViewNodeKindV1.ActionGroup -> {
+                buf.putInt(9)
+                FfiConverterTypeActionGroupNodeV1.write(value.v1, buf)
+                Unit
+            }
+        }.let { /* this makes the `when` an expression, which ensures it is exhaustive */ }
+    }
+}
+
+
+
+
+
+/**
+ * A plugin-emitted Daybook view description.
+ *
+ * This is the stable boundary between plugin view providers and Daybook hosts. It is intentionally
+ * smaller than the host renderer's internal model and must not contain authoring conveniences such
+ * as bindings, templates, or layout primitives.
+ */
+sealed class ViewSpec {
+    
+    data class V1(
+        val v1: org.example.daybook.uniffi.types.ViewSpecV1) : ViewSpec()
+        
+    {
+        
+
+        companion object
+    }
+    
+
+    
+
+    
+    
+
+
+    companion object
+}
+
+/**
+ * @suppress
+ */
+public object FfiConverterTypeViewSpec : FfiConverterRustBuffer<ViewSpec>{
+    override fun read(buf: ByteBuffer): ViewSpec {
+        return when(buf.getInt()) {
+            1 -> ViewSpec.V1(
+                FfiConverterTypeViewSpecV1.read(buf),
+                )
+            else -> throw RuntimeException("invalid enum value, something is very wrong!!")
+        }
+    }
+
+    override fun allocationSize(value: ViewSpec) = when(value) {
+        is ViewSpec.V1 -> {
+            // Add the size for the Int that specifies the variant plus the size needed for all fields
+            (
+                4UL
+                + FfiConverterTypeViewSpecV1.allocationSize(value.v1)
+            )
+        }
+    }
+
+    override fun write(value: ViewSpec, buf: ByteBuffer) {
+        when(value) {
+            is ViewSpec.V1 -> {
+                buf.putInt(1)
+                FfiConverterTypeViewSpecV1.write(value.v1, buf)
+                Unit
+            }
+        }.let { /* this makes the `when` an expression, which ensures it is exhaustive */ }
     }
 }
 
@@ -3052,6 +3969,62 @@ public object FfiConverterSequenceTypePoint: FfiConverterRustBuffer<List<Point>>
 /**
  * @suppress
  */
+public object FfiConverterSequenceTypeViewEventBindingV1: FfiConverterRustBuffer<List<ViewEventBindingV1>> {
+    override fun read(buf: ByteBuffer): List<ViewEventBindingV1> {
+        val len = buf.getInt()
+        return List<ViewEventBindingV1>(len) {
+            FfiConverterTypeViewEventBindingV1.read(buf)
+        }
+    }
+
+    override fun allocationSize(value: List<ViewEventBindingV1>): ULong {
+        val sizeForLength = 4UL
+        val sizeForItems = value.map { FfiConverterTypeViewEventBindingV1.allocationSize(it) }.sum()
+        return sizeForLength + sizeForItems
+    }
+
+    override fun write(value: List<ViewEventBindingV1>, buf: ByteBuffer) {
+        buf.putInt(value.size)
+        value.iterator().forEach {
+            FfiConverterTypeViewEventBindingV1.write(it, buf)
+        }
+    }
+}
+
+
+
+
+/**
+ * @suppress
+ */
+public object FfiConverterSequenceTypeViewNodeV1: FfiConverterRustBuffer<List<ViewNodeV1>> {
+    override fun read(buf: ByteBuffer): List<ViewNodeV1> {
+        val len = buf.getInt()
+        return List<ViewNodeV1>(len) {
+            FfiConverterTypeViewNodeV1.read(buf)
+        }
+    }
+
+    override fun allocationSize(value: List<ViewNodeV1>): ULong {
+        val sizeForLength = 4UL
+        val sizeForItems = value.map { FfiConverterTypeViewNodeV1.allocationSize(it) }.sum()
+        return sizeForLength + sizeForItems
+    }
+
+    override fun write(value: List<ViewNodeV1>, buf: ByteBuffer) {
+        buf.putInt(value.size)
+        value.iterator().forEach {
+            FfiConverterTypeViewNodeV1.write(it, buf)
+        }
+    }
+}
+
+
+
+
+/**
+ * @suppress
+ */
 public object FfiConverterSequenceTypeTimestamp: FfiConverterRustBuffer<List<Timestamp>> {
     override fun read(buf: ByteBuffer): List<Timestamp> {
         val len = buf.getInt()
@@ -3430,3 +4403,22 @@ public object FfiConverterTypeUuid: FfiConverter<Uuid, RustBuffer.ByValue> {
     }
 }
 
+
+
+/**
+ * Typealias from the type name used in the UDL file to the builtin type.  This
+ * is needed because the UDL type name is used in function/method signatures.
+ * It's also what we have an external type that references a custom type.
+ */
+public typealias ViewEventPayloadV1 = kotlin.String
+public typealias FfiConverterTypeViewEventPayloadV1 = FfiConverterString
+
+
+
+/**
+ * Typealias from the type name used in the UDL file to the builtin type.  This
+ * is needed because the UDL type name is used in function/method signatures.
+ * It's also what we have an external type that references a custom type.
+ */
+public typealias ViewNodeId = kotlin.String
+public typealias FfiConverterTypeViewNodeId = FfiConverterString

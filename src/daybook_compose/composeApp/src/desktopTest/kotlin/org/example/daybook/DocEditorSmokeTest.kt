@@ -4,7 +4,9 @@ import androidx.compose.runtime.CompositionLocalProvider
 import androidx.compose.ui.test.ExperimentalTestApi
 import androidx.compose.ui.test.assertIsDisplayed
 import androidx.compose.ui.test.assertTextContains
+import androidx.compose.ui.test.onAllNodesWithText
 import androidx.compose.ui.test.onNodeWithTag
+import androidx.compose.ui.test.onNodeWithText
 import androidx.compose.ui.test.v2.runComposeUiTest
 import java.nio.file.Files
 import java.nio.file.Path
@@ -35,9 +37,15 @@ import org.example.daybook.uniffi.FfiCtx
 import org.example.daybook.uniffi.InitRepoFfi
 import org.example.daybook.uniffi.PlugsRepoFfi
 import org.example.daybook.uniffi.ProgressRepoFfi
+import org.example.daybook.uniffi.RtFfi
 import org.example.daybook.uniffi.SqliteLocalStateRepoFfi
 import org.example.daybook.uniffi.TablesRepoFfi
 import org.example.daybook.uniffi.types.AddDocArgs
+import org.example.daybook.uniffi.types.FacetDisplayDeets
+import org.example.daybook.uniffi.types.FacetDisplayHint
+import org.example.daybook.uniffi.types.FacetViewMode
+import org.example.daybook.uniffi.types.ViewRef
+import org.example.daybook.ui.view.DaybookViewSemantics
 
 @OptIn(ExperimentalTestApi::class)
 class DocEditorSmokeTest {
@@ -83,6 +91,51 @@ class DocEditorSmokeTest {
             fixture.close()
         }
     }
+
+    @Test
+    fun realFfi_renders_custom_view_facet_in_doc_editor_screen() = runComposeUiTest {
+        val fixture = runBlocking { RealRepoFixture.create(loadRt = true) }
+        try {
+            val drawerVm = DrawerViewModel(fixture.drawerRepo)
+            val docEditorStore = DocEditorStoreViewModel(fixture.drawerRepo)
+
+            fixture.importPlugTestOci()
+            fixture.setNoteCustomViewHint()
+
+            val docId = fixture.createDoc(
+                titleText = "Custom view smoke title",
+                noteText = "This note is rendered through plug_test.",
+            )
+
+            setContent {
+                DaybookTheme(themeConfig = ThemeConfig.Light) {
+                    ProvideScreenChromeSpec(ScreenChromeSpec()) {
+                        CompositionLocalProvider(
+                            LocalContainer provides fixture.container,
+                            LocalDrawerViewModel provides drawerVm,
+                            LocalDocEditorStore provides docEditorStore,
+                        ) {
+                            DocEditorScreen(contentType = DaybookContentType.LIST_ONLY)
+                        }
+                    }
+                }
+            }
+
+            runOnIdle {
+                docEditorStore.selectDoc(docId)
+            }
+
+            waitUntil(timeoutMillis = 20_000) {
+                onAllNodesWithText("Sample summary").fetchSemanticsNodes().isNotEmpty()
+            }
+
+            onNodeWithTag(DaybookEditorSemantics.pluginFacet(facetKeyString(noteFacetKey()))).assertIsDisplayed()
+            onNodeWithTag(DaybookViewSemantics.Root).assertIsDisplayed()
+            onNodeWithText("Sample summary").assertIsDisplayed()
+        } finally {
+            fixture.close()
+        }
+    }
 }
 
 private class RealRepoFixture(
@@ -98,6 +151,7 @@ private class RealRepoFixture(
     val dispatchRepo: DispatchRepoFfi,
     val initRepo: InitRepoFfi,
     val sqliteLsRepo: SqliteLocalStateRepoFfi,
+    val rtFfi: RtFfi?,
     val cameraPreviewFfi: CameraPreviewFfi,
     val container: AppContainer,
 ) {
@@ -112,6 +166,26 @@ private class RealRepoFixture(
                 branchPath = "main",
                 facets = facets,
                 userPath = null,
+            ),
+        )
+    }
+
+    fun importPlugTestOci() = runBlocking(Dispatchers.IO) {
+        plugsRepo.importFromOciLayout(plugTestOciPath().toString())
+    }
+
+    fun setNoteCustomViewHint() = runBlocking(Dispatchers.IO) {
+        configRepo.setFacetDisplayHint(
+            NOTE_DISPLAY_HINT_KEY,
+            FacetDisplayHint(
+                alwaysVisible = true,
+                displayTitle = "Plug test sample",
+                deets =
+                FacetDisplayDeets.CustomView(
+                    view = ViewRef(plugId = PLUG_TEST_ID, viewKey = PLUG_TEST_SAMPLE_VIEW_KEY),
+                    mode = FacetViewMode.DISPLAY,
+                    priority = 0,
+                ),
             ),
         )
     }
@@ -143,10 +217,16 @@ private class RealRepoFixture(
         }
 
         runBlocking(Dispatchers.IO) {
+            if (rtFfi != null) {
+                stopOnIo("rt ffi") { rtFfi.stop() }
+            }
             stopOnIo("init repo") { initRepo.stop() }
             stopOnIo("sqlite local state repo") { sqliteLsRepo.stop() }
             stopOnIo("progress repo") { progressRepo.stop() }
             closeSafely("camera preview ffi") { cameraPreviewFfi.close() }
+            if (rtFfi != null) {
+                closeSafely("rt ffi") { rtFfi.close() }
+            }
             closeSafely("drawer repo") { drawerRepo.close() }
             closeSafely("tables repo") { tablesRepo.close() }
             closeSafely("dispatch repo") { dispatchRepo.close() }
@@ -166,7 +246,7 @@ private class RealRepoFixture(
     }
 
     companion object {
-        suspend fun create(): RealRepoFixture {
+        suspend fun create(loadRt: Boolean = false): RealRepoFixture {
             val repoRoot = Files.createTempDirectory("daybook-compose-smoke")
             val appCtx = withContext(Dispatchers.IO) { AppFfiCtx.init() }
             val ffiCtx = withContext(Dispatchers.IO) { FfiCtx.init(repoRoot.toString(), appCtx) }
@@ -180,6 +260,26 @@ private class RealRepoFixture(
             val initRepo = withContext(Dispatchers.IO) { InitRepoFfi.load(ffiCtx, progressRepo) }
             val sqliteLsRepo = withContext(Dispatchers.IO) { SqliteLocalStateRepoFfi.load(ffiCtx) }
             val cameraPreviewFfi = withContext(Dispatchers.IO) { CameraPreviewFfi.load() }
+            val rtFfi =
+                if (loadRt) {
+                    withContext(Dispatchers.IO) {
+                        RtFfi.load(
+                            fcx = ffiCtx,
+                            drawerRepo = drawerRepo,
+                            plugsRepo = plugsRepo,
+                            dispatchRepo = dispatchRepo,
+                            progressRepo = progressRepo,
+                            blobsRepo = blobsRepo,
+                            configRepo = configRepo,
+                            initRepo = initRepo,
+                            sqliteLsRepo = sqliteLsRepo,
+                            deviceId = "doc-editor-custom-view-smoke",
+                            startupProgressTaskId = null,
+                        )
+                    }
+                } else {
+                    null
+                }
             val container =
                 AppContainer(
                     ffiCtx = ffiCtx,
@@ -189,7 +289,7 @@ private class RealRepoFixture(
                     progressRepo = progressRepo,
                     initRepo = initRepo,
                     sqliteLsRepo = sqliteLsRepo,
-                    rtFfi = null,
+                    rtFfi = rtFfi,
                     plugsRepo = plugsRepo,
                     configRepo = configRepo,
                     blobsRepo = blobsRepo,
@@ -209,9 +309,29 @@ private class RealRepoFixture(
                 dispatchRepo = dispatchRepo,
                 initRepo = initRepo,
                 sqliteLsRepo = sqliteLsRepo,
+                rtFfi = rtFfi,
                 cameraPreviewFfi = cameraPreviewFfi,
                 container = container,
             )
         }
     }
+}
+
+private const val NOTE_DISPLAY_HINT_KEY = "org.example.daybook.note"
+private const val PLUG_TEST_ID = "@daybook/test"
+private const val PLUG_TEST_SAMPLE_VIEW_KEY = "sample-summary-card"
+
+private fun plugTestOciPath(): Path {
+    var cursor: Path? = Path.of("").toAbsolutePath()
+    while (cursor != null) {
+        val candidate = cursor.resolve("target/oci/@daybook/test")
+        if (Files.isDirectory(candidate)) {
+            return candidate
+        }
+        cursor = cursor.parent
+    }
+    error(
+        "Missing OCI plug artifact at target/oci/@daybook/test. Build it with: " +
+            "cargo run -p xtask -- build-plug-oci --plug-root ./src/plug_test",
+    )
 }

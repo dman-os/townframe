@@ -673,7 +673,8 @@ fn sample_stateless_view_spec() -> ViewSpec {
                                 name: "plug-test.sample-button-clicked".into(),
                                 payload: serde_json::json!({
                                     "source": "plug_test",
-                                }),
+                                })
+                                .into(),
                             }),
                         }],
                     },

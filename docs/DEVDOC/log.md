@@ -41,12 +41,25 @@ You can find the thought process in gory detail in the chatgpt logs but here's t
       - Well, all chains of signatures must resolve to the same genesis.
       - Re-genesis could re sign all keys?
         - GPT the smart cookie, has the idea that repo_id should be derived from genesis block. Nice and elegant.
+- Symmetric encryption keys will be stored in a separate cleartext automerge doc called keydoc
+  - Each agent that expects access to a specific encryption key will look for the encryption key in keydoc but wrap encrypted by it's own pubkey
 - Additionally, repo can have optional recovery keys
   - These must be signed by a pre-approved agent
   - These will only be used to sign new agent additions
   - Used for adding new agents when all previous keys are lost
     - I.e. agent keys can be device local but recovery keys can be stored elsewhere
-  - Recovery keys are derived per repo from a master recovery secret that can be encrypted stored in a passkey wallet
+- There are also a separate class of encryption recovery keys
+  - These get their own entry for each symmetric encryption key in the keysdoc
+- Both kinds ecovery keys are derived per repo from a master recovery secret
+- Instead of using a single encryption key across the repo, we'll partition it to spaces
+  - A single item should only map to a single space unlike sync partitions
+
+Why these recovery keys?
+These allow backup hub nodes to work better.
+They only need to see encrypted content.
+If all of the user's clone are unavailable, the user is still allowed to unlock the master secret key and derive the recovery keys allowing fresh clones from hub.
+Master secret keys are stored on the hub but in encrypted form.
+The hub impl can decide how to deliver/dercrypt those on the client.
 
 ## 2026-06-05 | forgery protection
 

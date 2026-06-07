@@ -1,7 +1,8 @@
 use crate::interlude::*;
 
 use crate::ffi::{FfiError, SharedFfiCtx};
-use daybook_core::plugs::{PlugsEvent, PlugsRepo};
+use daybook_core::plugs::{OciImportOptions, PlugsEvent, PlugsRepo};
+use std::path::PathBuf;
 
 #[derive(uniffi::Object)]
 pub struct PlugsRepoFfi {
@@ -54,6 +55,18 @@ impl PlugsRepoFfi {
                 if let Some(token) = stop_token {
                     token.stop().await?;
                 }
+                Ok::<(), FfiError>(())
+            })
+            .await
+    }
+
+    async fn import_from_oci_layout(&self, path: String) -> Result<(), FfiError> {
+        let repo = Arc::clone(&self.repo);
+        let path = PathBuf::from(path);
+        self.fcx
+            .do_on_rt(async move {
+                repo.import_from_oci_layout(&path, OciImportOptions::default())
+                    .await?;
                 Ok::<(), FfiError>(())
             })
             .await

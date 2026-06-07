@@ -76,11 +76,20 @@ import org.example.daybook.ui.editor.EditorSessionController
 import org.example.daybook.ui.editor.FacetEditorKind
 import org.example.daybook.ui.editor.FacetViewDescriptor
 import org.example.daybook.ui.editor.dmetaFacetKey
+import org.example.daybook.ui.editor.facetDisplayHintKey
+import org.example.daybook.ui.editor.facetKeyRefPathString
 import org.example.daybook.ui.editor.facetKeyString
+import org.example.daybook.ui.view.DaybookView
 import org.example.daybook.uniffi.types.Blob
 import org.example.daybook.uniffi.types.Doc
+import org.example.daybook.uniffi.types.FacetDisplayDeets
+import org.example.daybook.uniffi.types.FacetDisplayHint
 import org.example.daybook.uniffi.types.FacetKey
+import org.example.daybook.uniffi.types.ViewSpec
 import org.example.daybook.uniffi.types.WellKnownFacet
+import kotlin.coroutines.cancellation.CancellationException
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.withContext
 
 private enum class EditorSaveStatus {
     Idle,
@@ -90,10 +99,19 @@ private enum class EditorSaveStatus {
 
 private data class SaveStatusUi(val icon: ImageVector, val tint: Color, val label: String)
 
+private sealed interface PluginFacetViewState {
+    data object Loading : PluginFacetViewState
+    data object RuntimeUnavailable : PluginFacetViewState
+    data class Ready(val spec: ViewSpec) : PluginFacetViewState
+    data class Failed(val message: String) : PluginFacetViewState
+}
+
 @Composable
 fun DocEditor(
     controller: EditorSessionController,
     showInlineFacetRack: Boolean = false,
+    displayHints: Map<String, FacetDisplayHint> = emptyMap(),
+    displayHintsError: String? = null,
     modifier: Modifier = Modifier,
 ) {
     val state by controller.state.collectAsState()
@@ -153,6 +171,13 @@ fun DocEditor(
                 }
                 HorizontalDivider(modifier = Modifier.padding(vertical = 8.dp))
 
+                displayHintsError?.let { message ->
+                    FacetStatusText(
+                        text = "Facet display config unavailable: $message",
+                        modifier = Modifier.padding(bottom = 8.dp),
+                    )
+                }
+
                 if (state.contentFacetViews.isEmpty()) {
                     Text(
                         text = "No facets",
@@ -172,12 +197,14 @@ fun DocEditor(
                     FacetListItem(
                         descriptor = descriptor,
                         doc = state.doc,
+                        branchPath = state.branchPath,
                         controller = controller,
                         modifier = Modifier.bringIntoViewRequester(bringIntoViewRequester),
                         canShowMenu = state.docId != null,
                         noteDraft = state.noteEditors[descriptor.facetKey]?.draft,
                         noteEditable = state.noteEditors[descriptor.facetKey]?.editable ?: false,
                         noteNotice = state.noteEditors[descriptor.facetKey]?.notice,
+                        displayHints = displayHints,
                         canMoveUp = index > 0,
                         canMoveDown = index < state.contentFacetViews.lastIndex,
                         // FIXME: don't use viewport height but 5 lines of content
@@ -223,17 +250,22 @@ fun DocEditor(
 private fun FacetListItem(
     descriptor: FacetViewDescriptor,
     doc: Doc?,
+    branchPath: String,
     controller: EditorSessionController,
     modifier: Modifier = Modifier,
     canShowMenu: Boolean,
     noteDraft: String?,
     noteEditable: Boolean,
     noteNotice: String?,
+    displayHints: Map<String, FacetDisplayHint>,
     canMoveUp: Boolean,
     canMoveDown: Boolean,
     noteMinHeight: androidx.compose.ui.unit.Dp,
     onUiError: (String) -> Unit,
 ) {
+    val displayHintKey = facetDisplayHintKey(descriptor.facetKey)
+    val customView = displayHints[displayHintKey]?.deets as? FacetDisplayDeets.CustomView
+
     Column(
         modifier =
         modifier
@@ -250,8 +282,17 @@ private fun FacetListItem(
             canMoveUp = canMoveUp,
             canMoveDown = canMoveDown,
         )
-        when (descriptor.kind) {
-            FacetEditorKind.Note -> {
+        when {
+            customView != null -> {
+                PluginFacetView(
+                    docId = doc?.id,
+                    branchPath = branchPath,
+                    facetKey = descriptor.facetKey,
+                    customView = customView,
+                )
+            }
+
+            descriptor.kind == FacetEditorKind.Note -> {
                 val value = noteDraft ?: ""
                 val noteLineCount = value.count { character -> character == '\n' } + 1
                 val noteMinLines = 6
@@ -291,7 +332,7 @@ private fun FacetListItem(
                 }
             }
 
-            FacetEditorKind.ImageMetadata -> {
+            descriptor.kind == FacetEditorKind.ImageMetadata -> {
                 ImageFacetView(
                     descriptor = descriptor,
                     doc = doc,
@@ -299,10 +340,109 @@ private fun FacetListItem(
                 )
             }
 
-            FacetEditorKind.GenericJson -> {
+            descriptor.kind == FacetEditorKind.GenericJson -> {
                 GenericFacetView(rawValue = descriptor.rawValue)
             }
         }
+    }
+}
+
+@Composable
+private fun PluginFacetView(
+    docId: String?,
+    branchPath: String,
+    facetKey: FacetKey,
+    customView: FacetDisplayDeets.CustomView,
+) {
+    val rtFfi = LocalContainer.current.rtFfi
+    val facetKeyLabel = facetKeyString(facetKey)
+    val facetKeyRefPath = facetKeyRefPathString(facetKey)
+    var viewState by remember { mutableStateOf<PluginFacetViewState>(PluginFacetViewState.Loading) }
+
+    LaunchedEffect(
+        docId,
+        branchPath,
+        facetKeyRefPath,
+        customView.view.plugId,
+        customView.view.viewKey,
+        rtFfi,
+    ) {
+        viewState = PluginFacetViewState.Loading
+        when {
+            docId == null -> viewState = PluginFacetViewState.Failed("Document unavailable")
+            rtFfi == null -> viewState = PluginFacetViewState.RuntimeUnavailable
+            else -> {
+                viewState =
+                    try {
+                        val record =
+                            withContext(Dispatchers.IO) {
+                                rtFfi.renderFacetView(
+                                    docId = docId,
+                                    branchPath = branchPath,
+                                    facetKey = facetKeyRefPath,
+                                    requestedView = customView.view,
+                                    uiStateJson = null,
+                                )
+                            }
+                        PluginFacetViewState.Ready(record.view)
+                    } catch (throwable: Throwable) {
+                        if (throwable is CancellationException) {
+                            throw throwable
+                        }
+                        PluginFacetViewState.Failed(throwable.message ?: throwable::class.simpleName.orEmpty())
+                    }
+            }
+        }
+    }
+
+    Column(
+        modifier =
+        Modifier
+            .fillMaxWidth()
+            .testTag(DaybookEditorSemantics.pluginFacet(facetKeyLabel)),
+    ) {
+        when (val state = viewState) {
+            PluginFacetViewState.Loading -> {
+                FacetStatusText(
+                    text = "Loading plugin view...",
+                    modifier = Modifier.testTag(DaybookEditorSemantics.pluginFacetState(facetKeyLabel)),
+                )
+            }
+
+            PluginFacetViewState.RuntimeUnavailable -> {
+                FacetStatusText(
+                    text = "Plugin runtime unavailable",
+                    modifier = Modifier.testTag(DaybookEditorSemantics.pluginFacetState(facetKeyLabel)),
+                )
+            }
+
+            is PluginFacetViewState.Failed -> {
+                FacetStatusText(
+                    text = "Plugin view failed: ${state.message}",
+                    modifier = Modifier.testTag(DaybookEditorSemantics.pluginFacetState(facetKeyLabel)),
+                )
+            }
+
+            is PluginFacetViewState.Ready -> {
+                DaybookView(spec = state.spec)
+            }
+        }
+    }
+}
+
+@Composable
+private fun FacetStatusText(text: String, modifier: Modifier = Modifier) {
+    Surface(
+        modifier = modifier.fillMaxWidth(),
+        color = MaterialTheme.colorScheme.surfaceVariant,
+        shape = MaterialTheme.shapes.small,
+    ) {
+        Text(
+            text = text,
+            style = MaterialTheme.typography.bodySmall,
+            color = MaterialTheme.colorScheme.onSurfaceVariant,
+            modifier = Modifier.padding(12.dp),
+        )
     }
 }
 

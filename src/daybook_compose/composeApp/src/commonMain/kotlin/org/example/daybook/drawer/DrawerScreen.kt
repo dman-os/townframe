@@ -19,11 +19,14 @@ import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.semantics.contentDescription
 import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.unit.dp
+import androidx.lifecycle.viewmodel.compose.viewModel
+import org.example.daybook.ConfigViewModel
 import org.example.daybook.DaybookEditorSemantics
 import org.example.daybook.DaybookContentType
 import org.example.daybook.DocEditorStoreViewModel
 import org.example.daybook.DocListState
 import org.example.daybook.DrawerViewModel
+import org.example.daybook.LocalContainer
 import org.example.daybook.LocalDocEditorStore
 import org.example.daybook.layouts.DaybookScaffold
 import org.example.daybook.layouts.LocalScreenChromeSpec
@@ -38,6 +41,7 @@ import org.example.daybook.ui.editor.noteFacetKey
 import org.example.daybook.ui.editor.titleFacetKey
 import org.example.daybook.ui.stripFacetRefFragment
 import org.example.daybook.uniffi.types.Doc
+import org.example.daybook.uniffi.types.FacetDisplayHint
 import org.example.daybook.uniffi.types.FacetKey
 import org.example.daybook.uniffi.types.FacetTag
 import org.example.daybook.uniffi.types.WellKnownFacet
@@ -46,6 +50,8 @@ import org.example.daybook.uniffi.types.WellKnownFacet
 private fun DrawerDocEditorContent(
     controller: org.example.daybook.ui.editor.EditorSessionController?,
     selectedDocId: String?,
+    displayHints: Map<String, FacetDisplayHint>,
+    displayHintsError: String?,
     modifier: Modifier = Modifier,
     showFacetSidebar: Boolean,
     showInlineFacetRack: Boolean = false,
@@ -76,6 +82,8 @@ private fun DrawerDocEditorContent(
                     pane("doc-main") {
                         DocEditor(
                             controller = controller,
+                            displayHints = displayHints,
+                            displayHintsError = displayHintsError,
                             modifier = Modifier.fillMaxSize(),
                         )
                     }
@@ -90,6 +98,8 @@ private fun DrawerDocEditorContent(
                 DocEditor(
                     controller = controller,
                     showInlineFacetRack = showInlineFacetRack,
+                    displayHints = displayHints,
+                    displayHintsError = displayHintsError,
                     modifier = Modifier.padding(16.dp),
                 )
             }
@@ -128,6 +138,10 @@ fun DrawerScreen(drawerVm: DrawerViewModel, onOpenDoc: (String) -> Unit, modifie
 @Composable
 fun DocEditorScreen(contentType: DaybookContentType, modifier: Modifier = Modifier) {
     val docEditorStore: DocEditorStoreViewModel = LocalDocEditorStore.current
+    val container = LocalContainer.current
+    val configVm = viewModel { ConfigViewModel(container.configRepo, container.progressRepo) }
+    val displayHints by configVm.metaTableKeyConfigs.collectAsState()
+    val configError by configVm.error.collectAsState()
     val selectedDocId by docEditorStore.selectedDocId.collectAsState()
     val selectedController by docEditorStore.selectedController.collectAsState()
     val editorState =
@@ -193,6 +207,8 @@ fun DocEditorScreen(contentType: DaybookContentType, modifier: Modifier = Modifi
                         DrawerDocEditorContent(
                             controller = selectedController,
                             selectedDocId = selectedDocId,
+                            displayHints = displayHints,
+                            displayHintsError = configError?.message,
                             modifier = Modifier.fillMaxSize(),
                             showFacetSidebar = contentType == DaybookContentType.LIST_AND_DETAIL,
                             showInlineFacetRack = contentType != DaybookContentType.LIST_AND_DETAIL,

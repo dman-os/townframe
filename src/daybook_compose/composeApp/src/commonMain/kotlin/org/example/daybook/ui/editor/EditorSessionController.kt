@@ -53,6 +53,7 @@ data class ScrollToFacetRequest(val facetKey: FacetKey, val seq: Long)
 data class EditorSessionState(
     val doc: Doc?,
     val docId: String?,
+    val branchPath: String,
     val titleDraft: String,
     val titleEditable: Boolean,
     val titleNotice: String?,
@@ -80,6 +81,7 @@ class EditorSessionController(
             EditorSessionState(
                 doc = null,
                 docId = null,
+                branchPath = EDITOR_BRANCH_PATH,
                 titleDraft = "",
                 titleEditable = true,
                 titleNotice = null,
@@ -305,6 +307,7 @@ class EditorSessionController(
         return EditorSessionState(
             doc = doc,
             docId = doc?.id,
+            branchPath = EDITOR_BRANCH_PATH,
             titleDraft = nextTitle,
             titleEditable = titleEditable,
             titleNotice = titleNotice,
@@ -603,6 +606,8 @@ class EditorSessionController(
     private fun newScrollToFacetRequest(facetKey: FacetKey): ScrollToFacetRequest =
         ScrollToFacetRequest(facetKey = facetKey, seq = nextScrollRequestSeq++)
 }
+
+const val EDITOR_BRANCH_PATH: String = "main"
 
 private fun bs58UuidId(): String = encodeBase58(Uuid.random().toByteArray())
 
