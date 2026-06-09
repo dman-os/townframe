@@ -6,8 +6,6 @@ Experimental.
 > #### Disclaimer
 > This repo contains a heap of objectively (and subjectively) bad code and is, in its entirety, designated POC/it-works-sometimes quality.
 > A big reason for that is because I'm responsible for it but also, a majority of it is vibecoded.
-> This especially applies to the Kotlin code in here. 
-> I'd not written a line of Kotlin before this and it shows (great language tho🤌).
 
 > [!NOTE] 
 >
@@ -43,11 +41,13 @@ Specifically, daybook design is informed by tech I find shiny, gaps I see in the
   - Notion 
     - Excellent design 
     - Questionable performance on Android
+    - Proprietary
   - Obsidian 
     - Excellent sensibilities
     - Questionable performance on Android
     - The plugins seem insecure
     - Collaboration is secondary?
+    - Proprietary
 - Politics
   - I'm an adblock person.
 
@@ -81,7 +81,7 @@ More details can be found in the [design docs](./docs/DEVDOC/design.md) but acti
 - Mobile first design
   - I and many others just won't use it unless it's easily usable on the go.
 - Long term sustainablity
-  - How to become sustainable without relying on VC money and its strings.
+  - How to become sustainable without relying on VC and its consequences.
 - Long term use
   - How can I have the whole or parts of the system convincingly useful even on my deathbed.
   - Using local-first design where the server is optional is a big help here.

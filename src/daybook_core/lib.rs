@@ -28,6 +28,7 @@ mod interlude {
 
 pub mod blobs;
 pub mod config;
+pub mod crypto;
 pub mod drawer;
 pub mod event_origin;
 pub mod imgtools;

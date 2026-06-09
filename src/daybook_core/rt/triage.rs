@@ -656,7 +656,7 @@ fn make_processor_done_token(
         serde_json::to_string(heads).expect(ERROR_JSON)
     )
     .expect("writing to string should never fail");
-    utils_rs::hash::blake3_hash_bytes(fingerprint.as_bytes())
+    utils_rs::hash::blake3_hash_bytes_multibase(fingerprint.as_bytes())
 }
 
 pub fn doc_processor_triage_listener() -> Box<dyn SwitchSink + Send + Sync> {
