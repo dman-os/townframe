@@ -120,8 +120,9 @@ pub struct FacetRoutineArgs {
 }
 
 pub(crate) fn facet_routine_args_fingerprint(args: &FacetRoutineArgs) -> String {
+    // FIXME: use drisl
     let bytes = serde_json::to_vec(args).expect(ERROR_JSON);
-    utils_rs::hash::blake3_hash_bytes(&bytes)
+    utils_rs::hash::blake3_hash_bytes_multibase(&bytes)
 }
 
 #[derive(Debug, Clone)]

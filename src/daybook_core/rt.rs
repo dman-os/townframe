@@ -1785,7 +1785,7 @@ impl Rt {
                 request.request_id
             )
             .expect("writing to string should never fail");
-            let encoded = utils_rs::hash::blake3_hash_bytes(identity.as_bytes());
+            let encoded = utils_rs::hash::blake3_hash_bytes_multibase(identity.as_bytes());
             format!("cmdinvoke-{encoded}")
         };
         let waiting_on_dispatch_ids = self
@@ -1916,7 +1916,7 @@ impl Rt {
                     .expect("writing to string should never fail");
                     write!(&mut identity, "|{facet_key}")
                         .expect("writing to string should never fail");
-                    utils_rs::hash::blake3_hash_bytes(identity.as_bytes())
+                    utils_rs::hash::blake3_hash_bytes_multibase(identity.as_bytes())
                 };
                 let dispatch_id = fixed_dispatch_id
                     .clone()
@@ -2010,7 +2010,7 @@ impl Rt {
                         invocation_kind
                     )
                     .expect("writing to string should never fail");
-                    utils_rs::hash::blake3_hash_bytes(identity.as_bytes())
+                    utils_rs::hash::blake3_hash_bytes_multibase(identity.as_bytes())
                 };
                 let dispatch_id = fixed_dispatch_id.clone().unwrap_or_else(|| {
                     format!("{plug_id}/{routine_name}/{branch_path}-{dispatch_id}")

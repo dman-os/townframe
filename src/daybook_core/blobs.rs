@@ -813,12 +813,12 @@ pub(crate) fn blob_id_to_iroh_hash(blob_id: BlobId) -> iroh_blobs::Hash {
 }
 
 pub fn blob_id_to_digest_str(blob_id: BlobId) -> String {
-    utils_rs::hash::encode_base58_multibase_blake3(*blob_id.as_bytes())
+    utils_rs::hash::encode_base58_multihash_blake3(*blob_id.as_bytes())
 }
 
 #[tracing::instrument]
 pub fn digest_str_to_blob_id(digest: &str) -> Res<BlobId> {
-    let bytes = utils_rs::hash::decode_base58_multibase_blake3(digest)?;
+    let bytes = utils_rs::hash::decode_base58_multihash_blake3(digest)?;
     Ok(BlobId::new(bytes))
 }
 
