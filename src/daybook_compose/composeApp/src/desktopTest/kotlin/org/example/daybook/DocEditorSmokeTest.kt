@@ -2,11 +2,14 @@ package org.example.daybook
 
 import androidx.compose.runtime.CompositionLocalProvider
 import androidx.compose.ui.test.ExperimentalTestApi
-import androidx.compose.ui.test.assertIsDisplayed
 import androidx.compose.ui.test.assertTextContains
+import androidx.compose.ui.test.assertIsDisplayed
+import androidx.compose.ui.test.onAllNodesWithTag
 import androidx.compose.ui.test.onAllNodesWithText
 import androidx.compose.ui.test.onNodeWithTag
 import androidx.compose.ui.test.onNodeWithText
+import androidx.compose.ui.test.performCustomAccessibilityActionWithLabel
+import androidx.compose.ui.test.performClick
 import androidx.compose.ui.test.v2.runComposeUiTest
 import java.nio.file.Files
 import java.nio.file.Path
@@ -27,6 +30,7 @@ import org.example.daybook.ui.encodeWellKnownFacet
 import org.example.daybook.ui.editor.facetKeyString
 import org.example.daybook.ui.editor.noteFacetKey
 import org.example.daybook.ui.editor.titleFacetKey
+import org.example.daybook.ui.view.DaybookViewSemantics
 import org.example.daybook.uniffi.AppFfiCtx
 import org.example.daybook.uniffi.BlobsRepoFfi
 import org.example.daybook.uniffi.CameraPreviewFfi
@@ -43,9 +47,11 @@ import org.example.daybook.uniffi.TablesRepoFfi
 import org.example.daybook.uniffi.types.AddDocArgs
 import org.example.daybook.uniffi.types.FacetDisplayDeets
 import org.example.daybook.uniffi.types.FacetDisplayHint
+import org.example.daybook.uniffi.types.FacetKey
+import org.example.daybook.uniffi.types.FacetTag
 import org.example.daybook.uniffi.types.FacetViewMode
 import org.example.daybook.uniffi.types.ViewRef
-import org.example.daybook.ui.view.DaybookViewSemantics
+import org.example.daybook.uniffi.types.WellKnownFacetTag
 
 @OptIn(ExperimentalTestApi::class)
 class DocEditorSmokeTest {
@@ -74,19 +80,122 @@ class DocEditorSmokeTest {
                 }
             }
 
-            runOnIdle {
-                docEditorStore.selectDoc(docId)
-            }
+            docEditorStore.selectDoc(docId)
 
             waitForIdle()
 
+            waitUntil(timeoutMillis = 10_000) {
+                onAllNodesWithText(titleText).fetchSemanticsNodes().isNotEmpty()
+            }
             onNodeWithTag(DaybookEditorSemantics.Screen).assertIsDisplayed()
             onNodeWithTag(DaybookEditorSemantics.Editor).assertIsDisplayed()
+            onNodeWithTag(DaybookEditorSemantics.Details).assertIsDisplayed()
             onNodeWithTag(DaybookEditorSemantics.TitleField).assertTextContains(titleText)
+            waitUntil(timeoutMillis = 10_000) {
+                onAllNodesWithText(noteText).fetchSemanticsNodes().isNotEmpty()
+            }
             onNodeWithTag(DaybookEditorSemantics.noteField(facetKeyString(noteFacetKey()))).assertTextContains(
                 noteText,
             )
-            onNodeWithTag(DaybookEditorSemantics.Details).assertIsDisplayed()
+        } finally {
+            fixture.close()
+        }
+    }
+
+    @Test
+    fun realRepo_block_shell_actions_are_accessible_and_work() = runComposeUiTest {
+        val fixture = runBlocking { RealRepoFixture.create() }
+        try {
+            val drawerVm = DrawerViewModel(fixture.drawerRepo)
+            val docEditorStore = DocEditorStoreViewModel(fixture.drawerRepo)
+
+            val secondNoteKey = noteFacetKeyWithId("second")
+            val firstNoteLabel = facetKeyString(noteFacetKey())
+            val secondNoteLabel = facetKeyString(secondNoteKey)
+            val docId = fixture.createDoc(
+                titleText = "Block action smoke title",
+                noteText = "First note block",
+                extraNotes = listOf(secondNoteKey to "Second note block"),
+            )
+
+            fun contentFacetLabels(): List<String> =
+                docEditorStore.selectedController.value?.state?.value?.contentFacetViews
+                    ?.map { descriptor -> facetKeyString(descriptor.facetKey) }
+                    .orEmpty()
+
+            fun indexOfFacet(facetKeyLabel: String): Int =
+                contentFacetLabels().indexOf(facetKeyLabel)
+
+            fun openBlockActions(facetKeyLabel: String) {
+                onNodeWithTag(DaybookEditorSemantics.facetRow(facetKeyLabel))
+                    .performCustomAccessibilityActionWithLabel("Block actions")
+            }
+
+            setContent {
+                DaybookTheme(themeConfig = ThemeConfig.Light) {
+                    ProvideScreenChromeSpec(ScreenChromeSpec()) {
+                        CompositionLocalProvider(
+                            LocalContainer provides fixture.container,
+                            LocalDrawerViewModel provides drawerVm,
+                            LocalDocEditorStore provides docEditorStore,
+                        ) {
+                            DocEditorScreen(contentType = DaybookContentType.LIST_ONLY)
+                        }
+                    }
+                }
+            }
+
+            docEditorStore.selectDoc(docId)
+
+            waitUntil(timeoutMillis = 10_000) {
+                val labels = contentFacetLabels()
+                labels.contains(firstNoteLabel) && labels.contains(secondNoteLabel)
+            }
+
+            openBlockActions(firstNoteLabel)
+            waitUntil(timeoutMillis = 10_000) {
+                onAllNodesWithTag(DaybookEditorSemantics.addNoteAfterAction(firstNoteLabel))
+                    .fetchSemanticsNodes()
+                    .isNotEmpty()
+            }
+            onNodeWithTag(DaybookEditorSemantics.addNoteAfterAction(firstNoteLabel)).performClick()
+
+            waitUntil(timeoutMillis = 10_000) {
+                docEditorStore.selectedController.value?.state?.value?.contentFacetViews?.size == 3
+            }
+
+            openBlockActions(secondNoteLabel)
+            waitUntil(timeoutMillis = 10_000) {
+                onAllNodesWithTag(DaybookEditorSemantics.makePrimaryAction(secondNoteLabel))
+                    .fetchSemanticsNodes()
+                    .isNotEmpty()
+            }
+            onNodeWithTag(DaybookEditorSemantics.makePrimaryAction(secondNoteLabel)).performClick()
+            waitUntil(timeoutMillis = 10_000) {
+                indexOfFacet(secondNoteLabel) < indexOfFacet(firstNoteLabel)
+            }
+
+            openBlockActions(secondNoteLabel)
+            waitUntil(timeoutMillis = 10_000) {
+                onAllNodesWithTag(DaybookEditorSemantics.moveDownAction(secondNoteLabel))
+                    .fetchSemanticsNodes()
+                    .isNotEmpty()
+            }
+            onNodeWithTag(DaybookEditorSemantics.moveDownAction(secondNoteLabel)).performClick()
+            waitUntil(timeoutMillis = 10_000) {
+                indexOfFacet(firstNoteLabel) < indexOfFacet(secondNoteLabel)
+            }
+
+            openBlockActions(secondNoteLabel)
+            waitUntil(timeoutMillis = 10_000) {
+                onAllNodesWithTag(DaybookEditorSemantics.moveUpAction(secondNoteLabel))
+                    .fetchSemanticsNodes()
+                    .isNotEmpty()
+            }
+            onNodeWithTag(DaybookEditorSemantics.moveUpAction(secondNoteLabel)).performClick()
+            waitUntil(timeoutMillis = 10_000) {
+                indexOfFacet(secondNoteLabel) < indexOfFacet(firstNoteLabel)
+            }
         } finally {
             fixture.close()
         }
@@ -121,14 +230,11 @@ class DocEditorSmokeTest {
                 }
             }
 
-            runOnIdle {
-                docEditorStore.selectDoc(docId)
-            }
+            docEditorStore.selectDoc(docId)
 
             waitUntil(timeoutMillis = 20_000) {
                 onAllNodesWithText("Sample summary").fetchSemanticsNodes().isNotEmpty()
             }
-
             onNodeWithTag(DaybookEditorSemantics.pluginFacet(facetKeyString(noteFacetKey()))).assertIsDisplayed()
             onNodeWithTag(DaybookViewSemantics.Root).assertIsDisplayed()
             onNodeWithText("Sample summary").assertIsDisplayed()
@@ -155,12 +261,19 @@ private class RealRepoFixture(
     val cameraPreviewFfi: CameraPreviewFfi,
     val container: AppContainer,
 ) {
-    fun createDoc(titleText: String, noteText: String): String = runBlocking(Dispatchers.IO) {
+    fun createDoc(
+        titleText: String,
+        noteText: String,
+        extraNotes: List<Pair<FacetKey, String>> = emptyList(),
+    ): String = runBlocking(Dispatchers.IO) {
         val facets =
             mutableMapOf(
                 titleFacetKey() to encodeJsonString(titleText),
                 noteFacetKey() to encodeWellKnownFacet(buildNoteFacet(noteText)),
             )
+        for ((facetKey, content) in extraNotes) {
+            facets[facetKey] = encodeWellKnownFacet(buildNoteFacet(content))
+        }
         drawerRepo.add(
             AddDocArgs(
                 branchPath = "main",
@@ -320,6 +433,9 @@ private class RealRepoFixture(
 private const val NOTE_DISPLAY_HINT_KEY = "org.example.daybook.note"
 private const val PLUG_TEST_ID = "@daybook/test"
 private const val PLUG_TEST_SAMPLE_VIEW_KEY = "sample-summary-card"
+
+private fun noteFacetKeyWithId(id: String): FacetKey =
+    FacetKey(FacetTag.WellKnown(WellKnownFacetTag.NOTE), id)
 
 private fun plugTestOciPath(): Path {
     var cursor: Path? = Path.of("").toAbsolutePath()

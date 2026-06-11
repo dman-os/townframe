@@ -2,35 +2,29 @@
 
 package org.example.daybook.ui
 
-import androidx.compose.foundation.hoverable
-import androidx.compose.foundation.interaction.MutableInteractionSource
-import androidx.compose.foundation.interaction.collectIsHoveredAsState
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
-import androidx.compose.foundation.layout.BoxWithConstraints
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
-import androidx.compose.foundation.layout.heightIn
+import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.padding
-import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.relocation.BringIntoViewRequester
 import androidx.compose.foundation.relocation.bringIntoViewRequester
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.verticalScroll
+import androidx.compose.foundation.interaction.MutableInteractionSource
+import androidx.compose.foundation.interaction.collectIsHoveredAsState
+import androidx.compose.foundation.hoverable
 import androidx.compose.material.icons.Icons
-import androidx.compose.material.icons.filled.ArrowDownward
-import androidx.compose.material.icons.filled.ArrowUpward
 import androidx.compose.material.icons.filled.Error
 import androidx.compose.material.icons.filled.MoreVert
-import androidx.compose.material.icons.filled.Star
 import androidx.compose.material.icons.filled.Sync
-import androidx.compose.material.icons.outlined.StarOutline
 import androidx.compose.material3.DropdownMenu
 import androidx.compose.material3.DropdownMenuItem
 import androidx.compose.material3.ExperimentalMaterial3Api
@@ -41,7 +35,6 @@ import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.PlainTooltip
 import androidx.compose.material3.SnackbarHost
 import androidx.compose.material3.SnackbarHostState
-import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextField
 import androidx.compose.material3.TextFieldDefaults
@@ -53,43 +46,29 @@ import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
-import androidx.compose.runtime.produceState
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
-import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.vector.ImageVector
-import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.platform.testTag
+import androidx.compose.ui.semantics.CustomAccessibilityAction
 import androidx.compose.ui.semantics.contentDescription
+import androidx.compose.ui.semantics.customActions
 import androidx.compose.ui.semantics.semantics
-import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
-import coil3.compose.AsyncImage
 import org.example.daybook.DaybookEditorSemantics
-import org.example.daybook.LocalContainer
 import org.example.daybook.ui.editor.EditorSessionController
-import org.example.daybook.ui.editor.FacetEditorKind
 import org.example.daybook.ui.editor.FacetViewDescriptor
 import org.example.daybook.ui.editor.dmetaFacetKey
 import org.example.daybook.ui.editor.facetDisplayHintKey
-import org.example.daybook.ui.editor.facetKeyRefPathString
 import org.example.daybook.ui.editor.facetKeyString
-import org.example.daybook.ui.view.DaybookView
-import org.example.daybook.uniffi.types.Blob
 import org.example.daybook.uniffi.types.Doc
-import org.example.daybook.uniffi.types.FacetDisplayDeets
 import org.example.daybook.uniffi.types.FacetDisplayHint
 import org.example.daybook.uniffi.types.FacetKey
-import org.example.daybook.uniffi.types.ViewSpec
-import org.example.daybook.uniffi.types.WellKnownFacet
-import kotlin.coroutines.cancellation.CancellationException
-import kotlinx.coroutines.Dispatchers
-import kotlinx.coroutines.withContext
 
 private enum class EditorSaveStatus {
     Idle,
@@ -98,13 +77,6 @@ private enum class EditorSaveStatus {
 }
 
 private data class SaveStatusUi(val icon: ImageVector, val tint: Color, val label: String)
-
-private sealed interface PluginFacetViewState {
-    data object Loading : PluginFacetViewState
-    data object RuntimeUnavailable : PluginFacetViewState
-    data class Ready(val spec: ViewSpec) : PluginFacetViewState
-    data class Failed(val message: String) : PluginFacetViewState
-}
 
 @Composable
 fun DocEditor(
@@ -135,106 +107,101 @@ fun DocEditor(
     }
 
     Box(modifier = modifier.fillMaxSize().testTag(DaybookEditorSemantics.Editor)) {
-        BoxWithConstraints(modifier = Modifier.fillMaxSize()) {
-            val facetViewportHeight = maxHeight
-            Column(
-                modifier = Modifier.fillMaxSize().verticalScroll(rememberScrollState()),
-            ) {
-                TextField(
-                    value = state.titleDraft,
-                    onValueChange = { value -> controller.setTitleDraft(value) },
+        Column(
+            modifier = Modifier.fillMaxSize().verticalScroll(rememberScrollState()),
+        ) {
+            TextField(
+                value = state.titleDraft,
+                onValueChange = { value -> controller.setTitleDraft(value) },
+                modifier =
+                Modifier
+                    .fillMaxWidth()
+                    .testTag(DaybookEditorSemantics.TitleField)
+                    .semantics {
+                        contentDescription = "Document title"
+                    },
+                enabled = state.titleEditable,
+                placeholder = { Text("Title") },
+                textStyle = MaterialTheme.typography.titleLarge.copy(fontWeight = FontWeight.Bold),
+                colors =
+                TextFieldDefaults.colors(
+                    focusedContainerColor = androidx.compose.ui.graphics.Color.Transparent,
+                    unfocusedContainerColor = androidx.compose.ui.graphics.Color.Transparent,
+                    disabledContainerColor = androidx.compose.ui.graphics.Color.Transparent,
+                    focusedIndicatorColor = androidx.compose.ui.graphics.Color.Transparent,
+                    unfocusedIndicatorColor = androidx.compose.ui.graphics.Color.Transparent,
+                ),
+            )
+            state.titleNotice?.let { titleNotice ->
+                Text(
+                    text = titleNotice,
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                )
+            }
+            HorizontalDivider(modifier = Modifier.padding(vertical = 8.dp))
+
+            displayHintsError?.let { message ->
+                FacetStatusText(
+                    text = "Facet display config unavailable: $message",
+                    modifier = Modifier.padding(bottom = 8.dp),
+                )
+            }
+
+            if (state.contentFacetViews.isEmpty()) {
+                Text(
+                    text = "No facets",
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                )
+            }
+
+            state.contentFacetViews.forEachIndexed { index, descriptor ->
+                val bringIntoViewRequester = remember(descriptor.facetKey) { BringIntoViewRequester() }
+                LaunchedEffect(state.scrollToFacetRequest?.seq, descriptor.facetKey) {
+                    val request = state.scrollToFacetRequest ?: return@LaunchedEffect
+                    if (request.facetKey == descriptor.facetKey) {
+                        bringIntoViewRequester.bringIntoView()
+                    }
+                }
+                FacetBlock(
+                    descriptor = descriptor,
+                    doc = state.doc,
+                    branchPath = state.branchPath,
+                    controller = controller,
+                    modifier = Modifier.bringIntoViewRequester(bringIntoViewRequester),
+                    canShowMenu = state.docId != null,
+                    noteDraft = state.noteEditors[descriptor.facetKey]?.draft,
+                    noteEditable = state.noteEditors[descriptor.facetKey]?.editable ?: false,
+                    noteNotice = state.noteEditors[descriptor.facetKey]?.notice,
+                    displayHints = displayHints,
+                    canMoveUp = index > 0,
+                    canMoveDown = index < state.contentFacetViews.lastIndex,
+                    onUiError = { message -> uiMessage = message },
+                )
+                if (index < state.contentFacetViews.lastIndex) {
+                    Spacer(modifier = Modifier.height(4.dp))
+                }
+            }
+
+            if (showInlineFacetRack) {
+                Column(
                     modifier =
                     Modifier
                         .fillMaxWidth()
-                        .testTag(DaybookEditorSemantics.TitleField)
-                        .semantics {
-                            contentDescription = "Document title"
-                        },
-                    enabled = state.titleEditable,
-                    placeholder = { Text("Title") },
-                    textStyle = MaterialTheme.typography.titleLarge.copy(fontWeight = FontWeight.Bold),
-                    colors =
-                    TextFieldDefaults.colors(
-                        focusedContainerColor = androidx.compose.ui.graphics.Color.Transparent,
-                        unfocusedContainerColor = androidx.compose.ui.graphics.Color.Transparent,
-                        disabledContainerColor = androidx.compose.ui.graphics.Color.Transparent,
-                        focusedIndicatorColor = androidx.compose.ui.graphics.Color.Transparent,
-                        unfocusedIndicatorColor = androidx.compose.ui.graphics.Color.Transparent,
-                    ),
-                )
-                state.titleNotice?.let { titleNotice ->
+                        .testTag(DaybookEditorSemantics.Details),
+                ) {
+                    HorizontalDivider(modifier = Modifier.padding(vertical = 8.dp))
                     Text(
-                        text = titleNotice,
-                        style = MaterialTheme.typography.bodySmall,
-                        color = MaterialTheme.colorScheme.onSurfaceVariant,
-                    )
-                }
-                HorizontalDivider(modifier = Modifier.padding(vertical = 8.dp))
-
-                displayHintsError?.let { message ->
-                    FacetStatusText(
-                        text = "Facet display config unavailable: $message",
+                        text = "Details",
+                        style = MaterialTheme.typography.titleSmall,
                         modifier = Modifier.padding(bottom = 8.dp),
                     )
-                }
-
-                if (state.contentFacetViews.isEmpty()) {
-                    Text(
-                        text = "No facets",
-                        style = MaterialTheme.typography.bodySmall,
-                        color = MaterialTheme.colorScheme.onSurfaceVariant,
-                    )
-                }
-
-                state.contentFacetViews.forEachIndexed { index, descriptor ->
-                    val bringIntoViewRequester = remember(descriptor.facetKey) { BringIntoViewRequester() }
-                    LaunchedEffect(state.scrollToFacetRequest?.seq, descriptor.facetKey) {
-                        val request = state.scrollToFacetRequest ?: return@LaunchedEffect
-                        if (request.facetKey == descriptor.facetKey) {
-                            bringIntoViewRequester.bringIntoView()
-                        }
-                    }
-                    FacetListItem(
-                        descriptor = descriptor,
+                    DocDetailsSidebar(
                         doc = state.doc,
-                        branchPath = state.branchPath,
-                        controller = controller,
-                        modifier = Modifier.bringIntoViewRequester(bringIntoViewRequester),
-                        canShowMenu = state.docId != null,
-                        noteDraft = state.noteEditors[descriptor.facetKey]?.draft,
-                        noteEditable = state.noteEditors[descriptor.facetKey]?.editable ?: false,
-                        noteNotice = state.noteEditors[descriptor.facetKey]?.notice,
-                        displayHints = displayHints,
-                        canMoveUp = index > 0,
-                        canMoveDown = index < state.contentFacetViews.lastIndex,
-                        // FIXME: don't use viewport height but 5 lines of content
-                        noteMinHeight = facetViewportHeight * 0.45f,
-                        onUiError = { message -> uiMessage = message },
+                        warnings = state.docWarnings,
+                        modifier = Modifier.fillMaxWidth(),
                     )
-                    if (index < state.contentFacetViews.lastIndex) {
-                        HorizontalDivider(modifier = Modifier.padding(vertical = 8.dp))
-                    }
-                }
-
-                if (showInlineFacetRack) {
-                    Column(
-                        modifier =
-                        Modifier
-                            .fillMaxWidth()
-                            .testTag(DaybookEditorSemantics.Details),
-                    ) {
-                        HorizontalDivider(modifier = Modifier.padding(vertical = 8.dp))
-                        Text(
-                            text = "Details",
-                            style = MaterialTheme.typography.titleSmall,
-                            modifier = Modifier.padding(bottom = 8.dp),
-                        )
-                        DocDetailsSidebar(
-                            doc = state.doc,
-                            warnings = state.docWarnings,
-                            modifier = Modifier.fillMaxWidth(),
-                        )
-                    }
                 }
             }
         }
@@ -247,7 +214,7 @@ fun DocEditor(
 }
 
 @Composable
-private fun FacetListItem(
+private fun FacetBlock(
     descriptor: FacetViewDescriptor,
     doc: Doc?,
     branchPath: String,
@@ -260,271 +227,168 @@ private fun FacetListItem(
     displayHints: Map<String, FacetDisplayHint>,
     canMoveUp: Boolean,
     canMoveDown: Boolean,
-    noteMinHeight: androidx.compose.ui.unit.Dp,
     onUiError: (String) -> Unit,
 ) {
     val displayHintKey = facetDisplayHintKey(descriptor.facetKey)
-    val customView = displayHints[displayHintKey]?.deets as? FacetDisplayDeets.CustomView
+    val displayHint = displayHints[displayHintKey]
+    val facetKeyLabel = facetKeyString(descriptor.facetKey)
+    val interactionSource = remember { MutableInteractionSource() }
+    val isHovered by interactionSource.collectIsHoveredAsState()
+    var actionsExpanded by remember { mutableStateOf(false) }
+    val actionsVisible = canShowMenu && (isHovered || actionsExpanded)
 
-    Column(
+    Box(
         modifier =
         modifier
             .fillMaxWidth()
-            .testTag(DaybookEditorSemantics.facetRow(facetKeyString(descriptor.facetKey))),
-    ) {
-        FacetHeader(
-            descriptor = descriptor,
-            canShowMenu = canShowMenu,
-            onAddNote = { controller.addNoteFacetAfter(descriptor.facetKey) },
-            onMakePrimary = { controller.makeFacetPrimary(descriptor.facetKey) },
-            onMoveUp = { controller.moveFacetEarlier(descriptor.facetKey) },
-            onMoveDown = { controller.moveFacetLater(descriptor.facetKey) },
-            canMoveUp = canMoveUp,
-            canMoveDown = canMoveDown,
-        )
-        when {
-            customView != null -> {
-                PluginFacetView(
-                    docId = doc?.id,
-                    branchPath = branchPath,
-                    facetKey = descriptor.facetKey,
-                    customView = customView,
-                )
-            }
-
-            descriptor.kind == FacetEditorKind.Note -> {
-                val value = noteDraft ?: ""
-                val noteLineCount = value.count { character -> character == '\n' } + 1
-                val noteMinLines = 6
-                val noteMaxLines = if (noteLineCount < noteMinLines) noteMinLines else noteLineCount
-                TextField(
-                    value = value,
-                    onValueChange = { nextValue ->
-                        controller.setNoteDraft(descriptor.facetKey, nextValue)
-                    },
-                    modifier =
-                    Modifier
-                        .fillMaxWidth()
-                        .heightIn(min = noteMinHeight)
-                        .testTag(DaybookEditorSemantics.noteField(facetKeyString(descriptor.facetKey)))
-                        .semantics {
-                            contentDescription = "Note facet ${facetKeyString(descriptor.facetKey)}"
-                        },
-                    enabled = noteEditable,
-                    minLines = noteMinLines,
-                    maxLines = noteMaxLines,
-                    placeholder = { Text("Start typing...") },
-                    colors =
-                    TextFieldDefaults.colors(
-                        focusedContainerColor = androidx.compose.ui.graphics.Color.Transparent,
-                        unfocusedContainerColor = androidx.compose.ui.graphics.Color.Transparent,
-                        disabledContainerColor = androidx.compose.ui.graphics.Color.Transparent,
-                        focusedIndicatorColor = androidx.compose.ui.graphics.Color.Transparent,
-                        unfocusedIndicatorColor = androidx.compose.ui.graphics.Color.Transparent,
-                    ),
-                )
-                noteNotice?.let {
-                    Text(
-                        text = it,
-                        style = MaterialTheme.typography.bodySmall,
-                        color = MaterialTheme.colorScheme.onSurfaceVariant,
-                    )
-                }
-            }
-
-            descriptor.kind == FacetEditorKind.ImageMetadata -> {
-                ImageFacetView(
-                    descriptor = descriptor,
-                    doc = doc,
-                    onError = onUiError,
-                )
-            }
-
-            descriptor.kind == FacetEditorKind.GenericJson -> {
-                GenericFacetView(rawValue = descriptor.rawValue)
-            }
-        }
-    }
-}
-
-@Composable
-private fun PluginFacetView(
-    docId: String?,
-    branchPath: String,
-    facetKey: FacetKey,
-    customView: FacetDisplayDeets.CustomView,
-) {
-    val rtFfi = LocalContainer.current.rtFfi
-    val facetKeyLabel = facetKeyString(facetKey)
-    val facetKeyRefPath = facetKeyRefPathString(facetKey)
-    var viewState by remember { mutableStateOf<PluginFacetViewState>(PluginFacetViewState.Loading) }
-
-    LaunchedEffect(
-        docId,
-        branchPath,
-        facetKeyRefPath,
-        customView.view.plugId,
-        customView.view.viewKey,
-        rtFfi,
-    ) {
-        viewState = PluginFacetViewState.Loading
-        when {
-            docId == null -> viewState = PluginFacetViewState.Failed("Document unavailable")
-            rtFfi == null -> viewState = PluginFacetViewState.RuntimeUnavailable
-            else -> {
-                viewState =
-                    try {
-                        val record =
-                            withContext(Dispatchers.IO) {
-                                rtFfi.renderFacetView(
-                                    docId = docId,
-                                    branchPath = branchPath,
-                                    facetKey = facetKeyRefPath,
-                                    requestedView = customView.view,
-                                    uiStateJson = null,
-                                )
-                            }
-                        PluginFacetViewState.Ready(record.view)
-                    } catch (throwable: Throwable) {
-                        if (throwable is CancellationException) {
-                            throw throwable
-                        }
-                        PluginFacetViewState.Failed(throwable.message ?: throwable::class.simpleName.orEmpty())
-                    }
-            }
-        }
-    }
-
-    Column(
-        modifier =
-        Modifier
-            .fillMaxWidth()
-            .testTag(DaybookEditorSemantics.pluginFacet(facetKeyLabel)),
-    ) {
-        when (val state = viewState) {
-            PluginFacetViewState.Loading -> {
-                FacetStatusText(
-                    text = "Loading plugin view...",
-                    modifier = Modifier.testTag(DaybookEditorSemantics.pluginFacetState(facetKeyLabel)),
-                )
-            }
-
-            PluginFacetViewState.RuntimeUnavailable -> {
-                FacetStatusText(
-                    text = "Plugin runtime unavailable",
-                    modifier = Modifier.testTag(DaybookEditorSemantics.pluginFacetState(facetKeyLabel)),
-                )
-            }
-
-            is PluginFacetViewState.Failed -> {
-                FacetStatusText(
-                    text = "Plugin view failed: ${state.message}",
-                    modifier = Modifier.testTag(DaybookEditorSemantics.pluginFacetState(facetKeyLabel)),
-                )
-            }
-
-            is PluginFacetViewState.Ready -> {
-                DaybookView(spec = state.spec)
-            }
-        }
-    }
-}
-
-@Composable
-private fun FacetStatusText(text: String, modifier: Modifier = Modifier) {
-    Surface(
-        modifier = modifier.fillMaxWidth(),
-        color = MaterialTheme.colorScheme.surfaceVariant,
-        shape = MaterialTheme.shapes.small,
-    ) {
-        Text(
-            text = text,
-            style = MaterialTheme.typography.bodySmall,
-            color = MaterialTheme.colorScheme.onSurfaceVariant,
-            modifier = Modifier.padding(12.dp),
-        )
-    }
-}
-
-@OptIn(ExperimentalMaterial3Api::class)
-@Composable
-private fun FacetHeader(
-    descriptor: FacetViewDescriptor,
-    canShowMenu: Boolean,
-    onAddNote: () -> Unit,
-    onMakePrimary: () -> Unit,
-    onMoveUp: () -> Unit,
-    onMoveDown: () -> Unit,
-    canMoveUp: Boolean,
-    canMoveDown: Boolean,
-) {
-    val interactionSource = remember { MutableInteractionSource() }
-    val isHovered by interactionSource.collectIsHoveredAsState()
-    Row(
-        modifier = Modifier.fillMaxWidth().hoverable(interactionSource),
-        horizontalArrangement = Arrangement.SpaceBetween,
-        verticalAlignment = Alignment.CenterVertically,
-    ) {
-        Text(
-            text = facetKeyString(descriptor.facetKey),
-            style = MaterialTheme.typography.titleSmall,
-        )
-        if (canShowMenu) {
-            var expanded by remember { mutableStateOf(false) }
-            val showPriorityActions = isHovered || expanded
-            Row(
-                verticalAlignment = Alignment.CenterVertically,
-            ) {
-                if (showPriorityActions) {
-                    FacetActionIconButton(
-                        label = if (descriptor.isPrimary) "Facet is primary" else "Make this facet primary",
-                        onClick = onMakePrimary,
-                    ) {
-                        Icon(
-                            if (descriptor.isPrimary) Icons.Filled.Star else Icons.Outlined.StarOutline,
-                            contentDescription = null,
-                        )
-                    }
-                    FacetActionIconButton(
-                        label = "Move facet up",
-                        onClick = onMoveUp,
-                        enabled = canMoveUp,
-                    ) {
-                        Icon(Icons.Filled.ArrowUpward, contentDescription = null)
-                    }
-                    FacetActionIconButton(
-                        label = "Move facet down",
-                        onClick = onMoveDown,
-                        enabled = canMoveDown,
-                    ) {
-                        Icon(Icons.Filled.ArrowDownward, contentDescription = null)
-                    }
-                    Spacer(modifier = Modifier.width(4.dp))
-                }
-
-                Box {
-                    IconButton(onClick = { expanded = true }) {
-                        Icon(Icons.Default.MoreVert, contentDescription = "Facet actions")
-                    }
-                    DropdownMenu(
-                        expanded = expanded,
-                        onDismissRequest = { expanded = false },
-                    ) {
-                        Text(
-                            text = "Add new facet",
-                            style = MaterialTheme.typography.labelSmall,
-                            modifier = Modifier.padding(horizontal = 16.dp, vertical = 8.dp),
-                        )
-                        DropdownMenuItem(
-                            text = { Text("Note") },
-                            onClick = {
-                                expanded = false
-                                onAddNote()
+            .hoverable(interactionSource)
+            .semantics {
+                customActions =
+                    if (canShowMenu) {
+                        listOf(
+                            CustomAccessibilityAction("Block actions") {
+                                actionsExpanded = true
+                                true
                             },
                         )
+                    } else {
+                        emptyList<CustomAccessibilityAction>()
                     }
-                }
             }
+            .testTag(DaybookEditorSemantics.facetRow(facetKeyLabel)),
+    ) {
+        Column(
+            modifier =
+            Modifier
+                .fillMaxWidth()
+                .padding(vertical = 2.dp)
+                .testTag(DaybookEditorSemantics.facetBlock(facetKeyLabel))
+                .semantics {
+                    contentDescription =
+                        if (descriptor.isPrimary) {
+                            "Primary document block"
+                        } else {
+                            "Document block"
+                        }
+                },
+        ) {
+            FacetContentHost(
+                descriptor = descriptor,
+                doc = doc,
+                branchPath = branchPath,
+                displayHint = displayHint,
+                noteEditor =
+                FacetNoteEditorProps(
+                    draft = noteDraft,
+                    editable = noteEditable,
+                    notice = noteNotice,
+                    onDraftChange = { nextValue ->
+                        controller.setNoteDraft(descriptor.facetKey, nextValue)
+                    },
+                ),
+                onUiError = onUiError,
+            )
+        }
+        FacetBlockActionsMenu(
+            facetKeyLabel = facetKeyLabel,
+            isPrimary = descriptor.isPrimary,
+            actions =
+            FacetBlockActions(
+                canShowMenu = canShowMenu,
+                canMoveUp = canMoveUp,
+                canMoveDown = canMoveDown,
+                onAddNote = { controller.addNoteFacetAfter(descriptor.facetKey) },
+                onMakePrimary = { controller.makeFacetPrimary(descriptor.facetKey) },
+                onMoveUp = { controller.moveFacetEarlier(descriptor.facetKey) },
+                onMoveDown = { controller.moveFacetLater(descriptor.facetKey) },
+            ),
+            expanded = actionsExpanded,
+            visible = actionsVisible,
+            onExpandedChange = { actionsExpanded = it },
+            modifier = Modifier.align(Alignment.TopEnd).padding(top = 2.dp),
+        )
+    }
+}
+
+private data class FacetBlockActions(
+    val canShowMenu: Boolean,
+    val canMoveUp: Boolean,
+    val canMoveDown: Boolean,
+    val onAddNote: () -> Unit,
+    val onMakePrimary: () -> Unit,
+    val onMoveUp: () -> Unit,
+    val onMoveDown: () -> Unit,
+)
+
+@Composable
+private fun FacetBlockActionsMenu(
+    facetKeyLabel: String,
+    isPrimary: Boolean,
+    actions: FacetBlockActions,
+    expanded: Boolean,
+    visible: Boolean,
+    onExpandedChange: (Boolean) -> Unit,
+    modifier: Modifier = Modifier,
+) {
+    if (!actions.canShowMenu) {
+        return
+    }
+
+    Box(modifier = modifier) {
+        if (visible || expanded) {
+            IconButton(
+                onClick = { onExpandedChange(true) },
+                modifier =
+                Modifier
+                    .size(36.dp)
+                    .testTag(DaybookEditorSemantics.blockActions(facetKeyLabel)),
+            ) {
+                Icon(
+                    imageVector = Icons.Default.MoreVert,
+                    contentDescription = "Block actions",
+                    tint = MaterialTheme.colorScheme.onSurfaceVariant,
+                )
+            }
+        }
+        DropdownMenu(
+            expanded = expanded,
+            onDismissRequest = { onExpandedChange(false) },
+        ) {
+            DropdownMenuItem(
+                text = { Text(if (isPrimary) "Primary block" else "Make primary") },
+                enabled = !isPrimary,
+                modifier = Modifier.testTag(DaybookEditorSemantics.makePrimaryAction(facetKeyLabel)),
+                onClick = {
+                    onExpandedChange(false)
+                    actions.onMakePrimary()
+                },
+            )
+            DropdownMenuItem(
+                text = { Text("Move up") },
+                enabled = actions.canMoveUp,
+                modifier = Modifier.testTag(DaybookEditorSemantics.moveUpAction(facetKeyLabel)),
+                onClick = {
+                    onExpandedChange(false)
+                    actions.onMoveUp()
+                },
+            )
+            DropdownMenuItem(
+                text = { Text("Move down") },
+                enabled = actions.canMoveDown,
+                modifier = Modifier.testTag(DaybookEditorSemantics.moveDownAction(facetKeyLabel)),
+                onClick = {
+                    onExpandedChange(false)
+                    actions.onMoveDown()
+                },
+            )
+            DropdownMenuItem(
+                text = { Text("Add note below") },
+                modifier = Modifier.testTag(DaybookEditorSemantics.addNoteAfterAction(facetKeyLabel)),
+                onClick = {
+                    onExpandedChange(false)
+                    actions.onAddNote()
+                },
+            )
         }
     }
 }
@@ -573,150 +437,6 @@ private fun EditorSaveStatusIndicator(saveStatus: EditorSaveStatus, modifier: Mo
             )
         }
     }
-}
-
-@Composable
-@OptIn(ExperimentalMaterial3Api::class)
-private fun FacetActionIconButton(
-    label: String,
-    onClick: () -> Unit,
-    enabled: Boolean = true,
-    content: @Composable () -> Unit,
-) {
-    TooltipBox(
-        positionProvider = TooltipDefaults.rememberPlainTooltipPositionProvider(),
-        tooltip = { PlainTooltip { Text(label) } },
-        state = rememberTooltipState(),
-    ) {
-        IconButton(
-            onClick = onClick,
-            enabled = enabled,
-        ) {
-            content()
-        }
-    }
-}
-
-@Composable
-private fun GenericFacetView(rawValue: String) {
-    Text(
-        text = rawValue,
-        style = MaterialTheme.typography.bodySmall.copy(fontFamily = FontFamily.Monospace),
-        modifier = Modifier.fillMaxWidth().padding(top = 4.dp),
-        color = MaterialTheme.colorScheme.onSurfaceVariant,
-    )
-}
-
-@Composable
-private fun ImageFacetView(descriptor: FacetViewDescriptor, doc: Doc?, onError: (String) -> Unit) {
-    val blobsRepo = LocalContainer.current.blobsRepo
-    val imageMeta =
-        decodeWellKnownFacet<WellKnownFacet.ImageMetadata>(descriptor.rawValue)
-            .getOrElse {
-                ImageFacetError(
-                    "Invalid image metadata facet payload; image preview disabled to avoid destructive edits.",
-                )
-                return
-            }
-            .v1
-
-    val resolvedDoc =
-        doc ?: run {
-            ImageFacetError("Referenced blob facet not found.")
-            return
-        }
-
-    val blobKey =
-        resolvedDoc.facets.keys.firstOrNull { key ->
-            stripFacetRefFragment(buildSelfFacetRefUrl(key)) ==
-                stripFacetRefFragment(imageMeta.facetRef)
-        } ?: run {
-            ImageFacetError("Referenced blob facet not found.")
-            return
-        }
-
-    val blobValue =
-        resolvedDoc.facets[blobKey] ?: run {
-            ImageFacetError("Referenced blob facet not found.")
-            return
-        }
-
-    val blobFacet =
-        decodeWellKnownFacet<WellKnownFacet.Blob>(blobValue)
-            .getOrElse {
-                ImageFacetError(
-                    "Invalid blob facet payload; image preview disabled to avoid destructive edits.",
-                )
-                return
-            }
-
-    val blobHash =
-        blobHash(blobFacet.v1) ?: run {
-            ImageFacetError("Blob facet has no resolvable local hash URL.")
-            return
-        }
-
-    val imagePath by
-        produceState<String?>(initialValue = null, blobHash) {
-            value =
-                try {
-                    blobsRepo.getPath(blobHash)
-                } catch (error: Throwable) {
-                    onError(error.message ?: "Failed to resolve image path")
-                    null
-                }
-        }
-
-    Column(modifier = Modifier.fillMaxWidth().padding(top = 4.dp)) {
-        if (imagePath != null) {
-            val imageModifier =
-                if (descriptor.isPrimary) {
-                    Modifier.fillMaxWidth().heightIn(min = 260.dp)
-                } else {
-                    Modifier.fillMaxWidth().height(200.dp)
-                }
-
-            Box(modifier = imageModifier) {
-                AsyncImage(
-                    model = "file://$imagePath",
-                    contentDescription = "Document image",
-                    modifier = Modifier.fillMaxSize().clip(MaterialTheme.shapes.medium),
-                    contentScale = ContentScale.FillWidth,
-                )
-
-                val width = imageMeta.widthPx.toString()
-                val height = imageMeta.heightPx.toString()
-                Surface(
-                    tonalElevation = 2.dp,
-                    shape = MaterialTheme.shapes.small,
-                    color = MaterialTheme.colorScheme.surface.copy(alpha = 0.85f),
-                    modifier = Modifier.align(Alignment.BottomEnd).padding(8.dp),
-                ) {
-                    Text(
-                        text = "$width×$height",
-                        style = MaterialTheme.typography.labelSmall,
-                        modifier = Modifier.padding(horizontal = 8.dp, vertical = 4.dp),
-                    )
-                }
-            }
-        } else {
-            Text(
-                "Image path unavailable",
-                style = MaterialTheme.typography.bodySmall,
-                color = MaterialTheme.colorScheme.onSurfaceVariant,
-            )
-        }
-    }
-}
-
-@Composable
-private fun ImageFacetError(message: String) {
-    Text(
-        message,
-        style = MaterialTheme.typography.bodySmall,
-        color = MaterialTheme.colorScheme.onSurfaceVariant,
-        modifier = Modifier.fillMaxWidth().padding(top = 4.dp),
-    )
 }
 
 @Composable
@@ -857,20 +577,4 @@ private fun FacetRackList(facetRows: List<Pair<FacetKey, String>>, modifier: Mod
             }
         }
     }
-}
-
-private fun blobHash(blob: Blob): String? {
-    val fromUrl =
-        blob.urls?.firstNotNullOfOrNull { url ->
-            if (!url.startsWith("db+blob:///")) {
-                null
-            } else {
-                val hashValue = url.removePrefix("db+blob:///")
-                if (hashValue.isBlank()) null else hashValue
-            }
-        }
-    if (!fromUrl.isNullOrBlank()) {
-        return fromUrl
-    }
-    return blob.digest.ifBlank { null }
 }
