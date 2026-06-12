@@ -202,6 +202,86 @@ class DocEditorSmokeTest {
     }
 
     @Test
+    fun realRepo_block_shell_can_collapse_and_expand() = runComposeUiTest {
+        val fixture = runBlocking { RealRepoFixture.create() }
+        try {
+            val drawerVm = DrawerViewModel(fixture.drawerRepo)
+            val docEditorStore = DocEditorStoreViewModel(fixture.drawerRepo)
+
+            val firstNoteLabel = facetKeyString(noteFacetKey())
+            val docId = fixture.createDoc(
+                titleText = "Collapse smoke title",
+                noteText = "Collapsed note preview",
+            )
+
+            fun openBlockActions(facetKeyLabel: String) {
+                onNodeWithTag(DaybookEditorSemantics.facetRow(facetKeyLabel))
+                    .performCustomAccessibilityActionWithLabel("Block actions")
+            }
+
+            setContent {
+                DaybookTheme(themeConfig = ThemeConfig.Light) {
+                    ProvideScreenChromeSpec(ScreenChromeSpec()) {
+                        CompositionLocalProvider(
+                            LocalContainer provides fixture.container,
+                            LocalDrawerViewModel provides drawerVm,
+                            LocalDocEditorStore provides docEditorStore,
+                        ) {
+                            DocEditorScreen(contentType = DaybookContentType.LIST_ONLY)
+                        }
+                    }
+                }
+            }
+
+            docEditorStore.selectDoc(docId)
+
+            waitUntil(timeoutMillis = 10_000) {
+                onAllNodesWithTag(DaybookEditorSemantics.noteField(firstNoteLabel))
+                    .fetchSemanticsNodes()
+                    .isNotEmpty()
+            }
+
+            openBlockActions(firstNoteLabel)
+            waitUntil(timeoutMillis = 10_000) {
+                onAllNodesWithTag(DaybookEditorSemantics.toggleBlockCollapseAction(firstNoteLabel))
+                    .fetchSemanticsNodes()
+                    .isNotEmpty()
+            }
+            onNodeWithTag(DaybookEditorSemantics.toggleBlockCollapseAction(firstNoteLabel)).performClick()
+
+            waitUntil(timeoutMillis = 10_000) {
+                onAllNodesWithTag(DaybookEditorSemantics.collapsedFacetBlock(firstNoteLabel))
+                    .fetchSemanticsNodes()
+                    .isNotEmpty()
+            }
+            onNodeWithTag(DaybookEditorSemantics.collapsedFacetBlock(firstNoteLabel)).assertIsDisplayed()
+            onNodeWithText("Collapsed note preview").assertIsDisplayed()
+            waitUntil(timeoutMillis = 10_000) {
+                onAllNodesWithTag(DaybookEditorSemantics.noteField(firstNoteLabel))
+                    .fetchSemanticsNodes()
+                    .isEmpty()
+            }
+            onNodeWithTag(DaybookEditorSemantics.blockActions(firstNoteLabel)).assertIsDisplayed()
+            onNodeWithTag(DaybookEditorSemantics.facetRow(firstNoteLabel))
+                .performCustomAccessibilityActionWithLabel("Expand block")
+
+            waitUntil(timeoutMillis = 10_000) {
+                onAllNodesWithTag(DaybookEditorSemantics.noteField(firstNoteLabel))
+                    .fetchSemanticsNodes()
+                    .isNotEmpty()
+            }
+            onNodeWithTag(DaybookEditorSemantics.noteField(firstNoteLabel)).assertIsDisplayed()
+            waitUntil(timeoutMillis = 10_000) {
+                onAllNodesWithTag(DaybookEditorSemantics.collapsedFacetBlock(firstNoteLabel))
+                    .fetchSemanticsNodes()
+                    .isEmpty()
+            }
+        } finally {
+            fixture.close()
+        }
+    }
+
+    @Test
     fun realFfi_renders_custom_view_facet_in_doc_editor_screen() = runComposeUiTest {
         val fixture = runBlocking { RealRepoFixture.create(loadRt = true) }
         try {

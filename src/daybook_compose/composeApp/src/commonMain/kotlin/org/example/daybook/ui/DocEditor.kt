@@ -7,6 +7,7 @@ import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
+import androidx.compose.foundation.background
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
@@ -23,6 +24,8 @@ import androidx.compose.foundation.interaction.collectIsHoveredAsState
 import androidx.compose.foundation.hoverable
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.Error
+import androidx.compose.material.icons.filled.KeyboardArrowDown
+import androidx.compose.material.icons.filled.KeyboardArrowUp
 import androidx.compose.material.icons.filled.MoreVert
 import androidx.compose.material.icons.filled.Sync
 import androidx.compose.material3.DropdownMenu
@@ -46,11 +49,13 @@ import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.mutableStateMapOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Color
+import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.ui.graphics.vector.ImageVector
 import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.semantics.CustomAccessibilityAction
@@ -62,6 +67,7 @@ import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import org.example.daybook.DaybookEditorSemantics
 import org.example.daybook.ui.editor.EditorSessionController
+import org.example.daybook.ui.editor.FacetEditorKind
 import org.example.daybook.ui.editor.FacetViewDescriptor
 import org.example.daybook.ui.editor.dmetaFacetKey
 import org.example.daybook.ui.editor.facetDisplayHintKey
@@ -78,6 +84,12 @@ private enum class EditorSaveStatus {
 
 private data class SaveStatusUi(val icon: ImageVector, val tint: Color, val label: String)
 
+private data class FacetBlockSummary(
+    val title: String,
+    val preview: String?,
+    val contentDescription: String,
+)
+
 @Composable
 fun DocEditor(
     controller: EditorSessionController,
@@ -88,6 +100,7 @@ fun DocEditor(
 ) {
     val state by controller.state.collectAsState()
     val snackbarHostState = remember { SnackbarHostState() }
+    val collapsedFacetStates = remember(state.docId) { mutableStateMapOf<String, Boolean>() }
     var uiMessage by remember { mutableStateOf<String?>(null) }
     val saveStatus =
         when {
@@ -158,6 +171,8 @@ fun DocEditor(
 
             state.contentFacetViews.forEachIndexed { index, descriptor ->
                 val bringIntoViewRequester = remember(descriptor.facetKey) { BringIntoViewRequester() }
+                val facetKeyLabel = facetKeyString(descriptor.facetKey)
+                val isCollapsed = collapsedFacetStates[facetKeyLabel] == true
                 LaunchedEffect(state.scrollToFacetRequest?.seq, descriptor.facetKey) {
                     val request = state.scrollToFacetRequest ?: return@LaunchedEffect
                     if (request.facetKey == descriptor.facetKey) {
@@ -171,12 +186,16 @@ fun DocEditor(
                     controller = controller,
                     modifier = Modifier.bringIntoViewRequester(bringIntoViewRequester),
                     canShowMenu = state.docId != null,
+                    isCollapsed = isCollapsed,
                     noteDraft = state.noteEditors[descriptor.facetKey]?.draft,
                     noteEditable = state.noteEditors[descriptor.facetKey]?.editable ?: false,
                     noteNotice = state.noteEditors[descriptor.facetKey]?.notice,
                     displayHints = displayHints,
                     canMoveUp = index > 0,
                     canMoveDown = index < state.contentFacetViews.lastIndex,
+                    onToggleCollapse = {
+                        collapsedFacetStates[facetKeyLabel] = !(collapsedFacetStates[facetKeyLabel] == true)
+                    },
                     onUiError = { message -> uiMessage = message },
                 )
                 if (index < state.contentFacetViews.lastIndex) {
@@ -221,21 +240,41 @@ private fun FacetBlock(
     controller: EditorSessionController,
     modifier: Modifier = Modifier,
     canShowMenu: Boolean,
+    isCollapsed: Boolean,
     noteDraft: String?,
     noteEditable: Boolean,
     noteNotice: String?,
     displayHints: Map<String, FacetDisplayHint>,
     canMoveUp: Boolean,
     canMoveDown: Boolean,
+    onToggleCollapse: () -> Unit,
     onUiError: (String) -> Unit,
 ) {
     val displayHintKey = facetDisplayHintKey(descriptor.facetKey)
     val displayHint = displayHints[displayHintKey]
     val facetKeyLabel = facetKeyString(descriptor.facetKey)
+    val blockSummary =
+        remember(
+            descriptor.facetKey,
+            descriptor.kind,
+            descriptor.rawValue,
+            descriptor.isPrimary,
+            displayHint?.displayTitle,
+            noteDraft,
+        ) {
+            buildFacetBlockSummary(
+                descriptor = descriptor,
+                displayHint = displayHint,
+                noteDraft = noteDraft,
+            )
+        }
     val interactionSource = remember { MutableInteractionSource() }
     val isHovered by interactionSource.collectIsHoveredAsState()
     var actionsExpanded by remember { mutableStateOf(false) }
-    val actionsVisible = canShowMenu && (isHovered || actionsExpanded)
+    val blockActionsInteractionSource = remember { MutableInteractionSource() }
+    val isActionsHovered by blockActionsInteractionSource.collectIsHoveredAsState()
+    val actionsVisible = canShowMenu && (isCollapsed || isHovered || actionsExpanded || isActionsHovered)
+    val quickActionVisible = canShowMenu && (actionsExpanded || isActionsHovered)
 
     Box(
         modifier =
@@ -250,44 +289,71 @@ private fun FacetBlock(
                                 actionsExpanded = true
                                 true
                             },
+                            CustomAccessibilityAction(
+                                if (isCollapsed) {
+                                    "Expand block"
+                                } else {
+                                    "Collapse block"
+                                },
+                            ) {
+                                onToggleCollapse()
+                                true
+                            },
                         )
                     } else {
                         emptyList<CustomAccessibilityAction>()
                     }
-            }
-            .testTag(DaybookEditorSemantics.facetRow(facetKeyLabel)),
-    ) {
-        Column(
-            modifier =
-            Modifier
-                .fillMaxWidth()
-                .padding(vertical = 2.dp)
-                .testTag(DaybookEditorSemantics.facetBlock(facetKeyLabel))
-                .semantics {
-                    contentDescription =
+                contentDescription =
+                    if (isCollapsed) {
+                        blockSummary.contentDescription
+                    } else {
                         if (descriptor.isPrimary) {
                             "Primary document block"
                         } else {
                             "Document block"
                         }
-                },
-        ) {
-            FacetContentHost(
-                descriptor = descriptor,
-                doc = doc,
-                branchPath = branchPath,
-                displayHint = displayHint,
-                noteEditor =
-                FacetNoteEditorProps(
-                    draft = noteDraft,
-                    editable = noteEditable,
-                    notice = noteNotice,
-                    onDraftChange = { nextValue ->
-                        controller.setNoteDraft(descriptor.facetKey, nextValue)
-                    },
-                ),
-                onUiError = onUiError,
+                    }
+            }
+            .testTag(DaybookEditorSemantics.facetRow(facetKeyLabel)),
+    ) {
+        if (isCollapsed) {
+            FacetBlockCollapsedSummary(
+                summary = blockSummary,
+                facetKeyLabel = facetKeyLabel,
             )
+        } else {
+            Column(
+                modifier =
+                Modifier
+                    .fillMaxWidth()
+                    .padding(vertical = 2.dp)
+                    .testTag(DaybookEditorSemantics.facetBlock(facetKeyLabel))
+                    .semantics {
+                        contentDescription =
+                            if (descriptor.isPrimary) {
+                                "Primary document block"
+                            } else {
+                                "Document block"
+                            }
+                    },
+            ) {
+                FacetContentHost(
+                    descriptor = descriptor,
+                    doc = doc,
+                    branchPath = branchPath,
+                    displayHint = displayHint,
+                    noteEditor =
+                    FacetNoteEditorProps(
+                        draft = noteDraft,
+                        editable = noteEditable,
+                        notice = noteNotice,
+                        onDraftChange = { nextValue ->
+                            controller.setNoteDraft(descriptor.facetKey, nextValue)
+                        },
+                    ),
+                    onUiError = onUiError,
+                )
+            }
         }
         FacetBlockActionsMenu(
             facetKeyLabel = facetKeyLabel,
@@ -297,15 +363,27 @@ private fun FacetBlock(
                 canShowMenu = canShowMenu,
                 canMoveUp = canMoveUp,
                 canMoveDown = canMoveDown,
+                isCollapsed = isCollapsed,
                 onAddNote = { controller.addNoteFacetAfter(descriptor.facetKey) },
                 onMakePrimary = { controller.makeFacetPrimary(descriptor.facetKey) },
                 onMoveUp = { controller.moveFacetEarlier(descriptor.facetKey) },
                 onMoveDown = { controller.moveFacetLater(descriptor.facetKey) },
+                onToggleCollapse = onToggleCollapse,
             ),
             expanded = actionsExpanded,
             visible = actionsVisible,
             onExpandedChange = { actionsExpanded = it },
+            showQuickAction = quickActionVisible,
+            quickActionIcon =
+            if (isCollapsed) {
+                Icons.Default.KeyboardArrowDown
+            } else {
+                Icons.Default.KeyboardArrowUp
+            },
+            blockHovered = isHovered,
+            actionsHovered = isActionsHovered,
             modifier = Modifier.align(Alignment.TopEnd).padding(top = 2.dp),
+            interactionSource = blockActionsInteractionSource,
         )
     }
 }
@@ -314,10 +392,12 @@ private data class FacetBlockActions(
     val canShowMenu: Boolean,
     val canMoveUp: Boolean,
     val canMoveDown: Boolean,
+    val isCollapsed: Boolean,
     val onAddNote: () -> Unit,
     val onMakePrimary: () -> Unit,
     val onMoveUp: () -> Unit,
     val onMoveDown: () -> Unit,
+    val onToggleCollapse: () -> Unit,
 )
 
 @Composable
@@ -328,6 +408,11 @@ private fun FacetBlockActionsMenu(
     expanded: Boolean,
     visible: Boolean,
     onExpandedChange: (Boolean) -> Unit,
+    showQuickAction: Boolean,
+    quickActionIcon: ImageVector,
+    blockHovered: Boolean,
+    actionsHovered: Boolean,
+    interactionSource: MutableInteractionSource,
     modifier: Modifier = Modifier,
 ) {
     if (!actions.canShowMenu) {
@@ -335,18 +420,50 @@ private fun FacetBlockActionsMenu(
     }
 
     Box(modifier = modifier) {
-        if (visible || expanded) {
-            IconButton(
-                onClick = { onExpandedChange(true) },
-                modifier =
-                Modifier
-                    .size(36.dp)
-                    .testTag(DaybookEditorSemantics.blockActions(facetKeyLabel)),
-            ) {
-                Icon(
+        Row(
+            modifier =
+            Modifier
+                .hoverable(interactionSource)
+                .then(
+                    Modifier.background(
+                        color = if (showQuickAction) 
+                            MaterialTheme.colorScheme.surfaceContainer
+                        else 
+                            MaterialTheme.colorScheme.surfaceContainer.copy(alpha = 0.48f),
+                        shape = RoundedCornerShape(percent = 50),
+                    )
+                )
+                .padding(4.dp),
+            horizontalArrangement = Arrangement.spacedBy(2.dp),
+            verticalAlignment = Alignment.CenterVertically,
+        ) {
+            if (showQuickAction) {
+                FacetBlockActionButton(
+                    imageVector = quickActionIcon,
+                    tooltipText =
+                    if (actions.isCollapsed) {
+                        "Expand block"
+                    } else {
+                        "Collapse block"
+                    },
+                    contentDescription =
+                    if (actions.isCollapsed) {
+                        "Expand block"
+                    } else {
+                        "Collapse block"
+                    },
+                    testTag = DaybookEditorSemantics.toggleBlockCollapseQuickAction(facetKeyLabel),
+                    onClick = actions.onToggleCollapse,
+                    iconAlpha = 1f,
+                )
+            }
+            if (visible || expanded) {
+                FacetBlockActionButton(
                     imageVector = Icons.Default.MoreVert,
                     contentDescription = "Block actions",
-                    tint = MaterialTheme.colorScheme.onSurfaceVariant,
+                    testTag = DaybookEditorSemantics.blockActions(facetKeyLabel),
+                    onClick = { onExpandedChange(true) },
+                    iconAlpha = if (blockHovered || expanded || actionsHovered) 1f else 0.48f,
                 )
             }
         }
@@ -354,6 +471,22 @@ private fun FacetBlockActionsMenu(
             expanded = expanded,
             onDismissRequest = { onExpandedChange(false) },
         ) {
+            DropdownMenuItem(
+                text = {
+                    Text(
+                        if (actions.isCollapsed) {
+                            "Expand block"
+                        } else {
+                            "Collapse block"
+                        },
+                    )
+                },
+                modifier = Modifier.testTag(DaybookEditorSemantics.toggleBlockCollapseAction(facetKeyLabel)),
+                onClick = {
+                    onExpandedChange(false)
+                    actions.onToggleCollapse()
+                },
+            )
             DropdownMenuItem(
                 text = { Text(if (isPrimary) "Primary block" else "Make primary") },
                 enabled = !isPrimary,
@@ -390,6 +523,129 @@ private fun FacetBlockActionsMenu(
                 },
             )
         }
+    }
+}
+
+@OptIn(ExperimentalMaterial3Api::class)
+@Composable
+private fun FacetBlockActionButton(
+    imageVector: ImageVector,
+    contentDescription: String,
+    testTag: String,
+    onClick: () -> Unit,
+    tooltipText: String? = null,
+    iconAlpha: Float = 1f,
+) {
+    val buttonContent: @Composable () -> Unit = {
+        IconButton(
+            onClick = onClick,
+            modifier = Modifier.size(36.dp).testTag(testTag),
+        ) {
+            Icon(
+                imageVector = imageVector,
+                contentDescription = contentDescription,
+                tint = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = iconAlpha),
+            )
+        }
+    }
+
+    if (tooltipText != null) {
+        TooltipBox(
+            positionProvider = TooltipDefaults.rememberPlainTooltipPositionProvider(),
+            tooltip = {
+                PlainTooltip {
+                    Text(tooltipText)
+                }
+            },
+            state = rememberTooltipState(),
+        ) {
+            buttonContent()
+        }
+    } else {
+        buttonContent()
+    }
+}
+
+@Composable
+private fun FacetBlockCollapsedSummary(summary: FacetBlockSummary, facetKeyLabel: String) {
+    Column(
+        modifier =
+        Modifier
+            .fillMaxWidth()
+            .padding(vertical = 6.dp)
+            .testTag(DaybookEditorSemantics.collapsedFacetBlock(facetKeyLabel))
+            .semantics {
+                contentDescription = summary.contentDescription
+            },
+    ) {
+        Text(
+            text = summary.title,
+            style = MaterialTheme.typography.bodyMedium,
+            color = MaterialTheme.colorScheme.onSurfaceVariant,
+            maxLines = 1,
+            overflow = TextOverflow.Ellipsis,
+        )
+        summary.preview?.let { preview ->
+            Text(
+                text = preview,
+                style = MaterialTheme.typography.bodySmall,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                maxLines = 1,
+                overflow = TextOverflow.Ellipsis,
+                modifier = Modifier.padding(top = 2.dp),
+            )
+        }
+    }
+}
+
+private fun buildFacetBlockSummary(
+    descriptor: FacetViewDescriptor,
+    displayHint: FacetDisplayHint?,
+    noteDraft: String?,
+): FacetBlockSummary {
+    val title =
+        displayHint?.displayTitle?.takeIf { it.isNotBlank() }
+            ?: "${facetKindLabel(descriptor.kind)} · ${descriptor.facetKey.id}"
+    val preview =
+        when (descriptor.kind) {
+            FacetEditorKind.Note -> noteDraft.orEmpty().summaryPreview()
+            FacetEditorKind.GenericJson -> decodeJsonStringOrRaw(descriptor.rawValue).summaryPreview()
+            FacetEditorKind.ImageMetadata -> null
+        }
+    val prefix =
+        if (descriptor.isPrimary) {
+            "Primary collapsed document block"
+        } else {
+            "Collapsed document block"
+        }
+    val contentDescription =
+        buildString {
+            append(prefix)
+            append(": ")
+            append(title)
+            preview?.let {
+                append(". ")
+                append(it)
+            }
+        }
+    return FacetBlockSummary(title = title, preview = preview, contentDescription = contentDescription)
+}
+
+private fun facetKindLabel(kind: FacetEditorKind): String = when (kind) {
+    FacetEditorKind.Note -> "Note"
+    FacetEditorKind.ImageMetadata -> "Image"
+    FacetEditorKind.GenericJson -> "Generic"
+}
+
+private fun String.summaryPreview(maxLength: Int = 80): String? {
+    val preview = lineSequence().firstOrNull()?.trim().orEmpty()
+    if (preview.isBlank()) {
+        return null
+    }
+    return if (preview.length <= maxLength) {
+        preview
+    } else {
+        preview.take(maxLength - 1).trimEnd() + "…"
     }
 }
 

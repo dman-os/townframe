@@ -12,7 +12,13 @@ object DaybookEditorSemantics {
 
     fun facetBlock(facetKey: String): String = "doc-editor-facet-block:$facetKey"
 
+    fun collapsedFacetBlock(facetKey: String): String = "doc-editor-facet-block-collapsed:$facetKey"
+
     fun blockActions(facetKey: String): String = "doc-editor-block-actions:$facetKey"
+
+    fun toggleBlockCollapseAction(facetKey: String): String = "doc-editor-block-action-toggle-collapse:$facetKey"
+
+    fun toggleBlockCollapseQuickAction(facetKey: String): String = "doc-editor-block-action-toggle-collapse-quick:$facetKey"
 
     fun makePrimaryAction(facetKey: String): String = "doc-editor-block-action-make-primary:$facetKey"
 
