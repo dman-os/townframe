@@ -23,6 +23,7 @@ import kotlinx.coroutines.flow.asSharedFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.launch
 import org.example.daybook.ChromeState
+import org.example.daybook.LocalBigDialogController
 import org.example.daybook.LocalContainer
 import org.example.daybook.MainFeatureActionButton
 import org.example.daybook.ProvideChromeState
@@ -32,11 +33,12 @@ import org.example.daybook.capture.CaptureNavActions
 import org.example.daybook.capture.LocalCameraCaptureContext
 import org.example.daybook.capture.ui.DaybookCameraViewport
 import org.example.daybook.layouts.DaybookScaffold
-import org.example.daybook.ui.DocEditor
 import org.example.daybook.ui.buildBlobFacetFromDigest
 import org.example.daybook.ui.buildBodyFacet
 import org.example.daybook.ui.buildImageMetadataFacet
 import org.example.daybook.ui.buildSelfFacetRefUrl
+import org.example.daybook.ui.DocEditor
+import org.example.daybook.ui.rememberAddBlockDialogLauncher
 import org.example.daybook.ui.editor.EditorSessionController
 import org.example.daybook.ui.editor.blobFacetKey
 import org.example.daybook.ui.editor.bodyFacetKey
@@ -260,7 +262,10 @@ class CaptureScreenViewModel(
 }
 
 @Composable
-fun CaptureScreen(modifier: Modifier = Modifier, initialDocId: String? = null) {
+fun CaptureScreen(
+    modifier: Modifier = Modifier,
+    initialDocId: String? = null,
+) {
     val container = LocalContainer.current
     val tablesVm = viewModel { TablesViewModel(container.tablesRepo) }
     val vm =
@@ -343,8 +348,12 @@ fun CaptureScreen(modifier: Modifier = Modifier, initialDocId: String? = null) {
                     }
 
                     CaptureMode.TEXT -> {
+                        val addBlockDialogLauncher = rememberAddBlockDialogLauncher(vm.editorController)
+                        val bigDialogController = LocalBigDialogController.current
                         DocEditor(
                             controller = vm.editorController,
+                            isAddBlockPickerOpen = bigDialogController.isShowing,
+                            onAddBlockRequested = addBlockDialogLauncher,
                             modifier = Modifier.padding(16.dp),
                         )
                     }

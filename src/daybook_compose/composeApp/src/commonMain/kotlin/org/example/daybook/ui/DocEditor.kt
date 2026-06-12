@@ -4,13 +4,19 @@ package org.example.daybook.ui
 
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
+import androidx.compose.foundation.layout.BoxWithConstraints
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.background
+import androidx.compose.foundation.clickable
+import androidx.compose.foundation.layout.WindowInsets
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
+import androidx.compose.foundation.layout.heightIn
+import androidx.compose.foundation.layout.ime
+import androidx.compose.foundation.layout.imePadding
 import androidx.compose.foundation.layout.offset
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.padding
@@ -23,6 +29,7 @@ import androidx.compose.foundation.interaction.MutableInteractionSource
 import androidx.compose.foundation.interaction.collectIsHoveredAsState
 import androidx.compose.foundation.hoverable
 import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.filled.Add
 import androidx.compose.material.icons.filled.Error
 import androidx.compose.material.icons.filled.KeyboardArrowDown
 import androidx.compose.material.icons.filled.KeyboardArrowUp
@@ -38,7 +45,9 @@ import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.PlainTooltip
 import androidx.compose.material3.SnackbarHost
 import androidx.compose.material3.SnackbarHostState
+import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
+import androidx.compose.material3.TextButton
 import androidx.compose.material3.TextField
 import androidx.compose.material3.TextFieldDefaults
 import androidx.compose.material3.TooltipBox
@@ -54,11 +63,14 @@ import androidx.compose.runtime.mutableStateMapOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
+import androidx.compose.ui.focus.FocusRequester
+import androidx.compose.ui.focus.focusRequester
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Color
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.ui.graphics.vector.ImageVector
 import androidx.compose.ui.layout.onSizeChanged
+import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.semantics.CustomAccessibilityAction
 import androidx.compose.ui.semantics.contentDescription
@@ -67,8 +79,10 @@ import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.IntOffset
+import androidx.compose.ui.unit.Dp
 import androidx.compose.ui.unit.dp
 import org.example.daybook.DaybookEditorSemantics
+import org.example.daybook.LocalBigDialogController
 import org.example.daybook.ui.editor.EditorSessionController
 import org.example.daybook.ui.editor.FacetEditorKind
 import org.example.daybook.ui.editor.FacetViewDescriptor
@@ -105,12 +119,15 @@ fun DocEditor(
     showInlineFacetRack: Boolean = false,
     displayHints: Map<String, FacetDisplayHint> = emptyMap(),
     displayHintsError: String? = null,
+    isAddBlockPickerOpen: Boolean = false,
+    onAddBlockRequested: (FacetKey) -> Unit,
     modifier: Modifier = Modifier,
 ) {
     val state by controller.state.collectAsState()
     val snackbarHostState = remember { SnackbarHostState() }
     val collapsedFacetStates = remember(state.docId) { mutableStateMapOf<String, Boolean>() }
     val blockActionExpandedStates = remember(state.docId) { mutableStateMapOf<String, Boolean>() }
+    var focusedNoteFacetLabel by remember(state.docId) { mutableStateOf<String?>(null) }
     var uiMessage by remember { mutableStateOf<String?>(null) }
     val saveStatus =
         when {
@@ -132,6 +149,10 @@ fun DocEditor(
     val listState = rememberLazyListState()
     val hasFacetRows = state.contentFacetViews.isNotEmpty()
     var stickyFacetActionsHeightPx by remember(state.docId) { mutableStateOf(0) }
+    val onFocusedNoteFacetChanged: (FacetKey, Boolean) -> Unit = { facetKey, isFocused ->
+        val facetKeyLabel = facetKeyString(facetKey)
+        focusedNoteFacetLabel = if (isFocused) facetKeyLabel else focusedNoteFacetLabel?.takeUnless { it == facetKeyLabel }
+    }
     val facetListStartIndex =
         remember(state.titleNotice, displayHintsError, hasFacetRows) {
             docEditorFacetListStartIndex(
@@ -166,7 +187,8 @@ fun DocEditor(
         }
     }
 
-    Box(modifier = modifier.fillMaxSize().testTag(DaybookEditorSemantics.Editor)) {
+    BoxWithConstraints(modifier = modifier.fillMaxSize().imePadding().testTag(DaybookEditorSemantics.Editor)) {
+        val narrowScreen = maxWidth < 600.dp
         LazyColumn(
             state = listState,
             modifier =
@@ -235,8 +257,8 @@ fun DocEditor(
                 ) { index, descriptor ->
                     val facetKeyLabel = facetKeyString(descriptor.facetKey)
                     val isCollapsed = collapsedFacetStates[facetKeyLabel] == true
-                    val actionsExpanded = blockActionExpandedStates[facetKeyLabel] == true
-                    val showStickyActions = stickyFacetPlacement?.descriptor?.facetKey == descriptor.facetKey
+                    val isActionMenuOpen = blockActionExpandedStates[facetKeyLabel] == true
+                    val isUsingStickyActions = stickyFacetPlacement?.descriptor?.facetKey == descriptor.facetKey
                     FacetBlock(
                         descriptor = descriptor,
                         doc = state.doc,
@@ -245,15 +267,21 @@ fun DocEditor(
                         modifier = Modifier,
                         canShowMenu = state.docId != null,
                         isCollapsed = isCollapsed,
-                        actionsExpanded = actionsExpanded,
-                        onActionsExpandedChange = { blockActionExpandedStates[facetKeyLabel] = it },
-                        showInlineActions = !showStickyActions,
+                        isActionMenuOpen = isActionMenuOpen,
+                        onActionMenuOpenChange = { blockActionExpandedStates[facetKeyLabel] = it },
+                        showInlineActions = !isUsingStickyActions,
                         noteDraft = state.noteEditors[descriptor.facetKey]?.draft,
                         noteEditable = state.noteEditors[descriptor.facetKey]?.editable ?: false,
                         noteNotice = state.noteEditors[descriptor.facetKey]?.notice,
+                        onNoteFocusChanged = { isFocused ->
+                            onFocusedNoteFacetChanged(descriptor.facetKey, isFocused)
+                        },
                         displayHints = displayHints,
                         canMoveUp = index > 0,
                         canMoveDown = index < state.contentFacetViews.lastIndex,
+                        onAddBlockRequested = {
+                            onAddBlockRequested(descriptor.facetKey)
+                        },
                         onToggleCollapse = {
                             collapsedFacetStates[facetKeyLabel] = !(collapsedFacetStates[facetKeyLabel] == true)
                         },
@@ -293,9 +321,9 @@ fun DocEditor(
             val descriptor = placement.descriptor
             val facetKeyLabel = facetKeyString(descriptor.facetKey)
             val isCollapsed = collapsedFacetStates[facetKeyLabel] == true
-            val actionsExpanded = blockActionExpandedStates[facetKeyLabel] == true
+            val isActionMenuOpen = blockActionExpandedStates[facetKeyLabel] == true
             val stickyActionsHoverSource = remember(descriptor.facetKey) { MutableInteractionSource() }
-            val stickyActionsHovered by stickyActionsHoverSource.collectIsHoveredAsState()
+            val isStickyActionRowHovered by stickyActionsHoverSource.collectIsHoveredAsState()
             FacetBlockActionsMenu(
                 facetKeyLabel = facetKeyLabel,
                 isPrimary = descriptor.isPrimary,
@@ -305,7 +333,9 @@ fun DocEditor(
                     canMoveUp = placement.facetIndex > 0,
                     canMoveDown = placement.facetIndex < state.contentFacetViews.lastIndex,
                     isCollapsed = isCollapsed,
-                    onAddNote = { controller.addNoteFacetAfter(descriptor.facetKey) },
+                    onAddBlockRequested = {
+                        onAddBlockRequested(descriptor.facetKey)
+                    },
                     onMakePrimary = { controller.makeFacetPrimary(descriptor.facetKey) },
                     onMoveUp = { controller.moveFacetEarlier(descriptor.facetKey) },
                     onMoveDown = { controller.moveFacetLater(descriptor.facetKey) },
@@ -313,18 +343,18 @@ fun DocEditor(
                         collapsedFacetStates[facetKeyLabel] = !(collapsedFacetStates[facetKeyLabel] == true)
                     },
                 ),
-                expanded = actionsExpanded,
-                visible = true,
-                onExpandedChange = { blockActionExpandedStates[facetKeyLabel] = it },
-                showQuickAction = actionsExpanded || stickyActionsHovered,
-                quickActionIcon =
+                isMenuOpen = isActionMenuOpen,
+                showOverflowButton = isActionMenuOpen || isStickyActionRowHovered,
+                onMenuOpenChange = { blockActionExpandedStates[facetKeyLabel] = it },
+                showQuickActions = isActionMenuOpen || isStickyActionRowHovered,
+                collapseButtonIcon =
                 if (isCollapsed) {
                     Icons.Default.KeyboardArrowDown
                 } else {
                     Icons.Default.KeyboardArrowUp
                 },
-                blockHovered = true,
-                actionsHovered = stickyActionsHovered,
+                overflowButtonEmphasized = isActionMenuOpen || isStickyActionRowHovered,
+                enableInvisibleHoverTarget = true,
                 modifier =
                 Modifier
                     .align(Alignment.TopEnd)
@@ -335,9 +365,13 @@ fun DocEditor(
             )
         }
 
-        SnackbarHost(
-            hostState = snackbarHostState,
-            modifier = Modifier.align(Alignment.BottomCenter).padding(8.dp),
+        EditorBottomOverlayLane(
+            narrowScreen = narrowScreen,
+            contentFacetViews = state.contentFacetViews,
+            focusedNoteFacetLabel = focusedNoteFacetLabel,
+            isAddBlockPickerOpen = isAddBlockPickerOpen,
+            onAddBlockRequested = onAddBlockRequested,
+            snackbarHostState = snackbarHostState,
         )
     }
 }
@@ -399,15 +433,17 @@ private fun FacetBlock(
     modifier: Modifier = Modifier,
     canShowMenu: Boolean,
     isCollapsed: Boolean,
-    actionsExpanded: Boolean,
-    onActionsExpandedChange: (Boolean) -> Unit,
+    isActionMenuOpen: Boolean,
+    onActionMenuOpenChange: (Boolean) -> Unit,
     showInlineActions: Boolean,
     noteDraft: String?,
     noteEditable: Boolean,
     noteNotice: String?,
+    onNoteFocusChanged: (Boolean) -> Unit,
     displayHints: Map<String, FacetDisplayHint>,
     canMoveUp: Boolean,
     canMoveDown: Boolean,
+    onAddBlockRequested: () -> Unit,
     onToggleCollapse: () -> Unit,
     onUiError: (String) -> Unit,
 ) {
@@ -430,11 +466,20 @@ private fun FacetBlock(
             )
         }
     val interactionSource = remember { MutableInteractionSource() }
-    val isHovered by interactionSource.collectIsHoveredAsState()
+    val isBlockHovered by interactionSource.collectIsHoveredAsState()
     val blockActionsInteractionSource = remember { MutableInteractionSource() }
-    val isActionsHovered by blockActionsInteractionSource.collectIsHoveredAsState()
-    val actionsVisible = canShowMenu && (isCollapsed || isHovered || actionsExpanded || isActionsHovered)
-    val quickActionVisible = (actionsExpanded || isActionsHovered)
+    val isActionRowHovered by blockActionsInteractionSource.collectIsHoveredAsState()
+    val showOverflowButton =
+        canShowMenu && (isCollapsed || isBlockHovered || isActionMenuOpen || isActionRowHovered)
+    val showQuickActions = isActionMenuOpen || isActionRowHovered
+    val customActions =
+        blockCustomActions(
+            canShowMenu = canShowMenu,
+            isCollapsed = isCollapsed,
+            onOpenMenu = { onActionMenuOpenChange(true) },
+            onAddBlockRequested = onAddBlockRequested,
+            onToggleCollapse = onToggleCollapse,
+        )
 
     Box(
         modifier =
@@ -442,36 +487,14 @@ private fun FacetBlock(
             .fillMaxWidth()
             .hoverable(interactionSource)
             .semantics {
-                customActions =
-                    if (canShowMenu) {
-                        listOf(
-                            CustomAccessibilityAction("Block actions") {
-                                onActionsExpandedChange(true)
-                                true
-                            },
-                            CustomAccessibilityAction(
-                                if (isCollapsed) {
-                                    "Expand block"
-                                } else {
-                                    "Collapse block"
-                                },
-                            ) {
-                                onToggleCollapse()
-                                true
-                            },
-                        )
-                    } else {
-                        emptyList<CustomAccessibilityAction>()
-                    }
+                this.customActions = customActions
                 contentDescription =
                     if (isCollapsed) {
                         blockSummary.contentDescription
+                    } else if (descriptor.isPrimary) {
+                        "Primary document block"
                     } else {
-                        if (descriptor.isPrimary) {
-                            "Primary document block"
-                        } else {
-                            "Document block"
-                        }
+                        "Document block"
                     }
             }
             .testTag(DaybookEditorSemantics.facetRow(facetKeyLabel)),
@@ -507,6 +530,7 @@ private fun FacetBlock(
                         draft = noteDraft,
                         editable = noteEditable,
                         notice = noteNotice,
+                        onFocusChanged = onNoteFocusChanged,
                         onDraftChange = { nextValue ->
                             controller.setNoteDraft(descriptor.facetKey, nextValue)
                         },
@@ -516,33 +540,34 @@ private fun FacetBlock(
             }
         }
         if (showInlineActions) {
-            FacetBlockActionsMenu(
-                facetKeyLabel = facetKeyLabel,
-                isPrimary = descriptor.isPrimary,
-                actions =
+            val blockActions =
                 FacetBlockActions(
                     canShowMenu = canShowMenu,
                     canMoveUp = canMoveUp,
                     canMoveDown = canMoveDown,
                     isCollapsed = isCollapsed,
-                    onAddNote = { controller.addNoteFacetAfter(descriptor.facetKey) },
+                    onAddBlockRequested = onAddBlockRequested,
                     onMakePrimary = { controller.makeFacetPrimary(descriptor.facetKey) },
                     onMoveUp = { controller.moveFacetEarlier(descriptor.facetKey) },
                     onMoveDown = { controller.moveFacetLater(descriptor.facetKey) },
                     onToggleCollapse = onToggleCollapse,
-                ),
-                expanded = actionsExpanded,
-                visible = actionsVisible,
-                onExpandedChange = onActionsExpandedChange,
-                showQuickAction = quickActionVisible,
-                quickActionIcon =
+                )
+            FacetBlockActionsMenu(
+                facetKeyLabel = facetKeyLabel,
+                isPrimary = descriptor.isPrimary,
+                actions = blockActions,
+                isMenuOpen = isActionMenuOpen,
+                showOverflowButton = showOverflowButton,
+                onMenuOpenChange = onActionMenuOpenChange,
+                showQuickActions = showQuickActions,
+                collapseButtonIcon =
                 if (isCollapsed) {
                     Icons.Default.KeyboardArrowDown
                 } else {
                     Icons.Default.KeyboardArrowUp
                 },
-                blockHovered = isHovered,
-                actionsHovered = isActionsHovered,
+                overflowButtonEmphasized = isBlockHovered || isActionMenuOpen || isActionRowHovered,
+                enableInvisibleHoverTarget = false,
                 modifier = Modifier.align(Alignment.TopEnd).padding(top = 2.dp),
                 interactionSource = blockActionsInteractionSource,
             )
@@ -555,85 +580,143 @@ private data class FacetBlockActions(
     val canMoveUp: Boolean,
     val canMoveDown: Boolean,
     val isCollapsed: Boolean,
-    val onAddNote: () -> Unit,
+    val onAddBlockRequested: () -> Unit,
     val onMakePrimary: () -> Unit,
     val onMoveUp: () -> Unit,
     val onMoveDown: () -> Unit,
     val onToggleCollapse: () -> Unit,
 )
 
+private fun blockCustomActions(
+    canShowMenu: Boolean,
+    isCollapsed: Boolean,
+    onOpenMenu: () -> Unit,
+    onAddBlockRequested: () -> Unit,
+    onToggleCollapse: () -> Unit,
+): List<CustomAccessibilityAction> {
+    if (!canShowMenu) {
+        return emptyList()
+    }
+    return listOf(
+        CustomAccessibilityAction("Block actions") {
+            onOpenMenu()
+            true
+        },
+        CustomAccessibilityAction("Add block below") {
+            onAddBlockRequested()
+            true
+        },
+        CustomAccessibilityAction(
+            if (isCollapsed) {
+                "Expand block"
+            } else {
+                "Collapse block"
+            },
+        ) {
+            onToggleCollapse()
+            true
+        },
+    )
+}
+
 @Composable
 private fun FacetBlockActionsMenu(
     facetKeyLabel: String,
     isPrimary: Boolean,
     actions: FacetBlockActions,
-    expanded: Boolean,
-    visible: Boolean,
-    onExpandedChange: (Boolean) -> Unit,
-    showQuickAction: Boolean,
-    quickActionIcon: ImageVector,
-    blockHovered: Boolean,
-    actionsHovered: Boolean,
+    isMenuOpen: Boolean,
+    showOverflowButton: Boolean,
+    onMenuOpenChange: (Boolean) -> Unit,
+    showQuickActions: Boolean,
+    collapseButtonIcon: ImageVector,
+    overflowButtonEmphasized: Boolean,
+    enableInvisibleHoverTarget: Boolean,
     interactionSource: MutableInteractionSource,
     modifier: Modifier = Modifier,
 ) {
     if (!actions.canShowMenu) {
         return
     }
+    val hasVisibleControls = showQuickActions || showOverflowButton || isMenuOpen
+    if (!hasVisibleControls && !enableInvisibleHoverTarget) {
+        return
+    }
 
     val rowBackgroundColor =
-        if (showQuickAction) {
+        if (showQuickActions) {
             MaterialTheme.colorScheme.surfaceContainer
         } else {
             MaterialTheme.colorScheme.surfaceContainer.copy(alpha = 0.48f)
         }
 
     Box(modifier = modifier) {
-        Row(
-            modifier =
-            Modifier
-                .hoverable(interactionSource)
-                .background(
-                    color = rowBackgroundColor,
-                    shape = RoundedCornerShape(percent = 50),
-                )
-                .padding(4.dp),
-            horizontalArrangement = Arrangement.spacedBy(2.dp),
-            verticalAlignment = Alignment.CenterVertically,
-        ) {
-            if (showQuickAction) {
-                FacetBlockActionButton(
-                    imageVector = quickActionIcon,
-                    tooltipText =
-                    if (actions.isCollapsed) {
-                        "Expand block"
-                    } else {
-                        "Collapse block"
-                    },
-                    contentDescription =
-                    if (actions.isCollapsed) {
-                        "Expand block"
-                    } else {
-                        "Collapse block"
-                    },
-                    testTag = DaybookEditorSemantics.toggleBlockCollapseQuickAction(facetKeyLabel),
-                    onClick = actions.onToggleCollapse,
-                    iconAlpha = 1f,
-                )
+        if (hasVisibleControls) {
+            Row(
+                modifier =
+                Modifier
+                    .hoverable(interactionSource)
+                    .background(
+                        color = rowBackgroundColor,
+                        shape = RoundedCornerShape(percent = 50),
+                    )
+                    .padding(4.dp),
+                horizontalArrangement = Arrangement.spacedBy(2.dp),
+                verticalAlignment = Alignment.CenterVertically,
+            ) {
+                if (showQuickActions) {
+                    FacetBlockActionButton(
+                        imageVector = Icons.Default.Add,
+                        tooltipText = "Add block below",
+                        contentDescription = "Add block below",
+                        testTag = DaybookEditorSemantics.addBlockAfterQuickAction(facetKeyLabel),
+                        onClick = {
+                            onMenuOpenChange(false)
+                            actions.onAddBlockRequested()
+                        },
+                        iconAlpha = 1f,
+                    )
+                }
+                if (showQuickActions) {
+                    FacetBlockActionButton(
+                        imageVector = collapseButtonIcon,
+                        tooltipText =
+                        if (actions.isCollapsed) {
+                            "Expand block"
+                        } else {
+                            "Collapse block"
+                        },
+                        contentDescription =
+                        if (actions.isCollapsed) {
+                            "Expand block"
+                        } else {
+                            "Collapse block"
+                        },
+                        testTag = DaybookEditorSemantics.toggleBlockCollapseQuickAction(facetKeyLabel),
+                        onClick = actions.onToggleCollapse,
+                        iconAlpha = 1f,
+                    )
+                }
+                if (showOverflowButton || isMenuOpen) {
+                    FacetBlockActionButton(
+                        imageVector = Icons.Default.MoreVert,
+                        contentDescription = "Block actions",
+                        testTag = DaybookEditorSemantics.blockActions(facetKeyLabel),
+                        onClick = { onMenuOpenChange(true) },
+                        iconAlpha = if (overflowButtonEmphasized) 1f else 0.48f,
+                    )
+                }
             }
-            if (visible || expanded) {
-                FacetBlockActionButton(
-                    imageVector = Icons.Default.MoreVert,
-                    contentDescription = "Block actions",
-                    testTag = DaybookEditorSemantics.blockActions(facetKeyLabel),
-                    onClick = { onExpandedChange(true) },
-                    iconAlpha = if (blockHovered || expanded || actionsHovered) 1f else 0.48f,
-                )
-            }
+        } else {
+            Box(
+                modifier =
+                Modifier
+                    .size(44.dp)
+                    .hoverable(interactionSource),
+            )
         }
         DropdownMenu(
-            expanded = expanded,
-            onDismissRequest = { onExpandedChange(false) },
+            expanded = isMenuOpen,
+            onDismissRequest = { onMenuOpenChange(false) },
         ) {
             DropdownMenuItem(
                 text = {
@@ -647,7 +730,7 @@ private fun FacetBlockActionsMenu(
                 },
                 modifier = Modifier.testTag(DaybookEditorSemantics.toggleBlockCollapseAction(facetKeyLabel)),
                 onClick = {
-                    onExpandedChange(false)
+                    onMenuOpenChange(false)
                     actions.onToggleCollapse()
                 },
             )
@@ -656,7 +739,7 @@ private fun FacetBlockActionsMenu(
                 enabled = !isPrimary,
                 modifier = Modifier.testTag(DaybookEditorSemantics.makePrimaryAction(facetKeyLabel)),
                 onClick = {
-                    onExpandedChange(false)
+                    onMenuOpenChange(false)
                     actions.onMakePrimary()
                 },
             )
@@ -665,7 +748,7 @@ private fun FacetBlockActionsMenu(
                 enabled = actions.canMoveUp,
                 modifier = Modifier.testTag(DaybookEditorSemantics.moveUpAction(facetKeyLabel)),
                 onClick = {
-                    onExpandedChange(false)
+                    onMenuOpenChange(false)
                     actions.onMoveUp()
                 },
             )
@@ -674,16 +757,16 @@ private fun FacetBlockActionsMenu(
                 enabled = actions.canMoveDown,
                 modifier = Modifier.testTag(DaybookEditorSemantics.moveDownAction(facetKeyLabel)),
                 onClick = {
-                    onExpandedChange(false)
+                    onMenuOpenChange(false)
                     actions.onMoveDown()
                 },
             )
             DropdownMenuItem(
-                text = { Text("Add note below") },
-                modifier = Modifier.testTag(DaybookEditorSemantics.addNoteAfterAction(facetKeyLabel)),
+                text = { Text("Add block below") },
+                modifier = Modifier.testTag(DaybookEditorSemantics.addBlockAfterAction(facetKeyLabel)),
                 onClick = {
-                    onExpandedChange(false)
-                    actions.onAddNote()
+                    onMenuOpenChange(false)
+                    actions.onAddBlockRequested()
                 },
             )
         }
@@ -757,6 +840,271 @@ private fun FacetBlockCollapsedSummary(summary: FacetBlockSummary, facetKeyLabel
                 maxLines = 1,
                 overflow = TextOverflow.Ellipsis,
                 modifier = Modifier.padding(top = 2.dp),
+            )
+        }
+    }
+}
+
+private data class AddBlockOptionSpec(
+    val id: String,
+    val title: String,
+    val description: String,
+) {
+    fun matches(query: String): Boolean {
+        val normalized = query.trim()
+        if (normalized.isBlank()) {
+            return true
+        }
+        return title.contains(normalized, ignoreCase = true) || description.contains(normalized, ignoreCase = true)
+    }
+}
+
+private fun addBlockOptions(): List<AddBlockOptionSpec> =
+    listOf(
+        AddBlockOptionSpec(
+            id = "note",
+            title = "Note",
+            description = "Plain text note block",
+        ),
+    )
+
+@Composable
+internal fun rememberAddBlockDialogLauncher(
+    controller: EditorSessionController,
+): (FacetKey) -> Unit {
+    val bigDialogController = LocalBigDialogController.current
+    return remember(controller, bigDialogController) {
+        { facetKey ->
+            bigDialogController.show {
+                var searchQuery by remember { mutableStateOf("") }
+                AddBlockPickerContent(
+                    searchQuery = searchQuery,
+                    onSearchQueryChange = { nextValue -> searchQuery = nextValue },
+                    autoFocusSearch = false,
+                    onOptionSelected = { optionId ->
+                        bigDialogController.dismiss()
+                        when (optionId) {
+                            "note" -> controller.addNoteFacetAfter(facetKey)
+                            else -> error("Unknown add-block option: $optionId")
+                        }
+                    },
+                )
+            }
+        }
+    }
+}
+
+private sealed interface EditorBottomOverlay {
+    data object None : EditorBottomOverlay
+
+    data class FocusedNoteAccessoryBar(val facetKey: FacetKey) : EditorBottomOverlay
+}
+
+@Composable
+private fun EditorBottomOverlayLane(
+    narrowScreen: Boolean,
+    contentFacetViews: List<FacetViewDescriptor>,
+    focusedNoteFacetLabel: String?,
+    isAddBlockPickerOpen: Boolean,
+    onAddBlockRequested: (FacetKey) -> Unit,
+    snackbarHostState: SnackbarHostState,
+) {
+    Box(modifier = Modifier.fillMaxSize()) {
+        val imeVisible = WindowInsets.ime.getBottom(LocalDensity.current) > 0
+        val activeOverlay =
+            if (!narrowScreen || !imeVisible || focusedNoteFacetLabel == null || isAddBlockPickerOpen) {
+                EditorBottomOverlay.None
+            } else {
+                val activeFocusedNoteFacetKey =
+                    contentFacetViews.firstOrNull { descriptor ->
+                        facetKeyString(descriptor.facetKey) == focusedNoteFacetLabel
+                    }?.facetKey
+                if (activeFocusedNoteFacetKey != null) {
+                    EditorBottomOverlay.FocusedNoteAccessoryBar(activeFocusedNoteFacetKey)
+                } else {
+                    EditorBottomOverlay.None
+                }
+            }
+
+        Box(modifier = Modifier.fillMaxSize()) {
+            when (activeOverlay) {
+                is EditorBottomOverlay.FocusedNoteAccessoryBar -> {
+                    FocusedNoteAccessoryBar(
+                        facetKey = activeOverlay.facetKey,
+                        modifier = Modifier.align(Alignment.BottomCenter),
+                        onAddBlockRequested = { onAddBlockRequested(activeOverlay.facetKey) },
+                    )
+                }
+
+                EditorBottomOverlay.None -> Unit
+            }
+
+            val snackbarBottomPadding =
+                when (activeOverlay) {
+                    is EditorBottomOverlay.FocusedNoteAccessoryBar -> 72.dp
+                    EditorBottomOverlay.None -> 8.dp
+                }
+
+            SnackbarHost(
+                hostState = snackbarHostState,
+                modifier =
+                    Modifier
+                        .align(Alignment.BottomCenter)
+                        .padding(
+                            bottom = snackbarBottomPadding,
+                            start = 8.dp,
+                            end = 8.dp,
+                        ),
+            )
+        }
+    }
+}
+
+@Composable
+private fun FocusedNoteAccessoryBar(
+    facetKey: FacetKey,
+    modifier: Modifier = Modifier,
+    onAddBlockRequested: () -> Unit = {},
+) {
+    Box(
+        modifier =
+        modifier
+            .padding(horizontal = 12.dp, vertical = 8.dp)
+            .testTag(DaybookEditorSemantics.focusedNoteAccessoryBar()),
+    ) {
+        Surface(
+            tonalElevation = 1.dp,
+            shadowElevation = 4.dp,
+            shape = RoundedCornerShape(999.dp),
+            color = MaterialTheme.colorScheme.surfaceContainer,
+        ) {
+            Row(
+                verticalAlignment = Alignment.CenterVertically,
+                horizontalArrangement = Arrangement.spacedBy(4.dp),
+            ) {
+                TextButton(
+                    onClick = onAddBlockRequested,
+                    modifier =
+                    Modifier
+                        .testTag(DaybookEditorSemantics.focusedNoteAccessoryAddBlockAction(facetKeyString(facetKey)))
+                        .semantics {
+                            contentDescription = "Add block after note"
+                        },
+                ) {
+                    Text("Add block")
+                }
+            }
+        }
+    }
+}
+
+@Composable
+internal fun AddBlockPickerContent(
+    searchQuery: String,
+    onSearchQueryChange: (String) -> Unit,
+    onOptionSelected: (String) -> Unit,
+    autoFocusSearch: Boolean,
+    modifier: Modifier = Modifier,
+) {
+    val options = remember { addBlockOptions() }
+    val visibleOptions by remember(searchQuery, options) {
+        derivedStateOf { options.filter { option -> option.matches(searchQuery) } }
+    }
+    val searchFocusRequester = remember { FocusRequester() }
+
+    LaunchedEffect(autoFocusSearch) {
+        if (autoFocusSearch) {
+            searchFocusRequester.requestFocus()
+        }
+    }
+
+    Column(
+        modifier =
+        modifier
+            .fillMaxSize()
+            .padding(24.dp)
+            .testTag(DaybookEditorSemantics.addBlockDialog()),
+    ) {
+        Text(
+            text = "Add block",
+            style = MaterialTheme.typography.titleLarge,
+        )
+        Text(
+            text = "Choose a block type",
+            style = MaterialTheme.typography.bodySmall,
+            color = MaterialTheme.colorScheme.onSurfaceVariant,
+            modifier = Modifier.padding(top = 4.dp),
+        )
+        TextField(
+            value = searchQuery,
+            onValueChange = onSearchQueryChange,
+            placeholder = { Text("Search block types") },
+            modifier =
+            Modifier
+                .fillMaxWidth()
+                .padding(top = 16.dp)
+                .focusRequester(searchFocusRequester)
+                .testTag(DaybookEditorSemantics.addBlockSearchField())
+                .semantics {
+                    contentDescription = "Search block types"
+                },
+            singleLine = true,
+        )
+        if (visibleOptions.isEmpty()) {
+            Text(
+                text = "No block types match",
+                style = MaterialTheme.typography.bodySmall,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                modifier = Modifier.padding(top = 24.dp),
+            )
+        } else {
+            LazyColumn(
+                modifier =
+                Modifier
+                    .fillMaxWidth()
+                    .padding(top = 16.dp)
+                    .heightIn(max = 360.dp),
+                verticalArrangement = Arrangement.spacedBy(8.dp),
+            ) {
+                items(
+                    items = visibleOptions,
+                    key = { option -> option.id },
+                ) { option ->
+                    AddBlockOptionRow(
+                        option = option,
+                        onClick = { onOptionSelected(option.id) },
+                    )
+                }
+            }
+        }
+    }
+}
+
+@Composable
+private fun AddBlockOptionRow(option: AddBlockOptionSpec, onClick: () -> Unit) {
+    Surface(
+        shape = RoundedCornerShape(16.dp),
+        tonalElevation = 0.dp,
+        color = MaterialTheme.colorScheme.surfaceContainerHighest,
+        modifier =
+        Modifier
+            .fillMaxWidth()
+            .testTag(DaybookEditorSemantics.addBlockOption(option.id))
+            .semantics {
+                contentDescription = "${option.title}. ${option.description}"
+            }
+            .clickable(onClick = onClick),
+    ) {
+        Column(modifier = Modifier.padding(16.dp)) {
+            Text(
+                text = option.title,
+                style = MaterialTheme.typography.titleSmall,
+            )
+            Text(
+                text = option.description,
+                style = MaterialTheme.typography.bodySmall,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                modifier = Modifier.padding(top = 4.dp),
             )
         }
     }

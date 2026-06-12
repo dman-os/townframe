@@ -9,6 +9,8 @@ import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.heightIn
 import androidx.compose.foundation.layout.padding
+import androidx.compose.foundation.interaction.MutableInteractionSource
+import androidx.compose.foundation.interaction.collectIsFocusedAsState
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
@@ -53,6 +55,7 @@ internal data class FacetNoteEditorProps(
     val draft: String?,
     val editable: Boolean,
     val notice: String?,
+    val onFocusChanged: (Boolean) -> Unit = {},
     val onDraftChange: (String) -> Unit,
 )
 
@@ -107,9 +110,17 @@ internal fun FacetContentHost(
 @Composable
 private fun NoteFacetView(descriptor: FacetViewDescriptor, noteEditor: FacetNoteEditorProps) {
     val value = noteEditor.draft ?: ""
+    val interactionSource = remember { MutableInteractionSource() }
+    val isFocused by interactionSource.collectIsFocusedAsState()
+
+    LaunchedEffect(isFocused) {
+        noteEditor.onFocusChanged(isFocused)
+    }
+
     TextField(
         value = value,
         onValueChange = noteEditor.onDraftChange,
+        interactionSource = interactionSource,
         modifier =
         Modifier
             .fillMaxWidth()

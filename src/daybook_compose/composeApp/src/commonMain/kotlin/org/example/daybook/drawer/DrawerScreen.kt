@@ -28,11 +28,13 @@ import org.example.daybook.DocListState
 import org.example.daybook.DrawerViewModel
 import org.example.daybook.LocalContainer
 import org.example.daybook.LocalDocEditorStore
+import org.example.daybook.LocalBigDialogController
 import org.example.daybook.layouts.DaybookScaffold
 import org.example.daybook.layouts.LocalScreenChromeSpec
 import org.example.daybook.tables.DockableRegion
 import org.example.daybook.ui.DocEditor
 import org.example.daybook.ui.DocFacetSidebar
+import org.example.daybook.ui.rememberAddBlockDialogLauncher
 import org.example.daybook.ui.buildSelfFacetRefUrl
 import org.example.daybook.ui.decodeJsonStringOrRaw
 import org.example.daybook.ui.decodeWellKnownFacet
@@ -73,6 +75,8 @@ private fun DrawerDocEditorContent(
                 }
                 return@Box
             }
+            val addBlockDialogLauncher = rememberAddBlockDialogLauncher(controller)
+            val bigDialogController = LocalBigDialogController.current
             if (showFacetSidebar) {
                 DockableRegion(
                     modifier = Modifier.fillMaxSize().padding(16.dp),
@@ -84,6 +88,8 @@ private fun DrawerDocEditorContent(
                             controller = controller,
                             displayHints = displayHints,
                             displayHintsError = displayHintsError,
+                            isAddBlockPickerOpen = bigDialogController.isShowing,
+                            onAddBlockRequested = addBlockDialogLauncher,
                             modifier = Modifier.fillMaxSize(),
                         )
                     }
@@ -100,7 +106,9 @@ private fun DrawerDocEditorContent(
                     showInlineFacetRack = showInlineFacetRack,
                     displayHints = displayHints,
                     displayHintsError = displayHintsError,
-                    modifier = Modifier.padding(16.dp),
+                    isAddBlockPickerOpen = bigDialogController.isShowing,
+                    onAddBlockRequested = addBlockDialogLauncher,
+                    modifier = Modifier.fillMaxSize().padding(16.dp),
                 )
             }
         } else {
@@ -115,7 +123,11 @@ private fun DrawerDocEditorContent(
 }
 
 @Composable
-fun DrawerScreen(drawerVm: DrawerViewModel, onOpenDoc: (String) -> Unit, modifier: Modifier = Modifier) {
+fun DrawerScreen(
+    drawerVm: DrawerViewModel,
+    onOpenDoc: (String) -> Unit,
+    modifier: Modifier = Modifier,
+) {
     val docEditorStore: DocEditorStoreViewModel = LocalDocEditorStore.current
     val selectedDocId by docEditorStore.selectedDocId.collectAsState()
     DaybookScaffold(
@@ -176,45 +188,39 @@ fun DocEditorScreen(contentType: DaybookContentType, modifier: Modifier = Modifi
             },
         )
 
-    Box(modifier = modifier.fillMaxSize().testTag(DaybookEditorSemantics.Screen)) {
-        DaybookScaffold(
-            modifier = Modifier.fillMaxSize(),
-            topBar = savingTopBarSpec,
-        ) { scaffoldPadding ->
-            when (selectedDocId) {
-                null -> {
-                    Box(
-                        modifier =
-                        Modifier
-                            .fillMaxSize()
-                            .padding(scaffoldPadding)
-                            .background(MaterialTheme.colorScheme.surface)
-                            .testTag(DaybookEditorSemantics.EmptyState),
-                        contentAlignment = Alignment.Center,
-                    ) {
-                        Text("Select a document to view details")
-                    }
+    DaybookScaffold(
+        modifier = modifier.fillMaxSize().testTag(DaybookEditorSemantics.Screen),
+        topBar = savingTopBarSpec,
+    ) { scaffoldPadding ->
+        when (selectedDocId) {
+            null -> {
+                Box(
+                    modifier =
+                    Modifier
+                        .fillMaxSize()
+                        .padding(scaffoldPadding)
+                        .background(MaterialTheme.colorScheme.surface)
+                        .testTag(DaybookEditorSemantics.EmptyState),
+                    contentAlignment = Alignment.Center,
+                ) {
+                    Text("Select a document to view details")
                 }
+            }
 
-                else -> {
-                    Box(
-                        modifier =
-                        Modifier
-                            .fillMaxSize()
-                            .padding(scaffoldPadding)
-                            .background(MaterialTheme.colorScheme.surface),
-                    ) {
-                        DrawerDocEditorContent(
-                            controller = selectedController,
-                            selectedDocId = selectedDocId,
-                            displayHints = displayHints,
-                            displayHintsError = configError?.message,
-                            modifier = Modifier.fillMaxSize(),
-                            showFacetSidebar = contentType == DaybookContentType.LIST_AND_DETAIL,
-                            showInlineFacetRack = contentType != DaybookContentType.LIST_AND_DETAIL,
-                        )
-                    }
-                }
+            else -> {
+                DrawerDocEditorContent(
+                    controller = selectedController,
+                    selectedDocId = selectedDocId,
+                    displayHints = displayHints,
+                    displayHintsError = configError?.message,
+                    modifier =
+                    Modifier
+                        .fillMaxSize()
+                        .padding(scaffoldPadding)
+                        .consumeWindowInsets(scaffoldPadding),
+                    showFacetSidebar = contentType == DaybookContentType.LIST_AND_DETAIL,
+                    showInlineFacetRack = contentType != DaybookContentType.LIST_AND_DETAIL,
+                )
             }
         }
     }

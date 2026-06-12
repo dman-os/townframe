@@ -7,11 +7,23 @@ pub struct RepoIdentity {
 }
 
 pub struct SecretRepo {
-    store: Arc<keyring_core::CredentialStore>,
+    store: Option<Arc<keyring_core::CredentialStore>>,
 }
 
 impl SecretRepo {
     const KEYRING_USERNAME: &'static str = "iroh_secret_key_v1";
+
+    fn spawn_drop_thread<T: Send + 'static>(value: T) -> std::thread::JoinHandle<()> {
+        std::thread::spawn(move || drop(value))
+    }
+
+    fn drop_off_runtime<T: Send + 'static>(value: T) {
+        // The Linux keyring backend can tear down zbus state in `Drop`, and that
+        // must happen off any Tokio runtime thread.
+        Self::spawn_drop_thread(value)
+            .join()
+            .expect(ERROR_IMPOSSIBLE);
+    }
 
     pub async fn boot() -> Res<Self> {
         // `cfg(test)` is only set for this crate's own unit tests. Integration/e2e
@@ -50,10 +62,10 @@ impl SecretRepo {
                 .await
                 .expect(ERROR_TOKIO)?
             };
-        Ok(Self { store })
+        Ok(Self { store: Some(store) })
     }
     pub async fn load_identity(&self, checkout_id: &str) -> Res<Option<RepoIdentity>> {
-        let store = Arc::clone(&self.store);
+        let store = Arc::clone(self.store.as_ref().expect(ERROR_IMPOSSIBLE));
         let user = format!("daybook.checkout.{checkout_id}.{}", Self::KEYRING_USERNAME);
         tokio::task::spawn_blocking(move || {
             let entry = store
@@ -91,7 +103,7 @@ impl SecretRepo {
         checkout_id: &str,
         secret: iroh::SecretKey,
     ) -> Res<RepoIdentity> {
-        let store = Arc::clone(&self.store);
+        let store = Arc::clone(self.store.as_ref().expect(ERROR_IMPOSSIBLE));
         let user = format!("daybook.checkout.{checkout_id}.{}", Self::KEYRING_USERNAME);
         tokio::task::spawn_blocking(move || {
             let entry = store
@@ -110,11 +122,43 @@ impl SecretRepo {
         .expect(ERROR_TOKIO)
     }
 
-    pub async fn stop(self) -> Res<()> {
-        let store = self.store;
-        tokio::task::spawn_blocking(move || drop(store))
+    pub async fn stop(mut self) -> Res<()> {
+        let store = self.store.take().expect(ERROR_IMPOSSIBLE);
+        tokio::task::spawn_blocking(move || Self::drop_off_runtime(store))
             .await
             .expect(ERROR_TOKIO);
         Ok(())
+    }
+}
+
+impl Drop for SecretRepo {
+    fn drop(&mut self) {
+        if let Some(store) = self.store.take() {
+            let _ = Self::spawn_drop_thread(store);
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    struct AssertDroppedOffRuntime;
+
+    impl Drop for AssertDroppedOffRuntime {
+        fn drop(&mut self) {
+            assert!(
+                tokio::runtime::Handle::try_current().is_err(),
+                "keyring store was dropped on a tokio runtime thread"
+            );
+        }
+    }
+
+    #[test]
+    fn drop_helper_runs_off_runtime() {
+        let runtime = tokio::runtime::Runtime::new().expect("runtime");
+        runtime.block_on(async {
+            SecretRepo::drop_off_runtime(AssertDroppedOffRuntime);
+        });
     }
 }

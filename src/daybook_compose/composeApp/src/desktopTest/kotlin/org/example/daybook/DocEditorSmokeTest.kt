@@ -1,15 +1,22 @@
 package org.example.daybook
 
 import androidx.compose.runtime.CompositionLocalProvider
+import androidx.compose.foundation.layout.Box
+import androidx.compose.foundation.layout.requiredHeight
+import androidx.compose.foundation.layout.requiredWidth
+import androidx.compose.ui.Modifier
+import androidx.compose.ui.unit.dp
 import androidx.compose.ui.test.ExperimentalTestApi
 import androidx.compose.ui.test.assertTextContains
 import androidx.compose.ui.test.assertIsDisplayed
+import androidx.compose.ui.test.assertIsNotFocused
 import androidx.compose.ui.test.onAllNodesWithTag
 import androidx.compose.ui.test.onAllNodesWithText
 import androidx.compose.ui.test.onNodeWithTag
 import androidx.compose.ui.test.onNodeWithText
 import androidx.compose.ui.test.performCustomAccessibilityActionWithLabel
 import androidx.compose.ui.test.performClick
+import androidx.compose.ui.test.performTextInput
 import androidx.compose.ui.test.v2.runComposeUiTest
 import java.nio.file.Files
 import java.nio.file.Path
@@ -74,7 +81,9 @@ class DocEditorSmokeTest {
                             LocalDrawerViewModel provides drawerVm,
                             LocalDocEditorStore provides docEditorStore,
                         ) {
-                            DocEditorScreen(contentType = DaybookContentType.LIST_ONLY)
+                            BigDialogHost(narrowScreen = false) {
+                                DocEditorScreen(contentType = DaybookContentType.LIST_ONLY)
+                            }
                         }
                     }
                 }
@@ -139,7 +148,9 @@ class DocEditorSmokeTest {
                             LocalDrawerViewModel provides drawerVm,
                             LocalDocEditorStore provides docEditorStore,
                         ) {
-                            DocEditorScreen(contentType = DaybookContentType.LIST_ONLY)
+                            BigDialogHost(narrowScreen = false) {
+                                DocEditorScreen(contentType = DaybookContentType.LIST_ONLY)
+                            }
                         }
                     }
                 }
@@ -150,18 +161,6 @@ class DocEditorSmokeTest {
             waitUntil(timeoutMillis = 10_000) {
                 val labels = contentFacetLabels()
                 labels.contains(firstNoteLabel) && labels.contains(secondNoteLabel)
-            }
-
-            openBlockActions(firstNoteLabel)
-            waitUntil(timeoutMillis = 10_000) {
-                onAllNodesWithTag(DaybookEditorSemantics.addNoteAfterAction(firstNoteLabel))
-                    .fetchSemanticsNodes()
-                    .isNotEmpty()
-            }
-            onNodeWithTag(DaybookEditorSemantics.addNoteAfterAction(firstNoteLabel)).performClick()
-
-            waitUntil(timeoutMillis = 10_000) {
-                docEditorStore.selectedController.value?.state?.value?.contentFacetViews?.size == 3
             }
 
             openBlockActions(secondNoteLabel)
@@ -202,6 +201,226 @@ class DocEditorSmokeTest {
     }
 
     @Test
+    fun realRepo_block_shell_can_add_block_below_using_picker() = runComposeUiTest {
+        val fixture = runBlocking { RealRepoFixture.create() }
+        try {
+            val drawerVm = DrawerViewModel(fixture.drawerRepo)
+            val docEditorStore = DocEditorStoreViewModel(fixture.drawerRepo)
+
+            val firstNoteLabel = facetKeyString(noteFacetKey())
+            val docId = fixture.createDoc(
+                titleText = "Add block smoke title",
+                noteText = "Initial note block",
+            )
+
+            fun contentFacetViews() =
+                docEditorStore.selectedController.value?.state?.value?.contentFacetViews.orEmpty()
+
+            fun openBlockActions(facetKeyLabel: String) {
+                onNodeWithTag(DaybookEditorSemantics.facetRow(facetKeyLabel))
+                    .performCustomAccessibilityActionWithLabel("Block actions")
+            }
+
+            setContent {
+                DaybookTheme(themeConfig = ThemeConfig.Light) {
+                    ProvideScreenChromeSpec(ScreenChromeSpec()) {
+                        CompositionLocalProvider(
+                            LocalContainer provides fixture.container,
+                            LocalDrawerViewModel provides drawerVm,
+                            LocalDocEditorStore provides docEditorStore,
+                        ) {
+                            BigDialogHost(narrowScreen = false) {
+                                DocEditorScreen(contentType = DaybookContentType.LIST_ONLY)
+                            }
+                        }
+                    }
+                }
+            }
+
+            docEditorStore.selectDoc(docId)
+
+            waitUntil(timeoutMillis = 10_000) {
+                onAllNodesWithTag(DaybookEditorSemantics.noteField(firstNoteLabel))
+                    .fetchSemanticsNodes()
+                    .isNotEmpty()
+            }
+
+            openBlockActions(firstNoteLabel)
+            waitUntil(timeoutMillis = 10_000) {
+                onAllNodesWithTag(DaybookEditorSemantics.addBlockAfterAction(firstNoteLabel))
+                    .fetchSemanticsNodes()
+                    .isNotEmpty()
+            }
+            onNodeWithTag(DaybookEditorSemantics.addBlockAfterAction(firstNoteLabel)).performClick()
+
+            waitUntil(timeoutMillis = 10_000) {
+                onAllNodesWithTag(DaybookEditorSemantics.addBlockDialog())
+                    .fetchSemanticsNodes()
+                    .isNotEmpty()
+            }
+            onNodeWithTag(DaybookEditorSemantics.addBlockSearchField()).performTextInput("note")
+            waitUntil(timeoutMillis = 10_000) {
+                onAllNodesWithTag(DaybookEditorSemantics.addBlockOption("note"))
+                    .fetchSemanticsNodes()
+                    .isNotEmpty()
+            }
+            onNodeWithTag(DaybookEditorSemantics.addBlockOption("note")).performClick()
+
+            waitUntil(timeoutMillis = 10_000) {
+                contentFacetViews().size == 2
+            }
+            val newFacetKey = contentFacetViews().last().facetKey
+            waitUntil(timeoutMillis = 10_000) {
+                onAllNodesWithTag(DaybookEditorSemantics.noteField(facetKeyString(newFacetKey)))
+                    .fetchSemanticsNodes()
+                    .isNotEmpty()
+            }
+            onNodeWithTag(DaybookEditorSemantics.noteField(facetKeyString(newFacetKey))).assertIsDisplayed()
+        } finally {
+            fixture.close()
+        }
+    }
+
+    @Test
+    fun realRepo_block_shell_can_add_block_below_using_picker_in_narrow_layout() = runComposeUiTest {
+        val fixture = runBlocking { RealRepoFixture.create() }
+        try {
+            val drawerVm = DrawerViewModel(fixture.drawerRepo)
+            val docEditorStore = DocEditorStoreViewModel(fixture.drawerRepo)
+
+            val firstNoteLabel = facetKeyString(noteFacetKey())
+            val docId = fixture.createDoc(
+                titleText = "Add block dock smoke title",
+                noteText = "Initial note block",
+            )
+
+            fun contentFacetViews() =
+                docEditorStore.selectedController.value?.state?.value?.contentFacetViews.orEmpty()
+
+            fun openBlockActions(facetKeyLabel: String) {
+                onNodeWithTag(DaybookEditorSemantics.facetRow(facetKeyLabel))
+                    .performCustomAccessibilityActionWithLabel("Block actions")
+            }
+
+            setContent {
+                DaybookTheme(themeConfig = ThemeConfig.Light) {
+                    ProvideScreenChromeSpec(ScreenChromeSpec()) {
+                        CompositionLocalProvider(
+                            LocalContainer provides fixture.container,
+                            LocalDrawerViewModel provides drawerVm,
+                            LocalDocEditorStore provides docEditorStore,
+                        ) {
+                            BigDialogHost(narrowScreen = true) {
+                                Box(
+                                    modifier =
+                                    Modifier.requiredWidth(540.dp).requiredHeight(800.dp),
+                                ) {
+                                    DocEditorScreen(contentType = DaybookContentType.LIST_ONLY)
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+
+            docEditorStore.selectDoc(docId)
+
+            waitUntil(timeoutMillis = 10_000) {
+                onAllNodesWithTag(DaybookEditorSemantics.noteField(firstNoteLabel))
+                    .fetchSemanticsNodes()
+                    .isNotEmpty()
+            }
+
+            openBlockActions(firstNoteLabel)
+            waitUntil(timeoutMillis = 10_000) {
+                onAllNodesWithTag(DaybookEditorSemantics.addBlockAfterAction(firstNoteLabel))
+                    .fetchSemanticsNodes()
+                    .isNotEmpty()
+            }
+            onNodeWithTag(DaybookEditorSemantics.addBlockAfterAction(firstNoteLabel)).performClick()
+
+            waitUntil(timeoutMillis = 10_000) {
+                onAllNodesWithTag(DaybookEditorSemantics.addBlockDialog())
+                    .fetchSemanticsNodes()
+                    .isNotEmpty()
+            }
+            onNodeWithTag(DaybookEditorSemantics.addBlockDialog()).assertIsDisplayed()
+            onNodeWithTag(DaybookEditorSemantics.addBlockSearchField()).assertIsNotFocused()
+            onNodeWithTag(DaybookEditorSemantics.addBlockSearchField()).performTextInput("note")
+            waitUntil(timeoutMillis = 10_000) {
+                onAllNodesWithTag(DaybookEditorSemantics.addBlockOption("note"))
+                    .fetchSemanticsNodes()
+                    .isNotEmpty()
+            }
+            onNodeWithTag(DaybookEditorSemantics.addBlockOption("note")).performClick()
+
+            waitUntil(timeoutMillis = 10_000) {
+                contentFacetViews().size == 2
+            }
+            val newFacetKey = contentFacetViews().last().facetKey
+            waitUntil(timeoutMillis = 10_000) {
+                onAllNodesWithTag(DaybookEditorSemantics.noteField(facetKeyString(newFacetKey)))
+                    .fetchSemanticsNodes()
+                    .isNotEmpty()
+            }
+            onNodeWithTag(DaybookEditorSemantics.noteField(facetKeyString(newFacetKey))).assertIsDisplayed()
+        } finally {
+            fixture.close()
+        }
+    }
+
+    @Test
+    fun realRepo_narrow_note_focus_does_not_show_action_bar_without_ime() = runComposeUiTest {
+        val fixture = runBlocking { RealRepoFixture.create() }
+        try {
+            val docEditorStore = DocEditorStoreViewModel(fixture.drawerRepo)
+
+            val firstNoteLabel = facetKeyString(noteFacetKey())
+            val docId = fixture.createDoc(
+                titleText = "Focused note gate smoke title",
+                noteText = "Initial note block",
+            )
+
+            setContent {
+                DaybookTheme(themeConfig = ThemeConfig.Light) {
+                    ProvideScreenChromeSpec(ScreenChromeSpec()) {
+                        CompositionLocalProvider(
+                            LocalContainer provides fixture.container,
+                            LocalDocEditorStore provides docEditorStore,
+                        ) {
+                            BigDialogHost(narrowScreen = true) {
+                                Box(
+                                    modifier =
+                                    Modifier.requiredWidth(540.dp).requiredHeight(800.dp),
+                                ) {
+                                    DocEditorScreen(contentType = DaybookContentType.LIST_ONLY)
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+
+            docEditorStore.selectDoc(docId)
+
+            waitUntil(timeoutMillis = 10_000) {
+                onAllNodesWithTag(DaybookEditorSemantics.noteField(firstNoteLabel))
+                    .fetchSemanticsNodes()
+                    .isNotEmpty()
+            }
+
+            onNodeWithTag(DaybookEditorSemantics.noteField(firstNoteLabel)).performTextInput("x")
+            waitUntil(timeoutMillis = 10_000) {
+                onAllNodesWithTag(DaybookEditorSemantics.focusedNoteAccessoryBar())
+                    .fetchSemanticsNodes()
+                    .isEmpty()
+            }
+        } finally {
+            fixture.close()
+        }
+    }
+
+    @Test
     fun realRepo_block_shell_can_collapse_and_expand() = runComposeUiTest {
         val fixture = runBlocking { RealRepoFixture.create() }
         try {
@@ -227,7 +446,9 @@ class DocEditorSmokeTest {
                             LocalDrawerViewModel provides drawerVm,
                             LocalDocEditorStore provides docEditorStore,
                         ) {
-                            DocEditorScreen(contentType = DaybookContentType.LIST_ONLY)
+                            BigDialogHost(narrowScreen = false) {
+                                DocEditorScreen(contentType = DaybookContentType.LIST_ONLY)
+                            }
                         }
                     }
                 }
@@ -304,7 +525,9 @@ class DocEditorSmokeTest {
                             LocalDrawerViewModel provides drawerVm,
                             LocalDocEditorStore provides docEditorStore,
                         ) {
-                            DocEditorScreen(contentType = DaybookContentType.LIST_ONLY)
+                            BigDialogHost(narrowScreen = false) {
+                                DocEditorScreen(contentType = DaybookContentType.LIST_ONLY)
+                            }
                         }
                     }
                 }
