@@ -5,6 +5,7 @@ object DaybookEditorSemantics {
     const val EmptyState = "doc-editor-empty-state"
     const val Loading = "doc-editor-loading"
     const val Editor = "doc-editor"
+    const val EditorList = "doc-editor-list"
     const val TitleField = "doc-editor-title"
     const val Details = "doc-editor-details"
 

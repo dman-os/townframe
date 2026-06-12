@@ -11,14 +11,14 @@ import androidx.compose.foundation.background
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
+import androidx.compose.foundation.layout.offset
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.lazy.LazyColumn
+import androidx.compose.foundation.lazy.LazyListLayoutInfo
 import androidx.compose.foundation.lazy.items
-import androidx.compose.foundation.relocation.BringIntoViewRequester
-import androidx.compose.foundation.relocation.bringIntoViewRequester
-import androidx.compose.foundation.rememberScrollState
-import androidx.compose.foundation.verticalScroll
+import androidx.compose.foundation.lazy.itemsIndexed
+import androidx.compose.foundation.lazy.rememberLazyListState
 import androidx.compose.foundation.interaction.MutableInteractionSource
 import androidx.compose.foundation.interaction.collectIsHoveredAsState
 import androidx.compose.foundation.hoverable
@@ -46,6 +46,7 @@ import androidx.compose.material3.TooltipDefaults
 import androidx.compose.material3.rememberTooltipState
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
+import androidx.compose.runtime.derivedStateOf
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
@@ -57,6 +58,7 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Color
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.ui.graphics.vector.ImageVector
+import androidx.compose.ui.layout.onSizeChanged
 import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.semantics.CustomAccessibilityAction
 import androidx.compose.ui.semantics.contentDescription
@@ -64,6 +66,7 @@ import androidx.compose.ui.semantics.customActions
 import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
+import androidx.compose.ui.unit.IntOffset
 import androidx.compose.ui.unit.dp
 import org.example.daybook.DaybookEditorSemantics
 import org.example.daybook.ui.editor.EditorSessionController
@@ -90,6 +93,12 @@ private data class FacetBlockSummary(
     val contentDescription: String,
 )
 
+private data class StickyFacetActionPlacement(
+    val descriptor: FacetViewDescriptor,
+    val facetIndex: Int,
+    val yOffsetPx: Int,
+)
+
 @Composable
 fun DocEditor(
     controller: EditorSessionController,
@@ -101,6 +110,7 @@ fun DocEditor(
     val state by controller.state.collectAsState()
     val snackbarHostState = remember { SnackbarHostState() }
     val collapsedFacetStates = remember(state.docId) { mutableStateMapOf<String, Boolean>() }
+    val blockActionExpandedStates = remember(state.docId) { mutableStateMapOf<String, Boolean>() }
     var uiMessage by remember { mutableStateOf<String?>(null) }
     val saveStatus =
         when {
@@ -119,110 +129,210 @@ fun DocEditor(
         uiMessage = null
     }
 
-    Box(modifier = modifier.fillMaxSize().testTag(DaybookEditorSemantics.Editor)) {
-        Column(
-            modifier = Modifier.fillMaxSize().verticalScroll(rememberScrollState()),
-        ) {
-            TextField(
-                value = state.titleDraft,
-                onValueChange = { value -> controller.setTitleDraft(value) },
-                modifier =
-                Modifier
-                    .fillMaxWidth()
-                    .testTag(DaybookEditorSemantics.TitleField)
-                    .semantics {
-                        contentDescription = "Document title"
-                    },
-                enabled = state.titleEditable,
-                placeholder = { Text("Title") },
-                textStyle = MaterialTheme.typography.titleLarge.copy(fontWeight = FontWeight.Bold),
-                colors =
-                TextFieldDefaults.colors(
-                    focusedContainerColor = androidx.compose.ui.graphics.Color.Transparent,
-                    unfocusedContainerColor = androidx.compose.ui.graphics.Color.Transparent,
-                    disabledContainerColor = androidx.compose.ui.graphics.Color.Transparent,
-                    focusedIndicatorColor = androidx.compose.ui.graphics.Color.Transparent,
-                    unfocusedIndicatorColor = androidx.compose.ui.graphics.Color.Transparent,
-                ),
+    val listState = rememberLazyListState()
+    val hasFacetRows = state.contentFacetViews.isNotEmpty()
+    var stickyFacetActionsHeightPx by remember(state.docId) { mutableStateOf(0) }
+    val facetListStartIndex =
+        remember(state.titleNotice, displayHintsError, hasFacetRows) {
+            docEditorFacetListStartIndex(
+                titleNotice = state.titleNotice,
+                displayHintsError = displayHintsError,
+                hasFacetRows = hasFacetRows,
             )
-            state.titleNotice?.let { titleNotice ->
-                Text(
-                    text = titleNotice,
-                    style = MaterialTheme.typography.bodySmall,
-                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+        }
+    val stickyFacetPlacement by remember(
+        state.contentFacetViews,
+        state.titleNotice,
+        displayHintsError,
+        facetListStartIndex,
+        listState,
+        stickyFacetActionsHeightPx,
+    ) {
+        derivedStateOf {
+            resolveStickyFacetActionPlacement(
+                layoutInfo = listState.layoutInfo,
+                facetViews = state.contentFacetViews,
+                facetListStartIndex = facetListStartIndex,
+                stickyFacetActionsHeightPx = stickyFacetActionsHeightPx,
+            )
+        }
+    }
+
+    LaunchedEffect(state.scrollToFacetRequest?.seq, state.contentFacetViews, state.titleNotice, displayHintsError) {
+        val request = state.scrollToFacetRequest ?: return@LaunchedEffect
+        val targetIndex = state.contentFacetViews.indexOfFirst { it.facetKey == request.facetKey }
+        if (targetIndex >= 0) {
+            listState.animateScrollToItem(facetListStartIndex + targetIndex)
+        }
+    }
+
+    Box(modifier = modifier.fillMaxSize().testTag(DaybookEditorSemantics.Editor)) {
+        LazyColumn(
+            state = listState,
+            modifier =
+            Modifier
+                .fillMaxSize()
+                .testTag(DaybookEditorSemantics.EditorList),
+        ) {
+            item(key = "title") {
+                TextField(
+                    value = state.titleDraft,
+                    onValueChange = { value -> controller.setTitleDraft(value) },
+                    modifier =
+                    Modifier
+                        .fillMaxWidth()
+                        .testTag(DaybookEditorSemantics.TitleField)
+                        .semantics {
+                            contentDescription = "Document title"
+                        },
+                    enabled = state.titleEditable,
+                    placeholder = { Text("Title") },
+                    textStyle = MaterialTheme.typography.titleLarge.copy(fontWeight = FontWeight.Bold),
+                    colors =
+                    TextFieldDefaults.colors(
+                        focusedContainerColor = androidx.compose.ui.graphics.Color.Transparent,
+                        unfocusedContainerColor = androidx.compose.ui.graphics.Color.Transparent,
+                        disabledContainerColor = androidx.compose.ui.graphics.Color.Transparent,
+                        focusedIndicatorColor = androidx.compose.ui.graphics.Color.Transparent,
+                        unfocusedIndicatorColor = androidx.compose.ui.graphics.Color.Transparent,
+                    ),
                 )
             }
-            HorizontalDivider(modifier = Modifier.padding(vertical = 8.dp))
+            state.titleNotice?.let { titleNotice ->
+                item(key = "title-notice") {
+                    Text(
+                        text = titleNotice,
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    )
+                }
+            }
+            item(key = "title-divider") {
+                HorizontalDivider(modifier = Modifier.padding(vertical = 8.dp))
+            }
 
             displayHintsError?.let { message ->
-                FacetStatusText(
-                    text = "Facet display config unavailable: $message",
-                    modifier = Modifier.padding(bottom = 8.dp),
-                )
+                item(key = "display-hints-error") {
+                    FacetStatusText(
+                        text = "Facet display config unavailable: $message",
+                        modifier = Modifier.padding(bottom = 8.dp),
+                    )
+                }
             }
 
             if (state.contentFacetViews.isEmpty()) {
-                Text(
-                    text = "No facets",
-                    style = MaterialTheme.typography.bodySmall,
-                    color = MaterialTheme.colorScheme.onSurfaceVariant,
-                )
-            }
-
-            state.contentFacetViews.forEachIndexed { index, descriptor ->
-                val bringIntoViewRequester = remember(descriptor.facetKey) { BringIntoViewRequester() }
-                val facetKeyLabel = facetKeyString(descriptor.facetKey)
-                val isCollapsed = collapsedFacetStates[facetKeyLabel] == true
-                LaunchedEffect(state.scrollToFacetRequest?.seq, descriptor.facetKey) {
-                    val request = state.scrollToFacetRequest ?: return@LaunchedEffect
-                    if (request.facetKey == descriptor.facetKey) {
-                        bringIntoViewRequester.bringIntoView()
-                    }
+                item(key = "no-facets") {
+                    Text(
+                        text = "No facets",
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    )
                 }
-                FacetBlock(
-                    descriptor = descriptor,
-                    doc = state.doc,
-                    branchPath = state.branchPath,
-                    controller = controller,
-                    modifier = Modifier.bringIntoViewRequester(bringIntoViewRequester),
-                    canShowMenu = state.docId != null,
-                    isCollapsed = isCollapsed,
-                    noteDraft = state.noteEditors[descriptor.facetKey]?.draft,
-                    noteEditable = state.noteEditors[descriptor.facetKey]?.editable ?: false,
-                    noteNotice = state.noteEditors[descriptor.facetKey]?.notice,
-                    displayHints = displayHints,
-                    canMoveUp = index > 0,
-                    canMoveDown = index < state.contentFacetViews.lastIndex,
-                    onToggleCollapse = {
-                        collapsedFacetStates[facetKeyLabel] = !(collapsedFacetStates[facetKeyLabel] == true)
-                    },
-                    onUiError = { message -> uiMessage = message },
-                )
-                if (index < state.contentFacetViews.lastIndex) {
-                    Spacer(modifier = Modifier.height(4.dp))
+            } else {
+                itemsIndexed(
+                    items = state.contentFacetViews,
+                    key = { _, descriptor -> facetKeyString(descriptor.facetKey) },
+                ) { index, descriptor ->
+                    val facetKeyLabel = facetKeyString(descriptor.facetKey)
+                    val isCollapsed = collapsedFacetStates[facetKeyLabel] == true
+                    val actionsExpanded = blockActionExpandedStates[facetKeyLabel] == true
+                    val showStickyActions = stickyFacetPlacement?.descriptor?.facetKey == descriptor.facetKey
+                    FacetBlock(
+                        descriptor = descriptor,
+                        doc = state.doc,
+                        branchPath = state.branchPath,
+                        controller = controller,
+                        modifier = Modifier,
+                        canShowMenu = state.docId != null,
+                        isCollapsed = isCollapsed,
+                        actionsExpanded = actionsExpanded,
+                        onActionsExpandedChange = { blockActionExpandedStates[facetKeyLabel] = it },
+                        showInlineActions = !showStickyActions,
+                        noteDraft = state.noteEditors[descriptor.facetKey]?.draft,
+                        noteEditable = state.noteEditors[descriptor.facetKey]?.editable ?: false,
+                        noteNotice = state.noteEditors[descriptor.facetKey]?.notice,
+                        displayHints = displayHints,
+                        canMoveUp = index > 0,
+                        canMoveDown = index < state.contentFacetViews.lastIndex,
+                        onToggleCollapse = {
+                            collapsedFacetStates[facetKeyLabel] = !(collapsedFacetStates[facetKeyLabel] == true)
+                        },
+                        onUiError = { message -> uiMessage = message },
+                    )
+                    if (index < state.contentFacetViews.lastIndex) {
+                        Spacer(modifier = Modifier.height(8.dp))
+                    }
                 }
             }
 
             if (showInlineFacetRack) {
-                Column(
-                    modifier =
-                    Modifier
-                        .fillMaxWidth()
-                        .testTag(DaybookEditorSemantics.Details),
-                ) {
-                    HorizontalDivider(modifier = Modifier.padding(vertical = 8.dp))
-                    Text(
-                        text = "Details",
-                        style = MaterialTheme.typography.titleSmall,
-                        modifier = Modifier.padding(bottom = 8.dp),
-                    )
-                    DocDetailsSidebar(
-                        doc = state.doc,
-                        warnings = state.docWarnings,
-                        modifier = Modifier.fillMaxWidth(),
-                    )
+                item(key = "details") {
+                    Column(
+                        modifier =
+                        Modifier
+                            .fillMaxWidth()
+                            .testTag(DaybookEditorSemantics.Details),
+                    ) {
+                        HorizontalDivider(modifier = Modifier.padding(vertical = 8.dp))
+                        Text(
+                            text = "Details",
+                            style = MaterialTheme.typography.titleSmall,
+                            modifier = Modifier.padding(bottom = 8.dp),
+                        )
+                        DocDetailsSidebar(
+                            doc = state.doc,
+                            warnings = state.docWarnings,
+                            modifier = Modifier.fillMaxWidth(),
+                        )
+                    }
                 }
             }
+        }
+
+        stickyFacetPlacement?.let { placement ->
+            val descriptor = placement.descriptor
+            val facetKeyLabel = facetKeyString(descriptor.facetKey)
+            val isCollapsed = collapsedFacetStates[facetKeyLabel] == true
+            val actionsExpanded = blockActionExpandedStates[facetKeyLabel] == true
+            val stickyActionsHoverSource = remember(descriptor.facetKey) { MutableInteractionSource() }
+            val stickyActionsHovered by stickyActionsHoverSource.collectIsHoveredAsState()
+            FacetBlockActionsMenu(
+                facetKeyLabel = facetKeyLabel,
+                isPrimary = descriptor.isPrimary,
+                actions =
+                FacetBlockActions(
+                    canShowMenu = state.docId != null,
+                    canMoveUp = placement.facetIndex > 0,
+                    canMoveDown = placement.facetIndex < state.contentFacetViews.lastIndex,
+                    isCollapsed = isCollapsed,
+                    onAddNote = { controller.addNoteFacetAfter(descriptor.facetKey) },
+                    onMakePrimary = { controller.makeFacetPrimary(descriptor.facetKey) },
+                    onMoveUp = { controller.moveFacetEarlier(descriptor.facetKey) },
+                    onMoveDown = { controller.moveFacetLater(descriptor.facetKey) },
+                    onToggleCollapse = {
+                        collapsedFacetStates[facetKeyLabel] = !(collapsedFacetStates[facetKeyLabel] == true)
+                    },
+                ),
+                expanded = actionsExpanded,
+                visible = true,
+                onExpandedChange = { blockActionExpandedStates[facetKeyLabel] = it },
+                showQuickAction = actionsExpanded || stickyActionsHovered,
+                quickActionIcon =
+                if (isCollapsed) {
+                    Icons.Default.KeyboardArrowDown
+                } else {
+                    Icons.Default.KeyboardArrowUp
+                },
+                blockHovered = true,
+                actionsHovered = stickyActionsHovered,
+                modifier =
+                Modifier
+                    .align(Alignment.TopEnd)
+                    .offset { IntOffset(0, placement.yOffsetPx) }
+                    .padding(top = 2.dp)
+                    .onSizeChanged { stickyFacetActionsHeightPx = it.height },
+                interactionSource = stickyActionsHoverSource,
+            )
         }
 
         SnackbarHost(
@@ -230,6 +340,54 @@ fun DocEditor(
             modifier = Modifier.align(Alignment.BottomCenter).padding(8.dp),
         )
     }
+}
+
+private fun docEditorFacetListStartIndex(
+    titleNotice: String?,
+    displayHintsError: String?,
+    hasFacetRows: Boolean,
+): Int {
+    var index = 0
+    index += 1
+    if (titleNotice != null) {
+        index += 1
+    }
+    index += 1
+    if (displayHintsError != null) {
+        index += 1
+    }
+    if (!hasFacetRows) {
+        index += 1
+    }
+    return index
+}
+
+private fun resolveStickyFacetActionPlacement(
+    layoutInfo: LazyListLayoutInfo,
+    facetViews: List<FacetViewDescriptor>,
+    facetListStartIndex: Int,
+    stickyFacetActionsHeightPx: Int,
+): StickyFacetActionPlacement? {
+    val visibleFacetItem =
+        layoutInfo.visibleItemsInfo.firstOrNull { it.index >= facetListStartIndex } ?: return null
+    if (visibleFacetItem.offset >= 0) {
+        return null
+    }
+    val facetIndex = visibleFacetItem.index - facetListStartIndex
+    val descriptor = facetViews.getOrNull(facetIndex) ?: return null
+    val nextFacetItem =
+        if (facetIndex < facetViews.lastIndex) {
+            layoutInfo.visibleItemsInfo.firstOrNull { it.index == visibleFacetItem.index + 1 }
+        } else {
+            null
+        }
+    val yOffsetPx =
+        nextFacetItem?.let { minOf(0, it.offset - stickyFacetActionsHeightPx) } ?: 0
+    return StickyFacetActionPlacement(
+        descriptor = descriptor,
+        facetIndex = facetIndex,
+        yOffsetPx = yOffsetPx,
+    )
 }
 
 @Composable
@@ -241,6 +399,9 @@ private fun FacetBlock(
     modifier: Modifier = Modifier,
     canShowMenu: Boolean,
     isCollapsed: Boolean,
+    actionsExpanded: Boolean,
+    onActionsExpandedChange: (Boolean) -> Unit,
+    showInlineActions: Boolean,
     noteDraft: String?,
     noteEditable: Boolean,
     noteNotice: String?,
@@ -270,11 +431,10 @@ private fun FacetBlock(
         }
     val interactionSource = remember { MutableInteractionSource() }
     val isHovered by interactionSource.collectIsHoveredAsState()
-    var actionsExpanded by remember { mutableStateOf(false) }
     val blockActionsInteractionSource = remember { MutableInteractionSource() }
     val isActionsHovered by blockActionsInteractionSource.collectIsHoveredAsState()
     val actionsVisible = canShowMenu && (isCollapsed || isHovered || actionsExpanded || isActionsHovered)
-    val quickActionVisible = canShowMenu && (actionsExpanded || isActionsHovered)
+    val quickActionVisible = (actionsExpanded || isActionsHovered)
 
     Box(
         modifier =
@@ -286,7 +446,7 @@ private fun FacetBlock(
                     if (canShowMenu) {
                         listOf(
                             CustomAccessibilityAction("Block actions") {
-                                actionsExpanded = true
+                                onActionsExpandedChange(true)
                                 true
                             },
                             CustomAccessibilityAction(
@@ -355,36 +515,38 @@ private fun FacetBlock(
                 )
             }
         }
-        FacetBlockActionsMenu(
-            facetKeyLabel = facetKeyLabel,
-            isPrimary = descriptor.isPrimary,
-            actions =
-            FacetBlockActions(
-                canShowMenu = canShowMenu,
-                canMoveUp = canMoveUp,
-                canMoveDown = canMoveDown,
-                isCollapsed = isCollapsed,
-                onAddNote = { controller.addNoteFacetAfter(descriptor.facetKey) },
-                onMakePrimary = { controller.makeFacetPrimary(descriptor.facetKey) },
-                onMoveUp = { controller.moveFacetEarlier(descriptor.facetKey) },
-                onMoveDown = { controller.moveFacetLater(descriptor.facetKey) },
-                onToggleCollapse = onToggleCollapse,
-            ),
-            expanded = actionsExpanded,
-            visible = actionsVisible,
-            onExpandedChange = { actionsExpanded = it },
-            showQuickAction = quickActionVisible,
-            quickActionIcon =
-            if (isCollapsed) {
-                Icons.Default.KeyboardArrowDown
-            } else {
-                Icons.Default.KeyboardArrowUp
-            },
-            blockHovered = isHovered,
-            actionsHovered = isActionsHovered,
-            modifier = Modifier.align(Alignment.TopEnd).padding(top = 2.dp),
-            interactionSource = blockActionsInteractionSource,
-        )
+        if (showInlineActions) {
+            FacetBlockActionsMenu(
+                facetKeyLabel = facetKeyLabel,
+                isPrimary = descriptor.isPrimary,
+                actions =
+                FacetBlockActions(
+                    canShowMenu = canShowMenu,
+                    canMoveUp = canMoveUp,
+                    canMoveDown = canMoveDown,
+                    isCollapsed = isCollapsed,
+                    onAddNote = { controller.addNoteFacetAfter(descriptor.facetKey) },
+                    onMakePrimary = { controller.makeFacetPrimary(descriptor.facetKey) },
+                    onMoveUp = { controller.moveFacetEarlier(descriptor.facetKey) },
+                    onMoveDown = { controller.moveFacetLater(descriptor.facetKey) },
+                    onToggleCollapse = onToggleCollapse,
+                ),
+                expanded = actionsExpanded,
+                visible = actionsVisible,
+                onExpandedChange = onActionsExpandedChange,
+                showQuickAction = quickActionVisible,
+                quickActionIcon =
+                if (isCollapsed) {
+                    Icons.Default.KeyboardArrowDown
+                } else {
+                    Icons.Default.KeyboardArrowUp
+                },
+                blockHovered = isHovered,
+                actionsHovered = isActionsHovered,
+                modifier = Modifier.align(Alignment.TopEnd).padding(top = 2.dp),
+                interactionSource = blockActionsInteractionSource,
+            )
+        }
     }
 }
 
@@ -419,19 +581,21 @@ private fun FacetBlockActionsMenu(
         return
     }
 
+    val rowBackgroundColor =
+        if (showQuickAction) {
+            MaterialTheme.colorScheme.surfaceContainer
+        } else {
+            MaterialTheme.colorScheme.surfaceContainer.copy(alpha = 0.48f)
+        }
+
     Box(modifier = modifier) {
         Row(
             modifier =
             Modifier
                 .hoverable(interactionSource)
-                .then(
-                    Modifier.background(
-                        color = if (showQuickAction) 
-                            MaterialTheme.colorScheme.surfaceContainer
-                        else 
-                            MaterialTheme.colorScheme.surfaceContainer.copy(alpha = 0.48f),
-                        shape = RoundedCornerShape(percent = 50),
-                    )
+                .background(
+                    color = rowBackgroundColor,
+                    shape = RoundedCornerShape(percent = 50),
                 )
                 .padding(4.dp),
             horizontalArrangement = Arrangement.spacedBy(2.dp),
