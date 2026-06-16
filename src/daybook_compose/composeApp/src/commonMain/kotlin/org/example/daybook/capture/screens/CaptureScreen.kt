@@ -34,6 +34,7 @@ import org.example.daybook.capture.LocalCameraCaptureContext
 import org.example.daybook.capture.ui.DaybookCameraViewport
 import org.example.daybook.layouts.DaybookScaffold
 import org.example.daybook.ui.DocEditor
+import org.example.daybook.ui.DocEditorArgs
 import org.example.daybook.ui.buildBlobFacetFromDigest
 import org.example.daybook.ui.buildBodyFacet
 import org.example.daybook.ui.buildImageMetadataFacet
@@ -348,9 +349,12 @@ fun CaptureScreen(modifier: Modifier = Modifier, initialDocId: String? = null) {
                         val addBlockDialogLauncher = rememberAddBlockDialogLauncher(vm.editorController)
                         val bigDialogController = LocalBigDialogController.current
                         DocEditor(
-                            controller = vm.editorController,
-                            isAddBlockPickerOpen = bigDialogController.isShowing,
-                            onAddBlockRequested = addBlockDialogLauncher,
+                            args =
+                            DocEditorArgs(
+                                controller = vm.editorController,
+                                isAddBlockPickerOpen = bigDialogController.isShowing,
+                                onAddBlockRequested = addBlockDialogLauncher,
+                            ),
                             modifier = Modifier.padding(16.dp),
                         )
                     }

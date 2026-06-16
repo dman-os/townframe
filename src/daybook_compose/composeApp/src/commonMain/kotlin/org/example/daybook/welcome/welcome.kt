@@ -166,6 +166,8 @@ private val welcomeNavConfig =
             }
     }
 
+private const val WELCOME_NAV_TRANSITION_MS = 240
+
 private class WelcomeNavigationState(val backStack: NavBackStack<NavKey>) {
     val currentDestination: WelcomeNavKey?
         get() = backStack.lastOrNull() as? WelcomeNavKey
@@ -314,28 +316,28 @@ fun WelcomeFlowNavHost(
                 ),
                 transitionSpec = {
                     slideInHorizontally(
-                        animationSpec = tween(240),
+                        animationSpec = tween(WELCOME_NAV_TRANSITION_MS),
                         initialOffsetX = { fullWidth -> fullWidth },
                     ) togetherWith slideOutHorizontally(
-                        animationSpec = tween(240),
+                        animationSpec = tween(WELCOME_NAV_TRANSITION_MS),
                         targetOffsetX = { fullWidth -> -fullWidth },
                     )
                 },
                 popTransitionSpec = {
                     slideInHorizontally(
-                        animationSpec = tween(240),
+                        animationSpec = tween(WELCOME_NAV_TRANSITION_MS),
                         initialOffsetX = { fullWidth -> -fullWidth },
                     ) togetherWith slideOutHorizontally(
-                        animationSpec = tween(240),
+                        animationSpec = tween(WELCOME_NAV_TRANSITION_MS),
                         targetOffsetX = { fullWidth -> fullWidth },
                     )
                 },
                 predictivePopTransitionSpec = {
                     slideInHorizontally(
-                        animationSpec = tween(240),
+                        animationSpec = tween(WELCOME_NAV_TRANSITION_MS),
                         initialOffsetX = { fullWidth -> -fullWidth },
                     ) togetherWith slideOutHorizontally(
-                        animationSpec = tween(240),
+                        animationSpec = tween(WELCOME_NAV_TRANSITION_MS),
                         targetOffsetX = { fullWidth -> fullWidth },
                     )
                 },

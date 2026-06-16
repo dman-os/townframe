@@ -1,3 +1,5 @@
+@file:Suppress("FunctionNaming")
+
 @file:OptIn(
     kotlin.uuid.ExperimentalUuidApi::class,
     androidx.compose.material3.ExperimentalMaterial3Api::class,
@@ -6,7 +8,6 @@
 
 package org.example.daybook.drawer
 
-import androidx.compose.foundation.background
 import androidx.compose.foundation.gestures.Orientation
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.lazy.LazyColumn
@@ -30,9 +31,9 @@ import org.example.daybook.LocalBigDialogController
 import org.example.daybook.LocalContainer
 import org.example.daybook.LocalDocEditorStore
 import org.example.daybook.layouts.DaybookScaffold
-import org.example.daybook.layouts.LocalScreenChromeSpec
 import org.example.daybook.tables.DockableRegion
 import org.example.daybook.ui.DocEditor
+import org.example.daybook.ui.DocEditorArgs
 import org.example.daybook.ui.DocFacetSidebar
 import org.example.daybook.ui.buildSelfFacetRefUrl
 import org.example.daybook.ui.decodeJsonStringOrRaw
@@ -49,78 +50,102 @@ import org.example.daybook.uniffi.types.FacetTag
 import org.example.daybook.uniffi.types.WellKnownFacet
 
 @Composable
-private fun DrawerDocEditorContent(
-    controller: org.example.daybook.ui.editor.EditorSessionController?,
-    selectedDocId: String?,
-    displayHints: Map<String, FacetDisplayHint>,
-    displayHintsError: String?,
-    modifier: Modifier = Modifier,
-    showFacetSidebar: Boolean,
-    showInlineFacetRack: Boolean = false,
-) {
+private fun DrawerDocEditorContent(args: DrawerDocEditorContentArgs, modifier: Modifier = Modifier) {
     Box(modifier = modifier.fillMaxSize()) {
-        if (selectedDocId != null) {
-            if (controller == null) {
-                Box(
-                    modifier =
-                    Modifier
-                        .fillMaxSize()
-                        .testTag(DaybookEditorSemantics.Loading)
-                        .semantics {
-                            contentDescription = "Loading document"
-                        },
-                    contentAlignment = Alignment.Center,
-                ) {
-                    CircularProgressIndicator()
-                }
-                return@Box
-            }
-            val addBlockDialogLauncher = rememberAddBlockDialogLauncher(controller)
-            val bigDialogController = LocalBigDialogController.current
-            if (showFacetSidebar) {
-                DockableRegion(
-                    modifier = Modifier.fillMaxSize().padding(16.dp),
-                    orientation = Orientation.Horizontal,
-                    initialWeights = mapOf("doc-main" to 0.72f, "doc-facets" to 0.28f),
-                ) {
-                    pane("doc-main") {
-                        DocEditor(
-                            controller = controller,
-                            displayHints = displayHints,
-                            displayHintsError = displayHintsError,
-                            isAddBlockPickerOpen = bigDialogController.isShowing,
-                            onAddBlockRequested = addBlockDialogLauncher,
-                            modifier = Modifier.fillMaxSize(),
-                        )
-                    }
-                    pane("doc-facets") {
-                        DocFacetSidebar(
-                            controller = controller,
-                            modifier = Modifier.fillMaxSize(),
-                        )
-                    }
-                }
-            } else {
-                DocEditor(
-                    controller = controller,
-                    showInlineFacetRack = showInlineFacetRack,
-                    displayHints = displayHints,
-                    displayHintsError = displayHintsError,
-                    isAddBlockPickerOpen = bigDialogController.isShowing,
-                    onAddBlockRequested = addBlockDialogLauncher,
-                    modifier = Modifier.fillMaxSize().padding(16.dp),
-                )
-            }
-        } else {
-            Box(
-                modifier = Modifier.fillMaxSize(),
-                contentAlignment = Alignment.Center,
-            ) {
-                Text("Select a document to view details")
-            }
+        when {
+            args.selectedDocId == null -> DrawerDocEditorEmptyState()
+            args.controller == null -> DrawerDocEditorLoadingState()
+            args.showFacetSidebar -> DrawerDocEditorSplitState(args)
+            else -> DrawerDocEditorSingleState(args)
         }
     }
 }
+
+@Composable
+private fun DrawerDocEditorLoadingState() {
+    Box(
+        modifier =
+        Modifier
+            .fillMaxSize()
+            .testTag(DaybookEditorSemantics.LOADING)
+            .semantics {
+                contentDescription = "Loading document"
+            },
+        contentAlignment = Alignment.Center,
+    ) {
+        CircularProgressIndicator()
+    }
+}
+
+@Composable
+private fun DrawerDocEditorEmptyState() {
+    Box(
+        modifier = Modifier.fillMaxSize(),
+        contentAlignment = Alignment.Center,
+    ) {
+        Text("Select a document to view details")
+    }
+}
+
+@Composable
+private fun DrawerDocEditorSplitState(args: DrawerDocEditorContentArgs) {
+    val controller = args.controller ?: error("controller must be present when selectedDocId is present")
+    val addBlockDialogLauncher = rememberAddBlockDialogLauncher(controller)
+    val bigDialogController = LocalBigDialogController.current
+    DockableRegion(
+        modifier = Modifier.fillMaxSize().padding(16.dp),
+        orientation = Orientation.Horizontal,
+        initialWeights = mapOf("doc-main" to 0.72f, "doc-facets" to 0.28f),
+    ) {
+        pane("doc-main") {
+            DocEditor(
+                args =
+                org.example.daybook.ui.DocEditorArgs(
+                    controller = controller,
+                    displayHints = args.displayHints,
+                    displayHintsError = args.displayHintsError,
+                    isAddBlockPickerOpen = bigDialogController.isShowing,
+                    onAddBlockRequested = addBlockDialogLauncher,
+                ),
+                modifier = Modifier.fillMaxSize(),
+            )
+        }
+        pane("doc-facets") {
+            DocFacetSidebar(
+                controller = controller,
+                modifier = Modifier.fillMaxSize(),
+            )
+        }
+    }
+}
+
+@Composable
+private fun DrawerDocEditorSingleState(args: DrawerDocEditorContentArgs) {
+    val controller = args.controller ?: error("controller must be present when selectedDocId is present")
+    val addBlockDialogLauncher = rememberAddBlockDialogLauncher(controller)
+    val bigDialogController = LocalBigDialogController.current
+    DocEditor(
+        args =
+        org.example.daybook.ui.DocEditorArgs(
+            controller = controller,
+            showInlineFacetRack = args.showInlineFacetRack,
+            displayHints = args.displayHints,
+            displayHintsError = args.displayHintsError,
+            isAddBlockPickerOpen = bigDialogController.isShowing,
+            onAddBlockRequested = addBlockDialogLauncher,
+        ),
+        modifier = Modifier.fillMaxSize().padding(16.dp),
+    )
+}
+
+private data class DrawerDocEditorContentArgs(
+    val controller: org.example.daybook.ui.editor.EditorSessionController?,
+    val selectedDocId: String?,
+    val displayHints: Map<String, FacetDisplayHint>,
+    val displayHintsError: String?,
+    val showFacetSidebar: Boolean,
+    val showInlineFacetRack: Boolean = false,
+)
 
 @Composable
 fun DrawerScreen(drawerVm: DrawerViewModel, onOpenDoc: (String) -> Unit, modifier: Modifier = Modifier) {
@@ -145,6 +170,29 @@ fun DrawerScreen(drawerVm: DrawerViewModel, onOpenDoc: (String) -> Unit, modifie
 
 @Composable
 fun DocEditorScreen(contentType: DaybookContentType, modifier: Modifier = Modifier) {
+    val state = rememberDocEditorScreenState(contentType)
+    DaybookScaffold(
+        modifier = modifier.fillMaxSize().testTag(DaybookEditorSemantics.SCREEN),
+        topBar = null,
+    ) { scaffoldPadding ->
+        DocEditorScreenContent(
+            state = state,
+            scaffoldPadding = scaffoldPadding,
+        )
+    }
+}
+
+private data class DocEditorScreenState(
+    val selectedDocId: String?,
+    val selectedController: org.example.daybook.ui.editor.EditorSessionController?,
+    val displayHints: Map<String, FacetDisplayHint>,
+    val configError: String?,
+    val showFacetSidebar: Boolean,
+    val showInlineFacetRack: Boolean,
+)
+
+@Composable
+private fun rememberDocEditorScreenState(contentType: DaybookContentType): DocEditorScreenState {
     val docEditorStore: DocEditorStoreViewModel = LocalDocEditorStore.current
     val container = LocalContainer.current
     val configVm = viewModel { ConfigViewModel(container.configRepo, container.progressRepo) }
@@ -152,10 +200,6 @@ fun DocEditorScreen(contentType: DaybookContentType, modifier: Modifier = Modifi
     val configError by configVm.error.collectAsState()
     val selectedDocId by docEditorStore.selectedDocId.collectAsState()
     val selectedController by docEditorStore.selectedController.collectAsState()
-    val editorState =
-        selectedController?.let { controller ->
-            controller.state.collectAsState().value
-        }
 
     DisposableEffect(selectedDocId) {
         if (selectedDocId != null) {
@@ -168,56 +212,37 @@ fun DocEditorScreen(contentType: DaybookContentType, modifier: Modifier = Modifi
         }
     }
 
-    val baseChromeSpec = LocalScreenChromeSpec.current
-    val topBarSpec = baseChromeSpec.topBar
-    val baseActions = topBarSpec.actions
-    val savingTopBarSpec =
-        topBarSpec.copy(
-            actions = {
-                if (editorState?.isSaving == true) {
-                    CircularProgressIndicator(
-                        modifier = Modifier.padding(end = 12.dp).size(14.dp),
-                        strokeWidth = 1.25.dp,
-                    )
-                }
-                baseActions?.invoke(this)
-            },
-        )
+    return DocEditorScreenState(
+        selectedDocId = selectedDocId,
+        selectedController = selectedController,
+        displayHints = displayHints,
+        configError = configError?.message,
+        showFacetSidebar = contentType == DaybookContentType.LIST_AND_DETAIL,
+        showInlineFacetRack = contentType != DaybookContentType.LIST_AND_DETAIL,
+    )
+}
 
-    DaybookScaffold(
-        modifier = modifier.fillMaxSize().testTag(DaybookEditorSemantics.Screen),
-        topBar = savingTopBarSpec,
-    ) { scaffoldPadding ->
-        when (selectedDocId) {
-            null -> {
-                Box(
-                    modifier =
-                    Modifier
-                        .fillMaxSize()
-                        .padding(scaffoldPadding)
-                        .background(MaterialTheme.colorScheme.surface)
-                        .testTag(DaybookEditorSemantics.EmptyState),
-                    contentAlignment = Alignment.Center,
-                ) {
-                    Text("Select a document to view details")
-                }
-            }
-
-            else -> {
-                DrawerDocEditorContent(
-                    controller = selectedController,
-                    selectedDocId = selectedDocId,
-                    displayHints = displayHints,
-                    displayHintsError = configError?.message,
-                    modifier =
-                    Modifier
-                        .fillMaxSize()
-                        .padding(scaffoldPadding)
-                        .consumeWindowInsets(scaffoldPadding),
-                    showFacetSidebar = contentType == DaybookContentType.LIST_AND_DETAIL,
-                    showInlineFacetRack = contentType != DaybookContentType.LIST_AND_DETAIL,
-                )
-            }
+@Composable
+private fun DocEditorScreenContent(state: DocEditorScreenState, scaffoldPadding: PaddingValues) {
+    Box(modifier = Modifier.fillMaxSize().padding(scaffoldPadding)) {
+        val controller = state.selectedController
+        if (state.selectedDocId == null) {
+            DrawerDocEditorEmptyState()
+        } else if (controller == null) {
+            DrawerDocEditorLoadingState()
+        } else {
+            DrawerDocEditorContent(
+                args =
+                DrawerDocEditorContentArgs(
+                    controller = controller,
+                    selectedDocId = state.selectedDocId,
+                    displayHints = state.displayHints,
+                    displayHintsError = state.configError,
+                    showFacetSidebar = state.showFacetSidebar,
+                    showInlineFacetRack = state.showInlineFacetRack,
+                ),
+                modifier = Modifier.fillMaxSize(),
+            )
         }
     }
 }

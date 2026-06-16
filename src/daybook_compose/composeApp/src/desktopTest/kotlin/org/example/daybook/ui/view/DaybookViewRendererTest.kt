@@ -38,7 +38,7 @@ class DaybookViewRendererTest {
             }
         }
 
-        onNodeWithTag(DaybookViewSemantics.Root).assertIsDisplayed()
+        onNodeWithTag(DaybookViewSemantics.ROOT).assertIsDisplayed()
         onNodeWithTag(DaybookViewSemantics.node("root")).assertIsDisplayed()
         onNodeWithTag(DaybookViewSemantics.kind("card")).assertIsDisplayed()
         onNodeWithText("Claim summary").assertIsDisplayed()

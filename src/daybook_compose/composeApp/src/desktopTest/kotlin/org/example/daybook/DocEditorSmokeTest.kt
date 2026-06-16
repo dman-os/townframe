@@ -96,10 +96,10 @@ class DocEditorSmokeTest {
             waitUntil(timeoutMillis = 10_000) {
                 onAllNodesWithText(titleText).fetchSemanticsNodes().isNotEmpty()
             }
-            onNodeWithTag(DaybookEditorSemantics.Screen).assertIsDisplayed()
-            onNodeWithTag(DaybookEditorSemantics.Editor).assertIsDisplayed()
-            onNodeWithTag(DaybookEditorSemantics.Details).assertIsDisplayed()
-            onNodeWithTag(DaybookEditorSemantics.TitleField).assertTextContains(titleText)
+            onNodeWithTag(DaybookEditorSemantics.SCREEN).assertIsDisplayed()
+            onNodeWithTag(DaybookEditorSemantics.EDITOR).assertIsDisplayed()
+            onNodeWithTag(DaybookEditorSemantics.DETAILS).assertIsDisplayed()
+            onNodeWithTag(DaybookEditorSemantics.TITLE_FIELD).assertTextContains(titleText)
             waitUntil(timeoutMillis = 10_000) {
                 onAllNodesWithText(noteText).fetchSemanticsNodes().isNotEmpty()
             }
@@ -254,11 +254,11 @@ class DocEditorSmokeTest {
             onNodeWithTag(DaybookEditorSemantics.addBlockAfterAction(firstNoteLabel)).performClick()
 
             waitUntil(timeoutMillis = 10_000) {
-                onAllNodesWithTag(DaybookEditorSemantics.addBlockDialog())
+                onAllNodesWithTag(DaybookEditorSemantics.ADD_BLOCK_DIALOG)
                     .fetchSemanticsNodes()
                     .isNotEmpty()
             }
-            onNodeWithTag(DaybookEditorSemantics.addBlockSearchField()).performTextInput("note")
+            onNodeWithTag(DaybookEditorSemantics.ADD_BLOCK_SEARCH_FIELD).performTextInput("note")
             waitUntil(timeoutMillis = 10_000) {
                 onAllNodesWithTag(DaybookEditorSemantics.addBlockOption("note"))
                     .fetchSemanticsNodes()
@@ -340,13 +340,13 @@ class DocEditorSmokeTest {
             onNodeWithTag(DaybookEditorSemantics.addBlockAfterAction(firstNoteLabel)).performClick()
 
             waitUntil(timeoutMillis = 10_000) {
-                onAllNodesWithTag(DaybookEditorSemantics.addBlockDialog())
+                onAllNodesWithTag(DaybookEditorSemantics.ADD_BLOCK_DIALOG)
                     .fetchSemanticsNodes()
                     .isNotEmpty()
             }
-            onNodeWithTag(DaybookEditorSemantics.addBlockDialog()).assertIsDisplayed()
-            onNodeWithTag(DaybookEditorSemantics.addBlockSearchField()).assertIsNotFocused()
-            onNodeWithTag(DaybookEditorSemantics.addBlockSearchField()).performTextInput("note")
+            onNodeWithTag(DaybookEditorSemantics.ADD_BLOCK_DIALOG).assertIsDisplayed()
+            onNodeWithTag(DaybookEditorSemantics.ADD_BLOCK_SEARCH_FIELD).assertIsNotFocused()
+            onNodeWithTag(DaybookEditorSemantics.ADD_BLOCK_SEARCH_FIELD).performTextInput("note")
             waitUntil(timeoutMillis = 10_000) {
                 onAllNodesWithTag(DaybookEditorSemantics.addBlockOption("note"))
                     .fetchSemanticsNodes()
@@ -411,7 +411,7 @@ class DocEditorSmokeTest {
 
             onNodeWithTag(DaybookEditorSemantics.noteField(firstNoteLabel)).performTextInput("x")
             waitUntil(timeoutMillis = 10_000) {
-                onAllNodesWithTag(DaybookEditorSemantics.focusedNoteAccessoryBar())
+                onAllNodesWithTag(DaybookEditorSemantics.FOCUSED_NOTE_ACCESSORY_BAR)
                     .fetchSemanticsNodes()
                     .isEmpty()
             }
@@ -539,7 +539,7 @@ class DocEditorSmokeTest {
                 onAllNodesWithText("Sample summary").fetchSemanticsNodes().isNotEmpty()
             }
             onNodeWithTag(DaybookEditorSemantics.pluginFacet(facetKeyString(noteFacetKey()))).assertIsDisplayed()
-            onNodeWithTag(DaybookViewSemantics.Root).assertIsDisplayed()
+            onNodeWithTag(DaybookViewSemantics.ROOT).assertIsDisplayed()
             onNodeWithText("Sample summary").assertIsDisplayed()
         } finally {
             fixture.close()

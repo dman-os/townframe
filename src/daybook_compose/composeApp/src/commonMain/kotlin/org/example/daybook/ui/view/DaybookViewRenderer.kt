@@ -1,3 +1,5 @@
+@file:Suppress("FunctionNaming")
+
 package org.example.daybook.ui.view
 
 import androidx.compose.foundation.layout.Arrangement
@@ -33,7 +35,7 @@ import com.mikepenz.markdown.m3.Markdown as MarkdownContent
 
 @Composable
 fun DaybookView(spec: ViewSpec, modifier: Modifier = Modifier, onEvent: (DaybookViewEvent) -> Unit = {}) {
-    Box(modifier = modifier.testTag(DaybookViewSemantics.Root)) {
+    Box(modifier = modifier.testTag(DaybookViewSemantics.ROOT)) {
         when (spec) {
             is ViewSpec.V1 -> DaybookViewNode(spec.v1.root, onEvent = onEvent)
         }

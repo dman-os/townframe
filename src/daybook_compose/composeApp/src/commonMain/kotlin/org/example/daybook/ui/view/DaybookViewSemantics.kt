@@ -1,7 +1,7 @@
 package org.example.daybook.ui.view
 
 object DaybookViewSemantics {
-    const val Root = "daybook-view-root"
+    const val ROOT = "daybook-view-root"
 
     fun node(id: String) = "daybook-view-node:$id"
 

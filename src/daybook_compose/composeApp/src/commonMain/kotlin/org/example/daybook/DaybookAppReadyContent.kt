@@ -1,3 +1,5 @@
+@file:Suppress("FunctionNaming")
+
 package org.example.daybook
 
 import androidx.compose.foundation.layout.Box
@@ -11,35 +13,36 @@ import org.example.daybook.capture.ProvideCameraCaptureContext
 import org.example.daybook.navigation.rememberDaybookNavigationState
 
 @Composable
-internal fun DaybookAppReadyContent(
-    appContainer: AppContainer,
-    drawerVm: DrawerViewModel,
-    docEditorStore: DocEditorStoreViewModel,
-    surfaceModifier: Modifier = Modifier,
-    extraAction: (() -> Unit)? = null,
-    onExitRequest: (() -> Unit)? = null,
-) {
+internal fun DaybookAppReadyContent(args: DaybookAppReadyContentArgs, surfaceModifier: Modifier = Modifier) {
     Box(modifier = Modifier.fillMaxSize()) {
         CompositionLocalProvider(
-            LocalContainer provides appContainer,
-            LocalDrawerViewModel provides drawerVm,
-            LocalDocEditorStore provides docEditorStore,
+            LocalContainer provides args.appContainer,
+            LocalDrawerViewModel provides args.drawerVm,
+            LocalDocEditorStore provides args.docEditorStore,
         ) {
             val cameraCaptureContext = remember { CameraCaptureContext() }
             val chromeStateManager = remember { ChromeStateManager() }
             ProvideCameraCaptureContext(cameraCaptureContext) {
                 CompositionLocalProvider(
                     LocalChromeStateManager provides chromeStateManager,
-                    LocalAppExitRequest provides onExitRequest,
+                    LocalAppExitRequest provides args.onExitRequest,
                 ) {
                     val navState = rememberDaybookNavigationState()
                     AdaptiveAppLayout(
                         modifier = surfaceModifier,
                         navState = navState,
-                        extraAction = extraAction,
+                        extraAction = args.extraAction,
                     )
                 }
             }
         }
     }
 }
+
+internal data class DaybookAppReadyContentArgs(
+    val appContainer: AppContainer,
+    val drawerVm: DrawerViewModel,
+    val docEditorStore: DocEditorStoreViewModel,
+    val extraAction: (() -> Unit)? = null,
+    val onExitRequest: (() -> Unit)? = null,
+)

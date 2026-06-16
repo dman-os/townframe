@@ -772,12 +772,15 @@ fun App(
                         )
                     } else {
                         DaybookAppReadyContent(
-                            appContainer = appContainer,
-                            drawerVm = drawerVm,
-                            docEditorStore = docEditorStore,
+                            args =
+                            DaybookAppReadyContentArgs(
+                                appContainer = appContainer,
+                                drawerVm = drawerVm,
+                                docEditorStore = docEditorStore,
+                                extraAction = extraAction,
+                                onExitRequest = onExitRequest,
+                            ),
                             surfaceModifier = surfaceModifier,
-                            extraAction = extraAction,
-                            onExitRequest = onExitRequest,
                         )
                     }
                     if (shutdownRequested && !shutdownDone) {

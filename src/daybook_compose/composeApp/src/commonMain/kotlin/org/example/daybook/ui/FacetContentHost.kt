@@ -1,3 +1,5 @@
+@file:Suppress("FunctionNaming")
+
 @file:OptIn(kotlin.time.ExperimentalTime::class)
 
 package org.example.daybook.ui
@@ -19,7 +21,6 @@ import androidx.compose.material3.TextFieldDefaults
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
-import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.produceState
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
@@ -33,10 +34,12 @@ import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.unit.dp
 import coil3.compose.AsyncImage
+import kotlinx.coroutines.CoroutineDispatcher
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
 import org.example.daybook.DaybookEditorSemantics
 import org.example.daybook.LocalContainer
+import org.example.daybook.ui.buildSelfFacetRefUrl
 import org.example.daybook.ui.editor.FacetEditorKind
 import org.example.daybook.ui.editor.FacetViewDescriptor
 import org.example.daybook.ui.editor.facetKeyRefPathString
@@ -51,14 +54,6 @@ import org.example.daybook.uniffi.types.ViewSpec
 import org.example.daybook.uniffi.types.WellKnownFacet
 import kotlin.coroutines.cancellation.CancellationException
 
-internal data class FacetNoteEditorProps(
-    val draft: String?,
-    val editable: Boolean,
-    val notice: String?,
-    val onFocusChanged: (Boolean) -> Unit = {},
-    val onDraftChange: (String) -> Unit,
-)
-
 private sealed interface PluginFacetViewState {
     data object Loading : PluginFacetViewState
     data object RuntimeUnavailable : PluginFacetViewState
@@ -67,49 +62,51 @@ private sealed interface PluginFacetViewState {
 }
 
 @Composable
-internal fun FacetContentHost(
-    descriptor: FacetViewDescriptor,
-    doc: Doc?,
-    branchPath: String,
-    displayHint: FacetDisplayHint?,
-    noteEditor: FacetNoteEditorProps,
-    onUiError: (String) -> Unit,
-) {
-    val customView = displayHint?.deets as? FacetDisplayDeets.CustomView
+internal fun FacetContentHost(args: FacetContentHostArgs) {
+    val customView = args.displayHint?.deets as? FacetDisplayDeets.CustomView
     when {
         customView != null -> {
             PluginFacetView(
-                docId = doc?.id,
-                branchPath = branchPath,
-                facetKey = descriptor.facetKey,
+                docId = args.doc?.id,
+                branchPath = args.branchPath,
+                facetKey = args.descriptor.facetKey,
                 customView = customView,
             )
         }
 
-        descriptor.kind == FacetEditorKind.Note -> {
+        args.descriptor.kind == FacetEditorKind.Note -> {
             NoteFacetView(
-                descriptor = descriptor,
-                noteEditor = noteEditor,
+                descriptor = args.descriptor,
+                noteEditor = args.noteEditor,
             )
         }
 
-        descriptor.kind == FacetEditorKind.ImageMetadata -> {
+        args.descriptor.kind == FacetEditorKind.ImageMetadata -> {
             ImageFacetView(
-                descriptor = descriptor,
-                doc = doc,
-                onError = onUiError,
+                descriptor = args.descriptor,
+                doc = args.doc,
+                onError = args.onUiError,
             )
         }
 
-        descriptor.kind == FacetEditorKind.GenericJson -> {
-            GenericFacetView(rawValue = descriptor.rawValue)
+        args.descriptor.kind == FacetEditorKind.GenericJson -> {
+            GenericFacetView(rawValue = args.descriptor.rawValue)
         }
     }
 }
 
+internal data class FacetContentHostArgs(
+    val descriptor: FacetViewDescriptor,
+    val doc: Doc?,
+    val branchPath: String,
+    val displayHint: FacetDisplayHint?,
+    val noteEditor: FacetNoteEditorProps,
+    val onUiError: (String) -> Unit,
+)
+
 @Composable
 private fun NoteFacetView(descriptor: FacetViewDescriptor, noteEditor: FacetNoteEditorProps) {
-    val value = noteEditor.draft ?: ""
+    val value = noteEditor.draft.orEmpty()
     val interactionSource = remember { MutableInteractionSource() }
     val isFocused by interactionSource.collectIsFocusedAsState()
 
@@ -161,45 +158,27 @@ private fun PluginFacetView(
     val rtFfi = LocalContainer.current.rtFfi
     val facetKeyLabel = facetKeyString(facetKey)
     val facetKeyRefPath = facetKeyRefPathString(facetKey)
-    var viewState by remember { mutableStateOf<PluginFacetViewState>(PluginFacetViewState.Loading) }
-
-    LaunchedEffect(
-        docId,
-        branchPath,
-        facetKeyRefPath,
-        customView.view.plugId,
-        customView.view.viewKey,
-        rtFfi,
-    ) {
-        viewState = PluginFacetViewState.Loading
-        when {
-            docId == null -> viewState = PluginFacetViewState.Failed("Document unavailable")
-
-            rtFfi == null -> viewState = PluginFacetViewState.RuntimeUnavailable
-
-            else -> {
-                viewState =
-                    try {
-                        val record =
-                            withContext(Dispatchers.IO) {
-                                rtFfi.renderFacetView(
-                                    docId = docId,
-                                    branchPath = branchPath,
-                                    facetKey = facetKeyRefPath,
-                                    requestedView = customView.view,
-                                    uiStateJson = null,
-                                )
-                            }
-                        PluginFacetViewState.Ready(record.view)
-                    } catch (throwable: Throwable) {
-                        if (throwable is CancellationException) {
-                            throw throwable
-                        }
-                        PluginFacetViewState.Failed(throwable.message ?: throwable::class.simpleName.orEmpty())
-                    }
-            }
+    val viewState by
+        produceState<PluginFacetViewState>(
+            initialValue = PluginFacetViewState.Loading,
+            docId,
+            branchPath,
+            facetKeyRefPath,
+            customView.view.plugId,
+            customView.view.viewKey,
+            rtFfi,
+        ) {
+            value =
+                loadPluginFacetViewState(
+                    PluginFacetLoadArgs(
+                        docId = docId,
+                        branchPath = branchPath,
+                        facetKeyRefPath = facetKeyRefPath,
+                        customView = customView,
+                        rtFfi = rtFfi,
+                    ),
+                )
         }
-    }
 
     Column(
         modifier =
@@ -236,6 +215,42 @@ private fun PluginFacetView(
     }
 }
 
+private data class PluginFacetLoadArgs(
+    val docId: String?,
+    val branchPath: String,
+    val facetKeyRefPath: String,
+    val customView: FacetDisplayDeets.CustomView,
+    val rtFfi: org.example.daybook.uniffi.RtFfi?,
+    val ioDispatcher: CoroutineDispatcher = Dispatchers.IO,
+)
+
+private suspend fun loadPluginFacetViewState(args: PluginFacetLoadArgs): PluginFacetViewState = when {
+    args.docId == null -> PluginFacetViewState.Failed("Document unavailable")
+
+    args.rtFfi == null -> PluginFacetViewState.RuntimeUnavailable
+
+    else ->
+        runCatching {
+            withContext(args.ioDispatcher) {
+                args.rtFfi.renderFacetView(
+                    docId = args.docId,
+                    branchPath = args.branchPath,
+                    facetKey = args.facetKeyRefPath,
+                    requestedView = args.customView.view,
+                    uiStateJson = null,
+                )
+            }
+        }.fold(
+            onSuccess = { record -> PluginFacetViewState.Ready(record.view) },
+            onFailure = { exception ->
+                if (exception is CancellationException) {
+                    throw exception
+                }
+                PluginFacetViewState.Failed(exception.message ?: exception::class.simpleName.orEmpty())
+            },
+        )
+}
+
 @Composable
 internal fun FacetStatusText(text: String, modifier: Modifier = Modifier) {
     Surface(
@@ -262,103 +277,139 @@ private fun GenericFacetView(rawValue: String) {
     )
 }
 
-@Composable
-private fun ImageFacetView(descriptor: FacetViewDescriptor, doc: Doc?, onError: (String) -> Unit) {
-    val blobsRepo = LocalContainer.current.blobsRepo
+private sealed interface ImageFacetResolution {
+    data class Ready(
+        val descriptor: FacetViewDescriptor,
+        val imageMeta: org.example.daybook.uniffi.types.ImageMetadata,
+        val blobHash: String,
+    ) : ImageFacetResolution
+
+    data class Error(val message: String) : ImageFacetResolution
+}
+
+private fun resolveImageFacet(descriptor: FacetViewDescriptor, doc: Doc?): ImageFacetResolution {
     val imageMeta =
         decodeWellKnownFacet<WellKnownFacet.ImageMetadata>(descriptor.rawValue)
-            .getOrElse {
-                ImageFacetError(
-                    "Invalid image metadata facet payload; image preview disabled to avoid destructive edits.",
-                )
-                return
-            }
-            .v1
-
-    val resolvedDoc =
-        doc ?: run {
-            ImageFacetError("Referenced blob facet not found.")
-            return
-        }
-
+            .getOrNull()
+            ?.v1
+    val resolvedDoc = doc
     val blobKey =
-        resolvedDoc.facets.keys.firstOrNull { key ->
-            stripFacetRefFragment(buildSelfFacetRefUrl(key)) ==
-                stripFacetRefFragment(imageMeta.facetRef)
-        } ?: run {
-            ImageFacetError("Referenced blob facet not found.")
-            return
-        }
-
-    val blobValue =
-        resolvedDoc.facets[blobKey] ?: run {
-            ImageFacetError("Referenced blob facet not found.")
-            return
-        }
-
-    val blobFacet =
-        decodeWellKnownFacet<WellKnownFacet.Blob>(blobValue)
-            .getOrElse {
-                ImageFacetError(
-                    "Invalid blob facet payload; image preview disabled to avoid destructive edits.",
-                )
-                return
+        imageMeta?.let { imageMetaValue ->
+            resolvedDoc?.facets?.keys?.firstOrNull { key ->
+                stripFacetRefFragment(buildSelfFacetRefUrl(key)) ==
+                    stripFacetRefFragment(imageMetaValue.facetRef)
             }
-
-    val blobHash =
-        blobHash(blobFacet.v1) ?: run {
-            ImageFacetError("Blob facet has no resolvable local hash URL.")
-            return
         }
-
-    val imagePath by
-        produceState<String?>(initialValue = null, blobHash) {
-            value =
-                try {
-                    blobsRepo.getPath(blobHash)
-                } catch (error: Throwable) {
-                    onError(error.message ?: "Failed to resolve image path")
-                    null
-                }
+    val blobValue = blobKey?.let { key -> resolvedDoc?.facets?.get(key) }
+    val blobFacet =
+        blobValue?.let { blobValueString ->
+            decodeWellKnownFacet<WellKnownFacet.Blob>(blobValueString).getOrNull()
         }
+    val blobHash = blobFacet?.v1?.let(::blobHash)
+
+    return when {
+        imageMeta == null -> ImageFacetResolution.Error(
+            "Invalid image metadata facet payload; image preview disabled to avoid destructive edits.",
+        )
+
+        resolvedDoc == null -> ImageFacetResolution.Error("Referenced blob facet not found.")
+
+        blobKey == null -> ImageFacetResolution.Error("Referenced blob facet not found.")
+
+        blobValue == null -> ImageFacetResolution.Error("Referenced blob facet not found.")
+
+        blobFacet == null -> ImageFacetResolution.Error(
+            "Invalid blob facet payload; image preview disabled to avoid destructive edits.",
+        )
+
+        blobHash == null -> ImageFacetResolution.Error("Blob facet has no resolvable local hash URL.")
+
+        else -> ImageFacetResolution.Ready(
+            descriptor = descriptor,
+            imageMeta = imageMeta,
+            blobHash = blobHash,
+        )
+    }
+}
+
+@Composable
+private fun ImageFacetView(descriptor: FacetViewDescriptor, doc: Doc?, onError: (String) -> Unit) {
+    when (val resolution = resolveImageFacet(descriptor = descriptor, doc = doc)) {
+        is ImageFacetResolution.Error -> ImageFacetError(resolution.message)
+        is ImageFacetResolution.Ready -> ImageFacetBody(resolution, onError)
+    }
+}
+
+@Composable
+private fun ImageFacetBody(resolution: ImageFacetResolution.Ready, onError: (String) -> Unit) {
+    val blobsRepo = LocalContainer.current.blobsRepo
+    val imagePath by rememberImagePath(
+        blobHash = resolution.blobHash,
+        blobsRepo = blobsRepo,
+        onError = onError,
+    )
 
     Column(modifier = Modifier.fillMaxWidth().padding(top = 4.dp)) {
         if (imagePath != null) {
-            val imageModifier =
-                if (descriptor.isPrimary) {
-                    Modifier.fillMaxWidth().heightIn(min = 260.dp)
-                } else {
-                    Modifier.fillMaxWidth().height(200.dp)
-                }
-
-            Box(modifier = imageModifier) {
-                AsyncImage(
-                    model = "file://$imagePath",
-                    contentDescription = "Document image",
-                    modifier = Modifier.fillMaxSize().clip(MaterialTheme.shapes.medium),
-                    contentScale = ContentScale.FillWidth,
-                )
-
-                val width = imageMeta.widthPx.toString()
-                val height = imageMeta.heightPx.toString()
-                Surface(
-                    tonalElevation = 2.dp,
-                    shape = MaterialTheme.shapes.small,
-                    color = MaterialTheme.colorScheme.surface.copy(alpha = 0.85f),
-                    modifier = Modifier.align(Alignment.BottomEnd).padding(8.dp),
-                ) {
-                    Text(
-                        text = "$width×$height",
-                        style = MaterialTheme.typography.labelSmall,
-                        modifier = Modifier.padding(horizontal = 8.dp, vertical = 4.dp),
-                    )
-                }
-            }
+            ImageFacetPreview(resolution = resolution, imagePath = imagePath)
         } else {
             Text(
                 "Image path unavailable",
                 style = MaterialTheme.typography.bodySmall,
                 color = MaterialTheme.colorScheme.onSurfaceVariant,
+            )
+        }
+    }
+}
+
+@Composable
+private fun rememberImagePath(
+    blobHash: String,
+    blobsRepo: org.example.daybook.uniffi.BlobsRepoFfi,
+    onError: (String) -> Unit,
+    ioDispatcher: CoroutineDispatcher = Dispatchers.IO,
+) = produceState<String?>(initialValue = null, blobHash) {
+    value =
+        runCatching {
+            withContext(ioDispatcher) { blobsRepo.getPath(blobHash) }
+        }.getOrElse { exception ->
+            if (exception is CancellationException) {
+                throw exception
+            }
+            onError(exception.message ?: "Failed to resolve image path")
+            null
+        }
+}
+
+@Composable
+private fun ImageFacetPreview(resolution: ImageFacetResolution.Ready, imagePath: String?) {
+    val imageModifier =
+        if (resolution.descriptor.isPrimary) {
+            Modifier.fillMaxWidth().heightIn(min = 260.dp)
+        } else {
+            Modifier.fillMaxWidth().height(200.dp)
+        }
+
+    Box(modifier = imageModifier) {
+        AsyncImage(
+            model = "file://$imagePath",
+            contentDescription = "Document image",
+            modifier = Modifier.fillMaxSize().clip(MaterialTheme.shapes.medium),
+            contentScale = ContentScale.FillWidth,
+        )
+
+        val width = resolution.imageMeta.widthPx.toString()
+        val height = resolution.imageMeta.heightPx.toString()
+        Surface(
+            tonalElevation = 2.dp,
+            shape = MaterialTheme.shapes.small,
+            color = MaterialTheme.colorScheme.surface.copy(alpha = 0.85f),
+            modifier = Modifier.align(Alignment.BottomEnd).padding(8.dp),
+        ) {
+            Text(
+                text = "$width×$height",
+                style = MaterialTheme.typography.labelSmall,
+                modifier = Modifier.padding(horizontal = 8.dp, vertical = 4.dp),
             )
         }
     }

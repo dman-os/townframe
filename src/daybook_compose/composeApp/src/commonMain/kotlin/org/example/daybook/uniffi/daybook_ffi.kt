@@ -1173,8 +1173,6 @@ external fun uniffi_daybook_ffi_checksum_method_tablesrepoffi_stop(
 ): Short
 external fun uniffi_daybook_ffi_checksum_method_tablesrepoffi_update_batch(
 ): Short
-external fun uniffi_daybook_ffi_checksum_method_rtffi_dispatch_doc_facet(
-): Short
 external fun uniffi_daybook_ffi_checksum_method_rtffi_render_facet_view(
 ): Short
 external fun uniffi_daybook_ffi_checksum_method_rtffi_stop(
@@ -1594,8 +1592,6 @@ external fun uniffi_daybook_ffi_fn_clone_rtffi(`handle`: Long,uniffi_out_err: Un
 external fun uniffi_daybook_ffi_fn_free_rtffi(`handle`: Long,uniffi_out_err: UniffiRustCallStatus, 
 ): Unit
 external fun uniffi_daybook_ffi_fn_constructor_rtffi_load(`fcx`: Long,`drawerRepo`: Long,`plugsRepo`: Long,`dispatchRepo`: Long,`progressRepo`: Long,`blobsRepo`: Long,`configRepo`: Long,`initRepo`: Long,`sqliteLsRepo`: Long,`deviceId`: RustBuffer.ByValue,`startupProgressTaskId`: RustBuffer.ByValue,
-): Long
-external fun uniffi_daybook_ffi_fn_method_rtffi_dispatch_doc_facet(`ptr`: Long,`plugId`: RustBuffer.ByValue,`routineName`: RustBuffer.ByValue,`docId`: RustBuffer.ByValue,`branchPath`: RustBuffer.ByValue,
 ): Long
 external fun uniffi_daybook_ffi_fn_method_rtffi_render_facet_view(`ptr`: Long,`docId`: RustBuffer.ByValue,`branchPath`: RustBuffer.ByValue,`facetKey`: RustBuffer.ByValue,`requestedView`: RustBuffer.ByValue,`uiStateJson`: RustBuffer.ByValue,
 ): Long
@@ -2023,10 +2019,7 @@ private fun uniffiCheckApiChecksums(lib: IntegrityCheckingUniffiLib) {
     if (lib.uniffi_daybook_ffi_checksum_method_tablesrepoffi_update_batch() != 6945.toShort()) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
-    if (lib.uniffi_daybook_ffi_checksum_method_rtffi_dispatch_doc_facet() != 39849.toShort()) {
-        throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
-    }
-    if (lib.uniffi_daybook_ffi_checksum_method_rtffi_render_facet_view() != 26030.toShort()) {
+    if (lib.uniffi_daybook_ffi_checksum_method_rtffi_render_facet_view() != 40691.toShort()) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
     if (lib.uniffi_daybook_ffi_checksum_method_rtffi_stop() != 24290.toShort()) {
@@ -9649,9 +9642,7 @@ public object FfiConverterTypeProgressRepoFfi: FfiConverter<ProgressRepoFfi, Lon
 
 public interface RtFfiInterface {
     
-    suspend fun `dispatchDocFacet`(`plugId`: kotlin.String, `routineName`: kotlin.String, `docId`: kotlin.String, `branchPath`: kotlin.String): kotlin.String
-    
-    suspend fun `renderFacetView`(`docId`: kotlin.String, `branchPath`: kotlin.String, `facetKey`: kotlin.String, `requestedView`: ViewRef?, `uiStateJson`: kotlin.String?): RenderedFacetViewRecord
+    suspend fun `renderFacetView`(`docId`: kotlin.String, `branchPath`: kotlin.String, `facetKey`: kotlin.String, `requestedView`: ViewRef?, `uiStateJson`: kotlin.String?): RenderedFacetView
     
     suspend fun `stop`()
     
@@ -9757,28 +9748,7 @@ open class RtFfi: Disposable, AutoCloseable, RtFfiInterface
     
     @Throws(FfiException::class)
     @Suppress("ASSIGNED_BUT_NEVER_ACCESSED_VARIABLE")
-    override suspend fun `dispatchDocFacet`(`plugId`: kotlin.String, `routineName`: kotlin.String, `docId`: kotlin.String, `branchPath`: kotlin.String) : kotlin.String {
-        return uniffiRustCallAsync(
-        callWithHandle { uniffiHandle ->
-            UniffiLib.uniffi_daybook_ffi_fn_method_rtffi_dispatch_doc_facet(
-                uniffiHandle,
-                FfiConverterString.lower(`plugId`),FfiConverterString.lower(`routineName`),FfiConverterString.lower(`docId`),FfiConverterString.lower(`branchPath`),
-            )
-        },
-        { future, callback, continuation -> UniffiLib.ffi_daybook_ffi_rust_future_poll_rust_buffer(future, callback, continuation) },
-        { future, continuation -> UniffiLib.ffi_daybook_ffi_rust_future_complete_rust_buffer(future, continuation) },
-        { future -> UniffiLib.ffi_daybook_ffi_rust_future_free_rust_buffer(future) },
-        // lift function
-        { FfiConverterString.lift(it) },
-        // Error FFI converter
-        FfiException.ErrorHandler,
-    )
-    }
-
-    
-    @Throws(FfiException::class)
-    @Suppress("ASSIGNED_BUT_NEVER_ACCESSED_VARIABLE")
-    override suspend fun `renderFacetView`(`docId`: kotlin.String, `branchPath`: kotlin.String, `facetKey`: kotlin.String, `requestedView`: ViewRef?, `uiStateJson`: kotlin.String?) : RenderedFacetViewRecord {
+    override suspend fun `renderFacetView`(`docId`: kotlin.String, `branchPath`: kotlin.String, `facetKey`: kotlin.String, `requestedView`: ViewRef?, `uiStateJson`: kotlin.String?) : RenderedFacetView {
         return uniffiRustCallAsync(
         callWithHandle { uniffiHandle ->
             UniffiLib.uniffi_daybook_ffi_fn_method_rtffi_render_facet_view(
@@ -9790,7 +9760,7 @@ open class RtFfi: Disposable, AutoCloseable, RtFfiInterface
         { future, continuation -> UniffiLib.ffi_daybook_ffi_rust_future_complete_rust_buffer(future, continuation) },
         { future -> UniffiLib.ffi_daybook_ffi_rust_future_free_rust_buffer(future) },
         // lift function
-        { FfiConverterTypeRenderedFacetViewRecord.lift(it) },
+        { FfiConverterTypeRenderedFacetView.lift(it) },
         // Error FFI converter
         FfiException.ErrorHandler,
     )
@@ -11921,11 +11891,7 @@ public object FfiConverterTypeFacetKeyDisplayHintEntry: FfiConverterRustBuffer<F
 
 
 
-data class RenderedFacetViewRecord (
-    var `plugId`: kotlin.String
-    , 
-    var `viewKey`: kotlin.String
-    , 
+data class RenderedFacetView (
     var `view`: ViewSpec
     , 
     var `pluginStateJson`: kotlin.String?
@@ -11942,26 +11908,20 @@ data class RenderedFacetViewRecord (
 /**
  * @suppress
  */
-public object FfiConverterTypeRenderedFacetViewRecord: FfiConverterRustBuffer<RenderedFacetViewRecord> {
-    override fun read(buf: ByteBuffer): RenderedFacetViewRecord {
-        return RenderedFacetViewRecord(
-            FfiConverterString.read(buf),
-            FfiConverterString.read(buf),
+public object FfiConverterTypeRenderedFacetView: FfiConverterRustBuffer<RenderedFacetView> {
+    override fun read(buf: ByteBuffer): RenderedFacetView {
+        return RenderedFacetView(
             FfiConverterTypeViewSpec.read(buf),
             FfiConverterOptionalString.read(buf),
         )
     }
 
-    override fun allocationSize(value: RenderedFacetViewRecord) = (
-            FfiConverterString.allocationSize(value.`plugId`) +
-            FfiConverterString.allocationSize(value.`viewKey`) +
+    override fun allocationSize(value: RenderedFacetView) = (
             FfiConverterTypeViewSpec.allocationSize(value.`view`) +
             FfiConverterOptionalString.allocationSize(value.`pluginStateJson`)
     )
 
-    override fun write(value: RenderedFacetViewRecord, buf: ByteBuffer) {
-            FfiConverterString.write(value.`plugId`, buf)
-            FfiConverterString.write(value.`viewKey`, buf)
+    override fun write(value: RenderedFacetView, buf: ByteBuffer) {
             FfiConverterTypeViewSpec.write(value.`view`, buf)
             FfiConverterOptionalString.write(value.`pluginStateJson`, buf)
     }

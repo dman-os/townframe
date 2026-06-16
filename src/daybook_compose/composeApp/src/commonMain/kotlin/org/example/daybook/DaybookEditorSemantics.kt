@@ -1,13 +1,13 @@
 package org.example.daybook
 
 object DaybookEditorSemantics {
-    const val Screen = "doc-editor-screen"
-    const val EmptyState = "doc-editor-empty-state"
-    const val Loading = "doc-editor-loading"
-    const val Editor = "doc-editor"
-    const val EditorList = "doc-editor-list"
-    const val TitleField = "doc-editor-title"
-    const val Details = "doc-editor-details"
+    const val SCREEN = "doc-editor-screen"
+    const val EMPTY_STATE = "doc-editor-empty-state"
+    const val LOADING = "doc-editor-loading"
+    const val EDITOR = "doc-editor"
+    const val EDITOR_LIST = "doc-editor-list"
+    const val TITLE_FIELD = "doc-editor-title"
+    const val DETAILS = "doc-editor-details"
 
     fun facetRow(facetKey: String): String = "doc-editor-facet-row:$facetKey"
 
@@ -32,14 +32,14 @@ object DaybookEditorSemantics {
 
     fun addBlockAfterAction(facetKey: String): String = "doc-editor-block-action-add-block-after:$facetKey"
 
-    fun addBlockDialog(): String = "doc-editor-add-block-dialog"
+    const val ADD_BLOCK_DIALOG = "doc-editor-add-block-dialog"
 
-    fun focusedNoteAccessoryBar(): String = "doc-editor-focused-note-accessory-bar"
+    const val FOCUSED_NOTE_ACCESSORY_BAR = "doc-editor-focused-note-accessory-bar"
 
     fun focusedNoteAccessoryAddBlockAction(facetKey: String): String =
         "doc-editor-focused-note-accessory-add-block:$facetKey"
 
-    fun addBlockSearchField(): String = "doc-editor-add-block-search"
+    const val ADD_BLOCK_SEARCH_FIELD = "doc-editor-add-block-search"
 
     fun addBlockOption(optionId: String): String = "doc-editor-add-block-option:$optionId"
 

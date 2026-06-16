@@ -1,3 +1,5 @@
+@file:Suppress("FunctionNaming")
+
 package org.example.daybook
 
 import androidx.compose.animation.AnimatedVisibility
