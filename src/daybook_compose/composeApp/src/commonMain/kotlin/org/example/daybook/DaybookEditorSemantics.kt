@@ -19,7 +19,8 @@ object DaybookEditorSemantics {
 
     fun toggleBlockCollapseAction(facetKey: String): String = "doc-editor-block-action-toggle-collapse:$facetKey"
 
-    fun toggleBlockCollapseQuickAction(facetKey: String): String = "doc-editor-block-action-toggle-collapse-quick:$facetKey"
+    fun toggleBlockCollapseQuickAction(facetKey: String): String =
+        "doc-editor-block-action-toggle-collapse-quick:$facetKey"
 
     fun addBlockAfterQuickAction(facetKey: String): String = "doc-editor-block-action-add-block-after-quick:$facetKey"
 
@@ -35,7 +36,8 @@ object DaybookEditorSemantics {
 
     fun focusedNoteAccessoryBar(): String = "doc-editor-focused-note-accessory-bar"
 
-    fun focusedNoteAccessoryAddBlockAction(facetKey: String): String = "doc-editor-focused-note-accessory-add-block:$facetKey"
+    fun focusedNoteAccessoryAddBlockAction(facetKey: String): String =
+        "doc-editor-focused-note-accessory-add-block:$facetKey"
 
     fun addBlockSearchField(): String = "doc-editor-add-block-search"
 

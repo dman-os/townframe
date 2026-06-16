@@ -28,22 +28,21 @@ fun facetKeyString(key: FacetKey): String {
 fun facetKeyRefPathString(key: FacetKey): String =
     org.example.daybook.ui.buildSelfFacetRefUrl(key).removePrefix("db+facet:///self/")
 
-fun facetDisplayHintKey(key: FacetKey): String =
-    when (val tag = key.tag) {
-        is FacetTag.WellKnown -> when (tag.v1) {
-            WellKnownFacetTag.DMETA -> "org.example.daybook.dmeta"
-            WellKnownFacetTag.REF_GENERIC -> "org.example.daybook.refgeneric"
-            WellKnownFacetTag.LABEL_GENERIC -> "org.example.daybook.labelgeneric"
-            WellKnownFacetTag.TITLE_GENERIC -> "org.example.daybook.titlegeneric"
-            WellKnownFacetTag.PATH_GENERIC -> "org.example.daybook.pathgeneric"
-            WellKnownFacetTag.PENDING -> "org.example.daybook.pending"
-            WellKnownFacetTag.BODY -> "org.example.daybook.body"
-            WellKnownFacetTag.NOTE -> "org.example.daybook.note"
-            WellKnownFacetTag.BLOB -> "org.example.daybook.blob"
-            WellKnownFacetTag.IMAGE_METADATA -> "org.example.daybook.imagemetadata"
-            WellKnownFacetTag.OCR_RESULT -> "org.example.daybook.ocrresult"
-            WellKnownFacetTag.EMBEDDING -> "org.example.daybook.embedding"
-        }
-
-        is FacetTag.Any -> tag.v1
+fun facetDisplayHintKey(key: FacetKey): String = when (val tag = key.tag) {
+    is FacetTag.WellKnown -> when (tag.v1) {
+        WellKnownFacetTag.DMETA -> "org.example.daybook.dmeta"
+        WellKnownFacetTag.REF_GENERIC -> "org.example.daybook.refgeneric"
+        WellKnownFacetTag.LABEL_GENERIC -> "org.example.daybook.labelgeneric"
+        WellKnownFacetTag.TITLE_GENERIC -> "org.example.daybook.titlegeneric"
+        WellKnownFacetTag.PATH_GENERIC -> "org.example.daybook.pathgeneric"
+        WellKnownFacetTag.PENDING -> "org.example.daybook.pending"
+        WellKnownFacetTag.BODY -> "org.example.daybook.body"
+        WellKnownFacetTag.NOTE -> "org.example.daybook.note"
+        WellKnownFacetTag.BLOB -> "org.example.daybook.blob"
+        WellKnownFacetTag.IMAGE_METADATA -> "org.example.daybook.imagemetadata"
+        WellKnownFacetTag.OCR_RESULT -> "org.example.daybook.ocrresult"
+        WellKnownFacetTag.EMBEDDING -> "org.example.daybook.embedding"
     }
+
+    is FacetTag.Any -> tag.v1
+}

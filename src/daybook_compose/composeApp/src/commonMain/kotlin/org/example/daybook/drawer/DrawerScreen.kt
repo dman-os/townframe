@@ -21,26 +21,26 @@ import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.unit.dp
 import androidx.lifecycle.viewmodel.compose.viewModel
 import org.example.daybook.ConfigViewModel
-import org.example.daybook.DaybookEditorSemantics
 import org.example.daybook.DaybookContentType
+import org.example.daybook.DaybookEditorSemantics
 import org.example.daybook.DocEditorStoreViewModel
 import org.example.daybook.DocListState
 import org.example.daybook.DrawerViewModel
+import org.example.daybook.LocalBigDialogController
 import org.example.daybook.LocalContainer
 import org.example.daybook.LocalDocEditorStore
-import org.example.daybook.LocalBigDialogController
 import org.example.daybook.layouts.DaybookScaffold
 import org.example.daybook.layouts.LocalScreenChromeSpec
 import org.example.daybook.tables.DockableRegion
 import org.example.daybook.ui.DocEditor
 import org.example.daybook.ui.DocFacetSidebar
-import org.example.daybook.ui.rememberAddBlockDialogLauncher
 import org.example.daybook.ui.buildSelfFacetRefUrl
 import org.example.daybook.ui.decodeJsonStringOrRaw
 import org.example.daybook.ui.decodeWellKnownFacet
 import org.example.daybook.ui.editor.bodyFacetKey
 import org.example.daybook.ui.editor.noteFacetKey
 import org.example.daybook.ui.editor.titleFacetKey
+import org.example.daybook.ui.rememberAddBlockDialogLauncher
 import org.example.daybook.ui.stripFacetRefFragment
 import org.example.daybook.uniffi.types.Doc
 import org.example.daybook.uniffi.types.FacetDisplayHint
@@ -123,11 +123,7 @@ private fun DrawerDocEditorContent(
 }
 
 @Composable
-fun DrawerScreen(
-    drawerVm: DrawerViewModel,
-    onOpenDoc: (String) -> Unit,
-    modifier: Modifier = Modifier,
-) {
+fun DrawerScreen(drawerVm: DrawerViewModel, onOpenDoc: (String) -> Unit, modifier: Modifier = Modifier) {
     val docEditorStore: DocEditorStoreViewModel = LocalDocEditorStore.current
     val selectedDocId by docEditorStore.selectedDocId.collectAsState()
     DaybookScaffold(

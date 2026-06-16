@@ -23,10 +23,10 @@ import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
+import androidx.compose.runtime.staticCompositionLocalOf
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.unit.dp
-import androidx.compose.runtime.staticCompositionLocalOf
 import androidx.navigation3.runtime.NavEntry
 import androidx.navigation3.runtime.NavMetadataKey
 import androidx.navigation3.runtime.contains
@@ -67,11 +67,7 @@ internal val LocalBigDialogController =
     }
 
 @Composable
-internal fun BigDialogHost(
-    narrowScreen: Boolean,
-    modifier: Modifier = Modifier,
-    content: @Composable () -> Unit,
-) {
+internal fun BigDialogHost(narrowScreen: Boolean, modifier: Modifier = Modifier, content: @Composable () -> Unit) {
     val hostState = remember { BigDialogHostState() }
     CompositionLocalProvider(LocalBigDialogController provides hostState) {
         Box(modifier = modifier.fillMaxSize()) {
@@ -90,11 +86,7 @@ internal fun BigDialogHost(
 
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
-internal fun BigDialogFrame(
-    narrowScreen: Boolean,
-    onDismissRequest: () -> Unit,
-    content: @Composable () -> Unit,
-) {
+internal fun BigDialogFrame(narrowScreen: Boolean, onDismissRequest: () -> Unit, content: @Composable () -> Unit) {
     if (narrowScreen) {
         ModalBottomSheet(
             onDismissRequest = onDismissRequest,

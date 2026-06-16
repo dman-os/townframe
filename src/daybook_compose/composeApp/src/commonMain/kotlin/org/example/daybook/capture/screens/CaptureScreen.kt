@@ -33,17 +33,17 @@ import org.example.daybook.capture.CaptureNavActions
 import org.example.daybook.capture.LocalCameraCaptureContext
 import org.example.daybook.capture.ui.DaybookCameraViewport
 import org.example.daybook.layouts.DaybookScaffold
+import org.example.daybook.ui.DocEditor
 import org.example.daybook.ui.buildBlobFacetFromDigest
 import org.example.daybook.ui.buildBodyFacet
 import org.example.daybook.ui.buildImageMetadataFacet
 import org.example.daybook.ui.buildSelfFacetRefUrl
-import org.example.daybook.ui.DocEditor
-import org.example.daybook.ui.rememberAddBlockDialogLauncher
 import org.example.daybook.ui.editor.EditorSessionController
 import org.example.daybook.ui.editor.blobFacetKey
 import org.example.daybook.ui.editor.bodyFacetKey
 import org.example.daybook.ui.editor.imageMetadataFacetKey
 import org.example.daybook.ui.putWellKnownFacet
+import org.example.daybook.ui.rememberAddBlockDialogLauncher
 import org.example.daybook.ui.withFacetRefCommitHeads
 import org.example.daybook.uniffi.DrawerEventListener
 import org.example.daybook.uniffi.DrawerRepoFfi
@@ -262,10 +262,7 @@ class CaptureScreenViewModel(
 }
 
 @Composable
-fun CaptureScreen(
-    modifier: Modifier = Modifier,
-    initialDocId: String? = null,
-) {
+fun CaptureScreen(modifier: Modifier = Modifier, initialDocId: String? = null) {
     val container = LocalContainer.current
     val tablesVm = viewModel { TablesViewModel(container.tablesRepo) }
     val vm =

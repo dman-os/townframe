@@ -23,20 +23,16 @@ import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
-import com.mikepenz.markdown.m3.Markdown as MarkdownContent
 import org.example.daybook.uniffi.types.BadgeToneV1
 import org.example.daybook.uniffi.types.ViewActionV1
 import org.example.daybook.uniffi.types.ViewEventKindV1
 import org.example.daybook.uniffi.types.ViewNodeKindV1
 import org.example.daybook.uniffi.types.ViewNodeV1
 import org.example.daybook.uniffi.types.ViewSpec
+import com.mikepenz.markdown.m3.Markdown as MarkdownContent
 
 @Composable
-fun DaybookView(
-    spec: ViewSpec,
-    modifier: Modifier = Modifier,
-    onEvent: (DaybookViewEvent) -> Unit = {},
-) {
+fun DaybookView(spec: ViewSpec, modifier: Modifier = Modifier, onEvent: (DaybookViewEvent) -> Unit = {}) {
     Box(modifier = modifier.testTag(DaybookViewSemantics.Root)) {
         when (spec) {
             is ViewSpec.V1 -> DaybookViewNode(spec.v1.root, onEvent = onEvent)
@@ -44,29 +40,21 @@ fun DaybookView(
     }
 }
 
-data class DaybookViewEvent(
-    val nodeId: String,
-    val event: ViewEventKindV1,
-    val action: ViewActionV1,
-)
+data class DaybookViewEvent(val nodeId: String, val event: ViewEventKindV1, val action: ViewActionV1)
 
 val DaybookViewEvent.emitName: String?
     get() = (action as? ViewActionV1.Emit)?.v1?.name
 
 @Composable
-private fun DaybookViewNode(
-    node: ViewNodeV1,
-    modifier: Modifier = Modifier,
-    onEvent: (DaybookViewEvent) -> Unit,
-) {
+private fun DaybookViewNode(node: ViewNodeV1, modifier: Modifier = Modifier, onEvent: (DaybookViewEvent) -> Unit) {
     val kindName = node.kind.kindName
     Column(
         modifier =
-            modifier
-                .testTag(DaybookViewSemantics.node(node.id))
-                .semantics {
-                    contentDescription = "$kindName ${node.id}"
-                },
+        modifier
+            .testTag(DaybookViewSemantics.node(node.id))
+            .semantics {
+                contentDescription = "$kindName ${node.id}"
+            },
     ) {
         Box(modifier = Modifier.testTag(DaybookViewSemantics.kind(kindName))) {
             DaybookViewNodeBody(node = node, kind = node.kind, onEvent = onEvent)
@@ -75,11 +63,7 @@ private fun DaybookViewNode(
 }
 
 @Composable
-private fun DaybookViewNodeBody(
-    node: ViewNodeV1,
-    kind: ViewNodeKindV1,
-    onEvent: (DaybookViewEvent) -> Unit,
-) {
+private fun DaybookViewNodeBody(node: ViewNodeV1, kind: ViewNodeKindV1, onEvent: (DaybookViewEvent) -> Unit) {
     when (kind) {
         is ViewNodeKindV1.Card -> CardNode(kind = kind, onEvent = onEvent)
         is ViewNodeKindV1.Section -> SectionNode(kind = kind, onEvent = onEvent)
@@ -177,11 +161,7 @@ private fun ActionGroupNode(kind: ViewNodeKindV1.ActionGroup, onEvent: (DaybookV
 }
 
 @Composable
-private fun ButtonNode(
-    node: ViewNodeV1,
-    kind: ViewNodeKindV1.Button,
-    onEvent: (DaybookViewEvent) -> Unit,
-) {
+private fun ButtonNode(node: ViewNodeV1, kind: ViewNodeKindV1.Button, onEvent: (DaybookViewEvent) -> Unit) {
     val clickBinding = node.events.firstOrNull { it.event == ViewEventKindV1.CLICK }
     Button(
         onClick = {

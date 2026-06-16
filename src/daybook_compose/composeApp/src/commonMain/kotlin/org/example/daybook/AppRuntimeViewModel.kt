@@ -10,9 +10,9 @@ import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.runBlocking
-import kotlinx.coroutines.withContext
 import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
+import kotlinx.coroutines.withContext
 import org.example.daybook.uniffi.BlobsRepoFfi
 import org.example.daybook.uniffi.CameraPreviewFfi
 import org.example.daybook.uniffi.ConfigRepoFfi
@@ -97,7 +97,7 @@ private class StartupProgressTask(
                 deets =
                 ProgressUpdateDeets.Status(
                     severity = ProgressSeverity.INFO,
-                    message = "stage ${doneStages}/${totalStages}: $label",
+                    message = "stage $doneStages/$totalStages: $label",
                 ),
             ),
         )
@@ -195,9 +195,7 @@ internal suspend fun shutdownAppContainer(appContainer: AppContainer) {
     println("[APP_SHUTDOWN] flushing to disk: complete")
 }
 
-class AppRuntimeViewModel(
-    private val ffiServices: AppFfiServices,
-) : ViewModel() {
+class AppRuntimeViewModel(private val ffiServices: AppFfiServices) : ViewModel() {
     private val runtimeMutex = Mutex()
     private var runtimeJob: Job? = null
     private var activeContainer: AppContainer? = null
@@ -298,10 +296,7 @@ class AppRuntimeViewModel(
         }
     }
 
-    private suspend fun openRepoInternal(
-        repoPath: String,
-        appStartElapsedMs: () -> Long,
-    ) {
+    private suspend fun openRepoInternal(repoPath: String, appStartElapsedMs: () -> Long) {
         val startupMark = TimeSource.Monotonic.markNow()
         val startupPhaseId = Clock.System.now().toEpochMilliseconds().toString()
         val startupStageCount = 10
@@ -558,8 +553,8 @@ class AppRuntimeViewModel(
         super.onCleared()
     }
 
-    private suspend fun <T> stage(label: String, startupProgress: StartupProgressTask?, block: suspend () -> T): T {
-        return if (startupProgress == null) {
+    private suspend fun <T> stage(label: String, startupProgress: StartupProgressTask?, block: suspend () -> T): T =
+        if (startupProgress == null) {
             block()
         } else {
             var value: T? = null
@@ -569,5 +564,4 @@ class AppRuntimeViewModel(
             @Suppress("UNCHECKED_CAST")
             value as T
         }
-    }
 }

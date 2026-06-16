@@ -54,16 +54,13 @@ import androidx.navigation3.runtime.NavKey
 import androidx.navigation3.runtime.entryProvider
 import androidx.navigation3.runtime.rememberSaveableStateHolderNavEntryDecorator
 import androidx.navigation3.ui.NavDisplay
-import io.github.vinceglb.filekit.path
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Dispatchers
-import kotlinx.coroutines.TimeoutCancellationException
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.runBlocking
 import kotlinx.coroutines.withContext
-import kotlinx.coroutines.withTimeout
 import org.example.daybook.capture.screens.CaptureScreen
 import org.example.daybook.drawer.DocEditorScreen
 import org.example.daybook.drawer.DrawerScreen
@@ -96,23 +93,14 @@ import org.example.daybook.uniffi.SqliteLocalStateRepoFfi
 import org.example.daybook.uniffi.SyncRepoFfi
 import org.example.daybook.uniffi.TablesEventListener
 import org.example.daybook.uniffi.TablesRepoFfi
-import org.example.daybook.uniffi.core.CreateProgressTaskArgs
 import org.example.daybook.uniffi.core.KnownRepoEntry
 import org.example.daybook.uniffi.core.ListenerRegistration
 import org.example.daybook.uniffi.core.Panel
-import org.example.daybook.uniffi.core.ProgressFinalState
-import org.example.daybook.uniffi.core.ProgressRetentionPolicy
-import org.example.daybook.uniffi.core.ProgressSeverity
-import org.example.daybook.uniffi.core.ProgressUnit
-import org.example.daybook.uniffi.core.ProgressUpdate
-import org.example.daybook.uniffi.core.ProgressUpdateDeets
 import org.example.daybook.uniffi.core.Tab
 import org.example.daybook.uniffi.core.Table
 import org.example.daybook.uniffi.core.TablesEvent
 import org.example.daybook.uniffi.core.Uuid
 import org.example.daybook.uniffi.core.Window
-import kotlin.time.Clock
-import kotlin.time.TimeMark
 import kotlin.time.TimeSource
 
 enum class DaybookNavigationType {
@@ -819,7 +807,6 @@ fun App(
         }
     }
 }
-
 
 @Composable
 @Suppress("UnusedParameter", "FunctionNaming")

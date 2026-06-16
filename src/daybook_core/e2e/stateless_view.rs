@@ -2,9 +2,7 @@ use crate::interlude::*;
 
 use daybook_types::doc::{AddDocArgs, FacetKey, FacetRaw, WellKnownFacet, WellKnownFacetTag};
 use daybook_types::manifest::ViewRef;
-use daybook_types::view::{
-    ViewActionV1, ViewNodeKindV1, ViewSpec, ViewSpecV1,
-};
+use daybook_types::view::{ViewActionV1, ViewNodeKindV1, ViewSpec, ViewSpecV1};
 
 #[tokio::test(flavor = "multi_thread")]
 async fn render_plug_test_stateless_view() -> Res<()> {
@@ -15,12 +13,10 @@ async fn render_plug_test_stateless_view() -> Res<()> {
         .drawer_repo
         .add(AddDocArgs {
             branch_path: daybook_types::doc::BranchPathBuf::from("main"),
-            facets: [
-                (
-                    FacetKey::from(WellKnownFacetTag::LabelGeneric),
-                    FacetRaw::from(WellKnownFacet::LabelGeneric("seed".into())),
-                ),
-            ]
+            facets: [(
+                FacetKey::from(WellKnownFacetTag::LabelGeneric),
+                FacetRaw::from(WellKnownFacet::LabelGeneric("seed".into())),
+            )]
             .into(),
             user_path: None,
         })

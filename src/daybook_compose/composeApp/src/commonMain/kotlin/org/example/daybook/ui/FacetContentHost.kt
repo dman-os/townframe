@@ -2,6 +2,8 @@
 
 package org.example.daybook.ui
 
+import androidx.compose.foundation.interaction.MutableInteractionSource
+import androidx.compose.foundation.interaction.collectIsFocusedAsState
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.fillMaxSize
@@ -9,8 +11,6 @@ import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.heightIn
 import androidx.compose.foundation.layout.padding
-import androidx.compose.foundation.interaction.MutableInteractionSource
-import androidx.compose.foundation.interaction.collectIsFocusedAsState
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
@@ -33,7 +33,6 @@ import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.unit.dp
 import coil3.compose.AsyncImage
-import kotlin.coroutines.cancellation.CancellationException
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
 import org.example.daybook.DaybookEditorSemantics
@@ -50,6 +49,7 @@ import org.example.daybook.uniffi.types.FacetDisplayHint
 import org.example.daybook.uniffi.types.FacetKey
 import org.example.daybook.uniffi.types.ViewSpec
 import org.example.daybook.uniffi.types.WellKnownFacet
+import kotlin.coroutines.cancellation.CancellationException
 
 internal data class FacetNoteEditorProps(
     val draft: String?,
@@ -174,7 +174,9 @@ private fun PluginFacetView(
         viewState = PluginFacetViewState.Loading
         when {
             docId == null -> viewState = PluginFacetViewState.Failed("Document unavailable")
+
             rtFfi == null -> viewState = PluginFacetViewState.RuntimeUnavailable
+
             else -> {
                 viewState =
                     try {
