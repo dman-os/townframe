@@ -19,6 +19,7 @@ import androidx.compose.runtime.Composable
 import androidx.compose.runtime.CompositionLocalProvider
 import androidx.compose.runtime.compositionLocalOf
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.input.nestedscroll.NestedScrollConnection
 import androidx.compose.ui.input.nestedscroll.nestedScroll
 import androidx.compose.ui.graphics.Color as UiColor
 
@@ -27,6 +28,7 @@ data class ScreenChromeSpec(val topBar: TopBarSpec = TopBarSpec()) {
         val title: String? = null,
         val showBack: Boolean = false,
         val onBack: (() -> Unit)? = null,
+        val pinned: Boolean = false,
         val actions: (@Composable RowScope.() -> Unit)? = null,
     )
 }
@@ -83,16 +85,35 @@ fun DaybookTopBar(chrome: ScreenChromeSpec.TopBarSpec, scrollBehavior: TopAppBar
 fun DaybookScaffold(
     modifier: Modifier = Modifier,
     topBar: ScreenChromeSpec.TopBarSpec? = null,
+    nestedScrollConnection: NestedScrollConnection? = null,
+    topBarContent: (@Composable (ScreenChromeSpec.TopBarSpec) -> Unit)? = null,
     content: @Composable (PaddingValues) -> Unit,
 ) {
-    val scrollBehavior = TopAppBarDefaults.enterAlwaysScrollBehavior()
+    val topBarSpec = topBar ?: LocalScreenChromeSpec.current.topBar
+    val scrollBehavior = if (topBarSpec.pinned) null else TopAppBarDefaults.enterAlwaysScrollBehavior()
+    val resolvedNestedScrollConnection =
+        nestedScrollConnection
+            ?: if (topBarContent == null) {
+                scrollBehavior?.nestedScrollConnection
+            } else {
+                null
+            }
     Scaffold(
-        modifier = modifier.nestedScroll(scrollBehavior.nestedScrollConnection),
+        modifier =
+        if (resolvedNestedScrollConnection == null) {
+            modifier
+        } else {
+            modifier.nestedScroll(resolvedNestedScrollConnection)
+        },
         topBar = {
-            DaybookTopBar(
-                chrome = topBar ?: LocalScreenChromeSpec.current.topBar,
-                scrollBehavior = scrollBehavior,
-            )
+            if (topBarContent != null) {
+                topBarContent(topBarSpec)
+            } else {
+                DaybookTopBar(
+                    chrome = topBarSpec,
+                    scrollBehavior = scrollBehavior,
+                )
+            }
         },
         content = content,
     )

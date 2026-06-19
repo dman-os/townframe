@@ -45,6 +45,7 @@ import org.example.daybook.ui.editor.bodyFacetKey
 import org.example.daybook.ui.editor.imageMetadataFacetKey
 import org.example.daybook.ui.putWellKnownFacet
 import org.example.daybook.ui.rememberAddBlockDialogLauncher
+import org.example.daybook.ui.rememberDocEditorSelectionState
 import org.example.daybook.ui.withFacetRefCommitHeads
 import org.example.daybook.uniffi.DrawerEventListener
 import org.example.daybook.uniffi.DrawerRepoFfi
@@ -300,6 +301,8 @@ fun CaptureScreen(modifier: Modifier = Modifier, initialDocId: String? = null) {
         }
 
     val snackbarHostState = remember { SnackbarHostState() }
+    val editorState by vm.editorController.state.collectAsState()
+    val editorSelectionState = rememberDocEditorSelectionState(editorState.docId)
 
     LaunchedEffect(vm) {
         vm.message.collect { msg ->
@@ -352,6 +355,7 @@ fun CaptureScreen(modifier: Modifier = Modifier, initialDocId: String? = null) {
                             args =
                             DocEditorArgs(
                                 controller = vm.editorController,
+                                selectionState = editorSelectionState,
                                 isAddBlockPickerOpen = bigDialogController.isShowing,
                                 onAddBlockRequested = addBlockDialogLauncher,
                             ),

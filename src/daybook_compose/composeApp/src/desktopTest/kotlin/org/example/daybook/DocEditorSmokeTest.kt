@@ -10,13 +10,18 @@ import androidx.compose.ui.test.ExperimentalTestApi
 import androidx.compose.ui.test.assertTextContains
 import androidx.compose.ui.test.assertIsDisplayed
 import androidx.compose.ui.test.assertIsNotFocused
+import androidx.compose.ui.test.assertIsNotSelected
+import androidx.compose.ui.test.assertIsSelected
 import androidx.compose.ui.test.onAllNodesWithTag
 import androidx.compose.ui.test.onAllNodesWithText
 import androidx.compose.ui.test.onNodeWithTag
 import androidx.compose.ui.test.onNodeWithText
 import androidx.compose.ui.test.performCustomAccessibilityActionWithLabel
 import androidx.compose.ui.test.performClick
+import androidx.compose.ui.test.performMouseInput
 import androidx.compose.ui.test.performTextInput
+import androidx.compose.ui.test.performTouchInput
+import androidx.compose.ui.test.longClick
 import androidx.compose.ui.test.v2.runComposeUiTest
 import java.nio.file.Files
 import java.nio.file.Path
@@ -471,11 +476,17 @@ class DocEditorSmokeTest {
             onNodeWithTag(DaybookEditorSemantics.toggleBlockCollapseAction(firstNoteLabel)).performClick()
 
             waitUntil(timeoutMillis = 10_000) {
-                onAllNodesWithTag(DaybookEditorSemantics.collapsedFacetBlock(firstNoteLabel))
+                onAllNodesWithTag(
+                    testTag = DaybookEditorSemantics.collapsedFacetBlock(firstNoteLabel),
+                    useUnmergedTree = true,
+                )
                     .fetchSemanticsNodes()
                     .isNotEmpty()
             }
-            onNodeWithTag(DaybookEditorSemantics.collapsedFacetBlock(firstNoteLabel)).assertIsDisplayed()
+            onNodeWithTag(
+                testTag = DaybookEditorSemantics.collapsedFacetBlock(firstNoteLabel),
+                useUnmergedTree = true,
+            ).assertIsDisplayed()
             onNodeWithText("Collapsed note preview").assertIsDisplayed()
             waitUntil(timeoutMillis = 10_000) {
                 onAllNodesWithTag(DaybookEditorSemantics.noteField(firstNoteLabel))
@@ -497,6 +508,290 @@ class DocEditorSmokeTest {
                     .fetchSemanticsNodes()
                     .isEmpty()
             }
+        } finally {
+            fixture.close()
+        }
+    }
+
+    @Test
+    fun realRepo_block_shell_long_press_selects_and_tap_clears_selection() = runComposeUiTest {
+        val fixture = runBlocking { RealRepoFixture.create() }
+        try {
+            val drawerVm = DrawerViewModel(fixture.drawerRepo)
+            val docEditorStore = DocEditorStoreViewModel(fixture.drawerRepo)
+
+            val firstNoteLabel = facetKeyString(noteFacetKey())
+            val docId = fixture.createDoc(
+                titleText = "Selection smoke title",
+                noteText = "Selection note",
+            )
+
+            setContent {
+                DaybookTheme(themeConfig = ThemeConfig.Light) {
+                    ProvideScreenChromeSpec(ScreenChromeSpec()) {
+                        CompositionLocalProvider(
+                            LocalContainer provides fixture.container,
+                            LocalDrawerViewModel provides drawerVm,
+                            LocalDocEditorStore provides docEditorStore,
+                        ) {
+                            BigDialogHost(narrowScreen = false) {
+                                DocEditorScreen(contentType = DaybookContentType.LIST_ONLY)
+                            }
+                        }
+                    }
+                }
+            }
+
+            docEditorStore.selectDoc(docId)
+
+            waitUntil(timeoutMillis = 10_000) {
+                onAllNodesWithTag(DaybookEditorSemantics.noteField(firstNoteLabel))
+                    .fetchSemanticsNodes()
+                    .isNotEmpty()
+            }
+
+            onNodeWithTag(DaybookEditorSemantics.facetRow(firstNoteLabel))
+                .performTouchInput {
+                    longClick()
+                }
+
+            waitUntil(timeoutMillis = 10_000) {
+                onAllNodesWithTag(DaybookEditorSemantics.BLOCK_SELECTION_ACTION_BAR)
+                    .fetchSemanticsNodes()
+                    .isNotEmpty()
+            }
+            onNodeWithTag(DaybookEditorSemantics.facetRow(firstNoteLabel)).assertIsSelected()
+            onNodeWithTag(DaybookEditorSemantics.SELECTION_CANCEL_ACTION).assertIsDisplayed()
+            onNodeWithTag(DaybookEditorSemantics.SELECTION_SELECT_ALL_ACTION).assertIsDisplayed()
+            onNodeWithTag(DaybookEditorSemantics.BLOCK_SELECTION_ACTION_BAR).assertIsDisplayed()
+
+            onNodeWithTag(DaybookEditorSemantics.facetRow(firstNoteLabel)).performClick()
+
+            waitUntil(timeoutMillis = 10_000) {
+                onAllNodesWithTag(DaybookEditorSemantics.BLOCK_SELECTION_ACTION_BAR)
+                    .fetchSemanticsNodes()
+                    .isEmpty()
+            }
+            onNodeWithTag(DaybookEditorSemantics.facetRow(firstNoteLabel)).assertIsNotSelected()
+            onAllNodesWithTag(DaybookEditorSemantics.SELECTION_CANCEL_ACTION)
+                .fetchSemanticsNodes()
+                .isEmpty()
+        } finally {
+            fixture.close()
+        }
+    }
+
+    @Test
+    fun realRepo_block_handle_quick_select_action_enters_selection_mode() = runComposeUiTest {
+        val fixture = runBlocking { RealRepoFixture.create() }
+        try {
+            val drawerVm = DrawerViewModel(fixture.drawerRepo)
+            val docEditorStore = DocEditorStoreViewModel(fixture.drawerRepo)
+
+            val firstNoteLabel = facetKeyString(noteFacetKey())
+            val docId = fixture.createDoc(
+                titleText = "Quick select smoke title",
+                noteText = "Quick select note",
+            )
+
+            setContent {
+                DaybookTheme(themeConfig = ThemeConfig.Light) {
+                    ProvideScreenChromeSpec(ScreenChromeSpec()) {
+                        CompositionLocalProvider(
+                            LocalContainer provides fixture.container,
+                            LocalDrawerViewModel provides drawerVm,
+                            LocalDocEditorStore provides docEditorStore,
+                        ) {
+                            BigDialogHost(narrowScreen = false) {
+                                DocEditorScreen(contentType = DaybookContentType.LIST_ONLY)
+                            }
+                        }
+                    }
+                }
+            }
+
+            docEditorStore.selectDoc(docId)
+
+            waitUntil(timeoutMillis = 10_000) {
+                onAllNodesWithTag(DaybookEditorSemantics.noteField(firstNoteLabel))
+                    .fetchSemanticsNodes()
+                    .isNotEmpty()
+            }
+
+            onNodeWithTag(DaybookEditorSemantics.facetRow(firstNoteLabel))
+                .performMouseInput {
+                    moveTo(topRight)
+                }
+            waitUntil(timeoutMillis = 10_000) {
+                onAllNodesWithTag(DaybookEditorSemantics.blockActions(firstNoteLabel))
+                    .fetchSemanticsNodes()
+                    .isNotEmpty()
+            }
+            onNodeWithTag(DaybookEditorSemantics.blockActions(firstNoteLabel))
+                .performMouseInput {
+                    moveTo(center)
+                }
+            waitUntil(timeoutMillis = 10_000) {
+                onAllNodesWithTag(DaybookEditorSemantics.selectBlockQuickAction(firstNoteLabel))
+                    .fetchSemanticsNodes()
+                    .isNotEmpty()
+            }
+            onNodeWithTag(DaybookEditorSemantics.selectBlockQuickAction(firstNoteLabel)).performClick()
+
+            waitUntil(timeoutMillis = 10_000) {
+                onAllNodesWithTag(DaybookEditorSemantics.BLOCK_SELECTION_ACTION_BAR)
+                    .fetchSemanticsNodes()
+                    .isNotEmpty()
+            }
+            onNodeWithTag(DaybookEditorSemantics.facetRow(firstNoteLabel)).assertIsSelected()
+            onNodeWithTag(DaybookEditorSemantics.SELECTION_CANCEL_ACTION).assertIsDisplayed()
+        } finally {
+            fixture.close()
+        }
+    }
+
+    @Test
+    fun realRepo_block_menu_sheet_single_selection_collapse_action_works() = runComposeUiTest {
+        val fixture = runBlocking { RealRepoFixture.create() }
+        try {
+            val drawerVm = DrawerViewModel(fixture.drawerRepo)
+            val docEditorStore = DocEditorStoreViewModel(fixture.drawerRepo)
+
+            val firstNoteLabel = facetKeyString(noteFacetKey())
+            val docId = fixture.createDoc(
+                titleText = "Single selection menu title",
+                noteText = "Collapsed note preview",
+            )
+
+            setContent {
+                DaybookTheme(themeConfig = ThemeConfig.Light) {
+                    ProvideScreenChromeSpec(ScreenChromeSpec()) {
+                        CompositionLocalProvider(
+                            LocalContainer provides fixture.container,
+                            LocalDrawerViewModel provides drawerVm,
+                            LocalDocEditorStore provides docEditorStore,
+                        ) {
+                            BigDialogHost(narrowScreen = false) {
+                                DocEditorScreen(contentType = DaybookContentType.LIST_ONLY)
+                            }
+                        }
+                    }
+                }
+            }
+
+            docEditorStore.selectDoc(docId)
+
+            waitUntil(timeoutMillis = 10_000) {
+                onAllNodesWithTag(DaybookEditorSemantics.noteField(firstNoteLabel))
+                    .fetchSemanticsNodes()
+                    .isNotEmpty()
+            }
+
+            onNodeWithTag(DaybookEditorSemantics.facetRow(firstNoteLabel))
+                .performTouchInput {
+                    longClick()
+                }
+            waitUntil(timeoutMillis = 10_000) {
+                onAllNodesWithTag(DaybookEditorSemantics.selectionActionBarAction("toggle-collapse"))
+                    .fetchSemanticsNodes()
+                    .isNotEmpty()
+            }
+            onNodeWithTag(DaybookEditorSemantics.selectionActionBarAction("toggle-collapse")).performClick()
+
+            waitUntil(timeoutMillis = 10_000) {
+                onAllNodesWithTag(
+                    testTag = DaybookEditorSemantics.collapsedFacetBlock(firstNoteLabel),
+                    useUnmergedTree = true,
+                )
+                    .fetchSemanticsNodes()
+                    .isNotEmpty()
+            }
+            onNodeWithTag(
+                testTag = DaybookEditorSemantics.collapsedFacetBlock(firstNoteLabel),
+                useUnmergedTree = true,
+            ).assertIsDisplayed()
+            onNodeWithText("Collapsed note preview").assertIsDisplayed()
+            onAllNodesWithTag(DaybookEditorSemantics.noteField(firstNoteLabel))
+                .fetchSemanticsNodes()
+                .isEmpty()
+        } finally {
+            fixture.close()
+        }
+    }
+
+    @Test
+    fun realRepo_block_menu_sheet_multi_selection_only_shows_collapse_action() = runComposeUiTest {
+        val fixture = runBlocking { RealRepoFixture.create() }
+        try {
+            val drawerVm = DrawerViewModel(fixture.drawerRepo)
+            val docEditorStore = DocEditorStoreViewModel(fixture.drawerRepo)
+
+            val secondNoteKey = noteFacetKeyWithId("second")
+            val firstNoteLabel = facetKeyString(noteFacetKey())
+            val secondNoteLabel = facetKeyString(secondNoteKey)
+            val docId = fixture.createDoc(
+                titleText = "Multi selection menu title",
+                noteText = "First note block",
+                extraNotes = listOf(secondNoteKey to "Second note block"),
+            )
+
+            setContent {
+                DaybookTheme(themeConfig = ThemeConfig.Light) {
+                    ProvideScreenChromeSpec(ScreenChromeSpec()) {
+                        CompositionLocalProvider(
+                            LocalContainer provides fixture.container,
+                            LocalDrawerViewModel provides drawerVm,
+                            LocalDocEditorStore provides docEditorStore,
+                        ) {
+                            BigDialogHost(narrowScreen = false) {
+                                DocEditorScreen(contentType = DaybookContentType.LIST_ONLY)
+                            }
+                        }
+                    }
+                }
+            }
+
+            docEditorStore.selectDoc(docId)
+
+            waitUntil(timeoutMillis = 10_000) {
+                onAllNodesWithTag(DaybookEditorSemantics.noteField(firstNoteLabel))
+                    .fetchSemanticsNodes()
+                    .isNotEmpty()
+            }
+
+            onNodeWithTag(DaybookEditorSemantics.facetRow(firstNoteLabel))
+                .performTouchInput {
+                    longClick()
+                }
+            onNodeWithTag(DaybookEditorSemantics.facetRow(secondNoteLabel)).performClick()
+
+            waitUntil(timeoutMillis = 10_000) {
+                onAllNodesWithText("2 selected")
+                    .fetchSemanticsNodes()
+                    .isNotEmpty()
+            }
+
+            waitUntil(timeoutMillis = 10_000) {
+                onAllNodesWithTag(DaybookEditorSemantics.BLOCK_SELECTION_ACTION_BAR)
+                    .fetchSemanticsNodes()
+                    .isNotEmpty()
+            }
+            onNodeWithTag(DaybookEditorSemantics.selectionActionBarAction("collapse-selected")).assertIsDisplayed()
+            onAllNodesWithTag(DaybookEditorSemantics.selectionActionBarAction("add-below"))
+                .fetchSemanticsNodes()
+                .isEmpty()
+            onAllNodesWithTag(DaybookEditorSemantics.selectionActionBarAction("make-primary"))
+                .fetchSemanticsNodes()
+                .isEmpty()
+            onAllNodesWithTag(DaybookEditorSemantics.selectionActionBarAction("move-up"))
+                .fetchSemanticsNodes()
+                .isEmpty()
+            onAllNodesWithTag(DaybookEditorSemantics.selectionActionBarAction("move-down"))
+                .fetchSemanticsNodes()
+                .isEmpty()
+            onNodeWithTag(DaybookEditorSemantics.facetRow(firstNoteLabel)).assertIsSelected()
+            onNodeWithTag(DaybookEditorSemantics.facetRow(secondNoteLabel)).assertIsSelected()
+            onNodeWithText("2 selected").assertIsDisplayed()
         } finally {
             fixture.close()
         }

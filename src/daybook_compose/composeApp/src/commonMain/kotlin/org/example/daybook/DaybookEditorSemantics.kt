@@ -39,6 +39,19 @@ object DaybookEditorSemantics {
     fun focusedNoteAccessoryAddBlockAction(facetKey: String): String =
         "doc-editor-focused-note-accessory-add-block:$facetKey"
 
+    fun focusedNoteAccessorySelectBlockAction(facetKey: String): String =
+        "doc-editor-focused-note-accessory-select-block:$facetKey"
+
+    const val BLOCK_SELECTION_ACTION_BAR = "doc-editor-block-selection-action-bar"
+
+    fun selectionActionBarAction(actionId: String): String = "doc-editor-block-selection-action:$actionId"
+
+    fun selectBlockQuickAction(facetKey: String): String = "doc-editor-block-action-select-quick:$facetKey"
+
+    const val SELECTION_CANCEL_ACTION = "doc-editor-selection-cancel"
+
+    const val SELECTION_SELECT_ALL_ACTION = "doc-editor-selection-select-all"
+
     const val ADD_BLOCK_SEARCH_FIELD = "doc-editor-add-block-search"
 
     fun addBlockOption(optionId: String): String = "doc-editor-add-block-option:$optionId"

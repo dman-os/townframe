@@ -31,9 +31,15 @@ import org.example.daybook.LocalBigDialogController
 import org.example.daybook.LocalContainer
 import org.example.daybook.LocalDocEditorStore
 import org.example.daybook.layouts.DaybookScaffold
+import org.example.daybook.layouts.DaybookTopBar
+import org.example.daybook.layouts.LocalScreenChromeSpec
+import org.example.daybook.layouts.ProvideScreenChromeSpec
+import org.example.daybook.layouts.ScreenChromeSpec
 import org.example.daybook.tables.DockableRegion
 import org.example.daybook.ui.DocEditor
 import org.example.daybook.ui.DocEditorArgs
+import org.example.daybook.ui.DocEditorMediumTopAppBar
+import org.example.daybook.ui.DocEditorSelectionState
 import org.example.daybook.ui.DocFacetSidebar
 import org.example.daybook.ui.buildSelfFacetRefUrl
 import org.example.daybook.ui.decodeJsonStringOrRaw
@@ -42,6 +48,7 @@ import org.example.daybook.ui.editor.bodyFacetKey
 import org.example.daybook.ui.editor.noteFacetKey
 import org.example.daybook.ui.editor.titleFacetKey
 import org.example.daybook.ui.rememberAddBlockDialogLauncher
+import org.example.daybook.ui.rememberDocEditorSelectionState
 import org.example.daybook.ui.stripFacetRefFragment
 import org.example.daybook.uniffi.types.Doc
 import org.example.daybook.uniffi.types.FacetDisplayHint
@@ -102,6 +109,7 @@ private fun DrawerDocEditorSplitState(args: DrawerDocEditorContentArgs) {
                 args =
                 org.example.daybook.ui.DocEditorArgs(
                     controller = controller,
+                    selectionState = args.selectionState,
                     displayHints = args.displayHints,
                     displayHintsError = args.displayHintsError,
                     isAddBlockPickerOpen = bigDialogController.isShowing,
@@ -128,6 +136,7 @@ private fun DrawerDocEditorSingleState(args: DrawerDocEditorContentArgs) {
         args =
         org.example.daybook.ui.DocEditorArgs(
             controller = controller,
+            selectionState = args.selectionState,
             showInlineFacetRack = args.showInlineFacetRack,
             displayHints = args.displayHints,
             displayHintsError = args.displayHintsError,
@@ -145,6 +154,7 @@ private data class DrawerDocEditorContentArgs(
     val displayHintsError: String?,
     val showFacetSidebar: Boolean,
     val showInlineFacetRack: Boolean = false,
+    val selectionState: DocEditorSelectionState,
 )
 
 @Composable
@@ -171,15 +181,78 @@ fun DrawerScreen(drawerVm: DrawerViewModel, onOpenDoc: (String) -> Unit, modifie
 @Composable
 fun DocEditorScreen(contentType: DaybookContentType, modifier: Modifier = Modifier) {
     val state = rememberDocEditorScreenState(contentType)
-    DaybookScaffold(
-        modifier = modifier.fillMaxSize().testTag(DaybookEditorSemantics.SCREEN),
-        topBar = null,
-    ) { scaffoldPadding ->
-        DocEditorScreenContent(
-            state = state,
-            scaffoldPadding = scaffoldPadding,
-        )
+    val selectionState = rememberDocEditorSelectionState(state.selectedDocId)
+    val chrome = rememberDocEditorScreenChrome(state = state, selectionState = selectionState)
+    val topBarScrollBehavior =
+        if (selectionState.isSelectionMode) {
+            null
+        } else {
+            TopAppBarDefaults.exitUntilCollapsedScrollBehavior()
+        }
+    ProvideScreenChromeSpec(chrome) {
+        DaybookScaffold(
+            modifier = modifier.fillMaxSize().testTag(DaybookEditorSemantics.SCREEN),
+            nestedScrollConnection = topBarScrollBehavior?.nestedScrollConnection,
+            topBarContent = { topBarSpec ->
+                if (selectionState.isSelectionMode) {
+                    DaybookTopBar(
+                        chrome = topBarSpec,
+                        scrollBehavior = null,
+                    )
+                } else {
+                    DocEditorMediumTopAppBar(
+                        chrome = topBarSpec,
+                        controller = state.selectedController,
+                        scrollBehavior = topBarScrollBehavior,
+                    )
+                }
+            },
+        ) { scaffoldPadding ->
+            DocEditorScreenContent(
+                state = state,
+                selectionState = selectionState,
+                scaffoldPadding = scaffoldPadding,
+            )
+        }
     }
+}
+
+@Composable
+private fun rememberDocEditorScreenChrome(
+    state: DocEditorScreenState,
+    selectionState: DocEditorSelectionState,
+): ScreenChromeSpec {
+    val baseChrome = LocalScreenChromeSpec.current
+    if (!selectionState.isSelectionMode) {
+        return baseChrome
+    }
+
+    val contentFacetLabels =
+        state.selectedController?.state?.value?.contentFacetViews.orEmpty().map { facetDescriptor ->
+            org.example.daybook.ui.editor.facetKeyString(facetDescriptor.facetKey)
+        }
+
+    return ScreenChromeSpec(
+        topBar = ScreenChromeSpec.TopBarSpec(
+            title = "${selectionState.selectedCount} selected",
+            showBack = false,
+            pinned = true,
+            actions = {
+                androidx.compose.material3.TextButton(
+                    onClick = { selectionState.clear() },
+                    modifier = Modifier.testTag(DaybookEditorSemantics.SELECTION_CANCEL_ACTION),
+                ) {
+                    androidx.compose.material3.Text("Cancel")
+                }
+                androidx.compose.material3.TextButton(
+                    onClick = { selectionState.selectAll(contentFacetLabels) },
+                    modifier = Modifier.testTag(DaybookEditorSemantics.SELECTION_SELECT_ALL_ACTION),
+                ) {
+                    androidx.compose.material3.Text("Select all")
+                }
+            },
+        ),
+    )
 }
 
 private data class DocEditorScreenState(
@@ -223,7 +296,11 @@ private fun rememberDocEditorScreenState(contentType: DaybookContentType): DocEd
 }
 
 @Composable
-private fun DocEditorScreenContent(state: DocEditorScreenState, scaffoldPadding: PaddingValues) {
+private fun DocEditorScreenContent(
+    state: DocEditorScreenState,
+    selectionState: DocEditorSelectionState,
+    scaffoldPadding: PaddingValues,
+) {
     Box(
         modifier =
         Modifier
@@ -246,6 +323,7 @@ private fun DocEditorScreenContent(state: DocEditorScreenState, scaffoldPadding:
                     displayHintsError = state.configError,
                     showFacetSidebar = state.showFacetSidebar,
                     showInlineFacetRack = state.showInlineFacetRack,
+                    selectionState = selectionState,
                 ),
                 modifier = Modifier.fillMaxSize(),
             )

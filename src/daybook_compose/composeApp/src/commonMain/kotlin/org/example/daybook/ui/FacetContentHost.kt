@@ -127,6 +127,7 @@ private fun NoteFacetView(descriptor: FacetViewDescriptor, noteEditor: FacetNote
                 contentDescription = "Note facet ${facetKeyString(descriptor.facetKey)}"
             },
         enabled = noteEditor.editable,
+        readOnly = noteEditor.readOnly,
         minLines = 1,
         maxLines = Int.MAX_VALUE,
         placeholder = {
