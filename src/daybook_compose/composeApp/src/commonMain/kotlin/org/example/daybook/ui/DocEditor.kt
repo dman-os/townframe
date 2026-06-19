@@ -124,7 +124,11 @@ private fun rememberDocEditorLayoutArgs(args: DocEditorArgs): DocEditorLayoutArg
     val collapsedFacetStates = remember(state.docId) { mutableStateMapOf<String, Boolean>() }
     val blockActionExpandedStates = remember(state.docId) { mutableStateMapOf<String, Boolean>() }
     var focusedNoteFacetLabel by remember(state.docId) { mutableStateOf<String?>(null) }
+    var hoveredFacetLabel by remember(state.docId) { mutableStateOf<String?>(null) }
     var uiMessage by remember { mutableStateOf<String?>(null) }
+    val onFacetHoverChanged: (String, Boolean) -> Unit = { facetKeyLabel, isHovered ->
+        hoveredFacetLabel = updateHoveredFacetLabel(hoveredFacetLabel, facetKeyLabel, isHovered)
+    }
 
     DocEditorSnackbarEffects(
         snackbarHostState = snackbarHostState,
@@ -134,14 +138,7 @@ private fun rememberDocEditorLayoutArgs(args: DocEditorArgs): DocEditorLayoutArg
     )
 
     val listState = rememberLazyListState()
-    val facetListStartIndex =
-        remember(state.titleNotice, args.displayHintsError, state.contentFacetViews.isNotEmpty()) {
-            docEditorFacetListStartIndex(
-                titleNotice = state.titleNotice,
-                displayHintsError = args.displayHintsError,
-                hasFacetRows = state.contentFacetViews.isNotEmpty(),
-            )
-        }
+    val facetListStartIndex = rememberDocEditorFacetListStartIndex(state, args.displayHintsError)
     var stickyFacetActionsHeightPx by remember(state.docId) { mutableStateOf(0) }
     val onFocusedNoteFacetChanged: (FacetKey, Boolean) -> Unit = { facetKey, isFocused ->
         val facetKeyLabel = facetKeyString(facetKey)
@@ -173,13 +170,35 @@ private fun rememberDocEditorLayoutArgs(args: DocEditorArgs): DocEditorLayoutArg
         collapsedFacetStates = collapsedFacetStates,
         blockActionExpandedStates = blockActionExpandedStates,
         focusedNoteFacetLabel = focusedNoteFacetLabel,
+        hoveredFacetLabel = hoveredFacetLabel,
         onFocusedNoteFacetChanged = onFocusedNoteFacetChanged,
+        onFacetHoverChanged = onFacetHoverChanged,
         onUiError = { message -> uiMessage = message },
         listState = listState,
         stickyFacetActionsHeightPx = stickyFacetActionsHeightPx,
         onStickyFacetActionsHeightChanged = { stickyFacetActionsHeightPx = it },
     )
 }
+
+private fun updateHoveredFacetLabel(
+    currentFacetKeyLabel: String?,
+    changedFacetKeyLabel: String,
+    isHovered: Boolean,
+): String? = if (isHovered) {
+    changedFacetKeyLabel
+} else {
+    currentFacetKeyLabel?.takeUnless { it == changedFacetKeyLabel }
+}
+
+@Composable
+private fun rememberDocEditorFacetListStartIndex(state: EditorSessionState, displayHintsError: String?): Int =
+    remember(state.titleNotice, displayHintsError, state.contentFacetViews.isNotEmpty()) {
+        docEditorFacetListStartIndex(
+            titleNotice = state.titleNotice,
+            displayHintsError = displayHintsError,
+            hasFacetRows = state.contentFacetViews.isNotEmpty(),
+        )
+    }
 
 @Composable
 private fun DocEditorSnackbarEffects(
@@ -211,7 +230,9 @@ private data class DocEditorLayoutArgs(
     val collapsedFacetStates: MutableMap<String, Boolean>,
     val blockActionExpandedStates: MutableMap<String, Boolean>,
     val focusedNoteFacetLabel: String?,
+    val hoveredFacetLabel: String?,
     val onFocusedNoteFacetChanged: (FacetKey, Boolean) -> Unit,
+    val onFacetHoverChanged: (String, Boolean) -> Unit,
     val onUiError: (String) -> Unit,
     val listState: androidx.compose.foundation.lazy.LazyListState,
     val stickyFacetActionsHeightPx: Int,
@@ -247,14 +268,7 @@ private fun DocEditorScrollEffect(args: DocEditorScrollEffectArgs) {
 private fun DocEditorLayout(args: DocEditorLayoutArgs, modifier: Modifier = Modifier) {
     BoxWithConstraints(modifier = modifier.fillMaxSize().imePadding().testTag(DaybookEditorSemantics.EDITOR)) {
         val narrowScreen = maxWidth < 600.dp
-        val facetListStartIndex =
-            remember(args.state.titleNotice, args.displayHintsError, args.state.contentFacetViews.isNotEmpty()) {
-                docEditorFacetListStartIndex(
-                    titleNotice = args.state.titleNotice,
-                    displayHintsError = args.displayHintsError,
-                    hasFacetRows = args.state.contentFacetViews.isNotEmpty(),
-                )
-            }
+        val facetListStartIndex = rememberDocEditorFacetListStartIndex(args.state, args.displayHintsError)
         val stickyFacetPlacement by remember(
             args.state.contentFacetViews,
             args.state.titleNotice,
@@ -308,7 +322,7 @@ private fun DocEditorFacetList(args: DocEditorLayoutArgs, stickyFacetPlacement: 
     ) {
         docEditorTitleSection(args.controller, args.state)
         docEditorTitleNoticeSection(args.state.titleNotice)
-        docEditorTitleDividerSection()
+        // docEditorTitleDividerSection()
         docEditorDisplayHintsErrorSection(args.displayHintsError)
         if (args.state.contentFacetViews.isEmpty()) {
             docEditorEmptyFacetSection()
@@ -337,7 +351,13 @@ private fun LazyListScope.docEditorTitleSection(controller: EditorSessionControl
                     contentDescription = "Document title"
                 },
             enabled = state.titleEditable,
-            placeholder = { Text("Title") },
+            placeholder = {
+                Text(
+                    "Untitled",
+                    style = MaterialTheme.typography.titleLarge.copy(fontWeight = FontWeight.Bold),
+                    color = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.48f),
+                )
+            },
             textStyle = MaterialTheme.typography.titleLarge.copy(fontWeight = FontWeight.Bold),
             colors =
             TextFieldDefaults.colors(
@@ -360,12 +380,6 @@ private fun LazyListScope.docEditorTitleNoticeSection(titleNotice: String?) {
                 color = MaterialTheme.colorScheme.onSurfaceVariant,
             )
         }
-    }
-}
-
-private fun LazyListScope.docEditorTitleDividerSection() {
-    item(key = "title-divider") {
-        HorizontalDivider(modifier = Modifier.padding(vertical = 8.dp))
     }
 }
 
@@ -414,6 +428,7 @@ private fun LazyListScope.docEditorFacetRows(
                 isActionMenuOpen = isActionMenuOpen,
                 onActionMenuOpenChange = { args.blockActionExpandedStates[facetKeyLabel] = it },
                 showInlineActions = !isUsingStickyActions,
+                onHoverChanged = { isHovered -> args.onFacetHoverChanged(facetKeyLabel, isHovered) },
                 noteDraft = args.state.noteEditors[descriptor.facetKey]?.draft,
                 noteEditable = args.state.noteEditors[descriptor.facetKey]?.editable ?: false,
                 noteNotice = args.state.noteEditors[descriptor.facetKey]?.notice,
@@ -467,8 +482,11 @@ private fun DocEditorStickyFacetOverlay(args: DocEditorLayoutArgs, stickyFacetPl
             val facetKeyLabel = facetKeyString(descriptor.facetKey)
             val isCollapsed = args.collapsedFacetStates[facetKeyLabel] == true
             val isActionMenuOpen = args.blockActionExpandedStates[facetKeyLabel] == true
+            val isStickyFacetHovered = args.hoveredFacetLabel == facetKeyLabel
             val stickyActionsHoverSource = remember(descriptor.facetKey) { MutableInteractionSource() }
             val isStickyActionRowHovered by stickyActionsHoverSource.collectIsHoveredAsState()
+            val showStickyOverflowButton = isActionMenuOpen || isStickyFacetHovered || isStickyActionRowHovered
+            val showStickyQuickActions = isActionMenuOpen || isStickyActionRowHovered
             FacetBlockActionsMenu(
                 args =
                 FacetBlockActionsMenuArgs(
@@ -490,16 +508,16 @@ private fun DocEditorStickyFacetOverlay(args: DocEditorLayoutArgs, stickyFacetPl
                         },
                     ),
                     isMenuOpen = isActionMenuOpen,
-                    showOverflowButton = isActionMenuOpen || isStickyActionRowHovered,
+                    showOverflowButton = showStickyOverflowButton,
                     onMenuOpenChange = { args.blockActionExpandedStates[facetKeyLabel] = it },
-                    showQuickActions = isActionMenuOpen || isStickyActionRowHovered,
+                    showQuickActions = showStickyQuickActions,
                     collapseButtonIcon =
                     if (isCollapsed) {
                         Icons.Default.KeyboardArrowDown
                     } else {
                         Icons.Default.KeyboardArrowUp
                     },
-                    overflowButtonEmphasized = isActionMenuOpen || isStickyActionRowHovered,
+                    overflowButtonEmphasized = showStickyOverflowButton,
                     enableInvisibleHoverTarget = true,
                     interactionSource = stickyActionsHoverSource,
                 ),
@@ -524,7 +542,6 @@ private fun docEditorFacetListStartIndex(
     if (titleNotice != null) {
         index += 1
     }
-    index += 1
     if (displayHintsError != null) {
         index += 1
     }
@@ -573,6 +590,7 @@ private data class FacetBlockArgs(
     val isActionMenuOpen: Boolean,
     val onActionMenuOpenChange: (Boolean) -> Unit,
     val showInlineActions: Boolean,
+    val onHoverChanged: (Boolean) -> Unit,
     val noteDraft: String?,
     val noteEditable: Boolean,
     val noteNotice: String?,
@@ -688,6 +706,10 @@ private fun FacetBlock(args: FacetBlockArgs, modifier: Modifier = Modifier) {
     val displayHint = args.displayHints[displayHintKey]
     val facetKeyLabel = facetKeyString(args.descriptor.facetKey)
     val uiState = rememberFacetBlockUiState(args = args, displayHint = displayHint)
+
+    LaunchedEffect(uiState.isBlockHovered) {
+        args.onHoverChanged(uiState.isBlockHovered)
+    }
 
     Box(
         modifier =

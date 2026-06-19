@@ -224,7 +224,13 @@ private fun rememberDocEditorScreenState(contentType: DaybookContentType): DocEd
 
 @Composable
 private fun DocEditorScreenContent(state: DocEditorScreenState, scaffoldPadding: PaddingValues) {
-    Box(modifier = Modifier.fillMaxSize().padding(scaffoldPadding)) {
+    Box(
+        modifier =
+        Modifier
+            .fillMaxSize()
+            .padding(scaffoldPadding)
+            .consumeWindowInsets(scaffoldPadding),
+    ) {
         val controller = state.selectedController
         if (state.selectedDocId == null) {
             DrawerDocEditorEmptyState()

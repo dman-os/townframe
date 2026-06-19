@@ -129,7 +129,12 @@ private fun NoteFacetView(descriptor: FacetViewDescriptor, noteEditor: FacetNote
         enabled = noteEditor.editable,
         minLines = 1,
         maxLines = Int.MAX_VALUE,
-        placeholder = { Text("Start typing...") },
+        placeholder = {
+            Text(
+                "Note",
+                color = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.48f),
+            )
+        },
         colors =
         TextFieldDefaults.colors(
             focusedContainerColor = androidx.compose.ui.graphics.Color.Transparent,

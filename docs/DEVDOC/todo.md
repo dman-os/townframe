@@ -15,6 +15,7 @@
       - I could just describe to the LLM what the document is to do and it could write it
   - [ ] Granary
   - [ ] Import Obsidian vault
+    - [ ] Obsidian sync plugin
 - [ ] Best in class in something?
   - [ ] Ingest?
     - [ ] Email
@@ -239,7 +240,6 @@
   - [ ] Status bar/Gesture bar insets for puck and widgets
   - [ ] Puck drop required to be on center bug
 - [ ] WYSIWYG editor
-- [ ] Embed NVIM?
 - [ ] FUSE
   - [ ] Make it feature complete
 - [ ] PgLite
@@ -260,14 +260,20 @@
   - [ ] Windows
   - [ ] macOS
 - [ ] GraalVM for Linux
-- [ ] Cross-device networking features
 
 ### The Big Lifts
 
 - [ ] Good text editor
+  - [ ] Embed NVIM?
 - [ ] Camera stack
   - [ ] Fully featured Camera2 impl on Android
   - [ ] Filters
 - [ ] Screen recording
 - [ ] Agent OS
 - [ ] UI applets
+- [ ] Android launcher
+- [ ] KDE integration
+- [ ] Gnome integration
+- [ ] Quickshell distro
+- [ ] Email integration
+- [ ] Cross-device VPN
