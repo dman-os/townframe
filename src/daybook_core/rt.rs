@@ -716,12 +716,21 @@ impl Rt {
                 .new_store(&first_component_id)
                 .await
                 .map_err(|err| eyre::eyre!(err.to_string()))?;
+            let target_facet_acl = manifest::RoutineFacetAccess {
+                owner_plug_id: None,
+                tag: facet_key.tag.to_string().into(),
+                key_id: Some(facet_key.id.clone()),
+                read: true,
+                write: false,
+                create: false,
+                delete: false,
+            };
             let doc_tokens = dispatch::DocFacetTokens {
                 doc_id: doc_id.clone(),
                 branch_path: branch_path.clone(),
                 staging_branch_path: branch_path.clone(),
                 heads,
-                facet_acl: vec![],
+                facet_acl: vec![target_facet_acl],
             };
             let primary_doc = wash_plugin::build_doc_facet_tokens(
                 store.data_mut(),

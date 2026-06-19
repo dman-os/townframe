@@ -1,4 +1,5 @@
 // FIXME: consistent cross plugin reference story
+// FIXME: separate wasm components list
 
 use crate::interlude::*;
 

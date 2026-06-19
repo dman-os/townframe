@@ -443,8 +443,19 @@ internal data class DocEditorArgs(
 
 @Composable
 internal fun DocEditor(args: DocEditorArgs, modifier: Modifier = Modifier) {
+    DocEditorDisplayHintEffect(controller = args.controller, displayHints = args.displayHints)
     val layoutArgs = rememberDocEditorLayoutArgs(args)
     DocEditorLayout(args = layoutArgs, modifier = modifier)
+}
+
+@Composable
+private fun DocEditorDisplayHintEffect(
+    controller: EditorSessionController,
+    displayHints: Map<String, FacetDisplayHint>,
+) {
+    LaunchedEffect(controller, displayHints) {
+        controller.setDisplayHints(displayHints)
+    }
 }
 
 @Composable

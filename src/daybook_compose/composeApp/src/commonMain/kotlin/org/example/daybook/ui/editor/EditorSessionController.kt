@@ -27,6 +27,8 @@ import org.example.daybook.uniffi.core.UpdateDocArgsV2
 import org.example.daybook.uniffi.types.AddDocArgs
 import org.example.daybook.uniffi.types.Doc
 import org.example.daybook.uniffi.types.DocPatch
+import org.example.daybook.uniffi.types.FacetDisplayDeets
+import org.example.daybook.uniffi.types.FacetDisplayHint
 import org.example.daybook.uniffi.types.FacetKey
 import org.example.daybook.uniffi.types.FacetTag
 import org.example.daybook.uniffi.types.WellKnownFacet
@@ -75,6 +77,7 @@ class EditorSessionController(
     private var persistedDocSnapshot: Doc? = null
     private var facetHeadsByKeyString: Map<String, List<String>> = emptyMap()
     private var mainBranchHeads: List<String> = emptyList()
+    private var displayHints: Map<String, FacetDisplayHint> = emptyMap()
 
     private val _state =
         MutableStateFlow(
@@ -123,6 +126,22 @@ class EditorSessionController(
         mainBranchHeads = bundle?.branchHeads.orEmpty()
         val nextState = buildBoundState(doc)
         _state.value = nextState
+    }
+
+    fun setDisplayHints(displayHints: Map<String, FacetDisplayHint>) {
+        if (this.displayHints != displayHints) {
+            this.displayHints = displayHints
+
+            val doc = persistedDocSnapshot
+            val currentState = _state.value
+            if (doc != null && !(currentState.isDirty && currentState.docId == doc.id)) {
+                _state.value =
+                    currentState.copy(
+                        facetRows = buildSupportedFacetRows(doc),
+                        contentFacetViews = buildContentFacetViews(doc),
+                    )
+            }
+        }
     }
 
     fun setTitleDraft(value: String) {
@@ -430,7 +449,7 @@ class EditorSessionController(
 
     private fun hasSupportedFacetView(key: FacetKey): Boolean = when (facetKindForKey(key)) {
         FacetEditorKind.Note, FacetEditorKind.ImageMetadata -> true
-        FacetEditorKind.GenericJson -> false
+        FacetEditorKind.GenericJson -> displayHints[facetDisplayHintKey(key)]?.deets is FacetDisplayDeets.CustomView
     }
 
     private fun decodeBodyOrderUrls(doc: Doc): List<String>? {

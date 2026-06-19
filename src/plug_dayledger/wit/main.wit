@@ -7,5 +7,6 @@ world bundle {
     import townframe:daybook/facet-routine;
     import townframe:daybook/drawer;
 
+    export townframe:daybook/stateless-view;
     export townframe:wflow/bundle;
 }

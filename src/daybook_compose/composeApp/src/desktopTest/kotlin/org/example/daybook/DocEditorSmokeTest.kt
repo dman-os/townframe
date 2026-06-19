@@ -840,6 +840,61 @@ class DocEditorSmokeTest {
             fixture.close()
         }
     }
+
+    @Test
+    fun realFfi_renders_dayledger_custom_view_facet_in_doc_editor_screen() = runComposeUiTest {
+        val fixture = runBlocking { RealRepoFixture.create(loadRt = true) }
+        try {
+            val drawerVm = DrawerViewModel(fixture.drawerRepo)
+            val docEditorStore = DocEditorStoreViewModel(fixture.drawerRepo)
+
+            fixture.importDayledgerOci()
+            fixture.setLedgerMetaCustomViewHint()
+
+            val ledgerMetaKey = ledgerMetaFacetKey()
+            val docId = fixture.createDoc(
+                titleText = "Ledger smoke title",
+                noteText = "Ledger note facet",
+                extraRawFacets = listOf(ledgerMetaKey to ledgerMetaFacetJson()),
+            )
+
+            setContent {
+                DaybookTheme(themeConfig = ThemeConfig.Light) {
+                    ProvideScreenChromeSpec(ScreenChromeSpec()) {
+                        CompositionLocalProvider(
+                            LocalContainer provides fixture.container,
+                            LocalDrawerViewModel provides drawerVm,
+                            LocalDocEditorStore provides docEditorStore,
+                        ) {
+                            BigDialogHost(narrowScreen = false) {
+                                DocEditorScreen(contentType = DaybookContentType.LIST_ONLY)
+                            }
+                        }
+                    }
+                }
+            }
+
+            docEditorStore.selectDoc(docId)
+
+            waitUntil(timeoutMillis = 20_000) {
+                onAllNodesWithText("Ledger ID: ledger-1").fetchSemanticsNodes().isNotEmpty()
+            }
+            onAllNodesWithTag(DaybookEditorSemantics.pluginFacet(facetKeyString(ledgerMetaKey)))
+                .fetchSemanticsNodes()
+                .isNotEmpty()
+            onAllNodesWithTag(DaybookViewSemantics.ROOT).fetchSemanticsNodes().isNotEmpty()
+            onAllNodesWithTag(DaybookViewSemantics.kind("card")).fetchSemanticsNodes().isNotEmpty()
+            onAllNodesWithTag(DaybookViewSemantics.kind("section")).fetchSemanticsNodes().isNotEmpty()
+            onAllNodesWithTag(DaybookViewSemantics.kind("list")).fetchSemanticsNodes().isNotEmpty()
+            onNodeWithText("Ledger Overview").assertIsDisplayed()
+            onNodeWithText("Ledger ID: ledger-1").assertIsDisplayed()
+            onNodeWithText("Journal commodity: USD").assertIsDisplayed()
+            onNodeWithText("Account refs: 2").assertIsDisplayed()
+            onNodeWithText("Transaction refs: 1").assertIsDisplayed()
+        } finally {
+            fixture.close()
+        }
+    }
 }
 
 private class RealRepoFixture(
@@ -863,6 +918,7 @@ private class RealRepoFixture(
         titleText: String,
         noteText: String,
         extraNotes: List<Pair<FacetKey, String>> = emptyList(),
+        extraRawFacets: List<Pair<FacetKey, String>> = emptyList(),
     ): String = runBlocking(Dispatchers.IO) {
         val facets =
             mutableMapOf(
@@ -871,6 +927,9 @@ private class RealRepoFixture(
             )
         for ((facetKey, content) in extraNotes) {
             facets[facetKey] = encodeWellKnownFacet(buildNoteFacet(content))
+        }
+        for ((facetKey, content) in extraRawFacets) {
+            facets[facetKey] = content
         }
         drawerRepo.add(
             AddDocArgs(
@@ -885,6 +944,10 @@ private class RealRepoFixture(
         plugsRepo.importFromOciLayout(plugTestOciPath().toString())
     }
 
+    fun importDayledgerOci() = runBlocking(Dispatchers.IO) {
+        plugsRepo.importFromOciLayout(dayledgerOciPath().toString())
+    }
+
     fun setNoteCustomViewHint() = runBlocking(Dispatchers.IO) {
         configRepo.setFacetDisplayHint(
             NOTE_DISPLAY_HINT_KEY,
@@ -894,6 +957,22 @@ private class RealRepoFixture(
                 deets =
                 FacetDisplayDeets.CustomView(
                     view = ViewRef(plugId = PLUG_TEST_ID, viewKey = PLUG_TEST_SAMPLE_VIEW_KEY),
+                    mode = FacetViewMode.DISPLAY,
+                    priority = 0,
+                ),
+            ),
+        )
+    }
+
+    fun setLedgerMetaCustomViewHint() = runBlocking(Dispatchers.IO) {
+        configRepo.setFacetDisplayHint(
+            LEDGER_META_DISPLAY_HINT_KEY,
+            FacetDisplayHint(
+                alwaysVisible = true,
+                displayTitle = "Ledger overview",
+                deets =
+                FacetDisplayDeets.CustomView(
+                    view = ViewRef(plugId = DAYLEDGER_PLUG_ID, viewKey = LEDGER_META_VIEW_KEY),
                     mode = FacetViewMode.DISPLAY,
                     priority = 0,
                 ),
@@ -1031,9 +1110,30 @@ private class RealRepoFixture(
 private const val NOTE_DISPLAY_HINT_KEY = "org.example.daybook.note"
 private const val PLUG_TEST_ID = "@daybook/test"
 private const val PLUG_TEST_SAMPLE_VIEW_KEY = "sample-summary-card"
+private const val LEDGER_META_DISPLAY_HINT_KEY = "org.example.dayledger.meta"
+private const val DAYLEDGER_PLUG_ID = "@daybook/dayledger"
+private const val LEDGER_META_VIEW_KEY = "ledger-meta"
 
 private fun noteFacetKeyWithId(id: String): FacetKey =
     FacetKey(FacetTag.WellKnown(WellKnownFacetTag.NOTE), id)
+
+private fun ledgerMetaFacetKey(): FacetKey = FacetKey(FacetTag.Any(LEDGER_META_DISPLAY_HINT_KEY), "main")
+
+private fun ledgerMetaFacetJson(): String =
+    """
+        {
+          "ledgerId": "ledger-1",
+          "title": "Ledger Overview",
+          "journalCommodity": "USD",
+          "accountRefs": [
+            "db+facet:///doc/assets/main",
+            "db+facet:///doc/income/main"
+          ],
+          "transactionRefs": [
+            "db+facet:///doc/txn-1/main"
+          ]
+        }
+    """.trimIndent()
 
 private fun plugTestOciPath(): Path {
     var cursor: Path? = Path.of("").toAbsolutePath()
@@ -1047,5 +1147,20 @@ private fun plugTestOciPath(): Path {
     error(
         "Missing OCI plug artifact at target/oci/@daybook/test. Build it with: " +
             "cargo run -p xtask -- build-plug-oci --plug-root ./src/plug_test",
+    )
+}
+
+private fun dayledgerOciPath(): Path {
+    var cursor: Path? = Path.of("").toAbsolutePath()
+    while (cursor != null) {
+        val candidate = cursor.resolve("target/oci/@daybook/dayledger")
+        if (Files.isDirectory(candidate)) {
+            return candidate
+        }
+        cursor = cursor.parent
+    }
+    error(
+        "Missing OCI plug artifact at target/oci/@daybook/dayledger. Build it with: " +
+            "cargo x build-plug-oci --plug-root ./src/plug_dayledger",
     )
 }

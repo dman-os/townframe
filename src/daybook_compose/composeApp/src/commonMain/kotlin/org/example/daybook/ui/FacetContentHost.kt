@@ -215,7 +215,10 @@ private fun PluginFacetView(
             }
 
             is PluginFacetViewState.Ready -> {
-                DaybookView(spec = state.spec)
+                DaybookView(
+                    spec = state.spec,
+                    modifier = Modifier.fillMaxWidth(),
+                )
             }
         }
     }
