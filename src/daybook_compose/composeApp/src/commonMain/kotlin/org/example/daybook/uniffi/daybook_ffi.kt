@@ -1087,6 +1087,8 @@ external fun uniffi_daybook_ffi_checksum_method_plugsrepoffi_ffi_register_listen
 ): Short
 external fun uniffi_daybook_ffi_checksum_method_plugsrepoffi_import_from_oci_layout(
 ): Short
+external fun uniffi_daybook_ffi_checksum_method_plugsrepoffi_list_plugs(
+): Short
 external fun uniffi_daybook_ffi_checksum_method_plugsrepoffi_stop(
 ): Short
 external fun uniffi_daybook_ffi_checksum_method_progresseventlistener_on_progress_event(
@@ -1458,6 +1460,8 @@ external fun uniffi_daybook_ffi_fn_constructor_plugsrepoffi_load(`fcx`: Long,`bl
 external fun uniffi_daybook_ffi_fn_method_plugsrepoffi_ffi_register_listener(`ptr`: Long,`listener`: Long,uniffi_out_err: UniffiRustCallStatus, 
 ): Long
 external fun uniffi_daybook_ffi_fn_method_plugsrepoffi_import_from_oci_layout(`ptr`: Long,`path`: RustBuffer.ByValue,
+): Long
+external fun uniffi_daybook_ffi_fn_method_plugsrepoffi_list_plugs(`ptr`: Long,
 ): Long
 external fun uniffi_daybook_ffi_fn_method_plugsrepoffi_stop(`ptr`: Long,
 ): Long
@@ -1888,6 +1892,9 @@ private fun uniffiCheckApiChecksums(lib: IntegrityCheckingUniffiLib) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
     if (lib.uniffi_daybook_ffi_checksum_method_plugsrepoffi_import_from_oci_layout() != 34199.toShort()) {
+        throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
+    }
+    if (lib.uniffi_daybook_ffi_checksum_method_plugsrepoffi_list_plugs() != 20893.toShort()) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
     if (lib.uniffi_daybook_ffi_checksum_method_plugsrepoffi_stop() != 16868.toShort()) {
@@ -8506,6 +8513,8 @@ public interface PlugsRepoFfiInterface {
     
     suspend fun `importFromOciLayout`(`path`: kotlin.String)
     
+    suspend fun `listPlugs`(): List<PlugSummary>
+    
     suspend fun `stop`()
     
     companion object
@@ -8639,6 +8648,26 @@ open class PlugsRepoFfi: Disposable, AutoCloseable, PlugsRepoFfiInterface
         
         // Error FFI converter
         FfiException.ErrorHandler,
+    )
+    }
+
+    
+    @Suppress("ASSIGNED_BUT_NEVER_ACCESSED_VARIABLE")
+    override suspend fun `listPlugs`() : List<PlugSummary> {
+        return uniffiRustCallAsync(
+        callWithHandle { uniffiHandle ->
+            UniffiLib.uniffi_daybook_ffi_fn_method_plugsrepoffi_list_plugs(
+                uniffiHandle,
+                
+            )
+        },
+        { future, callback, continuation -> UniffiLib.ffi_daybook_ffi_rust_future_poll_rust_buffer(future, callback, continuation) },
+        { future, continuation -> UniffiLib.ffi_daybook_ffi_rust_future_complete_rust_buffer(future, continuation) },
+        { future -> UniffiLib.ffi_daybook_ffi_rust_future_free_rust_buffer(future) },
+        // lift function
+        { FfiConverterSequenceTypePlugSummary.lift(it) },
+        // Error FFI converter
+        UniffiNullRustCallStatusErrorHandler,
     )
     }
 
@@ -11891,6 +11920,89 @@ public object FfiConverterTypeFacetKeyDisplayHintEntry: FfiConverterRustBuffer<F
 
 
 
+data class PlugSummary (
+    var `id`: kotlin.String
+    , 
+    var `namespace`: kotlin.String
+    , 
+    var `name`: kotlin.String
+    , 
+    var `version`: kotlin.String
+    , 
+    var `title`: kotlin.String
+    , 
+    var `desc`: kotlin.String
+    , 
+    var `facetCount`: kotlin.UInt
+    , 
+    var `viewCount`: kotlin.UInt
+    , 
+    var `routineCount`: kotlin.UInt
+    , 
+    var `processorCount`: kotlin.UInt
+    , 
+    var `commandCount`: kotlin.UInt
+    
+){
+    
+
+    
+
+    
+    companion object
+}
+
+/**
+ * @suppress
+ */
+public object FfiConverterTypePlugSummary: FfiConverterRustBuffer<PlugSummary> {
+    override fun read(buf: ByteBuffer): PlugSummary {
+        return PlugSummary(
+            FfiConverterString.read(buf),
+            FfiConverterString.read(buf),
+            FfiConverterString.read(buf),
+            FfiConverterString.read(buf),
+            FfiConverterString.read(buf),
+            FfiConverterString.read(buf),
+            FfiConverterUInt.read(buf),
+            FfiConverterUInt.read(buf),
+            FfiConverterUInt.read(buf),
+            FfiConverterUInt.read(buf),
+            FfiConverterUInt.read(buf),
+        )
+    }
+
+    override fun allocationSize(value: PlugSummary) = (
+            FfiConverterString.allocationSize(value.`id`) +
+            FfiConverterString.allocationSize(value.`namespace`) +
+            FfiConverterString.allocationSize(value.`name`) +
+            FfiConverterString.allocationSize(value.`version`) +
+            FfiConverterString.allocationSize(value.`title`) +
+            FfiConverterString.allocationSize(value.`desc`) +
+            FfiConverterUInt.allocationSize(value.`facetCount`) +
+            FfiConverterUInt.allocationSize(value.`viewCount`) +
+            FfiConverterUInt.allocationSize(value.`routineCount`) +
+            FfiConverterUInt.allocationSize(value.`processorCount`) +
+            FfiConverterUInt.allocationSize(value.`commandCount`)
+    )
+
+    override fun write(value: PlugSummary, buf: ByteBuffer) {
+            FfiConverterString.write(value.`id`, buf)
+            FfiConverterString.write(value.`namespace`, buf)
+            FfiConverterString.write(value.`name`, buf)
+            FfiConverterString.write(value.`version`, buf)
+            FfiConverterString.write(value.`title`, buf)
+            FfiConverterString.write(value.`desc`, buf)
+            FfiConverterUInt.write(value.`facetCount`, buf)
+            FfiConverterUInt.write(value.`viewCount`, buf)
+            FfiConverterUInt.write(value.`routineCount`, buf)
+            FfiConverterUInt.write(value.`processorCount`, buf)
+            FfiConverterUInt.write(value.`commandCount`, buf)
+    }
+}
+
+
+
 data class RenderedFacetView (
     var `view`: ViewSpec
     , 
@@ -12776,6 +12888,34 @@ public object FfiConverterSequenceTypeCameraDeviceInfo: FfiConverterRustBuffer<L
 /**
  * @suppress
  */
+public object FfiConverterSequenceTypePlugSummary: FfiConverterRustBuffer<List<PlugSummary>> {
+    override fun read(buf: ByteBuffer): List<PlugSummary> {
+        val len = buf.getInt()
+        return List<PlugSummary>(len) {
+            FfiConverterTypePlugSummary.read(buf)
+        }
+    }
+
+    override fun allocationSize(value: List<PlugSummary>): ULong {
+        val sizeForLength = 4UL
+        val sizeForItems = value.map { FfiConverterTypePlugSummary.allocationSize(it) }.sum()
+        return sizeForLength + sizeForItems
+    }
+
+    override fun write(value: List<PlugSummary>, buf: ByteBuffer) {
+        buf.putInt(value.size)
+        value.iterator().forEach {
+            FfiConverterTypePlugSummary.write(it, buf)
+        }
+    }
+}
+
+
+
+
+/**
+ * @suppress
+ */
 public object FfiConverterSequenceTypeAddDocArgs: FfiConverterRustBuffer<List<AddDocArgs>> {
     override fun read(buf: ByteBuffer): List<AddDocArgs> {
         val len = buf.getInt()
@@ -12988,74 +13128,3 @@ public object FfiConverterTypeUuid: FfiConverter<Uuid, RustBuffer.ByValue> {
         FfiConverterByteArray.write(builtinValue, buf)
     }
 }
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-

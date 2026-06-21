@@ -21,6 +21,7 @@ import androidx.compose.runtime.compositionLocalOf
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.input.nestedscroll.NestedScrollConnection
 import androidx.compose.ui.input.nestedscroll.nestedScroll
+import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.graphics.Color as UiColor
 
 data class ScreenChromeSpec(val topBar: TopBarSpec = TopBarSpec()) {
@@ -28,6 +29,8 @@ data class ScreenChromeSpec(val topBar: TopBarSpec = TopBarSpec()) {
         val title: String? = null,
         val showBack: Boolean = false,
         val onBack: (() -> Unit)? = null,
+        val navigationIconContentDescription: String = "Back",
+        val navigationIconTestTag: String? = null,
         val pinned: Boolean = false,
         val actions: (@Composable RowScope.() -> Unit)? = null,
     )
@@ -61,8 +64,17 @@ fun DaybookTopBar(chrome: ScreenChromeSpec.TopBarSpec, scrollBehavior: TopAppBar
                     "inconsistent top bar chrome: showBack=${chrome.showBack} " +
                         "onBack=${chrome.onBack}",
                 )
-                IconButton(onClick = onBack) {
-                    Icon(Icons.AutoMirrored.Filled.ArrowBack, contentDescription = "Back")
+                IconButton(
+                    onClick = onBack,
+                    modifier =
+                    chrome.navigationIconTestTag?.let { tag ->
+                        Modifier.testTag(tag)
+                    } ?: Modifier,
+                ) {
+                    Icon(
+                        Icons.AutoMirrored.Filled.ArrowBack,
+                        contentDescription = chrome.navigationIconContentDescription,
+                    )
                 }
             }
         },

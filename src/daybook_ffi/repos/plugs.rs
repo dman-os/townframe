@@ -4,6 +4,21 @@ use crate::ffi::{FfiError, SharedFfiCtx};
 use daybook_core::plugs::{OciImportOptions, PlugsEvent, PlugsRepo};
 use std::path::PathBuf;
 
+#[derive(Debug, Clone, uniffi::Record)]
+pub struct PlugSummary {
+    pub id: String,
+    pub namespace: String,
+    pub name: String,
+    pub version: String,
+    pub title: String,
+    pub desc: String,
+    pub facet_count: u32,
+    pub view_count: u32,
+    pub routine_count: u32,
+    pub processor_count: u32,
+    pub command_count: u32,
+}
+
 #[derive(uniffi::Object)]
 pub struct PlugsRepoFfi {
     fcx: SharedFfiCtx,
@@ -68,6 +83,35 @@ impl PlugsRepoFfi {
                 repo.import_from_oci_layout(&path, OciImportOptions::default())
                     .await?;
                 Ok::<(), FfiError>(())
+            })
+            .await
+    }
+
+    #[tracing::instrument(skip(self))]
+    async fn list_plugs(&self) -> Vec<PlugSummary> {
+        let repo = Arc::clone(&self.repo);
+        self.fcx
+            .do_on_rt(async move {
+                let mut plugs = repo
+                    .list_plugs()
+                    .await
+                    .into_iter()
+                    .map(|manifest| PlugSummary {
+                        id: manifest.id(),
+                        namespace: manifest.namespace.clone(),
+                        name: manifest.name.clone(),
+                        version: manifest.version.to_string(),
+                        title: manifest.title.clone(),
+                        desc: manifest.desc.clone(),
+                        facet_count: manifest.facets.len().try_into().unwrap(),
+                        view_count: manifest.views.len().try_into().unwrap(),
+                        routine_count: manifest.routines.len().try_into().unwrap(),
+                        processor_count: manifest.processors.len().try_into().unwrap(),
+                        command_count: manifest.commands.len().try_into().unwrap(),
+                    })
+                    .collect::<Vec<_>>();
+                plugs.sort_by(|left, right| left.id.cmp(&right.id));
+                plugs
             })
             .await
     }

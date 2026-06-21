@@ -112,7 +112,6 @@
     <ID>FunctionNaming:Region.kt:@Composable fun SubRegion</ID>
     <ID>FunctionNaming:Region.kt:RegionScope$@Composable fun Pane</ID>
     <ID>FunctionNaming:Region.kt:RegionScope$@Composable fun SubRegion</ID>
-    <ID>FunctionNaming:ResetLayoutButton.kt:@Composable fun ResetLayoutButton</ID>
     <ID>FunctionNaming:ResizableDrawer.kt:@OptIn(ExperimentalMaterial3Api::class) @Composable fun ResizablePermanentNavigationDrawer</ID>
     <ID>FunctionNaming:RevealBottomSheetScaffold.kt:@OptIn(ExperimentalMaterial3Api::class) @Composable fun RevealBottomSheetScaffold</ID>
     <ID>FunctionNaming:SettingsScreen.kt:@Composable private fun MltoolsBackendSection</ID>
@@ -298,8 +297,6 @@
     <ID>MagicNumber:ProgressUi.kt:100</ID>
     <ID>MagicNumber:ProgressUi.kt:1024.0</ID>
     <ID>MagicNumber:ProgressUi.kt:1024UL</ID>
-    <ID>MagicNumber:ResetLayoutButton.kt:0xFFD32F2F</ID>
-    <ID>MagicNumber:ResetLayoutButton.kt:1000</ID>
     <ID>MagicNumber:RevealBottomSheetScaffold.kt:3</ID>
     <ID>MagicNumber:RevealBottomSheetScaffold.kt:4</ID>
     <ID>MagicNumber:RevealBottomSheetScaffold.kt:5</ID>
