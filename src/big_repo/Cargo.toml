@@ -41,6 +41,7 @@ serde.workspace = true
 serde_json = { workspace = true }
 sqlx = { workspace = true, features = ["sqlite", "runtime-tokio"] }
 rand.workspace = true
+rand_08 = { version = "0.8", package = "rand", default-features = false }
 tempfile.workspace = true
 
 #
@@ -54,11 +55,18 @@ irpc-iroh.workspace = true
 # sync
 future_form = { version = "0.3.0", }
 sedimentree_core = { workspace = true, features = ["rayon"] }
-sedimentree_fs_storage = { workspace = true }
 subduction_core = { workspace = true  }
 subduction_crypto = { workspace = true, }
 subduction_iroh = { workspace = true }
+subduction_keyhive = { workspace = true, features = ["runtime"] }
+subduction_redb_storage = { workspace = true }
 subduction_websocket = { workspace = true, features = ["tokio_base"], }
+keyhive_crypto.workspace = true
+keyhive_core = "0.4.1"
+beekem = "0.2.0"
+atproto-dasl = "0.14.5"
+nonempty.workspace = true
+ed25519-dalek.workspace = true
 
 #
 # logging

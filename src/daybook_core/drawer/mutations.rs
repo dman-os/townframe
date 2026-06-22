@@ -29,11 +29,13 @@ impl DrawerRepo {
             return Err(ferr!("new docs must be created on main"))?;
         }
         let doc_am = automerge::Automerge::new();
-        let handle = match self.big_repo.put_doc(DocumentId::random(), doc_am).await {
+        let handle = match self.big_repo.create_doc(doc_am).await {
             Ok(val) => val,
-            Err(big_repo::PutDocError::IdOccpuied { .. }) => panic!("uuid conflict lol"),
-            Err(big_repo::PutDocError::Other(err)) => {
-                return Err(err).wrap_err("error putting doc in big repo")?;
+            Err(big_repo::CreateDocError::Put(big_repo::PutDocError::IdOccpuied { .. })) => {
+                panic!("keyhive doc id conflict lol")
+            }
+            Err(err) => {
+                return Err(eyre::eyre!("{err}")).wrap_err("error creating doc in big repo")?;
             }
         };
         let doc_id = DocId::from(Uuid::new_v4().bs58());
@@ -442,15 +444,13 @@ impl DrawerRepo {
             })
             .await?;
         let heads = ChangeHashSet(branch_doc.get_heads().into());
-        let handle = match self
-            .big_repo
-            .put_doc(DocumentId::random(), branch_doc)
-            .await
-        {
+        let handle = match self.big_repo.create_doc(branch_doc).await {
             Ok(val) => val,
-            Err(big_repo::PutDocError::IdOccpuied { .. }) => panic!("uuid conflict lol"),
-            Err(big_repo::PutDocError::Other(err)) => {
-                return Err(err).wrap_err("error putting doc in big repo")?;
+            Err(big_repo::CreateDocError::Put(big_repo::PutDocError::IdOccpuied { .. })) => {
+                panic!("keyhive doc id conflict lol")
+            }
+            Err(err) => {
+                return Err(eyre::eyre!("{err}")).wrap_err("error creating doc in big repo")?;
             }
         };
         let branch_doc_id = handle.document_id();

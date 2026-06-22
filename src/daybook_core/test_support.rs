@@ -163,8 +163,7 @@ pub async fn test_cx_with_options(
         crate::test_support::boot_part_store("sqlite::memory:").await?;
     let (big_repo, acx_stop) = BigRepo::boot(
         big_repo::Config {
-            peer_id,
-            secret_key_bytes: rand::random::<[u8; 32]>(),
+            keyhive_seed: rand::random::<[u8; 32]>(),
             storage: big_repo::StorageConfig::Memory,
         },
         Arc::clone(&big_sync_host.store),
@@ -427,8 +426,7 @@ pub async fn boot_repo() -> Res<(
     let (big_sync_host, big_sync_stop) = boot_part_store("sqlite::memory:").await?;
     let (repo, stop) = BigRepo::boot(
         big_repo::Config {
-            peer_id: PeerId::new([7_u8; 32]),
-            secret_key_bytes: [7_u8; 32],
+            keyhive_seed: [7_u8; 32],
             storage: big_repo::StorageConfig::Memory,
         },
         Arc::clone(&big_sync_host.store),
@@ -461,8 +459,7 @@ pub async fn boot_disk_repo(
     let (big_sync_host, big_sync_stop) = boot_part_store(&sqlite_url).await?;
     let (repo, stop) = BigRepo::boot(
         big_repo::Config {
-            peer_id: PeerId::new([7_u8; 32]),
-            secret_key_bytes: [7_u8; 32],
+            keyhive_seed: [7_u8; 32],
             storage: big_repo::StorageConfig::Disk { path },
         },
         Arc::clone(&big_sync_host.store),
