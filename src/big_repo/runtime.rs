@@ -2,7 +2,12 @@
 
 use crate::interlude::*;
 
-use crate::{BigRepoChangeOrigin, ConnFinishSignal, DocumentId, PeerId};
+use crate::{
+    handler::{boot_keyhive, BigRepoComposedHandler, BigRepoKeyhiveProtocol, BigRepoSubduction},
+    keyhive_conn::BigRepoKeyhiveConnAdapter,
+    BigKeyhiveHandle, BigRepoChangeOrigin, ConnFinishSignal, DocumentId, PeerId,
+};
+use subduction_keyhive::{KeyhiveConnection, KeyhivePeerId, SyncStatus};
 
 use futures::future::BoxFuture;
 use sedimentree_core::crypto::digest::Digest;
@@ -22,8 +27,12 @@ type SharedPartitionStore = Arc<dyn big_sync::HostPartStore>;
 
 #[derive(Debug, thiserror::Error, displaydoc::Display)]
 pub enum SyncDocError {
-    /// NotFoundOrUnauthorized
-    NotFoundOrUnauthorized,
+    /// Document not found
+    NotFound,
+    /// Document exists but peer lacks access
+    Unauthorized,
+    /// Document exists but decryption key not yet available (pending keyhive sync)
+    PendingKeys,
     /// TransportError
     TransportError,
     /// IoError
@@ -62,6 +71,14 @@ impl Drop for RuntimeDocLease {
     fn drop(&mut self) {
         self.runtime.release_doc_lease(self.doc_id);
     }
+}
+
+#[derive(Debug, thiserror::Error, displaydoc::Display)]
+pub enum CreateDocError {
+    /// keyhive doc creation failed: {0}
+    Keyhive(#[from] eyre::Report),
+    /// storage put failed: {0}
+    Put(#[from] PutDocError),
 }
 
 #[derive(thiserror::Error, displaydoc::Display, Debug)]
@@ -116,6 +133,11 @@ enum RuntimeCmd {
         timeout: Option<Duration>,
         resp: oneshot::Sender<Result<(), SyncDocError>>,
     },
+    SyncKeyhiveWithPeer {
+        peer_id: PeerId,
+        timeout: Option<Duration>,
+        resp: oneshot::Sender<Res<()>>,
+    },
     ReleaseDocLease {
         doc_id: DocumentId,
     },
@@ -161,17 +183,29 @@ struct RuntimePeerConnDeets {
     closed: Arc<AtomicBool>,
 }
 
-#[derive(Clone, Debug)]
+#[derive(Clone)]
 pub struct BigRepoRuntimeHandle {
     cmd_tx: mpsc::UnboundedSender<RuntimeCmd>,
+    keyhive: BigKeyhiveHandle,
+    keyhive_protocol: BigRepoKeyhiveProtocol,
+}
+
+impl std::fmt::Debug for BigRepoRuntimeHandle {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("BigRepoRuntimeHandle").finish()
+    }
 }
 
 impl BigRepoRuntimeHandle {
-    pub async fn put_doc(
+    pub async fn create_doc(
         &self,
-        doc_id: DocumentId,
         initial_content: automerge::Automerge,
-    ) -> Result<Arc<LiveDocBundle>, PutDocError> {
+    ) -> Result<Arc<LiveDocBundle>, CreateDocError> {
+        use nonempty::NonEmpty;
+        let heads = initial_content.get_heads();
+        let content_heads = NonEmpty::from_vec(heads.iter().map(|h| h.0).collect())
+            .ok_or_else(|| eyre::eyre!("automerge doc has no heads"))?;
+        let doc_id = self.keyhive.create_doc(content_heads).await?;
         let (tx, rx) = oneshot::channel();
         self.cmd_tx
             .send(RuntimeCmd::PutDoc {
@@ -180,7 +214,9 @@ impl BigRepoRuntimeHandle {
                 resp: tx,
             })
             .map_err(|_| eyre::eyre!(ERROR_ACTOR))?;
-        rx.await.map_err(|_| eyre::eyre!(ERROR_CHANNEL))?
+        rx.await
+            .map_err(|_| eyre::eyre!(ERROR_CHANNEL))?
+            .map_err(CreateDocError::from)
     }
 
     pub async fn get_doc_handle(&self, doc_id: DocumentId) -> Res<Option<Arc<LiveDocBundle>>> {
@@ -304,6 +340,25 @@ impl BigRepoRuntimeHandle {
             warn!(%doc_id, "runtime stopped before releasing doc lease");
         }
     }
+
+    /// Initiate a keyhive protocol sync with the given peer,
+    /// blocking until the sync exchange completes.
+    pub async fn sync_keyhive_with_peer(
+        &self,
+        peer_id: PeerId,
+        timeout: Option<std::time::Duration>,
+    ) -> Res<()> {
+        let (tx, rx) = oneshot::channel();
+        self.cmd_tx
+            .send(RuntimeCmd::SyncKeyhiveWithPeer {
+                peer_id,
+                timeout,
+                resp: tx,
+            })
+            .map_err(|_| ferr!("runtime channel closed"))?;
+        rx.await
+            .map_err(|_| ferr!("sync keyhive response channel closed"))?
+    }
 }
 
 pub struct BigRepoRuntimeStopToken {
@@ -327,30 +382,24 @@ impl BigRepoRuntimeStopToken {
     }
 }
 
-type SubductionSedimentrees =
-    Arc<subduction_core::sharded_map::ShardedMap<SedimentreeId, Sedimentree, 256>>;
-type BigRepoIrohTransport = subduction_core::transport::message::MessageTransport<
+type SubductionSedimentrees = Arc<
+    subduction_core::collections::bounded_sharded_map::BoundedShardedMap<
+        SedimentreeId,
+        sedimentree_core::sedimentree::minimized::MinimizedSedimentree,
+        256,
+    >,
+>;
+pub(crate) type BigRepoIrohTransport = subduction_core::transport::message::MessageTransport<
     subduction_iroh::transport::IrohTransport,
 >;
-type BigRepoSyncHandler<S> = subduction_core::handler::sync::SyncHandler<
+pub(crate) type BigRepoPolicy = subduction_keyhive::policy::SubductionKeyhive<
     future_form::Sendable,
-    S,
-    BigRepoIrohTransport,
-    subduction_core::policy::open::OpenPolicy,
-    sedimentree_core::depth::CountLeadingZeroBytes,
-    256,
->;
-type BigRepoSubduction<S> = subduction_core::subduction::Subduction<
-    'static,
-    future_form::Sendable,
-    S,
-    BigRepoIrohTransport,
-    BigRepoSyncHandler<S>,
-    subduction_core::policy::open::OpenPolicy,
-    subduction_crypto::signer::memory::MemorySigner,
-    subduction_websocket::tokio::TimeoutTokio,
-    sedimentree_core::depth::CountLeadingZeroBytes,
-    256,
+    keyhive_crypto::signer::memory::MemorySigner,
+    Vec<u8>,
+    Vec<u8>,
+    keyhive_core::store::ciphertext::memory::MemoryCiphertextStore<Vec<u8>, Vec<u8>>,
+    keyhive_core::listener::no_listener::NoListener,
+    rand_08::rngs::OsRng,
 >;
 pub trait BigRepoSubductionStorage:
     subduction_core::storage::traits::Storage<
@@ -387,19 +436,20 @@ impl subduction_core::sync_session::SyncSessionObserver for BigRepoSyncSessionBr
             .expect(ERROR_CHANNEL);
     }
 }
-pub fn spawn_big_repo_runtime<S>(
+pub async fn spawn_big_repo_runtime<S>(
     signer: subduction_crypto::signer::memory::MemorySigner,
     storage: S,
+    policy: Arc<BigRepoPolicy>,
+    keyhive: BigKeyhiveHandle,
     big_sync_store: SharedPartitionStore,
     change_manager: Arc<changes::ChangeListenerManager>,
 ) -> Res<(BigRepoRuntimeHandle, BigRepoRuntimeStopToken)>
 where
     S: BigRepoSubductionStorage,
 {
-    use subduction_core::{policy::open::OpenPolicy, subduction::Subduction};
+    use subduction_core::subduction::Subduction;
     use subduction_websocket::tokio::{TimeoutTokio, TokioSpawn};
 
-    let policy = Arc::new(OpenPolicy);
     let connect_signer = signer.clone();
     let local_peer_id =
         subduction_core::peer::id::PeerId::new(*connect_signer.verifying_key().as_bytes());
@@ -409,17 +459,14 @@ where
     let runtime_stop = CancellationToken::new();
     let runtime_tasks = Arc::new(utils_rs::AbortableJoinSet::new());
 
-    let sedimentrees = Arc::new(subduction_core::sharded_map::ShardedMap::new());
+    let sedimentrees =
+        Arc::new(subduction_core::collections::bounded_sharded_map::BoundedShardedMap::new());
     let connections = Arc::new(async_lock::Mutex::new(
         sedimentree_core::collections::Map::new(),
     ));
     let subscriptions = Arc::new(async_lock::Mutex::new(
         sedimentree_core::collections::Map::new(),
     ));
-    let pending_blob_requests = Arc::new(async_lock::Mutex::new(
-        subduction_core::subduction::pending_blob_requests::PendingBlobRequests::new(256),
-    ));
-
     let (cmd_tx, mut cmd_rx) = mpsc::unbounded_channel::<RuntimeCmd>();
     let (evt_tx, mut evt_rx) = mpsc::unbounded_channel::<RuntimeEvt>();
     let storage_for_reads = storage.clone();
@@ -437,21 +484,30 @@ where
         Arc::clone(&connections),
         Arc::clone(&subscriptions),
         storage_powerbox.clone(),
-        Arc::clone(&pending_blob_requests),
         sedimentree_core::depth::CountLeadingZeroBytes,
     );
     sync_handler.set_sync_session_observer(Arc::clone(&sync_session_observer));
     let send_counter = sync_handler.send_counter().clone();
-    let handler = Arc::new(sync_handler);
+    let sync_handler = Arc::new(sync_handler);
+
+    // Boot keyhive protocol and handler
+    let (keyhive_protocol, keyhive_handler) = boot_keyhive(&keyhive).await?;
+    let (keyhive_sync_tx, keyhive_sync_rx) = mpsc::unbounded_channel();
+    let composed_handler = Arc::new(BigRepoComposedHandler::new(
+        sync_handler,
+        keyhive_handler,
+        Arc::clone(&keyhive_protocol),
+        keyhive_sync_tx.clone(),
+    ));
+
     let (subduction, listener, manager) = Subduction::new(
-        handler,
+        composed_handler,
         None,
         signer,
         Arc::clone(&sedimentrees),
         Arc::clone(&connections),
         Arc::clone(&subscriptions),
         storage_powerbox,
-        Arc::clone(&pending_blob_requests),
         send_counter,
         subduction_core::nonce_cache::NonceCache::new(Duration::from_secs(60)),
         TimeoutTokio,
@@ -462,6 +518,8 @@ where
     subduction.set_sync_session_observer(sync_session_observer);
     let subduction_handle: Arc<BigRepoSubduction<S>> = Arc::clone(&subduction);
     let runtime_worker = BigRepoRuntimeWorker {
+        keyhive: keyhive.clone(),
+        keyhive_protocol: Arc::clone(&keyhive_protocol),
         subduction: subduction_handle,
         sedimentrees: Arc::clone(&sedimentrees),
         storage_for_reads,
@@ -476,6 +534,7 @@ where
         evt_tx: evt_tx.clone(),
         connected_peers: default(),
         doc_workers: default(),
+        pending_keyhive_syncs: default(),
     };
 
     let peer_id = runtime_worker.local_peer_id;
@@ -514,6 +573,7 @@ where
 
     let fut = {
         let runtime_stop = runtime_stop.clone();
+        let mut keyhive_sync_rx = keyhive_sync_rx;
         let mut runtime_worker = runtime_worker;
         async move {
             let mut janitor_tick = tokio::time::interval(Duration::from_millis(500));
@@ -531,6 +591,10 @@ where
                     evt = evt_rx.recv() => {
                         let Some(evt) = evt else { break; };
                         runtime_worker.handle_evt(evt).await?;
+                    },
+                    keyhive_sync = keyhive_sync_rx.recv() => {
+                        let Some((peer_id, status)) = keyhive_sync else { break; };
+                        runtime_worker.handle_keyhive_sync_notification(peer_id, status).await?;
                     }
                 }
             }
@@ -545,7 +609,11 @@ where
     });
 
     Ok((
-        BigRepoRuntimeHandle { cmd_tx },
+        BigRepoRuntimeHandle {
+            cmd_tx,
+            keyhive: keyhive.clone(),
+            keyhive_protocol: Arc::clone(&keyhive_protocol),
+        },
         BigRepoRuntimeStopToken {
             cancel_token: runtime_stop,
             machine_loop_handle,
@@ -558,6 +626,8 @@ struct BigRepoRuntimeWorker<S>
 where
     S: BigRepoSubductionStorage,
 {
+    keyhive: BigKeyhiveHandle,
+    keyhive_protocol: BigRepoKeyhiveProtocol,
     subduction: Arc<BigRepoSubduction<S>>,
     sedimentrees: SubductionSedimentrees,
     storage_for_reads: S,
@@ -572,6 +642,8 @@ where
     evt_tx: mpsc::UnboundedSender<RuntimeEvt>,
     connected_peers: Arc<tokio::sync::Mutex<HashMap<PeerId, RuntimePeerConnDeets>>>,
     doc_workers: HashMap<DocumentId, DocWorkerEntry>,
+    pending_keyhive_syncs:
+        HashMap<subduction_core::peer::id::PeerId, Vec<oneshot::Sender<Res<()>>>>,
 }
 
 impl<S> BigRepoRuntimeWorker<S>
@@ -672,6 +744,39 @@ where
                     })
                     .expect(ERROR_ACTOR);
             }
+            RuntimeCmd::SyncKeyhiveWithPeer {
+                peer_id,
+                timeout: _,
+                resp,
+            } => {
+                let kh_peer_id = KeyhivePeerId::from_bytes(*peer_id.as_bytes());
+                let subduction_peer_id =
+                    subduction_core::peer::id::PeerId::new(peer_id.into_bytes());
+                tracing::info!("SyncKeyhiveWithPeer: initiating sync");
+                match self
+                    .keyhive_protocol
+                    .initiate_sync_with_peer(&kh_peer_id)
+                    .await
+                {
+                    Ok(true) => {
+                        // Full sync initiated — register waiter for Done notification
+                        tracing::info!("full sync initiated, registering waiter");
+                        self.pending_keyhive_syncs
+                            .entry(subduction_peer_id)
+                            .or_default()
+                            .push(resp);
+                    }
+                    Ok(false) => {
+                        // Lightweight SyncCheck sent — sync is already complete up to syncpoint
+                        tracing::info!("sync check passed, resolving immediately");
+                        let _ = resp.send(Ok(()));
+                    }
+                    Err(e) => {
+                        tracing::error!("initiate_sync_with_peer failed: {e}");
+                        let _ = resp.send(Err(ferr!("keyhive sync initiate failed: {e}")));
+                    }
+                }
+            }
             RuntimeCmd::ReleaseDocLease { doc_id } => self.handle_release_doc_lease(doc_id).await,
         }
 
@@ -713,6 +818,31 @@ where
                 error,
             } => {
                 panic!("fatal runtime worker error doc={doc_id:?} context={context}: {error}");
+            }
+        }
+        Ok(())
+    }
+
+    #[tracing::instrument(skip(self), fields(peer = %peer_id, ?status))]
+    async fn handle_keyhive_sync_notification(
+        &mut self,
+        peer_id: subduction_core::peer::id::PeerId,
+        status: SyncStatus,
+    ) -> Res<()> {
+        match status {
+            SyncStatus::Done => {
+                tracing::info!("keyhive sync Done notification");
+                if let Some(waiters) = self.pending_keyhive_syncs.remove(&peer_id) {
+                    tracing::info!("resolving waiters for keyhive sync Done");
+                    for sender in waiters {
+                        let _ = sender.send(Ok(()));
+                    }
+                } else {
+                    tracing::warn!("no waiters found for keyhive sync Done");
+                }
+            }
+            SyncStatus::Pending => {
+                // Notification not expected for Pending; ignore.
             }
         }
         Ok(())
@@ -807,6 +937,8 @@ where
             change_manager: Arc::clone(&self.change_manager),
             runtime_handle: BigRepoRuntimeHandle {
                 cmd_tx: self.cmd_tx.clone(),
+                keyhive: self.keyhive.clone(),
+                keyhive_protocol: Arc::clone(&self.keyhive_protocol),
             },
             runtime_evt_tx,
             // shutdown: worker_cancel.clone(),
@@ -925,6 +1057,7 @@ where
         let runtime_tasks = Arc::clone(&self.runtime_tasks);
         let connected_peers = Arc::clone(&self.connected_peers);
         let cancel_token = self.runtime_stop.child_token();
+        let kh_proto = Arc::clone(&self.keyhive_protocol);
         let fut = async move {
             if let Some(deets) = connected_peers.lock().await.get(&peer_id) {
                 return Ok((peer_id, Arc::clone(&deets.closed)));
@@ -969,6 +1102,7 @@ where
                 };
                 runtime_tasks.spawn(fut_wrapped).expect(ERROR_TOKIO);
             }
+            let auth = connect.authenticated.clone();
             subduction
                 .add_connection(connect.authenticated)
                 .await
@@ -976,6 +1110,8 @@ where
                     cancel_token.cancel();
                     ferr!("failed subduction add_connection: {err}")
                 })?;
+            let adapter = BigRepoKeyhiveConnAdapter::new(auth);
+            kh_proto.add_peer(adapter.peer_id(), adapter).await;
             let closed = Arc::new(AtomicBool::new(false));
             evt_tx
                 .send(RuntimeEvt::ConnEstablishedIroh {
@@ -1011,6 +1147,7 @@ where
         let evt_tx = self.evt_tx.clone();
         let cancel_token = self.runtime_stop.child_token();
         let runtime_tasks = Arc::clone(&self.runtime_tasks);
+        let kh_proto = Arc::clone(&self.keyhive_protocol);
         // let connected_peers = Arc::clone(&self.connected_peers);
         let fut = async move {
             // do handshake
@@ -1061,6 +1198,7 @@ where
                 };
                 runtime_tasks.spawn(fut_wrapped).expect(ERROR_TOKIO);
             }
+            let auth = accepted.authenticated.clone();
             subduction
                 .add_connection(accepted.authenticated)
                 .await
@@ -1068,6 +1206,8 @@ where
                     cancel_token.cancel();
                 })
                 .wrap_err("failed subduction add_connection")?;
+            let adapter = BigRepoKeyhiveConnAdapter::new(auth);
+            kh_proto.add_peer(adapter.peer_id(), adapter).await;
             let closed = Arc::new(AtomicBool::new(false));
             evt_tx
                 .send(RuntimeEvt::ConnEstablishedIroh {
@@ -1320,18 +1460,30 @@ where
         if !matches!(self.state, DocWorkerDocState::Unloaded) {
             return Err(PutDocError::IdOccpuied { id: self.doc_id });
         }
-        if load_doc_snapshot(&self.sedimentrees, &self.storage_for_reads, self.doc_id)
-            .await?
-            .is_some()
+        if load_doc_snapshot(
+            &self.sedimentrees,
+            &self.storage_for_reads,
+            Some(&self.runtime_handle.keyhive),
+            self.doc_id,
+        )
+        .await?
+        .is_some()
         {
             return Err(PutDocError::IdOccpuied { id: self.doc_id });
         }
         let sedimentree_id: SedimentreeId = self.doc_id_subduction;
         let ingested = ingest_automerge(&doc, sedimentree_id);
+
+        // Encrypt blobs via keyhive before storage
+        let (sedimentree, blobs) =
+            encrypt_ingested_blobs(&ingested, &self.runtime_handle.keyhive, sedimentree_id)
+                .await
+                .map_err(|e| PutDocError::Other(ferr!("encryption failed: {e}")))?;
+
         self.subduction
-            .add_sedimentree(sedimentree_id, ingested.sedimentree, ingested.blobs)
+            .store_sedimentree(sedimentree_id, sedimentree, blobs)
             .await
-            .map_err(|err| ferr!("failed add_sedimentree: {err}"))?;
+            .map_err(|err| ferr!("failed store_sedimentree: {err}"))?;
         let (item_payload, heads) = {
             let heads = Arc::<[automerge::ChangeHash]>::from(doc.get_heads());
             let item_payload = serde_json::json!({
@@ -1348,7 +1500,7 @@ where
             },
         ));
         self.big_sync_store
-            .set_obj_payload(self.doc_id, item_payload)
+            .set_obj_payload(self.doc_id.into(), item_payload)
             .await?;
         self.change_manager
             .notify_doc_created(self.doc_id, Arc::clone(&heads))?;
@@ -1404,9 +1556,13 @@ where
                     Ok(Some(doc.save()))
                 }
                 None => {
-                    let Some(doc) =
-                        load_doc_snapshot(&self.sedimentrees, &self.storage_for_reads, self.doc_id)
-                            .await?
+                    let Some(doc) = load_doc_snapshot(
+                        &self.sedimentrees,
+                        &self.storage_for_reads,
+                        Some(&self.runtime_handle.keyhive),
+                        self.doc_id,
+                    )
+                    .await?
                     else {
                         return Ok(None);
                     };
@@ -1417,9 +1573,13 @@ where
             },
             DocWorkerDocState::Transient(doc) => Ok(Some(doc.save())),
             DocWorkerDocState::Unloaded => {
-                let Some(doc) =
-                    load_doc_snapshot(&self.sedimentrees, &self.storage_for_reads, self.doc_id)
-                        .await?
+                let Some(doc) = load_doc_snapshot(
+                    &self.sedimentrees,
+                    &self.storage_for_reads,
+                    Some(&self.runtime_handle.keyhive),
+                    self.doc_id,
+                )
+                .await?
                 else {
                     return Ok(None);
                 };
@@ -1502,10 +1662,14 @@ where
             DocWorkerDocState::Unloaded => {
                 // since the doc in storage will have the latest blobs,
                 // we must load the before_heads from the partition payloads
-                let mut doc =
-                    load_doc_snapshot(&self.sedimentrees, &self.storage_for_reads, self.doc_id)
-                        .await?
-                        .unwrap_or_else(automerge::Automerge::new);
+                let mut doc = load_doc_snapshot(
+                    &self.sedimentrees,
+                    &self.storage_for_reads,
+                    Some(&self.runtime_handle.keyhive),
+                    self.doc_id,
+                )
+                .await?
+                .unwrap_or_else(automerge::Automerge::new);
                 let cached_before_heads =
                     super::partition_doc_heads_payload(&self.big_sync_store, self.doc_id).await?;
                 let before_heads = cached_before_heads
@@ -1577,10 +1741,14 @@ where
                     out
                 }
                 None => {
-                    let mut doc =
-                        load_doc_snapshot(&self.sedimentrees, &self.storage_for_reads, self.doc_id)
-                            .await?
-                            .unwrap_or_else(automerge::Automerge::new);
+                    let mut doc = load_doc_snapshot(
+                        &self.sedimentrees,
+                        &self.storage_for_reads,
+                        Some(&self.runtime_handle.keyhive),
+                        self.doc_id,
+                    )
+                    .await?
+                    .unwrap_or_else(automerge::Automerge::new);
                     let loaded_heads = doc.get_heads();
                     let cached_before_heads =
                         super::partition_doc_heads_payload(&self.big_sync_store, self.doc_id)
@@ -1639,6 +1807,16 @@ where
     ) -> Res<()> {
         let sedimentree_id = self.doc_id_subduction;
         let remote_peer_id = subduction_core::peer::id::PeerId::new(peer_id.into_bytes());
+        let timeout = timeout
+            .map(|duration| {
+                subduction_core::timeout::call::CallTimeout::TimeoutMillis(
+                    duration
+                        .as_millis()
+                        .try_into()
+                        .expect("timeout fits in u64"),
+                )
+            })
+            .unwrap_or(subduction_core::timeout::call::CallTimeout::Default);
         let result = self
             .subduction
             .sync_with_peer(&remote_peer_id, sedimentree_id, false, timeout)
@@ -1657,7 +1835,7 @@ where
                     }
                     Ok(())
                 } else if conn_errs.is_empty() {
-                    Err(SyncDocError::NotFoundOrUnauthorized)
+                    Err(SyncDocError::NotFound)
                 } else {
                     Err(SyncDocError::TransportError)
                 }
@@ -1694,7 +1872,13 @@ where
         let out = match std::mem::replace(&mut self.state, DocWorkerDocState::Unloaded) {
             DocWorkerDocState::Transient(doc) => Ok(Some(*doc)),
             DocWorkerDocState::Unloaded => {
-                load_doc_snapshot(&self.sedimentrees, &self.storage_for_reads, self.doc_id).await
+                load_doc_snapshot(
+                    &self.sedimentrees,
+                    &self.storage_for_reads,
+                    Some(&self.runtime_handle.keyhive),
+                    self.doc_id,
+                )
+                .await
             }
             DocWorkerDocState::Live(bundle) => {
                 self.state = DocWorkerDocState::Live(bundle);
@@ -1716,7 +1900,9 @@ async fn commit_delta_bookkeep(
     let item_payload = serde_json::json!({
         "heads": am_utils_rs::serialize_commit_heads(&heads),
     });
-    big_sync_store.set_obj_payload(doc_id, item_payload).await?;
+    big_sync_store
+        .set_obj_payload(doc_id.into(), item_payload)
+        .await?;
 
     let heads_arc = Arc::<[automerge::ChangeHash]>::from(heads);
     change_manager.notify_doc_heads_changed(doc_id, Arc::clone(&heads_arc), origin.clone())?;
@@ -1867,6 +2053,7 @@ async fn accept_incoming(
 async fn load_doc_snapshot<S, D>(
     sedimentrees: &SubductionSedimentrees,
     storage_for_reads: &S,
+    keyhive: Option<&BigKeyhiveHandle>,
     doc_id: D,
 ) -> Res<Option<automerge::Automerge>>
 where
@@ -1914,15 +2101,17 @@ where
     let (tree, fresh) = match sedimentrees.get_cloned(&sedimentree_id).await {
         Some(tree) => (tree, false),
         None => {
-            let tree = Sedimentree::new(
-                fragments
-                    .iter()
-                    .map(|verified| verified.payload().clone())
-                    .collect(),
-                loose_commits
-                    .iter()
-                    .map(|verified| verified.payload().clone())
-                    .collect(),
+            let tree = sedimentree_core::sedimentree::minimized::MinimizedSedimentree::new(
+                Sedimentree::new(
+                    fragments
+                        .iter()
+                        .map(|verified| verified.payload().clone())
+                        .collect(),
+                    loose_commits
+                        .iter()
+                        .map(|verified| verified.payload().clone())
+                        .collect(),
+                ),
             );
             (tree, true)
         }
@@ -1957,7 +2146,12 @@ where
                 missing_ordered_blob_context(wanted, &loaded_items)
             )
         })?;
-        buf.extend_from_slice(raw);
+        let decrypted = if let Some(kh) = keyhive {
+            decrypt_snapshot_blob(raw, kh, sedimentree_id).await?
+        } else {
+            raw.to_vec()
+        };
+        buf.extend_from_slice(&decrypted);
     }
 
     let mut doc = automerge::Automerge::new();
@@ -1965,7 +2159,9 @@ where
         .map_err(|err| ferr!("failed reconstructing automerge doc from ordered blobs: {err}"))?;
 
     if fresh {
-        sedimentrees.insert(sedimentree_id, tree).await;
+        sedimentrees
+            .get_or_insert_with(sedimentree_id, || tree)
+            .await;
     }
     Ok(Some(doc))
 }
@@ -2031,11 +2227,26 @@ fn blob_digest_hex(digest: Digest<Blob>) -> String {
     format!("{digest:?}")
 }
 
+/// Metadata for a single fragment from ingest, used to rebuild after encryption.
+struct FragmentEntry {
+    head: CommitId,
+    boundary: BTreeSet<CommitId>,
+    checkpoints: Vec<CommitId>,
+}
+
+/// Metadata for a single loose commit from ingest, used to rebuild after encryption.
+struct LooseEntry {
+    head: CommitId,
+    parents: BTreeSet<CommitId>,
+}
+
 /// Result of ingesting an Automerge document.
 struct IngestResult {
     sedimentree: Sedimentree,
     blobs: Vec<Blob>,
-    // _change_count: usize,
+    fragment_entries: Vec<FragmentEntry>,
+    loose_entries: Vec<LooseEntry>,
+    _change_count: usize,
     _covered_count: usize,
     _loose_count: usize,
     _fragment_count: usize,
@@ -2057,12 +2268,14 @@ fn ingest_automerge(doc: &automerge::Automerge, sedimentree_id: SedimentreeId) -
 
     let mut fragments = Vec::with_capacity(cached.len());
     let mut blobs = Vec::with_capacity(cached.len() + loose.len());
+    let mut fragment_entries = Vec::with_capacity(cached.len());
+    let mut loose_entries = Vec::with_capacity(loose.len());
     let mut covered: sedimentree_core::collections::Set<CommitId> = default();
     for (fragment, raw) in cached.iter().zip(cached_bytes) {
         for member in &fragment.members {
             covered.insert(CommitId::new(member.0));
         }
-        let blob = Blob::new(raw);
+        let head = CommitId::new(fragment.head.0);
         let boundary: BTreeSet<CommitId> = fragment
             .boundary
             .iter()
@@ -2073,15 +2286,21 @@ fn ingest_automerge(doc: &automerge::Automerge, sedimentree_id: SedimentreeId) -
             .iter()
             .map(|head| CommitId::new(head.0))
             .collect();
+        let blob = Blob::new(raw);
         let meta = BlobMeta::new(&blob);
         fragments.push(Fragment::new(
             sedimentree_id,
-            CommitId::new(fragment.head.0),
-            boundary,
+            head,
+            boundary.clone(),
             &checkpoints,
             meta,
         ));
         blobs.push(blob);
+        fragment_entries.push(FragmentEntry {
+            head,
+            boundary,
+            checkpoints,
+        });
     }
 
     let mut loose_commits = Vec::with_capacity(loose.len());
@@ -2094,8 +2313,14 @@ fn ingest_automerge(doc: &automerge::Automerge, sedimentree_id: SedimentreeId) -
             .collect();
         let blob = Blob::new(raw);
         let meta = BlobMeta::new(&blob);
-        loose_commits.push(LooseCommit::new(sedimentree_id, head, parents, meta));
+        loose_commits.push(LooseCommit::new(
+            sedimentree_id,
+            head,
+            parents.clone(),
+            meta,
+        ));
         blobs.push(blob);
+        loose_entries.push(LooseEntry { head, parents });
     }
 
     let fragment_count = fragments.len();
@@ -2105,11 +2330,148 @@ fn ingest_automerge(doc: &automerge::Automerge, sedimentree_id: SedimentreeId) -
     IngestResult {
         sedimentree: Sedimentree::new(fragments, loose_commits),
         blobs,
-        // _change_count: doc.get_changes_meta(&[]).len(),
+        fragment_entries,
+        loose_entries,
+         _change_count: doc.get_changes_meta(&[]).len(),
         _covered_count: covered_count,
         _loose_count: loose_count,
         _fragment_count: fragment_count,
     }
+}
+
+/// Encrypt ingested blobs via the keyhive, rebuilding the sedimentree with
+/// updated BlobMeta matching the encrypted bytes.
+///
+/// If the sedimentree ID does not correspond to a valid keyhive document
+/// (e.g. random IDs used in tests), the ingested data is returned unchanged.
+/// Encrypt ingested blobs via the keyhive, serializing each encrypted blob as
+/// DRISL (deterministic CBOR) prefixed with a 1-byte discriminator:
+/// - `0x00` = plaintext
+/// - `0x01` = encrypted
+///
+/// TODO: Upstream (keyhive/subduction_keyhive) hasn't specified the canonical
+/// EncryptedContent storage format yet. Revisit when upstream publishes a spec.
+async fn encrypt_ingested_blobs(
+    ingested: &IngestResult,
+    keyhive_handle: &BigKeyhiveHandle,
+    sedimentree_id: SedimentreeId,
+) -> Res<(Sedimentree, Vec<Blob>)> {
+    use sedimentree_core::{blob::BlobMeta, fragment::Fragment, loose_commit::LooseCommit};
+
+    let keyhive = keyhive_handle.clone_keyhive().await;
+    let vk = ed25519_dalek::VerifyingKey::from_bytes(sedimentree_id.as_bytes())
+        .map_err(|_| ferr!("not a valid Keyhive DocumentId"))?;
+    let kh_doc_id = keyhive_core::principal::document::id::DocumentId::from(
+        keyhive_core::principal::identifier::Identifier::from(vk),
+    );
+    let kh_doc = keyhive.get_document(kh_doc_id).await.ok_or_else(|| {
+        ferr!("keyhive doc not found in local keyhive; only the doc owner can call put_doc")
+    })?;
+
+    let mut encrypted_blobs: Vec<Blob> = Vec::with_capacity(ingested.blobs.len());
+    let mut new_fragments: Vec<Fragment> = Vec::with_capacity(ingested.fragment_entries.len());
+    let mut new_loose_commits: Vec<LooseCommit> = Vec::with_capacity(ingested.loose_entries.len());
+
+    // Encrypt fragment blobs
+    for (entry, blob) in ingested
+        .fragment_entries
+        .iter()
+        .zip(ingested.blobs.iter().take(ingested.fragment_entries.len()))
+    {
+        let content_ref: Vec<u8> = entry.head.as_bytes().to_vec();
+        let pred_refs: Vec<Vec<u8>> = entry
+            .boundary
+            .iter()
+            .map(|c| c.as_bytes().to_vec())
+            .collect();
+        let encrypted = keyhive
+            .try_encrypt_content(kh_doc.clone(), &content_ref, &pred_refs, blob.as_slice())
+            .await
+            .map_err(|e| ferr!("encrypt fragment failed: {e}"))?;
+        // discriminator 0x01 = encrypted, followed by DRISL-encoded EncryptedContent
+        let drisl_bytes = atproto_dasl::drisl::to_vec(encrypted.encrypted_content())
+            .map_err(|e| ferr!("DRISL encode encrypted content: {e}"))?;
+        let mut encrypted_bytes = vec![0x02u8];
+        encrypted_bytes.extend(drisl_bytes);
+        let encrypted_blob = Blob::new(encrypted_bytes);
+        let meta = BlobMeta::new(&encrypted_blob);
+        new_fragments.push(Fragment::new(
+            sedimentree_id,
+            entry.head,
+            entry.boundary.clone(),
+            &entry.checkpoints,
+            meta,
+        ));
+        encrypted_blobs.push(encrypted_blob);
+    }
+
+    // Encrypt loose commit blobs
+    for (entry, blob) in ingested
+        .loose_entries
+        .iter()
+        .zip(ingested.blobs.iter().skip(ingested.fragment_entries.len()))
+    {
+        let content_ref: Vec<u8> = entry.head.as_bytes().to_vec();
+        let pred_refs: Vec<Vec<u8>> = entry
+            .parents
+            .iter()
+            .map(|c| c.as_bytes().to_vec())
+            .collect();
+        let encrypted = keyhive
+            .try_encrypt_content(kh_doc.clone(), &content_ref, &pred_refs, blob.as_slice())
+            .await
+            .map_err(|e| ferr!("encrypt loose commit failed: {e}"))?;
+        let drisl_bytes = atproto_dasl::drisl::to_vec(encrypted.encrypted_content())
+            .map_err(|e| ferr!("DRISL encode encrypted content: {e}"))?;
+        let mut encrypted_bytes = vec![0x02u8];
+        encrypted_bytes.extend(drisl_bytes);
+        let encrypted_blob = Blob::new(encrypted_bytes);
+        let meta = BlobMeta::new(&encrypted_blob);
+        new_loose_commits.push(LooseCommit::new(
+            sedimentree_id,
+            entry.head,
+            entry.parents.clone(),
+            meta,
+        ));
+        encrypted_blobs.push(encrypted_blob);
+    }
+
+    Ok((
+        Sedimentree::new(new_fragments, new_loose_commits),
+        encrypted_blobs,
+    ))
+}
+
+/// Decrypt a single snapshot blob that may be encrypted content.
+///
+/// Decrypt a single snapshot blob stored as encrypted content.
+///
+/// Format: `0x02` = encrypted, followed by DRISL-encoded EncryptedContent.
+async fn decrypt_snapshot_blob(
+    raw_bytes: &[u8],
+    keyhive_handle: &BigKeyhiveHandle,
+    sedimentree_id: SedimentreeId,
+) -> Res<Vec<u8>> {
+    let encrypted: beekem::encrypted::EncryptedContent<Vec<u8>, Vec<u8>> = match raw_bytes.first() {
+        Some(0x02) => atproto_dasl::drisl::from_slice(&raw_bytes[1..])
+            .map_err(|e| ferr!("DRISL decode encrypted content: {e}"))?,
+        _ => return Err(ferr!("blob is not encrypted (missing 0x02 discriminator)")),
+    };
+    let keyhive = keyhive_handle.clone_keyhive().await;
+    let vk = ed25519_dalek::VerifyingKey::from_bytes(sedimentree_id.as_bytes())
+        .map_err(|_| ferr!("not a valid Keyhive DocumentId"))?;
+    let kh_doc_id = keyhive_core::principal::document::id::DocumentId::from(
+        keyhive_core::principal::identifier::Identifier::from(vk),
+    );
+    let kh_doc = keyhive
+        .get_document(kh_doc_id)
+        .await
+        .ok_or_else(|| ferr!("keyhive doc not found for decryption"))?;
+    let plaintext = keyhive
+        .try_decrypt_content(kh_doc, &encrypted)
+        .await
+        .map_err(|e| ferr!("decryption failed: {e}"))?;
+    Ok(plaintext)
 }
 
 #[cfg(test)]

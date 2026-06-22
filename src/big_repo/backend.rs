@@ -94,7 +94,7 @@ impl big_sync::SyncBackend for BigRepoSyncBackend {
     async fn sync_obj(
         &self,
         peer_id: PeerId,
-        obj_id: crate::DocumentId,
+        obj_id: big_sync_core::ObjId,
         remote_payload: Option<big_sync::ObjPayload>,
     ) -> Res<big_sync::SyncTaskRunOutcome> {
         let repo: Arc<crate::BigRepo> = self
@@ -102,60 +102,25 @@ impl big_sync::SyncBackend for BigRepoSyncBackend {
             .upgrade()
             .ok_or_else(|| eyre::eyre!("big repo dropped while sync backend was active"))?;
 
-        let local_heads = super::partition_doc_heads_payload(&repo.big_sync_store, obj_id).await?;
+        let doc_id: crate::DocumentId = obj_id.into();
+        let local_heads = super::partition_doc_heads_payload(&repo.big_sync_store, doc_id).await?;
         if local_heads.is_none() {
-            let client = self.remote_repo_client(peer_id)?;
-            let doc_id = obj_id.to_string();
-            let Some(full_doc) = client
-                .get_docs_full(vec![doc_id.clone()])
-                .await?
-                .into_iter()
-                .find(|doc| doc.doc_id == doc_id)
-            else {
-                eyre::bail!("missing on remote");
-            };
-            let loaded = automerge::Automerge::load(&full_doc.automerge_save)
-                .wrap_err("invalid automerge payload from GetDocsFull")?;
-            let put_outcome = repo.put_doc(obj_id, loaded).await;
-            match put_outcome {
-                Ok(_handle) => {
-                    return Ok(big_sync::SyncTaskRunOutcome::Completion(
-                        big_sync_core::SyncTaskCompletion {
-                            obj_id,
-                            deets: big_sync_core::SyncCompletionDeets::AddedMember,
-                        },
-                    ));
-                }
-                Err(crate::runtime::PutDocError::IdOccpuied { .. }) => {
-                    match repo
-                        .runtime
-                        .sync_doc_with_peer(obj_id, peer_id, Some(Duration::from_secs(10)))
-                        .await
-                    {
-                        Ok(_) => {
-                            return Ok(big_sync::SyncTaskRunOutcome::Completion(
-                                big_sync_core::SyncTaskCompletion {
-                                    obj_id,
-                                    deets: big_sync_core::SyncCompletionDeets::AddedMember,
-                                },
-                            ));
-                        }
-                        Err(crate::SyncDocError::Other(inner)) => {
-                            return Err(inner);
-                        }
-                        Err(crate::SyncDocError::IoError(inner)) => {
-                            Err(inner).wrap_err("i/o error syncing doc")?;
-                        }
-                        Err(crate::SyncDocError::TransportError) => {
-                            eyre::bail!("transport error syncing doc")
-                        }
-                        Err(crate::SyncDocError::NotFoundOrUnauthorized) => {
-                            eyre::bail!("remote doc was not found or unauthorized")
-                        }
-                    }
-                }
-                Err(err) => return Err(err).wrap_err("put_doc failed"),
-            }
+            // Doc not yet synced locally. Pull from peer via Subduction sync.
+            // Subduction syncs from an empty tree — the peer sends everything it has.
+            repo.runtime
+                .sync_doc_with_peer(doc_id, peer_id, Some(Duration::from_secs(10)))
+                .await
+                .map_err(|e| match e {
+                    crate::SyncDocError::NotFound => eyre::eyre!("remote doc was not found"),
+                    crate::SyncDocError::Unauthorized => eyre::eyre!("remote doc access denied"),
+                    _ => eyre::eyre!("{e}"),
+                })?;
+            return Ok(big_sync::SyncTaskRunOutcome::Completion(
+                big_sync_core::SyncTaskCompletion {
+                    obj_id,
+                    deets: big_sync_core::SyncCompletionDeets::AddedMember,
+                },
+            ));
         }
         let local_heads = local_heads.expect("checked above");
         if let Some(remote_payload) = &remote_payload {
@@ -171,12 +136,12 @@ impl big_sync::SyncBackend for BigRepoSyncBackend {
         }
         match repo
             .runtime
-            .sync_doc_with_peer(obj_id, peer_id, Some(Duration::from_secs(10)))
+            .sync_doc_with_peer(doc_id, peer_id, Some(Duration::from_secs(10)))
             .await
         {
             Ok(()) => {
                 let current_doc = repo
-                    .get_doc(&obj_id)
+                    .get_doc(&doc_id)
                     .await?
                     .ok_or_else(|| eyre::eyre!("local doc missing after successful sync"))?;
                 let heads = current_doc.with_document_read(|doc| doc.get_heads()).await;
@@ -197,8 +162,14 @@ impl big_sync::SyncBackend for BigRepoSyncBackend {
             Err(crate::SyncDocError::TransportError) => {
                 eyre::bail!("transport error syncing doc")
             }
-            Err(crate::SyncDocError::NotFoundOrUnauthorized) => {
-                eyre::bail!("remote doc was not found or unauthorized")
+            Err(crate::SyncDocError::NotFound) => {
+                eyre::bail!("remote doc was not found")
+            }
+            Err(crate::SyncDocError::Unauthorized) => {
+                eyre::bail!("remote doc access denied")
+            }
+            Err(crate::SyncDocError::PendingKeys) => {
+                eyre::bail!("remote doc keys are pending (keyhive sync incomplete)")
             }
         }
     }

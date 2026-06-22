@@ -172,10 +172,13 @@ subduction_core = { git = "https://github.com/dman-os/subduction", rev = "4de6e0
 subduction_iroh = { git = "https://github.com/dman-os/subduction", rev = "4de6e00b49ddcf1b84872afea24f928e7063249a" }
 subduction_websocket = { git = "https://github.com/dman-os/subduction", rev = "4de6e00b49ddcf1b84872afea24f928e7063249a" }
 sedimentree_core = { git = "https://github.com/dman-os/subduction", rev = "4de6e00b49ddcf1b84872afea24f928e7063249a" }
-sedimentree_fs_storage = { git = "https://github.com/dman-os/subduction", rev = "4de6e00b49ddcf1b84872afea24f928e7063249a" }
+subduction_redb_storage = { git = "https://github.com/dman-os/subduction", rev = "4de6e00b49ddcf1b84872afea24f928e7063249a" }
 subduction_crypto = { git = "https://github.com/dman-os/subduction", rev = "4de6e00b49ddcf1b84872afea24f928e7063249a" }
 subduction_keyhive = { git = "https://github.com/dman-os/subduction", rev = "4de6e00b49ddcf1b84872afea24f928e7063249a" }
+keyhive_crypto = "0.2.0"
+ed25519-dalek = "2.2.0"
 async-channel = "2.5.0"
+nonempty = "0.10.0"
 qrcode = { version = "0.14.1", default-features = false }
 
 #
@@ -236,16 +239,19 @@ irpc-iroh = "0.15.0"
 autosurgeon = { git = "https://github.com/dman-os/autosurgeon", rev = "274285c6007cccf4e5eb21a96bd1152ee0c6576c" }
 autosurgeon-derive = { git = "https://github.com/dman-os/autosurgeon", rev = "274285c6007cccf4e5eb21a96bd1152ee0c6576c" }
 automerge = { git = "https://github.com/automerge/automerge", branch = "fragments" }
+keyhive_crypto = { path = "../keyhive/keyhive_crypto" }
+keyhive_core = { path = "../keyhive/keyhive_core" }
+beekem = { path = "../keyhive/beekem" }
 # sqlite-vec = { git = "https://github.com/vlasky/sqlite-vec", rev = "9facf1ab84f2a360c0f1e62db3a7f3eca5bc099a" }
 #
-# [patch."https://github.com/dman-os/subduction"]
-# subduction_core = { path = "../subduction/subduction_core" }
-# subduction_iroh = { path = "../subduction/subduction_iroh" }
-# subduction_websocket = { path = "../subduction/subduction_websocket" }
-# sedimentree_core = { path = "../subduction/sedimentree_core" }
-# sedimentree_fs_storage = { path = "../subduction/sedimentree_fs_storage" }
-# subduction_crypto = { path = "../subduction/subduction_crypto" }
-# subduction_keyhive = { path = "../subduction/subduction_keyhive" }
+[patch."https://github.com/dman-os/subduction"]
+subduction_core = { path = "../subduction/subduction_core" }
+subduction_iroh = { path = "../subduction/subduction_iroh" }
+subduction_websocket = { path = "../subduction/subduction_websocket" }
+sedimentree_core = { path = "../subduction/sedimentree_core" }
+subduction_redb_storage = { path = "../subduction/subduction_redb_storage" }
+subduction_crypto = { path = "../subduction/subduction_crypto" }
+subduction_keyhive = { path = "../subduction/subduction_keyhive" }
 
 
 # The default profile is optimized for Wasm builds because

@@ -95,6 +95,49 @@ But then again, I can use different description at different layers.
 
 ---
 
+## 2026-05-22 | e2ee
+
+Okay, we have a design for the full sync and backup story I think.
+
+So we have docs.
+Docs are the user facing conecpt that you're imagining.
+Then we have branches.
+Think git.
+Branches allow grouping a related set of changes before we merge it into the doc proper.
+This can be a primitive for collaboration but its' currently useful for failable wflows to stage their work before they succeed avoiding destructive changes and rollabcks.
+These are the user facing surfaces.
+
+Beneath that, we have automerge documents that today correspond to each branch.
+We'll need a new name to disambiguate it with the user facing documents.
+The drawer repo manages these, it's the local abstraction taht makes sure changes correspond to the daybook schema format and branches and merging semantics and all that.
+The drawer repo uses the big_repo crate to manage subduction sedimentrees which are how we store and sync am docs across peers.
+big_repo is based on big_sync which allows it to do set/partition reconcillation between peers on reconnect.
+
+All of this is wehre we are today and it works for private repos where every device has full access and everything.
+But we want to add collaboration and we want to add zero knowledge backups.
+And we want zero knowledge servers to serve as collaboration hubs.
+And we want to support full recovery from a recovery key from the backup node.
+Allow me to introduce lockers.
+
+A locker is a bundle of docs that's acess managed by keyhive concap graph and stored on a server using keyhive encryption.
+- Since we're using keyhive, we'll need to use pubkeys as document ids.
+  - Thankfully, big_sync already uses 32byte keys.
+    - will this be enough? It won't if we want to support multikey.
+      - Maybe the key encoding will be per big_sync partition and one can't mix key types in a single part today?
+- In keyhive, BeeKEM is the CKGA, concap is the capability authz graph system.
+  - While keyhive wants us to have a BeeKEM/CKGA per doc, this is too costly in the common full repo backup case 
+    - Besides the storage and mgmt cost, on a full eager clone, we'd have to mutate N BeeKEMs to add the new peer
+      - Since the expectation is a lot of docs that are repo private and a few fractions that are cross-repo collaborative, this would be wasteful for the common case.
+      - To recap, repos are the user facing private space and collaboration is not like git where users clone the full repo. We want them give them partial acccess for collaboration where they can draw the parital stuff into their repo.
+  - We instead treat lockers as the main keyhive objects
+  - We then map a big sync partition to a locker and it goes on from that
+- Lockers are also the unit of server uploads
+  - The e2ee server can read the BeeKEM so it can also allow/deny pull access to other peers.
+- A repo wide locker will be used for full backup.
+  - On repo clone, we add the new peer to the BeeKEM so they can have access.
+- For collaboration, we'll create new lockers.
+  - Optionally, it should be possible to use a separate doc id when uploading to a new locker to avoid metadata tracking.
+    - We can use KDF from the 
 
 ## 2026-05-29 | shoddy
 

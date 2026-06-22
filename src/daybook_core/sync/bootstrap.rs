@@ -472,11 +472,10 @@ pub async fn clone_repo_init_from_url(
         let part_store: Arc<dyn big_sync::HostPartStore> = Arc::new(part_store) as _;
         let (big_repo, big_repo_stop) = big_repo::BigRepo::boot(
             big_repo::Config {
+                keyhive_seed: identity.iroh_secret_key.to_bytes(),
                 storage: big_repo::StorageConfig::Disk {
                     path: staging.join("samod"),
                 },
-                peer_id: PeerId::new(*identity.iroh_public_key.as_bytes()),
-                secret_key_bytes: identity.iroh_secret_key.to_bytes(),
             },
             Arc::clone(&part_store),
         )

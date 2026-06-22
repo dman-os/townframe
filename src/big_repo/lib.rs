@@ -2,6 +2,7 @@
 //! internally by sharing the Arc<Mutex> of the registry to the runtime
 
 mod interlude {
+    #[allow(unused_imports)]
     pub use big_sync_core::{ObjId, PeerId};
     pub use utils_rs::prelude::*;
 }
@@ -15,6 +16,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 
 use automerge::ChangeHash;
 use autosurgeon::{Hydrate, Prop, Reconcile};
+use sedimentree_core::id::SedimentreeId;
 use sedimentree_core::loose_commit::id::CommitId;
 
 // FIXME: properly test the changes impl and investigate
@@ -22,13 +24,19 @@ use sedimentree_core::loose_commit::id::CommitId;
 mod backend;
 #[expect(unused)]
 mod changes;
+pub(crate) mod handler;
+mod keyhive;
+pub(crate) mod keyhive_conn;
+pub(crate) mod keyhive_storage;
 pub mod rpc;
 mod runtime;
-pub use runtime::{PutDocError, SyncDocError};
+pub(crate) mod wire;
+pub use runtime::{CreateDocError, PutDocError, SyncDocError};
 #[cfg(test)]
 pub(crate) mod test;
 
 pub use backend::BigRepoSyncBackend;
+pub use keyhive::BigKeyhiveHandle;
 
 pub use changes::{
     path_prefix_matches as big_repo_path_prefix_matches, BigRepoChangeNotification,
@@ -37,13 +45,11 @@ pub use changes::{
     DocIdFilter as BigRepoDocIdFilter, OriginFilter as BigRepoOriginFilter,
 };
 
-pub type DocumentId = ObjId;
+pub type DocumentId = big_sync_core::ObjId;
 pub type SharedPartStore = Arc<dyn big_sync::HostPartStore>;
-
 #[derive(Debug, Clone)]
 pub struct Config {
-    pub peer_id: PeerId,
-    pub secret_key_bytes: [u8; 32],
+    pub keyhive_seed: [u8; 32],
     pub storage: StorageConfig,
 }
 
@@ -57,6 +63,8 @@ pub enum StorageConfig {
 #[educe(Debug)]
 pub struct BigRepo {
     local_peer_id: PeerId,
+    #[educe(Debug(ignore))]
+    keyhive: BigKeyhiveHandle,
     #[educe(Debug(ignore))]
     big_sync_store: SharedPartStore,
     #[educe(Debug(ignore))]
@@ -77,20 +85,29 @@ impl BigRepo {
         big_sync_store: SharedPartStore,
     ) -> Res<(Arc<Self>, BigRepoStopToken)> {
         let Config {
-            peer_id,
-            secret_key_bytes,
+            keyhive_seed,
             storage,
         } = config;
-
+        let keyhive = BigKeyhiveHandle::boot_memory_from_seed(keyhive_seed).await?;
+        let policy_keyhive = keyhive.clone_keyhive().await;
+        let policy = Arc::new(subduction_keyhive::policy::SubductionKeyhive::new(
+            policy_keyhive,
+        ));
+        let signer = subduction_crypto::signer::memory::MemorySigner::from_bytes(&keyhive_seed);
+        let peer_id = PeerId::new(*signer.verifying_key().as_bytes());
         let (change_manager, change_manager_stop) = changes::ChangeListenerManager::boot();
-        let signer = subduction_crypto::signer::memory::MemorySigner::from_bytes(&secret_key_bytes);
         let (runtime, runtime_stop) = match storage {
-            StorageConfig::Memory => runtime::spawn_big_repo_runtime(
-                signer,
-                subduction_core::storage::memory::MemoryStorage::new(),
-                Arc::clone(&big_sync_store),
-                Arc::clone(&change_manager),
-            )?,
+            StorageConfig::Memory => {
+                runtime::spawn_big_repo_runtime(
+                    signer,
+                    subduction_core::storage::memory::MemoryStorage::new(),
+                    Arc::clone(&policy),
+                    keyhive.clone(),
+                    Arc::clone(&big_sync_store),
+                    Arc::clone(&change_manager),
+                )
+                .await?
+            }
             StorageConfig::Disk { path } => {
                 let subduction_dir = path.join("subduction");
                 std::fs::create_dir_all(&subduction_dir).wrap_err_with(|| {
@@ -99,19 +116,23 @@ impl BigRepo {
                         subduction_dir.display()
                     )
                 })?;
-                let fs_storage = sedimentree_fs_storage::FsStorage::new(subduction_dir)
-                    .wrap_err("failed booting subduction fs storage")?;
+                let redb_storage = subduction_redb_storage::RedbStorage::new(subduction_dir)
+                    .wrap_err("failed booting subduction redb storage")?;
                 runtime::spawn_big_repo_runtime(
                     signer,
-                    fs_storage,
+                    redb_storage,
+                    Arc::clone(&policy),
+                    keyhive.clone(),
                     Arc::clone(&big_sync_store),
                     Arc::clone(&change_manager),
-                )?
+                )
+                .await?
             }
         };
 
         let out = Arc::new(Self {
             local_peer_id: peer_id,
+            keyhive,
             big_sync_store,
             runtime,
             change_manager,
@@ -137,6 +158,9 @@ impl BigRepo {
     pub fn local_peer_id(&self) -> PeerId {
         self.local_peer_id
     }
+    pub fn keyhive(&self) -> &BigKeyhiveHandle {
+        &self.keyhive
+    }
 }
 
 // main methods
@@ -157,13 +181,12 @@ impl BigRepo {
         Ok(out)
     }
 
-    #[tracing::instrument(skip_all, fields(%document_id, %self.local_peer_id))]
-    pub async fn put_doc(
+    #[tracing::instrument(skip_all, fields(%self.local_peer_id))]
+    pub async fn create_doc(
         self: &Arc<Self>,
-        document_id: DocumentId,
         initial_content: automerge::Automerge,
-    ) -> Result<BigDocHandle, runtime::PutDocError> {
-        let bundle = self.runtime.put_doc(document_id, initial_content).await?;
+    ) -> Result<BigDocHandle, CreateDocError> {
+        let bundle = self.runtime.create_doc(initial_content).await?;
         Ok(BigDocHandle {
             repo: Arc::clone(self),
             bundle,
@@ -246,6 +269,17 @@ impl BigRepoConnection {
 
     pub fn is_closed(&self) -> bool {
         self.closed.load(Ordering::SeqCst)
+    }
+
+    /// Initiate a keyhive protocol sync with the connected peer.
+    pub async fn sync_keyhive_with_peer(&self, timeout: Option<std::time::Duration>) -> Res<()> {
+        if self.is_closed() {
+            return Err(ferr!("connection is closed"));
+        }
+        self.repo
+            .runtime
+            .sync_keyhive_with_peer(self.peer_id, timeout)
+            .await
     }
 
     /// NOTE: a succesful outcome doesn't correspond to doc
@@ -516,7 +550,7 @@ async fn partition_doc_heads_payload(
     doc_id: DocumentId,
 ) -> Res<Option<Arc<[ChangeHash]>>> {
     Ok(big_sync_store
-        .obj_payload(doc_id)
+        .obj_payload(doc_id.into())
         .await?
         .map(doc_heads_from_payload))
 }
