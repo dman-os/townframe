@@ -366,7 +366,7 @@ private fun SettingsSectionList(
                 end = if (wideLayout) 12.dp else 16.dp,
                 bottom = 16.dp,
             ),
-        verticalArrangement = Arrangement.spacedBy(12.dp),
+        verticalArrangement = if (wideLayout) Arrangement.spacedBy(4.dp) else Arrangement.spacedBy(12.dp),
     ) {
         SettingsSection.entries.forEach { section ->
             if (wideLayout) {
@@ -405,7 +405,7 @@ private fun SettingsSectionSidebarButton(section: SettingsSection, onClick: () -
             Spacer(modifier = Modifier.width(12.dp))
             Text(
                 text = section.title,
-                style = MaterialTheme.typography.titleMedium,
+                // style = MaterialTheme.typography.titleMedium,
                 fontWeight = FontWeight.Medium,
             )
         }
@@ -414,41 +414,32 @@ private fun SettingsSectionSidebarButton(section: SettingsSection, onClick: () -
 
 @Composable
 private fun SettingsSectionCard(section: SettingsSection, onClick: () -> Unit) {
-    OutlinedCard(
+    ListItem(
         modifier =
         Modifier
             .fillMaxWidth()
             .testTag(SettingsScreenSemantics.sectionItem(section.id))
             .clickable(role = Role.Button, onClick = onClick),
-    ) {
-        ListItem(
-            headlineContent = {
-                Text(
-                    text = section.title,
-                    style = MaterialTheme.typography.titleMedium,
-                    fontWeight = FontWeight.SemiBold,
-                )
-            },
-            supportingContent = {
-                Text(
-                    text = section.subtitle,
-                    style = MaterialTheme.typography.bodyMedium,
-                )
-            },
-            leadingContent = {
-                Icon(
-                    imageVector = sectionIcon(section),
-                    contentDescription = null,
-                )
-            },
-            trailingContent = {
-                Icon(
-                    imageVector = Icons.Default.ChevronRight,
-                    contentDescription = null,
-                )
-            },
-        )
-    }
+        headlineContent = {
+            Text(
+                text = section.title,
+                style = MaterialTheme.typography.titleMedium,
+                fontWeight = FontWeight.SemiBold,
+            )
+        },
+        supportingContent = {
+            Text(
+                text = section.subtitle,
+                style = MaterialTheme.typography.bodyMedium,
+            )
+        },
+        leadingContent = {
+            Icon(
+                imageVector = sectionIcon(section),
+                contentDescription = null,
+            )
+        },
+    )
 }
 
 private data class SettingsDetailPaneState(
