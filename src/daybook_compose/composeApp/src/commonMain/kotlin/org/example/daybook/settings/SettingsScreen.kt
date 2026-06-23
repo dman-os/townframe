@@ -24,8 +24,8 @@ import androidx.compose.foundation.layout.widthIn
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
-import androidx.compose.material.icons.filled.ChevronRight
 import androidx.compose.material.icons.filled.Extension
+import androidx.compose.material.icons.filled.FolderOpen
 import androidx.compose.material.icons.filled.Settings
 import androidx.compose.material3.Button
 import androidx.compose.material3.CircularProgressIndicator
@@ -34,6 +34,7 @@ import androidx.compose.material3.Icon
 import androidx.compose.material3.ListItem
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedCard
+import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
@@ -41,7 +42,9 @@ import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableIntStateOf
+import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
@@ -69,7 +72,13 @@ import androidx.navigation3.scene.SceneStrategy
 import androidx.navigation3.scene.SceneStrategyScope
 import androidx.navigation3.ui.NavDisplay
 import androidx.savedstate.serialization.SavedStateConfiguration
+import io.github.vinceglb.filekit.dialogs.compose.rememberDirectoryPickerLauncher
+import io.github.vinceglb.filekit.path
 import kotlinx.coroutines.CancellationException
+import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.launch
+import kotlinx.coroutines.withContext
 import kotlinx.serialization.Serializable
 import kotlinx.serialization.modules.SerializersModule
 import kotlinx.serialization.modules.polymorphic
@@ -162,12 +171,14 @@ fun SettingsScreen(modifier: Modifier = Modifier) {
         val onBack =
             when {
                 wideLayout -> parentTopBar.onBack
+
                 currentRoute is SettingsNavKey.SectionDetail -> {
                     {
                         backStack.removeLastOrNull()
                         Unit
                     }
                 }
+
                 else -> parentTopBar.onBack
             }
         val topBarTitle =
@@ -513,7 +524,11 @@ private fun PlugsSettingsPane(wideLayout: Boolean, plugsRepo: PlugsRepoFfi) {
                 actionTestTag = SettingsScreenSemantics.PLUGS_ADD_BUTTON,
                 onAction = {
                     bigDialogController.show {
-                        ImportPlugComingNextDialog(onClose = bigDialogController::dismiss)
+                        ImportPlugWizardDialog(
+                            plugsRepo = plugsRepo,
+                            onClose = bigDialogController::dismiss,
+                            onImportSuccess = { reloadToken += 1 },
+                        )
                     }
                 },
             ),
@@ -948,8 +963,318 @@ private fun MltoolsDownloadTaskRow(task: ProgressTask) {
     }
 }
 
+private sealed interface PlugImportWizardState {
+    data class ChoosingPath(val path: String = "", val errorMessage: String? = null) : PlugImportWizardState
+
+    data class Reviewing(
+        val path: String,
+        val preview: PlugSummary? = null,
+        val isPreviewLoading: Boolean = false,
+        val isImporting: Boolean = false,
+        val errorMessage: String? = null,
+    ) : PlugImportWizardState
+
+    data class Success(val path: String, val preview: PlugSummary) : PlugImportWizardState
+}
+
 @Composable
-private fun ImportPlugComingNextDialog(onClose: () -> Unit) {
+private fun ImportPlugWizardDialog(plugsRepo: PlugsRepoFfi, onClose: () -> Unit, onImportSuccess: () -> Unit) {
+    var wizardState by remember {
+        mutableStateOf<PlugImportWizardState>(PlugImportWizardState.ChoosingPath())
+    }
+    val scope = rememberCoroutineScope()
+    val picker = rememberDirectoryPickerLauncher { directory ->
+        val selectedPath = directory?.path ?: return@rememberDirectoryPickerLauncher
+        wizardState = PlugImportWizardState.ChoosingPath(path = selectedPath)
+    }
+    ImportPlugWizardDialogContent(
+        wizardState = wizardState,
+        actions = ImportPlugWizardDialogActions(
+            plugsRepo = plugsRepo,
+            scope = scope,
+            onClose = onClose,
+            onImportSuccess = onImportSuccess,
+            onWizardStateChange = { nextState -> wizardState = nextState },
+            onBrowse = { picker.launch() },
+        ),
+    )
+}
+
+@Composable
+private fun ImportPlugWizardDialogContent(wizardState: PlugImportWizardState, actions: ImportPlugWizardDialogActions) {
+    when (val currentState = wizardState) {
+        is PlugImportWizardState.ChoosingPath -> ImportPlugWizardDialogChoosingPath(currentState, actions)
+        is PlugImportWizardState.Reviewing -> ImportPlugWizardDialogReviewing(currentState, actions)
+        is PlugImportWizardState.Success -> ImportPlugWizardDialogSuccess(currentState, actions.onClose)
+    }
+}
+
+private data class ImportPlugWizardDialogActions(
+    val plugsRepo: PlugsRepoFfi,
+    val scope: CoroutineScope,
+    val onClose: () -> Unit,
+    val onImportSuccess: () -> Unit,
+    val onWizardStateChange: (PlugImportWizardState) -> Unit,
+    val onBrowse: () -> Unit,
+)
+
+@Composable
+private fun ImportPlugWizardDialogChoosingPath(
+    state: PlugImportWizardState.ChoosingPath,
+    actions: ImportPlugWizardDialogActions,
+) {
+    ImportPlugWizardChoosePathStep(
+        state = ImportPlugWizardChoosePathStepState(
+            path = state.path,
+            errorMessage = state.errorMessage,
+            onPathChange = { nextPath ->
+                actions.onWizardStateChange(PlugImportWizardState.ChoosingPath(path = nextPath, errorMessage = null))
+            },
+            onBrowse = actions.onBrowse,
+            onCancel = actions.onClose,
+            onReview = { selectedPath ->
+                val path = selectedPath.trim()
+                if (path.isBlank()) {
+                    actions.onWizardStateChange(
+                        PlugImportWizardState.ChoosingPath(
+                            path = selectedPath,
+                            errorMessage = "Choose an OCI layout directory.",
+                        ),
+                    )
+                } else {
+                    actions.onWizardStateChange(PlugImportWizardState.Reviewing(path = path, isPreviewLoading = true))
+                    launchPlugPreview(
+                        path = path,
+                        plugsRepo = actions.plugsRepo,
+                        scope = actions.scope,
+                        onWizardStateChange = actions.onWizardStateChange,
+                    )
+                }
+            },
+        ),
+    )
+}
+
+@Composable
+private fun ImportPlugWizardDialogReviewing(
+    state: PlugImportWizardState.Reviewing,
+    actions: ImportPlugWizardDialogActions,
+) {
+    ImportPlugWizardReviewStep(
+        state = ImportPlugWizardReviewStepState(
+            path = state.path,
+            preview = state.preview,
+            isPreviewLoading = state.isPreviewLoading,
+            isImporting = state.isImporting,
+            errorMessage = state.errorMessage,
+            onCancel = actions.onClose,
+            onChangePath = {
+                actions.onWizardStateChange(PlugImportWizardState.ChoosingPath(path = state.path))
+            },
+            onImport = import@{
+                val preview = state.preview ?: return@import
+                actions.onWizardStateChange(state.copy(isImporting = true, errorMessage = null))
+                launchPlugImport(
+                    request = PlugImportRequest(
+                        path = state.path,
+                        preview = preview,
+                        plugsRepo = actions.plugsRepo,
+                        scope = actions.scope,
+                        onImportSuccess = actions.onImportSuccess,
+                        onWizardStateChange = actions.onWizardStateChange,
+                    ),
+                )
+            },
+        ),
+    )
+}
+
+@Composable
+private fun ImportPlugWizardDialogSuccess(state: PlugImportWizardState.Success, onClose: () -> Unit) {
+    ImportPlugWizardSuccessStep(
+        path = state.path,
+        preview = state.preview,
+        onClose = onClose,
+    )
+}
+
+@Composable
+private fun ImportPlugWizardChoosePathStep(state: ImportPlugWizardChoosePathStepState) {
+    var localPath by rememberSaveable { mutableStateOf(state.path) }
+    LaunchedEffect(state.path) {
+        if (localPath != state.path) {
+            localPath = state.path
+        }
+    }
+    ImportPlugWizardChoosePathStepContent(
+        state = state.copy(
+            path = localPath,
+            onPathChange = { nextPath ->
+                localPath = nextPath
+                state.onPathChange(nextPath)
+            },
+            onReview = { state.onReview(localPath) },
+        ),
+    )
+}
+
+@Composable
+private fun ImportPlugWizardChoosePathStepContent(state: ImportPlugWizardChoosePathStepState) {
+    Column(
+        modifier =
+        Modifier
+            .fillMaxWidth()
+            .padding(24.dp)
+            .testTag(SettingsScreenSemantics.PLUGS_ADD_DIALOG),
+        verticalArrangement = Arrangement.spacedBy(16.dp),
+    ) {
+        ImportPlugWizardChoosePathHeader()
+        ImportPlugWizardChoosePathDirectoryField(path = state.path, onPathChange = state.onPathChange)
+        ImportPlugWizardChoosePathBrowseButton(onBrowse = state.onBrowse)
+        ImportPlugWizardChoosePathError(message = state.errorMessage)
+        ImportPlugWizardChoosePathActions(onCancel = state.onCancel, onReview = { state.onReview(state.path) })
+    }
+}
+
+@Composable
+private fun ImportPlugWizardChoosePathHeader() {
+    Text(text = "Import plug", style = MaterialTheme.typography.headlineSmall, fontWeight = FontWeight.SemiBold)
+    Text(text = "Choose an OCI layout directory to review before import.", style = MaterialTheme.typography.bodyLarge)
+}
+
+@Composable
+private fun ImportPlugWizardChoosePathDirectoryField(path: String, onPathChange: (String) -> Unit) {
+    OutlinedTextField(
+        value = path,
+        onValueChange = onPathChange,
+        label = { Text("OCI layout directory") },
+        singleLine = true,
+        modifier = Modifier.fillMaxWidth().testTag(SettingsScreenSemantics.PLUGS_IMPORT_PATH_FIELD),
+    )
+}
+
+@Composable
+private fun ImportPlugWizardChoosePathBrowseButton(onBrowse: () -> Unit) {
+    Button(onClick = onBrowse, modifier = Modifier.testTag(SettingsScreenSemantics.PLUGS_IMPORT_BROWSE_BUTTON)) {
+        Icon(imageVector = Icons.Default.FolderOpen, contentDescription = null)
+        Spacer(modifier = Modifier.width(8.dp))
+        Text("Browse")
+    }
+}
+
+@Composable
+private fun ImportPlugWizardChoosePathError(message: String?) {
+    message ?: return
+    Text(
+        text = message,
+        style = MaterialTheme.typography.bodyMedium,
+        color = MaterialTheme.colorScheme.error,
+        modifier = Modifier.testTag(SettingsScreenSemantics.PLUGS_IMPORT_ERROR),
+    )
+}
+
+@Composable
+private fun ImportPlugWizardChoosePathActions(onCancel: () -> Unit, onReview: () -> Unit) {
+    Row(
+        modifier = Modifier.fillMaxWidth(),
+        horizontalArrangement = Arrangement.spacedBy(12.dp, Alignment.End),
+    ) {
+        TextButton(onClick = onCancel) { Text("Cancel") }
+        Button(onClick = onReview, modifier = Modifier.testTag(SettingsScreenSemantics.PLUGS_IMPORT_CONFIRM_BUTTON)) {
+            Text("Review")
+        }
+    }
+}
+
+@Composable
+private fun ImportPlugWizardReviewStep(state: ImportPlugWizardReviewStepState) {
+    ImportPlugWizardReviewStepContent(state)
+}
+
+@Composable
+private fun ImportPlugWizardReviewStepContent(state: ImportPlugWizardReviewStepState) {
+    Column(
+        modifier =
+        Modifier
+            .fillMaxWidth()
+            .padding(24.dp)
+            .testTag(SettingsScreenSemantics.PLUGS_IMPORT_REVIEW),
+        verticalArrangement = Arrangement.spacedBy(16.dp),
+    ) {
+        ImportPlugWizardReviewHeader(state.path)
+        ImportPlugWizardReviewStatus(state)
+        ImportPlugWizardReviewError(state.errorMessage)
+        ImportPlugWizardReviewActions(state)
+    }
+}
+
+@Composable
+private fun ImportPlugWizardReviewHeader(path: String) {
+    Text(text = "Review plug", style = MaterialTheme.typography.headlineSmall, fontWeight = FontWeight.SemiBold)
+    Text(text = path, style = MaterialTheme.typography.bodyMedium, color = MaterialTheme.colorScheme.onSurfaceVariant)
+}
+
+@Composable
+private fun ImportPlugWizardReviewStatus(state: ImportPlugWizardReviewStepState) {
+    when {
+        state.isPreviewLoading -> {
+            Row(
+                modifier = Modifier.testTag(SettingsScreenSemantics.PLUGS_IMPORT_REVIEW_LOADING),
+                horizontalArrangement = Arrangement.spacedBy(8.dp),
+                verticalAlignment = Alignment.CenterVertically,
+            ) {
+                CircularProgressIndicator(modifier = Modifier.width(18.dp).height(18.dp), strokeWidth = 2.dp)
+                Text("Loading preview…", style = MaterialTheme.typography.bodyMedium)
+            }
+        }
+
+        state.preview != null -> PlugImportPreviewCard(state.preview)
+    }
+}
+
+@Composable
+private fun ImportPlugWizardReviewError(message: String?) {
+    message ?: return
+    Text(
+        text = message,
+        style = MaterialTheme.typography.bodyMedium,
+        color = MaterialTheme.colorScheme.error,
+        modifier = Modifier.testTag(SettingsScreenSemantics.PLUGS_IMPORT_REVIEW_ERROR),
+    )
+}
+
+@Composable
+private fun ImportPlugWizardReviewActions(state: ImportPlugWizardReviewStepState) {
+    Row(
+        modifier = Modifier.fillMaxWidth(),
+        horizontalArrangement = Arrangement.spacedBy(12.dp, Alignment.End),
+    ) {
+        TextButton(onClick = state.onCancel, enabled = !state.isImporting) { Text("Cancel") }
+        TextButton(
+            onClick = state.onChangePath,
+            enabled = !state.isPreviewLoading && !state.isImporting,
+            modifier = Modifier.testTag(SettingsScreenSemantics.PLUGS_IMPORT_REVIEW_CHANGE_PATH_BUTTON),
+        ) {
+            Text("Change path")
+        }
+        Button(
+            onClick = state.onImport,
+            enabled = state.preview != null && !state.isPreviewLoading && !state.isImporting,
+            modifier = Modifier.testTag(SettingsScreenSemantics.PLUGS_IMPORT_REVIEW_IMPORT_BUTTON),
+        ) {
+            if (state.isImporting) {
+                CircularProgressIndicator(
+                    modifier = Modifier.padding(end = 8.dp).height(16.dp).width(16.dp),
+                    strokeWidth = 2.dp,
+                )
+            }
+            Text("Import")
+        }
+    }
+}
+
+@Composable
+private fun ImportPlugWizardSuccessStep(path: String, preview: PlugSummary, onClose: () -> Unit) {
     Column(
         modifier =
         Modifier
@@ -959,18 +1284,18 @@ private fun ImportPlugComingNextDialog(onClose: () -> Unit) {
         verticalArrangement = Arrangement.spacedBy(16.dp),
     ) {
         Text(
-            text = "Import plug",
+            text = "Import complete",
             style = MaterialTheme.typography.headlineSmall,
             fontWeight = FontWeight.SemiBold,
+            modifier = Modifier.testTag(SettingsScreenSemantics.PLUGS_IMPORT_SUCCESS),
         )
+        PlugImportPreviewCard(preview)
         Text(
-            text = "The OCI layout import wizard comes next.",
+            text = "Imported from:",
             style = MaterialTheme.typography.bodyLarge,
         )
         Text(
-            text =
-            "This placeholder keeps the Add plug entry point accessible " +
-                "while the multi-step flow is being built.",
+            text = path,
             style = MaterialTheme.typography.bodyMedium,
             color = MaterialTheme.colorScheme.onSurfaceVariant,
         )
@@ -978,11 +1303,147 @@ private fun ImportPlugComingNextDialog(onClose: () -> Unit) {
             modifier = Modifier.fillMaxWidth(),
             horizontalArrangement = Arrangement.End,
         ) {
-            TextButton(onClick = onClose) {
+            TextButton(
+                onClick = onClose,
+                modifier = Modifier.testTag(SettingsScreenSemantics.PLUGS_IMPORT_CLOSE_BUTTON),
+            ) {
                 Text("Close")
             }
         }
     }
+}
+
+@Composable
+private fun PlugImportPreviewCard(preview: PlugSummary) {
+    OutlinedCard(
+        modifier =
+        Modifier
+            .fillMaxWidth()
+            .testTag(SettingsScreenSemantics.PLUGS_IMPORT_REVIEW_PREVIEW),
+    ) {
+        Column(
+            modifier = Modifier.padding(16.dp),
+            verticalArrangement = Arrangement.spacedBy(8.dp),
+        ) {
+            Text(
+                text = preview.title,
+                style = MaterialTheme.typography.titleMedium,
+                fontWeight = FontWeight.SemiBold,
+                modifier = Modifier.testTag(SettingsScreenSemantics.PLUGS_IMPORT_REVIEW_PREVIEW_TITLE),
+            )
+            Text(
+                text = "${preview.id} · ${preview.version}",
+                style = MaterialTheme.typography.bodySmall,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                modifier = Modifier.testTag(SettingsScreenSemantics.PLUGS_IMPORT_REVIEW_PREVIEW_ID),
+            )
+            if (preview.desc.isNotBlank()) {
+                Text(
+                    text = preview.desc,
+                    style = MaterialTheme.typography.bodyMedium,
+                    modifier = Modifier.testTag(SettingsScreenSemantics.PLUGS_IMPORT_REVIEW_PREVIEW_DESCRIPTION),
+                )
+            }
+            Text(
+                text = buildPlugCountsText(preview),
+                style = MaterialTheme.typography.bodySmall,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                modifier = Modifier.testTag(SettingsScreenSemantics.PLUGS_IMPORT_REVIEW_PREVIEW_COUNTS),
+            )
+        }
+    }
+}
+
+private data class ImportPlugWizardChoosePathStepState(
+    val path: String,
+    val errorMessage: String?,
+    val onPathChange: (String) -> Unit,
+    val onBrowse: () -> Unit,
+    val onCancel: () -> Unit,
+    val onReview: (String) -> Unit,
+)
+
+private data class ImportPlugWizardReviewStepState(
+    val path: String,
+    val preview: PlugSummary?,
+    val isPreviewLoading: Boolean,
+    val isImporting: Boolean,
+    val errorMessage: String?,
+    val onCancel: () -> Unit,
+    val onChangePath: () -> Unit,
+    val onImport: () -> Unit,
+)
+
+private data class PlugImportRequest(
+    val path: String,
+    val preview: PlugSummary,
+    val plugsRepo: PlugsRepoFfi,
+    val scope: CoroutineScope,
+    val onImportSuccess: () -> Unit,
+    val onWizardStateChange: (PlugImportWizardState) -> Unit,
+)
+
+private fun launchPlugPreview(
+    path: String,
+    plugsRepo: PlugsRepoFfi,
+    scope: CoroutineScope,
+    onWizardStateChange: (PlugImportWizardState) -> Unit,
+) {
+    scope.launch {
+        try {
+            val preview = plugsRepo.inspectOciLayout(path)
+            withContext(Dispatchers.Main.immediate) {
+                onWizardStateChange(
+                    PlugImportWizardState.Reviewing(
+                        path = path,
+                        preview = preview,
+                    ),
+                )
+            }
+        } catch (error: CancellationException) {
+            throw error
+        } catch (error: FfiException) {
+            withContext(Dispatchers.Main.immediate) {
+                onWizardStateChange(
+                    PlugImportWizardState.ChoosingPath(
+                        path = path,
+                        errorMessage = buildImportErrorMessage("Preview", error),
+                    ),
+                )
+            }
+        }
+    }
+}
+
+private fun launchPlugImport(request: PlugImportRequest) {
+    request.scope.launch {
+        try {
+            request.plugsRepo.importFromOciLayout(request.path)
+            withContext(Dispatchers.Main.immediate) {
+                request.onImportSuccess()
+                request.onWizardStateChange(
+                    PlugImportWizardState.Success(path = request.path, preview = request.preview),
+                )
+            }
+        } catch (error: CancellationException) {
+            throw error
+        } catch (error: FfiException) {
+            withContext(Dispatchers.Main.immediate) {
+                request.onWizardStateChange(
+                    PlugImportWizardState.Reviewing(
+                        path = request.path,
+                        preview = request.preview,
+                        errorMessage = buildImportErrorMessage("Import", error),
+                    ),
+                )
+            }
+        }
+    }
+}
+
+private fun buildImportErrorMessage(action: String, error: FfiException): String {
+    val message = error.message?.takeIf { it.isNotBlank() } ?: "unknown error"
+    return "$action failed: $message"
 }
 
 @Composable

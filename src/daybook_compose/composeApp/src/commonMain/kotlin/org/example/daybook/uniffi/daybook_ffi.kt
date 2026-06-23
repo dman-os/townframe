@@ -1087,6 +1087,8 @@ external fun uniffi_daybook_ffi_checksum_method_plugsrepoffi_ffi_register_listen
 ): Short
 external fun uniffi_daybook_ffi_checksum_method_plugsrepoffi_import_from_oci_layout(
 ): Short
+external fun uniffi_daybook_ffi_checksum_method_plugsrepoffi_inspect_oci_layout(
+): Short
 external fun uniffi_daybook_ffi_checksum_method_plugsrepoffi_list_plugs(
 ): Short
 external fun uniffi_daybook_ffi_checksum_method_plugsrepoffi_stop(
@@ -1460,6 +1462,8 @@ external fun uniffi_daybook_ffi_fn_constructor_plugsrepoffi_load(`fcx`: Long,`bl
 external fun uniffi_daybook_ffi_fn_method_plugsrepoffi_ffi_register_listener(`ptr`: Long,`listener`: Long,uniffi_out_err: UniffiRustCallStatus, 
 ): Long
 external fun uniffi_daybook_ffi_fn_method_plugsrepoffi_import_from_oci_layout(`ptr`: Long,`path`: RustBuffer.ByValue,
+): Long
+external fun uniffi_daybook_ffi_fn_method_plugsrepoffi_inspect_oci_layout(`ptr`: Long,`path`: RustBuffer.ByValue,
 ): Long
 external fun uniffi_daybook_ffi_fn_method_plugsrepoffi_list_plugs(`ptr`: Long,
 ): Long
@@ -1892,6 +1896,9 @@ private fun uniffiCheckApiChecksums(lib: IntegrityCheckingUniffiLib) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
     if (lib.uniffi_daybook_ffi_checksum_method_plugsrepoffi_import_from_oci_layout() != 34199.toShort()) {
+        throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
+    }
+    if (lib.uniffi_daybook_ffi_checksum_method_plugsrepoffi_inspect_oci_layout() != 39088.toShort()) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
     if (lib.uniffi_daybook_ffi_checksum_method_plugsrepoffi_list_plugs() != 20893.toShort()) {
@@ -8513,6 +8520,8 @@ public interface PlugsRepoFfiInterface {
     
     suspend fun `importFromOciLayout`(`path`: kotlin.String)
     
+    suspend fun `inspectOciLayout`(`path`: kotlin.String): PlugSummary
+    
     suspend fun `listPlugs`(): List<PlugSummary>
     
     suspend fun `stop`()
@@ -8646,6 +8655,27 @@ open class PlugsRepoFfi: Disposable, AutoCloseable, PlugsRepoFfiInterface
         // lift function
         { Unit },
         
+        // Error FFI converter
+        FfiException.ErrorHandler,
+    )
+    }
+
+    
+    @Throws(FfiException::class)
+    @Suppress("ASSIGNED_BUT_NEVER_ACCESSED_VARIABLE")
+    override suspend fun `inspectOciLayout`(`path`: kotlin.String) : PlugSummary {
+        return uniffiRustCallAsync(
+        callWithHandle { uniffiHandle ->
+            UniffiLib.uniffi_daybook_ffi_fn_method_plugsrepoffi_inspect_oci_layout(
+                uniffiHandle,
+                FfiConverterString.lower(`path`),
+            )
+        },
+        { future, callback, continuation -> UniffiLib.ffi_daybook_ffi_rust_future_poll_rust_buffer(future, callback, continuation) },
+        { future, continuation -> UniffiLib.ffi_daybook_ffi_rust_future_complete_rust_buffer(future, continuation) },
+        { future -> UniffiLib.ffi_daybook_ffi_rust_future_free_rust_buffer(future) },
+        // lift function
+        { FfiConverterTypePlugSummary.lift(it) },
         // Error FFI converter
         FfiException.ErrorHandler,
     )
@@ -13128,74 +13158,3 @@ public object FfiConverterTypeUuid: FfiConverter<Uuid, RustBuffer.ByValue> {
         FfiConverterByteArray.write(builtinValue, buf)
     }
 }
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-

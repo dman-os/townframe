@@ -87,6 +87,17 @@ impl PlugsRepoFfi {
             .await
     }
 
+    async fn inspect_oci_layout(&self, path: String) -> Result<PlugSummary, FfiError> {
+        let repo = Arc::clone(&self.repo);
+        let path = PathBuf::from(path);
+        self.fcx
+            .do_on_rt(async move {
+                let manifest = repo.inspect_oci_layout(&path).await?;
+                Ok::<_, FfiError>(plug_summary_from_manifest(manifest))
+            })
+            .await
+    }
+
     #[tracing::instrument(skip(self))]
     async fn list_plugs(&self) -> Vec<PlugSummary> {
         let repo = Arc::clone(&self.repo);
@@ -114,5 +125,21 @@ impl PlugsRepoFfi {
                 plugs
             })
             .await
+    }
+}
+
+fn plug_summary_from_manifest(manifest: daybook_types::manifest::PlugManifest) -> PlugSummary {
+    PlugSummary {
+        id: manifest.id(),
+        namespace: manifest.namespace,
+        name: manifest.name,
+        version: manifest.version.to_string(),
+        title: manifest.title,
+        desc: manifest.desc,
+        facet_count: manifest.facets.len().try_into().unwrap(),
+        view_count: manifest.views.len().try_into().unwrap(),
+        routine_count: manifest.routines.len().try_into().unwrap(),
+        processor_count: manifest.processors.len().try_into().unwrap(),
+        command_count: manifest.commands.len().try_into().unwrap(),
     }
 }

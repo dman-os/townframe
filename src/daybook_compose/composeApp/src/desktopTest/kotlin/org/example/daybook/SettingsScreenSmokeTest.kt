@@ -13,6 +13,7 @@ import androidx.compose.ui.test.onNodeWithTag
 import androidx.compose.ui.test.onNodeWithText
 import androidx.compose.ui.test.performSemanticsAction
 import androidx.compose.ui.test.performClick
+import androidx.compose.ui.test.performTextInput
 import androidx.compose.ui.test.v2.runComposeUiTest
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.semantics.SemanticsActions
@@ -48,7 +49,7 @@ import org.example.daybook.uniffi.TablesRepoFfi
 @OptIn(ExperimentalTestApi::class)
 class SettingsScreenSmokeTest {
     @Test
-    fun realRepo_renders_plugs_and_opens_placeholder_add_dialog() = runComposeUiTest {
+    fun realRepo_renders_plugs_and_reviews_then_imports_test_plug_from_oci_layout() = runComposeUiTest {
         val fixture = runBlocking { SettingsRealRepoFixture.create() }
         val outerBackClicks = AtomicInteger(0)
         try {
@@ -58,6 +59,14 @@ class SettingsScreenSmokeTest {
                     it.namespace.contains("daybook", ignoreCase = true) ||
                         it.title.contains("daybook", ignoreCase = true)
                 } ?: error("expected a system plug in listPlugs(): $installedPlugs")
+            val plugTestPath = plugTestOciPath().toString()
+            val preview = runBlocking { fixture.plugsRepo.inspectOciLayout(plugTestPath) }
+            check(preview.title == "Daybook Test Plug") { "unexpected preview title: $preview" }
+            check(preview.id == PLUG_TEST_ID) { "unexpected preview id: $preview" }
+            check(preview.version == "0.0.1") { "unexpected preview version: $preview" }
+            check(preview.desc == "Internal e2e test plug for command invocation") {
+                "unexpected preview description: $preview"
+            }
 
             setContent {
                 DaybookTheme(themeConfig = ThemeConfig.Light) {
@@ -118,6 +127,42 @@ class SettingsScreenSmokeTest {
             }
             onNodeWithTag(SettingsScreenSemantics.PLUGS_ADD_DIALOG).assertIsDisplayed()
             onNodeWithText("Import plug").assertIsDisplayed()
+            onNodeWithTag(SettingsScreenSemantics.PLUGS_IMPORT_PATH_FIELD).assertIsDisplayed()
+            onNodeWithTag(SettingsScreenSemantics.PLUGS_IMPORT_PATH_FIELD)
+                .performTextInput(plugTestPath)
+            waitUntil(timeoutMillis = 10_000) {
+                onAllNodesWithText(plugTestPath).fetchSemanticsNodes().isNotEmpty()
+            }
+            onNodeWithTag(SettingsScreenSemantics.PLUGS_IMPORT_CONFIRM_BUTTON).performClick()
+
+            waitUntil(timeoutMillis = 10_000) {
+                onAllNodesWithTag(SettingsScreenSemantics.PLUGS_IMPORT_REVIEW_PREVIEW_TITLE)
+                    .fetchSemanticsNodes()
+                    .isNotEmpty()
+            }
+            onNodeWithTag(SettingsScreenSemantics.PLUGS_IMPORT_REVIEW).assertIsDisplayed()
+            onNodeWithTag(SettingsScreenSemantics.PLUGS_IMPORT_REVIEW_PREVIEW_TITLE).assertIsDisplayed()
+            onNodeWithText("Daybook Test Plug").assertIsDisplayed()
+            onNodeWithTag(SettingsScreenSemantics.PLUGS_IMPORT_REVIEW_PREVIEW_ID).assertIsDisplayed()
+            onNodeWithText("@daybook/test · 0.0.1").assertIsDisplayed()
+            onNodeWithTag(SettingsScreenSemantics.PLUGS_IMPORT_REVIEW_PREVIEW_DESCRIPTION).assertIsDisplayed()
+            onNodeWithText("Internal e2e test plug for command invocation").assertIsDisplayed()
+            onNodeWithTag(SettingsScreenSemantics.PLUGS_IMPORT_REVIEW_PREVIEW_COUNTS).assertIsDisplayed()
+            onNodeWithTag(SettingsScreenSemantics.PLUGS_IMPORT_REVIEW_IMPORT_BUTTON).performClick()
+            waitUntil(timeoutMillis = 10_000) {
+                onAllNodesWithTag(SettingsScreenSemantics.PLUGS_IMPORT_SUCCESS)
+                    .fetchSemanticsNodes()
+                    .isNotEmpty()
+            }
+            onNodeWithTag(SettingsScreenSemantics.PLUGS_IMPORT_SUCCESS).assertIsDisplayed()
+            onNodeWithTag(SettingsScreenSemantics.PLUGS_IMPORT_CLOSE_BUTTON).performClick()
+            waitUntil(timeoutMillis = 10_000) {
+                onAllNodesWithTag(SettingsScreenSemantics.plugRow(PLUG_TEST_ID))
+                    .fetchSemanticsNodes()
+                    .isNotEmpty()
+            }
+            onNodeWithTag(SettingsScreenSemantics.plugRow(PLUG_TEST_ID)).assertIsDisplayed()
+            onNodeWithText("Daybook Test Plug").assertIsDisplayed()
         } finally {
             fixture.close()
         }
@@ -347,4 +392,21 @@ private class SettingsRealRepoFixture(
             )
         }
     }
+}
+
+private const val PLUG_TEST_ID = "@daybook/test"
+
+private fun plugTestOciPath(): Path {
+    var cursor: Path? = Path.of("").toAbsolutePath()
+    while (cursor != null) {
+        val candidate = cursor.resolve("target/oci/@daybook/test")
+        if (Files.isDirectory(candidate)) {
+            return candidate
+        }
+        cursor = cursor.parent
+    }
+    error(
+        "Missing OCI plug artifact at target/oci/@daybook/test. Build it with: " +
+            "cargo run -p xtask -- build-plug-oci --plug-root ./src/plug_test",
+    )
 }

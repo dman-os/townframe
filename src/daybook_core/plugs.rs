@@ -1297,42 +1297,8 @@ impl PlugsRepo {
         layout_root: &std::path::Path,
         opts: OciImportOptions,
     ) -> Res<ImportedPlug> {
-        let _oci_layout = oci_spec::image::OciLayout::from_file(layout_root.join("oci-layout"))?;
-        let index = oci_spec::image::ImageIndex::from_file(layout_root.join("index.json"))?;
-        let selected_manifest_descriptor = index
-            .manifests()
-            .first()
-            .cloned()
-            .ok_or_eyre("oci index has no manifests")?;
-        let selected_manifest_sha = selected_manifest_descriptor
-            .as_digest_sha256()
-            .ok_or_eyre("oci index manifest descriptor must use sha256 digest")?
-            .to_string();
-        let manifest_bytes = Self::read_oci_layout_blob_by_sha(layout_root, &selected_manifest_sha)
-            .await
-            .wrap_err("error reading selected OCI manifest blob from layout")?;
-        let oci_manifest: oci_client::manifest::OciManifest =
-            serde_json::from_slice(&manifest_bytes)?;
-
-        let image_manifest = match oci_manifest {
-            oci_client::manifest::OciManifest::Image(manifest) => manifest,
-            oci_client::manifest::OciManifest::ImageIndex(index_manifest) => {
-                let nested_descriptor = index_manifest
-                    .manifests
-                    .first()
-                    .ok_or_eyre("nested OCI image index has no manifests")?;
-                let nested_sha = Self::sha256_hex_from_digest_str(&nested_descriptor.digest)?;
-                let nested_bytes = Self::read_oci_layout_blob_by_sha(layout_root, &nested_sha)
-                    .await
-                    .wrap_err("error reading nested OCI manifest blob from layout")?;
-                match serde_json::from_slice::<oci_client::manifest::OciManifest>(&nested_bytes)? {
-                    oci_client::manifest::OciManifest::Image(manifest) => manifest,
-                    oci_client::manifest::OciManifest::ImageIndex(_) => {
-                        eyre::bail!("nested OCI manifest must resolve to an image manifest")
-                    }
-                }
-            }
-        };
+        let (image_manifest, selected_manifest_sha) =
+            Self::load_oci_layout_image_manifest(layout_root).await?;
 
         self.import_from_oci_image_manifest(
             image_manifest,
@@ -1343,6 +1309,18 @@ impl PlugsRepo {
                 Self::read_oci_layout_blob_by_sha(layout_root, &sha).await
             },
         )
+        .await
+    }
+
+    pub async fn inspect_oci_layout(
+        &self,
+        layout_root: &std::path::Path,
+    ) -> Res<manifest::PlugManifest> {
+        let (image_manifest, _) = Self::load_oci_layout_image_manifest(layout_root).await?;
+        Self::inspect_oci_image_manifest(&image_manifest, |digest| async move {
+            let sha = Self::sha256_hex_from_digest_str(&digest)?;
+            Self::read_oci_layout_blob_by_sha(layout_root, &sha).await
+        })
         .await
     }
 
@@ -1592,6 +1570,101 @@ impl PlugsRepo {
             imported_blob_hashes,
             source_digest,
         })
+    }
+
+    async fn inspect_oci_image_manifest<F, Fut>(
+        image_manifest: &oci_client::manifest::OciImageManifest,
+        mut pull_blob_by_digest: F,
+    ) -> Res<manifest::PlugManifest>
+    where
+        F: FnMut(String) -> Fut,
+        Fut: std::future::Future<Output = Res<Vec<u8>>>,
+    {
+        let Some(manifest_layer) = image_manifest
+            .layers
+            .iter()
+            .find(|layer| layer.media_type == OCI_PLUG_MANIFEST_LAYER_MEDIA_TYPE)
+        else {
+            eyre::bail!(
+                "missing required '{}' layer",
+                OCI_PLUG_MANIFEST_LAYER_MEDIA_TYPE
+            );
+        };
+        let layer_bytes = pull_blob_by_digest(manifest_layer.digest.clone())
+            .await
+            .wrap_err_with(|| {
+                format!("error pulling OCI layer blob '{}'", manifest_layer.digest)
+            })?;
+        let manifest_json: serde_json::Value = serde_json::from_slice(&layer_bytes)
+            .wrap_err("error parsing plug manifest layer JSON")?;
+        let manifest_json = Self::scrub_oci_preview_manifest(manifest_json);
+        let plug_manifest: manifest::PlugManifest = serde_json::from_value(manifest_json)
+            .wrap_err("error parsing plug manifest JSON into PlugManifest")?;
+        Ok(plug_manifest)
+    }
+
+    fn scrub_oci_preview_manifest(mut manifest_json: serde_json::Value) -> serde_json::Value {
+        let Some(wflow_bundles) = manifest_json
+            .get_mut("wflowBundles")
+            .and_then(serde_json::Value::as_object_mut)
+        else {
+            return manifest_json;
+        };
+        for bundle in wflow_bundles.values_mut() {
+            let Some(bundle_object) = bundle.as_object_mut() else {
+                continue;
+            };
+            bundle_object.insert(
+                "componentUrls".to_string(),
+                serde_json::Value::Array(vec![]),
+            );
+        }
+        manifest_json
+    }
+
+    async fn load_oci_layout_image_manifest(
+        layout_root: &std::path::Path,
+    ) -> Res<(oci_client::manifest::OciImageManifest, String)> {
+        let _oci_layout = oci_spec::image::OciLayout::from_file(layout_root.join("oci-layout"))?;
+        let index = oci_spec::image::ImageIndex::from_file(layout_root.join("index.json"))?;
+        let selected_manifest_descriptor = index
+            .manifests()
+            .first()
+            .cloned()
+            .ok_or_eyre("oci index has no manifests")?;
+        let selected_manifest_sha = selected_manifest_descriptor
+            .as_digest_sha256()
+            .ok_or_eyre("oci index manifest descriptor must use sha256 digest")?
+            .to_string();
+        let manifest_bytes = Self::read_oci_layout_blob_by_sha(layout_root, &selected_manifest_sha)
+            .await
+            .wrap_err("error reading selected OCI manifest blob from layout")?;
+        let oci_manifest: oci_client::manifest::OciManifest =
+            serde_json::from_slice(&manifest_bytes)?;
+
+        match oci_manifest {
+            oci_client::manifest::OciManifest::Image(manifest) => {
+                Ok((manifest, selected_manifest_sha))
+            }
+            oci_client::manifest::OciManifest::ImageIndex(index_manifest) => {
+                let nested_descriptor = index_manifest
+                    .manifests
+                    .first()
+                    .ok_or_eyre("nested OCI image index has no manifests")?;
+                let nested_sha = Self::sha256_hex_from_digest_str(&nested_descriptor.digest)?;
+                let nested_bytes = Self::read_oci_layout_blob_by_sha(layout_root, &nested_sha)
+                    .await
+                    .wrap_err("error reading nested OCI manifest blob from layout")?;
+                match serde_json::from_slice::<oci_client::manifest::OciManifest>(&nested_bytes)? {
+                    oci_client::manifest::OciManifest::Image(manifest) => {
+                        Ok((manifest, selected_manifest_sha))
+                    }
+                    oci_client::manifest::OciManifest::ImageIndex(_) => {
+                        eyre::bail!("nested OCI manifest must resolve to an image manifest")
+                    }
+                }
+            }
+        }
     }
 
     fn rewrite_oci_component_urls(
@@ -2463,6 +2536,34 @@ mod tests {
         let (repo, _repo_stop) =
             PlugsRepo::load(Arc::clone(&big_repo), blobs, doc_id, local_user_path).await?;
         Ok((big_repo, big_sync_host.store, repo, doc_id, temp_dir))
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn inspect_test_plug_oci_layout() -> Res<()> {
+        let (_big_repo, _part_store, repo, _doc_id, _temp_dir) = setup_repo().await?;
+        let artifact_path = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("../../target/oci")
+            .join("@daybook/test");
+        eyre::ensure!(
+            artifact_path.exists(),
+            "missing OCI plug artifact at '{}'. Build it first with: cargo run -p xtask -- build-plug-oci --plug-root ./src/plug_test",
+            artifact_path.display()
+        );
+
+        let manifest = repo.inspect_oci_layout(&artifact_path).await?;
+        assert_eq!(manifest.id(), "@daybook/test");
+        assert_eq!(manifest.title, "Daybook Test Plug");
+        assert_eq!(
+            manifest.desc,
+            "Internal e2e test plug for command invocation"
+        );
+        assert_eq!(manifest.version.to_string(), "0.0.1");
+        assert_eq!(manifest.commands.len(), 6);
+        assert_eq!(manifest.facets.len(), 3);
+        assert_eq!(manifest.views.len(), 1);
+        assert_eq!(manifest.routines.len(), 14);
+        assert_eq!(manifest.processors.len(), 0);
+        Ok(())
     }
 
     fn mock_plug(name: &str) -> manifest::PlugManifest {
