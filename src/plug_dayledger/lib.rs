@@ -61,6 +61,9 @@ mod wasm_runtime {
                 "parse-hledger" => |cx, _args: serde_json::Value| {
                     parse_hledger::run(cx)
                 },
+                super::INIT_NOTE_EDITOR_CONFIG_ROUTINE_KEY => |cx, _args: serde_json::Value| {
+                    init_note_editor_config::run(cx)
+                },
             })
         }
     }
@@ -126,15 +129,22 @@ mod wasm_runtime {
 
 #[cfg(target_arch = "wasm32")]
 pub mod wflows {
+    pub mod init_note_editor_config;
     pub mod parse_hledger;
+}
+
+#[cfg(test)]
+mod wflows {
+    pub mod init_note_editor_config;
 }
 
 use daybook_types::doc::{Note, WellKnownFacetTag};
 use daybook_types::manifest::{
     CompareOp, DocChangePredicate, DocPredicateClause, FacetDependencyManifest, FacetDisplayDeets,
-    FacetDisplayHint, FacetManifest, FacetReferenceManifest, FacetViewMode, PlugDependencyManifest,
-    PlugManifest, ProcessorDeets, ProcessorEventPredicate, ProcessorManifest, RoutineDocAcl,
-    RoutineFacetAccess, RoutineImpl, RoutineManifest, ViewManifest, ViewProviderManifest, ViewRef,
+    FacetDisplayHint, FacetManifest, FacetReferenceManifest, FacetViewMode, InitDeets,
+    InitManifest, InitRunMode, PlugDependencyManifest, PlugManifest, ProcessorDeets,
+    ProcessorEventPredicate, ProcessorManifest, RoutineDocAcl, RoutineFacetAccess, RoutineImpl,
+    RoutineManifest, ViewManifest, ViewProviderManifest, ViewRef,
 };
 #[cfg(any(test, target_arch = "wasm32"))]
 use daybook_types::view::{
@@ -147,6 +157,8 @@ pub fn plug_manifest() -> PlugManifest {
     use crate::types::{Account, Claim, DayledgerFacetTag, LedgerMeta, Txn};
 
     let note_tag: daybook_types::manifest::FacetTag = WellKnownFacetTag::Note.into();
+    let note_editor_config_tag: daybook_types::manifest::FacetTag =
+        NOTE_EDITOR_CONFIG_FACET_TAG.into();
     let claim_tag: daybook_types::manifest::FacetTag = DayledgerFacetTag::Claim.as_str().into();
     let ledger_meta_view_key: daybook_types::manifest::KeyGeneric = LEDGER_META_VIEW_KEY.into();
 
@@ -198,10 +210,16 @@ pub fn plug_manifest() -> PlugManifest {
         dependencies: [(
             "@daybook/core@v0.0.1".into(),
             PlugDependencyManifest {
-                keys: vec![FacetDependencyManifest {
-                    key_tag: note_tag.clone(),
-                    value_schema: schemars::schema_for!(Note),
-                }],
+                keys: vec![
+                    FacetDependencyManifest {
+                        key_tag: note_tag.clone(),
+                        value_schema: schemars::schema_for!(Note),
+                    },
+                    FacetDependencyManifest {
+                        key_tag: note_editor_config_tag.clone(),
+                        value_schema: schemars::schema_for!(daybook_types::doc::NoteEditorConfig),
+                    },
+                ],
                 local_states: vec![],
             }
             .into(),
@@ -219,61 +237,98 @@ pub fn plug_manifest() -> PlugManifest {
             }),
         )]
         .into(),
-        routines: [(
-            "parse-hledger".into(),
-            Arc::new(RoutineManifest {
-                r#impl: RoutineImpl::Wflow {
-                    key: "parse-hledger".into(),
-                    bundle: "plug_dayledger".into(),
-                },
-                doc_acls: vec![RoutineDocAcl {
-                    doc_predicate: DocPredicateClause::And(vec![
-                        DocPredicateClause::HasTag(note_tag.clone()),
-                        DocPredicateClause::FacetFieldMatch {
-                            tag: note_tag.clone(),
-                            json_path: "$.mime".into(),
-                            operator: CompareOp::Eq,
-                            value: serde_json::json!("text/x-hledger-journal"),
-                        },
-                    ]),
-                    facet_acl: vec![
-                        RoutineFacetAccess {
-                            owner_plug_id: None,
-                            tag: WellKnownFacetTag::Note.into(),
-                            key_id: None,
-                            read: true,
-                            write: false,
-                            create: false,
-                            delete: false,
-                        },
-                        RoutineFacetAccess {
-                            owner_plug_id: None,
-                            tag: DayledgerFacetTag::Claim.as_str().into(),
-                            key_id: None,
-                            read: true,
-                            write: true,
-                            create: true,
-                            delete: false,
-                        },
-                    ],
-                }],
-                query_acls: vec![],
-                config_facet_acl: Default::default(),
-                command_invoke_acl: Default::default(),
-                local_state_acl: Default::default(),
-            }),
-        )]
+        routines: [
+            (
+                "parse-hledger".into(),
+                Arc::new(RoutineManifest {
+                    r#impl: RoutineImpl::Wflow {
+                        key: "parse-hledger".into(),
+                        bundle: "plug_dayledger".into(),
+                    },
+                    doc_acls: vec![RoutineDocAcl {
+                        doc_predicate: DocPredicateClause::And(vec![
+                            DocPredicateClause::HasTag(note_tag.clone()),
+                            DocPredicateClause::FacetFieldMatch {
+                                tag: note_tag.clone(),
+                                json_path: "$.mime".into(),
+                                operator: CompareOp::Eq,
+                                value: serde_json::json!(HLEDGER_NOTE_MIME),
+                            },
+                        ]),
+                        facet_acl: vec![
+                            RoutineFacetAccess {
+                                owner_plug_id: None,
+                                tag: WellKnownFacetTag::Note.into(),
+                                key_id: None,
+                                read: true,
+                                write: false,
+                                create: false,
+                                delete: false,
+                            },
+                            RoutineFacetAccess {
+                                owner_plug_id: None,
+                                tag: DayledgerFacetTag::Claim.as_str().into(),
+                                key_id: None,
+                                read: true,
+                                write: true,
+                                create: true,
+                                delete: false,
+                            },
+                        ],
+                    }],
+                    query_acls: vec![],
+                    config_facet_acl: Default::default(),
+                    command_invoke_acl: Default::default(),
+                    local_state_acl: Default::default(),
+                }),
+            ),
+            (
+                INIT_NOTE_EDITOR_CONFIG_ROUTINE_KEY.into(),
+                Arc::new(RoutineManifest {
+                    r#impl: RoutineImpl::Wflow {
+                        key: INIT_NOTE_EDITOR_CONFIG_ROUTINE_KEY.into(),
+                        bundle: "plug_dayledger".into(),
+                    },
+                    doc_acls: vec![],
+                    query_acls: vec![],
+                    config_facet_acl: vec![RoutineFacetAccess {
+                        owner_plug_id: Some("@daybook/core".into()),
+                        tag: note_editor_config_tag,
+                        key_id: Some(NOTE_EDITOR_CONFIG_FACET_ID.into()),
+                        read: true,
+                        write: true,
+                        create: true,
+                        delete: false,
+                    }],
+                    command_invoke_acl: Default::default(),
+                    local_state_acl: Default::default(),
+                }),
+            ),
+        ]
         .into(),
         wflow_bundles: [(
             "plug_dayledger".into(),
             Arc::new(daybook_types::manifest::WflowBundleManifest {
-                keys: vec!["parse-hledger".into()],
+                keys: vec![
+                    "parse-hledger".into(),
+                    INIT_NOTE_EDITOR_CONFIG_ROUTINE_KEY.into(),
+                ],
                 component_urls: vec!["build://component/plug_dayledger.wasm".parse().unwrap()],
             }),
         )]
         .into(),
         commands: Default::default(),
-        inits: Default::default(),
+        inits: [(
+            "note-editor-config".into(),
+            Arc::new(InitManifest {
+                desc: "Register dayledger note formats with the core note editor".into(),
+                run_mode: InitRunMode::PerInstall,
+                deets: InitDeets::InvokeRoutine {
+                    routine_name: INIT_NOTE_EDITOR_CONFIG_ROUTINE_KEY.into(),
+                },
+            }),
+        )]
+        .into(),
         processors: [(
             "parse-hledger".into(),
             Arc::new(ProcessorManifest {
@@ -292,7 +347,7 @@ pub fn plug_manifest() -> PlugManifest {
                             tag: note_tag,
                             json_path: "$.mime".into(),
                             operator: CompareOp::Eq,
-                            value: serde_json::json!("text/x-hledger-journal"),
+                            value: serde_json::json!(HLEDGER_NOTE_MIME),
                         },
                     ]),
                 },
@@ -304,6 +359,10 @@ pub fn plug_manifest() -> PlugManifest {
 
 const LEDGER_META_VIEW_KEY: &str = "ledger-meta";
 const LEDGER_META_VIEW_EXPORT: &str = "render-facet-view";
+const INIT_NOTE_EDITOR_CONFIG_ROUTINE_KEY: &str = "init-note-editor-config";
+const NOTE_EDITOR_CONFIG_FACET_TAG: &str = "org.example.daybook.note-editor-config";
+const NOTE_EDITOR_CONFIG_FACET_ID: &str = "main";
+const HLEDGER_NOTE_MIME: &str = "text/x-hledger-journal";
 
 #[cfg(any(test, target_arch = "wasm32"))]
 fn ledger_meta_view_spec(ledger_meta: &crate::types::LedgerMeta) -> ViewSpec {
@@ -607,5 +666,44 @@ mod tests {
                 assert_eq!(export.as_str(), LEDGER_META_VIEW_EXPORT);
             }
         }
+    }
+
+    #[test]
+    fn plug_manifest_declares_note_editor_config_init() {
+        let manifest = plug_manifest();
+
+        let init = manifest
+            .inits
+            .get("note-editor-config")
+            .expect("dayledger note editor config init should be declared");
+        assert!(matches!(init.run_mode, InitRunMode::PerInstall));
+        let InitDeets::InvokeRoutine { routine_name } = &init.deets;
+        assert_eq!(routine_name.as_str(), INIT_NOTE_EDITOR_CONFIG_ROUTINE_KEY);
+
+        let routine = manifest
+            .routines
+            .get(INIT_NOTE_EDITOR_CONFIG_ROUTINE_KEY)
+            .expect("init routine should be declared");
+        assert_eq!(routine.config_facet_acl.len(), 1);
+        let access = &routine.config_facet_acl[0];
+        assert_eq!(access.owner_plug_id.as_deref(), Some("@daybook/core"));
+        assert_eq!(access.tag.to_string(), NOTE_EDITOR_CONFIG_FACET_TAG);
+        assert_eq!(access.key_id.as_deref(), Some(NOTE_EDITOR_CONFIG_FACET_ID));
+        assert!(access.read);
+        assert!(access.write);
+        assert!(access.create);
+        assert!(!access.delete);
+
+        let core_dep = manifest
+            .dependencies
+            .get("@daybook/core@v0.0.1")
+            .expect("dayledger should depend on core");
+        assert!(
+            core_dep
+                .keys
+                .iter()
+                .any(|key| key.key_tag.to_string() == NOTE_EDITOR_CONFIG_FACET_TAG),
+            "dayledger should depend on the core note editor config facet",
+        );
     }
 }

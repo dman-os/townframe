@@ -41,6 +41,11 @@ fun facetKeyString(key: FacetKey): String {
     return if (key.id == "main") tagString else "$tagString:${key.id}"
 }
 
+fun facetTagDisplayString(tag: FacetTag): String = when (tag) {
+    is FacetTag.WellKnown -> WELL_KNOWN_FACET_DISPLAY_HINT_KEYS.getValue(tag.v1)
+    is FacetTag.Any -> tag.v1
+}
+
 fun facetKeyRefPathString(key: FacetKey): String =
     org.example.daybook.ui.buildSelfFacetRefUrl(key).removePrefix("db+facet:///self/")
 

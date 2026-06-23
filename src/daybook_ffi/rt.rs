@@ -52,6 +52,7 @@ impl RtFfi {
             sqlite_ls_repo,
         )
     )]
+    #[expect(clippy::too_many_arguments)]
     async fn load(
         fcx: SharedFfiCtx,
         drawer_repo: Arc<DrawerRepoFfi>,

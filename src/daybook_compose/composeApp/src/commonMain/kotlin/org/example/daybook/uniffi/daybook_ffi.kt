@@ -1067,6 +1067,8 @@ external fun uniffi_daybook_ffi_checksum_method_drawerrepoffi_get_bundle(
 ): Short
 external fun uniffi_daybook_ffi_checksum_method_drawerrepoffi_get_entry(
 ): Short
+external fun uniffi_daybook_ffi_checksum_method_drawerrepoffi_get_or_init_plug_config_doc_id(
+): Short
 external fun uniffi_daybook_ffi_checksum_method_drawerrepoffi_list(
 ): Short
 external fun uniffi_daybook_ffi_checksum_method_drawerrepoffi_stop(
@@ -1418,6 +1420,8 @@ external fun uniffi_daybook_ffi_fn_method_drawerrepoffi_get(`ptr`: Long,`id`: Ru
 external fun uniffi_daybook_ffi_fn_method_drawerrepoffi_get_bundle(`ptr`: Long,`id`: RustBuffer.ByValue,`branchPath`: RustBuffer.ByValue,
 ): Long
 external fun uniffi_daybook_ffi_fn_method_drawerrepoffi_get_entry(`ptr`: Long,`id`: RustBuffer.ByValue,
+): Long
+external fun uniffi_daybook_ffi_fn_method_drawerrepoffi_get_or_init_plug_config_doc_id(`ptr`: Long,`plugId`: RustBuffer.ByValue,
 ): Long
 external fun uniffi_daybook_ffi_fn_method_drawerrepoffi_list(`ptr`: Long,
 ): Long
@@ -1866,6 +1870,9 @@ private fun uniffiCheckApiChecksums(lib: IntegrityCheckingUniffiLib) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
     if (lib.uniffi_daybook_ffi_checksum_method_drawerrepoffi_get_entry() != 8189.toShort()) {
+        throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
+    }
+    if (lib.uniffi_daybook_ffi_checksum_method_drawerrepoffi_get_or_init_plug_config_doc_id() != 15565.toShort()) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
     if (lib.uniffi_daybook_ffi_checksum_method_drawerrepoffi_list() != 44053.toShort()) {
@@ -6325,6 +6332,8 @@ public interface DrawerRepoFfiInterface {
     
     suspend fun `getEntry`(`id`: kotlin.String): DocEntry?
     
+    suspend fun `getOrInitPlugConfigDocId`(`plugId`: kotlin.String): kotlin.String
+    
     suspend fun `list`(): List<DocNBranches>
     
     suspend fun `stop`()
@@ -6566,6 +6575,27 @@ open class DrawerRepoFfi: Disposable, AutoCloseable, DrawerRepoFfiInterface
         { future -> UniffiLib.ffi_daybook_ffi_rust_future_free_rust_buffer(future) },
         // lift function
         { FfiConverterOptionalTypeDocEntry.lift(it) },
+        // Error FFI converter
+        FfiException.ErrorHandler,
+    )
+    }
+
+    
+    @Throws(FfiException::class)
+    @Suppress("ASSIGNED_BUT_NEVER_ACCESSED_VARIABLE")
+    override suspend fun `getOrInitPlugConfigDocId`(`plugId`: kotlin.String) : kotlin.String {
+        return uniffiRustCallAsync(
+        callWithHandle { uniffiHandle ->
+            UniffiLib.uniffi_daybook_ffi_fn_method_drawerrepoffi_get_or_init_plug_config_doc_id(
+                uniffiHandle,
+                FfiConverterString.lower(`plugId`),
+            )
+        },
+        { future, callback, continuation -> UniffiLib.ffi_daybook_ffi_rust_future_poll_rust_buffer(future, callback, continuation) },
+        { future, continuation -> UniffiLib.ffi_daybook_ffi_rust_future_complete_rust_buffer(future, continuation) },
+        { future -> UniffiLib.ffi_daybook_ffi_rust_future_free_rust_buffer(future) },
+        // lift function
+        { FfiConverterString.lift(it) },
         // Error FFI converter
         FfiException.ErrorHandler,
     )

@@ -14,15 +14,19 @@ import androidx.compose.ui.test.assertIsNotSelected
 import androidx.compose.ui.test.assertIsSelected
 import androidx.compose.ui.test.onAllNodesWithTag
 import androidx.compose.ui.test.onAllNodesWithText
+import androidx.compose.ui.test.hasText
 import androidx.compose.ui.test.onNodeWithTag
 import androidx.compose.ui.test.onNodeWithText
 import androidx.compose.ui.test.performCustomAccessibilityActionWithLabel
 import androidx.compose.ui.test.performClick
+import androidx.compose.ui.test.performTextClearance
+import androidx.compose.ui.test.performScrollToNode
 import androidx.compose.ui.test.performMouseInput
 import androidx.compose.ui.test.performTextInput
 import androidx.compose.ui.test.performTouchInput
 import androidx.compose.ui.test.longClick
 import androidx.compose.ui.test.v2.runComposeUiTest
+import androidx.compose.ui.semantics.SemanticsProperties
 import java.nio.file.Files
 import java.nio.file.Path
 import kotlin.io.path.ExperimentalPathApi
@@ -37,6 +41,7 @@ import org.example.daybook.layouts.ScreenChromeSpec
 import org.example.daybook.theme.DaybookTheme
 import org.example.daybook.theme.ThemeConfig
 import org.example.daybook.ui.buildNoteFacet
+import org.example.daybook.ui.decodeWellKnownFacet
 import org.example.daybook.ui.encodeJsonString
 import org.example.daybook.ui.encodeWellKnownFacet
 import org.example.daybook.ui.editor.facetKeyString
@@ -57,13 +62,16 @@ import org.example.daybook.uniffi.RtFfi
 import org.example.daybook.uniffi.SqliteLocalStateRepoFfi
 import org.example.daybook.uniffi.TablesRepoFfi
 import org.example.daybook.uniffi.types.AddDocArgs
+import org.example.daybook.uniffi.types.DocPatch
 import org.example.daybook.uniffi.types.FacetDisplayDeets
 import org.example.daybook.uniffi.types.FacetDisplayHint
 import org.example.daybook.uniffi.types.FacetKey
 import org.example.daybook.uniffi.types.FacetTag
 import org.example.daybook.uniffi.types.FacetViewMode
+import org.example.daybook.uniffi.types.Note
 import org.example.daybook.uniffi.types.ViewRef
 import org.example.daybook.uniffi.types.WellKnownFacetTag
+import org.example.daybook.uniffi.types.WellKnownFacet
 
 @OptIn(ExperimentalTestApi::class)
 class DocEditorSmokeTest {
@@ -200,6 +208,400 @@ class DocEditorSmokeTest {
             waitUntil(timeoutMillis = 10_000) {
                 indexOfFacet(secondNoteLabel) < indexOfFacet(firstNoteLabel)
             }
+        } finally {
+            fixture.close()
+        }
+    }
+
+    @Test
+    fun realRepo_block_details_dialog_updates_note_mime_and_persists() = runComposeUiTest {
+        val fixture = runBlocking { RealRepoFixture.create() }
+        try {
+            val waitMillis = 60_000L
+            val drawerVm = DrawerViewModel(fixture.drawerRepo)
+            val docEditorStore = DocEditorStoreViewModel(fixture.drawerRepo)
+
+            val noteKey = noteFacetKey()
+            val noteLabel = facetKeyString(noteKey)
+            val docId = fixture.createDoc(
+                titleText = "Block details smoke title",
+                noteText = "Block details note",
+            )
+            fixture.setCoreNoteEditorConfig(
+                """
+                {
+                  "mimeOptions": [
+                    {
+                      "mime": "text/x-test-note-config",
+                      "label": "Config supplied format",
+                      "description": "Loaded from the core plug config doc."
+                    }
+                  ]
+                }
+                """.trimIndent(),
+            )
+
+            fun openBlockActions(facetKeyLabel: String) {
+                onNodeWithTag(DaybookEditorSemantics.facetRow(facetKeyLabel))
+                    .performCustomAccessibilityActionWithLabel("Block actions")
+            }
+
+            fun currentNoteMime(): String? =
+                docEditorStore.selectedController.value?.state?.value?.noteEditors
+                    ?.get(noteKey)
+                    ?.mime
+
+            fun persistedNoteMime(): String? {
+                val bundle = runBlocking { fixture.drawerRepo.getBundle(docId, "main") }
+                val raw = bundle?.doc?.facets?.get(noteKey) ?: return null
+                val decoded = decodeWellKnownFacet<WellKnownFacet.Note>(raw)
+                return decoded.getOrNull()?.v1?.mime
+            }
+
+            setContent {
+                DaybookTheme(themeConfig = ThemeConfig.Light) {
+                    ProvideScreenChromeSpec(ScreenChromeSpec()) {
+                        CompositionLocalProvider(
+                            LocalContainer provides fixture.container,
+                            LocalDrawerViewModel provides drawerVm,
+                            LocalDocEditorStore provides docEditorStore,
+                        ) {
+                            BigDialogHost(narrowScreen = false) {
+                                DocEditorScreen(contentType = DaybookContentType.LIST_ONLY)
+                            }
+                        }
+                    }
+                }
+            }
+
+            docEditorStore.selectDoc(docId)
+
+            waitUntil(timeoutMillis = waitMillis) {
+                onAllNodesWithTag(DaybookEditorSemantics.noteField(noteLabel))
+                    .fetchSemanticsNodes()
+                    .isNotEmpty()
+            }
+
+            openBlockActions(noteLabel)
+            waitUntil(timeoutMillis = waitMillis) {
+                onAllNodesWithTag(DaybookEditorSemantics.blockDetailsAction(noteLabel))
+                    .fetchSemanticsNodes()
+                    .isNotEmpty()
+            }
+            onNodeWithTag(DaybookEditorSemantics.blockDetailsAction(noteLabel)).performClick()
+
+            waitUntil(timeoutMillis = waitMillis) {
+                onAllNodesWithTag(DaybookEditorSemantics.BLOCK_DETAILS_DIALOG)
+                    .fetchSemanticsNodes()
+                    .isNotEmpty()
+            }
+            onNodeWithTag(DaybookEditorSemantics.BLOCK_DETAILS_DIALOG).assertIsDisplayed()
+            onNodeWithTag(DaybookEditorSemantics.BLOCK_DETAILS_BLOCK_SECTION).assertIsDisplayed()
+            onNodeWithTag(DaybookEditorSemantics.BLOCK_DETAILS_SOURCE_SECTION).assertIsDisplayed()
+            onNodeWithTag(DaybookEditorSemantics.blockDetailsSourceFacetCard(noteLabel)).assertIsDisplayed()
+            onNodeWithTag(DaybookEditorSemantics.blockDetailsMetadataValue("Facet key"))
+                .assertTextContains(noteLabel)
+            onNodeWithTag(DaybookEditorSemantics.blockDetailsMetadataValue("Facet tag"))
+                .assertTextContains("org.example.daybook.note")
+            onNodeWithTag(DaybookEditorSemantics.blockDetailsMetadataValue("Facet id"))
+                .assertTextContains("main")
+            onNodeWithTag(DaybookEditorSemantics.blockDetailsMetadataValue("Source facet count"))
+                .assertTextContains("1")
+            onNodeWithTag(DaybookEditorSemantics.blockDetailsCurrentFormatSummary(noteLabel))
+                .assertIsDisplayed()
+            onNodeWithTag(DaybookEditorSemantics.blockDetailsMetadataValue("Format label"))
+                .assertTextContains("Plain text")
+            onNodeWithTag(DaybookEditorSemantics.blockDetailsMetadataValue("Format description"))
+                .assertTextContains("Basic plain text notes.")
+            onNodeWithTag(DaybookEditorSemantics.blockDetailsMetadataValue("Raw MIME"))
+                .assertTextContains("text/plain")
+            onNodeWithTag(DaybookEditorSemantics.blockDetailsMetadataValue("Facet created"))
+                .assertIsDisplayed()
+            onNodeWithTag(DaybookEditorSemantics.blockDetailsMetadataValue("Facet last modified"))
+                .assertIsDisplayed()
+            onNodeWithTag(DaybookEditorSemantics.blockDetailsMetadataValue("Current MIME"))
+                .assertTextContains("text/plain")
+            onNodeWithTag(DaybookEditorSemantics.BLOCK_DETAILS_DIALOG)
+                .performScrollToNode(hasText("Change format"))
+            onNodeWithTag(DaybookEditorSemantics.blockDetailsChangeFormatAction(noteLabel)).performClick()
+
+            waitUntil(timeoutMillis = waitMillis) {
+                onAllNodesWithTag(DaybookEditorSemantics.BLOCK_DETAILS_FORMAT_PICKER_SECTION)
+                    .fetchSemanticsNodes()
+                    .isNotEmpty()
+            }
+            onNodeWithTag(DaybookEditorSemantics.BLOCK_DETAILS_FORMAT_PICKER_SECTION).assertIsDisplayed()
+            onNodeWithTag(DaybookEditorSemantics.blockDetailsFormatSearchField(noteLabel))
+                .performTextInput("Config supplied")
+            waitUntil(timeoutMillis = waitMillis) {
+                onAllNodesWithTag(
+                    DaybookEditorSemantics.blockDetailsFormatOption(noteLabel, "text/x-test-note-config"),
+                ).fetchSemanticsNodes().isNotEmpty()
+            }
+            onNodeWithTag(DaybookEditorSemantics.blockDetailsFormatOption(noteLabel, "text/x-test-note-config"))
+                .performClick()
+
+            waitUntil(timeoutMillis = waitMillis) {
+                currentNoteMime() == "text/x-test-note-config"
+            }
+            waitUntil(timeoutMillis = waitMillis) {
+                persistedNoteMime() == "text/x-test-note-config"
+            }
+            waitUntil(timeoutMillis = waitMillis) {
+                onAllNodesWithTag(DaybookEditorSemantics.blockDetailsMetadataValue("Format label"))
+                    .fetchSemanticsNodes()
+                    .firstOrNull()
+                    ?.config
+                    ?.get(SemanticsProperties.Text)
+                    ?.any { it.text.contains("Config supplied format") } == true
+            }
+            onNodeWithTag(DaybookEditorSemantics.blockDetailsMetadataValue("Raw MIME"))
+                .assertTextContains("text/x-test-note-config")
+            onNodeWithTag(DaybookEditorSemantics.noteField(noteLabel)).assertTextContains("Block details note")
+        } finally {
+            fixture.close()
+        }
+    }
+
+    @Test
+    fun realRepo_block_details_dialog_accepts_custom_note_mime_and_persists() = runComposeUiTest {
+        val fixture = runBlocking { RealRepoFixture.create() }
+        try {
+            val waitMillis = 60_000L
+            val drawerVm = DrawerViewModel(fixture.drawerRepo)
+            val docEditorStore = DocEditorStoreViewModel(fixture.drawerRepo)
+
+            val noteKey = noteFacetKey()
+            val noteLabel = facetKeyString(noteKey)
+            val docId = fixture.createDoc(
+                titleText = "Block details custom MIME entry title",
+                noteText = "Custom MIME entry note",
+            )
+
+            fun openBlockActions(facetKeyLabel: String) {
+                onNodeWithTag(DaybookEditorSemantics.facetRow(facetKeyLabel))
+                    .performCustomAccessibilityActionWithLabel("Block actions")
+            }
+
+            fun currentNoteMime(): String? =
+                docEditorStore.selectedController.value?.state?.value?.noteEditors
+                    ?.get(noteKey)
+                    ?.mime
+
+            fun persistedNoteMime(): String? {
+                val bundle = runBlocking { fixture.drawerRepo.getBundle(docId, "main") }
+                val raw = bundle?.doc?.facets?.get(noteKey) ?: return null
+                val decoded = decodeWellKnownFacet<WellKnownFacet.Note>(raw)
+                return decoded.getOrNull()?.v1?.mime
+            }
+
+            setContent {
+                DaybookTheme(themeConfig = ThemeConfig.Light) {
+                    ProvideScreenChromeSpec(ScreenChromeSpec()) {
+                        CompositionLocalProvider(
+                            LocalContainer provides fixture.container,
+                            LocalDrawerViewModel provides drawerVm,
+                            LocalDocEditorStore provides docEditorStore,
+                        ) {
+                            BigDialogHost(narrowScreen = false) {
+                                DocEditorScreen(contentType = DaybookContentType.LIST_ONLY)
+                            }
+                        }
+                    }
+                }
+            }
+
+            docEditorStore.selectDoc(docId)
+
+            waitUntil(timeoutMillis = waitMillis) {
+                onAllNodesWithTag(DaybookEditorSemantics.noteField(noteLabel))
+                    .fetchSemanticsNodes()
+                    .isNotEmpty()
+            }
+
+            openBlockActions(noteLabel)
+            waitUntil(timeoutMillis = waitMillis) {
+                onAllNodesWithTag(DaybookEditorSemantics.blockDetailsAction(noteLabel))
+                    .fetchSemanticsNodes()
+                    .isNotEmpty()
+            }
+            onNodeWithTag(DaybookEditorSemantics.blockDetailsAction(noteLabel)).performClick()
+
+            waitUntil(timeoutMillis = waitMillis) {
+                onAllNodesWithTag(DaybookEditorSemantics.BLOCK_DETAILS_DIALOG)
+                    .fetchSemanticsNodes()
+                    .isNotEmpty()
+            }
+            onNodeWithTag(DaybookEditorSemantics.BLOCK_DETAILS_DIALOG)
+                .performScrollToNode(hasText("Change format"))
+            onNodeWithTag(DaybookEditorSemantics.blockDetailsChangeFormatAction(noteLabel)).performClick()
+            waitUntil(timeoutMillis = waitMillis) {
+                onAllNodesWithText("Choose note format")
+                    .fetchSemanticsNodes()
+                    .isNotEmpty()
+            }
+            onNodeWithTag(DaybookEditorSemantics.blockDetailsCustomMimeAction(noteLabel)).performClick()
+            waitUntil(timeoutMillis = waitMillis) {
+                onAllNodesWithTag(DaybookEditorSemantics.BLOCK_DETAILS_CUSTOM_MIME_SECTION)
+                    .fetchSemanticsNodes()
+                    .isNotEmpty()
+            }
+            onNodeWithTag(DaybookEditorSemantics.BLOCK_DETAILS_CUSTOM_MIME_SECTION).assertIsDisplayed()
+
+            onNodeWithTag(DaybookEditorSemantics.blockDetailsCustomMimeInput(noteLabel))
+                .performTextInput("bad mime")
+            onNodeWithTag(DaybookEditorSemantics.blockDetailsCustomMimeConfirmAction(noteLabel))
+                .performClick()
+            onNodeWithTag(DaybookEditorSemantics.blockDetailsCustomMimeError(noteLabel))
+                .assertIsDisplayed()
+
+            onNodeWithTag(DaybookEditorSemantics.blockDetailsCustomMimeInput(noteLabel))
+                .performTextClearance()
+            onNodeWithTag(DaybookEditorSemantics.blockDetailsCustomMimeInput(noteLabel))
+                .performTextInput("text/x-user-custom")
+            onNodeWithTag(DaybookEditorSemantics.blockDetailsCustomMimeConfirmAction(noteLabel))
+                .performClick()
+
+            waitUntil(timeoutMillis = waitMillis) {
+                currentNoteMime() == "text/x-user-custom"
+            }
+            waitUntil(timeoutMillis = waitMillis) {
+                persistedNoteMime() == "text/x-user-custom"
+            }
+            onNodeWithTag(DaybookEditorSemantics.blockDetailsCurrentFormatSummary(noteLabel))
+                .assertIsDisplayed()
+            waitUntil(timeoutMillis = waitMillis) {
+                onAllNodesWithTag(DaybookEditorSemantics.blockDetailsMetadataValue("Format label"))
+                    .fetchSemanticsNodes()
+                    .firstOrNull()
+                    ?.config
+                    ?.get(SemanticsProperties.Text)
+                    ?.any { it.text.contains("Current custom format") } == true
+            }
+            waitUntil(timeoutMillis = waitMillis) {
+                onAllNodesWithTag(DaybookEditorSemantics.blockDetailsMetadataValue("Format description"))
+                    .fetchSemanticsNodes()
+                    .firstOrNull()
+                    ?.config
+                    ?.get(SemanticsProperties.Text)
+                    ?.any { it.text.contains("This note uses a MIME type not listed in note editor config.") } == true
+            }
+            onNodeWithTag(DaybookEditorSemantics.blockDetailsMetadataValue("Raw MIME"))
+                .assertTextContains("text/x-user-custom")
+
+            onNodeWithTag(DaybookEditorSemantics.BLOCK_DETAILS_DIALOG)
+                .performScrollToNode(hasText("Change format"))
+            onNodeWithTag(DaybookEditorSemantics.blockDetailsChangeFormatAction(noteLabel)).performClick()
+            waitUntil(timeoutMillis = waitMillis) {
+                onAllNodesWithTag(
+                    DaybookEditorSemantics.blockDetailsFormatOption(noteLabel, "text/x-user-custom"),
+                ).fetchSemanticsNodes().isNotEmpty()
+            }
+            onNodeWithTag(DaybookEditorSemantics.blockDetailsFormatOption(noteLabel, "text/x-user-custom"))
+                .assertIsSelected()
+        } finally {
+            fixture.close()
+        }
+    }
+
+    @Test
+    fun realRepo_block_details_dialog_preserves_unknown_current_mime() = runComposeUiTest {
+        val fixture = runBlocking { RealRepoFixture.create() }
+        try {
+            val waitMillis = 60_000L
+            val drawerVm = DrawerViewModel(fixture.drawerRepo)
+            val docEditorStore = DocEditorStoreViewModel(fixture.drawerRepo)
+
+            val noteKey = noteFacetKey()
+            val noteLabel = facetKeyString(noteKey)
+            val docId = fixture.createDoc(
+                titleText = "Block details custom mime title",
+                noteText = "Custom mime note",
+                extraRawFacets =
+                    listOf(
+                        noteKey to encodeWellKnownFacet(
+                            WellKnownFacet.Note(
+                                Note(
+                                    mime = "application/x-weird-note",
+                                    content = "Custom mime note",
+                                ),
+                            ),
+                        ),
+                    ),
+            )
+
+            fun openBlockActions(facetKeyLabel: String) {
+                onNodeWithTag(DaybookEditorSemantics.facetRow(facetKeyLabel))
+                    .performCustomAccessibilityActionWithLabel("Block actions")
+            }
+
+            setContent {
+                DaybookTheme(themeConfig = ThemeConfig.Light) {
+                    ProvideScreenChromeSpec(ScreenChromeSpec()) {
+                        CompositionLocalProvider(
+                            LocalContainer provides fixture.container,
+                            LocalDrawerViewModel provides drawerVm,
+                            LocalDocEditorStore provides docEditorStore,
+                        ) {
+                            BigDialogHost(narrowScreen = false) {
+                                DocEditorScreen(contentType = DaybookContentType.LIST_ONLY)
+                            }
+                        }
+                    }
+                }
+            }
+
+            docEditorStore.selectDoc(docId)
+
+            waitUntil(timeoutMillis = waitMillis) {
+                onAllNodesWithTag(DaybookEditorSemantics.noteField(noteLabel))
+                    .fetchSemanticsNodes()
+                    .isNotEmpty()
+            }
+
+            openBlockActions(noteLabel)
+            waitUntil(timeoutMillis = waitMillis) {
+                onAllNodesWithTag(DaybookEditorSemantics.blockDetailsAction(noteLabel))
+                    .fetchSemanticsNodes()
+                    .isNotEmpty()
+            }
+            onNodeWithTag(DaybookEditorSemantics.blockDetailsAction(noteLabel)).performClick()
+
+            waitUntil(timeoutMillis = waitMillis) {
+                onAllNodesWithTag(DaybookEditorSemantics.BLOCK_DETAILS_DIALOG)
+                    .fetchSemanticsNodes()
+                    .isNotEmpty()
+            }
+            onNodeWithTag(DaybookEditorSemantics.blockDetailsCurrentFormatSummary(noteLabel))
+                .assertIsDisplayed()
+            waitUntil(timeoutMillis = waitMillis) {
+                onAllNodesWithTag(DaybookEditorSemantics.blockDetailsMetadataValue("Format label"))
+                    .fetchSemanticsNodes()
+                    .firstOrNull()
+                    ?.config
+                    ?.get(SemanticsProperties.Text)
+                    ?.any { it.text.contains("Current custom format") } == true
+            }
+            waitUntil(timeoutMillis = waitMillis) {
+                onAllNodesWithTag(DaybookEditorSemantics.blockDetailsMetadataValue("Format description"))
+                    .fetchSemanticsNodes()
+                    .firstOrNull()
+                    ?.config
+                    ?.get(SemanticsProperties.Text)
+                    ?.any { it.text.contains("This note uses a MIME type not listed in note editor config.") } == true
+            }
+            onNodeWithTag(DaybookEditorSemantics.blockDetailsMetadataValue("Raw MIME"))
+                .assertTextContains("application/x-weird-note")
+            onNodeWithTag(DaybookEditorSemantics.BLOCK_DETAILS_DIALOG)
+                .performScrollToNode(hasText("Change format"))
+            onNodeWithTag(DaybookEditorSemantics.blockDetailsChangeFormatAction(noteLabel)).performClick()
+            waitUntil(timeoutMillis = waitMillis) {
+                onAllNodesWithText("Choose note format")
+                    .fetchSemanticsNodes()
+                    .isNotEmpty()
+            }
+            onNodeWithTag(DaybookEditorSemantics.blockDetailsFormatOption(noteLabel, "application/x-weird-note"))
+                .assertIsSelected()
         } finally {
             fixture.close()
         }
@@ -582,6 +984,68 @@ class DocEditorSmokeTest {
     }
 
     @Test
+    fun realRepo_block_shell_long_press_single_selection_exposes_details_action() = runComposeUiTest {
+        val fixture = runBlocking { RealRepoFixture.create() }
+        try {
+            val drawerVm = DrawerViewModel(fixture.drawerRepo)
+            val docEditorStore = DocEditorStoreViewModel(fixture.drawerRepo)
+
+            val firstNoteLabel = facetKeyString(noteFacetKey())
+            val docId = fixture.createDoc(
+                titleText = "Selection details smoke title",
+                noteText = "Selection details note",
+            )
+
+            setContent {
+                DaybookTheme(themeConfig = ThemeConfig.Light) {
+                    ProvideScreenChromeSpec(ScreenChromeSpec()) {
+                        CompositionLocalProvider(
+                            LocalContainer provides fixture.container,
+                            LocalDrawerViewModel provides drawerVm,
+                            LocalDocEditorStore provides docEditorStore,
+                        ) {
+                            BigDialogHost(narrowScreen = false) {
+                                DocEditorScreen(contentType = DaybookContentType.LIST_ONLY)
+                            }
+                        }
+                    }
+                }
+            }
+
+            docEditorStore.selectDoc(docId)
+
+            waitUntil(timeoutMillis = 10_000) {
+                onAllNodesWithTag(DaybookEditorSemantics.noteField(firstNoteLabel))
+                    .fetchSemanticsNodes()
+                    .isNotEmpty()
+            }
+
+            onNodeWithTag(DaybookEditorSemantics.facetRow(firstNoteLabel))
+                .performTouchInput {
+                    longClick()
+                }
+
+            waitUntil(timeoutMillis = 10_000) {
+                onAllNodesWithTag(DaybookEditorSemantics.BLOCK_SELECTION_ACTION_BAR)
+                    .fetchSemanticsNodes()
+                    .isNotEmpty()
+            }
+            onNodeWithTag(DaybookEditorSemantics.blockDetailsAction(firstNoteLabel))
+                .assertIsDisplayed()
+            onNodeWithTag(DaybookEditorSemantics.blockDetailsAction(firstNoteLabel)).performClick()
+
+            waitUntil(timeoutMillis = 10_000) {
+                onAllNodesWithTag(DaybookEditorSemantics.BLOCK_DETAILS_DIALOG)
+                    .fetchSemanticsNodes()
+                    .isNotEmpty()
+            }
+            onNodeWithTag(DaybookEditorSemantics.BLOCK_DETAILS_DIALOG).assertIsDisplayed()
+        } finally {
+            fixture.close()
+        }
+    }
+
+    @Test
     fun realRepo_block_handle_quick_select_action_enters_selection_mode() = runComposeUiTest {
         val fixture = runBlocking { RealRepoFixture.create() }
         try {
@@ -789,6 +1253,9 @@ class DocEditorSmokeTest {
             onAllNodesWithTag(DaybookEditorSemantics.selectionActionBarAction("move-down"))
                 .fetchSemanticsNodes()
                 .isEmpty()
+            onAllNodesWithTag(DaybookEditorSemantics.blockDetailsAction(firstNoteLabel))
+                .fetchSemanticsNodes()
+                .isEmpty()
             onNodeWithTag(DaybookEditorSemantics.facetRow(firstNoteLabel)).assertIsSelected()
             onNodeWithTag(DaybookEditorSemantics.facetRow(secondNoteLabel)).assertIsSelected()
             onNodeWithText("2 selected").assertIsDisplayed()
@@ -946,6 +1413,33 @@ private class RealRepoFixture(
 
     fun importDayledgerOci() = runBlocking(Dispatchers.IO) {
         plugsRepo.importFromOciLayout(dayledgerOciPath().toString())
+    }
+
+    fun setCoreNoteEditorConfig(configJson: String) = runBlocking(Dispatchers.IO) {
+        val configDocId = drawerRepo.getOrInitPlugConfigDocId("@daybook/core")
+        val configFacetKey =
+            FacetKey(
+                FacetTag.Any("org.example.daybook.note-editor-config"),
+                "main",
+            )
+        val bundle = drawerRepo.getBundle(configDocId, "main")
+        drawerRepo.update(
+            DocPatch(
+                id = configDocId,
+                facetsSet =
+                    mapOf(
+                        configFacetKey to configJson,
+                    ),
+                facetsRemove = emptyList(),
+                userPath = null,
+            ),
+            branchPath = "main",
+            heads = bundle?.branchHeads,
+        )
+        val saved = drawerRepo.get(configDocId, "main")
+        check(saved?.facets?.get(configFacetKey)?.contains("text/x-test-note-config") == true) {
+            "Failed to write core note editor config facet"
+        }
     }
 
     fun setNoteCustomViewHint() = runBlocking(Dispatchers.IO) {

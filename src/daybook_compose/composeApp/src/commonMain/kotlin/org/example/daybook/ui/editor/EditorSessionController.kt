@@ -35,7 +35,7 @@ import org.example.daybook.uniffi.types.WellKnownFacet
 import org.example.daybook.uniffi.types.WellKnownFacetTag
 import kotlin.uuid.Uuid
 
-data class NoteFacetEditorState(val draft: String, val editable: Boolean, val notice: String?)
+data class NoteFacetEditorState(val draft: String, val mime: String, val editable: Boolean, val notice: String?)
 
 enum class FacetEditorKind {
     ImageMetadata,
@@ -88,7 +88,7 @@ class EditorSessionController(
                 titleDraft = "",
                 titleEditable = true,
                 titleNotice = null,
-                noteEditors = mapOf(noteFacetKey() to NoteFacetEditorState("", true, null)),
+                noteEditors = mapOf(noteFacetKey() to NoteFacetEditorState("", "text/plain", true, null)),
                 facetRows = emptyList(),
                 contentFacetViews = listOf(
                     FacetViewDescriptor(noteFacetKey(), FacetEditorKind.Note, ""),
@@ -169,6 +169,25 @@ class EditorSessionController(
         scheduleSave()
     }
 
+    fun setNoteMime(facetKey: FacetKey, mime: String) {
+        val editorState = _state.value.noteEditors[facetKey] ?: return
+        _state.update { current ->
+            current.copy(
+                noteEditors = current.noteEditors.toMutableMap().also { map ->
+                    map[facetKey] =
+                        editorState.copy(
+                            mime = mime,
+                            editable = mime.startsWith("text/"),
+                            notice = noteMimeNotice(mime),
+                        )
+                },
+                isDirty = true,
+                saveError = null,
+            )
+        }
+        scheduleSave()
+    }
+
     fun addNoteFacetAfter(anchorFacetKey: FacetKey) {
         val snapshot = _state.value
         val doc = snapshot.doc ?: return
@@ -187,7 +206,7 @@ class EditorSessionController(
 
         val nextDoc = doc.copy(facets = nextFacets)
         val nextNoteEditors = snapshot.noteEditors.toMutableMap()
-        nextNoteEditors[newFacetKey] = NoteFacetEditorState("", true, null)
+        nextNoteEditors[newFacetKey] = NoteFacetEditorState("", "text/plain", true, null)
         updateLocalDoc(nextDoc, nextNoteEditors)
         scheduleSave()
     }
@@ -255,7 +274,7 @@ class EditorSessionController(
                 if (!noteState.editable) {
                     continue
                 }
-                putWellKnownFacet(nextFacets, noteKey, buildNoteFacet(noteState.draft))
+                putWellKnownFacet(nextFacets, noteKey, buildNoteFacet(noteState.draft, noteState.mime))
             }
 
             val currentDocId = snapshot.docId
@@ -296,11 +315,13 @@ class EditorSessionController(
         }
     }
 
-    private fun draftFingerprint(state: EditorSessionState): Pair<String, Map<String, String>> {
+    private data class NoteDraftFingerprint(val draft: String, val mime: String)
+
+    private fun draftFingerprint(state: EditorSessionState): Pair<String, Map<String, NoteDraftFingerprint>> {
         val notes =
             state.noteEditors
                 .mapKeys { (facetKey, _) -> facetKeyRefPathString(facetKey) }
-                .mapValues { (_, editorState) -> editorState.draft }
+                .mapValues { (_, editorState) -> NoteDraftFingerprint(editorState.draft, editorState.mime) }
         return state.titleDraft to notes
     }
 
@@ -363,7 +384,7 @@ class EditorSessionController(
 
     private fun buildNoteEditors(doc: Doc?): Map<FacetKey, NoteFacetEditorState> {
         if (doc == null) {
-            return mapOf(noteFacetKey() to NoteFacetEditorState("", true, null))
+            return mapOf(noteFacetKey() to NoteFacetEditorState("", "text/plain", true, null))
         }
 
         val out = linkedMapOf<FacetKey, NoteFacetEditorState>()
@@ -377,16 +398,18 @@ class EditorSessionController(
                 if (decodeResult.isFailure) {
                     NoteFacetEditorState(
                         draft = decodeJsonStringOrRaw(rawValue),
+                        mime = "text/plain",
                         editable = false,
                         notice = "Invalid note facet payload; editing disabled to avoid destructive writes.",
                     )
                 } else {
                     val note = decodeResult.getOrThrow().v1
-                    if (note.mime == "text/plain") {
-                        NoteFacetEditorState(note.content, true, null)
+                    if (isEditableNoteMime(note.mime)) {
+                        NoteFacetEditorState(note.content, note.mime, true, null)
                     } else {
                         NoteFacetEditorState(
                             draft = note.content,
+                            mime = note.mime,
                             editable = false,
                             notice = "Unsupported note mime '${note.mime}'; editing disabled to avoid destructive writes.",
                         )
@@ -395,7 +418,7 @@ class EditorSessionController(
         }
 
         if (out.isEmpty()) {
-            out[noteFacetKey()] = NoteFacetEditorState("", true, null)
+            out[noteFacetKey()] = NoteFacetEditorState("", "text/plain", true, null)
         }
         return out
     }
@@ -445,6 +468,14 @@ class EditorSessionController(
             WellKnownFacetTag.IMAGE_METADATA -> FacetEditorKind.ImageMetadata
             else -> FacetEditorKind.GenericJson
         }
+    }
+
+    private fun isEditableNoteMime(mime: String): Boolean = mime.startsWith("text/")
+
+    private fun noteMimeNotice(mime: String): String? = if (isEditableNoteMime(mime)) {
+        null
+    } else {
+        "Unsupported note mime '$mime'; editing disabled to avoid destructive writes."
     }
 
     private fun hasSupportedFacetView(key: FacetKey): Boolean = when (facetKindForKey(key)) {

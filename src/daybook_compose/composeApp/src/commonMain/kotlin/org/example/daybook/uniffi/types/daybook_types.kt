@@ -2019,6 +2019,82 @@ public object FfiConverterTypeNote: FfiConverterRustBuffer<Note> {
 
 
 
+data class NoteEditorConfig (
+    var `mimeOptions`: List<NoteMimeOption>
+    
+){
+    
+
+    
+
+    
+    companion object
+}
+
+/**
+ * @suppress
+ */
+public object FfiConverterTypeNoteEditorConfig: FfiConverterRustBuffer<NoteEditorConfig> {
+    override fun read(buf: ByteBuffer): NoteEditorConfig {
+        return NoteEditorConfig(
+            FfiConverterSequenceTypeNoteMimeOption.read(buf),
+        )
+    }
+
+    override fun allocationSize(value: NoteEditorConfig) = (
+            FfiConverterSequenceTypeNoteMimeOption.allocationSize(value.`mimeOptions`)
+    )
+
+    override fun write(value: NoteEditorConfig, buf: ByteBuffer) {
+            FfiConverterSequenceTypeNoteMimeOption.write(value.`mimeOptions`, buf)
+    }
+}
+
+
+
+data class NoteMimeOption (
+    var `mime`: kotlin.String
+    , 
+    var `label`: kotlin.String
+    , 
+    var `description`: kotlin.String
+    
+){
+    
+
+    
+
+    
+    companion object
+}
+
+/**
+ * @suppress
+ */
+public object FfiConverterTypeNoteMimeOption: FfiConverterRustBuffer<NoteMimeOption> {
+    override fun read(buf: ByteBuffer): NoteMimeOption {
+        return NoteMimeOption(
+            FfiConverterString.read(buf),
+            FfiConverterString.read(buf),
+            FfiConverterString.read(buf),
+        )
+    }
+
+    override fun allocationSize(value: NoteMimeOption) = (
+            FfiConverterString.allocationSize(value.`mime`) +
+            FfiConverterString.allocationSize(value.`label`) +
+            FfiConverterString.allocationSize(value.`description`)
+    )
+
+    override fun write(value: NoteMimeOption, buf: ByteBuffer) {
+            FfiConverterString.write(value.`mime`, buf)
+            FfiConverterString.write(value.`label`, buf)
+            FfiConverterString.write(value.`description`, buf)
+    }
+}
+
+
+
 data class OcrResult (
     var `facetRef`: Url
     , 
@@ -3903,6 +3979,34 @@ public object FfiConverterSequenceTypeFacetKey: FfiConverterRustBuffer<List<Face
         buf.putInt(value.size)
         value.iterator().forEach {
             FfiConverterTypeFacetKey.write(it, buf)
+        }
+    }
+}
+
+
+
+
+/**
+ * @suppress
+ */
+public object FfiConverterSequenceTypeNoteMimeOption: FfiConverterRustBuffer<List<NoteMimeOption>> {
+    override fun read(buf: ByteBuffer): List<NoteMimeOption> {
+        val len = buf.getInt()
+        return List<NoteMimeOption>(len) {
+            FfiConverterTypeNoteMimeOption.read(buf)
+        }
+    }
+
+    override fun allocationSize(value: List<NoteMimeOption>): ULong {
+        val sizeForLength = 4UL
+        val sizeForItems = value.map { FfiConverterTypeNoteMimeOption.allocationSize(it) }.sum()
+        return sizeForLength + sizeForItems
+    }
+
+    override fun write(value: List<NoteMimeOption>, buf: ByteBuffer) {
+        buf.putInt(value.size)
+        value.iterator().forEach {
+            FfiConverterTypeNoteMimeOption.write(it, buf)
         }
     }
 }

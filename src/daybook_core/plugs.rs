@@ -86,6 +86,12 @@ pub fn system_plugs() -> Vec<manifest::PlugManifest> {
                     references: default(),
                 },
                 FacetManifest {
+                    key_tag: "org.example.daybook.note-editor-config".into(),
+                    value_schema: schemars::schema_for!(daybook_types::doc::NoteEditorConfig),
+                    display_config: default(),
+                    references: default(),
+                },
+                FacetManifest {
                     key_tag: WellKnownFacetTag::Blob.into(),
                     value_schema: schemars::schema_for!(Blob),
                     display_config: default(),
