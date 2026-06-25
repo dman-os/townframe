@@ -8,6 +8,7 @@ mod interlude {
 }
 
 use crate::interlude::*;
+use crate::keyhive_storage::{BigRepoKeyhiveStorage, KEYHIVE_SUBDIR};
 use crate::rpc::FullDoc;
 
 use std::collections::BTreeSet;
@@ -16,7 +17,6 @@ use std::sync::atomic::{AtomicBool, Ordering};
 
 use automerge::ChangeHash;
 use autosurgeon::{Hydrate, Prop, Reconcile};
-use sedimentree_core::id::SedimentreeId;
 use sedimentree_core::loose_commit::id::CommitId;
 
 // FIXME: properly test the changes impl and investigate
@@ -88,7 +88,15 @@ impl BigRepo {
             keyhive_seed,
             storage,
         } = config;
-        let keyhive = BigKeyhiveHandle::boot_memory_from_seed(keyhive_seed).await?;
+        let mut keyhive = BigKeyhiveHandle::boot_memory_from_seed(keyhive_seed).await?;
+        let keyhive_storage = match &storage {
+            StorageConfig::Memory => BigRepoKeyhiveStorage::memory(),
+            StorageConfig::Disk { path } => BigRepoKeyhiveStorage::fs(path.join(KEYHIVE_SUBDIR))
+                .wrap_err("failed booting keyhive storage")?,
+        };
+        keyhive
+            .restore_from_storage_archive(&keyhive_storage)
+            .await?;
         let policy_keyhive = keyhive.clone_keyhive().await;
         let policy = Arc::new(subduction_keyhive::policy::SubductionKeyhive::new(
             policy_keyhive,
@@ -103,6 +111,7 @@ impl BigRepo {
                     subduction_core::storage::memory::MemoryStorage::new(),
                     Arc::clone(&policy),
                     keyhive.clone(),
+                    keyhive_storage,
                     Arc::clone(&big_sync_store),
                     Arc::clone(&change_manager),
                 )
@@ -123,6 +132,7 @@ impl BigRepo {
                     redb_storage,
                     Arc::clone(&policy),
                     keyhive.clone(),
+                    keyhive_storage,
                     Arc::clone(&big_sync_store),
                     Arc::clone(&change_manager),
                 )
@@ -187,6 +197,21 @@ impl BigRepo {
         initial_content: automerge::Automerge,
     ) -> Result<BigDocHandle, CreateDocError> {
         let bundle = self.runtime.create_doc(initial_content).await?;
+        Ok(BigDocHandle {
+            repo: Arc::clone(self),
+            bundle,
+        })
+    }
+
+    pub(crate) async fn put_keyhive_doc(
+        self: &Arc<Self>,
+        document_id: DocumentId,
+        initial_content: automerge::Automerge,
+    ) -> Result<BigDocHandle, PutDocError> {
+        let bundle = self
+            .runtime
+            .put_keyhive_doc(document_id, initial_content)
+            .await?;
         Ok(BigDocHandle {
             repo: Arc::clone(self),
             bundle,

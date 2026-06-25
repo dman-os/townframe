@@ -1,13 +1,13 @@
 use std::sync::Arc;
 
 use crate::keyhive_conn::BigRepoKeyhiveConnAdapter;
+use crate::keyhive_storage::BigRepoKeyhiveStorage;
 use crate::runtime::BigRepoIrohTransport;
 use crate::wire::BigRepoWireMessage;
 
 use future_form::Sendable;
 use futures::future::BoxFuture;
 use sedimentree_core::depth::CountLeadingZeroBytes;
-use subduction_core::peer::id::PeerId as SubductionPeerId;
 use subduction_core::{
     authenticated::Authenticated,
     connection::message::SyncMessage,
@@ -16,24 +16,19 @@ use subduction_core::{
     remote_heads::{RemoteHeads, RemoteHeadsNotifier},
     subduction::error::{IoError, ListenError},
 };
-use subduction_keyhive::{
-    handler::{SendableKeyhiveHandler, SendableRuntimeProtocol},
-    storage::MemoryKeyhiveStorage,
-};
-use subduction_keyhive::{KeyhiveConnection, SyncStatus};
+use subduction_keyhive::handler::{SendableKeyhiveHandler, SendableRuntimeProtocol};
 use subduction_websocket::tokio::{TimeoutTokio, TokioSpawn};
-use tokio::sync::mpsc::UnboundedSender;
 
 use crate::keyhive::BigKeyhiveHandle;
 
-/// The concrete keyhive protocol type for BigRepo (in-memory storage).
+/// The concrete keyhive protocol type for BigRepo.
 pub(crate) type BigRepoKeyhiveProtocol =
-    Arc<SendableRuntimeProtocol<BigRepoKeyhiveConnAdapter, MemoryKeyhiveStorage>>;
+    Arc<SendableRuntimeProtocol<BigRepoKeyhiveConnAdapter, BigRepoKeyhiveStorage>>;
 
 /// The concrete keyhive handler type for BigRepo.
 pub(crate) type BigRepoKeyhiveHandler = SendableKeyhiveHandler<
     BigRepoKeyhiveConnAdapter,
-    MemoryKeyhiveStorage,
+    BigRepoKeyhiveStorage,
     BigRepoIrohTransport,
     fn(Authenticated<BigRepoIrohTransport, Sendable>) -> BigRepoKeyhiveConnAdapter,
 >;
@@ -49,6 +44,7 @@ type BigRepoSyncHandler<S> = Arc<
         BigRepoIrohTransport,
         crate::runtime::BigRepoPolicy,
         CountLeadingZeroBytes,
+        TokioSpawn,
     >,
 >;
 
@@ -58,25 +54,13 @@ pub(crate) struct BigRepoComposedHandler<
 > {
     sync: BigRepoSyncHandler<S>,
     keyhive: BigRepoKeyhiveHandler,
-    keyhive_protocol: BigRepoKeyhiveProtocol,
-    keyhive_sync_tx: UnboundedSender<(SubductionPeerId, SyncStatus)>,
 }
 
 impl<S: subduction_core::storage::traits::Storage<future_form::Sendable>>
     BigRepoComposedHandler<S>
 {
-    pub(crate) fn new(
-        sync: BigRepoSyncHandler<S>,
-        keyhive: BigRepoKeyhiveHandler,
-        keyhive_protocol: BigRepoKeyhiveProtocol,
-        keyhive_sync_tx: UnboundedSender<(SubductionPeerId, SyncStatus)>,
-    ) -> Self {
-        Self {
-            sync,
-            keyhive,
-            keyhive_protocol,
-            keyhive_sync_tx,
-        }
+    pub(crate) fn new(sync: BigRepoSyncHandler<S>, keyhive: BigRepoKeyhiveHandler) -> Self {
+        Self { sync, keyhive }
     }
 }
 
@@ -128,29 +112,14 @@ where
                     .map_err(convert_sync_listen_error)
                 }
                 BigRepoWireMessage::Keyhive(keyhive_msg) => {
-                    let signed = match keyhive_msg.into_signed() {
-                        Ok(s) => s,
-                        Err(e) => {
-                            tracing::error!(error = %e, "keyhive decode error (non-fatal)");
-                            return Ok(());
-                        }
-                    };
-                    let adapter = BigRepoKeyhiveConnAdapter::new(conn.clone());
-                    let kh_peer = adapter.peer_id();
-                    match self
-                        .keyhive_protocol
-                        .handle_message(&kh_peer, signed, Some(adapter))
-                        .await
+                    if let Err(err) = Handler::<Sendable, BigRepoIrohTransport>::handle(
+                        &self.keyhive,
+                        conn,
+                        keyhive_msg,
+                    )
+                    .await
                     {
-                        Ok(SyncStatus::Done) => {
-                            let subduction_peer_id =
-                                SubductionPeerId::new(*kh_peer.verifying_key());
-                            let _ = self
-                                .keyhive_sync_tx
-                                .send((subduction_peer_id, SyncStatus::Done));
-                        }
-                        Ok(SyncStatus::Pending) => {}
-                        Err(e) => tracing::error!(error = %e, "keyhive handler error (non-fatal)"),
+                        tracing::warn!(error = %err, "keyhive handler failed");
                     }
                     Ok(())
                 }
@@ -164,8 +133,6 @@ where
                 .await;
             Handler::<Sendable, BigRepoIrohTransport>::on_peer_disconnect(&self.keyhive, peer)
                 .await;
-            let kh_peer = subduction_keyhive::KeyhivePeerId::from_bytes(*peer.as_bytes());
-            self.keyhive_protocol.remove_peer(&kh_peer).await;
         })
     }
 }
@@ -204,12 +171,11 @@ pub(crate) type BigRepoSubduction<S> = subduction_core::subduction::Subduction<
 /// Bootstrap the keyhive protocol and handler. Returns the protocol and handler.
 pub(crate) async fn boot_keyhive(
     keyhive: &BigKeyhiveHandle,
+    keyhive_storage: BigRepoKeyhiveStorage,
 ) -> crate::Res<(BigRepoKeyhiveProtocol, BigRepoKeyhiveHandler)> {
-    let protocol_keyhive = keyhive.clone_keyhive().await;
-    let shared_keyhive = Arc::new(async_lock::Mutex::new(protocol_keyhive));
+    let shared_keyhive = keyhive.shared_keyhive();
     let contact_card = keyhive.contact_card().clone();
     let kh_peer_id = keyhive.keyhive_peer_id();
-    let keyhive_storage = MemoryKeyhiveStorage::new();
     let keyhive_protocol: BigRepoKeyhiveProtocol =
         Arc::new(subduction_keyhive::KeyhiveProtocol::new(
             Arc::clone(&shared_keyhive),

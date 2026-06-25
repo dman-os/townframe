@@ -9,6 +9,7 @@ use big_sync::backend::contract::{
 use big_sync::stress_support::{self, StressFixture};
 use big_sync::{HostPartStore, SyncBackend};
 use big_sync_core::{Byte32Id, PartId, SyncCompletionDeets};
+use nonempty::NonEmpty;
 use rand::rngs::StdRng;
 use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::fmt::Write as _;
@@ -126,10 +127,6 @@ fn get_str_at_root(doc: &automerge::Automerge, key: &str) -> String {
         ScalarValue::Str(value) => value.to_string(),
         _ => panic!("expected string scalar"),
     }
-}
-
-fn random_doc_id() -> DocumentId {
-    DocumentId::random()
 }
 
 async fn recv_change_batch(
@@ -678,7 +675,15 @@ fn write_sync_doc_value(doc: &mut automerge::Automerge, value: &serde_json::Valu
         .get("items")
         .and_then(serde_json::Value::as_array)
         .expect("sync doc should contain an items array");
+    let has_placeholder = doc
+        .get(automerge::ROOT, "_")
+        .expect("failed reading sync placeholder")
+        .is_some();
     doc.transact(|tx| {
+        if has_placeholder {
+            tx.delete(automerge::ROOT, "_")
+                .expect("failed deleting sync placeholder");
+        }
         tx.put(automerge::ROOT, "title", title)
             .expect("failed writing sync title");
         let items_obj = tx
@@ -704,6 +709,18 @@ fn write_sync_doc_value(doc: &mut automerge::Automerge, value: &serde_json::Valu
         eyre::Ok(())
     })
     .expect("failed writing sync doc");
+}
+
+fn initial_content_heads(doc: &automerge::Automerge) -> Res<NonEmpty<[u8; 32]>> {
+    NonEmpty::from_vec(doc.get_heads().into_iter().map(|head| head.0).collect())
+        .ok_or_else(|| ferr!("automerge doc has no heads"))
+}
+
+fn new_sync_doc(actor: automerge::ActorId, value: &serde_json::Value) -> automerge::Automerge {
+    let mut doc = automerge::Automerge::new();
+    doc.set_actor(actor);
+    write_sync_doc_value(&mut doc, value);
+    doc
 }
 
 fn sync_test_part() -> PartId {
@@ -755,16 +772,57 @@ async fn wait_for_json_doc(
     expected: &serde_json::Value,
     timeout_dur: Duration,
 ) {
-    timeout(timeout_dur, async {
+    let mut last_actual = None;
+    let res = timeout(timeout_dur, async {
         loop {
-            if read_json_doc(handle).await == *expected {
+            let actual = read_json_doc(handle).await;
+            if actual == *expected {
                 break;
             }
+            last_actual = Some(actual);
             tokio::time::sleep(Duration::from_millis(25)).await;
         }
     })
-    .await
-    .expect("timed out waiting for JSON document to converge");
+    .await;
+    if res.is_err() {
+        panic!(
+            "timed out waiting for JSON document to converge\nexpected: {}\nactual: {}",
+            serde_json::to_string_pretty(expected).expect("json serializes"),
+            serde_json::to_string_pretty(&last_actual).expect("json serializes"),
+        );
+    }
+}
+
+async fn create_shared_sync_doc(
+    owner: &SyncRepoNode,
+    grantee: &SyncRepoNode,
+    owner_conn: &BigRepoConnection,
+    grantee_conn: &BigRepoConnection,
+    value: &serde_json::Value,
+    owner_actor: automerge::ActorId,
+) -> Res<BigDocHandle> {
+    owner_conn.sync_keyhive_with_peer(None).await?;
+    grantee_conn.sync_keyhive_with_peer(None).await?;
+
+    let doc = new_sync_doc(owner_actor, value);
+    use subduction_keyhive::KeyhivePeerId;
+    let grantee_kh_peer_id = KeyhivePeerId::from_bytes(*grantee.peer_id().as_bytes());
+    let grantee_agent = owner
+        .repo
+        .keyhive()
+        .get_agent_by_peer_id(&grantee_kh_peer_id)
+        .await?
+        .expect("grantee agent should be known after keyhive sync");
+    let doc_id = owner
+        .repo
+        .keyhive()
+        .create_doc_with_agents(vec![grantee_agent], initial_content_heads(&doc)?)
+        .await?;
+
+    owner_conn.sync_keyhive_with_peer(None).await?;
+    grantee_conn.sync_keyhive_with_peer(None).await?;
+
+    Ok(owner.repo.put_keyhive_doc(doc_id, doc).await?)
 }
 
 #[derive(Clone, Debug)]
@@ -938,7 +996,6 @@ impl SyncRepoNode {
             .remove_obj_from_part(part_init_obj, stress_support::test_part())
             .await?;
         let keyhive_seed = [seed; 32];
-        let signer = subduction_crypto::signer::memory::MemorySigner::from_bytes(&keyhive_seed);
         let (repo, stop_token) = BigRepo::boot(
             Config {
                 keyhive_seed,
@@ -1119,26 +1176,34 @@ impl SyncRepoNode {
         Ok(())
     }
 
-    async fn upsert_payload(&self, obj_id: ObjId, payload: serde_json::Value) -> Res<()> {
+    async fn stop_big_sync_with(&self, remote: &SyncRepoNode) -> Res<()> {
+        self.big_sync_worker.remove_peer(remote.peer_id()).await?;
+        remote.big_sync_worker.remove_peer(self.peer_id()).await?;
+        Ok(())
+    }
+
+    async fn connection_to(&self, remote: &SyncRepoNode) -> BigRepoConnection {
+        self.connections
+            .lock()
+            .await
+            .get(&remote.peer_id())
+            .cloned()
+            .expect("connection should exist")
+    }
+
+    async fn update_payload(&self, doc_id: DocumentId, payload: serde_json::Value) -> Res<()> {
         let handle = {
             let mut docs = self.docs.lock().await;
-            if let Some(handle) = docs.get(&obj_id) {
+            if let Some(handle) = docs.get(&doc_id) {
                 Arc::clone(handle)
             } else {
-                let handle = {
-                    let mut doc = automerge::Automerge::new();
-                    doc.transact(|tx| {
-                        autosurgeon::reconcile(tx, ThroughJson(payload.clone()))
-                            .expect("failed seeding big repo stress doc");
-                        eyre::Ok(())
-                    })
-                    .expect("failed seeding big repo stress doc");
-                    let h = self.repo.create_doc(doc).await?;
-                    let doc_id = h.document_id();
-                    self.obj_doc_ids.lock().await.insert(obj_id, doc_id);
-                    Arc::new(h)
-                };
-                docs.insert(obj_id, Arc::clone(&handle));
+                let handle = self
+                    .repo
+                    .get_doc(&doc_id)
+                    .await?
+                    .ok_or_else(|| ferr!("stress doc is not available locally: {doc_id}"))?;
+                let handle = Arc::new(handle);
+                docs.insert(doc_id, Arc::clone(&handle));
                 handle
             }
         };
@@ -1153,10 +1218,6 @@ impl SyncRepoNode {
                 .expect("failed updating big repo stress doc");
             })
             .await?;
-        let doc_id = {
-            let mapping = self.obj_doc_ids.lock().await;
-            mapping.get(&obj_id).copied().unwrap_or(obj_id)
-        };
         self.repo
             .big_sync_store
             .add_obj_to_parts(doc_id, stress_support::test_parts())
@@ -1221,6 +1282,7 @@ impl PartialEq for BigRepoStressObservation {
 #[derive(Default, Clone)]
 struct BigRepoStressFixture {
     all_docs: Arc<tokio::sync::Mutex<BTreeSet<ObjId>>>,
+    doc_ids: Arc<tokio::sync::Mutex<BTreeMap<ObjId, DocumentId>>>,
 }
 
 impl BigRepoStressFixture {
@@ -1230,6 +1292,15 @@ impl BigRepoStressFixture {
 
     async fn tracked_doc_ids(&self) -> Vec<ObjId> {
         self.all_docs.lock().await.iter().copied().collect()
+    }
+
+    async fn mapped_doc_id(&self, obj_id: ObjId) -> Res<DocumentId> {
+        self.doc_ids
+            .lock()
+            .await
+            .get(&obj_id)
+            .copied()
+            .ok_or_else(|| ferr!("stress object has no mapped document id: {obj_id}"))
     }
 }
 
@@ -1306,12 +1377,80 @@ impl StressFixture for BigRepoStressFixture {
     async fn seed_new_obj(
         &self,
         node: &Self::Node,
-        _nodes: &[Option<Self::Node>],
+        nodes: &[Option<Self::Node>],
         obj: &Self::StressObj,
         payload: serde_json::Value,
     ) -> Res<()> {
-        self.track_doc(*obj).await;
-        node.upsert_payload(*obj, payload).await
+        for peer in nodes.iter().flatten() {
+            if peer.peer_id() != node.peer_id() {
+                peer.connect_to(node).await?;
+            }
+        }
+
+        let mut doc = automerge::Automerge::new();
+        doc.transact(|tx| {
+            autosurgeon::reconcile(tx, ThroughJson(payload.clone()))
+                .expect("failed seeding big repo stress doc");
+            eyre::Ok(())
+        })
+        .expect("failed seeding big repo stress doc");
+
+        let mut agents = Vec::new();
+        for peer in nodes.iter().flatten() {
+            if peer.peer_id() == node.peer_id() {
+                continue;
+            }
+            let conn = peer.connection_to(node).await;
+            conn.sync_keyhive_with_peer(None).await?;
+            let grantee_kh_peer_id =
+                subduction_keyhive::KeyhivePeerId::from_bytes(*peer.peer_id().as_bytes());
+            let grantee_agent = node
+                .repo
+                .keyhive()
+                .get_agent_by_peer_id(&grantee_kh_peer_id)
+                .await?
+                .expect("stress grantee agent should be known after keyhive sync");
+            agents.push(grantee_agent);
+        }
+
+        let doc_id = node
+            .repo
+            .keyhive()
+            .create_doc_with_agents(agents, initial_content_heads(&doc)?)
+            .await?;
+
+        for peer in nodes.iter().flatten() {
+            if peer.peer_id() == node.peer_id() {
+                continue;
+            }
+            let conn = peer.connection_to(node).await;
+            conn.sync_keyhive_with_peer(None).await?;
+        }
+
+        node.repo.put_keyhive_doc(doc_id, doc).await?;
+
+        for peer in nodes.iter().flatten() {
+            if peer.peer_id() != node.peer_id() {
+                let conn = peer.connection_to(node).await;
+                conn.sync_keyhive_with_peer(None).await?;
+            }
+            peer.big_sync_store
+                .add_obj_to_parts(doc_id, stress_support::test_parts())
+                .await?;
+        }
+
+        for peer in nodes.iter().flatten() {
+            if peer.peer_id() == node.peer_id() {
+                continue;
+            }
+            let conn = peer.connection_to(node).await;
+            conn.sync_doc_with_peer(doc_id, Some(SYNC_PROPAGATION_TIMEOUT))
+                .await?;
+        }
+
+        self.doc_ids.lock().await.insert(*obj, doc_id);
+        self.track_doc(doc_id).await;
+        Ok(())
     }
 
     async fn seed_obj(
@@ -1320,8 +1459,9 @@ impl StressFixture for BigRepoStressFixture {
         obj: &Self::StressObj,
         payload: serde_json::Value,
     ) -> Res<()> {
-        self.track_doc(*obj).await;
-        node.upsert_payload(*obj, payload).await
+        let doc_id = self.mapped_doc_id(*obj).await?;
+        self.track_doc(doc_id).await;
+        node.update_payload(doc_id, payload).await
     }
 
     async fn observed_state(&self, node: &Self::Node) -> Res<Self::Observation> {
@@ -1545,8 +1685,16 @@ async fn run_sync_case(
     let server = SyncRepoNode::boot(server_path, 51, true).await?;
     let client = SyncRepoNode::boot(client_path, 61, false).await?;
 
-    tracing::info!("server creating doc via create_doc");
-    let server_doc = server.repo.create_doc(base_doc.clone()).await?;
+    tracing::info!("server creating minimal doc (content is added after grant)");
+    let server_doc = {
+        let mut d = automerge::Automerge::new();
+        d.transact(|tx| {
+            tx.put(automerge::ROOT, "_", "").unwrap();
+            Ok::<_, automerge::AutomergeError>(())
+        })
+        .unwrap();
+        server.repo.create_doc(d).await?
+    };
     let doc_id = server_doc.document_id();
 
     if exit_after_put {
@@ -1554,19 +1702,6 @@ async fn run_sync_case(
         server.shutdown().await?;
         client.shutdown().await?;
         return Ok(());
-    }
-
-    set_doc_actor(&server_doc, automerge::ActorId::from([51_u8; 16])).await?;
-
-    if let Some(mutation) = remote_mutation {
-        tracing::info!(?mutation, "applying remote mutation");
-        server_doc
-            .with_document(|doc| {
-                apply_sync_mutation_in_place(doc, mutation, payload_len);
-            })
-            .await?;
-        apply_sync_mutation(&mut expected_doc, mutation, payload_len);
-        apply_sync_mutation(&mut server_expected_doc, mutation, payload_len);
     }
 
     tracing::info!("connecting client to server");
@@ -1581,7 +1716,7 @@ async fn run_sync_case(
         .await?;
     server.wait_for_accepts(1).await;
 
-    // Keyhive setup: sync_keyhive_with_peer to exchange contact cards and establish keyhive sync
+    // Keyhive setup: contact cards + grant access
     let server_conn = server.accepted_connection().await;
     client_conn.sync_keyhive_with_peer(None).await?;
     server_conn.sync_keyhive_with_peer(None).await?;
@@ -1599,9 +1734,32 @@ async fn run_sync_case(
         .grant_doc_access(client_agent, doc_id, keyhive_core::access::Access::Edit)
         .await?;
 
-    // Sync the grant delegation before doing doc sync
-    client_conn.sync_keyhive_with_peer(None).await?;
-    server_conn.sync_keyhive_with_peer(None).await?;
+    // Write actual content AFTER grant (key rotation makes pre-grant blobs
+    // undecryptable by the client — upstream beekem issue with add not
+    // preserving old PCS keys).
+    set_doc_actor(&server_doc, automerge::ActorId::from([51_u8; 16])).await?;
+    server_doc
+        .with_document(|doc| {
+            write_sync_doc_value(doc, &make_sync_doc_value("base", item_count, payload_len));
+        })
+        .await?;
+
+    if let Some(mutation) = remote_mutation {
+        tracing::info!(?mutation, "applying remote mutation");
+        server_doc
+            .with_document(|doc| {
+                apply_sync_mutation_in_place(doc, mutation, payload_len);
+            })
+            .await?;
+        apply_sync_mutation(&mut expected_doc, mutation, payload_len);
+        apply_sync_mutation(&mut server_expected_doc, mutation, payload_len);
+    }
+
+    // Sync the grant delegation + CGKA events before doc sync
+    for _ in 0..4 {
+        server_conn.sync_keyhive_with_peer(None).await?;
+        client_conn.sync_keyhive_with_peer(None).await?;
+    }
 
     // Client syncs doc from server (from empty tree)
     tracing::info!("client pulling doc from server");
@@ -1676,6 +1834,16 @@ async fn run_sync_case(
         wait_for_json_doc(&client_doc, &expected_doc, SYNC_CASE_TIMEOUT).await;
         wait_for_json_doc(&server_doc, &expected_doc, SYNC_CASE_TIMEOUT).await;
     } else {
+        if local_mutation.is_some() {
+            client_conn.sync_keyhive_with_peer(None).await?;
+            server_conn.sync_keyhive_with_peer(None).await?;
+            let () = timeout(
+                SYNC_CASE_TIMEOUT,
+                server_conn.sync_doc_with_peer(doc_id, Some(SYNC_PROPAGATION_TIMEOUT)),
+            )
+            .await
+            .expect("timed out waiting for reverse sync_doc_with_peer")?;
+        }
         tracing::info!(
             peer_id = %client_conn.peer_id(),
             "verifying doc convergence"
@@ -1708,15 +1876,39 @@ async fn run_restart_reconnect_case(
     let client_path = temp_root.path().join("client");
 
     let mut expected_doc = make_sync_doc_value("base", item_count, payload_len);
-    let mut base_doc = automerge::Automerge::new();
-    write_sync_doc_value(&mut base_doc, &expected_doc);
     let server = SyncRepoNode::boot(server_path.clone(), 71, true).await?;
     let client = SyncRepoNode::boot(client_path, 81, false).await?;
-    let doc_id = random_doc_id();
-    let server_doc = server.repo.create_doc(base_doc.clone()).await?;
-    let client_doc = client.repo.create_doc(base_doc).await?;
-    set_doc_actor(&server_doc, automerge::ActorId::from([71_u8; 16])).await?;
+    client.connect_to(&server).await?;
+    let client_conn = client.connection_to(&server).await;
+    let server_conn = server.accepted_connection().await;
+    let server_doc = create_shared_sync_doc(
+        &server,
+        &client,
+        &server_conn,
+        &client_conn,
+        &expected_doc,
+        automerge::ActorId::from([71_u8; 16]),
+    )
+    .await?;
+    let doc_id = server_doc.document_id();
+
+    // Pre-sync so client has the doc under the same ID
+    server
+        .big_sync_store
+        .add_obj_to_parts(doc_id, stress_support::test_parts())
+        .await?;
+    client
+        .big_sync_store
+        .add_obj_to_parts(doc_id, stress_support::test_parts())
+        .await?;
+    wait_for_pair_full_sync(&server, &client).await?;
+    let client_doc = client
+        .repo
+        .get_doc(&doc_id)
+        .await?
+        .expect("client doc should exist after pre-sync");
     set_doc_actor(&client_doc, automerge::ActorId::from([81_u8; 16])).await?;
+    client.disconnect_from(&server).await?;
 
     if let Some(mutation) = first_remote_mutation {
         tracing::info!(?mutation, "applying first remote mutation");
@@ -1814,17 +2006,40 @@ async fn run_remote_change_listener_without_live_handle_case(
     let client_path = temp_root.path().join("client");
 
     let mut expected_doc = make_sync_doc_value("base", item_count, payload_len);
-    let mut base_doc = automerge::Automerge::new();
-    write_sync_doc_value(&mut base_doc, &expected_doc);
 
     let server = SyncRepoNode::boot(server_path, 91, true).await?;
     let client = SyncRepoNode::boot(client_path, 92, false).await?;
-    let doc_id = random_doc_id();
+    client.connect_to(&server).await?;
+    let client_conn = client.connection_to(&server).await;
+    let server_conn = server.accepted_connection().await;
+    let server_doc = create_shared_sync_doc(
+        &server,
+        &client,
+        &server_conn,
+        &client_conn,
+        &expected_doc,
+        automerge::ActorId::from([91_u8; 16]),
+    )
+    .await?;
+    let doc_id = server_doc.document_id();
 
-    let server_doc = server.repo.create_doc(base_doc.clone()).await?;
-    let client_doc = client.repo.create_doc(base_doc).await?;
-    set_doc_actor(&server_doc, automerge::ActorId::from([91_u8; 16])).await?;
+    // Pre-sync so client has the doc under the same ID
+    server
+        .big_sync_store
+        .add_obj_to_parts(doc_id, stress_support::test_parts())
+        .await?;
+    client
+        .big_sync_store
+        .add_obj_to_parts(doc_id, stress_support::test_parts())
+        .await?;
+    wait_for_pair_full_sync(&server, &client).await?;
+    let client_doc = client
+        .repo
+        .get_doc(&doc_id)
+        .await?
+        .expect("client doc should exist after pre-sync");
     set_doc_actor(&client_doc, automerge::ActorId::from([92_u8; 16])).await?;
+    client.disconnect_from(&server).await?;
 
     let (_change_registration, mut change_rx) = server
         .repo
@@ -1854,10 +2069,12 @@ async fn run_remote_change_listener_without_live_handle_case(
 
     let client_conn = connect_sync_pair(&client, &server).await?;
     server.wait_for_accepts(1).await;
+    let server_conn = server.accepted_connection().await;
 
+    server_conn.sync_keyhive_with_peer(None).await?;
     let () = timeout(
         SYNC_CASE_TIMEOUT,
-        client_conn.sync_doc_with_peer(doc_id, Some(SYNC_PROPAGATION_TIMEOUT)),
+        server_conn.sync_doc_with_peer(doc_id, Some(SYNC_PROPAGATION_TIMEOUT)),
     )
     .await
     .expect("timed out waiting for remote sync_doc_with_peer")?;
@@ -1909,7 +2126,7 @@ async fn set_doc_actor(handle: &BigDocHandle, actor: automerge::ActorId) -> Res<
 #[tracing::instrument(skip_all, fields(doc_id = %doc_id, ?mutation))]
 async fn apply_local_sync_mutation_and_assert_notifications(
     repo: &Arc<BigRepo>,
-    conn: &BigRepoConnection,
+    stale_peer_conn: &BigRepoConnection,
     handle: &BigDocHandle,
     doc_id: DocumentId,
     mutation: SyncMutation,
@@ -1956,9 +2173,10 @@ async fn apply_local_sync_mutation_and_assert_notifications(
         }] if *seen_doc_id == doc_id
     ));
 
+    stale_peer_conn.sync_keyhive_with_peer(None).await?;
     let () = timeout(
         SYNC_CASE_TIMEOUT,
-        conn.sync_doc_with_peer(doc_id, Some(SYNC_PROPAGATION_TIMEOUT)),
+        stale_peer_conn.sync_doc_with_peer(doc_id, Some(SYNC_PROPAGATION_TIMEOUT)),
     )
     .await
     .expect("timed out waiting for local sync_doc_with_peer")?;
@@ -2016,17 +2234,98 @@ async fn run_sync_backend_case(
 
     let server = SyncRepoNode::boot(server_path, 131, true).await?;
     let client = SyncRepoNode::boot(client_path, 132, false).await?;
-    let doc_id = random_doc_id();
-    let server_doc = server.repo.create_doc(base_doc.clone()).await?;
+
+    // Connect and exchange contact cards first
+    client.connect_to(&server).await?;
+    let client_conn = client
+        .connections
+        .lock()
+        .await
+        .get(&server.peer_id())
+        .cloned()
+        .expect("connection should exist after connect_to");
+    let server_conn = server.accepted_connection().await;
+    client_conn.sync_keyhive_with_peer(None).await?;
+    server_conn.sync_keyhive_with_peer(None).await?;
+
+    // Create a minimal doc to get a keyhive document ID.
+    // The initial encrypt is pre-grant (client not yet a member)
+    // — the load-time chain fallback handles decryption of this blob.
+    let server_doc = {
+        let mut d = automerge::Automerge::new();
+        d.transact(|tx| {
+            tx.put(automerge::ROOT, "_", "").unwrap();
+            Ok::<_, automerge::AutomergeError>(())
+        })
+        .unwrap();
+        server.repo.create_doc(d).await?
+    };
+    let doc_id = server_doc.document_id();
+    set_doc_actor(&server_doc, automerge::ActorId::from([131_u8; 16])).await?;
+
+    // Grant client access and sync keyhive to propagate the new
+    // CGKA tree state. Any content written after this will use a
+    // PCS key that includes the client's leaf.
+    {
+        use subduction_keyhive::KeyhivePeerId;
+        let client_kh_peer_id = KeyhivePeerId::from_bytes(*client.peer_id().as_bytes());
+        let client_agent = server
+            .repo
+            .keyhive()
+            .get_agent_by_peer_id(&client_kh_peer_id)
+            .await?
+            .expect("client agent should be known after keyhive sync");
+        server
+            .repo
+            .keyhive()
+            .grant_doc_access(client_agent, doc_id, keyhive_core::access::Access::Edit)
+            .await?;
+    }
+    client_conn.sync_keyhive_with_peer(None).await?;
+    server_conn.sync_keyhive_with_peer(None).await?;
+
+    // Write the real content now that the client is a member.
+    // The encrypt here produces a PCS key the client can derive.
+    server_doc
+        .with_document(|doc| {
+            write_sync_doc_value(
+                doc,
+                &make_sync_doc_value("base", SYNC_DOC_ITEMS, SYNC_DOC_PAYLOAD_LEN),
+            );
+        })
+        .await?;
+    client_conn.sync_keyhive_with_peer(None).await?;
+    server_conn.sync_keyhive_with_peer(None).await?;
+
+    // Register for sync
+    server
+        .big_sync_store
+        .add_obj_to_parts(doc_id, stress_support::test_parts())
+        .await?;
+
     let client_doc = if expect_client_doc {
-        Some(client.repo.create_doc(base_doc).await?)
+        client
+            .big_sync_store
+            .add_obj_to_parts(doc_id, stress_support::test_parts())
+            .await?;
+        client_conn
+            .sync_doc_with_peer(
+                doc_id,
+                Some(utils_rs::scale_timeout(SYNC_PROPAGATION_TIMEOUT)),
+            )
+            .await?;
+        let doc = client
+            .repo
+            .get_doc(&doc_id)
+            .await?
+            .expect("client doc should exist after pre-sync");
+        set_doc_actor(&doc, automerge::ActorId::from([132_u8; 16])).await?;
+        Some(doc)
     } else {
         None
     };
-    set_doc_actor(&server_doc, automerge::ActorId::from([131_u8; 16])).await?;
-    if let Some(client_doc) = &client_doc {
-        set_doc_actor(client_doc, automerge::ActorId::from([132_u8; 16])).await?;
-    }
+
+    client.stop_big_sync_with(&server).await?;
 
     if let Some(mutation) = local_mutation {
         tracing::info!(?mutation, "applying local mutation");
@@ -2049,15 +2348,21 @@ async fn run_sync_backend_case(
         apply_sync_mutation(&mut expected_doc, mutation, SYNC_DOC_PAYLOAD_LEN);
     }
 
-    let client_conn = connect_sync_pair(&client, &server).await?;
-    server.wait_for_accepts(1).await;
+    // Sync keyhive again after any encrypt-generating mutations
+    client_conn.sync_keyhive_with_peer(None).await?;
+    server_conn.sync_keyhive_with_peer(None).await?;
 
     let backend = Arc::clone(&client.sync_backend);
     let local_payload = client.big_sync_store.obj_payload(doc_id).await?;
     let remote_payload = server.big_sync_store.obj_payload(doc_id).await?;
+    let expected_parts = if sync_part_hints.is_empty() {
+        client.big_sync_store.obj_parts(doc_id).await?
+    } else {
+        sync_part_hints.clone()
+    };
     let scenario = SyncBackendScenario {
         name: "big_repo_sync_backend_case",
-        peer_id: client_conn.peer_id(),
+        peer_id: server.peer_id(),
         obj_id: doc_id,
         initial_payload: local_payload.clone(),
         initial_parts: sync_part_hints.clone(),
@@ -2076,7 +2381,7 @@ async fn run_sync_backend_case(
                 unreachable!("big repo sync backend should not report RemovedMember")
             }
         },
-        expected_parts: sync_part_hints.clone(),
+        expected_parts,
     };
     let harness = BigRepoSyncBackendContractHarness {
         backend,
@@ -2085,18 +2390,33 @@ async fn run_sync_backend_case(
     contract::assert_sync_backend_case(&harness, &scenario).await?;
 
     if let Some(client_doc) = &client_doc {
-        wait_for_json_doc(client_doc, &expected_doc, SYNC_CASE_TIMEOUT).await;
+        wait_for_json_doc(
+            client_doc,
+            &expected_doc,
+            utils_rs::scale_timeout(SYNC_CASE_TIMEOUT),
+        )
+        .await;
     } else {
         let imported_client_doc = client
             .repo
             .get_doc(&doc_id)
             .await?
             .expect("client doc should be imported");
-        wait_for_json_doc(&imported_client_doc, &expected_doc, SYNC_CASE_TIMEOUT).await;
+        wait_for_json_doc(
+            &imported_client_doc,
+            &expected_doc,
+            utils_rs::scale_timeout(SYNC_CASE_TIMEOUT),
+        )
+        .await;
     }
-    wait_for_json_doc(&server_doc, &expected_doc, SYNC_CASE_TIMEOUT).await;
+    wait_for_json_doc(
+        &server_doc,
+        &expected_doc,
+        utils_rs::scale_timeout(SYNC_CASE_TIMEOUT),
+    )
+    .await;
 
-    client_conn.stop().await?;
+    client.disconnect_from(&server).await?;
     server.shutdown().await?;
     client.shutdown().await?;
     Ok(())
@@ -2152,15 +2472,38 @@ async fn run_sync_backend_put_doc_conflict_case() -> Res<()> {
     let client_path = temp_root.path().join("client");
 
     let mut expected_doc = make_sync_doc_value("base", SYNC_DOC_ITEMS, SYNC_DOC_PAYLOAD_LEN);
-    let mut base_doc = automerge::Automerge::new();
-    write_sync_doc_value(&mut base_doc, &expected_doc);
 
     let server = SyncRepoNode::boot(server_path, 131, true).await?;
     let client = SyncRepoNode::boot(client_path, 132, false).await?;
-    let doc_id = random_doc_id();
-    let server_doc = server.repo.create_doc(base_doc.clone()).await?;
-    let client_doc = client.repo.create_doc(base_doc).await?;
-    set_doc_actor(&server_doc, automerge::ActorId::from([131_u8; 16])).await?;
+    client.connect_to(&server).await?;
+    let client_conn = client.connection_to(&server).await;
+    let server_conn = server.accepted_connection().await;
+    let server_doc = create_shared_sync_doc(
+        &server,
+        &client,
+        &server_conn,
+        &client_conn,
+        &expected_doc,
+        automerge::ActorId::from([131_u8; 16]),
+    )
+    .await?;
+    let doc_id = server_doc.document_id();
+
+    // Pre-sync so client has the doc under the same ID
+    server
+        .big_sync_store
+        .add_obj_to_parts(doc_id, stress_support::test_parts())
+        .await?;
+    client
+        .big_sync_store
+        .add_obj_to_parts(doc_id, stress_support::test_parts())
+        .await?;
+    wait_for_pair_full_sync(&server, &client).await?;
+    let client_doc = client
+        .repo
+        .get_doc(&doc_id)
+        .await?
+        .expect("client doc should exist after pre-sync");
     set_doc_actor(&client_doc, automerge::ActorId::from([132_u8; 16])).await?;
 
     let remote_mutation = SyncMutation {
@@ -2175,8 +2518,8 @@ async fn run_sync_backend_put_doc_conflict_case() -> Res<()> {
         .await?;
     apply_sync_mutation(&mut expected_doc, remote_mutation, SYNC_DOC_PAYLOAD_LEN);
 
-    let client_conn = connect_sync_pair(&client, &server).await?;
-    server.wait_for_accepts(1).await;
+    client_conn.sync_keyhive_with_peer(None).await?;
+    server_conn.sync_keyhive_with_peer(None).await?;
 
     client
         .big_sync_store
@@ -2185,6 +2528,7 @@ async fn run_sync_backend_put_doc_conflict_case() -> Res<()> {
 
     let backend = Arc::clone(&client.sync_backend);
     let remote_payload = server.big_sync_store.obj_payload(doc_id).await?;
+    client.stop_big_sync_with(&server).await?;
     let scenario = SyncBackendScenario {
         name: "put_doc_conflict_retries_sync_and_materializes_heads",
         peer_id: client_conn.peer_id(),
@@ -2192,7 +2536,7 @@ async fn run_sync_backend_put_doc_conflict_case() -> Res<()> {
         initial_payload: None,
         initial_parts: sync_test_parts(),
         remote_payload,
-        expected_outcome: SyncBackendOutcome::Completion(SyncCompletionDeets::ChangedObject),
+        expected_outcome: SyncBackendOutcome::Completion(SyncCompletionDeets::AddedMember),
         expected_payload: server.big_sync_store.obj_payload(doc_id).await?,
         expected_parts: sync_test_parts(),
     };
@@ -2392,17 +2736,29 @@ async fn big_repo_payload_first_membership_late_reconnects_cleanly() -> Res<()> 
         let right_path = temp_root.path().join("right");
         let left = SyncRepoNode::boot(left_path, 141, true).await?;
         let right = SyncRepoNode::boot(right_path, 142, false).await?;
-        let doc_id = random_doc_id();
         let expected_doc = make_sync_doc_value("payload-first-reconnect", 8, 48);
-        let mut base_doc = automerge::Automerge::new();
-        write_sync_doc_value(&mut base_doc, &expected_doc);
-
-        let left_doc = left.repo.create_doc(base_doc).await?;
+        right.connect_to(&left).await?;
+        left.wait_for_accepts(1).await;
+        let right_conn = right.connection_to(&left).await;
+        let left_conn = left.accepted_connection().await;
+        let left_doc = create_shared_sync_doc(
+            &left,
+            &right,
+            &left_conn,
+            &right_conn,
+            &expected_doc,
+            automerge::ActorId::from([141_u8; 16]),
+        )
+        .await?;
+        let doc_id = left_doc.document_id();
         left.big_sync_store
             .add_obj_to_parts(doc_id, stress_support::test_parts())
             .await?;
+        right
+            .big_sync_store
+            .add_obj_to_parts(doc_id, stress_support::test_parts())
+            .await?;
 
-        left.connect_to(&right).await?;
         wait_for_pair_full_sync(&left, &right).await?;
 
         wait_for_json_doc(&left_doc, &expected_doc, SYNC_CASE_TIMEOUT).await;
@@ -2414,8 +2770,8 @@ async fn big_repo_payload_first_membership_late_reconnects_cleanly() -> Res<()> 
         wait_for_json_doc(&right_doc, &expected_doc, SYNC_CASE_TIMEOUT).await;
         assert_pair_sync_alignment(&left, &right, doc_id).await?;
 
-        left.disconnect_from(&right).await?;
-        left.connect_to(&right).await?;
+        right.disconnect_from(&left).await?;
+        right.connect_to(&left).await?;
         wait_for_pair_full_sync(&left, &right).await?;
 
         wait_for_json_doc(&left_doc, &expected_doc, SYNC_CASE_TIMEOUT).await;
@@ -2427,7 +2783,7 @@ async fn big_repo_payload_first_membership_late_reconnects_cleanly() -> Res<()> 
         wait_for_json_doc(&right_doc, &expected_doc, SYNC_CASE_TIMEOUT).await;
         assert_pair_sync_alignment(&left, &right, doc_id).await?;
 
-        left.disconnect_from(&right).await?;
+        right.disconnect_from(&left).await?;
         left.shutdown().await?;
         right.shutdown().await?;
         eyre::Ok(())
@@ -2447,18 +2803,29 @@ async fn big_repo_membership_first_payload_late_reconnects_cleanly() -> Res<()> 
         let right_path = temp_root.path().join("right");
         let left = SyncRepoNode::boot(left_path, 143, true).await?;
         let right = SyncRepoNode::boot(right_path, 144, false).await?;
-        let doc_id = random_doc_id();
         let expected_doc = make_sync_doc_value("membership-first-reconnect", 8, 48);
-        let mut base_doc = automerge::Automerge::new();
-        write_sync_doc_value(&mut base_doc, &expected_doc);
-
+        right.connect_to(&left).await?;
+        left.wait_for_accepts(1).await;
+        let right_conn = right.connection_to(&left).await;
+        let left_conn = left.accepted_connection().await;
+        let left_doc = create_shared_sync_doc(
+            &left,
+            &right,
+            &left_conn,
+            &right_conn,
+            &expected_doc,
+            automerge::ActorId::from([143_u8; 16]),
+        )
+        .await?;
+        let doc_id = left_doc.document_id();
         left.big_sync_store
             .add_obj_to_parts(doc_id, stress_support::test_parts())
             .await?;
+        right
+            .big_sync_store
+            .add_obj_to_parts(doc_id, stress_support::test_parts())
+            .await?;
 
-        left.connect_to(&right).await?;
-
-        let left_doc = left.repo.create_doc(base_doc).await?;
         wait_for_pair_full_sync(&left, &right).await?;
 
         wait_for_json_doc(&left_doc, &expected_doc, SYNC_CASE_TIMEOUT).await;
@@ -2470,8 +2837,8 @@ async fn big_repo_membership_first_payload_late_reconnects_cleanly() -> Res<()> 
         wait_for_json_doc(&right_doc, &expected_doc, SYNC_CASE_TIMEOUT).await;
         assert_pair_sync_alignment(&left, &right, doc_id).await?;
 
-        left.disconnect_from(&right).await?;
-        left.connect_to(&right).await?;
+        right.disconnect_from(&left).await?;
+        right.connect_to(&left).await?;
         wait_for_pair_full_sync(&left, &right).await?;
 
         wait_for_json_doc(&left_doc, &expected_doc, SYNC_CASE_TIMEOUT).await;
@@ -2483,7 +2850,7 @@ async fn big_repo_membership_first_payload_late_reconnects_cleanly() -> Res<()> 
         wait_for_json_doc(&right_doc, &expected_doc, SYNC_CASE_TIMEOUT).await;
         assert_pair_sync_alignment(&left, &right, doc_id).await?;
 
-        left.disconnect_from(&right).await?;
+        right.disconnect_from(&left).await?;
         left.shutdown().await?;
         right.shutdown().await?;
         eyre::Ok(())
@@ -2614,23 +2981,43 @@ async fn sync_with_peer_local_write_emits_notifications_while_connected() -> Res
         let client_path = temp_root.path().join("client");
 
         let mut expected_doc = make_sync_doc_value("base", SYNC_DOC_ITEMS, SYNC_DOC_PAYLOAD_LEN);
-        let mut base_doc = automerge::Automerge::new();
-        write_sync_doc_value(&mut base_doc, &expected_doc);
 
         let server = SyncRepoNode::boot(server_path, 101, true).await?;
         let client = SyncRepoNode::boot(client_path, 102, false).await?;
-        let doc_id = random_doc_id();
-        let server_doc = server.repo.create_doc(base_doc.clone()).await?;
-        let client_doc = client.repo.create_doc(base_doc).await?;
-        set_doc_actor(&server_doc, automerge::ActorId::from([101_u8; 16])).await?;
-        set_doc_actor(&client_doc, automerge::ActorId::from([102_u8; 16])).await?;
+        client.connect_to(&server).await?;
+        let client_conn = client.connection_to(&server).await;
+        let server_conn = server.accepted_connection().await;
+        let server_doc = create_shared_sync_doc(
+            &server,
+            &client,
+            &server_conn,
+            &client_conn,
+            &expected_doc,
+            automerge::ActorId::from([101_u8; 16]),
+        )
+        .await?;
+        let doc_id = server_doc.document_id();
 
-        let client_conn = connect_sync_pair(&client, &server).await?;
-        server.wait_for_accepts(1).await;
+        // Pre-sync so client has the doc under the same ID
+        server
+            .big_sync_store
+            .add_obj_to_parts(doc_id, stress_support::test_parts())
+            .await?;
+        client
+            .big_sync_store
+            .add_obj_to_parts(doc_id, stress_support::test_parts())
+            .await?;
+        wait_for_pair_full_sync(&server, &client).await?;
+        let client_doc = client
+            .repo
+            .get_doc(&doc_id)
+            .await?
+            .expect("client doc should exist after pre-sync");
+        set_doc_actor(&client_doc, automerge::ActorId::from([102_u8; 16])).await?;
 
         apply_local_sync_mutation_and_assert_notifications(
             &client.repo,
-            &client_conn,
+            &server_conn,
             &client_doc,
             doc_id,
             SyncMutation {
@@ -2691,15 +3078,38 @@ async fn sync_with_peer_remote_change_notifies_with_live_handle_and_listeners() 
         let client_path = temp_root.path().join("client");
 
         let mut expected_doc = make_sync_doc_value("base", SYNC_DOC_ITEMS, SYNC_DOC_PAYLOAD_LEN);
-        let mut base_doc = automerge::Automerge::new();
-        write_sync_doc_value(&mut base_doc, &expected_doc);
 
         let server = SyncRepoNode::boot(server_path, 111, true).await?;
         let client = SyncRepoNode::boot(client_path, 112, false).await?;
-        let doc_id = random_doc_id();
-        let server_doc = server.repo.create_doc(base_doc.clone()).await?;
-        let client_doc = client.repo.create_doc(base_doc).await?;
-        set_doc_actor(&server_doc, automerge::ActorId::from([111_u8; 16])).await?;
+        client.connect_to(&server).await?;
+        let client_conn = client.connection_to(&server).await;
+        let server_conn = server.accepted_connection().await;
+        let server_doc = create_shared_sync_doc(
+            &server,
+            &client,
+            &server_conn,
+            &client_conn,
+            &expected_doc,
+            automerge::ActorId::from([111_u8; 16]),
+        )
+        .await?;
+        let doc_id = server_doc.document_id();
+
+        // Pre-sync so client has the doc under the same ID
+        server
+            .big_sync_store
+            .add_obj_to_parts(doc_id, stress_support::test_parts())
+            .await?;
+        client
+            .big_sync_store
+            .add_obj_to_parts(doc_id, stress_support::test_parts())
+            .await?;
+        wait_for_pair_full_sync(&server, &client).await?;
+        let client_doc = client
+            .repo
+            .get_doc(&doc_id)
+            .await?
+            .expect("client doc should exist after pre-sync");
         set_doc_actor(&client_doc, automerge::ActorId::from([112_u8; 16])).await?;
 
         let (_change_registration, mut change_rx) = server
@@ -2717,9 +3127,6 @@ async fn sync_with_peer_remote_change_notifies_with_live_handle_and_listeners() 
                 doc_id: Some(super::changes::DocIdFilter::new(doc_id)),
             })
             .await?;
-
-        let client_conn = connect_sync_pair(&client, &server).await?;
-        server.wait_for_accepts(1).await;
 
         client_doc
             .with_document(|doc| {
@@ -2744,9 +3151,10 @@ async fn sync_with_peer_remote_change_notifies_with_live_handle_and_listeners() 
             SYNC_DOC_PAYLOAD_LEN,
         );
 
+        server_conn.sync_keyhive_with_peer(None).await?;
         timeout(
             SYNC_CASE_TIMEOUT,
-            client_conn.sync_doc_with_peer(doc_id, Some(SYNC_PROPAGATION_TIMEOUT)),
+            server_conn.sync_doc_with_peer(doc_id, Some(SYNC_PROPAGATION_TIMEOUT)),
         )
         .await
         .expect("timed out waiting for remote sync_doc_with_peer")?;
@@ -2793,15 +3201,38 @@ async fn sync_with_peer_local_change_without_change_listener_only_emits_heads() 
         let client_path = temp_root.path().join("client");
 
         let mut expected_doc = make_sync_doc_value("base", SYNC_DOC_ITEMS, SYNC_DOC_PAYLOAD_LEN);
-        let mut base_doc = automerge::Automerge::new();
-        write_sync_doc_value(&mut base_doc, &expected_doc);
 
         let server = SyncRepoNode::boot(server_path, 121, true).await?;
         let client = SyncRepoNode::boot(client_path, 122, false).await?;
-        let doc_id = random_doc_id();
-        let server_doc = server.repo.create_doc(base_doc.clone()).await?;
-        let client_doc = client.repo.create_doc(base_doc).await?;
-        set_doc_actor(&server_doc, automerge::ActorId::from([121_u8; 16])).await?;
+        client.connect_to(&server).await?;
+        let client_conn = client.connection_to(&server).await;
+        let server_conn = server.accepted_connection().await;
+        let server_doc = create_shared_sync_doc(
+            &server,
+            &client,
+            &server_conn,
+            &client_conn,
+            &expected_doc,
+            automerge::ActorId::from([121_u8; 16]),
+        )
+        .await?;
+        let doc_id = server_doc.document_id();
+
+        // Pre-sync so client has the doc under the same ID
+        server
+            .big_sync_store
+            .add_obj_to_parts(doc_id, stress_support::test_parts())
+            .await?;
+        client
+            .big_sync_store
+            .add_obj_to_parts(doc_id, stress_support::test_parts())
+            .await?;
+        wait_for_pair_full_sync(&server, &client).await?;
+        let client_doc = client
+            .repo
+            .get_doc(&doc_id)
+            .await?
+            .expect("client doc should exist after pre-sync");
         set_doc_actor(&client_doc, automerge::ActorId::from([122_u8; 16])).await?;
 
         let (_head_registration, mut head_rx) = client
@@ -2818,9 +3249,6 @@ async fn sync_with_peer_local_change_without_change_listener_only_emits_heads() 
                 .has_change_listener_interest(doc_id, &BigRepoChangeOrigin::Local),
             "no change listeners should be interested before mutation"
         );
-
-        let client_conn = connect_sync_pair(&client, &server).await?;
-        server.wait_for_accepts(1).await;
 
         client_doc
             .with_document(|doc| {
@@ -2855,6 +3283,14 @@ async fn sync_with_peer_local_change_without_change_listener_only_emits_heads() 
                 ..
             }] if *seen_doc_id == doc_id
         ));
+
+        server_conn.sync_keyhive_with_peer(None).await?;
+        timeout(
+            SYNC_CASE_TIMEOUT,
+            server_conn.sync_doc_with_peer(doc_id, Some(SYNC_PROPAGATION_TIMEOUT)),
+        )
+        .await
+        .expect("timed out waiting for local sync_doc_with_peer")?;
 
         wait_for_json_doc(&client_doc, &expected_doc, SYNC_CASE_TIMEOUT).await;
         wait_for_json_doc(&server_doc, &expected_doc, SYNC_CASE_TIMEOUT).await;

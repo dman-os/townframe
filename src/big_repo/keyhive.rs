@@ -5,9 +5,24 @@ use keyhive_crypto::signer::memory::MemorySigner;
 use nonempty::NonEmpty;
 use subduction_keyhive::runtime::SendableRuntimeKeyhive;
 
+pub type BigKeyhiveAgent = keyhive_core::principal::agent::Agent<
+    future_form::Sendable,
+    keyhive_crypto::signer::memory::MemorySigner,
+    Vec<u8>,
+    keyhive_core::listener::no_listener::NoListener,
+>;
+
+type BigKeyhivePeer = keyhive_core::principal::peer::Peer<
+    future_form::Sendable,
+    keyhive_crypto::signer::memory::MemorySigner,
+    Vec<u8>,
+    keyhive_core::listener::no_listener::NoListener,
+>;
+
 #[derive(Clone)]
 pub struct BigKeyhiveHandle {
     keyhive: Arc<Mutex<SendableRuntimeKeyhive>>,
+    signer: MemorySigner,
     contact_card: Arc<keyhive_core::contact_card::ContactCard>,
     keyhive_peer_id: subduction_keyhive::KeyhivePeerId,
 }
@@ -20,18 +35,61 @@ impl BigKeyhiveHandle {
     pub async fn boot_memory_from_seed(seed: [u8; 32]) -> Res<Self> {
         let signer = MemorySigner::from(ed25519_dalek::SigningKey::from_bytes(&seed));
         let (keyhive, keyhive_peer_id, contact_card) =
-            subduction_keyhive::runtime::init_sendable_keyhive(signer)
+            subduction_keyhive::runtime::init_sendable_keyhive(signer.clone())
                 .await
                 .map_err(|err| ferr!("failed booting memory keyhive: {err}"))?;
         Ok(Self {
             keyhive: Arc::new(Mutex::new(keyhive)),
+            signer,
             contact_card: Arc::new(contact_card),
             keyhive_peer_id,
         })
     }
 
+    pub(crate) async fn restore_from_storage_archive(
+        &mut self,
+        storage: &crate::keyhive_storage::BigRepoKeyhiveStorage,
+    ) -> Res<()> {
+        let storage_id =
+            subduction_keyhive::StorageHash::new(*self.keyhive_peer_id.verifying_key());
+        let archives =
+            subduction_keyhive::load_archives::<Vec<u8>, _, future_form::Sendable>(storage)
+                .await
+                .map_err(|err| ferr!("failed loading keyhive archives: {err}"))?;
+        let Some((_, archive)) = archives
+            .into_iter()
+            .find(|(archive_storage_id, _)| *archive_storage_id == storage_id)
+        else {
+            return Ok(());
+        };
+
+        let restored = keyhive_core::keyhive::Keyhive::try_from_archive(
+            &archive,
+            self.signer.clone(),
+            keyhive_core::store::ciphertext::memory::MemoryCiphertextStore::<Vec<u8>, Vec<u8>>::new(
+            ),
+            keyhive_core::listener::no_listener::NoListener,
+            Arc::new(futures::lock::Mutex::new(rand_08::rngs::OsRng)),
+        )
+        .await
+        .map_err(|err| ferr!("failed restoring keyhive from archive: {err:?}"))?;
+        let contact_card = restored
+            .contact_card()
+            .await
+            .map_err(|err| ferr!("failed restoring keyhive contact card: {err}"))?;
+        let peer_id = subduction_keyhive::KeyhivePeerId::from_bytes(restored.id().to_bytes());
+        *self.keyhive.lock().await = restored;
+        self.contact_card = Arc::new(contact_card);
+        self.keyhive_peer_id = peer_id;
+        Ok(())
+    }
+
     pub(crate) async fn clone_keyhive(&self) -> SendableRuntimeKeyhive {
         self.keyhive.lock().await.clone()
+    }
+
+    pub(crate) fn shared_keyhive(&self) -> Arc<Mutex<SendableRuntimeKeyhive>> {
+        Arc::clone(&self.keyhive)
     }
 
     pub(crate) fn contact_card(&self) -> &keyhive_core::contact_card::ContactCard {
@@ -43,19 +101,32 @@ impl BigKeyhiveHandle {
     }
 
     pub async fn create_doc(&self, initial_content_heads: NonEmpty<[u8; 32]>) -> Res<DocumentId> {
-        let doc_id = self.create_doc_id_bytes(initial_content_heads).await?;
+        let doc_id = self
+            .create_doc_id_bytes(Vec::new(), initial_content_heads)
+            .await?;
+        Ok(DocumentId::new(doc_id))
+    }
+
+    pub(crate) async fn create_doc_with_agents(
+        &self,
+        agents: Vec<BigKeyhiveAgent>,
+        initial_content_heads: NonEmpty<[u8; 32]>,
+    ) -> Res<DocumentId> {
+        let coparents = agents
+            .into_iter()
+            .map(BigKeyhivePeer::try_from)
+            .collect::<Result<Vec<_>, _>>()
+            .map_err(|err| ferr!("invalid initial keyhive document peer: {err}"))?;
+        let doc_id = self
+            .create_doc_id_bytes(coparents, initial_content_heads)
+            .await?;
         Ok(DocumentId::new(doc_id))
     }
 
     /// Grant an agent access to a document.
     pub async fn grant_doc_access(
         &self,
-        agent: keyhive_core::principal::agent::Agent<
-            future_form::Sendable,
-            keyhive_crypto::signer::memory::MemorySigner,
-            Vec<u8>,
-            keyhive_core::listener::no_listener::NoListener,
-        >,
+        agent: BigKeyhiveAgent,
         doc_id: DocumentId,
         access: keyhive_core::access::Access,
     ) -> Res<()> {
@@ -76,6 +147,8 @@ impl BigKeyhiveHandle {
         kh.add_member(agent, &Membered::Document(kh_doc_id, doc), access, &[])
             .await
             .map_err(|e| ferr!("grant failed: {e}"))?;
+        // E2EE branch: add_member fires CGKA ops to the event listener
+        // automatically, so no manual receive_cgka_op loop is needed.
         Ok(())
     }
 
@@ -83,16 +156,7 @@ impl BigKeyhiveHandle {
     pub async fn get_agent_by_peer_id(
         &self,
         peer_id: &subduction_keyhive::KeyhivePeerId,
-    ) -> Res<
-        Option<
-            keyhive_core::principal::agent::Agent<
-                future_form::Sendable,
-                keyhive_crypto::signer::memory::MemorySigner,
-                Vec<u8>,
-                keyhive_core::listener::no_listener::NoListener,
-            >,
-        >,
-    > {
+    ) -> Res<Option<BigKeyhiveAgent>> {
         let key_bytes = peer_id.verifying_key();
         let vk = ed25519_dalek::VerifyingKey::from_bytes(key_bytes)
             .map_err(|_| ferr!("peer id is not a valid Ed25519 point"))?;
@@ -103,6 +167,7 @@ impl BigKeyhiveHandle {
 
     async fn create_doc_id_bytes(
         &self,
+        coparents: Vec<BigKeyhivePeer>,
         initial_content_heads: NonEmpty<[u8; 32]>,
     ) -> Res<[u8; 32]> {
         let initial_content_heads = NonEmpty {
@@ -115,7 +180,7 @@ impl BigKeyhiveHandle {
         };
         let keyhive = self.keyhive.lock().await;
         let doc = keyhive
-            .generate_doc(vec![], initial_content_heads)
+            .generate_doc(coparents, initial_content_heads)
             .await
             .map_err(|err| ferr!("failed creating keyhive document: {err}"))?;
         let doc_id = doc.lock().await.doc_id().to_bytes();
@@ -127,7 +192,9 @@ impl BigKeyhiveHandle {
         &self,
         initial_content_heads: NonEmpty<[u8; 32]>,
     ) -> Res<(DocumentId, [u8; 32])> {
-        let doc_id = self.create_doc_id_bytes(initial_content_heads).await?;
+        let doc_id = self
+            .create_doc_id_bytes(Vec::new(), initial_content_heads)
+            .await?;
         Ok((DocumentId::new(doc_id), doc_id))
     }
 }

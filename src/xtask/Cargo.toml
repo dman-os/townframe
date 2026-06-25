@@ -11,6 +11,8 @@ name = "xtask"
 path = "main.rs"
 
 [dependencies]
+atproto-dasl.workspace = true
+beekem = "0.3.0"
 clap = { workspace = true, features = ["derive", "env"] }
 
 dotenv-flow.workspace = true
@@ -24,8 +26,8 @@ serde_json.workspace = true
 http.workspace = true
 future_form.workspace = true
 ed25519-dalek = "2.2.0"
-keyhive_core = "0.4.0"
-keyhive_crypto = "0.2.0"
+keyhive_core = "0.5.0"
+keyhive_crypto = "0.2.1"
 nonempty = "0.10.0"
 rand08 = { package = "rand", version = "0.8.5" }
 sedimentree_core.workspace = true
