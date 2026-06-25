@@ -92,108 +92,153 @@ pub async fn cli() -> Res<()> {
         .await;
     bob_proto.add_peer(alice_id.clone(), bob_conn.clone()).await;
 
-    let created = {
+    println!("=== Testing application-secret predecessor key chain ===");
+
+    // Store encrypted content and keys for the chain demo
+    let mut pre_grant_enc: Option<beekem::encrypted::EncryptedContent<Vec<u8>, [u8; 32]>> = None;
+    let mut post_grant_enc: Option<beekem::encrypted::EncryptedContent<Vec<u8>, [u8; 32]>> = None;
+    let mut sealed_pred_key: Option<Vec<u8>> = None;
+    let pre_grant_pcs: Option<Vec<u8>> = None;
+    let post_grant_pcs: Option<Vec<u8>> = None;
+
+    let doc_id = {
         let kh = alice_kh.lock().await;
-        let set_group = kh.generate_group(vec![]).await?;
-        let set_group_id = set_group.lock().await.group_id();
+        let doc = kh
+            .generate_doc(vec![], nonempty![[0xAAu8; 32]])
+            .await?;
+        let doc_id = doc.lock().await.doc_id();
+        let doc_id_bytes = doc_id.to_bytes();
+
+        // Encrypt BEFORE adding Bob (pre-grant)
+        let pre_ref = [0x01u8; 32];
+        let pre_content = b"pre-grant";
+        let (enc_pre, key_pre) = kh
+            .try_encrypt_content_keyed(doc.clone(), &pre_ref, &vec![], pre_content)
+            .await?;
+        let pre_ec = enc_pre.encrypted_content().clone();
+        println!(
+            "Pre-grant  pcs_key_hash: {:?}",
+            &pre_ec.pcs_key_hash.raw.as_bytes()[..8]
+        );
+        pre_grant_enc = Some(pre_ec);
+
+        // Add Bob
         let bob_agent = kh
             .get_agent(bob_id.to_identifier()?)
             .await
             .ok_or_eyre("alice keyhive did not learn bob from contact card")?;
-
-        kh.add_member(
-            bob_agent,
-            &Membered::Group(set_group_id, Arc::clone(&set_group)),
-            Access::Edit,
-            &[],
-        )
-        .await?;
-
-        let first_doc = kh
-            .generate_doc(
-                vec![Peer::Group(set_group_id, Arc::clone(&set_group))],
-                nonempty![[0x11u8; 32]],
+        let update = kh
+            .add_member(
+                bob_agent,
+                &Membered::Document(doc_id, doc.clone()),
+                Access::Edit,
+                &[],
             )
             .await?;
-        let second_doc = kh
-            .generate_doc(
-                vec![Peer::Group(set_group_id, Arc::clone(&set_group))],
-                nonempty![[0x22u8; 32]],
-            )
-            .await?;
+        // E2EE branch: CGKA ops are fired to the event listener automatically.
+        // No manual receive_cgka_op needed.
+        println!("Added Bob, cgka_ops={}", update.cgka_ops.len());
 
-        let first_doc_id = first_doc.lock().await.doc_id();
-        let second_doc_id = second_doc.lock().await.doc_id();
-        for ii in 0..25000 {
-            let doc = kh
-                .generate_doc(
-                    vec![Peer::Group(set_group_id, Arc::clone(&set_group))],
-                    nonempty![[ii as u8; 32]],
-                )
-                .await?;
-        }
-        vec![
-            ("notes/today", first_doc_id),
-            ("plugin.todo/items", second_doc_id),
-        ]
+        // Encrypt AFTER adding Bob (post-grant)
+        let post_ref = [0x02u8; 32];
+        let post_content = b"post-grant";
+        let (enc_post, key_post) = kh
+            .try_encrypt_content_keyed(doc.clone(), &post_ref, &vec![], post_content)
+            .await?;
+        let post_ec = enc_post.encrypted_content().clone();
+        println!(
+            "Post-grant pcs_key_hash: {:?}",
+            &post_ec.pcs_key_hash.raw.as_bytes()[..8]
+        );
+        post_grant_enc = Some(post_ec);
+
+        // Build predecessor chain: seal the pre-grant key with the post-grant key.
+        // When Bob decrypts the post-grant blob (via CGKA), he gets key_post.
+        // From key_post, he can unwrap the sealed predecessor to get key_pre.
+        let sealed = key_post
+            .try_seal(key_pre.as_slice(), &doc_id_bytes)
+            .map_err(|e| eyre::eyre!("try_seal failed: {e}"))?;
+        println!(
+            "Sealed pred key: {} bytes (key_post sealed key_pre)",
+            sealed.len()
+        );
+        sealed_pred_key = Some(sealed);
+
+        doc_id
     };
 
-    warn!("doing sync");
+    // Sync Alice -> Bob (multiple rounds)
+    println!("=== Syncing ===");
+    run_sync_round(&alice_proto, &bob_proto, &alice_id, &bob_id, &alice_conn, &bob_conn).await;
+    run_sync_round(&bob_proto, &alice_proto, &bob_id, &alice_id, &bob_conn, &alice_conn).await;
+    run_sync_round(&alice_proto, &bob_proto, &alice_id, &bob_id, &alice_conn, &bob_conn).await;
+    println!("Sync done");
 
-    tokio::time::sleep(tokio::time::Duration::from_secs(10)).await;
+    // Bob: try to decrypt
+    {
+        let kh = bob_kh.lock().await;
+        if let Some(doc) = kh.get_document(doc_id).await {
+            let mut locked = doc.lock().await;
+            println!("Bob's doc cgka: {}", locked.cgka().is_ok());
 
-    run_sync_round(
-        &alice_proto,
-        &bob_proto,
-        &alice_id,
-        &bob_id,
-        &alice_conn,
-        &bob_conn,
-    )
-    .await;
+            // POST-GRANT: should work via CGKA
+            if let Some(ref post_ec) = post_grant_enc {
+                match locked.try_decrypt_content_keyed(post_ec) {
+                    Ok((pt, key)) => {
+                        let text = String::from_utf8_lossy(&pt);
+                        println!("POST-GRANT decrypt OK (CGKA): {text}");
+                        println!("  Post-grant key available for chain: yes");
 
-    warn!("sync done");
+                        // Now try PRE-GRANT using CGKA (should fail)
+                        if let Some(ref pre_ec) = pre_grant_enc {
+                            match locked.try_decrypt_content(pre_ec) {
+                                Ok(_) => println!("PRE-GRANT decrypt OK (unexpected!)"),
+                                Err(e) => {
+                                    println!("PRE-GRANT decrypt via CGKA: FAILED ({e}) — expected forward-secrecy");
 
-    let bob_peer = PeerId::new(*bob_id.verifying_key());
-    let mallory_signer = SubductionMemorySigner::from_bytes(&[0xC9; 32]);
-    let mallory_peer = PeerId::from(mallory_signer.verifying_key());
-    let bob_author = verified_author_from_seed(0xB0).await;
-    let mallory_author = verified_author_from_seed(0xC9).await;
-
-    let kh = bob_kh.lock().await;
-    let reachable = kh.reachable_docs().await;
-
-    println!("alice peer: {alice_id}");
-    println!("bob peer:   {bob_id}");
-    println!("bob reachable doc count: {}", reachable.len());
-
-    for (label, doc_id) in created {
-        let sedimentree_id = SedimentreeId::new(doc_id.to_bytes());
-        eyre::ensure!(
-            reachable.contains_key(&doc_id),
-            "bob did not see reachable doc {label} ({doc_id}) after keyhive sync"
-        );
-        authorize_fetch_with(&kh, bob_peer, sedimentree_id).await?;
-        authorize_put_with(&kh, bob_peer, bob_author, sedimentree_id).await?;
-
-        let mallory_fetch = authorize_fetch_with(&kh, mallory_peer, sedimentree_id).await;
-        eyre::ensure!(
-            mallory_fetch.is_err(),
-            "mallory unexpectedly fetched {label} ({doc_id})"
-        );
-        let mallory_put =
-            authorize_put_with(&kh, mallory_peer, mallory_author, sedimentree_id).await;
-        eyre::ensure!(
-            mallory_put.is_err(),
-            "mallory unexpectedly put {label} ({doc_id})"
-        );
-
-        println!("authorized item set member: {label} -> {sedimentree_id}");
+                                    // Now try the application-level chain:
+                                    // Use the post-grant key to unwrap the sealed predecessor key
+                                    if let Some(ref sealed) = sealed_pred_key {
+                                        match key.try_open(sealed) {
+                                            Ok(pred_key_bytes) => {
+                                                let pred_arr: [u8; 32] = pred_key_bytes
+                                                    .try_into()
+                                                    .expect("key is 32 bytes");
+                                                let pred_key =
+                                                    keyhive_crypto::symmetric_key::SymmetricKey::from(pred_arr);
+                                                match pre_ec.try_decrypt(pred_key) {
+                                                    Ok(pt) => {
+                                                        let text =
+                                                            String::from_utf8_lossy(&pt);
+                                                        println!(
+                                                            "PRE-GRANT decrypt via CHAIN: OK! → \"{text}\""
+                                                        );
+                                                    }
+                                                    Err(e) => {
+                                                        println!(
+                                                            "PRE-GRANT decrypt via chain: FAILED ({e})"
+                                                        );
+                                                    }
+                                                }
+                                            }
+                                            Err(e) => {
+                                                println!("try_open sealed pred key failed: {e}");
+                                            }
+                                        }
+                                    } else {
+                                        println!("No sealed predecessor key available");
+                                    }
+                                }
+                            }
+                        }
+                    }
+                    Err(e) => println!("POST-GRANT decrypt FAILED: {e}"),
+                }
+            }
+        }
     }
 
-    println!("subduction_keyhive policy accepted bob fetch/put and rejected mallory");
-
-    tokio::time::sleep(tokio::time::Duration::from_secs(10000)).await;
+    println!("=== Done ===");
     Ok(())
 }
 

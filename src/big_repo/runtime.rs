@@ -5,9 +5,10 @@ use crate::interlude::*;
 use crate::{
     handler::{boot_keyhive, BigRepoComposedHandler, BigRepoKeyhiveProtocol, BigRepoSubduction},
     keyhive_conn::BigRepoKeyhiveConnAdapter,
+    keyhive_storage::BigRepoKeyhiveStorage,
     BigKeyhiveHandle, BigRepoChangeOrigin, ConnFinishSignal, DocumentId, PeerId,
 };
-use subduction_keyhive::{KeyhiveConnection, KeyhivePeerId, SyncStatus};
+use subduction_keyhive::{KeyhiveConnection, KeyhivePeerId};
 
 use futures::future::BoxFuture;
 use sedimentree_core::crypto::digest::Digest;
@@ -183,17 +184,15 @@ struct RuntimePeerConnDeets {
     closed: Arc<AtomicBool>,
 }
 
-#[derive(Clone)]
+#[derive(Clone, educe::Educe)]
+#[educe(Debug)]
 pub struct BigRepoRuntimeHandle {
+    #[educe(Debug(ignore))]
     cmd_tx: mpsc::UnboundedSender<RuntimeCmd>,
+    #[educe(Debug(ignore))]
     keyhive: BigKeyhiveHandle,
+    #[educe(Debug(ignore))]
     keyhive_protocol: BigRepoKeyhiveProtocol,
-}
-
-impl std::fmt::Debug for BigRepoRuntimeHandle {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.debug_struct("BigRepoRuntimeHandle").finish()
-    }
 }
 
 impl BigRepoRuntimeHandle {
@@ -203,6 +202,7 @@ impl BigRepoRuntimeHandle {
     ) -> Result<Arc<LiveDocBundle>, CreateDocError> {
         use nonempty::NonEmpty;
         let heads = initial_content.get_heads();
+        // FIXME: do we use heads from subduction or from automerge???
         let content_heads = NonEmpty::from_vec(heads.iter().map(|h| h.0).collect())
             .ok_or_else(|| eyre::eyre!("automerge doc has no heads"))?;
         let doc_id = self.keyhive.create_doc(content_heads).await?;
@@ -217,6 +217,22 @@ impl BigRepoRuntimeHandle {
         rx.await
             .map_err(|_| eyre::eyre!(ERROR_CHANNEL))?
             .map_err(CreateDocError::from)
+    }
+
+    pub(crate) async fn put_keyhive_doc(
+        &self,
+        doc_id: DocumentId,
+        initial_content: automerge::Automerge,
+    ) -> Result<Arc<LiveDocBundle>, PutDocError> {
+        let (tx, rx) = oneshot::channel();
+        self.cmd_tx
+            .send(RuntimeCmd::PutDoc {
+                doc_id,
+                initial_content: initial_content.into(),
+                resp: tx,
+            })
+            .map_err(|_| eyre::eyre!(ERROR_ACTOR))?;
+        rx.await.map_err(|_| eyre::eyre!(ERROR_CHANNEL))?
     }
 
     pub async fn get_doc_handle(&self, doc_id: DocumentId) -> Res<Option<Arc<LiveDocBundle>>> {
@@ -357,7 +373,24 @@ impl BigRepoRuntimeHandle {
             })
             .map_err(|_| ferr!("runtime channel closed"))?;
         rx.await
-            .map_err(|_| ferr!("sync keyhive response channel closed"))?
+            .map_err(|_| ferr!("sync keyhive response channel closed"))??;
+        let deadline = tokio::time::Instant::now()
+            + timeout.unwrap_or_else(|| utils_rs::scale_timeout(Duration::from_secs(5)));
+        let keyhive_peer_id = KeyhivePeerId::from_bytes(*peer_id.as_bytes());
+        loop {
+            if self
+                .keyhive_protocol
+                .syncpoint_for_peer(&keyhive_peer_id)
+                .await
+                .is_some()
+            {
+                return Ok(());
+            }
+            if tokio::time::Instant::now() >= deadline {
+                return Err(ferr!("keyhive sync timed out waiting for syncpoint"));
+            }
+            tokio::time::sleep(utils_rs::scale_timeout(Duration::from_millis(10))).await;
+        }
     }
 }
 
@@ -365,10 +398,16 @@ pub struct BigRepoRuntimeStopToken {
     cancel_token: CancellationToken,
     machine_loop_handle: tokio::task::JoinHandle<()>,
     runtime_tasks: Arc<utils_rs::AbortableJoinSet>,
+    keyhive_protocol: BigRepoKeyhiveProtocol,
+    keyhive_archive_id: subduction_keyhive::storage::StorageHash,
 }
 
 impl BigRepoRuntimeStopToken {
     pub async fn stop(self) -> Res<()> {
+        self.keyhive_protocol
+            .compact(self.keyhive_archive_id)
+            .await
+            .wrap_err("failed persisting keyhive state during BigRepo shutdown")?;
         self.cancel_token.cancel();
         match self.runtime_tasks.stop(Duration::from_secs(5)).await {
             Ok(()) => {}
@@ -441,6 +480,7 @@ pub async fn spawn_big_repo_runtime<S>(
     storage: S,
     policy: Arc<BigRepoPolicy>,
     keyhive: BigKeyhiveHandle,
+    keyhive_storage: BigRepoKeyhiveStorage,
     big_sync_store: SharedPartitionStore,
     change_manager: Arc<changes::ChangeListenerManager>,
 ) -> Res<(BigRepoRuntimeHandle, BigRepoRuntimeStopToken)>
@@ -485,20 +525,15 @@ where
         Arc::clone(&subscriptions),
         storage_powerbox.clone(),
         sedimentree_core::depth::CountLeadingZeroBytes,
+        TokioSpawn,
     );
     sync_handler.set_sync_session_observer(Arc::clone(&sync_session_observer));
     let send_counter = sync_handler.send_counter().clone();
     let sync_handler = Arc::new(sync_handler);
 
     // Boot keyhive protocol and handler
-    let (keyhive_protocol, keyhive_handler) = boot_keyhive(&keyhive).await?;
-    let (keyhive_sync_tx, keyhive_sync_rx) = mpsc::unbounded_channel();
-    let composed_handler = Arc::new(BigRepoComposedHandler::new(
-        sync_handler,
-        keyhive_handler,
-        Arc::clone(&keyhive_protocol),
-        keyhive_sync_tx.clone(),
-    ));
+    let (keyhive_protocol, keyhive_handler) = boot_keyhive(&keyhive, keyhive_storage).await?;
+    let composed_handler = Arc::new(BigRepoComposedHandler::new(sync_handler, keyhive_handler));
 
     let (subduction, listener, manager) = Subduction::new(
         composed_handler,
@@ -534,7 +569,6 @@ where
         evt_tx: evt_tx.clone(),
         connected_peers: default(),
         doc_workers: default(),
-        pending_keyhive_syncs: default(),
     };
 
     let peer_id = runtime_worker.local_peer_id;
@@ -573,7 +607,6 @@ where
 
     let fut = {
         let runtime_stop = runtime_stop.clone();
-        let mut keyhive_sync_rx = keyhive_sync_rx;
         let mut runtime_worker = runtime_worker;
         async move {
             let mut janitor_tick = tokio::time::interval(Duration::from_millis(500));
@@ -591,10 +624,6 @@ where
                     evt = evt_rx.recv() => {
                         let Some(evt) = evt else { break; };
                         runtime_worker.handle_evt(evt).await?;
-                    },
-                    keyhive_sync = keyhive_sync_rx.recv() => {
-                        let Some((peer_id, status)) = keyhive_sync else { break; };
-                        runtime_worker.handle_keyhive_sync_notification(peer_id, status).await?;
                     }
                 }
             }
@@ -618,6 +647,10 @@ where
             cancel_token: runtime_stop,
             machine_loop_handle,
             runtime_tasks,
+            keyhive_protocol,
+            keyhive_archive_id: subduction_keyhive::storage::StorageHash::new(
+                *local_peer_id.as_bytes(),
+            ),
         },
     ))
 }
@@ -642,8 +675,6 @@ where
     evt_tx: mpsc::UnboundedSender<RuntimeEvt>,
     connected_peers: Arc<tokio::sync::Mutex<HashMap<PeerId, RuntimePeerConnDeets>>>,
     doc_workers: HashMap<DocumentId, DocWorkerEntry>,
-    pending_keyhive_syncs:
-        HashMap<subduction_core::peer::id::PeerId, Vec<oneshot::Sender<Res<()>>>>,
 }
 
 impl<S> BigRepoRuntimeWorker<S>
@@ -750,31 +781,19 @@ where
                 resp,
             } => {
                 let kh_peer_id = KeyhivePeerId::from_bytes(*peer_id.as_bytes());
-                let subduction_peer_id =
-                    subduction_core::peer::id::PeerId::new(peer_id.into_bytes());
-                tracing::info!("SyncKeyhiveWithPeer: initiating sync");
-                match self
-                    .keyhive_protocol
-                    .initiate_sync_with_peer(&kh_peer_id)
-                    .await
-                {
-                    Ok(true) => {
-                        // Full sync initiated — register waiter for Done notification
-                        tracing::info!("full sync initiated, registering waiter");
-                        self.pending_keyhive_syncs
-                            .entry(subduction_peer_id)
-                            .or_default()
-                            .push(resp);
-                    }
-                    Ok(false) => {
-                        // Lightweight SyncCheck sent — sync is already complete up to syncpoint
-                        tracing::info!("sync check passed, resolving immediately");
-                        let _ = resp.send(Ok(()));
-                    }
-                    Err(e) => {
-                        tracing::error!("initiate_sync_with_peer failed: {e}");
-                        let _ = resp.send(Err(ferr!("keyhive sync initiate failed: {e}")));
-                    }
+                tracing::info!("SyncKeyhiveWithPeer: refreshing cache + initiating sync");
+                // Refresh cache to pick up external keyhive mutations
+                // (e.g. grant_doc_access). TODO: do this periodically.
+                if let Err(e) = self.keyhive_protocol.refresh_cache().await {
+                    tracing::warn!(error = %e, "refresh_cache failed");
+                }
+                self.keyhive_protocol
+                    .clear_syncpoint_for_peer(&kh_peer_id)
+                    .await;
+                if let Err(e) = self.keyhive_protocol.sync_keyhive(Some(&kh_peer_id)).await {
+                    let _ = resp.send(Err(ferr!("keyhive sync failed: {e}")));
+                } else {
+                    let _ = resp.send(Ok(()));
                 }
             }
             RuntimeCmd::ReleaseDocLease { doc_id } => self.handle_release_doc_lease(doc_id).await,
@@ -818,31 +837,6 @@ where
                 error,
             } => {
                 panic!("fatal runtime worker error doc={doc_id:?} context={context}: {error}");
-            }
-        }
-        Ok(())
-    }
-
-    #[tracing::instrument(skip(self), fields(peer = %peer_id, ?status))]
-    async fn handle_keyhive_sync_notification(
-        &mut self,
-        peer_id: subduction_core::peer::id::PeerId,
-        status: SyncStatus,
-    ) -> Res<()> {
-        match status {
-            SyncStatus::Done => {
-                tracing::info!("keyhive sync Done notification");
-                if let Some(waiters) = self.pending_keyhive_syncs.remove(&peer_id) {
-                    tracing::info!("resolving waiters for keyhive sync Done");
-                    for sender in waiters {
-                        let _ = sender.send(Ok(()));
-                    }
-                } else {
-                    tracing::warn!("no waiters found for keyhive sync Done");
-                }
-            }
-            SyncStatus::Pending => {
-                // Notification not expected for Pending; ignore.
             }
         }
         Ok(())
@@ -1598,12 +1592,29 @@ where
         origin: BigRepoChangeOrigin,
     ) -> Res<()> {
         let sedimentree_id: SedimentreeId = self.doc_id_subduction;
+        // Track content_ref -> SymmetricKey within this batch for the
+        // application-level predecessor key chain during encrypt.
+        let mut batch_keys: std::collections::HashMap<
+            CommitId,
+            keyhive_crypto::symmetric_key::SymmetricKey,
+        > = std::collections::HashMap::new();
         for (head, parents, blob) in commits {
+            let (encrypted_blob, app_key) = encrypt_loose_commit(
+                &self.runtime_handle.keyhive,
+                sedimentree_id,
+                head,
+                &parents,
+                &blob,
+                &batch_keys,
+            )
+            .await
+            .map_err(|e| PutDocError::Other(ferr!("encryption failed: {e}")))?;
+            batch_keys.insert(head, app_key);
             let maybe_request = self
                 .subduction
-                .add_commit(sedimentree_id, head, parents, Blob::new(blob))
+                .store_commit(sedimentree_id, head, parents, encrypted_blob)
                 .await
-                .map_err(|err| ferr!("failed add_commit: {err}"))?;
+                .map_err(|err| ferr!("failed store_commit: {err}"))?;
             if let Some(request) = maybe_request {
                 self.pending_fragment_requests.insert(request);
             }
@@ -1641,14 +1652,24 @@ where
         // if session.received_commit_ids.is_empty() && session.received_fragment_ids.is_empty() {
         //     return Ok(());
         // }
-        let mut blobs = Vec::new();
+        use keyhive_crypto::symmetric_key::SymmetricKey;
+        // Pass 1: CGKA decrypt, collect keys
+        let mut decrypted: Vec<Option<Vec<u8>>> = Vec::new();
+        // Per-position keys (index → key)
+        let mut pos_keys: std::collections::HashMap<usize, SymmetricKey> =
+            std::collections::HashMap::new();
+        // DAG ancestor pool: content_ref → key from Envelope.ancestors
+        let mut ancestor_pool: std::collections::HashMap<Vec<u8>, SymmetricKey> =
+            std::collections::HashMap::new();
+        let mut raws: Vec<Vec<u8>> = Vec::new();
+
         for commit_id in &session.received_commit_ids {
             let verified = self
                 .storage_for_reads
                 .load_loose_commit(session.sedimentree_id, *commit_id)
                 .await?
                 .ok_or_eyre("synced loose commit missing")?;
-            blobs.push(verified.blob().clone().into_contents());
+            raws.push(verified.blob().clone().into_contents());
         }
         for fragment_id in &session.received_fragment_ids {
             let verified = self
@@ -1656,8 +1677,71 @@ where
                 .load_fragment(session.sedimentree_id, *fragment_id)
                 .await?
                 .ok_or_eyre("synced fragment missing")?;
-            blobs.push(verified.blob().clone().into_contents());
+            raws.push(verified.blob().clone().into_contents());
         }
+
+        // Pass 1: CGKA decrypt, collect keys and ancestors
+        for raw in &raws {
+            match decrypt_snapshot_blob_keyed(
+                raw,
+                &self.runtime_handle.keyhive,
+                self.doc_id_subduction,
+                None,
+            )
+            .await
+            {
+                Ok((plaintext, key, ancestors)) => {
+                    let idx = decrypted.len();
+                    pos_keys.insert(idx, key);
+                    ancestor_pool.extend(ancestors);
+                    decrypted.push(Some(plaintext));
+                }
+                Err(e) => {
+                    tracing::debug!(?e, "sync blob CGKA decrypt failed, will retry with chain");
+                    decrypted.push(None);
+                }
+            }
+        }
+
+        // Pass 2: retry with chain keys (position + ancestor pool)
+        let mut made_progress = !pos_keys.is_empty() || !ancestor_pool.is_empty();
+        while made_progress {
+            made_progress = false;
+            for (i, slot) in decrypted.iter_mut().enumerate() {
+                if slot.is_some() {
+                    continue;
+                }
+                for chain_key in pos_keys.values().chain(ancestor_pool.values()) {
+                    match decrypt_snapshot_blob_keyed(
+                        &raws[i],
+                        &self.runtime_handle.keyhive,
+                        self.doc_id_subduction,
+                        Some(chain_key),
+                    )
+                    .await
+                    {
+                        Ok((plaintext, key, ancestors)) => {
+                            pos_keys.insert(i, key);
+                            ancestor_pool.extend(ancestors);
+                            *slot = Some(plaintext);
+                            made_progress = true;
+                            break;
+                        }
+                        Err(_) => continue,
+                    }
+                }
+            }
+        }
+
+        // Filter out synthetic entry blobs before loading into automerge
+        let blobs: Vec<Vec<u8>> = decrypted
+            .into_iter()
+            .enumerate()
+            .map(|(i, opt)| opt.ok_or_else(|| ferr!("decrypt sync session blob {i} failed")))
+            .collect::<Result<Vec<_>, _>>()?
+            .into_iter()
+            .filter(|b| !b.starts_with(SENTINEL_PLAINTEXT_MAGIC))
+            .collect();
         let maybe_delta = match std::mem::replace(&mut self.state, DocWorkerDocState::Unloaded) {
             DocWorkerDocState::Unloaded => {
                 // since the doc in storage will have the latest blobs,
@@ -2084,20 +2168,6 @@ where
         .map(|verified| verified.blob().clone())
         .chain(fragments.iter().map(|verified| verified.blob().clone()))
         .collect::<Vec<_>>();
-    let loaded_items = loose_commits
-        .iter()
-        .map(|verified| LoadedOrderedBlob {
-            kind: OrderedBlobKind::LooseCommit,
-            head: verified.payload().head(),
-            blob_digest: verified.payload().blob_meta().digest(),
-        })
-        .chain(fragments.iter().map(|verified| LoadedOrderedBlob {
-            kind: OrderedBlobKind::Fragment,
-            head: verified.payload().head(),
-            blob_digest: verified.payload().summary().blob_meta().digest(),
-        }))
-        .collect::<Vec<_>>();
-
     let (tree, fresh) = match sedimentrees.get_cloned(&sedimentree_id).await {
         Some(tree) => (tree, false),
         None => {
@@ -2126,32 +2196,85 @@ where
     let fragments: Vec<_> = tree.fragments().collect();
     let loose: Vec<_> = tree.loose_commits().collect();
 
+    // Collect raw bytes and decrypt in reverse causal order (newest first).
+    // The latest blob is most likely to have been encrypted with a PCS key
+    // that includes the current members. From its key we chain backward
+    // through the predecessor keys embedded in each blob.
+    use keyhive_crypto::symmetric_key::SymmetricKey;
+    let raws: Vec<&[u8]> = order
+        .iter()
+        .map(|item| {
+            let wanted = match item {
+                SedimentreeItem::Fragment(ii) => OrderedBlobIdentity {
+                    kind: OrderedBlobKind::Fragment,
+                    head: fragments[*ii].head(),
+                    blob_digest: fragments[*ii].summary().blob_meta().digest(),
+                },
+                SedimentreeItem::LooseCommit(ii) => OrderedBlobIdentity {
+                    kind: OrderedBlobKind::LooseCommit,
+                    head: loose[*ii].head(),
+                    blob_digest: loose[*ii].blob_meta().digest(),
+                },
+            };
+            *blob_by_digest
+                .get(&wanted.blob_digest)
+                .expect("blob must exist in digest map")
+        })
+        .collect();
+
+    let mut plaintexts: Vec<Vec<u8>> = vec![Vec::new(); raws.len()];
+    // Per-position keys from successful decrypts (index → key)
+    let mut pos_keys: HashMap<usize, SymmetricKey> = HashMap::new();
+    // DAG ancestor pool: content_ref → key, populated from Envelope.ancestors
+    let mut ancestor_pool: HashMap<Vec<u8>, SymmetricKey> = HashMap::new();
+
+    if let Some(kh) = keyhive {
+        // Process newest-to-oldest. The newest blob should be CGKA-decryptable
+        // (its PCS key includes members added before it was encrypted).
+        // Its Envelope.ancestors then provide keys for older blobs.
+        for (i, raw) in raws.iter().enumerate().rev() {
+            // Try CGKA first (no chain key)
+            if let Ok((plaintext, key, ancestors)) =
+                decrypt_snapshot_blob_keyed(raw, kh, sedimentree_id, None).await
+            {
+                plaintexts[i] = plaintext;
+                pos_keys.insert(i, key);
+                ancestor_pool.extend(ancestors);
+                continue;
+            }
+            // Try chain: any known key (position or ancestor) might decrypt
+            let mut decrypted = false;
+            for chain_key in pos_keys.values().chain(ancestor_pool.values()) {
+                if let Ok((plaintext, key, ancestors)) =
+                    decrypt_snapshot_blob_keyed(raw, kh, sedimentree_id, Some(chain_key)).await
+                {
+                    plaintexts[i] = plaintext;
+                    pos_keys.insert(i, key);
+                    ancestor_pool.extend(ancestors);
+                    decrypted = true;
+                    break;
+                }
+            }
+            if !decrypted {
+                return Err(ferr!(
+                    "failed to decrypt blob {i}: CGKA and chain both failed"
+                ));
+            }
+        }
+    } else {
+        for (i, raw) in raws.iter().enumerate() {
+            plaintexts[i] = raw.to_vec();
+        }
+    }
+
+    // Build automerge doc from non-sentinel plaintexts.
+    // Synthetic entry blobs contribute ancestors but not automerge content.
     let mut buf = Vec::new();
-    for item in &order {
-        let wanted = match item {
-            SedimentreeItem::Fragment(ii) => OrderedBlobIdentity {
-                kind: OrderedBlobKind::Fragment,
-                head: fragments[*ii].head(),
-                blob_digest: fragments[*ii].summary().blob_meta().digest(),
-            },
-            SedimentreeItem::LooseCommit(ii) => OrderedBlobIdentity {
-                kind: OrderedBlobKind::LooseCommit,
-                head: loose[*ii].head(),
-                blob_digest: loose[*ii].blob_meta().digest(),
-            },
-        };
-        let raw = blob_by_digest.get(&wanted.blob_digest).ok_or_else(|| {
-            ferr!(
-                "blob not found for ordered sedimentree item fresh={fresh}: {}",
-                missing_ordered_blob_context(wanted, &loaded_items)
-            )
-        })?;
-        let decrypted = if let Some(kh) = keyhive {
-            decrypt_snapshot_blob(raw, kh, sedimentree_id).await?
-        } else {
-            raw.to_vec()
-        };
-        buf.extend_from_slice(&decrypted);
+    for plaintext in &plaintexts {
+        if plaintext.starts_with(SENTINEL_PLAINTEXT_MAGIC) {
+            continue;
+        }
+        buf.extend_from_slice(plaintext);
     }
 
     let mut doc = automerge::Automerge::new();
@@ -2339,6 +2462,27 @@ fn ingest_automerge(doc: &automerge::Automerge, sedimentree_id: SedimentreeId) -
     }
 }
 
+/// Sentinel plaintext prefix identifying a synthetic entry blob.
+///
+/// Synthetic blobs are minted at grant time to bridge CGKA epochs for new
+/// members. Their plaintext is just this magic followed by nothing useful.
+/// During `load_doc_snapshot` they contribute their ancestor keys to the
+/// chain pool but are NOT loaded into automerge.
+const SENTINEL_PLAINTEXT_MAGIC: &[u8] = b"KEYHIVE_SYNTHETIC_ENTRY";
+
+/// DRISL envelope for an encrypted blob.
+///
+/// Flattens `EncryptedContent` fields inline. The predecessor key chain
+/// lives inside the plaintext via keyhive_core's `Envelope<C, T>` wrapper
+/// (bincode-serialized before encryption).
+///
+/// Format: `[0x02][DRISL(EncryptedBlobEnvelope)]`
+#[derive(serde::Serialize, serde::Deserialize)]
+struct EncryptedBlobEnvelope {
+    #[serde(flatten)]
+    encrypted: beekem::encrypted::EncryptedContent<Vec<u8>, Vec<u8>>,
+}
+
 /// Encrypt ingested blobs via the keyhive, rebuilding the sedimentree with
 /// updated BlobMeta matching the encrypted bytes.
 ///
@@ -2347,7 +2491,7 @@ fn ingest_automerge(doc: &automerge::Automerge, sedimentree_id: SedimentreeId) -
 /// Encrypt ingested blobs via the keyhive, serializing each encrypted blob as
 /// DRISL (deterministic CBOR) prefixed with a 1-byte discriminator:
 /// - `0x00` = plaintext
-/// - `0x01` = encrypted
+/// - `0x02` = encrypted: [0x02][DRISL(EncryptedBlobEnvelope)]
 ///
 /// TODO: Upstream (keyhive/subduction_keyhive) hasn't specified the canonical
 /// EncryptedContent storage format yet. Revisit when upstream publishes a spec.
@@ -2356,6 +2500,8 @@ async fn encrypt_ingested_blobs(
     keyhive_handle: &BigKeyhiveHandle,
     sedimentree_id: SedimentreeId,
 ) -> Res<(Sedimentree, Vec<Blob>)> {
+    use keyhive_core::crypto::envelope::Envelope;
+    use keyhive_crypto::symmetric_key::SymmetricKey;
     use sedimentree_core::{blob::BlobMeta, fragment::Fragment, loose_commit::LooseCommit};
 
     let keyhive = keyhive_handle.clone_keyhive().await;
@@ -2372,6 +2518,10 @@ async fn encrypt_ingested_blobs(
     let mut new_fragments: Vec<Fragment> = Vec::with_capacity(ingested.fragment_entries.len());
     let mut new_loose_commits: Vec<LooseCommit> = Vec::with_capacity(ingested.loose_entries.len());
 
+    // Track content_ref -> SymmetricKey for building ancestor maps
+    let mut key_index: std::collections::HashMap<Vec<u8>, SymmetricKey> =
+        std::collections::HashMap::new();
+
     // Encrypt fragment blobs
     for (entry, blob) in ingested
         .fragment_entries
@@ -2384,15 +2534,33 @@ async fn encrypt_ingested_blobs(
             .iter()
             .map(|c| c.as_bytes().to_vec())
             .collect();
-        let encrypted = keyhive
-            .try_encrypt_content(kh_doc.clone(), &content_ref, &pred_refs, blob.as_slice())
+        // Build ancestors map from all known predecessor keys
+        let ancestors: std::collections::HashMap<Vec<u8>, SymmetricKey> = pred_refs
+            .iter()
+            .filter_map(|pred| key_index.get(pred).map(|k| (pred.clone(), *k)))
+            .collect();
+        let envelope = Envelope {
+            plaintext: blob.as_slice().to_vec(),
+            ancestors,
+        };
+        let envelope_bytes =
+            bincode::serialize(&envelope).map_err(|e| ferr!("bincode encode envelope: {e}"))?;
+
+        let (encrypted, app_key) = keyhive
+            .try_encrypt_content_keyed(kh_doc.clone(), &content_ref, &pred_refs, &envelope_bytes)
             .await
             .map_err(|e| ferr!("encrypt fragment failed: {e}"))?;
-        // discriminator 0x01 = encrypted, followed by DRISL-encoded EncryptedContent
-        let drisl_bytes = atproto_dasl::drisl::to_vec(encrypted.encrypted_content())
-            .map_err(|e| ferr!("DRISL encode encrypted content: {e}"))?;
+
+        let env = EncryptedBlobEnvelope {
+            encrypted: encrypted.encrypted_content().clone(),
+        };
+        let drisl_env = atproto_dasl::drisl::to_vec(&env)
+            .map_err(|e| ferr!("DRISL encode encrypted blob envelope: {e}"))?;
         let mut encrypted_bytes = vec![0x02u8];
-        encrypted_bytes.extend(drisl_bytes);
+        encrypted_bytes.extend(drisl_env);
+
+        key_index.insert(content_ref.clone(), app_key);
+
         let encrypted_blob = Blob::new(encrypted_bytes);
         let meta = BlobMeta::new(&encrypted_blob);
         new_fragments.push(Fragment::new(
@@ -2417,14 +2585,33 @@ async fn encrypt_ingested_blobs(
             .iter()
             .map(|c| c.as_bytes().to_vec())
             .collect();
-        let encrypted = keyhive
-            .try_encrypt_content(kh_doc.clone(), &content_ref, &pred_refs, blob.as_slice())
+
+        let ancestors: std::collections::HashMap<Vec<u8>, SymmetricKey> = pred_refs
+            .iter()
+            .filter_map(|pred| key_index.get(pred).map(|k| (pred.clone(), *k)))
+            .collect();
+        let envelope = Envelope {
+            plaintext: blob.as_slice().to_vec(),
+            ancestors,
+        };
+        let envelope_bytes =
+            bincode::serialize(&envelope).map_err(|e| ferr!("bincode encode envelope: {e}"))?;
+
+        let (encrypted, app_key) = keyhive
+            .try_encrypt_content_keyed(kh_doc.clone(), &content_ref, &pred_refs, &envelope_bytes)
             .await
             .map_err(|e| ferr!("encrypt loose commit failed: {e}"))?;
-        let drisl_bytes = atproto_dasl::drisl::to_vec(encrypted.encrypted_content())
-            .map_err(|e| ferr!("DRISL encode encrypted content: {e}"))?;
+
+        let env = EncryptedBlobEnvelope {
+            encrypted: encrypted.encrypted_content().clone(),
+        };
+        let drisl_env = atproto_dasl::drisl::to_vec(&env)
+            .map_err(|e| ferr!("DRISL encode encrypted blob envelope: {e}"))?;
         let mut encrypted_bytes = vec![0x02u8];
-        encrypted_bytes.extend(drisl_bytes);
+        encrypted_bytes.extend(drisl_env);
+
+        key_index.insert(content_ref.clone(), app_key);
+
         let encrypted_blob = Blob::new(encrypted_bytes);
         let meta = BlobMeta::new(&encrypted_blob);
         new_loose_commits.push(LooseCommit::new(
@@ -2442,21 +2629,114 @@ async fn encrypt_ingested_blobs(
     ))
 }
 
-/// Decrypt a single snapshot blob that may be encrypted content.
+/// Encrypt a single loose commit blob via keyhive.
 ///
+/// The caller provides `batch_keys` (CommitId → SymmetricKey) so we can build
+/// the `Envelope.ancestors` map from all known parent keys.
+async fn encrypt_loose_commit(
+    keyhive_handle: &BigKeyhiveHandle,
+    sedimentree_id: SedimentreeId,
+    head: CommitId,
+    parents: &BTreeSet<CommitId>,
+    blob: &[u8],
+    batch_keys: &std::collections::HashMap<CommitId, keyhive_crypto::symmetric_key::SymmetricKey>,
+) -> Res<(Blob, keyhive_crypto::symmetric_key::SymmetricKey)> {
+    use keyhive_core::crypto::envelope::Envelope;
+    use keyhive_crypto::symmetric_key::SymmetricKey;
+    let keyhive = keyhive_handle.clone_keyhive().await;
+    let vk = ed25519_dalek::VerifyingKey::from_bytes(sedimentree_id.as_bytes())
+        .map_err(|_| ferr!("not a valid Keyhive DocumentId"))?;
+    let kh_doc_id = keyhive_core::principal::document::id::DocumentId::from(
+        keyhive_core::principal::identifier::Identifier::from(vk),
+    );
+    let kh_doc = keyhive
+        .get_document(kh_doc_id)
+        .await
+        .ok_or_else(|| ferr!("keyhive doc not found for commit encryption"))?;
+    let content_ref: Vec<u8> = head.as_bytes().to_vec();
+    let pred_refs: Vec<Vec<u8>> = parents.iter().map(|c| c.as_bytes().to_vec()).collect();
+
+    let ancestors: std::collections::HashMap<Vec<u8>, SymmetricKey> = {
+        // Try batch_keys first, then fall back to known_decryption_keys
+        // (populated by prior encrypts on the same Document)
+        let doc_keys = kh_doc.lock().await.known_decryption_keys().clone();
+        parents
+            .iter()
+            .filter_map(|p| {
+                let pref: Vec<u8> = p.as_bytes().to_vec();
+                batch_keys
+                    .get(p)
+                    .map(|k| (pref.clone(), *k))
+                    .or_else(|| doc_keys.get(&pref).map(|k| (pref, *k)))
+            })
+            .collect()
+    };
+    let envelope = Envelope {
+        plaintext: blob.to_vec(),
+        ancestors,
+    };
+    let envelope_bytes =
+        bincode::serialize(&envelope).map_err(|e| ferr!("bincode encode envelope: {e}"))?;
+
+    let (encrypted, app_key) = keyhive
+        .try_encrypt_content_keyed(kh_doc.clone(), &content_ref, &pred_refs, &envelope_bytes)
+        .await
+        .map_err(|e| ferr!("encrypt commit failed: {e}"))?;
+
+    let env = EncryptedBlobEnvelope {
+        encrypted: encrypted.encrypted_content().clone(),
+    };
+    let drisl_env = atproto_dasl::drisl::to_vec(&env)
+        .map_err(|e| ferr!("DRISL encode encrypted blob envelope: {e}"))?;
+    let mut encrypted_bytes = vec![0x02u8];
+    encrypted_bytes.extend(drisl_env);
+
+    Ok((Blob::new(encrypted_bytes), app_key))
+}
+
 /// Decrypt a single snapshot blob stored as encrypted content.
 ///
-/// Format: `0x02` = encrypted, followed by DRISL-encoded EncryptedContent.
+/// Format: `[0x02][DRISL(EncryptedBlobEnvelope)]`
+/// Plaintext is bincode-encoded keyhive `Envelope<Vec<u8>, Vec<u8>>`.
 async fn decrypt_snapshot_blob(
     raw_bytes: &[u8],
     keyhive_handle: &BigKeyhiveHandle,
     sedimentree_id: SedimentreeId,
 ) -> Res<Vec<u8>> {
-    let encrypted: beekem::encrypted::EncryptedContent<Vec<u8>, Vec<u8>> = match raw_bytes.first() {
-        Some(0x02) => atproto_dasl::drisl::from_slice(&raw_bytes[1..])
-            .map_err(|e| ferr!("DRISL decode encrypted content: {e}"))?,
-        _ => return Err(ferr!("blob is not encrypted (missing 0x02 discriminator)")),
-    };
+    decrypt_snapshot_blob_keyed(raw_bytes, keyhive_handle, sedimentree_id, None)
+        .await
+        .map(|(plaintext, _key, _ancestors)| plaintext)
+}
+
+/// Decrypt and also return the application secret key and ancestors map for
+/// DAG-based causal decryption.
+///
+/// If `chain_key` is provided and CGKA decryption fails, `chain_key` is used
+/// to directly decrypt the ciphertext (bypassing CGKA).
+async fn decrypt_snapshot_blob_keyed(
+    raw_bytes: &[u8],
+    keyhive_handle: &BigKeyhiveHandle,
+    sedimentree_id: SedimentreeId,
+    chain_key: Option<&keyhive_crypto::symmetric_key::SymmetricKey>,
+) -> Res<(
+    Vec<u8>,
+    keyhive_crypto::symmetric_key::SymmetricKey,
+    std::collections::HashMap<Vec<u8>, keyhive_crypto::symmetric_key::SymmetricKey>,
+)> {
+    use keyhive_core::crypto::envelope::Envelope;
+    use keyhive_crypto::symmetric_key::SymmetricKey;
+
+    // Parse: [0x02][DRISL(EncryptedBlobEnvelope)]
+    if raw_bytes.first() != Some(&0x02) {
+        return Err(ferr!("blob is not encrypted (missing 0x02 discriminator)"));
+    }
+    let rest = &raw_bytes[1..];
+
+    let envelope: EncryptedBlobEnvelope = atproto_dasl::drisl::from_slice(rest)
+        .map_err(|e| ferr!("DRISL decode encrypted blob envelope: {e}"))?;
+
+    let encrypted = envelope.encrypted;
+
     let keyhive = keyhive_handle.clone_keyhive().await;
     let vk = ed25519_dalek::VerifyingKey::from_bytes(sedimentree_id.as_bytes())
         .map_err(|_| ferr!("not a valid Keyhive DocumentId"))?;
@@ -2467,11 +2747,45 @@ async fn decrypt_snapshot_blob(
         .get_document(kh_doc_id)
         .await
         .ok_or_else(|| ferr!("keyhive doc not found for decryption"))?;
-    let plaintext = keyhive
-        .try_decrypt_content(kh_doc, &encrypted)
+
+    // Helper: after AEAD decrypt, deserialize the Envelope and return
+    // (plaintext, key_used, ancestors).
+    let unwrap_envelope = |ciphertext: &[u8], key: SymmetricKey| -> Res<_> {
+        let payload: Envelope<Vec<u8>, Vec<u8>> =
+            bincode::deserialize(ciphertext).map_err(|e| ferr!("bincode decode envelope: {e}"))?;
+        Ok((payload.plaintext, key, payload.ancestors))
+    };
+
+    // Try CGKA first
+    match keyhive
+        .try_decrypt_content(kh_doc.clone(), &encrypted)
         .await
-        .map_err(|e| ferr!("decryption failed: {e}"))?;
-    Ok(plaintext)
+    {
+        Ok(plaintext) => {
+            let (_pt, key) = keyhive
+                .try_decrypt_content_keyed(kh_doc, &encrypted)
+                .await
+                .map_err(|e| ferr!("decrypt keyed failed after successful decrypt: {e}"))?;
+            return unwrap_envelope(&plaintext, key);
+        }
+        Err(keyhive_core::principal::document::DecryptError::KeyNotFound) => {
+            // CGKA forward-secrecy prevents direct derivation.
+            // Try chain key: direct AEAD decrypt bypassing CGKA.
+            if let Some(chain_key) = chain_key {
+                let plaintext = encrypted
+                    .try_decrypt(*chain_key)
+                    .map_err(|e| ferr!("chain decrypt failed: {e}"))?;
+                return unwrap_envelope(&plaintext, *chain_key);
+            }
+        }
+        Err(e) => {
+            return Err(ferr!("decryption failed: {e}"));
+        }
+    }
+
+    Err(ferr!(
+        "decryption failed: KeyNotFound (no chain key available)"
+    ))
 }
 
 #[cfg(test)]

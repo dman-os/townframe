@@ -3,12 +3,13 @@
 //! Adapted from `subduction_cli/src/keyhive.rs`.
 //! Original license: Apache-2.0/MIT.
 
+use std::convert::Infallible;
 use std::io;
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicU64, Ordering};
 
 use futures::{future::BoxFuture, FutureExt};
-use subduction_keyhive::storage::{KeyhiveStorage, StorageHash};
+use subduction_keyhive::storage::{KeyhiveStorage, MemoryKeyhiveStorage, StorageHash};
 
 /// Subdirectory of the repo data dir holding keyhive state.
 pub(crate) const KEYHIVE_SUBDIR: &str = "keyhive";
@@ -162,5 +163,127 @@ impl KeyhiveStorage<future_form::Sendable> for FsKeyhiveStorage {
     fn delete_event(&self, hash: StorageHash) -> BoxFuture<'_, Result<(), Self::Error>> {
         let dir = self.event_dir();
         async move { Self::delete_file(dir, hash).await.map_err(Into::into) }.boxed()
+    }
+}
+
+/// Keyhive storage backend selected by the BigRepo storage mode.
+#[derive(Debug, Clone)]
+pub(crate) enum BigRepoKeyhiveStorage {
+    Memory(MemoryKeyhiveStorage),
+    Fs(FsKeyhiveStorage),
+}
+
+/// Error type returned by [`BigRepoKeyhiveStorage`] operations.
+#[derive(Debug, thiserror::Error)]
+pub(crate) enum BigRepoKeyhiveStorageError {
+    #[error("memory keyhive storage failed: {0}")]
+    Memory(#[from] Infallible),
+    #[error(transparent)]
+    Fs(#[from] FsKeyhiveStorageError),
+}
+
+impl BigRepoKeyhiveStorage {
+    pub(crate) fn memory() -> Self {
+        Self::Memory(MemoryKeyhiveStorage::new())
+    }
+
+    pub(crate) fn fs(root: PathBuf) -> io::Result<Self> {
+        FsKeyhiveStorage::new(root).map(Self::Fs)
+    }
+}
+
+impl KeyhiveStorage<future_form::Sendable> for BigRepoKeyhiveStorage {
+    type Error = BigRepoKeyhiveStorageError;
+
+    fn save_archive(
+        &self,
+        hash: StorageHash,
+        data: Vec<u8>,
+    ) -> BoxFuture<'_, Result<(), Self::Error>> {
+        async move {
+            match self {
+                Self::Memory(storage) => <MemoryKeyhiveStorage as KeyhiveStorage<
+                    future_form::Sendable,
+                >>::save_archive(storage, hash, data)
+                .await
+                .map_err(Into::into),
+                Self::Fs(storage) => storage.save_archive(hash, data).await.map_err(Into::into),
+            }
+        }
+        .boxed()
+    }
+
+    fn load_archives(&self) -> BoxFuture<'_, Result<Vec<(StorageHash, Vec<u8>)>, Self::Error>> {
+        async move {
+            match self {
+                Self::Memory(storage) => <MemoryKeyhiveStorage as KeyhiveStorage<
+                    future_form::Sendable,
+                >>::load_archives(storage)
+                .await
+                .map_err(Into::into),
+                Self::Fs(storage) => storage.load_archives().await.map_err(Into::into),
+            }
+        }
+        .boxed()
+    }
+
+    fn delete_archive(&self, hash: StorageHash) -> BoxFuture<'_, Result<(), Self::Error>> {
+        async move {
+            match self {
+                Self::Memory(storage) => <MemoryKeyhiveStorage as KeyhiveStorage<
+                    future_form::Sendable,
+                >>::delete_archive(storage, hash)
+                .await
+                .map_err(Into::into),
+                Self::Fs(storage) => storage.delete_archive(hash).await.map_err(Into::into),
+            }
+        }
+        .boxed()
+    }
+
+    fn save_event(
+        &self,
+        hash: StorageHash,
+        data: Vec<u8>,
+    ) -> BoxFuture<'_, Result<(), Self::Error>> {
+        async move {
+            match self {
+                Self::Memory(storage) => <MemoryKeyhiveStorage as KeyhiveStorage<
+                    future_form::Sendable,
+                >>::save_event(storage, hash, data)
+                .await
+                .map_err(Into::into),
+                Self::Fs(storage) => storage.save_event(hash, data).await.map_err(Into::into),
+            }
+        }
+        .boxed()
+    }
+
+    fn load_events(&self) -> BoxFuture<'_, Result<Vec<(StorageHash, Vec<u8>)>, Self::Error>> {
+        async move {
+            match self {
+                Self::Memory(storage) => <MemoryKeyhiveStorage as KeyhiveStorage<
+                    future_form::Sendable,
+                >>::load_events(storage)
+                .await
+                .map_err(Into::into),
+                Self::Fs(storage) => storage.load_events().await.map_err(Into::into),
+            }
+        }
+        .boxed()
+    }
+
+    fn delete_event(&self, hash: StorageHash) -> BoxFuture<'_, Result<(), Self::Error>> {
+        async move {
+            match self {
+                Self::Memory(storage) => <MemoryKeyhiveStorage as KeyhiveStorage<
+                    future_form::Sendable,
+                >>::delete_event(storage, hash)
+                .await
+                .map_err(Into::into),
+                Self::Fs(storage) => storage.delete_event(hash).await.map_err(Into::into),
+            }
+        }
+        .boxed()
     }
 }

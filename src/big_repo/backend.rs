@@ -104,6 +104,10 @@ impl big_sync::SyncBackend for BigRepoSyncBackend {
 
         let doc_id: crate::DocumentId = obj_id.into();
         let local_heads = super::partition_doc_heads_payload(&repo.big_sync_store, doc_id).await?;
+        repo.runtime
+            .sync_keyhive_with_peer(peer_id, Some(Duration::from_secs(10)))
+            .await
+            .wrap_err("keyhive sync before doc sync failed")?;
         if local_heads.is_none() {
             // Doc not yet synced locally. Pull from peer via Subduction sync.
             // Subduction syncs from an empty tree — the peer sends everything it has.

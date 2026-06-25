@@ -20,6 +20,7 @@ am_utils_rs.workspace = true
 #
 # ds
 surelock.workspace = true
+ed25519-dalek.workspace = true
 
 #
 # async
@@ -43,6 +44,9 @@ sqlx = { workspace = true, features = ["sqlite", "runtime-tokio"] }
 rand.workspace = true
 rand_08 = { version = "0.8", package = "rand", default-features = false }
 tempfile.workspace = true
+atproto-dasl.workspace = true
+nonempty.workspace = true
+bincode = "1.3"
 
 #
 # errors
@@ -62,11 +66,8 @@ subduction_keyhive = { workspace = true, features = ["runtime"] }
 subduction_redb_storage = { workspace = true }
 subduction_websocket = { workspace = true, features = ["tokio_base"], }
 keyhive_crypto.workspace = true
-keyhive_core = "0.4.1"
-beekem = "0.2.0"
-atproto-dasl = "0.14.5"
-nonempty.workspace = true
-ed25519-dalek.workspace = true
+keyhive_core.workspace = true
+beekem.workspace = true
 
 #
 # logging
