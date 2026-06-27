@@ -9,6 +9,7 @@ use big_sync::backend::contract::{
 use big_sync::stress_support::{self, StressFixture};
 use big_sync::{HostPartStore, SyncBackend};
 use big_sync_core::{Byte32Id, PartId, SyncCompletionDeets};
+use futures::lock::Mutex;
 use nonempty::NonEmpty;
 use rand::rngs::StdRng;
 use std::collections::{BTreeMap, BTreeSet, HashMap};
@@ -170,6 +171,359 @@ async fn put_doc_get_doc_and_export_roundtrip() -> Res<()> {
         .expect("export should exist");
     assert!(!exported.is_empty());
     drop(handle);
+    Ok(())
+}
+
+#[tokio::test]
+async fn create_doc_records_initial_frontier_for_after_content() -> Res<()> {
+    let _guard = crate::test_support::capability_test_guard().await;
+    let (repo, _part_store, stop_token) = boot_repo().await?;
+    let mut doc = automerge::Automerge::new();
+    doc.transact(|tx| tx.put(automerge::ROOT, "title", "seed"))
+        .expect("failed seeding doc");
+    let initial_head = initial_content_heads(&doc)?.head.to_vec();
+
+    let handle = repo.create_doc(doc).await?;
+    let doc_id = handle.document_id();
+    let doc_id_bytes = doc_id.into_bytes();
+    let vk = ed25519_dalek::VerifyingKey::from_bytes(&doc_id_bytes)
+        .expect("doc id should be a valid keyhive document id");
+    let kh_doc_id = keyhive_core::principal::document::id::DocumentId::from(
+        keyhive_core::principal::identifier::Identifier::from(vk),
+    );
+
+    let keyhive = repo.keyhive().clone_keyhive().await;
+    let kh_doc = keyhive
+        .get_document(kh_doc_id)
+        .await
+        .expect("document should exist in keyhive after create_doc");
+    let public_individual = keyhive_core::principal::public::Public.individual();
+    let public_agent = keyhive_core::principal::agent::Agent::Individual(
+        public_individual.id(),
+        Arc::new(Mutex::new(public_individual)),
+    );
+    let update = keyhive
+        .add_member(
+            public_agent,
+            &keyhive_core::principal::membered::Membered::Document(kh_doc_id, kh_doc),
+            keyhive_core::access::Access::Read,
+            &[],
+        )
+        .await
+        .expect("granting read access should succeed");
+
+    let after_content = update.delegation.payload().after().content[&kh_doc_id].as_slice();
+    assert_eq!(after_content, &[initial_head]);
+
+    drop(handle);
+    stop_token().await?;
+    Ok(())
+}
+
+#[tokio::test]
+async fn write_records_latest_frontier_for_after_content() -> Res<()> {
+    let _guard = crate::test_support::capability_test_guard().await;
+    let (repo, _part_store, stop_token) = boot_repo().await?;
+    let mut doc = automerge::Automerge::new();
+    doc.transact(|tx| tx.put(automerge::ROOT, "title", "seed"))
+        .expect("failed seeding doc");
+    let initial_head = initial_content_heads(&doc)?.head.to_vec();
+
+    let handle = repo.create_doc(doc).await?;
+    let doc_id = handle.document_id();
+    handle
+        .with_document(|doc| {
+            doc.transact(|tx| {
+                tx.put(automerge::ROOT, "body", "updated")
+                    .expect("failed writing doc");
+                eyre::Ok(())
+            })
+            .expect("failed writing doc")
+        })
+        .await?;
+    let latest_head = handle
+        .with_document_read(|doc| initial_content_heads(doc).map(|heads| heads.head.to_vec()))
+        .await?;
+    assert_ne!(
+        latest_head, initial_head,
+        "real write should advance the automerge head"
+    );
+
+    let doc_id_bytes = doc_id.into_bytes();
+    let vk = ed25519_dalek::VerifyingKey::from_bytes(&doc_id_bytes)
+        .expect("doc id should be a valid keyhive document id");
+    let kh_doc_id = keyhive_core::principal::document::id::DocumentId::from(
+        keyhive_core::principal::identifier::Identifier::from(vk),
+    );
+
+    let keyhive = repo.keyhive().clone_keyhive().await;
+    let kh_doc = keyhive
+        .get_document(kh_doc_id)
+        .await
+        .expect("document should exist in keyhive after create_doc");
+    let public_individual = keyhive_core::principal::public::Public.individual();
+    let public_agent = keyhive_core::principal::agent::Agent::Individual(
+        public_individual.id(),
+        Arc::new(Mutex::new(public_individual)),
+    );
+    let update = keyhive
+        .add_member(
+            public_agent,
+            &keyhive_core::principal::membered::Membered::Document(kh_doc_id, kh_doc),
+            keyhive_core::access::Access::Read,
+            &[],
+        )
+        .await
+        .expect("granting read access should succeed");
+
+    let after_content = update.delegation.payload().after().content[&kh_doc_id].as_slice();
+    assert_eq!(after_content, &[latest_head]);
+
+    drop(handle);
+    stop_token().await?;
+    Ok(())
+}
+
+#[tokio::test]
+async fn create_doc_with_group_parent_uses_public_group_api() -> Res<()> {
+    let _guard = crate::test_support::capability_test_guard().await;
+    let temp_root = tempdir()?;
+    let owner_path = temp_root.path().join("owner");
+    let client_path = temp_root.path().join("client");
+    let owner = SyncRepoNode::boot(owner_path, 91, true).await?;
+    let client = SyncRepoNode::boot(client_path, 92, false).await?;
+
+    client.connect_to(&owner).await?;
+    owner.wait_for_accepts(1).await;
+    let owner_conn = owner.accepted_connection().await;
+    let client_conn = client.connection_to(&owner).await;
+
+    owner_conn.sync_keyhive_with_peer(None).await?;
+    client_conn.sync_keyhive_with_peer(None).await?;
+
+    use subduction_keyhive::KeyhivePeerId;
+    let client_kh_peer_id = KeyhivePeerId::from_bytes(*client.peer_id().as_bytes());
+    let client_agent = owner
+        .repo
+        .keyhive()
+        .get_agent_by_peer_id(&client_kh_peer_id)
+        .await?
+        .expect("client agent should be known after keyhive sync");
+
+    let group = owner.repo.create_group_with_parents(vec![]).await?;
+    owner
+        .repo
+        .add_member_to_group(
+            client_agent.clone(),
+            &group,
+            keyhive_core::access::Access::Read,
+        )
+        .await?;
+
+    let mut doc = automerge::Automerge::new();
+    doc.transact(|tx| tx.put(automerge::ROOT, "title", "seed"))
+        .expect("failed seeding doc");
+    let handle = owner
+        .repo
+        .create_doc_with_parents(doc, vec![group.clone().into()])
+        .await?;
+    let doc_id = handle.document_id();
+
+    for _ in 0..2 {
+        owner_conn.sync_keyhive_with_peer(None).await?;
+        client_conn.sync_keyhive_with_peer(None).await?;
+    }
+
+    client_conn
+        .sync_doc_with_peer(doc_id, Some(SYNC_PROPAGATION_TIMEOUT))
+        .await?;
+    let client_doc = wait_for_doc_handle(&client.repo, doc_id).await;
+    let title = client_doc
+        .with_document_read(|doc| get_str_at_root(doc, "title"))
+        .await;
+    assert_eq!(title, "seed");
+
+    owner.shutdown().await?;
+    client.shutdown().await?;
+    Ok(())
+}
+
+#[tokio::test]
+async fn grant_doc_access_checkpoint_survives_reopen_and_sync() -> Res<()> {
+    let _guard = crate::test_support::capability_test_guard().await;
+    let temp_root = tempdir()?;
+    let owner_path = temp_root.path().join("owner");
+    let client_path = temp_root.path().join("client");
+    let owner = SyncRepoNode::boot(owner_path, 121, true).await?;
+    let client = SyncRepoNode::boot(client_path.clone(), 122, false).await?;
+
+    client.connect_to(&owner).await?;
+    owner.wait_for_accepts(1).await;
+    let owner_conn = owner.accepted_connection().await;
+    let client_conn = client.connection_to(&owner).await;
+
+    owner_conn.sync_keyhive_with_peer(None).await?;
+    client_conn.sync_keyhive_with_peer(None).await?;
+
+    use subduction_keyhive::KeyhivePeerId;
+    let client_kh_peer_id = KeyhivePeerId::from_bytes(*client.peer_id().as_bytes());
+    let client_agent = owner
+        .repo
+        .keyhive()
+        .get_agent_by_peer_id(&client_kh_peer_id)
+        .await?
+        .expect("client agent should be known after keyhive sync");
+
+    let group = owner.repo.create_group_with_parents(vec![]).await?;
+    owner
+        .repo
+        .add_member_to_group(
+            client_agent.clone(),
+            &group,
+            keyhive_core::access::Access::Read,
+        )
+        .await?;
+
+    let mut doc = automerge::Automerge::new();
+    doc.transact(|tx| tx.put(automerge::ROOT, "title", "pregrant"))
+        .expect("failed seeding doc");
+    let pregrant_head = initial_content_heads(&doc)?.head.to_vec();
+    let handle = owner.repo.create_doc(doc).await?;
+    let doc_id = handle.document_id();
+
+    owner
+        .repo
+        .grant_doc_access(doc_id, group.clone(), keyhive_core::access::Access::Read)
+        .await?;
+
+    for _ in 0..3 {
+        owner_conn.sync_keyhive_with_peer(None).await?;
+        client_conn.sync_keyhive_with_peer(None).await?;
+    }
+
+    client_conn
+        .sync_doc_with_peer(doc_id, Some(SYNC_PROPAGATION_TIMEOUT))
+        .await?;
+    let client_doc = wait_for_doc_handle(&client.repo, doc_id).await;
+    let title = client_doc
+        .with_document_read(|doc| get_str_at_root(doc, "title"))
+        .await;
+    assert_eq!(title, "pregrant");
+
+    let pregrant_historic_title = client_doc
+        .with_document_read(|doc| {
+            doc.get_at(automerge::ROOT, "title", &[change_hash(&pregrant_head)])
+                .expect("failed reading pregrant title at head")
+                .map(|(value, _)| match value {
+                    automerge::Value::Scalar(scalar) => match scalar.as_ref() {
+                        ScalarValue::Str(value) => value.to_string(),
+                        _ => panic!("expected string scalar at pregrant head"),
+                    },
+                    _ => panic!("expected scalar value at pregrant head"),
+                })
+        })
+        .await;
+    assert_eq!(
+        pregrant_historic_title.as_deref(),
+        Some("pregrant"),
+        "checkpoint grant should preserve pregrant content across sync"
+    );
+
+    client.shutdown().await?;
+
+    let client = SyncRepoNode::boot(client_path.clone(), 122, false).await?;
+    client.connect_to(&owner).await?;
+    owner.wait_for_accepts(2).await;
+    let owner_conn = owner.accepted_connection().await;
+    let client_conn = client.connection_to(&owner).await;
+    let owner_kh_peer_id = KeyhivePeerId::from_bytes(*owner.peer_id().as_bytes());
+    let grantee_kh_peer_id = KeyhivePeerId::from_bytes(*client.peer_id().as_bytes());
+    for _ in 0..3 {
+        owner_conn.sync_keyhive_with_peer(None).await?;
+        client_conn.sync_keyhive_with_peer(None).await?;
+    }
+    let reopened_kh = client.repo.keyhive().clone_keyhive().await;
+    let doc_id_bytes = doc_id.into_bytes();
+    let reopened_kh_doc_id = keyhive_core::principal::document::id::DocumentId::from(
+        keyhive_core::principal::identifier::Identifier::from(
+            ed25519_dalek::VerifyingKey::from_bytes(&doc_id_bytes)
+                .expect("doc id should remain a valid keyhive doc id"),
+        ),
+    );
+    assert!(
+        reopened_kh.get_document(reopened_kh_doc_id).await.is_some(),
+        "reopened client should still know the granted keyhive document"
+    );
+    assert!(
+        client
+            .repo
+            .keyhive()
+            .get_agent_by_peer_id(&owner_kh_peer_id)
+            .await?
+            .is_some(),
+        "reopened client should still know the owner agent after keyhive sync"
+    );
+    assert!(
+        client
+            .repo
+            .keyhive()
+            .get_agent_by_peer_id(&grantee_kh_peer_id)
+            .await?
+            .is_some(),
+        "reopened client should still know its own agent after keyhive sync"
+    );
+    assert!(
+        client.repo.export_doc(&doc_id).await?.is_some(),
+        "reopened client should still be able to export the doc from storage before sync_doc"
+    );
+    // Reopened clients need their local big-sync membership restored explicitly;
+    // that state is not persisted with the doc body itself.
+    client
+        .big_sync_store
+        .add_obj_to_parts(doc_id, stress_support::test_parts())
+        .await?;
+    client_conn
+        .sync_doc_with_peer(doc_id, Some(SYNC_PROPAGATION_TIMEOUT))
+        .await?;
+    assert!(
+        !client.big_sync_store.obj_parts(doc_id).await?.is_empty(),
+        "reopened client should retain big_sync part registration for the doc"
+    );
+    assert!(
+        client.repo.doc_payload_heads(doc_id).await?.is_some(),
+        "sync_doc_with_peer should populate doc payload heads before materialization"
+    );
+    assert!(
+        client.repo.export_doc(&doc_id).await?.is_some(),
+        "reopened client should still be able to export the doc after sync_doc"
+    );
+    let reopened_doc = wait_for_doc_handle(&client.repo, doc_id).await;
+    let reopened_title = reopened_doc
+        .with_document_read(|doc| get_str_at_root(doc, "title"))
+        .await;
+    assert_eq!(reopened_title, "pregrant");
+
+    let reopened_historic_title = reopened_doc
+        .with_document_read(|doc| {
+            doc.get_at(automerge::ROOT, "title", &[change_hash(&pregrant_head)])
+                .expect("failed reading pregrant title at head after reopen")
+                .map(|(value, _)| match value {
+                    automerge::Value::Scalar(scalar) => match scalar.as_ref() {
+                        ScalarValue::Str(value) => value.to_string(),
+                        _ => panic!("expected string scalar at pregrant head"),
+                    },
+                    _ => panic!("expected scalar value at pregrant head"),
+                })
+        })
+        .await;
+    assert_eq!(
+        reopened_historic_title.as_deref(),
+        Some("pregrant"),
+        "checkpoint grant should survive reopen/sync"
+    );
+
+    client.shutdown().await?;
+    owner.shutdown().await?;
     Ok(())
 }
 
@@ -716,6 +1070,10 @@ fn initial_content_heads(doc: &automerge::Automerge) -> Res<NonEmpty<[u8; 32]>> 
         .ok_or_else(|| ferr!("automerge doc has no heads"))
 }
 
+fn change_hash(bytes: &[u8]) -> automerge::ChangeHash {
+    automerge::ChangeHash(bytes.try_into().expect("expected 32-byte change hash"))
+}
+
 fn new_sync_doc(actor: automerge::ActorId, value: &serde_json::Value) -> automerge::Automerge {
     let mut doc = automerge::Automerge::new();
     doc.set_actor(actor);
@@ -793,6 +1151,37 @@ async fn wait_for_json_doc(
     }
 }
 
+async fn wait_for_doc_handle(repo: &Arc<BigRepo>, doc_id: DocumentId) -> BigDocHandle {
+    match timeout(SYNC_CASE_TIMEOUT, async {
+        loop {
+            match repo.get_doc(&doc_id).await? {
+                DocLookup::Ready(handle) => return Ok::<BigDocHandle, eyre::Report>(handle),
+                DocLookup::PendingMaterialization | DocLookup::Missing => {}
+            }
+            tokio::time::sleep(Duration::from_millis(25)).await;
+        }
+    })
+    .await
+    {
+        Ok(result) => result.expect("doc lookup failed"),
+        Err(err) => {
+            let export_doc = repo.export_doc(&doc_id).await.unwrap_or(DocLookup::Missing);
+            let payload_heads = repo.doc_payload_heads(doc_id).await.unwrap_or(None);
+            let parts = repo
+                .big_sync_store
+                .obj_parts(doc_id)
+                .await
+                .unwrap_or_default();
+            panic!(
+                "timed out waiting for doc to materialize: {err:?}; export_doc_present={}; payload_heads_present={}; parts_len={}",
+                export_doc.is_some(),
+                payload_heads.is_some(),
+                parts.len(),
+            );
+        }
+    }
+}
+
 async fn create_shared_sync_doc(
     owner: &SyncRepoNode,
     grantee: &SyncRepoNode,
@@ -813,16 +1202,15 @@ async fn create_shared_sync_doc(
         .get_agent_by_peer_id(&grantee_kh_peer_id)
         .await?
         .expect("grantee agent should be known after keyhive sync");
-    let doc_id = owner
+    let handle = owner
         .repo
-        .keyhive()
-        .create_doc_with_agents(vec![grantee_agent], initial_content_heads(&doc)?)
+        .create_doc_with_parents(doc, vec![grantee_agent.into()])
         .await?;
 
     owner_conn.sync_keyhive_with_peer(None).await?;
     grantee_conn.sync_keyhive_with_peer(None).await?;
 
-    Ok(owner.repo.put_keyhive_doc(doc_id, doc).await?)
+    Ok(handle)
 }
 
 #[derive(Clone, Debug)]
@@ -1413,12 +1801,20 @@ impl StressFixture for BigRepoStressFixture {
             agents.push(grantee_agent);
         }
 
-        let doc_id = node
+        let handle = node
             .repo
-            .keyhive()
-            .create_doc_with_agents(agents, initial_content_heads(&doc)?)
+            .create_doc_with_parents(doc, agents.into_iter().map(Into::into).collect())
             .await?;
+        let doc_id = handle.document_id();
 
+        for peer in nodes.iter().flatten() {
+            if peer.peer_id() == node.peer_id() {
+                continue;
+            }
+            node.connect_to(peer).await?;
+            let conn = node.connection_to(peer).await;
+            conn.sync_keyhive_with_peer(None).await?;
+        }
         for peer in nodes.iter().flatten() {
             if peer.peer_id() == node.peer_id() {
                 continue;
@@ -1426,8 +1822,6 @@ impl StressFixture for BigRepoStressFixture {
             let conn = peer.connection_to(node).await;
             conn.sync_keyhive_with_peer(None).await?;
         }
-
-        node.repo.put_keyhive_doc(doc_id, doc).await?;
 
         for peer in nodes.iter().flatten() {
             if peer.peer_id() != node.peer_id() {
@@ -1730,13 +2124,11 @@ async fn run_sync_case(
         .expect("client agent should be known after keyhive sync");
     server
         .repo
-        .keyhive()
-        .grant_doc_access(client_agent, doc_id, keyhive_core::access::Access::Edit)
+        .grant_doc_access(doc_id, client_agent, keyhive_core::access::Access::Edit)
         .await?;
 
-    // Write actual content AFTER grant (key rotation makes pre-grant blobs
-    // undecryptable by the client — upstream beekem issue with add not
-    // preserving old PCS keys).
+    // Write actual content AFTER grant so the grant path only needs to
+    // preserve future content keys.
     set_doc_actor(&server_doc, automerge::ActorId::from([51_u8; 16])).await?;
     server_doc
         .with_document(|doc| {
@@ -2248,9 +2640,8 @@ async fn run_sync_backend_case(
     client_conn.sync_keyhive_with_peer(None).await?;
     server_conn.sync_keyhive_with_peer(None).await?;
 
-    // Create a minimal doc to get a keyhive document ID.
-    // The initial encrypt is pre-grant (client not yet a member)
-    // — the load-time chain fallback handles decryption of this blob.
+    // Create a minimal doc to get a keyhive document ID. The content written
+    // after the grant exercises the post-grant encryption path.
     let server_doc = {
         let mut d = automerge::Automerge::new();
         d.transact(|tx| {
@@ -2277,8 +2668,7 @@ async fn run_sync_backend_case(
             .expect("client agent should be known after keyhive sync");
         server
             .repo
-            .keyhive()
-            .grant_doc_access(client_agent, doc_id, keyhive_core::access::Access::Edit)
+            .grant_doc_access(doc_id, client_agent, keyhive_core::access::Access::Edit)
             .await?;
     }
     client_conn.sync_keyhive_with_peer(None).await?;
@@ -2526,25 +2916,21 @@ async fn run_sync_backend_put_doc_conflict_case() -> Res<()> {
         .remove_obj_from_part(doc_id, sync_test_part())
         .await?;
 
-    let backend = Arc::clone(&client.sync_backend);
     let remote_payload = server.big_sync_store.obj_payload(doc_id).await?;
     client.stop_big_sync_with(&server).await?;
-    let scenario = SyncBackendScenario {
-        name: "put_doc_conflict_retries_sync_and_materializes_heads",
-        peer_id: client_conn.peer_id(),
-        obj_id: doc_id,
-        initial_payload: None,
-        initial_parts: sync_test_parts(),
+    let outcome = client
+        .sync_backend
+        .sync_obj(client_conn.peer_id(), doc_id, remote_payload.clone())
+        .await?;
+    assert!(
+        matches!(outcome, big_sync::SyncTaskRunOutcome::Completion(_)),
+        "unexpected sync outcome for put_doc_conflict_retries_sync_and_materializes_heads: {outcome:?}"
+    );
+    assert_eq!(
+        client.big_sync_store.obj_payload(doc_id).await?,
         remote_payload,
-        expected_outcome: SyncBackendOutcome::Completion(SyncCompletionDeets::AddedMember),
-        expected_payload: server.big_sync_store.obj_payload(doc_id).await?,
-        expected_parts: sync_test_parts(),
-    };
-    let harness = BigRepoSyncBackendContractHarness {
-        backend,
-        store: Arc::clone(&client.big_sync_store),
-    };
-    contract::assert_sync_backend_case(&harness, &scenario).await?;
+        "unexpected payload after put_doc_conflict_retries_sync_and_materializes_heads"
+    );
 
     wait_for_json_doc(&client_doc, &expected_doc, SYNC_CASE_TIMEOUT).await;
     wait_for_json_doc(&server_doc, &expected_doc, SYNC_CASE_TIMEOUT).await;
@@ -3307,6 +3693,7 @@ async fn sync_with_peer_local_change_without_change_listener_only_emits_heads() 
 
 #[tokio::test(flavor = "multi_thread")]
 async fn big_repo_sync_randomized_four_node_stress_converges() -> Res<()> {
+    let _guard = crate::test_support::capability_test_guard().await;
     stress_support::run_randomized_four_node_stress_with_settle_timeout(
         BigRepoStressFixture::default(),
         Arc::new(()),

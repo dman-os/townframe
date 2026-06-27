@@ -103,9 +103,7 @@ pub async fn cli() -> Res<()> {
 
     let doc_id = {
         let kh = alice_kh.lock().await;
-        let doc = kh
-            .generate_doc(vec![], nonempty![[0xAAu8; 32]])
-            .await?;
+        let doc = kh.generate_doc(vec![], nonempty![[0xAAu8; 32]]).await?;
         let doc_id = doc.lock().await.doc_id();
         let doc_id_bytes = doc_id.to_bytes();
 
@@ -169,9 +167,33 @@ pub async fn cli() -> Res<()> {
 
     // Sync Alice -> Bob (multiple rounds)
     println!("=== Syncing ===");
-    run_sync_round(&alice_proto, &bob_proto, &alice_id, &bob_id, &alice_conn, &bob_conn).await;
-    run_sync_round(&bob_proto, &alice_proto, &bob_id, &alice_id, &bob_conn, &alice_conn).await;
-    run_sync_round(&alice_proto, &bob_proto, &alice_id, &bob_id, &alice_conn, &bob_conn).await;
+    run_sync_round(
+        &alice_proto,
+        &bob_proto,
+        &alice_id,
+        &bob_id,
+        &alice_conn,
+        &bob_conn,
+    )
+    .await;
+    run_sync_round(
+        &bob_proto,
+        &alice_proto,
+        &bob_id,
+        &alice_id,
+        &bob_conn,
+        &alice_conn,
+    )
+    .await;
+    run_sync_round(
+        &alice_proto,
+        &bob_proto,
+        &alice_id,
+        &bob_id,
+        &alice_conn,
+        &bob_conn,
+    )
+    .await;
     println!("Sync done");
 
     // Bob: try to decrypt
@@ -208,8 +230,7 @@ pub async fn cli() -> Res<()> {
                                                     keyhive_crypto::symmetric_key::SymmetricKey::from(pred_arr);
                                                 match pre_ec.try_decrypt(pred_key) {
                                                     Ok(pt) => {
-                                                        let text =
-                                                            String::from_utf8_lossy(&pt);
+                                                        let text = String::from_utf8_lossy(&pt);
                                                         println!(
                                                             "PRE-GRANT decrypt via CHAIN: OK! → \"{text}\""
                                                         );

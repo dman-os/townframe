@@ -49,6 +49,13 @@ pub enum BigRepoLocalNotification {
         doc_id: DocumentId,
         heads: Arc<[ChangeHash]>,
     },
+    DocMaterializationPending {
+        doc_id: DocumentId,
+    },
+    DocMaterializationReady {
+        doc_id: DocumentId,
+        heads: Arc<[ChangeHash]>,
+    },
 }
 
 #[derive(Debug, Clone)]
@@ -268,6 +275,29 @@ impl ChangeListenerManager {
         self.ensure_live()?;
         self.local_tx
             .send(vec![BigRepoLocalNotification::DocHeadsUpdated {
+                doc_id,
+                heads,
+            }])?;
+        Ok(())
+    }
+
+    pub(super) fn notify_local_doc_materialization_pending(&self, doc_id: DocumentId) -> Res<()> {
+        self.ensure_live()?;
+        self.local_tx
+            .send(vec![BigRepoLocalNotification::DocMaterializationPending {
+                doc_id,
+            }])?;
+        Ok(())
+    }
+
+    pub(super) fn notify_local_doc_materialization_ready(
+        &self,
+        doc_id: DocumentId,
+        heads: Arc<[ChangeHash]>,
+    ) -> Res<()> {
+        self.ensure_live()?;
+        self.local_tx
+            .send(vec![BigRepoLocalNotification::DocMaterializationReady {
                 doc_id,
                 heads,
             }])?;
@@ -639,6 +669,8 @@ fn local_notification_matches_filter(
         BigRepoLocalNotification::DocCreated { doc_id, .. } => doc_id,
         BigRepoLocalNotification::DocImported { doc_id, .. } => doc_id,
         BigRepoLocalNotification::DocHeadsUpdated { doc_id, .. } => doc_id,
+        BigRepoLocalNotification::DocMaterializationPending { doc_id } => doc_id,
+        BigRepoLocalNotification::DocMaterializationReady { doc_id, .. } => doc_id,
     };
     !filter
         .doc_id
@@ -836,11 +868,26 @@ mod tests {
             if *seen_doc_id == doc_id
         ));
 
+        let heads_for_ready = Arc::clone(&heads);
         manager.notify_local_doc_heads_updated(doc_id, heads)?;
         let third_batch = recv_batch(&mut rx).await;
         assert!(matches!(
             third_batch.as_slice(),
             [BigRepoLocalNotification::DocHeadsUpdated { doc_id: seen_doc_id, .. }]
+            if *seen_doc_id == doc_id
+        ));
+        manager.notify_local_doc_materialization_pending(doc_id)?;
+        let fourth_batch = recv_batch(&mut rx).await;
+        assert!(matches!(
+            fourth_batch.as_slice(),
+            [BigRepoLocalNotification::DocMaterializationPending { doc_id: seen_doc_id }]
+            if *seen_doc_id == doc_id
+        ));
+        manager.notify_local_doc_materialization_ready(doc_id, heads_for_ready)?;
+        let fifth_batch = recv_batch(&mut rx).await;
+        assert!(matches!(
+            fifth_batch.as_slice(),
+            [BigRepoLocalNotification::DocMaterializationReady { doc_id: seen_doc_id, .. }]
             if *seen_doc_id == doc_id
         ));
         Ok(())

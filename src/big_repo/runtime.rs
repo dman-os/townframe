@@ -6,12 +6,15 @@ use crate::{
     handler::{boot_keyhive, BigRepoComposedHandler, BigRepoKeyhiveProtocol, BigRepoSubduction},
     keyhive_conn::BigRepoKeyhiveConnAdapter,
     keyhive_storage::BigRepoKeyhiveStorage,
-    BigKeyhiveHandle, BigRepoChangeOrigin, ConnFinishSignal, DocumentId, PeerId,
+    BigKeyhiveAuthority, BigKeyhiveHandle, BigRepoChangeOrigin, ConnFinishSignal, DocumentId,
+    PeerId,
 };
 use subduction_keyhive::{KeyhiveConnection, KeyhivePeerId};
 
+use future_form::FutureForm;
 use futures::future::BoxFuture;
-use sedimentree_core::crypto::digest::Digest;
+use keyhive_core::store::ciphertext::CiphertextStore;
+use sedimentree_core::depth::CountLeadingZeroBytes;
 use sedimentree_core::sedimentree::{Sedimentree, SedimentreeItem};
 use sedimentree_core::{blob::Blob, id::SedimentreeId, loose_commit::id::CommitId};
 use std::collections::{BTreeSet, HashMap};
@@ -32,14 +35,58 @@ pub enum SyncDocError {
     NotFound,
     /// Document exists but peer lacks access
     Unauthorized,
-    /// Document exists but decryption key not yet available (pending keyhive sync)
-    PendingKeys,
     /// TransportError
     TransportError,
     /// IoError
     IoError(eyre::Report),
     /// Unexpected {0}
     Other(#[from] eyre::Report),
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum DocLookup<T> {
+    Missing,
+    PendingMaterialization,
+    Ready(T),
+}
+
+impl<T> DocLookup<T> {
+    pub(crate) fn map_ready<U>(self, map: impl FnOnce(T) -> U) -> DocLookup<U> {
+        match self {
+            Self::Missing => DocLookup::Missing,
+            Self::PendingMaterialization => DocLookup::PendingMaterialization,
+            Self::Ready(value) => DocLookup::Ready(map(value)),
+        }
+    }
+
+    pub fn is_some(&self) -> bool {
+        matches!(self, Self::Ready(_))
+    }
+
+    pub fn expect(self, msg: &str) -> T {
+        match self {
+            Self::Ready(value) => value,
+            Self::Missing | Self::PendingMaterialization => panic!("{msg}"),
+        }
+    }
+
+    pub fn ok_or_else<E>(self, err: impl FnOnce() -> E) -> Result<T, E> {
+        match self {
+            Self::Ready(value) => Ok(value),
+            Self::Missing | Self::PendingMaterialization => Err(err()),
+        }
+    }
+
+    pub fn into_option(self) -> Option<T> {
+        match self {
+            Self::Ready(value) => Some(value),
+            Self::Missing | Self::PendingMaterialization => None,
+        }
+    }
+
+    pub fn is_pending_materialization(&self) -> bool {
+        matches!(self, Self::PendingMaterialization)
+    }
 }
 
 #[derive(educe::Educe)]
@@ -98,11 +145,11 @@ enum RuntimeCmd {
     },
     GetDocHandle {
         doc_id: DocumentId,
-        resp: oneshot::Sender<Res<Option<Arc<LiveDocBundle>>>>,
+        resp: oneshot::Sender<Res<DocLookup<Arc<LiveDocBundle>>>>,
     },
     ExportDocSave {
         doc_id: DocumentId,
-        resp: oneshot::Sender<Res<Option<Vec<u8>>>>,
+        resp: oneshot::Sender<Res<DocLookup<Vec<u8>>>>,
     },
     CommitDelta {
         doc_id: DocumentId,
@@ -136,8 +183,7 @@ enum RuntimeCmd {
     },
     SyncKeyhiveWithPeer {
         peer_id: PeerId,
-        timeout: Option<Duration>,
-        resp: oneshot::Sender<Res<()>>,
+        resp: oneshot::Sender<Res<bool>>,
     },
     ReleaseDocLease {
         doc_id: DocumentId,
@@ -200,12 +246,28 @@ impl BigRepoRuntimeHandle {
         &self,
         initial_content: automerge::Automerge,
     ) -> Result<Arc<LiveDocBundle>, CreateDocError> {
+        self.create_doc_with_parents(initial_content, Vec::new())
+            .await
+    }
+
+    pub async fn create_doc_with_parents(
+        &self,
+        initial_content: automerge::Automerge,
+        parents: Vec<BigKeyhiveAuthority>,
+    ) -> Result<Arc<LiveDocBundle>, CreateDocError> {
         use nonempty::NonEmpty;
         let heads = initial_content.get_heads();
         // FIXME: do we use heads from subduction or from automerge???
         let content_heads = NonEmpty::from_vec(heads.iter().map(|h| h.0).collect())
             .ok_or_else(|| eyre::eyre!("automerge doc has no heads"))?;
-        let doc_id = self.keyhive.create_doc(content_heads).await?;
+        let doc_id = if parents.is_empty() {
+            self.keyhive.create_doc(content_heads).await?
+        } else {
+            self.keyhive
+                .create_doc_with_parents(parents, content_heads)
+                .await?
+        };
+        self.note_local_keyhive_changed().await?;
         let (tx, rx) = oneshot::channel();
         self.cmd_tx
             .send(RuntimeCmd::PutDoc {
@@ -219,23 +281,12 @@ impl BigRepoRuntimeHandle {
             .map_err(CreateDocError::from)
     }
 
-    pub(crate) async fn put_keyhive_doc(
-        &self,
-        doc_id: DocumentId,
-        initial_content: automerge::Automerge,
-    ) -> Result<Arc<LiveDocBundle>, PutDocError> {
-        let (tx, rx) = oneshot::channel();
-        self.cmd_tx
-            .send(RuntimeCmd::PutDoc {
-                doc_id,
-                initial_content: initial_content.into(),
-                resp: tx,
-            })
-            .map_err(|_| eyre::eyre!(ERROR_ACTOR))?;
-        rx.await.map_err(|_| eyre::eyre!(ERROR_CHANNEL))?
+    pub async fn get_doc_handle(&self, doc_id: DocumentId) -> Res<Option<Arc<LiveDocBundle>>> {
+        let out = self.get_doc_lookup(doc_id).await?;
+        Ok(out.into_option())
     }
 
-    pub async fn get_doc_handle(&self, doc_id: DocumentId) -> Res<Option<Arc<LiveDocBundle>>> {
+    pub async fn get_doc_lookup(&self, doc_id: DocumentId) -> Res<DocLookup<Arc<LiveDocBundle>>> {
         let (tx, rx) = oneshot::channel();
         self.cmd_tx
             .send(RuntimeCmd::GetDocHandle { doc_id, resp: tx })
@@ -244,12 +295,20 @@ impl BigRepoRuntimeHandle {
         out
     }
 
-    pub async fn export_doc_save(&self, doc_id: DocumentId) -> Res<Option<Vec<u8>>> {
+    pub async fn export_doc_save(&self, doc_id: DocumentId) -> Res<DocLookup<Vec<u8>>> {
         let (tx, rx) = oneshot::channel();
         self.cmd_tx
             .send(RuntimeCmd::ExportDocSave { doc_id, resp: tx })
             .map_err(|_| eyre::eyre!(ERROR_ACTOR))?;
         rx.await.map_err(|_| eyre::eyre!(ERROR_CHANNEL))?
+    }
+
+    pub async fn note_local_keyhive_changed(&self) -> Res<()> {
+        self.keyhive_protocol
+            .note_local_keyhive_changed()
+            .await
+            .wrap_err("keyhive local-change refresh failed")
+            .map(|_| ())
     }
 
     pub async fn commit_delta(
@@ -357,40 +416,65 @@ impl BigRepoRuntimeHandle {
         }
     }
 
-    /// Initiate a keyhive protocol sync with the given peer,
-    /// blocking until the sync exchange completes.
+    /// Initiate a keyhive protocol sync with the given peer.
+    ///
+    /// The call waits until the keyhive protocol observes a completed sync
+    /// round for the peer. A syncpoint may reduce this to a lightweight sync
+    /// check, but the waiter still resolves only after confirmation.
     pub async fn sync_keyhive_with_peer(
         &self,
         peer_id: PeerId,
         timeout: Option<std::time::Duration>,
     ) -> Res<()> {
-        let (tx, rx) = oneshot::channel();
-        self.cmd_tx
-            .send(RuntimeCmd::SyncKeyhiveWithPeer {
-                peer_id,
-                timeout,
-                resp: tx,
-            })
-            .map_err(|_| ferr!("runtime channel closed"))?;
-        rx.await
-            .map_err(|_| ferr!("sync keyhive response channel closed"))??;
-        let deadline = tokio::time::Instant::now()
-            + timeout.unwrap_or_else(|| utils_rs::scale_timeout(Duration::from_secs(5)));
         let keyhive_peer_id = KeyhivePeerId::from_bytes(*peer_id.as_bytes());
-        loop {
-            if self
-                .keyhive_protocol
-                .syncpoint_for_peer(&keyhive_peer_id)
-                .await
-                .is_some()
-            {
-                return Ok(());
-            }
-            if tokio::time::Instant::now() >= deadline {
-                return Err(ferr!("keyhive sync timed out waiting for syncpoint"));
-            }
-            tokio::time::sleep(utils_rs::scale_timeout(Duration::from_millis(10))).await;
+        let (waiter_id, waiter_rx) = self
+            .keyhive_protocol
+            .register_sync_waiter(&keyhive_peer_id)
+            .await;
+        let (tx, rx) = oneshot::channel();
+        if self
+            .cmd_tx
+            .send(RuntimeCmd::SyncKeyhiveWithPeer { peer_id, resp: tx })
+            .is_err()
+        {
+            self.keyhive_protocol
+                .cancel_sync_waiter(&keyhive_peer_id, waiter_id)
+                .await;
+            return Err(ferr!("runtime channel closed"));
         }
+        let _started_full_sync = match rx
+            .await
+            .map_err(|_| ferr!("sync keyhive response channel closed"))?
+        {
+            Ok(started_full_sync) => started_full_sync,
+            Err(err) => {
+                self.keyhive_protocol
+                    .cancel_sync_waiter(&keyhive_peer_id, waiter_id)
+                    .await;
+                return Err(err);
+            }
+        };
+        let timeout = timeout.unwrap_or_else(|| utils_rs::scale_timeout(Duration::from_secs(5)));
+        match tokio::time::timeout(timeout, waiter_rx).await {
+            Ok(Ok(())) => Ok(()),
+            Ok(Err(_)) => Err(ferr!("keyhive sync waiter canceled before completion")),
+            Err(_) => {
+                self.keyhive_protocol
+                    .cancel_sync_waiter(&keyhive_peer_id, waiter_id)
+                    .await;
+                Err(ferr!("keyhive sync timed out waiting for completion"))
+            }
+        }?;
+        self.keyhive_protocol.ingest_from_storage().await?;
+        self.refresh_keyhive_cache().await?;
+        Ok(())
+    }
+
+    pub async fn refresh_keyhive_cache(&self) -> Res<()> {
+        self.keyhive_protocol
+            .refresh_cache()
+            .await
+            .wrap_err("keyhive cache refresh failed")
     }
 }
 
@@ -407,7 +491,7 @@ impl BigRepoRuntimeStopToken {
         self.keyhive_protocol
             .compact(self.keyhive_archive_id)
             .await
-            .wrap_err("failed persisting keyhive state during BigRepo shutdown")?;
+            .wrap_err("keyhive archive compact failed during stop")?;
         self.cancel_token.cancel();
         match self.runtime_tasks.stop(Duration::from_secs(5)).await {
             Ok(()) => {}
@@ -546,19 +630,23 @@ where
         send_counter,
         subduction_core::nonce_cache::NonceCache::new(Duration::from_secs(60)),
         TimeoutTokio,
+        // FIXME: parametrize this
         Duration::from_secs(30),
         sedimentree_core::depth::CountLeadingZeroBytes,
         TokioSpawn,
     );
     subduction.set_sync_session_observer(sync_session_observer);
     let subduction_handle: Arc<BigRepoSubduction<S>> = Arc::clone(&subduction);
+    let big_sync_store_for_worker = Arc::clone(&big_sync_store);
+    let keyhive_archive_id =
+        subduction_keyhive::storage::StorageHash::new(*local_peer_id.as_bytes());
     let runtime_worker = BigRepoRuntimeWorker {
         keyhive: keyhive.clone(),
         keyhive_protocol: Arc::clone(&keyhive_protocol),
         subduction: subduction_handle,
         sedimentrees: Arc::clone(&sedimentrees),
         storage_for_reads,
-        big_sync_store,
+        big_sync_store: big_sync_store_for_worker,
         change_manager,
         runtime_tasks: Arc::clone(&runtime_tasks),
         connect_signer,
@@ -601,6 +689,39 @@ where
             }
             .instrument(
                 tracing::info_span!("BigRepoRuntime subduction manager", peer_id = %peer_id),
+            )
+        })
+        .expect(ERROR_TOKIO);
+    runtime_tasks
+        .spawn({
+            let stop = runtime_stop.clone();
+            let keyhive_protocol = Arc::clone(&keyhive_protocol);
+            async move {
+                let mut refresh_tick = tokio::time::interval(Duration::from_secs(2));
+                let mut compact_tick = tokio::time::interval(Duration::from_secs(300));
+                loop {
+                    tokio::select! {
+                        biased;
+                        _ = stop.cancelled() => break,
+                        _ = refresh_tick.tick() => {
+                            // Best-effort maintenance only: correctness and
+                            // scheduling do not depend on this loop.
+                            if let Err(e) = keyhive_protocol.refresh_cache().await {
+                                tracing::warn!(error = %e, "keyhive cache refresh failed");
+                            }
+                        },
+                        _ = compact_tick.tick() => {
+                            // Best-effort maintenance only; do not make stop
+                            // or forward progress depend on compaction.
+                            if let Err(e) = keyhive_protocol.compact(keyhive_archive_id).await {
+                                tracing::warn!(error = %e, "keyhive archive compact failed");
+                            }
+                        }
+                    }
+                }
+            }
+            .instrument(
+                tracing::info_span!("BigRepoRuntime keyhive maintenance", peer_id = %peer_id),
             )
         })
         .expect(ERROR_TOKIO);
@@ -647,10 +768,8 @@ where
             cancel_token: runtime_stop,
             machine_loop_handle,
             runtime_tasks,
-            keyhive_protocol,
-            keyhive_archive_id: subduction_keyhive::storage::StorageHash::new(
-                *local_peer_id.as_bytes(),
-            ),
+            keyhive_protocol: Arc::clone(&keyhive_protocol),
+            keyhive_archive_id,
         },
     ))
 }
@@ -775,25 +894,16 @@ where
                     })
                     .expect(ERROR_ACTOR);
             }
-            RuntimeCmd::SyncKeyhiveWithPeer {
-                peer_id,
-                timeout: _,
-                resp,
-            } => {
+            RuntimeCmd::SyncKeyhiveWithPeer { peer_id, resp } => {
                 let kh_peer_id = KeyhivePeerId::from_bytes(*peer_id.as_bytes());
-                tracing::info!("SyncKeyhiveWithPeer: refreshing cache + initiating sync");
-                // Refresh cache to pick up external keyhive mutations
-                // (e.g. grant_doc_access). TODO: do this periodically.
-                if let Err(e) = self.keyhive_protocol.refresh_cache().await {
-                    tracing::warn!(error = %e, "refresh_cache failed");
-                }
-                self.keyhive_protocol
-                    .clear_syncpoint_for_peer(&kh_peer_id)
-                    .await;
-                if let Err(e) = self.keyhive_protocol.sync_keyhive(Some(&kh_peer_id)).await {
-                    let _ = resp.send(Err(ferr!("keyhive sync failed: {e}")));
-                } else {
-                    let _ = resp.send(Ok(()));
+                tracing::info!("SyncKeyhiveWithPeer: initiating sync");
+                let res = self
+                    .keyhive_protocol
+                    .initiate_sync_with_peer(&kh_peer_id)
+                    .await
+                    .wrap_err("keyhive initiate_sync_with_peer failed");
+                if let Err(e) = resp.send(res) {
+                    warn!(error = ?e, "failed sending keyhive sync response");
                 }
             }
             RuntimeCmd::ReleaseDocLease { doc_id } => self.handle_release_doc_lease(doc_id).await,
@@ -921,9 +1031,9 @@ where
         let mut worker = DocWorker {
             doc_id_subduction,
             doc_id,
-            pending_sync_jobs: default(),
             state: DocWorkerDocState::Unloaded,
             pending_fragment_requests: BTreeSet::new(),
+            pending_sync_jobs: HashMap::new(),
             subduction: Arc::clone(&self.subduction),
             sedimentrees: Arc::clone(&self.sedimentrees),
             storage_for_reads: self.storage_for_reads.clone(),
@@ -1322,10 +1432,10 @@ enum DocWorkerMsg {
         resp: oneshot::Sender<Result<Arc<LiveDocBundle>, PutDocError>>,
     },
     AcquireHandle {
-        resp: oneshot::Sender<Res<Option<Arc<LiveDocBundle>>>>,
+        resp: oneshot::Sender<Res<DocLookup<Arc<LiveDocBundle>>>>,
     },
     ExportDocSave {
-        resp: oneshot::Sender<Res<Option<Vec<u8>>>>,
+        resp: oneshot::Sender<Res<DocLookup<Vec<u8>>>>,
     },
     CommitDelta {
         commits: Vec<(CommitId, BTreeSet<CommitId>, Vec<u8>)>,
@@ -1367,6 +1477,7 @@ enum DocWorkerDocState {
     Unloaded,
     Transient(Box<automerge::Automerge>),
     Live(std::sync::Weak<LiveDocBundle>),
+    PendingMaterialization,
 }
 
 impl<S> DocWorker<S>
@@ -1421,16 +1532,16 @@ where
                     })
                     .wrap_err(ERROR_CHANNEL)?;
                 if let Some(waiters) = self.pending_sync_jobs.remove(&peer_id) {
-                    for sender in waiters {
-                        sender
-                            .send(Ok(()))
-                            .inspect_err(|_| warn!(ERROR_CALLER))
-                            .ok();
+                    for waiter in waiters {
                         self.runtime_evt_tx
                             .send(RuntimeEvt::DocWorkerTransientFinished {
                                 doc_id: self.doc_id,
                             })
                             .wrap_err(ERROR_CHANNEL)?;
+                        waiter
+                            .send(Ok(()))
+                            .inspect_err(|_| warn!(ERROR_CALLER))
+                            .ok();
                     }
                 }
             }
@@ -1454,16 +1565,21 @@ where
         if !matches!(self.state, DocWorkerDocState::Unloaded) {
             return Err(PutDocError::IdOccpuied { id: self.doc_id });
         }
-        if load_doc_snapshot(
+        // FIXME: thsi is costly just for occupancy check
+        // maybe subduction has better APIs for now?
+        // storage.contains_sedimentree_id??
+        match load_doc_snapshot(
             &self.sedimentrees,
             &self.storage_for_reads,
-            Some(&self.runtime_handle.keyhive),
+            &self.runtime_handle.keyhive,
             self.doc_id,
         )
         .await?
-        .is_some()
         {
-            return Err(PutDocError::IdOccpuied { id: self.doc_id });
+            DocLookup::Ready(_) | DocLookup::PendingMaterialization => {
+                return Err(PutDocError::IdOccpuied { id: self.doc_id });
+            }
+            DocLookup::Missing => {}
         }
         let sedimentree_id: SedimentreeId = self.doc_id_subduction;
         let ingested = ingest_automerge(&doc, sedimentree_id);
@@ -1478,13 +1594,36 @@ where
             .store_sedimentree(sedimentree_id, sedimentree, blobs)
             .await
             .map_err(|err| ferr!("failed store_sedimentree: {err}"))?;
-        let (item_payload, heads) = {
-            let heads = Arc::<[automerge::ChangeHash]>::from(doc.get_heads());
-            let item_payload = serde_json::json!({
-                "heads": am_utils_rs::serialize_commit_heads(&heads),
-            });
-            (item_payload, heads)
-        };
+        for entry in &ingested.fragment_entries {
+            record_keyhive_content_frontier(
+                &self.runtime_handle.keyhive,
+                sedimentree_id,
+                entry.head.as_bytes().to_vec(),
+                entry
+                    .boundary
+                    .iter()
+                    .map(|content_ref| content_ref.as_bytes().to_vec())
+                    .collect(),
+            )
+            .await?;
+        }
+        for entry in &ingested.loose_entries {
+            record_keyhive_content_frontier(
+                &self.runtime_handle.keyhive,
+                sedimentree_id,
+                entry.head.as_bytes().to_vec(),
+                entry
+                    .parents
+                    .iter()
+                    .map(|content_ref| content_ref.as_bytes().to_vec())
+                    .collect(),
+            )
+            .await?;
+        }
+        let heads = sedimentree_heads_payload(&ingested.sedimentree);
+        let item_payload = serde_json::json!({
+            "heads": am_utils_rs::serialize_commit_heads(&heads),
+        });
         let bundle = Arc::new(LiveDocBundle::new(
             self.doc_id,
             *doc,
@@ -1494,7 +1633,7 @@ where
             },
         ));
         self.big_sync_store
-            .set_obj_payload(self.doc_id.into(), item_payload)
+            .set_obj_payload(self.doc_id, item_payload)
             .await?;
         self.change_manager
             .notify_doc_created(self.doc_id, Arc::clone(&heads))?;
@@ -1506,10 +1645,11 @@ where
                 bundle: Arc::clone(&bundle),
             })
             .expect(ERROR_CHANNEL);
+        self.runtime_handle.note_local_keyhive_changed().await?;
         Ok(bundle)
     }
 
-    async fn handle_acquire_handle(&mut self) -> Res<Option<Arc<LiveDocBundle>>> {
+    async fn handle_acquire_handle(&mut self) -> Res<DocLookup<Arc<LiveDocBundle>>> {
         if let DocWorkerDocState::Live(bundle) = &self.state {
             if let Some(bundle) = bundle.upgrade() {
                 self.runtime_evt_tx
@@ -1517,12 +1657,15 @@ where
                         bundle: Arc::clone(&bundle),
                     })
                     .expect(ERROR_CHANNEL);
-                return Ok(Some(Arc::clone(&bundle)));
+                return Ok(DocLookup::Ready(Arc::clone(&bundle)));
             }
             self.state = DocWorkerDocState::Unloaded;
         }
-        let Some(doc) = self.take_or_load_transient_doc().await? else {
-            return Ok(None);
+        let Some(doc) = self.take_or_load_transient_doc().await?.into_option() else {
+            return Ok(match self.state {
+                DocWorkerDocState::PendingMaterialization => DocLookup::PendingMaterialization,
+                _ => DocLookup::Missing,
+            });
         };
         let bundle = Arc::new(LiveDocBundle::new(
             self.doc_id,
@@ -1538,48 +1681,91 @@ where
                 bundle: Arc::clone(&bundle),
             })
             .expect(ERROR_CHANNEL);
-        Ok(Some(bundle))
+        Ok(DocLookup::Ready(bundle))
     }
 
     #[tracing::instrument(skip_all)]
-    async fn handle_export_doc_save(&mut self) -> Res<Option<Vec<u8>>> {
+    async fn handle_export_doc_save(&mut self) -> Res<DocLookup<Vec<u8>>> {
         match &self.state {
             DocWorkerDocState::Live(bundle) => match bundle.upgrade() {
                 Some(bundle) => {
                     let doc = bundle.doc.lock().await;
-                    Ok(Some(doc.save()))
+                    Ok(DocLookup::Ready(doc.save()))
                 }
                 None => {
-                    let Some(doc) = load_doc_snapshot(
+                    let was_pending =
+                        matches!(self.state, DocWorkerDocState::PendingMaterialization);
+                    match load_doc_snapshot(
                         &self.sedimentrees,
                         &self.storage_for_reads,
-                        Some(&self.runtime_handle.keyhive),
+                        &self.runtime_handle.keyhive,
                         self.doc_id,
                     )
                     .await?
-                    else {
-                        return Ok(None);
-                    };
-                    let save = doc.save();
-                    self.state = DocWorkerDocState::Transient(doc.into());
-                    Ok(Some(save))
+                    {
+                        DocLookup::Ready(doc) => {
+                            self.mark_materialization_ready(
+                                was_pending,
+                                Arc::from(doc.get_heads()),
+                            )?;
+                            let save = doc.save();
+                            self.state = DocWorkerDocState::Transient(doc.into());
+                            Ok(DocLookup::Ready(save))
+                        }
+                        DocLookup::PendingMaterialization => {
+                            self.mark_materialization_pending(was_pending)?;
+                            Ok(DocLookup::PendingMaterialization)
+                        }
+                        DocLookup::Missing => Ok(DocLookup::Missing),
+                    }
                 }
             },
-            DocWorkerDocState::Transient(doc) => Ok(Some(doc.save())),
-            DocWorkerDocState::Unloaded => {
-                let Some(doc) = load_doc_snapshot(
+            DocWorkerDocState::Transient(doc) => Ok(DocLookup::Ready(doc.save())),
+            DocWorkerDocState::PendingMaterialization => {
+                let was_pending = true;
+                match load_doc_snapshot(
                     &self.sedimentrees,
                     &self.storage_for_reads,
-                    Some(&self.runtime_handle.keyhive),
+                    &self.runtime_handle.keyhive,
                     self.doc_id,
                 )
                 .await?
-                else {
-                    return Ok(None);
-                };
-                let save = doc.save();
-                self.state = DocWorkerDocState::Transient(doc.into());
-                Ok(Some(save))
+                {
+                    DocLookup::Ready(doc) => {
+                        self.mark_materialization_ready(was_pending, Arc::from(doc.get_heads()))?;
+                        let save = doc.save();
+                        self.state = DocWorkerDocState::Transient(doc.into());
+                        Ok(DocLookup::Ready(save))
+                    }
+                    DocLookup::PendingMaterialization => {
+                        self.mark_materialization_pending(true)?;
+                        Ok(DocLookup::PendingMaterialization)
+                    }
+                    DocLookup::Missing => Ok(DocLookup::Missing),
+                }
+            }
+            DocWorkerDocState::Unloaded => {
+                let was_pending = false;
+                match load_doc_snapshot(
+                    &self.sedimentrees,
+                    &self.storage_for_reads,
+                    &self.runtime_handle.keyhive,
+                    self.doc_id,
+                )
+                .await?
+                {
+                    DocLookup::Ready(doc) => {
+                        self.mark_materialization_ready(was_pending, Arc::from(doc.get_heads()))?;
+                        let save = doc.save();
+                        self.state = DocWorkerDocState::Transient(doc.into());
+                        Ok(DocLookup::Ready(save))
+                    }
+                    DocLookup::PendingMaterialization => {
+                        self.mark_materialization_pending(false)?;
+                        Ok(DocLookup::PendingMaterialization)
+                    }
+                    DocLookup::Missing => Ok(DocLookup::Missing),
+                }
             }
         }
     }
@@ -1610,11 +1796,22 @@ where
             .await
             .map_err(|e| PutDocError::Other(ferr!("encryption failed: {e}")))?;
             batch_keys.insert(head, app_key);
+            let pred_refs: Vec<Vec<u8>> = parents
+                .iter()
+                .map(|content_ref| content_ref.as_bytes().to_vec())
+                .collect();
             let maybe_request = self
                 .subduction
                 .store_commit(sedimentree_id, head, parents, encrypted_blob)
                 .await
                 .map_err(|err| ferr!("failed store_commit: {err}"))?;
+            record_keyhive_content_frontier(
+                &self.runtime_handle.keyhive,
+                sedimentree_id,
+                head.as_bytes().to_vec(),
+                pred_refs,
+            )
+            .await?;
             if let Some(request) = maybe_request {
                 self.pending_fragment_requests.insert(request);
             }
@@ -1629,6 +1826,7 @@ where
         )
         .await?;
         self.process_pending_fragment_requests().await?;
+        self.runtime_handle.note_local_keyhive_changed().await?;
         Ok(())
     }
 
@@ -1644,116 +1842,286 @@ where
             is_live = matches!(self.state, DocWorkerDocState::Live(_)),
         )
     )]
+    // FIXME: decryption logic here seems hacky
     async fn handle_apply_sync_session(
         &mut self,
         session: subduction_core::sync_session::SyncSession,
     ) -> Res<()> {
+        let _peer_id = PeerId::new(*session.peer_id.as_bytes());
+        let was_pending = matches!(self.state, DocWorkerDocState::PendingMaterialization);
         // FIXME: enabling this quick exit breaks things
         // if session.received_commit_ids.is_empty() && session.received_fragment_ids.is_empty() {
         //     return Ok(());
         // }
-        use keyhive_crypto::symmetric_key::SymmetricKey;
-        // Pass 1: CGKA decrypt, collect keys
-        let mut decrypted: Vec<Option<Vec<u8>>> = Vec::new();
-        // Per-position keys (index → key)
-        let mut pos_keys: std::collections::HashMap<usize, SymmetricKey> =
-            std::collections::HashMap::new();
-        // DAG ancestor pool: content_ref → key from Envelope.ancestors
-        let mut ancestor_pool: std::collections::HashMap<Vec<u8>, SymmetricKey> =
-            std::collections::HashMap::new();
-        let mut raws: Vec<Vec<u8>> = Vec::new();
+        use keyhive_core::crypto::envelope::Envelope;
 
-        for commit_id in &session.received_commit_ids {
-            let verified = self
-                .storage_for_reads
-                .load_loose_commit(session.sedimentree_id, *commit_id)
-                .await?
-                .ok_or_eyre("synced loose commit missing")?;
-            raws.push(verified.blob().clone().into_contents());
-        }
-        for fragment_id in &session.received_fragment_ids {
-            let verified = self
-                .storage_for_reads
-                .load_fragment(session.sedimentree_id, *fragment_id)
-                .await?
-                .ok_or_eyre("synced fragment missing")?;
-            raws.push(verified.blob().clone().into_contents());
-        }
+        let loose_commits = <S as subduction_core::storage::traits::Storage<
+            future_form::Sendable,
+        >>::load_loose_commits(
+            &self.storage_for_reads, session.sedimentree_id
+        )
+        .await?
+        .into_iter()
+        .collect::<Vec<_>>();
+        let fragments = <S as subduction_core::storage::traits::Storage<future_form::Sendable>>::load_fragments(
+            &self.storage_for_reads,
+            session.sedimentree_id,
+        )
+        .await?
+        .into_iter()
+        .collect::<Vec<_>>();
+        let keyhive = self.runtime_handle.keyhive.clone_keyhive().await;
+        let vk = ed25519_dalek::VerifyingKey::from_bytes(self.doc_id_subduction.as_bytes())
+            .map_err(|_| ferr!("not a valid Keyhive DocumentId"))?;
+        let kh_doc_id = keyhive_core::principal::document::id::DocumentId::from(
+            keyhive_core::principal::identifier::Identifier::from(vk),
+        );
+        let _keyhive_has_doc = keyhive.get_document(kh_doc_id).await.is_some();
 
-        // Pass 1: CGKA decrypt, collect keys and ancestors
-        for raw in &raws {
-            match decrypt_snapshot_blob_keyed(
-                raw,
-                &self.runtime_handle.keyhive,
-                self.doc_id_subduction,
-                None,
+        let tree = match self.sedimentrees.get_cloned(&session.sedimentree_id).await {
+            Some(tree) => tree,
+            None => sedimentree_core::sedimentree::minimized::MinimizedSedimentree::new(
+                Sedimentree::new(
+                    fragments
+                        .iter()
+                        .map(|verified| verified.payload().clone())
+                        .collect(),
+                    loose_commits
+                        .iter()
+                        .map(|verified| verified.payload().clone())
+                        .collect(),
+                ),
+            ),
+        };
+        let order = tree
+            .topsorted_blob_order()
+            .map_err(|err| ferr!("failed ordering sync session blobs: {err}"))?;
+        let tree_fragments: Vec<_> = tree.fragments().collect();
+        let tree_loose: Vec<_> = tree.loose_commits().collect();
+        let received_refs = session
+            .received_commit_ids
+            .iter()
+            .map(|commit_id| commit_id.as_bytes().to_vec())
+            .chain(
+                session
+                    .received_fragment_ids
+                    .iter()
+                    .map(|fragment_id| fragment_id.as_bytes().to_vec()),
             )
-            .await
-            {
-                Ok((plaintext, key, ancestors)) => {
-                    let idx = decrypted.len();
-                    pos_keys.insert(idx, key);
-                    ancestor_pool.extend(ancestors);
-                    decrypted.push(Some(plaintext));
-                }
-                Err(e) => {
-                    tracing::debug!(?e, "sync blob CGKA decrypt failed, will retry with chain");
-                    decrypted.push(None);
-                }
-            }
-        }
+            .collect::<std::collections::HashSet<_>>();
 
-        // Pass 2: retry with chain keys (position + ancestor pool)
-        let mut made_progress = !pos_keys.is_empty() || !ancestor_pool.is_empty();
-        while made_progress {
-            made_progress = false;
-            for (i, slot) in decrypted.iter_mut().enumerate() {
-                if slot.is_some() {
-                    continue;
-                }
-                for chain_key in pos_keys.values().chain(ancestor_pool.values()) {
-                    match decrypt_snapshot_blob_keyed(
-                        &raws[i],
-                        &self.runtime_handle.keyhive,
-                        self.doc_id_subduction,
-                        Some(chain_key),
-                    )
-                    .await
-                    {
-                        Ok((plaintext, key, ancestors)) => {
-                            pos_keys.insert(i, key);
-                            ancestor_pool.extend(ancestors);
-                            *slot = Some(plaintext);
-                            made_progress = true;
-                            break;
+        let mut materialization_pending = false;
+        let blobs = {
+            let keyhive = self.runtime_handle.keyhive.clone_keyhive().await;
+            let vk = ed25519_dalek::VerifyingKey::from_bytes(self.doc_id_subduction.as_bytes())
+                .map_err(|_| ferr!("not a valid Keyhive DocumentId"))?;
+            let kh_doc_id = keyhive_core::principal::document::id::DocumentId::from(
+                keyhive_core::principal::identifier::Identifier::from(vk),
+            );
+            match keyhive.get_document(kh_doc_id).await {
+                Some(kh_doc) => {
+                    let ciphertext_store = {
+                        let store = BigRepoCiphertextStore::new(self.storage_for_reads.clone());
+                        for item in &order {
+                            match item {
+                                SedimentreeItem::Fragment(ii) => {
+                                    store
+                                        .record_locator(
+                                            tree_fragments[*ii].head().as_bytes().to_vec(),
+                                            session.sedimentree_id,
+                                            BigRepoCiphertextKind::Fragment,
+                                        )
+                                        .await?;
+                                }
+                                SedimentreeItem::LooseCommit(ii) => {
+                                    store
+                                        .record_locator(
+                                            tree_loose[*ii].head().as_bytes().to_vec(),
+                                            session.sedimentree_id,
+                                            BigRepoCiphertextKind::LooseCommit,
+                                        )
+                                        .await?;
+                                }
+                            }
                         }
-                        Err(_) => continue,
+                        store
+                    };
+
+                    let received_order = order
+                        .iter()
+                        .filter_map(|item| {
+                            let content_ref = match item {
+                                SedimentreeItem::Fragment(ii) => {
+                                    tree_fragments[*ii].head().as_bytes().to_vec()
+                                }
+                                SedimentreeItem::LooseCommit(ii) => {
+                                    tree_loose[*ii].head().as_bytes().to_vec()
+                                }
+                            };
+                            received_refs
+                                .contains(&content_ref)
+                                .then_some((item, content_ref))
+                        })
+                        .collect::<Vec<_>>();
+                    let mut plaintext_by_ref: HashMap<Vec<u8>, Vec<u8>> = HashMap::new();
+                    let mut plaintext_by_index: Vec<Option<Vec<u8>>> =
+                        std::iter::repeat_with(|| None)
+                            .take(received_order.len())
+                            .collect();
+                    let expected_received =
+                        session.received_commit_ids.len() + session.received_fragment_ids.len();
+                    if received_order.len() != expected_received {
+                        return Err(ferr!(
+                            "sync session received blobs are missing from sedimentree order: expected={} found={}",
+                            expected_received,
+                            received_order.len(),
+                        ));
+                    }
+
+                    for (idx, (item, content_ref)) in received_order.iter().enumerate().rev() {
+                        if let Some(plaintext) = plaintext_by_ref.get(content_ref).cloned() {
+                            plaintext_by_index[idx] = Some(plaintext);
+                            continue;
+                        }
+
+                        let locator = match item {
+                            SedimentreeItem::Fragment(ii) => BigRepoCiphertextLocator {
+                                kind: BigRepoCiphertextKind::Fragment,
+                                sedimentree_id: session.sedimentree_id,
+                                commit_id: CommitId::new(*tree_fragments[*ii].head().as_bytes()),
+                            },
+                            SedimentreeItem::LooseCommit(ii) => BigRepoCiphertextLocator {
+                                kind: BigRepoCiphertextKind::LooseCommit,
+                                sedimentree_id: session.sedimentree_id,
+                                commit_id: CommitId::new(*tree_loose[*ii].head().as_bytes()),
+                            },
+                        };
+                        let raw = ciphertext_store
+                            .load_raw_for_locator(&locator)
+                            .await
+                            .map_err(|e| ferr!("failed loading exact sync session blob: {e}"))?
+                            .ok_or_else(|| {
+                                ferr!(
+                                    "missing exact sync session blob: sedimentree_id={:?} content_ref={:?} kind={:?}",
+                                    session.sedimentree_id,
+                                    content_ref,
+                                    locator.kind
+                                )
+                            })?;
+
+                        if raw.first() != Some(&0x02) {
+                            let first_byte = raw.first().copied();
+                            let is_received_commit = session
+                                .received_commit_ids
+                                .iter()
+                                .any(|commit_id| commit_id.as_bytes() == content_ref.as_slice());
+                            let is_received_fragment =
+                                session.received_fragment_ids.iter().any(|fragment_id| {
+                                    fragment_id.as_bytes() == content_ref.as_slice()
+                                });
+                            return Err(ferr!(
+                                "sync session blob is not encrypted: sedimentree_id={:?} content_ref={:?} len={} first_byte={:?} received_commit={} received_fragment={}",
+                                session.sedimentree_id,
+                                content_ref,
+                                raw.len(),
+                                first_byte,
+                                is_received_commit,
+                                is_received_fragment,
+                            ));
+                        }
+
+                        let encrypted = decode_encrypted_blob(raw.as_slice())?;
+
+                        let (entrypoint_raw, _entrypoint_key) = {
+                            let mut doc = kh_doc.lock().await;
+                            match doc.try_decrypt_content_keyed(&encrypted) {
+                                Ok(result) => result,
+                                Err(
+                                    keyhive_core::principal::document::DecryptError::KeyNotFound,
+                                ) => {
+                                    materialization_pending = true;
+                                    break;
+                                }
+                                Err(err) => {
+                                    return Err(ferr!(
+                                        "failed decrypting sync session entrypoint: {err}"
+                                    ));
+                                }
+                            }
+                        };
+                        let entrypoint_envelope: Envelope<Vec<u8>, Vec<u8>> =
+                            bincode::deserialize(&entrypoint_raw).map_err(|e| {
+                                ferr!("bincode decode sync session entrypoint envelope: {e}")
+                            })?;
+                        let exact_plaintext = entrypoint_envelope.plaintext;
+                        plaintext_by_index[idx] = Some(exact_plaintext.clone());
+                        plaintext_by_ref.insert(content_ref.clone(), exact_plaintext);
+
+                        let state = {
+                            let mut doc = kh_doc.lock().await;
+                            doc.try_causal_decrypt_content(&encrypted, ciphertext_store.clone())
+                                .await
+                                .map_err(|e| {
+                                    ferr!("failed causal decrypting sync session blob: {e}")
+                                })?
+                        };
+                        for (ancestor_ref, plaintext) in state.complete {
+                            plaintext_by_ref.insert(ancestor_ref, plaintext);
+                        }
+                    }
+
+                    if materialization_pending {
+                        Vec::new()
+                    } else {
+                        plaintext_by_index
+                            .into_iter()
+                            .enumerate()
+                            .map(|(i, plaintext)| {
+                                plaintext.ok_or_else(|| {
+                                    ferr!("missing plaintext for sync session blob {i}")
+                                })
+                            })
+                            .collect::<Result<Vec<_>, _>>()?
                     }
                 }
+                None => {
+                    materialization_pending = true;
+                    Vec::new()
+                }
             }
+        };
+        if blobs.is_empty() {
+            self.refresh_doc_heads_from_storage(was_pending).await?;
+            return Ok(());
         }
-
-        // Filter out synthetic entry blobs before loading into automerge
-        let blobs: Vec<Vec<u8>> = decrypted
-            .into_iter()
-            .enumerate()
-            .map(|(i, opt)| opt.ok_or_else(|| ferr!("decrypt sync session blob {i} failed")))
-            .collect::<Result<Vec<_>, _>>()?
-            .into_iter()
-            .filter(|b| !b.starts_with(SENTINEL_PLAINTEXT_MAGIC))
-            .collect();
+        if materialization_pending {
+            let heads = sedimentree_heads_payload(&tree);
+            store_doc_heads_payload(&self.big_sync_store, self.doc_id, heads).await?;
+            self.mark_materialization_pending(was_pending)?;
+            return Ok(());
+        }
         let maybe_delta = match std::mem::replace(&mut self.state, DocWorkerDocState::Unloaded) {
-            DocWorkerDocState::Unloaded => {
+            DocWorkerDocState::Unloaded | DocWorkerDocState::PendingMaterialization => {
                 // since the doc in storage will have the latest blobs,
                 // we must load the before_heads from the partition payloads
-                let mut doc = load_doc_snapshot(
+                let doc = load_doc_snapshot(
                     &self.sedimentrees,
                     &self.storage_for_reads,
-                    Some(&self.runtime_handle.keyhive),
+                    &self.runtime_handle.keyhive,
                     self.doc_id,
                 )
-                .await?
-                .unwrap_or_else(automerge::Automerge::new);
+                .await?;
+                let mut doc = match doc {
+                    DocLookup::Ready(doc) => {
+                        self.mark_materialization_ready(was_pending, Arc::from(doc.get_heads()))?;
+                        doc
+                    }
+                    DocLookup::PendingMaterialization => {
+                        self.mark_materialization_pending(was_pending)?;
+                        return Ok(());
+                    }
+                    DocLookup::Missing => automerge::Automerge::new(),
+                };
                 let cached_before_heads =
                     super::partition_doc_heads_payload(&self.big_sync_store, self.doc_id).await?;
                 let before_heads = cached_before_heads
@@ -1786,6 +2154,10 @@ where
                 out
             }
             DocWorkerDocState::Transient(mut doc) => {
+                // A sync session can be a no-op for content and still be the
+                // first chance to persist heads for a reopened doc.
+                let cached_before_heads =
+                    super::partition_doc_heads_payload(&self.big_sync_store, self.doc_id).await?;
                 let out = {
                     let before_heads = doc.get_heads();
                     for blob in blobs {
@@ -1795,7 +2167,11 @@ where
                     }
                     let after_heads = doc.get_heads();
                     if before_heads == after_heads {
-                        None
+                        if cached_before_heads.is_some() {
+                            None
+                        } else {
+                            Some((after_heads, Vec::new()))
+                        }
                     } else {
                         let patches = doc.diff(&before_heads, &after_heads);
                         Some((after_heads, patches))
@@ -1807,6 +2183,9 @@ where
             DocWorkerDocState::Live(bundle) => match bundle.upgrade() {
                 Some(bundle) => {
                     let mut doc = bundle.doc.lock().await;
+                    let cached_before_heads =
+                        super::partition_doc_heads_payload(&self.big_sync_store, self.doc_id)
+                            .await?;
                     let before_heads = doc.get_heads();
                     for blob in blobs {
                         doc.load_incremental(&blob).map_err(|err| {
@@ -1815,7 +2194,11 @@ where
                     }
                     let after_heads = doc.get_heads();
                     let out = if before_heads == after_heads {
-                        None
+                        if cached_before_heads.is_some() {
+                            None
+                        } else {
+                            Some((after_heads, Vec::new()))
+                        }
                     } else {
                         let patches = doc.diff(&before_heads, &after_heads);
                         Some((after_heads, patches))
@@ -1825,14 +2208,27 @@ where
                     out
                 }
                 None => {
-                    let mut doc = load_doc_snapshot(
+                    let doc = load_doc_snapshot(
                         &self.sedimentrees,
                         &self.storage_for_reads,
-                        Some(&self.runtime_handle.keyhive),
+                        &self.runtime_handle.keyhive,
                         self.doc_id,
                     )
-                    .await?
-                    .unwrap_or_else(automerge::Automerge::new);
+                    .await?;
+                    let mut doc = match doc {
+                        DocLookup::Ready(doc) => {
+                            self.mark_materialization_ready(
+                                was_pending,
+                                Arc::from(doc.get_heads()),
+                            )?;
+                            doc
+                        }
+                        DocLookup::PendingMaterialization => {
+                            self.mark_materialization_pending(was_pending)?;
+                            return Ok(());
+                        }
+                        DocLookup::Missing => automerge::Automerge::new(),
+                    };
                     let loaded_heads = doc.get_heads();
                     let cached_before_heads =
                         super::partition_doc_heads_payload(&self.big_sync_store, self.doc_id)
@@ -1880,7 +2276,8 @@ where
                 peer_id: PeerId::new(*session.peer_id.as_bytes()),
             },
         )
-        .await
+        .await?;
+        Ok(())
     }
 
     async fn handle_sync_with_peer(
@@ -1890,7 +2287,7 @@ where
         sender: oneshot::Sender<Result<(), SyncDocError>>,
     ) -> Res<()> {
         let sedimentree_id = self.doc_id_subduction;
-        let remote_peer_id = subduction_core::peer::id::PeerId::new(peer_id.into_bytes());
+        let remote_peer_id = subduction_core::peer::id::PeerId::new(peer_id.clone().into_bytes());
         let timeout = timeout
             .map(|duration| {
                 subduction_core::timeout::call::CallTimeout::TimeoutMillis(
@@ -1906,11 +2303,9 @@ where
             .sync_with_peer(&remote_peer_id, sedimentree_id, false, timeout)
             .await;
         let res = match result {
-            Ok((had_success, _stats, conn_errs)) => {
+            Ok((had_success, stats, conn_errs)) => {
                 if had_success {
-                    // NOTE: we pre-optimize when stats says we recieved
-                    // 0 incoming but this might be a flakeout
-                    if _stats.commits_received > 0 || _stats.fragments_received > 0 {
+                    if stats.commits_received > 0 || stats.fragments_received > 0 {
                         self.pending_sync_jobs
                             .entry(peer_id)
                             .or_default()
@@ -1934,6 +2329,81 @@ where
         Ok(())
     }
 
+    fn mark_materialization_pending(&mut self, was_pending: bool) -> Res<()> {
+        self.state = DocWorkerDocState::PendingMaterialization;
+        if !was_pending {
+            self.change_manager
+                .notify_local_doc_materialization_pending(self.doc_id)?;
+        }
+        Ok(())
+    }
+
+    fn mark_materialization_ready(
+        &mut self,
+        was_pending: bool,
+        heads: Arc<[automerge::ChangeHash]>,
+    ) -> Res<()> {
+        if was_pending {
+            self.change_manager
+                .notify_local_doc_materialization_ready(self.doc_id, heads)?;
+        }
+        Ok(())
+    }
+
+    async fn refresh_doc_heads_from_storage(&mut self, was_pending: bool) -> Res<()> {
+        let sedimentree_id = self.doc_id_subduction;
+        let loose_commits = <S as subduction_core::storage::traits::Storage<
+            future_form::Sendable,
+        >>::load_loose_commits(&self.storage_for_reads, sedimentree_id)
+        .await?;
+        let fragments = <S as subduction_core::storage::traits::Storage<future_form::Sendable>>::load_fragments(
+            &self.storage_for_reads,
+            sedimentree_id,
+        )
+        .await?;
+        if loose_commits.is_empty() && fragments.is_empty() {
+            return Ok(());
+        }
+        let tree = match self.sedimentrees.get_cloned(&sedimentree_id).await {
+            Some(tree) => tree,
+            None => sedimentree_core::sedimentree::minimized::MinimizedSedimentree::new(
+                Sedimentree::new(
+                    fragments
+                        .iter()
+                        .map(|verified| verified.payload().clone())
+                        .collect(),
+                    loose_commits
+                        .iter()
+                        .map(|verified| verified.payload().clone())
+                        .collect(),
+                ),
+            ),
+        };
+        store_doc_heads_payload(
+            &self.big_sync_store,
+            self.doc_id,
+            sedimentree_heads_payload(&tree),
+        )
+        .await?;
+        match load_doc_snapshot(
+            &self.sedimentrees,
+            &self.storage_for_reads,
+            &self.runtime_handle.keyhive,
+            self.doc_id,
+        )
+        .await?
+        {
+            DocLookup::Ready(doc) => {
+                self.mark_materialization_ready(was_pending, Arc::from(doc.get_heads()))?;
+            }
+            DocLookup::PendingMaterialization => {
+                self.mark_materialization_pending(was_pending)?;
+            }
+            DocLookup::Missing => {}
+        }
+        Ok(())
+    }
+
     // FIXME: this only does fragment processing if there's
     // pending requests, is this wise? seems efficient but
     // confirm that we can defer fragment processing like this
@@ -1948,25 +2418,64 @@ where
             return Ok(());
         }
         let requests = std::mem::take(&mut self.pending_fragment_requests);
-        process_fragment_requests(Arc::clone(&bundle), requests, Arc::clone(&self.subduction)).await
+        process_fragment_requests(
+            Arc::clone(&bundle),
+            requests,
+            Arc::clone(&self.subduction),
+            self.storage_for_reads.clone(),
+            self.runtime_handle.keyhive.clone(),
+        )
+        .await
     }
 
     #[tracing::instrument(skip_all)]
-    async fn take_or_load_transient_doc(&mut self) -> Res<Option<automerge::Automerge>> {
+    async fn take_or_load_transient_doc(&mut self) -> Res<DocLookup<automerge::Automerge>> {
+        let was_pending = matches!(self.state, DocWorkerDocState::PendingMaterialization);
         let out = match std::mem::replace(&mut self.state, DocWorkerDocState::Unloaded) {
-            DocWorkerDocState::Transient(doc) => Ok(Some(*doc)),
+            DocWorkerDocState::Transient(doc) => Ok(DocLookup::Ready(*doc)),
             DocWorkerDocState::Unloaded => {
-                load_doc_snapshot(
+                let loaded = load_doc_snapshot(
                     &self.sedimentrees,
                     &self.storage_for_reads,
-                    Some(&self.runtime_handle.keyhive),
+                    &self.runtime_handle.keyhive,
                     self.doc_id,
                 )
-                .await
+                .await?;
+                match loaded {
+                    DocLookup::Ready(doc) => {
+                        self.mark_materialization_ready(was_pending, Arc::from(doc.get_heads()))?;
+                        Ok(DocLookup::Ready(doc))
+                    }
+                    DocLookup::PendingMaterialization => {
+                        self.mark_materialization_pending(was_pending)?;
+                        Ok(DocLookup::PendingMaterialization)
+                    }
+                    DocLookup::Missing => Ok(DocLookup::Missing),
+                }
             }
             DocWorkerDocState::Live(bundle) => {
                 self.state = DocWorkerDocState::Live(bundle);
                 eyre::bail!("document already live")
+            }
+            DocWorkerDocState::PendingMaterialization => {
+                let loaded = load_doc_snapshot(
+                    &self.sedimentrees,
+                    &self.storage_for_reads,
+                    &self.runtime_handle.keyhive,
+                    self.doc_id,
+                )
+                .await?;
+                match loaded {
+                    DocLookup::Ready(doc) => {
+                        self.mark_materialization_ready(was_pending, Arc::from(doc.get_heads()))?;
+                        Ok(DocLookup::Ready(doc))
+                    }
+                    DocLookup::PendingMaterialization => {
+                        self.mark_materialization_pending(was_pending)?;
+                        Ok(DocLookup::PendingMaterialization)
+                    }
+                    DocLookup::Missing => Ok(DocLookup::Missing),
+                }
             }
         };
         out
@@ -1984,9 +2493,7 @@ async fn commit_delta_bookkeep(
     let item_payload = serde_json::json!({
         "heads": am_utils_rs::serialize_commit_heads(&heads),
     });
-    big_sync_store
-        .set_obj_payload(doc_id.into(), item_payload)
-        .await?;
+    big_sync_store.set_obj_payload(doc_id, item_payload).await?;
 
     let heads_arc = Arc::<[automerge::ChangeHash]>::from(heads);
     change_manager.notify_doc_heads_changed(doc_id, Arc::clone(&heads_arc), origin.clone())?;
@@ -2005,10 +2512,39 @@ async fn commit_delta_bookkeep(
     Ok(())
 }
 
+fn doc_heads_from_commit_ids(
+    heads: impl IntoIterator<Item = CommitId>,
+) -> Arc<[automerge::ChangeHash]> {
+    Arc::<[automerge::ChangeHash]>::from(
+        heads
+            .into_iter()
+            .map(|head| automerge::ChangeHash(*head.as_bytes()))
+            .collect::<Vec<_>>(),
+    )
+}
+
+async fn store_doc_heads_payload(
+    big_sync_store: &SharedPartitionStore,
+    doc_id: DocumentId,
+    heads: Arc<[automerge::ChangeHash]>,
+) -> Res<()> {
+    let item_payload = serde_json::json!({
+        "heads": am_utils_rs::serialize_commit_heads(&heads),
+    });
+    big_sync_store.set_obj_payload(doc_id, item_payload).await?;
+    Ok(())
+}
+
+fn sedimentree_heads_payload(tree: &Sedimentree) -> Arc<[automerge::ChangeHash]> {
+    doc_heads_from_commit_ids(tree.heads(&CountLeadingZeroBytes))
+}
+
 async fn process_fragment_requests<S>(
     bundle: Arc<LiveDocBundle>,
     requests: BTreeSet<FragmentRequested>,
     subduction: Arc<BigRepoSubduction<S>>,
+    storage_for_reads: S,
+    keyhive_handle: BigKeyhiveHandle,
 ) -> Res<()>
 where
     S: BigRepoSubductionStorage,
@@ -2043,11 +2579,20 @@ where
                     .iter()
                     .map(|head| CommitId::new(head.0))
                     .collect::<Vec<_>>(),
-                Blob::new(raw),
+                raw,
             ));
         }
     }
-    for (commit_id, boundary, checkpoints, blob) in work {
+    for (commit_id, boundary, checkpoints, raw) in work {
+        let blob = encrypt_fragment_blob(
+            &keyhive_handle,
+            &storage_for_reads,
+            sed_id,
+            commit_id,
+            &boundary,
+            &raw,
+        )
+        .await?;
         subduction
             .add_fragment(sed_id, commit_id, boundary, &checkpoints, blob)
             .await
@@ -2134,12 +2679,18 @@ async fn accept_incoming(
     })
 }
 
+// FIXME: again this seems convoluted.
+// one thing I'm confused by is, we provide the heads to the
+// keyhive at create_doc but we do'nt seem to be providing the
+// heads aftewrards? what's up with that?
+// https://www.inkandswitch.com/keyhive/notebook/ specifies
+// pointers between keyhive and docs so maybe it can help us here
 async fn load_doc_snapshot<S, D>(
     sedimentrees: &SubductionSedimentrees,
     storage_for_reads: &S,
-    keyhive: Option<&BigKeyhiveHandle>,
+    keyhive: &BigKeyhiveHandle,
     doc_id: D,
-) -> Res<Option<automerge::Automerge>>
+) -> Res<DocLookup<automerge::Automerge>>
 where
     S: BigRepoSubductionStorage,
     D: Into<DocumentId>,
@@ -2161,13 +2712,9 @@ where
         .await
         .wrap_err("failed reading blobs from storage")?;
     if loose_commits.is_empty() && fragments.is_empty() {
-        return Ok(None);
+        return Ok(DocLookup::Missing);
     }
-    let blobs = loose_commits
-        .iter()
-        .map(|verified| verified.blob().clone())
-        .chain(fragments.iter().map(|verified| verified.blob().clone()))
-        .collect::<Vec<_>>();
+    // FIXME: consider subduciton.get_or_hydrate here
     let (tree, fresh) = match sedimentrees.get_cloned(&sedimentree_id).await {
         Some(tree) => (tree, false),
         None => {
@@ -2186,94 +2733,170 @@ where
             (tree, true)
         }
     };
-    let blob_by_digest = blobs
-        .iter()
-        .map(|blob| (Digest::hash(blob), blob.as_slice()))
-        .collect::<sedimentree_core::collections::Map<_, _>>();
     let order = tree
         .topsorted_blob_order()
         .map_err(|err| ferr!("failed ordering sedimentree blobs: {err}"))?;
     let fragments: Vec<_> = tree.fragments().collect();
     let loose: Vec<_> = tree.loose_commits().collect();
 
-    // Collect raw bytes and decrypt in reverse causal order (newest first).
-    // The latest blob is most likely to have been encrypted with a PCS key
-    // that includes the current members. From its key we chain backward
-    // through the predecessor keys embedded in each blob.
-    use keyhive_crypto::symmetric_key::SymmetricKey;
-    let raws: Vec<&[u8]> = order
-        .iter()
-        .map(|item| {
-            let wanted = match item {
-                SedimentreeItem::Fragment(ii) => OrderedBlobIdentity {
-                    kind: OrderedBlobKind::Fragment,
-                    head: fragments[*ii].head(),
-                    blob_digest: fragments[*ii].summary().blob_meta().digest(),
-                },
-                SedimentreeItem::LooseCommit(ii) => OrderedBlobIdentity {
-                    kind: OrderedBlobKind::LooseCommit,
-                    head: loose[*ii].head(),
-                    blob_digest: loose[*ii].blob_meta().digest(),
-                },
-            };
-            *blob_by_digest
-                .get(&wanted.blob_digest)
-                .expect("blob must exist in digest map")
-        })
-        .collect();
+    let keyhive = keyhive.clone_keyhive().await;
+    let vk = ed25519_dalek::VerifyingKey::from_bytes(sedimentree_id.as_bytes())
+        .map_err(|_| ferr!("not a valid Keyhive DocumentId"))?;
+    let kh_doc_id = keyhive_core::principal::document::id::DocumentId::from(
+        keyhive_core::principal::identifier::Identifier::from(vk),
+    );
+    let Some(kh_doc) = keyhive.get_document(kh_doc_id).await else {
+        return Ok(DocLookup::PendingMaterialization);
+    };
 
-    let mut plaintexts: Vec<Vec<u8>> = vec![Vec::new(); raws.len()];
-    // Per-position keys from successful decrypts (index → key)
-    let mut pos_keys: HashMap<usize, SymmetricKey> = HashMap::new();
-    // DAG ancestor pool: content_ref → key, populated from Envelope.ancestors
-    let mut ancestor_pool: HashMap<Vec<u8>, SymmetricKey> = HashMap::new();
-
-    if let Some(kh) = keyhive {
-        // Process newest-to-oldest. The newest blob should be CGKA-decryptable
-        // (its PCS key includes members added before it was encrypted).
-        // Its Envelope.ancestors then provide keys for older blobs.
-        for (i, raw) in raws.iter().enumerate().rev() {
-            // Try CGKA first (no chain key)
-            if let Ok((plaintext, key, ancestors)) =
-                decrypt_snapshot_blob_keyed(raw, kh, sedimentree_id, None).await
-            {
-                plaintexts[i] = plaintext;
-                pos_keys.insert(i, key);
-                ancestor_pool.extend(ancestors);
-                continue;
-            }
-            // Try chain: any known key (position or ancestor) might decrypt
-            let mut decrypted = false;
-            for chain_key in pos_keys.values().chain(ancestor_pool.values()) {
-                if let Ok((plaintext, key, ancestors)) =
-                    decrypt_snapshot_blob_keyed(raw, kh, sedimentree_id, Some(chain_key)).await
-                {
-                    plaintexts[i] = plaintext;
-                    pos_keys.insert(i, key);
-                    ancestor_pool.extend(ancestors);
-                    decrypted = true;
-                    break;
+    let ciphertext_store = {
+        let store = BigRepoCiphertextStore::new(storage_for_reads.clone());
+        for item in &order {
+            match item {
+                SedimentreeItem::Fragment(ii) => {
+                    store
+                        .record_locator(
+                            fragments[*ii].head().as_bytes().to_vec(),
+                            sedimentree_id,
+                            BigRepoCiphertextKind::Fragment,
+                        )
+                        .await?;
+                }
+                SedimentreeItem::LooseCommit(ii) => {
+                    store
+                        .record_locator(
+                            loose[*ii].head().as_bytes().to_vec(),
+                            sedimentree_id,
+                            BigRepoCiphertextKind::LooseCommit,
+                        )
+                        .await?;
                 }
             }
-            if !decrypted {
+        }
+        store
+    };
+
+    let mut plaintext_by_ref: HashMap<Vec<u8>, Vec<u8>> = HashMap::new();
+    let mut plaintext_by_index: Vec<Option<Vec<u8>>> =
+        std::iter::repeat_with(|| None).take(order.len()).collect();
+    let mut items_by_ref: HashMap<Vec<u8>, Vec<(usize, SedimentreeItem)>> = HashMap::new();
+    for (idx, item) in order.iter().enumerate() {
+        let content_ref = match item {
+            SedimentreeItem::Fragment(ii) => fragments[*ii].head().as_bytes().to_vec(),
+            SedimentreeItem::LooseCommit(ii) => loose[*ii].head().as_bytes().to_vec(),
+        };
+        items_by_ref
+            .entry(content_ref)
+            .or_default()
+            .push((idx, *item));
+    }
+    let mut grouped_order: Vec<(usize, Vec<u8>)> = items_by_ref
+        .iter()
+        .map(|(content_ref, items)| {
+            (
+                items.iter().map(|(idx, _)| *idx).max().unwrap_or(0),
+                content_ref.clone(),
+            )
+        })
+        .collect();
+    grouped_order.sort_by_key(|(idx, _)| std::cmp::Reverse(*idx));
+
+    for (_, content_ref) in grouped_order {
+        let items = items_by_ref
+            .get(&content_ref)
+            .expect("missing snapshot group after grouping");
+        if let Some(plaintext) = plaintext_by_ref.get(&content_ref).cloned() {
+            for (idx, _) in items {
+                plaintext_by_index[*idx] = Some(plaintext.clone());
+            }
+            continue;
+        }
+
+        let mut candidates = items.clone();
+        candidates.sort_by_key(|(_, item)| match item {
+            SedimentreeItem::Fragment(_) => 0usize,
+            SedimentreeItem::LooseCommit(_) => 1usize,
+        });
+
+        let mut decrypted = None;
+        for (_idx, item) in candidates {
+            let locator = match item {
+                SedimentreeItem::Fragment(ii) => BigRepoCiphertextLocator {
+                    kind: BigRepoCiphertextKind::Fragment,
+                    sedimentree_id,
+                    commit_id: CommitId::new(*fragments[ii].head().as_bytes()),
+                },
+                SedimentreeItem::LooseCommit(ii) => BigRepoCiphertextLocator {
+                    kind: BigRepoCiphertextKind::LooseCommit,
+                    sedimentree_id,
+                    commit_id: CommitId::new(*loose[ii].head().as_bytes()),
+                },
+            };
+            let Some(raw) = ciphertext_store
+                .load_raw_for_locator(&locator)
+                .await
+                .map_err(|e| ferr!("failed loading exact snapshot blob: {e}"))?
+            else {
+                continue;
+            };
+            if raw.first() != Some(&0x02) {
                 return Err(ferr!(
-                    "failed to decrypt blob {i}: CGKA and chain both failed"
+                    "snapshot blob is not encrypted: sedimentree_id={sedimentree_id:?} content_ref={content_ref:?} kind={:?}",
+                    locator.kind
                 ));
             }
+            let encrypted = decode_encrypted_blob(raw.as_slice())?;
+            let (entrypoint_raw, _entrypoint_key) = {
+                let mut doc = kh_doc.lock().await;
+                match doc.try_decrypt_content_keyed(&encrypted) {
+                    Ok(result) => result,
+                    Err(keyhive_core::principal::document::DecryptError::KeyNotFound) => {
+                        continue;
+                    }
+                    Err(err) => {
+                        return Err(ferr!(
+                                    "failed decrypting snapshot entrypoint: sedimentree_id={sedimentree_id:?} content_ref={content_ref:?} kind={:?} error={err}",
+                            locator.kind
+                        ));
+                    }
+                }
+            };
+            let entrypoint_envelope: keyhive_core::crypto::envelope::Envelope<Vec<u8>, Vec<u8>> =
+                bincode::deserialize(&entrypoint_raw)
+                    .map_err(|e| ferr!("bincode decode snapshot entrypoint envelope: {e}"))?;
+            let exact_plaintext = entrypoint_envelope.plaintext;
+            for (idx, _) in items {
+                plaintext_by_index[*idx] = Some(exact_plaintext.clone());
+            }
+            plaintext_by_ref.insert(content_ref.clone(), exact_plaintext);
+
+            let state = {
+                let mut doc = kh_doc.lock().await;
+                doc.try_causal_decrypt_content(&encrypted, ciphertext_store.clone())
+                    .await
+                    .map_err(|e| ferr!("failed causal decrypting snapshot blob: {e}"))?
+            };
+            for (ancestor_ref, plaintext) in state.complete {
+                plaintext_by_ref.insert(ancestor_ref, plaintext);
+            }
+            decrypted = Some(());
+            break;
         }
-    } else {
-        for (i, raw) in raws.iter().enumerate() {
-            plaintexts[i] = raw.to_vec();
+
+        if decrypted.is_none() {
+            return Ok(DocLookup::PendingMaterialization);
         }
     }
 
-    // Build automerge doc from non-sentinel plaintexts.
-    // Synthetic entry blobs contribute ancestors but not automerge content.
+    let mut plaintexts: Vec<Vec<u8>> = Vec::with_capacity(order.len());
+    for (idx, plaintext) in plaintext_by_index.into_iter().enumerate() {
+        plaintexts.push(
+            plaintext.ok_or_else(|| ferr!("missing plaintext for snapshot blob at index {idx}"))?,
+        );
+    }
+
     let mut buf = Vec::new();
     for plaintext in &plaintexts {
-        if plaintext.starts_with(SENTINEL_PLAINTEXT_MAGIC) {
-            continue;
-        }
         buf.extend_from_slice(plaintext);
     }
 
@@ -2286,69 +2909,10 @@ where
             .get_or_insert_with(sedimentree_id, || tree)
             .await;
     }
-    Ok(Some(doc))
+    Ok(DocLookup::Ready(doc))
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-enum OrderedBlobKind {
-    Fragment,
-    LooseCommit,
-}
-
-impl OrderedBlobKind {
-    const fn label(self) -> &'static str {
-        match self {
-            Self::Fragment => "fragment",
-            Self::LooseCommit => "loose_commit",
-        }
-    }
-}
-
-#[derive(Clone, Copy, Debug)]
-struct OrderedBlobIdentity {
-    kind: OrderedBlobKind,
-    head: CommitId,
-    blob_digest: Digest<Blob>,
-}
-
-type LoadedOrderedBlob = OrderedBlobIdentity;
-
-fn missing_ordered_blob_context(
-    wanted: OrderedBlobIdentity,
-    loaded_items: &[LoadedOrderedBlob],
-) -> String {
-    let same_kind_head = loaded_items
-        .iter()
-        .filter(|item| item.kind == wanted.kind && item.head == wanted.head)
-        .map(|item| blob_digest_hex(item.blob_digest))
-        .collect::<Vec<_>>();
-    let loaded_kind_count = loaded_items
-        .iter()
-        .filter(|item| item.kind == wanted.kind)
-        .count();
-
-    if same_kind_head.is_empty() {
-        format!(
-            "wanted_kind={} wanted_head={:?} wanted_blob_digest={} loaded_kind_count={} same_head_loaded_blob_digests=[]",
-            wanted.kind.label(),
-            wanted.head,
-            blob_digest_hex(wanted.blob_digest),
-            loaded_kind_count,
-        )
-    } else {
-        format!(
-            "wanted_kind={} wanted_head={:?} wanted_blob_digest={} loaded_kind_count={} same_head_loaded_blob_digests={same_kind_head:?}",
-            wanted.kind.label(),
-            wanted.head,
-            blob_digest_hex(wanted.blob_digest),
-            loaded_kind_count,
-        )
-    }
-}
-
-fn blob_digest_hex(digest: Digest<Blob>) -> String {
-    format!("{digest:?}")
-}
+// FIXME: the whole encryption/decryption scheme still needs cleanup.
 
 /// Metadata for a single fragment from ingest, used to rebuild after encryption.
 struct FragmentEntry {
@@ -2462,14 +3026,6 @@ fn ingest_automerge(doc: &automerge::Automerge, sedimentree_id: SedimentreeId) -
     }
 }
 
-/// Sentinel plaintext prefix identifying a synthetic entry blob.
-///
-/// Synthetic blobs are minted at grant time to bridge CGKA epochs for new
-/// members. Their plaintext is just this magic followed by nothing useful.
-/// During `load_doc_snapshot` they contribute their ancestor keys to the
-/// chain pool but are NOT loaded into automerge.
-const SENTINEL_PLAINTEXT_MAGIC: &[u8] = b"KEYHIVE_SYNTHETIC_ENTRY";
-
 /// DRISL envelope for an encrypted blob.
 ///
 /// Flattens `EncryptedContent` fields inline. The predecessor key chain
@@ -2483,6 +3039,222 @@ struct EncryptedBlobEnvelope {
     encrypted: beekem::encrypted::EncryptedContent<Vec<u8>, Vec<u8>>,
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, PartialOrd, Ord)]
+enum BigRepoCiphertextKind {
+    Fragment,
+    LooseCommit,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, PartialOrd, Ord)]
+struct BigRepoCiphertextLocator {
+    kind: BigRepoCiphertextKind,
+    sedimentree_id: SedimentreeId,
+    commit_id: CommitId,
+}
+
+#[derive(Clone, Debug)]
+struct BigRepoCiphertextStore<S> {
+    storage_for_reads: S,
+    locators: Arc<
+        tokio::sync::Mutex<HashMap<Vec<u8>, std::collections::BTreeSet<BigRepoCiphertextLocator>>>,
+    >,
+    decrypted: Arc<tokio::sync::Mutex<std::collections::HashSet<Vec<u8>>>>,
+    pcs_updates: Arc<
+        tokio::sync::Mutex<
+            HashMap<
+                keyhive_crypto::digest::Digest<
+                    keyhive_crypto::signed::Signed<beekem::operation::CgkaOperation>,
+                >,
+                std::collections::HashSet<Vec<u8>>,
+            >,
+        >,
+    >,
+}
+
+impl<S> BigRepoCiphertextStore<S> {
+    fn new(storage_for_reads: S) -> Self {
+        Self {
+            storage_for_reads,
+            locators: Arc::new(tokio::sync::Mutex::new(HashMap::new())),
+            decrypted: Arc::new(tokio::sync::Mutex::new(std::collections::HashSet::new())),
+            pcs_updates: Arc::new(tokio::sync::Mutex::new(HashMap::new())),
+        }
+    }
+
+    async fn record_locator(
+        &self,
+        content_ref: Vec<u8>,
+        sedimentree_id: SedimentreeId,
+        kind: BigRepoCiphertextKind,
+    ) -> Res<()> {
+        let commit_id_bytes: [u8; 32] = content_ref
+            .clone()
+            .try_into()
+            .map_err(|_| ferr!("content ref must be 32 bytes"))?;
+        let locator = BigRepoCiphertextLocator {
+            kind,
+            sedimentree_id,
+            commit_id: CommitId::new(commit_id_bytes),
+        };
+        self.locators
+            .lock()
+            .await
+            .entry(content_ref)
+            .or_default()
+            .insert(locator);
+        Ok(())
+    }
+
+    async fn load_raw_for_locator(&self, locator: &BigRepoCiphertextLocator) -> Res<Option<Vec<u8>>>
+    where
+        S: BigRepoSubductionStorage,
+    {
+        let maybe_raw = match locator.kind {
+            BigRepoCiphertextKind::LooseCommit => {
+                <S as subduction_core::storage::traits::Storage<future_form::Sendable>>::load_loose_commit(
+                    &self.storage_for_reads,
+                    locator.sedimentree_id,
+                    locator.commit_id,
+                )
+                .await
+                .map_err(|e| ferr!("failed loading loose commit for ciphertext: {e}"))?
+                .map(|verified| verified.blob().clone().into_contents())
+            }
+            BigRepoCiphertextKind::Fragment => {
+                <S as subduction_core::storage::traits::Storage<future_form::Sendable>>::load_fragment(
+                    &self.storage_for_reads,
+                    locator.sedimentree_id,
+                    locator.commit_id,
+                )
+                .await
+                .map_err(|e| ferr!("failed loading fragment for ciphertext: {e}"))?
+                .map(|verified| verified.blob().clone().into_contents())
+            }
+        };
+        Ok(maybe_raw)
+    }
+}
+
+fn decode_encrypted_blob(
+    raw_bytes: &[u8],
+) -> Res<Arc<beekem::encrypted::EncryptedContent<Vec<u8>, Vec<u8>>>> {
+    if raw_bytes.first() != Some(&0x02) {
+        return Err(ferr!("blob is not encrypted (missing 0x02 discriminator)"));
+    }
+    let envelope: EncryptedBlobEnvelope = atproto_dasl::drisl::from_slice(&raw_bytes[1..])
+        .map_err(|e| ferr!("DRISL decode encrypted blob envelope: {e}"))?;
+    Ok(Arc::new(envelope.encrypted))
+}
+
+impl<S: BigRepoSubductionStorage> CiphertextStore<future_form::Sendable, Vec<u8>, Vec<u8>>
+    for BigRepoCiphertextStore<S>
+{
+    type GetCiphertextError = eyre::Report;
+    type MarkDecryptedError = eyre::Report;
+
+    fn get_ciphertext<'a>(
+        &'a self,
+        content_ref: &'a Vec<u8>,
+    ) -> <future_form::Sendable as FutureForm>::Future<
+        'a,
+        Result<
+            Option<Arc<beekem::encrypted::EncryptedContent<Vec<u8>, Vec<u8>>>>,
+            Self::GetCiphertextError,
+        >,
+    > {
+        future_form::Sendable::from_future(async move {
+            if self.decrypted.lock().await.contains(content_ref) {
+                return Ok(None);
+            }
+            let Some(locators) = self.locators.lock().await.get(content_ref).cloned() else {
+                return Ok(None);
+            };
+            for locator in locators {
+                let maybe_raw =
+                    match locator.kind {
+                        BigRepoCiphertextKind::LooseCommit => {
+                            <S as subduction_core::storage::traits::Storage<
+                                future_form::Sendable,
+                            >>::load_loose_commit(
+                                &self.storage_for_reads,
+                                locator.sedimentree_id,
+                                locator.commit_id,
+                            )
+                            .await
+                            .map_err(|e| ferr!("failed loading loose commit for ciphertext: {e}"))?
+                            .map(|verified| verified.blob().clone().into_contents())
+                        }
+                        BigRepoCiphertextKind::Fragment => {
+                            <S as subduction_core::storage::traits::Storage<
+                                future_form::Sendable,
+                            >>::load_fragment(
+                                &self.storage_for_reads,
+                                locator.sedimentree_id,
+                                locator.commit_id,
+                            )
+                            .await
+                            .map_err(|e| ferr!("failed loading fragment for ciphertext: {e}"))?
+                            .map(|verified| verified.blob().clone().into_contents())
+                        }
+                    };
+                let Some(raw) = maybe_raw else {
+                    continue;
+                };
+                let encrypted = decode_encrypted_blob(raw.as_slice())?;
+                return Ok(Some(encrypted));
+            }
+            Ok(None)
+        })
+    }
+
+    fn get_ciphertext_by_pcs_update<'a>(
+        &'a self,
+        pcs_update: &'a keyhive_crypto::digest::Digest<
+            keyhive_crypto::signed::Signed<beekem::operation::CgkaOperation>,
+        >,
+    ) -> <future_form::Sendable as FutureForm>::Future<
+        'a,
+        Result<
+            Vec<Arc<beekem::encrypted::EncryptedContent<Vec<u8>, Vec<u8>>>>,
+            Self::GetCiphertextError,
+        >,
+    > {
+        future_form::Sendable::from_future(async move {
+            let content_refs = self
+                .pcs_updates
+                .lock()
+                .await
+                .get(pcs_update)
+                .cloned()
+                .unwrap_or_default();
+            let mut out = Vec::new();
+            for content_ref in content_refs {
+                if let Some(encrypted) = self.get_ciphertext(&content_ref).await? {
+                    out.push(encrypted);
+                }
+            }
+            Ok(out)
+        })
+    }
+
+    fn mark_decrypted<'a>(
+        &'a self,
+        content_ref: &'a Vec<u8>,
+    ) -> <future_form::Sendable as FutureForm>::Future<'a, Result<(), Self::MarkDecryptedError>>
+    {
+        future_form::Sendable::from_future(async move {
+            self.decrypted.lock().await.insert(content_ref.clone());
+            self.locators.lock().await.remove(content_ref);
+            let mut pcs_updates = self.pcs_updates.lock().await;
+            pcs_updates.retain(|_, refs| {
+                refs.remove(content_ref);
+                !refs.is_empty()
+            });
+            Ok(())
+        })
+    }
+}
+
 /// Encrypt ingested blobs via the keyhive, rebuilding the sedimentree with
 /// updated BlobMeta matching the encrypted bytes.
 ///
@@ -2490,7 +3262,6 @@ struct EncryptedBlobEnvelope {
 /// (e.g. random IDs used in tests), the ingested data is returned unchanged.
 /// Encrypt ingested blobs via the keyhive, serializing each encrypted blob as
 /// DRISL (deterministic CBOR) prefixed with a 1-byte discriminator:
-/// - `0x00` = plaintext
 /// - `0x02` = encrypted: [0x02][DRISL(EncryptedBlobEnvelope)]
 ///
 /// TODO: Upstream (keyhive/subduction_keyhive) hasn't specified the canonical
@@ -2547,7 +3318,12 @@ async fn encrypt_ingested_blobs(
             bincode::serialize(&envelope).map_err(|e| ferr!("bincode encode envelope: {e}"))?;
 
         let (encrypted, app_key) = keyhive
-            .try_encrypt_content_keyed(kh_doc.clone(), &content_ref, &pred_refs, &envelope_bytes)
+            .try_encrypt_content_keyed(
+                Arc::clone(&kh_doc),
+                &content_ref,
+                &pred_refs,
+                &envelope_bytes,
+            )
             .await
             .map_err(|e| ferr!("encrypt fragment failed: {e}"))?;
 
@@ -2598,7 +3374,12 @@ async fn encrypt_ingested_blobs(
             bincode::serialize(&envelope).map_err(|e| ferr!("bincode encode envelope: {e}"))?;
 
         let (encrypted, app_key) = keyhive
-            .try_encrypt_content_keyed(kh_doc.clone(), &content_ref, &pred_refs, &envelope_bytes)
+            .try_encrypt_content_keyed(
+                Arc::clone(&kh_doc),
+                &content_ref,
+                &pred_refs,
+                &envelope_bytes,
+            )
             .await
             .map_err(|e| ferr!("encrypt loose commit failed: {e}"))?;
 
@@ -2660,7 +3441,7 @@ async fn encrypt_loose_commit(
         // Try batch_keys first, then fall back to known_decryption_keys
         // (populated by prior encrypts on the same Document)
         let doc_keys = kh_doc.lock().await.known_decryption_keys().clone();
-        parents
+        let ancestors: std::collections::HashMap<Vec<u8>, SymmetricKey> = parents
             .iter()
             .filter_map(|p| {
                 let pref: Vec<u8> = p.as_bytes().to_vec();
@@ -2669,7 +3450,8 @@ async fn encrypt_loose_commit(
                     .map(|k| (pref.clone(), *k))
                     .or_else(|| doc_keys.get(&pref).map(|k| (pref, *k)))
             })
-            .collect()
+            .collect();
+        ancestors
     };
     let envelope = Envelope {
         plaintext: blob.to_vec(),
@@ -2679,7 +3461,12 @@ async fn encrypt_loose_commit(
         bincode::serialize(&envelope).map_err(|e| ferr!("bincode encode envelope: {e}"))?;
 
     let (encrypted, app_key) = keyhive
-        .try_encrypt_content_keyed(kh_doc.clone(), &content_ref, &pred_refs, &envelope_bytes)
+        .try_encrypt_content_keyed(
+            Arc::clone(&kh_doc),
+            &content_ref,
+            &pred_refs,
+            &envelope_bytes,
+        )
         .await
         .map_err(|e| ferr!("encrypt commit failed: {e}"))?;
 
@@ -2694,48 +3481,19 @@ async fn encrypt_loose_commit(
     Ok((Blob::new(encrypted_bytes), app_key))
 }
 
-/// Decrypt a single snapshot blob stored as encrypted content.
-///
-/// Format: `[0x02][DRISL(EncryptedBlobEnvelope)]`
-/// Plaintext is bincode-encoded keyhive `Envelope<Vec<u8>, Vec<u8>>`.
-async fn decrypt_snapshot_blob(
-    raw_bytes: &[u8],
+async fn encrypt_fragment_blob<S>(
     keyhive_handle: &BigKeyhiveHandle,
+    storage_for_reads: &S,
     sedimentree_id: SedimentreeId,
-) -> Res<Vec<u8>> {
-    decrypt_snapshot_blob_keyed(raw_bytes, keyhive_handle, sedimentree_id, None)
-        .await
-        .map(|(plaintext, _key, _ancestors)| plaintext)
-}
-
-/// Decrypt and also return the application secret key and ancestors map for
-/// DAG-based causal decryption.
-///
-/// If `chain_key` is provided and CGKA decryption fails, `chain_key` is used
-/// to directly decrypt the ciphertext (bypassing CGKA).
-async fn decrypt_snapshot_blob_keyed(
-    raw_bytes: &[u8],
-    keyhive_handle: &BigKeyhiveHandle,
-    sedimentree_id: SedimentreeId,
-    chain_key: Option<&keyhive_crypto::symmetric_key::SymmetricKey>,
-) -> Res<(
-    Vec<u8>,
-    keyhive_crypto::symmetric_key::SymmetricKey,
-    std::collections::HashMap<Vec<u8>, keyhive_crypto::symmetric_key::SymmetricKey>,
-)> {
+    head: CommitId,
+    boundary: &BTreeSet<CommitId>,
+    fragment_bytes: &[u8],
+) -> Res<Blob>
+where
+    S: BigRepoSubductionStorage,
+{
     use keyhive_core::crypto::envelope::Envelope;
-    use keyhive_crypto::symmetric_key::SymmetricKey;
-
-    // Parse: [0x02][DRISL(EncryptedBlobEnvelope)]
-    if raw_bytes.first() != Some(&0x02) {
-        return Err(ferr!("blob is not encrypted (missing 0x02 discriminator)"));
-    }
-    let rest = &raw_bytes[1..];
-
-    let envelope: EncryptedBlobEnvelope = atproto_dasl::drisl::from_slice(rest)
-        .map_err(|e| ferr!("DRISL decode encrypted blob envelope: {e}"))?;
-
-    let encrypted = envelope.encrypted;
+    use keyhive_crypto::{siv::Siv, symmetric_key::SymmetricKey};
 
     let keyhive = keyhive_handle.clone_keyhive().await;
     let vk = ed25519_dalek::VerifyingKey::from_bytes(sedimentree_id.as_bytes())
@@ -2746,75 +3504,476 @@ async fn decrypt_snapshot_blob_keyed(
     let kh_doc = keyhive
         .get_document(kh_doc_id)
         .await
-        .ok_or_else(|| ferr!("keyhive doc not found for decryption"))?;
+        .ok_or_else(|| ferr!("keyhive doc not found for fragment encryption"))?;
 
-    // Helper: after AEAD decrypt, deserialize the Envelope and return
-    // (plaintext, key_used, ancestors).
-    let unwrap_envelope = |ciphertext: &[u8], key: SymmetricKey| -> Res<_> {
-        let payload: Envelope<Vec<u8>, Vec<u8>> =
-            bincode::deserialize(ciphertext).map_err(|e| ferr!("bincode decode envelope: {e}"))?;
-        Ok((payload.plaintext, key, payload.ancestors))
+    let mut known_decryption_keys = kh_doc.lock().await.known_decryption_keys().clone();
+
+    let head_ref: Vec<u8> = head.as_bytes().to_vec();
+    let head_verified = <S as subduction_core::storage::traits::Storage<future_form::Sendable>>::load_loose_commit(
+        storage_for_reads,
+        sedimentree_id,
+        head,
+    )
+    .await
+    .map_err(|e| ferr!("failed loading loose commit for fragment encryption: {e}"))?
+    .ok_or_else(|| {
+        ferr!(
+            "fragment head missing loose commit in storage: sedimentree_id={sedimentree_id:?} head={head:?}"
+        )
+    })?;
+    let head_encrypted = decode_encrypted_blob(head_verified.blob().as_slice())?;
+    let head_key: SymmetricKey = if let Some(key) = known_decryption_keys.get(&head_ref).copied() {
+        key
+    } else {
+        let (_, key) = kh_doc
+            .lock()
+            .await
+            .try_decrypt_content_keyed(&head_encrypted)
+            .map_err(|e| ferr!("failed recovering fragment head key: {e}"))?;
+        known_decryption_keys.insert(head_ref.clone(), key);
+        key
     };
 
-    // Try CGKA first
-    match keyhive
-        .try_decrypt_content(kh_doc.clone(), &encrypted)
-        .await
-    {
-        Ok(plaintext) => {
-            let (_pt, key) = keyhive
-                .try_decrypt_content_keyed(kh_doc, &encrypted)
+    let mut ancestors = std::collections::HashMap::with_capacity(boundary.len());
+    for pred in boundary {
+        let pred_ref: Vec<u8> = pred.as_bytes().to_vec();
+        let pred_key = if let Some(key) = known_decryption_keys.get(&pred_ref).copied() {
+            key
+        } else {
+            let pred_verified = <S as subduction_core::storage::traits::Storage<
+                future_form::Sendable,
+            >>::load_loose_commit(storage_for_reads, sedimentree_id, *pred)
                 .await
-                .map_err(|e| ferr!("decrypt keyed failed after successful decrypt: {e}"))?;
-            return unwrap_envelope(&plaintext, key);
-        }
-        Err(keyhive_core::principal::document::DecryptError::KeyNotFound) => {
-            // CGKA forward-secrecy prevents direct derivation.
-            // Try chain key: direct AEAD decrypt bypassing CGKA.
-            if let Some(chain_key) = chain_key {
-                let plaintext = encrypted
-                    .try_decrypt(*chain_key)
-                    .map_err(|e| ferr!("chain decrypt failed: {e}"))?;
-                return unwrap_envelope(&plaintext, *chain_key);
-            }
-        }
-        Err(e) => {
-            return Err(ferr!("decryption failed: {e}"));
-        }
+                .map_err(|e| {
+                    ferr!("failed loading fragment boundary loose commit for encryption: {e}")
+                })?
+                .ok_or_else(|| {
+                    ferr!(
+                        "fragment boundary missing loose commit in storage: sedimentree_id={sedimentree_id:?} head={pred:?}"
+                    )
+                })?;
+            let pred_encrypted = decode_encrypted_blob(pred_verified.blob().as_slice())?;
+            let (_, key) = kh_doc
+                .lock()
+                .await
+                .try_decrypt_content_keyed(&pred_encrypted)
+                .map_err(|e| ferr!("failed recovering fragment boundary key: {e}"))?;
+            known_decryption_keys.insert(pred_ref.clone(), key);
+            key
+        };
+        ancestors.insert(pred_ref, pred_key);
     }
 
-    Err(ferr!(
-        "decryption failed: KeyNotFound (no chain key available)"
-    ))
+    let envelope = Envelope {
+        plaintext: fragment_bytes.to_vec(),
+        ancestors,
+    };
+    let envelope_bytes = bincode::serialize(&envelope)
+        .map_err(|e| ferr!("bincode encode fragment envelope: {e}"))?;
+    let nonce_context = fragment_nonce_context(sedimentree_id, head, boundary);
+    let nonce = Siv::new(&head_key, &envelope_bytes, &nonce_context);
+    let mut ciphertext = envelope_bytes;
+    head_key
+        .try_encrypt(nonce, &mut ciphertext)
+        .map_err(|e| ferr!("encrypt fragment payload failed: {e}"))?;
+
+    let encrypted = beekem::encrypted::EncryptedContent::new(
+        nonce,
+        ciphertext,
+        head_encrypted.pcs_key_hash,
+        head_encrypted.pcs_update_op_hash,
+        head_encrypted.content_ref.clone(),
+        head_encrypted.pred_refs,
+    );
+    let env = EncryptedBlobEnvelope { encrypted };
+    let drisl_env = atproto_dasl::drisl::to_vec(&env)
+        .map_err(|e| ferr!("DRISL encode encrypted fragment blob envelope: {e}"))?;
+    let mut encrypted_bytes = vec![0x02u8];
+    encrypted_bytes.extend(drisl_env);
+
+    Ok(Blob::new(encrypted_bytes))
+}
+
+fn fragment_nonce_context(
+    sedimentree_id: SedimentreeId,
+    head: CommitId,
+    boundary: &BTreeSet<CommitId>,
+) -> Vec<u8> {
+    let mut context = b"big_repo.fragment.v1".to_vec();
+    context.extend_from_slice(sedimentree_id.as_bytes());
+    context.extend_from_slice(head.as_bytes());
+    for boundary_head in boundary {
+        context.extend_from_slice(boundary_head.as_bytes());
+    }
+    context
+}
+
+/// Advance the Keyhive document's local content frontier after durable storage.
+///
+/// This only updates the local document state used for later `after_content`
+/// construction. It does not emit a Keyhive event.
+async fn record_keyhive_content_frontier(
+    keyhive_handle: &BigKeyhiveHandle,
+    sedimentree_id: SedimentreeId,
+    content_ref: Vec<u8>,
+    pred_refs: Vec<Vec<u8>>,
+) -> Res<()> {
+    let keyhive = keyhive_handle.clone_keyhive().await;
+    let vk = ed25519_dalek::VerifyingKey::from_bytes(sedimentree_id.as_bytes())
+        .map_err(|_| ferr!("not a valid Keyhive DocumentId"))?;
+    let kh_doc_id = keyhive_core::principal::document::id::DocumentId::from(
+        keyhive_core::principal::identifier::Identifier::from(vk),
+    );
+    let kh_doc = keyhive
+        .get_document(kh_doc_id)
+        .await
+        .ok_or_else(|| ferr!("keyhive doc not found for frontier recording"))?;
+    keyhive
+        .record_content_frontier(kh_doc, &content_ref, &pred_refs)
+        .await;
+    Ok(())
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use sedimentree_core::blob::Blob;
+    use std::collections::BTreeSet;
 
-    #[test]
-    fn missing_ordered_blob_context_reports_same_head_digest_mismatch() {
-        let head = CommitId::new([7; 32]);
-        let wanted_blob = Blob::new(b"wanted-fragment-bytes".to_vec());
-        let loaded_blob = Blob::new(b"loaded-fragment-bytes".to_vec());
-        let wanted = OrderedBlobIdentity {
-            kind: OrderedBlobKind::Fragment,
-            head,
-            blob_digest: Digest::hash(&wanted_blob),
+    use crate::test_support::capability_test_guard;
+    use keyhive_core::crypto::envelope::Envelope;
+    use nonempty::nonempty;
+    use sedimentree_core::blob::verified::VerifiedBlobMeta;
+    use subduction_core::storage::{memory::MemoryStorage, traits::Storage};
+    use subduction_crypto::{signer::memory::MemorySigner, verified_meta::VerifiedMeta};
+
+    #[tokio::test]
+    async fn ciphertext_store_loads_and_tombstones_stored_commit() -> Res<()> {
+        let _guard = capability_test_guard().await;
+        let keyhive = BigKeyhiveHandle::boot_memory_from_seed([9; 32]).await?;
+        let _doc_id = keyhive.create_doc(nonempty![[1; 32]]).await?;
+        let sedimentree_id = SedimentreeId::new(*_doc_id.as_bytes());
+        let commit_id = CommitId::new([7; 32]);
+        let storage = MemoryStorage::new();
+        let signer = MemorySigner::from_bytes(&[42u8; 32]);
+        let parents = BTreeSet::new();
+
+        let (encrypted_blob, _app_key) = encrypt_loose_commit(
+            &keyhive,
+            sedimentree_id,
+            commit_id,
+            &parents,
+            b"payload-bytes",
+            &HashMap::new(),
+        )
+        .await?;
+
+        let verified = VerifiedMeta::<sedimentree_core::loose_commit::LooseCommit>::seal::<
+            future_form::Sendable,
+            _,
+        >(
+            &signer,
+            (sedimentree_id, commit_id, parents),
+            VerifiedBlobMeta::new(encrypted_blob.clone()),
+        )
+        .await;
+        Storage::<future_form::Sendable>::save_loose_commit(&storage, sedimentree_id, verified)
+            .await
+            .map_err(|e| ferr!("save_loose_commit failed: {e}"))?;
+
+        let adapter = BigRepoCiphertextStore::new(storage.clone());
+        adapter
+            .record_locator(
+                commit_id.as_bytes().to_vec(),
+                sedimentree_id,
+                BigRepoCiphertextKind::LooseCommit,
+            )
+            .await?;
+
+        let content_ref = commit_id.as_bytes().to_vec();
+        let encrypted = adapter
+            .get_ciphertext(&content_ref)
+            .await
+            .map_err(|e| ferr!("get_ciphertext failed: {e}"))?
+            .expect("ciphertext should be found");
+        assert_eq!(encrypted.content_ref, content_ref);
+
+        adapter
+            .mark_decrypted(&commit_id.as_bytes().to_vec())
+            .await
+            .map_err(|e| ferr!("mark_decrypted failed: {e}"))?;
+        assert!(adapter
+            .get_ciphertext(&commit_id.as_bytes().to_vec())
+            .await
+            .map_err(|e| ferr!("get_ciphertext after mark_decrypted failed: {e}"))?
+            .is_none());
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn ciphertext_store_prefers_fragment_over_loose_commit_for_same_ref() -> Res<()> {
+        let _guard = capability_test_guard().await;
+        use sedimentree_core::fragment::Fragment;
+
+        let keyhive = BigKeyhiveHandle::boot_memory_from_seed([11; 32]).await?;
+        let _doc_id = keyhive.create_doc(nonempty![[1; 32]]).await?;
+        let sedimentree_id = SedimentreeId::new(*_doc_id.as_bytes());
+        let storage = MemoryStorage::new();
+        let signer = MemorySigner::from_bytes(&[44u8; 32]);
+
+        let h1 = CommitId::new([7; 32]);
+        let h2 = CommitId::new([8; 32]);
+        let h1_parents = BTreeSet::new();
+        let h2_parents = BTreeSet::from([h1]);
+        let h1_blob_bytes = b"loose-commit-payload";
+        let fragment_bytes = b"fragment-payload";
+
+        let (h1_blob, h1_key) = encrypt_loose_commit(
+            &keyhive,
+            sedimentree_id,
+            h1,
+            &h1_parents,
+            h1_blob_bytes,
+            &HashMap::new(),
+        )
+        .await?;
+        let h1_verified = VerifiedMeta::<sedimentree_core::loose_commit::LooseCommit>::seal::<
+            future_form::Sendable,
+            _,
+        >(
+            &signer,
+            (sedimentree_id, h1, h1_parents.clone()),
+            VerifiedBlobMeta::new(h1_blob),
+        )
+        .await;
+        Storage::<future_form::Sendable>::save_loose_commit(&storage, sedimentree_id, h1_verified)
+            .await
+            .map_err(|e| ferr!("save_loose_commit for h1 failed: {e}"))?;
+
+        let (h2_blob, h2_key) = encrypt_loose_commit(
+            &keyhive,
+            sedimentree_id,
+            h2,
+            &h2_parents,
+            b"head-bytes",
+            &HashMap::from([(h1, h1_key)]),
+        )
+        .await?;
+        let h2_verified = VerifiedMeta::<sedimentree_core::loose_commit::LooseCommit>::seal::<
+            future_form::Sendable,
+            _,
+        >(
+            &signer,
+            (sedimentree_id, h2, h2_parents.clone()),
+            VerifiedBlobMeta::new(h2_blob),
+        )
+        .await;
+        Storage::<future_form::Sendable>::save_loose_commit(&storage, sedimentree_id, h2_verified)
+            .await
+            .map_err(|e| ferr!("save_loose_commit for h2 failed: {e}"))?;
+
+        let fragment_blob = encrypt_fragment_blob(
+            &keyhive,
+            &storage,
+            sedimentree_id,
+            h2,
+            &h2_parents,
+            fragment_bytes,
+        )
+        .await?;
+        let fragment_verified = VerifiedMeta::<Fragment>::seal::<future_form::Sendable, _>(
+            &signer,
+            (sedimentree_id, h2, h2_parents.clone(), vec![]),
+            VerifiedBlobMeta::new(fragment_blob),
+        )
+        .await;
+        Storage::<future_form::Sendable>::save_fragment(
+            &storage,
+            sedimentree_id,
+            fragment_verified,
+        )
+        .await
+        .map_err(|e| ferr!("save_fragment failed: {e}"))?;
+
+        let adapter = BigRepoCiphertextStore::new(storage.clone());
+        adapter
+            .record_locator(
+                h2.as_bytes().to_vec(),
+                sedimentree_id,
+                BigRepoCiphertextKind::LooseCommit,
+            )
+            .await?;
+        adapter
+            .record_locator(
+                h2.as_bytes().to_vec(),
+                sedimentree_id,
+                BigRepoCiphertextKind::Fragment,
+            )
+            .await?;
+
+        let loose_locator = BigRepoCiphertextLocator {
+            kind: BigRepoCiphertextKind::LooseCommit,
+            sedimentree_id,
+            commit_id: h2,
         };
-        let loaded_items = [LoadedOrderedBlob {
-            kind: OrderedBlobKind::Fragment,
-            head,
-            blob_digest: Digest::hash(&loaded_blob),
-        }];
+        let loose_raw = adapter
+            .load_raw_for_locator(&loose_locator)
+            .await
+            .map_err(|e| ferr!("load_raw_for_locator for loose commit failed: {e}"))?
+            .expect("loose commit raw should exist");
+        let loose_encrypted = decode_encrypted_blob(loose_raw.as_slice())?;
+        let loose_decrypted = loose_encrypted
+            .try_decrypt(h2_key)
+            .map_err(|e| ferr!("decrypting loose locator failed: {e}"))?;
+        let loose_envelope: Envelope<Vec<u8>, Vec<u8>> = bincode::deserialize(&loose_decrypted)
+            .map_err(|e| ferr!("decode loose locator envelope: {e}"))?;
+        assert_eq!(loose_envelope.plaintext, b"head-bytes");
 
-        let context = missing_ordered_blob_context(wanted, &loaded_items);
+        let fragment_locator = BigRepoCiphertextLocator {
+            kind: BigRepoCiphertextKind::Fragment,
+            sedimentree_id,
+            commit_id: h2,
+        };
+        let fragment_raw = adapter
+            .load_raw_for_locator(&fragment_locator)
+            .await
+            .map_err(|e| ferr!("load_raw_for_locator for fragment failed: {e}"))?
+            .expect("fragment raw should exist");
+        let fragment_encrypted = decode_encrypted_blob(fragment_raw.as_slice())?;
+        let fragment_decrypted = fragment_encrypted
+            .try_decrypt(h2_key)
+            .map_err(|e| ferr!("decrypting fragment locator failed: {e}"))?;
+        let fragment_envelope: Envelope<Vec<u8>, Vec<u8>> =
+            bincode::deserialize(&fragment_decrypted)
+                .map_err(|e| ferr!("decode fragment locator envelope: {e}"))?;
+        assert_eq!(fragment_envelope.plaintext, fragment_bytes);
 
-        assert!(context.contains("wanted_kind=fragment"));
-        assert!(context.contains("loaded_kind_count=1"));
-        assert!(context.contains("same_head_loaded_blob_digests=["));
-        assert!(context.contains(&blob_digest_hex(Digest::hash(&wanted_blob))));
-        assert!(context.contains(&blob_digest_hex(Digest::hash(&loaded_blob))));
+        let encrypted = adapter
+            .get_ciphertext(&h2.as_bytes().to_vec())
+            .await
+            .map_err(|e| ferr!("get_ciphertext failed: {e}"))?
+            .expect("ciphertext should be found");
+        let decrypted = encrypted
+            .try_decrypt(h2_key)
+            .map_err(|e| ferr!("decrypting preferred fragment failed: {e}"))?;
+        let envelope: Envelope<Vec<u8>, Vec<u8>> = bincode::deserialize(&decrypted)
+            .map_err(|e| ferr!("decode preferred fragment envelope: {e}"))?;
+        assert_eq!(envelope.plaintext, fragment_bytes);
+        assert_eq!(envelope.ancestors.get(&h1.as_bytes()[..]), Some(&h1_key));
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn fragment_encryption_reuses_existing_content_key() -> Res<()> {
+        let _guard = capability_test_guard().await;
+        let keyhive = BigKeyhiveHandle::boot_memory_from_seed([10; 32]).await?;
+        let doc_id = keyhive.create_doc(nonempty![[1; 32]]).await?;
+        let sedimentree_id = SedimentreeId::new(*doc_id.as_bytes());
+        let storage = MemoryStorage::new();
+        let signer = MemorySigner::from_bytes(&[43u8; 32]);
+
+        let h1 = CommitId::new([7; 32]);
+        let h2 = CommitId::new([8; 32]);
+        let h1_parents = BTreeSet::new();
+        let h2_parents = BTreeSet::from([h1]);
+
+        let (h1_blob, h1_key) = encrypt_loose_commit(
+            &keyhive,
+            sedimentree_id,
+            h1,
+            &h1_parents,
+            b"parent-bytes",
+            &std::collections::HashMap::new(),
+        )
+        .await?;
+        let h1_verified = VerifiedMeta::<sedimentree_core::loose_commit::LooseCommit>::seal::<
+            future_form::Sendable,
+            _,
+        >(
+            &signer,
+            (sedimentree_id, h1, h1_parents.clone()),
+            VerifiedBlobMeta::new(h1_blob),
+        )
+        .await;
+        Storage::<future_form::Sendable>::save_loose_commit(&storage, sedimentree_id, h1_verified)
+            .await
+            .map_err(|e| ferr!("save_loose_commit for h1 failed: {e}"))?;
+
+        let (h2_blob, h2_key) = encrypt_loose_commit(
+            &keyhive,
+            sedimentree_id,
+            h2,
+            &h2_parents,
+            b"head-bytes",
+            &std::collections::HashMap::from([(h1, h1_key)]),
+        )
+        .await?;
+        let h2_verified = VerifiedMeta::<sedimentree_core::loose_commit::LooseCommit>::seal::<
+            future_form::Sendable,
+            _,
+        >(
+            &signer,
+            (sedimentree_id, h2, h2_parents.clone()),
+            VerifiedBlobMeta::new(h2_blob),
+        )
+        .await;
+        Storage::<future_form::Sendable>::save_loose_commit(&storage, sedimentree_id, h2_verified)
+            .await
+            .map_err(|e| ferr!("save_loose_commit for h2 failed: {e}"))?;
+
+        let fragment_plaintext = b"fragment-bundle-bytes";
+        let encrypted_blob = encrypt_fragment_blob(
+            &keyhive,
+            &storage,
+            sedimentree_id,
+            h2,
+            &h2_parents,
+            fragment_plaintext,
+        )
+        .await?;
+        assert_eq!(encrypted_blob.as_slice().first(), Some(&0x02));
+
+        let encrypted = decode_encrypted_blob(encrypted_blob.as_slice())?;
+        assert_eq!(encrypted.content_ref, h2.as_bytes().to_vec());
+        let decrypted = encrypted
+            .try_decrypt(h2_key)
+            .map_err(|e| ferr!("decrypting fragment blob failed: {e}"))?;
+        let envelope: Envelope<Vec<u8>, Vec<u8>> =
+            bincode::deserialize(&decrypted).map_err(|e| ferr!("decode fragment envelope: {e}"))?;
+        assert_eq!(envelope.plaintext, fragment_plaintext);
+        assert_eq!(envelope.ancestors.get(&h1.as_bytes()[..]), Some(&h1_key));
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn load_doc_snapshot_rejects_plaintext_blob() -> Res<()> {
+        let _guard = capability_test_guard().await;
+        let keyhive = BigKeyhiveHandle::boot_memory_from_seed([12; 32]).await?;
+        let doc_id = keyhive.create_doc(nonempty![[1; 32]]).await?;
+        let sedimentree_id = SedimentreeId::new(*doc_id.as_bytes());
+        let storage = MemoryStorage::new();
+        let signer = MemorySigner::from_bytes(&[45u8; 32]);
+        let commit_id = CommitId::new([9; 32]);
+        let parents = BTreeSet::new();
+        let plaintext_blob = Blob::new(b"plain commit bytes".to_vec());
+        let verified = VerifiedMeta::<sedimentree_core::loose_commit::LooseCommit>::seal::<
+            future_form::Sendable,
+            _,
+        >(
+            &signer,
+            (sedimentree_id, commit_id, parents),
+            VerifiedBlobMeta::new(plaintext_blob),
+        )
+        .await;
+        Storage::<future_form::Sendable>::save_loose_commit(&storage, sedimentree_id, verified)
+            .await
+            .map_err(|e| ferr!("save_loose_commit failed: {e}"))?;
+
+        let sedimentrees =
+            Arc::new(subduction_core::collections::bounded_sharded_map::BoundedShardedMap::new());
+        let err = load_doc_snapshot(&sedimentrees, &storage, &keyhive, doc_id)
+            .await
+            .expect_err("plaintext blob should be rejected");
+        assert!(err.to_string().contains("blob is not encrypted"));
+        Ok(())
     }
 }

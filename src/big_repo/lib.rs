@@ -31,12 +31,12 @@ pub(crate) mod keyhive_storage;
 pub mod rpc;
 mod runtime;
 pub(crate) mod wire;
-pub use runtime::{CreateDocError, PutDocError, SyncDocError};
+pub use runtime::{CreateDocError, DocLookup, PutDocError, SyncDocError};
 #[cfg(test)]
 pub(crate) mod test;
 
 pub use backend::BigRepoSyncBackend;
-pub use keyhive::BigKeyhiveHandle;
+pub use keyhive::{BigKeyhiveAgent, BigKeyhiveAuthority, BigKeyhiveGroup, BigKeyhiveHandle};
 
 pub use changes::{
     path_prefix_matches as big_repo_path_prefix_matches, BigRepoChangeNotification,
@@ -45,8 +45,68 @@ pub use changes::{
     DocIdFilter as BigRepoDocIdFilter, OriginFilter as BigRepoOriginFilter,
 };
 
+#[cfg(test)]
+pub(crate) mod test_support {
+    use fs4::fs_std::FileExt;
+    use std::fs::OpenOptions;
+    use std::path::PathBuf;
+    use utils_rs::prelude::{ResultExt, WrapErr};
+
+    pub struct CapabilityTestGuard {
+        file: std::fs::File,
+        _lock_path: PathBuf,
+    }
+
+    impl Drop for CapabilityTestGuard {
+        fn drop(&mut self) {
+            self.file.unlock().unwrap_or_log();
+        }
+    }
+
+    fn capability_test_lock_path() -> PathBuf {
+        std::env::temp_dir().join("townframe-2-big_repo-capability.lock")
+    }
+
+    fn acquire_capability_test_guard() -> CapabilityTestGuard {
+        let lock_path = capability_test_lock_path();
+        if let Some(parent) = lock_path.parent() {
+            std::fs::create_dir_all(parent).unwrap_or_log();
+        }
+        let file = OpenOptions::new()
+            .create(true)
+            .read(true)
+            .write(true)
+            .truncate(false)
+            .open(&lock_path)
+            .wrap_err_with(|| {
+                format!(
+                    "error opening big_repo capability lock file {}",
+                    lock_path.display()
+                )
+            })
+            .unwrap_or_log();
+        file.lock_exclusive().unwrap_or_else(|err| {
+            panic!(
+                "error acquiring big_repo capability lock file {}: {err}",
+                lock_path.display()
+            )
+        });
+        CapabilityTestGuard {
+            file,
+            _lock_path: lock_path,
+        }
+    }
+
+    pub async fn capability_test_guard() -> CapabilityTestGuard {
+        tokio::task::spawn_blocking(acquire_capability_test_guard)
+            .await
+            .unwrap_or_else(|err| panic!("failed joining capability test lock task: {err}"))
+    }
+}
+
 pub type DocumentId = big_sync_core::ObjId;
 pub type SharedPartStore = Arc<dyn big_sync::HostPartStore>;
+
 #[derive(Debug, Clone)]
 pub struct Config {
     pub keyhive_seed: [u8; 32],
@@ -179,16 +239,15 @@ impl BigRepo {
         skip_all,
         fields(%document_id, %self.local_peer_id)
     )]
-    pub async fn get_doc(self: &Arc<Self>, document_id: &DocumentId) -> Res<Option<BigDocHandle>> {
-        let out = self
-            .runtime
-            .get_doc_handle(*document_id)
-            .await?
-            .map(|bundle| BigDocHandle {
-                repo: Arc::clone(self),
-                bundle,
-            });
-        Ok(out)
+    pub async fn get_doc(
+        self: &Arc<Self>,
+        document_id: &DocumentId,
+    ) -> Res<DocLookup<BigDocHandle>> {
+        let out = self.runtime.get_doc_lookup(*document_id).await?;
+        Ok(out.map_ready(|bundle| BigDocHandle {
+            repo: Arc::clone(self),
+            bundle,
+        }))
     }
 
     #[tracing::instrument(skip_all, fields(%self.local_peer_id))]
@@ -196,21 +255,9 @@ impl BigRepo {
         self: &Arc<Self>,
         initial_content: automerge::Automerge,
     ) -> Result<BigDocHandle, CreateDocError> {
-        let bundle = self.runtime.create_doc(initial_content).await?;
-        Ok(BigDocHandle {
-            repo: Arc::clone(self),
-            bundle,
-        })
-    }
-
-    pub(crate) async fn put_keyhive_doc(
-        self: &Arc<Self>,
-        document_id: DocumentId,
-        initial_content: automerge::Automerge,
-    ) -> Result<BigDocHandle, PutDocError> {
         let bundle = self
             .runtime
-            .put_keyhive_doc(document_id, initial_content)
+            .create_doc_with_parents(initial_content, Vec::new())
             .await?;
         Ok(BigDocHandle {
             repo: Arc::clone(self),
@@ -218,11 +265,88 @@ impl BigRepo {
         })
     }
 
+    pub async fn create_doc_with_parents(
+        self: &Arc<Self>,
+        initial_content: automerge::Automerge,
+        parents: Vec<BigKeyhiveAuthority>,
+    ) -> Result<BigDocHandle, CreateDocError> {
+        let bundle = self
+            .runtime
+            .create_doc_with_parents(initial_content, parents)
+            .await?;
+        Ok(BigDocHandle {
+            repo: Arc::clone(self),
+            bundle,
+        })
+    }
+
+    pub async fn create_group_with_parents(
+        self: &Arc<Self>,
+        parents: Vec<BigKeyhiveAuthority>,
+    ) -> Res<BigKeyhiveGroup> {
+        let group = self.keyhive.create_group_with_parents(parents).await?;
+        self.runtime.note_local_keyhive_changed().await?;
+        Ok(group)
+    }
+
+    pub async fn add_member_to_group(
+        self: &Arc<Self>,
+        member: impl Into<BigKeyhiveAuthority>,
+        group: &BigKeyhiveGroup,
+        access: keyhive_core::access::Access,
+    ) -> Res<()> {
+        self.keyhive
+            .add_member_to_group(member, group, access)
+            .await?;
+        self.runtime.note_local_keyhive_changed().await?;
+        Ok(())
+    }
+
+    /// Grant document access.
+    ///
+    /// Reader grants also write a real Automerge checkpoint so the readable
+    /// history survives reopen and sync.
+    pub async fn grant_doc_access(
+        self: &Arc<Self>,
+        doc_id: DocumentId,
+        principal: impl Into<BigKeyhiveAuthority>,
+        access: keyhive_core::access::Access,
+    ) -> Res<()> {
+        let doc = match self.get_doc(&doc_id).await? {
+            DocLookup::Ready(doc) => doc,
+            DocLookup::PendingMaterialization => {
+                return Err(ferr!(
+                    "document {doc_id} is present but materialization is still pending"
+                ));
+            }
+            DocLookup::Missing => {
+                return Err(ferr!("document not found for checkpoint grant: {doc_id}"));
+            }
+        };
+
+        self.keyhive
+            .grant_doc_access(principal, doc_id, access)
+            .await?;
+        self.runtime.note_local_keyhive_changed().await?;
+
+        if access.is_reader() {
+            // Create the checkpoint after the grant so the checkpoint itself is
+            // written under the newly granted epoch and can carry the prior
+            // content history forward.
+            doc.with_document(|doc| {
+                let _ = doc.empty_commit(automerge::transaction::CommitOptions::default());
+            })
+            .await?;
+        }
+
+        Ok(())
+    }
+
     #[tracing::instrument(
         skip_all,
         fields(%doc_id, %self.local_peer_id)
     )]
-    pub async fn export_doc(&self, doc_id: &DocumentId) -> Res<Option<Vec<u8>>> {
+    pub async fn export_doc(&self, doc_id: &DocumentId) -> Res<DocLookup<Vec<u8>>> {
         self.runtime.export_doc_save(*doc_id).await
     }
 }
@@ -374,13 +498,13 @@ impl BigRepo {
                 Ok(val) => val,
                 Err(_) => return Ok(None),
             };
-            let Some(automerge_save) = self.export_doc(&parsed).await? else {
-                return Ok(None);
-            };
-            Ok(Some(FullDoc {
-                doc_id,
-                automerge_save,
-            }))
+            match self.export_doc(&parsed).await? {
+                DocLookup::Ready(automerge_save) => Ok(Some(FullDoc {
+                    doc_id,
+                    automerge_save,
+                })),
+                DocLookup::PendingMaterialization | DocLookup::Missing => Ok(None),
+            }
         }))
         .buffered_unordered(16)
         .collect::<Vec<Res<Option<FullDoc>>>>()
@@ -575,7 +699,7 @@ async fn partition_doc_heads_payload(
     doc_id: DocumentId,
 ) -> Res<Option<Arc<[ChangeHash]>>> {
     Ok(big_sync_store
-        .obj_payload(doc_id.into())
+        .obj_payload(doc_id)
         .await?
         .map(doc_heads_from_payload))
 }
