@@ -1000,6 +1000,7 @@ dependencies = [
  "big_sync_core",
  "bincode",
  "ed25519-dalek 2.2.0",
+ "fs4",
  "future_form",
  "futures",
  "futures-buffered",

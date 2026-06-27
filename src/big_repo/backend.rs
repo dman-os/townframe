@@ -101,13 +101,8 @@ impl big_sync::SyncBackend for BigRepoSyncBackend {
             .repo
             .upgrade()
             .ok_or_else(|| eyre::eyre!("big repo dropped while sync backend was active"))?;
-
-        let doc_id: crate::DocumentId = obj_id.into();
+        let doc_id: crate::DocumentId = obj_id;
         let local_heads = super::partition_doc_heads_payload(&repo.big_sync_store, doc_id).await?;
-        repo.runtime
-            .sync_keyhive_with_peer(peer_id, Some(Duration::from_secs(10)))
-            .await
-            .wrap_err("keyhive sync before doc sync failed")?;
         if local_heads.is_none() {
             // Doc not yet synced locally. Pull from peer via Subduction sync.
             // Subduction syncs from an empty tree — the peer sends everything it has.
@@ -144,13 +139,10 @@ impl big_sync::SyncBackend for BigRepoSyncBackend {
             .await
         {
             Ok(()) => {
-                let current_doc = repo
-                    .get_doc(&doc_id)
-                    .await?
-                    .ok_or_else(|| eyre::eyre!("local doc missing after successful sync"))?;
-                let heads = current_doc.with_document_read(|doc| doc.get_heads()).await;
-                let deets = if remote_payload.is_none() && heads.as_slice() == local_heads.as_ref()
-                {
+                let heads = repo.doc_payload_heads(doc_id).await?.ok_or_else(|| {
+                    eyre::eyre!("local doc payload missing after successful sync")
+                })?;
+                let deets = if remote_payload.is_none() && heads.as_ref() == local_heads.as_ref() {
                     big_sync_core::SyncCompletionDeets::Noop
                 } else {
                     big_sync_core::SyncCompletionDeets::ChangedObject
@@ -171,9 +163,6 @@ impl big_sync::SyncBackend for BigRepoSyncBackend {
             }
             Err(crate::SyncDocError::Unauthorized) => {
                 eyre::bail!("remote doc access denied")
-            }
-            Err(crate::SyncDocError::PendingKeys) => {
-                eyre::bail!("remote doc keys are pending (keyhive sync incomplete)")
             }
         }
     }

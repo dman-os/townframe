@@ -176,13 +176,15 @@ pub(crate) async fn boot_keyhive(
     let shared_keyhive = keyhive.shared_keyhive();
     let contact_card = keyhive.contact_card().clone();
     let kh_peer_id = keyhive.keyhive_peer_id();
-    let keyhive_protocol: BigRepoKeyhiveProtocol =
-        Arc::new(subduction_keyhive::KeyhiveProtocol::new(
+    let keyhive_protocol: BigRepoKeyhiveProtocol = Arc::new(
+        subduction_keyhive::KeyhiveProtocol::new(
             Arc::clone(&shared_keyhive),
             keyhive_storage,
             kh_peer_id,
             contact_card,
-        ));
+        )
+        .with_storage_recovery(),
+    );
 
     if let Err(e) = keyhive_protocol.ingest_from_storage().await {
         tracing::warn!(error = %e, "keyhive ingest_from_storage failed");

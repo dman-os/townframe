@@ -3,6 +3,7 @@ use crate::{interlude::*, DocumentId};
 use async_lock::Mutex;
 use keyhive_crypto::signer::memory::MemorySigner;
 use nonempty::NonEmpty;
+use std::fmt::{Debug, Formatter};
 use subduction_keyhive::runtime::SendableRuntimeKeyhive;
 
 pub type BigKeyhiveAgent = keyhive_core::principal::agent::Agent<
@@ -11,6 +12,91 @@ pub type BigKeyhiveAgent = keyhive_core::principal::agent::Agent<
     Vec<u8>,
     keyhive_core::listener::no_listener::NoListener,
 >;
+
+type BigKeyhiveGroupInner = keyhive_core::principal::group::Group<
+    future_form::Sendable,
+    keyhive_crypto::signer::memory::MemorySigner,
+    Vec<u8>,
+    keyhive_core::listener::no_listener::NoListener,
+>;
+
+type BigKeyhiveGroupShared = Arc<futures::lock::Mutex<BigKeyhiveGroupInner>>;
+
+pub struct BigKeyhiveGroup {
+    id: keyhive_core::principal::group::id::GroupId,
+    inner: BigKeyhiveGroupShared,
+}
+
+impl Clone for BigKeyhiveGroup {
+    fn clone(&self) -> Self {
+        Self {
+            id: self.id,
+            inner: Arc::clone(&self.inner),
+        }
+    }
+}
+
+impl Debug for BigKeyhiveGroup {
+    fn fmt(&self, formatter: &mut Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_tuple("BigKeyhiveGroup")
+            .field(&self.id())
+            .finish()
+    }
+}
+
+impl BigKeyhiveGroup {
+    pub fn id(&self) -> keyhive_core::principal::group::id::GroupId {
+        self.id
+    }
+
+    pub(crate) fn shared(&self) -> BigKeyhiveGroupShared {
+        Arc::clone(&self.inner)
+    }
+
+    pub(crate) fn as_agent(&self) -> BigKeyhiveAgent {
+        BigKeyhiveAgent::Group(self.id(), self.shared())
+    }
+
+    pub(crate) fn as_peer(&self) -> BigKeyhivePeer {
+        BigKeyhivePeer::Group(self.id(), self.shared())
+    }
+}
+
+#[derive(Debug, Clone)]
+pub enum BigKeyhiveAuthority {
+    Agent(BigKeyhiveAgent),
+    Group(BigKeyhiveGroup),
+}
+
+impl From<BigKeyhiveAgent> for BigKeyhiveAuthority {
+    fn from(agent: BigKeyhiveAgent) -> Self {
+        Self::Agent(agent)
+    }
+}
+
+impl From<BigKeyhiveGroup> for BigKeyhiveAuthority {
+    fn from(group: BigKeyhiveGroup) -> Self {
+        Self::Group(group)
+    }
+}
+
+impl BigKeyhiveAuthority {
+    fn into_agent(self) -> BigKeyhiveAgent {
+        match self {
+            Self::Agent(agent) => agent,
+            Self::Group(group) => group.as_agent(),
+        }
+    }
+
+    fn into_peer(self) -> Res<BigKeyhivePeer> {
+        Ok(match self {
+            Self::Agent(agent) => BigKeyhivePeer::try_from(agent)
+                .map_err(|err| ferr!("invalid keyhive peer authority: {err}"))?,
+            Self::Group(group) => group.as_peer(),
+        })
+    }
+}
 
 type BigKeyhivePeer = keyhive_core::principal::peer::Peer<
     future_form::Sendable,
@@ -101,36 +187,73 @@ impl BigKeyhiveHandle {
     }
 
     pub async fn create_doc(&self, initial_content_heads: NonEmpty<[u8; 32]>) -> Res<DocumentId> {
-        let doc_id = self
-            .create_doc_id_bytes(Vec::new(), initial_content_heads)
-            .await?;
-        Ok(DocumentId::new(doc_id))
+        self.create_doc_with_parents(Vec::new(), initial_content_heads)
+            .await
     }
 
-    pub(crate) async fn create_doc_with_agents(
+    pub async fn create_doc_with_parents(
         &self,
-        agents: Vec<BigKeyhiveAgent>,
+        parents: Vec<BigKeyhiveAuthority>,
         initial_content_heads: NonEmpty<[u8; 32]>,
     ) -> Res<DocumentId> {
-        let coparents = agents
+        let coparents = parents
             .into_iter()
-            .map(BigKeyhivePeer::try_from)
-            .collect::<Result<Vec<_>, _>>()
-            .map_err(|err| ferr!("invalid initial keyhive document peer: {err}"))?;
+            .map(BigKeyhiveAuthority::into_peer)
+            .collect::<Res<Vec<_>>>()?;
         let doc_id = self
             .create_doc_id_bytes(coparents, initial_content_heads)
             .await?;
         Ok(DocumentId::new(doc_id))
     }
 
+    pub async fn create_group_with_parents(
+        &self,
+        parents: Vec<BigKeyhiveAuthority>,
+    ) -> Res<BigKeyhiveGroup> {
+        let coparents = parents
+            .into_iter()
+            .map(BigKeyhiveAuthority::into_peer)
+            .collect::<Res<Vec<_>>>()?;
+        let keyhive = self.keyhive.lock().await;
+        let group = keyhive
+            .generate_group(coparents)
+            .await
+            .map_err(|err| ferr!("failed creating keyhive group: {err}"))?;
+        let id = group.lock().await.group_id();
+        Ok(BigKeyhiveGroup { id, inner: group })
+    }
+
+    pub async fn add_member_to_group(
+        &self,
+        member: impl Into<BigKeyhiveAuthority>,
+        group: &BigKeyhiveGroup,
+        access: keyhive_core::access::Access,
+    ) -> Res<()> {
+        use keyhive_core::principal::membered::Membered;
+
+        let member = member.into().into_agent();
+        let group_id = group.id();
+        let kh = self.keyhive.lock().await;
+        kh.add_member(
+            member,
+            &Membered::Group(group_id, group.shared()),
+            access,
+            &[],
+        )
+        .await
+        .map_err(|err| ferr!("group member add failed: {err}"))?;
+        Ok(())
+    }
+
     /// Grant an agent access to a document.
     pub async fn grant_doc_access(
         &self,
-        agent: BigKeyhiveAgent,
+        principal: impl Into<BigKeyhiveAuthority>,
         doc_id: DocumentId,
         access: keyhive_core::access::Access,
     ) -> Res<()> {
         use keyhive_core::principal::membered::Membered;
+        let agent = principal.into().into_agent();
         let doc_id_bytes = doc_id.into_bytes();
         let vk = ed25519_dalek::VerifyingKey::from_bytes(&doc_id_bytes)
             .map_err(|_| ferr!("doc_id is not a valid Ed25519 point"))?;
@@ -146,7 +269,7 @@ impl BigKeyhiveHandle {
         })?;
         kh.add_member(agent, &Membered::Document(kh_doc_id, doc), access, &[])
             .await
-            .map_err(|e| ferr!("grant failed: {e}"))?;
+            .map_err(|err| ferr!("grant failed: {err}"))?;
         // E2EE branch: add_member fires CGKA ops to the event listener
         // automatically, so no manual receive_cgka_op loop is needed.
         Ok(())

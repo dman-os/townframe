@@ -68,6 +68,7 @@ subduction_websocket = { workspace = true, features = ["tokio_base"], }
 keyhive_crypto.workspace = true
 keyhive_core.workspace = true
 beekem.workspace = true
+fs4.workspace = true
 
 #
 # logging
