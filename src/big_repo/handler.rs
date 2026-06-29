@@ -16,7 +16,9 @@ use subduction_core::{
     remote_heads::{RemoteHeads, RemoteHeadsNotifier},
     subduction::error::{IoError, ListenError},
 };
-use subduction_keyhive::handler::{SendableKeyhiveHandler, SendableRuntimeProtocol};
+use subduction_keyhive::handler::{
+    HandleError as KeyhiveHandleError, SendableKeyhiveHandler, SendableRuntimeProtocol,
+};
 use subduction_websocket::tokio::{TimeoutTokio, TokioSpawn};
 
 use crate::keyhive::BigKeyhiveHandle;
@@ -35,6 +37,35 @@ pub(crate) type BigRepoKeyhiveHandler = SendableKeyhiveHandler<
 
 /// Concrete ListenError for the composed handler.
 type SynchronousListenError<S> = ListenError<Sendable, S, BigRepoIrohTransport, BigRepoWireMessage>;
+
+#[derive(Debug, thiserror::Error)]
+pub(crate) enum BigRepoComposedHandlerError<S: subduction_core::storage::traits::Storage<Sendable>>
+{
+    #[error("sync handler error: {0}")]
+    Sync(#[source] SynchronousListenError<S>),
+    #[error("keyhive handler error: {0}")]
+    Keyhive(#[source] KeyhiveHandleError),
+}
+
+impl<S: subduction_core::storage::traits::Storage<Sendable>> From<BigRepoComposedHandlerError<S>>
+    for ListenError<Sendable, S, BigRepoIrohTransport, BigRepoWireMessage>
+{
+    fn from(err: BigRepoComposedHandlerError<S>) -> Self {
+        match err {
+            BigRepoComposedHandlerError::Sync(listen_err) => match listen_err {
+                ListenError::IoError(io_err) => ListenError::IoError(match io_err {
+                    IoError::Storage(e) => IoError::Storage(e),
+                    IoError::ConnSend(e) => IoError::ConnSend(e),
+                    IoError::ConnRecv(e) => IoError::ConnRecv(e),
+                    IoError::ConnCall(e) => IoError::ConnCall(e),
+                    IoError::BlobMismatch(e) => IoError::BlobMismatch(e),
+                }),
+                ListenError::TrySendError => ListenError::TrySendError,
+            },
+            BigRepoComposedHandlerError::Keyhive(_err) => ListenError::TrySendError,
+        }
+    }
+}
 
 /// The concrete sync handler type.
 type BigRepoSyncHandler<S> = Arc<
@@ -93,7 +124,7 @@ where
     <S as subduction_core::storage::traits::Storage<Sendable>>::Error: 'static,
 {
     type Message = BigRepoWireMessage;
-    type HandlerError = SynchronousListenError<S>;
+    type HandlerError = BigRepoComposedHandlerError<S>;
 
     fn handle<'a>(
         &'a self,
@@ -110,18 +141,16 @@ where
                     )
                     .await
                     .map_err(convert_sync_listen_error)
+                    .map_err(BigRepoComposedHandlerError::Sync)
                 }
                 BigRepoWireMessage::Keyhive(keyhive_msg) => {
-                    if let Err(err) = Handler::<Sendable, BigRepoIrohTransport>::handle(
+                    Handler::<Sendable, BigRepoIrohTransport>::handle(
                         &self.keyhive,
                         conn,
                         keyhive_msg,
                     )
                     .await
-                    {
-                        tracing::warn!(error = %err, "keyhive handler failed");
-                    }
-                    Ok(())
+                    .map_err(BigRepoComposedHandlerError::Keyhive)
                 }
             }
         })
@@ -172,6 +201,7 @@ pub(crate) type BigRepoSubduction<S> = subduction_core::subduction::Subduction<
 pub(crate) async fn boot_keyhive(
     keyhive: &BigKeyhiveHandle,
     keyhive_storage: BigRepoKeyhiveStorage,
+    sync_done_observer: Option<Arc<dyn Fn(subduction_keyhive::KeyhivePeerId) + Send + Sync>>,
 ) -> crate::Res<(BigRepoKeyhiveProtocol, BigRepoKeyhiveHandler)> {
     let shared_keyhive = keyhive.shared_keyhive();
     let contact_card = keyhive.contact_card().clone();
@@ -186,16 +216,20 @@ pub(crate) async fn boot_keyhive(
         .with_storage_recovery(),
     );
 
-    if let Err(e) = keyhive_protocol.ingest_from_storage().await {
-        tracing::warn!(error = %e, "keyhive ingest_from_storage failed");
-    }
+    keyhive_protocol
+        .ingest_from_storage()
+        .await
+        .map_err(|err| crate::ferr!("keyhive ingest_from_storage failed: {err}"))?;
 
     let keyhive_for_handler = Arc::clone(&keyhive_protocol);
-    let keyhive_handler = BigRepoKeyhiveHandler::new(
+    let mut keyhive_handler = BigRepoKeyhiveHandler::new(
         keyhive_for_handler,
         BigRepoKeyhiveConnAdapter::new
             as fn(Authenticated<BigRepoIrohTransport, Sendable>) -> BigRepoKeyhiveConnAdapter,
     );
+    if let Some(observer) = sync_done_observer {
+        keyhive_handler = keyhive_handler.with_sync_done_observer(observer);
+    }
 
     Ok((keyhive_protocol, keyhive_handler))
 }

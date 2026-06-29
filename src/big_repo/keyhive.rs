@@ -1,6 +1,8 @@
 use crate::{interlude::*, DocumentId};
 
 use async_lock::Mutex;
+use keyhive_core::event::static_event::StaticEvent;
+use keyhive_core::listener::no_listener::NoListener;
 use keyhive_crypto::signer::memory::MemorySigner;
 use nonempty::NonEmpty;
 use std::fmt::{Debug, Formatter};
@@ -105,6 +107,13 @@ type BigKeyhivePeer = keyhive_core::principal::peer::Peer<
     keyhive_core::listener::no_listener::NoListener,
 >;
 
+type BigKeyhiveDelegation = keyhive_core::principal::group::delegation::Delegation<
+    future_form::Sendable,
+    MemorySigner,
+    Vec<u8>,
+    NoListener,
+>;
+
 #[derive(Clone)]
 pub struct BigKeyhiveHandle {
     keyhive: Arc<Mutex<SendableRuntimeKeyhive>>,
@@ -170,6 +179,36 @@ impl BigKeyhiveHandle {
         Ok(())
     }
 
+    pub(crate) async fn ingest_from_storage(
+        &self,
+        storage: &crate::keyhive_storage::BigRepoKeyhiveStorage,
+    ) -> Res<()> {
+        let keyhive = self.keyhive.lock().await;
+        subduction_keyhive::ingest_from_storage(&*keyhive, storage)
+            .await
+            .map_err(|err| ferr!("failed ingesting keyhive storage: {err}"))?;
+        Ok(())
+    }
+
+    pub(crate) async fn save_storage_archive(
+        &self,
+        storage: &crate::keyhive_storage::BigRepoKeyhiveStorage,
+    ) -> Res<()> {
+        let (storage_id, archive) = {
+            let keyhive = self.keyhive.lock().await;
+            (
+                subduction_keyhive::StorageHash::new(*self.keyhive_peer_id.verifying_key()),
+                keyhive.into_archive().await,
+            )
+        };
+        subduction_keyhive::save_keyhive_archive::<Vec<u8>, _, future_form::Sendable>(
+            storage, storage_id, &archive,
+        )
+        .await
+        .map_err(|err| ferr!("failed saving keyhive archive: {err}"))?;
+        Ok(())
+    }
+
     pub(crate) async fn clone_keyhive(&self) -> SendableRuntimeKeyhive {
         self.keyhive.lock().await.clone()
     }
@@ -186,29 +225,36 @@ impl BigKeyhiveHandle {
         self.keyhive_peer_id.clone()
     }
 
-    pub async fn create_doc(&self, initial_content_heads: NonEmpty<[u8; 32]>) -> Res<DocumentId> {
-        self.create_doc_with_parents(Vec::new(), initial_content_heads)
+    pub(crate) async fn create_doc(
+        &self,
+        initial_content_heads: NonEmpty<[u8; 32]>,
+        storage: &crate::keyhive_storage::BigRepoKeyhiveStorage,
+    ) -> Res<DocumentId> {
+        self.create_doc_with_parents(Vec::new(), initial_content_heads, storage)
             .await
     }
 
-    pub async fn create_doc_with_parents(
+    pub(crate) async fn create_doc_with_parents(
         &self,
         parents: Vec<BigKeyhiveAuthority>,
         initial_content_heads: NonEmpty<[u8; 32]>,
+        storage: &crate::keyhive_storage::BigRepoKeyhiveStorage,
     ) -> Res<DocumentId> {
         let coparents = parents
             .into_iter()
             .map(BigKeyhiveAuthority::into_peer)
             .collect::<Res<Vec<_>>>()?;
         let doc_id = self
-            .create_doc_id_bytes(coparents, initial_content_heads)
+            .create_doc_id_bytes(coparents, initial_content_heads, Some(storage))
             .await?;
+        self.save_storage_archive(storage).await?;
         Ok(DocumentId::new(doc_id))
     }
 
-    pub async fn create_group_with_parents(
+    pub(crate) async fn create_group_with_parents(
         &self,
         parents: Vec<BigKeyhiveAuthority>,
+        storage: &crate::keyhive_storage::BigRepoKeyhiveStorage,
     ) -> Res<BigKeyhiveGroup> {
         let coparents = parents
             .into_iter()
@@ -219,38 +265,48 @@ impl BigKeyhiveHandle {
             .generate_group(coparents)
             .await
             .map_err(|err| ferr!("failed creating keyhive group: {err}"))?;
+        drop(keyhive);
         let id = group.lock().await.group_id();
+        persist_group_delegations(storage, &group).await?;
+        self.save_storage_archive(storage).await?;
         Ok(BigKeyhiveGroup { id, inner: group })
     }
 
-    pub async fn add_member_to_group(
+    pub(crate) async fn add_member_to_group(
         &self,
         member: impl Into<BigKeyhiveAuthority>,
         group: &BigKeyhiveGroup,
         access: keyhive_core::access::Access,
+        storage: &crate::keyhive_storage::BigRepoKeyhiveStorage,
     ) -> Res<()> {
         use keyhive_core::principal::membered::Membered;
 
         let member = member.into().into_agent();
         let group_id = group.id();
         let kh = self.keyhive.lock().await;
-        kh.add_member(
-            member,
-            &Membered::Group(group_id, group.shared()),
-            access,
-            &[],
-        )
-        .await
-        .map_err(|err| ferr!("group member add failed: {err}"))?;
+        let update = kh
+            .add_member(
+                member,
+                &Membered::Group(group_id, group.shared()),
+                access,
+                &[],
+            )
+            .await
+            .map_err(|err| ferr!("group member add failed: {err}"))?;
+        drop(kh);
+        persist_delegation(storage, update.delegation).await?;
+        persist_cgka_update_ops(storage, update.cgka_ops).await?;
+        self.save_storage_archive(storage).await?;
         Ok(())
     }
 
     /// Grant an agent access to a document.
-    pub async fn grant_doc_access(
+    pub(crate) async fn grant_doc_access(
         &self,
         principal: impl Into<BigKeyhiveAuthority>,
         doc_id: DocumentId,
         access: keyhive_core::access::Access,
+        storage: &crate::keyhive_storage::BigRepoKeyhiveStorage,
     ) -> Res<()> {
         use keyhive_core::principal::membered::Membered;
         let agent = principal.into().into_agent();
@@ -267,11 +323,14 @@ impl BigKeyhiveHandle {
                 doc_id_bytes
             )
         })?;
-        kh.add_member(agent, &Membered::Document(kh_doc_id, doc), access, &[])
+        let update = kh
+            .add_member(agent, &Membered::Document(kh_doc_id, doc), access, &[])
             .await
             .map_err(|err| ferr!("grant failed: {err}"))?;
-        // E2EE branch: add_member fires CGKA ops to the event listener
-        // automatically, so no manual receive_cgka_op loop is needed.
+        drop(kh);
+        persist_delegation(storage, update.delegation).await?;
+        persist_cgka_update_ops(storage, update.cgka_ops).await?;
+        self.save_storage_archive(storage).await?;
         Ok(())
     }
 
@@ -292,6 +351,7 @@ impl BigKeyhiveHandle {
         &self,
         coparents: Vec<BigKeyhivePeer>,
         initial_content_heads: NonEmpty<[u8; 32]>,
+        storage: Option<&crate::keyhive_storage::BigRepoKeyhiveStorage>,
     ) -> Res<[u8; 32]> {
         let initial_content_heads = NonEmpty {
             head: initial_content_heads.head.to_vec(),
@@ -306,7 +366,11 @@ impl BigKeyhiveHandle {
             .generate_doc(coparents, initial_content_heads)
             .await
             .map_err(|err| ferr!("failed creating keyhive document: {err}"))?;
+        drop(keyhive);
         let doc_id = doc.lock().await.doc_id().to_bytes();
+        if let Some(storage) = storage {
+            persist_doc_delegations(storage, &doc).await?;
+        }
         Ok(doc_id)
     }
 
@@ -316,10 +380,85 @@ impl BigKeyhiveHandle {
         initial_content_heads: NonEmpty<[u8; 32]>,
     ) -> Res<(DocumentId, [u8; 32])> {
         let doc_id = self
-            .create_doc_id_bytes(Vec::new(), initial_content_heads)
+            .create_doc_id_bytes(Vec::new(), initial_content_heads, None)
             .await?;
         Ok((DocumentId::new(doc_id), doc_id))
     }
+}
+
+async fn persist_delegation(
+    storage: &crate::keyhive_storage::BigRepoKeyhiveStorage,
+    delegation: Arc<keyhive_crypto::signed::Signed<BigKeyhiveDelegation>>,
+) -> Res<()> {
+    let event: StaticEvent<Vec<u8>> = keyhive_core::event::Event::<
+        future_form::Sendable,
+        MemorySigner,
+        Vec<u8>,
+        NoListener,
+    >::Delegated(delegation)
+    .into();
+    subduction_keyhive::save_event::<Vec<u8>, _, future_form::Sendable>(storage, &event)
+        .await
+        .map_err(|err| ferr!("failed saving keyhive delegation event: {err}"))?;
+    Ok(())
+}
+
+async fn persist_group_delegations(
+    storage: &crate::keyhive_storage::BigRepoKeyhiveStorage,
+    group: &BigKeyhiveGroupShared,
+) -> Res<()> {
+    let delegations = {
+        let locked = group.lock().await;
+        locked
+            .members()
+            .values()
+            .flat_map(|delegations| delegations.iter().cloned())
+            .collect::<Vec<_>>()
+    };
+    for delegation in delegations {
+        persist_delegation(storage, delegation).await?;
+    }
+    Ok(())
+}
+
+async fn persist_doc_delegations(
+    storage: &crate::keyhive_storage::BigRepoKeyhiveStorage,
+    doc: &Arc<
+        futures::lock::Mutex<
+            keyhive_core::principal::document::Document<
+                future_form::Sendable,
+                MemorySigner,
+                Vec<u8>,
+                NoListener,
+            >,
+        >,
+    >,
+) -> Res<()> {
+    let delegations = {
+        let locked = doc.lock().await;
+        locked
+            .members()
+            .values()
+            .flat_map(|delegations| delegations.iter().cloned())
+            .collect::<Vec<_>>()
+    };
+    for delegation in delegations {
+        persist_delegation(storage, delegation).await?;
+    }
+    Ok(())
+}
+
+async fn persist_cgka_update_ops(
+    storage: &crate::keyhive_storage::BigRepoKeyhiveStorage,
+    cgka_ops: Vec<keyhive_crypto::signed::Signed<beekem::operation::CgkaOperation>>,
+) -> Res<()> {
+    for cgka_op in cgka_ops {
+        let event = StaticEvent::CgkaOperation(Box::new(cgka_op));
+        subduction_keyhive::save_event::<Vec<u8>, _, future_form::Sendable>(storage, &event)
+            .await
+            .map_err(|err| ferr!("failed saving cgka update op: {err}"))?;
+    }
+    Ok(())
 }
 
 #[cfg(test)]
@@ -338,8 +477,8 @@ mod tests {
     #[tokio::test]
     async fn create_doc_mints_distinct_documents() -> Res<()> {
         let keyhive = BigKeyhiveHandle::boot_memory().await?;
-        let first = keyhive.create_doc(nonempty![[1; 32]]).await?;
-        let second = keyhive.create_doc(nonempty![[2; 32]]).await?;
+        let (first, _) = keyhive.create_doc_for_test(nonempty![[1; 32]]).await?;
+        let (second, _) = keyhive.create_doc_for_test(nonempty![[2; 32]]).await?;
         assert_ne!(first, second);
         Ok(())
     }
@@ -347,7 +486,7 @@ mod tests {
     #[tokio::test]
     async fn boot_memory_from_seed_can_create_documents() -> Res<()> {
         let keyhive = BigKeyhiveHandle::boot_memory_from_seed([7; 32]).await?;
-        let doc_id = keyhive.create_doc(nonempty![[3; 32]]).await?;
+        let (doc_id, _) = keyhive.create_doc_for_test(nonempty![[3; 32]]).await?;
         assert_ne!(doc_id.into_bytes(), [0; 32]);
         Ok(())
     }

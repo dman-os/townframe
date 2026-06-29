@@ -177,7 +177,7 @@ async fn put_doc_get_doc_and_export_roundtrip() -> Res<()> {
 #[tokio::test]
 async fn create_doc_records_initial_frontier_for_after_content() -> Res<()> {
     let _guard = crate::test_support::capability_test_guard().await;
-    let (repo, _part_store, stop_token) = boot_repo().await?;
+    let (repo, _part_store, _stop_token) = boot_repo().await?;
     let mut doc = automerge::Automerge::new();
     doc.transact(|tx| tx.put(automerge::ROOT, "title", "seed"))
         .expect("failed seeding doc");
@@ -216,14 +216,13 @@ async fn create_doc_records_initial_frontier_for_after_content() -> Res<()> {
     assert_eq!(after_content, &[initial_head]);
 
     drop(handle);
-    stop_token().await?;
     Ok(())
 }
 
 #[tokio::test]
 async fn write_records_latest_frontier_for_after_content() -> Res<()> {
     let _guard = crate::test_support::capability_test_guard().await;
-    let (repo, _part_store, stop_token) = boot_repo().await?;
+    let (repo, _part_store, _stop_token) = boot_repo().await?;
     let mut doc = automerge::Automerge::new();
     doc.transact(|tx| tx.put(automerge::ROOT, "title", "seed"))
         .expect("failed seeding doc");
@@ -280,7 +279,6 @@ async fn write_records_latest_frontier_for_after_content() -> Res<()> {
     assert_eq!(after_content, &[latest_head]);
 
     drop(handle);
-    stop_token().await?;
     Ok(())
 }
 
@@ -345,6 +343,868 @@ async fn create_doc_with_group_parent_uses_public_group_api() -> Res<()> {
 
     owner.shutdown().await?;
     client.shutdown().await?;
+    Ok(())
+}
+
+#[tokio::test]
+async fn keyhive_contact_card_bootstrap_sync_completes_bidirectionally() -> Res<()> {
+    let _guard = crate::test_support::capability_test_guard().await;
+    let temp_root = tempdir()?;
+    let owner_path = temp_root.path().join("owner");
+    let client_path = temp_root.path().join("client");
+    let owner = SyncRepoNode::boot(owner_path, 93, true).await?;
+    let client = SyncRepoNode::boot(client_path, 94, false).await?;
+
+    client.connect_to(&owner).await?;
+    owner.wait_for_accepts(1).await;
+    let owner_conn = owner.accepted_connection().await;
+    let client_conn = client.connection_to(&owner).await;
+
+    timeout(Duration::from_secs(5), async {
+        let (owner_sync, client_sync) = tokio::join!(
+            owner_conn.sync_keyhive_with_peer(None),
+            client_conn.sync_keyhive_with_peer(None),
+        );
+        owner_sync?;
+        client_sync?;
+        eyre::Ok(())
+    })
+    .await
+    .expect("timed out waiting for bidirectional keyhive bootstrap sync")?;
+
+    use subduction_keyhive::KeyhivePeerId;
+    let owner_kh_peer_id = KeyhivePeerId::from_bytes(*owner.peer_id().as_bytes());
+    let client_kh_peer_id = KeyhivePeerId::from_bytes(*client.peer_id().as_bytes());
+    assert!(
+        owner
+            .repo
+            .keyhive()
+            .get_agent_by_peer_id(&client_kh_peer_id)
+            .await?
+            .is_some(),
+        "owner should resolve the client as a keyhive agent after bootstrap sync"
+    );
+    assert!(
+        client
+            .repo
+            .keyhive()
+            .get_agent_by_peer_id(&owner_kh_peer_id)
+            .await?
+            .is_some(),
+        "client should resolve the owner as a keyhive agent after bootstrap sync"
+    );
+
+    owner.shutdown().await?;
+    client.shutdown().await?;
+    Ok(())
+}
+
+#[tokio::test]
+async fn authorized_peer_reads_encrypted_doc_after_keyhive_sync_without_reboot() -> Res<()> {
+    let _guard = crate::test_support::capability_test_guard().await;
+    let temp_root = tempdir()?;
+    let owner_path = temp_root.path().join("owner");
+    let client_path = temp_root.path().join("client");
+    let owner = SyncRepoNode::boot(owner_path, 95, true).await?;
+    let client = SyncRepoNode::boot(client_path, 96, false).await?;
+
+    client.connect_to(&owner).await?;
+    owner.wait_for_accepts(1).await;
+    let owner_conn = owner.accepted_connection().await;
+    let client_conn = client.connection_to(&owner).await;
+
+    owner_conn.sync_keyhive_with_peer(None).await?;
+    client_conn.sync_keyhive_with_peer(None).await?;
+
+    use subduction_keyhive::KeyhivePeerId;
+    let client_kh_peer_id = KeyhivePeerId::from_bytes(*client.peer_id().as_bytes());
+    let client_agent = owner
+        .repo
+        .keyhive()
+        .get_agent_by_peer_id(&client_kh_peer_id)
+        .await?
+        .expect("client agent should be known after keyhive sync");
+
+    let mut doc = automerge::Automerge::new();
+    doc.transact(|tx| tx.put(automerge::ROOT, "title", "seed"))
+        .expect("failed seeding doc");
+    let handle = owner.repo.create_doc(doc).await?;
+    let doc_id = handle.document_id();
+    owner
+        .repo
+        .grant_doc_access(doc_id, client_agent, keyhive_core::access::Access::Read)
+        .await?;
+
+    for _ in 0..2 {
+        owner_conn.sync_keyhive_with_peer(None).await?;
+        client_conn.sync_keyhive_with_peer(None).await?;
+    }
+
+    timeout(
+        Duration::from_secs(5),
+        client_conn.sync_doc_with_peer(doc_id, Some(Duration::from_secs(2))),
+    )
+    .await
+    .expect("timed out waiting for authorized doc sync")?;
+
+    let client_doc = timeout(
+        Duration::from_secs(5),
+        wait_for_doc_handle(&client.repo, doc_id),
+    )
+    .await
+    .expect("timed out waiting for authorized doc materialization");
+    let title = client_doc
+        .with_document_read(|doc| get_str_at_root(doc, "title"))
+        .await;
+    assert_eq!(title, "seed");
+    assert!(
+        client.repo.doc_payload_heads(doc_id).await?.is_some(),
+        "authorized client should have payload heads after doc sync"
+    );
+
+    let exported = client
+        .repo
+        .export_doc(&doc_id)
+        .await?
+        .expect("authorized client should export plaintext after sync");
+    assert!(!exported.is_empty());
+
+    owner.shutdown().await?;
+    client.shutdown().await?;
+    Ok(())
+}
+
+#[tokio::test]
+async fn disk_repo_round_trip_preserves_encrypted_doc_and_heads() -> Res<()> {
+    let temp_root = tempdir()?;
+    let repo_path = temp_root.path().join("repo");
+    let (repo, _part_store, stop) = _boot_disk_repo(repo_path.clone()).await?;
+
+    let mut doc = automerge::Automerge::new();
+    doc.transact(|tx| tx.put(automerge::ROOT, "title", "persisted"))
+        .expect("failed seeding doc");
+    let handle = repo.create_doc(doc).await?;
+    let doc_id = handle.document_id();
+    let export_before = repo
+        .export_doc(&doc_id)
+        .await?
+        .expect("export should exist before reboot");
+    let heads_before = repo
+        .doc_payload_heads(doc_id)
+        .await?
+        .expect("heads should exist before reboot");
+    let title_before = handle
+        .with_document_read(|doc| get_str_at_root(doc, "title"))
+        .await;
+    assert_eq!(title_before, "persisted");
+
+    stop().await?;
+
+    let (repo, _part_store, stop) = _boot_disk_repo(repo_path).await?;
+    let fetched = repo
+        .get_doc(&doc_id)
+        .await?
+        .expect("doc should exist after reboot");
+    let title_after = fetched
+        .with_document_read(|doc| get_str_at_root(doc, "title"))
+        .await;
+    assert_eq!(title_after, "persisted");
+
+    let export_after = repo
+        .export_doc(&doc_id)
+        .await?
+        .expect("export should exist after reboot");
+    let heads_after = repo
+        .doc_payload_heads(doc_id)
+        .await?
+        .expect("heads should exist after reboot");
+
+    assert_eq!(export_after, export_before);
+    assert_eq!(heads_after, heads_before);
+
+    stop().await?;
+    Ok(())
+}
+
+#[tokio::test]
+async fn closed_keyhive_connection_errors_cleanly_then_reconnects() -> Res<()> {
+    let _guard = crate::test_support::capability_test_guard().await;
+    let temp_root = tempdir()?;
+    let owner_path = temp_root.path().join("owner");
+    let client_path = temp_root.path().join("client");
+    let owner = SyncRepoNode::boot(owner_path, 97, true).await?;
+    let client = SyncRepoNode::boot(client_path, 98, false).await?;
+
+    client.connect_to(&owner).await?;
+    owner.wait_for_accepts(1).await;
+    let owner_conn = owner.accepted_connection().await;
+    let client_conn = client.connection_to(&owner).await;
+
+    owner_conn.sync_keyhive_with_peer(None).await?;
+    client_conn.sync_keyhive_with_peer(None).await?;
+
+    let closed_conn = owner_conn.clone();
+    owner_conn.stop().await?;
+    let err = closed_conn
+        .sync_keyhive_with_peer(None)
+        .await
+        .expect_err("closed connection should fail keyhive sync");
+    assert!(
+        err.to_string().contains("connection is closed"),
+        "closed connection should fail cleanly, got {err:?}"
+    );
+
+    let second_owner_path = temp_root.path().join("owner2");
+    let second_client_path = temp_root.path().join("client2");
+    let second_owner = SyncRepoNode::boot(second_owner_path, 99, true).await?;
+    let second_client = SyncRepoNode::boot(second_client_path, 100, false).await?;
+
+    second_client.connect_to(&second_owner).await?;
+    second_owner.wait_for_accepts(1).await;
+    let second_owner_conn = second_owner.accepted_connection().await;
+    let second_client_conn = second_client.connection_to(&second_owner).await;
+
+    timeout(Duration::from_secs(5), async {
+        second_owner_conn.sync_keyhive_with_peer(None).await?;
+        second_client_conn.sync_keyhive_with_peer(None).await?;
+        eyre::Ok(())
+    })
+    .await
+    .expect("timed out waiting for keyhive sync on fresh peer pair")?;
+
+    use subduction_keyhive::KeyhivePeerId;
+    let second_client_kh_peer_id = KeyhivePeerId::from_bytes(*second_client.peer_id().as_bytes());
+    assert!(
+        second_owner
+            .repo
+            .keyhive()
+            .get_agent_by_peer_id(&second_client_kh_peer_id)
+            .await?
+            .is_some(),
+        "keyhive sync should still work on a fresh peer pair"
+    );
+
+    owner.shutdown().await?;
+    client.shutdown().await?;
+    second_owner.shutdown().await?;
+    second_client.shutdown().await?;
+    Ok(())
+}
+
+#[tokio::test]
+async fn minimal_doc_sync_loads_and_exports_after_keyhive_grant() -> Res<()> {
+    let _guard = crate::test_support::capability_test_guard().await;
+    let temp_root = tempdir()?;
+    let owner_path = temp_root.path().join("owner");
+    let client_path = temp_root.path().join("client");
+    let owner = SyncRepoNode::boot(owner_path, 103, true).await?;
+    let client = SyncRepoNode::boot(client_path, 104, false).await?;
+
+    client.connect_to(&owner).await?;
+    owner.wait_for_accepts(1).await;
+    let owner_conn = owner.accepted_connection().await;
+    let client_conn = client.connection_to(&owner).await;
+
+    owner_conn.sync_keyhive_with_peer(None).await?;
+    client_conn.sync_keyhive_with_peer(None).await?;
+
+    use subduction_keyhive::KeyhivePeerId;
+    let client_kh_peer_id = KeyhivePeerId::from_bytes(*client.peer_id().as_bytes());
+    let client_agent = owner
+        .repo
+        .keyhive()
+        .get_agent_by_peer_id(&client_kh_peer_id)
+        .await?
+        .expect("client agent should be known after keyhive sync");
+
+    let mut doc = automerge::Automerge::new();
+    doc.transact(|tx| {
+        tx.put(automerge::ROOT, "_", "")
+            .expect("failed seeding minimal doc");
+        eyre::Ok(())
+    })
+    .expect("failed creating minimal doc");
+    let handle = owner.repo.create_doc(doc).await?;
+    let doc_id = handle.document_id();
+    owner
+        .repo
+        .grant_doc_access(doc_id, client_agent, keyhive_core::access::Access::Read)
+        .await?;
+
+    for _ in 0..2 {
+        owner_conn.sync_keyhive_with_peer(None).await?;
+        client_conn.sync_keyhive_with_peer(None).await?;
+    }
+
+    timeout(
+        Duration::from_secs(5),
+        client_conn.sync_doc_with_peer(doc_id, Some(Duration::from_secs(2))),
+    )
+    .await
+    .expect("timed out waiting for minimal doc sync")?;
+
+    let client_doc = timeout(
+        Duration::from_secs(5),
+        wait_for_doc_handle(&client.repo, doc_id),
+    )
+    .await
+    .expect("timed out waiting for minimal doc materialization");
+    let value = client_doc
+        .with_document_read(|doc| get_str_at_root(doc, "_"))
+        .await;
+    assert_eq!(value, "");
+    assert!(
+        client.repo.doc_payload_heads(doc_id).await?.is_some(),
+        "client should have payload heads after minimal doc sync"
+    );
+    assert!(
+        client.repo.export_doc(&doc_id).await?.is_some(),
+        "client should export minimal doc plaintext after sync"
+    );
+
+    owner.shutdown().await?;
+    client.shutdown().await?;
+    Ok(())
+}
+
+#[tokio::test]
+async fn group_member_reads_doc_while_non_member_stays_unauthorized() -> Res<()> {
+    let _guard = crate::test_support::capability_test_guard().await;
+    let temp_root = tempdir()?;
+    let owner_path = temp_root.path().join("owner");
+    let member_path = temp_root.path().join("member");
+    let outsider_path = temp_root.path().join("outsider");
+    let owner = SyncRepoNode::boot(owner_path, 105, true).await?;
+    let member = SyncRepoNode::boot(member_path, 106, false).await?;
+    let outsider = SyncRepoNode::boot(outsider_path, 107, false).await?;
+
+    member.connect_to(&owner).await?;
+    owner.wait_for_accepts(1).await;
+    let owner_member_conn = owner.accepted_connection().await;
+    let member_conn = member.connection_to(&owner).await;
+    outsider.connect_to(&owner).await?;
+    owner.wait_for_accepts(2).await;
+    let owner_outsider_conn = owner.accepted_connection().await;
+    let outsider_conn = outsider.connection_to(&owner).await;
+
+    owner_member_conn.sync_keyhive_with_peer(None).await?;
+    member_conn.sync_keyhive_with_peer(None).await?;
+    owner_outsider_conn.sync_keyhive_with_peer(None).await?;
+    outsider_conn.sync_keyhive_with_peer(None).await?;
+
+    use subduction_keyhive::KeyhivePeerId;
+    let member_kh_peer_id = KeyhivePeerId::from_bytes(*member.peer_id().as_bytes());
+    let member_agent = owner
+        .repo
+        .keyhive()
+        .get_agent_by_peer_id(&member_kh_peer_id)
+        .await?
+        .expect("member agent should be known after keyhive sync");
+
+    let group = owner.repo.create_group_with_parents(vec![]).await?;
+    owner
+        .repo
+        .add_member_to_group(
+            member_agent.clone(),
+            &group,
+            keyhive_core::access::Access::Read,
+        )
+        .await?;
+
+    let mut doc = automerge::Automerge::new();
+    doc.transact(|tx| {
+        tx.put(automerge::ROOT, "title", "grouped")
+            .expect("failed seeding grouped doc");
+        eyre::Ok(())
+    })
+    .expect("failed creating grouped doc");
+    let handle = owner
+        .repo
+        .create_doc_with_parents(doc, vec![group.clone().into()])
+        .await?;
+    let doc_id = handle.document_id();
+
+    for _ in 0..2 {
+        owner_member_conn.sync_keyhive_with_peer(None).await?;
+        member_conn.sync_keyhive_with_peer(None).await?;
+        owner_outsider_conn.sync_keyhive_with_peer(None).await?;
+        outsider_conn.sync_keyhive_with_peer(None).await?;
+    }
+
+    timeout(
+        Duration::from_secs(5),
+        member_conn.sync_doc_with_peer(doc_id, Some(Duration::from_secs(2))),
+    )
+    .await
+    .expect("timed out waiting for member doc sync")?;
+    let member_doc = timeout(
+        Duration::from_secs(5),
+        wait_for_doc_handle(&member.repo, doc_id),
+    )
+    .await
+    .expect("timed out waiting for member doc materialization");
+    assert_eq!(
+        member_doc
+            .with_document_read(|doc| get_str_at_root(doc, "title"))
+            .await,
+        "grouped"
+    );
+    assert!(
+        member.repo.export_doc(&doc_id).await?.is_some(),
+        "group member should export plaintext after sync"
+    );
+
+    let outsider_sync = timeout(
+        Duration::from_secs(5),
+        outsider_conn.sync_doc_with_peer(doc_id, Some(Duration::from_secs(2))),
+    )
+    .await
+    .expect("timed out waiting for outsider doc sync");
+    match outsider_sync {
+        Ok(()) => match outsider.repo.get_doc(&doc_id).await? {
+            DocLookup::PendingMaterialization | DocLookup::Missing => {}
+            DocLookup::Ready(_) => panic!("outsider should not materialize plaintext"),
+        },
+        Err(err) => {
+            assert!(
+                matches!(err, SyncDocError::NotFound | SyncDocError::Unauthorized),
+                "outsider sync should fail cleanly, got {err:?}"
+            );
+        }
+    }
+
+    owner.shutdown().await?;
+    member.shutdown().await?;
+    outsider.shutdown().await?;
+    Ok(())
+}
+
+#[tokio::test]
+async fn concurrent_writers_with_edit_access_converge_after_bidirectional_sync() -> Res<()> {
+    let _guard = crate::test_support::capability_test_guard().await;
+    let temp_root = tempdir()?;
+    let owner_path = temp_root.path().join("owner");
+    let client_path = temp_root.path().join("client");
+    let owner = SyncRepoNode::boot(owner_path, 108, true).await?;
+    let client = SyncRepoNode::boot(client_path, 109, false).await?;
+
+    client.connect_to(&owner).await?;
+    owner.wait_for_accepts(1).await;
+    let owner_conn = owner.accepted_connection().await;
+    let client_conn = client.connection_to(&owner).await;
+
+    owner_conn.sync_keyhive_with_peer(None).await?;
+    client_conn.sync_keyhive_with_peer(None).await?;
+
+    use subduction_keyhive::KeyhivePeerId;
+    let client_kh_peer_id = KeyhivePeerId::from_bytes(*client.peer_id().as_bytes());
+    let client_agent = owner
+        .repo
+        .keyhive()
+        .get_agent_by_peer_id(&client_kh_peer_id)
+        .await?
+        .expect("client agent should be known after keyhive sync");
+
+    let mut doc = automerge::Automerge::new();
+    doc.transact(|tx| {
+        tx.put(automerge::ROOT, "title", "base")
+            .expect("failed seeding doc");
+        eyre::Ok(())
+    })
+    .expect("failed creating doc");
+    let handle = owner.repo.create_doc(doc).await?;
+    let doc_id = handle.document_id();
+    owner
+        .repo
+        .grant_doc_access(doc_id, client_agent, keyhive_core::access::Access::Edit)
+        .await?;
+
+    for _ in 0..2 {
+        owner_conn.sync_keyhive_with_peer(None).await?;
+        client_conn.sync_keyhive_with_peer(None).await?;
+    }
+
+    owner
+        .big_sync_store
+        .add_obj_to_parts(doc_id, stress_support::test_parts())
+        .await?;
+    client
+        .big_sync_store
+        .add_obj_to_parts(doc_id, stress_support::test_parts())
+        .await?;
+
+    timeout(
+        Duration::from_secs(5),
+        client_conn.sync_doc_with_peer(doc_id, Some(Duration::from_secs(2))),
+    )
+    .await
+    .expect("timed out waiting for initial writer sync")?;
+
+    let owner_doc = owner
+        .repo
+        .get_doc(&doc_id)
+        .await?
+        .expect("owner doc should exist");
+    let client_doc = client
+        .repo
+        .get_doc(&doc_id)
+        .await?
+        .expect("client doc should exist");
+    set_doc_actor(&owner_doc, automerge::ActorId::from([108_u8; 16])).await?;
+    set_doc_actor(&client_doc, automerge::ActorId::from([109_u8; 16])).await?;
+
+    owner_doc
+        .with_document(|doc| {
+            doc.transact(|tx| {
+                tx.put(automerge::ROOT, "owner_note", "one")
+                    .expect("failed owner mutation");
+                eyre::Ok(())
+            })
+            .expect("failed owner mutation");
+        })
+        .await?;
+    client_doc
+        .with_document(|doc| {
+            doc.transact(|tx| {
+                tx.put(automerge::ROOT, "client_note", "two")
+                    .expect("failed client mutation");
+                eyre::Ok(())
+            })
+            .expect("failed client mutation");
+        })
+        .await?;
+
+    for _ in 0..2 {
+        owner_conn.sync_keyhive_with_peer(None).await?;
+        client_conn.sync_keyhive_with_peer(None).await?;
+    }
+
+    let (owner_sync, client_sync) = tokio::join!(
+        timeout(
+            Duration::from_secs(5),
+            owner_conn.sync_doc_with_peer(doc_id, Some(Duration::from_secs(2))),
+        ),
+        timeout(
+            Duration::from_secs(5),
+            client_conn.sync_doc_with_peer(doc_id, Some(Duration::from_secs(2))),
+        ),
+    );
+    owner_sync
+        .expect("timed out waiting for owner doc sync")
+        .expect("owner doc sync failed");
+    client_sync
+        .expect("timed out waiting for client doc sync")
+        .expect("client doc sync failed");
+
+    let owner_doc = owner
+        .repo
+        .get_doc(&doc_id)
+        .await?
+        .expect("owner doc should exist");
+    let client_doc = client
+        .repo
+        .get_doc(&doc_id)
+        .await?
+        .expect("client doc should exist");
+    assert_eq!(
+        owner_doc
+            .with_document_read(|doc| get_str_at_root(doc, "title"))
+            .await,
+        "base"
+    );
+    assert_eq!(
+        client_doc
+            .with_document_read(|doc| get_str_at_root(doc, "title"))
+            .await,
+        "base"
+    );
+    assert_eq!(
+        owner_doc
+            .with_document_read(|doc| get_str_at_root(doc, "owner_note"))
+            .await,
+        "one"
+    );
+    assert_eq!(
+        client_doc
+            .with_document_read(|doc| get_str_at_root(doc, "owner_note"))
+            .await,
+        "one"
+    );
+    assert_eq!(
+        owner_doc
+            .with_document_read(|doc| get_str_at_root(doc, "client_note"))
+            .await,
+        "two"
+    );
+    assert_eq!(
+        client_doc
+            .with_document_read(|doc| get_str_at_root(doc, "client_note"))
+            .await,
+        "two"
+    );
+
+    owner.shutdown().await?;
+    client.shutdown().await?;
+    Ok(())
+}
+
+#[tokio::test]
+async fn unauthorized_peer_does_not_materialize_plaintext_without_grant() -> Res<()> {
+    let _guard = crate::test_support::capability_test_guard().await;
+    let temp_root = tempdir()?;
+    let owner_path = temp_root.path().join("owner");
+    let client_path = temp_root.path().join("client");
+    let owner = SyncRepoNode::boot(owner_path, 95, true).await?;
+    let client = SyncRepoNode::boot(client_path, 96, false).await?;
+
+    client.connect_to(&owner).await?;
+    owner.wait_for_accepts(1).await;
+    let owner_conn = owner.accepted_connection().await;
+    let client_conn = client.connection_to(&owner).await;
+
+    owner_conn.sync_keyhive_with_peer(None).await?;
+    client_conn.sync_keyhive_with_peer(None).await?;
+
+    let mut doc = automerge::Automerge::new();
+    doc.transact(|tx| tx.put(automerge::ROOT, "title", "hidden"))
+        .expect("failed seeding doc");
+    let handle = owner.repo.create_doc(doc).await?;
+    let doc_id = handle.document_id();
+
+    owner
+        .big_sync_store
+        .add_obj_to_parts(doc_id, stress_support::test_parts())
+        .await?;
+    client
+        .big_sync_store
+        .add_obj_to_parts(doc_id, stress_support::test_parts())
+        .await?;
+
+    let sync_result = timeout(
+        Duration::from_secs(5),
+        client_conn.sync_doc_with_peer(doc_id, Some(Duration::from_secs(2))),
+    )
+    .await
+    .expect("timed out waiting for unauthorized doc sync");
+    match sync_result {
+        Ok(()) => {
+            assert!(
+                client.repo.doc_payload_heads(doc_id).await?.is_some(),
+                "client should at least have doc payload heads if sync completed"
+            );
+            match client.repo.get_doc(&doc_id).await? {
+                DocLookup::PendingMaterialization | DocLookup::Missing => {}
+                DocLookup::Ready(_) => {
+                    panic!("unauthorized peer should not materialize plaintext")
+                }
+            }
+            match client.repo.export_doc(&doc_id).await? {
+                DocLookup::PendingMaterialization | DocLookup::Missing => {}
+                DocLookup::Ready(_) => panic!("unauthorized peer should not export plaintext"),
+            }
+        }
+        Err(err) => {
+            assert!(
+                matches!(err, SyncDocError::NotFound | SyncDocError::Unauthorized),
+                "unauthorized doc sync should fail cleanly, got {err:?}"
+            );
+        }
+    }
+
+    owner.shutdown().await?;
+    client.shutdown().await?;
+    Ok(())
+}
+
+#[tokio::test]
+async fn pending_materialization_becomes_ready_after_keyhive_grant_and_sync() -> Res<()> {
+    let _guard = crate::test_support::capability_test_guard().await;
+    let temp_root = tempdir()?;
+    let owner_path = temp_root.path().join("owner");
+    let client_path = temp_root.path().join("client");
+    let owner = SyncRepoNode::boot(owner_path, 101, true).await?;
+    let client = SyncRepoNode::boot(client_path, 102, false).await?;
+
+    client.connect_to(&owner).await?;
+    owner.wait_for_accepts(1).await;
+    let owner_conn = owner.accepted_connection().await;
+    let client_conn = client.connection_to(&owner).await;
+
+    owner_conn.sync_keyhive_with_peer(None).await?;
+    client_conn.sync_keyhive_with_peer(None).await?;
+
+    use subduction_keyhive::KeyhivePeerId;
+    let client_kh_peer_id = KeyhivePeerId::from_bytes(*client.peer_id().as_bytes());
+    let client_agent = owner
+        .repo
+        .keyhive()
+        .get_agent_by_peer_id(&client_kh_peer_id)
+        .await?
+        .expect("client agent should be known after initial keyhive sync");
+
+    let mut doc = automerge::Automerge::new();
+    doc.transact(|tx| tx.put(automerge::ROOT, "title", "pending"))
+        .expect("failed seeding doc");
+    let handle = owner.repo.create_doc(doc).await?;
+    let doc_id = handle.document_id();
+
+    owner
+        .repo
+        .grant_doc_access(doc_id, client_agent, keyhive_core::access::Access::Read)
+        .await?;
+
+    owner
+        .big_sync_store
+        .add_obj_to_parts(doc_id, stress_support::test_parts())
+        .await?;
+    client
+        .big_sync_store
+        .add_obj_to_parts(doc_id, stress_support::test_parts())
+        .await?;
+
+    timeout(
+        Duration::from_secs(5),
+        client_conn.sync_doc_with_peer(doc_id, Some(Duration::from_secs(2))),
+    )
+    .await
+    .expect("timed out waiting for pre-grant doc sync")?;
+
+    match client.repo.get_doc(&doc_id).await? {
+        DocLookup::PendingMaterialization | DocLookup::Missing => {}
+        DocLookup::Ready(_) => panic!("client should not read plaintext before grant"),
+    }
+    match client.repo.export_doc(&doc_id).await? {
+        DocLookup::PendingMaterialization | DocLookup::Missing => {}
+        DocLookup::Ready(_) => panic!("client should not export plaintext before grant"),
+    }
+
+    for _ in 0..2 {
+        owner_conn.sync_keyhive_with_peer(None).await?;
+        client_conn.sync_keyhive_with_peer(None).await?;
+    }
+
+    timeout(
+        Duration::from_secs(5),
+        client_conn.sync_doc_with_peer(doc_id, Some(Duration::from_secs(2))),
+    )
+    .await
+    .expect("timed out waiting for post-grant doc sync")?;
+
+    let client_doc = timeout(
+        Duration::from_secs(5),
+        wait_for_doc_handle(&client.repo, doc_id),
+    )
+    .await
+    .expect("timed out waiting for doc materialization after grant");
+    let title = client_doc
+        .with_document_read(|doc| get_str_at_root(doc, "title"))
+        .await;
+    assert_eq!(title, "pending");
+
+    let exported = client
+        .repo
+        .export_doc(&doc_id)
+        .await?
+        .expect("client should export plaintext after keyhive grant");
+    assert!(!exported.is_empty());
+
+    owner.shutdown().await?;
+    client.shutdown().await?;
+    Ok(())
+}
+
+#[tokio::test]
+async fn grant_doc_access_checkpoint_becomes_visible_after_reopen_and_keyhive_sync() -> Res<()> {
+    let _guard = crate::test_support::capability_test_guard().await;
+    let temp_root = tempdir()?;
+    let owner_path = temp_root.path().join("owner");
+    let client_path = temp_root.path().join("client");
+    let owner = SyncRepoNode::boot(owner_path, 131, true).await?;
+    let client = SyncRepoNode::boot(client_path.clone(), 132, false).await?;
+
+    client.connect_to(&owner).await?;
+    owner.wait_for_accepts(1).await;
+    let owner_conn = owner.accepted_connection().await;
+    let client_conn = client.connection_to(&owner).await;
+
+    owner_conn.sync_keyhive_with_peer(None).await?;
+    client_conn.sync_keyhive_with_peer(None).await?;
+
+    use subduction_keyhive::KeyhivePeerId;
+    let client_kh_peer_id = KeyhivePeerId::from_bytes(*client.peer_id().as_bytes());
+    let client_agent = owner
+        .repo
+        .keyhive()
+        .get_agent_by_peer_id(&client_kh_peer_id)
+        .await?
+        .expect("client agent should be known after keyhive sync");
+
+    let group = owner.repo.create_group_with_parents(vec![]).await?;
+    owner
+        .repo
+        .add_member_to_group(
+            client_agent.clone(),
+            &group,
+            keyhive_core::access::Access::Read,
+        )
+        .await?;
+
+    let mut doc = automerge::Automerge::new();
+    doc.transact(|tx| tx.put(automerge::ROOT, "title", "pregrant"))
+        .expect("failed seeding doc");
+    let handle = owner.repo.create_doc(doc).await?;
+    let doc_id = handle.document_id();
+
+    owner
+        .repo
+        .grant_doc_access(doc_id, group.clone(), keyhive_core::access::Access::Read)
+        .await?;
+
+    for _ in 0..2 {
+        owner_conn.sync_keyhive_with_peer(None).await?;
+        client_conn.sync_keyhive_with_peer(None).await?;
+    }
+
+    client_conn
+        .sync_doc_with_peer(doc_id, Some(SYNC_PROPAGATION_TIMEOUT))
+        .await?;
+
+    let client_kh_before_shutdown = client.repo.keyhive().clone_keyhive().await;
+    let client_kh_doc_id = keyhive_core::principal::document::id::DocumentId::from(
+        keyhive_core::principal::identifier::Identifier::from(
+            ed25519_dalek::VerifyingKey::from_bytes(&doc_id.into_bytes())
+                .expect("doc id should be keyhive verifying key"),
+        ),
+    );
+    let client_ops_before_shutdown = client_kh_before_shutdown
+        .cgka_ops_for_doc(&client_kh_doc_id)
+        .await
+        .expect("client cgka ops lookup should not fail");
+    assert!(
+        client_ops_before_shutdown
+            .as_ref()
+            .is_some_and(|ops| !ops.is_empty()),
+        "client should have synced CGKA ops before shutdown"
+    );
+
+    client.shutdown().await?;
+
+    let client = SyncRepoNode::boot(client_path.clone(), 132, false).await?;
+    client.connect_to(&owner).await?;
+    owner.wait_for_accepts(2).await;
+    let owner_conn = owner.accepted_connection().await;
+    let client_conn = client.connection_to(&owner).await;
+
+    owner_conn.sync_keyhive_with_peer(None).await?;
+    client_conn.sync_keyhive_with_peer(None).await?;
+
+    assert!(
+        client.repo.export_doc(&doc_id).await?.is_some(),
+        "reopened client should be able to export the doc after keyhive sync alone"
+    );
+
+    client.shutdown().await?;
+    owner.shutdown().await?;
     Ok(())
 }
 
@@ -427,6 +1287,27 @@ async fn grant_doc_access_checkpoint_survives_reopen_and_sync() -> Res<()> {
         pregrant_historic_title.as_deref(),
         Some("pregrant"),
         "checkpoint grant should preserve pregrant content across sync"
+    );
+
+    let client_keyhive_storage = crate::keyhive_storage::BigRepoKeyhiveStorage::fs(
+        client_path.join(crate::keyhive_storage::KEYHIVE_SUBDIR),
+    )?;
+    let stored_events = subduction_keyhive::load_events::<Vec<u8>, _, future_form::Sendable>(
+        &client_keyhive_storage,
+    )
+    .await?;
+    let stored_cgka_ops = stored_events
+        .iter()
+        .filter(|(_, event)| {
+            matches!(
+                event,
+                keyhive_core::event::static_event::StaticEvent::CgkaOperation(_)
+            )
+        })
+        .count();
+    assert!(
+        stored_cgka_ops > 0,
+        "client keyhive storage should contain synced CGKA ops before shutdown"
     );
 
     client.shutdown().await?;
