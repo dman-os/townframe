@@ -9,6 +9,7 @@ use crate::{
     BigKeyhiveAuthority, BigKeyhiveHandle, BigRepoChangeOrigin, ConnFinishSignal, DocumentId,
     PeerId,
 };
+use keyhive_core::event::static_event::StaticEvent;
 use subduction_keyhive::{KeyhiveConnection, KeyhivePeerId};
 
 use future_form::FutureForm;
@@ -18,7 +19,7 @@ use sedimentree_core::depth::CountLeadingZeroBytes;
 use sedimentree_core::sedimentree::{Sedimentree, SedimentreeItem};
 use sedimentree_core::{blob::Blob, id::SedimentreeId, loose_commit::id::CommitId};
 use std::collections::{BTreeSet, HashMap};
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::time::{Duration, Instant};
 use tokio::sync::{mpsc, oneshot};
 use tokio_util::sync::CancellationToken;
@@ -28,6 +29,7 @@ use subduction_core::subduction::request::FragmentRequested;
 
 const DOC_WORKER_IDLE_TTL: Duration = Duration::from_secs(3);
 type SharedPartitionStore = Arc<dyn big_sync::HostPartStore>;
+type PendingKeyhiveSyncWaiters = HashMap<PeerId, Vec<(u64, oneshot::Sender<Res<()>>)>>;
 
 #[derive(Debug, thiserror::Error, displaydoc::Display)]
 pub enum SyncDocError {
@@ -183,7 +185,12 @@ enum RuntimeCmd {
     },
     SyncKeyhiveWithPeer {
         peer_id: PeerId,
-        resp: oneshot::Sender<Res<bool>>,
+        waiter_id: u64,
+        resp: oneshot::Sender<Res<()>>,
+    },
+    CancelKeyhiveSyncWaiter {
+        peer_id: PeerId,
+        waiter_id: u64,
     },
     ReleaseDocLease {
         doc_id: DocumentId,
@@ -207,6 +214,9 @@ enum RuntimeEvt {
         peer_id: PeerId,
         src_task: ConnTask,
         error: Option<subduction_iroh::error::RunError>,
+    },
+    KeyhiveSyncDone {
+        peer_id: PeerId,
     },
     DocWorkerTransientFinished {
         doc_id: DocumentId,
@@ -238,7 +248,11 @@ pub struct BigRepoRuntimeHandle {
     #[educe(Debug(ignore))]
     keyhive: BigKeyhiveHandle,
     #[educe(Debug(ignore))]
+    keyhive_storage: BigRepoKeyhiveStorage,
+    #[educe(Debug(ignore))]
     keyhive_protocol: BigRepoKeyhiveProtocol,
+    #[educe(Debug(ignore))]
+    keyhive_sync_waiter_ids: Arc<AtomicU64>,
 }
 
 impl BigRepoRuntimeHandle {
@@ -261,10 +275,12 @@ impl BigRepoRuntimeHandle {
         let content_heads = NonEmpty::from_vec(heads.iter().map(|h| h.0).collect())
             .ok_or_else(|| eyre::eyre!("automerge doc has no heads"))?;
         let doc_id = if parents.is_empty() {
-            self.keyhive.create_doc(content_heads).await?
+            self.keyhive
+                .create_doc(content_heads, &self.keyhive_storage)
+                .await?
         } else {
             self.keyhive
-                .create_doc_with_parents(parents, content_heads)
+                .create_doc_with_parents(parents, content_heads, &self.keyhive_storage)
                 .await?
         };
         self.note_local_keyhive_changed().await?;
@@ -418,55 +434,39 @@ impl BigRepoRuntimeHandle {
 
     /// Initiate a keyhive protocol sync with the given peer.
     ///
-    /// The call waits until the keyhive protocol observes a completed sync
-    /// round for the peer. A syncpoint may reduce this to a lightweight sync
-    /// check, but the waiter still resolves only after confirmation.
+    /// The call waits until BigRepo observes the completed sync round or the
+    /// peer is disconnected/closed.
     pub async fn sync_keyhive_with_peer(
         &self,
         peer_id: PeerId,
         timeout: Option<std::time::Duration>,
     ) -> Res<()> {
-        let keyhive_peer_id = KeyhivePeerId::from_bytes(*peer_id.as_bytes());
-        let (waiter_id, waiter_rx) = self
-            .keyhive_protocol
-            .register_sync_waiter(&keyhive_peer_id)
-            .await;
+        let waiter_id = self.keyhive_sync_waiter_ids.fetch_add(1, Ordering::Relaxed);
         let (tx, rx) = oneshot::channel();
         if self
             .cmd_tx
-            .send(RuntimeCmd::SyncKeyhiveWithPeer { peer_id, resp: tx })
+            .send(RuntimeCmd::SyncKeyhiveWithPeer {
+                peer_id,
+                waiter_id,
+                resp: tx,
+            })
             .is_err()
         {
-            self.keyhive_protocol
-                .cancel_sync_waiter(&keyhive_peer_id, waiter_id)
-                .await;
             return Err(ferr!("runtime channel closed"));
         }
-        let _started_full_sync = match rx
-            .await
-            .map_err(|_| ferr!("sync keyhive response channel closed"))?
-        {
-            Ok(started_full_sync) => started_full_sync,
-            Err(err) => {
-                self.keyhive_protocol
-                    .cancel_sync_waiter(&keyhive_peer_id, waiter_id)
-                    .await;
-                return Err(err);
-            }
-        };
         let timeout = timeout.unwrap_or_else(|| utils_rs::scale_timeout(Duration::from_secs(5)));
-        match tokio::time::timeout(timeout, waiter_rx).await {
-            Ok(Ok(())) => Ok(()),
-            Ok(Err(_)) => Err(ferr!("keyhive sync waiter canceled before completion")),
+        match tokio::time::timeout(timeout, rx).await {
+            Ok(Ok(res)) => res.wrap_err("keyhive sync request failed")?,
+            Ok(Err(_)) => return Err(ferr!("sync keyhive response channel closed")),
             Err(_) => {
-                self.keyhive_protocol
-                    .cancel_sync_waiter(&keyhive_peer_id, waiter_id)
-                    .await;
-                Err(ferr!("keyhive sync timed out waiting for completion"))
+                self.cmd_tx
+                    .send(RuntimeCmd::CancelKeyhiveSyncWaiter { peer_id, waiter_id })
+                    .map_err(|_| ferr!("runtime channel closed"))?;
+                return Err(ferr!("keyhive sync timed out waiting for completion"));
             }
-        }?;
+        }
         self.keyhive_protocol.ingest_from_storage().await?;
-        self.refresh_keyhive_cache().await?;
+        self.keyhive_protocol.note_local_keyhive_changed().await?;
         Ok(())
     }
 
@@ -482,16 +482,10 @@ pub struct BigRepoRuntimeStopToken {
     cancel_token: CancellationToken,
     machine_loop_handle: tokio::task::JoinHandle<()>,
     runtime_tasks: Arc<utils_rs::AbortableJoinSet>,
-    keyhive_protocol: BigRepoKeyhiveProtocol,
-    keyhive_archive_id: subduction_keyhive::storage::StorageHash,
 }
 
 impl BigRepoRuntimeStopToken {
     pub async fn stop(self) -> Res<()> {
-        self.keyhive_protocol
-            .compact(self.keyhive_archive_id)
-            .await
-            .wrap_err("keyhive archive compact failed during stop")?;
         self.cancel_token.cancel();
         match self.runtime_tasks.stop(Duration::from_secs(5)).await {
             Ok(()) => {}
@@ -593,6 +587,7 @@ where
     ));
     let (cmd_tx, mut cmd_rx) = mpsc::unbounded_channel::<RuntimeCmd>();
     let (evt_tx, mut evt_rx) = mpsc::unbounded_channel::<RuntimeEvt>();
+    let keyhive_sync_waiter_ids = Arc::new(AtomicU64::new(0));
     let storage_for_reads = storage.clone();
     let sync_session_observer: Arc<
         dyn subduction_core::sync_session::SyncSessionObserver + Send + Sync,
@@ -615,8 +610,22 @@ where
     let send_counter = sync_handler.send_counter().clone();
     let sync_handler = Arc::new(sync_handler);
 
+    let keyhive_sync_done_observer: Arc<dyn Fn(KeyhivePeerId) + Send + Sync> = {
+        let evt_tx = evt_tx.clone();
+        Arc::new(move |peer_id| {
+            let peer_id = PeerId::new(*peer_id.verifying_key());
+            evt_tx
+                .send(RuntimeEvt::KeyhiveSyncDone { peer_id })
+                .expect(ERROR_CHANNEL);
+        })
+    };
     // Boot keyhive protocol and handler
-    let (keyhive_protocol, keyhive_handler) = boot_keyhive(&keyhive, keyhive_storage).await?;
+    let (keyhive_protocol, keyhive_handler) = boot_keyhive(
+        &keyhive,
+        keyhive_storage.clone(),
+        Some(keyhive_sync_done_observer),
+    )
+    .await?;
     let composed_handler = Arc::new(BigRepoComposedHandler::new(sync_handler, keyhive_handler));
 
     let (subduction, listener, manager) = Subduction::new(
@@ -643,6 +652,7 @@ where
     let runtime_worker = BigRepoRuntimeWorker {
         keyhive: keyhive.clone(),
         keyhive_protocol: Arc::clone(&keyhive_protocol),
+        keyhive_storage: keyhive_storage.clone(),
         subduction: subduction_handle,
         sedimentrees: Arc::clone(&sedimentrees),
         storage_for_reads,
@@ -656,6 +666,8 @@ where
         cmd_tx: cmd_tx.clone(),
         evt_tx: evt_tx.clone(),
         connected_peers: default(),
+        keyhive_sync_waiter_ids: Arc::clone(&keyhive_sync_waiter_ids),
+        pending_keyhive_syncs: default(),
         doc_workers: default(),
     };
 
@@ -762,14 +774,14 @@ where
         BigRepoRuntimeHandle {
             cmd_tx,
             keyhive: keyhive.clone(),
+            keyhive_storage,
             keyhive_protocol: Arc::clone(&keyhive_protocol),
+            keyhive_sync_waiter_ids: Arc::clone(&keyhive_sync_waiter_ids),
         },
         BigRepoRuntimeStopToken {
             cancel_token: runtime_stop,
             machine_loop_handle,
             runtime_tasks,
-            keyhive_protocol: Arc::clone(&keyhive_protocol),
-            keyhive_archive_id,
         },
     ))
 }
@@ -780,6 +792,7 @@ where
 {
     keyhive: BigKeyhiveHandle,
     keyhive_protocol: BigRepoKeyhiveProtocol,
+    keyhive_storage: BigRepoKeyhiveStorage,
     subduction: Arc<BigRepoSubduction<S>>,
     sedimentrees: SubductionSedimentrees,
     storage_for_reads: S,
@@ -793,6 +806,8 @@ where
     cmd_tx: mpsc::UnboundedSender<RuntimeCmd>,
     evt_tx: mpsc::UnboundedSender<RuntimeEvt>,
     connected_peers: Arc<tokio::sync::Mutex<HashMap<PeerId, RuntimePeerConnDeets>>>,
+    keyhive_sync_waiter_ids: Arc<AtomicU64>,
+    pending_keyhive_syncs: PendingKeyhiveSyncWaiters,
     doc_workers: HashMap<DocumentId, DocWorkerEntry>,
 }
 
@@ -894,17 +909,56 @@ where
                     })
                     .expect(ERROR_ACTOR);
             }
-            RuntimeCmd::SyncKeyhiveWithPeer { peer_id, resp } => {
+            RuntimeCmd::SyncKeyhiveWithPeer {
+                peer_id,
+                waiter_id,
+                resp,
+            } => {
                 let kh_peer_id = KeyhivePeerId::from_bytes(*peer_id.as_bytes());
                 tracing::info!("SyncKeyhiveWithPeer: initiating sync");
-                let res = self
+                self.pending_keyhive_syncs
+                    .entry(peer_id)
+                    .or_default()
+                    .push((waiter_id, resp));
+                if let Err(err) = self.keyhive_protocol.ingest_from_storage().await {
+                    if let Some(resp) = self.cancel_pending_keyhive_sync(peer_id, waiter_id) {
+                        if let Err(send_err) = resp.send(Err(ferr!(
+                            "keyhive ingest_from_storage before sync failed: {err}"
+                        ))) {
+                            warn!(error = ?send_err, "failed sending keyhive sync response");
+                        }
+                    }
+                    return Ok(());
+                }
+                if let Err(err) = self.keyhive_protocol.note_local_keyhive_changed().await {
+                    if let Some(resp) = self.cancel_pending_keyhive_sync(peer_id, waiter_id) {
+                        if let Err(send_err) = resp.send(Err(ferr!(
+                            "keyhive local-change refresh before sync failed: {err}"
+                        ))) {
+                            warn!(error = ?send_err, "failed sending keyhive sync response");
+                        }
+                    }
+                    return Ok(());
+                }
+                match self
                     .keyhive_protocol
                     .initiate_sync_with_peer(&kh_peer_id)
                     .await
-                    .wrap_err("keyhive initiate_sync_with_peer failed");
-                if let Err(e) = resp.send(res) {
-                    warn!(error = ?e, "failed sending keyhive sync response");
+                {
+                    Ok(_) => {}
+                    Err(err) => {
+                        if let Some(resp) = self.cancel_pending_keyhive_sync(peer_id, waiter_id) {
+                            if let Err(send_err) = resp
+                                .send(Err(ferr!("keyhive initiate_sync_with_peer failed: {err}")))
+                            {
+                                warn!(error = ?send_err, "failed sending keyhive sync response");
+                            }
+                        }
+                    }
                 }
+            }
+            RuntimeCmd::CancelKeyhiveSyncWaiter { peer_id, waiter_id } => {
+                let _ = self.cancel_pending_keyhive_sync(peer_id, waiter_id);
             }
             RuntimeCmd::ReleaseDocLease { doc_id } => self.handle_release_doc_lease(doc_id).await,
         }
@@ -931,6 +985,9 @@ where
             } => {
                 self.handle_connection_lost(peer_id, error, src_task)
                     .await?;
+            }
+            RuntimeEvt::KeyhiveSyncDone { peer_id } => {
+                self.handle_keyhive_sync_done(peer_id).await?;
             }
             RuntimeEvt::DocWorkerTransientFinished { doc_id } => {
                 self.handle_doc_worker_transient_finished(doc_id);
@@ -997,10 +1054,14 @@ where
     }
 
     fn handle_doc_worker_transient_finished(&mut self, doc_id: DocumentId) {
-        let Some(entry) = self.doc_workers.get_mut(&doc_id) else {
-            return;
-        };
-        entry.transient_work = entry.transient_work.saturating_sub(1);
+        let entry = self.doc_workers.get_mut(&doc_id).unwrap_or_else(|| {
+            panic!("transient work finished for unknown doc worker: {doc_id:?}")
+        });
+        assert!(
+            entry.transient_work > 0,
+            "transient work underflow for doc worker: {doc_id:?}"
+        );
+        entry.transient_work -= 1;
         self.schedule_doc_worker_eviction_if_idle(doc_id);
     }
 
@@ -1014,6 +1075,51 @@ where
 
     fn handle_doc_worker_stopped(&mut self, doc_id: DocumentId) {
         self.doc_workers.remove(&doc_id);
+    }
+
+    fn complete_pending_keyhive_syncs(&mut self, peer_id: PeerId) {
+        if let Some(waiters) = self.pending_keyhive_syncs.remove(&peer_id) {
+            for (_, waiter) in waiters {
+                waiter
+                    .send(Ok(()))
+                    .inspect_err(|_| warn!(ERROR_CALLER))
+                    .ok();
+            }
+        }
+    }
+
+    fn cancel_pending_keyhive_syncs(&mut self, peer_id: PeerId, reason: &'static str) {
+        if let Some(waiters) = self.pending_keyhive_syncs.remove(&peer_id) {
+            for (_, waiter) in waiters {
+                waiter
+                    .send(Err(ferr!("{reason}")))
+                    .inspect_err(|_| warn!(ERROR_CALLER))
+                    .ok();
+            }
+        }
+    }
+
+    fn cancel_pending_keyhive_sync(
+        &mut self,
+        peer_id: PeerId,
+        waiter_id: u64,
+    ) -> Option<oneshot::Sender<Res<()>>> {
+        let mut remove_peer = false;
+        let waiter = {
+            let waiters = self.pending_keyhive_syncs.get_mut(&peer_id)?;
+            let pos = waiters
+                .iter()
+                .position(|(pending_id, _)| *pending_id == waiter_id)?;
+            let (_, waiter) = waiters.remove(pos);
+            if waiters.is_empty() {
+                remove_peer = true;
+            }
+            waiter
+        };
+        if remove_peer {
+            self.pending_keyhive_syncs.remove(&peer_id);
+        }
+        Some(waiter)
     }
 
     #[tracing::instrument(skip_all,fields(%doc_id))]
@@ -1037,12 +1143,15 @@ where
             subduction: Arc::clone(&self.subduction),
             sedimentrees: Arc::clone(&self.sedimentrees),
             storage_for_reads: self.storage_for_reads.clone(),
+            keyhive_storage: self.keyhive_storage.clone(),
             big_sync_store: Arc::clone(&self.big_sync_store),
             change_manager: Arc::clone(&self.change_manager),
             runtime_handle: BigRepoRuntimeHandle {
                 cmd_tx: self.cmd_tx.clone(),
                 keyhive: self.keyhive.clone(),
+                keyhive_storage: self.keyhive_storage.clone(),
                 keyhive_protocol: Arc::clone(&self.keyhive_protocol),
+                keyhive_sync_waiter_ids: Arc::clone(&self.keyhive_sync_waiter_ids),
             },
             runtime_evt_tx,
             // shutdown: worker_cancel.clone(),
@@ -1107,7 +1216,11 @@ where
 
     async fn handle_release_doc_lease(&mut self, doc_id: DocumentId) {
         if let Some(entry) = self.doc_workers.get_mut(&doc_id) {
-            entry.local_handles = entry.local_handles.saturating_sub(1);
+            assert!(
+                entry.local_handles > 0,
+                "doc lease underflow for doc worker: {doc_id:?}"
+            );
+            entry.local_handles -= 1;
             entry
                 .handle
                 .send(DocWorkerMsg::ReleaseHandleLease)
@@ -1138,6 +1251,26 @@ where
         worker
             .send(DocWorkerMsg::ApplySyncSession { session })
             .expect(ERROR_ACTOR);
+    }
+
+    async fn handle_keyhive_sync_done(&mut self, peer_id: PeerId) -> Res<()> {
+        if let Err(err) = self
+            .keyhive
+            .save_storage_archive(&self.keyhive_storage)
+            .await
+        {
+            if let Some(waiters) = self.pending_keyhive_syncs.remove(&peer_id) {
+                for (_, waiter) in waiters {
+                    waiter
+                        .send(Err(ferr!("keyhive archive save after sync failed: {err}")))
+                        .inspect_err(|_| warn!(ERROR_CALLER))
+                        .ok();
+                }
+            }
+            return Err(err);
+        }
+        self.complete_pending_keyhive_syncs(peer_id);
+        Ok(())
     }
 }
 
@@ -1334,9 +1467,13 @@ where
     }
 
     #[tracing::instrument(skip_all)]
-    async fn handle_close_iroh(&self, peer_id: PeerId, done: Option<oneshot::Sender<Res<()>>>) {
+    async fn handle_close_iroh(&mut self, peer_id: PeerId, done: Option<oneshot::Sender<Res<()>>>) {
         let subduction: Arc<BigRepoSubduction<S>> = Arc::clone(&self.subduction);
         let connected_peers = Arc::clone(&self.connected_peers);
+        self.keyhive_protocol
+            .remove_peer(&KeyhivePeerId::from_bytes(*peer_id.as_bytes()))
+            .await;
+        self.cancel_pending_keyhive_syncs(peer_id, "keyhive peer closed");
         self.spawn_background(async move {
             let out = async {
                 let deets = connected_peers.lock().await.remove(&peer_id);
@@ -1361,12 +1498,15 @@ where
 
     #[tracing::instrument(skip_all, fields(%peer_id))]
     async fn handle_connection_lost(
-        &self,
+        &mut self,
         peer_id: PeerId,
         err: Option<subduction_iroh::error::RunError>,
         _task: ConnTask,
     ) -> Res<()> {
         let deets = self.connected_peers.lock().await.remove(&peer_id);
+        let keyhive_peer_id = KeyhivePeerId::from_bytes(*peer_id.as_bytes());
+        self.keyhive_protocol.remove_peer(&keyhive_peer_id).await;
+        self.cancel_pending_keyhive_syncs(peer_id, "keyhive connection lost");
         if let Some(deets) = deets {
             deets.closed.store(true, Ordering::SeqCst);
             deets.cancel_token.cancel();
@@ -1389,10 +1529,23 @@ where
 
     #[tracing::instrument(skip_all, fields(%peer_id))]
     async fn handle_connection_established(&self, peer_id: PeerId, deets: RuntimePeerConnDeets) {
+        self.keyhive_protocol
+            .clear_syncpoint_for_peer(&KeyhivePeerId::from_bytes(*peer_id.as_bytes()))
+            .await;
         let mut connected_peers = self.connected_peers.lock().await;
         if let Some(previous) = connected_peers.insert(peer_id, deets) {
+            previous.closed.store(true, Ordering::SeqCst);
             previous.cancel_token.cancel();
-            panic!("fish trap: how did we establish a new connection without closing the previous? is this normal?")
+            if let Some(tx) = previous.end_signal_tx {
+                tx.send(ConnFinishSignal {
+                    peer_id,
+                    err: Some(ferr!(
+                        "connection replaced by a newer connection for the same peer"
+                    )),
+                })
+                .inspect_err(|_| warn!(ERROR_CALLER))
+                .ok();
+            }
         }
     }
 }
@@ -1467,6 +1620,7 @@ where
     subduction: Arc<BigRepoSubduction<S>>,
     sedimentrees: SubductionSedimentrees,
     storage_for_reads: S,
+    keyhive_storage: BigRepoKeyhiveStorage,
     big_sync_store: SharedPartitionStore,
     change_manager: Arc<changes::ChangeListenerManager>,
     runtime_handle: BigRepoRuntimeHandle,
@@ -1499,11 +1653,7 @@ where
             }
             DocWorkerMsg::ExportDocSave { resp: done } => {
                 let res = self.handle_export_doc_save().await;
-                self.runtime_evt_tx
-                    .send(RuntimeEvt::DocWorkerTransientFinished {
-                        doc_id: self.doc_id,
-                    })
-                    .wrap_err(ERROR_CHANNEL)?;
+                self.finish_transient_work()?;
                 done.send(res).inspect_err(|_| warn!(ERROR_CALLER)).ok();
             }
             DocWorkerMsg::CommitDelta {
@@ -1516,28 +1666,18 @@ where
                 let res = self
                     .handle_commit_delta(commits, heads, patches, origin)
                     .await;
-                self.runtime_evt_tx
-                    .send(RuntimeEvt::DocWorkerTransientFinished {
-                        doc_id: self.doc_id,
-                    })
-                    .wrap_err(ERROR_CHANNEL)?;
+                self.finish_transient_work()?;
                 done.send(res).inspect_err(|_| warn!(ERROR_CALLER)).ok();
             }
             DocWorkerMsg::ApplySyncSession { session } => {
                 let peer_id = PeerId::new(*session.peer_id.as_bytes());
                 self.handle_apply_sync_session(session).await?;
-                self.runtime_evt_tx
-                    .send(RuntimeEvt::DocWorkerTransientFinished {
-                        doc_id: self.doc_id,
-                    })
-                    .wrap_err(ERROR_CHANNEL)?;
+                self.finish_transient_work()?;
                 if let Some(waiters) = self.pending_sync_jobs.remove(&peer_id) {
+                    // Each pending sync waiter accounts for the matching
+                    // `RuntimeCmd::SyncDocWithPeer` increment.
                     for waiter in waiters {
-                        self.runtime_evt_tx
-                            .send(RuntimeEvt::DocWorkerTransientFinished {
-                                doc_id: self.doc_id,
-                            })
-                            .wrap_err(ERROR_CHANNEL)?;
+                        self.finish_transient_work()?;
                         waiter
                             .send(Ok(()))
                             .inspect_err(|_| warn!(ERROR_CALLER))
@@ -1585,11 +1725,14 @@ where
         let ingested = ingest_automerge(&doc, sedimentree_id);
 
         // Encrypt blobs via keyhive before storage
-        let (sedimentree, blobs) =
+        let (sedimentree, blobs, update_ops) =
             encrypt_ingested_blobs(&ingested, &self.runtime_handle.keyhive, sedimentree_id)
                 .await
                 .map_err(|e| PutDocError::Other(ferr!("encryption failed: {e}")))?;
 
+        for update_op in update_ops {
+            persist_cgka_update_op(&self.keyhive_storage, update_op).await?;
+        }
         self.subduction
             .store_sedimentree(sedimentree_id, sedimentree, blobs)
             .await
@@ -1785,7 +1928,7 @@ where
             keyhive_crypto::symmetric_key::SymmetricKey,
         > = std::collections::HashMap::new();
         for (head, parents, blob) in commits {
-            let (encrypted_blob, app_key) = encrypt_loose_commit(
+            let (encrypted_blob, app_key, update_op) = encrypt_loose_commit_with_update_op(
                 &self.runtime_handle.keyhive,
                 sedimentree_id,
                 head,
@@ -1795,6 +1938,9 @@ where
             )
             .await
             .map_err(|e| PutDocError::Other(ferr!("encryption failed: {e}")))?;
+            if let Some(update_op) = update_op {
+                persist_cgka_update_op(&self.keyhive_storage, update_op).await?;
+            }
             batch_keys.insert(head, app_key);
             let pred_refs: Vec<Vec<u8>> = parents
                 .iter()
@@ -1855,43 +2001,46 @@ where
         // }
         use keyhive_core::crypto::envelope::Envelope;
 
-        let loose_commits = <S as subduction_core::storage::traits::Storage<
-            future_form::Sendable,
-        >>::load_loose_commits(
-            &self.storage_for_reads, session.sedimentree_id
-        )
-        .await?
-        .into_iter()
-        .collect::<Vec<_>>();
-        let fragments = <S as subduction_core::storage::traits::Storage<future_form::Sendable>>::load_fragments(
-            &self.storage_for_reads,
-            session.sedimentree_id,
-        )
-        .await?
-        .into_iter()
-        .collect::<Vec<_>>();
         let keyhive = self.runtime_handle.keyhive.clone_keyhive().await;
         let vk = ed25519_dalek::VerifyingKey::from_bytes(self.doc_id_subduction.as_bytes())
             .map_err(|_| ferr!("not a valid Keyhive DocumentId"))?;
         let kh_doc_id = keyhive_core::principal::document::id::DocumentId::from(
             keyhive_core::principal::identifier::Identifier::from(vk),
         );
-        let _keyhive_has_doc = keyhive.get_document(kh_doc_id).await.is_some();
+        let kh_doc = keyhive.get_document(kh_doc_id).await;
 
         let tree = match self.sedimentrees.get_cloned(&session.sedimentree_id).await {
             Some(tree) => tree,
-            None => sedimentree_core::sedimentree::minimized::MinimizedSedimentree::new(
-                Sedimentree::new(
-                    fragments
-                        .iter()
-                        .map(|verified| verified.payload().clone())
-                        .collect(),
-                    loose_commits
-                        .iter()
-                        .map(|verified| verified.payload().clone())
-                        .collect(),
-                ),
-            ),
+            None => {
+                let loose_commits = <S as subduction_core::storage::traits::Storage<
+                    future_form::Sendable,
+                >>::load_loose_commits(
+                    &self.storage_for_reads, session.sedimentree_id
+                )
+                .await?
+                .into_iter()
+                .collect::<Vec<_>>();
+                let fragments = <S as subduction_core::storage::traits::Storage<
+                    future_form::Sendable,
+                >>::load_fragments(
+                    &self.storage_for_reads, session.sedimentree_id
+                )
+                .await?
+                .into_iter()
+                .collect::<Vec<_>>();
+                sedimentree_core::sedimentree::minimized::MinimizedSedimentree::new(
+                    Sedimentree::new(
+                        fragments
+                            .iter()
+                            .map(|verified| verified.payload().clone())
+                            .collect(),
+                        loose_commits
+                            .iter()
+                            .map(|verified| verified.payload().clone())
+                            .collect(),
+                    ),
+                )
+            }
         };
         let order = tree
             .topsorted_blob_order()
@@ -1912,13 +2061,7 @@ where
 
         let mut materialization_pending = false;
         let blobs = {
-            let keyhive = self.runtime_handle.keyhive.clone_keyhive().await;
-            let vk = ed25519_dalek::VerifyingKey::from_bytes(self.doc_id_subduction.as_bytes())
-                .map_err(|_| ferr!("not a valid Keyhive DocumentId"))?;
-            let kh_doc_id = keyhive_core::principal::document::id::DocumentId::from(
-                keyhive_core::principal::identifier::Identifier::from(vk),
-            );
-            match keyhive.get_document(kh_doc_id).await {
+            match kh_doc {
                 Some(kh_doc) => {
                     let ciphertext_store = {
                         let store = BigRepoCiphertextStore::new(self.storage_for_reads.clone());
@@ -2091,7 +2234,15 @@ where
             }
         };
         if blobs.is_empty() {
-            self.refresh_doc_heads_from_storage(was_pending).await?;
+            store_doc_heads_payload(
+                &self.big_sync_store,
+                self.doc_id,
+                sedimentree_heads_payload(&tree),
+            )
+            .await?;
+            if materialization_pending {
+                self.mark_materialization_pending(was_pending)?;
+            }
             return Ok(());
         }
         if materialization_pending {
@@ -2312,6 +2463,14 @@ where
                             .push(sender);
                         return Ok(());
                     }
+                    if let Some(tree) = self.sedimentrees.get_cloned(&sedimentree_id).await {
+                        store_doc_heads_payload(
+                            &self.big_sync_store,
+                            self.doc_id,
+                            sedimentree_heads_payload(&tree),
+                        )
+                        .await?;
+                    }
                     Ok(())
                 } else if conn_errs.is_empty() {
                     Err(SyncDocError::NotFound)
@@ -2321,12 +2480,17 @@ where
             }
             Err(err) => Err(SyncDocError::IoError(ferr!("{err}"))),
         };
-        let evt = RuntimeEvt::DocWorkerTransientFinished {
-            doc_id: self.doc_id,
-        };
-        self.runtime_evt_tx.send(evt).wrap_err(ERROR_CHANNEL)?;
+        self.finish_transient_work()?;
         sender.send(res).inspect_err(|_| warn!(ERROR_CALLER)).ok();
         Ok(())
+    }
+
+    fn finish_transient_work(&self) -> Res<()> {
+        self.runtime_evt_tx
+            .send(RuntimeEvt::DocWorkerTransientFinished {
+                doc_id: self.doc_id,
+            })
+            .wrap_err(ERROR_CHANNEL)
     }
 
     fn mark_materialization_pending(&mut self, was_pending: bool) -> Res<()> {
@@ -2346,60 +2510,6 @@ where
         if was_pending {
             self.change_manager
                 .notify_local_doc_materialization_ready(self.doc_id, heads)?;
-        }
-        Ok(())
-    }
-
-    async fn refresh_doc_heads_from_storage(&mut self, was_pending: bool) -> Res<()> {
-        let sedimentree_id = self.doc_id_subduction;
-        let loose_commits = <S as subduction_core::storage::traits::Storage<
-            future_form::Sendable,
-        >>::load_loose_commits(&self.storage_for_reads, sedimentree_id)
-        .await?;
-        let fragments = <S as subduction_core::storage::traits::Storage<future_form::Sendable>>::load_fragments(
-            &self.storage_for_reads,
-            sedimentree_id,
-        )
-        .await?;
-        if loose_commits.is_empty() && fragments.is_empty() {
-            return Ok(());
-        }
-        let tree = match self.sedimentrees.get_cloned(&sedimentree_id).await {
-            Some(tree) => tree,
-            None => sedimentree_core::sedimentree::minimized::MinimizedSedimentree::new(
-                Sedimentree::new(
-                    fragments
-                        .iter()
-                        .map(|verified| verified.payload().clone())
-                        .collect(),
-                    loose_commits
-                        .iter()
-                        .map(|verified| verified.payload().clone())
-                        .collect(),
-                ),
-            ),
-        };
-        store_doc_heads_payload(
-            &self.big_sync_store,
-            self.doc_id,
-            sedimentree_heads_payload(&tree),
-        )
-        .await?;
-        match load_doc_snapshot(
-            &self.sedimentrees,
-            &self.storage_for_reads,
-            &self.runtime_handle.keyhive,
-            self.doc_id,
-        )
-        .await?
-        {
-            DocLookup::Ready(doc) => {
-                self.mark_materialization_ready(was_pending, Arc::from(doc.get_heads()))?;
-            }
-            DocLookup::PendingMaterialization => {
-                self.mark_materialization_pending(was_pending)?;
-            }
-            DocLookup::Missing => {}
         }
         Ok(())
     }
@@ -2846,19 +2956,27 @@ where
                 ));
             }
             let encrypted = decode_encrypted_blob(raw.as_slice())?;
-            let (entrypoint_raw, _entrypoint_key) = {
+            let decrypt_result = {
                 let mut doc = kh_doc.lock().await;
-                match doc.try_decrypt_content_keyed(&encrypted) {
-                    Ok(result) => result,
-                    Err(keyhive_core::principal::document::DecryptError::KeyNotFound) => {
-                        continue;
-                    }
-                    Err(err) => {
-                        return Err(ferr!(
-                                    "failed decrypting snapshot entrypoint: sedimentree_id={sedimentree_id:?} content_ref={content_ref:?} kind={:?} error={err}",
-                            locator.kind
-                        ));
-                    }
+                doc.try_decrypt_content_keyed(&encrypted)
+            };
+            let (entrypoint_raw, _entrypoint_key) = match decrypt_result {
+                Ok(result) => result,
+                Err(keyhive_core::principal::document::DecryptError::KeyNotFound) => {
+                    tracing::warn!(
+                        sedimentree_id = ?sedimentree_id,
+                        content_ref = ?content_ref,
+                        kind = ?locator.kind,
+                        pcs_update_op_hash = ?encrypted.pcs_update_op_hash,
+                        "snapshot decrypt key not found"
+                    );
+                    continue;
+                }
+                Err(err) => {
+                    return Err(ferr!(
+                                "failed decrypting snapshot entrypoint: sedimentree_id={sedimentree_id:?} content_ref={content_ref:?} kind={:?} error={err}",
+                        locator.kind
+                    ));
                 }
             };
             let entrypoint_envelope: keyhive_core::crypto::envelope::Envelope<Vec<u8>, Vec<u8>> =
@@ -2884,15 +3002,24 @@ where
         }
 
         if decrypted.is_none() {
-            return Ok(DocLookup::PendingMaterialization);
+            continue;
+        }
+    }
+
+    for (content_ref, items) in &items_by_ref {
+        if let Some(plaintext) = plaintext_by_ref.get(content_ref).cloned() {
+            for (idx, _) in items {
+                plaintext_by_index[*idx] = Some(plaintext.clone());
+            }
         }
     }
 
     let mut plaintexts: Vec<Vec<u8>> = Vec::with_capacity(order.len());
-    for (idx, plaintext) in plaintext_by_index.into_iter().enumerate() {
-        plaintexts.push(
-            plaintext.ok_or_else(|| ferr!("missing plaintext for snapshot blob at index {idx}"))?,
-        );
+    for plaintext in plaintext_by_index {
+        let Some(plaintext) = plaintext else {
+            return Ok(DocLookup::PendingMaterialization);
+        };
+        plaintexts.push(plaintext);
     }
 
     let mut buf = Vec::new();
@@ -3086,9 +3213,12 @@ impl<S> BigRepoCiphertextStore<S> {
         content_ref: Vec<u8>,
         sedimentree_id: SedimentreeId,
         kind: BigRepoCiphertextKind,
-    ) -> Res<()> {
+    ) -> Res<()>
+    where
+        S: BigRepoSubductionStorage,
+    {
         let commit_id_bytes: [u8; 32] = content_ref
-            .clone()
+            .as_slice()
             .try_into()
             .map_err(|_| ferr!("content ref must be 32 bytes"))?;
         let locator = BigRepoCiphertextLocator {
@@ -3096,12 +3226,27 @@ impl<S> BigRepoCiphertextStore<S> {
             sedimentree_id,
             commit_id: CommitId::new(commit_id_bytes),
         };
+        let raw = self
+            .load_raw_for_locator(&locator)
+            .await?
+            .ok_or_else(|| {
+                ferr!(
+                    "missing ciphertext blob while recording locator: sedimentree_id={sedimentree_id:?} content_ref={content_ref:?} kind={kind:?}"
+                )
+            })?;
+        let encrypted = decode_encrypted_blob(raw.as_slice())?;
         self.locators
             .lock()
             .await
-            .entry(content_ref)
+            .entry(content_ref.clone())
             .or_default()
             .insert(locator);
+        self.pcs_updates
+            .lock()
+            .await
+            .entry(encrypted.pcs_update_op_hash)
+            .or_default()
+            .insert(content_ref);
         Ok(())
     }
 
@@ -3270,7 +3415,11 @@ async fn encrypt_ingested_blobs(
     ingested: &IngestResult,
     keyhive_handle: &BigKeyhiveHandle,
     sedimentree_id: SedimentreeId,
-) -> Res<(Sedimentree, Vec<Blob>)> {
+) -> Res<(
+    Sedimentree,
+    Vec<Blob>,
+    Vec<keyhive_crypto::signed::Signed<beekem::operation::CgkaOperation>>,
+)> {
     use keyhive_core::crypto::envelope::Envelope;
     use keyhive_crypto::symmetric_key::SymmetricKey;
     use sedimentree_core::{blob::BlobMeta, fragment::Fragment, loose_commit::LooseCommit};
@@ -3288,6 +3437,8 @@ async fn encrypt_ingested_blobs(
     let mut encrypted_blobs: Vec<Blob> = Vec::with_capacity(ingested.blobs.len());
     let mut new_fragments: Vec<Fragment> = Vec::with_capacity(ingested.fragment_entries.len());
     let mut new_loose_commits: Vec<LooseCommit> = Vec::with_capacity(ingested.loose_entries.len());
+    let mut update_ops: Vec<keyhive_crypto::signed::Signed<beekem::operation::CgkaOperation>> =
+        Vec::with_capacity(ingested.fragment_entries.len() + ingested.loose_entries.len());
 
     // Track content_ref -> SymmetricKey for building ancestor maps
     let mut key_index: std::collections::HashMap<Vec<u8>, SymmetricKey> =
@@ -3326,6 +3477,9 @@ async fn encrypt_ingested_blobs(
             )
             .await
             .map_err(|e| ferr!("encrypt fragment failed: {e}"))?;
+        if let Some(update_op) = encrypted.update_op().cloned() {
+            update_ops.push(update_op);
+        }
 
         let env = EncryptedBlobEnvelope {
             encrypted: encrypted.encrypted_content().clone(),
@@ -3382,6 +3536,9 @@ async fn encrypt_ingested_blobs(
             )
             .await
             .map_err(|e| ferr!("encrypt loose commit failed: {e}"))?;
+        if let Some(update_op) = encrypted.update_op().cloned() {
+            update_ops.push(update_op);
+        }
 
         let env = EncryptedBlobEnvelope {
             encrypted: encrypted.encrypted_content().clone(),
@@ -3407,6 +3564,7 @@ async fn encrypt_ingested_blobs(
     Ok((
         Sedimentree::new(new_fragments, new_loose_commits),
         encrypted_blobs,
+        update_ops,
     ))
 }
 
@@ -3422,6 +3580,30 @@ async fn encrypt_loose_commit(
     blob: &[u8],
     batch_keys: &std::collections::HashMap<CommitId, keyhive_crypto::symmetric_key::SymmetricKey>,
 ) -> Res<(Blob, keyhive_crypto::symmetric_key::SymmetricKey)> {
+    let (blob, app_key, _) = encrypt_loose_commit_with_update_op(
+        keyhive_handle,
+        sedimentree_id,
+        head,
+        parents,
+        blob,
+        batch_keys,
+    )
+    .await?;
+    Ok((blob, app_key))
+}
+
+async fn encrypt_loose_commit_with_update_op(
+    keyhive_handle: &BigKeyhiveHandle,
+    sedimentree_id: SedimentreeId,
+    head: CommitId,
+    parents: &BTreeSet<CommitId>,
+    blob: &[u8],
+    batch_keys: &std::collections::HashMap<CommitId, keyhive_crypto::symmetric_key::SymmetricKey>,
+) -> Res<(
+    Blob,
+    keyhive_crypto::symmetric_key::SymmetricKey,
+    Option<keyhive_crypto::signed::Signed<beekem::operation::CgkaOperation>>,
+)> {
     use keyhive_core::crypto::envelope::Envelope;
     use keyhive_crypto::symmetric_key::SymmetricKey;
     let keyhive = keyhive_handle.clone_keyhive().await;
@@ -3469,6 +3651,7 @@ async fn encrypt_loose_commit(
         )
         .await
         .map_err(|e| ferr!("encrypt commit failed: {e}"))?;
+    let update_op = encrypted.update_op().cloned();
 
     let env = EncryptedBlobEnvelope {
         encrypted: encrypted.encrypted_content().clone(),
@@ -3478,7 +3661,7 @@ async fn encrypt_loose_commit(
     let mut encrypted_bytes = vec![0x02u8];
     encrypted_bytes.extend(drisl_env);
 
-    Ok((Blob::new(encrypted_bytes), app_key))
+    Ok((Blob::new(encrypted_bytes), app_key, update_op))
 }
 
 async fn encrypt_fragment_blob<S>(
@@ -3495,12 +3678,12 @@ where
     use keyhive_core::crypto::envelope::Envelope;
     use keyhive_crypto::{siv::Siv, symmetric_key::SymmetricKey};
 
-    let keyhive = keyhive_handle.clone_keyhive().await;
     let vk = ed25519_dalek::VerifyingKey::from_bytes(sedimentree_id.as_bytes())
         .map_err(|_| ferr!("not a valid Keyhive DocumentId"))?;
     let kh_doc_id = keyhive_core::principal::document::id::DocumentId::from(
         keyhive_core::principal::identifier::Identifier::from(vk),
     );
+    let keyhive = keyhive_handle.clone_keyhive().await;
     let kh_doc = keyhive
         .get_document(kh_doc_id)
         .await
@@ -3634,6 +3817,17 @@ async fn record_keyhive_content_frontier(
     Ok(())
 }
 
+async fn persist_cgka_update_op(
+    keyhive_storage: &BigRepoKeyhiveStorage,
+    update_op: keyhive_crypto::signed::Signed<beekem::operation::CgkaOperation>,
+) -> Res<()> {
+    let event = StaticEvent::CgkaOperation(Box::new(update_op));
+    subduction_keyhive::save_event::<Vec<u8>, _, future_form::Sendable>(keyhive_storage, &event)
+        .await
+        .map_err(|e| ferr!("failed to save keyhive cgka update op: {e}"))?;
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -3650,7 +3844,10 @@ mod tests {
     async fn ciphertext_store_loads_and_tombstones_stored_commit() -> Res<()> {
         let _guard = capability_test_guard().await;
         let keyhive = BigKeyhiveHandle::boot_memory_from_seed([9; 32]).await?;
-        let _doc_id = keyhive.create_doc(nonempty![[1; 32]]).await?;
+        let keyhive_storage = BigRepoKeyhiveStorage::memory();
+        let _doc_id = keyhive
+            .create_doc(nonempty![[1; 32]], &keyhive_storage)
+            .await?;
         let sedimentree_id = SedimentreeId::new(*_doc_id.as_bytes());
         let commit_id = CommitId::new([7; 32]);
         let storage = MemoryStorage::new();
@@ -3715,7 +3912,10 @@ mod tests {
         use sedimentree_core::fragment::Fragment;
 
         let keyhive = BigKeyhiveHandle::boot_memory_from_seed([11; 32]).await?;
-        let _doc_id = keyhive.create_doc(nonempty![[1; 32]]).await?;
+        let keyhive_storage = BigRepoKeyhiveStorage::memory();
+        let _doc_id = keyhive
+            .create_doc(nonempty![[1; 32]], &keyhive_storage)
+            .await?;
         let sedimentree_id = SedimentreeId::new(*_doc_id.as_bytes());
         let storage = MemoryStorage::new();
         let signer = MemorySigner::from_bytes(&[44u8; 32]);
@@ -3866,7 +4066,10 @@ mod tests {
     async fn fragment_encryption_reuses_existing_content_key() -> Res<()> {
         let _guard = capability_test_guard().await;
         let keyhive = BigKeyhiveHandle::boot_memory_from_seed([10; 32]).await?;
-        let doc_id = keyhive.create_doc(nonempty![[1; 32]]).await?;
+        let keyhive_storage = BigRepoKeyhiveStorage::memory();
+        let doc_id = keyhive
+            .create_doc(nonempty![[1; 32]], &keyhive_storage)
+            .await?;
         let sedimentree_id = SedimentreeId::new(*doc_id.as_bytes());
         let storage = MemoryStorage::new();
         let signer = MemorySigner::from_bytes(&[43u8; 32]);
@@ -3948,7 +4151,10 @@ mod tests {
     async fn load_doc_snapshot_rejects_plaintext_blob() -> Res<()> {
         let _guard = capability_test_guard().await;
         let keyhive = BigKeyhiveHandle::boot_memory_from_seed([12; 32]).await?;
-        let doc_id = keyhive.create_doc(nonempty![[1; 32]]).await?;
+        let keyhive_storage = BigRepoKeyhiveStorage::memory();
+        let doc_id = keyhive
+            .create_doc(nonempty![[1; 32]], &keyhive_storage)
+            .await?;
         let sedimentree_id = SedimentreeId::new(*doc_id.as_bytes());
         let storage = MemoryStorage::new();
         let signer = MemorySigner::from_bytes(&[45u8; 32]);

@@ -25,14 +25,14 @@ It currently consists of:
 ## Why?
 
 I think tools like these tend to be highly personal to each person and I recommend everyone try to build one for themselves.
-Either from scratch as is foolishly done here or by customizing an existing platform like Obsidian, Emacs, Notion and soforth
+Either from scratch as is foolishly done here or by customizing an existing platform like Obsidian, Emacs, Notion and soforth.
 
-Specifically, daybook design is informed by tech I find shiny, gaps I see in the current landscape for such solutions and my personal politics.
+Specifically, daybook design is informed by tech I find shiny, gaps I see in the current landscape and my personal politics.
 
 - Shiny tech
   - Everything that is and around LLMs.
   - Uses Automerge for an offline and local-first experience.
-  - Uses Compose Multiplatform for a reliable experience on Android and Desktop.
+  - Uses Compose Multiplatform for a reliable experience on Android and desktop.
   - Leverage WASM for plugins. 
 - Gaps
   - Emacs/Vim
@@ -40,14 +40,14 @@ Specifically, daybook design is informed by tech I find shiny, gaps I see in the
     - Pre-mobile tech
   - Notion 
     - Excellent design 
-    - Questionable performance on Android
     - Proprietary
+    - Questionable performance on Android
   - Obsidian 
     - Excellent sensibilities
-    - Questionable performance on Android
     - The plugins seem insecure
     - Collaboration is secondary?
     - Proprietary
+    - Questionable performance on Android
 - Politics
   - I'm an adblock person.
 

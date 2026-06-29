@@ -137,7 +137,12 @@ A locker is a bundle of docs that's acess managed by keyhive concap graph and st
   - On repo clone, we add the new peer to the BeeKEM so they can have access.
 - For collaboration, we'll create new lockers.
   - Optionally, it should be possible to use a separate doc id when uploading to a new locker to avoid metadata tracking.
-    - We can use KDF from the 
+    - We can use KDF from the...
+
+---
+
+So the conclusion of this is I'm going full on keyhive and avoiding a custom layer for now.
+Will revisit the design if it's found inadequate.
 
 ## 2026-05-29 | shoddy
 

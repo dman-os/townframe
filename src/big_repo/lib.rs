@@ -126,6 +126,8 @@ pub struct BigRepo {
     #[educe(Debug(ignore))]
     keyhive: BigKeyhiveHandle,
     #[educe(Debug(ignore))]
+    keyhive_storage: BigRepoKeyhiveStorage,
+    #[educe(Debug(ignore))]
     big_sync_store: SharedPartStore,
     #[educe(Debug(ignore))]
     runtime: runtime::BigRepoRuntimeHandle,
@@ -157,6 +159,8 @@ impl BigRepo {
         keyhive
             .restore_from_storage_archive(&keyhive_storage)
             .await?;
+        keyhive.ingest_from_storage(&keyhive_storage).await?;
+        keyhive.save_storage_archive(&keyhive_storage).await?;
         let policy_keyhive = keyhive.clone_keyhive().await;
         let policy = Arc::new(subduction_keyhive::policy::SubductionKeyhive::new(
             policy_keyhive,
@@ -171,7 +175,7 @@ impl BigRepo {
                     subduction_core::storage::memory::MemoryStorage::new(),
                     Arc::clone(&policy),
                     keyhive.clone(),
-                    keyhive_storage,
+                    keyhive_storage.clone(),
                     Arc::clone(&big_sync_store),
                     Arc::clone(&change_manager),
                 )
@@ -192,7 +196,7 @@ impl BigRepo {
                     redb_storage,
                     Arc::clone(&policy),
                     keyhive.clone(),
-                    keyhive_storage,
+                    keyhive_storage.clone(),
                     Arc::clone(&big_sync_store),
                     Arc::clone(&change_manager),
                 )
@@ -203,6 +207,7 @@ impl BigRepo {
         let out = Arc::new(Self {
             local_peer_id: peer_id,
             keyhive,
+            keyhive_storage,
             big_sync_store,
             runtime,
             change_manager,
@@ -284,7 +289,10 @@ impl BigRepo {
         self: &Arc<Self>,
         parents: Vec<BigKeyhiveAuthority>,
     ) -> Res<BigKeyhiveGroup> {
-        let group = self.keyhive.create_group_with_parents(parents).await?;
+        let group = self
+            .keyhive
+            .create_group_with_parents(parents, &self.keyhive_storage)
+            .await?;
         self.runtime.note_local_keyhive_changed().await?;
         Ok(group)
     }
@@ -296,7 +304,7 @@ impl BigRepo {
         access: keyhive_core::access::Access,
     ) -> Res<()> {
         self.keyhive
-            .add_member_to_group(member, group, access)
+            .add_member_to_group(member, group, access, &self.keyhive_storage)
             .await?;
         self.runtime.note_local_keyhive_changed().await?;
         Ok(())
@@ -325,9 +333,8 @@ impl BigRepo {
         };
 
         self.keyhive
-            .grant_doc_access(principal, doc_id, access)
+            .grant_doc_access(principal, doc_id, access, &self.keyhive_storage)
             .await?;
-        self.runtime.note_local_keyhive_changed().await?;
 
         if access.is_reader() {
             // Create the checkpoint after the grant so the checkpoint itself is
@@ -338,6 +345,8 @@ impl BigRepo {
             })
             .await?;
         }
+
+        self.runtime.note_local_keyhive_changed().await?;
 
         Ok(())
     }
