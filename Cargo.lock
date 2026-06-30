@@ -1148,7 +1148,7 @@ dependencies = [
  "arrayvec",
  "cc",
  "cfg-if 1.0.4",
- "constant_time_eq 0.4.2",
+ "constant_time_eq",
  "cpufeatures 0.3.0",
 ]
 
@@ -1852,12 +1852,6 @@ dependencies = [
 
 [[package]]
 name = "constant_time_eq"
-version = "0.3.1"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "7c74b8349d32d297c9134b8c88677813a227df8f779daa29bfc29c183fe3dca6"
-
-[[package]]
-name = "constant_time_eq"
 version = "0.4.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "3d52eff69cd5e647efe296129160853a42795992097e8af39800e1060caeea9b"
@@ -2551,6 +2545,7 @@ dependencies = [
  "jsonschema",
  "keyring-core",
  "libsqlite3-sys",
+ "linux-keyutils-keyring-store",
  "loom",
  "mltools",
  "oci-client",
@@ -5000,7 +4995,7 @@ dependencies = [
  "bytes",
  "cfg_aliases",
  "chrono",
- "constant_time_eq 0.3.1",
+ "constant_time_eq",
  "data-encoding",
  "derive_more",
  "genawaiter",
@@ -5102,7 +5097,7 @@ checksum = "48eaefd27751bc5dabda1f1b318c38a8b624fa137a1aaf429dfdd4d66b452ba9"
 dependencies = [
  "blake3",
  "bytes",
- "constant_time_eq 0.3.1",
+ "constant_time_eq",
  "data-encoding",
  "derive_more",
  "ed25519-dalek 3.0.0-pre.7",
@@ -5638,6 +5633,26 @@ dependencies = [
  "cc",
  "pkg-config",
  "vcpkg",
+]
+
+[[package]]
+name = "linux-keyutils"
+version = "0.2.5"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "83270a18e9f90d0707c41e9f35efada77b64c0e6f3f1810e71c8368a864d5590"
+dependencies = [
+ "bitflags 2.11.1",
+ "libc",
+]
+
+[[package]]
+name = "linux-keyutils-keyring-store"
+version = "1.0.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "39fbed79f71dc21eb21d3d07c0e908a3c58ff9a1fdbf5cf44230fb3deb6d994b"
+dependencies = [
+ "keyring-core",
+ "linux-keyutils",
 ]
 
 [[package]]

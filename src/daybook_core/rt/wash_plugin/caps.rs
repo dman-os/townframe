@@ -929,6 +929,18 @@ impl capabilities::HostFacetTagToken for SharedWashCtx {
                 "create denied".into(),
             )));
         }
+        // Validate key_id against facet_acl: the requested id must be covered by
+        // at least one ACL entry granting CREATE (tag-wide or key-specific match).
+        let key_authorized = token.facet_acl.iter().any(|access| {
+            access.tag.0 == token.tag
+                && access.create
+                && (access.key_id.is_none() || access.key_id.as_deref() == Some(&key_id))
+        });
+        if !key_authorized {
+            return Ok(Err(capabilities::UpdateDocError::Other(format!(
+                "create denied for key_id: {key_id}"
+            ))));
+        }
         let facet_key = daybook_types::doc::FacetKey {
             tag: daybook_types::doc::FacetTag::from(token.tag.as_str()),
             id: key_id,
@@ -1041,6 +1053,18 @@ impl capabilities::HostFacetTagToken for SharedWashCtx {
             return Ok(Err(capabilities::UpdateDocError::Other(
                 "create denied".into(),
             )));
+        }
+        // Validate key_id against facet_acl: the requested id must be covered by
+        // at least one ACL entry granting CREATE (tag-wide or key-specific match).
+        let key_authorized = token.facet_acl.iter().any(|access| {
+            access.tag.0 == token.tag
+                && access.create
+                && (access.key_id.is_none() || access.key_id.as_deref() == Some(&key_id))
+        });
+        if !key_authorized {
+            return Ok(Err(capabilities::UpdateDocError::Other(format!(
+                "create denied for key_id: {key_id}"
+            ))));
         }
         let facet_key = daybook_types::doc::FacetKey {
             tag: daybook_types::doc::FacetTag::from(token.tag.as_str()),

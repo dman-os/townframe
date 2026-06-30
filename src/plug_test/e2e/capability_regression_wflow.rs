@@ -637,3 +637,34 @@ async fn test_delete_facet_capability() -> Res<()> {
     test_cx.stop().await?;
     Ok(())
 }
+
+#[tokio::test(flavor = "multi_thread")]
+async fn test_key_specific_create_acl_capability() -> Res<()> {
+    let (test_cx, doc_id) = setup_and_dispatch_case(
+        "cap_reg_key_specific",
+        "test-key-specific-create-acl",
+        vec![],
+    )
+    .await?;
+
+    let db_pool = open_plug_test_local_state(&test_cx).await?;
+    let report =
+        fetch_capability_report_v2(&db_pool, &doc_id, "test_key_specific_create_acl").await?;
+
+    assert_eq!(
+        report["created_key"].as_str().unwrap_or(""),
+        "org.example.test.createable/authorized-key"
+    );
+    let rights = report["created_rights"].as_str().unwrap_or("");
+    assert!(
+        rights.contains("CREATE"),
+        "created facet token should have CREATE, got: {rights}"
+    );
+    assert!(
+        report["unauthorized_denied"].as_bool().unwrap_or(false),
+        "create with unauthorized key_id should be denied"
+    );
+
+    test_cx.stop().await?;
+    Ok(())
+}

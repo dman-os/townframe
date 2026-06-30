@@ -720,15 +720,26 @@ pub(crate) async fn build_doc_facet_tokens(
     let mut tag_rights_map: std::collections::HashMap<String, capabilities::FacetRights> =
         std::collections::HashMap::new();
     for access in &doc_tokens.facet_acl {
-        if access.key_id.is_some() {
-            continue;
-        }
         let tag_str = access.tag.0.clone();
-        let entry_rights = caps::facet_rights_from_access(access);
-        tag_rights_map
-            .entry(tag_str)
-            .and_modify(|rights| *rights |= entry_rights)
-            .or_insert(entry_rights);
+        if access.key_id.is_some() {
+            // Key-specific entries: only contribute CREATE to the tag token
+            // (facet-scoped READ/UPDATE/DELETE are handled by the facet loop above).
+            // This ensures routines can call tag_token.create(key_id, data) for
+            // key-specific create ACLs even when the facet doesn't exist yet.
+            if !access.create {
+                continue;
+            }
+            tag_rights_map
+                .entry(tag_str)
+                .and_modify(|rights| *rights |= capabilities::FacetRights::CREATE)
+                .or_insert(capabilities::FacetRights::CREATE);
+        } else {
+            let entry_rights = caps::facet_rights_from_access(access);
+            tag_rights_map
+                .entry(tag_str)
+                .and_modify(|rights| *rights |= entry_rights)
+                .or_insert(entry_rights);
+        }
     }
     for (tag_str, rights) in tag_rights_map {
         let ttoken = ctx.table.push(caps::FacetTagToken {

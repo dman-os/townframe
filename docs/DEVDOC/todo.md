@@ -26,6 +26,7 @@
 ## Stack
 
 - [ ] Fix secret store for CI
+- [ ] Plugs screen
 - [ ] Change manifest/types module structure for plugs
 - [ ] daybook_server
   - [ ] Decide on wrpc vs json

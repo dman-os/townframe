@@ -469,6 +469,45 @@ mod wasm_runtime {
         Ok(())
     }
 
+    fn test_key_specific_create_acl(_cx: &mut WflowCtx) -> Result<(), JobErrorX> {
+        let args = crate::wit::townframe::daybook::facet_routine::get_args();
+        let tag_token = args
+            .primary_doc
+            .tags
+            .iter()
+            .find(|tag| tag.tag() == "org.example.test.createable")
+            .ok_or_else(|| JobErrorX::Terminal(ferr!("createable tag token not found")))?;
+
+        if !tag_token
+            .rights()
+            .contains(crate::wit::townframe::daybook::capabilities::FacetRights::CREATE)
+        {
+            return Err(JobErrorX::Terminal(ferr!(
+                "createable tag token missing CREATE right"
+            )));
+        }
+
+        let new_facet =
+            daybook_types::doc::WellKnownFacet::LabelGeneric("created-via-key-specific-acl".into());
+        let facet_json = serde_json::to_string(&new_facet).expect(ERROR_JSON);
+
+        // Authorized: key_id matches the ACL's key-specific entry
+        let created = tag_token
+            .create("authorized-key", &facet_json)
+            .map_err(|err| JobErrorX::Terminal(ferr!("create authorized-key failed: {err:?}")))?;
+
+        // Unauthorized: key_id doesn't match any ACL entry
+        let denied = tag_token.create("unauthorized-key", &facet_json).is_err();
+
+        let summary = serde_json::json!({
+            "created_key": created.key(),
+            "created_rights": format!("{:?}", created.rights()),
+            "unauthorized_denied": denied,
+        });
+        write_report_v2(&args, "test_key_specific_create_acl", &summary)?;
+        Ok(())
+    }
+
     fn report_capabilities(_cx: &mut WflowCtx) -> Result<(), JobErrorX> {
         use crate::wit::townframe::daybook::facet_routine;
         use crate::wit::townframe::sql::types::SqlValue;
@@ -610,6 +649,7 @@ mod wasm_runtime {
                 "test-acl-aggregate" => |cx, _args: serde_json::Value| test_acl_aggregate(cx),
                 "test-create-facet" => |cx, _args: serde_json::Value| test_create_facet(cx),
                 "test-get-create-token" => |cx, _args: serde_json::Value| test_get_create_token(cx),
+                "test-key-specific-create-acl" => |cx, _args: serde_json::Value| test_key_specific_create_acl(cx),
                 "test-delete-facet" => |cx, _args: serde_json::Value| test_delete_facet(cx),
             })
         }
@@ -1208,6 +1248,48 @@ pub fn plug_manifest() -> PlugManifest {
                 }),
             ),
             (
+                "test-key-specific-create-acl".into(),
+                Arc::new(RoutineManifest {
+                    r#impl: RoutineImpl::Wflow {
+                        key: "test-key-specific-create-acl".into(),
+                        bundle: "plug_test".into(),
+                    },
+                    doc_acls: vec![RoutineDocAcl {
+                        doc_predicate: DocPredicateClause::HasTag(
+                            WellKnownFacetTag::LabelGeneric.into(),
+                        ),
+                        facet_acl: vec![
+                            RoutineFacetAccess {
+                                owner_plug_id: None,
+                                tag: WellKnownFacetTag::LabelGeneric.into(),
+                                key_id: None,
+                                read: true,
+                                write: false,
+                                create: false,
+                                delete: false,
+                            },
+                            RoutineFacetAccess {
+                                owner_plug_id: None,
+                                tag: "org.example.test.createable".into(),
+                                // key-specific: only "authorized-key" may be created
+                                key_id: Some("authorized-key".into()),
+                                read: false,
+                                write: false,
+                                create: true,
+                                delete: false,
+                            },
+                        ],
+                    }],
+                    query_acls: vec![],
+                    config_facet_acl: vec![],
+                    local_state_acl: vec![daybook_types::manifest::RoutineLocalStateAccess {
+                        plug_id: "@daybook/test".into(),
+                        local_state_key: "capability-report".into(),
+                    }],
+                    command_invoke_acl: vec![],
+                }),
+            ),
+            (
                 "test-delete-facet".into(),
                 Arc::new(RoutineManifest {
                     r#impl: RoutineImpl::Wflow {
@@ -1253,6 +1335,7 @@ pub fn plug_manifest() -> PlugManifest {
                     "test-acl-aggregate".into(),
                     "test-create-facet".into(),
                     "test-get-create-token".into(),
+                    "test-key-specific-create-acl".into(),
                     "test-delete-facet".into(),
                 ],
                 component_urls: vec!["static:plug_test.wasm.zst".parse().unwrap()],

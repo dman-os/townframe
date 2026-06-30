@@ -40,30 +40,49 @@ impl SecretRepo {
                 ) as _
             } else {
                 tokio::task::spawn_blocking(move || {
-                    let store;
                     #[cfg(target_os = "linux")]
                     {
-                        store = zbus_secret_service_keyring_store::Store::new()?;
+                        match zbus_secret_service_keyring_store::Store::new() {
+                            Ok(sec) => Ok(sec as Arc<keyring_core::CredentialStore>),
+                            Err(_) => {
+                                tracing::warn!(
+                                    "secret-service keyring unavailable, \
+                                     falling back to kernel keyring"
+                                );
+                                linux_keyutils_keyring_store::Store::new()
+                                    .map(|sec| sec as Arc<keyring_core::CredentialStore>)
+                                    .map_err(|err| {
+                                        eyre::eyre!(err).wrap_err("kernel keyring unavailable")
+                                    })
+                            }
+                        }
                     }
                     #[cfg(target_os = "android")]
                     {
-                        store = android_native_keyring_store::Store::new()?;
+                        android_native_keyring_store::Store::new()
+                            .map(|sec| Arc::new(sec) as Arc<keyring_core::CredentialStore>)
+                            .map_err(|err| eyre::eyre!(err).wrap_err("android keyring unavailable"))
                     }
                     #[cfg(target_os = "windows")]
                     {
-                        store = windows_native_keyring_store::Store::new()?;
+                        windows_native_keyring_store::Store::new()
+                            .map(|sec| Arc::new(sec) as Arc<keyring_core::CredentialStore>)
+                            .map_err(|err| eyre::eyre!(err).wrap_err("windows keyring unavailable"))
                     }
                     #[cfg(any(target_os = "macos", target_os = "ios"))]
                     {
-                        store = apple_native_keyring_store::keychain::Store::new()?;
+                        apple_native_keyring_store::keychain::Store::new()
+                            .map(|sec| Arc::new(sec) as Arc<keyring_core::CredentialStore>)
+                            .map_err(|err| eyre::eyre!(err).wrap_err("apple keychain unavailable"))
                     }
-                    eyre::Ok(store)
                 })
                 .await
                 .expect(ERROR_TOKIO)?
             };
+
         Ok(Self { store: Some(store) })
     }
+
     pub async fn load_identity(&self, checkout_id: &str) -> Res<Option<RepoIdentity>> {
         let store = Arc::clone(self.store.as_ref().expect(ERROR_IMPOSSIBLE));
         let user = format!("daybook.checkout.{checkout_id}.{}", Self::KEYRING_USERNAME);
