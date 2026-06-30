@@ -32,6 +32,7 @@ import java.nio.file.Path
 import kotlin.io.path.ExperimentalPathApi
 import kotlin.io.path.deleteRecursively
 import kotlin.test.Test
+import kotlin.test.assertTrue
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.runBlocking
 import kotlinx.coroutines.withContext
@@ -977,7 +978,7 @@ class DocEditorSmokeTest {
             onNodeWithTag(DaybookEditorSemantics.facetRow(firstNoteLabel)).assertIsNotSelected()
             onAllNodesWithTag(DaybookEditorSemantics.SELECTION_CANCEL_ACTION)
                 .fetchSemanticsNodes()
-                .isEmpty()
+                .also { assertTrue(it.isEmpty()) }
         } finally {
             fixture.close()
         }
@@ -1177,7 +1178,7 @@ class DocEditorSmokeTest {
             onNodeWithText("Collapsed note preview").assertIsDisplayed()
             onAllNodesWithTag(DaybookEditorSemantics.noteField(firstNoteLabel))
                 .fetchSemanticsNodes()
-                .isEmpty()
+                .also { assertTrue(it.isEmpty()) }
         } finally {
             fixture.close()
         }
@@ -1243,19 +1244,19 @@ class DocEditorSmokeTest {
             onNodeWithTag(DaybookEditorSemantics.selectionActionBarAction("collapse-selected")).assertIsDisplayed()
             onAllNodesWithTag(DaybookEditorSemantics.selectionActionBarAction("add-below"))
                 .fetchSemanticsNodes()
-                .isEmpty()
+                .also { assertTrue(it.isEmpty()) }
             onAllNodesWithTag(DaybookEditorSemantics.selectionActionBarAction("make-primary"))
                 .fetchSemanticsNodes()
-                .isEmpty()
+                .also { assertTrue(it.isEmpty()) }
             onAllNodesWithTag(DaybookEditorSemantics.selectionActionBarAction("move-up"))
                 .fetchSemanticsNodes()
-                .isEmpty()
+                .also { assertTrue(it.isEmpty()) }
             onAllNodesWithTag(DaybookEditorSemantics.selectionActionBarAction("move-down"))
                 .fetchSemanticsNodes()
-                .isEmpty()
+                .also { assertTrue(it.isEmpty()) }
             onAllNodesWithTag(DaybookEditorSemantics.blockDetailsAction(firstNoteLabel))
                 .fetchSemanticsNodes()
-                .isEmpty()
+                .also { assertTrue(it.isEmpty()) }
             onNodeWithTag(DaybookEditorSemantics.facetRow(firstNoteLabel)).assertIsSelected()
             onNodeWithTag(DaybookEditorSemantics.facetRow(secondNoteLabel)).assertIsSelected()
             onNodeWithText("2 selected").assertIsDisplayed()
@@ -1348,11 +1349,11 @@ class DocEditorSmokeTest {
             }
             onAllNodesWithTag(DaybookEditorSemantics.pluginFacet(facetKeyString(ledgerMetaKey)))
                 .fetchSemanticsNodes()
-                .isNotEmpty()
-            onAllNodesWithTag(DaybookViewSemantics.ROOT).fetchSemanticsNodes().isNotEmpty()
-            onAllNodesWithTag(DaybookViewSemantics.kind("card")).fetchSemanticsNodes().isNotEmpty()
-            onAllNodesWithTag(DaybookViewSemantics.kind("section")).fetchSemanticsNodes().isNotEmpty()
-            onAllNodesWithTag(DaybookViewSemantics.kind("list")).fetchSemanticsNodes().isNotEmpty()
+                .also { assertTrue(it.isNotEmpty()) }
+            onAllNodesWithTag(DaybookViewSemantics.ROOT).fetchSemanticsNodes().also { assertTrue(it.isNotEmpty()) }
+            onAllNodesWithTag(DaybookViewSemantics.kind("card")).fetchSemanticsNodes().also { assertTrue(it.isNotEmpty()) }
+            onAllNodesWithTag(DaybookViewSemantics.kind("section")).fetchSemanticsNodes().also { assertTrue(it.isNotEmpty()) }
+            onAllNodesWithTag(DaybookViewSemantics.kind("list")).fetchSemanticsNodes().also { assertTrue(it.isNotEmpty()) }
             onNodeWithText("Ledger Overview").assertIsDisplayed()
             onNodeWithText("Ledger ID: ledger-1").assertIsDisplayed()
             onNodeWithText("Journal commodity: USD").assertIsDisplayed()

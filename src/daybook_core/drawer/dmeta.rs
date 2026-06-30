@@ -1,5 +1,9 @@
-// FIXME: we're only reading FacetMeta.uuid[0], is there a bug here when trying to resolve
-// multi uuid facets?
+// A facet's uuid is stored as a list because concurrent edits (e.g. two replicas creating the
+// same logical facet) can leave more than one uuid behind after a merge. Every uuid stays a
+// valid identity for the facet — external indices may key on any of them, so we keep them all
+// rather than collapsing the list. When a single representative id is needed we resolve it
+// deterministically (see canonical_facet_uuid) so all replicas converge regardless of automerge
+// list/merge ordering; we never index by `[0]`, which would be replica-dependent.
 
 use crate::interlude::*;
 
@@ -53,16 +57,17 @@ pub fn facet_uuid_for_key<D: ReadDoc + autosurgeon::ReadDoc>(
             Ok(Some(parse_uuid_scalar(scalar.as_ref())?))
         }
         Some((automerge::Value::Object(automerge::ObjType::List), list_obj)) => {
-            if automerge::ReadDoc::length(doc, &list_obj) == 0 {
-                return Ok(None);
+            let mut uuids: Vec<Uuid> = Vec::new();
+            for ii in 0..automerge::ReadDoc::length(doc, &list_obj) {
+                let Some((value, _)) = automerge::ReadDoc::get(doc, &list_obj, ii)? else {
+                    continue;
+                };
+                let automerge::Value::Scalar(scalar) = value else {
+                    eyre::bail!("facet uuid list contains non-scalar value for key {facet_key}");
+                };
+                uuids.push(parse_uuid_scalar(scalar.as_ref())?);
             }
-            let Some((value, _)) = automerge::ReadDoc::get(doc, &list_obj, 0)? else {
-                return Ok(None);
-            };
-            let automerge::Value::Scalar(scalar) = value else {
-                eyre::bail!("facet uuid list contains non-scalar value for key {facet_key}");
-            };
-            Ok(Some(parse_uuid_scalar(scalar.as_ref())?))
+            Ok(canonical_facet_uuid(&uuids))
         }
         Some((other, _)) => {
             eyre::bail!("facet uuid has invalid shape for key {facet_key}: {other:?}");
@@ -96,16 +101,17 @@ pub fn facet_uuid_for_key_at(
             Ok(Some(parse_uuid_scalar(scalar.as_ref())?))
         }
         Some((automerge::Value::Object(automerge::ObjType::List), list_obj)) => {
-            if doc.length_at(&list_obj, heads) == 0 {
-                return Ok(None);
+            let mut uuids: Vec<Uuid> = Vec::new();
+            for ii in 0..doc.length_at(&list_obj, heads) {
+                let Some((value, _)) = doc.get_at(&list_obj, ii, heads)? else {
+                    continue;
+                };
+                let automerge::Value::Scalar(scalar) = value else {
+                    eyre::bail!("facet uuid list contains non-scalar value for key {facet_key}");
+                };
+                uuids.push(parse_uuid_scalar(scalar.as_ref())?);
             }
-            let Some((value, _)) = doc.get_at(&list_obj, 0, heads)? else {
-                return Ok(None);
-            };
-            let automerge::Value::Scalar(scalar) = value else {
-                eyre::bail!("facet uuid list contains non-scalar value for key {facet_key}");
-            };
-            Ok(Some(parse_uuid_scalar(scalar.as_ref())?))
+            Ok(canonical_facet_uuid(&uuids))
         }
         Some((other, _)) => {
             eyre::bail!(
@@ -123,6 +129,16 @@ fn parse_uuid_scalar(scalar: &automerge::ScalarValue) -> Res<Uuid> {
         automerge::ScalarValue::Bytes(bytes) => Ok(Uuid::from_slice(bytes)?),
         other => eyre::bail!("facet uuid has invalid scalar type: {other:?}"),
     }
+}
+
+/// Resolve a single deterministic uuid for a facet from its (possibly multi-entry) uuid list.
+///
+/// Returns `None` for an empty list. When concurrent edits leave more than one uuid, every uuid
+/// remains a valid key for the facet, but callers needing one representative must agree across
+/// replicas — so we return the lexicographically smallest uuid, which is independent of the
+/// underlying automerge list ordering.
+fn canonical_facet_uuid(uuids: &[Uuid]) -> Option<Uuid> {
+    uuids.iter().min().copied()
 }
 
 pub fn facet_heads_for_key(doc: &automerge::Automerge, facet_key: &FacetKey) -> Res<ChangeHashSet> {

@@ -35,7 +35,13 @@ import org.example.daybook.uniffi.types.WellKnownFacet
 import org.example.daybook.uniffi.types.WellKnownFacetTag
 import kotlin.uuid.Uuid
 
-data class NoteFacetEditorState(val draft: String, val mime: String, val editable: Boolean, val notice: String?)
+data class NoteFacetEditorState(
+    val draft: String,
+    val mime: String,
+    val editable: Boolean,
+    val canPersist: Boolean,
+    val notice: String?,
+)
 
 enum class FacetEditorKind {
     ImageMetadata,
@@ -88,7 +94,7 @@ class EditorSessionController(
                 titleDraft = "",
                 titleEditable = true,
                 titleNotice = null,
-                noteEditors = mapOf(noteFacetKey() to NoteFacetEditorState("", "text/plain", true, null)),
+                noteEditors = mapOf(noteFacetKey() to NoteFacetEditorState("", "text/plain", true, true, null)),
                 facetRows = emptyList(),
                 contentFacetViews = listOf(
                     FacetViewDescriptor(noteFacetKey(), FacetEditorKind.Note, ""),
@@ -177,7 +183,10 @@ class EditorSessionController(
                     map[facetKey] =
                         editorState.copy(
                             mime = mime,
-                            editable = mime.startsWith("text/"),
+                            // Preserve write-safety (canPersist): a decode-failed note must stay
+                            // locked even if the user picks a text mime, so it can't be edited or
+                            // overwritten until its payload is valid again.
+                            editable = editorState.canPersist && isEditableNoteMime(mime),
                             notice = noteMimeNotice(mime),
                         )
                 },
@@ -206,7 +215,7 @@ class EditorSessionController(
 
         val nextDoc = doc.copy(facets = nextFacets)
         val nextNoteEditors = snapshot.noteEditors.toMutableMap()
-        nextNoteEditors[newFacetKey] = NoteFacetEditorState("", "text/plain", true, null)
+        nextNoteEditors[newFacetKey] = NoteFacetEditorState("", "text/plain", true, true, null)
         updateLocalDoc(nextDoc, nextNoteEditors)
         scheduleSave()
     }
@@ -271,7 +280,7 @@ class EditorSessionController(
             }
 
             for ((noteKey, noteState) in snapshot.noteEditors) {
-                if (!noteState.editable) {
+                if (!noteState.canPersist) {
                     continue
                 }
                 putWellKnownFacet(nextFacets, noteKey, buildNoteFacet(noteState.draft, noteState.mime))
@@ -384,7 +393,7 @@ class EditorSessionController(
 
     private fun buildNoteEditors(doc: Doc?): Map<FacetKey, NoteFacetEditorState> {
         if (doc == null) {
-            return mapOf(noteFacetKey() to NoteFacetEditorState("", "text/plain", true, null))
+            return mapOf(noteFacetKey() to NoteFacetEditorState("", "text/plain", true, true, null))
         }
 
         val out = linkedMapOf<FacetKey, NoteFacetEditorState>()
@@ -400,17 +409,19 @@ class EditorSessionController(
                         draft = decodeJsonStringOrRaw(rawValue),
                         mime = "text/plain",
                         editable = false,
+                        canPersist = false,
                         notice = "Invalid note facet payload; editing disabled to avoid destructive writes.",
                     )
                 } else {
                     val note = decodeResult.getOrThrow().v1
                     if (isEditableNoteMime(note.mime)) {
-                        NoteFacetEditorState(note.content, note.mime, true, null)
+                        NoteFacetEditorState(note.content, note.mime, true, true, null)
                     } else {
                         NoteFacetEditorState(
                             draft = note.content,
                             mime = note.mime,
                             editable = false,
+                            canPersist = true,
                             notice = "Unsupported note mime '${note.mime}'; editing disabled to avoid destructive writes.",
                         )
                     }
@@ -418,7 +429,7 @@ class EditorSessionController(
         }
 
         if (out.isEmpty()) {
-            out[noteFacetKey()] = NoteFacetEditorState("", "text/plain", true, null)
+            out[noteFacetKey()] = NoteFacetEditorState("", "text/plain", true, true, null)
         }
         return out
     }

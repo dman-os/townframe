@@ -364,13 +364,15 @@ class AppRuntimeViewModel(
             closeActiveContainer(updateState = false)
             _state.value = FfiRuntimeState.OpeningRepo(repoPath = repoPath)
             val container =
-                loadOpenRepoContainer(
-                    repoPath = repoPath,
-                    appStartElapsedMs = appStartElapsedMs,
-                    startupMark = startupMark,
-                    startupPhaseId = startupPhaseId,
-                    resources = resources,
-                )
+                withContext(ioDispatcher) {
+                    loadOpenRepoContainer(
+                        repoPath = repoPath,
+                        appStartElapsedMs = appStartElapsedMs,
+                        startupMark = startupMark,
+                        startupPhaseId = startupPhaseId,
+                        resources = resources,
+                    )
+                }
             val syncRepo = loadOpenRepoSyncRepo(container)
             resources.loadedSyncRepo = syncRepo
             val rtFfi = loadOpenRepoRuntimeRepo(container)
@@ -670,8 +672,10 @@ class AppRuntimeViewModel(
 
     private suspend fun closeActiveContainer(updateState: Boolean) {
         val container = activeContainer ?: return
-        shutdownAppContainer(container, ioDispatcher)
+        // Null the reference first so a partial shutdown can't leave callers observing a
+        // container that is mid-tear-down; shutdownAppContainer may throw partway.
         activeContainer = null
+        shutdownAppContainer(container, ioDispatcher)
         if (updateState && _state.value is FfiRuntimeState.Ready) {
             _state.value = FfiRuntimeState.Loading
         }

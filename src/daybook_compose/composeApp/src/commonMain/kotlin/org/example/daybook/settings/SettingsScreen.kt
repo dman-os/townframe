@@ -75,6 +75,7 @@ import androidx.savedstate.serialization.SavedStateConfiguration
 import io.github.vinceglb.filekit.dialogs.compose.rememberDirectoryPickerLauncher
 import io.github.vinceglb.filekit.path
 import kotlinx.coroutines.CancellationException
+import kotlinx.coroutines.CoroutineDispatcher
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
@@ -1379,6 +1380,7 @@ private data class PlugImportRequest(
     val preview: PlugSummary,
     val plugsRepo: PlugsRepoFfi,
     val scope: CoroutineScope,
+    val ioDispatcher: CoroutineDispatcher = Dispatchers.IO,
     val onImportSuccess: () -> Unit,
     val onWizardStateChange: (PlugImportWizardState) -> Unit,
 )
@@ -1388,10 +1390,11 @@ private fun launchPlugPreview(
     plugsRepo: PlugsRepoFfi,
     scope: CoroutineScope,
     onWizardStateChange: (PlugImportWizardState) -> Unit,
+    ioDispatcher: CoroutineDispatcher = Dispatchers.IO,
 ) {
     scope.launch {
         try {
-            val preview = plugsRepo.inspectOciLayout(path)
+            val preview = withContext(ioDispatcher) { plugsRepo.inspectOciLayout(path) }
             withContext(Dispatchers.Main.immediate) {
                 onWizardStateChange(
                     PlugImportWizardState.Reviewing(
@@ -1418,7 +1421,7 @@ private fun launchPlugPreview(
 private fun launchPlugImport(request: PlugImportRequest) {
     request.scope.launch {
         try {
-            request.plugsRepo.importFromOciLayout(request.path)
+            withContext(request.ioDispatcher) { request.plugsRepo.importFromOciLayout(request.path) }
             withContext(Dispatchers.Main.immediate) {
                 request.onImportSuccess()
                 request.onWizardStateChange(
@@ -1447,7 +1450,11 @@ private fun buildImportErrorMessage(action: String, error: FfiException): String
 }
 
 @Composable
-private fun rememberInstalledPlugsState(plugsRepo: PlugsRepoFfi, refreshToken: Int): InstalledPlugsState {
+private fun rememberInstalledPlugsState(
+    plugsRepo: PlugsRepoFfi,
+    refreshToken: Int,
+    ioDispatcher: CoroutineDispatcher = Dispatchers.IO,
+): InstalledPlugsState {
     val state by androidx.compose.runtime.produceState<InstalledPlugsState>(
         initialValue = InstalledPlugsState.Loading,
         key1 = plugsRepo,
@@ -1457,7 +1464,7 @@ private fun rememberInstalledPlugsState(plugsRepo: PlugsRepoFfi, refreshToken: I
         value =
             try {
                 val plugs =
-                    plugsRepo.listPlugs()
+                    withContext(ioDispatcher) { plugsRepo.listPlugs() }
                         .sortedWith(
                             compareBy<PlugSummary> { it.title.lowercase() }
                                 .thenBy { it.namespace.lowercase() }

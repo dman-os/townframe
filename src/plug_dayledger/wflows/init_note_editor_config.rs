@@ -1,26 +1,15 @@
+#[cfg(target_arch = "wasm32")]
 use crate::interlude::*;
 use daybook_types::doc::{NoteEditorConfig, NoteMimeOption};
+#[cfg(target_arch = "wasm32")]
 use wflow_sdk::WflowCtx;
 
-#[cfg_attr(
-    test,
-    expect(
-        dead_code,
-        reason = "entry point is used by the wasm route, not native unit tests"
-    )
-)]
+/// Wasm-only entry point, dispatched from the `route_wflows!` bundle route in `lib.rs`.
+/// Gated because `run_wasm` depends on `crate::wit` (wasm-only host imports); on native the
+/// module compiles only the pure `upsert_*` helpers and their tests.
+#[cfg(target_arch = "wasm32")]
 pub fn run(_cx: &mut WflowCtx) -> Result<(), wflow_sdk::JobErrorX> {
-    #[cfg(target_arch = "wasm32")]
-    {
-        run_wasm()
-    }
-
-    #[cfg(not(target_arch = "wasm32"))]
-    {
-        Err(wflow_sdk::JobErrorX::Terminal(ferr!(
-            "init_note_editor_config runs only as a wasm plugin routine"
-        )))
-    }
+    run_wasm()
 }
 
 fn hledger_note_mime_option() -> NoteMimeOption {

@@ -61,7 +61,9 @@ mod wasm_runtime {
                 "parse-hledger" => |cx, _args: serde_json::Value| {
                     parse_hledger::run(cx)
                 },
-                super::INIT_NOTE_EDITOR_CONFIG_ROUTINE_KEY => |cx, _args: serde_json::Value| {
+                // NOTE: route_wflows! matches keys as `:literal` patterns, so the routine key
+                // must be inlined here rather than referenced via INIT_NOTE_EDITOR_CONFIG_ROUTINE_KEY.
+                "init-note-editor-config" => |cx, _args: serde_json::Value| {
                     init_note_editor_config::run(cx)
                 },
             })

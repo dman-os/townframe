@@ -2105,10 +2105,11 @@ impl PlugsRepo {
         }
 
         // -- View Validation --
-        // Stateless wasm views must point at a declared wflow bundle. The manifest model does not
-        // currently carry a separate export registry, so we validate the bundle presence only.
+        // Stateless wasm views must point at a declared wflow bundle and export the canonical
+        // stateless-view entrypoint (`render-facet-view`). Otherwise the plug imports cleanly but
+        // fails later at render time (see rt::render_facet_view).
         for (view_name, view_manifest) in &manifest.views {
-            let manifest::ViewProviderManifest::StatelessWasm { bundle, .. } =
+            let manifest::ViewProviderManifest::StatelessWasm { bundle, export } =
                 &view_manifest.provider;
             let Some(_) = manifest.wflow_bundles.get(bundle.as_str()) else {
                 eyre::bail!(
@@ -2117,6 +2118,13 @@ impl PlugsRepo {
                     bundle
                 );
             };
+            if export.as_str() != "render-facet-view" {
+                eyre::bail!(
+                    "Invalid view '{}': stateless wasm export '{}' is not the supported 'render-facet-view' entrypoint",
+                    view_name,
+                    export
+                );
+            }
         }
 
         // -- ACL Scope Restriction --
@@ -2155,6 +2163,18 @@ impl PlugsRepo {
             {
                 match view.plug_id.as_deref() {
                     None => {
+                        if !manifest.views.contains_key(view.view_key.as_str()) {
+                            eyre::bail!(
+                                "Invalid display_config in facet '{}': view '{}' not found in this plug",
+                                facet_name,
+                                view.view_key
+                            );
+                        }
+                    }
+                    // An explicit self-reference (the plug's own id) is equivalent to `None`:
+                    // validate against the incoming manifest rather than treating the plug as one
+                    // of its own dependencies and resolving it through the stored copy.
+                    Some(view_plug_id) if view_plug_id == plug_id.as_str() => {
                         if !manifest.views.contains_key(view.view_key.as_str()) {
                             eyre::bail!(
                                 "Invalid display_config in facet '{}': view '{}' not found in this plug",

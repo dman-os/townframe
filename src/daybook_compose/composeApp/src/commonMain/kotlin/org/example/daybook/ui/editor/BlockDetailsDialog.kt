@@ -680,11 +680,19 @@ private data class BlockDetailsFormatPickerState(
     val searchQuery: String,
 )
 
-private fun validateCustomMime(rawMime: String): String? = when {
-    rawMime.trim().isBlank() -> "MIME must not be blank."
-    !rawMime.trim().contains('/') -> "MIME must contain '/'."
-    rawMime.trim().any { it.isWhitespace() } -> "MIME must not contain whitespace."
-    else -> null
+private fun validateCustomMime(rawMime: String): String? {
+    val trimmed = rawMime.trim()
+    val parts = trimmed.split('/')
+    return when {
+        trimmed.isBlank() -> "MIME must not be blank."
+
+        trimmed.any { it.isWhitespace() } -> "MIME must not contain whitespace."
+
+        parts.size != 2 || parts.any { it.isEmpty() } ->
+            "MIME must be a non-empty type and subtype separated by a single '/'."
+
+        else -> null
+    }
 }
 
 private fun loadDmeta(doc: Doc?): Dmeta? = doc?.facets?.get(dmetaFacetKey())

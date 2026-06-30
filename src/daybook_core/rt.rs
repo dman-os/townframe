@@ -613,7 +613,7 @@ impl Rt {
                 )
             })?;
 
-        let result = async {
+        async {
             let bundle_components = load_bundle_components(&self.blobs_repo, bundle_man).await?;
             let component_name = format!("stateless-view-{}", view.view_key);
             let workload_id: Arc<str> = Arc::from(format!(
@@ -792,9 +792,7 @@ impl Rt {
                 plugin_state_json: response.plugin_state_json,
             })
         }
-        .await;
-
-        result
+        .await
     }
 
     async fn resolve_stateless_view_provider(

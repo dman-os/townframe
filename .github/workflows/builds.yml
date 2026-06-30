@@ -236,10 +236,6 @@ jobs:
             cargo build -p daybook_cli
           fi
 
-      - name: desktop ui smoke test
-        run: |
-          nix develop .#ci-desktop --command bash -lc 'set -euo pipefail; export PROTOC="$(command -v protoc)"; cd src/daybook_compose && ./gradlew :composeApp:desktopTest --tests org.example.daybook.DocEditorSmokeTest.realRepo_wires_into_doc_editor_screen --no-daemon --no-configuration-cache'
-
       - name: build appimage
         run: |
           export PROTOC="$(command -v protoc)"

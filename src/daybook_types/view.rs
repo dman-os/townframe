@@ -10,6 +10,12 @@ pub const MAX_VIEW_NODE_COUNT: usize = 1024;
 /// Maximum permitted length for a validated event name.
 pub const MAX_VIEW_EVENT_NAME_LEN: usize = 128;
 
+/// Maximum permitted length for a validated node id.
+pub const MAX_VIEW_NODE_ID_LEN: usize = 128;
+
+/// Maximum permitted number of events bound to a single node.
+pub const MAX_VIEW_EVENTS_PER_NODE: usize = 64;
+
 /// A plugin-emitted Daybook view description.
 ///
 /// This is the stable boundary between plugin view providers and Daybook hosts. It is intentionally
@@ -73,6 +79,17 @@ fn validate_node(node: &ViewNodeV1, depth: usize, state: &mut ViewValidationStat
         );
     }
 
+    if node.id.0.is_empty() {
+        eyre::bail!("view tree contains a node with an empty id");
+    }
+    if node.id.0.len() > MAX_VIEW_NODE_ID_LEN {
+        eyre::bail!(
+            "view node id '{}' exceeds maximum length of {}",
+            node.id.0,
+            MAX_VIEW_NODE_ID_LEN
+        );
+    }
+
     if !state.seen_ids.insert(node.id.0.clone()) {
         eyre::bail!("duplicate view node id '{}' in view tree", node.id.0);
     }
@@ -114,6 +131,14 @@ fn validate_node(node: &ViewNodeV1, depth: usize, state: &mut ViewValidationStat
 }
 
 fn validate_node_events(node_id: &str, events: &[ViewEventBindingV1]) -> Res<()> {
+    if events.len() > MAX_VIEW_EVENTS_PER_NODE {
+        eyre::bail!(
+            "view node '{}' binds {} events; maximum is {}",
+            node_id,
+            events.len(),
+            MAX_VIEW_EVENTS_PER_NODE
+        );
+    }
     for event in events {
         match &event.action {
             ViewActionV1::Emit(action) => validate_event_name(node_id, &action.name)?,

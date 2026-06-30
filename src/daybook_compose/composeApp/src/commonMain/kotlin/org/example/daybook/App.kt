@@ -688,7 +688,12 @@ fun App(
                     onPendingOpenRepoPath = {
                         runtimeVm.openRepo(it) { appStartMark.elapsedNow().inWholeMilliseconds }
                     },
-                    onForgetRepo = { runtimeVm.forgetRepo(it) },
+                    onForgetRepo = {
+                        // Clear the selection so the RepoDetail screen pops immediately; the
+                        // async forget then removes the repo and refreshes the Welcome list.
+                        selectedWelcomeRepo = null
+                        runtimeVm.forgetRepo(it)
+                    },
                     onExitRequest = { onExitRequest?.invoke() },
                 )
             }
