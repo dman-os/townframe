@@ -169,13 +169,13 @@ reqwest = { version = "0.12", default-features = false, features = ["charset", "
 automerge = "0.9.0"
 autosurgeon = "0.11.0"
 automerge-test = "0.9"
-subduction_core = { git = "https://github.com/dman-os/subduction", rev = "4de6e00b49ddcf1b84872afea24f928e7063249a" }
-subduction_iroh = { git = "https://github.com/dman-os/subduction", rev = "4de6e00b49ddcf1b84872afea24f928e7063249a" }
-subduction_websocket = { git = "https://github.com/dman-os/subduction", rev = "4de6e00b49ddcf1b84872afea24f928e7063249a" }
-sedimentree_core = { git = "https://github.com/dman-os/subduction", rev = "4de6e00b49ddcf1b84872afea24f928e7063249a" }
-subduction_redb_storage = { git = "https://github.com/dman-os/subduction", rev = "4de6e00b49ddcf1b84872afea24f928e7063249a" }
-subduction_crypto = { git = "https://github.com/dman-os/subduction", rev = "4de6e00b49ddcf1b84872afea24f928e7063249a" }
-subduction_keyhive = { git = "https://github.com/dman-os/subduction", rev = "4de6e00b49ddcf1b84872afea24f928e7063249a" }
+subduction_core = { git = "https://github.com/dman-os/subduction", rev = "ad90a6f36875931ff986a50bb2880cb7820aafaa" }
+subduction_iroh = { git = "https://github.com/dman-os/subduction", rev = "ad90a6f36875931ff986a50bb2880cb7820aafaa" }
+subduction_websocket = { git = "https://github.com/dman-os/subduction", rev = "ad90a6f36875931ff986a50bb2880cb7820aafaa" }
+sedimentree_core = { git = "https://github.com/dman-os/subduction", rev = "ad90a6f36875931ff986a50bb2880cb7820aafaa" }
+subduction_redb_storage = { git = "https://github.com/dman-os/subduction", rev = "ad90a6f36875931ff986a50bb2880cb7820aafaa" }
+subduction_crypto = { git = "https://github.com/dman-os/subduction", rev = "ad90a6f36875931ff986a50bb2880cb7820aafaa" }
+subduction_keyhive = { git = "https://github.com/dman-os/subduction", rev = "ad90a6f36875931ff986a50bb2880cb7820aafaa" }
 keyhive_crypto = "0.2.1"
 keyhive_core = "0.5.0"
 beekem = "0.3.0"
@@ -247,14 +247,14 @@ keyhive_core = { path = "../keyhive/keyhive_core" }
 beekem = { path = "../keyhive/beekem" }
 # sqlite-vec = { git = "https://github.com/vlasky/sqlite-vec", rev = "9facf1ab84f2a360c0f1e62db3a7f3eca5bc099a" }
 #
-[patch."https://github.com/dman-os/subduction"]
-subduction_core = { path = "../subduction/subduction_core" }
-subduction_iroh = { path = "../subduction/subduction_iroh" }
-subduction_websocket = { path = "../subduction/subduction_websocket" }
-sedimentree_core = { path = "../subduction/sedimentree_core" }
-subduction_redb_storage = { path = "../subduction/subduction_redb_storage" }
-subduction_crypto = { path = "../subduction/subduction_crypto" }
-subduction_keyhive = { path = "../subduction/subduction_keyhive" }
+# [patch."https://github.com/dman-os/subduction"]
+# subduction_core = { path = "../subduction/subduction_core" }
+# subduction_iroh = { path = "../subduction/subduction_iroh" }
+# subduction_websocket = { path = "../subduction/subduction_websocket" }
+# sedimentree_core = { path = "../subduction/sedimentree_core" }
+# subduction_redb_storage = { path = "../subduction/subduction_redb_storage" }
+# subduction_crypto = { path = "../subduction/subduction_crypto" }
+# subduction_keyhive = { path = "../subduction/subduction_keyhive" }
 
 
 # The default profile is optimized for Wasm builds because

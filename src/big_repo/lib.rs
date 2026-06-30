@@ -45,65 +45,6 @@ pub use changes::{
     DocIdFilter as BigRepoDocIdFilter, OriginFilter as BigRepoOriginFilter,
 };
 
-#[cfg(test)]
-pub(crate) mod test_support {
-    use fs4::fs_std::FileExt;
-    use std::fs::OpenOptions;
-    use std::path::PathBuf;
-    use utils_rs::prelude::{ResultExt, WrapErr};
-
-    pub struct CapabilityTestGuard {
-        file: std::fs::File,
-        _lock_path: PathBuf,
-    }
-
-    impl Drop for CapabilityTestGuard {
-        fn drop(&mut self) {
-            self.file.unlock().unwrap_or_log();
-        }
-    }
-
-    fn capability_test_lock_path() -> PathBuf {
-        std::env::temp_dir().join("townframe-2-big_repo-capability.lock")
-    }
-
-    fn acquire_capability_test_guard() -> CapabilityTestGuard {
-        let lock_path = capability_test_lock_path();
-        if let Some(parent) = lock_path.parent() {
-            std::fs::create_dir_all(parent).unwrap_or_log();
-        }
-        let file = OpenOptions::new()
-            .create(true)
-            .read(true)
-            .write(true)
-            .truncate(false)
-            .open(&lock_path)
-            .wrap_err_with(|| {
-                format!(
-                    "error opening big_repo capability lock file {}",
-                    lock_path.display()
-                )
-            })
-            .unwrap_or_log();
-        file.lock_exclusive().unwrap_or_else(|err| {
-            panic!(
-                "error acquiring big_repo capability lock file {}: {err}",
-                lock_path.display()
-            )
-        });
-        CapabilityTestGuard {
-            file,
-            _lock_path: lock_path,
-        }
-    }
-
-    pub async fn capability_test_guard() -> CapabilityTestGuard {
-        tokio::task::spawn_blocking(acquire_capability_test_guard)
-            .await
-            .unwrap_or_else(|err| panic!("failed joining capability test lock task: {err}"))
-    }
-}
-
 pub type DocumentId = big_sync_core::ObjId;
 pub type SharedPartStore = Arc<dyn big_sync::HostPartStore>;
 
@@ -161,7 +102,7 @@ impl BigRepo {
             .await?;
         keyhive.ingest_from_storage(&keyhive_storage).await?;
         keyhive.save_storage_archive(&keyhive_storage).await?;
-        let policy_keyhive = keyhive.clone_keyhive().await;
+        let policy_keyhive = keyhive.clone_keyhive();
         let policy = Arc::new(subduction_keyhive::policy::SubductionKeyhive::new(
             policy_keyhive,
         ));

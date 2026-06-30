@@ -176,7 +176,6 @@ async fn put_doc_get_doc_and_export_roundtrip() -> Res<()> {
 
 #[tokio::test]
 async fn create_doc_records_initial_frontier_for_after_content() -> Res<()> {
-    let _guard = crate::test_support::capability_test_guard().await;
     let (repo, _part_store, _stop_token) = boot_repo().await?;
     let mut doc = automerge::Automerge::new();
     doc.transact(|tx| tx.put(automerge::ROOT, "title", "seed"))
@@ -192,7 +191,7 @@ async fn create_doc_records_initial_frontier_for_after_content() -> Res<()> {
         keyhive_core::principal::identifier::Identifier::from(vk),
     );
 
-    let keyhive = repo.keyhive().clone_keyhive().await;
+    let keyhive = repo.keyhive().clone_keyhive();
     let kh_doc = keyhive
         .get_document(kh_doc_id)
         .await
@@ -221,7 +220,6 @@ async fn create_doc_records_initial_frontier_for_after_content() -> Res<()> {
 
 #[tokio::test]
 async fn write_records_latest_frontier_for_after_content() -> Res<()> {
-    let _guard = crate::test_support::capability_test_guard().await;
     let (repo, _part_store, _stop_token) = boot_repo().await?;
     let mut doc = automerge::Automerge::new();
     doc.transact(|tx| tx.put(automerge::ROOT, "title", "seed"))
@@ -255,7 +253,7 @@ async fn write_records_latest_frontier_for_after_content() -> Res<()> {
         keyhive_core::principal::identifier::Identifier::from(vk),
     );
 
-    let keyhive = repo.keyhive().clone_keyhive().await;
+    let keyhive = repo.keyhive().clone_keyhive();
     let kh_doc = keyhive
         .get_document(kh_doc_id)
         .await
@@ -284,7 +282,6 @@ async fn write_records_latest_frontier_for_after_content() -> Res<()> {
 
 #[tokio::test]
 async fn create_doc_with_group_parent_uses_public_group_api() -> Res<()> {
-    let _guard = crate::test_support::capability_test_guard().await;
     let temp_root = tempdir()?;
     let owner_path = temp_root.path().join("owner");
     let client_path = temp_root.path().join("client");
@@ -348,7 +345,6 @@ async fn create_doc_with_group_parent_uses_public_group_api() -> Res<()> {
 
 #[tokio::test]
 async fn keyhive_contact_card_bootstrap_sync_completes_bidirectionally() -> Res<()> {
-    let _guard = crate::test_support::capability_test_guard().await;
     let temp_root = tempdir()?;
     let owner_path = temp_root.path().join("owner");
     let client_path = temp_root.path().join("client");
@@ -401,7 +397,6 @@ async fn keyhive_contact_card_bootstrap_sync_completes_bidirectionally() -> Res<
 
 #[tokio::test]
 async fn authorized_peer_reads_encrypted_doc_after_keyhive_sync_without_reboot() -> Res<()> {
-    let _guard = crate::test_support::capability_test_guard().await;
     let temp_root = tempdir()?;
     let owner_path = temp_root.path().join("owner");
     let client_path = temp_root.path().join("client");
@@ -528,7 +523,6 @@ async fn disk_repo_round_trip_preserves_encrypted_doc_and_heads() -> Res<()> {
 
 #[tokio::test]
 async fn closed_keyhive_connection_errors_cleanly_then_reconnects() -> Res<()> {
-    let _guard = crate::test_support::capability_test_guard().await;
     let temp_root = tempdir()?;
     let owner_path = temp_root.path().join("owner");
     let client_path = temp_root.path().join("client");
@@ -593,7 +587,6 @@ async fn closed_keyhive_connection_errors_cleanly_then_reconnects() -> Res<()> {
 
 #[tokio::test]
 async fn minimal_doc_sync_loads_and_exports_after_keyhive_grant() -> Res<()> {
-    let _guard = crate::test_support::capability_test_guard().await;
     let temp_root = tempdir()?;
     let owner_path = temp_root.path().join("owner");
     let client_path = temp_root.path().join("client");
@@ -669,7 +662,6 @@ async fn minimal_doc_sync_loads_and_exports_after_keyhive_grant() -> Res<()> {
 
 #[tokio::test]
 async fn group_member_reads_doc_while_non_member_stays_unauthorized() -> Res<()> {
-    let _guard = crate::test_support::capability_test_guard().await;
     let temp_root = tempdir()?;
     let owner_path = temp_root.path().join("owner");
     let member_path = temp_root.path().join("member");
@@ -781,7 +773,6 @@ async fn group_member_reads_doc_while_non_member_stays_unauthorized() -> Res<()>
 
 #[tokio::test]
 async fn concurrent_writers_with_edit_access_converge_after_bidirectional_sync() -> Res<()> {
-    let _guard = crate::test_support::capability_test_guard().await;
     let temp_root = tempdir()?;
     let owner_path = temp_root.path().join("owner");
     let client_path = temp_root.path().join("client");
@@ -950,7 +941,6 @@ async fn concurrent_writers_with_edit_access_converge_after_bidirectional_sync()
 
 #[tokio::test]
 async fn unauthorized_peer_does_not_materialize_plaintext_without_grant() -> Res<()> {
-    let _guard = crate::test_support::capability_test_guard().await;
     let temp_root = tempdir()?;
     let owner_path = temp_root.path().join("owner");
     let client_path = temp_root.path().join("client");
@@ -1018,7 +1008,6 @@ async fn unauthorized_peer_does_not_materialize_plaintext_without_grant() -> Res
 
 #[tokio::test]
 async fn pending_materialization_becomes_ready_after_keyhive_grant_and_sync() -> Res<()> {
-    let _guard = crate::test_support::capability_test_guard().await;
     let temp_root = tempdir()?;
     let owner_path = temp_root.path().join("owner");
     let client_path = temp_root.path().join("client");
@@ -1115,7 +1104,6 @@ async fn pending_materialization_becomes_ready_after_keyhive_grant_and_sync() ->
 
 #[tokio::test]
 async fn grant_doc_access_checkpoint_becomes_visible_after_reopen_and_keyhive_sync() -> Res<()> {
-    let _guard = crate::test_support::capability_test_guard().await;
     let temp_root = tempdir()?;
     let owner_path = temp_root.path().join("owner");
     let client_path = temp_root.path().join("client");
@@ -1169,7 +1157,7 @@ async fn grant_doc_access_checkpoint_becomes_visible_after_reopen_and_keyhive_sy
         .sync_doc_with_peer(doc_id, Some(SYNC_PROPAGATION_TIMEOUT))
         .await?;
 
-    let client_kh_before_shutdown = client.repo.keyhive().clone_keyhive().await;
+    let client_kh_before_shutdown = client.repo.keyhive().clone_keyhive();
     let client_kh_doc_id = keyhive_core::principal::document::id::DocumentId::from(
         keyhive_core::principal::identifier::Identifier::from(
             ed25519_dalek::VerifyingKey::from_bytes(&doc_id.into_bytes())
@@ -1210,7 +1198,6 @@ async fn grant_doc_access_checkpoint_becomes_visible_after_reopen_and_keyhive_sy
 
 #[tokio::test]
 async fn grant_doc_access_checkpoint_survives_reopen_and_sync() -> Res<()> {
-    let _guard = crate::test_support::capability_test_guard().await;
     let temp_root = tempdir()?;
     let owner_path = temp_root.path().join("owner");
     let client_path = temp_root.path().join("client");
@@ -1323,7 +1310,7 @@ async fn grant_doc_access_checkpoint_survives_reopen_and_sync() -> Res<()> {
         owner_conn.sync_keyhive_with_peer(None).await?;
         client_conn.sync_keyhive_with_peer(None).await?;
     }
-    let reopened_kh = client.repo.keyhive().clone_keyhive().await;
+    let reopened_kh = client.repo.keyhive().clone_keyhive();
     let doc_id_bytes = doc_id.into_bytes();
     let reopened_kh_doc_id = keyhive_core::principal::document::id::DocumentId::from(
         keyhive_core::principal::identifier::Identifier::from(
@@ -2696,18 +2683,13 @@ impl StressFixture for BigRepoStressFixture {
             let conn = node.connection_to(peer).await;
             conn.sync_keyhive_with_peer(None).await?;
         }
+
+        node.big_sync_store
+            .add_obj_to_parts(doc_id, stress_support::test_parts())
+            .await?;
         for peer in nodes.iter().flatten() {
             if peer.peer_id() == node.peer_id() {
                 continue;
-            }
-            let conn = peer.connection_to(node).await;
-            conn.sync_keyhive_with_peer(None).await?;
-        }
-
-        for peer in nodes.iter().flatten() {
-            if peer.peer_id() != node.peer_id() {
-                let conn = peer.connection_to(node).await;
-                conn.sync_keyhive_with_peer(None).await?;
             }
             peer.big_sync_store
                 .add_obj_to_parts(doc_id, stress_support::test_parts())
@@ -4574,7 +4556,6 @@ async fn sync_with_peer_local_change_without_change_listener_only_emits_heads() 
 
 #[tokio::test(flavor = "multi_thread")]
 async fn big_repo_sync_randomized_four_node_stress_converges() -> Res<()> {
-    let _guard = crate::test_support::capability_test_guard().await;
     stress_support::run_randomized_four_node_stress_with_settle_timeout(
         BigRepoStressFixture::default(),
         Arc::new(()),

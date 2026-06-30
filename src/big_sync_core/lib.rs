@@ -801,6 +801,20 @@ impl BigSyncMachine {
             unknown_count,
             "set peer strategy result"
         );
+        let stale_result = part_strats.keys().any(|part_id| {
+            !matches!(
+                peer_state.parts.get(part_id).map(|state| &state.strat),
+                Some(PeerPartStrategy::Pending(old_task_id)) if *old_task_id == task_id
+            )
+        });
+        if stale_result {
+            tracing::debug!(
+                peer_id = %peer_id,
+                task_id = %task_id,
+                "ignoring stale set peer strategy result"
+            );
+            return;
+        }
         let mut parts_retry = Set::new();
 
         for (part_id, decision) in part_strats {
