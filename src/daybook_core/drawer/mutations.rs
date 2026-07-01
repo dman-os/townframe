@@ -28,7 +28,13 @@ impl DrawerRepo {
         if args.branch_path != "main" {
             return Err(ferr!("new docs must be created on main"))?;
         }
-        let doc_am = automerge::Automerge::new();
+        let mut doc_am = automerge::Automerge::new();
+        {
+            let mut tx = doc_am.transaction();
+            tx.put(automerge::ROOT, "__seed", true)
+                .expect("seed write failed");
+            tx.commit();
+        }
         let handle = match self.big_repo.create_doc(doc_am).await {
             Ok(val) => val,
             Err(big_repo::CreateDocError::Put(big_repo::PutDocError::IdOccpuied { .. })) => {
@@ -49,6 +55,7 @@ impl DrawerRepo {
             .with_document(|am_doc| {
                 am_doc.set_actor(mutation_actor_id.clone());
                 let mut tx = am_doc.transaction();
+                tx.delete(automerge::ROOT, "__seed")?;
                 tx.put(automerge::ROOT, "$schema", "daybook.doc")?;
                 tx.put(automerge::ROOT, "id", &doc_id)?;
 

@@ -104,21 +104,34 @@ impl big_sync::SyncBackend for BigRepoSyncBackend {
         let doc_id: crate::DocumentId = obj_id;
         let local_heads = super::partition_doc_heads_payload(&repo.big_sync_store, doc_id).await?;
         if local_heads.is_none() {
+            let local_doc_exists =
+                !matches!(repo.get_doc(&doc_id).await?, crate::DocLookup::Missing);
             // Doc not yet synced locally. Pull from peer via Subduction sync.
             // Subduction syncs from an empty tree — the peer sends everything it has.
             repo.runtime
-                .sync_doc_with_peer(doc_id, peer_id, Some(Duration::from_secs(10)))
+                .sync_doc_with_peer(
+                    doc_id,
+                    peer_id,
+                    Some(crate::runtime::BIG_SYNC_DOC_SYNC_TIMEOUT),
+                )
                 .await
-                .map_err(|e| match e {
+                .map_err(|sync_error| match sync_error {
                     crate::SyncDocError::NotFound => eyre::eyre!("remote doc was not found"),
                     crate::SyncDocError::Unauthorized => eyre::eyre!("remote doc access denied"),
-                    _ => eyre::eyre!("{e}"),
+                    _ => eyre::eyre!("{sync_error}"),
                 })?;
+            if let Some(remote_payload) = remote_payload {
+                repo.big_sync_store
+                    .set_obj_payload(doc_id, remote_payload)
+                    .await?;
+            }
+            let deets = if local_doc_exists {
+                big_sync_core::SyncCompletionDeets::ChangedObject
+            } else {
+                big_sync_core::SyncCompletionDeets::AddedMember
+            };
             return Ok(big_sync::SyncTaskRunOutcome::Completion(
-                big_sync_core::SyncTaskCompletion {
-                    obj_id,
-                    deets: big_sync_core::SyncCompletionDeets::AddedMember,
-                },
+                big_sync_core::SyncTaskCompletion { obj_id, deets },
             ));
         }
         let local_heads = local_heads.expect("checked above");
@@ -135,7 +148,11 @@ impl big_sync::SyncBackend for BigRepoSyncBackend {
         }
         match repo
             .runtime
-            .sync_doc_with_peer(doc_id, peer_id, Some(Duration::from_secs(10)))
+            .sync_doc_with_peer(
+                doc_id,
+                peer_id,
+                Some(crate::runtime::BIG_SYNC_DOC_SYNC_TIMEOUT),
+            )
             .await
         {
             Ok(()) => {

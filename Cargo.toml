@@ -169,13 +169,14 @@ reqwest = { version = "0.12", default-features = false, features = ["charset", "
 automerge = "0.9.0"
 autosurgeon = "0.11.0"
 automerge-test = "0.9"
-subduction_core = { git = "https://github.com/dman-os/subduction", rev = "ad90a6f36875931ff986a50bb2880cb7820aafaa" }
-subduction_iroh = { git = "https://github.com/dman-os/subduction", rev = "ad90a6f36875931ff986a50bb2880cb7820aafaa" }
-subduction_websocket = { git = "https://github.com/dman-os/subduction", rev = "ad90a6f36875931ff986a50bb2880cb7820aafaa" }
-sedimentree_core = { git = "https://github.com/dman-os/subduction", rev = "ad90a6f36875931ff986a50bb2880cb7820aafaa" }
-subduction_redb_storage = { git = "https://github.com/dman-os/subduction", rev = "ad90a6f36875931ff986a50bb2880cb7820aafaa" }
-subduction_crypto = { git = "https://github.com/dman-os/subduction", rev = "ad90a6f36875931ff986a50bb2880cb7820aafaa" }
-subduction_keyhive = { git = "https://github.com/dman-os/subduction", rev = "ad90a6f36875931ff986a50bb2880cb7820aafaa" }
+subduction_core = { git = "https://github.com/dman-os/subduction", rev = "2c44ec24a68be2a0d038ffd202e3d0721e2cb550" }
+subduction_iroh = { git = "https://github.com/dman-os/subduction", rev = "2c44ec24a68be2a0d038ffd202e3d0721e2cb550" }
+subduction_websocket = { git = "https://github.com/dman-os/subduction", rev = "2c44ec24a68be2a0d038ffd202e3d0721e2cb550" }
+subduction_ephemeral = { git = "https://github.com/dman-os/subduction", rev = "2c44ec24a68be2a0d038ffd202e3d0721e2cb550" }
+sedimentree_core = { git = "https://github.com/dman-os/subduction", rev = "2c44ec24a68be2a0d038ffd202e3d0721e2cb550" }
+subduction_redb_storage = { git = "https://github.com/dman-os/subduction", rev = "2c44ec24a68be2a0d038ffd202e3d0721e2cb550" }
+subduction_crypto = { git = "https://github.com/dman-os/subduction", rev = "2c44ec24a68be2a0d038ffd202e3d0721e2cb550" }
+subduction_keyhive = { git = "https://github.com/dman-os/subduction", rev = "2c44ec24a68be2a0d038ffd202e3d0721e2cb550" }
 keyhive_crypto = "0.2.1"
 keyhive_core = "0.5.0"
 beekem = "0.3.0"
