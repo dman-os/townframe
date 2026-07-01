@@ -381,7 +381,7 @@ impl TablesRepo {
         let app_doc_handle = big_repo
             .get_doc(&app_doc_id)
             .await?
-            .ok_or_eyre("unable to find app doc in am")?;
+            .into_ready(app_doc_id)?;
 
         let store_val = TablesStore::load(&app_doc_handle).await?;
         let store = crate::stores::AmStoreHandle::new(
@@ -1651,7 +1651,7 @@ mod tests {
         let app_doc_id = {
             let doc_bytes = crate::app::version_updates::version_latest()?;
             let doc = automerge::Automerge::load(&doc_bytes)?;
-            let handle = big_repo.put_doc(DocumentId::random(), doc).await?;
+            let handle = big_repo.create_doc(doc).await?;
             handle.document_id()
         };
 

@@ -185,7 +185,7 @@ impl ConfigRepo {
         let app_doc_handle = big_repo
             .get_doc(&app_doc_id)
             .await?
-            .ok_or_eyre("unable to find app doc in am")?;
+            .into_ready(app_doc_id)?;
 
         let store_val = ConfigStore::load(&app_doc_handle).await?;
         let local_user_path =
@@ -524,7 +524,7 @@ impl ConfigRepo {
             .big_repo
             .get_doc(&self.app_doc_id)
             .await?
-            .ok_or_eyre("app doc not found")?;
+            .into_ready(self.app_doc_id)?;
         let heads = handle.with_document_read(|doc| doc.get_heads()).await;
         Ok(Arc::from(heads))
     }
@@ -724,7 +724,7 @@ mod tests {
         let (big_repo, big_sync_host, _acx_stop) = crate::test_support::boot_repo().await?;
 
         let app_doc = automerge::Automerge::load(&crate::app::version_updates::version_latest()?)?;
-        let app_doc_handle = big_repo.put_doc(DocumentId::random(), app_doc).await?;
+        let app_doc_handle = big_repo.create_doc(app_doc).await?;
         let app_doc_id = app_doc_handle.document_id();
 
         let temp = tempfile::tempdir()?;

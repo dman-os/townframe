@@ -114,7 +114,7 @@ impl DrawerRepo {
         let drawer_am_handle = big_repo
             .get_doc(&drawer_doc_id)
             .await?
-            .ok_or_eyre("drawer doc not found")?;
+            .into_ready(drawer_doc_id)?;
 
         let initial_heads = drawer_am_handle
             .with_document_read(|doc| ChangeHashSet(doc.get_heads().into()))
@@ -282,18 +282,16 @@ impl DrawerRepo {
         }) {
             return Ok(Some(handle));
         }
-        let has_local = self.big_repo.get_doc(&document_id).await?.is_some();
-        if !has_local {
-            return Ok(None);
+        match self.big_repo.get_doc(&document_id).await? {
+            big_repo::DocLookup::Ready(handle) => {
+                surelock::key::lock_scope(|key| {
+                    let (mut handles, _key) = key.lock(&self.branch_handles);
+                    handles.insert(document_id, handle.clone());
+                });
+                Ok(Some(handle))
+            }
+            _ => Ok(None),
         }
-        let Some(handle) = self.big_repo.get_doc(&document_id).await? else {
-            return Ok(None);
-        };
-        surelock::key::lock_scope(|key| {
-            let (mut handles, _key) = key.lock(&self.branch_handles);
-            handles.insert(document_id, handle.clone());
-        });
-        Ok(Some(handle))
     }
 
     async fn resolve_handle_for_branch_heads(
@@ -361,7 +359,7 @@ impl DrawerRepo {
             .big_repo
             .get_doc(&branch_doc_id)
             .await?
-            .ok_or_eyre("branch doc handle missing for tombstoned branch")?;
+            .into_ready(branch_doc_id)?;
         let keys = handle
             .with_document_read(|am_doc| {
                 let facets_obj = match automerge::ReadDoc::get_at(

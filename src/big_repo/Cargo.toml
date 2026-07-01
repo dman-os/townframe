@@ -30,6 +30,7 @@ async-lock = { workspace = true }
 async-trait.workspace = true
 futures-buffered.workspace = true
 futures = { workspace = true }
+async-channel.workspace = true
 
 #
 # automerge
@@ -46,6 +47,7 @@ rand_08 = { version = "0.8", package = "rand", default-features = false }
 tempfile.workspace = true
 atproto-dasl.workspace = true
 nonempty.workspace = true
+nonempty12 = { package = "nonempty", version = "0.12", features = ["std"] }
 bincode = "1.3"
 
 #
@@ -62,13 +64,13 @@ sedimentree_core = { workspace = true, features = ["rayon"] }
 subduction_core = { workspace = true  }
 subduction_crypto = { workspace = true, }
 subduction_iroh = { workspace = true }
+subduction_ephemeral = { workspace = true, features = ["std"] }
 subduction_keyhive = { workspace = true, features = ["runtime"] }
 subduction_redb_storage = { workspace = true }
 subduction_websocket = { workspace = true, features = ["tokio_base"], }
 keyhive_crypto.workspace = true
 keyhive_core.workspace = true
 beekem.workspace = true
-fs4.workspace = true
 
 #
 # logging

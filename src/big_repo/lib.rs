@@ -24,6 +24,8 @@ use sedimentree_core::loose_commit::id::CommitId;
 mod backend;
 #[expect(unused)]
 mod changes;
+mod encrypted_blob;
+pub mod ephemeral;
 pub(crate) mod handler;
 mod keyhive;
 pub(crate) mod keyhive_conn;
@@ -31,11 +33,15 @@ pub(crate) mod keyhive_storage;
 pub mod rpc;
 mod runtime;
 pub(crate) mod wire;
-pub use runtime::{CreateDocError, DocLookup, PutDocError, SyncDocError};
+pub use runtime::{CreateDocError, DocLookup, PutDocError, ReadyDocError, SyncDocError};
 #[cfg(test)]
 pub(crate) mod test;
 
 pub use backend::BigRepoSyncBackend;
+pub use ephemeral::{
+    BigEphemeral, BigEphemeralEvent, BigEphemeralFilter, BigEphemeralSubscription,
+    BigEphemeralTopic,
+};
 pub use keyhive::{BigKeyhiveAgent, BigKeyhiveAuthority, BigKeyhiveGroup, BigKeyhiveHandle};
 
 pub use changes::{
@@ -50,7 +56,9 @@ pub type SharedPartStore = Arc<dyn big_sync::HostPartStore>;
 
 #[derive(Debug, Clone)]
 pub struct Config {
-    pub keyhive_seed: [u8; 32],
+    /// Single identity seed used to derive both the Keyhive individual and
+    /// the Subduction signer.
+    pub node_identity_seed: [u8; 32],
     pub storage: StorageConfig,
 }
 
@@ -73,6 +81,8 @@ pub struct BigRepo {
     #[educe(Debug(ignore))]
     runtime: runtime::BigRepoRuntimeHandle,
     #[educe(Debug(ignore))]
+    ephemeral: BigEphemeral,
+    #[educe(Debug(ignore))]
     change_manager: Arc<changes::ChangeListenerManager>,
     #[educe(Debug(ignore))]
     change_manager_stop: std::sync::Mutex<Option<changes::ChangeListenerManagerStopToken>>,
@@ -88,10 +98,13 @@ impl BigRepo {
         big_sync_store: SharedPartStore,
     ) -> Res<(Arc<Self>, BigRepoStopToken)> {
         let Config {
-            keyhive_seed,
+            node_identity_seed,
             storage,
         } = config;
-        let mut keyhive = BigKeyhiveHandle::boot_memory_from_seed(keyhive_seed).await?;
+        // `SubductionKeyhive` authorizes peers by matching the peer signing
+        // identity to the Keyhive individual identifier, so BigRepo derives
+        // both identities from this one seed.
+        let mut keyhive = BigKeyhiveHandle::boot_memory_from_seed(node_identity_seed).await?;
         let keyhive_storage = match &storage {
             StorageConfig::Memory => BigRepoKeyhiveStorage::memory(),
             StorageConfig::Disk { path } => BigRepoKeyhiveStorage::fs(path.join(KEYHIVE_SUBDIR))
@@ -106,10 +119,11 @@ impl BigRepo {
         let policy = Arc::new(subduction_keyhive::policy::SubductionKeyhive::new(
             policy_keyhive,
         ));
-        let signer = subduction_crypto::signer::memory::MemorySigner::from_bytes(&keyhive_seed);
+        let signer =
+            subduction_crypto::signer::memory::MemorySigner::from_bytes(&node_identity_seed);
         let peer_id = PeerId::new(*signer.verifying_key().as_bytes());
         let (change_manager, change_manager_stop) = changes::ChangeListenerManager::boot();
-        let (runtime, runtime_stop) = match storage {
+        let (runtime, ephemeral, runtime_stop) = match storage {
             StorageConfig::Memory => {
                 runtime::spawn_big_repo_runtime(
                     signer,
@@ -151,6 +165,7 @@ impl BigRepo {
             keyhive_storage,
             big_sync_store,
             runtime,
+            ephemeral,
             change_manager,
             change_manager_stop: std::sync::Mutex::new(Some(change_manager_stop)),
         });
@@ -176,6 +191,15 @@ impl BigRepo {
     }
     pub fn keyhive(&self) -> &BigKeyhiveHandle {
         &self.keyhive
+    }
+
+    pub fn ephemeral(&self) -> BigEphemeral {
+        self.ephemeral.clone()
+    }
+
+    #[cfg(test)]
+    pub(crate) async fn inspect_stored_doc_blobs(&self, doc_id: DocumentId) -> Res<Vec<Vec<u8>>> {
+        self.runtime.inspect_stored_doc_blobs(doc_id).await
     }
 }
 
@@ -261,17 +285,7 @@ impl BigRepo {
         principal: impl Into<BigKeyhiveAuthority>,
         access: keyhive_core::access::Access,
     ) -> Res<()> {
-        let doc = match self.get_doc(&doc_id).await? {
-            DocLookup::Ready(doc) => doc,
-            DocLookup::PendingMaterialization => {
-                return Err(ferr!(
-                    "document {doc_id} is present but materialization is still pending"
-                ));
-            }
-            DocLookup::Missing => {
-                return Err(ferr!("document not found for checkpoint grant: {doc_id}"));
-            }
-        };
+        let doc = self.get_doc(&doc_id).await?.into_ready(doc_id)?;
 
         self.keyhive
             .grant_doc_access(principal, doc_id, access, &self.keyhive_storage)

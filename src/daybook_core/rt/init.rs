@@ -95,7 +95,7 @@ impl InitRepo {
         let app_am_handle = big_repo
             .get_doc(&app_doc_id)
             .await?
-            .ok_or_eyre("unable to find app doc in am")?;
+            .into_ready(app_doc_id)?;
         let store_val = InitStore::load(&app_am_handle).await?;
         let store = crate::stores::AmStoreHandle::new(
             store_val,

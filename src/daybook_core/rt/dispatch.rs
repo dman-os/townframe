@@ -1013,6 +1013,8 @@ async fn clear_cancelled_mark_tx(
 
 #[cfg(test)]
 mod tests {
+    use automerge::transaction::Transactable;
+
     use super::*;
     use crate::repos::{Repo, SubscribeOpts};
 
@@ -1021,9 +1023,13 @@ mod tests {
     ) -> Res<(Arc<DispatchRepo>, daybook_types::doc::UserPathBuf)> {
         let local_user_path = daybook_types::doc::UserPathBuf::from("/test-user/test-device");
         let (big_repo, _part_store, _acx_stop) = crate::test_support::boot_repo().await?;
-        let app_doc = big_repo
-            .put_doc(DocumentId::random(), automerge::Automerge::new())
-            .await?;
+        let mut app_doc = automerge::Automerge::new();
+        {
+            let mut tx = app_doc.transaction();
+            tx.put(automerge::ROOT, "version", "0")?;
+            tx.commit();
+        }
+        let app_doc = big_repo.create_doc(app_doc).await?;
         let app_doc_id = app_doc.document_id();
         let (repo, _stop) =
             DispatchRepo::load(big_repo, app_doc_id, local_user_path.clone(), repo_sql).await?;
