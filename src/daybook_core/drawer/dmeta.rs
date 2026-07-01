@@ -103,9 +103,7 @@ pub fn facet_uuid_for_key_at(
         Some((automerge::Value::Object(automerge::ObjType::List), list_obj)) => {
             let mut uuids: Vec<Uuid> = Vec::new();
             for ii in 0..doc.length_at(&list_obj, heads) {
-                let Some((value, _)) = doc.get_at(&list_obj, ii, heads)? else {
-                    continue;
-                };
+                let (value, _) = doc.get_at(&list_obj, ii, heads)?.expect(ERROR_IMPOSSIBLE);
                 let automerge::Value::Scalar(scalar) = value else {
                     eyre::bail!("facet uuid list contains non-scalar value for key {facet_key}");
                 };

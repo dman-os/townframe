@@ -96,7 +96,6 @@ import androidx.compose.ui.input.pointer.PointerEventTimeoutCancellationExceptio
 import androidx.compose.ui.input.pointer.PointerEventType
 import androidx.compose.ui.input.pointer.changedToUp
 import androidx.compose.ui.input.pointer.isOutOfBounds
-import androidx.compose.ui.input.pointer.onPointerEvent
 import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.layout.onSizeChanged
 import androidx.compose.ui.platform.LocalDensity
@@ -1795,24 +1794,38 @@ private fun BlockSelectionActionStrip(actions: List<BlockActionSpec>) {
         modifier =
         Modifier
             .fillMaxWidth()
-            .onPointerEvent(PointerEventType.Scroll, pass = PointerEventPass.Initial) { event ->
-                val scrollDelta = event.changes.firstOrNull()?.scrollDelta ?: return@onPointerEvent
-                val scrollInput =
-                    if (kotlin.math.abs(scrollDelta.x) > BLOCK_SELECTION_ACTION_SCROLL_EPSILON) {
-                        scrollDelta.x
-                    } else {
-                        scrollDelta.y
-                    }
-                val canScrollTowardInput =
-                    (scrollInput < -BLOCK_SELECTION_ACTION_SCROLL_EPSILON && actionScrollState.value > 0) ||
-                        (
-                            scrollInput > BLOCK_SELECTION_ACTION_SCROLL_EPSILON &&
-                                actionScrollState.value < actionScrollState.maxValue
-                            )
-                if (canScrollTowardInput) {
-                    event.changes.forEach { change -> change.consume() }
-                    scope.launch {
-                        actionScrollState.scrollBy(scrollInput * BLOCK_SELECTION_ACTION_WHEEL_SCROLL_MULTIPLIER)
+            .pointerInput(Unit) {
+                awaitPointerEventScope {
+                    while (true) {
+                        val event = awaitPointerEvent(PointerEventPass.Initial)
+                        if (event.type == PointerEventType.Scroll) {
+                            val scrollDelta = event.changes.firstOrNull()?.scrollDelta
+                            if (scrollDelta != null) {
+                                val scrollInput =
+                                    if (kotlin.math.abs(scrollDelta.x) > BLOCK_SELECTION_ACTION_SCROLL_EPSILON) {
+                                        scrollDelta.x
+                                    } else {
+                                        scrollDelta.y
+                                    }
+                                val canScrollTowardInput =
+                                    (
+                                        scrollInput < -BLOCK_SELECTION_ACTION_SCROLL_EPSILON &&
+                                            actionScrollState.value > 0
+                                        ) ||
+                                        (
+                                            scrollInput > BLOCK_SELECTION_ACTION_SCROLL_EPSILON &&
+                                                actionScrollState.value < actionScrollState.maxValue
+                                            )
+                                if (canScrollTowardInput) {
+                                    event.changes.forEach { change -> change.consume() }
+                                    scope.launch {
+                                        actionScrollState.scrollBy(
+                                            scrollInput * BLOCK_SELECTION_ACTION_WHEEL_SCROLL_MULTIPLIER,
+                                        )
+                                    }
+                                }
+                            }
+                        }
                     }
                 }
             }

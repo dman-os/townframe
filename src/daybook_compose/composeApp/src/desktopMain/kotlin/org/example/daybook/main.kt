@@ -22,17 +22,24 @@ import java.util.concurrent.atomic.AtomicBoolean
 private val signalShutdownRequested = AtomicBoolean(false)
 
 private fun installSignalHandler(signalName: String) {
-    runCatching {
+    try {
         Signal.handle(Signal(signalName)) {
             println("[APP_SHUTDOWN] signal received name=$signalName, requesting graceful shutdown")
             signalShutdownRequested.set(true)
         }
         println("[APP_SHUTDOWN] installed signal handler name=$signalName")
-    }.onFailure { error ->
+    } catch (e: IllegalArgumentException) {
         println(
-            "[APP_SHUTDOWN] failed to install signal handler name=$signalName err=${error.message}",
+            "[APP_SHUTDOWN] invalid signal name=$signalName err=${e.message}",
         )
-        throw error
+    } catch (e: UnsupportedOperationException) {
+        println(
+            "[APP_SHUTDOWN] signals not supported on this platform name=$signalName err=${e.message}",
+        )
+    } catch (e: NoClassDefFoundError) {
+        println(
+            "[APP_SHUTDOWN] signal handler unavailable (jdk.unsupported missing) name=$signalName err=${e.message}",
+        )
     }
 }
 
@@ -52,13 +59,19 @@ fun main() = application {
         )
     DisposableEffect(Unit) {
         val hook =
-            Thread { println("[APP_SHUTDOWN] JVM shutdown hook triggered (signal/process exit)") }
+            Thread {
+                println("[APP_SHUTDOWN] JVM shutdown hook triggered (signal/process exit)")
+                signalShutdownRequested.set(true)
+            }
         Runtime.getRuntime().addShutdownHook(hook)
         onDispose {
-            runCatching { Runtime.getRuntime().removeShutdownHook(hook) }
-                .onFailure { error ->
-                    println("[APP_SHUTDOWN] failed to remove shutdown hook err=${error.message}")
-                }
+            try {
+                Runtime.getRuntime().removeShutdownHook(hook)
+            } catch (e: IllegalStateException) {
+                println("[APP_SHUTDOWN] shutdown already in progress, cannot remove hook: ${e.message}")
+            } catch (e: SecurityException) {
+                println("[APP_SHUTDOWN] denied removing shutdown hook err=${e.message}")
+            }
         }
     }
 

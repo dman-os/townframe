@@ -375,7 +375,10 @@ fun WelcomeFlowNavHost(
                             WelcomeRepoDetailScreen(
                                 repo = repo,
                                 onOpen = { onPendingOpenRepoPath(repo.path) },
-                                onForget = { onForgetRepo(repo.id) },
+                                onForget = {
+                                    onForgetRepo(repo.id)
+                                    onSelectedWelcomeRepoChange(null)
+                                },
                                 forgetting = false,
                             )
                         }
