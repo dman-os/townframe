@@ -195,10 +195,18 @@ interface stateless-view {
 interface sqlite-connection {
     use townframe:sql/types.{sql-value, result-row, query-error};
 
+    resource transaction {
+        query: func(query: string, params: list<sql-value>) -> result<list<result-row>, query-error>;
+        query-batch: func(query: string) -> result<_, query-error>;
+        commit: func() -> result<_, query-error>;
+        rollback: func() -> result<_, query-error>;
+    }
+
     resource connection {
         query: func(query: string, params: list<sql-value>) -> result<list<result-row>, query-error>;
         query-batch: func(query: string) -> result<_, query-error>;
         sqlite-file-path: func() -> string;
+        begin-transaction: func() -> result<transaction, query-error>;
     }
 }
 

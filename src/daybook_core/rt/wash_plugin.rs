@@ -25,6 +25,7 @@ mod binds_guest {
             "townframe:daybook/capabilities.facet-tag-token": super::caps::FacetTagToken,
             "townframe:daybook/capabilities.command-invoke-token": super::caps::CommandInvokeToken,
             "townframe:daybook/sqlite-connection.connection": super::local_state_sql::SqliteConnectionToken,
+            "townframe:daybook/sqlite-connection.transaction": super::local_state_sql::SqliteTransactionToken,
         }
     });
 

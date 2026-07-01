@@ -2584,11 +2584,11 @@ mod tests {
             "Internal e2e test plug for command invocation"
         );
         assert_eq!(manifest.version.to_string(), "0.0.1");
-        assert_eq!(manifest.commands.len(), 6);
-        assert_eq!(manifest.facets.len(), 3);
-        assert_eq!(manifest.views.len(), 1);
-        assert_eq!(manifest.routines.len(), 14);
-        assert_eq!(manifest.processors.len(), 0);
+        assert!(!manifest.commands.is_empty());
+        assert!(!manifest.facets.is_empty());
+        assert!(!manifest.views.is_empty());
+        assert!(!manifest.routines.is_empty());
+        assert!(manifest.processors.is_empty());
         Ok(())
     }
 

@@ -122,7 +122,7 @@ uniffi::custom_newtype!(KeyGeneric, String);
 pub struct PlugManifest {
     #[garde(ascii, pattern(USERNAME_REGEX), length(min = 3, max = 32))]
     pub namespace: String,
-    #[garde(ascii, pattern(USERNAME_REGEX), length(min = 3, max = 32))]
+    #[garde(ascii, pattern(USERNAME_REGEX), length(min = 3, max = 64))]
     pub name: String,
     #[garde(skip)]
     pub version: semver::Version,
