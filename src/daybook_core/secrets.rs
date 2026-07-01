@@ -60,19 +60,19 @@ impl SecretRepo {
                     #[cfg(target_os = "android")]
                     {
                         android_native_keyring_store::Store::new()
-                            .map(|sec| Arc::new(sec) as Arc<keyring_core::CredentialStore>)
+                            .map(|sec| sec as Arc<keyring_core::CredentialStore>)
                             .map_err(|err| eyre::eyre!(err).wrap_err("android keyring unavailable"))
                     }
                     #[cfg(target_os = "windows")]
                     {
                         windows_native_keyring_store::Store::new()
-                            .map(|sec| Arc::new(sec) as Arc<keyring_core::CredentialStore>)
+                            .map(|sec| sec as Arc<keyring_core::CredentialStore>)
                             .map_err(|err| eyre::eyre!(err).wrap_err("windows keyring unavailable"))
                     }
                     #[cfg(any(target_os = "macos", target_os = "ios"))]
                     {
                         apple_native_keyring_store::keychain::Store::new()
-                            .map(|sec| Arc::new(sec) as Arc<keyring_core::CredentialStore>)
+                            .map(|sec| sec as Arc<keyring_core::CredentialStore>)
                             .map_err(|err| eyre::eyre!(err).wrap_err("apple keychain unavailable"))
                     }
                 })
