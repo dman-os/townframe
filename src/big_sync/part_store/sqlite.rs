@@ -712,6 +712,19 @@ impl HostPartStore for SqlitePartStore {
             .collect())
     }
 
+    async fn obj_exists(&self, obj_id: ObjId) -> Res<bool> {
+        let exists: Option<i64> = sqlx::query_scalar(
+            "SELECT 1
+             FROM big_sync_objs
+             WHERE scope_id = ?1 AND obj_id = ?2",
+        )
+        .bind(self.scope_id)
+        .bind(Self::obj_blob(obj_id))
+        .fetch_optional(&self.sql.read_pool)
+        .await?;
+        Ok(exists.is_some())
+    }
+
     async fn get_bucket_summary(&self, part_id: PartId, id: BuckId) -> Res<BucketSummary> {
         self.bucket_summary_for_path(part_id, id).await
     }

@@ -4139,11 +4139,11 @@ async fn run_sync_backend_case(
     Ok(())
 }
 
-async fn run_sync_backend_added_member_case(remote_mutation: Option<SyncMutation>) -> Res<()> {
+async fn run_sync_backend_changed_object_case(remote_mutation: Option<SyncMutation>) -> Res<()> {
     run_sync_backend_case(
         None,
         remote_mutation,
-        SyncCompletionDeets::AddedMember,
+        SyncCompletionDeets::ChangedObject,
         false,
         sync_test_parts(),
         false,
@@ -4422,7 +4422,7 @@ async fn big_repo_sync_backend_applies_remote_update_when_remote_payload_is_miss
 async fn big_repo_sync_backend_adds_missing_doc() -> Res<()> {
     timeout(
         SYNC_CASE_TIMEOUT,
-        run_sync_backend_added_member_case(Some(SyncMutation {
+        run_sync_backend_changed_object_case(Some(SyncMutation {
             item_idx: 23,
             note_key: "added_member",
             side_label: "remote",

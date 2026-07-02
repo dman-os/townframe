@@ -104,16 +104,11 @@ impl big_sync::SyncBackend for BigRepoSyncBackend {
         let doc_id: crate::DocumentId = obj_id;
         let local_heads = super::partition_doc_heads_payload(&repo.big_sync_store, doc_id).await?;
         if local_heads.is_none() {
-            let local_doc_exists =
-                !matches!(repo.get_doc(&doc_id).await?, crate::DocLookup::Missing);
+            let local_doc_exists = repo.big_sync_store.obj_exists(doc_id).await?;
             // Doc not yet synced locally. Pull from peer via Subduction sync.
             // Subduction syncs from an empty tree — the peer sends everything it has.
             repo.runtime
-                .sync_doc_with_peer(
-                    doc_id,
-                    peer_id,
-                    Some(crate::runtime::BIG_SYNC_DOC_SYNC_TIMEOUT),
-                )
+                .sync_doc_with_peer(doc_id, peer_id, Some(repo.sync_policy().doc_sync_timeout))
                 .await
                 .map_err(|sync_error| match sync_error {
                     crate::SyncDocError::NotFound => eyre::eyre!("remote doc was not found"),
@@ -148,11 +143,7 @@ impl big_sync::SyncBackend for BigRepoSyncBackend {
         }
         match repo
             .runtime
-            .sync_doc_with_peer(
-                doc_id,
-                peer_id,
-                Some(crate::runtime::BIG_SYNC_DOC_SYNC_TIMEOUT),
-            )
+            .sync_doc_with_peer(doc_id, peer_id, Some(repo.sync_policy().doc_sync_timeout))
             .await
         {
             Ok(()) => {

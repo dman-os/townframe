@@ -39,10 +39,29 @@ use tokio_util::sync::CancellationToken;
 use super::changes;
 use subduction_core::subduction::request::FragmentRequested;
 
-const DOC_WORKER_IDLE_TTL: Duration = Duration::from_secs(3);
-pub(crate) const BIG_SYNC_DOC_SYNC_TIMEOUT: Duration = Duration::from_secs(10);
-const SUBDUCTION_NONCE_TTL: Duration = Duration::from_secs(60);
-const SUBDUCTION_DEFAULT_ROUNDTRIP_TIMEOUT: Duration = Duration::from_secs(30);
+const DEFAULT_DOC_WORKER_IDLE_TTL: Duration = Duration::from_secs(3);
+const DEFAULT_DOC_SYNC_TIMEOUT: Duration = Duration::from_secs(10);
+const DEFAULT_SUBDUCTION_NONCE_TTL: Duration = Duration::from_secs(60);
+const DEFAULT_SUBDUCTION_DEFAULT_ROUNDTRIP_TIMEOUT: Duration = Duration::from_secs(30);
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) struct BigRepoSyncPolicy {
+    pub(crate) doc_worker_idle_ttl: Duration,
+    pub(crate) doc_sync_timeout: Duration,
+    pub(crate) subduction_nonce_ttl: Duration,
+    pub(crate) subduction_default_roundtrip_timeout: Duration,
+}
+
+impl Default for BigRepoSyncPolicy {
+    fn default() -> Self {
+        Self {
+            doc_worker_idle_ttl: DEFAULT_DOC_WORKER_IDLE_TTL,
+            doc_sync_timeout: DEFAULT_DOC_SYNC_TIMEOUT,
+            subduction_nonce_ttl: DEFAULT_SUBDUCTION_NONCE_TTL,
+            subduction_default_roundtrip_timeout: DEFAULT_SUBDUCTION_DEFAULT_ROUNDTRIP_TIMEOUT,
+        }
+    }
+}
 type SharedPartitionStore = Arc<dyn big_sync::HostPartStore>;
 type PendingKeyhiveSyncWaiters = HashMap<PeerId, Vec<(u64, oneshot::Sender<Res<()>>)>>;
 type PendingDocSyncWaiters = HashMap<PeerId, Vec<(u64, oneshot::Sender<Result<(), SyncDocError>>)>>;
@@ -62,7 +81,7 @@ pub enum SyncDocError {
 }
 
 #[derive(Debug, thiserror::Error, displaydoc::Display, PartialEq, Eq)]
-pub enum ReadyDocError {
+pub enum GetDocError {
     /// document {0} is not found
     NotFound(DocumentId),
     /// document {0} is pending materialization
@@ -85,11 +104,11 @@ impl<T> DocLookup<T> {
         }
     }
 
-    pub fn into_ready(self, doc_id: DocumentId) -> Result<T, ReadyDocError> {
+    pub fn into_ready(self, doc_id: DocumentId) -> Result<T, GetDocError> {
         match self {
             Self::Ready(value) => Ok(value),
-            Self::Missing => Err(ReadyDocError::NotFound(doc_id)),
-            Self::PendingMaterialization => Err(ReadyDocError::PendingMaterialization(doc_id)),
+            Self::Missing => Err(GetDocError::NotFound(doc_id)),
+            Self::PendingMaterialization => Err(GetDocError::PendingMaterialization(doc_id)),
         }
     }
 
@@ -276,6 +295,8 @@ pub struct BigRepoRuntimeHandle {
     keyhive: BigKeyhiveHandle,
     #[educe(Debug(ignore))]
     keyhive_storage: BigRepoKeyhiveStorage,
+    #[educe(Debug(ignore))]
+    sync_policy: BigRepoSyncPolicy,
     #[educe(Debug(ignore))]
     doc_sync_waiter_ids: Arc<AtomicU64>,
     #[educe(Debug(ignore))]
@@ -518,6 +539,7 @@ impl BigRepoRuntimeHandle {
             .map_err(|_| eyre::eyre!(ERROR_ACTOR))?;
         rx.await.map_err(|_| eyre::eyre!(ERROR_CHANNEL))?
     }
+
 }
 
 pub struct BigRepoRuntimeStopToken {
@@ -599,6 +621,7 @@ pub async fn spawn_big_repo_runtime<S>(
     signer: subduction_crypto::signer::memory::MemorySigner,
     storage: S,
     policy: Arc<BigRepoPolicy>,
+    sync_policy: BigRepoSyncPolicy,
     keyhive: BigKeyhiveHandle,
     keyhive_storage: BigRepoKeyhiveStorage,
     big_sync_store: SharedPartitionStore,
@@ -614,7 +637,7 @@ where
     let local_peer_id =
         subduction_core::peer::id::PeerId::new(*connect_signer.verifying_key().as_bytes());
     let nonce_cache = Arc::new(subduction_core::nonce_cache::NonceCache::new(
-        SUBDUCTION_NONCE_TTL,
+        sync_policy.subduction_nonce_ttl,
     ));
     let runtime_stop = CancellationToken::new();
     let runtime_tasks = Arc::new(utils_rs::AbortableJoinSet::new());
@@ -733,9 +756,9 @@ where
         Arc::clone(&subscriptions),
         storage_powerbox,
         send_counter,
-        subduction_core::nonce_cache::NonceCache::new(SUBDUCTION_NONCE_TTL),
+        subduction_core::nonce_cache::NonceCache::new(sync_policy.subduction_nonce_ttl),
         TimeoutTokio,
-        SUBDUCTION_DEFAULT_ROUNDTRIP_TIMEOUT,
+        sync_policy.subduction_default_roundtrip_timeout,
         sedimentree_core::depth::CountLeadingZeroBytes,
         TokioSpawn,
     );
@@ -759,6 +782,7 @@ where
         connect_signer,
         local_peer_id,
         nonce_cache,
+        sync_policy,
         runtime_stop: runtime_stop.clone(),
         cmd_tx: cmd_tx.clone(),
         evt_tx: evt_tx.clone(),
@@ -876,6 +900,7 @@ where
             cmd_tx,
             keyhive: keyhive.clone(),
             keyhive_storage,
+            sync_policy,
             doc_sync_waiter_ids: Arc::clone(&doc_sync_waiter_ids),
             keyhive_sync_waiter_ids: Arc::clone(&keyhive_sync_waiter_ids),
         },
@@ -906,6 +931,7 @@ where
     connect_signer: subduction_crypto::signer::memory::MemorySigner,
     local_peer_id: subduction_core::peer::id::PeerId,
     nonce_cache: Arc<subduction_core::nonce_cache::NonceCache>,
+    sync_policy: BigRepoSyncPolicy,
     runtime_stop: CancellationToken,
     cmd_tx: mpsc::UnboundedSender<RuntimeCmd>,
     evt_tx: mpsc::UnboundedSender<RuntimeEvt>,
@@ -1184,7 +1210,7 @@ where
             entry.eviction_deadline = None;
             return;
         }
-        entry.eviction_deadline = Some(Instant::now() + DOC_WORKER_IDLE_TTL);
+        entry.eviction_deadline = Some(Instant::now() + self.sync_policy.doc_worker_idle_ttl);
     }
 
     fn handle_doc_worker_janitor_tick(&mut self) {
@@ -1407,6 +1433,7 @@ where
                 cmd_tx: self.cmd_tx.clone(),
                 keyhive: self.keyhive.clone(),
                 keyhive_storage: self.keyhive_storage.clone(),
+                sync_policy: self.sync_policy,
                 doc_sync_waiter_ids: Arc::clone(&self.doc_sync_waiter_ids),
                 keyhive_sync_waiter_ids: Arc::clone(&self.keyhive_sync_waiter_ids),
             },
@@ -1455,7 +1482,7 @@ where
                 stop: DocWorkerStopToken { cancel_token },
                 local_handles: 0,
                 transient_work: 0,
-                eviction_deadline: Some(Instant::now() + DOC_WORKER_IDLE_TTL),
+                eviction_deadline: Some(Instant::now() + self.sync_policy.doc_worker_idle_ttl),
             },
         );
         Ok(())
@@ -2012,7 +2039,6 @@ where
                     subduction_core::sync_session::SyncSessionKind::OutboundBatch
                 );
                 let mut materialization_pending = self.handle_apply_sync_session(session).await?;
-                self.finish_transient_work()?;
                 if completes_sync_waiters {
                     let waiter = self
                         .pending_sync_jobs
@@ -2034,7 +2060,10 @@ where
                         let waiter_result = if materialization_pending {
                             match self
                                 .runtime_handle
-                                .sync_keyhive_with_peer(peer_id, Some(BIG_SYNC_DOC_SYNC_TIMEOUT))
+                                .sync_keyhive_with_peer(
+                                    peer_id,
+                                    Some(self.runtime_handle.sync_policy.doc_sync_timeout),
+                                )
                                 .await
                             {
                                 Ok(()) => {
@@ -2051,13 +2080,13 @@ where
                         } else {
                             Ok(())
                         };
-                        self.finish_transient_work()?;
                         waiter
                             .send(waiter_result)
                             .inspect_err(|_| warn!(ERROR_CALLER))
                             .ok();
                     }
                 }
+                self.finish_transient_work()?;
             }
             DocWorkerMsg::SyncWithPeer {
                 peer_id,
@@ -2315,6 +2344,7 @@ where
             CommitId,
             keyhive_crypto::symmetric_key::SymmetricKey,
         > = std::collections::HashMap::new();
+        let mut keyhive_changed = false;
         for (head, parents, blob) in commits {
             let (encrypted_blob, app_key, update_op) = encrypt_loose_commit_with_update_op(
                 &self.runtime_handle.keyhive,
@@ -2328,6 +2358,7 @@ where
             .map_err(|e| PutDocError::Other(ferr!("encryption failed: {e}")))?;
             if let Some(update_op) = update_op {
                 persist_cgka_update_op(&self.keyhive_storage, update_op).await?;
+                keyhive_changed = true;
             }
             batch_keys.insert(head, app_key);
             let pred_refs: Vec<Vec<u8>> = parents
@@ -2360,7 +2391,9 @@ where
         )
         .await?;
         self.process_pending_fragment_requests().await?;
-        self.runtime_handle.note_local_keyhive_changed().await?;
+        if keyhive_changed {
+            self.runtime_handle.note_local_keyhive_changed().await?;
+        }
         Ok(())
     }
 
@@ -2381,17 +2414,22 @@ where
         &mut self,
         session: subduction_core::sync_session::SyncSession,
     ) -> Res<bool> {
-        let _peer_id = PeerId::new(*session.peer_id.as_bytes());
+        let peer_id = PeerId::new(*session.peer_id.as_bytes());
         let was_pending = matches!(self.state, DocWorkerDocState::PendingMaterialization);
         use keyhive_core::crypto::envelope::Envelope;
+        let wants_patches = self
+            .change_manager
+            .has_change_listener_interest(self.doc_id, &BigRepoChangeOrigin::Remote { peer_id });
+        let make_patches = |doc: &automerge::Automerge,
+                            before_heads: &[automerge::ChangeHash],
+                            after_heads: &[automerge::ChangeHash]| {
+            if wants_patches {
+                doc.diff(before_heads, after_heads)
+            } else {
+                Vec::new()
+            }
+        };
 
-        let keyhive = self.runtime_handle.keyhive.clone_keyhive();
-        let vk = ed25519_dalek::VerifyingKey::from_bytes(self.doc_id_subduction.as_bytes())
-            .map_err(|_| ferr!("not a valid Keyhive DocumentId"))?;
-        let kh_doc_id = keyhive_core::principal::document::id::DocumentId::from(
-            keyhive_core::principal::identifier::Identifier::from(vk),
-        );
-        let kh_doc = keyhive.get_document(kh_doc_id).await;
         let received_refs = session
             .received_commit_ids
             .iter()
@@ -2411,19 +2449,44 @@ where
             return Ok(false);
         }
 
-        let tree = Self::get_or_hydrate_minimized_tree_from_storage(
+        let hydrated = Self::get_or_hydrate_minimized_tree_from_storage(
             &self.sedimentrees,
             &self.storage_for_reads,
             session.sedimentree_id,
         )
-        .await?
-        .tree;
+        .await?;
+        let fresh = hydrated.fresh;
+        let tree = hydrated.tree;
         let order = tree
             .topsorted_blob_order()
             .map_err(|err| ferr!("failed ordering sync session blobs: {err}"))?;
         let tree_fragments: Vec<_> = tree.fragments().collect();
         let tree_loose: Vec<_> = tree.loose_commits().collect();
         let received_all_ordered_blobs = received_refs.len() == order.len();
+
+        if !wants_patches
+            && matches!(
+                self.state,
+                DocWorkerDocState::Unloaded | DocWorkerDocState::PendingMaterialization
+            )
+        {
+            let heads = sedimentree_heads_payload(&tree);
+            if fresh {
+                self.sedimentrees
+                    .get_or_insert_with(session.sedimentree_id, || tree)
+                    .await;
+            }
+            store_doc_heads_payload(&self.big_sync_store, self.doc_id, heads).await?;
+            return Ok(false);
+        }
+
+        let keyhive = self.runtime_handle.keyhive.clone_keyhive();
+        let vk = ed25519_dalek::VerifyingKey::from_bytes(self.doc_id_subduction.as_bytes())
+            .map_err(|_| ferr!("not a valid Keyhive DocumentId"))?;
+        let kh_doc_id = keyhive_core::principal::document::id::DocumentId::from(
+            keyhive_core::principal::identifier::Identifier::from(vk),
+        );
+        let kh_doc = keyhive.get_document(kh_doc_id).await;
 
         let mut materialization_pending = false;
         let blobs = {
@@ -2635,7 +2698,8 @@ where
                             Some((after_heads, Vec::new()))
                         }
                     } else {
-                        let patches = doc.diff(&before_heads, &after_heads);
+                        let patches =
+                            make_patches(&doc, before_heads.as_ref(), after_heads.as_ref());
                         Some((after_heads, patches))
                     };
                     self.mark_materialization_ready(was_pending, Arc::from(doc.get_heads()))?;
@@ -2685,11 +2749,13 @@ where
                                 Some((after_heads, Vec::new()))
                             }
                         } else {
-                            let patches = doc.diff(&before_heads, &after_heads);
+                            let patches =
+                                make_patches(&doc, before_heads.as_ref(), after_heads.as_ref());
                             Some((after_heads, patches))
                         }
                     } else {
-                        let patches = doc.diff(&before_heads, &loaded_heads);
+                        let patches =
+                            make_patches(&doc, before_heads.as_ref(), loaded_heads.as_ref());
                         Some((loaded_heads, patches))
                     };
                     self.state = DocWorkerDocState::Transient(doc.into());
@@ -2716,7 +2782,8 @@ where
                             Some((after_heads, Vec::new()))
                         }
                     } else {
-                        let patches = doc.diff(&before_heads, &after_heads);
+                        let patches =
+                            make_patches(&doc, before_heads.as_ref(), after_heads.as_ref());
                         Some((after_heads, patches))
                     }
                 };
@@ -2743,7 +2810,8 @@ where
                             Some((after_heads, Vec::new()))
                         }
                     } else {
-                        let patches = doc.diff(&before_heads, &after_heads);
+                        let patches =
+                            make_patches(&doc, before_heads.as_ref(), after_heads.as_ref());
                         Some((after_heads, patches))
                     };
                     drop(doc);
@@ -2774,7 +2842,8 @@ where
                                 Some((after_heads, Vec::new()))
                             }
                         } else {
-                            let patches = doc.diff(&before_heads, &after_heads);
+                            let patches =
+                                make_patches(&doc, before_heads.as_ref(), after_heads.as_ref());
                             Some((after_heads, patches))
                         };
                         self.mark_materialization_ready(was_pending, Arc::from(doc.get_heads()))?;
@@ -2822,11 +2891,13 @@ where
                                     Some((after_heads, Vec::new()))
                                 }
                             } else {
-                                let patches = doc.diff(&before_heads, &after_heads);
+                                let patches =
+                                    make_patches(&doc, before_heads.as_ref(), after_heads.as_ref());
                                 Some((after_heads, patches))
                             }
                         } else {
-                            let patches = doc.diff(&before_heads, &loaded_heads);
+                            let patches =
+                                make_patches(&doc, before_heads.as_ref(), loaded_heads.as_ref());
                             Some((loaded_heads, patches))
                         };
                         self.state = DocWorkerDocState::Transient(doc.into());
@@ -3626,6 +3697,11 @@ struct BigRepoCiphertextStore<S> {
     locators: Arc<
         tokio::sync::Mutex<HashMap<Vec<u8>, std::collections::BTreeSet<BigRepoCiphertextLocator>>>,
     >,
+    ciphertexts: Arc<
+        tokio::sync::Mutex<
+            HashMap<Vec<u8>, Arc<beekem::encrypted::EncryptedContent<Vec<u8>, Vec<u8>>>>,
+        >,
+    >,
     pcs_updates: Arc<
         tokio::sync::Mutex<
             HashMap<
@@ -3644,6 +3720,7 @@ impl<S> BigRepoCiphertextStore<S> {
             storage_for_reads,
             sedimentree_id,
             locators: Arc::new(tokio::sync::Mutex::new(HashMap::new())),
+            ciphertexts: Arc::new(tokio::sync::Mutex::new(HashMap::new())),
             pcs_updates: Arc::new(tokio::sync::Mutex::new(HashMap::new())),
         }
     }
@@ -3665,6 +3742,10 @@ impl<S> BigRepoCiphertextStore<S> {
     ) -> Res<Arc<beekem::encrypted::EncryptedContent<Vec<u8>, Vec<u8>>>> {
         self.remember_locator(content_ref.clone(), locator).await;
         let encrypted = decode_encrypted_blob(raw)?;
+        self.ciphertexts
+            .lock()
+            .await
+            .insert(content_ref.clone(), Arc::clone(&encrypted));
         self.pcs_updates
             .lock()
             .await
@@ -3683,6 +3764,9 @@ impl<S> BigRepoCiphertextStore<S> {
     where
         S: BigRepoSubductionStorage,
     {
+        if let Some(encrypted) = self.ciphertexts.lock().await.get(&content_ref).cloned() {
+            return Ok(encrypted);
+        }
         let raw = self
             .load_raw_for_locator(&locator)
             .await?
@@ -3753,6 +3837,10 @@ impl<S> BigRepoCiphertextStore<S> {
         S: BigRepoSubductionStorage,
     {
         let content_ref_vec = content_ref.to_vec();
+
+        if let Some(encrypted) = self.ciphertexts.lock().await.get(content_ref).cloned() {
+            return Ok(Some(encrypted));
+        }
 
         let mut locators = self
             .locators
@@ -4345,6 +4433,70 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn ciphertext_store_reuses_indexed_entry_for_repeat_lookup() -> Res<()> {
+        let keyhive = BigKeyhiveHandle::boot_memory_from_seed([14; 32]).await?;
+        let keyhive_storage = BigRepoKeyhiveStorage::memory();
+        let doc_id = keyhive
+            .create_doc(nonempty![[1; 32]], &keyhive_storage)
+            .await?;
+        let sedimentree_id = SedimentreeId::new(*doc_id.as_bytes());
+        let commit_id = CommitId::new([17; 32]);
+        let storage = MemoryStorage::new();
+        let signer = MemorySigner::from_bytes(&[47u8; 32]);
+        let parents = BTreeSet::new();
+
+        let (encrypted_blob, _app_key) = encrypt_loose_commit(
+            &keyhive,
+            sedimentree_id,
+            commit_id,
+            &parents,
+            b"payload-bytes",
+            &HashMap::new(),
+        )
+        .await?;
+
+        let verified = VerifiedMeta::<sedimentree_core::loose_commit::LooseCommit>::seal::<
+            future_form::Sendable,
+            _,
+        >(
+            &signer,
+            (sedimentree_id, commit_id, parents),
+            VerifiedBlobMeta::new(encrypted_blob.clone()),
+        )
+        .await;
+        Storage::<future_form::Sendable>::save_loose_commit(&storage, sedimentree_id, verified)
+            .await
+            .map_err(|e| ferr!("save_loose_commit failed: {e}"))?;
+
+        let adapter = BigRepoCiphertextStore::new(storage.clone(), sedimentree_id);
+        let content_ref = commit_id.as_bytes().to_vec();
+        let first = adapter
+            .ensure_ciphertext_indexed(
+                content_ref.clone(),
+                BigRepoCiphertextLocator {
+                    kind: BigRepoCiphertextKind::LooseCommit,
+                    sedimentree_id,
+                    commit_id,
+                },
+            )
+            .await
+            .map_err(|e| ferr!("ensure_ciphertext_indexed failed: {e}"))?;
+        let second = adapter
+            .get_ciphertext(&content_ref)
+            .await
+            .map_err(|e| ferr!("first get_ciphertext failed: {e}"))?
+            .expect("ciphertext should be found");
+        let third = adapter
+            .get_ciphertext(&content_ref)
+            .await
+            .map_err(|e| ferr!("second get_ciphertext failed: {e}"))?
+            .expect("ciphertext should be found");
+        assert!(Arc::ptr_eq(&first, &second));
+        assert!(Arc::ptr_eq(&second, &third));
+        Ok(())
+    }
+
+    #[tokio::test]
     async fn ciphertext_store_prefers_fragment_over_loose_commit_for_same_ref() -> Res<()> {
         use sedimentree_core::fragment::Fragment;
 
@@ -4503,6 +4655,23 @@ mod tests {
         assert_eq!(envelope.plaintext, fragment_bytes);
         assert_eq!(envelope.ancestors.get(&h1.as_bytes()[..]), Some(&h1_key));
         Ok(())
+    }
+
+    #[test]
+    fn doc_lookup_distinguishes_missing_and_pending_materialization() {
+        let doc_id = DocumentId::new([23; 32]);
+        let missing = DocLookup::<()>::Missing
+            .into_ready(doc_id)
+            .expect_err("missing doc should fail");
+        assert!(matches!(missing, GetDocError::NotFound(id) if id == doc_id));
+
+        let pending = DocLookup::<()>::PendingMaterialization
+            .into_ready(doc_id)
+            .expect_err("pending doc should fail");
+        assert!(matches!(
+            pending,
+            GetDocError::PendingMaterialization(id) if id == doc_id
+        ));
     }
 
     #[tokio::test]
