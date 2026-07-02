@@ -1,5 +1,101 @@
 # duck-log
 
+## 2026-06-06 | keys
+
+So we have a lot of cyrptography in the system
+- Kehive keys
+- Iroh pubkeys
+- Keys to encrypt blobs?
+- Keys to sign facets
+  - Probably multiple keys per actor
+- We'll probably want to add some kind of signing to big sync.
+
+And we'll have need of more keys in the future.
+
+We cant use the same key for everything.
+We'll want to rotate them.
+Probably want to use session keys for iroh.
+Additionally, we'll need to consider the multi-user/hub case for common usage requiring an identitiy layer.
+
+A few easy decisions:
+- Identity and cryptograph are related but not the same
+- Use separate Iroh keys for different contexts.
+  - Use per-session iroh keys for client roles? Does this buy us anything?
+
+---
+
+Discussion with GPT 5.5: https://chatgpt.com/share/6a237a9d-1d48-83ea-a8ec-962b56e212e1
+
+---
+
+You can find the thought process in gory detail in the chatgpt logs but here's the design.
+- In a repo, we'll have agent keys.
+  - These agent keys will sign user keys for subsystems and so on.
+    - Drawer or plugin user will sign content like facets and blobs.
+- An agent key also acts as the authority root for sync.
+  - Peers will use keys signed by agents for sync or iroh.
+- In the repo will be stored the pubkey log and ACL list for agents.
+  - Each addition to the ACL list will need to be signed by an existing agent.
+  - Genesis agent will ofc sign itself.
+    - How to prevent re-genesis?
+      - Well, all chains of signatures must resolve to the same genesis.
+      - Re-genesis could re sign all keys?
+        - GPT the smart cookie, has the idea that repo_id should be derived from genesis block. Nice and elegant.
+- Symmetric encryption keys will be stored in a separate cleartext automerge doc called keydoc
+  - Each agent that expects access to a specific encryption key will look for the encryption key in keydoc but wrap encrypted by it's own pubkey
+- Additionally, repo can have optional recovery keys
+  - These must be signed by a pre-approved agent
+  - These will only be used to sign new agent additions
+  - Used for adding new agents when all previous keys are lost
+    - I.e. agent keys can be device local but recovery keys can be stored elsewhere
+- There are also a separate class of encryption recovery keys
+  - These get their own entry for each symmetric encryption key in the keysdoc
+- Both kinds ecovery keys are derived per repo from a master recovery secret
+- Instead of using a single encryption key across the repo, we'll partition it to spaces
+  - A single item should only map to a single space unlike sync partitions
+
+Why these recovery keys?
+These allow backup hub nodes to work better.
+They only need to see encrypted content.
+If all of the user's clone are unavailable, the user is still allowed to unlock the master secret key and derive the recovery keys allowing fresh clones from hub.
+Master secret keys are stored on the hub but in encrypted form.
+The hub impl can decide how to deliver/dercrypt those on the client.
+
+## 2026-06-05 | forgery protection
+
+If I were to use the automerge document itself as a public collaboration surface, how could I mark every change with signatures that prove authorship?
+I.e. how to prevent an system from masquereding writes as those from another.
+
+A good option is to add the signature as part of the change.
+We could sign of content ids of the facet shape at that version.
+CID in the DRISL sense.
+Hmm.
+Not bad actually.
+
+## 2026-06-05 | markup
+
+Markup might be the wrong term here.
+I have need of rendering widgets as specified by plugins.
+Not very crisp but I'm also figuring out exactly what it is that I need. 
+
+An early set of needs I've indentified is that the description must support programmatically or statistical (neural?) generation. Hand authoring is a plus.
+
+A good contender for what I'm looking for is https://json-render.dev/.
+JSON is not very nice to write by hand but that's why I said I'm not exactly looking for markup.
+A lightweight declarative UI description lang?
+
+One nice thing about json-render is that it's easy to implement.
+I'm in early stages of experimentation with the app so easy and light is good.
+I'm not yet convinced I yet need a full programmable UI layer (unsure about the implementation cost) here and since the the app is not on the web, I can't just use web rendering.
+
+Though admittedly, HTML is a very attractive option here.
+It supports graceful degradataion, users and LLMs are familiar with it, I can add support for my own supported tags for bespoke components.
+
+But then again, I can use different description at different layers.
+
+---
+
+
 ## 2026-05-29 | shoddy
 
 I'm worried about my engineering approach here.
@@ -1614,7 +1710,7 @@ Concerns:
     - Crux provide a nice abstraction here but maybe too much abstraction?
       - I think I'll wait on them to make some progress and see how that shakes out
 
-### 2025-09-18 | Wasmcloud
+## 2025-09-18 | Wasmcloud
 
 After long delays due to some tooling bugs, I was able to complete the wasmcloud based API system.
 Overengineering crap but I do like the result.
@@ -1626,7 +1722,7 @@ Spent the day trying to get it to start on desktop.
 That's like 3 hours of trying to debug the JDK issues and 3 hours of writing a ghjk port for it.
 What a waste but at least I did get it started on desktop.
 
-### 2025-07-20 | daybook
+## 2025-07-20 | daybook
 
 Spent the weekend vibe coding the magic puck stuff. 
 I feel productive somewhat productive.
@@ -1636,7 +1732,7 @@ I have to downscope fast.
 
 I need to make this happen ASAP. Everything depends on it.
 
-### 2025-03-05 | Proc macros
+## 2025-03-05 | Proc macros
 
 Spent today porting glue code from the aggy codebase.
 Cleaned up some of the boilerplates due to new proc macros.
@@ -1645,7 +1741,7 @@ Well, it certainly helped anyways.
 Next time, I'll have to setup the db stuff.
 Can't wait to start on actual feature work lol.
 
-### 2025-03-04 | Ramping up
+## 2025-03-04 | Ramping up
 
 Trying to get the show on the road.
 This is a full stack project in the traditional sense.

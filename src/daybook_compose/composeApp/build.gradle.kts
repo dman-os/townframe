@@ -6,8 +6,8 @@ import org.jetbrains.kotlin.gradle.targets.js.webpack.KotlinWebpackConfig
 import org.gradle.api.tasks.Copy
 import org.gradle.api.tasks.Delete
 import org.gradle.api.tasks.Exec
-import org.gradle.api.tasks.SourceTask
 import org.gradle.api.tasks.Sync
+import org.gradle.api.tasks.testing.Test
 import org.gradle.process.CommandLineArgumentProvider
 import java.io.File
 
@@ -30,12 +30,6 @@ detekt {
     config.setFrom(file("../config/detekt/detekt.yml"))
     baseline = file("detekt-baseline-main.xml")
     buildUponDefaultConfig = true
-}
-
-tasks.withType<SourceTask>().configureEach {
-    if (name.startsWith("detekt")) {
-        exclude("**/uniffi/**")
-    }
 }
 
 // cargo {
@@ -129,6 +123,7 @@ kotlin {
             implementation(libs.coil.compose)
             implementation(libs.coil.network.ktor)
             implementation(libs.filekit.dialogs.compose)
+            implementation(libs.multiplatform.markdown.renderer.m3)
         }
         commonTest.dependencies {
             implementation(libs.kotlin.test)
@@ -145,6 +140,8 @@ kotlin {
         }
         val desktopTest by getting {
             dependencies {
+                @OptIn(org.jetbrains.compose.ExperimentalComposeLibrary::class)
+                implementation(compose.uiTest)
                 implementation(compose.desktop.uiTestJUnit4)
                 implementation(compose.desktop.currentOs)
             }
@@ -209,13 +206,14 @@ compose.desktop {
             // native search path at the packaged lib/app directory.
             "-Djava.library.path=\$APPDIR",
             "-Djna.library.path=\$APPDIR",
+            "--add-opens=java.base/sun.misc=ALL-UNNAMED",
         )
 
         nativeDistributions {
             targetFormats(TargetFormat.Dmg, TargetFormat.Msi, TargetFormat.Deb, TargetFormat.AppImage)
             packageName = "org.example.daybook"
             packageVersion = "1.0.0"
-            modules("jdk.security.auth")
+            modules("jdk.security.auth", "jdk.unsupported")
         }
         buildTypes {
             release {
@@ -650,6 +648,15 @@ tasks.matching {
 tasks.matching { it.name == "packageReleaseAppImage" }.configureEach {
     dependsOn("buildRustDesktopRelease")
     dependsOn("copyRustDesktopReleaseToComposeApp")
+}
+
+tasks.named<Test>("desktopTest").configure {
+    dependsOn("buildRustDesktopDebug")
+    val debugLibDir = File(cargoTargetDir, "debug")
+    jvmArgs(
+        "-Djava.library.path=${debugLibDir.absolutePath}",
+        "-Djna.library.path=${debugLibDir.absolutePath}",
+    )
 }
 
 tasks.register("prepareLinuxdeployComposeAppDirDayb") {

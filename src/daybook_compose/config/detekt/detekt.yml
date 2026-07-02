@@ -380,6 +380,7 @@ naming:
   PackageNaming:
     active: true
     aliases: ['PackageName']
+    excludes: ['**/uniffi/**']
     packagePattern: '[a-z]+(\.[a-z][A-Za-z0-9]*)*'
   TopLevelPropertyNaming:
     active: true

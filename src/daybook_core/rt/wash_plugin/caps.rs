@@ -473,7 +473,7 @@ impl capabilities::HostFacetToken for SharedWashCtx {
                 _ => {
                     return Ok(Err(capabilities::AccessError::Other(
                         "invalid dmeta facet".into(),
-                    )))
+                    )));
                 }
             },
             None => return Ok(Err(capabilities::AccessError::NotFound)),
@@ -566,7 +566,7 @@ impl capabilities::HostFacetToken for SharedWashCtx {
                     inner: root_doc::FacetTagParseError::NotDomainName { _tag: tag },
                 } => capabilities::UpdateDocError::InvalidKey(tag),
                 crate::drawer::types::DrawerError::Other { inner } => {
-                    return Err(wasmtime_err(format!("unexpected error: {inner}")))
+                    return Err(wasmtime_err(format!("unexpected error: {inner}")));
                 }
                 crate::drawer::types::DrawerError::BranchAlreadyExists { .. } => unreachable!(),
             })));
@@ -672,7 +672,7 @@ impl capabilities::HostFacetCreateToken for SharedWashCtx {
                     inner: root_doc::FacetTagParseError::NotDomainName { _tag: tag },
                 } => capabilities::UpdateDocError::InvalidKey(tag),
                 crate::drawer::types::DrawerError::Other { inner } => {
-                    return Err(wasmtime_err(format!("unexpected error: {inner}")))
+                    return Err(wasmtime_err(format!("unexpected error: {inner}")));
                 }
                 crate::drawer::types::DrawerError::BranchAlreadyExists { .. } => unreachable!(),
             }));
@@ -929,6 +929,18 @@ impl capabilities::HostFacetTagToken for SharedWashCtx {
                 "create denied".into(),
             )));
         }
+        // Validate key_id against facet_acl: the requested id must be covered by
+        // at least one ACL entry granting CREATE (tag-wide or key-specific match).
+        let key_authorized = token.facet_acl.iter().any(|access| {
+            access.tag.0 == token.tag
+                && access.create
+                && (access.key_id.is_none() || access.key_id.as_deref() == Some(&key_id))
+        });
+        if !key_authorized {
+            return Ok(Err(capabilities::UpdateDocError::Other(format!(
+                "create denied for key_id: {key_id}"
+            ))));
+        }
         let facet_key = daybook_types::doc::FacetKey {
             tag: daybook_types::doc::FacetTag::from(token.tag.as_str()),
             id: key_id,
@@ -956,7 +968,7 @@ impl capabilities::HostFacetTagToken for SharedWashCtx {
                     inner: root_doc::FacetTagParseError::NotDomainName { _tag: tag },
                 } => capabilities::UpdateDocError::InvalidKey(tag),
                 crate::drawer::types::DrawerError::Other { inner } => {
-                    return Err(wasmtime_err(format!("unexpected error: {inner}")))
+                    return Err(wasmtime_err(format!("unexpected error: {inner}")));
                 }
                 crate::drawer::types::DrawerError::BranchAlreadyExists { .. } => unreachable!(),
             }));
@@ -1042,6 +1054,18 @@ impl capabilities::HostFacetTagToken for SharedWashCtx {
                 "create denied".into(),
             )));
         }
+        // Validate key_id against facet_acl: the requested id must be covered by
+        // at least one ACL entry granting CREATE (tag-wide or key-specific match).
+        let key_authorized = token.facet_acl.iter().any(|access| {
+            access.tag.0 == token.tag
+                && access.create
+                && (access.key_id.is_none() || access.key_id.as_deref() == Some(&key_id))
+        });
+        if !key_authorized {
+            return Ok(Err(capabilities::UpdateDocError::Other(format!(
+                "create denied for key_id: {key_id}"
+            ))));
+        }
         let facet_key = daybook_types::doc::FacetKey {
             tag: daybook_types::doc::FacetTag::from(token.tag.as_str()),
             id: key_id,
@@ -1097,7 +1121,7 @@ impl capabilities::Host for SharedWashCtx {
                     capabilities::AccessError::NotFound
                 }
                 crate::drawer::types::DrawerError::Other { inner } => {
-                    return Err(wasmtime_err(format!("unexpected error: {inner}")))
+                    return Err(wasmtime_err(format!("unexpected error: {inner}")));
                 }
                 _ => return Err(wasmtime_err("unexpected error ensuring branch")),
             }));
@@ -1177,7 +1201,7 @@ impl capabilities::HostCommandInvokeToken for SharedWashCtx {
             Err(err) => {
                 return Ok(Err(capabilities::InvokeCommandError::BadRequest(
                     err.to_string(),
-                )))
+                )));
             }
         };
 
@@ -1186,7 +1210,7 @@ impl capabilities::HostCommandInvokeToken for SharedWashCtx {
             Err(err) => {
                 return Ok(Err(capabilities::InvokeCommandError::Other(
                     err.to_string(),
-                )))
+                )));
             }
         };
         let dispatch_id = match rt

@@ -13,6 +13,7 @@ pub mod doc;
 #[cfg(all(test, feature = "wit"))]
 mod test;
 pub mod url;
+pub mod view;
 
 #[cfg(feature = "manifest")]
 pub mod manifest;

@@ -37,7 +37,7 @@ impl Default for ConfigStore {
                 val: FacetDisplayHint {
                     always_visible: false,
                     display_title: Some("Created At".to_string()),
-                    deets: FacetKeyDisplayDeets::DateTime {
+                    deets: FacetDisplayDeets::DateTime {
                         display_type: DateTimeFacetDisplayType::Relative,
                     },
                 }
@@ -51,7 +51,7 @@ impl Default for ConfigStore {
                 val: FacetDisplayHint {
                     always_visible: false,
                     display_title: Some("Updated At".to_string()),
-                    deets: FacetKeyDisplayDeets::DateTime {
+                    deets: FacetDisplayDeets::DateTime {
                         display_type: DateTimeFacetDisplayType::Relative,
                     },
                 }

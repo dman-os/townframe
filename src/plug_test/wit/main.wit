@@ -13,5 +13,6 @@ world bundle {
     import townframe:daybook/mltools-image-tools;
     import townframe:daybook/mltools-llm-chat;
 
+    export townframe:daybook/stateless-view;
     export townframe:wflow/bundle;
 }

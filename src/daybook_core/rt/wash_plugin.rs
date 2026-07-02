@@ -25,6 +25,7 @@ mod binds_guest {
             "townframe:daybook/capabilities.facet-tag-token": super::caps::FacetTagToken,
             "townframe:daybook/capabilities.command-invoke-token": super::caps::CommandInvokeToken,
             "townframe:daybook/sqlite-connection.connection": super::local_state_sql::SqliteConnectionToken,
+            "townframe:daybook/sqlite-connection.transaction": super::local_state_sql::SqliteTransactionToken,
         }
     });
 
@@ -326,7 +327,9 @@ mod binds_guest {
 mod caps;
 mod local_state_sql;
 mod mltools;
+mod stateless_view_host;
 
+pub(crate) use binds_guest::exports::townframe::daybook::stateless_view;
 pub use binds_guest::townframe::daybook::capabilities;
 pub use binds_guest::townframe::daybook::drawer;
 pub use binds_guest::townframe::daybook::facet_routine;
@@ -336,6 +339,8 @@ pub use binds_guest::townframe::daybook::mltools_llm_chat;
 pub use binds_guest::townframe::daybook::mltools_ocr;
 pub use binds_guest::townframe::daybook::sqlite_connection;
 use binds_guest::townframe::daybook_types::doc as bindgen_doc;
+pub(crate) use binds_guest::AllGuestPre;
+pub(crate) use stateless_view_host::StatelessViewPlugin;
 
 use daybook_types::doc::ChangeHashSet;
 use daybook_types::doc::DocId;
@@ -512,17 +517,19 @@ impl wash_runtime::plugin::HostPlugin for DaybookPlugin {
 
     async fn on_workload_resolved(
         &self,
-        _resolved: &wash_runtime::engine::workload::ResolvedWorkload,
-        _component_id: &str,
+        resolved: &wash_runtime::engine::workload::ResolvedWorkload,
+        component_id: &str,
     ) -> anyhow::Result<()> {
+        let _ = (resolved, component_id);
         Ok(())
     }
 
     async fn on_workload_unbind(
         &self,
-        _workload_id: &str,
+        workload_id: &str,
         _interfaces: std::collections::HashSet<WitInterface>,
     ) -> anyhow::Result<()> {
+        let _ = workload_id;
         Ok(())
     }
 
@@ -602,7 +609,7 @@ impl drawer::Host for SharedWashCtx {
                 Err(err) => {
                     return Ok(Err(drawer::UpdateDocError::InvalidHeads(format!(
                         "{err:?}"
-                    ))))
+                    ))));
                 }
             },
             None => None,
@@ -643,7 +650,7 @@ impl drawer::Host for SharedWashCtx {
     }
 }
 
-async fn build_doc_facet_tokens(
+pub(crate) async fn build_doc_facet_tokens(
     ctx: &mut SharedWashCtx,
     plugin: &Arc<DaybookPlugin>,
     doc_tokens: &dispatch::DocFacetTokens,
@@ -714,15 +721,26 @@ async fn build_doc_facet_tokens(
     let mut tag_rights_map: std::collections::HashMap<String, capabilities::FacetRights> =
         std::collections::HashMap::new();
     for access in &doc_tokens.facet_acl {
-        if access.key_id.is_some() {
-            continue;
-        }
         let tag_str = access.tag.0.clone();
-        let entry_rights = caps::facet_rights_from_access(access);
-        tag_rights_map
-            .entry(tag_str)
-            .and_modify(|rights| *rights |= entry_rights)
-            .or_insert(entry_rights);
+        if access.key_id.is_some() {
+            // Key-specific entries: only contribute CREATE to the tag token
+            // (facet-scoped READ/UPDATE/DELETE are handled by the facet loop above).
+            // This ensures routines can call tag_token.create(key_id, data) for
+            // key-specific create ACLs even when the facet doesn't exist yet.
+            if !access.create {
+                continue;
+            }
+            tag_rights_map
+                .entry(tag_str)
+                .and_modify(|rights| *rights |= capabilities::FacetRights::CREATE)
+                .or_insert(capabilities::FacetRights::CREATE);
+        } else {
+            let entry_rights = caps::facet_rights_from_access(access);
+            tag_rights_map
+                .entry(tag_str)
+                .and_modify(|rights| *rights |= entry_rights)
+                .or_insert(entry_rights);
+        }
     }
     for (tag_str, rights) in tag_rights_map {
         let ttoken = ctx.table.push(caps::FacetTagToken {

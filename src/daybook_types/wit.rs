@@ -21,6 +21,20 @@ pub mod doc {
         pub order: Vec<String>,
     }
 
+    #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+    #[serde(rename_all = "camelCase")]
+    pub struct NoteMimeOption {
+        pub mime: MimeType,
+        pub label: String,
+        pub description: String,
+    }
+
+    #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+    #[serde(rename_all = "camelCase")]
+    pub struct NoteEditorConfig {
+        pub mime_options: Vec<NoteMimeOption>,
+    }
+
     #[derive(Debug, Clone, Serialize, Deserialize)]
     #[serde_with::serde_as]
     pub struct FacetMeta {

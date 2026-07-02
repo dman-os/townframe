@@ -203,6 +203,7 @@ pub fn plug_manifest() -> PlugManifest {
             .into(),
         )]
         .into(),
+        views: Default::default(),
         routines: [
             (
                 "label-note".into(),

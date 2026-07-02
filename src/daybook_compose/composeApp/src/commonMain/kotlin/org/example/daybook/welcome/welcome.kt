@@ -4,6 +4,10 @@
 
 package org.example.daybook
 
+import androidx.compose.animation.core.tween
+import androidx.compose.animation.slideInHorizontally
+import androidx.compose.animation.slideOutHorizontally
+import androidx.compose.animation.togetherWith
 import androidx.compose.foundation.Image
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
@@ -42,7 +46,6 @@ import androidx.compose.material3.LargeTopAppBar
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.OutlinedTextField
-import androidx.compose.material3.Scaffold
 import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
@@ -163,6 +166,8 @@ private val welcomeNavConfig =
             }
     }
 
+private const val WELCOME_NAV_TRANSITION_MS = 240
+
 private class WelcomeNavigationState(val backStack: NavBackStack<NavKey>) {
     val currentDestination: WelcomeNavKey?
         get() = backStack.lastOrNull() as? WelcomeNavKey
@@ -205,7 +210,6 @@ fun WelcomeFlowNavHost(
     cloneSourceUrlPendingOpen: String?,
     cloneInitRequest: Pair<String, String>?,
     createRepoInitRequest: String?,
-    pendingForgetRepoId: String?,
     onSelectedWelcomeRepoChange: (KnownRepoEntry?) -> Unit,
     onCloneUiStateChange: (CloneUiState?) -> Unit,
     onCreateRepoUiStateChange: (CreateRepoUiState?) -> Unit,
@@ -213,7 +217,7 @@ fun WelcomeFlowNavHost(
     onCloneInitRequestChange: (Pair<String, String>?) -> Unit,
     onCreateRepoInitRequestChange: (String?) -> Unit,
     onPendingOpenRepoPath: (String) -> Unit,
-    onPendingForgetRepoId: (String) -> Unit,
+    onForgetRepo: (String) -> Unit,
     onExitRequest: () -> Unit,
 ) {
     val navState = rememberWelcomeNavigationState()
@@ -310,6 +314,33 @@ fun WelcomeFlowNavHost(
                     rememberSaveableStateHolderNavEntryDecorator(),
                     rememberViewModelStoreNavEntryDecorator(),
                 ),
+                transitionSpec = {
+                    slideInHorizontally(
+                        animationSpec = tween(WELCOME_NAV_TRANSITION_MS),
+                        initialOffsetX = { fullWidth -> fullWidth },
+                    ) togetherWith slideOutHorizontally(
+                        animationSpec = tween(WELCOME_NAV_TRANSITION_MS),
+                        targetOffsetX = { fullWidth -> -fullWidth },
+                    )
+                },
+                popTransitionSpec = {
+                    slideInHorizontally(
+                        animationSpec = tween(WELCOME_NAV_TRANSITION_MS),
+                        initialOffsetX = { fullWidth -> -fullWidth },
+                    ) togetherWith slideOutHorizontally(
+                        animationSpec = tween(WELCOME_NAV_TRANSITION_MS),
+                        targetOffsetX = { fullWidth -> fullWidth },
+                    )
+                },
+                predictivePopTransitionSpec = {
+                    slideInHorizontally(
+                        animationSpec = tween(WELCOME_NAV_TRANSITION_MS),
+                        initialOffsetX = { fullWidth -> -fullWidth },
+                    ) togetherWith slideOutHorizontally(
+                        animationSpec = tween(WELCOME_NAV_TRANSITION_MS),
+                        targetOffsetX = { fullWidth -> fullWidth },
+                    )
+                },
                 entryProvider = entryProvider {
                     entry<WelcomeNavKey.Menu> {
                         WelcomeScreen(
@@ -344,8 +375,11 @@ fun WelcomeFlowNavHost(
                             WelcomeRepoDetailScreen(
                                 repo = repo,
                                 onOpen = { onPendingOpenRepoPath(repo.path) },
-                                onForget = { onPendingForgetRepoId(repo.id) },
-                                forgetting = pendingForgetRepoId == repo.id,
+                                onForget = {
+                                    onForgetRepo(repo.id)
+                                    onSelectedWelcomeRepoChange(null)
+                                },
+                                forgetting = false,
                             )
                         }
                     }
@@ -788,8 +822,13 @@ private fun WelcomeFlowScaffold(
     onBack: (() -> Unit)? = null,
     content: @Composable () -> Unit,
 ) {
-    Scaffold(
-        topBar = {
+    Box(
+        modifier =
+        Modifier
+            .fillMaxSize()
+            .background(MaterialTheme.colorScheme.surface),
+    ) {
+        Column(modifier = Modifier.fillMaxSize()) {
             LargeTopAppBar(
                 title = {
                     Column {
@@ -811,16 +850,14 @@ private fun WelcomeFlowScaffold(
                     }
                 },
             )
-        },
-    ) { innerPadding ->
-        Box(
-            modifier =
-            Modifier
-                .fillMaxSize()
-                .background(MaterialTheme.colorScheme.surface)
-                .padding(innerPadding),
-        ) {
-            content()
+            Box(
+                modifier =
+                Modifier
+                    .fillMaxSize()
+                    .weight(1f),
+            ) {
+                content()
+            }
         }
     }
 }

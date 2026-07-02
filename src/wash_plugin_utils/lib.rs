@@ -19,6 +19,18 @@ mod binds_guest {
 
 use binds_guest::townframe::utils::types;
 
+mod binds_api_utils {
+    wash_runtime::wasmtime::component::bindgen!({
+        world: "imports",
+        path: "../api_utils_rs/wit",
+
+        imports: { default: async | trappable | tracing },
+        exports: { default: async | trappable | tracing },
+    });
+}
+
+use binds_api_utils::townframe::api_utils::utils as api_utils_utils;
+
 pub struct UtilsPlugin {}
 
 pub struct Config {}
@@ -47,7 +59,10 @@ impl wash_runtime::plugin::HostPlugin for UtilsPlugin {
     fn world(&self) -> WitWorld {
         WitWorld {
             exports: std::collections::HashSet::new(),
-            imports: std::collections::HashSet::from([WitInterface::from("townframe:utils/types")]),
+            imports: std::collections::HashSet::from([
+                WitInterface::from("townframe:utils/types"),
+                WitInterface::from("townframe:api-utils/utils"),
+            ]),
         }
     }
 
@@ -65,6 +80,7 @@ impl wash_runtime::plugin::HostPlugin for UtilsPlugin {
             if iface.namespace == "townframe"
                 && iface.package == "utils"
                 && !iface.interfaces.contains("types")
+                && !iface.interfaces.contains("utils")
             {
                 anyhow::bail!("unsupported utils interface: {iface:?}");
             }
@@ -79,14 +95,19 @@ impl wash_runtime::plugin::HostPlugin for UtilsPlugin {
     ) -> anyhow::Result<()> {
         let world = item.world();
         for iface in world.imports {
-            if iface.namespace == "townframe"
-                && iface.package == "utils"
-                && iface.interfaces.contains("types")
-            {
-                types::add_to_linker::<_, wasmtime::component::HasSelf<SharedWashCtx>>(
-                    item.linker(),
-                    |ctx| ctx,
-                )?;
+            if iface.namespace == "townframe" && iface.package == "utils" {
+                if iface.interfaces.contains("types") {
+                    types::add_to_linker::<_, wasmtime::component::HasSelf<SharedWashCtx>>(
+                        item.linker(),
+                        |ctx| ctx,
+                    )?;
+                }
+                if iface.interfaces.contains("utils") {
+                    api_utils_utils::add_to_linker::<_, wasmtime::component::HasSelf<SharedWashCtx>>(
+                        item.linker(),
+                        |ctx| ctx,
+                    )?;
+                }
             }
         }
         Ok(())
@@ -125,6 +146,20 @@ impl types::Host for SharedWashCtx {
     ) -> wasmtime::Result<Result<(), ()>> {
         // Implementation for the noop function from the types interface
         // This is a copy of the utils interface, so we can just return Ok
+        Ok(Ok(()))
+    }
+}
+
+impl api_utils_utils::Host for SharedWashCtx {
+    async fn noop(
+        &mut self,
+        _inc: (
+            api_utils_utils::ErrorsValidation,
+            api_utils_utils::ErrorInternal,
+            api_utils_utils::Datetime,
+            api_utils_utils::Uuid,
+        ),
+    ) -> wasmtime::Result<Result<(), ()>> {
         Ok(Ok(()))
     }
 }

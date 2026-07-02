@@ -22,6 +22,16 @@ interface doc {
         content: string,
     }
 
+    record note-mime-option {
+        mime: mime-type,
+        label: string,
+        description: string,
+    }
+
+    record note-editor-config {
+        mime-options: list<note-mime-option>,
+    }
+
     record image-metadata {
         facet-ref: string,
         ref-heads: list<string>,

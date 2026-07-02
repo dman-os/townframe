@@ -1,7 +1,6 @@
 // FIXME: use nested ids for facet keys
 // FIXME: use ensure_alive method for cancellation checks
-// FIXME: break aprart file, NVIM is lagging like 500ms on each scroll
-// FIXME: remove tmp branches from the branch doc and use sqliite
+// FIXME: is validating facet references on entry useful? Would that not race?
 
 use crate::app::SqlCtx;
 use crate::interlude::*;
@@ -526,7 +525,7 @@ impl DrawerRepo {
                     match selected_value {
                         serde_json::Value::String(url_value) => {
                             referenced_facets
-                                .push(self.validate_reference_url(url_value, origin_facet_key)?);
+                                .push(Self::validate_reference_url(url_value, origin_facet_key)?);
                         }
                         serde_json::Value::Array(url_values) => {
                             for url_value in url_values {
@@ -537,9 +536,10 @@ impl DrawerRepo {
                                         reference_manifest.json_path()
                                     );
                                 };
-                                referenced_facets.push(
-                                    self.validate_reference_url(url_string, origin_facet_key)?,
-                                );
+                                referenced_facets.push(Self::validate_reference_url(
+                                    url_string,
+                                    origin_facet_key,
+                                )?);
                             }
                         }
                         _ => {
@@ -563,8 +563,10 @@ impl DrawerRepo {
                                 reference_manifest.json_path()
                             )
                         })?;
-                    referenced_facets
-                        .push(self.validate_reference_object(&facet_ref, origin_facet_key)?);
+                    referenced_facets.push(Self::validate_reference_object(
+                        &facet_ref,
+                        origin_facet_key,
+                    )?);
                 }
             }
         }
@@ -676,7 +678,6 @@ impl DrawerRepo {
     }
 
     fn validate_reference_url(
-        &self,
         url_value: &str,
         origin_facet_key: &FacetKey,
     ) -> Res<ValidatedReference> {
@@ -701,7 +702,6 @@ impl DrawerRepo {
     }
 
     fn validate_reference_object(
-        &self,
         facet_ref: &FacetRef,
         origin_facet_key: &FacetKey,
     ) -> Res<ValidatedReference> {

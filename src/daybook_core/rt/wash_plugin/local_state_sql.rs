@@ -2,6 +2,7 @@ use crate::interlude::*;
 
 use sqlx::{Column, Row, TypeInfo, ValueRef};
 use sqlx_utils_rs::SqlCtx;
+use std::ops::DerefMut;
 use wash_runtime::engine::ctx::SharedCtx as SharedWashCtx;
 
 use super::{binds_guest, sqlite_connection, DaybookPlugin};
@@ -10,6 +11,10 @@ pub struct SqliteConnectionToken {
     pub local_state_id: String,
     pub sqlite_file_path: Option<String>,
     pub sql: Option<SqlCtx>,
+}
+
+pub struct SqliteTransactionToken {
+    pub transaction: Option<sqlx::Transaction<'static, sqlx::Sqlite>>,
 }
 
 impl sqlite_connection::Host for SharedWashCtx {}
@@ -31,7 +36,7 @@ impl sqlite_connection::HostConnection for SharedWashCtx {
             Err(err) => {
                 return Ok(Err(
                     binds_guest::townframe::sql::types::QueryError::Unexpected(err.to_string()),
-                ))
+                ));
             }
         };
 
@@ -64,7 +69,7 @@ impl sqlite_connection::HostConnection for SharedWashCtx {
             Err(err) => {
                 return Ok(Err(
                     binds_guest::townframe::sql::types::QueryError::Unexpected(err.to_string()),
-                ))
+                ));
             }
         };
         match sqlx::query(sqlx::AssertSqlSafe(query))
@@ -85,11 +90,150 @@ impl sqlite_connection::HostConnection for SharedWashCtx {
             .map_err(|err| wasmtime::Error::msg(err.to_string()))
     }
 
+    async fn begin_transaction(
+        &mut self,
+        handle: wasmtime::component::Resource<sqlite_connection::Connection>,
+    ) -> wasmtime::Result<
+        Result<
+            wasmtime::component::Resource<sqlite_connection::Transaction>,
+            binds_guest::townframe::sql::types::QueryError,
+        >,
+    > {
+        let sql = match ensure_sqlite_ctx(self, &handle).await {
+            Ok(sql) => sql,
+            Err(err) => {
+                return Ok(Err(
+                    binds_guest::townframe::sql::types::QueryError::Unexpected(err.to_string()),
+                ));
+            }
+        };
+        let tx = match sql.write_pool.begin_with("BEGIN IMMEDIATE").await {
+            Ok(tx) => tx,
+            Err(err) => return Ok(Err(query_error_from_sqlx_error(err))),
+        };
+        let handle = self
+            .table
+            .push(SqliteTransactionToken {
+                transaction: Some(tx),
+            })
+            .map_err(|err| wasmtime::Error::msg(err.to_string()))?;
+        Ok(Ok(handle))
+    }
+
     async fn drop(
         &mut self,
         rep: wasmtime::component::Resource<sqlite_connection::Connection>,
     ) -> wasmtime::Result<()> {
         self.table.delete(rep)?;
+        Ok(())
+    }
+}
+
+impl sqlite_connection::HostTransaction for SharedWashCtx {
+    async fn query(
+        &mut self,
+        handle: wasmtime::component::Resource<sqlite_connection::Transaction>,
+        query: String,
+        params: Vec<binds_guest::townframe::sql::types::SqlValue>,
+    ) -> wasmtime::Result<
+        Result<
+            Vec<binds_guest::townframe::sql::types::ResultRow>,
+            binds_guest::townframe::sql::types::QueryError,
+        >,
+    > {
+        let mut sql_query = sqlx::query(sqlx::AssertSqlSafe(query));
+        for param in params {
+            sql_query = bind_sql_value(sql_query, param);
+        }
+        let token = self
+            .table
+            .get_mut(&handle)
+            .map_err(|err| wasmtime::Error::msg(err.to_string()))?;
+        let tx = token
+            .transaction
+            .as_mut()
+            .ok_or_else(|| wasmtime::Error::msg("transaction already finalized"))?;
+        let conn: &mut sqlx::SqliteConnection = tx.deref_mut();
+        let rows = match sql_query.fetch_all(conn).await {
+            Ok(rows) => rows,
+            Err(err) => return Ok(Err(query_error_from_sqlx_error(err))),
+        };
+        let mut result_rows = Vec::with_capacity(rows.len());
+        for row in &rows {
+            let result_row = match sqlite_row_to_result_row(row) {
+                Ok(value) => value,
+                Err(err) => return Ok(Err(err)),
+            };
+            result_rows.push(result_row);
+        }
+        Ok(Ok(result_rows))
+    }
+
+    async fn query_batch(
+        &mut self,
+        handle: wasmtime::component::Resource<sqlite_connection::Transaction>,
+        query: String,
+    ) -> wasmtime::Result<Result<(), binds_guest::townframe::sql::types::QueryError>> {
+        let token = self
+            .table
+            .get_mut(&handle)
+            .map_err(|err| wasmtime::Error::msg(err.to_string()))?;
+        let tx = token
+            .transaction
+            .as_mut()
+            .ok_or_else(|| wasmtime::Error::msg("transaction already finalized"))?;
+        let conn: &mut sqlx::SqliteConnection = tx.deref_mut();
+        match sqlx::query(sqlx::AssertSqlSafe(query)).execute(conn).await {
+            Ok(_) => Ok(Ok(())),
+            Err(err) => Ok(Err(query_error_from_sqlx_error(err))),
+        }
+    }
+
+    async fn commit(
+        &mut self,
+        handle: wasmtime::component::Resource<sqlite_connection::Transaction>,
+    ) -> wasmtime::Result<Result<(), binds_guest::townframe::sql::types::QueryError>> {
+        let token = self
+            .table
+            .delete(handle)
+            .map_err(|err| wasmtime::Error::msg(err.to_string()))?;
+        let tx = token
+            .transaction
+            .ok_or_else(|| wasmtime::Error::msg("transaction already finalized"))?;
+        match tx.commit().await {
+            Ok(_) => Ok(Ok(())),
+            Err(err) => Ok(Err(query_error_from_sqlx_error(err))),
+        }
+    }
+
+    async fn rollback(
+        &mut self,
+        handle: wasmtime::component::Resource<sqlite_connection::Transaction>,
+    ) -> wasmtime::Result<Result<(), binds_guest::townframe::sql::types::QueryError>> {
+        let token = self
+            .table
+            .delete(handle)
+            .map_err(|err| wasmtime::Error::msg(err.to_string()))?;
+        let tx = token
+            .transaction
+            .ok_or_else(|| wasmtime::Error::msg("transaction already finalized"))?;
+        match tx.rollback().await {
+            Ok(_) => Ok(Ok(())),
+            Err(err) => Ok(Err(query_error_from_sqlx_error(err))),
+        }
+    }
+
+    async fn drop(
+        &mut self,
+        rep: wasmtime::component::Resource<sqlite_connection::Transaction>,
+    ) -> wasmtime::Result<()> {
+        let token = self
+            .table
+            .delete(rep)
+            .map_err(|err| wasmtime::Error::msg(err.to_string()))?;
+        if let Some(tx) = token.transaction {
+            let _ = tx.rollback().await;
+        }
         Ok(())
     }
 }

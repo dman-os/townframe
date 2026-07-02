@@ -23,6 +23,7 @@ import kotlinx.coroutines.flow.asSharedFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.launch
 import org.example.daybook.ChromeState
+import org.example.daybook.LocalBigDialogController
 import org.example.daybook.LocalContainer
 import org.example.daybook.MainFeatureActionButton
 import org.example.daybook.ProvideChromeState
@@ -33,6 +34,7 @@ import org.example.daybook.capture.LocalCameraCaptureContext
 import org.example.daybook.capture.ui.DaybookCameraViewport
 import org.example.daybook.layouts.DaybookScaffold
 import org.example.daybook.ui.DocEditor
+import org.example.daybook.ui.DocEditorArgs
 import org.example.daybook.ui.buildBlobFacetFromDigest
 import org.example.daybook.ui.buildBodyFacet
 import org.example.daybook.ui.buildImageMetadataFacet
@@ -42,6 +44,8 @@ import org.example.daybook.ui.editor.blobFacetKey
 import org.example.daybook.ui.editor.bodyFacetKey
 import org.example.daybook.ui.editor.imageMetadataFacetKey
 import org.example.daybook.ui.putWellKnownFacet
+import org.example.daybook.ui.rememberAddBlockDialogLauncher
+import org.example.daybook.ui.rememberDocEditorSelectionState
 import org.example.daybook.ui.withFacetRefCommitHeads
 import org.example.daybook.uniffi.DrawerEventListener
 import org.example.daybook.uniffi.DrawerRepoFfi
@@ -297,6 +301,8 @@ fun CaptureScreen(modifier: Modifier = Modifier, initialDocId: String? = null) {
         }
 
     val snackbarHostState = remember { SnackbarHostState() }
+    val editorState by vm.editorController.state.collectAsState()
+    val editorSelectionState = rememberDocEditorSelectionState(editorState.docId)
 
     LaunchedEffect(vm) {
         vm.message.collect { msg ->
@@ -343,8 +349,16 @@ fun CaptureScreen(modifier: Modifier = Modifier, initialDocId: String? = null) {
                     }
 
                     CaptureMode.TEXT -> {
+                        val addBlockDialogLauncher = rememberAddBlockDialogLauncher(vm.editorController)
+                        val bigDialogController = LocalBigDialogController.current
                         DocEditor(
-                            controller = vm.editorController,
+                            args =
+                            DocEditorArgs(
+                                controller = vm.editorController,
+                                selectionState = editorSelectionState,
+                                isAddBlockPickerOpen = bigDialogController.isShowing,
+                                onAddBlockRequested = addBlockDialogLauncher,
+                            ),
                             modifier = Modifier.padding(16.dp),
                         )
                     }

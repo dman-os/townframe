@@ -1,3 +1,6 @@
+// FIXME: consistent cross plugin reference story
+// FIXME: separate wasm components list
+
 use crate::interlude::*;
 
 use crate::doc::FacetRef;
@@ -23,9 +26,11 @@ pub fn is_domain_name(value: &str, _context: &()) -> garde::Result {
 #[serde(transparent)]
 #[garde(transparent)]
 #[repr(transparent)]
-pub struct FacetTag(#[garde(custom(is_domain_name))] pub String);
+pub struct ManifestFacetTag(#[garde(custom(is_domain_name))] pub String);
 
-impl<T> From<T> for FacetTag
+pub type FacetTag = ManifestFacetTag;
+
+impl<T> From<T> for ManifestFacetTag
 where
     T: Into<String>,
 {
@@ -34,13 +39,13 @@ where
     }
 }
 
-impl std::fmt::Display for FacetTag {
+impl std::fmt::Display for ManifestFacetTag {
     fn fmt(&self, fmt: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         write!(fmt, "{}", self.0)
     }
 }
 
-impl std::ops::Deref for FacetTag {
+impl std::ops::Deref for ManifestFacetTag {
     type Target = String;
 
     fn deref(&self) -> &Self::Target {
@@ -48,7 +53,23 @@ impl std::ops::Deref for FacetTag {
     }
 }
 
-#[derive(Debug, Validate, Clone, Serialize, Deserialize, PartialEq, Eq, Hash, PartialOrd, Ord)]
+#[cfg(feature = "uniffi")]
+uniffi::custom_newtype!(ManifestFacetTag, String);
+
+#[derive(
+    Debug,
+    Validate,
+    Clone,
+    Serialize,
+    Deserialize,
+    PartialEq,
+    Eq,
+    Hash,
+    PartialOrd,
+    Ord,
+    Reconcile,
+    Hydrate,
+)]
 #[serde(transparent)]
 #[garde(transparent)]
 #[repr(transparent)]
@@ -92,13 +113,16 @@ impl std::ops::Deref for KeyGeneric {
     }
 }
 
+#[cfg(feature = "uniffi")]
+uniffi::custom_newtype!(KeyGeneric, String);
+
 /// Versions work lik @foo/bar@1.2.3
 #[derive(Debug, Serialize, Deserialize, Validate, Clone)]
 #[serde(rename_all = "camelCase")]
 pub struct PlugManifest {
     #[garde(ascii, pattern(USERNAME_REGEX), length(min = 3, max = 32))]
     pub namespace: String,
-    #[garde(ascii, pattern(USERNAME_REGEX), length(min = 3, max = 32))]
+    #[garde(ascii, pattern(USERNAME_REGEX), length(min = 3, max = 64))]
     pub name: String,
     #[garde(skip)]
     pub version: semver::Version,
@@ -119,6 +143,9 @@ pub struct PlugManifest {
     pub routines: HashMap<KeyGeneric, Arc<RoutineManifest>>,
     #[garde(dive)]
     pub wflow_bundles: HashMap<KeyGeneric, Arc<WflowBundleManifest>>,
+    #[garde(dive)]
+    #[serde(default)]
+    pub views: HashMap<KeyGeneric, Arc<ViewManifest>>,
     #[garde(dive)]
     pub commands: HashMap<KeyGeneric, Arc<CommandManifest>>,
     #[garde(dive)]
@@ -242,6 +269,28 @@ pub struct FacetDependencyManifest {
     pub value_schema: schemars::Schema,
 }
 
+#[derive(Debug, Serialize, Deserialize, Validate, Clone)]
+#[serde(rename_all = "camelCase")]
+pub struct ViewManifest {
+    #[garde(length(min = 1))]
+    pub title: String,
+    #[garde(length(min = 1))]
+    pub desc: String,
+    #[garde(dive)]
+    pub provider: ViewProviderManifest,
+}
+
+#[derive(Debug, Serialize, Deserialize, Validate, Clone)]
+#[serde(rename_all = "camelCase")]
+pub enum ViewProviderManifest {
+    StatelessWasm {
+        #[garde(dive)]
+        bundle: KeyGeneric,
+        #[garde(dive)]
+        export: KeyGeneric,
+    },
+}
+
 #[derive(Debug, Serialize, Deserialize, Default, Validate, Clone)]
 #[serde(rename_all = "camelCase")]
 #[cfg_attr(feature = "uniffi", derive(uniffi::Record))]
@@ -254,14 +303,14 @@ pub struct FacetDisplayHint {
     pub display_title: Option<String>,
     #[serde(default)]
     #[garde(skip)]
-    pub deets: FacetKeyDisplayDeets,
+    pub deets: FacetDisplayDeets,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default, PartialEq)]
 #[serde(rename_all = "camelCase")]
 #[cfg_attr(feature = "uniffi", derive(uniffi::Enum))]
 #[derive(Reconcile, Hydrate)]
-pub enum FacetKeyDisplayDeets {
+pub enum FacetDisplayDeets {
     #[default]
     DebugPrint,
     DateTime {
@@ -271,6 +320,32 @@ pub enum FacetKeyDisplayDeets {
     Title {
         show_editor: bool,
     },
+    CustomView {
+        view: ViewRef,
+        mode: FacetViewMode,
+        priority: i32,
+    },
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[serde(rename_all = "camelCase")]
+#[cfg_attr(feature = "uniffi", derive(uniffi::Record))]
+#[derive(Reconcile, Hydrate)]
+pub struct ViewRef {
+    #[serde(default)]
+    pub plug_id: Option<String>,
+    pub view_key: KeyGeneric,
+}
+
+#[derive(Debug, Clone, Serialize, Default, Deserialize, PartialEq)]
+#[serde(rename_all = "camelCase")]
+#[cfg_attr(feature = "uniffi", derive(uniffi::Enum))]
+#[derive(Reconcile, Hydrate)]
+pub enum FacetViewMode {
+    #[default]
+    Display,
+    Edit,
+    DisplayAndEdit,
 }
 
 #[derive(Debug, Clone, Serialize, Default, Deserialize, PartialEq)]

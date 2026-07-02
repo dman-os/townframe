@@ -60,9 +60,9 @@ fn apply_kotlin_modifications(out_dir: &str) {
         }
     }
 
-    let file_opt_in =
-        "@file:OptIn(kotlin.time.ExperimentalTime::class, kotlin.uuid.ExperimentalUuidApi::class)";
-    let file_opt_in_re = Regex::new(r"(?m)^@file:.*$").expect("invalid regex");
+    let file_annotation = "@file:Suppress(\"all\")
+@file:OptIn(kotlin.time.ExperimentalTime::class, kotlin.uuid.ExperimentalUuidApi::class)";
+    let file_annotation_re = Regex::new(r"(?m)^@file:Suppress.*$").expect("invalid regex");
     let data_class_re =
         Regex::new(r"(?m)^(@Serializable\s*\n)?(data class\s+([A-Za-z0-9_]+)\s*\()")
             .expect("invalid regex");
@@ -76,10 +76,10 @@ fn apply_kotlin_modifications(out_dir: &str) {
         match fs::read_to_string(&path) {
             Ok(content) => {
                 let mut modified_content = content;
-                if !modified_content.contains(file_opt_in) {
-                    modified_content = file_opt_in_re
-                        .replace(&modified_content, |captures: &regex::Captures| {
-                            format!("{}\n{}", &captures[0], file_opt_in)
+                if !modified_content.contains(file_annotation) {
+                    modified_content = file_annotation_re
+                        .replace(&modified_content, |_captures: &regex::Captures| {
+                            file_annotation.to_string()
                         })
                         .to_string();
                 }
