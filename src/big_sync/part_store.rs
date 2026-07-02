@@ -36,6 +36,7 @@ pub trait HostPartStore: Send + Sync {
     async fn get_bucket_summary(&self, part_id: PartId, id: BuckId) -> Res<BucketSummary>;
 
     async fn obj_parts(&self, obj_id: ObjId) -> Res<Vec<PartId>>;
+    async fn obj_exists(&self, obj_id: ObjId) -> Res<bool>;
 
     // NOTE: upsert_obj doesn't take/invalidate leases since
     // it doesn't affect part membership
@@ -507,6 +508,28 @@ pub mod host_contract {
         assert_leaf_buckets_contract(harness).await?;
         assert_list_events_contract(harness).await?;
         assert_subscribe_contract(harness).await?;
+        assert_obj_occupancy_contract(harness).await?;
+        Ok(())
+    }
+
+    pub async fn assert_obj_occupancy_contract<H>(harness: &H) -> Res<()>
+    where
+        H: HostPartStoreContractHarness + Sync,
+    {
+        let store = harness.store();
+        let part_id = test_part(14);
+        let obj_id = test_obj(15);
+        assert!(!store.obj_exists(obj_id).await?);
+
+        let payload = payload("occupancy", 1);
+        store.set_obj_payload(obj_id, payload).await?;
+        assert!(store.obj_exists(obj_id).await?);
+
+        store.add_obj_to_parts(obj_id, vec![part_id]).await?;
+        assert!(store.obj_exists(obj_id).await?);
+
+        store.remove_obj_from_part(obj_id, part_id).await?;
+        assert!(store.obj_exists(obj_id).await?);
         Ok(())
     }
 

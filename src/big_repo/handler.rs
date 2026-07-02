@@ -20,7 +20,9 @@ use subduction_core::{
 use subduction_ephemeral::{
     clock::std_clock::StdClock, handler::EphemeralHandler, policy::OpenEphemeralPolicy,
 };
-use subduction_keyhive::handler::{SendableKeyhiveHandler, SendableRuntimeProtocol};
+use subduction_keyhive::handler::{
+    HandleError as KeyhiveHandleError, SendableKeyhiveHandler, SendableRuntimeProtocol,
+};
 use subduction_websocket::tokio::{TimeoutTokio, TokioSpawn};
 
 use crate::keyhive::BigKeyhiveHandle;
@@ -43,6 +45,33 @@ pub(crate) type BigRepoEphemeralHandler =
 
 type BigRepoListenError<S> = ListenError<Sendable, S, BigRepoIrohTransport, BigRepoWireMessage>;
 
+#[derive(Debug, thiserror::Error)]
+pub(crate) enum BigRepoComposedHandlerError<S>
+where
+    S: subduction_core::storage::traits::Storage<future_form::Sendable> + core::fmt::Debug,
+{
+    /// Sync handler error.
+    #[error(transparent)]
+    Sync(#[from] ListenError<Sendable, S, BigRepoIrohTransport, SyncMessage>),
+    /// Keyhive handler error.
+    #[error("keyhive: {0}")]
+    Keyhive(#[from] KeyhiveHandleError),
+}
+
+impl<S> From<BigRepoComposedHandlerError<S>> for BigRepoListenError<S>
+where
+    S: subduction_core::storage::traits::Storage<future_form::Sendable> + core::fmt::Debug,
+{
+    fn from(value: BigRepoComposedHandlerError<S>) -> Self {
+        match value {
+            BigRepoComposedHandlerError::Sync(sync_err) => convert_sync_listen_error(sync_err),
+            BigRepoComposedHandlerError::Keyhive(err) => {
+                panic!("keyhive handler error reached listen conversion: {err}")
+            }
+        }
+    }
+}
+
 /// The concrete sync handler type.
 type BigRepoSyncHandler<S> = Arc<
     SyncHandler<
@@ -58,8 +87,9 @@ type BigRepoSyncHandler<S> = Arc<
 /// Composed handler that dispatches to sync, ephemeral, and keyhive sub-handlers.
 ///
 /// Sync dispatch remains fatal because Subduction uses `ListenError` to control
-/// connection teardown. Ephemeral and keyhive dispatch are logged and treated
-/// as non-fatal so protocol failures do not get misreported as transport errors.
+/// connection teardown. Ephemeral dispatch is logged and treated as
+/// non-fatal. Keyhive failures are preserved as an explicit handler error and
+/// must not be collapsed into channel backpressure.
 pub(crate) struct BigRepoComposedHandler<
     S: subduction_core::storage::traits::Storage<future_form::Sendable>,
 > {
@@ -113,7 +143,7 @@ where
     <S as subduction_core::storage::traits::Storage<Sendable>>::Error: 'static,
 {
     type Message = BigRepoWireMessage;
-    type HandlerError = BigRepoListenError<S>;
+    type HandlerError = BigRepoComposedHandlerError<S>;
 
     fn handle<'a>(
         &'a self,
@@ -129,7 +159,7 @@ where
                         *sync_msg,
                     )
                     .await
-                    .map_err(convert_sync_listen_error)
+                    .map_err(BigRepoComposedHandlerError::Sync)
                 }
                 BigRepoWireMessage::Ephemeral(ephemeral_msg) => {
                     let result = Handler::<Sendable, BigRepoIrohTransport>::handle(
@@ -142,14 +172,13 @@ where
                     Ok(())
                 }
                 BigRepoWireMessage::Keyhive(keyhive_msg) => {
-                    let result = Handler::<Sendable, BigRepoIrohTransport>::handle(
+                    Handler::<Sendable, BigRepoIrohTransport>::handle(
                         &self.keyhive,
                         conn,
                         keyhive_msg,
                     )
-                    .await;
-                    log_nonfatal_handler_result(result, "keyhive").await;
-                    Ok(())
+                    .await
+                    .map_err(BigRepoComposedHandlerError::Keyhive)
                 }
             }
         })
@@ -273,5 +302,14 @@ mod tests {
         let err: BigRepoListenError<MemoryStorage> =
             convert_sync_listen_error(ListenError::TrySendError);
         assert!(matches!(err, ListenError::TrySendError));
+    }
+
+    #[test]
+    fn keyhive_error_conversion_panics_instead_of_becoming_try_send_error() {
+        let result = std::panic::catch_unwind(|| {
+            let _: BigRepoListenError<MemoryStorage> =
+                BigRepoComposedHandlerError::Keyhive(KeyhiveHandleError::ActorGone).into();
+        });
+        assert!(result.is_err(), "keyhive errors should not be laundered");
     }
 }

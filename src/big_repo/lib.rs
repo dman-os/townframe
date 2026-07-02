@@ -33,7 +33,7 @@ pub(crate) mod keyhive_storage;
 pub mod rpc;
 mod runtime;
 pub(crate) mod wire;
-pub use runtime::{CreateDocError, DocLookup, PutDocError, ReadyDocError, SyncDocError};
+pub use runtime::{CreateDocError, DocLookup, GetDocError, PutDocError, SyncDocError};
 #[cfg(test)]
 pub(crate) mod test;
 
@@ -77,6 +77,8 @@ pub struct BigRepo {
     #[educe(Debug(ignore))]
     keyhive_storage: BigRepoKeyhiveStorage,
     #[educe(Debug(ignore))]
+    sync_policy: runtime::BigRepoSyncPolicy,
+    #[educe(Debug(ignore))]
     big_sync_store: SharedPartStore,
     #[educe(Debug(ignore))]
     runtime: runtime::BigRepoRuntimeHandle,
@@ -105,6 +107,7 @@ impl BigRepo {
         // identity to the Keyhive individual identifier, so BigRepo derives
         // both identities from this one seed.
         let mut keyhive = BigKeyhiveHandle::boot_memory_from_seed(node_identity_seed).await?;
+        let sync_policy = runtime::BigRepoSyncPolicy::default();
         let keyhive_storage = match &storage {
             StorageConfig::Memory => BigRepoKeyhiveStorage::memory(),
             StorageConfig::Disk { path } => BigRepoKeyhiveStorage::fs(path.join(KEYHIVE_SUBDIR))
@@ -129,6 +132,7 @@ impl BigRepo {
                     signer,
                     subduction_core::storage::memory::MemoryStorage::new(),
                     Arc::clone(&policy),
+                    sync_policy,
                     keyhive.clone(),
                     keyhive_storage.clone(),
                     Arc::clone(&big_sync_store),
@@ -150,6 +154,7 @@ impl BigRepo {
                     signer,
                     redb_storage,
                     Arc::clone(&policy),
+                    sync_policy,
                     keyhive.clone(),
                     keyhive_storage.clone(),
                     Arc::clone(&big_sync_store),
@@ -163,6 +168,7 @@ impl BigRepo {
             local_peer_id: peer_id,
             keyhive,
             keyhive_storage,
+            sync_policy,
             big_sync_store,
             runtime,
             ephemeral,
@@ -191,6 +197,10 @@ impl BigRepo {
     }
     pub fn keyhive(&self) -> &BigKeyhiveHandle {
         &self.keyhive
+    }
+
+    pub(crate) fn sync_policy(&self) -> runtime::BigRepoSyncPolicy {
+        self.sync_policy
     }
 
     pub fn ephemeral(&self) -> BigEphemeral {

@@ -423,6 +423,13 @@ impl HostPartStore for MemoryPartStore {
         })
     }
 
+    async fn obj_exists(&self, obj_id: ObjId) -> Res<bool> {
+        surelock::key::lock_scope(|key| {
+            let (guard, _key) = key.lock(&self.inner);
+            Ok(guard.objs.contains_key(&obj_id) || guard.tombstoned_objs.contains_key(&obj_id))
+        })
+    }
+
     async fn set_obj_payload(&self, obj_id: ObjId, payload: ObjPayload) -> Res<()> {
         surelock::key::lock_scope(|key| {
             let (mut guard, _key) = key.lock(&self.inner);
