@@ -1,44 +1,9 @@
 use crate::interlude::*;
 
-use crate::rpc::FullDoc;
-
 #[derive(Clone)]
 pub struct BigRepoSyncBackend {
     repo: std::sync::Weak<crate::BigRepo>,
-    repo_rpc_endpoint: iroh::Endpoint,
-    remote_repo_clients:
         Arc<surelock::mutex::Mutex<std::collections::HashMap<PeerId, Arc<RepoRpcClient>>>>,
-}
-
-#[derive(Clone)]
-struct RepoRpcClient {
-    endpoint: iroh::Endpoint,
-    endpoint_addr: iroh::EndpointAddr,
-}
-
-impl RepoRpcClient {
-    fn new(endpoint: iroh::Endpoint, endpoint_addr: iroh::EndpointAddr) -> Self {
-        Self {
-            endpoint,
-            endpoint_addr,
-        }
-    }
-
-    async fn get_docs_full(&self, doc_ids: Vec<String>) -> Res<Vec<FullDoc>> {
-        let client = irpc_iroh::client::<crate::rpc::RepoSyncRpc>(
-            self.endpoint.clone(),
-            self.endpoint_addr.clone(),
-            crate::rpc::REPO_SYNC_ALPN,
-        );
-        let response = client
-            .rpc(crate::rpc::GetDocsFullRpcReq {
-                req: crate::rpc::GetDocsFullRequest { doc_ids },
-            })
-            .await
-            .wrap_err("GetDocsFull rpc failure")?
-            .wrap_err("GetDocsFull rejected")?;
-        Ok(response.docs)
-    }
 }
 
 impl BigRepoSyncBackend {
@@ -48,43 +13,6 @@ impl BigRepoSyncBackend {
     ) -> Res<Self> {
         Ok(Self {
             repo,
-            repo_rpc_endpoint: endpoint,
-            remote_repo_clients: surelock::mutex::Mutex::new(default()).into(),
-        })
-    }
-
-    pub fn register_remote_peer(&self, peer_id: PeerId, endpoint_addr: iroh::EndpointAddr) {
-        surelock::key::lock_scope(|key| {
-            let (mut remote_repo_clients, _key) = key.lock(&self.remote_repo_clients);
-            if endpoint_addr.addrs.is_empty()
-                && remote_repo_clients
-                    .get(&peer_id)
-                    .is_some_and(|existing| !existing.endpoint_addr.addrs.is_empty())
-            {
-                return;
-            }
-            let client = Arc::new(RepoRpcClient::new(
-                self.repo_rpc_endpoint.clone(),
-                endpoint_addr,
-            ));
-            remote_repo_clients.insert(peer_id, client);
-        })
-    }
-
-    pub fn unregister_remote_peer(&self, peer_id: PeerId) {
-        surelock::key::lock_scope(|key| {
-            let (mut remote_repo_clients, _key) = key.lock(&self.remote_repo_clients);
-            remote_repo_clients.remove(&peer_id);
-        })
-    }
-
-    fn remote_repo_client(&self, peer_id: PeerId) -> Res<Arc<RepoRpcClient>> {
-        surelock::key::lock_scope(|key| {
-            let (remote_repo_clients, _key) = key.lock(&self.remote_repo_clients);
-            remote_repo_clients
-                .get(&peer_id)
-                .cloned()
-                .ok_or_else(|| ferr!("missing repo rpc client for peer {peer_id:?}"))
         })
     }
 }
@@ -103,7 +31,8 @@ impl big_sync::SyncBackend for BigRepoSyncBackend {
             .ok_or_else(|| eyre::eyre!("big repo dropped while sync backend was active"))?;
         let doc_id: crate::DocumentId = obj_id;
         let local_heads = super::partition_doc_heads_payload(&repo.big_sync_store, doc_id).await?;
-        if local_heads.is_none() {
+        let Some(local_heads) = local_heads else {
+            // FIXME: this should be folded into partition_doc_heads_payload query
             let local_doc_exists = repo.big_sync_store.obj_exists(doc_id).await?;
             // Doc not yet synced locally. Pull from peer via Subduction sync.
             // Subduction syncs from an empty tree — the peer sends everything it has.
@@ -111,18 +40,13 @@ impl big_sync::SyncBackend for BigRepoSyncBackend {
                 .sync_doc_with_peer(doc_id, peer_id, Some(repo.sync_policy().doc_sync_timeout))
                 .await
                 .map_err(|sync_error| match sync_error {
-                    crate::SyncDocError::NotFound => eyre::eyre!("remote doc was not found"),
-                    crate::SyncDocError::Unauthorized => eyre::eyre!("remote doc access denied"),
+                    crate::SyncDocError::NotFound => ferr!("remote doc was not found"),
+                    crate::SyncDocError::Unauthorized => ferr!("remote doc access denied"),
                     crate::SyncDocError::PolicyRejected => {
-                        eyre::eyre!("remote doc sync hit policy rejection")
+                        ferr!("remote doc sync hit policy rejection")
                     }
-                    _ => eyre::eyre!("{sync_error}"),
+                    _ => ferr!("{sync_error}"),
                 })?;
-            if let Some(remote_payload) = remote_payload {
-                repo.big_sync_store
-                    .set_obj_payload(doc_id, remote_payload)
-                    .await?;
-            }
             let deets = if local_doc_exists {
                 big_sync_core::SyncCompletionDeets::ChangedObject
             } else {
@@ -131,10 +55,10 @@ impl big_sync::SyncBackend for BigRepoSyncBackend {
             return Ok(big_sync::SyncTaskRunOutcome::Completion(
                 big_sync_core::SyncTaskCompletion { obj_id, deets },
             ));
-        }
-        let local_heads = local_heads.expect("checked above");
+        };
+        // short circuit if the payloads are equal
         if let Some(remote_payload) = &remote_payload {
-            let remote_heads = super::doc_heads_from_payload(remote_payload.clone());
+            let remote_heads = super::doc_heads_from_payload(&remote_payload);
             if local_heads.as_ref() == remote_heads.as_ref() {
                 return Ok(big_sync::SyncTaskRunOutcome::Completion(
                     big_sync_core::SyncTaskCompletion {
@@ -150,9 +74,8 @@ impl big_sync::SyncBackend for BigRepoSyncBackend {
             .await
         {
             Ok(()) => {
-                let heads = repo.doc_payload_heads(doc_id).await?.ok_or_else(|| {
-                    eyre::eyre!("local doc payload missing after successful sync")
-                })?;
+                let heads = repo.doc_payload_heads(doc_id).await?
+                    .ok_or_eyre("local doc payload missing after successful sync")?;
                 let deets = if remote_payload.is_none() && heads.as_ref() == local_heads.as_ref() {
                     big_sync_core::SyncCompletionDeets::Noop
                 } else {

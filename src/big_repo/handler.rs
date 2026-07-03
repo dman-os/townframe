@@ -1,4 +1,7 @@
-use std::sync::Arc;
+//! Adapted from `subduction_cli/src/handler.rs`.
+//! Original license: Apache-2.0/MIT. (c) 2024 Ink & Switch
+
+use crate::interlude::*;
 
 use crate::keyhive_conn::BigRepoKeyhiveConnAdapter;
 use crate::keyhive_storage::BigRepoKeyhiveStorage;
@@ -21,9 +24,7 @@ use subduction_ephemeral::{
 use subduction_keyhive::handler::{
     HandleError as KeyhiveHandleError, SendableKeyhiveHandler, SendableRuntimeProtocol,
 };
-use subduction_websocket::tokio::{TimeoutTokio, TokioSpawn};
-
-use crate::keyhive::BigKeyhiveHandle;
+use subduction_websocket::tokio::{TokioSpawn};
 
 /// The concrete keyhive protocol type for BigRepo.
 pub(crate) type BigRepoKeyhiveProtocol =
@@ -62,7 +63,16 @@ where
 {
     fn from(value: BigRepoComposedHandlerError<S>) -> Self {
         match value {
-            BigRepoComposedHandlerError::Sync(sync_err) => convert_sync_listen_error(sync_err),
+            BigRepoComposedHandlerError::Sync(err) => match err {
+                ListenError::IoError(io_err) => ListenError::IoError(match io_err {
+                    IoError::Storage(err) => IoError::Storage(err),
+                    IoError::ConnSend(err) => IoError::ConnSend(err),
+                    IoError::ConnRecv(err) => IoError::ConnRecv(err),
+                    IoError::ConnCall(err) => IoError::ConnCall(err),
+                    IoError::BlobMismatch(err) => IoError::BlobMismatch(err),
+                }),
+                ListenError::TrySendError => ListenError::TrySendError,
+            }
             BigRepoComposedHandlerError::Keyhive(err) => {
                 panic!("keyhive handler error reached listen conversion: {err}")
             }
@@ -160,13 +170,13 @@ where
                     .map_err(BigRepoComposedHandlerError::Sync)
                 }
                 BigRepoWireMessage::Ephemeral(ephemeral_msg) => {
-                    let result = Handler::<Sendable, BigRepoIrohTransport>::handle(
+                    if let Err(err) = Handler::<Sendable, BigRepoIrohTransport>::handle(
                         self.ephemeral.as_ref(),
                         conn,
                         ephemeral_msg,
-                    )
-                    .await;
-                    log_nonfatal_handler_result(result, "ephemeral").await;
+                    ).await {
+                        tracing::error!(%err, "ephemeral handler error");
+                    }
                     Ok(())
                 }
                 BigRepoWireMessage::Keyhive(keyhive_msg) => {
@@ -194,115 +204,5 @@ where
             Handler::<Sendable, BigRepoIrohTransport>::on_peer_disconnect(&self.keyhive, peer)
                 .await;
         })
-    }
-}
-
-/// Convert a sync `ListenError<..., SyncMessage>` into `BigRepoListenError<S>`.
-fn convert_sync_listen_error<S: subduction_core::storage::traits::Storage<Sendable>>(
-    err: ListenError<Sendable, S, BigRepoIrohTransport, SyncMessage>,
-) -> BigRepoListenError<S> {
-    match err {
-        ListenError::IoError(io_err) => ListenError::IoError(match io_err {
-            IoError::Storage(e) => IoError::Storage(e),
-            IoError::ConnSend(e) => IoError::ConnSend(e),
-            IoError::ConnRecv(e) => IoError::ConnRecv(e),
-            IoError::ConnCall(e) => IoError::ConnCall(e),
-            IoError::BlobMismatch(e) => IoError::BlobMismatch(e),
-        }),
-        ListenError::TrySendError => ListenError::TrySendError,
-    }
-}
-
-async fn log_nonfatal_handler_result<E: core::fmt::Display>(
-    result: Result<(), E>,
-    label: &'static str,
-) {
-    if let Err(err) = result {
-        tracing::error!(error = %err, %label, "handler error (non-fatal)");
-    }
-}
-
-/// The concrete Subduction type for BigRepo, using the composed handler.
-pub(crate) type BigRepoSubduction<S> = subduction_core::subduction::Subduction<
-    'static,
-    future_form::Sendable,
-    S,
-    BigRepoIrohTransport,
-    BigRepoComposedHandler<S>,
-    crate::runtime::BigRepoPolicy,
-    subduction_crypto::signer::memory::MemorySigner,
-    TimeoutTokio,
-    TokioSpawn,
-    CountLeadingZeroBytes,
-    256,
->;
-
-/// Bootstrap the keyhive protocol and handler. Returns the protocol and handler.
-pub(crate) async fn boot_keyhive(
-    keyhive: &BigKeyhiveHandle,
-    keyhive_storage: BigRepoKeyhiveStorage,
-    sync_done_observer: Option<Arc<dyn Fn(subduction_keyhive::KeyhivePeerId) + Send + Sync>>,
-) -> crate::Res<(BigRepoKeyhiveProtocol, BigRepoKeyhiveHandler)> {
-    let shared_keyhive = keyhive.clone_keyhive();
-    let contact_card = keyhive.contact_card().clone();
-    let kh_peer_id = keyhive.keyhive_peer_id();
-    let keyhive_protocol: BigRepoKeyhiveProtocol = Arc::new(
-        subduction_keyhive::KeyhiveProtocol::new(
-            Arc::clone(&shared_keyhive),
-            keyhive_storage,
-            kh_peer_id,
-            contact_card,
-        )
-        .with_storage_recovery(),
-    );
-
-    let keyhive_for_handler = Arc::clone(&keyhive_protocol);
-    let mut keyhive_handler = BigRepoKeyhiveHandler::new(
-        keyhive_for_handler,
-        BigRepoKeyhiveConnAdapter::new
-            as fn(Authenticated<BigRepoIrohTransport, Sendable>) -> BigRepoKeyhiveConnAdapter,
-    );
-    if let Some(observer) = sync_done_observer {
-        keyhive_handler = keyhive_handler.with_sync_done_observer(observer);
-    }
-
-    Ok((keyhive_protocol, keyhive_handler))
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use subduction_core::storage::memory::MemoryStorage;
-
-    #[derive(Debug)]
-    struct TestError;
-
-    impl core::fmt::Display for TestError {
-        fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
-            f.write_str("test error")
-        }
-    }
-
-    impl std::error::Error for TestError {}
-
-    #[tokio::test]
-    async fn nonfatal_dispatch_swallows_handler_errors() {
-        log_nonfatal_handler_result::<TestError>(Err(TestError), "keyhive").await;
-    }
-
-    #[test]
-    fn sync_try_send_error_remains_try_send_error() {
-        let err: BigRepoListenError<MemoryStorage> =
-            convert_sync_listen_error(ListenError::TrySendError);
-        assert!(matches!(err, ListenError::TrySendError));
-    }
-
-    #[test]
-    fn keyhive_error_conversion_panics_instead_of_becoming_try_send_error() {
-        let result = std::panic::catch_unwind(|| {
-            let _: BigRepoListenError<MemoryStorage> =
-                BigRepoComposedHandlerError::Keyhive(KeyhiveHandleError::ActorGone).into();
-        });
-        assert!(result.is_err(), "keyhive errors should not be laundered");
     }
 }

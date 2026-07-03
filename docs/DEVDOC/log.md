@@ -1,5 +1,258 @@
 # duck-log
 
+
+## 2026-07-04 | Multiprocessing
+
+Right now, daybook repos are a web of differnt on disk storage formats.
+- SQlite
+  - Wflow
+  - Drawer and other repos
+  - Indexes
+  - Local plug state
+  - Big sync part stores
+- Blobs
+  - Iroh blobs for user content
+- Redb
+  - Blobs index
+  - Subduction
+- Keyhive
+  - Archives
+  - Events
+  - Prekeys
+- Keyring
+  - Secrets
+
+I'm probably missing a few here or new developments in other branches.
+This is a problem in the making:
+- Makes it difficult for local multiprocessing
+  - Right now, a repo checkout is using a lock file to lock access while open in a process
+  - This is not great since daybook is designed to be an always open app
+  - It makes it impossible to have difffent daybook processes working off the same checkout, think CLIs
+- Makes it difficult for cloud multiprocessing
+  - We want to have scalable and cloud friendly layering and tenancy for most of these bits
+  - For relays especially, metadata and blob storage ought to support clean separation
+- Makes it difficult to ship a wasm build in the future
+  - This is a far future goal but the browser is the most widely deployed platform, parts of daybook ought to be runnable there
+- Makes it difficult to write multiple apps on the same repo
+  - While the current design works well for a traditional application, daybook repos which are to be a digital repository of a person's life ought to be flexible as to what app uses them
+  - Solving this allows here allows diversity of visions working on the same data model without having to reinvent
+  - Makes it easy to experiment
+
+Big fuckin order but that's how it is.
+
+Thoughts:
+- A daemon?
+  - This requires we spec out an RPC format for every feature.
+  - Not fun but then again the current ffi interface is already shaped like that, we just have to make sure it works well.
+  - IRPC? It's designed to support cross-process and in-process actors.
+    - Have the ffi interface consume an IRPC interface?
+- A `libdaybook` library that will have a stable interface but allows the data model to evolve.
+  - Daemon or not, such a library is needed if we want other apps building on top of daybook repos
+  - The daybook_ffi is almost this
+- Instead of whole repo locks, have each storage primtive manage it's own serialization
+  - `wflow` and `big_sync` have pluggable storage and should be easy to adopt to cloud.
+    - `wflow` can run of standard key value interfaces.
+  - `sqlite` support multiprocessing natively.
+- Event model is tricky
+  - For example, how do listeners avoid re-processing the same events
+    - I suppose we need to have clearly separated event lanes
+      - Events that are emitted to drive app/GUI behavior
+        - These can be processed on every open 
+      - Events that are used to update derived state
+        - These should be crash resistant and dedup across instances
+        - They should dedup across checkouts too
+- A solution could be we could have hidden cheap, temporary and shallow checkouts/cloens that we perform whenever we detect locks.
+  - Local multiprocessing, is mostly isomprophic to the cross-checkout coordination problem.
+  - We could even have N local reusable checkouts that should avoid hot loop invocation costs
+    - Have them expire after some time
+  - These checkoust will then use the existing checkout2checkout infra to sync
+  - We can do optimizations on top like the blob store
+  - Seems hella hacky though
+  - So we have durable state that is mostly immutable and easy to cheap checkout and optimize
+    - But then we have indices over them, weather in-memory or persisted that would be costly and ccomplex to cheap-checkout
+      - Apps will be mainly built on top of these local indices
+      - Admittedly, we're using sqlite for all indices today which has multiprocessing.
+        - But the indices would also have in memory caches for sqlite state, we'd need to ahve sqlite level observability and event sourcing everywhere?? 
+- Actor model + daemons??
+  - I'm really liking this idea the more I think about it
+  - If we shape things right, I suspect we can have the same actor model semantics driving inter-checkout and intra-checkout invariants
+  - It'd also fit great browser environs with their worker model
+  - Having well encapuslated actors can be a great boundary for any efforts for cloud scaling and multi-tenancy
+  - What about indices?
+    - Each index is an actor that serves queries
+  - IPC overhead?
+    - Well, it's not that bad but I suppose I'm already worry about FFI overhead so we'll need to see numbers.
+
+Hmm, let's strictly model the current app first. The answer could be a mixture of all.
+- Sync
+  - Well, not all processes on a repo need to do sync.
+  - In fact, across checkouts, only a single processes should represent a checkout and partipate in sync.
+    - This is also true in cloud?
+- Sqlite
+  - Multiprocessing natively supported
+  - Any gotchas?
+- Redb
+  - Does it support multiprocessing?
+- Wflows
+  - Log: read/write/observe coordination all instances
+    - Read/write SQlite
+  - Metastore, Snapstore: read/write coordination all instances
+    - Read/write SQlite
+- BigSync
+  - Worker, Rpc
+    - Only on sync instance
+  - PartStore
+    - PartStore: read/write/observe coordination all instances
+      - Reads/writes/observes sqlite
+- BigRepo
+  - Peer connections only on sync instance
+  - Subduction, Keyhive, Ephemeral: read/write/observe coordination all instances
+  - Reads/write/observes BigSync
+- IrohBlobs
+  - Blob store: read/write coordination all instances
+  - Metadata: read/write coordination all instances
+    - Read writes Redb
+- Repos
+  - All repos generate obserable events inteded to drive GUI but also derivable state and thus must coordinate writes and observes across all instances to 
+  - Repos are currently designed to be singleton actors in a single repo
+  - They have persistent state that they write/read from but they also have linearization/serialization assumptions
+  - BlobsRepo
+    - PartStore
+      - Reads/writes/observes BigSync
+    - BlobStore
+      - read/writes IrohBlobs
+  - DrawerRepo
+    - Reads/writes/observes BigRepo
+    - In memory LRU caches from content docs: single instance
+    - Content docs, drawer doc automerge index for synced branches
+      - Reads/writes/observes BigRepo
+    - Local branch index for local branches
+      - Reads/writes SQLite
+      - Consider using a repo local automerge doc instead?
+        - It'd simplify impl
+        - It can be compacted easily
+        - Would introduce encryption/sigining overhead
+  - PlugsRepo
+    - Appdoc automerge state
+      - Reads/writes/observes BigRepo
+      - Move to content doc
+    - Plug blobs
+      - Reads/writes BlobsRepo
+  - ProgressRepo
+    - Reads/writes SQLite
+  - SecretsRepo
+    - Reads/writes platform Keyring
+  - TablesRepo 
+    - Appdoc automerge state
+      - Reads/writes/observes BigRepo
+      - Move to content doc
+  - ConfigRepo 
+    - Appdoc automerge state
+      - Reads/writes/observes BigRepo
+      - Move to content doc
+    - Reads PlugsRepo
+    - Local config
+      - Reads/writes SQLite
+      - Consider using a repo local automerge doc instead?
+  - SqliteLocalStateRepo
+    - Reads/writes SQLite
+  - DocBlobsIndexRepo
+    - Reads/writes SQLite
+    - Reads/observes DrawerRepo
+    - Writes BlobsRepo
+  - DocFacetRefIndexRepo
+    - Reads/writes SQLite
+    - Reads/observes DrawerRepo
+    - Reads/observes PlugsRepo
+  - DocFacetSetIndexRepo
+    - Reads/writes SQLite
+    - Reads/observes DrawerRepo
+  - InitRepo
+    - In memory working state
+    - App automerge state
+      - Reads/writes/observes BigRepo
+      - Move to content doc
+    - Read/writes ProgressRepo
+    - Local init tracking
+      - Read/writes SQLite
+  - DispatchRepo 
+    - In memory working state
+    - Appdoc automerge state
+      - Reads/writes/observes BigRepo
+      - Move to content doc
+    - Wflow observation state
+      - Reads/writes SQLite
+- RtSwitch
+  - Observability cursors
+    - Reads/writes Sqlite
+  - Reads/writes/observes BigSync
+  - Reads/observes DrawerRepo, PlugsRepo, DispatchRepo, ConfigRepo
+- RtTriage
+  - Reads/observes PlugsRepo
+  - Read/writes/observes DispatchRepo, DrawerRepo
+- Daybook WashPlugins
+  - Read/write DrawerRepo, DispatchRepo, BlobsRepo, SqliteLocalStateRepo, ConfigRepo, PlugsRepo
+- Rt
+  - Read/write/observes Daybook WashPlugins, Wflow Logs, DispatchRepo
+
+Learnings
+- Maybe we could unite read/write/observe into a new multi-processing and cloud friendly primitive?
+- Sync is single instance
+- Wflows logs are single writer but we could have dispatches across multiple wflow partitions coordinating across the single writer
+- How to make repos non-singleton while not using a single abstraction for inter and intra checkout coordination
+  - Today we're using CRDTs to allow a multi-writer system across repos.
+  - I suspect it'd be too complex to use CRDTs semantics for all repo state.
+  - On the same checkout, we could do PAXOS like systems but too complex still.
+  - PAXOS, RAFT, single-writer, whatever, if you have to communicate across processes on the write path, might as well just do an RPC call.
+    - But would the read path advantages be worth it??
+
+Cloud?
+- So there are two requirments on clouds
+  - Relays or multi user resources
+    - BigRepo is the only one today
+    - These services will need to scale like traditional web services so we'll need to separate compute from storage and do horizontal scaling
+      - Use cloud databases for metadata and object store
+  - Cloud repo instances
+    - Another big concern is we might want to have trusted cloud providers run a checkout for full or partial repo features
+    - For example, for always-availble p2p repo services or to offload expensive processors to cloud nodes
+    - Advanced users can rent a VM and run a cloud replica to get this advantage, only fair to offer this to paying users who care as long as they trust the providedr to have read/write access to their data.
+    - We don't have to offload the whole repo, only parts we want to have working in a persistent checkout
+    - A good example is for example, running a chat app or social bot off the repo.
+      - One could have a section of their repo read/writable to a trusted cloud provider
+  - In both cases, I want to maximize use of wasm infra to have flexible scaling including scale to zero
+    - The intention is to have a diversity of daybook cloud providers without requiring massive resources
+    - We want in relay and non-relay cases, have multi-tenant, scalable and efficient implementations
+    - We need to break apart the different pieces of daybook for cloud into wasm, faas, queue shaped things
+      - Or maybe we could have durable actors with state being managed by a runtime as the main primitive of daybook features??
+
+Browser?
+- I don't have big intentions for a browser implementation but if we're going to commit to using wasm-ified cloud peices, might as well do the little leg work required to make it browser compatible
+
+Decision time
+- Do we invest on making a new storage primitive for multi-writer support to have non-singleton actors?
+  - This is very attractive if it can be reused for cross-checkout coordination like CRDTs today
+  - What would that even look like?
+- Do we go all in on wasm?
+  - I think this is an easy yes
+  - We can have some native code in the wasm path on native
+    - Not so on browser
+    - We could peicmeal move features into scalable, cloud shaped wasm components written against wasip3
+    - This can happen overtime as we do more investment into running in the cloud
+    - Once the final native peices is gone, we can declare it browser ready
+      - But then again, maybe we don't have to have all features in the browser
+  - We should remodel the app again with this cloud requirement in mind
+- How to do multiprocessing?
+  - We can have a mixed model with different actors being evaluated and identifying themselves as multi-writer or not
+    - I.e. we'll have to invest in a daemon interface for those that are difficult to achieve this to
+    - When it's performance sensitive or useful to have multi-writer or replica with single writer and so on for a daybook service/repo, we can do the work then
+    - I.e. default we do IPC daemon for a repo
+- `libdaybook`?
+  - `daybook_ffi` today is almost this, should be easy to rewrite it so that it hides the detail of daemon vs local actors
+
+---
+
+Discussion with GPT 5.5 https://chatgpt.com/share/6a4969e5-b7f8-83ea-8918-c3afaf1f860f
+
 ## 2026-06-06 | keys
 
 So we have a lot of cyrptography in the system

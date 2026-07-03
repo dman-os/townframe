@@ -34,7 +34,7 @@ impl BigEphemeralTopic {
 
     #[must_use]
     pub const fn keyhive_changed() -> Self {
-        Self(*b"townframe.bigrepo.keyhive.v1\0\0\0\0")
+        Self(*b"\0\0\0\0townframe.bigrepo.keyhive.v1")
     }
 
     #[must_use]
@@ -128,16 +128,60 @@ impl BigEphemeralSwitchboard {
         runtime_stop: CancellationToken,
         runtime_tasks: Arc<utils_rs::AbortableJoinSet>,
     ) -> Self {
-        let (cmd_tx, cmd_rx) = mpsc::unbounded_channel();
+        let (cmd_tx, mut cmd_rx) = mpsc::unbounded_channel();
         let next_subscription_id = Arc::new(AtomicU64::new(0));
 
+        let mut state = SwitchboardState {
+            listeners: HashMap::new(),
+            topic_refcounts: HashMap::new(),
+        };
+        let fut = async move {
+            let mut cmd_closed = false;
+            loop {
+                tokio::select! {
+                    biased;
+                    event = event_rx.recv() => {
+                        let Ok(event) = event else {
+                            break;
+                        };
+                        let event = BigEphemeralEvent {
+                            topic: BigEphemeralTopic::from(event.id),
+                            sender: event.sender,
+                            nonce: event.nonce,
+                            payload: event.payload,
+                        };
+                        state.dispatch_event(&backend, event).await?;
+                    }
+                    cmd = cmd_rx.recv(), if !cmd_closed => {
+                        match cmd {
+                            Some(BigEphemeralSwitchboardCmd::Register {
+                                subscription_id,
+                                filter,
+                                event_tx,
+                                ack_tx,
+                            }) => {
+                                state.register_listener(&backend, subscription_id, filter, event_tx).await?;
+                                ack_tx.send(()).ok();
+                            }
+                            Some(BigEphemeralSwitchboardCmd::Unregister { subscription_id }) => {
+                                state.unregister_listener(&backend, subscription_id).await?;
+                            }
+                            None => {
+                                cmd_closed = true;
+                            }
+                        }
+                    }
+                }
+            }
+            eyre::Ok(())
+        };
         runtime_tasks
             .spawn({
                 let stop = runtime_stop.child_token();
                 async move {
-                    run_switchboard(backend, event_rx, cmd_rx, stop)
-                        .await
-                        .unwrap();
+                    if let Some(Err(err)) = stop.run_until_cancelled(fut).await {
+                        panic!("{:?}", err);
+                    }
                 }
                 .instrument(tracing::info_span!("BigEphemeralSwitchboard"))
             })
@@ -294,135 +338,85 @@ struct ListenerEntry {
     event_tx: mpsc::UnboundedSender<BigEphemeralEvent>,
 }
 
-async fn run_switchboard(
-    backend: Arc<dyn BigEphemeralBackend>,
-    event_rx: AsyncReceiver<EphemeralEvent>,
-    mut cmd_rx: mpsc::UnboundedReceiver<BigEphemeralSwitchboardCmd>,
-    stop: CancellationToken,
-) -> Res<()> {
-    let mut state = SwitchboardState {
-        listeners: HashMap::new(),
-        topic_refcounts: HashMap::new(),
-    };
-    let mut cmd_closed = false;
+impl SwitchboardState {
+    async fn register_listener<B: BigEphemeralBackend + ?Sized>(
+        &mut self,
+        backend: &Arc<B>,
+        subscription_id: u64,
+        filter: BigEphemeralFilter,
+        event_tx: mpsc::UnboundedSender<BigEphemeralEvent>,
+    ) -> Res<()> {
+        let previous = self
+            .listeners
+            .insert(subscription_id, ListenerEntry { filter, event_tx });
+        assert!(previous.is_none(), "duplicate ephemeral subscription id");
 
-    loop {
-        tokio::select! {
-            biased;
-            _ = stop.cancelled() => break,
-            event = event_rx.recv() => {
-                let Ok(event) = event else {
-                    break;
-                };
-                let event = BigEphemeralEvent {
-                    topic: BigEphemeralTopic::from(event.id),
-                    sender: event.sender,
-                    nonce: event.nonce,
-                    payload: event.payload,
-                };
-                dispatch_event(&backend, &mut state, event).await?;
+        let topic = filter.topic;
+        let count = self.topic_refcounts.entry(topic).or_insert(0);
+        if *count == 0 {
+            backend.subscribe_topic(topic).await;
+        }
+        *count += 1;
+        Ok(())
+    }
+
+    async fn unregister_listener<B: BigEphemeralBackend + ?Sized>(
+        &mut self,
+        backend: &Arc<B>,
+        subscription_id: u64,
+    ) -> Res<()> {
+        let Some(entry) = self.listeners.remove(&subscription_id) else {
+            return Ok(());
+        };
+        let topic = entry.filter.topic;
+        let Some(count) = self.topic_refcounts.get_mut(&topic) else {
+            return Ok(());
+        };
+        assert!(*count > 0, "ephemeral topic refcount underflow");
+        *count -= 1;
+        if *count == 0 {
+            self.topic_refcounts.remove(&topic);
+            backend.unsubscribe_topic(topic).await;
+        }
+        Ok(())
+    }
+
+    async fn dispatch_event<B: BigEphemeralBackend + ?Sized>(
+        &mut self,
+        backend: &Arc<B>,
+        event: BigEphemeralEvent,
+    ) -> Res<()> {
+        let mut stale_listener_ids = Vec::new();
+        for (subscription_id, listener) in &self.listeners {
+            if listener.filter.matches(&event) && listener.event_tx.send(event.clone()).is_err() {
+                stale_listener_ids.push(*subscription_id);
             }
-            cmd = cmd_rx.recv(), if !cmd_closed => {
-                match cmd {
-                    Some(BigEphemeralSwitchboardCmd::Register {
-                        subscription_id,
-                        filter,
-                        event_tx,
-                        ack_tx,
-                    }) => {
-                        register_listener(&backend, &mut state, subscription_id, filter, event_tx).await?;
-                        ack_tx.send(()).ok();
-                    }
-                    Some(BigEphemeralSwitchboardCmd::Unregister { subscription_id }) => {
-                        unregister_listener(&backend, &mut state, subscription_id).await?;
-                    }
-                    None => {
-                        cmd_closed = true;
-                    }
+        }
+
+        let mut topics_to_unsubscribe = Vec::new();
+        for subscription_id in stale_listener_ids {
+            if let Some(entry) = self.listeners.remove(&subscription_id) {
+                let topic = entry.filter.topic;
+                let Some(count) = self.topic_refcounts.get_mut(&topic) else {
+                    continue;
+                };
+                assert!(*count > 0, "ephemeral topic refcount underflow");
+                *count -= 1;
+                if *count == 0 {
+                    self.topic_refcounts.remove(&topic);
+                    topics_to_unsubscribe.push(topic);
                 }
             }
         }
-    }
 
-    Ok(())
-}
-
-async fn register_listener<B: BigEphemeralBackend + ?Sized>(
-    backend: &Arc<B>,
-    state: &mut SwitchboardState,
-    subscription_id: u64,
-    filter: BigEphemeralFilter,
-    event_tx: mpsc::UnboundedSender<BigEphemeralEvent>,
-) -> Res<()> {
-    let previous = state
-        .listeners
-        .insert(subscription_id, ListenerEntry { filter, event_tx });
-    assert!(previous.is_none(), "duplicate ephemeral subscription id");
-
-    let topic = filter.topic;
-    let count = state.topic_refcounts.entry(topic).or_insert(0);
-    if *count == 0 {
-        backend.subscribe_topic(topic).await;
-    }
-    *count += 1;
-    Ok(())
-}
-
-async fn unregister_listener<B: BigEphemeralBackend + ?Sized>(
-    backend: &Arc<B>,
-    state: &mut SwitchboardState,
-    subscription_id: u64,
-) -> Res<()> {
-    let Some(entry) = state.listeners.remove(&subscription_id) else {
-        return Ok(());
-    };
-    let topic = entry.filter.topic;
-    let Some(count) = state.topic_refcounts.get_mut(&topic) else {
-        return Ok(());
-    };
-    assert!(*count > 0, "ephemeral topic refcount underflow");
-    *count -= 1;
-    if *count == 0 {
-        state.topic_refcounts.remove(&topic);
-        backend.unsubscribe_topic(topic).await;
-    }
-    Ok(())
-}
-
-async fn dispatch_event<B: BigEphemeralBackend + ?Sized>(
-    backend: &Arc<B>,
-    state: &mut SwitchboardState,
-    event: BigEphemeralEvent,
-) -> Res<()> {
-    let mut stale_listener_ids = Vec::new();
-    for (subscription_id, listener) in &state.listeners {
-        if listener.filter.matches(&event) && listener.event_tx.send(event.clone()).is_err() {
-            stale_listener_ids.push(*subscription_id);
+        for topic in topics_to_unsubscribe {
+            backend.unsubscribe_topic(topic).await;
         }
-    }
 
-    let mut topics_to_unsubscribe = Vec::new();
-    for subscription_id in stale_listener_ids {
-        if let Some(entry) = state.listeners.remove(&subscription_id) {
-            let topic = entry.filter.topic;
-            let Some(count) = state.topic_refcounts.get_mut(&topic) else {
-                continue;
-            };
-            assert!(*count > 0, "ephemeral topic refcount underflow");
-            *count -= 1;
-            if *count == 0 {
-                state.topic_refcounts.remove(&topic);
-                topics_to_unsubscribe.push(topic);
-            }
-        }
+        Ok(())
     }
-
-    for topic in topics_to_unsubscribe {
-        backend.unsubscribe_topic(topic).await;
-    }
-
-    Ok(())
 }
+
 
 #[cfg(test)]
 mod tests {
@@ -479,17 +473,15 @@ mod tests {
         let (listener_a_tx, mut listener_a_rx) = tokio::sync::mpsc::unbounded_channel();
         let (listener_b_tx, mut listener_b_rx) = tokio::sync::mpsc::unbounded_channel();
 
-        register_listener(
+        state.register_listener(
             &backend,
-            &mut state,
             1,
             BigEphemeralFilter::new(topic).with_sender(sender_a),
             listener_a_tx,
         )
         .await?;
-        register_listener(
+        state.register_listener(
             &backend,
-            &mut state,
             2,
             BigEphemeralFilter::new(topic).with_sender(sender_b),
             listener_b_tx,
@@ -498,9 +490,8 @@ mod tests {
 
         assert_eq!(backend.subscribes.lock().await.as_slice(), &[topic]);
 
-        dispatch_event(
+        state.dispatch_event(
             &backend,
-            &mut state,
             BigEphemeralEvent {
                 topic,
                 sender: sender_a,
@@ -523,9 +514,8 @@ mod tests {
                 .is_err()
         );
 
-        dispatch_event(
+        state.dispatch_event(
             &backend,
-            &mut state,
             BigEphemeralEvent {
                 topic: other_topic,
                 sender: sender_a,
@@ -540,9 +530,9 @@ mod tests {
                 .is_err()
         );
 
-        unregister_listener(&backend, &mut state, 1).await?;
+        state.unregister_listener(&backend, 1).await?;
         assert!(backend.unsubscribes.lock().await.is_empty());
-        unregister_listener(&backend, &mut state, 2).await?;
+        state.unregister_listener(&backend, 2).await?;
         timeout(std::time::Duration::from_secs(1), async {
             loop {
                 let should_stop = {

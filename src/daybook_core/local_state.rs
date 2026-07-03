@@ -1,6 +1,7 @@
 use crate::interlude::*;
 use tokio_util::sync::CancellationToken;
 
+// FIXME: this is never constructed?
 #[derive(Debug, Clone)]
 #[cfg_attr(feature = "uniffi", derive(uniffi::Enum))]
 pub enum LocalStateEvent {

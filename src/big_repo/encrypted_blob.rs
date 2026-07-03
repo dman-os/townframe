@@ -2,8 +2,6 @@ use crate::interlude::*;
 
 use atproto_dasl::drisl;
 use beekem::encrypted::EncryptedContent;
-use serde::{Deserialize, Serialize};
-use std::sync::Arc;
 
 const ENCRYPTED_BLOB_DISCRIMINATOR: u8 = 0x02;
 
@@ -19,16 +17,15 @@ pub(crate) fn encode_encrypted_blob(
     let env = EncryptedBlobEnvelope {
         encrypted: encrypted.clone(),
     };
-    let drisl_env = drisl::to_vec(&env)
-        .map_err(|encode_err| ferr!("DRISL encode encrypted blob envelope: {encode_err}"))?;
     let mut encoded = vec![ENCRYPTED_BLOB_DISCRIMINATOR];
-    encoded.extend(drisl_env);
+    drisl::to_writer(&mut encoded, &env)
+        .map_err(|err| ferr!("DRISL encode encrypted blob envelope: {err}"))?;
     Ok(encoded)
 }
 
 pub(crate) fn decode_encrypted_blob(
     raw_bytes: &[u8],
-) -> Res<Arc<EncryptedContent<Vec<u8>, Vec<u8>>>> {
+) -> Res<EncryptedContent<Vec<u8>, Vec<u8>>> {
     let Some((discriminator, body)) = raw_bytes.split_first() else {
         return Err(ferr!("blob is missing encrypted discriminator"));
     };
@@ -39,7 +36,7 @@ pub(crate) fn decode_encrypted_blob(
     }
     let envelope: EncryptedBlobEnvelope = drisl::from_slice(body)
         .map_err(|decode_err| ferr!("DRISL decode encrypted blob envelope: {decode_err}"))?;
-    Ok(Arc::new(envelope.encrypted))
+    Ok(envelope.encrypted)
 }
 
 #[cfg(test)]
