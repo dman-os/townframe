@@ -72,6 +72,8 @@ pub enum SyncDocError {
     NotFound,
     /// Document exists but peer lacks access
     Unauthorized,
+    /// A sync session completed with policy-rejected items
+    PolicyRejected,
     /// TransportError
     TransportError,
     /// IoError
@@ -539,7 +541,6 @@ impl BigRepoRuntimeHandle {
             .map_err(|_| eyre::eyre!(ERROR_ACTOR))?;
         rx.await.map_err(|_| eyre::eyre!(ERROR_CHANNEL))?
     }
-
 }
 
 pub struct BigRepoRuntimeStopToken {
@@ -698,9 +699,12 @@ where
         let evt_tx = evt_tx.clone();
         Arc::new(move |peer_id| {
             let peer_id = PeerId::new(*peer_id.verifying_key());
-            evt_tx
+            if evt_tx
                 .send(RuntimeEvt::KeyhiveSyncDone { peer_id })
-                .expect(ERROR_CHANNEL);
+                .is_err()
+            {
+                tracing::debug!(%peer_id, "runtime stopped before keyhive sync-done event");
+            }
         })
     };
     // Boot keyhive protocol and handler
@@ -836,6 +840,7 @@ where
             async move {
                 let mut refresh_tick = tokio::time::interval(Duration::from_secs(2));
                 let mut compact_tick = tokio::time::interval(Duration::from_secs(300));
+                compact_tick.tick().await;
                 loop {
                     tokio::select! {
                         biased;
@@ -1107,10 +1112,6 @@ where
             }
             RuntimeCmd::NoteLocalKeyhiveChanged { resp } => {
                 let out = async {
-                    self.keyhive_protocol
-                        .ingest_from_storage()
-                        .await
-                        .wrap_err("keyhive protocol ingest before local-change refresh failed")?;
                     self.keyhive_protocol
                         .note_local_keyhive_changed()
                         .await
@@ -1540,21 +1541,9 @@ where
     async fn handle_keyhive_sync_done(&mut self, peer_id: PeerId) -> Res<()> {
         let result: Res<()> = async {
             self.keyhive_protocol
-                .ingest_from_storage()
-                .await
-                .wrap_err("keyhive ingest_from_storage after sync failed")?;
-            self.keyhive
-                .ingest_from_storage(&self.keyhive_storage)
-                .await
-                .wrap_err("runtime keyhive ingest_from_storage after sync failed")?;
-            self.keyhive_protocol
                 .refresh_cache()
                 .await
                 .wrap_err("keyhive refresh_cache after sync failed")?;
-            self.keyhive
-                .save_storage_archive(&self.keyhive_storage)
-                .await
-                .wrap_err("keyhive archive save after sync failed")?;
             Res::Ok(())
         }
         .await;
@@ -2038,6 +2027,7 @@ where
                     session.kind,
                     subduction_core::sync_session::SyncSessionKind::OutboundBatch
                 );
+                let session_has_policy_rejections = session.has_policy_rejections();
                 let mut materialization_pending = self.handle_apply_sync_session(session).await?;
                 if completes_sync_waiters {
                     let waiter = self
@@ -2070,7 +2060,11 @@ where
                                     materialization_pending =
                                         self.retry_pending_materialization().await?;
                                     if materialization_pending {
-                                        Err(SyncDocError::Unauthorized)
+                                        if session_has_policy_rejections {
+                                            Err(SyncDocError::PolicyRejected)
+                                        } else {
+                                            Err(SyncDocError::Unauthorized)
+                                        }
                                     } else {
                                         Ok(())
                                     }

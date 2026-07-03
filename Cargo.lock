@@ -9486,7 +9486,6 @@ dependencies = [
 [[package]]
 name = "sedimentree_core"
 version = "0.13.0"
-source = "git+https://github.com/dman-os/subduction?rev=2c44ec24a68be2a0d038ffd202e3d0721e2cb550#2c44ec24a68be2a0d038ffd202e3d0721e2cb550"
 dependencies = [
  "async-lock",
  "bijou64",
@@ -10320,7 +10319,6 @@ dependencies = [
 [[package]]
 name = "subduction_core"
 version = "0.16.0"
-source = "git+https://github.com/dman-os/subduction?rev=2c44ec24a68be2a0d038ffd202e3d0721e2cb550#2c44ec24a68be2a0d038ffd202e3d0721e2cb550"
 dependencies = [
  "async-channel",
  "async-lock",
@@ -10341,7 +10339,6 @@ dependencies = [
 [[package]]
 name = "subduction_crypto"
 version = "0.8.0"
-source = "git+https://github.com/dman-os/subduction?rev=2c44ec24a68be2a0d038ffd202e3d0721e2cb550#2c44ec24a68be2a0d038ffd202e3d0721e2cb550"
 dependencies = [
  "ed25519-dalek 2.2.0",
  "future_form",
@@ -10373,7 +10370,6 @@ dependencies = [
 [[package]]
 name = "subduction_iroh"
 version = "0.9.0"
-source = "git+https://github.com/dman-os/subduction?rev=2c44ec24a68be2a0d038ffd202e3d0721e2cb550#2c44ec24a68be2a0d038ffd202e3d0721e2cb550"
 dependencies = [
  "async-channel",
  "async-lock",
@@ -10392,7 +10388,6 @@ dependencies = [
 [[package]]
 name = "subduction_keyhive"
 version = "0.7.0"
-source = "git+https://github.com/dman-os/subduction?rev=2c44ec24a68be2a0d038ffd202e3d0721e2cb550#2c44ec24a68be2a0d038ffd202e3d0721e2cb550"
 dependencies = [
  "async-channel",
  "async-lock",
@@ -10422,7 +10417,6 @@ dependencies = [
 [[package]]
 name = "subduction_redb_storage"
 version = "0.1.0"
-source = "git+https://github.com/dman-os/subduction?rev=2c44ec24a68be2a0d038ffd202e3d0721e2cb550#2c44ec24a68be2a0d038ffd202e3d0721e2cb550"
 dependencies = [
  "future_form",
  "futures",
@@ -10438,7 +10432,6 @@ dependencies = [
 [[package]]
 name = "subduction_websocket"
 version = "0.11.0"
-source = "git+https://github.com/dman-os/subduction?rev=2c44ec24a68be2a0d038ffd202e3d0721e2cb550#2c44ec24a68be2a0d038ffd202e3d0721e2cb550"
 dependencies = [
  "async-channel",
  "async-lock",
