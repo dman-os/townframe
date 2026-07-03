@@ -6,11 +6,11 @@ use crate::{
     encrypted_blob::{decode_encrypted_blob, encode_encrypted_blob},
     ephemeral::{
         BigEphemeral, BigEphemeralBackend, BigEphemeralFilter, BigEphemeralSwitchboard,
-        BigEphemeralTopic, BigRepoEphemeralBackend,
+        BigEphemeralTopic, BigRepoEphemeralBackend, 
     },
     handler::{
-        boot_keyhive, BigRepoComposedHandler, BigRepoEphemeralHandler, BigRepoKeyhiveProtocol,
-        BigRepoSubduction,
+        BigRepoComposedHandler, BigRepoEphemeralHandler, BigRepoKeyhiveProtocol,
+        BigRepoKeyhiveHandler,
     },
     keyhive_conn::BigRepoKeyhiveConnAdapter,
     keyhive_storage::BigRepoKeyhiveStorage,
@@ -19,8 +19,9 @@ use crate::{
 };
 use keyhive_core::event::static_event::StaticEvent;
 use subduction_keyhive::{KeyhiveConnection, KeyhivePeerId};
+use subduction_websocket::tokio::{TimeoutTokio, TokioSpawn};
 
-use future_form::FutureForm;
+use future_form::{Sendable, FutureForm};
 use futures::future::BoxFuture;
 use keyhive_core::store::ciphertext::CiphertextStore;
 use sedimentree_core::depth::CountLeadingZeroBytes;
@@ -37,7 +38,7 @@ use tokio::sync::{mpsc, oneshot};
 use tokio_util::sync::CancellationToken;
 
 use super::changes;
-use subduction_core::subduction::request::FragmentRequested;
+use subduction_core::{subduction::request::FragmentRequested, authenticated::Authenticated};
 
 const DEFAULT_DOC_WORKER_IDLE_TTL: Duration = Duration::from_secs(3);
 const DEFAULT_DOC_SYNC_TIMEOUT: Duration = Duration::from_secs(10);
@@ -176,10 +177,6 @@ enum RuntimeCmd {
     GetDocHandle {
         doc_id: DocumentId,
         resp: oneshot::Sender<Res<DocLookup<Arc<LiveDocBundle>>>>,
-    },
-    ExportDocSave {
-        doc_id: DocumentId,
-        resp: oneshot::Sender<Res<DocLookup<Vec<u8>>>>,
     },
     CommitDelta {
         doc_id: DocumentId,
@@ -357,14 +354,6 @@ impl BigRepoRuntimeHandle {
             .map_err(|_| eyre::eyre!(ERROR_ACTOR))?;
         let out = rx.await.map_err(|_| eyre::eyre!(ERROR_CHANNEL))?;
         out
-    }
-
-    pub async fn export_doc_save(&self, doc_id: DocumentId) -> Res<DocLookup<Vec<u8>>> {
-        let (tx, rx) = oneshot::channel();
-        self.cmd_tx
-            .send(RuntimeCmd::ExportDocSave { doc_id, resp: tx })
-            .map_err(|_| eyre::eyre!(ERROR_ACTOR))?;
-        rx.await.map_err(|_| eyre::eyre!(ERROR_CHANNEL))?
     }
 
     pub async fn note_local_keyhive_changed(&self) -> Res<()> {
@@ -575,7 +564,7 @@ pub(crate) type BigRepoIrohTransport = subduction_core::transport::message::Mess
     subduction_iroh::transport::IrohTransport,
 >;
 pub(crate) type BigRepoPolicy = subduction_keyhive::policy::SubductionKeyhive<
-    future_form::Sendable,
+    Sendable,
     keyhive_crypto::signer::memory::MemorySigner,
     Vec<u8>,
     Vec<u8>,
@@ -585,7 +574,7 @@ pub(crate) type BigRepoPolicy = subduction_keyhive::policy::SubductionKeyhive<
 >;
 pub trait BigRepoSubductionStorage:
     subduction_core::storage::traits::Storage<
-        future_form::Sendable,
+        Sendable,
         Error: std::fmt::Display + Send + Sync + 'static,
     > + Clone
     + Send
@@ -596,7 +585,7 @@ pub trait BigRepoSubductionStorage:
 }
 impl<T> BigRepoSubductionStorage for T where
     T: subduction_core::storage::traits::Storage<
-            future_form::Sendable,
+            Sendable,
             Error: std::fmt::Display + Send + Sync + 'static,
         > + Clone
         + Send
@@ -605,6 +594,21 @@ impl<T> BigRepoSubductionStorage for T where
         + 'static
 {
 }
+
+/// The concrete Subduction type for BigRepo, using the composed handler.
+type BigRepoSubduction<S> = subduction_core::subduction::Subduction<
+    'static,
+    Sendable,
+    S,
+    BigRepoIrohTransport,
+    BigRepoComposedHandler<S>,
+    crate::runtime::BigRepoPolicy,
+    subduction_crypto::signer::memory::MemorySigner,
+    TimeoutTokio,
+    TokioSpawn,
+    CountLeadingZeroBytes,
+    256,
+>;
 
 #[derive(Clone)]
 struct BigRepoSyncSessionBridge {
@@ -695,25 +699,40 @@ where
     );
     let ephemeral = BigEphemeral::new(Arc::clone(&ephemeral_backend), ephemeral_switchboard);
 
-    let keyhive_sync_done_observer: Arc<dyn Fn(KeyhivePeerId) + Send + Sync> = {
-        let evt_tx = evt_tx.clone();
-        Arc::new(move |peer_id| {
-            let peer_id = PeerId::new(*peer_id.verifying_key());
-            if evt_tx
-                .send(RuntimeEvt::KeyhiveSyncDone { peer_id })
-                .is_err()
-            {
-                tracing::debug!(%peer_id, "runtime stopped before keyhive sync-done event");
-            }
-        })
-    };
     // Boot keyhive protocol and handler
-    let (keyhive_protocol, keyhive_handler) = boot_keyhive(
-        &keyhive,
-        keyhive_storage.clone(),
-        Some(keyhive_sync_done_observer),
-    )
-    .await?;
+    let (keyhive_protocol, keyhive_handler) = {
+        let contact_card = keyhive.contact_card().clone();
+        let kh_peer_id = keyhive.keyhive_peer_id();
+        let keyhive_protocol: BigRepoKeyhiveProtocol = Arc::new(
+            subduction_keyhive::KeyhiveProtocol::new(
+                Arc::clone(&keyhive.clone_keyhive()),
+                keyhive_storage.clone(),
+                kh_peer_id,
+                contact_card,
+            )
+            .with_storage_recovery(),
+        );
+
+        let mut keyhive_handler = BigRepoKeyhiveHandler::new(
+            Arc::clone(&keyhive_protocol),
+            BigRepoKeyhiveConnAdapter::new
+                as fn(Authenticated<BigRepoIrohTransport, Sendable>) -> BigRepoKeyhiveConnAdapter,
+        );
+        keyhive_handler = keyhive_handler.with_sync_done_observer({
+            let evt_tx = evt_tx.clone();
+            Arc::new(move |peer_id| {
+                let peer_id = PeerId::new(*peer_id.verifying_key());
+                if evt_tx
+                    .send(RuntimeEvt::KeyhiveSyncDone { peer_id })
+                    .is_err()
+                {
+                    tracing::debug!(%peer_id, "runtime stopped before keyhive sync-done event");
+                }
+            })
+        });
+        (keyhive_protocol, keyhive_handler)
+    };
+
     let mut keyhive_change_subscription = ephemeral
         .subscribe(BigEphemeralFilter::new(BigEphemeralTopic::keyhive_changed()))
         .await?;
@@ -973,15 +992,6 @@ where
                 let worker = self.doc_worker_handle(doc_id).expect(ERROR_ACTOR);
                 worker
                     .send(DocWorkerMsg::AcquireHandle { resp })
-                    .expect(ERROR_ACTOR);
-            }
-            RuntimeCmd::ExportDocSave { doc_id, resp } => {
-                let worker = self.doc_worker_handle(doc_id).expect(ERROR_ACTOR);
-                if let Some(entry) = self.doc_workers.get_mut(&doc_id) {
-                    entry.transient_work += 1;
-                }
-                worker
-                    .send(DocWorkerMsg::ExportDocSave { resp })
                     .expect(ERROR_ACTOR);
             }
             RuntimeCmd::CommitDelta {
@@ -1372,12 +1382,12 @@ where
     async fn inspect_stored_doc_blobs(&self, doc_id: DocumentId) -> Res<Vec<Vec<u8>>> {
         let sedimentree_id = SedimentreeId::new(doc_id.into_bytes());
         let loose_commits = <S as subduction_core::storage::traits::Storage<
-            future_form::Sendable,
+            Sendable,
         >>::load_loose_commits(&self.storage_for_reads, sedimentree_id)
         .await
         .wrap_err("failed loading loose commits for inspection")?;
         let fragments =
-            <S as subduction_core::storage::traits::Storage<future_form::Sendable>>::load_fragments(
+            <S as subduction_core::storage::traits::Storage<Sendable>>::load_fragments(
                 &self.storage_for_reads,
                 sedimentree_id,
             )
@@ -1932,9 +1942,6 @@ enum DocWorkerMsg {
     AcquireHandle {
         resp: oneshot::Sender<Res<DocLookup<Arc<LiveDocBundle>>>>,
     },
-    ExportDocSave {
-        resp: oneshot::Sender<Res<DocLookup<Vec<u8>>>>,
-    },
     CommitDelta {
         commits: Vec<(CommitId, BTreeSet<CommitId>, Vec<u8>)>,
         heads: Vec<automerge::ChangeHash>,
@@ -2001,11 +2008,6 @@ where
             }
             DocWorkerMsg::AcquireHandle { resp: done } => {
                 let res = self.handle_acquire_handle().await;
-                done.send(res).inspect_err(|_| warn!(ERROR_CALLER)).ok();
-            }
-            DocWorkerMsg::ExportDocSave { resp: done } => {
-                let res = self.handle_export_doc_save().await;
-                self.finish_transient_work()?;
                 done.send(res).inspect_err(|_| warn!(ERROR_CALLER)).ok();
             }
             DocWorkerMsg::CommitDelta {
@@ -2233,95 +2235,6 @@ where
             })
             .expect(ERROR_CHANNEL);
         Ok(DocLookup::Ready(bundle))
-    }
-
-    #[tracing::instrument(skip_all)]
-    async fn handle_export_doc_save(&mut self) -> Res<DocLookup<Vec<u8>>> {
-        match &self.state {
-            DocWorkerDocState::Live(bundle) => match bundle.upgrade() {
-                Some(bundle) => {
-                    let doc = bundle.doc.lock().await;
-                    Ok(DocLookup::Ready(doc.save()))
-                }
-                None => {
-                    let was_pending =
-                        matches!(self.state, DocWorkerDocState::PendingMaterialization);
-                    match load_doc_snapshot(
-                        &self.sedimentrees,
-                        &self.storage_for_reads,
-                        &self.ciphertext_store,
-                        &self.runtime_handle.keyhive,
-                        self.doc_id,
-                    )
-                    .await?
-                    {
-                        DocLookup::Ready(doc) => {
-                            self.mark_materialization_ready(
-                                was_pending,
-                                Arc::from(doc.get_heads()),
-                            )?;
-                            let save = doc.save();
-                            self.state = DocWorkerDocState::Transient(doc.into());
-                            Ok(DocLookup::Ready(save))
-                        }
-                        DocLookup::PendingMaterialization => {
-                            self.mark_materialization_pending(was_pending)?;
-                            Ok(DocLookup::PendingMaterialization)
-                        }
-                        DocLookup::Missing => Ok(DocLookup::Missing),
-                    }
-                }
-            },
-            DocWorkerDocState::Transient(doc) => Ok(DocLookup::Ready(doc.save())),
-            DocWorkerDocState::PendingMaterialization => {
-                let was_pending = true;
-                match load_doc_snapshot(
-                    &self.sedimentrees,
-                    &self.storage_for_reads,
-                    &self.ciphertext_store,
-                    &self.runtime_handle.keyhive,
-                    self.doc_id,
-                )
-                .await?
-                {
-                    DocLookup::Ready(doc) => {
-                        self.mark_materialization_ready(was_pending, Arc::from(doc.get_heads()))?;
-                        let save = doc.save();
-                        self.state = DocWorkerDocState::Transient(doc.into());
-                        Ok(DocLookup::Ready(save))
-                    }
-                    DocLookup::PendingMaterialization => {
-                        self.mark_materialization_pending(true)?;
-                        Ok(DocLookup::PendingMaterialization)
-                    }
-                    DocLookup::Missing => Ok(DocLookup::Missing),
-                }
-            }
-            DocWorkerDocState::Unloaded => {
-                let was_pending = false;
-                match load_doc_snapshot(
-                    &self.sedimentrees,
-                    &self.storage_for_reads,
-                    &self.ciphertext_store,
-                    &self.runtime_handle.keyhive,
-                    self.doc_id,
-                )
-                .await?
-                {
-                    DocLookup::Ready(doc) => {
-                        self.mark_materialization_ready(was_pending, Arc::from(doc.get_heads()))?;
-                        let save = doc.save();
-                        self.state = DocWorkerDocState::Transient(doc.into());
-                        Ok(DocLookup::Ready(save))
-                    }
-                    DocLookup::PendingMaterialization => {
-                        self.mark_materialization_pending(false)?;
-                        Ok(DocLookup::PendingMaterialization)
-                    }
-                    DocLookup::Missing => Ok(DocLookup::Missing),
-                }
-            }
-        }
     }
 
     async fn handle_commit_delta(
@@ -2960,10 +2873,10 @@ where
         }
 
         let loose_commits = <S as subduction_core::storage::traits::Storage<
-            future_form::Sendable,
+            Sendable,
         >>::load_loose_commits(storage_for_reads, sedimentree_id);
         let fragments =
-            <S as subduction_core::storage::traits::Storage<future_form::Sendable>>::load_fragments(
+            <S as subduction_core::storage::traits::Storage<Sendable>>::load_fragments(
                 storage_for_reads,
                 sedimentree_id,
             );
@@ -3301,7 +3214,7 @@ struct IrohConnectResult {
         subduction_core::transport::message::MessageTransport<
             subduction_iroh::transport::IrohTransport,
         >,
-        future_form::Sendable,
+        Sendable,
     >,
     listener_task: BoxFuture<'static, Result<(), subduction_iroh::error::RunError>>,
     sender_task: BoxFuture<'static, Result<(), subduction_iroh::error::RunError>>,
@@ -3736,6 +3649,7 @@ impl<S> BigRepoCiphertextStore<S> {
     ) -> Res<Arc<beekem::encrypted::EncryptedContent<Vec<u8>, Vec<u8>>>> {
         self.remember_locator(content_ref.clone(), locator).await;
         let encrypted = decode_encrypted_blob(raw)?;
+        let encrypted = Arc::new(encrypted);
         self.ciphertexts
             .lock()
             .await
@@ -3800,7 +3714,7 @@ impl<S> BigRepoCiphertextStore<S> {
     {
         let maybe_raw = match locator.kind {
             BigRepoCiphertextKind::LooseCommit => {
-                <S as subduction_core::storage::traits::Storage<future_form::Sendable>>::load_loose_commit(
+                <S as subduction_core::storage::traits::Storage<Sendable>>::load_loose_commit(
                     &self.storage_for_reads,
                     locator.sedimentree_id,
                     locator.commit_id,
@@ -3810,7 +3724,7 @@ impl<S> BigRepoCiphertextStore<S> {
                 .map(|verified| verified.blob().clone().into_contents())
             }
             BigRepoCiphertextKind::Fragment => {
-                <S as subduction_core::storage::traits::Storage<future_form::Sendable>>::load_fragment(
+                <S as subduction_core::storage::traits::Storage<Sendable>>::load_fragment(
                     &self.storage_for_reads,
                     locator.sedimentree_id,
                     locator.commit_id,
@@ -3875,7 +3789,7 @@ impl<S> BigRepoCiphertextStore<S> {
     }
 }
 
-impl<S: BigRepoSubductionStorage> CiphertextStore<future_form::Sendable, Vec<u8>, Vec<u8>>
+impl<S: BigRepoSubductionStorage> CiphertextStore<Sendable, Vec<u8>, Vec<u8>>
     for BigRepoCiphertextStore<S>
 {
     type GetCiphertextError = eyre::Report;
@@ -3884,14 +3798,14 @@ impl<S: BigRepoSubductionStorage> CiphertextStore<future_form::Sendable, Vec<u8>
     fn get_ciphertext<'a>(
         &'a self,
         content_ref: &'a Vec<u8>,
-    ) -> <future_form::Sendable as FutureForm>::Future<
+    ) -> <Sendable as FutureForm>::Future<
         'a,
         Result<
             Option<Arc<beekem::encrypted::EncryptedContent<Vec<u8>, Vec<u8>>>>,
             Self::GetCiphertextError,
         >,
     > {
-        future_form::Sendable::from_future(async move {
+        Sendable::from_future(async move {
             self.try_load_ciphertext(content_ref.as_slice()).await
         })
     }
@@ -3901,14 +3815,14 @@ impl<S: BigRepoSubductionStorage> CiphertextStore<future_form::Sendable, Vec<u8>
         pcs_update: &'a keyhive_crypto::digest::Digest<
             keyhive_crypto::signed::Signed<beekem::operation::CgkaOperation>,
         >,
-    ) -> <future_form::Sendable as FutureForm>::Future<
+    ) -> <Sendable as FutureForm>::Future<
         'a,
         Result<
             Vec<Arc<beekem::encrypted::EncryptedContent<Vec<u8>, Vec<u8>>>>,
             Self::GetCiphertextError,
         >,
     > {
-        future_form::Sendable::from_future(async move {
+        Sendable::from_future(async move {
             let content_refs = self
                 .pcs_updates
                 .lock()
@@ -3929,9 +3843,9 @@ impl<S: BigRepoSubductionStorage> CiphertextStore<future_form::Sendable, Vec<u8>
     fn mark_decrypted<'a>(
         &'a self,
         _content_ref: &'a Vec<u8>,
-    ) -> <future_form::Sendable as FutureForm>::Future<'a, Result<(), Self::MarkDecryptedError>>
+    ) -> <Sendable as FutureForm>::Future<'a, Result<(), Self::MarkDecryptedError>>
     {
-        future_form::Sendable::from_future(async move { Ok(()) })
+        Sendable::from_future(async move { Ok(()) })
     }
 }
 
@@ -4213,7 +4127,7 @@ where
     let mut known_decryption_keys = kh_doc.lock().await.known_decryption_keys().clone();
 
     let head_ref: Vec<u8> = head.as_bytes().to_vec();
-    let head_verified = <S as subduction_core::storage::traits::Storage<future_form::Sendable>>::load_loose_commit(
+    let head_verified = <S as subduction_core::storage::traits::Storage<Sendable>>::load_loose_commit(
         storage_for_reads,
         sedimentree_id,
         head,
@@ -4245,7 +4159,7 @@ where
             key
         } else {
             let pred_verified = <S as subduction_core::storage::traits::Storage<
-                future_form::Sendable,
+                Sendable,
             >>::load_loose_commit(storage_for_reads, sedimentree_id, *pred)
                 .await
                 .map_err(|e| {
@@ -4339,7 +4253,7 @@ async fn persist_cgka_update_op(
     update_op: keyhive_crypto::signed::Signed<beekem::operation::CgkaOperation>,
 ) -> Res<()> {
     let event = StaticEvent::CgkaOperation(Box::new(update_op));
-    subduction_keyhive::save_event::<Vec<u8>, _, future_form::Sendable>(keyhive_storage, &event)
+    subduction_keyhive::save_event::<Vec<u8>, _, Sendable>(keyhive_storage, &event)
         .await
         .map_err(|e| ferr!("failed to save keyhive cgka update op: {e}"))?;
     Ok(())
@@ -4357,7 +4271,7 @@ mod tests {
 
     #[tokio::test]
     async fn ciphertext_store_keeps_stored_commit_loadable_after_mark_decrypted() -> Res<()> {
-        let keyhive = BigKeyhiveHandle::boot_memory_from_seed([9; 32]).await?;
+        let keyhive = BigKeyhiveHandle::new([9; 32]).await?;
         let keyhive_storage = BigRepoKeyhiveStorage::memory();
         let _doc_id = keyhive
             .create_doc(nonempty![[1; 32]], &keyhive_storage)
@@ -4379,7 +4293,7 @@ mod tests {
         .await?;
 
         let verified = VerifiedMeta::<sedimentree_core::loose_commit::LooseCommit>::seal::<
-            future_form::Sendable,
+            Sendable,
             _,
         >(
             &signer,
@@ -4387,7 +4301,7 @@ mod tests {
             VerifiedBlobMeta::new(encrypted_blob.clone()),
         )
         .await;
-        Storage::<future_form::Sendable>::save_loose_commit(&storage, sedimentree_id, verified)
+        Storage::<Sendable>::save_loose_commit(&storage, sedimentree_id, verified)
             .await
             .map_err(|e| ferr!("save_loose_commit failed: {e}"))?;
 
@@ -4428,7 +4342,7 @@ mod tests {
 
     #[tokio::test]
     async fn ciphertext_store_reuses_indexed_entry_for_repeat_lookup() -> Res<()> {
-        let keyhive = BigKeyhiveHandle::boot_memory_from_seed([14; 32]).await?;
+        let keyhive = BigKeyhiveHandle::new([14; 32]).await?;
         let keyhive_storage = BigRepoKeyhiveStorage::memory();
         let doc_id = keyhive
             .create_doc(nonempty![[1; 32]], &keyhive_storage)
@@ -4450,7 +4364,7 @@ mod tests {
         .await?;
 
         let verified = VerifiedMeta::<sedimentree_core::loose_commit::LooseCommit>::seal::<
-            future_form::Sendable,
+            Sendable,
             _,
         >(
             &signer,
@@ -4458,7 +4372,7 @@ mod tests {
             VerifiedBlobMeta::new(encrypted_blob.clone()),
         )
         .await;
-        Storage::<future_form::Sendable>::save_loose_commit(&storage, sedimentree_id, verified)
+        Storage::<Sendable>::save_loose_commit(&storage, sedimentree_id, verified)
             .await
             .map_err(|e| ferr!("save_loose_commit failed: {e}"))?;
 
@@ -4494,7 +4408,7 @@ mod tests {
     async fn ciphertext_store_prefers_fragment_over_loose_commit_for_same_ref() -> Res<()> {
         use sedimentree_core::fragment::Fragment;
 
-        let keyhive = BigKeyhiveHandle::boot_memory_from_seed([11; 32]).await?;
+        let keyhive = BigKeyhiveHandle::new([11; 32]).await?;
         let keyhive_storage = BigRepoKeyhiveStorage::memory();
         let _doc_id = keyhive
             .create_doc(nonempty![[1; 32]], &keyhive_storage)
@@ -4520,7 +4434,7 @@ mod tests {
         )
         .await?;
         let h1_verified = VerifiedMeta::<sedimentree_core::loose_commit::LooseCommit>::seal::<
-            future_form::Sendable,
+            Sendable,
             _,
         >(
             &signer,
@@ -4528,7 +4442,7 @@ mod tests {
             VerifiedBlobMeta::new(h1_blob),
         )
         .await;
-        Storage::<future_form::Sendable>::save_loose_commit(&storage, sedimentree_id, h1_verified)
+        Storage::<Sendable>::save_loose_commit(&storage, sedimentree_id, h1_verified)
             .await
             .map_err(|e| ferr!("save_loose_commit for h1 failed: {e}"))?;
 
@@ -4542,7 +4456,7 @@ mod tests {
         )
         .await?;
         let h2_verified = VerifiedMeta::<sedimentree_core::loose_commit::LooseCommit>::seal::<
-            future_form::Sendable,
+            Sendable,
             _,
         >(
             &signer,
@@ -4550,7 +4464,7 @@ mod tests {
             VerifiedBlobMeta::new(h2_blob),
         )
         .await;
-        Storage::<future_form::Sendable>::save_loose_commit(&storage, sedimentree_id, h2_verified)
+        Storage::<Sendable>::save_loose_commit(&storage, sedimentree_id, h2_verified)
             .await
             .map_err(|e| ferr!("save_loose_commit for h2 failed: {e}"))?;
 
@@ -4563,13 +4477,13 @@ mod tests {
             fragment_bytes,
         )
         .await?;
-        let fragment_verified = VerifiedMeta::<Fragment>::seal::<future_form::Sendable, _>(
+        let fragment_verified = VerifiedMeta::<Fragment>::seal::<Sendable, _>(
             &signer,
             (sedimentree_id, h2, h2_parents.clone(), vec![]),
             VerifiedBlobMeta::new(fragment_blob),
         )
         .await;
-        Storage::<future_form::Sendable>::save_fragment(
+        Storage::<Sendable>::save_fragment(
             &storage,
             sedimentree_id,
             fragment_verified,
@@ -4670,7 +4584,7 @@ mod tests {
 
     #[tokio::test]
     async fn ciphertext_store_lazy_ancestor_lookup_uses_indexed_child_only() -> Res<()> {
-        let keyhive = BigKeyhiveHandle::boot_memory_from_seed([13; 32]).await?;
+        let keyhive = BigKeyhiveHandle::new([13; 32]).await?;
         let keyhive_storage = BigRepoKeyhiveStorage::memory();
         let doc_id = keyhive
             .create_doc(nonempty![[1; 32]], &keyhive_storage)
@@ -4694,7 +4608,7 @@ mod tests {
         )
         .await?;
         let h1_verified = VerifiedMeta::<sedimentree_core::loose_commit::LooseCommit>::seal::<
-            future_form::Sendable,
+            Sendable,
             _,
         >(
             &signer,
@@ -4702,7 +4616,7 @@ mod tests {
             VerifiedBlobMeta::new(h1_blob),
         )
         .await;
-        Storage::<future_form::Sendable>::save_loose_commit(&storage, sedimentree_id, h1_verified)
+        Storage::<Sendable>::save_loose_commit(&storage, sedimentree_id, h1_verified)
             .await
             .map_err(|e| ferr!("save_loose_commit for h1 failed: {e}"))?;
 
@@ -4716,7 +4630,7 @@ mod tests {
         )
         .await?;
         let h2_verified = VerifiedMeta::<sedimentree_core::loose_commit::LooseCommit>::seal::<
-            future_form::Sendable,
+            Sendable,
             _,
         >(
             &signer,
@@ -4724,7 +4638,7 @@ mod tests {
             VerifiedBlobMeta::new(h2_blob),
         )
         .await;
-        Storage::<future_form::Sendable>::save_loose_commit(&storage, sedimentree_id, h2_verified)
+        Storage::<Sendable>::save_loose_commit(&storage, sedimentree_id, h2_verified)
             .await
             .map_err(|e| ferr!("save_loose_commit for h2 failed: {e}"))?;
 
@@ -4791,7 +4705,7 @@ mod tests {
 
     #[tokio::test]
     async fn fragment_encryption_reuses_existing_content_key() -> Res<()> {
-        let keyhive = BigKeyhiveHandle::boot_memory_from_seed([10; 32]).await?;
+        let keyhive = BigKeyhiveHandle::new([10; 32]).await?;
         let keyhive_storage = BigRepoKeyhiveStorage::memory();
         let doc_id = keyhive
             .create_doc(nonempty![[1; 32]], &keyhive_storage)
@@ -4815,7 +4729,7 @@ mod tests {
         )
         .await?;
         let h1_verified = VerifiedMeta::<sedimentree_core::loose_commit::LooseCommit>::seal::<
-            future_form::Sendable,
+            Sendable,
             _,
         >(
             &signer,
@@ -4823,7 +4737,7 @@ mod tests {
             VerifiedBlobMeta::new(h1_blob),
         )
         .await;
-        Storage::<future_form::Sendable>::save_loose_commit(&storage, sedimentree_id, h1_verified)
+        Storage::<Sendable>::save_loose_commit(&storage, sedimentree_id, h1_verified)
             .await
             .map_err(|e| ferr!("save_loose_commit for h1 failed: {e}"))?;
 
@@ -4837,7 +4751,7 @@ mod tests {
         )
         .await?;
         let h2_verified = VerifiedMeta::<sedimentree_core::loose_commit::LooseCommit>::seal::<
-            future_form::Sendable,
+            Sendable,
             _,
         >(
             &signer,
@@ -4845,7 +4759,7 @@ mod tests {
             VerifiedBlobMeta::new(h2_blob),
         )
         .await;
-        Storage::<future_form::Sendable>::save_loose_commit(&storage, sedimentree_id, h2_verified)
+        Storage::<Sendable>::save_loose_commit(&storage, sedimentree_id, h2_verified)
             .await
             .map_err(|e| ferr!("save_loose_commit for h2 failed: {e}"))?;
 
@@ -4873,7 +4787,7 @@ mod tests {
 
     #[tokio::test]
     async fn load_doc_snapshot_rejects_plaintext_blob() -> Res<()> {
-        let keyhive = BigKeyhiveHandle::boot_memory_from_seed([12; 32]).await?;
+        let keyhive = BigKeyhiveHandle::new([12; 32]).await?;
         let keyhive_storage = BigRepoKeyhiveStorage::memory();
         let doc_id = keyhive
             .create_doc(nonempty![[1; 32]], &keyhive_storage)
@@ -4885,7 +4799,7 @@ mod tests {
         let parents = BTreeSet::new();
         let plaintext_blob = Blob::new(b"plain commit bytes".to_vec());
         let verified = VerifiedMeta::<sedimentree_core::loose_commit::LooseCommit>::seal::<
-            future_form::Sendable,
+            Sendable,
             _,
         >(
             &signer,
@@ -4893,7 +4807,7 @@ mod tests {
             VerifiedBlobMeta::new(plaintext_blob),
         )
         .await;
-        Storage::<future_form::Sendable>::save_loose_commit(&storage, sedimentree_id, verified)
+        Storage::<Sendable>::save_loose_commit(&storage, sedimentree_id, verified)
             .await
             .map_err(|e| ferr!("save_loose_commit failed: {e}"))?;
 

@@ -106,16 +106,17 @@ impl BigRepo {
         // `SubductionKeyhive` authorizes peers by matching the peer signing
         // identity to the Keyhive individual identifier, so BigRepo derives
         // both identities from this one seed.
-        let mut keyhive = BigKeyhiveHandle::boot_memory_from_seed(node_identity_seed).await?;
         let sync_policy = runtime::BigRepoSyncPolicy::default();
         let keyhive_storage = match &storage {
             StorageConfig::Memory => BigRepoKeyhiveStorage::memory(),
             StorageConfig::Disk { path } => BigRepoKeyhiveStorage::fs(path.join(KEYHIVE_SUBDIR))
                 .wrap_err("failed booting keyhive storage")?,
         };
-        keyhive
-            .restore_from_storage_archive(&keyhive_storage)
-            .await?;
+        let keyhive = if let Some(restored) = BigKeyhiveHandle::restore_from_storage_archive(node_identity_seed, &keyhive_storage).await? {
+            restored
+        } else {
+            BigKeyhiveHandle::new(node_identity_seed).await?
+        };
         keyhive.import_prekey_secrets(&keyhive_storage).await?;
         keyhive.ingest_from_storage(&keyhive_storage).await?;
         keyhive.save_prekey_secrets(&keyhive_storage).await?;
@@ -446,53 +447,6 @@ impl BigRepo {
     pub async fn doc_payload_heads(&self, doc_id: DocumentId) -> Res<Option<Arc<[ChangeHash]>>> {
         partition_doc_heads_payload(&self.big_sync_store, doc_id).await
     }
-
-    pub async fn get_docs_full(&self, doc_ids: &[String]) -> Res<Vec<FullDoc>> {
-        if doc_ids.len() > crate::rpc::MAX_GET_DOCS_FULL_DOC_IDS {
-            return Err(crate::rpc::BigRepoRpcError::Internal {
-                message: format!(
-                    "requested too many docs: {} exceeds max {}",
-                    doc_ids.len(),
-                    crate::rpc::MAX_GET_DOCS_FULL_DOC_IDS
-                ),
-            }
-            .into());
-        }
-
-        let mut dedup = HashSet::new();
-        let requested_doc_ids: Vec<String> = doc_ids
-            .iter()
-            .filter(|doc_id| dedup.insert((*doc_id).clone()))
-            .cloned()
-            .collect();
-
-        use futures::StreamExt;
-        use futures_buffered::BufferedStreamExt;
-        let rows = futures::stream::iter(requested_doc_ids.into_iter().map(|doc_id| async move {
-            let parsed = match DocumentId::from_str(&doc_id) {
-                Ok(val) => val,
-                Err(_) => return Ok(None),
-            };
-            match self.export_doc(&parsed).await? {
-                DocLookup::Ready(automerge_save) => Ok(Some(FullDoc {
-                    doc_id,
-                    automerge_save,
-                })),
-                DocLookup::PendingMaterialization | DocLookup::Missing => Ok(None),
-            }
-        }))
-        .buffered_unordered(16)
-        .collect::<Vec<Res<Option<FullDoc>>>>()
-        .await;
-
-        let mut out = Vec::new();
-        for row in rows {
-            if let Some(doc) = row? {
-                out.push(doc);
-            }
-        }
-        Ok(out)
-    }
 }
 
 pub struct BigRepoStopToken {
@@ -676,10 +630,11 @@ async fn partition_doc_heads_payload(
     Ok(big_sync_store
         .obj_payload(doc_id)
         .await?
+        .as_ref()
         .map(doc_heads_from_payload))
 }
 
-fn doc_heads_from_payload(payload: serde_json::Value) -> Arc<[ChangeHash]> {
+fn doc_heads_from_payload(payload: &serde_json::Value) -> Arc<[ChangeHash]> {
     let heads = payload
         .as_object()
         .expect(ERROR_IMPOSSIBLE)

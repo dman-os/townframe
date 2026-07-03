@@ -82,6 +82,7 @@ pub struct BlobsRepo {
     root: PathBuf,
     src_local_user_path: UserPathBuf,
     iroh_store: iroh_blobs::api::Store,
+    // FIXME: use surelock
     hash_locks: Arc<std::sync::Mutex<HashMap<BlobId, Arc<tokio::sync::Mutex<()>>>>>,
     partition_writer: Arc<dyn PartitionMembershipWriter>,
 }

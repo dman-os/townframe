@@ -1,7 +1,10 @@
 //! Keyhive filesystem storage for BigRepo.
 //!
 //! Adapted from `subduction_cli/src/keyhive.rs`.
-//! Original license: Apache-2.0/MIT.
+//! Original license: Apache-2.0/MIT. (c) 2024 Ink & Switch
+
+// FIXME: KeyhiveStorage requires loading all archives at once instead of
+// by id which is wasteful
 
 use std::convert::Infallible;
 use std::io;

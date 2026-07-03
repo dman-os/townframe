@@ -1,3 +1,6 @@
+//! Adapted from `subduction_cli/src/wire.rs`.
+//! Original license: Apache-2.0/MIT. (c) 2024 Ink & Switch
+
 use sedimentree_core::{
     codec::{
         decode::Decode,
