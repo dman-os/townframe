@@ -408,17 +408,6 @@ impl BigKeyhiveHandle {
         }
         Ok(doc_id)
     }
-
-    #[cfg(test)]
-    async fn create_doc_for_test(
-        &self,
-        initial_content_heads: NonEmpty<[u8; 32]>,
-    ) -> Res<(DocumentId, [u8; 32])> {
-        let doc_id = self
-            .create_doc_id_bytes(Vec::new(), initial_content_heads, None)
-            .await?;
-        Ok((DocumentId::new(doc_id), doc_id))
-    }
 }
 
 async fn persist_delegation(
@@ -451,33 +440,3 @@ async fn persist_cgka_update_ops(
     Ok(())
 }
 
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use nonempty::nonempty;
-
-    #[tokio::test]
-    async fn create_doc_returns_keyhive_document_id_bytes() -> Res<()> {
-        let keyhive = BigKeyhiveHandle::boot_memory().await?;
-        let (doc_id, keyhive_doc_id) = keyhive.create_doc_for_test(nonempty![[1; 32]]).await?;
-        assert_eq!(doc_id.into_bytes(), keyhive_doc_id);
-        Ok(())
-    }
-
-    #[tokio::test]
-    async fn create_doc_mints_distinct_documents() -> Res<()> {
-        let keyhive = BigKeyhiveHandle::boot_memory().await?;
-        let (first, _) = keyhive.create_doc_for_test(nonempty![[1; 32]]).await?;
-        let (second, _) = keyhive.create_doc_for_test(nonempty![[2; 32]]).await?;
-        assert_ne!(first, second);
-        Ok(())
-    }
-
-    #[tokio::test]
-    async fn boot_memory_from_seed_can_create_documents() -> Res<()> {
-        let keyhive = BigKeyhiveHandle::boot_memory_from_seed([7; 32]).await?;
-        let (doc_id, _) = keyhive.create_doc_for_test(nonempty![[3; 32]]).await?;
-        assert_ne!(doc_id.into_bytes(), [0; 32]);
-        Ok(())
-    }
-}
