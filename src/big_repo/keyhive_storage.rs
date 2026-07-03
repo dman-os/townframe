@@ -16,6 +16,7 @@ pub(crate) const KEYHIVE_SUBDIR: &str = "keyhive";
 
 const ARCHIVES_SUBDIR: &str = "archives";
 const OPS_SUBDIR: &str = "ops";
+const PREKEY_SECRETS_FILE: &str = "prekey-secrets.bin";
 const TMP_SUBDIR: &str = "tmp";
 
 /// Monotonic per-process counter for temp filenames.
@@ -54,6 +55,32 @@ impl FsKeyhiveStorage {
 
     fn tmp_dir(&self) -> PathBuf {
         self.root.join(TMP_SUBDIR)
+    }
+
+    async fn save_prekey_secrets(&self, bytes: Vec<u8>) -> io::Result<()> {
+        let tmp_id = NEXT_TMP_ID.fetch_add(1, Ordering::Relaxed);
+        let tmp = self.tmp_dir().join(format!(
+            "{PREKEY_SECRETS_FILE}.{}.{tmp_id}.tmp",
+            std::process::id()
+        ));
+        let dest = self.root.join(PREKEY_SECRETS_FILE);
+        tokio::fs::write(&tmp, bytes).await?;
+        match tokio::fs::rename(&tmp, &dest).await {
+            Ok(()) => Ok(()),
+            Err(err) => {
+                drop(tokio::fs::remove_file(&tmp).await);
+                Err(err)
+            }
+        }
+    }
+
+    async fn load_prekey_secrets(&self) -> io::Result<Option<Vec<u8>>> {
+        let path = self.root.join(PREKEY_SECRETS_FILE);
+        match tokio::fs::read(path).await {
+            Ok(bytes) => Ok(Some(bytes)),
+            Err(err) if err.kind() == io::ErrorKind::NotFound => Ok(None),
+            Err(err) => Err(err),
+        }
     }
 
     async fn save_file(
@@ -189,6 +216,20 @@ impl BigRepoKeyhiveStorage {
 
     pub(crate) fn fs(root: PathBuf) -> io::Result<Self> {
         FsKeyhiveStorage::new(root).map(Self::Fs)
+    }
+
+    pub(crate) async fn save_prekey_secrets(&self, bytes: Vec<u8>) -> io::Result<()> {
+        match self {
+            Self::Memory(_) => Ok(()),
+            Self::Fs(storage) => storage.save_prekey_secrets(bytes).await,
+        }
+    }
+
+    pub(crate) async fn load_prekey_secrets(&self) -> io::Result<Option<Vec<u8>>> {
+        match self {
+            Self::Memory(_) => Ok(None),
+            Self::Fs(storage) => storage.load_prekey_secrets().await,
+        }
     }
 }
 

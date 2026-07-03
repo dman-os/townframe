@@ -4,8 +4,6 @@ use crate::keyhive_conn::BigRepoKeyhiveConnAdapter;
 use crate::keyhive_storage::BigRepoKeyhiveStorage;
 use crate::runtime::BigRepoIrohTransport;
 use crate::wire::BigRepoWireMessage;
-use async_lock::Mutex;
-
 use future_form::Sendable;
 use futures::future::BoxFuture;
 use sedimentree_core::depth::CountLeadingZeroBytes;
@@ -245,7 +243,7 @@ pub(crate) async fn boot_keyhive(
     keyhive_storage: BigRepoKeyhiveStorage,
     sync_done_observer: Option<Arc<dyn Fn(subduction_keyhive::KeyhivePeerId) + Send + Sync>>,
 ) -> crate::Res<(BigRepoKeyhiveProtocol, BigRepoKeyhiveHandler)> {
-    let shared_keyhive = Arc::new(Mutex::new(keyhive.clone_keyhive()));
+    let shared_keyhive = keyhive.clone_keyhive();
     let contact_card = keyhive.contact_card().clone();
     let kh_peer_id = keyhive.keyhive_peer_id();
     let keyhive_protocol: BigRepoKeyhiveProtocol = Arc::new(
@@ -257,11 +255,6 @@ pub(crate) async fn boot_keyhive(
         )
         .with_storage_recovery(),
     );
-
-    keyhive_protocol
-        .ingest_from_storage()
-        .await
-        .map_err(|err| crate::ferr!("keyhive ingest_from_storage failed: {err}"))?;
 
     let keyhive_for_handler = Arc::clone(&keyhive_protocol);
     let mut keyhive_handler = BigRepoKeyhiveHandler::new(

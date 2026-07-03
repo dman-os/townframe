@@ -167,10 +167,7 @@ impl BigKeyhiveHandle {
         )
         .await
         .map_err(|err| ferr!("failed restoring keyhive from archive: {err:?}"))?;
-        let contact_card = restored
-            .contact_card()
-            .await
-            .map_err(|err| ferr!("failed restoring keyhive contact card: {err}"))?;
+        let contact_card = restored.get_existing_contact_card().await;
         let peer_id = subduction_keyhive::KeyhivePeerId::from_bytes(restored.id().to_bytes());
         self.keyhive = Arc::new(restored);
         self.contact_card = Arc::new(contact_card);
@@ -188,23 +185,42 @@ impl BigKeyhiveHandle {
         Ok(())
     }
 
-    pub(crate) async fn save_storage_archive(
+    pub(crate) async fn import_prekey_secrets(
         &self,
         storage: &crate::keyhive_storage::BigRepoKeyhiveStorage,
     ) -> Res<()> {
-        let storage_id =
-            subduction_keyhive::StorageHash::new(*self.keyhive_peer_id.verifying_key());
-        let archive = self.keyhive.as_ref().into_archive().await;
-        subduction_keyhive::save_keyhive_archive::<Vec<u8>, _, future_form::Sendable>(
-            storage, storage_id, &archive,
-        )
-        .await
-        .map_err(|err| ferr!("failed saving keyhive archive: {err}"))?;
+        let Some(bytes) = storage
+            .load_prekey_secrets()
+            .await
+            .map_err(|err| ferr!("failed loading keyhive prekey secrets: {err}"))?
+        else {
+            return Ok(());
+        };
+        self.keyhive
+            .import_prekey_secrets(&bytes)
+            .await
+            .map_err(|err| ferr!("failed importing keyhive prekey secrets: {err}"))?;
         Ok(())
     }
 
-    pub(crate) fn clone_keyhive(&self) -> SendableRuntimeKeyhive {
-        self.keyhive.as_ref().clone()
+    pub(crate) async fn save_prekey_secrets(
+        &self,
+        storage: &crate::keyhive_storage::BigRepoKeyhiveStorage,
+    ) -> Res<()> {
+        let bytes = self
+            .keyhive
+            .export_prekey_secrets()
+            .await
+            .map_err(|err| ferr!("failed exporting keyhive prekey secrets: {err}"))?;
+        storage
+            .save_prekey_secrets(bytes)
+            .await
+            .map_err(|err| ferr!("failed saving keyhive prekey secrets: {err}"))?;
+        Ok(())
+    }
+
+    pub(crate) fn clone_keyhive(&self) -> Arc<SendableRuntimeKeyhive> {
+        Arc::clone(&self.keyhive)
     }
 
     pub(crate) fn contact_card(&self) -> &keyhive_core::contact_card::ContactCard {
@@ -237,7 +253,6 @@ impl BigKeyhiveHandle {
         let doc_id = self
             .create_doc_id_bytes(coparents, initial_content_heads, Some(storage))
             .await?;
-        self.save_storage_archive(storage).await?;
         Ok(DocumentId::new(doc_id))
     }
 
@@ -256,8 +271,19 @@ impl BigKeyhiveHandle {
             .await
             .map_err(|err| ferr!("failed creating keyhive group: {err}"))?;
         let id = group.lock().await.group_id();
-        persist_group_delegations(storage, &group).await?;
-        self.save_storage_archive(storage).await?;
+        {
+            let delegations = {
+                let locked = group.lock().await;
+                locked
+                    .members()
+                    .values()
+                    .flat_map(|delegations| delegations.iter().cloned())
+                    .collect::<Vec<_>>()
+            };
+            for delegation in delegations {
+                persist_delegation(storage, delegation).await?;
+            }
+        }
         Ok(BigKeyhiveGroup { id, inner: group })
     }
 
@@ -282,9 +308,8 @@ impl BigKeyhiveHandle {
             )
             .await
             .map_err(|err| ferr!("group member add failed: {err}"))?;
-        persist_delegation(storage, update.delegation).await?;
         persist_cgka_update_ops(storage, update.cgka_ops).await?;
-        self.save_storage_archive(storage).await?;
+        persist_delegation(storage, update.delegation).await?;
         Ok(())
     }
 
@@ -315,9 +340,8 @@ impl BigKeyhiveHandle {
             .add_member(agent, &Membered::Document(kh_doc_id, doc), access, &[])
             .await
             .map_err(|err| ferr!("grant failed: {err}"))?;
-        persist_delegation(storage, update.delegation).await?;
         persist_cgka_update_ops(storage, update.cgka_ops).await?;
-        self.save_storage_archive(storage).await?;
+        persist_delegation(storage, update.delegation).await?;
         Ok(())
     }
 
@@ -334,6 +358,7 @@ impl BigKeyhiveHandle {
         Ok(kh.get_agent(identifier).await)
     }
 
+    // FIXME: why is storage optional??
     async fn create_doc_id_bytes(
         &self,
         coparents: Vec<BigKeyhivePeer>,
@@ -355,7 +380,31 @@ impl BigKeyhiveHandle {
             .map_err(|err| ferr!("failed creating keyhive document: {err}"))?;
         let doc_id = doc.lock().await.doc_id().to_bytes();
         if let Some(storage) = storage {
-            persist_doc_delegations(storage, &doc).await?;
+            {
+                let cgka_ops = {
+                    let locked = doc.lock().await;
+                    locked
+                        .cgka_ops()
+                        .map_err(|err| ferr!("failed reading initial doc cgka ops: {err}"))?
+                        .iter()
+                        .flat_map(|epoch| epoch.iter().map(|op| op.as_ref().clone()))
+                        .collect::<Vec<_>>()
+                };
+                persist_cgka_update_ops(storage, cgka_ops).await?;
+            }
+            {
+                let delegations = {
+                    let locked = doc.lock().await;
+                    locked
+                        .members()
+                        .values()
+                        .flat_map(|delegations| delegations.iter().cloned())
+                        .collect::<Vec<_>>()
+                };
+                for delegation in delegations {
+                    persist_delegation(storage, delegation).await?;
+                }
+            }
         }
         Ok(doc_id)
     }
@@ -386,51 +435,6 @@ async fn persist_delegation(
     subduction_keyhive::save_event::<Vec<u8>, _, future_form::Sendable>(storage, &event)
         .await
         .map_err(|err| ferr!("failed saving keyhive delegation event: {err}"))?;
-    Ok(())
-}
-
-async fn persist_group_delegations(
-    storage: &crate::keyhive_storage::BigRepoKeyhiveStorage,
-    group: &BigKeyhiveGroupShared,
-) -> Res<()> {
-    let delegations = {
-        let locked = group.lock().await;
-        locked
-            .members()
-            .values()
-            .flat_map(|delegations| delegations.iter().cloned())
-            .collect::<Vec<_>>()
-    };
-    for delegation in delegations {
-        persist_delegation(storage, delegation).await?;
-    }
-    Ok(())
-}
-
-async fn persist_doc_delegations(
-    storage: &crate::keyhive_storage::BigRepoKeyhiveStorage,
-    doc: &Arc<
-        futures::lock::Mutex<
-            keyhive_core::principal::document::Document<
-                future_form::Sendable,
-                MemorySigner,
-                Vec<u8>,
-                NoListener,
-            >,
-        >,
-    >,
-) -> Res<()> {
-    let delegations = {
-        let locked = doc.lock().await;
-        locked
-            .members()
-            .values()
-            .flat_map(|delegations| delegations.iter().cloned())
-            .collect::<Vec<_>>()
-    };
-    for delegation in delegations {
-        persist_delegation(storage, delegation).await?;
-    }
     Ok(())
 }
 

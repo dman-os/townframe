@@ -248,14 +248,14 @@ keyhive_core = { path = "../keyhive/keyhive_core" }
 beekem = { path = "../keyhive/beekem" }
 # sqlite-vec = { git = "https://github.com/vlasky/sqlite-vec", rev = "9facf1ab84f2a360c0f1e62db3a7f3eca5bc099a" }
 #
-# [patch."https://github.com/dman-os/subduction"]
-# subduction_core = { path = "../subduction/subduction_core" }
-# subduction_iroh = { path = "../subduction/subduction_iroh" }
-# subduction_websocket = { path = "../subduction/subduction_websocket" }
-# sedimentree_core = { path = "../subduction/sedimentree_core" }
-# subduction_redb_storage = { path = "../subduction/subduction_redb_storage" }
-# subduction_crypto = { path = "../subduction/subduction_crypto" }
-# subduction_keyhive = { path = "../subduction/subduction_keyhive" }
+[patch."https://github.com/dman-os/subduction"]
+subduction_core = { path = "../subduction/subduction_core" }
+subduction_iroh = { path = "../subduction/subduction_iroh" }
+subduction_websocket = { path = "../subduction/subduction_websocket" }
+sedimentree_core = { path = "../subduction/sedimentree_core" }
+subduction_redb_storage = { path = "../subduction/subduction_redb_storage" }
+subduction_crypto = { path = "../subduction/subduction_crypto" }
+subduction_keyhive = { path = "../subduction/subduction_keyhive" }
 
 
 # The default profile is optimized for Wasm builds because

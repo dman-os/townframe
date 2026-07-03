@@ -116,8 +116,9 @@ impl BigRepo {
         keyhive
             .restore_from_storage_archive(&keyhive_storage)
             .await?;
+        keyhive.import_prekey_secrets(&keyhive_storage).await?;
         keyhive.ingest_from_storage(&keyhive_storage).await?;
-        keyhive.save_storage_archive(&keyhive_storage).await?;
+        keyhive.save_prekey_secrets(&keyhive_storage).await?;
         let policy_keyhive = keyhive.clone_keyhive();
         let policy = Arc::new(subduction_keyhive::policy::SubductionKeyhive::new(
             policy_keyhive,

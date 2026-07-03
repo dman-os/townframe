@@ -113,6 +113,9 @@ impl big_sync::SyncBackend for BigRepoSyncBackend {
                 .map_err(|sync_error| match sync_error {
                     crate::SyncDocError::NotFound => eyre::eyre!("remote doc was not found"),
                     crate::SyncDocError::Unauthorized => eyre::eyre!("remote doc access denied"),
+                    crate::SyncDocError::PolicyRejected => {
+                        eyre::eyre!("remote doc sync hit policy rejection")
+                    }
                     _ => eyre::eyre!("{sync_error}"),
                 })?;
             if let Some(remote_payload) = remote_payload {
@@ -171,6 +174,9 @@ impl big_sync::SyncBackend for BigRepoSyncBackend {
             }
             Err(crate::SyncDocError::Unauthorized) => {
                 eyre::bail!("remote doc access denied")
+            }
+            Err(crate::SyncDocError::PolicyRejected) => {
+                eyre::bail!("remote doc sync hit policy rejection")
             }
         }
     }
