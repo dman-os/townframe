@@ -3,7 +3,6 @@ use crate::interlude::*;
 #[derive(Clone)]
 pub struct BigRepoSyncBackend {
     repo: std::sync::Weak<crate::BigRepo>,
-        Arc<surelock::mutex::Mutex<std::collections::HashMap<PeerId, Arc<RepoRpcClient>>>>,
 }
 
 impl BigRepoSyncBackend {
@@ -11,9 +10,7 @@ impl BigRepoSyncBackend {
         repo: std::sync::Weak<crate::BigRepo>,
         endpoint: iroh::Endpoint,
     ) -> Res<Self> {
-        Ok(Self {
-            repo,
-        })
+        Ok(Self { repo })
     }
 }
 
@@ -74,7 +71,9 @@ impl big_sync::SyncBackend for BigRepoSyncBackend {
             .await
         {
             Ok(()) => {
-                let heads = repo.doc_payload_heads(doc_id).await?
+                let heads = repo
+                    .doc_payload_heads(doc_id)
+                    .await?
                     .ok_or_eyre("local doc payload missing after successful sync")?;
                 let deets = if remote_payload.is_none() && heads.as_ref() == local_heads.as_ref() {
                     big_sync_core::SyncCompletionDeets::Noop

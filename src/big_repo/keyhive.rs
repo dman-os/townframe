@@ -143,28 +143,30 @@ impl BigKeyhiveHandle {
     ) -> Res<Option<Self>> {
         use keyhive_crypto::verifiable::Verifiable;
         let signer = MemorySigner::from(ed25519_dalek::SigningKey::from_bytes(&seed));
-        let storage_id =
-            subduction_keyhive::StorageHash::new(*signer.verifying_key().as_bytes());
+        let storage_id = subduction_keyhive::StorageHash::new(*signer.verifying_key().as_bytes());
         let archives =
             subduction_keyhive::load_archives::<Vec<u8>, _, future_form::Sendable>(storage)
                 .await
                 .map_err(|err| ferr!("error loading keyhive archives: {err:?}"))?;
         let Some((_, archive)) = archives
             .into_iter()
-            .find(|(archive_storage_id, _)| *archive_storage_id == storage_id)  else {
-            return Ok(None)
+            .find(|(archive_storage_id, _)| *archive_storage_id == storage_id)
+        else {
+            return Ok(None);
         };
         let restored = keyhive_core::keyhive::Keyhive::try_from_archive(
             &archive,
             signer.clone(),
-            keyhive_core::store::ciphertext::memory::MemoryCiphertextStore::<Vec<u8>, Vec<u8>>::new(),
+            keyhive_core::store::ciphertext::memory::MemoryCiphertextStore::<Vec<u8>, Vec<u8>>::new(
+            ),
             keyhive_core::listener::no_listener::NoListener,
             Arc::new(futures::lock::Mutex::new(rand_08::rngs::OsRng)),
         )
         .await
         .map_err(|err| ferr!("error restoring keyhive from archive: {err:?}"))?;
         let contact_card = restored.get_existing_contact_card().await;
-        let keyhive_peer_id = subduction_keyhive::KeyhivePeerId::from_bytes(restored.id().to_bytes());
+        let keyhive_peer_id =
+            subduction_keyhive::KeyhivePeerId::from_bytes(restored.id().to_bytes());
         Ok(Some(Self {
             keyhive: Arc::new(restored),
             signer,
@@ -231,15 +233,6 @@ impl BigKeyhiveHandle {
 
     pub(crate) async fn create_doc(
         &self,
-        initial_content_heads: NonEmpty<[u8; 32]>,
-        storage: &crate::keyhive_storage::BigRepoKeyhiveStorage,
-    ) -> Res<DocumentId> {
-        self.create_doc_with_parents(Vec::new(), initial_content_heads, storage)
-            .await
-    }
-
-    pub(crate) async fn create_doc_with_parents(
-        &self,
         parents: Vec<BigKeyhiveAuthority>,
         initial_content_heads: NonEmpty<[u8; 32]>,
         storage: &crate::keyhive_storage::BigRepoKeyhiveStorage,
@@ -272,10 +265,10 @@ impl BigKeyhiveHandle {
                     .flat_map(|epoch| epoch.iter().map(|op| op.as_ref().clone()))
                     .collect::<Vec<_>>(),
                 locked
-                        .members()
-                        .values()
-                        .flat_map(|delegations| delegations.iter().cloned())
-                        .collect::<Vec<_>>(),
+                    .members()
+                    .values()
+                    .flat_map(|delegations| delegations.iter().cloned())
+                    .collect::<Vec<_>>(),
             )
         };
         persist_cgka_update_ops(storage, cgka_ops).await?;
@@ -302,7 +295,7 @@ impl BigKeyhiveHandle {
         let (id, delegations) = {
             let locked = group.lock().await;
             (
-                id.group_id(),
+                locked.group_id(),
                 locked
                     .members()
                     .values()
@@ -360,9 +353,7 @@ impl BigKeyhiveHandle {
         );
         let kh = self.keyhive.as_ref();
         let doc = kh.get_document(kh_doc_id).await.ok_or_else(|| {
-            ferr!(
-                "document not found in keyhive: {doc_id} (bytes={doc_id_bytes:?})",
-            )
+            ferr!("document not found in keyhive: {doc_id} (bytes={doc_id_bytes:?})",)
         })?;
         let update = kh
             .add_member(agent, &Membered::Document(kh_doc_id, doc), access, &[])
@@ -384,15 +375,6 @@ impl BigKeyhiveHandle {
         let identifier = keyhive_core::principal::identifier::Identifier::from(vk);
         let kh = self.keyhive.as_ref();
         Ok(kh.get_agent(identifier).await)
-    }
-
-    async fn create_doc_id_bytes(
-        &self,
-        coparents: Vec<BigKeyhivePeer>,
-        initial_content_heads: NonEmpty<[u8; 32]>,
-        storage: &crate::keyhive_storage::BigRepoKeyhiveStorage,
-    ) -> Res<[u8; 32]> {
-        Ok(doc_id)
     }
 }
 
@@ -425,4 +407,3 @@ async fn persist_cgka_update_ops(
     }
     Ok(())
 }
-

@@ -9,7 +9,6 @@ mod interlude {
 
 use crate::interlude::*;
 use crate::keyhive_storage::{BigRepoKeyhiveStorage, KEYHIVE_SUBDIR};
-use crate::rpc::FullDoc;
 
 use std::collections::BTreeSet;
 use std::str::FromStr;
@@ -30,7 +29,6 @@ pub(crate) mod handler;
 mod keyhive;
 pub(crate) mod keyhive_conn;
 pub(crate) mod keyhive_storage;
-pub mod rpc;
 mod runtime;
 pub(crate) mod wire;
 pub use runtime::{CreateDocError, DocLookup, GetDocError, PutDocError, SyncDocError};
@@ -112,7 +110,10 @@ impl BigRepo {
             StorageConfig::Disk { path } => BigRepoKeyhiveStorage::fs(path.join(KEYHIVE_SUBDIR))
                 .wrap_err("failed booting keyhive storage")?,
         };
-        let keyhive = if let Some(restored) = BigKeyhiveHandle::restore_from_storage_archive(node_identity_seed, &keyhive_storage).await? {
+        let keyhive = if let Some(restored) =
+            BigKeyhiveHandle::restore_from_storage_archive(node_identity_seed, &keyhive_storage)
+                .await?
+        {
             restored
         } else {
             BigKeyhiveHandle::new(node_identity_seed).await?
@@ -225,7 +226,7 @@ impl BigRepo {
         self: &Arc<Self>,
         document_id: &DocumentId,
     ) -> Res<DocLookup<BigDocHandle>> {
-        let out = self.runtime.get_doc_lookup(*document_id).await?;
+        let out = self.runtime.get_doc_handle(*document_id).await?;
         Ok(out.map_ready(|bundle| BigDocHandle {
             repo: Arc::clone(self),
             bundle,
@@ -237,10 +238,7 @@ impl BigRepo {
         self: &Arc<Self>,
         initial_content: automerge::Automerge,
     ) -> Result<BigDocHandle, CreateDocError> {
-        let bundle = self
-            .runtime
-            .create_doc_with_parents(initial_content, Vec::new())
-            .await?;
+        let bundle = self.runtime.create_doc(initial_content, Vec::new()).await?;
         Ok(BigDocHandle {
             repo: Arc::clone(self),
             bundle,
@@ -252,10 +250,7 @@ impl BigRepo {
         initial_content: automerge::Automerge,
         parents: Vec<BigKeyhiveAuthority>,
     ) -> Result<BigDocHandle, CreateDocError> {
-        let bundle = self
-            .runtime
-            .create_doc_with_parents(initial_content, parents)
-            .await?;
+        let bundle = self.runtime.create_doc(initial_content, parents).await?;
         Ok(BigDocHandle {
             repo: Arc::clone(self),
             bundle,
@@ -316,14 +311,6 @@ impl BigRepo {
         self.runtime.note_local_keyhive_changed().await?;
 
         Ok(())
-    }
-
-    #[tracing::instrument(
-        skip_all,
-        fields(%doc_id, %self.local_peer_id)
-    )]
-    pub async fn export_doc(&self, doc_id: &DocumentId) -> Res<DocLookup<Vec<u8>>> {
-        self.runtime.export_doc_save(*doc_id).await
     }
 }
 

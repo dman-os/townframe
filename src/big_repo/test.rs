@@ -460,7 +460,7 @@ async fn create_doc_with_group_parent_uses_public_group_api() -> Res<()> {
         .expect("failed seeding doc");
     let handle = owner
         .repo
-        .create_doc_with_parents(doc, vec![group.clone().into()])
+        .create_doc(doc, vec![group.clone().into()])
         .await?;
     let doc_id = handle.document_id();
 
@@ -1116,7 +1116,7 @@ async fn group_member_reads_doc_while_non_member_stays_unauthorized() -> Res<()>
     .expect("failed creating grouped doc");
     let handle = owner
         .repo
-        .create_doc_with_parents(doc, vec![group.clone().into()])
+        .create_doc(doc, vec![group.clone().into()])
         .await?;
     let doc_id = handle.document_id();
 
@@ -2435,7 +2435,7 @@ async fn create_shared_sync_doc(
         .expect("grantee agent should be known after keyhive sync");
     let handle = owner
         .repo
-        .create_doc_with_parents(doc, vec![grantee_agent.into()])
+        .create_doc(doc, vec![grantee_agent.into()])
         .await?;
 
     owner_conn.sync_keyhive_with_peer(None).await?;
