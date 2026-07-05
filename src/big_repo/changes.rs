@@ -67,6 +67,15 @@ pub enum BigRepoHeadNotification {
     },
 }
 
+#[derive(Debug, Clone)]
+pub enum BigRepoPendingHeadNotification {
+    DocPendingHeads {
+        doc_id: DocumentId,
+        heads: Arc<[ChangeHash]>,
+        origin: BigRepoChangeOrigin,
+    },
+}
+
 pub struct ChangeFilter {
     pub doc_id: Option<DocIdFilter>,
     pub origin: Option<OriginFilter>,
@@ -88,6 +97,10 @@ pub struct HeadFilter {
     pub doc_id: Option<DocIdFilter>,
 }
 
+pub struct PendingHeadFilter {
+    pub doc_id: Option<DocIdFilter>,
+}
+
 struct ChangeListener {
     id: Uuid,
     filter: ChangeFilter,
@@ -105,6 +118,8 @@ pub struct ChangeListenerManager {
     change_tx: mpsc::UnboundedSender<Vec<BigRepoChangeNotification>>,
     head_listeners: Mutex<Vec<HeadListener>>,
     head_tx: mpsc::UnboundedSender<Vec<BigRepoHeadNotification>>,
+    pending_head_listeners: Mutex<Vec<PendingHeadListener>>,
+    pending_head_tx: mpsc::UnboundedSender<Vec<BigRepoPendingHeadNotification>>,
     local_listeners: Mutex<Vec<LocalListener>>,
     /// used to send local ops to the switchboard
     local_tx: mpsc::UnboundedSender<Vec<BigRepoLocalNotification>>,
@@ -141,18 +156,21 @@ impl ChangeListenerManager {
         let (change_tx, change_rx) = mpsc::unbounded_channel();
         let (head_tx, head_rx) = mpsc::unbounded_channel();
         let (local_tx, local_rx) = mpsc::unbounded_channel();
+        let (pending_head_tx, pending_head_rx) = mpsc::unbounded_channel();
         let cancel_token = CancellationToken::new();
         let out = Self {
             listeners: default(),
             change_tx,
             head_listeners: default(),
             head_tx,
+            pending_head_listeners: default(),
+            pending_head_tx,
             local_listeners: default(),
             local_tx,
             cancel_token: cancel_token.clone(),
         };
         let out = Arc::new(out);
-        let handle = Arc::clone(&out).spawn_switchboard(change_rx, head_rx, local_rx);
+        let handle = Arc::clone(&out).spawn_switchboard(change_rx, head_rx, local_rx, pending_head_rx);
 
         (
             out,
@@ -235,6 +253,24 @@ impl ChangeListenerManager {
         trace!("queue doc heads notification");
         self.head_tx
             .send(vec![BigRepoHeadNotification::DocHeadsChanged {
+                doc_id,
+                heads,
+                origin,
+            }])?;
+        Ok(())
+    }
+
+    #[tracing::instrument(skip(self, heads))]
+    pub(super) fn notify_doc_pending_heads_changed(
+        &self,
+        doc_id: DocumentId,
+        heads: Arc<[ChangeHash]>,
+        origin: BigRepoChangeOrigin,
+    ) -> Res<()> {
+        self.ensure_live()?;
+        trace!("queue doc pending heads notification");
+        self.pending_head_tx
+            .send(vec![BigRepoPendingHeadNotification::DocPendingHeads {
                 doc_id,
                 heads,
                 origin,
@@ -409,11 +445,39 @@ impl ChangeListenerManager {
         ))
     }
 
+    pub async fn subscribe_pending_head_listener(
+        self: &Arc<Self>,
+        filter: PendingHeadFilter,
+    ) -> Res<(
+        PendingHeadListenerRegistration,
+        mpsc::UnboundedReceiver<Vec<BigRepoPendingHeadNotification>>,
+    )> {
+        self.ensure_live()?;
+        let (change_tx, change_rx) = mpsc::unbounded_channel();
+        let id = Uuid::new_v4();
+        self.pending_head_listeners
+            .lock()
+            .expect(ERROR_MUTEX)
+            .push(PendingHeadListener {
+                id,
+                filter,
+                change_tx,
+            });
+        Ok((
+            PendingHeadListenerRegistration {
+                manager: Arc::downgrade(self),
+                id,
+            },
+            change_rx,
+        ))
+    }
+
     fn spawn_switchboard(
         self: Arc<Self>,
         mut change_rx: mpsc::UnboundedReceiver<Vec<BigRepoChangeNotification>>,
         mut head_rx: mpsc::UnboundedReceiver<Vec<BigRepoHeadNotification>>,
         mut local_rx: mpsc::UnboundedReceiver<Vec<BigRepoLocalNotification>>,
+        mut pending_head_rx: mpsc::UnboundedReceiver<Vec<BigRepoPendingHeadNotification>>,
     ) -> JoinHandle<()> {
         let fut = async move {
             loop {
@@ -421,6 +485,7 @@ impl ChangeListenerManager {
                     Remote(Vec<BigRepoChangeNotification>),
                     Heads(Vec<BigRepoHeadNotification>),
                     Local(Vec<BigRepoLocalNotification>),
+                    PendingHeads(Vec<BigRepoPendingHeadNotification>),
                 }
                 let input = tokio::select! {
                     biased;
@@ -445,6 +510,12 @@ impl ChangeListenerManager {
                             continue;
                         };
                         SwitchboardInput::Local(val)
+                    },
+                    val = pending_head_rx.recv() => {
+                        let Some(val) = val else {
+                            continue;
+                        };
+                        SwitchboardInput::PendingHeads(val)
                     }
                 };
 
@@ -516,6 +587,43 @@ impl ChangeListenerManager {
                         }
                         if !failed_listener_ids.is_empty() {
                             let mut listeners = self.head_listeners.lock().expect(ERROR_MUTEX);
+                            listeners
+                                .retain(|listener| !failed_listener_ids.contains(&listener.id));
+                        }
+                    }
+                    SwitchboardInput::PendingHeads(notifications) => {
+                        let to_send = {
+                            let listeners = self.pending_head_listeners.lock().expect(ERROR_MUTEX);
+                            let mut to_send = Vec::new();
+                            for listener in listeners.iter() {
+                                let mut relevant_notifications = Vec::new();
+                                for notification in &notifications {
+                                    if pending_head_notification_matches_filter(
+                                        notification,
+                                        &listener.filter,
+                                    ) {
+                                        relevant_notifications.push(notification.clone());
+                                    }
+                                }
+                                if relevant_notifications.is_empty() {
+                                    continue;
+                                }
+                                to_send.push((
+                                    listener.id,
+                                    listener.change_tx.clone(),
+                                    relevant_notifications,
+                                ));
+                            }
+                            to_send
+                        };
+                        let mut failed_listener_ids = Vec::new();
+                        for (listener_id, change_tx, relevant_notifications) in to_send {
+                            if change_tx.send(relevant_notifications).is_err() {
+                                failed_listener_ids.push(listener_id);
+                            }
+                        }
+                        if !failed_listener_ids.is_empty() {
+                            let mut listeners = self.pending_head_listeners.lock().expect(ERROR_MUTEX);
                             listeners
                                 .retain(|listener| !failed_listener_ids.contains(&listener.id));
                         }
@@ -643,6 +751,12 @@ struct HeadListener {
     change_tx: mpsc::UnboundedSender<Vec<BigRepoHeadNotification>>,
 }
 
+struct PendingHeadListener {
+    id: Uuid,
+    filter: PendingHeadFilter,
+    change_tx: mpsc::UnboundedSender<Vec<BigRepoPendingHeadNotification>>,
+}
+
 pub struct HeadListenerRegistration {
     manager: std::sync::Weak<ChangeListenerManager>,
     id: Uuid,
@@ -654,6 +768,24 @@ impl Drop for HeadListenerRegistration {
             let id = self.id;
             manager
                 .head_listeners
+                .lock()
+                .expect(ERROR_MUTEX)
+                .retain(|listener| listener.id != id);
+        }
+    }
+}
+
+pub struct PendingHeadListenerRegistration {
+    manager: std::sync::Weak<ChangeListenerManager>,
+    id: Uuid,
+}
+
+impl Drop for PendingHeadListenerRegistration {
+    fn drop(&mut self) {
+        if let Some(manager) = self.manager.upgrade() {
+            let id = self.id;
+            manager
+                .pending_head_listeners
                 .lock()
                 .expect(ERROR_MUTEX)
                 .retain(|listener| listener.id != id);
@@ -703,6 +835,20 @@ fn head_notification_matches_filter(
 ) -> bool {
     let doc_id = match notification {
         BigRepoHeadNotification::DocHeadsChanged { doc_id, .. } => doc_id,
+    };
+    !filter
+        .doc_id
+        .as_ref()
+        .map(|target| target.doc_id != *doc_id)
+        .unwrap_or_default()
+}
+
+fn pending_head_notification_matches_filter(
+    notification: &BigRepoPendingHeadNotification,
+    filter: &PendingHeadFilter,
+) -> bool {
+    let doc_id = match notification {
+        BigRepoPendingHeadNotification::DocPendingHeads { doc_id, .. } => doc_id,
     };
     !filter
         .doc_id

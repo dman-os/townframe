@@ -1,16 +1,41 @@
 use crate::interlude::*;
 
+use surelock::key::lock_scope;
+
 #[derive(Clone)]
 pub struct BigRepoSyncBackend {
     repo: std::sync::Weak<crate::BigRepo>,
+    remote_peer_endpoints:
+        Arc<surelock::mutex::Mutex<HashMap<PeerId, iroh::EndpointAddr>>>,
 }
 
 impl BigRepoSyncBackend {
     pub async fn boot(
         repo: std::sync::Weak<crate::BigRepo>,
-        endpoint: iroh::Endpoint,
+        _endpoint: iroh::Endpoint,
     ) -> Res<Self> {
-        Ok(Self { repo })
+        Ok(Self {
+            repo,
+            remote_peer_endpoints: Arc::new(surelock::mutex::Mutex::new(default())),
+        })
+    }
+
+    pub fn register_remote_peer(
+        &self,
+        peer_id: PeerId,
+        endpoint_addr: iroh::EndpointAddr,
+    ) {
+        lock_scope(|key| {
+            let (mut m, _) = key.lock(&self.remote_peer_endpoints);
+            m.insert(peer_id, endpoint_addr);
+        })
+    }
+
+    pub fn unregister_remote_peer(&self, peer_id: PeerId) {
+        lock_scope(|key| {
+            let (mut m, _) = key.lock(&self.remote_peer_endpoints);
+            m.remove(&peer_id);
+        })
     }
 }
 
@@ -38,10 +63,6 @@ impl big_sync::SyncBackend for BigRepoSyncBackend {
                 .await
                 .map_err(|sync_error| match sync_error {
                     crate::SyncDocError::NotFound => ferr!("remote doc was not found"),
-                    crate::SyncDocError::Unauthorized => ferr!("remote doc access denied"),
-                    crate::SyncDocError::PolicyRejected => {
-                        ferr!("remote doc sync hit policy rejection")
-                    }
                     _ => ferr!("{sync_error}"),
                 })?;
             let deets = if local_doc_exists {
@@ -93,12 +114,6 @@ impl big_sync::SyncBackend for BigRepoSyncBackend {
             }
             Err(crate::SyncDocError::NotFound) => {
                 eyre::bail!("remote doc was not found")
-            }
-            Err(crate::SyncDocError::Unauthorized) => {
-                eyre::bail!("remote doc access denied")
-            }
-            Err(crate::SyncDocError::PolicyRejected) => {
-                eyre::bail!("remote doc sync hit policy rejection")
             }
         }
     }

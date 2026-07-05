@@ -11,7 +11,6 @@ use crate::interlude::*;
 use crate::keyhive_storage::{BigRepoKeyhiveStorage, KEYHIVE_SUBDIR};
 
 use std::collections::BTreeSet;
-use std::str::FromStr;
 use std::sync::atomic::{AtomicBool, Ordering};
 
 use automerge::ChangeHash;
@@ -478,6 +477,10 @@ impl BigDocHandle {
         let doc = self.bundle.doc.lock().await;
 
         operation(&doc)
+    }
+
+    pub async fn export(&self) -> Vec<u8> {
+        self.with_document_read(|doc| doc.save()).await
     }
 
     pub async fn with_document<F, R>(&self, operation: F) -> Res<R>

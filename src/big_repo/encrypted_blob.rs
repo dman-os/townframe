@@ -70,7 +70,7 @@ mod tests {
         let encrypted = sample_encrypted_content();
         let encoded = encode_encrypted_blob(&encrypted).expect("encode");
         let decoded = decode_encrypted_blob(&encoded).expect("decode");
-        assert_eq!(*decoded, encrypted);
+        assert_eq!(decoded, encrypted);
     }
 
     #[test]

@@ -27,7 +27,7 @@ use keyhive_core::store::ciphertext::CiphertextStore;
 use sedimentree_core::depth::CountLeadingZeroBytes;
 use sedimentree_core::sedimentree::{Sedimentree, SedimentreeItem};
 use sedimentree_core::{blob::Blob, id::SedimentreeId, loose_commit::id::CommitId};
-use std::collections::{BTreeSet, HashMap};
+use std::collections::{BTreeSet, HashMap, HashSet};
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::time::{Duration, Instant};
 use subduction_ephemeral::{
@@ -71,10 +71,6 @@ type PendingDocSyncWaiters = HashMap<PeerId, Vec<(u64, oneshot::Sender<Result<()
 pub enum SyncDocError {
     /// Document not found
     NotFound,
-    /// Document exists but peer lacks access
-    Unauthorized,
-    /// A sync session completed with policy-rejected items
-    PolicyRejected,
     /// TransportError
     TransportError,
     /// IoError
@@ -115,9 +111,6 @@ impl<T> DocLookup<T> {
         }
     }
 
-    pub fn is_pending_materialization(&self) -> bool {
-        matches!(self, Self::PendingMaterialization)
-    }
 }
 
 #[derive(educe::Educe)]
@@ -276,6 +269,12 @@ enum RuntimeEvt {
         doc_id: Option<DocumentId>,
         context: &'static str,
         error: String,
+    },
+    DocWorkerMaterializationPending {
+        doc_id: DocumentId,
+    },
+    DocWorkerMaterializationReady {
+        doc_id: DocumentId,
     },
 }
 
@@ -599,9 +598,13 @@ struct BigRepoSyncSessionBridge {
 
 impl subduction_core::sync_session::SyncSessionObserver for BigRepoSyncSessionBridge {
     fn on_sync_session(&self, session: subduction_core::sync_session::SyncSession) {
-        self.evt_tx
+        if self
+            .evt_tx
             .send(RuntimeEvt::SyncSessionObserved { session })
-            .expect(ERROR_CHANNEL);
+            .is_err()
+        {
+            warn!("runtime shutting down; dropping observed sync session");
+        }
     }
 }
 pub async fn spawn_big_repo_runtime<S>(
@@ -791,13 +794,13 @@ where
         runtime_stop: runtime_stop.clone(),
         cmd_tx: cmd_tx.clone(),
         evt_tx: evt_tx.clone(),
-        connected_peers: default(),
+        connected_peers: Arc::new(surelock::mutex::Mutex::new(HashMap::new())),
         doc_sync_waiter_ids: Arc::clone(&doc_sync_waiter_ids),
         keyhive_sync_waiter_ids: Arc::clone(&keyhive_sync_waiter_ids),
         pending_keyhive_syncs: default(),
-        queued_keyhive_syncs: default(),
         active_keyhive_syncs: default(),
-        queued_internal_keyhive_syncs: default(),
+        keyhive_dirty: default(),
+        pending_materialization: default(),
         doc_workers: default(),
     };
 
@@ -883,11 +886,11 @@ where
                     },
                     cmd = cmd_rx.recv() => {
                         let Some(cmd) = cmd else { break; };
-                        runtime_worker.handle_cmd(cmd).await?;
+                        runtime_worker.handle_cmd(cmd)?;
                     },
                     evt = evt_rx.recv() => {
                         let Some(evt) = evt else { break; };
-                        runtime_worker.handle_evt(evt).await?;
+                        runtime_worker.handle_evt(evt)?;
                     }
                 }
             }
@@ -945,9 +948,9 @@ where
     doc_sync_waiter_ids: Arc<AtomicU64>,
     keyhive_sync_waiter_ids: Arc<AtomicU64>,
     pending_keyhive_syncs: PendingKeyhiveSyncWaiters,
-    queued_keyhive_syncs: PendingKeyhiveSyncWaiters,
     active_keyhive_syncs: BTreeSet<PeerId>,
-    queued_internal_keyhive_syncs: BTreeSet<PeerId>,
+    keyhive_dirty: BTreeSet<PeerId>,
+    pending_materialization: HashSet<DocumentId>,
     doc_workers: HashMap<DocumentId, DocWorkerEntry>,
 }
 
@@ -1051,8 +1054,36 @@ where
             }
             #[cfg(test)]
             RuntimeCmd::InspectStoredDocBlobs { doc_id, resp } => {
-                let res = self.inspect_stored_doc_blobs(doc_id).await;
-                resp.send(res).inspect_err(|_| warn!(ERROR_CALLER)).ok();
+                let storage = self.storage_for_reads.clone();
+                self.spawn_background(async move {
+                    let sedimentree_id = SedimentreeId::new(doc_id.into_bytes());
+                    let res = async {
+                        let loose_commits = <S as subduction_core::storage::traits::Storage<
+                            Sendable,
+                        >>::load_loose_commits(&storage, sedimentree_id)
+                        .await
+                        .wrap_err("failed loading loose commits for inspection")?;
+                        let fragments = <S as subduction_core::storage::traits::Storage<
+                            Sendable,
+                        >>::load_fragments(&storage, sedimentree_id)
+                        .await
+                        .wrap_err("failed loading fragments for inspection")?;
+                        let mut out = Vec::with_capacity(loose_commits.len() + fragments.len());
+                        out.extend(
+                            loose_commits
+                                .into_iter()
+                                .map(|verified| verified.blob().clone().into_contents()),
+                        );
+                        out.extend(
+                            fragments
+                                .into_iter()
+                                .map(|verified| verified.blob().clone().into_contents()),
+                        );
+                        Res::Ok(out)
+                    }
+                    .await;
+                    resp.send(res).inspect_err(|_| warn!(ERROR_CALLER)).ok();
+                });
             }
             RuntimeCmd::CancelDocSyncWaiter {
                 doc_id,
@@ -1076,52 +1107,42 @@ where
                 resp,
             } => {
                 tracing::debug!("SyncKeyhiveWithPeer: scheduling sync");
-                if self.active_keyhive_syncs.contains(&peer_id) {
-                    self.queued_keyhive_syncs
-                        .entry(peer_id)
-                        .or_default()
-                        .push((waiter_id, resp));
-                } else {
-                    self.pending_keyhive_syncs
-                        .entry(peer_id)
-                        .or_default()
-                        .push((waiter_id, resp));
-                    if let Err(err) = self.start_keyhive_sync(peer_id).await {
-                        if let Some(resp) = self.cancel_pending_keyhive_sync(peer_id, waiter_id) {
-                            if let Err(send_err) = resp
-                                .send(Err(ferr!("keyhive initiate_sync_with_peer failed: {err}")))
-                            {
-                                warn!(error = ?send_err, "failed sending keyhive sync response");
-                            }
-                        }
-                    }
+                self.pending_keyhive_syncs
+                    .entry(peer_id)
+                    .or_default()
+                    .push((waiter_id, resp));
+                if !self.active_keyhive_syncs.contains(&peer_id) {
+                    let _ = self.start_keyhive_sync(peer_id);
                 }
             }
             RuntimeCmd::SyncKeyhiveWithPeerInternal { peer_id } => {
-                self.schedule_internal_keyhive_sync(peer_id).await;
+                self.schedule_internal_keyhive_sync(peer_id);
             }
             RuntimeCmd::NoteLocalKeyhiveChanged { resp } => {
-                // FIXME: this will block the worker? do it on spawn_background?
-                let out = async {
-                    self.keyhive_protocol
-                        .note_local_keyhive_changed()
-                        .await
-                        .wrap_err("keyhive local-change refresh failed")?;
-                    self.ephemeral
-                        .publish(BigEphemeralTopic::keyhive_changed(), Vec::new())
-                        .await
-                        .wrap_err("keyhive change notification publish failed")?;
-                    Res::Ok(())
-                }
-                .await;
-                if resp.send(out).is_err() {
-                    warn!("failed sending keyhive local-change response");
-                }
+                let keyhive_protocol = Arc::clone(&self.keyhive_protocol);
+                let ephemeral = self.ephemeral.clone();
+                self.spawn_background(async move {
+                    let out = async {
+                        keyhive_protocol
+                            .note_local_keyhive_changed()
+                            .await
+                            .wrap_err("keyhive local-change refresh failed")?;
+                        ephemeral
+                            .publish(BigEphemeralTopic::keyhive_changed(), Vec::new())
+                            .await
+                            .wrap_err("keyhive change notification publish failed")?;
+                        Res::Ok(())
+                    }
+                    .await;
+                    if resp.send(out).is_err() {
+                        warn!("failed sending keyhive local-change response");
+                    }
+                });
             }
             RuntimeCmd::CancelKeyhiveSyncWaiter { peer_id, waiter_id } => {
                 let _ = self.cancel_pending_keyhive_sync(peer_id, waiter_id);
             }
-            RuntimeCmd::ReleaseDocLease { doc_id } => self.handle_release_doc_lease(doc_id).await,
+            RuntimeCmd::ReleaseDocLease { doc_id } => self.handle_release_doc_lease(doc_id),
         }
 
         Ok(())
@@ -1130,28 +1151,26 @@ where
     fn handle_evt(&mut self, evt: RuntimeEvt) -> Res<()> {
         match evt {
             RuntimeEvt::SyncSessionObserved { session } => {
-                self.handle_sync_session_observed(session).await;
+                self.handle_sync_session_observed(session);
             }
             RuntimeEvt::ConnEstablishedIroh {
                 peer_id,
                 deets: cancel_token,
             } => {
-                self.handle_connection_established(peer_id, cancel_token)
-                    .await;
+                self.handle_connection_established(peer_id, cancel_token);
             }
             RuntimeEvt::ConnLostIroh {
                 peer_id,
                 error,
                 src_task,
             } => {
-                self.handle_connection_lost(peer_id, error, src_task)
-                    .await?;
+                self.handle_connection_lost(peer_id, error, src_task)?;
             }
             RuntimeEvt::KeyhiveSyncDone { peer_id } => {
-                self.handle_keyhive_sync_done(peer_id).await?;
+                self.finish_keyhive_sync(peer_id)?;
             }
             RuntimeEvt::KeyhiveSyncRequested { peer_id } => {
-                self.schedule_internal_keyhive_sync(peer_id).await;
+                self.schedule_internal_keyhive_sync(peer_id);
             }
             RuntimeEvt::DocWorkerTransientFinished { doc_id } => {
                 self.handle_doc_worker_transient_finished(doc_id);
@@ -1168,6 +1187,12 @@ where
                 error,
             } => {
                 panic!("fatal runtime worker error doc={doc_id:?} context={context}: {error}");
+            }
+            RuntimeEvt::DocWorkerMaterializationPending { doc_id } => {
+                self.pending_materialization.insert(doc_id);
+            }
+            RuntimeEvt::DocWorkerMaterializationReady { doc_id } => {
+                self.pending_materialization.remove(&doc_id);
             }
         }
         Ok(())
@@ -1192,7 +1217,10 @@ where
         let Some(entry) = self.doc_workers.get_mut(&doc_id) else {
             return;
         };
-        if entry.local_handles > 0 || entry.transient_work > 0 {
+        if entry.local_handles > 0
+            || entry.transient_work > 0
+            || self.pending_materialization.contains(&doc_id)
+        {
             entry.eviction_deadline = None;
             return;
         }
@@ -1256,74 +1284,20 @@ where
         peer_id: PeerId,
         waiter_id: u64,
     ) -> Option<oneshot::Sender<Res<()>>> {
-        let pending_waiter = if let Some(waiters) = self.pending_keyhive_syncs.get_mut(&peer_id) {
-            waiters
-                .iter()
-                .position(|(pending_id, _)| *pending_id == waiter_id)
-                .map(|pos| {
-                    let (_, waiter) = waiters.remove(pos);
-                    (waiter, waiters.is_empty())
-                })
-        } else {
-            None
-        };
-        if let Some((waiter, is_empty)) = pending_waiter {
-            if is_empty {
-                self.pending_keyhive_syncs.remove(&peer_id);
+        if let Some(waiters) = self.pending_keyhive_syncs.get_mut(&peer_id) {
+            let pos = waiters.iter().position(|(pending_id, _)| *pending_id == waiter_id);
+            if let Some(pos) = pos {
+                let (_, waiter) = waiters.remove(pos);
+                if waiters.is_empty() {
+                    self.pending_keyhive_syncs.remove(&peer_id);
+                }
+                return Some(waiter);
             }
-            return Some(waiter);
         }
-
-        let queued_waiter = if let Some(waiters) = self.queued_keyhive_syncs.get_mut(&peer_id) {
-            waiters
-                .iter()
-                .position(|(pending_id, _)| *pending_id == waiter_id)
-                .map(|pos| {
-                    let (_, waiter) = waiters.remove(pos);
-                    (waiter, waiters.is_empty())
-                })
-        } else {
-            None
-        };
-        if let Some((waiter, is_empty)) = queued_waiter {
-            if is_empty {
-                self.queued_keyhive_syncs.remove(&peer_id);
-            }
-            return Some(waiter);
-        }
-
         None
     }
 
-    #[cfg(test)]
-    async fn inspect_stored_doc_blobs(&self, doc_id: DocumentId) -> Res<Vec<Vec<u8>>> {
-        let sedimentree_id = SedimentreeId::new(doc_id.into_bytes());
-        let loose_commits =
-            <S as subduction_core::storage::traits::Storage<Sendable>>::load_loose_commits(
-                &self.storage_for_reads,
-                sedimentree_id,
-            )
-            .await
-            .wrap_err("failed loading loose commits for inspection")?;
-        let fragments = <S as subduction_core::storage::traits::Storage<Sendable>>::load_fragments(
-            &self.storage_for_reads,
-            sedimentree_id,
-        )
-        .await
-        .wrap_err("failed loading fragments for inspection")?;
-        let mut out = Vec::with_capacity(loose_commits.len() + fragments.len());
-        out.extend(
-            loose_commits
-                .into_iter()
-                .map(|verified| verified.blob().clone().into_contents()),
-        );
-        out.extend(
-            fragments
-                .into_iter()
-                .map(|verified| verified.blob().clone().into_contents()),
-        );
-        Ok(out)
-    }
+
 
     #[tracing::instrument(skip_all,fields(%doc_id))]
     fn spawn_doc_worker(&mut self, doc_id: DocumentId) -> Res<()> {
@@ -1339,6 +1313,7 @@ where
         }
         self.doc_workers.remove(&doc_id);
         let (msg_tx, mut msg_rx) = mpsc::unbounded_channel();
+        let worker_msg_tx = msg_tx.clone();
         let cancel_token = self.runtime_stop.child_token();
         let worker_cancel = cancel_token.clone();
         let runtime_evt_tx = self.evt_tx.clone();
@@ -1368,8 +1343,10 @@ where
                 doc_sync_waiter_ids: Arc::clone(&self.doc_sync_waiter_ids),
                 keyhive_sync_waiter_ids: Arc::clone(&self.keyhive_sync_waiter_ids),
             },
+            msg_tx: worker_msg_tx,
+            runtime_tasks: Arc::clone(&runtime_tasks),
             runtime_evt_tx,
-            // shutdown: worker_cancel.clone(),
+            last_notified_heads: None,
         };
         runtime_tasks
             .spawn(
@@ -1429,7 +1406,7 @@ where
         Ok(entry.handle.clone())
     }
 
-    async fn handle_release_doc_lease(&mut self, doc_id: DocumentId) {
+    fn handle_release_doc_lease(&mut self, doc_id: DocumentId) {
         if let Some(entry) = self.doc_workers.get_mut(&doc_id) {
             assert!(
                 entry.local_handles > 0,
@@ -1445,7 +1422,7 @@ where
     }
 
     #[tracing::instrument(skip_all)]
-    async fn handle_sync_session_observed(
+    fn handle_sync_session_observed(
         &mut self,
         session: subduction_core::sync_session::SyncSession,
     ) {
@@ -1474,9 +1451,20 @@ impl<S> BigRepoRuntimeWorker<S>
 where
     S: BigRepoSubductionStorage,
 {
-    // FIXME: this seems fucked, why are we waiting for each round to complete
-    // before starting another one??
-    async fn complete_keyhive_sync_round(&mut self, peer_id: PeerId) -> Res<()> {
+    fn cancel_pending_keyhive_syncs(&mut self, peer_id: PeerId, reason: &'static str) {
+        self.active_keyhive_syncs.remove(&peer_id);
+        self.keyhive_dirty.remove(&peer_id);
+        if let Some(waiters) = self.pending_keyhive_syncs.remove(&peer_id) {
+            for (_, waiter) in waiters {
+                waiter
+                    .send(Err(ferr!("{reason}")))
+                    .inspect_err(|_| warn!(ERROR_CALLER))
+                    .ok();
+            }
+        }
+    }
+
+    fn finish_keyhive_sync(&mut self, peer_id: PeerId) -> Res<()> {
         if !self.active_keyhive_syncs.remove(&peer_id) {
             debug!(%peer_id, "ignoring untracked keyhive sync completion");
             return Ok(());
@@ -1489,92 +1477,60 @@ where
                     .ok();
             }
         }
-        if let Some(waiters) = self.queued_keyhive_syncs.remove(&peer_id) {
-            self.pending_keyhive_syncs.insert(peer_id, waiters);
-            self.queued_internal_keyhive_syncs.remove(&peer_id);
-            if let Err(err) = self.start_keyhive_sync(peer_id).await {
-                self.cancel_pending_keyhive_syncs(peer_id, "keyhive queued sync failed");
-                return Err(err);
-            }
-        } else if self.queued_internal_keyhive_syncs.remove(&peer_id) {
-            let kh_peer_id = KeyhivePeerId::from_bytes(*peer_id.as_bytes());
-            if !self.keyhive_protocol.has_peer(&kh_peer_id).await {
-                debug!(%peer_id, "dropping queued internal keyhive sync for disconnected peer");
-                return Ok(());
-            }
-            if let Err(err) = self.start_keyhive_sync(peer_id).await {
-                warn!(error = %err, %peer_id, "queued internal keyhive sync initiation failed");
+        let keyhive_protocol = Arc::clone(&self.keyhive_protocol);
+        self.spawn_background(async move {
+            let _ = keyhive_protocol.refresh_cache().await;
+        });
+        if self.keyhive_dirty.remove(&peer_id) {
+            self.start_keyhive_sync(peer_id)?;
+        }
+        for doc_id in self.pending_materialization.clone() {
+            match self.doc_worker_handle(doc_id) {
+                Ok(worker) => {
+                    worker
+                        .send(DocWorkerMsg::ReattemptMaterialization)
+                        .inspect_err(|_| warn!(ERROR_CALLER))
+                        .ok();
+                }
+                Err(e) => {
+                    tracing::warn!(
+                        %doc_id, error=%e,
+                        "failed to get doc worker for reattempt on keyhive sync done"
+                    );
+                }
             }
         }
         Ok(())
     }
 
-    fn cancel_pending_keyhive_syncs(&mut self, peer_id: PeerId, reason: &'static str) {
-        self.active_keyhive_syncs.remove(&peer_id);
-        self.queued_internal_keyhive_syncs.remove(&peer_id);
-        if let Some(waiters) = self.pending_keyhive_syncs.remove(&peer_id) {
-            for (_, waiter) in waiters {
-                waiter
-                    .send(Err(ferr!("{reason}")))
-                    .inspect_err(|_| warn!(ERROR_CALLER))
-                    .ok();
-            }
-        }
-        if let Some(waiters) = self.queued_keyhive_syncs.remove(&peer_id) {
-            for (_, waiter) in waiters {
-                waiter
-                    .send(Err(ferr!("{reason}")))
-                    .inspect_err(|_| warn!(ERROR_CALLER))
-                    .ok();
-            }
-        }
-    }
-    async fn handle_keyhive_sync_done(&mut self, peer_id: PeerId) -> Res<()> {
-        let result: Res<()> = async {
-            self.keyhive_protocol
-                .refresh_cache()
-                .await
-                .wrap_err("keyhive refresh_cache after sync failed")?;
-            Res::Ok(())
-        }
-        .await;
-        if let Err(err) = result {
-            let err_msg = err.to_string();
-            self.cancel_pending_keyhive_syncs(peer_id, "keyhive sync completion failed");
-            warn!(%peer_id, error = %err_msg, "keyhive sync completion failed");
-            return Err(err);
-        }
-        self.complete_keyhive_sync_round(peer_id).await
-    }
-
-    async fn start_keyhive_sync(&mut self, peer_id: PeerId) -> Res<()> {
+    fn start_keyhive_sync(&mut self, peer_id: PeerId) -> Res<()> {
         let was_idle = self.active_keyhive_syncs.insert(peer_id);
         if !was_idle {
             return Ok(());
         }
+        let keyhive_protocol = Arc::clone(&self.keyhive_protocol);
         let kh_peer_id = KeyhivePeerId::from_bytes(*peer_id.as_bytes());
-        if let Err(err) = self
-            .keyhive_protocol
-            .initiate_sync_with_peer(&kh_peer_id)
-            .await
-            .wrap_err_with(|| format!("keyhive initiate_sync_with_peer failed for {peer_id}"))
-        {
-            self.active_keyhive_syncs.remove(&peer_id);
-            return Err(err);
-        }
+        self.spawn_background(async move {
+            if let Err(err) = keyhive_protocol.initiate_sync_with_peer(&kh_peer_id).await {
+                tracing::warn!(%peer_id, error=%err, "keyhive initiate_sync_with_peer failed");
+            }
+        });
         Ok(())
     }
 
-    async fn schedule_internal_keyhive_sync(&mut self, peer_id: PeerId) {
-        let kh_peer_id = KeyhivePeerId::from_bytes(*peer_id.as_bytes());
-        if !self.keyhive_protocol.has_peer(&kh_peer_id).await {
+    fn schedule_internal_keyhive_sync(&mut self, peer_id: PeerId) {
+        let connected = surelock::key::lock_scope(|key| {
+            let (m, _) = key.lock(&self.connected_peers);
+            m.contains_key(&peer_id)
+        });
+        if !connected {
             debug!(%peer_id, "dropping internal keyhive sync for disconnected peer");
             return;
         }
         if self.active_keyhive_syncs.contains(&peer_id) {
-            self.queued_internal_keyhive_syncs.insert(peer_id);
-        } else if let Err(err) = self.start_keyhive_sync(peer_id).await {
-            warn!(error = %err, %peer_id, "internal keyhive sync initiation failed");
+            self.keyhive_dirty.insert(peer_id);
+        } else {
+            let _ = self.start_keyhive_sync(peer_id);
         }
     }
 }
@@ -1602,8 +1558,12 @@ where
         let ephemeral_backend = Arc::clone(&self.ephemeral_backend);
         let kh_proto = Arc::clone(&self.keyhive_protocol);
         let fut = async move {
-            if let Some(deets) = connected_peers.lock().await.get(&peer_id) {
-                return Ok((peer_id, Arc::clone(&deets.closed)));
+            let existing = surelock::key::lock_scope(|key| {
+                let (guard, _key) = key.lock(&connected_peers);
+                guard.get(&peer_id).map(|deets| Arc::clone(&deets.closed))
+            });
+            if let Some(closed) = existing {
+                return Ok((peer_id, closed));
             }
             let connect = connect_outgoing(endpoint, endpoint_addr, &connect_signer).await?;
             let peer_id = PeerId::new(*connect.authenticated.peer_id().as_bytes());
@@ -1660,10 +1620,6 @@ where
             kh_proto.add_peer(adapter.peer_id(), adapter).await;
             let closed = Arc::new(AtomicBool::new(false));
             evt_tx
-                .send(RuntimeEvt::KeyhiveSyncRequested { peer_id })
-                .inspect_err(|_| warn!(ERROR_CALLER))
-                .ok();
-            evt_tx
                 .send(RuntimeEvt::ConnEstablishedIroh {
                     peer_id,
                     deets: RuntimePeerConnDeets {
@@ -1672,6 +1628,10 @@ where
                         closed: Arc::clone(&closed),
                     },
                 })
+                .inspect_err(|_| warn!(ERROR_CALLER))
+                .ok();
+            evt_tx
+                .send(RuntimeEvt::KeyhiveSyncRequested { peer_id })
                 .inspect_err(|_| warn!(ERROR_CALLER))
                 .ok();
             Ok((peer_id, closed))
@@ -1764,10 +1724,6 @@ where
             kh_proto.add_peer(adapter.peer_id(), adapter).await;
             let closed = Arc::new(AtomicBool::new(false));
             evt_tx
-                .send(RuntimeEvt::KeyhiveSyncRequested { peer_id })
-                .inspect_err(|_| warn!(ERROR_CALLER))
-                .ok();
-            evt_tx
                 .send(RuntimeEvt::ConnEstablishedIroh {
                     peer_id,
                     deets: RuntimePeerConnDeets {
@@ -1776,6 +1732,10 @@ where
                         closed: Arc::clone(&closed),
                     },
                 })
+                .inspect_err(|_| warn!(ERROR_CALLER))
+                .ok();
+            evt_tx
+                .send(RuntimeEvt::KeyhiveSyncRequested { peer_id })
                 .inspect_err(|_| warn!(ERROR_CALLER))
                 .ok();
             Ok((peer_id, closed))
@@ -1789,24 +1749,25 @@ where
 
     #[tracing::instrument(skip_all)]
     fn handle_close_iroh(&mut self, peer_id: PeerId, done: Option<oneshot::Sender<Res<()>>>) {
-        let subduction: Arc<BigRepoSubduction<S>> = Arc::clone(&self.subduction);
-        let keyhive_protocol = Arc::clone(&self.keyhive_protocol);
-        let connected_peers = Arc::clone(&self.connected_peers);
         self.cancel_pending_keyhive_syncs(peer_id, "keyhive peer closed");
         self.cancel_pending_doc_syncs(peer_id, "doc sync peer closed")
             .expect(ERROR_ACTOR);
+        let deets = surelock::key::lock_scope(|key| {
+            let (mut g, _) = key.lock(&self.connected_peers);
+            g.remove(&peer_id)
+        });
+        if let Some(ref deets) = deets {
+            deets.closed.store(true, Ordering::SeqCst);
+            deets.cancel_token.cancel();
+        }
+        let subduction = Arc::clone(&self.subduction);
+        let keyhive_protocol = Arc::clone(&self.keyhive_protocol);
         self.spawn_background(async move {
-            let out = async {
+            let out: Res<()> = async {
                 keyhive_protocol
                     .remove_peer(&KeyhivePeerId::from_bytes(*peer_id.as_bytes()))
                     .await;
-                let deets = surelock::key::lock_scope(|key| {
-                    let (mut guard, _key) = key.lock(&connected_peers);
-                    guard.remove(&peer_id)
-                });
-                if let Some(deets) = deets {
-                    deets.closed.store(true, Ordering::SeqCst);
-                    deets.cancel_token.cancel();
+                if deets.is_some() {
                     let remote_peer_id =
                         subduction_core::peer::id::PeerId::new(peer_id.into_bytes());
                     subduction
@@ -1830,48 +1791,57 @@ where
         err: Option<subduction_iroh::error::RunError>,
         _task: ConnTask,
     ) -> Res<()> {
-        let subduction = Arc::clone(&self.subduction);
-        let keyhive_protocol = Arc::clone(&self.keyhive_protocol);
-        let connected_peers = Arc::clone(&self.connected_peers);
         self.cancel_pending_keyhive_syncs(peer_id, "keyhive connection lost");
         self.cancel_pending_doc_syncs(peer_id, "doc sync connection lost")?;
+        let deets = surelock::key::lock_scope(|key| {
+            let (mut g, _) = key.lock(&self.connected_peers);
+            g.remove(&peer_id)
+        });
+        if let Some(ref deets) = deets {
+            deets.closed.store(true, Ordering::SeqCst);
+            deets.cancel_token.cancel();
+        }
+        let subduction = Arc::clone(&self.subduction);
+        let keyhive_protocol = Arc::clone(&self.keyhive_protocol);
         self.spawn_background(async move {
-            keyhive_protocol
-                .remove_peer(&KeyhivePeerId::from_bytes(*peer_id.as_bytes()))
-                .await;
-            let deets = surelock::key::lock_scope(|key| {
-                let (mut guard, _key) = key.lock(&connected_peers);
-                guard.remove(&peer_id)
-            });
-            let keyhive_peer_id = KeyhivePeerId::from_bytes(*peer_id.as_bytes());
-            if let Some(deets) = deets {
-                deets.closed.store(true, Ordering::SeqCst);
-                deets.cancel_token.cancel();
-                let remote_peer_id = subduction_core::peer::id::PeerId::new(peer_id.into_bytes());
-                subduction
-                    .disconnect_from_peer(&remote_peer_id)
-                    .await
-                    .wrap_err("error on disconnect")?;
-                if let Some(tx) = deets.end_signal_tx {
-                    tx.send(ConnFinishSignal {
-                        peer_id,
-                        err: err.map(|err| ferr!("connection task error: {err}")),
-                    })
-                    .inspect_err(|_| warn!(ERROR_CALLER))
-                    .ok();
+            let out: Res<()> = async {
+                keyhive_protocol
+                    .remove_peer(&KeyhivePeerId::from_bytes(*peer_id.as_bytes()))
+                    .await;
+                if let Some(deets) = deets {
+                    let remote_peer_id =
+                        subduction_core::peer::id::PeerId::new(peer_id.into_bytes());
+                    subduction
+                        .disconnect_from_peer(&remote_peer_id)
+                        .await
+                        .wrap_err("error on disconnect")?;
+                    if let Some(tx) = deets.end_signal_tx {
+                        tx.send(ConnFinishSignal {
+                            peer_id,
+                            err: err.map(|err| ferr!("connection task error: {err}")),
+                        })
+                        .inspect_err(|_| warn!(ERROR_CALLER))
+                        .ok();
+                    }
                 }
+                Res::Ok(())
             }
-            Ok(())
+            .await;
+            if let Err(e) = out {
+                tracing::warn!(%peer_id, error=%e, "connection lost teardown failed");
+            }
         });
         Ok(())
     }
 
     #[tracing::instrument(skip_all, fields(%peer_id))]
-    async fn handle_connection_established(&self, peer_id: PeerId, deets: RuntimePeerConnDeets) {
-        self.keyhive_protocol
-            .clear_syncpoint_for_peer(&KeyhivePeerId::from_bytes(*peer_id.as_bytes()))
-            .await;
-        let mut connected_peers = self.connected_peers.lock().await;
+    fn handle_connection_established(&self, peer_id: PeerId, deets: RuntimePeerConnDeets) {
+        let kh_proto = Arc::clone(&self.keyhive_protocol);
+        self.spawn_background(async move {
+            kh_proto
+                .clear_syncpoint_for_peer(&KeyhivePeerId::from_bytes(*peer_id.as_bytes()))
+                .await;
+        });
         let old = surelock::key::lock_scope(|key| {
             let (mut guard, _key) = key.lock(&self.connected_peers);
             guard.insert(peer_id, deets)
@@ -1959,7 +1929,13 @@ enum DocWorkerMsg {
         waiter_id: Option<u64>,
         reason: &'static str,
     },
+    SyncWithPeerResult {
+        peer_id: PeerId,
+        waiter_id: u64,
+        result: Result<(), SyncDocError>,
+    },
     ReleaseHandleLease,
+    ReattemptMaterialization,
 }
 
 struct DocWorker<S>
@@ -1979,7 +1955,10 @@ where
     big_sync_store: SharedPartitionStore,
     change_manager: Arc<changes::ChangeListenerManager>,
     runtime_handle: BigRepoRuntimeHandle,
+    msg_tx: mpsc::UnboundedSender<DocWorkerMsg>,
+    runtime_tasks: Arc<utils_rs::AbortableJoinSet>,
     runtime_evt_tx: mpsc::UnboundedSender<RuntimeEvt>,
+    last_notified_heads: Option<Arc<[automerge::ChangeHash]>>,
 }
 
 enum DocWorkerDocState {
@@ -2025,8 +2004,7 @@ where
                     session.kind,
                     subduction_core::sync_session::SyncSessionKind::OutboundBatch
                 );
-                let session_has_policy_rejections = session.has_policy_rejections();
-                let mut materialization_pending = self.handle_apply_sync_session(session).await?;
+                let _materialization_pending = self.handle_apply_sync_session(session).await?;
                 if completes_sync_waiters {
                     let waiter = self
                         .pending_sync_jobs
@@ -2045,35 +2023,8 @@ where
                         self.pending_sync_jobs.remove(&peer_id);
                     }
                     if let Some(waiter) = waiter {
-                        let waiter_result = if materialization_pending {
-                            match self
-                                .runtime_handle
-                                .sync_keyhive_with_peer(
-                                    peer_id,
-                                    Some(self.runtime_handle.sync_policy.doc_sync_timeout),
-                                )
-                                .await
-                            {
-                                Ok(()) => {
-                                    materialization_pending =
-                                        self.retry_pending_materialization().await?;
-                                    if materialization_pending {
-                                        if session_has_policy_rejections {
-                                            Err(SyncDocError::PolicyRejected)
-                                        } else {
-                                            Err(SyncDocError::Unauthorized)
-                                        }
-                                    } else {
-                                        Ok(())
-                                    }
-                                }
-                                Err(err) => Err(SyncDocError::Other(err)),
-                            }
-                        } else {
-                            Ok(())
-                        };
                         waiter
-                            .send(waiter_result)
+                            .send(Ok(()))
                             .inspect_err(|_| warn!(ERROR_CALLER))
                             .ok();
                     }
@@ -2097,7 +2048,29 @@ where
                 self.handle_cancel_sync_with_peer(peer_id, waiter_id, reason)
                     .await?;
             }
+            DocWorkerMsg::SyncWithPeerResult {
+                peer_id,
+                waiter_id,
+                result,
+            } => {
+                if let Err(err) = result {
+                    let waiters = self.pending_sync_jobs.get_mut(&peer_id);
+                    if let Some(waiters) = waiters {
+                        if let Some(pos) = waiters.iter().position(|(id, _)| *id == waiter_id) {
+                            let (_id, sender) = waiters.remove(pos);
+                            if waiters.is_empty() {
+                                self.pending_sync_jobs.remove(&peer_id);
+                            }
+                            sender.send(Err(err)).inspect_err(|_| warn!(ERROR_CALLER)).ok();
+                            self.finish_transient_work()?;
+                        }
+                    }
+                }
+            }
             DocWorkerMsg::ReleaseHandleLease => {}
+            DocWorkerMsg::ReattemptMaterialization => {
+                let _ = self.retry_pending_materialization().await?;
+            }
         }
         Ok(())
     }
@@ -2124,7 +2097,7 @@ where
         if resident || stored {
             return Err(PutDocError::IdOccpuied { id: self.doc_id });
         }
-        let staged_ingest = stage_automerge_ingest(&doc, sedimentree_id);
+        let staged_ingest = stage_automerge_ingest(&doc);
 
         // Encrypt blobs via keyhive before storage
         let (sedimentree, blobs, update_ops) = encrypt_staged_automerge_ingest(
@@ -2138,6 +2111,7 @@ where
         for update_op in update_ops {
             persist_cgka_update_op(&self.keyhive_storage, update_op).await?;
         }
+        let heads = sedimentree_heads_payload(&sedimentree);
         self.subduction
             .store_sedimentree(sedimentree_id, sedimentree, blobs)
             .await
@@ -2168,7 +2142,6 @@ where
             )
             .await?;
         }
-        let heads = sedimentree_heads_payload(&staged_ingest.sedimentree);
         let item_payload = serde_json::json!({
             "heads": am_utils_rs::serialize_commit_heads(&heads),
         });
@@ -2284,6 +2257,7 @@ where
                 self.pending_fragment_requests.insert(request);
             }
         }
+        let last_heads = heads.clone();
         commit_delta_bookkeep(
             &self.big_sync_store,
             &self.change_manager,
@@ -2293,6 +2267,7 @@ where
             origin,
         )
         .await?;
+        self.last_notified_heads = Some(Arc::<[automerge::ChangeHash]>::from(last_heads));
         self.process_pending_fragment_requests().await?;
         if keyhive_changed {
             self.runtime_handle.note_local_keyhive_changed().await?;
@@ -2379,7 +2354,8 @@ where
                     .get_or_insert_with(session.sedimentree_id, || tree)
                     .await;
             }
-            store_doc_heads_payload(&self.big_sync_store, self.doc_id, heads).await?;
+            store_doc_heads_payload(&self.big_sync_store, self.doc_id, heads.clone()).await?;
+            self.change_manager.notify_doc_pending_heads_changed(self.doc_id, heads, BigRepoChangeOrigin::Remote { peer_id })?;
             return Ok(false);
         }
 
@@ -2560,12 +2536,14 @@ where
             }
         };
         if blobs.is_empty() {
+            let heads = sedimentree_heads_payload(&tree);
             store_doc_heads_payload(
                 &self.big_sync_store,
                 self.doc_id,
-                sedimentree_heads_payload(&tree),
+                heads.clone(),
             )
             .await?;
+            self.change_manager.notify_doc_pending_heads_changed(self.doc_id, heads, BigRepoChangeOrigin::Remote { peer_id })?;
             if materialization_pending {
                 self.mark_materialization_pending(was_pending)?;
             }
@@ -2573,7 +2551,8 @@ where
         }
         if materialization_pending {
             let heads = sedimentree_heads_payload(&tree);
-            store_doc_heads_payload(&self.big_sync_store, self.doc_id, heads).await?;
+            store_doc_heads_payload(&self.big_sync_store, self.doc_id, heads.clone()).await?;
+            self.change_manager.notify_doc_pending_heads_changed(self.doc_id, heads, BigRepoChangeOrigin::Remote { peer_id })?;
             self.mark_materialization_pending(was_pending)?;
             return Ok(true);
         }
@@ -2812,6 +2791,7 @@ where
         let Some((after_heads, patches)) = maybe_delta else {
             return Ok(false);
         };
+        let last_heads = after_heads.clone();
         commit_delta_bookkeep(
             &self.big_sync_store,
             &self.change_manager,
@@ -2823,6 +2803,7 @@ where
             },
         )
         .await?;
+        self.last_notified_heads = Some(Arc::<[automerge::ChangeHash]>::from(last_heads));
         Ok(false)
     }
 
@@ -2838,7 +2819,26 @@ where
         .await?
         {
             DocLookup::Ready(doc) => {
-                self.mark_materialization_ready(was_pending, Arc::from(doc.get_heads()))?;
+                let after_heads = doc.get_heads();
+                self.mark_materialization_ready(was_pending, Arc::from(after_heads.clone()))?;
+                if was_pending {
+                    let before: &[automerge::ChangeHash] = self
+                        .last_notified_heads
+                        .as_deref()
+                        .unwrap_or(&[]);
+                    let patches = doc.diff(before, &after_heads);
+                    commit_delta_bookkeep(
+                        &self.big_sync_store,
+                        &self.change_manager,
+                        self.doc_id,
+                        after_heads.clone(),
+                        patches,
+                        BigRepoChangeOrigin::Bootstrap,
+                    )
+                    .await?;
+                    self.last_notified_heads =
+                        Some(Arc::<[automerge::ChangeHash]>::from(after_heads));
+                }
                 self.state = DocWorkerDocState::Transient(doc.into());
                 Ok(false)
             }
@@ -2908,7 +2908,15 @@ where
     ) -> Res<()> {
         let sedimentree_id = self.doc_id_subduction;
         let remote_peer_id = subduction_core::peer::id::PeerId::new(peer_id.clone().into_bytes());
-        let timeout = timeout
+
+        // Push the waiter immediately so it is visible to both
+        // ApplySyncSession (on OutboundBatch) and SyncWithPeerResult
+        // (on error) — whichever fires first resolves it.
+        self.pending_sync_jobs
+            .entry(peer_id)
+            .or_default()
+            .push((waiter_id, sender));
+        let subduction_timeout = timeout
             .map(|duration| {
                 subduction_core::timeout::call::CallTimeout::TimeoutMillis(
                     duration
@@ -2918,28 +2926,35 @@ where
                 )
             })
             .unwrap_or(subduction_core::timeout::call::CallTimeout::Default);
-        let result = self
-            .subduction
-            .sync_with_peer(&remote_peer_id, sedimentree_id, false, timeout)
-            .await;
-        let res = match result {
-            Ok((had_success, _stats, conn_errs)) => {
-                if had_success {
-                    self.pending_sync_jobs
-                        .entry(peer_id)
-                        .or_default()
-                        .push((waiter_id, sender));
-                    return Ok(());
-                } else if conn_errs.is_empty() {
-                    Err(SyncDocError::NotFound)
-                } else {
-                    Err(SyncDocError::TransportError)
-                }
-            }
-            Err(err) => Err(SyncDocError::IoError(ferr!("{err}"))),
-        };
-        self.finish_transient_work()?;
-        sender.send(res).inspect_err(|_| warn!(ERROR_CALLER)).ok();
+        let subduction = Arc::clone(&self.subduction);
+        let msg_tx = self.msg_tx.clone();
+        let runtime_tasks = Arc::clone(&self.runtime_tasks);
+
+        runtime_tasks
+            .spawn(async move {
+                let result = subduction
+                    .sync_with_peer(&remote_peer_id, sedimentree_id, false, subduction_timeout)
+                    .await;
+                let result = match result {
+                    Ok((had_success, _stats, conn_errs)) => {
+                        if had_success {
+                            Ok(())
+                        } else if conn_errs.is_empty() {
+                            Err(SyncDocError::NotFound)
+                        } else {
+                            Err(SyncDocError::TransportError)
+                        }
+                    }
+                    Err(err) => Err(SyncDocError::IoError(ferr!("{err}"))),
+                };
+                let _ = msg_tx.send(DocWorkerMsg::SyncWithPeerResult {
+                    peer_id,
+                    waiter_id,
+                    result,
+                });
+            })
+            .expect(ERROR_TOKIO);
+
         Ok(())
     }
 
@@ -2991,6 +3006,12 @@ where
         if !was_pending {
             self.change_manager
                 .notify_local_doc_materialization_pending(self.doc_id)?;
+            self.runtime_evt_tx
+                .send(RuntimeEvt::DocWorkerMaterializationPending {
+                    doc_id: self.doc_id,
+                })
+                .inspect_err(|_| warn!(ERROR_CHANNEL))
+                .ok();
         }
         Ok(())
     }
@@ -3003,6 +3024,12 @@ where
         if was_pending {
             self.change_manager
                 .notify_local_doc_materialization_ready(self.doc_id, heads)?;
+            self.runtime_evt_tx
+                .send(RuntimeEvt::DocWorkerMaterializationReady {
+                    doc_id: self.doc_id,
+                })
+                .inspect_err(|_| warn!(ERROR_CHANNEL))
+                .ok();
         }
         Ok(())
     }
@@ -3473,7 +3500,6 @@ struct LooseEntry {
 /// These bytes are transient in-memory data and must be encrypted before they
 /// are persisted through Subduction storage.
 struct StagedAutomergeIngest {
-    sedimentree: Sedimentree,
     blobs: Vec<Blob>,
     fragment_entries: Vec<FragmentEntry>,
     loose_entries: Vec<LooseEntry>,
@@ -3499,16 +3525,12 @@ struct HydratedMinimizedTree {
 /// it reaches Subduction storage.
 fn stage_automerge_ingest(
     doc: &automerge::Automerge,
-    sedimentree_id: SedimentreeId,
 ) -> StagedAutomergeIngest {
-    use sedimentree_core::{blob::BlobMeta, fragment::Fragment, loose_commit::LooseCommit};
-
     let cached = doc.fragments(1..);
     let loose = doc.fragments(0..=0);
     let cached_bytes = doc.bundle_fragments(cached.iter().cloned());
     let loose_bytes = doc.bundle_fragments(loose.iter().cloned());
 
-    let mut fragments = Vec::with_capacity(cached.len());
     let mut blobs = Vec::with_capacity(cached.len() + loose.len());
     let mut fragment_entries = Vec::with_capacity(cached.len());
     let mut loose_entries = Vec::with_capacity(loose.len());
@@ -3528,16 +3550,7 @@ fn stage_automerge_ingest(
             .iter()
             .map(|head| CommitId::new(head.0))
             .collect();
-        let blob = Blob::new(raw);
-        let meta = BlobMeta::new(&blob);
-        fragments.push(Fragment::new(
-            sedimentree_id,
-            head,
-            boundary.clone(),
-            &checkpoints,
-            meta,
-        ));
-        blobs.push(blob);
+        blobs.push(Blob::new(raw));
         fragment_entries.push(FragmentEntry {
             head,
             boundary,
@@ -3545,7 +3558,6 @@ fn stage_automerge_ingest(
         });
     }
 
-    let mut loose_commits = Vec::with_capacity(loose.len());
     for (fragment, raw) in loose.iter().zip(loose_bytes) {
         let head = CommitId::new(fragment.head.0);
         let parents: BTreeSet<CommitId> = fragment
@@ -3553,24 +3565,15 @@ fn stage_automerge_ingest(
             .iter()
             .map(|pp| CommitId::new(pp.0))
             .collect();
-        let blob = Blob::new(raw);
-        let meta = BlobMeta::new(&blob);
-        loose_commits.push(LooseCommit::new(
-            sedimentree_id,
-            head,
-            parents.clone(),
-            meta,
-        ));
-        blobs.push(blob);
+        blobs.push(Blob::new(raw));
         loose_entries.push(LooseEntry { head, parents });
     }
 
-    let fragment_count = fragments.len();
-    let loose_count = loose_commits.len();
     let covered_count = covered.len();
+    let fragment_count = fragment_entries.len();
+    let loose_count = loose_entries.len();
 
     StagedAutomergeIngest {
-        sedimentree: Sedimentree::new(fragments, loose_commits),
         blobs,
         fragment_entries,
         loose_entries,
@@ -3775,15 +3778,6 @@ impl<S> BigRepoCiphertextStore<S> {
         Ok(None)
     }
 
-    async fn try_load_ciphertext(
-        &self,
-        content_ref: &[u8],
-    ) -> Res<Option<Arc<beekem::encrypted::EncryptedContent<Vec<u8>, Vec<u8>>>>>
-    where
-        S: BigRepoSubductionStorage,
-    {
-        self.load_entrypoint_ciphertext(content_ref).await
-    }
 }
 
 impl<S: BigRepoSubductionStorage> CiphertextStore<Sendable, Vec<u8>, Vec<u8>>
@@ -3802,7 +3796,7 @@ impl<S: BigRepoSubductionStorage> CiphertextStore<Sendable, Vec<u8>, Vec<u8>>
             Self::GetCiphertextError,
         >,
     > {
-        Sendable::from_future(async move { self.try_load_ciphertext(content_ref.as_slice()).await })
+        Sendable::from_future(async move { self.load_entrypoint_ciphertext(content_ref.as_slice()).await })
     }
 
     fn get_ciphertext_by_pcs_update<'a>(
@@ -4007,6 +4001,7 @@ async fn encrypt_staged_automerge_ingest(
 ///
 /// The caller provides `batch_keys` (CommitId → SymmetricKey) so we can build
 /// the `Envelope.ancestors` map from all known parent keys.
+#[cfg(test)]
 async fn encrypt_loose_commit(
     keyhive_handle: &BigKeyhiveHandle,
     sedimentree_id: SedimentreeId,

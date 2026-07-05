@@ -250,8 +250,8 @@ async fn put_doc_get_doc_and_export_roundtrip() -> Res<()> {
             .await,
         "seed"
     );
-    let exported = repo.export_doc(&doc_id).await?.into_ready(doc_id)?;
-    assert!(!exported.is_empty());
+    let handle = repo.get_doc(&doc_id).await?.into_ready(doc_id)?;
+    assert!(!handle.export().await.is_empty());
 
     let stored_blobs = repo.inspect_stored_doc_blobs(doc_id).await?;
     assert!(
@@ -460,7 +460,7 @@ async fn create_doc_with_group_parent_uses_public_group_api() -> Res<()> {
         .expect("failed seeding doc");
     let handle = owner
         .repo
-        .create_doc(doc, vec![group.clone().into()])
+        .create_doc_with_parents(doc, vec![group.clone().into()])
         .await?;
     let doc_id = handle.document_id();
 
@@ -605,8 +605,8 @@ async fn authorized_peer_reads_encrypted_doc_after_keyhive_change_notification_w
         "authorized client should have payload heads after ephemeral-triggered keyhive sync and doc sync"
     );
 
-    let exported = client.repo.export_doc(&doc_id).await?.into_ready(doc_id)?;
-    assert!(!exported.is_empty());
+    let handle = client.repo.get_doc(&doc_id).await?.into_ready(doc_id)?;
+    assert!(!handle.export().await.is_empty());
 
     owner.shutdown().await?;
     client.shutdown().await?;
@@ -901,7 +901,7 @@ async fn disk_repo_round_trip_preserves_encrypted_doc_and_heads() -> Res<()> {
         .expect("failed seeding doc");
     let handle = repo.create_doc(doc).await?;
     let doc_id = handle.document_id();
-    let export_before = repo.export_doc(&doc_id).await?.into_ready(doc_id)?;
+    let export_before = repo.get_doc(&doc_id).await?.into_ready(doc_id)?.export().await;
     let heads_before = repo
         .doc_payload_heads(doc_id)
         .await?
@@ -920,7 +920,7 @@ async fn disk_repo_round_trip_preserves_encrypted_doc_and_heads() -> Res<()> {
         .await;
     assert_eq!(title_after, "persisted");
 
-    let export_after = repo.export_doc(&doc_id).await?.into_ready(doc_id)?;
+    let export_after = repo.get_doc(&doc_id).await?.into_ready(doc_id)?.export().await;
     let heads_after = repo
         .doc_payload_heads(doc_id)
         .await?
@@ -1057,7 +1057,7 @@ async fn minimal_doc_sync_loads_and_exports_after_keyhive_grant() -> Res<()> {
         "client should have payload heads after minimal doc sync"
     );
     assert!(
-        matches!(client.repo.export_doc(&doc_id).await?, DocLookup::Ready(_)),
+        matches!(client.repo.get_doc(&doc_id).await?, DocLookup::Ready(_)),
         "client should export minimal doc plaintext after sync"
     );
 
@@ -1116,7 +1116,7 @@ async fn group_member_reads_doc_while_non_member_stays_unauthorized() -> Res<()>
     .expect("failed creating grouped doc");
     let handle = owner
         .repo
-        .create_doc(doc, vec![group.clone().into()])
+        .create_doc_with_parents(doc, vec![group.clone().into()])
         .await?;
     let doc_id = handle.document_id();
 
@@ -1141,7 +1141,7 @@ async fn group_member_reads_doc_while_non_member_stays_unauthorized() -> Res<()>
         "grouped"
     );
     assert!(
-        matches!(member.repo.export_doc(&doc_id).await?, DocLookup::Ready(_)),
+        matches!(member.repo.get_doc(&doc_id).await?, DocLookup::Ready(_)),
         "group member should export plaintext after sync"
     );
 
@@ -1161,8 +1161,6 @@ async fn group_member_reads_doc_while_non_member_stays_unauthorized() -> Res<()>
                 matches!(
                     err,
                     SyncDocError::NotFound
-                        | SyncDocError::Unauthorized
-                        | SyncDocError::PolicyRejected
                 ),
                 "outsider sync should fail cleanly, got {err:?}"
             );
@@ -1368,7 +1366,7 @@ async fn unauthorized_peer_does_not_materialize_plaintext_without_grant() -> Res
                     panic!("unauthorized peer should not materialize plaintext")
                 }
             }
-            match client.repo.export_doc(&doc_id).await? {
+            match client.repo.get_doc(&doc_id).await? {
                 DocLookup::PendingMaterialization | DocLookup::Missing => {}
                 DocLookup::Ready(_) => panic!("unauthorized peer should not export plaintext"),
             }
@@ -1378,8 +1376,6 @@ async fn unauthorized_peer_does_not_materialize_plaintext_without_grant() -> Res
                 matches!(
                     err,
                     SyncDocError::NotFound
-                        | SyncDocError::Unauthorized
-                        | SyncDocError::PolicyRejected
                 ),
                 "unauthorized doc sync should fail cleanly, got {err:?}"
             );
@@ -1462,8 +1458,8 @@ async fn granted_doc_sync_materializes_without_manual_keyhive_sync() -> Res<()> 
         }
         DocLookup::Missing => panic!("granted client should have synced document bytes"),
     }
-    match client.repo.export_doc(&doc_id).await? {
-        DocLookup::Ready(exported) => assert!(!exported.is_empty()),
+    match client.repo.get_doc(&doc_id).await? {
+        DocLookup::Ready(handle) => assert!(!handle.export().await.is_empty()),
         DocLookup::PendingMaterialization => {
             panic!("granted client should export after doc sync catches keyhive up")
         }
@@ -1555,7 +1551,7 @@ async fn grant_doc_access_checkpoint_becomes_visible_after_reopen_and_keyhive_sy
     owner_conn.sync_keyhive_with_peer(None).await?;
 
     assert!(
-        matches!(client.repo.export_doc(&doc_id).await?, DocLookup::Ready(_)),
+        matches!(client.repo.get_doc(&doc_id).await?, DocLookup::Ready(_)),
         "reopened client should be able to export the doc after keyhive sync alone"
     );
 
@@ -1702,7 +1698,7 @@ async fn grant_doc_access_checkpoint_survives_reopen_and_sync() -> Res<()> {
         "reopened client should still know its own agent after keyhive sync"
     );
     assert!(
-        matches!(client.repo.export_doc(&doc_id).await?, DocLookup::Ready(_)),
+        matches!(client.repo.get_doc(&doc_id).await?, DocLookup::Ready(_)),
         "reopened client should still be able to export the doc from storage before sync_doc"
     );
     // Reopened clients need their local big-sync membership restored explicitly;
@@ -1723,7 +1719,7 @@ async fn grant_doc_access_checkpoint_survives_reopen_and_sync() -> Res<()> {
         "sync_doc_with_peer should populate doc payload heads before materialization"
     );
     assert!(
-        matches!(client.repo.export_doc(&doc_id).await?, DocLookup::Ready(_)),
+        matches!(client.repo.get_doc(&doc_id).await?, DocLookup::Ready(_)),
         "reopened client should still be able to export the doc after sync_doc"
     );
     let reopened_doc = wait_for_doc_handle(&client.repo, doc_id).await;
@@ -2397,7 +2393,7 @@ async fn wait_for_doc_handle(repo: &Arc<BigRepo>, doc_id: DocumentId) -> BigDocH
     {
         Ok(result) => result.expect("doc lookup failed"),
         Err(err) => {
-            let export_doc = repo.export_doc(&doc_id).await.unwrap_or(DocLookup::Missing);
+            let export_doc = repo.get_doc(&doc_id).await.unwrap_or(DocLookup::Missing);
             let payload_heads = repo.doc_payload_heads(doc_id).await.unwrap_or(None);
             let parts = repo
                 .big_sync_store
@@ -2435,7 +2431,7 @@ async fn create_shared_sync_doc(
         .expect("grantee agent should be known after keyhive sync");
     let handle = owner
         .repo
-        .create_doc(doc, vec![grantee_agent.into()])
+        .create_doc_with_parents(doc, vec![grantee_agent.into()])
         .await?;
 
     owner_conn.sync_keyhive_with_peer(None).await?;
@@ -2471,33 +2467,6 @@ impl iroh::protocol::ProtocolHandler for SubductionProtocolHandler {
     }
 }
 
-#[derive(Clone, Debug)]
-struct RepoRpcProtocolHandler {
-    tx: tokio::sync::mpsc::Sender<(PeerId, crate::rpc::RepoSyncRpcMessage)>,
-}
-
-impl iroh::protocol::ProtocolHandler for RepoRpcProtocolHandler {
-    async fn accept(
-        &self,
-        conn: iroh::endpoint::Connection,
-    ) -> Result<(), iroh::protocol::AcceptError> {
-        let peer_id = PeerId::new(*conn.remote_id().as_bytes());
-        loop {
-            let msg = match irpc_iroh::read_request::<crate::rpc::RepoSyncRpc>(&conn).await {
-                Ok(Some(msg)) => msg,
-                Ok(None) => break,
-                Err(err) => {
-                    tracing::warn!(?err, "error reading repo rpc request");
-                    break;
-                }
-            };
-            if self.tx.send((peer_id, msg)).await.is_err() {
-                break;
-            }
-        }
-        Ok(())
-    }
-}
 
 struct StressBigSyncRpcClient {
     target_part_store: SharedPartStore,
@@ -2583,7 +2552,6 @@ struct SyncRepoNode {
     stop_token: BigRepoStopToken,
     endpoint: iroh::Endpoint,
     router: iroh::protocol::Router,
-    repo_rpc_stop: Option<crate::rpc::BigRepoRpcStopToken>,
     accept_count: Arc<AtomicUsize>,
     accept_notify: Arc<Notify>,
     accepted_connection: Arc<tokio::sync::Mutex<Option<BigRepoConnection>>>,
@@ -2642,7 +2610,6 @@ impl SyncRepoNode {
         let (big_sync_worker, big_sync_stop) =
             big_sync::spawn_big_sync_worker(Arc::clone(&big_sync_host.store), sync_backends)?;
 
-        let (repo_rpc, repo_rpc_stop) = crate::rpc::spawn_repo_rpc(Arc::clone(&repo)).await?;
         let accept_count = Arc::new(AtomicUsize::new(0));
         let accept_notify = Arc::new(Notify::new());
         let accepted_connection = Arc::new(tokio::sync::Mutex::new(None));
@@ -2658,12 +2625,6 @@ impl SyncRepoNode {
                     accept_count: Arc::clone(&accept_count),
                     accept_notify: Arc::clone(&accept_notify),
                     accepted_connection: Arc::clone(&accepted_connection),
-                },
-            )
-            .accept(
-                crate::rpc::REPO_SYNC_ALPN,
-                RepoRpcProtocolHandler {
-                    tx: repo_rpc.local_sender(),
                 },
             )
             .spawn();
@@ -2687,7 +2648,6 @@ impl SyncRepoNode {
             big_sync_stop,
             endpoint,
             router,
-            repo_rpc_stop: Some(repo_rpc_stop),
             accept_count,
             accept_notify,
             accepted_connection,
@@ -2871,15 +2831,12 @@ impl SyncRepoNode {
     }
 
     #[tracing::instrument(skip(self))]
-    async fn shutdown(mut self) -> Res<()> {
+    async fn shutdown(self) -> Res<()> {
         tracing::info!(
             repo_peer_id = %self.repo.local_peer_id(),
             "shutting down sync repo node"
         );
         self.endpoint.close().await;
-        if let Some(stop) = self.repo_rpc_stop.take() {
-            stop.stop().await?;
-        }
         self.stop_token.stop().await?;
         self.big_sync_stop.stop().await?;
         drop(self.router);
@@ -4207,19 +4164,35 @@ async fn run_sync_backend_put_doc_conflict_case() -> Res<()> {
         .await?;
 
     let remote_payload = server.big_sync_store.obj_payload(doc_id).await?;
+    // Capture client heads before sync_obj: the big_sync worker may have already
+    // delivered the server's mutation, in which case backend.rs's early-Noop
+    // (local_heads == remote_heads, pre-sync) is correct.
+    let local_heads_pre: Option<Arc<[automerge::ChangeHash]>> =
+        super::partition_doc_heads_payload(&client.big_sync_store, doc_id).await?;
+    let remote_heads = remote_payload
+        .as_ref()
+        .map(super::doc_heads_from_payload);
     client.stop_big_sync_with(&server).await?;
     let outcome = client
         .sync_backend
         .sync_obj(client_conn.peer_id(), doc_id, remote_payload.clone())
         .await?;
+    let changed_object_ok = matches!(
+        outcome,
+        big_sync::SyncTaskRunOutcome::Completion(big_sync_core::SyncTaskCompletion {
+            deets: SyncCompletionDeets::ChangedObject,
+            ..
+        })
+    );
+    let noop_ok = matches!(
+        outcome,
+        big_sync::SyncTaskRunOutcome::Completion(big_sync_core::SyncTaskCompletion {
+            deets: SyncCompletionDeets::Noop,
+            ..
+        })
+    ) && local_heads_pre.as_ref() == remote_heads.as_ref();
     assert!(
-        matches!(
-            outcome,
-            big_sync::SyncTaskRunOutcome::Completion(big_sync_core::SyncTaskCompletion {
-                deets: SyncCompletionDeets::ChangedObject,
-                ..
-            })
-        ),
+        changed_object_ok || noop_ok,
         "unexpected sync outcome for put_doc_conflict_retries_sync_and_materializes_heads: {outcome:?}"
     );
     assert_eq!(
