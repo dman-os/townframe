@@ -1,6 +1,5 @@
 # duck-log
 
-
 ## 2026-07-04 | Multiprocessing
 
 Right now, daybook repos are a web of differnt on disk storage formats.
