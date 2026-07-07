@@ -232,8 +232,8 @@ if (composeProfile === "release") {
         `bundletool did not produce universal APK at ${universalApkPath}`,
       );
     }
+    await $`${apksignerPath} verify --verbose --print-certs ${universalApkPath}`;
     await $`cp ${universalApkPath} ${releaseApkPath}`;
-    await $`${apksignerPath} verify --verbose --print-certs ${releaseApkPath}`;
   } finally {
     await removeTreeIfExists(bundletoolSecretsDir);
     await removeTreeIfExists(bundletoolExtractDir.toString());
