@@ -190,13 +190,6 @@ android {
     buildTypes {
         getByName("release") {
             isMinifyEnabled = false
-            if (daybookComposeIsReleaseProfile && androidReleaseSigningConfig == null) {
-                throw GradleException(
-                    "Android release builds require signing configuration. Set DAYBOOK_ANDROID_RELEASE_KEYSTORE_PATH, " +
-                        "DAYBOOK_ANDROID_RELEASE_KEYSTORE_PASSWORD, DAYBOOK_ANDROID_RELEASE_KEY_ALIAS, and " +
-                        "DAYBOOK_ANDROID_RELEASE_KEY_PASSWORD."
-                )
-            }
             if (androidReleaseSigningConfig != null) {
                 signingConfig = signingConfigs.getByName("release")
             }
@@ -384,6 +377,21 @@ fun resolveAndroidReleaseSigningConfig(): AndroidReleaseSigningConfig? {
 }
 
 val androidReleaseSigningConfig = resolveAndroidReleaseSigningConfig()
+
+val validateAndroidReleaseSigningConfig =
+    tasks.register("validateAndroidReleaseSigningConfig") {
+        group = "build"
+        description = "Validate Android release signing configuration for Android release builds"
+        doLast {
+            if (daybookComposeIsReleaseProfile && androidReleaseSigningConfig == null) {
+                throw GradleException(
+                    "Android release builds require signing configuration. Set DAYBOOK_ANDROID_RELEASE_KEYSTORE_PATH, " +
+                        "DAYBOOK_ANDROID_RELEASE_KEYSTORE_PASSWORD, DAYBOOK_ANDROID_RELEASE_KEY_ALIAS, and " +
+                        "DAYBOOK_ANDROID_RELEASE_KEY_PASSWORD."
+                )
+            }
+        }
+    }
 
 // Desktop Rust builds
 tasks.register<Exec>("buildRustDesktopDebug") {
@@ -675,6 +683,7 @@ tasks.matching { it.name == "preReleaseBuild" }.configureEach {
     val isCheckTask = taskNames.contains("check")
     // Skip release Rust build during check - we only need debug for testing
     if (!isCheckTask) {
+        dependsOn(validateAndroidReleaseSigningConfig)
         dependsOn("copyRustAndroidRelease")
     }
 }

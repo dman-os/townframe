@@ -336,17 +336,20 @@ jobs:
       - name: materialize android release keystore
         if: env.DAYBOOK_COMPOSE_PROFILE == 'release'
         shell: bash
+        env:
+          DAYBOOK_ANDROID_RELEASE_KEYSTORE_B64: ${{ secrets.DAYBOOK_ANDROID_RELEASE_KEYSTORE_B64 }}
+          DAYBOOK_ANDROID_RELEASE_KEYSTORE_PASSWORD: ${{ secrets.DAYBOOK_ANDROID_RELEASE_KEYSTORE_PASSWORD }}
+          DAYBOOK_ANDROID_RELEASE_KEY_ALIAS: ${{ secrets.DAYBOOK_ANDROID_RELEASE_KEY_ALIAS }}
+          DAYBOOK_ANDROID_RELEASE_KEY_PASSWORD: ${{ secrets.DAYBOOK_ANDROID_RELEASE_KEY_PASSWORD }}
         run: |
           set -euo pipefail
           keystore_path="${RUNNER_TEMP}/daybook-release.jks"
-          printf '%s' '${{ secrets.DAYBOOK_ANDROID_RELEASE_KEYSTORE_B64 }}' | base64 --decode > "${keystore_path}"
+          printf '%s' "${DAYBOOK_ANDROID_RELEASE_KEYSTORE_B64}" | base64 --decode > "${keystore_path}"
           chmod 600 "${keystore_path}"
-          {
-            echo "DAYBOOK_ANDROID_RELEASE_KEYSTORE_PATH=${keystore_path}"
-            echo "DAYBOOK_ANDROID_RELEASE_KEYSTORE_PASSWORD=${{ secrets.DAYBOOK_ANDROID_RELEASE_KEYSTORE_PASSWORD }}"
-            echo "DAYBOOK_ANDROID_RELEASE_KEY_ALIAS=${{ secrets.DAYBOOK_ANDROID_RELEASE_KEY_ALIAS }}"
-            echo "DAYBOOK_ANDROID_RELEASE_KEY_PASSWORD=${{ secrets.DAYBOOK_ANDROID_RELEASE_KEY_PASSWORD }}"
-          } >> "${GITHUB_ENV}"
+          printf 'DAYBOOK_ANDROID_RELEASE_KEYSTORE_PATH=%s\n' "${keystore_path}" >> "${GITHUB_ENV}"
+          printf 'DAYBOOK_ANDROID_RELEASE_KEYSTORE_PASSWORD=%s\n' "${DAYBOOK_ANDROID_RELEASE_KEYSTORE_PASSWORD}" >> "${GITHUB_ENV}"
+          printf 'DAYBOOK_ANDROID_RELEASE_KEY_ALIAS=%s\n' "${DAYBOOK_ANDROID_RELEASE_KEY_ALIAS}" >> "${GITHUB_ENV}"
+          printf 'DAYBOOK_ANDROID_RELEASE_KEY_PASSWORD=%s\n' "${DAYBOOK_ANDROID_RELEASE_KEY_PASSWORD}" >> "${GITHUB_ENV}"
 
       - name: build daybook cli (android termux)
         run: |

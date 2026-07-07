@@ -193,13 +193,6 @@ await $`./gradlew ${gradleTask} -PdaybookProfile=${composeProfile} -PortLibLocat
 } -PortPreferDynamicLink=${$.env.ORT_PREFER_DYNAMIC_LINK ?? "1"}`
   .cwd($.relativeDir("../src/daybook_compose/"))
   .env({
-    DAYBOOK_ANDROID_RELEASE_KEYSTORE_PATH:
-      $.env.DAYBOOK_ANDROID_RELEASE_KEYSTORE_PATH,
-    DAYBOOK_ANDROID_RELEASE_KEYSTORE_PASSWORD:
-      $.env.DAYBOOK_ANDROID_RELEASE_KEYSTORE_PASSWORD,
-    DAYBOOK_ANDROID_RELEASE_KEY_ALIAS: $.env.DAYBOOK_ANDROID_RELEASE_KEY_ALIAS,
-    DAYBOOK_ANDROID_RELEASE_KEY_PASSWORD:
-      $.env.DAYBOOK_ANDROID_RELEASE_KEY_PASSWORD,
     ORT_LIB_LOCATION: (await libDirFile.readText()).trim(),
     ORT_LIB_PROFILE: $.env.ORT_LIB_PROFILE ?? ortBuildConfig,
     ORT_PREFER_DYNAMIC_LINK: $.env.ORT_PREFER_DYNAMIC_LINK ?? "1",
@@ -212,6 +205,11 @@ if (composeProfile === "release") {
   );
   const keyAlias = requireEnv("DAYBOOK_ANDROID_RELEASE_KEY_ALIAS");
   const keyPassword = requireEnv("DAYBOOK_ANDROID_RELEASE_KEY_PASSWORD");
+  const bundletoolSecretsDir = await Deno.makeTempDir({
+    prefix: "daybook-bundletool-secrets-",
+  });
+  const keystorePasswordFile = `${bundletoolSecretsDir}/ks-pass.txt`;
+  const keyPasswordFile = `${bundletoolSecretsDir}/key-pass.txt`;
 
   await releaseApksDir.ensureDir();
   await releaseApkDir.ensureDir();
@@ -220,15 +218,24 @@ if (composeProfile === "release") {
   await removeTreeIfExists(bundletoolExtractDir.toString());
   await bundletoolExtractDir.ensureDir();
 
-  await $`bundletool build-apks --bundle=${releaseBundlePath} --output=${releaseApksPath} --mode=universal --overwrite --ks=${keystorePath} --ks-pass=pass:${keystorePassword} --ks-key-alias=${keyAlias} --key-pass=pass:${keyPassword}`;
-  const universalApkPath = bundletoolExtractDir.join("universal.apk");
-  await $`bsdtar --extract --file ${releaseApksPath} --directory ${bundletoolExtractDir}`;
-  if (!(await universalApkPath.exists())) {
-    throw new Error(
-      `bundletool did not produce universal APK at ${universalApkPath}`,
-    );
+  try {
+    await Deno.writeTextFile(keystorePasswordFile, keystorePassword);
+    await Deno.chmod(keystorePasswordFile, 0o600);
+    await Deno.writeTextFile(keyPasswordFile, keyPassword);
+    await Deno.chmod(keyPasswordFile, 0o600);
+
+    await $`bundletool build-apks --bundle=${releaseBundlePath} --output=${releaseApksPath} --mode=universal --overwrite --ks=${keystorePath} --ks-pass=file:${keystorePasswordFile} --ks-key-alias=${keyAlias} --key-pass=file:${keyPasswordFile}`;
+    const universalApkPath = bundletoolExtractDir.join("universal.apk");
+    await $`bsdtar --extract --file ${releaseApksPath} --directory ${bundletoolExtractDir}`;
+    if (!(await universalApkPath.exists())) {
+      throw new Error(
+        `bundletool did not produce universal APK at ${universalApkPath}`,
+      );
+    }
+    await $`cp ${universalApkPath} ${releaseApkPath}`;
+    await $`${apksignerPath} verify --verbose --print-certs ${releaseApkPath}`;
+  } finally {
+    await removeTreeIfExists(bundletoolSecretsDir);
+    await removeTreeIfExists(bundletoolExtractDir.toString());
   }
-  await $`cp ${universalApkPath} ${releaseApkPath}`;
-  await $`${apksignerPath} verify --verbose --print-certs ${releaseApkPath}`;
-  await removeTreeIfExists(bundletoolExtractDir.toString());
 }
