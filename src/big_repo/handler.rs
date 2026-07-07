@@ -28,10 +28,11 @@ use subduction_websocket::tokio::{TokioSpawn};
 
 /// The concrete keyhive protocol type for BigRepo.
 pub(crate) type BigRepoKeyhiveProtocol =
-    Arc<SendableRuntimeProtocol<BigRepoKeyhiveConnAdapter, BigRepoKeyhiveStorage>>;
+    Arc<SendableRuntimeProtocol<crate::keyhive_listener::BigRepoKeyhiveListener, BigRepoKeyhiveConnAdapter, BigRepoKeyhiveStorage>>;
 
 /// The concrete keyhive handler type for BigRepo.
 pub(crate) type BigRepoKeyhiveHandler = SendableKeyhiveHandler<
+    crate::keyhive_listener::BigRepoKeyhiveListener,
     BigRepoKeyhiveConnAdapter,
     BigRepoKeyhiveStorage,
     BigRepoIrohTransport,

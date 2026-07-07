@@ -72,6 +72,7 @@ impl PeerReplayTask {
         let peer_rpc = cx.rpc_clients.get(&self.peer_id).expect(ERROR_UNRECONIZED);
         let rx = peer_rpc
             .sub_parts(rpc::SubPartsRequest {
+                peer_id: self.peer_id,
                 parts: self
                     .parts
                     .into_iter()

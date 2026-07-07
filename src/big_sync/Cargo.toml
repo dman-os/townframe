@@ -17,7 +17,7 @@ test-support = ["big_sync_core/test-support"]
 # internal
 utils_rs = { workspace = true, features = ["hash"] }
 big_sync_core.workspace = true
-
+keyhive_core.workspace = true
 #
 # ds
 surelock.workspace = true

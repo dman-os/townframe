@@ -10,7 +10,7 @@ mod interlude {
 use crate::interlude::*;
 use crate::keyhive_storage::{BigRepoKeyhiveStorage, KEYHIVE_SUBDIR};
 
-use std::collections::BTreeSet;
+use std::collections::{BTreeSet, HashMap};
 use std::sync::atomic::{AtomicBool, Ordering};
 
 use automerge::ChangeHash;
@@ -27,6 +27,7 @@ pub mod ephemeral;
 pub(crate) mod handler;
 mod keyhive;
 pub(crate) mod keyhive_conn;
+pub(crate) mod keyhive_listener;
 pub(crate) mod keyhive_storage;
 mod runtime;
 pub(crate) mod wire;
@@ -50,6 +51,11 @@ pub use changes::{
 
 pub type DocumentId = big_sync_core::ObjId;
 pub type SharedPartStore = Arc<dyn big_sync::HostPartStore>;
+
+/// The global partition: every doc we can read appears here as a marker.
+/// Embedders pass this PartId to big_sync's `set_peer`.
+pub const GLOBAL_PART_ID: big_sync_core::PartId =
+    big_sync_core::PartId::new([0x67, 0x6c, 0x6f, 0x62, 0x61, 0x6c, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00]);
 
 #[derive(Debug, Clone)]
 pub struct Config {
@@ -109,13 +115,25 @@ impl BigRepo {
             StorageConfig::Disk { path } => BigRepoKeyhiveStorage::fs(path.join(KEYHIVE_SUBDIR))
                 .wrap_err("failed booting keyhive storage")?,
         };
+        // Create the listener channel before constructing Keyhive so the
+        // listener can be wired in (avoids the reference cycle). Only the
+        // sender side is used by the listener; the receiver is forwarded into
+        // the runtime's own event channel via a background task.
+        let (listener_evt_tx, listener_evt_rx) = tokio::sync::mpsc::unbounded_channel();
+        let listener = crate::keyhive_listener::BigRepoKeyhiveListener {
+            evt_tx: listener_evt_tx.clone(),
+        };
         let keyhive = if let Some(restored) =
-            BigKeyhiveHandle::restore_from_storage_archive(node_identity_seed, &keyhive_storage)
+            BigKeyhiveHandle::restore_from_storage_archive(
+                node_identity_seed,
+                &keyhive_storage,
+                listener.clone(),
+            )
                 .await?
         {
             restored
         } else {
-            BigKeyhiveHandle::new(node_identity_seed).await?
+            BigKeyhiveHandle::new(node_identity_seed, listener).await?
         };
         keyhive.import_prekey_secrets(&keyhive_storage).await?;
         keyhive.ingest_from_storage(&keyhive_storage).await?;
@@ -128,6 +146,7 @@ impl BigRepo {
             subduction_crypto::signer::memory::MemorySigner::from_bytes(&node_identity_seed);
         let peer_id = PeerId::new(*signer.verifying_key().as_bytes());
         let (change_manager, change_manager_stop) = changes::ChangeListenerManager::boot();
+
         let (runtime, ephemeral, runtime_stop) = match storage {
             StorageConfig::Memory => {
                 runtime::spawn_big_repo_runtime(
@@ -139,6 +158,7 @@ impl BigRepo {
                     keyhive_storage.clone(),
                     Arc::clone(&big_sync_store),
                     Arc::clone(&change_manager),
+                    listener_evt_rx,
                 )
                 .await?
             }
@@ -161,6 +181,7 @@ impl BigRepo {
                     keyhive_storage.clone(),
                     Arc::clone(&big_sync_store),
                     Arc::clone(&change_manager),
+                    listener_evt_rx,
                 )
                 .await?
             }
@@ -177,6 +198,25 @@ impl BigRepo {
             change_manager,
             change_manager_stop: std::sync::Mutex::new(Some(change_manager_stop)),
         });
+
+        // Boot full reindex: seed the doc-members index for our own principal.
+        // This is the ONLY full recompute — incremental updates handle the rest.
+        {
+            let own_id = PeerId::new(out.keyhive.clone_keyhive().id().to_bytes());
+            let store = out.big_sync_store.clone();
+            let kh = out.keyhive.clone();
+            tokio::spawn(async move {
+                let agent = keyhive_core::principal::identifier::Identifier::from(
+                    ed25519_dalek::VerifyingKey::from_bytes(own_id.0.as_bytes()).expect("own id is valid"),
+                );
+                let docs = kh.docs_for_agent(&agent).await;
+                for (doc_id, access) in docs {
+                    let mut agents = HashMap::new();
+                    agents.insert(own_id, access);
+                    store.set_doc_members(doc_id, agents).await;
+                }
+            });
+        }
 
         let change_manager_stop = out
             .change_manager_stop

@@ -1,11 +1,23 @@
 use crate::interlude::*;
 
+use crate::keyhive_listener::BigRepoKeyhiveListener;
 use crate::DocumentId;
 use automerge::ChangeHash;
 use autosurgeon::Prop;
+use beekem::operation::CgkaOperation;
+use future_form::Sendable;
+use keyhive_core::principal::group::{delegation::Delegation, revocation::Revocation};
+use keyhive_core::principal::individual::op::{add_key::AddKeyOp, rotate_key::RotateKeyOp};
+use keyhive_crypto::signed::Signed;
+use keyhive_crypto::signer::memory::MemorySigner;
 use std::sync::Mutex;
 use tokio::{sync::mpsc, task::JoinHandle};
 use tokio_util::sync::CancellationToken;
+
+/// Keyhive event payload type aliases — concrete for our generics.
+pub(crate) type SignedAddKeyOp = Signed<AddKeyOp>;
+pub(crate) type SignedRotateKeyOp = Signed<RotateKeyOp>;
+pub(crate) type SignedCgkaOp = Signed<CgkaOperation>;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum BigRepoChangeOrigin {
@@ -76,6 +88,34 @@ pub enum BigRepoPendingHeadNotification {
     },
 }
 
+#[derive(Debug, Clone)]
+pub enum BigRepoPrekeyNotification {
+    PrekeysExpanded {
+        new_prekey: Arc<SignedAddKeyOp>,
+    },
+    PrekeyRotated {
+        rotate_key: Arc<SignedRotateKeyOp>,
+    },
+}
+
+#[derive(Debug, Clone)]
+pub enum BigRepoCgkaNotification {
+    CgkaOp {
+        data: Arc<SignedCgkaOp>,
+    },
+}
+
+#[expect(clippy::type_complexity)]
+#[derive(Debug, Clone)]
+pub enum BigRepoMembershipNotification {
+    DelegationReceived {
+        data: Arc<Signed<Delegation<Sendable, MemorySigner, Vec<u8>, BigRepoKeyhiveListener>>>,
+    },
+    RevocationReceived {
+        data: Arc<Signed<Revocation<Sendable, MemorySigner, Vec<u8>, BigRepoKeyhiveListener>>>,
+    },
+}
+
 pub struct ChangeFilter {
     pub doc_id: Option<DocIdFilter>,
     pub origin: Option<OriginFilter>,
@@ -101,6 +141,15 @@ pub struct PendingHeadFilter {
     pub doc_id: Option<DocIdFilter>,
 }
 
+/// No filter fields yet — all prekey events are delivered to all subscribers.
+pub struct PrekeyFilter;
+
+/// No filter fields yet — all cgka events are delivered to all subscribers.
+pub struct CgkaFilter;
+
+/// No filter fields yet — all membership events are delivered to all subscribers.
+pub struct MembershipFilter;
+
 struct ChangeListener {
     id: Uuid,
     filter: ChangeFilter,
@@ -113,6 +162,21 @@ struct LocalListener {
     change_tx: mpsc::UnboundedSender<Vec<BigRepoLocalNotification>>,
 }
 
+struct PrekeyListener {
+    id: Uuid,
+    change_tx: mpsc::UnboundedSender<Vec<BigRepoPrekeyNotification>>,
+}
+
+struct CgkaListener {
+    id: Uuid,
+    change_tx: mpsc::UnboundedSender<Vec<BigRepoCgkaNotification>>,
+}
+
+struct MembershipListener {
+    id: Uuid,
+    change_tx: mpsc::UnboundedSender<Vec<BigRepoMembershipNotification>>,
+}
+
 pub struct ChangeListenerManager {
     listeners: Arc<Mutex<Vec<ChangeListener>>>,
     change_tx: mpsc::UnboundedSender<Vec<BigRepoChangeNotification>>,
@@ -123,6 +187,12 @@ pub struct ChangeListenerManager {
     local_listeners: Mutex<Vec<LocalListener>>,
     /// used to send local ops to the switchboard
     local_tx: mpsc::UnboundedSender<Vec<BigRepoLocalNotification>>,
+    prekey_listeners: Mutex<Vec<PrekeyListener>>,
+    prekey_tx: mpsc::UnboundedSender<Vec<BigRepoPrekeyNotification>>,
+    cgka_listeners: Mutex<Vec<CgkaListener>>,
+    cgka_tx: mpsc::UnboundedSender<Vec<BigRepoCgkaNotification>>,
+    membership_listeners: Mutex<Vec<MembershipListener>>,
+    membership_tx: mpsc::UnboundedSender<Vec<BigRepoMembershipNotification>>,
     cancel_token: CancellationToken,
 }
 
@@ -157,6 +227,9 @@ impl ChangeListenerManager {
         let (head_tx, head_rx) = mpsc::unbounded_channel();
         let (local_tx, local_rx) = mpsc::unbounded_channel();
         let (pending_head_tx, pending_head_rx) = mpsc::unbounded_channel();
+        let (prekey_tx, prekey_rx) = mpsc::unbounded_channel();
+        let (cgka_tx, cgka_rx) = mpsc::unbounded_channel();
+        let (membership_tx, membership_rx) = mpsc::unbounded_channel();
         let cancel_token = CancellationToken::new();
         let out = Self {
             listeners: default(),
@@ -167,10 +240,24 @@ impl ChangeListenerManager {
             pending_head_tx,
             local_listeners: default(),
             local_tx,
+            prekey_listeners: default(),
+            prekey_tx,
+            cgka_listeners: default(),
+            cgka_tx,
+            membership_listeners: default(),
+            membership_tx,
             cancel_token: cancel_token.clone(),
         };
         let out = Arc::new(out);
-        let handle = Arc::clone(&out).spawn_switchboard(change_rx, head_rx, local_rx, pending_head_rx);
+        let handle = Arc::clone(&out).spawn_switchboard(
+            change_rx,
+            head_rx,
+            local_rx,
+            pending_head_rx,
+            prekey_rx,
+            cgka_rx,
+            membership_rx,
+        );
 
         (
             out,
@@ -340,6 +427,66 @@ impl ChangeListenerManager {
         Ok(())
     }
 
+    pub(super) fn notify_prekeys_expanded(
+        &self,
+        new_prekey: Arc<SignedAddKeyOp>,
+    ) -> Res<()> {
+        self.ensure_live()?;
+        self.prekey_tx
+            .send(vec![BigRepoPrekeyNotification::PrekeysExpanded {
+                new_prekey,
+            }])?;
+        Ok(())
+    }
+
+    pub(super) fn notify_prekey_rotated(
+        &self,
+        rotate_key: Arc<SignedRotateKeyOp>,
+    ) -> Res<()> {
+        self.ensure_live()?;
+        self.prekey_tx
+            .send(vec![BigRepoPrekeyNotification::PrekeyRotated {
+                rotate_key,
+            }])?;
+        Ok(())
+    }
+
+    pub(super) fn notify_cgka_op(
+        &self,
+        data: Arc<SignedCgkaOp>,
+    ) -> Res<()> {
+        self.ensure_live()?;
+        self.cgka_tx
+            .send(vec![BigRepoCgkaNotification::CgkaOp {
+                data,
+            }])?;
+        Ok(())
+    }
+
+    pub(super) fn notify_delegation_received(
+        &self,
+        data: Arc<Signed<Delegation<Sendable, MemorySigner, Vec<u8>, BigRepoKeyhiveListener>>>,
+    ) -> Res<()> {
+        self.ensure_live()?;
+        self.membership_tx
+            .send(vec![BigRepoMembershipNotification::DelegationReceived {
+                data,
+            }])?;
+        Ok(())
+    }
+
+    pub(super) fn notify_revocation_received(
+        &self,
+        data: Arc<Signed<Revocation<Sendable, MemorySigner, Vec<u8>, BigRepoKeyhiveListener>>>,
+    ) -> Res<()> {
+        self.ensure_live()?;
+        self.membership_tx
+            .send(vec![BigRepoMembershipNotification::RevocationReceived {
+                data,
+            }])?;
+        Ok(())
+    }
+
     pub async fn subscribe_listener(
         self: &Arc<Self>,
         filter: ChangeFilter,
@@ -472,12 +619,88 @@ impl ChangeListenerManager {
         ))
     }
 
+    pub async fn subscribe_prekey_listener(
+        self: &Arc<Self>,
+        _filter: PrekeyFilter,
+    ) -> Res<(
+        PrekeyListenerRegistration,
+        mpsc::UnboundedReceiver<Vec<BigRepoPrekeyNotification>>,
+    )> {
+        self.ensure_live()?;
+        let (tx, rx) = mpsc::unbounded_channel();
+        let id = Uuid::new_v4();
+        self.prekey_listeners
+            .lock()
+            .expect(ERROR_MUTEX)
+            .push(PrekeyListener { id, change_tx: tx });
+        Ok((
+            PrekeyListenerRegistration {
+                manager: Arc::downgrade(self),
+                id,
+            },
+            rx,
+        ))
+    }
+
+    pub async fn subscribe_cgka_listener(
+        self: &Arc<Self>,
+        _filter: CgkaFilter,
+    ) -> Res<(
+        CgkaListenerRegistration,
+        mpsc::UnboundedReceiver<Vec<BigRepoCgkaNotification>>,
+    )> {
+        self.ensure_live()?;
+        let (tx, rx) = mpsc::unbounded_channel();
+        let id = Uuid::new_v4();
+        self.cgka_listeners
+            .lock()
+            .expect(ERROR_MUTEX)
+            .push(CgkaListener { id, change_tx: tx });
+        Ok((
+            CgkaListenerRegistration {
+                manager: Arc::downgrade(self),
+                id,
+            },
+            rx,
+        ))
+    }
+
+    pub async fn subscribe_membership_listener(
+        self: &Arc<Self>,
+        _filter: MembershipFilter,
+    ) -> Res<(
+        MembershipListenerRegistration,
+        mpsc::UnboundedReceiver<Vec<BigRepoMembershipNotification>>,
+    )> {
+        self.ensure_live()?;
+        let (tx, rx) = mpsc::unbounded_channel();
+        let id = Uuid::new_v4();
+        self.membership_listeners
+            .lock()
+            .expect(ERROR_MUTEX)
+            .push(MembershipListener {
+                id,
+                change_tx: tx,
+            });
+        Ok((
+            MembershipListenerRegistration {
+                manager: Arc::downgrade(self),
+                id,
+            },
+            rx,
+        ))
+    }
+
+    #[expect(clippy::too_many_arguments)]
     fn spawn_switchboard(
         self: Arc<Self>,
         mut change_rx: mpsc::UnboundedReceiver<Vec<BigRepoChangeNotification>>,
         mut head_rx: mpsc::UnboundedReceiver<Vec<BigRepoHeadNotification>>,
         mut local_rx: mpsc::UnboundedReceiver<Vec<BigRepoLocalNotification>>,
         mut pending_head_rx: mpsc::UnboundedReceiver<Vec<BigRepoPendingHeadNotification>>,
+        mut prekey_rx: mpsc::UnboundedReceiver<Vec<BigRepoPrekeyNotification>>,
+        mut cgka_rx: mpsc::UnboundedReceiver<Vec<BigRepoCgkaNotification>>,
+        mut membership_rx: mpsc::UnboundedReceiver<Vec<BigRepoMembershipNotification>>,
     ) -> JoinHandle<()> {
         let fut = async move {
             loop {
@@ -486,6 +709,9 @@ impl ChangeListenerManager {
                     Heads(Vec<BigRepoHeadNotification>),
                     Local(Vec<BigRepoLocalNotification>),
                     PendingHeads(Vec<BigRepoPendingHeadNotification>),
+                    Prekey(Vec<BigRepoPrekeyNotification>),
+                    Cgka(Vec<BigRepoCgkaNotification>),
+                    Membership(Vec<BigRepoMembershipNotification>),
                 }
                 let input = tokio::select! {
                     biased;
@@ -516,6 +742,24 @@ impl ChangeListenerManager {
                             continue;
                         };
                         SwitchboardInput::PendingHeads(val)
+                    },
+                    val = prekey_rx.recv() => {
+                        let Some(val) = val else {
+                            continue;
+                        };
+                        SwitchboardInput::Prekey(val)
+                    },
+                    val = cgka_rx.recv() => {
+                        let Some(val) = val else {
+                            continue;
+                        };
+                        SwitchboardInput::Cgka(val)
+                    },
+                    val = membership_rx.recv() => {
+                        let Some(val) = val else {
+                            continue;
+                        };
+                        SwitchboardInput::Membership(val)
                     }
                 };
 
@@ -665,6 +909,81 @@ impl ChangeListenerManager {
                                 .retain(|listener| !failed_listener_ids.contains(&listener.id));
                         }
                     }
+                    SwitchboardInput::Prekey(notifications) => {
+                        let to_send = {
+                            let listeners = self.prekey_listeners.lock().expect(ERROR_MUTEX);
+                            let mut to_send = Vec::new();
+                            for listener in listeners.iter() {
+                                to_send.push((
+                                    listener.id,
+                                    listener.change_tx.clone(),
+                                    notifications.clone(),
+                                ));
+                            }
+                            to_send
+                        };
+                        let mut failed_listener_ids = Vec::new();
+                        for (listener_id, change_tx, notifications) in to_send {
+                            if change_tx.send(notifications).is_err() {
+                                failed_listener_ids.push(listener_id);
+                            }
+                        }
+                        if !failed_listener_ids.is_empty() {
+                            let mut listeners = self.prekey_listeners.lock().expect(ERROR_MUTEX);
+                            listeners
+                                .retain(|listener| !failed_listener_ids.contains(&listener.id));
+                        }
+                    }
+                    SwitchboardInput::Cgka(notifications) => {
+                        let to_send = {
+                            let listeners = self.cgka_listeners.lock().expect(ERROR_MUTEX);
+                            let mut to_send = Vec::new();
+                            for listener in listeners.iter() {
+                                to_send.push((
+                                    listener.id,
+                                    listener.change_tx.clone(),
+                                    notifications.clone(),
+                                ));
+                            }
+                            to_send
+                        };
+                        let mut failed_listener_ids = Vec::new();
+                        for (listener_id, change_tx, notifications) in to_send {
+                            if change_tx.send(notifications).is_err() {
+                                failed_listener_ids.push(listener_id);
+                            }
+                        }
+                        if !failed_listener_ids.is_empty() {
+                            let mut listeners = self.cgka_listeners.lock().expect(ERROR_MUTEX);
+                            listeners
+                                .retain(|listener| !failed_listener_ids.contains(&listener.id));
+                        }
+                    }
+                    SwitchboardInput::Membership(notifications) => {
+                        let to_send = {
+                            let listeners = self.membership_listeners.lock().expect(ERROR_MUTEX);
+                            let mut to_send = Vec::new();
+                            for listener in listeners.iter() {
+                                to_send.push((
+                                    listener.id,
+                                    listener.change_tx.clone(),
+                                    notifications.clone(),
+                                ));
+                            }
+                            to_send
+                        };
+                        let mut failed_listener_ids = Vec::new();
+                        for (listener_id, change_tx, notifications) in to_send {
+                            if change_tx.send(notifications).is_err() {
+                                failed_listener_ids.push(listener_id);
+                            }
+                        }
+                        if !failed_listener_ids.is_empty() {
+                            let mut listeners = self.membership_listeners.lock().expect(ERROR_MUTEX);
+                            listeners
+                                .retain(|listener| !failed_listener_ids.contains(&listener.id));
+                        }
+                    }
                 }
             }
             eyre::Ok(())
@@ -793,6 +1112,60 @@ impl Drop for PendingHeadListenerRegistration {
     }
 }
 
+pub struct PrekeyListenerRegistration {
+    manager: std::sync::Weak<ChangeListenerManager>,
+    id: Uuid,
+}
+
+impl Drop for PrekeyListenerRegistration {
+    fn drop(&mut self) {
+        if let Some(manager) = self.manager.upgrade() {
+            let id = self.id;
+            manager
+                .prekey_listeners
+                .lock()
+                .expect(ERROR_MUTEX)
+                .retain(|listener| listener.id != id);
+        }
+    }
+}
+
+pub struct CgkaListenerRegistration {
+    manager: std::sync::Weak<ChangeListenerManager>,
+    id: Uuid,
+}
+
+impl Drop for CgkaListenerRegistration {
+    fn drop(&mut self) {
+        if let Some(manager) = self.manager.upgrade() {
+            let id = self.id;
+            manager
+                .cgka_listeners
+                .lock()
+                .expect(ERROR_MUTEX)
+                .retain(|listener| listener.id != id);
+        }
+    }
+}
+
+pub struct MembershipListenerRegistration {
+    manager: std::sync::Weak<ChangeListenerManager>,
+    id: Uuid,
+}
+
+impl Drop for MembershipListenerRegistration {
+    fn drop(&mut self) {
+        if let Some(manager) = self.manager.upgrade() {
+            let id = self.id;
+            manager
+                .membership_listeners
+                .lock()
+                .expect(ERROR_MUTEX)
+                .retain(|listener| listener.id != id);
+        }
+    }
+}
+
 fn local_notification_matches_filter(
     notification: &BigRepoLocalNotification,
     filter: &LocalFilter,
@@ -855,6 +1228,30 @@ fn pending_head_notification_matches_filter(
         .as_ref()
         .map(|target| target.doc_id != *doc_id)
         .unwrap_or_default()
+}
+
+fn prekey_notification_matches_filter(
+    _notification: &BigRepoPrekeyNotification,
+    _filter: &PrekeyFilter,
+) -> bool {
+    // No filter fields yet — always deliver.
+    true
+}
+
+fn cgka_notification_matches_filter(
+    _notification: &BigRepoCgkaNotification,
+    _filter: &CgkaFilter,
+) -> bool {
+    // No filter fields yet — always deliver.
+    true
+}
+
+fn membership_notification_matches_filter(
+    _notification: &BigRepoMembershipNotification,
+    _filter: &MembershipFilter,
+) -> bool {
+    // No filter fields yet — always deliver.
+    true
 }
 
 pub fn path_prefix_matches(

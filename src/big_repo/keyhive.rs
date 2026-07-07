@@ -1,25 +1,29 @@
 use crate::interlude::*;
 
-use crate::DocumentId;
+use crate::{keyhive_listener::BigRepoKeyhiveListener, DocumentId};
+use keyhive_core::principal::identifier::Identifier;
+use std::collections::{BTreeMap, HashMap};
+use keyhive_core::access::Access;
+use keyhive_core::principal::document::id::DocumentId as KhDocumentId;
+use keyhive_core::principal::group::id::GroupId as KhGroupId;
 use keyhive_core::event::static_event::StaticEvent;
-use keyhive_core::listener::no_listener::NoListener;
 use keyhive_crypto::signer::memory::MemorySigner;
 use nonempty::NonEmpty;
+use std::sync::Arc;
 use std::fmt::{Debug, Formatter};
-use subduction_keyhive::runtime::SendableRuntimeKeyhive;
 
 pub type BigKeyhiveAgent = keyhive_core::principal::agent::Agent<
     future_form::Sendable,
     keyhive_crypto::signer::memory::MemorySigner,
     Vec<u8>,
-    keyhive_core::listener::no_listener::NoListener,
+    BigRepoKeyhiveListener,
 >;
 
 type BigKeyhiveGroupInner = keyhive_core::principal::group::Group<
     future_form::Sendable,
     keyhive_crypto::signer::memory::MemorySigner,
     Vec<u8>,
-    keyhive_core::listener::no_listener::NoListener,
+    BigRepoKeyhiveListener,
 >;
 
 type BigKeyhiveGroupShared = Arc<futures::lock::Mutex<BigKeyhiveGroupInner>>;
@@ -104,29 +108,50 @@ type BigKeyhivePeer = keyhive_core::principal::peer::Peer<
     future_form::Sendable,
     keyhive_crypto::signer::memory::MemorySigner,
     Vec<u8>,
-    keyhive_core::listener::no_listener::NoListener,
+    BigRepoKeyhiveListener,
 >;
 
 type BigKeyhiveDelegation = keyhive_core::principal::group::delegation::Delegation<
     future_form::Sendable,
     MemorySigner,
     Vec<u8>,
-    NoListener,
+    BigRepoKeyhiveListener,
+>;
+
+type BigKeyhiveRevocation = keyhive_core::principal::group::revocation::Revocation<
+    future_form::Sendable,
+    MemorySigner,
+    Vec<u8>,
+    BigRepoKeyhiveListener,
+>;
+
+/// The concrete [`Keyhive`] type with our [`BigRepoKeyhiveListener`].
+type BigKeyhiveKeyhive = keyhive_core::keyhive::Keyhive<
+    future_form::Sendable,
+    keyhive_crypto::signer::memory::MemorySigner,
+    Vec<u8>,
+    Vec<u8>,
+    keyhive_core::store::ciphertext::memory::MemoryCiphertextStore<Vec<u8>, Vec<u8>>,
+    BigRepoKeyhiveListener,
+    rand_08::rngs::OsRng,
 >;
 
 #[derive(Clone)]
 pub struct BigKeyhiveHandle {
-    keyhive: Arc<SendableRuntimeKeyhive>,
+    keyhive: Arc<BigKeyhiveKeyhive>,
     signer: MemorySigner,
     contact_card: Arc<keyhive_core::contact_card::ContactCard>,
     keyhive_peer_id: subduction_keyhive::KeyhivePeerId,
 }
 // a background task. rename to new
 impl BigKeyhiveHandle {
-    pub(crate) async fn new(seed: [u8; 32]) -> Res<Self> {
+    pub(crate) async fn new(
+        seed: [u8; 32],
+        listener: BigRepoKeyhiveListener,
+    ) -> Res<Self> {
         let signer = MemorySigner::from(ed25519_dalek::SigningKey::from_bytes(&seed));
         let (keyhive, keyhive_peer_id, contact_card) =
-            subduction_keyhive::runtime::init_sendable_keyhive(signer.clone())
+            subduction_keyhive::runtime::init_sendable_keyhive(signer.clone(), listener)
                 .await
                 .map_err(|err| ferr!("error on keyhive init: {err:?}"))?;
         Ok(Self {
@@ -140,6 +165,7 @@ impl BigKeyhiveHandle {
     pub(crate) async fn restore_from_storage_archive(
         seed: [u8; 32],
         storage: &crate::keyhive_storage::BigRepoKeyhiveStorage,
+        listener: BigRepoKeyhiveListener,
     ) -> Res<Option<Self>> {
         use keyhive_crypto::verifiable::Verifiable;
         let signer = MemorySigner::from(ed25519_dalek::SigningKey::from_bytes(&seed));
@@ -159,7 +185,7 @@ impl BigKeyhiveHandle {
             signer.clone(),
             keyhive_core::store::ciphertext::memory::MemoryCiphertextStore::<Vec<u8>, Vec<u8>>::new(
             ),
-            keyhive_core::listener::no_listener::NoListener,
+            listener,
             Arc::new(futures::lock::Mutex::new(rand_08::rngs::OsRng)),
         )
         .await
@@ -219,8 +245,129 @@ impl BigKeyhiveHandle {
         Ok(())
     }
 
-    pub(crate) fn clone_keyhive(&self) -> Arc<SendableRuntimeKeyhive> {
+    pub(crate) fn clone_keyhive(&self) -> Arc<BigKeyhiveKeyhive> {
         Arc::clone(&self.keyhive)
+    }
+
+    /// All docs reachable by `agent`, with the [`Access`] level for each.
+    /// O(all_docs × transitive_members) — only for boot full reindex.
+    pub async fn docs_for_agent(
+        &self,
+        agent: &Identifier,
+    ) -> BTreeMap<DocumentId, Access> {
+        let keyhive = self.keyhive.as_ref();
+        let mut caps = BTreeMap::new();
+        let doc_ids: Vec<KhDocumentId> = {
+            let docs = keyhive.documents().lock().await;
+            docs.keys().copied().collect()
+        };
+        for kh_doc_id in doc_ids {
+            if let Some(doc) = keyhive.get_document(kh_doc_id).await {
+                let locked = doc.lock().await;
+                if let Some((_, access)) = locked.transitive_members().await.get(agent) {
+                    caps.insert(DocumentId::new(kh_doc_id.to_bytes()), *access);
+                }
+            }
+        }
+        caps
+    }
+
+    /// All agents (individuals + groups) who can reach this doc/group, with [`Access`].
+    /// O(|transitive_members(target)|) — used for incremental per-target update.
+    pub async fn agents_for_membered(
+        &self,
+        id: Identifier,
+    ) -> HashMap<[u8; 32], Access> {
+        let keyhive = self.keyhive.as_ref();
+        // Try document first, then group
+        if let Some(doc) = keyhive
+            .get_document(KhDocumentId::from(id))
+            .await
+        {
+            let locked = doc.lock().await;
+            return locked
+                .transitive_members()
+                .await
+                .into_iter()
+                .map(|(id, (_, access))| (id.to_bytes(), access))
+                .collect();
+        }
+        if let Some(group) = keyhive.get_group(KhGroupId::from(id)).await {
+            let locked = group.lock().await;
+            return locked
+                .transitive_members()
+                .await
+                .into_iter()
+                .map(|(id, (_, access))| (id.to_bytes(), access))
+                .collect();
+        }
+        HashMap::new()
+    }
+
+    /// What [`Access`] does `agent` have on this doc/group? None if unreachable.
+    pub async fn agent_access_on(
+        &self,
+        agent: &Identifier,
+        membered_id: Identifier,
+    ) -> Option<Access> {
+        let keyhive = self.keyhive.as_ref();
+        if let Some(doc) = keyhive
+            .get_document(KhDocumentId::from(membered_id))
+            .await
+        {
+            let locked = doc.lock().await;
+            return locked
+                .transitive_members()
+                .await
+                .get(agent)
+                .map(|(_, access)| *access);
+        }
+        if let Some(group) = keyhive.get_group(KhGroupId::from(membered_id)).await {
+            let locked = group.lock().await;
+            return locked
+                .transitive_members()
+                .await
+                .get(agent)
+                .map(|(_, access)| *access);
+        }
+        None
+    }
+
+    /// All groups AND docs `agent` can reach, with [`Access`].
+    pub async fn membered_for_agent(
+        &self,
+        agent: &Identifier,
+    ) -> HashMap<[u8; 32], Access> {
+        let keyhive = self.keyhive.as_ref();
+        let mut caps = HashMap::new();
+        // Enumerate docs
+        let doc_ids: Vec<KhDocumentId> = {
+            let docs = keyhive.documents().lock().await;
+            docs.keys().copied().collect()
+        };
+        for kh_doc_id in doc_ids {
+            if let Some(doc) = keyhive.get_document(kh_doc_id).await {
+                let locked = doc.lock().await;
+                if let Some((_, access)) = locked.transitive_members().await.get(agent) {
+                    caps.insert(kh_doc_id.to_bytes(), *access);
+                }
+            }
+        }
+        // Enumerate groups
+        #[allow(unused_mut)]
+        let mut group_ids: Vec<KhGroupId> = {
+            let groups = keyhive.groups().lock().await;
+            groups.keys().copied().collect()
+        };
+        for kh_group_id in group_ids {
+            if let Some(group) = keyhive.get_group(kh_group_id).await {
+                let locked = group.lock().await;
+                if let Some((_, access)) = locked.transitive_members().await.get(agent) {
+                    caps.insert(kh_group_id.to_bytes(), *access);
+                }
+            }
+        }
+        caps
     }
 
     pub(crate) fn contact_card(&self) -> &keyhive_core::contact_card::ContactCard {
@@ -386,7 +533,7 @@ async fn persist_delegation(
         future_form::Sendable,
         MemorySigner,
         Vec<u8>,
-        NoListener,
+        BigRepoKeyhiveListener,
     >::Delegated(delegation)
     .into();
     subduction_keyhive::save_event::<Vec<u8>, _, future_form::Sendable>(storage, &event)

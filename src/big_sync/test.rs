@@ -186,7 +186,7 @@ impl crate::rpc::HostBigRpcClient for MemoryRpcClient {
         if !self.world.is_online(self.target_peer_id) {
             return Ok(Err(big_sync_core::rpc::RpcError::TransportError));
         }
-        let receiver = self.target_part_store.subscribe(req).await??;
+        let receiver = self.target_part_store.subscribe(req, PeerId::new([0u8; 32])).await??;
         Ok(Ok(Ok(receiver)))
     }
 
