@@ -1,16 +1,16 @@
 use crate::interlude::*;
 
 use crate::{keyhive_listener::BigRepoKeyhiveListener, DocumentId};
-use keyhive_core::principal::identifier::Identifier;
-use std::collections::{BTreeMap, HashMap};
 use keyhive_core::access::Access;
+use keyhive_core::event::static_event::StaticEvent;
 use keyhive_core::principal::document::id::DocumentId as KhDocumentId;
 use keyhive_core::principal::group::id::GroupId as KhGroupId;
-use keyhive_core::event::static_event::StaticEvent;
+use keyhive_core::principal::identifier::Identifier;
 use keyhive_crypto::signer::memory::MemorySigner;
 use nonempty::NonEmpty;
-use std::sync::Arc;
+use std::collections::{BTreeMap, HashMap};
 use std::fmt::{Debug, Formatter};
+use std::sync::Arc;
 
 pub type BigKeyhiveAgent = keyhive_core::principal::agent::Agent<
     future_form::Sendable,
@@ -145,10 +145,7 @@ pub struct BigKeyhiveHandle {
 }
 // a background task. rename to new
 impl BigKeyhiveHandle {
-    pub(crate) async fn new(
-        seed: [u8; 32],
-        listener: BigRepoKeyhiveListener,
-    ) -> Res<Self> {
+    pub(crate) async fn new(seed: [u8; 32], listener: BigRepoKeyhiveListener) -> Res<Self> {
         let signer = MemorySigner::from(ed25519_dalek::SigningKey::from_bytes(&seed));
         let (keyhive, keyhive_peer_id, contact_card) =
             subduction_keyhive::runtime::init_sendable_keyhive(signer.clone(), listener)
@@ -251,10 +248,7 @@ impl BigKeyhiveHandle {
 
     /// All docs reachable by `agent`, with the [`Access`] level for each.
     /// O(all_docs × transitive_members) — only for boot full reindex.
-    pub async fn docs_for_agent(
-        &self,
-        agent: &Identifier,
-    ) -> BTreeMap<DocumentId, Access> {
+    pub async fn docs_for_agent(&self, agent: &Identifier) -> BTreeMap<DocumentId, Access> {
         let keyhive = self.keyhive.as_ref();
         let mut caps = BTreeMap::new();
         let doc_ids: Vec<KhDocumentId> = {
@@ -274,16 +268,10 @@ impl BigKeyhiveHandle {
 
     /// All agents (individuals + groups) who can reach this doc/group, with [`Access`].
     /// O(|transitive_members(target)|) — used for incremental per-target update.
-    pub async fn agents_for_membered(
-        &self,
-        id: Identifier,
-    ) -> HashMap<[u8; 32], Access> {
+    pub async fn agents_for_membered(&self, id: Identifier) -> HashMap<[u8; 32], Access> {
         let keyhive = self.keyhive.as_ref();
         // Try document first, then group
-        if let Some(doc) = keyhive
-            .get_document(KhDocumentId::from(id))
-            .await
-        {
+        if let Some(doc) = keyhive.get_document(KhDocumentId::from(id)).await {
             let locked = doc.lock().await;
             return locked
                 .transitive_members()
@@ -311,10 +299,7 @@ impl BigKeyhiveHandle {
         membered_id: Identifier,
     ) -> Option<Access> {
         let keyhive = self.keyhive.as_ref();
-        if let Some(doc) = keyhive
-            .get_document(KhDocumentId::from(membered_id))
-            .await
-        {
+        if let Some(doc) = keyhive.get_document(KhDocumentId::from(membered_id)).await {
             let locked = doc.lock().await;
             return locked
                 .transitive_members()
@@ -334,10 +319,7 @@ impl BigKeyhiveHandle {
     }
 
     /// All groups AND docs `agent` can reach, with [`Access`].
-    pub async fn membered_for_agent(
-        &self,
-        agent: &Identifier,
-    ) -> HashMap<[u8; 32], Access> {
+    pub async fn membered_for_agent(&self, agent: &Identifier) -> HashMap<[u8; 32], Access> {
         let keyhive = self.keyhive.as_ref();
         let mut caps = HashMap::new();
         // Enumerate docs

@@ -90,19 +90,13 @@ pub enum BigRepoPendingHeadNotification {
 
 #[derive(Debug, Clone)]
 pub enum BigRepoPrekeyNotification {
-    PrekeysExpanded {
-        new_prekey: Arc<SignedAddKeyOp>,
-    },
-    PrekeyRotated {
-        rotate_key: Arc<SignedRotateKeyOp>,
-    },
+    PrekeysExpanded { new_prekey: Arc<SignedAddKeyOp> },
+    PrekeyRotated { rotate_key: Arc<SignedRotateKeyOp> },
 }
 
 #[derive(Debug, Clone)]
 pub enum BigRepoCgkaNotification {
-    CgkaOp {
-        data: Arc<SignedCgkaOp>,
-    },
+    CgkaOp { data: Arc<SignedCgkaOp> },
 }
 
 #[expect(clippy::type_complexity)]
@@ -427,10 +421,7 @@ impl ChangeListenerManager {
         Ok(())
     }
 
-    pub(super) fn notify_prekeys_expanded(
-        &self,
-        new_prekey: Arc<SignedAddKeyOp>,
-    ) -> Res<()> {
+    pub(super) fn notify_prekeys_expanded(&self, new_prekey: Arc<SignedAddKeyOp>) -> Res<()> {
         self.ensure_live()?;
         self.prekey_tx
             .send(vec![BigRepoPrekeyNotification::PrekeysExpanded {
@@ -439,10 +430,7 @@ impl ChangeListenerManager {
         Ok(())
     }
 
-    pub(super) fn notify_prekey_rotated(
-        &self,
-        rotate_key: Arc<SignedRotateKeyOp>,
-    ) -> Res<()> {
+    pub(super) fn notify_prekey_rotated(&self, rotate_key: Arc<SignedRotateKeyOp>) -> Res<()> {
         self.ensure_live()?;
         self.prekey_tx
             .send(vec![BigRepoPrekeyNotification::PrekeyRotated {
@@ -451,15 +439,10 @@ impl ChangeListenerManager {
         Ok(())
     }
 
-    pub(super) fn notify_cgka_op(
-        &self,
-        data: Arc<SignedCgkaOp>,
-    ) -> Res<()> {
+    pub(super) fn notify_cgka_op(&self, data: Arc<SignedCgkaOp>) -> Res<()> {
         self.ensure_live()?;
         self.cgka_tx
-            .send(vec![BigRepoCgkaNotification::CgkaOp {
-                data,
-            }])?;
+            .send(vec![BigRepoCgkaNotification::CgkaOp { data }])?;
         Ok(())
     }
 
@@ -678,10 +661,7 @@ impl ChangeListenerManager {
         self.membership_listeners
             .lock()
             .expect(ERROR_MUTEX)
-            .push(MembershipListener {
-                id,
-                change_tx: tx,
-            });
+            .push(MembershipListener { id, change_tx: tx });
         Ok((
             MembershipListenerRegistration {
                 manager: Arc::downgrade(self),
@@ -867,7 +847,8 @@ impl ChangeListenerManager {
                             }
                         }
                         if !failed_listener_ids.is_empty() {
-                            let mut listeners = self.pending_head_listeners.lock().expect(ERROR_MUTEX);
+                            let mut listeners =
+                                self.pending_head_listeners.lock().expect(ERROR_MUTEX);
                             listeners
                                 .retain(|listener| !failed_listener_ids.contains(&listener.id));
                         }
@@ -979,7 +960,8 @@ impl ChangeListenerManager {
                             }
                         }
                         if !failed_listener_ids.is_empty() {
-                            let mut listeners = self.membership_listeners.lock().expect(ERROR_MUTEX);
+                            let mut listeners =
+                                self.membership_listeners.lock().expect(ERROR_MUTEX);
                             listeners
                                 .retain(|listener| !failed_listener_ids.contains(&listener.id));
                         }

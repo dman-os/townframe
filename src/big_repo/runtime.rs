@@ -110,7 +110,6 @@ impl<T> DocLookup<T> {
             Self::PendingMaterialization => Err(GetDocError::PendingMaterialization(doc_id)),
         }
     }
-
 }
 
 #[derive(educe::Educe)]
@@ -246,9 +245,11 @@ enum ConnTask {
 }
 
 /// Keyhive event payload type aliases — concrete for our generics.
-type SignedAddKeyOp = keyhive_crypto::signed::Signed<keyhive_core::principal::individual::op::add_key::AddKeyOp>;
-type SignedRotateKeyOp =
-    keyhive_crypto::signed::Signed<keyhive_core::principal::individual::op::rotate_key::RotateKeyOp>;
+type SignedAddKeyOp =
+    keyhive_crypto::signed::Signed<keyhive_core::principal::individual::op::add_key::AddKeyOp>;
+type SignedRotateKeyOp = keyhive_crypto::signed::Signed<
+    keyhive_core::principal::individual::op::rotate_key::RotateKeyOp,
+>;
 type SignedCgkaOp = keyhive_crypto::signed::Signed<beekem::operation::CgkaOperation>;
 
 pub(crate) enum RuntimeEvt {
@@ -402,10 +403,7 @@ impl BigRepoRuntimeHandle {
     pub async fn contains_sedimentree_id(&self, doc_id: DocumentId) -> Res<bool> {
         let (tx, rx) = oneshot::channel();
         self.cmd_tx
-            .send(RuntimeCmd::CheckSedimentreeResident {
-                doc_id,
-                resp: tx,
-            })
+            .send(RuntimeCmd::CheckSedimentreeResident { doc_id, resp: tx })
             .map_err(|_| eyre::eyre!(ERROR_ACTOR))?;
         rx.await.map_err(|_| eyre::eyre!(ERROR_CHANNEL))
     }
@@ -414,10 +412,7 @@ impl BigRepoRuntimeHandle {
     pub async fn has_doc_worker(&self, doc_id: DocumentId) -> Res<bool> {
         let (tx, rx) = oneshot::channel();
         self.cmd_tx
-            .send(RuntimeCmd::CheckDocWorkerExists {
-                doc_id,
-                resp: tx,
-            })
+            .send(RuntimeCmd::CheckDocWorkerExists { doc_id, resp: tx })
             .map_err(|_| eyre::eyre!(ERROR_ACTOR))?;
         rx.await.map_err(|_| eyre::eyre!(ERROR_CHANNEL))
     }
@@ -1062,6 +1057,7 @@ where
             } => {
                 let worker = self.doc_worker_handle(doc_id).expect(ERROR_ACTOR);
                 worker
+                    .msg_tx
                     .send(DocWorkerMsg::PutDoc {
                         initial_content,
                         resp,
@@ -1071,6 +1067,7 @@ where
             RuntimeCmd::GetDocHandle { doc_id, resp } => {
                 let worker = self.doc_worker_handle(doc_id).expect(ERROR_ACTOR);
                 worker
+                    .msg_tx
                     .send(DocWorkerMsg::AcquireHandle { resp })
                     .expect(ERROR_ACTOR);
             }
@@ -1087,6 +1084,7 @@ where
                     entry.transient_work += 1;
                 }
                 worker
+                    .msg_tx
                     .send(DocWorkerMsg::CommitDelta {
                         commits,
                         heads,
@@ -1135,7 +1133,7 @@ where
                     timeout,
                     done,
                 };
-                if let Err(err) = worker.send_msg(msg) {
+                if let Err(err) = worker.msg_tx.send(msg) {
                     self.handle_doc_worker_transient_finished(doc_id);
                     let DocWorkerMsg::SyncWithPeer { done, .. } = err.0 else {
                         unreachable!("send_msg returned a different doc worker message");
@@ -1155,12 +1153,16 @@ where
                     let res = async {
                         let loose_commits = <S as subduction_core::storage::traits::Storage<
                             Sendable,
-                        >>::load_loose_commits(&storage, sedimentree_id)
+                        >>::load_loose_commits(
+                            &storage, sedimentree_id
+                        )
                         .await
                         .wrap_err("failed loading loose commits for inspection")?;
                         let fragments = <S as subduction_core::storage::traits::Storage<
                             Sendable,
-                        >>::load_fragments(&storage, sedimentree_id)
+                        >>::load_fragments(
+                            &storage, sedimentree_id
+                        )
                         .await
                         .wrap_err("failed loading fragments for inspection")?;
                         let mut out = Vec::with_capacity(loose_commits.len() + fragments.len());
@@ -1188,6 +1190,7 @@ where
                 if let Some(entry) = self.doc_workers.get(&doc_id) {
                     entry
                         .handle
+                        .msg_tx
                         .send(DocWorkerMsg::CancelSyncWithPeer {
                             peer_id,
                             waiter_id: Some(waiter_id),
@@ -1316,9 +1319,7 @@ where
                     .expect(ERROR_ACTOR);
             }
             RuntimeEvt::CgkaOp { data } => {
-                self.change_manager
-                    .notify_cgka_op(data)
-                    .expect(ERROR_ACTOR);
+                self.change_manager.notify_cgka_op(data).expect(ERROR_ACTOR);
             }
             RuntimeEvt::DelegationReceived { target, data } => {
                 self.change_manager
@@ -1355,7 +1356,11 @@ where
             store.set_doc_members(doc_id, agents.clone()).await;
 
             // Global partition marker: are WE readable?
-            if agents.get(&own_principal).map(|a| a.is_reader()).unwrap_or(false) {
+            if agents
+                .get(&own_principal)
+                .map(|a| a.is_reader())
+                .unwrap_or(false)
+            {
                 store
                     .add_obj_to_parts(doc_id, vec![crate::GLOBAL_PART_ID])
                     .await
@@ -1376,7 +1381,10 @@ where
             let kh = keyhive.clone_keyhive();
             let group_ids: std::collections::HashSet<PeerId> = {
                 let locked = kh.groups().lock().await;
-                locked.keys().map(|gid| PeerId::new(gid.to_bytes())).collect()
+                locked
+                    .keys()
+                    .map(|gid| PeerId::new(gid.to_bytes()))
+                    .collect()
             };
             for (agent_id, _access) in &agents {
                 if group_ids.contains(agent_id) {
@@ -1399,14 +1407,17 @@ where
         F: std::future::Future<Output = ()> + Send + 'static,
     {
         let stop = self.runtime_stop.child_token();
-        self.runtime_tasks
-            .spawn(
-                async move {
-                    let _ = stop.run_until_cancelled(fut).await;
-                }
-                .instrument(tracing::info_span!("spawn_background")),
-            )
-            .expect(ERROR_TOKIO);
+        match self.runtime_tasks.spawn(
+            async move {
+                let _ = stop.run_until_cancelled(fut).await;
+            }
+            .instrument(tracing::info_span!("spawn_background")),
+        ) {
+            Ok(_) => {}
+            Err(utils_rs::AbortableJoinSetError::Aborted) => {
+                warn!("spawn_background aborted: shutting down")
+            }
+        }
     }
 
     fn schedule_doc_worker_eviction_if_idle(&mut self, doc_id: DocumentId) {
@@ -1463,44 +1474,31 @@ where
                 (entry.transient_work > 0).then_some((*doc_id, entry.handle.clone()))
             })
             .collect::<Vec<_>>();
-        for (_, worker) in workers {
-            worker
+        for (doc_id, worker) in workers {
+            if worker
+                .msg_tx
                 .send(DocWorkerMsg::CancelSyncWithPeer {
                     peer_id,
                     waiter_id: None,
                     reason,
                 })
-                .wrap_err(ERROR_ACTOR)?;
+                .is_err()
+            {
+                // A worker can stop after the transient-work snapshot and
+                // before connection-loss cancellation is fanned out. The
+                // DocWorkerStopped event is responsible for final cleanup.
+                warn!(%doc_id, %peer_id, "doc worker stopped before sync cancellation");
+            }
         }
         Ok(())
     }
-
-    fn cancel_pending_keyhive_sync(
-        &mut self,
-        peer_id: PeerId,
-        waiter_id: u64,
-    ) -> Option<oneshot::Sender<Res<()>>> {
-        if let Some(waiters) = self.pending_keyhive_syncs.get_mut(&peer_id) {
-            let pos = waiters.iter().position(|(pending_id, _)| *pending_id == waiter_id);
-            if let Some(pos) = pos {
-                let (_, waiter) = waiters.remove(pos);
-                if waiters.is_empty() {
-                    self.pending_keyhive_syncs.remove(&peer_id);
-                }
-                return Some(waiter);
-            }
-        }
-        None
-    }
-
-
 
     #[tracing::instrument(skip_all,fields(%doc_id))]
     fn spawn_doc_worker(&mut self, doc_id: DocumentId) -> Res<()> {
         if self
             .doc_workers
             .get(&doc_id)
-            .is_some_and(|entry| !entry.handle.is_closed())
+            .is_some_and(|entry| !entry.handle.msg_tx.is_closed())
         {
             if let Some(entry) = self.doc_workers.get_mut(&doc_id) {
                 entry.eviction_deadline = None;
@@ -1611,6 +1609,7 @@ where
             entry.local_handles -= 1;
             entry
                 .handle
+                .msg_tx
                 .send(DocWorkerMsg::ReleaseHandleLease)
                 .expect(ERROR_ACTOR);
         }
@@ -1637,6 +1636,7 @@ where
             entry.transient_work += 1;
         }
         worker
+            .msg_tx
             .send(DocWorkerMsg::ApplySyncSession { session })
             .expect(ERROR_ACTOR);
     }
@@ -1647,6 +1647,7 @@ impl<S> BigRepoRuntimeWorker<S>
 where
     S: BigRepoSubductionStorage,
 {
+    // FIXME: why do we have two of these
     fn cancel_pending_keyhive_syncs(&mut self, peer_id: PeerId, reason: &'static str) {
         self.active_keyhive_syncs.remove(&peer_id);
         self.keyhive_dirty.remove(&peer_id);
@@ -1658,6 +1659,27 @@ where
                     .ok();
             }
         }
+    }
+
+    // FIXME: why do we have two of these
+    fn cancel_pending_keyhive_sync(
+        &mut self,
+        peer_id: PeerId,
+        waiter_id: u64,
+    ) -> Option<oneshot::Sender<Res<()>>> {
+        if let Some(waiters) = self.pending_keyhive_syncs.get_mut(&peer_id) {
+            let pos = waiters
+                .iter()
+                .position(|(pending_id, _)| *pending_id == waiter_id);
+            if let Some(pos) = pos {
+                let (_, waiter) = waiters.remove(pos);
+                if waiters.is_empty() {
+                    self.pending_keyhive_syncs.remove(&peer_id);
+                }
+                return Some(waiter);
+            }
+        }
+        None
     }
 
     fn finish_keyhive_sync(&mut self, peer_id: PeerId) -> Res<()> {
@@ -1684,6 +1706,7 @@ where
             match self.doc_worker_handle(doc_id) {
                 Ok(worker) => {
                     worker
+                        .msg_tx
                         .send(DocWorkerMsg::ReattemptMaterialization)
                         .inspect_err(|_| warn!(ERROR_CALLER))
                         .ok();
@@ -1930,10 +1953,6 @@ where
                 })
                 .inspect_err(|_| warn!(ERROR_CALLER))
                 .ok();
-            evt_tx
-                .send(RuntimeEvt::KeyhiveSyncRequested { peer_id })
-                .inspect_err(|_| warn!(ERROR_CALLER))
-                .ok();
             Ok((peer_id, closed))
         };
         self.spawn_background(async move {
@@ -1949,8 +1968,8 @@ where
         self.cancel_pending_doc_syncs(peer_id, "doc sync peer closed")
             .expect(ERROR_ACTOR);
         let deets = surelock::key::lock_scope(|key| {
-            let (mut g, _) = key.lock(&self.connected_peers);
-            g.remove(&peer_id)
+            let (mut guard, _) = key.lock(&self.connected_peers);
+            guard.remove(&peer_id)
         });
         if let Some(ref deets) = deets {
             deets.closed.store(true, Ordering::SeqCst);
@@ -1990,8 +2009,8 @@ where
         self.cancel_pending_keyhive_syncs(peer_id, "keyhive connection lost");
         self.cancel_pending_doc_syncs(peer_id, "doc sync connection lost")?;
         let deets = surelock::key::lock_scope(|key| {
-            let (mut g, _) = key.lock(&self.connected_peers);
-            g.remove(&peer_id)
+            let (mut guard, _) = key.lock(&self.connected_peers);
+            guard.remove(&peer_id)
         });
         if let Some(ref deets) = deets {
             deets.closed.store(true, Ordering::SeqCst);
@@ -2062,20 +2081,6 @@ where
 #[derive(Clone)]
 struct DocWorkerHandle {
     msg_tx: mpsc::UnboundedSender<DocWorkerMsg>,
-}
-
-impl DocWorkerHandle {
-    fn send(&self, msg: DocWorkerMsg) -> Res<()> {
-        self.msg_tx.send(msg).map_err(|_| eyre::eyre!(ERROR_ACTOR))
-    }
-
-    fn send_msg(&self, msg: DocWorkerMsg) -> Result<(), mpsc::error::SendError<DocWorkerMsg>> {
-        self.msg_tx.send(msg)
-    }
-
-    fn is_closed(&self) -> bool {
-        self.msg_tx.is_closed()
-    }
 }
 
 struct DocWorkerStopToken {
@@ -2257,7 +2262,10 @@ where
                             if waiters.is_empty() {
                                 self.pending_sync_jobs.remove(&peer_id);
                             }
-                            sender.send(Err(err)).inspect_err(|_| warn!(ERROR_CALLER)).ok();
+                            sender
+                                .send(Err(err))
+                                .inspect_err(|_| warn!(ERROR_CALLER))
+                                .ok();
                             self.finish_transient_work()?;
                         }
                     }
@@ -2280,17 +2288,17 @@ where
             return Err(PutDocError::IdOccpuied { id: self.doc_id });
         }
         let sedimentree_id: SedimentreeId = self.doc_id_subduction;
-        let resident = self
-            .sedimentrees
-            .get_cloned(&sedimentree_id)
-            .await
-            .is_some();
-        let stored = self
-            .storage_for_reads
-            .contains_sedimentree_id(sedimentree_id)
-            .await
-            .map_err(|err| PutDocError::Other(ferr!("failed checking doc occupancy: {err}")))?;
-        if resident || stored {
+        if {
+            self.sedimentrees
+                .get_cloned(&sedimentree_id)
+                .await
+                .is_some()
+        } || {
+            self.storage_for_reads
+                .contains_sedimentree_id(sedimentree_id)
+                .await
+                .map_err(|err| PutDocError::Other(ferr!("failed checking doc occupancy: {err}")))?
+        } {
             return Err(PutDocError::IdOccpuied { id: self.doc_id });
         }
         let staged_ingest = stage_automerge_ingest(&doc);
@@ -2551,7 +2559,11 @@ where
                     .await;
             }
             store_doc_heads_payload(&self.big_sync_store, self.doc_id, heads.clone()).await?;
-            self.change_manager.notify_doc_pending_heads_changed(self.doc_id, heads, BigRepoChangeOrigin::Remote { peer_id })?;
+            self.change_manager.notify_doc_pending_heads_changed(
+                self.doc_id,
+                heads,
+                BigRepoChangeOrigin::Remote { peer_id },
+            )?;
             return Ok(false);
         }
 
@@ -2733,13 +2745,12 @@ where
         };
         if blobs.is_empty() {
             let heads = sedimentree_heads_payload(&tree);
-            store_doc_heads_payload(
-                &self.big_sync_store,
+            store_doc_heads_payload(&self.big_sync_store, self.doc_id, heads.clone()).await?;
+            self.change_manager.notify_doc_pending_heads_changed(
                 self.doc_id,
-                heads.clone(),
-            )
-            .await?;
-            self.change_manager.notify_doc_pending_heads_changed(self.doc_id, heads, BigRepoChangeOrigin::Remote { peer_id })?;
+                heads,
+                BigRepoChangeOrigin::Remote { peer_id },
+            )?;
             if materialization_pending {
                 self.mark_materialization_pending(was_pending)?;
             }
@@ -2748,7 +2759,11 @@ where
         if materialization_pending {
             let heads = sedimentree_heads_payload(&tree);
             store_doc_heads_payload(&self.big_sync_store, self.doc_id, heads.clone()).await?;
-            self.change_manager.notify_doc_pending_heads_changed(self.doc_id, heads, BigRepoChangeOrigin::Remote { peer_id })?;
+            self.change_manager.notify_doc_pending_heads_changed(
+                self.doc_id,
+                heads,
+                BigRepoChangeOrigin::Remote { peer_id },
+            )?;
             self.mark_materialization_pending(was_pending)?;
             return Ok(true);
         }
@@ -3018,10 +3033,8 @@ where
                 let after_heads = doc.get_heads();
                 self.mark_materialization_ready(was_pending, Arc::from(after_heads.clone()))?;
                 if was_pending {
-                    let before: &[automerge::ChangeHash] = self
-                        .last_notified_heads
-                        .as_deref()
-                        .unwrap_or(&[]);
+                    let before: &[automerge::ChangeHash] =
+                        self.last_notified_heads.as_deref().unwrap_or(&[]);
                     let patches = doc.diff(before, &after_heads);
                     commit_delta_bookkeep(
                         &self.big_sync_store,
@@ -3719,9 +3732,7 @@ struct HydratedMinimizedTree {
 /// into a staged sedimentree [`Fragment`] and each level-0 fragment into a
 /// staged [`LooseCommit`]. The staged plaintext must be encrypted before
 /// it reaches Subduction storage.
-fn stage_automerge_ingest(
-    doc: &automerge::Automerge,
-) -> StagedAutomergeIngest {
+fn stage_automerge_ingest(doc: &automerge::Automerge) -> StagedAutomergeIngest {
     let cached = doc.fragments(1..);
     let loose = doc.fragments(0..=0);
     let cached_bytes = doc.bundle_fragments(cached.iter().cloned());
@@ -3973,7 +3984,6 @@ impl<S> BigRepoCiphertextStore<S> {
 
         Ok(None)
     }
-
 }
 
 impl<S: BigRepoSubductionStorage> CiphertextStore<Sendable, Vec<u8>, Vec<u8>>
@@ -3992,7 +4002,10 @@ impl<S: BigRepoSubductionStorage> CiphertextStore<Sendable, Vec<u8>, Vec<u8>>
             Self::GetCiphertextError,
         >,
     > {
-        Sendable::from_future(async move { self.load_entrypoint_ciphertext(content_ref.as_slice()).await })
+        Sendable::from_future(async move {
+            self.load_entrypoint_ciphertext(content_ref.as_slice())
+                .await
+        })
     }
 
     fn get_ciphertext_by_pcs_update<'a>(

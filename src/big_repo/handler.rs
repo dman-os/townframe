@@ -24,11 +24,16 @@ use subduction_ephemeral::{
 use subduction_keyhive::handler::{
     HandleError as KeyhiveHandleError, SendableKeyhiveHandler, SendableRuntimeProtocol,
 };
-use subduction_websocket::tokio::{TokioSpawn};
+use subduction_websocket::tokio::TokioSpawn;
 
 /// The concrete keyhive protocol type for BigRepo.
-pub(crate) type BigRepoKeyhiveProtocol =
-    Arc<SendableRuntimeProtocol<crate::keyhive_listener::BigRepoKeyhiveListener, BigRepoKeyhiveConnAdapter, BigRepoKeyhiveStorage>>;
+pub(crate) type BigRepoKeyhiveProtocol = Arc<
+    SendableRuntimeProtocol<
+        crate::keyhive_listener::BigRepoKeyhiveListener,
+        BigRepoKeyhiveConnAdapter,
+        BigRepoKeyhiveStorage,
+    >,
+>;
 
 /// The concrete keyhive handler type for BigRepo.
 pub(crate) type BigRepoKeyhiveHandler = SendableKeyhiveHandler<
@@ -73,7 +78,7 @@ where
                     IoError::BlobMismatch(err) => IoError::BlobMismatch(err),
                 }),
                 ListenError::TrySendError => ListenError::TrySendError,
-            }
+            },
             BigRepoComposedHandlerError::Keyhive(err) => {
                 panic!("keyhive handler error reached listen conversion: {err}")
             }
@@ -175,7 +180,9 @@ where
                         self.ephemeral.as_ref(),
                         conn,
                         ephemeral_msg,
-                    ).await {
+                    )
+                    .await
+                    {
                         tracing::error!(%err, "ephemeral handler error");
                     }
                     Ok(())

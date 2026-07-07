@@ -694,12 +694,7 @@ impl BigSyncMachine {
 
 // peer support
 impl BigSyncMachine {
-    fn handle_set_peer_evt(
-        &mut self,
-        SetPeerEvent {
-            peer_id, parts,
-        }: SetPeerEvent,
-    ) {
+    fn handle_set_peer_evt(&mut self, SetPeerEvent { peer_id, parts }: SetPeerEvent) {
         tracing::debug!(peer_id = %peer_id, part_count = parts.len(), "set peer event");
         // clear out everything, avoid reuising any old state
         // treating SetPeer as a refresh peer cmd in a way

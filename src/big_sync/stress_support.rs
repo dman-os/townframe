@@ -13,6 +13,7 @@ pub const PHASE2_MUTATIONS: usize = 24;
 pub const PHASE3_MUTATIONS: usize = 32;
 pub const DEFAULT_STRESS_SEED: u64 = 0xB1A0_5EED_5EED_0001;
 pub const SLOW_OP_LOG_THRESHOLD: Duration = Duration::from_millis(250);
+const STRESS_SETTLE_STABLE_ROUNDS: usize = 20;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 struct LwwPayload {
@@ -86,6 +87,7 @@ pub trait StressFixture: Sync {
     async fn seed_obj(
         &self,
         node: &Self::Node,
+        nodes: &[Option<Self::Node>],
         obj: &Self::StressObj,
         payload: serde_json::Value,
     ) -> Res<()>;
@@ -334,7 +336,7 @@ pub async fn apply_random_mutation<F: StressFixture>(
     if fresh_obj {
         fixture.seed_new_obj(node, nodes, &obj, value).await?;
     } else {
-        fixture.seed_obj(node, &obj, value).await?;
+        fixture.seed_obj(node, nodes, &obj, value).await?;
     }
 
     if rng.random_bool(0.25) {
@@ -439,7 +441,7 @@ pub async fn wait_for_cluster_settled<F: StressFixture>(
 
         if last_snapshot.as_ref().is_some_and(|prev| prev == &current) {
             stable_rounds += 1;
-            if stable_rounds >= 100 {
+            if stable_rounds >= STRESS_SETTLE_STABLE_ROUNDS {
                 log_if_slow(label, started_at);
                 return Ok(());
             }

@@ -23,9 +23,7 @@ pub(crate) fn encode_encrypted_blob(
     Ok(encoded)
 }
 
-pub(crate) fn decode_encrypted_blob(
-    raw_bytes: &[u8],
-) -> Res<EncryptedContent<Vec<u8>, Vec<u8>>> {
+pub(crate) fn decode_encrypted_blob(raw_bytes: &[u8]) -> Res<EncryptedContent<Vec<u8>, Vec<u8>>> {
     let Some((discriminator, body)) = raw_bytes.split_first() else {
         return Err(ferr!("blob is missing encrypted discriminator"));
     };

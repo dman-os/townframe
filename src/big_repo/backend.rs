@@ -5,8 +5,7 @@ use surelock::key::lock_scope;
 #[derive(Clone)]
 pub struct BigRepoSyncBackend {
     repo: std::sync::Weak<crate::BigRepo>,
-    remote_peer_endpoints:
-        Arc<surelock::mutex::Mutex<HashMap<PeerId, iroh::EndpointAddr>>>,
+    remote_peer_endpoints: Arc<surelock::mutex::Mutex<HashMap<PeerId, iroh::EndpointAddr>>>,
 }
 
 impl BigRepoSyncBackend {
@@ -20,11 +19,7 @@ impl BigRepoSyncBackend {
         })
     }
 
-    pub fn register_remote_peer(
-        &self,
-        peer_id: PeerId,
-        endpoint_addr: iroh::EndpointAddr,
-    ) {
+    pub fn register_remote_peer(&self, peer_id: PeerId, endpoint_addr: iroh::EndpointAddr) {
         lock_scope(|key| {
             let (mut m, _) = key.lock(&self.remote_peer_endpoints);
             m.insert(peer_id, endpoint_addr);
@@ -53,9 +48,9 @@ impl big_sync::SyncBackend for BigRepoSyncBackend {
             .ok_or_else(|| eyre::eyre!("big repo dropped while sync backend was active"))?;
         let doc_id: crate::DocumentId = obj_id;
 
-        if !repo.runtime.has_doc_worker(doc_id).await?
-            && !repo.runtime.contains_sedimentree_id(doc_id).await?
-        {
+        let has_local_doc_state = repo.runtime.has_doc_worker(doc_id).await?
+            || repo.runtime.contains_sedimentree_id(doc_id).await?;
+        if !has_local_doc_state && remote_payload.is_none() {
             return Ok(big_sync::SyncTaskRunOutcome::Completion(
                 big_sync_core::SyncTaskCompletion {
                     obj_id,
