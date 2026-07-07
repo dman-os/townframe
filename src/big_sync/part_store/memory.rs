@@ -813,10 +813,19 @@ impl HostPartStore for MemoryPartStore {
         })
     }
 
-    async fn add_doc_member(&self, doc: ObjId, member: PeerId, access: keyhive_core::access::Access) {
+    async fn add_doc_member(
+        &self,
+        doc: ObjId,
+        member: PeerId,
+        access: keyhive_core::access::Access,
+    ) {
         surelock::key::lock_scope(|key| {
             let (mut guard, _key) = key.lock(&self.inner);
-            guard.doc_members.entry(doc).or_default().insert(member, access);
+            guard
+                .doc_members
+                .entry(doc)
+                .or_default()
+                .insert(member, access);
         })
     }
 
@@ -1139,7 +1148,9 @@ mod tests {
         let non_reader = PeerId::new([4u8; 32]);
 
         store.ensure_part(part).await?;
-        store.set_obj_payload(obj, serde_json::json!("content")).await?;
+        store
+            .set_obj_payload(obj, serde_json::json!("content"))
+            .await?;
 
         // Set doc members: only `reader` has Read access.
         let mut agents = HashMap::new();
@@ -1151,7 +1162,10 @@ mod tests {
             .subscribe(
                 SubPartsRequest {
                     peer_id: big_sync_core::PeerId::new([0u8; 32]),
-                    parts: vec![big_sync_core::rpc::PartStreamCursorRequest { part_id: part, cursor: 0 }],
+                    parts: vec![big_sync_core::rpc::PartStreamCursorRequest {
+                        part_id: part,
+                        cursor: 0,
+                    }],
                 },
                 reader,
             )
@@ -1174,13 +1188,18 @@ mod tests {
             .subscribe(
                 SubPartsRequest {
                     peer_id: big_sync_core::PeerId::new([0u8; 32]),
-                    parts: vec![big_sync_core::rpc::PartStreamCursorRequest { part_id: part, cursor: 0 }],
+                    parts: vec![big_sync_core::rpc::PartStreamCursorRequest {
+                        part_id: part,
+                        cursor: 0,
+                    }],
                 },
                 non_reader,
             )
             .await??;
         let second_obj = ObjId(Byte32Id::new([5u8; 32]));
-        store.set_obj_payload(second_obj, serde_json::json!("content2")).await?;
+        store
+            .set_obj_payload(second_obj, serde_json::json!("content2"))
+            .await?;
         store.add_obj_to_parts(second_obj, vec![part]).await?;
         // The non-reader should NOT get this Added event.
         // We just check that add_obj_to_parts succeeded (it always does).
@@ -1198,7 +1217,9 @@ mod tests {
         let peer = PeerId::new([30u8; 32]);
 
         store.ensure_part(part).await?;
-        store.set_obj_payload(obj, serde_json::json!("initial")).await?;
+        store
+            .set_obj_payload(obj, serde_json::json!("initial"))
+            .await?;
 
         // Initially peer has Read access.
         let mut agents = HashMap::new();
@@ -1209,7 +1230,10 @@ mod tests {
             .subscribe(
                 SubPartsRequest {
                     peer_id: big_sync_core::PeerId::new([0u8; 32]),
-                    parts: vec![big_sync_core::rpc::PartStreamCursorRequest { part_id: part, cursor: 0 }],
+                    parts: vec![big_sync_core::rpc::PartStreamCursorRequest {
+                        part_id: part,
+                        cursor: 0,
+                    }],
                 },
                 peer,
             )
@@ -1231,7 +1255,9 @@ mod tests {
 
         // Now revoke access: set empty members.
         store.set_doc_members(obj, HashMap::new()).await;
-        store.set_obj_payload(obj, serde_json::json!("updated")).await?;
+        store
+            .set_obj_payload(obj, serde_json::json!("updated"))
+            .await?;
         // Peer is no longer a reader — Changed event should be dropped.
         // We can't easily observe the drop without checking the stream
         // didn't receive anything, but the call to set_obj_payload should

@@ -91,7 +91,13 @@ pub trait HostPartStore: Send + Sync {
     /// Add a single member to `doc` with the given [`Access`] level.
     ///
     /// **Default: no-op** — existing impls and test doubles are unaffected.
-    async fn add_doc_member(&self, _doc: ObjId, _member: PeerId, _access: keyhive_core::access::Access) {}
+    async fn add_doc_member(
+        &self,
+        _doc: ObjId,
+        _member: PeerId,
+        _access: keyhive_core::access::Access,
+    ) {
+    }
 
     /// Remove a single member from `doc`.
     ///
@@ -419,12 +425,12 @@ pub mod contract {
 #[cfg(test)]
 pub mod host_contract {
     use super::*;
-    use keyhive_core::access::Access;
     use big_sync_core::rpc::{
         BucketObjPageEntry, BucketSummary, LeafBucketPage, LeafBucketRequest, LeafBucketsRequest,
         ListPartsError, PartEvent, PartPage, SubEvent, SubPartsRequest, BUCKET_LIVE_FP_SEED,
     };
     use big_sync_core::{Fingerprint, FingerprintSeed};
+    use keyhive_core::access::Access;
     use tokio::time::{timeout, Duration};
 
     #[async_trait]
@@ -1127,7 +1133,12 @@ pub mod host_contract {
 
         // Grant the subscriber Read access so the filter passes events.
         let sub_peer = big_sync_core::PeerId::new([0u8; 32]);
-        store.set_doc_members(obj, std::collections::HashMap::from([(sub_peer, Access::Read)])).await;
+        store
+            .set_doc_members(
+                obj,
+                std::collections::HashMap::from([(sub_peer, Access::Read)]),
+            )
+            .await;
 
         seed_live_obj(store, obj, payload("sub-1", 1), &[part_a]).await?;
         store.add_obj_to_parts(obj, vec![part_b]).await?;
@@ -1136,13 +1147,16 @@ pub mod host_contract {
         store.set_obj_payload(obj, payload("sub-3", 3)).await?;
 
         let rx = store
-            .subscribe(SubPartsRequest {
-                peer_id: sub_peer,
-                parts: vec![big_sync_core::rpc::PartStreamCursorRequest {
-                    part_id: part_b,
-                    cursor: 3,
-                }],
-            }, sub_peer)
+            .subscribe(
+                SubPartsRequest {
+                    peer_id: sub_peer,
+                    parts: vec![big_sync_core::rpc::PartStreamCursorRequest {
+                        part_id: part_b,
+                        cursor: 3,
+                    }],
+                },
+                sub_peer,
+            )
             .await??;
         let events = collect_sub_events(&rx).await?;
         let replay_cursor = match &events[..] {

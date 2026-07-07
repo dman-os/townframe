@@ -729,7 +729,8 @@ impl HostPartStore for SqlitePartStore {
             part_ids: live_part_ids,
             obj_id,
             payload,
-        })]).await;
+        })])
+        .await;
         Ok(())
     }
 
@@ -1186,7 +1187,8 @@ impl HostPartStore for SqlitePartStore {
                 part_id,
                 obj_id,
             },
-        )]).await;
+        )])
+        .await;
         Ok(())
     }
 
@@ -1381,7 +1383,9 @@ impl HostPartStore for SqlitePartStore {
 
         let mut bus = self.bus.lock().expect(ERROR_MUTEX);
         for part_id in parts {
-            bus.entry(part_id).or_default().push((tx.clone(), subscriber));
+            bus.entry(part_id)
+                .or_default()
+                .push((tx.clone(), subscriber));
         }
         Ok(Ok(rx))
     }
@@ -1405,7 +1409,12 @@ impl HostPartStore for SqlitePartStore {
         agents: HashMap<PeerId, keyhive_core::access::Access>,
     ) {
         let doc_blob = Self::obj_blob(doc);
-        let mut tx = self.sql.write_pool.begin_with("BEGIN IMMEDIATE").await.unwrap();
+        let mut tx = self
+            .sql
+            .write_pool
+            .begin_with("BEGIN IMMEDIATE")
+            .await
+            .unwrap();
         sqlx::query("DELETE FROM big_sync_syncable WHERE scope_id = ?1 AND obj_id = ?2")
             .bind(self.scope_id)
             .bind(&doc_blob)
@@ -1431,9 +1440,19 @@ impl HostPartStore for SqlitePartStore {
             .insert(doc, agents);
     }
 
-    async fn add_doc_member(&self, doc: ObjId, member: PeerId, access: keyhive_core::access::Access) {
+    async fn add_doc_member(
+        &self,
+        doc: ObjId,
+        member: PeerId,
+        access: keyhive_core::access::Access,
+    ) {
         let doc_blob = Self::obj_blob(doc);
-        let mut tx = self.sql.write_pool.begin_with("BEGIN IMMEDIATE").await.unwrap();
+        let mut tx = self
+            .sql
+            .write_pool
+            .begin_with("BEGIN IMMEDIATE")
+            .await
+            .unwrap();
         sqlx::query("DELETE FROM big_sync_syncable WHERE scope_id = ?1 AND obj_id = ?2")
             .bind(self.scope_id)
             .bind(&doc_blob)
@@ -1461,7 +1480,12 @@ impl HostPartStore for SqlitePartStore {
 
     async fn remove_doc_member(&self, doc: ObjId, member: PeerId) {
         let doc_blob = Self::obj_blob(doc);
-        let mut tx = self.sql.write_pool.begin_with("BEGIN IMMEDIATE").await.unwrap();
+        let mut tx = self
+            .sql
+            .write_pool
+            .begin_with("BEGIN IMMEDIATE")
+            .await
+            .unwrap();
         sqlx::query("DELETE FROM big_sync_syncable WHERE scope_id = ?1 AND obj_id = ?2 AND principal_id = ?3")
             .bind(self.scope_id)
             .bind(&doc_blob)

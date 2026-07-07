@@ -438,10 +438,16 @@ mod tests {
             .unwrap();
         let expected_sub_events = collect_sub_events(
             store
-                .subscribe(SubPartsRequest {
-                    peer_id: big_sync_core::PeerId::new([0u8; 32]),
-                    parts: vec![big_sync_core::rpc::PartStreamCursorRequest { part_id, cursor: 0 }],
-                }, PeerId::new([0u8; 32]))
+                .subscribe(
+                    SubPartsRequest {
+                        peer_id: big_sync_core::PeerId::new([0u8; 32]),
+                        parts: vec![big_sync_core::rpc::PartStreamCursorRequest {
+                            part_id,
+                            cursor: 0,
+                        }],
+                    },
+                    PeerId::new([0u8; 32]),
+                )
                 .await?
                 .unwrap(),
         )

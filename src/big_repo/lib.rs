@@ -54,8 +54,10 @@ pub type SharedPartStore = Arc<dyn big_sync::HostPartStore>;
 
 /// The global partition: every doc we can read appears here as a marker.
 /// Embedders pass this PartId to big_sync's `set_peer`.
-pub const GLOBAL_PART_ID: big_sync_core::PartId =
-    big_sync_core::PartId::new([0x67, 0x6c, 0x6f, 0x62, 0x61, 0x6c, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00]);
+pub const GLOBAL_PART_ID: big_sync_core::PartId = big_sync_core::PartId::new([
+    0x67, 0x6c, 0x6f, 0x62, 0x61, 0x6c, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+    0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+]);
 
 #[derive(Debug, Clone)]
 pub struct Config {
@@ -123,13 +125,12 @@ impl BigRepo {
         let listener = crate::keyhive_listener::BigRepoKeyhiveListener {
             evt_tx: listener_evt_tx.clone(),
         };
-        let keyhive = if let Some(restored) =
-            BigKeyhiveHandle::restore_from_storage_archive(
-                node_identity_seed,
-                &keyhive_storage,
-                listener.clone(),
-            )
-                .await?
+        let keyhive = if let Some(restored) = BigKeyhiveHandle::restore_from_storage_archive(
+            node_identity_seed,
+            &keyhive_storage,
+            listener.clone(),
+        )
+        .await?
         {
             restored
         } else {
@@ -207,7 +208,8 @@ impl BigRepo {
             let kh = out.keyhive.clone();
             tokio::spawn(async move {
                 let agent = keyhive_core::principal::identifier::Identifier::from(
-                    ed25519_dalek::VerifyingKey::from_bytes(own_id.0.as_bytes()).expect("own id is valid"),
+                    ed25519_dalek::VerifyingKey::from_bytes(own_id.0.as_bytes())
+                        .expect("own id is valid"),
                 );
                 let docs = kh.docs_for_agent(&agent).await;
                 for (doc_id, access) in docs {

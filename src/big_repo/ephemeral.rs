@@ -417,7 +417,6 @@ impl SwitchboardState {
     }
 }
 
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -473,33 +472,36 @@ mod tests {
         let (listener_a_tx, mut listener_a_rx) = tokio::sync::mpsc::unbounded_channel();
         let (listener_b_tx, mut listener_b_rx) = tokio::sync::mpsc::unbounded_channel();
 
-        state.register_listener(
-            &backend,
-            1,
-            BigEphemeralFilter::new(topic).with_sender(sender_a),
-            listener_a_tx,
-        )
-        .await?;
-        state.register_listener(
-            &backend,
-            2,
-            BigEphemeralFilter::new(topic).with_sender(sender_b),
-            listener_b_tx,
-        )
-        .await?;
+        state
+            .register_listener(
+                &backend,
+                1,
+                BigEphemeralFilter::new(topic).with_sender(sender_a),
+                listener_a_tx,
+            )
+            .await?;
+        state
+            .register_listener(
+                &backend,
+                2,
+                BigEphemeralFilter::new(topic).with_sender(sender_b),
+                listener_b_tx,
+            )
+            .await?;
 
         assert_eq!(backend.subscribes.lock().await.as_slice(), &[topic]);
 
-        state.dispatch_event(
-            &backend,
-            BigEphemeralEvent {
-                topic,
-                sender: sender_a,
-                nonce: 1,
-                payload: vec![1, 2, 3],
-            },
-        )
-        .await?;
+        state
+            .dispatch_event(
+                &backend,
+                BigEphemeralEvent {
+                    topic,
+                    sender: sender_a,
+                    nonce: 1,
+                    payload: vec![1, 2, 3],
+                },
+            )
+            .await?;
 
         let event = timeout(std::time::Duration::from_secs(1), listener_a_rx.recv())
             .await
@@ -514,16 +516,17 @@ mod tests {
                 .is_err()
         );
 
-        state.dispatch_event(
-            &backend,
-            BigEphemeralEvent {
-                topic: other_topic,
-                sender: sender_a,
-                nonce: 2,
-                payload: vec![9],
-            },
-        )
-        .await?;
+        state
+            .dispatch_event(
+                &backend,
+                BigEphemeralEvent {
+                    topic: other_topic,
+                    sender: sender_a,
+                    nonce: 2,
+                    payload: vec![9],
+                },
+            )
+            .await?;
         assert!(
             timeout(std::time::Duration::from_millis(100), listener_a_rx.recv())
                 .await

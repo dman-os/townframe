@@ -8,9 +8,7 @@ use crate::runtime::RuntimeEvt;
 use beekem::operation::CgkaOperation;
 use future_form::{FutureForm, Sendable};
 use keyhive_core::listener::{
-    cgka::CgkaListener,
-    membership::MembershipListener,
-    prekey::PrekeyListener,
+    cgka::CgkaListener, membership::MembershipListener, prekey::PrekeyListener,
 };
 use keyhive_core::principal::{
     group::{delegation::Delegation, revocation::Revocation},
@@ -61,9 +59,7 @@ impl CgkaListener<Sendable> for BigRepoKeyhiveListener {
         &'a self,
         data: &'a Arc<Signed<CgkaOperation>>,
     ) -> <Sendable as FutureForm>::Future<'a, ()> {
-        let _ = self.evt_tx.send(RuntimeEvt::CgkaOp {
-            data: data.clone(),
-        });
+        let _ = self.evt_tx.send(RuntimeEvt::CgkaOp { data: data.clone() });
         Sendable::ready(())
     }
 }
@@ -76,9 +72,7 @@ impl MembershipListener<Sendable, MemorySigner, Vec<u8>> for BigRepoKeyhiveListe
     fn on_delegation<'a>(
         &'a self,
         target: Identifier,
-        data: &'a Arc<
-            Signed<Delegation<Sendable, MemorySigner, Vec<u8>, BigRepoKeyhiveListener>>,
-        >,
+        data: &'a Arc<Signed<Delegation<Sendable, MemorySigner, Vec<u8>, BigRepoKeyhiveListener>>>,
     ) -> <Sendable as FutureForm>::Future<'a, ()> {
         let _ = self.evt_tx.send(RuntimeEvt::DelegationReceived {
             target,
@@ -90,9 +84,7 @@ impl MembershipListener<Sendable, MemorySigner, Vec<u8>> for BigRepoKeyhiveListe
     fn on_revocation<'a>(
         &'a self,
         target: Identifier,
-        data: &'a Arc<
-            Signed<Revocation<Sendable, MemorySigner, Vec<u8>, BigRepoKeyhiveListener>>,
-        >,
+        data: &'a Arc<Signed<Revocation<Sendable, MemorySigner, Vec<u8>, BigRepoKeyhiveListener>>>,
     ) -> <Sendable as FutureForm>::Future<'a, ()> {
         let _ = self.evt_tx.send(RuntimeEvt::RevocationReceived {
             target,
