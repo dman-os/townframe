@@ -9,7 +9,11 @@ pub mod wit {
         world: "sdk",
         additional_derives: [serde::Serialize, serde::Deserialize],
         with: {
+            "wasi:keyvalue/store@0.2.0-draft": api_utils_rs::wit::wasi::keyvalue::store,
+            "wasi:keyvalue/atomics@0.2.0-draft": api_utils_rs::wit::wasi::keyvalue::atomics,
             "wasi:logging/logging@0.1.0-draft": api_utils_rs::wit::wasi::logging::logging,
+            "wasmcloud:postgres/types@0.1.1-draft": api_utils_rs::wit::wasmcloud::postgres::types,
+            "wasmcloud:postgres/query@0.1.1-draft": api_utils_rs::wit::wasmcloud::postgres::query,
             "wasi:io/poll@0.2.6": api_utils_rs::wit::wasi::io::poll,
             "wasi:clocks/monotonic-clock@0.2.6": api_utils_rs::wit::wasi::clocks::monotonic_clock,
             "wasi:clocks/wall-clock@0.2.6": api_utils_rs::wit::wasi::clocks::wall_clock,
