@@ -646,15 +646,6 @@ impl Rt {
                         Arc::clone(&self.stateless_view_plugin)
                             as Arc<dyn wash_runtime::plugin::HostPlugin>,
                     ),
-                    (
-                        "townframe:utils",
-                        Arc::clone(&self.utils_plugin) as Arc<dyn wash_runtime::plugin::HostPlugin>,
-                    ),
-                    (
-                        "townframe:mltools",
-                        Arc::clone(&self.mltools_plugin)
-                            as Arc<dyn wash_runtime::plugin::HostPlugin>,
-                    ),
                 ]);
 
             let resolved_workload = unresolved_workload
