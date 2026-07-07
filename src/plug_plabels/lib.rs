@@ -12,7 +12,6 @@ mod wit {
     wit_bindgen::generate!({
         path: "wit",
         world: "bundle",
-
         // generate_all,
         // async: true,
         with: {
