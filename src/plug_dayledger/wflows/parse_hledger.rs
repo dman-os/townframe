@@ -93,7 +93,7 @@ pub fn run(_cx: &mut WflowCtx) -> Result<(), wflow_sdk::JobErrorX> {
         })?;
 
         claim_tag_token
-            .create(&claim_id, &claim_json)
+            .create(claim_id, &claim_json)
             .map_err(|err| {
                 wflow_sdk::JobErrorX::Terminal(ferr!(
                     "error creating/updating claim facet: {err:?}"
@@ -161,7 +161,7 @@ pub fn run(_cx: &mut WflowCtx) -> Result<(), wflow_sdk::JobErrorX> {
             wflow_sdk::JobErrorX::Terminal(ferr!("serde error serializing txn: {err}"))
         })?;
 
-        txn_tag_token.create(&claim_id, &txn_json).map_err(|err| {
+        txn_tag_token.create(claim_id, &txn_json).map_err(|err| {
             wflow_sdk::JobErrorX::Terminal(ferr!("error creating txn facet: {err:?}"))
         })?;
     }
@@ -224,7 +224,7 @@ pub fn run(_cx: &mut WflowCtx) -> Result<(), wflow_sdk::JobErrorX> {
         })?;
 
         account_tag_token
-            .create(&account_name, &account_json)
+            .create(account_name, &account_json)
             .map_err(|err| {
                 wflow_sdk::JobErrorX::Terminal(ferr!("error creating account facet: {err:?}"))
             })?;
@@ -323,7 +323,7 @@ pub fn run(_cx: &mut WflowCtx) -> Result<(), wflow_sdk::JobErrorX> {
         })?;
     } else {
         meta_tag_token
-            .create(&daybook_types::doc::DEFAULT_FACET_ID, &meta_json)
+            .create(daybook_types::doc::DEFAULT_FACET_ID, &meta_json)
             .map_err(|err| {
                 wflow_sdk::JobErrorX::Terminal(ferr!("error creating ledger meta facet: {err:?}"))
             })?;
@@ -334,8 +334,8 @@ pub fn run(_cx: &mut WflowCtx) -> Result<(), wflow_sdk::JobErrorX> {
 
 // ── Helpers ────────────────────────────────────────────────────────────
 
-fn map_txn_status(s: &crate::hledger::types::Status) -> crate::types::TxnStatus {
-    match s {
+fn map_txn_status(st: &crate::hledger::types::Status) -> crate::types::TxnStatus {
+    match st {
         crate::hledger::types::Status::Unmarked => crate::types::TxnStatus::Unmarked,
         crate::hledger::types::Status::Pending => crate::types::TxnStatus::Pending,
         crate::hledger::types::Status::Cleared => crate::types::TxnStatus::Cleared,
