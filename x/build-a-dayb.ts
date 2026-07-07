@@ -33,6 +33,14 @@ async function cleanupOrtBuildArtifacts(sourceDir: {
   await removeTreeIfExists(androidBuildPath);
 }
 
+function requireEnv(name: string): string {
+  const value = $.env[name];
+  if (!value) {
+    throw new Error(`${name} must be set for release builds`);
+  }
+  return value;
+}
+
 const abiToTriple = {
   "arm64-v8a": "aarch64-linux-android",
   "armeabi-v7a": "armv7-linux-androideabi",
@@ -50,11 +58,17 @@ if (!(composeProfile === "debug" || composeProfile === "release")) {
     `Unsupported DAYBOOK_COMPOSE_PROFILE=${composeProfile}; expected debug or release`,
   );
 }
-const gradleVariant = composeProfile === "release" ? "Release" : "Debug";
-const gradleTask = $.env.DAYBOOK_ANDROID_GRADLE_TASK ??
-  `assemble${gradleVariant}`;
+const gradleTask = composeProfile === "release"
+  ? "bundleRelease"
+  : "assembleDebug";
 const ortBuildConfig = $.env.ORT_BUILD_CONFIG ??
   (composeProfile === "release" ? "Release" : "Debug");
+const androidBuildToolsVersion = $.env.ANDROID_BUILD_TOOLS_VERSION ??
+  "36.0.0";
+const androidSdkRoot = $.env.ANDROID_SDK_ROOT ?? $.env.ANDROID_HOME;
+if (!androidSdkRoot) {
+  throw new Error("ANDROID_SDK_ROOT or ANDROID_HOME must be set");
+}
 
 const ortSourceTag = $.env.ORT_SOURCE_TAG ?? "v1.24.1";
 const androidApiLevel = $.env.ANDROID_API_LEVEL ?? "31";
@@ -92,6 +106,23 @@ const distCompleteFile = ortRootDir.join(
 const libDirFile = ortRootDir.join(
   `ort-lib-location-${ortSourceTag}-${triple}-${ortBuildConfig.toLowerCase()}-${buildKeySuffix}.txt`,
 );
+const composeAppBuildDir = $.relativeDir(
+  "../src/daybook_compose/composeApp/build",
+);
+const composeOutputsDir = composeAppBuildDir.join("outputs");
+const releaseBundleDir = composeOutputsDir.join("bundle", "release");
+const releaseApksDir = composeOutputsDir.join("apk_from_bundle", "release");
+const releaseApkDir = composeOutputsDir.join("apk", "release");
+const releaseBundlePath = releaseBundleDir.join("composeApp-release.aab");
+const releaseApksPath = releaseApksDir.join("composeApp-release.apks");
+const releaseApkPath = releaseApkDir.join("composeApp-release.apk");
+const bundletoolExtractDir = composeOutputsDir.join(
+  "apk_from_bundle",
+  "release",
+  "composeApp-release-apks",
+);
+const apksignerPath =
+  `${androidSdkRoot}/build-tools/${androidBuildToolsVersion}/apksigner`;
 
 await ortRootDir.ensureDir();
 await fetchcontentCacheDir.ensureDir();
@@ -115,7 +146,7 @@ if (!((await distCompleteFile.exists()) && (await libDirFile.exists()))) {
     await sourceCompleteFile.writeText("ok\n");
   }
 
-  await $`bash ./build.sh --update --build --config ${ortBuildConfig} --parallel --compile_no_warning_as_error --skip_submodule_sync --build_shared_lib --android --android_abi=${abi} --android_api=${androidApiLevel} --android_ndk_path=${androidNdkRoot} --cmake_extra_defines FETCHCONTENT_BASE_DIR=${fetchcontentCacheDir}`
+  await $`bash ./build.sh --update --build --config ${ortBuildConfig} --parallel --compile_no_warning_as_error --skip_submodule_sync --build_shared_lib --android --android_abi=${abi} --android_api=${androidApiLevel} --android_ndk_path=${androidNdkRoot} --cmake_extra_defines FETCHCONTENT_BASE_DIR=${fetchcontentCacheDir} onnxruntime_BUILD_UNIT_TESTS=OFF`
     .cwd(
       sourceDir,
     );
@@ -166,3 +197,45 @@ await $`./gradlew ${gradleTask} -PdaybookProfile=${composeProfile} -PortLibLocat
     ORT_LIB_PROFILE: $.env.ORT_LIB_PROFILE ?? ortBuildConfig,
     ORT_PREFER_DYNAMIC_LINK: $.env.ORT_PREFER_DYNAMIC_LINK ?? "1",
   });
+
+if (composeProfile === "release") {
+  const keystorePath = requireEnv("DAYBOOK_ANDROID_RELEASE_KEYSTORE_PATH");
+  const keystorePassword = requireEnv(
+    "DAYBOOK_ANDROID_RELEASE_KEYSTORE_PASSWORD",
+  );
+  const keyAlias = requireEnv("DAYBOOK_ANDROID_RELEASE_KEY_ALIAS");
+  const keyPassword = requireEnv("DAYBOOK_ANDROID_RELEASE_KEY_PASSWORD");
+  const bundletoolSecretsDir = await Deno.makeTempDir({
+    prefix: "daybook-bundletool-secrets-",
+  });
+  const keystorePasswordFile = `${bundletoolSecretsDir}/ks-pass.txt`;
+  const keyPasswordFile = `${bundletoolSecretsDir}/key-pass.txt`;
+
+  await releaseApksDir.ensureDir();
+  await releaseApkDir.ensureDir();
+  await removeTreeIfExists(releaseApksPath.toString());
+  await removeTreeIfExists(releaseApkPath.toString());
+  await removeTreeIfExists(bundletoolExtractDir.toString());
+  await bundletoolExtractDir.ensureDir();
+
+  try {
+    await Deno.writeTextFile(keystorePasswordFile, keystorePassword);
+    await Deno.chmod(keystorePasswordFile, 0o600);
+    await Deno.writeTextFile(keyPasswordFile, keyPassword);
+    await Deno.chmod(keyPasswordFile, 0o600);
+
+    await $`bundletool build-apks --bundle=${releaseBundlePath} --output=${releaseApksPath} --mode=universal --overwrite --ks=${keystorePath} --ks-pass=file:${keystorePasswordFile} --ks-key-alias=${keyAlias} --key-pass=file:${keyPasswordFile}`;
+    const universalApkPath = bundletoolExtractDir.join("universal.apk");
+    await $`bsdtar --extract --file ${releaseApksPath} --directory ${bundletoolExtractDir}`;
+    if (!(await universalApkPath.exists())) {
+      throw new Error(
+        `bundletool did not produce universal APK at ${universalApkPath}`,
+      );
+    }
+    await $`${apksignerPath} verify --verbose --print-certs ${universalApkPath}`;
+    await $`cp ${universalApkPath} ${releaseApkPath}`;
+  } finally {
+    await removeTreeIfExists(bundletoolSecretsDir);
+    await removeTreeIfExists(bundletoolExtractDir.toString());
+  }
+}

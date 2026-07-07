@@ -177,9 +177,22 @@ android {
             useLegacyPackaging = false
         }
     }
+    if (androidReleaseSigningConfig != null) {
+        signingConfigs {
+            create("release") {
+                storeFile = androidReleaseSigningConfig.keystoreFile
+                storePassword = androidReleaseSigningConfig.keystorePassword
+                keyAlias = androidReleaseSigningConfig.keyAlias
+                keyPassword = androidReleaseSigningConfig.keyPassword
+            }
+        }
+    }
     buildTypes {
         getByName("release") {
             isMinifyEnabled = false
+            if (androidReleaseSigningConfig != null) {
+                signingConfig = signingConfigs.getByName("release")
+            }
         }
     }
     compileOptions {
@@ -308,6 +321,78 @@ fun resolveDaybookComposeProfile(): String {
 val daybookComposeProfile = resolveDaybookComposeProfile()
 val daybookComposeIsReleaseProfile = daybookComposeProfile == "release"
 
+data class AndroidReleaseSigningConfig(
+    val keystoreFile: File,
+    val keystorePassword: String,
+    val keyAlias: String,
+    val keyPassword: String,
+)
+
+fun resolveAndroidReleaseSigningConfig(): AndroidReleaseSigningConfig? {
+    fun envOrProperty(name: String, propertyName: String): String? =
+        (findProperty(propertyName) as String?)
+            ?.takeIf { it.isNotBlank() }
+            ?: System.getenv(name)?.takeIf { it.isNotBlank() }
+
+    val keystorePath = envOrProperty(
+        "DAYBOOK_ANDROID_RELEASE_KEYSTORE_PATH",
+        "daybookAndroidReleaseKeystorePath",
+    )
+    val keystorePassword = envOrProperty(
+        "DAYBOOK_ANDROID_RELEASE_KEYSTORE_PASSWORD",
+        "daybookAndroidReleaseKeystorePassword",
+    )
+    val keyAlias = envOrProperty(
+        "DAYBOOK_ANDROID_RELEASE_KEY_ALIAS",
+        "daybookAndroidReleaseKeyAlias",
+    )
+    val keyPassword = envOrProperty(
+        "DAYBOOK_ANDROID_RELEASE_KEY_PASSWORD",
+        "daybookAndroidReleaseKeyPassword",
+    )
+
+    val values = listOf(keystorePath, keystorePassword, keyAlias, keyPassword)
+    if (values.all { it == null }) {
+        return null
+    }
+    if (values.any { it == null }) {
+        throw GradleException(
+            "Incomplete Android release signing configuration. Set DAYBOOK_ANDROID_RELEASE_KEYSTORE_PATH, " +
+                "DAYBOOK_ANDROID_RELEASE_KEYSTORE_PASSWORD, DAYBOOK_ANDROID_RELEASE_KEY_ALIAS, and " +
+                "DAYBOOK_ANDROID_RELEASE_KEY_PASSWORD."
+        )
+    }
+
+    val keystoreFile = File(keystorePath!!)
+    if (!keystoreFile.exists()) {
+        throw GradleException("Android release keystore does not exist: ${keystoreFile.absolutePath}")
+    }
+
+    return AndroidReleaseSigningConfig(
+        keystoreFile = keystoreFile,
+        keystorePassword = keystorePassword!!,
+        keyAlias = keyAlias!!,
+        keyPassword = keyPassword!!,
+    )
+}
+
+val androidReleaseSigningConfig = resolveAndroidReleaseSigningConfig()
+
+val validateAndroidReleaseSigningConfig =
+    tasks.register("validateAndroidReleaseSigningConfig") {
+        group = "build"
+        description = "Validate Android release signing configuration for Android release builds"
+        doLast {
+            if (daybookComposeIsReleaseProfile && androidReleaseSigningConfig == null) {
+                throw GradleException(
+                    "Android release builds require signing configuration. Set DAYBOOK_ANDROID_RELEASE_KEYSTORE_PATH, " +
+                        "DAYBOOK_ANDROID_RELEASE_KEYSTORE_PASSWORD, DAYBOOK_ANDROID_RELEASE_KEY_ALIAS, and " +
+                        "DAYBOOK_ANDROID_RELEASE_KEY_PASSWORD."
+                )
+            }
+        }
+    }
+
 // Desktop Rust builds
 tasks.register<Exec>("buildRustDesktopDebug") {
     group = "build"
@@ -407,6 +492,10 @@ fun registerRustAndroidCopyTask(
                 if (!sourceSoFile.exists()) {
                     throw GradleException("Missing Rust Android library: ${sourceSoFile.absolutePath}")
                 }
+                if (destDir.exists() && !destDir.deleteRecursively()) {
+                    throw GradleException("Failed to clear Android JNI output directory: ${destDir.absolutePath}")
+                }
+                destDir.mkdirs()
             }
             from(sourceSoFile)
 
@@ -594,6 +683,7 @@ tasks.matching { it.name == "preReleaseBuild" }.configureEach {
     val isCheckTask = taskNames.contains("check")
     // Skip release Rust build during check - we only need debug for testing
     if (!isCheckTask) {
+        dependsOn(validateAndroidReleaseSigningConfig)
         dependsOn("copyRustAndroidRelease")
     }
 }
@@ -673,7 +763,7 @@ tasks.register("prepareLinuxdeployComposeAppDirDayb") {
     val destLibFile = File(destLibDir, sourceLibFile.name)
 
     if (daybookComposeIsReleaseProfile) {
-        dependsOn("packageReleaseDistributionForCurrentOS")
+        dependsOn("packageReleaseAppImage")
         dependsOn("buildRustDesktopRelease")
     } else {
         dependsOn("createDistributable")

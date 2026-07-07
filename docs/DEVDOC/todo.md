@@ -25,54 +25,71 @@
 
 ## Stack
 
-- [ ] Fix secret store for CI
-- [ ] Plugs screen
-- [ ] Change manifest/types module structure for plugs
-- [ ] daybook_server
-  - [ ] Decide on wrpc vs json
-- [ ] Home screen and visual identity
-  - [ ] Avoid reinvention
-- [ ] Figure out key mgmt
-- [ ] Keyhive
-- [ ] Encrypted blobs
-- [ ] Decide on wether to adopt Lexicons
-- [ ] Hledger editor
-- [ ] Good and local document classification
-  - [ ] Receipt parsing
-  - [ ] Collators
-- [ ] Sync panel
-- [ ] P2P
-  - [x] iroh
-  - [ ] better URLs
-  - [ ] auto-peer discovery
-  - [x] QR based clone
-  - [ ] RPC api versioning scheme
-- [ ] Deterministic doc ids for main docs [LOST]
-- [x] Prune dependencies
-- [ ] Blobs server
-  - [x] Iroh blobs?
-  - [x] Chunked hashing for transfers
-- [ ] DrawerScreen
-  - [ ] Search FAB
-  - [ ] Press again to change views
-- [ ] Mltools config should be per device
-- [ ] Processors should only run on device that created the doc
-- [x] use a env var or an env! var to set global multipliers for our test timeouts
-- [ ] File locks on repo
-- [ ] Store plugin info in drawer??
-- [ ] Js execution
-  - [ ] https://json-render.dev/ based display
-- [ ] DocEditor
-- [x] Progress system
-  - [x] Blob download
-- [x] Overhaul bottom bar
-  - [ ] Change color when in different modes.
-  - [x] Experiment with floating bottom bar
-- [ ] Repos
-  - [ ] Profiles
-  - [x] CLI support
-    - [ ] Make it nice
-  - [ ] GUI support
+- Top
+  - [ ] Built in updater
+
+- [ ] Plugs
+  - [ ] Change manifest/types module structure for plugs
+  - [ ] Better SDK
+  - [ ] Store plugin info in drawer??
+  - [ ] Js execution
+  - [ ] Processors should only run on device that created the doc
+  - [ ] Predicates for losing/gaining facets
+  - [ ] UI
+    - [ ] Improve cold start
+    - [ ] Redo IR
+    - [ ] https://json-render.dev/ based display
+- [ ] Sync
+  - [ ] Keyhive
+  - [ ] Figure out key mgmt
+  - [ ] P2P
+    - [x] iroh
+    - [ ] better URLs
+    - [ ] auto-peer discovery
+    - [x] QR based clone
+    - [ ] RPC api versioning scheme
+- [ ] Compose
+  - [ ] Migrate to new Compose architecture
+  - [ ] Check out BoltFFI
+- [ ] UI
+  - [ ] DocEditor
+    - [ ]
+  - [ ] Cleanup welcome screen
+  - [ ] Plugs
+  - [ ] Home screen and visual identity
+    - [ ] Avoid reinvention
+  - [ ] DrawerScreen
+    - [ ] Search FAB
+    - [ ] Press again to change views
+  - [ ] Repos
+    - [ ] Profiles
+    - [x] CLI support
+      - [ ] Make it nice
+    - [ ] GUI support
+  - [x] Progress
+    - [x] Blob download
+    - [ ] Redo
+- [ ] CI
+  - [ ] Fix the builds
+    - [ ] Android APK is invalid
+    - [ ] Windows MSI is valid
+    - [ ] Test MacOS builds
+  - [x] Prune dependencies
+    - [ ] Setup cargo-machete action
+- [ ] Schema
+  - [ ] `KeyId` is a terrible name.
+    - [ ] `FacetKey` too, it's misused
+  - [ ] Decide on wether to adopt Lexicons
+  - [ ] Deterministic doc ids for main docs [LOST]
+  - [ ] Figure out how multi-processed repo access 
+    - [ ] Daemon?
+  - [ ] Local app doc
+    - [ ] Mltools config should be per device
+- [ ] plug_dayledger
+  - [ ] Hledger editor
+  - [ ] Good and local document classification
+    - [ ] Receipt parsing
+    - [ ] Collators
 - [ ] Bugs
   - [ ] App open blocked on locked repo with no feedback
   - [ ] `WflowNotFound`
@@ -85,14 +102,21 @@
       - [ ] How to avoid missing triage work?
     - [ ] Abort/cancel on StopToken Drop
     - [ ] Drop warning on stop tokens
-- [x] Keychains for secrets
-- [ ] Predicates for losing/gaining facets
-- [ ] Local app doc
-- [ ] Figure out how multi-processed repo access 
-  - [ ] Daemon?
 
 - [ ] Cleanup and show it to people
  
+- [ ] Get started on iOS
+- [ ] Server
+  - [ ] Decide on wrpc vs json
+  - [ ] Encrypted blobs
+  - [ ] Blobs server
+- [ ] Plugs
+  - [ ] Official registry
+    - [ ] LLM auditor
+- [x] Overhaul bottom bar
+  - [ ] Change color when in different modes.
+  - [x] Experiment with floating bottom bar
+  - [ ] Modern floating UI
 - [ ] Telegram
   - [ ] Export channel
 - [ ] Migrate to annoter Compose navigation lib
@@ -123,7 +147,7 @@
   - [ ] Consider futures-signals
 - [ ] Tutorial
 - [ ] CI/CD
-  - [ ] Kotlin tests
+  - [x] Kotlin tests
   - [ ] Version tagging and releases
   - [x] Continuius builds on push to main
   - [ ] Publish
@@ -152,8 +176,6 @@
   - [ ] Harsher bounds on data shapes
   - [ ] LLM auidted registry subset
     - Open-source
-- [ ] Screenshots and screen recording
-  - [ ] How to make it cross platform easily?
 - [ ] Publishing
   - [ ] ATProto
   - [ ] Apub
@@ -196,8 +218,8 @@
   - [ ] OCI
 - [ ] File lock on repo
 - [ ] daybook_cli
-    - [ ] `daybook pset docId propKey value`
-    - [ ] `daybook pget docId propKey`
+    - [ ] `daybook fset docId facetKeyId value`
+    - [ ] `daybook fget docId facetKeyId`
     - [ ] `daybook grep`
     - [ ] `daybook sed`
 - [ ] wflow
@@ -225,8 +247,6 @@
       - [ ] https://mother.town.app
 - [ ] PgLite based testing
 - [ ] DRY up all the wit bindgen
-- [ ] Move http tests into api crates
-  - [ ] Replace http with wrpc?
 - [ ] Code generator for http wrapper
 - [ ] Policy against tokio mutexes (cancel safety)
 - [ ] Move to wasmcloud v2
@@ -278,3 +298,5 @@
 - [ ] Quickshell distro
 - [ ] Email integration
 - [ ] Cross-device VPN
+- [ ] Screenshots and screen recording
+  - [ ] How to make it cross platform easily?

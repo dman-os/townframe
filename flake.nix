@@ -154,6 +154,7 @@
               ANDROID_SDK_ROOT = "${sdkPath}/libexec/android-sdk";
               ANDROID_HOME = "${sdkPath}/libexec/android-sdk";
               ANDROID_NDK_ROOT = "${sdkPath}/libexec/android-sdk/ndk-bundle";
+              ANDROID_BUILD_TOOLS_VERSION = androidBuildToolsVersion;
               ANDROID_NDK_TOOLCHAIN_BIN_DIR = "${sdkPath}/libexec/android-sdk/ndk-bundle/toolchains/llvm/prebuilt/${ndkHostTag}/bin";
               GRADLE_OPTS = "-Dorg.gradle.project.android.aapt2FromMavenOverride=${sdkPath}/libexec/android-sdk/build-tools/${androidBuildToolsVersion}/aapt2";
 
@@ -208,6 +209,7 @@
             androidSdkOnly.androidsdk
             openjdk21
             cmake
+            bundletool
           ];
 
           desktopBuildInputs = with pkgs; [

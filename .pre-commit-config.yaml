@@ -32,12 +32,6 @@ repos:
           - commit-msg
   - repo: local
     hooks:
-      - id: detekt-kotlin
-        name: Detekt Kotlin
-        language: system
-        entry: ./x/gradle.ts detektMainDesktop --auto-correct
-        pass_filenames: false
-        files: \.kt$
       - id: deno-fmt-x
         name: Formt scripts
         language: system
@@ -81,6 +75,12 @@ repos:
       #         ./src/daybook_rn/pnpm-lock.yaml|
       #         ./src/daybook_rn/package.json
       #     )$
+      - id: detekt-kotlin
+        name: Detekt Kotlin
+        language: system
+        entry: ./x/gradle.ts detektMainDesktop --auto-correct
+        pass_filenames: false
+        files: \.kt$
   - repo: https://github.com/doublify/pre-commit-rust
     rev: v1.0
     hooks:

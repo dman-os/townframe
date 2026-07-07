@@ -56,7 +56,6 @@ jobs:
       is_release_build: ${{ steps.meta.outputs.is_release_build }}
       compose_profile: ${{ steps.meta.outputs.compose_profile }}
       rust_profile_dir: ${{ steps.meta.outputs.rust_profile_dir }}
-      android_gradle_task: ${{ steps.meta.outputs.android_gradle_task }}
       windows_gradle_task: ${{ steps.meta.outputs.windows_gradle_task }}
       macos_gradle_task: ${{ steps.meta.outputs.macos_gradle_task }}
     steps:
@@ -105,11 +104,9 @@ jobs:
           fi
 
           rust_profile_dir="${compose_profile}"
-          android_gradle_task=":composeApp:assembleDebug"
           windows_gradle_task=":composeApp:packageMsi"
           macos_gradle_task=":composeApp:packageDmg"
           if [[ "${compose_profile}" == "release" ]]; then
-            android_gradle_task=":composeApp:assembleRelease"
             windows_gradle_task=":composeApp:packageReleaseMsi"
             macos_gradle_task=":composeApp:packageReleaseDmg"
           fi
@@ -155,7 +152,6 @@ jobs:
             echo "is_release_build=${is_release_build}"
             echo "compose_profile=${compose_profile}"
             echo "rust_profile_dir=${rust_profile_dir}"
-            echo "android_gradle_task=${android_gradle_task}"
             echo "windows_gradle_task=${windows_gradle_task}"
             echo "macos_gradle_task=${macos_gradle_task}"
           } >> "${GITHUB_OUTPUT}"
@@ -168,9 +164,6 @@ jobs:
       DAYBOOK_IS_RELEASE_BUILD: ${{ needs.resolve-release-meta.outputs.is_release_build }}
       DAYBOOK_COMPOSE_PROFILE: ${{ needs.resolve-release-meta.outputs.compose_profile }}
       DAYBOOK_RUST_PROFILE_DIR: ${{ needs.resolve-release-meta.outputs.rust_profile_dir }}
-      DAYBOOK_ANDROID_GRADLE_TASK: ${{ needs.resolve-release-meta.outputs.android_gradle_task }}
-      DAYBOOK_WINDOWS_GRADLE_TASK: ${{ needs.resolve-release-meta.outputs.windows_gradle_task }}
-      DAYBOOK_MACOS_GRADLE_TASK: ${{ needs.resolve-release-meta.outputs.macos_gradle_task }}
     steps:
       - name: Setup tmate session
         if: ${{ github.event_name == 'workflow_dispatch' && inputs.tmate_enabled }}
@@ -296,9 +289,6 @@ jobs:
       DAYBOOK_IS_RELEASE_BUILD: ${{ needs.resolve-release-meta.outputs.is_release_build }}
       DAYBOOK_COMPOSE_PROFILE: ${{ needs.resolve-release-meta.outputs.compose_profile }}
       DAYBOOK_RUST_PROFILE_DIR: ${{ needs.resolve-release-meta.outputs.rust_profile_dir }}
-      DAYBOOK_ANDROID_GRADLE_TASK: ${{ needs.resolve-release-meta.outputs.android_gradle_task }}
-      DAYBOOK_WINDOWS_GRADLE_TASK: ${{ needs.resolve-release-meta.outputs.windows_gradle_task }}
-      DAYBOOK_MACOS_GRADLE_TASK: ${{ needs.resolve-release-meta.outputs.macos_gradle_task }}
     steps:
       - name: Setup tmate session
         if: ${{ github.event_name == 'workflow_dispatch' && inputs.tmate_enabled }}
@@ -342,6 +332,24 @@ jobs:
       - name: verify archive tools
         run: |
           command -v bsdtar
+
+      - name: materialize android release keystore
+        if: env.DAYBOOK_COMPOSE_PROFILE == 'release'
+        shell: bash
+        env:
+          DAYBOOK_ANDROID_RELEASE_KEYSTORE_B64: ${{ secrets.DAYBOOK_ANDROID_RELEASE_KEYSTORE_B64 }}
+          DAYBOOK_ANDROID_RELEASE_KEYSTORE_PASSWORD: ${{ secrets.DAYBOOK_ANDROID_RELEASE_KEYSTORE_PASSWORD }}
+          DAYBOOK_ANDROID_RELEASE_KEY_ALIAS: ${{ secrets.DAYBOOK_ANDROID_RELEASE_KEY_ALIAS }}
+          DAYBOOK_ANDROID_RELEASE_KEY_PASSWORD: ${{ secrets.DAYBOOK_ANDROID_RELEASE_KEY_PASSWORD }}
+        run: |
+          set -euo pipefail
+          keystore_path="${RUNNER_TEMP}/daybook-release.jks"
+          printf '%s' "${DAYBOOK_ANDROID_RELEASE_KEYSTORE_B64}" | base64 --decode > "${keystore_path}"
+          chmod 600 "${keystore_path}"
+          printf 'DAYBOOK_ANDROID_RELEASE_KEYSTORE_PATH=%s\n' "${keystore_path}" >> "${GITHUB_ENV}"
+          printf 'DAYBOOK_ANDROID_RELEASE_KEYSTORE_PASSWORD=%s\n' "${DAYBOOK_ANDROID_RELEASE_KEYSTORE_PASSWORD}" >> "${GITHUB_ENV}"
+          printf 'DAYBOOK_ANDROID_RELEASE_KEY_ALIAS=%s\n' "${DAYBOOK_ANDROID_RELEASE_KEY_ALIAS}" >> "${GITHUB_ENV}"
+          printf 'DAYBOOK_ANDROID_RELEASE_KEY_PASSWORD=%s\n' "${DAYBOOK_ANDROID_RELEASE_KEY_PASSWORD}" >> "${GITHUB_ENV}"
 
       - name: build daybook cli (android termux)
         run: |
@@ -408,7 +416,6 @@ jobs:
       DAYBOOK_IS_RELEASE_BUILD: ${{ needs.resolve-release-meta.outputs.is_release_build }}
       DAYBOOK_COMPOSE_PROFILE: ${{ needs.resolve-release-meta.outputs.compose_profile }}
       DAYBOOK_RUST_PROFILE_DIR: ${{ needs.resolve-release-meta.outputs.rust_profile_dir }}
-      DAYBOOK_ANDROID_GRADLE_TASK: ${{ needs.resolve-release-meta.outputs.android_gradle_task }}
       DAYBOOK_WINDOWS_GRADLE_TASK: ${{ needs.resolve-release-meta.outputs.windows_gradle_task }}
       DAYBOOK_MACOS_GRADLE_TASK: ${{ needs.resolve-release-meta.outputs.macos_gradle_task }}
     steps:
@@ -538,7 +545,6 @@ jobs:
       DAYBOOK_IS_RELEASE_BUILD: ${{ needs.resolve-release-meta.outputs.is_release_build }}
       DAYBOOK_COMPOSE_PROFILE: ${{ needs.resolve-release-meta.outputs.compose_profile }}
       DAYBOOK_RUST_PROFILE_DIR: ${{ needs.resolve-release-meta.outputs.rust_profile_dir }}
-      DAYBOOK_ANDROID_GRADLE_TASK: ${{ needs.resolve-release-meta.outputs.android_gradle_task }}
       DAYBOOK_WINDOWS_GRADLE_TASK: ${{ needs.resolve-release-meta.outputs.windows_gradle_task }}
       DAYBOOK_MACOS_GRADLE_TASK: ${{ needs.resolve-release-meta.outputs.macos_gradle_task }}
     steps:

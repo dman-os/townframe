@@ -635,11 +635,6 @@ private fun defaultNoteMimeOptions(): List<NoteMimeOption> = listOf(
         label = "Markdown",
         description = "Rich text formatting with Markdown syntax.",
     ),
-    NoteMimeOption(
-        mime = "text/x-hledger-journal",
-        label = "hledger journal",
-        description = "Ledger-style journal entry format.",
-    ),
 )
 
 private fun mergeNoteMimeOptions(config: NoteEditorConfig?, currentMime: String?): List<NoteMimeOption> {
