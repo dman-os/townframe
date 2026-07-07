@@ -230,6 +230,14 @@ enum RuntimeCmd {
     ReleaseDocLease {
         doc_id: DocumentId,
     },
+    CheckSedimentreeResident {
+        doc_id: DocumentId,
+        resp: oneshot::Sender<bool>,
+    },
+    CheckDocWorkerExists {
+        doc_id: DocumentId,
+        resp: oneshot::Sender<bool>,
+    },
 }
 
 enum ConnTask {
@@ -237,7 +245,13 @@ enum ConnTask {
     Listener,
 }
 
-enum RuntimeEvt {
+/// Keyhive event payload type aliases — concrete for our generics.
+type SignedAddKeyOp = keyhive_crypto::signed::Signed<keyhive_core::principal::individual::op::add_key::AddKeyOp>;
+type SignedRotateKeyOp =
+    keyhive_crypto::signed::Signed<keyhive_core::principal::individual::op::rotate_key::RotateKeyOp>;
+type SignedCgkaOp = keyhive_crypto::signed::Signed<beekem::operation::CgkaOperation>;
+
+pub(crate) enum RuntimeEvt {
     SyncSessionObserved {
         session: subduction_core::sync_session::SyncSession,
     },
@@ -275,6 +289,42 @@ enum RuntimeEvt {
     },
     DocWorkerMaterializationReady {
         doc_id: DocumentId,
+    },
+    // --- Keyhive event listener variants (P1) ---
+    PrekeyExpanded {
+        new_prekey: Arc<SignedAddKeyOp>,
+    },
+    PrekeyRotated {
+        rotate_key: Arc<SignedRotateKeyOp>,
+    },
+    CgkaOp {
+        data: Arc<SignedCgkaOp>,
+    },
+    DelegationReceived {
+        target: keyhive_core::principal::identifier::Identifier,
+        data: Arc<
+            keyhive_crypto::signed::Signed<
+                keyhive_core::principal::group::delegation::Delegation<
+                    future_form::Sendable,
+                    keyhive_crypto::signer::memory::MemorySigner,
+                    Vec<u8>,
+                    crate::keyhive_listener::BigRepoKeyhiveListener,
+                >,
+            >,
+        >,
+    },
+    RevocationReceived {
+        target: keyhive_core::principal::identifier::Identifier,
+        data: Arc<
+            keyhive_crypto::signed::Signed<
+                keyhive_core::principal::group::revocation::Revocation<
+                    future_form::Sendable,
+                    keyhive_crypto::signer::memory::MemorySigner,
+                    Vec<u8>,
+                    crate::keyhive_listener::BigRepoKeyhiveListener,
+                >,
+            >,
+        >,
     },
 }
 
@@ -343,6 +393,33 @@ impl BigRepoRuntimeHandle {
             .send(RuntimeCmd::NoteLocalKeyhiveChanged { resp: tx })
             .map_err(|_| eyre::eyre!(ERROR_ACTOR))?;
         rx.await.map_err(|_| eyre::eyre!(ERROR_CHANNEL))?
+    }
+
+    /// Check whether the sedimentree for `doc_id` is resident in subduction storage.
+    ///
+    /// This is the authoritative presence check for the fetch gate:
+    /// a doc that was never pulled subduction-side exists as a marker only.
+    pub async fn contains_sedimentree_id(&self, doc_id: DocumentId) -> Res<bool> {
+        let (tx, rx) = oneshot::channel();
+        self.cmd_tx
+            .send(RuntimeCmd::CheckSedimentreeResident {
+                doc_id,
+                resp: tx,
+            })
+            .map_err(|_| eyre::eyre!(ERROR_ACTOR))?;
+        rx.await.map_err(|_| eyre::eyre!(ERROR_CHANNEL))
+    }
+
+    /// Check whether a doc worker is currently alive for `doc_id`.
+    pub async fn has_doc_worker(&self, doc_id: DocumentId) -> Res<bool> {
+        let (tx, rx) = oneshot::channel();
+        self.cmd_tx
+            .send(RuntimeCmd::CheckDocWorkerExists {
+                doc_id,
+                resp: tx,
+            })
+            .map_err(|_| eyre::eyre!(ERROR_ACTOR))?;
+        rx.await.map_err(|_| eyre::eyre!(ERROR_CHANNEL))
     }
 
     pub async fn commit_delta(
@@ -550,7 +627,7 @@ pub(crate) type BigRepoPolicy = subduction_keyhive::policy::SubductionKeyhive<
     Vec<u8>,
     Vec<u8>,
     keyhive_core::store::ciphertext::memory::MemoryCiphertextStore<Vec<u8>, Vec<u8>>,
-    keyhive_core::listener::no_listener::NoListener,
+    crate::keyhive_listener::BigRepoKeyhiveListener,
     rand_08::rngs::OsRng,
 >;
 pub trait BigRepoSubductionStorage:
@@ -616,6 +693,7 @@ pub async fn spawn_big_repo_runtime<S>(
     keyhive_storage: BigRepoKeyhiveStorage,
     big_sync_store: SharedPartitionStore,
     change_manager: Arc<changes::ChangeListenerManager>,
+    listener_evt_rx: mpsc::UnboundedReceiver<RuntimeEvt>,
 ) -> Res<(BigRepoRuntimeHandle, BigEphemeral, BigRepoRuntimeStopToken)>
 where
     S: BigRepoSubductionStorage,
@@ -642,6 +720,23 @@ where
     ));
     let (cmd_tx, mut cmd_rx) = mpsc::unbounded_channel::<RuntimeCmd>();
     let (evt_tx, mut evt_rx) = mpsc::unbounded_channel::<RuntimeEvt>();
+
+    // Forward events from the keyhive listener (external) into the runtime's
+    // own event channel so the main loop can process them alongside internal
+    // events (sync session, doc workers, etc.).
+    {
+        let evt_tx = evt_tx.clone();
+        runtime_tasks
+            .spawn(async move {
+                let mut rx = listener_evt_rx;
+                while let Some(evt) = rx.recv().await {
+                    if evt_tx.send(evt).is_err() {
+                        break;
+                    }
+                }
+            })
+            .expect(ERROR_TOKIO);
+    }
     let doc_sync_waiter_ids = Arc::new(AtomicU64::new(0));
     let keyhive_sync_waiter_ids = Arc::new(AtomicU64::new(0));
     let storage_for_reads = storage.clone();
@@ -1143,6 +1238,21 @@ where
                 let _ = self.cancel_pending_keyhive_sync(peer_id, waiter_id);
             }
             RuntimeCmd::ReleaseDocLease { doc_id } => self.handle_release_doc_lease(doc_id),
+            RuntimeCmd::CheckSedimentreeResident { doc_id, resp } => {
+                let sedimentree_id = SedimentreeId::new(doc_id.into_bytes());
+                let storage = self.storage_for_reads.clone();
+                self.spawn_background(async move {
+                    let stored = storage
+                        .contains_sedimentree_id(sedimentree_id)
+                        .await
+                        .unwrap_or(false);
+                    resp.send(stored).inspect_err(|_| warn!(ERROR_CALLER)).ok();
+                });
+            }
+            RuntimeCmd::CheckDocWorkerExists { doc_id, resp } => {
+                let exists = self.doc_workers.contains_key(&doc_id);
+                resp.send(exists).inspect_err(|_| warn!(ERROR_CALLER)).ok();
+            }
         }
 
         Ok(())
@@ -1194,8 +1304,94 @@ where
             RuntimeEvt::DocWorkerMaterializationReady { doc_id } => {
                 self.pending_materialization.remove(&doc_id);
             }
+            // --- Keyhive event listener handlers ---
+            RuntimeEvt::PrekeyExpanded { new_prekey } => {
+                self.change_manager
+                    .notify_prekeys_expanded(new_prekey)
+                    .expect(ERROR_ACTOR);
+            }
+            RuntimeEvt::PrekeyRotated { rotate_key } => {
+                self.change_manager
+                    .notify_prekey_rotated(rotate_key)
+                    .expect(ERROR_ACTOR);
+            }
+            RuntimeEvt::CgkaOp { data } => {
+                self.change_manager
+                    .notify_cgka_op(data)
+                    .expect(ERROR_ACTOR);
+            }
+            RuntimeEvt::DelegationReceived { target, data } => {
+                self.change_manager
+                    .notify_delegation_received(data)
+                    .expect(ERROR_ACTOR);
+                self.update_doc_access(target);
+            }
+            RuntimeEvt::RevocationReceived { target, data } => {
+                self.change_manager
+                    .notify_revocation_received(data)
+                    .expect(ERROR_ACTOR);
+                self.update_doc_access(target);
+            }
         }
         Ok(())
+    }
+
+    /// Incrementally update doc access for a single target (doc or group).
+    ///
+    /// Called on every DelegationReceived / RevocationReceived instead of
+    /// a full O(all_docs) rebuild. The `target` is the doc or group whose
+    /// membership changed.
+    fn update_doc_access(&self, target: keyhive_core::principal::identifier::Identifier) {
+        let keyhive = self.keyhive.clone();
+        let store = Arc::clone(&self.big_sync_store);
+        let own_principal = PeerId::new(self.keyhive.clone_keyhive().id().to_bytes());
+        self.spawn_background(async move {
+            let agents_raw = keyhive.agents_for_membered(target).await;
+            let agents: HashMap<PeerId, keyhive_core::access::Access> = agents_raw
+                .into_iter()
+                .map(|(k, v)| (PeerId::new(k), v))
+                .collect();
+            let doc_id = DocumentId::new(target.to_bytes());
+            store.set_doc_members(doc_id, agents.clone()).await;
+
+            // Global partition marker: are WE readable?
+            if agents.get(&own_principal).map(|a| a.is_reader()).unwrap_or(false) {
+                store
+                    .add_obj_to_parts(doc_id, vec![crate::GLOBAL_PART_ID])
+                    .await
+                    .unwrap_or_else(|err| {
+                        warn!(%doc_id, error=%err, "failed adding doc to global partition");
+                    });
+            } else {
+                store
+                    .remove_obj_from_part(doc_id, crate::GLOBAL_PART_ID)
+                    .await
+                    .unwrap_or_else(|err| {
+                        warn!(%doc_id, error=%err, "failed removing doc from global partition");
+                    });
+            }
+
+            // Group partitions: agents keys whose Identifier corresponds to a Group.
+            // For each such group, add this doc to that group's partition.
+            let kh = keyhive.clone_keyhive();
+            let group_ids: std::collections::HashSet<PeerId> = {
+                let locked = kh.groups().lock().await;
+                locked.keys().map(|gid| PeerId::new(gid.to_bytes())).collect()
+            };
+            for (agent_id, _access) in &agents {
+                if group_ids.contains(agent_id) {
+                    let group_part_id = big_sync_core::PartId::new(*agent_id.0.as_bytes());
+                    store.ensure_part(group_part_id).await.ok();
+                    store
+                        .add_obj_to_parts(doc_id, vec![group_part_id])
+                        .await
+                        .unwrap_or_else(|err| {
+                            warn!(%doc_id, ?group_part_id, error=%err,
+                                  "failed adding doc to group partition");
+                        });
+                }
+            }
+        });
     }
 
     fn spawn_background<F>(&self, fut: F)
@@ -4258,9 +4454,17 @@ mod tests {
     use subduction_core::storage::{memory::MemoryStorage, traits::Storage};
     use subduction_crypto::{signer::memory::MemorySigner, verified_meta::VerifiedMeta};
 
+    /// Create a [`BigRepoKeyhiveListener`] that drops events (tests don't need
+    /// the runtime event loop to be running — the send will simply fail
+    /// silently because the receiver is dropped).
+    fn test_keyhive_listener() -> crate::keyhive_listener::BigRepoKeyhiveListener {
+        let (tx, _rx) = tokio::sync::mpsc::unbounded_channel();
+        crate::keyhive_listener::BigRepoKeyhiveListener { evt_tx: tx }
+    }
+
     #[tokio::test]
     async fn ciphertext_store_keeps_stored_commit_loadable_after_mark_decrypted() -> Res<()> {
-        let keyhive = BigKeyhiveHandle::new([9; 32]).await?;
+        let keyhive = BigKeyhiveHandle::new([9; 32], test_keyhive_listener()).await?;
         let keyhive_storage = BigRepoKeyhiveStorage::memory();
         let _doc_id = keyhive
             .create_doc(default(), nonempty![[1; 32]], &keyhive_storage)
@@ -4329,7 +4533,7 @@ mod tests {
 
     #[tokio::test]
     async fn ciphertext_store_reuses_indexed_entry_for_repeat_lookup() -> Res<()> {
-        let keyhive = BigKeyhiveHandle::new([14; 32]).await?;
+        let keyhive = BigKeyhiveHandle::new([14; 32], test_keyhive_listener()).await?;
         let keyhive_storage = BigRepoKeyhiveStorage::memory();
         let doc_id = keyhive
             .create_doc(default(), nonempty![[1; 32]], &keyhive_storage)
@@ -4393,7 +4597,7 @@ mod tests {
     async fn ciphertext_store_prefers_fragment_over_loose_commit_for_same_ref() -> Res<()> {
         use sedimentree_core::fragment::Fragment;
 
-        let keyhive = BigKeyhiveHandle::new([11; 32]).await?;
+        let keyhive = BigKeyhiveHandle::new([11; 32], test_keyhive_listener()).await?;
         let keyhive_storage = BigRepoKeyhiveStorage::memory();
         let _doc_id = keyhive
             .create_doc(default(), nonempty![[1; 32]], &keyhive_storage)
@@ -4561,7 +4765,7 @@ mod tests {
 
     #[tokio::test]
     async fn ciphertext_store_lazy_ancestor_lookup_uses_indexed_child_only() -> Res<()> {
-        let keyhive = BigKeyhiveHandle::new([13; 32]).await?;
+        let keyhive = BigKeyhiveHandle::new([13; 32], test_keyhive_listener()).await?;
         let keyhive_storage = BigRepoKeyhiveStorage::memory();
         let doc_id = keyhive
             .create_doc(default(), nonempty![[1; 32]], &keyhive_storage)
@@ -4678,7 +4882,7 @@ mod tests {
 
     #[tokio::test]
     async fn fragment_encryption_reuses_existing_content_key() -> Res<()> {
-        let keyhive = BigKeyhiveHandle::new([10; 32]).await?;
+        let keyhive = BigKeyhiveHandle::new([10; 32], test_keyhive_listener()).await?;
         let keyhive_storage = BigRepoKeyhiveStorage::memory();
         let doc_id = keyhive
             .create_doc(default(), nonempty![[1; 32]], &keyhive_storage)
@@ -4756,7 +4960,7 @@ mod tests {
 
     #[tokio::test]
     async fn load_doc_snapshot_rejects_plaintext_blob() -> Res<()> {
-        let keyhive = BigKeyhiveHandle::new([12; 32]).await?;
+        let keyhive = BigKeyhiveHandle::new([12; 32], test_keyhive_listener()).await?;
         let keyhive_storage = BigRepoKeyhiveStorage::memory();
         let doc_id = keyhive
             .create_doc(default(), nonempty![[1; 32]], &keyhive_storage)

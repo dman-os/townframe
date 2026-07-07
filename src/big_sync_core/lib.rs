@@ -13,6 +13,14 @@ mod interlude {
     pub use crate::ids::{BuckId, ObjId, PartId, PeerId};
 }
 
+/// Per-part sync mode: `CursorOnly` skips the bucket-diff path entirely;
+/// `Bucket` uses the full bucket-diff strategy.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SyncMode {
+    CursorOnly,
+    Bucket,
+}
+
 use std::collections::VecDeque;
 
 use crate::interlude::*;
@@ -686,7 +694,12 @@ impl BigSyncMachine {
 
 // peer support
 impl BigSyncMachine {
-    fn handle_set_peer_evt(&mut self, SetPeerEvent { peer_id, parts }: SetPeerEvent) {
+    fn handle_set_peer_evt(
+        &mut self,
+        SetPeerEvent {
+            peer_id, parts,
+        }: SetPeerEvent,
+    ) {
         tracing::debug!(peer_id = %peer_id, part_count = parts.len(), "set peer event");
         // clear out everything, avoid reuising any old state
         // treating SetPeer as a refresh peer cmd in a way
@@ -695,6 +708,7 @@ impl BigSyncMachine {
         let deets = MachineTaskDeets::DecidePeerStrategy(DecidePeerStrategyTask {
             peer_id,
             parts: parts.iter().copied().collect(),
+            sync_modes: default(),
         });
         let decide_task = self.tasks.spawn_task(TaskSeed::Machine(deets));
         self.stat_machine.set_peer(peer_id, parts.iter().copied());
@@ -881,6 +895,7 @@ impl BigSyncMachine {
                 DecidePeerStrategyTask {
                     peer_id,
                     parts: parts_retry.clone(),
+                    sync_modes: default(),
                 },
             ));
             let decide_task = if parts_retry.len() == response_len {
@@ -958,6 +973,7 @@ impl BigSyncMachine {
             let deets = MachineTaskDeets::DecidePeerStrategy(DecidePeerStrategyTask {
                 peer_id,
                 parts: parts_retry.clone(),
+                sync_modes: default(),
             });
             let decide_task = self.tasks.spawn_delayed_task(
                 TaskSeed::Machine(deets),

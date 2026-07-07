@@ -344,11 +344,12 @@ pub async fn spawn_switch_worker(
                 .rcx
                 .part_store
                 .subscribe(SubPartsRequest {
+                    peer_id: big_sync_core::PeerId::new([0u8; 32]),
                     parts: vec![PartStreamCursorRequest {
                         part_id: docs_partition_id,
                         cursor,
                     }],
-                })
+                }, [0u8; 32])
                 .await??;
 
             loop {

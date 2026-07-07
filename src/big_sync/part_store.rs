@@ -66,12 +66,37 @@ pub trait HostPartStore: Send + Sync {
         limit: u32,
     ) -> Res<Result<HashMap<PartId, PartPage>, ListPartsError>>;
 
+    /// Subscribe to events for the given parts, filtering events for
+    /// the given `subscriber` (ed25519 verifying key bytes).
+    /// Events for documents the subscriber cannot read are silently dropped.
     async fn subscribe(
         &self,
         reqs: SubPartsRequest,
+        subscriber: PeerId,
     ) -> Res<Result<mpsc::Receiver<SubEvent>, ListPartsError>>;
 
     async fn ensure_part(&self, part_id: PartId) -> Res<()>;
+
+    /// Set the agents who have access to `doc` and their [`Access`] level.
+    /// The subscribe filter uses this to determine readability.
+    ///
+    /// **Default: no-op** — existing impls and test doubles are unaffected.
+    async fn set_doc_members(
+        &self,
+        _doc: ObjId,
+        _agents: HashMap<PeerId, keyhive_core::access::Access>,
+    ) {
+    }
+
+    /// Add a single member to `doc` with the given [`Access`] level.
+    ///
+    /// **Default: no-op** — existing impls and test doubles are unaffected.
+    async fn add_doc_member(&self, _doc: ObjId, _member: PeerId, _access: keyhive_core::access::Access) {}
+
+    /// Remove a single member from `doc`.
+    ///
+    /// **Default: no-op** — existing impls and test doubles are unaffected.
+    async fn remove_doc_member(&self, _doc: ObjId, _member: PeerId) {}
 }
 
 pub(crate) fn obj_id_bounds_for_bucket(bucket_id: BuckId) -> (ObjId, Option<ObjId>) {
@@ -394,6 +419,7 @@ pub mod contract {
 #[cfg(test)]
 pub mod host_contract {
     use super::*;
+    use keyhive_core::access::Access;
     use big_sync_core::rpc::{
         BucketObjPageEntry, BucketSummary, LeafBucketPage, LeafBucketRequest, LeafBucketsRequest,
         ListPartsError, PartEvent, PartPage, SubEvent, SubPartsRequest, BUCKET_LIVE_FP_SEED,
@@ -1099,6 +1125,10 @@ pub mod host_contract {
         store.ensure_part(part_a).await?;
         store.ensure_part(part_b).await?;
 
+        // Grant the subscriber Read access so the filter passes events.
+        let sub_peer = big_sync_core::PeerId::new([0u8; 32]);
+        store.set_doc_members(obj, std::collections::HashMap::from([(sub_peer, Access::Read)])).await;
+
         seed_live_obj(store, obj, payload("sub-1", 1), &[part_a]).await?;
         store.add_obj_to_parts(obj, vec![part_b]).await?;
         store.set_obj_payload(obj, payload("sub-2", 2)).await?;
@@ -1107,11 +1137,12 @@ pub mod host_contract {
 
         let rx = store
             .subscribe(SubPartsRequest {
+                peer_id: sub_peer,
                 parts: vec![big_sync_core::rpc::PartStreamCursorRequest {
                     part_id: part_b,
                     cursor: 3,
                 }],
-            })
+            }, sub_peer)
             .await??;
         let events = collect_sub_events(&rx).await?;
         let replay_cursor = match &events[..] {

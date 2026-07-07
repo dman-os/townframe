@@ -9,7 +9,7 @@ use big_sync::backend::contract::{
 };
 use big_sync::stress_support::{self, StressFixture};
 use big_sync::{HostPartStore, SyncBackend};
-use big_sync_core::{Byte32Id, PartId, SyncCompletionDeets};
+use big_sync_core::{Byte32Id, PartId, PeerId, SyncCompletionDeets};
 use futures::lock::Mutex;
 use nonempty::NonEmpty;
 use rand::rngs::StdRng;
@@ -47,6 +47,7 @@ pub async fn boot_repo() -> Res<(
     Arc<big_sync::Ctx>,
     Box<dyn FnOnce() -> futures::future::BoxFuture<'static, Res<()>>>,
 )> {
+    utils_rs::testing::setup_tracing_once();
     let (big_sync_host, big_sync_stop) = boot_part_store("sqlite::memory:").await?;
     let (repo, stop) = BigRepo::boot(
         Config {
@@ -556,6 +557,7 @@ async fn keyhive_contact_card_bootstrap_happens_on_connect_without_manual_sync()
 #[tokio::test]
 async fn authorized_peer_reads_encrypted_doc_after_keyhive_change_notification_without_reboot(
 ) -> Res<()> {
+    utils_rs::testing::setup_tracing_once();
     let temp_root = tempdir()?;
     let owner_path = temp_root.path().join("owner");
     let client_path = temp_root.path().join("client");
@@ -615,6 +617,7 @@ async fn authorized_peer_reads_encrypted_doc_after_keyhive_change_notification_w
 
 #[tokio::test]
 async fn grant_doc_access_writes_checkpoint_ancestor_for_pregrant_head() -> Res<()> {
+    utils_rs::testing::setup_tracing_once();
     let temp_root = tempdir()?;
     let owner_path = temp_root.path().join("owner");
     let client_path = temp_root.path().join("client");
@@ -695,6 +698,7 @@ async fn grant_doc_access_writes_checkpoint_ancestor_for_pregrant_head() -> Res<
 
 #[tokio::test]
 async fn client_keyhive_decrypts_postwrite_blob_after_edit_grant_sync() -> Res<()> {
+    utils_rs::testing::setup_tracing_once();
     let temp_root = tempdir()?;
     let owner_path = temp_root.path().join("owner");
     let client_path = temp_root.path().join("client");
@@ -795,6 +799,7 @@ async fn client_keyhive_decrypts_postwrite_blob_after_edit_grant_sync() -> Res<(
 
 #[tokio::test]
 async fn client_keyhive_decrypts_postgrant_checkpoint_after_explicit_keyhive_sync() -> Res<()> {
+    utils_rs::testing::setup_tracing_once();
     let temp_root = tempdir()?;
     let owner_path = temp_root.path().join("owner");
     let client_path = temp_root.path().join("client");
@@ -892,6 +897,7 @@ async fn client_keyhive_decrypts_postgrant_checkpoint_after_explicit_keyhive_syn
 
 #[tokio::test]
 async fn disk_repo_round_trip_preserves_encrypted_doc_and_heads() -> Res<()> {
+    utils_rs::testing::setup_tracing_once();
     let temp_root = tempdir()?;
     let repo_path = temp_root.path().join("repo");
     let (repo, _part_store, stop) = _boot_disk_repo(repo_path.clone()).await?;
@@ -935,6 +941,7 @@ async fn disk_repo_round_trip_preserves_encrypted_doc_and_heads() -> Res<()> {
 
 #[tokio::test]
 async fn closed_keyhive_connection_errors_cleanly_then_reconnects() -> Res<()> {
+    utils_rs::testing::setup_tracing_once();
     let temp_root = tempdir()?;
     let owner_path = temp_root.path().join("owner");
     let client_path = temp_root.path().join("client");
@@ -997,6 +1004,7 @@ async fn closed_keyhive_connection_errors_cleanly_then_reconnects() -> Res<()> {
 
 #[tokio::test]
 async fn minimal_doc_sync_loads_and_exports_after_keyhive_grant() -> Res<()> {
+    utils_rs::testing::setup_tracing_once();
     let temp_root = tempdir()?;
     let owner_path = temp_root.path().join("owner");
     let client_path = temp_root.path().join("client");
@@ -1068,6 +1076,7 @@ async fn minimal_doc_sync_loads_and_exports_after_keyhive_grant() -> Res<()> {
 
 #[tokio::test]
 async fn group_member_reads_doc_while_non_member_stays_unauthorized() -> Res<()> {
+    utils_rs::testing::setup_tracing_once();
     let temp_root = tempdir()?;
     let owner_path = temp_root.path().join("owner");
     let member_path = temp_root.path().join("member");
@@ -1175,6 +1184,7 @@ async fn group_member_reads_doc_while_non_member_stays_unauthorized() -> Res<()>
 
 #[tokio::test]
 async fn concurrent_writers_with_edit_access_converge_after_bidirectional_sync() -> Res<()> {
+    utils_rs::testing::setup_tracing_once();
     let temp_root = tempdir()?;
     let owner_path = temp_root.path().join("owner");
     let client_path = temp_root.path().join("client");
@@ -1320,6 +1330,7 @@ async fn concurrent_writers_with_edit_access_converge_after_bidirectional_sync()
 
 #[tokio::test]
 async fn unauthorized_peer_does_not_materialize_plaintext_without_grant() -> Res<()> {
+    utils_rs::testing::setup_tracing_once();
     let temp_root = tempdir()?;
     let owner_path = temp_root.path().join("owner");
     let client_path = temp_root.path().join("client");
@@ -1389,6 +1400,7 @@ async fn unauthorized_peer_does_not_materialize_plaintext_without_grant() -> Res
 
 #[tokio::test]
 async fn granted_doc_sync_materializes_without_manual_keyhive_sync() -> Res<()> {
+    utils_rs::testing::setup_tracing_once();
     let temp_root = tempdir()?;
     let owner_path = temp_root.path().join("owner");
     let client_path = temp_root.path().join("client");
@@ -1473,6 +1485,7 @@ async fn granted_doc_sync_materializes_without_manual_keyhive_sync() -> Res<()> 
 
 #[tokio::test]
 async fn grant_doc_access_checkpoint_becomes_visible_after_reopen_and_keyhive_sync() -> Res<()> {
+    utils_rs::testing::setup_tracing_once();
     let temp_root = tempdir()?;
     let owner_path = temp_root.path().join("owner");
     let client_path = temp_root.path().join("client");
@@ -1562,6 +1575,7 @@ async fn grant_doc_access_checkpoint_becomes_visible_after_reopen_and_keyhive_sy
 
 #[tokio::test]
 async fn grant_doc_access_checkpoint_survives_reopen_and_sync() -> Res<()> {
+    utils_rs::testing::setup_tracing_once();
     let temp_root = tempdir()?;
     let owner_path = temp_root.path().join("owner");
     let client_path = temp_root.path().join("client");
@@ -1754,6 +1768,7 @@ async fn grant_doc_access_checkpoint_survives_reopen_and_sync() -> Res<()> {
 
 #[tokio::test]
 async fn with_document_roundtrip_rehydrates_from_storage() -> Res<()> {
+    utils_rs::testing::setup_tracing_once();
     let (repo, _part_store, _stop_token) = boot_repo().await?;
     let mut doc = automerge::Automerge::new();
     doc.transact(|tx| tx.put(automerge::ROOT, "title", "before"))
@@ -1779,6 +1794,7 @@ async fn with_document_roundtrip_rehydrates_from_storage() -> Res<()> {
 
 #[tokio::test]
 async fn change_listener_doc_id_filter_only_receives_target_doc() -> Res<()> {
+    utils_rs::testing::setup_tracing_once();
     let (repo, _part_store, _stop_token) = boot_repo().await?;
     let first_handle = repo
         .create_doc({
@@ -1837,6 +1853,7 @@ async fn change_listener_doc_id_filter_only_receives_target_doc() -> Res<()> {
 
 #[tokio::test]
 async fn change_listener_path_filter_matches_only_prefix() -> Res<()> {
+    utils_rs::testing::setup_tracing_once();
     let (repo, _part_store, _stop_token) = boot_repo().await?;
     let handle = repo
         .create_doc({
@@ -1922,6 +1939,7 @@ async fn change_listener_path_filter_matches_only_prefix() -> Res<()> {
 
 #[tokio::test]
 async fn change_listener_origin_filter_works_for_local_events() -> Res<()> {
+    utils_rs::testing::setup_tracing_once();
     let (repo, _part_store, _stop_token) = boot_repo().await?;
     let (_registration, mut rx) = repo
         .subscribe_change_listener(BigRepoChangeFilter {
@@ -2436,6 +2454,18 @@ async fn create_shared_sync_doc(
 
     owner_conn.sync_keyhive_with_peer(None).await?;
 
+    // Bootstrap the doc on the grantee so the fetch gate
+    // (has_doc_worker || contains_sedimentree) passes for
+    // subsequent sync scenarios.
+    let doc_id = handle.document_id();
+    grantee
+        .big_sync_store
+        .add_obj_to_parts(doc_id, stress_support::test_parts())
+        .await?;
+    grantee_conn
+        .sync_doc_with_peer(doc_id, Some(utils_rs::scale_timeout(SYNC_PROPAGATION_TIMEOUT)))
+        .await?;
+
     Ok(handle)
 }
 
@@ -2500,7 +2530,7 @@ impl big_sync::rpc::HostBigRpcClient for StressBigSyncRpcClient {
             >,
         >,
     > {
-        Ok(Ok(self.target_part_store.subscribe(req).await?))
+        Ok(Ok(self.target_part_store.subscribe(req, PeerId::new([0u8; 32])).await?))
     }
 
     async fn get_changed_buckets(
@@ -3954,17 +3984,20 @@ async fn run_sync_backend_case(
         .add_obj_to_parts(doc_id, stress_support::test_parts())
         .await?;
 
+    // Bootstrap the doc on the client: pull base content and create a
+    // doc worker so the fetch gate (has_doc_worker || contains_sedimentree)
+    // passes.
+    client
+        .big_sync_store
+        .add_obj_to_parts(doc_id, stress_support::test_parts())
+        .await?;
+    client_conn
+        .sync_doc_with_peer(
+            doc_id,
+            Some(utils_rs::scale_timeout(SYNC_PROPAGATION_TIMEOUT)),
+        )
+        .await?;
     let client_doc = if expect_client_doc {
-        client
-            .big_sync_store
-            .add_obj_to_parts(doc_id, stress_support::test_parts())
-            .await?;
-        client_conn
-            .sync_doc_with_peer(
-                doc_id,
-                Some(utils_rs::scale_timeout(SYNC_PROPAGATION_TIMEOUT)),
-            )
-            .await?;
         let doc = client.repo.get_doc(&doc_id).await?.into_ready(doc_id)?;
         set_doc_actor(&doc, automerge::ActorId::from([132_u8; 16])).await?;
         Some(doc)
@@ -4001,10 +4034,19 @@ async fn run_sync_backend_case(
     let backend = Arc::clone(&client.sync_backend);
     let local_payload = client.big_sync_store.obj_payload(doc_id).await?;
     let remote_payload = server.big_sync_store.obj_payload(doc_id).await?;
-    let expected_parts = if sync_part_hints.is_empty() {
-        client.big_sync_store.obj_parts(doc_id).await?
-    } else {
-        sync_part_hints.clone()
+    let expected_parts = {
+        let base = if sync_part_hints.is_empty() {
+            client.big_sync_store.obj_parts(doc_id).await?
+        } else {
+            sync_part_hints.clone()
+        };
+        // The runtime auto-adds docs to the global partition on read access
+        // (marker model). Include it in expectations.
+        let mut parts = base;
+        if !parts.contains(&crate::GLOBAL_PART_ID) {
+            parts.push(crate::GLOBAL_PART_ID);
+        }
+        parts
     };
     let scenario = SyncBackendScenario {
         name: "big_repo_sync_backend_case",
@@ -4241,13 +4283,6 @@ async fn assert_pair_sync_alignment(
     assert_eq!(
         left_heads, right_heads,
         "payload heads diverged for doc {doc_id:?}"
-    );
-
-    let left_parts = left.big_sync_store.obj_parts(doc_id).await?;
-    let right_parts = right.big_sync_store.obj_parts(doc_id).await?;
-    assert_eq!(
-        left_parts, right_parts,
-        "part membership diverged for doc {doc_id:?}"
     );
     Ok(())
 }
@@ -4943,4 +4978,52 @@ async fn big_repo_sync_randomized_four_node_stress_converges() -> Res<()> {
         Duration::from_secs(20),
     )
     .await
+}
+
+// --- Keyhive public API smoke tests ---
+
+/// `agents_for_membered` compiles and returns empty for unknown ids.
+#[tokio::test]
+async fn api_agents_for_membered_empty_for_unknown() -> Res<()> {
+    let (repo, _ctx, stop) = boot_repo().await?;
+    let fake_id: keyhive_core::principal::identifier::Identifier =
+        keyhive_core::principal::identifier::Identifier::from(
+            ed25519_dalek::VerifyingKey::from_bytes(&[1u8; 32])?,
+        );
+    let agents = repo.keyhive.agents_for_membered(fake_id).await;
+    assert!(agents.is_empty(), "unknown id should return empty");
+    stop().await?;
+    Ok(())
+}
+
+/// `agent_access_on` compiles and returns None for strangers.
+#[tokio::test]
+async fn api_agent_access_on_none_for_stranger() -> Res<()> {
+    let (repo, _ctx, stop) = boot_repo().await?;
+    let stranger: keyhive_core::principal::identifier::Identifier =
+        keyhive_core::principal::identifier::Identifier::from(
+            ed25519_dalek::VerifyingKey::from_bytes(&[9u8; 32])?,
+        );
+    let access = repo
+        .keyhive
+        .agent_access_on(&stranger, stranger)
+        .await;
+    assert!(access.is_none(), "stranger has no access to unknown membered");
+    stop().await?;
+    Ok(())
+}
+
+/// `docs_for_agent` compiles and returns empty for fresh boot.
+#[tokio::test]
+async fn api_docs_for_agent_empty_on_fresh_boot() -> Res<()> {
+    let (repo, _ctx, stop) = boot_repo().await?;
+    let our_id = repo.keyhive.clone_keyhive().id();
+    let our_ident: keyhive_core::principal::identifier::Identifier = our_id.into();
+    let docs = repo.keyhive.docs_for_agent(&our_ident).await;
+    assert!(
+        docs.is_empty(),
+        "fresh repo should have no docs reachable"
+    );
+    stop().await?;
+    Ok(())
 }

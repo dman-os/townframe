@@ -52,12 +52,22 @@ impl big_sync::SyncBackend for BigRepoSyncBackend {
             .upgrade()
             .ok_or_else(|| eyre::eyre!("big repo dropped while sync backend was active"))?;
         let doc_id: crate::DocumentId = obj_id;
+
+        if !repo.runtime.has_doc_worker(doc_id).await?
+            && !repo.runtime.contains_sedimentree_id(doc_id).await?
+        {
+            return Ok(big_sync::SyncTaskRunOutcome::Completion(
+                big_sync_core::SyncTaskCompletion {
+                    obj_id,
+                    deets: big_sync_core::SyncCompletionDeets::Noop,
+                },
+            ));
+        }
+
         let local_heads = super::partition_doc_heads_payload(&repo.big_sync_store, doc_id).await?;
         let Some(local_heads) = local_heads else {
-            // FIXME: this should be folded into partition_doc_heads_payload query
-            let local_doc_exists = repo.big_sync_store.obj_exists(doc_id).await?;
-            // Doc not yet synced locally. Pull from peer via Subduction sync.
-            // Subduction syncs from an empty tree — the peer sends everything it has.
+            // Doc has a subduction sedimentree but no big_sync payload yet.
+            // Pull from peer via Subduction sync.
             repo.runtime
                 .sync_doc_with_peer(doc_id, peer_id, Some(repo.sync_policy().doc_sync_timeout))
                 .await
@@ -65,18 +75,16 @@ impl big_sync::SyncBackend for BigRepoSyncBackend {
                     crate::SyncDocError::NotFound => ferr!("remote doc was not found"),
                     _ => ferr!("{sync_error}"),
                 })?;
-            let deets = if local_doc_exists {
-                big_sync_core::SyncCompletionDeets::ChangedObject
-            } else {
-                big_sync_core::SyncCompletionDeets::AddedMember
-            };
             return Ok(big_sync::SyncTaskRunOutcome::Completion(
-                big_sync_core::SyncTaskCompletion { obj_id, deets },
+                big_sync_core::SyncTaskCompletion {
+                    obj_id,
+                    deets: big_sync_core::SyncCompletionDeets::ChangedObject,
+                },
             ));
         };
         // short circuit if the payloads are equal
         if let Some(remote_payload) = &remote_payload {
-            let remote_heads = super::doc_heads_from_payload(&remote_payload);
+            let remote_heads = super::doc_heads_from_payload(remote_payload);
             if local_heads.as_ref() == remote_heads.as_ref() {
                 return Ok(big_sync::SyncTaskRunOutcome::Completion(
                     big_sync_core::SyncTaskCompletion {

@@ -8,12 +8,15 @@ use crate::{
         PeerSummaryRequest, RpcError,
     },
     tasks::{TaskCtx, TaskResultDeets},
+    SyncMode,
 };
 
 #[derive(Debug)]
 pub struct DecidePeerStrategyTask {
     pub peer_id: PeerId,
     pub parts: Set<PartId>,
+    /// Per-part sync mode; defaults to `Bucket` if not specified.
+    pub sync_modes: Map<PartId, SyncMode>,
 }
 
 structstruck::strike! {
@@ -106,6 +109,23 @@ impl DecidePeerStrategyTask {
                 .part_store
                 .get_peer_part_cursor(self.peer_id, part_id)
                 .await;
+            // Per-part sync mode: look up from peer_state or default to Bucket.
+            // The mode is supplied by the embedder via set_peer's parts map.
+            let sync_mode = self
+                .sync_modes
+                .get(&part_id)
+                .copied()
+                .unwrap_or(SyncMode::Bucket);
+            if sync_mode == SyncMode::CursorOnly {
+                part_strats.insert(
+                    part_id,
+                    PeerPartStratDecision::Cursor(CursorStrat {
+                        latest_cursor: part_summary.latest_cursor,
+                        last_cursor: last_peer_cursor,
+                    }),
+                );
+                continue;
+            }
             let diff = part_summary.latest_cursor.abs_diff(last_peer_cursor);
             if diff <= BucketMachine::BUCKET_DIFF_THRESHOLD {
                 part_strats.insert(
