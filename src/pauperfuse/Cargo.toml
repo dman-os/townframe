@@ -16,6 +16,10 @@ path = "lib.rs"
 utils_rs = { workspace = true, default-features = false }
 
 #
+# ds
+surelock.workspace = true
+
+#
 # async
 # async-trait.workspace = true
 futures-buffered.workspace = true
