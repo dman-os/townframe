@@ -208,11 +208,11 @@ impl EntryMetaDiff {
 
 enum FileDiff {
     NewFile,
-    NoChange { id: VFileId },
-    FileChanged { id: VFileId, diff: EntryMetaDiff },
+    NoChange { id: FileId },
+    FileChanged { id: FileId, diff: EntryMetaDiff },
 }
 struct VFileSnap {
-    id: VFileId,
+    id: FileId,
     meta: EntryMeta,
 }
 

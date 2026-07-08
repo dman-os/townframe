@@ -51,6 +51,8 @@
     - [ ] auto-peer discovery
     - [x] QR based clone
     - [ ] RPC api versioning scheme
+  - [ ] Big Sync
+    - [ ] Use cursor epoch uuids for the event log
 - [ ] Compose
   - [ ] Migrate to new Compose architecture
   - [ ] Check out BoltFFI
