@@ -1038,7 +1038,7 @@ where
     doc_sync_waiter_ids: Arc<AtomicU64>,
     keyhive_sync_waiter_ids: Arc<AtomicU64>,
     pending_keyhive_syncs: PendingKeyhiveSyncWaiters,
-    active_keyhive_syncs: BTreeSet<PeerId>,
+    active_keyhive_syncs: HashMap<PeerId, u64>,
     keyhive_dirty: BTreeSet<PeerId>,
     pending_materialization: HashSet<DocumentId>,
     doc_workers: HashMap<DocumentId, DocWorkerEntry>,
@@ -1209,7 +1209,7 @@ where
                     .entry(peer_id)
                     .or_default()
                     .push((waiter_id, resp));
-                if !self.active_keyhive_syncs.contains(&peer_id) {
+                if !self.active_keyhive_syncs.contains_key(&peer_id) {
                     let _ = self.start_keyhive_sync(peer_id);
                 }
             }
@@ -1537,6 +1537,7 @@ where
                 doc_sync_waiter_ids: Arc::clone(&self.doc_sync_waiter_ids),
                 keyhive_sync_waiter_ids: Arc::clone(&self.keyhive_sync_waiter_ids),
             },
+            active_doc_syncs: HashMap::new(),
             msg_tx: worker_msg_tx,
             runtime_tasks: Arc::clone(&runtime_tasks),
             runtime_evt_tx,
@@ -1683,23 +1684,36 @@ where
     }
 
     fn finish_keyhive_sync(&mut self, peer_id: PeerId) -> Res<()> {
-        if !self.active_keyhive_syncs.remove(&peer_id) {
+        let Some(watermark) = self.active_keyhive_syncs.remove(&peer_id) else {
             debug!(%peer_id, "ignoring untracked keyhive sync completion");
             return Ok(());
-        }
-        if let Some(waiters) = self.pending_keyhive_syncs.remove(&peer_id) {
-            for (_, waiter) in waiters {
-                waiter
-                    .send(Ok(()))
-                    .inspect_err(|_| warn!(ERROR_CALLER))
-                    .ok();
+        };
+        // Split waiters: those that existed before this sync started resolve,
+        // those that arrived during/after cascade into a new round.
+        if let Some(waiters) = self.pending_keyhive_syncs.get_mut(&peer_id) {
+            let mut remaining = Vec::new();
+            for (id, sender) in std::mem::take(waiters) {
+                if id < watermark {
+                    sender
+                        .send(Ok(()))
+                        .inspect_err(|_| warn!(ERROR_CALLER))
+                        .ok();
+                } else {
+                    remaining.push((id, sender));
+                }
+            }
+            if remaining.is_empty() {
+                self.pending_keyhive_syncs.remove(&peer_id);
+            } else {
+                *waiters = remaining;
             }
         }
         let keyhive_protocol = Arc::clone(&self.keyhive_protocol);
         self.spawn_background(async move {
             let _ = keyhive_protocol.refresh_cache().await;
         });
-        if self.keyhive_dirty.remove(&peer_id) {
+        let has_remaining = self.pending_keyhive_syncs.contains_key(&peer_id);
+        if has_remaining || self.keyhive_dirty.remove(&peer_id) {
             self.start_keyhive_sync(peer_id)?;
         }
         for doc_id in self.pending_materialization.clone() {
@@ -1723,10 +1737,11 @@ where
     }
 
     fn start_keyhive_sync(&mut self, peer_id: PeerId) -> Res<()> {
-        let was_idle = self.active_keyhive_syncs.insert(peer_id);
-        if !was_idle {
+        if self.active_keyhive_syncs.contains_key(&peer_id) {
             return Ok(());
         }
+        let watermark = self.keyhive_sync_waiter_ids.load(Ordering::Relaxed);
+        self.active_keyhive_syncs.insert(peer_id, watermark);
         let keyhive_protocol = Arc::clone(&self.keyhive_protocol);
         let kh_peer_id = KeyhivePeerId::from_bytes(*peer_id.as_bytes());
         self.spawn_background(async move {
@@ -1746,7 +1761,7 @@ where
             debug!(%peer_id, "dropping internal keyhive sync for disconnected peer");
             return;
         }
-        if self.active_keyhive_syncs.contains(&peer_id) {
+        if self.active_keyhive_syncs.contains_key(&peer_id) {
             self.keyhive_dirty.insert(peer_id);
         } else {
             let _ = self.start_keyhive_sync(peer_id);
@@ -2148,6 +2163,7 @@ where
     state: DocWorkerDocState,
     pending_fragment_requests: BTreeSet<FragmentRequested>,
     pending_sync_jobs: PendingDocSyncWaiters,
+    active_doc_syncs: HashMap<PeerId, u64>,
     subduction: Arc<BigRepoSubduction<S>>,
     sedimentrees: SubductionSedimentrees,
     storage_for_reads: S,
@@ -2207,30 +2223,17 @@ where
                 );
                 let _materialization_pending = self.handle_apply_sync_session(session).await?;
                 if completes_sync_waiters {
-                    let waiter = self
-                        .pending_sync_jobs
-                        .get_mut(&peer_id)
-                        .and_then(|waiters| {
-                            // One successful `sync_with_peer` call emits one
-                            // outbound sync session, so one observed outbound
-                            // session completes one caller waiter.
-                            (!waiters.is_empty()).then(|| waiters.remove(0).1)
-                        });
-                    if self
-                        .pending_sync_jobs
-                        .get(&peer_id)
-                        .is_some_and(Vec::is_empty)
-                    {
-                        self.pending_sync_jobs.remove(&peer_id);
-                    }
-                    if let Some(waiter) = waiter {
-                        waiter
-                            .send(Ok(()))
-                            .inspect_err(|_| warn!(ERROR_CALLER))
-                            .ok();
+                    if let Some(watermark) = self.active_doc_syncs.remove(&peer_id) {
+                        let (resolved_count, needs_cascade) =
+                            self.resolve_doc_waiters(peer_id, watermark);
+                        for _ in 0..resolved_count {
+                            self.finish_transient_work()?;
+                        }
+                        if needs_cascade {
+                            self.spawn_doc_sync_for_peer(peer_id).await?;
+                        }
                     }
                 }
-                self.finish_transient_work()?;
             }
             DocWorkerMsg::SyncWithPeer {
                 peer_id,
@@ -2251,17 +2254,22 @@ where
             }
             DocWorkerMsg::SyncWithPeerResult {
                 peer_id,
-                waiter_id,
+                waiter_id: _,
                 result,
             } => {
-                if let Err(err) = result {
-                    let waiters = self.pending_sync_jobs.get_mut(&peer_id);
-                    if let Some(waiters) = waiters {
-                        if let Some(pos) = waiters.iter().position(|(id, _)| *id == waiter_id) {
-                            let (_id, sender) = waiters.remove(pos);
-                            if waiters.is_empty() {
-                                self.pending_sync_jobs.remove(&peer_id);
-                            }
+                if let Err(err) = &result {
+                    // The sync failed — the active guard is still set.
+                    // Clear it so the next request can start fresh, and
+                    // resolve all pending waiters for this peer with the error.
+                    self.active_doc_syncs.remove(&peer_id);
+                    if let Some(waiters) = self.pending_sync_jobs.remove(&peer_id) {
+                        for (_, sender) in waiters {
+                            let err = match err {
+                                SyncDocError::NotFound => SyncDocError::NotFound,
+                                SyncDocError::TransportError => SyncDocError::TransportError,
+                                SyncDocError::IoError(e) => SyncDocError::IoError(ferr!("{e}")),
+                                SyncDocError::Other(e) => SyncDocError::Other(ferr!("{e}")),
+                            };
                             sender
                                 .send(Err(err))
                                 .inspect_err(|_| warn!(ERROR_CALLER))
@@ -2270,6 +2278,9 @@ where
                         }
                     }
                 }
+                // On success the waiters are resolved by ApplySyncSession;
+                // do NOT touch active_doc_syncs here — ApplySyncSession owns
+                // that guard for the success path.
             }
             DocWorkerMsg::ReleaseHandleLease => {}
             DocWorkerMsg::ReattemptMaterialization => {
@@ -3108,33 +3119,18 @@ where
         })
     }
 
-    async fn handle_sync_with_peer(
-        &mut self,
-        peer_id: PeerId,
-        waiter_id: u64,
-        timeout: Option<Duration>,
-        sender: oneshot::Sender<Result<(), SyncDocError>>,
-    ) -> Res<()> {
-        let sedimentree_id = self.doc_id_subduction;
-        let remote_peer_id = subduction_core::peer::id::PeerId::new(peer_id.clone().into_bytes());
+    async fn spawn_doc_sync_for_peer(&mut self, peer_id: PeerId) -> Res<()> {
+        if self.active_doc_syncs.contains_key(&peer_id) {
+            return Ok(());
+        }
+        let watermark = self
+            .runtime_handle
+            .doc_sync_waiter_ids
+            .load(Ordering::Relaxed);
+        self.active_doc_syncs.insert(peer_id, watermark);
 
-        // Push the waiter immediately so it is visible to both
-        // ApplySyncSession (on OutboundBatch) and SyncWithPeerResult
-        // (on error) — whichever fires first resolves it.
-        self.pending_sync_jobs
-            .entry(peer_id)
-            .or_default()
-            .push((waiter_id, sender));
-        let subduction_timeout = timeout
-            .map(|duration| {
-                subduction_core::timeout::call::CallTimeout::TimeoutMillis(
-                    duration
-                        .as_millis()
-                        .try_into()
-                        .expect("timeout fits in u64"),
-                )
-            })
-            .unwrap_or(subduction_core::timeout::call::CallTimeout::Default);
+        let sedimentree_id = self.doc_id_subduction;
+        let remote_peer_id = subduction_core::peer::id::PeerId::new(peer_id.into_bytes());
         let subduction = Arc::clone(&self.subduction);
         let msg_tx = self.msg_tx.clone();
         let runtime_tasks = Arc::clone(&self.runtime_tasks);
@@ -3142,7 +3138,12 @@ where
         runtime_tasks
             .spawn(async move {
                 let result = subduction
-                    .sync_with_peer(&remote_peer_id, sedimentree_id, false, subduction_timeout)
+                    .sync_with_peer(
+                        &remote_peer_id,
+                        sedimentree_id,
+                        false,
+                        subduction_core::timeout::call::CallTimeout::Default,
+                    )
                     .await;
                 let result = match result {
                     Ok((had_success, _stats, conn_errs)) => {
@@ -3158,13 +3159,67 @@ where
                 };
                 let _ = msg_tx.send(DocWorkerMsg::SyncWithPeerResult {
                     peer_id,
-                    waiter_id,
+                    // Carry the peer id only; the handler resolves by watermark.
+                    waiter_id: 0,
                     result,
                 });
             })
             .expect(ERROR_TOKIO);
 
         Ok(())
+    }
+
+    async fn handle_sync_with_peer(
+        &mut self,
+        peer_id: PeerId,
+        waiter_id: u64,
+        _timeout: Option<Duration>,
+        sender: oneshot::Sender<Result<(), SyncDocError>>,
+    ) -> Res<()> {
+        // Push the waiter immediately so it is visible to both
+        // ApplySyncSession (on OutboundBatch) and SyncWithPeerResult
+        // (on error) — whichever fires first resolves it.
+        self.pending_sync_jobs
+            .entry(peer_id)
+            .or_default()
+            .push((waiter_id, sender));
+        // Start a sync only if none is active for this peer;
+        // the waiter will be resolved when the sync completes.
+        if !self.active_doc_syncs.contains_key(&peer_id) {
+            self.spawn_doc_sync_for_peer(peer_id).await?;
+        }
+        Ok(())
+    }
+
+    /// Split pending waiters for `peer_id` at `watermark`.
+    ///
+    /// Returns (resolved_count, needs_cascade): the number of waiters
+    /// ≤ watermark that were resolved, and whether any waiters remain
+    /// beyond the watermark (triggering a cascade).
+    fn resolve_doc_waiters(&mut self, peer_id: PeerId, watermark: u64) -> (usize, bool) {
+        let Some(waiters) = self.pending_sync_jobs.get_mut(&peer_id) else {
+            return (0, false);
+        };
+        let mut remaining = Vec::new();
+        let mut resolved = 0usize;
+        for (id, sender) in std::mem::take(waiters) {
+            if id < watermark {
+                sender
+                    .send(Ok(()))
+                    .inspect_err(|_| warn!(ERROR_CALLER))
+                    .ok();
+                resolved += 1;
+            } else {
+                remaining.push((id, sender));
+            }
+        }
+        if remaining.is_empty() {
+            self.pending_sync_jobs.remove(&peer_id);
+            (resolved, false)
+        } else {
+            *waiters = remaining;
+            (resolved, true)
+        }
     }
 
     async fn handle_cancel_sync_with_peer(
@@ -3187,10 +3242,14 @@ where
                 let waiter = waiters.remove(pos);
                 if waiters.is_empty() {
                     self.pending_sync_jobs.remove(&peer_id);
+                    self.active_doc_syncs.remove(&peer_id);
                 }
                 vec![waiter]
             }
-            None => self.pending_sync_jobs.remove(&peer_id).unwrap_or_default(),
+            None => {
+                self.active_doc_syncs.remove(&peer_id);
+                self.pending_sync_jobs.remove(&peer_id).unwrap_or_default()
+            }
         };
         for (_, waiter) in waiters {
             self.finish_transient_work()?;
