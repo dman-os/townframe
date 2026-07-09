@@ -65,8 +65,6 @@ impl Default for BigRepoSyncPolicy {
 }
 type SharedPartitionStore = Arc<dyn big_sync::HostPartStore>;
 type PendingKeyhiveSyncWaiters = HashMap<PeerId, Vec<(u64, oneshot::Sender<Res<()>>)>>;
-type PendingDocSyncWaiters = HashMap<PeerId, Vec<(u64, oneshot::Sender<Result<(), SyncDocError>>)>>;
-
 #[derive(Debug, thiserror::Error, displaydoc::Display)]
 pub enum SyncDocError {
     /// Document not found
@@ -141,6 +139,33 @@ struct RuntimeDocLease {
 impl Drop for RuntimeDocLease {
     fn drop(&mut self) {
         self.runtime.release_doc_lease(self.doc_id);
+    }
+}
+
+/// RAII lease returned from `doc_worker_handle` alongside the worker handle.
+///
+/// Mirrors `RuntimeDocLease` but for internal transient operations
+/// (CommitDelta, SyncWithPeer, ApplySyncSession). The lease is bundled
+/// into the message sent to the doc worker; when the worker finishes
+/// processing and drops the lease, the runtime decrements `internal_leases`
+/// automatically — no manual counter management or event roundtrip needed.
+#[derive(Debug)]
+struct DocWorkerInternalLease {
+    cmd_tx: mpsc::UnboundedSender<RuntimeCmd>,
+    doc_id: DocumentId,
+}
+
+impl Drop for DocWorkerInternalLease {
+    fn drop(&mut self) {
+        if self
+            .cmd_tx
+            .send(RuntimeCmd::ReleaseInternalLease {
+                doc_id: self.doc_id,
+            })
+            .is_err()
+        {
+            warn!(doc_id = %self.doc_id, "runtime stopped before releasing internal lease");
+        }
     }
 }
 
@@ -229,6 +254,9 @@ enum RuntimeCmd {
     ReleaseDocLease {
         doc_id: DocumentId,
     },
+    ReleaseInternalLease {
+        doc_id: DocumentId,
+    },
     CheckSedimentreeResident {
         doc_id: DocumentId,
         resp: oneshot::Sender<bool>,
@@ -270,9 +298,6 @@ pub(crate) enum RuntimeEvt {
     },
     KeyhiveSyncRequested {
         peer_id: PeerId,
-    },
-    DocWorkerTransientFinished {
-        doc_id: DocumentId,
     },
     DocWorkerHandleAcquired {
         bundle: Arc<LiveDocBundle>,
@@ -1055,7 +1080,7 @@ where
                 initial_content,
                 resp,
             } => {
-                let worker = self.doc_worker_handle(doc_id).expect(ERROR_ACTOR);
+                let (worker, _lease) = self.doc_worker_handle(doc_id).expect(ERROR_ACTOR);
                 worker
                     .msg_tx
                     .send(DocWorkerMsg::PutDoc {
@@ -1065,7 +1090,7 @@ where
                     .expect(ERROR_ACTOR);
             }
             RuntimeCmd::GetDocHandle { doc_id, resp } => {
-                let worker = self.doc_worker_handle(doc_id).expect(ERROR_ACTOR);
+                let (worker, _lease) = self.doc_worker_handle(doc_id).expect(ERROR_ACTOR);
                 worker
                     .msg_tx
                     .send(DocWorkerMsg::AcquireHandle { resp })
@@ -1079,10 +1104,7 @@ where
                 origin,
                 resp,
             } => {
-                let worker = self.doc_worker_handle(doc_id).expect(ERROR_ACTOR);
-                if let Some(entry) = self.doc_workers.get_mut(&doc_id) {
-                    entry.transient_work += 1;
-                }
+                let (worker, _lease) = self.doc_worker_handle(doc_id).expect(ERROR_ACTOR);
                 worker
                     .msg_tx
                     .send(DocWorkerMsg::CommitDelta {
@@ -1091,6 +1113,7 @@ where
                         patches,
                         origin,
                         resp,
+                        _lease,
                     })
                     .expect(ERROR_ACTOR);
             }
@@ -1123,18 +1146,15 @@ where
                 timeout,
                 resp: done,
             } => {
-                let worker = self.doc_worker_handle(doc_id).expect(ERROR_ACTOR);
-                if let Some(entry) = self.doc_workers.get_mut(&doc_id) {
-                    entry.transient_work += 1;
-                }
+                let (worker, _lease) = self.doc_worker_handle(doc_id).expect(ERROR_ACTOR);
                 let msg = DocWorkerMsg::SyncWithPeer {
                     peer_id,
                     waiter_id,
                     timeout,
                     done,
+                    _lease,
                 };
                 if let Err(err) = worker.msg_tx.send(msg) {
-                    self.handle_doc_worker_transient_finished(doc_id);
                     let DocWorkerMsg::SyncWithPeer { done, .. } = err.0 else {
                         unreachable!("send_msg returned a different doc worker message");
                     };
@@ -1241,6 +1261,7 @@ where
                 let _ = self.cancel_pending_keyhive_sync(peer_id, waiter_id);
             }
             RuntimeCmd::ReleaseDocLease { doc_id } => self.handle_release_doc_lease(doc_id),
+            RuntimeCmd::ReleaseInternalLease { doc_id } => self.handle_release_internal_lease(doc_id),
             RuntimeCmd::CheckSedimentreeResident { doc_id, resp } => {
                 let sedimentree_id = SedimentreeId::new(doc_id.into_bytes());
                 let storage = self.storage_for_reads.clone();
@@ -1284,9 +1305,6 @@ where
             }
             RuntimeEvt::KeyhiveSyncRequested { peer_id } => {
                 self.schedule_internal_keyhive_sync(peer_id);
-            }
-            RuntimeEvt::DocWorkerTransientFinished { doc_id } => {
-                self.handle_doc_worker_transient_finished(doc_id);
             }
             RuntimeEvt::DocWorkerHandleAcquired { bundle } => {
                 self.handle_doc_worker_handle_acquired(bundle);
@@ -1425,7 +1443,7 @@ where
             return;
         };
         if entry.local_handles > 0
-            || entry.transient_work > 0
+            || entry.internal_leases > 0
             || self.pending_materialization.contains(&doc_id)
         {
             entry.eviction_deadline = None;
@@ -1446,15 +1464,14 @@ where
         }
     }
 
-    fn handle_doc_worker_transient_finished(&mut self, doc_id: DocumentId) {
-        let entry = self.doc_workers.get_mut(&doc_id).unwrap_or_else(|| {
-            panic!("transient work finished for unknown doc worker: {doc_id:?}")
-        });
-        assert!(
-            entry.transient_work > 0,
-            "transient work underflow for doc worker: {doc_id:?}"
-        );
-        entry.transient_work -= 1;
+    fn handle_release_internal_lease(&mut self, doc_id: DocumentId) {
+        if let Some(entry) = self.doc_workers.get_mut(&doc_id) {
+            assert!(
+                entry.internal_leases > 0,
+                "internal lease underflow for doc worker: {doc_id:?}"
+            );
+            entry.internal_leases -= 1;
+        }
         self.schedule_doc_worker_eviction_if_idle(doc_id);
     }
 
@@ -1471,7 +1488,7 @@ where
             .doc_workers
             .iter()
             .filter_map(|(doc_id, entry)| {
-                (entry.transient_work > 0).then_some((*doc_id, entry.handle.clone()))
+                (entry.internal_leases > 0).then_some((*doc_id, entry.handle.clone()))
             })
             .collect::<Vec<_>>();
         for (doc_id, worker) in workers {
@@ -1584,21 +1601,26 @@ where
                 handle: DocWorkerHandle { msg_tx },
                 stop: DocWorkerStopToken { cancel_token },
                 local_handles: 0,
-                transient_work: 0,
+                internal_leases: 0,
                 eviction_deadline: Some(Instant::now() + self.sync_policy.doc_worker_idle_ttl),
             },
         );
         Ok(())
     }
 
-    fn doc_worker_handle(&mut self, doc_id: DocumentId) -> Res<DocWorkerHandle> {
+    fn doc_worker_handle(&mut self, doc_id: DocumentId) -> Res<(DocWorkerHandle, DocWorkerInternalLease)> {
         self.spawn_doc_worker(doc_id)?;
         let entry = self
             .doc_workers
             .get_mut(&doc_id)
             .ok_or_eyre("doc worker missing after spawn")?;
         entry.eviction_deadline = None;
-        Ok(entry.handle.clone())
+        entry.internal_leases += 1;
+        let lease = DocWorkerInternalLease {
+            cmd_tx: self.cmd_tx.clone(),
+            doc_id,
+        };
+        Ok((entry.handle.clone(), lease))
     }
 
     fn handle_release_doc_lease(&mut self, doc_id: DocumentId) {
@@ -1632,13 +1654,10 @@ where
             sent_fragment_ids = session.sent_fragment_ids.len(),
             "observed sync session"
         );
-        let worker = self.doc_worker_handle(doc_id).expect(ERROR_ACTOR);
-        if let Some(entry) = self.doc_workers.get_mut(&doc_id) {
-            entry.transient_work += 1;
-        }
+        let (worker, _lease) = self.doc_worker_handle(doc_id).expect(ERROR_ACTOR);
         worker
             .msg_tx
-            .send(DocWorkerMsg::ApplySyncSession { session })
+            .send(DocWorkerMsg::ApplySyncSession { session, _lease })
             .expect(ERROR_ACTOR);
     }
 }
@@ -1718,7 +1737,7 @@ where
         }
         for doc_id in self.pending_materialization.clone() {
             match self.doc_worker_handle(doc_id) {
-                Ok(worker) => {
+                Ok((worker, _lease)) => {
                     worker
                         .msg_tx
                         .send(DocWorkerMsg::ReattemptMaterialization)
@@ -2112,7 +2131,7 @@ struct DocWorkerEntry {
     handle: DocWorkerHandle,
     stop: DocWorkerStopToken,
     local_handles: usize,
-    transient_work: usize,
+    internal_leases: usize,
     eviction_deadline: Option<Instant>,
 }
 
@@ -2130,15 +2149,18 @@ enum DocWorkerMsg {
         patches: Vec<automerge::Patch>,
         origin: BigRepoChangeOrigin,
         resp: oneshot::Sender<Res<()>>,
+        _lease: DocWorkerInternalLease,
     },
     ApplySyncSession {
         session: subduction_core::sync_session::SyncSession,
+        _lease: DocWorkerInternalLease,
     },
     SyncWithPeer {
         peer_id: PeerId,
         waiter_id: u64,
         timeout: Option<Duration>,
         done: oneshot::Sender<Result<(), SyncDocError>>,
+        _lease: DocWorkerInternalLease,
     },
     CancelSyncWithPeer {
         peer_id: PeerId,
@@ -2162,7 +2184,7 @@ where
     doc_id_subduction: SedimentreeId,
     state: DocWorkerDocState,
     pending_fragment_requests: BTreeSet<FragmentRequested>,
-    pending_sync_jobs: PendingDocSyncWaiters,
+    pending_sync_jobs: HashMap<PeerId, Vec<(u64, oneshot::Sender<Result<(), SyncDocError>>, DocWorkerInternalLease)>>,
     active_doc_syncs: HashMap<PeerId, u64>,
     subduction: Arc<BigRepoSubduction<S>>,
     sedimentrees: SubductionSedimentrees,
@@ -2208,14 +2230,15 @@ where
                 patches,
                 origin,
                 resp: done,
+                _lease,
             } => {
                 let res = self
                     .handle_commit_delta(commits, heads, patches, origin)
                     .await;
-                self.finish_transient_work()?;
+                drop(_lease);
                 done.send(res).inspect_err(|_| warn!(ERROR_CALLER)).ok();
             }
-            DocWorkerMsg::ApplySyncSession { session } => {
+            DocWorkerMsg::ApplySyncSession { session, _lease } => {
                 let peer_id = PeerId::new(*session.peer_id.as_bytes());
                 let completes_sync_waiters = matches!(
                     session.kind,
@@ -2224,24 +2247,23 @@ where
                 let _materialization_pending = self.handle_apply_sync_session(session).await?;
                 if completes_sync_waiters {
                     if let Some(watermark) = self.active_doc_syncs.remove(&peer_id) {
-                        let (resolved_count, needs_cascade) =
+                        let (_resolved_count, needs_cascade) =
                             self.resolve_doc_waiters(peer_id, watermark);
-                        for _ in 0..resolved_count {
-                            self.finish_transient_work()?;
-                        }
                         if needs_cascade {
                             self.spawn_doc_sync_for_peer(peer_id).await?;
                         }
                     }
                 }
+                drop(_lease);
             }
             DocWorkerMsg::SyncWithPeer {
                 peer_id,
                 waiter_id,
                 timeout,
                 done,
+                _lease,
             } => {
-                self.handle_sync_with_peer(peer_id, waiter_id, timeout, done)
+                self.handle_sync_with_peer(peer_id, waiter_id, timeout, done, _lease)
                     .await?;
             }
             DocWorkerMsg::CancelSyncWithPeer {
@@ -2263,7 +2285,7 @@ where
                     // resolve all pending waiters for this peer with the error.
                     self.active_doc_syncs.remove(&peer_id);
                     if let Some(waiters) = self.pending_sync_jobs.remove(&peer_id) {
-                        for (_, sender) in waiters {
+                        for (_, sender, _lease) in waiters {
                             let err = match err {
                                 SyncDocError::NotFound => SyncDocError::NotFound,
                                 SyncDocError::TransportError => SyncDocError::TransportError,
@@ -2274,7 +2296,7 @@ where
                                 .send(Err(err))
                                 .inspect_err(|_| warn!(ERROR_CALLER))
                                 .ok();
-                            self.finish_transient_work()?;
+                            // _lease dropped here: ReleaseInternalLease sent to runtime
                         }
                     }
                 }
@@ -3175,14 +3197,17 @@ where
         waiter_id: u64,
         _timeout: Option<Duration>,
         sender: oneshot::Sender<Result<(), SyncDocError>>,
+        _lease: DocWorkerInternalLease,
     ) -> Res<()> {
         // Push the waiter immediately so it is visible to both
         // ApplySyncSession (on OutboundBatch) and SyncWithPeerResult
         // (on error) — whichever fires first resolves it.
+        // The lease is stored alongside the waiter and dropped when
+        // the waiter is resolved, releasing the internal lease counter.
         self.pending_sync_jobs
             .entry(peer_id)
             .or_default()
-            .push((waiter_id, sender));
+            .push((waiter_id, sender, _lease));
         // Start a sync only if none is active for this peer;
         // the waiter will be resolved when the sync completes.
         if !self.active_doc_syncs.contains_key(&peer_id) {
@@ -3202,15 +3227,16 @@ where
         };
         let mut remaining = Vec::new();
         let mut resolved = 0usize;
-        for (id, sender) in std::mem::take(waiters) {
+        for (id, sender, _lease) in std::mem::take(waiters) {
             if id < watermark {
                 sender
                     .send(Ok(()))
                     .inspect_err(|_| warn!(ERROR_CALLER))
                     .ok();
+                // _lease dropped here: ReleaseInternalLease sent to runtime
                 resolved += 1;
             } else {
-                remaining.push((id, sender));
+                remaining.push((id, sender, _lease));
             }
         }
         if remaining.is_empty() {
@@ -3235,7 +3261,7 @@ where
                 };
                 let Some(pos) = waiters
                     .iter()
-                    .position(|(pending_id, _)| *pending_id == waiter_id)
+                    .position(|(pending_id, _, _)| *pending_id == waiter_id)
                 else {
                     return Ok(());
                 };
@@ -3251,22 +3277,14 @@ where
                 self.pending_sync_jobs.remove(&peer_id).unwrap_or_default()
             }
         };
-        for (_, waiter) in waiters {
-            self.finish_transient_work()?;
+        for (_, waiter, _lease) in waiters {
             waiter
                 .send(Err(SyncDocError::IoError(ferr!("{reason}"))))
                 .inspect_err(|_| warn!(ERROR_CALLER))
                 .ok();
+            // _lease dropped here: ReleaseInternalLease sent to runtime
         }
         Ok(())
-    }
-
-    fn finish_transient_work(&self) -> Res<()> {
-        self.runtime_evt_tx
-            .send(RuntimeEvt::DocWorkerTransientFinished {
-                doc_id: self.doc_id,
-            })
-            .wrap_err(ERROR_CHANNEL)
     }
 
     fn mark_materialization_pending(&mut self, was_pending: bool) -> Res<()> {

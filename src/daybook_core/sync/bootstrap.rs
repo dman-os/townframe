@@ -254,7 +254,7 @@ async fn pull_required_partitions_via_big_sync_worker(
     let mut sync_backends = HashMap::new();
     let repo_backend_id = big_repo::BigRepo::BACKEND_ID.into();
     let repo_sync_backend = Arc::new(
-        big_repo::BigRepoSyncBackend::boot(Arc::downgrade(big_repo), endpoint.clone())
+        big_repo::BigRepoSyncBackend::boot(Arc::downgrade(big_repo))
             .await
             .wrap_err("failed booting big repo sync backend")?,
     );
@@ -314,8 +314,6 @@ async fn pull_required_partitions_via_big_sync_worker(
     big_sync_worker
         .set_peer(peer_id, big_sync_rpc_client, initial_partitions.clone())
         .await?;
-    repo_sync_backend.register_remote_peer(peer_id, bootstrap.endpoint_addr.clone());
-    blob_sync_backend.register_remote_peer(peer_id, bootstrap.endpoint_addr.clone());
 
     info!("XXX onto wait_for_full_sync");
     let timeout_result = tokio::time::timeout(timeout, async {
