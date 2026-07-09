@@ -4,7 +4,6 @@
 use crate::interlude::*;
 use crate::rpc::BuckLevel;
 
-#[macro_export]
 macro_rules! alias_byte32id {
     ($name:ident) => {
         #[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]

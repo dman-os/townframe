@@ -2960,7 +2960,7 @@ impl SyncRepoNode {
             .wrap_err("failed binding iroh endpoint")?;
 
         let sync_backend = Arc::new(
-            BigRepoSyncBackend::boot(Arc::downgrade(&repo), endpoint.clone())
+            BigRepoSyncBackend::boot(Arc::downgrade(&repo))
                 .await
                 .wrap_err("failed booting big repo sync backend")?,
         );
@@ -3060,17 +3060,6 @@ impl SyncRepoNode {
                 None,
             )
             .await?;
-        let remote_addr = endpoint_addr_from_remote_info(&self.endpoint, remote.endpoint.id())
-            .await
-            .unwrap_or_else(|_| remote.endpoint.addr());
-        self.sync_backend
-            .register_remote_peer(remote.peer_id(), remote_addr);
-        let self_addr = endpoint_addr_from_remote_info(&remote.endpoint, self.endpoint.id())
-            .await
-            .unwrap_or_else(|_| self.endpoint.addr());
-        remote
-            .sync_backend
-            .register_remote_peer(self.peer_id(), self_addr);
         let parts = stress_support::test_parts()
             .into_iter()
             .map(|part_id| (part_id, BigRepo::BACKEND_ID.into()))
@@ -3106,8 +3095,6 @@ impl SyncRepoNode {
         if let Some(conn) = self.connections.lock().await.remove(&remote.peer_id()) {
             conn.stop().await?;
         }
-        self.sync_backend.unregister_remote_peer(remote.peer_id());
-        remote.sync_backend.unregister_remote_peer(self.peer_id());
         self.big_sync_worker.remove_peer(remote.peer_id()).await?;
         remote.big_sync_worker.remove_peer(self.peer_id()).await?;
         Ok(())
@@ -4469,12 +4456,6 @@ async fn connect_sync_pair(client: &SyncRepoNode, server: &SyncRepoNode) -> Res<
             None,
         )
         .await?;
-    client
-        .sync_backend
-        .register_remote_peer(server.peer_id(), server.endpoint.addr());
-    server
-        .sync_backend
-        .register_remote_peer(client.peer_id(), client.endpoint.addr());
     Ok(conn)
 }
 

@@ -247,7 +247,7 @@ impl IrohSyncRepo {
             big_repo::rpc::spawn_repo_rpc(Arc::clone(&rcx.big_repo)).await?;
 
         let repo_sync_backend = Arc::new(
-            big_repo::BigRepoSyncBackend::boot(Arc::downgrade(&rcx.big_repo), endpoint.clone())
+            big_repo::BigRepoSyncBackend::boot(Arc::downgrade(&rcx.big_repo))
                 .await
                 .wrap_err("failed booting big repo sync backend")?,
         );
