@@ -54,7 +54,7 @@ async fn test_v2_smoke() -> Res<()> {
         let mut tx = doc.transaction();
         tx.put(automerge::ROOT, "version", "0")?;
         tx.commit();
-        let handle = big_repo.put_doc(DocumentId::random(), doc).await?;
+        let handle = big_repo.create_doc(doc).await?;
         handle.document_id()
     };
 
@@ -149,7 +149,7 @@ async fn test_partitions_track_non_tmp_branches() -> Res<()> {
         let mut tx = doc.transaction();
         tx.put(automerge::ROOT, "version", "0")?;
         tx.commit();
-        let handle = big_repo.put_doc(DocumentId::random(), doc).await?;
+        let handle = big_repo.create_doc(doc).await?;
         handle.document_id()
     };
 
@@ -268,7 +268,7 @@ async fn test_v2_batch_add_smoke() -> Res<()> {
         let mut tx = doc.transaction();
         tx.put(automerge::ROOT, "version", "0")?;
         tx.commit();
-        let handle = big_repo.put_doc(DocumentId::random(), doc).await?;
+        let handle = big_repo.create_doc(doc).await?;
         handle.document_id()
     };
 
@@ -335,7 +335,7 @@ async fn test_v2_batch_add_emits_single_list_changed() -> Res<()> {
         let mut tx = doc.transaction();
         tx.put(automerge::ROOT, "version", "0")?;
         tx.commit();
-        let handle = big_repo.put_doc(DocumentId::random(), doc).await?;
+        let handle = big_repo.create_doc(doc).await?;
         handle.document_id()
     };
 
@@ -436,7 +436,7 @@ async fn test_v2_merge() -> Res<()> {
         let mut tx = doc.transaction();
         tx.put(automerge::ROOT, "version", "0")?;
         tx.commit();
-        let handle = big_repo.put_doc(DocumentId::random(), doc).await?;
+        let handle = big_repo.create_doc(doc).await?;
         handle.document_id()
     };
 
@@ -581,7 +581,7 @@ async fn test_resolve_handle_for_heads_does_not_match_foreign_doc_heads() -> Res
         let mut tx = doc.transaction();
         tx.put(automerge::ROOT, "version", "0")?;
         tx.commit();
-        let handle = big_repo.put_doc(DocumentId::random(), doc).await?;
+        let handle = big_repo.create_doc(doc).await?;
         handle.document_id()
     };
 
@@ -655,7 +655,7 @@ async fn test_create_branch_at_stale_main_heads_after_intervening_merges() -> Re
         let mut tx = doc.transaction();
         tx.put(automerge::ROOT, "version", "0")?;
         tx.commit();
-        let handle = big_repo.put_doc(DocumentId::random(), doc).await?;
+        let handle = big_repo.create_doc(doc).await?;
         handle.document_id()
     };
 
@@ -921,12 +921,17 @@ async fn test_bigrepo_raw_automerge_stale_heads_after_merges() -> Res<()> {
     utils_rs::testing::setup_tracing_once();
     let (big_repo, _big_sync_host, acx_stop) = boot_repo().await?;
 
-    let main_handle = big_repo
-        .put_doc(DocumentId::random(), automerge::Automerge::new())
-        .await?;
+    let mut main_doc = automerge::Automerge::new();
+    {
+        let mut tx = main_doc.transaction();
+        tx.put(automerge::ROOT, "note", "init")?;
+        tx.commit();
+    }
+    let main_handle = big_repo.create_doc(main_doc).await?;
     main_handle
         .with_document(|doc| {
             let mut tx = doc.transaction();
+            tx.delete(automerge::ROOT, "note")?;
             tx.put(automerge::ROOT, "note", "init")?;
             tx.commit();
             eyre::Ok(())
@@ -935,7 +940,7 @@ async fn test_bigrepo_raw_automerge_stale_heads_after_merges() -> Res<()> {
     let h0 = main_handle.with_document(|doc| doc.get_heads()).await?;
 
     let branch_a_doc = main_handle.with_document(|doc| doc.fork_at(&h0)).await??;
-    let branch_a_handle = big_repo.put_doc(DocumentId::random(), branch_a_doc).await?;
+    let branch_a_handle = big_repo.create_doc(branch_a_doc).await?;
     branch_a_handle
         .with_document(|doc| {
             let mut tx = doc.transaction();
@@ -951,7 +956,7 @@ async fn test_bigrepo_raw_automerge_stale_heads_after_merges() -> Res<()> {
     let h1 = main_handle.with_document(|doc| doc.get_heads()).await?;
 
     let branch_b_doc = main_handle.with_document(|doc| doc.fork_at(&h1)).await??;
-    let branch_b_handle = big_repo.put_doc(DocumentId::random(), branch_b_doc).await?;
+    let branch_b_handle = big_repo.create_doc(branch_b_doc).await?;
     branch_b_handle
         .with_document(|doc| {
             let mut tx = doc.transaction();
@@ -987,7 +992,7 @@ async fn test_v2_additional_apis() -> Res<()> {
         let mut tx = doc.transaction();
         tx.put(automerge::ROOT, "version", "0")?;
         tx.commit();
-        let handle = big_repo.put_doc(DocumentId::random(), doc).await?;
+        let handle = big_repo.create_doc(doc).await?;
         handle.document_id()
     };
 
@@ -1167,7 +1172,7 @@ async fn test_v2_metadata_maintenance() -> Res<()> {
         let mut tx = doc.transaction();
         tx.put(automerge::ROOT, "version", "0")?;
         tx.commit();
-        let handle = big_repo.put_doc(DocumentId::random(), doc).await?;
+        let handle = big_repo.create_doc(doc).await?;
         handle.document_id()
     };
 
@@ -1229,7 +1234,7 @@ async fn test_v2_metadata_maintenance() -> Res<()> {
         .await?
         .ok_or_eyre("missing main branch state")?
         .branch_doc_id;
-    let handle = big_repo.get_doc(&am_id).await?.unwrap();
+    let handle = big_repo.get_doc(&am_id).await?.into_ready(am_id)?;
     handle
         .with_document(|doc| -> Res<()> {
             let heads = facet_recovery::recover_facet_heads(doc, &facet_title)?;
@@ -1406,7 +1411,7 @@ async fn test_update_at_heads_uses_patch_user_path_actor() -> Res<()> {
         let mut tx = doc.transaction();
         tx.put(automerge::ROOT, "version", "0")?;
         tx.commit();
-        let handle = big_repo.put_doc(DocumentId::random(), doc).await?;
+        let handle = big_repo.create_doc(doc).await?;
         handle.document_id()
     };
     let (repo, stop_token) = DrawerRepo::load(
@@ -1458,16 +1463,15 @@ async fn test_update_at_heads_uses_patch_user_path_actor() -> Res<()> {
             .ok_or_eyre("missing main branch state")?
             .branch_doc_id,
     );
-    let handle = big_repo
-        .get_doc(
-            &repo
-                .get_branch_state(&doc_id, BranchPath::new("main"))
-                .await?
-                .ok_or_eyre("missing main branch state")?
-                .branch_doc_id,
-        )
+    let branch_doc_id = repo
+        .get_branch_state(&doc_id, BranchPath::new("main"))
         .await?
-        .ok_or_eyre("doc not found")?;
+        .ok_or_eyre("missing main branch state")?
+        .branch_doc_id;
+    let handle = big_repo
+        .get_doc(&branch_doc_id)
+        .await?
+        .into_ready(branch_doc_id)?;
     let latest_actor = latest_change_actor(&handle).await?;
     assert_eq!(latest_actor, expected_actor);
 
@@ -1485,7 +1489,7 @@ async fn test_merge_from_heads_uses_user_path_actor() -> Res<()> {
         let mut tx = doc.transaction();
         tx.put(automerge::ROOT, "version", "0")?;
         tx.commit();
-        let handle = big_repo.put_doc(DocumentId::random(), doc).await?;
+        let handle = big_repo.create_doc(doc).await?;
         handle.document_id()
     };
     let (repo, stop_token) = DrawerRepo::load(
@@ -1571,16 +1575,15 @@ async fn test_merge_from_heads_uses_user_path_actor() -> Res<()> {
             .ok_or_eyre("missing main branch state")?
             .branch_doc_id,
     );
-    let handle = big_repo
-        .get_doc(
-            &repo
-                .get_branch_state(&doc_id, BranchPath::new("main"))
-                .await?
-                .ok_or_eyre("missing main branch state")?
-                .branch_doc_id,
-        )
+    let branch_doc_id = repo
+        .get_branch_state(&doc_id, BranchPath::new("main"))
         .await?
-        .ok_or_eyre("doc not found")?;
+        .ok_or_eyre("missing main branch state")?
+        .branch_doc_id;
+    let handle = big_repo
+        .get_doc(&branch_doc_id)
+        .await?
+        .into_ready(branch_doc_id)?;
     let latest_actor = latest_change_actor(&handle).await?;
     assert_eq!(latest_actor, expected_actor);
 
@@ -1598,7 +1601,7 @@ async fn test_facet_keys_touched_by_local_actor_includes_user_path_scoped_actor(
         let mut tx = doc.transaction();
         tx.put(automerge::ROOT, "version", "0")?;
         tx.commit();
-        let handle = big_repo.put_doc(DocumentId::random(), doc).await?;
+        let handle = big_repo.create_doc(doc).await?;
         handle.document_id()
     };
     let (repo, stop_token) = DrawerRepo::load(
@@ -1773,7 +1776,7 @@ async fn test_v2_updated_at_merge() -> Res<()> {
         let mut tx = doc.transaction();
         tx.put(automerge::ROOT, "version", "0")?;
         tx.commit();
-        let handle = big_repo.put_doc(DocumentId::random(), doc).await?;
+        let handle = big_repo.create_doc(doc).await?;
         handle.document_id()
     };
 
@@ -1921,7 +1924,7 @@ async fn test_v2_updated_at_merge() -> Res<()> {
         .await?
         .ok_or_eyre("missing main branch state")?
         .branch_doc_id;
-    let handle = big_repo.get_doc(&am_id).await?.unwrap();
+    let handle = big_repo.get_doc(&am_id).await?.into_ready(am_id)?;
     let recovered_heads = handle
         .with_document(|doc| -> Res<Vec<automerge::ChangeHash>> {
             let heads = facet_recovery::recover_facet_heads(doc, &facet_title)?;
@@ -1980,7 +1983,7 @@ async fn test_v2_facet_blame_maintenance() -> Res<()> {
         let mut tx = doc.transaction();
         tx.put(automerge::ROOT, "version", "0")?;
         tx.commit();
-        let handle = big_repo.put_doc(DocumentId::random(), doc).await?;
+        let handle = big_repo.create_doc(doc).await?;
         handle.document_id()
     };
 
@@ -2134,7 +2137,7 @@ async fn test_v2_listener_is_scoped_to_drawer_doc() -> Res<()> {
         let mut tx = doc.transaction();
         tx.put(automerge::ROOT, "version", "0")?;
         tx.commit();
-        let handle = big_repo.put_doc(DocumentId::random(), doc).await?;
+        let handle = big_repo.create_doc(doc).await?;
         eyre::Ok(handle.document_id())
     };
 
@@ -2210,7 +2213,7 @@ async fn test_v2_content_update_does_not_emit_drawer_membership_events() -> Res<
         let mut tx = doc.transaction();
         tx.put(automerge::ROOT, "version", "0")?;
         tx.commit();
-        let handle = big_repo.put_doc(DocumentId::random(), doc).await?;
+        let handle = big_repo.create_doc(doc).await?;
         handle.document_id()
     };
 
@@ -2292,7 +2295,7 @@ async fn test_diff_events_delete_origin_uses_map_deleted_tombstone() -> Res<()> 
         let mut tx = doc.transaction();
         tx.put(automerge::ROOT, "version", "0")?;
         tx.commit();
-        let handle = big_repo.put_doc(DocumentId::random(), doc).await?;
+        let handle = big_repo.create_doc(doc).await?;
         handle.document_id()
     };
 
@@ -2368,7 +2371,7 @@ async fn test_add_rejects_unknown_facet_tag() -> Res<()> {
         let mut tx = doc.transaction();
         tx.put(automerge::ROOT, "version", "0")?;
         tx.commit();
-        let handle = big_repo.put_doc(DocumentId::random(), doc).await?;
+        let handle = big_repo.create_doc(doc).await?;
         handle.document_id()
     };
 
@@ -2414,7 +2417,7 @@ async fn test_add_rejects_self_reference_without_target_facet() -> Res<()> {
         let mut tx = doc.transaction();
         tx.put(automerge::ROOT, "version", "0")?;
         tx.commit();
-        let handle = big_repo.put_doc(DocumentId::random(), doc).await?;
+        let handle = big_repo.create_doc(doc).await?;
         handle.document_id()
     };
 
@@ -2470,7 +2473,7 @@ async fn test_add_accepts_body_self_reference_with_empty_fragment_for_present_ta
         let mut tx = doc.transaction();
         tx.put(automerge::ROOT, "version", "0")?;
         tx.commit();
-        let handle = big_repo.put_doc(DocumentId::random(), doc).await?;
+        let handle = big_repo.create_doc(doc).await?;
         handle.document_id()
     };
 
@@ -2542,9 +2545,7 @@ async fn perf_samod_disk_add_like_drawer_baseline() -> Res<()> {
         tx.put_object(&docs_obj, "map", automerge::ObjType::Map)?;
         tx.commit();
     }
-    let aggregate_handle = big_repo
-        .put_doc(DocumentId::random(), aggregate_doc)
-        .await?;
+    let aggregate_handle = big_repo.create_doc(aggregate_doc).await?;
 
     let total_docs: u64 = 80;
     let started_at = std::time::Instant::now();
@@ -2552,7 +2553,7 @@ async fn perf_samod_disk_add_like_drawer_baseline() -> Res<()> {
     for ii in 0..total_docs {
         let mut content_doc = automerge::Automerge::new();
         content_doc.set_actor(automerge::ActorId::random());
-        let content_handle = big_repo.put_doc(DocumentId::random(), content_doc).await?;
+        let content_handle = big_repo.create_doc(content_doc).await?;
         let content_doc_id = content_handle.document_id();
 
         let _content_heads = content_handle
@@ -2643,7 +2644,7 @@ async fn perf_drawer_add_disk_baseline() -> Res<()> {
         let mut tx = doc.transaction();
         tx.put(automerge::ROOT, "version", "0")?;
         tx.commit();
-        let handle = big_repo.put_doc(DocumentId::random(), doc).await?;
+        let handle = big_repo.create_doc(doc).await?;
         handle.document_id()
     };
 

@@ -163,8 +163,7 @@ pub async fn test_cx_with_options(
         crate::test_support::boot_part_store("sqlite::memory:").await?;
     let (big_repo, acx_stop) = BigRepo::boot(
         big_repo::Config {
-            peer_id,
-            secret_key_bytes: rand::random::<[u8; 32]>(),
+            node_identity_seed: rand::random::<[u8; 32]>(),
             storage: big_repo::StorageConfig::Memory,
         },
         Arc::clone(&big_sync_host.store),
@@ -177,14 +176,14 @@ pub async fn test_cx_with_options(
         let mut tx = doc.transaction();
         tx.put(automerge::ROOT, "version", "0")?;
         tx.commit();
-        let handle = big_repo.put_doc(DocumentId::random(), doc).await?;
+        let handle = big_repo.create_doc(doc).await?;
         handle.document_id()
     };
 
     // Create an app document for all stores (config, plugs, dispatch, triage)
     let app_doc_id = {
         let doc = automerge::Automerge::load(&crate::app::version_updates::version_latest()?)?;
-        let handle = big_repo.put_doc(DocumentId::random(), doc).await?;
+        let handle = big_repo.create_doc(doc).await?;
         handle.document_id()
     };
 
@@ -323,11 +322,11 @@ pub async fn test_cx_with_options(
         big_repo
             .get_doc(&app_doc_id)
             .await?
-            .ok_or_eyre("missing app doc")?,
+            .into_ready(app_doc_id)?,
         big_repo
             .get_doc(&drawer_doc_id)
             .await?
-            .ok_or_eyre("missing drawer doc")?,
+            .into_ready(drawer_doc_id)?,
     );
 
     let (init_repo, init_stop) = crate::rt::init::InitRepo::load(
@@ -427,8 +426,7 @@ pub async fn boot_repo() -> Res<(
     let (big_sync_host, big_sync_stop) = boot_part_store("sqlite::memory:").await?;
     let (repo, stop) = BigRepo::boot(
         big_repo::Config {
-            peer_id: PeerId::new([7_u8; 32]),
-            secret_key_bytes: [7_u8; 32],
+            node_identity_seed: [7_u8; 32],
             storage: big_repo::StorageConfig::Memory,
         },
         Arc::clone(&big_sync_host.store),
@@ -461,8 +459,7 @@ pub async fn boot_disk_repo(
     let (big_sync_host, big_sync_stop) = boot_part_store(&sqlite_url).await?;
     let (repo, stop) = BigRepo::boot(
         big_repo::Config {
-            peer_id: PeerId::new([7_u8; 32]),
-            secret_key_bytes: [7_u8; 32],
+            node_identity_seed: [7_u8; 32],
             storage: big_repo::StorageConfig::Disk { path },
         },
         Arc::clone(&big_sync_host.store),

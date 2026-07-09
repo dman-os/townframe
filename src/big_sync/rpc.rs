@@ -7,6 +7,8 @@ use big_sync_core::rpc::{
     LeafBucketsRequest, ListPartsError, PeerSummaryRequest, PeerSummaryResult, SubEvent,
     SubPartsRequest,
 };
+#[cfg(test)]
+use big_sync_core::PeerId;
 use irpc::{channel, rpc_requests, WithChannels};
 use tokio::sync::mpsc;
 
@@ -295,7 +297,8 @@ impl BigSyncRpcWorker {
             }
             BigSyncRpcMessage::SubParts(req) => {
                 let WithChannels { inner, tx, .. } = req;
-                let sub = self.store.subscribe(inner).await.unwrap();
+                let subscriber = inner.peer_id;
+                let sub = self.store.subscribe(inner, subscriber).await.unwrap();
                 let Ok(sub) = sub else {
                     warn!("sub_parts request for unknown parts");
                     return;
@@ -435,9 +438,16 @@ mod tests {
             .unwrap();
         let expected_sub_events = collect_sub_events(
             store
-                .subscribe(SubPartsRequest {
-                    parts: vec![big_sync_core::rpc::PartStreamCursorRequest { part_id, cursor: 0 }],
-                })
+                .subscribe(
+                    SubPartsRequest {
+                        peer_id: big_sync_core::PeerId::new([0u8; 32]),
+                        parts: vec![big_sync_core::rpc::PartStreamCursorRequest {
+                            part_id,
+                            cursor: 0,
+                        }],
+                    },
+                    PeerId::new([0u8; 32]),
+                )
                 .await?
                 .unwrap(),
         )
@@ -507,6 +517,7 @@ mod tests {
 
         let sub_events = client
             .sub_parts(SubPartsRequest {
+                peer_id: big_sync_core::PeerId::new([0u8; 32]),
                 parts: vec![big_sync_core::rpc::PartStreamCursorRequest { part_id, cursor: 0 }],
             })
             .await???;

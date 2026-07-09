@@ -4,6 +4,7 @@
 use crate::interlude::*;
 use crate::rpc::BuckLevel;
 
+#[macro_export]
 macro_rules! alias_byte32id {
     ($name:ident) => {
         #[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
@@ -198,8 +199,8 @@ impl autosurgeon::Hydrate for Byte32Id {
     fn hydrate_bytes(bytes: &[u8]) -> Result<Self, autosurgeon::HydrateError> {
         if bytes.len() != 32 {
             return Err(autosurgeon::HydrateError::unexpected(
-                "version tag in 32 length byte array",
-                format!("version tags has byte length of {}", bytes.len()),
+                "byte id in 32 length byte array",
+                format!("byte string has byte length of {}", bytes.len()),
             ));
         }
         let mut buf = [0_u8; 32];

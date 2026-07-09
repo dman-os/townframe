@@ -338,8 +338,14 @@ async fn pull_required_partitions_via_big_sync_worker(
         }
     }
 
-    let app_present = big_repo.get_doc(&bootstrap.app_doc_id).await?.is_some();
-    let drawer_present = big_repo.get_doc(&bootstrap.drawer_doc_id).await?.is_some();
+    let app_present = matches!(
+        big_repo.get_doc(&bootstrap.app_doc_id).await?,
+        big_repo::DocLookup::Ready(_)
+    );
+    let drawer_present = matches!(
+        big_repo.get_doc(&bootstrap.drawer_doc_id).await?,
+        big_repo::DocLookup::Ready(_)
+    );
     if !app_present || !drawer_present {
         eyre::bail!(
             "required core docs missing after clone sync (app_present={app_present}, drawer_present={drawer_present})"
@@ -472,11 +478,10 @@ pub async fn clone_repo_init_from_url(
         let part_store: Arc<dyn big_sync::HostPartStore> = Arc::new(part_store) as _;
         let (big_repo, big_repo_stop) = big_repo::BigRepo::boot(
             big_repo::Config {
+                node_identity_seed: identity.iroh_secret_key.to_bytes(),
                 storage: big_repo::StorageConfig::Disk {
                     path: staging.join("samod"),
                 },
-                peer_id: PeerId::new(*identity.iroh_public_key.as_bytes()),
-                secret_key_bytes: identity.iroh_secret_key.to_bytes(),
             },
             Arc::clone(&part_store),
         )
