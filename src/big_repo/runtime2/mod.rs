@@ -1,18 +1,28 @@
 //! runtime2 — the tractable rewrite of `runtime.rs`.
 //!
-//! Blocking-out scaffold: types, messages, IO seams, hub/worker model, leases.
-//! Method bodies are `todo!()` with a one-line contract + IO needs, so a
-//! lesser model can fill them in without re-deriving the architecture.
+//! A FutureForm-generic, transport-agnostic rewrite of the 5k-line tokio+iroh
+//! `runtime.rs`. Hub/worker actors with all IO centralized behind traits
+//! ([`DocIo`], injected [`TaskRuntime`]/[`Timer`]/[`Clock`]). Parity with the old
+//! runtime, with three bugs fixed (see `play.big_repo.current_fixes.md`):
+//! - head-divergence flake — heads are derived, never cached in an overloaded
+//!   payload field;
+//! - noop-after-crash — `apply_sync_session` always re-derives sedimentree
+//!   heads, even on an empty-refs sync;
+//! - non-atomic local write — a single `store_commit` (big_sync is gone from
+//!   the runtime, so there is no split write).
+//!
+//! Not yet wired into the build (`#[cfg(any())]` in `lib.rs`); green-up is a
+//! separate pass. See `play.big_repo.runtime2.md`.
 //!
 //! # IO model (v1: async actor + centralized IO traits → D2 determinism)
 //!
-//! The hub and doc-worker are async actors driven by an injected [`Spawner`].
-//! All IO flows through traits — [`DocIo`], `Storage<F>`, `KeyhiveStorage<F>`,
-//! `HostPartStore` — so IO is *external* to the actor logic. Memory backends
-//! give D2 determinism (no disk/network jitter). Full step-determinism
-//! (samod-style `IoTask` round-stepping) is a future evolution: the trait seam
-//! lets us wrap `DocIo` in an `IoTask`-completing harness later without
-//! rewriting the actor. See `play.big_repo.runtime2.md`.
+//! The hub and doc-worker are async actors driven by an injected [`TaskRuntime`].
+//! All IO flows through traits — [`DocIo`], `Storage<F>`, `KeyhiveStorage<F>`
+//! — so IO is *external* to the actor logic. Memory backends give D2
+//! determinism (no disk/network jitter). Full step-determinism (samod-style
+//! `IoTask` round-stepping) is a future evolution: the trait seam lets us wrap
+//! [`DocIo`] in an `IoTask`-completing harness later without rewriting the
+//! actor.
 //!
 //! # Avoiding message soup
 //!
@@ -35,10 +45,12 @@ use future_form::FutureForm;
 mod io;
 mod lease;
 mod messages;
+mod tasks;
 
-pub use io::{Clock, CausalDecryptResult, DocIo, EncryptedLooseCommit, HostPartStore, Spawner, SpawnHandle, Timer};
+pub use io::{Clock, CausalDecryptResult, DocIo, EncryptedLooseCommit, Timer};
 pub use lease::{DocLease, DocWorkerEntry, DocWorkerHandle, DocWorkerInternalLease, DocWorkerStopToken};
 pub use messages::{DocWorkerMsg, Runtime2Cmd, Runtime2Evt};
+pub use tasks::{TaskRuntime, TaskSet, TokioTaskRuntime, TokioTaskSet};
 
 mod doc_worker;
 mod handle;
@@ -58,9 +70,10 @@ pub use crate::DocumentId;
 /// unified SQL store (plan B) makes `S` and the `HostPartStore` share one KV so
 /// local writes are one atomic transaction.
 #[expect(clippy::type_complexity)]
-pub struct Runtime2Config<F, S, K>
+pub struct Runtime2Config<F, R, S, K>
 where
     F: FutureForm,
+    R: TaskRuntime<F>,
     S: subduction_core::storage::traits::Storage<F> + Clone + Send + Sync + std::fmt::Debug + 'static,
     K: subduction_keyhive::storage::KeyhiveStorage<F> + Send + Sync + 'static,
 {
@@ -68,15 +81,21 @@ where
     /// Unified SQL store backing subduction sedimentree storage (plan B).
     pub storage: S,
     pub keyhive_storage: std::sync::Arc<K>,
-    /// big_sync part_store — shares `storage`'s KV in the unified shape.
-    pub part_store: std::sync::Arc<dyn HostPartStore>,
+    /// IO surface shared by per-document workers. The implementation owns the
+    /// concrete subduction/keyhive/storage wiring; workers remain generic.
+    pub doc_io: std::sync::Arc<dyn DocIo<F>>,
+    /// NOTE: no `part_store` / `HostPartStore` here — runtime2 does not touch
+    /// big_sync. big_sync (sync routing, partitions) lives in a sibling layer.
     pub policy: std::sync::Arc<crate::runtime::BigRepoPolicy>,
     pub sync_policy: crate::runtime::BigRepoSyncPolicy,
     pub keyhive: crate::keyhive::BigKeyhiveHandle,
     pub change_manager: std::sync::Arc<crate::changes::ChangeListenerManager>,
-    /// Injected spawner/timer/clock — the determinism levers. `TokioSpawn`
-    /// native; a step-spawner in tests; wasm event loop.
-    pub spawner: std::sync::Arc<dyn Spawner<F>>,
+    /// Concrete task runtime (native: [`TokioTaskRuntime`]). Controls how
+    /// background tasks (keyhive syncs, lease waiters, doc-workers) are
+    /// spawned and stopped.
+    pub tasks: R,
+    /// Injected timer/clock — the determinism levers. `TokioTimer` native;
+    /// a step-timer in tests; wasm event loop.
     pub timer: std::sync::Arc<dyn Timer<F>>,
     pub clock: std::sync::Arc<dyn Clock>,
     pub rng: std::sync::Arc<futures::lock::Mutex<rand::rngs::StdRng>>,

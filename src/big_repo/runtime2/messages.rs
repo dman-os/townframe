@@ -1,8 +1,23 @@
 //! runtime2 messages.
 //!
-//! De-iroh'd vs today: connection verbs take a transport-agnostic `Runtime2Conn`
-//! handle, not `iroh::Endpoint`. Added `DocHeadState` (the new walk-derived
-//! heads query) and `QueryHeadState` on the doc-worker mailbox.
+//! De-iroh'd vs the old runtime ([`crate::runtime::RuntimeCmd`],
+//! [`crate::runtime::RuntimeEvt`], [`crate::runtime::DocWorkerMsg`]):
+//! - Connection verbs take a transport-agnostic `Runtime2Conn` handle,
+//!   not `iroh::Endpoint`.
+//! - Added [`DocHeadState`](crate::runtime2::DocHeadState) (the new
+//!   walk-derived heads query, `runtime.rs:188` had no equivalent).
+//! - Added [`QueryHeadState`](DocWorkerMsg::QueryHeadState) on the doc-worker
+//!   mailbox.
+//! - Every [`RuntimeCmd`](crate::runtime::RuntimeCmd) variant has a direct
+//!   counterpart here, except the `#[cfg(test)] InspectStoredDocBlobs`
+//!   (test-only introspection, deferred to test2 harness).
+//!
+//! # Forward references
+//!
+//! [`Runtime2Conn`] is a trait defined in a later parcel (transport layer).
+//! The hub accepts connections through it; the hub impl will generic over
+//! the transport. For now the message variants reference it directly to
+//! define the shape exposed to the runtime handle.
 
 use crate::interlude::*;
 use big_sync_core::PeerId;
@@ -33,15 +48,21 @@ pub enum Runtime2Cmd {
     /// heads (None if pending/relay). The flake-detector's backing op.
     DocHeadState {
         doc_id: DocumentId,
-        resp: tokio::sync::oneshot::Sender<eyre::Result<crate::runtime::DocHeadState>>,
+        resp: tokio::sync::oneshot::Sender<eyre::Result<crate::runtime2::DocHeadState>>,
     },
     // ── connections (transport-agnostic) ──────────────────────────────────
+    /// Open an outbound connection to `peer` at a transport-specific `addr`
+    /// (a `Box<dyn Any + Send>` interpreted by the hub's [`TransportConnect`]).
+    /// De-iroh'd: no `iroh::Endpoint`.
     OpenConn {
-        conn: Box<dyn crate::runtime2::Runtime2Conn<future_form::Sendable>>,
+        peer: PeerId,
+        addr: Box<dyn std::any::Any + Send>,
         resp: tokio::sync::oneshot::Sender<eyre::Result<(PeerId, Arc<std::sync::atomic::AtomicBool>)>>,
     },
+    /// Accept an inbound connection. `incoming` is a transport-specific
+    /// connection handle (`Box<dyn Any + Send>`) the hub hands to its transport.
     AcceptConn {
-        conn: Box<dyn crate::runtime2::Runtime2Conn<future_form::Sendable>>,
+        incoming: Box<dyn std::any::Any + Send>,
         resp: tokio::sync::oneshot::Sender<eyre::Result<(PeerId, Arc<std::sync::atomic::AtomicBool>)>>,
     },
     CloseConn {
@@ -91,8 +112,32 @@ pub enum Runtime2Evt {
     PrekeyExpanded { new_prekey: Arc<crate::runtime::SignedAddKeyOp> },
     PrekeyRotated { rotate_key: Arc<crate::runtime::SignedRotateKeyOp> },
     CgkaOp { data: Arc<crate::runtime::SignedCgkaOp> },
-    DelegationReceived { target: keyhive_core::principal::identifier::Identifier },
-    RevocationReceived { target: keyhive_core::principal::identifier::Identifier },
+    DelegationReceived {
+        target: keyhive_core::principal::identifier::Identifier,
+        data: Arc<
+            keyhive_crypto::signed::Signed<
+                keyhive_core::principal::group::delegation::Delegation<
+                    future_form::Sendable,
+                    keyhive_crypto::signer::memory::MemorySigner,
+                    Vec<u8>,
+                    crate::keyhive_listener::BigRepoKeyhiveListener,
+                >,
+            >,
+        >,
+    },
+    RevocationReceived {
+        target: keyhive_core::principal::identifier::Identifier,
+        data: Arc<
+            keyhive_crypto::signed::Signed<
+                keyhive_core::principal::group::revocation::Revocation<
+                    future_form::Sendable,
+                    keyhive_crypto::signer::memory::MemorySigner,
+                    Vec<u8>,
+                    crate::keyhive_listener::BigRepoKeyhiveListener,
+                >,
+            >,
+        >,
+    },
 }
 
 /// The doc-worker's mailbox. `_lease` fields keep the worker alive for the
@@ -129,7 +174,7 @@ pub enum DocWorkerMsg {
     ReleaseHandleLease,
     ReattemptMaterialization,
     /// NEW: back the `DocHeadState` runtime query.
-    QueryHeadState { resp: tokio::sync::oneshot::Sender<eyre::Result<crate::runtime::DocHeadState>> },
+    QueryHeadState { resp: tokio::sync::oneshot::Sender<eyre::Result<crate::runtime2::DocHeadState>> },
 }
 
 /// Monotonic waiter-id counters (shared handle↔hub).
