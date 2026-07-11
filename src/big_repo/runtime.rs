@@ -273,12 +273,12 @@ enum ConnTask {
 }
 
 /// Keyhive event payload type aliases — concrete for our generics.
-type SignedAddKeyOp =
+pub(crate) type SignedAddKeyOp =
     keyhive_crypto::signed::Signed<keyhive_core::principal::individual::op::add_key::AddKeyOp>;
-type SignedRotateKeyOp = keyhive_crypto::signed::Signed<
+pub(crate) type SignedRotateKeyOp = keyhive_crypto::signed::Signed<
     keyhive_core::principal::individual::op::rotate_key::RotateKeyOp,
 >;
-type SignedCgkaOp = keyhive_crypto::signed::Signed<beekem::operation::CgkaOperation>;
+pub(crate) type SignedCgkaOp = keyhive_crypto::signed::Signed<beekem::operation::CgkaOperation>;
 
 pub(crate) enum RuntimeEvt {
     SyncSessionObserved {
@@ -3869,13 +3869,14 @@ fn stage_automerge_ingest(doc: &automerge::Automerge) -> StagedAutomergeIngest {
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, PartialOrd, Ord)]
-enum BigRepoCiphertextKind {
+#[expect(dead_code)]
+pub(crate) enum BigRepoCiphertextKind {
     Fragment,
     LooseCommit,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, PartialOrd, Ord)]
-struct BigRepoCiphertextLocator {
+pub(crate) struct BigRepoCiphertextLocator {
     kind: BigRepoCiphertextKind,
     sedimentree_id: SedimentreeId,
     commit_id: CommitId,
