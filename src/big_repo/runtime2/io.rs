@@ -24,6 +24,8 @@
 //! layer that owns its own sync and watches subduction for new content.
 
 use crate::interlude::*;
+use big_sync_core::PeerId;
+use crate::DocumentId;
 use future_form::FutureForm;
 
 // ─── Determinism levers: Timer / Clock ─────────────────────────────────────
@@ -31,12 +33,10 @@ use future_form::FutureForm;
 // Spawning is handled by [`TaskRuntime`](crate::runtime2::TaskRuntime) /
 // [`TaskSet`](crate::runtime2::TaskSet), not by a local trait.
 
-/// Replaces `tokio::time::interval` / `tokio::time::sleep`. The runtime's
-/// periodic workers (keyhive refresh/compact, janitor) go through this so a
-/// step-`Timer` can drive them deterministically.
+/// Runtime-neutral sleep capability. Periodic workers recreate a sleep on
+/// each iteration, which also lets deterministic tests advance time explicitly.
 pub trait Timer<F: FutureForm>: Send + Sync {
-    /// A periodic tick; the determinism boundary for maintenance loops.
-    fn tick(&self, period: std::time::Duration) -> F::Future<'static, ()>;
+    fn sleep(&self, duration: std::time::Duration) -> F::Future<'static, ()>;
 }
 
 /// Replaces `TimestampSeconds::now()` / `Instant::now()`. Injected so tests
@@ -76,6 +76,7 @@ pub struct CausalDecryptResult {
 /// persists. The [`cgka_update_op`](Self::cgka_update_op) is *metadata*
 /// emitted during encryption — the hub routes it to the keyhive event listener;
 /// `store_commit` itself operates only on the head/parents/blob.
+#[derive(Clone)]
 pub struct EncryptedLooseCommit {
     pub head: sedimentree_core::loose_commit::id::CommitId,
     pub parents: std::collections::BTreeSet<sedimentree_core::loose_commit::id::CommitId>,
@@ -180,9 +181,56 @@ pub trait DocIo<F: FutureForm>: Send + Sync {
     /// [`Document::try_causal_decrypt_content`](keyhive_core::principal::document::Document::try_causal_decrypt_content).
     /// The returned [`CausalDecryptResult::complete`] includes the entrypoint
     /// plus any ancestors decrypted along the causal chain.
+    /// Persist a CGKA update operation emitted during encryption.
+    ///
+    /// Mirrors `keyhive_storage::persist_cgka_update_op`. Extracted as a
+    /// `DocIo` method so the doc-worker doesn't hold concrete keyhive storage.
+    fn persist_cgka_update_op(
+        &self,
+        op: keyhive_crypto::signed::Signed<beekem::operation::CgkaOperation>,
+    ) -> F::Future<'_, eyre::Result<()>>;
+
     fn try_causal_decrypt(
         &self,
         sed_id: sedimentree_core::id::SedimentreeId,
         locator: crate::runtime::BigRepoCiphertextLocator,
     ) -> F::Future<'_, eyre::Result<CausalDecryptResult>>;
+}
+
+// ─── RuntimeIo: hub-level IO contract ──────────────────────────────────────
+
+/// Hub-level IO that runtime2 currently hardcodes in the hub/handle.
+///
+/// Every method returns `F::Future` so the same logic works for `Sendable`
+/// (native) and `Local` (wasm). No concrete keyhive protocol, storage, spawn,
+/// or transport types appear in this trait.
+pub trait RuntimeIo<F: FutureForm>: Send + Sync {
+    /// Create a new keyhive document with the given parents and content heads.
+    /// Returns the generated [`DocumentId`].
+    fn create_document(
+        &self,
+        parents: Vec<crate::keyhive::BigKeyhiveAuthority>,
+        content_heads: nonempty::NonEmpty<[u8; 32]>,
+    ) -> F::Future<'_, eyre::Result<crate::DocumentId>>;
+
+    /// Check whether the sedimentree for `sed_id` is resident in storage.
+    fn contains_sedimentree(
+        &self,
+        sed_id: sedimentree_core::id::SedimentreeId,
+    ) -> F::Future<'_, eyre::Result<bool>>;
+
+    /// Notify the runtime that the local keyhive state has changed.
+    fn note_local_keyhive_changed(&self) -> F::Future<'_, eyre::Result<()>>;
+
+    /// Initiate a keyhive sync round with a peer.
+    fn sync_keyhive_with_peer(
+        &self,
+        peer_id: big_sync_core::PeerId,
+    ) -> F::Future<'_, eyre::Result<()>>;
+
+    /// Refresh the keyhive cache (periodic maintenance).
+    fn refresh_keyhive_cache(&self) -> F::Future<'_, eyre::Result<()>>;
+
+    /// Compact the keyhive archive (periodic maintenance).
+    fn compact_keyhive(&self) -> F::Future<'_, eyre::Result<()>>;
 }

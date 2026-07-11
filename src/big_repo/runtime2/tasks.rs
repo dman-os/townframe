@@ -9,10 +9,11 @@
 //! `wasm_bindgen_futures::spawn_local` behind the same interface without
 //! imposing `Send` or Tokio types on the actors.
 
+use crate::interlude::*;
 use std::{sync::Arc, time::Duration};
 
 use future_form::{FutureForm, Sendable};
-use futures::{FutureExt, future::Abortable, stream::AbortHandle};
+use futures::{FutureExt, future::{AbortHandle, Abortable}};
 
 /// Platform capability for creating independent task ownership scopes.
 ///
@@ -58,6 +59,20 @@ pub trait TaskSet<F: FutureForm>: Clone + 'static {
 /// runtime2 actors depend only on [`TaskRuntime`] / [`TaskSet`].
 #[derive(Debug, Clone, Copy, Default)]
 pub struct TokioTaskRuntime;
+
+/// Native timer backend. Tokio remains confined to platform adapters; actor
+/// code depends only on [`Timer`](crate::runtime2::Timer).
+#[derive(Debug, Clone, Copy, Default)]
+pub struct TokioTimer;
+
+impl crate::runtime2::Timer<Sendable> for TokioTimer {
+    fn sleep(
+        &self,
+        duration: Duration,
+    ) -> <Sendable as FutureForm>::Future<'static, ()> {
+        tokio::time::sleep(duration).boxed()
+    }
+}
 
 /// Native task ownership scope backed by [`utils_rs::AbortableJoinSet`].
 #[derive(Debug, Clone)]
