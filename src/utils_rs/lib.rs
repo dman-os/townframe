@@ -827,6 +827,13 @@ impl AbortableJoinSet {
         let Some(join_set) = guard.as_mut() else {
             return Err(AbortableJoinSetError::Aborted);
         };
+        // A long-lived runtime may spawn many short jobs before shutdown.
+        // Reap completed tasks opportunistically so JoinSet does not retain
+        // every result until `stop()`. A failed task is an invariant break and
+        // must surface immediately rather than remain hidden until shutdown.
+        while let Some(result) = join_set.try_join_next() {
+            result.expect("background task failed");
+        }
         let (done_tx, done_rx) = tokio::sync::oneshot::channel();
         let abort = join_set.spawn(async move {
             fut.await;
@@ -835,8 +842,15 @@ impl AbortableJoinSet {
         Ok(TaskHandle { abort, done_rx })
     }
 
+    /// Abort every task currently owned by the set.
+    ///
+    /// The set remains available to [`stop`](Self::stop), which can then join
+    /// the aborted tasks and surface any unexpected join failures. Keeping
+    /// abort and join as separate operations lets owners enforce reverse-order
+    /// shutdown without abandoning task cleanup.
     pub fn abort(&self) {
-        let Some(mut join_set) = self.inner.lock().expect(ERROR_MUTEX).take() else {
+        let mut guard = self.inner.lock().expect(ERROR_MUTEX);
+        let Some(join_set) = guard.as_mut() else {
             return;
         };
         join_set.abort_all();
