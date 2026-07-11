@@ -7,66 +7,67 @@
 //!
 //! # Generics
 //!
-//! Unlike [`Runtime2Config`] and the hub, `Runtime2Handle` is **not** generic
-//! over `F: FutureForm` — it only holds channel senders + `Arc` counters +
-//! accessor handles (`BigKeyhiveHandle`, `BigRepoSyncPolicy`), none of which
-//! depend on the async runtime flavour. The hub's `F` is erased at
-//! construction.
+//! Generic over `F: FutureForm` to carry the injected [`Timer`] so timeout
+//! behaviour is runtime-neutral. The hub and stop token carry the same `F`.
 //!
 //! [`Runtime2Cmd`]: super::Runtime2Cmd
+//! [`Timer`]: super::Timer
 
 use crate::interlude::*;
-use crate::runtime2::messages::{Runtime2Cmd, fresh_waiter_id};
+use crate::runtime2::{messages::{Runtime2Cmd, fresh_waiter_id}, Timer};
 use big_sync_core::PeerId;
 use crate::DocumentId;
+use future_form::FutureForm;
+use std::sync::Arc;
 
 /// The handle embedders use to drive the runtime.
 ///
-/// Cloneable (just a channel sender + shared counters). Does **not** own the
-/// runtime — see [`crate::runtime2::Runtime2StopToken`].
+/// Cloneable (just a channel sender + shared counters + timer). Does **not**
+/// own the runtime — see [`crate::runtime2::Runtime2StopToken`].
 ///
-/// Mirrors `BigRepoRuntimeHandle` at `runtime.rs:365` which has the same
-/// `cmd_tx`, `keyhive`, `keyhive_storage`, `sync_policy`, and waiter-id
-/// counters.
-#[derive(Clone)]
-pub struct Runtime2Handle {
-    pub(crate) cmd_tx: tokio::sync::mpsc::UnboundedSender<Runtime2Cmd>,
-    pub(crate) keyhive: crate::keyhive::BigKeyhiveHandle,
-    pub(crate) keyhive_storage: std::sync::Arc<crate::runtime::BigRepoKeyhiveStorage>,
+/// Mirrors `BigRepoRuntimeHandle` at `runtime.rs:365` which has `cmd_tx`,
+/// `sync_policy`, and waiter-id counters. Keyhive and storage are now
+/// behind [`RuntimeIo`] in the hub.
+///
+/// [`RuntimeIo`]: super::RuntimeIo
+pub struct Runtime2Handle<F: FutureForm> {
+    pub(crate) cmd_tx: async_channel::Sender<Runtime2Cmd>,
     pub(crate) sync_policy: crate::runtime::BigRepoSyncPolicy,
     pub(crate) doc_sync_waiter_ids: std::sync::Arc<std::sync::atomic::AtomicU64>,
     pub(crate) keyhive_sync_waiter_ids: std::sync::Arc<std::sync::atomic::AtomicU64>,
+    /// Injected runtime-neutral timer for timeout operations.
+    pub(crate) timer: Arc<dyn Timer<F>>,
 }
 
-impl Runtime2Handle {
-    /// Construct a new handle. Called by `spawn_runtime2` in the hub; the hub
-    /// passes its own cmd channel sender, keyhive handle, waiter counters, etc.
-    ///
-    /// Mirrors `BigRepoRuntimeHandle` construction at `runtime.rs:1044` which
-    /// takes the same constituents from `spawn_big_repo_runtime`.
+impl<F: FutureForm> Clone for Runtime2Handle<F> {
+    fn clone(&self) -> Self {
+        Self {
+            cmd_tx: self.cmd_tx.clone(),
+            sync_policy: self.sync_policy,
+            doc_sync_waiter_ids: self.doc_sync_waiter_ids.clone(),
+            keyhive_sync_waiter_ids: self.keyhive_sync_waiter_ids.clone(),
+            timer: self.timer.clone(),
+        }
+    }
+}
+
+impl<F: FutureForm> Runtime2Handle<F> {
+    /// Construct a new handle. Called by `spawn_runtime2` in the hub.
     pub(crate) fn new(
-        cmd_tx: tokio::sync::mpsc::UnboundedSender<Runtime2Cmd>,
-        keyhive: crate::keyhive::BigKeyhiveHandle,
-        keyhive_storage: std::sync::Arc<crate::runtime::BigRepoKeyhiveStorage>,
+        cmd_tx: async_channel::Sender<Runtime2Cmd>,
         sync_policy: crate::runtime::BigRepoSyncPolicy,
+        timer: Arc<dyn Timer<F>>,
     ) -> Self {
         Self {
             cmd_tx,
-            keyhive,
-            keyhive_storage,
             sync_policy,
             doc_sync_waiter_ids: std::sync::Arc::new(std::sync::atomic::AtomicU64::new(1)),
             keyhive_sync_waiter_ids: std::sync::Arc::new(std::sync::atomic::AtomicU64::new(1)),
+            timer,
         }
     }
 
     // ── accessors (mirror BigRepoRuntimeHandle fields) ──────────────────────
-
-    /// The keyhive handle used for access control, CGKA, and encryption.
-    /// Mirrors `BigRepoRuntimeHandle::keyhive` (`runtime.rs:367`).
-    pub fn keyhive(&self) -> &crate::keyhive::BigKeyhiveHandle {
-        &self.keyhive
-    }
 
     /// The sync policy (timeouts, TTLs). Mirrors
     /// `BigRepoRuntimeHandle::sync_policy` (`runtime.rs:373`).
@@ -81,10 +82,12 @@ impl Runtime2Handle {
     /// [`BigRepoRuntimeHandle::create_doc`](crate::runtime::BigRepoRuntimeHandle::create_doc)
     /// at `runtime.rs:381`.
     ///
-    /// The doc `DocumentId` is derived from a keyhive [`generate_doc`] call
-    /// before sending the `PutDoc` command to the hub.
+    /// Sends a [`CreateDoc`] command to the hub, which asynchronously calls
+    /// [`RuntimeIo::create_document`] then enqueues a [`PutDoc`] to itself.
     ///
-    /// [`generate_doc`]: keyhive_core::keyhive::Keyhive::generate_doc
+    /// [`CreateDoc`]: Runtime2Cmd::CreateDoc
+    /// [`PutDoc`]: Runtime2Cmd::PutDoc
+    /// [`RuntimeIo::create_document`]: super::RuntimeIo::create_document
     pub async fn create_doc(
         &self,
         initial_content: automerge::Automerge,
@@ -94,17 +97,15 @@ impl Runtime2Handle {
         let heads = initial_content.get_heads();
         let content_heads = NonEmpty::from_vec(heads.iter().map(|h| h.0).collect())
             .ok_or_else(|| eyre::eyre!("automerge doc has no heads"))?;
-        let doc_id = self
-            .keyhive
-            .create_doc(parents, content_heads, &self.keyhive_storage)
-            .await?;
-        let (resp, rx) = tokio::sync::oneshot::channel();
+        let (resp, rx) = futures::channel::oneshot::channel();
         self.cmd_tx
-            .send(Runtime2Cmd::PutDoc {
-                doc_id,
+            .send(Runtime2Cmd::CreateDoc {
                 initial_content: Box::new(initial_content),
+                parents,
+                content_heads,
                 resp,
             })
+            .await
             .map_err(|_| eyre::eyre!("task was found dead"))?;
         rx.await
             .map_err(|_| eyre::eyre!("caller dropped before response"))?
@@ -124,9 +125,10 @@ impl Runtime2Handle {
         &self,
         doc_id: DocumentId,
     ) -> eyre::Result<crate::runtime::DocLookup<std::sync::Arc<crate::runtime::LiveDocBundle>>> {
-        let (resp, rx) = tokio::sync::oneshot::channel();
+        let (resp, rx) = futures::channel::oneshot::channel();
         self.cmd_tx
             .send(Runtime2Cmd::GetDocHandle { doc_id, resp })
+            .await
             .map_err(|_| eyre::eyre!("task was found dead"))?;
         rx.await.map_err(|_| eyre::eyre!("caller dropped before response"))?
     }
@@ -150,7 +152,7 @@ impl Runtime2Handle {
         patches: Vec<automerge::Patch>,
         origin: crate::changes::BigRepoChangeOrigin,
     ) -> eyre::Result<()> {
-        let (resp, rx) = tokio::sync::oneshot::channel();
+        let (resp, rx) = futures::channel::oneshot::channel();
         self.cmd_tx
             .send(Runtime2Cmd::CommitDelta {
                 doc_id,
@@ -160,6 +162,7 @@ impl Runtime2Handle {
                 origin,
                 resp,
             })
+            .await
             .map_err(|_| eyre::eyre!("task was found dead"))?;
         rx.await.map_err(|_| eyre::eyre!("caller dropped before response"))?
     }
@@ -175,9 +178,10 @@ impl Runtime2Handle {
         &self,
         doc_id: DocumentId,
     ) -> eyre::Result<crate::runtime2::DocHeadState> {
-        let (resp, rx) = tokio::sync::oneshot::channel();
+        let (resp, rx) = futures::channel::oneshot::channel();
         self.cmd_tx
             .send(Runtime2Cmd::DocHeadState { doc_id, resp })
+            .await
             .map_err(|_| eyre::eyre!("task was found dead"))?;
         rx.await.map_err(|_| eyre::eyre!("caller dropped before response"))?
     }
@@ -217,9 +221,10 @@ impl Runtime2Handle {
         peer: PeerId,
         addr: Box<dyn std::any::Any + Send>,
     ) -> eyre::Result<(PeerId, std::sync::Arc<std::sync::atomic::AtomicBool>)> {
-        let (resp, rx) = tokio::sync::oneshot::channel();
+        let (resp, rx) = futures::channel::oneshot::channel();
         self.cmd_tx
             .send(Runtime2Cmd::OpenConn { peer, addr, resp })
+            .await
             .map_err(|_| eyre::eyre!("task was found dead"))?;
         rx.await.map_err(|_| eyre::eyre!("caller dropped before response"))?
     }
@@ -235,9 +240,10 @@ impl Runtime2Handle {
         &self,
         incoming: Box<dyn std::any::Any + Send>,
     ) -> eyre::Result<(PeerId, std::sync::Arc<std::sync::atomic::AtomicBool>)> {
-        let (resp, rx) = tokio::sync::oneshot::channel();
+        let (resp, rx) = futures::channel::oneshot::channel();
         self.cmd_tx
             .send(Runtime2Cmd::AcceptConn { incoming, resp })
+            .await
             .map_err(|_| eyre::eyre!("task was found dead"))?;
         rx.await.map_err(|_| eyre::eyre!("caller dropped before response"))?
     }
@@ -246,12 +252,13 @@ impl Runtime2Handle {
     ///
     /// Mirrors `BigRepoRuntimeHandle::close_peer_connection` at `runtime.rs:507`.
     pub async fn close_connection(&self, peer_id: PeerId) -> eyre::Result<()> {
-        let (resp, rx) = tokio::sync::oneshot::channel();
+        let (resp, rx) = futures::channel::oneshot::channel();
         self.cmd_tx
             .send(Runtime2Cmd::CloseConn {
                 peer_id,
                 resp: Some(resp),
             })
+            .await
             .map_err(|_| eyre::eyre!("task was found dead"))?;
         rx.await.map_err(|_| eyre::eyre!("caller dropped before response"))?
     }
@@ -262,9 +269,8 @@ impl Runtime2Handle {
     /// `timeout`.
     ///
     /// Mirrors `BigRepoRuntimeHandle::sync_doc_with_peer` at `runtime.rs:518`.
-    /// The old handle applies a `tokio::time::timeout` at the handle level;
-    /// runtime2 does the same (keeping the timeout-driven cancellation path
-    /// for parity).
+    /// The old handle applies a timeout at the handle level; runtime2 does
+    /// the same (keeping the timeout-driven cancellation path for parity).
     pub async fn sync_doc_with_peer(
         &self,
         doc_id: DocumentId,
@@ -272,7 +278,7 @@ impl Runtime2Handle {
         timeout: Option<std::time::Duration>,
     ) -> Result<(), crate::runtime::SyncDocError> {
         let waiter_id = fresh_waiter_id(&self.doc_sync_waiter_ids);
-        let (resp, rx) = tokio::sync::oneshot::channel();
+        let (resp, mut rx) = futures::channel::oneshot::channel();
         self.cmd_tx
             .send(Runtime2Cmd::SyncDocWithPeer {
                 doc_id,
@@ -281,26 +287,36 @@ impl Runtime2Handle {
                 timeout,
                 resp,
             })
+            .await
             .map_err(|_| crate::runtime::SyncDocError::IoError(eyre::eyre!("task was found dead")))?;
         // If no timeout, wait indefinitely (the old handle returns
         // immediately without timeout).
-        let Some(timeout) = timeout else {
+        let Some(duration) = timeout else {
             return rx.await.map_err(|_| {
                 crate::runtime::SyncDocError::IoError(eyre::eyre!("caller dropped before response"))
             })?;
         };
-        match tokio::time::timeout(timeout, rx).await {
+        match self.race_timeout(rx, duration).await {
             Ok(Ok(result)) => result,
             Ok(Err(_)) => Err(crate::runtime::SyncDocError::IoError(eyre::eyre!(
                 "caller dropped before response"
             ))),
-            Err(_) => {
+            Err(()) => {
                 // Send cancellation to the hub so it cleans up the waiter.
-                let _ = self.cmd_tx.send(Runtime2Cmd::CancelDocSyncWaiter {
-                    doc_id,
-                    peer_id,
-                    waiter_id,
-                });
+                self.cmd_tx
+                    .try_send(Runtime2Cmd::CancelDocSyncWaiter {
+                        doc_id,
+                        peer_id,
+                        waiter_id,
+                    })
+                    .map_err(|e| match e {
+                        async_channel::TrySendError::Closed(_) => {
+                            crate::runtime::SyncDocError::IoError(ferr!("task was found dead"))
+                        }
+                        async_channel::TrySendError::Full(_) => {
+                            crate::runtime::SyncDocError::IoError(ferr!("mailbox full"))
+                        }
+                    })?;
                 Err(crate::runtime::SyncDocError::IoError(eyre::eyre!(
                     "doc sync timed out"
                 )))
@@ -311,33 +327,43 @@ impl Runtime2Handle {
     /// Sync keyhive state with a peer. Waits for completion or `timeout`.
     ///
     /// Mirrors `BigRepoRuntimeHandle::sync_keyhive_with_peer` at `runtime.rs:578`.
-    /// The old handle applies a `tokio::time::timeout` (defaulting to 5s);
-    /// runtime2 does the same.
+    /// The old handle applies a timeout (defaulting to 5s); runtime2 does
+    /// the same via the injected [`Timer`].
     pub async fn sync_keyhive_with_peer(
         &self,
         peer_id: PeerId,
         timeout: Option<std::time::Duration>,
     ) -> eyre::Result<()> {
         let waiter_id = fresh_waiter_id(&self.keyhive_sync_waiter_ids);
-        let (resp, rx) = tokio::sync::oneshot::channel();
+        let (resp, mut rx) = futures::channel::oneshot::channel();
         self.cmd_tx
             .send(Runtime2Cmd::SyncKeyhiveWithPeer {
                 peer_id,
                 waiter_id,
                 resp,
             })
+            .await
             .map_err(|_| eyre::eyre!("task was found dead"))?;
-        let timeout = timeout.unwrap_or_else(|| {
+        let duration = timeout.unwrap_or_else(|| {
             utils_rs::scale_timeout(std::time::Duration::from_secs(5))
         });
-        match tokio::time::timeout(timeout, rx).await {
+        match self.race_timeout(rx, duration).await {
             Ok(Ok(result)) => result.wrap_err("keyhive sync failed"),
             Ok(Err(_)) => Err(eyre::eyre!("caller dropped before response")),
-            Err(_) => {
-                let _ = self.cmd_tx.send(Runtime2Cmd::CancelKeyhiveSyncWaiter {
-                    peer_id,
-                    waiter_id,
-                });
+            Err(()) => {
+                self.cmd_tx
+                    .try_send(Runtime2Cmd::CancelKeyhiveSyncWaiter {
+                        peer_id,
+                        waiter_id,
+                    })
+                    .map_err(|e| match e {
+                        async_channel::TrySendError::Closed(_) => {
+                            eyre::eyre!("task was found dead")
+                        }
+                        async_channel::TrySendError::Full(_) => {
+                            eyre::eyre!("mailbox full")
+                        }
+                    })?;
                 Err(eyre::eyre!("keyhive sync timed out"))
             },
         }
@@ -349,9 +375,10 @@ impl Runtime2Handle {
     /// Mirrors `BigRepoRuntimeHandle::note_local_keyhive_changed` at
     /// `runtime.rs:415`.
     pub async fn note_local_keyhive_changed(&self) -> eyre::Result<()> {
-        let (resp, rx) = tokio::sync::oneshot::channel();
+        let (resp, rx) = futures::channel::oneshot::channel();
         self.cmd_tx
             .send(Runtime2Cmd::NoteLocalKeyhiveChanged { resp })
+            .await
             .map_err(|_| eyre::eyre!("task was found dead"))?;
         rx.await.map_err(|_| eyre::eyre!("caller dropped before response"))?
     }
@@ -364,9 +391,10 @@ impl Runtime2Handle {
     /// that was never pulled subduction-side exists as a marker only. Mirrors
     /// `BigRepoRuntimeHandle::contains_sedimentree_id` at `runtime.rs:425`.
     pub async fn contains_sedimentree_id(&self, doc_id: DocumentId) -> eyre::Result<bool> {
-        let (resp, rx) = tokio::sync::oneshot::channel();
+        let (resp, rx) = futures::channel::oneshot::channel();
         self.cmd_tx
             .send(Runtime2Cmd::CheckSedimentreeResident { doc_id, resp })
+            .await
             .map_err(|_| eyre::eyre!("task was found dead"))?;
         rx.await.map_err(|_| eyre::eyre!("caller dropped before response"))
     }
@@ -377,10 +405,34 @@ impl Runtime2Handle {
     /// materialization). Mirrors `BigRepoRuntimeHandle::has_doc_worker` at
     /// `runtime.rs:435`.
     pub async fn has_doc_worker(&self, doc_id: DocumentId) -> eyre::Result<bool> {
-        let (resp, rx) = tokio::sync::oneshot::channel();
+        let (resp, rx) = futures::channel::oneshot::channel();
         self.cmd_tx
             .send(Runtime2Cmd::CheckDocWorkerExists { doc_id, resp })
+            .await
             .map_err(|_| eyre::eyre!("task was found dead"))?;
         rx.await.map_err(|_| eyre::eyre!("caller dropped before response"))
+    }
+
+    // ── private helpers ──────────────────────────────────────────────────────
+
+    /// Race a oneshot response against a timer sleep.
+    ///
+    /// Replaces the `timeout` combinator. Uses `select_biased!` so the sleep
+    /// branch has priority when both are ready (parity with Tokio semantics
+    /// where timeout always resolves first on simultaneity).
+    ///
+    /// Returns `Ok(Ok(value))` on response success, `Ok(Err(Canceled))` on
+    /// caller-drop, and `Err(())` on timeout.
+    async fn race_timeout<T>(
+        &self,
+        rx: futures::channel::oneshot::Receiver<T>,
+        duration: std::time::Duration,
+    ) -> Result<Result<T, futures::channel::oneshot::Canceled>, ()> {
+        use futures::future::{Either, select};
+        let sleep = Box::pin(self.timer.sleep(duration));
+        match select(sleep, rx).await {
+            Either::Left(_) => Err(()),
+            Either::Right((result, _)) => Ok(result),
+        }
     }
 }

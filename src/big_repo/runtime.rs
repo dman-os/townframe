@@ -117,23 +117,31 @@ pub struct LiveDocBundle {
     #[educe(Debug(ignore))]
     pub doc: tokio::sync::Mutex<automerge::Automerge>,
     #[educe(Debug(ignore))]
-    _lease: RuntimeDocLease,
+    _lease: Option<RuntimeDocLease>,
 }
 
 impl LiveDocBundle {
-    fn new(doc_id: DocumentId, doc: automerge::Automerge, lease: RuntimeDocLease) -> Self {
+    pub(crate) fn new(doc_id: DocumentId, doc: automerge::Automerge, lease: RuntimeDocLease) -> Self {
         Self {
             doc_id,
             doc: tokio::sync::Mutex::new(doc),
-            _lease: lease,
+            _lease: Some(lease),
+        }
+    }
+
+    pub(crate) fn new_noop(doc_id: DocumentId, doc: automerge::Automerge) -> Self {
+        Self {
+            doc_id,
+            doc: tokio::sync::Mutex::new(doc),
+            _lease: None,
         }
     }
 }
 
 #[derive(Clone, Debug)]
-struct RuntimeDocLease {
-    runtime: BigRepoRuntimeHandle,
-    doc_id: DocumentId,
+pub(crate) struct RuntimeDocLease {
+    pub(crate) runtime: BigRepoRuntimeHandle,
+    pub(crate) doc_id: DocumentId,
 }
 
 impl Drop for RuntimeDocLease {
@@ -673,13 +681,28 @@ impl<T> BigRepoSubductionStorage for T where
 {
 }
 
+type BigRepoSyncHandler<S> = subduction_core::handler::sync::SyncHandler<
+    Sendable,
+    S,
+    BigRepoIrohTransport,
+    BigRepoPolicy,
+    CountLeadingZeroBytes,
+    TokioSpawn,
+>;
+
+type BigRepoNativeComposedHandler<S> = BigRepoComposedHandler<
+    BigRepoSyncHandler<S>,
+    BigRepoEphemeralHandler,
+    BigRepoKeyhiveHandler,
+>;
+
 /// The concrete Subduction type for BigRepo, using the composed handler.
 type BigRepoSubduction<S> = subduction_core::subduction::Subduction<
     'static,
     Sendable,
     S,
     BigRepoIrohTransport,
-    BigRepoComposedHandler<S>,
+    BigRepoNativeComposedHandler<S>,
     crate::runtime::BigRepoPolicy,
     subduction_crypto::signer::memory::MemorySigner,
     TimeoutTokio,
@@ -786,7 +809,7 @@ where
         EphemeralConfig::default(),
         StdClock,
     );
-    let ephemeral_handler: BigRepoEphemeralHandler = Arc::new(ephemeral_handler);
+    let ephemeral_handler: Arc<BigRepoEphemeralHandler> = Arc::new(ephemeral_handler);
     let ephemeral_backend: Arc<dyn BigEphemeralBackend> = Arc::new(BigRepoEphemeralBackend::new(
         signer.clone(),
         Arc::clone(&ephemeral_handler),
@@ -866,7 +889,7 @@ where
         .expect(ERROR_TOKIO);
     let composed_handler = Arc::new(BigRepoComposedHandler::new(
         sync_handler,
-        Arc::clone(&ephemeral_handler),
+        Some(Arc::clone(&ephemeral_handler)),
         keyhive_handler,
     ));
 
@@ -3766,29 +3789,29 @@ where
 ///
 /// These are transient in-memory plaintext bytes and must be encrypted before
 /// they reach Subduction storage.
-struct FragmentEntry {
-    head: CommitId,
-    boundary: BTreeSet<CommitId>,
-    checkpoints: Vec<CommitId>,
+pub(crate) struct FragmentEntry {
+    pub(crate) head: CommitId,
+    pub(crate) boundary: BTreeSet<CommitId>,
+    pub(crate) checkpoints: Vec<CommitId>,
 }
 
 /// Metadata for a staged loose commit emitted by Automerge bundling.
 ///
 /// These are transient in-memory plaintext bytes and must be encrypted before
 /// they reach Subduction storage.
-struct LooseEntry {
-    head: CommitId,
-    parents: BTreeSet<CommitId>,
+pub(crate) struct LooseEntry {
+    pub(crate) head: CommitId,
+    pub(crate) parents: BTreeSet<CommitId>,
 }
 
 /// Plaintext Automerge staging output.
 ///
 /// These bytes are transient in-memory data and must be encrypted before they
 /// are persisted through Subduction storage.
-struct StagedAutomergeIngest {
-    blobs: Vec<Blob>,
-    fragment_entries: Vec<FragmentEntry>,
-    loose_entries: Vec<LooseEntry>,
+pub(crate) struct StagedAutomergeIngest {
+    pub(crate) blobs: Vec<Blob>,
+    pub(crate) fragment_entries: Vec<FragmentEntry>,
+    pub(crate) loose_entries: Vec<LooseEntry>,
     _change_count: usize,
     _covered_count: usize,
     _loose_count: usize,
@@ -3809,7 +3832,7 @@ struct HydratedMinimizedTree {
 /// into a staged sedimentree [`Fragment`] and each level-0 fragment into a
 /// staged [`LooseCommit`]. The staged plaintext must be encrypted before
 /// it reaches Subduction storage.
-fn stage_automerge_ingest(doc: &automerge::Automerge) -> StagedAutomergeIngest {
+pub(crate) fn stage_automerge_ingest(doc: &automerge::Automerge) -> StagedAutomergeIngest {
     let cached = doc.fragments(1..);
     let loose = doc.fragments(0..=0);
     let cached_bytes = doc.bundle_fragments(cached.iter().cloned());
@@ -3880,6 +3903,20 @@ pub(crate) struct BigRepoCiphertextLocator {
     kind: BigRepoCiphertextKind,
     sedimentree_id: SedimentreeId,
     commit_id: CommitId,
+}
+
+impl BigRepoCiphertextLocator {
+    pub(crate) const fn new(
+        kind: BigRepoCiphertextKind,
+        sedimentree_id: SedimentreeId,
+        commit_id: CommitId,
+    ) -> Self {
+        Self {
+            kind,
+            sedimentree_id,
+            commit_id,
+        }
+    }
 }
 
 #[derive(Clone, Debug)]

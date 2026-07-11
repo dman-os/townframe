@@ -2,8 +2,8 @@
 //!
 //! A FutureForm-generic, transport-agnostic rewrite of the 5k-line tokio+iroh
 //! `runtime.rs`. Hub/worker actors with all IO centralized behind traits
-//! ([`DocIo`], injected [`TaskRuntime`]/[`Timer`]/[`Clock`]). Parity with the old
-//! runtime, with three bugs fixed (see `play.big_repo.current_fixes.md`):
+//! ([`DocIo`], [`RuntimeIo`], injected [`TaskRuntime`]/[`Timer`]/[`Clock`]).
+//! Parity with the old runtime, with three bugs fixed (see `play.big_repo.current_fixes.md`):
 //! - head-divergence flake — heads are derived, never cached in an overloaded
 //!   payload field;
 //! - noop-after-crash — `apply_sync_session` always re-derives sedimentree
@@ -17,21 +17,12 @@
 //! # IO model (v1: async actor + centralized IO traits → D2 determinism)
 //!
 //! The hub and doc-worker are async actors driven by an injected [`TaskRuntime`].
-//! All IO flows through traits — [`DocIo`], `Storage<F>`, `KeyhiveStorage<F>`
-//! — so IO is *external* to the actor logic. Memory backends give D2
-//! determinism (no disk/network jitter). Full step-determinism (samod-style
-//! `IoTask` round-stepping) is a future evolution: the trait seam lets us wrap
-//! [`DocIo`] in an `IoTask`-completing harness later without rewriting the
-//! actor.
-//!
-//! # Avoiding message soup
-//!
-//! samod's subduction branch uses a sans-io `engine.handle(Input) -> Output`
-//! + `HubResults::emit_io_action` (IO as out-param, completed by the harness).
-//! We can't match that fully (current subduction is async, not sans-io), so we
-//! avoid soup by: (a) centralizing every doc-worker IO through [`DocIo`],
-//! (b) breaking mega-methods into small steps with explicit IO contracts,
-//! (c) one mailbox per actor (no fan-out of IO futures).
+//! All IO flows through traits — [`DocIo`], [`RuntimeIo`], `Storage<F>`,
+//! `KeyhiveStorage<F>` — so IO is *external* to the actor logic. Memory
+//! backends give D2 determinism (no disk/network jitter). Full step-determinism
+//! (samod-style `IoTask` round-stepping) is a future evolution: the trait seam
+//! lets us wrap [`DocIo`] in an `IoTask`-completing harness later without
+//! rewriting the actor.
 //!
 //! # FutureForm
 //!
@@ -47,48 +38,37 @@ mod lease;
 mod messages;
 mod tasks;
 
-pub use io::{Clock, CausalDecryptResult, DocIo, EncryptedLooseCommit, Timer};
-pub use lease::{DocLease, DocWorkerEntry, DocWorkerHandle, DocWorkerInternalLease, DocWorkerStopToken};
+pub use io::{CausalDecryptResult, Clock, DocIo, EncryptedLooseCommit, RuntimeIo, Timer};
+pub use lease::{
+    DocLease, DocWorkerEntry, DocWorkerHandle, DocWorkerInternalLease, DocWorkerStopToken,
+};
 pub use messages::{DocWorkerMsg, Runtime2Cmd, Runtime2Evt};
-pub use tasks::{TaskRuntime, TaskSet, TokioTaskRuntime, TokioTaskSet};
+pub use tasks::{TaskRuntime, TaskSet, TokioTaskRuntime, TokioTaskSet, TokioTimer};
 
 mod doc_worker;
 mod handle;
 mod hub;
 
-pub use doc_worker::{DocWorker2, spawn_doc_worker};
+pub use doc_worker::{spawn_doc_worker, DocWorker2};
 pub use handle::Runtime2Handle;
-pub use hub::{Runtime2Hub, Runtime2StopToken, spawn_runtime2};
+pub use hub::{spawn_runtime2, Runtime2Hub, Runtime2StopToken};
 
 /// Re-export of the doc id (root type alias) so runtime2 modules agree.
 pub use crate::DocumentId;
 
 /// runtime2 config — all inputs that were once hardcoded in `spawn_big_repo_runtime`.
 ///
-/// Generic over `F: FutureForm` (Sendable native, Local wasm) and the storage
-/// backends `S` (subduction `Storage<F>`) + `K` (`KeyhiveStorage<F>`). The
-/// unified SQL store (plan B) makes `S` and the `HostPartStore` share one KV so
-/// local writes are one atomic transaction.
-#[expect(clippy::type_complexity)]
-pub struct Runtime2Config<F, R, S, K>
-where
-    F: FutureForm,
-    R: TaskRuntime<F>,
-    S: subduction_core::storage::traits::Storage<F> + Clone + Send + Sync + std::fmt::Debug + 'static,
-    K: subduction_keyhive::storage::KeyhiveStorage<F> + Send + Sync + 'static,
-{
-    pub signer: subduction_crypto::signer::memory::MemorySigner,
-    /// Unified SQL store backing subduction sedimentree storage (plan B).
-    pub storage: S,
-    pub keyhive_storage: std::sync::Arc<K>,
-    /// IO surface shared by per-document workers. The implementation owns the
-    /// concrete subduction/keyhive/storage wiring; workers remain generic.
+/// Generic over `F: FutureForm` (Sendable native, Local wasm) and the task
+/// runtime `R`. Concrete storage, keyhive, and transport are behind the
+/// injected [`RuntimeIo`] / [`DocIo`] / [`TransportConnect`] traits.
+pub struct Runtime2Config<F: FutureForm, R: TaskRuntime<F>> {
+    /// Local peer identity (derived from signer by the caller).
+    pub local_peer_id: big_sync_core::PeerId,
+    /// Hub-level IO (keyhive CRUD, sedimentree presence, transport).
+    pub runtime_io: std::sync::Arc<dyn RuntimeIo<F>>,
+    /// IO surface shared by per-document workers (encrypt, decrypt, store).
     pub doc_io: std::sync::Arc<dyn DocIo<F>>,
-    /// NOTE: no `part_store` / `HostPartStore` here — runtime2 does not touch
-    /// big_sync. big_sync (sync routing, partitions) lives in a sibling layer.
-    pub policy: std::sync::Arc<crate::runtime::BigRepoPolicy>,
     pub sync_policy: crate::runtime::BigRepoSyncPolicy,
-    pub keyhive: crate::keyhive::BigKeyhiveHandle,
     pub change_manager: std::sync::Arc<crate::changes::ChangeListenerManager>,
     /// Concrete task runtime (native: [`TokioTaskRuntime`]). Controls how
     /// background tasks (keyhive syncs, lease waiters, doc-workers) are
@@ -98,7 +78,6 @@ where
     /// a step-timer in tests; wasm event loop.
     pub timer: std::sync::Arc<dyn Timer<F>>,
     pub clock: std::sync::Arc<dyn Clock>,
-    pub rng: std::sync::Arc<futures::lock::Mutex<rand::rngs::StdRng>>,
     /// Transport-agnostic connection factory. Given a peer id + opaque addr,
     /// produces an authenticated connection + handshake. `iroh` native; in-memory
     /// `ChannelTransport` in tests; websocket in wasm. The blocking-out carries

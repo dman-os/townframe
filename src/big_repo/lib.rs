@@ -30,11 +30,8 @@ pub(crate) mod keyhive_conn;
 pub(crate) mod keyhive_listener;
 pub(crate) mod keyhive_storage;
 mod runtime;
-/// runtime2 — the tractable rewrite (blocking-out scaffold; `todo!()` bodies).
-/// See `play.big_repo.runtime2.md`. NOT wired into the build yet — the
-/// scaffold compiles only once the implementing model resolves the type
-/// paths/generics flagged in `play.big_repo.runtime2.md`. Inert until then.
-#[cfg(any())]
+/// runtime2 — the tractable, runtime-neutral rewrite.
+/// See `play.big_repo.runtime2.md`.
 pub(crate) mod runtime2;
 pub(crate) mod wire;
 pub use runtime::{CreateDocError, DocLookup, GetDocError, PutDocError, SyncDocError};
