@@ -4407,14 +4407,18 @@ pub(crate) async fn encrypt_loose_commit_with_update_op(
         let doc_keys = kh_doc.lock().await.known_decryption_keys().clone();
         let ancestors: std::collections::HashMap<Vec<u8>, SymmetricKey> = parents
             .iter()
-            .filter_map(|p| {
-                let pref: Vec<u8> = p.as_bytes().to_vec();
-                batch_keys
+            .map(|p| {
+                let pref = p.as_bytes().to_vec();
+                let key = batch_keys
                     .get(p)
-                    .map(|k| (pref.clone(), *k))
-                    .or_else(|| doc_keys.get(&pref).map(|k| (pref, *k)))
+                    .copied()
+                    .or_else(|| doc_keys.get(&pref).copied())
+                    .ok_or_else(|| {
+                        ferr!("missing causal encryption key for parent {p}")
+                    })?;
+                Ok((pref, key))
             })
-            .collect();
+            .collect::<Res<_>>()?;
         ancestors
     };
     let envelope = Envelope {

@@ -637,9 +637,19 @@ where
             // Attempt causal decrypt.
             let state = {
                 let mut doc = kh_doc.lock().await;
-                doc.try_causal_decrypt_content(&encrypted, ct_store)
-                    .await
-                    .map_err(|e| ferr!("causal decrypt failed: {e}"))?
+                match doc.try_causal_decrypt_content(&encrypted, ct_store).await {
+                    Ok(state) => state,
+                    Err(
+                        keyhive_core::principal::document::DocCausalDecryptionError::EntrypointDecryptError(
+                            keyhive_core::principal::document::DecryptError::KeyNotFound,
+                        ),
+                    ) => return Ok(CausalDecryptResult::default()),
+                    Err(error) => {
+                        return Err(ferr!(
+                            "causal decrypt failed; BigRepo envelope is not causally closed: {error}"
+                        ));
+                    }
+                }
             };
 
             // Deserialize each envelope to extract the actual plaintext.
@@ -817,10 +827,18 @@ where
     ) -> <Sendable as future_form::FutureForm>::Future<'_, eyre::Result<()>> {
         Sendable::from_future(async move {
             let kh_peer_id = KeyhivePeerId::from_bytes(*peer_id.as_bytes());
-            self.keyhive_protocol
+            match self
+                .keyhive_protocol
                 .initiate_sync_with_peer(&kh_peer_id)
                 .await
-                .map_err(|e| ferr!("keyhive initiate_sync_with_peer failed: {e}"))
+            {
+                Ok(()) => Ok(()),
+                Err(error) if error.to_string().contains("unknown peer") => {
+                    tracing::debug!(%peer_id, "dropping keyhive sync after peer teardown");
+                    Ok(())
+                }
+                Err(error) => Err(ferr!("keyhive initiate_sync_with_peer failed: {error}")),
+            }
         })
     }
 

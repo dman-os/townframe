@@ -315,6 +315,7 @@ impl<F: FutureForm> DocWorker2<F> {
         // since the handle's cmd channel routes to the same machine loop.
         // For the blocking-out, we rely on the hub to pick this up.
         self.last_notified_heads = Some(Arc::clone(&heads));
+        self.io.note_local_keyhive_changed().await?;
 
         let _ = resp.send(Ok(bundle));
         Ok(())
@@ -411,7 +412,7 @@ impl<F: FutureForm> DocWorker2<F> {
         // here we iterate directly via fragments()/loose_commits() which
         // MinimizedSedimentree exposes through Deref to Sedimentree.
         let mut doc = automerge::Automerge::new();
-        let mut made_progress = false;
+        let mut plaintexts = std::collections::HashMap::<Vec<u8>, Vec<u8>>::new();
 
         let fragments: Vec<_> = tree.fragments().collect();
         let commits: Vec<_> = tree.loose_commits().collect();
@@ -423,13 +424,7 @@ impl<F: FutureForm> DocWorker2<F> {
                 f.head(),
             );
             let result = self.io.try_causal_decrypt(self.sed_id, locator).await?;
-            if !result.complete.is_empty() {
-                for (_content_ref, plaintext) in &result.complete {
-                    doc.load_incremental(plaintext)
-                        .map_err(|e| ferr!("automerge load_incremental failed: {e}"))?;
-                    made_progress = true;
-                }
-            }
+            plaintexts.extend(result.complete);
         }
 
         for c in &commits {
@@ -439,13 +434,33 @@ impl<F: FutureForm> DocWorker2<F> {
                 c.head(),
             );
             let result = self.io.try_causal_decrypt(self.sed_id, locator).await?;
-            if !result.complete.is_empty() {
-                for (_content_ref, plaintext) in &result.complete {
-                    doc.load_incremental(plaintext)
-                        .map_err(|e| ferr!("automerge load_incremental failed: {e}"))?;
-                    made_progress = true;
+            plaintexts.extend(result.complete);
+        }
+
+        // BeeKEM returns a causal closure whenever it can decrypt one. Apply
+        // all returned Automerge chunks in dependency order; an independent
+        // readable branch may be materialized even while another branch is
+        // waiting for a key. An orphan chunk is held until its ancestors are
+        // available rather than being exposed or treated as corruption.
+        let mut pending: Vec<Vec<u8>> = plaintexts.into_values().collect();
+        let mut made_progress = false;
+        loop {
+            let mut next = Vec::new();
+            let mut round_progress = false;
+            for plaintext in pending {
+                match doc.load_incremental(&plaintext) {
+                    Ok(_) => {
+                        made_progress = true;
+                        round_progress = true;
+                    }
+                    Err(automerge::AutomergeError::MissingDeps) => next.push(plaintext),
+                    Err(error) => return Err(ferr!("automerge load_incremental failed: {error}")),
                 }
             }
+            if next.is_empty() || !round_progress {
+                break;
+            }
+            pending = next;
         }
 
         if !made_progress {
@@ -896,13 +911,11 @@ impl<F: FutureForm> DocWorker2<F> {
         // heads from the sedimentree. The old code early-returned here without
         // refreshing, letting recorded heads go stale after a crash.
         if received_refs.is_empty() {
-            // Still hydrate and refresh heads from the sedimentree so the
-            // part-store heads are never stale after a crash.
+            // Refresh and re-materialize even when the transport transferred
+            // no new blobs: the storage frontier may have advanced while the
+            // worker's in-memory Automerge document remained live.
             self.refresh_heads_from_sedimentree(peer_id).await?;
-            if was_pending {
-                return self.retry_materialization().await.map(|_| ());
-            }
-            return Ok(());
+            return self.retry_materialization().await.map(|_| ());
         }
 
         // ── Step 1: Hydrate the tree ────────────────────────────────────
@@ -941,12 +954,18 @@ impl<F: FutureForm> DocWorker2<F> {
             .await?;
 
         // ── Step 3: Decision branch ──────────────────────────────────────
-        if materialization_pending || blobs.is_empty() {
+        if blobs.is_empty() {
             self.record_pending_heads(Some(&mut tree), peer_id).await?;
             if materialization_pending {
                 self.transition_to_pending(was_pending).await?;
             }
             return Ok(());
+        }
+        if materialization_pending {
+            // A readable causal branch is available even though another
+            // branch is still waiting for keys. Keep the branch materialized;
+            // the next sync/keyhive event will retry the missing branch.
+            self.record_pending_heads(Some(&mut tree), peer_id).await?;
         }
 
         // ── Decryptable: materialize ─────────────────────────────────────
@@ -1077,11 +1096,9 @@ impl<F: FutureForm> DocWorker2<F> {
                     continue;
                 };
 
-                // Deserialize the envelope to get the exact plaintext.
-                let entrypoint_envelope: keyhive_core::crypto::envelope::Envelope<Vec<u8>, Vec<u8>> =
-                    bincode::deserialize(&entrypoint_raw)
-                        .map_err(|e| ferr!("bincode decode sync session entrypoint: {e}"))?;
-                let exact_plaintext = entrypoint_envelope.plaintext;
+                // `DocIo::try_decrypt_content_keyed` already unwraps the
+                // Keyhive envelope and returns the stored plaintext.
+                let exact_plaintext = entrypoint_raw;
                 plaintext_by_index[idx] = Some(exact_plaintext.clone());
                 plaintext_by_ref.insert(content_ref.clone(), exact_plaintext);
                 made_progress = true;
@@ -1103,15 +1120,10 @@ impl<F: FutureForm> DocWorker2<F> {
             materialization_pending = true;
         }
 
+        let blobs: Vec<Vec<u8>> = plaintext_by_index.into_iter().flatten().collect();
         if materialization_pending {
-            return Ok((Vec::new(), true));
+            return Ok((blobs, true));
         }
-
-        let blobs: Vec<Vec<u8>> = plaintext_by_index
-            .into_iter()
-            .enumerate()
-            .map(|(i, p)| p.ok_or_else(|| ferr!("missing plaintext for sync session blob {i}")))
-            .collect::<eyre::Result<_>>()?;
         Ok((blobs, false))
     }
 
