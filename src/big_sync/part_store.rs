@@ -136,8 +136,7 @@ pub(crate) fn obj_id_bounds_for_bucket(bucket_id: BuckId) -> (ObjId, Option<ObjI
     (start, end)
 }
 
-// #[cfg(any(test, feature = "test-support"))]
-#[cfg(test)]
+#[cfg(any(test, feature = "test-support"))]
 pub mod contract {
     use super::*;
     use big_sync_core::rpc::{
@@ -421,8 +420,7 @@ pub mod contract {
     }
 }
 
-// #[cfg(any(test, feature = "test-support"))]
-#[cfg(test)]
+#[cfg(any(test, feature = "test-support"))]
 pub mod host_contract {
     use super::*;
     use big_sync_core::rpc::{

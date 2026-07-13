@@ -30,6 +30,7 @@ pub(crate) mod keyhive_conn;
 pub(crate) mod keyhive_listener;
 pub(crate) mod keyhive_storage;
 mod runtime;
+mod sqlite_big_repo_store;
 /// runtime2 — the tractable, runtime-neutral rewrite.
 /// See `play.big_repo.runtime2.md`.
 pub(crate) mod runtime2;
