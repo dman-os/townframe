@@ -30,14 +30,16 @@ pub(crate) mod keyhive_conn;
 pub(crate) mod keyhive_listener;
 pub(crate) mod keyhive_storage;
 mod runtime;
-mod sqlite_big_repo_store;
 /// runtime2 — the tractable, runtime-neutral rewrite.
 /// See `play.big_repo.runtime2.md`.
 pub(crate) mod runtime2;
+mod sqlite_big_repo_store;
 pub(crate) mod wire;
 pub use runtime::{CreateDocError, DocLookup, GetDocError, PutDocError, SyncDocError};
 #[cfg(test)]
 pub(crate) mod test;
+#[cfg(test)]
+pub(crate) mod test2;
 
 pub use backend::BigRepoSyncBackend;
 pub use ephemeral::{
@@ -90,7 +92,7 @@ pub struct BigRepo {
     #[educe(Debug(ignore))]
     big_sync_store: SharedPartStore,
     #[educe(Debug(ignore))]
-    runtime: runtime::BigRepoRuntimeHandle,
+    runtime: runtime2::Runtime2Handle<future_form::Sendable>,
     #[educe(Debug(ignore))]
     ephemeral: BigEphemeral,
     #[educe(Debug(ignore))]
@@ -154,18 +156,19 @@ impl BigRepo {
 
         let (runtime, ephemeral, runtime_stop) = match storage {
             StorageConfig::Memory => {
-                runtime::spawn_big_repo_runtime(
+                let (runtime, ephemeral, _events, stop) = runtime2::native::spawn_native_runtime2(
                     signer,
                     subduction_core::storage::memory::MemoryStorage::new(),
+                    big_sync_store.clone(),
                     Arc::clone(&policy),
                     sync_policy,
                     keyhive.clone(),
                     keyhive_storage.clone(),
-                    Arc::clone(&big_sync_store),
                     Arc::clone(&change_manager),
                     listener_evt_rx,
                 )
-                .await?
+                .await?;
+                (runtime, ephemeral, stop)
             }
             StorageConfig::Disk { path } => {
                 let subduction_dir = path.join("subduction");
@@ -177,18 +180,19 @@ impl BigRepo {
                 })?;
                 let redb_storage = subduction_redb_storage::RedbStorage::new(subduction_dir)
                     .wrap_err("failed booting subduction redb storage")?;
-                runtime::spawn_big_repo_runtime(
+                let (runtime, ephemeral, _events, stop) = runtime2::native::spawn_native_runtime2(
                     signer,
                     redb_storage,
+                    big_sync_store.clone(),
                     Arc::clone(&policy),
                     sync_policy,
                     keyhive.clone(),
                     keyhive_storage.clone(),
-                    Arc::clone(&big_sync_store),
                     Arc::clone(&change_manager),
                     listener_evt_rx,
                 )
-                .await?
+                .await?;
+                (runtime, ephemeral, stop)
             }
         };
 
@@ -279,6 +283,10 @@ impl BigRepo {
     }
 
     #[tracing::instrument(skip_all, fields(%self.local_peer_id))]
+    pub async fn doc_head_state(&self, document_id: DocumentId) -> Res<runtime2::DocHeadState> {
+        self.runtime.doc_head_state(document_id).await
+    }
+
     pub async fn create_doc(
         self: &Arc<Self>,
         initial_content: automerge::Automerge,
@@ -372,9 +380,10 @@ impl BigRepo {
         peer_id: PeerId,
         end_signal_tx: Option<tokio::sync::mpsc::UnboundedSender<ConnFinishSignal>>,
     ) -> Res<BigRepoConnection> {
+        let _ = end_signal_tx;
         let (peer_id, closed) = self
             .runtime
-            .open_connection_iroh(endpoint, endpoint_addr, peer_id, end_signal_tx)
+            .open_connection(peer_id, Box::new((endpoint, endpoint_addr)))
             .await?;
         Ok(BigRepoConnection {
             repo: Arc::clone(self),
@@ -392,10 +401,8 @@ impl BigRepo {
         conn: iroh::endpoint::Connection,
         end_signal_tx: Option<tokio::sync::mpsc::UnboundedSender<ConnFinishSignal>>,
     ) -> Res<BigRepoConnection> {
-        let (peer_id, closed) = self
-            .runtime
-            .accept_connection_iroh(conn, end_signal_tx)
-            .await?;
+        let _ = end_signal_tx;
+        let (peer_id, closed) = self.runtime.accept_connection(Box::new(conn)).await?;
         Ok(BigRepoConnection {
             repo: Arc::clone(self),
             peer_id,
@@ -456,7 +463,7 @@ impl BigRepoConnection {
     }
 
     pub async fn stop(self) -> Res<()> {
-        self.repo.runtime.close_peer_connection(self.peer_id).await
+        self.repo.runtime.close_connection(self.peer_id).await
     }
 }
 
@@ -482,13 +489,15 @@ impl BigRepo {
 }
 
 pub struct BigRepoStopToken {
-    runtime_stop: runtime::BigRepoRuntimeStopToken,
+    runtime_stop: runtime2::Runtime2StopToken<future_form::Sendable, runtime2::TokioTaskRuntime>,
     change_manager_stop: Option<changes::ChangeListenerManagerStopToken>,
 }
 
 impl BigRepoStopToken {
     pub async fn stop(mut self) -> Res<()> {
-        self.runtime_stop.stop().await?;
+        self.runtime_stop
+            .stop(std::time::Duration::from_secs(5))
+            .await?;
         if let Some(stop_token) = self.change_manager_stop.take() {
             stop_token.stop().await?;
         }

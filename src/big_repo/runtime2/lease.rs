@@ -20,7 +20,9 @@ impl DocLease {
     /// Create a new lease. The `release` sender is consumed on drop to signal
     /// the hub.
     pub(crate) fn new(release: futures::channel::oneshot::Sender<()>) -> Self {
-        Self { release: Some(release) }
+        Self {
+            release: Some(release),
+        }
     }
 }
 
@@ -49,7 +51,10 @@ pub struct DocWorkerInternalLease {
 impl DocWorkerInternalLease {
     /// Create a new internal lease. The `release` sender fires on drop.
     pub(crate) fn new(doc_id: DocumentId, release: futures::channel::oneshot::Sender<()>) -> Self {
-        Self { doc_id, release: Some(release) }
+        Self {
+            doc_id,
+            release: Some(release),
+        }
     }
 }
 

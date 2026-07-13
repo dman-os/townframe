@@ -2824,8 +2824,8 @@ impl iroh::protocol::ProtocolHandler for SubductionProtocolHandler {
     }
 }
 
-struct StressBigSyncRpcClient {
-    target_part_store: SharedPartStore,
+pub(crate) struct StressBigSyncRpcClient {
+    pub(crate) target_part_store: SharedPartStore,
 }
 
 #[async_trait::async_trait]

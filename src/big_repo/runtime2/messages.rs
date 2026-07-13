@@ -2,8 +2,8 @@
 //! no Tokio types.
 
 use crate::interlude::*;
-use big_sync_core::PeerId;
 use crate::DocumentId;
+use big_sync_core::PeerId;
 use std::sync::atomic::AtomicU64;
 use std::sync::Arc;
 
@@ -29,11 +29,17 @@ pub enum Runtime2Cmd {
     },
     GetDocHandle {
         doc_id: DocumentId,
-        resp: futures::channel::oneshot::Sender<eyre::Result<crate::runtime::DocLookup<Arc<crate::runtime::LiveDocBundle>>>>,
+        resp: futures::channel::oneshot::Sender<
+            eyre::Result<crate::runtime::DocLookup<Arc<crate::runtime::LiveDocBundle>>>,
+        >,
     },
     CommitDelta {
         doc_id: DocumentId,
-        commits: Vec<(sedimentree_core::loose_commit::id::CommitId, std::collections::BTreeSet<sedimentree_core::loose_commit::id::CommitId>, Vec<u8>)>,
+        commits: Vec<(
+            sedimentree_core::loose_commit::id::CommitId,
+            std::collections::BTreeSet<sedimentree_core::loose_commit::id::CommitId>,
+            Vec<u8>,
+        )>,
         heads: Vec<automerge::ChangeHash>,
         patches: Vec<automerge::Patch>,
         origin: crate::changes::BigRepoChangeOrigin,
@@ -46,11 +52,15 @@ pub enum Runtime2Cmd {
     OpenConn {
         peer: PeerId,
         addr: Box<dyn std::any::Any + Send>,
-        resp: futures::channel::oneshot::Sender<eyre::Result<(PeerId, Arc<std::sync::atomic::AtomicBool>)>>,
+        resp: futures::channel::oneshot::Sender<
+            eyre::Result<(PeerId, Arc<std::sync::atomic::AtomicBool>)>,
+        >,
     },
     AcceptConn {
         incoming: Box<dyn std::any::Any + Send>,
-        resp: futures::channel::oneshot::Sender<eyre::Result<(PeerId, Arc<std::sync::atomic::AtomicBool>)>>,
+        resp: futures::channel::oneshot::Sender<
+            eyre::Result<(PeerId, Arc<std::sync::atomic::AtomicBool>)>,
+        >,
     },
     CloseConn {
         peer_id: PeerId,
@@ -68,33 +78,99 @@ pub enum Runtime2Cmd {
         waiter_id: u64,
         resp: futures::channel::oneshot::Sender<eyre::Result<()>>,
     },
-    SyncKeyhiveWithPeerInternal { peer_id: PeerId },
+    SyncKeyhiveWithPeerInternal {
+        peer_id: PeerId,
+    },
     NoteLocalKeyhiveChanged {
         resp: futures::channel::oneshot::Sender<eyre::Result<()>>,
     },
-    CancelDocSyncWaiter { doc_id: DocumentId, peer_id: PeerId, waiter_id: u64 },
-    CancelKeyhiveSyncWaiter { peer_id: PeerId, waiter_id: u64 },
-    ReleaseDocLease { doc_id: DocumentId },
-    ReleaseInternalLease { doc_id: DocumentId },
-    CheckSedimentreeResident { doc_id: DocumentId, resp: futures::channel::oneshot::Sender<bool> },
-    CheckDocWorkerExists { doc_id: DocumentId, resp: futures::channel::oneshot::Sender<bool> },
+    CancelDocSyncWaiter {
+        doc_id: DocumentId,
+        peer_id: PeerId,
+        waiter_id: u64,
+    },
+    CancelKeyhiveSyncWaiter {
+        peer_id: PeerId,
+        waiter_id: u64,
+    },
+    ReleaseDocLease {
+        doc_id: DocumentId,
+    },
+    ReleaseInternalLease {
+        doc_id: DocumentId,
+    },
+    CheckSedimentreeResident {
+        doc_id: DocumentId,
+        resp: futures::channel::oneshot::Sender<bool>,
+    },
+    InspectStoredDocBlobs {
+        sed_id: sedimentree_core::id::SedimentreeId,
+        resp: futures::channel::oneshot::Sender<eyre::Result<Vec<Vec<u8>>>>,
+    },
+    CheckDocWorkerExists {
+        doc_id: DocumentId,
+        resp: futures::channel::oneshot::Sender<bool>,
+    },
 }
 
 /// Events from background workers / keyhive listener / sync sessions / doc-workers.
 pub enum Runtime2Evt {
-    SyncSessionObserved { session: subduction_core::sync_session::SyncSession },
-    ConnEstablished { peer_id: PeerId, closed: Arc<std::sync::atomic::AtomicBool> },
-    ConnLost { peer_id: PeerId, error: Option<String> },
-    KeyhiveSyncDone { peer_id: PeerId },
-    KeyhiveSyncRequested { peer_id: PeerId },
-    DocWorkerHandleAcquired { bundle: Arc<crate::runtime::LiveDocBundle> },
-    DocWorkerStopped { doc_id: DocumentId },
-    FatalWorkerError { doc_id: Option<DocumentId>, context: &'static str, error: String },
-    DocWorkerMaterializationPending { doc_id: DocumentId },
-    DocWorkerMaterializationReady { doc_id: DocumentId },
-    PrekeyExpanded { new_prekey: Arc<crate::runtime::SignedAddKeyOp> },
-    PrekeyRotated { rotate_key: Arc<crate::runtime::SignedRotateKeyOp> },
-    CgkaOp { data: Arc<crate::runtime::SignedCgkaOp> },
+    SyncSessionObserved {
+        session: subduction_core::sync_session::SyncSession,
+    },
+    ConnEstablished {
+        peer_id: PeerId,
+        closed: Arc<std::sync::atomic::AtomicBool>,
+    },
+    ConnLost {
+        peer_id: PeerId,
+        error: Option<String>,
+    },
+    KeyhiveSyncDone {
+        peer_id: PeerId,
+    },
+    KeyhiveSyncRequested {
+        peer_id: PeerId,
+    },
+    /// A document worker requested that the hub start a Subduction sync.
+    DocSyncRequested {
+        doc_id: DocumentId,
+        peer_id: PeerId,
+        waiter_id: u64,
+    },
+    /// Completion of a hub-driven document sync.
+    DocSyncCompleted {
+        doc_id: DocumentId,
+        peer_id: PeerId,
+        waiter_id: u64,
+        result: Result<(), crate::runtime::SyncDocError>,
+    },
+    DocWorkerHandleAcquired {
+        bundle: Arc<crate::runtime::LiveDocBundle>,
+    },
+    DocWorkerStopped {
+        doc_id: DocumentId,
+    },
+    FatalWorkerError {
+        doc_id: Option<DocumentId>,
+        context: &'static str,
+        error: String,
+    },
+    DocWorkerMaterializationPending {
+        doc_id: DocumentId,
+    },
+    DocWorkerMaterializationReady {
+        doc_id: DocumentId,
+    },
+    PrekeyExpanded {
+        new_prekey: Arc<crate::runtime::SignedAddKeyOp>,
+    },
+    PrekeyRotated {
+        rotate_key: Arc<crate::runtime::SignedRotateKeyOp>,
+    },
+    CgkaOp {
+        data: Arc<crate::runtime::SignedCgkaOp>,
+    },
     DelegationReceived {
         target: keyhive_core::principal::identifier::Identifier,
         data: Arc<
@@ -131,10 +207,16 @@ pub enum DocWorkerMsg {
         resp: futures::channel::oneshot::Sender<eyre::Result<Arc<crate::runtime::LiveDocBundle>>>,
     },
     AcquireHandle {
-        resp: futures::channel::oneshot::Sender<eyre::Result<crate::runtime::DocLookup<Arc<crate::runtime::LiveDocBundle>>>>,
+        resp: futures::channel::oneshot::Sender<
+            eyre::Result<crate::runtime::DocLookup<Arc<crate::runtime::LiveDocBundle>>>,
+        >,
     },
     CommitDelta {
-        commits: Vec<(sedimentree_core::loose_commit::id::CommitId, std::collections::BTreeSet<sedimentree_core::loose_commit::id::CommitId>, Vec<u8>)>,
+        commits: Vec<(
+            sedimentree_core::loose_commit::id::CommitId,
+            std::collections::BTreeSet<sedimentree_core::loose_commit::id::CommitId>,
+            Vec<u8>,
+        )>,
         heads: Vec<automerge::ChangeHash>,
         patches: Vec<automerge::Patch>,
         origin: crate::changes::BigRepoChangeOrigin,
@@ -152,11 +234,21 @@ pub enum DocWorkerMsg {
         done: futures::channel::oneshot::Sender<Result<(), crate::runtime::SyncDocError>>,
         _lease: crate::runtime2::DocWorkerInternalLease,
     },
-    CancelSyncWithPeer { peer_id: PeerId, waiter_id: Option<u64>, reason: &'static str },
-    SyncWithPeerResult { peer_id: PeerId, waiter_id: u64, result: Result<(), crate::runtime::SyncDocError> },
+    CancelSyncWithPeer {
+        peer_id: PeerId,
+        waiter_id: Option<u64>,
+        reason: &'static str,
+    },
+    SyncWithPeerResult {
+        peer_id: PeerId,
+        waiter_id: u64,
+        result: Result<(), crate::runtime::SyncDocError>,
+    },
     ReleaseHandleLease,
     ReattemptMaterialization,
-    QueryHeadState { resp: futures::channel::oneshot::Sender<eyre::Result<crate::runtime2::DocHeadState>> },
+    QueryHeadState {
+        resp: futures::channel::oneshot::Sender<eyre::Result<crate::runtime2::DocHeadState>>,
+    },
 }
 
 /// Monotonic waiter-id counters (shared handle↔hub).

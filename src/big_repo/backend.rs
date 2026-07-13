@@ -31,7 +31,7 @@ impl big_sync::SyncBackend for BigRepoSyncBackend {
         )
         .await
         {
-            futures::future::Either::Left((val, other))=> val? || other.await?,
+            futures::future::Either::Left((val, other)) => val? || other.await?,
             futures::future::Either::Right((val, other)) => val? || other.await?,
         };
         if !has_local_doc_state && remote_payload.is_none() {
@@ -68,11 +68,12 @@ impl big_sync::SyncBackend for BigRepoSyncBackend {
                     .doc_payload_heads(doc_id)
                     .await?
                     .ok_or_eyre("local doc payload missing after successful sync")?;
-                let deets = if remote_payload.is_none() 
+                let deets = if remote_payload.is_none()
                     && local_heads
                         .as_ref()
                         .map(|prev| prev.as_ref() == heads.as_ref())
-                        .unwrap_or_default() {
+                        .unwrap_or_default()
+                {
                     big_sync_core::SyncCompletionDeets::Noop
                 } else {
                     big_sync_core::SyncCompletionDeets::ChangedObject

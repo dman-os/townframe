@@ -34,32 +34,32 @@ use subduction_keyhive::{
     KeyhiveMessage,
 };
 
-// ─── Concrete type aliases (for old-runtime compatibility) ─────────────────
-// These are concrete to `Sendable` / `BigRepoIrohTransport`. They do not
-// import `subduction_websocket::tokio` and will be parameterised or moved
-// in a follow-up.
+// ─── Generic type aliases (connection-parameterised, old-runtime default) ──
+// These are generic over `C` with a default of `BigRepoIrohTransport`.
+// Old Iroh-based callers that omit the type parameter continue to work
+// unchanged.
 
-/// The concrete keyhive protocol type for BigRepo.
-pub(crate) type BigRepoKeyhiveProtocol = Arc<
+/// Keyhive protocol for BigRepo, parameterised over the connection type.
+pub(crate) type BigRepoKeyhiveProtocol<C = BigRepoIrohTransport> = Arc<
     SendableRuntimeProtocol<
         crate::keyhive_listener::BigRepoKeyhiveListener,
-        BigRepoKeyhiveConnAdapter,
+        BigRepoKeyhiveConnAdapter<C>,
         BigRepoKeyhiveStorage,
     >,
 >;
 
-/// The concrete keyhive handler type for BigRepo.
-pub(crate) type BigRepoKeyhiveHandler = SendableKeyhiveHandler<
+/// Keyhive handler for BigRepo, parameterised over the connection type.
+pub(crate) type BigRepoKeyhiveHandler<C = BigRepoIrohTransport> = SendableKeyhiveHandler<
     crate::keyhive_listener::BigRepoKeyhiveListener,
-    BigRepoKeyhiveConnAdapter,
+    BigRepoKeyhiveConnAdapter<C>,
     BigRepoKeyhiveStorage,
-    BigRepoIrohTransport,
-    fn(Authenticated<BigRepoIrohTransport, Sendable>) -> BigRepoKeyhiveConnAdapter,
+    C,
+    fn(Authenticated<C, Sendable>) -> BigRepoKeyhiveConnAdapter<C>,
 >;
 
-/// The concrete ephemeral handler type for BigRepo.
-pub(crate) type BigRepoEphemeralHandler =
-    EphemeralHandler<Sendable, BigRepoIrohTransport, OpenEphemeralPolicy, StdClock>;
+/// Ephemeral handler for BigRepo, parameterised over the connection type.
+pub(crate) type BigRepoEphemeralHandler<C = BigRepoIrohTransport> =
+    EphemeralHandler<Sendable, C, OpenEphemeralPolicy, StdClock>;
 
 // ─── Generic composed error ────────────────────────────────────────────────
 
@@ -80,19 +80,29 @@ where
     Keyhive(KeyhiveErr),
 }
 
-impl<S>
-    From<
-        BigRepoComposedHandlerError<
-            ListenError<Sendable, S, BigRepoIrohTransport, SyncMessage>,
-            KeyhiveHandleError,
-        >,
-    > for ListenError<Sendable, S, BigRepoIrohTransport, BigRepoWireMessage>
+impl<S, C>
+    From<BigRepoComposedHandlerError<ListenError<Sendable, S, C, SyncMessage>, KeyhiveHandleError>>
+    for ListenError<Sendable, S, C, BigRepoWireMessage>
 where
     S: subduction_core::storage::traits::Storage<Sendable> + core::fmt::Debug,
+    C: subduction_core::connection::Connection<Sendable, SyncMessage>
+        + subduction_core::connection::Connection<
+            Sendable,
+            BigRepoWireMessage,
+            SendError = <C as subduction_core::connection::Connection<Sendable, SyncMessage>>::SendError,
+            RecvError = <C as subduction_core::connection::Connection<Sendable, SyncMessage>>::RecvError,
+            DisconnectionError = <C as subduction_core::connection::Connection<Sendable, SyncMessage>>::DisconnectionError,
+        >
+        + Clone
+        + PartialEq
+        + core::fmt::Debug
+        + Send
+        + Sync
+        + 'static,
 {
     fn from(
         value: BigRepoComposedHandlerError<
-            ListenError<Sendable, S, BigRepoIrohTransport, SyncMessage>,
+            ListenError<Sendable, S, C, SyncMessage>,
             KeyhiveHandleError,
         >,
     ) -> Self {
@@ -150,7 +160,11 @@ impl<SH, EH, KH> BigRepoComposedHandler<SH, EH, KH> {
     /// `ephemeral` is optional — pass `None` to omit ephemeral dispatch
     /// (e.g. in relay-only runtime2 configurations).
     pub(crate) fn new(sync: Arc<SH>, ephemeral: Option<Arc<EH>>, keyhive: KH) -> Self {
-        Self { sync, ephemeral, keyhive }
+        Self {
+            sync,
+            ephemeral,
+            keyhive,
+        }
     }
 }
 

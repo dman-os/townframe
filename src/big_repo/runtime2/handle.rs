@@ -14,9 +14,12 @@
 //! [`Timer`]: super::Timer
 
 use crate::interlude::*;
-use crate::runtime2::{messages::{Runtime2Cmd, fresh_waiter_id}, Timer};
-use big_sync_core::PeerId;
+use crate::runtime2::{
+    messages::{fresh_waiter_id, Runtime2Cmd},
+    Timer,
+};
 use crate::DocumentId;
+use big_sync_core::PeerId;
 use future_form::FutureForm;
 use std::sync::Arc;
 
@@ -57,12 +60,14 @@ impl<F: FutureForm> Runtime2Handle<F> {
         cmd_tx: async_channel::Sender<Runtime2Cmd>,
         sync_policy: crate::runtime::BigRepoSyncPolicy,
         timer: Arc<dyn Timer<F>>,
+        doc_sync_waiter_ids: std::sync::Arc<std::sync::atomic::AtomicU64>,
+        keyhive_sync_waiter_ids: std::sync::Arc<std::sync::atomic::AtomicU64>,
     ) -> Self {
         Self {
             cmd_tx,
             sync_policy,
-            doc_sync_waiter_ids: std::sync::Arc::new(std::sync::atomic::AtomicU64::new(1)),
-            keyhive_sync_waiter_ids: std::sync::Arc::new(std::sync::atomic::AtomicU64::new(1)),
+            doc_sync_waiter_ids,
+            keyhive_sync_waiter_ids,
             timer,
         }
     }
@@ -124,13 +129,15 @@ impl<F: FutureForm> Runtime2Handle<F> {
     pub async fn get_doc_handle(
         &self,
         doc_id: DocumentId,
-    ) -> eyre::Result<crate::runtime::DocLookup<std::sync::Arc<crate::runtime::LiveDocBundle>>> {
+    ) -> eyre::Result<crate::runtime::DocLookup<std::sync::Arc<crate::runtime::LiveDocBundle>>>
+    {
         let (resp, rx) = futures::channel::oneshot::channel();
         self.cmd_tx
             .send(Runtime2Cmd::GetDocHandle { doc_id, resp })
             .await
             .map_err(|_| eyre::eyre!("task was found dead"))?;
-        rx.await.map_err(|_| eyre::eyre!("caller dropped before response"))?
+        rx.await
+            .map_err(|_| eyre::eyre!("caller dropped before response"))?
     }
 
     /// Commit a delta (sets of encrypted commits) to a document.
@@ -164,7 +171,8 @@ impl<F: FutureForm> Runtime2Handle<F> {
             })
             .await
             .map_err(|_| eyre::eyre!("task was found dead"))?;
-        rx.await.map_err(|_| eyre::eyre!("caller dropped before response"))?
+        rx.await
+            .map_err(|_| eyre::eyre!("caller dropped before response"))?
     }
 
     /// NEW: query walk-derived head state for a document.
@@ -183,7 +191,8 @@ impl<F: FutureForm> Runtime2Handle<F> {
             .send(Runtime2Cmd::DocHeadState { doc_id, resp })
             .await
             .map_err(|_| eyre::eyre!("task was found dead"))?;
-        rx.await.map_err(|_| eyre::eyre!("caller dropped before response"))?
+        rx.await
+            .map_err(|_| eyre::eyre!("caller dropped before response"))?
     }
 
     /// Convenience: query only the sedimentree (payload) heads.
@@ -226,7 +235,8 @@ impl<F: FutureForm> Runtime2Handle<F> {
             .send(Runtime2Cmd::OpenConn { peer, addr, resp })
             .await
             .map_err(|_| eyre::eyre!("task was found dead"))?;
-        rx.await.map_err(|_| eyre::eyre!("caller dropped before response"))?
+        rx.await
+            .map_err(|_| eyre::eyre!("caller dropped before response"))?
     }
 
     /// Accept an inbound connection from the transport layer.
@@ -245,7 +255,8 @@ impl<F: FutureForm> Runtime2Handle<F> {
             .send(Runtime2Cmd::AcceptConn { incoming, resp })
             .await
             .map_err(|_| eyre::eyre!("task was found dead"))?;
-        rx.await.map_err(|_| eyre::eyre!("caller dropped before response"))?
+        rx.await
+            .map_err(|_| eyre::eyre!("caller dropped before response"))?
     }
 
     /// Close an established peer connection.
@@ -260,7 +271,8 @@ impl<F: FutureForm> Runtime2Handle<F> {
             })
             .await
             .map_err(|_| eyre::eyre!("task was found dead"))?;
-        rx.await.map_err(|_| eyre::eyre!("caller dropped before response"))?
+        rx.await
+            .map_err(|_| eyre::eyre!("caller dropped before response"))?
     }
 
     // ── sync ───────────────────────────────────────────────────────────────
@@ -288,7 +300,9 @@ impl<F: FutureForm> Runtime2Handle<F> {
                 resp,
             })
             .await
-            .map_err(|_| crate::runtime::SyncDocError::IoError(eyre::eyre!("task was found dead")))?;
+            .map_err(|_| {
+                crate::runtime::SyncDocError::IoError(eyre::eyre!("task was found dead"))
+            })?;
         // If no timeout, wait indefinitely (the old handle returns
         // immediately without timeout).
         let Some(duration) = timeout else {
@@ -320,7 +334,7 @@ impl<F: FutureForm> Runtime2Handle<F> {
                 Err(crate::runtime::SyncDocError::IoError(eyre::eyre!(
                     "doc sync timed out"
                 )))
-            },
+            }
         }
     }
 
@@ -344,18 +358,14 @@ impl<F: FutureForm> Runtime2Handle<F> {
             })
             .await
             .map_err(|_| eyre::eyre!("task was found dead"))?;
-        let duration = timeout.unwrap_or_else(|| {
-            utils_rs::scale_timeout(std::time::Duration::from_secs(5))
-        });
+        let duration =
+            timeout.unwrap_or_else(|| utils_rs::scale_timeout(std::time::Duration::from_secs(5)));
         match self.race_timeout(rx, duration).await {
             Ok(Ok(result)) => result.wrap_err("keyhive sync failed"),
             Ok(Err(_)) => Err(eyre::eyre!("caller dropped before response")),
             Err(()) => {
                 self.cmd_tx
-                    .try_send(Runtime2Cmd::CancelKeyhiveSyncWaiter {
-                        peer_id,
-                        waiter_id,
-                    })
+                    .try_send(Runtime2Cmd::CancelKeyhiveSyncWaiter { peer_id, waiter_id })
                     .map_err(|e| match e {
                         async_channel::TrySendError::Closed(_) => {
                             eyre::eyre!("task was found dead")
@@ -365,7 +375,7 @@ impl<F: FutureForm> Runtime2Handle<F> {
                         }
                     })?;
                 Err(eyre::eyre!("keyhive sync timed out"))
-            },
+            }
         }
     }
 
@@ -380,7 +390,8 @@ impl<F: FutureForm> Runtime2Handle<F> {
             .send(Runtime2Cmd::NoteLocalKeyhiveChanged { resp })
             .await
             .map_err(|_| eyre::eyre!("task was found dead"))?;
-        rx.await.map_err(|_| eyre::eyre!("caller dropped before response"))?
+        rx.await
+            .map_err(|_| eyre::eyre!("caller dropped before response"))?
     }
 
     // ── presence / introspection ───────────────────────────────────────────
@@ -396,7 +407,26 @@ impl<F: FutureForm> Runtime2Handle<F> {
             .send(Runtime2Cmd::CheckSedimentreeResident { doc_id, resp })
             .await
             .map_err(|_| eyre::eyre!("task was found dead"))?;
-        rx.await.map_err(|_| eyre::eyre!("caller dropped before response"))
+        rx.await
+            .map_err(|_| eyre::eyre!("caller dropped before response"))
+    }
+
+    /// Inspect raw stored commit/fragment blobs for a document.
+    #[cfg(test)]
+    pub(crate) async fn inspect_stored_doc_blobs(
+        &self,
+        doc_id: DocumentId,
+    ) -> eyre::Result<Vec<Vec<u8>>> {
+        let (resp, rx) = futures::channel::oneshot::channel();
+        self.cmd_tx
+            .send(Runtime2Cmd::InspectStoredDocBlobs {
+                sed_id: sedimentree_core::id::SedimentreeId::new(doc_id.into_bytes()),
+                resp,
+            })
+            .await
+            .map_err(|_| eyre::eyre!("task was found dead"))?;
+        rx.await
+            .map_err(|_| eyre::eyre!("caller dropped before response"))?
     }
 
     /// Check whether a doc-worker is currently alive for `doc_id`.
@@ -410,7 +440,8 @@ impl<F: FutureForm> Runtime2Handle<F> {
             .send(Runtime2Cmd::CheckDocWorkerExists { doc_id, resp })
             .await
             .map_err(|_| eyre::eyre!("task was found dead"))?;
-        rx.await.map_err(|_| eyre::eyre!("caller dropped before response"))
+        rx.await
+            .map_err(|_| eyre::eyre!("caller dropped before response"))
     }
 
     // ── private helpers ──────────────────────────────────────────────────────
@@ -428,7 +459,7 @@ impl<F: FutureForm> Runtime2Handle<F> {
         rx: futures::channel::oneshot::Receiver<T>,
         duration: std::time::Duration,
     ) -> Result<Result<T, futures::channel::oneshot::Canceled>, ()> {
-        use futures::future::{Either, select};
+        use futures::future::{select, Either};
         let sleep = Box::pin(self.timer.sleep(duration));
         match select(sleep, rx).await {
             Either::Left(_) => Err(()),

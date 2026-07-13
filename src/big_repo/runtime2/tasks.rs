@@ -13,7 +13,10 @@ use crate::interlude::*;
 use std::{sync::Arc, time::Duration};
 
 use future_form::{FutureForm, Sendable};
-use futures::{FutureExt, future::{AbortHandle, Abortable}};
+use futures::{
+    future::{AbortHandle, Abortable},
+    FutureExt,
+};
 
 /// Platform capability for creating independent task ownership scopes.
 ///
@@ -38,10 +41,7 @@ pub trait TaskSet<F: FutureForm>: Clone + 'static {
     ///
     /// Unexpected errors are programming failures: implementations must make
     /// them observable from [`stop`](Self::stop), rather than log and detach.
-    fn spawn(
-        &self,
-        task: F::Future<'static, eyre::Result<()>>,
-    ) -> eyre::Result<AbortHandle>;
+    fn spawn(&self, task: F::Future<'static, eyre::Result<()>>) -> eyre::Result<AbortHandle>;
 
     /// Abort every task in the set without waiting for termination.
     fn abort(&self);
@@ -66,10 +66,7 @@ pub struct TokioTaskRuntime;
 pub struct TokioTimer;
 
 impl crate::runtime2::Timer<Sendable> for TokioTimer {
-    fn sleep(
-        &self,
-        duration: Duration,
-    ) -> <Sendable as FutureForm>::Future<'static, ()> {
+    fn sleep(&self, duration: Duration) -> <Sendable as FutureForm>::Future<'static, ()> {
         tokio::time::sleep(duration).boxed()
     }
 }
@@ -115,10 +112,15 @@ impl TaskSet<Sendable> for TokioTaskSet {
 
     fn stop(&self, timeout: Duration) -> <Sendable as FutureForm>::Future<'_, eyre::Result<()>> {
         async move {
-            self.inner
-                .stop(timeout)
-                .await
-                .map_err(|error| eyre::eyre!("failed stopping runtime task set: {error}"))
+            match self.inner.stop(timeout).await {
+                Ok(()) => Ok(()),
+                Err(utils_rs::AbortableJoinSetStopError::JoinError(error))
+                    if error.is_cancelled() =>
+                {
+                    Ok(())
+                }
+                Err(error) => Err(eyre::eyre!("failed stopping runtime task set: {error}")),
+            }
         }
         .boxed()
     }
