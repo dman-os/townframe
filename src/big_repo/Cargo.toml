@@ -42,6 +42,7 @@ autosurgeon = { workspace = true }
 serde.workspace = true
 serde_json = { workspace = true }
 sqlx = { workspace = true, features = ["sqlite", "runtime-tokio"] }
+sqlx_utils_rs.workspace = true
 rand.workspace = true
 rand_08 = { version = "0.8", package = "rand", default-features = false }
 tempfile.workspace = true
@@ -79,4 +80,3 @@ pretty_assertions = "1.4.1"
 
 [dev-dependencies]
 big_sync = { workspace = true, features = ["test-support"] }
-sqlx_utils_rs.workspace = true

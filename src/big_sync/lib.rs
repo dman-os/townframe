@@ -20,6 +20,10 @@ mod worker;
 
 pub use backend::SyncBackend;
 pub use big_sync_core::part_store::ObjPayload;
+#[cfg(feature = "test-support")]
+pub use part_store::host_contract as host_part_store_contract;
+#[cfg(feature = "test-support")]
+pub use part_store::host_contract::HostPartStoreContractHarness;
 pub use part_store::memory::MemoryPartStore;
 pub use part_store::sqlite::SqlitePartStore;
 pub use part_store::HostPartStore;
