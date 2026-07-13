@@ -33,8 +33,8 @@
 use crate::interlude::*;
 use crate::runtime2::{
     messages::{DocWorkerMsg, Runtime2Cmd, Runtime2Evt},
-    DocWorkerEntry, DocWorkerHandle, DocWorkerInternalLease, DocWorkerStopToken,
-    Runtime2Config, Runtime2Handle, TaskRuntime, TaskSet,
+    DocWorkerEntry, DocWorkerHandle, DocWorkerInternalLease, DocWorkerStopToken, Runtime2Config,
+    Runtime2Handle, TaskRuntime, TaskSet,
 };
 use crate::DocumentId;
 use big_sync_core::PeerId;
@@ -64,6 +64,10 @@ pub struct Runtime2Hub<F: FutureForm, R: TaskRuntime<F>> {
 
     // ── injected IO facades ────────────────────────────────────────────────
     pub(crate) runtime_io: std::sync::Arc<dyn crate::runtime2::RuntimeIo<F>>,
+    /// Transport-agnostic connection factory. Cloned for each spawn so
+    /// background connect/accept/close tasks can drive IO without holding
+    /// a borrow on the hub.
+    pub(crate) connect: std::sync::Arc<dyn crate::runtime2::TransportConnect<F>>,
     /// Shared IO facade passed to every document worker.
     pub(crate) doc_io: Arc<dyn crate::runtime2::DocIo<F>>,
 
@@ -130,6 +134,12 @@ trait HubCommandFuture<F: FutureForm> {
         resp: futures::channel::oneshot::Sender<bool>,
     ) -> F::Future<'static, eyre::Result<()>>;
 
+    fn inspect_stored_doc_blobs(
+        runtime_io: Arc<dyn crate::runtime2::RuntimeIo<F>>,
+        sed_id: sedimentree_core::id::SedimentreeId,
+        resp: futures::channel::oneshot::Sender<eyre::Result<Vec<Vec<u8>>>>,
+    ) -> F::Future<'static, eyre::Result<()>>;
+
     fn note_local_keyhive_changed(
         runtime_io: Arc<dyn crate::runtime2::RuntimeIo<F>>,
         resp: futures::channel::oneshot::Sender<eyre::Result<()>>,
@@ -181,6 +191,18 @@ impl<F: FutureForm> HubCommandFuture<F> for F {
         })
     }
 
+    fn inspect_stored_doc_blobs(
+        runtime_io: Arc<dyn crate::runtime2::RuntimeIo<F>>,
+        sed_id: sedimentree_core::id::SedimentreeId,
+        resp: futures::channel::oneshot::Sender<eyre::Result<Vec<Vec<u8>>>>,
+    ) -> F::Future<'static, eyre::Result<()>> {
+        F::from_future(async move {
+            let result = runtime_io.inspect_stored_doc_blobs(sed_id).await;
+            let _ = resp.send(result);
+            Ok(())
+        })
+    }
+
     fn note_local_keyhive_changed(
         runtime_io: Arc<dyn crate::runtime2::RuntimeIo<F>>,
         resp: futures::channel::oneshot::Sender<eyre::Result<()>>,
@@ -196,7 +218,14 @@ impl<F: FutureForm> HubCommandFuture<F> for F {
     }
 }
 
-impl<F: FutureForm + HubCommandFuture<F> + HubBackgroundFuture<F> + crate::runtime2::doc_worker::DocWorkerLoop<F>, R: TaskRuntime<F>> Runtime2Hub<F, R>
+impl<
+        F: FutureForm
+            + HubCommandFuture<F>
+            + HubBackgroundFuture<F>
+            + HubIoFutures<F, R::Tasks>
+            + crate::runtime2::doc_worker::DocWorkerLoop<F>,
+        R: TaskRuntime<F>,
+    > Runtime2Hub<F, R>
 where
     F: 'static,
 {
@@ -204,7 +233,12 @@ where
     /// of the old `RuntimeCmd`. Mirrors `handle_cmd` at `runtime.rs:1096`.
     pub(crate) fn handle_cmd(&mut self, cmd: Runtime2Cmd) -> eyre::Result<()> {
         match cmd {
-            Runtime2Cmd::CreateDoc { initial_content, parents, content_heads, resp } => {
+            Runtime2Cmd::CreateDoc {
+                initial_content,
+                parents,
+                content_heads,
+                resp,
+            } => {
                 self.spawn_background(F::create_doc(
                     Arc::clone(&self.runtime_io),
                     self.cmd_tx.clone(),
@@ -262,42 +296,39 @@ where
                     .expect("task was found dead");
             }
             Runtime2Cmd::OpenConn { peer, addr, resp } => {
-                // In runtime2 the connection is driven by TransportConnect.
-                // For now we complete the response immediately with a peer-id
-                // placeholder. The full handshake will go through the
-                // TransportConnect trait in a later parcel.
-                let closed = Arc::new(std::sync::atomic::AtomicBool::new(false));
-                self.connected_peers.insert(
+                let child_tasks = self.child_tasks.clone();
+                self.spawn_background(F::open_connection_and_watch(
+                    Arc::clone(&self.connect),
                     peer,
-                    ConnDeets {
-                        closed: Arc::clone(&closed),
-                    },
-                );
-                let _ = resp.send(Ok((peer, closed)));
+                    addr,
+                    self.evt_tx.clone(),
+                    child_tasks,
+                    resp,
+                ))?;
             }
-            Runtime2Cmd::AcceptConn { incoming: _, resp } => {
-                // Same stub as OpenConn; the transport-agnostic accept
-                // handshake is implemented in a later parcel.
-                let closed = Arc::new(std::sync::atomic::AtomicBool::new(false));
-                // Placeholder peer — the real peer_id comes from the handshake.
-                let peer = self.local_peer_id;
-                self.connected_peers.insert(
-                    peer,
-                    ConnDeets {
-                        closed: Arc::clone(&closed),
-                    },
-                );
-                let _ = resp.send(Ok((peer, closed)));
+            Runtime2Cmd::AcceptConn { incoming, resp } => {
+                let child_tasks = self.child_tasks.clone();
+                self.spawn_background(F::accept_connection_and_watch(
+                    Arc::clone(&self.connect),
+                    incoming,
+                    self.evt_tx.clone(),
+                    child_tasks,
+                    resp,
+                ))?;
             }
             Runtime2Cmd::CloseConn { peer_id, resp } => {
                 self.cancel_pending_keyhive_syncs(&peer_id, "keyhive peer closed");
                 self.cancel_pending_doc_syncs(&peer_id, "doc sync peer closed")?;
                 if let Some(deets) = self.connected_peers.remove(&peer_id) {
-                    deets.closed.store(true, std::sync::atomic::Ordering::SeqCst);
+                    deets
+                        .closed
+                        .store(true, std::sync::atomic::Ordering::SeqCst);
                 }
-                if let Some(resp) = resp {
-                    let _ = resp.send(Ok(()));
-                }
+                self.spawn_background(F::close_connection_async(
+                    Arc::clone(&self.connect),
+                    peer_id,
+                    resp,
+                ))?;
             }
             Runtime2Cmd::SyncDocWithPeer {
                 doc_id,
@@ -306,21 +337,26 @@ where
                 timeout,
                 resp,
             } => {
-                let Ok((worker, _lease)) = self.doc_worker_handle(doc_id) else {
+                let Ok((worker, lease)) = self.doc_worker_handle(doc_id) else {
                     let _ = resp.send(Err(crate::runtime::SyncDocError::NotFound));
                     return Ok(());
                 };
-                if let Err(err) = worker.send(DocWorkerMsg::SyncWithPeer {
+                let msg = DocWorkerMsg::SyncWithPeer {
                     peer_id,
                     waiter_id,
                     timeout,
                     done: resp,
-                    _lease,
-                }) {
-                    // Worker closed before accepting the sync request; report
-                    // the error back to the caller (who is waiting on the
-                    // oneshot that never fires). We log instead of crashing.
-                    tracing::warn!(%doc_id, %peer_id, error = %err, "doc worker closed before sync");
+                    _lease: lease,
+                };
+                if let Err(send_error) = worker.msg_tx.try_send(msg) {
+                    let DocWorkerMsg::SyncWithPeer { done, .. } = send_error.into_inner() else {
+                        unreachable!(
+                            "worker returned a different message after SyncWithPeer send failure"
+                        );
+                    };
+                    let _ = done.send(Err(crate::runtime::SyncDocError::IoError(ferr!(
+                        "doc worker stopped before sync request"
+                    ))));
                 }
             }
             Runtime2Cmd::SyncKeyhiveWithPeer {
@@ -328,7 +364,7 @@ where
                 waiter_id,
                 resp,
             } => {
-                self.pending_keyhive_syncs
+                        self.pending_keyhive_syncs
                     .entry(peer_id)
                     .or_default()
                     .push((waiter_id, resp));
@@ -371,11 +407,17 @@ where
                 self.handle_release_internal_lease(doc_id);
             }
             Runtime2Cmd::CheckSedimentreeResident { doc_id, resp } => {
-                let sedimentree_id =
-                    sedimentree_core::id::SedimentreeId::new(doc_id.into_bytes());
+                let sedimentree_id = sedimentree_core::id::SedimentreeId::new(doc_id.into_bytes());
                 self.spawn_background(F::check_sedimentree(
                     Arc::clone(&self.runtime_io),
                     sedimentree_id,
+                    resp,
+                ))?;
+            }
+            Runtime2Cmd::InspectStoredDocBlobs { sed_id, resp } => {
+                self.spawn_background(F::inspect_stored_doc_blobs(
+                    Arc::clone(&self.runtime_io),
+                    sed_id,
                     resp,
                 ))?;
             }
@@ -389,11 +431,6 @@ where
 }
 
 trait HubBackgroundFuture<F: FutureForm> {
-    fn sync_connection(
-        runtime_io: Arc<dyn crate::runtime2::RuntimeIo<F>>,
-        peer_id: PeerId,
-    ) -> F::Future<'static, eyre::Result<()>>;
-
     fn start_sync(
         runtime_io: Arc<dyn crate::runtime2::RuntimeIo<F>>,
         peer_id: PeerId,
@@ -403,6 +440,11 @@ trait HubBackgroundFuture<F: FutureForm> {
         runtime_io: Arc<dyn crate::runtime2::RuntimeIo<F>>,
     ) -> F::Future<'static, eyre::Result<()>>;
 
+    fn update_doc_access(
+        runtime_io: Arc<dyn crate::runtime2::RuntimeIo<F>>,
+        target: keyhive_core::principal::identifier::Identifier,
+    ) -> F::Future<'static, eyre::Result<()>>;
+
     fn release_lease(
         lease_rx: futures::channel::oneshot::Receiver<()>,
         cmd_tx: async_channel::Sender<Runtime2Cmd>,
@@ -410,21 +452,49 @@ trait HubBackgroundFuture<F: FutureForm> {
     ) -> F::Future<'static, eyre::Result<()>>;
 }
 
+/// Connection and doc-sync IO futures that need the concrete task set for
+/// spawning end-futures. Defined as a separate trait so `#[future_form]`
+/// can generate Sendable/Local implementations.
+trait HubIoFutures<F: FutureForm, Tasks: crate::runtime2::TaskSet<F>> {
+    fn open_connection_and_watch(
+        connect: std::sync::Arc<dyn crate::runtime2::TransportConnect<F>>,
+        peer: PeerId,
+        addr: Box<dyn std::any::Any + Send>,
+        evt_tx: async_channel::Sender<Runtime2Evt>,
+        child_tasks: Tasks,
+        resp: futures::channel::oneshot::Sender<
+            eyre::Result<(PeerId, std::sync::Arc<std::sync::atomic::AtomicBool>)>,
+        >,
+    ) -> F::Future<'static, eyre::Result<()>>;
+
+    fn accept_connection_and_watch(
+        connect: std::sync::Arc<dyn crate::runtime2::TransportConnect<F>>,
+        incoming: Box<dyn std::any::Any + Send>,
+        evt_tx: async_channel::Sender<Runtime2Evt>,
+        child_tasks: Tasks,
+        resp: futures::channel::oneshot::Sender<
+            eyre::Result<(PeerId, std::sync::Arc<std::sync::atomic::AtomicBool>)>,
+        >,
+    ) -> F::Future<'static, eyre::Result<()>>;
+
+    fn close_connection_async(
+        connect: std::sync::Arc<dyn crate::runtime2::TransportConnect<F>>,
+        peer_id: PeerId,
+        resp: Option<futures::channel::oneshot::Sender<eyre::Result<()>>>,
+    ) -> F::Future<'static, eyre::Result<()>>;
+
+    fn sync_doc_with_peer_and_notify(
+        runtime_io: std::sync::Arc<dyn crate::runtime2::RuntimeIo<F>>,
+        evt_tx: async_channel::Sender<Runtime2Evt>,
+        doc_id: DocumentId,
+        peer_id: PeerId,
+        waiter_id: u64,
+        sed_id: sedimentree_core::id::SedimentreeId,
+    ) -> F::Future<'static, eyre::Result<()>>;
+}
+
 #[future_form::future_form(Sendable, Local)]
 impl<F: FutureForm> HubBackgroundFuture<F> for F {
-    fn sync_connection(
-        runtime_io: Arc<dyn crate::runtime2::RuntimeIo<F>>,
-        peer_id: PeerId,
-    ) -> F::Future<'static, eyre::Result<()>> {
-        F::from_future(async move {
-            runtime_io
-                .sync_keyhive_with_peer(peer_id)
-                .await
-                .wrap_err("initial keyhive sync after connection established failed")?;
-            Ok(())
-        })
-    }
-
     fn start_sync(
         runtime_io: Arc<dyn crate::runtime2::RuntimeIo<F>>,
         peer_id: PeerId,
@@ -450,6 +520,18 @@ impl<F: FutureForm> HubBackgroundFuture<F> for F {
         })
     }
 
+    fn update_doc_access(
+        runtime_io: Arc<dyn crate::runtime2::RuntimeIo<F>>,
+        target: keyhive_core::principal::identifier::Identifier,
+    ) -> F::Future<'static, eyre::Result<()>> {
+        F::from_future(async move {
+            runtime_io
+                .update_doc_access(target)
+                .await
+                .wrap_err("big-sync document access update failed")
+        })
+    }
+
     fn release_lease(
         lease_rx: futures::channel::oneshot::Receiver<()>,
         cmd_tx: async_channel::Sender<Runtime2Cmd>,
@@ -461,6 +543,168 @@ impl<F: FutureForm> HubBackgroundFuture<F> for F {
                 .send(Runtime2Cmd::ReleaseInternalLease { doc_id })
                 .await
                 .map_err(|_| ferr!("runtime stopped before internal lease release"))?;
+            Ok(())
+        })
+    }
+}
+
+#[future_form::future_form(Sendable where Tasks: Send, Local)]
+impl<F: FutureForm, Tasks: crate::runtime2::TaskSet<F>> HubIoFutures<F, Tasks> for F {
+    fn open_connection_and_watch(
+        connect: std::sync::Arc<dyn crate::runtime2::TransportConnect<F>>,
+        peer: PeerId,
+        addr: Box<dyn std::any::Any + Send>,
+        evt_tx: async_channel::Sender<Runtime2Evt>,
+        child_tasks: Tasks,
+        resp: futures::channel::oneshot::Sender<
+            eyre::Result<(PeerId, std::sync::Arc<std::sync::atomic::AtomicBool>)>,
+        >,
+    ) -> F::Future<'static, eyre::Result<()>> {
+        F::from_future(async move {
+            match connect.connect(peer, addr).await {
+                Ok((handshake_peer, closed, end_fut)) => {
+                    if handshake_peer != peer {
+                        // The connector has already authenticated the peer;
+                        // close that authenticated connection before rejecting
+                        // the caller's expected-target mismatch.
+                        connect.close(handshake_peer).await?;
+                        let _ = resp.send(Err(ferr!(
+                            "handshake peer mismatch: expected {peer}, got {handshake_peer}"
+                        )));
+                        return Ok(());
+                    }
+                    let watcher_closed = Arc::clone(&closed);
+                    let watcher_peer = handshake_peer;
+                    let watcher_evt_tx = evt_tx.clone();
+                    let evt_tx_established = evt_tx.clone();
+                    let closed_established = Arc::clone(&closed);
+                    let watcher = child_tasks.spawn(F::from_future(async move {
+                        let result = end_fut.await;
+                        watcher_closed.store(true, std::sync::atomic::Ordering::SeqCst);
+                        let error = result.as_ref().err().map(ToString::to_string);
+                        watcher_evt_tx
+                            .send(Runtime2Evt::ConnLost {
+                                peer_id: watcher_peer,
+                                error,
+                            })
+                            .await
+                            .map_err(|_| ferr!("runtime stopped before connection-loss event"))?;
+                        Ok(())
+                    }));
+                    if let Err(error) = watcher {
+                        connect.close(handshake_peer).await?;
+                        let _ = resp.send(Err(error));
+                        return Ok(());
+                    }
+                    evt_tx_established
+                        .send(Runtime2Evt::ConnEstablished {
+                            peer_id: handshake_peer,
+                            closed: closed_established,
+                        })
+                        .await
+                        .map_err(|_| {
+                            ferr!("runtime stopped before connection-established event")
+                        })?;
+                    let _ = resp.send(Ok((handshake_peer, closed)));
+                }
+                Err(error) => {
+                    let _ = resp.send(Err(error));
+                }
+            }
+            Ok(())
+        })
+    }
+
+    fn accept_connection_and_watch(
+        connect: std::sync::Arc<dyn crate::runtime2::TransportConnect<F>>,
+        incoming: Box<dyn std::any::Any + Send>,
+        evt_tx: async_channel::Sender<Runtime2Evt>,
+        child_tasks: Tasks,
+        resp: futures::channel::oneshot::Sender<
+            eyre::Result<(PeerId, std::sync::Arc<std::sync::atomic::AtomicBool>)>,
+        >,
+    ) -> F::Future<'static, eyre::Result<()>> {
+        F::from_future(async move {
+            match connect.accept(incoming).await {
+                Ok((handshake_peer, closed, end_fut)) => {
+                    let watcher_closed = Arc::clone(&closed);
+                    let watcher_peer = handshake_peer;
+                    let watcher_evt_tx = evt_tx.clone();
+                    let evt_tx_established = evt_tx.clone();
+                    let closed_established = Arc::clone(&closed);
+                    let watcher = child_tasks.spawn(F::from_future(async move {
+                        let result = end_fut.await;
+                        watcher_closed.store(true, std::sync::atomic::Ordering::SeqCst);
+                        let error = result.as_ref().err().map(ToString::to_string);
+                        watcher_evt_tx
+                            .send(Runtime2Evt::ConnLost {
+                                peer_id: watcher_peer,
+                                error,
+                            })
+                            .await
+                            .map_err(|_| ferr!("runtime stopped before connection-loss event"))?;
+                        Ok(())
+                    }));
+                    if let Err(error) = watcher {
+                        let _ = resp.send(Err(error));
+                        return Ok(());
+                    }
+                    evt_tx_established
+                        .send(Runtime2Evt::ConnEstablished {
+                            peer_id: handshake_peer,
+                            closed: closed_established,
+                        })
+                        .await
+                        .map_err(|_| {
+                            ferr!("runtime stopped before connection-established event")
+                        })?;
+                    let _ = resp.send(Ok((handshake_peer, closed)));
+                }
+                Err(error) => {
+                    let _ = resp.send(Err(error));
+                }
+            }
+            Ok(())
+        })
+    }
+
+    fn close_connection_async(
+        connect: std::sync::Arc<dyn crate::runtime2::TransportConnect<F>>,
+        peer_id: PeerId,
+        resp: Option<futures::channel::oneshot::Sender<eyre::Result<()>>>,
+    ) -> F::Future<'static, eyre::Result<()>> {
+        F::from_future(async move {
+            let result = connect.close(peer_id).await;
+            if let Some(resp) = resp {
+                let _ = resp.send(result);
+            }
+            Ok(())
+        })
+    }
+
+    fn sync_doc_with_peer_and_notify(
+        runtime_io: std::sync::Arc<dyn crate::runtime2::RuntimeIo<F>>,
+        evt_tx: async_channel::Sender<Runtime2Evt>,
+        doc_id: DocumentId,
+        peer_id: PeerId,
+        waiter_id: u64,
+        sed_id: sedimentree_core::id::SedimentreeId,
+    ) -> F::Future<'static, eyre::Result<()>> {
+        F::from_future(async move {
+            let result = match runtime_io.sync_doc_with_peer(sed_id, peer_id).await {
+                Ok(true) => Ok(()),
+                Ok(false) => Err(crate::runtime::SyncDocError::NotFound),
+                Err(error) => Err(crate::runtime::SyncDocError::IoError(error)),
+            };
+            evt_tx
+                .send(Runtime2Evt::DocSyncCompleted {
+                    doc_id,
+                    peer_id,
+                    waiter_id,
+                    result,
+                })
+                .await
+                .map_err(|_| ferr!("runtime stopped before document sync completion"))?;
             Ok(())
         })
     }
@@ -481,7 +725,13 @@ impl<F: FutureForm + 'static, R: TaskRuntime<F>> Runtime2Hub<F, R> {
 // EVENT HANDLERS
 // ═══════════════════════════════════════════════════════════════════════════
 
-impl<F: FutureForm + HubBackgroundFuture<F> + crate::runtime2::doc_worker::DocWorkerLoop<F>, R: TaskRuntime<F>> Runtime2Hub<F, R>
+impl<
+        F: FutureForm
+            + HubBackgroundFuture<F>
+            + HubIoFutures<F, R::Tasks>
+            + crate::runtime2::doc_worker::DocWorkerLoop<F>,
+        R: TaskRuntime<F>,
+    > Runtime2Hub<F, R>
 where
     F: 'static,
 {
@@ -500,6 +750,36 @@ where
             }
             Runtime2Evt::KeyhiveSyncDone { peer_id } => {
                 self.finish_keyhive_sync(peer_id)?;
+            }
+            Runtime2Evt::DocSyncRequested {
+                doc_id,
+                peer_id,
+                waiter_id,
+            } => {
+                let sed_id = sedimentree_core::id::SedimentreeId::new(doc_id.into_bytes());
+                self.spawn_background(F::sync_doc_with_peer_and_notify(
+                    Arc::clone(&self.runtime_io),
+                    self.evt_tx.clone(),
+                    doc_id,
+                    peer_id,
+                    waiter_id,
+                    sed_id,
+                ))?;
+            }
+            Runtime2Evt::DocSyncCompleted {
+                doc_id,
+                peer_id,
+                waiter_id,
+                result,
+            } => {
+                let (worker, _lease) = self.doc_worker_handle(doc_id)?;
+                worker
+                    .send(DocWorkerMsg::SyncWithPeerResult {
+                        peer_id,
+                        waiter_id,
+                        result,
+                    })
+                    .expect("task was found dead");
             }
             Runtime2Evt::KeyhiveSyncRequested { peer_id } => {
                 self.schedule_internal_keyhive_sync(peer_id);
@@ -544,13 +824,19 @@ where
                 self.change_manager
                     .notify_delegation_received(data)
                     .expect("task was found dead");
-                self.update_doc_access(target);
+                self.spawn_background(F::update_doc_access(
+                    Arc::clone(&self.runtime_io),
+                    target,
+                ))?;
             }
             Runtime2Evt::RevocationReceived { target, data } => {
                 self.change_manager
                     .notify_revocation_received(data)
                     .expect("task was found dead");
-                self.update_doc_access(target);
+                self.spawn_background(F::update_doc_access(
+                    Arc::clone(&self.runtime_io),
+                    target,
+                ))?;
             }
         }
         Ok(())
@@ -585,14 +871,21 @@ where
 
     // ─── connection lifecycle ──────────────────────────────────────────────
 
-    /// Handle an established connection: register and schedule initial keyhive sync.
+    /// Handle an established connection: register peer in `connected_peers`,
+    /// then schedule the initial keyhive sync.
     /// Mirrors `handle_connection_established` at `runtime.rs:2087`.
     fn handle_connection_established(
-        &self,
+        &mut self,
         peer_id: PeerId,
         closed: Arc<std::sync::atomic::AtomicBool>,
     ) -> eyre::Result<()> {
-        self.spawn_background(F::sync_connection(Arc::clone(&self.runtime_io), peer_id))?;
+        self.connected_peers.insert(
+            peer_id,
+            ConnDeets {
+                closed: closed.clone(),
+            },
+        );
+        self.start_keyhive_sync(peer_id)?;
         Ok(())
     }
 
@@ -680,13 +973,14 @@ where
 
     /// Cancel a pending keyhive sync waiter by id.
     fn cancel_pending_keyhive_sync(&mut self, peer_id: &PeerId, waiter_id: u64) -> bool {
-        let (removed, became_empty) = if let Some(waiters) = self.pending_keyhive_syncs.get_mut(peer_id) {
-            let len_before = waiters.len();
-            waiters.retain(|(id, _)| *id != waiter_id);
-            (waiters.len() < len_before, waiters.is_empty())
-        } else {
-            return false;
-        };
+        let (removed, became_empty) =
+            if let Some(waiters) = self.pending_keyhive_syncs.get_mut(peer_id) {
+                let len_before = waiters.len();
+                waiters.retain(|(id, _)| *id != waiter_id);
+                (waiters.len() < len_before, waiters.is_empty())
+            } else {
+                return false;
+            };
         if became_empty {
             self.pending_keyhive_syncs.remove(peer_id);
         }
@@ -703,7 +997,11 @@ where
     }
 
     /// Cancel all pending doc syncs for a peer (fan-out to all doc-workers).
-    fn cancel_pending_doc_syncs(&mut self, peer_id: &PeerId, reason: &'static str) -> eyre::Result<()> {
+    fn cancel_pending_doc_syncs(
+        &mut self,
+        peer_id: &PeerId,
+        reason: &'static str,
+    ) -> eyre::Result<()> {
         let workers: Vec<(DocumentId, DocWorkerHandle)> = self
             .doc_workers
             .iter()
@@ -726,30 +1024,20 @@ where
         Ok(())
     }
 
-    // ─── doc access updates ────────────────────────────────────────────────
-
-    /// Incrementally update doc access for a single target (doc or group) after
-    /// a delegation or revocation is received. Mirrors `update_doc_access` at
-    /// `runtime.rs:1420`.
-    ///
-    /// NOTE: the old runtime updates `big_sync_store.set_doc_members` /
-    /// `add_obj_to_parts` here. In runtime2, big_sync is a sibling layer — the
-    /// access update is forwarded via the change manager or an event channel.
-    /// For now, this is a no-op that logs the target.
-    fn update_doc_access(&self, _target: keyhive_core::principal::identifier::Identifier) {
-        // TODO(runtime2): forward access change to the big_sync sibling layer
-        // via an event channel or callback. The old runtime did:
-        //   big_sync_store.set_doc_members(doc_id, agents)
-        //   big_sync_store.add_obj_to_parts(doc_id, vec![GLOBAL_PART_ID])
-        // These are out of scope for runtime2's Layer 2.
-    }
 }
 
 // ═══════════════════════════════════════════════════════════════════════════
 // DOC-WORKER LIFECYCLE
 // ═══════════════════════════════════════════════════════════════════════════
 
-impl<F: FutureForm + HubBackgroundFuture<F> + crate::runtime2::doc_worker::DocWorkerLoop<F> + 'static, R: TaskRuntime<F>> Runtime2Hub<F, R> {
+impl<
+        F: FutureForm
+            + HubBackgroundFuture<F>
+            + crate::runtime2::doc_worker::DocWorkerLoop<F>
+            + 'static,
+        R: TaskRuntime<F>,
+    > Runtime2Hub<F, R>
+{
     /// Ensure a doc-worker exists for `doc_id`, return its handle + internal lease.
     ///
     /// If the worker is already alive, bumps `internal_leases` and clears the
@@ -784,9 +1072,11 @@ impl<F: FutureForm + HubBackgroundFuture<F> + crate::runtime2::doc_worker::DocWo
     #[tracing::instrument(skip_all, fields(%doc_id))]
     fn spawn_doc_worker(&mut self, doc_id: DocumentId) -> eyre::Result<()> {
         // Fast path: already alive, just reset eviction.
-        if self.doc_workers.get(&doc_id).is_some_and(|entry| {
-            !entry.handle.msg_tx.is_closed()
-        }) {
+        if self
+            .doc_workers
+            .get(&doc_id)
+            .is_some_and(|entry| !entry.handle.msg_tx.is_closed())
+        {
             if let Some(entry) = self.doc_workers.get_mut(&doc_id) {
                 entry.eviction_deadline = None;
             }
@@ -873,9 +1163,7 @@ impl<F: FutureForm + HubBackgroundFuture<F> + crate::runtime2::doc_worker::DocWo
             entry.eviction_deadline = None;
             return;
         }
-        entry.eviction_deadline = Some(
-            self.clock.instant() + self.sync_policy.doc_worker_idle_ttl,
-        );
+        entry.eviction_deadline = Some(self.clock.instant() + self.sync_policy.doc_worker_idle_ttl);
     }
 
     /// Periodic eviction of idle doc-workers. Driven by the machine loop's
@@ -946,9 +1234,10 @@ trait HubMachineFuture<F: FutureForm + FutureForm, R: TaskRuntime<F>> {
 
 #[future_form::future_form(Sendable where R::Tasks: Send, Local)]
 impl<
-    F: FutureForm + HubCommandFuture<F> + HubBackgroundFuture<F>,
-    R: TaskRuntime<F>,
-> HubMachineFuture<F, R> for F {
+        F: FutureForm + HubCommandFuture<F> + HubBackgroundFuture<F> + HubIoFutures<F, R::Tasks>,
+        R: TaskRuntime<F>,
+    > HubMachineFuture<F, R> for F
+{
     fn machine_loop(
         mut hub: Runtime2Hub<F, R>,
         cmd_rx: async_channel::Receiver<Runtime2Cmd>,
@@ -961,11 +1250,8 @@ impl<
             let result = futures::future::Abortable::new(
                 async move {
                     loop {
-                        let mut sleep = Box::pin(
-                            timer
-                                .sleep(std::time::Duration::from_millis(500))
-                                .fuse(),
-                        );
+                        let mut sleep =
+                            Box::pin(timer.sleep(std::time::Duration::from_millis(500)).fuse());
                         let mut cmd = Box::pin(cmd_rx.recv().fuse());
                         let mut evt = Box::pin(evt_rx.recv().fuse());
                         futures::select_biased! {
@@ -1021,6 +1307,7 @@ where
     F: FutureForm
         + HubCommandFuture<F>
         + HubBackgroundFuture<F>
+        + HubIoFutures<F, R::Tasks>
         + HubMachineFuture<F, R>
         + crate::runtime2::doc_worker::DocWorkerLoop<F>
         + 'static,
@@ -1035,7 +1322,8 @@ where
         tasks,
         timer,
         clock,
-        connect: _,
+        connect,
+        event_channel,
     } = config;
 
     // Create two independent task sets for reverse-order shutdown.
@@ -1045,13 +1333,20 @@ where
     let (runtime_abort, runtime_registration) = futures::future::AbortHandle::new_pair();
 
     let (cmd_tx, cmd_rx) = async_channel::unbounded::<Runtime2Cmd>();
-    let (evt_tx, evt_rx) = async_channel::unbounded::<Runtime2Evt>();
+    let (evt_tx, evt_rx) = event_channel.unwrap_or_else(async_channel::unbounded::<Runtime2Evt>);
+
+    // The hub and its public handle must share waiter counters. The hub uses
+    // the current counter as a sync watermark; separate counters would leave
+    // every request below that watermark and make it wait forever.
+    let doc_sync_waiter_ids = Arc::new(std::sync::atomic::AtomicU64::new(1));
+    let keyhive_sync_waiter_ids = Arc::new(std::sync::atomic::AtomicU64::new(1));
 
     // ── Build the hub ──────────────────────────────────────────────────────
     let mut hub: Runtime2Hub<F, R> = Runtime2Hub {
         local_peer_id,
         sync_policy,
         runtime_io: Arc::clone(&runtime_io),
+        connect,
         doc_io,
         change_manager,
         child_tasks: child_tasks.clone(),
@@ -1065,8 +1360,8 @@ where
         keyhive_dirty: BTreeSet::new(),
         doc_workers: HashMap::new(),
         pending_materialization: HashSet::new(),
-        doc_sync_waiter_ids: Arc::new(std::sync::atomic::AtomicU64::new(0)),
-        keyhive_sync_waiter_ids: Arc::new(std::sync::atomic::AtomicU64::new(0)),
+        doc_sync_waiter_ids: Arc::clone(&doc_sync_waiter_ids),
+        keyhive_sync_waiter_ids: Arc::clone(&keyhive_sync_waiter_ids),
     };
 
     // ── Construct handle ───────────────────────────────────────────────────
@@ -1074,6 +1369,8 @@ where
         cmd_tx.clone(),
         hub.sync_policy,
         hub.timer.clone(),
+        doc_sync_waiter_ids,
+        keyhive_sync_waiter_ids,
     );
 
     // ── Spawn (machine): the hub machine loop ──────────────────────────────

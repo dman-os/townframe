@@ -36,7 +36,11 @@ use future_form::FutureForm;
 mod io;
 mod lease;
 mod messages;
+pub(crate) mod native;
 mod tasks;
+
+#[cfg(test)]
+mod test_support;
 
 pub use io::{CausalDecryptResult, Clock, DocIo, EncryptedLooseCommit, RuntimeIo, Timer};
 pub use lease::{
@@ -83,18 +87,58 @@ pub struct Runtime2Config<F: FutureForm, R: TaskRuntime<F>> {
     /// `ChannelTransport` in tests; websocket in wasm. The blocking-out carries
     /// the addr as `Box<dyn Any + Send>`; the implementing model pins the type.
     pub connect: std::sync::Arc<dyn TransportConnect<F>>,
+    /// Event bus supplied by IO backends that receive protocol events from
+    /// outside the runtime machine (for example Subduction's observer).
+    /// When absent, runtime2 creates a private bus.
+    pub event_channel: Option<(
+        async_channel::Sender<Runtime2Evt>,
+        async_channel::Receiver<Runtime2Evt>,
+    )>,
 }
 
-/// Transport-agnostic connect/accept — the seam that replaces iroh baked into
-/// the runtime. The hub calls these on `OpenConn`/`AcceptConn`.
+/// Transport-agnostic connect/accept/close — the seam that replaces iroh baked
+/// into the runtime. The hub calls these on `OpenConn`/`AcceptConn`/`CloseConn`.
+///
+/// Every method returns `F::Future<'static, …>` so the same interface works
+/// for `Sendable` (native) and `Local` (wasm).  The connect/accept results
+/// carry a connection lifecycle end-future that the hub spawns to observe
+/// `ConnLost`.
 pub trait TransportConnect<F: FutureForm>: Send + Sync {
-    /// Connect to `peer` at `addr_blob` (transport-specific); returns the
-    /// authenticated subduction connection + peer id.
+    /// Connect to `expected_peer` at `addr_blob` (transport-specific).
+    /// Returns the handshake-authoritative peer identity, a closed flag that
+    /// transitions to `true` when the transport drops the connection, and an
+    /// end-future that resolves when the connection lifecycle ends (the hub
+    /// spawns this to emit [`Runtime2Evt::ConnLost`]).
     fn connect(
         &self,
-        peer: big_sync_core::PeerId,
+        expected_peer: big_sync_core::PeerId,
         addr_blob: Box<dyn std::any::Any + Send>,
-    ) -> F::Future<'static, eyre::Result<big_sync_core::PeerId>>;
+    ) -> F::Future<
+        'static,
+        eyre::Result<(
+            big_sync_core::PeerId,
+            std::sync::Arc<std::sync::atomic::AtomicBool>,
+            F::Future<'static, eyre::Result<()>>,
+        )>,
+    >;
+
+    /// Accept an inbound connection from `incoming` (transport-specific).
+    /// Returns the same triple as [`connect`](Self::connect).
+    fn accept(
+        &self,
+        incoming: Box<dyn std::any::Any + Send>,
+    ) -> F::Future<
+        'static,
+        eyre::Result<(
+            big_sync_core::PeerId,
+            std::sync::Arc<std::sync::atomic::AtomicBool>,
+            F::Future<'static, eyre::Result<()>>,
+        )>,
+    >;
+
+    /// Asynchronously close the connection to `peer_id`.
+    /// Returns when the transport has finished tearing down.
+    fn close(&self, peer_id: big_sync_core::PeerId) -> F::Future<'static, eyre::Result<()>>;
 }
 
 // ─── NEW types (the heads-fix op) ──────────────────────────────────────────

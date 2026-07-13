@@ -24,8 +24,8 @@
 //! layer that owns its own sync and watches subduction for new content.
 
 use crate::interlude::*;
-use big_sync_core::PeerId;
 use crate::DocumentId;
+use big_sync_core::PeerId;
 use future_form::FutureForm;
 
 // ─── Determinism levers: Timer / Clock ─────────────────────────────────────
@@ -124,7 +124,10 @@ pub trait DocIo<F: FutureForm>: Send + Sync {
     fn hydrate_tree(
         &self,
         sed_id: sedimentree_core::id::SedimentreeId,
-    ) -> F::Future<'_, eyre::Result<Option<sedimentree_core::sedimentree::minimized::MinimizedSedimentree>>>;
+    ) -> F::Future<
+        '_,
+        eyre::Result<Option<sedimentree_core::sedimentree::minimized::MinimizedSedimentree>>,
+    >;
 
     // ── the single local write (atomic) ───────────────────────────────────
     /// Store an encrypted loose commit. subduction records it AND advances the
@@ -148,8 +151,20 @@ pub trait DocIo<F: FutureForm>: Send + Sync {
         &self,
         sed_id: sedimentree_core::id::SedimentreeId,
         fragment: sedimentree_core::fragment::Fragment,
+        checkpoints: Vec<sedimentree_core::loose_commit::id::CommitId>,
         blob: sedimentree_core::blob::Blob,
     ) -> F::Future<'_, eyre::Result<()>>;
+
+    /// Update the external big-sync object payload when one is configured.
+    /// The payload carries the current document heads for partition sync.
+    fn set_doc_heads_payload(
+        &self,
+        doc_id: crate::DocumentId,
+        heads: Arc<[automerge::ChangeHash]>,
+    ) -> F::Future<'_, eyre::Result<()>>;
+
+    /// Refresh keyhive caches after local encryption advances its frontier.
+    fn note_local_keyhive_changed(&self) -> F::Future<'_, eyre::Result<()>>;
 
     // ── keyhive encrypt/decrypt (hides the keyhive doc handle) ────────────
     /// Encrypt a loose commit's blob under the current keyhive epoch. Returns
@@ -219,8 +234,20 @@ pub trait RuntimeIo<F: FutureForm>: Send + Sync {
         sed_id: sedimentree_core::id::SedimentreeId,
     ) -> F::Future<'_, eyre::Result<bool>>;
 
+    /// Test-support inspection of the raw stored blobs for a sedimentree.
+    fn inspect_stored_doc_blobs(
+        &self,
+        sed_id: sedimentree_core::id::SedimentreeId,
+    ) -> F::Future<'_, eyre::Result<Vec<Vec<u8>>>>;
+
     /// Notify the runtime that the local keyhive state has changed.
     fn note_local_keyhive_changed(&self) -> F::Future<'_, eyre::Result<()>>;
+
+    /// Refresh big-sync membership and partition indexes for a changed target.
+    fn update_doc_access(
+        &self,
+        target: keyhive_core::principal::identifier::Identifier,
+    ) -> F::Future<'_, eyre::Result<()>>;
 
     /// Initiate a keyhive sync round with a peer.
     fn sync_keyhive_with_peer(
@@ -233,4 +260,14 @@ pub trait RuntimeIo<F: FutureForm>: Send + Sync {
 
     /// Compact the keyhive archive (periodic maintenance).
     fn compact_keyhive(&self) -> F::Future<'_, eyre::Result<()>>;
+
+    /// Run a doc sync round with `peer_id` for the given sedimentree.
+    /// Returns `true` if the sync exchange had success (commits/fragments
+    /// were received or sent), `false` if the sync completed without
+    /// meaningful exchange (no new content).
+    fn sync_doc_with_peer(
+        &self,
+        sed_id: sedimentree_core::id::SedimentreeId,
+        peer_id: big_sync_core::PeerId,
+    ) -> F::Future<'_, eyre::Result<bool>>;
 }

@@ -121,7 +121,11 @@ pub struct LiveDocBundle {
 }
 
 impl LiveDocBundle {
-    pub(crate) fn new(doc_id: DocumentId, doc: automerge::Automerge, lease: RuntimeDocLease) -> Self {
+    pub(crate) fn new(
+        doc_id: DocumentId,
+        doc: automerge::Automerge,
+        lease: RuntimeDocLease,
+    ) -> Self {
         Self {
             doc_id,
             doc: tokio::sync::Mutex::new(doc),
@@ -639,7 +643,7 @@ impl BigRepoRuntimeStopToken {
     }
 }
 
-type SubductionSedimentrees = Arc<
+pub(crate) type SubductionSedimentrees = Arc<
     subduction_core::collections::bounded_sharded_map::BoundedShardedMap<
         SedimentreeId,
         sedimentree_core::sedimentree::minimized::MinimizedSedimentree,
@@ -681,35 +685,37 @@ impl<T> BigRepoSubductionStorage for T where
 {
 }
 
-type BigRepoSyncHandler<S> = subduction_core::handler::sync::SyncHandler<
-    Sendable,
-    S,
-    BigRepoIrohTransport,
-    BigRepoPolicy,
-    CountLeadingZeroBytes,
-    TokioSpawn,
->;
+pub(crate) type BigRepoSyncHandler<S, C = BigRepoIrohTransport> =
+    subduction_core::handler::sync::SyncHandler<
+        Sendable,
+        S,
+        C,
+        BigRepoPolicy,
+        CountLeadingZeroBytes,
+        TokioSpawn,
+    >;
 
-type BigRepoNativeComposedHandler<S> = BigRepoComposedHandler<
-    BigRepoSyncHandler<S>,
-    BigRepoEphemeralHandler,
-    BigRepoKeyhiveHandler,
+pub(crate) type BigRepoNativeComposedHandler<S, C = BigRepoIrohTransport> = BigRepoComposedHandler<
+    BigRepoSyncHandler<S, C>,
+    BigRepoEphemeralHandler<C>,
+    BigRepoKeyhiveHandler<C>,
 >;
 
 /// The concrete Subduction type for BigRepo, using the composed handler.
-type BigRepoSubduction<S> = subduction_core::subduction::Subduction<
-    'static,
-    Sendable,
-    S,
-    BigRepoIrohTransport,
-    BigRepoNativeComposedHandler<S>,
-    crate::runtime::BigRepoPolicy,
-    subduction_crypto::signer::memory::MemorySigner,
-    TimeoutTokio,
-    TokioSpawn,
-    CountLeadingZeroBytes,
-    256,
->;
+pub(crate) type BigRepoSubduction<S, C = BigRepoIrohTransport> =
+    subduction_core::subduction::Subduction<
+        'static,
+        Sendable,
+        S,
+        C,
+        BigRepoNativeComposedHandler<S, C>,
+        crate::runtime::BigRepoPolicy,
+        subduction_crypto::signer::memory::MemorySigner,
+        TimeoutTokio,
+        TokioSpawn,
+        CountLeadingZeroBytes,
+        256,
+    >;
 
 #[derive(Clone)]
 struct BigRepoSyncSessionBridge {
@@ -1284,7 +1290,9 @@ where
                 let _ = self.cancel_pending_keyhive_sync(peer_id, waiter_id);
             }
             RuntimeCmd::ReleaseDocLease { doc_id } => self.handle_release_doc_lease(doc_id),
-            RuntimeCmd::ReleaseInternalLease { doc_id } => self.handle_release_internal_lease(doc_id),
+            RuntimeCmd::ReleaseInternalLease { doc_id } => {
+                self.handle_release_internal_lease(doc_id)
+            }
             RuntimeCmd::CheckSedimentreeResident { doc_id, resp } => {
                 let sedimentree_id = SedimentreeId::new(doc_id.into_bytes());
                 let storage = self.storage_for_reads.clone();
@@ -1631,7 +1639,10 @@ where
         Ok(())
     }
 
-    fn doc_worker_handle(&mut self, doc_id: DocumentId) -> Res<(DocWorkerHandle, DocWorkerInternalLease)> {
+    fn doc_worker_handle(
+        &mut self,
+        doc_id: DocumentId,
+    ) -> Res<(DocWorkerHandle, DocWorkerInternalLease)> {
         self.spawn_doc_worker(doc_id)?;
         let entry = self
             .doc_workers
@@ -2207,7 +2218,14 @@ where
     doc_id_subduction: SedimentreeId,
     state: DocWorkerDocState,
     pending_fragment_requests: BTreeSet<FragmentRequested>,
-    pending_sync_jobs: HashMap<PeerId, Vec<(u64, oneshot::Sender<Result<(), SyncDocError>>, DocWorkerInternalLease)>>,
+    pending_sync_jobs: HashMap<
+        PeerId,
+        Vec<(
+            u64,
+            oneshot::Sender<Result<(), SyncDocError>>,
+            DocWorkerInternalLease,
+        )>,
+    >,
     active_doc_syncs: HashMap<PeerId, u64>,
     subduction: Arc<BigRepoSubduction<S>>,
     sedimentrees: SubductionSedimentrees,
@@ -3476,7 +3494,7 @@ async fn store_doc_heads_payload(
     Ok(())
 }
 
-fn sedimentree_heads_payload(tree: &Sedimentree) -> Arc<[automerge::ChangeHash]> {
+pub(crate) fn sedimentree_heads_payload(tree: &Sedimentree) -> Arc<[automerge::ChangeHash]> {
     doc_heads_from_commit_ids(tree.heads(&CountLeadingZeroBytes))
 }
 
@@ -3542,30 +3560,40 @@ where
     Ok(())
 }
 
-struct IrohConnectResult {
-    authenticated: subduction_core::authenticated::Authenticated<
+pub(crate) struct IrohConnectResult {
+    pub(crate) authenticated: subduction_core::authenticated::Authenticated<
         subduction_core::transport::message::MessageTransport<
             subduction_iroh::transport::IrohTransport,
         >,
         Sendable,
     >,
-    listener_task: BoxFuture<'static, Result<(), subduction_iroh::error::RunError>>,
-    sender_task: BoxFuture<'static, Result<(), subduction_iroh::error::RunError>>,
+    pub(crate) listener_task: BoxFuture<'static, Result<(), subduction_iroh::error::RunError>>,
+    pub(crate) sender_task: BoxFuture<'static, Result<(), subduction_iroh::error::RunError>>,
 }
 
-async fn connect_outgoing(
+pub(crate) async fn connect_outgoing(
     endpoint: iroh::Endpoint,
     endpoint_addr: iroh::EndpointAddr,
     signer: &subduction_crypto::signer::memory::MemorySigner,
 ) -> Res<IrohConnectResult> {
-    let connected = subduction_iroh::client::connect(
-        &endpoint,
+    connect_outgoing_to(
+        endpoint,
         endpoint_addr,
         signer,
         subduction_core::handshake::audience::Audience::discover(b"townframe-subduction"),
     )
     .await
-    .map_err(|err| ferr!("subduction iroh connect failed: {err}"))?;
+}
+
+pub(crate) async fn connect_outgoing_to(
+    endpoint: iroh::Endpoint,
+    endpoint_addr: iroh::EndpointAddr,
+    signer: &subduction_crypto::signer::memory::MemorySigner,
+    audience: subduction_core::handshake::audience::Audience,
+) -> Res<IrohConnectResult> {
+    let connected = subduction_iroh::client::connect(&endpoint, endpoint_addr, signer, audience)
+        .await
+        .map_err(|err| ferr!("subduction iroh connect failed: {err}"))?;
     Ok(IrohConnectResult {
         authenticated: connected
             .authenticated
@@ -3575,7 +3603,7 @@ async fn connect_outgoing(
     })
 }
 
-async fn accept_incoming(
+pub(crate) async fn accept_incoming(
     conn: iroh::endpoint::Connection,
     signer: &subduction_crypto::signer::memory::MemorySigner,
     nonce_cache: &subduction_core::nonce_cache::NonceCache,
@@ -3818,7 +3846,7 @@ pub(crate) struct StagedAutomergeIngest {
     _fragment_count: usize,
 }
 
-struct HydratedMinimizedTree {
+pub(crate) struct HydratedMinimizedTree {
     tree: sedimentree_core::sedimentree::minimized::MinimizedSedimentree,
     fresh: bool,
     has_blobs: bool,
@@ -3900,9 +3928,9 @@ pub(crate) enum BigRepoCiphertextKind {
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, PartialOrd, Ord)]
 pub(crate) struct BigRepoCiphertextLocator {
-    kind: BigRepoCiphertextKind,
-    sedimentree_id: SedimentreeId,
-    commit_id: CommitId,
+    pub(crate) kind: BigRepoCiphertextKind,
+    pub(crate) sedimentree_id: SedimentreeId,
+    pub(crate) commit_id: CommitId,
 }
 
 impl BigRepoCiphertextLocator {
@@ -4346,7 +4374,7 @@ async fn encrypt_loose_commit(
     Ok((blob, app_key))
 }
 
-async fn encrypt_loose_commit_with_update_op(
+pub(crate) async fn encrypt_loose_commit_with_update_op(
     keyhive_handle: &BigKeyhiveHandle,
     sedimentree_id: SedimentreeId,
     head: CommitId,
@@ -4412,7 +4440,7 @@ async fn encrypt_loose_commit_with_update_op(
     Ok((Blob::new(encrypted_bytes), app_key, update_op))
 }
 
-async fn encrypt_fragment_blob<S>(
+pub(crate) async fn encrypt_fragment_blob<S>(
     keyhive_handle: &BigKeyhiveHandle,
     storage_for_reads: &S,
     sedimentree_id: SedimentreeId,
@@ -4521,7 +4549,7 @@ where
     Ok(Blob::new(encrypted_bytes))
 }
 
-fn fragment_nonce_context(
+pub(crate) fn fragment_nonce_context(
     sedimentree_id: SedimentreeId,
     head: CommitId,
     boundary: &BTreeSet<CommitId>,
@@ -4539,7 +4567,7 @@ fn fragment_nonce_context(
 ///
 /// This only updates the local document state used for later `after_content`
 /// construction. It does not emit a Keyhive event.
-async fn record_keyhive_content_frontier(
+pub(crate) async fn record_keyhive_content_frontier(
     keyhive_handle: &BigKeyhiveHandle,
     sedimentree_id: SedimentreeId,
     content_ref: Vec<u8>,
@@ -4561,7 +4589,7 @@ async fn record_keyhive_content_frontier(
     Ok(())
 }
 
-async fn persist_cgka_update_op(
+pub(crate) async fn persist_cgka_update_op(
     keyhive_storage: &BigRepoKeyhiveStorage,
     update_op: keyhive_crypto::signed::Signed<beekem::operation::CgkaOperation>,
 ) -> Res<()> {

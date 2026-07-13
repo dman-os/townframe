@@ -263,7 +263,12 @@ impl<F: FutureForm> DocWorker2<F> {
                 sedimentree_core::blob::BlobMeta::new(blob),
             );
             self.io
-                .store_fragment(self.sed_id, fragment, blob.clone())
+                .store_fragment(
+                    self.sed_id,
+                    fragment,
+                    entry.checkpoints.clone(),
+                    blob.clone(),
+                )
                 .await?;
         }
 
@@ -1538,26 +1543,14 @@ impl<F: FutureForm> DocWorker2<F> {
             let watermark = waiter_id;
             self.active_doc_syncs.insert(peer_id, watermark);
 
-            // TODO(parcel 4b integration): drive subduction sync for
-            // (self.doc_id, peer_id). In the old runtime, this was:
-            //   self.subduction.sync_with_peer(&remote_peer_id, sed_id, false, ...)
-            //   .await -> sends SyncWithPeerResult back via msg_tx.
-            //
-            // In runtime2, the doc-worker needs either:
-            // (a) A reference to the hub's subduction (Arc<HubSubduction<S>>)
-            // (b) A callback closure passed at construction
-            // (c) An event sent to the hub which drives sync and sends back
-            //
-            // For the blocking-out, we resolve the waiter immediately with
-            // an error so callers don't hang. The actual sync wiring is
-            // deferred to the integration pass.
-            let _ = self.msg_tx.try_send(DocWorkerMsg::SyncWithPeerResult {
-                peer_id,
-                waiter_id,
-                result: Err(crate::runtime::SyncDocError::IoError(ferr!(
-                    "sync_with_peer not yet wired (parcel 4b integration)"
-                ))),
-            });
+            self.evt_tx
+                .send(crate::runtime2::Runtime2Evt::DocSyncRequested {
+                    doc_id: self.doc_id,
+                    peer_id,
+                    waiter_id,
+                })
+                .await
+                .map_err(|_| ferr!("runtime stopped before document sync request"))?;
         }
         Ok(())
     }
