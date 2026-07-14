@@ -111,6 +111,12 @@ pub enum Runtime2Cmd {
         doc_id: DocumentId,
         resp: futures::channel::oneshot::Sender<bool>,
     },
+    /// Wait until all finite runtime work currently admitted to the Hub and
+    /// document workers has drained. Pending decryption is quiescent; this
+    /// does not wait for unavailable keys.
+    WaitForQuiescence {
+        resp: futures::channel::oneshot::Sender<eyre::Result<()>>,
+    },
 }
 
 /// Events from background workers / keyhive listener / sync sessions / doc-workers.
@@ -124,14 +130,17 @@ pub enum Runtime2Evt {
     },
     ConnLost {
         peer_id: PeerId,
+        closed: Arc<std::sync::atomic::AtomicBool>,
         error: Option<String>,
     },
     KeyhiveSyncDone {
         peer_id: PeerId,
+        request_id: subduction_keyhive::message::RequestId,
     },
     /// The keyhive protocol sync and local cache refresh both completed.
     KeyhiveCacheRefreshDone {
         peer_id: PeerId,
+        round_id: Option<u64>,
         result: eyre::Result<()>,
     },
     KeyhiveSyncRequested {
@@ -166,6 +175,11 @@ pub enum Runtime2Evt {
     },
     DocWorkerMaterializationReady {
         doc_id: DocumentId,
+    },
+    /// A document worker reached a quiescence barrier in mailbox order.
+    DocWorkerQuiescent {
+        doc_id: DocumentId,
+        barrier_id: u64,
     },
     PrekeyExpanded {
         new_prekey: Arc<crate::runtime::SignedAddKeyOp>,
@@ -253,6 +267,11 @@ pub enum DocWorkerMsg {
     ReattemptMaterialization,
     QueryHeadState {
         resp: futures::channel::oneshot::Sender<eyre::Result<crate::runtime2::DocHeadState>>,
+    },
+    /// Mailbox-ordered runtime quiescence barrier.
+    Quiesce {
+        barrier_id: u64,
+        _lease: crate::runtime2::DocWorkerInternalLease,
     },
 }
 

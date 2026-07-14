@@ -93,6 +93,8 @@ pub struct DocWorker2<F: FutureForm> {
     pub(crate) sync_completed: std::collections::HashSet<PeerId>,
     /// An outbound sync session has finished applying for the peer.
     pub(crate) sync_materialized: std::collections::HashSet<PeerId>,
+    /// Mailbox-ordered quiescence barriers waiting for active finite work.
+    pub(crate) quiescence_waiters: Vec<(u64, DocWorkerInternalLease)>,
 }
 
 /// The doc's live state. `Unloaded` = relay/pending (sedimentree heads only,
@@ -145,7 +147,7 @@ impl<F: FutureForm> DocWorker2<F> {
                 let peer_id = PeerId::new(*session.peer_id.as_bytes());
                 let completes_sync_waiters = matches!(
                     session.kind,
-                    subduction_core::sync_session::SyncSessionKind::OutboundBatch
+                    subduction_core::sync_session::SyncSessionKind::OutboundBatch { .. }
                 );
                 let result = self.apply_sync_session(session).await;
                 if completes_sync_waiters {
@@ -187,7 +189,7 @@ impl<F: FutureForm> DocWorker2<F> {
                 result,
             } => {
                 match result {
-                    Ok(()) => self.mark_sync_completed(peer_id),
+                    Ok(()) => self.mark_sync_completed(peer_id, waiter_id),
                     Err(error) => {
                         self.sync_completed.remove(&peer_id);
                         self.sync_materialized.remove(&peer_id);
@@ -209,6 +211,13 @@ impl<F: FutureForm> DocWorker2<F> {
                 self.retry_materialization().await.map(|_| ())
             }
             DocWorkerMsg::QueryHeadState { resp } => self.query_head_state(resp).await,
+            DocWorkerMsg::Quiesce {
+                barrier_id,
+                _lease,
+            } => {
+                self.quiescence_waiters.push((barrier_id, _lease));
+                Ok(())
+            }
         }
     }
 }
@@ -245,76 +254,56 @@ impl<F: FutureForm> DocWorker2<F> {
             return Ok(());
         }
 
-        // ── 2. Stage content into loose commits + fragments ─────────────────
+        // ── 2. Stage and encrypt the complete initial sedimentree ─────────
+        // An initial fragment may contain its head only inside the fragment;
+        // there need not be a loose-commit row from which to recover its
+        // content key. The batch encryption path handles that case and keeps
+        // the fragment/commit key chain intact.
         let staged = stage_automerge_ingest(&initial_content);
+        let encrypted = self
+            .io
+            .encrypt_initial_sedimentree(self.sed_id, staged.clone())
+            .await?;
 
-        // ── 3. Encrypt each staged item ────────────────────────────────────
-        // Blobs are laid out fragment-blobs-first, then loose-commit-blobs;
-        // loose entry `i` pairs with `blobs[fragment_entries.len() + i]`.
-        let frag_n = staged.fragment_entries.len();
-        let mut encrypted_commits: Vec<crate::runtime2::EncryptedLooseCommit> = Vec::new();
-        let mut cgka_update_ops: Vec<
-            keyhive_crypto::signed::Signed<beekem::operation::CgkaOperation>,
-        > = Vec::new();
-
-        for (entry, blob) in staged
-            .loose_entries
-            .iter()
-            .zip(staged.blobs.iter().skip(frag_n))
-        {
-            let encrypted = self
-                .io
-                .encrypt_loose_commit(
-                    self.sed_id,
-                    entry.head,
-                    entry.parents.clone(),
-                    blob.as_slice().to_vec(),
-                )
-                .await?;
-            if let Some(ref op) = encrypted.cgka_update_op {
-                cgka_update_ops.push(op.clone());
-            }
-            encrypted_commits.push(encrypted);
+        // ── 3. Persist the complete tree, then its encryption metadata ────
+        let cgka_update_ops = encrypted.cgka_update_ops.clone();
+        self.io
+            .store_initial_sedimentree(self.sed_id, encrypted)
+            .await?;
+        for op in cgka_update_ops {
+            self.io.persist_cgka_update_op(op).await?;
         }
 
-        // ── 4. Store each commit (the single atomic write) ─────────────────
-        let mut fragment_requests = Vec::new();
-        for encrypted in &encrypted_commits {
-            let maybe_request = self.io.store_commit(self.sed_id, encrypted.clone()).await?;
-            if let Some(request) = maybe_request {
-                fragment_requests.push(request);
-            }
-        }
-
-        // ── 5. Store fragments for boundary commits ────────────────────────
-        for (entry, blob) in staged
-            .fragment_entries
-            .iter()
-            .zip(staged.blobs.iter().take(staged.fragment_entries.len()))
-        {
-            let fragment = sedimentree_core::fragment::Fragment::new(
-                self.sed_id,
-                entry.head,
-                entry.boundary.clone(),
-                &entry.checkpoints,
-                sedimentree_core::blob::BlobMeta::new(blob),
-            );
+        // Record frontiers only after the corresponding encrypted tree is
+        // durable. This also covers fragment heads, which have no loose row.
+        for entry in &staged.fragment_entries {
             self.io
-                .store_fragment(
+                .record_content_frontier(
                     self.sed_id,
-                    fragment,
-                    entry.checkpoints.clone(),
-                    blob.clone(),
+                    entry.head.as_bytes().to_vec(),
+                    entry
+                        .boundary
+                        .iter()
+                        .map(|content_ref| content_ref.as_bytes().to_vec())
+                        .collect(),
+                )
+                .await?;
+        }
+        for entry in &staged.loose_entries {
+            self.io
+                .record_content_frontier(
+                    self.sed_id,
+                    entry.head.as_bytes().to_vec(),
+                    entry
+                        .parents
+                        .iter()
+                        .map(|content_ref| content_ref.as_bytes().to_vec())
+                        .collect(),
                 )
                 .await?;
         }
 
-        // ── 6. Persist CGKA ops ───────────────────────────────────────────
-        for op in &cgka_update_ops {
-            self.io.persist_cgka_update_op(op.clone()).await?;
-        }
-
-        // ── 5. Build LiveDocBundle, transition to Live ─────────────────────
+        // ── 4. Build LiveDocBundle, transition to Live ─────────────────────
         let heads: Arc<[automerge::ChangeHash]> =
             Arc::from(initial_content.get_heads());
 
@@ -1603,6 +1592,31 @@ impl<F: FutureForm> DocWorker2<F> {
     ///
     /// Mirrors `handle_sync_with_peer` at `runtime.rs:3199` and
     /// `spawn_doc_sync_for_peer` at `runtime.rs:3099`.
+    fn is_quiescent(&self) -> bool {
+        self.active_doc_syncs.is_empty()
+            && self.pending_sync_jobs.is_empty()
+            && self.sync_completed.is_empty()
+            && self.sync_materialized.is_empty()
+            && self.pending_fragment_requests.is_empty()
+    }
+
+    async fn resolve_quiescence_waiters(&mut self) -> eyre::Result<()> {
+        if !self.is_quiescent() || self.quiescence_waiters.is_empty() {
+            return Ok(());
+        }
+        let waiters = std::mem::take(&mut self.quiescence_waiters);
+        for (barrier_id, _lease) in waiters {
+            self.evt_tx
+                .send(crate::runtime2::Runtime2Evt::DocWorkerQuiescent {
+                    doc_id: self.doc_id,
+                    barrier_id,
+                })
+                .await
+                .map_err(|_| ferr!("hub event channel closed"))?;
+        }
+        Ok(())
+    }
+
     async fn sync_with_peer(
         &mut self,
         peer_id: PeerId,
@@ -1626,7 +1640,14 @@ impl<F: FutureForm> DocWorker2<F> {
         // a subduction reference. The old runtime called
         // `subduction.sync_with_peer(...)` directly.
         if !self.active_doc_syncs.contains_key(&peer_id) {
-            let watermark = waiter_id;
+            // The watermark is the first waiter ID not present when this
+            // round starts. Waiters arriving after this point cascade into a
+            // subsequent round, matching the original runtime.
+            let watermark = self
+                .pending_sync_jobs
+                .get(&peer_id)
+                .and_then(|waiters| waiters.iter().map(|(id, _, _)| *id).max())
+                .map_or(waiter_id, |id| id.saturating_add(1));
             self.active_doc_syncs.insert(peer_id, watermark);
 
             self.evt_tx
@@ -1656,6 +1677,9 @@ impl<F: FutureForm> DocWorker2<F> {
         waiter_id: Option<u64>,
         reason: &'static str,
     ) {
+        if waiter_id.is_none() {
+            self.active_doc_syncs.remove(peer_id);
+        }
         self.sync_completed.remove(peer_id);
         self.sync_materialized.remove(peer_id);
         if let Some(waiters) = self.pending_sync_jobs.get_mut(peer_id) {
@@ -1670,6 +1694,7 @@ impl<F: FutureForm> DocWorker2<F> {
                 }
                 if waiters.is_empty() {
                     self.pending_sync_jobs.remove(peer_id);
+                    self.active_doc_syncs.remove(peer_id);
                 }
             } else {
                 // Cancel all waiters for this peer.
@@ -1693,53 +1718,107 @@ impl<F: FutureForm> DocWorker2<F> {
     /// the active sync entry if the watermark matches.
     ///
     /// Mirrors the result resolution at `runtime.rs:3238`.
-    fn mark_sync_completed(&mut self, peer_id: PeerId) {
+    fn mark_sync_completed(&mut self, peer_id: PeerId, _waiter_id: u64) {
+        if !self.active_doc_syncs.contains_key(&peer_id) {
+            tracing::debug!(%peer_id, "ignoring document sync completion without active sync");
+            return;
+        }
         self.sync_completed.insert(peer_id);
         self.finish_sync_if_ready(peer_id);
     }
 
     fn mark_sync_materialized(&mut self, peer_id: PeerId) {
+        if !self.active_doc_syncs.contains_key(&peer_id) {
+            tracing::debug!(%peer_id, "ignoring document materialization without active sync");
+            return;
+        }
         self.sync_materialized.insert(peer_id);
         self.finish_sync_if_ready(peer_id);
     }
 
     fn finish_sync_if_ready(&mut self, peer_id: PeerId) {
-        if self.sync_completed.remove(&peer_id) && self.sync_materialized.remove(&peer_id) {
-            self.resolve_sync_peer_result(peer_id, 0, Ok(()));
+        if self.active_doc_syncs.contains_key(&peer_id)
+            && self.sync_completed.contains(&peer_id)
+            && self.sync_materialized.contains(&peer_id)
+        {
+            self.sync_completed.remove(&peer_id);
+            self.sync_materialized.remove(&peer_id);
+            let watermark = self
+                .active_doc_syncs
+                .get(&peer_id)
+                .copied()
+                .expect("active document sync disappeared before completion");
+            self.resolve_sync_peer_result(peer_id, watermark, Ok(()));
         }
     }
 
     fn resolve_sync_peer_result(
         &mut self,
         peer_id: PeerId,
-        _waiter_id: u64,
+        watermark: u64,
         result: Result<(), crate::runtime::SyncDocError>,
     ) {
-        // Clear active sync marker.
         self.active_doc_syncs.remove(&peer_id);
+        let Some(waiters) = self.pending_sync_jobs.remove(&peer_id) else {
+            return;
+        };
 
-        // Resolve ALL waiters for this peer (the old runtime resolved them
-        // all regardless of individual waiter_id).
-        if let Some(waiters) = self.pending_sync_jobs.remove(&peer_id) {
+        // Errors terminate the whole active round. Successful completion only
+        // resolves waiters that existed when this round began; later waiters
+        // require a fresh round, as in the original runtime.
+        if result.is_err() {
             for (_wid, sender, _lease) in waiters {
                 let _ = sender.send(match &result {
-                    Ok(()) => Ok(()),
                     Err(crate::runtime::SyncDocError::NotFound) => {
                         Err(crate::runtime::SyncDocError::NotFound)
                     }
                     Err(crate::runtime::SyncDocError::TransportError) => {
                         Err(crate::runtime::SyncDocError::TransportError)
                     }
-                    Err(crate::runtime::SyncDocError::IoError(e)) => {
-                        Err(crate::runtime::SyncDocError::IoError(eyre::eyre!("{}", e)))
+                    Err(crate::runtime::SyncDocError::IoError(error)) => {
+                        Err(crate::runtime::SyncDocError::IoError(eyre::eyre!("{error}")))
                     }
-                    Err(crate::runtime::SyncDocError::Other(e)) => {
-                        Err(crate::runtime::SyncDocError::Other(eyre::eyre!("{}", e)))
+                    Err(crate::runtime::SyncDocError::Other(error)) => {
+                        Err(crate::runtime::SyncDocError::Other(eyre::eyre!("{error}")))
                     }
+                    Ok(()) => unreachable!("successful result entered error path"),
                 });
-                // _lease dropped here → releases internal lease counter.
+            }
+            return;
+        }
+
+        let mut remaining = Vec::new();
+        for (waiter_id, sender, lease) in waiters {
+            if waiter_id < watermark {
+                sender.send(Ok(())).expect("document sync waiter receiver must remain open");
+            } else {
+                remaining.push((waiter_id, sender, lease));
             }
         }
+        if remaining.is_empty() {
+            return;
+        }
+
+        let next_waiter_id = remaining
+            .iter()
+            .map(|(id, _, _)| *id)
+            .min()
+            .expect("remaining document waiters must be non-empty");
+        let next_watermark = remaining
+            .iter()
+            .map(|(id, _, _)| *id)
+            .max()
+            .expect("remaining document waiters must be non-empty")
+            .saturating_add(1);
+        self.pending_sync_jobs.insert(peer_id, remaining);
+        self.active_doc_syncs.insert(peer_id, next_watermark);
+        self.evt_tx
+            .try_send(crate::runtime2::Runtime2Evt::DocSyncRequested {
+                doc_id: self.doc_id,
+                peer_id,
+                waiter_id: next_waiter_id,
+            })
+            .expect("runtime event channel must remain open");
     }
 
 }
@@ -1777,7 +1856,10 @@ impl<F: FutureForm> DocWorkerLoop<F> for F {
                 async {
                     loop {
                         match msg_rx.recv().await {
-                            Ok(msg) => worker.handle_msg(msg).await?,
+                            Ok(msg) => {
+                                worker.handle_msg(msg).await?;
+                                worker.resolve_quiescence_waiters().await?;
+                            }
                             Err(async_channel::RecvError) => break,
                         }
                     }
@@ -1867,6 +1949,7 @@ where
         active_doc_syncs: HashMap::new(),
         sync_completed: std::collections::HashSet::new(),
         sync_materialized: std::collections::HashSet::new(),
+        quiescence_waiters: Vec::new(),
     };
 
     let (stop_abort, stop_registration) = futures::future::AbortHandle::new_pair();

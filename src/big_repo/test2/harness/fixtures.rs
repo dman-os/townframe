@@ -94,6 +94,8 @@ pub async fn sync_doc_expect_ready(
 ) -> Res<crate::BigDocHandle> {
     conn.sync_doc_with_peer(doc_id, Some(std::time::Duration::from_secs(10)))
         .await?;
+    repo.wait_for_quiescence(Some(std::time::Duration::from_secs(10)))
+        .await?;
     match repo.get_doc(&doc_id).await? {
         crate::DocLookup::Ready(handle) => Ok(handle),
         crate::DocLookup::PendingMaterialization => Err(crate::ferr!(

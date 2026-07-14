@@ -42,7 +42,10 @@ mod tasks;
 #[cfg(test)]
 mod test_support;
 
-pub use io::{CausalDecryptResult, Clock, DocIo, EncryptedLooseCommit, RuntimeIo, Timer};
+pub use io::{
+    CausalDecryptResult, Clock, DocIo, EncryptedInitialSedimentree, EncryptedLooseCommit,
+    RuntimeIo, Timer,
+};
 pub use lease::{
     DocLease, DocWorkerEntry, DocWorkerHandle, DocWorkerInternalLease, DocWorkerStopToken,
 };
@@ -147,7 +150,7 @@ pub trait TransportConnect<F: FutureForm>: Send + Sync {
 /// This is the flake-detector's backing type: test2 Tier-0 asserts sedimentree
 /// parity across all peers (incl. relays) and materialized parity across peers
 /// with access.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct DocHeadState {
     /// Sedimentree heads — storage ground truth; always present for a doc in
     /// the big_sync partition (relays included). What `obj_payload.heads`
