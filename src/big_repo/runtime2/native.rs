@@ -568,7 +568,10 @@ where
             let kh_doc = get_kh_doc(&self.keyhive, sed_id).await?;
             let mut doc = kh_doc.lock().await;
             match doc.try_decrypt_content_keyed(&encrypted) {
-                Ok((plaintext, _key)) => {
+                Ok((plaintext, key)) => {
+                    // Keep the recovered key available for a later local
+                    // child commit's causal envelope.
+                    doc.remember_decryption_key(encrypted.content_ref.clone(), key);
                     // Deserialize the envelope to extract the actual payload.
                     let envelope: Envelope<Vec<u8>, Vec<u8>> = bincode::deserialize(&plaintext)
                         .map_err(|e| ferr!("bincode decrypt result: {e}"))?;
@@ -634,16 +637,32 @@ where
             // Set up a ciphertext store backed by our storage.
             let ct_store = NativeCiphertextStore::new(self.storage.clone(), sed_id);
 
-            // Attempt causal decrypt.
+            // The upstream causal walk returns the decrypted ancestors, but
+            // not the entrypoint itself. The old runtime explicitly loaded
+            // the entrypoint first; runtime2 must preserve that contract.
+            let (entrypoint_raw, entrypoint_key) = {
+                let mut doc = kh_doc.lock().await;
+                match doc.try_decrypt_content_keyed(&encrypted) {
+                    Ok((plaintext, key)) => (plaintext, key),
+                    Err(
+                        keyhive_core::principal::document::DecryptError::KeyNotFound,
+                    ) => return Ok(CausalDecryptResult::default()),
+                    Err(error) => {
+                        return Err(ferr!(
+                            "entrypoint decrypt failed: {error}"
+                        ));
+                    }
+                }
+            };
+            let entrypoint_envelope: Envelope<Vec<u8>, Vec<u8>> =
+                bincode::deserialize(&entrypoint_raw)
+                    .map_err(|error| ferr!("failed decoding entrypoint envelope: {error}"))?;
+
+            // Attempt causal decrypt for the entrypoint's ancestors.
             let state = {
                 let mut doc = kh_doc.lock().await;
                 match doc.try_causal_decrypt_content(&encrypted, ct_store).await {
                     Ok(state) => state,
-                    Err(
-                        keyhive_core::principal::document::DocCausalDecryptionError::EntrypointDecryptError(
-                            keyhive_core::principal::document::DecryptError::KeyNotFound,
-                        ),
-                    ) => return Ok(CausalDecryptResult::default()),
                     Err(error) => {
                         return Err(ferr!(
                             "causal decrypt failed; BigRepo envelope is not causally closed: {error}"
@@ -652,20 +671,27 @@ where
                 }
             };
 
-            // Deserialize each envelope to extract the actual plaintext.
-            let mut complete = Vec::with_capacity(state.complete.len());
+            // The causal store returns the application keys it used, but the
+            // generic Keyhive API does not persist them on the document. Keep
+            // them there so a later local child commit can construct its own
+            // causal envelope, including ancestors recovered through a grant.
+            {
+                let mut doc = kh_doc.lock().await;
+                doc.remember_decryption_key(encrypted.content_ref.clone(), entrypoint_key);
+                for (content_ref, key) in &state.keys {
+                    doc.remember_decryption_key(content_ref.clone(), *key);
+                }
+            }
+
+            // Return the entrypoint first, followed by the decrypted causal
+            // ancestors. Consumers can therefore materialize the exact blob
+            // requested as well as its closure.
+            let mut complete = vec![(encrypted.content_ref.clone(), entrypoint_envelope.plaintext)];
             for (content_ref, ciphertext_or_plaintext) in state.complete {
-                // try_causal_decrypt_content returns
-                // Vec<(Vec<u8>, Vec<u8>)> where the second element is
-                // the *plaintext* (entrypoint) or *ciphertext* already
-                // decrypted by the store. In practice the store returns
-                // decrypted content for ancestors, but the entrypoint
-                // is also decrypted. Both should be serialized Envelopes.
                 let envelope: Envelope<Vec<u8>, Vec<u8>> =
                     match bincode::deserialize(&ciphertext_or_plaintext) {
                         Ok(env) => env,
                         Err(_) => {
-                            // Might already be raw plaintext from the store.
                             complete.push((content_ref, ciphertext_or_plaintext));
                             continue;
                         }

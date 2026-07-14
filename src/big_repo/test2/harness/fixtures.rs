@@ -50,6 +50,7 @@ pub async fn grant_and_propagate(
     pair.left_conn().sync_keyhive_with_peer(None).await?;
     pair.right_conn().sync_keyhive_with_peer(None).await?;
     assert_reader_has_access(&pair.right().repo, doc_id).await?;
+    super::keyhive::assert_document_snapshot_equal(pair.left(), pair.right(), doc_id).await?;
     Ok(())
 }
 
