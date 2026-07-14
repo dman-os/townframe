@@ -129,6 +129,11 @@ pub enum Runtime2Evt {
     KeyhiveSyncDone {
         peer_id: PeerId,
     },
+    /// The keyhive protocol sync and local cache refresh both completed.
+    KeyhiveCacheRefreshDone {
+        peer_id: PeerId,
+        result: eyre::Result<()>,
+    },
     KeyhiveSyncRequested {
         peer_id: PeerId,
     },

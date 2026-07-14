@@ -32,8 +32,7 @@ async fn tier1_connected_document_replicates_and_preserves_head_parity() -> crat
         .await?;
     let title = read_title(&bob_doc).await;
     assert_eq!(title, "ladder rung 1");
-
-    heads::tier0_invariants(&pair, doc_id).await?;
+    heads::tier0_invariants(&pair, doc_id, &alice_doc, &bob_doc).await?;
 
     drop(alice_doc);
     drop(bob_doc);
@@ -61,6 +60,7 @@ async fn tier1_connected_document_update_propagates_to_reader_after_first_replic
     let reader_doc =
         fixtures::sync_doc_expect_ready(pair.right_conn(), &pair.right().repo, doc_id).await?;
     assert_eq!(read_title(&reader_doc).await, "first rung");
+    heads::tier0_invariants(&pair, doc_id, &owner_doc, &reader_doc).await?;
 
     // Owner edits after first replication.
     owner_doc
@@ -68,34 +68,185 @@ async fn tier1_connected_document_update_propagates_to_reader_after_first_replic
             doc.transact(|tx| tx.put(automerge::ROOT, "title", "second rung"))
                 .map_err(|err| crate::ferr!("failed editing document: {err:?}"))
         })
-        .await?;
-
+        .await??;
+    assert_eq!(read_title(&owner_doc).await, "second rung");
     // Reader pulls the update in one sync.
     drop(reader_doc);
     let reader_doc2 =
         fixtures::sync_doc_expect_ready(pair.right_conn(), &pair.right().repo, doc_id).await?;
     assert_eq!(read_title(&reader_doc2).await, "second rung");
-
-    heads::tier0_invariants(&pair, doc_id).await?;
+    heads::tier0_invariants(&pair, doc_id, &owner_doc, &reader_doc2).await?;
 
     drop(owner_doc);
     drop(reader_doc2);
     Ok(())
 }
 
+#[tokio::test(flavor = "multi_thread")]
+async fn tier1_reader_edit_propagates_back_to_owner() -> crate::Res<()> {
+    utils_rs::testing::setup_tracing_once();
+    let pair = Pair::boot(35, 36, "Owner", "Editor").await?;
+
+    let editor_agent = fixtures::agent_of(&pair.left().repo, pair.right()).await?;
+
+    let mut initial = automerge::Automerge::new();
+    initial
+        .transact(|tx| tx.put(automerge::ROOT, "title", "owner value"))
+        .map_err(|err| crate::ferr!("failed creating ladder document: {err:?}"))?;
+    let owner_doc = pair.left().repo.create_doc(initial).await?;
+    let doc_id = owner_doc.document_id();
+
+    fixtures::grant_and_propagate(&pair, doc_id, &editor_agent, Access::Edit).await?;
+
+    let editor_doc =
+        fixtures::sync_doc_expect_ready(pair.right_conn(), &pair.right().repo, doc_id).await?;
+    assert_eq!(read_title(&editor_doc).await, "owner value");
+
+    editor_doc
+        .with_document(|doc| {
+            doc.transact(|tx| tx.put(automerge::ROOT, "title", "editor value"))
+                .map_err(|err| crate::ferr!("failed editing document: {err:?}"))
+        })
+        .await??;
+    assert_eq!(read_title(&editor_doc).await, "editor value");
+
+    // The owner handle predates the editor's commit. Drop it before syncing
+    // so the returned handle is the materialized post-edit view.
+    drop(owner_doc);
+    let owner_doc2 =
+        fixtures::sync_doc_expect_ready(pair.left_conn(), &pair.left().repo, doc_id).await?;
+    assert_eq!(read_title(&owner_doc2).await, "editor value");
+    heads::tier0_invariants(&pair, doc_id, &owner_doc2, &editor_doc).await?;
+
+    drop(owner_doc2);
+    drop(editor_doc);
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn tier1_divergent_edits_converge_bidirectionally() -> crate::Res<()> {
+    utils_rs::testing::setup_tracing_once();
+    let pair = Pair::boot(37, 38, "Owner", "Editor").await?;
+
+    let editor_agent = fixtures::agent_of(&pair.left().repo, pair.right()).await?;
+
+    let mut initial = automerge::Automerge::new();
+    initial
+        .transact(|tx| tx.put(automerge::ROOT, "title", "base"))
+        .map_err(|err| crate::ferr!("failed creating ladder document: {err:?}"))?;
+    let owner_doc = pair.left().repo.create_doc(initial).await?;
+    let doc_id = owner_doc.document_id();
+    fixtures::grant_and_propagate(&pair, doc_id, &editor_agent, Access::Edit).await?;
+
+    let editor_doc =
+        fixtures::sync_doc_expect_ready(pair.right_conn(), &pair.right().repo, doc_id).await?;
+
+    owner_doc
+        .with_document(|doc| {
+            doc.set_actor(automerge::ActorId::from([37_u8; 16]));
+            doc.transact(|tx| tx.put(automerge::ROOT, "owner_note", "owner branch"))
+                .map_err(|err| crate::ferr!("failed owner edit: {err:?}"))
+        })
+        .await??;
+    editor_doc
+        .with_document(|doc| {
+            doc.set_actor(automerge::ActorId::from([38_u8; 16]));
+            doc.transact(|tx| tx.put(automerge::ROOT, "editor_note", "editor branch"))
+                .map_err(|err| crate::ferr!("failed editor edit: {err:?}"))
+        })
+        .await??;
+
+    // The editor's commit may advance CGKA state. Propagate that state before
+    // asking Owner to decrypt the new document entrypoint.
+    pair.right_conn().sync_keyhive_with_peer(None).await?;
+    pair.left_conn().sync_keyhive_with_peer(None).await?;
+
+    // Pull the editor branch into Owner first, then pull the converged state
+    // back into Editor. Each call is a synchronization barrier; a concurrent
+    // pair of calls can race before either side has the other's new branch.
+    pair.left_conn()
+        .sync_doc_with_peer(doc_id, Some(std::time::Duration::from_secs(10)))
+        .await?;
+    pair.right_conn()
+        .sync_doc_with_peer(doc_id, Some(std::time::Duration::from_secs(10)))
+        .await?;
+    for (label, handle) in [("Owner", &owner_doc), ("Editor", &editor_doc)] {
+        assert_eq!(
+            read_optional_text(handle, "owner_note").await.as_deref(),
+            Some("owner branch"),
+            "{label} is missing the owner branch",
+        );
+        assert_eq!(
+            read_optional_text(handle, "editor_note").await.as_deref(),
+            Some("editor branch"),
+            "{label} is missing the editor branch",
+        );
+    }
+    heads::tier0_invariants(&pair, doc_id, &owner_doc, &editor_doc).await?;
+
+    drop(owner_doc);
+    drop(editor_doc);
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn tier1_closed_connection_then_reconnect_syncs_again() -> crate::Res<()> {
+    utils_rs::testing::setup_tracing_once();
+    let mut pair = Pair::boot(39, 40, "Owner", "Reader").await?;
+
+    let reader_agent = fixtures::agent_of(&pair.left().repo, pair.right()).await?;
+    let mut initial = automerge::Automerge::new();
+    initial
+        .transact(|tx| tx.put(automerge::ROOT, "title", "before reconnect"))
+        .map_err(|err| crate::ferr!("failed creating ladder document: {err:?}"))?;
+    let owner_doc = pair.left().repo.create_doc(initial).await?;
+    let doc_id = owner_doc.document_id();
+    fixtures::grant_and_propagate(&pair, doc_id, &reader_agent, Access::Read).await?;
+
+    let reader_doc =
+        fixtures::sync_doc_expect_ready(pair.right_conn(), &pair.right().repo, doc_id).await?;
+    assert_eq!(read_title(&reader_doc).await, "before reconnect");
+
+    let old_left = pair.left_conn.take().expect("left connection should exist");
+    let _old_right = pair.right_conn.take().expect("right connection should exist");
+    old_left.stop().await?;
+
+    let new_left = pair.left().connect(pair.right()).await?;
+    let new_right = pair.right().accepted_connection().await;
+    pair.left_conn = Some(new_left);
+    pair.right_conn = Some(new_right);
+
+    let reader_doc2 =
+        fixtures::sync_doc_expect_ready(pair.right_conn(), &pair.right().repo, doc_id).await?;
+    assert_eq!(read_title(&reader_doc2).await, "before reconnect");
+    heads::tier0_invariants(&pair, doc_id, &owner_doc, &reader_doc2).await?;
+
+    drop(owner_doc);
+    drop(reader_doc);
+    drop(reader_doc2);
+    Ok(())
+}
+
 async fn read_title(handle: &crate::BigDocHandle) -> String {
+    read_text(handle, "title").await
+}
+
+async fn read_text(handle: &crate::BigDocHandle, key: &str) -> String {
+    read_optional_text(handle, key)
+        .await
+        .unwrap_or_else(|| panic!("text value {key:?} should exist and be a string"))
+}
+
+async fn read_optional_text(handle: &crate::BigDocHandle, key: &str) -> Option<String> {
     handle
         .with_document_read(|doc| {
-            let (value, _) = doc
-                .get(automerge::ROOT, "title")
-                .expect("title lookup should succeed")
-                .expect("title should exist");
-            let automerge::Value::Scalar(value) = value else {
-                panic!("title should be scalar");
+            let Ok(Some((automerge::Value::Scalar(value), _))) = doc.get(automerge::ROOT, key)
+            else {
+                return None;
             };
             match value.as_ref() {
-                ScalarValue::Str(value) => value.to_string(),
-                _ => panic!("title should be a string"),
+                ScalarValue::Str(value) => Some(value.to_string()),
+                _ => None,
             }
         })
         .await

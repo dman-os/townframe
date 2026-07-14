@@ -87,6 +87,12 @@ pub struct DocWorker2<F: FutureForm> {
             DocWorkerInternalLease,
         )>>,
     pub(crate) active_doc_syncs: HashMap<PeerId, u64>,
+    /// The subduction sync task has completed for the peer. Success does not
+    /// resolve waiters until the corresponding outbound session has also been
+    /// applied; the two events arrive through independent runtime2 paths.
+    pub(crate) sync_completed: std::collections::HashSet<PeerId>,
+    /// An outbound sync session has finished applying for the peer.
+    pub(crate) sync_materialized: std::collections::HashSet<PeerId>,
 }
 
 /// The doc's live state. `Unloaded` = relay/pending (sedimentree heads only,
@@ -136,7 +142,29 @@ impl<F: FutureForm> DocWorker2<F> {
                 _lease,
             } => self.commit_delta(commits, heads, patches, origin, resp).await,
             DocWorkerMsg::ApplySyncSession { session, _lease } => {
-                self.apply_sync_session(session).await
+                let peer_id = PeerId::new(*session.peer_id.as_bytes());
+                let completes_sync_waiters = matches!(
+                    session.kind,
+                    subduction_core::sync_session::SyncSessionKind::OutboundBatch
+                );
+                let result = self.apply_sync_session(session).await;
+                if completes_sync_waiters {
+                    match &result {
+                        Ok(()) => self.mark_sync_materialized(peer_id),
+                        Err(error) => {
+                            self.sync_completed.remove(&peer_id);
+                            self.sync_materialized.remove(&peer_id);
+                            self.resolve_sync_peer_result(
+                                peer_id,
+                                0,
+                                Err(crate::runtime::SyncDocError::IoError(eyre::eyre!(
+                                    "document materialization failed: {error}"
+                                ))),
+                            );
+                        }
+                    }
+                }
+                result
             }
             DocWorkerMsg::SyncWithPeer {
                 peer_id,
@@ -158,7 +186,16 @@ impl<F: FutureForm> DocWorker2<F> {
                 waiter_id,
                 result,
             } => {
-                self.resolve_sync_peer_result(peer_id, waiter_id, result);
+                match result {
+                    Ok(()) => self.mark_sync_completed(peer_id),
+                    Err(error) => {
+                        self.sync_completed.remove(&peer_id);
+                        self.sync_materialized.remove(&peer_id);
+                        // Successful sync waiters are resolved only after both
+                        // this completion and ApplySyncSession have arrived.
+                        self.resolve_sync_peer_result(peer_id, waiter_id, Err(error));
+                    }
+                }
                 Ok(())
             }
             DocWorkerMsg::ReleaseHandleLease => {
@@ -407,60 +444,57 @@ impl<F: FutureForm> DocWorker2<F> {
         // `MinimizedSedimentree::ensure_minimized` takes a DepthMetric.
         tree.ensure_minimized(&sedimentree_core::depth::CountLeadingZeroBytes);
 
-        // Walk the tree: iterate all fragments and loose commits, decrypt each.
-        // The old runtime uses SedimentreeItem indices from a sync session;
-        // here we iterate directly via fragments()/loose_commits() which
-        // MinimizedSedimentree exposes through Deref to Sedimentree.
-        let mut doc = automerge::Automerge::new();
-        let mut plaintexts = std::collections::HashMap::<Vec<u8>, Vec<u8>>::new();
-
+        // Walk and decrypt in the sedimentree's causal topological order.
+        // This is the same order used by sync-session materialization; the
+        // lookup/reload path must not have a second, unordered loader.
+        let order = tree
+            .topsorted_blob_order()
+            .map_err(|e| ferr!("failed ordering document blobs: {e}"))?;
         let fragments: Vec<_> = tree.fragments().collect();
         let commits: Vec<_> = tree.loose_commits().collect();
+        let mut plaintexts = std::collections::HashMap::<Vec<u8>, Vec<u8>>::new();
 
-        for f in &fragments {
-            let locator = crate::runtime::BigRepoCiphertextLocator::new(
-                crate::runtime::BigRepoCiphertextKind::Fragment,
-                self.sed_id,
-                f.head(),
-            );
+        for item in &order {
+            let (kind, head) = match item {
+                sedimentree_core::sedimentree::SedimentreeItem::Fragment(index) => (
+                    crate::runtime::BigRepoCiphertextKind::Fragment,
+                    fragments[*index].head(),
+                ),
+                sedimentree_core::sedimentree::SedimentreeItem::LooseCommit(index) => (
+                    crate::runtime::BigRepoCiphertextKind::LooseCommit,
+                    commits[*index].head(),
+                ),
+            };
+            let locator = crate::runtime::BigRepoCiphertextLocator::new(kind, self.sed_id, head);
             let result = self.io.try_causal_decrypt(self.sed_id, locator).await?;
             plaintexts.extend(result.complete);
         }
 
-        for c in &commits {
-            let locator = crate::runtime::BigRepoCiphertextLocator::new(
-                crate::runtime::BigRepoCiphertextKind::LooseCommit,
-                self.sed_id,
-                c.head(),
-            );
-            let result = self.io.try_causal_decrypt(self.sed_id, locator).await?;
-            plaintexts.extend(result.complete);
-        }
-
-        // BeeKEM returns a causal closure whenever it can decrypt one. Apply
-        // all returned Automerge chunks in dependency order; an independent
-        // readable branch may be materialized even while another branch is
-        // waiting for a key. An orphan chunk is held until its ancestors are
-        // available rather than being exposed or treated as corruption.
-        let mut pending: Vec<Vec<u8>> = plaintexts.into_values().collect();
+        let mut doc = automerge::Automerge::new();
         let mut made_progress = false;
-        loop {
-            let mut next = Vec::new();
-            let mut round_progress = false;
-            for plaintext in pending {
-                match doc.load_incremental(&plaintext) {
-                    Ok(_) => {
-                        made_progress = true;
-                        round_progress = true;
-                    }
-                    Err(automerge::AutomergeError::MissingDeps) => next.push(plaintext),
-                    Err(error) => return Err(ferr!("automerge load_incremental failed: {error}")),
+        for item in &order {
+            let content_ref = match item {
+                sedimentree_core::sedimentree::SedimentreeItem::Fragment(index) => {
+                    fragments[*index].head().as_bytes().to_vec()
                 }
+                sedimentree_core::sedimentree::SedimentreeItem::LooseCommit(index) => {
+                    commits[*index].head().as_bytes().to_vec()
+                }
+            };
+            let Some(plaintext) = plaintexts.remove(&content_ref) else {
+                // This branch is not decryptable with the currently available
+                // entrypoint key. Other independent branches may still load.
+                continue;
+            };
+            match doc.load_incremental(&plaintext) {
+                Ok(_) => made_progress = true,
+                Err(automerge::AutomergeError::MissingDeps) => {
+                    return Err(ferr!(
+                        "topologically ordered document blob has missing Automerge dependencies"
+                    ));
+                }
+                Err(error) => return Err(ferr!("automerge load_incremental failed: {error}")),
             }
-            if next.is_empty() || !round_progress {
-                break;
-            }
-            pending = next;
         }
 
         if !made_progress {
@@ -503,6 +537,7 @@ impl<F: FutureForm> DocWorker2<F> {
                     crate::runtime::DocLookup::Ready(doc) => {
                         let heads: Arc<[automerge::ChangeHash]> =
                             Arc::from(doc.get_heads());
+                        self.last_notified_heads = Some(Arc::clone(&heads));
                         self.transition_to_ready(was_pending, Arc::clone(&heads)).await?;
                         let bundle = Arc::new(crate::runtime::LiveDocBundle::new_noop(
                             self.doc_id,
@@ -577,6 +612,10 @@ impl<F: FutureForm> DocWorker2<F> {
             patches,
             origin,
         ).await?;
+        // Keep the query-facing materialized frontier synchronized with the
+        // caller's actual Automerge heads even when notification coalescing
+        // suppresses an event.
+        self.last_notified_heads = Some(Arc::from(heads));
 
         // ── 4. Process pending fragment requests ───────────────────────────
         self.process_pending_fragment_requests().await?;
@@ -812,8 +851,10 @@ impl<F: FutureForm> DocWorker2<F> {
             DocState::Live(bundle) => {
                 if let Some(bundle) = bundle.upgrade() {
                     let doc = bundle.doc.lock().await;
-                    let heads: Arc<[automerge::ChangeHash]> =
-                        Arc::from(doc.get_heads());
+                    let heads: Arc<[automerge::ChangeHash]> = self
+                        .last_notified_heads
+                        .clone()
+                        .unwrap_or_else(|| Arc::from(doc.get_heads()));
                     (Some(heads), crate::runtime2::MaterializationState::Materialized)
                 } else {
                     // Weak reference expired — treat as Unloaded.
@@ -821,8 +862,10 @@ impl<F: FutureForm> DocWorker2<F> {
                 }
             }
             DocState::Transient(doc) => {
-                let heads: Arc<[automerge::ChangeHash]> =
-                    Arc::from(doc.get_heads());
+                let heads: Arc<[automerge::ChangeHash]> = self
+                    .last_notified_heads
+                    .clone()
+                    .unwrap_or_else(|| Arc::from(doc.get_heads()));
                 (Some(heads), crate::runtime2::MaterializationState::Materialized)
             }
             DocState::PendingMaterialization => {
@@ -1170,7 +1213,6 @@ impl<F: FutureForm> DocWorker2<F> {
 
         // Determine before-heads based on state (no big_sync read).
         let (before_heads, had_cached_before) = self.before_heads_for_materialization().await?;
-
         // ── Per-state materialization ──────────────────────────────────────
         let maybe_delta = match std::mem::replace(&mut self.state, DocState::Unloaded) {
             DocState::Unloaded | DocState::PendingMaterialization => {
@@ -1211,27 +1253,26 @@ impl<F: FutureForm> DocWorker2<F> {
                         crate::runtime::DocLookup::Missing => automerge::Automerge::new(),
                     };
                     let loaded_heads = doc.get_heads();
-                    let out = if before_heads == loaded_heads {
-                        for blob in blobs {
-                            doc.load_incremental(blob)
-                                .map_err(|e| ferr!("failed applying sync blob: {e}"))?;
-                        }
-                        let after_heads = doc.get_heads();
-                        if before_heads == after_heads {
-                            if had_cached_before {
-                                None
-                            } else {
-                                Some((after_heads, Vec::new()))
-                            }
+                    // The loaded snapshot is the actual Automerge baseline.
+                    // The storage frontier may already include the received
+                    // commit even when the snapshot walk did not, so never
+                    // skip `blobs` merely because `loaded_heads` differs from
+                    // the cached/storage heads. Duplicate Automerge changes
+                    // are harmless; missing newly received changes are not.
+                    for blob in blobs {
+                        doc.load_incremental(blob)
+                            .map_err(|e| ferr!("failed applying sync blob: {e}"))?;
+                    }
+                    let after_heads = doc.get_heads();
+                    let out = if loaded_heads == after_heads {
+                        if had_cached_before {
+                            None
                         } else {
-                            let patches = make_patches(&doc, &before_heads, &after_heads);
-                            Some((after_heads, patches))
+                            Some((after_heads, Vec::new()))
                         }
                     } else {
-                        // Existing doc diverged from cached before-heads.
-                        // The loaded heads ARE the new before-heads.
-                        let patches = make_patches(&doc, &before_heads, &loaded_heads);
-                        Some((loaded_heads, patches))
+                        let patches = make_patches(&doc, &loaded_heads, &after_heads);
+                        Some((after_heads, patches))
                     };
                     self.state = DocState::Transient(Box::new(doc));
                     out
@@ -1319,25 +1360,24 @@ impl<F: FutureForm> DocWorker2<F> {
                             crate::runtime::DocLookup::Missing => automerge::Automerge::new(),
                         };
                         let loaded_heads = doc.get_heads();
-                        let out = if before_heads == loaded_heads {
-                            for blob in blobs {
-                                doc.load_incremental(blob)
-                                    .map_err(|e| ferr!("failed applying sync blob: {e}"))?;
-                            }
-                            let after_heads = doc.get_heads();
-                            if before_heads == after_heads {
-                                if had_cached_before {
-                                    None
-                                } else {
-                                    Some((after_heads, Vec::new()))
-                                }
+                        // The loaded snapshot is the actual Automerge baseline;
+                        // apply the received blobs regardless of the cached
+                        // storage frontier comparison. The snapshot may lag
+                        // the frontier even though the blob is already stored.
+                        for blob in blobs {
+                            doc.load_incremental(blob)
+                                .map_err(|e| ferr!("failed applying sync blob: {e}"))?;
+                        }
+                        let after_heads = doc.get_heads();
+                        let out = if loaded_heads == after_heads {
+                            if had_cached_before {
+                                None
                             } else {
-                                let patches = make_patches(&doc, &before_heads, &after_heads);
-                                Some((after_heads, patches))
+                                Some((after_heads, Vec::new()))
                             }
                         } else {
-                            let patches = make_patches(&doc, &before_heads, &loaded_heads);
-                            Some((loaded_heads, patches))
+                            let patches = make_patches(&doc, &loaded_heads, &after_heads);
+                            Some((after_heads, patches))
                         };
                         self.state = DocState::Transient(Box::new(doc));
                         out
@@ -1470,8 +1510,42 @@ impl<F: FutureForm> DocWorker2<F> {
     /// Mirrors `retry_pending_materialization` at `runtime.rs:3055`.
     async fn retry_materialization(&mut self) -> eyre::Result<bool> {
         let was_pending = matches!(self.state, DocState::PendingMaterialization);
+        let live_bundle = match &self.state {
+            DocState::Live(weak) => weak.upgrade(),
+            _ => None,
+        };
         match self.load_doc_snapshot().await? {
             crate::runtime::DocLookup::Ready(doc) => {
+                if let Some(bundle) = live_bundle {
+                    let before = bundle.doc.lock().await.get_heads();
+                    let after_heads = doc.get_heads();
+                    let patches = doc.diff(&before, &after_heads);
+                    *bundle.doc.lock().await = doc;
+                    let heads_arc = Arc::<[automerge::ChangeHash]>::from(after_heads);
+                    if before.as_slice() != heads_arc.as_ref() {
+                        self.change_manager
+                            .notify_doc_heads_changed(
+                                self.doc_id,
+                                Arc::clone(&heads_arc),
+                                crate::changes::BigRepoChangeOrigin::Bootstrap,
+                            )
+                            .map_err(|_| ferr!("change manager notify_doc_heads_changed failed"))?;
+                        for patch in &patches {
+                            self.change_manager
+                                .notify_doc_changed(
+                                    self.doc_id,
+                                    Arc::new(patch.clone()),
+                                    Arc::clone(&heads_arc),
+                                    crate::changes::BigRepoChangeOrigin::Bootstrap,
+                                )
+                                .map_err(|_| ferr!("change manager notify_doc_changed failed"))?;
+                        }
+                        self.last_notified_heads = Some(heads_arc);
+                    }
+                    self.state = DocState::Live(Arc::downgrade(&bundle));
+                    return Ok(false);
+                }
+
                 let after_heads = doc.get_heads();
                 self.transition_to_ready(was_pending, Arc::from(after_heads.clone())).await?;
                 if was_pending {
@@ -1582,6 +1656,8 @@ impl<F: FutureForm> DocWorker2<F> {
         waiter_id: Option<u64>,
         reason: &'static str,
     ) {
+        self.sync_completed.remove(peer_id);
+        self.sync_materialized.remove(peer_id);
         if let Some(waiters) = self.pending_sync_jobs.get_mut(peer_id) {
             if let Some(wid) = waiter_id {
                 // Cancel a specific waiter.
@@ -1617,6 +1693,22 @@ impl<F: FutureForm> DocWorker2<F> {
     /// the active sync entry if the watermark matches.
     ///
     /// Mirrors the result resolution at `runtime.rs:3238`.
+    fn mark_sync_completed(&mut self, peer_id: PeerId) {
+        self.sync_completed.insert(peer_id);
+        self.finish_sync_if_ready(peer_id);
+    }
+
+    fn mark_sync_materialized(&mut self, peer_id: PeerId) {
+        self.sync_materialized.insert(peer_id);
+        self.finish_sync_if_ready(peer_id);
+    }
+
+    fn finish_sync_if_ready(&mut self, peer_id: PeerId) {
+        if self.sync_completed.remove(&peer_id) && self.sync_materialized.remove(&peer_id) {
+            self.resolve_sync_peer_result(peer_id, 0, Ok(()));
+        }
+    }
+
     fn resolve_sync_peer_result(
         &mut self,
         peer_id: PeerId,
@@ -1773,6 +1865,8 @@ where
         pending_fragment_requests: std::collections::BTreeSet::new(),
         pending_sync_jobs: HashMap::new(),
         active_doc_syncs: HashMap::new(),
+        sync_completed: std::collections::HashSet::new(),
+        sync_materialized: std::collections::HashSet::new(),
     };
 
     let (stop_abort, stop_registration) = futures::future::AbortHandle::new_pair();

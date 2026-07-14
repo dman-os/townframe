@@ -440,6 +440,12 @@ trait HubBackgroundFuture<F: FutureForm> {
         runtime_io: Arc<dyn crate::runtime2::RuntimeIo<F>>,
     ) -> F::Future<'static, eyre::Result<()>>;
 
+    fn refresh_cache_and_notify(
+        runtime_io: Arc<dyn crate::runtime2::RuntimeIo<F>>,
+        evt_tx: async_channel::Sender<Runtime2Evt>,
+        peer_id: PeerId,
+    ) -> F::Future<'static, eyre::Result<()>>;
+
     fn update_doc_access(
         runtime_io: Arc<dyn crate::runtime2::RuntimeIo<F>>,
         target: keyhive_core::principal::identifier::Identifier,
@@ -516,6 +522,24 @@ impl<F: FutureForm> HubBackgroundFuture<F> for F {
                 .refresh_keyhive_cache()
                 .await
                 .wrap_err("keyhive cache refresh failed")?;
+            Ok(())
+        })
+    }
+
+    fn refresh_cache_and_notify(
+        runtime_io: Arc<dyn crate::runtime2::RuntimeIo<F>>,
+        evt_tx: async_channel::Sender<Runtime2Evt>,
+        peer_id: PeerId,
+    ) -> F::Future<'static, eyre::Result<()>> {
+        F::from_future(async move {
+            let result = runtime_io
+                .refresh_keyhive_cache()
+                .await
+                .wrap_err("keyhive cache refresh failed");
+            evt_tx
+                .send(Runtime2Evt::KeyhiveCacheRefreshDone { peer_id, result })
+                .await
+                .map_err(|_| ferr!("runtime stopped before keyhive cache completion"))?;
             Ok(())
         })
     }
@@ -751,6 +775,9 @@ where
             Runtime2Evt::KeyhiveSyncDone { peer_id } => {
                 self.finish_keyhive_sync(peer_id)?;
             }
+            Runtime2Evt::KeyhiveCacheRefreshDone { peer_id, result } => {
+                self.finish_keyhive_sync_after_cache(peer_id, result)?;
+            }
             Runtime2Evt::DocSyncRequested {
                 doc_id,
                 peer_id,
@@ -914,21 +941,50 @@ where
         Ok(())
     }
 
-    /// Finish a keyhive sync round: resolve waiters, cascade if dirty, reattempt
-    /// materialization for pending docs. Mirrors `finish_keyhive_sync` at
-    /// `runtime.rs:1705`.
+    /// Start the cache-refresh half of keyhive sync completion. Waiters stay
+    /// pending until [`finish_keyhive_sync_after_cache`] observes that refresh.
     fn finish_keyhive_sync(&mut self, peer_id: PeerId) -> eyre::Result<()> {
-        let Some(watermark) = self.active_keyhive_syncs.remove(&peer_id) else {
+        if !self.active_keyhive_syncs.contains_key(&peer_id) {
             tracing::debug!(%peer_id, "ignoring untracked keyhive sync completion");
             return Ok(());
+        }
+        self.spawn_background(F::refresh_cache_and_notify(
+            Arc::clone(&self.runtime_io),
+            self.evt_tx.clone(),
+            peer_id,
+        ))?;
+        Ok(())
+    }
+
+    /// Resolve keyhive waiters only after protocol sync *and* local cache
+    /// refresh have completed. This is the synchronous public barrier.
+    fn finish_keyhive_sync_after_cache(
+        &mut self,
+        peer_id: PeerId,
+        result: eyre::Result<()>,
+    ) -> eyre::Result<()> {
+        let Some(watermark) = self.active_keyhive_syncs.remove(&peer_id) else {
+            tracing::debug!(%peer_id, "ignoring untracked keyhive cache completion");
+            return Ok(());
         };
+        if let Err(error) = result {
+            if let Some(waiters) = self.pending_keyhive_syncs.remove(&peer_id) {
+                for (_, sender) in waiters {
+                    sender
+                        .send(Err(ferr!("keyhive cache refresh failed: {error}")))
+                        .expect("keyhive sync waiter receiver must remain open");
+                }
+            }
+            return Ok(());
+        }
+
         // Split waiters: those that existed before this sync started resolve,
         // those that arrived during/after cascade into a new round.
         if let Some(waiters) = self.pending_keyhive_syncs.get_mut(&peer_id) {
             let mut remaining = Vec::new();
             for (id, sender) in std::mem::take(waiters) {
                 if id < watermark {
-                    let _ = sender.send(Ok(()));
+                    sender.send(Ok(())).expect("keyhive sync waiter receiver must remain open");
                 } else {
                     remaining.push((id, sender));
                 }
@@ -939,14 +995,14 @@ where
                 *waiters = remaining;
             }
         }
-        self.spawn_background(F::refresh_cache(Arc::clone(&self.runtime_io)))?;
         let has_remaining = self.pending_keyhive_syncs.contains_key(&peer_id);
         if has_remaining || self.keyhive_dirty.remove(&peer_id) {
             self.start_keyhive_sync(peer_id)?;
         }
         for doc_id in self.pending_materialization.clone() {
             if let Ok((worker, _lease)) = self.doc_worker_handle(doc_id) {
-                let _ = worker.send(DocWorkerMsg::ReattemptMaterialization);
+                worker.send(DocWorkerMsg::ReattemptMaterialization)
+                    .expect("pending doc worker must remain open");
             } else {
                 tracing::warn!(
                     %doc_id,

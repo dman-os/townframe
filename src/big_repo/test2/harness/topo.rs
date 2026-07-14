@@ -190,7 +190,7 @@ impl Node {
         .expect("timed out waiting for accepted connection")
     }
 
-    async fn shutdown(mut self) {
+    async fn shutdown(self) {
         self.endpoint.close().await;
         let _ = self.repo_stop.stop().await;
         let _ = self.big_sync_stop.stop().await;
@@ -230,7 +230,6 @@ impl Drop for ShutdownGuard {
         if self.nodes.is_empty() {
             return;
         }
-        let mut nodes = std::mem::take(&mut self.nodes);
         // We are inside a `#[tokio::test(flavor = "multi_thread")]` runtime, on
         // a worker thread. `block_in_place` moves us off the scheduler so the
         // nested `block_on` can drive the async shutdown without deadlocking.
@@ -273,8 +272,8 @@ impl Pair {
         left_label: &'static str,
         right_label: &'static str,
     ) -> crate::Res<Self> {
-        let mut left = Node::boot(left_seed, left_label).await?;
-        let mut right = Node::boot(right_seed, right_label).await?;
+        let left = Node::boot(left_seed, left_label).await?;
+        let right = Node::boot(right_seed, right_label).await?;
         let left_conn = left.connect(&right).await?;
         let right_conn = right.accepted_connection().await;
         // Contact-card exchange: a single keyhive sync makes each side's agent
