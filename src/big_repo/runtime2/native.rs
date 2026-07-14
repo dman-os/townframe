@@ -23,7 +23,8 @@
 use crate::interlude::*;
 use crate::keyhive_storage::BigRepoKeyhiveStorage;
 use crate::runtime2::{
-    CausalDecryptResult, Clock, DocIo, EncryptedLooseCommit, RuntimeIo, TaskSet, Timer,
+    CausalDecryptResult, Clock, DocIo, EncryptedInitialSedimentree, EncryptedLooseCommit,
+    RuntimeIo, TaskSet, Timer,
 };
 use crate::{
     encrypted_blob::{decode_encrypted_blob, encode_encrypted_blob},
@@ -35,10 +36,10 @@ use crate::{
     keyhive_conn::BigRepoKeyhiveConnAdapter,
     runtime::{
         accept_incoming, connect_outgoing_to, encrypt_fragment_blob,
-        encrypt_loose_commit_with_update_op, persist_cgka_update_op,
-        record_keyhive_content_frontier, sedimentree_heads_payload, BigRepoIrohTransport,
-        BigRepoSubduction, BigRepoSubductionStorage, BigRepoSyncPolicy, IrohConnectResult,
-        SubductionSedimentrees,
+        encrypt_loose_commit_with_update_op, encrypt_staged_automerge_ingest,
+        persist_cgka_update_op, record_keyhive_content_frontier, sedimentree_heads_payload,
+        BigRepoIrohTransport, BigRepoSubduction, BigRepoSubductionStorage, BigRepoSyncPolicy,
+        IrohConnectResult, SubductionSedimentrees,
     },
     wire::BigRepoWireMessage,
     BigEphemeral, BigEphemeralFilter, BigEphemeralSubscription, BigEphemeralTopic,
@@ -307,6 +308,42 @@ impl<S> DocIo<Sendable> for NativeBigRepoIo<S>
 where
     S: BigRepoSubductionStorage,
 {
+    fn encrypt_initial_sedimentree(
+        &self,
+        sed_id: SedimentreeId,
+        staged: crate::runtime::StagedAutomergeIngest,
+    ) -> <Sendable as future_form::FutureForm>::Future<'_, eyre::Result<EncryptedInitialSedimentree>>
+    {
+        Sendable::from_future(async move {
+            let (sedimentree, blobs, cgka_update_ops) = encrypt_staged_automerge_ingest(
+                &staged,
+                &self.keyhive,
+                sed_id,
+            )
+            .await
+            .wrap_err("failed encrypting initial sedimentree")?;
+            Ok(EncryptedInitialSedimentree {
+                sedimentree,
+                blobs,
+                cgka_update_ops,
+            })
+        })
+    }
+
+    fn store_initial_sedimentree(
+        &self,
+        sed_id: SedimentreeId,
+        initial: EncryptedInitialSedimentree,
+    ) -> <Sendable as future_form::FutureForm>::Future<'_, eyre::Result<()>> {
+        Sendable::from_future(async move {
+            self.subduction
+                .store_sedimentree(sed_id, initial.sedimentree, initial.blobs)
+                .await
+                .map_err(|err| ferr!("failed storing initial sedimentree: {err}"))?;
+            Ok(())
+        })
+    }
+
     // ── sedimentree_heads ──────────────────────────────────────────────────
     fn sedimentree_heads(
         &self,
@@ -476,6 +513,20 @@ where
                 .set_obj_payload(doc_id, payload)
                 .await
                 .map_err(|error| ferr!("failed updating big-sync payload: {error}"))
+        })
+    }
+
+    // ── content frontier ─────────────────────────────────────────────────
+    fn record_content_frontier(
+        &self,
+        sed_id: SedimentreeId,
+        content_ref: Vec<u8>,
+        pred_refs: Vec<Vec<u8>>,
+    ) -> <Sendable as FutureForm>::Future<'_, eyre::Result<()>> {
+        Sendable::from_future(async move {
+            record_keyhive_content_frontier(&self.keyhive, sed_id, content_ref, pred_refs)
+                .await
+                .wrap_err("failed recording content frontier")
         })
     }
 
@@ -850,12 +901,13 @@ where
     fn sync_keyhive_with_peer(
         &self,
         peer_id: PeerId,
+        request_id: subduction_keyhive::message::RequestId,
     ) -> <Sendable as future_form::FutureForm>::Future<'_, eyre::Result<()>> {
         Sendable::from_future(async move {
             let kh_peer_id = KeyhivePeerId::from_bytes(*peer_id.as_bytes());
             match self
                 .keyhive_protocol
-                .initiate_sync_with_peer(&kh_peer_id)
+                .initiate_sync_with_request(&kh_peer_id, request_id)
                 .await
             {
                 Ok(()) => Ok(()),
@@ -1271,18 +1323,23 @@ where
     );
     {
         let evt_tx = evt_tx.clone();
-        keyhive_handler = keyhive_handler.with_sync_done_observer(Arc::new(move |peer_id| {
-            let peer_id = PeerId::new(*peer_id.verifying_key());
-            if evt_tx
-                .try_send(crate::runtime2::Runtime2Evt::KeyhiveSyncDone { peer_id })
+        keyhive_handler = keyhive_handler.with_sync_done_observer(Arc::new(
+            move |keyhive_peer_id, request_id| {
+                let peer_id = PeerId::new(*keyhive_peer_id.verifying_key());
+                if evt_tx
+                    .try_send(crate::runtime2::Runtime2Evt::KeyhiveSyncDone {
+                        peer_id,
+                        request_id,
+                    })
                 .is_err()
             {
-                tracing::debug!(
-                    %peer_id,
-                    "runtime2 stopped before keyhive sync-done event"
-                );
-            }
-        }));
+                    tracing::debug!(
+                        %peer_id,
+                        "runtime2 stopped before keyhive sync-done event"
+                    );
+                }
+            },
+        ));
     }
 
     // ── Composed handler ─────────────────────────────────────────────────

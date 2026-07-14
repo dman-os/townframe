@@ -87,6 +87,20 @@ pub struct EncryptedLooseCommit {
     pub cgka_update_op: Option<keyhive_crypto::signed::Signed<beekem::operation::CgkaOperation>>,
 }
 
+/// The result of encrypting the complete initial Automerge state.
+///
+/// Initial state may already contain sedimentree fragments. Those fragments
+/// do not necessarily have a loose-commit row for their head, so they cannot
+/// use the incremental `store_fragment` path, which recovers a fragment key by
+/// loading that row.
+#[derive(Clone)]
+pub struct EncryptedInitialSedimentree {
+    pub sedimentree: sedimentree_core::sedimentree::Sedimentree,
+    pub blobs: Vec<sedimentree_core::blob::Blob>,
+    pub cgka_update_ops:
+        Vec<keyhive_crypto::signed::Signed<beekem::operation::CgkaOperation>>,
+}
+
 /// The doc-worker's IO contract. All methods are `F::Future<'_>` so the same
 /// logic runs `Sendable` (native) and `Local` (wasm).
 ///
@@ -129,6 +143,23 @@ pub trait DocIo<F: FutureForm>: Send + Sync {
         eyre::Result<Option<sedimentree_core::sedimentree::minimized::MinimizedSedimentree>>,
     >;
 
+    // ── initial state ─────────────────────────────────────────────────────
+    /// Encrypt and assemble the complete initial sedimentree in one batch.
+    /// This is distinct from incremental commit encryption because an initial
+    /// fragment can have no corresponding loose-commit row yet.
+    fn encrypt_initial_sedimentree(
+        &self,
+        sed_id: sedimentree_core::id::SedimentreeId,
+        staged: crate::runtime::StagedAutomergeIngest,
+    ) -> F::Future<'_, eyre::Result<EncryptedInitialSedimentree>>;
+
+    /// Persist the encrypted initial sedimentree durably.
+    fn store_initial_sedimentree(
+        &self,
+        sed_id: sedimentree_core::id::SedimentreeId,
+        initial: EncryptedInitialSedimentree,
+    ) -> F::Future<'_, eyre::Result<()>>;
+
     // ── the single local write (atomic) ───────────────────────────────────
     /// Store an encrypted loose commit. subduction records it AND advances the
     /// sedimentree frontier in one call. Returns any fragment-boundary request
@@ -161,6 +192,14 @@ pub trait DocIo<F: FutureForm>: Send + Sync {
         &self,
         doc_id: crate::DocumentId,
         heads: Arc<[automerge::ChangeHash]>,
+    ) -> F::Future<'_, eyre::Result<()>>;
+
+    /// Record one content frontier after its encrypted payload is durable.
+    fn record_content_frontier(
+        &self,
+        sed_id: sedimentree_core::id::SedimentreeId,
+        content_ref: Vec<u8>,
+        pred_refs: Vec<Vec<u8>>,
     ) -> F::Future<'_, eyre::Result<()>>;
 
     /// Refresh keyhive caches after local encryption advances its frontier.
@@ -253,6 +292,7 @@ pub trait RuntimeIo<F: FutureForm>: Send + Sync {
     fn sync_keyhive_with_peer(
         &self,
         peer_id: big_sync_core::PeerId,
+        request_id: subduction_keyhive::message::RequestId,
     ) -> F::Future<'_, eyre::Result<()>>;
 
     /// Refresh the keyhive cache (periodic maintenance).

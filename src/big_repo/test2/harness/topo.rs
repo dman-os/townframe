@@ -38,6 +38,7 @@ pub(crate) struct Node {
     accepts: Arc<Notify>,
     /// Human label for diagnostics ("Alice"). Registered in [`log_nickname`].
     pub label: &'static str,
+    identity_seed: [u8; 32],
 }
 
 #[derive(Clone, Debug)]
@@ -64,8 +65,17 @@ impl iroh::protocol::ProtocolHandler for AcceptHandler {
 }
 
 impl Node {
-    /// Boot a node with a deterministic identity `seed` and diagnostic `label`.
+    /// Boot a node with in-memory BigRepo storage.
     pub(crate) async fn boot(seed: u8, label: &'static str) -> crate::Res<Self> {
+        Self::boot_with_config(seed, label, StorageConfig::Memory).await
+    }
+
+    /// Boot a node with a selectable persistent BigRepo storage configuration.
+    pub(crate) async fn boot_with_config(
+        seed: u8,
+        label: &'static str,
+        storage: StorageConfig,
+    ) -> crate::Res<Self> {
         let (host, initial_stop) = boot_part_store("sqlite::memory:").await?;
         let part_init_obj = big_sync_core::ObjId(big_sync_core::Byte32Id::new(
             [255_u8.wrapping_sub(seed); 32],
@@ -80,13 +90,21 @@ impl Node {
             .remove_obj_from_part(part_init_obj, stress_support::test_part())
             .await?;
         initial_stop.stop().await?;
+        Self::boot_with_store(seed, label, storage, Arc::clone(&host.store)).await
+    }
 
+    async fn boot_with_store(
+        seed: u8,
+        label: &'static str,
+        storage: StorageConfig,
+        store: SharedPartStore,
+    ) -> crate::Res<Self> {
         let (repo, repo_stop) = BigRepo::boot(
             Config {
                 node_identity_seed: [seed; 32],
-                storage: StorageConfig::Memory,
+                storage,
             },
-            Arc::clone(&host.store),
+            Arc::clone(&store),
         )
         .await?;
 
@@ -113,12 +131,12 @@ impl Node {
         let mut backends = HashMap::new();
         backends.insert(BigRepo::BACKEND_ID.into(), sync_backend as _);
         let (worker, big_sync_stop) =
-            big_sync::spawn_big_sync_worker(Arc::clone(&host.store), backends)?;
+            big_sync::spawn_big_sync_worker(Arc::clone(&store), backends)?;
 
         log_nickname::register(repo.local_peer_id(), label);
         Ok(Self {
             repo,
-            store: Arc::clone(&host.store),
+            store,
             worker,
             big_sync_stop,
             repo_stop,
@@ -127,7 +145,16 @@ impl Node {
             accepted,
             accepts,
             label,
+            identity_seed: [seed; 32],
         })
+    }
+
+    async fn restart(self, storage: StorageConfig) -> crate::Res<Self> {
+        let store = Arc::clone(&self.store);
+        let seed = self.identity_seed;
+        let label = self.label;
+        self.shutdown().await;
+        Self::boot_with_store(seed[0], label, storage, store).await
     }
 
     pub fn peer_id(&self) -> PeerId {
@@ -260,13 +287,9 @@ pub(crate) struct Pair {
 }
 
 impl Pair {
-    /// Boot two nodes (`left_seed`, `right_seed`), connect them, accept the
-    /// reverse connection, and run one keyhive sync so each side knows the
-    /// other's agent.
-    ///
-    /// After this returns, `left` has `right`'s agent in its keyhive
-    /// ([`Pair::right_agent`] is a single lookup — no polling).
-    pub(crate) async fn boot(
+    /// Boot two nodes without connecting them. The RAII guard is active
+    /// immediately, so setup failures still tear down both nodes.
+    pub(crate) async fn boot_disconnected(
         left_seed: u8,
         right_seed: u8,
         left_label: &'static str,
@@ -274,10 +297,38 @@ impl Pair {
     ) -> crate::Res<Self> {
         let left = Node::boot(left_seed, left_label).await?;
         let right = Node::boot(right_seed, right_label).await?;
+        Ok(Self {
+            guard: ShutdownGuard::from(vec![left, right]),
+            left_idx: 0,
+            right_idx: 1,
+            left_conn: None,
+            right_conn: None,
+        })
+    }
+
+    /// Boot a connected pair with persistent per-node BigRepo storage.
+    pub(crate) async fn boot_persistent(
+        left_seed: u8,
+        right_seed: u8,
+        left_label: &'static str,
+        right_label: &'static str,
+        left_path: std::path::PathBuf,
+        right_path: std::path::PathBuf,
+    ) -> crate::Res<Self> {
+        let left = Node::boot_with_config(
+            left_seed,
+            left_label,
+            StorageConfig::Disk { path: left_path },
+        )
+        .await?;
+        let right = Node::boot_with_config(
+            right_seed,
+            right_label,
+            StorageConfig::Disk { path: right_path },
+        )
+        .await?;
         let left_conn = left.connect(&right).await?;
         let right_conn = right.accepted_connection().await;
-        // Contact-card exchange: a single keyhive sync makes each side's agent
-        // visible to the other.
         left_conn.sync_keyhive_with_peer(None).await?;
         Ok(Self {
             guard: ShutdownGuard::from(vec![left, right]),
@@ -286,6 +337,54 @@ impl Pair {
             left_conn: Some(left_conn),
             right_conn: Some(right_conn),
         })
+    }
+
+    /// Connect an already-booted pair without performing a Keyhive sync.
+    pub(crate) async fn connect(&mut self) -> crate::Res<()> {
+        assert!(self.left_conn.is_none());
+        assert!(self.right_conn.is_none());
+        let left_conn = self.left().connect(self.right()).await?;
+        let right_conn = self.right().accepted_connection().await;
+        self.left_conn = Some(left_conn);
+        self.right_conn = Some(right_conn);
+        Ok(())
+    }
+
+    /// Remove the big-sync peer routes as well as the transport connections.
+    /// This makes offline ladder rungs genuinely offline instead of merely
+    /// suppressing the Iroh connection.
+    pub(crate) async fn disconnect(&self) -> crate::Res<()> {
+        self.left()
+            .worker
+            .remove_peer(self.right().peer_id())
+            .await?;
+        self.right()
+            .worker
+            .remove_peer(self.left().peer_id())
+            .await?;
+        Ok(())
+    }
+
+    pub(crate) async fn restart_right(&mut self, storage: StorageConfig) -> crate::Res<()> {
+        let node = self.guard.nodes.remove(self.right_idx);
+        let restarted = node.restart(storage).await?;
+        self.guard.nodes.insert(self.right_idx, restarted);
+        Ok(())
+    }
+
+    /// Boot two nodes, connect them, and run one keyhive sync so each side
+    /// knows the other's agent.
+    pub(crate) async fn boot(
+        left_seed: u8,
+        right_seed: u8,
+        left_label: &'static str,
+        right_label: &'static str,
+    ) -> crate::Res<Self> {
+        let mut pair = Self::boot_disconnected(left_seed, right_seed, left_label, right_label)
+            .await?;
+        pair.connect().await?;
+        pair.left_conn().sync_keyhive_with_peer(None).await?;
+        Ok(pair)
     }
 
     pub fn left(&self) -> &Node {

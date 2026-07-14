@@ -379,6 +379,27 @@ impl<F: FutureForm> Runtime2Handle<F> {
         }
     }
 
+    /// Wait until finite runtime work currently admitted to the Hub and its
+    /// document workers has drained. Pending materialization due to missing
+    /// keys is considered quiescent and does not block this barrier.
+    pub async fn wait_for_quiescence(
+        &self,
+        timeout: Option<std::time::Duration>,
+    ) -> eyre::Result<()> {
+        let (resp, rx) = futures::channel::oneshot::channel();
+        self.cmd_tx
+            .send(Runtime2Cmd::WaitForQuiescence { resp })
+            .await
+            .map_err(|_| eyre::eyre!("task was found dead"))?;
+        let duration = timeout
+            .unwrap_or_else(|| utils_rs::scale_timeout(std::time::Duration::from_secs(5)));
+        match self.race_timeout(rx, duration).await {
+            Ok(Ok(result)) => result,
+            Ok(Err(_)) => Err(eyre::eyre!("caller dropped before quiescence completion")),
+            Err(()) => Err(eyre::eyre!("runtime quiescence timed out")),
+        }
+    }
+
     /// Notify the runtime that the local keyhive state has changed (e.g. a
     /// delegation or membership update was received out-of-band).
     ///

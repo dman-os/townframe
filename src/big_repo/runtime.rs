@@ -307,6 +307,7 @@ pub(crate) enum RuntimeEvt {
     },
     KeyhiveSyncDone {
         peer_id: PeerId,
+        request_id: subduction_keyhive::message::RequestId,
     },
     KeyhiveSyncRequested {
         peer_id: PeerId,
@@ -849,10 +850,13 @@ where
         );
         keyhive_handler = keyhive_handler.with_sync_done_observer({
             let evt_tx = evt_tx.clone();
-            Arc::new(move |peer_id| {
-                let peer_id = PeerId::new(*peer_id.verifying_key());
+            Arc::new(move |keyhive_peer_id, request_id| {
+                let peer_id = PeerId::new(*keyhive_peer_id.verifying_key());
                 if evt_tx
-                    .send(RuntimeEvt::KeyhiveSyncDone { peer_id })
+                    .send(RuntimeEvt::KeyhiveSyncDone {
+                        peer_id,
+                        request_id,
+                    })
                     .is_err()
                 {
                     tracing::debug!(%peer_id, "runtime stopped before keyhive sync-done event");
@@ -1331,7 +1335,10 @@ where
             } => {
                 self.handle_connection_lost(peer_id, error, src_task)?;
             }
-            RuntimeEvt::KeyhiveSyncDone { peer_id } => {
+            RuntimeEvt::KeyhiveSyncDone {
+                peer_id,
+                request_id: _,
+            } => {
                 self.finish_keyhive_sync(peer_id)?;
             }
             RuntimeEvt::KeyhiveSyncRequested { peer_id } => {
@@ -2283,7 +2290,7 @@ where
                 let peer_id = PeerId::new(*session.peer_id.as_bytes());
                 let completes_sync_waiters = matches!(
                     session.kind,
-                    subduction_core::sync_session::SyncSessionKind::OutboundBatch
+                    subduction_core::sync_session::SyncSessionKind::OutboundBatch { .. }
                 );
                 let _materialization_pending = self.handle_apply_sync_session(session).await?;
                 if completes_sync_waiters {
@@ -3817,6 +3824,7 @@ where
 ///
 /// These are transient in-memory plaintext bytes and must be encrypted before
 /// they reach Subduction storage.
+#[derive(Clone)]
 pub(crate) struct FragmentEntry {
     pub(crate) head: CommitId,
     pub(crate) boundary: BTreeSet<CommitId>,
@@ -3827,6 +3835,7 @@ pub(crate) struct FragmentEntry {
 ///
 /// These are transient in-memory plaintext bytes and must be encrypted before
 /// they reach Subduction storage.
+#[derive(Clone)]
 pub(crate) struct LooseEntry {
     pub(crate) head: CommitId,
     pub(crate) parents: BTreeSet<CommitId>,
@@ -3836,6 +3845,7 @@ pub(crate) struct LooseEntry {
 ///
 /// These bytes are transient in-memory data and must be encrypted before they
 /// are persisted through Subduction storage.
+#[derive(Clone)]
 pub(crate) struct StagedAutomergeIngest {
     pub(crate) blobs: Vec<Blob>,
     pub(crate) fragment_entries: Vec<FragmentEntry>,
@@ -4199,7 +4209,7 @@ impl<S: BigRepoSubductionStorage> CiphertextStore<Sendable, Vec<u8>, Vec<u8>>
 ///
 /// TODO: Upstream (keyhive/subduction_keyhive) hasn't specified the canonical
 /// EncryptedContent storage format yet. Revisit when upstream publishes a spec.
-async fn encrypt_staged_automerge_ingest(
+pub(crate) async fn encrypt_staged_automerge_ingest(
     staged_ingest: &StagedAutomergeIngest,
     keyhive_handle: &BigKeyhiveHandle,
     sedimentree_id: SedimentreeId,

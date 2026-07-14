@@ -6,8 +6,36 @@
 //! surfaces as an `Err`, exposing runtime2 ordering bugs.
 
 use super::harness::{Pair, fixtures, heads};
+use crate::{BigRepoChangeFilter, BigRepoDocIdFilter, StorageConfig};
 use automerge::{ReadDoc, ScalarValue, transaction::Transactable};
 use keyhive_core::access::Access;
+
+#[tokio::test(flavor = "multi_thread")]
+async fn tier1_document_created_before_connection_replicates() -> crate::Res<()> {
+    utils_rs::testing::setup_tracing_once();
+    let mut pair = Pair::boot_disconnected(29, 30, "Owner", "Reader").await?;
+
+    let mut initial = automerge::Automerge::new();
+    initial
+        .transact(|tx| tx.put(automerge::ROOT, "title", "before connection"))
+        .map_err(|err| crate::ferr!("failed creating ladder document: {err:?}"))?;
+    let owner_doc = pair.left().repo.create_doc(initial).await?;
+    let doc_id = owner_doc.document_id();
+
+    pair.connect().await?;
+    pair.left_conn().sync_keyhive_with_peer(None).await?;
+    let reader_agent = fixtures::agent_of(&pair.left().repo, pair.right()).await?;
+    fixtures::grant_and_propagate(&pair, doc_id, &reader_agent, Access::Read).await?;
+
+    let reader_doc =
+        fixtures::sync_doc_expect_ready(pair.right_conn(), &pair.right().repo, doc_id).await?;
+    assert_eq!(read_title(&reader_doc).await, "before connection");
+    heads::tier0_invariants(&pair, doc_id, &owner_doc, &reader_doc).await?;
+
+    drop(owner_doc);
+    drop(reader_doc);
+    Ok(())
+}
 
 #[tokio::test(flavor = "multi_thread")]
 async fn tier1_connected_document_replicates_and_preserves_head_parity() -> crate::Res<()> {
@@ -170,6 +198,14 @@ async fn tier1_divergent_edits_converge_bidirectionally() -> crate::Res<()> {
     pair.right_conn()
         .sync_doc_with_peer(doc_id, Some(std::time::Duration::from_secs(10)))
         .await?;
+    pair.left()
+        .repo
+        .wait_for_quiescence(Some(std::time::Duration::from_secs(10)))
+        .await?;
+    pair.right()
+        .repo
+        .wait_for_quiescence(Some(std::time::Duration::from_secs(10)))
+        .await?;
     for (label, handle) in [("Owner", &owner_doc), ("Editor", &editor_doc)] {
         assert_eq!(
             read_optional_text(handle, "owner_note").await.as_deref(),
@@ -186,6 +222,55 @@ async fn tier1_divergent_edits_converge_bidirectionally() -> crate::Res<()> {
 
     drop(owner_doc);
     drop(editor_doc);
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn tier1_noop_sync_emits_no_change_notification() -> crate::Res<()> {
+    utils_rs::testing::setup_tracing_once();
+    let pair = Pair::boot(43, 44, "Owner", "Reader").await?;
+
+    let reader_agent = fixtures::agent_of(&pair.left().repo, pair.right()).await?;
+    let mut initial = automerge::Automerge::new();
+    initial
+        .transact(|tx| tx.put(automerge::ROOT, "title", "unchanged"))
+        .map_err(|err| crate::ferr!("failed creating ladder document: {err:?}"))?;
+    let owner_doc = pair.left().repo.create_doc(initial).await?;
+    let doc_id = owner_doc.document_id();
+    fixtures::grant_and_propagate(&pair, doc_id, &reader_agent, Access::Read).await?;
+
+    let reader_doc =
+        fixtures::sync_doc_expect_ready(pair.right_conn(), &pair.right().repo, doc_id).await?;
+    let (_registration, mut notifications) = pair
+        .right()
+        .repo
+        .subscribe_change_listener(BigRepoChangeFilter {
+            doc_id: Some(BigRepoDocIdFilter::new(doc_id)),
+            origin: None,
+            path: Vec::new(),
+        })
+        .await?;
+    let before = pair.right().repo.doc_head_state(doc_id).await?;
+
+    pair.right_conn()
+        .sync_doc_with_peer(doc_id, Some(std::time::Duration::from_secs(10)))
+        .await?;
+    pair.right()
+        .repo
+        .wait_for_quiescence(Some(std::time::Duration::from_secs(10)))
+        .await?;
+    let after = pair.right().repo.doc_head_state(doc_id).await?;
+
+    assert_eq!(before, after);
+    assert!(matches!(
+        notifications.try_recv(),
+        Err(tokio::sync::mpsc::error::TryRecvError::Empty)
+    ));
+    assert_eq!(read_title(&reader_doc).await, "unchanged");
+    heads::tier0_invariants(&pair, doc_id, &owner_doc, &reader_doc).await?;
+
+    drop(owner_doc);
+    drop(reader_doc);
     Ok(())
 }
 
@@ -223,6 +308,107 @@ async fn tier1_closed_connection_then_reconnect_syncs_again() -> crate::Res<()> 
 
     drop(owner_doc);
     drop(reader_doc);
+    drop(reader_doc2);
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn tier1_remote_restart_then_live_reconnect_preserves_document() -> crate::Res<()> {
+    utils_rs::testing::setup_tracing_once();
+    let temp = tempfile::tempdir()?;
+    let left_path = temp.path().join("owner");
+    let right_path = temp.path().join("reader");
+    let mut pair = Pair::boot_persistent(
+        45,
+        46,
+        "Owner",
+        "Reader",
+        left_path,
+        right_path.clone(),
+    )
+    .await?;
+
+    let reader_agent = fixtures::agent_of(&pair.left().repo, pair.right()).await?;
+    let mut initial = automerge::Automerge::new();
+    initial
+        .transact(|tx| tx.put(automerge::ROOT, "title", "before restart"))
+        .map_err(|err| crate::ferr!("failed creating ladder document: {err:?}"))?;
+    let owner_doc = pair.left().repo.create_doc(initial).await?;
+    let doc_id = owner_doc.document_id();
+    fixtures::grant_and_propagate(&pair, doc_id, &reader_agent, Access::Read).await?;
+    let reader_doc =
+        fixtures::sync_doc_expect_ready(pair.right_conn(), &pair.right().repo, doc_id).await?;
+    assert_eq!(read_title(&reader_doc).await, "before restart");
+    drop(reader_doc);
+
+    let old_left = pair.left_conn.take().expect("left connection should exist");
+    let _old_right = pair.right_conn.take().expect("right connection should exist");
+    old_left.stop().await?;
+    pair.restart_right(StorageConfig::Disk { path: right_path }).await?;
+    pair.connect().await?;
+    pair.left_conn().sync_keyhive_with_peer(None).await?;
+
+    let reader_doc2 =
+        fixtures::sync_doc_expect_ready(pair.right_conn(), &pair.right().repo, doc_id).await?;
+    assert_eq!(read_title(&reader_doc2).await, "before restart");
+    heads::tier0_invariants(&pair, doc_id, &owner_doc, &reader_doc2).await?;
+
+    drop(owner_doc);
+    drop(reader_doc2);
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn tier1_offline_updates_catch_up() -> crate::Res<()> {
+    utils_rs::testing::setup_tracing_once();
+    let mut pair = Pair::boot(41, 42, "Owner", "Reader").await?;
+
+    let reader_agent = fixtures::agent_of(&pair.left().repo, pair.right()).await?;
+
+    let mut initial = automerge::Automerge::new();
+    initial
+        .transact(|tx| tx.put(automerge::ROOT, "title", "first value"))
+        .map_err(|err| crate::ferr!("failed creating ladder document: {err:?}"))?;
+    let owner_doc = pair.left().repo.create_doc(initial).await?;
+    let doc_id = owner_doc.document_id();
+
+    fixtures::grant_and_propagate(&pair, doc_id, &reader_agent, Access::Read).await?;
+
+    // Reader syncs the initial document.
+    let reader_doc =
+        fixtures::sync_doc_expect_ready(pair.right_conn(), &pair.right().repo, doc_id).await?;
+    assert_eq!(read_title(&reader_doc).await, "first value");
+    heads::tier0_invariants(&pair, doc_id, &owner_doc, &reader_doc).await?;
+
+    // --- Go offline: remove both transport and big-sync routes.
+    pair.disconnect().await?;
+    let old_left = pair.left_conn.take().expect("left connection should exist");
+    let _old_right = pair.right_conn.take().expect("right connection should exist");
+    old_left.stop().await?;
+
+    // Owner edits while Reader's big-repo connection is closed.
+    owner_doc
+        .with_document(|doc| {
+            doc.transact(|tx| tx.put(automerge::ROOT, "title", "offline update"))
+                .map_err(|err| crate::ferr!("failed offline edit: {err:?}"))
+        })
+        .await??;
+    assert_eq!(read_title(&owner_doc).await, "offline update");
+
+    // --- Reconnect.
+    let new_left = pair.left().connect(pair.right()).await?;
+    let new_right = pair.right().accepted_connection().await;
+    pair.left_conn = Some(new_left);
+    pair.right_conn = Some(new_right);
+
+    // Reader syncs and catches up on the offline update.
+    drop(reader_doc);
+    let reader_doc2 =
+        fixtures::sync_doc_expect_ready(pair.right_conn(), &pair.right().repo, doc_id).await?;
+    assert_eq!(read_title(&reader_doc2).await, "offline update");
+    heads::tier0_invariants(&pair, doc_id, &owner_doc, &reader_doc2).await?;
+
+    drop(owner_doc);
     drop(reader_doc2);
     Ok(())
 }

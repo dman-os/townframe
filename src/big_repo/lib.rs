@@ -287,6 +287,15 @@ impl BigRepo {
         self.runtime.doc_head_state(document_id).await
     }
 
+    /// Wait until finite runtime work currently admitted to this repository
+    /// has drained. Pending materialization due to unavailable keys is allowed.
+    pub async fn wait_for_quiescence(
+        &self,
+        timeout: Option<std::time::Duration>,
+    ) -> Res<()> {
+        self.runtime.wait_for_quiescence(timeout).await
+    }
+
     pub async fn create_doc(
         self: &Arc<Self>,
         initial_content: automerge::Automerge,
