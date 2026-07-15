@@ -3,8 +3,8 @@
 //! Covers the four access levels [`Access::{Read, Edit, Admin}`] plus
 //! `None` (no grant) across **grant-before-content** and
 //! **grant-after-content** scenarios. Uses direct (A<-->) topology only;
-//! groups, nested groups, doc-as-member, and public grants are deferred
-//! to a later tier.
+//! Group and nested-group coverage is included below; document-as-member and
+//! public grants remain deferred to a later tier.
 //!
 //! # Structure
 //!
@@ -236,6 +236,225 @@ async fn tier2_grant_after_content_admin() -> crate::Res<()> {
 
     drop(owner_doc);
     drop(admin_doc);
+    Ok(())
+}
+
+// ─── Group grants ────────────────────────────────────────────────────────────
+
+#[tokio::test(flavor = "multi_thread")]
+async fn tier2_group_grant_read_materializes_member() -> crate::Res<()> {
+    utils_rs::testing::setup_tracing_once();
+    let pair = Pair::boot(65, 66, "Owner", "GroupReader").await?;
+    let reader_agent = fixtures::agent_of(&pair.left().repo, pair.right()).await?;
+
+    let mut initial = automerge::Automerge::new();
+    initial
+        .transact(|tx| tx.put(automerge::ROOT, "title", "group-readable"))
+        .map_err(|err| crate::ferr!("failed creating grouped doc: {err:?}"))?;
+    let owner_doc = pair.left().repo.create_doc(initial).await?;
+    let doc_id = owner_doc.document_id();
+
+    let group = pair.left().repo.create_group_with_parents(vec![]).await?;
+    pair.left()
+        .repo
+        .add_member_to_group(reader_agent, &group, Access::Read)
+        .await?;
+    fixtures::grant_group_and_propagate(&pair, doc_id, &group, Access::Read).await?;
+
+    let reader_doc =
+        fixtures::sync_doc_expect_ready(pair.right_conn(), &pair.right().repo, doc_id).await?;
+    assert_eq!(read_title(&reader_doc).await, "group-readable");
+    heads::tier0_invariants(&pair, doc_id, &owner_doc, &reader_doc).await?;
+
+    drop(owner_doc);
+    drop(reader_doc);
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn tier2_group_grant_before_content_read() -> crate::Res<()> {
+    utils_rs::testing::setup_tracing_once();
+    let pair = Pair::boot(73, 74, "Owner", "GroupReaderBeforeContent").await?;
+    let reader_agent = fixtures::agent_of(&pair.left().repo, pair.right()).await?;
+
+    let mut seed = automerge::Automerge::new();
+    seed.transact(|tx| tx.put(automerge::ROOT, "_init", true))
+        .map_err(|err| crate::ferr!("failed creating group seed doc: {err:?}"))?;
+    let owner_doc = pair.left().repo.create_doc(seed).await?;
+    let doc_id = owner_doc.document_id();
+
+    let group = pair.left().repo.create_group_with_parents(vec![]).await?;
+    pair.left()
+        .repo
+        .add_member_to_group(reader_agent, &group, Access::Read)
+        .await?;
+    fixtures::grant_group_and_propagate(&pair, doc_id, &group, Access::Read).await?;
+
+    owner_doc
+        .with_document(|doc| {
+            doc.transact(|tx| tx.put(automerge::ROOT, "title", "group-before-content"))
+                .map_err(|err| crate::ferr!("failed writing after group grant: {err:?}"))
+        })
+        .await??;
+
+    let reader_doc =
+        fixtures::sync_doc_expect_ready(pair.right_conn(), &pair.right().repo, doc_id).await?;
+    assert_eq!(read_title(&reader_doc).await, "group-before-content");
+    heads::tier0_invariants(&pair, doc_id, &owner_doc, &reader_doc).await?;
+
+    drop(owner_doc);
+    drop(reader_doc);
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn tier2_nested_group_edit_propagates_member_update() -> crate::Res<()> {
+    utils_rs::testing::setup_tracing_once();
+    let pair = Pair::boot(67, 68, "Owner", "NestedEditor").await?;
+    let reader_agent = fixtures::agent_of(&pair.left().repo, pair.right()).await?;
+
+    let mut initial = automerge::Automerge::new();
+    initial
+        .transact(|tx| tx.put(automerge::ROOT, "title", "nested-group"))
+        .map_err(|err| crate::ferr!("failed creating nested-group doc: {err:?}"))?;
+    let owner_doc = pair.left().repo.create_doc(initial).await?;
+    let doc_id = owner_doc.document_id();
+
+    let outer = pair.left().repo.create_group_with_parents(vec![]).await?;
+    let inner = pair.left().repo.create_group_with_parents(vec![]).await?;
+    pair.left()
+        .repo
+        .add_member_to_group(reader_agent, &inner, Access::Edit)
+        .await?;
+    pair.left()
+        .repo
+        .add_member_to_group(inner.clone(), &outer, Access::Edit)
+        .await?;
+    fixtures::grant_group_and_propagate(&pair, doc_id, &outer, Access::Edit).await?;
+
+    let editor_doc =
+        fixtures::sync_doc_expect_ready(pair.right_conn(), &pair.right().repo, doc_id).await?;
+    assert_eq!(read_title(&editor_doc).await, "nested-group");
+    editor_doc
+        .with_document(|doc| {
+            doc.transact(|tx| tx.put(automerge::ROOT, "nested_note", "member-edit"))
+                .map_err(|err| crate::ferr!("failed nested-group member edit: {err:?}"))
+        })
+        .await??;
+
+    pair.right_conn().sync_keyhive_with_peer(None).await?;
+    pair.left_conn().sync_keyhive_with_peer(None).await?;
+    drop(owner_doc);
+    let owner_doc2 =
+        fixtures::sync_doc_expect_ready(pair.left_conn(), &pair.left().repo, doc_id).await?;
+    assert_eq!(
+        read_optional_text(&owner_doc2, "nested_note").await.as_deref(),
+        Some("member-edit")
+    );
+    heads::tier0_invariants(&pair, doc_id, &owner_doc2, &editor_doc).await?;
+
+    drop(owner_doc2);
+    drop(editor_doc);
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn tier2_grant_after_content_while_offline_read() -> crate::Res<()> {
+    utils_rs::testing::setup_tracing_once();
+    let mut pair = Pair::boot(69, 70, "Owner", "OfflineReader").await?;
+    let reader_agent = fixtures::agent_of(&pair.left().repo, pair.right()).await?;
+
+    let mut initial = automerge::Automerge::new();
+    initial
+        .transact(|tx| tx.put(automerge::ROOT, "title", "offline-grant"))
+        .map_err(|err| crate::ferr!("failed creating offline-grant doc: {err:?}"))?;
+    let owner_doc = pair.left().repo.create_doc(initial).await?;
+    let doc_id = owner_doc.document_id();
+
+    // Remove both transport and big-sync routes before changing membership.
+    pair.disconnect().await?;
+    let old_left = pair.left_conn.take().expect("left connection should exist");
+    let _old_right = pair.right_conn.take().expect("right connection should exist");
+    old_left.stop().await?;
+
+    // The owner can make the grant while the reader is disconnected. The
+    // checkpoint produced by this read grant is also part of the offline
+    // change and must become readable after reconnection.
+    pair.left()
+        .repo
+        .grant_doc_access(doc_id, reader_agent, Access::Read)
+        .await?;
+
+    let new_left = pair.left().connect(pair.right()).await?;
+    let new_right = pair.right().accepted_connection().await;
+    pair.left_conn = Some(new_left);
+    pair.right_conn = Some(new_right);
+
+    pair.left_conn().sync_keyhive_with_peer(None).await?;
+    pair.right_conn().sync_keyhive_with_peer(None).await?;
+    fixtures::assert_reader_has_access(&pair.right().repo, doc_id).await?;
+    fixtures::sync_doc_expect_ready(pair.right_conn(), &pair.right().repo, doc_id).await?;
+    let reader_doc = pair.right().repo.get_doc(&doc_id).await?.into_ready(doc_id)?;
+    assert_eq!(read_title(&reader_doc).await, "offline-grant");
+    heads::tier0_invariants(&pair, doc_id, &owner_doc, &reader_doc).await?;
+
+    drop(owner_doc);
+    drop(reader_doc);
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn tier2_grant_after_content_while_offline_edit() -> crate::Res<()> {
+    utils_rs::testing::setup_tracing_once();
+    let mut pair = Pair::boot(71, 72, "Owner", "OfflineEditor").await?;
+    let editor_agent = fixtures::agent_of(&pair.left().repo, pair.right()).await?;
+
+    let mut initial = automerge::Automerge::new();
+    initial
+        .transact(|tx| tx.put(automerge::ROOT, "title", "offline-edit"))
+        .map_err(|err| crate::ferr!("failed creating offline-edit doc: {err:?}"))?;
+    let owner_doc = pair.left().repo.create_doc(initial).await?;
+    let doc_id = owner_doc.document_id();
+
+    pair.disconnect().await?;
+    let old_left = pair.left_conn.take().expect("left connection should exist");
+    let _old_right = pair.right_conn.take().expect("right connection should exist");
+    old_left.stop().await?;
+
+    pair.left()
+        .repo
+        .grant_doc_access(doc_id, editor_agent, Access::Edit)
+        .await?;
+
+    let new_left = pair.left().connect(pair.right()).await?;
+    let new_right = pair.right().accepted_connection().await;
+    pair.left_conn = Some(new_left);
+    pair.right_conn = Some(new_right);
+    pair.left_conn().sync_keyhive_with_peer(None).await?;
+    pair.right_conn().sync_keyhive_with_peer(None).await?;
+
+    let editor_doc =
+        fixtures::sync_doc_expect_ready(pair.right_conn(), &pair.right().repo, doc_id).await?;
+    editor_doc
+        .with_document(|doc| {
+            doc.transact(|tx| tx.put(automerge::ROOT, "offline_note", "editor-added"))
+                .map_err(|err| crate::ferr!("failed offline editor write: {err:?}"))
+        })
+        .await??;
+
+    pair.right_conn().sync_keyhive_with_peer(None).await?;
+    pair.left_conn().sync_keyhive_with_peer(None).await?;
+    drop(owner_doc);
+    let owner_doc2 =
+        fixtures::sync_doc_expect_ready(pair.left_conn(), &pair.left().repo, doc_id).await?;
+    assert_eq!(
+        read_optional_text(&owner_doc2, "offline_note").await.as_deref(),
+        Some("editor-added")
+    );
+    heads::tier0_invariants(&pair, doc_id, &owner_doc2, &editor_doc).await?;
+
+    drop(owner_doc2);
+    drop(editor_doc);
     Ok(())
 }
 

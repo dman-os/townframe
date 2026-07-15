@@ -180,14 +180,17 @@ impl<F: FutureForm> HubCommandFuture<F> for F {
         F::from_future(async move {
             match runtime_io.create_document(parents, content_heads).await {
                 Ok(doc_id) => {
-                    cmd_tx
+                    if cmd_tx
                         .send(Runtime2Cmd::PutDoc {
                             doc_id,
                             initial_content,
                             resp,
                         })
                         .await
-                        .map_err(|_| ferr!("runtime stopped before PutDoc could be enqueued"))?;
+                        .is_err()
+                    {
+                        tracing::debug!(?doc_id, "runtime stopped before PutDoc could be enqueued");
+                    }
                 }
                 Err(err) => {
                     let _ = resp.send(Err(err));
@@ -537,6 +540,7 @@ where
 trait HubBackgroundFuture<F: FutureForm> {
     fn start_sync(
         runtime_io: Arc<dyn crate::runtime2::RuntimeIo<F>>,
+        evt_tx: async_channel::Sender<Runtime2Evt>,
         peer_id: PeerId,
         request_id: subduction_keyhive::message::RequestId,
     ) -> F::Future<'static, eyre::Result<()>>;
@@ -609,14 +613,25 @@ trait HubIoFutures<F: FutureForm, Tasks: crate::runtime2::TaskSet<F>> {
 impl<F: FutureForm> HubBackgroundFuture<F> for F {
     fn start_sync(
         runtime_io: Arc<dyn crate::runtime2::RuntimeIo<F>>,
+        evt_tx: async_channel::Sender<Runtime2Evt>,
         peer_id: PeerId,
         request_id: subduction_keyhive::message::RequestId,
     ) -> F::Future<'static, eyre::Result<()>> {
         F::from_future(async move {
-            runtime_io
-                .sync_keyhive_with_peer(peer_id, request_id)
-                .await
-                .wrap_err_with(|| format!("keyhive sync with {peer_id} failed"))?;
+            if let Err(error) = runtime_io.sync_keyhive_with_peer(peer_id, request_id.clone()).await {
+                let error = format!("keyhive sync with {peer_id} failed: {error}");
+                if evt_tx
+                    .send(Runtime2Evt::KeyhiveSyncFailed {
+                        peer_id,
+                        request_id,
+                        error,
+                    })
+                    .await
+                    .is_err()
+                {
+                    tracing::debug!(%peer_id, "runtime stopped before keyhive sync failure event");
+                }
+            }
             Ok(())
         })
     }
@@ -678,10 +693,13 @@ impl<F: FutureForm> HubBackgroundFuture<F> for F {
     ) -> F::Future<'static, eyre::Result<()>> {
         F::from_future(async move {
             let _ = lease_rx.await;
-            cmd_tx
+            if cmd_tx
                 .send(Runtime2Cmd::ReleaseInternalLease { doc_id })
                 .await
-                .map_err(|_| ferr!("runtime stopped before internal lease release"))?;
+                .is_err()
+            {
+                tracing::debug!(?doc_id, "runtime stopped before internal lease release");
+            }
             Ok(())
         })
     }
@@ -742,15 +760,18 @@ impl<F: FutureForm, Tasks: crate::runtime2::TaskSet<F>> HubIoFutures<F, Tasks> f
                         let _ = resp.send(Err(error));
                         return Ok(());
                     }
-                    evt_tx_established
+                    if evt_tx_established
                         .send(Runtime2Evt::ConnEstablished {
                             peer_id: handshake_peer,
                             closed: closed_established,
                         })
                         .await
-                        .map_err(|_| {
-                            ferr!("runtime stopped before connection-established event")
-                        })?;
+                        .is_err()
+                    {
+                        tracing::debug!(%handshake_peer, "runtime stopped before connection-established event");
+                        connect.close(handshake_peer).await?;
+                        return Ok(());
+                    }
                     let _ = resp.send(Ok((handshake_peer, closed)));
                 }
                 Err(error) => {
@@ -802,15 +823,18 @@ impl<F: FutureForm, Tasks: crate::runtime2::TaskSet<F>> HubIoFutures<F, Tasks> f
                         let _ = resp.send(Err(error));
                         return Ok(());
                     }
-                    evt_tx_established
+                    if evt_tx_established
                         .send(Runtime2Evt::ConnEstablished {
                             peer_id: handshake_peer,
                             closed: closed_established,
                         })
                         .await
-                        .map_err(|_| {
-                            ferr!("runtime stopped before connection-established event")
-                        })?;
+                        .is_err()
+                    {
+                        tracing::debug!(%handshake_peer, "runtime stopped before connection-established event");
+                        connect.close(handshake_peer).await?;
+                        return Ok(());
+                    }
                     let _ = resp.send(Ok((handshake_peer, closed)));
                 }
                 Err(error) => {
@@ -849,7 +873,7 @@ impl<F: FutureForm, Tasks: crate::runtime2::TaskSet<F>> HubIoFutures<F, Tasks> f
                 Ok(false) => Err(crate::runtime::SyncDocError::NotFound),
                 Err(error) => Err(crate::runtime::SyncDocError::IoError(error)),
             };
-            evt_tx
+            if evt_tx
                 .send(Runtime2Evt::DocSyncCompleted {
                     doc_id,
                     peer_id,
@@ -857,7 +881,10 @@ impl<F: FutureForm, Tasks: crate::runtime2::TaskSet<F>> HubIoFutures<F, Tasks> f
                     result,
                 })
                 .await
-                .map_err(|_| ferr!("runtime stopped before document sync completion"))?;
+                .is_err()
+            {
+                tracing::debug!(?doc_id, %peer_id, "runtime stopped before document sync completion");
+            }
             Ok(())
         })
     }
@@ -914,6 +941,13 @@ where
                 request_id,
             } => {
                 self.finish_keyhive_sync(peer_id, request_id)?;
+            }
+            Runtime2Evt::KeyhiveSyncFailed {
+                peer_id,
+                request_id,
+                error,
+            } => {
+                self.fail_keyhive_sync(peer_id, request_id, error)?;
             }
             Runtime2Evt::KeyhiveCacheRefreshDone {
                 peer_id,
@@ -1120,9 +1154,47 @@ where
         );
         self.spawn_background(F::start_sync(
             Arc::clone(&self.runtime_io),
+            self.evt_tx.clone(),
             peer_id,
             request_id,
         ))?;
+        Ok(())
+    }
+
+    /// Resolve a keyhive round whose initiation failed before the protocol
+    /// could emit its normal completion event.
+    fn fail_keyhive_sync(
+        &mut self,
+        peer_id: PeerId,
+        request_id: subduction_keyhive::message::RequestId,
+        error: String,
+    ) -> eyre::Result<()> {
+        let Some(round) = self.active_keyhive_syncs.get(&peer_id) else {
+            tracing::debug!(%peer_id, ?request_id, "ignoring untracked keyhive sync failure");
+            return Ok(());
+        };
+        if round.request_id != request_id {
+            tracing::debug!(
+                %peer_id,
+                expected_request_id = ?round.request_id,
+                request_id = ?request_id,
+                "ignoring stale keyhive sync failure"
+            );
+            return Ok(());
+        }
+
+        self.active_keyhive_syncs
+            .remove(&peer_id)
+            .expect("active keyhive sync disappeared after failure validation");
+        if let Some(waiters) = self.pending_keyhive_syncs.remove(&peer_id) {
+            for (_, sender) in waiters {
+                sender
+                    .send(Err(ferr!("{error}")))
+                    .expect("keyhive sync waiter receiver must remain open");
+            }
+        }
+        self.keyhive_dirty.remove(&peer_id);
+        tracing::debug!(%peer_id, ?request_id, error, "keyhive sync initiation failed");
         Ok(())
     }
 
@@ -1500,9 +1572,9 @@ impl<
 
 /// Stop token for the runtime. Generic over the async form `F` and the
 /// concrete [`TaskRuntime`] backend `R`. Holds two independent task sets:
-/// - `child_tasks` — construction-time workers and dynamic background jobs,
-///    stopped first on shutdown (children before the hub loop).
-/// - `machine_tasks` — the hub's machine loop, stopped after children.
+/// - `child_tasks` — construction-time workers and dynamic background jobs.
+/// - `machine_tasks` — the hub's dispatcher loop, stopped first so it cannot
+///    dispatch work into an aborted child scope.
 ///
 /// Mirrors `BigRepoRuntimeStopToken` at `runtime.rs:613`.
 pub struct Runtime2StopToken<F: FutureForm, R: TaskRuntime<F>> {
@@ -1512,16 +1584,19 @@ pub struct Runtime2StopToken<F: FutureForm, R: TaskRuntime<F>> {
 }
 
 impl<F: FutureForm, R: TaskRuntime<F>> Runtime2StopToken<F, R> {
-    /// Cancel the runtime and await graceful shutdown. Reverses startup order:
-    /// children first, then the hub machine loop.
+    /// Cancel the runtime and await graceful shutdown.
     pub async fn stop(self, timeout: std::time::Duration) -> eyre::Result<()> {
+        // Stop the dispatcher before aborting its children. Otherwise a late
+        // connection-loss event can be consumed by the still-running hub and
+        // try to spawn work into the already-aborted child task set.
         self.cancel.abort();
+        self.machine_tasks.stop(timeout).await?;
+
         // Not every child operation observes the runtime cancellation token
         // (for example a peer sync may be awaiting transport IO). Abort the
-        // child scope, then join it before allowing the hub loop to terminate.
+        // child scope only after the dispatcher has stopped, then join it.
         self.child_tasks.abort();
         self.child_tasks.stop(timeout).await?;
-        self.machine_tasks.stop(timeout).await?;
         Ok(())
     }
 }
@@ -1600,11 +1675,9 @@ impl<
 /// the concrete task runtime. Two independent [`TaskSet`]s are created
 /// from the runtime:
 /// - `child_tasks`: all construction-time workers, dynamic background jobs,
-///   and doc-workers. Stopped first on shutdown.
-/// - `machine_tasks`: the hub's machine loop. Stopped after children.
-///
-/// This preserves the old runtime's reverse-order shutdown: children die
-/// before the hub loop that dispatched them.
+///   and doc-workers.
+/// - `machine_tasks`: the hub's machine loop. Stopped first on shutdown so
+///   it cannot dispatch into an aborted child scope.
 ///
 /// Determinism: the task runtime is injected via `config.tasks`, so a
 /// step-task-runtime implementation can drive tests deterministically.
@@ -1687,8 +1760,8 @@ where
     );
 
     // ── Spawn (machine): the hub machine loop ──────────────────────────────
-    // Spawned on the MACHINE task set so it is stopped after children on
-    // shutdown (reverse startup order).
+    // The dispatcher is stopped before child work so it cannot accept late
+    // events that would spawn into an aborted child task set.
     machine_tasks.spawn(F::machine_loop(
         hub,
         cmd_rx,
