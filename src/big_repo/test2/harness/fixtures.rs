@@ -31,6 +31,49 @@ pub async fn agent_of(repo: &crate::BigRepo, peer: &Node) -> Res<BigKeyhiveAgent
         })
 }
 
+/// Construct the well-known public agent in the concrete BigRepo Keyhive type.
+/// The public agent is not learned through the contact-card exchange.
+pub fn public_agent() -> BigKeyhiveAgent {
+    let individual = keyhive_core::principal::public::Public.individual();
+    BigKeyhiveAgent::Individual(
+        individual.id(),
+        Arc::new(futures::lock::Mutex::new(individual)),
+    )
+}
+
+/// Resolve a BigRepo document as a Keyhive agent. This is used to exercise
+/// document-as-member delegation rather than treating the document as a plain
+/// individual agent.
+pub async fn document_agent(repo: &crate::BigRepo, doc_id: DocumentId) -> Res<BigKeyhiveAgent> {
+    let verifying_key = ed25519_dalek::VerifyingKey::from_bytes(&doc_id.into_bytes())
+        .map_err(|_| crate::ferr!("document id is not a valid Keyhive document id"))?;
+    let kh_doc_id = keyhive_core::principal::document::id::DocumentId::from(
+        keyhive_core::principal::identifier::Identifier::from(verifying_key),
+    );
+    let document = repo
+        .keyhive()
+        .clone_keyhive()
+        .get_document(kh_doc_id)
+        .await
+        .ok_or_else(|| crate::ferr!("document {doc_id} is not present in Keyhive"))?;
+    Ok(BigKeyhiveAgent::Document(kh_doc_id, document))
+}
+
+/// Close both connection handles and remove the corresponding big-sync
+/// routes. The old right-side handle is dropped before returning so stale
+/// connection teardown cannot race the next explicit Keyhive barrier.
+pub async fn go_offline(pair: &mut Pair) -> Res<()> {
+    pair.disconnect().await?;
+    let old_left = pair.left_conn.take().expect("left connection should exist");
+    let old_right = pair
+        .right_conn
+        .take()
+        .expect("right connection should exist");
+    old_left.stop().await?;
+    drop(old_right);
+    Ok(())
+}
+
 /// Grant `access` on `doc_id` to `grantee` (resolved on the owner) and
 /// propagate the membership change to the reader via a single bidirectional
 /// keyhive sync.
@@ -76,10 +119,7 @@ pub async fn grant_group_and_propagate(
 }
 
 /// Assert the reader's keyhive reflects access on `doc_id` — single lookup.
-pub async fn assert_reader_has_access(
-    repo: &crate::BigRepo,
-    doc_id: DocumentId,
-) -> Res<()> {
+pub async fn assert_reader_has_access(repo: &crate::BigRepo, doc_id: DocumentId) -> Res<()> {
     let peer = repo.local_peer_id();
     let agent_key = ed25519_dalek::VerifyingKey::from_bytes(peer.as_bytes())
         .expect("peer id must be a verifying key");
