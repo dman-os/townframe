@@ -122,7 +122,7 @@ const BOGUS_DISCOVERY_ID: &[u8] = b"bogus-discovery-id-for-test";
 /// * The responder's returned peer ID equals the initiator's signer public key.
 #[tokio::test]
 async fn handshake_identity_is_authoritative() {
-    let _ = utils_rs::testing::setup_tracing_once();
+    utils_rs::testing::setup_tracing_once();
 
     // ── seeds ──────────────────────────────────────────────────────────────
     let initiator_signer = MemorySigner::from_bytes(&[0xAB; 32]);

@@ -36,6 +36,14 @@ pub struct SqliteBigRepoStore {
         Arc<std::sync::RwLock<HashMap<ObjId, HashMap<PeerId, keyhive_core::access::Access>>>>,
 }
 
+impl std::fmt::Debug for SqliteBigRepoStore {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("SqliteBigRepoStore")
+            .finish_non_exhaustive()
+    }
+}
+
 #[derive(Default, Clone, Copy)]
 struct BucketSummaryRow {
     changed_at: u64,

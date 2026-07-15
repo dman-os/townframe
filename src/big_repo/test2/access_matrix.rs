@@ -515,102 +515,125 @@ async fn tier2_no_grant_blocks_materialization() -> crate::Res<()> {
     drop(owner_doc);
     Ok(())
 }
-
 // ─── Remaining direct-agent offline matrix ────────────────────────────────────
 
-#[tokio::test(flavor = "multi_thread")]
-async fn tier2_agent_grant_while_offline_matrix() -> crate::Res<()> {
-    utils_rs::testing::setup_tracing_once();
-    let mut seed = 90u8;
-    for before_content in [false, true] {
-        for access in [Access::Read, Access::Edit, Access::Admin] {
-            let mut pair = Pair::boot(seed, seed.wrapping_add(1), "Owner", "OfflineAgent").await?;
-            seed = seed.wrapping_add(2);
-            let agent = fixtures::agent_of(&pair.left().repo, pair.right()).await?;
-            let mut initial = automerge::Automerge::new();
-            if before_content {
-                initial
-                    .transact(|tx| tx.put(automerge::ROOT, "_init", true))
-                    .map_err(|err| crate::ferr!("failed creating offline seed doc: {err:?}"))?;
-            } else {
-                initial
-                    .transact(|tx| tx.put(automerge::ROOT, "title", "offline-agent-matrix"))
-                    .map_err(|err| crate::ferr!("failed creating offline doc: {err:?}"))?;
-            }
-            let owner_doc = pair.left().repo.create_doc(initial).await?;
-            let doc_id = owner_doc.document_id();
-
-            fixtures::go_offline(&mut pair).await?;
-            pair.left()
-                .repo
-                .grant_doc_access(doc_id, agent, access)
-                .await?;
-            pair.connect().await?;
-            pair.left_conn().sync_keyhive_with_peer(None).await?;
-            pair.right_conn().sync_keyhive_with_peer(None).await?;
-            if before_content {
-                owner_doc
-                    .with_document(|doc| {
-                        doc.transact(|tx| tx.put(automerge::ROOT, "title", "offline-agent-matrix"))
-                            .map_err(|err| crate::ferr!("failed writing offline content: {err:?}"))
-                    })
-                    .await??;
-            }
-            let agent_doc =
-                fixtures::sync_doc_expect_ready(pair.right_conn(), &pair.right().repo, doc_id)
-                    .await?;
-            assert_eq!(read_title(&agent_doc).await, "offline-agent-matrix");
-            heads::tier0_invariants(&pair, doc_id, &owner_doc, &agent_doc).await?;
-            if access.is_editor() {
-                agent_doc
-                    .with_document(|doc| {
-                        doc.transact(|tx| tx.put(automerge::ROOT, "agent_note", "agent-member"))
-                            .map_err(|err| crate::ferr!("failed offline agent write: {err:?}"))
-                    })
-                    .await??;
-                pair.right_conn().sync_keyhive_with_peer(None).await?;
-                pair.left_conn().sync_keyhive_with_peer(None).await?;
-                drop(owner_doc);
-                let owner_doc =
-                    fixtures::sync_doc_expect_ready(pair.left_conn(), &pair.left().repo, doc_id)
-                        .await?;
-                assert_eq!(
-                    read_optional_text(&owner_doc, "agent_note")
-                        .await
-                        .as_deref(),
-                    Some("agent-member")
-                );
-                heads::tier0_invariants(&pair, doc_id, &owner_doc, &agent_doc).await?;
-                drop(owner_doc);
-            } else {
-                drop(owner_doc);
-            }
-            drop(agent_doc);
-        }
+async fn run_offline_case(seed: u8, before_content: bool, access: Access) -> crate::Res<()> {
+    let mut pair = Pair::boot(seed, seed.wrapping_add(1), "Owner", "OfflineAgent").await?;
+    let agent = fixtures::agent_of(&pair.left().repo, pair.right()).await?;
+    let mut initial = automerge::Automerge::new();
+    if before_content {
+        initial
+            .transact(|tx| tx.put(automerge::ROOT, "_init", true))
+            .map_err(|err| crate::ferr!("failed creating offline seed doc: {err:?}"))?;
+    } else {
+        initial
+            .transact(|tx| tx.put(automerge::ROOT, "title", "offline-agent-matrix"))
+            .map_err(|err| crate::ferr!("failed creating offline doc: {err:?}"))?;
     }
+    let owner_doc = pair.left().repo.create_doc(initial).await?;
+    let doc_id = owner_doc.document_id();
+
+    fixtures::go_offline(&mut pair).await?;
+    pair.left()
+        .repo
+        .grant_doc_access(doc_id, agent, access)
+        .await?;
+    pair.connect().await?;
+    pair.left_conn().sync_keyhive_with_peer(None).await?;
+    pair.right_conn().sync_keyhive_with_peer(None).await?;
+    if before_content {
+        owner_doc
+            .with_document(|doc| {
+                doc.transact(|tx| tx.put(automerge::ROOT, "title", "offline-agent-matrix"))
+                    .map_err(|err| crate::ferr!("failed writing offline content: {err:?}"))
+            })
+            .await??;
+    }
+    let agent_doc =
+        fixtures::sync_doc_expect_ready(pair.right_conn(), &pair.right().repo, doc_id).await?;
+    assert_eq!(read_title(&agent_doc).await, "offline-agent-matrix");
+    heads::tier0_invariants(&pair, doc_id, &owner_doc, &agent_doc).await?;
+    if access.is_editor() {
+        agent_doc
+            .with_document(|doc| {
+                doc.transact(|tx| tx.put(automerge::ROOT, "agent_note", "agent-member"))
+                    .map_err(|err| crate::ferr!("failed offline agent write: {err:?}"))
+            })
+            .await??;
+        pair.right_conn().sync_keyhive_with_peer(None).await?;
+        pair.left_conn().sync_keyhive_with_peer(None).await?;
+        drop(owner_doc);
+        let owner_doc =
+            fixtures::sync_doc_expect_ready(pair.left_conn(), &pair.left().repo, doc_id).await?;
+        assert_eq!(
+            read_optional_text(&owner_doc, "agent_note")
+                .await
+                .as_deref(),
+            Some("agent-member")
+        );
+        heads::tier0_invariants(&pair, doc_id, &owner_doc, &agent_doc).await?;
+        drop(owner_doc);
+    } else {
+        drop(owner_doc);
+    }
+    drop(agent_doc);
     Ok(())
+}
+
+utils_rs::table_tests! {
+    tier2_offline_agent_cases tokio,
+    (seed, before_content, access),
+    {
+        run_offline_case(seed, before_content, access).await?;
+    },
+    multi_thread: true,
+}
+
+tier2_offline_agent_cases! {
+    offline_after_read: (90, false, Access::Read),
+    offline_after_edit: (92, false, Access::Edit),
+    offline_after_admin: (94, false, Access::Admin),
+    offline_before_read: (96, true, Access::Read),
+    offline_before_edit: (98, true, Access::Edit),
+    offline_before_admin: (100, true, Access::Admin),
 }
 
 // ─── Full group/nested-group matrix ──────────────────────────────────────────
 
-/// Exercise all connected/offline and before/after-content group cases for the
-/// three materializing access levels. The nested variant adds a transitive
-/// document-member path through an inner group.
-#[tokio::test(flavor = "multi_thread")]
-async fn tier2_group_and_nested_group_matrix() -> crate::Res<()> {
-    utils_rs::testing::setup_tracing_once();
-    let mut seed = 100u8;
-    for nested in [false, true] {
-        for offline in [false, true] {
-            for before_content in [false, true] {
-                for access in [Access::Read, Access::Edit, Access::Admin] {
-                    run_group_case(seed, access, before_content, offline, nested).await?;
-                    seed = seed.wrapping_add(1);
-                }
-            }
-        }
-    }
-    Ok(())
+utils_rs::table_tests! {
+    tier2_group_cases tokio,
+    (seed, access, before_content, offline, nested),
+    {
+        run_group_case(seed, access, before_content, offline, nested).await?;
+    },
+    multi_thread: true,
+}
+
+tier2_group_cases! {
+    connected_after_read: (102, Access::Read, false, false, false),
+    connected_after_edit: (103, Access::Edit, false, false, false),
+    connected_after_admin: (104, Access::Admin, false, false, false),
+    connected_before_read: (105, Access::Read, true, false, false),
+    connected_before_edit: (106, Access::Edit, true, false, false),
+    connected_before_admin: (107, Access::Admin, true, false, false),
+    offline_after_read: (108, Access::Read, false, true, false),
+    offline_after_edit: (109, Access::Edit, false, true, false),
+    offline_after_admin: (110, Access::Admin, false, true, false),
+    offline_before_read: (111, Access::Read, true, true, false),
+    offline_before_edit: (112, Access::Edit, true, true, false),
+    offline_before_admin: (113, Access::Admin, true, true, false),
+    nested_connected_after_read: (114, Access::Read, false, false, true),
+    nested_connected_after_edit: (115, Access::Edit, false, false, true),
+    nested_connected_after_admin: (116, Access::Admin, false, false, true),
+    nested_connected_before_read: (117, Access::Read, true, false, true),
+    nested_connected_before_edit: (118, Access::Edit, true, false, true),
+    nested_connected_before_admin: (119, Access::Admin, true, false, true),
+    nested_offline_after_read: (120, Access::Read, false, true, true),
+    nested_offline_after_edit: (121, Access::Edit, false, true, true),
+    nested_offline_after_admin: (122, Access::Admin, false, true, true),
+    nested_offline_before_read: (123, Access::Read, true, true, true),
+    nested_offline_before_edit: (124, Access::Edit, true, true, true),
+    nested_offline_before_admin: (125, Access::Admin, true, true, true),
 }
 
 async fn run_group_case(
@@ -723,89 +746,98 @@ async fn run_group_case(
 
 // ─── Public and document-as-member cases ────────────────────────────────────
 
-#[tokio::test(flavor = "multi_thread")]
-async fn tier2_public_grant_matrix() -> crate::Res<()> {
-    utils_rs::testing::setup_tracing_once();
-    let mut seed = 140u8;
-    for offline in [false, true] {
-        for before_content in [false, true] {
-            for access in [Access::Read, Access::Edit, Access::Admin] {
-                let mut pair =
-                    Pair::boot(seed, seed.wrapping_add(1), "Owner", "PublicReader").await?;
-                seed = seed.wrapping_add(2);
-                let mut initial = automerge::Automerge::new();
-                if before_content {
-                    initial
-                        .transact(|tx| tx.put(automerge::ROOT, "_init", true))
-                        .map_err(|err| crate::ferr!("failed creating public seed doc: {err:?}"))?;
-                } else {
-                    initial
-                        .transact(|tx| tx.put(automerge::ROOT, "title", "public-matrix"))
-                        .map_err(|err| crate::ferr!("failed creating public doc: {err:?}"))?;
-                }
-                let owner_doc = pair.left().repo.create_doc(initial).await?;
-                let doc_id = owner_doc.document_id();
-                if offline {
-                    fixtures::go_offline(&mut pair).await?;
-                }
-                pair.left()
-                    .repo
-                    .grant_doc_access(doc_id, fixtures::public_agent(), access)
-                    .await?;
-                if offline {
-                    pair.connect().await?;
-                }
-                pair.left_conn().sync_keyhive_with_peer(None).await?;
-                pair.right_conn().sync_keyhive_with_peer(None).await?;
-                if before_content {
-                    owner_doc
-                        .with_document(|doc| {
-                            doc.transact(|tx| tx.put(automerge::ROOT, "title", "public-matrix"))
-                                .map_err(|err| {
-                                    crate::ferr!("failed writing public content: {err:?}")
-                                })
-                        })
-                        .await??;
-                }
-                let public_doc =
-                    fixtures::sync_doc_expect_ready(pair.right_conn(), &pair.right().repo, doc_id)
-                        .await?;
-                assert_eq!(read_title(&public_doc).await, "public-matrix");
-                heads::tier0_invariants(&pair, doc_id, &owner_doc, &public_doc).await?;
-                if access.is_editor() {
-                    public_doc
-                        .with_document(|doc| {
-                            doc.transact(|tx| {
-                                tx.put(automerge::ROOT, "public_note", "public-member")
-                            })
-                            .map_err(|err| crate::ferr!("failed public member write: {err:?}"))
-                        })
-                        .await??;
-                    pair.right_conn().sync_keyhive_with_peer(None).await?;
-                    pair.left_conn().sync_keyhive_with_peer(None).await?;
-                    drop(owner_doc);
-                    let owner_doc = fixtures::sync_doc_expect_ready(
-                        pair.left_conn(),
-                        &pair.left().repo,
-                        doc_id,
-                    )
-                    .await?;
-                    assert_eq!(
-                        read_optional_text(&owner_doc, "public_note")
-                            .await
-                            .as_deref(),
-                        Some("public-member")
-                    );
-                    heads::tier0_invariants(&pair, doc_id, &owner_doc, &public_doc).await?;
-                    drop(owner_doc);
-                } else {
-                    drop(owner_doc);
-                }
-                drop(public_doc);
-            }
-        }
+async fn run_public_case(
+    seed: u8,
+    offline: bool,
+    before_content: bool,
+    access: Access,
+) -> crate::Res<()> {
+    let mut pair = Pair::boot(seed, seed.wrapping_add(1), "Owner", "PublicReader").await?;
+    let mut initial = automerge::Automerge::new();
+    if before_content {
+        initial
+            .transact(|tx| tx.put(automerge::ROOT, "_init", true))
+            .map_err(|err| crate::ferr!("failed creating public seed doc: {err:?}"))?;
+    } else {
+        initial
+            .transact(|tx| tx.put(automerge::ROOT, "title", "public-matrix"))
+            .map_err(|err| crate::ferr!("failed creating public doc: {err:?}"))?;
     }
+    let owner_doc = pair.left().repo.create_doc(initial).await?;
+    let doc_id = owner_doc.document_id();
+    if offline {
+        fixtures::go_offline(&mut pair).await?;
+    }
+    pair.left()
+        .repo
+        .grant_doc_access(doc_id, fixtures::public_agent(), access)
+        .await?;
+    if offline {
+        pair.connect().await?;
+    }
+    pair.left_conn().sync_keyhive_with_peer(None).await?;
+    pair.right_conn().sync_keyhive_with_peer(None).await?;
+    if before_content {
+        owner_doc
+            .with_document(|doc| {
+                doc.transact(|tx| tx.put(automerge::ROOT, "title", "public-matrix"))
+                    .map_err(|err| crate::ferr!("failed writing public content: {err:?}"))
+            })
+            .await??;
+    }
+    let public_doc =
+        fixtures::sync_doc_expect_ready(pair.right_conn(), &pair.right().repo, doc_id).await?;
+    assert_eq!(read_title(&public_doc).await, "public-matrix");
+    heads::tier0_invariants(&pair, doc_id, &owner_doc, &public_doc).await?;
+    if access.is_editor() {
+        public_doc
+            .with_document(|doc| {
+                doc.transact(|tx| tx.put(automerge::ROOT, "public_note", "public-member"))
+                    .map_err(|err| crate::ferr!("failed public member write: {err:?}"))
+            })
+            .await??;
+        pair.right_conn().sync_keyhive_with_peer(None).await?;
+        pair.left_conn().sync_keyhive_with_peer(None).await?;
+        drop(owner_doc);
+        let owner_doc =
+            fixtures::sync_doc_expect_ready(pair.left_conn(), &pair.left().repo, doc_id).await?;
+        assert_eq!(
+            read_optional_text(&owner_doc, "public_note")
+                .await
+                .as_deref(),
+            Some("public-member")
+        );
+        heads::tier0_invariants(&pair, doc_id, &owner_doc, &public_doc).await?;
+        drop(owner_doc);
+    } else {
+        drop(owner_doc);
+    }
+    drop(public_doc);
     Ok(())
+}
+
+utils_rs::table_tests! {
+    tier2_public_grant_cases tokio,
+    (seed, offline, before_content, access),
+    {
+        run_public_case(seed, offline, before_content, access).await?;
+    },
+    multi_thread: true,
+}
+
+tier2_public_grant_cases! {
+    connected_after_read: (130, false, false, Access::Read),
+    connected_after_edit: (132, false, false, Access::Edit),
+    connected_after_admin: (134, false, false, Access::Admin),
+    connected_before_read: (136, false, true, Access::Read),
+    connected_before_edit: (138, false, true, Access::Edit),
+    connected_before_admin: (140, false, true, Access::Admin),
+    offline_after_read: (142, true, false, Access::Read),
+    offline_after_edit: (144, true, false, Access::Edit),
+    offline_after_admin: (146, true, false, Access::Admin),
+    offline_before_read: (148, true, true, Access::Read),
+    offline_before_edit: (150, true, true, Access::Edit),
+    offline_before_admin: (152, true, true, Access::Admin),
 }
 
 // A document member is introduced as a target document coparent. This keeps
@@ -938,62 +970,68 @@ async fn run_document_as_member_case(
 
 // ─── None / no-grant matrix ──────────────────────────────────────────────────
 
-#[tokio::test(flavor = "multi_thread")]
-async fn tier2_no_grant_matrix() -> crate::Res<()> {
-    utils_rs::testing::setup_tracing_once();
-    let mut seed = 180u8;
-    for offline in [false, true] {
-        for before_content in [false, true] {
-            let mut pair =
-                Pair::boot(seed, seed.wrapping_add(1), "Owner", "StrangerMatrix").await?;
-            seed = seed.wrapping_add(2);
-            let mut initial = automerge::Automerge::new();
-            if before_content {
-                initial
-                    .transact(|tx| tx.put(automerge::ROOT, "_init", true))
-                    .map_err(|err| crate::ferr!("failed creating no-grant seed doc: {err:?}"))?;
-            } else {
-                initial
-                    .transact(|tx| tx.put(automerge::ROOT, "secret", "unauthorized"))
-                    .map_err(|err| crate::ferr!("failed creating no-grant doc: {err:?}"))?;
-            }
-            let owner_doc = pair.left().repo.create_doc(initial).await?;
-            let doc_id = owner_doc.document_id();
-            if offline {
-                fixtures::go_offline(&mut pair).await?;
-                pair.connect().await?;
-            }
-            if before_content {
-                owner_doc
-                    .with_document(|doc| {
-                        doc.transact(|tx| tx.put(automerge::ROOT, "secret", "unauthorized"))
-                            .map_err(|err| crate::ferr!("failed writing no-grant content: {err:?}"))
-                    })
-                    .await??;
-            }
-            pair.left_conn().sync_keyhive_with_peer(None).await?;
-            pair.right_conn().sync_keyhive_with_peer(None).await?;
-            match pair.right().repo.get_doc(&doc_id).await {
-                Ok(crate::DocLookup::Ready(_)) => {
-                    return Err(crate::ferr!(concat!(
-                        "stranger materialized a no-grant document ",
-                        "(before_content={before_content}, offline={offline})"
-                    )));
-                }
-                Ok(crate::DocLookup::Missing | crate::DocLookup::PendingMaterialization)
-                | Err(_) => {}
-            }
-            let state = pair.right().repo.doc_head_state(doc_id).await?;
-            if !state.sedimentree_heads.is_empty() {
-                return Err(crate::ferr!(
-                    "stranger received no-grant sedimentree heads (before_content={before_content}, offline={offline}): {:?}",
-                    state.sedimentree_heads
-                ));
-            }
-            drop(owner_doc);
-        }
+async fn run_no_grant_case(seed: u8, offline: bool, before_content: bool) -> crate::Res<()> {
+    let mut pair = Pair::boot(seed, seed.wrapping_add(1), "Owner", "StrangerMatrix").await?;
+    let mut initial = automerge::Automerge::new();
+    if before_content {
+        initial
+            .transact(|tx| tx.put(automerge::ROOT, "_init", true))
+            .map_err(|err| crate::ferr!("failed creating no-grant seed doc: {err:?}"))?;
+    } else {
+        initial
+            .transact(|tx| tx.put(automerge::ROOT, "secret", "unauthorized"))
+            .map_err(|err| crate::ferr!("failed creating no-grant doc: {err:?}"))?;
     }
+    let owner_doc = pair.left().repo.create_doc(initial).await?;
+    let doc_id = owner_doc.document_id();
+    if offline {
+        fixtures::go_offline(&mut pair).await?;
+        pair.connect().await?;
+    }
+    if before_content {
+        owner_doc
+            .with_document(|doc| {
+                doc.transact(|tx| tx.put(automerge::ROOT, "secret", "unauthorized"))
+                    .map_err(|err| crate::ferr!("failed writing no-grant content: {err:?}"))
+            })
+            .await??;
+    }
+    pair.left_conn().sync_keyhive_with_peer(None).await?;
+    pair.right_conn().sync_keyhive_with_peer(None).await?;
+    match pair.right().repo.get_doc(&doc_id).await {
+        Ok(crate::DocLookup::Ready(_)) => {
+            return Err(crate::ferr!(concat!(
+                "stranger materialized a no-grant document ",
+                "(offline={offline}, before_content={before_content})"
+            )));
+        }
+        Ok(crate::DocLookup::Missing | crate::DocLookup::PendingMaterialization) | Err(_) => {}
+    }
+    let state = pair.right().repo.doc_head_state(doc_id).await?;
+    if !state.sedimentree_heads.is_empty() {
+        return Err(crate::ferr!(
+            "stranger received no-grant sedimentree heads (offline={offline}, before_content={before_content}): {:?}",
+            state.sedimentree_heads
+        ));
+    }
+    drop(owner_doc);
     Ok(())
+}
+
+utils_rs::table_tests! {
+    tier2_no_grant_cases tokio,
+    (seed, offline, before_content),
+    {
+        run_no_grant_case(seed, offline, before_content).await?;
+    },
+    multi_thread: true,
+}
+
+tier2_no_grant_cases! {
+    connected_before: (190, false, true),
+    connected_after: (192, false, false),
+    offline_before: (194, true, true),
+    offline_after: (196, true, false),
 }
 
 // ─── Read helpers (mirror ladder.rs) ─────────────────────────────────────────

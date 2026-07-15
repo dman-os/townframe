@@ -26,11 +26,10 @@
 //! [`DocIo`]: crate::runtime2::DocIo
 
 use crate::interlude::*;
-use crate::runtime2::{
-    DocIo, DocWorkerHandle, DocWorkerInternalLease, DocWorkerStopToken,
-    messages::DocWorkerMsg,
-};
 use crate::runtime::stage_automerge_ingest;
+use crate::runtime2::{
+    messages::DocWorkerMsg, DocIo, DocWorkerHandle, DocWorkerInternalLease, DocWorkerStopToken,
+};
 use crate::DocumentId;
 use big_sync_core::PeerId;
 use future_form::{FutureForm, Local, Sendable};
@@ -80,12 +79,14 @@ pub struct DocWorker2<F: FutureForm> {
 
     // ── sync bookkeeping (parcel 4b) ───────────────────────────────────────
     /// In-flight sync jobs: peer → (waiter_id, response_sender, internal_lease).
-    pub(crate) pending_sync_jobs:
-        HashMap<PeerId, Vec<(
+    pub(crate) pending_sync_jobs: HashMap<
+        PeerId,
+        Vec<(
             u64,
             futures::channel::oneshot::Sender<Result<(), crate::runtime::SyncDocError>>,
             DocWorkerInternalLease,
-        )>>,
+        )>,
+    >,
     pub(crate) active_doc_syncs: HashMap<PeerId, u64>,
     /// The subduction sync task has completed for the peer. Success does not
     /// resolve waiters until the corresponding outbound session has also been
@@ -142,7 +143,10 @@ impl<F: FutureForm> DocWorker2<F> {
                 origin,
                 resp,
                 _lease,
-            } => self.commit_delta(commits, heads, patches, origin, resp).await,
+            } => {
+                self.commit_delta(commits, heads, patches, origin, resp)
+                    .await
+            }
             DocWorkerMsg::ApplySyncSession { session, _lease } => {
                 let peer_id = PeerId::new(*session.peer_id.as_bytes());
                 let completes_sync_waiters = matches!(
@@ -174,7 +178,10 @@ impl<F: FutureForm> DocWorker2<F> {
                 timeout,
                 done,
                 _lease,
-            } => self.sync_with_peer(peer_id, waiter_id, timeout, done, _lease).await,
+            } => {
+                self.sync_with_peer(peer_id, waiter_id, timeout, done, _lease)
+                    .await
+            }
             DocWorkerMsg::CancelSyncWithPeer {
                 peer_id,
                 waiter_id,
@@ -211,10 +218,7 @@ impl<F: FutureForm> DocWorker2<F> {
                 self.retry_materialization().await.map(|_| ())
             }
             DocWorkerMsg::QueryHeadState { resp } => self.query_head_state(resp).await,
-            DocWorkerMsg::Quiesce {
-                barrier_id,
-                _lease,
-            } => {
+            DocWorkerMsg::Quiesce { barrier_id, _lease } => {
                 self.quiescence_waiters.push((barrier_id, _lease));
                 Ok(())
             }
@@ -274,38 +278,8 @@ impl<F: FutureForm> DocWorker2<F> {
             self.io.persist_cgka_update_op(op).await?;
         }
 
-        // Record frontiers only after the corresponding encrypted tree is
-        // durable. This also covers fragment heads, which have no loose row.
-        for entry in &staged.fragment_entries {
-            self.io
-                .record_content_frontier(
-                    self.sed_id,
-                    entry.head.as_bytes().to_vec(),
-                    entry
-                        .boundary
-                        .iter()
-                        .map(|content_ref| content_ref.as_bytes().to_vec())
-                        .collect(),
-                )
-                .await?;
-        }
-        for entry in &staged.loose_entries {
-            self.io
-                .record_content_frontier(
-                    self.sed_id,
-                    entry.head.as_bytes().to_vec(),
-                    entry
-                        .parents
-                        .iter()
-                        .map(|content_ref| content_ref.as_bytes().to_vec())
-                        .collect(),
-                )
-                .await?;
-        }
-
         // ── 4. Build LiveDocBundle, transition to Live ─────────────────────
-        let heads: Arc<[automerge::ChangeHash]> =
-            Arc::from(initial_content.get_heads());
+        let heads: Arc<[automerge::ChangeHash]> = Arc::from(initial_content.get_heads());
 
         // NOTE: the old `LiveDocBundle::new` takes a `RuntimeDocLease` which
         // fires `release_doc_lease` on drop. In runtime2, the hub manages
@@ -333,9 +307,9 @@ impl<F: FutureForm> DocWorker2<F> {
             .await
             .map_err(|_| ferr!("hub event channel closed"))?;
 
-        // ── 9. Note keyhive changed (frontier advanced) ────────────────────
-        // The content frontier was advanced by encrypt_loose_commit internally.
-        // We emit a note so the hub triggers keyhive sync with peers.
+        // ── 9. Note keyhive changed (initial membership/CGKA state) ───────
+        // The initial document membership and CGKA operations were persisted
+        // during creation. Emit a note so the hub triggers keyhive sync.
         // NOTE: this uses `note_local_keyhive_changed` through the runtime handle
         // (which sends a cmd to the hub). In runtime2, this is synchronous
         // since the handle's cmd channel routes to the same machine loop.
@@ -380,7 +354,7 @@ impl<F: FutureForm> DocWorker2<F> {
                             bundle: Arc::clone(&bundle),
                         })
                         .await
-            .map_err(|_| ferr!("hub event channel closed"))?;
+                        .map_err(|_| ferr!("hub event channel closed"))?;
                     crate::runtime::DocLookup::Ready(bundle)
                 } else {
                     // Weak reference expired — fall through to re-load below.
@@ -394,17 +368,14 @@ impl<F: FutureForm> DocWorker2<F> {
                     DocState::Transient(doc) => doc,
                     _ => unreachable!(),
                 };
-                let bundle = Arc::new(crate::runtime::LiveDocBundle::new_noop(
-                    self.doc_id,
-                    *doc,
-                ));
+                let bundle = Arc::new(crate::runtime::LiveDocBundle::new_noop(self.doc_id, *doc));
                 self.state = DocState::Live(Arc::downgrade(&bundle));
                 self.evt_tx
                     .send(crate::runtime2::Runtime2Evt::DocWorkerHandleAcquired {
                         bundle: Arc::clone(&bundle),
                     })
                     .await
-            .map_err(|_| ferr!("hub event channel closed"))?;
+                    .map_err(|_| ferr!("hub event channel closed"))?;
                 crate::runtime::DocLookup::Ready(bundle)
             }
             DocState::Unloaded | DocState::PendingMaterialization => {
@@ -422,8 +393,9 @@ impl<F: FutureForm> DocWorker2<F> {
     /// - `Ready(doc)` if fully decryptable.
     /// - `PendingMaterialization` if undecryptable.
     /// - `Missing` if no sedimentree content exists.
-    async fn load_doc_snapshot(&self) -> eyre::Result<crate::runtime::DocLookup<automerge::Automerge>>
-    {
+    async fn load_doc_snapshot(
+        &self,
+    ) -> eyre::Result<crate::runtime::DocLookup<automerge::Automerge>> {
         // Hydrate the tree from storage.
         let Some(mut tree) = self.io.hydrate_tree(self.sed_id).await? else {
             return Ok(crate::runtime::DocLookup::Missing);
@@ -502,43 +474,37 @@ impl<F: FutureForm> DocWorker2<F> {
     async fn take_or_load_transient_doc(
         &mut self,
     ) -> eyre::Result<crate::runtime::DocLookup<Arc<crate::runtime::LiveDocBundle>>> {
-        let was_pending =
-            matches!(self.state, DocState::PendingMaterialization);
+        let was_pending = matches!(self.state, DocState::PendingMaterialization);
         let out = match std::mem::replace(&mut self.state, DocState::Unloaded) {
             DocState::Transient(doc) => {
                 // Already have a transient doc; wrap in Live bundle.
-                let bundle = Arc::new(crate::runtime::LiveDocBundle::new_noop(
-                    self.doc_id,
-                    *doc,
-                ));
+                let bundle = Arc::new(crate::runtime::LiveDocBundle::new_noop(self.doc_id, *doc));
                 self.state = DocState::Live(Arc::downgrade(&bundle));
                 self.evt_tx
                     .send(crate::runtime2::Runtime2Evt::DocWorkerHandleAcquired {
                         bundle: Arc::clone(&bundle),
                     })
                     .await
-            .map_err(|_| ferr!("hub event channel closed"))?;
+                    .map_err(|_| ferr!("hub event channel closed"))?;
                 crate::runtime::DocLookup::Ready(bundle)
             }
             DocState::Unloaded | DocState::PendingMaterialization => {
                 let loaded = self.load_doc_snapshot().await?;
                 match loaded {
                     crate::runtime::DocLookup::Ready(doc) => {
-                        let heads: Arc<[automerge::ChangeHash]> =
-                            Arc::from(doc.get_heads());
+                        let heads: Arc<[automerge::ChangeHash]> = Arc::from(doc.get_heads());
                         self.last_notified_heads = Some(Arc::clone(&heads));
-                        self.transition_to_ready(was_pending, Arc::clone(&heads)).await?;
-                        let bundle = Arc::new(crate::runtime::LiveDocBundle::new_noop(
-                            self.doc_id,
-                            doc,
-                        ));
+                        self.transition_to_ready(was_pending, Arc::clone(&heads))
+                            .await?;
+                        let bundle =
+                            Arc::new(crate::runtime::LiveDocBundle::new_noop(self.doc_id, doc));
                         self.state = DocState::Live(Arc::downgrade(&bundle));
                         self.evt_tx
                             .send(crate::runtime2::Runtime2Evt::DocWorkerHandleAcquired {
                                 bundle: Arc::clone(&bundle),
                             })
                             .await
-            .map_err(|_| ferr!("hub event channel closed"))?;
+                            .map_err(|_| ferr!("hub event channel closed"))?;
                         crate::runtime::DocLookup::Ready(bundle)
                     }
                     crate::runtime::DocLookup::PendingMaterialization => {
@@ -596,11 +562,8 @@ impl<F: FutureForm> DocWorker2<F> {
         self.persist_commits_and_heads(&encrypted).await?;
 
         // ── 3. Notify heads changed ────────────────────────────────────────
-        self.notify_heads_changed(
-            Arc::from(heads.clone()),
-            patches,
-            origin,
-        ).await?;
+        self.notify_heads_changed(Arc::from(heads.clone()), patches, origin)
+            .await?;
         // Keep the query-facing materialized frontier synchronized with the
         // caller's actual Automerge heads even when notification coalescing
         // suppresses an event.
@@ -713,7 +676,12 @@ impl<F: FutureForm> DocWorker2<F> {
         // changes within the same head set — e.g. tombstone compaction).
         for patch in &patches {
             self.change_manager
-                .notify_doc_changed(self.doc_id, Arc::new(patch.clone()), Arc::clone(&heads), origin.clone())
+                .notify_doc_changed(
+                    self.doc_id,
+                    Arc::new(patch.clone()),
+                    Arc::clone(&heads),
+                    origin.clone(),
+                )
                 .map_err(|_| ferr!("change manager notify_doc_changed failed"))?;
         }
 
@@ -723,24 +691,44 @@ impl<F: FutureForm> DocWorker2<F> {
 
     /// Process fragment-boundary commits stored during the write.
     /// Builds and stores fragments for each pending request.
-    ///
-    /// Mirrors `process_pending_fragment_requests` at `runtime.rs:3386`.
     async fn process_pending_fragment_requests(&mut self) -> eyre::Result<()> {
         if self.pending_fragment_requests.is_empty() {
             return Ok(());
         }
+        let bundle = match &self.state {
+            DocState::Live(bundle) => bundle
+                .upgrade()
+                .ok_or_else(|| ferr!("live document expired while storing fragment"))?,
+            _ => return Ok(()),
+        };
         let requests = std::mem::take(&mut self.pending_fragment_requests);
-        for request in &requests {
-            // The fragment must be constructed from the live doc's content at
-            // the fragment boundary. In runtime2 this is deferred to the DocIo
-            // impl — the DocIo knows how to read the sed-tree and build a
-            // fragment for a given `FragmentRequested`.
-            // For the blocking-out, we log and skip.
-            tracing::warn!(
-                doc_id = ?self.doc_id,
-                head = ?request.head(),
-                "pending fragment request not yet processed (parcel 4b)"
-            );
+        let sed_id = sedimentree_core::id::SedimentreeId::new(self.doc_id.into_bytes());
+        for request in requests {
+            let (boundary, checkpoints, raw_blob) = {
+                let doc = bundle.doc.lock().await;
+                let fragment = doc
+                    .get_fragment(automerge::ChangeHash(*request.head().as_bytes()))
+                    .ok_or_else(|| ferr!("requested Automerge fragment is unavailable"))?;
+                let raw_blob = doc
+                    .bundle(fragment.members.iter().cloned())
+                    .wrap_err("unable to resolve bundle for fragment")?
+                    .bytes()
+                    .to_vec();
+                let boundary = fragment
+                    .boundary
+                    .iter()
+                    .map(|head| sedimentree_core::loose_commit::id::CommitId::new(head.0))
+                    .collect();
+                let checkpoints = fragment
+                    .checkpoints
+                    .iter()
+                    .map(|head| sedimentree_core::loose_commit::id::CommitId::new(head.0))
+                    .collect();
+                (boundary, checkpoints, raw_blob)
+            };
+            self.io
+                .store_fragment(sed_id, request.head(), boundary, checkpoints, raw_blob)
+                .await?;
         }
         Ok(())
     }
@@ -762,11 +750,13 @@ impl<F: FutureForm> DocWorker2<F> {
                 .notify_local_doc_materialization_pending(self.doc_id)
                 .map_err(|_| ferr!("change manager materialization_pending failed"))?;
             self.evt_tx
-                .send(crate::runtime2::Runtime2Evt::DocWorkerMaterializationPending {
-                    doc_id: self.doc_id,
-                })
+                .send(
+                    crate::runtime2::Runtime2Evt::DocWorkerMaterializationPending {
+                        doc_id: self.doc_id,
+                    },
+                )
                 .await
-            .map_err(|_| ferr!("hub event channel closed"))?;
+                .map_err(|_| ferr!("hub event channel closed"))?;
         }
         Ok(())
     }
@@ -785,11 +775,13 @@ impl<F: FutureForm> DocWorker2<F> {
                 .notify_local_doc_materialization_ready(self.doc_id, heads)
                 .map_err(|_| ferr!("change manager materialization_ready failed"))?;
             self.evt_tx
-                .send(crate::runtime2::Runtime2Evt::DocWorkerMaterializationReady {
-                    doc_id: self.doc_id,
-                })
+                .send(
+                    crate::runtime2::Runtime2Evt::DocWorkerMaterializationReady {
+                        doc_id: self.doc_id,
+                    },
+                )
                 .await
-            .map_err(|_| ferr!("hub event channel closed"))?;
+                .map_err(|_| ferr!("hub event channel closed"))?;
         }
         Ok(())
     }
@@ -800,10 +792,13 @@ impl<F: FutureForm> DocWorker2<F> {
     /// Mirrors the condition in `handle_apply_sync_session` at `runtime.rs:~2600`
     /// (`!wants_patches && state ∈ {Unloaded, PendingMaterialization}`).
     fn should_fast_path_pending(&self, peer_id: PeerId) -> bool {
-        !self
-            .change_manager
-            .has_change_listener_interest(self.doc_id, &crate::changes::BigRepoChangeOrigin::Remote { peer_id })
-            && matches!(self.state, DocState::Unloaded | DocState::PendingMaterialization)
+        !self.change_manager.has_change_listener_interest(
+            self.doc_id,
+            &crate::changes::BigRepoChangeOrigin::Remote { peer_id },
+        ) && matches!(
+            self.state,
+            DocState::Unloaded | DocState::PendingMaterialization
+        )
     }
 }
 
@@ -824,9 +819,7 @@ impl<F: FutureForm> DocWorker2<F> {
     /// - `state`: mapped from [`DocState`] to [`MaterializationState`].
     async fn query_head_state(
         &self,
-        resp: futures::channel::oneshot::Sender<
-            eyre::Result<crate::runtime2::DocHeadState>,
-        >,
+        resp: futures::channel::oneshot::Sender<eyre::Result<crate::runtime2::DocHeadState>>,
     ) -> eyre::Result<()> {
         let sedimentree_heads_commit_ids = self.io.sedimentree_heads(self.sed_id).await?;
 
@@ -844,7 +837,10 @@ impl<F: FutureForm> DocWorker2<F> {
                         .last_notified_heads
                         .clone()
                         .unwrap_or_else(|| Arc::from(doc.get_heads()));
-                    (Some(heads), crate::runtime2::MaterializationState::Materialized)
+                    (
+                        Some(heads),
+                        crate::runtime2::MaterializationState::Materialized,
+                    )
                 } else {
                     // Weak reference expired — treat as Unloaded.
                     (None, crate::runtime2::MaterializationState::Missing)
@@ -855,7 +851,10 @@ impl<F: FutureForm> DocWorker2<F> {
                     .last_notified_heads
                     .clone()
                     .unwrap_or_else(|| Arc::from(doc.get_heads()));
-                (Some(heads), crate::runtime2::MaterializationState::Materialized)
+                (
+                    Some(heads),
+                    crate::runtime2::MaterializationState::Materialized,
+                )
             }
             DocState::PendingMaterialization => {
                 (None, crate::runtime2::MaterializationState::Pending)
@@ -976,13 +975,7 @@ impl<F: FutureForm> DocWorker2<F> {
 
         // ── Step 2: Try to decrypt session blobs ─────────────────────────
         let (blobs, materialization_pending) = self
-            .try_decrypt_session_blobs(
-                &fragments,
-                &commits,
-                &order,
-                &received_refs,
-                &session,
-            )
+            .try_decrypt_session_blobs(&fragments, &commits, &order, &received_refs, &session)
             .await?;
 
         // ── Step 3: Decision branch ──────────────────────────────────────
@@ -1055,19 +1048,13 @@ impl<F: FutureForm> DocWorker2<F> {
             .filter_map(|item| {
                 let content_ref = match item {
                     sedimentree_core::sedimentree::SedimentreeItem::Fragment(idx) => {
-                        fragments
-                            .get(*idx)
-                            .map(|f| f.head().as_bytes().to_vec())
+                        fragments.get(*idx).map(|f| f.head().as_bytes().to_vec())
                     }
                     sedimentree_core::sedimentree::SedimentreeItem::LooseCommit(idx) => {
                         commits.get(*idx).map(|c| c.head().as_bytes().to_vec())
                     }
                 };
-                content_ref.and_then(|cr| {
-                    received_refs
-                        .contains(&cr)
-                        .then_some((item, cr))
-                })
+                content_ref.and_then(|cr| received_refs.contains(&cr).then_some((item, cr)))
             })
             .collect();
 
@@ -1081,8 +1068,9 @@ impl<F: FutureForm> DocWorker2<F> {
 
         let mut plaintext_by_ref: std::collections::HashMap<Vec<u8>, Vec<u8>> =
             std::collections::HashMap::new();
-        let mut plaintext_by_index: Vec<Option<Vec<u8>>> =
-            std::iter::repeat_with(|| None).take(received_order.len()).collect();
+        let mut plaintext_by_index: Vec<Option<Vec<u8>>> = std::iter::repeat_with(|| None)
+            .take(received_order.len())
+            .collect();
         let mut made_progress = true;
         let mut materialization_pending = false;
 
@@ -1122,7 +1110,10 @@ impl<F: FutureForm> DocWorker2<F> {
                 };
 
                 // Try entrypoint decrypt first.
-                let entrypoint = self.io.try_decrypt_content_keyed(self.sed_id, locator).await?;
+                let entrypoint = self
+                    .io
+                    .try_decrypt_content_keyed(self.sed_id, locator)
+                    .await?;
                 let Some(entrypoint_raw) = entrypoint else {
                     // Key not found — skip; may resolve via causal chain.
                     continue;
@@ -1180,12 +1171,7 @@ impl<F: FutureForm> DocWorker2<F> {
         received_all_ordered_blobs: bool,
         peer_id: PeerId,
         was_pending: bool,
-    ) -> eyre::Result<
-        Option<(
-            Vec<automerge::ChangeHash>,
-            Vec<automerge::Patch>,
-        )>,
-    > {
+    ) -> eyre::Result<Option<(Vec<automerge::ChangeHash>, Vec<automerge::Patch>)>> {
         let wants_patches = self.change_manager.has_change_listener_interest(
             self.doc_id,
             &crate::changes::BigRepoChangeOrigin::Remote { peer_id },
@@ -1223,7 +1209,8 @@ impl<F: FutureForm> DocWorker2<F> {
                         let patches = make_patches(&doc, &before_heads, &after_heads);
                         Some((after_heads, patches))
                     };
-                    self.transition_to_ready(was_pending, Arc::from(doc.get_heads())).await?;
+                    self.transition_to_ready(was_pending, Arc::from(doc.get_heads()))
+                        .await?;
                     self.state = DocState::Transient(Box::new(doc));
                     out
                 } else {
@@ -1232,7 +1219,8 @@ impl<F: FutureForm> DocWorker2<F> {
                     let mut doc = match loaded {
                         crate::runtime::DocLookup::Ready(doc) => {
                             let heads = doc.get_heads();
-                            self.transition_to_ready(was_pending, Arc::from(heads)).await?;
+                            self.transition_to_ready(was_pending, Arc::from(heads))
+                                .await?;
                             doc
                         }
                         crate::runtime::DocLookup::PendingMaterialization => {
@@ -1331,7 +1319,8 @@ impl<F: FutureForm> DocWorker2<F> {
                             let patches = make_patches(&doc, &before_heads, &after_heads);
                             Some((after_heads, patches))
                         };
-                        self.transition_to_ready(was_pending, Arc::from(doc.get_heads())).await?;
+                        self.transition_to_ready(was_pending, Arc::from(doc.get_heads()))
+                            .await?;
                         self.state = DocState::Transient(Box::new(doc));
                         out
                     } else {
@@ -1339,7 +1328,8 @@ impl<F: FutureForm> DocWorker2<F> {
                         let mut doc = match loaded {
                             crate::runtime::DocLookup::Ready(doc) => {
                                 let heads = doc.get_heads();
-                                self.transition_to_ready(was_pending, Arc::from(heads)).await?;
+                                self.transition_to_ready(was_pending, Arc::from(heads))
+                                    .await?;
                                 doc
                             }
                             crate::runtime::DocLookup::PendingMaterialization => {
@@ -1348,24 +1338,24 @@ impl<F: FutureForm> DocWorker2<F> {
                             }
                             crate::runtime::DocLookup::Missing => automerge::Automerge::new(),
                         };
-                        let loaded_heads = doc.get_heads();
-                        // The loaded snapshot is the actual Automerge baseline;
-                        // apply the received blobs regardless of the cached
-                        // storage frontier comparison. The snapshot may lag
-                        // the frontier even though the blob is already stored.
+                        // The snapshot may already include the received
+                        // blobs because storage is updated before materialization.
+                        // Compare against the last notified frontier instead of
+                        // the freshly hydrated snapshot so remote changes still
+                        // emit notifications after the live handle is dropped.
                         for blob in blobs {
                             doc.load_incremental(blob)
                                 .map_err(|e| ferr!("failed applying sync blob: {e}"))?;
                         }
                         let after_heads = doc.get_heads();
-                        let out = if loaded_heads == after_heads {
+                        let out = if before_heads == after_heads {
                             if had_cached_before {
                                 None
                             } else {
                                 Some((after_heads, Vec::new()))
                             }
                         } else {
-                            let patches = make_patches(&doc, &loaded_heads, &after_heads);
+                            let patches = make_patches(&doc, &before_heads, &after_heads);
                             Some((after_heads, patches))
                         };
                         self.state = DocState::Transient(Box::new(doc));
@@ -1391,8 +1381,12 @@ impl<F: FutureForm> DocWorker2<F> {
                 if let Some(bundle) = bundle.upgrade() {
                     let doc = bundle.doc.lock().await;
                     (doc.get_heads(), true)
+                } else if let Some(heads) = &self.last_notified_heads {
+                    // The storage frontier may already include the incoming
+                    // changes. Keep the last materialized frontier as the
+                    // notification baseline after a handle is dropped.
+                    (heads.to_vec(), true)
                 } else {
-                    // Weak expired — read from sedimentree.
                     let commit_ids = self.io.sedimentree_heads(self.sed_id).await?;
                     let heads: Vec<automerge::ChangeHash> = commit_ids
                         .iter()
@@ -1401,16 +1395,13 @@ impl<F: FutureForm> DocWorker2<F> {
                     (heads, !commit_ids.is_empty())
                 }
             }
-            DocState::Transient(doc) => {
-                (doc.get_heads(), true)
-            }
+            DocState::Transient(doc) => (doc.get_heads(), true),
             DocState::Unloaded | DocState::PendingMaterialization => {
-                let commit_ids = self.io.sedimentree_heads(self.sed_id).await?;
-                let heads: Vec<automerge::ChangeHash> = commit_ids
-                    .iter()
-                    .map(|cid| automerge::ChangeHash(*cid.as_bytes()))
-                    .collect();
-                (heads, !commit_ids.is_empty())
+                // There is no previously notified materialized frontier on a
+                // fresh worker. If a listener requires materialization, compare
+                // the hydrated document against an empty baseline so its
+                // initial remote state is observable.
+                (Vec::new(), false)
             }
         };
         Ok((heads, had_cached))
@@ -1536,12 +1527,11 @@ impl<F: FutureForm> DocWorker2<F> {
                 }
 
                 let after_heads = doc.get_heads();
-                self.transition_to_ready(was_pending, Arc::from(after_heads.clone())).await?;
+                self.transition_to_ready(was_pending, Arc::from(after_heads.clone()))
+                    .await?;
                 if was_pending {
-                    let before: Arc<[automerge::ChangeHash]> = self
-                        .last_notified_heads
-                        .clone()
-                        .unwrap_or_default();
+                    let before: Arc<[automerge::ChangeHash]> =
+                        self.last_notified_heads.clone().unwrap_or_default();
                     let patches = doc.diff(&before, &after_heads);
                     let heads_arc = Arc::<[automerge::ChangeHash]>::from(after_heads);
                     self.change_manager
@@ -1775,9 +1765,9 @@ impl<F: FutureForm> DocWorker2<F> {
                     Err(crate::runtime::SyncDocError::TransportError) => {
                         Err(crate::runtime::SyncDocError::TransportError)
                     }
-                    Err(crate::runtime::SyncDocError::IoError(error)) => {
-                        Err(crate::runtime::SyncDocError::IoError(eyre::eyre!("{error}")))
-                    }
+                    Err(crate::runtime::SyncDocError::IoError(error)) => Err(
+                        crate::runtime::SyncDocError::IoError(eyre::eyre!("{error}")),
+                    ),
                     Err(crate::runtime::SyncDocError::Other(error)) => {
                         Err(crate::runtime::SyncDocError::Other(eyre::eyre!("{error}")))
                     }
@@ -1790,7 +1780,9 @@ impl<F: FutureForm> DocWorker2<F> {
         let mut remaining = Vec::new();
         for (waiter_id, sender, lease) in waiters {
             if waiter_id < watermark {
-                sender.send(Ok(())).expect("document sync waiter receiver must remain open");
+                sender
+                    .send(Ok(()))
+                    .expect("document sync waiter receiver must remain open");
             } else {
                 remaining.push((waiter_id, sender, lease));
             }
@@ -1820,7 +1812,6 @@ impl<F: FutureForm> DocWorker2<F> {
             })
             .expect("runtime event channel must remain open");
     }
-
 }
 
 // ─── Mailbox loop trait (discharges from_send_future for wasm) ──────────
@@ -1954,7 +1945,13 @@ where
 
     let (stop_abort, stop_registration) = futures::future::AbortHandle::new_pair();
 
-    let abort = tasks.spawn(F::mailbox_loop(worker, msg_rx, stop_registration, runtime_evt_tx, doc_id))?;
+    let abort = tasks.spawn(F::mailbox_loop(
+        worker,
+        msg_rx,
+        stop_registration,
+        runtime_evt_tx,
+        doc_id,
+    ))?;
 
     Ok((
         DocWorkerHandle { msg_tx },

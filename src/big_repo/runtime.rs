@@ -2401,32 +2401,6 @@ where
             .store_sedimentree(sedimentree_id, sedimentree, blobs)
             .await
             .map_err(|err| ferr!("failed store_sedimentree: {err}"))?;
-        for entry in &staged_ingest.fragment_entries {
-            record_keyhive_content_frontier(
-                &self.runtime_handle.keyhive,
-                sedimentree_id,
-                entry.head.as_bytes().to_vec(),
-                entry
-                    .boundary
-                    .iter()
-                    .map(|content_ref| content_ref.as_bytes().to_vec())
-                    .collect(),
-            )
-            .await?;
-        }
-        for entry in &staged_ingest.loose_entries {
-            record_keyhive_content_frontier(
-                &self.runtime_handle.keyhive,
-                sedimentree_id,
-                entry.head.as_bytes().to_vec(),
-                entry
-                    .parents
-                    .iter()
-                    .map(|content_ref| content_ref.as_bytes().to_vec())
-                    .collect(),
-            )
-            .await?;
-        }
         let item_payload = serde_json::json!({
             "heads": am_utils_rs::serialize_commit_heads(&heads),
         });
@@ -2522,22 +2496,11 @@ where
                 keyhive_changed = true;
             }
             batch_keys.insert(head, app_key);
-            let pred_refs: Vec<Vec<u8>> = parents
-                .iter()
-                .map(|content_ref| content_ref.as_bytes().to_vec())
-                .collect();
             let maybe_request = self
                 .subduction
                 .store_commit(sedimentree_id, head, parents, encrypted_blob)
                 .await
                 .map_err(|err| ferr!("failed store_commit: {err}"))?;
-            record_keyhive_content_frontier(
-                &self.runtime_handle.keyhive,
-                sedimentree_id,
-                head.as_bytes().to_vec(),
-                pred_refs,
-            )
-            .await?;
             if let Some(request) = maybe_request {
                 self.pending_fragment_requests.insert(request);
             }
@@ -3930,7 +3893,6 @@ pub(crate) fn stage_automerge_ingest(doc: &automerge::Automerge) -> StagedAutome
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, PartialOrd, Ord)]
-#[expect(dead_code)]
 pub(crate) enum BigRepoCiphertextKind {
     Fragment,
     LooseCommit,
@@ -4423,9 +4385,7 @@ pub(crate) async fn encrypt_loose_commit_with_update_op(
                     .get(p)
                     .copied()
                     .or_else(|| doc_keys.get(&pref).copied())
-                    .ok_or_else(|| {
-                        ferr!("missing causal encryption key for parent {p}")
-                    })?;
+                    .ok_or_else(|| ferr!("missing causal encryption key for parent {p}"))?;
                 Ok((pref, key))
             })
             .collect::<Res<_>>()?;
@@ -4575,32 +4535,6 @@ pub(crate) fn fragment_nonce_context(
         context.extend_from_slice(boundary_head.as_bytes());
     }
     context
-}
-
-/// Advance the Keyhive document's local content frontier after durable storage.
-///
-/// This only updates the local document state used for later `after_content`
-/// construction. It does not emit a Keyhive event.
-pub(crate) async fn record_keyhive_content_frontier(
-    keyhive_handle: &BigKeyhiveHandle,
-    sedimentree_id: SedimentreeId,
-    content_ref: Vec<u8>,
-    pred_refs: Vec<Vec<u8>>,
-) -> Res<()> {
-    let keyhive = keyhive_handle.clone_keyhive();
-    let vk = ed25519_dalek::VerifyingKey::from_bytes(sedimentree_id.as_bytes())
-        .map_err(|_| ferr!("not a valid Keyhive DocumentId"))?;
-    let kh_doc_id = keyhive_core::principal::document::id::DocumentId::from(
-        keyhive_core::principal::identifier::Identifier::from(vk),
-    );
-    let kh_doc = keyhive
-        .get_document(kh_doc_id)
-        .await
-        .ok_or_else(|| ferr!("keyhive doc not found for frontier recording"))?;
-    keyhive
-        .record_content_frontier(kh_doc, &content_ref, &pred_refs)
-        .await;
-    Ok(())
 }
 
 pub(crate) async fn persist_cgka_update_op(

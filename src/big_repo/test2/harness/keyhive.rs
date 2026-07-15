@@ -103,4 +103,3 @@ pub(crate) async fn assert_document_snapshot_equal(
     }
     Ok(())
 }
-

@@ -10,7 +10,7 @@ mod interlude {
 use crate::interlude::*;
 use crate::keyhive_storage::{BigRepoKeyhiveStorage, KEYHIVE_SUBDIR};
 
-use std::collections::{BTreeSet, HashMap};
+use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::sync::atomic::{AtomicBool, Ordering};
 
 use automerge::ChangeHash;
@@ -34,6 +34,7 @@ mod runtime;
 /// See `play.big_repo.runtime2.md`.
 pub(crate) mod runtime2;
 mod sqlite_big_repo_store;
+pub use sqlite_big_repo_store::SqliteBigRepoStore;
 pub(crate) mod wire;
 pub use runtime::{CreateDocError, DocLookup, GetDocError, PutDocError, SyncDocError};
 #[cfg(test)]
@@ -114,6 +115,62 @@ impl BigRepo {
             node_identity_seed,
             storage,
         } = config;
+        match storage {
+            StorageConfig::Memory => {
+                Self::boot_inner(
+                    Config {
+                        node_identity_seed,
+                        storage: StorageConfig::Memory,
+                    },
+                    big_sync_store,
+                    subduction_core::storage::memory::MemoryStorage::new(),
+                )
+                .await
+            }
+            StorageConfig::Disk { path } => {
+                let subduction_dir = path.join("subduction");
+                std::fs::create_dir_all(&subduction_dir).wrap_err_with(|| {
+                    format!(
+                        "Failed to create subduction directory: {}",
+                        subduction_dir.display()
+                    )
+                })?;
+                let redb_storage = subduction_redb_storage::RedbStorage::new(subduction_dir)
+                    .wrap_err("failed booting subduction redb storage")?;
+                Self::boot_inner(
+                    Config {
+                        node_identity_seed,
+                        storage: StorageConfig::Disk { path },
+                    },
+                    big_sync_store,
+                    redb_storage,
+                )
+                .await
+            }
+        }
+    }
+
+    /// Boot BigRepo with one SQLite store shared by runtime2 and big-sync.
+    pub async fn boot_with_sqlite(
+        config: Config,
+        store: SqliteBigRepoStore,
+    ) -> Res<(Arc<Self>, BigRepoStopToken)> {
+        let runtime_store = store.clone();
+        Self::boot_inner(config, Arc::new(store), runtime_store).await
+    }
+
+    async fn boot_inner<S>(
+        config: Config,
+        big_sync_store: SharedPartStore,
+        subduction_storage: S,
+    ) -> Res<(Arc<Self>, BigRepoStopToken)>
+    where
+        S: runtime::BigRepoSubductionStorage,
+    {
+        let Config {
+            node_identity_seed,
+            storage,
+        } = config;
         // `SubductionKeyhive` authorizes peers by matching the peer signing
         // identity to the Keyhive individual identifier, so BigRepo derives
         // both identities from this one seed.
@@ -154,47 +211,18 @@ impl BigRepo {
         let peer_id = PeerId::new(*signer.verifying_key().as_bytes());
         let (change_manager, change_manager_stop) = changes::ChangeListenerManager::boot();
 
-        let (runtime, ephemeral, runtime_stop) = match storage {
-            StorageConfig::Memory => {
-                let (runtime, ephemeral, _events, stop) = runtime2::native::spawn_native_runtime2(
-                    signer,
-                    subduction_core::storage::memory::MemoryStorage::new(),
-                    big_sync_store.clone(),
-                    Arc::clone(&policy),
-                    sync_policy,
-                    keyhive.clone(),
-                    keyhive_storage.clone(),
-                    Arc::clone(&change_manager),
-                    listener_evt_rx,
-                )
-                .await?;
-                (runtime, ephemeral, stop)
-            }
-            StorageConfig::Disk { path } => {
-                let subduction_dir = path.join("subduction");
-                std::fs::create_dir_all(&subduction_dir).wrap_err_with(|| {
-                    format!(
-                        "Failed to create subduction directory: {}",
-                        subduction_dir.display()
-                    )
-                })?;
-                let redb_storage = subduction_redb_storage::RedbStorage::new(subduction_dir)
-                    .wrap_err("failed booting subduction redb storage")?;
-                let (runtime, ephemeral, _events, stop) = runtime2::native::spawn_native_runtime2(
-                    signer,
-                    redb_storage,
-                    big_sync_store.clone(),
-                    Arc::clone(&policy),
-                    sync_policy,
-                    keyhive.clone(),
-                    keyhive_storage.clone(),
-                    Arc::clone(&change_manager),
-                    listener_evt_rx,
-                )
-                .await?;
-                (runtime, ephemeral, stop)
-            }
-        };
+        let (runtime, ephemeral, _events, runtime_stop) = runtime2::native::spawn_native_runtime2(
+            signer,
+            subduction_storage,
+            big_sync_store.clone(),
+            Arc::clone(&policy),
+            sync_policy,
+            keyhive.clone(),
+            keyhive_storage.clone(),
+            Arc::clone(&change_manager),
+            listener_evt_rx,
+        )
+        .await?;
 
         let out = Arc::new(Self {
             local_peer_id: peer_id,
@@ -289,10 +317,7 @@ impl BigRepo {
 
     /// Wait until finite runtime work currently admitted to this repository
     /// has drained. Pending materialization due to unavailable keys is allowed.
-    pub async fn wait_for_quiescence(
-        &self,
-        timeout: Option<std::time::Duration>,
-    ) -> Res<()> {
+    pub async fn wait_for_quiescence(&self, timeout: Option<std::time::Duration>) -> Res<()> {
         self.runtime.wait_for_quiescence(timeout).await
     }
 
@@ -331,15 +356,48 @@ impl BigRepo {
         Ok(group)
     }
 
+    /// Add a principal to a group and propagate reader membership into every
+    /// document governed by that group. Reader additions also create one
+    /// history checkpoint per affected document.
     pub async fn add_member_to_group(
         self: &Arc<Self>,
         member: impl Into<BigKeyhiveAuthority>,
         group: &BigKeyhiveGroup,
         access: keyhive_core::access::Access,
     ) -> Res<()> {
-        self.keyhive
-            .add_member_to_group(member, group, access, &self.keyhive_storage)
+        let mut docs = BTreeMap::new();
+        for doc_id in self.keyhive.group_document_ids(group).await {
+            let doc = self.get_doc(&doc_id).await?.into_ready(doc_id)?;
+            docs.insert(doc_id, doc);
+        }
+
+        let mut after_content = BTreeMap::new();
+        for doc_id in docs.keys().copied() {
+            let heads = self.doc_head_state(doc_id).await?.sedimentree_heads;
+            after_content.insert(doc_id, heads.iter().map(|head| head.0.to_vec()).collect());
+        }
+
+        let affected_docs = self
+            .keyhive
+            .add_member_to_group(member, group, access, after_content, &self.keyhive_storage)
             .await?;
+
+        // BigRepo's contract is history-inclusive for reader grants. Keyhive
+        // updates each affected document's CGKA tree, while this layer creates
+        // one real content checkpoint per affected document so the new member
+        // receives a decryptable entry point to the existing history.
+        if access.is_reader() {
+            for doc_id in affected_docs {
+                let doc = docs
+                    .get(&doc_id)
+                    .ok_or_else(|| ferr!("affected document was not preflighted: {doc_id}"))?;
+                doc.with_document(|doc| {
+                    let _ = doc.empty_commit(automerge::transaction::CommitOptions::default());
+                })
+                .await?;
+            }
+        }
+
         self.runtime.note_local_keyhive_changed().await?;
         Ok(())
     }
@@ -355,9 +413,17 @@ impl BigRepo {
         access: keyhive_core::access::Access,
     ) -> Res<()> {
         let doc = self.get_doc(&doc_id).await?.into_ready(doc_id)?;
+        let heads = self.doc_head_state(doc_id).await?.sedimentree_heads;
+        let after_content = heads.iter().map(|head| head.0.to_vec()).collect();
 
         self.keyhive
-            .grant_doc_access(principal, doc_id, access, &self.keyhive_storage)
+            .grant_doc_access(
+                principal,
+                doc_id,
+                access,
+                after_content,
+                &self.keyhive_storage,
+            )
             .await?;
 
         if access.is_reader() {
@@ -372,6 +438,28 @@ impl BigRepo {
 
         self.runtime.note_local_keyhive_changed().await?;
 
+        Ok(())
+    }
+
+    /// Revoke an authority's access using the current sedimentree frontier.
+    pub async fn revoke_doc_access(
+        self: &Arc<Self>,
+        doc_id: DocumentId,
+        principal: impl Into<BigKeyhiveAuthority>,
+    ) -> Res<()> {
+        let _doc = self.get_doc(&doc_id).await?.into_ready(doc_id)?;
+        let heads = self.doc_head_state(doc_id).await?.sedimentree_heads;
+        let after_content = heads.iter().map(|head| head.0.to_vec()).collect();
+        self.keyhive
+            .revoke_doc_access(
+                principal,
+                doc_id,
+                true,
+                after_content,
+                &self.keyhive_storage,
+            )
+            .await?;
+        self.runtime.note_local_keyhive_changed().await?;
         Ok(())
     }
 }

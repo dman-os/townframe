@@ -467,21 +467,21 @@ pub async fn clone_repo_init_from_url(
             crate::repo::globals::set_sync_config(&sql, &sync_config).await?;
         }
 
-        let part_store = big_sync::SqlitePartStore::new(
+        let sqlite_part_store = big_repo::SqliteBigRepoStore::new(
             sql.clone(),
             bootstrap.repo_id.clone(),
             big_sync_core::BuckId::MAX_LEVEL,
         )
         .await?;
-        let part_store: Arc<dyn big_sync::HostPartStore> = Arc::new(part_store) as _;
-        let (big_repo, big_repo_stop) = big_repo::BigRepo::boot(
+        let part_store: Arc<dyn big_sync::HostPartStore> = Arc::new(sqlite_part_store.clone()) as _;
+        let (big_repo, big_repo_stop) = big_repo::BigRepo::boot_with_sqlite(
             big_repo::Config {
                 node_identity_seed: identity.iroh_secret_key.to_bytes(),
                 storage: big_repo::StorageConfig::Disk {
                     path: staging.join("samod"),
                 },
             },
-            Arc::clone(&part_store),
+            sqlite_part_store,
         )
         .await?;
         let blobs_repo = crate::blobs::BlobsRepo::new(

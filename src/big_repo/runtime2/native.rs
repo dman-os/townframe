@@ -37,9 +37,8 @@ use crate::{
     runtime::{
         accept_incoming, connect_outgoing_to, encrypt_fragment_blob,
         encrypt_loose_commit_with_update_op, encrypt_staged_automerge_ingest,
-        persist_cgka_update_op, record_keyhive_content_frontier, sedimentree_heads_payload,
-        BigRepoIrohTransport, BigRepoSubduction, BigRepoSubductionStorage, BigRepoSyncPolicy,
-        IrohConnectResult, SubductionSedimentrees,
+        persist_cgka_update_op, sedimentree_heads_payload, BigRepoIrohTransport, BigRepoSubduction,
+        BigRepoSubductionStorage, BigRepoSyncPolicy, IrohConnectResult, SubductionSedimentrees,
     },
     wire::BigRepoWireMessage,
     BigEphemeral, BigEphemeralFilter, BigEphemeralSubscription, BigEphemeralTopic,
@@ -55,7 +54,7 @@ use keyhive_core::{
 use keyhive_crypto::symmetric_key::SymmetricKey;
 use nonempty::NonEmpty;
 use sedimentree_core::{
-    blob::Blob,
+    blob::{Blob, BlobMeta},
     depth::CountLeadingZeroBytes,
     id::SedimentreeId,
     loose_commit::id::CommitId,
@@ -315,13 +314,10 @@ where
     ) -> <Sendable as future_form::FutureForm>::Future<'_, eyre::Result<EncryptedInitialSedimentree>>
     {
         Sendable::from_future(async move {
-            let (sedimentree, blobs, cgka_update_ops) = encrypt_staged_automerge_ingest(
-                &staged,
-                &self.keyhive,
-                sed_id,
-            )
-            .await
-            .wrap_err("failed encrypting initial sedimentree")?;
+            let (sedimentree, blobs, cgka_update_ops) =
+                encrypt_staged_automerge_ingest(&staged, &self.keyhive, sed_id)
+                    .await
+                    .wrap_err("failed encrypting initial sedimentree")?;
             Ok(EncryptedInitialSedimentree {
                 sedimentree,
                 blobs,
@@ -443,21 +439,11 @@ where
             } = commit;
 
             // Wrap the blob for subduction's store_commit call.
-            let pred_refs: Vec<Vec<u8>> = parents.iter().map(|c| c.as_bytes().to_vec()).collect();
             let maybe_request = self
                 .subduction
                 .store_commit(sed_id, head, parents, blob)
                 .await
                 .map_err(|err| ferr!("failed store_commit: {err}"))?;
-
-            // Record content frontier in keyhive.
-            record_keyhive_content_frontier(
-                &self.keyhive,
-                sed_id,
-                head.as_bytes().to_vec(),
-                pred_refs,
-            )
-            .await?;
 
             Ok(maybe_request)
         })
@@ -467,22 +453,30 @@ where
     fn store_fragment(
         &self,
         sed_id: SedimentreeId,
-        fragment: sedimentree_core::fragment::Fragment,
+        head: CommitId,
+        boundary: std::collections::BTreeSet<CommitId>,
         checkpoints: Vec<CommitId>,
-        blob: Blob,
+        raw_blob: Vec<u8>,
     ) -> <Sendable as future_form::FutureForm>::Future<'_, eyre::Result<()>> {
         Sendable::from_future(async move {
-            // Re-encrypt the fragment blob using the head's content key.
+            let raw_blob = Blob::new(raw_blob);
             let encrypted_blob = encrypt_fragment_blob(
                 &self.keyhive,
                 &self.storage,
                 sed_id,
-                fragment.head(),
-                &fragment.boundary().clone(),
-                blob.as_slice(),
+                head,
+                &boundary,
+                raw_blob.as_slice(),
             )
             .await
             .wrap_err("failed encrypting fragment blob")?;
+            let fragment = sedimentree_core::fragment::Fragment::new(
+                sed_id,
+                head,
+                boundary,
+                &checkpoints,
+                BlobMeta::new(&encrypted_blob),
+            );
 
             self.subduction
                 .add_fragment(
@@ -516,24 +510,8 @@ where
         })
     }
 
-    // ── content frontier ─────────────────────────────────────────────────
-    fn record_content_frontier(
-        &self,
-        sed_id: SedimentreeId,
-        content_ref: Vec<u8>,
-        pred_refs: Vec<Vec<u8>>,
-    ) -> <Sendable as FutureForm>::Future<'_, eyre::Result<()>> {
-        Sendable::from_future(async move {
-            record_keyhive_content_frontier(&self.keyhive, sed_id, content_ref, pred_refs)
-                .await
-                .wrap_err("failed recording content frontier")
-        })
-    }
-
     // ── note local keyhive change ─────────────────────────────────────────
-    fn note_local_keyhive_changed(
-        &self,
-    ) -> <Sendable as FutureForm>::Future<'_, eyre::Result<()>> {
+    fn note_local_keyhive_changed(&self) -> <Sendable as FutureForm>::Future<'_, eyre::Result<()>> {
         Sendable::from_future(async move {
             self.keyhive_protocol
                 .note_local_keyhive_changed()
@@ -695,13 +673,11 @@ where
                 let mut doc = kh_doc.lock().await;
                 match doc.try_decrypt_content_keyed(&encrypted) {
                     Ok((plaintext, key)) => (plaintext, key),
-                    Err(
-                        keyhive_core::principal::document::DecryptError::KeyNotFound,
-                    ) => return Ok(CausalDecryptResult::default()),
+                    Err(keyhive_core::principal::document::DecryptError::KeyNotFound) => {
+                        return Ok(CausalDecryptResult::default())
+                    }
                     Err(error) => {
-                        return Err(ferr!(
-                            "entrypoint decrypt failed: {error}"
-                        ));
+                        return Err(ferr!("entrypoint decrypt failed: {error}"));
                     }
                 }
             };
@@ -858,19 +834,20 @@ where
                 .await;
 
             let own_id = PeerId::new(self.keyhive.clone_keyhive().id().to_bytes());
-            if agents
-                .get(&own_id)
-                .is_some_and(|access| access.is_reader())
-            {
+            if agents.get(&own_id).is_some_and(|access| access.is_reader()) {
                 self.big_sync_store
                     .add_obj_to_parts(doc_id, vec![crate::GLOBAL_PART_ID])
                     .await
-                    .map_err(|error| ferr!("failed adding document to global partition: {error}"))?;
+                    .map_err(|error| {
+                        ferr!("failed adding document to global partition: {error}")
+                    })?;
             } else {
                 self.big_sync_store
                     .remove_obj_from_part(doc_id, crate::GLOBAL_PART_ID)
                     .await
-                    .map_err(|error| ferr!("failed removing document from global partition: {error}"))?;
+                    .map_err(|error| {
+                        ferr!("failed removing document from global partition: {error}")
+                    })?;
             }
 
             let group_ids: std::collections::HashSet<PeerId> = self
@@ -1331,8 +1308,8 @@ where
                         peer_id,
                         request_id,
                     })
-                .is_err()
-            {
+                    .is_err()
+                {
                     tracing::debug!(
                         %peer_id,
                         "runtime2 stopped before keyhive sync-done event"

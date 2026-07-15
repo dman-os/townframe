@@ -1013,7 +1013,7 @@ fn notification_matches_filter(
 
     match notification {
         BigRepoChangeNotification::DocChanged { patch, .. } => {
-            path_prefix_matches(&filter.path, &patch.path[..])
+            patch_matches_path(&filter.path, patch)
         }
         BigRepoChangeNotification::DocCreated { .. }
         | BigRepoChangeNotification::DocImported { .. } => false,
@@ -1257,6 +1257,38 @@ pub fn prop_matches(listener_prop: &Prop<'_>, change_prop: &automerge::Prop) -> 
         (Prop::Key(listener_key), automerge::Prop::Map(change_key)) => listener_key == change_key,
         (Prop::Index(listener_idx), automerge::Prop::Seq(change_idx)) => {
             *listener_idx == (*change_idx as u32)
+        }
+        _ => false,
+    }
+}
+
+fn patch_matches_path(listener_path: &[Prop<'_>], patch: &automerge::Patch) -> bool {
+    if path_prefix_matches(listener_path, &patch.path[..]) {
+        return true;
+    }
+
+    let Some((last_listener, listener_prefix)) = listener_path.split_last() else {
+        return true;
+    };
+    listener_prefix.len() == patch.path.len()
+        && path_prefix_matches(listener_prefix, &patch.path[..])
+        && action_prop_matches(last_listener, &patch.action)
+}
+
+fn action_prop_matches(listener_prop: &Prop<'_>, action: &automerge::PatchAction) -> bool {
+    match (listener_prop, action) {
+        (Prop::Key(listener_key), automerge::PatchAction::PutMap { key, .. })
+        | (Prop::Key(listener_key), automerge::PatchAction::DeleteMap { key }) => {
+            listener_key == key
+        }
+        (Prop::Index(listener_idx), automerge::PatchAction::PutSeq { index, .. })
+        | (Prop::Index(listener_idx), automerge::PatchAction::Insert { index, .. })
+        | (Prop::Index(listener_idx), automerge::PatchAction::DeleteSeq { index, .. }) => {
+            *listener_idx == (*index as u32)
+        }
+        (listener_prop, automerge::PatchAction::Increment { prop, .. })
+        | (listener_prop, automerge::PatchAction::Conflict { prop }) => {
+            prop_matches(listener_prop, prop)
         }
         _ => false,
     }

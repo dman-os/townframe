@@ -4,5 +4,8 @@
 //! fixture and the Tier-0 state assertions are kept close to the scenario.
 
 mod access_matrix;
+mod cgka;
 mod harness;
 mod ladder;
+mod notifications;
+mod revocation;
