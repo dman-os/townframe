@@ -38,7 +38,9 @@ async fn lookup_summary(repo: &Arc<crate::BigRepo>, doc_id: DocumentId) -> Strin
     let nick = log_nickname::nickname(&repo.local_peer_id());
     match repo.get_doc(&doc_id).await {
         Ok(crate::DocLookup::Ready(_)) => format!("{nick}: lookup=Ready"),
-        Ok(crate::DocLookup::PendingMaterialization) => format!("{nick}: lookup=PendingMaterialization"),
+        Ok(crate::DocLookup::PendingMaterialization) => {
+            format!("{nick}: lookup=PendingMaterialization")
+        }
         Ok(crate::DocLookup::Missing) => format!("{nick}: lookup=Missing"),
         Err(e) => format!("{nick}: lookup=error({e})"),
     }

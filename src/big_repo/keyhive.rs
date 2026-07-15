@@ -8,7 +8,7 @@ use keyhive_core::principal::group::id::GroupId as KhGroupId;
 use keyhive_core::principal::identifier::Identifier;
 use keyhive_crypto::signer::memory::MemorySigner;
 use nonempty::NonEmpty;
-use std::collections::{BTreeMap, HashMap};
+use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::fmt::{Debug, Formatter};
 use std::sync::Arc;
 
@@ -93,6 +93,10 @@ impl BigKeyhiveAuthority {
             Self::Agent(agent) => agent,
             Self::Group(group) => group.as_agent(),
         }
+    }
+
+    fn into_identifier(self) -> Identifier {
+        self.into_agent().id()
     }
 
     fn into_peer(self) -> Res<BigKeyhivePeer> {
@@ -438,30 +442,49 @@ impl BigKeyhiveHandle {
         Ok(BigKeyhiveGroup { id, inner: group })
     }
 
+    pub(crate) async fn group_document_ids(&self, group: &BigKeyhiveGroup) -> BTreeSet<DocumentId> {
+        self.keyhive
+            .document_ids_containing_group(group.id())
+            .await
+            .into_iter()
+            .map(|doc_id| DocumentId::new(*doc_id.as_bytes()))
+            .collect()
+    }
+
     pub(crate) async fn add_member_to_group(
         &self,
         member: impl Into<BigKeyhiveAuthority>,
         group: &BigKeyhiveGroup,
         access: keyhive_core::access::Access,
+        after_content: BTreeMap<DocumentId, Vec<Vec<u8>>>,
         storage: &crate::keyhive_storage::BigRepoKeyhiveStorage,
-    ) -> Res<()> {
+    ) -> Res<BTreeSet<DocumentId>> {
         use keyhive_core::principal::membered::Membered;
 
         let member = member.into().into_agent();
         let group_id = group.id();
         let kh = self.keyhive.as_ref();
+        let after_content = after_content
+            .into_iter()
+            .map(|(doc_id, refs)| Ok((keyhive_doc_id(doc_id)?, refs)))
+            .collect::<Res<BTreeMap<_, _>>>()?;
         let update = kh
-            .add_member(
+            .add_member_with_manual_content(
                 member,
                 &Membered::Group(group_id, group.shared()),
                 access,
-                &[],
+                after_content,
             )
             .await
             .map_err(|err| ferr!("group member add failed: {err}"))?;
+        let affected_docs = update
+            .cgka_ops
+            .iter()
+            .map(|op| DocumentId::new(*op.payload().doc_id().as_bytes()))
+            .collect();
         persist_cgka_update_ops(storage, update.cgka_ops).await?;
         persist_delegation(storage, update.delegation).await?;
-        Ok(())
+        Ok(affected_docs)
     }
 
     /// Grant an agent access to a document.
@@ -470,26 +493,64 @@ impl BigKeyhiveHandle {
         principal: impl Into<BigKeyhiveAuthority>,
         doc_id: DocumentId,
         access: keyhive_core::access::Access,
+        after_content: Vec<Vec<u8>>,
         storage: &crate::keyhive_storage::BigRepoKeyhiveStorage,
     ) -> Res<()> {
         use keyhive_core::principal::membered::Membered;
         let agent = principal.into().into_agent();
-        let doc_id_bytes = doc_id.into_bytes();
-        let vk = ed25519_dalek::VerifyingKey::from_bytes(&doc_id_bytes)
-            .map_err(|_| ferr!("doc_id is not a valid Ed25519 point"))?;
-        let kh_doc_id = keyhive_core::principal::document::id::DocumentId::from(
-            keyhive_core::principal::identifier::Identifier::from(vk),
-        );
+        let kh_doc_id = keyhive_doc_id(doc_id)?;
         let kh = self.keyhive.as_ref();
-        let doc = kh.get_document(kh_doc_id).await.ok_or_else(|| {
-            ferr!("document not found in keyhive: {doc_id} (bytes={doc_id_bytes:?})",)
-        })?;
+        let doc = kh
+            .get_document(kh_doc_id)
+            .await
+            .ok_or_else(|| ferr!("document not found in keyhive: {doc_id}"))?;
         let update = kh
-            .add_member(agent, &Membered::Document(kh_doc_id, doc), access, &[])
+            .add_member_with_manual_content(
+                agent,
+                &Membered::Document(kh_doc_id, doc),
+                access,
+                BTreeMap::from([(kh_doc_id, after_content)]),
+            )
             .await
             .map_err(|err| ferr!("grant failed: {err}"))?;
         persist_cgka_update_ops(storage, update.cgka_ops).await?;
         persist_delegation(storage, update.delegation).await?;
+        Ok(())
+    }
+
+    /// Revoke an authority's access to a document with an explicit content frontier.
+    pub(crate) async fn revoke_doc_access(
+        &self,
+        principal: impl Into<BigKeyhiveAuthority>,
+        doc_id: DocumentId,
+        retain_all_other_members: bool,
+        after_content: Vec<Vec<u8>>,
+        storage: &crate::keyhive_storage::BigRepoKeyhiveStorage,
+    ) -> Res<()> {
+        use keyhive_core::principal::membered::Membered;
+
+        let kh_doc_id = keyhive_doc_id(doc_id)?;
+        let kh = self.keyhive.as_ref();
+        let doc = kh
+            .get_document(kh_doc_id)
+            .await
+            .ok_or_else(|| ferr!("document not found in keyhive: {doc_id}"))?;
+        let update = kh
+            .revoke_member_with_manual_content(
+                principal.into().into_identifier(),
+                retain_all_other_members,
+                &Membered::Document(kh_doc_id, doc),
+                BTreeMap::from([(kh_doc_id, after_content)]),
+            )
+            .await
+            .map_err(|err| ferr!("revoke failed: {err}"))?;
+        persist_cgka_update_ops(storage, update.cgka_ops().to_vec()).await?;
+        for revocation in update.revocations() {
+            persist_revocation(storage, Arc::clone(revocation)).await?;
+        }
+        for redelegation in update.redelegations() {
+            persist_delegation(storage, Arc::clone(redelegation)).await?;
+        }
         Ok(())
     }
 
@@ -507,6 +568,14 @@ impl BigKeyhiveHandle {
     }
 }
 
+fn keyhive_doc_id(doc_id: DocumentId) -> Res<keyhive_core::principal::document::id::DocumentId> {
+    let vk = ed25519_dalek::VerifyingKey::from_bytes(&doc_id.into_bytes())
+        .map_err(|_| ferr!("doc_id is not a valid Ed25519 point"))?;
+    Ok(keyhive_core::principal::document::id::DocumentId::from(
+        keyhive_core::principal::identifier::Identifier::from(vk),
+    ))
+}
+
 async fn persist_delegation(
     storage: &crate::keyhive_storage::BigRepoKeyhiveStorage,
     delegation: Arc<keyhive_crypto::signed::Signed<BigKeyhiveDelegation>>,
@@ -521,6 +590,23 @@ async fn persist_delegation(
     subduction_keyhive::save_event::<Vec<u8>, _, future_form::Sendable>(storage, &event)
         .await
         .map_err(|err| ferr!("failed saving keyhive delegation event: {err}"))?;
+    Ok(())
+}
+
+async fn persist_revocation(
+    storage: &crate::keyhive_storage::BigRepoKeyhiveStorage,
+    revocation: Arc<keyhive_crypto::signed::Signed<BigKeyhiveRevocation>>,
+) -> Res<()> {
+    let event: StaticEvent<Vec<u8>> = keyhive_core::event::Event::<
+        future_form::Sendable,
+        MemorySigner,
+        Vec<u8>,
+        BigRepoKeyhiveListener,
+    >::Revoked(revocation)
+    .into();
+    subduction_keyhive::save_event::<Vec<u8>, _, future_form::Sendable>(storage, &event)
+        .await
+        .map_err(|err| ferr!("failed saving keyhive revocation event: {err}"))?;
     Ok(())
 }
 

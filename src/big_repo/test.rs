@@ -23,41 +23,29 @@ use subduction_keyhive::KeyhivePeerId;
 use tempfile::tempdir;
 use tokio::{sync::Notify, time::timeout};
 
-pub async fn boot_part_store(sqlite_url: &str) -> Res<(Arc<big_sync::Ctx>, big_sync::StopToken)> {
-    let sql = sqlx_utils_rs::SqlCtx::url(sqlite_url).await?;
-
-    let store = Arc::new(
-        big_sync::SqlitePartStore::new(
-            sql,
-            sqlite_url.to_owned(),
-            big_sync_core::BuckId::MAX_LEVEL,
-        )
-        .await?,
-    );
-    let store_for_worker: Arc<dyn big_sync::HostPartStore> = Arc::clone(&store) as _;
-    let (worker, stop) =
-        big_sync::spawn_big_sync_worker(Arc::clone(&store_for_worker), HashMap::new())?;
-    Ok((
-        Arc::new(big_sync::Ctx {
-            store: store_for_worker,
-            worker,
-        }),
-        stop,
-    ))
-}
 pub async fn boot_repo() -> Res<(
     Arc<BigRepo>,
     Arc<big_sync::Ctx>,
     Box<dyn FnOnce() -> futures::future::BoxFuture<'static, Res<()>>>,
 )> {
     utils_rs::testing::setup_tracing_once();
-    let (big_sync_host, big_sync_stop) = boot_part_store("sqlite::memory:").await?;
-    let (repo, stop) = BigRepo::boot(
+    let sql = sqlx_utils_rs::SqlCtx::memory().await?;
+    let store = Arc::new(
+        SqliteBigRepoStore::new(sql, "big-repo-test", big_sync_core::BuckId::MAX_LEVEL).await?,
+    );
+    let shared_store: Arc<dyn big_sync::HostPartStore> = Arc::clone(&store) as _;
+    let (worker, big_sync_stop) =
+        big_sync::spawn_big_sync_worker(Arc::clone(&shared_store), HashMap::new())?;
+    let big_sync_host = Arc::new(big_sync::Ctx {
+        store: shared_store,
+        worker,
+    });
+    let (repo, stop) = BigRepo::boot_with_sqlite(
         Config {
             node_identity_seed: [7_u8; 32],
             storage: StorageConfig::Memory,
         },
-        Arc::clone(&big_sync_host.store),
+        (*store).clone(),
     )
     .await?;
     Ok((
@@ -84,13 +72,23 @@ pub async fn _boot_disk_repo(
     std::fs::create_dir_all(&path)
         .wrap_err_with(|| format!("failed creating disk repo path: {}", path.display()))?;
     let sqlite_url = format!("sqlite://{}", path.join("part_store.db").display());
-    let (big_sync_host, big_sync_stop) = boot_part_store(&sqlite_url).await?;
-    let (repo, stop) = BigRepo::boot(
+    let sql = sqlx_utils_rs::SqlCtx::url(&sqlite_url).await?;
+    let store = Arc::new(
+        SqliteBigRepoStore::new(sql, "big-repo-test", big_sync_core::BuckId::MAX_LEVEL).await?,
+    );
+    let shared_store: Arc<dyn big_sync::HostPartStore> = Arc::clone(&store) as _;
+    let (worker, big_sync_stop) =
+        big_sync::spawn_big_sync_worker(Arc::clone(&shared_store), HashMap::new())?;
+    let big_sync_host = Arc::new(big_sync::Ctx {
+        store: shared_store,
+        worker,
+    });
+    let (repo, stop) = BigRepo::boot_with_sqlite(
         Config {
             node_identity_seed: [7_u8; 32],
             storage: StorageConfig::Disk { path },
         },
-        Arc::clone(&big_sync_host.store),
+        (*store).clone(),
     )
     .await?;
     Ok((
@@ -361,11 +359,11 @@ async fn create_doc_records_initial_frontier_for_after_content() -> Res<()> {
         Arc::new(Mutex::new(public_individual)),
     );
     let update = keyhive
-        .add_member(
+        .add_member_with_manual_content(
             public_agent,
             &keyhive_core::principal::membered::Membered::Document(kh_doc_id, kh_doc),
             keyhive_core::access::Access::Read,
-            &[],
+            std::collections::BTreeMap::from([(kh_doc_id, vec![initial_head.clone()])]),
         )
         .await
         .expect("granting read access should succeed");
@@ -423,11 +421,11 @@ async fn write_records_latest_frontier_for_after_content() -> Res<()> {
         Arc::new(Mutex::new(public_individual)),
     );
     let update = keyhive
-        .add_member(
+        .add_member_with_manual_content(
             public_agent,
             &keyhive_core::principal::membered::Membered::Document(kh_doc_id, kh_doc),
             keyhive_core::access::Access::Read,
-            &[],
+            std::collections::BTreeMap::from([(kh_doc_id, vec![latest_head.clone()])]),
         )
         .await
         .expect("granting read access should succeed");
@@ -2925,7 +2923,18 @@ impl SyncRepoNode {
         std::fs::create_dir_all(&path)
             .wrap_err_with(|| format!("failed creating sync repo path: {}", path.display()))?;
         let sqlite_url = format!("sqlite://{}", path.join("part_store.db").display());
-        let (big_sync_host, big_sync_stop) = boot_part_store(&sqlite_url).await?;
+        let sql = sqlx_utils_rs::SqlCtx::url(&sqlite_url).await?;
+        let store = Arc::new(
+            SqliteBigRepoStore::new(sql, "big-repo-sync-test", big_sync_core::BuckId::MAX_LEVEL)
+                .await?,
+        );
+        let shared_store: SharedPartStore = Arc::clone(&store) as _;
+        let (initial_worker, big_sync_stop) =
+            big_sync::spawn_big_sync_worker(Arc::clone(&shared_store), HashMap::new())?;
+        let big_sync_host = Arc::new(big_sync::Ctx {
+            store: shared_store,
+            worker: initial_worker,
+        });
         let part_init_obj = ObjId(big_sync_core::Byte32Id::new(
             [255_u8.wrapping_sub(seed); 32],
         ));
@@ -2941,12 +2950,12 @@ impl SyncRepoNode {
             .remove_obj_from_part(part_init_obj, stress_support::test_part())
             .await?;
         let node_identity_seed = [seed; 32];
-        let (repo, stop_token) = BigRepo::boot(
+        let (repo, stop_token) = BigRepo::boot_with_sqlite(
             Config {
                 node_identity_seed,
                 storage: StorageConfig::Disk { path: path.clone() },
             },
-            Arc::clone(&big_sync_host.store),
+            (*store).clone(),
         )
         .await?;
         big_sync_stop.stop().await?;

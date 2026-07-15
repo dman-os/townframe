@@ -32,11 +32,17 @@ pub fn nickname(peer_id: &PeerId) -> String {
         return name.clone();
     }
     let bytes = peer_id.as_bytes();
-    format!("peer:{:02x}{:02x}{:02x}{:02x}", bytes[0], bytes[1], bytes[2], bytes[3])
+    format!(
+        "peer:{:02x}{:02x}{:02x}{:02x}",
+        bytes[0], bytes[1], bytes[2], bytes[3]
+    )
 }
 
 /// Clear all nicknames (used between independent test cases).
 #[allow(dead_code)]
 pub fn clear() {
-    registry().lock().expect("nickname registry poisoned").clear();
+    registry()
+        .lock()
+        .expect("nickname registry poisoned")
+        .clear();
 }

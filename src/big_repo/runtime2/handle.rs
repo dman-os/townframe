@@ -391,8 +391,8 @@ impl<F: FutureForm> Runtime2Handle<F> {
             .send(Runtime2Cmd::WaitForQuiescence { resp })
             .await
             .map_err(|_| eyre::eyre!("task was found dead"))?;
-        let duration = timeout
-            .unwrap_or_else(|| utils_rs::scale_timeout(std::time::Duration::from_secs(5)));
+        let duration =
+            timeout.unwrap_or_else(|| utils_rs::scale_timeout(std::time::Duration::from_secs(5)));
         match self.race_timeout(rx, duration).await {
             Ok(Ok(result)) => result,
             Ok(Err(_)) => Err(eyre::eyre!("caller dropped before quiescence completion")),

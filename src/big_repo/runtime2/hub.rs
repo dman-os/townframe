@@ -99,8 +99,7 @@ pub struct Runtime2Hub<F: FutureForm, R: TaskRuntime<F>> {
     pub(crate) keyhive_dirty: BTreeSet<PeerId>,
 
     // ── runtime-wide quiescence ────────────────────────────────────────────
-    pub(crate) quiescence_waiters:
-        Vec<futures::channel::oneshot::Sender<eyre::Result<()>>>,
+    pub(crate) quiescence_waiters: Vec<futures::channel::oneshot::Sender<eyre::Result<()>>>,
     pub(crate) quiescence_probe: Option<QuiescenceProbe>,
     pub(crate) quiescence_barrier_ids: u64,
     pub(crate) activity_generation: u64,
@@ -319,7 +318,9 @@ where
         }
         self.quiescence_probe = None;
         for waiter in std::mem::take(&mut self.quiescence_waiters) {
-            waiter.send(Ok(())).expect("quiescence waiter receiver must remain open");
+            waiter
+                .send(Ok(()))
+                .expect("quiescence waiter receiver must remain open");
         }
         Ok(())
     }
@@ -330,8 +331,7 @@ where
         if !matches!(&cmd, Runtime2Cmd::WaitForQuiescence { .. })
             && !matches!(
                 &cmd,
-                Runtime2Cmd::ReleaseDocLease { .. }
-                    | Runtime2Cmd::ReleaseInternalLease { .. }
+                Runtime2Cmd::ReleaseDocLease { .. } | Runtime2Cmd::ReleaseInternalLease { .. }
             )
         {
             self.note_activity();
@@ -618,7 +618,10 @@ impl<F: FutureForm> HubBackgroundFuture<F> for F {
         request_id: subduction_keyhive::message::RequestId,
     ) -> F::Future<'static, eyre::Result<()>> {
         F::from_future(async move {
-            if let Err(error) = runtime_io.sync_keyhive_with_peer(peer_id, request_id.clone()).await {
+            if let Err(error) = runtime_io
+                .sync_keyhive_with_peer(peer_id, request_id.clone())
+                .await
+            {
                 let error = format!("keyhive sync with {peer_id} failed: {error}");
                 if evt_tx
                     .send(Runtime2Evt::KeyhiveSyncFailed {
@@ -998,10 +1001,7 @@ where
                     probe.pending_docs.remove(&doc_id);
                 }
             }
-            Runtime2Evt::DocWorkerQuiescent {
-                doc_id,
-                barrier_id,
-            } => {
+            Runtime2Evt::DocWorkerQuiescent { doc_id, barrier_id } => {
                 self.handle_doc_worker_quiescent(doc_id, barrier_id)?;
             }
             Runtime2Evt::FatalWorkerError {
@@ -1038,19 +1038,13 @@ where
                 self.change_manager
                     .notify_delegation_received(data)
                     .expect("task was found dead");
-                self.spawn_background(F::update_doc_access(
-                    Arc::clone(&self.runtime_io),
-                    target,
-                ))?;
+                self.spawn_background(F::update_doc_access(Arc::clone(&self.runtime_io), target))?;
             }
             Runtime2Evt::RevocationReceived { target, data } => {
                 self.change_manager
                     .notify_revocation_received(data)
                     .expect("task was found dead");
-                self.spawn_background(F::update_doc_access(
-                    Arc::clone(&self.runtime_io),
-                    target,
-                ))?;
+                self.spawn_background(F::update_doc_access(Arc::clone(&self.runtime_io), target))?;
             }
         }
         self.try_resolve_quiescence()
@@ -1297,7 +1291,9 @@ where
             let mut remaining = Vec::new();
             for (id, sender) in std::mem::take(waiters) {
                 if id < watermark {
-                    sender.send(Ok(())).expect("keyhive sync waiter receiver must remain open");
+                    sender
+                        .send(Ok(()))
+                        .expect("keyhive sync waiter receiver must remain open");
                 } else {
                     remaining.push((id, sender));
                 }
@@ -1399,7 +1395,6 @@ where
         }
         Ok(())
     }
-
 }
 
 // ═══════════════════════════════════════════════════════════════════════════

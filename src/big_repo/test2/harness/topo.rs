@@ -12,15 +12,16 @@
 //! called out in `play.big_repo.test2.md`. Tests do not call `.stop()` by hand.
 
 use super::log_nickname;
-use crate::test::{StressBigSyncRpcClient, boot_part_store};
+use crate::test::StressBigSyncRpcClient;
 use crate::{
-    BigRepo, BigRepoConnection, BigRepoStopToken, Config, DocumentId, PeerId, SharedPartStore,
+    BigRepo, BigRepoConnection, BigRepoStopToken, Config, DocumentId, PeerId, SqliteBigRepoStore,
     StorageConfig,
 };
-use big_sync::stress_support;
+use big_sync::{stress_support, HostPartStore};
+use sqlx_utils_rs::SqlCtx;
 use std::{collections::HashMap, sync::Arc};
 use tokio::sync::{Mutex, Notify};
-use tokio::time::{Duration, timeout};
+use tokio::time::{timeout, Duration};
 
 /// A single booted BigRepo node with an Iroh endpoint + big-sync worker.
 ///
@@ -28,7 +29,7 @@ use tokio::time::{Duration, timeout};
 /// [`Topo`]; callers rarely construct this directly.
 pub(crate) struct Node {
     pub repo: Arc<BigRepo>,
-    pub store: SharedPartStore,
+    pub store: Arc<SqliteBigRepoStore>,
     worker: big_sync::BigSyncWorkerHandle,
     big_sync_stop: big_sync::StopToken,
     repo_stop: BigRepoStopToken,
@@ -76,35 +77,41 @@ impl Node {
         label: &'static str,
         storage: StorageConfig,
     ) -> crate::Res<Self> {
-        let (host, initial_stop) = boot_part_store("sqlite::memory:").await?;
+        let store = Arc::new(
+            SqliteBigRepoStore::new(
+                SqlCtx::memory().await?,
+                "big-repo-test",
+                big_sync_core::BuckId::MAX_LEVEL,
+            )
+            .await?,
+        );
         let part_init_obj = big_sync_core::ObjId(big_sync_core::Byte32Id::new(
             [255_u8.wrapping_sub(seed); 32],
         ));
-        host.store
+        store
             .set_obj_payload(
                 part_init_obj,
                 serde_json::json!({ "heads": Vec::<String>::new() }),
             )
             .await?;
-        host.store
+        store
             .remove_obj_from_part(part_init_obj, stress_support::test_part())
             .await?;
-        initial_stop.stop().await?;
-        Self::boot_with_store(seed, label, storage, Arc::clone(&host.store)).await
+        Self::boot_with_store(seed, label, storage, store).await
     }
 
     async fn boot_with_store(
         seed: u8,
         label: &'static str,
         storage: StorageConfig,
-        store: SharedPartStore,
+        store: Arc<SqliteBigRepoStore>,
     ) -> crate::Res<Self> {
-        let (repo, repo_stop) = BigRepo::boot(
+        let (repo, repo_stop) = BigRepo::boot_with_sqlite(
             Config {
                 node_identity_seed: [seed; 32],
                 storage,
             },
-            Arc::clone(&store),
+            (*store).clone(),
         )
         .await?;
 
@@ -130,8 +137,8 @@ impl Node {
         let sync_backend = Arc::new(crate::BigRepoSyncBackend::boot(Arc::downgrade(&repo)).await?);
         let mut backends = HashMap::new();
         backends.insert(BigRepo::BACKEND_ID.into(), sync_backend as _);
-        let (worker, big_sync_stop) =
-            big_sync::spawn_big_sync_worker(Arc::clone(&store), backends)?;
+        let shared_store: crate::SharedPartStore = Arc::clone(&store) as _;
+        let (worker, big_sync_stop) = big_sync::spawn_big_sync_worker(shared_store, backends)?;
 
         log_nickname::register(repo.local_peer_id(), label);
         Ok(Self {
@@ -181,7 +188,7 @@ impl Node {
             .set_peer(
                 remote.peer_id(),
                 Arc::new(StressBigSyncRpcClient {
-                    target_part_store: Arc::clone(&remote.store),
+                    target_part_store: Arc::clone(&remote.store) as crate::SharedPartStore,
                 }),
                 parts,
             )
@@ -195,7 +202,7 @@ impl Node {
             .set_peer(
                 self.peer_id(),
                 Arc::new(StressBigSyncRpcClient {
-                    target_part_store: Arc::clone(&self.store),
+                    target_part_store: Arc::clone(&self.store) as crate::SharedPartStore,
                 }),
                 parts,
             )
@@ -267,7 +274,7 @@ impl Drop for ShutdownGuard {
             return;
         }
         let nodes = std::mem::take(&mut self.nodes);
-        let _ = tokio::task::block_in_place(|| {
+        tokio::task::block_in_place(|| {
             tokio::runtime::Handle::current().block_on(Self::shutdown_all(nodes))
         });
     }
@@ -380,8 +387,8 @@ impl Pair {
         left_label: &'static str,
         right_label: &'static str,
     ) -> crate::Res<Self> {
-        let mut pair = Self::boot_disconnected(left_seed, right_seed, left_label, right_label)
-            .await?;
+        let mut pair =
+            Self::boot_disconnected(left_seed, right_seed, left_label, right_label).await?;
         pair.connect().await?;
         pair.left_conn().sync_keyhive_with_peer(None).await?;
         Ok(pair)
@@ -396,15 +403,11 @@ impl Pair {
     }
 
     pub fn left_conn(&self) -> &BigRepoConnection {
-        self.left_conn
-            .as_ref()
-            .expect("Pair connection consumed")
+        self.left_conn.as_ref().expect("Pair connection consumed")
     }
 
     pub fn right_conn(&self) -> &BigRepoConnection {
-        self.right_conn
-            .as_ref()
-            .expect("Pair connection consumed")
+        self.right_conn.as_ref().expect("Pair connection consumed")
     }
 
     /// Borrow both nodes mutably for orderly teardown (unused; kept for

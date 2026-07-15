@@ -97,8 +97,7 @@ pub struct EncryptedLooseCommit {
 pub struct EncryptedInitialSedimentree {
     pub sedimentree: sedimentree_core::sedimentree::Sedimentree,
     pub blobs: Vec<sedimentree_core::blob::Blob>,
-    pub cgka_update_ops:
-        Vec<keyhive_crypto::signed::Signed<beekem::operation::CgkaOperation>>,
+    pub cgka_update_ops: Vec<keyhive_crypto::signed::Signed<beekem::operation::CgkaOperation>>,
 }
 
 /// The doc-worker's IO contract. All methods are `F::Future<'_>` so the same
@@ -172,18 +171,16 @@ pub trait DocIo<F: FutureForm>: Send + Sync {
         commit: EncryptedLooseCommit,
     ) -> F::Future<'_, eyre::Result<Option<subduction_core::subduction::request::FragmentRequested>>>;
 
-    /// Store a fragment (companion to `store_commit` for boundary commits).
-    /// Mirrors subduction's
-    /// [`store_fragment`](subduction_core::subduction::Subduction::store_fragment)
-    /// which takes `(id, head, boundary, checkpoints, blob)` — the
-    /// [`Fragment`](sedimentree_core::fragment::Fragment) struct already
-    /// bundles the head, boundary, and checkpoints.
+    /// Store a raw fragment bundle at a boundary commit.
+    /// The implementation encrypts the bundle and constructs the persisted
+    /// fragment metadata from the encrypted blob.
     fn store_fragment(
         &self,
         sed_id: sedimentree_core::id::SedimentreeId,
-        fragment: sedimentree_core::fragment::Fragment,
+        head: sedimentree_core::loose_commit::id::CommitId,
+        boundary: std::collections::BTreeSet<sedimentree_core::loose_commit::id::CommitId>,
         checkpoints: Vec<sedimentree_core::loose_commit::id::CommitId>,
-        blob: sedimentree_core::blob::Blob,
+        raw_blob: Vec<u8>,
     ) -> F::Future<'_, eyre::Result<()>>;
 
     /// Update the external big-sync object payload when one is configured.
@@ -192,14 +189,6 @@ pub trait DocIo<F: FutureForm>: Send + Sync {
         &self,
         doc_id: crate::DocumentId,
         heads: Arc<[automerge::ChangeHash]>,
-    ) -> F::Future<'_, eyre::Result<()>>;
-
-    /// Record one content frontier after its encrypted payload is durable.
-    fn record_content_frontier(
-        &self,
-        sed_id: sedimentree_core::id::SedimentreeId,
-        content_ref: Vec<u8>,
-        pred_refs: Vec<Vec<u8>>,
     ) -> F::Future<'_, eyre::Result<()>>;
 
     /// Refresh keyhive caches after local encryption advances its frontier.

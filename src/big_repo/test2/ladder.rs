@@ -5,9 +5,9 @@
 //! `sync_*` call per barrier, no retry loops. A missed post-condition
 //! surfaces as an `Err`, exposing runtime2 ordering bugs.
 
-use super::harness::{Pair, fixtures, heads};
+use super::harness::{fixtures, heads, Pair};
 use crate::{BigRepoChangeFilter, BigRepoDocIdFilter, StorageConfig};
-use automerge::{ReadDoc, ScalarValue, transaction::Transactable};
+use automerge::{transaction::Transactable, ReadDoc, ScalarValue};
 use keyhive_core::access::Access;
 
 #[tokio::test(flavor = "multi_thread")]
@@ -56,8 +56,8 @@ async fn tier1_connected_document_replicates_and_preserves_head_parity() -> crat
     fixtures::grant_and_propagate(&pair, doc_id, &bob, Access::Read).await?;
 
     // One doc sync is the barrier: Bob must be able to read after this call.
-    let bob_doc = fixtures::sync_doc_expect_ready(pair.right_conn(), &pair.right().repo, doc_id)
-        .await?;
+    let bob_doc =
+        fixtures::sync_doc_expect_ready(pair.right_conn(), &pair.right().repo, doc_id).await?;
     let title = read_title(&bob_doc).await;
     assert_eq!(title, "ladder rung 1");
     heads::tier0_invariants(&pair, doc_id, &alice_doc, &bob_doc).await?;
@@ -293,7 +293,10 @@ async fn tier1_closed_connection_then_reconnect_syncs_again() -> crate::Res<()> 
     assert_eq!(read_title(&reader_doc).await, "before reconnect");
 
     let old_left = pair.left_conn.take().expect("left connection should exist");
-    let _old_right = pair.right_conn.take().expect("right connection should exist");
+    let _old_right = pair
+        .right_conn
+        .take()
+        .expect("right connection should exist");
     old_left.stop().await?;
 
     let new_left = pair.left().connect(pair.right()).await?;
@@ -318,15 +321,8 @@ async fn tier1_remote_restart_then_live_reconnect_preserves_document() -> crate:
     let temp = tempfile::tempdir()?;
     let left_path = temp.path().join("owner");
     let right_path = temp.path().join("reader");
-    let mut pair = Pair::boot_persistent(
-        45,
-        46,
-        "Owner",
-        "Reader",
-        left_path,
-        right_path.clone(),
-    )
-    .await?;
+    let mut pair =
+        Pair::boot_persistent(45, 46, "Owner", "Reader", left_path, right_path.clone()).await?;
 
     let reader_agent = fixtures::agent_of(&pair.left().repo, pair.right()).await?;
     let mut initial = automerge::Automerge::new();
@@ -342,9 +338,13 @@ async fn tier1_remote_restart_then_live_reconnect_preserves_document() -> crate:
     drop(reader_doc);
 
     let old_left = pair.left_conn.take().expect("left connection should exist");
-    let _old_right = pair.right_conn.take().expect("right connection should exist");
+    let _old_right = pair
+        .right_conn
+        .take()
+        .expect("right connection should exist");
     old_left.stop().await?;
-    pair.restart_right(StorageConfig::Disk { path: right_path }).await?;
+    pair.restart_right(StorageConfig::Disk { path: right_path })
+        .await?;
     pair.connect().await?;
     pair.left_conn().sync_keyhive_with_peer(None).await?;
 
@@ -383,7 +383,10 @@ async fn tier1_offline_updates_catch_up() -> crate::Res<()> {
     // --- Go offline: remove both transport and big-sync routes.
     pair.disconnect().await?;
     let old_left = pair.left_conn.take().expect("left connection should exist");
-    let _old_right = pair.right_conn.take().expect("right connection should exist");
+    let _old_right = pair
+        .right_conn
+        .take()
+        .expect("right connection should exist");
     old_left.stop().await?;
 
     // Owner edits while Reader's big-repo connection is closed.

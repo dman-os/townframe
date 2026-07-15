@@ -15,7 +15,7 @@ use super::topo::Pair;
 use crate::{DocumentId, Res};
 
 /// Sort heads into a canonical order for order-independent comparison.
-fn sorted(heads: &mut Vec<automerge::ChangeHash>) {
+fn sorted(heads: &mut [automerge::ChangeHash]) {
     heads.sort_by_key(|h| h.0);
 }
 
