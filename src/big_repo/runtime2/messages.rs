@@ -137,6 +137,14 @@ pub enum Runtime2Evt {
         peer_id: PeerId,
         request_id: subduction_keyhive::message::RequestId,
     },
+    /// Initiating a keyhive sync failed before the protocol could emit a
+    /// completion event. The hub uses this to resolve the public waiter
+    /// instead of allowing a network error to panic a child task.
+    KeyhiveSyncFailed {
+        peer_id: PeerId,
+        request_id: subduction_keyhive::message::RequestId,
+        error: String,
+    },
     /// The keyhive protocol sync and local cache refresh both completed.
     KeyhiveCacheRefreshDone {
         peer_id: PeerId,

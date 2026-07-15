@@ -8,7 +8,7 @@
 
 use super::log_nickname;
 use super::topo::{Node, Pair};
-use crate::{BigKeyhiveAgent, DocumentId, Res};
+use crate::{BigKeyhiveAgent, BigKeyhiveGroup, DocumentId, Res};
 use keyhive_core::access::Access;
 use std::sync::Arc;
 use subduction_keyhive::KeyhivePeerId;
@@ -46,6 +46,27 @@ pub async fn grant_and_propagate(
     pair.left()
         .repo
         .grant_doc_access(doc_id, grantee.clone(), access)
+        .await?;
+    pair.left_conn().sync_keyhive_with_peer(None).await?;
+    pair.right_conn().sync_keyhive_with_peer(None).await?;
+    assert_reader_has_access(&pair.right().repo, doc_id).await?;
+    super::keyhive::assert_document_snapshot_equal(pair.left(), pair.right(), doc_id).await?;
+    Ok(())
+}
+
+/// Grant `access` to a group and propagate the resulting Keyhive state.
+///
+/// This is the group analogue of [`grant_and_propagate`]. The reader's
+/// effective access is checked through the transitive group membership path.
+pub async fn grant_group_and_propagate(
+    pair: &Pair,
+    doc_id: DocumentId,
+    group: &BigKeyhiveGroup,
+    access: Access,
+) -> Res<()> {
+    pair.left()
+        .repo
+        .grant_doc_access(doc_id, group.clone(), access)
         .await?;
     pair.left_conn().sync_keyhive_with_peer(None).await?;
     pair.right_conn().sync_keyhive_with_peer(None).await?;
