@@ -30,7 +30,7 @@ use tokio::time::{timeout, Duration};
 pub(crate) struct Node {
     pub repo: Arc<BigRepo>,
     pub store: Arc<SqliteBigRepoStore>,
-    worker: big_sync::BigSyncWorkerHandle,
+    pub(crate) worker: big_sync::BigSyncWorkerHandle,
     big_sync_stop: big_sync::StopToken,
     repo_stop: BigRepoStopToken,
     endpoint: iroh::Endpoint,
@@ -245,6 +245,11 @@ impl ShutdownGuard {
         Self { nodes }
     }
 
+    /// Return a reference to a node by index.
+    pub(crate) fn node(&self, idx: usize) -> &Node {
+        &self.nodes[idx]
+    }
+
     /// Remove and return all nodes, deferring their shutdown to the caller.
     /// Used when a test wants orderly explicit teardown.
     #[allow(dead_code)]
@@ -434,12 +439,199 @@ impl Pair {
 #[allow(dead_code)]
 fn _doc_id_typecheck(_id: DocumentId) {}
 
-/// Placeholder seam for Tier 3 topologies (relay/line/star/mesh).
-///
-/// Today only [`Pair`] (direct) exists. Tier 3 expands this enum; the
-/// [`Node`] + [`ShutdownGuard`] primitives above are reused unchanged.
-#[allow(dead_code)]
+// ─── Multi-node topology support (Tier 3+) ──────────────────────────────────
+
+/// A generic multi-node topology built from the same [`Node`] and
+/// [`ShutdownGuard`] primitives used by [`Pair`]. Each variant holds
+/// a guard for RAII teardown, the node vector, labelled connections for
+/// keyhive and document sync operations, and indexing metadata.
+#[allow(clippy::large_enum_variant)]
 pub(crate) enum Topo {
+    /// Direct A↔B — delegates to [`Pair`] for backward compatibility.
     Direct(Pair),
-    // Relay, Line, Star, Mesh land with Tier 3.
+    /// Relay A↔R↔B where R has Relay-only capability (stores encrypted parts
+    /// but has no decryption access). `a_conn` / `b_conn` are A↔R and R↔B.
+    Relay(TopoData3),
+    /// Line A↔B↔C.
+    Line(TopoData3),
+    /// Star hub↔leaf1, hub↔leaf2.
+    Star(TopoData3),
+    /// Triangle A↔B↔C↔A (full 3-node mesh).
+    Triangle(TopoData3),
+}
+
+/// Shared internals for 3-node topologies (relay, line, triangle).
+pub(crate) struct TopoData3 {
+    pub(crate) guard: ShutdownGuard,
+    /// (initiator_idx, initiator_conn, acceptor_idx, acceptor_conn) for
+    /// each edge in the topology.
+    pub(crate) edges: Vec<(usize, BigRepoConnection, usize, BigRepoConnection)>,
+}
+
+impl TopoData3 {
+    fn from(
+        nodes: Vec<Node>,
+        edges: Vec<(usize, BigRepoConnection, usize, BigRepoConnection)>,
+    ) -> Self {
+        let guard = ShutdownGuard::from(nodes);
+        Self { guard, edges }
+    }
+
+    /// Return the connection from `from_idx` to `to_idx` (the initiator's
+    /// connection). Panics if the edge does not exist in that direction.
+    pub(crate) fn conn(&self, from_idx: usize, to_idx: usize) -> &BigRepoConnection {
+        self.edges
+            .iter()
+            .find(|(i, _, j, _)| *i == from_idx && *j == to_idx)
+            .map(|(_, conn, _, _)| conn)
+            .or_else(|| {
+                self.edges
+                    .iter()
+                    .find(|(i, _, j, _)| *i == to_idx && *j == from_idx)
+                    .map(|(_, _, _, conn)| conn)
+            })
+            .expect("edge not found")
+    }
+}
+
+impl Topo {
+    /// Build a relay topology: A ↔ R ↔ B. R is a no-grant relay.
+    pub(crate) async fn boot_relay(
+        seed_a: u8,
+        seed_r: u8,
+        seed_b: u8,
+        label_a: &'static str,
+        label_r: &'static str,
+        label_b: &'static str,
+    ) -> crate::Res<Self> {
+        let a = Node::boot(seed_a, label_a).await?;
+        let r = Node::boot(seed_r, label_r).await?;
+        let b = Node::boot(seed_b, label_b).await?;
+
+        // A → R
+        let a_r_conn = a.connect(&r).await?;
+        let r_a_conn = r.accepted_connection().await;
+        // R → B
+        let r_b_conn = r.connect(&b).await?;
+        let b_r_conn = b.accepted_connection().await;
+
+        let nodes = vec![a, r, b];
+        let edges = vec![(0, a_r_conn, 1, r_a_conn), (1, r_b_conn, 2, b_r_conn)];
+        // Sync from the far end inward so A learns B's contact identity
+        // through the relay before topology tests issue grants.
+        edges[1].1.sync_keyhive_with_peer(None).await?;
+        edges[0].1.sync_keyhive_with_peer(None).await?;
+        Ok(Self::Relay(TopoData3::from(nodes, edges)))
+    }
+
+    /// Build a line topology: A ↔ B ↔ C.
+    pub(crate) async fn boot_line(
+        seed_a: u8,
+        seed_b: u8,
+        seed_c: u8,
+        label_a: &'static str,
+        label_b: &'static str,
+        label_c: &'static str,
+    ) -> crate::Res<Self> {
+        let a = Node::boot(seed_a, label_a).await?;
+        let b = Node::boot(seed_b, label_b).await?;
+        let c = Node::boot(seed_c, label_c).await?;
+
+        let a_b_conn = a.connect(&b).await?;
+        let b_a_conn = b.accepted_connection().await;
+        let b_c_conn = b.connect(&c).await?;
+        let c_b_conn = c.accepted_connection().await;
+
+        let nodes = vec![a, b, c];
+        let edges = vec![(0, a_b_conn, 1, b_a_conn), (1, b_c_conn, 2, c_b_conn)];
+        // Sync from the far end inward so A learns C through B.
+        edges[1].1.sync_keyhive_with_peer(None).await?;
+        edges[0].1.sync_keyhive_with_peer(None).await?;
+        Ok(Self::Line(TopoData3::from(nodes, edges)))
+    }
+
+    /// Build a star topology: hub ↔ leaf1, hub ↔ leaf2.
+    /// Returns nodes as [hub, leaf1, leaf2].
+    pub(crate) async fn boot_star(
+        seed_h: u8,
+        seed_l1: u8,
+        seed_l2: u8,
+        label_h: &'static str,
+        label_l1: &'static str,
+        label_l2: &'static str,
+    ) -> crate::Res<Self> {
+        let hub = Node::boot(seed_h, label_h).await?;
+        let leaf1 = Node::boot(seed_l1, label_l1).await?;
+        let leaf2 = Node::boot(seed_l2, label_l2).await?;
+
+        // hub ↔ leaf1
+        let h_l1_conn = hub.connect(&leaf1).await?;
+        let l1_h_conn = leaf1.accepted_connection().await;
+        // hub ↔ leaf2
+        let h_l2_conn = hub.connect(&leaf2).await?;
+        let l2_h_conn = leaf2.accepted_connection().await;
+
+        let nodes = vec![hub, leaf1, leaf2];
+        let edges = vec![(0, h_l1_conn, 1, l1_h_conn), (0, h_l2_conn, 2, l2_h_conn)];
+        edges[0].1.sync_keyhive_with_peer(None).await?;
+        edges[1].1.sync_keyhive_with_peer(None).await?;
+        Ok(Self::Star(TopoData3::from(nodes, edges)))
+    }
+
+    /// Build a partial-mesh (triangle) topology: A↔B, B↔C, C↔A (full
+    /// triangle, the densest 3-node mesh).
+    pub(crate) async fn boot_triangle(
+        seed_a: u8,
+        seed_b: u8,
+        seed_c: u8,
+        label_a: &'static str,
+        label_b: &'static str,
+        label_c: &'static str,
+    ) -> crate::Res<Self> {
+        let a = Node::boot(seed_a, label_a).await?;
+        let b = Node::boot(seed_b, label_b).await?;
+        let c = Node::boot(seed_c, label_c).await?;
+
+        let a_b_conn = a.connect(&b).await?;
+        let b_a_conn = b.accepted_connection().await;
+        let b_c_conn = b.connect(&c).await?;
+        let c_b_conn = c.accepted_connection().await;
+        let c_a_conn = c.connect(&a).await?;
+        let a_c_conn = a.accepted_connection().await;
+
+        let nodes = vec![a, b, c];
+        let edges = vec![
+            (0, a_b_conn, 1, b_a_conn),
+            (1, b_c_conn, 2, c_b_conn),
+            (2, c_a_conn, 0, a_c_conn),
+        ];
+        edges[0].1.sync_keyhive_with_peer(None).await?;
+        edges[1].1.sync_keyhive_with_peer(None).await?;
+        edges[2].1.sync_keyhive_with_peer(None).await?;
+        Ok(Self::Triangle(TopoData3::from(nodes, edges)))
+    }
+
+    /// Return a reference to a node by index.
+    pub(crate) fn topo_node(&self, idx: usize) -> &Node {
+        match self {
+            Topo::Direct(p) => match idx {
+                0 => p.left(),
+                1 => p.right(),
+                _ => panic!("index out of range"),
+            },
+            Topo::Relay(d) | Topo::Line(d) | Topo::Star(d) | Topo::Triangle(d) => d.guard.node(idx),
+        }
+    }
+
+    /// Return the connection for a directional edge.
+    pub(crate) fn topo_conn(&self, from: usize, to: usize) -> &BigRepoConnection {
+        match self {
+            Topo::Direct(p) => match (from, to) {
+                (0, 1) => p.left_conn(),
+                (1, 0) => p.right_conn(),
+                _ => panic!("no edge ({from}→{to}) in Direct"),
+            },
+            Topo::Relay(d) | Topo::Line(d) | Topo::Star(d) | Topo::Triangle(d) => d.conn(from, to),
+        }
+    }
 }
