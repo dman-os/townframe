@@ -255,6 +255,7 @@ async fn tier7_noop_mutation_emits_nothing() -> crate::Res<()> {
         .map_err(|err| crate::ferr!("failed creating doc: {err:?}"))?;
     let owner_doc = pair.left().repo.create_doc(initial).await?;
     let doc_id = owner_doc.document_id();
+    pair.left().repo.wait_for_quiescence(None).await?;
 
     let (_reg, mut rx) = pair
         .left()

@@ -16,4 +16,4 @@ pub(crate) mod keyhive;
 pub(crate) mod log_nickname;
 pub(crate) mod topo;
 
-pub(crate) use topo::{Node, Pair};
+pub(crate) use topo::{Node, Pair, Topo};
