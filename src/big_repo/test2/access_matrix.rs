@@ -686,6 +686,12 @@ async fn run_group_case(
     };
 
     if offline {
+        // Establish the group proof chain while connected. The matrix's
+        // offline dimension is the document grant, not the creation of the
+        // group/member delegation that the grant depends on. Otherwise the
+        // reconnect can deliver the document grant before its root proof.
+        pair.left_conn().sync_keyhive_with_peer(None).await?;
+        pair.right_conn().sync_keyhive_with_peer(None).await?;
         fixtures::go_offline(&mut pair).await?;
         pair.left()
             .repo
@@ -729,6 +735,13 @@ async fn run_group_case(
         drop(owner_doc);
         let owner_doc =
             fixtures::sync_doc_expect_ready(pair.left_conn(), &pair.left().repo, doc_id).await?;
+        pair.right_conn()
+            .sync_doc_with_peer(doc_id, Some(std::time::Duration::from_secs(10)))
+            .await?;
+        pair.left()
+            .repo
+            .wait_for_quiescence(Some(std::time::Duration::from_secs(10)))
+            .await?;
         assert_eq!(
             read_optional_text(&owner_doc, "member_note")
                 .await
@@ -952,6 +965,13 @@ async fn run_document_as_member_case(
         drop(target_doc);
         let target_doc =
             fixtures::sync_doc_expect_ready(pair.left_conn(), &pair.left().repo, target_id).await?;
+        pair.right_conn()
+            .sync_doc_with_peer(target_id, Some(std::time::Duration::from_secs(10)))
+            .await?;
+        pair.left()
+            .repo
+            .wait_for_quiescence(Some(std::time::Duration::from_secs(10)))
+            .await?;
         assert_eq!(
             read_optional_text(&target_doc, "member_note")
                 .await

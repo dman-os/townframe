@@ -4,34 +4,26 @@
 //!
 //! | Test | Invariant |
 //! |------|-----------|
-//! | `closed_connection_errors_cleanly` | A stopped connection returns typed errors (`"connection is closed"`) for both keyhive and doc syncs, rather than panicking or hanging. |
-//! | `unauthorized_peer_no_plaintext_leak` | A peer without document access receives `SyncDocError::NotFound` on sync and never materialises plaintext (`DocLookup::Missing` / `PendingMaterialization`). |
+//! | `closed_connection_errors_cleanly` | A stopped connection returns typed errors for both keyhive and doc syncs, rather than panicking or hanging. |
+//! | `unauthorized_peer_no_plaintext_leak` | A peer without document access receives `SyncDocError::NotFound` on sync and never materialises plaintext. |
 //! | `missing_doc_sync_returns_not_found` | Syncing a document id that does not exist on either side returns `SyncDocError::NotFound`. |
+//! | `duplicate_concurrent_sync_converges` | Two concurrent `sync_doc_with_peer` calls converge without duplicate state or errors. |
+//! | `reconnect_preserves_live_handles` | After connection loss + reconnect, previously acquired live handles remain valid and can read new content. |
+//! | `interrupted_sync_retry_succeeds` | A sync that fails due to closed connection can be retried after reconnect. |
 //!
 //! # Skipped-by-design
 //!
 //! - **put_doc conflict recovery**: `PutDocError::IdOccpuied` exists in the runtime
-//!   layer but there is no public API to create a document with an explicit id;
-//!   `create_doc` always generates a fresh keyhive-backed id. Not testable through
-//!   the BigRepo public API.
-//!
-//! - **over-cap-frame**: The sedimentree boundary-commit mechanism tested by
-//!   `local_boundary_commit_stores_requested_encrypted_fragment` in `test.rs` is an
-//!   internal storage optimization (writing fragment blobs on first zero-byte head).
-//!   There is no bounded-frame transport path exposed at the BigRepo API level,
-//!   and the current runtime2 transport (subduction) handles large messages through
-//!   streaming, not fixed-size frames.
-//!
+//!   layer but there is no public API to create a document with an explicit id.
+//! - **over-cap-frame**: No bounded-frame transport path exposed at the BigRepo API level.
 //! - **stop-waits-for-save-tasks**: Every test2 test exercises the RAII
-//!   [`ShutdownGuard`] / [`Pair`] teardown path, which shuts down the repo runtime
-//!   with a timeout. The `Runtime2StopToken::stop` path is exercised on every test
-//!   completion. Adding an explicit test would duplicate coverage already provided
-//!   by the harness.
+//!   [`ShutdownGuard`] / [`Pair`] teardown path.
 
 use super::harness::{fixtures, topo::ShutdownGuard, Node, Pair};
 use crate::SyncDocError;
 use automerge::{transaction::Transactable, ReadDoc, ScalarValue};
 use keyhive_core::access::Access;
+use std::time::Duration;
 
 // ─── helpers ───────────────────────────────────────────────────────────────
 
@@ -115,11 +107,9 @@ async fn tier9_closed_connection_errors_cleanly() -> crate::Res<()> {
     // doc sync on closed connection must fail.
     let doc_err = pair
         .left_conn()
-        .sync_doc_with_peer(doc_id, Some(std::time::Duration::from_secs(5)))
+        .sync_doc_with_peer(doc_id, Some(Duration::from_secs(5)))
         .await
         .expect_err("doc sync on closed connection must fail");
-    // SyncDocError::IoError wraps the inner report; the Display is just
-    // "IoError" so we check the variant and the Debug representation.
     assert!(
         matches!(&doc_err, SyncDocError::IoError(_)),
         "doc sync on closed connection must return SyncDocError::IoError, got: {doc_err:?}"
@@ -185,7 +175,7 @@ async fn tier9_unauthorized_peer_no_plaintext_leak() -> crate::Res<()> {
     // Reader can sync and materialise.
     let reader_doc = {
         reader_owner_conn
-            .sync_doc_with_peer(doc_id, Some(std::time::Duration::from_secs(10)))
+            .sync_doc_with_peer(doc_id, Some(Duration::from_secs(10)))
             .await?;
         guard.node(1).repo.wait_for_quiescence(None).await?;
         match guard.node(1).repo.get_doc(&doc_id).await? {
@@ -206,12 +196,10 @@ async fn tier9_unauthorized_peer_no_plaintext_leak() -> crate::Res<()> {
 
     // Intruder must NOT materialise plaintext.
     let intruder_sync = intruder_owner_conn
-        .sync_doc_with_peer(doc_id, Some(std::time::Duration::from_secs(10)))
+        .sync_doc_with_peer(doc_id, Some(Duration::from_secs(10)))
         .await;
     match intruder_sync {
         Ok(()) => {
-            // Sync succeeded at the transport level, but the doc must not
-            // be Materialized (key material is missing).
             let lookup = guard.node(2).repo.get_doc(&doc_id).await?;
             assert!(
                 !matches!(lookup, crate::DocLookup::Ready(_)),
@@ -279,7 +267,7 @@ async fn tier9_missing_doc_sync_returns_not_found() -> crate::Res<()> {
     // Attempting to sync a non-existent doc must return NotFound.
     let err = pair
         .left_conn()
-        .sync_doc_with_peer(fake_doc_id, Some(std::time::Duration::from_secs(10)))
+        .sync_doc_with_peer(fake_doc_id, Some(Duration::from_secs(10)))
         .await
         .expect_err("syncing a non-existent doc must fail");
     assert!(
@@ -287,5 +275,228 @@ async fn tier9_missing_doc_sync_returns_not_found() -> crate::Res<()> {
         "sync of non-existent doc must return NotFound, got {err:?}"
     );
 
+    Ok(())
+}
+
+// ========================================================================
+// Polish cases
+// ========================================================================
+
+// ─── Duplicate/concurrent sync converges ──────────────────────────────────
+//
+// Two concurrent `sync_doc_with_peer` calls for the same document must both
+// return Ok and converge to the same state without duplicate effects.
+#[tokio::test(flavor = "multi_thread")]
+async fn tier9_duplicate_concurrent_sync_converges() -> crate::Res<()> {
+    utils_rs::testing::setup_tracing_once();
+    let pair = Pair::boot(138, 139, "Owner", "Reader").await?;
+    let reader_agent = fixtures::agent_of(&pair.left().repo, pair.right()).await?;
+
+    let mut initial = automerge::Automerge::new();
+    initial
+        .transact(|tx| tx.put(automerge::ROOT, "title", "concurrent-base"))
+        .map_err(|err| crate::ferr!("failed creating doc: {err:?}"))?;
+    let owner_doc = pair.left().repo.create_doc(initial).await?;
+    let doc_id = owner_doc.document_id();
+
+    pair.left()
+        .repo
+        .grant_doc_access(doc_id, reader_agent, Access::Read)
+        .await?;
+    pair.left_conn().sync_keyhive_with_peer(None).await?;
+    pair.right_conn().sync_keyhive_with_peer(None).await?;
+
+    // Fire two concurrent doc syncs and wait for both.
+    let (r1, r2) = tokio::join!(
+        pair.right_conn()
+            .sync_doc_with_peer(doc_id, Some(Duration::from_secs(10))),
+        pair.right_conn()
+            .sync_doc_with_peer(doc_id, Some(Duration::from_secs(10))),
+    );
+
+    // Both must succeed.
+    r1.map_err(|e| crate::ferr!("first concurrent sync failed: {e:?}"))?;
+    r2.map_err(|e| crate::ferr!("second concurrent sync failed: {e:?}"))?;
+
+    pair.right()
+        .repo
+        .wait_for_quiescence(Some(Duration::from_secs(10)))
+        .await?;
+
+    // Verify the doc is fully materialized once and readable.
+    let reader_doc = pair
+        .right()
+        .repo
+        .get_doc(&doc_id)
+        .await?
+        .into_ready(doc_id)?;
+    assert_eq!(
+        read_text(&reader_doc, "title").await.as_deref(),
+        Some("concurrent-base")
+    );
+
+    // Check head parity — state is not duplicated.
+    let left_state = pair.left().repo.doc_head_state(doc_id).await?;
+    let right_state = pair.right().repo.doc_head_state(doc_id).await?;
+    assert_eq!(
+        left_state.sedimentree_heads, right_state.sedimentree_heads,
+        "sedimentree heads must converge after concurrent syncs"
+    );
+
+    drop(reader_doc);
+    drop(owner_doc);
+    Ok(())
+}
+
+// ─── Reconnect preserves live handles ─────────────────────────────────────
+//
+// After closing the transport connection and re-establishing it, previously
+// acquired `BigDocHandle` values must remain valid (they hold internal leases
+// to the local runtime) and must be able to read newly synced content.
+#[tokio::test(flavor = "multi_thread")]
+async fn tier9_reconnect_preserves_live_handles() -> crate::Res<()> {
+    utils_rs::testing::setup_tracing_once();
+    let mut pair = Pair::boot(140, 141, "Owner", "Reader").await?;
+    let reader_agent = fixtures::agent_of(&pair.left().repo, pair.right()).await?;
+
+    let mut initial = automerge::Automerge::new();
+    initial
+        .transact(|tx| tx.put(automerge::ROOT, "title", "handle-persists"))
+        .map_err(|err| crate::ferr!("failed creating doc: {err:?}"))?;
+    let owner_doc = pair.left().repo.create_doc(initial).await?;
+    let doc_id = owner_doc.document_id();
+
+    pair.left()
+        .repo
+        .grant_doc_access(doc_id, reader_agent, Access::Read)
+        .await?;
+    pair.left_conn().sync_keyhive_with_peer(None).await?;
+    pair.right_conn().sync_keyhive_with_peer(None).await?;
+
+    let reader_doc =
+        fixtures::sync_doc_expect_ready(pair.right_conn(), &pair.right().repo, doc_id).await?;
+    assert_eq!(
+        read_text(&reader_doc, "title").await.as_deref(),
+        Some("handle-persists")
+    );
+
+    // --- Close the transport connection but keep the handle.
+    let old_left = pair.left_conn.take().expect("left connection");
+    let _old_right = pair.right_conn.take().expect("right connection");
+    old_left.stop().await?;
+
+    // --- Reconnect.
+    let new_left = pair.left().connect(pair.right()).await?;
+    let new_right = pair.right().accepted_connection().await;
+    pair.left_conn = Some(new_left);
+    pair.right_conn = Some(new_right);
+
+    // Sync keyhive to the new connection — the reader must catch up.
+    pair.left_conn().sync_keyhive_with_peer(None).await?;
+    pair.right_conn().sync_keyhive_with_peer(None).await?;
+
+    // The OLD handle must still be valid and able to read content.
+    let title = read_text(&reader_doc, "title").await;
+    assert_eq!(
+        title.as_deref(),
+        Some("handle-persists"),
+        "live handle must remain readable after reconnect"
+    );
+
+    // Owner writes new content after reconnect; the handle should pick it up
+    // after a fresh sync.
+    owner_doc
+        .with_document(|doc| {
+            doc.transact(|tx| tx.put(automerge::ROOT, "phase", "post-reconnect"))
+                .map_err(|err| crate::ferr!("owner post-reconnect write failed: {err:?}"))
+        })
+        .await??;
+
+    pair.right_conn()
+        .sync_doc_with_peer(doc_id, Some(Duration::from_secs(10)))
+        .await?;
+    pair.right()
+        .repo
+        .wait_for_quiescence(Some(Duration::from_secs(10)))
+        .await?;
+
+    let phase = read_text(&reader_doc, "phase").await;
+    assert_eq!(
+        phase.as_deref(),
+        Some("post-reconnect"),
+        "live handle must see content written after reconnect"
+    );
+
+    drop(reader_doc);
+    drop(owner_doc);
+    Ok(())
+}
+
+// ─── Interrupted sync retry succeeds ──────────────────────────────────────
+//
+// A document sync that fails because the connection was closed can be
+// retried after re-establishing the connection. The retry must succeed
+// and deliver the document content.
+#[tokio::test(flavor = "multi_thread")]
+async fn tier9_interrupted_sync_retry_succeeds() -> crate::Res<()> {
+    utils_rs::testing::setup_tracing_once();
+    let mut pair = Pair::boot(142, 143, "Owner", "Reader").await?;
+    let reader_agent = fixtures::agent_of(&pair.left().repo, pair.right()).await?;
+
+    let mut initial = automerge::Automerge::new();
+    initial
+        .transact(|tx| tx.put(automerge::ROOT, "title", "retry-test"))
+        .map_err(|err| crate::ferr!("failed creating doc: {err:?}"))?;
+    let owner_doc = pair.left().repo.create_doc(initial).await?;
+    let doc_id = owner_doc.document_id();
+
+    pair.left()
+        .repo
+        .grant_doc_access(doc_id, reader_agent, Access::Read)
+        .await?;
+    pair.left_conn().sync_keyhive_with_peer(None).await?;
+    pair.right_conn().sync_keyhive_with_peer(None).await?;
+
+    // --- Make the connection fail by cloning and stopping one side.
+    // The `closed` flag is shared via `Arc<AtomicBool>` so stopping the
+    // clone marks the original as closed too.
+    let closed_left = pair.left_conn().clone();
+    closed_left.stop().await?;
+
+    // Attempt sync on the now-closed connection — must fail with IoError.
+    let fail_err = pair
+        .left_conn()
+        .sync_doc_with_peer(doc_id, Some(Duration::from_secs(5)))
+        .await
+        .expect_err("sync on closed connection must fail");
+    assert!(
+        matches!(&fail_err, SyncDocError::IoError(_)),
+        "failed sync must return IoError, got: {fail_err:?}"
+    );
+
+    // Replace the stale connections with fresh ones (reconnect).
+    let old_left = pair.left_conn.take().expect("left connection");
+    let _old_right = pair.right_conn.take().expect("right connection");
+    drop(old_left);
+
+    let new_left = pair.left().connect(pair.right()).await?;
+    let new_right = pair.right().accepted_connection().await;
+    pair.left_conn = Some(new_left);
+    pair.right_conn = Some(new_right);
+
+    // Sync keyhive on the new connection.
+    pair.left_conn().sync_keyhive_with_peer(None).await?;
+    pair.right_conn().sync_keyhive_with_peer(None).await?;
+
+    // Retry the doc sync — must succeed.
+    let reader_doc =
+        fixtures::sync_doc_expect_ready(pair.right_conn(), &pair.right().repo, doc_id).await?;
+    assert_eq!(
+        read_text(&reader_doc, "title").await.as_deref(),
+        Some("retry-test")
+    );
+
+    drop(reader_doc);
+    drop(owner_doc);
     Ok(())
 }

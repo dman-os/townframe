@@ -76,8 +76,16 @@ pub async fn tier0_invariants(
     left: &crate::BigDocHandle,
     right: &crate::BigDocHandle,
 ) -> Res<()> {
-    assert_sedimentree_parity(pair, doc_id).await?;
-    assert_materialized_parity_handles(pair.left().label, left, pair.right().label, right).await?;
+    if let Err(error) = assert_sedimentree_parity(pair, doc_id).await {
+        let diagnostics = super::dump::diagnostics(pair, doc_id).await?;
+        return Err(crate::ferr!("{error}\n{diagnostics}"));
+    }
+    if let Err(error) =
+        assert_materialized_parity_handles(pair.left().label, left, pair.right().label, right).await
+    {
+        let diagnostics = super::dump::diagnostics(pair, doc_id).await?;
+        return Err(crate::ferr!("{error}\n{diagnostics}"));
+    }
     Ok(())
 }
 

@@ -270,3 +270,91 @@ async fn tier4_rapid_fire_then_idle_sync_converges_once() -> crate::Res<()> {
     drop(owner_doc);
     Ok(())
 }
+
+// ─── Concurrent edits while sync is in flight ─────────────────────────────
+//
+// Both peers have Edit access. A doc sync is in progress while both sides
+// make independent local edits. After the sync completes, a follow-up sync
+// converges both fields. This exercises the real concurrent scenario where
+// edits and sync overlap.
+#[tokio::test(flavor = "multi_thread")]
+async fn tier4_concurrent_edit_while_sync_in_flight() -> crate::Res<()> {
+    utils_rs::testing::setup_tracing_once();
+    let pair = Pair::boot(55, 56, "Owner", "Editor").await?;
+    let (owner_doc, doc_id) = new_doc(&pair, "concurrent-sync").await?;
+    let editor_doc = grant_and_sync(&pair, doc_id, Access::Edit).await?;
+
+    // All three tasks run concurrently: a doc sync (left→right) while
+    // both sides make independent local edits.
+    let sync_fut = pair
+        .left_conn()
+        .sync_doc_with_peer(doc_id, Some(Duration::from_secs(10)));
+    let left_edit_fut = owner_doc.with_document(|doc| {
+        doc.transact(|tx| tx.put(automerge::ROOT, "field_a", "from_left"))
+            .map_err(|err| crate::ferr!("owner concurrent edit failed: {err:?}"))
+    });
+    let right_edit_fut = editor_doc.with_document(|doc| {
+        doc.transact(|tx| tx.put(automerge::ROOT, "field_b", "from_right"))
+            .map_err(|err| crate::ferr!("editor concurrent edit failed: {err:?}"))
+    });
+
+    let (sync_result, left_result, right_result) =
+        tokio::join!(sync_fut, left_edit_fut, right_edit_fut);
+
+    sync_result.map_err(|e| crate::ferr!("concurrent sync failed: {e:?}"))?;
+    left_result??;
+    right_result??;
+
+    // Follow-up sync to capture any edits that the in-flight sync missed.
+    pair.right_conn()
+        .sync_doc_with_peer(doc_id, Some(Duration::from_secs(10)))
+        .await?;
+    pair.left_conn()
+        .sync_doc_with_peer(doc_id, Some(Duration::from_secs(10)))
+        .await?;
+    pair.left().repo.wait_for_quiescence(None).await?;
+    pair.right().repo.wait_for_quiescence(None).await?;
+
+    // Both sides must see both fields.
+    let owner_check = pair
+        .left()
+        .repo
+        .get_doc(&doc_id)
+        .await?
+        .into_ready(doc_id)?;
+    let editor_check = pair
+        .right()
+        .repo
+        .get_doc(&doc_id)
+        .await?
+        .into_ready(doc_id)?;
+
+    assert_eq!(
+        read_text(&owner_check, "field_a").await.as_deref(),
+        Some("from_left"),
+        "owner must see its own concurrent edit"
+    );
+    assert_eq!(
+        read_text(&owner_check, "field_b").await.as_deref(),
+        Some("from_right"),
+        "owner must see editor's concurrent edit after convergence"
+    );
+    assert_eq!(
+        read_text(&editor_check, "field_a").await.as_deref(),
+        Some("from_left"),
+        "editor must see owner's concurrent edit after convergence"
+    );
+    assert_eq!(
+        read_text(&editor_check, "field_b").await.as_deref(),
+        Some("from_right"),
+        "editor must see its own concurrent edit"
+    );
+
+    heads::tier0_invariants(&pair, doc_id, &owner_check, &editor_check).await?;
+
+    drop(owner_check);
+    drop(editor_check);
+    drop(owner_doc);
+    drop(editor_doc);
+    Ok(())
+}
