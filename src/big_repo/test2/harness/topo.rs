@@ -384,6 +384,14 @@ impl Pair {
         Ok(())
     }
 
+    /// Restart the left node while preserving its persistent store and identity.
+    pub(crate) async fn restart_left(&mut self, storage: StorageConfig) -> crate::Res<()> {
+        let node = self.guard.nodes.remove(self.left_idx);
+        let restarted = node.restart(storage).await?;
+        self.guard.nodes.insert(self.left_idx, restarted);
+        Ok(())
+    }
+
     /// Boot two nodes, connect them, and run one keyhive sync so each side
     /// knows the other's agent.
     pub(crate) async fn boot(

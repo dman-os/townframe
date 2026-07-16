@@ -531,3 +531,140 @@ async fn tier5_reopen_sync_payload_first() -> crate::Res<()> {
     drop(reader_doc2);
     Ok(())
 }
+
+// ========================================================================
+// Polish: both-endpoint restart, restart after local write
+// ========================================================================
+
+// ─── Both endpoints restart using persistent stores ───────────────────────
+//
+// Both left and right nodes restart on their persistent stores. After
+// reconnection and sync, the previously replicated document and its
+// content must be preserved.
+#[tokio::test(flavor = "multi_thread")]
+async fn tier5_both_endpoints_restart_preserve_document() -> crate::Res<()> {
+    utils_rs::testing::setup_tracing_once();
+    let temp = tempfile::tempdir()?;
+    let left_path = temp.path().join("left");
+    let right_path = temp.path().join("right");
+    let mut pair = Pair::boot_persistent(
+        150,
+        151,
+        "Left",
+        "Right",
+        left_path.clone(),
+        right_path.clone(),
+    )
+    .await?;
+
+    let reader_agent = fixtures::agent_of(&pair.left().repo, pair.right()).await?;
+
+    let mut initial = automerge::Automerge::new();
+    initial
+        .transact(|tx| tx.put(automerge::ROOT, "title", "both-restart"))
+        .map_err(|err| crate::ferr!("failed creating doc: {err:?}"))?;
+    let owner_doc = pair.left().repo.create_doc(initial).await?;
+    let doc_id = owner_doc.document_id();
+
+    fixtures::grant_and_propagate(&pair, doc_id, &reader_agent, Access::Read).await?;
+
+    let reader_doc =
+        fixtures::sync_doc_expect_ready(pair.right_conn(), &pair.right().repo, doc_id).await?;
+    assert_eq!(read_title(&reader_doc).await, "both-restart");
+    drop(reader_doc);
+
+    // --- Restart both nodes.
+    let old_left = pair.left_conn.take().expect("left connection");
+    let _old_right = pair.right_conn.take().expect("right connection");
+    old_left.stop().await?;
+
+    pair.restart_left(StorageConfig::Disk { path: left_path })
+        .await?;
+    pair.restart_right(StorageConfig::Disk { path: right_path })
+        .await?;
+
+    // Reconnect and sync.
+    pair.connect().await?;
+    pair.left_conn().sync_keyhive_with_peer(None).await?;
+    pair.right_conn().sync_keyhive_with_peer(None).await?;
+
+    let reader_doc2 =
+        fixtures::sync_doc_expect_ready(pair.right_conn(), &pair.right().repo, doc_id).await?;
+    assert_eq!(read_title(&reader_doc2).await, "both-restart");
+    heads::tier0_invariants(&pair, doc_id, &owner_doc, &reader_doc2).await?;
+
+    drop(reader_doc2);
+    drop(owner_doc);
+    Ok(())
+}
+
+// ─── Restart after local write, before outbound sync ─────────────────────
+//
+// The left node writes content but is restarted before syncing the content
+// to the right. After restart, reconnect and sync — the write must be
+// delivered from the local store.
+#[tokio::test(flavor = "multi_thread")]
+async fn tier5_restart_after_local_write_delivers_on_reconnect() -> crate::Res<()> {
+    utils_rs::testing::setup_tracing_once();
+    let temp = tempfile::tempdir()?;
+    let left_path = temp.path().join("left");
+    let right_path = temp.path().join("right");
+    let mut pair = Pair::boot_persistent(
+        152,
+        153,
+        "Owner",
+        "Reader",
+        left_path.clone(),
+        right_path.clone(),
+    )
+    .await?;
+
+    let reader_agent = fixtures::agent_of(&pair.left().repo, pair.right()).await?;
+
+    let mut initial = automerge::Automerge::new();
+    initial
+        .transact(|tx| tx.put(automerge::ROOT, "title", "local-before-restart"))
+        .map_err(|err| crate::ferr!("failed creating doc: {err:?}"))?;
+    let owner_doc = pair.left().repo.create_doc(initial).await?;
+    let doc_id = owner_doc.document_id();
+
+    // Grant and sync keyhive so the reader learns the CGKA material — but
+    // do NOT sync the document content yet.
+    fixtures::grant_and_propagate(&pair, doc_id, &reader_agent, Access::Read).await?;
+
+    // Write content that has NOT been synced to the reader.
+    owner_doc
+        .with_document(|doc| {
+            doc.transact(|tx| tx.put(automerge::ROOT, "note", "written-before-restart"))
+                .map_err(|err| crate::ferr!("local write failed: {err:?}"))
+        })
+        .await??;
+
+    // --- Restart the left node WITHOUT syncing the content first.
+    let old_left = pair.left_conn.take().expect("left connection");
+    let _old_right = pair.right_conn.take().expect("right connection");
+    old_left.stop().await?;
+
+    pair.restart_left(StorageConfig::Disk { path: left_path })
+        .await?;
+
+    // Reconnect.
+    pair.connect().await?;
+    pair.left_conn().sync_keyhive_with_peer(None).await?;
+    pair.right_conn().sync_keyhive_with_peer(None).await?;
+
+    // Now sync the doc — the local write should be pushed to the reader.
+    let reader_doc =
+        fixtures::sync_doc_expect_ready(pair.right_conn(), &pair.right().repo, doc_id).await?;
+    assert_eq!(
+        read_text(&reader_doc, "note").await.as_deref(),
+        Some("written-before-restart"),
+        "reader must see the write that was made before left's restart"
+    );
+
+    heads::tier0_invariants(&pair, doc_id, &owner_doc, &reader_doc).await?;
+
+    drop(reader_doc);
+    drop(owner_doc);
+    Ok(())
+}

@@ -20,7 +20,7 @@ use super::harness::{fixtures, Pair};
 use crate::changes::{
     BigRepoChangeNotification, BigRepoChangeOrigin, ChangeFilter, DocIdFilter, OriginFilter,
 };
-use automerge::transaction::Transactable;
+use automerge::{transaction::Transactable, ReadDoc};
 use keyhive_core::access::Access;
 use std::sync::Arc;
 use std::time::Duration;
@@ -491,6 +491,463 @@ async fn tier7_doc_created_heads_only() -> crate::Res<()> {
             "DocCreated must not also emit a DocChanged"
         );
     }
+
+    drop(owner_doc);
+    Ok(())
+}
+
+// ========================================================================
+// Polish: dedup, batching, listener lifecycle
+// ========================================================================
+
+// ─── Repeated sync does not duplicate notification ────────────────────────
+//
+// A `sync_doc_with_peer` that produces no new changes (the doc has already
+// converged) must NOT emit a `DocChanged` notification. Only the first sync
+// that actually delivers new commits fires the notification.
+#[tokio::test(flavor = "multi_thread")]
+async fn tier7_repeated_sync_no_duplicate_notification() -> crate::Res<()> {
+    utils_rs::testing::setup_tracing_once();
+    let pair = Pair::boot(240, 241, "Owner", "Reader").await?;
+    let reader_agent = fixtures::agent_of(&pair.left().repo, pair.right()).await?;
+
+    let mut initial = automerge::Automerge::new();
+    initial
+        .transact(|tx| tx.put(automerge::ROOT, "title", "dedup-test"))
+        .map_err(|err| crate::ferr!("failed creating doc: {err:?}"))?;
+    let owner_doc = pair.left().repo.create_doc(initial).await?;
+    let doc_id = owner_doc.document_id();
+
+    pair.left()
+        .repo
+        .grant_doc_access(doc_id, reader_agent, Access::Edit)
+        .await?;
+    pair.left_conn().sync_keyhive_with_peer(None).await?;
+    pair.right_conn().sync_keyhive_with_peer(None).await?;
+
+    // Subscribe on the owner side to see changes.
+    let (_reg, mut rx) = pair
+        .left()
+        .repo
+        .subscribe_change_listener(ChangeFilter {
+            doc_id: Some(DocIdFilter::new(doc_id)),
+            origin: None,
+            path: Vec::new(),
+        })
+        .await?;
+
+    // Doc was created + first sync already occurred before subscribing; no
+    // bootstrap notification is pending.
+
+    // Reader writes a change.
+    let reader_doc =
+        fixtures::sync_doc_expect_ready(pair.right_conn(), &pair.right().repo, doc_id).await?;
+    reader_doc
+        .with_document(|doc| {
+            doc.transact(|tx| tx.put(automerge::ROOT, "phase", "reader-write"))
+                .map_err(|err| crate::ferr!("reader write failed: {err:?}"))
+        })
+        .await??;
+    drop(reader_doc);
+
+    // First sync: delivers the change → notification fires.
+    pair.left_conn()
+        .sync_doc_with_peer(doc_id, Some(Duration::from_secs(10)))
+        .await?;
+    pair.left().repo.wait_for_quiescence(None).await?;
+    let first = recv_one(&mut rx).await;
+    assert!(
+        first
+            .iter()
+            .any(|n| matches!(n, BigRepoChangeNotification::DocChanged { .. })),
+        "first sync carrying new commits must emit DocChanged"
+    );
+
+    // Second sync: no new data → no notification.
+    pair.left_conn()
+        .sync_doc_with_peer(doc_id, Some(Duration::from_secs(10)))
+        .await?;
+    pair.left().repo.wait_for_quiescence(None).await?;
+    assert_no_notification(&mut rx);
+
+    drop(owner_doc);
+    Ok(())
+}
+
+// ─── Multiple local mutations notification batching and order ───────────────
+//
+// Sequential local mutations produce notification batches with the mutations
+// in causal order. Each `automerge::Patch` in a notification has a `path`
+// and `action`; this test peeks into the patch action to assert the content
+// and order of mutations without timing-based sleep.
+#[tokio::test(flavor = "multi_thread")]
+async fn tier7_local_mutations_notification_batching() -> crate::Res<()> {
+    utils_rs::testing::setup_tracing_once();
+    let pair = Pair::boot(242, 243, "Owner", "BatchListener").await?;
+
+    let mut initial = automerge::Automerge::new();
+    initial
+        .transact(|tx| tx.put(automerge::ROOT, "title", "batch-base"))
+        .map_err(|err| crate::ferr!("failed creating doc: {err:?}"))?;
+    let owner_doc = pair.left().repo.create_doc(initial).await?;
+    let doc_id = owner_doc.document_id();
+
+    let (_reg, mut rx) = pair
+        .left()
+        .repo
+        .subscribe_change_listener(ChangeFilter {
+            doc_id: Some(DocIdFilter::new(doc_id)),
+            origin: Some(OriginFilter::Local),
+            path: Vec::new(),
+        })
+        .await?;
+
+    // Doc was created before subscribing; no bootstrap notification pending.
+
+    // Mutation 1: write "step" = "first".
+    owner_doc
+        .with_document(|doc| {
+            doc.transact(|tx| tx.put(automerge::ROOT, "step", "first"))
+                .map_err(|err| crate::ferr!("first mutation: {err:?}"))
+        })
+        .await??;
+
+    // Mutation 2: write "step" = "second".
+    owner_doc
+        .with_document(|doc| {
+            doc.transact(|tx| tx.put(automerge::ROOT, "step", "second"))
+                .map_err(|err| crate::ferr!("second mutation: {err:?}"))
+        })
+        .await??;
+
+    // Mutation 3: write "counter" = 3.
+    owner_doc
+        .with_document(|doc| {
+            doc.transact(|tx| tx.put(automerge::ROOT, "counter", 3_i64))
+                .map_err(|err| crate::ferr!("third mutation: {err:?}"))
+        })
+        .await??;
+
+    pair.left().repo.wait_for_quiescence(None).await?;
+
+    // Collect all notification batches. The runtime may deliver multiple
+    // batches; aggregate them and inspect the patch actions.
+    let mut step_values_in_order: Vec<String> = Vec::new();
+    let mut saw_counter = false;
+    loop {
+        match rx.try_recv() {
+            Ok(batch) => {
+                for n in &batch {
+                    if let BigRepoChangeNotification::DocChanged {
+                        doc_id: seen,
+                        patch,
+                        ..
+                    } = n
+                    {
+                        if *seen != doc_id {
+                            continue;
+                        }
+                        if let automerge::PatchAction::PutMap { key, value, .. } = &patch.action {
+                            match key.as_str() {
+                                "step" => {
+                                    if let (automerge::Value::Scalar(s), _) = value {
+                                        if let automerge::ScalarValue::Str(s) = s.as_ref() {
+                                            step_values_in_order.push(s.to_string());
+                                        }
+                                    }
+                                }
+                                "counter" => {
+                                    saw_counter = true;
+                                }
+                                _ => {}
+                            }
+                        }
+                    }
+                }
+            }
+            Err(tokio::sync::mpsc::error::TryRecvError::Empty) => break,
+            Err(tokio::sync::mpsc::error::TryRecvError::Disconnected) => break,
+        }
+    }
+
+    assert!(
+        !step_values_in_order.is_empty(),
+        "must see at least one step mutation"
+    );
+    assert_eq!(
+        step_values_in_order.first().map(String::as_str),
+        Some("first"),
+        "first step mutation must be 'first' in causal order"
+    );
+    assert_eq!(
+        step_values_in_order.last().map(String::as_str),
+        Some("second"),
+        "last step mutation must be 'second' in causal order"
+    );
+    assert!(saw_counter, "must see the counter mutation");
+
+    // Verify the final document state.
+    let final_step = owner_doc
+        .with_document_read(|doc| {
+            doc.get(automerge::ROOT, "step")
+                .ok()
+                .flatten()
+                .and_then(|(value, _)| match value {
+                    automerge::Value::Scalar(s) => match s.as_ref() {
+                        automerge::ScalarValue::Str(s) => Some(s.to_string()),
+                        _ => None,
+                    },
+                    _ => None,
+                })
+        })
+        .await;
+    assert_eq!(
+        final_step.as_deref(),
+        Some("second"),
+        "final doc state must reflect the last mutation"
+    );
+
+    drop(owner_doc);
+    Ok(())
+}
+
+// ─── Listener removal before mutation ─────────────────────────────────────
+//
+// Dropping the `ChangeListenerRegistration` unregisters the listener.
+// Subsequent mutations must NOT be delivered to the old receiver.
+// A new subscription after the mutation must receive subsequent ones.
+#[tokio::test(flavor = "multi_thread")]
+async fn tier7_listener_removal_before_mutation() -> crate::Res<()> {
+    utils_rs::testing::setup_tracing_once();
+    let pair = Pair::boot(244, 245, "Owner", "DropListener").await?;
+
+    let mut initial = automerge::Automerge::new();
+    initial
+        .transact(|tx| tx.put(automerge::ROOT, "title", "drop-test"))
+        .map_err(|err| crate::ferr!("failed creating doc: {err:?}"))?;
+    let owner_doc = pair.left().repo.create_doc(initial).await?;
+    let doc_id = owner_doc.document_id();
+
+    // Phase 1: subscribe and verify the listener works.
+    let (reg, mut rx) = pair
+        .left()
+        .repo
+        .subscribe_change_listener(ChangeFilter {
+            doc_id: Some(DocIdFilter::new(doc_id)),
+            origin: None,
+            path: Vec::new(),
+        })
+        .await?;
+
+    // Doc was created before subscribing; no bootstrap notification pending.
+
+    owner_doc
+        .with_document(|doc| {
+            doc.transact(|tx| tx.put(automerge::ROOT, "phase", "while-registered"))
+                .map_err(|err| crate::ferr!("mutation during registration: {err:?}"))
+        })
+        .await??;
+    pair.left().repo.wait_for_quiescence(None).await?;
+    let batch_before = recv_one(&mut rx).await;
+    assert!(
+        batch_before
+            .iter()
+            .any(|n| matches!(n, BigRepoChangeNotification::DocChanged { .. })),
+        "DocChanged must fire while listener is registered"
+    );
+
+    // Phase 2: drop registration, mutate. The old receiver is now
+    // disconnected (channel closed when the listener was removed).
+    drop(reg);
+
+    owner_doc
+        .with_document(|doc| {
+            doc.transact(|tx| tx.put(automerge::ROOT, "phase", "after-unregister"))
+                .map_err(|err| crate::ferr!("mutation after unregister: {err:?}"))
+        })
+        .await??;
+    pair.left().repo.wait_for_quiescence(None).await?;
+    // Old rx must be disconnected (channel closed on unregister).
+    assert!(
+        matches!(
+            rx.try_recv(),
+            Err(tokio::sync::mpsc::error::TryRecvError::Disconnected)
+        ),
+        "old receiver must be disconnected after unregister"
+    );
+
+    // Phase 3: re-subscribe, mutate, verify the new subscription fires.
+    let (_reg2, mut rx2) = pair
+        .left()
+        .repo
+        .subscribe_change_listener(ChangeFilter {
+            doc_id: Some(DocIdFilter::new(doc_id)),
+            origin: None,
+            path: Vec::new(),
+        })
+        .await?;
+
+    owner_doc
+        .with_document(|doc| {
+            doc.transact(|tx| tx.put(automerge::ROOT, "phase", "after-resubscribe"))
+                .map_err(|err| crate::ferr!("mutation after resubscribe: {err:?}"))
+        })
+        .await??;
+    pair.left().repo.wait_for_quiescence(None).await?;
+    let batch_after = recv_one(&mut rx2).await;
+    assert!(
+        batch_after
+            .iter()
+            .any(|n| matches!(n, BigRepoChangeNotification::DocChanged { .. })),
+        "DocChanged must fire for the new subscription"
+    );
+
+    drop(owner_doc);
+    Ok(())
+}
+
+// ─── Nested map path-prefix filter ─────────────────────────────────────────
+//
+// Subscribe to `["config", "theme"]`. Mutating that nested path fires.
+// A sibling key under the same parent (`config.lang`) does NOT fire.
+// Deleting the nested key fires `DeleteMap`.
+#[tokio::test(flavor = "multi_thread")]
+async fn tier7_nested_path_prefix_filter() -> crate::Res<()> {
+    utils_rs::testing::setup_tracing_once();
+    let pair = Pair::boot(246, 247, "Owner", "NestedListener").await?;
+
+    // Create doc with an initial seed value (BigRepo requires at least one
+    // head), then add nested config map.
+    let mut initial = automerge::Automerge::new();
+    initial
+        .transact(|tx| tx.put(automerge::ROOT, "_init", true))
+        .map_err(|err| crate::ferr!("init seed: {err:?}"))?;
+    let owner_doc = pair.left().repo.create_doc(initial).await?;
+    let doc_id = owner_doc.document_id();
+
+    owner_doc
+        .with_document(|doc| {
+            doc.transact(|tx| {
+                tx.put_object(automerge::ROOT, "config", automerge::ObjType::Map)
+                    .expect("put_object config");
+                Ok::<(), automerge::AutomergeError>(())
+            })
+            .expect("transact create config");
+        })
+        .await?;
+
+    // Get config ObjMeta.  The tuple from doc.get() is (Value, ObjMeta);
+    // ObjMeta can be passed as `obj` to Transaction methods.
+    let config_meta = owner_doc
+        .with_document_read(|doc| {
+            let (_, meta) = doc
+                .get(automerge::ROOT, "config")
+                .expect("get config")
+                .expect("config must exist");
+            meta
+        })
+        .await;
+
+    // Populate config.theme and config.lang.
+    owner_doc
+        .with_document(|doc| {
+            doc.transact(|tx| {
+                tx.put(&config_meta, "theme", "dark")
+                    .expect("put config.theme");
+                tx.put(&config_meta, "lang", "en").expect("put config.lang");
+                Ok::<(), automerge::AutomergeError>(())
+            })
+            .expect("transact populate config");
+        })
+        .await?;
+
+    use autosurgeon::Prop;
+    let (_reg, mut rx) = pair
+        .left()
+        .repo
+        .subscribe_change_listener(ChangeFilter {
+            doc_id: Some(DocIdFilter::new(doc_id)),
+            origin: None,
+            path: vec![Prop::Key("config".into()), Prop::Key("theme".into())],
+        })
+        .await?;
+
+    // Drain bootstrap notifications.
+    while rx.try_recv().is_ok() {}
+
+    // --- Mutation under the subscribed path: write config.theme.
+    owner_doc
+        .with_document(|doc| {
+            doc.transact(|tx| {
+                tx.put(&config_meta, "theme", "light")
+                    .expect("put config.theme");
+                Ok::<(), automerge::AutomergeError>(())
+            })
+            .expect("transact mutate theme");
+        })
+        .await?;
+    pair.left().repo.wait_for_quiescence(None).await?;
+
+    let batch = recv_one(&mut rx).await;
+    let theme_changed = batch.iter().any(|n| match n {
+        BigRepoChangeNotification::DocChanged {
+            doc_id: seen,
+            patch,
+            ..
+        } if *seen == doc_id => match &patch.action {
+            automerge::PatchAction::PutMap { key, .. } => key.as_str() == "theme",
+            _ => false,
+        },
+        _ => false,
+    });
+    assert!(
+        theme_changed,
+        "mutation under subscribed nested path config.theme must fire DocChanged"
+    );
+
+    // --- Sibling mutation: write config.lang (different key, same parent).
+    owner_doc
+        .with_document(|doc| {
+            doc.transact(|tx| {
+                tx.put(&config_meta, "lang", "fr").expect("put config.lang");
+                Ok::<(), automerge::AutomergeError>(())
+            })
+            .expect("transact mutate lang");
+        })
+        .await?;
+    pair.left().repo.wait_for_quiescence(None).await?;
+
+    assert_no_notification(&mut rx);
+
+    // --- Delete the nested key: delete config.theme.
+    owner_doc
+        .with_document(|doc| {
+            doc.transact(|tx| {
+                tx.delete(&config_meta, "theme")
+                    .expect("delete config.theme");
+                Ok::<(), automerge::AutomergeError>(())
+            })
+            .expect("transact delete theme");
+        })
+        .await?;
+    pair.left().repo.wait_for_quiescence(None).await?;
+
+    let del_batch = recv_one(&mut rx).await;
+    let theme_deleted = del_batch.iter().any(|n| match n {
+        BigRepoChangeNotification::DocChanged {
+            doc_id: seen,
+            patch,
+            ..
+        } if *seen == doc_id => match &patch.action {
+            automerge::PatchAction::DeleteMap { key } => key.as_str() == "theme",
+            _ => false,
+        },
+        _ => false,
+    });
+    assert!(
+        theme_deleted,
+        "deletion of nested key config.theme must fire DocChanged with DeleteMap"
+    );
 
     drop(owner_doc);
     Ok(())
