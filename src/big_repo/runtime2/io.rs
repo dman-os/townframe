@@ -69,6 +69,15 @@ pub struct CausalDecryptResult {
     pub complete: Vec<(Vec<u8>, Vec<u8>)>,
 }
 
+/// Result of a transport-level document sync attempt before materialization.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SyncDocAttempt {
+    Exchanged,
+    NotFound,
+    Unauthorized,
+    Policy(subduction_core::sync_session::SyncPolicyRejectionKind),
+}
+
 /// An encrypted loose commit ready for the atomic `store_commit` write.
 ///
 /// Bundles the commit identity (head, parents) and the encrypted blob that
@@ -271,8 +280,9 @@ pub trait RuntimeIo<F: FutureForm>: Send + Sync {
     /// Notify the runtime that the local keyhive state has changed.
     fn note_local_keyhive_changed(&self) -> F::Future<'_, eyre::Result<()>>;
 
-    /// Refresh big-sync membership and partition indexes for a changed target.
-    fn update_doc_access(
+    /// Refresh BigRepo's sync membership and partition indexes from Keyhive
+    /// for a changed target.
+    fn refresh_big_sync_doc_access(
         &self,
         target: keyhive_core::principal::identifier::Identifier,
     ) -> F::Future<'_, eyre::Result<()>>;
@@ -298,5 +308,5 @@ pub trait RuntimeIo<F: FutureForm>: Send + Sync {
         &self,
         sed_id: sedimentree_core::id::SedimentreeId,
         peer_id: big_sync_core::PeerId,
-    ) -> F::Future<'_, eyre::Result<bool>>;
+    ) -> F::Future<'_, eyre::Result<SyncDocAttempt>>;
 }

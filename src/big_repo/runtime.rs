@@ -65,10 +65,28 @@ impl Default for BigRepoSyncPolicy {
 }
 type SharedPartitionStore = Arc<dyn big_sync::HostPartStore>;
 type PendingKeyhiveSyncWaiters = HashMap<PeerId, Vec<(u64, oneshot::Sender<Res<()>>)>>;
+#[derive(Debug, Clone, PartialEq, Eq, thiserror::Error, displaydoc::Display)]
+pub enum SyncDocPolicyError {
+    /// The local or remote policy has no document definition.
+    DocumentNotFound,
+    /// The policy knows the document but denies the requested operation.
+    InsufficientAccess,
+    /// The policy rejected an identifier as malformed.
+    InvalidIdentifier,
+    /// The remote peer refused the request without exposing a finer reason.
+    Unauthorized,
+    /// The policy returned an implementation-specific rejection.
+    Other(String),
+}
+
 #[derive(Debug, thiserror::Error, displaydoc::Display)]
 pub enum SyncDocError {
     /// Document not found
     NotFound,
+    /// The remote peer refused the document request.
+    Unauthorized,
+    /// The storage policy rejected the sync: {0}
+    Policy(SyncDocPolicyError),
     /// TransportError
     TransportError,
     /// IoError
@@ -1414,7 +1432,7 @@ where
             // Global partition marker: are WE readable?
             if agents
                 .get(&own_principal)
-                .map(|a| a.is_reader())
+                .map(|a| a.is_fetcher())
                 .unwrap_or(false)
             {
                 store
@@ -2336,6 +2354,8 @@ where
                         for (_, sender, _lease) in waiters {
                             let err = match err {
                                 SyncDocError::NotFound => SyncDocError::NotFound,
+                                SyncDocError::Unauthorized => SyncDocError::Unauthorized,
+                                SyncDocError::Policy(e) => SyncDocError::Policy(e.clone()),
                                 SyncDocError::TransportError => SyncDocError::TransportError,
                                 SyncDocError::IoError(e) => SyncDocError::IoError(ferr!("{e}")),
                                 SyncDocError::Other(e) => SyncDocError::Other(ferr!("{e}")),

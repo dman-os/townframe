@@ -709,9 +709,29 @@ async fn tier5_payload_without_keyhive_stays_pending() -> crate::Res<()> {
     let _old_right = pair.right_conn.take().expect("right connection");
     old_left.stop().await?;
     pair.restart_right(StorageConfig::Memory).await?;
+    pair.connect().await?;
 
-    // The persisted tree is distinguishable from a missing document, and
-    // loading it without Keyhive capability is a normal pending state.
+    // Produce a new encrypted payload after the reader has restarted without
+    // its Keyhive document. The payload reaches the receiver's policy layer,
+    // which reports the missing local document as a structured rejection.
+    owner_doc
+        .with_document(|doc| {
+            doc.transact(|tx| tx.put(automerge::ROOT, "title", "payload-before-keyhive"))
+                .map_err(|err| crate::ferr!("failed creating post-restart edit: {err:?}"))
+        })
+        .await??;
+    let sync_error = pair
+        .right_conn()
+        .sync_doc_with_peer(doc_id, Some(std::time::Duration::from_secs(10)))
+        .await
+        .expect_err("missing local Keyhive document must be reported by policy");
+    assert!(matches!(
+        sync_error,
+        crate::SyncDocError::Policy(crate::SyncDocPolicyError::DocumentNotFound)
+    ));
+
+    // The persisted tree remains distinguishable from a missing document and
+    // loading it without Keyhive capability is still a normal pending state.
     assert!(matches!(
         pair.right().repo.get_doc(&doc_id).await?,
         crate::DocLookup::PendingMaterialization

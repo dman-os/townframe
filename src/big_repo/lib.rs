@@ -36,7 +36,9 @@ pub(crate) mod runtime2;
 mod sqlite_big_repo_store;
 pub use sqlite_big_repo_store::SqliteBigRepoStore;
 pub(crate) mod wire;
-pub use runtime::{CreateDocError, DocLookup, GetDocError, PutDocError, SyncDocError};
+pub use runtime::{
+    CreateDocError, DocLookup, GetDocError, PutDocError, SyncDocError, SyncDocPolicyError,
+};
 #[cfg(test)]
 pub(crate) mod test;
 #[cfg(test)]

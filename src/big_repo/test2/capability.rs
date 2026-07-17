@@ -172,19 +172,30 @@ async fn tier6_downgrade_edit_to_read() -> crate::Res<()> {
         // propagate: sync back to owner and check.
         pair.right_conn().sync_keyhive_with_peer(None).await?;
         pair.left_conn().sync_keyhive_with_peer(None).await?;
-        pair.left_conn()
+        let owner_sync = pair
+            .left_conn()
             .sync_doc_with_peer(doc_id, Some(std::time::Duration::from_secs(10)))
-            .await?;
-        let owner_state = pair.left().repo.doc_head_state(doc_id).await?;
-        let owner_handle =
-            fixtures::sync_doc_expect_ready(pair.left_conn(), &pair.left().repo, doc_id).await?;
-        // The owner should NOT see the "downgraded-try-write" status.
-        assert_ne!(
-            read_text(&owner_handle, "status").await.as_deref(),
-            Some("downgraded-try-write"),
-            "post-downgrade write must not propagate to the owner"
-        );
-        drop(owner_handle);
+            .await;
+        match owner_sync {
+            Ok(()) => {
+                let owner_handle =
+                    fixtures::sync_doc_expect_ready(pair.left_conn(), &pair.left().repo, doc_id)
+                        .await?;
+                // The owner should NOT see the "downgraded-try-write" status.
+                assert_ne!(
+                    read_text(&owner_handle, "status").await.as_deref(),
+                    Some("downgraded-try-write"),
+                    "post-downgrade write must not propagate to the owner"
+                );
+                drop(owner_handle);
+            }
+            Err(crate::SyncDocError::Policy(crate::SyncDocPolicyError::InsufficientAccess)) => {}
+            Err(error) => {
+                return Err(crate::ferr!(
+                    "unexpected downgraded write sync result: {error:?}"
+                ));
+            }
+        }
     }
 
     // Access level must be Read (not Edit).

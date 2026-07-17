@@ -45,6 +45,21 @@ async fn assert_relay_only(
         )
         .await;
     assert_eq!(access, Some(Access::Relay));
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+    loop {
+        if relay
+            .obj_parts_contains(doc_id, crate::GLOBAL_PART_ID)
+            .await?
+        {
+            break;
+        }
+        if std::time::Instant::now() >= deadline {
+            return Err(crate::ferr!(
+                "Relay access did not place the document in the global fetch partition"
+            ));
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+    }
     Ok(())
 }
 
@@ -735,16 +750,25 @@ async fn tier3_opposite_order_membership_payload() -> crate::Res<()> {
     // B pulls the doc payload from A (stores encrypted parts).
     sync_doc_no_materialize(topo.topo_conn(1, 0), doc_id).await?;
 
-    // C pulls the doc payload from B BEFORE receiving membership.
-    topo.topo_conn(2, 1)
+    // C asks B for the doc payload BEFORE receiving membership. Subduction
+    // rejects the incoming payload because C has no local document policy;
+    // the rejection must be structured and non-fatal.
+    let policy_error = topo
+        .topo_conn(2, 1)
         .sync_doc_with_peer(doc_id, Some(std::time::Duration::from_secs(10)))
-        .await?;
+        .await
+        .expect_err("missing local Keyhive document must reject the payload");
+    assert!(matches!(
+        policy_error,
+        crate::SyncDocError::Policy(crate::SyncDocPolicyError::DocumentNotFound)
+    ));
+
     topo.topo_node(2)
         .repo
         .wait_for_quiescence(Some(std::time::Duration::from_secs(10)))
         .await?;
 
-    // C has the encrypted parts but must NOT be materialized yet (no access).
+    // C must not be materialized before membership arrives.
     let c_lookup = topo.topo_node(2).repo.get_doc(&doc_id).await?;
     assert!(
         !matches!(c_lookup, crate::DocLookup::Ready(_)),

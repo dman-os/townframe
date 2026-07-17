@@ -379,12 +379,12 @@ impl SyncStatMachine {
             };
             part_state.peers.remove(&peer_id);
             part_state.fully_synced_peers.remove(&peer_id);
-            // FIXME: track removed peers to avoid blocking WaitForFullSync
-            // when peers disconnect
-            // for waiter in self.waiters.values_mut() {
-            //     waiter.done_set.remove(&(peer_id, part_id));
-            //     waiter.need_set.remove(&(peer_id, part_id));
-            // }
+            // When a peer is removed, clean up all waiters that reference it
+            // so they don't remain stranded.
+            for waiter in self.waiters.values_mut() {
+                waiter.done_set.remove(&(peer_id, part_id));
+                waiter.need_set.remove(&(peer_id, part_id));
+            }
             if part_state.peers.is_empty() {
                 self.parts.remove(&part_id);
             } else if part_state.peers.len() == part_state.fully_synced_peers.len() {
@@ -1684,5 +1684,41 @@ impl BigSyncMachine {
             );
             worker.task_id = task_id;
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// A waiter registered for a peer+part must NOT remain stranded after that
+    /// peer is removed.  Currently the cleanup in `SyncStatMachine::remove_peer`
+    /// is commented out (see FIXME on line 380), so this test is **red**.
+    ///
+    /// Expected post-fix behavior: the waiter is satisfied / removed when its
+    /// last remaining peer is removed.
+    #[test]
+    fn full_sync_waiter_does_not_strand_on_peer_removal() {
+        let mut stat = SyncStatMachine::default();
+
+        let peer = PeerId::random();
+        let part = PartId::random();
+
+        // Register the peer and its part.
+        stat.set_peer(peer, [part].into_iter());
+
+        // Register a waiter needing that peer + part.
+        stat.add_full_sync_waiter(1, [peer].into(), [part].into());
+
+        // Remove the peer -- the waiter must be cleaned up.
+        stat.remove_peer(peer);
+
+        let stranded = stat.debug_full_sync_waiters();
+        assert!(
+            stranded.is_empty(),
+            "waiter {} still stranded after peer removal: need_set={:?}",
+            1,
+            stranded.get(&1),
+        );
     }
 }
