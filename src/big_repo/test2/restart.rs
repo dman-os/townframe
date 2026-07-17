@@ -668,3 +668,55 @@ async fn tier5_restart_after_local_write_delivers_on_reconnect() -> crate::Res<(
     drop(owner_doc);
     Ok(())
 }
+
+// ─── Payload before restored membership does not panic ────────────────────
+//
+// The persistent part/subduction store survives this restart, but the
+// in-memory Keyhive store does not. Loading the persisted payload without
+// the local Keyhive document must leave it pending, not terminate the doc
+// worker. The normal archive-restore path is covered separately by Tier 5/8.
+#[tokio::test(flavor = "multi_thread")]
+async fn tier5_payload_without_keyhive_stays_pending() -> crate::Res<()> {
+    utils_rs::testing::setup_tracing_once();
+    let temp = tempfile::tempdir()?;
+    let left_path = temp.path().join("owner");
+    let right_path = temp.path().join("reader");
+    let mut pair =
+        Pair::boot_persistent(174, 175, "Owner", "Reader", left_path, right_path).await?;
+
+    let reader_agent = fixtures::agent_of(&pair.left().repo, pair.right()).await?;
+    let mut initial = automerge::Automerge::new();
+    initial
+        .transact(|tx| tx.put(automerge::ROOT, "title", "pending-before-membership"))
+        .map_err(|err| crate::ferr!("failed creating doc: {err:?}"))?;
+    let owner_doc = pair.left().repo.create_doc(initial).await?;
+    let doc_id = owner_doc.document_id();
+
+    pair.left()
+        .repo
+        .grant_doc_access(doc_id, reader_agent, Access::Read)
+        .await?;
+    pair.left_conn().sync_keyhive_with_peer(None).await?;
+    pair.right_conn().sync_keyhive_with_peer(None).await?;
+    let reader_doc =
+        fixtures::sync_doc_expect_ready(pair.right_conn(), &pair.right().repo, doc_id).await?;
+    drop(reader_doc);
+
+    // Restart with Memory keyhive storage while retaining the shared SQLite
+    // subduction/part store. The reader now has encrypted payload but no
+    // local Keyhive Document entry.
+    let old_left = pair.left_conn.take().expect("left connection");
+    let _old_right = pair.right_conn.take().expect("right connection");
+    old_left.stop().await?;
+    pair.restart_right(StorageConfig::Memory).await?;
+
+    // The persisted tree is distinguishable from a missing document, and
+    // loading it without Keyhive capability is a normal pending state.
+    assert!(matches!(
+        pair.right().repo.get_doc(&doc_id).await?,
+        crate::DocLookup::PendingMaterialization
+    ));
+
+    drop(owner_doc);
+    Ok(())
+}

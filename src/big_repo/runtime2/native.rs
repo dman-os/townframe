@@ -593,8 +593,13 @@ where
             let encrypted = decode_encrypted_blob(&raw)
                 .map_err(|e| ferr!("failed decoding encrypted blob: {e}"))?;
 
-            // Get the keyhive document and decrypt.
-            let kh_doc = get_kh_doc(&self.keyhive, sed_id).await?;
+            // A missing local Keyhive document means the content keys have
+            // not arrived yet. This is a normal pending-materialization
+            // state, not a fatal decryption error.
+            let kh_doc_id = kh_doc_id_from_sed_id(sed_id)?;
+            let Some(kh_doc) = self.keyhive.clone_keyhive().get_document(kh_doc_id).await else {
+                return Ok(None);
+            };
             let mut doc = kh_doc.lock().await;
             match doc.try_decrypt_content_keyed(&encrypted) {
                 Ok((plaintext, key)) => {
@@ -660,8 +665,14 @@ where
             let encrypted = decode_encrypted_blob(&raw)
                 .map_err(|e| ferr!("failed decoding encrypted blob: {e}"))?;
 
-            // Get the keyhive document.
-            let kh_doc = get_kh_doc(&self.keyhive, sed_id).await?;
+            // A missing local Keyhive document means the content keys have
+            // not arrived yet. Return an incomplete causal result so the doc
+            // worker records PendingMaterialization and retries after the
+            // next Keyhive sync.
+            let kh_doc_id = kh_doc_id_from_sed_id(sed_id)?;
+            let Some(kh_doc) = self.keyhive.clone_keyhive().get_document(kh_doc_id).await else {
+                return Ok(CausalDecryptResult::default());
+            };
 
             // Set up a ciphertext store backed by our storage.
             let ct_store = NativeCiphertextStore::new(self.storage.clone(), sed_id);

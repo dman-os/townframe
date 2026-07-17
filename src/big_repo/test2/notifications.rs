@@ -952,3 +952,144 @@ async fn tier7_nested_path_prefix_filter() -> crate::Res<()> {
     drop(owner_doc);
     Ok(())
 }
+
+// ========================================================================
+// Polish: bidirectional sync notification origins
+// ========================================================================
+
+// ─── Local and remote notifications during convergence ────────────────────
+//
+// Two Edit peers each write an independent field, then synchronise both
+// directions.  Each peer must emit a Local notification for its own write
+// and a Remote notification for the peer's write, all with correct doc_id.
+#[tokio::test(flavor = "multi_thread")]
+async fn tier7_bidirectional_sync_origin_correctness() -> crate::Res<()> {
+    utils_rs::testing::setup_tracing_once();
+    let pair = Pair::boot(248, 249, "Owner", "Editor").await?;
+    let editor_agent = fixtures::agent_of(&pair.left().repo, pair.right()).await?;
+
+    let mut initial = automerge::Automerge::new();
+    initial
+        .transact(|tx| tx.put(automerge::ROOT, "title", "origin-test"))
+        .map_err(|err| crate::ferr!("failed creating doc: {err:?}"))?;
+    let owner_doc = pair.left().repo.create_doc(initial).await?;
+    let doc_id = owner_doc.document_id();
+
+    // Grant Edit, sync both sides.
+    pair.left()
+        .repo
+        .grant_doc_access(doc_id, editor_agent, Access::Edit)
+        .await?;
+    pair.left_conn().sync_keyhive_with_peer(None).await?;
+    pair.right_conn().sync_keyhive_with_peer(None).await?;
+
+    let editor_doc =
+        fixtures::sync_doc_expect_ready(pair.right_conn(), &pair.right().repo, doc_id).await?;
+
+    // Subscribe on both sides (doc already created, no bootstrap to drain).
+    let (_reg_owner, mut owner_rx) = pair
+        .left()
+        .repo
+        .subscribe_change_listener(ChangeFilter {
+            doc_id: Some(DocIdFilter::new(doc_id)),
+            origin: None,
+            path: Vec::new(),
+        })
+        .await?;
+    let (_reg_editor, mut editor_rx) = pair
+        .right()
+        .repo
+        .subscribe_change_listener(ChangeFilter {
+            doc_id: Some(DocIdFilter::new(doc_id)),
+            origin: None,
+            path: Vec::new(),
+        })
+        .await?;
+
+    // Owner writes field_a (Local on owner side).
+    owner_doc
+        .with_document(|doc| {
+            doc.transact(|tx| tx.put(automerge::ROOT, "field_a", "from_owner"))
+                .map_err(|err| crate::ferr!("owner write: {err:?}"))
+        })
+        .await??;
+
+    // Editor writes field_b (Local on editor side).
+    editor_doc
+        .with_document(|doc| {
+            doc.transact(|tx| tx.put(automerge::ROOT, "field_b", "from_editor"))
+                .map_err(|err| crate::ferr!("editor write: {err:?}"))
+        })
+        .await??;
+
+    pair.left().repo.wait_for_quiescence(None).await?;
+    pair.right().repo.wait_for_quiescence(None).await?;
+
+    // Drain local notifications on each side.
+    let owner_local = recv_one(&mut owner_rx).await;
+    assert!(
+        owner_local.iter().any(|n| matches!(
+            n,
+            BigRepoChangeNotification::DocChanged {
+                doc_id: did,
+                origin: BigRepoChangeOrigin::Local,
+                ..
+            } if *did == doc_id
+        )),
+        "owner must see Local DocChanged for its own write"
+    );
+    let editor_local = recv_one(&mut editor_rx).await;
+    assert!(
+        editor_local.iter().any(|n| matches!(
+            n,
+            BigRepoChangeNotification::DocChanged {
+                doc_id: did,
+                origin: BigRepoChangeOrigin::Local,
+                ..
+            } if *did == doc_id
+        )),
+        "editor must see Local DocChanged for its own write"
+    );
+
+    // --- Sync both directions.
+    pair.left_conn()
+        .sync_doc_with_peer(doc_id, Some(std::time::Duration::from_secs(10)))
+        .await?;
+    pair.right_conn()
+        .sync_doc_with_peer(doc_id, Some(std::time::Duration::from_secs(10)))
+        .await?;
+    pair.left().repo.wait_for_quiescence(None).await?;
+    pair.right().repo.wait_for_quiescence(None).await?;
+
+    // Owner receives editor's field_b as Remote.
+    let owner_remote = recv_one(&mut owner_rx).await;
+    assert!(
+        owner_remote.iter().any(|n| matches!(
+            n,
+            BigRepoChangeNotification::DocChanged {
+                doc_id: did,
+                origin: BigRepoChangeOrigin::Remote { .. },
+                ..
+            } if *did == doc_id
+        )),
+        "owner must see Remote DocChanged for editor's write"
+    );
+
+    // Editor receives owner's field_a as Remote.
+    let editor_remote = recv_one(&mut editor_rx).await;
+    assert!(
+        editor_remote.iter().any(|n| matches!(
+            n,
+            BigRepoChangeNotification::DocChanged {
+                doc_id: did,
+                origin: BigRepoChangeOrigin::Remote { .. },
+                ..
+            } if *did == doc_id
+        )),
+        "editor must see Remote DocChanged for owner's write"
+    );
+
+    drop(editor_doc);
+    drop(owner_doc);
+    Ok(())
+}

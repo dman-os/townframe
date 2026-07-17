@@ -1,36 +1,4 @@
-//! runtime2 — the tractable rewrite of `runtime.rs`.
-//!
-//! A FutureForm-generic, transport-agnostic rewrite of the 5k-line tokio+iroh
-//! `runtime.rs`. Hub/worker actors with all IO centralized behind traits
-//! ([`DocIo`], [`RuntimeIo`], injected [`TaskRuntime`]/[`Timer`]/[`Clock`]).
-//! Parity with the old runtime, with three bugs fixed (see `play.big_repo.current_fixes.md`):
-//! - head-divergence flake — heads are derived, never cached in an overloaded
-//!   payload field;
-//! - noop-after-crash — `apply_sync_session` always re-derives sedimentree
-//!   heads, even on an empty-refs sync;
-//! - non-atomic local write — a single `store_commit` (big_sync is gone from
-//!   the runtime, so there is no split write).
-//!
-//! Not yet wired into the build (`#[cfg(any())]` in `lib.rs`); green-up is a
-//! separate pass. See `play.big_repo.runtime2.md`.
-//!
-//! # IO model (v1: async actor + centralized IO traits → D2 determinism)
-//!
-//! The hub and doc-worker are async actors driven by an injected [`TaskRuntime`].
-//! All IO flows through traits — [`DocIo`], [`RuntimeIo`], `Storage<F>`,
-//! `KeyhiveStorage<F>` — so IO is *external* to the actor logic. Memory
-//! backends give D2 determinism (no disk/network jitter). Full step-determinism
-//! (samod-style `IoTask` round-stepping) is a future evolution: the trait seam
-//! lets us wrap [`DocIo`] in an `IoTask`-completing harness later without
-//! rewriting the actor.
-//!
-//! # FutureForm
-//!
-//! Everything is generic over `F: FutureForm` (`Sendable` native, `Local` wasm).
-//! This is the wasm lever. subduction + keyhive + subduction_keyhive already
-//! support both; big_repo currently hardcodes `Sendable`.
-
-use crate::interlude::*; // brings PeerId, ObjId, Res, prelude
+use crate::interlude::*;
 use future_form::FutureForm;
 
 mod io;
@@ -56,15 +24,10 @@ mod doc_worker;
 mod handle;
 mod hub;
 
-pub use doc_worker::{spawn_doc_worker, DocWorker2};
+pub use doc_worker::spawn_doc_worker;
 pub use handle::Runtime2Handle;
 pub use hub::{spawn_runtime2, Runtime2Hub, Runtime2StopToken};
 
-/// Re-export of the doc id (root type alias) so runtime2 modules agree.
-pub use crate::DocumentId;
-
-/// runtime2 config — all inputs that were once hardcoded in `spawn_big_repo_runtime`.
-///
 /// Generic over `F: FutureForm` (Sendable native, Local wasm) and the task
 /// runtime `R`. Concrete storage, keyhive, and transport are behind the
 /// injected [`RuntimeIo`] / [`DocIo`] / [`TransportConnect`] traits.
@@ -102,10 +65,8 @@ pub struct Runtime2Config<F: FutureForm, R: TaskRuntime<F>> {
 /// Transport-agnostic connect/accept/close — the seam that replaces iroh baked
 /// into the runtime. The hub calls these on `OpenConn`/`AcceptConn`/`CloseConn`.
 ///
-/// Every method returns `F::Future<'static, …>` so the same interface works
-/// for `Sendable` (native) and `Local` (wasm).  The connect/accept results
-/// carry a connection lifecycle end-future that the hub spawns to observe
-/// `ConnLost`.
+/// The connect/accept results carry a connection lifecycle end-future that the
+/// hub spawns to observe `ConnLost`.
 pub trait TransportConnect<F: FutureForm>: Send + Sync {
     /// Connect to `expected_peer` at `addr_blob` (transport-specific).
     /// Returns the handshake-authoritative peer identity, a closed flag that
@@ -144,12 +105,7 @@ pub trait TransportConnect<F: FutureForm>: Send + Sync {
     fn close(&self, peer_id: big_sync_core::PeerId) -> F::Future<'static, eyre::Result<()>>;
 }
 
-// ─── NEW types (the heads-fix op) ──────────────────────────────────────────
-
 /// The result of the walk-derived heads query (`Runtime2Handle::doc_head_state`).
-/// This is the flake-detector's backing type: test2 Tier-0 asserts sedimentree
-/// parity across all peers (incl. relays) and materialized parity across peers
-/// with access.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct DocHeadState {
     /// Sedimentree heads — storage ground truth; always present for a doc in
