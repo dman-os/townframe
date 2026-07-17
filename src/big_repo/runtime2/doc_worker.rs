@@ -1,12 +1,8 @@
 //! `DocWorker2` — the per-doc actor.
 //!
-//! Replaces the `DocWorker` in `runtime.rs`. Each former mega-method is broken
-//! into small steps with an explicit IO contract via [`DocIo`], so the IO needs
-//! are visible at the type level.
-//!
 //! # State machine
 //!
-//! Four states (parity with old `DocWorkerDocState` at `runtime.rs:2198`):
+//! Four states
 //! - [`Unloaded`](DocState::Unloaded) — nothing loaded; sedimentree heads may
 //!   exist in storage (relay mode).
 //! - [`Transient`](DocState::Transient) — automerge doc in memory, no external
@@ -15,15 +11,6 @@
 //!   `Weak` so eviction can reclaim when all handles drop.
 //! - [`PendingMaterialization`](DocState::PendingMaterialization) — content
 //!   exists in the sedimentree but is not yet decryptable (keyhive keys pending).
-//!
-//! # big_sync dropped
-//!
-//! The old `commit_delta` wrote materialized heads into `set_obj_payload` and
-//! read them back for no-op detection. Both are gone: heads are derived from
-//! the live automerge doc (materialized heads) or the sedimentree
-//! ([`DocIo::sedimentree_heads`]). There is no separate "heads store."
-//!
-//! [`DocIo`]: crate::runtime2::DocIo
 
 use crate::interlude::*;
 use crate::runtime::stage_automerge_ingest;
@@ -39,47 +26,98 @@ use std::sync::Arc;
 // STRUCT
 // ═══════════════════════════════════════════════════════════════════════════
 
-/// The per-doc actor state. Generic over `F: FutureForm`.
-///
-/// Mirrors the old `DocWorker<S>` at `runtime.rs:2168` but replaces the
-/// scattered `subduction`/`storage`/`ciphertext_store`/`big_sync_store` fields
-/// with a single [`io: Arc<dyn DocIo<F>>`](DocIo) — every IO operation flows
-/// through this trait.
-pub struct DocWorker2<F: FutureForm> {
-    pub(crate) doc_id: DocumentId,
-    pub(crate) sed_id: sedimentree_core::id::SedimentreeId,
+#[allow(clippy::too_many_arguments)]
+pub fn spawn_doc_worker<F, T>(
+    doc_id: DocumentId,
+    io: Arc<dyn DocIo<F>>,
+    change_manager: Arc<crate::changes::ChangeListenerManager>,
+    sync_policy: crate::runtime::BigRepoSyncPolicy,
+    clock: Arc<dyn crate::runtime2::Clock>,
+    tasks: &T,
+    runtime_evt_tx: async_channel::Sender<crate::runtime2::Runtime2Evt>,
+) -> eyre::Result<(
+    DocWorkerHandle,
+    DocWorkerStopToken,
+    futures::stream::AbortHandle,
+)>
+where
+    F: FutureForm + DocWorkerLoop<F> + 'static,
+    T: crate::runtime2::TaskSet<F>,
+{
+    let (msg_tx, msg_rx) = async_channel::unbounded::<DocWorkerMsg>();
+    let sed_id = sedimentree_core::id::SedimentreeId::new(doc_id.into_bytes());
+
+    let mut worker = DocWorker2 {
+        doc_id,
+        sed_id,
+        state: DocState::Unloaded,
+        io,
+        change_manager,
+        sync_policy,
+        clock,
+        msg_tx: msg_tx.clone(),
+        evt_tx: runtime_evt_tx.clone(),
+        last_notified_heads: None,
+        pending_fragment_requests: std::collections::BTreeSet::new(),
+        pending_sync_jobs: HashMap::new(),
+        active_doc_syncs: HashMap::new(),
+        sync_completed: std::collections::HashSet::new(),
+        sync_materialized: std::collections::HashSet::new(),
+        quiescence_waiters: Vec::new(),
+    };
+
+    let (stop_abort, stop_registration) = futures::future::AbortHandle::new_pair();
+
+    let abort = tasks.spawn(F::mailbox_loop(
+        worker,
+        msg_rx,
+        stop_registration,
+        runtime_evt_tx,
+        doc_id,
+    ))?;
+
+    Ok((
+        DocWorkerHandle { msg_tx },
+        DocWorkerStopToken { abort: stop_abort },
+        abort,
+    ))
+}
+
+struct DocWorker2<F: FutureForm> {
+    doc_id: DocumentId,
+    sed_id: sedimentree_core::id::SedimentreeId,
 
     /// The 4-state machine (Unloaded / Transient / Live / PendingMaterialization).
-    pub(crate) state: DocState,
+    state: DocState,
 
     /// Centralized IO surface — replaces subduction + storage + ciphertext_store
     /// + big_sync_store from the old `DocWorker`.
-    pub(crate) io: Arc<dyn DocIo<F>>,
+    io: Arc<dyn DocIo<F>>,
 
     // ── change manager ─────────────────────────────────────────────────────
-    pub(crate) change_manager: Arc<crate::changes::ChangeListenerManager>,
+    change_manager: Arc<crate::changes::ChangeListenerManager>,
 
     // ── sync policy / clock ────────────────────────────────────────────────
-    pub(crate) sync_policy: crate::runtime::BigRepoSyncPolicy,
-    pub(crate) clock: Arc<dyn crate::runtime2::Clock>,
+    sync_policy: crate::runtime::BigRepoSyncPolicy,
+    clock: Arc<dyn crate::runtime2::Clock>,
 
     // ── channels ───────────────────────────────────────────────────────────
-    pub(crate) msg_tx: async_channel::Sender<DocWorkerMsg>,
-    pub(crate) evt_tx: async_channel::Sender<crate::runtime2::Runtime2Evt>,
+    msg_tx: async_channel::Sender<DocWorkerMsg>,
+    evt_tx: async_channel::Sender<crate::runtime2::Runtime2Evt>,
 
     // ── head-tracking ──────────────────────────────────────────────────────
     /// The last heads we notified via the change manager. Used for no-op
     /// detection (if the live doc's heads haven't changed, skip notification).
-    pub(crate) last_notified_heads: Option<Arc<[automerge::ChangeHash]>>,
+    last_notified_heads: Option<Arc<[automerge::ChangeHash]>>,
 
     // ── fragment bookkeeping ───────────────────────────────────────────────
     /// Fragment-boundary commits awaiting a corresponding `store_fragment` call.
-    pub(crate) pending_fragment_requests:
+    pending_fragment_requests:
         std::collections::BTreeSet<subduction_core::subduction::request::FragmentRequested>,
 
     // ── sync bookkeeping (parcel 4b) ───────────────────────────────────────
     /// In-flight sync jobs: peer → (waiter_id, response_sender, internal_lease).
-    pub(crate) pending_sync_jobs: HashMap<
+    pending_sync_jobs: HashMap<
         PeerId,
         Vec<(
             u64,
@@ -87,22 +125,22 @@ pub struct DocWorker2<F: FutureForm> {
             DocWorkerInternalLease,
         )>,
     >,
-    pub(crate) active_doc_syncs: HashMap<PeerId, u64>,
+    active_doc_syncs: HashMap<PeerId, u64>,
     /// The subduction sync task has completed for the peer. Success does not
     /// resolve waiters until the corresponding outbound session has also been
     /// applied; the two events arrive through independent runtime2 paths.
-    pub(crate) sync_completed: std::collections::HashSet<PeerId>,
+    sync_completed: std::collections::HashSet<PeerId>,
     /// An outbound sync session has finished applying for the peer.
-    pub(crate) sync_materialized: std::collections::HashSet<PeerId>,
+    sync_materialized: std::collections::HashSet<PeerId>,
     /// Mailbox-ordered quiescence barriers waiting for active finite work.
-    pub(crate) quiescence_waiters: Vec<(u64, DocWorkerInternalLease)>,
+    quiescence_waiters: Vec<(u64, DocWorkerInternalLease)>,
 }
 
 /// The doc's live state. `Unloaded` = relay/pending (sedimentree heads only,
 /// no automerge). `Transient` / `Live` = materialized.
 ///
 /// Mirrors `DocWorkerDocState` at `runtime.rs:2198`.
-pub enum DocState {
+enum DocState {
     /// No automerge doc loaded. The sedimentree may have content (relay mode)
     /// or may be empty.
     Unloaded,
@@ -129,7 +167,7 @@ impl<F: FutureForm> DocWorker2<F> {
     /// where individual message handlers are defined). The `_lease` fields in
     /// certain messages keep the worker alive while the operation is in-flight
     /// (the hub's side of the lease is released when the message completes).
-    pub(crate) async fn handle_msg(&mut self, msg: DocWorkerMsg) -> eyre::Result<()> {
+    async fn handle_msg(&mut self, msg: DocWorkerMsg) -> eyre::Result<()> {
         match msg {
             DocWorkerMsg::PutDoc {
                 initial_content,
@@ -1871,91 +1909,4 @@ impl<F: FutureForm> DocWorkerLoop<F> for F {
             }
         })
     }
-}
-
-// ═══════════════════════════════════════════════════════════════════════════
-// NO-OP LEASE
-// ═══════════════════════════════════════════════════════════════════════════
-
-/// A no-op lease for `LiveDocBundle` that does nothing on drop.
-///
-/// In runtime2, the hub manages doc-worker lifecycle via
-/// `Runtime2Cmd::ReleaseDocLease` — the lease on the bundle itself is a
-/// dummy. This replaces the old `RuntimeDocLease` which sent
-/// `release_doc_lease` on drop.
-#[derive(Clone, Debug)]
-pub(crate) struct NoopDocLease;
-
-impl Drop for NoopDocLease {
-    fn drop(&mut self) {
-        // No-op: hub manages refcounts.
-    }
-}
-
-// ═══════════════════════════════════════════════════════════════════════════
-// SPAWN  (top-standing free function)
-// ═══════════════════════════════════════════════════════════════════════════
-
-/// Spawn a doc-worker. Top-standing free function (NOT a method on the hub) —
-/// the hub calls this when ensuring a worker. Mirrors the old `spawn_doc_worker`
-/// at `runtime.rs:1514`.
-///
-/// Returns the mailbox handle, stop token, and runtime-neutral abort handle.
-/// The enclosing [`TaskSet`](crate::runtime2::TaskSet) retains and joins the
-/// underlying runtime task; the abort handle exists for per-document eviction.
-#[allow(clippy::too_many_arguments)]
-pub fn spawn_doc_worker<F, T>(
-    doc_id: DocumentId,
-    io: Arc<dyn DocIo<F>>,
-    change_manager: Arc<crate::changes::ChangeListenerManager>,
-    sync_policy: crate::runtime::BigRepoSyncPolicy,
-    clock: Arc<dyn crate::runtime2::Clock>,
-    tasks: &T,
-    runtime_evt_tx: async_channel::Sender<crate::runtime2::Runtime2Evt>,
-) -> eyre::Result<(
-    DocWorkerHandle,
-    DocWorkerStopToken,
-    futures::stream::AbortHandle,
-)>
-where
-    F: FutureForm + DocWorkerLoop<F> + 'static,
-    T: crate::runtime2::TaskSet<F>,
-{
-    let (msg_tx, msg_rx) = async_channel::unbounded::<DocWorkerMsg>();
-    let sed_id = sedimentree_core::id::SedimentreeId::new(doc_id.into_bytes());
-
-    let mut worker = DocWorker2 {
-        doc_id,
-        sed_id,
-        state: DocState::Unloaded,
-        io,
-        change_manager,
-        sync_policy,
-        clock,
-        msg_tx: msg_tx.clone(),
-        evt_tx: runtime_evt_tx.clone(),
-        last_notified_heads: None,
-        pending_fragment_requests: std::collections::BTreeSet::new(),
-        pending_sync_jobs: HashMap::new(),
-        active_doc_syncs: HashMap::new(),
-        sync_completed: std::collections::HashSet::new(),
-        sync_materialized: std::collections::HashSet::new(),
-        quiescence_waiters: Vec::new(),
-    };
-
-    let (stop_abort, stop_registration) = futures::future::AbortHandle::new_pair();
-
-    let abort = tasks.spawn(F::mailbox_loop(
-        worker,
-        msg_rx,
-        stop_registration,
-        runtime_evt_tx,
-        doc_id,
-    ))?;
-
-    Ok((
-        DocWorkerHandle { msg_tx },
-        DocWorkerStopToken { abort: stop_abort },
-        abort,
-    ))
 }

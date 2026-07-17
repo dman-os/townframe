@@ -48,6 +48,23 @@ async fn assert_relay_only(
     Ok(())
 }
 
+async fn read_text(handle: &crate::BigDocHandle, key: &str) -> Option<String> {
+    handle
+        .with_document_read(|doc| {
+            doc.get(automerge::ROOT, key)
+                .ok()
+                .flatten()
+                .and_then(|(value, _)| match value {
+                    automerge::Value::Scalar(s) => match s.as_ref() {
+                        ScalarValue::Str(v) => Some(v.to_string()),
+                        _ => None,
+                    },
+                    _ => None,
+                })
+        })
+        .await
+}
+
 async fn read_title(handle: &crate::BigDocHandle) -> String {
     handle
         .with_document_read(|doc| {
@@ -566,6 +583,567 @@ async fn tier3_partition_then_heal() -> crate::Res<()> {
 
     drop(a_doc);
     drop(b_doc2);
+    drop(guard);
+    Ok(())
+}
+
+// ========================================================================
+// Polish: duplicate-delivery, opposite-order membership/payload
+// ========================================================================
+
+// ─── Duplicate delivery through mesh paths ───────────────────────────────
+//
+// A document arrives at node D through two independent paths (direct A↔D
+// and indirect A↔B↔C↔D).  Duplicate deliveries must not produce duplicate
+// commits or divergent sedimentree heads.
+#[tokio::test(flavor = "multi_thread")]
+async fn tier3_duplicate_delivery_harmless() -> crate::Res<()> {
+    utils_rs::testing::setup_tracing_once();
+    let a = Node::boot(10, "Alice").await?;
+    let b = Node::boot(11, "Bob").await?;
+    let c = Node::boot(12, "Carol").await?;
+    let d = Node::boot(13, "Dora").await?;
+
+    let a_b = a.connect(&b).await?;
+    let b_a = b.accepted_connection().await;
+    let b_c = b.connect(&c).await?;
+    let c_b = c.accepted_connection().await;
+    let c_d = c.connect(&d).await?;
+    let d_c = d.accepted_connection().await;
+    let d_a = d.connect(&a).await?;
+    let a_d = a.accepted_connection().await;
+    let guard = ShutdownGuard::from(vec![a, b, c, d]);
+
+    let mut initial = automerge::Automerge::new();
+    initial
+        .transact(|tx| tx.put(automerge::ROOT, "title", "dup-delivery"))
+        .map_err(|err| crate::ferr!("failed creating doc: {err:?}"))?;
+    let owner_doc = guard.node(0).repo.create_doc(initial).await?;
+    let doc_id = owner_doc.document_id();
+
+    // Grant via public agent so all reachable peers can read.
+    guard
+        .node(0)
+        .repo
+        .grant_doc_access(doc_id, fixtures::public_agent(), Access::Read)
+        .await?;
+
+    // Sync keyhive along all edges so the public-agent grant propagates.
+    for conn in [&a_b, &b_c, &c_d, &d_a, &b_a, &c_b, &d_c, &a_d] {
+        conn.sync_keyhive_with_peer(None).await?;
+    }
+
+    // Path 1: A→B→C→D.
+    b_a.sync_doc_with_peer(doc_id, Some(std::time::Duration::from_secs(10)))
+        .await?;
+    c_b.sync_doc_with_peer(doc_id, Some(std::time::Duration::from_secs(10)))
+        .await?;
+    d_c.sync_doc_with_peer(doc_id, Some(std::time::Duration::from_secs(10)))
+        .await?;
+    guard
+        .node(3)
+        .repo
+        .wait_for_quiescence(Some(std::time::Duration::from_secs(10)))
+        .await?;
+
+    // Path 2: A→D (direct).  This sends the same doc again.  D must
+    // converge without duplication.
+    a_d.sync_doc_with_peer(doc_id, Some(std::time::Duration::from_secs(10)))
+        .await?;
+    guard
+        .node(3)
+        .repo
+        .wait_for_quiescence(Some(std::time::Duration::from_secs(10)))
+        .await?;
+
+    // All four nodes must have identical sedimentree heads.
+    let mut baseline = guard
+        .node(0)
+        .repo
+        .doc_head_state(doc_id)
+        .await?
+        .sedimentree_heads
+        .to_vec();
+    baseline.sort_by_key(|h| h.0);
+    for idx in 1..4 {
+        let mut heads = guard
+            .node(idx)
+            .repo
+            .doc_head_state(doc_id)
+            .await?
+            .sedimentree_heads
+            .to_vec();
+        heads.sort_by_key(|h| h.0);
+        assert_eq!(
+            heads, baseline,
+            "sedimentree heads diverged at node {idx} after duplicate delivery"
+        );
+    }
+
+    // D can materialise.
+    let d_doc = guard
+        .node(3)
+        .repo
+        .get_doc(&doc_id)
+        .await?
+        .into_ready(doc_id)?;
+    assert_eq!(read_title(&d_doc).await, "dup-delivery");
+    drop(d_doc);
+    drop(owner_doc);
+    drop(guard);
+    Ok(())
+}
+
+// ─── Multi-hop opposite-order membership/payload ─────────────────────────
+//
+// In a line A↔B↔C, C receives the doc payload (through B) BEFORE the
+// keyhive membership grant from A arrives.  After the membership sync,
+// C must be able to materialise (payload-first ordering).
+#[tokio::test(flavor = "multi_thread")]
+async fn tier3_opposite_order_membership_payload() -> crate::Res<()> {
+    utils_rs::testing::setup_tracing_once();
+    //   ┌─────┐    ┌─────┐    ┌─────┐
+    //   │  A  │────│  B  │────│  C  │
+    //   │(30) │    │(31) │    │(32) │
+    //   └─────┘    └─────┘    └─────┘
+    let topo = Topo::boot_line(30, 31, 32, "Alice", "Bob", "Carol").await?;
+
+    let mut initial = automerge::Automerge::new();
+    initial
+        .transact(|tx| tx.put(automerge::ROOT, "title", "opposite-order"))
+        .map_err(|err| crate::ferr!("failed creating doc: {err:?}"))?;
+    let a_doc = topo.topo_node(0).repo.create_doc(initial).await?;
+    let doc_id = a_doc.document_id();
+
+    // Grant B as relay and C as Reader via public agent (same pattern as
+    // the existing relay/line tests where the far-end agent is not directly
+    // learned by the owner across a multi-hop connection).
+    let b_agent = fixtures::agent_of(&topo.topo_node(0).repo, topo.topo_node(1)).await?;
+    topo.topo_node(0)
+        .repo
+        .grant_doc_access(doc_id, b_agent, Access::Relay)
+        .await?;
+    topo.topo_node(0)
+        .repo
+        .grant_doc_access(doc_id, fixtures::public_agent(), Access::Read)
+        .await?;
+
+    // Sync keyhive A↔B.
+    topo.topo_conn(0, 1).sync_keyhive_with_peer(None).await?;
+    topo.topo_conn(1, 0).sync_keyhive_with_peer(None).await?;
+
+    // B pulls the doc payload from A (stores encrypted parts).
+    sync_doc_no_materialize(topo.topo_conn(1, 0), doc_id).await?;
+
+    // C pulls the doc payload from B BEFORE receiving membership.
+    topo.topo_conn(2, 1)
+        .sync_doc_with_peer(doc_id, Some(std::time::Duration::from_secs(10)))
+        .await?;
+    topo.topo_node(2)
+        .repo
+        .wait_for_quiescence(Some(std::time::Duration::from_secs(10)))
+        .await?;
+
+    // C has the encrypted parts but must NOT be materialized yet (no access).
+    let c_lookup = topo.topo_node(2).repo.get_doc(&doc_id).await?;
+    assert!(
+        !matches!(c_lookup, crate::DocLookup::Ready(_)),
+        "C must not materialise before membership arrives"
+    );
+
+    // Now sync membership from B→C.  C learns about Read access.
+    topo.topo_conn(1, 2).sync_keyhive_with_peer(None).await?;
+
+    // C must be able to materialize now.
+    let c_doc =
+        fixtures::sync_doc_expect_ready(topo.topo_conn(2, 1), &topo.topo_node(2).repo, doc_id)
+            .await?;
+    assert_eq!(
+        read_title(&c_doc).await,
+        "opposite-order",
+        "C must materialise after payload-first delivery then membership arrival"
+    );
+
+    // Tier 0: sedimentree parity across the line.
+    assert_sedimentree_parity_across(&topo, doc_id, &[0, 1, 2]).await?;
+    kh_snap::assert_document_snapshot_equal(topo.topo_node(0), topo.topo_node(2), doc_id).await?;
+
+    drop(a_doc);
+    drop(c_doc);
+    Ok(())
+}
+
+// ========================================================================
+// Polish batch: store-and-forward relay, partial-mesh partition/heal
+// ========================================================================
+
+// ─── Store-and-forward relay ──────────────────────────────────────────────
+//
+// A relay receives encrypted doc parts before the reader connects.  The
+// owner and relay then exchange additional updates while the reader is
+// still absent.  When the reader later connects through the relay, syncs
+// keyhive, and pulls the doc, they must receive BOTH the initial content
+// and the later updates.  The relay remains Relay-only throughout.
+#[tokio::test(flavor = "multi_thread")]
+async fn tier3_store_and_forward_relay() -> crate::Res<()> {
+    utils_rs::testing::setup_tracing_once();
+
+    let owner = Node::boot(36, "Owner").await?;
+    let relay = Node::boot(37, "Relay").await?;
+    let reader = Node::boot(38, "Reader").await?;
+    let guard = ShutdownGuard::from(vec![owner, relay, reader]);
+
+    // Phase 1: connect A↔R only; reader is not yet on the network.
+    let a_r = guard.node(0).connect(guard.node(1)).await?;
+    let r_a = guard.node(1).accepted_connection().await;
+    a_r.sync_keyhive_with_peer(None).await?;
+
+    // Owner creates doc with initial content.
+    let mut initial = automerge::Automerge::new();
+    initial
+        .transact(|tx| tx.put(automerge::ROOT, "phase", "initial"))
+        .map_err(|err| crate::ferr!("failed creating doc: {err:?}"))?;
+    let owner_doc = guard.node(0).repo.create_doc(initial).await?;
+    let doc_id = owner_doc.document_id();
+
+    // Grant R Relay access; grant Read via public agent for the future reader.
+    let relay_agent = fixtures::agent_of(&guard.node(0).repo, guard.node(1)).await?;
+    guard
+        .node(0)
+        .repo
+        .grant_doc_access(doc_id, relay_agent, Access::Relay)
+        .await?;
+    guard
+        .node(0)
+        .repo
+        .grant_doc_access(doc_id, fixtures::public_agent(), Access::Read)
+        .await?;
+    a_r.sync_keyhive_with_peer(None).await?;
+    // Verify the relay only has Relay access (no Read).
+    assert_relay_only(&guard.node(1).repo, guard.node(1), doc_id).await?;
+
+    // R pulls the initial doc from A (stores encrypted parts, doesn't
+    // materialize because the relay only has Relay access).
+    sync_doc_no_materialize(&r_a, doc_id).await?;
+    // R must NOT materialise.
+    let r_state = guard.node(1).repo.doc_head_state(doc_id).await?;
+    assert!(
+        r_state.materialized_heads.is_none(),
+        "relay must NOT materialise after first sync"
+    );
+
+    // Phase 2: owner writes an update while the reader is still absent.
+    owner_doc
+        .with_document(|doc| {
+            doc.transact(|tx| tx.put(automerge::ROOT, "phase", "update1"))
+                .map_err(|err| crate::ferr!("failed update1: {err:?}"))
+        })
+        .await??;
+    // R pulls the update.
+    r_a.sync_doc_with_peer(doc_id, Some(std::time::Duration::from_secs(10)))
+        .await?;
+    guard
+        .node(1)
+        .repo
+        .wait_for_quiescence(Some(std::time::Duration::from_secs(10)))
+        .await?;
+
+    // Phase 3: reader connects to the relay.
+    let r_b = guard.node(1).connect(guard.node(2)).await?;
+    let b_r = guard.node(2).accepted_connection().await;
+    r_b.sync_keyhive_with_peer(None).await?;
+    b_r.sync_keyhive_with_peer(None).await?;
+
+    // Reader pulls the doc from the relay — must get both initial and update1.
+    let reader_doc = fixtures::sync_doc_expect_ready(&b_r, &guard.node(2).repo, doc_id).await?;
+    assert_eq!(
+        read_text(&reader_doc, "phase").await.as_deref(),
+        Some("update1"),
+        "reader must see the latest content after store-and-forward"
+    );
+
+    // Relay retains Relay-only access and sedimentree heads.
+    assert_relay_only(&guard.node(1).repo, guard.node(1), doc_id).await?;
+    let relay_state = guard.node(1).repo.doc_head_state(doc_id).await?;
+    assert!(!relay_state.sedimentree_heads.is_empty());
+
+    // Sedimentree parity across all three nodes.
+    let mut baseline = guard
+        .node(0)
+        .repo
+        .doc_head_state(doc_id)
+        .await?
+        .sedimentree_heads
+        .to_vec();
+    baseline.sort_by_key(|h| h.0);
+    for idx in 1..3 {
+        let mut heads = guard
+            .node(idx)
+            .repo
+            .doc_head_state(doc_id)
+            .await?
+            .sedimentree_heads
+            .to_vec();
+        heads.sort_by_key(|h| h.0);
+        assert_eq!(
+            heads, baseline,
+            "sedimentree heads diverged at node {idx} after store-and-forward"
+        );
+    }
+
+    drop(owner_doc);
+    drop(reader_doc);
+    drop(a_r);
+    drop(r_a);
+    drop(r_b);
+    drop(b_r);
+    drop(guard);
+    Ok(())
+}
+
+// ─── Partial-mesh partition/heal ─────────────────────────────────────────
+//
+// A four-node cycle (A↔B↔C↔D↔A) is fully converged.  Two edges (A↔B and
+// C↔D) are partitioned simultaneously, splitting the mesh into two halves.
+// After healing all edges and syncing, every node converges to the same
+// head state (no stale divergent heads).
+#[tokio::test(flavor = "multi_thread")]
+async fn tier3_partial_mesh_partition_heal() -> crate::Res<()> {
+    utils_rs::testing::setup_tracing_once();
+    let a = Node::boot(44, "Alice").await?;
+    let b = Node::boot(45, "Bob").await?;
+    let c = Node::boot(46, "Carol").await?;
+    let d = Node::boot(47, "Dora").await?;
+    let guard = ShutdownGuard::from(vec![a, b, c, d]);
+
+    // Full mesh: A↔B↔C↔D↔A.
+    let a_b = guard.node(0).connect(guard.node(1)).await?;
+    let b_a = guard.node(1).accepted_connection().await;
+    let b_c = guard.node(1).connect(guard.node(2)).await?;
+    let c_b = guard.node(2).accepted_connection().await;
+    let c_d = guard.node(2).connect(guard.node(3)).await?;
+    let d_c = guard.node(3).accepted_connection().await;
+    let d_a = guard.node(3).connect(guard.node(0)).await?;
+    let a_d = guard.node(0).accepted_connection().await;
+
+    for conn in [&a_b, &b_c, &c_d, &d_a] {
+        conn.sync_keyhive_with_peer(None).await?;
+    }
+
+    let mut initial = automerge::Automerge::new();
+    initial
+        .transact(|tx| tx.put(automerge::ROOT, "title", "mesh-partition"))
+        .map_err(|err| crate::ferr!("failed creating doc: {err:?}"))?;
+    let owner_doc = guard.node(0).repo.create_doc(initial).await?;
+    let doc_id = owner_doc.document_id();
+
+    // Edit access lets the two partition components make independent
+    // writes; this test is about merge semantics rather than authorization.
+    guard
+        .node(0)
+        .repo
+        .grant_doc_access(doc_id, fixtures::public_agent(), Access::Edit)
+        .await?;
+
+    for conn in [&a_b, &b_c, &c_d, &d_a] {
+        conn.sync_keyhive_with_peer(None).await?;
+    }
+    b_a.sync_doc_with_peer(doc_id, Some(std::time::Duration::from_secs(10)))
+        .await?;
+    c_b.sync_doc_with_peer(doc_id, Some(std::time::Duration::from_secs(10)))
+        .await?;
+    d_c.sync_doc_with_peer(doc_id, Some(std::time::Duration::from_secs(10)))
+        .await?;
+    for idx in 1..4 {
+        guard
+            .node(idx)
+            .repo
+            .wait_for_quiescence(Some(std::time::Duration::from_secs(10)))
+            .await?;
+        let _h = guard
+            .node(idx)
+            .repo
+            .get_doc(&doc_id)
+            .await?
+            .into_ready(doc_id)?;
+    }
+    let c_doc = guard
+        .node(2)
+        .repo
+        .get_doc(&doc_id)
+        .await?
+        .into_ready(doc_id)?;
+
+    // ── Partition: remove A↔B and C↔D ──────────────────────────────────
+    guard
+        .node(0)
+        .worker
+        .remove_peer(guard.node(1).peer_id())
+        .await?;
+    guard
+        .node(1)
+        .worker
+        .remove_peer(guard.node(0).peer_id())
+        .await?;
+    guard
+        .node(2)
+        .worker
+        .remove_peer(guard.node(3).peer_id())
+        .await?;
+    guard
+        .node(3)
+        .worker
+        .remove_peer(guard.node(2).peer_id())
+        .await?;
+    drop(a_b);
+    drop(b_a);
+    drop(c_d);
+    drop(d_c);
+
+    // Both surviving components make independent edits while partitioned.
+    owner_doc
+        .with_document(|doc| {
+            doc.transact(|tx| tx.put(automerge::ROOT, "owner_branch", "from-a"))
+                .map_err(|err| crate::ferr!("owner partition edit: {err:?}"))
+        })
+        .await??;
+    c_doc
+        .with_document(|doc| {
+            doc.transact(|tx| tx.put(automerge::ROOT, "reader_branch", "from-c"))
+                .map_err(|err| crate::ferr!("reader partition edit: {err:?}"))
+        })
+        .await??;
+
+    // ── Heal: reconnect A↔B and C↔D ────────────────────────────────────
+    let a_b2 = guard.node(0).connect(guard.node(1)).await?;
+    let b_a2 = guard.node(1).accepted_connection().await;
+    let c_d2 = guard.node(2).connect(guard.node(3)).await?;
+    let d_c2 = guard.node(3).accepted_connection().await;
+
+    a_b2.sync_keyhive_with_peer(None).await?;
+    c_d2.sync_keyhive_with_peer(None).await?;
+
+    // Sync doc across A↔B and C↔D, then the existing B↔C and D↔A edges
+    // will propagate everything to all nodes.
+    b_a2.sync_doc_with_peer(doc_id, Some(std::time::Duration::from_secs(10)))
+        .await?;
+    a_b2.sync_doc_with_peer(doc_id, Some(std::time::Duration::from_secs(10)))
+        .await?;
+    d_c2.sync_doc_with_peer(doc_id, Some(std::time::Duration::from_secs(10)))
+        .await?;
+    c_d2.sync_doc_with_peer(doc_id, Some(std::time::Duration::from_secs(10)))
+        .await?;
+    for idx in 0..4 {
+        guard
+            .node(idx)
+            .repo
+            .wait_for_quiescence(Some(std::time::Duration::from_secs(10)))
+            .await?;
+    }
+    // Push C's edit to B (B↔C was never partitioned, so use b_c).
+    b_c.sync_doc_with_peer(doc_id, Some(std::time::Duration::from_secs(10)))
+        .await?;
+    guard.node(1).repo.wait_for_quiescence(None).await?;
+    guard.node(2).repo.wait_for_quiescence(None).await?;
+
+    // Second round of healing syncs.
+    for conn in [&b_a2, &a_b2, &d_c2, &c_d2, &b_c, &c_b] {
+        conn.sync_doc_with_peer(doc_id, Some(std::time::Duration::from_secs(10)))
+            .await?;
+    }
+    for idx in 0..4 {
+        guard
+            .node(idx)
+            .repo
+            .wait_for_quiescence(Some(std::time::Duration::from_secs(10)))
+            .await?;
+    }
+
+    // Both independent branches must survive the heal.
+    for handle in [&owner_doc, &c_doc] {
+        assert_eq!(
+            read_text(handle, "owner_branch").await.as_deref(),
+            Some("from-a")
+        );
+        assert_eq!(
+            read_text(handle, "reader_branch").await.as_deref(),
+            Some("from-c")
+        );
+    }
+    for idx in [1, 3] {
+        let handle = guard
+            .node(idx)
+            .repo
+            .get_doc(&doc_id)
+            .await?
+            .into_ready(doc_id)?;
+        assert_eq!(
+            read_text(&handle, "owner_branch").await.as_deref(),
+            Some("from-a")
+        );
+        assert_eq!(
+            read_text(&handle, "reader_branch").await.as_deref(),
+            Some("from-c")
+        );
+    }
+
+    // All four nodes must have identical sedimentree heads after heal.
+    let mut baseline = guard
+        .node(0)
+        .repo
+        .doc_head_state(doc_id)
+        .await?
+        .sedimentree_heads
+        .to_vec();
+    baseline.sort_by_key(|h| h.0);
+    for idx in 1..4 {
+        let mut heads = guard
+            .node(idx)
+            .repo
+            .doc_head_state(doc_id)
+            .await?
+            .sedimentree_heads
+            .to_vec();
+        heads.sort_by_key(|h| h.0);
+        assert_eq!(
+            heads, baseline,
+            "sedimentree heads diverged at node {idx} after partition heal"
+        );
+    }
+
+    // Sedimentree parity across all four nodes.
+    let mut baseline = guard
+        .node(0)
+        .repo
+        .doc_head_state(doc_id)
+        .await?
+        .sedimentree_heads
+        .to_vec();
+    baseline.sort_by_key(|h| h.0);
+    for idx in 1..4 {
+        let mut heads = guard
+            .node(idx)
+            .repo
+            .doc_head_state(doc_id)
+            .await?
+            .sedimentree_heads
+            .to_vec();
+        heads.sort_by_key(|h| h.0);
+        assert_eq!(
+            heads, baseline,
+            "sedimentree heads diverged at node {idx} after partition heal"
+        );
+    }
+
+    drop(owner_doc);
+    drop(c_doc);
+    drop(a_d);
+    drop(b_c);
+    drop(c_b);
+    drop(a_b2);
+    drop(b_a2);
+    drop(c_d2);
+    drop(d_c2);
     drop(guard);
     Ok(())
 }

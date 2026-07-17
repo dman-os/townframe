@@ -77,13 +77,16 @@ impl Node {
         label: &'static str,
         storage: StorageConfig,
     ) -> crate::Res<Self> {
+        let sql = match &storage {
+            StorageConfig::Memory => SqlCtx::memory().await?,
+            StorageConfig::Disk { path } => {
+                std::fs::create_dir_all(path)?;
+                let db_path = path.join("big_repo.sqlite");
+                SqlCtx::url(&format!("sqlite://{}", db_path.display())).await?
+            }
+        };
         let store = Arc::new(
-            SqliteBigRepoStore::new(
-                SqlCtx::memory().await?,
-                "big-repo-test",
-                big_sync_core::BuckId::MAX_LEVEL,
-            )
-            .await?,
+            SqliteBigRepoStore::new(sql, "big-repo-test", big_sync_core::BuckId::MAX_LEVEL).await?,
         );
         let part_init_obj = big_sync_core::ObjId(big_sync_core::Byte32Id::new(
             [255_u8.wrapping_sub(seed); 32],
@@ -157,11 +160,21 @@ impl Node {
     }
 
     async fn restart(self, storage: StorageConfig) -> crate::Res<Self> {
-        let store = Arc::clone(&self.store);
         let seed = self.identity_seed;
         let label = self.label;
+        let retained_memory_store =
+            matches!(&storage, StorageConfig::Memory).then(|| Arc::clone(&self.store));
         self.shutdown().await;
-        Self::boot_with_store(seed[0], label, storage, store).await
+
+        if let Some(store) = retained_memory_store {
+            // Memory restarts intentionally retain the store for tests that
+            // isolate Keyhive loss from part-store persistence.
+            Self::boot_with_store(seed[0], label, storage, store).await
+        } else {
+            // Disk restarts reopen the SQLite file, modeling a new process
+            // rather than reusing the old pool/Arc.
+            Self::boot_with_config(seed[0], label, storage).await
+        }
     }
 
     pub fn peer_id(&self) -> PeerId {
@@ -442,10 +455,6 @@ impl Pair {
         (left_part, right_part)
     }
 }
-
-// A `DocumentId` is just newtype-wrapped bytes; allow it in this module's API.
-#[allow(dead_code)]
-fn _doc_id_typecheck(_id: DocumentId) {}
 
 // ─── Multi-node topology support (Tier 3+) ──────────────────────────────────
 
