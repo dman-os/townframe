@@ -556,7 +556,7 @@ trait HubBackgroundFuture<F: FutureForm> {
         round_id: Option<u64>,
     ) -> F::Future<'static, eyre::Result<()>>;
 
-    fn update_doc_access(
+    fn refresh_big_sync_doc_access(
         runtime_io: Arc<dyn crate::runtime2::RuntimeIo<F>>,
         target: keyhive_core::principal::identifier::Identifier,
     ) -> F::Future<'static, eyre::Result<()>>;
@@ -677,15 +677,15 @@ impl<F: FutureForm> HubBackgroundFuture<F> for F {
         })
     }
 
-    fn update_doc_access(
+    fn refresh_big_sync_doc_access(
         runtime_io: Arc<dyn crate::runtime2::RuntimeIo<F>>,
         target: keyhive_core::principal::identifier::Identifier,
     ) -> F::Future<'static, eyre::Result<()>> {
         F::from_future(async move {
             runtime_io
-                .update_doc_access(target)
+                .refresh_big_sync_doc_access(target)
                 .await
-                .wrap_err("big-sync document access update failed")
+                .wrap_err("big-sync document access refresh failed")
         })
     }
 
@@ -872,8 +872,30 @@ impl<F: FutureForm, Tasks: crate::runtime2::TaskSet<F>> HubIoFutures<F, Tasks> f
     ) -> F::Future<'static, eyre::Result<()>> {
         F::from_future(async move {
             let result = match runtime_io.sync_doc_with_peer(sed_id, peer_id).await {
-                Ok(true) => Ok(()),
-                Ok(false) => Err(crate::runtime::SyncDocError::NotFound),
+                Ok(crate::runtime2::SyncDocAttempt::Exchanged) => Ok(()),
+                Ok(crate::runtime2::SyncDocAttempt::NotFound) => {
+                    Err(crate::runtime::SyncDocError::NotFound)
+                }
+                Ok(crate::runtime2::SyncDocAttempt::Unauthorized) => {
+                    Err(crate::runtime::SyncDocError::Unauthorized)
+                }
+                Ok(crate::runtime2::SyncDocAttempt::Policy(kind)) => {
+                    let policy = match kind {
+                        subduction_core::sync_session::SyncPolicyRejectionKind::DocumentNotFound => {
+                            crate::runtime::SyncDocPolicyError::DocumentNotFound
+                        }
+                        subduction_core::sync_session::SyncPolicyRejectionKind::InsufficientAccess => {
+                            crate::runtime::SyncDocPolicyError::InsufficientAccess
+                        }
+                        subduction_core::sync_session::SyncPolicyRejectionKind::InvalidIdentifier => {
+                            crate::runtime::SyncDocPolicyError::InvalidIdentifier
+                        }
+                        subduction_core::sync_session::SyncPolicyRejectionKind::Other => {
+                            crate::runtime::SyncDocPolicyError::Other("remote policy rejection".into())
+                        }
+                    };
+                    Err(crate::runtime::SyncDocError::Policy(policy))
+                }
                 Err(error) => Err(crate::runtime::SyncDocError::IoError(error)),
             };
             if evt_tx
@@ -1038,13 +1060,19 @@ where
                 self.change_manager
                     .notify_delegation_received(data)
                     .expect("task was found dead");
-                self.spawn_background(F::update_doc_access(Arc::clone(&self.runtime_io), target))?;
+                self.spawn_background(F::refresh_big_sync_doc_access(
+                    Arc::clone(&self.runtime_io),
+                    target,
+                ))?;
             }
             Runtime2Evt::RevocationReceived { target, data } => {
                 self.change_manager
                     .notify_revocation_received(data)
                     .expect("task was found dead");
-                self.spawn_background(F::update_doc_access(Arc::clone(&self.runtime_io), target))?;
+                self.spawn_background(F::refresh_big_sync_doc_access(
+                    Arc::clone(&self.runtime_io),
+                    target,
+                ))?;
             }
         }
         self.try_resolve_quiescence()

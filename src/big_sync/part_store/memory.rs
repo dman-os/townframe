@@ -17,6 +17,82 @@ use std::collections::BTreeMap;
 #[cfg(test)]
 use std::collections::BTreeSet;
 
+const SUB_REPLAYING_CLEAN: u8 = 0;
+const SUB_REPLAYING_DIRTY: u8 = 1;
+const SUB_FINALIZING: u8 = 2;
+const SUB_REPLAY_DONE: u8 = 3;
+
+struct PendingSubscription {
+    state: std::sync::atomic::AtomicU8,
+}
+
+impl PendingSubscription {
+    fn new() -> Arc<Self> {
+        Arc::new(Self {
+            state: std::sync::atomic::AtomicU8::new(SUB_REPLAYING_CLEAN),
+        })
+    }
+
+    fn mark_dirty(&self) -> bool {
+        loop {
+            let state = self.state.load(std::sync::atomic::Ordering::Acquire);
+            match state {
+                SUB_REPLAYING_CLEAN | SUB_FINALIZING => {
+                    if self
+                        .state
+                        .compare_exchange(
+                            state,
+                            SUB_REPLAYING_DIRTY,
+                            std::sync::atomic::Ordering::AcqRel,
+                            std::sync::atomic::Ordering::Acquire,
+                        )
+                        .is_ok()
+                    {
+                        return false;
+                    }
+                }
+                SUB_REPLAYING_DIRTY => return false,
+                SUB_REPLAY_DONE => return true,
+                _ => panic!("invalid subscription state {state}"),
+            }
+        }
+    }
+
+    fn begin_finalization(&self) -> bool {
+        self.state
+            .compare_exchange(
+                SUB_REPLAYING_CLEAN,
+                SUB_FINALIZING,
+                std::sync::atomic::Ordering::AcqRel,
+                std::sync::atomic::Ordering::Acquire,
+            )
+            .is_ok()
+    }
+
+    fn become_ready(&self) -> bool {
+        self.state
+            .compare_exchange(
+                SUB_FINALIZING,
+                SUB_REPLAY_DONE,
+                std::sync::atomic::Ordering::AcqRel,
+                std::sync::atomic::Ordering::Acquire,
+            )
+            .is_ok()
+    }
+}
+
+enum MemorySubscription {
+    Pending {
+        sender: big_sync_core::mpsc::Sender<SubEvent>,
+        principal: PeerId,
+        state: Arc<PendingSubscription>,
+    },
+    Live {
+        sender: big_sync_core::mpsc::Sender<SubEvent>,
+        principal: PeerId,
+    },
+}
+
 structstruck::strike! {
     pub struct MemoryPartStore {
         inner: Arc<surelock::mutex::Mutex<
@@ -52,8 +128,7 @@ structstruck::strike! {
                     subs_to_drop: Vec<Uuid>,
                     subs_by_part: HashMap<PartId, HashSet<Uuid>>,
                     part_by_sub: HashMap<Uuid, HashSet<PartId>>,
-                    subs: HashMap<Uuid, big_sync_core::mpsc::Sender<SubEvent>>,
-                    sub_principal: HashMap<Uuid, PeerId>
+                    subs: HashMap<Uuid, MemorySubscription>
                 },
                 objs: HashMap<
                     ObjId,
@@ -186,8 +261,6 @@ impl MemoryPartStoreScopeState {
         }
         for evt in self.bus.buf.drain(..) {
             let (parts, cursor, sub_evt) = match &evt {
-                // PartEvent::Upserted(inner) => (inner.cursor, SubEvent::Upserted(inner.clone())),
-                // PartEvent::Deleted(inner) => (inner.cursor, SubEvent::Deleted(inner.clone())),
                 PartEvent::Changed(inner) => (
                     inner.part_ids.clone(),
                     inner.cursor,
@@ -205,44 +278,71 @@ impl MemoryPartStoreScopeState {
                 ),
             };
             let evt_obj_id = match &evt {
-                PartEvent::Changed(inner) => Some(inner.obj_id),
-                PartEvent::Added(inner) => Some(inner.obj_id),
-                PartEvent::Removed(inner) => Some(inner.obj_id),
+                PartEvent::Changed(inner) => inner.obj_id,
+                PartEvent::Added(inner) => inner.obj_id,
+                PartEvent::Removed(inner) => inner.obj_id,
             };
+            self.events.insert(cursor, evt);
+
+            let mut recipients = HashSet::new();
             for part_id in parts {
-                let Some(subs) = self.bus.subs_by_part.get(&part_id) else {
+                if let Some(subs) = self.bus.subs_by_part.get(&part_id) {
+                    recipients.extend(subs.iter().copied());
+                }
+            }
+            for sub_id in recipients {
+                let Some(mut sub) = self.bus.subs.remove(&sub_id) else {
                     continue;
                 };
-                'subscribers: for sub_id in subs {
-                    // Filter by doc members: if access is explicitly configured,
-                    // skip subscribers who cannot read the doc. If no members are
-                    // configured for this doc, allow all (backward compatible).
-                    if let Some(obj_id) = evt_obj_id {
-                        if let Some(principal) = self.bus.sub_principal.get(sub_id) {
-                            if let Some(members) = self.doc_members.get(&obj_id) {
-                                if !members
-                                    .get(principal)
-                                    .map(|a| a.is_reader())
-                                    .unwrap_or(false)
-                                {
-                                    continue 'subscribers;
-                                }
+                let permitted = |principal: PeerId| {
+                    self.doc_members
+                        .get(&evt_obj_id)
+                        .map(|members| {
+                            members
+                                .get(&principal)
+                                .map(|access| access.is_fetcher())
+                                .unwrap_or(false)
+                        })
+                        .unwrap_or(true)
+                };
+                let mut should_drop = false;
+                sub = match sub {
+                    MemorySubscription::Pending {
+                        sender,
+                        principal,
+                        state,
+                    } => {
+                        if state.mark_dirty() {
+                            if permitted(principal) && sender.try_send(sub_evt.clone()).is_err() {
+                                should_drop = true;
+                            }
+                            MemorySubscription::Live { sender, principal }
+                        } else {
+                            MemorySubscription::Pending {
+                                sender,
+                                principal,
+                                state,
                             }
                         }
                     }
-                    let sub = self.bus.subs.get(sub_id).expect(ERROR_IMPOSSIBLE);
-                    if sub.try_send(sub_evt.clone()).is_err() {
-                        self.bus.subs_to_drop.push(*sub_id)
+                    MemorySubscription::Live { sender, principal } => {
+                        if permitted(principal) && sender.try_send(sub_evt.clone()).is_err() {
+                            should_drop = true;
+                        }
+                        MemorySubscription::Live { sender, principal }
                     }
+                };
+                if should_drop {
+                    self.bus.subs_to_drop.push(sub_id);
+                } else {
+                    self.bus.subs.insert(sub_id, sub);
                 }
             }
-            self.events.insert(cursor, evt);
             self.bus.subs_to_drop.sort_unstable();
             self.bus.subs_to_drop.dedup();
             self.bus.subs_to_drop.reverse();
             for sub_id in self.bus.subs_to_drop.drain(..) {
                 self.bus.subs.remove(&sub_id);
-                self.bus.sub_principal.remove(&sub_id);
                 let parts = self
                     .bus
                     .part_by_sub
@@ -640,6 +740,12 @@ impl HostPartStore for MemoryPartStore {
         tracing::debug!(peer_id = %peer_id, part_id = %part_id, cursor, "memory store set peer part cursor");
         surelock::key::lock_scope(|key| {
             let (mut guard, _key) = key.lock(&self.inner);
+            let prev = guard
+                .peer_part_cursors
+                .get(&(peer_id, part_id))
+                .copied()
+                .unwrap_or_default();
+            let cursor = prev.max(cursor);
             guard.peer_part_cursors.insert((peer_id, part_id), cursor);
             Ok(())
         })
@@ -663,19 +769,28 @@ impl HostPartStore for MemoryPartStore {
                 };
                 let mut next_cursor = None;
                 let mut events = vec![];
-                for (&ii, evt) in guard.events.range(cursor.saturating_add(1)..) {
-                    if events.len() >= limit as usize {
-                        next_cursor = Some(ii);
-                        break;
-                    }
+                for (&_ii, evt) in guard.events.range(cursor.saturating_add(1)..) {
                     let push = match evt {
                         PartEvent::Changed(inner) => inner.part_ids.contains(&part_id),
                         PartEvent::Added(inner) => inner.part_id == part_id,
                         PartEvent::Removed(inner) => inner.part_id == part_id,
                     };
                     if push {
+                        if events.len() >= limit as usize {
+                            // next_cursor is the LAST returned event, not the first
+                            // excluded one.  The API docs say the input cursor means
+                            // "return events after this cursor", so the caller adds 1.
+                            break;
+                        }
                         events.push(evt.clone());
                     }
+                }
+                if events.len() >= limit as usize {
+                    next_cursor = events.last().map(|evt| match evt {
+                        PartEvent::Changed(inner) => inner.cursor,
+                        PartEvent::Added(inner) => inner.cursor,
+                        PartEvent::Removed(inner) => inner.cursor,
+                    });
                 }
                 out.insert(
                     part_id,
@@ -721,19 +836,49 @@ impl HostPartStore for MemoryPartStore {
         }
         let (tx, rx) = mpsc::unbounded("MemoryPartStore".into(), "caller".into());
         let state = Arc::clone(&self.inner);
+        let sub_id = Uuid::new_v4();
+        let pending = PendingSubscription::new();
+        let pending_for_replay = Arc::clone(&pending);
+        let parts: HashSet<_> = reqs.parts.iter().map(|req| req.part_id).collect();
+        surelock::key::lock_scope(|key| {
+            let (mut guard, _key) = key.lock(&self.inner);
+            guard.bus.subs.insert(
+                sub_id,
+                MemorySubscription::Pending {
+                    sender: tx.clone(),
+                    principal: subscriber,
+                    state: pending,
+                },
+            );
+            for &part_id in &parts {
+                guard
+                    .bus
+                    .subs_by_part
+                    .entry(part_id)
+                    .or_default()
+                    .insert(sub_id);
+            }
+            guard.bus.part_by_sub.insert(sub_id, parts.clone());
+        });
         let fut = async move {
-            let mut replay_done = false;
+            let mut marker_sent = false;
             let limit = 50;
             let mut events = Vec::with_capacity(limit);
-            let parts: HashSet<_> = reqs.parts.iter().map(|req| req.part_id).collect();
-            let mut cursor = reqs
+            let part_cursors: HashMap<PartId, CursorIndex> = reqs
                 .parts
                 .iter()
-                .map(|req| req.cursor)
+                .map(|req| (req.part_id, req.cursor))
+                .collect();
+            let mut cursor = part_cursors
+                .values()
                 .min()
+                .copied()
                 .unwrap_or(0)
                 .saturating_add(1);
-            while !replay_done {
+            loop {
+                pending_for_replay
+                    .state
+                    .store(SUB_REPLAYING_CLEAN, std::sync::atomic::Ordering::Release);
                 let mut next_cursor = cursor;
                 surelock::key::lock_scope(|key| {
                     let (mut guard, _key) = key.lock(&state);
@@ -744,20 +889,76 @@ impl HostPartStore for MemoryPartStore {
                             next_cursor = ii + 1;
                             break;
                         }
-                        let push = match evt {
-                            PartEvent::Changed(inner) => {
-                                inner.part_ids.iter().any(|id| parts.contains(id))
-                            }
-                            PartEvent::Added(inner) => parts.contains(&inner.part_id),
-                            PartEvent::Removed(inner) => parts.contains(&inner.part_id),
+                        next_cursor = ii + 1;
+                        // Filter by doc membership.
+                        let obj_id = match evt {
+                            PartEvent::Changed(inner) => Some(inner.obj_id),
+                            PartEvent::Added(inner) => Some(inner.obj_id),
+                            PartEvent::Removed(inner) => Some(inner.obj_id),
                         };
-                        if push {
-                            events.push(evt.clone())
+                        let permitted = obj_id
+                            .and_then(|oid| guard.doc_members.get(&oid))
+                            .map(|members| {
+                                members
+                                    .get(&subscriber)
+                                    .map(|access| access.is_fetcher())
+                                    .unwrap_or(false)
+                            })
+                            .unwrap_or(true);
+                        if !permitted {
+                            continue;
                         }
+                        // Determine which requested parts need this event
+                        // based on each part's per-part cursor.
+                        let relevant_parts: Vec<PartId> = match evt {
+                            PartEvent::Changed(inner) => inner
+                                .part_ids
+                                .iter()
+                                .filter(|pid| {
+                                    parts.contains(pid)
+                                        && ii > part_cursors.get(pid).copied().unwrap_or(0)
+                                })
+                                .copied()
+                                .collect(),
+                            PartEvent::Added(inner) => {
+                                if parts.contains(&inner.part_id)
+                                    && ii > part_cursors.get(&inner.part_id).copied().unwrap_or(0)
+                                {
+                                    vec![inner.part_id]
+                                } else {
+                                    Vec::new()
+                                }
+                            }
+                            PartEvent::Removed(inner) => {
+                                if parts.contains(&inner.part_id)
+                                    && ii > part_cursors.get(&inner.part_id).copied().unwrap_or(0)
+                                {
+                                    vec![inner.part_id]
+                                } else {
+                                    Vec::new()
+                                }
+                            }
+                        };
+                        if relevant_parts.is_empty() {
+                            continue;
+                        }
+                        // For Changed events, project part_ids to only
+                        // the parts that are still catching up.
+                        let projected = match evt {
+                            PartEvent::Changed(inner)
+                                if relevant_parts.len() < inner.part_ids.len() =>
+                            {
+                                let mut projected = inner.clone();
+                                projected.part_ids = relevant_parts;
+                                PartEvent::Changed(projected)
+                            }
+                            _ => evt.clone(),
+                        };
+                        events.push(projected);
                         next_cursor = ii + 1;
                     }
                 });
-                replay_done = events.is_empty();
+                let batch_done = events.is_empty();
                 for evt in events.drain(..) {
                     if tx
                         .send(match evt {
@@ -772,23 +973,24 @@ impl HostPartStore for MemoryPartStore {
                     }
                 }
                 cursor = next_cursor;
-            }
-            if tx.send(SubEvent::ReplayComplete).await.is_err() {
-                return;
-            }
-            surelock::key::lock_scope(|key| {
-                let (mut guard, _key) = key.lock(&state);
-                let guard = &mut *guard;
-
-                let sub_id = Uuid::new_v4();
-                guard.bus.subs.insert(sub_id, tx);
-                guard.bus.sub_principal.insert(sub_id, subscriber);
-                for &part_id in &parts {
-                    let subs = guard.bus.subs_by_part.entry(part_id).or_default();
-                    subs.insert(sub_id);
+                if !batch_done {
+                    continue;
                 }
-                guard.bus.part_by_sub.insert(sub_id, parts);
-            });
+                if !marker_sent {
+                    if !pending_for_replay.begin_finalization() {
+                        continue;
+                    }
+                    if tx.send(SubEvent::ReplayComplete).await.is_err() {
+                        return;
+                    }
+                    marker_sent = true;
+                    if pending_for_replay.become_ready() {
+                        return;
+                    }
+                } else if pending_for_replay.become_ready() {
+                    return;
+                }
+            }
         };
         tokio::spawn(fut);
         Ok(Ok(rx))
@@ -1171,7 +1373,7 @@ mod tests {
             )
             .await??;
         store.add_obj_to_parts(obj, vec![part]).await?;
-        let _evt = tokio::time::timeout(Duration::from_secs(2), async {
+        tokio::time::timeout(Duration::from_secs(2), async {
             loop {
                 match rx.recv().await {
                     Ok(SubEvent::Added(_)) => return Ok::<_, eyre::Report>(()),

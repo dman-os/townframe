@@ -24,13 +24,108 @@ use sqlx_utils_rs::SqlCtx;
 use subduction_core::storage::traits::Storage;
 use subduction_crypto::{signed::Signed, verified_meta::VerifiedMeta};
 
+const SUB_REPLAYING_CLEAN: u8 = 0;
+const SUB_REPLAYING_DIRTY: u8 = 1;
+const SUB_FINALIZING: u8 = 2;
+const SUB_REPLAY_DONE: u8 = 3;
+
+struct PendingSubscription {
+    state: std::sync::atomic::AtomicU8,
+}
+
+impl PendingSubscription {
+    fn new() -> Arc<Self> {
+        Arc::new(Self {
+            state: std::sync::atomic::AtomicU8::new(SUB_REPLAYING_CLEAN),
+        })
+    }
+
+    fn mark_dirty(&self) -> bool {
+        loop {
+            let state = self.state.load(std::sync::atomic::Ordering::Acquire);
+            match state {
+                SUB_REPLAYING_CLEAN | SUB_FINALIZING => {
+                    if self
+                        .state
+                        .compare_exchange(
+                            state,
+                            SUB_REPLAYING_DIRTY,
+                            std::sync::atomic::Ordering::AcqRel,
+                            std::sync::atomic::Ordering::Acquire,
+                        )
+                        .is_ok()
+                    {
+                        return false;
+                    }
+                }
+                SUB_REPLAYING_DIRTY => return false,
+                SUB_REPLAY_DONE => return true,
+                _ => panic!("invalid subscription state {state}"),
+            }
+        }
+    }
+
+    fn begin_finalization(&self) -> bool {
+        self.state
+            .compare_exchange(
+                SUB_REPLAYING_CLEAN,
+                SUB_FINALIZING,
+                std::sync::atomic::Ordering::AcqRel,
+                std::sync::atomic::Ordering::Acquire,
+            )
+            .is_ok()
+    }
+
+    fn become_ready(&self) -> bool {
+        self.state
+            .compare_exchange(
+                SUB_FINALIZING,
+                SUB_REPLAY_DONE,
+                std::sync::atomic::Ordering::AcqRel,
+                std::sync::atomic::Ordering::Acquire,
+            )
+            .is_ok()
+    }
+}
+
+struct BigRepoSubscription {
+    sender: mpsc::Sender<SubEvent>,
+    principal: PeerId,
+    pending: Arc<PendingSubscription>,
+}
+
+#[derive(Default)]
+struct BigRepoSubscriptions {
+    by_part: HashMap<PartId, HashSet<Uuid>>,
+    parts_by_sub: HashMap<Uuid, HashSet<PartId>>,
+    pending: HashSet<Uuid>,
+    live: HashSet<Uuid>,
+    subs: HashMap<Uuid, Arc<BigRepoSubscription>>,
+}
+
+impl BigRepoSubscriptions {
+    fn remove(&mut self, sub_id: Uuid) {
+        self.pending.remove(&sub_id);
+        self.live.remove(&sub_id);
+        self.subs.remove(&sub_id);
+        let Some(parts) = self.parts_by_sub.remove(&sub_id) else {
+            return;
+        };
+        for part_id in parts {
+            if let Some(subs) = self.by_part.get_mut(&part_id) {
+                subs.remove(&sub_id);
+            }
+        }
+    }
+}
+
 #[derive(Clone)]
 pub struct SqliteBigRepoStore {
     sql: SqlCtx,
     scope_id: i64,
     bucket_depth: u8,
     _scope_key: Arc<str>,
-    bus: Arc<std::sync::Mutex<HashMap<PartId, Vec<(mpsc::Sender<SubEvent>, PeerId)>>>>,
+    bus: Arc<std::sync::RwLock<BigRepoSubscriptions>>,
     /// In-memory doc-members cache, written alongside the SQL table.
     doc_members_cache:
         Arc<std::sync::RwLock<HashMap<ObjId, HashMap<PeerId, keyhive_core::access::Access>>>>,
@@ -123,13 +218,44 @@ impl SqliteBigRepoStore {
         init_schema(&sql.write_pool, bucket_depth).await?;
         let scope_key = scope_key.into();
         let scope_id = Self::ensure_scope_id(&sql.write_pool, &scope_key).await?;
+        // Rehydrate doc_members_cache from persisted syncable rows.
+        let mut doc_members: HashMap<ObjId, HashMap<PeerId, keyhive_core::access::Access>> =
+            HashMap::new();
+        let rows = sqlx::query(
+            "SELECT obj_id, principal_id, access_level
+             FROM big_sync_syncable
+             WHERE scope_id = ?1",
+        )
+        .bind(scope_id)
+        .fetch_all(&sql.read_pool)
+        .await?;
+        for row in rows {
+            let obj_id = Self::obj_from_blob(row.try_get("obj_id")?);
+            let principal = Self::peer_from_blob(row.try_get("principal_id")?);
+            let access: u8 = row
+                .try_get::<i64, _>("access_level")?
+                .try_into()
+                .expect(ERROR_IMPOSSIBLE);
+            let access = match access {
+                0 => keyhive_core::access::Access::Relay,
+                1 => keyhive_core::access::Access::Read,
+                2 => keyhive_core::access::Access::Edit,
+                3 => keyhive_core::access::Access::Admin,
+                other => panic!("invalid persisted access_level {other}"),
+            };
+            doc_members
+                .entry(obj_id)
+                .or_default()
+                .insert(principal, access);
+        }
+
         let store = Self {
             sql,
             scope_id,
             bucket_depth,
             _scope_key: scope_key,
             bus: default(),
-            doc_members_cache: default(),
+            doc_members_cache: Arc::new(std::sync::RwLock::new(doc_members)),
         };
         store.init_subduction_schema().await?;
         Ok(store)
@@ -189,7 +315,6 @@ impl SqliteBigRepoStore {
         ObjId(Byte32Id::new(blob.try_into().expect(ERROR_IMPOSSIBLE)))
     }
 
-    #[cfg(test)]
     fn peer_from_blob(blob: Vec<u8>) -> PeerId {
         PeerId(Byte32Id::new(blob.try_into().expect(ERROR_IMPOSSIBLE)))
     }
@@ -338,41 +463,83 @@ impl SqliteBigRepoStore {
     }
 
     async fn publish(&self, events: Vec<SubEvent>) {
-        // Extract references before locking bus to avoid self-borrow conflict.
-        let cache = self.doc_members_cache.read().expect(ERROR_MUTEX);
-        let mut bus = self.bus.lock().expect(ERROR_MUTEX);
-        for event in &events {
-            let (part_ids, evt_obj_id): (Vec<PartId>, Option<ObjId>) = match event {
-                SubEvent::Changed(transition) => {
-                    (transition.part_ids.clone(), Some(transition.obj_id))
-                }
-                SubEvent::Added(transition) => (vec![transition.part_id], Some(transition.obj_id)),
-                SubEvent::Removed(transition) => {
-                    (vec![transition.part_id], Some(transition.obj_id))
-                }
-                SubEvent::ReplayComplete => continue,
-            };
-            let evt = event.clone();
-            for part_id in part_ids {
-                let Some(subs) = bus.get_mut(&part_id) else {
-                    continue;
+        let cache = self.doc_members_cache.read().expect(ERROR_MUTEX).clone();
+        let mut promote = Vec::new();
+        let mut drop_subs = HashSet::new();
+        {
+            let bus = self.bus.read().expect(ERROR_MUTEX);
+            for event in events {
+                let (part_ids, obj_id) = match &event {
+                    SubEvent::Changed(inner) => (inner.part_ids.clone(), inner.obj_id),
+                    SubEvent::Added(inner) => (vec![inner.part_id], inner.obj_id),
+                    SubEvent::Removed(inner) => (vec![inner.part_id], inner.obj_id),
+                    SubEvent::ReplayComplete => continue,
                 };
-                subs.retain(|(sub, principal)| {
-                    if let Some(obj_id) = evt_obj_id {
-                        // Only filter when doc_members is explicitly configured.
-                        // No entry → allow all (backward compatible).
-                        if let Some(members) = cache.get(&obj_id) {
-                            if !members
-                                .get(principal)
-                                .map(|a| a.is_reader())
-                                .unwrap_or(false)
-                            {
-                                return true;
-                            }
-                        }
+                let mut recipients = HashSet::new();
+                for part_id in part_ids {
+                    if let Some(subs) = bus.by_part.get(&part_id) {
+                        recipients.extend(subs.iter().copied());
                     }
-                    sub.try_send(evt.clone()).is_ok()
-                });
+                }
+                for sub_id in recipients {
+                    let Some(sub) = bus.subs.get(&sub_id) else {
+                        continue;
+                    };
+                    if bus.pending.contains(&sub_id) {
+                        if sub.pending.mark_dirty() {
+                            promote.push((sub_id, event.clone(), obj_id));
+                        }
+                        continue;
+                    }
+                    if !bus.live.contains(&sub_id) {
+                        continue;
+                    }
+                    let permitted = cache
+                        .get(&obj_id)
+                        .map(|members| {
+                            members
+                                .get(&sub.principal)
+                                .map(|access| access.is_fetcher())
+                                .unwrap_or(false)
+                        })
+                        .unwrap_or(true);
+                    if permitted && sub.sender.try_send(event.clone()).is_err() {
+                        drop_subs.insert(sub_id);
+                    }
+                }
+            }
+        }
+
+        for (sub_id, event, obj_id) in promote {
+            let mut bus = self.bus.write().expect(ERROR_MUTEX);
+            let Some(sub) = bus.subs.get(&sub_id).cloned() else {
+                continue;
+            };
+            if bus.pending.remove(&sub_id) {
+                if sub.pending.state.load(std::sync::atomic::Ordering::Acquire) != SUB_REPLAY_DONE {
+                    bus.pending.insert(sub_id);
+                    continue;
+                }
+                bus.live.insert(sub_id);
+            }
+            let permitted = cache
+                .get(&obj_id)
+                .map(|members| {
+                    members
+                        .get(&sub.principal)
+                        .map(|access| access.is_fetcher())
+                        .unwrap_or(false)
+                })
+                .unwrap_or(true);
+            if permitted && sub.sender.try_send(event).is_err() {
+                bus.remove(sub_id);
+            }
+        }
+
+        if !drop_subs.is_empty() {
+            let mut bus = self.bus.write().expect(ERROR_MUTEX);
+            for sub_id in drop_subs {
+                bus.remove(sub_id);
             }
         }
     }
@@ -1152,7 +1319,7 @@ impl HostPartStore for SqliteBigRepoStore {
         sqlx::query(
             "INSERT INTO big_sync_peer_cursors(scope_id, peer_id, part_id, cursor)
              VALUES (?1, ?2, ?3, ?4)
-             ON CONFLICT(scope_id, peer_id, part_id) DO UPDATE SET cursor = excluded.cursor",
+             ON CONFLICT(scope_id, peer_id, part_id) DO UPDATE SET cursor = MAX(cursor, excluded.cursor)",
         )
         .bind(self.scope_id)
         .bind(Self::peer_blob(peer_id))
@@ -1249,8 +1416,9 @@ impl HostPartStore for SqliteBigRepoStore {
             }
             events.sort_by_key(|(cursor, _)| *cursor);
             let mut next_cursor = None;
-            if events.len() > usize::try_from(limit).expect(ERROR_IMPOSSIBLE) {
-                let next = events[usize::try_from(limit).expect(ERROR_IMPOSSIBLE)].0;
+            let limit_usize = usize::try_from(limit).expect(ERROR_IMPOSSIBLE);
+            if limit_usize != 0 && events.len() > limit_usize {
+                let next = events[limit_usize - 1].0;
                 next_cursor = Some(u64::try_from(next).expect(ERROR_IMPOSSIBLE));
             }
             let events = events
@@ -1279,40 +1447,151 @@ impl HostPartStore for SqliteBigRepoStore {
         if let Err(err) = summaries {
             return Ok(Err(err));
         }
-
-        let cursor = reqs
+        let part_cursors: HashMap<PartId, CursorIndex> = reqs
             .parts
             .iter()
-            .map(|req| req.cursor)
-            .min()
-            .unwrap_or_default();
-        let (tx, rx) = mpsc::unbounded("SqlitePartStore".into(), "caller".into());
-        let page = self
-            .list_events(parts.clone(), cursor, u32::MAX)
-            .await?
-            .expect(ERROR_IMPOSSIBLE);
-        for (_, part_page) in page {
-            for event in part_page.events {
-                let sub_event = match event {
-                    PartEvent::Changed(transition) => SubEvent::Changed(transition),
-                    PartEvent::Added(transition) => SubEvent::Added(transition),
-                    PartEvent::Removed(transition) => SubEvent::Removed(transition),
-                };
-                if tx.send(sub_event).await.is_err() {
-                    return Ok(Ok(rx));
-                }
+            .map(|req| (req.part_id, req.cursor))
+            .collect();
+        let (tx, rx) = mpsc::unbounded("SqliteBigRepoStore".into(), "caller".into());
+        let sub_id = uuid::Uuid::new_v4();
+        let sub = Arc::new(BigRepoSubscription {
+            sender: tx.clone(),
+            principal: subscriber,
+            pending: PendingSubscription::new(),
+        });
+        {
+            let mut bus = self.bus.write().expect(ERROR_IMPOSSIBLE);
+            bus.pending.insert(sub_id);
+            bus.subs.insert(sub_id, Arc::clone(&sub));
+            bus.parts_by_sub.insert(sub_id, parts.clone());
+            for &part_id in &parts {
+                bus.by_part.entry(part_id).or_default().insert(sub_id);
             }
         }
-        if tx.send(SubEvent::ReplayComplete).await.is_err() {
-            return Ok(Ok(rx));
-        }
 
-        let mut bus = self.bus.lock().expect(ERROR_MUTEX);
-        for part_id in parts {
-            bus.entry(part_id)
-                .or_default()
-                .push((tx.clone(), subscriber));
-        }
+        let store = self.clone();
+        tokio::spawn(async move {
+            let mut cursor = part_cursors.values().min().copied().unwrap_or_default();
+            let mut marker_sent = false;
+            loop {
+                sub.pending
+                    .state
+                    .store(SUB_REPLAYING_CLEAN, std::sync::atomic::Ordering::Release);
+                let page = store
+                    .list_events(parts.clone(), cursor, u32::MAX)
+                    .await
+                    .expect(ERROR_IMPOSSIBLE)
+                    .expect(ERROR_IMPOSSIBLE);
+                let mut max_cursor = cursor;
+                let mut raw_event_count = 0;
+                let cache = store
+                    .doc_members_cache
+                    .read()
+                    .expect(ERROR_IMPOSSIBLE)
+                    .clone();
+                let mut output = Vec::new();
+                for (_, part_page) in page {
+                    for event in part_page.events {
+                        raw_event_count += 1;
+                        let event_cursor = match &event {
+                            PartEvent::Changed(inner) => inner.cursor,
+                            PartEvent::Added(inner) => inner.cursor,
+                            PartEvent::Removed(inner) => inner.cursor,
+                        };
+                        max_cursor = max_cursor.max(event_cursor);
+                        let obj_id = match &event {
+                            PartEvent::Changed(inner) => inner.obj_id,
+                            PartEvent::Added(inner) => inner.obj_id,
+                            PartEvent::Removed(inner) => inner.obj_id,
+                        };
+                        let permitted = cache
+                            .get(&obj_id)
+                            .map(|members| {
+                                members
+                                    .get(&subscriber)
+                                    .map(|access| access.is_fetcher())
+                                    .unwrap_or(false)
+                            })
+                            .unwrap_or(true);
+                        if !permitted {
+                            continue;
+                        }
+                        let relevant_parts: Vec<PartId> = match &event {
+                            PartEvent::Changed(inner) => inner
+                                .part_ids
+                                .iter()
+                                .filter(|pid| {
+                                    parts.contains(pid)
+                                        && event_cursor
+                                            > part_cursors.get(pid).copied().unwrap_or(0)
+                                })
+                                .copied()
+                                .collect(),
+                            PartEvent::Added(inner) => {
+                                if parts.contains(&inner.part_id)
+                                    && event_cursor
+                                        > part_cursors.get(&inner.part_id).copied().unwrap_or(0)
+                                {
+                                    vec![inner.part_id]
+                                } else {
+                                    Vec::new()
+                                }
+                            }
+                            PartEvent::Removed(inner) => {
+                                if parts.contains(&inner.part_id)
+                                    && event_cursor
+                                        > part_cursors.get(&inner.part_id).copied().unwrap_or(0)
+                                {
+                                    vec![inner.part_id]
+                                } else {
+                                    Vec::new()
+                                }
+                            }
+                        };
+                        if relevant_parts.is_empty() {
+                            continue;
+                        }
+                        output.push(match event {
+                            PartEvent::Changed(inner)
+                                if relevant_parts.len() < inner.part_ids.len() =>
+                            {
+                                let mut projected = inner;
+                                projected.part_ids = relevant_parts;
+                                SubEvent::Changed(projected)
+                            }
+                            PartEvent::Changed(inner) => SubEvent::Changed(inner),
+                            PartEvent::Added(inner) => SubEvent::Added(inner),
+                            PartEvent::Removed(inner) => SubEvent::Removed(inner),
+                        });
+                    }
+                }
+                for event in output {
+                    if tx.send(event).await.is_err() {
+                        store.bus.write().expect(ERROR_IMPOSSIBLE).remove(sub_id);
+                        return;
+                    }
+                }
+                cursor = max_cursor;
+                if raw_event_count != 0 {
+                    continue;
+                }
+                if !marker_sent {
+                    if !sub.pending.begin_finalization() {
+                        continue;
+                    }
+                    if tx.send(SubEvent::ReplayComplete).await.is_err() {
+                        store.bus.write().expect(ERROR_IMPOSSIBLE).remove(sub_id);
+                        return;
+                    }
+                    marker_sent = true;
+                    if sub.pending.become_ready() {
+                        return;
+                    }
+                } else if sub.pending.become_ready() {
+                    return;
+                }
+            }
+        });
         Ok(Ok(rx))
     }
 

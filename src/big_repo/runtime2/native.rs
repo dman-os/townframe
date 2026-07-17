@@ -24,7 +24,7 @@ use crate::interlude::*;
 use crate::keyhive_storage::BigRepoKeyhiveStorage;
 use crate::runtime2::{
     CausalDecryptResult, Clock, DocIo, EncryptedInitialSedimentree, EncryptedLooseCommit,
-    RuntimeIo, TaskSet, Timer,
+    RuntimeIo, SyncDocAttempt, TaskSet, Timer,
 };
 use crate::{
     encrypted_blob::{decode_encrypted_blob, encode_encrypted_blob},
@@ -827,7 +827,7 @@ where
     }
 
     // ── big-sync membership bridge ───────────────────────────────────────
-    fn update_doc_access(
+    fn refresh_big_sync_doc_access(
         &self,
         target: keyhive_core::principal::identifier::Identifier,
     ) -> <Sendable as future_form::FutureForm>::Future<'_, eyre::Result<()>> {
@@ -845,7 +845,10 @@ where
                 .await;
 
             let own_id = PeerId::new(self.keyhive.clone_keyhive().id().to_bytes());
-            if agents.get(&own_id).is_some_and(|access| access.is_reader()) {
+            if agents
+                .get(&own_id)
+                .is_some_and(|access| access.is_fetcher())
+            {
                 self.big_sync_store
                     .add_obj_to_parts(doc_id, vec![crate::GLOBAL_PART_ID])
                     .await
@@ -939,12 +942,8 @@ where
         &self,
         sed_id: SedimentreeId,
         peer_id: PeerId,
-    ) -> <Sendable as future_form::FutureForm>::Future<'_, eyre::Result<bool>> {
+    ) -> <Sendable as future_form::FutureForm>::Future<'_, eyre::Result<SyncDocAttempt>> {
         Sendable::from_future(async move {
-            let target = ed25519_dalek::VerifyingKey::from_bytes(sed_id.as_bytes())
-                .map_err(|error| ferr!("document id is not a valid key: {error}"))?;
-            self.update_doc_access(Identifier::from(target)).await?;
-
             let remote_peer_id = subduction_core::peer::id::PeerId::new(*peer_id.as_bytes());
             let result = self
                 .subduction
@@ -957,12 +956,24 @@ where
                 .await;
 
             match result {
-                Ok((had_success, _stats, conn_errs)) => {
+                Ok((had_success, stats, conn_errs)) => {
                     if had_success {
-                        Ok(true)
+                        Ok(SyncDocAttempt::Exchanged)
+                    } else if let Some(rejection) = stats.remote_rejection {
+                        Ok(match rejection {
+                            subduction_core::sync_session::SyncRemoteRejection::NotFound => {
+                                SyncDocAttempt::NotFound
+                            }
+                            subduction_core::sync_session::SyncRemoteRejection::Unauthorized => {
+                                SyncDocAttempt::Unauthorized
+                            }
+                            subduction_core::sync_session::SyncRemoteRejection::Policy(kind) => {
+                                SyncDocAttempt::Policy(kind)
+                            }
+                        })
                     } else if conn_errs.is_empty() {
                         // Sync completed with no content exchanged and no errors.
-                        Ok(false)
+                        Ok(SyncDocAttempt::NotFound)
                     } else {
                         Err(ferr!("doc sync transport errors: {conn_errs:?}"))
                     }

@@ -181,6 +181,14 @@ impl Node {
         self.repo.local_peer_id()
     }
 
+    pub(crate) async fn obj_parts_contains(
+        &self,
+        doc_id: DocumentId,
+        part_id: big_sync_core::PartId,
+    ) -> crate::Res<bool> {
+        Ok(self.store.obj_parts(doc_id).await?.contains(&part_id))
+    }
+
     /// Open an outbound connection to `remote` and wire bidirectional big-sync
     /// part replication between the two nodes.
     pub(crate) async fn connect(&self, remote: &Self) -> crate::Res<BigRepoConnection> {

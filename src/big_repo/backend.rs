@@ -92,6 +92,12 @@ impl big_sync::SyncBackend for BigRepoSyncBackend {
             Err(crate::SyncDocError::NotFound) => {
                 eyre::bail!("remote doc was not found")
             }
+            Err(crate::SyncDocError::Unauthorized) => {
+                eyre::bail!("remote doc sync was unauthorized")
+            }
+            Err(crate::SyncDocError::Policy(error)) => {
+                eyre::bail!("remote doc sync was rejected by policy: {error}")
+            }
         }
     }
 }

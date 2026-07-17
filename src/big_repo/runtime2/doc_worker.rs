@@ -192,23 +192,56 @@ impl<F: FutureForm> DocWorker2<F> {
                     subduction_core::sync_session::SyncSessionKind::OutboundBatch { .. }
                 );
                 let result = self.apply_sync_session(session).await;
-                if completes_sync_waiters {
-                    match &result {
-                        Ok(()) => self.mark_sync_materialized(peer_id),
-                        Err(error) => {
-                            self.sync_completed.remove(&peer_id);
-                            self.sync_materialized.remove(&peer_id);
-                            self.resolve_sync_peer_result(
-                                peer_id,
-                                0,
-                                Err(crate::runtime::SyncDocError::IoError(eyre::eyre!(
-                                    "document materialization failed: {error}"
-                                ))),
-                            );
+                if !completes_sync_waiters {
+                    return result;
+                }
+                match result {
+                    Ok(()) => {
+                        self.mark_sync_materialized(peer_id);
+                        Ok(())
+                    }
+                    Err(error) => {
+                        self.sync_completed.remove(&peer_id);
+                        self.sync_materialized.remove(&peer_id);
+                        let expected_sync_error = error
+                            .downcast_ref::<crate::runtime::SyncDocError>()
+                            .is_some();
+                        let sync_error = if let Some(sync_error) =
+                            error.downcast_ref::<crate::runtime::SyncDocError>()
+                        {
+                            match sync_error {
+                                crate::runtime::SyncDocError::NotFound => {
+                                    crate::runtime::SyncDocError::NotFound
+                                }
+                                crate::runtime::SyncDocError::Unauthorized => {
+                                    crate::runtime::SyncDocError::Unauthorized
+                                }
+                                crate::runtime::SyncDocError::Policy(policy) => {
+                                    crate::runtime::SyncDocError::Policy(policy.clone())
+                                }
+                                crate::runtime::SyncDocError::TransportError => {
+                                    crate::runtime::SyncDocError::TransportError
+                                }
+                                crate::runtime::SyncDocError::IoError(error) => {
+                                    crate::runtime::SyncDocError::IoError(eyre::eyre!("{error}"))
+                                }
+                                crate::runtime::SyncDocError::Other(error) => {
+                                    crate::runtime::SyncDocError::Other(eyre::eyre!("{error}"))
+                                }
+                            }
+                        } else {
+                            crate::runtime::SyncDocError::IoError(eyre::eyre!(
+                                "document materialization failed: {error}"
+                            ))
+                        };
+                        self.resolve_sync_peer_result(peer_id, 0, Err(sync_error));
+                        if expected_sync_error {
+                            Ok(())
+                        } else {
+                            Err(error)
                         }
                     }
                 }
-                result
             }
             DocWorkerMsg::SyncWithPeer {
                 peer_id,
@@ -956,6 +989,54 @@ impl<F: FutureForm> DocWorker2<F> {
         session: subduction_core::sync_session::SyncSession,
     ) -> eyre::Result<()> {
         let peer_id = PeerId::new(*session.peer_id.as_bytes());
+        if let Some(rejection) = session.remote_rejection {
+            return Err(match rejection {
+                subduction_core::sync_session::SyncRemoteRejection::NotFound => {
+                    crate::runtime::SyncDocError::NotFound.into()
+                }
+                subduction_core::sync_session::SyncRemoteRejection::Unauthorized => {
+                    crate::runtime::SyncDocError::Unauthorized.into()
+                }
+                subduction_core::sync_session::SyncRemoteRejection::Policy(kind) => {
+                    let policy = match kind {
+                        subduction_core::sync_session::SyncPolicyRejectionKind::DocumentNotFound => {
+                            crate::runtime::SyncDocPolicyError::DocumentNotFound
+                        }
+                        subduction_core::sync_session::SyncPolicyRejectionKind::InsufficientAccess => {
+                            crate::runtime::SyncDocPolicyError::InsufficientAccess
+                        }
+                        subduction_core::sync_session::SyncPolicyRejectionKind::InvalidIdentifier => {
+                            crate::runtime::SyncDocPolicyError::InvalidIdentifier
+                        }
+                        subduction_core::sync_session::SyncPolicyRejectionKind::Other => {
+                            crate::runtime::SyncDocPolicyError::Other("remote policy rejection".into())
+                        }
+                    };
+                    crate::runtime::SyncDocError::Policy(policy).into()
+                }
+            });
+        }
+        if let Some((_, rejection)) = session
+            .rejected_commit_ids
+            .first()
+            .or_else(|| session.rejected_fragment_ids.first())
+        {
+            let kind = match rejection.kind {
+                subduction_core::sync_session::SyncPolicyRejectionKind::DocumentNotFound => {
+                    crate::runtime::SyncDocPolicyError::DocumentNotFound
+                }
+                subduction_core::sync_session::SyncPolicyRejectionKind::InsufficientAccess => {
+                    crate::runtime::SyncDocPolicyError::InsufficientAccess
+                }
+                subduction_core::sync_session::SyncPolicyRejectionKind::InvalidIdentifier => {
+                    crate::runtime::SyncDocPolicyError::InvalidIdentifier
+                }
+                subduction_core::sync_session::SyncPolicyRejectionKind::Other => {
+                    crate::runtime::SyncDocPolicyError::Other(rejection.reason.clone())
+                }
+            };
+            return Err(crate::runtime::SyncDocError::Policy(kind).into());
+        }
         let was_pending = matches!(self.state, DocState::PendingMaterialization);
         let wants_patches = self.change_manager.has_change_listener_interest(
             self.doc_id,
@@ -1799,6 +1880,12 @@ impl<F: FutureForm> DocWorker2<F> {
                 let _ = sender.send(match &result {
                     Err(crate::runtime::SyncDocError::NotFound) => {
                         Err(crate::runtime::SyncDocError::NotFound)
+                    }
+                    Err(crate::runtime::SyncDocError::Unauthorized) => {
+                        Err(crate::runtime::SyncDocError::Unauthorized)
+                    }
+                    Err(crate::runtime::SyncDocError::Policy(error)) => {
+                        Err(crate::runtime::SyncDocError::Policy(error.clone()))
                     }
                     Err(crate::runtime::SyncDocError::TransportError) => {
                         Err(crate::runtime::SyncDocError::TransportError)

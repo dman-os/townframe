@@ -12,7 +12,7 @@ mod test_support;
 
 pub use io::{
     CausalDecryptResult, Clock, DocIo, EncryptedInitialSedimentree, EncryptedLooseCommit,
-    RuntimeIo, Timer,
+    RuntimeIo, SyncDocAttempt, Timer,
 };
 pub use lease::{
     DocLease, DocWorkerEntry, DocWorkerHandle, DocWorkerInternalLease, DocWorkerStopToken,
