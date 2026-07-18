@@ -76,6 +76,7 @@ pub struct IrohSyncRepo {
     keyhive_rpc_cancel: CancellationToken,
     keyhive_rpc_cancels: Arc<tokio::sync::Mutex<HashMap<PeerId, CancellationToken>>>,
     big_sync_worker: big_sync::BigSyncWorkerHandle,
+    big_repo_rpc: big_repo::rpc::BigRepoRpcHandle,
     _big_sync_rpc: big_sync::rpc::BigSyncRpcHandle,
 }
 
@@ -292,6 +293,7 @@ impl IrohSyncRepo {
             keyhive_rpc_cancel: keyhive_rpc_cancel.clone(),
             keyhive_rpc_cancels: Arc::clone(&keyhive_rpc_cancels),
             big_sync_worker,
+            big_repo_rpc: big_repo_rpc.clone(),
             _big_sync_rpc: big_sync_rpc, // active_endpoint_ids: tokio::sync::RwLock::new(HashMap::new()),
         });
         #[cfg(test)]
@@ -575,6 +577,7 @@ impl IrohSyncRepo {
             .collect::<Vec<_>>();
         for peer_id in active_peers {
             self.stop_keyhive_rpc_subscription(peer_id).await;
+            self.big_repo_rpc.unregister_peer(peer_id);
             self.blobs_sync_backend.unregister_remote_peer(peer_id);
             self.big_sync_worker.remove_peer(peer_id).await.ok();
         }
@@ -603,10 +606,12 @@ impl IrohSyncRepo {
                 )
                 .await
                 .ok_or_eyre("unable to get remote info for incoming conn")?;
+            let remote_endpoint_id = remote_info.id();
             let addr = iroh::EndpointAddr::from_parts(
-                remote_info.id(),
+                remote_endpoint_id,
                 remote_info.into_addrs().map(|info| info.into_addr()),
             );
+            self.big_repo_rpc.register_peer(remote_endpoint_id, peer_id);
             let big_sync_rpc_client =
                 big_sync::rpc::IrohBigSyncRpcClient::new(endpoint, addr.clone());
             let big_sync_rpc_client = Arc::new(big_sync_rpc_client);
@@ -631,6 +636,7 @@ impl IrohSyncRepo {
         }
         .await;
         if res.is_err() {
+            self.big_repo_rpc.unregister_peer(peer_id);
             let old = self.active_peers.write().await.remove(&peer_id);
             assert!(matches!(old, Some(ActivePeerState::Connecting)), "fishy")
         }
@@ -643,6 +649,7 @@ impl IrohSyncRepo {
         signal: big_repo::ConnFinishSignal,
     ) -> Res<()> {
         self.stop_keyhive_rpc_subscription(signal.peer_id).await;
+        self.big_repo_rpc.unregister_peer(signal.peer_id);
         self.blobs_sync_backend
             .unregister_remote_peer(signal.peer_id);
         self.big_sync_worker.remove_peer(signal.peer_id).await?;
@@ -782,6 +789,7 @@ impl IrohSyncRepo {
                 big_sync::rpc::IrohBigSyncRpcClient::new(endpoint, endpoint_addr.clone());
             let big_sync_rpc_client = Arc::new(big_sync_rpc_client);
 
+            self.big_repo_rpc.register_peer(endpoint_id, conn.peer_id);
             self.blobs_sync_backend
                 .register_remote_peer(conn.peer_id, endpoint_addr.clone());
             self.big_sync_worker
@@ -801,6 +809,7 @@ impl IrohSyncRepo {
         }
         .await;
         if res.is_err() {
+            self.big_repo_rpc.unregister_peer(peer_id);
             let old = self.active_peers.write().await.remove(&peer_id);
             assert!(matches!(old, Some(ActivePeerState::Connecting)), "fishy")
         }

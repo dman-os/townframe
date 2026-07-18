@@ -599,6 +599,17 @@ async fn authorized_peer_reads_encrypted_doc_after_keyhive_change_notification_w
     // Ensure the global partition exists before subscribing.
     client.big_sync_store.ensure_part(GLOBAL_PART_ID).await?;
 
+    // Keyhive invalidation is now direct RPC, not the relay-capable
+    // application ephemeral/gossip channel. Keep a legacy-topic subscription
+    // as a smoke check that this grant does not publish there.
+    let keyhive_topic = BigEphemeralTopic::keyhive_changed();
+    let owner_eph_peer_id = subduction_core::peer::id::PeerId::new(*owner.peer_id().as_bytes());
+    let mut keyhive_ephemeral = client
+        .repo
+        .ephemeral()
+        .subscribe(BigEphemeralFilter::new(keyhive_topic).with_sender(owner_eph_peer_id))
+        .await?;
+
     // Subscribe to the client's global partition to learn about the doc
     // being registered locally by the runtime's keyhive listener.
     let req = SubPartsRequest {
@@ -619,16 +630,25 @@ async fn authorized_peer_reads_encrypted_doc_after_keyhive_change_notification_w
         .await?;
 
     // Wait for the runtime's keyhive listener to register the doc in the
-    // client's local global partition (which means the ephemeral-delivered
+    // client's local global partition (which means the direct-RPC-delivered
     // grant has been processed).
     wait_for_global_part_addition(&mut rx, doc_id, Duration::from_secs(30)).await?;
+
+    // The old Keyhive ephemeral topic should remain silent. This is a smoke
+    // assertion for the routing boundary, not the consistency mechanism.
+    assert!(
+        timeout(Duration::from_millis(500), keyhive_ephemeral.recv())
+            .await
+            .is_err(),
+        "Keyhive grant was published through the application ephemeral channel"
+    );
 
     timeout(
         Duration::from_secs(5),
         client_conn.sync_doc_with_peer(doc_id, Some(Duration::from_secs(2))),
     )
     .await
-    .expect("timed out waiting for authorized doc sync after ephemeral-triggered keyhive sync")?;
+    .expect("timed out waiting for authorized doc sync after RPC-triggered keyhive sync")?;
 
     let client_doc = timeout(
         Duration::from_secs(10),
@@ -642,7 +662,7 @@ async fn authorized_peer_reads_encrypted_doc_after_keyhive_change_notification_w
     assert_eq!(title, "seed");
     assert!(
         client.repo.doc_payload_heads(doc_id).await?.is_some(),
-        "authorized client should have payload heads after ephemeral-triggered keyhive sync and doc sync"
+        "authorized client should have payload heads after RPC-triggered keyhive sync and doc sync"
     );
 
     let handle = client.repo.get_doc(&doc_id).await?.into_ready(doc_id)?;
