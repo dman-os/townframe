@@ -98,7 +98,6 @@ async fn tier2_grant_before_content_edit() -> crate::Res<()> {
 
     // Sync back to Owner and verify convergence.
     pair.right_conn().sync_keyhive_with_peer(None).await?;
-    pair.left_conn().sync_keyhive_with_peer(None).await?;
     drop(owner_doc);
     let owner_doc2 =
         fixtures::sync_doc_expect_ready(pair.left_conn(), &pair.left().repo, doc_id).await?;
@@ -699,7 +698,6 @@ async fn run_group_case(
         // group/member delegation that the grant depends on. Otherwise the
         // reconnect can deliver the document grant before its root proof.
         pair.left_conn().sync_keyhive_with_peer(None).await?;
-        pair.right_conn().sync_keyhive_with_peer(None).await?;
         fixtures::go_offline(&mut pair).await?;
         pair.left()
             .repo
@@ -707,8 +705,7 @@ async fn run_group_case(
             .await?;
         pair.connect().await?;
         pair.left_conn().sync_keyhive_with_peer(None).await?;
-        pair.right_conn().sync_keyhive_with_peer(None).await?;
-        fixtures::assert_reader_has_access(&pair.right().repo, doc_id).await?;
+        fixtures::assert_reader_has_access(&pair.right().repo, doc_id).await?
     } else {
         fixtures::grant_group_and_propagate(&pair, doc_id, &target_group, access).await?;
     }
@@ -739,7 +736,6 @@ async fn run_group_case(
             })
             .await??;
         pair.right_conn().sync_keyhive_with_peer(None).await?;
-        pair.left_conn().sync_keyhive_with_peer(None).await?;
         pair.left()
             .repo
             .wait_for_quiescence(Some(std::time::Duration::from_secs(10)))

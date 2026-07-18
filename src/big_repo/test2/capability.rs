@@ -1116,7 +1116,6 @@ async fn tier6_regrant_after_revoke_new_epoch() -> crate::Res<()> {
         .grant_doc_access(doc_id, editor_agent.clone(), Access::Edit)
         .await?;
     pair.left_conn().sync_keyhive_with_peer(None).await?;
-    pair.right_conn().sync_keyhive_with_peer(None).await?;
 
     let editor_doc =
         fixtures::sync_doc_expect_ready(pair.right_conn(), &pair.right().repo, doc_id).await?;
@@ -1134,7 +1133,6 @@ async fn tier6_regrant_after_revoke_new_epoch() -> crate::Res<()> {
 
     // Sync epoch-1 content to owner.
     pair.right_conn().sync_keyhive_with_peer(None).await?;
-    pair.left_conn().sync_keyhive_with_peer(None).await?;
     let _owner_sync =
         fixtures::sync_doc_expect_ready(pair.left_conn(), &pair.left().repo, doc_id).await?;
     drop(_owner_sync);
@@ -1154,7 +1152,6 @@ async fn tier6_regrant_after_revoke_new_epoch() -> crate::Res<()> {
         .revoke_doc_access(doc_id, editor_agent.clone())
         .await?;
     pair.left_conn().sync_keyhive_with_peer(None).await?;
-    pair.right_conn().sync_keyhive_with_peer(None).await?;
 
     // Editor must lose effective access.
     let editor_has = pair
@@ -1174,7 +1171,6 @@ async fn tier6_regrant_after_revoke_new_epoch() -> crate::Res<()> {
         .grant_doc_access(doc_id, editor_agent.clone(), Access::Edit)
         .await?;
     pair.left_conn().sync_keyhive_with_peer(None).await?;
-    pair.right_conn().sync_keyhive_with_peer(None).await?;
     // Keyhive completion and the incremental BigSync access-index refresh are
     // separate runtime activities; wait for the latter before syncing content.
     pair.left()
@@ -1206,7 +1202,6 @@ async fn tier6_regrant_after_revoke_new_epoch() -> crate::Res<()> {
 
     // Sync epoch-2 to the owner.
     pair.right_conn().sync_keyhive_with_peer(None).await?;
-    pair.left_conn().sync_keyhive_with_peer(None).await?;
     let owner_epoch2 =
         fixtures::sync_doc_expect_ready(pair.left_conn(), &pair.left().repo, doc_id).await?;
     let owner_state = pair.left().repo.doc_head_state(doc_id).await?;

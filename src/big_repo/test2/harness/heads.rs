@@ -76,6 +76,13 @@ pub async fn tier0_invariants(
     left: &crate::BigDocHandle,
     right: &crate::BigDocHandle,
 ) -> Res<()> {
+    // Handle commits and inbound sync application are acknowledged before
+    // their final materialized state is necessarily visible to doc_head_state.
+    // The invariant is about the settled document, not that intermediate
+    // acknowledgement boundary.
+    pair.left().repo.wait_for_quiescence(None).await?;
+    pair.right().repo.wait_for_quiescence(None).await?;
+
     if let Err(error) = assert_sedimentree_parity(pair, doc_id).await {
         let diagnostics = super::dump::diagnostics(pair, doc_id).await?;
         return Err(crate::ferr!("{error}\n{diagnostics}"));

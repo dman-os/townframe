@@ -117,6 +117,10 @@ where
     pub(crate) keyhive_change_tx: tokio::sync::broadcast::Sender<()>,
     /// Compatibility bridge for the existing big-sync partition layer.
     pub(crate) big_sync_store: crate::SharedPartStore,
+    /// Serialize access-index rebuilds so an older Keyhive snapshot cannot
+    /// overwrite a newer membership map while concurrent listener events are
+    /// being applied.
+    pub(crate) access_refresh_lock: Arc<async_lock::Mutex<()>>,
 }
 
 impl<S> std::fmt::Debug for NativeBigRepoIo<S>
@@ -762,6 +766,11 @@ where
                 .keyhive
                 .create_doc(parents, content_heads, &self.keyhive_storage)
                 .await?;
+            let target = Identifier::from(
+                ed25519_dalek::VerifyingKey::from_bytes(&doc_id.into_bytes())
+                    .map_err(|_| ferr!("doc_id is not a valid Ed25519 point"))?,
+            );
+            self.refresh_big_sync_doc_access(target).await?;
             Ok(doc_id)
         })
     }
@@ -847,6 +856,7 @@ where
         target: keyhive_core::principal::identifier::Identifier,
     ) -> <Sendable as future_form::FutureForm>::Future<'_, eyre::Result<()>> {
         Sendable::from_future(async move {
+            let _refresh_guard = self.access_refresh_lock.lock().await;
             let agents = self
                 .keyhive
                 .agents_for_membered(target)
@@ -1255,6 +1265,7 @@ pub async fn spawn_native_runtime2<S>(
     keyhive: BigKeyhiveHandle,
     keyhive_storage: BigRepoKeyhiveStorage,
     change_manager: Arc<crate::changes::ChangeListenerManager>,
+    listener_evt_tx: mpsc::UnboundedSender<crate::runtime::RuntimeEvt>,
     listener_evt_rx: mpsc::UnboundedReceiver<crate::runtime::RuntimeEvt>,
     keyhive_change_tx: tokio::sync::broadcast::Sender<()>,
 ) -> eyre::Result<(
@@ -1337,12 +1348,16 @@ where
             ) -> BigRepoKeyhiveConnAdapter<BigRepoIrohTransport>,
     );
     {
-        let evt_tx = evt_tx.clone();
+        // Route sync completion through the same ordered listener channel as
+        // membership events. The Keyhive protocol invokes its sync observer
+        // after applying events, but the runtime listener bridge is a separate
+        // task; sending completion directly to the runtime event channel could
+        // let `KeyhiveSyncDone` overtake a preceding delegation event.
         keyhive_handler = keyhive_handler.with_sync_done_observer(Arc::new(
             move |keyhive_peer_id, request_id| {
                 let peer_id = PeerId::new(*keyhive_peer_id.verifying_key());
-                if evt_tx
-                    .try_send(crate::runtime2::Runtime2Evt::KeyhiveSyncDone {
+                if listener_evt_tx
+                    .send(crate::runtime::RuntimeEvt::KeyhiveSyncDone {
                         peer_id,
                         request_id,
                     })
@@ -1397,6 +1412,7 @@ where
         ephemeral_backend: Arc::clone(&ephemeral_backend),
         keyhive_change_tx: keyhive_change_tx.clone(),
         big_sync_store,
+        access_refresh_lock: Arc::new(async_lock::Mutex::new(())),
     });
 
     let iroh_connect = Arc::new(IrohTransportConnect {
@@ -1497,6 +1513,13 @@ where
                 let mut rx = listener_evt_rx;
                 while let Some(evt) = rx.recv().await {
                     let evt2 = match evt {
+                        crate::runtime::RuntimeEvt::KeyhiveSyncDone {
+                            peer_id,
+                            request_id,
+                        } => crate::runtime2::Runtime2Evt::KeyhiveSyncDone {
+                            peer_id,
+                            request_id,
+                        },
                         crate::runtime::RuntimeEvt::PrekeyExpanded { new_prekey } => {
                             crate::runtime2::Runtime2Evt::PrekeyExpanded { new_prekey }
                         }
