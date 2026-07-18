@@ -263,7 +263,7 @@ impl Node {
         Ok(())
     }
 
-    async fn stop_keyhive_rpc(&self, peer_id: PeerId) {
+    pub(crate) async fn stop_keyhive_rpc(&self, peer_id: PeerId) {
         if let Some(cancel) = self.keyhive_rpc_cancels.lock().await.remove(&peer_id) {
             cancel.cancel();
         }
@@ -271,7 +271,11 @@ impl Node {
 
     /// Open an outbound connection to `remote` and wire bidirectional big-sync
     /// part replication between the two nodes.
-    pub(crate) async fn connect(&self, remote: &Self) -> crate::Res<BigRepoConnection> {
+    async fn connect_with_keyhive_notifications(
+        &self,
+        remote: &Self,
+        enable_keyhive_notifications: bool,
+    ) -> crate::Res<BigRepoConnection> {
         let connection = self
             .repo
             .open_connection_iroh(
@@ -308,9 +312,22 @@ impl Node {
                 parts,
             )
             .await?;
-        self.start_keyhive_rpc(remote).await?;
-        remote.start_keyhive_rpc(self).await?;
+        if enable_keyhive_notifications {
+            self.start_keyhive_rpc(remote).await?;
+            remote.start_keyhive_rpc(self).await?;
+        }
         Ok(connection)
+    }
+
+    pub(crate) async fn connect(&self, remote: &Self) -> crate::Res<BigRepoConnection> {
+        self.connect_with_keyhive_notifications(remote, true).await
+    }
+
+    async fn connect_without_keyhive_notifications(
+        &self,
+        remote: &Self,
+    ) -> crate::Res<BigRepoConnection> {
+        self.connect_with_keyhive_notifications(remote, false).await
     }
 
     /// Take the next inbound connection accepted by this node's endpoint.
@@ -459,9 +476,29 @@ impl Pair {
 
     /// Connect an already-booted pair without performing a Keyhive sync.
     pub(crate) async fn connect(&mut self) -> crate::Res<()> {
+        self.connect_with_keyhive_notifications(true).await
+    }
+
+    /// Connect an already-booted pair without installing direct Keyhive
+    /// notification consumers. Used by tests that intentionally model a
+    /// missing local Keyhive document after restart.
+    pub(crate) async fn connect_without_keyhive_notifications(&mut self) -> crate::Res<()> {
+        self.connect_with_keyhive_notifications(false).await
+    }
+
+    async fn connect_with_keyhive_notifications(
+        &mut self,
+        enable_keyhive_notifications: bool,
+    ) -> crate::Res<()> {
         assert!(self.left_conn.is_none());
         assert!(self.right_conn.is_none());
-        let left_conn = self.left().connect(self.right()).await?;
+        let left_conn = if enable_keyhive_notifications {
+            self.left().connect(self.right()).await?
+        } else {
+            self.left()
+                .connect_without_keyhive_notifications(self.right())
+                .await?
+        };
         let right_conn = self.right().accepted_connection().await;
         self.left_conn = Some(left_conn);
         self.right_conn = Some(right_conn);

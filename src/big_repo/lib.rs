@@ -56,8 +56,11 @@ pub use changes::{
     path_prefix_matches as big_repo_path_prefix_matches, BigRepoChangeNotification,
     BigRepoChangeOrigin, ChangeFilter as BigRepoChangeFilter,
     ChangeListenerRegistration as BigRepoChangeListenerRegistration,
-    DocIdFilter as BigRepoDocIdFilter, OriginFilter as BigRepoOriginFilter,
+    DocIdFilter as BigRepoDocIdFilter, DomainFilter as BigRepoDomainFilter,
+    DomainListenerRegistration as BigRepoDomainListenerRegistration,
+    OriginFilter as BigRepoOriginFilter,
 };
+pub use changes::{BigRepoAccess, BigRepoDomainNotification, GroupId};
 
 pub type DocumentId = big_sync_core::ObjId;
 pub type SharedPartStore = Arc<dyn big_sync::HostPartStore>;
@@ -596,6 +599,20 @@ impl BigRepo {
     )> {
         let (registration, change_rx) = self.change_manager.subscribe_listener(filter).await?;
         Ok((registration, change_rx))
+    }
+
+    pub async fn subscribe_domain_listener(
+        self: &Arc<Self>,
+        filter: BigRepoDomainFilter,
+    ) -> Res<(
+        BigRepoDomainListenerRegistration,
+        tokio::sync::mpsc::UnboundedReceiver<Vec<crate::changes::BigRepoDomainNotification>>,
+    )> {
+        let (registration, domain_rx) = self
+            .change_manager
+            .subscribe_domain_listener(filter)
+            .await?;
+        Ok((registration, domain_rx))
     }
 }
 

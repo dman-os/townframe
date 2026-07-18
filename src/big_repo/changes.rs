@@ -1,23 +1,24 @@
+//! BigRepo notification types, split into two families:
+//!
+//! 1. **Document change notifications** — ordinary doc lifecycle events
+//!    (DocCreated, DocImported, DocChanged, heads, local materialization).
+//! 2. **Domain notifications** — BigRepo-level events about group membership,
+//!    document access control, and key rotation. These replace the old raw
+//!    Keyhive notification families (PrekeyNotification, CgkaNotification,
+//!    MembershipNotification) and expose only BigRepo-owned identifier types.
+
 use crate::interlude::*;
 
-use crate::keyhive_listener::BigRepoKeyhiveListener;
 use crate::DocumentId;
 use automerge::ChangeHash;
 use autosurgeon::Prop;
-use beekem::operation::CgkaOperation;
-use future_form::Sendable;
-use keyhive_core::principal::group::{delegation::Delegation, revocation::Revocation};
-use keyhive_core::principal::individual::op::{add_key::AddKeyOp, rotate_key::RotateKeyOp};
-use keyhive_crypto::signed::Signed;
-use keyhive_crypto::signer::memory::MemorySigner;
 use std::sync::Mutex;
 use tokio::{sync::mpsc, task::JoinHandle};
 use tokio_util::sync::CancellationToken;
 
-/// Keyhive event payload type aliases — concrete for our generics.
-pub(crate) type SignedAddKeyOp = Signed<AddKeyOp>;
-pub(crate) type SignedRotateKeyOp = Signed<RotateKeyOp>;
-pub(crate) type SignedCgkaOp = Signed<CgkaOperation>;
+// ═══════════════════════════════════════════════════════════════════════════
+// Document-level change notifications (keep as-is)
+// ═══════════════════════════════════════════════════════════════════════════
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum BigRepoChangeOrigin {
@@ -88,27 +89,100 @@ pub enum BigRepoPendingHeadNotification {
     },
 }
 
-#[derive(Debug, Clone)]
-pub enum BigRepoPrekeyNotification {
-    PrekeysExpanded { new_prekey: Arc<SignedAddKeyOp> },
-    PrekeyRotated { rotate_key: Arc<SignedRotateKeyOp> },
+// ═══════════════════════════════════════════════════════════════════════════
+// Domain notifications — BigRepo-level, no Keyhive internals
+// ═══════════════════════════════════════════════════════════════════════════
+
+/// A group identifier, semantically distinct from a document or peer ID.
+/// Backed by the same 32-byte representation (Keyhive group public key).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub struct GroupId(pub [u8; 32]);
+
+impl GroupId {
+    pub const fn new(bytes: [u8; 32]) -> Self {
+        Self(bytes)
+    }
+
+    pub fn to_bytes(self) -> [u8; 32] {
+        self.0
+    }
 }
 
-#[derive(Debug, Clone)]
-pub enum BigRepoCgkaNotification {
-    CgkaOp { data: Arc<SignedCgkaOp> },
+impl std::fmt::Display for GroupId {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "GroupId({:02x?}..)", &self.0[..4])
+    }
 }
 
-#[expect(clippy::type_complexity)]
-#[derive(Debug, Clone)]
-pub enum BigRepoMembershipNotification {
-    DelegationReceived {
-        data: Arc<Signed<Delegation<Sendable, MemorySigner, Vec<u8>, BigRepoKeyhiveListener>>>,
-    },
-    RevocationReceived {
-        data: Arc<Signed<Revocation<Sendable, MemorySigner, Vec<u8>, BigRepoKeyhiveListener>>>,
-    },
+/// Access level for a member on a document or group.
+/// Re-exported from Keyhive but without exposing the Keyhive crate path.
+/// Preserves all four Keyhive access levels distinctly.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum BigRepoAccess {
+    /// Can retrieve encrypted bytes over the network (relay).
+    Relay,
+    /// Can read (decrypt) document content.
+    Read,
+    /// Can edit (append ops to) document content.
+    Edit,
+    /// Can manage membership (revoke any member, not just causally junior).
+    Admin,
 }
+
+impl From<keyhive_core::access::Access> for BigRepoAccess {
+    fn from(a: keyhive_core::access::Access) -> Self {
+        match a {
+            keyhive_core::access::Access::Relay => Self::Relay,
+            keyhive_core::access::Access::Read => Self::Read,
+            keyhive_core::access::Access::Edit => Self::Edit,
+            keyhive_core::access::Access::Admin => Self::Admin,
+        }
+    }
+}
+
+/// BigRepo-level domain events that replace the old raw Keyhive
+/// notification families.
+#[derive(Debug, Clone)]
+pub enum BigRepoDomainNotification {
+    /// A document was added to a group's governance.
+    DocumentAddedToGroup {
+        doc_id: DocumentId,
+        group_id: GroupId,
+    },
+    /// A document was removed from a group's governance.
+    DocumentRemovedFromGroup {
+        doc_id: DocumentId,
+        group_id: GroupId,
+    },
+    /// A member was added to a group.
+    MemberAddedToGroup {
+        group_id: GroupId,
+        member_id: PeerId,
+        access: BigRepoAccess,
+    },
+    /// A member was removed from a group.
+    MemberRemovedFromGroup {
+        group_id: GroupId,
+        member_id: PeerId,
+    },
+    /// A document's access control entry changed.
+    DocumentAccessChanged {
+        doc_id: DocumentId,
+        member_id: PeerId,
+        access: BigRepoAccess,
+    },
+    /// A member's access to a document was revoked.
+    DocumentAccessRevoked {
+        doc_id: DocumentId,
+        member_id: PeerId,
+    },
+    /// A document's encryption key was rotated.
+    DocumentKeyRotated { doc_id: DocumentId },
+}
+
+// ═══════════════════════════════════════════════════════════════════════════
+// Filters
+// ═══════════════════════════════════════════════════════════════════════════
 
 pub struct ChangeFilter {
     pub doc_id: Option<DocIdFilter>,
@@ -135,14 +209,13 @@ pub struct PendingHeadFilter {
     pub doc_id: Option<DocIdFilter>,
 }
 
-/// No filter fields yet — all prekey events are delivered to all subscribers.
-pub struct PrekeyFilter;
+/// Describes which domain events a subscriber is interested in.
+/// Currently unfiltered — all domain events are delivered to every subscriber.
+pub struct DomainFilter;
 
-/// No filter fields yet — all cgka events are delivered to all subscribers.
-pub struct CgkaFilter;
-
-/// No filter fields yet — all membership events are delivered to all subscribers.
-pub struct MembershipFilter;
+// ═══════════════════════════════════════════════════════════════════════════
+// Internal listener bookkeeping
+// ═══════════════════════════════════════════════════════════════════════════
 
 struct ChangeListener {
     id: Uuid,
@@ -156,21 +229,24 @@ struct LocalListener {
     change_tx: mpsc::UnboundedSender<Vec<BigRepoLocalNotification>>,
 }
 
-struct PrekeyListener {
+struct HeadListener {
     id: Uuid,
-    change_tx: mpsc::UnboundedSender<Vec<BigRepoPrekeyNotification>>,
+    filter: HeadFilter,
+    change_tx: mpsc::UnboundedSender<Vec<BigRepoHeadNotification>>,
 }
 
-struct CgkaListener {
+struct PendingHeadListener {
     id: Uuid,
-    change_tx: mpsc::UnboundedSender<Vec<BigRepoCgkaNotification>>,
+    filter: PendingHeadFilter,
+    change_tx: mpsc::UnboundedSender<Vec<BigRepoPendingHeadNotification>>,
 }
 
-struct MembershipListener {
+struct DomainListener {
     id: Uuid,
-    change_tx: mpsc::UnboundedSender<Vec<BigRepoMembershipNotification>>,
+    change_tx: mpsc::UnboundedSender<Vec<BigRepoDomainNotification>>,
 }
 
+/// Unified manager for all notification families.
 pub struct ChangeListenerManager {
     listeners: Arc<Mutex<Vec<ChangeListener>>>,
     change_tx: mpsc::UnboundedSender<Vec<BigRepoChangeNotification>>,
@@ -179,14 +255,9 @@ pub struct ChangeListenerManager {
     pending_head_listeners: Mutex<Vec<PendingHeadListener>>,
     pending_head_tx: mpsc::UnboundedSender<Vec<BigRepoPendingHeadNotification>>,
     local_listeners: Mutex<Vec<LocalListener>>,
-    /// used to send local ops to the switchboard
     local_tx: mpsc::UnboundedSender<Vec<BigRepoLocalNotification>>,
-    prekey_listeners: Mutex<Vec<PrekeyListener>>,
-    prekey_tx: mpsc::UnboundedSender<Vec<BigRepoPrekeyNotification>>,
-    cgka_listeners: Mutex<Vec<CgkaListener>>,
-    cgka_tx: mpsc::UnboundedSender<Vec<BigRepoCgkaNotification>>,
-    membership_listeners: Mutex<Vec<MembershipListener>>,
-    membership_tx: mpsc::UnboundedSender<Vec<BigRepoMembershipNotification>>,
+    domain_listeners: Mutex<Vec<DomainListener>>,
+    domain_tx: mpsc::UnboundedSender<Vec<BigRepoDomainNotification>>,
     cancel_token: CancellationToken,
 }
 
@@ -215,15 +286,107 @@ impl DocIdFilter {
     }
 }
 
+pub struct ChangeListenerRegistration {
+    manager: std::sync::Weak<ChangeListenerManager>,
+    id: Uuid,
+}
+
+impl Drop for ChangeListenerRegistration {
+    fn drop(&mut self) {
+        if let Some(manager) = self.manager.upgrade() {
+            let id = self.id;
+            manager
+                .listeners
+                .lock()
+                .expect(ERROR_MUTEX)
+                .retain(|listener| listener.id != id);
+        }
+    }
+}
+
+pub struct LocalListenerRegistration {
+    manager: std::sync::Weak<ChangeListenerManager>,
+    id: Uuid,
+}
+
+impl Drop for LocalListenerRegistration {
+    fn drop(&mut self) {
+        if let Some(manager) = self.manager.upgrade() {
+            let id = self.id;
+            manager
+                .local_listeners
+                .lock()
+                .expect(ERROR_MUTEX)
+                .retain(|listener| listener.id != id);
+        }
+    }
+}
+
+pub struct HeadListenerRegistration {
+    manager: std::sync::Weak<ChangeListenerManager>,
+    id: Uuid,
+}
+
+impl Drop for HeadListenerRegistration {
+    fn drop(&mut self) {
+        if let Some(manager) = self.manager.upgrade() {
+            let id = self.id;
+            manager
+                .head_listeners
+                .lock()
+                .expect(ERROR_MUTEX)
+                .retain(|listener| listener.id != id);
+        }
+    }
+}
+
+pub struct PendingHeadListenerRegistration {
+    manager: std::sync::Weak<ChangeListenerManager>,
+    id: Uuid,
+}
+
+impl Drop for PendingHeadListenerRegistration {
+    fn drop(&mut self) {
+        if let Some(manager) = self.manager.upgrade() {
+            let id = self.id;
+            manager
+                .pending_head_listeners
+                .lock()
+                .expect(ERROR_MUTEX)
+                .retain(|listener| listener.id != id);
+        }
+    }
+}
+
+pub struct DomainListenerRegistration {
+    manager: std::sync::Weak<ChangeListenerManager>,
+    id: Uuid,
+}
+
+impl Drop for DomainListenerRegistration {
+    fn drop(&mut self) {
+        if let Some(manager) = self.manager.upgrade() {
+            let id = self.id;
+            manager
+                .domain_listeners
+                .lock()
+                .expect(ERROR_MUTEX)
+                .retain(|listener| listener.id != id);
+        }
+    }
+}
+
+// ═══════════════════════════════════════════════════════════════════════════
+// ChangeListenerManager implementation
+// ═══════════════════════════════════════════════════════════════════════════
+
 impl ChangeListenerManager {
     pub fn boot() -> (Arc<Self>, ChangeListenerManagerStopToken) {
         let (change_tx, change_rx) = mpsc::unbounded_channel();
         let (head_tx, head_rx) = mpsc::unbounded_channel();
         let (local_tx, local_rx) = mpsc::unbounded_channel();
         let (pending_head_tx, pending_head_rx) = mpsc::unbounded_channel();
-        let (prekey_tx, prekey_rx) = mpsc::unbounded_channel();
-        let (cgka_tx, cgka_rx) = mpsc::unbounded_channel();
-        let (membership_tx, membership_rx) = mpsc::unbounded_channel();
+        let (domain_tx, domain_rx) = mpsc::unbounded_channel();
         let cancel_token = CancellationToken::new();
         let out = Self {
             listeners: default(),
@@ -234,12 +397,8 @@ impl ChangeListenerManager {
             pending_head_tx,
             local_listeners: default(),
             local_tx,
-            prekey_listeners: default(),
-            prekey_tx,
-            cgka_listeners: default(),
-            cgka_tx,
-            membership_listeners: default(),
-            membership_tx,
+            domain_listeners: default(),
+            domain_tx,
             cancel_token: cancel_token.clone(),
         };
         let out = Arc::new(out);
@@ -248,9 +407,7 @@ impl ChangeListenerManager {
             head_rx,
             local_rx,
             pending_head_rx,
-            prekey_rx,
-            cgka_rx,
-            membership_rx,
+            domain_rx,
         );
 
         (
@@ -268,6 +425,8 @@ impl ChangeListenerManager {
         }
         Ok(())
     }
+
+    // ── Document change notify methods ────────────────────────────────────
 
     #[tracing::instrument(skip(self, heads))]
     pub(super) fn notify_doc_created(
@@ -421,54 +580,111 @@ impl ChangeListenerManager {
         Ok(())
     }
 
-    pub(super) fn notify_prekeys_expanded(&self, new_prekey: Arc<SignedAddKeyOp>) -> Res<()> {
-        self.ensure_live()?;
-        self.prekey_tx
-            .send(vec![BigRepoPrekeyNotification::PrekeysExpanded {
-                new_prekey,
-            }])?;
-        Ok(())
-    }
+    // ── Domain notification notify methods ────────────────────────────────
 
-    pub(super) fn notify_prekey_rotated(&self, rotate_key: Arc<SignedRotateKeyOp>) -> Res<()> {
-        self.ensure_live()?;
-        self.prekey_tx
-            .send(vec![BigRepoPrekeyNotification::PrekeyRotated {
-                rotate_key,
-            }])?;
-        Ok(())
-    }
-
-    pub(super) fn notify_cgka_op(&self, data: Arc<SignedCgkaOp>) -> Res<()> {
-        self.ensure_live()?;
-        self.cgka_tx
-            .send(vec![BigRepoCgkaNotification::CgkaOp { data }])?;
-        Ok(())
-    }
-
-    pub(super) fn notify_delegation_received(
+    /// Notify that a document was added to a group's governance.
+    pub(super) fn notify_document_added_to_group(
         &self,
-        data: Arc<Signed<Delegation<Sendable, MemorySigner, Vec<u8>, BigRepoKeyhiveListener>>>,
+        doc_id: DocumentId,
+        group_id: GroupId,
     ) -> Res<()> {
         self.ensure_live()?;
-        self.membership_tx
-            .send(vec![BigRepoMembershipNotification::DelegationReceived {
-                data,
+        self.domain_tx
+            .send(vec![BigRepoDomainNotification::DocumentAddedToGroup {
+                doc_id,
+                group_id,
             }])?;
         Ok(())
     }
 
-    pub(super) fn notify_revocation_received(
+    /// Notify that a member was added to a group.
+    pub(super) fn notify_document_removed_from_group(
         &self,
-        data: Arc<Signed<Revocation<Sendable, MemorySigner, Vec<u8>, BigRepoKeyhiveListener>>>,
+        doc_id: DocumentId,
+        group_id: GroupId,
     ) -> Res<()> {
         self.ensure_live()?;
-        self.membership_tx
-            .send(vec![BigRepoMembershipNotification::RevocationReceived {
-                data,
+        self.domain_tx
+            .send(vec![BigRepoDomainNotification::DocumentRemovedFromGroup {
+                doc_id,
+                group_id,
             }])?;
         Ok(())
     }
+
+    pub(super) fn notify_member_added_to_group(
+        &self,
+        group_id: GroupId,
+        member_id: PeerId,
+        access: BigRepoAccess,
+    ) -> Res<()> {
+        self.ensure_live()?;
+        self.domain_tx
+            .send(vec![BigRepoDomainNotification::MemberAddedToGroup {
+                group_id,
+                member_id,
+                access,
+            }])?;
+        Ok(())
+    }
+
+    /// Notify that a member was removed from a group.
+    pub(super) fn notify_member_removed_from_group(
+        &self,
+        group_id: GroupId,
+        member_id: PeerId,
+    ) -> Res<()> {
+        self.ensure_live()?;
+        self.domain_tx
+            .send(vec![BigRepoDomainNotification::MemberRemovedFromGroup {
+                group_id,
+                member_id,
+            }])?;
+        Ok(())
+    }
+
+    /// Notify that a document's access control entry changed.
+    pub(super) fn notify_document_access_changed(
+        &self,
+        doc_id: DocumentId,
+        member_id: PeerId,
+        access: BigRepoAccess,
+    ) -> Res<()> {
+        self.ensure_live()?;
+        self.domain_tx
+            .send(vec![BigRepoDomainNotification::DocumentAccessChanged {
+                doc_id,
+                member_id,
+                access,
+            }])?;
+        Ok(())
+    }
+
+    /// Notify that a document's encryption key was rotated.
+    pub(super) fn notify_document_access_revoked(
+        &self,
+        doc_id: DocumentId,
+        member_id: PeerId,
+    ) -> Res<()> {
+        self.ensure_live()?;
+        self.domain_tx
+            .send(vec![BigRepoDomainNotification::DocumentAccessRevoked {
+                doc_id,
+                member_id,
+            }])?;
+        Ok(())
+    }
+
+    pub(super) fn notify_document_key_rotated(&self, doc_id: DocumentId) -> Res<()> {
+        self.ensure_live()?;
+        self.domain_tx
+            .send(vec![BigRepoDomainNotification::DocumentKeyRotated {
+                doc_id,
+            }])?;
+        Ok(())
+    }
+
+    // ── Subscription methods ──────────────────────────────────────────────
 
     pub async fn subscribe_listener(
         self: &Arc<Self>,
@@ -602,22 +818,23 @@ impl ChangeListenerManager {
         ))
     }
 
-    pub async fn subscribe_prekey_listener(
+    /// Subscribe to domain-level notifications.
+    pub async fn subscribe_domain_listener(
         self: &Arc<Self>,
-        _filter: PrekeyFilter,
+        _filter: DomainFilter,
     ) -> Res<(
-        PrekeyListenerRegistration,
-        mpsc::UnboundedReceiver<Vec<BigRepoPrekeyNotification>>,
+        DomainListenerRegistration,
+        mpsc::UnboundedReceiver<Vec<BigRepoDomainNotification>>,
     )> {
         self.ensure_live()?;
         let (tx, rx) = mpsc::unbounded_channel();
         let id = Uuid::new_v4();
-        self.prekey_listeners
+        self.domain_listeners
             .lock()
             .expect(ERROR_MUTEX)
-            .push(PrekeyListener { id, change_tx: tx });
+            .push(DomainListener { id, change_tx: tx });
         Ok((
-            PrekeyListenerRegistration {
+            DomainListenerRegistration {
                 manager: Arc::downgrade(self),
                 id,
             },
@@ -625,62 +842,15 @@ impl ChangeListenerManager {
         ))
     }
 
-    pub async fn subscribe_cgka_listener(
-        self: &Arc<Self>,
-        _filter: CgkaFilter,
-    ) -> Res<(
-        CgkaListenerRegistration,
-        mpsc::UnboundedReceiver<Vec<BigRepoCgkaNotification>>,
-    )> {
-        self.ensure_live()?;
-        let (tx, rx) = mpsc::unbounded_channel();
-        let id = Uuid::new_v4();
-        self.cgka_listeners
-            .lock()
-            .expect(ERROR_MUTEX)
-            .push(CgkaListener { id, change_tx: tx });
-        Ok((
-            CgkaListenerRegistration {
-                manager: Arc::downgrade(self),
-                id,
-            },
-            rx,
-        ))
-    }
+    // ── Switchboard ───────────────────────────────────────────────────────
 
-    pub async fn subscribe_membership_listener(
-        self: &Arc<Self>,
-        _filter: MembershipFilter,
-    ) -> Res<(
-        MembershipListenerRegistration,
-        mpsc::UnboundedReceiver<Vec<BigRepoMembershipNotification>>,
-    )> {
-        self.ensure_live()?;
-        let (tx, rx) = mpsc::unbounded_channel();
-        let id = Uuid::new_v4();
-        self.membership_listeners
-            .lock()
-            .expect(ERROR_MUTEX)
-            .push(MembershipListener { id, change_tx: tx });
-        Ok((
-            MembershipListenerRegistration {
-                manager: Arc::downgrade(self),
-                id,
-            },
-            rx,
-        ))
-    }
-
-    #[expect(clippy::too_many_arguments)]
     fn spawn_switchboard(
         self: Arc<Self>,
         mut change_rx: mpsc::UnboundedReceiver<Vec<BigRepoChangeNotification>>,
         mut head_rx: mpsc::UnboundedReceiver<Vec<BigRepoHeadNotification>>,
         mut local_rx: mpsc::UnboundedReceiver<Vec<BigRepoLocalNotification>>,
         mut pending_head_rx: mpsc::UnboundedReceiver<Vec<BigRepoPendingHeadNotification>>,
-        mut prekey_rx: mpsc::UnboundedReceiver<Vec<BigRepoPrekeyNotification>>,
-        mut cgka_rx: mpsc::UnboundedReceiver<Vec<BigRepoCgkaNotification>>,
-        mut membership_rx: mpsc::UnboundedReceiver<Vec<BigRepoMembershipNotification>>,
+        mut domain_rx: mpsc::UnboundedReceiver<Vec<BigRepoDomainNotification>>,
     ) -> JoinHandle<()> {
         let fut = async move {
             loop {
@@ -689,9 +859,7 @@ impl ChangeListenerManager {
                     Heads(Vec<BigRepoHeadNotification>),
                     Local(Vec<BigRepoLocalNotification>),
                     PendingHeads(Vec<BigRepoPendingHeadNotification>),
-                    Prekey(Vec<BigRepoPrekeyNotification>),
-                    Cgka(Vec<BigRepoCgkaNotification>),
-                    Membership(Vec<BigRepoMembershipNotification>),
+                    Domain(Vec<BigRepoDomainNotification>),
                 }
                 let input = tokio::select! {
                     biased;
@@ -723,23 +891,11 @@ impl ChangeListenerManager {
                         };
                         SwitchboardInput::PendingHeads(val)
                     },
-                    val = prekey_rx.recv() => {
+                    val = domain_rx.recv() => {
                         let Some(val) = val else {
                             continue;
                         };
-                        SwitchboardInput::Prekey(val)
-                    },
-                    val = cgka_rx.recv() => {
-                        let Some(val) = val else {
-                            continue;
-                        };
-                        SwitchboardInput::Cgka(val)
-                    },
-                    val = membership_rx.recv() => {
-                        let Some(val) = val else {
-                            continue;
-                        };
-                        SwitchboardInput::Membership(val)
+                        SwitchboardInput::Domain(val)
                     }
                 };
 
@@ -890,9 +1046,9 @@ impl ChangeListenerManager {
                                 .retain(|listener| !failed_listener_ids.contains(&listener.id));
                         }
                     }
-                    SwitchboardInput::Prekey(notifications) => {
+                    SwitchboardInput::Domain(notifications) => {
                         let to_send = {
-                            let listeners = self.prekey_listeners.lock().expect(ERROR_MUTEX);
+                            let listeners = self.domain_listeners.lock().expect(ERROR_MUTEX);
                             let mut to_send = Vec::new();
                             for listener in listeners.iter() {
                                 to_send.push((
@@ -910,58 +1066,7 @@ impl ChangeListenerManager {
                             }
                         }
                         if !failed_listener_ids.is_empty() {
-                            let mut listeners = self.prekey_listeners.lock().expect(ERROR_MUTEX);
-                            listeners
-                                .retain(|listener| !failed_listener_ids.contains(&listener.id));
-                        }
-                    }
-                    SwitchboardInput::Cgka(notifications) => {
-                        let to_send = {
-                            let listeners = self.cgka_listeners.lock().expect(ERROR_MUTEX);
-                            let mut to_send = Vec::new();
-                            for listener in listeners.iter() {
-                                to_send.push((
-                                    listener.id,
-                                    listener.change_tx.clone(),
-                                    notifications.clone(),
-                                ));
-                            }
-                            to_send
-                        };
-                        let mut failed_listener_ids = Vec::new();
-                        for (listener_id, change_tx, notifications) in to_send {
-                            if change_tx.send(notifications).is_err() {
-                                failed_listener_ids.push(listener_id);
-                            }
-                        }
-                        if !failed_listener_ids.is_empty() {
-                            let mut listeners = self.cgka_listeners.lock().expect(ERROR_MUTEX);
-                            listeners
-                                .retain(|listener| !failed_listener_ids.contains(&listener.id));
-                        }
-                    }
-                    SwitchboardInput::Membership(notifications) => {
-                        let to_send = {
-                            let listeners = self.membership_listeners.lock().expect(ERROR_MUTEX);
-                            let mut to_send = Vec::new();
-                            for listener in listeners.iter() {
-                                to_send.push((
-                                    listener.id,
-                                    listener.change_tx.clone(),
-                                    notifications.clone(),
-                                ));
-                            }
-                            to_send
-                        };
-                        let mut failed_listener_ids = Vec::new();
-                        for (listener_id, change_tx, notifications) in to_send {
-                            if change_tx.send(notifications).is_err() {
-                                failed_listener_ids.push(listener_id);
-                            }
-                        }
-                        if !failed_listener_ids.is_empty() {
-                            let mut listeners =
-                                self.membership_listeners.lock().expect(ERROR_MUTEX);
+                            let mut listeners = self.domain_listeners.lock().expect(ERROR_MUTEX);
                             listeners
                                 .retain(|listener| !failed_listener_ids.contains(&listener.id));
                         }
@@ -974,6 +1079,10 @@ impl ChangeListenerManager {
         tokio::spawn(async { fut.await.unwrap() })
     }
 }
+
+// ═══════════════════════════════════════════════════════════════════════════
+// Filter matching helpers
+// ═══════════════════════════════════════════════════════════════════════════
 
 fn notification_matches_filter(
     notification: &BigRepoChangeNotification,
@@ -1028,126 +1137,6 @@ fn origin_matches_filter(origin: &BigRepoChangeOrigin, filter: OriginFilter) -> 
     }
 }
 
-pub struct ChangeListenerRegistration {
-    manager: std::sync::Weak<ChangeListenerManager>,
-    id: Uuid,
-}
-
-impl Drop for ChangeListenerRegistration {
-    fn drop(&mut self) {
-        if let Some(manager) = self.manager.upgrade() {
-            let id = self.id;
-            manager
-                .listeners
-                .lock()
-                .expect(ERROR_MUTEX)
-                .retain(|listener| listener.id != id);
-        }
-    }
-}
-
-struct HeadListener {
-    id: Uuid,
-    filter: HeadFilter,
-    change_tx: mpsc::UnboundedSender<Vec<BigRepoHeadNotification>>,
-}
-
-struct PendingHeadListener {
-    id: Uuid,
-    filter: PendingHeadFilter,
-    change_tx: mpsc::UnboundedSender<Vec<BigRepoPendingHeadNotification>>,
-}
-
-pub struct HeadListenerRegistration {
-    manager: std::sync::Weak<ChangeListenerManager>,
-    id: Uuid,
-}
-
-impl Drop for HeadListenerRegistration {
-    fn drop(&mut self) {
-        if let Some(manager) = self.manager.upgrade() {
-            let id = self.id;
-            manager
-                .head_listeners
-                .lock()
-                .expect(ERROR_MUTEX)
-                .retain(|listener| listener.id != id);
-        }
-    }
-}
-
-pub struct PendingHeadListenerRegistration {
-    manager: std::sync::Weak<ChangeListenerManager>,
-    id: Uuid,
-}
-
-impl Drop for PendingHeadListenerRegistration {
-    fn drop(&mut self) {
-        if let Some(manager) = self.manager.upgrade() {
-            let id = self.id;
-            manager
-                .pending_head_listeners
-                .lock()
-                .expect(ERROR_MUTEX)
-                .retain(|listener| listener.id != id);
-        }
-    }
-}
-
-pub struct PrekeyListenerRegistration {
-    manager: std::sync::Weak<ChangeListenerManager>,
-    id: Uuid,
-}
-
-impl Drop for PrekeyListenerRegistration {
-    fn drop(&mut self) {
-        if let Some(manager) = self.manager.upgrade() {
-            let id = self.id;
-            manager
-                .prekey_listeners
-                .lock()
-                .expect(ERROR_MUTEX)
-                .retain(|listener| listener.id != id);
-        }
-    }
-}
-
-pub struct CgkaListenerRegistration {
-    manager: std::sync::Weak<ChangeListenerManager>,
-    id: Uuid,
-}
-
-impl Drop for CgkaListenerRegistration {
-    fn drop(&mut self) {
-        if let Some(manager) = self.manager.upgrade() {
-            let id = self.id;
-            manager
-                .cgka_listeners
-                .lock()
-                .expect(ERROR_MUTEX)
-                .retain(|listener| listener.id != id);
-        }
-    }
-}
-
-pub struct MembershipListenerRegistration {
-    manager: std::sync::Weak<ChangeListenerManager>,
-    id: Uuid,
-}
-
-impl Drop for MembershipListenerRegistration {
-    fn drop(&mut self) {
-        if let Some(manager) = self.manager.upgrade() {
-            let id = self.id;
-            manager
-                .membership_listeners
-                .lock()
-                .expect(ERROR_MUTEX)
-                .retain(|listener| listener.id != id);
-        }
-    }
-}
-
 fn local_notification_matches_filter(
     notification: &BigRepoLocalNotification,
     filter: &LocalFilter,
@@ -1164,24 +1153,6 @@ fn local_notification_matches_filter(
         .as_ref()
         .map(|target| target.doc_id != *doc_id)
         .unwrap_or_default()
-}
-
-pub struct LocalListenerRegistration {
-    manager: std::sync::Weak<ChangeListenerManager>,
-    id: Uuid,
-}
-
-impl Drop for LocalListenerRegistration {
-    fn drop(&mut self) {
-        if let Some(manager) = self.manager.upgrade() {
-            let id = self.id;
-            manager
-                .local_listeners
-                .lock()
-                .expect(ERROR_MUTEX)
-                .retain(|listener| listener.id != id);
-        }
-    }
 }
 
 fn head_notification_matches_filter(
@@ -1212,29 +1183,9 @@ fn pending_head_notification_matches_filter(
         .unwrap_or_default()
 }
 
-fn prekey_notification_matches_filter(
-    _notification: &BigRepoPrekeyNotification,
-    _filter: &PrekeyFilter,
-) -> bool {
-    // No filter fields yet — always deliver.
-    true
-}
-
-fn cgka_notification_matches_filter(
-    _notification: &BigRepoCgkaNotification,
-    _filter: &CgkaFilter,
-) -> bool {
-    // No filter fields yet — always deliver.
-    true
-}
-
-fn membership_notification_matches_filter(
-    _notification: &BigRepoMembershipNotification,
-    _filter: &MembershipFilter,
-) -> bool {
-    // No filter fields yet — always deliver.
-    true
-}
+// ═══════════════════════════════════════════════════════════════════════════
+// Path matching utilities (unchanged)
+// ═══════════════════════════════════════════════════════════════════════════
 
 pub fn path_prefix_matches(
     listener_path: &[Prop<'_>],
@@ -1530,6 +1481,77 @@ mod tests {
 
         drop(remote_registration);
         drop(bootstrap_registration);
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn domain_listener_receives_domain_notifications() -> Res<()> {
+        let (manager, _stop) = ChangeListenerManager::boot();
+        let (_registration, mut rx) = manager.subscribe_domain_listener(DomainFilter).await?;
+
+        let doc_id = DocumentId::random();
+        let group_id = GroupId::new([1u8; 32]);
+        let member_id = PeerId::new([2u8; 32]);
+
+        manager.notify_document_added_to_group(doc_id, group_id)?;
+        let batch1 = recv_batch(&mut rx).await;
+        assert!(matches!(
+            batch1.as_slice(),
+            [BigRepoDomainNotification::DocumentAddedToGroup {
+                doc_id: d, group_id: g, ..
+            }] if *d == doc_id && *g == group_id
+        ));
+
+        manager.notify_member_added_to_group(group_id, member_id, BigRepoAccess::Read)?;
+        let batch2 = recv_batch(&mut rx).await;
+        assert!(matches!(
+            batch2.as_slice(),
+            [BigRepoDomainNotification::MemberAddedToGroup {
+                group_id: g, member_id: m, access: a, ..
+            }] if *g == group_id && *m == member_id && *a == BigRepoAccess::Read
+        ));
+
+        manager.notify_member_removed_from_group(group_id, member_id)?;
+        let batch3 = recv_batch(&mut rx).await;
+        assert!(matches!(
+            batch3.as_slice(),
+            [BigRepoDomainNotification::MemberRemovedFromGroup {
+                group_id: g, member_id: m, ..
+            }] if *g == group_id && *m == member_id
+        ));
+
+        manager.notify_document_access_changed(doc_id, member_id, BigRepoAccess::Relay)?;
+        let batch4 = recv_batch(&mut rx).await;
+        assert!(matches!(
+            batch4.as_slice(),
+            [BigRepoDomainNotification::DocumentAccessChanged {
+                doc_id: d, member_id: m, access: a, ..
+            }] if *d == doc_id && *m == member_id && *a == BigRepoAccess::Relay
+        ));
+
+        manager.notify_document_key_rotated(doc_id)?;
+        let batch5 = recv_batch(&mut rx).await;
+        assert!(matches!(
+            batch5.as_slice(),
+            [BigRepoDomainNotification::DocumentKeyRotated {
+                doc_id: d, ..
+            }] if *d == doc_id
+        ));
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn domain_listener_drop_unregisters() -> Res<()> {
+        let (manager, _stop) = ChangeListenerManager::boot();
+        let (registration, mut rx) = manager.subscribe_domain_listener(DomainFilter).await?;
+
+        drop(registration);
+        manager.notify_document_key_rotated(DocumentId::random())?;
+        let closed = timeout(Duration::from_millis(250), rx.recv())
+            .await
+            .expect("expected receiver to resolve")
+            .is_none();
+        assert!(closed, "domain listener should be removed on drop");
         Ok(())
     }
 }

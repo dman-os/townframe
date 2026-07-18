@@ -5,8 +5,7 @@ use crate::interlude::*;
 use crate::{
     encrypted_blob::{decode_encrypted_blob, encode_encrypted_blob},
     ephemeral::{
-        BigEphemeral, BigEphemeralBackend, BigEphemeralFilter, BigEphemeralSwitchboard,
-        BigEphemeralTopic, BigRepoEphemeralBackend,
+        BigEphemeral, BigEphemeralBackend, BigEphemeralSwitchboard, BigRepoEphemeralBackend,
     },
     handler::{
         BigRepoComposedHandler, BigRepoEphemeralHandler, BigRepoKeyhiveHandler,
@@ -884,37 +883,6 @@ where
         (keyhive_protocol, keyhive_handler)
     };
 
-    let mut keyhive_change_subscription = ephemeral
-        .subscribe(BigEphemeralFilter::new(BigEphemeralTopic::keyhive_changed()))
-        .await?;
-    runtime_tasks
-        .spawn({
-            let stop = runtime_stop.child_token();
-            let cmd_tx = cmd_tx.clone();
-            async move {
-                loop {
-                    let Some(event) = stop
-                        .run_until_cancelled(keyhive_change_subscription.recv())
-                        .await
-                    else {
-                        break;
-                    };
-                    let Some(event) = event else {
-                        break;
-                    };
-                    if cmd_tx
-                        .send(RuntimeCmd::SyncKeyhiveWithPeerInternal {
-                            peer_id: PeerId::new(*event.sender.as_bytes()),
-                        })
-                        .is_err()
-                    {
-                        break;
-                    }
-                }
-            }
-            .instrument(tracing::info_span!("BigRepo keyhive change listener"))
-        })
-        .expect(ERROR_TOKIO);
     let composed_handler = Arc::new(BigRepoComposedHandler::new(
         sync_handler,
         Some(Arc::clone(&ephemeral_handler)),
@@ -947,7 +915,6 @@ where
         keyhive_storage: keyhive_storage.clone(),
         subduction: subduction_handle,
         ephemeral_backend: Arc::clone(&ephemeral_backend),
-        ephemeral: ephemeral.clone(),
         sedimentrees: Arc::clone(&sedimentrees),
         storage_for_reads,
         big_sync_store: big_sync_store_for_worker,
@@ -1097,7 +1064,6 @@ where
     keyhive_storage: BigRepoKeyhiveStorage,
     subduction: Arc<BigRepoSubduction<S>>,
     ephemeral_backend: Arc<dyn BigEphemeralBackend>,
-    ephemeral: BigEphemeral,
     sedimentrees: SubductionSedimentrees,
     storage_for_reads: S,
     big_sync_store: SharedPartitionStore,
@@ -1289,20 +1255,12 @@ where
             }
             RuntimeCmd::NoteLocalKeyhiveChanged { resp } => {
                 let keyhive_protocol = Arc::clone(&self.keyhive_protocol);
-                let ephemeral = self.ephemeral.clone();
                 self.spawn_background(async move {
-                    let out = async {
-                        keyhive_protocol
-                            .note_local_keyhive_changed()
-                            .await
-                            .wrap_err("keyhive local-change refresh failed")?;
-                        ephemeral
-                            .publish(BigEphemeralTopic::keyhive_changed(), Vec::new())
-                            .await
-                            .wrap_err("keyhive change notification publish failed")?;
-                        Res::Ok(())
-                    }
-                    .await;
+                    let out = keyhive_protocol
+                        .note_local_keyhive_changed()
+                        .await
+                        .map(|_| ())
+                        .wrap_err("keyhive local-change refresh failed");
                     if resp.send(out).is_err() {
                         warn!("failed sending keyhive local-change response");
                     }
@@ -1382,29 +1340,48 @@ where
                 self.pending_materialization.remove(&doc_id);
             }
             // --- Keyhive event listener handlers ---
-            RuntimeEvt::PrekeyExpanded { new_prekey } => {
-                self.change_manager
-                    .notify_prekeys_expanded(new_prekey)
-                    .expect(ERROR_ACTOR);
-            }
-            RuntimeEvt::PrekeyRotated { rotate_key } => {
-                self.change_manager
-                    .notify_prekey_rotated(rotate_key)
-                    .expect(ERROR_ACTOR);
+            // Translate raw Keyhive events into domain-level notifications.
+            RuntimeEvt::PrekeyExpanded { .. } | RuntimeEvt::PrekeyRotated { .. } => {
+                // Individual prekey operations are internal key management
+                // and do not correspond to a BigRepo domain event.
             }
             RuntimeEvt::CgkaOp { data } => {
-                self.change_manager.notify_cgka_op(data).expect(ERROR_ACTOR);
+                // Every CGKA op is a document key rotation.
+                let doc_id = DocumentId::new(*data.payload().doc_id().as_bytes());
+                self.change_manager
+                    .notify_document_key_rotated(doc_id)
+                    .expect(ERROR_ACTOR);
             }
             RuntimeEvt::DelegationReceived { target, data } => {
-                self.change_manager
-                    .notify_delegation_received(data)
-                    .expect(ERROR_ACTOR);
+                let delegate_id: [u8; 32] = data.payload().delegate().id().to_bytes();
+                let access: keyhive_core::access::Access = data.payload().can();
+                let member_is_document = matches!(
+                    data.payload().delegate(),
+                    keyhive_core::principal::agent::Agent::Document(..)
+                );
+                self.emit_membership_domain_event(
+                    target,
+                    PeerId::new(delegate_id),
+                    access,
+                    false,
+                    member_is_document,
+                );
                 self.update_doc_access(target);
             }
             RuntimeEvt::RevocationReceived { target, data } => {
-                self.change_manager
-                    .notify_revocation_received(data)
-                    .expect(ERROR_ACTOR);
+                let revoked = data.payload().revoked_id();
+                let revoked_bytes: [u8; 32] = revoked.as_bytes();
+                let member_is_document = matches!(
+                    data.payload().revoked().payload().delegate(),
+                    keyhive_core::principal::agent::Agent::Document(..)
+                );
+                self.emit_membership_domain_event(
+                    target,
+                    PeerId::new(revoked_bytes),
+                    keyhive_core::access::Access::Relay,
+                    true,
+                    member_is_document,
+                );
                 self.update_doc_access(target);
             }
         }
@@ -1471,6 +1448,78 @@ where
                             warn!(%doc_id, ?group_part_id, error=%err,
                                   "failed adding doc to group partition");
                         });
+                }
+            }
+        });
+    }
+
+    /// Emit the correct domain notification for a delegation, classifying
+    /// the target as document or group via background keyhive query.
+    fn emit_membership_domain_event(
+        &self,
+        target: keyhive_core::principal::identifier::Identifier,
+        member_id: PeerId,
+        access: keyhive_core::access::Access,
+        removed: bool,
+        member_is_document: bool,
+    ) {
+        let keyhive = self.keyhive.clone();
+        use crate::changes::BigRepoAccess;
+        use keyhive_core::principal::document::id::DocumentId as KhDocId;
+        use keyhive_core::principal::group::id::GroupId as KhGroupId;
+        let change_manager = Arc::clone(&self.change_manager);
+        self.spawn_background(async move {
+            let kh = keyhive.clone_keyhive();
+            if kh.get_document(KhDocId::from(target)).await.is_some() {
+                if removed {
+                    let _ = change_manager.notify_document_access_revoked(
+                        DocumentId::new(target.to_bytes()),
+                        member_id,
+                    );
+                } else {
+                    let _ = change_manager.notify_document_access_changed(
+                        DocumentId::new(target.to_bytes()),
+                        member_id,
+                        BigRepoAccess::from(access),
+                    );
+                }
+            } else if kh.get_group(KhGroupId::from(target)).await.is_some() {
+                let group_id = crate::changes::GroupId::new(target.to_bytes());
+                if member_is_document {
+                    if removed {
+                        let _ = change_manager.notify_document_removed_from_group(
+                            DocumentId::new(member_id.0.into_bytes()),
+                            group_id,
+                        );
+                    } else {
+                        let _ = change_manager.notify_document_added_to_group(
+                            DocumentId::new(member_id.0.into_bytes()),
+                            group_id,
+                        );
+                    }
+                } else if removed {
+                    let _ = change_manager.notify_member_removed_from_group(group_id, member_id);
+                } else {
+                    let _ = change_manager.notify_member_added_to_group(
+                        group_id,
+                        member_id,
+                        BigRepoAccess::from(access),
+                    );
+                }
+            } else {
+                // Unknown target — preserve a high-level access change rather
+                // than leaking or fabricating a Keyhive payload.
+                if removed {
+                    let _ = change_manager.notify_document_access_revoked(
+                        DocumentId::new(target.to_bytes()),
+                        member_id,
+                    );
+                } else {
+                    let _ = change_manager.notify_document_access_changed(
+                        DocumentId::new(target.to_bytes()),
+                        member_id,
+                        BigRepoAccess::from(access),
+                    );
                 }
             }
         });

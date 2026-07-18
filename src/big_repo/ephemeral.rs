@@ -33,11 +33,6 @@ impl BigEphemeralTopic {
     }
 
     #[must_use]
-    pub const fn keyhive_changed() -> Self {
-        Self(*b"\0\0\0\0townframe.bigrepo.keyhive.v1")
-    }
-
-    #[must_use]
     pub const fn as_bytes(&self) -> &[u8; 32] {
         &self.0
     }

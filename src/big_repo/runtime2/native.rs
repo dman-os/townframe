@@ -826,6 +826,21 @@ where
         })
     }
 
+    fn is_document_membership_target(
+        &self,
+        target: keyhive_core::principal::identifier::Identifier,
+    ) -> <Sendable as FutureForm>::Future<'_, eyre::Result<bool>> {
+        Sendable::from_future(async move {
+            let document_id = keyhive_core::principal::document::id::DocumentId::from(target);
+            Ok(self
+                .keyhive
+                .clone_keyhive()
+                .get_document(document_id)
+                .await
+                .is_some())
+        })
+    }
+
     // ── big-sync membership bridge ───────────────────────────────────────
     fn refresh_big_sync_doc_access(
         &self,

@@ -649,9 +649,12 @@ impl<F: FutureForm> DocWorker2<F> {
             self.io.persist_cgka_update_op(op.clone()).await?;
         }
         if keyhive_changed {
-            // This is synchronous since the handle's cmd channel routes to the
-            // same machine loop. The hub will pick up the note and trigger
-            // keyhive sync with peers.
+            // Refresh the protocol cache before acknowledging the document
+            // write. Otherwise a caller can immediately initiate Keyhive sync
+            // against the pre-commit cache and publish an encrypted commit
+            // whose new epoch is not yet visible to the peer.
+            self.io.note_local_keyhive_changed().await?;
+
             self.evt_tx
                 .send(crate::runtime2::Runtime2Evt::CgkaOp {
                     data: Arc::new(cgka_ops.into_iter().next().unwrap()),
@@ -1061,11 +1064,23 @@ impl<F: FutureForm> DocWorker2<F> {
         // heads from the sedimentree. The old code early-returned here without
         // refreshing, letting recorded heads go stale after a crash.
         if received_refs.is_empty() {
-            // Refresh and re-materialize even when the transport transferred
-            // no new blobs: the storage frontier may have advanced while the
-            // worker's in-memory Automerge document remained live.
+            // Refresh the recorded frontier even when this transport session
+            // transferred no blobs. Do not reload over a live bundle, though:
+            // an empty inbound session can race a local commit whose encrypted
+            // storage write has not become visible to the snapshot loader yet.
+            // Reloading then would replace the live Automerge document with an
+            // older snapshot and lose the local materialized frontier.
             self.refresh_heads_from_sedimentree(peer_id).await?;
-            return self.retry_materialization().await.map(|_| ());
+            let needs_reload = match &self.state {
+                DocState::Live(bundle) => bundle.upgrade().is_none(),
+                DocState::Transient(_) | DocState::Unloaded | DocState::PendingMaterialization => {
+                    true
+                }
+            };
+            if needs_reload {
+                return self.retry_materialization().await.map(|_| ());
+            }
+            return Ok(());
         }
 
         // ── Step 1: Hydrate the tree ────────────────────────────────────
@@ -1985,12 +2000,18 @@ impl<F: FutureForm> DocWorkerLoop<F> for F {
             )
             .await;
 
-            runtime_evt_tx
-                .send(crate::runtime2::Runtime2Evt::DocWorkerStopped { doc_id })
-                .await
-                .map_err(|_| ferr!("hub event channel closed"))?;
+            if matches!(&result, Ok(Ok(()))) {
+                runtime_evt_tx
+                    .send(crate::runtime2::Runtime2Evt::DocWorkerStopped { doc_id })
+                    .await
+                    .map_err(|_| ferr!("hub event channel closed"))?;
+            }
 
             match result {
+                Ok(Err(error)) if runtime_evt_tx.is_closed() => {
+                    tracing::debug!(%doc_id, ?error, "doc worker stopped after runtime shutdown");
+                    Ok(())
+                }
                 Ok(ok) => ok,
                 Err(_) => Ok(()),
             }
