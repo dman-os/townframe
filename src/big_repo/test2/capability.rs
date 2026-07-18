@@ -1175,6 +1175,16 @@ async fn tier6_regrant_after_revoke_new_epoch() -> crate::Res<()> {
         .await?;
     pair.left_conn().sync_keyhive_with_peer(None).await?;
     pair.right_conn().sync_keyhive_with_peer(None).await?;
+    // Keyhive completion and the incremental BigSync access-index refresh are
+    // separate runtime activities; wait for the latter before syncing content.
+    pair.left()
+        .repo
+        .wait_for_quiescence(Some(std::time::Duration::from_secs(10)))
+        .await?;
+    pair.right()
+        .repo
+        .wait_for_quiescence(Some(std::time::Duration::from_secs(10)))
+        .await?;
 
     let editor_regranted =
         fixtures::sync_doc_expect_ready(pair.right_conn(), &pair.right().repo, doc_id).await?;
@@ -1199,10 +1209,14 @@ async fn tier6_regrant_after_revoke_new_epoch() -> crate::Res<()> {
     pair.left_conn().sync_keyhive_with_peer(None).await?;
     let owner_epoch2 =
         fixtures::sync_doc_expect_ready(pair.left_conn(), &pair.left().repo, doc_id).await?;
+    let owner_state = pair.left().repo.doc_head_state(doc_id).await?;
+    let editor_state = pair.right().repo.doc_head_state(doc_id).await?;
     assert_eq!(
         read_text(&owner_epoch2, "phase").await.as_deref(),
         Some("epoch-2"),
-        "owner must see epoch-2 write from regranted editor"
+        "owner must see epoch-2 write from regranted editor; owner heads={:?}, editor heads={:?}",
+        owner_state.sedimentree_heads,
+        editor_state.sedimentree_heads,
     );
     // Pre-revoke note is still visible.
     assert_eq!(

@@ -24,8 +24,6 @@
 //! layer that owns its own sync and watches subduction for new content.
 
 use crate::interlude::*;
-use crate::DocumentId;
-use big_sync_core::PeerId;
 use future_form::FutureForm;
 
 // ─── Determinism levers: Timer / Clock ─────────────────────────────────────
@@ -286,6 +284,12 @@ pub trait RuntimeIo<F: FutureForm>: Send + Sync {
         &self,
         target: keyhive_core::principal::identifier::Identifier,
     ) -> F::Future<'_, eyre::Result<()>>;
+
+    /// Classify a membership target without exposing Keyhive types to callers.
+    fn is_document_membership_target(
+        &self,
+        target: keyhive_core::principal::identifier::Identifier,
+    ) -> F::Future<'_, eyre::Result<bool>>;
 
     /// Initiate a keyhive sync round with a peer.
     fn sync_keyhive_with_peer(

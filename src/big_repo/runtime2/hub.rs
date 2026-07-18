@@ -561,6 +561,16 @@ trait HubBackgroundFuture<F: FutureForm> {
         target: keyhive_core::principal::identifier::Identifier,
     ) -> F::Future<'static, eyre::Result<()>>;
 
+    fn emit_membership_change(
+        runtime_io: Arc<dyn crate::runtime2::RuntimeIo<F>>,
+        change_manager: Arc<crate::changes::ChangeListenerManager>,
+        target: keyhive_core::principal::identifier::Identifier,
+        member_id: PeerId,
+        access: crate::changes::BigRepoAccess,
+        removed: bool,
+        member_is_document: bool,
+    ) -> F::Future<'static, eyre::Result<()>>;
+
     fn release_lease(
         lease_rx: futures::channel::oneshot::Receiver<()>,
         cmd_tx: async_channel::Sender<Runtime2Cmd>,
@@ -686,6 +696,70 @@ impl<F: FutureForm> HubBackgroundFuture<F> for F {
                 .refresh_big_sync_doc_access(target)
                 .await
                 .wrap_err("big-sync document access refresh failed")
+        })
+    }
+
+    fn emit_membership_change(
+        runtime_io: Arc<dyn crate::runtime2::RuntimeIo<F>>,
+        change_manager: Arc<crate::changes::ChangeListenerManager>,
+        target: keyhive_core::principal::identifier::Identifier,
+        member_id: PeerId,
+        access: crate::changes::BigRepoAccess,
+        removed: bool,
+        member_is_document: bool,
+    ) -> F::Future<'static, eyre::Result<()>> {
+        F::from_future(async move {
+            if runtime_io.is_document_membership_target(target).await? {
+                if removed {
+                    change_manager
+                        .notify_document_access_revoked(
+                            DocumentId::new(target.to_bytes()),
+                            member_id,
+                        )
+                        .wrap_err("document access revocation notification failed")?;
+                } else {
+                    change_manager
+                        .notify_document_access_changed(
+                            DocumentId::new(target.to_bytes()),
+                            member_id,
+                            access,
+                        )
+                        .wrap_err("document access notification failed")?;
+                }
+            } else if member_is_document {
+                let group_id = crate::changes::GroupId::new(target.to_bytes());
+                if removed {
+                    change_manager
+                        .notify_document_removed_from_group(
+                            DocumentId::new(member_id.0.into_bytes()),
+                            group_id,
+                        )
+                        .wrap_err("document group removal notification failed")?;
+                } else {
+                    change_manager
+                        .notify_document_added_to_group(
+                            DocumentId::new(member_id.0.into_bytes()),
+                            group_id,
+                        )
+                        .wrap_err("document group addition notification failed")?;
+                }
+            } else if removed {
+                change_manager
+                    .notify_member_removed_from_group(
+                        crate::changes::GroupId::new(target.to_bytes()),
+                        member_id,
+                    )
+                    .wrap_err("group member removal notification failed")?;
+            } else {
+                change_manager
+                    .notify_member_added_to_group(
+                        crate::changes::GroupId::new(target.to_bytes()),
+                        member_id,
+                        access,
+                    )
+                    .wrap_err("group member addition notification failed")?;
+            }
+            Ok(())
         })
     }
 
@@ -1040,35 +1114,54 @@ where
             Runtime2Evt::DocWorkerMaterializationReady { doc_id } => {
                 self.pending_materialization.remove(&doc_id);
             }
-            // --- Keyhive event listener handlers (parity with old) ---
-            Runtime2Evt::PrekeyExpanded { new_prekey } => {
-                self.change_manager
-                    .notify_prekeys_expanded(new_prekey)
-                    .expect("task was found dead");
-            }
-            Runtime2Evt::PrekeyRotated { rotate_key } => {
-                self.change_manager
-                    .notify_prekey_rotated(rotate_key)
-                    .expect("task was found dead");
+            // --- Keyhive event listener handlers ---
+            // Translate raw Keyhive events into domain-level notifications.
+            Runtime2Evt::PrekeyExpanded { .. } | Runtime2Evt::PrekeyRotated { .. } => {
+                // Individual prekey operations are internal key management
+                // and do not correspond to a BigRepo domain event.
             }
             Runtime2Evt::CgkaOp { data } => {
+                // Every CGKA op is a document key rotation.
+                let doc_id = crate::DocumentId::new(*data.payload().doc_id().as_bytes());
                 self.change_manager
-                    .notify_cgka_op(data)
+                    .notify_document_key_rotated(doc_id)
                     .expect("task was found dead");
             }
             Runtime2Evt::DelegationReceived { target, data } => {
-                self.change_manager
-                    .notify_delegation_received(data)
-                    .expect("task was found dead");
+                let member_id = PeerId::new(data.payload().delegate().id().to_bytes());
+                let member_is_document = matches!(
+                    data.payload().delegate(),
+                    keyhive_core::principal::agent::Agent::Document(..)
+                );
+                self.spawn_background(F::emit_membership_change(
+                    Arc::clone(&self.runtime_io),
+                    Arc::clone(&self.change_manager),
+                    target,
+                    member_id,
+                    crate::changes::BigRepoAccess::from(data.payload().can()),
+                    false,
+                    member_is_document,
+                ))?;
                 self.spawn_background(F::refresh_big_sync_doc_access(
                     Arc::clone(&self.runtime_io),
                     target,
                 ))?;
             }
             Runtime2Evt::RevocationReceived { target, data } => {
-                self.change_manager
-                    .notify_revocation_received(data)
-                    .expect("task was found dead");
+                let member_id = PeerId::new(data.payload().revoked_id().as_bytes());
+                let member_is_document = matches!(
+                    data.payload().revoked().payload().delegate(),
+                    keyhive_core::principal::agent::Agent::Document(..)
+                );
+                self.spawn_background(F::emit_membership_change(
+                    Arc::clone(&self.runtime_io),
+                    Arc::clone(&self.change_manager),
+                    target,
+                    member_id,
+                    crate::changes::BigRepoAccess::Relay,
+                    true,
+                    member_is_document,
+                ))?;
                 self.spawn_background(F::refresh_big_sync_doc_access(
                     Arc::clone(&self.runtime_io),
                     target,

@@ -333,17 +333,23 @@ async fn tier7_local_mutation_emits_doc_changed() -> crate::Res<()> {
         })
         .await??;
 
-    let batch = recv_one(&mut rx).await;
-    let has_local = batch.iter().any(|n| {
-        matches!(
-            n,
-            BigRepoChangeNotification::DocChanged {
-                origin: BigRepoChangeOrigin::Local,
-                ..
-            }
-        )
-    });
-    assert!(has_local, "local mutation must fire with Local origin");
+    loop {
+        let batch = recv_one(&mut rx).await;
+        if batch.iter().any(|n| {
+            matches!(
+                n,
+                BigRepoChangeNotification::DocChanged {
+                    origin: BigRepoChangeOrigin::Local,
+                    ..
+                }
+            )
+        }) {
+            break;
+        }
+        // A create notification queued before subscription may be delivered
+        // after registration when the switchboard is busy. It is not the
+        // mutation under test; keep receiving until that mutation arrives.
+    }
 
     drop(owner_doc);
     Ok(())

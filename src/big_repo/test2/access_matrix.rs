@@ -562,6 +562,14 @@ async fn run_offline_case(seed: u8, before_content: bool, access: Access) -> cra
             .await??;
         pair.right_conn().sync_keyhive_with_peer(None).await?;
         pair.left_conn().sync_keyhive_with_peer(None).await?;
+        pair.left()
+            .repo
+            .wait_for_quiescence(Some(std::time::Duration::from_secs(10)))
+            .await?;
+        pair.right()
+            .repo
+            .wait_for_quiescence(Some(std::time::Duration::from_secs(10)))
+            .await?;
         drop(owner_doc);
         let owner_doc =
             fixtures::sync_doc_expect_ready(pair.left_conn(), &pair.left().repo, doc_id).await?;
@@ -732,16 +740,17 @@ async fn run_group_case(
             .await??;
         pair.right_conn().sync_keyhive_with_peer(None).await?;
         pair.left_conn().sync_keyhive_with_peer(None).await?;
-        drop(owner_doc);
-        let owner_doc =
-            fixtures::sync_doc_expect_ready(pair.left_conn(), &pair.left().repo, doc_id).await?;
-        pair.right_conn()
-            .sync_doc_with_peer(doc_id, Some(std::time::Duration::from_secs(10)))
-            .await?;
         pair.left()
             .repo
             .wait_for_quiescence(Some(std::time::Duration::from_secs(10)))
             .await?;
+        pair.right()
+            .repo
+            .wait_for_quiescence(Some(std::time::Duration::from_secs(10)))
+            .await?;
+        drop(owner_doc);
+        let owner_doc =
+            fixtures::sync_doc_expect_ready(pair.left_conn(), &pair.left().repo, doc_id).await?;
         assert_eq!(
             read_optional_text(&owner_doc, "member_note")
                 .await
@@ -962,16 +971,17 @@ async fn run_document_as_member_case(
             .await??;
         pair.right_conn().sync_keyhive_with_peer(None).await?;
         pair.left_conn().sync_keyhive_with_peer(None).await?;
-        drop(target_doc);
-        let target_doc =
-            fixtures::sync_doc_expect_ready(pair.left_conn(), &pair.left().repo, target_id).await?;
-        pair.right_conn()
-            .sync_doc_with_peer(target_id, Some(std::time::Duration::from_secs(10)))
-            .await?;
         pair.left()
             .repo
             .wait_for_quiescence(Some(std::time::Duration::from_secs(10)))
             .await?;
+        pair.right()
+            .repo
+            .wait_for_quiescence(Some(std::time::Duration::from_secs(10)))
+            .await?;
+        drop(target_doc);
+        let target_doc =
+            fixtures::sync_doc_expect_ready(pair.left_conn(), &pair.left().repo, target_id).await?;
         assert_eq!(
             read_optional_text(&target_doc, "member_note")
                 .await
