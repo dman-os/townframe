@@ -4,6 +4,8 @@ use big_sync_core::PeerId;
 use iroh::endpoint::Connection;
 use iroh::protocol::{AcceptError, ProtocolHandler};
 use irpc::{channel, rpc_requests, WithChannels};
+use std::{collections::HashMap, sync::RwLock};
+
 use tokio::sync::mpsc;
 use tokio_util::sync::CancellationToken;
 
@@ -37,9 +39,40 @@ pub enum RepoSyncRpc {
     SubscribeKeyhiveChanges(SubscribeKeyhiveChangesRequest),
 }
 
+#[derive(Debug, Default)]
+struct RpcPeerMap {
+    by_endpoint: HashMap<iroh::EndpointId, PeerId>,
+    by_peer: HashMap<PeerId, iroh::EndpointId>,
+}
+
+impl RpcPeerMap {
+    fn register(&mut self, endpoint_id: iroh::EndpointId, peer_id: PeerId) {
+        if let Some(old_peer_id) = self.by_endpoint.insert(endpoint_id, peer_id) {
+            self.by_peer.remove(&old_peer_id);
+        }
+        if let Some(old_endpoint_id) = self.by_peer.insert(peer_id, endpoint_id) {
+            self.by_endpoint.remove(&old_endpoint_id);
+        }
+    }
+
+    fn unregister(&mut self, peer_id: PeerId) {
+        if let Some(endpoint_id) = self.by_peer.remove(&peer_id) {
+            self.by_endpoint.remove(&endpoint_id);
+        }
+    }
+
+    fn lookup(&self, endpoint_id: iroh::EndpointId) -> PeerId {
+        self.by_endpoint
+            .get(&endpoint_id)
+            .copied()
+            .unwrap_or_else(|| PeerId::new(*endpoint_id.as_bytes()))
+    }
+}
+
 #[derive(Clone)]
 pub struct BigRepoRpcHandle {
     rpc_tx: mpsc::Sender<(PeerId, RepoSyncRpcMessage)>,
+    peer_map: Arc<RwLock<RpcPeerMap>>,
 }
 
 impl BigRepoRpcHandle {
@@ -47,9 +80,29 @@ impl BigRepoRpcHandle {
         self.rpc_tx.clone()
     }
 
+    /// Associate an authenticated Iroh endpoint with its BigRepo identity.
+    ///
+    /// The mapping is only an identity seam for RPC consumers; notification
+    /// delivery itself does not perform authorization.
+    pub fn register_peer(&self, endpoint_id: iroh::EndpointId, peer_id: PeerId) {
+        self.peer_map
+            .write()
+            .expect(ERROR_MUTEX)
+            .register(endpoint_id, peer_id);
+    }
+
+    /// Remove the identity mapping for a disconnected BigRepo peer.
+    pub fn unregister_peer(&self, peer_id: PeerId) {
+        self.peer_map
+            .write()
+            .expect(ERROR_MUTEX)
+            .unregister(peer_id);
+    }
+
     pub fn protocol_handler(&self) -> BigRepoRpcProtocolHandler {
         BigRepoRpcProtocolHandler {
             tx: self.rpc_tx.clone(),
+            peer_map: Arc::clone(&self.peer_map),
         }
     }
 }
@@ -57,11 +110,13 @@ impl BigRepoRpcHandle {
 #[derive(Clone, Debug)]
 pub struct BigRepoRpcProtocolHandler {
     tx: mpsc::Sender<(PeerId, RepoSyncRpcMessage)>,
+    peer_map: Arc<RwLock<RpcPeerMap>>,
 }
 
 impl ProtocolHandler for BigRepoRpcProtocolHandler {
     async fn accept(&self, conn: Connection) -> Result<(), AcceptError> {
-        let peer_id = PeerId::new(*conn.remote_id().as_bytes());
+        let endpoint_id = conn.remote_id();
+        let peer_id = self.peer_map.read().expect(ERROR_MUTEX).lookup(endpoint_id);
         loop {
             let msg = match irpc_iroh::read_request::<RepoSyncRpc>(&conn).await {
                 Ok(Some(msg)) => msg,
@@ -102,6 +157,7 @@ pub async fn spawn_repo_rpc(
     big_repo: Arc<BigRepo>,
 ) -> Res<(BigRepoRpcHandle, BigRepoRpcStopToken)> {
     let (rpc_tx, mut rpc_rx) = mpsc::channel(1024);
+    let peer_map = Arc::new(RwLock::new(RpcPeerMap::default()));
     let cancel_token = CancellationToken::new();
     let subscription_tasks = Arc::new(utils_rs::AbortableJoinSet::new());
     let worker_subscription_tasks = Arc::clone(&subscription_tasks);
@@ -129,7 +185,7 @@ pub async fn spawn_repo_rpc(
     });
 
     Ok((
-        BigRepoRpcHandle { rpc_tx },
+        BigRepoRpcHandle { rpc_tx, peer_map },
         BigRepoRpcStopToken {
             cancel_token,
             subscription_tasks,
@@ -218,6 +274,22 @@ mod tests {
     use std::net::Ipv4Addr;
     use tokio::time::timeout;
 
+    #[test]
+    fn rpc_peer_mapping_tracks_application_identity() {
+        let endpoint_id = iroh::SecretKey::from_bytes(&[7; 32]).public();
+        let application_peer = PeerId::new([8; 32]);
+        let mut map = RpcPeerMap::default();
+
+        map.register(endpoint_id, application_peer);
+        assert_eq!(map.lookup(endpoint_id), application_peer);
+
+        map.unregister(application_peer);
+        assert_eq!(
+            map.lookup(endpoint_id),
+            PeerId::new(*endpoint_id.as_bytes())
+        );
+    }
+
     async fn test_endpoint() -> Res<iroh::Endpoint> {
         Ok(iroh::Endpoint::builder(iroh::endpoint::presets::Minimal)
             .clear_ip_transports()
@@ -263,6 +335,64 @@ mod tests {
         drop(events);
         router.shutdown().await?;
         client_endpoint.close().await;
+        endpoint.close().await;
+        rpc_stop.stop().await?;
+        repo_stop.stop().await?;
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn keyhive_change_stream_reconnects_after_client_disconnect() -> Res<()> {
+        let store: SharedPartStore = Arc::new(MemoryPartStore::new());
+        let (repo, repo_stop) = BigRepo::boot(
+            Config {
+                node_identity_seed: [42; 32],
+                storage: StorageConfig::Memory,
+            },
+            store,
+        )
+        .await?;
+        let endpoint = test_endpoint().await?;
+        let (rpc, rpc_stop) = spawn_repo_rpc(Arc::clone(&repo)).await?;
+        let _router = Router::builder(endpoint.clone())
+            .accept(REPO_SYNC_ALPN, rpc.protocol_handler())
+            .spawn();
+
+        // First subscription: consume initial=true
+        let client_a = test_endpoint().await?;
+        let sub_a = IrohBigRepoRpcClient::new(client_a.clone(), endpoint.addr());
+        let mut events_a = sub_a.subscribe_keyhive_changes(8).await?;
+        let ready = timeout(Duration::from_secs(5), events_a.recv())
+            .await
+            .map_err(|_| ferr!("timed out waiting for first readiness"))??
+            .ok_or_eyre("first stream closed before readiness")?;
+        assert!(ready.initial);
+
+        // Disconnect the subscriber and drop the stream
+        drop(events_a);
+        client_a.close().await;
+
+        // Second subscription from a fresh endpoint
+        let client_b = test_endpoint().await?;
+        let sub_b = IrohBigRepoRpcClient::new(client_b.clone(), endpoint.addr());
+        let mut events_b = sub_b.subscribe_keyhive_changes(8).await?;
+        let ready_b = timeout(Duration::from_secs(5), events_b.recv())
+            .await
+            .map_err(|_| ferr!("timed out waiting for second readiness"))??
+            .ok_or_eyre("second stream closed before readiness")?;
+        assert!(ready_b.initial);
+
+        // Local Keyhive change should reach the second subscriber
+        repo.create_group_with_parents(Vec::new()).await?;
+        let changed = timeout(Duration::from_secs(5), events_b.recv())
+            .await
+            .map_err(|_| ferr!("timed out waiting for Keyhive change on second subscriber"))??
+            .ok_or_eyre("second stream closed before Keyhive change")?;
+        assert!(!changed.initial);
+
+        drop(events_b);
+        client_b.close().await;
+        _router.shutdown().await?;
         endpoint.close().await;
         rpc_stop.stop().await?;
         repo_stop.stop().await?;

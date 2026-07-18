@@ -1320,7 +1320,7 @@ mod tests {
     use super::*;
     use crate::part_store::host_contract::{self, HostPartStoreContractHarness};
     use big_sync_core::Byte32Id;
-    use std::time::Duration;
+    use std::{collections::HashSet, time::Duration};
 
     struct MemoryHostHarness {
         store: MemoryPartStore,
@@ -1339,6 +1339,60 @@ mod tests {
             store: MemoryPartStore::new(),
         };
         host_contract::assert_host_part_store_contract(&harness).await
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn subscription_handoff_does_not_lose_immediate_mutation() -> Res<()> {
+        let store = MemoryPartStore::new();
+        let part = PartId(Byte32Id::new([61u8; 32]));
+        let first = ObjId(Byte32Id::new([62u8; 32]));
+        let second = ObjId(Byte32Id::new([63u8; 32]));
+        let peer = PeerId::new([64u8; 32]);
+
+        store.ensure_part(part).await?;
+        for (obj, value) in [(first, "first"), (second, "second")] {
+            store.set_obj_payload(obj, serde_json::json!(value)).await?;
+        }
+        store.add_obj_to_parts(first, vec![part]).await?;
+
+        let rx = store
+            .subscribe(
+                SubPartsRequest {
+                    peer_id: peer,
+                    parts: vec![big_sync_core::rpc::PartStreamCursorRequest {
+                        part_id: part,
+                        cursor: 0,
+                    }],
+                },
+                peer,
+            )
+            .await??;
+
+        // This mutation is deliberately issued immediately after subscribe:
+        // it may be observed by replay or by the pending-to-live handoff, but
+        // it must not be lost in either case.
+        store.add_obj_to_parts(second, vec![part]).await?;
+
+        let mut seen = HashSet::new();
+        loop {
+            let event = tokio::time::timeout(Duration::from_secs(2), rx.recv()).await??;
+            match event {
+                SubEvent::Added(event) => {
+                    seen.insert(event.obj_id);
+                }
+                SubEvent::ReplayComplete => break,
+                SubEvent::Changed(_) | SubEvent::Removed(_) => {}
+            }
+        }
+        if !seen.contains(&second) {
+            let event = tokio::time::timeout(Duration::from_secs(2), rx.recv()).await??;
+            assert!(
+                matches!(&event, SubEvent::Added(event) if event.obj_id == second),
+                "immediate mutation was not delivered after replay: {event:?}"
+            );
+        }
+        assert!(seen.contains(&first), "replay lost the existing object");
+        Ok(())
     }
 
     #[tokio::test(flavor = "multi_thread")]
