@@ -41,8 +41,7 @@ use crate::{
         BigRepoSubductionStorage, BigRepoSyncPolicy, IrohConnectResult, SubductionSedimentrees,
     },
     wire::BigRepoWireMessage,
-    BigEphemeral, BigEphemeralFilter, BigEphemeralSubscription, BigEphemeralTopic,
-    BigKeyhiveHandle, DocumentId,
+    BigEphemeral, BigKeyhiveHandle, DocumentId,
 };
 use big_sync_core::PeerId;
 use future_form::{FutureForm, Sendable};
@@ -78,7 +77,6 @@ use subduction_ephemeral::{
 use subduction_keyhive::{KeyhiveConnection, KeyhivePeerId};
 use subduction_websocket::tokio::{TimeoutTokio, TokioSpawn};
 use tokio::sync::mpsc;
-use tokio_util::sync::CancellationToken;
 
 // ═══════════════════════════════════════════════════════════════════════════
 // CONTEXT
@@ -113,8 +111,10 @@ where
     /// Ownership for the legacy ephemeral switchboard task. Dropping the
     /// runtime2 hub drops this set and therefore shuts the switchboard down.
     pub(crate) ephemeral_tasks: Arc<utils_rs::AbortableJoinSet>,
-    /// Ephemeral publisher used to notify connected peers of local keyhive changes.
+    /// Ephemeral publisher for application-level transient messages.
     pub(crate) ephemeral_backend: Arc<dyn BigEphemeralBackend>,
+    /// Direct BigRepo RPC notification source for local Keyhive changes.
+    pub(crate) keyhive_change_tx: tokio::sync::broadcast::Sender<()>,
     /// Compatibility bridge for the existing big-sync partition layer.
     pub(crate) big_sync_store: crate::SharedPartStore,
 }
@@ -518,10 +518,11 @@ where
                 .await
                 .map(|_| ())
                 .map_err(|error| ferr!("failed refreshing keyhive cache: {error}"))?;
-            self.ephemeral_backend
-                .publish(BigEphemeralTopic::keyhive_changed(), Vec::new())
-                .await
-                .map_err(|error| ferr!("failed publishing keyhive change: {error}"))
+            // This is a best-effort invalidation hint. The direct BigRepo RPC
+            // stream carries it to connected peers; Keyhive sync carries the
+            // actual state.
+            let _ = self.keyhive_change_tx.send(());
+            Ok(())
         })
     }
 
@@ -818,10 +819,9 @@ where
                 .note_local_keyhive_changed()
                 .await
                 .wrap_err("keyhive local-change refresh failed")?;
-            self.ephemeral_backend
-                .publish(BigEphemeralTopic::keyhive_changed(), Vec::new())
-                .await
-                .wrap_err("keyhive change notification publish failed")?;
+            // Broadcast delivery is intentionally best effort; the event is
+            // only a wake-up hint and is not the source of Keyhive state.
+            let _ = self.keyhive_change_tx.send(());
             Ok(())
         })
     }
@@ -1241,6 +1241,7 @@ pub async fn spawn_native_runtime2<S>(
     keyhive_storage: BigRepoKeyhiveStorage,
     change_manager: Arc<crate::changes::ChangeListenerManager>,
     listener_evt_rx: mpsc::UnboundedReceiver<crate::runtime::RuntimeEvt>,
+    keyhive_change_tx: tokio::sync::broadcast::Sender<()>,
 ) -> eyre::Result<(
     crate::runtime2::Runtime2Handle<Sendable>,
     BigEphemeral,
@@ -1379,6 +1380,7 @@ where
         sync_policy,
         ephemeral_tasks: Arc::new(utils_rs::AbortableJoinSet::new()),
         ephemeral_backend: Arc::clone(&ephemeral_backend),
+        keyhive_change_tx: keyhive_change_tx.clone(),
         big_sync_store,
     });
 
@@ -1458,41 +1460,17 @@ where
         })?;
     }
 
-    // Keyhive change subscription: listen on ephemeral for keyhive-changed
-    // notifications and send SyncKeyhiveWithPeerInternal to the hub.
+    // BigEphemeral remains available for application-level transient topics.
+    // Keyhive invalidations use the direct BigRepo RPC stream instead of this
+    // relay-capable bus.
     let ephemeral = {
         let switchboard = BigEphemeralSwitchboard::spawn(
             Arc::clone(&ephemeral_backend),
             ephemeral_rx,
-            CancellationToken::new(),
+            tokio_util::sync::CancellationToken::new(),
             Arc::clone(&native_io.ephemeral_tasks),
         );
-        let ephemeral = BigEphemeral::new(Arc::clone(&ephemeral_backend), switchboard);
-        let mut subscription = ephemeral
-            .subscribe(BigEphemeralFilter::new(BigEphemeralTopic::keyhive_changed()))
-            .await
-            .map_err(|err| ferr!("failed subscribing to keyhive-changed topic: {err}"))?;
-        let cmd_tx = handle.cmd_tx.clone();
-        stop_token
-            .child_tasks
-            .spawn(Sendable::from_future(async move {
-                loop {
-                    let Some(event) = subscription.recv().await else {
-                        break;
-                    };
-                    let sender_peer = PeerId::new(*event.sender.as_bytes());
-                    if cmd_tx
-                        .try_send(crate::runtime2::Runtime2Cmd::SyncKeyhiveWithPeerInternal {
-                            peer_id: sender_peer,
-                        })
-                        .is_err()
-                    {
-                        break;
-                    }
-                }
-                Ok(())
-            }))?;
-        ephemeral
+        BigEphemeral::new(Arc::clone(&ephemeral_backend), switchboard)
     };
 
     // Listener event forwarding: old RuntimeEvt -> Runtime2Evt.
