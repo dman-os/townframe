@@ -84,6 +84,10 @@ pub enum Runtime2Cmd {
     NoteLocalKeyhiveChanged {
         resp: futures::channel::oneshot::Sender<eyre::Result<()>>,
     },
+    RefreshBigSyncDocAccess {
+        target: keyhive_core::principal::identifier::Identifier,
+        resp: futures::channel::oneshot::Sender<eyre::Result<()>>,
+    },
     CancelDocSyncWaiter {
         doc_id: DocumentId,
         peer_id: PeerId,
@@ -149,6 +153,9 @@ pub enum Runtime2Evt {
     KeyhiveCacheRefreshDone {
         peer_id: PeerId,
         round_id: Option<u64>,
+        result: eyre::Result<()>,
+    },
+    BigSyncAccessRefreshDone {
         result: eyre::Result<()>,
     },
     KeyhiveSyncRequested {

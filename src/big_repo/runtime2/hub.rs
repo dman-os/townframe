@@ -97,6 +97,9 @@ pub struct Runtime2Hub<F: FutureForm, R: TaskRuntime<F>> {
     pub(crate) active_keyhive_syncs: HashMap<PeerId, KeyhiveSyncRound>,
     pub(crate) keyhive_round_ids: u64,
     pub(crate) keyhive_dirty: BTreeSet<PeerId>,
+    /// Access-index refreshes triggered by received membership changes.
+    /// Public Keyhive sync waiters do not resolve until these finish.
+    pub(crate) pending_access_refreshes: usize,
 
     // ── runtime-wide quiescence ────────────────────────────────────────────
     pub(crate) quiescence_waiters: Vec<futures::channel::oneshot::Sender<eyre::Result<()>>>,
@@ -126,6 +129,7 @@ pub(crate) struct KeyhiveSyncRound {
     pub round_id: u64,
     pub request_id: subduction_keyhive::message::RequestId,
     pub cache_refresh_started: bool,
+    pub access_refresh_waiting: bool,
 }
 
 pub(crate) struct QuiescenceProbe {
@@ -162,6 +166,12 @@ trait HubCommandFuture<F: FutureForm> {
 
     fn note_local_keyhive_changed(
         runtime_io: Arc<dyn crate::runtime2::RuntimeIo<F>>,
+        resp: futures::channel::oneshot::Sender<eyre::Result<()>>,
+    ) -> F::Future<'static, eyre::Result<()>>;
+
+    fn refresh_doc_access(
+        runtime_io: Arc<dyn crate::runtime2::RuntimeIo<F>>,
+        target: keyhive_core::principal::identifier::Identifier,
         resp: futures::channel::oneshot::Sender<eyre::Result<()>>,
     ) -> F::Future<'static, eyre::Result<()>>;
 }
@@ -235,6 +245,21 @@ impl<F: FutureForm> HubCommandFuture<F> for F {
                 .note_local_keyhive_changed()
                 .await
                 .wrap_err("keyhive local-change refresh failed");
+            let _ = resp.send(out);
+            Ok(())
+        })
+    }
+
+    fn refresh_doc_access(
+        runtime_io: Arc<dyn crate::runtime2::RuntimeIo<F>>,
+        target: keyhive_core::principal::identifier::Identifier,
+        resp: futures::channel::oneshot::Sender<eyre::Result<()>>,
+    ) -> F::Future<'static, eyre::Result<()>> {
+        F::from_future(async move {
+            let out = runtime_io
+                .refresh_big_sync_doc_access(target)
+                .await
+                .wrap_err("big-sync document access refresh failed");
             let _ = resp.send(out);
             Ok(())
         })
@@ -313,6 +338,7 @@ where
         if !probe.pending_docs.is_empty()
             || !self.active_keyhive_syncs.is_empty()
             || !self.keyhive_dirty.is_empty()
+            || self.pending_access_refreshes != 0
         {
             return Ok(());
         }
@@ -472,7 +498,14 @@ where
                     .entry(peer_id)
                     .or_default()
                     .push((waiter_id, resp));
-                if !self.active_keyhive_syncs.contains_key(&peer_id) {
+                // A reconnect can expose the public connection handle before
+                // the hub has processed its ConnEstablished event. Do not
+                // initiate against the old/missing Keyhive peer in that gap;
+                // the establishment handler will start the round once the
+                // transport is registered.
+                if self.connected_peers.contains_key(&peer_id)
+                    && !self.active_keyhive_syncs.contains_key(&peer_id)
+                {
                     self.start_keyhive_sync(peer_id)?;
                 }
             }
@@ -482,6 +515,13 @@ where
             Runtime2Cmd::NoteLocalKeyhiveChanged { resp } => {
                 self.spawn_background(F::note_local_keyhive_changed(
                     Arc::clone(&self.runtime_io),
+                    resp,
+                ))?;
+            }
+            Runtime2Cmd::RefreshBigSyncDocAccess { target, resp } => {
+                self.spawn_background(F::refresh_doc_access(
+                    Arc::clone(&self.runtime_io),
+                    target,
                     resp,
                 ))?;
             }
@@ -558,6 +598,7 @@ trait HubBackgroundFuture<F: FutureForm> {
 
     fn refresh_big_sync_doc_access(
         runtime_io: Arc<dyn crate::runtime2::RuntimeIo<F>>,
+        evt_tx: async_channel::Sender<Runtime2Evt>,
         target: keyhive_core::principal::identifier::Identifier,
     ) -> F::Future<'static, eyre::Result<()>>;
 
@@ -689,13 +730,24 @@ impl<F: FutureForm> HubBackgroundFuture<F> for F {
 
     fn refresh_big_sync_doc_access(
         runtime_io: Arc<dyn crate::runtime2::RuntimeIo<F>>,
+        evt_tx: async_channel::Sender<Runtime2Evt>,
         target: keyhive_core::principal::identifier::Identifier,
     ) -> F::Future<'static, eyre::Result<()>> {
         F::from_future(async move {
-            runtime_io
+            let result = runtime_io
                 .refresh_big_sync_doc_access(target)
                 .await
-                .wrap_err("big-sync document access refresh failed")
+                .wrap_err("big-sync document access refresh failed");
+            if evt_tx
+                .send(Runtime2Evt::BigSyncAccessRefreshDone { result })
+                .await
+                .is_err()
+            {
+                // The hub is deliberately stopped before child tasks during
+                // shutdown; completion cannot be delivered after that point.
+                tracing::debug!("runtime stopped before big-sync access refresh completion");
+            }
+            Ok(())
         })
     }
 
@@ -1085,6 +1137,28 @@ where
                     })
                     .expect("task was found dead");
             }
+            Runtime2Evt::BigSyncAccessRefreshDone { result } => {
+                assert!(
+                    self.pending_access_refreshes > 0,
+                    "access refresh completed without an admitted refresh"
+                );
+                self.pending_access_refreshes -= 1;
+                result.wrap_err("big-sync access refresh failed")?;
+                if self.pending_access_refreshes == 0 {
+                    let ready_rounds: Vec<_> = self
+                        .active_keyhive_syncs
+                        .iter()
+                        .filter_map(|(peer_id, round)| {
+                            round
+                                .access_refresh_waiting
+                                .then_some((*peer_id, round.round_id))
+                        })
+                        .collect();
+                    for (peer_id, round_id) in ready_rounds {
+                        self.complete_keyhive_sync_round(peer_id, round_id)?;
+                    }
+                }
+            }
             Runtime2Evt::KeyhiveSyncRequested { peer_id } => {
                 self.schedule_internal_keyhive_sync(peer_id);
             }
@@ -1142,8 +1216,10 @@ where
                     false,
                     member_is_document,
                 ))?;
+                self.pending_access_refreshes += 1;
                 self.spawn_background(F::refresh_big_sync_doc_access(
                     Arc::clone(&self.runtime_io),
+                    self.evt_tx.clone(),
                     target,
                 ))?;
             }
@@ -1162,8 +1238,10 @@ where
                     true,
                     member_is_document,
                 ))?;
+                self.pending_access_refreshes += 1;
                 self.spawn_background(F::refresh_big_sync_doc_access(
                     Arc::clone(&self.runtime_io),
+                    self.evt_tx.clone(),
                     target,
                 ))?;
             }
@@ -1265,6 +1343,7 @@ where
                 round_id,
                 request_id: request_id.clone(),
                 cache_refresh_started: false,
+                access_refresh_waiting: false,
             },
         );
         self.spawn_background(F::start_sync(
@@ -1376,7 +1455,7 @@ where
             }
             return Ok(());
         };
-        let Some(round) = self.active_keyhive_syncs.get(&peer_id) else {
+        let Some(round) = self.active_keyhive_syncs.get_mut(&peer_id) else {
             tracing::debug!(%peer_id, round_id, "ignoring untracked keyhive cache completion");
             return Ok(());
         };
@@ -1389,12 +1468,8 @@ where
             );
             return Ok(());
         }
-        let round = self
-            .active_keyhive_syncs
-            .remove(&peer_id)
-            .expect("active keyhive sync disappeared after round validation");
-        let watermark = round.watermark;
         if let Err(error) = result {
+            self.active_keyhive_syncs.remove(&peer_id);
             if let Some(waiters) = self.pending_keyhive_syncs.remove(&peer_id) {
                 for (_, sender) in waiters {
                     sender
@@ -1405,6 +1480,20 @@ where
             self.keyhive_dirty.remove(&peer_id);
             return Ok(());
         }
+        if self.pending_access_refreshes != 0 {
+            round.access_refresh_waiting = true;
+            return Ok(());
+        }
+        self.complete_keyhive_sync_round(peer_id, round_id)
+    }
+
+    fn complete_keyhive_sync_round(&mut self, peer_id: PeerId, round_id: u64) -> eyre::Result<()> {
+        let round = self
+            .active_keyhive_syncs
+            .remove(&peer_id)
+            .expect("active keyhive sync disappeared before access refresh completion");
+        assert_eq!(round.round_id, round_id);
+        let watermark = round.watermark;
 
         // Split waiters: those that existed before this sync started resolve,
         // those that arrived during/after cascade into a new round.
@@ -1856,6 +1945,7 @@ where
         active_keyhive_syncs: HashMap::new(),
         keyhive_round_ids: 0,
         keyhive_dirty: BTreeSet::new(),
+        pending_access_refreshes: 0,
         quiescence_waiters: Vec::new(),
         quiescence_probe: None,
         quiescence_barrier_ids: 0,

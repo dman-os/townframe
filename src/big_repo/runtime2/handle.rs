@@ -415,6 +415,19 @@ impl<F: FutureForm> Runtime2Handle<F> {
             .map_err(|_| eyre::eyre!("caller dropped before response"))?
     }
 
+    pub async fn refresh_big_sync_doc_access(
+        &self,
+        target: keyhive_core::principal::identifier::Identifier,
+    ) -> eyre::Result<()> {
+        let (resp, rx) = futures::channel::oneshot::channel();
+        self.cmd_tx
+            .send(Runtime2Cmd::RefreshBigSyncDocAccess { target, resp })
+            .await
+            .map_err(|_| eyre::eyre!("task was found dead"))?;
+        rx.await
+            .map_err(|_| eyre::eyre!("caller dropped before response"))?
+    }
+
     // ── presence / introspection ───────────────────────────────────────────
 
     /// Check whether the sedimentree for `doc_id` is resident in storage.

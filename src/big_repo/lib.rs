@@ -229,6 +229,7 @@ impl BigRepo {
             keyhive.clone(),
             keyhive_storage.clone(),
             Arc::clone(&change_manager),
+            listener_evt_tx,
             listener_evt_rx,
             keyhive_change_tx.clone(),
         )
@@ -247,24 +248,21 @@ impl BigRepo {
             change_manager_stop: std::sync::Mutex::new(Some(change_manager_stop)),
         });
 
-        // Boot full reindex: seed the doc-members index for our own principal.
-        // This is the ONLY full recompute — incremental updates handle the rest.
+        // Boot full reindex: seed the doc-members index for our own principal
+        // before exposing the repo to callers. Running this detached allowed a
+        // later local grant refresh to be overwritten by the boot task.
         {
             let own_id = PeerId::new(out.keyhive.clone_keyhive().id().to_bytes());
-            let store = out.big_sync_store.clone();
-            let kh = out.keyhive.clone();
-            tokio::spawn(async move {
-                let agent = keyhive_core::principal::identifier::Identifier::from(
-                    ed25519_dalek::VerifyingKey::from_bytes(own_id.0.as_bytes())
-                        .expect("own id is valid"),
-                );
-                let docs = kh.docs_for_agent(&agent).await;
-                for (doc_id, access) in docs {
-                    let mut agents = HashMap::new();
-                    agents.insert(own_id, access);
-                    store.set_doc_members(doc_id, agents).await;
-                }
-            });
+            let agent = keyhive_core::principal::identifier::Identifier::from(
+                ed25519_dalek::VerifyingKey::from_bytes(own_id.0.as_bytes())
+                    .expect("own id is valid"),
+            );
+            let docs = out.keyhive.docs_for_agent(&agent).await;
+            for (doc_id, access) in docs {
+                let mut agents = HashMap::new();
+                agents.insert(own_id, access);
+                out.big_sync_store.set_doc_members(doc_id, agents).await;
+            }
         }
 
         let change_manager_stop = out
@@ -411,9 +409,9 @@ impl BigRepo {
         // one real content checkpoint per affected document so the new member
         // receives a decryptable entry point to the existing history.
         if access.is_reader() {
-            for doc_id in affected_docs {
+            for doc_id in &affected_docs {
                 let doc = docs
-                    .get(&doc_id)
+                    .get(doc_id)
                     .ok_or_else(|| ferr!("affected document was not preflighted: {doc_id}"))?;
                 doc.with_document(|doc| {
                     let _ = doc.empty_commit(automerge::transaction::CommitOptions::default());
@@ -423,6 +421,9 @@ impl BigRepo {
         }
 
         self.runtime.note_local_keyhive_changed().await?;
+        for doc_id in affected_docs {
+            self.refresh_doc_access_index(doc_id).await?;
+        }
         Ok(())
     }
 
@@ -461,6 +462,7 @@ impl BigRepo {
         }
 
         self.runtime.note_local_keyhive_changed().await?;
+        self.refresh_doc_access_index(doc_id).await?;
 
         Ok(())
     }
@@ -484,6 +486,18 @@ impl BigRepo {
             )
             .await?;
         self.runtime.note_local_keyhive_changed().await?;
+        self.refresh_doc_access_index(doc_id).await?;
+        Ok(())
+    }
+
+    async fn refresh_doc_access_index(&self, doc_id: DocumentId) -> Res<()> {
+        let verifying_key = ed25519_dalek::VerifyingKey::from_bytes(&doc_id.into_bytes())
+            .map_err(|_| ferr!("doc_id is not a valid Ed25519 point"))?;
+        self.runtime
+            .refresh_big_sync_doc_access(keyhive_core::principal::identifier::Identifier::from(
+                verifying_key,
+            ))
+            .await?;
         Ok(())
     }
 }

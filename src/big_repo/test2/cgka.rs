@@ -632,7 +632,6 @@ async fn tier6_multipath_strongest_access() -> crate::Res<()> {
         .await?;
 
     pair.left_conn().sync_keyhive_with_peer(None).await?;
-    pair.right_conn().sync_keyhive_with_peer(None).await?;
 
     // Add the same user to BOTH groups. The effective access through the Edit
     // path is the strongest, so the user must be able to write.
@@ -646,7 +645,6 @@ async fn tier6_multipath_strongest_access() -> crate::Res<()> {
         .await?;
 
     pair.left_conn().sync_keyhive_with_peer(None).await?;
-    pair.right_conn().sync_keyhive_with_peer(None).await?;
 
     // Materialise: read the pre-grant content.
     let member_doc =
@@ -681,7 +679,6 @@ async fn tier6_multipath_strongest_access() -> crate::Res<()> {
 
     // Sync the edit back to the owner and verify convergence.
     pair.right_conn().sync_keyhive_with_peer(None).await?;
-    pair.left_conn().sync_keyhive_with_peer(None).await?;
     let owner_doc2 =
         fixtures::sync_doc_expect_ready(pair.left_conn(), &pair.left().repo, doc_id).await?;
     let note = owner_doc2

@@ -36,6 +36,30 @@ async fn recv_one(
         .expect("listener closed unexpectedly")
 }
 
+/// A subscription can observe a DocCreated batch that was queued by the
+/// preceding create operation before the switchboard delivered it. Consume
+/// such already-admitted batches without assuming a scheduler order.
+async fn recv_until_doc_changed(
+    rx: &mut tokio::sync::mpsc::UnboundedReceiver<Vec<BigRepoChangeNotification>>,
+) -> Vec<BigRepoChangeNotification> {
+    loop {
+        let batch = recv_one(rx).await;
+        if batch.iter().any(|notification| {
+            matches!(notification, BigRepoChangeNotification::DocChanged { .. })
+        }) {
+            tracing::debug!(
+                batch_len = batch.len(),
+                "received expected DocChanged batch"
+            );
+            return batch;
+        }
+        tracing::debug!(
+            batch_len = batch.len(),
+            "skipping notification batch without DocChanged while waiting"
+        );
+    }
+}
+
 /// Assert no notification is already queued.
 fn assert_no_notification(
     rx: &mut tokio::sync::mpsc::UnboundedReceiver<Vec<BigRepoChangeNotification>>,
@@ -754,7 +778,7 @@ async fn tier7_listener_removal_before_mutation() -> crate::Res<()> {
         })
         .await??;
     pair.left().repo.wait_for_quiescence(None).await?;
-    let batch_before = recv_one(&mut rx).await;
+    let batch_before = recv_until_doc_changed(&mut rx).await;
     assert!(
         batch_before
             .iter()
@@ -800,7 +824,7 @@ async fn tier7_listener_removal_before_mutation() -> crate::Res<()> {
         })
         .await??;
     pair.left().repo.wait_for_quiescence(None).await?;
-    let batch_after = recv_one(&mut rx2).await;
+    let batch_after = recv_until_doc_changed(&mut rx2).await;
     assert!(
         batch_after
             .iter()

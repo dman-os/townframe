@@ -91,7 +91,6 @@ pub async fn grant_and_propagate(
         .grant_doc_access(doc_id, grantee.clone(), access)
         .await?;
     pair.left_conn().sync_keyhive_with_peer(None).await?;
-    pair.right_conn().sync_keyhive_with_peer(None).await?;
     assert_reader_has_access(&pair.right().repo, doc_id).await?;
     super::keyhive::assert_document_snapshot_equal(pair.left(), pair.right(), doc_id).await?;
     Ok(())
@@ -112,7 +111,6 @@ pub async fn grant_group_and_propagate(
         .grant_doc_access(doc_id, group.clone(), access)
         .await?;
     pair.left_conn().sync_keyhive_with_peer(None).await?;
-    pair.right_conn().sync_keyhive_with_peer(None).await?;
     assert_reader_has_access(&pair.right().repo, doc_id).await?;
     super::keyhive::assert_document_snapshot_equal(pair.left(), pair.right(), doc_id).await?;
     Ok(())
@@ -135,6 +133,13 @@ pub async fn assert_reader_has_access(repo: &crate::BigRepo, doc_id: DocumentId)
     {
         Ok(())
     } else {
+        let effective_members = repo.keyhive().agents_for_membered(document).await;
+        tracing::error!(
+            peer = %peer,
+            ?doc_id,
+            ?effective_members,
+            "Keyhive access assertion failed after synchronization"
+        );
         Err(crate::ferr!(
             "{} has no access on {} after grant + keyhive sync",
             log_nickname::nickname(&peer),
