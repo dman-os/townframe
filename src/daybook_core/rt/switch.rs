@@ -351,7 +351,7 @@ pub async fn spawn_switch_worker(
                             cursor,
                         }],
                     },
-                    [0u8; 32],
+                    big_sync_core::PeerId::new([0u8; 32]),
                 )
                 .await??;
 

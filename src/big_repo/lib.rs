@@ -29,6 +29,7 @@ mod keyhive;
 pub(crate) mod keyhive_conn;
 pub(crate) mod keyhive_listener;
 pub(crate) mod keyhive_storage;
+pub mod rpc;
 mod runtime;
 /// runtime2 — the tractable, runtime-neutral rewrite.
 /// See `play.big_repo.runtime2.md`.
@@ -98,6 +99,8 @@ pub struct BigRepo {
     runtime: runtime2::Runtime2Handle<future_form::Sendable>,
     #[educe(Debug(ignore))]
     ephemeral: BigEphemeral,
+    #[educe(Debug(ignore))]
+    keyhive_change_tx: tokio::sync::broadcast::Sender<()>,
     #[educe(Debug(ignore))]
     change_manager: Arc<changes::ChangeListenerManager>,
     #[educe(Debug(ignore))]
@@ -212,6 +215,7 @@ impl BigRepo {
             subduction_crypto::signer::memory::MemorySigner::from_bytes(&node_identity_seed);
         let peer_id = PeerId::new(*signer.verifying_key().as_bytes());
         let (change_manager, change_manager_stop) = changes::ChangeListenerManager::boot();
+        let (keyhive_change_tx, _) = tokio::sync::broadcast::channel(128);
 
         let (runtime, ephemeral, _events, runtime_stop) = runtime2::native::spawn_native_runtime2(
             signer,
@@ -223,6 +227,7 @@ impl BigRepo {
             keyhive_storage.clone(),
             Arc::clone(&change_manager),
             listener_evt_rx,
+            keyhive_change_tx.clone(),
         )
         .await?;
 
@@ -234,6 +239,7 @@ impl BigRepo {
             big_sync_store,
             runtime,
             ephemeral,
+            keyhive_change_tx,
             change_manager,
             change_manager_stop: std::sync::Mutex::new(Some(change_manager_stop)),
         });
@@ -287,6 +293,19 @@ impl BigRepo {
 
     pub fn ephemeral(&self) -> BigEphemeral {
         self.ephemeral.clone()
+    }
+
+    pub(crate) fn subscribe_keyhive_changes(&self) -> tokio::sync::broadcast::Receiver<()> {
+        self.keyhive_change_tx.subscribe()
+    }
+
+    /// Synchronize local Keyhive state with a directly connected peer.
+    pub async fn sync_keyhive_with_peer(
+        &self,
+        peer_id: PeerId,
+        timeout: Option<std::time::Duration>,
+    ) -> Res<()> {
+        self.runtime.sync_keyhive_with_peer(peer_id, timeout).await
     }
 
     #[cfg(test)]

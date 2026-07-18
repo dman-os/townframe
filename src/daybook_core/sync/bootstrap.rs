@@ -278,13 +278,7 @@ async fn pull_required_partitions_via_big_sync_worker(
             big_sync::rpc::BIG_SYNC_RPC_ALPN,
             big_sync_rpc.protocol_handler(),
         )
-        .accept(
-            big_repo::rpc::REPO_SYNC_ALPN,
-            super::AuthenticatedIrohProtocol::<big_repo::rpc::RepoSyncRpc, PeerId> {
-                tx: repo_rpc.local_sender(),
-                peer_key_fn: Arc::new(|endpoint_id| PeerId::new(*endpoint_id.as_bytes())),
-            },
-        )
+        .accept(big_repo::rpc::REPO_SYNC_ALPN, repo_rpc.protocol_handler())
         .spawn();
 
     let peer_id = PeerId::new(*bootstrap.endpoint_id.as_bytes());
