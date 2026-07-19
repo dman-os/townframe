@@ -17,6 +17,7 @@ pub use io::{
 pub use lease::{
     DocLease, DocWorkerEntry, DocWorkerHandle, DocWorkerInternalLease, DocWorkerStopToken,
 };
+pub use doc_worker::spawn_doc_worker;
 pub use messages::{DocWorkerMsg, Runtime2Cmd, Runtime2Evt};
 pub use tasks::{TaskRuntime, TaskSet, TokioTaskRuntime, TokioTaskSet, TokioTimer};
 
@@ -24,7 +25,6 @@ mod doc_worker;
 mod handle;
 mod hub;
 
-pub use doc_worker::spawn_doc_worker;
 pub use handle::Runtime2Handle;
 pub use hub::{spawn_runtime2, Runtime2Hub, Runtime2StopToken};
 

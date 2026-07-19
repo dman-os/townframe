@@ -301,14 +301,11 @@ mod tests {
 
     #[tokio::test]
     async fn keyhive_change_stream_delivers_ready_and_local_change() -> Res<()> {
-        let store: SharedPartStore = Arc::new(MemoryPartStore::new());
-        let (repo, repo_stop) = BigRepo::boot(
-            Config {
-                node_identity_seed: [41; 32],
-                storage: StorageConfig::Memory,
-            },
-            store,
-        )
+        let (repo, repo_stop) = BigRepo::boot(Config {
+            node_identity_seed: [41; 32],
+            storage: StorageConfig::Memory,
+            scope_key: Arc::from("rpc-ready"),
+        })
         .await?;
         let endpoint = test_endpoint().await?;
         let (rpc, rpc_stop) = spawn_repo_rpc(Arc::clone(&repo)).await?;
@@ -343,14 +340,11 @@ mod tests {
 
     #[tokio::test]
     async fn keyhive_change_stream_reconnects_after_client_disconnect() -> Res<()> {
-        let store: SharedPartStore = Arc::new(MemoryPartStore::new());
-        let (repo, repo_stop) = BigRepo::boot(
-            Config {
-                node_identity_seed: [42; 32],
-                storage: StorageConfig::Memory,
-            },
-            store,
-        )
+        let (repo, repo_stop) = BigRepo::boot(Config {
+            node_identity_seed: [42; 32],
+            storage: StorageConfig::Memory,
+            scope_key: Arc::from("rpc-reconnect"),
+        })
         .await?;
         let endpoint = test_endpoint().await?;
         let (rpc, rpc_stop) = spawn_repo_rpc(Arc::clone(&repo)).await?;

@@ -1873,14 +1873,113 @@ impl SqliteBigRepoStore {
                 FOREIGN KEY(scope_id, sedimentree_id)
                     REFERENCES big_repo_subduction_trees(scope_id, sedimentree_id)
             ) STRICT",
-            "CREATE INDEX IF NOT EXISTS big_repo_subduction_commits_tree_idx
-             ON big_repo_subduction_commits(scope_id, sedimentree_id, commit_id, digest)",
-            "CREATE INDEX IF NOT EXISTS big_repo_subduction_fragments_tree_idx
-             ON big_repo_subduction_fragments(scope_id, sedimentree_id, head_id, digest)",
+            "CREATE TABLE IF NOT EXISTS big_repo_keyhive_event_log (
+                scope_id INTEGER NOT NULL,
+                seq INTEGER NOT NULL,
+                event_hash BLOB NOT NULL,
+                event_bytes BLOB NOT NULL,
+                event_kind INTEGER,
+                source_id BLOB,
+                PRIMARY KEY(scope_id, seq),
+                UNIQUE(scope_id, event_hash)
+            ) STRICT",
+            "CREATE TABLE IF NOT EXISTS big_repo_keyhive_replay_tail (
+                scope_id INTEGER NOT NULL,
+                event_hash BLOB NOT NULL,
+                PRIMARY KEY(scope_id, event_hash),
+                FOREIGN KEY(scope_id, event_hash)
+                    REFERENCES big_repo_keyhive_event_log(scope_id, event_hash)
+            ) STRICT",
+            "CREATE INDEX IF NOT EXISTS big_repo_keyhive_event_log_hash_idx
+             ON big_repo_keyhive_event_log(scope_id, event_hash)",
+            "CREATE INDEX IF NOT EXISTS big_repo_keyhive_replay_tail_seq_idx
+             ON big_repo_keyhive_replay_tail(scope_id, event_hash)",
         ] {
             sqlx::query(statement).execute(&mut *tx).await?;
         }
         tx.commit().await?;
+        Ok(())
+    }
+
+    pub(crate) async fn save_keyhive_event(
+        &self,
+        hash: subduction_keyhive::storage::StorageHash,
+        data: Vec<u8>,
+    ) -> Result<(), SqliteBigRepoStoreError> {
+        let mut tx = self.sql.write_pool.begin_with("BEGIN IMMEDIATE").await?;
+        let next_seq: i64 = sqlx::query_scalar(
+            "SELECT COALESCE(MAX(seq), 0) + 1
+             FROM big_repo_keyhive_event_log
+             WHERE scope_id = ?1",
+        )
+        .bind(self.scope_id)
+        .fetch_one(&mut *tx)
+        .await?;
+        sqlx::query(
+            "INSERT INTO big_repo_keyhive_event_log(
+                scope_id, seq, event_hash, event_bytes
+             )
+             VALUES (?1, ?2, ?3, ?4)
+             ON CONFLICT(scope_id, event_hash) DO NOTHING",
+        )
+        .bind(self.scope_id)
+        .bind(next_seq)
+        .bind(hash.as_bytes().as_slice())
+        .bind(data)
+        .execute(&mut *tx)
+        .await?;
+        sqlx::query(
+            "INSERT INTO big_repo_keyhive_replay_tail(scope_id, event_hash)
+             VALUES (?1, ?2)
+             ON CONFLICT(scope_id, event_hash) DO NOTHING",
+        )
+        .bind(self.scope_id)
+        .bind(hash.as_bytes().as_slice())
+        .execute(&mut *tx)
+        .await?;
+        tx.commit().await?;
+        Ok(())
+    }
+
+    pub(crate) async fn load_keyhive_events(
+        &self,
+    ) -> Result<Vec<(subduction_keyhive::storage::StorageHash, Vec<u8>)>, SqliteBigRepoStoreError> {
+        let rows = sqlx::query(
+            "SELECT event_hash, event_bytes
+             FROM big_repo_keyhive_event_log
+             WHERE scope_id = ?1
+               AND event_hash IN (
+                   SELECT event_hash
+                   FROM big_repo_keyhive_replay_tail
+                   WHERE scope_id = ?1
+               )
+             ORDER BY seq",
+        )
+        .bind(self.scope_id)
+        .fetch_all(&self.sql.read_pool)
+        .await?;
+        rows.into_iter()
+            .map(|row| {
+                let hash_bytes: Vec<u8> = row.try_get("event_hash")?;
+                let hash = Self::decode_id(hash_bytes)?;
+                let event_bytes: Vec<u8> = row.try_get("event_bytes")?;
+                Ok((subduction_keyhive::storage::StorageHash::new(hash), event_bytes))
+            })
+            .collect()
+    }
+
+    pub(crate) async fn delete_keyhive_event(
+        &self,
+        hash: subduction_keyhive::storage::StorageHash,
+    ) -> Result<(), SqliteBigRepoStoreError> {
+        sqlx::query(
+            "DELETE FROM big_repo_keyhive_replay_tail
+             WHERE scope_id = ?1 AND event_hash = ?2",
+        )
+        .bind(self.scope_id)
+        .bind(hash.as_bytes().as_slice())
+        .execute(&self.sql.write_pool)
+        .await?;
         Ok(())
     }
 
@@ -2530,6 +2629,155 @@ mod tests {
             Some(old_payload)
         );
         assert_eq!(HostPartStore::member_count(&store, part_id).await?, 1);
+        Ok(())
+    }
+    #[tokio::test]
+    async fn sqlite_big_repo_keyhive_events_are_ordered_and_deduplicated() -> Res<()> {
+        let sql = SqlCtx::memory().await?;
+        let store =
+            SqliteBigRepoStore::new(sql, "keyhive-event-order", BuckId::MAX_LEVEL).await?;
+        let first = subduction_keyhive::storage::StorageHash::new([1; 32]);
+        let second = subduction_keyhive::storage::StorageHash::new([2; 32]);
+        store.save_keyhive_event(first, b"first".to_vec()).await?;
+        store.save_keyhive_event(second, b"second".to_vec()).await?;
+        store.save_keyhive_event(first, b"replacement".to_vec()).await?;
+
+        assert_eq!(
+            store.load_keyhive_events().await?,
+            vec![(first, b"first".to_vec()), (second, b"second".to_vec())]
+        );
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn sqlite_big_repo_keyhive_event_tail_deletion_keeps_history() -> Res<()> {
+        let sql = SqlCtx::memory().await?;
+        let store =
+            SqliteBigRepoStore::new(sql, "keyhive-event-tail", BuckId::MAX_LEVEL).await?;
+        let hash = subduction_keyhive::storage::StorageHash::new([3; 32]);
+        store.save_keyhive_event(hash, b"event".to_vec()).await?;
+        store.delete_keyhive_event(hash).await?;
+
+        assert!(store.load_keyhive_events().await?.is_empty());
+        let immutable_count: i64 = sqlx::query_scalar(
+            "SELECT COUNT(*) FROM big_repo_keyhive_event_log WHERE scope_id = ?1",
+        )
+        .bind(store.scope_id)
+        .fetch_one(&store.sql.read_pool)
+        .await?;
+        assert_eq!(immutable_count, 1);
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn sqlite_big_repo_keyhive_events_are_scope_isolated() -> Res<()> {
+        let sql = SqlCtx::memory().await?;
+        let first_store =
+            SqliteBigRepoStore::new(sql.clone(), "keyhive-scope-a", BuckId::MAX_LEVEL).await?;
+        let second_store =
+            SqliteBigRepoStore::new(sql, "keyhive-scope-b", BuckId::MAX_LEVEL).await?;
+        let hash = subduction_keyhive::storage::StorageHash::new([4; 32]);
+        first_store.save_keyhive_event(hash, b"a".to_vec()).await?;
+        second_store.save_keyhive_event(hash, b"b".to_vec()).await?;
+
+        assert_eq!(
+            first_store.load_keyhive_events().await?,
+            vec![(hash, b"a".to_vec())]
+        );
+        assert_eq!(
+            second_store.load_keyhive_events().await?,
+            vec![(hash, b"b".to_vec())]
+        );
+        Ok(())
+    }
+    #[tokio::test]
+    async fn sqlite_big_repo_keyhive_events_survive_restart() -> Res<()> {
+        let dir = tempfile::tempdir()?;
+        let db_path = dir.path().join("events.sqlite");
+        let url = format!("sqlite://{}", db_path.display());
+        let first = SqlCtx::url(&url).await?;
+        let store = SqliteBigRepoStore::new(
+            first,
+            "keyhive-restart",
+            BuckId::MAX_LEVEL,
+        )
+        .await?;
+        let hash = subduction_keyhive::storage::StorageHash::new([5; 32]);
+        store.save_keyhive_event(hash, b"persistent".to_vec()).await?;
+        drop(store);
+
+        let reopened = SqlCtx::url(&url).await?;
+        let store = SqliteBigRepoStore::new(
+            reopened,
+            "keyhive-restart",
+            BuckId::MAX_LEVEL,
+        )
+        .await?;
+        assert_eq!(
+            store.load_keyhive_events().await?,
+            vec![(hash, b"persistent".to_vec())]
+        );
+        Ok(())
+    }
+    #[tokio::test]
+    async fn sqlite_big_repo_keyhive_duplicate_saves_are_safe_concurrently() -> Res<()> {
+        let sql = SqlCtx::memory().await?;
+        let store =
+            SqliteBigRepoStore::new(sql, "keyhive-concurrent", BuckId::MAX_LEVEL).await?;
+        let hash = subduction_keyhive::storage::StorageHash::new([6; 32]);
+        let left = store.clone();
+        let right = store.clone();
+        let (left, right) = tokio::join!(
+            left.save_keyhive_event(hash, b"left".to_vec()),
+            right.save_keyhive_event(hash, b"right".to_vec()),
+        );
+        left?;
+        right?;
+        let events = store.load_keyhive_events().await?;
+        assert_eq!(events.len(), 1);
+        assert!(events[0].1 == b"left" || events[0].1 == b"right");
+        Ok(())
+    }
+    #[tokio::test]
+    async fn sqlite_big_repo_keyhive_archive_changes_do_not_prune_event_log() -> Res<()> {
+        let sql = SqlCtx::memory().await?;
+        let store =
+            SqliteBigRepoStore::new(sql, "keyhive-archive", BuckId::MAX_LEVEL).await?;
+        let archive_dir = tempfile::tempdir()?;
+        let storage = crate::keyhive_storage::BigRepoKeyhiveStorage::fs(
+            store.clone(),
+            archive_dir.path().to_path_buf(),
+        )?;
+        let event_hash = subduction_keyhive::storage::StorageHash::new([7; 32]);
+        let archive_hash = subduction_keyhive::storage::StorageHash::new([8; 32]);
+        subduction_keyhive::storage::KeyhiveStorage::<Sendable>::save_event(
+            &storage,
+            event_hash,
+            b"event".to_vec(),
+        )
+        .await?;
+        subduction_keyhive::storage::KeyhiveStorage::<Sendable>::save_archive(
+            &storage,
+            archive_hash,
+            b"archive".to_vec(),
+        )
+        .await?;
+        subduction_keyhive::storage::KeyhiveStorage::<Sendable>::delete_archive(
+            &storage,
+            archive_hash,
+        )
+        .await?;
+
+        assert!(subduction_keyhive::storage::KeyhiveStorage::<Sendable>::load_archives(
+            &storage,
+        )
+        .await?
+        .is_empty());
+        assert_eq!(
+            subduction_keyhive::storage::KeyhiveStorage::<Sendable>::load_events(&storage)
+                .await?,
+            vec![(event_hash, b"event".to_vec())]
+        );
         Ok(())
     }
 }

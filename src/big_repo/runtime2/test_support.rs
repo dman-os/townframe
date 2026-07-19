@@ -6,22 +6,11 @@
 //! even with a misleading discovery audience, the returned peer IDs equal
 //! the signer-derived handshake IDs.
 //!
-//! # What is tested
-//!
-//! Two [`MemorySigner`]s create a transport pair. One side runs
-//! [`handshake::initiate`] with a deliberately bogus discovery audience;
-//! the other runs [`handshake::respond`] with the same bogus audience.
-//! The test asserts the returned peer IDs match the signers' verifying
-//! keys, proving that the handshake (not the transport layer) is
-//! authoritative for identity.
-//!
 //! [`MemorySigner`]: subduction_crypto::signer::memory::MemorySigner
 
-use core::time::Duration;
-use std::sync::Arc;
-
-use async_channel;
+use crate::interlude::*;
 use future_form::{FutureForm, Sendable};
+
 use subduction_core::{
     handshake::audience::Audience,
     handshake::{self, Handshake},

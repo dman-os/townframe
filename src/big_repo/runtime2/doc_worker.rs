@@ -31,8 +31,6 @@ pub fn spawn_doc_worker<F, T>(
     doc_id: DocumentId,
     io: Arc<dyn DocIo<F>>,
     change_manager: Arc<crate::changes::ChangeListenerManager>,
-    sync_policy: crate::runtime::BigRepoSyncPolicy,
-    clock: Arc<dyn crate::runtime2::Clock>,
     tasks: &T,
     runtime_evt_tx: async_channel::Sender<crate::runtime2::Runtime2Evt>,
 ) -> eyre::Result<(
@@ -53,8 +51,6 @@ where
         state: DocState::Unloaded,
         io,
         change_manager,
-        sync_policy,
-        clock,
         msg_tx: msg_tx.clone(),
         evt_tx: runtime_evt_tx.clone(),
         last_notified_heads: None,
@@ -83,29 +79,88 @@ where
     ))
 }
 
+// ─── Mailbox loop trait (discharges from_send_future for wasm) ──────────
+
+/// Trait that isolates the doc-worker\'s mailbox loop from the
+/// `FutureForm::from_send_future` Send requirement.
+///
+/// The `#[future_form]` macro generates a `Sendable` impl where the async
+/// block must be `Send` and a `Local` impl where it need not be.  This is the
+/// wasm compatibility lever: `DocIo<Local>` returns non-Send futures, so the
+/// `Local` variant of this trait does not require them to be `Send`.
+pub(crate) trait DocWorkerLoop<F: FutureForm> {
+    fn mailbox_loop(
+        worker: DocWorker2<F>,
+        msg_rx: async_channel::Receiver<DocWorkerMsg>,
+        stop_registration: futures::future::AbortRegistration,
+        runtime_evt_tx: async_channel::Sender<crate::runtime2::Runtime2Evt>,
+        doc_id: DocumentId,
+    ) -> F::Future<'static, eyre::Result<()>>;
+}
+
+#[future_form::future_form(Sendable, Local)]
+impl<F: FutureForm> DocWorkerLoop<F> for F {
+    fn mailbox_loop(
+        mut worker: DocWorker2<F>,
+        msg_rx: async_channel::Receiver<DocWorkerMsg>,
+        stop_registration: futures::future::AbortRegistration,
+        runtime_evt_tx: async_channel::Sender<crate::runtime2::Runtime2Evt>,
+        doc_id: DocumentId,
+    ) -> F::Future<'static, eyre::Result<()>> {
+        F::from_future(async move {
+            let result = futures::future::Abortable::new(
+                async {
+                    loop {
+                        match msg_rx.recv().await {
+                            Ok(msg) => {
+                                worker.handle_msg(msg).await?;
+                                worker.resolve_quiescence_waiters().await?;
+                            }
+                            Err(async_channel::RecvError) => break,
+                        }
+                    }
+                    eyre::Ok(())
+                },
+                stop_registration,
+            )
+            .await;
+
+            if matches!(&result, Ok(Ok(()))) {
+                runtime_evt_tx
+                    .send(crate::runtime2::Runtime2Evt::DocWorkerStopped { doc_id })
+                    .await
+                    .map_err(|_| ferr!("hub event channel closed"))?;
+            }
+
+            match result {
+                Ok(Err(error)) if runtime_evt_tx.is_closed() => {
+                    tracing::debug!(%doc_id, ?error, "doc worker stopped after runtime shutdown");
+                    Ok(())
+                }
+                Ok(ok) => ok,
+                Err(_) => Ok(()),
+            }
+        })
+    }
+}
+
 struct DocWorker2<F: FutureForm> {
     doc_id: DocumentId,
     sed_id: sedimentree_core::id::SedimentreeId,
 
     /// The 4-state machine (Unloaded / Transient / Live / PendingMaterialization).
     state: DocState,
+    change_manager: Arc<crate::changes::ChangeListenerManager>,
 
     /// Centralized IO surface — replaces subduction + storage + ciphertext_store
     /// + big_sync_store from the old `DocWorker`.
     io: Arc<dyn DocIo<F>>,
 
-    // ── change manager ─────────────────────────────────────────────────────
-    change_manager: Arc<crate::changes::ChangeListenerManager>,
-
-    // ── sync policy / clock ────────────────────────────────────────────────
-    sync_policy: crate::runtime::BigRepoSyncPolicy,
-    clock: Arc<dyn crate::runtime2::Clock>,
 
     // ── channels ───────────────────────────────────────────────────────────
     msg_tx: async_channel::Sender<DocWorkerMsg>,
     evt_tx: async_channel::Sender<crate::runtime2::Runtime2Evt>,
 
-    // ── head-tracking ──────────────────────────────────────────────────────
     /// The last heads we notified via the change manager. Used for no-op
     /// detection (if the live doc's heads haven't changed, skip notification).
     last_notified_heads: Option<Arc<[automerge::ChangeHash]>>,
@@ -115,7 +170,7 @@ struct DocWorker2<F: FutureForm> {
     pending_fragment_requests:
         std::collections::BTreeSet<subduction_core::subduction::request::FragmentRequested>,
 
-    // ── sync bookkeeping (parcel 4b) ───────────────────────────────────────
+    // ── sync bookkeeping ───────────────────────────────────────
     /// In-flight sync jobs: peer → (waiter_id, response_sender, internal_lease).
     pending_sync_jobs: HashMap<
         PeerId,
@@ -297,27 +352,8 @@ impl<F: FutureForm> DocWorker2<F> {
     }
 }
 
-// ═══════════════════════════════════════════════════════════════════════════
-// PUT_DOC  (parity with handle_put_doc at runtime.rs:2316)
-// ═══════════════════════════════════════════════════════════════════════════
-
 impl<F: FutureForm> DocWorker2<F> {
     /// Create a new document with initial content.
-    ///
-    /// 1. Check the worker is `Unloaded` (doc not already occupied).
-    /// 2. Stage the automerge content into loose commits + fragments.
-    /// 3. Encrypt each blob via `io.encrypt_loose_commit`.
-    /// 4. Store each commit via `io.store_commit` (the single atomic write).
-    ///    Fragment-boundary commits add to `pending_fragment_requests`.
-    /// 5. Persist any CGKA update ops emitted by encryption.
-    /// 6. Build a `LiveDocBundle`, transition to `Live`.
-    /// 7. Notify `doc_created` + `local_doc_created` via the change manager.
-    /// 8. Emit `DocWorkerHandleAcquired` to the hub.
-    /// 9. Note local keyhive changed (frontier advanced).
-    ///
-    /// Mirrors `handle_put_doc` at `runtime.rs:2316`. The old runtime also
-    /// called `set_obj_payload` (big_sync) — that is dropped in runtime2;
-    /// heads are derived on query.
     async fn put_doc(
         &mut self,
         initial_content: Box<automerge::Automerge>,
@@ -393,24 +429,8 @@ impl<F: FutureForm> DocWorker2<F> {
     }
 }
 
-// ═══════════════════════════════════════════════════════════════════════════
-// ACQUIRE_HANDLE  (parity with handle_acquire_handle at runtime.rs:2410)
-// ═══════════════════════════════════════════════════════════════════════════
-
 impl<F: FutureForm> DocWorker2<F> {
     /// Acquire a live handle to the document.
-    ///
-    /// - `Live(bundle)` and bundle still alive → upgrade the `Weak`, return
-    ///   `Ready(upgraded)`.
-    /// - `Transient(doc)` → build a new `LiveDocBundle`, transition to `Live`,
-    ///   emit `DocWorkerHandleAcquired`.
-    /// - `Unloaded` / `PendingMaterialization` → attempt to load + decrypt
-    ///   the sedimentree via `load_doc_snapshot` (hydrate + decrypt walk).
-    ///   - Fully decryptable → `Ready` + `mark_materialization_ready`.
-    ///   - Partially decryptable → `PendingMaterialization` +
-    ///     `mark_materialization_pending`.
-    ///
-    /// Mirrors `handle_acquire_handle` at `runtime.rs:2410`.
     async fn acquire_handle(
         &mut self,
         resp: futures::channel::oneshot::Sender<
@@ -418,6 +438,8 @@ impl<F: FutureForm> DocWorker2<F> {
         >,
     ) -> eyre::Result<()> {
         let result = match &self.state {
+            // - `Live(bundle)` and bundle still alive → upgrade the `Weak`, return
+            //   `Ready(upgraded)`.
             DocState::Live(bundle) => {
                 if let Some(bundle) = bundle.upgrade() {
                     self.evt_tx
@@ -433,6 +455,8 @@ impl<F: FutureForm> DocWorker2<F> {
                     self.take_or_load_transient_doc().await?
                 }
             }
+            // - `Transient(doc)` → build a new `LiveDocBundle`, transition 
+            // to `Live`, emit `DocWorkerHandleAcquired`.
             DocState::Transient(_) => {
                 // Take ownership and build a bundle.
                 let doc = match std::mem::replace(&mut self.state, DocState::Unloaded) {
@@ -449,6 +473,11 @@ impl<F: FutureForm> DocWorker2<F> {
                     .map_err(|_| ferr!("hub event channel closed"))?;
                 crate::runtime::DocLookup::Ready(bundle)
             }
+            // - `Unloaded` / `PendingMaterialization` → attempt to load + decrypt
+            //   the sedimentree via `load_doc_snapshot` (hydrate + decrypt walk).
+            //   - Fully decryptable → `Ready` + `mark_materialization_ready`.
+            //   - Partially decryptable → `PendingMaterialization` +
+            //     `mark_materialization_pending`.
             DocState::Unloaded | DocState::PendingMaterialization => {
                 self.take_or_load_transient_doc().await?
             }
@@ -459,7 +488,6 @@ impl<F: FutureForm> DocWorker2<F> {
 
     /// Load or re-load the document from storage (hydrate + decrypt walk).
     ///
-    /// Mirrors the old `load_doc_snapshot` at `runtime.rs:3610`.
     /// Returns:
     /// - `Ready(doc)` if fully decryptable.
     /// - `PendingMaterialization` if undecryptable.
@@ -536,8 +564,6 @@ impl<F: FutureForm> DocWorker2<F> {
         Ok(crate::runtime::DocLookup::Ready(doc))
     }
 
-    /// `take_or_load_transient_doc` — mirror of old `runtime.rs:3295`.
-    ///
     /// Takes ownership of the current state (replacing with `Unloaded`), then
     /// either returns the existing `Transient` doc or attempts to load from
     /// storage. Handles the `was_pending` deduplication for the
@@ -547,6 +573,7 @@ impl<F: FutureForm> DocWorker2<F> {
     ) -> eyre::Result<crate::runtime::DocLookup<Arc<crate::runtime::LiveDocBundle>>> {
         let was_pending = matches!(self.state, DocState::PendingMaterialization);
         let out = match std::mem::replace(&mut self.state, DocState::Unloaded) {
+            DocState::Live(bundle) => unreachable!("document already live"),
             DocState::Transient(doc) => {
                 // Already have a transient doc; wrap in Live bundle.
                 let bundle = Arc::new(crate::runtime::LiveDocBundle::new_noop(self.doc_id, *doc));
@@ -586,19 +613,10 @@ impl<F: FutureForm> DocWorker2<F> {
                     crate::runtime::DocLookup::Missing => crate::runtime::DocLookup::Missing,
                 }
             }
-            DocState::Live(bundle) => {
-                // Shouldn't be called when Live — restore and bail.
-                self.state = DocState::Live(bundle);
-                eyre::bail!("document already live")
-            }
         };
         Ok(out)
     }
 }
-
-// ═══════════════════════════════════════════════════════════════════════════
-// COMMIT_DELTA  (parity with handle_commit_delta at runtime.rs:2446)
-// ═══════════════════════════════════════════════════════════════════════════
 
 impl<F: FutureForm> DocWorker2<F> {
     /// Commit a set of changes locally.
@@ -809,7 +827,7 @@ impl<F: FutureForm> DocWorker2<F> {
 }
 
 // ═══════════════════════════════════════════════════════════════════════════
-// STATE TRANSITIONS  (parity with mark_materialization_* at runtime.rs:3290)
+// STATE TRANSITIONS 
 // ═══════════════════════════════════════════════════════════════════════════
 
 impl<F: FutureForm> DocWorker2<F> {
@@ -1954,67 +1972,3 @@ impl<F: FutureForm> DocWorker2<F> {
     }
 }
 
-// ─── Mailbox loop trait (discharges from_send_future for wasm) ──────────
-
-/// Trait that isolates the doc-worker\'s mailbox loop from the
-/// `FutureForm::from_send_future` Send requirement.
-///
-/// The `#[future_form]` macro generates a `Sendable` impl where the async
-/// block must be `Send` and a `Local` impl where it need not be.  This is the
-/// wasm compatibility lever: `DocIo<Local>` returns non-Send futures, so the
-/// `Local` variant of this trait does not require them to be `Send`.
-pub(crate) trait DocWorkerLoop<F: FutureForm> {
-    fn mailbox_loop(
-        worker: DocWorker2<F>,
-        msg_rx: async_channel::Receiver<DocWorkerMsg>,
-        stop_registration: futures::future::AbortRegistration,
-        runtime_evt_tx: async_channel::Sender<crate::runtime2::Runtime2Evt>,
-        doc_id: DocumentId,
-    ) -> F::Future<'static, eyre::Result<()>>;
-}
-
-#[future_form::future_form(Sendable, Local)]
-impl<F: FutureForm> DocWorkerLoop<F> for F {
-    fn mailbox_loop(
-        mut worker: DocWorker2<F>,
-        msg_rx: async_channel::Receiver<DocWorkerMsg>,
-        stop_registration: futures::future::AbortRegistration,
-        runtime_evt_tx: async_channel::Sender<crate::runtime2::Runtime2Evt>,
-        doc_id: DocumentId,
-    ) -> F::Future<'static, eyre::Result<()>> {
-        F::from_future(async move {
-            let result = futures::future::Abortable::new(
-                async {
-                    loop {
-                        match msg_rx.recv().await {
-                            Ok(msg) => {
-                                worker.handle_msg(msg).await?;
-                                worker.resolve_quiescence_waiters().await?;
-                            }
-                            Err(async_channel::RecvError) => break,
-                        }
-                    }
-                    eyre::Ok(())
-                },
-                stop_registration,
-            )
-            .await;
-
-            if matches!(&result, Ok(Ok(()))) {
-                runtime_evt_tx
-                    .send(crate::runtime2::Runtime2Evt::DocWorkerStopped { doc_id })
-                    .await
-                    .map_err(|_| ferr!("hub event channel closed"))?;
-            }
-
-            match result {
-                Ok(Err(error)) if runtime_evt_tx.is_closed() => {
-                    tracing::debug!(%doc_id, ?error, "doc worker stopped after runtime shutdown");
-                    Ok(())
-                }
-                Ok(ok) => ok,
-                Err(_) => Ok(()),
-            }
-        })
-    }
-}

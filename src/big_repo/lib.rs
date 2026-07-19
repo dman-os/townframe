@@ -4,11 +4,13 @@
 mod interlude {
     #[allow(unused_imports)]
     pub use big_sync_core::{ObjId, PeerId};
+    use future_form::{FutureForm, Sendable};
     pub use utils_rs::prelude::*;
 }
 
 use crate::interlude::*;
 use crate::keyhive_storage::{BigRepoKeyhiveStorage, KEYHIVE_SUBDIR};
+use sqlx_utils_rs::SqlCtx;
 
 use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -78,6 +80,8 @@ pub struct Config {
     /// the Subduction signer.
     pub node_identity_seed: [u8; 32],
     pub storage: StorageConfig,
+    /// Scope key used to isolate this BigRepo instance's data in SQLite storage.
+    pub scope_key: Arc<str>,
 }
 
 #[derive(Debug, Clone)]
@@ -99,6 +103,8 @@ pub struct BigRepo {
     #[educe(Debug(ignore))]
     big_sync_store: SharedPartStore,
     #[educe(Debug(ignore))]
+    sqlite_store: SqliteBigRepoStore,
+    #[educe(Debug(ignore))]
     runtime: runtime2::Runtime2Handle<future_form::Sendable>,
     #[educe(Debug(ignore))]
     ephemeral: BigEphemeral,
@@ -115,78 +121,81 @@ pub type SharedBigRepo = Arc<BigRepo>;
 impl BigRepo {
     pub const BACKEND_ID: &'static str = "BigRepoSyncBackend";
 
-    pub async fn boot(
-        config: Config,
-        big_sync_store: SharedPartStore,
-    ) -> Res<(Arc<Self>, BigRepoStopToken)> {
+    /// Boot BigRepo, constructing its own SQLite-backed store for both the
+    /// big-sync partition layer and subduction/runtime storage.
+    ///
+    /// The [`Config::scope_key`] isolates this instance's data from other
+    /// BigRepo instances sharing the same SQLite database.
+    pub async fn boot(config: Config) -> Res<(Arc<Self>, BigRepoStopToken)> {
         let Config {
             node_identity_seed,
             storage,
+            scope_key,
         } = config;
-        match storage {
-            StorageConfig::Memory => {
-                Self::boot_inner(
-                    Config {
-                        node_identity_seed,
-                        storage: StorageConfig::Memory,
-                    },
-                    big_sync_store,
-                    subduction_core::storage::memory::MemoryStorage::new(),
-                )
-                .await
-            }
+        let sql = match &storage {
+            StorageConfig::Memory => SqlCtx::memory().await?,
             StorageConfig::Disk { path } => {
-                let subduction_dir = path.join("subduction");
-                std::fs::create_dir_all(&subduction_dir).wrap_err_with(|| {
-                    format!(
-                        "Failed to create subduction directory: {}",
-                        subduction_dir.display()
-                    )
-                })?;
-                let redb_storage = subduction_redb_storage::RedbStorage::new(subduction_dir)
-                    .wrap_err("failed booting subduction redb storage")?;
-                Self::boot_inner(
-                    Config {
-                        node_identity_seed,
-                        storage: StorageConfig::Disk { path },
-                    },
-                    big_sync_store,
-                    redb_storage,
-                )
-                .await
+                std::fs::create_dir_all(path)
+                    .wrap_err_with(|| format!("failed creating BigRepo data directory: {}", path.display()))?;
+                let db_path = path.join("big_repo.sqlite");
+                SqlCtx::url(&format!("sqlite://{}", db_path.display())).await?
             }
-        }
+        };
+        let store = SqliteBigRepoStore::new(
+            sql,
+            scope_key.clone(),
+            big_sync_core::BuckId::MAX_LEVEL,
+        )
+        .await?;
+        Self::boot_inner(
+            Config {
+                node_identity_seed,
+                storage,
+                scope_key,
+            },
+            store,
+        )
+        .await
     }
-
-    /// Boot BigRepo with one SQLite store shared by runtime2 and big-sync.
-    pub async fn boot_with_sqlite(
+    #[cfg(test)]
+    pub(crate) async fn boot_with_store(
         config: Config,
         store: SqliteBigRepoStore,
     ) -> Res<(Arc<Self>, BigRepoStopToken)> {
-        let runtime_store = store.clone();
-        Self::boot_inner(config, Arc::new(store), runtime_store).await
+        Self::boot_inner(config, store).await
+    }
+    #[cfg(test)]
+    pub(crate) fn shared_part_store(&self) -> SharedPartStore {
+        Arc::clone(&self.big_sync_store)
+    }
+    #[cfg(test)]
+    pub(crate) fn sqlite_store(&self) -> SqliteBigRepoStore {
+        self.sqlite_store.clone()
     }
 
-    async fn boot_inner<S>(
+    async fn boot_inner(
         config: Config,
-        big_sync_store: SharedPartStore,
-        subduction_storage: S,
-    ) -> Res<(Arc<Self>, BigRepoStopToken)>
-    where
-        S: runtime::BigRepoSubductionStorage,
-    {
+        store: SqliteBigRepoStore,
+    ) -> Res<(Arc<Self>, BigRepoStopToken)> {
         let Config {
             node_identity_seed,
             storage,
+            scope_key: _,
         } = config;
+        let big_sync_store: SharedPartStore = Arc::new(store.clone());
+        let keyhive_events = store.clone();
+        let subduction_storage = store;
         // `SubductionKeyhive` authorizes peers by matching the peer signing
         // identity to the Keyhive individual identifier, so BigRepo derives
         // both identities from this one seed.
         let sync_policy = runtime::BigRepoSyncPolicy::default();
         let keyhive_storage = match &storage {
-            StorageConfig::Memory => BigRepoKeyhiveStorage::memory(),
-            StorageConfig::Disk { path } => BigRepoKeyhiveStorage::fs(path.join(KEYHIVE_SUBDIR))
-                .wrap_err("failed booting keyhive storage")?,
+            StorageConfig::Memory => BigRepoKeyhiveStorage::memory_sqlite(keyhive_events.clone()),
+            StorageConfig::Disk { path } => BigRepoKeyhiveStorage::fs(
+                keyhive_events.clone(),
+                path.join(KEYHIVE_SUBDIR),
+            )
+            .wrap_err("failed booting keyhive storage")?,
         };
         // Create the listener channel before constructing Keyhive so the
         // listener can be wired in (avoids the reference cycle). Only the
@@ -222,7 +231,7 @@ impl BigRepo {
 
         let (runtime, ephemeral, _events, runtime_stop) = runtime2::native::spawn_native_runtime2(
             signer,
-            subduction_storage,
+            subduction_storage.clone(),
             big_sync_store.clone(),
             Arc::clone(&policy),
             sync_policy,
@@ -241,6 +250,7 @@ impl BigRepo {
             keyhive_storage,
             sync_policy,
             big_sync_store,
+            sqlite_store: subduction_storage.clone(),
             runtime,
             ephemeral,
             keyhive_change_tx,
@@ -290,6 +300,10 @@ impl BigRepo {
 
     pub(crate) fn sync_policy(&self) -> runtime::BigRepoSyncPolicy {
         self.sync_policy
+    }
+
+    pub(crate) fn big_sync_store(&self) -> &SharedPartStore {
+        &self.big_sync_store
     }
 
     pub fn ephemeral(&self) -> BigEphemeral {
@@ -794,6 +808,7 @@ impl BigDocHandle {
         })
         .await
     }
+    #[cfg(test)]
 
     pub async fn hydrate_path_at_heads<T: Hydrate + Reconcile + Send + Sync + 'static>(
         &self,

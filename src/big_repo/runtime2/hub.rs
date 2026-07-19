@@ -100,6 +100,8 @@ pub struct Runtime2Hub<F: FutureForm, R: TaskRuntime<F>> {
     /// Access-index refreshes triggered by received membership changes.
     /// Public Keyhive sync waiters do not resolve until these finish.
     pub(crate) pending_access_refreshes: usize,
+    /// A quiescence probe has admitted a cache refresh barrier.
+    pub(crate) quiescence_cache_refresh_pending: bool,
 
     // ── runtime-wide quiescence ────────────────────────────────────────────
     pub(crate) quiescence_waiters: Vec<futures::channel::oneshot::Sender<eyre::Result<()>>>,
@@ -302,6 +304,11 @@ where
             activity_generation: generation,
             pending_docs: doc_ids.iter().copied().collect(),
         });
+        self.quiescence_cache_refresh_pending = true;
+        self.spawn_background(F::refresh_cache_for_quiescence(
+            Arc::clone(&self.runtime_io),
+            self.evt_tx.clone(),
+        ))?;
         for doc_id in doc_ids {
             let (worker, lease) = self.doc_worker_handle(doc_id)?;
             worker
@@ -339,6 +346,7 @@ where
             || !self.active_keyhive_syncs.is_empty()
             || !self.keyhive_dirty.is_empty()
             || self.pending_access_refreshes != 0
+            || self.quiescence_cache_refresh_pending
         {
             return Ok(());
         }
@@ -595,6 +603,10 @@ trait HubBackgroundFuture<F: FutureForm> {
         peer_id: PeerId,
         round_id: Option<u64>,
     ) -> F::Future<'static, eyre::Result<()>>;
+    fn refresh_cache_for_quiescence(
+        runtime_io: Arc<dyn crate::runtime2::RuntimeIo<F>>,
+        evt_tx: async_channel::Sender<Runtime2Evt>,
+    ) -> F::Future<'static, eyre::Result<()>>;
 
     fn refresh_big_sync_doc_access(
         runtime_io: Arc<dyn crate::runtime2::RuntimeIo<F>>,
@@ -724,6 +736,22 @@ impl<F: FutureForm> HubBackgroundFuture<F> for F {
             {
                 tracing::debug!(%peer_id, "runtime stopped before keyhive cache completion");
             }
+            Ok(())
+        })
+    }
+    fn refresh_cache_for_quiescence(
+        runtime_io: Arc<dyn crate::runtime2::RuntimeIo<F>>,
+        evt_tx: async_channel::Sender<Runtime2Evt>,
+    ) -> F::Future<'static, eyre::Result<()>> {
+        F::from_future(async move {
+            let result = runtime_io
+                .refresh_keyhive_cache()
+                .await
+                .wrap_err("quiescence cache refresh failed");
+            evt_tx
+                .send(Runtime2Evt::QuiescenceCacheRefreshDone { result })
+                .await
+                .map_err(|_| ferr!("runtime event channel closed"))?;
             Ok(())
         })
     }
@@ -1070,7 +1098,11 @@ where
     /// Process a single [`Runtime2Evt`]. Mirrors `handle_evt` at
     /// `runtime.rs:1315`.
     pub(crate) fn handle_evt(&mut self, evt: Runtime2Evt) -> eyre::Result<()> {
-        if !matches!(&evt, Runtime2Evt::DocWorkerQuiescent { .. }) {
+        if !matches!(
+            &evt,
+            Runtime2Evt::DocWorkerQuiescent { .. }
+                | Runtime2Evt::QuiescenceCacheRefreshDone { .. }
+        ) {
             self.note_activity();
         }
         match evt {
@@ -1106,6 +1138,18 @@ where
                 result,
             } => {
                 self.finish_keyhive_sync_after_cache(peer_id, round_id, result)?;
+            }
+            Runtime2Evt::QuiescenceCacheRefreshDone { result } => {
+                self.quiescence_cache_refresh_pending = false;
+                if let Err(error) = result {
+                    self.quiescence_probe = None;
+                    let message = error.to_string();
+                    for waiter in std::mem::take(&mut self.quiescence_waiters) {
+                        waiter
+                            .send(Err(ferr!("quiescence cache refresh failed: {message}")))
+                            .expect("quiescence waiter receiver must remain open");
+                    }
+                }
             }
             Runtime2Evt::DocSyncRequested {
                 doc_id,
@@ -1670,8 +1714,6 @@ impl<
             doc_id,
             Arc::clone(&self.doc_io),
             Arc::clone(&self.change_manager),
-            self.sync_policy,
-            Arc::clone(&self.clock),
             &self.child_tasks,
             self.evt_tx.clone(),
         )?;
@@ -1946,6 +1988,7 @@ where
         keyhive_round_ids: 0,
         keyhive_dirty: BTreeSet::new(),
         pending_access_refreshes: 0,
+        quiescence_cache_refresh_pending: false,
         quiescence_waiters: Vec::new(),
         quiescence_probe: None,
         quiescence_barrier_ids: 0,

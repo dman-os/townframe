@@ -190,14 +190,6 @@ pub trait DocIo<F: FutureForm>: Send + Sync {
         raw_blob: Vec<u8>,
     ) -> F::Future<'_, eyre::Result<()>>;
 
-    /// Update the external big-sync object payload when one is configured.
-    /// The payload carries the current document heads for partition sync.
-    fn set_doc_heads_payload(
-        &self,
-        doc_id: crate::DocumentId,
-        heads: Arc<[automerge::ChangeHash]>,
-    ) -> F::Future<'_, eyre::Result<()>>;
-
     /// Refresh keyhive caches after local encryption advances its frontier.
     fn note_local_keyhive_changed(&self) -> F::Future<'_, eyre::Result<()>>;
 
