@@ -113,10 +113,11 @@ impl Node {
         storage: StorageConfig,
         store: Arc<SqliteBigRepoStore>,
     ) -> crate::Res<Self> {
-        let (repo, repo_stop) = BigRepo::boot_with_sqlite(
+        let (repo, repo_stop) = BigRepo::boot_with_store(
             Config {
                 node_identity_seed: [seed; 32],
                 storage,
+                scope_key: Arc::from("big-repo-test"),
             },
             (*store).clone(),
         )

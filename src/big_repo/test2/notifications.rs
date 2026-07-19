@@ -1123,3 +1123,81 @@ async fn tier7_bidirectional_sync_origin_correctness() -> crate::Res<()> {
     drop(owner_doc);
     Ok(())
 }
+
+// ─── Local mutation → quiescence → Keyhive state → notification ────────────
+//
+// A local mutation completes, then an explicit `wait_for_quiescence` barrier
+// is used to observe the resulting Keyhive state (sedimentree heads advanced,
+// materialized heads present). After the barrier, the notification must have
+// been delivered. This verifies that quiescence guarantees both internal
+// consistency and notification publication.
+#[tokio::test(flavor = "multi_thread")]
+async fn tier7_local_mutation_quiescence_keyhive_state_and_notification() -> crate::Res<()> {
+    utils_rs::testing::setup_tracing_once();
+    let pair = Pair::boot(250, 251, "Owner", "Listener").await?;
+
+    let mut initial = automerge::Automerge::new();
+    initial
+        .transact(|tx| tx.put(automerge::ROOT, "title", "quiescence-state"))
+        .map_err(|err| crate::ferr!("failed creating doc: {err:?}"))?;
+    let owner_doc = pair.left().repo.create_doc(initial).await?;
+    let doc_id = owner_doc.document_id();
+
+    // Capture sedimentree heads before the mutation.
+    let pre_state = pair.left().repo.doc_head_state(doc_id).await?;
+    let pre_sedimentree = pre_state.sedimentree_heads.clone();
+
+    // Subscribe before the mutation so the notification channel is live.
+    let (_reg, mut rx) = pair
+        .left()
+        .repo
+        .subscribe_change_listener(ChangeFilter {
+            doc_id: Some(DocIdFilter::new(doc_id)),
+            origin: None,
+            path: Vec::new(),
+        })
+        .await?;
+
+    // Local mutation.
+    owner_doc
+        .with_document(|doc| {
+            doc.transact(|tx| tx.put(automerge::ROOT, "phase", "after-quiescence"))
+                .map_err(|err| crate::ferr!("failed local mutation: {err:?}"))
+        })
+        .await??;
+
+    // ── quiescence barrier: wait for all in-flight work to settle ────────
+    pair.left().repo.wait_for_quiescence(None).await?;
+
+    // ── Keyhive state observation: sedimentree heads must have advanced ──
+    let post_state = pair.left().repo.doc_head_state(doc_id).await?;
+    assert_ne!(
+        post_state.sedimentree_heads, pre_sedimentree,
+        "sedimentree heads must advance after a local mutation"
+    );
+    assert!(
+        post_state.materialized_heads.is_some(),
+        "materialized heads must be present after quiescence"
+    );
+
+    // ── Notification: must have been delivered after publication ─────────
+    let batch = recv_one(&mut rx).await;
+    let has_doc_changed = batch.iter().any(|n| match n {
+        BigRepoChangeNotification::DocChanged {
+            doc_id: seen,
+            origin: BigRepoChangeOrigin::Local,
+            ..
+        } => *seen == doc_id,
+        _ => false,
+    });
+    assert!(
+        has_doc_changed,
+        "local mutation must emit DocChanged with Local origin after quiescence"
+    );
+
+    // ── No further notifications after quiescence has settled ───────────
+    assert_no_notification(&mut rx);
+
+    drop(owner_doc);
+    Ok(())
+}

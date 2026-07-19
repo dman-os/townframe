@@ -344,7 +344,6 @@ where
         })
     }
 
-    // ── sedimentree_heads ──────────────────────────────────────────────────
     fn sedimentree_heads(
         &self,
         sed_id: SedimentreeId,
@@ -386,7 +385,6 @@ where
         })
     }
 
-    // ── hydrate_tree ──────────────────────────────────────────────────────
     fn hydrate_tree(
         &self,
         sed_id: SedimentreeId,
@@ -427,7 +425,6 @@ where
         })
     }
 
-    // ── store_commit ──────────────────────────────────────────────────────
     fn store_commit(
         &self,
         sed_id: SedimentreeId,
@@ -453,7 +450,6 @@ where
         })
     }
 
-    // ── store_fragment ────────────────────────────────────────────────────
     fn store_fragment(
         &self,
         sed_id: SedimentreeId,
@@ -497,40 +493,17 @@ where
         })
     }
 
-    // ── big-sync payload compatibility bridge ─────────────────────────────
-    fn set_doc_heads_payload(
-        &self,
-        doc_id: DocumentId,
-        heads: Arc<[automerge::ChangeHash]>,
-    ) -> <Sendable as FutureForm>::Future<'_, eyre::Result<()>> {
-        Sendable::from_future(async move {
-            let payload = serde_json::json!({
-                "heads": am_utils_rs::serialize_commit_heads(&heads),
-            });
-            self.big_sync_store
-                .set_obj_payload(doc_id, payload)
-                .await
-                .map_err(|error| ferr!("failed updating big-sync payload: {error}"))
-        })
-    }
-
-    // ── note local keyhive change ─────────────────────────────────────────
     fn note_local_keyhive_changed(&self) -> <Sendable as FutureForm>::Future<'_, eyre::Result<()>> {
         Sendable::from_future(async move {
             self.keyhive_protocol
                 .note_local_keyhive_changed()
                 .await
                 .map(|_| ())
-                .map_err(|error| ferr!("failed refreshing keyhive cache: {error}"))?;
-            // This is a best-effort invalidation hint. The direct BigRepo RPC
-            // stream carries it to connected peers; Keyhive sync carries the
-            // actual state.
-            let _ = self.keyhive_change_tx.send(());
+                .map_err(|error| ferr!("failed marking keyhive cache dirty: {error}"))?;
             Ok(())
         })
     }
 
-    // ── encrypt_loose_commit ──────────────────────────────────────────────
     fn encrypt_loose_commit(
         &self,
         sed_id: SedimentreeId,
@@ -560,7 +533,6 @@ where
         })
     }
 
-    // ── try_decrypt_content_keyed ─────────────────────────────────────────
     fn try_decrypt_content_keyed(
         &self,
         sed_id: SedimentreeId,
@@ -622,7 +594,6 @@ where
         })
     }
 
-    // ── persist_cgka_update_op ────────────────────────────────────────────
     fn persist_cgka_update_op(
         &self,
         op: keyhive_crypto::signed::Signed<beekem::operation::CgkaOperation>,
@@ -632,7 +603,6 @@ where
         )
     }
 
-    // ── try_causal_decrypt ────────────────────────────────────────────────
     fn try_causal_decrypt(
         &self,
         sed_id: SedimentreeId,
@@ -944,7 +914,10 @@ where
             self.keyhive_protocol
                 .refresh_cache()
                 .await
-                .wrap_err("keyhive cache refresh failed")
+                .wrap_err("keyhive cache refresh failed")?;
+            // Notify peers only after the refreshed projection is published.
+            let _ = self.keyhive_change_tx.send(());
+            Ok(())
         })
     }
 
@@ -1467,7 +1440,24 @@ where
         })
     })?;
 
-    // Keyhive maintenance (cache refresh + archive compact).
+    // Keyhive maintenance: cache warming and archive compaction have
+    // independent schedules. Cache refresh is also single-flight and is
+    // triggered on demand by the protocol when a sync needs fresh state.
+    {
+        let kh_proto = Arc::clone(&keyhive_protocol);
+        stop_token.child_tasks.spawn({
+            let timer = Arc::clone(&timer);
+            Sendable::from_future(async move {
+                loop {
+                    timer.sleep(std::time::Duration::from_secs(2)).await;
+                    kh_proto
+                        .refresh_cache()
+                        .await
+                        .map_err(|error| ferr!("keyhive cache refresh failed: {error}"))?;
+                }
+            })
+        })?;
+    }
     {
         let kh_proto = Arc::clone(&keyhive_protocol);
         let peer_id = PeerId::new(*local_peer_id.as_bytes());
@@ -1476,16 +1466,11 @@ where
             let timer = Arc::clone(&timer);
             Sendable::from_future(async move {
                 loop {
-                    timer.sleep(std::time::Duration::from_secs(2)).await;
-                    let _ = kh_proto
-                        .refresh_cache()
-                        .await
-                        .map_err(|e| tracing::warn!(error = %e, "keyhive cache refresh failed"));
-                    timer.sleep(std::time::Duration::from_secs(298)).await;
-                    let _ = kh_proto
+                    timer.sleep(std::time::Duration::from_secs(300)).await;
+                    kh_proto
                         .compact(keyhive_archive_id)
                         .await
-                        .map_err(|e| tracing::warn!(error = %e, "keyhive archive compact failed"));
+                        .map_err(|error| ferr!("keyhive archive compaction failed: {error}"))?;
                 }
             })
         })?;

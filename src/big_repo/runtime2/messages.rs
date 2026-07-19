@@ -155,6 +155,10 @@ pub enum Runtime2Evt {
         round_id: Option<u64>,
         result: eyre::Result<()>,
     },
+    /// Completion of the cache refresh admitted by a quiescence barrier.
+    QuiescenceCacheRefreshDone {
+        result: eyre::Result<()>,
+    },
     BigSyncAccessRefreshDone {
         result: eyre::Result<()>,
     },
