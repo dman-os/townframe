@@ -135,18 +135,16 @@ impl BigRepo {
         let sql = match &storage {
             StorageConfig::Memory => SqlCtx::memory().await?,
             StorageConfig::Disk { path } => {
-                std::fs::create_dir_all(path)
-                    .wrap_err_with(|| format!("failed creating BigRepo data directory: {}", path.display()))?;
+                std::fs::create_dir_all(path).wrap_err_with(|| {
+                    format!("failed creating BigRepo data directory: {}", path.display())
+                })?;
                 let db_path = path.join("big_repo.sqlite");
                 SqlCtx::url(&format!("sqlite://{}", db_path.display())).await?
             }
         };
-        let store = SqliteBigRepoStore::new(
-            sql,
-            scope_key.clone(),
-            big_sync_core::BuckId::MAX_LEVEL,
-        )
-        .await?;
+        let store =
+            SqliteBigRepoStore::new(sql, scope_key.clone(), big_sync_core::BuckId::MAX_LEVEL)
+                .await?;
         Self::boot_inner(
             Config {
                 node_identity_seed,
@@ -191,11 +189,10 @@ impl BigRepo {
         let sync_policy = runtime::BigRepoSyncPolicy::default();
         let keyhive_storage = match &storage {
             StorageConfig::Memory => BigRepoKeyhiveStorage::memory_sqlite(keyhive_events.clone()),
-            StorageConfig::Disk { path } => BigRepoKeyhiveStorage::fs(
-                keyhive_events.clone(),
-                path.join(KEYHIVE_SUBDIR),
-            )
-            .wrap_err("failed booting keyhive storage")?,
+            StorageConfig::Disk { path } => {
+                BigRepoKeyhiveStorage::fs(keyhive_events.clone(), path.join(KEYHIVE_SUBDIR))
+                    .wrap_err("failed booting keyhive storage")?
+            }
         };
         // Create the listener channel before constructing Keyhive so the
         // listener can be wired in (avoids the reference cycle). Only the
@@ -232,7 +229,7 @@ impl BigRepo {
         let (runtime, ephemeral, _events, runtime_stop) = runtime2::native::spawn_native_runtime2(
             signer,
             subduction_storage.clone(),
-            big_sync_store.clone(),
+            subduction_storage.clone(),
             Arc::clone(&policy),
             sync_policy,
             keyhive.clone(),
@@ -257,23 +254,6 @@ impl BigRepo {
             change_manager,
             change_manager_stop: std::sync::Mutex::new(Some(change_manager_stop)),
         });
-
-        // Boot full reindex: seed the doc-members index for our own principal
-        // before exposing the repo to callers. Running this detached allowed a
-        // later local grant refresh to be overwritten by the boot task.
-        {
-            let own_id = PeerId::new(out.keyhive.clone_keyhive().id().to_bytes());
-            let agent = keyhive_core::principal::identifier::Identifier::from(
-                ed25519_dalek::VerifyingKey::from_bytes(own_id.0.as_bytes())
-                    .expect("own id is valid"),
-            );
-            let docs = out.keyhive.docs_for_agent(&agent).await;
-            for (doc_id, access) in docs {
-                let mut agents = HashMap::new();
-                agents.insert(own_id, access);
-                out.big_sync_store.set_doc_members(doc_id, agents).await;
-            }
-        }
 
         let change_manager_stop = out
             .change_manager_stop
@@ -435,9 +415,6 @@ impl BigRepo {
         }
 
         self.runtime.note_local_keyhive_changed().await?;
-        for doc_id in affected_docs {
-            self.refresh_doc_access_index(doc_id).await?;
-        }
         Ok(())
     }
 
@@ -476,7 +453,6 @@ impl BigRepo {
         }
 
         self.runtime.note_local_keyhive_changed().await?;
-        self.refresh_doc_access_index(doc_id).await?;
 
         Ok(())
     }
@@ -500,18 +476,6 @@ impl BigRepo {
             )
             .await?;
         self.runtime.note_local_keyhive_changed().await?;
-        self.refresh_doc_access_index(doc_id).await?;
-        Ok(())
-    }
-
-    async fn refresh_doc_access_index(&self, doc_id: DocumentId) -> Res<()> {
-        let verifying_key = ed25519_dalek::VerifyingKey::from_bytes(&doc_id.into_bytes())
-            .map_err(|_| ferr!("doc_id is not a valid Ed25519 point"))?;
-        self.runtime
-            .refresh_big_sync_doc_access(keyhive_core::principal::identifier::Identifier::from(
-                verifying_key,
-            ))
-            .await?;
         Ok(())
     }
 }

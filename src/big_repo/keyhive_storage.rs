@@ -3,7 +3,6 @@
 //! Adapted from `subduction_cli/src/keyhive.rs`.
 //! Original license: Apache-2.0/MIT. (c) 2024 Ink & Switch
 
-
 // FIXME: KeyhiveStorage requires loading all archives at once instead of
 // by id which is wasteful
 
@@ -265,17 +264,21 @@ impl KeyhiveStorage<future_form::Sendable> for BigRepoKeyhiveStorage {
     ) -> BoxFuture<'_, Result<(), Self::Error>> {
         async move {
             match self {
-                Self::Memory { archives, .. } => <MemoryKeyhiveStorage as KeyhiveStorage<
-                    future_form::Sendable,
-                >>::save_archive(archives, hash, data)
-                .await
-                .map_err(Into::into),
+                Self::Memory { archives, .. } => {
+                    <MemoryKeyhiveStorage as KeyhiveStorage<future_form::Sendable>>::save_archive(
+                        archives, hash, data,
+                    )
+                    .await
+                    .map_err(Into::into)
+                }
                 Self::MemoryLegacy(storage) => <MemoryKeyhiveStorage as KeyhiveStorage<
                     future_form::Sendable,
                 >>::save_archive(storage, hash, data)
                 .await
                 .map_err(Into::into),
-                Self::Fs { archives, .. } => archives.save_archive(hash, data).await.map_err(Into::into),
+                Self::Fs { archives, .. } => {
+                    archives.save_archive(hash, data).await.map_err(Into::into)
+                }
             }
         }
         .boxed()
@@ -313,7 +316,9 @@ impl KeyhiveStorage<future_form::Sendable> for BigRepoKeyhiveStorage {
                 >>::delete_archive(storage, hash)
                 .await
                 .map_err(Into::into),
-                Self::Fs { archives, .. } => archives.delete_archive(hash).await.map_err(Into::into),
+                Self::Fs { archives, .. } => {
+                    archives.delete_archive(hash).await.map_err(Into::into)
+                }
             }
         }
         .boxed()
@@ -326,9 +331,10 @@ impl KeyhiveStorage<future_form::Sendable> for BigRepoKeyhiveStorage {
     ) -> BoxFuture<'_, Result<(), Self::Error>> {
         async move {
             match self {
-                Self::Memory { events, .. } | Self::Fs { events, .. } => {
-                    events.save_keyhive_event(hash, data).await.map_err(Into::into)
-                }
+                Self::Memory { events, .. } | Self::Fs { events, .. } => events
+                    .save_keyhive_event(hash, data)
+                    .await
+                    .map_err(Into::into),
                 Self::MemoryLegacy(storage) => <MemoryKeyhiveStorage as KeyhiveStorage<
                     future_form::Sendable,
                 >>::save_event(storage, hash, data)

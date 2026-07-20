@@ -1,6 +1,7 @@
 use crate::interlude::*;
 use future_form::FutureForm;
 
+mod group_part_worker;
 mod io;
 mod lease;
 mod messages;
@@ -10,6 +11,7 @@ mod tasks;
 #[cfg(test)]
 mod test_support;
 
+pub use doc_worker::spawn_doc_worker;
 pub use io::{
     CausalDecryptResult, Clock, DocIo, EncryptedInitialSedimentree, EncryptedLooseCommit,
     RuntimeIo, SyncDocAttempt, Timer,
@@ -17,7 +19,6 @@ pub use io::{
 pub use lease::{
     DocLease, DocWorkerEntry, DocWorkerHandle, DocWorkerInternalLease, DocWorkerStopToken,
 };
-pub use doc_worker::spawn_doc_worker;
 pub use messages::{DocWorkerMsg, Runtime2Cmd, Runtime2Evt};
 pub use tasks::{TaskRuntime, TaskSet, TokioTaskRuntime, TokioTaskSet, TokioTimer};
 

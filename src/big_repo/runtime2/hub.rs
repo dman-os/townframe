@@ -97,17 +97,18 @@ pub struct Runtime2Hub<F: FutureForm, R: TaskRuntime<F>> {
     pub(crate) active_keyhive_syncs: HashMap<PeerId, KeyhiveSyncRound>,
     pub(crate) keyhive_round_ids: u64,
     pub(crate) keyhive_dirty: BTreeSet<PeerId>,
-    /// Access-index refreshes triggered by received membership changes.
-    /// Public Keyhive sync waiters do not resolve until these finish.
-    pub(crate) pending_access_refreshes: usize,
     /// A quiescence probe has admitted a cache refresh barrier.
     pub(crate) quiescence_cache_refresh_pending: bool,
+    /// A quiescence probe is awaiting its event-log watermark.
+    pub(crate) quiescence_group_part_watermark_pending: bool,
 
     // ── runtime-wide quiescence ────────────────────────────────────────────
     pub(crate) quiescence_waiters: Vec<futures::channel::oneshot::Sender<eyre::Result<()>>>,
     pub(crate) quiescence_probe: Option<QuiescenceProbe>,
     pub(crate) quiescence_barrier_ids: u64,
     pub(crate) activity_generation: u64,
+    pub(crate) group_part_cursor: u64,
+    pub(crate) group_part_worker_pending: bool,
 
     // ── doc-worker registry ────────────────────────────────────────────────
     pub(crate) doc_workers: HashMap<DocumentId, DocWorkerEntry>,
@@ -131,13 +132,13 @@ pub(crate) struct KeyhiveSyncRound {
     pub round_id: u64,
     pub request_id: subduction_keyhive::message::RequestId,
     pub cache_refresh_started: bool,
-    pub access_refresh_waiting: bool,
 }
 
 pub(crate) struct QuiescenceProbe {
     barrier_id: u64,
     activity_generation: u64,
     pending_docs: HashSet<DocumentId>,
+    group_part_cursor: u64,
 }
 
 // ═══════════════════════════════════════════════════════════════════════════
@@ -168,12 +169,6 @@ trait HubCommandFuture<F: FutureForm> {
 
     fn note_local_keyhive_changed(
         runtime_io: Arc<dyn crate::runtime2::RuntimeIo<F>>,
-        resp: futures::channel::oneshot::Sender<eyre::Result<()>>,
-    ) -> F::Future<'static, eyre::Result<()>>;
-
-    fn refresh_doc_access(
-        runtime_io: Arc<dyn crate::runtime2::RuntimeIo<F>>,
-        target: keyhive_core::principal::identifier::Identifier,
         resp: futures::channel::oneshot::Sender<eyre::Result<()>>,
     ) -> F::Future<'static, eyre::Result<()>>;
 }
@@ -251,21 +246,6 @@ impl<F: FutureForm> HubCommandFuture<F> for F {
             Ok(())
         })
     }
-
-    fn refresh_doc_access(
-        runtime_io: Arc<dyn crate::runtime2::RuntimeIo<F>>,
-        target: keyhive_core::principal::identifier::Identifier,
-        resp: futures::channel::oneshot::Sender<eyre::Result<()>>,
-    ) -> F::Future<'static, eyre::Result<()>> {
-        F::from_future(async move {
-            let out = runtime_io
-                .refresh_big_sync_doc_access(target)
-                .await
-                .wrap_err("big-sync document access refresh failed");
-            let _ = resp.send(out);
-            Ok(())
-        })
-    }
 }
 
 impl<
@@ -303,8 +283,15 @@ where
             barrier_id,
             activity_generation: generation,
             pending_docs: doc_ids.iter().copied().collect(),
+            group_part_cursor: self.group_part_cursor,
         });
         self.quiescence_cache_refresh_pending = true;
+        self.quiescence_group_part_watermark_pending = true;
+        self.spawn_background(F::capture_group_part_watermark(
+            Arc::clone(&self.runtime_io),
+            self.evt_tx.clone(),
+            barrier_id,
+        ))?;
         self.spawn_background(F::refresh_cache_for_quiescence(
             Arc::clone(&self.runtime_io),
             self.evt_tx.clone(),
@@ -343,18 +330,20 @@ where
             return Ok(());
         }
         if !probe.pending_docs.is_empty()
-            || !self.active_keyhive_syncs.is_empty()
+            || self.quiescence_group_part_watermark_pending
             || !self.keyhive_dirty.is_empty()
-            || self.pending_access_refreshes != 0
             || self.quiescence_cache_refresh_pending
+            || self.group_part_worker_pending
+            || self.group_part_cursor < probe.group_part_cursor
         {
             return Ok(());
         }
         self.quiescence_probe = None;
         for waiter in std::mem::take(&mut self.quiescence_waiters) {
-            waiter
-                .send(Ok(()))
-                .expect("quiescence waiter receiver must remain open");
+            // A caller timeout drops the receiver; that cancellation is not
+            // a runtime failure and must not crash the hub while resolving
+            // other waiters.
+            let _ = waiter.send(Ok(()));
         }
         Ok(())
     }
@@ -526,13 +515,6 @@ where
                     resp,
                 ))?;
             }
-            Runtime2Cmd::RefreshBigSyncDocAccess { target, resp } => {
-                self.spawn_background(F::refresh_doc_access(
-                    Arc::clone(&self.runtime_io),
-                    target,
-                    resp,
-                ))?;
-            }
             Runtime2Cmd::CancelDocSyncWaiter {
                 doc_id,
                 peer_id,
@@ -607,11 +589,10 @@ trait HubBackgroundFuture<F: FutureForm> {
         runtime_io: Arc<dyn crate::runtime2::RuntimeIo<F>>,
         evt_tx: async_channel::Sender<Runtime2Evt>,
     ) -> F::Future<'static, eyre::Result<()>>;
-
-    fn refresh_big_sync_doc_access(
+    fn capture_group_part_watermark(
         runtime_io: Arc<dyn crate::runtime2::RuntimeIo<F>>,
         evt_tx: async_channel::Sender<Runtime2Evt>,
-        target: keyhive_core::principal::identifier::Identifier,
+        barrier_id: u64,
     ) -> F::Future<'static, eyre::Result<()>>;
 
     fn emit_membership_change(
@@ -756,25 +737,17 @@ impl<F: FutureForm> HubBackgroundFuture<F> for F {
         })
     }
 
-    fn refresh_big_sync_doc_access(
+    fn capture_group_part_watermark(
         runtime_io: Arc<dyn crate::runtime2::RuntimeIo<F>>,
         evt_tx: async_channel::Sender<Runtime2Evt>,
-        target: keyhive_core::principal::identifier::Identifier,
+        barrier_id: u64,
     ) -> F::Future<'static, eyre::Result<()>> {
         F::from_future(async move {
-            let result = runtime_io
-                .refresh_big_sync_doc_access(target)
+            let result = runtime_io.keyhive_event_log_cursor().await;
+            evt_tx
+                .send(Runtime2Evt::QuiescenceGroupPartWatermark { barrier_id, result })
                 .await
-                .wrap_err("big-sync document access refresh failed");
-            if evt_tx
-                .send(Runtime2Evt::BigSyncAccessRefreshDone { result })
-                .await
-                .is_err()
-            {
-                // The hub is deliberately stopped before child tasks during
-                // shutdown; completion cannot be delivered after that point.
-                tracing::debug!("runtime stopped before big-sync access refresh completion");
-            }
+                .map_err(|_| ferr!("runtime event channel closed"))?;
             Ok(())
         })
     }
@@ -1098,10 +1071,27 @@ where
     /// Process a single [`Runtime2Evt`]. Mirrors `handle_evt` at
     /// `runtime.rs:1315`.
     pub(crate) fn handle_evt(&mut self, evt: Runtime2Evt) -> eyre::Result<()> {
+        // Lifecycle/completion events update dedicated barriers below; only
+        // domain mutations restart a quiescence probe's activity generation.
         if !matches!(
             &evt,
             Runtime2Evt::DocWorkerQuiescent { .. }
                 | Runtime2Evt::QuiescenceCacheRefreshDone { .. }
+                | Runtime2Evt::QuiescenceGroupPartWatermark { .. }
+                | Runtime2Evt::GroupPartWorkerAdvanced { .. }
+                | Runtime2Evt::SyncSessionObserved { .. }
+                | Runtime2Evt::ConnEstablished { .. }
+                | Runtime2Evt::ConnLost { .. }
+                | Runtime2Evt::KeyhiveSyncDone { .. }
+                | Runtime2Evt::KeyhiveSyncFailed { .. }
+                | Runtime2Evt::KeyhiveCacheRefreshDone { .. }
+                | Runtime2Evt::KeyhiveSyncRequested { .. }
+                | Runtime2Evt::DocSyncRequested { .. }
+                | Runtime2Evt::DocSyncCompleted { .. }
+                | Runtime2Evt::DocWorkerHandleAcquired { .. }
+                | Runtime2Evt::DocWorkerStopped { .. }
+                | Runtime2Evt::DocWorkerMaterializationPending { .. }
+                | Runtime2Evt::DocWorkerMaterializationReady { .. }
         ) {
             self.note_activity();
         }
@@ -1145,11 +1135,42 @@ where
                     self.quiescence_probe = None;
                     let message = error.to_string();
                     for waiter in std::mem::take(&mut self.quiescence_waiters) {
-                        waiter
-                            .send(Err(ferr!("quiescence cache refresh failed: {message}")))
-                            .expect("quiescence waiter receiver must remain open");
+                        // A caller timeout drops the receiver; that cancellation
+                        // is not a runtime failure.
+                        let _ =
+                            waiter.send(Err(ferr!("quiescence cache refresh failed: {message}")));
                     }
                 }
+            }
+            Runtime2Evt::QuiescenceGroupPartWatermark { barrier_id, result } => {
+                let current = self
+                    .quiescence_probe
+                    .as_ref()
+                    .is_some_and(|probe| probe.barrier_id == barrier_id);
+                if current {
+                    self.quiescence_group_part_watermark_pending = false;
+                    match result {
+                        Ok(cursor) => {
+                            self.quiescence_probe
+                                .as_mut()
+                                .expect("quiescence probe disappeared")
+                                .group_part_cursor = cursor;
+                        }
+                        Err(error) => {
+                            self.quiescence_probe = None;
+                            let message = error.to_string();
+                            for waiter in std::mem::take(&mut self.quiescence_waiters) {
+                                let _ = waiter.send(Err(ferr!(
+                                    "group-part watermark capture failed: {message}"
+                                )));
+                            }
+                        }
+                    }
+                }
+            }
+            Runtime2Evt::GroupPartWorkerAdvanced { cursor } => {
+                self.group_part_cursor = self.group_part_cursor.max(cursor);
+                self.group_part_worker_pending = false;
             }
             Runtime2Evt::DocSyncRequested {
                 doc_id,
@@ -1180,28 +1201,6 @@ where
                         result,
                     })
                     .expect("task was found dead");
-            }
-            Runtime2Evt::BigSyncAccessRefreshDone { result } => {
-                assert!(
-                    self.pending_access_refreshes > 0,
-                    "access refresh completed without an admitted refresh"
-                );
-                self.pending_access_refreshes -= 1;
-                result.wrap_err("big-sync access refresh failed")?;
-                if self.pending_access_refreshes == 0 {
-                    let ready_rounds: Vec<_> = self
-                        .active_keyhive_syncs
-                        .iter()
-                        .filter_map(|(peer_id, round)| {
-                            round
-                                .access_refresh_waiting
-                                .then_some((*peer_id, round.round_id))
-                        })
-                        .collect();
-                    for (peer_id, round_id) in ready_rounds {
-                        self.complete_keyhive_sync_round(peer_id, round_id)?;
-                    }
-                }
             }
             Runtime2Evt::KeyhiveSyncRequested { peer_id } => {
                 self.schedule_internal_keyhive_sync(peer_id);
@@ -1239,6 +1238,7 @@ where
                 // and do not correspond to a BigRepo domain event.
             }
             Runtime2Evt::CgkaOp { data } => {
+                self.group_part_worker_pending = true;
                 // Every CGKA op is a document key rotation.
                 let doc_id = crate::DocumentId::new(*data.payload().doc_id().as_bytes());
                 self.change_manager
@@ -1246,6 +1246,7 @@ where
                     .expect("task was found dead");
             }
             Runtime2Evt::DelegationReceived { target, data } => {
+                self.group_part_worker_pending = true;
                 let member_id = PeerId::new(data.payload().delegate().id().to_bytes());
                 let member_is_document = matches!(
                     data.payload().delegate(),
@@ -1260,14 +1261,9 @@ where
                     false,
                     member_is_document,
                 ))?;
-                self.pending_access_refreshes += 1;
-                self.spawn_background(F::refresh_big_sync_doc_access(
-                    Arc::clone(&self.runtime_io),
-                    self.evt_tx.clone(),
-                    target,
-                ))?;
             }
             Runtime2Evt::RevocationReceived { target, data } => {
+                self.group_part_worker_pending = true;
                 let member_id = PeerId::new(data.payload().revoked_id().as_bytes());
                 let member_is_document = matches!(
                     data.payload().revoked().payload().delegate(),
@@ -1281,12 +1277,6 @@ where
                     crate::changes::BigRepoAccess::Relay,
                     true,
                     member_is_document,
-                ))?;
-                self.pending_access_refreshes += 1;
-                self.spawn_background(F::refresh_big_sync_doc_access(
-                    Arc::clone(&self.runtime_io),
-                    self.evt_tx.clone(),
-                    target,
                 ))?;
             }
         }
@@ -1387,7 +1377,6 @@ where
                 round_id,
                 request_id: request_id.clone(),
                 cache_refresh_started: false,
-                access_refresh_waiting: false,
             },
         );
         self.spawn_background(F::start_sync(
@@ -1522,10 +1511,6 @@ where
                 }
             }
             self.keyhive_dirty.remove(&peer_id);
-            return Ok(());
-        }
-        if self.pending_access_refreshes != 0 {
-            round.access_refresh_waiting = true;
             return Ok(());
         }
         self.complete_keyhive_sync_round(peer_id, round_id)
@@ -1987,12 +1972,14 @@ where
         active_keyhive_syncs: HashMap::new(),
         keyhive_round_ids: 0,
         keyhive_dirty: BTreeSet::new(),
-        pending_access_refreshes: 0,
         quiescence_cache_refresh_pending: false,
+        quiescence_group_part_watermark_pending: false,
         quiescence_waiters: Vec::new(),
         quiescence_probe: None,
         quiescence_barrier_ids: 0,
         activity_generation: 0,
+        group_part_cursor: 0,
+        group_part_worker_pending: true,
         doc_workers: HashMap::new(),
         pending_materialization: HashSet::new(),
         doc_sync_waiter_ids: Arc::clone(&doc_sync_waiter_ids),
