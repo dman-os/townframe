@@ -84,10 +84,6 @@ pub enum Runtime2Cmd {
     NoteLocalKeyhiveChanged {
         resp: futures::channel::oneshot::Sender<eyre::Result<()>>,
     },
-    RefreshBigSyncDocAccess {
-        target: keyhive_core::principal::identifier::Identifier,
-        resp: futures::channel::oneshot::Sender<eyre::Result<()>>,
-    },
     CancelDocSyncWaiter {
         doc_id: DocumentId,
         peer_id: PeerId,
@@ -159,8 +155,14 @@ pub enum Runtime2Evt {
     QuiescenceCacheRefreshDone {
         result: eyre::Result<()>,
     },
-    BigSyncAccessRefreshDone {
-        result: eyre::Result<()>,
+    /// Event-log cursor captured when a quiescence barrier is admitted.
+    QuiescenceGroupPartWatermark {
+        barrier_id: u64,
+        result: eyre::Result<u64>,
+    },
+    /// The persisted Keyhive-derived partition cursor advanced.
+    GroupPartWorkerAdvanced {
+        cursor: u64,
     },
     KeyhiveSyncRequested {
         peer_id: PeerId,

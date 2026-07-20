@@ -270,12 +270,8 @@ pub trait RuntimeIo<F: FutureForm>: Send + Sync {
     /// Notify the runtime that the local keyhive state has changed.
     fn note_local_keyhive_changed(&self) -> F::Future<'_, eyre::Result<()>>;
 
-    /// Refresh BigRepo's sync membership and partition indexes from Keyhive
-    /// for a changed target.
-    fn refresh_big_sync_doc_access(
-        &self,
-        target: keyhive_core::principal::identifier::Identifier,
-    ) -> F::Future<'_, eyre::Result<()>>;
+    /// Read the immutable Keyhive event-log watermark for quiescence barriers.
+    fn keyhive_event_log_cursor(&self) -> F::Future<'_, eyre::Result<u64>>;
 
     /// Classify a membership target without exposing Keyhive types to callers.
     fn is_document_membership_target(

@@ -356,6 +356,23 @@ impl BigKeyhiveHandle {
         caps
     }
 
+    pub(crate) async fn group_document_ids_by_id(&self) -> HashMap<[u8; 32], BTreeSet<DocumentId>> {
+        let group_ids: Vec<KhGroupId> =
+            self.keyhive.groups().lock().await.keys().copied().collect();
+        let mut out = HashMap::new();
+        for group_id in group_ids {
+            let docs = self
+                .keyhive
+                .document_ids_containing_group(group_id)
+                .await
+                .into_iter()
+                .map(|id| DocumentId::new(id.to_bytes()))
+                .collect();
+            out.insert(group_id.to_bytes(), docs);
+        }
+        out
+    }
+
     pub(crate) fn contact_card(&self) -> &keyhive_core::contact_card::ContactCard {
         &self.contact_card
     }

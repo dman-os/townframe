@@ -156,7 +156,6 @@ struct DocWorker2<F: FutureForm> {
     /// + big_sync_store from the old `DocWorker`.
     io: Arc<dyn DocIo<F>>,
 
-
     // ── channels ───────────────────────────────────────────────────────────
     msg_tx: async_channel::Sender<DocWorkerMsg>,
     evt_tx: async_channel::Sender<crate::runtime2::Runtime2Evt>,
@@ -455,7 +454,7 @@ impl<F: FutureForm> DocWorker2<F> {
                     self.take_or_load_transient_doc().await?
                 }
             }
-            // - `Transient(doc)` → build a new `LiveDocBundle`, transition 
+            // - `Transient(doc)` → build a new `LiveDocBundle`, transition
             // to `Live`, emit `DocWorkerHandleAcquired`.
             DocState::Transient(_) => {
                 // Take ownership and build a bundle.
@@ -827,7 +826,7 @@ impl<F: FutureForm> DocWorker2<F> {
 }
 
 // ═══════════════════════════════════════════════════════════════════════════
-// STATE TRANSITIONS 
+// STATE TRANSITIONS
 // ═══════════════════════════════════════════════════════════════════════════
 
 impl<F: FutureForm> DocWorker2<F> {
@@ -1971,4 +1970,3 @@ impl<F: FutureForm> DocWorker2<F> {
             .expect("runtime event channel must remain open");
     }
 }
-

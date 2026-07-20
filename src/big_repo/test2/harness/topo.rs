@@ -203,6 +203,10 @@ impl Node {
         Ok(self.store.obj_parts(doc_id).await?.contains(&part_id))
     }
 
+    pub(crate) async fn keyhive_group_part_cursor(&self) -> crate::Res<u64> {
+        self.store.keyhive_group_part_cursor().await
+    }
+
     async fn start_keyhive_rpc(&self, remote: &Self) -> crate::Res<()> {
         let client =
             crate::rpc::IrohBigRepoRpcClient::new(self.endpoint.clone(), remote.endpoint.addr());

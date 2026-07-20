@@ -92,6 +92,8 @@ pub(crate) struct NativeBigRepoIo<S>
 where
     S: BigRepoSubductionStorage,
 {
+    /// Shared SQLite state for Keyhive-derived partition/event watermarks.
+    pub(crate) group_part_store: crate::sqlite_big_repo_store::SqliteBigRepoStore,
     /// Shared subduction handle — the core sync + storage engine.
     pub(crate) subduction: Arc<BigRepoSubduction<S>>,
     /// Clonable storage backend (for direct reads).
@@ -115,12 +117,6 @@ where
     pub(crate) ephemeral_backend: Arc<dyn BigEphemeralBackend>,
     /// Direct BigRepo RPC notification source for local Keyhive changes.
     pub(crate) keyhive_change_tx: tokio::sync::broadcast::Sender<()>,
-    /// Compatibility bridge for the existing big-sync partition layer.
-    pub(crate) big_sync_store: crate::SharedPartStore,
-    /// Serialize access-index rebuilds so an older Keyhive snapshot cannot
-    /// overwrite a newer membership map while concurrent listener events are
-    /// being applied.
-    pub(crate) access_refresh_lock: Arc<async_lock::Mutex<()>>,
 }
 
 impl<S> std::fmt::Debug for NativeBigRepoIo<S>
@@ -736,11 +732,6 @@ where
                 .keyhive
                 .create_doc(parents, content_heads, &self.keyhive_storage)
                 .await?;
-            let target = Identifier::from(
-                ed25519_dalek::VerifyingKey::from_bytes(&doc_id.into_bytes())
-                    .map_err(|_| ferr!("doc_id is not a valid Ed25519 point"))?,
-            );
-            self.refresh_big_sync_doc_access(target).await?;
             Ok(doc_id)
         })
     }
@@ -805,6 +796,12 @@ where
         })
     }
 
+    fn keyhive_event_log_cursor(
+        &self,
+    ) -> <Sendable as future_form::FutureForm>::Future<'_, eyre::Result<u64>> {
+        Sendable::from_future(async move { self.group_part_store.keyhive_event_log_cursor().await })
+    }
+
     fn is_document_membership_target(
         &self,
         target: keyhive_core::principal::identifier::Identifier,
@@ -817,69 +814,6 @@ where
                 .get_document(document_id)
                 .await
                 .is_some())
-        })
-    }
-
-    // ── big-sync membership bridge ───────────────────────────────────────
-    fn refresh_big_sync_doc_access(
-        &self,
-        target: keyhive_core::principal::identifier::Identifier,
-    ) -> <Sendable as future_form::FutureForm>::Future<'_, eyre::Result<()>> {
-        Sendable::from_future(async move {
-            let _refresh_guard = self.access_refresh_lock.lock().await;
-            let agents = self
-                .keyhive
-                .agents_for_membered(target)
-                .await
-                .into_iter()
-                .map(|(id, access)| (PeerId::new(id), access))
-                .collect::<HashMap<PeerId, keyhive_core::access::Access>>();
-            let doc_id = DocumentId::new(target.to_bytes());
-            self.big_sync_store
-                .set_doc_members(doc_id, agents.clone())
-                .await;
-
-            let own_id = PeerId::new(self.keyhive.clone_keyhive().id().to_bytes());
-            if agents
-                .get(&own_id)
-                .is_some_and(|access| access.is_fetcher())
-            {
-                self.big_sync_store
-                    .add_obj_to_parts(doc_id, vec![crate::GLOBAL_PART_ID])
-                    .await
-                    .map_err(|error| {
-                        ferr!("failed adding document to global partition: {error}")
-                    })?;
-            } else {
-                self.big_sync_store
-                    .remove_obj_from_part(doc_id, crate::GLOBAL_PART_ID)
-                    .await
-                    .map_err(|error| {
-                        ferr!("failed removing document from global partition: {error}")
-                    })?;
-            }
-
-            let group_ids: std::collections::HashSet<PeerId> = self
-                .keyhive
-                .clone_keyhive()
-                .groups()
-                .lock()
-                .await
-                .keys()
-                .map(|id| PeerId::new(id.to_bytes()))
-                .collect();
-            for agent_id in agents.keys().filter(|id| group_ids.contains(id)) {
-                let group_part_id = big_sync_core::PartId::new(*agent_id.as_bytes());
-                self.big_sync_store
-                    .ensure_part(group_part_id)
-                    .await
-                    .map_err(|error| ferr!("failed ensuring group partition: {error}"))?;
-                self.big_sync_store
-                    .add_obj_to_parts(doc_id, vec![group_part_id])
-                    .await
-                    .map_err(|error| ferr!("failed adding document to group partition: {error}"))?;
-            }
-            Ok(())
         })
     }
 
@@ -1231,8 +1165,8 @@ impl subduction_core::sync_session::SyncSessionObserver for Runtime2EvtBridge {
 /// - [`Runtime2StopToken<Sendable, TokioTaskRuntime>`] — stop token.
 pub async fn spawn_native_runtime2<S>(
     signer: subduction_crypto::signer::memory::MemorySigner,
+    group_part_store: crate::sqlite_big_repo_store::SqliteBigRepoStore,
     storage: S,
-    big_sync_store: crate::SharedPartStore,
     policy: Arc<crate::runtime::BigRepoPolicy>,
     sync_policy: BigRepoSyncPolicy,
     keyhive: BigKeyhiveHandle,
@@ -1373,6 +1307,7 @@ where
 
     // ── IO facades ─────────────────────────────────────────────────────────
     let native_io = Arc::new(NativeBigRepoIo {
+        group_part_store: group_part_store.clone(),
         subduction: Arc::clone(&subduction_handle),
         storage: storage.clone(),
         sedimentrees: Arc::clone(&sedimentrees),
@@ -1384,8 +1319,6 @@ where
         ephemeral_tasks: Arc::new(utils_rs::AbortableJoinSet::new()),
         ephemeral_backend: Arc::clone(&ephemeral_backend),
         keyhive_change_tx: keyhive_change_tx.clone(),
-        big_sync_store,
-        access_refresh_lock: Arc::new(async_lock::Mutex::new(())),
     });
 
     let iroh_connect = Arc::new(IrohTransportConnect {
@@ -1422,6 +1355,20 @@ where
     // ── Background tasks (owned by child_tasks for reverse-order shutdown) ─
 
     // Subduction listener.
+    let group_part_worker = crate::runtime2::group_part_worker::GroupPartWorker::new(
+        group_part_store,
+        keyhive.clone(),
+        PeerId::new(*local_peer_id.as_bytes()),
+        Arc::clone(&timer),
+        evt_tx.clone(),
+    );
+    stop_token
+        .child_tasks
+        .spawn(Sendable::from_future(async move {
+            group_part_worker.run().await.unwrap();
+            Ok(())
+        }))?;
+
     stop_token.child_tasks.spawn({
         let listener = listener;
         Sendable::from_future(async move {

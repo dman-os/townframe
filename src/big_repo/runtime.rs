@@ -1366,7 +1366,6 @@ where
                     false,
                     member_is_document,
                 );
-                self.update_doc_access(target);
             }
             RuntimeEvt::RevocationReceived { target, data } => {
                 let revoked = data.payload().revoked_id();
@@ -1382,7 +1381,6 @@ where
                     true,
                     member_is_document,
                 );
-                self.update_doc_access(target);
             }
         }
         Ok(())
@@ -1393,65 +1391,6 @@ where
     /// Called on every DelegationReceived / RevocationReceived instead of
     /// a full O(all_docs) rebuild. The `target` is the doc or group whose
     /// membership changed.
-    fn update_doc_access(&self, target: keyhive_core::principal::identifier::Identifier) {
-        let keyhive = self.keyhive.clone();
-        let store = Arc::clone(&self.big_sync_store);
-        let own_principal = PeerId::new(self.keyhive.clone_keyhive().id().to_bytes());
-        self.spawn_background(async move {
-            let agents_raw = keyhive.agents_for_membered(target).await;
-            let agents: HashMap<PeerId, keyhive_core::access::Access> = agents_raw
-                .into_iter()
-                .map(|(k, v)| (PeerId::new(k), v))
-                .collect();
-            let doc_id = DocumentId::new(target.to_bytes());
-            store.set_doc_members(doc_id, agents.clone()).await;
-
-            // Global partition marker: are WE readable?
-            if agents
-                .get(&own_principal)
-                .map(|a| a.is_fetcher())
-                .unwrap_or(false)
-            {
-                store
-                    .add_obj_to_parts(doc_id, vec![crate::GLOBAL_PART_ID])
-                    .await
-                    .unwrap_or_else(|err| {
-                        warn!(%doc_id, error=%err, "failed adding doc to global partition");
-                    });
-            } else {
-                store
-                    .remove_obj_from_part(doc_id, crate::GLOBAL_PART_ID)
-                    .await
-                    .unwrap_or_else(|err| {
-                        warn!(%doc_id, error=%err, "failed removing doc from global partition");
-                    });
-            }
-
-            // Group partitions: agents keys whose Identifier corresponds to a Group.
-            // For each such group, add this doc to that group's partition.
-            let kh = keyhive.clone_keyhive();
-            let group_ids: std::collections::HashSet<PeerId> = {
-                let locked = kh.groups().lock().await;
-                locked
-                    .keys()
-                    .map(|gid| PeerId::new(gid.to_bytes()))
-                    .collect()
-            };
-            for (agent_id, _access) in &agents {
-                if group_ids.contains(agent_id) {
-                    let group_part_id = big_sync_core::PartId::new(*agent_id.0.as_bytes());
-                    store.ensure_part(group_part_id).await.ok();
-                    store
-                        .add_obj_to_parts(doc_id, vec![group_part_id])
-                        .await
-                        .unwrap_or_else(|err| {
-                            warn!(%doc_id, ?group_part_id, error=%err,
-                                  "failed adding doc to group partition");
-                        });
-                }
-            }
-        });
-    }
 
     /// Emit the correct domain notification for a delegation, classifying
     /// the target as document or group via background keyhive query.
