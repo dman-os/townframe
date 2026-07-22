@@ -306,7 +306,12 @@ async fn pull_required_partitions_via_big_sync_worker(
     .collect();
 
     big_sync_worker
-        .set_peer(peer_id, big_sync_rpc_client, initial_partitions.clone())
+        .set_peer(
+            peer_id,
+            big_sync_rpc_client,
+            initial_partitions.clone(),
+            HashMap::new(),
+        )
         .await?;
 
     info!("XXX onto wait_for_full_sync");

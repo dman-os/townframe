@@ -26,7 +26,7 @@ pub use part_store::host_contract as host_part_store_contract;
 pub use part_store::host_contract::HostPartStoreContractHarness;
 pub use part_store::memory::MemoryPartStore;
 pub use part_store::sqlite::SqlitePartStore;
-pub use part_store::HostPartStore;
+pub use part_store::{HostPartStore, HostPartStoreConfig};
 #[cfg(any(test, feature = "test-support"))]
 pub use worker::WorkerSnapshot;
 pub use worker::{

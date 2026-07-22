@@ -10,6 +10,12 @@ use big_sync_core::{mpsc, BuckId, Byte32Id, ObjId, PartId, PeerId};
 pub mod memory;
 pub mod sqlite;
 
+#[derive(Debug, Clone, Default)]
+pub struct HostPartStoreConfig {
+    /// Parts that remain physically present but are invisible to remote part access.
+    pub hidden_parts: HashSet<PartId>,
+}
+
 // pub type ObjStoreLease = u64;
 
 // #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -65,6 +71,15 @@ pub trait HostPartStore: Send + Sync {
         cursor: CursorIndex,
         limit: u32,
     ) -> Res<Result<HashMap<PartId, PartPage>, ListPartsError>>;
+    async fn list_events_with_policy(
+        &self,
+        parts: HashSet<PartId>,
+        cursor: CursorIndex,
+        limit: u32,
+        _enforce_policy: bool,
+    ) -> Res<Result<HashMap<PartId, PartPage>, ListPartsError>> {
+        self.list_events(parts, cursor, limit).await
+    }
 
     /// Subscribe to events for the given parts, filtering events for
     /// the given `subscriber` (ed25519 verifying key bytes).
@@ -74,7 +89,15 @@ pub trait HostPartStore: Send + Sync {
         reqs: SubPartsRequest,
         subscriber: PeerId,
     ) -> Res<Result<mpsc::Receiver<SubEvent>, ListPartsError>>;
-
+    /// Subscribe a trusted local consumer without remote authorization or
+    /// hidden-part filtering. This method is intentionally not exposed by RPC.
+    /// Stores that do not provide a local mirror return an error.
+    async fn subscribe_local(
+        &self,
+        _reqs: SubPartsRequest,
+    ) -> Res<Result<mpsc::Receiver<SubEvent>, ListPartsError>> {
+        Err(ferr!("local subscription mirror is not available"))
+    }
     async fn ensure_part(&self, part_id: PartId) -> Res<()>;
 
     /// Set the agents who have access to `doc` and their [`Access`] level.
@@ -1142,11 +1165,10 @@ pub mod host_contract {
         let rx = store
             .subscribe(
                 SubPartsRequest {
-                    peer_id: relay,
-                    parts: vec![big_sync_core::rpc::PartStreamCursorRequest {
+                    target: big_sync_core::rpc::SubscriptionTarget::Part {
                         part_id: part,
                         cursor: 0,
-                    }],
+                    },
                 },
                 relay,
             )
@@ -1169,7 +1191,10 @@ pub mod host_contract {
                     assert_eq!(event.part_id, part);
                     break;
                 }
-                SubEvent::ReplayComplete | SubEvent::Changed(_) | SubEvent::Removed(_) => {}
+                SubEvent::ReplayComplete
+                | SubEvent::Changed(_)
+                | SubEvent::Removed(_)
+                | SubEvent::ObjectChanged(_) => {}
             }
         }
         Ok(())
@@ -1205,11 +1230,10 @@ pub mod host_contract {
         let rx = store
             .subscribe(
                 SubPartsRequest {
-                    peer_id: sub_peer,
-                    parts: vec![big_sync_core::rpc::PartStreamCursorRequest {
+                    target: big_sync_core::rpc::SubscriptionTarget::Part {
                         part_id: part_b,
                         cursor: 3,
-                    }],
+                    },
                 },
                 sub_peer,
             )
@@ -1274,11 +1298,10 @@ pub mod host_contract {
         let auth_rx = store
             .subscribe(
                 SubPartsRequest {
-                    peer_id: auth_peer,
-                    parts: vec![big_sync_core::rpc::PartStreamCursorRequest {
+                    target: big_sync_core::rpc::SubscriptionTarget::Part {
                         part_id: part,
                         cursor: 0,
-                    }],
+                    },
                 },
                 auth_peer,
             )
@@ -1301,11 +1324,10 @@ pub mod host_contract {
         let denied_rx = store
             .subscribe(
                 SubPartsRequest {
-                    peer_id: denied_peer,
-                    parts: vec![big_sync_core::rpc::PartStreamCursorRequest {
+                    target: big_sync_core::rpc::SubscriptionTarget::Part {
                         part_id: part,
                         cursor: 0,
-                    }],
+                    },
                 },
                 denied_peer,
             )
@@ -1334,6 +1356,9 @@ pub mod host_contract {
                     panic!(
                         "denied subscriber must not receive Removed event during replay; got {transition:?}"
                     );
+                }
+                SubEvent::ObjectChanged(_) => {
+                    panic!("denied subscriber must not receive ObjectChanged event during replay");
                 }
                 SubEvent::ReplayComplete => {}
             }
@@ -1378,11 +1403,10 @@ pub mod host_contract {
             store
                 .subscribe(
                     SubPartsRequest {
-                        peer_id: peer,
-                        parts: vec![big_sync_core::rpc::PartStreamCursorRequest {
+                        target: big_sync_core::rpc::SubscriptionTarget::Part {
                             part_id: part,
                             cursor: 0,
-                        }],
+                        },
                     },
                     peer,
                 )
@@ -1444,7 +1468,12 @@ pub mod host_contract {
 
         store.ensure_part(part_a).await?;
         store.ensure_part(part_b).await?;
-
+        store
+            .set_doc_members(
+                obj,
+                HashMap::from([(peer, keyhive_core::access::Access::Read)]),
+            )
+            .await;
         // Build events: cursor 1-4 only for part_a, 5-6 involve part_b.
         // First set payload while obj has no parts (no event recorded).
         store.set_obj_payload(obj, payload("per-cursor", 1)).await?;
@@ -1484,39 +1513,51 @@ pub mod host_contract {
 
         // Subscribe with per-part cursors: part_a is fully caught up at its
         // actual cursor, part_b starts from scratch (cursor 0).
-        let rx = store
+        // Since the new API uses single-target SubPartsRequest, subscribe
+        // separately per part.
+        let rx_a = store
             .subscribe(
                 SubPartsRequest {
-                    peer_id: peer,
-                    parts: vec![
-                        big_sync_core::rpc::PartStreamCursorRequest {
-                            part_id: part_a,
-                            cursor: part_a_cursor,
-                        },
-                        big_sync_core::rpc::PartStreamCursorRequest {
-                            part_id: part_b,
-                            cursor: 0,
-                        },
-                    ],
+                    target: big_sync_core::rpc::SubscriptionTarget::Part {
+                        part_id: part_a,
+                        cursor: part_a_cursor,
+                    },
+                },
+                peer,
+            )
+            .await??;
+        let rx_b = store
+            .subscribe(
+                SubPartsRequest {
+                    target: big_sync_core::rpc::SubscriptionTarget::Part {
+                        part_id: part_b,
+                        cursor: 0,
+                    },
                 },
                 peer,
             )
             .await??;
 
-        let events = collect_sub_events(&rx).await?;
+        let events_a = collect_sub_events(&rx_a).await?;
         // The replay must not rehash Added(part_a) since part_a is caught up.
+        for evt in &events_a {
+            if let SubEvent::Added(transition) = evt {
+                if transition.part_id == part_a && transition.obj_id == obj {
+                    panic!(
+                        "replayed Added event for part_a at cursor {} (part_a cursor {}, should be skipped)",
+                        transition.cursor, part_a_cursor,
+                    );
+                }
+            }
+        }
+
+        let events_b = collect_sub_events(&rx_b).await?;
         // Added(part_b) and any Changed mentioning part_b must be replayed.
         let mut saw_part_b_added = false;
         let mut saw_part_b_changed = false;
-        for evt in &events {
+        for evt in &events_b {
             match evt {
                 SubEvent::Added(transition) => {
-                    if transition.part_id == part_a && transition.obj_id == obj {
-                        panic!(
-                            "replayed Added event for part_a at cursor {} (part_a cursor {}, should be skipped)",
-                            transition.cursor, part_a_cursor,
-                        );
-                    }
                     if transition.part_id == part_b && transition.obj_id == obj {
                         saw_part_b_added = true;
                     }
@@ -1526,17 +1567,17 @@ pub mod host_contract {
                         saw_part_b_changed = true;
                     }
                 }
-                SubEvent::Removed(_) => {}
+                SubEvent::Removed(_) | SubEvent::ObjectChanged(_) => {}
                 SubEvent::ReplayComplete => {}
             }
         }
         assert!(
             saw_part_b_added,
-            "replay must include the Added event for part_b; got events: {events:?}"
+            "replay must include the Added event for part_b; got events: {events_b:?}"
         );
         assert!(
             saw_part_b_changed,
-            "replay must include a Changed event involving part_b; got events: {events:?}"
+            "replay must include a Changed event involving part_b; got events: {events_b:?}"
         );
         Ok(())
     }

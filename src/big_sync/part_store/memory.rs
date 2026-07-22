@@ -128,6 +128,8 @@ structstruck::strike! {
                     subs_to_drop: Vec<Uuid>,
                     subs_by_part: HashMap<PartId, HashSet<Uuid>>,
                     part_by_sub: HashMap<Uuid, HashSet<PartId>>,
+                    subs_by_obj: HashMap<ObjId, HashSet<Uuid>>,
+                    obj_by_sub: HashMap<Uuid, ObjId>,
                     subs: HashMap<Uuid, MemorySubscription>
                 },
                 objs: HashMap<
@@ -143,6 +145,7 @@ structstruck::strike! {
                 doc_members: HashMap<ObjId, HashMap<PeerId, keyhive_core::access::Access>>,
             }
         >>,
+        hidden_parts: Arc<HashSet<PartId>>,
     }
 }
 
@@ -154,8 +157,13 @@ impl Default for MemoryPartStore {
 
 impl MemoryPartStore {
     pub fn new() -> Self {
+        Self::with_config(Default::default())
+    }
+
+    pub fn with_config(config: super::HostPartStoreConfig) -> Self {
         Self {
             inner: Arc::new(surelock::mutex::Mutex::new(default())),
+            hidden_parts: Arc::new(config.hidden_parts),
         }
     }
 }
@@ -282,15 +290,43 @@ impl MemoryPartStoreScopeState {
                 PartEvent::Added(inner) => inner.obj_id,
                 PartEvent::Removed(inner) => inner.obj_id,
             };
+            let object_evt = match &evt {
+                PartEvent::Changed(inner) => Some(SubEvent::ObjectChanged(
+                    big_sync_core::rpc::ObjChangedWithoutPart {
+                        obj_id: inner.obj_id,
+                        payload: inner.payload.clone(),
+                    },
+                )),
+                PartEvent::Added(inner) => inner.payload.clone().map(|payload| {
+                    SubEvent::ObjectChanged(big_sync_core::rpc::ObjChangedWithoutPart {
+                        obj_id: inner.obj_id,
+                        payload,
+                    })
+                }),
+                PartEvent::Removed(_) => None,
+            };
             self.events.insert(cursor, evt);
 
-            let mut recipients = HashSet::new();
+            let mut recipients = HashMap::new();
             for part_id in parts {
                 if let Some(subs) = self.bus.subs_by_part.get(&part_id) {
-                    recipients.extend(subs.iter().copied());
+                    for &sub_id in subs {
+                        let mut projected = sub_evt.clone();
+                        if let SubEvent::Changed(inner) = &mut projected {
+                            inner.part_ids = vec![part_id];
+                        }
+                        recipients.insert(sub_id, projected);
+                    }
                 }
             }
-            for sub_id in recipients {
+            if let Some(object_evt) = object_evt {
+                if let Some(subs) = self.bus.subs_by_obj.get(&evt_obj_id) {
+                    for &sub_id in subs {
+                        recipients.insert(sub_id, object_evt.clone());
+                    }
+                }
+            }
+            for (sub_id, sub_evt) in recipients {
                 let Some(mut sub) = self.bus.subs.remove(&sub_id) else {
                     continue;
                 };
@@ -326,7 +362,7 @@ impl MemoryPartStoreScopeState {
                         }
                     }
                     MemorySubscription::Live { sender, principal } => {
-                        if permitted(principal) && sender.try_send(sub_evt.clone()).is_err() {
+                        if permitted(principal) && sender.try_send(sub_evt).is_err() {
                             should_drop = true;
                         }
                         MemorySubscription::Live { sender, principal }
@@ -343,16 +379,17 @@ impl MemoryPartStoreScopeState {
             self.bus.subs_to_drop.reverse();
             for sub_id in self.bus.subs_to_drop.drain(..) {
                 self.bus.subs.remove(&sub_id);
-                let parts = self
-                    .bus
-                    .part_by_sub
-                    .remove(&sub_id)
-                    .expect(ERROR_IMPOSSIBLE);
-                for part_id in parts {
-                    let Some(set) = self.bus.subs_by_part.get_mut(&part_id) else {
-                        continue;
-                    };
-                    set.remove(&sub_id);
+                if let Some(parts) = self.bus.part_by_sub.remove(&sub_id) {
+                    for part_id in parts {
+                        if let Some(set) = self.bus.subs_by_part.get_mut(&part_id) {
+                            set.remove(&sub_id);
+                        }
+                    }
+                }
+                if let Some(obj_id) = self.bus.obj_by_sub.remove(&sub_id) {
+                    if let Some(set) = self.bus.subs_by_obj.get_mut(&obj_id) {
+                        set.remove(&sub_id);
+                    }
                 }
             }
         }
@@ -365,6 +402,21 @@ impl MemorySubsBus {
     }
     fn remove_evt(&mut self, idx: CursorIndex) {
         self.events_to_drop.push(idx);
+    }
+    fn remove_subscription(&mut self, sub_id: Uuid) {
+        self.subs.remove(&sub_id);
+        if let Some(parts) = self.part_by_sub.remove(&sub_id) {
+            for part_id in parts {
+                if let Some(subs) = self.subs_by_part.get_mut(&part_id) {
+                    subs.remove(&sub_id);
+                }
+            }
+        }
+        if let Some(obj_id) = self.obj_by_sub.remove(&sub_id) {
+            if let Some(subs) = self.subs_by_obj.get_mut(&obj_id) {
+                subs.remove(&sub_id);
+            }
+        }
     }
 }
 impl GlobalCursor {
@@ -385,6 +437,11 @@ impl HostPartStore for MemoryPartStore {
             let (guard, _key) = key.lock(&self.inner);
             let mut out = HashMap::new();
             for part_id in parts {
+                if self.hidden_parts.contains(&part_id) {
+                    return Err(ListPartsError::UnkownParts {
+                        unkown_parts: vec![part_id],
+                    });
+                }
                 let Some(part) = guard.parts.get(&part_id) else {
                     return Err(ListPartsError::UnkownParts {
                         unkown_parts: vec![part_id],
@@ -564,12 +621,74 @@ impl HostPartStore for MemoryPartStore {
             let event_payload = payload.clone();
             obj_state.payload = Some(payload);
             if obj_state.parts.is_empty() {
-                guard.flush();
+                let event = SubEvent::ObjectChanged(big_sync_core::rpc::ObjChangedWithoutPart {
+                    obj_id,
+                    payload: event_payload.clone(),
+                });
+                let sub_ids = guard
+                    .bus
+                    .subs_by_obj
+                    .get(&obj_id)
+                    .cloned()
+                    .unwrap_or_default();
+                for sub_id in sub_ids {
+                    let Some(subscription) = guard.bus.subs.remove(&sub_id) else {
+                        continue;
+                    };
+                    match subscription {
+                        MemorySubscription::Pending {
+                            sender,
+                            principal,
+                            state,
+                        } => {
+                            let permitted = guard
+                                .doc_members
+                                .get(&obj_id)
+                                .and_then(|members| members.get(&principal))
+                                .map(|access| access.is_fetcher())
+                                .unwrap_or(false);
+                            if state.mark_dirty() {
+                                if permitted && sender.try_send(event.clone()).is_err() {
+                                    guard.bus.remove_subscription(sub_id);
+                                    continue;
+                                }
+                                guard
+                                    .bus
+                                    .subs
+                                    .insert(sub_id, MemorySubscription::Live { sender, principal });
+                            } else {
+                                guard.bus.subs.insert(
+                                    sub_id,
+                                    MemorySubscription::Pending {
+                                        sender,
+                                        principal,
+                                        state,
+                                    },
+                                );
+                            }
+                        }
+                        MemorySubscription::Live { sender, principal } => {
+                            let permitted = guard
+                                .doc_members
+                                .get(&obj_id)
+                                .and_then(|members| members.get(&principal))
+                                .map(|access| access.is_fetcher())
+                                .unwrap_or(false);
+                            if permitted && sender.try_send(event.clone()).is_err() {
+                                guard.bus.remove_subscription(sub_id);
+                            } else {
+                                guard
+                                    .bus
+                                    .subs
+                                    .insert(sub_id, MemorySubscription::Live { sender, principal });
+                            }
+                        }
+                    }
+                }
                 return Ok(());
             }
-            let new_payload = obj_state.payload.as_ref().expect(ERROR_IMPOSSIBLE);
-
             let cursor = guard.global_cursor.get();
+            let new_payload = obj_state.payload.as_ref().expect(ERROR_IMPOSSIBLE);
             for &part_id in &obj_state.parts {
                 let part = guard.parts.entry(part_id).or_default();
                 let (added_at, changed_at) = {
@@ -817,29 +936,23 @@ impl HostPartStore for MemoryPartStore {
         reqs: SubPartsRequest,
         subscriber: PeerId,
     ) -> Res<Result<mpsc::Receiver<SubEvent>, ListPartsError>> {
-        tracing::debug!(part_count = reqs.parts.len(), "memory store subscribe");
-        // make sure the parts exist first
-        if let Err(err) = surelock::key::lock_scope(|key| {
-            let (mut guard, _key) = key.lock(&self.inner);
-            let guard = &mut *guard;
-            for req in &reqs.parts {
-                let part_id = req.part_id;
-                if !guard.parts.contains_key(&part_id) {
-                    return Err(ListPartsError::UnkownParts {
-                        unkown_parts: vec![part_id],
-                    });
-                };
+        let target = reqs.target;
+        if let big_sync_core::rpc::SubscriptionTarget::Part { part_id, .. } = target {
+            let known = surelock::key::lock_scope(|key| {
+                let (guard, _key) = key.lock(&self.inner);
+                !self.hidden_parts.contains(&part_id) && guard.parts.contains_key(&part_id)
+            });
+            if !known {
+                return Ok(Err(ListPartsError::UnkownParts {
+                    unkown_parts: vec![part_id],
+                }));
             }
-            Ok(())
-        }) {
-            return Ok(Err(err));
         }
         let (tx, rx) = mpsc::unbounded("MemoryPartStore".into(), "caller".into());
         let state = Arc::clone(&self.inner);
         let sub_id = Uuid::new_v4();
         let pending = PendingSubscription::new();
         let pending_for_replay = Arc::clone(&pending);
-        let parts: HashSet<_> = reqs.parts.iter().map(|req| req.part_id).collect();
         surelock::key::lock_scope(|key| {
             let (mut guard, _key) = key.lock(&self.inner);
             guard.bus.subs.insert(
@@ -850,130 +963,149 @@ impl HostPartStore for MemoryPartStore {
                     state: pending,
                 },
             );
-            for &part_id in &parts {
-                guard
-                    .bus
-                    .subs_by_part
-                    .entry(part_id)
-                    .or_default()
-                    .insert(sub_id);
+            match target {
+                big_sync_core::rpc::SubscriptionTarget::Part { part_id, .. } => {
+                    guard
+                        .bus
+                        .subs_by_part
+                        .entry(part_id)
+                        .or_default()
+                        .insert(sub_id);
+                    guard
+                        .bus
+                        .part_by_sub
+                        .insert(sub_id, HashSet::from([part_id]));
+                }
+                big_sync_core::rpc::SubscriptionTarget::Object { obj_id } => {
+                    guard
+                        .bus
+                        .subs_by_obj
+                        .entry(obj_id)
+                        .or_default()
+                        .insert(sub_id);
+                    guard.bus.obj_by_sub.insert(sub_id, obj_id);
+                }
             }
-            guard.bus.part_by_sub.insert(sub_id, parts.clone());
         });
         let fut = async move {
             let mut marker_sent = false;
-            let limit = 50;
-            let mut events = Vec::with_capacity(limit);
-            let part_cursors: HashMap<PartId, CursorIndex> = reqs
-                .parts
-                .iter()
-                .map(|req| (req.part_id, req.cursor))
-                .collect();
-            let mut cursor = part_cursors
-                .values()
-                .min()
-                .copied()
-                .unwrap_or(0)
-                .saturating_add(1);
+            let mut cursor = match target {
+                big_sync_core::rpc::SubscriptionTarget::Part { cursor, .. } => {
+                    cursor.saturating_add(1)
+                }
+                big_sync_core::rpc::SubscriptionTarget::Object { .. } => 0,
+            };
             loop {
                 pending_for_replay
                     .state
                     .store(SUB_REPLAYING_CLEAN, std::sync::atomic::Ordering::Release);
-                let mut next_cursor = cursor;
-                surelock::key::lock_scope(|key| {
-                    let (mut guard, _key) = key.lock(&state);
-                    let guard = &mut *guard;
-
-                    for (&ii, evt) in guard.events.range(cursor..) {
-                        if events.len() >= limit {
-                            next_cursor = ii + 1;
-                            break;
-                        }
-                        next_cursor = ii + 1;
-                        // Filter by doc membership.
-                        let obj_id = match evt {
-                            PartEvent::Changed(inner) => Some(inner.obj_id),
-                            PartEvent::Added(inner) => Some(inner.obj_id),
-                            PartEvent::Removed(inner) => Some(inner.obj_id),
-                        };
-                        let permitted = obj_id
-                            .and_then(|oid| guard.doc_members.get(&oid))
-                            .map(|members| {
-                                members
-                                    .get(&subscriber)
-                                    .map(|access| access.is_fetcher())
-                                    .unwrap_or(false)
-                            })
-                            .unwrap_or(true);
-                        if !permitted {
-                            continue;
-                        }
-                        // Determine which requested parts need this event
-                        // based on each part's per-part cursor.
-                        let relevant_parts: Vec<PartId> = match evt {
-                            PartEvent::Changed(inner) => inner
-                                .part_ids
-                                .iter()
-                                .filter(|pid| {
-                                    parts.contains(pid)
-                                        && ii > part_cursors.get(pid).copied().unwrap_or(0)
-                                })
-                                .copied()
-                                .collect(),
-                            PartEvent::Added(inner) => {
-                                if parts.contains(&inner.part_id)
-                                    && ii > part_cursors.get(&inner.part_id).copied().unwrap_or(0)
-                                {
-                                    vec![inner.part_id]
-                                } else {
-                                    Vec::new()
+                let mut replay = Vec::new();
+                let next_cursor = match target {
+                    big_sync_core::rpc::SubscriptionTarget::Part { part_id, .. } => {
+                        let mut next_cursor = cursor;
+                        surelock::key::lock_scope(|key| {
+                            let (guard, _key) = key.lock(&state);
+                            for (&event_cursor, event) in guard.events.range(cursor..) {
+                                next_cursor = event_cursor.saturating_add(1);
+                                let obj_id = match event {
+                                    PartEvent::Changed(inner) => inner.obj_id,
+                                    PartEvent::Added(inner) => inner.obj_id,
+                                    PartEvent::Removed(inner) => inner.obj_id,
+                                };
+                                let permitted = guard
+                                    .doc_members
+                                    .get(&obj_id)
+                                    .map(|members| {
+                                        members
+                                            .get(&subscriber)
+                                            .map(|access| access.is_fetcher())
+                                            .unwrap_or(false)
+                                    })
+                                    .unwrap_or(true);
+                                if !permitted {
+                                    continue;
+                                }
+                                let event = match event {
+                                    PartEvent::Changed(inner)
+                                        if inner.part_ids.contains(&part_id) =>
+                                    {
+                                        let mut projected = inner.clone();
+                                        projected.part_ids = vec![part_id];
+                                        Some(PartEvent::Changed(projected))
+                                    }
+                                    PartEvent::Added(inner) if inner.part_id == part_id => {
+                                        Some(PartEvent::Added(inner.clone()))
+                                    }
+                                    PartEvent::Removed(inner) if inner.part_id == part_id => {
+                                        Some(PartEvent::Removed(inner.clone()))
+                                    }
+                                    _ => None,
+                                };
+                                if let Some(event) = event {
+                                    replay.push(event);
+                                }
+                                if replay.len() >= 50 {
+                                    break;
                                 }
                             }
-                            PartEvent::Removed(inner) => {
-                                if parts.contains(&inner.part_id)
-                                    && ii > part_cursors.get(&inner.part_id).copied().unwrap_or(0)
-                                {
-                                    vec![inner.part_id]
-                                } else {
-                                    Vec::new()
-                                }
-                            }
-                        };
-                        if relevant_parts.is_empty() {
-                            continue;
-                        }
-                        // For Changed events, project part_ids to only
-                        // the parts that are still catching up.
-                        let projected = match evt {
-                            PartEvent::Changed(inner)
-                                if relevant_parts.len() < inner.part_ids.len() =>
-                            {
-                                let mut projected = inner.clone();
-                                projected.part_ids = relevant_parts;
-                                PartEvent::Changed(projected)
-                            }
-                            _ => evt.clone(),
-                        };
-                        events.push(projected);
-                        next_cursor = ii + 1;
+                        });
+                        next_cursor
                     }
-                });
-                let batch_done = events.is_empty();
-                for evt in events.drain(..) {
-                    if tx
-                        .send(match evt {
+                    big_sync_core::rpc::SubscriptionTarget::Object { obj_id } => {
+                        surelock::key::lock_scope(|key| {
+                            let (guard, _key) = key.lock(&state);
+                            let permitted = guard
+                                .doc_members
+                                .get(&obj_id)
+                                .and_then(|members| members.get(&subscriber))
+                                .map(|access| access.is_fetcher())
+                                .unwrap_or(false);
+                            if permitted {
+                                if let Some(Some(payload)) = guard
+                                    .objs
+                                    .get(&obj_id)
+                                    .map(|details| details.payload.clone())
+                                {
+                                    replay.push(PartEvent::Changed(
+                                        big_sync_core::rpc::ObjChanged {
+                                            cursor: 0,
+                                            part_ids: Vec::new(),
+                                            obj_id,
+                                            payload,
+                                        },
+                                    ));
+                                }
+                            }
+                        });
+                        0
+                    }
+                };
+                let had_replay = !replay.is_empty();
+                for event in replay.drain(..) {
+                    let event = if matches!(
+                        target,
+                        big_sync_core::rpc::SubscriptionTarget::Object { .. }
+                    ) {
+                        let PartEvent::Changed(inner) = event else {
+                            unreachable!("object subscription replay must be a changed event");
+                        };
+                        SubEvent::ObjectChanged(big_sync_core::rpc::ObjChangedWithoutPart {
+                            obj_id: inner.obj_id,
+                            payload: inner.payload,
+                        })
+                    } else {
+                        match event {
                             PartEvent::Changed(inner) => SubEvent::Changed(inner),
                             PartEvent::Added(inner) => SubEvent::Added(inner),
                             PartEvent::Removed(inner) => SubEvent::Removed(inner),
-                        })
-                        .await
-                        .is_err()
-                    {
+                        }
+                    };
+                    if tx.send(event).await.is_err() {
                         return;
                     }
                 }
                 cursor = next_cursor;
-                if !batch_done {
+                if had_replay {
                     continue;
                 }
                 if !marker_sent {
@@ -1350,6 +1482,14 @@ mod tests {
         let peer = PeerId::new([64u8; 32]);
 
         store.ensure_part(part).await?;
+        for obj in [first, second] {
+            store
+                .set_doc_members(
+                    obj,
+                    HashMap::from([(peer, keyhive_core::access::Access::Read)]),
+                )
+                .await;
+        }
         for (obj, value) in [(first, "first"), (second, "second")] {
             store.set_obj_payload(obj, serde_json::json!(value)).await?;
         }
@@ -1358,11 +1498,10 @@ mod tests {
         let rx = store
             .subscribe(
                 SubPartsRequest {
-                    peer_id: peer,
-                    parts: vec![big_sync_core::rpc::PartStreamCursorRequest {
+                    target: big_sync_core::rpc::SubscriptionTarget::Part {
                         part_id: part,
                         cursor: 0,
-                    }],
+                    },
                 },
                 peer,
             )
@@ -1381,7 +1520,7 @@ mod tests {
                     seen.insert(event.obj_id);
                 }
                 SubEvent::ReplayComplete => break,
-                SubEvent::Changed(_) | SubEvent::Removed(_) => {}
+                SubEvent::Changed(_) | SubEvent::Removed(_) | SubEvent::ObjectChanged(_) => {}
             }
         }
         if !seen.contains(&second) {
@@ -1417,11 +1556,10 @@ mod tests {
         let rx = store
             .subscribe(
                 SubPartsRequest {
-                    peer_id: big_sync_core::PeerId::new([0u8; 32]),
-                    parts: vec![big_sync_core::rpc::PartStreamCursorRequest {
+                    target: big_sync_core::rpc::SubscriptionTarget::Part {
                         part_id: part,
                         cursor: 0,
-                    }],
+                    },
                 },
                 reader,
             )
@@ -1443,11 +1581,10 @@ mod tests {
         let rx2 = store
             .subscribe(
                 SubPartsRequest {
-                    peer_id: big_sync_core::PeerId::new([0u8; 32]),
-                    parts: vec![big_sync_core::rpc::PartStreamCursorRequest {
+                    target: big_sync_core::rpc::SubscriptionTarget::Part {
                         part_id: part,
                         cursor: 0,
-                    }],
+                    },
                 },
                 non_reader,
             )
@@ -1485,11 +1622,10 @@ mod tests {
         let rx = store
             .subscribe(
                 SubPartsRequest {
-                    peer_id: big_sync_core::PeerId::new([0u8; 32]),
-                    parts: vec![big_sync_core::rpc::PartStreamCursorRequest {
+                    target: big_sync_core::rpc::SubscriptionTarget::Part {
                         part_id: part,
                         cursor: 0,
-                    }],
+                    },
                 },
                 peer,
             )

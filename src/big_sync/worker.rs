@@ -6,8 +6,8 @@ use crate::trap;
 use crate::SyncBackend;
 
 use big_sync_core::{
-    mpsc, BigSyncEvent, BigSyncMachine, BigSyncMachineCommand, MachineTask, MachineTaskMsg, PartId,
-    PeerId, SyncTask, SyncTaskCompletion, SyncTaskDeets, TaskCtx, TaskId,
+    mpsc, BigSyncEvent, BigSyncMachine, BigSyncMachineCommand, MachineTask, MachineTaskMsg, ObjId,
+    PartId, PeerId, SyncTask, SyncTaskCompletion, SyncTaskDeets, TaskCtx, TaskId,
 };
 use rand::{rngs::StdRng, SeedableRng};
 
@@ -26,10 +26,15 @@ type SharedRpcClients = Arc<std::sync::Mutex<HashMap<PeerId, SharedPeerRpcClient
 
 #[derive(Debug, thiserror::Error, displaydoc::Display, Serialize, Deserialize)]
 pub enum BigSyncWorkerError {
-    /// Unkown backend {backend_id} set for part {part_id}
+    /// Unknown backend {backend_id} set for part {part_id}
     UnknownBackend {
         backend_id: BackendId,
         part_id: PartId,
+    },
+    /// Unknown backend {backend_id} set for object {obj_id:?}
+    UnknownObjectBackend {
+        backend_id: BackendId,
+        obj_id: ObjId,
     },
     /// Unknown peer {peer_id} in full sync waiter request
     UnknownPeer { peer_id: PeerId },
@@ -47,6 +52,8 @@ structstruck::strike! {
             client: SharedPeerRpcClient,
             /// Partitions to sync from the peer
             parts: HashMap<PartId, BackendId>,
+            /// Objects to follow directly from the peer
+            objects: HashMap<ObjId, BackendId>,
             resp: tokio::sync::oneshot::Sender<Result<(), BigSyncWorkerError>>
         },
         RemovePeer {
@@ -131,20 +138,23 @@ impl BigSyncWorkerHandle {
         peer_id: PeerId,
         client: Arc<dyn crate::rpc::HostBigRpcClient>,
         parts: HashMap<PartId, BackendId>,
+        objects: HashMap<ObjId, BackendId>,
     ) -> Res<()> {
         let part_count = parts.len();
+        let object_count = objects.len();
         let (resp_tx, resp_rx) = tokio::sync::oneshot::channel();
         self.host_tx
             .send(BigSyncWorkerMsg::SetPeer {
                 peer_id,
                 client,
                 parts,
+                objects,
                 resp: resp_tx,
             })
             .await
             .wrap_err(ERROR_CHANNEL)?;
-        tracing::debug!(peer_id = %peer_id, part_count, "queue set peer");
         resp_rx.await.wrap_err(ERROR_CHANNEL)??;
+        tracing::debug!(peer_id = %peer_id, part_count, object_count, "queue set peer");
         Ok(())
     }
 
@@ -377,6 +387,7 @@ struct BigSyncWorker {
 
 struct PeerState {
     parts: HashMap<PartId, BackendId>,
+    objects: HashMap<ObjId, BackendId>,
 }
 
 struct TaskDeets {
@@ -504,6 +515,7 @@ impl BigSyncWorker {
                 peer_id,
                 client,
                 parts,
+                objects,
                 resp,
             } => {
                 for (&part_id, backend_id) in &parts {
@@ -511,6 +523,17 @@ impl BigSyncWorker {
                         resp.send(Err(BigSyncWorkerError::UnknownBackend {
                             backend_id: Arc::clone(backend_id),
                             part_id,
+                        }))
+                        .inspect_err(|_| warn!(ERROR_CALLER))
+                        .ok();
+                        return Ok(());
+                    }
+                }
+                for (&obj_id, backend_id) in &objects {
+                    if !self.sync_backends.contains_key(backend_id) {
+                        resp.send(Err(BigSyncWorkerError::UnknownObjectBackend {
+                            backend_id: Arc::clone(backend_id),
+                            obj_id,
                         }))
                         .inspect_err(|_| warn!(ERROR_CALLER))
                         .ok();
@@ -525,23 +548,27 @@ impl BigSyncWorker {
                     peer_id,
                     PeerState {
                         parts: parts.clone(),
+                        objects: objects.clone(),
                     },
                 );
                 let part_count = parts.len();
+                let object_count = objects.len();
                 let evt = BigSyncEvent::SetPeer(big_sync_core::SetPeerEvent {
                     peer_id,
                     parts: parts.into_keys().collect(),
+                    objects: objects.into_keys().collect(),
                 });
-                resp.send(Ok(())).inspect_err(|_| warn!(ERROR_CALLER)).ok();
-                tracing::debug!(peer_id = %peer_id, part_count, "accept set peer");
                 self.machine.handle_evt(evt);
+                resp.send(Ok(())).inspect_err(|_| warn!(ERROR_CALLER)).ok();
+                tracing::debug!(peer_id = %peer_id, part_count, object_count, "accept set peer");
             }
             BigSyncWorkerMsg::RemovePeer { peer_id, resp } => {
                 self.peers.remove(&peer_id);
+                self.rpc_clients.lock().expect(ERROR_MUTEX).remove(&peer_id);
                 let evt = BigSyncEvent::RemovePeer(big_sync_core::RemovePeerEvent { peer_id });
+                self.machine.handle_evt(evt);
                 resp.send(()).inspect_err(|_| warn!(ERROR_CALLER)).ok();
                 tracing::debug!(peer_id = %peer_id, "accept remove peer");
-                self.machine.handle_evt(evt);
             }
             BigSyncWorkerMsg::WaitForFullSync {
                 waiter_id,
@@ -722,19 +749,21 @@ impl BigSyncWorker {
             .peers
             .get(&task.deets.peer_id)
             .expect(ERROR_UNRECONIZED);
-        let mut part_ids: Vec<PartId> = if task.part_hints.is_empty() {
+        let object_backend_id = if task.part_hints.is_empty() {
+            peer_state.objects.get(&task.deets.obj_id).cloned()
+        } else {
+            None
+        };
+        let mut part_ids: Vec<PartId> = if object_backend_id.is_some() {
+            Vec::new()
+        } else if task.part_hints.is_empty() {
             self.part_store.obj_parts(task.deets.obj_id).await?
         } else {
             task.part_hints.iter().copied().collect()
         };
         part_ids.sort_unstable();
         part_ids.dedup();
-        assert!(
-            !part_ids.is_empty(),
-            "sync task for obj {:?} had no parts to resolve a backend",
-            task.deets.obj_id
-        );
-        let mut backend_id = None;
+        let mut backend_id = object_backend_id;
         for part_id in &part_ids {
             let Some(part_backend_id) = peer_state.parts.get(part_id) else {
                 panic!(

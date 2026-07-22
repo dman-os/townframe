@@ -3,6 +3,7 @@
 
 use crate::interlude::*;
 
+#[derive(Debug)]
 pub struct Receiver<T> {
     from: Arc<str>,
     inner: async_channel::Receiver<T>,
@@ -31,6 +32,7 @@ impl<T> Receiver<T> {
     }
 }
 
+#[derive(Debug)]
 pub struct Sender<T> {
     to: Arc<str>,
     inner: async_channel::Sender<T>,

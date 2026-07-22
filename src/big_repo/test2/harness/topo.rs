@@ -118,6 +118,7 @@ impl Node {
                 node_identity_seed: [seed; 32],
                 storage,
                 scope_key: Arc::from("big-repo-test"),
+                hidden_parts: Default::default(),
             },
             (*store).clone(),
         )
@@ -301,6 +302,7 @@ impl Node {
                     target_part_store: Arc::clone(&remote.store) as crate::SharedPartStore,
                 }),
                 parts,
+                HashMap::new(),
             )
             .await?;
         let parts = stress_support::test_parts()
@@ -315,6 +317,7 @@ impl Node {
                     target_part_store: Arc::clone(&self.store) as crate::SharedPartStore,
                 }),
                 parts,
+                HashMap::new(),
             )
             .await?;
         if enable_keyhive_notifications {

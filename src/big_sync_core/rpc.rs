@@ -227,11 +227,7 @@ structstruck::strike! {
 structstruck::strike! {
     #[structstruck::each[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]]
     pub struct PeerSummaryResult {
-        /// Only known partitions where the requestor has
-        /// accessed are returned here. If an expected partition
-        /// is missing, either access is denied or the peer doesn't
-        /// know of the partitions yet. Request again with backoff
-        /// in case peer learns of partitions from the current node
+        /// Only known partitions where the requestor has accessed are returned here.
         pub parts: Map<
             PartId,
             pub struct PartSummary {
@@ -243,18 +239,20 @@ structstruck::strike! {
     }
 }
 
-structstruck::strike! {
-    #[structstruck::each[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]]
-    pub struct SubPartsRequest {
-        /// The subscriber's identity (ed25519 verifying key bytes — same as PeerId).
-        pub peer_id: PeerId,
-        pub parts: Vec<
-            pub struct PartStreamCursorRequest {
-                pub part_id: PartId,
-                pub cursor: CursorIndex,
-            }
-        >,
-    }
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub enum SubscriptionTarget {
+    Part {
+        part_id: PartId,
+        cursor: CursorIndex,
+    },
+    Object {
+        obj_id: ObjId,
+    },
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SubPartsRequest {
+    pub target: SubscriptionTarget,
 }
 
 structstruck::strike! {
@@ -338,7 +336,15 @@ structstruck::strike! {
         Changed(ObjChanged),
         Added(ObjAddedToPart),
         Removed(ObjRemovedFromPart),
-        ReplayComplete ,
+        ObjectChanged(pub struct ObjChangedWithoutPart {
+            pub obj_id: ObjId,
+            #[serde(
+                serialize_with = "value_as_string",
+                deserialize_with = "value_from_string"
+            )]
+            pub payload: ObjPayload,
+        }),
+        ReplayComplete,
     }
 }
 

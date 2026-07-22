@@ -95,6 +95,8 @@ struct SqliteSubscription {
 struct SqliteSubscriptions {
     by_part: HashMap<PartId, HashSet<Uuid>>,
     parts_by_sub: HashMap<Uuid, HashSet<PartId>>,
+    by_obj: HashMap<ObjId, HashSet<Uuid>>,
+    obj_by_sub: HashMap<Uuid, ObjId>,
     pending: HashSet<Uuid>,
     live: HashSet<Uuid>,
     subs: HashMap<Uuid, Arc<SqliteSubscription>>,
@@ -105,11 +107,15 @@ impl SqliteSubscriptions {
         self.pending.remove(&sub_id);
         self.live.remove(&sub_id);
         self.subs.remove(&sub_id);
-        let Some(parts) = self.parts_by_sub.remove(&sub_id) else {
-            return;
-        };
-        for part_id in parts {
-            if let Some(subs) = self.by_part.get_mut(&part_id) {
+        if let Some(parts) = self.parts_by_sub.remove(&sub_id) {
+            for part_id in parts {
+                if let Some(subs) = self.by_part.get_mut(&part_id) {
+                    subs.remove(&sub_id);
+                }
+            }
+        }
+        if let Some(obj_id) = self.obj_by_sub.remove(&sub_id) {
+            if let Some(subs) = self.by_obj.get_mut(&obj_id) {
                 subs.remove(&sub_id);
             }
         }
@@ -123,6 +129,7 @@ pub struct SqlitePartStore {
     bucket_depth: u8,
     _scope_key: Arc<str>,
     bus: Arc<std::sync::RwLock<SqliteSubscriptions>>,
+    hidden_parts: Arc<HashSet<PartId>>,
     /// In-memory doc-members cache, written alongside the SQL table.
     doc_members_cache:
         Arc<std::sync::RwLock<HashMap<ObjId, HashMap<PeerId, keyhive_core::access::Access>>>>,
@@ -204,6 +211,15 @@ impl BucketSummaryRow {
 
 impl SqlitePartStore {
     pub async fn new(sql: SqlCtx, scope_key: impl Into<Arc<str>>, bucket_depth: u8) -> Res<Self> {
+        Self::new_with_config(sql, scope_key, bucket_depth, Default::default()).await
+    }
+
+    pub async fn new_with_config(
+        sql: SqlCtx,
+        scope_key: impl Into<Arc<str>>,
+        bucket_depth: u8,
+        config: super::HostPartStoreConfig,
+    ) -> Res<Self> {
         init_schema(&sql.write_pool, bucket_depth).await?;
         let scope_key = scope_key.into();
         let scope_id = Self::ensure_scope_id(&sql.write_pool, &scope_key).await?;
@@ -244,6 +260,7 @@ impl SqlitePartStore {
             bucket_depth,
             _scope_key: scope_key,
             bus: default(),
+            hidden_parts: Arc::new(config.hidden_parts),
             doc_members_cache: Arc::new(std::sync::RwLock::new(doc_members)),
         })
     }
@@ -456,25 +473,60 @@ impl SqlitePartStore {
         {
             let bus = self.bus.read().expect(ERROR_MUTEX);
             for event in events {
-                let (part_ids, obj_id) = match &event {
-                    SubEvent::Changed(inner) => (inner.part_ids.clone(), inner.obj_id),
-                    SubEvent::Added(inner) => (vec![inner.part_id], inner.obj_id),
-                    SubEvent::Removed(inner) => (vec![inner.part_id], inner.obj_id),
+                let (part_ids, obj_id, object_event) = match &event {
+                    SubEvent::Changed(inner) => (
+                        inner.part_ids.clone(),
+                        inner.obj_id,
+                        SubEvent::ObjectChanged(big_sync_core::rpc::ObjChangedWithoutPart {
+                            obj_id: inner.obj_id,
+                            payload: inner.payload.clone(),
+                        }),
+                    ),
+                    SubEvent::Added(inner) => (
+                        vec![inner.part_id],
+                        inner.obj_id,
+                        inner
+                            .payload
+                            .clone()
+                            .map_or(SubEvent::ReplayComplete, |payload| {
+                                SubEvent::ObjectChanged(big_sync_core::rpc::ObjChangedWithoutPart {
+                                    obj_id: inner.obj_id,
+                                    payload,
+                                })
+                            }),
+                    ),
+                    SubEvent::Removed(inner) => {
+                        (vec![inner.part_id], inner.obj_id, SubEvent::ReplayComplete)
+                    }
+                    SubEvent::ObjectChanged(inner) => (Vec::new(), inner.obj_id, event.clone()),
                     SubEvent::ReplayComplete => continue,
                 };
-                let mut recipients = HashSet::new();
+                let mut recipients = HashMap::new();
                 for part_id in part_ids {
                     if let Some(subs) = bus.by_part.get(&part_id) {
-                        recipients.extend(subs.iter().copied());
+                        for &sub_id in subs {
+                            let mut projected = event.clone();
+                            if let SubEvent::Changed(inner) = &mut projected {
+                                inner.part_ids = vec![part_id];
+                            }
+                            recipients.insert(sub_id, projected);
+                        }
                     }
                 }
-                for sub_id in recipients {
+                if !matches!(object_event, SubEvent::ReplayComplete) {
+                    if let Some(subs) = bus.by_obj.get(&obj_id) {
+                        for &sub_id in subs {
+                            recipients.insert(sub_id, object_event.clone());
+                        }
+                    }
+                }
+                for (sub_id, event) in recipients {
                     let Some(sub) = bus.subs.get(&sub_id) else {
                         continue;
                     };
                     if bus.pending.contains(&sub_id) {
                         if sub.pending.mark_dirty() {
-                            promote.push((sub_id, event.clone(), obj_id));
+                            promote.push((sub_id, event, obj_id));
                         }
                         continue;
                     }
@@ -490,7 +542,7 @@ impl SqlitePartStore {
                                 .unwrap_or(false)
                         })
                         .unwrap_or(true);
-                    if permitted && sub.sender.try_send(event.clone()).is_err() {
+                    if permitted && sub.sender.try_send(event).is_err() {
                         drop_subs.insert(sub_id);
                     }
                 }
@@ -720,6 +772,13 @@ impl HostPartStore for SqlitePartStore {
         if parts.is_empty() {
             return Ok(Ok(HashMap::new()));
         }
+        let mut hidden: Vec<_> = parts.intersection(&self.hidden_parts).copied().collect();
+        if !hidden.is_empty() {
+            hidden.sort_unstable();
+            return Ok(Err(ListPartsError::UnkownParts {
+                unkown_parts: hidden,
+            }));
+        }
 
         let mut query = QueryBuilder::<sqlx::Sqlite>::new(
             "SELECT p.part_id, p.latest_cursor, COALESCE(b.live_count, 0) AS member_count
@@ -840,6 +899,10 @@ impl HostPartStore for SqlitePartStore {
         .await?;
         if live_part_ids.is_empty() {
             tx.commit().await?;
+            self.publish(vec![SubEvent::ObjectChanged(
+                big_sync_core::rpc::ObjChangedWithoutPart { obj_id, payload },
+            )])
+            .await;
             return Ok(());
         }
         let old_payload: ObjPayload = old_payload_json
@@ -1519,16 +1582,13 @@ impl HostPartStore for SqlitePartStore {
         reqs: SubPartsRequest,
         subscriber: PeerId,
     ) -> Res<Result<mpsc::Receiver<SubEvent>, ListPartsError>> {
-        let parts: HashSet<_> = reqs.parts.iter().map(|req| req.part_id).collect();
-        let summaries = self.summarize_parts(parts.clone()).await?;
-        if let Err(err) = summaries {
-            return Ok(Err(err));
+        let target = reqs.target;
+        if let big_sync_core::rpc::SubscriptionTarget::Part { part_id, .. } = target {
+            let summaries = self.summarize_parts(HashSet::from([part_id])).await?;
+            if let Err(err) = summaries {
+                return Ok(Err(err));
+            }
         }
-        let part_cursors: HashMap<PartId, CursorIndex> = reqs
-            .parts
-            .iter()
-            .map(|req| (req.part_id, req.cursor))
-            .collect();
         let (tx, rx) = mpsc::unbounded("SqlitePartStore".into(), "caller".into());
         let sub_id = Uuid::new_v4();
         let sub = Arc::new(SqliteSubscription {
@@ -1540,102 +1600,104 @@ impl HostPartStore for SqlitePartStore {
             let mut bus = self.bus.write().expect(ERROR_MUTEX);
             bus.pending.insert(sub_id);
             bus.subs.insert(sub_id, Arc::clone(&sub));
-            bus.parts_by_sub.insert(sub_id, parts.clone());
-            for &part_id in &parts {
-                bus.by_part.entry(part_id).or_default().insert(sub_id);
+            match target {
+                big_sync_core::rpc::SubscriptionTarget::Part { part_id, .. } => {
+                    bus.parts_by_sub.insert(sub_id, HashSet::from([part_id]));
+                    bus.by_part.entry(part_id).or_default().insert(sub_id);
+                }
+                big_sync_core::rpc::SubscriptionTarget::Object { obj_id } => {
+                    bus.obj_by_sub.insert(sub_id, obj_id);
+                    bus.by_obj.entry(obj_id).or_default().insert(sub_id);
+                }
             }
         }
 
         let store = self.clone();
         tokio::spawn(async move {
-            let mut cursor = part_cursors.values().min().copied().unwrap_or_default();
+            let mut cursor = match target {
+                big_sync_core::rpc::SubscriptionTarget::Part { cursor, .. } => cursor,
+                big_sync_core::rpc::SubscriptionTarget::Object { .. } => 0,
+            };
             let mut marker_sent = false;
+            let mut object_replayed = false;
             loop {
                 sub.pending
                     .state
                     .store(SUB_REPLAYING_CLEAN, std::sync::atomic::Ordering::Release);
-                let page = store
-                    .list_events(parts.clone(), cursor, u32::MAX)
-                    .await
-                    .expect(ERROR_IMPOSSIBLE)
-                    .expect(ERROR_IMPOSSIBLE);
-                let mut max_cursor = cursor;
-                let mut raw_event_count = 0;
-                let cache = store.doc_members_cache.read().expect(ERROR_MUTEX).clone();
                 let mut output = Vec::new();
-                for (_, part_page) in page {
-                    for event in part_page.events {
-                        raw_event_count += 1;
-                        let event_cursor = match &event {
-                            PartEvent::Changed(inner) => inner.cursor,
-                            PartEvent::Added(inner) => inner.cursor,
-                            PartEvent::Removed(inner) => inner.cursor,
-                        };
-                        max_cursor = max_cursor.max(event_cursor);
-                        let obj_id = match &event {
-                            PartEvent::Changed(inner) => inner.obj_id,
-                            PartEvent::Added(inner) => inner.obj_id,
-                            PartEvent::Removed(inner) => inner.obj_id,
-                        };
-                        let permitted = cache
-                            .get(&obj_id)
-                            .map(|members| {
-                                members
-                                    .get(&subscriber)
-                                    .map(|access| access.is_fetcher())
-                                    .unwrap_or(false)
-                            })
-                            .unwrap_or(true);
-                        if !permitted {
-                            continue;
+                let mut replay_has_more = false;
+                match target {
+                    big_sync_core::rpc::SubscriptionTarget::Part { part_id, .. } => {
+                        let page = store
+                            .list_events(HashSet::from([part_id]), cursor, u32::MAX)
+                            .await
+                            .expect(ERROR_IMPOSSIBLE)
+                            .expect(ERROR_IMPOSSIBLE);
+                        for (_, part_page) in page {
+                            replay_has_more = !part_page.events.is_empty();
+                            for event in part_page.events {
+                                let event_cursor = match &event {
+                                    PartEvent::Changed(inner) => inner.cursor,
+                                    PartEvent::Added(inner) => inner.cursor,
+                                    PartEvent::Removed(inner) => inner.cursor,
+                                };
+                                cursor = cursor.max(event_cursor);
+                                let obj_id = match &event {
+                                    PartEvent::Changed(inner) => inner.obj_id,
+                                    PartEvent::Added(inner) => inner.obj_id,
+                                    PartEvent::Removed(inner) => inner.obj_id,
+                                };
+                                let permitted = store
+                                    .doc_members_cache
+                                    .read()
+                                    .expect(ERROR_MUTEX)
+                                    .get(&obj_id)
+                                    .map(|members| {
+                                        members
+                                            .get(&subscriber)
+                                            .map(|access| access.is_fetcher())
+                                            .unwrap_or(false)
+                                    })
+                                    .unwrap_or(true);
+                                if !permitted {
+                                    continue;
+                                }
+                                output.push(match event {
+                                    PartEvent::Changed(mut inner) => {
+                                        inner.part_ids = vec![part_id];
+                                        SubEvent::Changed(inner)
+                                    }
+                                    PartEvent::Added(inner) => SubEvent::Added(inner),
+                                    PartEvent::Removed(inner) => SubEvent::Removed(inner),
+                                });
+                            }
                         }
-                        let relevant_parts: Vec<PartId> = match &event {
-                            PartEvent::Changed(inner) => inner
-                                .part_ids
-                                .iter()
-                                .filter(|pid| {
-                                    parts.contains(pid)
-                                        && event_cursor
-                                            > part_cursors.get(pid).copied().unwrap_or(0)
-                                })
-                                .copied()
-                                .collect(),
-                            PartEvent::Added(inner) => {
-                                if parts.contains(&inner.part_id)
-                                    && event_cursor
-                                        > part_cursors.get(&inner.part_id).copied().unwrap_or(0)
+                    }
+                    big_sync_core::rpc::SubscriptionTarget::Object { obj_id } => {
+                        if !object_replayed {
+                            let permitted = store
+                                .doc_members_cache
+                                .read()
+                                .expect(ERROR_MUTEX)
+                                .get(&obj_id)
+                                .and_then(|members| members.get(&subscriber))
+                                .map(|access| access.is_fetcher())
+                                .unwrap_or(false);
+                            if permitted {
+                                if let Some(payload) = HostPartStore::obj_payload(&store, obj_id)
+                                    .await
+                                    .expect(ERROR_IMPOSSIBLE)
                                 {
-                                    vec![inner.part_id]
-                                } else {
-                                    Vec::new()
+                                    output.push(SubEvent::ObjectChanged(
+                                        big_sync_core::rpc::ObjChangedWithoutPart {
+                                            obj_id,
+                                            payload,
+                                        },
+                                    ));
                                 }
                             }
-                            PartEvent::Removed(inner) => {
-                                if parts.contains(&inner.part_id)
-                                    && event_cursor
-                                        > part_cursors.get(&inner.part_id).copied().unwrap_or(0)
-                                {
-                                    vec![inner.part_id]
-                                } else {
-                                    Vec::new()
-                                }
-                            }
-                        };
-                        if relevant_parts.is_empty() {
-                            continue;
+                            object_replayed = true;
                         }
-                        output.push(match event {
-                            PartEvent::Changed(inner)
-                                if relevant_parts.len() < inner.part_ids.len() =>
-                            {
-                                let mut projected = inner;
-                                projected.part_ids = relevant_parts;
-                                SubEvent::Changed(projected)
-                            }
-                            PartEvent::Changed(inner) => SubEvent::Changed(inner),
-                            PartEvent::Added(inner) => SubEvent::Added(inner),
-                            PartEvent::Removed(inner) => SubEvent::Removed(inner),
-                        });
                     }
                 }
                 for event in output {
@@ -1644,12 +1706,12 @@ impl HostPartStore for SqlitePartStore {
                         return;
                     }
                 }
-                cursor = max_cursor;
-                if raw_event_count != 0 {
+                if replay_has_more {
                     continue;
                 }
                 if !marker_sent {
                     if !sub.pending.begin_finalization() {
+                        object_replayed = false;
                         continue;
                     }
                     if tx.send(SubEvent::ReplayComplete).await.is_err() {
@@ -1660,8 +1722,11 @@ impl HostPartStore for SqlitePartStore {
                     if sub.pending.become_ready() {
                         return;
                     }
+                    object_replayed = false;
                 } else if sub.pending.become_ready() {
                     return;
+                } else {
+                    object_replayed = false;
                 }
             }
         });
@@ -2172,11 +2237,10 @@ mod tests {
                 store
                     .subscribe(
                         SubPartsRequest {
-                            peer_id: peer,
-                            parts: vec![big_sync_core::rpc::PartStreamCursorRequest {
+                            target: big_sync_core::rpc::SubscriptionTarget::Part {
                                 part_id: *part,
                                 cursor: 0,
-                            }],
+                            },
                         },
                         peer,
                     )
@@ -2220,11 +2284,10 @@ mod tests {
                 store
                     .subscribe(
                         SubPartsRequest {
-                            peer_id: peer,
-                            parts: vec![big_sync_core::rpc::PartStreamCursorRequest {
+                            target: big_sync_core::rpc::SubscriptionTarget::Part {
                                 part_id: *part,
                                 cursor: 0,
-                            }],
+                            },
                         },
                         peer,
                     )

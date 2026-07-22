@@ -10,7 +10,7 @@ use big_sync::backend::contract::{
 use big_sync::stress_support::{self, StressFixture};
 use big_sync::{HostPartStore, SyncBackend};
 use big_sync_core::mpsc;
-use big_sync_core::rpc::{PartStreamCursorRequest, SubEvent, SubPartsRequest};
+use big_sync_core::rpc::{SubEvent, SubPartsRequest};
 use big_sync_core::{Byte32Id, PartId, PeerId, SyncCompletionDeets};
 use futures::lock::Mutex;
 use nonempty::NonEmpty;
@@ -34,6 +34,7 @@ pub async fn boot_repo() -> Res<(
         node_identity_seed: [7_u8; 32],
         storage: StorageConfig::Memory,
         scope_key: Arc::from("big-repo-test"),
+        hidden_parts: HashSet::new(),
     })
     .await?;
     let shared_store = repo.shared_part_store();
@@ -70,6 +71,7 @@ pub async fn _boot_disk_repo(
         node_identity_seed: [7_u8; 32],
         storage: StorageConfig::Disk { path },
         scope_key: Arc::from("big-repo-test"),
+        hidden_parts: HashSet::new(),
     })
     .await?;
     let shared_store = repo.shared_part_store();
@@ -589,11 +591,10 @@ async fn authorized_peer_reads_encrypted_doc_after_keyhive_change_notification_w
     // Subscribe to the client's global partition to learn about the doc
     // being registered locally by the runtime's keyhive listener.
     let req = SubPartsRequest {
-        peer_id: client.peer_id(),
-        parts: vec![PartStreamCursorRequest {
+        target: big_sync_core::rpc::SubscriptionTarget::Part {
             part_id: GLOBAL_PART_ID,
             cursor: 0,
-        }],
+        },
     };
     let mut rx = client
         .big_sync_store
@@ -1406,11 +1407,10 @@ async fn granted_doc_requires_manual_sync_after_keyhive_notification() -> Res<()
     // listener will add the doc here when the direct-RPC grant notification
     // is processed.
     let req = SubPartsRequest {
-        peer_id: client.peer_id(),
-        parts: vec![PartStreamCursorRequest {
+        target: big_sync_core::rpc::SubscriptionTarget::Part {
             part_id: GLOBAL_PART_ID,
             cursor: 0,
-        }],
+        },
     };
     let mut rx = client
         .big_sync_store
@@ -1516,11 +1516,10 @@ async fn synced_doc_auto_propagates_subsequent_edits() -> Res<()> {
     // Subscribe to client's global partition for the doc registration.
     client.big_sync_store.ensure_part(GLOBAL_PART_ID).await?;
     let req = SubPartsRequest {
-        peer_id: client.peer_id(),
-        parts: vec![PartStreamCursorRequest {
+        target: big_sync_core::rpc::SubscriptionTarget::Part {
             part_id: GLOBAL_PART_ID,
             cursor: 0,
-        }],
+        },
     };
     let mut rx = client
         .big_sync_store
@@ -1642,11 +1641,10 @@ async fn three_node_key_rotation_propagates_to_existing_reader() -> Res<()> {
     // Subscribe B to its global partition, grant, wait for registration.
     b.big_sync_store.ensure_part(GLOBAL_PART_ID).await?;
     let req = SubPartsRequest {
-        peer_id: b.peer_id(),
-        parts: vec![PartStreamCursorRequest {
+        target: big_sync_core::rpc::SubscriptionTarget::Part {
             part_id: GLOBAL_PART_ID,
             cursor: 0,
-        }],
+        },
     };
     let mut rx = b.big_sync_store.subscribe(req, b.peer_id()).await??;
 
@@ -2926,6 +2924,7 @@ impl SyncRepoNode {
             node_identity_seed,
             storage: StorageConfig::Disk { path: path.clone() },
             scope_key: Arc::from("big-repo-sync-test"),
+            hidden_parts: HashSet::new(),
         })
         .await?;
         let shared_store = repo.shared_part_store();
@@ -3148,6 +3147,7 @@ impl SyncRepoNode {
                     target_part_store: Arc::clone(&remote.big_sync_store),
                 }),
                 parts,
+                HashMap::new(),
             )
             .await?;
         let parts = stress_support::test_parts()
@@ -3162,6 +3162,7 @@ impl SyncRepoNode {
                     target_part_store: Arc::clone(&self.big_sync_store),
                 }),
                 parts,
+                HashMap::new(),
             )
             .await?;
         self.connections.lock().await.insert(remote.peer_id(), conn);

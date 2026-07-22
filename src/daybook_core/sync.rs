@@ -619,7 +619,12 @@ impl IrohSyncRepo {
             self.blobs_sync_backend
                 .register_remote_peer(conn.peer_id, addr.clone());
             self.big_sync_worker
-                .set_peer(conn.peer_id, big_sync_rpc_client, partition_ids)
+                .set_peer(
+                    conn.peer_id,
+                    big_sync_rpc_client,
+                    partition_ids,
+                    HashMap::new(),
+                )
                 .await?;
             self.start_keyhive_rpc_subscription(conn.peer_id, addr)
                 .await?;
@@ -793,7 +798,12 @@ impl IrohSyncRepo {
             self.blobs_sync_backend
                 .register_remote_peer(conn.peer_id, endpoint_addr.clone());
             self.big_sync_worker
-                .set_peer(conn.peer_id, big_sync_rpc_client, partition_ids)
+                .set_peer(
+                    conn.peer_id,
+                    big_sync_rpc_client,
+                    partition_ids,
+                    HashMap::new(),
+                )
                 .await?;
             self.start_keyhive_rpc_subscription(conn.peer_id, endpoint_addr)
                 .await?;
