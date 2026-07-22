@@ -102,7 +102,7 @@
 
 - If you're not able to cleanly read a provided web link through tool calls, pause and ask for a copy/paste of the contents. NEVER ASSUME THE CONTENTS OF A LINK YOU HAVEN'T SEEN!
 - Currently doing compaction? Always indicate whoever reads your summary that they should refresh on AGENTS.md and any .md docs linked from it.
-
+- When operating inside pi, truncation limit is 50KB or 2000 lines which is wasteful. Use your own limits/heads/tail on outputs to avoid flooding the context. Don't do broad, speculative searches that are going to flood the context with garbage.
 ## Cheating
 
 Avoid cheating through hacks that violate common sensibilities just to get a task done.

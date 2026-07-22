@@ -7,7 +7,6 @@ use big_sync_core::rpc::{
     LeafBucketsRequest, ListPartsError, PeerSummaryRequest, PeerSummaryResult, SubEvent,
     SubPartsRequest,
 };
-#[cfg(test)]
 use big_sync_core::PeerId;
 use irpc::{channel, rpc_requests, WithChannels};
 use tokio::sync::mpsc;
@@ -53,6 +52,7 @@ pub enum BigSyncIrpc {
 #[derive(Clone)]
 pub struct BigSyncRpcHandle {
     client: irpc::Client<BigSyncIrpc>,
+    protocol_handler: BigSyncRpcProtocolHandler,
 }
 
 impl BigSyncRpcHandle {
@@ -61,15 +61,13 @@ impl BigSyncRpcHandle {
     }
 
     pub fn protocol_handler(&self) -> BigSyncRpcProtocolHandler {
-        BigSyncRpcProtocolHandler {
-            tx: self.local_sender(),
-        }
+        self.protocol_handler.clone()
     }
 }
 
 #[derive(Clone)]
 pub struct BigSyncRpcProtocolHandler {
-    tx: irpc::LocalSender<BigSyncIrpc>,
+    tx: mpsc::Sender<(PeerId, BigSyncRpcMessage)>,
 }
 
 impl std::fmt::Debug for BigSyncRpcProtocolHandler {
@@ -85,6 +83,7 @@ impl iroh::protocol::ProtocolHandler for BigSyncRpcProtocolHandler {
         &self,
         conn: iroh::endpoint::Connection,
     ) -> Result<(), iroh::protocol::AcceptError> {
+        let peer_id = PeerId::new(*conn.remote_id().as_bytes());
         loop {
             let msg = match irpc_iroh::read_request::<BigSyncIrpc>(&conn).await {
                 Ok(Some(msg)) => msg,
@@ -94,7 +93,7 @@ impl iroh::protocol::ProtocolHandler for BigSyncRpcProtocolHandler {
                     break;
                 }
             };
-            if self.tx.send_raw(msg).await.is_err() {
+            if self.tx.send((peer_id, msg)).await.is_err() {
                 break;
             }
         }
@@ -125,6 +124,7 @@ pub async fn spawn_big_sync_rpc(
     store: Arc<dyn HostPartStore>,
 ) -> Res<(BigSyncRpcHandle, BigSyncRpcStopToken)> {
     let (rpc_tx, mut rpc_rx) = mpsc::channel(1024);
+    let (authenticated_tx, mut authenticated_rx) = mpsc::channel(1024);
     let client = irpc::Client::<BigSyncIrpc>::local(rpc_tx);
 
     let cancel_token = CancellationToken::new();
@@ -146,7 +146,13 @@ pub async fn spawn_big_sync_rpc(
                         let Some(msg) = msg else {
                             break;
                         };
-                        worker.handle_rpc_message(msg).await;
+                        worker.handle_rpc_message(msg, None).await;
+                    }
+                    authenticated = authenticated_rx.recv() => {
+                        let Some((peer_id, msg)) = authenticated else {
+                            break;
+                        };
+                        worker.handle_rpc_message(msg, Some(peer_id)).await;
                     }
                 }
             }
@@ -156,7 +162,12 @@ pub async fn spawn_big_sync_rpc(
     let join_handle = tokio::spawn(async { fut.await.unwrap() });
 
     Ok((
-        BigSyncRpcHandle { client },
+        BigSyncRpcHandle {
+            client,
+            protocol_handler: BigSyncRpcProtocolHandler {
+                tx: authenticated_tx,
+            },
+        },
         BigSyncRpcStopToken {
             cancel_token,
             subscription_tasks,
@@ -199,15 +210,17 @@ impl HostBigRpcClient for IrohBigSyncRpcClient {
         req: SubPartsRequest,
     ) -> Res<BigSyncRpcResult<Result<big_sync_core::mpsc::Receiver<SubEvent>, ListPartsError>>>
     {
-        let part_ids: std::collections::HashSet<_> =
-            req.parts.iter().map(|part| part.part_id).collect();
-        match self
-            .peer_summary(PeerSummaryRequest { parts: part_ids })
-            .await?
-        {
-            Ok(Ok(_)) => {}
-            Ok(Err(err)) => return Ok(Ok(Err(err))),
-            Err(err) => return Ok(Err(err)),
+        if let big_sync_core::rpc::SubscriptionTarget::Part { part_id, .. } = &req.target {
+            match self
+                .peer_summary(PeerSummaryRequest {
+                    parts: std::collections::HashSet::from([*part_id]),
+                })
+                .await?
+            {
+                Ok(Ok(_)) => {}
+                Ok(Err(err)) => return Ok(Ok(Err(err))),
+                Err(err) => return Ok(Err(err)),
+            }
         }
 
         let remote_rx = match self.client.server_streaming(req, 1024).await {
@@ -282,7 +295,11 @@ struct BigSyncRpcWorker {
 
 impl BigSyncRpcWorker {
     #[tracing::instrument(skip(self, msg))]
-    async fn handle_rpc_message(&mut self, msg: BigSyncRpcMessage) {
+    async fn handle_rpc_message(
+        &mut self,
+        msg: BigSyncRpcMessage,
+        authenticated_peer: Option<PeerId>,
+    ) {
         match msg {
             BigSyncRpcMessage::PeerSummary(req) => {
                 let WithChannels { inner, tx, .. } = req;
@@ -297,7 +314,10 @@ impl BigSyncRpcWorker {
             }
             BigSyncRpcMessage::SubParts(req) => {
                 let WithChannels { inner, tx, .. } = req;
-                let subscriber = inner.peer_id;
+                let Some(subscriber) = authenticated_peer else {
+                    warn!("rejecting unauthenticated sub_parts request");
+                    return;
+                };
                 let sub = self.store.subscribe(inner, subscriber).await.unwrap();
                 let Ok(sub) = sub else {
                     warn!("sub_parts request for unknown parts");
@@ -440,11 +460,7 @@ mod tests {
             store
                 .subscribe(
                     SubPartsRequest {
-                        peer_id: big_sync_core::PeerId::new([0u8; 32]),
-                        parts: vec![big_sync_core::rpc::PartStreamCursorRequest {
-                            part_id,
-                            cursor: 0,
-                        }],
+                        target: big_sync_core::rpc::SubscriptionTarget::Part { part_id, cursor: 0 },
                     },
                     PeerId::new([0u8; 32]),
                 )
@@ -517,8 +533,7 @@ mod tests {
 
         let sub_events = client
             .sub_parts(SubPartsRequest {
-                peer_id: big_sync_core::PeerId::new([0u8; 32]),
-                parts: vec![big_sync_core::rpc::PartStreamCursorRequest { part_id, cursor: 0 }],
+                target: big_sync_core::rpc::SubscriptionTarget::Part { part_id, cursor: 0 },
             })
             .await???;
         let sub_events =

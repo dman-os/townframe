@@ -305,6 +305,7 @@ mod tests {
             node_identity_seed: [41; 32],
             storage: StorageConfig::Memory,
             scope_key: Arc::from("rpc-ready"),
+            hidden_parts: Default::default(),
         })
         .await?;
         let endpoint = test_endpoint().await?;
@@ -344,6 +345,7 @@ mod tests {
             node_identity_seed: [42; 32],
             storage: StorageConfig::Memory,
             scope_key: Arc::from("rpc-reconnect"),
+            hidden_parts: Default::default(),
         })
         .await?;
         let endpoint = test_endpoint().await?;

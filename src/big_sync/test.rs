@@ -132,6 +132,7 @@ impl TestWorld {
 pub(crate) struct MemoryRpcClient {
     world: Arc<TestWorld>,
     _source_part_store: Arc<dyn HostPartStore>,
+    source_peer_id: PeerId,
     target_peer_id: PeerId,
     target_part_store: Arc<dyn HostPartStore>,
 }
@@ -140,12 +141,14 @@ impl MemoryRpcClient {
     fn new(
         world: Arc<TestWorld>,
         source_part_store: Arc<dyn HostPartStore>,
+        source_peer_id: PeerId,
         target_peer_id: PeerId,
         target_part_store: Arc<dyn HostPartStore>,
     ) -> Self {
         Self {
             world,
             _source_part_store: source_part_store,
+            source_peer_id,
             target_peer_id,
             target_part_store,
         }
@@ -180,7 +183,7 @@ impl crate::rpc::HostBigRpcClient for MemoryRpcClient {
     {
         tracing::debug!(
             target_peer_id = %self.target_peer_id,
-            part_count = req.parts.len(),
+            target = ?req.target,
             "memory rpc sub parts"
         );
         if !self.world.is_online(self.target_peer_id) {
@@ -188,7 +191,7 @@ impl crate::rpc::HostBigRpcClient for MemoryRpcClient {
         }
         let receiver = self
             .target_part_store
-            .subscribe(req, PeerId::new([0u8; 32]))
+            .subscribe(req, self.source_peer_id)
             .await??;
         Ok(Ok(Ok(receiver)))
     }
@@ -447,6 +450,7 @@ impl NodeHarness {
         let client = Arc::new(MemoryRpcClient::new(
             Arc::clone(&self.world),
             Arc::clone(&self.store),
+            self.peer_id,
             remote.peer_id,
             Arc::clone(&remote.store),
         ));
@@ -459,16 +463,31 @@ impl NodeHarness {
                     .iter()
                     .map(|&part| (part, TEST_BACKEND_ID.into()))
                     .collect(),
+                std::collections::HashMap::new(),
             )
             .await
     }
 
     async fn seed_obj(&self, obj: ObjId, payload: serde_json::Value) -> Res<()> {
+        let (peer_ids, stores): (Vec<_>, Vec<_>) = {
+            let stores = self.world.stores.lock().expect(ERROR_MUTEX);
+            (
+                stores.keys().copied().collect(),
+                stores.values().cloned().collect(),
+            )
+        };
+        for store in stores {
+            let agents = peer_ids
+                .iter()
+                .copied()
+                .map(|peer_id| (peer_id, keyhive_core::access::Access::Read))
+                .collect();
+            store.set_doc_members(obj, agents).await;
+        }
         self.host.store.set_obj_payload(obj, payload).await?;
         self.host.store.add_obj_to_parts(obj, test_parts()).await?;
         Ok(())
     }
-
     async fn remove_obj(&self, obj: ObjId) -> Res<()> {
         self.host
             .store
@@ -1166,6 +1185,20 @@ async fn memory_sync_concurrent_conflicting_updates_converge_to_higher_peer_valu
 
     node_a.connect_to(&node_b).await?;
     node_b.connect_to(&node_a).await?;
+    node_a
+        .store
+        .set_doc_members(
+            obj,
+            HashMap::from([(node_b.peer_id, keyhive_core::access::Access::Read)]),
+        )
+        .await;
+    node_b
+        .store
+        .set_doc_members(
+            obj,
+            HashMap::from([(node_a.peer_id, keyhive_core::access::Access::Read)]),
+        )
+        .await;
     wait_for_convergence(&[&node_a, &node_b], Duration::from_secs(30)).await?;
 
     tokio::try_join!(
@@ -1829,6 +1862,58 @@ async fn memory_sync_offline_evolution_reconnects_cleanly() -> Res<()> {
 
     node_a.stop().await?;
     node_b.stop().await?;
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn hidden_part_subscription_returns_unknown_parts() -> Res<()> {
+    use crate::HostPartStoreConfig;
+    use big_sync_core::rpc::SubscriptionTarget;
+
+    let part = test_part();
+    let hidden = PartId(Byte32Id::new([99u8; 32]));
+    let store = MemoryPartStore::with_config(HostPartStoreConfig {
+        hidden_parts: HashSet::from([hidden]),
+    });
+    let peer = PeerId::new([1u8; 32]);
+
+    // Both parts exist in the store.
+    store.ensure_part(part).await?;
+    store.ensure_part(hidden).await?;
+
+    // Subscribing to a visible part succeeds.
+    let rx = store
+        .subscribe(
+            SubPartsRequest {
+                target: SubscriptionTarget::Part {
+                    part_id: part,
+                    cursor: 0,
+                },
+            },
+            peer,
+        )
+        .await?;
+    assert!(rx.is_ok(), "visible part must subscribe ok");
+
+    // Subscribing to a hidden part returns UnkownParts.
+    let err = store
+        .subscribe(
+            SubPartsRequest {
+                target: SubscriptionTarget::Part {
+                    part_id: hidden,
+                    cursor: 0,
+                },
+            },
+            peer,
+        )
+        .await?;
+    match err {
+        Err(ListPartsError::UnkownParts { unkown_parts }) => {
+            assert_eq!(unkown_parts, vec![hidden]);
+        }
+        other => panic!("expected UnkownParts for hidden part, got {other:?}"),
+    }
+
     Ok(())
 }
 

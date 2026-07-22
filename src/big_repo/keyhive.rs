@@ -356,6 +356,16 @@ impl BigKeyhiveHandle {
         caps
     }
 
+    pub(crate) async fn document_ids(&self) -> Vec<big_sync_core::ObjId> {
+        self.keyhive
+            .documents()
+            .lock()
+            .await
+            .keys()
+            .map(|id| big_sync_core::ObjId::new(id.to_bytes()))
+            .collect()
+    }
+
     pub(crate) async fn group_document_ids_by_id(&self) -> HashMap<[u8; 32], BTreeSet<DocumentId>> {
         let group_ids: Vec<KhGroupId> =
             self.keyhive.groups().lock().await.keys().copied().collect();

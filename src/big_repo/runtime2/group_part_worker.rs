@@ -67,14 +67,26 @@ impl GroupPartWorker {
 
             let event_cursor = events.last().expect("non-empty event batch").seq;
             let group_documents = self.keyhive.group_document_ids_by_id().await;
-            let mut docs = HashSet::new();
-            for event in &events {
-                docs.extend(affected_documents(&event.bytes, &group_documents));
-            }
             let managed_group_parts: HashSet<PartId> =
                 group_documents.keys().copied().map(group_part_id).collect();
             let local_principal = self.local_peer_id;
-            let docs: Vec<_> = docs.into_iter().collect();
+            let missed_history = events
+                .first()
+                .is_some_and(|event| event.seq > cursor.saturating_add(1));
+            let docs: Vec<_> = if missed_history {
+                tracing::warn!(
+                    cursor,
+                    first_retained_event = events.first().expect("non-empty event batch").seq,
+                    "group-part event history was pruned; rebuilding current document state"
+                );
+                self.keyhive.document_ids().await
+            } else {
+                let mut docs = HashSet::new();
+                for event in &events {
+                    docs.extend(affected_documents(&event.bytes, &group_documents));
+                }
+                docs.into_iter().collect()
+            };
             if docs.is_empty() {
                 self.store
                     .reconcile_group_part_batch(&[], event_cursor, true)
@@ -142,7 +154,7 @@ impl GroupPartWorker {
 }
 
 fn group_part_id(group_id: [u8; 32]) -> PartId {
-    let mut bytes = b"townframe/big-repo/group-part/v1".to_vec();
+    let mut bytes = b"townframe/big-repo/group-part/sedimentree/v1".to_vec();
     bytes.extend_from_slice(&group_id);
     let raw = keyhive_crypto::digest::Digest::<Vec<u8>>::hash(&bytes).raw;
     PartId::new(raw.into())
@@ -186,4 +198,18 @@ fn affected_documents(
         StaticEvent::PrekeysExpanded(_) | StaticEvent::PrekeyRotated(_) => {}
     }
     documents
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn group_part_id_uses_sedimentree_namespace() {
+        let actual = group_part_id([0; 32]);
+        assert_eq!(
+            actual.to_string(),
+            "B1TtXt35pLe8AyPkUKgPLgbpFHckKjK3CHCQEytRFaLj"
+        );
+    }
 }

@@ -3,7 +3,7 @@
 
 mod interlude {
     #[allow(unused_imports)]
-    pub use big_sync_core::{ObjId, PeerId};
+    pub use big_sync_core::{ObjId, PartId, PeerId};
     use future_form::{FutureForm, Sendable};
     pub use utils_rs::prelude::*;
 }
@@ -12,7 +12,7 @@ use crate::interlude::*;
 use crate::keyhive_storage::{BigRepoKeyhiveStorage, KEYHIVE_SUBDIR};
 use sqlx_utils_rs::SqlCtx;
 
-use std::collections::{BTreeMap, BTreeSet, HashMap};
+use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 use std::sync::atomic::{AtomicBool, Ordering};
 
 use automerge::ChangeHash;
@@ -82,6 +82,7 @@ pub struct Config {
     pub storage: StorageConfig,
     /// Scope key used to isolate this BigRepo instance's data in SQLite storage.
     pub scope_key: Arc<str>,
+    pub hidden_parts: HashSet<PartId>,
 }
 
 #[derive(Debug, Clone)]
@@ -131,6 +132,7 @@ impl BigRepo {
             node_identity_seed,
             storage,
             scope_key,
+            hidden_parts,
         } = config;
         let sql = match &storage {
             StorageConfig::Memory => SqlCtx::memory().await?,
@@ -142,14 +144,21 @@ impl BigRepo {
                 SqlCtx::url(&format!("sqlite://{}", db_path.display())).await?
             }
         };
-        let store =
-            SqliteBigRepoStore::new(sql, scope_key.clone(), big_sync_core::BuckId::MAX_LEVEL)
-                .await?;
+        let store = SqliteBigRepoStore::new_with_config(
+            sql,
+            scope_key.clone(),
+            big_sync_core::BuckId::MAX_LEVEL,
+            big_sync::HostPartStoreConfig {
+                hidden_parts: hidden_parts.clone(),
+            },
+        )
+        .await?;
         Self::boot_inner(
             Config {
                 node_identity_seed,
                 storage,
                 scope_key,
+                hidden_parts,
             },
             store,
         )
@@ -179,6 +188,7 @@ impl BigRepo {
             node_identity_seed,
             storage,
             scope_key: _,
+            hidden_parts: _,
         } = config;
         let big_sync_store: SharedPartStore = Arc::new(store.clone());
         let keyhive_events = store.clone();
@@ -284,6 +294,18 @@ impl BigRepo {
 
     pub(crate) fn big_sync_store(&self) -> &SharedPartStore {
         &self.big_sync_store
+    }
+
+    pub(crate) async fn subscribe_local(
+        &self,
+        reqs: big_sync_core::rpc::SubPartsRequest,
+    ) -> Res<
+        Result<
+            big_sync_core::mpsc::Receiver<big_sync_core::rpc::SubEvent>,
+            big_sync_core::rpc::ListPartsError,
+        >,
+    > {
+        big_sync::HostPartStore::subscribe_local(&self.sqlite_store, reqs).await
     }
 
     pub fn ephemeral(&self) -> BigEphemeral {
