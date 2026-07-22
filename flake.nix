@@ -58,7 +58,7 @@
             includeNDK = true;
             platformToolsVersion = "36.0.0";
             buildToolsVersions = [ androidBuildToolsVersion ];
-            platformVersions = [ "36" ];
+            platformVersions = [ "35" "36" ];
           };
 
           # Android SDK/NDK with Studio (for dev)
@@ -267,6 +267,8 @@
             fontconfig
             libglvnd
             vulkan-loader
+            pulseaudio
+            alsa-lib
           ];
 
           desktopRuntimeLibraryPath = pkgs.lib.makeLibraryPath (
