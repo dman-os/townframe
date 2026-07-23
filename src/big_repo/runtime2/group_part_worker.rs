@@ -142,7 +142,7 @@ impl GroupPartWorker {
             .collect();
         let desired_global = agents
             .get(&local_principal)
-            .is_some_and(|access| access.is_fetcher());
+            .is_some_and(|access| access.is_reader());
         Ok(GroupPartReconciliation {
             doc,
             agents,
