@@ -538,7 +538,7 @@ impl SqlitePartStore {
                         .map(|members| {
                             members
                                 .get(&sub.principal)
-                                .map(|access| access.is_fetcher())
+                                .map(|access| access.is_reader())
                                 .unwrap_or(false)
                         })
                         .unwrap_or(true);
@@ -566,7 +566,7 @@ impl SqlitePartStore {
                 .map(|members| {
                     members
                         .get(&sub.principal)
-                        .map(|access| access.is_fetcher())
+                        .map(|access| access.is_reader())
                         .unwrap_or(false)
                 })
                 .unwrap_or(true);
@@ -1655,7 +1655,7 @@ impl HostPartStore for SqlitePartStore {
                                     .map(|members| {
                                         members
                                             .get(&subscriber)
-                                            .map(|access| access.is_fetcher())
+                                            .map(|access| access.is_reader())
                                             .unwrap_or(false)
                                     })
                                     .unwrap_or(true);
@@ -1681,7 +1681,7 @@ impl HostPartStore for SqlitePartStore {
                                 .expect(ERROR_MUTEX)
                                 .get(&obj_id)
                                 .and_then(|members| members.get(&subscriber))
-                                .map(|access| access.is_fetcher())
+                                .map(|access| access.is_reader())
                                 .unwrap_or(false);
                             if permitted {
                                 if let Some(payload) = HostPartStore::obj_payload(&store, obj_id)

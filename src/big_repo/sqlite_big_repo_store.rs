@@ -584,7 +584,7 @@ impl SqliteBigRepoStore {
                             .map(|members| {
                                 members
                                     .get(&principal)
-                                    .map(|access| access.is_fetcher())
+                                    .map(|access| access.is_reader())
                                     .unwrap_or(false)
                             })
                             .unwrap_or(true),
@@ -615,7 +615,7 @@ impl SqliteBigRepoStore {
                     .map(|members| {
                         members
                             .get(&principal)
-                            .map(|access| access.is_fetcher())
+                            .map(|access| access.is_reader())
                             .unwrap_or(false)
                     })
                     .unwrap_or(true),
@@ -1808,7 +1808,7 @@ impl SqliteBigRepoStore {
                                     .map(|members| {
                                         members
                                             .get(&principal)
-                                            .map(|access| access.is_fetcher())
+                                            .map(|access| access.is_reader())
                                             .unwrap_or(false)
                                     })
                                     .unwrap_or(true),
@@ -1843,7 +1843,7 @@ impl SqliteBigRepoStore {
                             .map(|members| {
                                 members
                                     .get(&principal)
-                                    .map(|access| access.is_fetcher())
+                                    .map(|access| access.is_reader())
                                     .unwrap_or(false)
                             })
                             .unwrap_or(true),

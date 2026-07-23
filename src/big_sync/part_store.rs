@@ -561,7 +561,7 @@ pub mod host_contract {
         assert_leaf_buckets_contract(harness).await?;
         assert_list_events_contract(harness).await?;
         assert_subscribe_contract(harness).await?;
-        assert_relay_subscribe_contract(harness).await?;
+        assert_readable_subscribe_contract(harness).await?;
         assert_subscribe_replay_filtering_contract(harness).await?;
         assert_subscribe_live_filtering_contract(harness).await?;
         assert_subscribe_per_part_cursor_contract(harness).await?;
@@ -1146,20 +1146,20 @@ pub mod host_contract {
         Ok(())
     }
 
-    pub async fn assert_relay_subscribe_contract<H>(harness: &H) -> Res<()>
+    pub async fn assert_readable_subscribe_contract<H>(harness: &H) -> Res<()>
     where
         H: HostPartStoreContractHarness + Sync,
     {
         let store = harness.store();
         let part = test_part(54);
         let obj = test_obj(55);
-        let relay = big_sync_core::PeerId::new([56u8; 32]);
+        let reader = big_sync_core::PeerId::new([56u8; 32]);
 
         store.ensure_part(part).await?;
         store
             .set_doc_members(
                 obj,
-                std::collections::HashMap::from([(relay, Access::Relay)]),
+                std::collections::HashMap::from([(reader, Access::Read)]),
             )
             .await;
         let rx = store
@@ -1170,7 +1170,7 @@ pub mod host_contract {
                         cursor: 0,
                     },
                 },
-                relay,
+                reader,
             )
             .await??;
         loop {
@@ -1180,7 +1180,7 @@ pub mod host_contract {
         }
 
         store
-            .set_obj_payload(obj, payload("relay-subscribe", 1))
+            .set_obj_payload(obj, payload("readable-subscribe", 1))
             .await?;
         store.add_obj_to_parts(obj, vec![part]).await?;
 
@@ -1434,13 +1434,16 @@ pub mod host_contract {
         assert_eq!(auth_changed.obj_id, obj);
         assert_eq!(auth_changed.payload, payload("live-filter", 2));
 
-        // Relay must also receive the live Changed event (Relay is fetcher).
-        let relay_live = recv_sub_event(&relay_rx).await?;
-        let SubEvent::Changed(relay_changed) = &relay_live else {
-            panic!("relay subscriber expected Changed, got {relay_live:?}");
-        };
-        assert_eq!(relay_changed.obj_id, obj);
-        assert_eq!(relay_changed.payload, payload("live-filter", 2));
+        // Relay-only principals are excluded from the readability stream.
+        match tokio::time::timeout(Duration::from_millis(500), relay_rx.recv()).await {
+            Err(_elapsed) => { /* expected: no event within timeout */ }
+            Ok(Ok(evt)) => {
+                panic!("relay-only subscriber must not receive live event; got {evt:?}");
+            }
+            Ok(Err(_)) => {
+                panic!("relay-only subscriber channel closed unexpectedly");
+            }
+        }
 
         // Denied subscriber must NOT receive any live document event.
         match tokio::time::timeout(Duration::from_millis(500), denied_rx.recv()).await {

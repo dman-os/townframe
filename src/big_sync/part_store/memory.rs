@@ -336,7 +336,7 @@ impl MemoryPartStoreScopeState {
                         .map(|members| {
                             members
                                 .get(&principal)
-                                .map(|access| access.is_fetcher())
+                                .map(|access| access.is_reader())
                                 .unwrap_or(false)
                         })
                         .unwrap_or(true)
@@ -645,7 +645,7 @@ impl HostPartStore for MemoryPartStore {
                                 .doc_members
                                 .get(&obj_id)
                                 .and_then(|members| members.get(&principal))
-                                .map(|access| access.is_fetcher())
+                                .map(|access| access.is_reader())
                                 .unwrap_or(false);
                             if state.mark_dirty() {
                                 if permitted && sender.try_send(event.clone()).is_err() {
@@ -672,7 +672,7 @@ impl HostPartStore for MemoryPartStore {
                                 .doc_members
                                 .get(&obj_id)
                                 .and_then(|members| members.get(&principal))
-                                .map(|access| access.is_fetcher())
+                                .map(|access| access.is_reader())
                                 .unwrap_or(false);
                             if permitted && sender.try_send(event.clone()).is_err() {
                                 guard.bus.remove_subscription(sub_id);
@@ -1018,7 +1018,7 @@ impl HostPartStore for MemoryPartStore {
                                     .map(|members| {
                                         members
                                             .get(&subscriber)
-                                            .map(|access| access.is_fetcher())
+                                            .map(|access| access.is_reader())
                                             .unwrap_or(false)
                                     })
                                     .unwrap_or(true);
@@ -1058,7 +1058,7 @@ impl HostPartStore for MemoryPartStore {
                                 .doc_members
                                 .get(&obj_id)
                                 .and_then(|members| members.get(&subscriber))
-                                .map(|access| access.is_fetcher())
+                                .map(|access| access.is_reader())
                                 .unwrap_or(false);
                             if permitted {
                                 if let Some(Some(payload)) = guard

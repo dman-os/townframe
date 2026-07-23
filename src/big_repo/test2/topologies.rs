@@ -45,21 +45,14 @@ async fn assert_relay_only(
         )
         .await;
     assert_eq!(access, Some(Access::Relay));
-    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
-    loop {
-        if relay
+    repo.wait_for_quiescence(Some(std::time::Duration::from_secs(10)))
+        .await?;
+    assert!(
+        !relay
             .obj_parts_contains(doc_id, crate::GLOBAL_PART_ID)
-            .await?
-        {
-            break;
-        }
-        if std::time::Instant::now() >= deadline {
-            return Err(crate::ferr!(
-                "Relay access did not place the document in the global fetch partition"
-            ));
-        }
-        tokio::time::sleep(std::time::Duration::from_millis(10)).await;
-    }
+            .await?,
+        "Relay-only access must not place the document in the readable global partition"
+    );
     Ok(())
 }
 
