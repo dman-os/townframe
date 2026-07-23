@@ -604,8 +604,16 @@ impl BigSyncMachine {
             BigSyncEvent::SetPeer(evt) => self.handle_set_peer_evt(evt),
             BigSyncEvent::RemovePeer(evt) => self.handle_remove_peer_evt(evt),
             BigSyncEvent::WaitForFullSync(evt) => {
+                let WaitForFullSyncEvent {
+                    waiter_id,
+                    peer_ids,
+                    part_ids,
+                } = evt;
+                for peer_id in &peer_ids {
+                    self.refresh_peer_replay_worker(*peer_id, true);
+                }
                 self.stat_machine
-                    .add_full_sync_waiter(evt.waiter_id, evt.peer_ids, evt.part_ids);
+                    .add_full_sync_waiter(waiter_id, peer_ids, part_ids);
             }
             BigSyncEvent::SyncCompleted(evt) => {
                 if self.tasks.stop_task(evt.task_id).is_some() {
@@ -802,7 +810,7 @@ impl BigSyncMachine {
         self.stat_machine.remove_peer(peer_id);
         self.stat_machine.set_peer(peer_id, parts.iter().copied());
         self.peers.insert(peer_id, peer_state);
-        self.refresh_peer_replay_worker(peer_id);
+        self.refresh_peer_replay_worker(peer_id, false);
     }
 
     fn handle_remove_peer_evt(&mut self, RemovePeerEvent { peer_id }: RemovePeerEvent) {
@@ -987,7 +995,7 @@ impl BigSyncMachine {
         let bucket_cmd_count = peer_state.bucket_cmd_buf.len();
         let cursor_cmd_count = peer_state.cursors_cmd_buf.len();
         // refresh the PeerReplayWorker if needed
-        self.refresh_peer_replay_worker(peer_id);
+        self.refresh_peer_replay_worker(peer_id, false);
         tracing::debug!(
             peer_id = %peer_id,
             bucket_cmd_count,
@@ -1076,7 +1084,21 @@ impl BigSyncMachine {
 
 // cursor support
 impl BigSyncMachine {
-    fn refresh_peer_replay_worker(&mut self, peer_id: PeerId) {
+    fn refresh_peer_replay_worker(&mut self, peer_id: PeerId, force: bool) {
+        if force {
+            if let Some(old_state) = self
+                .peers
+                .get_mut(&peer_id)
+                .expect(ERROR_UNRECONIZED)
+                .replay_worker
+                .take()
+            {
+                let _state = self
+                    .tasks
+                    .stop_task(old_state.task_id)
+                    .expect(ERROR_UNRECONIZED);
+            }
+        }
         let peer_state = self.peers.get_mut(&peer_id).expect(ERROR_UNRECONIZED);
         let replay_req_parts: Set<_> = peer_state
             .parts
@@ -1500,7 +1522,7 @@ impl BigSyncMachine {
             }
         }
         if refresh_peer_replaly {
-            self.refresh_peer_replay_worker(peer_id);
+            self.refresh_peer_replay_worker(peer_id, false);
         }
     }
 

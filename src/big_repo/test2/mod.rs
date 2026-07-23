@@ -9,6 +9,7 @@ mod cgka;
 mod convergence;
 mod edge;
 mod encryption;
+mod ephemeral;
 mod harness;
 mod ladder;
 mod notifications;
