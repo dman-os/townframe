@@ -507,3 +507,35 @@ async fn tier9_interrupted_sync_retry_succeeds() -> crate::Res<()> {
     drop(owner_doc);
     Ok(())
 }
+
+#[tokio::test(flavor = "multi_thread")]
+async fn with_document_roundtrip_rehydrates_from_storage() -> crate::Res<()> {
+    utils_rs::testing::setup_tracing_once();
+    let pair = Pair::boot(222, 223, "Owner", "Reader").await?;
+    let mut initial = automerge::Automerge::new();
+    initial
+        .transact(|tx| tx.put(automerge::ROOT, "title", "before"))
+        .map_err(|err| crate::ferr!("failed initializing title: {err:?}"))?;
+
+    let handle = pair.left().repo.create_doc(initial).await?;
+    let doc_id = handle.document_id();
+    handle
+        .with_document(|doc| {
+            doc.transact(|tx| tx.put(automerge::ROOT, "title", "after"))
+                .map_err(|err| crate::ferr!("failed mutating doc: {err:?}"))
+        })
+        .await??;
+    drop(handle);
+
+    let reloaded = pair
+        .left()
+        .repo
+        .get_doc(&doc_id)
+        .await?
+        .into_ready(doc_id)?;
+    assert_eq!(
+        read_text(&reloaded, "title").await.as_deref(),
+        Some("after")
+    );
+    Ok(())
+}

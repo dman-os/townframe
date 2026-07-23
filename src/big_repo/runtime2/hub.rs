@@ -108,7 +108,6 @@ pub struct Runtime2Hub<F: FutureForm, R: TaskRuntime<F>> {
     pub(crate) quiescence_barrier_ids: u64,
     pub(crate) activity_generation: u64,
     pub(crate) group_part_cursor: u64,
-    pub(crate) group_part_worker_pending: bool,
 
     // ── doc-worker registry ────────────────────────────────────────────────
     pub(crate) doc_workers: HashMap<DocumentId, DocWorkerEntry>,
@@ -279,6 +278,14 @@ where
         let barrier_id = self.quiescence_barrier_ids;
         let generation = self.activity_generation;
         let doc_ids: Vec<_> = self.doc_workers.keys().copied().collect();
+        tracing::debug!(
+            barrier_id,
+            activity_generation = generation,
+            doc_workers = doc_ids.len(),
+            pending_materialization = self.pending_materialization.len(),
+            group_part_cursor = self.group_part_cursor,
+            "runtime2 quiescence probe started",
+        );
         self.quiescence_probe = Some(QuiescenceProbe {
             barrier_id,
             activity_generation: generation,
@@ -333,11 +340,15 @@ where
             || self.quiescence_group_part_watermark_pending
             || !self.keyhive_dirty.is_empty()
             || self.quiescence_cache_refresh_pending
-            || self.group_part_worker_pending
             || self.group_part_cursor < probe.group_part_cursor
         {
             return Ok(());
         }
+        tracing::debug!(
+            barrier_id = probe.barrier_id,
+            activity_generation = probe.activity_generation,
+            "runtime2 quiescence probe resolved",
+        );
         self.quiescence_probe = None;
         for waiter in std::mem::take(&mut self.quiescence_waiters) {
             // A caller timeout drops the receiver; that cancellation is not
@@ -1071,6 +1082,68 @@ where
     /// Process a single [`Runtime2Evt`]. Mirrors `handle_evt` at
     /// `runtime.rs:1315`.
     pub(crate) fn handle_evt(&mut self, evt: Runtime2Evt) -> eyre::Result<()> {
+        match &evt {
+            Runtime2Evt::SyncSessionObserved { session } => {
+                tracing::debug!(
+                    doc_id = %DocumentId::new(*session.sedimentree_id.as_bytes()),
+                    peer_id = %session.peer_id,
+                    kind = ?session.kind,
+                    remote_rejection = ?&session.remote_rejection,
+                    received_commits = session.received_commit_ids.len(),
+                    received_fragments = session.received_fragment_ids.len(),
+                    rejected_commits = session.rejected_commit_ids.len(),
+                    rejected_fragments = session.rejected_fragment_ids.len(),
+                    sent_commits = session.sent_commit_ids.len(),
+                    sent_fragments = session.sent_fragment_ids.len(),
+                    "runtime2 event: sync session observed",
+                );
+            }
+            Runtime2Evt::DocSyncRequested {
+                doc_id,
+                peer_id,
+                waiter_id,
+            } => tracing::debug!(
+                %doc_id,
+                %peer_id,
+                waiter_id,
+                "runtime2 event: document sync requested",
+            ),
+            Runtime2Evt::DocSyncCompleted {
+                doc_id,
+                peer_id,
+                waiter_id,
+                result,
+            } => tracing::debug!(
+                %doc_id,
+                %peer_id,
+                waiter_id,
+                success = result.is_ok(),
+                "runtime2 event: document sync completed",
+            ),
+            Runtime2Evt::KeyhiveSyncRequested { peer_id } => tracing::debug!(
+                %peer_id,
+                "runtime2 event: Keyhive sync requested",
+            ),
+            Runtime2Evt::KeyhiveSyncDone {
+                peer_id,
+                request_id,
+            } => tracing::debug!(
+                %peer_id,
+                ?request_id,
+                "runtime2 event: Keyhive sync completed",
+            ),
+            Runtime2Evt::KeyhiveSyncFailed {
+                peer_id,
+                request_id,
+                error,
+            } => tracing::debug!(
+                %peer_id,
+                ?request_id,
+                %error,
+                "runtime2 event: Keyhive sync failed",
+            ),
+            _ => {}
+        }
         // Lifecycle/completion events update dedicated barriers below; only
         // domain mutations restart a quiescence probe's activity generation.
         if !matches!(
@@ -1079,18 +1152,14 @@ where
                 | Runtime2Evt::QuiescenceCacheRefreshDone { .. }
                 | Runtime2Evt::QuiescenceGroupPartWatermark { .. }
                 | Runtime2Evt::GroupPartWorkerAdvanced { .. }
-                | Runtime2Evt::SyncSessionObserved { .. }
                 | Runtime2Evt::ConnEstablished { .. }
                 | Runtime2Evt::ConnLost { .. }
                 | Runtime2Evt::KeyhiveSyncDone { .. }
                 | Runtime2Evt::KeyhiveSyncFailed { .. }
                 | Runtime2Evt::KeyhiveCacheRefreshDone { .. }
-                | Runtime2Evt::KeyhiveSyncRequested { .. }
-                | Runtime2Evt::DocSyncRequested { .. }
                 | Runtime2Evt::DocSyncCompleted { .. }
                 | Runtime2Evt::DocWorkerHandleAcquired { .. }
                 | Runtime2Evt::DocWorkerStopped { .. }
-                | Runtime2Evt::DocWorkerMaterializationPending { .. }
                 | Runtime2Evt::DocWorkerMaterializationReady { .. }
         ) {
             self.note_activity();
@@ -1170,7 +1239,6 @@ where
             }
             Runtime2Evt::GroupPartWorkerAdvanced { cursor } => {
                 self.group_part_cursor = self.group_part_cursor.max(cursor);
-                self.group_part_worker_pending = false;
             }
             Runtime2Evt::DocSyncRequested {
                 doc_id,
@@ -1238,7 +1306,6 @@ where
                 // and do not correspond to a BigRepo domain event.
             }
             Runtime2Evt::CgkaOp { data } => {
-                self.group_part_worker_pending = true;
                 // Every CGKA op is a document key rotation.
                 let doc_id = crate::DocumentId::new(*data.payload().doc_id().as_bytes());
                 self.change_manager
@@ -1246,7 +1313,6 @@ where
                     .expect("task was found dead");
             }
             Runtime2Evt::DelegationReceived { target, data } => {
-                self.group_part_worker_pending = true;
                 let member_id = PeerId::new(data.payload().delegate().id().to_bytes());
                 let member_is_document = matches!(
                     data.payload().delegate(),
@@ -1263,7 +1329,6 @@ where
                 ))?;
             }
             Runtime2Evt::RevocationReceived { target, data } => {
-                self.group_part_worker_pending = true;
                 let member_id = PeerId::new(data.payload().revoked_id().as_bytes());
                 let member_is_document = matches!(
                     data.payload().revoked().payload().delegate(),
@@ -1616,9 +1681,7 @@ where
         let workers: Vec<(DocumentId, DocWorkerHandle)> = self
             .doc_workers
             .iter()
-            .filter_map(|(doc_id, entry)| {
-                (entry.internal_leases > 0).then_some((*doc_id, entry.handle.clone()))
-            })
+            .map(|(doc_id, entry)| (*doc_id, entry.handle.clone()))
             .collect();
         for (doc_id, worker) in workers {
             if worker
@@ -1979,7 +2042,6 @@ where
         quiescence_barrier_ids: 0,
         activity_generation: 0,
         group_part_cursor: 0,
-        group_part_worker_pending: true,
         doc_workers: HashMap::new(),
         pending_materialization: HashSet::new(),
         doc_sync_waiter_ids: Arc::clone(&doc_sync_waiter_ids),

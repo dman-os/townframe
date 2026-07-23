@@ -722,10 +722,18 @@ async fn tier3_opposite_order_membership_payload() -> crate::Res<()> {
         .map_err(|err| crate::ferr!("failed creating doc: {err:?}"))?;
     let a_doc = topo.topo_node(0).repo.create_doc(initial).await?;
     let doc_id = a_doc.document_id();
-
+    // Keep the B↔C keyhive notification bridge quiet until the explicit
+    // membership sync below; otherwise the concurrent notification task can
+    // race the payload-first assertion. The direct sync RPC remains active.
     // Grant B as relay and C as Reader via public agent (same pattern as
     // the existing relay/line tests where the far-end agent is not directly
     // learned by the owner across a multi-hop connection).
+    topo.topo_node(1)
+        .stop_keyhive_rpc(topo.topo_node(2).peer_id())
+        .await;
+    topo.topo_node(2)
+        .stop_keyhive_rpc(topo.topo_node(1).peer_id())
+        .await;
     let b_agent = fixtures::agent_of(&topo.topo_node(0).repo, topo.topo_node(1)).await?;
     topo.topo_node(0)
         .repo
