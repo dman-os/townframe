@@ -1916,6 +1916,12 @@ impl SqliteBigRepoStore {
         .into_iter()
         .map(Self::part_from_blob)
         .collect();
+        tracing::debug!(
+            obj_id = ?obj_id,
+            live_part_ids = ?live_part_ids,
+            payload = %payload_json,
+            "persisting BigSync object payload",
+        );
         sqlx::query(
             "INSERT INTO big_sync_objs(scope_id, obj_id, payload_json)
              VALUES (?1, ?2, ?3)

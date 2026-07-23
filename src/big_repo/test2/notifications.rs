@@ -1055,10 +1055,10 @@ async fn tier7_bidirectional_sync_origin_correctness() -> crate::Res<()> {
     pair.left().repo.wait_for_quiescence(None).await?;
     pair.right().repo.wait_for_quiescence(None).await?;
 
-    // Drain local notifications on each side.
-    let owner_local = recv_one(&mut owner_rx).await;
+    // Background gossip may batch the remote edit with the local notification.
+    let owner_notifications = recv_one(&mut owner_rx).await;
     assert!(
-        owner_local.iter().any(|n| matches!(
+        owner_notifications.iter().any(|n| matches!(
             n,
             BigRepoChangeNotification::DocChanged {
                 doc_id: did,
@@ -1068,9 +1068,9 @@ async fn tier7_bidirectional_sync_origin_correctness() -> crate::Res<()> {
         )),
         "owner must see Local DocChanged for its own write"
     );
-    let editor_local = recv_one(&mut editor_rx).await;
+    let editor_notifications = recv_one(&mut editor_rx).await;
     assert!(
-        editor_local.iter().any(|n| matches!(
+        editor_notifications.iter().any(|n| matches!(
             n,
             BigRepoChangeNotification::DocChanged {
                 doc_id: did,
@@ -1091,31 +1091,45 @@ async fn tier7_bidirectional_sync_origin_correctness() -> crate::Res<()> {
     pair.left().repo.wait_for_quiescence(None).await?;
     pair.right().repo.wait_for_quiescence(None).await?;
 
-    // Owner receives editor's field_b as Remote.
-    let owner_remote = recv_one(&mut owner_rx).await;
+    // Each side must observe the other edit as Remote. It may have arrived in
+    // the batch above or during the explicit synchronization.
+    let owner_saw_remote = owner_notifications.iter().any(|n| matches!(
+        n,
+        BigRepoChangeNotification::DocChanged {
+            doc_id: did,
+            origin: BigRepoChangeOrigin::Remote { .. },
+            ..
+        } if *did == doc_id
+    )) || recv_one(&mut owner_rx).await.iter().any(|n| matches!(
+        n,
+        BigRepoChangeNotification::DocChanged {
+            doc_id: did,
+            origin: BigRepoChangeOrigin::Remote { .. },
+            ..
+        } if *did == doc_id
+    ));
     assert!(
-        owner_remote.iter().any(|n| matches!(
-            n,
-            BigRepoChangeNotification::DocChanged {
-                doc_id: did,
-                origin: BigRepoChangeOrigin::Remote { .. },
-                ..
-            } if *did == doc_id
-        )),
+        owner_saw_remote,
         "owner must see Remote DocChanged for editor's write"
     );
 
-    // Editor receives owner's field_a as Remote.
-    let editor_remote = recv_one(&mut editor_rx).await;
+    let editor_saw_remote = editor_notifications.iter().any(|n| matches!(
+        n,
+        BigRepoChangeNotification::DocChanged {
+            doc_id: did,
+            origin: BigRepoChangeOrigin::Remote { .. },
+            ..
+        } if *did == doc_id
+    )) || recv_one(&mut editor_rx).await.iter().any(|n| matches!(
+        n,
+        BigRepoChangeNotification::DocChanged {
+            doc_id: did,
+            origin: BigRepoChangeOrigin::Remote { .. },
+            ..
+        } if *did == doc_id
+    ));
     assert!(
-        editor_remote.iter().any(|n| matches!(
-            n,
-            BigRepoChangeNotification::DocChanged {
-                doc_id: did,
-                origin: BigRepoChangeOrigin::Remote { .. },
-                ..
-            } if *did == doc_id
-        )),
+        editor_saw_remote,
         "editor must see Remote DocChanged for owner's write"
     );
 
@@ -1181,7 +1195,7 @@ async fn tier7_local_mutation_quiescence_keyhive_state_and_notification() -> cra
     );
 
     // ── Notification: must have been delivered after publication ─────────
-    let batch = recv_one(&mut rx).await;
+    let batch = recv_until_doc_changed(&mut rx).await;
     let has_doc_changed = batch.iter().any(|n| match n {
         BigRepoChangeNotification::DocChanged {
             doc_id: seen,

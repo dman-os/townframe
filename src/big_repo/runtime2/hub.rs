@@ -131,6 +131,7 @@ pub(crate) struct KeyhiveSyncRound {
     pub round_id: u64,
     pub request_id: subduction_keyhive::message::RequestId,
     pub cache_refresh_started: bool,
+    pub changed: bool,
 }
 
 pub(crate) struct QuiescenceProbe {
@@ -280,6 +281,7 @@ where
         let doc_ids: Vec<_> = self.doc_workers.keys().copied().collect();
         tracing::debug!(
             barrier_id,
+            local_peer_id = %self.local_peer_id,
             activity_generation = generation,
             doc_workers = doc_ids.len(),
             pending_materialization = self.pending_materialization.len(),
@@ -345,6 +347,7 @@ where
             return Ok(());
         }
         tracing::debug!(
+            local_peer_id = %self.local_peer_id,
             barrier_id = probe.barrier_id,
             activity_generation = probe.activity_generation,
             "runtime2 quiescence probe resolved",
@@ -594,6 +597,7 @@ trait HubBackgroundFuture<F: FutureForm> {
         runtime_io: Arc<dyn crate::runtime2::RuntimeIo<F>>,
         evt_tx: async_channel::Sender<Runtime2Evt>,
         peer_id: PeerId,
+        changed: bool,
         round_id: Option<u64>,
     ) -> F::Future<'static, eyre::Result<()>>;
     fn refresh_cache_for_quiescence(
@@ -699,7 +703,7 @@ impl<F: FutureForm> HubBackgroundFuture<F> for F {
     ) -> F::Future<'static, eyre::Result<()>> {
         F::from_future(async move {
             runtime_io
-                .refresh_keyhive_cache()
+                .refresh_keyhive_cache(false)
                 .await
                 .wrap_err("keyhive cache refresh failed")?;
             Ok(())
@@ -710,11 +714,12 @@ impl<F: FutureForm> HubBackgroundFuture<F> for F {
         runtime_io: Arc<dyn crate::runtime2::RuntimeIo<F>>,
         evt_tx: async_channel::Sender<Runtime2Evt>,
         peer_id: PeerId,
+        changed: bool,
         round_id: Option<u64>,
     ) -> F::Future<'static, eyre::Result<()>> {
         F::from_future(async move {
             let result = runtime_io
-                .refresh_keyhive_cache()
+                .refresh_keyhive_cache(changed)
                 .await
                 .wrap_err("keyhive cache refresh failed");
             if evt_tx
@@ -737,7 +742,7 @@ impl<F: FutureForm> HubBackgroundFuture<F> for F {
     ) -> F::Future<'static, eyre::Result<()>> {
         F::from_future(async move {
             let result = runtime_io
-                .refresh_keyhive_cache()
+                .refresh_keyhive_cache(false)
                 .await
                 .wrap_err("quiescence cache refresh failed");
             evt_tx
@@ -1085,6 +1090,7 @@ where
         match &evt {
             Runtime2Evt::SyncSessionObserved { session } => {
                 tracing::debug!(
+                    local_peer_id = %self.local_peer_id,
                     doc_id = %DocumentId::new(*session.sedimentree_id.as_bytes()),
                     peer_id = %session.peer_id,
                     kind = ?session.kind,
@@ -1103,6 +1109,7 @@ where
                 peer_id,
                 waiter_id,
             } => tracing::debug!(
+                local_peer_id = %self.local_peer_id,
                 %doc_id,
                 %peer_id,
                 waiter_id,
@@ -1114,6 +1121,7 @@ where
                 waiter_id,
                 result,
             } => tracing::debug!(
+                local_peer_id = %self.local_peer_id,
                 %doc_id,
                 %peer_id,
                 waiter_id,
@@ -1121,15 +1129,19 @@ where
                 "runtime2 event: document sync completed",
             ),
             Runtime2Evt::KeyhiveSyncRequested { peer_id } => tracing::debug!(
+                local_peer_id = %self.local_peer_id,
                 %peer_id,
                 "runtime2 event: Keyhive sync requested",
             ),
             Runtime2Evt::KeyhiveSyncDone {
                 peer_id,
                 request_id,
+                changed,
             } => tracing::debug!(
+                local_peer_id = %self.local_peer_id,
                 %peer_id,
                 ?request_id,
+                changed,
                 "runtime2 event: Keyhive sync completed",
             ),
             Runtime2Evt::KeyhiveSyncFailed {
@@ -1137,10 +1149,22 @@ where
                 request_id,
                 error,
             } => tracing::debug!(
+                local_peer_id = %self.local_peer_id,
                 %peer_id,
                 ?request_id,
                 %error,
                 "runtime2 event: Keyhive sync failed",
+            ),
+            Runtime2Evt::ConnEstablished { peer_id, .. } => tracing::debug!(
+                local_peer_id = %self.local_peer_id,
+                %peer_id,
+                "runtime2 event: connection established",
+            ),
+            Runtime2Evt::ConnLost { peer_id, error, .. } => tracing::debug!(
+                local_peer_id = %self.local_peer_id,
+                %peer_id,
+                ?error,
+                "runtime2 event: connection lost",
             ),
             _ => {}
         }
@@ -1181,8 +1205,9 @@ where
             Runtime2Evt::KeyhiveSyncDone {
                 peer_id,
                 request_id,
+                changed,
             } => {
-                self.finish_keyhive_sync(peer_id, request_id)?;
+                self.finish_keyhive_sync(peer_id, request_id, changed)?;
             }
             Runtime2Evt::KeyhiveSyncFailed {
                 peer_id,
@@ -1442,7 +1467,17 @@ where
                 round_id,
                 request_id: request_id.clone(),
                 cache_refresh_started: false,
+                changed: false,
             },
+        );
+        tracing::debug!(
+            %peer_id,
+            round_id,
+            ?request_id,
+            watermark,
+            pending_waiters = self.pending_keyhive_syncs.get(&peer_id).map_or(0, Vec::len),
+            dirty = self.keyhive_dirty.contains(&peer_id),
+            "starting Keyhive sync round"
         );
         self.spawn_background(F::start_sync(
             Arc::clone(&self.runtime_io),
@@ -1496,6 +1531,7 @@ where
         &mut self,
         peer_id: PeerId,
         request_id: subduction_keyhive::message::RequestId,
+        changed: bool,
     ) -> eyre::Result<()> {
         let Some(round) = self.active_keyhive_syncs.get_mut(&peer_id) else {
             tracing::debug!(%peer_id, ?request_id, "refreshing untracked inbound keyhive completion");
@@ -1503,10 +1539,16 @@ where
                 Arc::clone(&self.runtime_io),
                 self.evt_tx.clone(),
                 peer_id,
+                changed,
                 None,
             ))?;
             return Ok(());
         };
+        // A concurrent inbound exchange can advance this peer's state while a
+        // different request owns the explicit waiter. That progress still
+        // invalidates the active round and requires an unchanged validation
+        // round before its waiters may resolve.
+        round.changed |= changed;
         if round.request_id != request_id {
             tracing::debug!(
                 %peer_id,
@@ -1518,6 +1560,7 @@ where
                 Arc::clone(&self.runtime_io),
                 self.evt_tx.clone(),
                 peer_id,
+                changed,
                 None,
             ))?;
             return Ok(());
@@ -1532,6 +1575,7 @@ where
             Arc::clone(&self.runtime_io),
             self.evt_tx.clone(),
             peer_id,
+            changed,
             Some(round_id),
         ))?;
         Ok(())
@@ -1589,8 +1633,25 @@ where
         assert_eq!(round.round_id, round_id);
         let watermark = round.watermark;
 
+        // Ingestion can change the pair view used by the just-completed
+        // exchange. Keep every waiter pending until a subsequent unchanged
+        // round validates the caller-sided fixed point.
+        if round.changed {
+            tracing::debug!(
+                %peer_id,
+                round_id,
+                ?round.request_id,
+                pending_waiters = self.pending_keyhive_syncs.get(&peer_id).map_or(0, Vec::len),
+                "Keyhive sync changed local state; scheduling validation round"
+            );
+            self.keyhive_dirty.remove(&peer_id);
+            self.start_keyhive_sync(peer_id)?;
+            self.reattempt_pending_materialization();
+            return Ok(());
+        }
         // Split waiters: those that existed before this sync started resolve,
         // those that arrived during/after cascade into a new round.
+        let mut resolved_waiters = 0usize;
         if let Some(waiters) = self.pending_keyhive_syncs.get_mut(&peer_id) {
             let mut remaining = Vec::new();
             for (id, sender) in std::mem::take(waiters) {
@@ -1598,6 +1659,7 @@ where
                     sender
                         .send(Ok(()))
                         .expect("keyhive sync waiter receiver must remain open");
+                    resolved_waiters += 1;
                 } else {
                     remaining.push((id, sender));
                 }
@@ -1609,6 +1671,17 @@ where
             }
         }
         let has_remaining = self.pending_keyhive_syncs.contains_key(&peer_id);
+        tracing::debug!(
+            %peer_id,
+            round_id,
+            ?round.request_id,
+            watermark,
+            resolved_waiters,
+            remaining_waiters = self.pending_keyhive_syncs.get(&peer_id).map_or(0, Vec::len),
+            has_remaining,
+            dirty = self.keyhive_dirty.contains(&peer_id),
+            "completing Keyhive sync round"
+        );
         if has_remaining || self.keyhive_dirty.remove(&peer_id) {
             self.start_keyhive_sync(peer_id)?;
         }
@@ -1639,7 +1712,13 @@ where
             return;
         }
         if self.active_keyhive_syncs.contains_key(&peer_id) {
-            self.keyhive_dirty.insert(peer_id);
+            let newly_dirty = self.keyhive_dirty.insert(peer_id);
+            tracing::debug!(
+                %peer_id,
+                newly_dirty,
+                active_round_id = self.active_keyhive_syncs.get(&peer_id).map(|round| round.round_id),
+                "marked active Keyhive sync round dirty"
+            );
         } else if let Err(err) = self.start_keyhive_sync(peer_id) {
             tracing::warn!(%peer_id, error = %err, "failed to start internal keyhive sync");
         }

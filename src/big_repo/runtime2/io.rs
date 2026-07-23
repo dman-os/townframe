@@ -287,7 +287,7 @@ pub trait RuntimeIo<F: FutureForm>: Send + Sync {
     ) -> F::Future<'_, eyre::Result<()>>;
 
     /// Refresh the keyhive cache (periodic maintenance).
-    fn refresh_keyhive_cache(&self) -> F::Future<'_, eyre::Result<()>>;
+    fn refresh_keyhive_cache(&self, notify: bool) -> F::Future<'_, eyre::Result<()>>;
 
     /// Compact the keyhive archive (periodic maintenance).
     fn compact_keyhive(&self) -> F::Future<'_, eyre::Result<()>>;

@@ -175,3 +175,62 @@ pub async fn sync_doc_expect_ready(
         )),
     }
 }
+
+// ─── Bidirectional document sync ─────────────────────────────────────────────
+
+/// Bidirectional document sync: both sides pull from each other, then both
+/// repos reach quiescence.  Returns handles from both repos.
+///
+/// API semantics guarantee that after `A.sync_doc_with_peer(B)` the caller (A)
+/// has incorporated B's data, but NOT that B has ingested data A sent.  A
+/// single directional sync leaves the non-calling side's sedimentree parity
+/// unconstrained.  This helper issues both directions and waits for both repos
+/// to settle, so callers can safely assert convergence invariants.
+pub async fn sync_doc_bidirectional(
+    conn_a_to_b: &crate::BigRepoConnection,
+    conn_b_to_a: &crate::BigRepoConnection,
+    repo_a: &Arc<crate::BigRepo>,
+    repo_b: &Arc<crate::BigRepo>,
+    doc_id: DocumentId,
+) -> Res<(crate::BigDocHandle, crate::BigDocHandle)> {
+    let timeout = Some(std::time::Duration::from_secs(10));
+    conn_a_to_b.sync_doc_with_peer(doc_id, timeout).await?;
+    conn_b_to_a.sync_doc_with_peer(doc_id, timeout).await?;
+    repo_a.wait_for_quiescence(timeout).await?;
+    repo_b.wait_for_quiescence(timeout).await?;
+    let handle_a = match repo_a.get_doc(&doc_id).await? {
+        crate::DocLookup::Ready(h) => h,
+        _ => {
+            return Err(crate::ferr!(
+                "{}: doc not Ready on repo_a after bidirectional sync",
+                log_nickname::nickname(&repo_a.local_peer_id()),
+            ))
+        }
+    };
+    let handle_b = match repo_b.get_doc(&doc_id).await? {
+        crate::DocLookup::Ready(h) => h,
+        _ => {
+            return Err(crate::ferr!(
+                "{}: doc not Ready on repo_b after bidirectional sync",
+                log_nickname::nickname(&repo_b.local_peer_id()),
+            ))
+        }
+    };
+    Ok((handle_a, handle_b))
+}
+
+/// Convenience wrapper around [`sync_doc_bidirectional`] for a [`Pair`].
+/// Returns (left_handle, right_handle).
+pub async fn sync_doc_pair(
+    pair: &Pair,
+    doc_id: DocumentId,
+) -> Res<(crate::BigDocHandle, crate::BigDocHandle)> {
+    sync_doc_bidirectional(
+        pair.left_conn(),
+        pair.right_conn(),
+        &pair.left().repo,
+        &pair.right().repo,
+        doc_id,
+    )
+    .await
+}

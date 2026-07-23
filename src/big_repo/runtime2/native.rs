@@ -345,11 +345,19 @@ where
         sed_id: SedimentreeId,
     ) -> <Sendable as future_form::FutureForm>::Future<'_, eyre::Result<Vec<CommitId>>> {
         Sendable::from_future(async move {
-            // Try sedimentree cache first.
-            if let Some(tree) = self.sedimentrees.get_cloned(&sed_id).await {
-                let heads = sedimentree_heads_payload(&tree);
-                return Ok(heads.iter().map(|h| CommitId::new(h.0)).collect());
-            }
+            // Try sedimentree cache first. If it reports an impossible empty
+            // frontier, compare it with durable storage before returning so a
+            // future failure identifies the layer that lost the metadata.
+            let empty_cached_counts =
+                if let Some(tree) = self.sedimentrees.get_cloned(&sed_id).await {
+                    let heads = sedimentree_heads_payload(&tree);
+                    if !heads.is_empty() {
+                        return Ok(heads.iter().map(|h| CommitId::new(h.0)).collect());
+                    }
+                    Some((tree.loose_commits().count(), tree.fragments().count()))
+                } else {
+                    None
+                };
 
             // Hydrate from storage: load loose commits + fragments, build tree.
             let loose_commits =
@@ -368,6 +376,16 @@ where
                 .wrap_err("failed loading fragments for heads")?;
 
             if loose_commits.is_empty() && fragments.is_empty() {
+                if let Some((cached_loose, cached_fragments)) = empty_cached_counts {
+                    tracing::warn!(
+                        ?sed_id,
+                        cached_loose,
+                        cached_fragments,
+                        durable_loose = 0,
+                        durable_fragments = 0,
+                        "cached and durable Sedimentree both report an empty frontier"
+                    );
+                }
                 return Ok(Vec::new());
             }
 
@@ -377,6 +395,18 @@ where
             ));
 
             let heads = sedimentree_heads_payload(&tree);
+            if let Some((cached_loose, cached_fragments)) = empty_cached_counts {
+                tracing::warn!(
+                    ?sed_id,
+                    cached_loose,
+                    cached_fragments,
+                    durable_loose = loose_commits.len(),
+                    durable_fragments = fragments.len(),
+                    durable_heads = heads.len(),
+                    "cached Sedimentree reported empty heads; compared durable state"
+                );
+                return Ok(Vec::new());
+            }
             Ok(heads.iter().map(|h| CommitId::new(h.0)).collect())
         })
     }
@@ -697,6 +727,12 @@ where
             // requested as well as its closure.
             let mut complete = vec![(encrypted.content_ref.clone(), entrypoint_envelope.plaintext)];
             for (content_ref, ciphertext_or_plaintext) in state.complete {
+                if complete
+                    .iter()
+                    .any(|(known_ref, _)| known_ref == &content_ref)
+                {
+                    continue;
+                }
                 let envelope: Envelope<Vec<u8>, Vec<u8>> =
                     match bincode::deserialize(&ciphertext_or_plaintext) {
                         Ok(env) => env,
@@ -843,14 +879,18 @@ where
     // ── refresh_keyhive_cache ─────────────────────────────────────────────
     fn refresh_keyhive_cache(
         &self,
+        notify: bool,
     ) -> <Sendable as future_form::FutureForm>::Future<'_, eyre::Result<()>> {
         Sendable::from_future(async move {
             self.keyhive_protocol
                 .refresh_cache()
                 .await
                 .wrap_err("keyhive cache refresh failed")?;
-            // Notify peers only after the refreshed projection is published.
-            let _ = self.keyhive_change_tx.send(());
+            if notify {
+                // Notify peers only after the refreshed projection is published
+                // and only when this sync ingested new operations.
+                let _ = self.keyhive_change_tx.send(());
+            }
             Ok(())
         })
     }
@@ -1261,12 +1301,13 @@ where
         // task; sending completion directly to the runtime event channel could
         // let `KeyhiveSyncDone` overtake a preceding delegation event.
         keyhive_handler = keyhive_handler.with_sync_done_observer(Arc::new(
-            move |keyhive_peer_id, request_id| {
+            move |keyhive_peer_id, request_id, changed| {
                 let peer_id = PeerId::new(*keyhive_peer_id.verifying_key());
                 if listener_evt_tx
                     .send(crate::runtime::RuntimeEvt::KeyhiveSyncDone {
                         peer_id,
                         request_id,
+                        changed,
                     })
                     .is_err()
                 {
@@ -1448,9 +1489,11 @@ where
                         crate::runtime::RuntimeEvt::KeyhiveSyncDone {
                             peer_id,
                             request_id,
+                            changed,
                         } => crate::runtime2::Runtime2Evt::KeyhiveSyncDone {
                             peer_id,
                             request_id,
+                            changed,
                         },
                         crate::runtime::RuntimeEvt::PrekeyExpanded { new_prekey } => {
                             crate::runtime2::Runtime2Evt::PrekeyExpanded { new_prekey }

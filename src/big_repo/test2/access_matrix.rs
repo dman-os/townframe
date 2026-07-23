@@ -553,12 +553,19 @@ async fn run_offline_case(seed: u8, before_content: bool, access: Access) -> cra
     assert_eq!(read_title(&agent_doc).await, "offline-agent-matrix");
     heads::tier0_invariants(&pair, doc_id, &owner_doc, &agent_doc).await?;
     if access.is_editor() {
+        let agent_heads_before = agent_doc.with_document_read(|doc| doc.get_heads()).await;
         agent_doc
             .with_document(|doc| {
                 doc.transact(|tx| tx.put(automerge::ROOT, "agent_note", "agent-member"))
                     .map_err(|err| crate::ferr!("failed offline agent write: {err:?}"))
             })
             .await??;
+        let agent_heads_after = agent_doc.with_document_read(|doc| doc.get_heads()).await;
+        let edit_heads: Vec<_> = agent_heads_after
+            .iter()
+            .filter(|head| !agent_heads_before.contains(head))
+            .copied()
+            .collect();
         pair.right_conn().sync_keyhive_with_peer(None).await?;
         pair.left_conn().sync_keyhive_with_peer(None).await?;
         pair.left()
@@ -572,12 +579,20 @@ async fn run_offline_case(seed: u8, before_content: bool, access: Access) -> cra
         drop(owner_doc);
         let owner_doc =
             fixtures::sync_doc_expect_ready(pair.left_conn(), &pair.left().repo, doc_id).await?;
-        assert_eq!(
-            read_optional_text(&owner_doc, "agent_note")
-                .await
-                .as_deref(),
-            Some("agent-member")
-        );
+        let owner_agent_note = read_optional_text(&owner_doc, "agent_note").await;
+        if owner_agent_note.as_deref() != Some("agent-member") {
+            let owner_state = pair.left().repo.doc_head_state(doc_id).await?;
+            let agent_state = pair.right().repo.doc_head_state(doc_id).await?;
+            let owner_live_heads = owner_doc.with_document_read(|doc| doc.get_heads()).await;
+            let agent_live_heads = agent_doc.with_document_read(|doc| doc.get_heads()).await;
+            return Err(crate::ferr!(
+                "owner missed agent edit after sync: edit_heads={edit_heads:?} \
+                 agent_heads_before={agent_heads_before:?} agent_heads_after={agent_heads_after:?} \
+                 owner_state={owner_state:?} agent_state={agent_state:?} \
+                 owner_live_heads={owner_live_heads:?} agent_live_heads={agent_live_heads:?} \
+                 owner_agent_note={owner_agent_note:?}"
+            ));
+        }
         heads::tier0_invariants(&pair, doc_id, &owner_doc, &agent_doc).await?;
         drop(owner_doc);
     } else {
@@ -953,6 +968,11 @@ async fn run_document_as_member_case(
     }
     pair.left_conn().sync_keyhive_with_peer(None).await?;
     pair.right_conn().sync_keyhive_with_peer(None).await?;
+
+    // Document commits and deterministic fragmentation are published
+    // independently of the Keyhive exchange. Settle the owner before asking
+    // the member to synchronize the resulting Sedimentree frontier.
+    pair.left().repo.wait_for_quiescence(None).await?;
 
     let member_doc =
         fixtures::sync_doc_expect_ready(pair.right_conn(), &pair.right().repo, target_id).await?;

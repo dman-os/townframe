@@ -136,6 +136,7 @@ pub enum Runtime2Evt {
     KeyhiveSyncDone {
         peer_id: PeerId,
         request_id: subduction_keyhive::message::RequestId,
+        changed: bool,
     },
     /// Initiating a keyhive sync failed before the protocol could emit a
     /// completion event. The hub uses this to resolve the public waiter

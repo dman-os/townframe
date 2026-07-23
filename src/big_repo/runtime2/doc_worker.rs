@@ -546,7 +546,7 @@ impl<F: FutureForm> DocWorker2<F> {
                 continue;
             };
             match doc.load_incremental(&plaintext) {
-                Ok(_) => made_progress = true,
+                Ok(applied) => made_progress |= applied > 0,
                 Err(automerge::AutomergeError::MissingDeps) => {
                     return Err(ferr!(
                         "topologically ordered document blob has missing Automerge dependencies"
@@ -554,6 +554,17 @@ impl<F: FutureForm> DocWorker2<F> {
                 }
                 Err(error) => return Err(ferr!("automerge load_incremental failed: {error}")),
             }
+        }
+
+        // A minimized tree can omit loose ancestors covered by a fragment,
+        // while causal decryption still returns their plaintexts. They remain
+        // necessary Automerge dependencies even though they have no visible
+        // Sedimentree item.
+        for (_, plaintext) in plaintexts {
+            let applied = doc
+                .load_incremental(&plaintext)
+                .map_err(|error| ferr!("failed applying causal ancestor blob: {error}"))?;
+            made_progress |= applied > 0;
         }
 
         if !made_progress {
@@ -754,14 +765,12 @@ impl<F: FutureForm> DocWorker2<F> {
         patches: Vec<automerge::Patch>,
         origin: crate::changes::BigRepoChangeOrigin,
     ) -> eyre::Result<()> {
-        // No-op detection: skip notification if heads haven't changed.
-        if self.last_notified_heads.as_ref() == Some(&heads) {
-            return Ok(());
+        // Deduplicate the frontier notification without suppressing patches.
+        if self.last_notified_heads.as_ref() != Some(&heads) {
+            self.change_manager
+                .notify_doc_heads_changed(self.doc_id, Arc::clone(&heads), origin.clone())
+                .map_err(|_| ferr!("change manager notify_doc_heads_changed failed"))?;
         }
-
-        self.change_manager
-            .notify_doc_heads_changed(self.doc_id, Arc::clone(&heads), origin.clone())
-            .map_err(|_| ferr!("change manager notify_doc_heads_changed failed"))?;
 
         // Fire patches even if heads didn't change (delta can have content
         // changes within the same head set — e.g. tombstone compaction).
@@ -912,14 +921,15 @@ impl<F: FutureForm> DocWorker2<F> {
         &self,
         resp: futures::channel::oneshot::Sender<eyre::Result<crate::runtime2::DocHeadState>>,
     ) -> eyre::Result<()> {
-        let sedimentree_heads_commit_ids = self.io.sedimentree_heads(self.sed_id).await?;
-
-        // Convert CommitIds to ChangeHashes for the public API.
-        let sedimentree_heads: Arc<[automerge::ChangeHash]> = sedimentree_heads_commit_ids
+        let mut sedimentree_heads: Vec<automerge::ChangeHash> = self
+            .io
+            .sedimentree_heads(self.sed_id)
+            .await?
             .iter()
             .map(|cid| automerge::ChangeHash(*cid.as_bytes()))
             .collect();
-
+        sedimentree_heads.sort_unstable();
+        let sedimentree_heads: Arc<[automerge::ChangeHash]> = sedimentree_heads.into();
         let (materialized_heads, state) = match &self.state {
             DocState::Live(bundle) => {
                 if let Some(bundle) = bundle.upgrade() {
@@ -958,6 +968,19 @@ impl<F: FutureForm> DocWorker2<F> {
                 }
             }
         };
+
+        if sedimentree_heads.is_empty()
+            && materialized_heads
+                .as_ref()
+                .is_some_and(|heads| !heads.is_empty())
+        {
+            tracing::warn!(
+                sed_id = ?self.sed_id,
+                materialized_heads = materialized_heads.as_ref().map_or(0, |heads| heads.len()),
+                ?state,
+                "materialized document has heads while its Sedimentree frontier is empty"
+            );
+        }
 
         let _ = resp.send(Ok(crate::runtime2::DocHeadState {
             sedimentree_heads,
@@ -1116,7 +1139,6 @@ impl<F: FutureForm> DocWorker2<F> {
         let order = tree
             .topsorted_blob_order()
             .map_err(|e| ferr!("failed ordering sync session blobs: {e}"))?;
-        let received_all_ordered_blobs = received_refs.len() == order.len();
 
         // ── Fast path: relay mode (no change listener, not materialized) ──
         if self.should_fast_path_pending(peer_id) {
@@ -1128,6 +1150,7 @@ impl<F: FutureForm> DocWorker2<F> {
         let (blobs, materialization_pending) = self
             .try_decrypt_session_blobs(&fragments, &commits, &order, &received_refs, &session)
             .await?;
+        let received_all_ordered_blobs = blobs.len() == order.len();
 
         // ── Step 3: Decision branch ──────────────────────────────────────
         if blobs.is_empty() {
@@ -1452,8 +1475,9 @@ impl<F: FutureForm> DocWorker2<F> {
                     out
                 }
                 None => {
-                    // Weak expired — same as Unloaded path.
-                    if received_all_ordered_blobs {
+                    // Rebuild from scratch only when no materialized baseline
+                    // survives the expired handle.
+                    if received_all_ordered_blobs && !had_cached_before {
                         let mut doc = automerge::Automerge::new();
                         for blob in blobs {
                             doc.load_incremental(blob)

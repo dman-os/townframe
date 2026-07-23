@@ -325,6 +325,7 @@ pub(crate) enum RuntimeEvt {
     KeyhiveSyncDone {
         peer_id: PeerId,
         request_id: subduction_keyhive::message::RequestId,
+        changed: bool,
     },
     KeyhiveSyncRequested {
         peer_id: PeerId,
@@ -867,12 +868,13 @@ where
         );
         keyhive_handler = keyhive_handler.with_sync_done_observer({
             let evt_tx = evt_tx.clone();
-            Arc::new(move |keyhive_peer_id, request_id| {
+            Arc::new(move |keyhive_peer_id, request_id, changed| {
                 let peer_id = PeerId::new(*keyhive_peer_id.verifying_key());
                 if evt_tx
                     .send(RuntimeEvt::KeyhiveSyncDone {
                         peer_id,
                         request_id,
+                        changed,
                     })
                     .is_err()
                 {
@@ -1314,6 +1316,7 @@ where
             RuntimeEvt::KeyhiveSyncDone {
                 peer_id,
                 request_id: _,
+                changed: _,
             } => {
                 self.finish_keyhive_sync(peer_id)?;
             }

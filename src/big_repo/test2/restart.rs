@@ -85,25 +85,27 @@ async fn restart_right(pair: &mut Pair, right_path: std::path::PathBuf) -> crate
 
 /// After reconnect: sync membership (keyhive) first, then document payload.
 ///
-/// Verifies the document is readable on the right side after one doc sync.
+/// Uses bidirectional doc sync (both sides pull) so both repos are quiescent
+/// and callers can safely assert convergence invariants.  Returns handles from
+/// both repos.
 async fn reconcile_membership_first(
     pair: &Pair,
     doc_id: crate::DocumentId,
-) -> crate::Res<crate::BigDocHandle> {
+) -> crate::Res<(crate::BigDocHandle, crate::BigDocHandle)> {
     pair.left_conn().sync_keyhive_with_peer(None).await?;
     pair.right_conn().sync_keyhive_with_peer(None).await?;
-    fixtures::sync_doc_expect_ready(pair.right_conn(), &pair.right().repo, doc_id).await
+    fixtures::sync_doc_pair(pair, doc_id).await
 }
 
 /// After reconnect: sync document payload first (before membership).
 ///
 /// The first doc sync may not decrypt (membership is stale); we then sync
-/// keyhive and issue a second doc sync. Returns the handle from the second
-/// sync, when the reader should be able to materialise.
+/// keyhive and issue a second bidirectional doc sync. Returns handles from
+/// both repos.
 async fn reconcile_payload_first(
     pair: &Pair,
     doc_id: crate::DocumentId,
-) -> crate::Res<crate::BigDocHandle> {
+) -> crate::Res<(crate::BigDocHandle, crate::BigDocHandle)> {
     // First doc sync — may produce PendingMaterialization because the reader
     // hasn't synced the updated CGKA key material yet.
     pair.right_conn()
@@ -116,8 +118,9 @@ async fn reconcile_payload_first(
     // Now sync membership so the reader learns the new CGKA epoch.
     pair.left_conn().sync_keyhive_with_peer(None).await?;
     pair.right_conn().sync_keyhive_with_peer(None).await?;
-    // Second doc sync — should decrypt with the fresh key material.
-    fixtures::sync_doc_expect_ready(pair.right_conn(), &pair.right().repo, doc_id).await
+    // Bidirectional doc sync: the second pull materialises, reverse pull
+    // settles parity so tier0_invariants is safe.
+    fixtures::sync_doc_pair(pair, doc_id).await
 }
 
 // ─── remote-restart-live-conn ──────────────────────────────────────────────
@@ -144,12 +147,13 @@ async fn tier5_remote_restart_membership_first() -> crate::Res<()> {
     restart_right(&mut pair, right_path).await?;
     pair.connect().await?;
 
-    // membership-first: sync keyhive before document payload.
-    let reader_doc2 = reconcile_membership_first(&pair, doc_id).await?;
+    // membership-first: sync keyhive then bidirectional doc sync.
+    let (owner_doc2, reader_doc2) = reconcile_membership_first(&pair, doc_id).await?;
     assert_eq!(read_title(&reader_doc2).await, "restart-membership-first");
-    heads::tier0_invariants(&pair, doc_id, &owner_doc, &reader_doc2).await?;
+    heads::tier0_invariants(&pair, doc_id, &owner_doc2, &reader_doc2).await?;
 
     drop(owner_doc);
+    drop(owner_doc2);
     drop(reader_doc2);
     Ok(())
 }
@@ -171,12 +175,13 @@ async fn tier5_remote_restart_payload_first() -> crate::Res<()> {
     restart_right(&mut pair, right_path).await?;
     pair.connect().await?;
 
-    // payload-first: sync doc, then keyhive, then doc again.
-    let reader_doc2 = reconcile_payload_first(&pair, doc_id).await?;
+    // payload-first: sync doc, then keyhive, then bidirectional doc sync.
+    let (owner_doc2, reader_doc2) = reconcile_payload_first(&pair, doc_id).await?;
     assert_eq!(read_title(&reader_doc2).await, "restart-payload-first");
-    heads::tier0_invariants(&pair, doc_id, &owner_doc, &reader_doc2).await?;
+    heads::tier0_invariants(&pair, doc_id, &owner_doc2, &reader_doc2).await?;
 
     drop(owner_doc);
+    drop(owner_doc2);
     drop(reader_doc2);
     Ok(())
 }
@@ -228,11 +233,12 @@ async fn tier5_offline_updates_membership_first() -> crate::Res<()> {
     pair.connect().await?;
 
     // membership-first.
-    let reader_doc2 = reconcile_membership_first(&pair, doc_id).await?;
+    let (owner_doc2, reader_doc2) = reconcile_membership_first(&pair, doc_id).await?;
     assert_eq!(read_title(&reader_doc2).await, "offline-update");
-    heads::tier0_invariants(&pair, doc_id, &owner_doc, &reader_doc2).await?;
+    heads::tier0_invariants(&pair, doc_id, &owner_doc2, &reader_doc2).await?;
 
     drop(owner_doc);
+    drop(owner_doc2);
     drop(reader_doc2);
     Ok(())
 }
@@ -273,12 +279,13 @@ async fn tier5_offline_updates_payload_first() -> crate::Res<()> {
         .await?;
     pair.connect().await?;
 
-    // payload-first: doc first, then keyhive, then doc again.
-    let reader_doc2 = reconcile_payload_first(&pair, doc_id).await?;
+    // payload-first: doc first, then keyhive, then bidirectional doc sync.
+    let (owner_doc2, reader_doc2) = reconcile_payload_first(&pair, doc_id).await?;
     assert_eq!(read_title(&reader_doc2).await, "offline-update");
-    heads::tier0_invariants(&pair, doc_id, &owner_doc, &reader_doc2).await?;
+    heads::tier0_invariants(&pair, doc_id, &owner_doc2, &reader_doc2).await?;
 
     drop(owner_doc);
+    drop(owner_doc2);
     drop(reader_doc2);
     Ok(())
 }
@@ -479,12 +486,13 @@ async fn tier5_reopen_sync_membership_first() -> crate::Res<()> {
         .await?;
     pair.connect().await?;
 
-    // membership-first: sync keyhive then doc.
-    let reader_doc2 = reconcile_membership_first(&pair, doc_id).await?;
+    // membership-first: sync keyhive then bidirectional doc sync.
+    let (owner_doc2, reader_doc2) = reconcile_membership_first(&pair, doc_id).await?;
     assert_eq!(read_title(&reader_doc2).await, "reopen-edit");
-    heads::tier0_invariants(&pair, doc_id, &owner_doc, &reader_doc2).await?;
+    heads::tier0_invariants(&pair, doc_id, &owner_doc2, &reader_doc2).await?;
 
     drop(owner_doc);
+    drop(owner_doc2);
     drop(reader_doc2);
     Ok(())
 }
@@ -522,12 +530,13 @@ async fn tier5_reopen_sync_payload_first() -> crate::Res<()> {
         .await?;
     pair.connect().await?;
 
-    // payload-first: doc sync, then keyhive, then doc again.
-    let reader_doc2 = reconcile_payload_first(&pair, doc_id).await?;
+    // payload-first: doc sync, then keyhive, then bidirectional doc sync.
+    let (owner_doc2, reader_doc2) = reconcile_payload_first(&pair, doc_id).await?;
     assert_eq!(read_title(&reader_doc2).await, "reopen-payload-first-edit");
-    heads::tier0_invariants(&pair, doc_id, &owner_doc, &reader_doc2).await?;
+    heads::tier0_invariants(&pair, doc_id, &owner_doc2, &reader_doc2).await?;
 
     drop(owner_doc);
+    drop(owner_doc2);
     drop(reader_doc2);
     Ok(())
 }
@@ -588,12 +597,12 @@ async fn tier5_both_endpoints_restart_preserve_document() -> crate::Res<()> {
     pair.left_conn().sync_keyhive_with_peer(None).await?;
     pair.right_conn().sync_keyhive_with_peer(None).await?;
 
-    let reader_doc2 =
-        fixtures::sync_doc_expect_ready(pair.right_conn(), &pair.right().repo, doc_id).await?;
+    let (owner_doc2, reader_doc2) = fixtures::sync_doc_pair(&pair, doc_id).await?;
     assert_eq!(read_title(&reader_doc2).await, "both-restart");
-    heads::tier0_invariants(&pair, doc_id, &owner_doc, &reader_doc2).await?;
+    heads::tier0_invariants(&pair, doc_id, &owner_doc2, &reader_doc2).await?;
 
     drop(reader_doc2);
+    drop(owner_doc2);
     drop(owner_doc);
     Ok(())
 }
@@ -653,18 +662,20 @@ async fn tier5_restart_after_local_write_delivers_on_reconnect() -> crate::Res<(
     pair.left_conn().sync_keyhive_with_peer(None).await?;
     pair.right_conn().sync_keyhive_with_peer(None).await?;
 
-    // Now sync the doc — the local write should be pushed to the reader.
-    let reader_doc =
-        fixtures::sync_doc_expect_ready(pair.right_conn(), &pair.right().repo, doc_id).await?;
+    // Now sync bidirectionally — the local write should be pushed to the reader
+    // and both repos settle for safe convergence checks.
+    let (owner_doc2, reader_doc) =
+        fixtures::sync_doc_pair(&pair, doc_id).await?;
     assert_eq!(
         read_text(&reader_doc, "note").await.as_deref(),
         Some("written-before-restart"),
         "reader must see the write that was made before left's restart"
     );
 
-    heads::tier0_invariants(&pair, doc_id, &owner_doc, &reader_doc).await?;
+    heads::tier0_invariants(&pair, doc_id, &owner_doc2, &reader_doc).await?;
 
     drop(reader_doc);
+    drop(owner_doc2);
     drop(owner_doc);
     Ok(())
 }

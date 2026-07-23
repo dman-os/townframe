@@ -244,22 +244,44 @@ impl Node {
                         event = changes.recv() => {
                             match event {
                                 Ok(Some(event)) if !event.initial => {
-                                    if let Err(error) = repo
+                                    tracing::debug!(
+                                        %peer_id,
+                                        "received Keyhive RPC notification; starting sync",
+                                    );
+                                    match repo
                                         .sync_keyhive_with_peer(
                                             peer_id,
                                             Some(Duration::from_secs(10)),
                                         )
                                         .await
                                     {
-                                        tracing::debug!(
+                                        Ok(()) => tracing::debug!(
+                                            %peer_id,
+                                            "Keyhive sync after RPC notification completed",
+                                        ),
+                                        Err(error) => tracing::debug!(
                                             %peer_id,
                                             ?error,
-                                            "Keyhive sync after RPC notification failed"
-                                        );
+                                            "Keyhive sync after RPC notification failed",
+                                        ),
                                     }
                                 }
                                 Ok(Some(_)) => {}
-                                Ok(None) | Err(_) => break,
+                                Ok(None) => {
+                                    tracing::debug!(
+                                        %peer_id,
+                                        "Keyhive RPC notification stream closed",
+                                    );
+                                    break;
+                                }
+                                Err(error) => {
+                                    tracing::debug!(
+                                        %peer_id,
+                                        ?error,
+                                        "Keyhive RPC notification stream failed",
+                                    );
+                                    break;
+                                }
                             }
                         }
                     }
