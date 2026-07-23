@@ -3,14 +3,16 @@
 
 mod interlude {
     #[allow(unused_imports)]
-    pub use big_sync_core::{ObjId, PeerId};
+    pub use big_sync_core::{ObjId, PartId, PeerId};
+    use future_form::{FutureForm, Sendable};
     pub use utils_rs::prelude::*;
 }
 
 use crate::interlude::*;
 use crate::keyhive_storage::{BigRepoKeyhiveStorage, KEYHIVE_SUBDIR};
+use sqlx_utils_rs::SqlCtx;
 
-use std::collections::{BTreeSet, HashMap};
+use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 use std::sync::atomic::{AtomicBool, Ordering};
 
 use automerge::ChangeHash;
@@ -29,11 +31,21 @@ mod keyhive;
 pub(crate) mod keyhive_conn;
 pub(crate) mod keyhive_listener;
 pub(crate) mod keyhive_storage;
+pub mod rpc;
 mod runtime;
+/// runtime2 — the tractable, runtime-neutral rewrite.
+/// See `play.big_repo.runtime2.md`.
+pub(crate) mod runtime2;
+mod sqlite_big_repo_store;
+pub use sqlite_big_repo_store::SqliteBigRepoStore;
 pub(crate) mod wire;
-pub use runtime::{CreateDocError, DocLookup, GetDocError, PutDocError, SyncDocError};
+pub use runtime::{
+    CreateDocError, DocLookup, GetDocError, PutDocError, SyncDocError, SyncDocPolicyError,
+};
 #[cfg(test)]
 pub(crate) mod test;
+#[cfg(test)]
+pub(crate) mod test2;
 
 pub use backend::BigRepoSyncBackend;
 pub use ephemeral::{
@@ -46,8 +58,11 @@ pub use changes::{
     path_prefix_matches as big_repo_path_prefix_matches, BigRepoChangeNotification,
     BigRepoChangeOrigin, ChangeFilter as BigRepoChangeFilter,
     ChangeListenerRegistration as BigRepoChangeListenerRegistration,
-    DocIdFilter as BigRepoDocIdFilter, OriginFilter as BigRepoOriginFilter,
+    DocIdFilter as BigRepoDocIdFilter, DomainFilter as BigRepoDomainFilter,
+    DomainListenerRegistration as BigRepoDomainListenerRegistration,
+    OriginFilter as BigRepoOriginFilter,
 };
+pub use changes::{BigRepoAccess, BigRepoDomainNotification, GroupId};
 
 pub type DocumentId = big_sync_core::ObjId;
 pub type SharedPartStore = Arc<dyn big_sync::HostPartStore>;
@@ -65,6 +80,9 @@ pub struct Config {
     /// the Subduction signer.
     pub node_identity_seed: [u8; 32],
     pub storage: StorageConfig,
+    /// Scope key used to isolate this BigRepo instance's data in SQLite storage.
+    pub scope_key: Arc<str>,
+    pub hidden_parts: HashSet<PartId>,
 }
 
 #[derive(Debug, Clone)]
@@ -86,9 +104,13 @@ pub struct BigRepo {
     #[educe(Debug(ignore))]
     big_sync_store: SharedPartStore,
     #[educe(Debug(ignore))]
-    runtime: runtime::BigRepoRuntimeHandle,
+    sqlite_store: SqliteBigRepoStore,
+    #[educe(Debug(ignore))]
+    runtime: runtime2::Runtime2Handle<future_form::Sendable>,
     #[educe(Debug(ignore))]
     ephemeral: BigEphemeral,
+    #[educe(Debug(ignore))]
+    keyhive_change_tx: tokio::sync::broadcast::Sender<()>,
     #[educe(Debug(ignore))]
     change_manager: Arc<changes::ChangeListenerManager>,
     #[educe(Debug(ignore))]
@@ -100,22 +122,87 @@ pub type SharedBigRepo = Arc<BigRepo>;
 impl BigRepo {
     pub const BACKEND_ID: &'static str = "BigRepoSyncBackend";
 
-    pub async fn boot(
+    /// Boot BigRepo, constructing its own SQLite-backed store for both the
+    /// big-sync partition layer and subduction/runtime storage.
+    ///
+    /// The [`Config::scope_key`] isolates this instance's data from other
+    /// BigRepo instances sharing the same SQLite database.
+    pub async fn boot(config: Config) -> Res<(Arc<Self>, BigRepoStopToken)> {
+        let Config {
+            node_identity_seed,
+            storage,
+            scope_key,
+            hidden_parts,
+        } = config;
+        let sql = match &storage {
+            StorageConfig::Memory => SqlCtx::memory().await?,
+            StorageConfig::Disk { path } => {
+                std::fs::create_dir_all(path).wrap_err_with(|| {
+                    format!("failed creating BigRepo data directory: {}", path.display())
+                })?;
+                let db_path = path.join("big_repo.sqlite");
+                SqlCtx::url(&format!("sqlite://{}", db_path.display())).await?
+            }
+        };
+        let store = SqliteBigRepoStore::new_with_config(
+            sql,
+            scope_key.clone(),
+            big_sync_core::BuckId::MAX_LEVEL,
+            big_sync::HostPartStoreConfig {
+                hidden_parts: hidden_parts.clone(),
+            },
+        )
+        .await?;
+        Self::boot_inner(
+            Config {
+                node_identity_seed,
+                storage,
+                scope_key,
+                hidden_parts,
+            },
+            store,
+        )
+        .await
+    }
+    #[cfg(test)]
+    pub(crate) async fn boot_with_store(
         config: Config,
-        big_sync_store: SharedPartStore,
+        store: SqliteBigRepoStore,
+    ) -> Res<(Arc<Self>, BigRepoStopToken)> {
+        Self::boot_inner(config, store).await
+    }
+    #[cfg(test)]
+    pub(crate) fn shared_part_store(&self) -> SharedPartStore {
+        Arc::clone(&self.big_sync_store)
+    }
+    #[cfg(test)]
+    pub(crate) fn sqlite_store(&self) -> SqliteBigRepoStore {
+        self.sqlite_store.clone()
+    }
+
+    async fn boot_inner(
+        config: Config,
+        store: SqliteBigRepoStore,
     ) -> Res<(Arc<Self>, BigRepoStopToken)> {
         let Config {
             node_identity_seed,
             storage,
+            scope_key: _,
+            hidden_parts: _,
         } = config;
+        let big_sync_store: SharedPartStore = Arc::new(store.clone());
+        let keyhive_events = store.clone();
+        let subduction_storage = store;
         // `SubductionKeyhive` authorizes peers by matching the peer signing
         // identity to the Keyhive individual identifier, so BigRepo derives
         // both identities from this one seed.
         let sync_policy = runtime::BigRepoSyncPolicy::default();
         let keyhive_storage = match &storage {
-            StorageConfig::Memory => BigRepoKeyhiveStorage::memory(),
-            StorageConfig::Disk { path } => BigRepoKeyhiveStorage::fs(path.join(KEYHIVE_SUBDIR))
-                .wrap_err("failed booting keyhive storage")?,
+            StorageConfig::Memory => BigRepoKeyhiveStorage::memory_sqlite(keyhive_events.clone()),
+            StorageConfig::Disk { path } => {
+                BigRepoKeyhiveStorage::fs(keyhive_events.clone(), path.join(KEYHIVE_SUBDIR))
+                    .wrap_err("failed booting keyhive storage")?
+            }
         };
         // Create the listener channel before constructing Keyhive so the
         // listener can be wired in (avoids the reference cycle). Only the
@@ -147,46 +234,22 @@ impl BigRepo {
             subduction_crypto::signer::memory::MemorySigner::from_bytes(&node_identity_seed);
         let peer_id = PeerId::new(*signer.verifying_key().as_bytes());
         let (change_manager, change_manager_stop) = changes::ChangeListenerManager::boot();
+        let (keyhive_change_tx, _) = tokio::sync::broadcast::channel(128);
 
-        let (runtime, ephemeral, runtime_stop) = match storage {
-            StorageConfig::Memory => {
-                runtime::spawn_big_repo_runtime(
-                    signer,
-                    subduction_core::storage::memory::MemoryStorage::new(),
-                    Arc::clone(&policy),
-                    sync_policy,
-                    keyhive.clone(),
-                    keyhive_storage.clone(),
-                    Arc::clone(&big_sync_store),
-                    Arc::clone(&change_manager),
-                    listener_evt_rx,
-                )
-                .await?
-            }
-            StorageConfig::Disk { path } => {
-                let subduction_dir = path.join("subduction");
-                std::fs::create_dir_all(&subduction_dir).wrap_err_with(|| {
-                    format!(
-                        "Failed to create subduction directory: {}",
-                        subduction_dir.display()
-                    )
-                })?;
-                let redb_storage = subduction_redb_storage::RedbStorage::new(subduction_dir)
-                    .wrap_err("failed booting subduction redb storage")?;
-                runtime::spawn_big_repo_runtime(
-                    signer,
-                    redb_storage,
-                    Arc::clone(&policy),
-                    sync_policy,
-                    keyhive.clone(),
-                    keyhive_storage.clone(),
-                    Arc::clone(&big_sync_store),
-                    Arc::clone(&change_manager),
-                    listener_evt_rx,
-                )
-                .await?
-            }
-        };
+        let (runtime, ephemeral, _events, runtime_stop) = runtime2::native::spawn_native_runtime2(
+            signer,
+            subduction_storage.clone(),
+            subduction_storage.clone(),
+            Arc::clone(&policy),
+            sync_policy,
+            keyhive.clone(),
+            keyhive_storage.clone(),
+            Arc::clone(&change_manager),
+            listener_evt_tx,
+            listener_evt_rx,
+            keyhive_change_tx.clone(),
+        )
+        .await?;
 
         let out = Arc::new(Self {
             local_peer_id: peer_id,
@@ -194,31 +257,13 @@ impl BigRepo {
             keyhive_storage,
             sync_policy,
             big_sync_store,
+            sqlite_store: subduction_storage.clone(),
             runtime,
             ephemeral,
+            keyhive_change_tx,
             change_manager,
             change_manager_stop: std::sync::Mutex::new(Some(change_manager_stop)),
         });
-
-        // Boot full reindex: seed the doc-members index for our own principal.
-        // This is the ONLY full recompute — incremental updates handle the rest.
-        {
-            let own_id = PeerId::new(out.keyhive.clone_keyhive().id().to_bytes());
-            let store = out.big_sync_store.clone();
-            let kh = out.keyhive.clone();
-            tokio::spawn(async move {
-                let agent = keyhive_core::principal::identifier::Identifier::from(
-                    ed25519_dalek::VerifyingKey::from_bytes(own_id.0.as_bytes())
-                        .expect("own id is valid"),
-                );
-                let docs = kh.docs_for_agent(&agent).await;
-                for (doc_id, access) in docs {
-                    let mut agents = HashMap::new();
-                    agents.insert(own_id, access);
-                    store.set_doc_members(doc_id, agents).await;
-                }
-            });
-        }
 
         let change_manager_stop = out
             .change_manager_stop
@@ -247,8 +292,37 @@ impl BigRepo {
         self.sync_policy
     }
 
+    pub(crate) fn big_sync_store(&self) -> &SharedPartStore {
+        &self.big_sync_store
+    }
+
+    pub(crate) async fn subscribe_local(
+        &self,
+        reqs: big_sync_core::rpc::SubPartsRequest,
+    ) -> Res<
+        Result<
+            big_sync_core::mpsc::Receiver<big_sync_core::rpc::SubEvent>,
+            big_sync_core::rpc::ListPartsError,
+        >,
+    > {
+        big_sync::HostPartStore::subscribe_local(&self.sqlite_store, reqs).await
+    }
+
     pub fn ephemeral(&self) -> BigEphemeral {
         self.ephemeral.clone()
+    }
+
+    pub(crate) fn subscribe_keyhive_changes(&self) -> tokio::sync::broadcast::Receiver<()> {
+        self.keyhive_change_tx.subscribe()
+    }
+
+    /// Synchronize local Keyhive state with a directly connected peer.
+    pub async fn sync_keyhive_with_peer(
+        &self,
+        peer_id: PeerId,
+        timeout: Option<std::time::Duration>,
+    ) -> Res<()> {
+        self.runtime.sync_keyhive_with_peer(peer_id, timeout).await
     }
 
     #[cfg(test)]
@@ -275,6 +349,16 @@ impl BigRepo {
     }
 
     #[tracing::instrument(skip_all, fields(%self.local_peer_id))]
+    pub async fn doc_head_state(&self, document_id: DocumentId) -> Res<runtime2::DocHeadState> {
+        self.runtime.doc_head_state(document_id).await
+    }
+
+    /// Wait until finite runtime work currently admitted to this repository
+    /// has drained. Pending materialization due to unavailable keys is allowed.
+    pub async fn wait_for_quiescence(&self, timeout: Option<std::time::Duration>) -> Res<()> {
+        self.runtime.wait_for_quiescence(timeout).await
+    }
+
     pub async fn create_doc(
         self: &Arc<Self>,
         initial_content: automerge::Automerge,
@@ -310,15 +394,48 @@ impl BigRepo {
         Ok(group)
     }
 
+    /// Add a principal to a group and propagate reader membership into every
+    /// document governed by that group. Reader additions also create one
+    /// history checkpoint per affected document.
     pub async fn add_member_to_group(
         self: &Arc<Self>,
         member: impl Into<BigKeyhiveAuthority>,
         group: &BigKeyhiveGroup,
         access: keyhive_core::access::Access,
     ) -> Res<()> {
-        self.keyhive
-            .add_member_to_group(member, group, access, &self.keyhive_storage)
+        let mut docs = BTreeMap::new();
+        for doc_id in self.keyhive.group_document_ids(group).await {
+            let doc = self.get_doc(&doc_id).await?.into_ready(doc_id)?;
+            docs.insert(doc_id, doc);
+        }
+
+        let mut after_content = BTreeMap::new();
+        for doc_id in docs.keys().copied() {
+            let heads = self.doc_head_state(doc_id).await?.sedimentree_heads;
+            after_content.insert(doc_id, heads.iter().map(|head| head.0.to_vec()).collect());
+        }
+
+        let affected_docs = self
+            .keyhive
+            .add_member_to_group(member, group, access, after_content, &self.keyhive_storage)
             .await?;
+
+        // BigRepo's contract is history-inclusive for reader grants. Keyhive
+        // updates each affected document's CGKA tree, while this layer creates
+        // one real content checkpoint per affected document so the new member
+        // receives a decryptable entry point to the existing history.
+        if access.is_reader() {
+            for doc_id in &affected_docs {
+                let doc = docs
+                    .get(doc_id)
+                    .ok_or_else(|| ferr!("affected document was not preflighted: {doc_id}"))?;
+                doc.with_document(|doc| {
+                    let _ = doc.empty_commit(automerge::transaction::CommitOptions::default());
+                })
+                .await?;
+            }
+        }
+
         self.runtime.note_local_keyhive_changed().await?;
         Ok(())
     }
@@ -334,9 +451,17 @@ impl BigRepo {
         access: keyhive_core::access::Access,
     ) -> Res<()> {
         let doc = self.get_doc(&doc_id).await?.into_ready(doc_id)?;
+        let heads = self.doc_head_state(doc_id).await?.sedimentree_heads;
+        let after_content = heads.iter().map(|head| head.0.to_vec()).collect();
 
         self.keyhive
-            .grant_doc_access(principal, doc_id, access, &self.keyhive_storage)
+            .grant_doc_access(
+                principal,
+                doc_id,
+                access,
+                after_content,
+                &self.keyhive_storage,
+            )
             .await?;
 
         if access.is_reader() {
@@ -351,6 +476,28 @@ impl BigRepo {
 
         self.runtime.note_local_keyhive_changed().await?;
 
+        Ok(())
+    }
+
+    /// Revoke an authority's access using the current sedimentree frontier.
+    pub async fn revoke_doc_access(
+        self: &Arc<Self>,
+        doc_id: DocumentId,
+        principal: impl Into<BigKeyhiveAuthority>,
+    ) -> Res<()> {
+        let _doc = self.get_doc(&doc_id).await?.into_ready(doc_id)?;
+        let heads = self.doc_head_state(doc_id).await?.sedimentree_heads;
+        let after_content = heads.iter().map(|head| head.0.to_vec()).collect();
+        self.keyhive
+            .revoke_doc_access(
+                principal,
+                doc_id,
+                true,
+                after_content,
+                &self.keyhive_storage,
+            )
+            .await?;
+        self.runtime.note_local_keyhive_changed().await?;
         Ok(())
     }
 }
@@ -368,9 +515,10 @@ impl BigRepo {
         peer_id: PeerId,
         end_signal_tx: Option<tokio::sync::mpsc::UnboundedSender<ConnFinishSignal>>,
     ) -> Res<BigRepoConnection> {
+        let _ = end_signal_tx;
         let (peer_id, closed) = self
             .runtime
-            .open_connection_iroh(endpoint, endpoint_addr, peer_id, end_signal_tx)
+            .open_connection(peer_id, Box::new((endpoint, endpoint_addr)))
             .await?;
         Ok(BigRepoConnection {
             repo: Arc::clone(self),
@@ -388,10 +536,8 @@ impl BigRepo {
         conn: iroh::endpoint::Connection,
         end_signal_tx: Option<tokio::sync::mpsc::UnboundedSender<ConnFinishSignal>>,
     ) -> Res<BigRepoConnection> {
-        let (peer_id, closed) = self
-            .runtime
-            .accept_connection_iroh(conn, end_signal_tx)
-            .await?;
+        let _ = end_signal_tx;
+        let (peer_id, closed) = self.runtime.accept_connection(Box::new(conn)).await?;
         Ok(BigRepoConnection {
             repo: Arc::clone(self),
             peer_id,
@@ -452,7 +598,7 @@ impl BigRepoConnection {
     }
 
     pub async fn stop(self) -> Res<()> {
-        self.repo.runtime.close_peer_connection(self.peer_id).await
+        self.repo.runtime.close_connection(self.peer_id).await
     }
 }
 
@@ -468,6 +614,20 @@ impl BigRepo {
         let (registration, change_rx) = self.change_manager.subscribe_listener(filter).await?;
         Ok((registration, change_rx))
     }
+
+    pub async fn subscribe_domain_listener(
+        self: &Arc<Self>,
+        filter: BigRepoDomainFilter,
+    ) -> Res<(
+        BigRepoDomainListenerRegistration,
+        tokio::sync::mpsc::UnboundedReceiver<Vec<crate::changes::BigRepoDomainNotification>>,
+    )> {
+        let (registration, domain_rx) = self
+            .change_manager
+            .subscribe_domain_listener(filter)
+            .await?;
+        Ok((registration, domain_rx))
+    }
 }
 
 // big_sync support
@@ -478,13 +638,15 @@ impl BigRepo {
 }
 
 pub struct BigRepoStopToken {
-    runtime_stop: runtime::BigRepoRuntimeStopToken,
+    runtime_stop: runtime2::Runtime2StopToken<future_form::Sendable, runtime2::TokioTaskRuntime>,
     change_manager_stop: Option<changes::ChangeListenerManagerStopToken>,
 }
 
 impl BigRepoStopToken {
     pub async fn stop(mut self) -> Res<()> {
-        self.runtime_stop.stop().await?;
+        self.runtime_stop
+            .stop(std::time::Duration::from_secs(5))
+            .await?;
         if let Some(stop_token) = self.change_manager_stop.take() {
             stop_token.stop().await?;
         }
@@ -632,6 +794,7 @@ impl BigDocHandle {
         })
         .await
     }
+    #[cfg(test)]
 
     pub async fn hydrate_path_at_heads<T: Hydrate + Reconcile + Send + Sync + 'static>(
         &self,

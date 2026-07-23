@@ -325,17 +325,17 @@ impl RepoCtx {
             local_actor_id,
         } = compute_user_info(&repo_id, &repo_user_id, &identity);
 
-        let part_store = big_sync::SqlitePartStore::new(
+        let sqlite_part_store = big_repo::SqliteBigRepoStore::new(
             sql.clone(),
             repo_id.clone(),
             big_sync_core::BuckId::MAX_LEVEL,
         )
         .await?;
-        let part_store: SharedPartStore = Arc::new(part_store) as _;
+        let part_store: SharedPartStore = Arc::new(sqlite_part_store.clone()) as _;
         info!(repo_root = %layout.repo_root.display(), "repo open_inner: partition store ready");
 
         let (big_repo, big_repo_stop) =
-            boot_big_repo(&layout, &identity, Arc::clone(&part_store)).await?;
+            boot_big_repo(&layout, &identity, sqlite_part_store).await?;
         info!(repo_root = %layout.repo_root.display(), "repo open_inner: big repo booted");
 
         let (doc_app, doc_drawer) = if initialize_repo {
@@ -635,7 +635,7 @@ fn compute_user_info(
 async fn boot_big_repo(
     layout: &RepoLayout,
     identity: &crate::secrets::RepoIdentity,
-    partition_store: SharedPartStore,
+    partition_store: big_repo::SqliteBigRepoStore,
 ) -> Res<(SharedBigRepo, big_repo::BigRepoStopToken)> {
     let am_config = big_repo::Config {
         node_identity_seed: identity.iroh_secret_key.to_bytes(),
@@ -643,7 +643,8 @@ async fn boot_big_repo(
             path: layout.samod_root.clone(),
         },
     };
-    let (big_repo, big_repo_stop) = big_repo::BigRepo::boot(am_config, partition_store).await?;
+    let (big_repo, big_repo_stop) =
+        big_repo::BigRepo::boot_with_sqlite(am_config, partition_store).await?;
     Ok((big_repo, big_repo_stop))
 }
 

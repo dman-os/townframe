@@ -181,6 +181,14 @@ impl CursorSyncMachine {
                     part_id: evt.part_id,
                 });
             }
+            SubEvent::ObjectChanged(evt) => {
+                out.push(CursorMachineCommand::SyncObj {
+                    obj_id: evt.obj_id,
+                    remote_payload: evt.payload,
+                    cursor: 0,
+                    parts: Vec::new(),
+                });
+            }
             SubEvent::ReplayComplete => unreachable!(),
         }
     }

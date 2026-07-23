@@ -10,7 +10,7 @@ use big_sync::backend::contract::{
 use big_sync::stress_support::{self, StressFixture};
 use big_sync::{HostPartStore, SyncBackend};
 use big_sync_core::mpsc;
-use big_sync_core::rpc::{PartStreamCursorRequest, SubEvent, SubPartsRequest};
+use big_sync_core::rpc::{SubEvent, SubPartsRequest};
 use big_sync_core::{Byte32Id, PartId, PeerId, SyncCompletionDeets};
 use futures::lock::Mutex;
 use nonempty::NonEmpty;
@@ -22,44 +22,28 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 use subduction_keyhive::KeyhivePeerId;
 use tempfile::tempdir;
 use tokio::{sync::Notify, time::timeout};
+use tokio_util::sync::CancellationToken;
 
-pub async fn boot_part_store(sqlite_url: &str) -> Res<(Arc<big_sync::Ctx>, big_sync::StopToken)> {
-    let sql = sqlx_utils_rs::SqlCtx::url(sqlite_url).await?;
-
-    let store = Arc::new(
-        big_sync::SqlitePartStore::new(
-            sql,
-            sqlite_url.to_owned(),
-            big_sync_core::BuckId::MAX_LEVEL,
-        )
-        .await?,
-    );
-    let store_for_worker: Arc<dyn big_sync::HostPartStore> = Arc::clone(&store) as _;
-    let (worker, stop) =
-        big_sync::spawn_big_sync_worker(Arc::clone(&store_for_worker), HashMap::new())?;
-    Ok((
-        Arc::new(big_sync::Ctx {
-            store: store_for_worker,
-            worker,
-        }),
-        stop,
-    ))
-}
 pub async fn boot_repo() -> Res<(
     Arc<BigRepo>,
     Arc<big_sync::Ctx>,
     Box<dyn FnOnce() -> futures::future::BoxFuture<'static, Res<()>>>,
 )> {
     utils_rs::testing::setup_tracing_once();
-    let (big_sync_host, big_sync_stop) = boot_part_store("sqlite::memory:").await?;
-    let (repo, stop) = BigRepo::boot(
-        Config {
-            node_identity_seed: [7_u8; 32],
-            storage: StorageConfig::Memory,
-        },
-        Arc::clone(&big_sync_host.store),
-    )
+    let (repo, stop) = BigRepo::boot(Config {
+        node_identity_seed: [7_u8; 32],
+        storage: StorageConfig::Memory,
+        scope_key: Arc::from("big-repo-test"),
+        hidden_parts: HashSet::new(),
+    })
     .await?;
+    let shared_store = repo.shared_part_store();
+    let (worker, big_sync_stop) =
+        big_sync::spawn_big_sync_worker(Arc::clone(&shared_store), HashMap::new())?;
+    let big_sync_host = Arc::new(big_sync::Ctx {
+        store: shared_store,
+        worker,
+    });
     Ok((
         repo,
         big_sync_host,
@@ -83,16 +67,20 @@ pub async fn _boot_disk_repo(
 )> {
     std::fs::create_dir_all(&path)
         .wrap_err_with(|| format!("failed creating disk repo path: {}", path.display()))?;
-    let sqlite_url = format!("sqlite://{}", path.join("part_store.db").display());
-    let (big_sync_host, big_sync_stop) = boot_part_store(&sqlite_url).await?;
-    let (repo, stop) = BigRepo::boot(
-        Config {
-            node_identity_seed: [7_u8; 32],
-            storage: StorageConfig::Disk { path },
-        },
-        Arc::clone(&big_sync_host.store),
-    )
+    let (repo, stop) = BigRepo::boot(Config {
+        node_identity_seed: [7_u8; 32],
+        storage: StorageConfig::Disk { path },
+        scope_key: Arc::from("big-repo-test"),
+        hidden_parts: HashSet::new(),
+    })
     .await?;
+    let shared_store = repo.shared_part_store();
+    let (worker, big_sync_stop) =
+        big_sync::spawn_big_sync_worker(Arc::clone(&shared_store), HashMap::new())?;
+    let big_sync_host = Arc::new(big_sync::Ctx {
+        store: shared_store,
+        worker,
+    });
     Ok((
         repo,
         big_sync_host,
@@ -361,11 +349,11 @@ async fn create_doc_records_initial_frontier_for_after_content() -> Res<()> {
         Arc::new(Mutex::new(public_individual)),
     );
     let update = keyhive
-        .add_member(
+        .add_member_with_manual_content(
             public_agent,
             &keyhive_core::principal::membered::Membered::Document(kh_doc_id, kh_doc),
             keyhive_core::access::Access::Read,
-            &[],
+            std::collections::BTreeMap::from([(kh_doc_id, vec![initial_head.clone()])]),
         )
         .await
         .expect("granting read access should succeed");
@@ -423,11 +411,11 @@ async fn write_records_latest_frontier_for_after_content() -> Res<()> {
         Arc::new(Mutex::new(public_individual)),
     );
     let update = keyhive
-        .add_member(
+        .add_member_with_manual_content(
             public_agent,
             &keyhive_core::principal::membered::Membered::Document(kh_doc_id, kh_doc),
             keyhive_core::access::Access::Read,
-            &[],
+            std::collections::BTreeMap::from([(kh_doc_id, vec![latest_head.clone()])]),
         )
         .await
         .expect("granting read access should succeed");
@@ -603,11 +591,10 @@ async fn authorized_peer_reads_encrypted_doc_after_keyhive_change_notification_w
     // Subscribe to the client's global partition to learn about the doc
     // being registered locally by the runtime's keyhive listener.
     let req = SubPartsRequest {
-        peer_id: client.peer_id(),
-        parts: vec![PartStreamCursorRequest {
+        target: big_sync_core::rpc::SubscriptionTarget::Part {
             part_id: GLOBAL_PART_ID,
             cursor: 0,
-        }],
+        },
     };
     let mut rx = client
         .big_sync_store
@@ -620,7 +607,7 @@ async fn authorized_peer_reads_encrypted_doc_after_keyhive_change_notification_w
         .await?;
 
     // Wait for the runtime's keyhive listener to register the doc in the
-    // client's local global partition (which means the ephemeral-delivered
+    // client's local global partition (which means the direct-RPC-delivered
     // grant has been processed).
     wait_for_global_part_addition(&mut rx, doc_id, Duration::from_secs(30)).await?;
 
@@ -629,7 +616,7 @@ async fn authorized_peer_reads_encrypted_doc_after_keyhive_change_notification_w
         client_conn.sync_doc_with_peer(doc_id, Some(Duration::from_secs(2))),
     )
     .await
-    .expect("timed out waiting for authorized doc sync after ephemeral-triggered keyhive sync")?;
+    .expect("timed out waiting for authorized doc sync after RPC-triggered keyhive sync")?;
 
     let client_doc = timeout(
         Duration::from_secs(10),
@@ -643,7 +630,7 @@ async fn authorized_peer_reads_encrypted_doc_after_keyhive_change_notification_w
     assert_eq!(title, "seed");
     assert!(
         client.repo.doc_payload_heads(doc_id).await?.is_some(),
-        "authorized client should have payload heads after ephemeral-triggered keyhive sync and doc sync"
+        "authorized client should have payload heads after RPC-triggered keyhive sync and doc sync"
     );
 
     let handle = client.repo.get_doc(&doc_id).await?.into_ready(doc_id)?;
@@ -1170,8 +1157,11 @@ async fn group_member_reads_doc_while_non_member_stays_unauthorized() -> Res<()>
         },
         Err(err) => {
             assert!(
-                matches!(err, SyncDocError::NotFound),
-                "outsider sync should fail cleanly, got {err:?}"
+                matches!(
+                    err,
+                    SyncDocError::Policy(crate::SyncDocPolicyError::InsufficientAccess)
+                ),
+                "outsider sync should fail with policy detail, got {err:?}"
             );
         }
     }
@@ -1365,8 +1355,11 @@ async fn unauthorized_peer_does_not_materialize_plaintext_without_grant() -> Res
         }
         Err(err) => {
             assert!(
-                matches!(err, SyncDocError::NotFound),
-                "unauthorized doc sync should fail cleanly, got {err:?}"
+                matches!(
+                    err,
+                    SyncDocError::Policy(crate::SyncDocPolicyError::InsufficientAccess)
+                ),
+                "unauthorized doc sync should fail with policy detail, got {err:?}"
             );
         }
     }
@@ -1411,14 +1404,13 @@ async fn granted_doc_requires_manual_sync_after_keyhive_notification() -> Res<()
     client.big_sync_store.ensure_part(GLOBAL_PART_ID).await?;
 
     // Subscribe to the client's global partition — the runtime's keyhive
-    // listener will add the doc here when the ephemeral-triggered grant
-    // notification is processed.
+    // listener will add the doc here when the direct-RPC grant notification
+    // is processed.
     let req = SubPartsRequest {
-        peer_id: client.peer_id(),
-        parts: vec![PartStreamCursorRequest {
+        target: big_sync_core::rpc::SubscriptionTarget::Part {
             part_id: GLOBAL_PART_ID,
             cursor: 0,
-        }],
+        },
     };
     let mut rx = client
         .big_sync_store
@@ -1431,7 +1423,7 @@ async fn granted_doc_requires_manual_sync_after_keyhive_notification() -> Res<()
         .await?;
 
     // Wait for the runtime's keyhive listener to register the doc in the
-    // client's global partition via the ephemeral notification path.
+    // client's global partition via the direct notification path.
     wait_for_global_part_addition(&mut rx, doc_id, Duration::from_secs(30)).await?;
 
     // The doc is now discoverable in the global partition (the keyhive
@@ -1524,11 +1516,10 @@ async fn synced_doc_auto_propagates_subsequent_edits() -> Res<()> {
     // Subscribe to client's global partition for the doc registration.
     client.big_sync_store.ensure_part(GLOBAL_PART_ID).await?;
     let req = SubPartsRequest {
-        peer_id: client.peer_id(),
-        parts: vec![PartStreamCursorRequest {
+        target: big_sync_core::rpc::SubscriptionTarget::Part {
             part_id: GLOBAL_PART_ID,
             cursor: 0,
-        }],
+        },
     };
     let mut rx = client
         .big_sync_store
@@ -1650,11 +1641,10 @@ async fn three_node_key_rotation_propagates_to_existing_reader() -> Res<()> {
     // Subscribe B to its global partition, grant, wait for registration.
     b.big_sync_store.ensure_part(GLOBAL_PART_ID).await?;
     let req = SubPartsRequest {
-        peer_id: b.peer_id(),
-        parts: vec![PartStreamCursorRequest {
+        target: big_sync_core::rpc::SubscriptionTarget::Part {
             part_id: GLOBAL_PART_ID,
             cursor: 0,
-        }],
+        },
     };
     let mut rx = b.big_sync_store.subscribe(req, b.peer_id()).await??;
 
@@ -1976,6 +1966,7 @@ async fn grant_doc_access_checkpoint_survives_reopen_and_sync() -> Res<()> {
     );
 
     let client_keyhive_storage = crate::keyhive_storage::BigRepoKeyhiveStorage::fs(
+        client.repo.sqlite_store(),
         client_path.join(crate::keyhive_storage::KEYHIVE_SUBDIR),
     )?;
     let stored_events = subduction_keyhive::load_events::<Vec<u8>, _, future_form::Sendable>(
@@ -2824,8 +2815,8 @@ impl iroh::protocol::ProtocolHandler for SubductionProtocolHandler {
     }
 }
 
-struct StressBigSyncRpcClient {
-    target_part_store: SharedPartStore,
+pub(crate) struct StressBigSyncRpcClient {
+    pub(crate) target_part_store: SharedPartStore,
 }
 
 #[async_trait::async_trait]
@@ -2911,6 +2902,10 @@ struct SyncRepoNode {
     stop_token: BigRepoStopToken,
     endpoint: iroh::Endpoint,
     router: iroh::protocol::Router,
+    repo_rpc_stop: crate::rpc::BigRepoRpcStopToken,
+    keyhive_rpc_tasks: Arc<utils_rs::AbortableJoinSet>,
+    keyhive_rpc_cancel: CancellationToken,
+    keyhive_rpc_cancels: Arc<tokio::sync::Mutex<HashMap<PeerId, CancellationToken>>>,
     accept_count: Arc<AtomicUsize>,
     accept_notify: Arc<Notify>,
     accepted_connection: Arc<tokio::sync::Mutex<Option<BigRepoConnection>>>,
@@ -2924,8 +2919,21 @@ impl SyncRepoNode {
         tracing::info!(path = %path.display(), "booting sync repo node");
         std::fs::create_dir_all(&path)
             .wrap_err_with(|| format!("failed creating sync repo path: {}", path.display()))?;
-        let sqlite_url = format!("sqlite://{}", path.join("part_store.db").display());
-        let (big_sync_host, big_sync_stop) = boot_part_store(&sqlite_url).await?;
+        let node_identity_seed = [seed; 32];
+        let (repo, stop_token) = BigRepo::boot(Config {
+            node_identity_seed,
+            storage: StorageConfig::Disk { path: path.clone() },
+            scope_key: Arc::from("big-repo-sync-test"),
+            hidden_parts: HashSet::new(),
+        })
+        .await?;
+        let shared_store = repo.shared_part_store();
+        let (initial_worker, big_sync_stop) =
+            big_sync::spawn_big_sync_worker(Arc::clone(&shared_store), HashMap::new())?;
+        let big_sync_host = Arc::new(big_sync::Ctx {
+            store: shared_store,
+            worker: initial_worker,
+        });
         let part_init_obj = ObjId(big_sync_core::Byte32Id::new(
             [255_u8.wrapping_sub(seed); 32],
         ));
@@ -2940,15 +2948,6 @@ impl SyncRepoNode {
             .store
             .remove_obj_from_part(part_init_obj, stress_support::test_part())
             .await?;
-        let node_identity_seed = [seed; 32];
-        let (repo, stop_token) = BigRepo::boot(
-            Config {
-                node_identity_seed,
-                storage: StorageConfig::Disk { path: path.clone() },
-            },
-            Arc::clone(&big_sync_host.store),
-        )
-        .await?;
         big_sync_stop.stop().await?;
 
         let endpoint = iroh::Endpoint::builder(iroh::endpoint::presets::Minimal)
@@ -2960,7 +2959,7 @@ impl SyncRepoNode {
             .wrap_err("failed binding iroh endpoint")?;
 
         let sync_backend = Arc::new(
-            BigRepoSyncBackend::boot(Arc::downgrade(&repo), endpoint.clone())
+            BigRepoSyncBackend::boot(Arc::downgrade(&repo))
                 .await
                 .wrap_err("failed booting big repo sync backend")?,
         );
@@ -2972,6 +2971,10 @@ impl SyncRepoNode {
         let accept_count = Arc::new(AtomicUsize::new(0));
         let accept_notify = Arc::new(Notify::new());
         let accepted_connection = Arc::new(tokio::sync::Mutex::new(None));
+        let (repo_rpc, repo_rpc_stop) = crate::rpc::spawn_repo_rpc(Arc::clone(&repo)).await?;
+        let keyhive_rpc_tasks = Arc::new(utils_rs::AbortableJoinSet::new());
+        let keyhive_rpc_cancel = CancellationToken::new();
+        let keyhive_rpc_cancels = Arc::new(tokio::sync::Mutex::new(HashMap::new()));
         let docs = Arc::new(tokio::sync::Mutex::new(HashMap::new()));
         let obj_doc_ids = Arc::new(tokio::sync::Mutex::new(HashMap::new()));
         let connections = Arc::new(tokio::sync::Mutex::new(HashMap::new()));
@@ -2986,6 +2989,7 @@ impl SyncRepoNode {
                     accepted_connection: Arc::clone(&accepted_connection),
                 },
             )
+            .accept(crate::rpc::REPO_SYNC_ALPN, repo_rpc.protocol_handler())
             .spawn();
 
         tracing::info!(
@@ -3007,6 +3011,10 @@ impl SyncRepoNode {
             big_sync_stop,
             endpoint,
             router,
+            repo_rpc_stop,
+            keyhive_rpc_tasks,
+            keyhive_rpc_cancel,
+            keyhive_rpc_cancels,
             accept_count,
             accept_notify,
             accepted_connection,
@@ -3040,6 +3048,74 @@ impl SyncRepoNode {
             .expect("expected accepted connection to be available")
     }
 
+    async fn start_keyhive_rpc(&self, remote: &SyncRepoNode) -> Res<()> {
+        let peer_id = remote.peer_id();
+        let cancel = CancellationToken::new();
+        if let Some(previous) = self
+            .keyhive_rpc_cancels
+            .lock()
+            .await
+            .insert(peer_id, cancel.clone())
+        {
+            previous.cancel();
+        }
+
+        let client =
+            crate::rpc::IrohBigRepoRpcClient::new(self.endpoint.clone(), remote.endpoint.addr());
+        let mut changes = client.subscribe_keyhive_changes(64).await?;
+        let ready = timeout(Duration::from_secs(5), changes.recv())
+            .await
+            .map_err(|_| ferr!("timed out installing Keyhive RPC subscription"))?
+            .map_err(|error| ferr!("Keyhive RPC subscription failed: {error}"))?
+            .ok_or_eyre("Keyhive RPC subscription closed before ready")?;
+        assert!(
+            ready.initial,
+            "first Keyhive RPC event must confirm readiness"
+        );
+
+        let repo = Arc::clone(&self.repo);
+        let cancel = self.keyhive_rpc_cancel.child_token();
+        self.keyhive_rpc_tasks
+            .spawn(async move {
+                loop {
+                    tokio::select! {
+                        biased;
+                        _ = cancel.cancelled() => break,
+                        event = changes.recv() => {
+                            match event {
+                                Ok(Some(event)) => {
+                                    if !event.initial {
+                                        if let Err(error) = repo
+                                            .sync_keyhive_with_peer(
+                                                peer_id,
+                                                Some(Duration::from_secs(10)),
+                                            )
+                                            .await
+                                        {
+                                            tracing::debug!(
+                                                %peer_id,
+                                                ?error,
+                                                "Keyhive sync after RPC notification failed"
+                                            );
+                                        }
+                                    }
+                                }
+                                Ok(None) | Err(_) => break,
+                            }
+                        }
+                    }
+                }
+            })
+            .map_err(|error| ferr!("failed spawning Keyhive RPC subscription: {error}"))?;
+        Ok(())
+    }
+
+    async fn stop_keyhive_rpc(&self, peer_id: PeerId) {
+        if let Some(cancel) = self.keyhive_rpc_cancels.lock().await.remove(&peer_id) {
+            cancel.cancel();
+        }
+    }
+
     async fn connect_to(&self, remote: &SyncRepoNode) -> Res<()> {
         {
             let mut connections = self.connections.lock().await;
@@ -3060,17 +3136,6 @@ impl SyncRepoNode {
                 None,
             )
             .await?;
-        let remote_addr = endpoint_addr_from_remote_info(&self.endpoint, remote.endpoint.id())
-            .await
-            .unwrap_or_else(|_| remote.endpoint.addr());
-        self.sync_backend
-            .register_remote_peer(remote.peer_id(), remote_addr);
-        let self_addr = endpoint_addr_from_remote_info(&remote.endpoint, self.endpoint.id())
-            .await
-            .unwrap_or_else(|_| self.endpoint.addr());
-        remote
-            .sync_backend
-            .register_remote_peer(self.peer_id(), self_addr);
         let parts = stress_support::test_parts()
             .into_iter()
             .map(|part_id| (part_id, BigRepo::BACKEND_ID.into()))
@@ -3082,6 +3147,7 @@ impl SyncRepoNode {
                     target_part_store: Arc::clone(&remote.big_sync_store),
                 }),
                 parts,
+                HashMap::new(),
             )
             .await?;
         let parts = stress_support::test_parts()
@@ -3096,18 +3162,21 @@ impl SyncRepoNode {
                     target_part_store: Arc::clone(&self.big_sync_store),
                 }),
                 parts,
+                HashMap::new(),
             )
             .await?;
         self.connections.lock().await.insert(remote.peer_id(), conn);
+        self.start_keyhive_rpc(remote).await?;
+        remote.start_keyhive_rpc(self).await?;
         Ok(())
     }
 
     async fn disconnect_from(&self, remote: &SyncRepoNode) -> Res<()> {
+        self.stop_keyhive_rpc(remote.peer_id()).await;
+        remote.stop_keyhive_rpc(self.peer_id()).await;
         if let Some(conn) = self.connections.lock().await.remove(&remote.peer_id()) {
             conn.stop().await?;
         }
-        self.sync_backend.unregister_remote_peer(remote.peer_id());
-        remote.sync_backend.unregister_remote_peer(self.peer_id());
         self.big_sync_worker.remove_peer(remote.peer_id()).await?;
         remote.big_sync_worker.remove_peer(self.peer_id()).await?;
         Ok(())
@@ -3205,6 +3274,12 @@ impl SyncRepoNode {
         self.endpoint.close().await;
         self.stop_token.stop().await?;
         self.big_sync_stop.stop().await?;
+        self.keyhive_rpc_cancel.cancel();
+        self.keyhive_rpc_tasks
+            .stop(Duration::from_secs(5))
+            .await
+            .wrap_err("failed stopping test Keyhive RPC subscriptions")?;
+        self.repo_rpc_stop.stop().await?;
         drop(self.router);
         Ok(())
     }
@@ -4469,12 +4544,6 @@ async fn connect_sync_pair(client: &SyncRepoNode, server: &SyncRepoNode) -> Res<
             None,
         )
         .await?;
-    client
-        .sync_backend
-        .register_remote_peer(server.peer_id(), server.endpoint.addr());
-    server
-        .sync_backend
-        .register_remote_peer(client.peer_id(), client.endpoint.addr());
     Ok(conn)
 }
 

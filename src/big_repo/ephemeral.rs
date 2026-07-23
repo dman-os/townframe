@@ -33,11 +33,6 @@ impl BigEphemeralTopic {
     }
 
     #[must_use]
-    pub const fn keyhive_changed() -> Self {
-        Self(*b"\0\0\0\0townframe.bigrepo.keyhive.v1")
-    }
-
-    #[must_use]
     pub const fn as_bytes(&self) -> &[u8; 32] {
         &self.0
     }
@@ -246,35 +241,34 @@ pub(crate) trait BigEphemeralBackend: Send + Sync {
 }
 
 #[derive(Clone)]
-pub(crate) struct BigRepoEphemeralBackend {
+pub(crate) struct BigRepoEphemeralBackend<C = BigRepoIrohTransport>
+where
+    C: Clone + 'static,
+{
     signer: MemorySigner,
-    handler: Arc<
-        EphemeralHandler<
-            future_form::Sendable,
-            BigRepoIrohTransport,
-            OpenEphemeralPolicy,
-            StdClock,
-        >,
-    >,
+    handler: Arc<EphemeralHandler<future_form::Sendable, C, OpenEphemeralPolicy, StdClock>>,
 }
 
-impl BigRepoEphemeralBackend {
+impl<C> BigRepoEphemeralBackend<C>
+where
+    C: Clone,
+{
     pub(crate) fn new(
         signer: MemorySigner,
-        handler: Arc<
-            EphemeralHandler<
-                future_form::Sendable,
-                BigRepoIrohTransport,
-                OpenEphemeralPolicy,
-                StdClock,
-            >,
-        >,
+        handler: Arc<EphemeralHandler<future_form::Sendable, C, OpenEphemeralPolicy, StdClock>>,
     ) -> Self {
         Self { signer, handler }
     }
 }
 
-impl BigEphemeralBackend for BigRepoEphemeralBackend {
+impl<C> BigEphemeralBackend for BigRepoEphemeralBackend<C>
+where
+    C: subduction_core::connection::Connection<future_form::Sendable, EphemeralMessage>
+        + Clone
+        + Send
+        + Sync
+        + 'static,
+{
     fn publish(&self, topic: BigEphemeralTopic, payload: Vec<u8>) -> BoxFuture<'_, Res<()>> {
         Box::pin(async move {
             let timestamp = StdClock.now();

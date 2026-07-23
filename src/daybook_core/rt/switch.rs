@@ -7,7 +7,7 @@ use crate::drawer::DrawerEvent;
 use crate::plugs::PlugsEvent;
 use crate::rt::dispatch::DispatchEvent;
 use crate::rt::Rt;
-use big_sync_core::rpc::{PartStreamCursorRequest, SubEvent, SubPartsRequest};
+use big_sync_core::rpc::{SubEvent, SubPartsRequest};
 use daybook_types::doc::BranchPathBuf;
 use daybook_types::doc::{Doc, DocId, FacetKey, WellKnownFacet, WellKnownFacetTag};
 use daybook_types::manifest::{
@@ -343,16 +343,12 @@ pub async fn spawn_switch_worker(
                 .rt
                 .rcx
                 .part_store
-                .subscribe(
-                    SubPartsRequest {
-                        peer_id: big_sync_core::PeerId::new([0u8; 32]),
-                        parts: vec![PartStreamCursorRequest {
-                            part_id: docs_partition_id,
-                            cursor,
-                        }],
+                .subscribe_local(SubPartsRequest {
+                    target: big_sync_core::rpc::SubscriptionTarget::Part {
+                        part_id: docs_partition_id,
+                        cursor,
                     },
-                    [0u8; 32],
-                )
+                })
                 .await??;
 
             loop {
@@ -427,7 +423,7 @@ pub async fn spawn_switch_worker(
                             SubEvent::Added(inner) => inner.cursor,
                             SubEvent::Changed(inner) => inner.cursor,
                             SubEvent::Removed(inner) => inner.cursor,
-                            SubEvent::ReplayComplete => cursor,
+                            SubEvent::ObjectChanged(_) | SubEvent::ReplayComplete => cursor,
                         };
                         worker
                             .store
@@ -551,7 +547,7 @@ impl SwitchWorker {
             SubEvent::Added(inner) => inner.obj_id.to_string().into(),
             SubEvent::Changed(inner) => inner.obj_id.to_string().into(),
             SubEvent::Removed(inner) => inner.obj_id.to_string().into(),
-            SubEvent::ReplayComplete => return Ok(None),
+            SubEvent::ObjectChanged(_) | SubEvent::ReplayComplete => return Ok(None),
         };
         let stored_state = self
             .store
@@ -658,7 +654,7 @@ impl SwitchWorker {
                 next_state.present = false;
                 next_state.last_heads = None;
             }
-            SubEvent::ReplayComplete => return Ok(None),
+            SubEvent::ObjectChanged(_) | SubEvent::ReplayComplete => return Ok(None),
         }
         Ok(Some((branch_doc_id, next_state)))
     }

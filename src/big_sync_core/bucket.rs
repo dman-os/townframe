@@ -376,7 +376,7 @@ impl BucketMachine {
 pub fn calc_working_level(remote_size: u64, remote_depth: u8) -> u8 {
     let mut working_level = 0;
     let mut bucket_width = remote_size / (BuckId::ARITY as u64);
-    while working_level <= remote_depth
+    while working_level < remote_depth
         && bucket_width > BucketMachine::ACTIVE_SYNC_JOB_TARGET as u64
     {
         working_level += 1;
@@ -554,4 +554,43 @@ pub async fn filter_objects<K: FutureForm, S: PartStoreReadOnly<K>>(
         );
     }
     out
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// `calc_working_level` must never return a level exceeding `remote_depth`,
+    /// even at extreme `remote_size`.  When `remote_depth = 0` and `remote_size`
+    /// is large enough that `remote_size / ARITY > ACTIVE_SYNC_JOB_TARGET`,
+    /// the current implementation increments `working_level` past `remote_depth`
+    /// before the loop guard catches it.
+    #[test]
+    fn calc_working_level_never_exceeds_remote_depth() {
+        // remote_depth=0, extreme remote_size: loop fires once, working_level=1.
+        // This violates `working_level <= remote_depth`.
+        let wl = calc_working_level(20_000, 0);
+        assert!(
+            wl == 0,
+            "working_level {wl} exceeded remote_depth=0 at size 20000"
+        );
+
+        // Even with a very large size, the result must stay at 0.
+        let wl = calc_working_level(1_000_000, 0);
+        assert!(
+            wl == 0,
+            "working_level {wl} exceeded remote_depth=0 at size 1000000"
+        );
+
+        // Normal case: remote_depth=5, moderate size should stay within bounds.
+        let wl = calc_working_level(10_000, 5);
+        assert!(
+            wl <= 5,
+            "working_level {wl} exceeded remote_depth=5 at moderate size"
+        );
+
+        // Boundary: zero-size remote should cleanly return 0.
+        assert_eq!(calc_working_level(0, 0), 0);
+        assert_eq!(calc_working_level(0, 10), 0);
+    }
 }

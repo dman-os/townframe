@@ -254,7 +254,7 @@ async fn pull_required_partitions_via_big_sync_worker(
     let mut sync_backends = HashMap::new();
     let repo_backend_id = big_repo::BigRepo::BACKEND_ID.into();
     let repo_sync_backend = Arc::new(
-        big_repo::BigRepoSyncBackend::boot(Arc::downgrade(big_repo), endpoint.clone())
+        big_repo::BigRepoSyncBackend::boot(Arc::downgrade(big_repo))
             .await
             .wrap_err("failed booting big repo sync backend")?,
     );
@@ -278,13 +278,7 @@ async fn pull_required_partitions_via_big_sync_worker(
             big_sync::rpc::BIG_SYNC_RPC_ALPN,
             big_sync_rpc.protocol_handler(),
         )
-        .accept(
-            big_repo::rpc::REPO_SYNC_ALPN,
-            super::AuthenticatedIrohProtocol::<big_repo::rpc::RepoSyncRpc, PeerId> {
-                tx: repo_rpc.local_sender(),
-                peer_key_fn: Arc::new(|endpoint_id| PeerId::new(*endpoint_id.as_bytes())),
-            },
-        )
+        .accept(big_repo::rpc::REPO_SYNC_ALPN, repo_rpc.protocol_handler())
         .spawn();
 
     let peer_id = PeerId::new(*bootstrap.endpoint_id.as_bytes());
@@ -312,10 +306,13 @@ async fn pull_required_partitions_via_big_sync_worker(
     .collect();
 
     big_sync_worker
-        .set_peer(peer_id, big_sync_rpc_client, initial_partitions.clone())
+        .set_peer(
+            peer_id,
+            big_sync_rpc_client,
+            initial_partitions.clone(),
+            HashMap::new(),
+        )
         .await?;
-    repo_sync_backend.register_remote_peer(peer_id, bootstrap.endpoint_addr.clone());
-    blob_sync_backend.register_remote_peer(peer_id, bootstrap.endpoint_addr.clone());
 
     info!("XXX onto wait_for_full_sync");
     let timeout_result = tokio::time::timeout(timeout, async {
@@ -469,21 +466,21 @@ pub async fn clone_repo_init_from_url(
             crate::repo::globals::set_sync_config(&sql, &sync_config).await?;
         }
 
-        let part_store = big_sync::SqlitePartStore::new(
+        let sqlite_part_store = big_repo::SqliteBigRepoStore::new(
             sql.clone(),
             bootstrap.repo_id.clone(),
             big_sync_core::BuckId::MAX_LEVEL,
         )
         .await?;
-        let part_store: Arc<dyn big_sync::HostPartStore> = Arc::new(part_store) as _;
-        let (big_repo, big_repo_stop) = big_repo::BigRepo::boot(
+        let part_store: Arc<dyn big_sync::HostPartStore> = Arc::new(sqlite_part_store.clone()) as _;
+        let (big_repo, big_repo_stop) = big_repo::BigRepo::boot_with_sqlite(
             big_repo::Config {
                 node_identity_seed: identity.iroh_secret_key.to_bytes(),
                 storage: big_repo::StorageConfig::Disk {
                     path: staging.join("samod"),
                 },
             },
-            Arc::clone(&part_store),
+            sqlite_part_store,
         )
         .await?;
         let blobs_repo = crate::blobs::BlobsRepo::new(
