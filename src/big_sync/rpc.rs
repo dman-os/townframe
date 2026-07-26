@@ -210,13 +210,16 @@ impl HostBigRpcClient for IrohBigSyncRpcClient {
         req: SubPartsRequest,
     ) -> Res<BigSyncRpcResult<Result<big_sync_core::mpsc::Receiver<SubEvent>, ListPartsError>>>
     {
-        if let big_sync_core::rpc::SubscriptionTarget::Part { part_id, .. } = &req.target {
-            match self
-                .peer_summary(PeerSummaryRequest {
-                    parts: std::collections::HashSet::from([*part_id]),
-                })
-                .await?
-            {
+        let parts: std::collections::HashSet<_> = req
+            .targets
+            .iter()
+            .filter_map(|target| match target {
+                big_sync_core::rpc::SubscriptionTarget::Part { part_id, .. } => Some(*part_id),
+                big_sync_core::rpc::SubscriptionTarget::Object { .. } => None,
+            })
+            .collect();
+        if !parts.is_empty() {
+            match self.peer_summary(PeerSummaryRequest { parts }).await? {
                 Ok(Ok(_)) => {}
                 Ok(Err(err)) => return Ok(Ok(Err(err))),
                 Err(err) => return Ok(Err(err)),
@@ -460,7 +463,12 @@ mod tests {
             store
                 .subscribe(
                     SubPartsRequest {
-                        target: big_sync_core::rpc::SubscriptionTarget::Part { part_id, cursor: 0 },
+                        targets: std::collections::HashSet::from([
+                            big_sync_core::rpc::SubscriptionTarget::Part {
+                                part_id,
+                                cursor: 0,
+                            },
+                        ]),
                     },
                     PeerId::new([0u8; 32]),
                 )
@@ -533,7 +541,10 @@ mod tests {
 
         let sub_events = client
             .sub_parts(SubPartsRequest {
-                target: big_sync_core::rpc::SubscriptionTarget::Part { part_id, cursor: 0 },
+                targets: std::collections::HashSet::from([big_sync_core::rpc::SubscriptionTarget::Part {
+                    part_id,
+                    cursor: 0,
+                }]),
             })
             .await???;
         let sub_events =

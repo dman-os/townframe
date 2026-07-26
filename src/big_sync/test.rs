@@ -183,7 +183,7 @@ impl crate::rpc::HostBigRpcClient for MemoryRpcClient {
     {
         tracing::debug!(
             target_peer_id = %self.target_peer_id,
-            target = ?req.target,
+            targets = ?req.targets,
             "memory rpc sub parts"
         );
         if !self.world.is_online(self.target_peer_id) {
@@ -1861,10 +1861,10 @@ async fn hidden_part_subscription_returns_unknown_parts() -> Res<()> {
     let rx = store
         .subscribe(
             SubPartsRequest {
-                target: SubscriptionTarget::Part {
+                targets: HashSet::from([SubscriptionTarget::Part {
                     part_id: part,
                     cursor: 0,
-                },
+                }]),
             },
             peer,
         )
@@ -1875,10 +1875,10 @@ async fn hidden_part_subscription_returns_unknown_parts() -> Res<()> {
     let err = store
         .subscribe(
             SubPartsRequest {
-                target: SubscriptionTarget::Part {
+                targets: HashSet::from([SubscriptionTarget::Part {
                     part_id: hidden,
                     cursor: 0,
-                },
+                }]),
             },
             peer,
         )

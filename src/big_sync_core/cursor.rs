@@ -144,28 +144,19 @@ impl CursorSyncMachine {
                 let job = self.active_obj_jobs.entry(evt.obj_id).or_default();
                 let waiter = job.waiters.entry(evt.cursor).or_default();
                 waiter.parts.push(evt.part_id);
-                if let Some(payload) = evt.payload {
-                    waiter.pending_membership = true;
-                    waiter.pending_sync = true;
-                    out.push(CursorMachineCommand::AddObjToPart {
-                        cursor: evt.cursor,
-                        obj_id: evt.obj_id,
-                        part_id: evt.part_id,
-                    });
-                    out.push(CursorMachineCommand::SyncObj {
-                        cursor: evt.cursor,
-                        obj_id: evt.obj_id,
-                        remote_payload: payload,
-                        parts: vec![evt.part_id],
-                    });
-                } else {
-                    waiter.pending_membership = true;
-                    out.push(CursorMachineCommand::AddObjToPart {
-                        cursor: evt.cursor,
-                        obj_id: evt.obj_id,
-                        part_id: evt.part_id,
-                    });
-                }
+                waiter.pending_membership = true;
+                waiter.pending_sync = true;
+                out.push(CursorMachineCommand::AddObjToPart {
+                    cursor: evt.cursor,
+                    obj_id: evt.obj_id,
+                    part_id: evt.part_id,
+                });
+                out.push(CursorMachineCommand::SyncObj {
+                    cursor: evt.cursor,
+                    obj_id: evt.obj_id,
+                    remote_payload: evt.payload,
+                    parts: vec![evt.part_id],
+                });
             }
             SubEvent::Removed(evt) => {
                 if !self.mark_pending_cursor(evt.part_id, evt.cursor) {

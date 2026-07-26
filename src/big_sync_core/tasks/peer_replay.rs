@@ -12,7 +12,6 @@ use crate::{
 pub struct PeerReplayTask {
     pub peer_id: PeerId,
     pub targets: Set<rpc::SubscriptionTarget>,
-    pub updates: mpsc::Receiver<Set<rpc::SubscriptionTarget>>,
 }
 
 #[derive(Debug)]
@@ -70,121 +69,24 @@ impl PeerReplayTask {
         Rpc: BigSyncRpcClient<K>,
         Rng: rand::Rng,
     {
-        struct ActiveSubscription {
-            target: rpc::SubscriptionTarget,
-            receiver: mpsc::Receiver<rpc::SubEvent>,
-            replay_done: bool,
-        }
-
         let peer_rpc = cx.rpc_clients.get(&self.peer_id).expect(ERROR_UNRECONIZED);
-        let mut subscriptions = Vec::with_capacity(self.targets.len());
-        for target in self.targets {
-            let receiver = peer_rpc
-                .sub_parts(rpc::SubPartsRequest { target })
-                .await??;
-            subscriptions.push(ActiveSubscription {
-                target,
-                receiver,
-                replay_done: false,
-            });
-        }
-        let mut replay_complete_sent = false;
+        let receiver = peer_rpc
+            .sub_parts(rpc::SubPartsRequest {
+                targets: self.targets,
+            })
+            .await??;
         loop {
-            if subscriptions.is_empty() {
-                return Err(PeerReplayWorkerErrorDeets::StreamClosed);
-            }
-            enum Selected {
-                Event(Result<rpc::SubEvent, mpsc::RecvError>, usize),
-                Update(Result<Set<rpc::SubscriptionTarget>, mpsc::RecvError>),
-            }
-            let selected = match futures::future::select(
-                futures::future::select_all(
-                    subscriptions
-                        .iter()
-                        .map(|subscription| Box::pin(subscription.receiver.recv())),
-                ),
-                Box::pin(self.updates.recv()),
-            )
-            .await
-            {
-                futures::future::Either::Left((evt, _updates)) => {
-                    let (evt, index, remaining_events) = evt;
-                    drop(remaining_events);
-                    Selected::Event(evt, index)
-                }
-                futures::future::Either::Right((targets, events)) => {
-                    drop(events);
-                    Selected::Update(targets)
-                }
-            };
-            match selected {
-                Selected::Event(evt, index) => match evt {
-                    Err(_) => {
-                        subscriptions.swap_remove(index);
-                        if subscriptions.is_empty() {
-                            return Err(PeerReplayWorkerErrorDeets::StreamClosed);
-                        }
-                    }
-                    Ok(rpc::SubEvent::ReplayComplete) => {
-                        subscriptions[index].replay_done = true;
-                        if !replay_complete_sent
-                            && subscriptions
-                                .iter()
-                                .all(|subscription| subscription.replay_done)
-                        {
-                            cx.main_tx
-                                .send(MachineTaskMsg::PeerReplayWorker(PeerReplayWorkerMsg {
-                                    peer_id: self.peer_id,
-                                    task_id: cx.task_id,
-                                    evt: rpc::SubEvent::ReplayComplete,
-                                }))
-                                .await?;
-                            replay_complete_sent = true;
-                        }
-                    }
-                    Ok(evt) => {
-                        cx.main_tx
-                            .send(MachineTaskMsg::PeerReplayWorker(PeerReplayWorkerMsg {
-                                peer_id: self.peer_id,
-                                task_id: cx.task_id,
-                                evt,
-                            }))
-                            .await?;
-                    }
-                },
-                Selected::Update(targets) => {
-                    let targets = targets?;
-                    let old_targets: Set<_> = subscriptions
-                        .iter()
-                        .map(|subscription| subscription.target)
-                        .collect();
-                    subscriptions.retain(|subscription| targets.contains(&subscription.target));
-                    for target in targets.difference(&old_targets).copied() {
-                        let receiver = peer_rpc
-                            .sub_parts(rpc::SubPartsRequest { target })
-                            .await??;
-                        subscriptions.push(ActiveSubscription {
-                            target,
-                            receiver,
-                            replay_done: false,
-                        });
-                    }
-                    replay_complete_sent = false;
-                    if subscriptions
-                        .iter()
-                        .all(|subscription| subscription.replay_done)
-                    {
-                        cx.main_tx
-                            .send(MachineTaskMsg::PeerReplayWorker(PeerReplayWorkerMsg {
-                                peer_id: self.peer_id,
-                                task_id: cx.task_id,
-                                evt: rpc::SubEvent::ReplayComplete,
-                            }))
-                            .await?;
-                        replay_complete_sent = true;
-                    }
-                }
-            }
+            let evt = receiver
+                .recv()
+                .await
+                .map_err(|_| PeerReplayWorkerErrorDeets::StreamClosed)?;
+            cx.main_tx
+                .send(MachineTaskMsg::PeerReplayWorker(PeerReplayWorkerMsg {
+                    peer_id: self.peer_id,
+                    task_id: cx.task_id,
+                    evt,
+                }))
+                .await?;
         }
     }
 }

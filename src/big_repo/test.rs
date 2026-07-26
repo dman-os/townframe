@@ -589,10 +589,10 @@ async fn authorized_peer_reads_encrypted_doc_after_keyhive_change_notification_w
     // Subscribe to the client's global partition to learn about the doc
     // being registered locally by the runtime's keyhive listener.
     let req = SubPartsRequest {
-        target: big_sync_core::rpc::SubscriptionTarget::Part {
+        targets: HashSet::from([big_sync_core::rpc::SubscriptionTarget::Part {
             part_id: GLOBAL_PART_ID,
             cursor: 0,
-        },
+        }]),
     };
     let mut rx = client
         .big_sync_store
@@ -1405,10 +1405,10 @@ async fn granted_doc_requires_manual_sync_after_keyhive_notification() -> Res<()
     // listener will add the doc here when the direct-RPC grant notification
     // is processed.
     let req = SubPartsRequest {
-        target: big_sync_core::rpc::SubscriptionTarget::Part {
+        targets: HashSet::from([big_sync_core::rpc::SubscriptionTarget::Part {
             part_id: GLOBAL_PART_ID,
             cursor: 0,
-        },
+        }]),
     };
     let mut rx = client
         .big_sync_store
@@ -1514,10 +1514,10 @@ async fn synced_doc_auto_propagates_subsequent_edits() -> Res<()> {
     // Subscribe to client's global partition for the doc registration.
     client.big_sync_store.ensure_part(GLOBAL_PART_ID).await?;
     let req = SubPartsRequest {
-        target: big_sync_core::rpc::SubscriptionTarget::Part {
+        targets: HashSet::from([big_sync_core::rpc::SubscriptionTarget::Part {
             part_id: GLOBAL_PART_ID,
             cursor: 0,
-        },
+        }]),
     };
     let mut rx = client
         .big_sync_store
@@ -1639,10 +1639,10 @@ async fn three_node_key_rotation_propagates_to_existing_reader() -> Res<()> {
     // Subscribe B to its global partition, grant, wait for registration.
     b.big_sync_store.ensure_part(GLOBAL_PART_ID).await?;
     let req = SubPartsRequest {
-        target: big_sync_core::rpc::SubscriptionTarget::Part {
+        targets: HashSet::from([big_sync_core::rpc::SubscriptionTarget::Part {
             part_id: GLOBAL_PART_ID,
             cursor: 0,
-        },
+        }]),
     };
     let mut rx = b.big_sync_store.subscribe(req, b.peer_id()).await??;
 

@@ -209,7 +209,6 @@ structstruck::strike! {
         }>,
         replay_worker: Option<struct PeerReplayWorkerState {
             task_id: TaskId,
-            updates: mpsc::Sender<Set<SubscriptionTarget>>,
             parts: Set<PartId>,
             objects: Set<ObjId>,
         }>,
@@ -1130,26 +1129,19 @@ impl BigSyncMachine {
                 .copied()
                 .map(|obj_id| SubscriptionTarget::Object { obj_id }),
         );
-        if let Some((task_id, updates, unchanged)) =
-            peer_state.replay_worker.as_ref().map(|worker| {
-                (
-                    worker.task_id,
-                    worker.updates.clone(),
-                    replay_req_parts == worker.parts && replay_req_objects == worker.objects,
-                )
-            })
-        {
-            if unchanged {
+        if let Some(worker) = peer_state.replay_worker.as_ref() {
+            if !force
+                && replay_req_parts == worker.parts
+                && replay_req_objects == worker.objects
+            {
                 return;
             }
-            if updates.try_send(targets.clone()).is_ok() {
-                let worker = peer_state.replay_worker.as_mut().expect(ERROR_UNRECONIZED);
-                worker.parts = replay_req_parts;
-                worker.objects = replay_req_objects;
-                self.stat_machine.mark_peer_replay_done(peer_id, false);
-                return;
-            }
-            let _state = self.tasks.stop_task(task_id).expect(ERROR_UNRECONIZED);
+        }
+        if let Some(old_state) = peer_state.replay_worker.take() {
+            let _state = self
+                .tasks
+                .stop_task(old_state.task_id)
+                .expect(ERROR_UNRECONIZED);
         }
         tracing::debug!(
             peer_id = %peer_id,
@@ -1157,17 +1149,13 @@ impl BigSyncMachine {
             object_count = replay_req_objects.len(),
             "refresh peer replay worker"
         );
-        let (updates, update_rx) =
-            mpsc::unbounded("BigSyncMachine".into(), "PeerReplayWorker".into());
         let deets = TaskSeed::Machine(MachineTaskDeets::PeerReplay(PeerReplayTask {
             peer_id,
             targets,
-            updates: update_rx,
         }));
         let replay_task = self.tasks.spawn_task(deets);
         peer_state.replay_worker = Some(PeerReplayWorkerState {
             task_id: replay_task,
-            updates,
             parts: replay_req_parts,
             objects: replay_req_objects,
         });
@@ -1258,19 +1246,12 @@ impl BigSyncMachine {
                 .copied()
                 .map(|obj_id| SubscriptionTarget::Object { obj_id }),
         );
-        let (updates, update_rx) =
-            mpsc::unbounded("BigSyncMachine".into(), "PeerReplayWorker".into());
-        let deets = MachineTaskDeets::PeerReplay(PeerReplayTask {
-            peer_id,
-            targets,
-            updates: update_rx,
-        });
+        let deets = MachineTaskDeets::PeerReplay(PeerReplayTask { peer_id, targets });
         let replay_task =
             self.tasks
                 .spawn_delayed_task(TaskSeed::Machine(deets), retry, Duration::from_secs(2));
         peer_state.replay_worker = Some(PeerReplayWorkerState {
             task_id: replay_task,
-            updates,
             parts: worker_parts,
             objects: worker_objects,
         });

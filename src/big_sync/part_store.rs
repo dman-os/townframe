@@ -505,7 +505,7 @@ pub mod host_contract {
         cursor: CursorIndex,
         part_id: PartId,
         obj_id: ObjId,
-        payload: Option<ObjPayload>,
+        payload: ObjPayload,
     ) {
         let PartEvent::Added(transition) = event else {
             panic!("expected added event");
@@ -516,21 +516,6 @@ pub mod host_contract {
         assert_eq!(transition.payload, payload);
     }
 
-    fn assert_changed(
-        event: &PartEvent,
-        cursor: CursorIndex,
-        part_ids: &[PartId],
-        obj_id: ObjId,
-        payload: ObjPayload,
-    ) {
-        let PartEvent::Changed(transition) = event else {
-            panic!("expected changed event");
-        };
-        assert_eq!(transition.cursor, cursor);
-        assert_eq!(transition.part_ids, part_ids);
-        assert_eq!(transition.obj_id, obj_id);
-        assert_eq!(transition.payload, payload);
-    }
 
     async fn recv_sub_event(rx: &big_sync_core::mpsc::Receiver<SubEvent>) -> Res<SubEvent> {
         Ok(timeout(Duration::from_secs(5), rx.recv()).await??)
@@ -763,27 +748,17 @@ pub mod host_contract {
 
         assert_eq!(store.obj_payload(obj).await?, None);
         assert_eq!(store.obj_parts(obj).await?, vec![part]);
-        assert_eq!(store.member_count(part).await?, 1);
+        assert_eq!(store.member_count(part).await?, 0);
 
-        let live_fp_before = Fingerprint::new(
-            &BUCKET_LIVE_FP_SEED,
-            &(
-                "big-sync-bucket-live-v1",
-                bucket,
-                obj,
-                serde_json::Value::Null,
-            ),
-        )
-        .as_u64();
         let bucket_before = store.get_bucket_summary(part, bucket).await?;
         assert_eq!(
             bucket_before,
             BucketSummary {
                 id: bucket,
-                len: 1,
-                live_count: 1,
-                fp: (live_fp_before, 0),
-                changed_at: 3,
+                len: 0,
+                live_count: 0,
+                fp: (0, 0),
+                changed_at: 0,
             }
         );
 
@@ -805,14 +780,7 @@ pub mod host_contract {
         assert_eq!(
             leaf_before,
             LeafBucketPage {
-                entries: vec![BucketObjPageEntry {
-                    obj_id: obj,
-                    dead: false,
-                    fp: Fingerprint::new(
-                        &seed,
-                        &("big-sync-obj-fp-v1", obj, serde_json::Value::Null),
-                    ),
-                }],
+                entries: Vec::new(),
                 next_after: None,
                 done: true,
             }
@@ -822,16 +790,10 @@ pub mod host_contract {
         assert_eq!(
             events_before.get(&part).expect(ERROR_IMPOSSIBLE),
             &PartPage {
-                events: vec![PartEvent::Added(big_sync_core::rpc::ObjAddedToPart {
-                    cursor: 3,
-                    part_id: part,
-                    obj_id: obj,
-                    payload: None,
-                })],
+                events: Vec::new(),
                 next_cursor: None,
             }
         );
-
         store
             .set_obj_payload(obj, payload("late-payload", 99))
             .await?;
@@ -898,12 +860,11 @@ pub mod host_contract {
 
         let events_after = store.list_events(HashSet::from([part]), 0, 8).await??;
         let page_after = events_after.get(&part).expect(ERROR_IMPOSSIBLE);
-        assert_eq!(page_after.events.len(), 2);
-        assert_added(&page_after.events[0], 3, part, obj, None);
-        assert_changed(
-            &page_after.events[1],
-            4,
-            &[part],
+        assert_eq!(page_after.events.len(), 1);
+        assert_added(
+            &page_after.events[0],
+            3,
+            part,
             obj,
             payload("late-payload", 99),
         );
@@ -1135,7 +1096,7 @@ pub mod host_contract {
             [PartEvent::Added(added), PartEvent::Changed(changed)] => {
                 assert_eq!(added.part_id, part_b);
                 assert_eq!(added.obj_id, obj);
-                assert_eq!(added.payload, Some(payload("events-1", 1)));
+                assert_eq!(added.payload, payload("events-1", 1));
                 assert_eq!(changed.part_ids, vec![part_b]);
                 assert_eq!(changed.obj_id, obj);
                 assert_eq!(changed.payload, payload("events-3", 3));
@@ -1165,10 +1126,10 @@ pub mod host_contract {
         let rx = store
             .subscribe(
                 SubPartsRequest {
-                    target: big_sync_core::rpc::SubscriptionTarget::Part {
+                    targets: HashSet::from([big_sync_core::rpc::SubscriptionTarget::Part {
                         part_id: part,
                         cursor: 0,
-                    },
+                    }]),
                 },
                 reader,
             )
@@ -1230,10 +1191,10 @@ pub mod host_contract {
         let rx = store
             .subscribe(
                 SubPartsRequest {
-                    target: big_sync_core::rpc::SubscriptionTarget::Part {
+                    targets: HashSet::from([big_sync_core::rpc::SubscriptionTarget::Part {
                         part_id: part_b,
                         cursor: 3,
-                    },
+                    }]),
                 },
                 sub_peer,
             )
@@ -1243,7 +1204,7 @@ pub mod host_contract {
             [SubEvent::Added(added), SubEvent::Changed(changed), SubEvent::ReplayComplete] => {
                 assert_eq!(added.part_id, part_b);
                 assert_eq!(added.obj_id, obj);
-                assert_eq!(added.payload, Some(payload("sub-1", 1)));
+                assert_eq!(added.payload, payload("sub-1", 1));
                 assert_eq!(changed.part_ids, vec![part_b]);
                 assert_eq!(changed.obj_id, obj);
                 assert_eq!(changed.payload, payload("sub-3", 3));
@@ -1298,10 +1259,10 @@ pub mod host_contract {
         let auth_rx = store
             .subscribe(
                 SubPartsRequest {
-                    target: big_sync_core::rpc::SubscriptionTarget::Part {
+                    targets: HashSet::from([big_sync_core::rpc::SubscriptionTarget::Part {
                         part_id: part,
                         cursor: 0,
-                    },
+                    }]),
                 },
                 auth_peer,
             )
@@ -1324,10 +1285,10 @@ pub mod host_contract {
         let denied_rx = store
             .subscribe(
                 SubPartsRequest {
-                    target: big_sync_core::rpc::SubscriptionTarget::Part {
+                    targets: HashSet::from([big_sync_core::rpc::SubscriptionTarget::Part {
                         part_id: part,
                         cursor: 0,
-                    },
+                    }]),
                 },
                 denied_peer,
             )
@@ -1372,18 +1333,22 @@ pub mod host_contract {
     {
         let store = harness.store();
         let part = test_part(71);
+        let overlapping_part = test_part(76);
         let obj = test_obj(72);
         let auth_peer = big_sync_core::PeerId::new([73u8; 32]);
         let relay_peer = big_sync_core::PeerId::new([74u8; 32]);
         let denied_peer = big_sync_core::PeerId::new([75u8; 32]);
 
         store.ensure_part(part).await?;
+        store.ensure_part(overlapping_part).await?;
 
         // Seed the doc before any subscriptions.
         store
             .set_obj_payload(obj, payload("live-filter", 1))
             .await?;
-        store.add_obj_to_parts(obj, vec![part]).await?;
+        store
+            .add_obj_to_parts(obj, vec![part, overlapping_part])
+            .await?;
 
         // Set membership: auth_peer has Read, relay_peer has Relay,
         // denied_peer has no entry (explicitly denied via empty map).
@@ -1403,10 +1368,16 @@ pub mod host_contract {
             store
                 .subscribe(
                     SubPartsRequest {
-                        target: big_sync_core::rpc::SubscriptionTarget::Part {
-                            part_id: part,
-                            cursor: 0,
-                        },
+                        targets: HashSet::from([
+                            big_sync_core::rpc::SubscriptionTarget::Part {
+                                part_id: part,
+                                cursor: 0,
+                            },
+                            big_sync_core::rpc::SubscriptionTarget::Part {
+                                part_id: overlapping_part,
+                                cursor: 0,
+                            },
+                        ]),
                     },
                     peer,
                 )
@@ -1433,6 +1404,17 @@ pub mod host_contract {
         };
         assert_eq!(auth_changed.obj_id, obj);
         assert_eq!(auth_changed.payload, payload("live-filter", 2));
+        assert_eq!(
+            auth_changed.part_ids.iter().copied().collect::<HashSet<_>>(),
+            HashSet::from([part, overlapping_part]),
+            "one live event must aggregate every subscribed part",
+        );
+        assert!(
+            tokio::time::timeout(Duration::from_millis(100), auth_rx.recv())
+                .await
+                .is_err(),
+            "multi-part change must not be duplicated on the grouped stream",
+        );
 
         // Relay-only principals are excluded from the readability stream.
         match tokio::time::timeout(Duration::from_millis(500), relay_rx.recv()).await {
@@ -1514,73 +1496,58 @@ pub mod host_contract {
             .next_back()
             .expect("must find the Added event for part_a");
 
-        // Subscribe with per-part cursors: part_a is fully caught up at its
-        // actual cursor, part_b starts from scratch (cursor 0).
-        // Since the new API uses single-target SubPartsRequest, subscribe
-        // separately per part.
-        let rx_a = store
+        // One immutable grouped stream retains independent per-part cursors while
+        // preserving one wire event for a change spanning both parts.
+        let rx = store
             .subscribe(
                 SubPartsRequest {
-                    target: big_sync_core::rpc::SubscriptionTarget::Part {
-                        part_id: part_a,
-                        cursor: part_a_cursor,
-                    },
+                    targets: HashSet::from([
+                        big_sync_core::rpc::SubscriptionTarget::Part {
+                            part_id: part_a,
+                            cursor: part_a_cursor,
+                        },
+                        big_sync_core::rpc::SubscriptionTarget::Part {
+                            part_id: part_b,
+                            cursor: 0,
+                        },
+                    ]),
                 },
                 peer,
             )
             .await??;
-        let rx_b = store
-            .subscribe(
-                SubPartsRequest {
-                    target: big_sync_core::rpc::SubscriptionTarget::Part {
-                        part_id: part_b,
-                        cursor: 0,
-                    },
-                },
-                peer,
-            )
-            .await??;
+        let events = collect_sub_events(&rx).await?;
 
-        let events_a = collect_sub_events(&rx_a).await?;
-        // The replay must not rehash Added(part_a) since part_a is caught up.
-        for evt in &events_a {
-            if let SubEvent::Added(transition) = evt {
-                if transition.part_id == part_a && transition.obj_id == obj {
-                    panic!(
-                        "replayed Added event for part_a at cursor {} (part_a cursor {}, should be skipped)",
-                        transition.cursor, part_a_cursor,
-                    );
-                }
-            }
-        }
-
-        let events_b = collect_sub_events(&rx_b).await?;
-        // Added(part_b) and any Changed mentioning part_b must be replayed.
-        let mut saw_part_b_added = false;
-        let mut saw_part_b_changed = false;
-        for evt in &events_b {
-            match evt {
-                SubEvent::Added(transition) => {
-                    if transition.part_id == part_b && transition.obj_id == obj {
-                        saw_part_b_added = true;
-                    }
-                }
-                SubEvent::Changed(transition) => {
-                    if transition.obj_id == obj && transition.part_ids.contains(&part_b) {
-                        saw_part_b_changed = true;
-                    }
-                }
-                SubEvent::Removed(_) | SubEvent::ObjectChanged(_) => {}
-                SubEvent::ReplayComplete => {}
-            }
-        }
         assert!(
-            saw_part_b_added,
-            "replay must include the Added event for part_b; got events: {events_b:?}"
+            !events.iter().any(|event| matches!(
+                event,
+                SubEvent::Added(added)
+                    if added.obj_id == obj && added.part_id == part_a
+            )),
+            "part_a's caught-up Added event must not replay: {events:?}",
         );
         assert!(
-            saw_part_b_changed,
-            "replay must include a Changed event involving part_b; got events: {events_b:?}"
+            events.iter().any(|event| matches!(
+                event,
+                SubEvent::Added(added)
+                    if added.obj_id == obj && added.part_id == part_b
+            )),
+            "part_b's Added event must replay: {events:?}",
+        );
+        let changes: Vec<_> = events
+            .iter()
+            .filter_map(|event| match event {
+                SubEvent::Changed(changed) if changed.obj_id == obj => Some(changed),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(
+            changes.len(),
+            1,
+            "one logical multi-part change must produce one replay message: {events:?}",
+        );
+        assert_eq!(
+            changes[0].part_ids.iter().copied().collect::<HashSet<_>>(),
+            HashSet::from([part_a, part_b]),
         );
         Ok(())
     }

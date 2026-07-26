@@ -252,7 +252,9 @@ pub enum SubscriptionTarget {
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct SubPartsRequest {
-    pub target: SubscriptionTarget,
+    /// An immutable snapshot of the peer's complete subscription set.
+    /// Reconfiguration establishes a replacement stream with a new replay barrier.
+    pub targets: Set<SubscriptionTarget>,
 }
 
 structstruck::strike! {
@@ -278,10 +280,10 @@ structstruck::strike! {
                 pub part_id: PartId,
                 pub obj_id: ObjId,
                 #[serde(
-                    serialize_with = "option_value_as_string",
-                    deserialize_with = "option_value_from_string"
+                    serialize_with = "value_as_string",
+                    deserialize_with = "value_from_string"
                 )]
-                pub payload: Option<ObjPayload>,
+                pub payload: ObjPayload,
             }),
             Removed(pub struct ObjRemovedFromPart {
                 pub cursor: CursorIndex,
@@ -307,28 +309,6 @@ where
     serde_json::from_str(&str).map_err(serde::de::Error::custom)
 }
 
-fn option_value_as_string<S>(
-    val: &Option<serde_json::Value>,
-    serializer: S,
-) -> Result<S::Ok, S::Error>
-where
-    S: Serializer,
-{
-    match val {
-        Some(val) => serializer
-            .serialize_some(&serde_json::to_string(val).map_err(serde::ser::Error::custom)?),
-        None => serializer.serialize_none(),
-    }
-}
-
-fn option_value_from_string<'de, D>(deserializer: D) -> Result<Option<serde_json::Value>, D::Error>
-where
-    D: Deserializer<'de>,
-{
-    let str = Option::<String>::deserialize(deserializer)?;
-    str.map(|str| serde_json::from_str(&str).map_err(serde::de::Error::custom))
-        .transpose()
-}
 
 structstruck::strike! {
     #[structstruck::each[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]]

@@ -100,7 +100,7 @@ struct BigRepoSubscriptions {
     by_part: HashMap<PartId, HashSet<Uuid>>,
     parts_by_sub: HashMap<Uuid, HashSet<PartId>>,
     by_obj: HashMap<ObjId, HashSet<Uuid>>,
-    obj_by_sub: HashMap<Uuid, ObjId>,
+    objs_by_sub: HashMap<Uuid, HashSet<ObjId>>,
     pending: HashSet<Uuid>,
     live: HashSet<Uuid>,
     subs: HashMap<Uuid, Arc<BigRepoSubscription>>,
@@ -118,9 +118,11 @@ impl BigRepoSubscriptions {
                 }
             }
         }
-        if let Some(obj_id) = self.obj_by_sub.remove(&sub_id) {
-            if let Some(subs) = self.by_obj.get_mut(&obj_id) {
-                subs.remove(&sub_id);
+        if let Some(obj_ids) = self.objs_by_sub.remove(&sub_id) {
+            for obj_id in obj_ids {
+                if let Some(subs) = self.by_obj.get_mut(&obj_id) {
+                    subs.remove(&sub_id);
+                }
             }
         }
     }
@@ -514,12 +516,12 @@ impl SqliteBigRepoStore {
                     ),
                     SubEvent::Added(inner) => (
                         inner.obj_id,
-                        inner.payload.clone().map(|payload| {
-                            SubEvent::ObjectChanged(big_sync_core::rpc::ObjChangedWithoutPart {
+                        Some(SubEvent::ObjectChanged(
+                            big_sync_core::rpc::ObjChangedWithoutPart {
                                 obj_id: inner.obj_id,
-                                payload,
-                            })
-                        }),
+                                payload: inner.payload.clone(),
+                            },
+                        )),
                     ),
                     SubEvent::Removed(inner) => (inner.obj_id, None),
                     SubEvent::ObjectChanged(inner) => (inner.obj_id, Some(event.clone())),
@@ -531,11 +533,18 @@ impl SqliteBigRepoStore {
                         for part_id in &inner.part_ids {
                             if let Some(subs) = bus.by_part.get(part_id) {
                                 for &sub_id in subs {
-                                    let mut projected = event.clone();
-                                    if let SubEvent::Changed(inner) = &mut projected {
-                                        inner.part_ids = vec![*part_id];
+                                    match recipients.get_mut(&sub_id) {
+                                        Some(SubEvent::Changed(existing)) => {
+                                            existing.part_ids.push(*part_id);
+                                        }
+                                        _ => {
+                                            let mut projected = event.clone();
+                                            if let SubEvent::Changed(inner) = &mut projected {
+                                                inner.part_ids = vec![*part_id];
+                                            }
+                                            recipients.insert(sub_id, projected);
+                                        }
                                     }
-                                    recipients.insert(sub_id, projected);
                                 }
                             }
                         }
@@ -560,7 +569,7 @@ impl SqliteBigRepoStore {
                 if let Some(object_event) = object_event {
                     if let Some(subs) = bus.by_obj.get(&obj_id) {
                         for &sub_id in subs {
-                            recipients.insert(sub_id, object_event.clone());
+                            recipients.entry(sub_id).or_insert_with(|| object_event.clone());
                         }
                     }
                 }
@@ -787,6 +796,17 @@ async fn init_schema(pool: &sqlx::SqlitePool, bucket_depth: u8) -> Res<()> {
     .execute(&mut *tx)
     .await?;
     sqlx::query(
+        "CREATE TABLE IF NOT EXISTS big_sync_pending_members (
+            scope_id INTEGER NOT NULL REFERENCES big_sync_scopes(scope_id),
+            part_id BLOB NOT NULL,
+            obj_id BLOB NOT NULL,
+            PRIMARY KEY(scope_id, part_id, obj_id),
+            FOREIGN KEY(scope_id, obj_id) REFERENCES big_sync_objs(scope_id, obj_id)
+        ) STRICT",
+    )
+    .execute(&mut *tx)
+    .await?;
+    sqlx::query(
         "CREATE TABLE IF NOT EXISTS big_sync_peer_cursors (
             scope_id INTEGER NOT NULL REFERENCES big_sync_scopes(scope_id),
             peer_id BLOB NOT NULL,
@@ -915,11 +935,9 @@ impl HostPartStore for SqliteBigRepoStore {
 
     async fn set_obj_payload(&self, obj_id: ObjId, payload: ObjPayload) -> Res<()> {
         let mut tx = self.sql.write_pool.begin_with("BEGIN IMMEDIATE").await?;
-        let event = self.set_obj_payload_in_tx(&mut tx, obj_id, payload).await?;
+        let events = self.set_obj_payload_in_tx(&mut tx, obj_id, payload).await?;
         tx.commit().await?;
-        if let Some(event) = event {
-            self.publish(vec![event]).await;
-        }
+        self.publish(events).await;
         Ok(())
     }
 
@@ -927,6 +945,9 @@ impl HostPartStore for SqliteBigRepoStore {
         let rows = sqlx::query(
             "SELECT part_id FROM big_sync_members
              WHERE scope_id = ?1 AND obj_id = ?2 AND removed_at IS NULL
+             UNION
+             SELECT part_id FROM big_sync_pending_members
+             WHERE scope_id = ?1 AND obj_id = ?2
              ORDER BY part_id ASC",
         )
         .bind(self.scope_id)
@@ -1214,12 +1235,6 @@ impl HostPartStore for SqliteBigRepoStore {
         .bind(Self::obj_blob(obj_id))
         .fetch_optional(&mut *tx)
         .await?;
-        let payload: ObjPayload = payload_json
-            .as_deref()
-            .filter(|payload_json| !payload_json.is_empty())
-            .map(|payload_json| serde_json::from_str(payload_json).wrap_err(ERROR_JSON))
-            .transpose()?
-            .unwrap_or(serde_json::Value::Null);
         let event_payload: Option<ObjPayload> = payload_json
             .as_deref()
             .filter(|payload_json| !payload_json.is_empty())
@@ -1236,7 +1251,22 @@ impl HostPartStore for SqliteBigRepoStore {
         .bind(payload_json.as_deref())
         .execute(&mut *tx)
         .await?;
-        let added_payload_json = payload_json.clone();
+        let Some(payload) = event_payload else {
+            for part_id in parts {
+                sqlx::query(
+                    "INSERT OR IGNORE INTO big_sync_pending_members(scope_id, part_id, obj_id)
+                     VALUES (?1, ?2, ?3)",
+                )
+                .bind(self.scope_id)
+                .bind(Self::part_blob(part_id))
+                .bind(Self::obj_blob(obj_id))
+                .execute(&mut *tx)
+                .await?;
+            }
+            tx.commit().await?;
+            return Ok(());
+        };
+        let added_payload_json = Some(serde_json::to_string(&payload).wrap_err(ERROR_JSON)?);
         let changed_parts: Vec<_> = part_states
             .into_iter()
             .filter(|(_, old_state)| !matches!(old_state, MemberState::Live(_)))
@@ -1293,11 +1323,20 @@ impl HostPartStore for SqliteBigRepoStore {
             .bind(Self::part_blob(part_id))
             .execute(&mut *tx)
             .await?;
+            sqlx::query(
+                "DELETE FROM big_sync_pending_members
+                 WHERE scope_id = ?1 AND part_id = ?2 AND obj_id = ?3",
+            )
+            .bind(self.scope_id)
+            .bind(Self::part_blob(part_id))
+            .bind(Self::obj_blob(obj_id))
+            .execute(&mut *tx)
+            .await?;
             events.push(SubEvent::Added(big_sync_core::rpc::ObjAddedToPart {
                 cursor,
                 part_id,
                 obj_id,
-                payload: event_payload.clone(),
+                payload: payload.clone(),
             }));
         }
         tx.commit().await?;
@@ -1327,6 +1366,15 @@ impl HostPartStore for SqliteBigRepoStore {
         )
         .bind(self.scope_id)
         .bind(Self::part_blob(part_id))
+        .execute(&mut *tx)
+        .await?;
+        sqlx::query(
+            "DELETE FROM big_sync_pending_members
+             WHERE scope_id = ?1 AND part_id = ?2 AND obj_id = ?3",
+        )
+        .bind(self.scope_id)
+        .bind(Self::part_blob(part_id))
+        .bind(Self::obj_blob(obj_id))
         .execute(&mut *tx)
         .await?;
         let current_state = self.load_member_state(&mut tx, part_id, obj_id).await?;
@@ -1512,7 +1560,9 @@ impl HostPartStore for SqliteBigRepoStore {
                             cursor: u64::try_from(added_at).expect(ERROR_IMPOSSIBLE),
                             part_id,
                             obj_id,
-                            payload: added_payload.clone(),
+                            payload: added_payload
+                                .clone()
+                                .expect("visible membership requires added payload"),
                         }),
                     ));
                 }
@@ -1724,19 +1774,29 @@ impl SqliteBigRepoStore {
         reqs: SubPartsRequest,
         subscriber: Option<PeerId>,
     ) -> Res<Result<mpsc::Receiver<SubEvent>, ListPartsError>> {
-        let target = reqs.target;
-        let part_cursor = match target {
-            SubscriptionTarget::Part { part_id, cursor } => {
-                if subscriber.is_some() {
-                    let summaries = self.summarize_parts(HashSet::from([part_id])).await?;
-                    if let Err(err) = summaries {
-                        return Ok(Err(err));
-                    }
-                }
-                Some((part_id, cursor))
+        let part_cursors: HashMap<PartId, CursorIndex> = reqs
+            .targets
+            .iter()
+            .filter_map(|target| match target {
+                SubscriptionTarget::Part { part_id, cursor } => Some((*part_id, *cursor)),
+                SubscriptionTarget::Object { .. } => None,
+            })
+            .collect();
+        let objects: HashSet<ObjId> = reqs
+            .targets
+            .iter()
+            .filter_map(|target| match target {
+                SubscriptionTarget::Object { obj_id } => Some(*obj_id),
+                SubscriptionTarget::Part { .. } => None,
+            })
+            .collect();
+        let parts: HashSet<_> = part_cursors.keys().copied().collect();
+        if subscriber.is_some() {
+            if let Err(err) = self.summarize_parts(parts.clone()).await? {
+                return Ok(Err(err));
             }
-            SubscriptionTarget::Object { .. } => None,
-        };
+        }
+
         let (tx, rx) = mpsc::unbounded("SqliteBigRepoStore".into(), "caller".into());
         let sub_id = uuid::Uuid::new_v4();
         let sub = Arc::new(BigRepoSubscription {
@@ -1748,115 +1808,123 @@ impl SqliteBigRepoStore {
             let mut bus = self.bus.write().expect(ERROR_IMPOSSIBLE);
             bus.pending.insert(sub_id);
             bus.subs.insert(sub_id, Arc::clone(&sub));
-            match target {
-                SubscriptionTarget::Part { part_id, .. } => {
-                    bus.parts_by_sub.insert(sub_id, HashSet::from([part_id]));
-                    bus.by_part.entry(part_id).or_default().insert(sub_id);
-                }
-                SubscriptionTarget::Object { obj_id } => {
-                    bus.obj_by_sub.insert(sub_id, obj_id);
-                    bus.by_obj.entry(obj_id).or_default().insert(sub_id);
-                }
+            bus.parts_by_sub.insert(sub_id, parts.clone());
+            for part_id in &parts {
+                bus.by_part.entry(*part_id).or_default().insert(sub_id);
+            }
+            bus.objs_by_sub.insert(sub_id, objects.clone());
+            for obj_id in &objects {
+                bus.by_obj.entry(*obj_id).or_default().insert(sub_id);
             }
         }
 
         let store = self.clone();
         tokio::spawn(async move {
-            let mut cursor = part_cursor.map(|(_, cursor)| cursor).unwrap_or_default();
+            let mut cursor = part_cursors.values().copied().min().unwrap_or_default();
             let mut marker_sent = false;
+            let mut object_replay_pending = true;
             loop {
                 sub.pending
                     .state
                     .store(SUB_REPLAYING_CLEAN, std::sync::atomic::Ordering::Release);
-                let mut output = Vec::new();
+                let page = store
+                    .list_events_with_policy(
+                        parts.clone(),
+                        cursor,
+                        u32::MAX,
+                        subscriber.is_some(),
+                    )
+                    .await
+                    .expect(ERROR_IMPOSSIBLE)
+                    .expect(ERROR_IMPOSSIBLE);
+                let cache = store
+                    .doc_members_cache
+                    .read()
+                    .expect(ERROR_IMPOSSIBLE)
+                    .clone();
+                let mut output: Vec<SubEvent> = Vec::new();
                 let mut raw_event_count = 0;
                 let mut max_cursor = cursor;
-                if let Some((part_id, requested_cursor)) = part_cursor {
-                    let page = store
-                        .list_events_with_policy(
-                            HashSet::from([part_id]),
-                            cursor,
-                            u32::MAX,
-                            subscriber.is_some(),
-                        )
-                        .await
-                        .expect(ERROR_IMPOSSIBLE)
-                        .expect(ERROR_IMPOSSIBLE);
-                    let cache = store
-                        .doc_members_cache
-                        .read()
-                        .expect(ERROR_IMPOSSIBLE)
-                        .clone();
-                    for (_, part_page) in page {
-                        for event in part_page.events {
-                            raw_event_count += 1;
-                            let event_cursor = match &event {
-                                PartEvent::Changed(inner) => inner.cursor,
-                                PartEvent::Added(inner) => inner.cursor,
-                                PartEvent::Removed(inner) => inner.cursor,
-                            };
-                            max_cursor = max_cursor.max(event_cursor);
-                            let obj_id = match &event {
-                                PartEvent::Changed(inner) => inner.obj_id,
-                                PartEvent::Added(inner) => inner.obj_id,
-                                PartEvent::Removed(inner) => inner.obj_id,
-                            };
-                            let permitted = match subscriber {
-                                None => true,
-                                Some(principal) => cache
-                                    .get(&obj_id)
-                                    .map(|members| {
-                                        members
-                                            .get(&principal)
-                                            .map(|access| access.is_reader())
-                                            .unwrap_or(false)
-                                    })
-                                    .unwrap_or(true),
-                            };
-                            if !permitted || event_cursor <= requested_cursor {
-                                continue;
-                            }
-                            output.push(match event {
-                                PartEvent::Changed(inner) => {
-                                    let mut projected = inner;
-                                    projected.part_ids = vec![part_id];
-                                    SubEvent::Changed(projected)
+                for (part_id, part_page) in page {
+                    for event in part_page.events {
+                        raw_event_count += 1;
+                        let event_cursor = match &event {
+                            PartEvent::Changed(inner) => inner.cursor,
+                            PartEvent::Added(inner) => inner.cursor,
+                            PartEvent::Removed(inner) => inner.cursor,
+                        };
+                        max_cursor = max_cursor.max(event_cursor);
+                        if event_cursor <= part_cursors.get(&part_id).copied().unwrap_or_default() {
+                            continue;
+                        }
+                        let obj_id = match &event {
+                            PartEvent::Changed(inner) => inner.obj_id,
+                            PartEvent::Added(inner) => inner.obj_id,
+                            PartEvent::Removed(inner) => inner.obj_id,
+                        };
+                        let permitted = match subscriber {
+                            None => true,
+                            Some(principal) => cache
+                                .get(&obj_id)
+                                .map(|members| {
+                                    members
+                                        .get(&principal)
+                                        .map(|access| access.is_reader())
+                                        .unwrap_or(false)
+                                })
+                                .unwrap_or(true),
+                        };
+                        if !permitted {
+                            continue;
+                        }
+                        match event {
+                            PartEvent::Changed(inner) => {
+                                if let Some(SubEvent::Changed(existing)) = output.iter_mut().find(
+                                    |candidate| matches!(
+                                        candidate,
+                                        SubEvent::Changed(candidate)
+                                            if candidate.cursor == inner.cursor
+                                                && candidate.obj_id == inner.obj_id
+                                    ),
+                                ) {
+                                    if !existing.part_ids.contains(&part_id) {
+                                        existing.part_ids.push(part_id);
+                                    }
+                                } else {
+                                    let mut inner = inner;
+                                    inner.part_ids = vec![part_id];
+                                    output.push(SubEvent::Changed(inner));
                                 }
-                                PartEvent::Added(inner) => SubEvent::Added(inner),
-                                PartEvent::Removed(inner) => SubEvent::Removed(inner),
-                            });
+                            }
+                            PartEvent::Added(inner) => output.push(SubEvent::Added(inner)),
+                            PartEvent::Removed(inner) => output.push(SubEvent::Removed(inner)),
                         }
                     }
-                } else if !marker_sent {
-                    let SubscriptionTarget::Object { obj_id } = target else {
-                        unreachable!("missing subscription target");
-                    };
-                    let cache = store
-                        .doc_members_cache
-                        .read()
-                        .expect(ERROR_IMPOSSIBLE)
-                        .clone();
-                    let permitted = match subscriber {
-                        None => true,
-                        Some(principal) => cache
-                            .get(&obj_id)
-                            .map(|members| {
-                                members
-                                    .get(&principal)
-                                    .map(|access| access.is_reader())
-                                    .unwrap_or(false)
-                            })
-                            .unwrap_or(true),
-                    };
-                    if permitted {
-                        if let Some(payload) =
-                            store.obj_payload(obj_id).await.expect(ERROR_IMPOSSIBLE)
-                        {
-                            output.push(SubEvent::ObjectChanged(
-                                big_sync_core::rpc::ObjChangedWithoutPart { obj_id, payload },
-                            ));
+                }
+                if object_replay_pending {
+                    for obj_id in &objects {
+                        let permitted = match subscriber {
+                            None => true,
+                            Some(principal) => cache
+                                .get(obj_id)
+                                .and_then(|members| members.get(&principal))
+                                .map(|access| access.is_reader())
+                                .unwrap_or(false),
+                        };
+                        if permitted {
+                            if let Some(payload) =
+                                store.obj_payload(*obj_id).await.expect(ERROR_IMPOSSIBLE)
+                            {
+                                output.push(SubEvent::ObjectChanged(
+                                    big_sync_core::rpc::ObjChangedWithoutPart {
+                                        obj_id: *obj_id,
+                                        payload,
+                                    },
+                                ));
+                            }
                         }
                     }
+                    object_replay_pending = false;
                 }
                 for event in output {
                     if tx.send(event).await.is_err() {
@@ -1870,6 +1938,7 @@ impl SqliteBigRepoStore {
                 }
                 if !marker_sent {
                     if !sub.pending.begin_finalization() {
+                        object_replay_pending = true;
                         continue;
                     }
                     if tx.send(SubEvent::ReplayComplete).await.is_err() {
@@ -1880,8 +1949,11 @@ impl SqliteBigRepoStore {
                     if sub.pending.become_ready() {
                         return;
                     }
+                    object_replay_pending = true;
                 } else if sub.pending.become_ready() {
                     return;
+                } else {
+                    object_replay_pending = true;
                 }
             }
         });
@@ -1893,7 +1965,7 @@ impl SqliteBigRepoStore {
         tx: &mut sqlx::Transaction<'_, sqlx::Sqlite>,
         obj_id: ObjId,
         payload: ObjPayload,
-    ) -> Res<Option<SubEvent>> {
+    ) -> Res<Vec<SubEvent>> {
         let payload_json = serde_json::to_string(&payload).wrap_err(ERROR_JSON)?;
         let old_payload_json: Option<String> = sqlx::query_scalar(
             "SELECT payload_json
@@ -1905,8 +1977,7 @@ impl SqliteBigRepoStore {
         .fetch_optional(&mut **tx)
         .await?;
         let live_part_ids: Vec<PartId> = sqlx::query_scalar(
-            "SELECT part_id
-             FROM big_sync_members
+            "SELECT part_id FROM big_sync_members
              WHERE scope_id = ?1 AND obj_id = ?2 AND removed_at IS NULL",
         )
         .bind(self.scope_id)
@@ -1916,12 +1987,17 @@ impl SqliteBigRepoStore {
         .into_iter()
         .map(Self::part_from_blob)
         .collect();
-        tracing::debug!(
-            obj_id = ?obj_id,
-            live_part_ids = ?live_part_ids,
-            payload = %payload_json,
-            "persisting BigSync object payload",
-        );
+        let pending_part_ids: Vec<PartId> = sqlx::query_scalar(
+            "SELECT part_id FROM big_sync_pending_members
+             WHERE scope_id = ?1 AND obj_id = ?2",
+        )
+        .bind(self.scope_id)
+        .bind(Self::obj_blob(obj_id))
+        .fetch_all(&mut **tx)
+        .await?
+        .into_iter()
+        .map(Self::part_from_blob)
+        .collect();
         sqlx::query(
             "INSERT INTO big_sync_objs(scope_id, obj_id, payload_json)
              VALUES (?1, ?2, ?3)
@@ -1932,26 +2008,84 @@ impl SqliteBigRepoStore {
         .bind(&payload_json)
         .execute(&mut **tx)
         .await?;
-        if live_part_ids.is_empty() {
-            return Ok(None);
+
+        if live_part_ids.is_empty() && pending_part_ids.is_empty() {
+            return Ok(vec![SubEvent::ObjectChanged(
+                big_sync_core::rpc::ObjChangedWithoutPart { obj_id, payload },
+            )]);
         }
+        assert!(
+            live_part_ids.is_empty() || pending_part_ids.is_empty(),
+            "readable object cannot retain latent part memberships"
+        );
+        let cursor = Self::next_cursor(tx).await?;
+        if !pending_part_ids.is_empty() {
+            let mut events = Vec::with_capacity(pending_part_ids.len());
+            for part_id in pending_part_ids {
+                sqlx::query(
+                    "INSERT INTO big_sync_parts(scope_id, part_id, latest_cursor)
+                     VALUES (?1, ?2, 0)
+                     ON CONFLICT(scope_id, part_id) DO NOTHING",
+                )
+                .bind(self.scope_id)
+                .bind(Self::part_blob(part_id))
+                .execute(&mut **tx)
+                .await?;
+                sqlx::query(
+                    "INSERT INTO big_sync_members(scope_id, part_id, obj_id, added_at, added_payload_json, changed_at, removed_at, latest_cursor)
+                     VALUES (?1, ?2, ?3, ?4, ?5, ?4, NULL, ?4)",
+                )
+                .bind(self.scope_id)
+                .bind(Self::part_blob(part_id))
+                .bind(Self::obj_blob(obj_id))
+                .bind(i64::try_from(cursor).expect(ERROR_IMPOSSIBLE))
+                .bind(&payload_json)
+                .execute(&mut **tx)
+                .await?;
+                self.apply_bucket_transition(
+                    tx,
+                    part_id,
+                    obj_id,
+                    cursor,
+                    &MemberState::Absent,
+                    &MemberState::Live(payload.clone()),
+                )
+                .await?;
+                sqlx::query(
+                    "UPDATE big_sync_parts SET latest_cursor = ?1
+                     WHERE scope_id = ?2 AND part_id = ?3",
+                )
+                .bind(i64::try_from(cursor).expect(ERROR_IMPOSSIBLE))
+                .bind(self.scope_id)
+                .bind(Self::part_blob(part_id))
+                .execute(&mut **tx)
+                .await?;
+                sqlx::query(
+                    "DELETE FROM big_sync_pending_members
+                     WHERE scope_id = ?1 AND part_id = ?2 AND obj_id = ?3",
+                )
+                .bind(self.scope_id)
+                .bind(Self::part_blob(part_id))
+                .bind(Self::obj_blob(obj_id))
+                .execute(&mut **tx)
+                .await?;
+                events.push(SubEvent::Added(big_sync_core::rpc::ObjAddedToPart {
+                    cursor,
+                    part_id,
+                    obj_id,
+                    payload: payload.clone(),
+                }));
+            }
+            return Ok(events);
+        }
+
         let old_payload: ObjPayload = old_payload_json
             .as_deref()
             .filter(|payload_json| !payload_json.is_empty())
             .map(|payload_json| serde_json::from_str(payload_json).wrap_err(ERROR_JSON))
             .transpose()?
-            .unwrap_or(serde_json::Value::Null);
-        let cursor = Self::next_cursor(tx).await?;
+            .expect("visible object membership requires an existing payload");
         for part_id in &live_part_ids {
-            sqlx::query(
-                "INSERT INTO big_sync_parts(scope_id, part_id, latest_cursor)
-                 VALUES (?1, ?2, 0)
-                 ON CONFLICT(scope_id, part_id) DO NOTHING",
-            )
-            .bind(self.scope_id)
-            .bind(Self::part_blob(*part_id))
-            .execute(&mut **tx)
-            .await?;
             sqlx::query(
                 "UPDATE big_sync_members
                  SET changed_at = ?1, latest_cursor = ?1
@@ -1973,8 +2107,7 @@ impl SqliteBigRepoStore {
             )
             .await?;
             sqlx::query(
-                "UPDATE big_sync_parts
-                 SET latest_cursor = ?1
+                "UPDATE big_sync_parts SET latest_cursor = ?1
                  WHERE scope_id = ?2 AND part_id = ?3",
             )
             .bind(i64::try_from(cursor).expect(ERROR_IMPOSSIBLE))
@@ -1983,12 +2116,12 @@ impl SqliteBigRepoStore {
             .execute(&mut **tx)
             .await?;
         }
-        Ok(Some(SubEvent::Changed(big_sync_core::rpc::ObjChanged {
+        Ok(vec![SubEvent::Changed(big_sync_core::rpc::ObjChanged {
             cursor,
             part_ids: live_part_ids,
             obj_id,
             payload,
-        })))
+        })])
     }
 
     async fn init_subduction_schema(&self) -> Result<(), SqliteBigRepoStoreError> {
@@ -2086,13 +2219,7 @@ impl SqliteBigRepoStore {
             .fetch_optional(&mut *tx)
             .await?;
             let payload_json = payload_json.filter(|value| !value.is_empty());
-            let payload: ObjPayload = payload_json
-                .as_deref()
-                .filter(|value| !value.is_empty())
-                .map(|value| serde_json::from_str(value).wrap_err(ERROR_JSON))
-                .transpose()?
-                .unwrap_or(serde_json::Value::Null);
-            let event_payload = payload_json
+            let event_payload: Option<ObjPayload> = payload_json
                 .as_deref()
                 .filter(|value| !value.is_empty())
                 .map(|value| serde_json::from_str(value).wrap_err(ERROR_JSON))
@@ -2129,7 +2256,10 @@ impl SqliteBigRepoStore {
 
             let current_rows = sqlx::query(
                 "SELECT part_id FROM big_sync_members
-                 WHERE scope_id = ?1 AND obj_id = ?2 AND removed_at IS NULL",
+                 WHERE scope_id = ?1 AND obj_id = ?2 AND removed_at IS NULL
+                 UNION
+                 SELECT part_id FROM big_sync_pending_members
+                 WHERE scope_id = ?1 AND obj_id = ?2",
             )
             .bind(self.scope_id)
             .bind(&doc_blob)
@@ -2158,16 +2288,40 @@ impl SqliteBigRepoStore {
                 let old = self
                     .load_member_state(&mut tx, part_id, mutation.doc)
                     .await?;
-                let new = if desired_parts.contains(&part_id) {
-                    MemberState::Live(payload.clone())
+                if desired_parts.contains(&part_id) {
+                    let Some(payload) = event_payload.clone() else {
+                        sqlx::query(
+                            "INSERT OR IGNORE INTO big_sync_pending_members(scope_id, part_id, obj_id)
+                             VALUES (?1, ?2, ?3)",
+                        )
+                        .bind(self.scope_id)
+                        .bind(Self::part_blob(part_id))
+                        .bind(&doc_blob)
+                        .execute(&mut *tx)
+                        .await?;
+                        continue;
+                    };
+                    transition_event_payloads.insert((part_id, mutation.doc), payload.clone());
+                    transitions.push((
+                        part_id,
+                        mutation.doc,
+                        old,
+                        MemberState::Live(payload),
+                    ));
                 } else {
-                    MemberState::Dead
-                };
-                if matches!((&old, &new), (MemberState::Live(_), MemberState::Live(_))) {
-                    continue;
+                    sqlx::query(
+                        "DELETE FROM big_sync_pending_members
+                         WHERE scope_id = ?1 AND part_id = ?2 AND obj_id = ?3",
+                    )
+                    .bind(self.scope_id)
+                    .bind(Self::part_blob(part_id))
+                    .bind(&doc_blob)
+                    .execute(&mut *tx)
+                    .await?;
+                    if !matches!(old, MemberState::Absent) {
+                        transitions.push((part_id, mutation.doc, old, MemberState::Dead));
+                    }
                 }
-                transition_event_payloads.insert((part_id, mutation.doc), event_payload.clone());
-                transitions.push((part_id, mutation.doc, old, new));
             }
         }
 
@@ -2206,23 +2360,34 @@ impl SqliteBigRepoStore {
                         .bind(Self::obj_blob(doc))
                         .bind(i64::try_from(cursor).expect(ERROR_IMPOSSIBLE))
                         .bind(
-                            transition_event_payloads
-                                .get(&(part_id, doc))
-                                .and_then(|payload| payload.as_ref())
-                                .map(|payload| serde_json::to_string(payload).expect(ERROR_JSON)),
+                            serde_json::to_string(
+                                transition_event_payloads
+                                    .get(&(part_id, doc))
+                                    .expect("live transition requires payload"),
+                            )
+                            .expect(ERROR_JSON),
                         )
                         .execute(&mut *tx)
                         .await?;
                         self.apply_bucket_transition(&mut tx, part_id, doc, cursor, &old, &new)
                             .await?;
+                        sqlx::query(
+                            "DELETE FROM big_sync_pending_members
+                             WHERE scope_id = ?1 AND part_id = ?2 AND obj_id = ?3",
+                        )
+                        .bind(self.scope_id)
+                        .bind(Self::part_blob(part_id))
+                        .bind(Self::obj_blob(doc))
+                        .execute(&mut *tx)
+                        .await?;
                         events.push(SubEvent::Added(big_sync_core::rpc::ObjAddedToPart {
                             cursor,
                             part_id,
                             obj_id: doc,
                             payload: transition_event_payloads
                                 .get(&(part_id, doc))
-                                .cloned()
-                                .flatten(),
+                                .expect("live transition requires payload")
+                                .clone(),
                         }));
                     }
                     MemberState::Dead => {
@@ -2736,13 +2901,11 @@ impl Storage<Sendable> for SqliteBigRepoStore {
             self.save_tree(&mut tx, id).await?;
             self.insert_commit(&mut tx, id, verified).await?;
             let payload = self.sedimentree_payload_in_tx(&mut tx, id).await?;
-            let event = self
+            let events = self
                 .set_obj_payload_in_tx(&mut tx, Self::obj_id(id), payload)
                 .await?;
             tx.commit().await?;
-            if let Some(event) = event {
-                self.publish(vec![event]).await;
-            }
+            self.publish(events).await;
             Ok(())
         })
     }
@@ -2842,13 +3005,11 @@ impl Storage<Sendable> for SqliteBigRepoStore {
             self.save_tree(&mut tx, id).await?;
             self.insert_fragment(&mut tx, id, verified).await?;
             let payload = self.sedimentree_payload_in_tx(&mut tx, id).await?;
-            let event = self
+            let events = self
                 .set_obj_payload_in_tx(&mut tx, Self::obj_id(id), payload)
                 .await?;
             tx.commit().await?;
-            if let Some(event) = event {
-                self.publish(vec![event]).await;
-            }
+            self.publish(events).await;
             Ok(())
         })
     }
@@ -2948,17 +3109,15 @@ impl Storage<Sendable> for SqliteBigRepoStore {
             for fragment in fragments {
                 self.insert_fragment(&mut tx, id, fragment).await?;
             }
-            let event = if count == 0 {
-                None
+            let events = if count == 0 {
+                Vec::new()
             } else {
                 let payload = self.sedimentree_payload_in_tx(&mut tx, id).await?;
                 self.set_obj_payload_in_tx(&mut tx, Self::obj_id(id), payload)
                     .await?
             };
             tx.commit().await?;
-            if let Some(event) = event {
-                self.publish(vec![event]).await;
-            }
+            self.publish(events).await;
             Ok(count)
         })
     }
@@ -3013,10 +3172,10 @@ mod tests {
         let mut rx = HostPartStore::subscribe_local(
             &store,
             SubPartsRequest {
-                target: SubscriptionTarget::Part {
+                targets: HashSet::from([SubscriptionTarget::Part {
                     part_id: part,
                     cursor: 0,
-                },
+                }]),
             },
         )
         .await??;
@@ -3034,6 +3193,71 @@ mod tests {
 
         HostPartStore::set_obj_payload(&store, obj, serde_json::json!({"value": 2})).await?;
         assert!(matches!(rx.recv().await?, SubEvent::Changed(event) if event.obj_id == obj));
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn keyhive_membership_is_not_advertised_until_payload_is_available() -> Res<()> {
+        let store = SqliteBigRepoStore::new(
+            SqlCtx::memory().await?,
+            "big-repo-sqlite-latent-membership",
+            BuckId::MAX_LEVEL,
+        )
+        .await?;
+        let obj = ObjId(Byte32Id::new([223; 32]));
+        HostPartStore::ensure_part(&store, crate::GLOBAL_PART_ID).await?;
+        store
+            .reconcile_group_part_batch(
+                &[GroupPartReconciliation {
+                    doc: obj,
+                    agents: HashMap::new(),
+                    managed_group_parts: HashSet::new(),
+                    desired_group_parts: HashSet::new(),
+                    desired_global: true,
+                }],
+                1,
+                true,
+            )
+            .await?;
+
+        assert_eq!(HostPartStore::obj_parts(&store, obj).await?, vec![crate::GLOBAL_PART_ID]);
+        assert_eq!(HostPartStore::member_count(&store, crate::GLOBAL_PART_ID).await?, 0);
+        assert!(
+            HostPartStore::list_events(
+                &store,
+                HashSet::from([crate::GLOBAL_PART_ID]),
+                0,
+                8,
+            )
+            .await??
+            .get(&crate::GLOBAL_PART_ID)
+            .expect(ERROR_IMPOSSIBLE)
+            .events
+            .is_empty(),
+        );
+
+        let rx = HostPartStore::subscribe_local(
+            &store,
+            SubPartsRequest {
+                targets: HashSet::from([SubscriptionTarget::Part {
+                    part_id: crate::GLOBAL_PART_ID,
+                    cursor: 0,
+                }]),
+            },
+        )
+        .await??;
+        assert!(matches!(rx.recv().await?, SubEvent::ReplayComplete));
+
+        let payload = serde_json::json!({"heads": ["available"]});
+        HostPartStore::set_obj_payload(&store, obj, payload.clone()).await?;
+        let event = tokio::time::timeout(Duration::from_secs(2), rx.recv()).await??;
+        let SubEvent::Added(added) = event else {
+            panic!("payload promotion must first advertise Added, got {event:?}");
+        };
+        assert_eq!(added.obj_id, obj);
+        assert_eq!(added.part_id, crate::GLOBAL_PART_ID);
+        assert_eq!(added.payload, payload);
+        assert_eq!(HostPartStore::member_count(&store, crate::GLOBAL_PART_ID).await?, 1);
         Ok(())
     }
 
