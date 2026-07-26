@@ -90,7 +90,7 @@ pub async fn grant_and_propagate(
         .repo
         .grant_doc_access(doc_id, grantee.clone(), access)
         .await?;
-    pair.left_conn().sync_keyhive_with_peer(None).await?;
+    pair.right_conn().sync_keyhive_with_peer(None).await?;
     assert_reader_has_access(&pair.right().repo, doc_id).await?;
     super::keyhive::assert_document_snapshot_equal(pair.left(), pair.right(), doc_id).await?;
     Ok(())
@@ -110,7 +110,7 @@ pub async fn grant_group_and_propagate(
         .repo
         .grant_doc_access(doc_id, group.clone(), access)
         .await?;
-    pair.left_conn().sync_keyhive_with_peer(None).await?;
+    pair.right_conn().sync_keyhive_with_peer(None).await?;
     assert_reader_has_access(&pair.right().repo, doc_id).await?;
     super::keyhive::assert_document_snapshot_equal(pair.left(), pair.right(), doc_id).await?;
     Ok(())

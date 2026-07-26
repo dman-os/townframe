@@ -137,7 +137,18 @@ impl<F: FutureForm> DocWorkerLoop<F> for F {
                     tracing::debug!(%doc_id, ?error, "doc worker stopped after runtime shutdown");
                     Ok(())
                 }
-                Ok(ok) => ok,
+                Ok(Err(error)) => {
+                    runtime_evt_tx
+                        .send(crate::runtime2::Runtime2Evt::FatalWorkerError {
+                            doc_id: Some(doc_id),
+                            context: "document worker failed",
+                            error: format!("{error:?}"),
+                        })
+                        .await
+                        .map_err(|_| ferr!("hub event channel closed"))?;
+                    Err(error)
+                }
+                Ok(Ok(())) => Ok(()),
                 Err(_) => Ok(()),
             }
         })
@@ -1104,23 +1115,11 @@ impl<F: FutureForm> DocWorker2<F> {
         // heads from the sedimentree. The old code early-returned here without
         // refreshing, letting recorded heads go stale after a crash.
         if received_refs.is_empty() {
-            // Refresh the recorded frontier even when this transport session
-            // transferred no blobs. Do not reload over a live bundle, though:
-            // an empty inbound session can race a local commit whose encrypted
-            // storage write has not become visible to the snapshot loader yet.
-            // Reloading then would replace the live Automerge document with an
-            // older snapshot and lose the local materialized frontier.
+            // Refresh the recorded frontier, then reconcile the durable snapshot
+            // into any live document. `retry_materialization` merges rather than
+            // replaces live state, so a concurrent local branch is preserved.
             self.refresh_heads_from_sedimentree(peer_id).await?;
-            let needs_reload = match &self.state {
-                DocState::Live(bundle) => bundle.upgrade().is_none(),
-                DocState::Transient(_) | DocState::Unloaded | DocState::PendingMaterialization => {
-                    true
-                }
-            };
-            if needs_reload {
-                return self.retry_materialization().await.map(|_| ());
-            }
-            return Ok(());
+            return self.retry_materialization().await.map(|_| ());
         }
 
         // ── Step 1: Hydrate the tree ────────────────────────────────────
@@ -1670,12 +1669,16 @@ impl<F: FutureForm> DocWorker2<F> {
             _ => None,
         };
         match self.load_doc_snapshot().await? {
-            crate::runtime::DocLookup::Ready(doc) => {
+            crate::runtime::DocLookup::Ready(mut doc) => {
                 if let Some(bundle) = live_bundle {
-                    let before = bundle.doc.lock().await.get_heads();
-                    let after_heads = doc.get_heads();
-                    let patches = doc.diff(&before, &after_heads);
-                    *bundle.doc.lock().await = doc;
+                    let (before, after_heads, patches) = {
+                        let mut live = bundle.doc.lock().await;
+                        let before = live.get_heads();
+                        live.merge(&mut doc)?;
+                        let after_heads = live.get_heads();
+                        let patches = live.diff(&before, &after_heads);
+                        (before, after_heads, patches)
+                    };
                     let heads_arc = Arc::<[automerge::ChangeHash]>::from(after_heads);
                     if before.as_slice() != heads_arc.as_ref() {
                         self.change_manager

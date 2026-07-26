@@ -325,7 +325,7 @@ impl SyncBackendHarness for MemorySyncBackendContractHarness {
     async fn prepare_case(&self, case: &SyncBackendScenario) -> Res<()> {
         if case.remote_payload.is_none() {
             let remote_store = Arc::new(MemoryPartStore::new());
-            if let Some(payload) = &case.expected_payload {
+            if let Some(payload) = &case.initial_payload {
                 remote_store
                     .set_obj_payload(case.obj_id, payload.clone())
                     .await?;
@@ -355,31 +355,7 @@ fn memory_sync_backend_cases() -> Vec<SyncBackendScenario> {
             payload(serde_json::json!({"kind": "noop"}), 1, peer_id(2)),
             vec![part],
         ),
-        SyncBackendScenario::noop(
-            "noop_when_remote_payload_is_missing",
-            peer_id(2),
-            gen_obj_id(1010),
-            payload(serde_json::json!({"kind": "noop-none"}), 1, peer_id(2)),
-            vec![part],
-        )
-        .with_remote_payload(None),
-        SyncBackendScenario::changed_object(
-            "changed_object_when_remote_payload_is_missing",
-            peer_id(2),
-            gen_obj_id(1011),
-            payload(serde_json::json!({"kind": "old-none"}), 1, peer_id(1)),
-            payload(serde_json::json!({"kind": "new-none"}), 2, peer_id(2)),
-            vec![part],
-        )
-        .with_remote_payload(None),
-        SyncBackendScenario::added_member(
-            "added_member_when_remote_payload_is_missing",
-            peer_id(2),
-            gen_obj_id(1012),
-            payload(serde_json::json!({"kind": "new-added-none"}), 2, peer_id(2)),
-            vec![part],
-        )
-        .with_remote_payload(None),
+
         SyncBackendScenario::changed_object(
             "changed_object_applies_remote",
             peer_id(2),

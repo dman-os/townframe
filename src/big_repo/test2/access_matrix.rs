@@ -712,14 +712,14 @@ async fn run_group_case(
         // offline dimension is the document grant, not the creation of the
         // group/member delegation that the grant depends on. Otherwise the
         // reconnect can deliver the document grant before its root proof.
-        pair.left_conn().sync_keyhive_with_peer(None).await?;
+        pair.right_conn().sync_keyhive_with_peer(None).await?;
         fixtures::go_offline(&mut pair).await?;
         pair.left()
             .repo
             .grant_doc_access(doc_id, target_group.clone(), access)
             .await?;
         pair.connect().await?;
-        pair.left_conn().sync_keyhive_with_peer(None).await?;
+        pair.right_conn().sync_keyhive_with_peer(None).await?;
         fixtures::assert_reader_has_access(&pair.right().repo, doc_id).await?
     } else {
         fixtures::grant_group_and_propagate(&pair, doc_id, &target_group, access).await?;

@@ -153,7 +153,7 @@ impl GroupPartWorker {
     }
 }
 
-fn group_part_id(group_id: [u8; 32]) -> PartId {
+pub(crate) fn group_part_id(group_id: [u8; 32]) -> PartId {
     let mut bytes = b"townframe/big-repo/group-part/sedimentree/v1".to_vec();
     bytes.extend_from_slice(&group_id);
     let raw = keyhive_crypto::digest::Digest::<Vec<u8>>::hash(&bytes).raw;

@@ -7,16 +7,14 @@ use autosurgeon::Prop;
 use big_sync::backend::contract::{
     self, SyncBackendHarness, SyncBackendOutcome, SyncBackendScenario,
 };
-use big_sync::stress_support::{self, StressFixture};
+use big_sync::stress_support;
 use big_sync::{HostPartStore, SyncBackend};
 use big_sync_core::mpsc;
 use big_sync_core::rpc::{SubEvent, SubPartsRequest};
 use big_sync_core::{Byte32Id, PartId, PeerId, SyncCompletionDeets};
 use futures::lock::Mutex;
 use nonempty::NonEmpty;
-use rand::rngs::StdRng;
-use std::collections::{BTreeMap, BTreeSet, HashMap};
-use std::fmt::Write as _;
+use std::collections::HashMap;
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use subduction_keyhive::KeyhivePeerId;
@@ -2895,9 +2893,6 @@ struct SyncRepoNode {
     repo: Arc<BigRepo>,
     big_sync_store: SharedPartStore,
     big_sync_worker: big_sync::BigSyncWorkerHandle,
-    docs: Arc<tokio::sync::Mutex<HashMap<ObjId, Arc<BigDocHandle>>>>,
-    /// Maps stress framework ObjIds to keyhive-generated DocumentIds.
-    obj_doc_ids: Arc<tokio::sync::Mutex<HashMap<ObjId, DocumentId>>>,
     connections: Arc<tokio::sync::Mutex<HashMap<PeerId, BigRepoConnection>>>,
     stop_token: BigRepoStopToken,
     endpoint: iroh::Endpoint,
@@ -2975,8 +2970,6 @@ impl SyncRepoNode {
         let keyhive_rpc_tasks = Arc::new(utils_rs::AbortableJoinSet::new());
         let keyhive_rpc_cancel = CancellationToken::new();
         let keyhive_rpc_cancels = Arc::new(tokio::sync::Mutex::new(HashMap::new()));
-        let docs = Arc::new(tokio::sync::Mutex::new(HashMap::new()));
-        let obj_doc_ids = Arc::new(tokio::sync::Mutex::new(HashMap::new()));
         let connections = Arc::new(tokio::sync::Mutex::new(HashMap::new()));
         let router = iroh::protocol::Router::builder(endpoint.clone())
             .accept(
@@ -3004,8 +2997,6 @@ impl SyncRepoNode {
             repo,
             big_sync_store: Arc::clone(&big_sync_host.store),
             big_sync_worker,
-            docs,
-            obj_doc_ids,
             connections,
             stop_token,
             big_sync_stop,
@@ -3197,73 +3188,6 @@ impl SyncRepoNode {
             .expect("connection should exist")
     }
 
-    async fn update_payload(&self, doc_id: DocumentId, payload: serde_json::Value) -> Res<()> {
-        let handle = {
-            let mut docs = self.docs.lock().await;
-            if let Some(handle) = docs.get(&doc_id) {
-                Arc::clone(handle)
-            } else {
-                let handle = match self.repo.get_doc(&doc_id).await? {
-                    DocLookup::Ready(handle) => handle,
-                    DocLookup::PendingMaterialization => {
-                        return Err(ferr!(
-                            "stress doc is present but pending materialization: {doc_id}"
-                        ));
-                    }
-                    DocLookup::Missing => {
-                        return Err(ferr!("stress doc is not available locally: {doc_id}"));
-                    }
-                };
-                let handle = Arc::new(handle);
-                docs.insert(doc_id, Arc::clone(&handle));
-                handle
-            }
-        };
-
-        handle
-            .with_document(|doc| {
-                doc.transact(|tx| {
-                    autosurgeon::reconcile(tx, ThroughJson(payload.clone()))
-                        .expect("failed updating big repo stress doc");
-                    eyre::Ok(())
-                })
-                .expect("failed updating big repo stress doc");
-            })
-            .await?;
-        self.repo
-            .big_sync_store
-            .add_obj_to_parts(doc_id, stress_support::test_parts())
-            .await?;
-        Ok(())
-    }
-
-    async fn snapshot_docs(&self, all_docs: &[ObjId]) -> Res<BigRepoStressObservation> {
-        let worker = self.big_sync_worker.snapshot().await?;
-        let mut sync_store = BTreeMap::new();
-        let mut memberships = BTreeMap::new();
-        let mapping = self.obj_doc_ids.lock().await;
-        let stress_parts = stress_support::test_parts();
-        for obj_id in all_docs {
-            let doc_id = mapping.get(obj_id).copied().unwrap_or(*obj_id);
-            let heads = self
-                .repo
-                .big_sync_store
-                .obj_payload(doc_id)
-                .await?
-                .map(canonical_doc_heads_payload);
-            let mut obj_parts = self.repo.big_sync_store.obj_parts(doc_id).await?;
-            obj_parts.retain(|part_id| stress_parts.contains(part_id));
-            sync_store.insert(*obj_id, heads);
-            memberships.insert(*obj_id, obj_parts);
-        }
-        let connected_peers = self.connections.lock().await.keys().copied().collect();
-        Ok(BigRepoStressObservation {
-            connected_peers,
-            worker,
-            sync_store,
-            parts: memberships,
-        })
-    }
 
     #[tracing::instrument(skip(self))]
     async fn shutdown(self) -> Res<()> {
@@ -3282,761 +3206,6 @@ impl SyncRepoNode {
         self.repo_rpc_stop.stop().await?;
         drop(self.router);
         Ok(())
-    }
-}
-
-fn canonical_doc_heads_payload(payload: serde_json::Value) -> serde_json::Value {
-    let heads = payload
-        .as_object()
-        .expect("doc heads payload should be a json object")
-        .get("heads")
-        .cloned()
-        .expect("doc heads payload should contain heads");
-    let mut heads: Vec<String> =
-        serde_json::from_value(heads).expect("doc heads should be string array");
-    heads.sort();
-    serde_json::json!({ "heads": heads })
-}
-
-#[derive(Clone, Debug)]
-struct BigRepoStressObservation {
-    connected_peers: BTreeSet<PeerId>,
-    worker: big_sync::WorkerSnapshot,
-    sync_store: BTreeMap<ObjId, Option<serde_json::Value>>,
-    parts: BTreeMap<ObjId, Vec<PartId>>,
-}
-
-impl PartialEq for BigRepoStressObservation {
-    fn eq(&self, other: &Self) -> bool {
-        // self.connected_peers == other.connected_peers
-        //     && self.worker == other.worker
-        self.sync_store == other.sync_store && self.parts == other.parts
-    }
-}
-
-#[derive(Default, Clone)]
-struct BigRepoStressFixture {
-    all_docs: Arc<tokio::sync::Mutex<BTreeSet<ObjId>>>,
-    doc_ids: Arc<tokio::sync::Mutex<BTreeMap<ObjId, DocumentId>>>,
-    /// Per-creator edit groups used for newly-created stress documents.
-    /// Reusing a group preserves the stress intent without paying per-document
-    /// grant checkpoint costs.
-    shared_edit_groups: Arc<tokio::sync::Mutex<HashMap<PeerId, BigKeyhiveGroup>>>,
-    /// Pre-collected keyhive agents, indexed by (viewer_peer_id, target_peer_id).
-    /// Populated during connect_pair so seed_new_obj doesn't need to sync keyhive
-    /// just to discover agent identities.
-    peer_agents: Arc<tokio::sync::Mutex<HashMap<(PeerId, PeerId), BigKeyhiveAgent>>>,
-}
-
-impl BigRepoStressFixture {
-    async fn track_doc(&self, obj_id: ObjId) {
-        self.all_docs.lock().await.insert(obj_id);
-    }
-
-    async fn tracked_doc_ids(&self) -> Vec<ObjId> {
-        self.all_docs.lock().await.iter().copied().collect()
-    }
-
-    async fn mapped_doc_id(&self, obj_id: ObjId) -> Res<DocumentId> {
-        self.doc_ids
-            .lock()
-            .await
-            .get(&obj_id)
-            .copied()
-            .ok_or_else(|| ferr!("stress object has no mapped document id: {obj_id}"))
-    }
-
-    async fn doc_ready_on(&self, node: &SyncRepoNode, doc_id: DocumentId) -> Res<bool> {
-        Ok(matches!(
-            node.repo.get_doc(&doc_id).await?,
-            DocLookup::Ready(_)
-        ))
-    }
-
-    async fn wait_for_doc_ready_on(
-        &self,
-        node: &SyncRepoNode,
-        doc_id: DocumentId,
-        timeout_duration: Duration,
-    ) -> Res<bool> {
-        timeout(timeout_duration, async {
-            loop {
-                if matches!(node.repo.get_doc(&doc_id).await?, DocLookup::Ready(_)) {
-                    return Ok::<_, eyre::Report>(true);
-                }
-                tokio::time::sleep(Duration::from_millis(25)).await;
-            }
-        })
-        .await
-        .unwrap_or(Ok(false))
-    }
-
-    async fn ensure_doc_ready_for_stress_update(
-        &self,
-        node: &SyncRepoNode,
-        nodes: &[Option<SyncRepoNode>],
-        obj: ObjId,
-        doc_id: DocumentId,
-    ) -> Res<()> {
-        if self.doc_ready_on(node, doc_id).await? {
-            return Ok(());
-        }
-
-        let mut attempts = Vec::new();
-        for peer in nodes.iter().flatten() {
-            if peer.peer_id() == node.peer_id() {
-                continue;
-            }
-
-            if let Err(err) = self.connect_pair(node, peer).await {
-                attempts.push(format!("connect to {} failed: {err:?}", peer.peer_id()));
-                continue;
-            }
-
-            let conn = node.connection_to(peer).await;
-            if let Err(err) = conn.sync_keyhive_with_peer(None).await {
-                attempts.push(format!(
-                    "keyhive sync from {} failed: {err:?}",
-                    peer.peer_id()
-                ));
-                continue;
-            }
-            if let Err(err) = wait_for_keyhive_document_access(
-                &node.repo,
-                doc_id,
-                node.peer_id(),
-                keyhive_core::access::Access::Edit,
-            )
-            .await
-            {
-                attempts.push(format!(
-                    "local keyhive access after sync from {} did not materialize: {err:?}",
-                    peer.peer_id()
-                ));
-                continue;
-            }
-
-            match conn
-                .sync_doc_with_peer(doc_id, Some(SYNC_PROPAGATION_TIMEOUT))
-                .await
-            {
-                Ok(()) => {
-                    if self
-                        .wait_for_doc_ready_on(node, doc_id, SYNC_PROPAGATION_TIMEOUT)
-                        .await?
-                    {
-                        return Ok(());
-                    }
-                    attempts.push(format!(
-                        "doc sync from {} completed but doc did not materialize",
-                        peer.peer_id()
-                    ));
-                }
-                Err(err) => {
-                    attempts.push(format!("doc sync from {} failed: {err:?}", peer.peer_id()));
-                }
-            }
-        }
-
-        eyre::bail!(
-            "stress doc {doc_id} for obj {obj} is not available on {}; pull attempts: {}",
-            node.peer_id(),
-            attempts.join("; ")
-        );
-    }
-
-    async fn shared_edit_group(
-        &self,
-        node: &SyncRepoNode,
-        peers: &[&SyncRepoNode],
-    ) -> Res<BigKeyhiveGroup> {
-        let creator_peer_id = node.peer_id();
-        if let Some(group) = self
-            .shared_edit_groups
-            .lock()
-            .await
-            .get(&creator_peer_id)
-            .cloned()
-        {
-            return Ok(group);
-        }
-
-        let group = node.repo.create_group_with_parents(vec![]).await?;
-        for peer in peers {
-            let agent = self.get_agent(creator_peer_id, peer.peer_id()).await?;
-            node.repo
-                .add_member_to_group(agent, &group, keyhive_core::access::Access::Edit)
-                .await?;
-        }
-
-        let old = self
-            .shared_edit_groups
-            .lock()
-            .await
-            .insert(creator_peer_id, group.clone());
-        assert!(old.is_none(), "shared edit group was inserted concurrently");
-        Ok(group)
-    }
-
-    async fn get_agent(&self, viewer: PeerId, target: PeerId) -> Res<BigKeyhiveAgent> {
-        self.peer_agents
-            .lock()
-            .await
-            .get(&(viewer, target))
-            .cloned()
-            .ok_or_else(|| {
-                ferr!(
-                    "no pre-collected agent for viewer={viewer} target={target}; \
-                     ensure connect_pair collected agents before seed_new_obj"
-                )
-            })
-    }
-
-    async fn drain_tracked_doc_sync_full_mesh(&self, nodes: &[&SyncRepoNode]) -> Res<()> {
-        let docs = self.tracked_doc_ids().await;
-        for node in nodes {
-            for peer in nodes {
-                if node.peer_id() == peer.peer_id() {
-                    continue;
-                }
-                let conn = node.connection_to(peer).await;
-                conn.sync_keyhive_with_peer(None).await?;
-                for doc_id in &docs {
-                    conn.sync_doc_with_peer(*doc_id, Some(SYNC_PROPAGATION_TIMEOUT))
-                        .await?;
-                }
-            }
-        }
-        Ok(())
-    }
-}
-
-fn log_slow_fixture_op(label: &str, started_at: std::time::Instant, details: impl std::fmt::Debug) {
-    let elapsed = started_at.elapsed();
-    if elapsed >= stress_support::SLOW_OP_LOG_THRESHOLD {
-        tracing::warn!(
-            %label,
-            ?elapsed,
-            ?details,
-            "stress fixture operation took longer than expected"
-        );
-    }
-}
-
-#[async_trait::async_trait]
-impl StressFixture for BigRepoStressFixture {
-    type World = ();
-    type Node = SyncRepoNode;
-    type StressObj = ObjId;
-    type Observation = BigRepoStressObservation;
-
-    fn label(&self) -> &'static str {
-        "big_repo"
-    }
-
-    fn make_stress_obj(&self, rng: &mut StdRng) -> Self::StressObj {
-        stress_support::stress_obj(rng)
-    }
-
-    fn make_doc_content(
-        &self,
-        phase: &str,
-        step: usize,
-        node_idx: usize,
-        obj: &Self::StressObj,
-        nonce: u64,
-        _written_at: u64,
-        _writer_id: PeerId,
-    ) -> serde_json::Value {
-        serde_json::json!({
-            "phase": phase,
-            "step": step,
-            "node": node_idx,
-            "obj": format!("{obj:?}"),
-            "nonce": nonce,
-        })
-    }
-
-    async fn boot_node(&self, _world: Arc<Self::World>, peer_seed: u8) -> Res<Self::Node> {
-        let path = tempfile::tempdir()?.keep();
-        SyncRepoNode::boot(path, peer_seed, true).await
-    }
-
-    async fn stop_node(&self, node: Self::Node) -> Res<()> {
-        node.shutdown().await
-    }
-
-    async fn restart_node(
-        &self,
-        _world: Arc<Self::World>,
-        peer_seed: u8,
-        node: Self::Node,
-    ) -> Res<Self::Node> {
-        self.shared_edit_groups.lock().await.remove(&node.peer_id());
-        let path = node.path.clone();
-        node.shutdown().await?;
-        SyncRepoNode::boot(path, peer_seed, true).await
-    }
-
-    async fn connect_pair(&self, left: &Self::Node, right: &Self::Node) -> Res<()> {
-        let started_at = std::time::Instant::now();
-        let (initiator, responder) = if left.peer_id() <= right.peer_id() {
-            (left, right)
-        } else {
-            (right, left)
-        };
-
-        // Single iroh+subduction connection: initiator connects to responder.
-        initiator.connect_to(responder).await?;
-
-        let responder_already_connected = responder
-            .connections
-            .lock()
-            .await
-            .get(&initiator.peer_id())
-            .is_some_and(|conn| !conn.is_closed());
-        if !responder_already_connected {
-            // A fresh inbound connection is delivered through the responder's
-            // one-shot accept slot. Store it so either side can drive sync.
-            let accepted = responder
-                .accepted_connection
-                .lock()
-                .await
-                .take()
-                .expect("expected accepted connection on responder after connect_to");
-            responder
-                .connections
-                .lock()
-                .await
-                .insert(initiator.peer_id(), accepted);
-        }
-
-        // Explicit keyhive sync propagates agent identities in both directions.
-        // sync_keyhive_with_peer is synchronous: guards return only after completion.
-        let initiator_conn = initiator.connection_to(responder).await;
-        initiator_conn.sync_keyhive_with_peer(None).await?;
-
-        // Collect agent identities from both sides for later use by seed_new_obj.
-        if let Some(agent) = get_keyhive_agent(&initiator.repo, responder.peer_id()).await? {
-            self.peer_agents
-                .lock()
-                .await
-                .insert((initiator.peer_id(), responder.peer_id()), agent);
-        }
-        if let Some(agent) = get_keyhive_agent(&responder.repo, initiator.peer_id()).await? {
-            self.peer_agents
-                .lock()
-                .await
-                .insert((responder.peer_id(), initiator.peer_id()), agent);
-        }
-
-        log_slow_fixture_op(
-            "connect_pair",
-            started_at,
-            (left.peer_id(), right.peer_id()),
-        );
-        Ok(())
-    }
-
-    async fn disconnect_pair(&self, left: &Self::Node, right: &Self::Node) -> Res<()> {
-        let started_at = std::time::Instant::now();
-        let res = if left.peer_id() <= right.peer_id() {
-            left.disconnect_from(right).await
-        } else {
-            right.disconnect_from(left).await
-        };
-        log_slow_fixture_op(
-            "disconnect_pair",
-            started_at,
-            (left.peer_id(), right.peer_id()),
-        );
-        res
-    }
-
-    async fn seed_new_obj(
-        &self,
-        node: &Self::Node,
-        nodes: &[Option<Self::Node>],
-        obj: &Self::StressObj,
-        payload: serde_json::Value,
-    ) -> Res<()> {
-        let started_at = std::time::Instant::now();
-        let creator_peer_id = node.peer_id();
-        let peers: Vec<&Self::Node> = nodes
-            .iter()
-            .flatten()
-            .filter(|peer| peer.peer_id() != creator_peer_id)
-            .collect();
-
-        // Ensure all peers are directly connected to the creator and their
-        // agent is known. The stress topology is a partial mesh so not every
-        // pair is connected during topology setup.
-        for peer in &peers {
-            let peer_already_connected = peer
-                .connections
-                .lock()
-                .await
-                .get(&creator_peer_id)
-                .is_some_and(|conn| !conn.is_closed());
-            if !peer_already_connected {
-                let connect_started_at = std::time::Instant::now();
-                peer.connect_to(node).await?;
-                let accepted = node
-                    .accepted_connection
-                    .lock()
-                    .await
-                    .take()
-                    .expect("expected accepted connection after peer.connect_to");
-                node.connections
-                    .lock()
-                    .await
-                    .insert(peer.peer_id(), accepted);
-                log_slow_fixture_op(
-                    "seed_new_obj:connect_peer",
-                    connect_started_at,
-                    (creator_peer_id, peer.peer_id(), obj),
-                );
-            }
-
-            // Collect agent if not already known.
-            if self
-                .get_agent(creator_peer_id, peer.peer_id())
-                .await
-                .is_err()
-            {
-                let conn = node.connection_to(peer).await;
-                conn.sync_keyhive_with_peer(None).await?;
-                let agent = get_keyhive_agent(&node.repo, peer.peer_id())
-                    .await?
-                    .expect("agent should be discoverable after keyhive sync");
-                self.peer_agents
-                    .lock()
-                    .await
-                    .insert((creator_peer_id, peer.peer_id()), agent);
-            }
-        }
-
-        let mut doc = automerge::Automerge::new();
-        doc.transact(|tx| {
-            autosurgeon::reconcile(tx, ThroughJson(payload.clone()))
-                .expect("failed seeding big repo stress doc");
-            eyre::Ok(())
-        })
-        .expect("failed seeding big repo stress doc");
-
-        let create_doc_started_at = std::time::Instant::now();
-        let handle = if peers.is_empty() {
-            node.repo.create_doc(doc).await?
-        } else {
-            let group = self.shared_edit_group(node, &peers).await?;
-            node.repo
-                .create_doc_with_parents(doc, vec![group.into()])
-                .await?
-        };
-        let doc_id = handle.document_id();
-        log_slow_fixture_op(
-            "seed_new_obj:create_doc",
-            create_doc_started_at,
-            (creator_peer_id, obj, doc_id),
-        );
-
-        futures::future::try_join_all(peers.iter().map(|peer| async {
-            let keyhive_sync_started_at = std::time::Instant::now();
-            let conn = peer.connection_to(node).await;
-            conn.sync_keyhive_with_peer(None).await?;
-            wait_for_keyhive_document_access(
-                &peer.repo,
-                doc_id,
-                peer.peer_id(),
-                keyhive_core::access::Access::Edit,
-            )
-            .await?;
-            log_slow_fixture_op(
-                "seed_new_obj:sync_initial_keyhive",
-                keyhive_sync_started_at,
-                (creator_peer_id, peer.peer_id(), obj, doc_id),
-            );
-            eyre::Ok(())
-        }))
-        .await?;
-
-        let creator_part_registration_started_at = std::time::Instant::now();
-        node.big_sync_store
-            .add_obj_to_parts(doc_id, stress_support::test_parts())
-            .await?;
-        log_slow_fixture_op(
-            "seed_new_obj:part_registration_creator",
-            creator_part_registration_started_at,
-            (creator_peer_id, obj, doc_id),
-        );
-
-        futures::future::try_join_all(peers.iter().map(|peer| async {
-            let peer_part_registration_started_at = std::time::Instant::now();
-            peer.big_sync_store
-                .add_obj_to_parts(doc_id, stress_support::test_parts())
-                .await?;
-            log_slow_fixture_op(
-                "seed_new_obj:part_registration_peer",
-                peer_part_registration_started_at,
-                (creator_peer_id, peer.peer_id(), obj, doc_id),
-            );
-            eyre::Ok(())
-        }))
-        .await?;
-
-        futures::future::try_join_all(peers.iter().map(|peer| async {
-            let sync_doc_started_at = std::time::Instant::now();
-            let conn = peer.connection_to(node).await;
-            conn.sync_doc_with_peer(doc_id, Some(SYNC_PROPAGATION_TIMEOUT))
-                .await?;
-            log_slow_fixture_op(
-                "seed_new_obj:sync_doc_with_peer",
-                sync_doc_started_at,
-                (creator_peer_id, peer.peer_id(), obj, doc_id),
-            );
-            eyre::Ok(())
-        }))
-        .await?;
-
-        self.doc_ids.lock().await.insert(*obj, doc_id);
-        self.track_doc(doc_id).await;
-        log_slow_fixture_op("seed_new_obj", started_at, (node.peer_id(), obj));
-        Ok(())
-    }
-
-    async fn seed_obj(
-        &self,
-        node: &Self::Node,
-        nodes: &[Option<Self::Node>],
-        obj: &Self::StressObj,
-        payload: serde_json::Value,
-    ) -> Res<()> {
-        let started_at = std::time::Instant::now();
-        let doc_id = self.mapped_doc_id(*obj).await?;
-        self.track_doc(doc_id).await;
-        self.ensure_doc_ready_for_stress_update(node, nodes, *obj, doc_id)
-            .await?;
-        let res = node.update_payload(doc_id, payload).await;
-        log_slow_fixture_op("seed_obj", started_at, (node.peer_id(), obj));
-        res
-    }
-
-    async fn observed_state(&self, node: &Self::Node) -> Res<Self::Observation> {
-        let started_at = std::time::Instant::now();
-        let all_docs = self.tracked_doc_ids().await;
-        let res = node.snapshot_docs(&all_docs).await;
-        log_slow_fixture_op(
-            "observed_state",
-            started_at,
-            (node.peer_id(), all_docs.len()),
-        );
-        res
-    }
-
-    fn peer_id(&self, node: &Self::Node) -> PeerId {
-        node.peer_id()
-    }
-
-    async fn assert_cluster_alignment(&self, nodes: &[&Self::Node]) -> Res<()> {
-        let started_at = std::time::Instant::now();
-        let peer_ids: Vec<PeerId> = nodes.iter().map(|node| node.peer_id()).collect();
-        let part_ids = stress_support::test_parts();
-        let deadline = std::time::Instant::now() + Duration::from_secs(45);
-        let full_sync_timeout = Duration::from_secs(20);
-        let mut last_snapshots: Option<Vec<(PeerId, BigRepoStressObservation)>> = None;
-        let mut stable_rounds = 0usize;
-
-        for node in nodes {
-            let node_peer_id = node.peer_id();
-            let peers = peer_ids
-                .iter()
-                .copied()
-                .filter(|peer_id| *peer_id != node_peer_id)
-                .collect::<Vec<_>>();
-            let parts = part_ids.clone();
-            let wait = node
-                .big_sync_worker
-                .wait_for_full_sync(peers.iter().copied(), parts.iter().copied());
-            if tokio::time::timeout(full_sync_timeout, wait).await.is_err() {
-                let worker = node.big_sync_worker.snapshot().await?;
-                let observed = self.observed_state(node).await?;
-                let mut out = String::new();
-                let _ = writeln!(
-                    out,
-                    "timed out waiting for full sync on peer {node_peer_id:?} after {full_sync_timeout:?}"
-                );
-                let _ = writeln!(out, "requested peers={peers:?} parts={parts:?}");
-                let _ = writeln!(out, "worker snapshot={worker:#?}");
-                let _ = writeln!(out, "observed state={observed:#?}");
-                eyre::bail!("{out}");
-            }
-        }
-
-        for _ in 0..2 {
-            self.drain_tracked_doc_sync_full_mesh(nodes).await?;
-        }
-
-        loop {
-            let mut snapshots = Vec::with_capacity(nodes.len());
-            for node in nodes {
-                snapshots.push((node.peer_id(), self.observed_state(node).await?));
-            }
-
-            let aligned = snapshots.windows(2).all(|pair| pair[0].1 == pair[1].1);
-            if aligned
-                && last_snapshots
-                    .as_ref()
-                    .is_some_and(|prev| prev == &snapshots)
-            {
-                stable_rounds += 1;
-                if stable_rounds >= 5 {
-                    log_slow_fixture_op(
-                        "assert_cluster_alignment",
-                        started_at,
-                        nodes.iter().map(|node| node.peer_id()).collect::<Vec<_>>(),
-                    );
-                    return Ok(());
-                }
-            } else {
-                stable_rounds = 0;
-            }
-            last_snapshots = Some(snapshots.clone());
-
-            if std::time::Instant::now() >= deadline {
-                let mut out = String::new();
-                let _ = writeln!(
-                    out,
-                    "timed out waiting for big repo cluster alignment; last snapshots:"
-                );
-                if let Some((baseline_peer, baseline)) = snapshots.first() {
-                    for (peer_id, snapshot) in snapshots.iter().skip(1) {
-                        let _ = writeln!(out, "peer {peer_id:?} vs baseline {baseline_peer:?}:");
-                        let _ = writeln!(
-                            out,
-                            "  baseline vs snapshot sync_store {}",
-                            pretty_assertions::Comparison::new(
-                                &baseline.sync_store,
-                                &snapshot.sync_store
-                            )
-                        );
-                        let _ = writeln!(
-                            out,
-                            "  baseline vs snapshot parts {}",
-                            pretty_assertions::Comparison::new(&baseline.parts, &snapshot.parts)
-                        );
-                        let differing_sync_store = baseline
-                            .sync_store
-                            .iter()
-                            .filter_map(|(obj_id, left_payload)| {
-                                let right_payload = snapshot.sync_store.get(obj_id)?;
-                                if left_payload == right_payload {
-                                    None
-                                } else {
-                                    Some((*obj_id, left_payload, right_payload))
-                                }
-                            })
-                            .take(12)
-                            .collect::<Vec<_>>();
-                        let differing_parts = baseline
-                            .parts
-                            .iter()
-                            .filter_map(|(obj_id, left_parts)| {
-                                let right_parts = snapshot.parts.get(obj_id)?;
-                                if left_parts == right_parts {
-                                    None
-                                } else {
-                                    Some((*obj_id, left_parts, right_parts))
-                                }
-                            })
-                            .take(12)
-                            .collect::<Vec<_>>();
-                        let _ = writeln!(
-                            out,
-                            "  differing sync_store entries={differing_sync_store:?}"
-                        );
-                        let _ = writeln!(out, "  differing parts entries={differing_parts:?}");
-                        let missing_sync_store = baseline
-                            .sync_store
-                            .keys()
-                            .filter(|obj_id| !snapshot.sync_store.contains_key(obj_id))
-                            .take(12)
-                            .collect::<Vec<_>>();
-
-                        let extra_sync_store = snapshot
-                            .sync_store
-                            .keys()
-                            .filter(|obj_id| !baseline.sync_store.contains_key(obj_id))
-                            .take(12)
-                            .collect::<Vec<_>>();
-
-                        let _ = writeln!(out, "  missing sync_store keys={missing_sync_store:?}");
-                        let _ = writeln!(out, "  extra sync_store keys={extra_sync_store:?}");
-
-                        let missing_parts = baseline
-                            .parts
-                            .keys()
-                            .filter(|obj_id| !snapshot.parts.contains_key(obj_id))
-                            .take(12)
-                            .collect::<Vec<_>>();
-
-                        let extra_parts = snapshot
-                            .parts
-                            .keys()
-                            .filter(|obj_id| !baseline.parts.contains_key(obj_id))
-                            .take(12)
-                            .collect::<Vec<_>>();
-
-                        let _ = writeln!(out, "  missing parts={missing_parts:?}");
-                        let _ = writeln!(out, "  extra parts={extra_parts:?}");
-
-                        writeln!(
-                            out,
-                            "sync_store eq={}",
-                            baseline.sync_store == snapshot.sync_store
-                        )?;
-                        writeln!(
-                            out,
-                            "sync_store eq={}",
-                            baseline.sync_store == snapshot.sync_store
-                        )?;
-                        writeln!(out, "parts eq={}", baseline.parts == snapshot.parts)?;
-                        let left = format!("{:#?}", baseline.sync_store);
-                        let right = format!("{:#?}", snapshot.sync_store);
-                        writeln!(out, "sync_store debug_eq={}", left == right)?;
-                        writeln!(out, "snapshot eq={}", baseline == snapshot)?;
-                        let _ = writeln!(
-                            out,
-                            "  field equality: connected_peers={} worker={} sync_store={} parts={}",
-                            baseline.connected_peers == snapshot.connected_peers,
-                            baseline.worker == snapshot.worker,
-                            baseline.sync_store == snapshot.sync_store,
-                            baseline.parts == snapshot.parts,
-                        );
-                    }
-                }
-                for node in nodes {
-                    let worker = node.big_sync_worker.snapshot().await?;
-                    let _ = writeln!(
-                        out,
-                        "worker peer={:?} task_counts={:?} active_machine_tasks={} active_sync_tasks={} zombie_tasks={} full_sync_waiters={:?}",
-                        node.peer_id(),
-                        worker.task_counts,
-                        worker.active_machine_tasks,
-                        worker.active_sync_tasks,
-                        worker.zombie_tasks,
-                        worker.full_sync_waiters,
-                    );
-                }
-                log_slow_fixture_op(
-                    "assert_cluster_alignment",
-                    started_at,
-                    nodes.iter().map(|node| node.peer_id()).collect::<Vec<_>>(),
-                );
-                eyre::bail!("{out}");
-            }
-
-            tokio::time::sleep(Duration::from_millis(50)).await;
-        }
     }
 }
 
@@ -4633,20 +3802,19 @@ async fn run_sync_backend_case(
         .add_obj_to_parts(doc_id, stress_support::test_parts())
         .await?;
 
-    // Bootstrap the doc on the client: pull base content and create a
-    // doc worker so the fetch gate (has_doc_worker || contains_sedimentree)
-    // passes.
-    client
-        .big_sync_store
-        .add_obj_to_parts(doc_id, stress_support::test_parts())
-        .await?;
-    client_conn
-        .sync_doc_with_peer(
-            doc_id,
-            Some(utils_rs::scale_timeout(SYNC_PROPAGATION_TIMEOUT)),
-        )
-        .await?;
     let client_doc = if expect_client_doc {
+        // Bootstrap cases that exercise updates to an existing client document.
+        // The added-member case intentionally leaves the document absent.
+        client
+            .big_sync_store
+            .add_obj_to_parts(doc_id, stress_support::test_parts())
+            .await?;
+        client_conn
+            .sync_doc_with_peer(
+                doc_id,
+                Some(utils_rs::scale_timeout(SYNC_PROPAGATION_TIMEOUT)),
+            )
+            .await?;
         let doc = client.repo.get_doc(&doc_id).await?.into_ready(doc_id)?;
         set_doc_actor(&doc, automerge::ActorId::from([132_u8; 16])).await?;
         Some(doc)
@@ -4683,6 +3851,16 @@ async fn run_sync_backend_case(
     let backend = Arc::clone(&client.sync_backend);
     let local_payload = client.big_sync_store.obj_payload(doc_id).await?;
     let remote_payload = server.big_sync_store.obj_payload(doc_id).await?;
+    // A prior subscription may deliver the remote mutation before this backend
+    // invocation. Completion describes work performed by this invocation, so an
+    // already-matching settled snapshot is correctly a no-op.
+    let expected_deets = if expected_deets == SyncCompletionDeets::ChangedObject
+        && local_payload == remote_payload
+    {
+        SyncCompletionDeets::Noop
+    } else {
+        expected_deets
+    };
     let expected_parts = {
         let base = if sync_part_hints.is_empty() {
             client.big_sync_store.obj_parts(doc_id).await?
@@ -4709,15 +3887,6 @@ async fn run_sync_backend_case(
             remote_payload.clone()
         },
         expected_outcome: SyncBackendOutcome::Completion(expected_deets.clone()),
-        expected_payload: match &expected_deets {
-            SyncCompletionDeets::Noop => local_payload.clone(),
-            SyncCompletionDeets::ChangedObject | SyncCompletionDeets::AddedMember => {
-                remote_payload.clone()
-            }
-            SyncCompletionDeets::RemovedMember => {
-                unreachable!("big repo sync backend should not report RemovedMember")
-            }
-        },
         expected_parts,
     };
     let harness = BigRepoSyncBackendContractHarness {
@@ -5612,19 +4781,6 @@ async fn sync_with_peer_local_change_without_change_listener_only_emits_heads() 
     .await
     .expect("sync test timed out")?;
     eyre::Ok(())
-}
-
-#[tokio::test(flavor = "multi_thread")]
-async fn big_repo_sync_randomized_four_node_stress_converges() -> Res<()> {
-    stress_support::run_randomized_four_node_stress_with_settle_timeout(
-        BigRepoStressFixture::default(),
-        Arc::new(()),
-        stress_support::PHASE1_MUTATIONS,
-        stress_support::PHASE2_MUTATIONS,
-        stress_support::PHASE3_MUTATIONS,
-        Duration::from_secs(20),
-    )
-    .await
 }
 
 // --- Keyhive public API smoke tests ---

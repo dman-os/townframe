@@ -16,4 +16,5 @@ mod ladder;
 mod notifications;
 mod restart;
 mod revocation;
+mod stress;
 mod topologies;

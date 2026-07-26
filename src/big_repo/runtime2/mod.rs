@@ -2,6 +2,7 @@ use crate::interlude::*;
 use future_form::FutureForm;
 
 mod group_part_worker;
+pub(crate) use group_part_worker::group_part_id;
 mod io;
 mod lease;
 mod messages;

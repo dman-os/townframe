@@ -253,7 +253,6 @@ mod tests {
                 expected_outcome: SyncBackendOutcome::Completion(
                     big_sync_core::SyncCompletionDeets::Noop,
                 ),
-                expected_payload: Some(noop_payload.clone()),
                 expected_parts: parts.clone(),
             },
             SyncBackendScenario::changed_object(

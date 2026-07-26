@@ -250,6 +250,15 @@ impl BigKeyhiveHandle {
         Arc::clone(&self.keyhive)
     }
 
+    pub async fn get_group(
+        &self,
+        id: keyhive_core::principal::group::id::GroupId,
+    ) -> Option<BigKeyhiveGroup> {
+        self.keyhive.get_group(id).await.map(|inner| BigKeyhiveGroup {
+            id,
+            inner,
+        })
+    }
     /// All docs reachable by `agent`, with the [`Access`] level for each.
     /// O(all_docs × transitive_members) — only for boot full reindex.
     pub async fn docs_for_agent(&self, agent: &Identifier) -> BTreeMap<DocumentId, Access> {

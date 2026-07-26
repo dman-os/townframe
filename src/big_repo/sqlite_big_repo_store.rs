@@ -2329,7 +2329,7 @@ impl SqliteBigRepoStore {
         &self,
         hash: subduction_keyhive::storage::StorageHash,
         data: Vec<u8>,
-    ) -> Result<(), SqliteBigRepoStoreError> {
+    ) -> Result<bool, SqliteBigRepoStoreError> {
         let mut tx = self.sql.write_pool.begin_with("BEGIN IMMEDIATE").await?;
         let next_seq: i64 = sqlx::query_scalar(
             "SELECT COALESCE(MAX(seq), 0) + 1
@@ -2339,7 +2339,7 @@ impl SqliteBigRepoStore {
         .bind(self.scope_id)
         .fetch_one(&mut *tx)
         .await?;
-        sqlx::query(
+        let inserted = sqlx::query(
             "INSERT INTO big_repo_keyhive_event_log(
                 scope_id, seq, event_hash, event_bytes
              )
@@ -2351,7 +2351,9 @@ impl SqliteBigRepoStore {
         .bind(hash.as_bytes().as_slice())
         .bind(data)
         .execute(&mut *tx)
-        .await?;
+        .await?
+        .rows_affected()
+            > 0;
         sqlx::query(
             "INSERT INTO big_repo_keyhive_replay_tail(scope_id, event_hash)
              VALUES (?1, ?2)
@@ -2397,7 +2399,7 @@ impl SqliteBigRepoStore {
             .await?;
         }
         tx.commit().await?;
-        Ok(())
+        Ok(inserted)
     }
 
     pub(crate) async fn load_keyhive_events(

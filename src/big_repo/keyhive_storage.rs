@@ -117,6 +117,29 @@ impl FsKeyhiveStorage {
         }
     }
 
+    async fn save_file_if_absent(
+        &self,
+        parent_dir: PathBuf,
+        hash: StorageHash,
+        data: Vec<u8>,
+    ) -> io::Result<bool> {
+        let dest = parent_dir.join(format!("{}.bin", hash.to_hex()));
+        let tmp_id = NEXT_TMP_ID.fetch_add(1, Ordering::Relaxed);
+        let tmp = self.tmp_dir().join(format!(
+            "{}.{}.{tmp_id}.tmp",
+            hash.to_hex(),
+            std::process::id()
+        ));
+        tokio::fs::write(&tmp, data).await?;
+        let result = match tokio::fs::hard_link(&tmp, &dest).await {
+            Ok(()) => Ok(true),
+            Err(error) if error.kind() == io::ErrorKind::AlreadyExists => Ok(false),
+            Err(error) => Err(error),
+        };
+        drop(tokio::fs::remove_file(&tmp).await);
+        result
+    }
+
     async fn load_dir(dir: PathBuf) -> io::Result<Vec<(StorageHash, Vec<u8>)>> {
         use tokio::fs;
         let mut out = Vec::new();
@@ -176,10 +199,10 @@ impl KeyhiveStorage<future_form::Sendable> for FsKeyhiveStorage {
         &self,
         hash: StorageHash,
         data: Vec<u8>,
-    ) -> BoxFuture<'_, Result<(), Self::Error>> {
+    ) -> BoxFuture<'_, Result<bool, Self::Error>> {
         let parent_dir = self.event_dir();
         async move {
-            self.save_file(parent_dir, hash, data)
+            self.save_file_if_absent(parent_dir, hash, data)
                 .await
                 .map_err(Into::into)
         }
@@ -328,7 +351,7 @@ impl KeyhiveStorage<future_form::Sendable> for BigRepoKeyhiveStorage {
         &self,
         hash: StorageHash,
         data: Vec<u8>,
-    ) -> BoxFuture<'_, Result<(), Self::Error>> {
+    ) -> BoxFuture<'_, Result<bool, Self::Error>> {
         async move {
             match self {
                 Self::Memory { events, .. } | Self::Fs { events, .. } => events

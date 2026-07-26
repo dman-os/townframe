@@ -125,6 +125,10 @@ async fn tier4_delta_sync_advances_only_the_new_frontier() -> crate::Res<()> {
                 .map_err(|err| crate::ferr!("failed writing delta: {err:?}"))
         })
         .await??;
+    pair.left()
+        .repo
+        .wait_for_quiescence(Some(std::time::Duration::from_secs(10)))
+        .await?;
     drop(reader_doc);
     let reader_doc =
         fixtures::sync_doc_expect_ready(pair.right_conn(), &pair.right().repo, doc_id).await?;

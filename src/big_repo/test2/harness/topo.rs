@@ -33,7 +33,7 @@ pub(crate) struct Node {
     pub(crate) worker: big_sync::BigSyncWorkerHandle,
     big_sync_stop: big_sync::StopToken,
     repo_stop: BigRepoStopToken,
-    endpoint: iroh::Endpoint,
+    pub(crate) endpoint: iroh::Endpoint,
     _router: iroh::protocol::Router,
     repo_rpc_stop: crate::rpc::BigRepoRpcStopToken,
     keyhive_rpc_tasks: Arc<utils_rs::AbortableJoinSet>,
@@ -41,9 +41,10 @@ pub(crate) struct Node {
     keyhive_rpc_cancels: Arc<Mutex<HashMap<PeerId, tokio_util::sync::CancellationToken>>>,
     accepted: Arc<Mutex<Option<BigRepoConnection>>>,
     accepts: Arc<Notify>,
+    connections: Arc<Mutex<HashMap<PeerId, BigRepoConnection>>>,
     /// Human label for diagnostics ("Alice"). Registered in [`log_nickname`].
     pub label: &'static str,
-    identity_seed: [u8; 32],
+    pub(crate) identity_seed: [u8; 32],
 }
 
 #[derive(Clone, Debug)]
@@ -104,6 +105,7 @@ impl Node {
         store
             .remove_obj_from_part(part_init_obj, stress_support::test_part())
             .await?;
+        store.ensure_part(crate::GLOBAL_PART_ID).await?;
         Self::boot_with_store(seed, label, storage, store).await
     }
 
@@ -169,12 +171,13 @@ impl Node {
             keyhive_rpc_cancels,
             accepted,
             accepts,
+            connections: Arc::new(Mutex::new(HashMap::new())),
             label,
             identity_seed: [seed; 32],
         })
     }
 
-    async fn restart(self, storage: StorageConfig) -> crate::Res<Self> {
+    pub(crate) async fn restart(self, storage: StorageConfig) -> crate::Res<Self> {
         let seed = self.identity_seed;
         let label = self.label;
         let retained_memory_store =
@@ -297,12 +300,35 @@ impl Node {
         }
     }
 
+    /// Update the subscribed parts for an already-connected peer.
+    /// part replication between the two nodes.
+    pub(crate) async fn set_peer_parts(
+        &self,
+        remote: &Self,
+        subscribed_parts: Vec<big_sync_core::PartId>,
+    ) -> crate::Res<()> {
+        let parts = subscribed_parts
+            .into_iter()
+            .map(|part| (part, BigRepo::BACKEND_ID.into()))
+            .collect::<HashMap<_, _>>();
+        self.worker
+            .set_peer(
+                remote.peer_id(),
+                Arc::new(StressBigSyncRpcClient {
+                    target_part_store: Arc::clone(&remote.store) as crate::SharedPartStore,
+                }),
+                parts,
+                HashMap::new(),
+            )
+            .await
+    }
     /// Open an outbound connection to `remote` and wire bidirectional big-sync
     /// part replication between the two nodes.
     async fn connect_with_keyhive_notifications(
         &self,
         remote: &Self,
         enable_keyhive_notifications: bool,
+        subscribed_parts: Vec<big_sync_core::PartId>,
     ) -> crate::Res<BigRepoConnection> {
         let connection = self
             .repo
@@ -313,56 +339,69 @@ impl Node {
                 None,
             )
             .await?;
-        let parts = stress_support::test_parts()
-            .into_iter()
-            .map(|part| (part, BigRepo::BACKEND_ID.into()))
-            .collect();
-        self.worker
-            .set_peer(
-                remote.peer_id(),
-                Arc::new(StressBigSyncRpcClient {
-                    target_part_store: Arc::clone(&remote.store) as crate::SharedPartStore,
-                }),
-                parts,
-                HashMap::new(),
-            )
-            .await?;
-        let parts = stress_support::test_parts()
-            .into_iter()
-            .map(|part| (part, BigRepo::BACKEND_ID.into()))
-            .collect();
-        remote
-            .worker
-            .set_peer(
-                self.peer_id(),
-                Arc::new(StressBigSyncRpcClient {
-                    target_part_store: Arc::clone(&self.store) as crate::SharedPartStore,
-                }),
-                parts,
-                HashMap::new(),
-            )
-            .await?;
+        self.set_peer_parts(remote, subscribed_parts.clone()).await?;
+        remote.set_peer_parts(self, subscribed_parts).await?;
         if enable_keyhive_notifications {
             self.start_keyhive_rpc(remote).await?;
             remote.start_keyhive_rpc(self).await?;
         }
         Ok(connection)
     }
-
     pub(crate) async fn connect(&self, remote: &Self) -> crate::Res<BigRepoConnection> {
-        self.connect_with_keyhive_notifications(remote, true).await
+        self.connect_with_parts(remote, stress_support::test_parts()).await
     }
-
+    pub(crate) async fn connect_with_parts(
+        &self,
+        remote: &Self,
+        subscribed_parts: Vec<big_sync_core::PartId>,
+    ) -> crate::Res<BigRepoConnection> {
+        let connection = self
+            .connect_with_keyhive_notifications(remote, true, subscribed_parts)
+            .await?;
+        self.connections
+            .lock()
+            .await
+            .insert(remote.peer_id(), connection.clone());
+        Ok(connection)
+    }
     async fn connect_without_keyhive_notifications(
         &self,
         remote: &Self,
     ) -> crate::Res<BigRepoConnection> {
-        self.connect_with_keyhive_notifications(remote, false).await
+        let connection = self
+            .connect_with_keyhive_notifications(remote, false, stress_support::test_parts())
+            .await?;
+        self.connections
+            .lock()
+            .await
+            .insert(remote.peer_id(), connection.clone());
+        Ok(connection)
     }
-
+    pub(crate) async fn connection_to(
+        &self,
+        peer_id: PeerId,
+    ) -> crate::Res<BigRepoConnection> {
+        self.connections
+            .lock()
+            .await
+            .get(&peer_id)
+            .cloned()
+            .ok_or_else(|| crate::ferr!("no connection from {} to {peer_id}", self.peer_id()))
+    }
+    pub(crate) async fn connected_peer_ids(&self) -> Vec<PeerId> {
+        self.connections.lock().await.keys().copied().collect()
+    }
+    pub(crate) async fn disconnect_peer(&self, peer_id: PeerId) -> crate::Res<()> {
+        self.worker.remove_peer(peer_id).await?;
+        self.stop_keyhive_rpc(peer_id).await;
+        if let Some(connection) = self.connections.lock().await.remove(&peer_id) {
+            connection.stop().await?;
+        }
+        Ok(())
+    }
     /// Take the next inbound connection accepted by this node's endpoint.
     pub(crate) async fn accepted_connection(&self) -> BigRepoConnection {
-        timeout(Duration::from_secs(10), async {
+        let connection = timeout(Duration::from_secs(10), async {
             loop {
                 if let Some(connection) = self.accepted.lock().await.take() {
                     return connection;
@@ -371,10 +410,23 @@ impl Node {
             }
         })
         .await
-        .expect("timed out waiting for accepted connection")
+        .expect("timed out waiting for accepted connection");
+        self.connections
+            .lock()
+            .await
+            .insert(connection.peer_id(), connection.clone());
+        connection
     }
 
-    async fn shutdown(self) {
+    pub(crate) async fn shutdown(self) {
+        for connection in self.connections.lock().await.drain().map(|(_, connection)| connection) {
+            if !connection.is_closed() {
+                connection
+                    .stop()
+                    .await
+                    .expect("failed stopping node connection during shutdown");
+            }
+        }
         self.endpoint.close().await;
         self.keyhive_rpc_cancel.cancel();
         let _ = self.keyhive_rpc_tasks.stop(Duration::from_secs(5)).await;
