@@ -8,7 +8,10 @@ use super::harness::topo::Node;
 use crate::{BigKeyhiveGroup, DocumentId, PeerId, Res, StorageConfig};
 use am_utils_rs::codecs::ThroughJson;
 use autosurgeon;
-use big_sync::{stress_support::{self, StressFixture}, HostPartStore};
+use big_sync::{
+    stress_support::{self, StressFixture},
+    HostPartStore,
+};
 use big_sync_core::{ObjId, PartId};
 use futures::future::try_join_all;
 use keyhive_core::access::Access;
@@ -31,6 +34,7 @@ pub struct BigRepoStressConfig {
     pub node_count: usize,
     pub relay_idx: Option<usize>,
     pub seed: u64,
+    pub peer_seed_offset: u8,
 }
 
 impl Default for BigRepoStressConfig {
@@ -39,6 +43,7 @@ impl Default for BigRepoStressConfig {
             node_count: 4,
             relay_idx: None,
             seed: DEFAULT_STRESS_SEED,
+            peer_seed_offset: 0,
         }
     }
 }
@@ -212,8 +217,11 @@ impl StressFixture for BigRepoStressFixture {
             _ => "editor",
         };
         let path = tempdir()?.keep();
+        let actual_peer_seed = peer_seed
+            .checked_add(self.config.peer_seed_offset)
+            .expect("stress peer seed offset overflowed");
         let node = Node::boot_with_config(
-            peer_seed,
+            actual_peer_seed,
             label,
             StorageConfig::Disk { path: path.clone() },
         )
@@ -250,13 +258,20 @@ impl StressFixture for BigRepoStressFixture {
             .connect_with_parts(right, vec![crate::GLOBAL_PART_ID])
             .await?;
         let _ = right.accepted_connection().await;
-        connection.sync_keyhive_with_peer(Some(Duration::from_secs(10))).await?;
+        connection
+            .sync_keyhive_with_peer(Some(Duration::from_secs(10)))
+            .await?;
         let reverse = right.connection_to(left.peer_id()).await?;
         reverse
             .sync_keyhive_with_peer(Some(Duration::from_secs(10)))
             .await?;
-        left.repo.wait_for_quiescence(Some(Duration::from_secs(20))).await?;
-        right.repo.wait_for_quiescence(Some(Duration::from_secs(20))).await?;
+        left.repo
+            .wait_for_quiescence(Some(Duration::from_secs(20)))
+            .await?;
+        right
+            .repo
+            .wait_for_quiescence(Some(Duration::from_secs(20)))
+            .await?;
         let parts = self.available_sync_parts(left, right).await?;
         left.set_peer_parts(right, parts.clone()).await?;
         right.set_peer_parts(left, parts).await?;
@@ -302,8 +317,7 @@ impl StressFixture for BigRepoStressFixture {
                 .await?;
         }
         for peer_id in node.connected_peer_ids().await {
-            node
-                .connection_to(peer_id)
+            node.connection_to(peer_id)
                 .await?
                 .sync_keyhive_with_peer(Some(Duration::from_secs(10)))
                 .await?;
@@ -324,10 +338,16 @@ impl StressFixture for BigRepoStressFixture {
         let handle = match node.repo.get_doc(&doc_id).await? {
             crate::DocLookup::Ready(handle) => handle,
             crate::DocLookup::PendingMaterialization => {
-                return Err(crate::ferr!("doc {doc_id} is pending on {}", node.peer_id()))
+                return Err(crate::ferr!(
+                    "doc {doc_id} is pending on {}",
+                    node.peer_id()
+                ))
             }
             crate::DocLookup::Missing => {
-                return Err(crate::ferr!("doc {doc_id} is missing on {}", node.peer_id()))
+                return Err(crate::ferr!(
+                    "doc {doc_id} is missing on {}",
+                    node.peer_id()
+                ))
             }
         };
         handle
@@ -357,15 +377,21 @@ impl StressFixture for BigRepoStressFixture {
 
     async fn prepare_cluster(&self, nodes: &[Option<Self::Node>]) -> Res<()> {
         let live: Vec<&Node> = nodes.iter().filter_map(Option::as_ref).collect();
-        let editors: Vec<&Node> = live.iter().copied().filter(|node| !self.is_relay(node)).collect();
+        let editors: Vec<&Node> = live
+            .iter()
+            .copied()
+            .filter(|node| !self.is_relay(node))
+            .collect();
         self.editor_peer_ids
             .lock()
             .await
             .extend(editors.iter().map(|node| node.peer_id()));
-        self.relay_peer_ids
-            .lock()
-            .await
-            .extend(live.iter().copied().filter(|node| self.is_relay(node)).map(|node| node.peer_id()));
+        self.relay_peer_ids.lock().await.extend(
+            live.iter()
+                .copied()
+                .filter(|node| self.is_relay(node))
+                .map(|node| node.peer_id()),
+        );
         // This is the only deliberate bootstrap mesh. The shared runner
         // disconnects it before randomized phase 1 begins.
         for left_index in 0..live.len() {
@@ -378,10 +404,11 @@ impl StressFixture for BigRepoStressFixture {
             }
         }
 
-        let group_owner = editors
-            .first()
-            .expect("stress cluster must have an editor");
-        let group = group_owner.repo.create_group_with_parents(Vec::new()).await?;
+        let group_owner = editors.first().expect("stress cluster must have an editor");
+        let group = group_owner
+            .repo
+            .create_group_with_parents(Vec::new())
+            .await?;
         *self.shared_edit_group_id.lock().await = Some(group.id());
         for peer_id in self.editor_peer_ids.lock().await.iter().copied() {
             if peer_id == group_owner.peer_id() {
@@ -393,9 +420,7 @@ impl StressFixture for BigRepoStressFixture {
                 .keyhive()
                 .get_agent_by_peer_id(&keyhive_peer)
                 .await?
-                .ok_or_else(|| {
-                    crate::ferr!("agent {peer_id} not discovered during bootstrap")
-                })?;
+                .ok_or_else(|| crate::ferr!("agent {peer_id} not discovered during bootstrap"))?;
             group_owner
                 .repo
                 .add_member_to_group(agent, &group, Access::Edit)
@@ -427,7 +452,9 @@ impl StressFixture for BigRepoStressFixture {
             }
         }
         for node in &live {
-            node.repo.wait_for_quiescence(Some(Duration::from_secs(20))).await?;
+            node.repo
+                .wait_for_quiescence(Some(Duration::from_secs(20)))
+                .await?;
         }
         Ok(())
     }
@@ -444,17 +471,20 @@ impl StressFixture for BigRepoStressFixture {
             Ok(doc_id) => doc_id,
             Err(_) => return Ok(false),
         };
-        Ok(matches!(node.repo.get_doc(&doc_id).await?, crate::DocLookup::Ready(_)))
+        Ok(matches!(
+            node.repo.get_doc(&doc_id).await?,
+            crate::DocLookup::Ready(_)
+        ))
     }
 
     async fn assert_cluster_alignment(&self, nodes: &[&Self::Node]) -> Res<()> {
-        let parts = vec![crate::GLOBAL_PART_ID];
-        for node in nodes {
+        let parts = self.sync_parts().await;
+        try_join_all(nodes.iter().map(|node| async {
             let peer_ids = node.connected_peer_ids().await;
             timeout(
                 Duration::from_secs(20),
                 node.worker
-                    .wait_for_full_sync(peer_ids.into_iter(), parts.iter().copied()),
+                    .wait_for_full_sync(peer_ids, parts.iter().copied()),
             )
             .await
             .map_err(|_| {
@@ -463,82 +493,190 @@ impl StressFixture for BigRepoStressFixture {
                     node.peer_id()
                 )
             })??;
-        }
+            Ok::<_, crate::interlude::eyre::Report>(())
+        }))
+        .await?;
+
         let editors: Vec<&Node> = nodes
             .iter()
             .copied()
             .filter(|node| !self.is_relay(node))
             .collect();
-        let deadline = std::time::Instant::now() + Duration::from_secs(60);
-        let mut last_observations = None;
-        loop {
-            for node in nodes {
-                node.repo
-                    .wait_for_quiescence(Some(Duration::from_secs(5)))
-                    .await?;
-            }
-            let observations: Vec<(PeerId, BigRepoStressObservation)> = try_join_all(
-                nodes.iter().map(|node| async {
-                    Ok::<_, crate::interlude::eyre::Report>((node.peer_id(), self.observed_state(node).await?))
-                }),
-            )
+        try_join_all(editors.iter().map(|node| async {
+            node.repo
+                .wait_for_quiescence(Some(Duration::from_secs(20)))
+                .await
+        }))
+        .await?;
+
+        let observations: Vec<(PeerId, BigRepoStressObservation)> =
+            try_join_all(nodes.iter().map(|node| async {
+                Ok::<_, crate::interlude::eyre::Report>((
+                    node.peer_id(),
+                    self.observed_state(node).await?,
+                ))
+            }))
             .await?;
-            let sedimentree_aligned = observations
-                .windows(2)
-                .all(|pair| pair[0].1.sedimentree_heads == pair[1].1.sedimentree_heads);
-            let mut materialized = Vec::new();
-            for node in &editors {
-                let mut heads = BTreeMap::new();
-                for doc_id in self.tracked_docs().await {
-                    let values = match node.repo.get_doc(&doc_id).await? {
-                        crate::DocLookup::Ready(handle) => {
-                            let mut values = handle
-                                .with_document_read(|document| document.get_heads())
-                                .await;
-                            values.sort_unstable();
-                            Some(values.into_iter().map(|head| head.0).collect::<BTreeSet<_>>())
-                        }
-                        crate::DocLookup::PendingMaterialization => None,
-                        crate::DocLookup::Missing => None,
-                    };
-                    heads.insert(doc_id, values);
-                }
-                materialized.push(heads);
-            }
-            let materialized_ready = materialized
+
+        let tracked_docs = self.tracked_docs().await;
+        let format_heads = |heads: &BTreeSet<[u8; 32]>| {
+            heads
                 .iter()
-                .flat_map(|heads| heads.values())
-                .all(Option::is_some);
-            let materialized_aligned = materialized_ready
-                && materialized.windows(2).all(|pair| pair[0] == pair[1]);
-            if sedimentree_aligned && materialized_aligned {
-                return Ok(());
+                .map(|head| {
+                    head.iter()
+                        .take(8)
+                        .map(|byte| format!("{byte:02x}"))
+                        .collect::<String>()
+                })
+                .collect::<Vec<_>>()
+                .join(",")
+        };
+        let reference_peer = observations
+            .first()
+            .map(|(peer_id, _)| *peer_id)
+            .expect("stress cluster must contain nodes");
+        let reference_heads = &observations[0].1.sedimentree_heads;
+        let mut sedimentree_mismatches = Vec::new();
+        for doc_id in &tracked_docs {
+            let expected = reference_heads.get(doc_id).cloned().unwrap_or_default();
+            let mut differences = Vec::new();
+            for (peer_id, observation) in &observations {
+                let actual = observation
+                    .sedimentree_heads
+                    .get(doc_id)
+                    .cloned()
+                    .unwrap_or_default();
+                if actual != expected {
+                    let peer_parts = observation.parts.get(doc_id).cloned().unwrap_or_default();
+                    differences.push(format!(
+                        "peer={peer_id} count={} missing_vs_{reference_peer}=[{}] extra_vs_{reference_peer}=[{}] parts={peer_parts:?}",
+                        actual.len(),
+                        format_heads(&expected.difference(&actual).copied().collect()),
+                        format_heads(&actual.difference(&expected).copied().collect()),
+                    ));
+                }
             }
-            last_observations = Some(observations);
-            if std::time::Instant::now() >= deadline {
-                let sedimentree_counts = last_observations.as_ref().map(|observations| {
-                    observations
-                        .iter()
-                        .map(|(peer, observation)| {
-                            (*peer, observation.sedimentree_heads.values().map(BTreeSet::len).sum::<usize>())
-                        })
-                        .collect::<Vec<_>>()
-                });
-                let materialized_counts = materialized
-                    .iter()
-                    .map(|heads| {
-                        heads
-                            .values()
-                            .map(|heads| heads.as_ref().map(BTreeSet::len).unwrap_or(0))
-                            .sum::<usize>()
-                    })
-                    .collect::<Vec<_>>();
-                return Err(crate::ferr!(
-                    "stress cluster did not naturally converge: sedimentree_head_counts={sedimentree_counts:?}; materialized_head_counts={materialized_counts:?}"
+            if !differences.is_empty() {
+                sedimentree_mismatches.push(format!(
+                    "doc={doc_id} reference_peer={reference_peer} reference_count={} differences=[{}]",
+                    expected.len(),
+                    differences.join("; "),
                 ));
             }
-            tokio::time::sleep(Duration::from_millis(100)).await;
         }
+
+        let mut materialized_by_peer = Vec::new();
+        for node in &editors {
+            let mut documents = BTreeMap::new();
+            for doc_id in &tracked_docs {
+                let materialization = match node.repo.get_doc(doc_id).await? {
+                    crate::DocLookup::Ready(handle) => {
+                        let mut heads = handle
+                            .with_document_read(|document| document.get_heads())
+                            .await;
+                        heads.sort_unstable();
+                        (
+                            "ready",
+                            Some(
+                                heads
+                                    .into_iter()
+                                    .map(|head| head.0)
+                                    .collect::<BTreeSet<_>>(),
+                            ),
+                        )
+                    }
+                    crate::DocLookup::PendingMaterialization => ("pending", None),
+                    crate::DocLookup::Missing => ("missing", None),
+                };
+                documents.insert(*doc_id, materialization);
+            }
+            materialized_by_peer.push((node.peer_id(), documents));
+        }
+
+        let materialized_reference_peer = materialized_by_peer
+            .first()
+            .map(|(peer_id, _)| *peer_id)
+            .expect("stress cluster must contain an editor");
+        let materialized_reference = &materialized_by_peer[0].1;
+        let mut materialized_mismatches = Vec::new();
+        for doc_id in &tracked_docs {
+            let (expected_state, expected) = materialized_reference
+                .get(doc_id)
+                .cloned()
+                .expect("tracked document must have a materialization observation");
+            let mut differences = Vec::new();
+            for (peer_id, documents) in &materialized_by_peer {
+                let (actual_state, actual) = documents
+                    .get(doc_id)
+                    .cloned()
+                    .expect("tracked document must have a materialization observation");
+                if actual != expected || actual_state != expected_state {
+                    let node = editors
+                        .iter()
+                        .copied()
+                        .find(|node| node.peer_id() == *peer_id)
+                        .expect("materialization peer must have a node");
+                    let parts = node.store.obj_parts(*doc_id).await?;
+                    let blob_lengths = node
+                        .repo
+                        .inspect_stored_doc_blobs(*doc_id)
+                        .await?
+                        .iter()
+                        .map(Vec::len)
+                        .collect::<Vec<_>>();
+                    let agent_id = keyhive_core::principal::identifier::Identifier::from(
+                        ed25519_dalek::VerifyingKey::from_bytes(peer_id.as_bytes())
+                            .expect("stress peer id must be a verifying key"),
+                    );
+                    let doc_identifier = keyhive_core::principal::identifier::Identifier::from(
+                        ed25519_dalek::VerifyingKey::from_bytes(&doc_id.into_bytes())
+                            .expect("stress document id must be a verifying key"),
+                    );
+                    let access = node
+                        .repo
+                        .keyhive()
+                        .agent_access_on(&agent_id, doc_identifier)
+                        .await;
+                    differences.push(format!(
+                        "peer={peer_id} state={actual_state} heads=[{}] access={access:?} parts={parts:?} stored_blob_lengths={blob_lengths:?}",
+                        actual.as_ref().map(&format_heads).unwrap_or_default(),
+                    ));
+                }
+            }
+            if expected.is_none() || !differences.is_empty() {
+                materialized_mismatches.push(format!(
+                    "doc={doc_id} reference_peer={materialized_reference_peer} reference_state={expected_state} reference_heads=[{}] differences=[{}]",
+                    expected.as_ref().map(&format_heads).unwrap_or_default(),
+                    differences.join("; "),
+                ));
+            }
+        }
+
+        if sedimentree_mismatches.is_empty() && materialized_mismatches.is_empty() {
+            return Ok(());
+        }
+
+        Err(crate::ferr!(
+            "stress cluster did not converge after local barriers:\nsedimentree mismatches:\n{}\nmaterialized mismatches:\n{}",
+            if sedimentree_mismatches.is_empty() {
+                "  none".to_owned()
+            } else {
+                sedimentree_mismatches
+                    .iter()
+                    .map(|mismatch| format!("  {mismatch}"))
+                    .collect::<Vec<_>>()
+                    .join("\n")
+            },
+            if materialized_mismatches.is_empty() {
+                "  none".to_owned()
+            } else {
+                materialized_mismatches
+                    .iter()
+                    .map(|mismatch| format!("  {mismatch}"))
+                    .collect::<Vec<_>>()
+                    .join("\n")
+            },
+        ))
     }
 }
 
@@ -571,6 +709,7 @@ mod tests {
     async fn big_repo_tier10_stress_3_editor_1_relay_converges() -> Res<()> {
         let config = BigRepoStressConfig {
             relay_idx: Some(3),
+            peer_seed_offset: 64,
             ..BigRepoStressConfig::default()
         };
         let fixture = BigRepoStressFixture::new(config.clone());

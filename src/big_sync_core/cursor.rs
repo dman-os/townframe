@@ -92,13 +92,23 @@ pub struct CursorSyncMachine {
 }
 
 impl CursorSyncMachine {
+    pub(crate) fn remove_part(&mut self, part_id: PartId) {
+        self.cursor_state.remove(&part_id);
+        self.active_obj_jobs.retain(|_, job| {
+            job.waiters.retain(|_, waiter| {
+                waiter.parts.retain(|candidate| *candidate != part_id);
+                !waiter.parts.is_empty()
+            });
+            !job.waiters.is_empty()
+        });
+    }
     fn mark_pending_cursor(&mut self, part_id: PartId, cursor: CursorIndex) -> bool {
         let state = self.cursor_state.entry(part_id).or_default();
         if cursor <= state.last_emitted_cursor.unwrap_or_default() {
-            panic!(
-                "cursority trap: cursor ({cursor}) seen below floor ({:?})",
-                state.last_emitted_cursor
-            );
+            // Replay/live handoff is at-least-once. A replacement immutable
+            // subscription can repeat an event whose cursor was already
+            // durably advanced by the previous generation.
+            return false;
         }
         if let Some(_old) = state.slots.get_mut(&cursor) {
             // duplicate cursor

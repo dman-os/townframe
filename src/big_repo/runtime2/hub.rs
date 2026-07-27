@@ -1034,7 +1034,7 @@ impl<F: FutureForm, Tasks: crate::runtime2::TaskSet<F>> HubIoFutures<F, Tasks> f
                             crate::runtime::SyncDocPolicyError::InvalidIdentifier
                         }
                         subduction_core::sync_session::SyncPolicyRejectionKind::Other => {
-                            crate::runtime::SyncDocPolicyError::Other("remote policy rejection".into())
+                            crate::runtime::SyncDocPolicyError::Other("local policy rejection".into())
                         }
                     };
                     Err(crate::runtime::SyncDocError::Policy(policy))

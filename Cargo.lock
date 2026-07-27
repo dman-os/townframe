@@ -971,6 +971,7 @@ dependencies = [
 [[package]]
 name = "beekem"
 version = "0.3.0"
+source = "git+https://github.com/dman-os/keyhive?rev=4fcc3121a3d6a759db62da13ed36f96df043d086#4fcc3121a3d6a759db62da13ed36f96df043d086"
 dependencies = [
  "blake3",
  "chacha20poly1305",
@@ -3080,7 +3081,7 @@ dependencies = [
  "libc",
  "option-ext",
  "redox_users 0.5.2",
- "windows-sys 0.59.0",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]
@@ -5553,7 +5554,7 @@ dependencies = [
  "portable-atomic",
  "portable-atomic-util",
  "serde_core",
- "windows-sys 0.59.0",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]
@@ -5741,6 +5742,7 @@ dependencies = [
 [[package]]
 name = "keyhive_core"
 version = "0.5.0"
+source = "git+https://github.com/dman-os/keyhive?rev=4fcc3121a3d6a759db62da13ed36f96df043d086#4fcc3121a3d6a759db62da13ed36f96df043d086"
 dependencies = [
  "beekem",
  "bincode",
@@ -5766,6 +5768,7 @@ dependencies = [
 [[package]]
 name = "keyhive_crypto"
 version = "0.2.1"
+source = "git+https://github.com/dman-os/keyhive?rev=4fcc3121a3d6a759db62da13ed36f96df043d086#4fcc3121a3d6a759db62da13ed36f96df043d086"
 dependencies = [
  "bincode",
  "blake3",
@@ -6879,7 +6882,7 @@ version = "0.50.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "7957b9740744892f114936ab4a57b3f487491bbeafaf8083688b16841a4240e5"
 dependencies = [
- "windows-sys 0.59.0",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]
@@ -8497,7 +8500,7 @@ dependencies = [
  "once_cell",
  "socket2 0.6.4",
  "tracing",
- "windows-sys 0.59.0",
+ "windows-sys 0.60.2",
 ]
 
 [[package]]
@@ -9173,7 +9176,7 @@ dependencies = [
  "errno",
  "libc",
  "linux-raw-sys 0.12.1",
- "windows-sys 0.59.0",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]
@@ -9242,7 +9245,7 @@ dependencies = [
  "security-framework 3.7.0",
  "security-framework-sys",
  "webpki-root-certs",
- "windows-sys 0.59.0",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]
@@ -9263,7 +9266,7 @@ dependencies = [
  "security-framework 3.7.0",
  "security-framework-sys",
  "webpki-root-certs",
- "windows-sys 0.59.0",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]
@@ -9511,7 +9514,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "5b55fb86dfd3a2f5f76ea78310a88f96c4ea21a3031f8d212443d56123fd0521"
 dependencies = [
  "libc",
- "windows-sys 0.59.0",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]
@@ -10583,7 +10586,7 @@ dependencies = [
  "getrandom 0.4.1",
  "once_cell",
  "rustix 1.1.4",
- "windows-sys 0.59.0",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]
@@ -12869,7 +12872,7 @@ version = "0.1.11"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "c2a7b1c03c876122aa43f3020e6c3c3ee5c05081c9a00739faf7503aeba10d22"
 dependencies = [
- "windows-sys 0.59.0",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]

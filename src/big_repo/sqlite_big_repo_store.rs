@@ -569,7 +569,9 @@ impl SqliteBigRepoStore {
                 if let Some(object_event) = object_event {
                     if let Some(subs) = bus.by_obj.get(&obj_id) {
                         for &sub_id in subs {
-                            recipients.entry(sub_id).or_insert_with(|| object_event.clone());
+                            recipients
+                                .entry(sub_id)
+                                .or_insert_with(|| object_event.clone());
                         }
                     }
                 }
@@ -593,8 +595,7 @@ impl SqliteBigRepoStore {
                             .map(|members| {
                                 members
                                     .get(&principal)
-                                    .map(|access| access.is_reader())
-                                    .unwrap_or(false)
+                                    .is_some_and(|access| access.is_fetcher())
                             })
                             .unwrap_or(true),
                     };
@@ -624,8 +625,7 @@ impl SqliteBigRepoStore {
                     .map(|members| {
                         members
                             .get(&principal)
-                            .map(|access| access.is_reader())
-                            .unwrap_or(false)
+                            .is_some_and(|access| access.is_fetcher())
                     })
                     .unwrap_or(true),
             };
@@ -1828,12 +1828,7 @@ impl SqliteBigRepoStore {
                     .state
                     .store(SUB_REPLAYING_CLEAN, std::sync::atomic::Ordering::Release);
                 let page = store
-                    .list_events_with_policy(
-                        parts.clone(),
-                        cursor,
-                        u32::MAX,
-                        subscriber.is_some(),
-                    )
+                    .list_events_with_policy(parts.clone(), cursor, u32::MAX, subscriber.is_some())
                     .await
                     .expect(ERROR_IMPOSSIBLE)
                     .expect(ERROR_IMPOSSIBLE);
@@ -1869,8 +1864,7 @@ impl SqliteBigRepoStore {
                                 .map(|members| {
                                     members
                                         .get(&principal)
-                                        .map(|access| access.is_reader())
-                                        .unwrap_or(false)
+                                        .is_some_and(|access| access.is_fetcher())
                                 })
                                 .unwrap_or(true),
                         };
@@ -1879,14 +1873,16 @@ impl SqliteBigRepoStore {
                         }
                         match event {
                             PartEvent::Changed(inner) => {
-                                if let Some(SubEvent::Changed(existing)) = output.iter_mut().find(
-                                    |candidate| matches!(
-                                        candidate,
-                                        SubEvent::Changed(candidate)
-                                            if candidate.cursor == inner.cursor
-                                                && candidate.obj_id == inner.obj_id
-                                    ),
-                                ) {
+                                if let Some(SubEvent::Changed(existing)) =
+                                    output.iter_mut().find(|candidate| {
+                                        matches!(
+                                            candidate,
+                                            SubEvent::Changed(candidate)
+                                                if candidate.cursor == inner.cursor
+                                                    && candidate.obj_id == inner.obj_id
+                                        )
+                                    })
+                                {
                                     if !existing.part_ids.contains(&part_id) {
                                         existing.part_ids.push(part_id);
                                     }
@@ -1905,11 +1901,11 @@ impl SqliteBigRepoStore {
                     for obj_id in &objects {
                         let permitted = match subscriber {
                             None => true,
-                            Some(principal) => cache
-                                .get(obj_id)
-                                .and_then(|members| members.get(&principal))
-                                .map(|access| access.is_reader())
-                                .unwrap_or(false),
+                            Some(principal) => cache.get(obj_id).is_some_and(|members| {
+                                members
+                                    .get(&principal)
+                                    .is_some_and(|access| access.is_fetcher())
+                            }),
                         };
                         if permitted {
                             if let Some(payload) =
@@ -2302,12 +2298,7 @@ impl SqliteBigRepoStore {
                         continue;
                     };
                     transition_event_payloads.insert((part_id, mutation.doc), payload.clone());
-                    transitions.push((
-                        part_id,
-                        mutation.doc,
-                        old,
-                        MemberState::Live(payload),
-                    ));
+                    transitions.push((part_id, mutation.doc, old, MemberState::Live(payload)));
                 } else {
                     sqlx::query(
                         "DELETE FROM big_sync_pending_members
@@ -3220,20 +3211,21 @@ mod tests {
             )
             .await?;
 
-        assert_eq!(HostPartStore::obj_parts(&store, obj).await?, vec![crate::GLOBAL_PART_ID]);
-        assert_eq!(HostPartStore::member_count(&store, crate::GLOBAL_PART_ID).await?, 0);
+        assert_eq!(
+            HostPartStore::obj_parts(&store, obj).await?,
+            vec![crate::GLOBAL_PART_ID]
+        );
+        assert_eq!(
+            HostPartStore::member_count(&store, crate::GLOBAL_PART_ID).await?,
+            0
+        );
         assert!(
-            HostPartStore::list_events(
-                &store,
-                HashSet::from([crate::GLOBAL_PART_ID]),
-                0,
-                8,
-            )
-            .await??
-            .get(&crate::GLOBAL_PART_ID)
-            .expect(ERROR_IMPOSSIBLE)
-            .events
-            .is_empty(),
+            HostPartStore::list_events(&store, HashSet::from([crate::GLOBAL_PART_ID]), 0, 8,)
+                .await??
+                .get(&crate::GLOBAL_PART_ID)
+                .expect(ERROR_IMPOSSIBLE)
+                .events
+                .is_empty(),
         );
 
         let rx = HostPartStore::subscribe_local(
@@ -3257,7 +3249,10 @@ mod tests {
         assert_eq!(added.obj_id, obj);
         assert_eq!(added.part_id, crate::GLOBAL_PART_ID);
         assert_eq!(added.payload, payload);
-        assert_eq!(HostPartStore::member_count(&store, crate::GLOBAL_PART_ID).await?, 1);
+        assert_eq!(
+            HostPartStore::member_count(&store, crate::GLOBAL_PART_ID).await?,
+            1
+        );
         Ok(())
     }
 

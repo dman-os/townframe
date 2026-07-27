@@ -69,7 +69,9 @@ impl PeerReplayTask {
         Rpc: BigSyncRpcClient<K>,
         Rng: rand::Rng,
     {
-        let peer_rpc = cx.rpc_clients.get(&self.peer_id).expect(ERROR_UNRECONIZED);
+        let Some(peer_rpc) = cx.rpc_clients.get(&self.peer_id) else {
+            return Err(PeerReplayWorkerErrorDeets::StreamClosed);
+        };
         let receiver = peer_rpc
             .sub_parts(rpc::SubPartsRequest {
                 targets: self.targets,

@@ -522,7 +522,9 @@ impl SqlitePartStore {
                 if !matches!(object_event, SubEvent::ReplayComplete) {
                     if let Some(subs) = bus.by_obj.get(&obj_id) {
                         for &sub_id in subs {
-                            recipients.entry(sub_id).or_insert_with(|| object_event.clone());
+                            recipients
+                                .entry(sub_id)
+                                .or_insert_with(|| object_event.clone());
                         }
                     }
                 }
@@ -544,7 +546,7 @@ impl SqlitePartStore {
                         .map(|members| {
                             members
                                 .get(&sub.principal)
-                                .map(|access| access.is_reader())
+                                .map(|access| access.is_fetcher())
                                 .unwrap_or(false)
                         })
                         .unwrap_or(true);
@@ -572,7 +574,7 @@ impl SqlitePartStore {
                 .map(|members| {
                     members
                         .get(&sub.principal)
-                        .map(|access| access.is_reader())
+                        .map(|access| access.is_fetcher())
                         .unwrap_or(false)
                 })
                 .unwrap_or(true);
@@ -1737,7 +1739,7 @@ impl HostPartStore for SqlitePartStore {
                             .map(|members| {
                                 members
                                     .get(&subscriber)
-                                    .map(|access| access.is_reader())
+                                    .map(|access| access.is_fetcher())
                                     .unwrap_or(false)
                             })
                             .unwrap_or(true);
@@ -1746,14 +1748,16 @@ impl HostPartStore for SqlitePartStore {
                         }
                         match event {
                             PartEvent::Changed(inner) => {
-                                if let Some(SubEvent::Changed(existing)) = output.iter_mut().find(
-                                    |candidate| matches!(
-                                        candidate,
-                                        SubEvent::Changed(candidate)
-                                            if candidate.cursor == inner.cursor
-                                                && candidate.obj_id == inner.obj_id
-                                    ),
-                                ) {
+                                if let Some(SubEvent::Changed(existing)) =
+                                    output.iter_mut().find(|candidate| {
+                                        matches!(
+                                            candidate,
+                                            SubEvent::Changed(candidate)
+                                                if candidate.cursor == inner.cursor
+                                                    && candidate.obj_id == inner.obj_id
+                                        )
+                                    })
+                                {
                                     if !existing.part_ids.contains(&part_id) {
                                         existing.part_ids.push(part_id);
                                     }
@@ -1776,7 +1780,7 @@ impl HostPartStore for SqlitePartStore {
                             .expect(ERROR_MUTEX)
                             .get(obj_id)
                             .and_then(|members| members.get(&subscriber))
-                            .map(|access| access.is_reader())
+                            .map(|access| access.is_fetcher())
                             .unwrap_or(false);
                         if permitted {
                             if let Some(payload) = HostPartStore::obj_payload(&store, *obj_id)

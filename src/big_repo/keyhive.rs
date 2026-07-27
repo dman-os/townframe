@@ -254,10 +254,10 @@ impl BigKeyhiveHandle {
         &self,
         id: keyhive_core::principal::group::id::GroupId,
     ) -> Option<BigKeyhiveGroup> {
-        self.keyhive.get_group(id).await.map(|inner| BigKeyhiveGroup {
-            id,
-            inner,
-        })
+        self.keyhive
+            .get_group(id)
+            .await
+            .map(|inner| BigKeyhiveGroup { id, inner })
     }
     /// All docs reachable by `agent`, with the [`Access`] level for each.
     /// O(all_docs × transitive_members) — only for boot full reindex.

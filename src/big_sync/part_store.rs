@@ -516,7 +516,6 @@ pub mod host_contract {
         assert_eq!(transition.payload, payload);
     }
 
-
     async fn recv_sub_event(rx: &big_sync_core::mpsc::Receiver<SubEvent>) -> Res<SubEvent> {
         Ok(timeout(Duration::from_secs(5), rx.recv()).await??)
     }
@@ -1405,7 +1404,11 @@ pub mod host_contract {
         assert_eq!(auth_changed.obj_id, obj);
         assert_eq!(auth_changed.payload, payload("live-filter", 2));
         assert_eq!(
-            auth_changed.part_ids.iter().copied().collect::<HashSet<_>>(),
+            auth_changed
+                .part_ids
+                .iter()
+                .copied()
+                .collect::<HashSet<_>>(),
             HashSet::from([part, overlapping_part]),
             "one live event must aggregate every subscribed part",
         );
@@ -1416,16 +1419,28 @@ pub mod host_contract {
             "multi-part change must not be duplicated on the grouped stream",
         );
 
-        // Relay-only principals are excluded from the readability stream.
-        match tokio::time::timeout(Duration::from_millis(500), relay_rx.recv()).await {
-            Err(_elapsed) => { /* expected: no event within timeout */ }
-            Ok(Ok(evt)) => {
-                panic!("relay-only subscriber must not receive live event; got {evt:?}");
-            }
-            Ok(Err(_)) => {
-                panic!("relay-only subscriber channel closed unexpectedly");
-            }
-        }
+        // Relay principals receive payload metadata so they can replicate
+        // encrypted objects without materializing plaintext.
+        let relay_live = recv_sub_event(&relay_rx).await?;
+        let SubEvent::Changed(relay_changed) = &relay_live else {
+            panic!("relay subscriber expected Changed, got {relay_live:?}");
+        };
+        assert_eq!(relay_changed.obj_id, obj);
+        assert_eq!(relay_changed.payload, payload("live-filter", 2));
+        assert_eq!(
+            relay_changed
+                .part_ids
+                .iter()
+                .copied()
+                .collect::<HashSet<_>>(),
+            HashSet::from([part, overlapping_part]),
+        );
+        assert!(
+            tokio::time::timeout(Duration::from_millis(100), relay_rx.recv())
+                .await
+                .is_err(),
+            "relay multi-part change must not be duplicated",
+        );
 
         // Denied subscriber must NOT receive any live document event.
         match tokio::time::timeout(Duration::from_millis(500), denied_rx.recv()).await {

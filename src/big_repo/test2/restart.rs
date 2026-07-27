@@ -664,8 +664,7 @@ async fn tier5_restart_after_local_write_delivers_on_reconnect() -> crate::Res<(
 
     // Now sync bidirectionally — the local write should be pushed to the reader
     // and both repos settle for safe convergence checks.
-    let (owner_doc2, reader_doc) =
-        fixtures::sync_doc_pair(&pair, doc_id).await?;
+    let (owner_doc2, reader_doc) = fixtures::sync_doc_pair(&pair, doc_id).await?;
     assert_eq!(
         read_text(&reader_doc, "note").await.as_deref(),
         Some("written-before-restart"),

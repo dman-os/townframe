@@ -316,6 +316,7 @@ impl Node {
                 remote.peer_id(),
                 Arc::new(StressBigSyncRpcClient {
                     target_part_store: Arc::clone(&remote.store) as crate::SharedPartStore,
+                    subscriber: self.peer_id(),
                 }),
                 parts,
                 HashMap::new(),
@@ -339,7 +340,8 @@ impl Node {
                 None,
             )
             .await?;
-        self.set_peer_parts(remote, subscribed_parts.clone()).await?;
+        self.set_peer_parts(remote, subscribed_parts.clone())
+            .await?;
         remote.set_peer_parts(self, subscribed_parts).await?;
         if enable_keyhive_notifications {
             self.start_keyhive_rpc(remote).await?;
@@ -348,7 +350,8 @@ impl Node {
         Ok(connection)
     }
     pub(crate) async fn connect(&self, remote: &Self) -> crate::Res<BigRepoConnection> {
-        self.connect_with_parts(remote, stress_support::test_parts()).await
+        self.connect_with_parts(remote, stress_support::test_parts())
+            .await
     }
     pub(crate) async fn connect_with_parts(
         &self,
@@ -377,10 +380,7 @@ impl Node {
             .insert(remote.peer_id(), connection.clone());
         Ok(connection)
     }
-    pub(crate) async fn connection_to(
-        &self,
-        peer_id: PeerId,
-    ) -> crate::Res<BigRepoConnection> {
+    pub(crate) async fn connection_to(&self, peer_id: PeerId) -> crate::Res<BigRepoConnection> {
         self.connections
             .lock()
             .await
@@ -419,7 +419,13 @@ impl Node {
     }
 
     pub(crate) async fn shutdown(self) {
-        for connection in self.connections.lock().await.drain().map(|(_, connection)| connection) {
+        for connection in self
+            .connections
+            .lock()
+            .await
+            .drain()
+            .map(|(_, connection)| connection)
+        {
             if !connection.is_closed() {
                 connection
                     .stop()

@@ -355,7 +355,6 @@ fn memory_sync_backend_cases() -> Vec<SyncBackendScenario> {
             payload(serde_json::json!({"kind": "noop"}), 1, peer_id(2)),
             vec![part],
         ),
-
         SyncBackendScenario::changed_object(
             "changed_object_applies_remote",
             peer_id(2),

@@ -1093,41 +1093,49 @@ async fn tier7_bidirectional_sync_origin_correctness() -> crate::Res<()> {
 
     // Each side must observe the other edit as Remote. It may have arrived in
     // the batch above or during the explicit synchronization.
-    let owner_saw_remote = owner_notifications.iter().any(|n| matches!(
-        n,
-        BigRepoChangeNotification::DocChanged {
-            doc_id: did,
-            origin: BigRepoChangeOrigin::Remote { .. },
-            ..
-        } if *did == doc_id
-    )) || recv_one(&mut owner_rx).await.iter().any(|n| matches!(
-        n,
-        BigRepoChangeNotification::DocChanged {
-            doc_id: did,
-            origin: BigRepoChangeOrigin::Remote { .. },
-            ..
-        } if *did == doc_id
-    ));
+    let owner_saw_remote = owner_notifications.iter().any(|n| {
+        matches!(
+            n,
+            BigRepoChangeNotification::DocChanged {
+                doc_id: did,
+                origin: BigRepoChangeOrigin::Remote { .. },
+                ..
+            } if *did == doc_id
+        )
+    }) || recv_one(&mut owner_rx).await.iter().any(|n| {
+        matches!(
+            n,
+            BigRepoChangeNotification::DocChanged {
+                doc_id: did,
+                origin: BigRepoChangeOrigin::Remote { .. },
+                ..
+            } if *did == doc_id
+        )
+    });
     assert!(
         owner_saw_remote,
         "owner must see Remote DocChanged for editor's write"
     );
 
-    let editor_saw_remote = editor_notifications.iter().any(|n| matches!(
-        n,
-        BigRepoChangeNotification::DocChanged {
-            doc_id: did,
-            origin: BigRepoChangeOrigin::Remote { .. },
-            ..
-        } if *did == doc_id
-    )) || recv_one(&mut editor_rx).await.iter().any(|n| matches!(
-        n,
-        BigRepoChangeNotification::DocChanged {
-            doc_id: did,
-            origin: BigRepoChangeOrigin::Remote { .. },
-            ..
-        } if *did == doc_id
-    ));
+    let editor_saw_remote = editor_notifications.iter().any(|n| {
+        matches!(
+            n,
+            BigRepoChangeNotification::DocChanged {
+                doc_id: did,
+                origin: BigRepoChangeOrigin::Remote { .. },
+                ..
+            } if *did == doc_id
+        )
+    }) || recv_one(&mut editor_rx).await.iter().any(|n| {
+        matches!(
+            n,
+            BigRepoChangeNotification::DocChanged {
+                doc_id: did,
+                origin: BigRepoChangeOrigin::Remote { .. },
+                ..
+            } if *did == doc_id
+        )
+    });
     assert!(
         editor_saw_remote,
         "editor must see Remote DocChanged for owner's write"

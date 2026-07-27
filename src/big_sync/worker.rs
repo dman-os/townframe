@@ -398,7 +398,6 @@ struct TaskDeets {
 struct ActiveSyncTaskDeets {
     cancel_token: CancellationToken,
     handle: utils_rs::TaskHandle,
-    part_hints: Vec<PartId>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -438,18 +437,6 @@ impl BigSyncWorker {
                         break;
                     };
                     debug!(?evt, "XXX sync msg");
-                    if let BigSyncEvent::SyncCompleted(completed) = &evt {
-                        let part_hints = self
-                            .sync_tasks
-                            .get(&completed.task_id)
-                            .map(|task| task.part_hints.clone())
-                            .unwrap_or_default();
-                        if !part_hints.is_empty() {
-                            self.part_store
-                                .add_obj_to_parts(completed.completion.obj_id, part_hints)
-                                .await?;
-                        }
-                    }
                     self.machine.handle_evt(evt);
                 }
                 msg = self.host_rx.recv() => {
@@ -823,7 +810,6 @@ impl BigSyncWorker {
             ActiveSyncTaskDeets {
                 cancel_token,
                 handle,
-                part_hints: part_ids,
             },
         );
         Ok(())

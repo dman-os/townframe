@@ -344,7 +344,7 @@ pub async fn connect_final_topology<F: StressFixture>(
     fixture: &F,
     rng: &mut StdRng,
     nodes: &[Option<F::Node>],
- ) -> Res<()> {
+) -> Res<()> {
     let live = live_indices(nodes);
     connect_active_topology(fixture, rng, nodes, &live).await
 }
@@ -383,7 +383,13 @@ pub async fn apply_random_mutation<F: StressFixture>(
         let nonce = rng.random::<u64>();
         let written_at = state.next_written_at();
         let value = fixture.make_doc_content(
-            phase, step, node_idx, &obj, nonce, written_at, fixture.peer_id(node),
+            phase,
+            step,
+            node_idx,
+            &obj,
+            nonce,
+            written_at,
+            fixture.peer_id(node),
         );
         journal.record(format!(
             "{phase}:step={step}:create node={node_idx} obj={obj:?} value={value:?}"
@@ -409,7 +415,13 @@ pub async fn apply_random_mutation<F: StressFixture>(
             let nonce = rng.random::<u64>();
             let written_at = state.next_written_at();
             let value = fixture.make_doc_content(
-                phase, step, node_idx, &obj, nonce, written_at, fixture.peer_id(node),
+                phase,
+                step,
+                node_idx,
+                &obj,
+                nonce,
+                written_at,
+                fixture.peer_id(node),
             );
             journal.record(format!(
                 "{phase}:step={step}:upsert node={node_idx} obj={obj:?} value={value:?}"
@@ -435,7 +447,13 @@ pub async fn apply_random_mutation<F: StressFixture>(
             let nonce = rng.random::<u64>();
             let written_at = state.next_written_at();
             let value = fixture.make_doc_content(
-                phase, step, node_idx, &obj, nonce, written_at, fixture.peer_id(node),
+                phase,
+                step,
+                node_idx,
+                &obj,
+                nonce,
+                written_at,
+                fixture.peer_id(node),
             );
             journal.record(format!(
                 "{phase}:step={step}:create(no-mutator) node={node_idx} obj={obj:?} value={value:?}"
@@ -613,12 +631,9 @@ pub async fn run_randomized_stress<F: StressFixture>(
         "stress phase1 connect complete"
     );
     let phase1_settle_started_at = std::time::Instant::now();
-    fixture.wait_for_settled(
-        &live_refs(&nodes),
-        settle_timeout,
-        "phase1:post-connect",
-    )
-    .await?;
+    fixture
+        .wait_for_settled(&live_refs(&nodes), settle_timeout, "phase1:post-connect")
+        .await?;
     info!(
         elapsed = ?phase1_settle_started_at.elapsed(),
         "stress phase1 post-connect settled"
@@ -637,12 +652,9 @@ pub async fn run_randomized_stress<F: StressFixture>(
     .await?;
     info!(elapsed = ?phase1_mutate_started_at.elapsed(), "stress phase1 mutations complete");
     let phase1_post_settle_started_at = std::time::Instant::now();
-    fixture.wait_for_settled(
-        &live_refs(&nodes),
-        settle_timeout,
-        "phase1:post-mutations",
-    )
-    .await?;
+    fixture
+        .wait_for_settled(&live_refs(&nodes), settle_timeout, "phase1:post-mutations")
+        .await?;
     info!(
         elapsed = ?phase1_post_settle_started_at.elapsed(),
         "stress phase1 post-mutations settled"
@@ -659,12 +671,9 @@ pub async fn run_randomized_stress<F: StressFixture>(
         "stress phase2 connect complete"
     );
     let phase2_settle_started_at = std::time::Instant::now();
-    fixture.wait_for_settled(
-        &live_refs(&nodes),
-        settle_timeout,
-        "phase2:post-connect",
-    )
-    .await?;
+    fixture
+        .wait_for_settled(&live_refs(&nodes), settle_timeout, "phase2:post-connect")
+        .await?;
     info!(
         elapsed = ?phase2_settle_started_at.elapsed(),
         "stress phase2 post-connect settled"
@@ -683,12 +692,9 @@ pub async fn run_randomized_stress<F: StressFixture>(
     .await?;
     info!(elapsed = ?phase2_mutate_started_at.elapsed(), "stress phase2 mutations complete");
     let phase2_post_settle_started_at = std::time::Instant::now();
-    fixture.wait_for_settled(
-        &live_refs(&nodes),
-        settle_timeout,
-        "phase2:post-mutations",
-    )
-    .await?;
+    fixture
+        .wait_for_settled(&live_refs(&nodes), settle_timeout, "phase2:post-mutations")
+        .await?;
     info!(
         elapsed = ?phase2_post_settle_started_at.elapsed(),
         "stress phase2 post-mutations settled"
@@ -705,12 +711,9 @@ pub async fn run_randomized_stress<F: StressFixture>(
         "stress phase3 connect complete"
     );
     let phase3_settle_started_at = std::time::Instant::now();
-    fixture.wait_for_settled(
-        &live_refs(&nodes),
-        settle_timeout,
-        "phase3:post-connect",
-    )
-    .await?;
+    fixture
+        .wait_for_settled(&live_refs(&nodes), settle_timeout, "phase3:post-connect")
+        .await?;
     info!(
         elapsed = ?phase3_settle_started_at.elapsed(),
         "stress phase3 post-connect settled"
@@ -729,12 +732,9 @@ pub async fn run_randomized_stress<F: StressFixture>(
     .await?;
     info!(elapsed = ?phase3_mutate_started_at.elapsed(), "stress phase3 mutations complete");
     let phase3_post_settle_started_at = std::time::Instant::now();
-    fixture.wait_for_settled(
-        &live_refs(&nodes),
-        settle_timeout,
-        "phase3:post-mutations",
-    )
-    .await?;
+    fixture
+        .wait_for_settled(&live_refs(&nodes), settle_timeout, "phase3:post-mutations")
+        .await?;
     info!(
         elapsed = ?phase3_post_settle_started_at.elapsed(),
         "stress phase3 post-mutations settled"
@@ -748,12 +748,13 @@ pub async fn run_randomized_stress<F: StressFixture>(
         "stress final spanning-topology connect complete"
     );
     let final_settle_started_at = std::time::Instant::now();
-    fixture.wait_for_settled(
-        &live_refs(&nodes),
-        Duration::from_secs(60),
-        "final:post-connect",
-    )
-    .await?;
+    fixture
+        .wait_for_settled(
+            &live_refs(&nodes),
+            Duration::from_secs(60),
+            "final:post-connect",
+        )
+        .await?;
     info!(
         elapsed = ?final_settle_started_at.elapsed(),
         "stress final cluster settle complete"

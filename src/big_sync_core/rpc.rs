@@ -309,7 +309,6 @@ where
     serde_json::from_str(&str).map_err(serde::de::Error::custom)
 }
 
-
 structstruck::strike! {
     #[structstruck::each[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]]
     pub enum SubEvent {

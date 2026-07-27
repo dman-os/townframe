@@ -331,7 +331,9 @@ impl MemoryPartStoreScopeState {
             if let Some(object_evt) = object_evt {
                 if let Some(subs) = self.bus.subs_by_obj.get(&evt_obj_id) {
                     for &sub_id in subs {
-                        recipients.entry(sub_id).or_insert_with(|| object_evt.clone());
+                        recipients
+                            .entry(sub_id)
+                            .or_insert_with(|| object_evt.clone());
                     }
                 }
             }
@@ -345,7 +347,7 @@ impl MemoryPartStoreScopeState {
                         .map(|members| {
                             members
                                 .get(&principal)
-                                .map(|access| access.is_reader())
+                                .map(|access| access.is_fetcher())
                                 .unwrap_or(false)
                         })
                         .unwrap_or(true)
@@ -648,22 +650,28 @@ impl HostPartStore for MemoryPartStore {
                         continue;
                     };
                     let (sender, principal, pending) = match subscription {
-                        MemorySubscription::Pending { sender, principal, state } => {
-                            (sender, principal, Some(state))
-                        }
+                        MemorySubscription::Pending {
+                            sender,
+                            principal,
+                            state,
+                        } => (sender, principal, Some(state)),
                         MemorySubscription::Live { sender, principal } => (sender, principal, None),
                     };
                     let permitted = guard
                         .doc_members
                         .get(&obj_id)
                         .and_then(|members| members.get(&principal))
-                        .map(|access| access.is_reader())
+                        .map(|access| access.is_fetcher())
                         .unwrap_or(false);
                     if let Some(state) = pending {
                         if !state.mark_dirty() {
                             guard.bus.subs.insert(
                                 sub_id,
-                                MemorySubscription::Pending { sender, principal, state },
+                                MemorySubscription::Pending {
+                                    sender,
+                                    principal,
+                                    state,
+                                },
                             );
                             continue;
                         }
@@ -697,12 +705,14 @@ impl HostPartStore for MemoryPartStore {
                     part_obj_state.changed_at = cursor;
                     part.latest_cursor = cursor;
                 }
-                guard.bus.queue_evt(PartEvent::Changed(big_sync_core::rpc::ObjChanged {
-                    cursor,
-                    part_ids: desired_parts.into_iter().collect(),
-                    obj_id,
-                    payload,
-                }));
+                guard
+                    .bus
+                    .queue_evt(PartEvent::Changed(big_sync_core::rpc::ObjChanged {
+                        cursor,
+                        part_ids: desired_parts.into_iter().collect(),
+                        obj_id,
+                        payload,
+                    }));
             } else {
                 for part_id in desired_parts {
                     let part = guard.parts.entry(part_id).or_default();
@@ -721,14 +731,14 @@ impl HostPartStore for MemoryPartStore {
                         },
                     );
                     part.latest_cursor = cursor;
-                    guard.bus.queue_evt(PartEvent::Added(
-                        big_sync_core::rpc::ObjAddedToPart {
+                    guard
+                        .bus
+                        .queue_evt(PartEvent::Added(big_sync_core::rpc::ObjAddedToPart {
                             cursor,
                             part_id,
                             obj_id,
                             payload: payload.clone(),
-                        },
-                    ));
+                        }));
                 }
             }
             guard.flush();
@@ -1059,7 +1069,7 @@ impl HostPartStore for MemoryPartStore {
                             .map(|members| {
                                 members
                                     .get(&subscriber)
-                                    .map(|access| access.is_reader())
+                                    .map(|access| access.is_fetcher())
                                     .unwrap_or(false)
                             })
                             .unwrap_or(true);
@@ -1098,7 +1108,7 @@ impl HostPartStore for MemoryPartStore {
                                 .doc_members
                                 .get(obj_id)
                                 .and_then(|members| members.get(&subscriber))
-                                .map(|access| access.is_reader())
+                                .map(|access| access.is_fetcher())
                                 .unwrap_or(false);
                             if permitted {
                                 if let Some(payload) = guard
@@ -1517,12 +1527,10 @@ mod tests {
         let rx = store
             .subscribe(
                 SubPartsRequest {
-                    targets: HashSet::from([
-                        big_sync_core::rpc::SubscriptionTarget::Part {
-                            part_id: part,
-                            cursor: 0,
-                        },
-                    ]),
+                    targets: HashSet::from([big_sync_core::rpc::SubscriptionTarget::Part {
+                        part_id: part,
+                        cursor: 0,
+                    }]),
                 },
                 peer,
             )
@@ -1643,12 +1651,10 @@ mod tests {
         let rx = store
             .subscribe(
                 SubPartsRequest {
-                    targets: HashSet::from([
-                        big_sync_core::rpc::SubscriptionTarget::Part {
-                            part_id: part,
-                            cursor: 0,
-                        },
-                    ]),
+                    targets: HashSet::from([big_sync_core::rpc::SubscriptionTarget::Part {
+                        part_id: part,
+                        cursor: 0,
+                    }]),
                 },
                 peer,
             )

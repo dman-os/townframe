@@ -67,9 +67,7 @@ async fn write_and_get_heads(
 /// The maximum number of attempts is bounded (2048) as a hard guard against an
 /// infinite loop if the Automerge change hash scheme changes, but in practice
 /// each attempt has a ~1/256 success probability.
-async fn produce_boundary_commit(
-    handle: &crate::BigDocHandle,
-) -> crate::Res<(usize, ChangeHash)> {
+async fn produce_boundary_commit(handle: &crate::BigDocHandle) -> crate::Res<(usize, ChangeHash)> {
     let mut attempt: usize = 0;
     loop {
         attempt += 1;
@@ -203,7 +201,9 @@ async fn tier6_fragmentation_convergence() -> crate::Res<()> {
     );
     for i in 0..8 {
         assert_eq!(
-            read_text(&reloaded, &format!("post_boundary_{i}")).await.as_deref(),
+            read_text(&reloaded, &format!("post_boundary_{i}"))
+                .await
+                .as_deref(),
             Some("yes"),
             "reloaded doc must contain post-boundary commit {i}",
         );

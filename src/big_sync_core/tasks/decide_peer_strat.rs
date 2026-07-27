@@ -127,6 +127,16 @@ impl DecidePeerStrategyTask {
                 continue;
             }
             let diff = part_summary.latest_cursor.abs_diff(last_peer_cursor);
+            tracing::debug!(
+                peer_id = %self.peer_id,
+                ?part_id,
+                remote_cursor = part_summary.latest_cursor,
+                stored_peer_cursor = last_peer_cursor,
+                cursor_diff = diff,
+                member_count = part_summary.member_count,
+                ?sync_mode,
+                "decide peer part strategy",
+            );
             if diff <= BucketMachine::BUCKET_DIFF_THRESHOLD {
                 part_strats.insert(
                     part_id,

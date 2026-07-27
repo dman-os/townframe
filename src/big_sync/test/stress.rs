@@ -198,17 +198,11 @@ async fn assert_cluster_alignment_lww(nodes: &[&NodeHarness]) -> Res<()> {
     if nodes.is_empty() {
         return Ok(());
     }
-    let peer_ids: Vec<PeerId> = nodes.iter().map(|node| node.peer_id).collect();
     let part_ids = stress_support::test_parts();
     for node in nodes {
-        node.wait_for_full_sync(
-            peer_ids
-                .iter()
-                .copied()
-                .filter(|peer_id| *peer_id != node.peer_id),
-            part_ids.iter().copied(),
-        )
-        .await?;
+        let connected_peers = node.handle.snapshot().await?.peer_parts.into_keys();
+        node.wait_for_full_sync(connected_peers, part_ids.iter().copied())
+            .await?;
     }
     let mut worker_snaps = Vec::with_capacity(nodes.len());
     let mut store_snaps = Vec::with_capacity(nodes.len());

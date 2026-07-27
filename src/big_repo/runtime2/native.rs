@@ -929,7 +929,9 @@ where
 
             match result {
                 Ok((had_success, stats, conn_errs)) => {
-                    if had_success {
+                    if let Some(rejection) = stats.local_policy_rejections.first() {
+                        Ok(SyncDocAttempt::Policy(rejection.kind))
+                    } else if had_success {
                         Ok(SyncDocAttempt::Exchanged)
                     } else if let Some(rejection) = stats.remote_rejection {
                         Ok(match rejection {
@@ -938,9 +940,6 @@ where
                             }
                             subduction_core::sync_session::SyncRemoteRejection::Unauthorized => {
                                 SyncDocAttempt::Unauthorized
-                            }
-                            subduction_core::sync_session::SyncRemoteRejection::Policy(kind) => {
-                                SyncDocAttempt::Policy(kind)
                             }
                         })
                     } else if conn_errs.is_empty() {

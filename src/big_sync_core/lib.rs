@@ -765,6 +765,9 @@ impl BigSyncMachine {
                 }
             }
         }
+        for &part_id in &removed_parts {
+            peer_state.cursor_machine.remove_part(part_id);
+        }
         let added_parts: Set<_> = parts.difference(&old_part_ids).copied().collect();
         let decision_parts: Set<_> = pending_parts.union(&added_parts).copied().collect();
         if !decision_parts.is_empty() {
@@ -787,12 +790,7 @@ impl BigSyncMachine {
             .sync_workers
             .iter()
             .filter_map(|(&obj_id, worker)| {
-                (!objects.contains(&obj_id)
-                    || worker
-                        .part_hints
-                        .iter()
-                        .any(|part_id| removed_parts.contains(part_id)))
-                .then_some(obj_id)
+                (worker.part_hints.is_empty() && !objects.contains(&obj_id)).then_some(obj_id)
             })
             .collect();
         for obj_id in stale_workers {
@@ -1130,10 +1128,7 @@ impl BigSyncMachine {
                 .map(|obj_id| SubscriptionTarget::Object { obj_id }),
         );
         if let Some(worker) = peer_state.replay_worker.as_ref() {
-            if !force
-                && replay_req_parts == worker.parts
-                && replay_req_objects == worker.objects
-            {
+            if !force && replay_req_parts == worker.parts && replay_req_objects == worker.objects {
                 return;
             }
         }
@@ -1702,23 +1697,27 @@ impl BigSyncMachine {
                 cursors: worker.cursors,
                 deets: completion.deets,
             };
-            let part_hints = worker.part_hints.clone();
+            let mut part_hints = worker.part_hints.clone();
+            let mut stale_part_hints = Vec::new();
             for part_id in &part_hints {
                 let Some(part) = peer_state.parts.get_mut(part_id) else {
-                    warn!("sync completed for unknown part");
+                    stale_part_hints.push(*part_id);
                     continue;
                 };
                 match &mut part.strat {
-                    PeerPartStrategy::Pending(_) => {
-                        unreachable!("unexpected pending peer part strategy")
-                    }
+                    PeerPartStrategy::Pending(_) => stale_part_hints.push(*part_id),
                     PeerPartStrategy::Bucket(state) => {
                         state
                             .machine
                             .on_obj_sync_completed(&completion, &mut peer_state.bucket_cmd_buf);
                     }
-                    PeerPartStrategy::Cursor(_state) => {}
+                    PeerPartStrategy::Cursor(_) => {}
                 }
+            }
+            for part_id in stale_part_hints {
+                tracing::debug!(?part_id, "discarding sync completion for stale peer part");
+                peer_state.cursor_machine.remove_part(part_id);
+                part_hints.remove(&part_id);
             }
             for &cursor in &completion.cursors {
                 peer_state.cursor_machine.on_obj_sync_job_evt(

@@ -464,10 +464,7 @@ mod tests {
                 .subscribe(
                     SubPartsRequest {
                         targets: std::collections::HashSet::from([
-                            big_sync_core::rpc::SubscriptionTarget::Part {
-                                part_id,
-                                cursor: 0,
-                            },
+                            big_sync_core::rpc::SubscriptionTarget::Part { part_id, cursor: 0 },
                         ]),
                     },
                     PeerId::new([0u8; 32]),
@@ -541,10 +538,9 @@ mod tests {
 
         let sub_events = client
             .sub_parts(SubPartsRequest {
-                targets: std::collections::HashSet::from([big_sync_core::rpc::SubscriptionTarget::Part {
-                    part_id,
-                    cursor: 0,
-                }]),
+                targets: std::collections::HashSet::from([
+                    big_sync_core::rpc::SubscriptionTarget::Part { part_id, cursor: 0 },
+                ]),
             })
             .await???;
         let sub_events =

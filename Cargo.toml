@@ -177,9 +177,9 @@ sedimentree_core = { git = "https://github.com/dman-os/subduction", rev = "2c44e
 subduction_redb_storage = { git = "https://github.com/dman-os/subduction", rev = "2c44ec24a68be2a0d038ffd202e3d0721e2cb550" }
 subduction_crypto = { git = "https://github.com/dman-os/subduction", rev = "2c44ec24a68be2a0d038ffd202e3d0721e2cb550" }
 subduction_keyhive = { git = "https://github.com/dman-os/subduction", rev = "2c44ec24a68be2a0d038ffd202e3d0721e2cb550" }
-keyhive_crypto = "0.2.1"
-keyhive_core = "0.5.0"
-beekem = "0.3.0"
+keyhive_crypto = { version = "0.2.1", git = "https://github.com/dman-os/keyhive", rev = "4fcc3121a3d6a759db62da13ed36f96df043d086" }
+keyhive_core = { version = "0.5.0", git = "https://github.com/dman-os/keyhive", rev = "4fcc3121a3d6a759db62da13ed36f96df043d086" }
+beekem = { version = "0.3.0", git = "https://github.com/dman-os/keyhive", rev = "4fcc3121a3d6a759db62da13ed36f96df043d086" }
 ed25519-dalek = "2.2.0"
 async-channel = "2.5.0"
 nonempty = "0.10.0"
@@ -243,9 +243,6 @@ irpc-iroh = "0.17.0"
 autosurgeon = { git = "https://github.com/dman-os/autosurgeon", rev = "274285c6007cccf4e5eb21a96bd1152ee0c6576c" }
 autosurgeon-derive = { git = "https://github.com/dman-os/autosurgeon", rev = "274285c6007cccf4e5eb21a96bd1152ee0c6576c" }
 automerge = { git = "https://github.com/automerge/automerge", branch = "fragments" }
-keyhive_crypto = { path = "../keyhive/keyhive_crypto" }
-keyhive_core = { path = "../keyhive/keyhive_core" }
-beekem = { path = "../keyhive/beekem" }
 # sqlite-vec = { git = "https://github.com/vlasky/sqlite-vec", rev = "9facf1ab84f2a360c0f1e62db3a7f3eca5bc099a" }
 #
 [patch."https://github.com/dman-os/subduction"]

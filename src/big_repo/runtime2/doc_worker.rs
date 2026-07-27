@@ -1051,23 +1051,6 @@ impl<F: FutureForm> DocWorker2<F> {
                 subduction_core::sync_session::SyncRemoteRejection::Unauthorized => {
                     crate::runtime::SyncDocError::Unauthorized.into()
                 }
-                subduction_core::sync_session::SyncRemoteRejection::Policy(kind) => {
-                    let policy = match kind {
-                        subduction_core::sync_session::SyncPolicyRejectionKind::DocumentNotFound => {
-                            crate::runtime::SyncDocPolicyError::DocumentNotFound
-                        }
-                        subduction_core::sync_session::SyncPolicyRejectionKind::InsufficientAccess => {
-                            crate::runtime::SyncDocPolicyError::InsufficientAccess
-                        }
-                        subduction_core::sync_session::SyncPolicyRejectionKind::InvalidIdentifier => {
-                            crate::runtime::SyncDocPolicyError::InvalidIdentifier
-                        }
-                        subduction_core::sync_session::SyncPolicyRejectionKind::Other => {
-                            crate::runtime::SyncDocPolicyError::Other("remote policy rejection".into())
-                        }
-                    };
-                    crate::runtime::SyncDocError::Policy(policy).into()
-                }
             });
         }
         if let Some((_, rejection)) = session
@@ -1964,9 +1947,10 @@ impl<F: FutureForm> DocWorker2<F> {
         let mut remaining = Vec::new();
         for (waiter_id, sender, lease) in waiters {
             if waiter_id < watermark {
-                sender
-                    .send(Ok(()))
-                    .expect("document sync waiter receiver must remain open");
+                // Dropping a one-shot receiver is the caller's cancellation
+                // signal. The underlying shared sync round still completes for
+                // any remaining waiters and must not crash the document actor.
+                let _ = sender.send(Ok(()));
             } else {
                 remaining.push((waiter_id, sender, lease));
             }

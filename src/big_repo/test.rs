@@ -168,73 +168,34 @@ fn keyhive_document_id_for_big_repo_doc(
     )
 }
 
-fn keyhive_identifier_for_peer_id(
-    peer_id: PeerId,
-) -> keyhive_core::principal::identifier::Identifier {
-    let vk = ed25519_dalek::VerifyingKey::from_bytes(peer_id.as_bytes())
-        .expect("peer id should be a valid keyhive identifier");
-    keyhive_core::principal::identifier::Identifier::from(vk)
-}
-
-fn keyhive_identifier_for_big_repo_doc(
+async fn wait_for_document_access_notification(
+    rx: &mut tokio::sync::mpsc::UnboundedReceiver<Vec<crate::changes::BigRepoDomainNotification>>,
     doc_id: DocumentId,
-) -> keyhive_core::principal::identifier::Identifier {
-    let doc_id_bytes = doc_id.into_bytes();
-    let vk = ed25519_dalek::VerifyingKey::from_bytes(&doc_id_bytes)
-        .expect("doc id should be a valid keyhive document id");
-    keyhive_core::principal::identifier::Identifier::from(vk)
-}
-
-async fn wait_for_keyhive_document_access(
-    repo: &Arc<BigRepo>,
-    doc_id: DocumentId,
-    peer_id: PeerId,
-    minimum_access: keyhive_core::access::Access,
+    member_id: PeerId,
+    expected_access: crate::changes::BigRepoAccess,
 ) -> Res<()> {
-    let agent = keyhive_identifier_for_peer_id(peer_id);
-    let membered = keyhive_identifier_for_big_repo_doc(doc_id);
     timeout(utils_rs::scale_timeout(Duration::from_secs(10)), async {
         loop {
-            if repo
-                .keyhive()
-                .agent_access_on(&agent, membered)
-                .await
-                .is_some_and(|access| access >= minimum_access)
-            {
-                return Ok(());
+            let notifications = rx.recv().await.expect("domain listener must remain open");
+            if notifications.iter().any(|notification| {
+                matches!(
+                    notification,
+                    crate::changes::BigRepoDomainNotification::DocumentAccessChanged {
+                        doc_id: candidate_doc,
+                        member_id: candidate_member,
+                        access,
+                    } if *candidate_doc == doc_id
+                        && *candidate_member == member_id
+                        && *access == expected_access
+                )
+            }) {
+                return;
             }
-            tokio::time::sleep(Duration::from_millis(25)).await;
         }
     })
     .await
-    .expect("timed out waiting for keyhive document access")
-}
-
-/// Subscribe to the client's global partition and wait for the doc to be
-/// registered locally by the runtime's keyhive listener.
-///
-/// Returns once the [`SubEvent::Added`] for the given `doc_id` is received
-/// (or after timeout). The presence of the doc in the global partition proves
-/// the runtime has processed the keyhive change (e.g. grant delegation) and
-/// the document is discoverable.
-async fn wait_for_global_part_addition(
-    rx: &mut mpsc::Receiver<SubEvent>,
-    doc_id: DocumentId,
-    timeout_duration: Duration,
-) -> Res<()> {
-    let deadline = tokio::time::Instant::now() + timeout_duration;
-    loop {
-        let remaining = deadline.saturating_duration_since(tokio::time::Instant::now());
-        if remaining.is_zero() {
-            eyre::bail!("timed out waiting for doc {doc_id} to appear in global partition");
-        }
-        match timeout(remaining, rx.recv()).await {
-            Ok(Ok(SubEvent::Added(added))) if added.obj_id == doc_id => return Ok(()),
-            Ok(Ok(_)) => continue,
-            Ok(Err(err)) => eyre::bail!("subscription channel error: {err:?}"),
-            Err(_) => eyre::bail!("timed out waiting for doc {doc_id} in global partition"),
-        }
-    }
+    .expect("timed out waiting for document access notification");
+    Ok(())
 }
 
 #[tokio::test]
@@ -583,31 +544,22 @@ async fn authorized_peer_reads_encrypted_doc_after_keyhive_change_notification_w
     let handle = owner.repo.create_doc(doc).await?;
     let doc_id = handle.document_id();
 
-    // Ensure the global partition exists before subscribing.
-    client.big_sync_store.ensure_part(GLOBAL_PART_ID).await?;
-
-    // Subscribe to the client's global partition to learn about the doc
-    // being registered locally by the runtime's keyhive listener.
-    let req = SubPartsRequest {
-        targets: HashSet::from([big_sync_core::rpc::SubscriptionTarget::Part {
-            part_id: GLOBAL_PART_ID,
-            cursor: 0,
-        }]),
-    };
-    let mut rx = client
-        .big_sync_store
-        .subscribe(req, client.peer_id())
-        .await??;
-
+    let (_access_registration, mut access_events) = client
+        .repo
+        .subscribe_domain_listener(BigRepoDomainFilter)
+        .await?;
     owner
         .repo
         .grant_doc_access(doc_id, client_agent, keyhive_core::access::Access::Read)
         .await?;
 
-    // Wait for the runtime's keyhive listener to register the doc in the
-    // client's local global partition (which means the direct-RPC-delivered
-    // grant has been processed).
-    wait_for_global_part_addition(&mut rx, doc_id, Duration::from_secs(30)).await?;
+    wait_for_document_access_notification(
+        &mut access_events,
+        doc_id,
+        client.peer_id(),
+        BigRepoAccess::Read,
+    )
+    .await?;
 
     timeout(
         Duration::from_secs(5),
@@ -1398,39 +1350,24 @@ async fn granted_doc_requires_manual_sync_after_keyhive_notification() -> Res<()
     let doc_id = handle.document_id();
     let missing_doc_id = DocumentId::new([0x42; 32]);
 
-    // Ensure the global partition exists before subscribing.
-    client.big_sync_store.ensure_part(GLOBAL_PART_ID).await?;
-
-    // Subscribe to the client's global partition — the runtime's keyhive
-    // listener will add the doc here when the direct-RPC grant notification
-    // is processed.
-    let req = SubPartsRequest {
-        targets: HashSet::from([big_sync_core::rpc::SubscriptionTarget::Part {
-            part_id: GLOBAL_PART_ID,
-            cursor: 0,
-        }]),
-    };
-    let mut rx = client
-        .big_sync_store
-        .subscribe(req, client.peer_id())
-        .await??;
-
+    let (_access_registration, mut access_events) = client
+        .repo
+        .subscribe_domain_listener(BigRepoDomainFilter)
+        .await?;
     owner
         .repo
         .grant_doc_access(doc_id, client_agent, keyhive_core::access::Access::Read)
         .await?;
 
-    // Wait for the runtime's keyhive listener to register the doc in the
-    // client's global partition via the direct notification path.
-    wait_for_global_part_addition(&mut rx, doc_id, Duration::from_secs(30)).await?;
+    wait_for_document_access_notification(
+        &mut access_events,
+        doc_id,
+        client.peer_id(),
+        BigRepoAccess::Read,
+    )
+    .await?;
 
-    // The doc is now discoverable in the global partition (the keyhive
-    // listener added it), but it has no content yet — it's just a marker.
-    let parts = client.big_sync_store.obj_parts(doc_id).await?;
-    assert!(
-        parts.contains(&GLOBAL_PART_ID),
-        "granted doc should appear in the client's global partition"
-    );
+    // The grant is observable independently of payload discovery.
     assert!(
         client.repo.doc_payload_heads(doc_id).await?.is_none(),
         "doc should NOT have payload heads yet — no auto-sync has occurred"
@@ -1511,25 +1448,22 @@ async fn synced_doc_auto_propagates_subsequent_edits() -> Res<()> {
     let handle = owner.repo.create_doc(doc).await?;
     let doc_id = handle.document_id();
 
-    // Subscribe to client's global partition for the doc registration.
-    client.big_sync_store.ensure_part(GLOBAL_PART_ID).await?;
-    let req = SubPartsRequest {
-        targets: HashSet::from([big_sync_core::rpc::SubscriptionTarget::Part {
-            part_id: GLOBAL_PART_ID,
-            cursor: 0,
-        }]),
-    };
-    let mut rx = client
-        .big_sync_store
-        .subscribe(req, client.peer_id())
-        .await??;
-
+    let (_access_registration, mut access_events) = client
+        .repo
+        .subscribe_domain_listener(BigRepoDomainFilter)
+        .await?;
     owner
         .repo
         .grant_doc_access(doc_id, client_agent, keyhive_core::access::Access::Read)
         .await?;
 
-    wait_for_global_part_addition(&mut rx, doc_id, Duration::from_secs(30)).await?;
+    wait_for_document_access_notification(
+        &mut access_events,
+        doc_id,
+        client.peer_id(),
+        BigRepoAccess::Read,
+    )
+    .await?;
 
     // Initial pull.
     timeout(
@@ -1636,24 +1570,24 @@ async fn three_node_key_rotation_propagates_to_existing_reader() -> Res<()> {
     let handle = a.repo.create_doc(doc).await?;
     let doc_id = handle.document_id();
 
-    // Subscribe B to its global partition, grant, wait for registration.
-    b.big_sync_store.ensure_part(GLOBAL_PART_ID).await?;
-    let req = SubPartsRequest {
-        targets: HashSet::from([big_sync_core::rpc::SubscriptionTarget::Part {
-            part_id: GLOBAL_PART_ID,
-            cursor: 0,
-        }]),
-    };
-    let mut rx = b.big_sync_store.subscribe(req, b.peer_id()).await??;
-
+    let (_access_registration, mut access_events) = b
+        .repo
+        .subscribe_domain_listener(BigRepoDomainFilter)
+        .await?;
     tracing::info!("THREE_NODE: granting B read access");
     a.repo
         .grant_doc_access(doc_id, b_agent, keyhive_core::access::Access::Read)
         .await?;
 
-    tracing::info!("THREE_NODE: waiting for GLOBAL_PART_ID addition on B");
-    wait_for_global_part_addition(&mut rx, doc_id, Duration::from_secs(30)).await?;
-    tracing::info!("THREE_NODE: GLOBAL_PART_ID added on B, syncing doc");
+    tracing::info!("THREE_NODE: waiting for B's Keyhive access");
+    wait_for_document_access_notification(
+        &mut access_events,
+        doc_id,
+        b.peer_id(),
+        BigRepoAccess::Read,
+    )
+    .await?;
+    tracing::info!("THREE_NODE: B received Keyhive access, syncing doc");
 
     // B pulls the doc.
     timeout(
@@ -2815,6 +2749,7 @@ impl iroh::protocol::ProtocolHandler for SubductionProtocolHandler {
 
 pub(crate) struct StressBigSyncRpcClient {
     pub(crate) target_part_store: SharedPartStore,
+    pub(crate) subscriber: PeerId,
 }
 
 #[async_trait::async_trait]
@@ -2847,7 +2782,7 @@ impl big_sync::rpc::HostBigRpcClient for StressBigSyncRpcClient {
     > {
         Ok(Ok(self
             .target_part_store
-            .subscribe(req, PeerId::new([0u8; 32]))
+            .subscribe(req, self.subscriber)
             .await?))
     }
 
@@ -3136,6 +3071,7 @@ impl SyncRepoNode {
                 remote.peer_id(),
                 Arc::new(StressBigSyncRpcClient {
                     target_part_store: Arc::clone(&remote.big_sync_store),
+                    subscriber: self.peer_id(),
                 }),
                 parts,
                 HashMap::new(),
@@ -3151,6 +3087,7 @@ impl SyncRepoNode {
                 self.peer_id(),
                 Arc::new(StressBigSyncRpcClient {
                     target_part_store: Arc::clone(&self.big_sync_store),
+                    subscriber: remote.peer_id(),
                 }),
                 parts,
                 HashMap::new(),
@@ -3187,7 +3124,6 @@ impl SyncRepoNode {
             .cloned()
             .expect("connection should exist")
     }
-
 
     #[tracing::instrument(skip(self))]
     async fn shutdown(self) -> Res<()> {
@@ -4003,6 +3939,9 @@ async fn run_sync_backend_put_doc_conflict_case() -> Res<()> {
     wait_for_pair_full_sync(&server, &client).await?;
     let client_doc = client.repo.get_doc(&doc_id).await?.into_ready(doc_id)?;
     set_doc_actor(&client_doc, automerge::ActorId::from([132_u8; 16])).await?;
+    // Isolate the backend call under test before publishing the remote mutation.
+    // Otherwise BigSync can legitimately win the race and make the explicit call a no-op.
+    client.stop_big_sync_with(&server).await?;
 
     let remote_mutation = SyncMutation {
         item_idx: 21,
@@ -4024,33 +3963,18 @@ async fn run_sync_backend_put_doc_conflict_case() -> Res<()> {
         .await?;
 
     let remote_payload = server.big_sync_store.obj_payload(doc_id).await?;
-    // Capture client heads before sync_obj: the big_sync worker may have already
-    // delivered the server's mutation, in which case backend.rs's early-Noop
-    // (local_heads == remote_heads, pre-sync) is correct.
-    let local_heads_pre: Option<Arc<[automerge::ChangeHash]>> =
-        super::partition_doc_heads_payload(&client.big_sync_store, doc_id).await?;
-    let remote_heads = remote_payload.as_ref().map(super::doc_heads_from_payload);
-    client.stop_big_sync_with(&server).await?;
     let outcome = client
         .sync_backend
         .sync_obj(client_conn.peer_id(), doc_id, remote_payload.clone())
         .await?;
-    let changed_object_ok = matches!(
-        outcome,
-        big_sync::SyncTaskRunOutcome::Completion(big_sync_core::SyncTaskCompletion {
-            deets: SyncCompletionDeets::ChangedObject,
-            ..
-        })
-    );
-    let noop_ok = matches!(
-        outcome,
-        big_sync::SyncTaskRunOutcome::Completion(big_sync_core::SyncTaskCompletion {
-            deets: SyncCompletionDeets::Noop,
-            ..
-        })
-    ) && local_heads_pre.as_ref() == remote_heads.as_ref();
     assert!(
-        changed_object_ok || noop_ok,
+        matches!(
+            outcome,
+            big_sync::SyncTaskRunOutcome::Completion(big_sync_core::SyncTaskCompletion {
+                deets: SyncCompletionDeets::ChangedObject,
+                ..
+            })
+        ),
         "unexpected sync outcome for put_doc_conflict_retries_sync_and_materializes_heads: {outcome:?}"
     );
     assert_eq!(
