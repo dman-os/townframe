@@ -47,40 +47,47 @@ repos:
         language: system
         entry: deno check ./x/
         pass_filenames: false
-      # - id: lint-check
-      #   name: Ts check
-      #   language: system
-      #   entry: bash -c 'pnpm -C ./src/daybook_rn/ expo lint'
-      #   pass_filenames: false
-      #   types:
-      #     - ts
-      #     - tsx
-      #     - javascript
-      # - id: tsc-check
-      #   name: Ts check
-      #   language: system
-      #   entry: bash -c 'pnpm -C ./src/daybook_rn/ tsc --noEmit'
-      #   pass_filenames: false
-      #   types:
-      #     - ts
-      #     - tsx
-      #     - javascript
-      # - id: pnpm-install
-      #   name: Pnpm install
-      #   language: system
-      #   entry: bash -c 'pnpm -C ./src/daybook_rn/ install'
-      #   pass_filenames: false
-      #   files: |
-      #     (?x)^(
-      #         ./src/daybook_rn/pnpm-lock.yaml|
-      #         ./src/daybook_rn/package.json
-      #     )$
       - id: detekt-kotlin
         name: Detekt Kotlin
         language: system
         entry: ./x/gradle.ts detektMainDesktop --auto-correct --no-daemon
         pass_filenames: false
         files: \.kt$
+      - id: syncpack-fmt
+        name: syncpack format
+        language: system
+        entry: pnpm syncpack format
+        pass_filenames: false
+      - id: syncpack-lint
+        name: syncpack lint
+        language: system
+        entry: pnpm syncpack lint
+        pass_filenames: false
+      - id: pnpm-install
+        name: pnpm install
+        language: system
+        entry: pnpm install --frozen-lockfile
+        pass_filenames: false
+      - id: check-tsc
+        name: check tsc
+        language: system
+        entry: deno run -A ./x/check-tsc.js
+        pass_filenames: false
+      - id: biome-fmt
+        name: biome format
+        language: system
+        entry: pnpm format
+        pass_filenames: false
+      - id: biome-check
+        name: biome check
+        language: system
+        entry: pnpm check
+      - id: biome-lint
+        name: biome lint
+        language: system
+        entry: pnpm lint
+        pass_filenames: false
+
   - repo: https://github.com/doublify/pre-commit-rust
     rev: v1.0
     hooks:

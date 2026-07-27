@@ -8,3 +8,4 @@ interface poll {
 
   poll: func(in: list<borrow<pollable>>) -> list<u32>;
 }
+

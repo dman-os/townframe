@@ -2,8 +2,8 @@
 
 // FIXME: provide a devshell for building onnxcore (python and so on)
 
-import { $ } from "./utils.ts";
 import { walk } from "jsr:@std/fs@1.0.23/walk";
+import { $ } from "./utils.ts";
 
 async function removeTreeIfExists(targetPath: string) {
   for (let attempt = 0; attempt < 5; attempt++) {
@@ -15,7 +15,8 @@ async function removeTreeIfExists(targetPath: string) {
         return;
       }
       const message = error instanceof Error ? error.message : String(error);
-      const isRetryable = message.includes("Directory not empty") ||
+      const isRetryable =
+        message.includes("Directory not empty") ||
         message.includes("resource busy");
       if (!isRetryable || attempt === 4) {
         throw error;
@@ -58,13 +59,12 @@ if (!(composeProfile === "debug" || composeProfile === "release")) {
     `Unsupported DAYBOOK_COMPOSE_PROFILE=${composeProfile}; expected debug or release`,
   );
 }
-const gradleTask = composeProfile === "release"
-  ? "bundleRelease"
-  : "assembleDebug";
-const ortBuildConfig = $.env.ORT_BUILD_CONFIG ??
+const gradleTask =
+  composeProfile === "release" ? "bundleRelease" : "assembleDebug";
+const ortBuildConfig =
+  $.env.ORT_BUILD_CONFIG ??
   (composeProfile === "release" ? "Release" : "Debug");
-const androidBuildToolsVersion = $.env.ANDROID_BUILD_TOOLS_VERSION ??
-  "36.0.0";
+const androidBuildToolsVersion = $.env.ANDROID_BUILD_TOOLS_VERSION ?? "36.0.0";
 const androidSdkRoot = $.env.ANDROID_SDK_ROOT ?? $.env.ANDROID_HOME;
 if (!androidSdkRoot) {
   throw new Error("ANDROID_SDK_ROOT or ANDROID_HOME must be set");
@@ -74,7 +74,8 @@ const ortSourceTag = $.env.ORT_SOURCE_TAG ?? "v1.24.1";
 const androidApiLevel = $.env.ANDROID_API_LEVEL ?? "31";
 const androidNdkRoot = $.env.ANDROID_NDK_ROOT;
 if (!androidNdkRoot) throw new Error("ANDROID_NDK_ROOT must be set");
-const ndkRevision = $.env.ANDROID_NDK_REVISION ??
+const ndkRevision =
+  $.env.ANDROID_NDK_REVISION ??
   androidNdkRoot
     .split(/[\\/]/)
     .filter((part) => part.length > 0)
@@ -121,8 +122,7 @@ const bundletoolExtractDir = composeOutputsDir.join(
   "release",
   "composeApp-release-apks",
 );
-const apksignerPath =
-  `${androidSdkRoot}/build-tools/${androidBuildToolsVersion}/apksigner`;
+const apksignerPath = `${androidSdkRoot}/build-tools/${androidBuildToolsVersion}/apksigner`;
 
 await ortRootDir.ensureDir();
 await fetchcontentCacheDir.ensureDir();
@@ -146,18 +146,15 @@ if (!((await distCompleteFile.exists()) && (await libDirFile.exists()))) {
     await sourceCompleteFile.writeText("ok\n");
   }
 
-  await $`bash ./build.sh --update --build --config ${ortBuildConfig} --parallel --compile_no_warning_as_error --skip_submodule_sync --build_shared_lib --android --android_abi=${abi} --android_api=${androidApiLevel} --android_ndk_path=${androidNdkRoot} --cmake_extra_defines FETCHCONTENT_BASE_DIR=${fetchcontentCacheDir} onnxruntime_BUILD_UNIT_TESTS=OFF`
-    .cwd(
-      sourceDir,
-    );
+  await $`bash ./build.sh --update --build --config ${ortBuildConfig} --parallel --compile_no_warning_as_error --skip_submodule_sync --build_shared_lib --android --android_abi=${abi} --android_api=${androidApiLevel} --android_ndk_path=${androidNdkRoot} --cmake_extra_defines FETCHCONTENT_BASE_DIR=${fetchcontentCacheDir} onnxruntime_BUILD_UNIT_TESTS=OFF`.cwd(
+    sourceDir,
+  );
   const builtLibDir = sourceDir.join("build", "Android", ortBuildConfig);
   const sharedLibPaths: string[] = [];
-  for await (
-    const entry of walk(builtLibDir.toString(), {
-      includeDirs: false,
-      followSymlinks: false,
-    })
-  ) {
+  for await (const entry of walk(builtLibDir.toString(), {
+    includeDirs: false,
+    followSymlinks: false,
+  })) {
     if (!entry.isFile) continue;
     if (!entry.name.includes(".so")) continue;
     sharedLibPaths.push(entry.path);
@@ -184,11 +181,9 @@ if (
   await cleanupOrtBuildArtifacts(sourceDir);
 }
 
-await $`./gradlew ${gradleTask} -PdaybookProfile=${composeProfile} -PortLibLocation=${
-  (
-    await libDirFile.readText()
-  ).trim()
-} -PortLibProfile=${
+await $`./gradlew ${gradleTask} -PdaybookProfile=${composeProfile} -PortLibLocation=${(
+  await libDirFile.readText()
+).trim()} -PortLibProfile=${
   $.env.ORT_LIB_PROFILE ?? ortBuildConfig
 } -PortPreferDynamicLink=${$.env.ORT_PREFER_DYNAMIC_LINK ?? "1"}`
   .cwd($.relativeDir("../src/daybook_compose/"))

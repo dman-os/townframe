@@ -6,6 +6,7 @@ members = [
   "./src/big_sync/",
   "./src/big_sync_core/",
   "./src/big_repo/",
+  "./src/btress_sysadmin/",
   "./src/daybook_cli",
   "./src/daybook_core",
   "./src/daybook_ffi",
@@ -133,12 +134,13 @@ fs4 = "0.13.1"
 
 #
 # http
-axum = { version = "0.8.6", default-features = false }
-axum-extra = { version = "0.10.1", default-features = false }
+axum = { version = "0.8.9", default-features = false }
+axum-extra = { version = "0.12.6", default-features = false }
 http = "1"
 utoipa = { version = "5.4.0", features = ["debug", "uuid", "time", "smallvec",  "preserve_order"] }
 # utoipa-swagger-ui = "9"
 tower = "0.5"
+tower-http = "0.7"
 reqwest = { version = "0.12", default-features = false, features = ["charset", "http2", "system-proxy", "json", "stream", "rustls-tls"] }
 
 #
@@ -191,9 +193,10 @@ uniffi = { version = "0.31.0" }
 
 #
 # wasm
-wasmtime = "45"
-wash-runtime = { git = "https://github.com/dman-os/wasmCloud", rev = "61235c15f7157cd558f847317eaa4d1d365944f2" }
-wit-bindgen = "0.55.0"
+wasmtime = "47"
+wash-runtime = { git = "https://github.com/wasmCloud/wasmCloud", rev = "44fc4cf76a49a599b42dcb1466586b39f09ef658" }
+wit-bindgen = "0.60.0"
+wstd = "0.6.8"
 # wash-runtime = { path = "../wash/crates/wash-runtime/"}
 
 #
@@ -217,12 +220,17 @@ irpc-iroh = "0.17.0"
 # xilem = { path = "../xilem/xilem/" }
 
 [patch.crates-io]
-autosurgeon = { git = "https://github.com/dman-os/autosurgeon", rev = "6a1df66f667667f1d14bc2272c4d426815de66b8" }
-autosurgeon-derive = { git = "https://github.com/dman-os/autosurgeon", rev = "6a1df66f667667f1d14bc2272c4d426815de66b8" }
+autosurgeon = { git = "https://github.com/dman-os/autosurgeon", rev = "274285c6007cccf4e5eb21a96bd1152ee0c6576c" }
+autosurgeon-derive = { git = "https://github.com/dman-os/autosurgeon", rev = "274285c6007cccf4e5eb21a96bd1152ee0c6576c" }
+automerge = { git = "https://github.com/automerge/automerge", branch = "fragments" }
 
-# automerge = { git = "https://github.com/automerge/automerge", branch = "fragments" }
-# # sqlite-vec = { git = "https://github.com/vlasky/sqlite-vec", rev = "9facf1ab84f2a360c0f1e62db3a7f3eca5bc099a" }
-# # #
+# leptos = { path = "../leptos/leptos/" }
+# leptos_meta = { path = "../leptos/meta/" }
+# leptos_router = { path = "../leptos/router/" }
+# leptos_axum = { path = "../leptos/integrations/axum/" }
+
+# sqlite-vec = { git = "https://github.com/vlasky/sqlite-vec", rev = "9facf1ab84f2a360c0f1e62db3a7f3eca5bc099a" }
+# #
 # [patch."https://github.com/dman-os/subduction"]
 # subduction_core = { path = "../subduction/subduction_core" }
 # subduction_iroh = { path = "../subduction/subduction_iroh" }
@@ -238,10 +246,8 @@ autosurgeon-derive = { git = "https://github.com/dman-os/autosurgeon", rev = "6a
 # keyhive_core = { path = "../keyhive/keyhive_core" }
 # beekem = { path = "../keyhive/beekem" }
 
-# The default profile is optimized for Wasm builds because
-# that's what [Trunk reads](https://github.com/trunk-rs/trunk/issues/605).
 # Optimize for size in the wasm-release profile to reduce load times and bandwidth usage on web.
-# NOTE: the comment above is now stale
+# # NOTE: the comment above is now stale
 [profile.wasm-release]
 inherits = "release"
 # Compile the entire crate as one unit.
@@ -256,9 +262,9 @@ lto = "thin"
 opt-level = "s"
 # opt-level = 'z'
 # Strip all debugging information from the binary to slightly reduce file size.
-strip = "debuginfo"
-panic = "abort"
-
+# strip = "debuginfo"
+# panic = "abort"
+debug = true
 
 [workspace.lints]
 clippy.clone_on_ref_ptr = "warn"
@@ -266,72 +272,3 @@ clippy.let_underscore_must_use = "warn"
 clippy.let_underscore_untyped = "deny"
 rust.let_underscore_drop = "deny"
 # clippy.used_underscore_binding = "warn"
-
-[[workspace.metadata.leptos]]
-name = "wflow_webui"
-# the package in the workspace that contains the server binary (binary crate)
-bin-package = "wflow_webui"
-# the package in the workspace that contains the frontend wasm binary (library crate)
-lib-package = "wflow_webui"
-
-# The name used by wasm-bindgen/cargo-leptos for the JS/WASM bundle. Defaults to the crate name
-# output-name = "isis"
-
-# The site root folder is where cargo-leptos generate all output. WARNING: all content of this folder will be erased on a rebuild. Use it in your server setup.
-site-root = "./target/site"
-
-# The site-root relative folder where all compiled output (JS, WASM and CSS) is written
-# Defaults to pkg
-site-pkg-dir = "pkg"
-
-# [Optional] The source CSS file. If it ends with .sass or .scss then it will be compiled by dart-sass into CSS. The CSS is optimized by Lightning CSS before being written to <site-root>/<site-pkg>/app.css
-style-file = "src/wflow_webui/styles/main.scss"
-tailwind-input-file = "src/wflow_webui/styles/tailwind.css"
-# Assets source dir. All files found here will be copied and synchronized to site-root.
-# The assets-dir cannot have a sub directory with the same name/path as site-pkg-dir.
-#
-# Optional. Env: LEPTOS_ASSETS_DIR.
-# assets-dir = "assets"
-
-# The IP and port (ex: 127.0.0.1:3000) where the server serves the content. Use it in your server setup.
-site-addr = "127.0.0.1:3000"
-
-# The port to use for automatic reload monitoring
-reload-port = 3001
-
-# [Optional] Command to use when running end2end tests. It will run in the end2end dir.
-#   [Windows] for non-WSL use "npx.cmd playwright test"
-#   This binary name can be checked in Powershell with Get-Command npx
-end2end-cmd = "npx playwright test"
-end2end-dir = "src/end2end"
-
-#  The browserlist query used for optimizing the CSS.
-browserquery = "defaults"
-
-# The environment Leptos will run in, usually either "DEV" or "PROD"
-env = "DEV"
-
-# The features to use when compiling the bin target
-#
-# Optional. Can be over-ridden with the command line parameter --bin-features
-bin-features = ["ssr"]
-
-# If the --no-default-features flag should be used when compiling the bin target
-#
-# Optional. Defaults to false.
-bin-default-features = false
-
-# The features to use when compiling the lib target
-#
-# Optional. Can be over-ridden with the command line parameter --lib-features
-lib-features = ["hydrate"]
-
-# If the --no-default-features flag should be used when compiling the lib target
-#
-# Optional. Defaults to false.
-lib-default-features = false
-
-# The profile to use for the lib target when compiling for release
-#
-# Optional. Defaults to "release".
-lib-profile-release = "wasm-release"

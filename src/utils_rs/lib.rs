@@ -145,7 +145,7 @@ pub fn setup_tracing() -> Res<()> {
     };
 
     #[cfg(target_arch = "wasm32")]
-    let filter: Option<String> = None;
+    let filter: Option<String> = Some("trace".into());
 
     let filter = filter.unwrap_or_else(||
         "info,samod_core=warn,ort::logging=warn,netlink_packet_route::link::buffer_tool=error,iroh_docs::store::fs::migrations=warn,subduction_core=warn,subduction_keyhive=warn,keyhive_core=warn,keyhive_crypto=warn,beekem=warn".into()
@@ -173,7 +173,7 @@ pub fn setup_tracing() -> Res<()> {
         color_eyre::config::HookBuilder::default().try_into_hooks()?;
     std::panic::set_hook(Box::new(move |panic_info| {
         let report = eyre_panic_hook.panic_report(panic_info);
-        tracing::error!("{report}");
+        println!("{report}");
 
         // - Tokio does not exit the process when a task panics, so we define a custom
         //   panic hook to implement this behaviour.

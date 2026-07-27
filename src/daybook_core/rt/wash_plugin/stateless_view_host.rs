@@ -2,6 +2,7 @@ use crate::interlude::*;
 
 use wash_runtime::engine::ctx::SharedCtx as SharedWashCtx;
 use wash_runtime::plugin::HostPlugin;
+use wash_runtime::plugin::WitInterfaces;
 use wash_runtime::wit::{WitInterface, WitWorld};
 
 use wash_plugin_wflow::{service_host, service_metastore, service_partition_host};
@@ -39,7 +40,7 @@ impl HostPlugin for StatelessViewPlugin {
     async fn on_workload_bind(
         &self,
         _workload: &wash_runtime::engine::workload::UnresolvedWorkload,
-        _interface_configs: std::collections::HashSet<WitInterface>,
+        _interfaces: WitInterfaces<'_>,
     ) -> anyhow::Result<()> {
         Ok(())
     }
@@ -47,7 +48,7 @@ impl HostPlugin for StatelessViewPlugin {
     async fn on_workload_item_bind<'a>(
         &self,
         item: &mut wash_runtime::engine::workload::WorkloadItem<'a>,
-        _interfaces: std::collections::HashSet<wash_runtime::wit::WitInterface>,
+        _interfaces: WitInterfaces<'_>,
     ) -> anyhow::Result<()> {
         let world = item.world();
         for iface in world.imports {
@@ -86,7 +87,7 @@ impl HostPlugin for StatelessViewPlugin {
     async fn on_workload_unbind(
         &self,
         _workload_id: &str,
-        _interfaces: std::collections::HashSet<WitInterface>,
+        _interfaces: WitInterfaces<'_>,
     ) -> anyhow::Result<()> {
         Ok(())
     }

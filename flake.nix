@@ -192,6 +192,11 @@
             protobuf
             mold
             deno
+
+            pnpm
+            nodejs_24
+            biome
+
             libarchive
             prek
           ];
@@ -233,11 +238,16 @@
             tokio-console
             infisical
             cargo-ndk
+
+            wasm-bindgen-cli_0_2_126
+            binaryen
             wac-cli
             wasmtime
             wasm-tools
             cargo-leptos
             trunk
+            tailwindcss_4
+            watchexec
 
             # maestro
           ];

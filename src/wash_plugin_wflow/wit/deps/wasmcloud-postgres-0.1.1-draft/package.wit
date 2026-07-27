@@ -336,3 +336,4 @@ interface prepared {
   /// Execute a prepared statement, returning the number of rows affected
   exec: func(stmt-token: prepared-statement-token, params: list<pg-value>) -> result<u64, prepared-statement-exec-error>;
 }
+

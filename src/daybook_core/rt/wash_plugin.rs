@@ -346,6 +346,7 @@ use daybook_types::doc::ChangeHashSet;
 use daybook_types::doc::DocId;
 use daybook_types::wit::doc as wit_doc;
 use wash_runtime::engine::ctx::SharedCtx as SharedWashCtx;
+use wash_runtime::plugin::WitInterfaces;
 use wash_runtime::wit::{WitInterface, WitWorld};
 
 pub struct DaybookPlugin {
@@ -381,10 +382,7 @@ impl DaybookPlugin {
     pub const ID: &str = "townframe:daybook";
 
     fn from_ctx(wcx: &SharedWashCtx) -> Arc<Self> {
-        let Some(this) = wcx.active_ctx.get_plugin::<Self>(Self::ID) else {
-            panic!("plugin not on ctx");
-        };
-        this
+        wcx.active_ctx.get_plugin::<Self>(Self::ID)
     }
 
     async fn get_doc(
@@ -453,7 +451,7 @@ impl wash_runtime::plugin::HostPlugin for DaybookPlugin {
     async fn on_workload_bind(
         &self,
         _workload: &wash_runtime::engine::workload::UnresolvedWorkload,
-        _interface_configs: std::collections::HashSet<WitInterface>,
+        _interface_configs: WitInterfaces<'_>,
     ) -> anyhow::Result<()> {
         Ok(())
     }
@@ -461,7 +459,7 @@ impl wash_runtime::plugin::HostPlugin for DaybookPlugin {
     async fn on_workload_item_bind<'a>(
         &self,
         item: &mut wash_runtime::engine::workload::WorkloadItem<'a>,
-        _interfaces: std::collections::HashSet<wash_runtime::wit::WitInterface>,
+        _interfaces: WitInterfaces<'_>,
     ) -> anyhow::Result<()> {
         let world = item.world();
         for iface in world.imports {
@@ -531,7 +529,7 @@ impl wash_runtime::plugin::HostPlugin for DaybookPlugin {
     async fn on_workload_unbind(
         &self,
         workload_id: &str,
-        _interfaces: std::collections::HashSet<WitInterface>,
+        _interfaces: WitInterfaces<'_>,
     ) -> anyhow::Result<()> {
         let _workload_id = workload_id;
         Ok(())

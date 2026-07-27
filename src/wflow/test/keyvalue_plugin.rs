@@ -9,6 +9,8 @@ use std::collections::{HashMap, HashSet};
 
 const WASI_KEYVALUE_ID: &str = "wasi-keyvalue";
 use tokio::sync::RwLock;
+use wash_runtime::engine::workload::WorkloadItem;
+use wash_runtime::plugin::WitInterfaces;
 use wasmtime::component::{HasSelf, Resource};
 
 use wash_runtime::engine::ctx::{Ctx as WashCtx, SharedCtx as SharedWashCtx};
@@ -108,11 +110,7 @@ impl bindings::wasi::keyvalue::store::Host for SharedWashCtx {
         &mut self,
         identifier: String,
     ) -> wasmtime::Result<Result<Resource<BucketHandle>, StoreError>> {
-        let Some(plugin) = self.active_ctx.get_plugin::<WasiKeyvalue>(WASI_KEYVALUE_ID) else {
-            return Ok(Err(StoreError::Other(
-                "keyvalue plugin not available".to_string(),
-            )));
-        };
+        let plugin = self.active_ctx.get_plugin::<WasiKeyvalue>(WASI_KEYVALUE_ID);
 
         let mut storage = plugin.storage.write().await;
         let workload_storage = storage
@@ -143,11 +141,7 @@ impl bindings::wasi::keyvalue::store::HostBucket for SharedWashCtx {
     ) -> wasmtime::Result<Result<Option<Vec<u8>>, StoreError>> {
         let bucket_name = self.table.get(&bucket)?;
 
-        let Some(plugin) = self.active_ctx.get_plugin::<WasiKeyvalue>(WASI_KEYVALUE_ID) else {
-            return Ok(Err(StoreError::Other(
-                "keyvalue plugin not available".to_string(),
-            )));
-        };
+        let plugin = self.active_ctx.get_plugin::<WasiKeyvalue>(WASI_KEYVALUE_ID);
 
         let storage = plugin.storage.read().await;
         let empty_map = HashMap::new();
@@ -174,11 +168,7 @@ impl bindings::wasi::keyvalue::store::HostBucket for SharedWashCtx {
     ) -> wasmtime::Result<Result<(), StoreError>> {
         let bucket_name = self.table.get(&bucket)?;
 
-        let Some(plugin) = self.active_ctx.get_plugin::<WasiKeyvalue>(WASI_KEYVALUE_ID) else {
-            return Ok(Err(StoreError::Other(
-                "keyvalue plugin not available".to_string(),
-            )));
-        };
+        let plugin = self.active_ctx.get_plugin::<WasiKeyvalue>(WASI_KEYVALUE_ID);
 
         let mut storage = plugin.storage.write().await;
         let workload_storage = storage
@@ -203,11 +193,7 @@ impl bindings::wasi::keyvalue::store::HostBucket for SharedWashCtx {
     ) -> wasmtime::Result<Result<(), StoreError>> {
         let bucket_name = self.table.get(&bucket)?;
 
-        let Some(plugin) = self.active_ctx.get_plugin::<WasiKeyvalue>(WASI_KEYVALUE_ID) else {
-            return Ok(Err(StoreError::Other(
-                "keyvalue plugin not available".to_string(),
-            )));
-        };
+        let plugin = self.active_ctx.get_plugin::<WasiKeyvalue>(WASI_KEYVALUE_ID);
 
         let mut storage = plugin.storage.write().await;
         let workload_storage = storage
@@ -232,11 +218,7 @@ impl bindings::wasi::keyvalue::store::HostBucket for SharedWashCtx {
     ) -> wasmtime::Result<Result<bool, StoreError>> {
         let bucket_name = self.table.get(&bucket)?;
 
-        let Some(plugin) = self.active_ctx.get_plugin::<WasiKeyvalue>(WASI_KEYVALUE_ID) else {
-            return Ok(Err(StoreError::Other(
-                "keyvalue plugin not available".to_string(),
-            )));
-        };
+        let plugin = self.active_ctx.get_plugin::<WasiKeyvalue>(WASI_KEYVALUE_ID);
 
         let storage = plugin.storage.read().await;
         let empty_map = HashMap::new();
@@ -257,11 +239,7 @@ impl bindings::wasi::keyvalue::store::HostBucket for SharedWashCtx {
     ) -> wasmtime::Result<Result<KeyResponse, StoreError>> {
         let bucket_name = self.table.get(&bucket)?;
 
-        let Some(plugin) = self.active_ctx.get_plugin::<WasiKeyvalue>(WASI_KEYVALUE_ID) else {
-            return Ok(Err(StoreError::Other(
-                "keyvalue plugin not available".to_string(),
-            )));
-        };
+        let plugin = self.active_ctx.get_plugin::<WasiKeyvalue>(WASI_KEYVALUE_ID);
 
         let storage = plugin.storage.read().await;
         let empty_map = HashMap::new();
@@ -300,7 +278,7 @@ impl bindings::wasi::keyvalue::store::HostBucket for SharedWashCtx {
 
     async fn drop(&mut self, rep: Resource<BucketHandle>) -> wasmtime::Result<()> {
         tracing::debug!(
-            workload_id = self.active_ctx.id,
+            workload_id = %self.active_ctx.id,
             resource_id = ?rep,
             "Dropping bucket resource"
         );
@@ -319,11 +297,7 @@ impl bindings::wasi::keyvalue::atomics::Host for SharedWashCtx {
     ) -> wasmtime::Result<Result<u64, StoreError>> {
         let bucket_name = self.table.get(&bucket)?;
 
-        let Some(plugin) = self.active_ctx.get_plugin::<WasiKeyvalue>(WASI_KEYVALUE_ID) else {
-            return Ok(Err(StoreError::Other(
-                "keyvalue plugin not available".to_string(),
-            )));
-        };
+        let plugin = self.active_ctx.get_plugin::<WasiKeyvalue>(WASI_KEYVALUE_ID);
 
         let mut storage = plugin.storage.write().await;
         let workload_storage = storage
@@ -371,11 +345,7 @@ impl bindings::wasi::keyvalue::batch::Host for SharedWashCtx {
     ) -> wasmtime::Result<Result<Vec<Option<(String, Vec<u8>)>>, StoreError>> {
         let bucket_name = self.table.get(&bucket)?;
 
-        let Some(plugin) = self.active_ctx.get_plugin::<WasiKeyvalue>(WASI_KEYVALUE_ID) else {
-            return Ok(Err(StoreError::Other(
-                "keyvalue plugin not available".to_string(),
-            )));
-        };
+        let plugin = self.active_ctx.get_plugin::<WasiKeyvalue>(WASI_KEYVALUE_ID);
 
         let storage = plugin.storage.read().await;
         let empty_map = HashMap::new();
@@ -410,11 +380,7 @@ impl bindings::wasi::keyvalue::batch::Host for SharedWashCtx {
     ) -> wasmtime::Result<Result<(), StoreError>> {
         let bucket_name = self.table.get(&bucket)?;
 
-        let Some(plugin) = self.active_ctx.get_plugin::<WasiKeyvalue>(WASI_KEYVALUE_ID) else {
-            return Ok(Err(StoreError::Other(
-                "keyvalue plugin not available".to_string(),
-            )));
-        };
+        let plugin = self.active_ctx.get_plugin::<WasiKeyvalue>(WASI_KEYVALUE_ID);
 
         let mut storage = plugin.storage.write().await;
         let workload_storage = storage
@@ -441,11 +407,7 @@ impl bindings::wasi::keyvalue::batch::Host for SharedWashCtx {
     ) -> wasmtime::Result<Result<(), StoreError>> {
         let bucket_name = self.table.get(&bucket)?;
 
-        let Some(plugin) = self.active_ctx.get_plugin::<WasiKeyvalue>(WASI_KEYVALUE_ID) else {
-            return Ok(Err(StoreError::Other(
-                "keyvalue plugin not available".to_string(),
-            )));
-        };
+        let plugin = self.active_ctx.get_plugin::<WasiKeyvalue>(WASI_KEYVALUE_ID);
 
         let mut storage = plugin.storage.write().await;
         let workload_storage = storage
@@ -483,8 +445,8 @@ impl HostPlugin for WasiKeyvalue {
 
     async fn on_workload_item_bind<'a>(
         &self,
-        item: &mut wash_runtime::engine::workload::WorkloadItem<'a>,
-        interfaces: std::collections::HashSet<wash_runtime::wit::WitInterface>,
+        item: &mut WorkloadItem<'a>,
+        interfaces: WitInterfaces<'_>,
     ) -> anyhow::Result<()> {
         // Check if any of the interfaces are wasi:keyvalue related
         let has_keyvalue = interfaces
@@ -536,7 +498,7 @@ impl HostPlugin for WasiKeyvalue {
     async fn on_workload_unbind(
         &self,
         workload_id: &str,
-        _interfaces: std::collections::HashSet<wash_runtime::wit::WitInterface>,
+        _interfaces: WitInterfaces<'_>,
     ) -> anyhow::Result<()> {
         // Clean up storage for this workload
         let mut storage = self.storage.write().await;
