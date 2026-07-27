@@ -643,8 +643,15 @@ impl BigSyncMachine {
         if let Some(cursor) = cursor {
             match last_cmd {
                 BigSyncMachineCommand::SetPartCursor { .. } => unreachable!(),
-                BigSyncMachineCommand::RemoveObjFromPart { obj_id, .. }
-                | BigSyncMachineCommand::AddObjToPart { obj_id, .. } => {
+                BigSyncMachineCommand::RemoveObjFromPart { obj_id, part_id }
+                | BigSyncMachineCommand::AddObjToPart { obj_id, part_id } => {
+                    tracing::debug!(
+                        peer_id = %peer_id,
+                        obj_id = %obj_id,
+                        part_id = %part_id,
+                        cursor,
+                        "big sync membership command completed",
+                    );
                     let peer_state = self.peers.get_mut(&peer_id).expect(ERROR_UNRECONIZED);
                     peer_state.cursor_machine.on_obj_sync_job_evt(
                         obj_id,
@@ -1172,9 +1179,16 @@ impl BigSyncMachine {
         }
 
         if let SubEvent::ReplayComplete = &msg.evt {
+            tracing::debug!(
+                peer_id = %msg.peer_id,
+                task_id = msg.task_id,
+                part_count = worker.parts.len(),
+                object_count = worker.objects.len(),
+                "big sync peer replay completed",
+            );
             self.stat_machine.mark_peer_replay_done(msg.peer_id, true);
             return;
-        };
+        }
         peer_state
             .cursor_machine
             .on_subscription_evt(msg.evt, &mut peer_state.cursors_cmd_buf);
@@ -1197,6 +1211,13 @@ impl BigSyncMachine {
         if worker.task_id != task_id {
             return;
         }
+        tracing::debug!(
+            peer_id = %peer_id,
+            task_id,
+            retry = ?retry,
+            deets = ?deets,
+            "big sync peer replay failed; rescheduling",
+        );
         match deets {
             PeerReplayWorkerErrorDeets::SubError(ListPartsError::UnkownParts { unkown_parts }) => {
                 let (parts, objects, remaining_part_count) = {
@@ -1684,7 +1705,15 @@ impl BigSyncMachine {
         if worker.task_id != evt.task_id {
             return;
         }
-
+        tracing::debug!(
+            peer_id = %evt.peer_id,
+            task_id = evt.task_id,
+            obj_id = %completion.obj_id,
+            deets = ?completion.deets,
+            cursors = ?worker.cursors,
+            part_hints = ?worker.part_hints,
+            "big sync object task completed",
+        );
         let (completion, part_hints) = {
             let Some(peer_state) = self.peers.get_mut(&evt.peer_id) else {
                 return;
@@ -1764,7 +1793,15 @@ impl BigSyncMachine {
                 worker.part_hints.clone(),
             )
         };
-
+        tracing::debug!(
+            peer_id = %evt.peer_id,
+            task_id = evt.task_id,
+            obj_id = %evt.obj_id,
+            retry = ?retry,
+            error = %evt.err,
+            part_hints = ?part_hints,
+            "big sync object task failed; rescheduling",
+        );
         let Some(peer_state) = self.peers.get_mut(&evt.peer_id) else {
             return;
         };
@@ -1802,6 +1839,14 @@ impl BigSyncMachine {
                 worker.part_hints.clone(),
             )
         };
+        tracing::debug!(
+            peer_id = %evt.peer_id,
+            task_id = evt.task_id,
+            obj_id = %evt.obj_id,
+            retry = ?retry,
+            part_hints = ?part_hints,
+            "big sync object task became stale; rescheduling",
+        );
 
         let Some(peer_state) = self.peers.get_mut(&evt.peer_id) else {
             return;

@@ -102,7 +102,7 @@ pub async fn cli() -> Res<()> {
     let post_grant_pcs: Option<Vec<u8>> = None;
 
     let doc_id = {
-        let kh = alice_kh.lock().await;
+        let kh = alice_kh;
         let doc = kh.generate_doc(vec![], nonempty![[0xAAu8; 32]]).await?;
         let doc_id = doc.lock().await.doc_id();
         let doc_id_bytes = doc_id.to_bytes();
@@ -198,7 +198,7 @@ pub async fn cli() -> Res<()> {
 
     // Bob: try to decrypt
     {
-        let kh = bob_kh.lock().await;
+        let kh = bob_kh;
         if let Some(doc) = kh.get_document(doc_id).await {
             let mut locked = doc.lock().await;
             println!("Bob's doc cgka: {}", locked.cgka().is_ok());

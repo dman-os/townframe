@@ -5,8 +5,8 @@
 //! | Test | Invariant |
 //! |------|-----------|
 //! | `closed_connection_errors_cleanly` | A stopped connection returns typed errors for both keyhive and doc syncs, rather than panicking or hanging. |
-//! | `unauthorized_peer_no_plaintext_leak` | A peer without document access receives a structured policy rejection on sync and never materialises plaintext. |
-//! | `missing_doc_sync_returns_not_found` | Syncing a document id that does not exist on either side returns a structured `DocumentNotFound` policy rejection. |
+//! | `unauthorized_peer_no_plaintext_leak` | A peer without document access receives an `Unauthorized` sync result and never materialises plaintext. |
+//! | `missing_doc_sync_returns_unauthorized` | Syncing a document id that does not exist on either side returns the wire-level `Unauthorized` result. |
 //! | `duplicate_concurrent_sync_converges` | Two concurrent `sync_doc_with_peer` calls converge without duplicate state or errors. |
 //! | `reconnect_preserves_live_handles` | After connection loss + reconnect, previously acquired live handles remain valid and can read new content. |
 //! | `interrupted_sync_retry_succeeds` | A sync that fails due to closed connection can be retried after reconnect. |
@@ -127,8 +127,8 @@ async fn tier9_closed_connection_errors_cleanly() -> crate::Res<()> {
 // ─── Unauthorized peer → no plaintext leak ────────────────────────────────
 //
 // A peer that has never been granted access to a document must not be able
-// to materialise plaintext. The sync returns a structured authorization
-// error, and `get_doc` returns `DocLookup::Missing` or `PendingMaterialization`.
+// to materialise plaintext. The sync returns an unauthorized error, and
+// `get_doc` returns `DocLookup::Missing` or `PendingMaterialization`.
 #[tokio::test(flavor = "multi_thread")]
 async fn tier9_unauthorized_peer_no_plaintext_leak() -> crate::Res<()> {
     utils_rs::testing::setup_tracing_once();
@@ -208,11 +208,8 @@ async fn tier9_unauthorized_peer_no_plaintext_leak() -> crate::Res<()> {
         }
         Err(err) => {
             assert!(
-                matches!(
-                    err,
-                    SyncDocError::Policy(crate::SyncDocPolicyError::InsufficientAccess)
-                ),
-                "unauthorized doc sync should fail with policy InsufficientAccess, got {err:?}"
+                matches!(err, SyncDocError::Unauthorized),
+                "unauthorized doc sync should return Unauthorized, got {err:?}"
             );
         }
     }
@@ -238,12 +235,12 @@ async fn tier9_unauthorized_peer_no_plaintext_leak() -> crate::Res<()> {
     Ok(())
 }
 
-// ─── Missing doc sync returns structured policy rejection ─────────────────
+// ─── Missing doc sync returns unauthorized ─────────────────────────────────
 //
-// Syncing a document id that does not exist on either peer must return a
-// structured `DocumentNotFound` policy result, not hang or panic.
+// Syncing a document id that does not exist on either peer must return the
+// wire-level Unauthorized result, not hang or panic.
 #[tokio::test(flavor = "multi_thread")]
-async fn tier9_missing_doc_sync_returns_not_found() -> crate::Res<()> {
+async fn tier9_missing_doc_sync_returns_unauthorized() -> crate::Res<()> {
     utils_rs::testing::setup_tracing_once();
     let pair = Pair::boot(135, 136, "Owner", "Reader").await?;
 
@@ -267,19 +264,15 @@ async fn tier9_missing_doc_sync_returns_not_found() -> crate::Res<()> {
         "non-existent doc must be Missing on the reader"
     );
 
-    // Attempting to sync a non-existent doc must return the remote policy's
-    // structured DocumentNotFound result.
+    // Attempting to sync a non-existent doc returns the remote Unauthorized result.
     let err = pair
         .left_conn()
         .sync_doc_with_peer(fake_doc_id, Some(Duration::from_secs(10)))
         .await
         .expect_err("syncing a non-existent doc must fail");
     assert!(
-        matches!(
-            err,
-            SyncDocError::Policy(crate::SyncDocPolicyError::DocumentNotFound)
-        ),
-        "sync of non-existent doc must return policy DocumentNotFound, got {err:?}"
+        matches!(err, SyncDocError::Unauthorized),
+        "sync of a non-existent doc must return Unauthorized, got {err:?}"
     );
 
     Ok(())

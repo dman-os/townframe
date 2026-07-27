@@ -1107,11 +1107,8 @@ async fn group_member_reads_doc_while_non_member_stays_unauthorized() -> Res<()>
         },
         Err(err) => {
             assert!(
-                matches!(
-                    err,
-                    SyncDocError::Policy(crate::SyncDocPolicyError::InsufficientAccess)
-                ),
-                "outsider sync should fail with policy detail, got {err:?}"
+                matches!(err, SyncDocError::Unauthorized),
+                "outsider doc sync should return Unauthorized, got {err:?}"
             );
         }
     }
@@ -1305,11 +1302,8 @@ async fn unauthorized_peer_does_not_materialize_plaintext_without_grant() -> Res
         }
         Err(err) => {
             assert!(
-                matches!(
-                    err,
-                    SyncDocError::Policy(crate::SyncDocPolicyError::InsufficientAccess)
-                ),
-                "unauthorized doc sync should fail with policy detail, got {err:?}"
+                matches!(err, SyncDocError::Unauthorized),
+                "unauthorized doc sync should return Unauthorized, got {err:?}"
             );
         }
     }

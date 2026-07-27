@@ -110,7 +110,40 @@ impl BigRepoStressFixture {
         }
         Ok(result)
     }
-
+    /// Returns the local receive cursor for every connected peer and sync part.
+    async fn collect_peer_cursors(
+        &self,
+        node: &Node,
+        parts: &[PartId],
+    ) -> Res<BTreeMap<PeerId, BTreeMap<PartId, u64>>> {
+        let mut result = BTreeMap::new();
+        for peer_id in node.connected_peer_ids().await {
+            let mut peer_cursors = BTreeMap::new();
+            for part_id in parts {
+                peer_cursors.insert(
+                    *part_id,
+                    node.store.get_peer_part_cursor(peer_id, *part_id).await?,
+                );
+            }
+            result.insert(peer_id, peer_cursors);
+        }
+        Ok(result)
+    }
+    async fn collect_local_cursors(
+        &self,
+        node: &Node,
+        parts: &[PartId],
+    ) -> Res<BTreeMap<PartId, u64>> {
+        let summaries = node
+            .store
+            .summarize_parts(parts.iter().copied().collect())
+            .await?
+            .map_err(|err| crate::ferr!("unable to summarize local sync parts: {err:?}"))?;
+        Ok(summaries
+            .into_iter()
+            .map(|(part_id, summary)| (part_id, summary.latest_cursor))
+            .collect())
+    }
     async fn edit_group(&self, node: &Node) -> Res<BigKeyhiveGroup> {
         if let Some(group) = self
             .shared_edit_groups
@@ -651,13 +684,22 @@ impl StressFixture for BigRepoStressFixture {
                 ));
             }
         }
-
         if sedimentree_mismatches.is_empty() && materialized_mismatches.is_empty() {
             return Ok(());
         }
-
+        let peer_cursors = try_join_all(nodes.iter().map(|node| async {
+            Ok::<_, crate::interlude::eyre::Report>({
+                let local_cursors = self.collect_local_cursors(node, &parts).await?;
+                let receive_cursors = self.collect_peer_cursors(node, &parts).await?;
+                format!(
+                    "node={} local_cursors={local_cursors:?} receive_cursors={receive_cursors:?}",
+                    node.peer_id(),
+                )
+            })
+        }))
+        .await?;
         Err(crate::ferr!(
-            "stress cluster did not converge after local barriers:\nsedimentree mismatches:\n{}\nmaterialized mismatches:\n{}",
+            "stress cluster did not converge after local barriers:\nsedimentree mismatches:\n{}\nmaterialized mismatches:\n{}\npeer cursors:\n{}",
             if sedimentree_mismatches.is_empty() {
                 "  none".to_owned()
             } else {
@@ -676,6 +718,11 @@ impl StressFixture for BigRepoStressFixture {
                     .collect::<Vec<_>>()
                     .join("\n")
             },
+            peer_cursors
+                .iter()
+                .map(|cursors| format!("  {cursors}"))
+                .collect::<Vec<_>>()
+                .join("\n"),
         ))
     }
 }

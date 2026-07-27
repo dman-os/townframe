@@ -125,27 +125,31 @@ pub async fn assert_reader_has_access(repo: &crate::BigRepo, doc_id: DocumentId)
         .expect("document id must be a verifying key");
     let agent = keyhive_core::principal::identifier::Identifier::from(agent_key);
     let document = keyhive_core::principal::identifier::Identifier::from(doc_key);
-    if repo
-        .keyhive()
-        .agent_access_on(&agent, document)
-        .await
-        .is_some()
-    {
-        Ok(())
-    } else {
-        let effective_members = repo.keyhive().agents_for_membered(document).await;
-        tracing::error!(
-            peer = %peer,
-            ?doc_id,
-            ?effective_members,
-            "Keyhive access assertion failed after synchronization"
-        );
-        Err(crate::ferr!(
-            "{} has no access on {} after grant + keyhive sync",
-            log_nickname::nickname(&peer),
-            log_nickname::nickname(&peer), // doc_id has no nickname; peer stands in
-        ))
+    let access = repo.keyhive().agent_access_on(&agent, document).await;
+    if access.is_some() {
+        return Ok(());
     }
+
+    let effective_members = repo.keyhive().agents_for_membered(document).await;
+    let membered_for_agent = repo.keyhive().membered_for_agent(&agent).await;
+    let agent_bytes = agent.to_bytes();
+    let doc_bytes = doc_id.into_bytes();
+    tracing::error!(
+        peer = %peer,
+        ?doc_id,
+        ?agent_bytes,
+        ?access,
+        effective_member_access = ?effective_members.get(&agent_bytes),
+        effective_members = ?effective_members,
+        membered_for_agent_doc_access = ?membered_for_agent.get(&doc_bytes),
+        membered_for_agent_count = membered_for_agent.len(),
+        "Keyhive access assertion failed after synchronization"
+    );
+    Err(crate::ferr!(
+        "{} has no access on {} after grant + keyhive sync",
+        log_nickname::nickname(&peer),
+        log_nickname::nickname(&peer), // doc_id has no nickname; peer stands in
+    ))
 }
 
 /// Sync a document and expect it to be fully materialized (Ready) on `repo`.
