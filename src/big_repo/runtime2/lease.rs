@@ -1,5 +1,5 @@
-//! Leases for runtime2. No Tokio types — uses `futures::channel::oneshot` for
-//! lease release signals and `async_channel` for worker mailboxes.
+//! Leases for runtime2. Lease drops enqueue release commands directly; worker
+//! operation leases use oneshots because their owner is an in-flight future.
 
 use crate::interlude::*;
 use crate::runtime2::messages::DocWorkerMsg;
@@ -13,23 +13,29 @@ use crate::DocumentId;
 /// Mirrors `RuntimeDocLease` in `runtime.rs:141` — the old runtime's
 /// handle lease that fires `release_doc_lease` on drop.
 pub struct DocLease {
-    pub(crate) release: Option<futures::channel::oneshot::Sender<()>>,
+    cmd_tx: async_channel::Sender<crate::runtime2::Runtime2Cmd>,
+    doc_id: DocumentId,
 }
 
 impl DocLease {
-    /// Create a new lease. The `release` sender is consumed on drop to signal
-    /// the hub.
-    pub(crate) fn new(release: futures::channel::oneshot::Sender<()>) -> Self {
-        Self {
-            release: Some(release),
-        }
+    pub(crate) fn new(
+        cmd_tx: async_channel::Sender<crate::runtime2::Runtime2Cmd>,
+        doc_id: DocumentId,
+    ) -> Self {
+        Self { cmd_tx, doc_id }
     }
 }
 
 impl Drop for DocLease {
     fn drop(&mut self) {
-        // Fire-and-forget; the hub treats a dropped sender as "handle gone".
-        let _ = self.release.take();
+        if let Err(async_channel::TrySendError::Full(_)) =
+            self.cmd_tx
+                .try_send(crate::runtime2::Runtime2Cmd::ReleaseDocLease {
+                    doc_id: self.doc_id,
+                })
+        {
+            unreachable!("runtime command channel is unbounded");
+        }
     }
 }
 
@@ -40,9 +46,8 @@ impl Drop for DocLease {
 /// [`DocWorkerEntry`] is > 0). Bundled into messages sent to the doc-worker
 /// so the lease lives for the duration of the operation.
 ///
-/// Mirrors the old runtime's `DocWorkerInternalLease` (`runtime.rs:~202`)
-/// which is bundled into `CommitDelta`, `SyncWithPeer`, and
-/// `ApplySyncSession` messages.
+/// Used by finite mailbox operations such as local commits and quiescence
+/// barriers. Remote Subduction sessions no longer acquire worker leases.
 pub struct DocWorkerInternalLease {
     pub(crate) doc_id: DocumentId,
     pub(crate) release: Option<futures::channel::oneshot::Sender<()>>,

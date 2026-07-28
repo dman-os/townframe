@@ -93,6 +93,10 @@ pub enum Runtime2Cmd {
         peer_id: PeerId,
         waiter_id: u64,
     },
+    RegisterDocLease {
+        doc_id: DocumentId,
+        registered: futures::channel::oneshot::Sender<()>,
+    },
     ReleaseDocLease {
         doc_id: DocumentId,
     },
@@ -167,22 +171,6 @@ pub enum Runtime2Evt {
     },
     KeyhiveSyncRequested {
         peer_id: PeerId,
-    },
-    /// A document worker requested that the hub start a Subduction sync.
-    DocSyncRequested {
-        doc_id: DocumentId,
-        peer_id: PeerId,
-        waiter_id: u64,
-    },
-    /// Completion of a hub-driven document sync.
-    DocSyncCompleted {
-        doc_id: DocumentId,
-        peer_id: PeerId,
-        waiter_id: u64,
-        result: Result<(), crate::runtime::SyncDocError>,
-    },
-    DocWorkerHandleAcquired {
-        bundle: Arc<crate::runtime::LiveDocBundle>,
     },
     DocWorkerStopped {
         doc_id: DocumentId,
@@ -264,28 +252,11 @@ pub enum DocWorkerMsg {
         resp: futures::channel::oneshot::Sender<eyre::Result<()>>,
         _lease: crate::runtime2::DocWorkerInternalLease,
     },
-    ApplySyncSession {
-        session: subduction_core::sync_session::SyncSession,
-        _lease: crate::runtime2::DocWorkerInternalLease,
-    },
-    SyncWithPeer {
+    ApplyReceivedContent {
         peer_id: PeerId,
-        waiter_id: u64,
-        timeout: Option<std::time::Duration>,
-        done: futures::channel::oneshot::Sender<Result<(), crate::runtime::SyncDocError>>,
-        _lease: crate::runtime2::DocWorkerInternalLease,
+        commit_ids: Vec<sedimentree_core::loose_commit::id::CommitId>,
+        fragment_ids: Vec<sedimentree_core::loose_commit::id::CommitId>,
     },
-    CancelSyncWithPeer {
-        peer_id: PeerId,
-        waiter_id: Option<u64>,
-        reason: &'static str,
-    },
-    SyncWithPeerResult {
-        peer_id: PeerId,
-        waiter_id: u64,
-        result: Result<(), crate::runtime::SyncDocError>,
-    },
-    ReleaseHandleLease,
     ReattemptMaterialization,
     QueryHeadState {
         resp: futures::channel::oneshot::Sender<eyre::Result<crate::runtime2::DocHeadState>>,

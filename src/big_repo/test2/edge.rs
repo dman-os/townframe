@@ -19,10 +19,11 @@
 //! - **stop-waits-for-save-tasks**: Every test2 test exercises the RAII
 //!   [`ShutdownGuard`] / [`Pair`] teardown path.
 
-use super::harness::{fixtures, topo::ShutdownGuard, Node, Pair};
+use super::harness::{fixtures, topo::ShutdownGuard, Node, Pair, Topo};
 use crate::SyncDocError;
 use automerge::{transaction::Transactable, ReadDoc, ScalarValue};
 use keyhive_core::access::Access;
+use std::sync::Arc;
 use std::time::Duration;
 
 // ─── helpers ───────────────────────────────────────────────────────────────
@@ -530,5 +531,280 @@ async fn with_document_roundtrip_rehydrates_from_storage() -> crate::Res<()> {
         read_text(&reloaded, "title").await.as_deref(),
         Some("after")
     );
+    Ok(())
+}
+
+// ========================================================================
+// runtime2 doc-worker regression tests
+// ========================================================================
+
+// ─── Relay/no-live sync persists content but creates no worker ─────────────
+//
+// A sync session observed by the hub when no live handle exists must persist
+// the encrypted content into storage without creating a doc-worker.  Checking
+// `has_doc_worker` BEFORE any handle acquisition proves that the sync
+// session handler skipped worker creation.
+#[tokio::test(flavor = "multi_thread")]
+async fn tier9_r2_relay_sync_persists_no_worker() -> crate::Res<()> {
+    utils_rs::testing::setup_tracing_once();
+    let pair = Pair::boot(240, 241, "Owner", "Reader").await?;
+
+    let reader_agent = fixtures::agent_of(&pair.left().repo, pair.right()).await?;
+
+    let mut initial = automerge::Automerge::new();
+    initial
+        .transact(|tx| tx.put(automerge::ROOT, "key", "relay-no-worker"))
+        .map_err(|err| crate::ferr!("failed creating doc: {err:?}"))?;
+    let owner_doc = pair.left().repo.create_doc(initial).await?;
+    let doc_id = owner_doc.document_id();
+
+    // Grant reader access, then sync keyhive so the reader has a decryption key.
+    pair.left()
+        .repo
+        .grant_doc_access(doc_id, reader_agent, keyhive_core::access::Access::Read)
+        .await?;
+    pair.left_conn().sync_keyhive_with_peer(None).await?;
+    pair.right_conn().sync_keyhive_with_peer(None).await?;
+
+    // Sync document content WITHOUT acquiring a live handle on the reader.
+    // The subduction layer persists the content; the hub sees SyncSessionObserved
+    // but must skip worker creation because no live handle exists.
+    pair.right_conn()
+        .sync_doc_with_peer(doc_id, Some(std::time::Duration::from_secs(10)))
+        .await?;
+    pair.right()
+        .repo
+        .wait_for_quiescence(Some(std::time::Duration::from_secs(10)))
+        .await?;
+
+    // Before any handle acquisition: no doc-worker should exist.
+    assert!(
+        !pair.right().repo.runtime.has_doc_worker(doc_id).await?,
+        "doc-worker must NOT be created by sync session when no live handle exists"
+    );
+
+    // Content was persisted by subduction even without a worker.
+    assert!(
+        pair.right()
+            .repo
+            .runtime
+            .contains_sedimentree_id(doc_id)
+            .await?,
+        "encrypted content must be persisted after relay sync"
+    );
+
+    // Lazy worker created by get_doc -> returns Ready because keys arrived.
+    let lookup = pair.right().repo.get_doc(&doc_id).await?;
+    let _reader_handle = match lookup {
+        crate::runtime::DocLookup::Ready(h) => h,
+        ref other => {
+            return Err(crate::ferr!(
+                "reader doc should be Ready after keyhive+doc sync, got {other:?}"
+            ))
+        }
+    };
+
+    // Now that get_doc created a worker, head state must be Materialized.
+    let state = pair.right().repo.doc_head_state(doc_id).await?;
+    assert_eq!(
+        state.state,
+        crate::runtime2::MaterializationState::Materialized,
+        "reader must have Materialized state after handle acquisition"
+    );
+    assert!(
+        state.materialized_heads.is_some(),
+        "materialized heads must be present"
+    );
+    assert!(
+        !state.sedimentree_heads.is_empty(),
+        "sedimentree heads must be present"
+    );
+
+    drop(owner_doc);
+    Ok(())
+}
+
+// ─── Partially-decrypted relay handle transitions on access upgrade ────────
+//
+// A relay-only node stores encrypted content without a decryption key.
+// After access is upgraded to Read + keyhive sync + doc re-sync, the
+// handle must become Ready — proving the persisted content converges.
+#[tokio::test(flavor = "multi_thread")]
+async fn tier9_r2_partial_decrypt_converges_after_upgrade() -> crate::Res<()> {
+    utils_rs::testing::setup_tracing_once();
+
+    let topo = Topo::boot_relay(246, 247, 248, "Owner", "Relay", "Reader").await?;
+
+    let mut initial = automerge::Automerge::new();
+    initial
+        .transact(|tx| tx.put(automerge::ROOT, "title", "pending-relay"))
+        .map_err(|err| crate::ferr!("failed creating doc: {err:?}"))?;
+    let owner_doc = topo.topo_node(0).repo.create_doc(initial).await?;
+    let doc_id = owner_doc.document_id();
+
+    // Relay gets relay-only (stores encrypted blobs, no key).
+    let relay_agent = fixtures::agent_of(&topo.topo_node(0).repo, topo.topo_node(1)).await?;
+    topo.topo_node(0)
+        .repo
+        .grant_doc_access(doc_id, relay_agent, keyhive_core::access::Access::Relay)
+        .await?;
+
+    // Propagate keyhive: Owner→Relay so relay learns the doc exists.
+    topo.topo_conn(0, 1).sync_keyhive_with_peer(None).await?;
+
+    // Relay pulls doc from Owner — stores encrypted blobs, can't decrypt.
+    topo.topo_conn(1, 0)
+        .sync_doc_with_peer(doc_id, Some(std::time::Duration::from_secs(10)))
+        .await?;
+    topo.topo_node(1)
+        .repo
+        .wait_for_quiescence(Some(std::time::Duration::from_secs(10)))
+        .await?;
+
+    // No doc-worker exists after sync (no live handle).
+    assert!(
+        !topo
+            .topo_node(1)
+            .repo
+            .runtime
+            .has_doc_worker(doc_id)
+            .await?,
+        "relay must NOT have a doc-worker after relay-only sync"
+    );
+    assert!(
+        topo.topo_node(1)
+            .repo
+            .runtime
+            .contains_sedimentree_id(doc_id)
+            .await?,
+        "relay must have stored encrypted content"
+    );
+
+    // Acquire handle — PendingMaterialization (has content, no key).
+    let lookup = topo.topo_node(1).repo.get_doc(&doc_id).await?;
+    assert!(
+        matches!(lookup, crate::runtime::DocLookup::PendingMaterialization),
+        "relay doc must be PendingMaterialization (content exists, no key)"
+    );
+    let state = topo
+        .topo_node(1)
+        .repo
+        .runtime
+        .doc_head_state(doc_id)
+        .await?;
+    assert_eq!(
+        state.state,
+        crate::runtime2::MaterializationState::Pending,
+        "relay doc must be Pending before key upgrade"
+    );
+
+    // Upgrade relay from Relay → Read access.
+    let relay_agent = fixtures::agent_of(&topo.topo_node(0).repo, topo.topo_node(1)).await?;
+    topo.topo_node(0)
+        .repo
+        .grant_doc_access(doc_id, relay_agent, keyhive_core::access::Access::Read)
+        .await?;
+
+    // Keyhive sync delivers the decryption key.
+    topo.topo_conn(0, 1).sync_keyhive_with_peer(None).await?;
+    topo.topo_node(1)
+        .repo
+        .wait_for_quiescence(Some(std::time::Duration::from_secs(10)))
+        .await?;
+
+    // Re-sync the doc now that keys are available → must become Ready.
+    topo.topo_conn(1, 0)
+        .sync_doc_with_peer(doc_id, Some(std::time::Duration::from_secs(10)))
+        .await?;
+    topo.topo_node(1)
+        .repo
+        .wait_for_quiescence(Some(std::time::Duration::from_secs(10)))
+        .await?;
+
+    let lookup = topo.topo_node(1).repo.get_doc(&doc_id).await?;
+    match lookup {
+        crate::runtime::DocLookup::Ready(handle) => {
+            drop(handle);
+        }
+        other => {
+            return Err(crate::ferr!(
+                "relay doc must become Ready after key upgrade + re-sync, got {other:?}"
+            ))
+        }
+    }
+
+    drop(owner_doc);
+    Ok(())
+}
+
+// ─── Racing handle acquisition with concurrent doc sync ────────────────────
+//
+// A sync session delivering content while a handle is being acquired must not
+// miss the update.  We race sync_doc_with_peer and get_doc on the Owner→Reader
+// path (normal Pair) and verify the result is Ready.
+#[tokio::test(flavor = "multi_thread")]
+async fn tier9_r2_racing_handle_acquisition() -> crate::Res<()> {
+    utils_rs::testing::setup_tracing_once();
+
+    let pair = Pair::boot(250, 251, "Owner", "Reader").await?;
+
+    let reader_agent = fixtures::agent_of(&pair.left().repo, pair.right()).await?;
+
+    let mut initial = automerge::Automerge::new();
+    initial
+        .transact(|tx| tx.put(automerge::ROOT, "ticker", 42u64))
+        .map_err(|err| crate::ferr!("failed creating doc: {err:?}"))?;
+    let owner_doc = pair.left().repo.create_doc(initial).await?;
+    let doc_id = owner_doc.document_id();
+
+    // Grant Read, sync keyhive fully — reader knows keys.
+    pair.left()
+        .repo
+        .grant_doc_access(doc_id, reader_agent, keyhive_core::access::Access::Read)
+        .await?;
+    pair.left_conn().sync_keyhive_with_peer(None).await?;
+    pair.right_conn().sync_keyhive_with_peer(None).await?;
+
+    // Race: doc sync (delivers content) vs handle acquisition (creates worker).
+    // The sync triggers SyncSessionObserved → ApplyReceivedContent on the worker.
+    // The get_doc triggers AcquireHandle.  Both must converge to Ready.
+    let conn = pair.right_conn().clone();
+    let repo = Arc::clone(&pair.right().repo);
+
+    let sync_fut = async move {
+        conn.sync_doc_with_peer(doc_id, Some(std::time::Duration::from_secs(10)))
+            .await?;
+        repo.wait_for_quiescence(Some(std::time::Duration::from_secs(10)))
+            .await
+    };
+    let get_fut = pair.right().repo.get_doc(&doc_id);
+
+    let (sync_result, _get_result) = tokio::join!(sync_fut, get_fut);
+    sync_result?;
+
+    // After both race, poll for Ready (sync delivery + worker converge).
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+    let ready = loop {
+        match pair.right().repo.get_doc(&doc_id).await? {
+            crate::runtime::DocLookup::Ready(handle) => break Some(handle),
+            crate::runtime::DocLookup::PendingMaterialization
+            | crate::runtime::DocLookup::Missing => {
+                if std::time::Instant::now() >= deadline {
+                    break None;
+                }
+                tokio::time::sleep(std::time::Duration::from_millis(200)).await;
+            }
+        }
+    };
+    match ready {
+        Some(handle) => drop(handle),
+        None => {
+            return Err(crate::ferr!(
+                "racing handle acquisition never converged to Ready (10s timeout)"
+            ))
+        }
+    }
+
+    drop(owner_doc);
     Ok(())
 }

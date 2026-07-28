@@ -2632,7 +2632,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "7ab67060fc6b8ef687992d439ca0fa36e7ed17e9a0b16b25b601e8757df720de"
 dependencies = [
  "data-encoding",
- "syn 2.0.106",
+ "syn 1.0.109",
 ]
 
 [[package]]
@@ -9490,6 +9490,7 @@ dependencies = [
 [[package]]
 name = "sedimentree_core"
 version = "0.13.0"
+source = "git+https://github.com/dman-os/subduction?rev=d24335e75e555e6b58c2186c8fd6a3b6d0f4c3a4#d24335e75e555e6b58c2186c8fd6a3b6d0f4c3a4"
 dependencies = [
  "async-lock",
  "bijou64",
@@ -10323,6 +10324,7 @@ dependencies = [
 [[package]]
 name = "subduction_core"
 version = "0.16.0"
+source = "git+https://github.com/dman-os/subduction?rev=d24335e75e555e6b58c2186c8fd6a3b6d0f4c3a4#d24335e75e555e6b58c2186c8fd6a3b6d0f4c3a4"
 dependencies = [
  "async-channel",
  "async-lock",
@@ -10343,6 +10345,7 @@ dependencies = [
 [[package]]
 name = "subduction_crypto"
 version = "0.8.0"
+source = "git+https://github.com/dman-os/subduction?rev=d24335e75e555e6b58c2186c8fd6a3b6d0f4c3a4#d24335e75e555e6b58c2186c8fd6a3b6d0f4c3a4"
 dependencies = [
  "ed25519-dalek 2.2.0",
  "future_form",
@@ -10356,7 +10359,7 @@ dependencies = [
 [[package]]
 name = "subduction_ephemeral"
 version = "0.7.0"
-source = "git+https://github.com/dman-os/subduction?rev=2c44ec24a68be2a0d038ffd202e3d0721e2cb550#2c44ec24a68be2a0d038ffd202e3d0721e2cb550"
+source = "git+https://github.com/dman-os/subduction?rev=d24335e75e555e6b58c2186c8fd6a3b6d0f4c3a4#d24335e75e555e6b58c2186c8fd6a3b6d0f4c3a4"
 dependencies = [
  "async-channel",
  "async-lock",
@@ -10374,6 +10377,7 @@ dependencies = [
 [[package]]
 name = "subduction_iroh"
 version = "0.9.0"
+source = "git+https://github.com/dman-os/subduction?rev=d24335e75e555e6b58c2186c8fd6a3b6d0f4c3a4#d24335e75e555e6b58c2186c8fd6a3b6d0f4c3a4"
 dependencies = [
  "async-channel",
  "async-lock",
@@ -10392,6 +10396,7 @@ dependencies = [
 [[package]]
 name = "subduction_keyhive"
 version = "0.7.0"
+source = "git+https://github.com/dman-os/subduction?rev=d24335e75e555e6b58c2186c8fd6a3b6d0f4c3a4#d24335e75e555e6b58c2186c8fd6a3b6d0f4c3a4"
 dependencies = [
  "async-channel",
  "async-lock",
@@ -10421,6 +10426,7 @@ dependencies = [
 [[package]]
 name = "subduction_redb_storage"
 version = "0.1.0"
+source = "git+https://github.com/dman-os/subduction?rev=d24335e75e555e6b58c2186c8fd6a3b6d0f4c3a4#d24335e75e555e6b58c2186c8fd6a3b6d0f4c3a4"
 dependencies = [
  "future_form",
  "futures",
@@ -10436,6 +10442,7 @@ dependencies = [
 [[package]]
 name = "subduction_websocket"
 version = "0.11.0"
+source = "git+https://github.com/dman-os/subduction?rev=d24335e75e555e6b58c2186c8fd6a3b6d0f4c3a4#d24335e75e555e6b58c2186c8fd6a3b6d0f4c3a4"
 dependencies = [
  "async-channel",
  "async-lock",

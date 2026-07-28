@@ -398,8 +398,7 @@ async fn tier7_no_live_handle_remote_mutation() -> crate::Res<()> {
     let owner_doc = pair.left().repo.create_doc(initial).await?;
     let doc_id = owner_doc.document_id();
 
-    // Grant Edit to the reader so they can later subscribe and receive
-    // remote mutations after dropping the handle.
+    // Grant Edit so the reader can materialize before dropping its handle.
     let reader_agent = fixtures::agent_of(&pair.left().repo, pair.right()).await?;
     pair.left()
         .repo
@@ -423,10 +422,13 @@ async fn tier7_no_live_handle_remote_mutation() -> crate::Res<()> {
         })
         .await?;
 
-    // Drop the handle. The doc worker stays alive in the runtime (weak ref).
+    // Dropping the last handle leaves no materialized state to update. The
+    // worker may remain cached until its TTL, but sync sessions must not route
+    // through it or emit materialized-document notifications.
     drop(reader_doc);
 
-    // Owner writes, triggering a remote mutation on the reader side.
+    // Owner writes; Subduction persists the remote mutation without waking the
+    // idle document worker.
     owner_doc
         .with_document(|doc| {
             doc.transact(|tx| tx.put(automerge::ROOT, "title", "post-drop-write"))
@@ -441,20 +443,7 @@ async fn tier7_no_live_handle_remote_mutation() -> crate::Res<()> {
     pair.left().repo.wait_for_quiescence(None).await?;
     pair.right().repo.wait_for_quiescence(None).await?;
 
-    let batch = recv_one(&mut rx).await;
-    let has_remote = batch.iter().any(|n| {
-        matches!(
-            n,
-            BigRepoChangeNotification::DocChanged {
-                origin: BigRepoChangeOrigin::Remote { .. },
-                ..
-            }
-        )
-    });
-    assert!(
-        has_remote,
-        "remote mutation must still fire DocChanged after the handle is dropped"
-    );
+    assert_no_notification(&mut rx);
 
     drop(owner_doc);
     Ok(())

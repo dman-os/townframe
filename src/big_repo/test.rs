@@ -3525,26 +3525,18 @@ async fn run_remote_change_listener_without_live_handle_case(
     .await
     .expect("timed out waiting for remote sync_doc_with_peer")?;
 
-    let change_batch = recv_change_batch(&mut change_rx).await;
-    assert!(matches!(
-        change_batch.as_slice(),
-        [BigRepoChangeNotification::DocChanged {
-            doc_id: seen_doc_id,
-            origin: BigRepoChangeOrigin::Remote { .. },
-            ..
-        }] if *seen_doc_id == doc_id
-    ));
-
-    let head_batch: Vec<super::changes::BigRepoHeadNotification> =
-        recv_head_batch(&mut head_rx).await;
-    assert!(matches!(
-        head_batch.as_slice(),
-        [super::changes::BigRepoHeadNotification::DocHeadsChanged {
-            doc_id: seen_doc_id,
-            origin: BigRepoChangeOrigin::Remote { .. },
-            ..
-        }] if *seen_doc_id == doc_id
-    ));
+    assert!(
+        timeout(Duration::from_millis(250), change_rx.recv())
+            .await
+            .is_err(),
+        "a document without a live handle must not emit materialized change notifications"
+    );
+    assert!(
+        timeout(Duration::from_millis(250), head_rx.recv())
+            .await
+            .is_err(),
+        "a document without a live handle must not emit materialized head notifications"
+    );
 
     let reopened = server.repo.get_doc(&doc_id).await?.into_ready(doc_id)?;
     wait_for_json_doc(&reopened, &expected_doc, SYNC_CASE_TIMEOUT).await;

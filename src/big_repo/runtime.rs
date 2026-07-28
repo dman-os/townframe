@@ -134,7 +134,11 @@ pub struct LiveDocBundle {
     #[educe(Debug(ignore))]
     pub doc: tokio::sync::Mutex<automerge::Automerge>,
     #[educe(Debug(ignore))]
+    partially_decrypted: std::sync::atomic::AtomicBool,
+    #[educe(Debug(ignore))]
     _lease: Option<RuntimeDocLease>,
+    #[educe(Debug(ignore))]
+    _runtime2_lease: Option<crate::runtime2::DocLease>,
 }
 
 impl LiveDocBundle {
@@ -146,7 +150,9 @@ impl LiveDocBundle {
         Self {
             doc_id,
             doc: tokio::sync::Mutex::new(doc),
+            partially_decrypted: std::sync::atomic::AtomicBool::new(false),
             _lease: Some(lease),
+            _runtime2_lease: None,
         }
     }
 
@@ -154,8 +160,35 @@ impl LiveDocBundle {
         Self {
             doc_id,
             doc: tokio::sync::Mutex::new(doc),
+            partially_decrypted: std::sync::atomic::AtomicBool::new(false),
             _lease: None,
+            _runtime2_lease: None,
         }
+    }
+
+    pub(crate) fn new_runtime2(
+        doc_id: DocumentId,
+        doc: automerge::Automerge,
+        lease: crate::runtime2::DocLease,
+    ) -> Self {
+        Self {
+            doc_id,
+            doc: tokio::sync::Mutex::new(doc),
+            partially_decrypted: std::sync::atomic::AtomicBool::new(false),
+            _lease: None,
+            _runtime2_lease: Some(lease),
+        }
+    }
+    /// Whether some locally stored Sedimentree heads are not represented in
+    /// the materialized Automerge document because their keys are unavailable.
+    pub fn is_partially_decrypted(&self) -> bool {
+        self.partially_decrypted
+            .load(std::sync::atomic::Ordering::Acquire)
+    }
+
+    pub(crate) fn set_partially_decrypted(&self, partial: bool) {
+        self.partially_decrypted
+            .store(partial, std::sync::atomic::Ordering::Release);
     }
 }
 
@@ -3935,7 +3968,9 @@ struct BigRepoCiphertextStore<S> {
     storage_for_reads: S,
     sedimentree_id: SedimentreeId,
     locators: Arc<
-        tokio::sync::Mutex<HashMap<Vec<u8>, std::collections::BTreeSet<BigRepoCiphertextLocator>>>,
+        tokio::sync::Mutex<
+            HashMap<Vec<u8>, std::collections::BTreeSet<BigRepoCiphertextLocator>>
+        >,
     >,
     ciphertexts: Arc<
         tokio::sync::Mutex<

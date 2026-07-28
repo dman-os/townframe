@@ -368,7 +368,9 @@ where
         if !matches!(&cmd, Runtime2Cmd::WaitForQuiescence { .. })
             && !matches!(
                 &cmd,
-                Runtime2Cmd::ReleaseDocLease { .. } | Runtime2Cmd::ReleaseInternalLease { .. }
+                Runtime2Cmd::RegisterDocLease { .. }
+                    | Runtime2Cmd::ReleaseDocLease { .. }
+                    | Runtime2Cmd::ReleaseInternalLease { .. }
             )
         {
             self.note_activity();
@@ -459,7 +461,6 @@ where
             }
             Runtime2Cmd::CloseConn { peer_id, resp } => {
                 self.cancel_pending_keyhive_syncs(&peer_id, "keyhive peer closed");
-                self.cancel_pending_doc_syncs(&peer_id, "doc sync peer closed")?;
                 if let Some(deets) = self.connected_peers.remove(&peer_id) {
                     deets
                         .closed
@@ -474,31 +475,17 @@ where
             Runtime2Cmd::SyncDocWithPeer {
                 doc_id,
                 peer_id,
-                waiter_id,
-                timeout,
+                waiter_id: _,
+                timeout: _,
                 resp,
             } => {
-                let Ok((worker, lease)) = self.doc_worker_handle(doc_id) else {
-                    let _ = resp.send(Err(crate::runtime::SyncDocError::NotFound));
-                    return Ok(());
-                };
-                let msg = DocWorkerMsg::SyncWithPeer {
+                let sed_id = sedimentree_core::id::SedimentreeId::new(doc_id.into_bytes());
+                self.spawn_background(F::sync_doc_with_peer(
+                    Arc::clone(&self.runtime_io),
                     peer_id,
-                    waiter_id,
-                    timeout,
-                    done: resp,
-                    _lease: lease,
-                };
-                if let Err(send_error) = worker.msg_tx.try_send(msg) {
-                    let DocWorkerMsg::SyncWithPeer { done, .. } = send_error.into_inner() else {
-                        unreachable!(
-                            "worker returned a different message after SyncWithPeer send failure"
-                        );
-                    };
-                    let _ = done.send(Err(crate::runtime::SyncDocError::IoError(ferr!(
-                        "doc worker stopped before sync request"
-                    ))));
-                }
+                    sed_id,
+                    resp,
+                ))?;
             }
             Runtime2Cmd::SyncKeyhiveWithPeer {
                 peer_id,
@@ -529,24 +516,21 @@ where
                     resp,
                 ))?;
             }
-            Runtime2Cmd::CancelDocSyncWaiter {
-                doc_id,
-                peer_id,
-                waiter_id,
-            } => {
-                if let Some(entry) = self.doc_workers.get(&doc_id) {
-                    entry
-                        .handle
-                        .send(DocWorkerMsg::CancelSyncWithPeer {
-                            peer_id,
-                            waiter_id: Some(waiter_id),
-                            reason: "doc sync timed out",
-                        })
-                        .expect("task was found dead");
-                }
+            Runtime2Cmd::CancelDocSyncWaiter { .. } => {
+                // Dropping the timed-out response receiver is sufficient. The
+                // shared Subduction sync continues independently of doc workers.
             }
             Runtime2Cmd::CancelKeyhiveSyncWaiter { peer_id, waiter_id } => {
                 self.cancel_pending_keyhive_sync(&peer_id, waiter_id);
+            }
+            Runtime2Cmd::RegisterDocLease { doc_id, registered } => {
+                let entry = self
+                    .doc_workers
+                    .get_mut(&doc_id)
+                    .expect("doc worker must exist before registering its bundle lease");
+                entry.local_handles += 1;
+                entry.eviction_deadline = None;
+                let _ = registered.send(());
             }
             Runtime2Cmd::ReleaseDocLease { doc_id } => {
                 self.handle_release_doc_lease(doc_id);
@@ -658,13 +642,11 @@ trait HubIoFutures<F: FutureForm, Tasks: crate::runtime2::TaskSet<F>> {
         resp: Option<futures::channel::oneshot::Sender<eyre::Result<()>>>,
     ) -> F::Future<'static, eyre::Result<()>>;
 
-    fn sync_doc_with_peer_and_notify(
+    fn sync_doc_with_peer(
         runtime_io: std::sync::Arc<dyn crate::runtime2::RuntimeIo<F>>,
-        evt_tx: async_channel::Sender<Runtime2Evt>,
-        doc_id: DocumentId,
         peer_id: PeerId,
-        waiter_id: u64,
         sed_id: sedimentree_core::id::SedimentreeId,
+        resp: futures::channel::oneshot::Sender<Result<(), crate::runtime::SyncDocError>>,
     ) -> F::Future<'static, eyre::Result<()>>;
 }
 
@@ -1005,13 +987,11 @@ impl<F: FutureForm, Tasks: crate::runtime2::TaskSet<F>> HubIoFutures<F, Tasks> f
         })
     }
 
-    fn sync_doc_with_peer_and_notify(
+    fn sync_doc_with_peer(
         runtime_io: std::sync::Arc<dyn crate::runtime2::RuntimeIo<F>>,
-        evt_tx: async_channel::Sender<Runtime2Evt>,
-        doc_id: DocumentId,
         peer_id: PeerId,
-        waiter_id: u64,
         sed_id: sedimentree_core::id::SedimentreeId,
+        resp: futures::channel::oneshot::Sender<Result<(), crate::runtime::SyncDocError>>,
     ) -> F::Future<'static, eyre::Result<()>> {
         F::from_future(async move {
             let result = match runtime_io.sync_doc_with_peer(sed_id, peer_id).await {
@@ -1041,18 +1021,7 @@ impl<F: FutureForm, Tasks: crate::runtime2::TaskSet<F>> HubIoFutures<F, Tasks> f
                 }
                 Err(error) => Err(crate::runtime::SyncDocError::IoError(error)),
             };
-            if evt_tx
-                .send(Runtime2Evt::DocSyncCompleted {
-                    doc_id,
-                    peer_id,
-                    waiter_id,
-                    result,
-                })
-                .await
-                .is_err()
-            {
-                tracing::debug!(?doc_id, %peer_id, "runtime stopped before document sync completion");
-            }
+            let _ = resp.send(result);
             Ok(())
         })
     }
@@ -1104,30 +1073,6 @@ where
                     "runtime2 event: sync session observed",
                 );
             }
-            Runtime2Evt::DocSyncRequested {
-                doc_id,
-                peer_id,
-                waiter_id,
-            } => tracing::debug!(
-                local_peer_id = %self.local_peer_id,
-                %doc_id,
-                %peer_id,
-                waiter_id,
-                "runtime2 event: document sync requested",
-            ),
-            Runtime2Evt::DocSyncCompleted {
-                doc_id,
-                peer_id,
-                waiter_id,
-                result,
-            } => tracing::debug!(
-                local_peer_id = %self.local_peer_id,
-                %doc_id,
-                %peer_id,
-                waiter_id,
-                success = result.is_ok(),
-                "runtime2 event: document sync completed",
-            ),
             Runtime2Evt::KeyhiveSyncRequested { peer_id } => tracing::debug!(
                 local_peer_id = %self.local_peer_id,
                 %peer_id,
@@ -1181,8 +1126,6 @@ where
                 | Runtime2Evt::KeyhiveSyncDone { .. }
                 | Runtime2Evt::KeyhiveSyncFailed { .. }
                 | Runtime2Evt::KeyhiveCacheRefreshDone { .. }
-                | Runtime2Evt::DocSyncCompleted { .. }
-                | Runtime2Evt::DocWorkerHandleAcquired { .. }
                 | Runtime2Evt::DocWorkerStopped { .. }
                 | Runtime2Evt::DocWorkerMaterializationReady { .. }
         ) {
@@ -1265,44 +1208,12 @@ where
             Runtime2Evt::GroupPartWorkerAdvanced { cursor } => {
                 self.group_part_cursor = self.group_part_cursor.max(cursor);
             }
-            Runtime2Evt::DocSyncRequested {
-                doc_id,
-                peer_id,
-                waiter_id,
-            } => {
-                let sed_id = sedimentree_core::id::SedimentreeId::new(doc_id.into_bytes());
-                self.spawn_background(F::sync_doc_with_peer_and_notify(
-                    Arc::clone(&self.runtime_io),
-                    self.evt_tx.clone(),
-                    doc_id,
-                    peer_id,
-                    waiter_id,
-                    sed_id,
-                ))?;
-            }
-            Runtime2Evt::DocSyncCompleted {
-                doc_id,
-                peer_id,
-                waiter_id,
-                result,
-            } => {
-                let (worker, _lease) = self.doc_worker_handle(doc_id)?;
-                worker
-                    .send(DocWorkerMsg::SyncWithPeerResult {
-                        peer_id,
-                        waiter_id,
-                        result,
-                    })
-                    .expect("task was found dead");
-            }
             Runtime2Evt::KeyhiveSyncRequested { peer_id } => {
                 self.schedule_internal_keyhive_sync(peer_id);
             }
-            Runtime2Evt::DocWorkerHandleAcquired { bundle } => {
-                self.handle_doc_worker_handle_acquired(bundle);
-            }
             Runtime2Evt::DocWorkerStopped { doc_id } => {
                 self.doc_workers.remove(&doc_id);
+                self.pending_materialization.remove(&doc_id);
                 if let Some(probe) = self.quiescence_probe.as_mut() {
                     probe.pending_docs.remove(&doc_id);
                 }
@@ -1392,11 +1303,26 @@ where
             sent_fragment_ids = session.sent_fragment_ids.len(),
             "observed sync session"
         );
-        let Ok((worker, _lease)) = self.doc_worker_handle(doc_id) else {
+        if session.received_commit_ids.is_empty() && session.received_fragment_ids.is_empty() {
+            return;
+        }
+        let Some(entry) = self
+            .doc_workers
+            .get_mut(&doc_id)
+            .filter(|entry| entry.local_handles > 0)
+        else {
+            // Subduction has already persisted the session. Without a live
+            // materialized handle there is nothing for a doc worker to update.
             return;
         };
-        worker
-            .send(DocWorkerMsg::ApplySyncSession { session, _lease })
+        entry.eviction_deadline = None;
+        entry
+            .handle
+            .send(DocWorkerMsg::ApplyReceivedContent {
+                peer_id: PeerId::new(*session.peer_id.as_bytes()),
+                commit_ids: session.received_commit_ids,
+                fragment_ids: session.received_fragment_ids,
+            })
             .expect("task was found dead");
     }
 
@@ -1436,7 +1362,6 @@ where
             return Ok(());
         }
         self.cancel_pending_keyhive_syncs(&peer_id, "keyhive connection lost");
-        self.cancel_pending_doc_syncs(&peer_id, "doc sync connection lost")?;
         self.connected_peers.remove(&peer_id);
         Ok(())
     }
@@ -1690,17 +1615,21 @@ where
     }
 
     fn reattempt_pending_materialization(&mut self) {
-        for doc_id in self.pending_materialization.clone() {
-            if let Ok((worker, _lease)) = self.doc_worker_handle(doc_id) {
-                worker
-                    .send(DocWorkerMsg::ReattemptMaterialization)
-                    .expect("pending doc worker must remain open");
-            } else {
-                tracing::warn!(
-                    %doc_id,
-                    "failed to get doc worker for reattempt on keyhive sync done"
-                );
-            }
+        let pending = self.pending_materialization.clone();
+        for doc_id in pending {
+            let Some(entry) = self
+                .doc_workers
+                .get(&doc_id)
+                .filter(|entry| entry.local_handles > 0)
+            else {
+                self.pending_materialization.remove(&doc_id);
+                self.schedule_doc_worker_eviction_if_idle(doc_id);
+                continue;
+            };
+            entry
+                .handle
+                .send(DocWorkerMsg::ReattemptMaterialization)
+                .expect("live partial doc worker must remain open");
         }
     }
 
@@ -1749,32 +1678,6 @@ where
                 let _ = sender.send(Err(eyre::eyre!("{}", reason)));
             }
         }
-    }
-
-    /// Cancel all pending doc syncs for a peer (fan-out to all doc-workers).
-    fn cancel_pending_doc_syncs(
-        &mut self,
-        peer_id: &PeerId,
-        reason: &'static str,
-    ) -> eyre::Result<()> {
-        let workers: Vec<(DocumentId, DocWorkerHandle)> = self
-            .doc_workers
-            .iter()
-            .map(|(doc_id, entry)| (*doc_id, entry.handle.clone()))
-            .collect();
-        for (doc_id, worker) in workers {
-            if worker
-                .send(DocWorkerMsg::CancelSyncWithPeer {
-                    peer_id: *peer_id,
-                    waiter_id: None,
-                    reason,
-                })
-                .is_err()
-            {
-                tracing::warn!(%doc_id, %peer_id, "doc worker stopped before sync cancellation");
-            }
-        }
-        Ok(())
     }
 }
 
@@ -1837,13 +1740,16 @@ impl<
         // Stale entry: remove before re-creating.
         self.doc_workers.remove(&doc_id);
 
-        let (handle, stop, _abort) = crate::runtime2::spawn_doc_worker(
+        let worker = crate::runtime2::spawn_doc_worker(
             doc_id,
             Arc::clone(&self.doc_io),
             Arc::clone(&self.change_manager),
-            &self.child_tasks,
+            self.cmd_tx.clone(),
             self.evt_tx.clone(),
-        )?;
+        );
+        let handle = worker.handle;
+        let stop = worker.stop;
+        self.child_tasks.spawn(worker.run)?;
 
         self.doc_workers.insert(
             doc_id,
@@ -1869,10 +1775,6 @@ impl<
                 "doc lease underflow for doc worker: {doc_id:?}"
             );
             entry.local_handles -= 1;
-            entry
-                .handle
-                .send(DocWorkerMsg::ReleaseHandleLease)
-                .expect("task was found dead");
         }
         self.schedule_doc_worker_eviction_if_idle(doc_id);
     }
@@ -1890,26 +1792,13 @@ impl<
         self.schedule_doc_worker_eviction_if_idle(doc_id);
     }
 
-    /// Increment `local_handles` when a handle is acquired.
-    /// Mirrors `handle_doc_worker_handle_acquired` at `runtime.rs:1478`.
-    fn handle_doc_worker_handle_acquired(&mut self, bundle: Arc<crate::runtime::LiveDocBundle>) {
-        let doc_id = bundle.doc_id;
-        if let Some(entry) = self.doc_workers.get_mut(&doc_id) {
-            entry.local_handles += 1;
-            entry.eviction_deadline = None;
-        }
-    }
-
     /// Set or clear the eviction deadline based on refcounts.
     /// Mirrors `schedule_doc_worker_eviction_if_idle` at `runtime.rs:1441`.
     fn schedule_doc_worker_eviction_if_idle(&mut self, doc_id: DocumentId) {
         let Some(entry) = self.doc_workers.get_mut(&doc_id) else {
             return;
         };
-        if entry.local_handles > 0
-            || entry.internal_leases > 0
-            || self.pending_materialization.contains(&doc_id)
-        {
+        if entry.local_handles > 0 || entry.internal_leases > 0 {
             entry.eviction_deadline = None;
             return;
         }

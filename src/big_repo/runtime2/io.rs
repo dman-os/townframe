@@ -76,55 +76,13 @@ pub enum SyncDocAttempt {
     Policy(subduction_core::sync_session::SyncPolicyRejectionKind),
 }
 
-/// An encrypted loose commit ready for the atomic `store_commit` write.
-///
-/// Bundles the commit identity (head, parents) and the encrypted blob that
-/// subduction's [`store_commit`](subduction_core::subduction::Subduction::store_commit)
-/// persists. The [`cgka_update_op`](Self::cgka_update_op) is *metadata*
-/// emitted during encryption — the hub routes it to the keyhive event listener;
-/// `store_commit` itself operates only on the head/parents/blob.
-#[derive(Clone)]
-pub struct EncryptedLooseCommit {
-    pub head: sedimentree_core::loose_commit::id::CommitId,
-    pub parents: std::collections::BTreeSet<sedimentree_core::loose_commit::id::CommitId>,
-    pub blob: sedimentree_core::blob::Blob,
-    /// CGKA operation emitted by the encrypt (if the key epoch advanced).
-    /// Routed to the keyhive event listener by the hub, never stored with the
-    /// sedimentree.
-    pub cgka_update_op: Option<keyhive_crypto::signed::Signed<beekem::operation::CgkaOperation>>,
-}
-
-/// The result of encrypting the complete initial Automerge state.
-///
-/// Initial state may already contain sedimentree fragments. Those fragments
-/// do not necessarily have a loose-commit row for their head, so they cannot
-/// use the incremental `store_fragment` path, which recovers a fragment key by
-/// loading that row.
-#[derive(Clone)]
-pub struct EncryptedInitialSedimentree {
-    pub sedimentree: sedimentree_core::sedimentree::Sedimentree,
-    pub blobs: Vec<sedimentree_core::blob::Blob>,
-    pub cgka_update_ops: Vec<keyhive_crypto::signed::Signed<beekem::operation::CgkaOperation>>,
-}
-
 /// The doc-worker's IO contract. All methods are `F::Future<'_>` so the same
 /// logic runs `Sendable` (native) and `Local` (wasm).
 ///
-/// # Single atomic write
-/// [`DocIo::store_commit`] is the *only* local write. subduction records the
-/// commit and advances the sedimentree frontier in one call — there is no
-/// separate "set heads" step (the old split write was the atomicity bug; it is
-/// gone because heads are derived, never cached).
+/// Local writes are exposed as document-level service operations. Their
+/// implementations own Keyhive encryption/update persistence and Subduction
+/// storage ordering; the worker only serializes document transitions.
 ///
-/// # Parities with the old runtime
-///
-/// These methods mirror the subduction + keyhive calls the old runtime made
-/// directly in `runtime.rs::DocWorker::handle_commit_delta` and the
-/// materialization paths. The `EncryptedLooseCommit` bundles the (head,
-/// parents, blob) tuple that `subduction.store_commit(id, head, parents, blob)`
-/// accepts. The encrypt/decrypt methods wrap `keyhive.try_encrypt_content_keyed`,
-/// `Document::try_decrypt_content_keyed`, and
-/// `Document::try_causal_decrypt_content`.
 pub trait DocIo<F: FutureForm>: Send + Sync {
     // ── sedimentree frontier (derivable; never cached) ────────────────────
     /// Cheap sedimentree frontier via subduction's
@@ -149,35 +107,31 @@ pub trait DocIo<F: FutureForm>: Send + Sync {
         eyre::Result<Option<sedimentree_core::sedimentree::minimized::MinimizedSedimentree>>,
     >;
 
-    // ── initial state ─────────────────────────────────────────────────────
-    /// Encrypt and assemble the complete initial sedimentree in one batch.
-    /// This is distinct from incremental commit encryption because an initial
-    /// fragment can have no corresponding loose-commit row yet.
-    fn encrypt_initial_sedimentree(
+    /// Encrypt and persist a newly created document, including any Keyhive
+    /// updates produced by encryption. The service owns operation ordering and
+    /// publishes the resulting Keyhive change.
+    fn persist_initial_document(
         &self,
         sed_id: sedimentree_core::id::SedimentreeId,
         staged: crate::runtime::StagedAutomergeIngest,
-    ) -> F::Future<'_, eyre::Result<EncryptedInitialSedimentree>>;
-
-    /// Persist the encrypted initial sedimentree durably.
-    fn store_initial_sedimentree(
-        &self,
-        sed_id: sedimentree_core::id::SedimentreeId,
-        initial: EncryptedInitialSedimentree,
     ) -> F::Future<'_, eyre::Result<()>>;
 
-    // ── the single local write (atomic) ───────────────────────────────────
-    /// Store an encrypted loose commit. subduction records it AND advances the
-    /// sedimentree frontier in one call. Returns any fragment-boundary request
-    /// (as subduction's [`store_commit`](subduction_core::subduction::Subduction::store_commit)
-    /// does — `Some(FragmentRequested)` when the commit sits at a fragment
-    /// boundary depth).
-    fn store_commit(
+    /// Encrypt and persist one serialized local document transition. Keyhive
+    /// update operations never escape this service boundary.
+    fn persist_local_commits(
         &self,
         sed_id: sedimentree_core::id::SedimentreeId,
-        commit: EncryptedLooseCommit,
-    ) -> F::Future<'_, eyre::Result<Option<subduction_core::subduction::request::FragmentRequested>>>;
-
+        commits: Vec<(
+            sedimentree_core::loose_commit::id::CommitId,
+            std::collections::BTreeSet<sedimentree_core::loose_commit::id::CommitId>,
+            Vec<u8>,
+        )>,
+    ) -> F::Future<
+        '_,
+        eyre::Result<
+            std::collections::BTreeSet<subduction_core::subduction::request::FragmentRequested>,
+        >,
+    >;
     /// Store a raw fragment bundle at a boundary commit.
     /// The implementation encrypts the bundle and constructs the persisted
     /// fragment metadata from the encrypted blob.
@@ -190,22 +144,7 @@ pub trait DocIo<F: FutureForm>: Send + Sync {
         raw_blob: Vec<u8>,
     ) -> F::Future<'_, eyre::Result<()>>;
 
-    /// Refresh keyhive caches after local encryption advances its frontier.
-    fn note_local_keyhive_changed(&self) -> F::Future<'_, eyre::Result<()>>;
-
-    // ── keyhive encrypt/decrypt (hides the keyhive doc handle) ────────────
-    /// Encrypt a loose commit's blob under the current keyhive epoch. Returns
-    /// the encrypted blob + any CGKA op emitted. Mirrors
-    /// [`Keyhive::try_encrypt_content_keyed`](keyhive_core::keyhive::Keyhive::try_encrypt_content_keyed)
-    /// but takes the sedimentree identity directly (the impl looks up the
-    /// keyhive document internally).
-    fn encrypt_loose_commit(
-        &self,
-        sed_id: sedimentree_core::id::SedimentreeId,
-        head: sedimentree_core::loose_commit::id::CommitId,
-        parents: std::collections::BTreeSet<sedimentree_core::loose_commit::id::CommitId>,
-        blob: Vec<u8>,
-    ) -> F::Future<'_, eyre::Result<EncryptedLooseCommit>>;
+    // ── keyhive decrypt (hides the keyhive doc handle) ────────────────────
 
     /// Try to decrypt the blob at `locator`. Returns `None` if the key is not
     /// available (materialization pending). Mirrors
@@ -223,15 +162,6 @@ pub trait DocIo<F: FutureForm>: Send + Sync {
     /// [`Document::try_causal_decrypt_content`](keyhive_core::principal::document::Document::try_causal_decrypt_content).
     /// The returned [`CausalDecryptResult::complete`] includes the entrypoint
     /// plus any ancestors decrypted along the causal chain.
-    /// Persist a CGKA update operation emitted during encryption.
-    ///
-    /// Mirrors `keyhive_storage::persist_cgka_update_op`. Extracted as a
-    /// `DocIo` method so the doc-worker doesn't hold concrete keyhive storage.
-    fn persist_cgka_update_op(
-        &self,
-        op: keyhive_crypto::signed::Signed<beekem::operation::CgkaOperation>,
-    ) -> F::Future<'_, eyre::Result<()>>;
-
     fn try_causal_decrypt(
         &self,
         sed_id: sedimentree_core::id::SedimentreeId,

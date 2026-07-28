@@ -23,8 +23,7 @@
 use crate::interlude::*;
 use crate::keyhive_storage::BigRepoKeyhiveStorage;
 use crate::runtime2::{
-    CausalDecryptResult, Clock, DocIo, EncryptedInitialSedimentree, EncryptedLooseCommit,
-    RuntimeIo, SyncDocAttempt, TaskSet, Timer,
+    CausalDecryptResult, Clock, DocIo, RuntimeIo, SyncDocAttempt, TaskSet, Timer,
 };
 use crate::{
     encrypted_blob::{decode_encrypted_blob, encode_encrypted_blob},
@@ -307,36 +306,78 @@ impl<S> DocIo<Sendable> for NativeBigRepoIo<S>
 where
     S: BigRepoSubductionStorage,
 {
-    fn encrypt_initial_sedimentree(
+    fn persist_initial_document(
         &self,
         sed_id: SedimentreeId,
         staged: crate::runtime::StagedAutomergeIngest,
-    ) -> <Sendable as future_form::FutureForm>::Future<'_, eyre::Result<EncryptedInitialSedimentree>>
-    {
+    ) -> <Sendable as future_form::FutureForm>::Future<'_, eyre::Result<()>> {
         Sendable::from_future(async move {
-            let (sedimentree, blobs, cgka_update_ops) =
+            let (sedimentree, blobs, cgka_ops) =
                 encrypt_staged_automerge_ingest(&staged, &self.keyhive, sed_id)
                     .await
                     .wrap_err("failed encrypting initial sedimentree")?;
-            Ok(EncryptedInitialSedimentree {
-                sedimentree,
-                blobs,
-                cgka_update_ops,
-            })
+            self.subduction
+                .store_sedimentree(sed_id, sedimentree, blobs)
+                .await
+                .map_err(|error| ferr!("failed storing initial sedimentree: {error}"))?;
+            if !cgka_ops.is_empty() {
+                for op in cgka_ops {
+                    persist_cgka_update_op(&self.keyhive_storage, op).await?;
+                }
+                self.keyhive_protocol
+                    .note_local_keyhive_changed()
+                    .await
+                    .map_err(|error| ferr!("failed marking keyhive cache dirty: {error}"))?;
+            }
+            Ok(())
         })
     }
 
-    fn store_initial_sedimentree(
+    fn persist_local_commits(
         &self,
         sed_id: SedimentreeId,
-        initial: EncryptedInitialSedimentree,
-    ) -> <Sendable as future_form::FutureForm>::Future<'_, eyre::Result<()>> {
+        commits: Vec<(CommitId, BTreeSet<CommitId>, Vec<u8>)>,
+    ) -> <Sendable as future_form::FutureForm>::Future<'_, eyre::Result<BTreeSet<FragmentRequested>>>
+    {
         Sendable::from_future(async move {
-            self.subduction
-                .store_sedimentree(sed_id, initial.sedimentree, initial.blobs)
+            let mut fragment_requests = BTreeSet::new();
+            let mut cgka_ops = Vec::new();
+            for (head, parents, blob) in commits {
+                let (encrypted_blob, _app_key, update_op) = encrypt_loose_commit_with_update_op(
+                    &self.keyhive,
+                    sed_id,
+                    head,
+                    &parents,
+                    &blob,
+                    &HashMap::new(),
+                )
                 .await
-                .map_err(|err| ferr!("failed storing initial sedimentree: {err}"))?;
-            Ok(())
+                .map_err(|error| ferr!("encrypt commit failed: {error}"))?;
+                if let Some(op) = update_op {
+                    cgka_ops.push(op);
+                }
+                if let Some(request) = self
+                    .subduction
+                    .store_commit(sed_id, head, parents, encrypted_blob)
+                    .await
+                    .map_err(|error| ferr!("failed store_commit: {error}"))?
+                {
+                    assert!(
+                        fragment_requests.insert(request),
+                        "duplicate fragment request"
+                    );
+                }
+            }
+            if !cgka_ops.is_empty() {
+                for op in cgka_ops {
+                    persist_cgka_update_op(&self.keyhive_storage, op).await?;
+                }
+                self.keyhive_protocol
+                    .note_local_keyhive_changed()
+                    .await
+                    .map_err(|error| ferr!("failed marking keyhive cache dirty: {error}"))?;
+            }
+            Ok(fragment_requests)
         })
     }
 
@@ -451,31 +492,6 @@ where
         })
     }
 
-    fn store_commit(
-        &self,
-        sed_id: SedimentreeId,
-        commit: EncryptedLooseCommit,
-    ) -> <Sendable as future_form::FutureForm>::Future<'_, eyre::Result<Option<FragmentRequested>>>
-    {
-        Sendable::from_future(async move {
-            let EncryptedLooseCommit {
-                head,
-                parents,
-                blob,
-                ..
-            } = commit;
-
-            // Wrap the blob for subduction's store_commit call.
-            let maybe_request = self
-                .subduction
-                .store_commit(sed_id, head, parents, blob)
-                .await
-                .map_err(|err| ferr!("failed store_commit: {err}"))?;
-
-            Ok(maybe_request)
-        })
-    }
-
     fn store_fragment(
         &self,
         sed_id: SedimentreeId,
@@ -516,46 +532,6 @@ where
                 .map_err(|err| ferr!("failed add_fragment: {err}"))?;
 
             Ok(())
-        })
-    }
-
-    fn note_local_keyhive_changed(&self) -> <Sendable as FutureForm>::Future<'_, eyre::Result<()>> {
-        Sendable::from_future(async move {
-            self.keyhive_protocol
-                .note_local_keyhive_changed()
-                .await
-                .map(|_| ())
-                .map_err(|error| ferr!("failed marking keyhive cache dirty: {error}"))?;
-            Ok(())
-        })
-    }
-
-    fn encrypt_loose_commit(
-        &self,
-        sed_id: SedimentreeId,
-        head: CommitId,
-        parents: BTreeSet<CommitId>,
-        blob: Vec<u8>,
-    ) -> <Sendable as future_form::FutureForm>::Future<'_, eyre::Result<EncryptedLooseCommit>> {
-        Sendable::from_future(async move {
-            // Use the old helper to encrypt.
-            let (encrypted_blob, _app_key, update_op) = encrypt_loose_commit_with_update_op(
-                &self.keyhive,
-                sed_id,
-                head,
-                &parents,
-                &blob,
-                &HashMap::new(), // batch_keys empty on first call; keyhive uses known_decryption_keys
-            )
-            .await
-            .map_err(|e| ferr!("encrypt commit failed: {e}"))?;
-
-            Ok(EncryptedLooseCommit {
-                head,
-                parents,
-                blob: encrypted_blob,
-                cgka_update_op: update_op,
-            })
         })
     }
 
@@ -618,15 +594,6 @@ where
                 Err(err) => Err(ferr!("decrypt failed: {err}")),
             }
         })
-    }
-
-    fn persist_cgka_update_op(
-        &self,
-        op: keyhive_crypto::signed::Signed<beekem::operation::CgkaOperation>,
-    ) -> <Sendable as future_form::FutureForm>::Future<'_, eyre::Result<()>> {
-        Sendable::from_future(
-            async move { persist_cgka_update_op(&self.keyhive_storage, op).await },
-        )
     }
 
     fn try_causal_decrypt(
@@ -768,6 +735,10 @@ where
                 .keyhive
                 .create_doc(parents, content_heads, &self.keyhive_storage)
                 .await?;
+            self.keyhive_protocol
+                .note_local_keyhive_changed()
+                .await
+                .map_err(|error| ferr!("failed publishing new Keyhive document: {error}"))?;
             Ok(doc_id)
         })
     }

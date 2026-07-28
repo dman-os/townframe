@@ -12,11 +12,8 @@ mod tasks;
 #[cfg(test)]
 mod test_support;
 
-pub use doc_worker::spawn_doc_worker;
-pub use io::{
-    CausalDecryptResult, Clock, DocIo, EncryptedInitialSedimentree, EncryptedLooseCommit,
-    RuntimeIo, SyncDocAttempt, Timer,
-};
+pub use doc_worker::{spawn_doc_worker, SpawnedDocWorker};
+pub use io::{CausalDecryptResult, Clock, DocIo, RuntimeIo, SyncDocAttempt, Timer};
 pub use lease::{
     DocLease, DocWorkerEntry, DocWorkerHandle, DocWorkerInternalLease, DocWorkerStopToken,
 };
@@ -127,6 +124,8 @@ pub enum MaterializationState {
     Missing,
     /// Sedimentree heads recorded, but not (yet) decryptable. Relay/pending path.
     Pending,
-    /// Live automerge doc; `materialized_heads` is `Some`.
+    /// Automerge state exists, but some stored branches remain undecryptable.
+    PartiallyMaterialized,
+    /// Live automerge doc with every stored branch materialized.
     Materialized,
 }
