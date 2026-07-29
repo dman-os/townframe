@@ -1,13 +1,15 @@
 //! runtime2 messages. Uses `futures::channel::oneshot` for request/response;
 //! no Tokio types.
 
-use crate::interlude::*;
 use crate::DocumentId;
+use crate::interlude::*;
 use big_sync_core::PeerId;
-use std::sync::atomic::AtomicU64;
 use std::sync::Arc;
+use std::sync::atomic::AtomicU64;
 
 /// Commands into the runtime hub (from `Runtime2Handle`).
+#[derive(educe::Educe)]
+#[educe(Debug)]
 pub enum Runtime2Cmd {
     /// Create a document. The handle sends this; the hub asynchronously calls
     /// [`RuntimeIo::create_document`], then enqueues a [`PutDoc`] to itself.
@@ -135,6 +137,8 @@ pub enum Runtime2Cmd {
 }
 
 /// Events from background workers / keyhive listener / sync sessions / doc-workers.
+#[derive(educe::Educe)]
+#[educe(Debug)]
 pub enum Runtime2Evt {
     SyncSessionObserved {
         session: subduction_core::sync_session::SyncSession,
@@ -235,6 +239,8 @@ pub enum Runtime2Evt {
 
 /// The doc-worker's mailbox. `_lease` fields keep the worker alive for the
 /// duration of the op (see [`crate::runtime2::DocWorkerInternalLease`]).
+#[derive(educe::Educe)]
+#[educe(Debug)]
 pub enum DocWorkerMsg {
     PutDoc {
         initial_content: Box<automerge::Automerge>,

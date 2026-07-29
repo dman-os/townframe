@@ -1,10 +1,5 @@
 //! `Runtime2Handle` — the public API handle.
 //!
-//! Thin sender over [`Runtime2Cmd`]. Replaces
-//! [`BigRepoRuntimeHandle`](crate::runtime2::Runtime2Handle). Every public
-//! method mirrors a method on the old handle (`runtime.rs:380`) or is a new
-//! heads-fix method (`doc_head_state`, `doc_payload_heads`).
-//!
 //! # Generics
 //!
 //! Generic over `F: FutureForm` to carry the injected [`Timer`] so timeout
@@ -13,26 +8,17 @@
 //! [`Runtime2Cmd`]: super::Runtime2Cmd
 //! [`Timer`]: super::Timer
 
+use crate::DocumentId;
 use crate::interlude::*;
 use crate::runtime2::{
-    messages::{fresh_waiter_id, Runtime2Cmd},
     Timer,
+    messages::{Runtime2Cmd, fresh_waiter_id},
 };
-use crate::DocumentId;
 use big_sync_core::PeerId;
 use future_form::FutureForm;
 use std::sync::Arc;
 
 /// The handle embedders use to drive the runtime.
-///
-/// Cloneable (just a channel sender + shared counters + timer). Does **not**
-/// own the runtime — see [`crate::runtime2::Runtime2StopToken`].
-///
-/// Mirrors `BigRepoRuntimeHandle` at `runtime.rs:365` which has `cmd_tx`,
-/// `sync_policy`, and waiter-id counters. Keyhive and storage are now
-/// behind [`RuntimeIo`] in the hub.
-///
-/// [`RuntimeIo`]: super::RuntimeIo
 pub struct Runtime2Handle<F: FutureForm> {
     pub(crate) cmd_tx: async_channel::Sender<Runtime2Cmd>,
     pub(crate) sync_policy: crate::runtime2::types::BigRepoSyncPolicy,
@@ -72,10 +58,7 @@ impl<F: FutureForm> Runtime2Handle<F> {
         }
     }
 
-    // ── accessors (mirror BigRepoRuntimeHandle fields) ──────────────────────
-
-    /// The sync policy (timeouts, TTLs). Mirrors
-    /// `BigRepoRuntimeHandle::sync_policy` (`runtime.rs:373`).
+    /// The sync policy (timeouts, TTLs).
     pub fn sync_policy(&self) -> crate::runtime2::types::BigRepoSyncPolicy {
         self.sync_policy
     }
@@ -83,9 +66,7 @@ impl<F: FutureForm> Runtime2Handle<F> {
     // ── doc lifecycle ──────────────────────────────────────────────────────
 
     /// Create a new document with `initial_content` and the given keyhive
-    /// `parents` (co-creators). Mirrors
-    /// [`BigRepoRuntimeHandle::create_doc`](crate::runtime2::Runtime2Handle::create_doc)
-    /// at `runtime.rs:381`.
+    /// `parents` (co-creators).
     ///
     /// Sends a [`CreateDoc`] command to the hub, which asynchronously calls
     /// [`RuntimeIo::create_document`] then enqueues a [`PutDoc`] to itself.
@@ -118,7 +99,6 @@ impl<F: FutureForm> Runtime2Handle<F> {
 
     /// Get or spawn a live handle for an existing document.
     ///
-    /// Mirrors `BigRepoRuntimeHandle::get_doc_handle` at `runtime.rs:405`.
     /// Returns [`DocLookup::Ready`] with a live automerge bundle,
     /// [`DocLookup::PendingMaterialization`] if the doc exists but is not yet
     /// decryptable, or [`DocLookup::Missing`] if unknown.
@@ -143,7 +123,6 @@ impl<F: FutureForm> Runtime2Handle<F> {
 
     /// Commit a delta (sets of encrypted commits) to a document.
     ///
-    /// Mirrors `BigRepoRuntimeHandle::commit_delta` at `runtime.rs:444`.
     /// Each commit is a triple (head, parents, blob); the runtime encrypts
     /// and persists it atomically via the [`DocIo::store_commit`] seam.
     ///
@@ -222,10 +201,7 @@ impl<F: FutureForm> Runtime2Handle<F> {
     ///
     /// The `addr` is an opaque `Box<dyn Any + Send>` that the hub's
     /// [`TransportConnect`](super::TransportConnect) implementation
-    /// interprets. Mirrors
-    /// [`BigRepoRuntimeHandle::open_connection_iroh`](crate::runtime2::Runtime2Handle::open_connection_iroh)
-    /// at `runtime.rs:467` but de-iroh'd — takes an abstract addr instead of
-    /// `iroh::Endpoint` + `iroh::EndpointAddr`.
+    /// interprets.
     pub async fn open_connection(
         &self,
         peer: PeerId,
@@ -244,9 +220,7 @@ impl<F: FutureForm> Runtime2Handle<F> {
     ///
     /// `incoming` is an opaque handle the hub's
     /// [`TransportConnect`](super::TransportConnect) implementation
-    /// uses to complete the handshake. Mirrors
-    /// [`BigRepoRuntimeHandle::accept_connection_iroh`](crate::runtime2::Runtime2Handle::accept_connection_iroh)
-    /// at `runtime.rs:488` but de-iroh'd.
+    /// uses to complete the handshake.
     pub async fn accept_connection(
         &self,
         incoming: Box<dyn std::any::Any + Send>,
@@ -261,8 +235,6 @@ impl<F: FutureForm> Runtime2Handle<F> {
     }
 
     /// Close an established peer connection.
-    ///
-    /// Mirrors `BigRepoRuntimeHandle::close_peer_connection` at `runtime.rs:507`.
     pub async fn close_connection(&self, peer_id: PeerId) -> eyre::Result<()> {
         let (resp, rx) = futures::channel::oneshot::channel();
         self.cmd_tx
@@ -280,10 +252,6 @@ impl<F: FutureForm> Runtime2Handle<F> {
 
     /// Sync a document's sedimentree with a peer. Waits for completion or
     /// `timeout`.
-    ///
-    /// Mirrors `BigRepoRuntimeHandle::sync_doc_with_peer` at `runtime.rs:518`.
-    /// The old handle applies a timeout at the handle level; runtime2 does
-    /// the same (keeping the timeout-driven cancellation path for parity).
     pub async fn sync_doc_with_peer(
         &self,
         doc_id: DocumentId,
@@ -291,7 +259,7 @@ impl<F: FutureForm> Runtime2Handle<F> {
         timeout: Option<std::time::Duration>,
     ) -> Result<(), crate::runtime2::types::SyncDocError> {
         let waiter_id = fresh_waiter_id(&self.doc_sync_waiter_ids);
-        let (resp, mut rx) = futures::channel::oneshot::channel();
+        let (resp, rx) = futures::channel::oneshot::channel();
         self.cmd_tx
             .send(Runtime2Cmd::SyncDocWithPeer {
                 doc_id,
@@ -345,7 +313,6 @@ impl<F: FutureForm> Runtime2Handle<F> {
 
     /// Sync keyhive state with a peer. Waits for completion or `timeout`.
     ///
-    /// Mirrors `BigRepoRuntimeHandle::sync_keyhive_with_peer` at `runtime.rs:578`.
     /// The old handle applies a timeout (defaulting to 5s); runtime2 does
     /// the same via the injected [`Timer`].
     pub async fn sync_keyhive_with_peer(
@@ -354,7 +321,7 @@ impl<F: FutureForm> Runtime2Handle<F> {
         timeout: Option<std::time::Duration>,
     ) -> eyre::Result<()> {
         let waiter_id = fresh_waiter_id(&self.keyhive_sync_waiter_ids);
-        let (resp, mut rx) = futures::channel::oneshot::channel();
+        let (resp, rx) = futures::channel::oneshot::channel();
         self.cmd_tx
             .send(Runtime2Cmd::SyncKeyhiveWithPeer {
                 peer_id,
@@ -407,9 +374,6 @@ impl<F: FutureForm> Runtime2Handle<F> {
 
     /// Notify the runtime that the local keyhive state has changed (e.g. a
     /// delegation or membership update was received out-of-band).
-    ///
-    /// Mirrors `BigRepoRuntimeHandle::note_local_keyhive_changed` at
-    /// `runtime.rs:415`.
     pub async fn note_local_keyhive_changed(&self) -> eyre::Result<()> {
         let (resp, rx) = futures::channel::oneshot::channel();
         self.cmd_tx
@@ -425,8 +389,7 @@ impl<F: FutureForm> Runtime2Handle<F> {
     /// Check whether the sedimentree for `doc_id` is resident in storage.
     ///
     /// This is the authoritative presence check for the fetch gate: a doc
-    /// that was never pulled subduction-side exists as a marker only. Mirrors
-    /// `BigRepoRuntimeHandle::contains_sedimentree_id` at `runtime.rs:425`.
+    /// that was never pulled subduction-side exists as a marker only.
     pub async fn contains_sedimentree_id(&self, doc_id: DocumentId) -> eyre::Result<bool> {
         let (resp, rx) = futures::channel::oneshot::channel();
         self.cmd_tx
@@ -491,7 +454,7 @@ impl<F: FutureForm> Runtime2Handle<F> {
         rx: futures::channel::oneshot::Receiver<T>,
         duration: std::time::Duration,
     ) -> Result<Result<T, futures::channel::oneshot::Canceled>, ()> {
-        use futures::future::{select, Either};
+        use futures::future::{Either, select};
         let sleep = Box::pin(self.timer.sleep(duration));
         match select(sleep, rx).await {
             Either::Left(_) => Err(()),

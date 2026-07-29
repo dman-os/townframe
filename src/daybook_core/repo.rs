@@ -325,21 +325,13 @@ impl RepoCtx {
             local_actor_id,
         } = compute_user_info(&repo_id, &repo_user_id, &identity);
 
-        let sqlite_part_store = big_repo::SqliteBigRepoStore::new(
-            sql.clone(),
-            repo_id.clone(),
-            big_sync_core::BuckId::MAX_LEVEL,
-        )
-        .await?;
-        let part_store: SharedPartStore = Arc::new(sqlite_part_store.clone()) as _;
-        info!(repo_root = %layout.repo_root.display(), "repo open_inner: partition store ready");
-
-        let (big_repo, big_repo_stop) =
-            boot_big_repo(&layout, &identity, sqlite_part_store).await?;
-        info!(repo_root = %layout.repo_root.display(), "repo open_inner: big repo booted");
+        let (big_repo, big_repo_stop) = boot_big_repo(&layout, &identity).await?;
+        let part_store = big_repo.shared_part_store();
+        let authority = crate::authority::ensure(&big_repo, &sql, None).await?;
+        info!(repo_root = %layout.repo_root.display(), "repo open_inner: BigRepo and authority booted");
 
         let (doc_app, doc_drawer) = if initialize_repo {
-            init_core_docs(&big_repo, &sql).await?
+            init_core_docs(&big_repo, &sql, &authority).await?
         } else {
             load_core_docs(&big_repo, &sql).await?
         };
@@ -349,9 +341,18 @@ impl RepoCtx {
             doc_drawer_id = %doc_drawer.document_id(),
             "repo open_inner: core docs ready"
         );
+        if !initialize_repo {
+            crate::authority::grant_docs_admin(
+                &big_repo,
+                &authority.core_docs,
+                [doc_app.document_id(), doc_drawer.document_id()],
+            )
+            .await?;
+        }
 
         ensure_expected_partitions_for_docs(
             &part_store,
+            &authority,
             doc_app.document_id(),
             doc_drawer.document_id(),
         )
@@ -635,17 +636,16 @@ fn compute_user_info(
 async fn boot_big_repo(
     layout: &RepoLayout,
     identity: &crate::secrets::RepoIdentity,
-    partition_store: big_repo::SqliteBigRepoStore,
 ) -> Res<(SharedBigRepo, big_repo::BigRepoStopToken)> {
-    let am_config = big_repo::Config {
+    let config = big_repo::Config {
         node_identity_seed: identity.iroh_secret_key.to_bytes(),
         storage: big_repo::StorageConfig::Disk {
             path: layout.samod_root.clone(),
         },
+        scope_key: Arc::from("daybook-core"),
+        hidden_parts: Default::default(),
     };
-    let (big_repo, big_repo_stop) =
-        big_repo::BigRepo::boot_with_sqlite(am_config, partition_store).await?;
-    Ok((big_repo, big_repo_stop))
+    big_repo::BigRepo::boot(config).await
 }
 
 async fn cleanup_blobs_staging_dir(blobs_root: &Path) -> Res<()> {
@@ -681,7 +681,14 @@ pub(crate) async fn finish_clone_init(
         .get_doc(&doc_id_drawer)
         .await?
         .into_ready(doc_id_drawer)?;
-    ensure_expected_partitions_for_docs(&parts.part_store, doc_id_app, doc_id_drawer).await?;
+    let authority = crate::authority::ensure(&parts.big_repo, sql, None).await?;
+    ensure_expected_partitions_for_docs(
+        &parts.part_store,
+        &authority,
+        doc_id_app,
+        doc_id_drawer,
+    )
+    .await?;
     RepoCtx::run_repo_init_dance(
         &parts.big_repo,
         &parts.part_store,
@@ -697,25 +704,20 @@ pub(crate) async fn finish_clone_init(
 
 pub(crate) async fn ensure_expected_partitions_for_docs(
     partition_store: &SharedPartStore,
-    doc_app_id: DocumentId,
-    doc_drawer_id: DocumentId,
+    authority: &crate::authority::RepoAuthority,
+    _doc_app_id: DocumentId,
+    _doc_drawer_id: DocumentId,
 ) -> Res<()> {
-    let core_docs_partition_id = crate::part_id_from_label(crate::sync::CORE_DOCS_PARTITION_ID);
     for part_id in [
-        core_docs_partition_id,
-        crate::drawer::DrawerRepo::replicated_partition_id_for_drawer(&doc_drawer_id),
+        authority.core_docs_part_id(),
+        authority.content_docs_part_id(),
+        authority.default_drawer_part_id(),
         crate::part_id_from_label(crate::rt::PROCESSOR_RUNLOG_PARTITION_ID),
         crate::part_id_from_label(crate::blobs::BLOB_SCOPE_DOCS_PARTITION_ID),
         crate::part_id_from_label(crate::blobs::BLOB_SCOPE_PLUGS_PARTITION_ID),
     ] {
         partition_store.ensure_part(part_id).await?;
     }
-    partition_store
-        .add_obj_to_parts(doc_drawer_id, vec![core_docs_partition_id])
-        .await?;
-    partition_store
-        .add_obj_to_parts(doc_app_id, vec![core_docs_partition_id])
-        .await?;
     Ok(())
 }
 fn repo_layout(repo_root: &std::path::Path) -> Res<RepoLayout> {
@@ -789,15 +791,15 @@ async fn load_core_docs(
 async fn init_core_docs(
     big_repo: &SharedBigRepo,
     repo_sql: &SqlCtx,
+    authority: &crate::authority::RepoAuthority,
 ) -> Res<(BigDocHandle, BigDocHandle)> {
     use automerge::transaction::Transactable;
-
     let app_doc = {
         let bytes = version_updates::version_latest()?;
         let doc = automerge::Automerge::load(&bytes)
             .wrap_err("error loading version_latest for app doc")?;
         big_repo
-            .create_doc(doc)
+            .create_doc_with_parents(doc, vec![authority.core_docs_parent()])
             .await
             .map_err(|err| eyre::eyre!("{err}"))?
     };
@@ -808,7 +810,7 @@ async fn init_core_docs(
         let doc = automerge::Automerge::load(&bytes)
             .wrap_err("error loading version_latest for drawer doc")?;
         big_repo
-            .create_doc(doc)
+            .create_doc_with_parents(doc, vec![authority.core_docs_parent()])
             .await
             .map_err(|err| eyre::eyre!("{err}"))?
     };

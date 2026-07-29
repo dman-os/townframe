@@ -1,6 +1,6 @@
 use crate::interlude::*;
 
-use crate::{keyhive_listener::BigRepoKeyhiveListener, DocumentId};
+use crate::{DocumentId, keyhive_listener::BigRepoKeyhiveListener};
 use keyhive_core::access::Access;
 use keyhive_core::event::static_event::StaticEvent;
 use keyhive_core::principal::document::id::DocumentId as KhDocumentId;
@@ -658,3 +658,6 @@ async fn persist_cgka_update_ops(
     }
     Ok(())
 }
+
+#[cfg(test)]
+mod tests;

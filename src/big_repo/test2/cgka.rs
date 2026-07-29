@@ -23,10 +23,239 @@
 //! | `group_add_checkpoint`                        | BigRepo emits CGKA membership plus a history checkpoint |
 //! |                                               | for a group member added after document creation.       |
 
-use super::harness::{fixtures, keyhive as kh_snap, Pair};
-use automerge::{transaction::Transactable, ReadDoc, ScalarValue};
+use super::harness::{Pair, fixtures, keyhive as kh_snap};
+use automerge::{ReadDoc, ScalarValue, transaction::Transactable};
 use keyhive_core::access::Access;
 use std::collections::BTreeSet;
+
+// ─── Immediate write after parented document creation ──────────────────────
+
+/// Creating a parented document returns a writable handle. The PCS update used
+/// for its initial commit must leave enough local secret state for the next
+/// commit; no network synchronization is involved in this invariant.
+#[tokio::test(flavor = "multi_thread")]
+async fn tier6_parented_document_handle_is_immediately_writable() -> crate::Res<()> {
+    utils_rs::testing::setup_tracing_once();
+    let pair = Pair::boot(198, 199, "Owner", "IdlePeer").await?;
+
+    for parent_count in 0..=2 {
+        let mut parents = Vec::new();
+        for _ in 0..parent_count {
+            parents.push(
+                pair.left()
+                    .repo
+                    .create_group_with_parents(Vec::new())
+                    .await?
+                    .into(),
+            );
+        }
+
+        let mut initial = automerge::Automerge::new();
+        initial
+            .transact(|tx| tx.put(automerge::ROOT, "phase", "initial"))
+            .map_err(|err| crate::ferr!("failed creating doc: {err:?}"))?;
+        let handle = pair
+            .left()
+            .repo
+            .create_doc_with_parents(initial, parents)
+            .await?;
+
+        handle
+            .with_document(|doc| {
+                doc.transact(|tx| tx.put(automerge::ROOT, "phase", "second"))
+                    .map_err(|err| crate::ferr!("failed second write: {err:?}"))
+            })
+            .await??;
+    }
+
+    Ok(())
+}
+
+/// Persisting a clone-agent grant and reopening the source must restore the
+/// private CGKA material behind its authority groups, not only the public graph.
+#[tokio::test(flavor = "multi_thread")]
+async fn tier6_reopen_after_authority_grant_keeps_new_documents_writable() -> crate::Res<()> {
+    utils_rs::testing::setup_tracing_once();
+    let temp = tempfile::tempdir()?;
+    let left_path = temp.path().join("left");
+    let right_path = temp.path().join("right");
+    let left_storage = crate::StorageConfig::Disk {
+        path: left_path.clone(),
+    };
+    let mut pair = Pair::boot_persistent(196, 197, "Owner", "Clone", left_path, right_path).await?;
+
+    let repo_agents = pair
+        .left()
+        .repo
+        .create_group_with_parents(Vec::new())
+        .await?;
+    let content = pair
+        .left()
+        .repo
+        .create_group_with_parents(Vec::new())
+        .await?;
+    let drawer = pair
+        .left()
+        .repo
+        .create_group_with_parents(Vec::new())
+        .await?;
+    let content_id = content.id().to_bytes();
+    let drawer_id = drawer.id().to_bytes();
+    let local_agent = pair.left().repo.local_keyhive_agent().await?;
+    pair.left()
+        .repo
+        .add_admin_member_to_group(local_agent, &repo_agents)
+        .await?;
+    pair.left()
+        .repo
+        .add_admin_member_to_group(repo_agents.clone(), &content)
+        .await?;
+    pair.left()
+        .repo
+        .add_admin_member_to_group(repo_agents.clone(), &drawer)
+        .await?;
+
+    let cloned_agent = fixtures::agent_of(&pair.left().repo, pair.right()).await?;
+    pair.left()
+        .repo
+        .add_admin_member_to_group(cloned_agent, &repo_agents)
+        .await?;
+    pair.left_conn().sync_keyhive_with_peer(None).await?;
+    pair.right_conn().sync_keyhive_with_peer(None).await?;
+
+    pair.restart_left(left_storage).await?;
+    let content = pair
+        .left()
+        .repo
+        .get_group_by_id(content_id)
+        .await
+        .expect("content group must survive restart");
+    let drawer = pair
+        .left()
+        .repo
+        .get_group_by_id(drawer_id)
+        .await
+        .expect("drawer group must survive restart");
+
+    let mut initial = automerge::Automerge::new();
+    initial
+        .transact(|tx| tx.put(automerge::ROOT, "phase", "initial"))
+        .map_err(|err| crate::ferr!("failed creating doc: {err:?}"))?;
+    let handle = pair
+        .left()
+        .repo
+        .create_doc_with_parents(initial, vec![content.into(), drawer.into()])
+        .await?;
+    handle
+        .with_document(|doc| {
+            doc.transact(|tx| tx.put(automerge::ROOT, "phase", "second"))
+                .map_err(|err| crate::ferr!("failed second write: {err:?}"))
+        })
+        .await??;
+
+    Ok(())
+}
+
+/// A source must retain the private key for an existing document rotated by a
+/// transitive authority-group membership change across restart.
+#[tokio::test(flavor = "multi_thread")]
+async fn tier6_existing_governed_document_survives_grant_and_restart() -> crate::Res<()> {
+    utils_rs::testing::setup_tracing_once();
+    let temp = tempfile::tempdir()?;
+    let left_path = temp.path().join("left");
+    let right_path = temp.path().join("right");
+    let left_storage = crate::StorageConfig::Disk {
+        path: left_path.clone(),
+    };
+    let right_storage = crate::StorageConfig::Disk {
+        path: right_path.clone(),
+    };
+    let mut pair = Pair::boot_persistent(194, 195, "Owner", "Clone", left_path, right_path).await?;
+
+    let repo_agents = pair
+        .left()
+        .repo
+        .create_group_with_parents(Vec::new())
+        .await?;
+    let core_docs = pair
+        .left()
+        .repo
+        .create_group_with_parents(Vec::new())
+        .await?;
+    let local_agent = pair.left().repo.local_keyhive_agent().await?;
+    pair.left()
+        .repo
+        .add_admin_member_to_group(local_agent, &repo_agents)
+        .await?;
+    pair.left()
+        .repo
+        .add_admin_member_to_group(repo_agents.clone(), &core_docs)
+        .await?;
+
+    let mut initial = automerge::Automerge::new();
+    initial
+        .transact(|tx| tx.put(automerge::ROOT, "phase", "before-grant"))
+        .map_err(|err| crate::ferr!("failed creating core doc: {err:?}"))?;
+    let core_handle = pair
+        .left()
+        .repo
+        .create_doc_with_parents(initial, vec![core_docs.into()])
+        .await?;
+    let core_doc_id = core_handle.document_id();
+
+    let cloned_agent = fixtures::agent_of(&pair.left().repo, pair.right()).await?;
+    pair.left()
+        .repo
+        .add_admin_member_to_group(cloned_agent, &repo_agents)
+        .await?;
+    pair.left_conn().sync_keyhive_with_peer(None).await?;
+    pair.right_conn().sync_keyhive_with_peer(None).await?;
+    let clone_handle =
+        fixtures::sync_doc_expect_ready(pair.right_conn(), &pair.right().repo, core_doc_id).await?;
+    clone_handle
+        .with_document(|doc| {
+            doc.transact(|tx| tx.put(automerge::ROOT, "clone_phase", "opened"))
+                .map_err(|err| crate::ferr!("failed clone write: {err:?}"))
+        })
+        .await??;
+    pair.right_conn().sync_keyhive_with_peer(None).await?;
+    pair.left_conn().sync_keyhive_with_peer(None).await?;
+    drop(clone_handle);
+    drop(core_handle);
+
+    pair.restart_left(left_storage).await?;
+    pair.restart_right(right_storage).await?;
+    let core_handle = match pair.left().repo.get_doc(&core_doc_id).await? {
+        crate::DocLookup::Ready(handle) => handle,
+        other => {
+            return Err(crate::ferr!(
+                "core document was not ready after restart: {other:?}"
+            ));
+        }
+    };
+    pair.connect().await?;
+    let verifying_key = ed25519_dalek::VerifyingKey::from_bytes(&core_doc_id.into_bytes())
+        .map_err(|_| crate::ferr!("core document id is not a valid Ed25519 point"))?;
+    let kh_doc_id = keyhive_core::principal::document::id::DocumentId::from(
+        keyhive_core::principal::identifier::Identifier::from(verifying_key),
+    );
+    let remote_keyhive = pair.right().repo.keyhive().clone_keyhive();
+    let remote_doc = remote_keyhive
+        .get_document(kh_doc_id)
+        .await
+        .ok_or_else(|| crate::ferr!("clone is missing core Keyhive document"))?;
+    remote_keyhive.force_pcs_update(remote_doc).await?;
+    pair.left_conn().sync_keyhive_with_peer(None).await?;
+    pair.right_conn().sync_keyhive_with_peer(None).await?;
+    core_handle
+        .with_document(|doc| {
+            doc.transact(|tx| tx.put(automerge::ROOT, "phase", "after-restart"))
+                .map_err(|err| crate::ferr!("failed post-restart write: {err:?}"))
+        })
+        .await??;
+
+    Ok(())
+}
 
 // ─── Group grant, then add user ─────────────────────────────────────────────
 

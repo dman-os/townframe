@@ -1,17 +1,14 @@
 //! Leases for runtime2. Lease drops enqueue release commands directly; worker
 //! operation leases use oneshots because their owner is an in-flight future.
 
+use crate::DocumentId;
 use crate::interlude::*;
 use crate::runtime2::messages::DocWorkerMsg;
-use crate::DocumentId;
 
 /// RAII lease held by a `BigDocHandle` (the public doc handle).
 ///
 /// On drop, signals the hub to decrement `local_handles` for the doc-worker,
 /// which may schedule eviction if both refcounts reach zero.
-///
-/// Mirrors `RuntimeDocLease` in `runtime.rs:141` — the old runtime's
-/// handle lease that fires `release_doc_lease` on drop.
 pub struct DocLease {
     cmd_tx: async_channel::Sender<crate::runtime2::Runtime2Cmd>,
     doc_id: DocumentId,
@@ -48,6 +45,7 @@ impl Drop for DocLease {
 ///
 /// Used by finite mailbox operations such as local commits and quiescence
 /// barriers. Remote Subduction sessions no longer acquire worker leases.
+#[derive(Debug)]
 pub struct DocWorkerInternalLease {
     pub(crate) doc_id: DocumentId,
     pub(crate) release: Option<futures::channel::oneshot::Sender<()>>,
@@ -110,14 +108,6 @@ impl DocWorkerStopToken {
 }
 
 /// The hub's bookkeeping for one doc-worker.
-///
-/// Matches the old `DocWorkerEntry` at `runtime.rs:2130` field-for-field:
-/// - `handle`: mailbox sender
-/// - `stop`: abort handle (replaces CancellationToken)
-/// - `local_handles`: refcount of live [`BigDocHandle`](crate::BigDocHandle) instances
-/// - `internal_leases`: refcount of in-flight operations
-/// - `eviction_deadline`: set when both refcounts hit zero; the janitor
-///    evicts the worker after `doc_worker_idle_ttl`.
 pub struct DocWorkerEntry {
     pub handle: DocWorkerHandle,
     /// The one authoritative abort handle for this worker. The janitor calls

@@ -6,14 +6,14 @@ use crate::wire::BigRepoWireMessage;
 
 use core::convert::Infallible;
 use future_form::Sendable;
-use futures::future::BoxFuture;
 use futures::FutureExt;
+use futures::future::BoxFuture;
 use subduction_core::{authenticated::Authenticated, connection::Connection};
 use subduction_keyhive::{
+    KeyhiveMessage,
     connection::KeyhiveConnection,
     peer_id::KeyhivePeerId,
     signed_message::{CborError, SignedMessage},
-    KeyhiveMessage,
 };
 
 /// Errors from [`BigRepoKeyhiveConnAdapter::send`].

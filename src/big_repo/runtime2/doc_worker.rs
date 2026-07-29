@@ -2,17 +2,15 @@
 
 use crate::interlude::*;
 
-use crate::runtime2::support::stage_automerge_ingest;
-use crate::runtime2::Runtime2Evt;
-use crate::runtime2::{
-    messages::DocWorkerMsg, DocIo, DocWorkerHandle, DocWorkerInternalLease, DocWorkerStopToken,
-};
 use crate::DocumentId;
+use crate::runtime2::Runtime2Evt;
+use crate::runtime2::support::stage_automerge_ingest;
+use crate::runtime2::{
+    DocIo, DocWorkerHandle, DocWorkerInternalLease, DocWorkerStopToken, messages::DocWorkerMsg,
+};
 use big_sync_core::PeerId;
 use future_form::{FutureForm, Local, Sendable};
-use sedimentree_core::fragment::Fragment;
 use sedimentree_core::loose_commit::id::CommitId;
-use sedimentree_core::loose_commit::LooseCommit;
 use sedimentree_core::sedimentree::SedimentreeItem;
 
 pub struct SpawnedDocWorker<F: FutureForm> {
@@ -109,12 +107,12 @@ impl<F: FutureForm> DocWorkerLoop<F> for F {
                     .await
                     .is_err()
             {
-                tracing::debug!(%doc_id, "runtime stopped before doc worker stop event");
+                debug!(%doc_id, "runtime stopped before doc worker stop event");
             }
 
             match result {
                 Ok(Err(error)) if runtime_evt_tx.is_closed() => {
-                    tracing::debug!(%doc_id, ?error, "doc worker stopped after runtime shutdown");
+                    debug!(%doc_id, ?error, "doc worker stopped after runtime shutdown");
                     Ok(())
                 }
                 Ok(Err(error)) => {
@@ -189,6 +187,7 @@ impl<F: FutureForm> DocWorker2<F> {
     /// the operation is in-flight (the hub's side of the lease is released
     /// when the message completes).
     async fn handle_msg(&mut self, msg: DocWorkerMsg) -> eyre::Result<()> {
+        debug!(?msg, "doc worker msg");
         match msg {
             DocWorkerMsg::PutDoc {
                 initial_content,
@@ -399,7 +398,7 @@ impl<F: FutureForm> DocWorker2<F> {
                 Ok(applied) => made_progress |= applied > 0,
                 Err(automerge::AutomergeError::MissingDeps) => {
                     partially_decrypted = true;
-                    tracing::debug!(
+                    debug!(
                         doc_id = %self.doc_id,
                         "document blob is waiting for unavailable Automerge dependencies"
                     );
@@ -415,7 +414,7 @@ impl<F: FutureForm> DocWorker2<F> {
                 Ok(applied) => made_progress |= applied > 0,
                 Err(automerge::AutomergeError::MissingDeps) => {
                     partially_decrypted = true;
-                    tracing::debug!(
+                    debug!(
                         doc_id = %self.doc_id,
                         "causal ancestor blob is waiting for unavailable Automerge dependencies"
                     );
@@ -519,8 +518,28 @@ impl<F: FutureForm> DocWorker2<F> {
         origin: crate::changes::BigRepoChangeOrigin,
         resp: futures::channel::oneshot::Sender<eyre::Result<()>>,
     ) -> eyre::Result<()> {
+        let pending_fragment_requests =
+            match self.io.persist_local_commits(self.sed_id, commits).await {
+                Ok(requests) => requests,
+                Err(error)
+                    if error
+                        .downcast_ref::<crate::runtime2::io::DocumentKeyUnavailable>()
+                        .is_some() =>
+                {
+                    // The Automerge operation already ran against the live
+                    // handle, but its encrypted commit cannot be accepted until
+                    // Keyhive supplies the document key. Report the transient
+                    // failure to the caller and keep the worker alive; the
+                    // runtime's retry/materialization paths remain usable.
+                    resp.send(Err(error))
+                        .inspect_err(|_| warn!(ERROR_CALLER))
+                        .ok();
+                    return Ok(());
+                }
+                Err(error) => return Err(error),
+            };
         self.pending_fragment_requests
-            .extend(self.io.persist_local_commits(self.sed_id, commits).await?);
+            .extend(pending_fragment_requests);
 
         // ── 3. Notify heads changed ────────────────────────────────────────
 
@@ -686,7 +705,7 @@ impl<F: FutureForm> DocWorker2<F> {
                 .as_ref()
                 .is_some_and(|heads| !heads.is_empty())
         {
-            tracing::error!(
+            error!(
                 sed_id = ?self.sed_id,
                 materialized_heads = materialized_heads.as_ref().map_or(0, |heads| heads.len()),
                 ?state,
@@ -736,7 +755,7 @@ impl<F: FutureForm> DocWorker2<F> {
             return Ok(());
         };
         let Some(mut tree) = self.io.hydrate_tree(self.sed_id).await? else {
-            tracing::error!(
+            error!(
                 doc_id = %self.doc_id,
                 "received sync content has no persisted Sedimentree"
             );

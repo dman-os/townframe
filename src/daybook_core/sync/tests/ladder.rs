@@ -2,8 +2,8 @@ use daybook_types::doc::{BranchPath, BranchPathBuf};
 
 use super::*;
 
-async fn boot_connected_sync_pair(
-) -> Res<(tempfile::TempDir, SyncTestNode, SyncTestNode, EndpointId)> {
+async fn boot_connected_sync_pair()
+-> Res<(tempfile::TempDir, SyncTestNode, SyncTestNode, EndpointId)> {
     info!("XXX boot_connected_sync_pair");
     let temp_root = tempfile::tempdir()?;
     let repo_a_path = temp_root.path().join("repo-a");
@@ -903,7 +903,7 @@ async fn iroh_sync_shutdown_peer_updates_catch_up_after_reconnect() -> Res<()> {
 
         let required_partitions = node_b
             .sync_repo
-            .peer_partition_ids("")
+            .peer_partition_ids("", true)
             .into_keys()
             .collect::<Vec<_>>();
         let reopened_peer_id = PeerId::new(*reopened_endpoint_id.as_bytes());

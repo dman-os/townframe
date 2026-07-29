@@ -26,6 +26,7 @@ mod interlude {
     pub use utils_rs::CHeapStr;
 }
 
+pub(crate) mod authority;
 pub mod blobs;
 pub mod config;
 pub mod crypto;

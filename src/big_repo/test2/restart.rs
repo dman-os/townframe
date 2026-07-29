@@ -22,9 +22,9 @@
 //! parity) at the end. Seeds are unique per test; RAII `Pair` teardown
 //! handles all cleanup — no manual `.stop()` calls.
 
-use super::harness::{fixtures, heads, Pair};
+use super::harness::{Pair, fixtures, heads};
 use crate::StorageConfig;
-use automerge::{transaction::Transactable, ReadDoc, ScalarValue};
+use automerge::{ReadDoc, ScalarValue, transaction::Transactable};
 use keyhive_core::access::Access;
 
 // ─── helpers ───────────────────────────────────────────────────────────────

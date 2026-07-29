@@ -5,9 +5,9 @@
 //! `sync_*` call per barrier, no retry loops. A missed post-condition
 //! surfaces as an `Err`, exposing runtime2 ordering bugs.
 
-use super::harness::{fixtures, heads, Pair};
+use super::harness::{Pair, fixtures, heads};
 use crate::{BigRepoChangeFilter, BigRepoDocIdFilter, StorageConfig};
-use automerge::{transaction::Transactable, ReadDoc, ScalarValue};
+use automerge::{ReadDoc, ScalarValue, transaction::Transactable};
 use keyhive_core::access::Access;
 
 #[tokio::test(flavor = "multi_thread")]
@@ -68,8 +68,8 @@ async fn tier1_connected_document_replicates_and_preserves_head_parity() -> crat
 }
 
 #[tokio::test(flavor = "multi_thread")]
-async fn tier1_connected_document_update_propagates_to_reader_after_first_replication(
-) -> crate::Res<()> {
+async fn tier1_connected_document_update_propagates_to_reader_after_first_replication()
+-> crate::Res<()> {
     utils_rs::testing::setup_tracing_once();
     let pair = Pair::boot(33, 34, "Owner", "Reader").await?;
 

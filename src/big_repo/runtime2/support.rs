@@ -1,5 +1,3 @@
-//! Support definitions migrated from the obsolete runtime.rs.
-//!
 //! Support types, traits, type aliases, and helper functions that are still
 //! imported by runtime2, its native backend, handler.rs, keyhive_conn.rs,
 //! and ephemeral.rs.
@@ -7,9 +5,9 @@
 use crate::interlude::*;
 
 use crate::{
+    BigKeyhiveHandle,
     encrypted_blob::{decode_encrypted_blob, encode_encrypted_blob},
     keyhive_storage::BigRepoKeyhiveStorage,
-    BigKeyhiveHandle,
 };
 use future_form::Sendable;
 use futures::future::BoxFuture;
@@ -19,11 +17,10 @@ use sedimentree_core::{
     depth::CountLeadingZeroBytes,
     fragment::Fragment,
     id::SedimentreeId,
-    loose_commit::{id::CommitId, LooseCommit},
-    sedimentree::{minimized::MinimizedSedimentree, Sedimentree},
+    loose_commit::{LooseCommit, id::CommitId},
+    sedimentree::{Sedimentree, minimized::MinimizedSedimentree},
 };
 use std::collections::BTreeSet;
-use std::sync::Arc;
 use std::time::Duration;
 use subduction_core::{
     authenticated::Authenticated, collections::bounded_sharded_map::BoundedShardedMap,
@@ -327,6 +324,39 @@ pub(crate) async fn persist_cgka_update_op(
     Ok(())
 }
 
+pub(crate) async fn persist_cgka_updates_durably(
+    keyhive_storage: &BigRepoKeyhiveStorage,
+    update_ops: Vec<keyhive_crypto::signed::Signed<beekem::operation::CgkaOperation>>,
+    local_secrets: Vec<keyhive_core::cgka::LocalCgkaSecret>,
+) -> Res<()> {
+    if update_ops.len() != local_secrets.len() {
+        return Err(ferr!(
+            "local CGKA persistence invariant violated: {} updates but {} private deltas",
+            update_ops.len(),
+            local_secrets.len()
+        ));
+    }
+    for (update, secret) in update_ops.iter().zip(&local_secrets) {
+        if update.payload().doc_id() != &secret.tree_id() {
+            return Err(ferr!(
+                "local CGKA private delta belongs to a different document than its update"
+            ));
+        }
+    }
+
+    // The private leaf key must be durable before the public operation that
+    // makes the new leaf current.
+    for secret in local_secrets {
+        subduction_keyhive::save_local_cgka_secret(keyhive_storage, &secret)
+            .await
+            .map_err(|error| ferr!("failed saving local CGKA secret: {error}"))?;
+    }
+    for update_op in update_ops {
+        persist_cgka_update_op(keyhive_storage, update_op).await?;
+    }
+    Ok(())
+}
+
 // ─── encrypt_staged_automerge_ingest ───────────────────────────────────────────
 
 pub(crate) async fn encrypt_staged_automerge_ingest(
@@ -337,6 +367,7 @@ pub(crate) async fn encrypt_staged_automerge_ingest(
     Sedimentree,
     Vec<Blob>,
     Vec<keyhive_crypto::signed::Signed<beekem::operation::CgkaOperation>>,
+    Vec<keyhive_core::cgka::LocalCgkaSecret>,
 )> {
     use keyhive_core::crypto::envelope::Envelope;
     use keyhive_crypto::symmetric_key::SymmetricKey;
@@ -359,6 +390,7 @@ pub(crate) async fn encrypt_staged_automerge_ingest(
         Vec::with_capacity(
             staged_ingest.fragment_entries.len() + staged_ingest.loose_entries.len(),
         );
+    let mut local_secrets = Vec::new();
 
     // Track content_ref -> SymmetricKey for building ancestor maps
     let mut key_index: std::collections::HashMap<Vec<u8>, SymmetricKey> =
@@ -398,6 +430,9 @@ pub(crate) async fn encrypt_staged_automerge_ingest(
             )
             .await
             .map_err(|e| ferr!("encrypt fragment failed: {e}"))?;
+        if let Some(secret) = encrypted.local_cgka_secret().copied() {
+            local_secrets.push(secret);
+        }
         if let Some(update_op) = encrypted.update_op().cloned() {
             update_ops.push(update_op);
         }
@@ -452,6 +487,9 @@ pub(crate) async fn encrypt_staged_automerge_ingest(
             )
             .await
             .map_err(|e| ferr!("encrypt loose commit failed: {e}"))?;
+        if let Some(secret) = encrypted.local_cgka_secret().copied() {
+            local_secrets.push(secret);
+        }
         if let Some(update_op) = encrypted.update_op().cloned() {
             update_ops.push(update_op);
         }
@@ -475,6 +513,7 @@ pub(crate) async fn encrypt_staged_automerge_ingest(
         Sedimentree::new(new_fragments, new_loose_commits),
         encrypted_blobs,
         update_ops,
+        local_secrets,
     ))
 }
 
@@ -491,6 +530,7 @@ pub(crate) async fn encrypt_loose_commit_with_update_op(
     Blob,
     keyhive_crypto::symmetric_key::SymmetricKey,
     Option<keyhive_crypto::signed::Signed<beekem::operation::CgkaOperation>>,
+    Option<keyhive_core::cgka::LocalCgkaSecret>,
 )> {
     use keyhive_core::crypto::envelope::Envelope;
     use keyhive_crypto::symmetric_key::SymmetricKey;
@@ -530,6 +570,13 @@ pub(crate) async fn encrypt_loose_commit_with_update_op(
     let envelope_bytes =
         bincode::serialize(&envelope).map_err(|e| ferr!("bincode encode envelope: {e}"))?;
 
+    let (owner_secret_count, cgka_operation_count, has_pcs_key) = {
+        let locked = kh_doc.lock().await;
+        let cgka = locked
+            .cgka()
+            .map_err(|error| ferr!("failed inspecting document CGKA before encryption: {error}"))?;
+        (cgka.owner_sks().len(), cgka.ops_count(), cgka.has_pcs_key())
+    };
     let (encrypted, app_key) = keyhive
         .try_encrypt_content_keyed(
             Arc::clone(&kh_doc),
@@ -538,12 +585,24 @@ pub(crate) async fn encrypt_loose_commit_with_update_op(
             &envelope_bytes,
         )
         .await
-        .map_err(|e| ferr!("encrypt commit failed: {e}"))?;
+        .map_err(|error| match error {
+            keyhive_core::keyhive::EncryptContentError::EncryptError(
+                keyhive_core::principal::document::EncryptError::FailedToMakeAppSecret(source),
+            ) => eyre::Report::new(crate::runtime2::io::DocumentKeyUnavailable {
+                source,
+                document_id: crate::DocumentId::new(*sedimentree_id.as_bytes()),
+                owner_secret_count,
+                cgka_operation_count,
+                has_pcs_key,
+            }),
+            error => ferr!("encrypt commit failed: {error}"),
+        })?;
     let update_op = encrypted.update_op().cloned();
+    let local_secret = encrypted.local_cgka_secret().copied();
 
     let encrypted_bytes = encode_encrypted_blob(encrypted.encrypted_content())?;
 
-    Ok((Blob::new(encrypted_bytes), app_key, update_op))
+    Ok((Blob::new(encrypted_bytes), app_key, update_op, local_secret))
 }
 
 // ─── encrypt_fragment_blob ─────────────────────────────────────────────────────

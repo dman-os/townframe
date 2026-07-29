@@ -1,8 +1,8 @@
 use std::{
     collections::HashMap,
     sync::{
-        atomic::{AtomicU64, Ordering},
         Arc,
+        atomic::{AtomicU64, Ordering},
     },
 };
 
@@ -11,7 +11,7 @@ use futures::future::BoxFuture;
 use subduction_core::peer::id::PeerId;
 use subduction_crypto::{signed::Signed, signer::memory::MemorySigner};
 use subduction_ephemeral::{
-    clock::{std_clock::StdClock, Clock},
+    clock::{Clock, std_clock::StdClock},
     config::EphemeralEvent,
     handler::EphemeralHandler,
     message::{EphemeralMessage, EphemeralPayload},

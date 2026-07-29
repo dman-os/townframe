@@ -2,7 +2,7 @@ use super::*;
 
 use crate::encrypted_blob::decode_encrypted_blob;
 use am_utils_rs::codecs::ThroughJson;
-use automerge::{transaction::Transactable, ReadDoc, ScalarValue};
+use automerge::{ReadDoc, ScalarValue, transaction::Transactable};
 use autosurgeon::Prop;
 use big_sync::backend::contract::{
     self, SyncBackendHarness, SyncBackendOutcome, SyncBackendScenario,
@@ -517,10 +517,40 @@ async fn keyhive_contact_card_bootstrap_happens_on_connect_without_manual_sync()
     client.shutdown().await?;
     Ok(())
 }
-
 #[tokio::test]
-async fn authorized_peer_reads_encrypted_doc_after_keyhive_change_notification_without_reboot(
-) -> Res<()> {
+async fn concurrent_bidirectional_keyhive_sync_is_safe() -> Res<()> {
+    let temp_root = tempdir()?;
+    let owner = SyncRepoNode::boot(temp_root.path().join("owner"), 97, true).await?;
+    let client = SyncRepoNode::boot(temp_root.path().join("client"), 98, false).await?;
+    client.connect_to(&owner).await?;
+    owner.wait_for_accepts(1).await;
+    let owner_conn = owner.take_latest_accepted_connection().await;
+    let client_conn = client.connection_to(&owner).await;
+    let (owner_sync, client_sync) = tokio::join!(
+        owner_conn.sync_keyhive_with_peer(Some(Duration::from_secs(5))),
+        client_conn.sync_keyhive_with_peer(Some(Duration::from_secs(5))),
+    );
+    owner_sync?;
+    client_sync?;
+    assert!(
+        get_keyhive_agent(&owner.repo, client.peer_id())
+            .await?
+            .is_some()
+    );
+    assert!(
+        get_keyhive_agent(&client.repo, owner.peer_id())
+            .await?
+            .is_some()
+    );
+    drop(owner_conn);
+    drop(client_conn);
+    owner.shutdown().await?;
+    client.shutdown().await?;
+    Ok(())
+}
+#[tokio::test]
+async fn authorized_peer_reads_encrypted_doc_after_keyhive_change_notification_without_reboot()
+-> Res<()> {
     utils_rs::testing::setup_tracing_once();
     let temp_root = tempdir()?;
     let owner_path = temp_root.path().join("owner");
@@ -2254,12 +2284,16 @@ async fn change_and_head_listeners_ignore_noop_mutation() -> Res<()> {
         })
         .await?;
 
-    assert!(timeout(Duration::from_millis(250), change_rx.recv())
-        .await
-        .is_err());
-    assert!(timeout(Duration::from_millis(250), head_rx.recv())
-        .await
-        .is_err());
+    assert!(
+        timeout(Duration::from_millis(250), change_rx.recv())
+            .await
+            .is_err()
+    );
+    assert!(
+        timeout(Duration::from_millis(250), head_rx.recv())
+            .await
+            .is_err()
+    );
     Ok(())
 }
 

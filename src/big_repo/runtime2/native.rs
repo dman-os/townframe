@@ -4,14 +4,6 @@
 //! subduction storage and keyhive. Generic over subduction storage `S`
 //! and connection type `C` (default: [`BigRepoIrohTransport`]).
 //!
-//! # Design
-//!
-//! [`NativeBigRepoIo`] bundles all the state that runtime2's hub and
-//! doc-workers need: the subduction handle, storage, sedimentree cache,
-//! keyhive handle, keyhive storage, and keyhive protocol. It implements both
-//! [`DocIo<Sendable>`] and [`RuntimeIo<Sendable>`] by adapting/copying the old
-//! `runtime.rs` logic — no behavioral simplification.
-//!
 //! # Tokio boundary
 //!
 //! All methods are `async` and `Sendable`. Tokio type use (channels, tasks) is
@@ -26,7 +18,8 @@ use crate::runtime2::{
     CausalDecryptResult, Clock, DocIo, RuntimeIo, SyncDocAttempt, TaskSet, Timer,
 };
 use crate::{
-    encrypted_blob::{decode_encrypted_blob, encode_encrypted_blob},
+    BigEphemeral, BigKeyhiveHandle, DocumentId,
+    encrypted_blob::decode_encrypted_blob,
     ephemeral::{BigEphemeralBackend, BigEphemeralSwitchboard, BigRepoEphemeralBackend},
     handler::{
         BigRepoComposedHandler, BigRepoEphemeralHandler, BigRepoKeyhiveHandler,
@@ -34,45 +27,37 @@ use crate::{
     },
     keyhive_conn::BigRepoKeyhiveConnAdapter,
     runtime2::support::{
-        accept_incoming, connect_outgoing_to, encrypt_fragment_blob,
+        BigRepoIrohTransport, BigRepoSubduction, BigRepoSubductionStorage, IrohConnectResult,
+        SubductionSedimentrees, accept_incoming, connect_outgoing_to, encrypt_fragment_blob,
         encrypt_loose_commit_with_update_op, encrypt_staged_automerge_ingest,
-        persist_cgka_update_op, sedimentree_heads_payload, BigRepoIrohTransport, BigRepoSubduction,
-        BigRepoSubductionStorage, IrohConnectResult, SubductionSedimentrees,
+        persist_cgka_updates_durably, sedimentree_heads_payload,
     },
     runtime2::types::BigRepoSyncPolicy,
-    wire::BigRepoWireMessage,
-    BigEphemeral, BigKeyhiveHandle, DocumentId,
 };
 use big_sync_core::PeerId;
 use future_form::{FutureForm, Sendable};
 use keyhive_core::{
-    crypto::envelope::Envelope, event::static_event::StaticEvent,
-    principal::document::id::DocumentId as KhDocumentId, principal::identifier::Identifier,
-    store::ciphertext::CiphertextStore,
+    crypto::envelope::Envelope, principal::document::id::DocumentId as KhDocumentId,
+    principal::identifier::Identifier, store::ciphertext::CiphertextStore,
 };
-use keyhive_crypto::symmetric_key::SymmetricKey;
 use nonempty::NonEmpty;
 use sedimentree_core::{
     blob::{Blob, BlobMeta},
     depth::CountLeadingZeroBytes,
     id::SedimentreeId,
     loose_commit::id::CommitId,
-    sedimentree::{minimized::MinimizedSedimentree, Sedimentree},
+    sedimentree::{Sedimentree, minimized::MinimizedSedimentree},
 };
 use std::collections::{BTreeSet, HashMap};
 use std::sync::Arc;
 use subduction_core::{
-    authenticated::Authenticated,
-    connection::{message::SyncMessage, Connection},
-    handler::sync::SyncHandler,
-    nonce_cache::NonceCache,
-    storage::powerbox::StoragePowerbox,
+    authenticated::Authenticated, connection::Connection, handler::sync::SyncHandler,
+    nonce_cache::NonceCache, storage::powerbox::StoragePowerbox, subduction::Subduction,
     subduction::request::FragmentRequested,
-    subduction::Subduction,
 };
 use subduction_ephemeral::{
     clock::std_clock::StdClock, config::EphemeralConfig, handler::EphemeralHandler,
-    message::EphemeralMessage, policy::OpenEphemeralPolicy,
+    policy::OpenEphemeralPolicy,
 };
 use subduction_keyhive::{KeyhiveConnection, KeyhivePeerId};
 use subduction_websocket::tokio::{TimeoutTokio, TokioSpawn};
@@ -311,18 +296,20 @@ where
         staged: crate::runtime2::support::StagedAutomergeIngest,
     ) -> <Sendable as future_form::FutureForm>::Future<'_, eyre::Result<()>> {
         Sendable::from_future(async move {
-            let (sedimentree, blobs, cgka_ops) =
+            let (sedimentree, blobs, cgka_ops, local_secrets) =
                 encrypt_staged_automerge_ingest(&staged, &self.keyhive, sed_id)
                     .await
                     .wrap_err("failed encrypting initial sedimentree")?;
+            let keyhive_changed = !cgka_ops.is_empty();
+            if keyhive_changed {
+                persist_cgka_updates_durably(&self.keyhive_storage, cgka_ops, local_secrets)
+                    .await?;
+            }
             self.subduction
                 .store_sedimentree(sed_id, sedimentree, blobs)
                 .await
                 .map_err(|error| ferr!("failed storing initial sedimentree: {error}"))?;
-            if !cgka_ops.is_empty() {
-                for op in cgka_ops {
-                    persist_cgka_update_op(&self.keyhive_storage, op).await?;
-                }
+            if keyhive_changed {
                 self.keyhive_protocol
                     .note_local_keyhive_changed()
                     .await
@@ -340,20 +327,36 @@ where
     {
         Sendable::from_future(async move {
             let mut fragment_requests = BTreeSet::new();
-            let mut cgka_ops = Vec::new();
+            let mut keyhive_changed = false;
             for (head, parents, blob) in commits {
-                let (encrypted_blob, _app_key, update_op) = encrypt_loose_commit_with_update_op(
-                    &self.keyhive,
-                    sed_id,
-                    head,
-                    &parents,
-                    &blob,
-                    &HashMap::new(),
-                )
-                .await
-                .map_err(|error| ferr!("encrypt commit failed: {error}"))?;
-                if let Some(op) = update_op {
-                    cgka_ops.push(op);
+                let (encrypted_blob, _app_key, update_op, local_secret) =
+                    encrypt_loose_commit_with_update_op(
+                        &self.keyhive,
+                        sed_id,
+                        head,
+                        &parents,
+                        &blob,
+                        &HashMap::new(),
+                    )
+                    .await
+                    .map_err(|error| {
+                        if error
+                            .downcast_ref::<crate::runtime2::io::DocumentKeyUnavailable>()
+                            .is_some()
+                        {
+                            error
+                        } else {
+                            ferr!("encrypt commit failed: {error}")
+                        }
+                    })?;
+                if let Some(update_op) = update_op {
+                    persist_cgka_updates_durably(
+                        &self.keyhive_storage,
+                        vec![update_op],
+                        local_secret.into_iter().collect(),
+                    )
+                    .await?;
+                    keyhive_changed = true;
                 }
                 if let Some(request) = self
                     .subduction
@@ -367,10 +370,7 @@ where
                     );
                 }
             }
-            if !cgka_ops.is_empty() {
-                for op in cgka_ops {
-                    persist_cgka_update_op(&self.keyhive_storage, op).await?;
-                }
+            if keyhive_changed {
                 self.keyhive_protocol
                     .note_local_keyhive_changed()
                     .await
@@ -656,7 +656,7 @@ where
                 match doc.try_decrypt_content_keyed(&encrypted) {
                     Ok((plaintext, key)) => (plaintext, key),
                     Err(keyhive_core::principal::document::DecryptError::KeyNotFound) => {
-                        return Ok(CausalDecryptResult::default())
+                        return Ok(CausalDecryptResult::default());
                     }
                     Err(error) => {
                         return Err(ferr!("entrypoint decrypt failed: {error}"));
@@ -727,17 +727,19 @@ impl<S> RuntimeIo<Sendable> for NativeBigRepoIo<S>
 where
     S: BigRepoSubductionStorage,
 {
-    // ── create_document ────────────────────────────────────────────────────
     fn create_document(
         &self,
         parents: Vec<crate::keyhive::BigKeyhiveAuthority>,
         content_heads: NonEmpty<[u8; 32]>,
     ) -> <Sendable as future_form::FutureForm>::Future<'_, eyre::Result<DocumentId>> {
         Sendable::from_future(async move {
+            let uuid = Uuid::new_v4();
+            info!(%uuid, "creating doc");
             let doc_id = self
                 .keyhive
                 .create_doc(parents, content_heads, &self.keyhive_storage)
                 .await?;
+            info!(%uuid, ?doc_id, "created doc");
             self.keyhive_protocol
                 .note_local_keyhive_changed()
                 .await
@@ -746,7 +748,6 @@ where
         })
     }
 
-    // ── contains_sedimentree ──────────────────────────────────────────────
     fn contains_sedimentree(
         &self,
         sed_id: SedimentreeId,
@@ -827,7 +828,6 @@ where
         })
     }
 
-    // ── sync_keyhive_with_peer ────────────────────────────────────────────
     fn sync_keyhive_with_peer(
         &self,
         peer_id: PeerId,
@@ -850,7 +850,6 @@ where
         })
     }
 
-    // ── refresh_keyhive_cache ─────────────────────────────────────────────
     fn refresh_keyhive_cache(
         &self,
         notify: bool,
@@ -883,7 +882,6 @@ where
         })
     }
 
-    // ── sync_doc_with_peer ────────────────────────────────────────────────
     fn sync_doc_with_peer(
         &self,
         sed_id: SedimentreeId,
@@ -1025,7 +1023,7 @@ where
             let closed_end = std::sync::Arc::clone(&closed);
             let end_fut: <Sendable as FutureForm>::Future<'static, eyre::Result<()>> =
                 Sendable::from_future(async move {
-                    use futures::future::{select, Either};
+                    use futures::future::{Either, select};
                     match select(
                         Box::pin(async { listener.await.map_err(|e| eyre::eyre!("{e}")) }),
                         Box::pin(async { sender.await.map_err(|e| eyre::eyre!("{e}")) }),
@@ -1096,7 +1094,7 @@ where
             let closed_end = std::sync::Arc::clone(&closed);
             let end_fut: <Sendable as FutureForm>::Future<'static, eyre::Result<()>> =
                 Sendable::from_future(async move {
-                    use futures::future::{select, Either};
+                    use futures::future::{Either, select};
                     match select(
                         Box::pin(async { listener.await.map_err(|e| eyre::eyre!("{e}")) }),
                         Box::pin(async { sender.await.map_err(|e| eyre::eyre!("{e}")) }),
@@ -1345,8 +1343,7 @@ where
         keyhive_protocol: Arc::clone(&keyhive_protocol),
     });
 
-    let timer: Arc<dyn crate::runtime2::Timer<Sendable>> =
-        Arc::new(crate::runtime2::TokioTimer::default());
+    let timer: Arc<dyn crate::runtime2::Timer<Sendable>> = Arc::new(crate::runtime2::TokioTimer);
     let clock: Arc<dyn crate::runtime2::Clock> =
         Arc::new(subduction_ephemeral::clock::std_clock::StdClock);
 
@@ -1387,7 +1384,7 @@ where
     stop_token.child_tasks.spawn({
         let listener = listener;
         Sendable::from_future(async move {
-            let _ = listener.await.unwrap();
+            listener.await.unwrap();
             Ok(())
         })
     })?;
@@ -1513,9 +1510,9 @@ impl crate::runtime2::Clock for subduction_ephemeral::clock::std_clock::StdClock
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::BigKeyhiveHandle;
     use crate::keyhive_listener::BigRepoKeyhiveListener;
     use crate::keyhive_storage::BigRepoKeyhiveStorage;
-    use crate::BigKeyhiveHandle;
     use keyhive_core::crypto::envelope::Envelope;
     use keyhive_core::store::ciphertext::CiphertextStore;
     use sedimentree_core::blob::verified::VerifiedBlobMeta;
@@ -1553,7 +1550,7 @@ mod tests {
 
         let head = sedimentree_core::loose_commit::id::CommitId::new([7; 32]);
         let parents = BTreeSet::new();
-        let (encrypted_blob, _app_key, _) =
+        let (encrypted_blob, _app_key, _, _) =
             crate::runtime2::support::encrypt_loose_commit_with_update_op(
                 &keyhive,
                 sed_id,
@@ -1618,7 +1615,7 @@ mod tests {
 
         let head = sedimentree_core::loose_commit::id::CommitId::new([17; 32]);
         let parents = BTreeSet::new();
-        let (encrypted_blob, _app_key, _) =
+        let (encrypted_blob, _app_key, _, _) =
             crate::runtime2::support::encrypt_loose_commit_with_update_op(
                 &keyhive,
                 sed_id,
@@ -1680,15 +1677,16 @@ mod tests {
         let h2 = sedimentree_core::loose_commit::id::CommitId::new([8; 32]);
         let h1_parents = BTreeSet::new();
         let h2_parents = BTreeSet::from([h1]);
-        let (h1_blob, h1_key, _) = crate::runtime2::support::encrypt_loose_commit_with_update_op(
-            &keyhive,
-            sed_id,
-            h1,
-            &h1_parents,
-            b"parent-bytes",
-            &HashMap::new(),
-        )
-        .await?;
+        let (h1_blob, h1_key, _, _) =
+            crate::runtime2::support::encrypt_loose_commit_with_update_op(
+                &keyhive,
+                sed_id,
+                h1,
+                &h1_parents,
+                b"parent-bytes",
+                &HashMap::new(),
+            )
+            .await?;
         let h1_verified = VerifiedMeta::<LooseCommit>::seal::<Sendable, _>(
             &signer,
             (sed_id, h1, h1_parents.clone()),
@@ -1696,15 +1694,16 @@ mod tests {
         )
         .await;
         Storage::<Sendable>::save_loose_commit(&storage, sed_id, h1_verified).await?;
-        let (h2_blob, h2_key, _) = crate::runtime2::support::encrypt_loose_commit_with_update_op(
-            &keyhive,
-            sed_id,
-            h2,
-            &h2_parents,
-            b"head-bytes",
-            &HashMap::from([(h1, h1_key)]),
-        )
-        .await?;
+        let (h2_blob, h2_key, _, _) =
+            crate::runtime2::support::encrypt_loose_commit_with_update_op(
+                &keyhive,
+                sed_id,
+                h2,
+                &h2_parents,
+                b"head-bytes",
+                &HashMap::from([(h1, h1_key)]),
+            )
+            .await?;
         let h2_verified = VerifiedMeta::<LooseCommit>::seal::<Sendable, _>(
             &signer,
             (sed_id, h2, h2_parents.clone()),
@@ -1763,9 +1762,11 @@ mod tests {
             .get_ciphertext(&head.as_bytes().to_vec())
             .await
             .expect_err("plaintext blob must not decode as ciphertext");
-        assert!(error
-            .to_string()
-            .contains("failed decoding loose commit encrypted blob"));
+        assert!(
+            error
+                .to_string()
+                .contains("failed decoding loose commit encrypted blob")
+        );
         Ok(())
     }
 }

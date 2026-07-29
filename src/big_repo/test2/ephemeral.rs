@@ -74,11 +74,15 @@ async fn tier9_ephemeral_filters_topic_and_sender() -> crate::Res<()> {
         .map_err(|_| crate::ferr!("timed out waiting for matching ephemeral event"))?
         .ok_or_else(|| crate::ferr!("matching ephemeral subscription closed unexpectedly"))?;
     assert_eq!(event.payload, b"matching");
-    assert!(timeout(Duration::from_millis(250), wrong_sender.recv())
-        .await
-        .is_err());
-    assert!(timeout(Duration::from_millis(250), wrong_topic.recv())
-        .await
-        .is_err());
+    assert!(
+        timeout(Duration::from_millis(250), wrong_sender.recv())
+            .await
+            .is_err()
+    );
+    assert!(
+        timeout(Duration::from_millis(250), wrong_topic.recv())
+            .await
+            .is_err()
+    );
     Ok(())
 }

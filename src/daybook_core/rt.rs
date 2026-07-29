@@ -274,8 +274,10 @@ impl Rt {
     ) -> Res<(Arc<Self>, RtStopToken)> {
         let total_started = std::time::Instant::now();
         let startup_progress_task_id = config.startup_progress_task_id.clone();
+        let authority = crate::authority::ensure(&rcx.big_repo, &rcx.sql, None).await?;
         crate::repo::ensure_expected_partitions_for_docs(
             &rcx.part_store,
+            &authority,
             rcx.doc_app.document_id(),
             rcx.doc_drawer.document_id(),
         )

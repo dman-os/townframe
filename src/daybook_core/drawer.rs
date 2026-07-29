@@ -20,7 +20,7 @@ pub mod types;
 
 pub use crate::drawer::types::{DocBundle, DocEntry, DocEntryDiff, DocNBranches, DrawerEvent};
 
-use big_repo::{SharedBigRepo, SharedPartStore};
+use big_repo::{BigKeyhiveGroup, SharedBigRepo, SharedPartStore};
 use cache::FacetCacheKey;
 use cache::*;
 use lru::SharedKeyedLruPool;
@@ -32,8 +32,6 @@ use daybook_types::url::{parse_facet_ref, FACET_SELF_DOC_ID};
 
 use tokio_util::sync::CancellationToken;
 
-const DRAWER_REPLICATED_PARTITION_PREFIX: &str = "drawer.replicated";
-
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum BranchKind {
     Replicated,
@@ -43,6 +41,8 @@ pub struct DrawerRepo {
     pub big_repo: SharedBigRepo,
     partition_store: SharedPartStore,
     drawer_doc_id: DocumentId,
+    content_docs_group: BigKeyhiveGroup,
+    drawer_group: BigKeyhiveGroup,
     local_actor_id: ActorId,
     local_peer_id: PeerId,
     local_user_path: daybook_types::doc::UserPathBuf,
@@ -108,6 +108,7 @@ impl DrawerRepo {
         #[cfg(not(test))] plugs_repo: Arc<PlugsRepo>,
         #[cfg(test)] plugs_repo: Option<Arc<PlugsRepo>>,
     ) -> Res<(Arc<Self>, crate::repos::RepoStopToken)> {
+        let authority = crate::authority::ensure(&big_repo, &meta_db_pool, None).await?;
         let local_user_path =
             daybook_types::doc::user_path::for_repo(local_user_path, "drawer-repo")?;
         let local_actor_id = daybook_types::doc::user_path::to_actor_id(&local_user_path);
@@ -135,6 +136,8 @@ impl DrawerRepo {
             big_repo,
             partition_store,
             drawer_doc_id,
+            content_docs_group: authority.content_docs.clone(),
+            drawer_group: authority.default_drawer.clone(),
             local_actor_id,
             local_user_path,
             entry_cache: surelock::mutex::Mutex::new(HashMap::new()),
@@ -155,6 +158,7 @@ impl DrawerRepo {
             plugs_repo,
         });
         repo.ensure_local_branch_schema().await?;
+        repo.migrate_content_doc_authority().await?;
 
         let worker_handle = tokio::spawn({
             let repo = Arc::clone(&repo);
@@ -175,6 +179,34 @@ impl DrawerRepo {
         ))
     }
 
+    async fn migrate_content_doc_authority(&self) -> Res<()> {
+        const MIGRATION_KEY: &str = "global.authority.content_docs_and_drawer_migrated";
+        if crate::repo::globals::get_string_global(&self.meta_store_sql, MIGRATION_KEY)
+            .await?
+            .is_some()
+        {
+            return Ok(());
+        }
+        for item in self.list().await? {
+            let Some(entry) = self.get_entry(&item.doc_id).await? else {
+                continue;
+            };
+            for branch in entry.branches.values() {
+                self.big_repo
+                    .add_admin_member_to_doc(
+                        branch.branch_doc_id,
+                        self.content_docs_group.clone(),
+                    )
+                    .await?;
+                self.big_repo
+                    .add_admin_member_to_doc(branch.branch_doc_id, self.drawer_group.clone())
+                    .await?;
+            }
+        }
+        crate::repo::globals::upsert_string_global(&self.meta_store_sql, MIGRATION_KEY, "1")
+            .await?;
+        Ok(())
+    }
     fn branch_kind_for_path(
         &self,
         branch_path: &daybook_types::doc::BranchPath,
@@ -191,12 +223,8 @@ impl DrawerRepo {
         eyre::bail!("invalid branch path '{}'", branch_path)
     }
 
-    pub(crate) fn replicated_partition_id_for_drawer(_drawer_doc_id: &DocumentId) -> PartId {
-        crate::part_id_from_label(DRAWER_REPLICATED_PARTITION_PREFIX)
-    }
-
     pub(crate) fn replicated_partition_id(&self) -> PartId {
-        Self::replicated_partition_id_for_drawer(&self.drawer_doc_id)
+        big_repo::group_part_id(self.drawer_group.id().to_bytes())
     }
 
     async fn add_branch_to_partitions_if_needed(
@@ -215,8 +243,8 @@ impl DrawerRepo {
                     }),
                 )
                 .await?;
-            self.partition_store
-                .add_obj_to_parts(branch_doc_id, vec![self.replicated_partition_id()])
+            self.big_repo
+                .wait_for_quiescence(Some(std::time::Duration::from_secs(5)))
                 .await?;
         }
         Ok(())
@@ -228,8 +256,11 @@ impl DrawerRepo {
         branch_doc_id: DocumentId,
     ) -> Res<()> {
         if branch_kind == BranchKind::Replicated {
-            self.partition_store
-                .remove_obj_from_part(branch_doc_id, self.replicated_partition_id())
+            self.big_repo
+                .revoke_doc_access(branch_doc_id, self.drawer_group.clone())
+                .await?;
+            self.big_repo
+                .wait_for_quiescence(Some(std::time::Duration::from_secs(5)))
                 .await?;
         }
         Ok(())

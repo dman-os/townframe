@@ -20,8 +20,8 @@
 //!    and assert that the full Automerge document (including ancestors covered
 //!    by the fragment boundary closure) is materialised.
 
-use super::harness::{fixtures, heads, Pair};
-use automerge::{transaction::Transactable, ChangeHash, ReadDoc, ScalarValue};
+use super::harness::{Pair, fixtures, heads};
+use automerge::{ChangeHash, ReadDoc, ScalarValue, transaction::Transactable};
 use future_form::Sendable;
 use keyhive_core::access::Access;
 use sedimentree_core::id::SedimentreeId;

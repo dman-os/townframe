@@ -344,10 +344,12 @@ pub async fn spawn_switch_worker(
                 .rcx
                 .part_store
                 .subscribe_local(SubPartsRequest {
-                    target: big_sync_core::rpc::SubscriptionTarget::Part {
-                        part_id: docs_partition_id,
-                        cursor,
-                    },
+                    targets: std::collections::HashSet::from([
+                        big_sync_core::rpc::SubscriptionTarget::Part {
+                            part_id: docs_partition_id,
+                            cursor,
+                        },
+                    ]),
                 })
                 .await??;
 

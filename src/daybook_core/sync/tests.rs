@@ -338,7 +338,7 @@ async fn cloned_repo_registers_core_docs_partition_on_open() -> Res<()> {
     node_a.stop().await?;
 
     let node_b = open_sync_node(&repo_b_path).await?;
-    let core_partition_id = crate::part_id_from_label(CORE_DOCS_PARTITION_ID);
+    let core_partition_id = node_b.sync_repo.authority.core_docs_part_id();
     let partitions = node_b
         .ctx
         .part_store
@@ -394,6 +394,9 @@ async fn iroh_clone_sync_batch_100_docs_with_blobs() -> Res<()> {
 
     let node_a = open_sync_node(&repo_a_path).await?;
     let node_b = open_sync_node(&repo_b_path).await?;
+    let sync_url = node_a.sync_repo.get_clone_ticket_url().await?;
+    let endpoint_addr = node_b.sync_repo.connect_url(&sync_url).await?;
+    wait_for_sync_convergence(&node_a, &node_b, endpoint_addr.id, Duration::from_secs(20)).await?;
 
     let mut args_batch = Vec::new();
     for idx in 0..100usize {
@@ -424,9 +427,6 @@ async fn iroh_clone_sync_batch_100_docs_with_blobs() -> Res<()> {
     let created = node_a.drawer.batch_add(args_batch).await?;
     assert_eq!(created.len(), 100);
 
-    let sync_url = node_a.sync_repo.get_clone_ticket_url().await?;
-    let endpoint_addr = node_b.sync_repo.connect_url(&sync_url).await?;
-    wait_for_sync_convergence(&node_a, &node_b, endpoint_addr.id, Duration::from_secs(20)).await?;
     let ids_a = list_doc_ids(&node_a.drawer).await?;
     let ids_b = list_doc_ids(&node_b.drawer).await?;
     assert_eq!(
@@ -449,6 +449,9 @@ async fn iroh_blob_sync_validates_bytes() -> Res<()> {
 
     let node_a = open_sync_node(&repo_a_path).await?;
     let node_b = open_sync_node(&repo_b_path).await?;
+    let sync_url = node_a.sync_repo.get_clone_ticket_url().await?;
+    let endpoint_addr = node_b.sync_repo.connect_url(&sync_url).await?;
+    wait_for_sync_convergence(&node_a, &node_b, endpoint_addr.id, Duration::from_secs(60)).await?;
 
     let mut blob_payloads = Vec::new();
     let mut args_batch = Vec::new();
@@ -478,10 +481,6 @@ async fn iroh_blob_sync_validates_bytes() -> Res<()> {
         });
     }
     node_a.drawer.batch_add(args_batch).await?;
-
-    let sync_url = node_a.sync_repo.get_clone_ticket_url().await?;
-    let endpoint_addr = node_b.sync_repo.connect_url(&sync_url).await?;
-    wait_for_sync_convergence(&node_a, &node_b, endpoint_addr.id, Duration::from_secs(60)).await?;
 
     for (hash, expected) in &blob_payloads {
         let got = wait_for_blob_bytes(&node_b.blobs_repo, *hash, Duration::from_secs(60)).await?;
@@ -866,10 +865,17 @@ async fn wait_for_sync_convergence(
 ) -> Res<()> {
     let required_partitions = source
         .sync_repo
-        .peer_partition_ids("")
+        .peer_partition_ids("", true)
         .into_keys()
         .collect::<Vec<_>>();
     let peer_id = PeerId::new(*endpoint_id.as_bytes());
+    // Match the BigRepo topology harness: the receiving side must complete
+    // Keyhive synchronization before BigSync is allowed to materialize docs.
+    target
+        .ctx
+        .big_repo
+        .sync_keyhive_with_peer(peer_id, Some(timeout))
+        .await?;
     tokio::try_join!(
         target.sync_repo.wait_for_full_sync(
             std::slice::from_ref(&peer_id),
@@ -908,7 +914,7 @@ async fn wait_for_full_sync_succeeds_after_event_was_already_emitted() -> Res<()
 
     let required_partitions = node_b
         .sync_repo
-        .peer_partition_ids("")
+        .peer_partition_ids("", true)
         .into_keys()
         .collect::<Vec<_>>();
     let peer_id = PeerId::new(*endpoint_addr_ba.id.as_bytes());

@@ -208,7 +208,7 @@ pub async fn sync_doc_bidirectional(
             return Err(crate::ferr!(
                 "{}: doc not Ready on repo_a after bidirectional sync",
                 log_nickname::nickname(&repo_a.local_peer_id()),
-            ))
+            ));
         }
     };
     let handle_b = match repo_b.get_doc(&doc_id).await? {
@@ -217,7 +217,7 @@ pub async fn sync_doc_bidirectional(
             return Err(crate::ferr!(
                 "{}: doc not Ready on repo_b after bidirectional sync",
                 log_nickname::nickname(&repo_b.local_peer_id()),
-            ))
+            ));
         }
     };
     Ok((handle_a, handle_b))

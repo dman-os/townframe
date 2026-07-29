@@ -27,7 +27,6 @@ pub const IROH_CLONE_URL_SCHEME: &str = "db+iroh-clone";
 pub const PARTITION_SYNC_ALPN: &[u8] = b"townframe/partition-sync/0";
 pub const REPO_SYNC_ALPN: &[u8] = big_repo::rpc::REPO_SYNC_ALPN;
 pub const CLONE_PROVISION_ALPN: &[u8] = b"townframe/clone-provision/0";
-pub const CORE_DOCS_PARTITION_ID: &str = "core.docs";
 pub(crate) const BLOBS_BACKEND_ID: &str = "blobs";
 
 pub type PeerKey = Arc<str>;
@@ -60,6 +59,7 @@ pub struct IrohSyncRepo {
     pub registry: Arc<crate::repos::ListenersRegistry>,
     cancel_token: CancellationToken,
     rcx: Arc<RepoCtx>,
+    authority: crate::authority::RepoAuthority,
 
     router: iroh::protocol::Router,
 
@@ -73,8 +73,8 @@ pub struct IrohSyncRepo {
     // sync_store: am_utils_rs::sync::store::SyncStoreHandle,
     reconnect_task: Arc<std::sync::Mutex<Option<JoinHandle<()>>>>,
     keyhive_rpc_tasks: Arc<utils_rs::AbortableJoinSet>,
-    keyhive_rpc_cancel: CancellationToken,
     keyhive_rpc_cancels: Arc<tokio::sync::Mutex<HashMap<PeerId, CancellationToken>>>,
+    clone_provision_peers: Arc<tokio::sync::Mutex<std::collections::HashSet<PeerId>>>,
     big_sync_worker: big_sync::BigSyncWorkerHandle,
     big_repo_rpc: big_repo::rpc::BigRepoRpcHandle,
     _big_sync_rpc: big_sync::rpc::BigSyncRpcHandle,
@@ -205,6 +205,7 @@ impl IrohSyncRepo {
         ));
 
         let cancel_token = CancellationToken::new();
+        let authority = crate::authority::ensure(&rcx.big_repo, &rcx.sql, None).await?;
 
         let (incoming_conn_tx, incoming_conn_rx) = mpsc::unbounded_channel();
         let (conn_end_tx, conn_end_rx) = mpsc::unbounded_channel();
@@ -243,9 +244,7 @@ impl IrohSyncRepo {
             )
             .accept(
                 big_sync::rpc::BIG_SYNC_RPC_ALPN,
-                irpc_iroh::IrohProtocol::<big_sync::rpc::BigSyncIrpc>::with_sender(
-                    big_sync_rpc.local_sender(),
-                ),
+                big_sync_rpc.protocol_handler(),
             )
             .accept(
                 big_repo::rpc::REPO_SYNC_ALPN,
@@ -275,10 +274,13 @@ impl IrohSyncRepo {
         let keyhive_rpc_tasks = Arc::new(utils_rs::AbortableJoinSet::new());
         let keyhive_rpc_cancel = CancellationToken::new();
         let keyhive_rpc_cancels = Arc::new(tokio::sync::Mutex::new(HashMap::new()));
+        let clone_provision_peers =
+            Arc::new(tokio::sync::Mutex::new(std::collections::HashSet::new()));
 
         let reconnect_task = default();
         let repo = Arc::new(Self {
             rcx,
+            authority,
             router: router.clone(),
             config_repo,
             blobs_sync_backend,
@@ -290,7 +292,7 @@ impl IrohSyncRepo {
             conn_end_signal_tx: conn_end_tx,
             reconnect_task: Arc::clone(&reconnect_task),
             keyhive_rpc_tasks: Arc::clone(&keyhive_rpc_tasks),
-            keyhive_rpc_cancel: keyhive_rpc_cancel.clone(),
+            clone_provision_peers: Arc::clone(&clone_provision_peers),
             keyhive_rpc_cancels: Arc::clone(&keyhive_rpc_cancels),
             big_sync_worker,
             big_repo_rpc: big_repo_rpc.clone(),
@@ -332,6 +334,7 @@ impl IrohSyncRepo {
         ))
     }
 
+    #[tracing::instrument(skip(self, endpoint_addr))]
     async fn start_keyhive_rpc_subscription(
         &self,
         peer_id: PeerId,
@@ -361,7 +364,7 @@ impl IrohSyncRepo {
             eyre::bail!("Keyhive RPC stream did not send its readiness event");
         }
 
-        let stream_cancel = self.keyhive_rpc_cancel.child_token();
+        let stream_cancel = cancel.child_token();
         let repo = Arc::clone(&self.rcx.big_repo);
         self.keyhive_rpc_tasks
             .spawn(async move {
@@ -370,8 +373,10 @@ impl IrohSyncRepo {
                         biased;
                         _ = stream_cancel.cancelled() => break,
                         event = changes.recv() => {
+                            info!("recieved keyhive change notif");
                             match event {
                                 Ok(Some(_)) => {
+                                    info!("syncing keyhive with remote");
                                     if let Err(error) = repo
                                         .sync_keyhive_with_peer(
                                             peer_id,
@@ -391,7 +396,9 @@ impl IrohSyncRepo {
                         }
                     }
                 }
-            })
+            }
+                .in_current_span()
+            )
             .map_err(|error| ferr!("failed spawning Keyhive RPC subscription: {error}"))?;
         Ok(())
     }
@@ -409,34 +416,38 @@ impl IrohSyncRepo {
         Ok(())
     }
 
-    fn peer_partition_ids(&self, _peer_key: &str) -> HashMap<PartId, BackendId> {
+    fn peer_partition_ids(
+        &self,
+        _peer_key: &str,
+        include_blob_parts: bool,
+    ) -> HashMap<PartId, BackendId> {
         let repo_backend_id = big_repo::BigRepo::BACKEND_ID.into();
-        let blob_backend_id = BLOBS_BACKEND_ID.into();
-        [
+        let mut parts = HashMap::from([
             (
-                crate::part_id_from_label(CORE_DOCS_PARTITION_ID),
+                self.authority.core_docs_part_id(),
                 Arc::clone(&repo_backend_id),
             ),
             (
-                crate::drawer::DrawerRepo::replicated_partition_id_for_drawer(
-                    &self.rcx.doc_drawer.document_id(),
-                ),
+                self.authority.content_docs_part_id(),
                 Arc::clone(&repo_backend_id),
             ),
-            // (
-            //     crate::part_id_from_label(crate::rt::PROCESSOR_RUNLOG_PARTITION_ID),
-            //     repo_backend_id,
-            // ),
             (
+                self.authority.default_drawer_part_id(),
+                Arc::clone(&repo_backend_id),
+            ),
+        ]);
+        if include_blob_parts {
+            let blob_backend_id = BLOBS_BACKEND_ID.into();
+            parts.insert(
                 crate::part_id_from_label(crate::blobs::BLOB_SCOPE_DOCS_PARTITION_ID),
                 Arc::clone(&blob_backend_id),
-            ),
-            (
+            );
+            parts.insert(
                 crate::part_id_from_label(crate::blobs::BLOB_SCOPE_PLUGS_PARTITION_ID),
                 blob_backend_id,
-            ),
-        ]
-        .into()
+            );
+        }
+        parts
     }
 
     async fn spawn_connect_known_devices_once(self: &Arc<Self>, trigger: &'static str) {
@@ -588,17 +599,18 @@ impl IrohSyncRepo {
         {
             let mut active_peers = self.active_peers.write().await;
             if active_peers.contains_key(&conn.peer_id) {
-                panic!("curiosity trap: duplicate incoming connection? how did we get here?");
+                warn!(peer_id = %conn.peer_id, "ignoring duplicate incoming connection");
+                return Ok(());
             }
             active_peers.insert(conn.peer_id, ActivePeerState::Connecting);
         }
         let peer_id = conn.peer_id;
+        let clone_provision = self.clone_provision_peers.lock().await.remove(&peer_id);
         let res = async {
             let peer_key = daybook_types::doc::format_peer_key(conn.peer_id.as_bytes());
             let events = [IrohSyncEvent::IncomingConnection {
                 peer_key: Arc::clone(&peer_key),
             }];
-            let partition_ids = self.peer_partition_ids(&peer_key);
             let endpoint = self.router.endpoint().clone();
             let remote_info = endpoint
                 .remote_info(
@@ -618,6 +630,32 @@ impl IrohSyncRepo {
 
             self.blobs_sync_backend
                 .register_remote_peer(conn.peer_id, addr.clone());
+            self.start_keyhive_rpc_subscription(conn.peer_id, addr)
+                .await?;
+            if clone_provision {
+                self.rcx
+                    .big_repo
+                    .sync_keyhive_with_peer(peer_id, Some(Duration::from_secs(10)))
+                    .await?;
+                let agent = self
+                    .rcx
+                    .big_repo
+                    .keyhive_agent_for_peer(peer_id)
+                    .await?
+                    .ok_or_else(|| ferr!("clone peer is not present in Keyhive"))?;
+                self.rcx
+                    .big_repo
+                    .add_admin_member_to_group(agent, &self.authority.repo_agents)
+                    .await?;
+                // The grant is a new Keyhive event. Complete a second exchange
+                // before exposing the clone to BigSync, so document policy state
+                // is installed before document commits can arrive.
+                self.rcx
+                    .big_repo
+                    .sync_keyhive_with_peer(peer_id, Some(Duration::from_secs(10)))
+                    .await?;
+            }
+            let partition_ids = self.peer_partition_ids(&peer_key, !clone_provision);
             self.big_sync_worker
                 .set_peer(
                     conn.peer_id,
@@ -625,8 +663,6 @@ impl IrohSyncRepo {
                     partition_ids,
                     HashMap::new(),
                 )
-                .await?;
-            self.start_keyhive_rpc_subscription(conn.peer_id, addr)
                 .await?;
 
             let old = self
@@ -697,7 +733,11 @@ impl IrohSyncRepo {
     ) -> Res<bootstrap::CloneProvisionResponse> {
         let endpoint_id = iroh::PublicKey::from_str(&req.requester_endpoint_id)
             .wrap_err("invalid requester_endpoint_id in clone provision request")?;
-        let _requester_peer_key = daybook_types::doc::format_peer_key(endpoint_id.as_bytes());
+        let requester_peer_id = PeerId::new(*endpoint_id.as_bytes());
+        self.clone_provision_peers
+            .lock()
+            .await
+            .insert(requester_peer_id);
         // self.sync_store.allow_peer(requester_peer_key).await?;
         let endpoint_addr = self.router.endpoint().addr();
         let device_name = req
@@ -710,6 +750,10 @@ impl IrohSyncRepo {
             app_doc_id: self.rcx.doc_app.document_id().to_string(),
             drawer_doc_id: self.rcx.doc_drawer.document_id().to_string(),
             device_name: Some(device_name),
+            repo_agents_group: self.authority.ids().repo_agents,
+            core_docs_group: self.authority.ids().core_docs,
+            content_docs_group: self.authority.ids().content_docs,
+            default_drawer_group: self.authority.ids().default_drawer,
         })
     }
 
@@ -779,7 +823,7 @@ impl IrohSyncRepo {
                 peer_key: Arc::clone(&peer_key),
             }];
 
-            let partition_ids = self.peer_partition_ids(&peer_key);
+            let partition_ids = self.peer_partition_ids(&peer_key, true);
             let conn = self
                 .rcx
                 .big_repo
@@ -893,7 +937,10 @@ impl IrohSyncRepo {
     }
 
     pub async fn wait_until_peers_sync(&self, peer_ids: &[PeerId], timeout: Duration) -> Res<()> {
-        let parts = self.peer_partition_ids("").into_keys().collect::<Vec<_>>();
+        let parts = self
+            .peer_partition_ids("", true)
+            .into_keys()
+            .collect::<Vec<_>>();
         self.wait_for_full_sync(peer_ids, &parts, timeout).await
     }
 }

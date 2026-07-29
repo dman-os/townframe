@@ -9,8 +9,8 @@ use crate::{BigKeyhiveGroup, DocumentId, PeerId, Res, StorageConfig};
 use am_utils_rs::codecs::ThroughJson;
 use autosurgeon;
 use big_sync::{
-    stress_support::{self, StressFixture},
     HostPartStore,
+    stress_support::{self, StressFixture},
 };
 use big_sync_core::{ObjId, PartId};
 use futures::future::try_join_all;
@@ -374,13 +374,13 @@ impl StressFixture for BigRepoStressFixture {
                 return Err(crate::ferr!(
                     "doc {doc_id} is pending on {}",
                     node.peer_id()
-                ))
+                ));
             }
             crate::DocLookup::Missing => {
                 return Err(crate::ferr!(
                     "doc {doc_id} is missing on {}",
                     node.peer_id()
-                ))
+                ));
             }
         };
         handle
@@ -731,7 +731,7 @@ impl StressFixture for BigRepoStressFixture {
 mod tests {
     use super::*;
     use big_sync::stress_support::{
-        run_randomized_stress, PHASE1_MUTATIONS, PHASE2_MUTATIONS, PHASE3_MUTATIONS,
+        PHASE1_MUTATIONS, PHASE2_MUTATIONS, PHASE3_MUTATIONS, run_randomized_stress,
     };
     const SETTLE_TIMEOUT: Duration = Duration::from_secs(60);
 

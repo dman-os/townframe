@@ -35,10 +35,19 @@ impl DrawerRepo {
                 .expect("seed write failed");
             tx.commit();
         }
-        let handle = match self.big_repo.create_doc(doc_am).await {
+        let handle = match self
+            .big_repo
+            .create_doc_with_parents(
+                doc_am,
+                vec![
+                    self.content_docs_group.clone().into(),
+                    self.drawer_group.clone().into(),
+                ],
+            )
+            .await {
             Ok(val) => val,
             Err(big_repo::CreateDocError::Put(big_repo::PutDocError::IdOccpuied { .. })) => {
-                panic!("keyhive doc id conflict lol")
+                panic!("keyhive document ID conflict")
             }
             Err(err) => {
                 return Err(eyre::eyre!("{err}")).wrap_err("error creating doc in big repo")?;
@@ -451,17 +460,24 @@ impl DrawerRepo {
             })
             .await?;
         let heads = ChangeHashSet(branch_doc.get_heads().into());
-        let handle = match self.big_repo.create_doc(branch_doc).await {
+        let branch_kind = self.branch_kind_for_path(to_branch)?;
+        let mut parents = vec![self.content_docs_group.clone().into()];
+        if branch_kind == BranchKind::Replicated {
+            parents.push(self.drawer_group.clone().into());
+        }
+        let handle = match self
+            .big_repo
+            .create_doc_with_parents(branch_doc, parents)
+            .await {
             Ok(val) => val,
             Err(big_repo::CreateDocError::Put(big_repo::PutDocError::IdOccpuied { .. })) => {
-                panic!("keyhive doc id conflict lol")
+                panic!("keyhive document ID conflict")
             }
             Err(err) => {
                 return Err(eyre::eyre!("{err}")).wrap_err("error creating doc in big repo")?;
             }
         };
         let branch_doc_id = handle.document_id();
-        let branch_kind = self.branch_kind_for_path(to_branch)?;
         self.add_branch_to_partitions_if_needed(branch_kind, branch_doc_id, &heads)
             .await?;
 

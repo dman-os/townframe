@@ -14,20 +14,20 @@ pub(crate) mod types;
 #[cfg(test)]
 mod test_support;
 
-pub use doc_worker::{spawn_doc_worker, SpawnedDocWorker};
+pub use doc_worker::spawn_doc_worker;
 pub use io::{CausalDecryptResult, Clock, DocIo, RuntimeIo, SyncDocAttempt, Timer};
 pub use lease::{
     DocLease, DocWorkerEntry, DocWorkerHandle, DocWorkerInternalLease, DocWorkerStopToken,
 };
-pub use messages::{DocWorkerMsg, Runtime2Cmd, Runtime2Evt};
-pub use tasks::{TaskRuntime, TaskSet, TokioTaskRuntime, TokioTaskSet, TokioTimer};
+pub use messages::{Runtime2Cmd, Runtime2Evt};
+pub use tasks::{TaskRuntime, TaskSet, TokioTaskRuntime, TokioTimer};
 
 mod doc_worker;
 mod handle;
 mod hub;
 
 pub use handle::Runtime2Handle;
-pub use hub::{spawn_runtime2, Runtime2StopToken};
+pub use hub::{Runtime2StopToken, spawn_runtime2};
 
 /// Generic over `F: FutureForm` (Sendable native, Local wasm) and the task
 /// runtime `R`. Concrete storage, keyhive, and transport are behind the

@@ -3,31 +3,24 @@ use keyhive_core::{
     access::Access,
     keyhive::Keyhive,
     listener::no_listener::NoListener,
-    principal::{membered::Membered, peer::Peer},
+    principal::membered::Membered,
     store::ciphertext::memory::MemoryCiphertextStore,
 };
 use keyhive_crypto::signer::memory::MemorySigner as KeyhiveMemorySigner;
 use nonempty::nonempty;
-use sedimentree_core::{
-    codec::{
+use sedimentree_core::codec::{
         decode::{self, DecodeFields},
         encode::{self, EncodeFields},
         error::DecodeError,
         schema::{self, Schema},
-    },
-    id::SedimentreeId,
-};
-use subduction_core::peer::id::PeerId;
+    };
 use subduction_crypto::{
     signed::Signed, signer::memory::MemorySigner as SubductionMemorySigner,
     verified_author::VerifiedAuthor,
 };
-use subduction_keyhive::{
-    policy::{authorize_fetch_with, authorize_put_with},
-    test_utils::{
+use subduction_keyhive::test_utils::{
         create_channel_pair, keyhive_peer_id, make_protocol_with_shared_keyhive, run_sync_round,
-    },
-};
+    };
 
 use crate::interlude::*;
 
@@ -98,8 +91,8 @@ pub async fn cli() -> Res<()> {
     let mut pre_grant_enc: Option<beekem::encrypted::EncryptedContent<Vec<u8>, [u8; 32]>> = None;
     let mut post_grant_enc: Option<beekem::encrypted::EncryptedContent<Vec<u8>, [u8; 32]>> = None;
     let mut sealed_pred_key: Option<Vec<u8>> = None;
-    let pre_grant_pcs: Option<Vec<u8>> = None;
-    let post_grant_pcs: Option<Vec<u8>> = None;
+    let _pre_grant_pcs: Option<Vec<u8>> = None;
+    let _post_grant_pcs: Option<Vec<u8>> = None;
 
     let doc_id = {
         let kh = alice_kh;
@@ -235,15 +228,15 @@ pub async fn cli() -> Res<()> {
                                                             "PRE-GRANT decrypt via CHAIN: OK! → \"{text}\""
                                                         );
                                                     }
-                                                    Err(e) => {
+                                                    Err(err) => {
                                                         println!(
-                                                            "PRE-GRANT decrypt via chain: FAILED ({e})"
+                                                            "PRE-GRANT decrypt via chain: FAILED ({err})"
                                                         );
                                                     }
                                                 }
                                             }
-                                            Err(e) => {
-                                                println!("try_open sealed pred key failed: {e}");
+                                            Err(err) => {
+                                                println!("try_open sealed pred key failed: {err}");
                                             }
                                         }
                                     } else {
@@ -253,7 +246,7 @@ pub async fn cli() -> Res<()> {
                             }
                         }
                     }
-                    Err(e) => println!("POST-GRANT decrypt FAILED: {e}"),
+                    Err(err) => println!("POST-GRANT decrypt FAILED: {err}"),
                 }
             }
         }

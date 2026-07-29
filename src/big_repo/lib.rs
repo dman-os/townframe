@@ -4,7 +4,7 @@
 mod interlude {
     #[allow(unused_imports)]
     pub use big_sync_core::{ObjId, PartId, PeerId};
-    use future_form::{FutureForm, Sendable};
+
     pub use utils_rs::prelude::*;
 }
 
@@ -12,7 +12,7 @@ use crate::interlude::*;
 use crate::keyhive_storage::{BigRepoKeyhiveStorage, KEYHIVE_SUBDIR};
 use sqlx_utils_rs::SqlCtx;
 
-use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
+use std::collections::{BTreeMap, BTreeSet, HashSet};
 use std::sync::atomic::{AtomicBool, Ordering};
 
 use automerge::ChangeHash;
@@ -54,15 +54,14 @@ pub use ephemeral::{
 };
 pub use keyhive::{BigKeyhiveAgent, BigKeyhiveAuthority, BigKeyhiveGroup, BigKeyhiveHandle};
 
+pub use changes::{BigRepoAccess, BigRepoDomainNotification, GroupId};
 pub use changes::{
-    path_prefix_matches as big_repo_path_prefix_matches, BigRepoChangeNotification,
-    BigRepoChangeOrigin, ChangeFilter as BigRepoChangeFilter,
+    BigRepoChangeNotification, BigRepoChangeOrigin, ChangeFilter as BigRepoChangeFilter,
     ChangeListenerRegistration as BigRepoChangeListenerRegistration,
     DocIdFilter as BigRepoDocIdFilter, DomainFilter as BigRepoDomainFilter,
     DomainListenerRegistration as BigRepoDomainListenerRegistration,
-    OriginFilter as BigRepoOriginFilter,
+    OriginFilter as BigRepoOriginFilter, path_prefix_matches as big_repo_path_prefix_matches,
 };
-pub use changes::{BigRepoAccess, BigRepoDomainNotification, GroupId};
 
 pub type DocumentId = big_sync_core::ObjId;
 pub type SharedPartStore = Arc<dyn big_sync::HostPartStore>;
@@ -73,6 +72,10 @@ pub const GLOBAL_PART_ID: big_sync_core::PartId = big_sync_core::PartId::new([
     0x67, 0x6c, 0x6f, 0x62, 0x61, 0x6c, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
     0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
 ]);
+/// Return the deterministic BigSync partition derived from a Keyhive group.
+pub fn group_part_id(group_id: [u8; 32]) -> big_sync_core::PartId {
+    runtime2::group_part_id(group_id)
+}
 
 #[derive(Debug, Clone)]
 pub struct Config {
@@ -171,8 +174,11 @@ impl BigRepo {
     ) -> Res<(Arc<Self>, BigRepoStopToken)> {
         Self::boot_inner(config, store).await
     }
-    #[cfg(test)]
-    pub(crate) fn shared_part_store(&self) -> SharedPartStore {
+    /// Return the partition store owned by this BigRepo.
+    ///
+    /// BigSync consumers must use this handle so they share BigRepo's
+    /// authority-derived partition membership.
+    pub fn shared_part_store(&self) -> SharedPartStore {
         Arc::clone(&self.big_sync_store)
     }
     #[cfg(test)]
@@ -287,6 +293,48 @@ impl BigRepo {
     pub fn keyhive(&self) -> &BigKeyhiveHandle {
         &self.keyhive
     }
+    /// Resolve a persisted Keyhive group without exposing the upstream id type.
+    pub async fn get_group_by_id(&self, id: [u8; 32]) -> Option<BigKeyhiveGroup> {
+        self.keyhive
+            .get_group(keyhive_core::principal::group::id::GroupId::new(
+                keyhive_core::principal::identifier::Identifier::from(
+                    ed25519_dalek::VerifyingKey::from_bytes(&id)
+                        .expect("group id must be a verifying key"),
+                ),
+            ))
+            .await
+    }
+    /// Resolve this repository's local Keyhive agent.
+    pub async fn local_keyhive_agent(&self) -> Res<BigKeyhiveAgent> {
+        let peer_id = subduction_keyhive::KeyhivePeerId::from_bytes(*self.local_peer_id.as_bytes());
+        self.keyhive
+            .get_agent_by_peer_id(&peer_id)
+            .await?
+            .ok_or_eyre("local Keyhive agent is unavailable")
+    }
+    /// Resolve a connected peer's Keyhive agent.
+    pub async fn keyhive_agent_for_peer(&self, peer_id: PeerId) -> Res<Option<BigKeyhiveAgent>> {
+        let keyhive_peer = subduction_keyhive::KeyhivePeerId::from_bytes(*peer_id.as_bytes());
+        self.keyhive.get_agent_by_peer_id(&keyhive_peer).await
+    }
+    /// Grant administrative membership without exposing the Keyhive access type.
+    pub async fn add_admin_member_to_group(
+        self: &Arc<Self>,
+        member: impl Into<BigKeyhiveAuthority>,
+        group: &BigKeyhiveGroup,
+    ) -> Res<()> {
+        self.add_member_to_group(member, group, keyhive_core::access::Access::Admin)
+            .await
+    }
+    /// Grant administrative access to a document without exposing Keyhive's access type.
+    pub async fn add_admin_member_to_doc(
+        self: &Arc<Self>,
+        doc_id: DocumentId,
+        member: impl Into<BigKeyhiveAuthority>,
+    ) -> Res<()> {
+        self.grant_doc_access(doc_id, member, keyhive_core::access::Access::Admin)
+            .await
+    }
 
     pub(crate) fn sync_policy(&self) -> runtime2::types::BigRepoSyncPolicy {
         self.sync_policy
@@ -323,6 +371,18 @@ impl BigRepo {
         timeout: Option<std::time::Duration>,
     ) -> Res<()> {
         self.runtime.sync_keyhive_with_peer(peer_id, timeout).await
+    }
+
+    /// Synchronize a document with a directly connected peer.
+    pub async fn sync_doc_with_peer(
+        &self,
+        doc_id: DocumentId,
+        peer_id: PeerId,
+        timeout: Option<std::time::Duration>,
+    ) -> Result<(), SyncDocError> {
+        self.runtime
+            .sync_doc_with_peer(doc_id, peer_id, timeout)
+            .await
     }
 
     #[cfg(test)]
@@ -673,6 +733,10 @@ impl BigDocHandle {
     pub fn document_id(&self) -> DocumentId {
         self.bundle.doc_id
     }
+    /// Whether this live handle is missing one or more decryption keys.
+    pub fn is_partially_decrypted(&self) -> bool {
+        self.bundle.is_partially_decrypted()
+    }
 
     pub async fn with_document_read<F, R>(&self, operation: F) -> R
     where
@@ -794,7 +858,6 @@ impl BigDocHandle {
         })
         .await
     }
-    #[cfg(test)]
 
     pub async fn hydrate_path_at_heads<T: Hydrate + Reconcile + Send + Sync + 'static>(
         &self,

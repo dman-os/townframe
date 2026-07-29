@@ -76,6 +76,20 @@ pub enum SyncDocAttempt {
     Policy(subduction_core::sync_session::SyncPolicyRejectionKind),
 }
 
+/// A document's Keyhive encryption state cannot currently produce an application key.
+#[derive(Debug, thiserror::Error)]
+#[error(
+    "document encryption key unavailable: {source} (document={document_id}, owner_secrets={owner_secret_count}, cgka_ops={cgka_operation_count}, has_pcs_key={has_pcs_key})"
+)]
+pub(crate) struct DocumentKeyUnavailable {
+    #[source]
+    pub(crate) source: beekem::error::CgkaError,
+    pub(crate) document_id: crate::DocumentId,
+    pub(crate) owner_secret_count: usize,
+    pub(crate) cgka_operation_count: usize,
+    pub(crate) has_pcs_key: bool,
+}
+
 /// The doc-worker's IO contract. All methods are `F::Future<'_>` so the same
 /// logic runs `Sendable` (native) and `Local` (wasm).
 ///

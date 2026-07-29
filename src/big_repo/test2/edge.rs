@@ -19,9 +19,9 @@
 //! - **stop-waits-for-save-tasks**: Every test2 test exercises the RAII
 //!   [`ShutdownGuard`] / [`Pair`] teardown path.
 
-use super::harness::{fixtures, topo::ShutdownGuard, Node, Pair, Topo};
+use super::harness::{Node, Pair, Topo, fixtures, topo::ShutdownGuard};
 use crate::SyncDocError;
-use automerge::{transaction::Transactable, ReadDoc, ScalarValue};
+use automerge::{ReadDoc, ScalarValue, transaction::Transactable};
 use keyhive_core::access::Access;
 use std::sync::Arc;
 use std::time::Duration;
@@ -600,7 +600,7 @@ async fn tier9_r2_relay_sync_persists_no_worker() -> crate::Res<()> {
         ref other => {
             return Err(crate::ferr!(
                 "reader doc should be Ready after keyhive+doc sync, got {other:?}"
-            ))
+            ));
         }
     };
 
@@ -732,13 +732,95 @@ async fn tier9_r2_partial_decrypt_converges_after_upgrade() -> crate::Res<()> {
         other => {
             return Err(crate::ferr!(
                 "relay doc must become Ready after key upgrade + re-sync, got {other:?}"
-            ))
+            ));
         }
     }
 
     drop(owner_doc);
     Ok(())
 }
+// ─── Live handle with a temporarily unavailable content key ────────────────
+//
+// A reader may retain a live handle across an access downgrade. The handle
+// remains useful for already-decrypted history, while later content can arrive
+// without a local key. A local write in that state must return a transient
+// encryption error; it must not kill the document worker.
+#[tokio::test(flavor = "multi_thread")]
+async fn tier9_r2_live_handle_missing_key_does_not_kill_worker() -> crate::Res<()> {
+    utils_rs::testing::setup_tracing_once();
+    let pair = Pair::boot(252, 253, "Owner", "Reader").await?;
+    let reader_agent = fixtures::agent_of(&pair.left().repo, pair.right()).await?;
+
+    let mut initial = automerge::Automerge::new();
+    initial
+        .transact(|tx| tx.put(automerge::ROOT, "title", "before-downgrade"))
+        .map_err(|err| crate::ferr!("failed creating doc: {err:?}"))?;
+    let owner_doc = pair.left().repo.create_doc(initial).await?;
+    let doc_id = owner_doc.document_id();
+
+    pair.left()
+        .repo
+        .grant_doc_access(
+            doc_id,
+            reader_agent.clone(),
+            keyhive_core::access::Access::Read,
+        )
+        .await?;
+    pair.left_conn().sync_keyhive_with_peer(None).await?;
+    pair.right_conn().sync_keyhive_with_peer(None).await?;
+    let reader_doc =
+        fixtures::sync_doc_expect_ready(pair.right_conn(), &pair.right().repo, doc_id).await?;
+
+    pair.left()
+        .repo
+        .revoke_doc_access(doc_id, reader_agent.clone())
+        .await?;
+    pair.left()
+        .repo
+        .grant_doc_access(doc_id, reader_agent, keyhive_core::access::Access::Relay)
+        .await?;
+    pair.left_conn().sync_keyhive_with_peer(None).await?;
+    pair.right_conn().sync_keyhive_with_peer(None).await?;
+
+    owner_doc
+        .with_document(|doc| {
+            doc.transact(|tx| tx.put(automerge::ROOT, "owner_update", "opaque"))
+                .map_err(|err| crate::ferr!("failed writing owner update: {err:?}"))
+        })
+        .await??;
+    pair.right_conn()
+        .sync_doc_with_peer(doc_id, Some(std::time::Duration::from_secs(10)))
+        .await?;
+    pair.right()
+        .repo
+        .wait_for_quiescence(Some(std::time::Duration::from_secs(10)))
+        .await?;
+
+    assert!(
+        reader_doc.is_partially_decrypted(),
+        "live reader handle should record unavailable post-downgrade keys"
+    );
+    let local_result = reader_doc
+        .with_document(|doc| {
+            doc.transact(|tx| tx.put(automerge::ROOT, "reader_update", "deferred"))
+                .map_err(|err| crate::ferr!("failed writing reader update: {err:?}"))
+        })
+        .await;
+    assert!(
+        local_result.is_err(),
+        "write without a content key must fail cleanly"
+    );
+    assert!(
+        pair.right().repo.runtime.has_doc_worker(doc_id).await?,
+        "a transient encryption failure must not terminate the document worker"
+    );
+
+    drop(reader_doc);
+    drop(owner_doc);
+    Ok(())
+}
+
+// ─── Racing handle acquisition with concurrent doc sync ────────────────────
 
 // ─── Racing handle acquisition with concurrent doc sync ────────────────────
 //
@@ -804,7 +886,7 @@ async fn tier9_r2_racing_handle_acquisition() -> crate::Res<()> {
         None => {
             return Err(crate::ferr!(
                 "racing handle acquisition never converged to Ready (10s timeout)"
-            ))
+            ));
         }
     }
 

@@ -170,11 +170,7 @@ fn generate_connected_edges(rng: &mut StdRng) -> Vec<(usize, usize)> {
 }
 
 fn canon_edge(a: usize, b: usize) -> (usize, usize) {
-    if a < b {
-        (a, b)
-    } else {
-        (b, a)
-    }
+    if a < b { (a, b) } else { (b, a) }
 }
 
 async fn init_and_copy_repo_cluster(root: &std::path::Path) -> Res<Vec<PathBuf>> {

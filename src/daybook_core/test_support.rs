@@ -159,16 +159,20 @@ pub async fn test_cx_with_options(
     let peer_id = crate::peer_id_from_label(&format!("test_{}", uuid::Uuid::new_v4().simple()));
 
     // Initialize SharedBigRepo with memory storage
-    let (big_sync_host, big_sync_stop) =
-        crate::test_support::boot_part_store("sqlite::memory:").await?;
     let (big_repo, acx_stop) = BigRepo::boot(
         big_repo::Config {
             node_identity_seed: rand::random::<[u8; 32]>(),
             storage: big_repo::StorageConfig::Memory,
+            scope_key: Arc::from("daybook-core-test"),
+            hidden_parts: Default::default(),
         },
-        Arc::clone(&big_sync_host.store),
     )
     .await?;
+    let part_store = big_repo.shared_part_store();
+    let (_worker, big_sync_stop) = big_sync::spawn_big_sync_worker(
+        Arc::clone(&part_store),
+        HashMap::new(),
+    )?;
 
     // Create a drawer document
     let drawer_doc_id = {
@@ -191,7 +195,7 @@ pub async fn test_cx_with_options(
     let local_user_path = daybook_types::doc::UserPathBuf::from("/test-user");
     let local_actor_id = daybook_types::doc::user_path::to_actor_id(&local_user_path);
     let temp_dir = tempfile::tempdir()?;
-    let part_store = Arc::clone(&big_sync_host.store);
+
     let blobs = crate::blobs::BlobsRepo::new(
         temp_dir.path().join("blobs"),
         local_user_path.clone(),
@@ -298,7 +302,19 @@ pub async fn test_cx_with_options(
     let secret_repo = crate::secrets::SecretRepo::boot().await?;
     let iroh_secret_key = iroh::SecretKey::generate();
     let local_peer_key = daybook_types::doc::format_peer_key(peer_id.as_bytes());
-    crate::repo::ensure_expected_partitions_for_docs(&part_store, app_doc_id, drawer_doc_id)
+    let authority = crate::authority::ensure(&big_repo, &sql_ctx, None).await?;
+    crate::authority::grant_docs_admin(
+        &big_repo,
+        &authority.core_docs,
+        [app_doc_id, drawer_doc_id],
+    )
+    .await?;
+    crate::repo::ensure_expected_partitions_for_docs(
+        &part_store,
+        &authority,
+        app_doc_id,
+        drawer_doc_id,
+    )
         .await?;
     let rcx = crate::repo::RepoCtx::from_parts(
         crate::repo::RepoCtxParts {
@@ -423,15 +439,24 @@ pub async fn boot_repo() -> Res<(
     big_sync::Ctx,
     Box<dyn FnOnce() -> futures::future::BoxFuture<'static, Res<()>>>,
 )> {
-    let (big_sync_host, big_sync_stop) = boot_part_store("sqlite::memory:").await?;
     let (repo, stop) = BigRepo::boot(
         big_repo::Config {
             node_identity_seed: [7_u8; 32],
             storage: big_repo::StorageConfig::Memory,
+            scope_key: Arc::from("daybook-core-test"),
+            hidden_parts: Default::default(),
         },
-        Arc::clone(&big_sync_host.store),
     )
     .await?;
+    let part_store = repo.shared_part_store();
+    let (worker, big_sync_stop) = big_sync::spawn_big_sync_worker(
+        Arc::clone(&part_store),
+        HashMap::new(),
+    )?;
+    let big_sync_host = big_sync::Ctx {
+        store: part_store,
+        worker,
+    };
     Ok((
         repo,
         big_sync_host,
@@ -453,18 +478,24 @@ pub async fn boot_disk_repo(
     big_sync::Ctx,
     Box<dyn FnOnce() -> futures::future::BoxFuture<'static, Res<()>>>,
 )> {
-    std::fs::create_dir_all(&path)
-        .wrap_err_with(|| format!("failed creating disk repo path: {}", path.display()))?;
-    let sqlite_url = format!("sqlite://{}", path.join("part_store.db").display());
-    let (big_sync_host, big_sync_stop) = boot_part_store(&sqlite_url).await?;
     let (repo, stop) = BigRepo::boot(
         big_repo::Config {
             node_identity_seed: [7_u8; 32],
             storage: big_repo::StorageConfig::Disk { path },
+            scope_key: Arc::from("daybook-core-test"),
+            hidden_parts: Default::default(),
         },
-        Arc::clone(&big_sync_host.store),
     )
     .await?;
+    let part_store = repo.shared_part_store();
+    let (worker, big_sync_stop) = big_sync::spawn_big_sync_worker(
+        Arc::clone(&part_store),
+        HashMap::new(),
+    )?;
+    let big_sync_host = big_sync::Ctx {
+        store: part_store,
+        worker,
+    };
     Ok((
         repo,
         big_sync_host,

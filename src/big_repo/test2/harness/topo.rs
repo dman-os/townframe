@@ -17,11 +17,11 @@ use crate::{
     BigRepo, BigRepoConnection, BigRepoStopToken, Config, DocumentId, PeerId, SqliteBigRepoStore,
     StorageConfig,
 };
-use big_sync::{stress_support, HostPartStore};
+use big_sync::{HostPartStore, stress_support};
 use sqlx_utils_rs::SqlCtx;
 use std::{collections::HashMap, sync::Arc};
 use tokio::sync::{Mutex, Notify};
-use tokio::time::{timeout, Duration};
+use tokio::time::{Duration, timeout};
 
 /// A single booted BigRepo node with an Iroh endpoint + big-sync worker.
 ///
@@ -611,6 +611,8 @@ impl Pair {
     }
 
     pub(crate) async fn restart_right(&mut self, storage: StorageConfig) -> crate::Res<()> {
+        self.left_conn.take();
+        self.right_conn.take();
         let node = self.guard.nodes.remove(self.right_idx);
         let restarted = node.restart(storage).await?;
         self.guard.nodes.insert(self.right_idx, restarted);
@@ -619,6 +621,8 @@ impl Pair {
 
     /// Restart the left node while preserving its persistent store and identity.
     pub(crate) async fn restart_left(&mut self, storage: StorageConfig) -> crate::Res<()> {
+        self.left_conn.take();
+        self.right_conn.take();
         let node = self.guard.nodes.remove(self.left_idx);
         let restarted = node.restart(storage).await?;
         self.guard.nodes.insert(self.left_idx, restarted);

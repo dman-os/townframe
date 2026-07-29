@@ -854,6 +854,7 @@ impl ChangeListenerManager {
     ) -> JoinHandle<()> {
         let fut = async move {
             loop {
+                #[derive(Debug)]
                 enum SwitchboardInput {
                     Remote(Vec<BigRepoChangeNotification>),
                     Heads(Vec<BigRepoHeadNotification>),
@@ -899,10 +900,13 @@ impl ChangeListenerManager {
                     }
                 };
 
+                debug!(?input, "switchboard input");
+
                 match input {
                     SwitchboardInput::Remote(notifications) => {
                         let to_send = {
                             let listeners = self.listeners.lock().expect(ERROR_MUTEX);
+                            // FIXME: we're allocating vecs on every event
                             let mut to_send = Vec::new();
                             for listener in listeners.iter() {
                                 let mut relevant_notifications = Vec::new();
@@ -1250,7 +1254,7 @@ mod tests {
     use super::*;
     use automerge::transaction::Transactable;
     use std::sync::Arc;
-    use tokio::time::{timeout, Duration};
+    use tokio::time::{Duration, timeout};
 
     fn make_change_fixture() -> (DocumentId, Arc<[ChangeHash]>, Arc<automerge::Patch>) {
         let doc_id = DocumentId::random();

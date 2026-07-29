@@ -169,14 +169,14 @@ reqwest = { version = "0.12", default-features = false, features = ["charset", "
 automerge = "0.9.0"
 autosurgeon = "0.11.0"
 automerge-test = "0.9"
-subduction_core = { git = "https://github.com/dman-os/subduction", rev = "d24335e75e555e6b58c2186c8fd6a3b6d0f4c3a4" }
-subduction_iroh = { git = "https://github.com/dman-os/subduction", rev = "d24335e75e555e6b58c2186c8fd6a3b6d0f4c3a4" }
-subduction_websocket = { git = "https://github.com/dman-os/subduction", rev = "d24335e75e555e6b58c2186c8fd6a3b6d0f4c3a4" }
-subduction_ephemeral = { git = "https://github.com/dman-os/subduction", rev = "d24335e75e555e6b58c2186c8fd6a3b6d0f4c3a4" }
-sedimentree_core = { git = "https://github.com/dman-os/subduction", rev = "d24335e75e555e6b58c2186c8fd6a3b6d0f4c3a4" }
-subduction_redb_storage = { git = "https://github.com/dman-os/subduction", rev = "d24335e75e555e6b58c2186c8fd6a3b6d0f4c3a4" }
-subduction_crypto = { git = "https://github.com/dman-os/subduction", rev = "d24335e75e555e6b58c2186c8fd6a3b6d0f4c3a4" }
-subduction_keyhive = { git = "https://github.com/dman-os/subduction", rev = "d24335e75e555e6b58c2186c8fd6a3b6d0f4c3a4" }
+subduction_core = { git = "https://github.com/dman-os/subduction", rev = "ceadf18535b86acd8f6be82181beae1dfb8bf654" }
+subduction_iroh = { git = "https://github.com/dman-os/subduction", rev = "ceadf18535b86acd8f6be82181beae1dfb8bf654" }
+subduction_websocket = { git = "https://github.com/dman-os/subduction", rev = "ceadf18535b86acd8f6be82181beae1dfb8bf654" }
+subduction_ephemeral = { git = "https://github.com/dman-os/subduction", rev = "ceadf18535b86acd8f6be82181beae1dfb8bf654" }
+sedimentree_core = { git = "https://github.com/dman-os/subduction", rev = "ceadf18535b86acd8f6be82181beae1dfb8bf654" }
+subduction_redb_storage = { git = "https://github.com/dman-os/subduction", rev = "ceadf18535b86acd8f6be82181beae1dfb8bf654" }
+subduction_crypto = { git = "https://github.com/dman-os/subduction", rev = "ceadf18535b86acd8f6be82181beae1dfb8bf654" }
+subduction_keyhive = { git = "https://github.com/dman-os/subduction", rev = "ceadf18535b86acd8f6be82181beae1dfb8bf654" }
 keyhive_crypto = { version = "0.2.1", git = "https://github.com/dman-os/keyhive", rev = "4fcc3121a3d6a759db62da13ed36f96df043d086" }
 keyhive_core = { version = "0.5.0", git = "https://github.com/dman-os/keyhive", rev = "4fcc3121a3d6a759db62da13ed36f96df043d086" }
 beekem = { version = "0.3.0", git = "https://github.com/dman-os/keyhive", rev = "4fcc3121a3d6a759db62da13ed36f96df043d086" }
@@ -245,15 +245,20 @@ autosurgeon-derive = { git = "https://github.com/dman-os/autosurgeon", rev = "27
 automerge = { git = "https://github.com/automerge/automerge", branch = "fragments" }
 # sqlite-vec = { git = "https://github.com/vlasky/sqlite-vec", rev = "9facf1ab84f2a360c0f1e62db3a7f3eca5bc099a" }
 #
-# [patch."https://github.com/dman-os/subduction"]
-# subduction_core = { path = "../subduction/subduction_core" }
-# subduction_iroh = { path = "../subduction/subduction_iroh" }
-# subduction_websocket = { path = "../subduction/subduction_websocket" }
-# sedimentree_core = { path = "../subduction/sedimentree_core" }
-# subduction_redb_storage = { path = "../subduction/subduction_redb_storage" }
-# subduction_crypto = { path = "../subduction/subduction_crypto" }
-# subduction_keyhive = { path = "../subduction/subduction_keyhive" }
+[patch."https://github.com/dman-os/subduction"]
+subduction_core = { path = "../subduction/subduction_core" }
+subduction_iroh = { path = "../subduction/subduction_iroh" }
+subduction_websocket = { path = "../subduction/subduction_websocket" }
+subduction_ephemeral = { path = "../subduction/subduction_ephemeral" }
+sedimentree_core = { path = "../subduction/sedimentree_core" }
+subduction_redb_storage = { path = "../subduction/subduction_redb_storage" }
+subduction_crypto = { path = "../subduction/subduction_crypto" }
+subduction_keyhive = { path = "../subduction/subduction_keyhive" }
 
+[patch."https://github.com/dman-os/keyhive"]
+keyhive_crypto = { path = "../keyhive/keyhive_crypto" }
+keyhive_core = { path = "../keyhive/keyhive_core" }
+beekem = { path = "../keyhive/beekem" }
 
 # The default profile is optimized for Wasm builds because
 # that's what [Trunk reads](https://github.com/trunk-rs/trunk/issues/605).

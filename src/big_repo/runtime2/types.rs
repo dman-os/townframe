@@ -1,14 +1,9 @@
-//! Support types migrated from the obsolete runtime.rs.
-//!
-//! These are the types that runtime2 and its peers (keyhive_listener, native
-//! backend, lib.rs re-exports) still import from the old `crate::runtime`
-//! module.  Kept in a separate file so the old runtime implementation can be
-//! deleted without disrupting the consumer sites.
+// FIXME: cleanup/reintegrate the legacy items in here
 
 use crate::interlude::*;
 
-use crate::keyhive_listener::BigRepoKeyhiveListener;
 use crate::DocumentId;
+use crate::keyhive_listener::BigRepoKeyhiveListener;
 use future_form::Sendable;
 use keyhive_core::principal::identifier::Identifier;
 use std::sync::Arc;

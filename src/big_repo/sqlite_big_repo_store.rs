@@ -1,16 +1,16 @@
 use crate::interlude::*;
-use big_sync::sqlite_core::{
-    decode_access, encode_access, MemberState, PendingSubscription, SqliteCore,
-    SUB_REPLAYING_CLEAN, SUB_REPLAY_DONE,
-};
 use big_sync::HostPartStore;
+use big_sync::sqlite_core::{
+    MemberState, PendingSubscription, SUB_REPLAY_DONE, SUB_REPLAYING_CLEAN, SqliteCore,
+    decode_access, encode_access,
+};
 use big_sync_core::part_store::{CursorIndex, ObjPayload};
 use big_sync_core::rpc::{
     BucketObjPageEntry, BucketSummary, GetChangedBucketsRequest, LeafBucketPage, LeafBucketResult,
     LeafBucketsError, LeafBucketsRequest, ListPartsError, PartEvent, PartPage, PartSummary,
     SubEvent, SubPartsRequest, SubscriptionTarget,
 };
-use big_sync_core::{mpsc, BuckId, Byte32Id, Fingerprint, ObjId, PartId, PeerId};
+use big_sync_core::{BuckId, Byte32Id, Fingerprint, ObjId, PartId, PeerId, mpsc};
 use future_form::{FutureForm, Sendable};
 use futures::future::BoxFuture;
 use sedimentree_core::{
@@ -20,7 +20,7 @@ use sedimentree_core::{
     depth::CountLeadingZeroBytes,
     fragment::Fragment,
     id::SedimentreeId,
-    loose_commit::{id::CommitId, LooseCommit},
+    loose_commit::{LooseCommit, id::CommitId},
     sedimentree::Sedimentree,
 };
 use sqlx::{QueryBuilder, Row};
@@ -2618,7 +2618,7 @@ impl Storage<Sendable> for SqliteBigRepoStore {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use big_sync::{host_part_store_contract, HostPartStoreContractHarness};
+    use big_sync::{HostPartStoreContractHarness, host_part_store_contract};
     use sedimentree_core::blob::BlobMeta;
     use subduction_crypto::signer::memory::MemorySigner;
 
@@ -2849,12 +2849,16 @@ mod tests {
         .await?;
 
         let commit = make_commit(&signer, tree, 1).await;
-        assert!(Storage::<Sendable>::save_loose_commit(&store, tree, commit)
-            .await
-            .is_err());
-        assert!(Storage::<Sendable>::load_loose_commits(&store, tree)
-            .await?
-            .is_empty());
+        assert!(
+            Storage::<Sendable>::save_loose_commit(&store, tree, commit)
+                .await
+                .is_err()
+        );
+        assert!(
+            Storage::<Sendable>::load_loose_commits(&store, tree)
+                .await?
+                .is_empty()
+        );
         assert_eq!(
             HostPartStore::obj_payload(&store, obj_id).await?,
             Some(old_payload)
@@ -3169,10 +3173,12 @@ mod tests {
             desired_group_parts: HashSet::from([part]),
             desired_global: false,
         }];
-        assert!(store
-            .reconcile_group_part_batch(&mutations, 42, true)
-            .await
-            .is_err());
+        assert!(
+            store
+                .reconcile_group_part_batch(&mutations, 42, true)
+                .await
+                .is_err()
+        );
 
         assert!(
             HostPartStore::obj_parts(&store, doc).await?.is_empty(),
@@ -3556,10 +3562,12 @@ mod tests {
             desired_group_parts: HashSet::from([part]),
             desired_global: false,
         };
-        assert!(store
-            .reconcile_group_part_batch(&[mutation], 42, true)
-            .await
-            .is_err());
+        assert!(
+            store
+                .reconcile_group_part_batch(&[mutation], 42, true)
+                .await
+                .is_err()
+        );
         assert_eq!(store.keyhive_group_part_cursor().await?, 0);
         assert!(HostPartStore::obj_parts(&store, doc).await?.is_empty());
         Ok(())
@@ -3588,10 +3596,12 @@ mod tests {
             desired_group_parts: HashSet::from([part]),
             desired_global: false,
         };
-        assert!(store
-            .reconcile_group_part_batch(&[mutation], 42, true)
-            .await
-            .is_err());
+        assert!(
+            store
+                .reconcile_group_part_batch(&[mutation], 42, true)
+                .await
+                .is_err()
+        );
         assert_eq!(store.keyhive_group_part_cursor().await?, 0);
         assert!(HostPartStore::obj_parts(&store, doc).await?.is_empty());
         Ok(())
