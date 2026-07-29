@@ -596,7 +596,7 @@ async fn tier9_r2_relay_sync_persists_no_worker() -> crate::Res<()> {
     // Lazy worker created by get_doc -> returns Ready because keys arrived.
     let lookup = pair.right().repo.get_doc(&doc_id).await?;
     let _reader_handle = match lookup {
-        crate::runtime::DocLookup::Ready(h) => h,
+        crate::runtime2::types::DocLookup::Ready(h) => h,
         ref other => {
             return Err(crate::ferr!(
                 "reader doc should be Ready after keyhive+doc sync, got {other:?}"
@@ -683,7 +683,10 @@ async fn tier9_r2_partial_decrypt_converges_after_upgrade() -> crate::Res<()> {
     // Acquire handle — PendingMaterialization (has content, no key).
     let lookup = topo.topo_node(1).repo.get_doc(&doc_id).await?;
     assert!(
-        matches!(lookup, crate::runtime::DocLookup::PendingMaterialization),
+        matches!(
+            lookup,
+            crate::runtime2::types::DocLookup::PendingMaterialization
+        ),
         "relay doc must be PendingMaterialization (content exists, no key)"
     );
     let state = topo
@@ -723,7 +726,7 @@ async fn tier9_r2_partial_decrypt_converges_after_upgrade() -> crate::Res<()> {
 
     let lookup = topo.topo_node(1).repo.get_doc(&doc_id).await?;
     match lookup {
-        crate::runtime::DocLookup::Ready(handle) => {
+        crate::runtime2::types::DocLookup::Ready(handle) => {
             drop(handle);
         }
         other => {
@@ -786,9 +789,9 @@ async fn tier9_r2_racing_handle_acquisition() -> crate::Res<()> {
     let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
     let ready = loop {
         match pair.right().repo.get_doc(&doc_id).await? {
-            crate::runtime::DocLookup::Ready(handle) => break Some(handle),
-            crate::runtime::DocLookup::PendingMaterialization
-            | crate::runtime::DocLookup::Missing => {
+            crate::runtime2::types::DocLookup::Ready(handle) => break Some(handle),
+            crate::runtime2::types::DocLookup::PendingMaterialization
+            | crate::runtime2::types::DocLookup::Missing => {
                 if std::time::Instant::now() >= deadline {
                     break None;
                 }

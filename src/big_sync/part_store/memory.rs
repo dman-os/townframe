@@ -17,69 +17,7 @@ use std::collections::BTreeMap;
 #[cfg(test)]
 use std::collections::BTreeSet;
 
-const SUB_REPLAYING_CLEAN: u8 = 0;
-const SUB_REPLAYING_DIRTY: u8 = 1;
-const SUB_FINALIZING: u8 = 2;
-const SUB_REPLAY_DONE: u8 = 3;
-
-struct PendingSubscription {
-    state: std::sync::atomic::AtomicU8,
-}
-
-impl PendingSubscription {
-    fn new() -> Arc<Self> {
-        Arc::new(Self {
-            state: std::sync::atomic::AtomicU8::new(SUB_REPLAYING_CLEAN),
-        })
-    }
-
-    fn mark_dirty(&self) -> bool {
-        loop {
-            let state = self.state.load(std::sync::atomic::Ordering::Acquire);
-            match state {
-                SUB_REPLAYING_CLEAN | SUB_FINALIZING => {
-                    if self
-                        .state
-                        .compare_exchange(
-                            state,
-                            SUB_REPLAYING_DIRTY,
-                            std::sync::atomic::Ordering::AcqRel,
-                            std::sync::atomic::Ordering::Acquire,
-                        )
-                        .is_ok()
-                    {
-                        return false;
-                    }
-                }
-                SUB_REPLAYING_DIRTY => return false,
-                SUB_REPLAY_DONE => return true,
-                _ => panic!("invalid subscription state {state}"),
-            }
-        }
-    }
-
-    fn begin_finalization(&self) -> bool {
-        self.state
-            .compare_exchange(
-                SUB_REPLAYING_CLEAN,
-                SUB_FINALIZING,
-                std::sync::atomic::Ordering::AcqRel,
-                std::sync::atomic::Ordering::Acquire,
-            )
-            .is_ok()
-    }
-
-    fn become_ready(&self) -> bool {
-        self.state
-            .compare_exchange(
-                SUB_FINALIZING,
-                SUB_REPLAY_DONE,
-                std::sync::atomic::Ordering::AcqRel,
-                std::sync::atomic::Ordering::Acquire,
-            )
-            .is_ok()
-    }
-}
+use super::sqlite_core::{PendingSubscription, SUB_REPLAYING_CLEAN};
 
 enum MemorySubscription {
     Pending {
@@ -350,7 +288,7 @@ impl MemoryPartStoreScopeState {
                                 .map(|access| access.is_fetcher())
                                 .unwrap_or(false)
                         })
-                        .unwrap_or(true)
+                        .unwrap_or(false)
                 };
                 let mut should_drop = false;
                 sub = match sub {
@@ -1072,7 +1010,7 @@ impl HostPartStore for MemoryPartStore {
                                     .map(|access| access.is_fetcher())
                                     .unwrap_or(false)
                             })
-                            .unwrap_or(true);
+                            .unwrap_or(false);
                         if !permitted {
                             continue;
                         }
@@ -1140,6 +1078,7 @@ impl HostPartStore for MemoryPartStore {
                 }
                 if !marker_sent {
                     if !pending_for_replay.begin_finalization() {
+                        object_replay_pending = true;
                         continue;
                     }
                     if tx.send(SubEvent::ReplayComplete).await.is_err() {
@@ -1149,8 +1088,11 @@ impl HostPartStore for MemoryPartStore {
                     if pending_for_replay.become_ready() {
                         return;
                     }
+                    object_replay_pending = true;
                 } else if pending_for_replay.become_ready() {
                     return;
+                } else {
+                    object_replay_pending = true;
                 }
             }
         });

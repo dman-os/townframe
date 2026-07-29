@@ -7,7 +7,9 @@ mod io;
 mod lease;
 mod messages;
 pub(crate) mod native;
+pub(crate) mod support;
 mod tasks;
+pub(crate) mod types;
 
 #[cfg(test)]
 mod test_support;
@@ -25,7 +27,7 @@ mod handle;
 mod hub;
 
 pub use handle::Runtime2Handle;
-pub use hub::{spawn_runtime2, Runtime2Hub, Runtime2StopToken};
+pub use hub::{spawn_runtime2, Runtime2StopToken};
 
 /// Generic over `F: FutureForm` (Sendable native, Local wasm) and the task
 /// runtime `R`. Concrete storage, keyhive, and transport are behind the
@@ -37,7 +39,7 @@ pub struct Runtime2Config<F: FutureForm, R: TaskRuntime<F>> {
     pub runtime_io: std::sync::Arc<dyn RuntimeIo<F>>,
     /// IO surface shared by per-document workers (encrypt, decrypt, store).
     pub doc_io: std::sync::Arc<dyn DocIo<F>>,
-    pub sync_policy: crate::runtime::BigRepoSyncPolicy,
+    pub sync_policy: crate::runtime2::types::BigRepoSyncPolicy,
     pub change_manager: std::sync::Arc<crate::changes::ChangeListenerManager>,
     /// Concrete task runtime (native: [`TokioTaskRuntime`]). Controls how
     /// background tasks (keyhive syncs, lease waiters, doc-workers) are

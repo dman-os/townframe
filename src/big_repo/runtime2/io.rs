@@ -113,11 +113,12 @@ pub trait DocIo<F: FutureForm>: Send + Sync {
     fn persist_initial_document(
         &self,
         sed_id: sedimentree_core::id::SedimentreeId,
-        staged: crate::runtime::StagedAutomergeIngest,
+        staged: crate::runtime2::support::StagedAutomergeIngest,
     ) -> F::Future<'_, eyre::Result<()>>;
 
-    /// Encrypt and persist one serialized local document transition. Keyhive
-    /// update operations never escape this service boundary.
+    /// Encrypt and persist a batch of serialized local document transitions.
+    /// Keyhive update operations never escape this service boundary. The caller
+    /// must service every returned `FragmentRequested` through `store_fragment`.
     fn persist_local_commits(
         &self,
         sed_id: sedimentree_core::id::SedimentreeId,
@@ -154,7 +155,7 @@ pub trait DocIo<F: FutureForm>: Send + Sync {
     fn try_decrypt_content_keyed(
         &self,
         sed_id: sedimentree_core::id::SedimentreeId,
-        locator: crate::runtime::BigRepoCiphertextLocator,
+        locator: crate::runtime2::support::BigRepoCiphertextLocator,
     ) -> F::Future<'_, eyre::Result<Option<Vec<u8>>>>;
 
     /// Causal decrypt: decrypt `locator` + any ancestors whose keys are now
@@ -165,7 +166,7 @@ pub trait DocIo<F: FutureForm>: Send + Sync {
     fn try_causal_decrypt(
         &self,
         sed_id: sedimentree_core::id::SedimentreeId,
-        locator: crate::runtime::BigRepoCiphertextLocator,
+        locator: crate::runtime2::support::BigRepoCiphertextLocator,
     ) -> F::Future<'_, eyre::Result<CausalDecryptResult>>;
 }
 

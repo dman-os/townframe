@@ -1,34 +1,4 @@
 //! `Runtime2Hub` — the runtime actor ("the machine loop").
-//!
-//! Replaces [`BigRepoRuntimeWorker`](crate::runtime::BigRepoRuntimeWorker).
-//! Processes [`Runtime2Cmd`] (from the handle) and [`Runtime2Evt`] (from
-//! background workers, keyhive listener, sync sessions, doc-workers).
-//! Manages connections, doc-worker lifecycle, keyhive sync, the janitor.
-//!
-//! # big_sync removed
-//!
-//! The old hub held a `big_sync_store: SharedPartitionStore` and wrote
-//! materialized heads to the obj payload (`set_obj_payload`) — both are gone.
-//! Heads are derived from the sedimentree (see [`DocIo::sedimentree_heads`]).
-//! big_sync (partition membership, sync routing) moves to a sibling layer.
-//!
-//! # FutureForm
-//!
-//! The hub is generic over `F: FutureForm`. However, subduction and keyhive
-//! types in the current crate are hardcoded to [`Sendable`] (type aliases like
-//! [`BigRepoSubduction`], [`BigRepoPolicy`]). The hub fields that reference
-//! these concrete types carry a de-facto `F = Sendable` constraint until those
-//! types are lifted.
-//!
-//! # Spawning
-//!
-//! [`spawn_runtime2`] is a top-standing free function (not a method),
-//! mirroring [`spawn_big_repo_runtime`](crate::runtime::spawn_big_repo_runtime).
-//! It spawns 6 background workers + the machine loop and returns
-//! `(Runtime2Handle, Runtime2StopToken)`.
-//!
-//! [`Sendable`]: future_form::Sendable
-//! [`BigRepoSubduction`]: crate::runtime::BigRepoSubduction
 
 use crate::interlude::*;
 use crate::runtime2::{
@@ -45,96 +15,79 @@ use std::collections::{BTreeSet, HashMap, HashSet};
 // Re-export the ephemeral so embedders can subscribe.
 pub use crate::ephemeral::BigEphemeral;
 
-// ─── Local type aliases (replacing private types from runtime.rs) ──────────
-// These mirror the private type aliases in runtime.rs that we can't access.
-// When the old runtime types are made `pub(crate)`, these can be replaced
-// with `crate::runtime::...`.
-
-// ─── Runtime2Hub ───────────────────────────────────────────────────────────
-
-/// The runtime actor. Owns the live state; driven by [`handle_cmd`](Self::handle_cmd)
-/// / [`handle_evt`](Self::handle_evt) in the machine loop.
-///
-/// Mirrors [`BigRepoRuntimeWorker`](crate::runtime::BigRepoRuntimeWorker)
-/// (`runtime.rs:1044`) with the same fields minus `big_sync_store`.
-pub struct Runtime2Hub<F: FutureForm, R: TaskRuntime<F>> {
+struct Runtime2Hub<F: FutureForm, R: TaskRuntime<F>> {
     // ── identity / config ──────────────────────────────────────────────────
-    pub(crate) local_peer_id: PeerId,
-    pub(crate) sync_policy: crate::runtime::BigRepoSyncPolicy,
+    local_peer_id: PeerId,
+    sync_policy: crate::runtime2::types::BigRepoSyncPolicy,
 
     // ── injected IO facades ────────────────────────────────────────────────
-    pub(crate) runtime_io: std::sync::Arc<dyn crate::runtime2::RuntimeIo<F>>,
+    runtime_io: std::sync::Arc<dyn crate::runtime2::RuntimeIo<F>>,
     /// Transport-agnostic connection factory. Cloned for each spawn so
     /// background connect/accept/close tasks can drive IO without holding
     /// a borrow on the hub.
-    pub(crate) connect: std::sync::Arc<dyn crate::runtime2::TransportConnect<F>>,
+    connect: std::sync::Arc<dyn crate::runtime2::TransportConnect<F>>,
     /// Shared IO facade passed to every document worker.
-    pub(crate) doc_io: Arc<dyn crate::runtime2::DocIo<F>>,
+    doc_io: Arc<dyn crate::runtime2::DocIo<F>>,
 
     // ── change manager ─────────────────────────────────────────────────────
-    pub(crate) change_manager: Arc<crate::changes::ChangeListenerManager>,
+    change_manager: Arc<crate::changes::ChangeListenerManager>,
 
     // ── task sets ──────────────────────────────────────────────────────────
     /// Child/background tasks (construction-time, keyhive syncs, lease
     /// waiters, doc-workers). Stopped first on shutdown (children before
     /// the hub loop).
-    pub(crate) child_tasks: R::Tasks,
+    child_tasks: R::Tasks,
 
     // ── determinism levers ─────────────────────────────────────────────────
-    pub(crate) timer: Arc<dyn crate::runtime2::Timer<F>>,
-    pub(crate) clock: Arc<dyn crate::runtime2::Clock>,
+    timer: Arc<dyn crate::runtime2::Timer<F>>,
+    clock: Arc<dyn crate::runtime2::Clock>,
 
     // ── channels ───────────────────────────────────────────────────────────
-    pub(crate) cmd_tx: async_channel::Sender<Runtime2Cmd>,
-    pub(crate) evt_tx: async_channel::Sender<Runtime2Evt>,
+    cmd_tx: async_channel::Sender<Runtime2Cmd>,
+    evt_tx: async_channel::Sender<Runtime2Evt>,
 
     // ── connection state ───────────────────────────────────────────────────
-    pub(crate) connected_peers: HashMap<PeerId, ConnDeets>,
+    connected_peers: HashMap<PeerId, ConnDeets>,
 
     // ── keyhive sync bookkeeping ───────────────────────────────────────────
-    pub(crate) pending_keyhive_syncs:
+    pending_keyhive_syncs:
         HashMap<PeerId, Vec<(u64, futures::channel::oneshot::Sender<eyre::Result<()>>)>>,
-    pub(crate) active_keyhive_syncs: HashMap<PeerId, KeyhiveSyncRound>,
-    pub(crate) keyhive_round_ids: u64,
-    pub(crate) keyhive_dirty: BTreeSet<PeerId>,
+    active_keyhive_syncs: HashMap<PeerId, KeyhiveSyncRound>,
+    keyhive_round_ids: u64,
+    keyhive_dirty: BTreeSet<PeerId>,
     /// A quiescence probe has admitted a cache refresh barrier.
-    pub(crate) quiescence_cache_refresh_pending: bool,
+    quiescence_cache_refresh_pending: bool,
     /// A quiescence probe is awaiting its event-log watermark.
-    pub(crate) quiescence_group_part_watermark_pending: bool,
+    quiescence_group_part_watermark_pending: bool,
 
     // ── runtime-wide quiescence ────────────────────────────────────────────
-    pub(crate) quiescence_waiters: Vec<futures::channel::oneshot::Sender<eyre::Result<()>>>,
-    pub(crate) quiescence_probe: Option<QuiescenceProbe>,
-    pub(crate) quiescence_barrier_ids: u64,
-    pub(crate) activity_generation: u64,
-    pub(crate) group_part_cursor: u64,
+    quiescence_waiters: Vec<futures::channel::oneshot::Sender<eyre::Result<()>>>,
+    quiescence_probe: Option<QuiescenceProbe>,
+    quiescence_barrier_ids: u64,
+    activity_generation: u64,
+    group_part_cursor: u64,
 
     // ── doc-worker registry ────────────────────────────────────────────────
-    pub(crate) doc_workers: HashMap<DocumentId, DocWorkerEntry>,
-    pub(crate) pending_materialization: HashSet<DocumentId>,
+    doc_workers: HashMap<DocumentId, DocWorkerEntry>,
+    pending_materialization: HashSet<DocumentId>,
 
     // ── waiter-id counters (shared with the handle) ────────────────────────
-    pub(crate) doc_sync_waiter_ids: Arc<std::sync::atomic::AtomicU64>,
-    pub(crate) keyhive_sync_waiter_ids: Arc<std::sync::atomic::AtomicU64>,
+    doc_sync_waiter_ids: Arc<std::sync::atomic::AtomicU64>,
+    keyhive_sync_waiter_ids: Arc<std::sync::atomic::AtomicU64>,
 }
 
-/// Per-connection bookkeeping. Holds the cancellation token and the `closed`
-/// flag so [`handle_close_iroh`] / [`handle_connection_lost`] can tear down.
-///
-/// Mirrors `RuntimePeerConnDeets` at `runtime.rs:339`.
-pub(crate) struct ConnDeets {
-    pub closed: Arc<std::sync::atomic::AtomicBool>,
+struct ConnDeets {
+    closed: Arc<std::sync::atomic::AtomicBool>,
 }
 
-pub(crate) struct KeyhiveSyncRound {
-    pub watermark: u64,
-    pub round_id: u64,
-    pub request_id: subduction_keyhive::message::RequestId,
-    pub cache_refresh_started: bool,
-    pub changed: bool,
+struct KeyhiveSyncRound {
+    watermark: u64,
+    round_id: u64,
+    request_id: subduction_keyhive::message::RequestId,
+    changed: bool,
 }
 
-pub(crate) struct QuiescenceProbe {
+struct QuiescenceProbe {
     barrier_id: u64,
     activity_generation: u64,
     pending_docs: HashSet<DocumentId>,
@@ -152,13 +105,21 @@ trait HubCommandFuture<F: FutureForm> {
         initial_content: Box<automerge::Automerge>,
         parents: Vec<crate::keyhive::BigKeyhiveAuthority>,
         content_heads: nonempty::NonEmpty<[u8; 32]>,
-        resp: futures::channel::oneshot::Sender<eyre::Result<Arc<crate::runtime::LiveDocBundle>>>,
+        resp: futures::channel::oneshot::Sender<
+            eyre::Result<Arc<crate::runtime2::types::LiveDocBundle>>,
+        >,
     ) -> F::Future<'static, eyre::Result<()>>;
 
-    fn check_sedimentree(
+    fn contains_sedimentree(
         runtime_io: Arc<dyn crate::runtime2::RuntimeIo<F>>,
         sed_id: sedimentree_core::id::SedimentreeId,
-        resp: futures::channel::oneshot::Sender<bool>,
+        resp: futures::channel::oneshot::Sender<eyre::Result<bool>>,
+    ) -> F::Future<'static, eyre::Result<()>>;
+    fn has_local_doc_state(
+        runtime_io: Arc<dyn crate::runtime2::RuntimeIo<F>>,
+        doc_id: DocumentId,
+        has_doc_worker: bool,
+        resp: futures::channel::oneshot::Sender<eyre::Result<bool>>,
     ) -> F::Future<'static, eyre::Result<()>>;
 
     fn inspect_stored_doc_blobs(
@@ -181,42 +142,61 @@ impl<F: FutureForm> HubCommandFuture<F> for F {
         initial_content: Box<automerge::Automerge>,
         parents: Vec<crate::keyhive::BigKeyhiveAuthority>,
         content_heads: nonempty::NonEmpty<[u8; 32]>,
-        resp: futures::channel::oneshot::Sender<eyre::Result<Arc<crate::runtime::LiveDocBundle>>>,
+        resp: futures::channel::oneshot::Sender<
+            eyre::Result<Arc<crate::runtime2::types::LiveDocBundle>>,
+        >,
     ) -> F::Future<'static, eyre::Result<()>> {
         F::from_future(async move {
             match runtime_io.create_document(parents, content_heads).await {
                 Ok(doc_id) => {
-                    if cmd_tx
+                    cmd_tx
                         .send(Runtime2Cmd::PutDoc {
                             doc_id,
                             initial_content,
                             resp,
                         })
                         .await
-                        .is_err()
-                    {
-                        tracing::debug!(?doc_id, "runtime stopped before PutDoc could be enqueued");
-                    }
+                        .expect(ERROR_CHANNEL);
                 }
                 Err(err) => {
-                    let _ = resp.send(Err(err));
+                    resp.send(Err(err))
+                        .inspect_err(|_| warn!(ERROR_CALLER))
+                        .ok();
                 }
             }
             Ok(())
         })
     }
 
-    fn check_sedimentree(
+    fn contains_sedimentree(
         runtime_io: Arc<dyn crate::runtime2::RuntimeIo<F>>,
         sed_id: sedimentree_core::id::SedimentreeId,
-        resp: futures::channel::oneshot::Sender<bool>,
+        resp: futures::channel::oneshot::Sender<eyre::Result<bool>>,
     ) -> F::Future<'static, eyre::Result<()>> {
         F::from_future(async move {
-            let stored = runtime_io
-                .contains_sedimentree(sed_id)
-                .await
-                .unwrap_or(false);
-            let _ = resp.send(stored);
+            let stored = runtime_io.contains_sedimentree(sed_id).await;
+            resp.send(stored).inspect_err(|_| warn!(ERROR_CALLER)).ok();
+            Ok(())
+        })
+    }
+
+    fn has_local_doc_state(
+        runtime_io: Arc<dyn crate::runtime2::RuntimeIo<F>>,
+        doc_id: DocumentId,
+        has_doc_worker: bool,
+        resp: futures::channel::oneshot::Sender<eyre::Result<bool>>,
+    ) -> F::Future<'static, eyre::Result<()>> {
+        F::from_future(async move {
+            let result = if has_doc_worker {
+                Ok(true)
+            } else {
+                runtime_io
+                    .contains_sedimentree(sedimentree_core::id::SedimentreeId::new(
+                        doc_id.into_bytes(),
+                    ))
+                    .await
+            };
+            resp.send(result).inspect_err(|_| warn!(ERROR_CALLER)).ok();
             Ok(())
         })
     }
@@ -228,7 +208,7 @@ impl<F: FutureForm> HubCommandFuture<F> for F {
     ) -> F::Future<'static, eyre::Result<()>> {
         F::from_future(async move {
             let result = runtime_io.inspect_stored_doc_blobs(sed_id).await;
-            let _ = resp.send(result);
+            resp.send(result).inspect_err(|_| warn!(ERROR_CALLER)).ok();
             Ok(())
         })
     }
@@ -242,7 +222,7 @@ impl<F: FutureForm> HubCommandFuture<F> for F {
                 .note_local_keyhive_changed()
                 .await
                 .wrap_err("keyhive local-change refresh failed");
-            let _ = resp.send(out);
+            resp.send(out).inspect_err(|_| warn!(ERROR_CALLER)).ok();
             Ok(())
         })
     }
@@ -312,7 +292,7 @@ where
                     barrier_id,
                     _lease: lease,
                 })
-                .expect("task was found dead");
+                .expect(ERROR_CHANNEL);
         }
         Ok(())
     }
@@ -341,6 +321,8 @@ where
         if !probe.pending_docs.is_empty()
             || self.quiescence_group_part_watermark_pending
             || !self.keyhive_dirty.is_empty()
+            || !self.active_keyhive_syncs.is_empty()
+            || !self.pending_keyhive_syncs.is_empty()
             || self.quiescence_cache_refresh_pending
             || self.group_part_cursor < probe.group_part_cursor
         {
@@ -357,22 +339,22 @@ where
             // A caller timeout drops the receiver; that cancellation is not
             // a runtime failure and must not crash the hub while resolving
             // other waiters.
-            let _ = waiter.send(Ok(()));
+            waiter
+                .send(Ok(()))
+                .inspect_err(|_| warn!(ERROR_CALLER))
+                .ok();
         }
         Ok(())
     }
 
-    /// Process a single [`Runtime2Cmd`]. Every variant maps 1:1 to a variant
-    /// of the old `RuntimeCmd`. Mirrors `handle_cmd` at `runtime.rs:1096`.
-    pub(crate) fn handle_cmd(&mut self, cmd: Runtime2Cmd) -> eyre::Result<()> {
-        if !matches!(&cmd, Runtime2Cmd::WaitForQuiescence { .. })
-            && !matches!(
-                &cmd,
-                Runtime2Cmd::RegisterDocLease { .. }
-                    | Runtime2Cmd::ReleaseDocLease { .. }
-                    | Runtime2Cmd::ReleaseInternalLease { .. }
-            )
-        {
+    fn handle_cmd(&mut self, cmd: Runtime2Cmd) -> eyre::Result<()> {
+        if !matches!(
+            &cmd,
+            Runtime2Cmd::WaitForQuiescence { .. }
+                | Runtime2Cmd::RegisterDocLease { .. }
+                | Runtime2Cmd::ReleaseDocLease { .. }
+                | Runtime2Cmd::ReleaseInternalLease { .. }
+        ) {
             self.note_activity();
         }
         match cmd {
@@ -402,13 +384,13 @@ where
                         initial_content,
                         resp,
                     })
-                    .expect("task was found dead");
+                    .expect(ERROR_CHANNEL);
             }
             Runtime2Cmd::GetDocHandle { doc_id, resp } => {
                 let (worker, _lease) = self.doc_worker_handle(doc_id)?;
                 worker
                     .send(DocWorkerMsg::AcquireHandle { resp })
-                    .expect("task was found dead");
+                    .expect(ERROR_CHANNEL);
             }
             Runtime2Cmd::CommitDelta {
                 doc_id,
@@ -430,13 +412,13 @@ where
                         resp,
                         _lease,
                     })
-                    .expect("task was found dead");
+                    .expect(ERROR_CHANNEL);
             }
             Runtime2Cmd::DocHeadState { doc_id, resp } => {
                 let (worker, _lease) = self.doc_worker_handle(doc_id)?;
                 worker
                     .send(DocWorkerMsg::QueryHeadState { resp })
-                    .expect("task was found dead");
+                    .expect(ERROR_CHANNEL);
             }
             Runtime2Cmd::OpenConn { peer, addr, resp } => {
                 let child_tasks = self.child_tasks.clone();
@@ -530,7 +512,7 @@ where
                     .expect("doc worker must exist before registering its bundle lease");
                 entry.local_handles += 1;
                 entry.eviction_deadline = None;
-                let _ = registered.send(());
+                registered.send(()).expect(ERROR_CHANNEL);
             }
             Runtime2Cmd::ReleaseDocLease { doc_id } => {
                 self.handle_release_doc_lease(doc_id);
@@ -538,13 +520,28 @@ where
             Runtime2Cmd::ReleaseInternalLease { doc_id } => {
                 self.handle_release_internal_lease(doc_id);
             }
-            Runtime2Cmd::CheckSedimentreeResident { doc_id, resp } => {
+            Runtime2Cmd::ContainsSedimentree { doc_id, resp } => {
                 let sedimentree_id = sedimentree_core::id::SedimentreeId::new(doc_id.into_bytes());
-                self.spawn_background(F::check_sedimentree(
+                self.spawn_background(F::contains_sedimentree(
                     Arc::clone(&self.runtime_io),
                     sedimentree_id,
                     resp,
                 ))?;
+            }
+            Runtime2Cmd::HasLocalDocState { doc_id, resp } => {
+                let has_doc_worker = self.doc_workers.contains_key(&doc_id);
+                self.spawn_background(F::has_local_doc_state(
+                    Arc::clone(&self.runtime_io),
+                    doc_id,
+                    has_doc_worker,
+                    resp,
+                ))?;
+            }
+            #[cfg(test)]
+            Runtime2Cmd::HasDocWorker { doc_id, resp } => {
+                resp.send(Ok(self.doc_workers.contains_key(&doc_id)))
+                    .inspect_err(|_| warn!(ERROR_CALLER))
+                    .ok();
             }
             Runtime2Cmd::InspectStoredDocBlobs { sed_id, resp } => {
                 self.spawn_background(F::inspect_stored_doc_blobs(
@@ -552,10 +549,6 @@ where
                     sed_id,
                     resp,
                 ))?;
-            }
-            Runtime2Cmd::CheckDocWorkerExists { doc_id, resp } => {
-                let exists = self.doc_workers.contains_key(&doc_id);
-                let _ = resp.send(exists);
             }
             Runtime2Cmd::WaitForQuiescence { resp } => {
                 self.request_quiescence(resp)?;
@@ -573,17 +566,6 @@ trait HubBackgroundFuture<F: FutureForm> {
         request_id: subduction_keyhive::message::RequestId,
     ) -> F::Future<'static, eyre::Result<()>>;
 
-    fn refresh_cache(
-        runtime_io: Arc<dyn crate::runtime2::RuntimeIo<F>>,
-    ) -> F::Future<'static, eyre::Result<()>>;
-
-    fn refresh_cache_and_notify(
-        runtime_io: Arc<dyn crate::runtime2::RuntimeIo<F>>,
-        evt_tx: async_channel::Sender<Runtime2Evt>,
-        peer_id: PeerId,
-        changed: bool,
-        round_id: Option<u64>,
-    ) -> F::Future<'static, eyre::Result<()>>;
     fn refresh_cache_for_quiescence(
         runtime_io: Arc<dyn crate::runtime2::RuntimeIo<F>>,
         evt_tx: async_channel::Sender<Runtime2Evt>,
@@ -646,7 +628,7 @@ trait HubIoFutures<F: FutureForm, Tasks: crate::runtime2::TaskSet<F>> {
         runtime_io: std::sync::Arc<dyn crate::runtime2::RuntimeIo<F>>,
         peer_id: PeerId,
         sed_id: sedimentree_core::id::SedimentreeId,
-        resp: futures::channel::oneshot::Sender<Result<(), crate::runtime::SyncDocError>>,
+        resp: futures::channel::oneshot::Sender<Result<(), crate::runtime2::types::SyncDocError>>,
     ) -> F::Future<'static, eyre::Result<()>>;
 }
 
@@ -664,60 +646,19 @@ impl<F: FutureForm> HubBackgroundFuture<F> for F {
                 .await
             {
                 let error = format!("keyhive sync with {peer_id} failed: {error}");
-                if evt_tx
+                evt_tx
                     .send(Runtime2Evt::KeyhiveSyncFailed {
                         peer_id,
                         request_id,
                         error,
                     })
                     .await
-                    .is_err()
-                {
-                    tracing::debug!(%peer_id, "runtime stopped before keyhive sync failure event");
-                }
+                    .expect(ERROR_CHANNEL);
             }
             Ok(())
         })
     }
 
-    fn refresh_cache(
-        runtime_io: Arc<dyn crate::runtime2::RuntimeIo<F>>,
-    ) -> F::Future<'static, eyre::Result<()>> {
-        F::from_future(async move {
-            runtime_io
-                .refresh_keyhive_cache(false)
-                .await
-                .wrap_err("keyhive cache refresh failed")?;
-            Ok(())
-        })
-    }
-
-    fn refresh_cache_and_notify(
-        runtime_io: Arc<dyn crate::runtime2::RuntimeIo<F>>,
-        evt_tx: async_channel::Sender<Runtime2Evt>,
-        peer_id: PeerId,
-        changed: bool,
-        round_id: Option<u64>,
-    ) -> F::Future<'static, eyre::Result<()>> {
-        F::from_future(async move {
-            let result = runtime_io
-                .refresh_keyhive_cache(changed)
-                .await
-                .wrap_err("keyhive cache refresh failed");
-            if evt_tx
-                .send(Runtime2Evt::KeyhiveCacheRefreshDone {
-                    peer_id,
-                    round_id,
-                    result,
-                })
-                .await
-                .is_err()
-            {
-                tracing::debug!(%peer_id, "runtime stopped before keyhive cache completion");
-            }
-            Ok(())
-        })
-    }
     fn refresh_cache_for_quiescence(
         runtime_io: Arc<dyn crate::runtime2::RuntimeIo<F>>,
         evt_tx: async_channel::Sender<Runtime2Evt>,
@@ -730,7 +671,7 @@ impl<F: FutureForm> HubBackgroundFuture<F> for F {
             evt_tx
                 .send(Runtime2Evt::QuiescenceCacheRefreshDone { result })
                 .await
-                .map_err(|_| ferr!("runtime event channel closed"))?;
+                .expect(ERROR_CHANNEL);
             Ok(())
         })
     }
@@ -745,7 +686,7 @@ impl<F: FutureForm> HubBackgroundFuture<F> for F {
             evt_tx
                 .send(Runtime2Evt::QuiescenceGroupPartWatermark { barrier_id, result })
                 .await
-                .map_err(|_| ferr!("runtime event channel closed"))?;
+                .expect(ERROR_CHANNEL);
             Ok(())
         })
     }
@@ -762,53 +703,41 @@ impl<F: FutureForm> HubBackgroundFuture<F> for F {
         F::from_future(async move {
             if runtime_io.is_document_membership_target(target).await? {
                 if removed {
-                    change_manager
-                        .notify_document_access_revoked(
-                            DocumentId::new(target.to_bytes()),
-                            member_id,
-                        )
-                        .wrap_err("document access revocation notification failed")?;
+                    change_manager.notify_document_access_revoked(
+                        DocumentId::new(target.to_bytes()),
+                        member_id,
+                    )?;
                 } else {
-                    change_manager
-                        .notify_document_access_changed(
-                            DocumentId::new(target.to_bytes()),
-                            member_id,
-                            access,
-                        )
-                        .wrap_err("document access notification failed")?;
+                    change_manager.notify_document_access_changed(
+                        DocumentId::new(target.to_bytes()),
+                        member_id,
+                        access,
+                    )?;
                 }
             } else if member_is_document {
                 let group_id = crate::changes::GroupId::new(target.to_bytes());
                 if removed {
-                    change_manager
-                        .notify_document_removed_from_group(
-                            DocumentId::new(member_id.0.into_bytes()),
-                            group_id,
-                        )
-                        .wrap_err("document group removal notification failed")?;
+                    change_manager.notify_document_removed_from_group(
+                        DocumentId::new(member_id.0.into_bytes()),
+                        group_id,
+                    )?;
                 } else {
-                    change_manager
-                        .notify_document_added_to_group(
-                            DocumentId::new(member_id.0.into_bytes()),
-                            group_id,
-                        )
-                        .wrap_err("document group addition notification failed")?;
+                    change_manager.notify_document_added_to_group(
+                        DocumentId::new(member_id.0.into_bytes()),
+                        group_id,
+                    )?;
                 }
             } else if removed {
-                change_manager
-                    .notify_member_removed_from_group(
-                        crate::changes::GroupId::new(target.to_bytes()),
-                        member_id,
-                    )
-                    .wrap_err("group member removal notification failed")?;
+                change_manager.notify_member_removed_from_group(
+                    crate::changes::GroupId::new(target.to_bytes()),
+                    member_id,
+                )?;
             } else {
-                change_manager
-                    .notify_member_added_to_group(
-                        crate::changes::GroupId::new(target.to_bytes()),
-                        member_id,
-                        access,
-                    )
-                    .wrap_err("group member addition notification failed")?;
+                change_manager.notify_member_added_to_group(
+                    crate::changes::GroupId::new(target.to_bytes()),
+                    member_id,
+                    access,
+                )?;
             }
             Ok(())
         })
@@ -821,13 +750,10 @@ impl<F: FutureForm> HubBackgroundFuture<F> for F {
     ) -> F::Future<'static, eyre::Result<()>> {
         F::from_future(async move {
             let _ = lease_rx.await;
-            if cmd_tx
+            cmd_tx
                 .send(Runtime2Cmd::ReleaseInternalLease { doc_id })
                 .await
-                .is_err()
-            {
-                tracing::debug!(?doc_id, "runtime stopped before internal lease release");
-            }
+                .expect(ERROR_CHANNEL);
             Ok(())
         })
     }
@@ -853,9 +779,11 @@ impl<F: FutureForm, Tasks: crate::runtime2::TaskSet<F>> HubIoFutures<F, Tasks> f
                         // close that authenticated connection before rejecting
                         // the caller's expected-target mismatch.
                         connect.close(handshake_peer).await?;
-                        let _ = resp.send(Err(ferr!(
+                        resp.send(Err(ferr!(
                             "handshake peer mismatch: expected {peer}, got {handshake_peer}"
-                        )));
+                        )))
+                        .inspect_err(|_| warn!(ERROR_CALLER))
+                        .ok();
                         return Ok(());
                     }
                     let watcher_closed = Arc::clone(&closed);
@@ -876,16 +804,15 @@ impl<F: FutureForm, Tasks: crate::runtime2::TaskSet<F>> HubIoFutures<F, Tasks> f
                             .await
                             .is_err()
                         {
-                            tracing::debug!(
-                                %watcher_peer,
-                                "runtime stopped before connection-loss event"
-                            );
+                            tracing::debug!(%watcher_peer, "runtime stopped before connection-lost event");
                         }
                         Ok(())
                     }));
                     if let Err(error) = watcher {
                         connect.close(handshake_peer).await?;
-                        let _ = resp.send(Err(error));
+                        resp.send(Err(error))
+                            .inspect_err(|_| warn!(ERROR_CALLER))
+                            .ok();
                         return Ok(());
                     }
                     if evt_tx_established
@@ -900,10 +827,14 @@ impl<F: FutureForm, Tasks: crate::runtime2::TaskSet<F>> HubIoFutures<F, Tasks> f
                         connect.close(handshake_peer).await?;
                         return Ok(());
                     }
-                    let _ = resp.send(Ok((handshake_peer, closed)));
+                    resp.send(Ok((handshake_peer, closed)))
+                        .inspect_err(|_| warn!(ERROR_CALLER))
+                        .ok();
                 }
                 Err(error) => {
-                    let _ = resp.send(Err(error));
+                    resp.send(Err(error))
+                        .inspect_err(|_| warn!(ERROR_CALLER))
+                        .ok();
                 }
             }
             Ok(())
@@ -940,15 +871,14 @@ impl<F: FutureForm, Tasks: crate::runtime2::TaskSet<F>> HubIoFutures<F, Tasks> f
                             .await
                             .is_err()
                         {
-                            tracing::debug!(
-                                %watcher_peer,
-                                "runtime stopped before connection-loss event"
-                            );
+                            tracing::debug!(%watcher_peer, "runtime stopped before connection-lost event");
                         }
                         Ok(())
                     }));
                     if let Err(error) = watcher {
-                        let _ = resp.send(Err(error));
+                        resp.send(Err(error))
+                            .inspect_err(|_| warn!(ERROR_CALLER))
+                            .ok();
                         return Ok(());
                     }
                     if evt_tx_established
@@ -963,10 +893,14 @@ impl<F: FutureForm, Tasks: crate::runtime2::TaskSet<F>> HubIoFutures<F, Tasks> f
                         connect.close(handshake_peer).await?;
                         return Ok(());
                     }
-                    let _ = resp.send(Ok((handshake_peer, closed)));
+                    resp.send(Ok((handshake_peer, closed)))
+                        .inspect_err(|_| warn!(ERROR_CALLER))
+                        .ok();
                 }
                 Err(error) => {
-                    let _ = resp.send(Err(error));
+                    resp.send(Err(error))
+                        .inspect_err(|_| warn!(ERROR_CALLER))
+                        .ok();
                 }
             }
             Ok(())
@@ -981,7 +915,7 @@ impl<F: FutureForm, Tasks: crate::runtime2::TaskSet<F>> HubIoFutures<F, Tasks> f
         F::from_future(async move {
             let result = connect.close(peer_id).await;
             if let Some(resp) = resp {
-                let _ = resp.send(result);
+                resp.send(result).inspect_err(|_| warn!(ERROR_CALLER)).ok();
             }
             Ok(())
         })
@@ -991,37 +925,37 @@ impl<F: FutureForm, Tasks: crate::runtime2::TaskSet<F>> HubIoFutures<F, Tasks> f
         runtime_io: std::sync::Arc<dyn crate::runtime2::RuntimeIo<F>>,
         peer_id: PeerId,
         sed_id: sedimentree_core::id::SedimentreeId,
-        resp: futures::channel::oneshot::Sender<Result<(), crate::runtime::SyncDocError>>,
+        resp: futures::channel::oneshot::Sender<Result<(), crate::runtime2::types::SyncDocError>>,
     ) -> F::Future<'static, eyre::Result<()>> {
         F::from_future(async move {
             let result = match runtime_io.sync_doc_with_peer(sed_id, peer_id).await {
                 Ok(crate::runtime2::SyncDocAttempt::Exchanged) => Ok(()),
                 Ok(crate::runtime2::SyncDocAttempt::NotFound) => {
-                    Err(crate::runtime::SyncDocError::NotFound)
+                    Err(crate::runtime2::types::SyncDocError::NotFound)
                 }
                 Ok(crate::runtime2::SyncDocAttempt::Unauthorized) => {
-                    Err(crate::runtime::SyncDocError::Unauthorized)
+                    Err(crate::runtime2::types::SyncDocError::Unauthorized)
                 }
                 Ok(crate::runtime2::SyncDocAttempt::Policy(kind)) => {
                     let policy = match kind {
                         subduction_core::sync_session::SyncPolicyRejectionKind::DocumentNotFound => {
-                            crate::runtime::SyncDocPolicyError::DocumentNotFound
+                            crate::runtime2::types::SyncDocPolicyError::DocumentNotFound
                         }
                         subduction_core::sync_session::SyncPolicyRejectionKind::InsufficientAccess => {
-                            crate::runtime::SyncDocPolicyError::InsufficientAccess
+                            crate::runtime2::types::SyncDocPolicyError::InsufficientAccess
                         }
                         subduction_core::sync_session::SyncPolicyRejectionKind::InvalidIdentifier => {
-                            crate::runtime::SyncDocPolicyError::InvalidIdentifier
+                            crate::runtime2::types::SyncDocPolicyError::InvalidIdentifier
                         }
                         subduction_core::sync_session::SyncPolicyRejectionKind::Other => {
-                            crate::runtime::SyncDocPolicyError::Other("local policy rejection".into())
+                            crate::runtime2::types::SyncDocPolicyError::Other("local policy rejection".into())
                         }
                     };
-                    Err(crate::runtime::SyncDocError::Policy(policy))
+                    Err(crate::runtime2::types::SyncDocError::Policy(policy))
                 }
-                Err(error) => Err(crate::runtime::SyncDocError::IoError(error)),
+                Err(error) => Err(crate::runtime2::types::SyncDocError::IoError(error)),
             };
-            let _ = resp.send(result);
+            resp.send(result).inspect_err(|_| warn!(ERROR_CALLER)).ok();
             Ok(())
         })
     }
@@ -1053,9 +987,7 @@ impl<
 where
     F: 'static,
 {
-    /// Process a single [`Runtime2Evt`]. Mirrors `handle_evt` at
-    /// `runtime.rs:1315`.
-    pub(crate) fn handle_evt(&mut self, evt: Runtime2Evt) -> eyre::Result<()> {
+    fn handle_evt(&mut self, evt: Runtime2Evt) -> eyre::Result<()> {
         match &evt {
             Runtime2Evt::SyncSessionObserved { session } => {
                 tracing::debug!(
@@ -1125,7 +1057,6 @@ where
                 | Runtime2Evt::ConnLost { .. }
                 | Runtime2Evt::KeyhiveSyncDone { .. }
                 | Runtime2Evt::KeyhiveSyncFailed { .. }
-                | Runtime2Evt::KeyhiveCacheRefreshDone { .. }
                 | Runtime2Evt::DocWorkerStopped { .. }
                 | Runtime2Evt::DocWorkerMaterializationReady { .. }
         ) {
@@ -1159,13 +1090,6 @@ where
             } => {
                 self.fail_keyhive_sync(peer_id, request_id, error)?;
             }
-            Runtime2Evt::KeyhiveCacheRefreshDone {
-                peer_id,
-                round_id,
-                result,
-            } => {
-                self.finish_keyhive_sync_after_cache(peer_id, round_id, result)?;
-            }
             Runtime2Evt::QuiescenceCacheRefreshDone { result } => {
                 self.quiescence_cache_refresh_pending = false;
                 if let Err(error) = result {
@@ -1174,8 +1098,10 @@ where
                     for waiter in std::mem::take(&mut self.quiescence_waiters) {
                         // A caller timeout drops the receiver; that cancellation
                         // is not a runtime failure.
-                        let _ =
-                            waiter.send(Err(ferr!("quiescence cache refresh failed: {message}")));
+                        waiter
+                            .send(Err(ferr!("quiescence cache refresh failed: {message}")))
+                            .inspect_err(|_| warn!(ERROR_CALLER))
+                            .ok();
                     }
                 }
             }
@@ -1197,9 +1123,12 @@ where
                             self.quiescence_probe = None;
                             let message = error.to_string();
                             for waiter in std::mem::take(&mut self.quiescence_waiters) {
-                                let _ = waiter.send(Err(ferr!(
-                                    "group-part watermark capture failed: {message}"
-                                )));
+                                waiter
+                                    .send(Err(ferr!(
+                                        "group-part watermark capture failed: {message}"
+                                    )))
+                                    .inspect_err(|_| warn!(ERROR_CALLER))
+                                    .ok();
                             }
                         }
                     }
@@ -1246,7 +1175,7 @@ where
                 let doc_id = crate::DocumentId::new(*data.payload().doc_id().as_bytes());
                 self.change_manager
                     .notify_document_key_rotated(doc_id)
-                    .expect("task was found dead");
+                    .expect(ERROR_CHANNEL);
             }
             Runtime2Evt::DelegationReceived { target, data } => {
                 let member_id = PeerId::new(data.payload().delegate().id().to_bytes());
@@ -1287,7 +1216,6 @@ where
     // ─── sync session routing ──────────────────────────────────────────────
 
     /// Route an observed sync session to the relevant doc-worker.
-    /// Mirrors `handle_sync_session_observed` at `runtime.rs:1643`.
     #[tracing::instrument(skip_all)]
     fn handle_sync_session_observed(
         &mut self,
@@ -1323,7 +1251,7 @@ where
                 commit_ids: session.received_commit_ids,
                 fragment_ids: session.received_fragment_ids,
             })
-            .expect("task was found dead");
+            .expect(ERROR_CHANNEL);
     }
 
     // ─── connection lifecycle ──────────────────────────────────────────────
@@ -1391,7 +1319,6 @@ where
                 watermark,
                 round_id,
                 request_id: request_id.clone(),
-                cache_refresh_started: false,
                 changed: false,
             },
         );
@@ -1442,7 +1369,8 @@ where
             for (_, sender) in waiters {
                 sender
                     .send(Err(ferr!("{error}")))
-                    .expect("keyhive sync waiter receiver must remain open");
+                    .inspect_err(|_| warn!(ERROR_CALLER))
+                    .ok();
             }
         }
         self.keyhive_dirty.remove(&peer_id);
@@ -1450,8 +1378,7 @@ where
         Ok(())
     }
 
-    /// Start the cache-refresh half of keyhive sync completion. Waiters stay
-    /// pending until [`finish_keyhive_sync_after_cache`] observes that refresh.
+    /// Complete a keyhive protocol round and resolve any eligible waiters.
     fn finish_keyhive_sync(
         &mut self,
         peer_id: PeerId,
@@ -1459,14 +1386,8 @@ where
         changed: bool,
     ) -> eyre::Result<()> {
         let Some(round) = self.active_keyhive_syncs.get_mut(&peer_id) else {
-            tracing::debug!(%peer_id, ?request_id, "refreshing untracked inbound keyhive completion");
-            self.spawn_background(F::refresh_cache_and_notify(
-                Arc::clone(&self.runtime_io),
-                self.evt_tx.clone(),
-                peer_id,
-                changed,
-                None,
-            ))?;
+            tracing::debug!(%peer_id, ?request_id, "processing untracked inbound keyhive completion");
+            self.reattempt_pending_materialization();
             return Ok(());
         };
         // A concurrent inbound exchange can advance this peer's state while a
@@ -1481,72 +1402,10 @@ where
                 request_id = ?request_id,
                 "processing inbound keyhive exchange without resolving waiter"
             );
-            self.spawn_background(F::refresh_cache_and_notify(
-                Arc::clone(&self.runtime_io),
-                self.evt_tx.clone(),
-                peer_id,
-                changed,
-                None,
-            ))?;
+            self.reattempt_pending_materialization();
             return Ok(());
         }
-        if round.cache_refresh_started {
-            tracing::debug!(%peer_id, round_id = round.round_id, "ignoring duplicate keyhive sync completion");
-            return Ok(());
-        }
-        round.cache_refresh_started = true;
         let round_id = round.round_id;
-        self.spawn_background(F::refresh_cache_and_notify(
-            Arc::clone(&self.runtime_io),
-            self.evt_tx.clone(),
-            peer_id,
-            changed,
-            Some(round_id),
-        ))?;
-        Ok(())
-    }
-
-    /// Resolve keyhive waiters only after protocol sync *and* local cache
-    /// refresh have completed. This is the synchronous public barrier.
-    fn finish_keyhive_sync_after_cache(
-        &mut self,
-        peer_id: PeerId,
-        round_id: Option<u64>,
-        result: eyre::Result<()>,
-    ) -> eyre::Result<()> {
-        let Some(round_id) = round_id else {
-            if let Err(error) = result {
-                tracing::warn!(%peer_id, error = %error, "inbound keyhive cache refresh failed");
-            } else {
-                self.reattempt_pending_materialization();
-            }
-            return Ok(());
-        };
-        let Some(round) = self.active_keyhive_syncs.get_mut(&peer_id) else {
-            tracing::debug!(%peer_id, round_id, "ignoring untracked keyhive cache completion");
-            return Ok(());
-        };
-        if round.round_id != round_id {
-            tracing::debug!(
-                %peer_id,
-                expected_round_id = round.round_id,
-                round_id,
-                "ignoring stale keyhive cache completion"
-            );
-            return Ok(());
-        }
-        if let Err(error) = result {
-            self.active_keyhive_syncs.remove(&peer_id);
-            if let Some(waiters) = self.pending_keyhive_syncs.remove(&peer_id) {
-                for (_, sender) in waiters {
-                    sender
-                        .send(Err(ferr!("keyhive cache refresh failed: {error}")))
-                        .expect("keyhive sync waiter receiver must remain open");
-                }
-            }
-            self.keyhive_dirty.remove(&peer_id);
-            return Ok(());
-        }
         self.complete_keyhive_sync_round(peer_id, round_id)
     }
 
@@ -1554,7 +1413,7 @@ where
         let round = self
             .active_keyhive_syncs
             .remove(&peer_id)
-            .expect("active keyhive sync disappeared before access refresh completion");
+            .expect("active keyhive sync disappeared before protocol completion");
         assert_eq!(round.round_id, round_id);
         let watermark = round.watermark;
 
@@ -1583,7 +1442,8 @@ where
                 if id < watermark {
                     sender
                         .send(Ok(()))
-                        .expect("keyhive sync waiter receiver must remain open");
+                        .inspect_err(|_| warn!(ERROR_CALLER))
+                        .ok();
                     resolved_waiters += 1;
                 } else {
                     remaining.push((id, sender));
@@ -1634,7 +1494,6 @@ where
     }
 
     /// Schedule an internal keyhive sync (triggered by keyhive-change events).
-    /// Mirrors `schedule_internal_keyhive_sync` at `runtime.rs:1774`.
     fn schedule_internal_keyhive_sync(&mut self, peer_id: PeerId) {
         if !self.connected_peers.contains_key(&peer_id) {
             tracing::debug!(%peer_id, "dropping internal keyhive sync for disconnected peer");
@@ -1675,7 +1534,10 @@ where
         self.keyhive_dirty.remove(peer_id);
         if let Some(waiters) = self.pending_keyhive_syncs.remove(peer_id) {
             for (_id, sender) in waiters {
-                let _ = sender.send(Err(eyre::eyre!("{}", reason)));
+                sender
+                    .send(Err(eyre::eyre!("{reason}")))
+                    .inspect_err(|_| warn!(ERROR_CALLER))
+                    .ok();
             }
         }
     }
@@ -1697,7 +1559,7 @@ impl<
     ///
     /// If the worker is already alive, bumps `internal_leases` and clears the
     /// eviction deadline. Mirrors `doc_worker_handle` at `runtime.rs:1611`.
-    pub(crate) fn doc_worker_handle(
+    fn doc_worker_handle(
         &mut self,
         doc_id: DocumentId,
     ) -> eyre::Result<(DocWorkerHandle, DocWorkerInternalLease)> {
@@ -1808,7 +1670,7 @@ impl<
     /// Periodic eviction of idle doc-workers. Driven by the machine loop's
     /// `Timer::tick(doc_worker_idle_ttl)`. Mirrors
     /// `handle_doc_worker_janitor_tick` at `runtime.rs:1455`.
-    pub(crate) fn janitor_tick(&mut self) {
+    fn janitor_tick(&mut self) {
         let now = self.clock.instant();
         let expired: Vec<DocumentId> = self
             .doc_workers
@@ -1930,7 +1792,7 @@ impl<
 // ═══════════════════════════════════════════════════════════════════════════
 
 /// Top-standing runtime spawn. Mirrors
-/// [`spawn_big_repo_runtime`](crate::runtime::spawn_big_repo_runtime) at
+/// [`spawn_big_repo_runtime`](crate::runtime2::hub::spawn_runtime2) at
 /// `runtime.rs:707`. Spawns background workers + the machine loop and
 /// returns the handle + stop token.
 ///

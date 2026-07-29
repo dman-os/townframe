@@ -9,6 +9,7 @@ use big_sync_core::{mpsc, BuckId, Byte32Id, ObjId, PartId, PeerId};
 
 pub mod memory;
 pub mod sqlite;
+pub mod sqlite_core;
 
 #[derive(Debug, Clone, Default)]
 pub struct HostPartStoreConfig {

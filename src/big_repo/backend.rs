@@ -25,15 +25,7 @@ impl big_sync::SyncBackend for BigRepoSyncBackend {
             .ok_or_else(|| eyre::eyre!("big repo dropped while sync backend was active"))?;
         let doc_id: crate::DocumentId = obj_id;
 
-        let has_local_doc_state = match futures::future::select(
-            core::pin::pin!(repo.runtime.has_doc_worker(doc_id)),
-            core::pin::pin!(repo.runtime.contains_sedimentree_id(doc_id)),
-        )
-        .await
-        {
-            futures::future::Either::Left((val, other)) => val? || other.await?,
-            futures::future::Either::Right((val, other)) => val? || other.await?,
-        };
+        let has_local_doc_state = repo.runtime.has_local_doc_state(doc_id).await?;
         if !has_local_doc_state && remote_payload.is_none() {
             return Ok(big_sync::SyncTaskRunOutcome::Completion(
                 big_sync_core::SyncTaskCompletion {

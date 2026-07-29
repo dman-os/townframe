@@ -18,19 +18,25 @@ pub enum Runtime2Cmd {
         initial_content: Box<automerge::Automerge>,
         parents: Vec<crate::keyhive::BigKeyhiveAuthority>,
         content_heads: nonempty::NonEmpty<[u8; 32]>,
-        resp: futures::channel::oneshot::Sender<eyre::Result<Arc<crate::runtime::LiveDocBundle>>>,
+        resp: futures::channel::oneshot::Sender<
+            eyre::Result<Arc<crate::runtime2::types::LiveDocBundle>>,
+        >,
     },
     /// Internal: persist a document whose doc_id is already resolved.
     /// The hub sends this to itself after `CreateDoc` completes.
     PutDoc {
         doc_id: DocumentId,
         initial_content: Box<automerge::Automerge>,
-        resp: futures::channel::oneshot::Sender<eyre::Result<Arc<crate::runtime::LiveDocBundle>>>,
+        resp: futures::channel::oneshot::Sender<
+            eyre::Result<Arc<crate::runtime2::types::LiveDocBundle>>,
+        >,
     },
     GetDocHandle {
         doc_id: DocumentId,
         resp: futures::channel::oneshot::Sender<
-            eyre::Result<crate::runtime::DocLookup<Arc<crate::runtime::LiveDocBundle>>>,
+            eyre::Result<
+                crate::runtime2::types::DocLookup<Arc<crate::runtime2::types::LiveDocBundle>>,
+            >,
         >,
     },
     CommitDelta {
@@ -71,7 +77,7 @@ pub enum Runtime2Cmd {
         peer_id: PeerId,
         waiter_id: u64,
         timeout: Option<std::time::Duration>,
-        resp: futures::channel::oneshot::Sender<Result<(), crate::runtime::SyncDocError>>,
+        resp: futures::channel::oneshot::Sender<Result<(), crate::runtime2::types::SyncDocError>>,
     },
     SyncKeyhiveWithPeer {
         peer_id: PeerId,
@@ -103,17 +109,22 @@ pub enum Runtime2Cmd {
     ReleaseInternalLease {
         doc_id: DocumentId,
     },
-    CheckSedimentreeResident {
+    ContainsSedimentree {
         doc_id: DocumentId,
-        resp: futures::channel::oneshot::Sender<bool>,
+        resp: futures::channel::oneshot::Sender<eyre::Result<bool>>,
+    },
+    HasLocalDocState {
+        doc_id: DocumentId,
+        resp: futures::channel::oneshot::Sender<eyre::Result<bool>>,
+    },
+    #[cfg(test)]
+    HasDocWorker {
+        doc_id: DocumentId,
+        resp: futures::channel::oneshot::Sender<eyre::Result<bool>>,
     },
     InspectStoredDocBlobs {
         sed_id: sedimentree_core::id::SedimentreeId,
         resp: futures::channel::oneshot::Sender<eyre::Result<Vec<Vec<u8>>>>,
-    },
-    CheckDocWorkerExists {
-        doc_id: DocumentId,
-        resp: futures::channel::oneshot::Sender<bool>,
     },
     /// Wait until all finite runtime work currently admitted to the Hub and
     /// document workers has drained. Pending decryption is quiescent; this
@@ -149,12 +160,6 @@ pub enum Runtime2Evt {
         peer_id: PeerId,
         request_id: subduction_keyhive::message::RequestId,
         error: String,
-    },
-    /// The keyhive protocol sync and local cache refresh both completed.
-    KeyhiveCacheRefreshDone {
-        peer_id: PeerId,
-        round_id: Option<u64>,
-        result: eyre::Result<()>,
     },
     /// Completion of the cache refresh admitted by a quiescence barrier.
     QuiescenceCacheRefreshDone {
@@ -192,13 +197,13 @@ pub enum Runtime2Evt {
         barrier_id: u64,
     },
     PrekeyExpanded {
-        new_prekey: Arc<crate::runtime::SignedAddKeyOp>,
+        new_prekey: Arc<crate::runtime2::types::SignedAddKeyOp>,
     },
     PrekeyRotated {
-        rotate_key: Arc<crate::runtime::SignedRotateKeyOp>,
+        rotate_key: Arc<crate::runtime2::types::SignedRotateKeyOp>,
     },
     CgkaOp {
-        data: Arc<crate::runtime::SignedCgkaOp>,
+        data: Arc<crate::runtime2::types::SignedCgkaOp>,
     },
     DelegationReceived {
         target: keyhive_core::principal::identifier::Identifier,
@@ -233,11 +238,15 @@ pub enum Runtime2Evt {
 pub enum DocWorkerMsg {
     PutDoc {
         initial_content: Box<automerge::Automerge>,
-        resp: futures::channel::oneshot::Sender<eyre::Result<Arc<crate::runtime::LiveDocBundle>>>,
+        resp: futures::channel::oneshot::Sender<
+            eyre::Result<Arc<crate::runtime2::types::LiveDocBundle>>,
+        >,
     },
     AcquireHandle {
         resp: futures::channel::oneshot::Sender<
-            eyre::Result<crate::runtime::DocLookup<Arc<crate::runtime::LiveDocBundle>>>,
+            eyre::Result<
+                crate::runtime2::types::DocLookup<Arc<crate::runtime2::types::LiveDocBundle>>,
+            >,
         >,
     },
     CommitDelta {

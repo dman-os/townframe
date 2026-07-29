@@ -21,7 +21,7 @@ use subduction_ephemeral::{
 use tokio::sync::{mpsc, oneshot};
 use tokio_util::sync::CancellationToken;
 
-use crate::{interlude::*, runtime::BigRepoIrohTransport};
+use crate::{interlude::*, runtime2::support::BigRepoIrohTransport};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct BigEphemeralTopic([u8; 32]);

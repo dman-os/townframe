@@ -2,7 +2,7 @@
 
 use crate::interlude::*;
 
-use crate::runtime::stage_automerge_ingest;
+use crate::runtime2::support::stage_automerge_ingest;
 use crate::runtime2::Runtime2Evt;
 use crate::runtime2::{
     messages::DocWorkerMsg, DocIo, DocWorkerHandle, DocWorkerInternalLease, DocWorkerStopToken,
@@ -103,11 +103,13 @@ impl<F: FutureForm> DocWorkerLoop<F> for F {
             )
             .await;
 
-            if matches!(&result, Ok(Ok(()))) && !runtime_evt_tx.is_closed() {
-                runtime_evt_tx
+            if matches!(&result, Ok(Ok(())))
+                && runtime_evt_tx
                     .send(Runtime2Evt::DocWorkerStopped { doc_id })
                     .await
-                    .expect("hub event channel checked open immediately before send");
+                    .is_err()
+            {
+                tracing::debug!(%doc_id, "runtime stopped before doc worker stop event");
             }
 
             match result {
@@ -123,7 +125,7 @@ impl<F: FutureForm> DocWorkerLoop<F> for F {
                             error: format!("{error:?}"),
                         })
                         .await
-                        .map_err(|_| ferr!("hub event channel closed"))?;
+                        .expect(ERROR_CHANNEL);
                     Err(error)
                 }
                 Ok(Ok(())) => Ok(()),
@@ -165,7 +167,7 @@ enum DocState {
     Transient(Box<automerge::Automerge>),
     /// Doc shared via a live handle. The worker holds only a [`Weak`] reference,
     /// so the bundle can be reclaimed when all client references drop.
-    Live(std::sync::Weak<crate::runtime::LiveDocBundle>),
+    Live(std::sync::Weak<crate::runtime2::types::LiveDocBundle>),
     /// Sedimentree content exists but is not yet decryptable (keyhive keys
     /// not yet available — pending sync).
     PendingMaterialization,
@@ -229,11 +231,15 @@ impl<F: FutureForm> DocWorker2<F> {
     async fn put_doc(
         &mut self,
         initial_content: Box<automerge::Automerge>,
-        resp: futures::channel::oneshot::Sender<eyre::Result<Arc<crate::runtime::LiveDocBundle>>>,
+        resp: futures::channel::oneshot::Sender<
+            eyre::Result<Arc<crate::runtime2::types::LiveDocBundle>>,
+        >,
     ) -> eyre::Result<()> {
         // ── 1. Occupancy check ─────────────────────────────────────────────
         if !matches!(self.state, DocState::Unloaded) {
-            let _ = resp.send(Err(ferr!("doc already occupied: {:?}", self.doc_id)));
+            resp.send(Err(ferr!("doc already occupied: {:?}", self.doc_id)))
+                .inspect_err(|_| warn!(ERROR_CALLER))
+                .ok();
             return Ok(());
         }
 
@@ -245,7 +251,7 @@ impl<F: FutureForm> DocWorker2<F> {
         // ── 4. Build LiveDocBundle, transition to Live ─────────────────────
         let heads: Arc<[automerge::ChangeHash]> = Arc::from(initial_content.get_heads());
 
-        let bundle = Arc::new(crate::runtime::LiveDocBundle::new_runtime2(
+        let bundle = Arc::new(crate::runtime2::types::LiveDocBundle::new_runtime2(
             self.doc_id,
             *initial_content,
             crate::runtime2::DocLease::new(self.runtime_cmd_tx.clone(), self.doc_id),
@@ -255,15 +261,15 @@ impl<F: FutureForm> DocWorker2<F> {
 
         // ── 6. Notify ──────────────────────────────────────────────────────
         self.change_manager
-            .notify_doc_created(self.doc_id, Arc::clone(&heads))
-            .map_err(|_| ferr!("change manager notify_doc_created failed"))?;
+            .notify_doc_created(self.doc_id, Arc::clone(&heads))?;
         self.change_manager
-            .notify_local_doc_created(self.doc_id, Arc::clone(&heads))
-            .map_err(|_| ferr!("change manager notify_local_doc_created failed"))?;
+            .notify_local_doc_created(self.doc_id, Arc::clone(&heads))?;
 
         self.register_bundle_lease().await?;
 
-        let _ = resp.send(Ok(bundle));
+        resp.send(Ok(bundle))
+            .inspect_err(|_| warn!(ERROR_CALLER))
+            .ok();
         Ok(())
     }
 }
@@ -273,7 +279,9 @@ impl<F: FutureForm> DocWorker2<F> {
     async fn acquire_handle(
         &mut self,
         resp: futures::channel::oneshot::Sender<
-            eyre::Result<crate::runtime::DocLookup<Arc<crate::runtime::LiveDocBundle>>>,
+            eyre::Result<
+                crate::runtime2::types::DocLookup<Arc<crate::runtime2::types::LiveDocBundle>>,
+            >,
         >,
     ) -> eyre::Result<()> {
         let result = match &self.state {
@@ -281,7 +289,7 @@ impl<F: FutureForm> DocWorker2<F> {
             //   `Ready(upgraded)`.
             DocState::Live(bundle) => {
                 if let Some(bundle) = bundle.upgrade() {
-                    crate::runtime::DocLookup::Ready(bundle)
+                    crate::runtime2::types::DocLookup::Ready(bundle)
                 } else {
                     // Weak reference expired — fall through to re-load below.
                     self.state = DocState::Unloaded;
@@ -296,7 +304,7 @@ impl<F: FutureForm> DocWorker2<F> {
                     DocState::Transient(doc) => doc,
                     _ => unreachable!(),
                 };
-                let bundle = Arc::new(crate::runtime::LiveDocBundle::new_runtime2(
+                let bundle = Arc::new(crate::runtime2::types::LiveDocBundle::new_runtime2(
                     self.doc_id,
                     *doc,
                     crate::runtime2::DocLease::new(self.runtime_cmd_tx.clone(), self.doc_id),
@@ -304,7 +312,7 @@ impl<F: FutureForm> DocWorker2<F> {
                 bundle.set_partially_decrypted(self.partially_decrypted);
                 self.state = DocState::Live(Arc::downgrade(&bundle));
                 self.register_bundle_lease().await?;
-                crate::runtime::DocLookup::Ready(bundle)
+                crate::runtime2::types::DocLookup::Ready(bundle)
             }
             // - `Unloaded` / `PendingMaterialization` → attempt to load + decrypt
             //   the sedimentree via `load_doc_snapshot` (hydrate + decrypt walk).
@@ -315,7 +323,9 @@ impl<F: FutureForm> DocWorker2<F> {
                 self.take_or_load_transient_doc().await?
             }
         };
-        let _ = resp.send(Ok(result));
+        resp.send(Ok(result))
+            .inspect_err(|_| warn!(ERROR_CALLER))
+            .ok();
         Ok(())
     }
 
@@ -327,13 +337,18 @@ impl<F: FutureForm> DocWorker2<F> {
                 registered: registered_tx,
             })
             .await
-            .map_err(|_| ferr!("runtime command channel closed"))?;
-        registered_rx
-            .await
-            .map_err(|_| ferr!("runtime stopped before registering document lease"))
+            .expect(ERROR_CHANNEL);
+        registered_rx.await.expect(ERROR_CHANNEL);
+        Ok(())
     }
     /// Load the materializable document state and retain whether any stored
     /// Sedimentree item could not be decrypted.
+    ///
+    /// This runs on initial handle acquisition and on every
+    /// `ReattemptMaterialization` message while the worker is pending. The
+    /// tree itself is cached by `DocIo::hydrate_tree`, but this method still
+    /// walks and causally decrypts the full resident history; retrying that
+    /// walk is the remaining materialization hot path.
     async fn load_doc_snapshot(&self) -> eyre::Result<LoadedDocSnapshot> {
         let Some(mut tree) = self.io.hydrate_tree(self.sed_id).await? else {
             return Ok(LoadedDocSnapshot::Missing);
@@ -350,15 +365,16 @@ impl<F: FutureForm> DocWorker2<F> {
         for item in &order {
             let (kind, head) = match item {
                 SedimentreeItem::Fragment(index) => (
-                    crate::runtime::BigRepoCiphertextKind::Fragment,
+                    crate::runtime2::support::BigRepoCiphertextKind::Fragment,
                     fragments[*index].head(),
                 ),
                 SedimentreeItem::LooseCommit(index) => (
-                    crate::runtime::BigRepoCiphertextKind::LooseCommit,
+                    crate::runtime2::support::BigRepoCiphertextKind::LooseCommit,
                     commits[*index].head(),
                 ),
             };
-            let locator = crate::runtime::BigRepoCiphertextLocator::new(kind, self.sed_id, head);
+            let locator =
+                crate::runtime2::support::BigRepoCiphertextLocator::new(kind, self.sed_id, head);
             plaintexts.extend(
                 self.io
                     .try_causal_decrypt(self.sed_id, locator)
@@ -382,9 +398,11 @@ impl<F: FutureForm> DocWorker2<F> {
             match doc.load_incremental(&plaintext) {
                 Ok(applied) => made_progress |= applied > 0,
                 Err(automerge::AutomergeError::MissingDeps) => {
-                    return Err(ferr!(
-                        "topologically ordered document blob has missing Automerge dependencies"
-                    ));
+                    partially_decrypted = true;
+                    tracing::debug!(
+                        doc_id = %self.doc_id,
+                        "document blob is waiting for unavailable Automerge dependencies"
+                    );
                 }
                 Err(error) => return Err(ferr!("automerge load_incremental failed: {error}")),
             }
@@ -393,10 +411,17 @@ impl<F: FutureForm> DocWorker2<F> {
         // Minimized fragments can hide loose ancestors that causal decryption
         // still returns. Automerge still needs those plaintext dependencies.
         for (_, plaintext) in plaintexts {
-            let applied = doc
-                .load_incremental(&plaintext)
-                .map_err(|error| ferr!("failed applying causal ancestor blob: {error}"))?;
-            made_progress |= applied > 0;
+            match doc.load_incremental(&plaintext) {
+                Ok(applied) => made_progress |= applied > 0,
+                Err(automerge::AutomergeError::MissingDeps) => {
+                    partially_decrypted = true;
+                    tracing::debug!(
+                        doc_id = %self.doc_id,
+                        "causal ancestor blob is waiting for unavailable Automerge dependencies"
+                    );
+                }
+                Err(error) => return Err(ferr!("failed applying causal ancestor blob: {error}")),
+            }
         }
 
         if !made_progress {
@@ -410,12 +435,13 @@ impl<F: FutureForm> DocWorker2<F> {
 
     async fn take_or_load_transient_doc(
         &mut self,
-    ) -> eyre::Result<crate::runtime::DocLookup<Arc<crate::runtime::LiveDocBundle>>> {
+    ) -> eyre::Result<crate::runtime2::types::DocLookup<Arc<crate::runtime2::types::LiveDocBundle>>>
+    {
         let was_pending = matches!(self.state, DocState::PendingMaterialization);
         let out = match std::mem::replace(&mut self.state, DocState::Unloaded) {
             DocState::Live(_) => unreachable!("document already live"),
             DocState::Transient(doc) => {
-                let bundle = Arc::new(crate::runtime::LiveDocBundle::new_runtime2(
+                let bundle = Arc::new(crate::runtime2::types::LiveDocBundle::new_runtime2(
                     self.doc_id,
                     *doc,
                     crate::runtime2::DocLease::new(self.runtime_cmd_tx.clone(), self.doc_id),
@@ -423,7 +449,7 @@ impl<F: FutureForm> DocWorker2<F> {
                 bundle.set_partially_decrypted(self.partially_decrypted);
                 self.state = DocState::Live(Arc::downgrade(&bundle));
                 self.register_bundle_lease().await?;
-                crate::runtime::DocLookup::Ready(bundle)
+                crate::runtime2::types::DocLookup::Ready(bundle)
             }
             DocState::Unloaded | DocState::PendingMaterialization => {
                 match self.load_doc_snapshot().await? {
@@ -435,7 +461,7 @@ impl<F: FutureForm> DocWorker2<F> {
                         self.transition_to_ready(was_pending, Arc::clone(&heads))
                             .await?;
                         self.set_partially_decrypted(partially_decrypted).await?;
-                        let bundle = Arc::new(crate::runtime::LiveDocBundle::new_runtime2(
+                        let bundle = Arc::new(crate::runtime2::types::LiveDocBundle::new_runtime2(
                             self.doc_id,
                             doc,
                             crate::runtime2::DocLease::new(
@@ -446,13 +472,13 @@ impl<F: FutureForm> DocWorker2<F> {
                         bundle.set_partially_decrypted(partially_decrypted);
                         self.state = DocState::Live(Arc::downgrade(&bundle));
                         self.register_bundle_lease().await?;
-                        crate::runtime::DocLookup::Ready(bundle)
+                        crate::runtime2::types::DocLookup::Ready(bundle)
                     }
                     LoadedDocSnapshot::Unavailable => {
                         self.transition_to_pending(was_pending).await?;
-                        crate::runtime::DocLookup::PendingMaterialization
+                        crate::runtime2::types::DocLookup::PendingMaterialization
                     }
-                    LoadedDocSnapshot::Missing => crate::runtime::DocLookup::Missing,
+                    LoadedDocSnapshot::Missing => crate::runtime2::types::DocLookup::Missing,
                 }
             }
         };
@@ -478,10 +504,8 @@ impl<F: FutureForm> DocWorker2<F> {
                 doc_id: self.doc_id,
             }
         };
-        self.evt_tx
-            .send(event)
-            .await
-            .map_err(|_| ferr!("hub event channel closed"))
+        self.evt_tx.send(event).await.expect(ERROR_CHANNEL);
+        Ok(())
     }
 }
 
@@ -501,27 +525,27 @@ impl<F: FutureForm> DocWorker2<F> {
         // ── 3. Notify heads changed ────────────────────────────────────────
 
         let heads = Arc::from(heads);
-        self.change_manager
-            .notify_doc_heads_changed(self.doc_id, Arc::clone(&heads), origin.clone())
-            .map_err(|_| ferr!("change manager notify_doc_heads_changed failed"))?;
+        self.change_manager.notify_doc_heads_changed(
+            self.doc_id,
+            Arc::clone(&heads),
+            origin.clone(),
+        )?;
 
         // Fire patches even if heads didn't change (delta can have content
         // changes within the same head set — e.g. tombstone compaction).
         for patch in &patches {
-            self.change_manager
-                .notify_doc_changed(
-                    self.doc_id,
-                    Arc::new(patch.clone()),
-                    Arc::clone(&heads),
-                    origin.clone(),
-                )
-                .map_err(|_| ferr!("change manager notify_doc_changed failed"))?;
+            self.change_manager.notify_doc_changed(
+                self.doc_id,
+                Arc::new(patch.clone()),
+                Arc::clone(&heads),
+                origin.clone(),
+            )?;
         }
 
         // ── 4. Process pending fragment requests ───────────────────────────
         self.process_pending_fragment_requests().await?;
 
-        let _ = resp.send(Ok(()));
+        resp.send(Ok(())).inspect_err(|_| warn!(ERROR_CALLER)).ok();
         Ok(())
     }
 
@@ -574,8 +598,7 @@ impl<F: FutureForm> DocWorker2<F> {
         self.state = DocState::PendingMaterialization;
         if !was_pending {
             self.change_manager
-                .notify_local_doc_materialization_pending(self.doc_id)
-                .map_err(|_| ferr!("change manager materialization_pending failed"))?;
+                .notify_local_doc_materialization_pending(self.doc_id)?;
         }
         self.set_partially_decrypted(true).await
     }
@@ -587,8 +610,7 @@ impl<F: FutureForm> DocWorker2<F> {
     ) -> eyre::Result<()> {
         if was_pending {
             self.change_manager
-                .notify_local_doc_materialization_ready(self.doc_id, heads)
-                .map_err(|_| ferr!("change manager materialization_ready failed"))?;
+                .notify_local_doc_materialization_ready(self.doc_id, heads)?;
         }
         Ok(())
     }
@@ -673,11 +695,13 @@ impl<F: FutureForm> DocWorker2<F> {
             unreachable!("materialized document has heads while its Sedimentree frontier is empty")
         }
 
-        let _ = resp.send(Ok(crate::runtime2::DocHeadState {
+        resp.send(Ok(crate::runtime2::DocHeadState {
             sedimentree_heads,
             materialized_heads,
             state,
-        }));
+        }))
+        .inspect_err(|_| warn!(ERROR_CALLER))
+        .ok();
         Ok(())
     }
 }
@@ -712,52 +736,72 @@ impl<F: FutureForm> DocWorker2<F> {
             return Ok(());
         };
         let Some(mut tree) = self.io.hydrate_tree(self.sed_id).await? else {
-            unreachable!("a received sync session must have persisted Sedimentree content")
+            tracing::error!(
+                doc_id = %self.doc_id,
+                "received sync content has no persisted Sedimentree"
+            );
+            return Err(ferr!(
+                "received sync session has no persisted Sedimentree content"
+            ));
         };
         tree.ensure_minimized(&sedimentree_core::depth::CountLeadingZeroBytes);
-        let fragments: Vec<_> = tree.fragments().collect();
-        let commits: Vec<_> = tree.loose_commits().collect();
-        let order = tree
-            .topsorted_blob_order()
-            .map_err(|error| ferr!("failed ordering sync session blobs: {error}"))?;
-
         let (blobs, partially_decrypted) = self
-            .try_decrypt_received_blobs(&fragments, &commits, &order, &received_refs)
+            .try_decrypt_received_blobs(&mut tree, &received_refs)
             .await?;
         self.set_partially_decrypted(partially_decrypted).await?;
 
         if blobs.is_empty() {
-            self.record_pending_heads(Some(&mut tree), peer_id).await?;
+            self.notif_pending_heads(&mut tree, peer_id).await?;
             return Ok(());
         }
         if partially_decrypted {
-            self.record_pending_heads(Some(&mut tree), peer_id).await?;
+            self.notif_pending_heads(&mut tree, peer_id).await?;
         }
 
-        let Some((after_heads, patches)) = self
-            .materialize_from_blobs(&bundle, &blobs, peer_id)
-            .await?
-        else {
-            return Ok(());
+        let (after_heads, patches) = {
+            let mut doc = bundle.doc.lock().await;
+            let before = doc.get_heads();
+            for blob in blobs {
+                match doc.load_incremental(&blob) {
+                    Ok(_) => {}
+                    Err(automerge::AutomergeError::MissingDeps) => {
+                        self.set_partially_decrypted(true).await?;
+                        self.notif_pending_heads(&mut tree, peer_id).await?;
+                        return Ok(());
+                    }
+                    Err(error) => {
+                        return Err(ferr!("failed applying sync blob: {error}"));
+                    }
+                }
+            }
+            let after = doc.get_heads();
+            if before == after {
+                return Ok(());
+            }
+            let patches = if self.change_manager.has_change_listener_interest(
+                self.doc_id,
+                &crate::changes::BigRepoChangeOrigin::Remote { peer_id },
+            ) {
+                doc.diff(&before, &after)
+            } else {
+                Vec::new()
+            };
+            (after, patches)
         };
 
         let heads = Arc::<[automerge::ChangeHash]>::from(after_heads);
-        self.change_manager
-            .notify_doc_heads_changed(
+        self.change_manager.notify_doc_heads_changed(
+            self.doc_id,
+            Arc::clone(&heads),
+            crate::changes::BigRepoChangeOrigin::Remote { peer_id },
+        )?;
+        for patch in patches {
+            self.change_manager.notify_doc_changed(
                 self.doc_id,
+                Arc::new(patch),
                 Arc::clone(&heads),
                 crate::changes::BigRepoChangeOrigin::Remote { peer_id },
-            )
-            .map_err(|_| ferr!("change manager notify_doc_heads_changed failed"))?;
-        for patch in patches {
-            self.change_manager
-                .notify_doc_changed(
-                    self.doc_id,
-                    Arc::new(patch),
-                    Arc::clone(&heads),
-                    crate::changes::BigRepoChangeOrigin::Remote { peer_id },
-                )
-                .map_err(|_| ferr!("change manager notify_doc_changed failed"))?;
+            )?;
         }
         Ok(())
     }
@@ -765,11 +809,15 @@ impl<F: FutureForm> DocWorker2<F> {
     /// Decrypt only the content received by this Subduction exchange.
     async fn try_decrypt_received_blobs(
         &self,
-        fragments: &[&Fragment],
-        commits: &[&LooseCommit],
-        order: &[SedimentreeItem],
+        tree: &mut sedimentree_core::sedimentree::minimized::MinimizedSedimentree,
         received_refs: &HashSet<Vec<u8>>,
     ) -> eyre::Result<(Vec<Vec<u8>>, bool)> {
+        let fragments: Vec<_> = tree.fragments().collect();
+        let commits: Vec<_> = tree.loose_commits().collect();
+        let order = tree
+            .topsorted_blob_order()
+            .map_err(|error| ferr!("failed ordering sync session blobs: {error}"))?;
+
         // Filter the order to only received items.
         let received_order: Vec<(&SedimentreeItem, Vec<u8>)> = order
             .iter()
@@ -818,8 +866,8 @@ impl<F: FutureForm> DocWorker2<F> {
                         let f = fragments
                             .get(*idx)
                             .ok_or_else(|| ferr!("missing fragment at index {idx}"))?;
-                        crate::runtime::BigRepoCiphertextLocator::new(
-                            crate::runtime::BigRepoCiphertextKind::Fragment,
+                        crate::runtime2::support::BigRepoCiphertextLocator::new(
+                            crate::runtime2::support::BigRepoCiphertextKind::Fragment,
                             self.sed_id,
                             f.head(),
                         )
@@ -828,8 +876,8 @@ impl<F: FutureForm> DocWorker2<F> {
                         let c = commits
                             .get(*idx)
                             .ok_or_else(|| ferr!("missing loose commit at index {idx}"))?;
-                        crate::runtime::BigRepoCiphertextLocator::new(
-                            crate::runtime::BigRepoCiphertextKind::LooseCommit,
+                        crate::runtime2::support::BigRepoCiphertextLocator::new(
+                            crate::runtime2::support::BigRepoCiphertextKind::LooseCommit,
                             self.sed_id,
                             c.head(),
                         )
@@ -877,81 +925,24 @@ impl<F: FutureForm> DocWorker2<F> {
         Ok((blobs, false))
     }
 
-    /// Materialize decrypted blobs into the automerge document.
-    ///
-    /// Handles all `DocState` variants:
-    /// - `Unloaded` / `PendingMaterialization`: build fresh Automerge doc,
-    ///   compare before/after heads, emit patches.
-    /// - `Transient(doc)`: mutate in-place, compare before/after.
-    /// - `Live(bundle)`: lock the shared doc, mutate, compare.
-    ///
-    /// Returns `Some((after_heads, patches))` if the heads changed or there
-    /// was no cached prior state, or `None` if the sync was a true no-op
-    /// (same heads, cached state existed).
-    async fn materialize_from_blobs(
+    async fn notif_pending_heads(
         &mut self,
-        bundle: &Arc<crate::runtime::LiveDocBundle>,
-        blobs: &[Vec<u8>],
-        peer_id: PeerId,
-    ) -> eyre::Result<Option<(Vec<automerge::ChangeHash>, Vec<automerge::Patch>)>> {
-        let mut doc = bundle.doc.lock().await;
-        let before = doc.get_heads();
-        for blob in blobs {
-            doc.load_incremental(blob)
-                .map_err(|error| ferr!("failed applying sync blob: {error}"))?;
-        }
-        let after = doc.get_heads();
-        if before == after {
-            return Ok(None);
-        }
-        let patches = if self.change_manager.has_change_listener_interest(
-            self.doc_id,
-            &crate::changes::BigRepoChangeOrigin::Remote { peer_id },
-        ) {
-            doc.diff(&before, &after)
-        } else {
-            Vec::new()
-        };
-        Ok(Some((after, patches)))
-    }
-
-    /// Record pending (sedimentree) heads when content exists but is
-    /// undecryptable. In runtime2 this is a no-op with respect to storage:
-    /// heads are derived from the sedimentree, never cached. The notification
-    /// still fires so change listeners know the frontier advanced.
-    async fn record_pending_heads(
-        &mut self,
-        tree: Option<&mut sedimentree_core::sedimentree::minimized::MinimizedSedimentree>,
+        tree: &mut sedimentree_core::sedimentree::minimized::MinimizedSedimentree,
         peer_id: PeerId,
     ) -> eyre::Result<()> {
-        let heads: Arc<[automerge::ChangeHash]> = if let Some(tree) = tree {
-            let commit_ids = tree.heads(&sedimentree_core::depth::CountLeadingZeroBytes);
-            commit_ids
-                .iter()
-                .map(|cid| automerge::ChangeHash(*cid.as_bytes()))
-                .collect()
-        } else {
-            let commit_ids = self.io.sedimentree_heads(self.sed_id).await?;
-            commit_ids
-                .iter()
-                .map(|cid| automerge::ChangeHash(*cid.as_bytes()))
-                .collect()
-        };
+        let commit_ids = tree.heads(&sedimentree_core::depth::CountLeadingZeroBytes);
+        let heads = commit_ids
+            .iter()
+            .map(|cid| automerge::ChangeHash(*cid.as_bytes()))
+            .collect();
 
-        // TODO(runtime2): the old runtime called `store_doc_heads_payload`
-        // (big_sync `set_obj_payload`) here. In runtime2, heads are always
-        // derived — no write needed. The notification fires so listeners can
-        // react (e.g. the relay layer may want to track frontier progress).
-        self.change_manager
-            .notify_doc_pending_heads_changed(
-                self.doc_id,
-                heads,
-                crate::changes::BigRepoChangeOrigin::Remote { peer_id },
-            )
-            .map_err(|_| ferr!("change manager notify_doc_pending_heads_changed failed"))?;
+        self.change_manager.notify_doc_pending_heads_changed(
+            self.doc_id,
+            heads,
+            crate::changes::BigRepoChangeOrigin::Remote { peer_id },
+        )?;
         Ok(())
     }
-
 
     /// Retry materialization (e.g. after keyhive sync delivers new keys).
     ///
@@ -982,22 +973,18 @@ impl<F: FutureForm> DocWorker2<F> {
                     };
                     let heads = Arc::<[automerge::ChangeHash]>::from(after_heads);
                     if before.as_slice() != heads.as_ref() {
-                        self.change_manager
-                            .notify_doc_heads_changed(
+                        self.change_manager.notify_doc_heads_changed(
+                            self.doc_id,
+                            Arc::clone(&heads),
+                            crate::changes::BigRepoChangeOrigin::Bootstrap,
+                        )?;
+                        for patch in patches {
+                            self.change_manager.notify_doc_changed(
                                 self.doc_id,
+                                Arc::new(patch),
                                 Arc::clone(&heads),
                                 crate::changes::BigRepoChangeOrigin::Bootstrap,
-                            )
-                            .map_err(|_| ferr!("change manager notify_doc_heads_changed failed"))?;
-                        for patch in patches {
-                            self.change_manager
-                                .notify_doc_changed(
-                                    self.doc_id,
-                                    Arc::new(patch),
-                                    Arc::clone(&heads),
-                                    crate::changes::BigRepoChangeOrigin::Bootstrap,
-                                )
-                                .map_err(|_| ferr!("change manager notify_doc_changed failed"))?;
+                            )?;
                         }
                     }
                     self.state = DocState::Live(Arc::downgrade(&bundle));
@@ -1011,22 +998,18 @@ impl<F: FutureForm> DocWorker2<F> {
                 if was_pending {
                     let patches = doc.diff(&[], &after_heads);
                     let heads = Arc::<[automerge::ChangeHash]>::from(after_heads);
-                    self.change_manager
-                        .notify_doc_heads_changed(
+                    self.change_manager.notify_doc_heads_changed(
+                        self.doc_id,
+                        Arc::clone(&heads),
+                        crate::changes::BigRepoChangeOrigin::Bootstrap,
+                    )?;
+                    for patch in patches {
+                        self.change_manager.notify_doc_changed(
                             self.doc_id,
+                            Arc::new(patch),
                             Arc::clone(&heads),
                             crate::changes::BigRepoChangeOrigin::Bootstrap,
-                        )
-                        .map_err(|_| ferr!("change manager notify_doc_heads_changed failed"))?;
-                    for patch in patches {
-                        self.change_manager
-                            .notify_doc_changed(
-                                self.doc_id,
-                                Arc::new(patch),
-                                Arc::clone(&heads),
-                                crate::changes::BigRepoChangeOrigin::Bootstrap,
-                            )
-                            .map_err(|_| ferr!("change manager notify_doc_changed failed"))?;
+                        )?;
                     }
                 }
                 self.state = DocState::Transient(Box::new(doc));
@@ -1064,7 +1047,7 @@ impl<F: FutureForm> DocWorker2<F> {
                     barrier_id,
                 })
                 .await
-                .map_err(|_| ferr!("hub event channel closed"))?;
+                .expect(ERROR_CHANNEL);
         }
         Ok(())
     }

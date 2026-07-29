@@ -13,7 +13,7 @@ use crate::interlude::*;
 use crate::keyhive_conn::BigRepoKeyhiveConnAdapter;
 use crate::keyhive_storage::BigRepoKeyhiveStorage;
 // Retained for concrete aliases below; will be removed when aliases move out.
-use crate::runtime::BigRepoIrohTransport;
+use crate::runtime2::support::BigRepoIrohTransport;
 use crate::wire::BigRepoWireMessage;
 use future_form::{Local, Sendable};
 use futures::future::{BoxFuture, LocalBoxFuture};

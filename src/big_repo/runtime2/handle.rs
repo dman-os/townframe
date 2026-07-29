@@ -1,7 +1,7 @@
 //! `Runtime2Handle` — the public API handle.
 //!
 //! Thin sender over [`Runtime2Cmd`]. Replaces
-//! [`BigRepoRuntimeHandle`](crate::runtime::BigRepoRuntimeHandle). Every public
+//! [`BigRepoRuntimeHandle`](crate::runtime2::Runtime2Handle). Every public
 //! method mirrors a method on the old handle (`runtime.rs:380`) or is a new
 //! heads-fix method (`doc_head_state`, `doc_payload_heads`).
 //!
@@ -35,7 +35,7 @@ use std::sync::Arc;
 /// [`RuntimeIo`]: super::RuntimeIo
 pub struct Runtime2Handle<F: FutureForm> {
     pub(crate) cmd_tx: async_channel::Sender<Runtime2Cmd>,
-    pub(crate) sync_policy: crate::runtime::BigRepoSyncPolicy,
+    pub(crate) sync_policy: crate::runtime2::types::BigRepoSyncPolicy,
     pub(crate) doc_sync_waiter_ids: std::sync::Arc<std::sync::atomic::AtomicU64>,
     pub(crate) keyhive_sync_waiter_ids: std::sync::Arc<std::sync::atomic::AtomicU64>,
     /// Injected runtime-neutral timer for timeout operations.
@@ -58,7 +58,7 @@ impl<F: FutureForm> Runtime2Handle<F> {
     /// Construct a new handle. Called by `spawn_runtime2` in the hub.
     pub(crate) fn new(
         cmd_tx: async_channel::Sender<Runtime2Cmd>,
-        sync_policy: crate::runtime::BigRepoSyncPolicy,
+        sync_policy: crate::runtime2::types::BigRepoSyncPolicy,
         timer: Arc<dyn Timer<F>>,
         doc_sync_waiter_ids: std::sync::Arc<std::sync::atomic::AtomicU64>,
         keyhive_sync_waiter_ids: std::sync::Arc<std::sync::atomic::AtomicU64>,
@@ -76,7 +76,7 @@ impl<F: FutureForm> Runtime2Handle<F> {
 
     /// The sync policy (timeouts, TTLs). Mirrors
     /// `BigRepoRuntimeHandle::sync_policy` (`runtime.rs:373`).
-    pub fn sync_policy(&self) -> crate::runtime::BigRepoSyncPolicy {
+    pub fn sync_policy(&self) -> crate::runtime2::types::BigRepoSyncPolicy {
         self.sync_policy
     }
 
@@ -84,7 +84,7 @@ impl<F: FutureForm> Runtime2Handle<F> {
 
     /// Create a new document with `initial_content` and the given keyhive
     /// `parents` (co-creators). Mirrors
-    /// [`BigRepoRuntimeHandle::create_doc`](crate::runtime::BigRepoRuntimeHandle::create_doc)
+    /// [`BigRepoRuntimeHandle::create_doc`](crate::runtime2::Runtime2Handle::create_doc)
     /// at `runtime.rs:381`.
     ///
     /// Sends a [`CreateDoc`] command to the hub, which asynchronously calls
@@ -97,7 +97,7 @@ impl<F: FutureForm> Runtime2Handle<F> {
         &self,
         initial_content: automerge::Automerge,
         parents: Vec<crate::keyhive::BigKeyhiveAuthority>,
-    ) -> eyre::Result<std::sync::Arc<crate::runtime::LiveDocBundle>> {
+    ) -> eyre::Result<std::sync::Arc<crate::runtime2::types::LiveDocBundle>> {
         use nonempty::NonEmpty;
         let heads = initial_content.get_heads();
         let content_heads = NonEmpty::from_vec(heads.iter().map(|h| h.0).collect())
@@ -123,14 +123,15 @@ impl<F: FutureForm> Runtime2Handle<F> {
     /// [`DocLookup::PendingMaterialization`] if the doc exists but is not yet
     /// decryptable, or [`DocLookup::Missing`] if unknown.
     ///
-    /// [`DocLookup::Ready`]: crate::runtime::DocLookup::Ready
-    /// [`DocLookup::PendingMaterialization`]: crate::runtime::DocLookup::PendingMaterialization
-    /// [`DocLookup::Missing`]: crate::runtime::DocLookup::Missing
+    /// [`DocLookup::Ready`]: crate::runtime2::types::DocLookup::Ready
+    /// [`DocLookup::PendingMaterialization`]: crate::runtime2::types::DocLookup::PendingMaterialization
+    /// [`DocLookup::Missing`]: crate::runtime2::types::DocLookup::Missing
     pub async fn get_doc_handle(
         &self,
         doc_id: DocumentId,
-    ) -> eyre::Result<crate::runtime::DocLookup<std::sync::Arc<crate::runtime::LiveDocBundle>>>
-    {
+    ) -> eyre::Result<
+        crate::runtime2::types::DocLookup<std::sync::Arc<crate::runtime2::types::LiveDocBundle>>,
+    > {
         let (resp, rx) = futures::channel::oneshot::channel();
         self.cmd_tx
             .send(Runtime2Cmd::GetDocHandle { doc_id, resp })
@@ -222,7 +223,7 @@ impl<F: FutureForm> Runtime2Handle<F> {
     /// The `addr` is an opaque `Box<dyn Any + Send>` that the hub's
     /// [`TransportConnect`](super::TransportConnect) implementation
     /// interprets. Mirrors
-    /// [`BigRepoRuntimeHandle::open_connection_iroh`](crate::runtime::BigRepoRuntimeHandle::open_connection_iroh)
+    /// [`BigRepoRuntimeHandle::open_connection_iroh`](crate::runtime2::Runtime2Handle::open_connection_iroh)
     /// at `runtime.rs:467` but de-iroh'd — takes an abstract addr instead of
     /// `iroh::Endpoint` + `iroh::EndpointAddr`.
     pub async fn open_connection(
@@ -244,7 +245,7 @@ impl<F: FutureForm> Runtime2Handle<F> {
     /// `incoming` is an opaque handle the hub's
     /// [`TransportConnect`](super::TransportConnect) implementation
     /// uses to complete the handshake. Mirrors
-    /// [`BigRepoRuntimeHandle::accept_connection_iroh`](crate::runtime::BigRepoRuntimeHandle::accept_connection_iroh)
+    /// [`BigRepoRuntimeHandle::accept_connection_iroh`](crate::runtime2::Runtime2Handle::accept_connection_iroh)
     /// at `runtime.rs:488` but de-iroh'd.
     pub async fn accept_connection(
         &self,
@@ -288,7 +289,7 @@ impl<F: FutureForm> Runtime2Handle<F> {
         doc_id: DocumentId,
         peer_id: PeerId,
         timeout: Option<std::time::Duration>,
-    ) -> Result<(), crate::runtime::SyncDocError> {
+    ) -> Result<(), crate::runtime2::types::SyncDocError> {
         let waiter_id = fresh_waiter_id(&self.doc_sync_waiter_ids);
         let (resp, mut rx) = futures::channel::oneshot::channel();
         self.cmd_tx
@@ -301,18 +302,20 @@ impl<F: FutureForm> Runtime2Handle<F> {
             })
             .await
             .map_err(|_| {
-                crate::runtime::SyncDocError::IoError(eyre::eyre!("task was found dead"))
+                crate::runtime2::types::SyncDocError::IoError(eyre::eyre!("task was found dead"))
             })?;
         // If no timeout, wait indefinitely (the old handle returns
         // immediately without timeout).
         let Some(duration) = timeout else {
             return rx.await.map_err(|_| {
-                crate::runtime::SyncDocError::IoError(eyre::eyre!("caller dropped before response"))
+                crate::runtime2::types::SyncDocError::IoError(eyre::eyre!(
+                    "caller dropped before response"
+                ))
             })?;
         };
         match self.race_timeout(rx, duration).await {
             Ok(Ok(result)) => result,
-            Ok(Err(_)) => Err(crate::runtime::SyncDocError::IoError(eyre::eyre!(
+            Ok(Err(_)) => Err(crate::runtime2::types::SyncDocError::IoError(eyre::eyre!(
                 "caller dropped before response"
             ))),
             Err(()) => {
@@ -325,13 +328,15 @@ impl<F: FutureForm> Runtime2Handle<F> {
                     })
                     .map_err(|e| match e {
                         async_channel::TrySendError::Closed(_) => {
-                            crate::runtime::SyncDocError::IoError(ferr!("task was found dead"))
+                            crate::runtime2::types::SyncDocError::IoError(ferr!(
+                                "task was found dead"
+                            ))
                         }
                         async_channel::TrySendError::Full(_) => {
-                            crate::runtime::SyncDocError::IoError(ferr!("mailbox full"))
+                            crate::runtime2::types::SyncDocError::IoError(ferr!("mailbox full"))
                         }
                     })?;
-                Err(crate::runtime::SyncDocError::IoError(eyre::eyre!(
+                Err(crate::runtime2::types::SyncDocError::IoError(eyre::eyre!(
                     "doc sync timed out"
                 )))
             }
@@ -425,11 +430,11 @@ impl<F: FutureForm> Runtime2Handle<F> {
     pub async fn contains_sedimentree_id(&self, doc_id: DocumentId) -> eyre::Result<bool> {
         let (resp, rx) = futures::channel::oneshot::channel();
         self.cmd_tx
-            .send(Runtime2Cmd::CheckSedimentreeResident { doc_id, resp })
+            .send(Runtime2Cmd::ContainsSedimentree { doc_id, resp })
             .await
             .map_err(|_| eyre::eyre!("task was found dead"))?;
         rx.await
-            .map_err(|_| eyre::eyre!("caller dropped before response"))
+            .map_err(|_| eyre::eyre!("caller dropped before response"))?
     }
 
     /// Inspect raw stored commit/fragment blobs for a document.
@@ -450,19 +455,25 @@ impl<F: FutureForm> Runtime2Handle<F> {
             .map_err(|_| eyre::eyre!("caller dropped before response"))?
     }
 
-    /// Check whether a doc-worker is currently alive for `doc_id`.
-    ///
-    /// Returns `true` if a worker is running (handles ongoing sync, commits,
-    /// materialization). Mirrors `BigRepoRuntimeHandle::has_doc_worker` at
-    /// `runtime.rs:435`.
-    pub async fn has_doc_worker(&self, doc_id: DocumentId) -> eyre::Result<bool> {
+    /// Return whether the document has either an active worker or persisted sedimentree state.
+    pub async fn has_local_doc_state(&self, doc_id: DocumentId) -> eyre::Result<bool> {
         let (resp, rx) = futures::channel::oneshot::channel();
         self.cmd_tx
-            .send(Runtime2Cmd::CheckDocWorkerExists { doc_id, resp })
+            .send(Runtime2Cmd::HasLocalDocState { doc_id, resp })
             .await
             .map_err(|_| eyre::eyre!("task was found dead"))?;
         rx.await
-            .map_err(|_| eyre::eyre!("caller dropped before response"))
+            .map_err(|_| eyre::eyre!("caller dropped before response"))?
+    }
+    #[cfg(test)]
+    pub(crate) async fn has_doc_worker(&self, doc_id: DocumentId) -> eyre::Result<bool> {
+        let (resp, rx) = futures::channel::oneshot::channel();
+        self.cmd_tx
+            .send(Runtime2Cmd::HasDocWorker { doc_id, resp })
+            .await
+            .map_err(|_| eyre::eyre!("task was found dead"))?;
+        rx.await
+            .map_err(|_| eyre::eyre!("caller dropped before response"))?
     }
 
     // ── private helpers ──────────────────────────────────────────────────────

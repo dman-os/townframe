@@ -32,14 +32,14 @@ pub(crate) mod keyhive_conn;
 pub(crate) mod keyhive_listener;
 pub(crate) mod keyhive_storage;
 pub mod rpc;
-mod runtime;
+
 /// runtime2 — the tractable, runtime-neutral rewrite.
 /// See `play.big_repo.runtime2.md`.
 pub(crate) mod runtime2;
 mod sqlite_big_repo_store;
 pub use sqlite_big_repo_store::SqliteBigRepoStore;
 pub(crate) mod wire;
-pub use runtime::{
+pub use runtime2::types::{
     CreateDocError, DocLookup, GetDocError, PutDocError, SyncDocError, SyncDocPolicyError,
 };
 #[cfg(test)]
@@ -100,7 +100,7 @@ pub struct BigRepo {
     #[educe(Debug(ignore))]
     keyhive_storage: BigRepoKeyhiveStorage,
     #[educe(Debug(ignore))]
-    sync_policy: runtime::BigRepoSyncPolicy,
+    sync_policy: runtime2::types::BigRepoSyncPolicy,
     #[educe(Debug(ignore))]
     big_sync_store: SharedPartStore,
     #[educe(Debug(ignore))]
@@ -196,7 +196,7 @@ impl BigRepo {
         // `SubductionKeyhive` authorizes peers by matching the peer signing
         // identity to the Keyhive individual identifier, so BigRepo derives
         // both identities from this one seed.
-        let sync_policy = runtime::BigRepoSyncPolicy::default();
+        let sync_policy = runtime2::types::BigRepoSyncPolicy::default();
         let keyhive_storage = match &storage {
             StorageConfig::Memory => BigRepoKeyhiveStorage::memory_sqlite(keyhive_events.clone()),
             StorageConfig::Disk { path } => {
@@ -288,7 +288,7 @@ impl BigRepo {
         &self.keyhive
     }
 
-    pub(crate) fn sync_policy(&self) -> runtime::BigRepoSyncPolicy {
+    pub(crate) fn sync_policy(&self) -> runtime2::types::BigRepoSyncPolicy {
         self.sync_policy
     }
 
@@ -657,7 +657,7 @@ impl BigRepoStopToken {
 #[derive(Clone)]
 pub struct BigDocHandle {
     repo: Arc<BigRepo>,
-    bundle: Arc<runtime::LiveDocBundle>,
+    bundle: Arc<runtime2::types::LiveDocBundle>,
 }
 
 impl std::fmt::Debug for BigDocHandle {

@@ -18,7 +18,7 @@
 //! confined to this backend; runtime2 actor code depends only on the trait
 //! interfaces.
 //!
-//! [`BigRepoIrohTransport`]: crate::runtime::BigRepoIrohTransport
+//! [`BigRepoIrohTransport`]: crate::runtime2::support::BigRepoIrohTransport
 
 use crate::interlude::*;
 use crate::keyhive_storage::BigRepoKeyhiveStorage;
@@ -33,12 +33,13 @@ use crate::{
         BigRepoKeyhiveProtocol,
     },
     keyhive_conn::BigRepoKeyhiveConnAdapter,
-    runtime::{
+    runtime2::support::{
         accept_incoming, connect_outgoing_to, encrypt_fragment_blob,
         encrypt_loose_commit_with_update_op, encrypt_staged_automerge_ingest,
         persist_cgka_update_op, sedimentree_heads_payload, BigRepoIrohTransport, BigRepoSubduction,
-        BigRepoSubductionStorage, BigRepoSyncPolicy, IrohConnectResult, SubductionSedimentrees,
+        BigRepoSubductionStorage, IrohConnectResult, SubductionSedimentrees,
     },
+    runtime2::types::BigRepoSyncPolicy,
     wire::BigRepoWireMessage,
     BigEphemeral, BigKeyhiveHandle, DocumentId,
 };
@@ -165,33 +166,12 @@ impl<S: BigRepoSubductionStorage> NativeCiphertextStore<S> {
             }
         }
 
-        // Try loading as loose commit, then fragment.
         let commit_id_bytes: [u8; 32] = content_ref
             .try_into()
             .map_err(|_| ferr!("content_ref must be 32 bytes, got {}", content_ref.len()))?;
         let commit_id = CommitId::new(commit_id_bytes);
-
-        // Loose commit
-        if let Some(verified) =
-            <S as subduction_core::storage::traits::Storage<Sendable>>::load_loose_commit(
-                &self.storage,
-                self.sed_id,
-                commit_id,
-            )
-            .await
-            .map_err(|e| ferr!("failed loading loose commit for ciphertext: {e}"))?
-        {
-            let encrypted = decode_encrypted_blob(verified.blob().as_slice())
-                .map_err(|e| ferr!("failed decoding loose commit encrypted blob: {e}"))?;
-            let encrypted = Arc::new(encrypted);
-            self.cache
-                .lock()
-                .expect(ERROR_MUTEX)
-                .insert(content_ref.to_vec(), Arc::clone(&encrypted));
-            return Ok(Some(encrypted));
-        }
-
-        // Fragment
+        // Prefer fragments: a fragment and its head loose commit can share a
+        // content reference, but the fragment is the causally complete form.
         if let Some(verified) =
             <S as subduction_core::storage::traits::Storage<Sendable>>::load_fragment(
                 &self.storage,
@@ -203,6 +183,25 @@ impl<S: BigRepoSubductionStorage> NativeCiphertextStore<S> {
         {
             let encrypted = decode_encrypted_blob(verified.blob().as_slice())
                 .map_err(|e| ferr!("failed decoding fragment encrypted blob: {e}"))?;
+            let encrypted = Arc::new(encrypted);
+            self.cache
+                .lock()
+                .expect(ERROR_MUTEX)
+                .insert(content_ref.to_vec(), Arc::clone(&encrypted));
+            return Ok(Some(encrypted));
+        }
+        // Fall back to the loose commit when no fragment exists.
+        if let Some(verified) =
+            <S as subduction_core::storage::traits::Storage<Sendable>>::load_loose_commit(
+                &self.storage,
+                self.sed_id,
+                commit_id,
+            )
+            .await
+            .map_err(|e| ferr!("failed loading loose commit for ciphertext: {e}"))?
+        {
+            let encrypted = decode_encrypted_blob(verified.blob().as_slice())
+                .map_err(|e| ferr!("failed decoding loose commit encrypted blob: {e}"))?;
             let encrypted = Arc::new(encrypted);
             self.cache
                 .lock()
@@ -309,7 +308,7 @@ where
     fn persist_initial_document(
         &self,
         sed_id: SedimentreeId,
-        staged: crate::runtime::StagedAutomergeIngest,
+        staged: crate::runtime2::support::StagedAutomergeIngest,
     ) -> <Sendable as future_form::FutureForm>::Future<'_, eyre::Result<()>> {
         Sendable::from_future(async move {
             let (sedimentree, blobs, cgka_ops) =
@@ -434,7 +433,7 @@ where
                 fragments.iter().map(|v| v.payload().clone()).collect(),
                 loose_commits.iter().map(|v| v.payload().clone()).collect(),
             ));
-
+            let tree = self.sedimentrees.get_or_insert_with(sed_id, || tree).await;
             let heads = sedimentree_heads_payload(&tree);
             if let Some((cached_loose, cached_fragments)) = empty_cached_counts {
                 tracing::warn!(
@@ -446,7 +445,7 @@ where
                     durable_heads = heads.len(),
                     "cached Sedimentree reported empty heads; compared durable state"
                 );
-                return Ok(Vec::new());
+                return Ok(heads.iter().map(|h| CommitId::new(h.0)).collect());
             }
             Ok(heads.iter().map(|h| CommitId::new(h.0)).collect())
         })
@@ -488,6 +487,10 @@ where
                 loose_commits.iter().map(|v| v.payload().clone()).collect(),
             ));
 
+            // Keep the hydrated tree resident: materialization retries can be
+            // frequent while Keyhive operations arrive, and the durable store
+            // should not be rescanned for every retry.
+            let tree = self.sedimentrees.get_or_insert_with(sed_id, || tree).await;
             Ok(Some(tree))
         })
     }
@@ -538,12 +541,12 @@ where
     fn try_decrypt_content_keyed(
         &self,
         sed_id: SedimentreeId,
-        locator: crate::runtime::BigRepoCiphertextLocator,
+        locator: crate::runtime2::support::BigRepoCiphertextLocator,
     ) -> <Sendable as future_form::FutureForm>::Future<'_, eyre::Result<Option<Vec<u8>>>> {
         Sendable::from_future(async move {
             // Load the raw blob from storage.
             let raw = match locator.kind {
-                crate::runtime::BigRepoCiphertextKind::LooseCommit => {
+                crate::runtime2::support::BigRepoCiphertextKind::LooseCommit => {
                     <S as subduction_core::storage::traits::Storage<Sendable>>::load_loose_commit(
                         &self.storage,
                         locator.sedimentree_id,
@@ -553,7 +556,7 @@ where
                     .map_err(|e| ferr!("failed loading loose commit: {e}"))?
                     .map(|v| v.blob().clone().into_contents())
                 }
-                crate::runtime::BigRepoCiphertextKind::Fragment => {
+                crate::runtime2::support::BigRepoCiphertextKind::Fragment => {
                     <S as subduction_core::storage::traits::Storage<Sendable>>::load_fragment(
                         &self.storage,
                         locator.sedimentree_id,
@@ -599,12 +602,12 @@ where
     fn try_causal_decrypt(
         &self,
         sed_id: SedimentreeId,
-        locator: crate::runtime::BigRepoCiphertextLocator,
+        locator: crate::runtime2::support::BigRepoCiphertextLocator,
     ) -> <Sendable as future_form::FutureForm>::Future<'_, eyre::Result<CausalDecryptResult>> {
         Sendable::from_future(async move {
             // Load the raw blob from storage.
             let raw = match locator.kind {
-                crate::runtime::BigRepoCiphertextKind::LooseCommit => {
+                crate::runtime2::support::BigRepoCiphertextKind::LooseCommit => {
                     <S as subduction_core::storage::traits::Storage<Sendable>>::load_loose_commit(
                         &self.storage,
                         locator.sedimentree_id,
@@ -614,7 +617,7 @@ where
                     .map_err(|e| ferr!("failed loading loose commit: {e}"))?
                     .map(|v| v.blob().clone().into_contents())
                 }
-                crate::runtime::BigRepoCiphertextKind::Fragment => {
+                crate::runtime2::support::BigRepoCiphertextKind::Fragment => {
                     <S as subduction_core::storage::traits::Storage<Sendable>>::load_fragment(
                         &self.storage,
                         locator.sedimentree_id,
@@ -1177,13 +1180,13 @@ pub async fn spawn_native_runtime2<S>(
     signer: subduction_crypto::signer::memory::MemorySigner,
     group_part_store: crate::sqlite_big_repo_store::SqliteBigRepoStore,
     storage: S,
-    policy: Arc<crate::runtime::BigRepoPolicy>,
+    policy: Arc<crate::runtime2::support::BigRepoPolicy>,
     sync_policy: BigRepoSyncPolicy,
     keyhive: BigKeyhiveHandle,
     keyhive_storage: BigRepoKeyhiveStorage,
     change_manager: Arc<crate::changes::ChangeListenerManager>,
-    listener_evt_tx: mpsc::UnboundedSender<crate::runtime::RuntimeEvt>,
-    listener_evt_rx: mpsc::UnboundedReceiver<crate::runtime::RuntimeEvt>,
+    listener_evt_tx: mpsc::UnboundedSender<crate::runtime2::types::RuntimeEvt>,
+    listener_evt_rx: mpsc::UnboundedReceiver<crate::runtime2::types::RuntimeEvt>,
     keyhive_change_tx: tokio::sync::broadcast::Sender<()>,
 ) -> eyre::Result<(
     crate::runtime2::Runtime2Handle<Sendable>,
@@ -1207,7 +1210,7 @@ where
     let subscriptions = Arc::new(async_lock::Mutex::new(
         sedimentree_core::collections::Map::new(),
     ));
-    let storage_powerbox: StoragePowerbox<S, crate::runtime::BigRepoPolicy> =
+    let storage_powerbox: StoragePowerbox<S, crate::runtime2::support::BigRepoPolicy> =
         subduction_core::storage::powerbox::StoragePowerbox::new(
             storage.clone(),
             Arc::clone(&policy),
@@ -1222,14 +1225,15 @@ where
         evt_tx: evt_tx.clone(),
     });
 
-    let sync_handler: Arc<crate::runtime::BigRepoSyncHandler<S>> = Arc::new(SyncHandler::new(
-        Arc::clone(&sedimentrees),
-        Arc::clone(&connections),
-        Arc::clone(&subscriptions),
-        storage_powerbox.clone(),
-        CountLeadingZeroBytes,
-        TokioSpawn,
-    ));
+    let sync_handler: Arc<crate::runtime2::support::BigRepoSyncHandler<S>> =
+        Arc::new(SyncHandler::new(
+            Arc::clone(&sedimentrees),
+            Arc::clone(&connections),
+            Arc::clone(&subscriptions),
+            storage_powerbox.clone(),
+            CountLeadingZeroBytes,
+            TokioSpawn,
+        ));
     sync_handler.set_sync_session_observer(Arc::clone(&sync_session_observer));
     let send_counter = sync_handler.send_counter().clone();
 
@@ -1274,7 +1278,7 @@ where
             move |keyhive_peer_id, request_id, changed| {
                 let peer_id = PeerId::new(*keyhive_peer_id.verifying_key());
                 if listener_evt_tx
-                    .send(crate::runtime::RuntimeEvt::KeyhiveSyncDone {
+                    .send(crate::runtime2::types::RuntimeEvt::KeyhiveSyncDone {
                         peer_id,
                         request_id,
                         changed,
@@ -1456,7 +1460,7 @@ where
                 let mut rx = listener_evt_rx;
                 while let Some(evt) = rx.recv().await {
                     let evt2 = match evt {
-                        crate::runtime::RuntimeEvt::KeyhiveSyncDone {
+                        crate::runtime2::types::RuntimeEvt::KeyhiveSyncDone {
                             peer_id,
                             request_id,
                             changed,
@@ -1465,25 +1469,21 @@ where
                             request_id,
                             changed,
                         },
-                        crate::runtime::RuntimeEvt::PrekeyExpanded { new_prekey } => {
+                        crate::runtime2::types::RuntimeEvt::PrekeyExpanded { new_prekey } => {
                             crate::runtime2::Runtime2Evt::PrekeyExpanded { new_prekey }
                         }
-                        crate::runtime::RuntimeEvt::PrekeyRotated { rotate_key } => {
+                        crate::runtime2::types::RuntimeEvt::PrekeyRotated { rotate_key } => {
                             crate::runtime2::Runtime2Evt::PrekeyRotated { rotate_key }
                         }
-                        crate::runtime::RuntimeEvt::CgkaOp { data } => {
+                        crate::runtime2::types::RuntimeEvt::CgkaOp { data } => {
                             crate::runtime2::Runtime2Evt::CgkaOp { data }
                         }
-                        crate::runtime::RuntimeEvt::DelegationReceived { target, data } => {
+                        crate::runtime2::types::RuntimeEvt::DelegationReceived { target, data } => {
                             crate::runtime2::Runtime2Evt::DelegationReceived { target, data }
                         }
-                        crate::runtime::RuntimeEvt::RevocationReceived { target, data } => {
+                        crate::runtime2::types::RuntimeEvt::RevocationReceived { target, data } => {
                             crate::runtime2::Runtime2Evt::RevocationReceived { target, data }
                         }
-                        // Other RuntimeEvt variants (connection lifecycle,
-                        // sync sessions, doc-worker) are handled directly by
-                        // runtime2's hub or TransportConnect — skip them.
-                        _ => continue,
                     };
                     if evt_tx.send(evt2).await.is_err() {
                         break;
@@ -1507,5 +1507,265 @@ impl crate::runtime2::Clock for subduction_ephemeral::clock::std_clock::StdClock
 
     fn instant(&self) -> std::time::Instant {
         std::time::Instant::now()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::keyhive_listener::BigRepoKeyhiveListener;
+    use crate::keyhive_storage::BigRepoKeyhiveStorage;
+    use crate::BigKeyhiveHandle;
+    use keyhive_core::crypto::envelope::Envelope;
+    use keyhive_core::store::ciphertext::CiphertextStore;
+    use sedimentree_core::blob::verified::VerifiedBlobMeta;
+    use sedimentree_core::fragment::Fragment;
+    use sedimentree_core::loose_commit::LooseCommit;
+    use std::collections::{BTreeSet, HashMap};
+    use std::sync::Arc;
+    use subduction_core::storage::memory::MemoryStorage;
+    use subduction_core::storage::traits::Storage;
+    use subduction_crypto::signer::memory::MemorySigner;
+    use subduction_crypto::verified_meta::VerifiedMeta;
+
+    fn kh_listener() -> BigRepoKeyhiveListener {
+        let (tx, _rx) = tokio::sync::mpsc::unbounded_channel();
+        BigRepoKeyhiveListener { evt_tx: tx }
+    }
+
+    #[tokio::test]
+    async fn ciphertext_store_durable_after_mark_decrypted() -> eyre::Result<()> {
+        let keyhive = BigKeyhiveHandle::new([9; 32], kh_listener()).await?;
+        let kh_storage = BigRepoKeyhiveStorage::memory();
+        let doc_id = keyhive
+            .create_doc(
+                default(),
+                nonempty::NonEmpty {
+                    head: [1; 32],
+                    tail: vec![],
+                },
+                &kh_storage,
+            )
+            .await?;
+        let sed_id = sedimentree_core::id::SedimentreeId::new(*doc_id.as_bytes());
+        let storage = MemoryStorage::new();
+        let signer = MemorySigner::from_bytes(&[42; 32]);
+
+        let head = sedimentree_core::loose_commit::id::CommitId::new([7; 32]);
+        let parents = BTreeSet::new();
+        let (encrypted_blob, _app_key, _) =
+            crate::runtime2::support::encrypt_loose_commit_with_update_op(
+                &keyhive,
+                sed_id,
+                head,
+                &parents,
+                b"payload-bytes",
+                &HashMap::new(),
+            )
+            .await?;
+
+        let verified = VerifiedMeta::<LooseCommit>::seal::<Sendable, _>(
+            &signer,
+            (sed_id, head, parents),
+            VerifiedBlobMeta::new(encrypted_blob.clone()),
+        )
+        .await;
+        Storage::<Sendable>::save_loose_commit(&storage, sed_id, verified)
+            .await
+            .map_err(|e| ferr!("save_loose_commit failed: {e}"))?;
+
+        let ct_store = NativeCiphertextStore::new(storage.clone(), sed_id);
+        let content_ref = head.as_bytes().to_vec();
+
+        let indexed = ct_store
+            .get_ciphertext(&content_ref)
+            .await
+            .map_err(|e| ferr!("get_ciphertext failed: {e}"))?
+            .expect("ciphertext should be found");
+        assert_eq!(indexed.content_ref, content_ref);
+
+        ct_store
+            .mark_decrypted(&head.as_bytes().to_vec())
+            .await
+            .map_err(|e| ferr!("mark_decrypted failed: {e}"))?;
+
+        let after_mark = ct_store
+            .get_ciphertext(&head.as_bytes().to_vec())
+            .await
+            .map_err(|e| ferr!("get_ciphertext after mark failed: {e}"))?
+            .expect("ciphertext should remain loadable after mark_decrypted");
+        assert_eq!(after_mark.content_ref, content_ref);
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn ciphertext_store_cache_identity() -> eyre::Result<()> {
+        let keyhive = BigKeyhiveHandle::new([14; 32], kh_listener()).await?;
+        let kh_storage = BigRepoKeyhiveStorage::memory();
+        let doc_id = keyhive
+            .create_doc(
+                default(),
+                nonempty::NonEmpty {
+                    head: [1; 32],
+                    tail: vec![],
+                },
+                &kh_storage,
+            )
+            .await?;
+        let sed_id = sedimentree_core::id::SedimentreeId::new(*doc_id.as_bytes());
+        let storage = MemoryStorage::new();
+        let signer = MemorySigner::from_bytes(&[47; 32]);
+
+        let head = sedimentree_core::loose_commit::id::CommitId::new([17; 32]);
+        let parents = BTreeSet::new();
+        let (encrypted_blob, _app_key, _) =
+            crate::runtime2::support::encrypt_loose_commit_with_update_op(
+                &keyhive,
+                sed_id,
+                head,
+                &parents,
+                b"payload-bytes",
+                &HashMap::new(),
+            )
+            .await?;
+
+        let verified = VerifiedMeta::<LooseCommit>::seal::<Sendable, _>(
+            &signer,
+            (sed_id, head, parents),
+            VerifiedBlobMeta::new(encrypted_blob),
+        )
+        .await;
+        Storage::<Sendable>::save_loose_commit(&storage, sed_id, verified)
+            .await
+            .map_err(|e| ferr!("save_loose_commit failed: {e}"))?;
+
+        let ct_store = NativeCiphertextStore::new(storage.clone(), sed_id);
+        let content_ref = head.as_bytes().to_vec();
+
+        let first = ct_store
+            .get_ciphertext(&content_ref)
+            .await
+            .map_err(|e| ferr!("first get_ciphertext failed: {e}"))?
+            .expect("ciphertext should be found");
+        let second = ct_store
+            .get_ciphertext(&content_ref)
+            .await
+            .map_err(|e| ferr!("second get_ciphertext failed: {e}"))?
+            .expect("ciphertext should be found");
+
+        assert!(
+            Arc::ptr_eq(&first, &second),
+            "repeated lookup must return the same Arc"
+        );
+        Ok(())
+    }
+    #[tokio::test]
+    async fn ciphertext_store_prefers_fragment_over_loose_commit() -> eyre::Result<()> {
+        let keyhive = BigKeyhiveHandle::new([11; 32], kh_listener()).await?;
+        let kh_storage = BigRepoKeyhiveStorage::memory();
+        let doc_id = keyhive
+            .create_doc(
+                default(),
+                nonempty::NonEmpty {
+                    head: [1; 32],
+                    tail: vec![],
+                },
+                &kh_storage,
+            )
+            .await?;
+        let sed_id = sedimentree_core::id::SedimentreeId::new(*doc_id.as_bytes());
+        let storage = MemoryStorage::new();
+        let signer = MemorySigner::from_bytes(&[44; 32]);
+        let h1 = sedimentree_core::loose_commit::id::CommitId::new([7; 32]);
+        let h2 = sedimentree_core::loose_commit::id::CommitId::new([8; 32]);
+        let h1_parents = BTreeSet::new();
+        let h2_parents = BTreeSet::from([h1]);
+        let (h1_blob, h1_key, _) = crate::runtime2::support::encrypt_loose_commit_with_update_op(
+            &keyhive,
+            sed_id,
+            h1,
+            &h1_parents,
+            b"parent-bytes",
+            &HashMap::new(),
+        )
+        .await?;
+        let h1_verified = VerifiedMeta::<LooseCommit>::seal::<Sendable, _>(
+            &signer,
+            (sed_id, h1, h1_parents.clone()),
+            VerifiedBlobMeta::new(h1_blob),
+        )
+        .await;
+        Storage::<Sendable>::save_loose_commit(&storage, sed_id, h1_verified).await?;
+        let (h2_blob, h2_key, _) = crate::runtime2::support::encrypt_loose_commit_with_update_op(
+            &keyhive,
+            sed_id,
+            h2,
+            &h2_parents,
+            b"head-bytes",
+            &HashMap::from([(h1, h1_key)]),
+        )
+        .await?;
+        let h2_verified = VerifiedMeta::<LooseCommit>::seal::<Sendable, _>(
+            &signer,
+            (sed_id, h2, h2_parents.clone()),
+            VerifiedBlobMeta::new(h2_blob),
+        )
+        .await;
+        Storage::<Sendable>::save_loose_commit(&storage, sed_id, h2_verified).await?;
+        let fragment_blob = crate::runtime2::support::encrypt_fragment_blob(
+            &keyhive,
+            &storage,
+            sed_id,
+            h2,
+            &h2_parents,
+            b"fragment-payload",
+        )
+        .await?;
+        let fragment_verified = VerifiedMeta::<Fragment>::seal::<Sendable, _>(
+            &signer,
+            (sed_id, h2, h2_parents, vec![]),
+            VerifiedBlobMeta::new(fragment_blob),
+        )
+        .await;
+        Storage::<Sendable>::save_fragment(&storage, sed_id, fragment_verified).await?;
+        let ct_store = NativeCiphertextStore::new(storage, sed_id);
+        let encrypted = ct_store
+            .get_ciphertext(&h2.as_bytes().to_vec())
+            .await?
+            .expect("fragment ciphertext should be found");
+        let plaintext = encrypted
+            .try_decrypt(h2_key)
+            .map_err(|e| ferr!("decrypting fragment: {e}"))?;
+        let envelope: Envelope<Vec<u8>, Vec<u8>> = bincode::deserialize(&plaintext)?;
+        assert_eq!(envelope.plaintext, b"fragment-payload");
+        assert_eq!(envelope.ancestors.get(&h1.as_bytes()[..]), Some(&h1_key));
+        Ok(())
+    }
+    #[tokio::test]
+    async fn ciphertext_store_rejects_plaintext_blob() -> eyre::Result<()> {
+        let sed_id = sedimentree_core::id::SedimentreeId::new([12; 32]);
+        let head = sedimentree_core::loose_commit::id::CommitId::new([9; 32]);
+        let parents = BTreeSet::new();
+        let storage = MemoryStorage::new();
+        let signer = MemorySigner::from_bytes(&[45; 32]);
+        let plaintext = sedimentree_core::blob::Blob::new(b"plain commit bytes".to_vec());
+        let verified = VerifiedMeta::<LooseCommit>::seal::<Sendable, _>(
+            &signer,
+            (sed_id, head, parents),
+            VerifiedBlobMeta::new(plaintext),
+        )
+        .await;
+        Storage::<Sendable>::save_loose_commit(&storage, sed_id, verified)
+            .await
+            .map_err(|e| ferr!("save_loose_commit failed: {e}"))?;
+        let ct_store = NativeCiphertextStore::new(storage, sed_id);
+        let error = ct_store
+            .get_ciphertext(&head.as_bytes().to_vec())
+            .await
+            .expect_err("plaintext blob must not decode as ciphertext");
+        assert!(error
+            .to_string()
+            .contains("failed decoding loose commit encrypted blob"));
+        Ok(())
     }
 }
