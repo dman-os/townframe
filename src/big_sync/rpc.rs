@@ -13,6 +13,13 @@ use tokio::sync::mpsc;
 
 pub const BIG_SYNC_RPC_ALPN: &[u8] = b"townframe/big-sync/0";
 
+/// ALPN for the blob-partition BigSync stack.
+///
+/// Blob partitions are content-addressed and carry no Keyhive membership
+/// policy, so they run on a separate store/worker/RPC server from the
+/// Keyhive-managed document partitions.
+pub const BIG_SYNC_BLOB_RPC_ALPN: &[u8] = b"townframe/big-sync-blobs/0";
+
 #[async_trait]
 pub trait HostBigRpcClient: Send + Sync {
     async fn peer_summary(
@@ -48,7 +55,21 @@ pub enum BigSyncIrpc {
     #[rpc(tx = channel::oneshot::Sender<Result<LeafBucketResult, LeafBucketsError>>)]
     LeafBuckets(LeafBucketsRequest),
 }
+impl IrohBigSyncRpcClient {
+    pub fn new(endpoint: iroh::Endpoint, endpoint_addr: iroh::EndpointAddr) -> Self {
+        Self::new_with_alpn(endpoint, endpoint_addr, BIG_SYNC_RPC_ALPN)
+    }
 
+    pub fn new_with_alpn(
+        endpoint: iroh::Endpoint,
+        endpoint_addr: iroh::EndpointAddr,
+        alpn: &'static [u8],
+    ) -> Self {
+        Self {
+            client: irpc_iroh::client::<BigSyncIrpc>(endpoint, endpoint_addr, alpn),
+        }
+    }
+}
 #[derive(Clone)]
 pub struct BigSyncRpcHandle {
     client: irpc::Client<BigSyncIrpc>,
@@ -181,13 +202,6 @@ pub struct IrohBigSyncRpcClient {
     client: irpc::Client<BigSyncIrpc>,
 }
 
-impl IrohBigSyncRpcClient {
-    pub fn new(endpoint: iroh::Endpoint, endpoint_addr: iroh::EndpointAddr) -> Self {
-        Self {
-            client: irpc_iroh::client::<BigSyncIrpc>(endpoint, endpoint_addr, BIG_SYNC_RPC_ALPN),
-        }
-    }
-}
 
 #[async_trait]
 impl HostBigRpcClient for IrohBigSyncRpcClient {
@@ -427,7 +441,7 @@ mod tests {
     #[tokio::test(flavor = "multi_thread")]
     async fn real_iroh_rpc_roundtrip_matches_store() -> Res<()> {
         let part_id = test_part();
-        let store = Arc::new(MemoryPartStore::new());
+        let store = Arc::new(MemoryPartStore::new(Arc::new(crate::AllowAllPolicy)));
         seed_test_store(&store, part_id).await?;
 
         let expected_peer_summary = PeerSummaryResult {

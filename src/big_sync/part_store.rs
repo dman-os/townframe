@@ -8,6 +8,7 @@ use big_sync_core::rpc::{
 use big_sync_core::{mpsc, BuckId, Byte32Id, ObjId, PartId, PeerId};
 
 pub mod memory;
+pub mod policy;
 pub mod sqlite;
 pub mod sqlite_core;
 
@@ -101,32 +102,34 @@ pub trait HostPartStore: Send + Sync {
     }
     async fn ensure_part(&self, part_id: PartId) -> Res<()>;
 
-    /// Set the agents who have access to `doc` and their [`Access`] level.
-    /// The subscribe filter uses this to determine fetchability.
+    /// Set the agents who have access to `obj` and their [`Access`] level.
+    /// The store's [`ObjAccessPolicy`] uses this to determine fetchability.
     ///
-    /// **Default: no-op** — existing impls and test doubles are unaffected.
-    async fn set_doc_members(
+    /// The store persists the members (SQL `big_sync_syncable`) and forwards
+    /// the mutation to its policy. **Default: no-op** — impls without a
+    /// policy-driven store are unaffected.
+    async fn set_obj_members(
         &self,
-        _doc: ObjId,
+        _obj: ObjId,
         _agents: HashMap<PeerId, keyhive_core::access::Access>,
     ) {
     }
 
-    /// Add a single member to `doc` with the given [`Access`] level.
+    /// Add a single member to `obj` with the given [`Access`] level.
     ///
-    /// **Default: no-op** — existing impls and test doubles are unaffected.
-    async fn add_doc_member(
+    /// **Default: no-op** — impls without a policy-driven store are unaffected.
+    async fn add_obj_member(
         &self,
-        _doc: ObjId,
+        _obj: ObjId,
         _member: PeerId,
         _access: keyhive_core::access::Access,
     ) {
     }
 
-    /// Remove a single member from `doc`.
+    /// Remove a single member from `obj`.
     ///
-    /// **Default: no-op** — existing impls and test doubles are unaffected.
-    async fn remove_doc_member(&self, _doc: ObjId, _member: PeerId) {}
+    /// **Default: no-op** — impls without a policy-driven store are unaffected.
+    async fn remove_obj_member(&self, _obj: ObjId, _member: PeerId) {}
 }
 
 pub(crate) fn obj_id_bounds_for_bucket(bucket_id: BuckId) -> (ObjId, Option<ObjId>) {
@@ -1118,7 +1121,7 @@ pub mod host_contract {
 
         store.ensure_part(part).await?;
         store
-            .set_doc_members(
+            .set_obj_members(
                 obj,
                 std::collections::HashMap::from([(reader, Access::Read)]),
             )
@@ -1176,7 +1179,7 @@ pub mod host_contract {
         // Grant the subscriber Read access so the filter passes events.
         let sub_peer = big_sync_core::PeerId::new([0u8; 32]);
         store
-            .set_doc_members(
+            .set_obj_members(
                 obj,
                 std::collections::HashMap::from([(sub_peer, Access::Read)]),
             )
@@ -1249,7 +1252,7 @@ pub mod host_contract {
         // Set explicit membership: auth_peer has Read; denied_peer gets
         // an empty membership map (explicitly denied).
         store
-            .set_doc_members(
+            .set_obj_members(
                 obj,
                 std::collections::HashMap::from([(auth_peer, Access::Read)]),
             )
@@ -1353,7 +1356,7 @@ pub mod host_contract {
         // Set membership: auth_peer has Read, relay_peer has Relay,
         // denied_peer has no entry (explicitly denied via empty map).
         store
-            .set_doc_members(
+            .set_obj_members(
                 obj,
                 std::collections::HashMap::from([
                     (auth_peer, Access::Read),
@@ -1470,7 +1473,7 @@ pub mod host_contract {
         store.ensure_part(part_a).await?;
         store.ensure_part(part_b).await?;
         store
-            .set_doc_members(
+            .set_obj_members(
                 obj,
                 HashMap::from([(peer, keyhive_core::access::Access::Read)]),
             )

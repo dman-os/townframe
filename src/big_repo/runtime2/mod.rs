@@ -15,6 +15,7 @@ pub(crate) mod types;
 mod test_support;
 
 pub use doc_worker::spawn_doc_worker;
+pub(crate) use native::KeyhiveChangeNotifier;
 pub use io::{CausalDecryptResult, Clock, DocIo, RuntimeIo, SyncDocAttempt, Timer};
 pub use lease::{
     DocLease, DocWorkerEntry, DocWorkerHandle, DocWorkerInternalLease, DocWorkerStopToken,

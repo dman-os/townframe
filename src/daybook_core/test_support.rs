@@ -196,11 +196,12 @@ pub async fn test_cx_with_options(
     let local_actor_id = daybook_types::doc::user_path::to_actor_id(&local_user_path);
     let temp_dir = tempfile::tempdir()?;
 
+    let blob_part_store = crate::repo::open_blob_part_store(temp_dir.path()).await?;
     let blobs = crate::blobs::BlobsRepo::new(
         temp_dir.path().join("blobs"),
         local_user_path.clone(),
         Arc::new(crate::blobs::PartitionStoreMembershipWriter::new(
-            Arc::clone(&part_store),
+            Arc::clone(&blob_part_store),
         )),
     )
     .await?;
@@ -315,13 +316,15 @@ pub async fn test_cx_with_options(
         app_doc_id,
         drawer_doc_id,
     )
-        .await?;
+    .await?;
+    crate::repo::ensure_blob_partitions(&blob_part_store).await?;
     let rcx = crate::repo::RepoCtx::from_parts(
         crate::repo::RepoCtxParts {
             layout,
             lock_guard,
             sql: sql_ctx.clone(),
             part_store: Arc::clone(&part_store),
+            blob_part_store: Arc::clone(&blob_part_store),
             big_repo: Arc::clone(&big_repo),
             big_repo_stop: std::sync::Mutex::new(Some(acx_stop)),
             local_peer_key,
@@ -426,6 +429,7 @@ pub async fn boot_part_store(sqlite_url: &str) -> Res<(big_sync::Ctx, big_sync::
             sql,
             sqlite_url.to_owned(),
             big_sync_core::BuckId::MAX_LEVEL,
+            Arc::new(big_sync::AllowAllPolicy),
         )
         .await?,
     );

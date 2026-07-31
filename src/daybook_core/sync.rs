@@ -76,8 +76,10 @@ pub struct IrohSyncRepo {
     keyhive_rpc_cancels: Arc<tokio::sync::Mutex<HashMap<PeerId, CancellationToken>>>,
     clone_provision_peers: Arc<tokio::sync::Mutex<std::collections::HashSet<PeerId>>>,
     big_sync_worker: big_sync::BigSyncWorkerHandle,
+    blob_sync_worker: big_sync::BigSyncWorkerHandle,
     big_repo_rpc: big_repo::rpc::BigRepoRpcHandle,
     _big_sync_rpc: big_sync::rpc::BigSyncRpcHandle,
+    _blob_sync_rpc: big_sync::rpc::BigSyncRpcHandle,
 }
 
 #[derive(Debug, Clone)]
@@ -135,6 +137,8 @@ pub struct IrohSyncRepoStopToken {
     keyhive_rpc_cancel: CancellationToken,
     big_sync_rpc_stop: big_sync::rpc::BigSyncRpcStopToken,
     big_sync_worker_stop: big_sync::StopToken,
+    blob_sync_rpc_stop: big_sync::rpc::BigSyncRpcStopToken,
+    blob_sync_worker_stop: big_sync::StopToken,
     // partition_sync_store_stop_token: am_utils_rs::sync::store::SyncStoreStopToken,
 }
 
@@ -158,6 +162,8 @@ impl IrohSyncRepoStopToken {
         .await?;
         self.big_sync_worker_stop.stop().await?;
         self.big_sync_rpc_stop.stop().await?;
+        self.blob_sync_worker_stop.stop().await?;
+        self.blob_sync_rpc_stop.stop().await?;
         self.keyhive_rpc_cancel.cancel();
         self.keyhive_rpc_tasks
             .stop(Duration::from_secs(5))
@@ -200,7 +206,7 @@ impl IrohSyncRepo {
             .map_err(|err| ferr!("error booting iroh docs protocol: {err:?}"))?;
         let blobs_sync_backend = Arc::new(crate::blobs::sync::BlobSyncBackend::new(
             Arc::clone(&blobs_repo),
-            Arc::clone(&rcx.part_store),
+            Arc::clone(&rcx.blob_part_store),
             endpoint.clone(),
         ));
 
@@ -221,18 +227,25 @@ impl IrohSyncRepo {
         );
         let blob_sync_backend: Arc<dyn big_sync::SyncBackend> =
             Arc::clone(&blobs_sync_backend) as _;
-        let mut sync_backends = std::collections::HashMap::new();
-        sync_backends.insert(BLOBS_BACKEND_ID.into(), blob_sync_backend);
-        sync_backends.insert(
+        let mut doc_sync_backends = std::collections::HashMap::new();
+        doc_sync_backends.insert(
             big_repo::BigRepo::BACKEND_ID.into(),
             Arc::clone(&repo_sync_backend) as _,
         );
         let (big_sync_worker, big_sync_worker_stop) =
-            big_sync::spawn_big_sync_worker(Arc::clone(&rcx.part_store), sync_backends)?;
+            big_sync::spawn_big_sync_worker(Arc::clone(&rcx.part_store), doc_sync_backends)?;
+
+        let mut blob_sync_backends = std::collections::HashMap::new();
+        blob_sync_backends.insert(BLOBS_BACKEND_ID.into(), blob_sync_backend);
+        let (blob_sync_worker, blob_sync_worker_stop) = big_sync::spawn_big_sync_worker(
+            Arc::clone(&rcx.blob_part_store),
+            blob_sync_backends,
+        )?;
 
         let (big_sync_rpc, big_sync_rpc_stop) =
             big_sync::rpc::spawn_big_sync_rpc(Arc::clone(&rcx.part_store)).await?;
-
+        let (blob_sync_rpc, blob_sync_rpc_stop) =
+            big_sync::rpc::spawn_big_sync_rpc(Arc::clone(&rcx.blob_part_store)).await?;
         let router = iroh::protocol::Router::builder(endpoint.clone())
             .accept(
                 SUBDUCTION_ALPN,
@@ -245,6 +258,10 @@ impl IrohSyncRepo {
             .accept(
                 big_sync::rpc::BIG_SYNC_RPC_ALPN,
                 big_sync_rpc.protocol_handler(),
+            )
+            .accept(
+                big_sync::rpc::BIG_SYNC_BLOB_RPC_ALPN,
+                blob_sync_rpc.protocol_handler(),
             )
             .accept(
                 big_repo::rpc::REPO_SYNC_ALPN,
@@ -295,8 +312,10 @@ impl IrohSyncRepo {
             clone_provision_peers: Arc::clone(&clone_provision_peers),
             keyhive_rpc_cancels: Arc::clone(&keyhive_rpc_cancels),
             big_sync_worker,
+            blob_sync_worker,
             big_repo_rpc: big_repo_rpc.clone(),
-            _big_sync_rpc: big_sync_rpc, // active_endpoint_ids: tokio::sync::RwLock::new(HashMap::new()),
+            _big_sync_rpc: big_sync_rpc,
+            _blob_sync_rpc: blob_sync_rpc,
         });
         #[cfg(test)]
         bootstrap::register_test_clone_rpc_sender(router.endpoint().id(), clone_rpc_tx.clone())
@@ -330,6 +349,8 @@ impl IrohSyncRepo {
                 keyhive_rpc_cancel,
                 big_sync_rpc_stop,
                 big_sync_worker_stop,
+                blob_sync_rpc_stop,
+                blob_sync_worker_stop,
             },
         ))
     }
@@ -448,6 +469,22 @@ impl IrohSyncRepo {
             );
         }
         parts
+    }
+
+    fn split_partitions(
+        parts: HashMap<PartId, BackendId>,
+    ) -> (HashMap<PartId, BackendId>, HashMap<PartId, BackendId>) {
+        let blob_backend = BLOBS_BACKEND_ID.into();
+        let mut doc = HashMap::new();
+        let mut blob = HashMap::new();
+        for (part, backend) in parts {
+            if backend == blob_backend {
+                blob.insert(part, backend);
+            } else {
+                doc.insert(part, backend);
+            }
+        }
+        (doc, blob)
     }
 
     async fn spawn_connect_known_devices_once(self: &Arc<Self>, trigger: &'static str) {
@@ -624,9 +661,17 @@ impl IrohSyncRepo {
                 remote_info.into_addrs().map(|info| info.into_addr()),
             );
             self.big_repo_rpc.register_peer(remote_endpoint_id, peer_id);
-            let big_sync_rpc_client =
-                big_sync::rpc::IrohBigSyncRpcClient::new(endpoint, addr.clone());
-            let big_sync_rpc_client = Arc::new(big_sync_rpc_client);
+            let doc_rpc_client = big_sync::rpc::IrohBigSyncRpcClient::new(
+                endpoint.clone(),
+                addr.clone(),
+            );
+            let blob_rpc_client = big_sync::rpc::IrohBigSyncRpcClient::new_with_alpn(
+                endpoint,
+                addr.clone(),
+                big_sync::rpc::BIG_SYNC_BLOB_RPC_ALPN,
+            );
+            let doc_rpc_client = Arc::new(doc_rpc_client);
+            let blob_rpc_client = Arc::new(blob_rpc_client);
 
             self.blobs_sync_backend
                 .register_remote_peer(conn.peer_id, addr.clone());
@@ -656,14 +701,25 @@ impl IrohSyncRepo {
                     .await?;
             }
             let partition_ids = self.peer_partition_ids(&peer_key, !clone_provision);
+            let (doc_parts, blob_parts) = Self::split_partitions(partition_ids);
             self.big_sync_worker
                 .set_peer(
                     conn.peer_id,
-                    big_sync_rpc_client,
-                    partition_ids,
+                    doc_rpc_client,
+                    doc_parts,
                     HashMap::new(),
                 )
                 .await?;
+            if !blob_parts.is_empty() {
+                self.blob_sync_worker
+                    .set_peer(
+                        conn.peer_id,
+                        blob_rpc_client,
+                        blob_parts,
+                        HashMap::new(),
+                    )
+                    .await?;
+            }
 
             let old = self
                 .active_peers
@@ -693,11 +749,16 @@ impl IrohSyncRepo {
         self.big_repo_rpc.unregister_peer(signal.peer_id);
         self.blobs_sync_backend
             .unregister_remote_peer(signal.peer_id);
-        self.big_sync_worker.remove_peer(signal.peer_id).await?;
+        self.big_sync_worker.remove_peer(signal.peer_id).await.ok();
+        self.blob_sync_worker.remove_peer(signal.peer_id).await.ok();
+        // The runtime emits connection-end signals for every tracked
+        // connection, including ones the sync layer never registered
+        // (e.g. a connection that was rejected as a duplicate).
         let Some(ActivePeerState::Connected { peer_key }) =
             self.active_peers.write().await.remove(&signal.peer_id)
         else {
-            eyre::bail!("unkown connection disconnected");
+            debug!(peer_id = %signal.peer_id, "connection end for unknown peer");
+            return Ok(());
         };
         let events = [IrohSyncEvent::ConnectionClosed {
             peer_key,
@@ -824,6 +885,7 @@ impl IrohSyncRepo {
             }];
 
             let partition_ids = self.peer_partition_ids(&peer_key, true);
+            let (doc_parts, blob_parts) = Self::split_partitions(partition_ids);
             let conn = self
                 .rcx
                 .big_repo
@@ -834,21 +896,29 @@ impl IrohSyncRepo {
                     Some(self.conn_end_signal_tx.clone()),
                 )
                 .await?;
-            let big_sync_rpc_client =
-                big_sync::rpc::IrohBigSyncRpcClient::new(endpoint, endpoint_addr.clone());
-            let big_sync_rpc_client = Arc::new(big_sync_rpc_client);
+            let doc_rpc_client = big_sync::rpc::IrohBigSyncRpcClient::new(
+                endpoint.clone(),
+                endpoint_addr.clone(),
+            );
+            let blob_rpc_client = big_sync::rpc::IrohBigSyncRpcClient::new_with_alpn(
+                endpoint,
+                endpoint_addr.clone(),
+                big_sync::rpc::BIG_SYNC_BLOB_RPC_ALPN,
+            );
+            let doc_rpc_client = Arc::new(doc_rpc_client);
+            let blob_rpc_client = Arc::new(blob_rpc_client);
 
             self.big_repo_rpc.register_peer(endpoint_id, conn.peer_id);
             self.blobs_sync_backend
                 .register_remote_peer(conn.peer_id, endpoint_addr.clone());
             self.big_sync_worker
-                .set_peer(
-                    conn.peer_id,
-                    big_sync_rpc_client,
-                    partition_ids,
-                    HashMap::new(),
-                )
+                .set_peer(conn.peer_id, doc_rpc_client, doc_parts, HashMap::new())
                 .await?;
+            if !blob_parts.is_empty() {
+                self.blob_sync_worker
+                    .set_peer(conn.peer_id, blob_rpc_client, blob_parts, HashMap::new())
+                    .await?;
+            }
             self.start_keyhive_rpc_subscription(conn.peer_id, endpoint_addr)
                 .await?;
 
@@ -917,13 +987,25 @@ impl IrohSyncRepo {
         if peer_ids.is_empty() {
             return Ok(());
         }
+        let all_parts = self.peer_partition_ids("", true);
+        let blob_backend = BLOBS_BACKEND_ID.into();
+        let (blob_parts, doc_parts): (Vec<_>, Vec<_>) = required_partitions
+            .iter()
+            .partition(|part| {
+                all_parts
+                    .get(part)
+                    .is_some_and(|backend| *backend == blob_backend)
+            });
         let timeout_outcome = tokio::time::timeout(timeout, async {
-            self.big_sync_worker
-                .wait_for_full_sync(
-                    peer_ids.iter().copied(),
-                    required_partitions.iter().copied(),
-                )
-                .await?;
+            let doc_wait = self.big_sync_worker.wait_for_full_sync(
+                peer_ids.iter().copied(),
+                doc_parts.iter().copied(),
+            );
+            let blob_wait = self.blob_sync_worker.wait_for_full_sync(
+                peer_ids.iter().copied(),
+                blob_parts.iter().copied(),
+            );
+            tokio::try_join!(doc_wait, blob_wait)?;
             eyre::Ok(())
         })
         .await;

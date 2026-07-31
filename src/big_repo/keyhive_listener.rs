@@ -3,7 +3,7 @@
 //!
 //! Constructed with **only** a sender — no keyhive/storage handle
 //! (avoids the reference cycle the playbook warns about). Pure forwarder.
-
+use crate::interlude::*;
 use crate::runtime2::types::RuntimeEvt;
 use beekem::operation::CgkaOperation;
 use future_form::{FutureForm, Sendable};
@@ -37,9 +37,12 @@ impl PrekeyListener<Sendable> for BigRepoKeyhiveListener {
         &'a self,
         new_prekey: &'a Arc<Signed<AddKeyOp>>,
     ) -> <Sendable as FutureForm>::Future<'a, ()> {
-        let _ = self.evt_tx.send(RuntimeEvt::PrekeyExpanded {
-            new_prekey: new_prekey.clone(),
-        });
+        self.evt_tx
+            .send(RuntimeEvt::PrekeyExpanded {
+                new_prekey: new_prekey.clone(),
+            })
+            .inspect_err(|_| warn!(ERROR_CHANNEL))
+            .ok();
         Sendable::ready(())
     }
 
@@ -47,9 +50,12 @@ impl PrekeyListener<Sendable> for BigRepoKeyhiveListener {
         &'a self,
         rotate_key: &'a Arc<Signed<RotateKeyOp>>,
     ) -> <Sendable as FutureForm>::Future<'a, ()> {
-        let _ = self.evt_tx.send(RuntimeEvt::PrekeyRotated {
-            rotate_key: rotate_key.clone(),
-        });
+        self.evt_tx
+            .send(RuntimeEvt::PrekeyRotated {
+                rotate_key: rotate_key.clone(),
+            })
+            .inspect_err(|_| warn!(ERROR_CHANNEL))
+            .ok();
         Sendable::ready(())
     }
 }
@@ -59,7 +65,10 @@ impl CgkaListener<Sendable> for BigRepoKeyhiveListener {
         &'a self,
         data: &'a Arc<Signed<CgkaOperation>>,
     ) -> <Sendable as FutureForm>::Future<'a, ()> {
-        let _ = self.evt_tx.send(RuntimeEvt::CgkaOp { data: data.clone() });
+        self.evt_tx
+            .send(RuntimeEvt::CgkaOp { data: data.clone() })
+            .inspect_err(|_| warn!(ERROR_CHANNEL))
+            .ok();
         Sendable::ready(())
     }
 }
@@ -74,10 +83,13 @@ impl MembershipListener<Sendable, MemorySigner, Vec<u8>> for BigRepoKeyhiveListe
         target: Identifier,
         data: &'a Arc<Signed<Delegation<Sendable, MemorySigner, Vec<u8>, BigRepoKeyhiveListener>>>,
     ) -> <Sendable as FutureForm>::Future<'a, ()> {
-        let _ = self.evt_tx.send(RuntimeEvt::DelegationReceived {
-            target,
-            data: data.clone(),
-        });
+        self.evt_tx
+            .send(RuntimeEvt::DelegationReceived {
+                target,
+                data: data.clone(),
+            })
+            .inspect_err(|_| warn!(ERROR_CHANNEL))
+            .ok();
         Sendable::ready(())
     }
 
@@ -86,10 +98,13 @@ impl MembershipListener<Sendable, MemorySigner, Vec<u8>> for BigRepoKeyhiveListe
         target: Identifier,
         data: &'a Arc<Signed<Revocation<Sendable, MemorySigner, Vec<u8>, BigRepoKeyhiveListener>>>,
     ) -> <Sendable as FutureForm>::Future<'a, ()> {
-        let _ = self.evt_tx.send(RuntimeEvt::RevocationReceived {
-            target,
-            data: data.clone(),
-        });
+        self.evt_tx
+            .send(RuntimeEvt::RevocationReceived {
+                target,
+                data: data.clone(),
+            })
+            .inspect_err(|_| warn!(ERROR_CHANNEL))
+            .ok();
         Sendable::ready(())
     }
 }

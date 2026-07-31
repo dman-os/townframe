@@ -1,4 +1,5 @@
 use super::HostPartStore;
+use super::policy::ObjAccessPolicy;
 use crate::interlude::*;
 #[cfg(test)]
 use crate::test_support::{ObservedObjSnapshot, ObservedStore, ObservedStoreSnapshot};
@@ -71,9 +72,8 @@ pub struct SqlitePartStore {
     pub(crate) core: SqliteCore,
     bus: Arc<std::sync::RwLock<SqliteSubscriptions>>,
     hidden_parts: Arc<HashSet<PartId>>,
-    /// In-memory doc-members cache, written alongside the SQL table.
-    doc_members_cache:
-        Arc<std::sync::RwLock<HashMap<ObjId, HashMap<PeerId, keyhive_core::access::Access>>>>,
+    /// Access-control policy consulted at event-forward time.
+    policy: Arc<dyn ObjAccessPolicy>,
 }
 
 use super::sqlite_core::MemberState;
@@ -90,6 +90,14 @@ impl SqlitePartStore {
     }
     fn peer_blob(id: PeerId) -> Vec<u8> {
         SqliteCore::peer_blob(id)
+    }
+    fn event_part_id(event: &SubEvent) -> Option<PartId> {
+        match event {
+            SubEvent::Changed(_) | SubEvent::ObjectChanged(_) => None,
+            SubEvent::Added(inner) => Some(inner.part_id),
+            SubEvent::Removed(inner) => Some(inner.part_id),
+            SubEvent::ReplayComplete => None,
+        }
     }
     fn buck_i64(id: BuckId) -> i64 {
         SqliteCore::buck_i64(id)
@@ -143,8 +151,13 @@ impl SqlitePartStore {
 }
 
 impl SqlitePartStore {
-    pub async fn new(sql: SqlCtx, scope_key: impl Into<Arc<str>>, bucket_depth: u8) -> Res<Self> {
-        Self::new_with_config(sql, scope_key, bucket_depth, Default::default()).await
+    pub async fn new(
+        sql: SqlCtx,
+        scope_key: impl Into<Arc<str>>,
+        bucket_depth: u8,
+        policy: Arc<dyn ObjAccessPolicy>,
+    ) -> Res<Self> {
+        Self::new_with_config(sql, scope_key, bucket_depth, Default::default(), policy).await
     }
 
     pub async fn new_with_config(
@@ -152,20 +165,23 @@ impl SqlitePartStore {
         scope_key: impl Into<Arc<str>>,
         bucket_depth: u8,
         config: super::HostPartStoreConfig,
+        policy: Arc<dyn ObjAccessPolicy>,
     ) -> Res<Self> {
         SqliteCore::init_schema(&sql.write_pool, bucket_depth).await?;
         let core = SqliteCore::new(sql, scope_key, bucket_depth).await?;
-        let doc_members = core.load_doc_members().await?;
+        // Rehydrate the policy's member map from persisted syncable rows.
+        for (obj, agents) in core.load_doc_members().await? {
+            policy.set_obj_members(obj, agents);
+        }
 
         Ok(Self {
             core,
             bus: default(),
             hidden_parts: Arc::new(config.hidden_parts),
-            doc_members_cache: Arc::new(std::sync::RwLock::new(doc_members)),
+            policy,
         })
     }
     async fn publish(&self, events: Vec<SubEvent>) {
-        let cache = self.doc_members_cache.read().expect(ERROR_MUTEX).clone();
         let mut promote = Vec::new();
         let mut drop_subs = HashSet::new();
         {
@@ -237,15 +253,9 @@ impl SqlitePartStore {
                     if !bus.live.contains(&sub_id) {
                         continue;
                     }
-                    let permitted = cache
-                        .get(&obj_id)
-                        .map(|members| {
-                            members
-                                .get(&sub.principal)
-                                .map(|access| access.is_fetcher())
-                                .unwrap_or(false)
-                        })
-                        .unwrap_or(false);
+                    let permitted = self
+                        .policy
+.is_event_permitted(Self::event_part_id(&event), obj_id, Some(sub.principal));
                     if permitted && sub.sender.try_send(event).is_err() {
                         drop_subs.insert(sub_id);
                     }
@@ -265,15 +275,9 @@ impl SqlitePartStore {
                 }
                 bus.live.insert(sub_id);
             }
-            let permitted = cache
-                .get(&obj_id)
-                .map(|members| {
-                    members
-                        .get(&sub.principal)
-                        .map(|access| access.is_fetcher())
-                        .unwrap_or(false)
-                })
-                .unwrap_or(false);
+            let permitted = self
+                .policy
+.is_event_permitted(Self::event_part_id(&event), obj_id, Some(sub.principal));
             if permitted && sub.sender.try_send(event).is_err() {
                 bus.remove(sub_id);
             }
@@ -1253,17 +1257,8 @@ impl HostPartStore for SqlitePartStore {
                             PartEvent::Removed(inner) => inner.obj_id,
                         };
                         let permitted = store
-                            .doc_members_cache
-                            .read()
-                            .expect(ERROR_MUTEX)
-                            .get(&obj_id)
-                            .map(|members| {
-                                members
-                                    .get(&subscriber)
-                                    .map(|access| access.is_fetcher())
-                                    .unwrap_or(false)
-                            })
-                            .unwrap_or(false);
+                            .policy
+                            .is_event_permitted(Some(part_id), obj_id, Some(subscriber));
                         if !permitted {
                             continue;
                         }
@@ -1296,13 +1291,8 @@ impl HostPartStore for SqlitePartStore {
                 if object_replay_pending {
                     for obj_id in &objects {
                         let permitted = store
-                            .doc_members_cache
-                            .read()
-                            .expect(ERROR_MUTEX)
-                            .get(obj_id)
-                            .and_then(|members| members.get(&subscriber))
-                            .map(|access| access.is_fetcher())
-                            .unwrap_or(false);
+                            .policy
+                            .is_event_permitted(None, *obj_id, Some(subscriber));
                         if permitted {
                             if let Some(payload) = HostPartStore::obj_payload(&store, *obj_id)
                                 .await
@@ -1366,12 +1356,12 @@ impl HostPartStore for SqlitePartStore {
         Ok(())
     }
 
-    async fn set_doc_members(
+    async fn set_obj_members(
         &self,
-        doc: ObjId,
+        obj: ObjId,
         agents: HashMap<PeerId, keyhive_core::access::Access>,
     ) {
-        let doc_blob = Self::obj_blob(doc);
+        let obj_blob = Self::obj_blob(obj);
         let mut tx = self
             .core
             .sql
@@ -1381,7 +1371,7 @@ impl HostPartStore for SqlitePartStore {
             .unwrap();
         sqlx::query("DELETE FROM big_sync_syncable WHERE scope_id = ?1 AND obj_id = ?2")
             .bind(self.core.scope_id)
-            .bind(&doc_blob)
+.bind(&obj_blob)
             .execute(&mut *tx)
             .await
             .unwrap();
@@ -1390,7 +1380,7 @@ impl HostPartStore for SqlitePartStore {
                 "INSERT INTO big_sync_syncable(scope_id, obj_id, principal_id, access_level) VALUES (?1, ?2, ?3, ?4)",
             )
             .bind(self.core.scope_id)
-            .bind(&doc_blob)
+.bind(&obj_blob)
             .bind(Self::peer_blob(*principal))
             .bind(encode_access(access))
             .execute(&mut *tx)
@@ -1398,19 +1388,16 @@ impl HostPartStore for SqlitePartStore {
             .unwrap();
         }
         tx.commit().await.unwrap();
-        self.doc_members_cache
-            .write()
-            .expect(ERROR_MUTEX)
-            .insert(doc, agents);
+        self.policy.set_obj_members(obj, agents);
     }
 
-    async fn add_doc_member(
+    async fn add_obj_member(
         &self,
-        doc: ObjId,
+        obj: ObjId,
         member: PeerId,
         access: keyhive_core::access::Access,
     ) {
-        let doc_blob = Self::obj_blob(doc);
+        let obj_blob = Self::obj_blob(obj);
         let mut tx = self
             .core
             .sql
@@ -1420,7 +1407,7 @@ impl HostPartStore for SqlitePartStore {
             .unwrap();
         sqlx::query("DELETE FROM big_sync_syncable WHERE scope_id = ?1 AND obj_id = ?2")
             .bind(self.core.scope_id)
-            .bind(&doc_blob)
+.bind(&obj_blob)
             .execute(&mut *tx)
             .await
             .unwrap();
@@ -1428,23 +1415,18 @@ impl HostPartStore for SqlitePartStore {
             "INSERT INTO big_sync_syncable(scope_id, obj_id, principal_id, access_level) VALUES (?1, ?2, ?3, ?4)",
         )
         .bind(self.core.scope_id)
-        .bind(&doc_blob)
+.bind(&obj_blob)
         .bind(Self::peer_blob(member))
         .bind(encode_access(&access))
         .execute(&mut *tx)
         .await
         .unwrap();
         tx.commit().await.unwrap();
-        self.doc_members_cache
-            .write()
-            .expect(ERROR_MUTEX)
-            .entry(doc)
-            .or_default()
-            .insert(member, access);
+        self.policy.add_obj_member(obj, member, access);
     }
 
-    async fn remove_doc_member(&self, doc: ObjId, member: PeerId) {
-        let doc_blob = Self::obj_blob(doc);
+    async fn remove_obj_member(&self, obj: ObjId, member: PeerId) {
+        let obj_blob = Self::obj_blob(obj);
         let mut tx = self
             .core
             .sql
@@ -1454,18 +1436,13 @@ impl HostPartStore for SqlitePartStore {
             .unwrap();
         sqlx::query("DELETE FROM big_sync_syncable WHERE scope_id = ?1 AND obj_id = ?2 AND principal_id = ?3")
             .bind(self.core.scope_id)
-            .bind(&doc_blob)
+.bind(&obj_blob)
             .bind(Self::peer_blob(member))
             .execute(&mut *tx)
             .await
             .unwrap();
         tx.commit().await.unwrap();
-        self.doc_members_cache
-            .write()
-            .expect(ERROR_MUTEX)
-            .entry(doc)
-            .or_default()
-            .remove(&member);
+        self.policy.remove_obj_member(obj, member);
     }
 }
 
@@ -1635,7 +1612,7 @@ mod tests {
 
     async fn test_store(scope_key: &str) -> Res<SqlitePartStore> {
         let sql = test_sql().await?;
-        SqlitePartStore::new(sql, scope_key, BuckId::MAX_LEVEL).await
+        SqlitePartStore::new(sql, scope_key, BuckId::MAX_LEVEL, Arc::new(crate::AllowAllPolicy)).await
     }
 
     fn test_part_id(seed: u8) -> PartId {
@@ -1773,9 +1750,9 @@ mod tests {
             store_a.core.sql.clone(),
             "big-sync-sqlite-test://other-repo",
             BuckId::MAX_LEVEL,
+            Arc::new(crate::AllowAllPolicy),
         )
         .await?;
-
         let part_id = test_part_id(9);
         let obj_id = test_obj_id(10);
 
@@ -1825,7 +1802,7 @@ mod tests {
         let scope_key = "big-sync-sqlite-test://membership-restart";
 
         // ---- first session ----
-        let store1 = SqlitePartStore::new(sql.clone(), scope_key, BuckId::MAX_LEVEL).await?;
+        let store1 = SqlitePartStore::new(sql.clone(), scope_key, BuckId::MAX_LEVEL, Arc::new(crate::AllowAllPolicy)).await?;
         let part = PartId(Byte32Id::new([201u8; 32]));
         let obj = ObjId(Byte32Id::new([202u8; 32]));
         let auth = PeerId::new([203u8; 32]);
@@ -1839,7 +1816,7 @@ mod tests {
 
         // Persist membership.
         store1
-            .set_doc_members(obj, std::collections::HashMap::from([(auth, Access::Read)]))
+            .set_obj_members(obj, std::collections::HashMap::from([(auth, Access::Read)]))
             .await;
 
         // Helper to drain through ReplayComplete.
@@ -1900,7 +1877,7 @@ mod tests {
         drop(store1);
 
         // ---- second session on the same database and scope ----
-        let store2 = SqlitePartStore::new(sql, scope_key, BuckId::MAX_LEVEL).await?;
+        let store2 = SqlitePartStore::new(sql, scope_key, BuckId::MAX_LEVEL, Arc::new(crate::AllowAllPolicy)).await?;
 
         let sub2 = |peer: PeerId| {
             let store = &store2;

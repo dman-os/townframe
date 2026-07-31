@@ -61,13 +61,21 @@ pub enum Runtime2Cmd {
         peer: PeerId,
         addr: Box<dyn std::any::Any + Send>,
         resp: futures::channel::oneshot::Sender<
-            eyre::Result<(PeerId, Arc<std::sync::atomic::AtomicBool>)>,
+            eyre::Result<(
+                PeerId,
+                Arc<std::sync::atomic::AtomicBool>,
+                futures::channel::oneshot::Receiver<eyre::Result<()>>,
+            )>,
         >,
     },
     AcceptConn {
         incoming: Box<dyn std::any::Any + Send>,
         resp: futures::channel::oneshot::Sender<
-            eyre::Result<(PeerId, Arc<std::sync::atomic::AtomicBool>)>,
+            eyre::Result<(
+                PeerId,
+                Arc<std::sync::atomic::AtomicBool>,
+                futures::channel::oneshot::Receiver<eyre::Result<()>>,
+            )>,
         >,
     },
     CloseConn {
@@ -84,12 +92,6 @@ pub enum Runtime2Cmd {
     SyncKeyhiveWithPeer {
         peer_id: PeerId,
         waiter_id: u64,
-        resp: futures::channel::oneshot::Sender<eyre::Result<()>>,
-    },
-    SyncKeyhiveWithPeerInternal {
-        peer_id: PeerId,
-    },
-    NoteLocalKeyhiveChanged {
         resp: futures::channel::oneshot::Sender<eyre::Result<()>>,
     },
     CancelDocSyncWaiter {
@@ -177,9 +179,6 @@ pub enum Runtime2Evt {
     /// The persisted Keyhive-derived partition cursor advanced.
     GroupPartWorkerAdvanced {
         cursor: u64,
-    },
-    KeyhiveSyncRequested {
-        peer_id: PeerId,
     },
     DocWorkerStopped {
         doc_id: DocumentId,

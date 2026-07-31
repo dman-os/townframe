@@ -11,7 +11,7 @@ use crate::runtime2::{
 use big_sync_core::PeerId;
 use future_form::{FutureForm, Local, Sendable};
 
-use std::collections::{BTreeSet, HashMap, HashSet};
+use std::collections::{HashMap, HashSet};
 
 // Re-export the ephemeral so embedders can subscribe.
 
@@ -54,7 +54,6 @@ struct Runtime2Hub<F: FutureForm, R: TaskRuntime<F>> {
         HashMap<PeerId, Vec<(u64, futures::channel::oneshot::Sender<eyre::Result<()>>)>>,
     active_keyhive_syncs: HashMap<PeerId, KeyhiveSyncRound>,
     keyhive_round_ids: u64,
-    keyhive_dirty: BTreeSet<PeerId>,
     /// A quiescence probe has admitted a cache refresh barrier.
     quiescence_cache_refresh_pending: bool,
     /// A quiescence probe is awaiting its event-log watermark.
@@ -128,10 +127,6 @@ trait HubCommandFuture<F: FutureForm> {
         resp: futures::channel::oneshot::Sender<eyre::Result<Vec<Vec<u8>>>>,
     ) -> F::Future<'static, eyre::Result<()>>;
 
-    fn note_local_keyhive_changed(
-        runtime_io: Arc<dyn crate::runtime2::RuntimeIo<F>>,
-        resp: futures::channel::oneshot::Sender<eyre::Result<()>>,
-    ) -> F::Future<'static, eyre::Result<()>>;
 }
 
 #[future_form::future_form(Sendable, Local)]
@@ -213,19 +208,6 @@ impl<F: FutureForm> HubCommandFuture<F> for F {
         })
     }
 
-    fn note_local_keyhive_changed(
-        runtime_io: Arc<dyn crate::runtime2::RuntimeIo<F>>,
-        resp: futures::channel::oneshot::Sender<eyre::Result<()>>,
-    ) -> F::Future<'static, eyre::Result<()>> {
-        F::from_future(async move {
-            let out = runtime_io
-                .note_local_keyhive_changed()
-                .await
-                .wrap_err("keyhive local-change refresh failed");
-            resp.send(out).inspect_err(|_| warn!(ERROR_CALLER)).ok();
-            Ok(())
-        })
-    }
 }
 
 impl<
@@ -320,7 +302,6 @@ where
         }
         if !probe.pending_docs.is_empty()
             || self.quiescence_group_part_watermark_pending
-            || !self.keyhive_dirty.is_empty()
             || !self.active_keyhive_syncs.is_empty()
             || !self.pending_keyhive_syncs.is_empty()
             || self.quiescence_cache_refresh_pending
@@ -490,15 +471,6 @@ where
                     self.start_keyhive_sync(peer_id)?;
                 }
             }
-            Runtime2Cmd::SyncKeyhiveWithPeerInternal { peer_id } => {
-                self.schedule_internal_keyhive_sync(peer_id);
-            }
-            Runtime2Cmd::NoteLocalKeyhiveChanged { resp } => {
-                self.spawn_background(F::note_local_keyhive_changed(
-                    Arc::clone(&self.runtime_io),
-                    resp,
-                ))?;
-            }
             Runtime2Cmd::CancelDocSyncWaiter { .. } => {
                 // Dropping the timed-out response receiver is sufficient. The
                 // shared Subduction sync continues independently of doc workers.
@@ -605,7 +577,11 @@ trait HubIoFutures<F: FutureForm, Tasks: crate::runtime2::TaskSet<F>> {
         evt_tx: async_channel::Sender<Runtime2Evt>,
         child_tasks: Tasks,
         resp: futures::channel::oneshot::Sender<
-            eyre::Result<(PeerId, std::sync::Arc<std::sync::atomic::AtomicBool>)>,
+            eyre::Result<(
+                PeerId,
+                std::sync::Arc<std::sync::atomic::AtomicBool>,
+                futures::channel::oneshot::Receiver<eyre::Result<()>>,
+            )>,
         >,
     ) -> F::Future<'static, eyre::Result<()>>;
 
@@ -615,7 +591,11 @@ trait HubIoFutures<F: FutureForm, Tasks: crate::runtime2::TaskSet<F>> {
         evt_tx: async_channel::Sender<Runtime2Evt>,
         child_tasks: Tasks,
         resp: futures::channel::oneshot::Sender<
-            eyre::Result<(PeerId, std::sync::Arc<std::sync::atomic::AtomicBool>)>,
+            eyre::Result<(
+                PeerId,
+                std::sync::Arc<std::sync::atomic::AtomicBool>,
+                futures::channel::oneshot::Receiver<eyre::Result<()>>,
+            )>,
         >,
     ) -> F::Future<'static, eyre::Result<()>>;
 
@@ -769,7 +749,11 @@ impl<F: FutureForm, Tasks: crate::runtime2::TaskSet<F>> HubIoFutures<F, Tasks> f
         evt_tx: async_channel::Sender<Runtime2Evt>,
         child_tasks: Tasks,
         resp: futures::channel::oneshot::Sender<
-            eyre::Result<(PeerId, std::sync::Arc<std::sync::atomic::AtomicBool>)>,
+            eyre::Result<(
+                PeerId,
+                std::sync::Arc<std::sync::atomic::AtomicBool>,
+                futures::channel::oneshot::Receiver<eyre::Result<()>>,
+            )>,
         >,
     ) -> F::Future<'static, eyre::Result<()>> {
         F::from_future(async move {
@@ -787,15 +771,24 @@ impl<F: FutureForm, Tasks: crate::runtime2::TaskSet<F>> HubIoFutures<F, Tasks> f
                         .ok();
                         return Ok(());
                     }
+                    let (end_tx, end_rx) = futures::channel::oneshot::channel();
                     let watcher_closed = Arc::clone(&closed);
                     let watcher_peer = handshake_peer;
                     let watcher_evt_tx = evt_tx.clone();
+                    let watcher_end_tx = end_tx;
                     let evt_tx_established = evt_tx.clone();
                     let closed_established = Arc::clone(&closed);
                     let watcher = child_tasks.spawn(F::from_future(async move {
                         let result = end_fut.await;
                         watcher_closed.store(true, std::sync::atomic::Ordering::SeqCst);
                         let error = result.as_ref().err().map(ToString::to_string);
+                        // Surface the connection end to the caller alongside
+                        // the runtime's own ConnLost event. The receiver is
+                        // the caller's opt-in end channel; it is dropped when
+                        // no end signal was requested (or the caller is
+                        // gone), making a failed send here benign — ConnLost
+                        // remains the runtime's source of truth.
+                        let _ = watcher_end_tx.send(result);
                         if watcher_evt_tx
                             .send(Runtime2Evt::ConnLost {
                                 peer_id: watcher_peer,
@@ -828,7 +821,7 @@ impl<F: FutureForm, Tasks: crate::runtime2::TaskSet<F>> HubIoFutures<F, Tasks> f
                         connect.close(handshake_peer).await?;
                         return Ok(());
                     }
-                    resp.send(Ok((handshake_peer, closed)))
+                    resp.send(Ok((handshake_peer, closed, end_rx)))
                         .inspect_err(|_| warn!(ERROR_CALLER))
                         .ok();
                 }
@@ -848,21 +841,34 @@ impl<F: FutureForm, Tasks: crate::runtime2::TaskSet<F>> HubIoFutures<F, Tasks> f
         evt_tx: async_channel::Sender<Runtime2Evt>,
         child_tasks: Tasks,
         resp: futures::channel::oneshot::Sender<
-            eyre::Result<(PeerId, std::sync::Arc<std::sync::atomic::AtomicBool>)>,
+            eyre::Result<(
+                PeerId,
+                std::sync::Arc<std::sync::atomic::AtomicBool>,
+                futures::channel::oneshot::Receiver<eyre::Result<()>>,
+            )>,
         >,
     ) -> F::Future<'static, eyre::Result<()>> {
         F::from_future(async move {
             match connect.accept(incoming).await {
                 Ok((handshake_peer, closed, end_fut)) => {
+                    let (end_tx, end_rx) = futures::channel::oneshot::channel();
                     let watcher_closed = Arc::clone(&closed);
                     let watcher_peer = handshake_peer;
                     let watcher_evt_tx = evt_tx.clone();
+                    let watcher_end_tx = end_tx;
                     let evt_tx_established = evt_tx.clone();
                     let closed_established = Arc::clone(&closed);
                     let watcher = child_tasks.spawn(F::from_future(async move {
                         let result = end_fut.await;
                         watcher_closed.store(true, std::sync::atomic::Ordering::SeqCst);
                         let error = result.as_ref().err().map(ToString::to_string);
+                        // Surface the connection end to the caller alongside
+                        // the runtime's own ConnLost event. The receiver is
+                        // the caller's opt-in end channel; it is dropped when
+                        // no end signal was requested (or the caller is
+                        // gone), making a failed send here benign — ConnLost
+                        // remains the runtime's source of truth.
+                        let _ = watcher_end_tx.send(result);
                         if watcher_evt_tx
                             .send(Runtime2Evt::ConnLost {
                                 peer_id: watcher_peer,
@@ -894,7 +900,7 @@ impl<F: FutureForm, Tasks: crate::runtime2::TaskSet<F>> HubIoFutures<F, Tasks> f
                         connect.close(handshake_peer).await?;
                         return Ok(());
                     }
-                    resp.send(Ok((handshake_peer, closed)))
+                    resp.send(Ok((handshake_peer, closed, end_rx)))
                         .inspect_err(|_| warn!(ERROR_CALLER))
                         .ok();
                 }
@@ -1007,11 +1013,6 @@ where
                     "runtime2 event: sync session observed",
                 );
             }
-            Runtime2Evt::KeyhiveSyncRequested { peer_id } => debug!(
-                local_peer_id = %self.local_peer_id,
-                %peer_id,
-                "runtime2 event: Keyhive sync requested",
-            ),
             Runtime2Evt::KeyhiveSyncDone {
                 peer_id,
                 request_id,
@@ -1138,9 +1139,6 @@ where
             }
             Runtime2Evt::GroupPartWorkerAdvanced { cursor } => {
                 self.group_part_cursor = self.group_part_cursor.max(cursor);
-            }
-            Runtime2Evt::KeyhiveSyncRequested { peer_id } => {
-                self.schedule_internal_keyhive_sync(peer_id);
             }
             Runtime2Evt::DocWorkerStopped { doc_id } => {
                 self.doc_workers.remove(&doc_id);
@@ -1329,7 +1327,6 @@ where
             ?request_id,
             watermark,
             pending_waiters = self.pending_keyhive_syncs.get(&peer_id).map_or(0, Vec::len),
-            dirty = self.keyhive_dirty.contains(&peer_id),
             "starting Keyhive sync round"
         );
         self.spawn_background(F::start_sync(
@@ -1374,7 +1371,6 @@ where
                     .ok();
             }
         }
-        self.keyhive_dirty.remove(&peer_id);
         debug!(%peer_id, ?request_id, error, "keyhive sync initiation failed");
         Ok(())
     }
@@ -1429,7 +1425,6 @@ where
                 pending_waiters = self.pending_keyhive_syncs.get(&peer_id).map_or(0, Vec::len),
                 "Keyhive sync changed local state; scheduling validation round"
             );
-            self.keyhive_dirty.remove(&peer_id);
             self.start_keyhive_sync(peer_id)?;
             self.reattempt_pending_materialization();
             return Ok(());
@@ -1465,10 +1460,9 @@ where
             resolved_waiters,
             remaining_waiters = self.pending_keyhive_syncs.get(&peer_id).map_or(0, Vec::len),
             has_remaining,
-            dirty = self.keyhive_dirty.contains(&peer_id),
             "completing Keyhive sync round"
         );
-        if has_remaining || self.keyhive_dirty.remove(&peer_id) {
+        if has_remaining {
             self.start_keyhive_sync(peer_id)?;
         }
         self.reattempt_pending_materialization();
@@ -1494,24 +1488,6 @@ where
         }
     }
 
-    /// Schedule an internal keyhive sync (triggered by keyhive-change events).
-    fn schedule_internal_keyhive_sync(&mut self, peer_id: PeerId) {
-        if !self.connected_peers.contains_key(&peer_id) {
-            debug!(%peer_id, "dropping internal keyhive sync for disconnected peer");
-            return;
-        }
-        if self.active_keyhive_syncs.contains_key(&peer_id) {
-            let newly_dirty = self.keyhive_dirty.insert(peer_id);
-            debug!(
-                %peer_id,
-                newly_dirty,
-                active_round_id = self.active_keyhive_syncs.get(&peer_id).map(|round| round.round_id),
-                "marked active Keyhive sync round dirty"
-            );
-        } else if let Err(err) = self.start_keyhive_sync(peer_id) {
-            warn!(%peer_id, error = %err, "failed to start internal keyhive sync");
-        }
-    }
 
     /// Cancel a pending keyhive sync waiter by id.
     fn cancel_pending_keyhive_sync(&mut self, peer_id: &PeerId, waiter_id: u64) -> bool {
@@ -1532,7 +1508,6 @@ where
     /// Cancel all pending keyhive syncs for a peer.
     fn cancel_pending_keyhive_syncs(&mut self, peer_id: &PeerId, reason: &'static str) {
         self.active_keyhive_syncs.remove(peer_id);
-        self.keyhive_dirty.remove(peer_id);
         if let Some(waiters) = self.pending_keyhive_syncs.remove(peer_id) {
             for (_id, sender) in waiters {
                 sender
@@ -1854,7 +1829,6 @@ where
         pending_keyhive_syncs: HashMap::new(),
         active_keyhive_syncs: HashMap::new(),
         keyhive_round_ids: 0,
-        keyhive_dirty: BTreeSet::new(),
         quiescence_cache_refresh_pending: false,
         quiescence_group_part_watermark_pending: false,
         quiescence_waiters: Vec::new(),

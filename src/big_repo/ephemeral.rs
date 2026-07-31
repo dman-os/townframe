@@ -156,7 +156,10 @@ impl BigEphemeralSwitchboard {
                                 ack_tx,
                             }) => {
                                 state.register_listener(&backend, subscription_id, filter, event_tx).await?;
-                                ack_tx.send(()).ok();
+                                ack_tx
+                                    .send(())
+                                    .inspect_err(|_| warn!(ERROR_CALLER))
+                                    .ok();
                             }
                             Some(BigEphemeralSwitchboardCmd::Unregister { subscription_id }) => {
                                 state.unregister_listener(&backend, subscription_id).await?;

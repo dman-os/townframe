@@ -2,7 +2,7 @@ use crate::interlude::*;
 use big_sync::HostPartStore;
 use big_sync::sqlite_core::{
     MemberState, PendingSubscription, SUB_REPLAY_DONE, SUB_REPLAYING_CLEAN, SqliteCore,
-    decode_access, encode_access,
+    encode_access,
 };
 use big_sync_core::part_store::{CursorIndex, ObjPayload};
 use big_sync_core::rpc::{
@@ -74,9 +74,8 @@ pub struct SqliteBigRepoStore {
     core: SqliteCore,
     bus: Arc<std::sync::RwLock<BigRepoSubscriptions>>,
     hidden_parts: Arc<HashSet<PartId>>,
-    /// In-memory doc-members cache, written alongside the SQL table.
-    doc_members_cache:
-        Arc<std::sync::RwLock<HashMap<ObjId, HashMap<PeerId, keyhive_core::access::Access>>>>,
+    /// Access-control policy consulted at event-forward time.
+    policy: Arc<dyn big_sync::ObjAccessPolicy>,
 }
 
 impl std::ops::Deref for SqliteBigRepoStore {
@@ -111,8 +110,13 @@ impl std::fmt::Debug for SqliteBigRepoStore {
 }
 
 impl SqliteBigRepoStore {
-    pub async fn new(sql: SqlCtx, scope_key: impl Into<Arc<str>>, bucket_depth: u8) -> Res<Self> {
-        Self::new_with_config(sql, scope_key, bucket_depth, Default::default()).await
+    pub async fn new(
+        sql: SqlCtx,
+        scope_key: impl Into<Arc<str>>,
+        bucket_depth: u8,
+        policy: Arc<dyn big_sync::ObjAccessPolicy>,
+    ) -> Res<Self> {
+        Self::new_with_config(sql, scope_key, bucket_depth, Default::default(), policy).await
     }
 
     pub async fn new_with_config(
@@ -120,40 +124,20 @@ impl SqliteBigRepoStore {
         scope_key: impl Into<Arc<str>>,
         bucket_depth: u8,
         config: big_sync::HostPartStoreConfig,
+        policy: Arc<dyn big_sync::ObjAccessPolicy>,
     ) -> Res<Self> {
         SqliteCore::init_schema(&sql.write_pool, bucket_depth).await?;
         let core = SqliteCore::new(sql, scope_key, bucket_depth).await?;
-        let scope_id = core.scope_id;
-        // Rehydrate doc_members_cache from persisted syncable rows.
-        let mut doc_members: HashMap<ObjId, HashMap<PeerId, keyhive_core::access::Access>> =
-            HashMap::new();
-        let rows = sqlx::query(
-            "SELECT obj_id, principal_id, access_level
-             FROM big_sync_syncable
-             WHERE scope_id = ?1",
-        )
-        .bind(scope_id)
-        .fetch_all(&core.sql.read_pool)
-        .await?;
-        for row in rows {
-            let obj_id = Self::obj_from_blob(row.try_get("obj_id")?);
-            let principal = Self::peer_from_blob(row.try_get("principal_id")?);
-            let access: u8 = row
-                .try_get::<i64, _>("access_level")?
-                .try_into()
-                .expect(ERROR_IMPOSSIBLE);
-            let access = decode_access(access);
-            doc_members
-                .entry(obj_id)
-                .or_default()
-                .insert(principal, access);
+        // Rehydrate the policy's member map from persisted syncable rows.
+        for (obj, agents) in core.load_doc_members().await? {
+            policy.set_obj_members(obj, agents);
         }
 
         let store = Self {
             core,
             bus: default(),
             hidden_parts: Arc::new(config.hidden_parts),
-            doc_members_cache: Arc::new(std::sync::RwLock::new(doc_members)),
+            policy,
         };
         store.init_subduction_schema().await?;
         Ok(store)
@@ -198,6 +182,14 @@ impl SqliteBigRepoStore {
     fn peer_from_blob(blob: Vec<u8>) -> PeerId {
         SqliteCore::peer_from_blob(blob)
     }
+    fn event_part_id(event: &SubEvent) -> Option<PartId> {
+        match event {
+            SubEvent::Changed(_) | SubEvent::ObjectChanged(_) => None,
+            SubEvent::Added(inner) => Some(inner.part_id),
+            SubEvent::Removed(inner) => Some(inner.part_id),
+            SubEvent::ReplayComplete => None,
+        }
+    }
 
     async fn load_member_state(
         &self,
@@ -227,7 +219,6 @@ impl SqliteBigRepoStore {
     }
 
     async fn publish(&self, events: Vec<SubEvent>) {
-        let cache = self.doc_members_cache.read().expect(ERROR_MUTEX).clone();
         let mut promote = Vec::new();
         let mut drop_subs = HashSet::new();
         {
@@ -317,7 +308,9 @@ impl SqliteBigRepoStore {
                     if !bus.live.contains(&sub_id) {
                         continue;
                     }
-                    let permitted = SqliteCore::is_event_permitted(&cache, obj_id, sub.principal);
+                    let permitted = self
+                        .policy
+                        .is_event_permitted(Self::event_part_id(&event), obj_id, sub.principal);
                     if permitted && sub.sender.try_send(event.clone()).is_err() {
                         drop_subs.insert(sub_id);
                     }
@@ -337,7 +330,9 @@ impl SqliteBigRepoStore {
                 }
                 bus.live.insert(sub_id);
             }
-            let permitted = SqliteCore::is_event_permitted(&cache, obj_id, sub.principal);
+            let permitted = self
+                .policy
+                .is_event_permitted(Self::event_part_id(&event), obj_id, sub.principal);
             if permitted && sub.sender.try_send(event).is_err() {
                 bus.remove(sub_id);
             }
@@ -1149,7 +1144,7 @@ impl HostPartStore for SqliteBigRepoStore {
         Ok(())
     }
 
-    async fn set_doc_members(
+    async fn set_obj_members(
         &self,
         doc: ObjId,
         agents: HashMap<PeerId, keyhive_core::access::Access>,
@@ -1180,13 +1175,10 @@ impl HostPartStore for SqliteBigRepoStore {
             .unwrap();
         }
         tx.commit().await.unwrap();
-        self.doc_members_cache
-            .write()
-            .expect(ERROR_MUTEX)
-            .insert(doc, agents);
+        self.policy.set_obj_members(doc, agents);
     }
 
-    async fn add_doc_member(
+    async fn add_obj_member(
         &self,
         doc: ObjId,
         member: PeerId,
@@ -1216,15 +1208,10 @@ impl HostPartStore for SqliteBigRepoStore {
         .await
         .unwrap();
         tx.commit().await.unwrap();
-        self.doc_members_cache
-            .write()
-            .expect(ERROR_MUTEX)
-            .entry(doc)
-            .or_default()
-            .insert(member, access);
+        self.policy.add_obj_member(doc, member, access);
     }
 
-    async fn remove_doc_member(&self, doc: ObjId, member: PeerId) {
+    async fn remove_obj_member(&self, doc: ObjId, member: PeerId) {
         let doc_blob = Self::obj_blob(doc);
         let mut tx = self
             .sql
@@ -1240,12 +1227,7 @@ impl HostPartStore for SqliteBigRepoStore {
             .await
             .unwrap();
         tx.commit().await.unwrap();
-        self.doc_members_cache
-            .write()
-            .expect(ERROR_MUTEX)
-            .entry(doc)
-            .or_default()
-            .remove(&member);
+        self.policy.remove_obj_member(doc, member);
     }
 }
 
@@ -1350,11 +1332,6 @@ impl SqliteBigRepoStore {
                     .await
                     .expect(ERROR_IMPOSSIBLE)
                     .expect(ERROR_IMPOSSIBLE);
-                let cache = store
-                    .doc_members_cache
-                    .read()
-                    .expect(ERROR_IMPOSSIBLE)
-                    .clone();
                 let mut output: Vec<SubEvent> = Vec::new();
                 let mut raw_event_count = 0;
                 let mut max_cursor = cursor;
@@ -1375,7 +1352,9 @@ impl SqliteBigRepoStore {
                             PartEvent::Added(inner) => inner.obj_id,
                             PartEvent::Removed(inner) => inner.obj_id,
                         };
-                        let permitted = SqliteCore::is_event_permitted(&cache, obj_id, subscriber);
+                        let permitted = store
+                            .policy
+                            .is_event_permitted(Some(part_id), obj_id, subscriber);
                         if !permitted {
                             continue;
                         }
@@ -1407,7 +1386,9 @@ impl SqliteBigRepoStore {
                 }
                 if object_replay_pending {
                     for obj_id in &objects {
-                        let permitted = SqliteCore::is_event_permitted(&cache, *obj_id, subscriber);
+                        let permitted = store
+                            .policy
+                            .is_event_permitted(None, *obj_id, subscriber);
                         if permitted {
                             if let Some(payload) =
                                 store.obj_payload(*obj_id).await.expect(ERROR_IMPOSSIBLE)
@@ -1926,10 +1907,9 @@ impl SqliteBigRepoStore {
         }
         tx.commit().await?;
 
-        self.doc_members_cache
-            .write()
-            .expect(ERROR_MUTEX)
-            .extend(reconciled_docs);
+        for (obj, agents) in reconciled_docs {
+            self.policy.set_obj_members(obj, agents);
+        }
         if !events.is_empty() {
             self.publish(events).await;
         }
@@ -2636,7 +2616,7 @@ mod tests {
     async fn sqlite_big_repo_host_part_store_contract() -> Res<()> {
         let sql = SqlCtx::memory().await?;
         let store =
-            SqliteBigRepoStore::new(sql, "big-repo-sqlite-host-contract", BuckId::MAX_LEVEL)
+            SqliteBigRepoStore::new(sql, "big-repo-sqlite-host-contract", BuckId::MAX_LEVEL, Arc::new(crate::access_policy::KeyhiveMembershipPolicy::new()))
                 .await?;
         host_part_store_contract::assert_host_part_store_contract(&SqliteBigRepoHarness { store })
             .await
@@ -2655,6 +2635,7 @@ mod tests {
             big_sync::HostPartStoreConfig {
                 hidden_parts: HashSet::from([part]),
             },
+            Arc::new(crate::access_policy::KeyhiveMembershipPolicy::new()),
         )
         .await?;
         HostPartStore::set_obj_payload(&store, obj, serde_json::json!({"value": 1})).await?;
@@ -2694,6 +2675,7 @@ mod tests {
             SqlCtx::memory().await?,
             "big-repo-sqlite-latent-membership",
             BuckId::MAX_LEVEL,
+            Arc::new(crate::access_policy::KeyhiveMembershipPolicy::new()),
         )
         .await?;
         let obj = ObjId(Byte32Id::new([223; 32]));
@@ -2783,7 +2765,7 @@ mod tests {
     async fn sqlite_big_repo_subduction_roundtrip() -> Res<()> {
         let sql = SqlCtx::memory().await?;
         let store =
-            SqliteBigRepoStore::new(sql, "big-repo-sqlite-subduction", BuckId::MAX_LEVEL).await?;
+            SqliteBigRepoStore::new(sql, "big-repo-sqlite-subduction", BuckId::MAX_LEVEL, Arc::new(crate::access_policy::KeyhiveMembershipPolicy::new())).await?;
         let signer = MemorySigner::from_bytes(&[9; 32]);
         let tree = SedimentreeId::new([4; 32]);
         let verified = make_commit(&signer, tree, 1).await;
@@ -2800,7 +2782,7 @@ mod tests {
     async fn sqlite_big_repo_commit_updates_payload_atomically() -> Res<()> {
         let sql = SqlCtx::memory().await?;
         let store =
-            SqliteBigRepoStore::new(sql, "big-repo-sqlite-atomic", BuckId::MAX_LEVEL).await?;
+            SqliteBigRepoStore::new(sql, "big-repo-sqlite-atomic", BuckId::MAX_LEVEL, Arc::new(crate::access_policy::KeyhiveMembershipPolicy::new())).await?;
         let signer = MemorySigner::from_bytes(&[10; 32]);
         let tree = SedimentreeId::new([11; 32]);
         let obj_id = SqliteBigRepoStore::obj_id(tree);
@@ -2829,7 +2811,7 @@ mod tests {
     async fn sqlite_big_repo_commit_rolls_back_when_payload_update_fails() -> Res<()> {
         let sql = SqlCtx::memory().await?;
         let store =
-            SqliteBigRepoStore::new(sql, "big-repo-sqlite-atomic-failure", BuckId::MAX_LEVEL)
+            SqliteBigRepoStore::new(sql, "big-repo-sqlite-atomic-failure", BuckId::MAX_LEVEL, Arc::new(crate::access_policy::KeyhiveMembershipPolicy::new()))
                 .await?;
         let signer = MemorySigner::from_bytes(&[13; 32]);
         let tree = SedimentreeId::new([14; 32]);
@@ -2869,7 +2851,7 @@ mod tests {
     #[tokio::test]
     async fn sqlite_big_repo_keyhive_events_are_ordered_and_deduplicated() -> Res<()> {
         let sql = SqlCtx::memory().await?;
-        let store = SqliteBigRepoStore::new(sql, "keyhive-event-order", BuckId::MAX_LEVEL).await?;
+        let store = SqliteBigRepoStore::new(sql, "keyhive-event-order", BuckId::MAX_LEVEL, Arc::new(crate::access_policy::KeyhiveMembershipPolicy::new())).await?;
         let first = subduction_keyhive::storage::StorageHash::new([1; 32]);
         let second = subduction_keyhive::storage::StorageHash::new([2; 32]);
         store.save_keyhive_event(first, b"first".to_vec()).await?;
@@ -2890,7 +2872,7 @@ mod tests {
     async fn sqlite_big_repo_keyhive_event_log_is_bounded() -> Res<()> {
         let sql = SqlCtx::memory().await?;
         let store =
-            SqliteBigRepoStore::new(sql, "keyhive-event-retention", BuckId::MAX_LEVEL).await?;
+            SqliteBigRepoStore::new(sql, "keyhive-event-retention", BuckId::MAX_LEVEL, Arc::new(crate::access_policy::KeyhiveMembershipPolicy::new())).await?;
         sqlx::query(
             "WITH RECURSIVE numbers(n) AS (
                  SELECT 1
@@ -2922,7 +2904,7 @@ mod tests {
     #[tokio::test]
     async fn sqlite_big_repo_keyhive_event_tail_deletion_keeps_history() -> Res<()> {
         let sql = SqlCtx::memory().await?;
-        let store = SqliteBigRepoStore::new(sql, "keyhive-event-tail", BuckId::MAX_LEVEL).await?;
+        let store = SqliteBigRepoStore::new(sql, "keyhive-event-tail", BuckId::MAX_LEVEL, Arc::new(crate::access_policy::KeyhiveMembershipPolicy::new())).await?;
         let hash = subduction_keyhive::storage::StorageHash::new([3; 32]);
         store.save_keyhive_event(hash, b"event".to_vec()).await?;
         store.delete_keyhive_event(hash).await?;
@@ -2942,9 +2924,9 @@ mod tests {
     async fn sqlite_big_repo_keyhive_events_are_scope_isolated() -> Res<()> {
         let sql = SqlCtx::memory().await?;
         let first_store =
-            SqliteBigRepoStore::new(sql.clone(), "keyhive-scope-a", BuckId::MAX_LEVEL).await?;
+            SqliteBigRepoStore::new(sql.clone(), "keyhive-scope-a", BuckId::MAX_LEVEL, Arc::new(crate::access_policy::KeyhiveMembershipPolicy::new())).await?;
         let second_store =
-            SqliteBigRepoStore::new(sql, "keyhive-scope-b", BuckId::MAX_LEVEL).await?;
+            SqliteBigRepoStore::new(sql, "keyhive-scope-b", BuckId::MAX_LEVEL, Arc::new(crate::access_policy::KeyhiveMembershipPolicy::new())).await?;
         let hash = subduction_keyhive::storage::StorageHash::new([4; 32]);
         first_store.save_keyhive_event(hash, b"a".to_vec()).await?;
         second_store.save_keyhive_event(hash, b"b".to_vec()).await?;
@@ -2965,7 +2947,7 @@ mod tests {
         let db_path = dir.path().join("events.sqlite");
         let url = format!("sqlite://{}", db_path.display());
         let first = SqlCtx::url(&url).await?;
-        let store = SqliteBigRepoStore::new(first, "keyhive-restart", BuckId::MAX_LEVEL).await?;
+        let store = SqliteBigRepoStore::new(first, "keyhive-restart", BuckId::MAX_LEVEL, Arc::new(crate::access_policy::KeyhiveMembershipPolicy::new())).await?;
         let hash = subduction_keyhive::storage::StorageHash::new([5; 32]);
         store
             .save_keyhive_event(hash, b"persistent".to_vec())
@@ -2973,7 +2955,7 @@ mod tests {
         drop(store);
 
         let reopened = SqlCtx::url(&url).await?;
-        let store = SqliteBigRepoStore::new(reopened, "keyhive-restart", BuckId::MAX_LEVEL).await?;
+        let store = SqliteBigRepoStore::new(reopened, "keyhive-restart", BuckId::MAX_LEVEL, Arc::new(crate::access_policy::KeyhiveMembershipPolicy::new())).await?;
         assert_eq!(
             store.load_keyhive_events().await?,
             vec![(hash, b"persistent".to_vec())]
@@ -2983,7 +2965,7 @@ mod tests {
     #[tokio::test]
     async fn sqlite_big_repo_keyhive_duplicate_saves_are_safe_concurrently() -> Res<()> {
         let sql = SqlCtx::memory().await?;
-        let store = SqliteBigRepoStore::new(sql, "keyhive-concurrent", BuckId::MAX_LEVEL).await?;
+        let store = SqliteBigRepoStore::new(sql, "keyhive-concurrent", BuckId::MAX_LEVEL, Arc::new(crate::access_policy::KeyhiveMembershipPolicy::new())).await?;
         let hash = subduction_keyhive::storage::StorageHash::new([6; 32]);
         let left = store.clone();
         let right = store.clone();
@@ -3001,7 +2983,7 @@ mod tests {
     #[tokio::test]
     async fn sqlite_big_repo_keyhive_archive_changes_do_not_prune_event_log() -> Res<()> {
         let sql = SqlCtx::memory().await?;
-        let store = SqliteBigRepoStore::new(sql, "keyhive-archive", BuckId::MAX_LEVEL).await?;
+        let store = SqliteBigRepoStore::new(sql, "keyhive-archive", BuckId::MAX_LEVEL, Arc::new(crate::access_policy::KeyhiveMembershipPolicy::new())).await?;
         let archive_dir = tempfile::tempdir()?;
         let storage = crate::keyhive_storage::BigRepoKeyhiveStorage::fs(
             store.clone(),
@@ -3042,7 +3024,7 @@ mod tests {
     #[tokio::test]
     async fn reconcile_group_part_batch_adds_managed_parts() -> Res<()> {
         let sql = SqlCtx::memory().await?;
-        let store = SqliteBigRepoStore::new(sql, "reconcile-add", BuckId::MAX_LEVEL).await?;
+        let store = SqliteBigRepoStore::new(sql, "reconcile-add", BuckId::MAX_LEVEL, Arc::new(crate::access_policy::KeyhiveMembershipPolicy::new())).await?;
         let doc = ObjId(Byte32Id::new([1; 32]));
         let group_part = PartId(Byte32Id::new([2; 32]));
 
@@ -3077,7 +3059,7 @@ mod tests {
     #[tokio::test]
     async fn reconcile_group_part_batch_removes_stale_managed_membership() -> Res<()> {
         let sql = SqlCtx::memory().await?;
-        let store = SqliteBigRepoStore::new(sql, "reconcile-stale", BuckId::MAX_LEVEL).await?;
+        let store = SqliteBigRepoStore::new(sql, "reconcile-stale", BuckId::MAX_LEVEL, Arc::new(crate::access_policy::KeyhiveMembershipPolicy::new())).await?;
         let doc = ObjId(Byte32Id::new([10; 32]));
         let part_a = PartId(Byte32Id::new([11; 32]));
         let part_b = PartId(Byte32Id::new([12; 32]));
@@ -3123,7 +3105,7 @@ mod tests {
     #[tokio::test]
     async fn reconcile_group_part_batch_cursor_advances() -> Res<()> {
         let sql = SqlCtx::memory().await?;
-        let store = SqliteBigRepoStore::new(sql, "reconcile-cursor", BuckId::MAX_LEVEL).await?;
+        let store = SqliteBigRepoStore::new(sql, "reconcile-cursor", BuckId::MAX_LEVEL, Arc::new(crate::access_policy::KeyhiveMembershipPolicy::new())).await?;
         let doc = ObjId(Byte32Id::new([20; 32]));
         let part = PartId(Byte32Id::new([21; 32]));
 
@@ -3150,7 +3132,7 @@ mod tests {
     #[tokio::test]
     async fn reconcile_group_part_batch_rolls_back_on_cursor_update_failure() -> Res<()> {
         let sql = SqlCtx::memory().await?;
-        let store = SqliteBigRepoStore::new(sql, "reconcile-rollback", BuckId::MAX_LEVEL).await?;
+        let store = SqliteBigRepoStore::new(sql, "reconcile-rollback", BuckId::MAX_LEVEL, Arc::new(crate::access_policy::KeyhiveMembershipPolicy::new())).await?;
         let doc = ObjId(Byte32Id::new([30; 32]));
         let part = PartId(Byte32Id::new([31; 32]));
         let peer = PeerId(Byte32Id::new([32; 32]));
@@ -3196,7 +3178,7 @@ mod tests {
     async fn reconcile_group_part_batch_removes_global_when_desired_global_drops() -> Res<()> {
         let sql = SqlCtx::memory().await?;
         let store =
-            SqliteBigRepoStore::new(sql, "reconcile-global-drop", BuckId::MAX_LEVEL).await?;
+            SqliteBigRepoStore::new(sql, "reconcile-global-drop", BuckId::MAX_LEVEL, Arc::new(crate::access_policy::KeyhiveMembershipPolicy::new())).await?;
         let doc = ObjId(Byte32Id::new([40; 32]));
         let group_part = PartId(Byte32Id::new([41; 32]));
 
@@ -3238,7 +3220,7 @@ mod tests {
     #[tokio::test]
     async fn reconcile_group_part_batch_noop_still_advances_cursor() -> Res<()> {
         let sql = SqlCtx::memory().await?;
-        let store = SqliteBigRepoStore::new(sql, "reconcile-noop", BuckId::MAX_LEVEL).await?;
+        let store = SqliteBigRepoStore::new(sql, "reconcile-noop", BuckId::MAX_LEVEL, Arc::new(crate::access_policy::KeyhiveMembershipPolicy::new())).await?;
         let doc = ObjId(Byte32Id::new([50; 32]));
         let part = PartId(Byte32Id::new([51; 32]));
 
@@ -3272,7 +3254,7 @@ mod tests {
     #[tokio::test]
     async fn reconcile_group_part_batch_empty_mutations_advances_cursor() -> Res<()> {
         let sql = SqlCtx::memory().await?;
-        let store = SqliteBigRepoStore::new(sql, "reconcile-empty", BuckId::MAX_LEVEL).await?;
+        let store = SqliteBigRepoStore::new(sql, "reconcile-empty", BuckId::MAX_LEVEL, Arc::new(crate::access_policy::KeyhiveMembershipPolicy::new())).await?;
         let doc = ObjId(Byte32Id::new([60; 32]));
         HostPartStore::set_obj_payload(&store, doc, serde_json::json!("live")).await?;
 
@@ -3299,7 +3281,7 @@ mod tests {
     #[tokio::test]
     async fn reconcile_group_part_batch_idempotent_duplicate_delivery() -> Res<()> {
         let sql = SqlCtx::memory().await?;
-        let store = SqliteBigRepoStore::new(sql, "reconcile-idempotent", BuckId::MAX_LEVEL).await?;
+        let store = SqliteBigRepoStore::new(sql, "reconcile-idempotent", BuckId::MAX_LEVEL, Arc::new(crate::access_policy::KeyhiveMembershipPolicy::new())).await?;
         let doc = ObjId(Byte32Id::new([70; 32]));
         let part = PartId(Byte32Id::new([71; 32]));
         let peer = PeerId(Byte32Id::new([72; 32]));
@@ -3377,7 +3359,7 @@ mod tests {
         let url = format!("sqlite://{}", db_path.display());
 
         let first = SqlCtx::url(&url).await?;
-        let store = SqliteBigRepoStore::new(first, "reconcile-restart", BuckId::MAX_LEVEL).await?;
+        let store = SqliteBigRepoStore::new(first, "reconcile-restart", BuckId::MAX_LEVEL, Arc::new(crate::access_policy::KeyhiveMembershipPolicy::new())).await?;
         let doc = ObjId(Byte32Id::new([80; 32]));
         let part = PartId(Byte32Id::new([81; 32]));
 
@@ -3402,7 +3384,7 @@ mod tests {
         // Reopen the same database.
         let reopened = SqlCtx::url(&url).await?;
         let store =
-            SqliteBigRepoStore::new(reopened, "reconcile-restart", BuckId::MAX_LEVEL).await?;
+            SqliteBigRepoStore::new(reopened, "reconcile-restart", BuckId::MAX_LEVEL, Arc::new(crate::access_policy::KeyhiveMembershipPolicy::new())).await?;
 
         // Cursor must survive restart.
         assert_eq!(
@@ -3422,7 +3404,7 @@ mod tests {
     async fn reconcile_group_part_batch_rolls_back_on_syncable_write_failure() -> Res<()> {
         let sql = SqlCtx::memory().await?;
         let store =
-            SqliteBigRepoStore::new(sql, "reconcile-syncable-fail", BuckId::MAX_LEVEL).await?;
+            SqliteBigRepoStore::new(sql, "reconcile-syncable-fail", BuckId::MAX_LEVEL, Arc::new(crate::access_policy::KeyhiveMembershipPolicy::new())).await?;
         let doc = ObjId(Byte32Id::new([90; 32]));
         let part = PartId(Byte32Id::new([91; 32]));
         let peer = PeerId(Byte32Id::new([92; 32]));
@@ -3432,7 +3414,7 @@ mod tests {
         // Put doc in part so a later removal has stale parts to process.
         HostPartStore::add_obj_to_parts(&store, doc, vec![part]).await?;
         store
-            .set_doc_members(
+            .set_obj_members(
                 doc,
                 HashMap::from([(peer, keyhive_core::access::Access::Read)]),
             )
@@ -3480,7 +3462,7 @@ mod tests {
     async fn reconcile_group_part_batch_rolls_back_on_member_insert_failure() -> Res<()> {
         let sql = SqlCtx::memory().await?;
         let store =
-            SqliteBigRepoStore::new(sql, "reconcile-member-insert-fail", BuckId::MAX_LEVEL).await?;
+            SqliteBigRepoStore::new(sql, "reconcile-member-insert-fail", BuckId::MAX_LEVEL, Arc::new(crate::access_policy::KeyhiveMembershipPolicy::new())).await?;
         let doc = ObjId(Byte32Id::new([100; 32]));
         let part = PartId(Byte32Id::new([101; 32]));
         let peer = PeerId(Byte32Id::new([102; 32]));
@@ -3542,7 +3524,7 @@ mod tests {
     async fn reconcile_group_part_batch_rolls_back_on_bucket_write_failure() -> Res<()> {
         let sql = SqlCtx::memory().await?;
         let store =
-            SqliteBigRepoStore::new(sql, "reconcile-bucket-fail", BuckId::MAX_LEVEL).await?;
+            SqliteBigRepoStore::new(sql, "reconcile-bucket-fail", BuckId::MAX_LEVEL, Arc::new(crate::access_policy::KeyhiveMembershipPolicy::new())).await?;
         let doc = ObjId(Byte32Id::new([110; 32]));
         let part = PartId(Byte32Id::new([111; 32]));
         let peer = PeerId(Byte32Id::new([112; 32]));
@@ -3576,7 +3558,7 @@ mod tests {
     #[tokio::test]
     async fn reconcile_group_part_batch_rolls_back_on_part_cursor_write_failure() -> Res<()> {
         let sql = SqlCtx::memory().await?;
-        let store = SqliteBigRepoStore::new(sql, "reconcile-part-fail", BuckId::MAX_LEVEL).await?;
+        let store = SqliteBigRepoStore::new(sql, "reconcile-part-fail", BuckId::MAX_LEVEL, Arc::new(crate::access_policy::KeyhiveMembershipPolicy::new())).await?;
         let doc = ObjId(Byte32Id::new([120; 32]));
         let part = PartId(Byte32Id::new([121; 32]));
         let peer = PeerId(Byte32Id::new([122; 32]));

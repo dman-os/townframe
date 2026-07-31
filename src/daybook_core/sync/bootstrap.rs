@@ -556,11 +556,12 @@ pub async fn clone_repo_init_from_url(
         })
         .await?;
         let part_store = big_repo.shared_part_store();
+        let blob_part_store = crate::repo::open_blob_part_store(&staging).await?;
         let blobs_repo = crate::blobs::BlobsRepo::new(
             staging.join("blobs"),
             "clone-bootstrap".into(),
             Arc::new(crate::blobs::PartitionStoreMembershipWriter::new(
-                Arc::clone(&part_store),
+                Arc::clone(&blob_part_store),
             )),
         )
         .await?;
@@ -594,6 +595,7 @@ pub async fn clone_repo_init_from_url(
                 lock_guard,
                 sql: sql.clone(),
                 part_store: Arc::clone(&part_store),
+                blob_part_store: Arc::clone(&blob_part_store),
                 big_repo: Arc::clone(&big_repo),
                 big_repo_stop: std::sync::Mutex::new(Some(big_repo_stop)),
                 local_peer_key,

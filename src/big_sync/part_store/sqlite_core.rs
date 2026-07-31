@@ -671,31 +671,6 @@ impl SqliteCore {
         }
         Ok(doc_members)
     }
-
-    // -----------------------------------------------------------------------
-    // Simple authorization check: fail-closed for remote (missing => denied),
-    // bypassed entirely for trusted local subscribers (principal=None).
-    // -----------------------------------------------------------------------
-
-    /// Returns `true` if the event for `obj_id` may be forwarded.
-    /// - `principal == None` (local trusted subscriber): always permitted.
-    /// - `principal == Some(peer)`: check `doc_members[obj_id][peer].is_fetcher()`.
-    ///   Missing membership → denied (fail-closed).
-    #[inline]
-    pub fn is_event_permitted(
-        doc_members: &HashMap<ObjId, HashMap<PeerId, keyhive_core::access::Access>>,
-        obj_id: ObjId,
-        principal: Option<PeerId>,
-    ) -> bool {
-        match principal {
-            None => true,
-            Some(peer) => doc_members
-                .get(&obj_id)
-                .and_then(|members| members.get(&peer))
-                .map(|access| access.is_fetcher())
-                .unwrap_or(false), // fail-closed: missing = denied
-        }
-    }
 }
 
 // Re-export for convenience

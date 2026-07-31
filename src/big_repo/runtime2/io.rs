@@ -212,8 +212,6 @@ pub trait RuntimeIo<F: FutureForm>: Send + Sync {
         sed_id: sedimentree_core::id::SedimentreeId,
     ) -> F::Future<'_, eyre::Result<Vec<Vec<u8>>>>;
 
-    /// Notify the runtime that the local keyhive state has changed.
-    fn note_local_keyhive_changed(&self) -> F::Future<'_, eyre::Result<()>>;
 
     /// Read the immutable Keyhive event-log watermark for quiescence barriers.
     fn keyhive_event_log_cursor(&self) -> F::Future<'_, eyre::Result<u64>>;

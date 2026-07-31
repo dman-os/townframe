@@ -12,6 +12,7 @@ mod encryption;
 mod ephemeral;
 mod fragmentation;
 mod harness;
+mod keyhive_rpc;
 mod ladder;
 mod notifications;
 mod restart;

@@ -91,7 +91,7 @@ impl Node {
             }
         };
         let store = Arc::new(
-            SqliteBigRepoStore::new(sql, "big-repo-test", big_sync_core::BuckId::MAX_LEVEL).await?,
+            SqliteBigRepoStore::new(sql, "big-repo-test", big_sync_core::BuckId::MAX_LEVEL, Arc::new(crate::access_policy::KeyhiveMembershipPolicy::new())).await?,
         );
         let part_init_obj = big_sync_core::ObjId(big_sync_core::Byte32Id::new(
             [255_u8.wrapping_sub(seed); 32],

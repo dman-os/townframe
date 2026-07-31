@@ -62,6 +62,55 @@ use subduction_ephemeral::{
 use subduction_keyhive::{KeyhiveConnection, KeyhivePeerId};
 use subduction_websocket::tokio::{TimeoutTokio, TokioSpawn};
 use tokio::sync::mpsc;
+/// Single funnel for "the local Keyhive changed".
+///
+/// Every local Keyhive mutation calls
+/// [`KeyhiveChangeNotifier::note_local_keyhive_changed`] instead of talking to
+/// the protocol cache or the RPC broadcast directly: the method cache-busts
+/// the protocol (so the creator's next serve/sync is fresh) and then
+/// broadcasts the keyhive-changed hint that `rpc.rs` forwards to connected
+/// peers — they pull if they want. Keeping both effects in one call is what
+/// prevents mutations from emitting one half without the other.
+#[derive(Clone)]
+pub(crate) struct KeyhiveChangeNotifier {
+    /// Keyhive protocol handle — cache busting + syncpoint invalidation.
+    keyhive_protocol: BigRepoKeyhiveProtocol,
+    /// Broadcast backing the `SubscribeKeyhiveChanges` RPC stream.
+    keyhive_change_tx: tokio::sync::broadcast::Sender<()>,
+}
+
+impl KeyhiveChangeNotifier {
+    pub(crate) fn new(
+        keyhive_protocol: BigRepoKeyhiveProtocol,
+        keyhive_change_tx: tokio::sync::broadcast::Sender<()>,
+    ) -> Self {
+        Self {
+            keyhive_protocol,
+            keyhive_change_tx,
+        }
+    }
+
+    /// Cache-bust the protocol cache, then broadcast the change hint to peers.
+    ///
+    /// The cache bust is deliberately synchronous with the mutation: a peer
+    /// that pulls in response to the broadcast must be served fresh state, and
+    /// the protocol serves sync requests from its cache.
+    pub(crate) async fn note_local_keyhive_changed(&self) -> eyre::Result<()> {
+        self.keyhive_protocol
+            .note_local_keyhive_changed()
+            .await
+            .wrap_err("keyhive local-change refresh failed")?;
+        // Broadcast delivery is intentionally best effort; the event is only
+        // a wake-up hint and is not the source of Keyhive state.
+        let _ = self.keyhive_change_tx.send(());
+        Ok(())
+    }
+
+    /// Best-effort peer wake-up without a cache bust (maintenance refresh).
+    pub(crate) fn notify_peers(&self) {
+        let _ = self.keyhive_change_tx.send(());
+    }
+}
 
 // ═══════════════════════════════════════════════════════════════════════════
 // CONTEXT
@@ -100,8 +149,9 @@ where
     pub(crate) ephemeral_tasks: Arc<utils_rs::AbortableJoinSet>,
     /// Ephemeral publisher for application-level transient messages.
     pub(crate) ephemeral_backend: Arc<dyn BigEphemeralBackend>,
-    /// Direct BigRepo RPC notification source for local Keyhive changes.
-    pub(crate) keyhive_change_tx: tokio::sync::broadcast::Sender<()>,
+    /// Single funnel for local Keyhive change notifications: cache-busts the
+    /// protocol and broadcasts the RPC keyhive-changed hint to peers.
+    pub(crate) keyhive_notifier: KeyhiveChangeNotifier,
 }
 
 impl<S> std::fmt::Debug for NativeBigRepoIo<S>
@@ -310,10 +360,8 @@ where
                 .await
                 .map_err(|error| ferr!("failed storing initial sedimentree: {error}"))?;
             if keyhive_changed {
-                self.keyhive_protocol
-                    .note_local_keyhive_changed()
-                    .await
-                    .map_err(|error| ferr!("failed marking keyhive cache dirty: {error}"))?;
+                // Cache-bust + notify peers in one call.
+                self.keyhive_notifier.note_local_keyhive_changed().await?;
             }
             Ok(())
         })
@@ -371,10 +419,8 @@ where
                 }
             }
             if keyhive_changed {
-                self.keyhive_protocol
-                    .note_local_keyhive_changed()
-                    .await
-                    .map_err(|error| ferr!("failed marking keyhive cache dirty: {error}"))?;
+                // Cache-bust + notify peers in one call.
+                self.keyhive_notifier.note_local_keyhive_changed().await?;
             }
             Ok(fragment_requests)
         })
@@ -740,10 +786,7 @@ where
                 .create_doc(parents, content_heads, &self.keyhive_storage)
                 .await?;
             info!(%uuid, ?doc_id, "created doc");
-            self.keyhive_protocol
-                .note_local_keyhive_changed()
-                .await
-                .map_err(|error| ferr!("failed publishing new Keyhive document: {error}"))?;
+            self.keyhive_notifier.note_local_keyhive_changed().await?;
             Ok(doc_id)
         })
     }
@@ -791,21 +834,6 @@ where
         })
     }
 
-    // ── note_local_keyhive_changed ────────────────────────────────────────
-    fn note_local_keyhive_changed(
-        &self,
-    ) -> <Sendable as future_form::FutureForm>::Future<'_, eyre::Result<()>> {
-        Sendable::from_future(async move {
-            self.keyhive_protocol
-                .note_local_keyhive_changed()
-                .await
-                .wrap_err("keyhive local-change refresh failed")?;
-            // Broadcast delivery is intentionally best effort; the event is
-            // only a wake-up hint and is not the source of Keyhive state.
-            let _ = self.keyhive_change_tx.send(());
-            Ok(())
-        })
-    }
 
     fn keyhive_event_log_cursor(
         &self,
@@ -862,7 +890,7 @@ where
             if notify {
                 // Notify peers only after the refreshed projection is published
                 // and only when this sync ingested new operations.
-                let _ = self.keyhive_change_tx.send(());
+                self.keyhive_notifier.notify_peers();
             }
             Ok(())
         })
@@ -1190,6 +1218,7 @@ pub async fn spawn_native_runtime2<S>(
     crate::runtime2::Runtime2Handle<Sendable>,
     BigEphemeral,
     async_channel::Sender<crate::runtime2::Runtime2Evt>,
+    crate::runtime2::KeyhiveChangeNotifier,
     crate::runtime2::Runtime2StopToken<Sendable, crate::runtime2::TokioTaskRuntime>,
 )>
 where
@@ -1319,6 +1348,12 @@ where
     let subduction_handle: Arc<BigRepoSubduction<S>> = Arc::clone(&subduction);
 
     // ── IO facades ─────────────────────────────────────────────────────────
+    // Single funnel for local Keyhive change notifications (cache bust + RPC
+    // broadcast). Mutations inside the IO and the public API both call it.
+    let keyhive_notifier = crate::runtime2::KeyhiveChangeNotifier::new(
+        Arc::clone(&keyhive_protocol),
+        keyhive_change_tx,
+    );
     let native_io = Arc::new(NativeBigRepoIo {
         group_part_store: group_part_store.clone(),
         subduction: Arc::clone(&subduction_handle),
@@ -1331,7 +1366,7 @@ where
         sync_policy,
         ephemeral_tasks: Arc::new(utils_rs::AbortableJoinSet::new()),
         ephemeral_backend: Arc::clone(&ephemeral_backend),
-        keyhive_change_tx: keyhive_change_tx.clone(),
+        keyhive_notifier: keyhive_notifier.clone(),
     });
 
     let iroh_connect = Arc::new(IrohTransportConnect {
@@ -1490,7 +1525,7 @@ where
             }))?;
     }
 
-    Ok((handle, ephemeral, evt_tx, stop_token))
+    Ok((handle, ephemeral, evt_tx, keyhive_notifier, stop_token))
 }
 
 // ═══════════════════════════════════════════════════════════════════════════

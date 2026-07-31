@@ -21,6 +21,7 @@ use sedimentree_core::loose_commit::id::CommitId;
 
 // FIXME: properly test the changes impl and investigate
 // why it no longer has users
+pub(crate) mod access_policy;
 mod backend;
 #[expect(unused)]
 mod changes;
@@ -115,6 +116,8 @@ pub struct BigRepo {
     #[educe(Debug(ignore))]
     keyhive_change_tx: tokio::sync::broadcast::Sender<()>,
     #[educe(Debug(ignore))]
+    keyhive_notifier: runtime2::KeyhiveChangeNotifier,
+    #[educe(Debug(ignore))]
     change_manager: Arc<changes::ChangeListenerManager>,
     #[educe(Debug(ignore))]
     change_manager_stop: std::sync::Mutex<Option<changes::ChangeListenerManagerStopToken>>,
@@ -154,6 +157,7 @@ impl BigRepo {
             big_sync::HostPartStoreConfig {
                 hidden_parts: hidden_parts.clone(),
             },
+            Arc::new(crate::access_policy::KeyhiveMembershipPolicy::new()),
         )
         .await?;
         Self::boot_inner(
@@ -242,7 +246,8 @@ impl BigRepo {
         let (change_manager, change_manager_stop) = changes::ChangeListenerManager::boot();
         let (keyhive_change_tx, _) = tokio::sync::broadcast::channel(128);
 
-        let (runtime, ephemeral, _events, runtime_stop) = runtime2::native::spawn_native_runtime2(
+        let (runtime, ephemeral, _events, keyhive_notifier, runtime_stop) =
+            runtime2::native::spawn_native_runtime2(
             signer,
             subduction_storage.clone(),
             subduction_storage.clone(),
@@ -267,6 +272,7 @@ impl BigRepo {
             runtime,
             ephemeral,
             keyhive_change_tx,
+            keyhive_notifier,
             change_manager,
             change_manager_stop: std::sync::Mutex::new(Some(change_manager_stop)),
         });
@@ -450,7 +456,7 @@ impl BigRepo {
             .keyhive
             .create_group_with_parents(parents, &self.keyhive_storage)
             .await?;
-        self.runtime.note_local_keyhive_changed().await?;
+        self.keyhive_notifier.note_local_keyhive_changed().await?;
         Ok(group)
     }
 
@@ -496,7 +502,7 @@ impl BigRepo {
             }
         }
 
-        self.runtime.note_local_keyhive_changed().await?;
+        self.keyhive_notifier.note_local_keyhive_changed().await?;
         Ok(())
     }
 
@@ -534,7 +540,7 @@ impl BigRepo {
             .await?;
         }
 
-        self.runtime.note_local_keyhive_changed().await?;
+        self.keyhive_notifier.note_local_keyhive_changed().await?;
 
         Ok(())
     }
@@ -557,7 +563,7 @@ impl BigRepo {
                 &self.keyhive_storage,
             )
             .await?;
-        self.runtime.note_local_keyhive_changed().await?;
+        self.keyhive_notifier.note_local_keyhive_changed().await?;
         Ok(())
     }
 }
@@ -575,11 +581,11 @@ impl BigRepo {
         peer_id: PeerId,
         end_signal_tx: Option<tokio::sync::mpsc::UnboundedSender<ConnFinishSignal>>,
     ) -> Res<BigRepoConnection> {
-        let _ = end_signal_tx;
-        let (peer_id, closed) = self
+        let (peer_id, closed, end_rx) = self
             .runtime
             .open_connection(peer_id, Box::new((endpoint, endpoint_addr)))
             .await?;
+        watch_connection_end(peer_id, end_rx, end_signal_tx);
         Ok(BigRepoConnection {
             repo: Arc::clone(self),
             peer_id,
@@ -596,14 +602,40 @@ impl BigRepo {
         conn: iroh::endpoint::Connection,
         end_signal_tx: Option<tokio::sync::mpsc::UnboundedSender<ConnFinishSignal>>,
     ) -> Res<BigRepoConnection> {
-        let _ = end_signal_tx;
-        let (peer_id, closed) = self.runtime.accept_connection(Box::new(conn)).await?;
+        let (peer_id, closed, end_rx) = self.runtime.accept_connection(Box::new(conn)).await?;
+        watch_connection_end(peer_id, end_rx, end_signal_tx);
         Ok(BigRepoConnection {
             repo: Arc::clone(self),
             peer_id,
             closed,
         })
     }
+}
+
+/// Forward a runtime connection-end to the caller's `ConnFinishSignal`
+/// channel (used by the sync layer to release per-peer state when a
+/// connection drops, whether outbound or inbound).
+fn watch_connection_end(
+    peer_id: PeerId,
+    end_rx: futures::channel::oneshot::Receiver<eyre::Result<()>>,
+    end_signal_tx: Option<tokio::sync::mpsc::UnboundedSender<ConnFinishSignal>>,
+) {
+    let Some(end_signal_tx) = end_signal_tx else {
+        return;
+    };
+    tokio::spawn(async move {
+        let result = end_rx.await;
+        let err = match result {
+            Ok(result) => result.err(),
+        // The runtime stopped before its watcher fired; treat the
+        // connection as ended without a transport error.
+        Err(_) => None,
+    };
+    end_signal_tx
+        .send(ConnFinishSignal { peer_id, err })
+        .inspect_err(|_| warn!(ERROR_CALLER))
+        .ok();
+    });
 }
 
 #[derive(Clone, educe::Educe)]

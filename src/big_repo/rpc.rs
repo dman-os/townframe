@@ -222,6 +222,20 @@ async fn handle_rpc_message(
                             event = changes.recv() => {
                                 match event {
                                     Ok(()) | Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => {
+                                        // Collapse bursts: drain everything immediately
+                                        // available (lag counts as "more happened") into
+                                        // one notification, so a burst of local mutations
+                                        // costs peers a single pull.
+                                        loop {
+                                            match changes.try_recv() {
+                                                Ok(()) => {}
+                                                Err(tokio::sync::broadcast::error::TryRecvError::Lagged(_)) => {}
+                                                Err(
+                                                    tokio::sync::broadcast::error::TryRecvError::Empty
+                                                    | tokio::sync::broadcast::error::TryRecvError::Closed,
+                                                ) => break,
+                                            }
+                                        }
                                         if tx
                                             .send(KeyhiveChangedRpcEvent { initial: false })
                                             .await

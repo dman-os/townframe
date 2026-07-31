@@ -627,7 +627,7 @@ async fn open_sync_node(repo_root: &std::path::Path) -> Res<SyncTestNode> {
         rtx.layout.blobs_root.clone(),
         rtx.local_user_path.clone(),
         Arc::new(crate::blobs::PartitionStoreMembershipWriter::new(
-            Arc::clone(&rtx.part_store),
+            Arc::clone(&rtx.blob_part_store),
         )),
     )
     .await?;

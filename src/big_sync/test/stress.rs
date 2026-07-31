@@ -255,6 +255,7 @@ async fn boot_sqlite_node_at(
             sql,
             format!("big-sync-stress://peer/{peer_seed}"),
             BuckId::MAX_LEVEL,
+            Arc::new(crate::AllowAllPolicy),
         )
         .await?,
     );

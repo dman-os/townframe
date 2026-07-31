@@ -92,7 +92,7 @@ impl<F: FutureForm> Runtime2Handle<F> {
                 resp,
             })
             .await
-            .map_err(|_| eyre::eyre!("task was found dead"))?;
+            .map_err(|_| eyre::eyre!(ERROR_ACTOR))?;
         rx.await
             .map_err(|_| eyre::eyre!("caller dropped before response"))?
     }
@@ -116,7 +116,7 @@ impl<F: FutureForm> Runtime2Handle<F> {
         self.cmd_tx
             .send(Runtime2Cmd::GetDocHandle { doc_id, resp })
             .await
-            .map_err(|_| eyre::eyre!("task was found dead"))?;
+            .map_err(|_| eyre::eyre!(ERROR_ACTOR))?;
         rx.await
             .map_err(|_| eyre::eyre!("caller dropped before response"))?
     }
@@ -150,7 +150,7 @@ impl<F: FutureForm> Runtime2Handle<F> {
                 resp,
             })
             .await
-            .map_err(|_| eyre::eyre!("task was found dead"))?;
+            .map_err(|_| eyre::eyre!(ERROR_ACTOR))?;
         rx.await
             .map_err(|_| eyre::eyre!("caller dropped before response"))?
     }
@@ -170,7 +170,7 @@ impl<F: FutureForm> Runtime2Handle<F> {
         self.cmd_tx
             .send(Runtime2Cmd::DocHeadState { doc_id, resp })
             .await
-            .map_err(|_| eyre::eyre!("task was found dead"))?;
+            .map_err(|_| eyre::eyre!(ERROR_ACTOR))?;
         rx.await
             .map_err(|_| eyre::eyre!("caller dropped before response"))?
     }
@@ -202,16 +202,23 @@ impl<F: FutureForm> Runtime2Handle<F> {
     /// The `addr` is an opaque `Box<dyn Any + Send>` that the hub's
     /// [`TransportConnect`](super::TransportConnect) implementation
     /// interprets.
+    ///
+    /// The returned receiver resolves with the connection end result once the
+    /// hub's watcher observes the transport connection lifecycle ending.
     pub async fn open_connection(
         &self,
         peer: PeerId,
         addr: Box<dyn std::any::Any + Send>,
-    ) -> eyre::Result<(PeerId, std::sync::Arc<std::sync::atomic::AtomicBool>)> {
+    ) -> eyre::Result<(
+        PeerId,
+        std::sync::Arc<std::sync::atomic::AtomicBool>,
+        futures::channel::oneshot::Receiver<eyre::Result<()>>,
+    )> {
         let (resp, rx) = futures::channel::oneshot::channel();
         self.cmd_tx
             .send(Runtime2Cmd::OpenConn { peer, addr, resp })
             .await
-            .map_err(|_| eyre::eyre!("task was found dead"))?;
+            .map_err(|_| eyre::eyre!(ERROR_ACTOR))?;
         rx.await
             .map_err(|_| eyre::eyre!("caller dropped before response"))?
     }
@@ -221,15 +228,22 @@ impl<F: FutureForm> Runtime2Handle<F> {
     /// `incoming` is an opaque handle the hub's
     /// [`TransportConnect`](super::TransportConnect) implementation
     /// uses to complete the handshake.
+    ///
+    /// The returned receiver resolves with the connection end result once the
+    /// hub's watcher observes the transport connection lifecycle ending.
     pub async fn accept_connection(
         &self,
         incoming: Box<dyn std::any::Any + Send>,
-    ) -> eyre::Result<(PeerId, std::sync::Arc<std::sync::atomic::AtomicBool>)> {
+    ) -> eyre::Result<(
+        PeerId,
+        std::sync::Arc<std::sync::atomic::AtomicBool>,
+        futures::channel::oneshot::Receiver<eyre::Result<()>>,
+    )> {
         let (resp, rx) = futures::channel::oneshot::channel();
         self.cmd_tx
             .send(Runtime2Cmd::AcceptConn { incoming, resp })
             .await
-            .map_err(|_| eyre::eyre!("task was found dead"))?;
+            .map_err(|_| eyre::eyre!(ERROR_ACTOR))?;
         rx.await
             .map_err(|_| eyre::eyre!("caller dropped before response"))?
     }
@@ -243,7 +257,7 @@ impl<F: FutureForm> Runtime2Handle<F> {
                 resp: Some(resp),
             })
             .await
-            .map_err(|_| eyre::eyre!("task was found dead"))?;
+            .map_err(|_| eyre::eyre!(ERROR_ACTOR))?;
         rx.await
             .map_err(|_| eyre::eyre!("caller dropped before response"))?
     }
@@ -270,7 +284,7 @@ impl<F: FutureForm> Runtime2Handle<F> {
             })
             .await
             .map_err(|_| {
-                crate::runtime2::types::SyncDocError::IoError(eyre::eyre!("task was found dead"))
+                crate::runtime2::types::SyncDocError::IoError(eyre::eyre!(ERROR_ACTOR))
             })?;
         // If no timeout, wait indefinitely (the old handle returns
         // immediately without timeout).
@@ -329,7 +343,7 @@ impl<F: FutureForm> Runtime2Handle<F> {
                 resp,
             })
             .await
-            .map_err(|_| eyre::eyre!("task was found dead"))?;
+            .map_err(|_| eyre::eyre!(ERROR_ACTOR))?;
         let duration =
             timeout.unwrap_or_else(|| utils_rs::scale_timeout(std::time::Duration::from_secs(5)));
         match self.race_timeout(rx, duration).await {
@@ -340,7 +354,7 @@ impl<F: FutureForm> Runtime2Handle<F> {
                     .try_send(Runtime2Cmd::CancelKeyhiveSyncWaiter { peer_id, waiter_id })
                     .map_err(|e| match e {
                         async_channel::TrySendError::Closed(_) => {
-                            eyre::eyre!("task was found dead")
+                            eyre::eyre!(ERROR_ACTOR)
                         }
                         async_channel::TrySendError::Full(_) => {
                             eyre::eyre!("mailbox full")
@@ -362,7 +376,7 @@ impl<F: FutureForm> Runtime2Handle<F> {
         self.cmd_tx
             .send(Runtime2Cmd::WaitForQuiescence { resp })
             .await
-            .map_err(|_| eyre::eyre!("task was found dead"))?;
+            .map_err(|_| eyre::eyre!(ERROR_ACTOR))?;
         let duration =
             timeout.unwrap_or_else(|| utils_rs::scale_timeout(std::time::Duration::from_secs(5)));
         match self.race_timeout(rx, duration).await {
@@ -372,17 +386,6 @@ impl<F: FutureForm> Runtime2Handle<F> {
         }
     }
 
-    /// Notify the runtime that the local keyhive state has changed (e.g. a
-    /// delegation or membership update was received out-of-band).
-    pub async fn note_local_keyhive_changed(&self) -> eyre::Result<()> {
-        let (resp, rx) = futures::channel::oneshot::channel();
-        self.cmd_tx
-            .send(Runtime2Cmd::NoteLocalKeyhiveChanged { resp })
-            .await
-            .map_err(|_| eyre::eyre!("task was found dead"))?;
-        rx.await
-            .map_err(|_| eyre::eyre!("caller dropped before response"))?
-    }
 
     // ── presence / introspection ───────────────────────────────────────────
 
@@ -395,7 +398,7 @@ impl<F: FutureForm> Runtime2Handle<F> {
         self.cmd_tx
             .send(Runtime2Cmd::ContainsSedimentree { doc_id, resp })
             .await
-            .map_err(|_| eyre::eyre!("task was found dead"))?;
+            .map_err(|_| eyre::eyre!(ERROR_ACTOR))?;
         rx.await
             .map_err(|_| eyre::eyre!("caller dropped before response"))?
     }
@@ -413,7 +416,7 @@ impl<F: FutureForm> Runtime2Handle<F> {
                 resp,
             })
             .await
-            .map_err(|_| eyre::eyre!("task was found dead"))?;
+            .map_err(|_| eyre::eyre!(ERROR_ACTOR))?;
         rx.await
             .map_err(|_| eyre::eyre!("caller dropped before response"))?
     }
@@ -424,7 +427,7 @@ impl<F: FutureForm> Runtime2Handle<F> {
         self.cmd_tx
             .send(Runtime2Cmd::HasLocalDocState { doc_id, resp })
             .await
-            .map_err(|_| eyre::eyre!("task was found dead"))?;
+            .map_err(|_| eyre::eyre!(ERROR_ACTOR))?;
         rx.await
             .map_err(|_| eyre::eyre!("caller dropped before response"))?
     }
@@ -434,7 +437,7 @@ impl<F: FutureForm> Runtime2Handle<F> {
         self.cmd_tx
             .send(Runtime2Cmd::HasDocWorker { doc_id, resp })
             .await
-            .map_err(|_| eyre::eyre!("task was found dead"))?;
+            .map_err(|_| eyre::eyre!(ERROR_ACTOR))?;
         rx.await
             .map_err(|_| eyre::eyre!("caller dropped before response"))?
     }
