@@ -246,6 +246,7 @@ struct DomainListener {
     change_tx: mpsc::UnboundedSender<Vec<BigRepoDomainNotification>>,
 }
 
+
 /// Unified manager for all notification families.
 pub struct ChangeListenerManager {
     listeners: Arc<Mutex<Vec<ChangeListener>>>,
@@ -425,6 +426,7 @@ impl ChangeListenerManager {
         }
         Ok(())
     }
+
 
     // ── Document change notify methods ────────────────────────────────────
 
@@ -1254,7 +1256,7 @@ mod tests {
     use super::*;
     use automerge::transaction::Transactable;
     use std::sync::Arc;
-    use tokio::time::{Duration, timeout};
+    use tokio::time::{timeout, Duration};
 
     fn make_change_fixture() -> (DocumentId, Arc<[ChangeHash]>, Arc<automerge::Patch>) {
         let doc_id = DocumentId::random();

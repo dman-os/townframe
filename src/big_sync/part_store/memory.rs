@@ -9,8 +9,8 @@ use big_sync_core::rpc::{
 };
 use big_sync_core::{mpsc, BuckId, Fingerprint, ObjId, PartId, PeerId};
 
-use super::{obj_id_bounds_for_bucket, HostPartStore};
 use super::policy::ObjAccessPolicy;
+use super::{obj_id_bounds_for_bucket, HostPartStore};
 #[cfg(test)]
 use crate::test_support::{ObservedObjSnapshot, ObservedStore, ObservedStoreSnapshot};
 
@@ -94,7 +94,10 @@ impl MemoryPartStore {
         Self::with_config(Default::default(), policy)
     }
 
-    pub fn with_config(config: super::HostPartStoreConfig, policy: Arc<dyn ObjAccessPolicy>) -> Self {
+    pub fn with_config(
+        config: super::HostPartStoreConfig,
+        policy: Arc<dyn ObjAccessPolicy>,
+    ) -> Self {
         Self {
             inner: Arc::new(surelock::mutex::Mutex::new(default())),
             hidden_parts: Arc::new(config.hidden_parts),
@@ -281,37 +284,37 @@ impl MemoryPartStoreScopeState {
                 let Some(mut sub) = self.bus.subs.remove(&sub_id) else {
                     continue;
                 };
-            let mut should_drop = false;
-            sub = match sub {
-                MemorySubscription::Pending {
-                    sender,
-                    principal,
-                    state,
-                } => {
-                    if state.mark_dirty() {
+                let mut should_drop = false;
+                sub = match sub {
+                    MemorySubscription::Pending {
+                        sender,
+                        principal,
+                        state,
+                    } => {
+                        if state.mark_dirty() {
+                            if policy.is_event_permitted(evt_part_id, evt_obj_id, Some(principal))
+                                && sender.try_send(sub_evt.clone()).is_err()
+                            {
+                                should_drop = true;
+                            }
+                            MemorySubscription::Live { sender, principal }
+                        } else {
+                            MemorySubscription::Pending {
+                                sender,
+                                principal,
+                                state,
+                            }
+                        }
+                    }
+                    MemorySubscription::Live { sender, principal } => {
                         if policy.is_event_permitted(evt_part_id, evt_obj_id, Some(principal))
-                            && sender.try_send(sub_evt.clone()).is_err()
+                            && sender.try_send(sub_evt).is_err()
                         {
                             should_drop = true;
                         }
                         MemorySubscription::Live { sender, principal }
-                    } else {
-                        MemorySubscription::Pending {
-                            sender,
-                            principal,
-                            state,
-                        }
                     }
-                }
-                MemorySubscription::Live { sender, principal } => {
-                    if policy.is_event_permitted(evt_part_id, evt_obj_id, Some(principal))
-                        && sender.try_send(sub_evt).is_err()
-                    {
-                        should_drop = true;
-                    }
-                    MemorySubscription::Live { sender, principal }
-                }
-            };
+                };
                 if should_drop {
                     self.bus.subs_to_drop.push(sub_id);
                 } else {
@@ -590,7 +593,9 @@ impl HostPartStore for MemoryPartStore {
                         } => (sender, principal, Some(state)),
                         MemorySubscription::Live { sender, principal } => (sender, principal, None),
                     };
-                    let permitted = self.policy.is_event_permitted(None, obj_id, Some(principal));
+                    let permitted = self
+                        .policy
+                        .is_event_permitted(None, obj_id, Some(principal));
                     if let Some(state) = pending {
                         if !state.mark_dirty() {
                             guard.bus.subs.insert(
@@ -997,7 +1002,8 @@ impl HostPartStore for MemoryPartStore {
                             PartEvent::Added(inner) => Some(inner.part_id),
                             PartEvent::Removed(inner) => Some(inner.part_id),
                         };
-                        let permitted = policy.is_event_permitted(part_id, obj_id, Some(subscriber));
+                        let permitted =
+                            policy.is_event_permitted(part_id, obj_id, Some(subscriber));
                         if !permitted {
                             continue;
                         }
@@ -1029,7 +1035,8 @@ impl HostPartStore for MemoryPartStore {
                     }
                     if object_replay_pending {
                         for obj_id in &objects {
-                            let permitted = policy.is_event_permitted(None, *obj_id, Some(subscriber));
+                            let permitted =
+                                policy.is_event_permitted(None, *obj_id, Some(subscriber));
                             if permitted {
                                 if let Some(payload) = guard
                                     .objs
@@ -1406,7 +1413,7 @@ mod tests {
     #[tokio::test(flavor = "multi_thread")]
     async fn memory_host_part_store_contract() -> Res<()> {
         let harness = MemoryHostHarness {
-            store: MemoryPartStore::new(Arc::new(crate::AllowAllPolicy)),
+            store: MemoryPartStore::new(Arc::new(crate::MembershipPolicy::default())),
         };
         host_contract::assert_host_part_store_contract(&harness).await
     }
@@ -1474,7 +1481,7 @@ mod tests {
 
     #[tokio::test(flavor = "multi_thread")]
     async fn syncability_filter_drops_non_readable_events() -> Res<()> {
-        let store = MemoryPartStore::new(Arc::new(crate::AllowAllPolicy));
+        let store = MemoryPartStore::new(Arc::new(crate::MembershipPolicy::default()));
         let part = PartId(Byte32Id::new([1u8; 32]));
         let obj = ObjId(Byte32Id::new([2u8; 32]));
         let reader = PeerId::new([3u8; 32]);
@@ -1527,22 +1534,36 @@ mod tests {
                 non_reader,
             )
             .await??;
+        tokio::time::timeout(Duration::from_secs(2), async {
+            loop {
+                match rx2.recv().await {
+                    Ok(SubEvent::ReplayComplete) => return Ok::<_, eyre::Report>(()),
+                    Ok(SubEvent::Added(event)) => {
+                        return Err(ferr!("denied replay leaked Added event: {event:?}"));
+                    }
+                    Ok(event) => return Err(ferr!("denied replay leaked event: {event:?}")),
+                    Err(_) => return Err(ferr!("denied subscriber closed during replay")),
+                }
+            }
+        })
+        .await??;
         let second_obj = ObjId(Byte32Id::new([5u8; 32]));
         store
             .set_obj_payload(second_obj, serde_json::json!("content2"))
             .await?;
         store.add_obj_to_parts(second_obj, vec![part]).await?;
-        // The non-reader should NOT get this Added event.
-        // We just check that add_obj_to_parts succeeded (it always does).
-        // The filter drops events for non-readers silently.
-        drop(rx2);
+        match tokio::time::timeout(Duration::from_millis(200), rx2.recv()).await {
+            Err(_) => {}
+            Ok(Ok(event)) => return Err(ferr!("denied live event leaked: {event:?}")),
+            Ok(Err(_)) => return Err(ferr!("denied subscriber closed unexpectedly")),
+        }
 
         Ok(())
     }
 
     #[tokio::test(flavor = "multi_thread")]
     async fn syncability_filter_updates() -> Res<()> {
-        let store = MemoryPartStore::new(Arc::new(crate::AllowAllPolicy));
+        let store = MemoryPartStore::new(Arc::new(crate::MembershipPolicy::default()));
         let part = PartId(Byte32Id::new([10u8; 32]));
         let obj = ObjId(Byte32Id::new([20u8; 32]));
         let peer = PeerId::new([30u8; 32]);
@@ -1569,6 +1590,20 @@ mod tests {
             )
             .await??;
         store.add_obj_to_parts(obj, vec![part]).await?;
+        tokio::time::timeout(Duration::from_secs(2), async {
+            let mut saw_added = false;
+            loop {
+                match rx.recv().await {
+                    Ok(SubEvent::Added(_)) => saw_added = true,
+                    Ok(SubEvent::ReplayComplete) if saw_added => return Ok::<_, eyre::Report>(()),
+                    Ok(SubEvent::ReplayComplete) => continue,
+                    Ok(event) => return Err(ferr!("unexpected authorized event: {event:?}")),
+                    Err(_) => return Err(ferr!("authorized subscriber closed")),
+                }
+            }
+        })
+        .await??;
+        store.add_obj_to_parts(obj, vec![part]).await?;
         // Should receive Added event.
         tokio::time::timeout(Duration::from_secs(2), async {
             loop {
@@ -1588,11 +1623,11 @@ mod tests {
         store
             .set_obj_payload(obj, serde_json::json!("updated"))
             .await?;
-        // Peer is no longer a reader — Changed event should be dropped.
-        // We can't easily observe the drop without checking the stream
-        // didn't receive anything, but the call to set_obj_payload should
-        // complete (it always does). The filter ensures the event isn't
-        // forwarded to non-readers.
+        match tokio::time::timeout(Duration::from_millis(200), rx.recv()).await {
+            Err(_) => {}
+            Ok(Ok(event)) => return Err(ferr!("revoked subscriber received event: {event:?}")),
+            Ok(Err(_)) => return Err(ferr!("revoked subscriber closed unexpectedly")),
+        }
 
         Ok(())
     }

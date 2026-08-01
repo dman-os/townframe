@@ -45,14 +45,26 @@ impl ProtocolHandler for SubductionProtocolHandler {
             .accept_connection_iroh(conn, Some(self.end_signal_tx.clone()))
             .await
             .map_err(|err| AcceptError::from_boxed(err.into()))?;
+        tracing::debug!(peer_id = %conn.peer_id, "subduction conn accepted");
         self.incoming_conn_tx.send(conn).ok();
         Ok(())
     }
 }
 
+#[derive(Debug)]
 enum ActivePeerState {
-    Connecting,
-    Connected { peer_key: PeerKey },
+    Connecting {
+        // The registering connection's end flag, once it exists. `None` only
+        // while an outbound dial reserves the slot before the connection has
+        // been opened (no end signal can exist before then).
+        closed: Option<std::sync::Arc<std::sync::atomic::AtomicBool>>,
+    },
+    Connected {
+        peer_key: PeerKey,
+        // The connection's end flag (shared with the runtime's watcher),
+        // used to identify which connection a `ConnFinishSignal` belongs to.
+        closed: std::sync::Arc<std::sync::atomic::AtomicBool>,
+    },
 }
 
 pub struct IrohSyncRepo {
@@ -237,10 +249,8 @@ impl IrohSyncRepo {
 
         let mut blob_sync_backends = std::collections::HashMap::new();
         blob_sync_backends.insert(BLOBS_BACKEND_ID.into(), blob_sync_backend);
-        let (blob_sync_worker, blob_sync_worker_stop) = big_sync::spawn_big_sync_worker(
-            Arc::clone(&rcx.blob_part_store),
-            blob_sync_backends,
-        )?;
+        let (blob_sync_worker, blob_sync_worker_stop) =
+            big_sync::spawn_big_sync_worker(Arc::clone(&rcx.blob_part_store), blob_sync_backends)?;
 
         let (big_sync_rpc, big_sync_rpc_stop) =
             big_sync::rpc::spawn_big_sync_rpc(Arc::clone(&rcx.part_store)).await?;
@@ -384,6 +394,11 @@ impl IrohSyncRepo {
         if !ready.initial {
             eyre::bail!("Keyhive RPC stream did not send its readiness event");
         }
+        info!(
+            local_peer_id = %self.router.endpoint().id(),
+            %peer_id,
+            "keyhive RPC subscription ready"
+        );
 
         let stream_cancel = cancel.child_token();
         let repo = Arc::clone(&self.rcx.big_repo);
@@ -396,15 +411,26 @@ impl IrohSyncRepo {
                         event = changes.recv() => {
                             info!("recieved keyhive change notif");
                             match event {
-                                Ok(Some(_)) => {
-                                    info!("syncing keyhive with remote");
-                                    if let Err(error) = repo
+                                Ok(Some(event)) => {
+                                    info!(
+                                        local_peer_id = %repo.local_peer_id(),
+                                        %peer_id,
+                                        initial = event.initial,
+                                        "keyhive RPC notification received; starting sync"
+                                    );
+                                    let result = repo
                                         .sync_keyhive_with_peer(
                                             peer_id,
                                             Some(Duration::from_secs(10)),
                                         )
-                                        .await
-                                    {
+                                        .await;
+                                    info!(
+                                        local_peer_id = %repo.local_peer_id(),
+                                        %peer_id,
+                                        ?result,
+                                        "keyhive sync after RPC notification finished"
+                                    );
+                                    if let Err(error) = result {
                                         warn!(%peer_id, ?error, "Keyhive sync after RPC notification failed");
                                     }
                                 }
@@ -633,13 +659,49 @@ impl IrohSyncRepo {
         eyre::Ok(())
     }
     async fn handle_incoming_big_repo_conn(&self, conn: big_repo::BigRepoConnection) -> Res<()> {
+        tracing::debug!(
+            peer_id = %conn.peer_id,
+            closed = conn.is_closed(),
+            "handle_incoming: start"
+        );
+        // peer id — the clone bootstrap persists the clone identity, so the
+        // clone-phase connection and the peer's runtime connection present
+        // the same id. Tear down the old registration first; the old
+        // connection's own end signal is identified as stale by its end flag
+        // and ignored. A registration already in flight (`Connecting`) is
+        // left alone rather than raced.
+        let replaced = {
+            let mut active_peers = self.active_peers.write().await;
+            match active_peers.get(&conn.peer_id) {
+                Some(ActivePeerState::Connected { .. }) => {
+                    active_peers.remove(&conn.peer_id);
+                    true
+                }
+                Some(ActivePeerState::Connecting { .. }) => {
+                    warn!(
+                        peer_id = %conn.peer_id,
+                        "ignoring duplicate incoming connection during setup"
+                    );
+                    return Ok(());
+                }
+                None => false,
+            }
+        };
+        if replaced {
+            warn!(
+                peer_id = %conn.peer_id,
+                "new connection replacing existing registration (re-establishment)"
+            );
+            self.teardown_peer_registration(conn.peer_id).await;
+        }
         {
             let mut active_peers = self.active_peers.write().await;
-            if active_peers.contains_key(&conn.peer_id) {
-                warn!(peer_id = %conn.peer_id, "ignoring duplicate incoming connection");
-                return Ok(());
-            }
-            active_peers.insert(conn.peer_id, ActivePeerState::Connecting);
+            active_peers.insert(
+                conn.peer_id,
+                ActivePeerState::Connecting {
+                    closed: Some(conn.closed_flag()),
+                },
+            );
         }
         let peer_id = conn.peer_id;
         let clone_provision = self.clone_provision_peers.lock().await.remove(&peer_id);
@@ -661,10 +723,8 @@ impl IrohSyncRepo {
                 remote_info.into_addrs().map(|info| info.into_addr()),
             );
             self.big_repo_rpc.register_peer(remote_endpoint_id, peer_id);
-            let doc_rpc_client = big_sync::rpc::IrohBigSyncRpcClient::new(
-                endpoint.clone(),
-                addr.clone(),
-            );
+            let doc_rpc_client =
+                big_sync::rpc::IrohBigSyncRpcClient::new(endpoint.clone(), addr.clone());
             let blob_rpc_client = big_sync::rpc::IrohBigSyncRpcClient::new_with_alpn(
                 endpoint,
                 addr.clone(),
@@ -692,9 +752,22 @@ impl IrohSyncRepo {
                     .big_repo
                     .add_admin_member_to_group(agent, &self.authority.repo_agents)
                     .await?;
-                // The grant is a new Keyhive event. Complete a second exchange
-                // before exposing the clone to BigSync, so document policy state
-                // is installed before document commits can arrive.
+                self.rcx
+                    .big_repo
+                    .sync_keyhive_with_peer(peer_id, Some(Duration::from_secs(10)))
+                    .await?;
+                // Group membership grants current authority but cannot decrypt
+                // blobs written before the clone joined. Publish self-contained
+                // checkpoints under the new epoch before BigSync exposes the
+                // authoritative documents.
+                for doc in [&self.rcx.doc_app, &self.rcx.doc_drawer] {
+                    doc.with_document(|doc| {
+                        let _ = doc.empty_commit(automerge::transaction::CommitOptions::default());
+                    })
+                    .await?;
+                }
+                // Exchange again so the clone observes the checkpoint's epoch
+                // before BigSync can deliver its ciphertext.
                 self.rcx
                     .big_repo
                     .sync_keyhive_with_peer(peer_id, Some(Duration::from_secs(10)))
@@ -703,58 +776,86 @@ impl IrohSyncRepo {
             let partition_ids = self.peer_partition_ids(&peer_key, !clone_provision);
             let (doc_parts, blob_parts) = Self::split_partitions(partition_ids);
             self.big_sync_worker
-                .set_peer(
-                    conn.peer_id,
-                    doc_rpc_client,
-                    doc_parts,
-                    HashMap::new(),
-                )
+                .set_peer(conn.peer_id, doc_rpc_client, doc_parts, HashMap::new())
                 .await?;
             if !blob_parts.is_empty() {
                 self.blob_sync_worker
-                    .set_peer(
-                        conn.peer_id,
-                        blob_rpc_client,
-                        blob_parts,
-                        HashMap::new(),
-                    )
+                    .set_peer(conn.peer_id, blob_rpc_client, blob_parts, HashMap::new())
                     .await?;
             }
 
-            let old = self
-                .active_peers
-                .write()
-                .await
-                .insert(peer_id, ActivePeerState::Connected { peer_key });
-            assert!(matches!(old, Some(ActivePeerState::Connecting)), "fishy");
+            let old = self.active_peers.write().await.insert(
+                peer_id,
+                ActivePeerState::Connected {
+                    peer_key,
+                    closed: conn.closed_flag(),
+                },
+            );
+            assert!(
+                matches!(old, Some(ActivePeerState::Connecting { .. })),
+                "fishy"
+            );
 
             self.registry.notify(events);
             eyre::Ok(())
         }
         .await;
-        if res.is_err() {
+        if let Err(error) = &res {
+            error!(%peer_id, ?error, clone_provision, "incoming BigRepo connection setup failed");
             self.big_repo_rpc.unregister_peer(peer_id);
             let old = self.active_peers.write().await.remove(&peer_id);
-            assert!(matches!(old, Some(ActivePeerState::Connecting)), "fishy")
+            assert!(
+                matches!(old, Some(ActivePeerState::Connecting { .. })),
+                "fishy"
+            );
+            if clone_provision {
+                self.clone_provision_peers.lock().await.insert(peer_id);
+            }
         }
 
-        Ok(())
+        res
     }
 
     async fn handle_big_repo_conn_end(
         self: &Arc<Self>,
         signal: big_repo::ConnFinishSignal,
     ) -> Res<()> {
-        self.stop_keyhive_rpc_subscription(signal.peer_id).await;
-        self.big_repo_rpc.unregister_peer(signal.peer_id);
-        self.blobs_sync_backend
-            .unregister_remote_peer(signal.peer_id);
-        self.big_sync_worker.remove_peer(signal.peer_id).await.ok();
-        self.blob_sync_worker.remove_peer(signal.peer_id).await.ok();
-        // The runtime emits connection-end signals for every tracked
-        // connection, including ones the sync layer never registered
-        // (e.g. a connection that was rejected as a duplicate).
-        let Some(ActivePeerState::Connected { peer_key }) =
+        // The runtime emits a signal for every tracked connection end. A
+        // replaced (superseded) connection's end must not tear down the
+        // replacement: only act when the signal's end flag matches the peer's
+        // current registration.
+        let is_current = {
+            let active_peers = self.active_peers.read().await;
+            match active_peers.get(&signal.peer_id) {
+                Some(ActivePeerState::Connected { closed, .. }) => {
+                    std::sync::Arc::ptr_eq(closed, &signal.closed)
+                }
+                Some(ActivePeerState::Connecting {
+                    closed: Some(closed),
+                }) => std::sync::Arc::ptr_eq(closed, &signal.closed),
+                // A dial reservation with no connection yet cannot have an
+                // end signal; treat any as current.
+                Some(ActivePeerState::Connecting { closed: None }) => true,
+                None => false,
+            }
+        };
+        if !is_current {
+            debug!(
+                peer_id = %signal.peer_id,
+                current = false,
+                error = ?signal.err,
+                "connection end for replaced or unknown connection; ignoring"
+            );
+            return Ok(());
+        }
+        info!(
+            peer_id = %signal.peer_id,
+            current = true,
+            error = ?signal.err,
+            "current connection ended; tearing down peer registration"
+        );
+        self.teardown_peer_registration(signal.peer_id).await;
+        let Some(ActivePeerState::Connected { peer_key, .. }) =
             self.active_peers.write().await.remove(&signal.peer_id)
         else {
             debug!(peer_id = %signal.peer_id, "connection end for unknown peer");
@@ -777,6 +878,15 @@ impl IrohSyncRepo {
         Ok(())
     }
 
+    /// Tear down a peer's registration without touching `active_peers` (the
+    /// caller manages that). Idempotent per peer.
+    async fn teardown_peer_registration(&self, peer_id: PeerId) {
+        self.stop_keyhive_rpc_subscription(peer_id).await;
+        self.big_repo_rpc.unregister_peer(peer_id);
+        self.blobs_sync_backend.unregister_remote_peer(peer_id);
+        self.big_sync_worker.remove_peer(peer_id).await.ok();
+        self.blob_sync_worker.remove_peer(peer_id).await.ok();
+    }
     async fn handle_resolve_clone_info(
         &self,
         req: bootstrap::CloneInfoRequest,
@@ -832,19 +942,31 @@ impl IrohSyncRepo {
         if active_peers.contains_key(&peer_id) {
             return false;
         }
-        active_peers.insert(peer_id, ActivePeerState::Connecting);
+        active_peers.insert(peer_id, ActivePeerState::Connecting { closed: None });
         true
     }
 
     async fn handle_big_sync_evt(&self, evt: big_sync_core::SyncStatEvent) -> Res<()> {
         match evt {
             big_sync_core::SyncStatEvent::ObjectSynced { peer_id, obj_id } => {
+                info!(
+                    local_peer_id = %self.router.endpoint().id(),
+                    %peer_id,
+                    %obj_id,
+                    "BigSync object synced"
+                );
                 self.registry.notify([IrohSyncEvent::DocSyncedWithPeer {
                     peer_key: daybook_types::doc::format_peer_key(peer_id.as_bytes()),
                     doc_id: obj_id,
                 }]);
             }
             big_sync_core::SyncStatEvent::PeerPartFullySynced { peer_id, part_id } => {
+                info!(
+                    local_peer_id = %self.router.endpoint().id(),
+                    %peer_id,
+                    %part_id,
+                    "BigSync peer partition fully synced"
+                );
                 self.registry.notify([IrohSyncEvent::PartitionFullySynced {
                     peer_key: daybook_types::doc::format_peer_key(peer_id.as_bytes()),
                     partition: part_id.to_string(),
@@ -896,10 +1018,8 @@ impl IrohSyncRepo {
                     Some(self.conn_end_signal_tx.clone()),
                 )
                 .await?;
-            let doc_rpc_client = big_sync::rpc::IrohBigSyncRpcClient::new(
-                endpoint.clone(),
-                endpoint_addr.clone(),
-            );
+            let doc_rpc_client =
+                big_sync::rpc::IrohBigSyncRpcClient::new(endpoint.clone(), endpoint_addr.clone());
             let blob_rpc_client = big_sync::rpc::IrohBigSyncRpcClient::new_with_alpn(
                 endpoint,
                 endpoint_addr.clone(),
@@ -919,15 +1039,30 @@ impl IrohSyncRepo {
                     .set_peer(conn.peer_id, blob_rpc_client, blob_parts, HashMap::new())
                     .await?;
             }
+            info!(
+                local_peer_id = %self.router.endpoint().id(),
+                %peer_id,
+                "outgoing connection registered; starting keyhive subscription"
+            );
             self.start_keyhive_rpc_subscription(conn.peer_id, endpoint_addr)
                 .await?;
 
-            let old = self
-                .active_peers
-                .write()
-                .await
-                .insert(peer_id, ActivePeerState::Connected { peer_key });
-            assert!(matches!(old, Some(ActivePeerState::Connecting)), "fishy");
+            let old = self.active_peers.write().await.insert(
+                peer_id,
+                ActivePeerState::Connected {
+                    peer_key,
+                    closed: conn.closed_flag(),
+                },
+            );
+            assert!(
+                matches!(old, Some(ActivePeerState::Connecting { .. })),
+                "fishy"
+            );
+            info!(
+                local_peer_id = %self.router.endpoint().id(),
+                %peer_id,
+                "outgoing connection fully registered"
+            );
             self.registry.notify(events);
             eyre::Ok(())
         }
@@ -935,7 +1070,10 @@ impl IrohSyncRepo {
         if res.is_err() {
             self.big_repo_rpc.unregister_peer(peer_id);
             let old = self.active_peers.write().await.remove(&peer_id);
-            assert!(matches!(old, Some(ActivePeerState::Connecting)), "fishy")
+            assert!(
+                matches!(old, Some(ActivePeerState::Connecting { .. })),
+                "fishy"
+            )
         }
 
         Ok(())
@@ -989,22 +1127,19 @@ impl IrohSyncRepo {
         }
         let all_parts = self.peer_partition_ids("", true);
         let blob_backend = BLOBS_BACKEND_ID.into();
-        let (blob_parts, doc_parts): (Vec<_>, Vec<_>) = required_partitions
-            .iter()
-            .partition(|part| {
+        let (blob_parts, doc_parts): (Vec<_>, Vec<_>) =
+            required_partitions.iter().partition(|part| {
                 all_parts
                     .get(part)
                     .is_some_and(|backend| *backend == blob_backend)
             });
         let timeout_outcome = tokio::time::timeout(timeout, async {
-            let doc_wait = self.big_sync_worker.wait_for_full_sync(
-                peer_ids.iter().copied(),
-                doc_parts.iter().copied(),
-            );
-            let blob_wait = self.blob_sync_worker.wait_for_full_sync(
-                peer_ids.iter().copied(),
-                blob_parts.iter().copied(),
-            );
+            let doc_wait = self
+                .big_sync_worker
+                .wait_for_full_sync(peer_ids.iter().copied(), doc_parts.iter().copied());
+            let blob_wait = self
+                .blob_sync_worker
+                .wait_for_full_sync(peer_ids.iter().copied(), blob_parts.iter().copied());
             tokio::try_join!(doc_wait, blob_wait)?;
             eyre::Ok(())
         })

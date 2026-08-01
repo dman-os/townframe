@@ -44,7 +44,8 @@ impl DrawerRepo {
                     self.drawer_group.clone().into(),
                 ],
             )
-            .await {
+            .await
+        {
             Ok(val) => val,
             Err(big_repo::CreateDocError::Put(big_repo::PutDocError::IdOccpuied { .. })) => {
                 panic!("keyhive document ID conflict")
@@ -468,7 +469,8 @@ impl DrawerRepo {
         let handle = match self
             .big_repo
             .create_doc_with_parents(branch_doc, parents)
-            .await {
+            .await
+        {
             Ok(val) => val,
             Err(big_repo::CreateDocError::Put(big_repo::PutDocError::IdOccpuied { .. })) => {
                 panic!("keyhive document ID conflict")

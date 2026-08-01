@@ -14,7 +14,7 @@
 //! the suite gates every Keyhive assertion behind an explicit sync call, so a
 //! missing notification is invisible there; this module is the exception.
 
-use super::harness::{Pair, fixtures};
+use super::harness::{fixtures, Pair};
 use crate::Res;
 use automerge::transaction::Transactable;
 use std::time::Duration;
@@ -106,8 +106,6 @@ async fn create_doc_notification_drives_peer_keyhive_convergence() -> Res<()> {
              syncs — cluster Keyhive convergence is broken"
         )
     })?;
-
-
 
     drop(owner_doc);
     Ok(())

@@ -317,24 +317,14 @@ async fn pull_required_partitions_via_big_sync_worker(
     big_repo
         .sync_keyhive_with_peer(peer_id, Some(timeout))
         .await?;
-    big_repo.wait_for_quiescence(Some(timeout)).await?;
-    // The source grants the clone agent membership after the first Keyhive
-    // exchange. Wait for that notification, then repeat the exchange before
-    // exposing the clone to BigSync document discovery.
+    // Clone provisioning is an explicit protocol. Notifications are advisory;
+    // after subscription readiness, poll the authoritative grant by exchanging
+    // Keyhive state and attempting the two required document syncs.
     tokio::time::timeout(timeout, async {
         loop {
-            let event = keyhive_changes
-                .recv()
-                .await
-                .map_err(|error| ferr!("clone Keyhive subscription failed: {error}"))?
-                .ok_or_else(|| ferr!("clone Keyhive subscription closed"))?;
-            if event.initial {
-                continue;
-            }
             big_repo
                 .sync_keyhive_with_peer(peer_id, Some(timeout))
                 .await?;
-            big_repo.wait_for_quiescence(Some(timeout)).await?;
             let docs = [bootstrap.app_doc_id, bootstrap.drawer_doc_id];
             let mut ready = true;
             for doc_id in docs {
@@ -359,6 +349,9 @@ async fn pull_required_partitions_via_big_sync_worker(
             if ready {
                 return eyre::Ok(());
             }
+            // A sync can overlap grant persistence. Retry this explicit
+            // clone-bootstrap protocol until both authoritative docs are visible.
+            tokio::time::sleep(Duration::from_millis(50)).await;
         }
     })
     .await

@@ -1,11 +1,11 @@
 //! runtime2 messages. Uses `futures::channel::oneshot` for request/response;
 //! no Tokio types.
 
-use crate::DocumentId;
 use crate::interlude::*;
+use crate::DocumentId;
 use big_sync_core::PeerId;
-use std::sync::Arc;
 use std::sync::atomic::AtomicU64;
+use std::sync::Arc;
 
 /// Commands into the runtime hub (from `Runtime2Handle`).
 #[derive(educe::Educe)]
@@ -17,9 +17,11 @@ pub enum Runtime2Cmd {
     /// [`RuntimeIo::create_document`]: super::RuntimeIo::create_document
     /// [`PutDoc`]: Self::PutDoc
     CreateDoc {
+        #[educe(Debug(ignore))]
         initial_content: Box<automerge::Automerge>,
         parents: Vec<crate::keyhive::BigKeyhiveAuthority>,
         content_heads: nonempty::NonEmpty<[u8; 32]>,
+        #[educe(Debug(ignore))]
         resp: futures::channel::oneshot::Sender<
             eyre::Result<Arc<crate::runtime2::types::LiveDocBundle>>,
         >,
@@ -28,13 +30,16 @@ pub enum Runtime2Cmd {
     /// The hub sends this to itself after `CreateDoc` completes.
     PutDoc {
         doc_id: DocumentId,
+        #[educe(Debug(ignore))]
         initial_content: Box<automerge::Automerge>,
+        #[educe(Debug(ignore))]
         resp: futures::channel::oneshot::Sender<
             eyre::Result<Arc<crate::runtime2::types::LiveDocBundle>>,
         >,
     },
     GetDocHandle {
         doc_id: DocumentId,
+        #[educe(Debug(ignore))]
         resp: futures::channel::oneshot::Sender<
             eyre::Result<
                 crate::runtime2::types::DocLookup<Arc<crate::runtime2::types::LiveDocBundle>>,
@@ -43,43 +48,68 @@ pub enum Runtime2Cmd {
     },
     CommitDelta {
         doc_id: DocumentId,
+        #[educe(Debug(ignore))]
         commits: Vec<(
             sedimentree_core::loose_commit::id::CommitId,
             std::collections::BTreeSet<sedimentree_core::loose_commit::id::CommitId>,
             Vec<u8>,
         )>,
         heads: Vec<automerge::ChangeHash>,
+        #[educe(Debug(ignore))]
         patches: Vec<automerge::Patch>,
         origin: crate::changes::BigRepoChangeOrigin,
+        #[educe(Debug(ignore))]
         resp: futures::channel::oneshot::Sender<eyre::Result<()>>,
     },
     DocHeadState {
         doc_id: DocumentId,
+        #[educe(Debug(ignore))]
         resp: futures::channel::oneshot::Sender<eyre::Result<crate::runtime2::DocHeadState>>,
+    },
+    InspectDocHeadState {
+        doc_id: DocumentId,
+        #[educe(Debug(ignore))]
+        resp: futures::channel::oneshot::Sender<
+            eyre::Result<Option<crate::runtime2::DocHeadState>>,
+        >,
     },
     OpenConn {
         peer: PeerId,
         addr: Box<dyn std::any::Any + Send>,
+        #[educe(Debug(ignore))]
         resp: futures::channel::oneshot::Sender<
             eyre::Result<(
                 PeerId,
                 Arc<std::sync::atomic::AtomicBool>,
-                futures::channel::oneshot::Receiver<eyre::Result<()>>,
+                futures::channel::oneshot::Receiver<(
+                    Arc<std::sync::atomic::AtomicBool>,
+                    eyre::Result<()>,
+                )>,
             )>,
         >,
     },
     AcceptConn {
         incoming: Box<dyn std::any::Any + Send>,
+        #[educe(Debug(ignore))]
         resp: futures::channel::oneshot::Sender<
             eyre::Result<(
                 PeerId,
                 Arc<std::sync::atomic::AtomicBool>,
-                futures::channel::oneshot::Receiver<eyre::Result<()>>,
+                futures::channel::oneshot::Receiver<(
+                    Arc<std::sync::atomic::AtomicBool>,
+                    eyre::Result<()>,
+                )>,
             )>,
         >,
     },
     CloseConn {
         peer_id: PeerId,
+        /// End flag of the specific connection being closed. Subduction
+        /// tracks multiple connections per peer, so a close must identify
+        /// WHICH connection it targets; the peer's registration is only
+        /// torn down when this flag matches the peer's current connection.
+        closed: std::sync::Arc<std::sync::atomic::AtomicBool>,
+        #[educe(Debug(ignore))]
         resp: Option<futures::channel::oneshot::Sender<eyre::Result<()>>>,
     },
     SyncDocWithPeer {
@@ -87,11 +117,30 @@ pub enum Runtime2Cmd {
         peer_id: PeerId,
         waiter_id: u64,
         timeout: Option<std::time::Duration>,
-        resp: futures::channel::oneshot::Sender<Result<(), crate::runtime2::types::SyncDocError>>,
+        #[educe(Debug(ignore))]
+        resp: futures::channel::oneshot::Sender<
+            Result<crate::runtime2::types::SyncDocReceipt, crate::runtime2::types::SyncDocError>,
+        >,
+    },
+    FinalizeDocSync {
+        sync_id: u64,
+        doc_id: DocumentId,
+        peer_id: PeerId,
+        #[educe(Debug(ignore))]
+        transport: crate::runtime2::io::SyncDocAttempt,
+        #[educe(Debug(ignore))]
+        resp: futures::channel::oneshot::Sender<
+            Result<crate::runtime2::types::SyncDocReceipt, crate::runtime2::types::SyncDocError>,
+        >,
     },
     SyncKeyhiveWithPeer {
         peer_id: PeerId,
         waiter_id: u64,
+        #[educe(Debug(ignore))]
+        resp: futures::channel::oneshot::Sender<eyre::Result<()>>,
+    },
+    WaitForKeyhiveReconciliation {
+        #[educe(Debug(ignore))]
         resp: futures::channel::oneshot::Sender<eyre::Result<()>>,
     },
     CancelDocSyncWaiter {
@@ -105,6 +154,7 @@ pub enum Runtime2Cmd {
     },
     RegisterDocLease {
         doc_id: DocumentId,
+        #[educe(Debug(ignore))]
         registered: futures::channel::oneshot::Sender<()>,
     },
     ReleaseDocLease {
@@ -115,25 +165,30 @@ pub enum Runtime2Cmd {
     },
     ContainsSedimentree {
         doc_id: DocumentId,
+        #[educe(Debug(ignore))]
         resp: futures::channel::oneshot::Sender<eyre::Result<bool>>,
     },
     HasLocalDocState {
         doc_id: DocumentId,
+        #[educe(Debug(ignore))]
         resp: futures::channel::oneshot::Sender<eyre::Result<bool>>,
     },
     #[cfg(test)]
     HasDocWorker {
         doc_id: DocumentId,
+        #[educe(Debug(ignore))]
         resp: futures::channel::oneshot::Sender<eyre::Result<bool>>,
     },
     InspectStoredDocBlobs {
         sed_id: sedimentree_core::id::SedimentreeId,
+        #[educe(Debug(ignore))]
         resp: futures::channel::oneshot::Sender<eyre::Result<Vec<Vec<u8>>>>,
     },
     /// Wait until all finite runtime work currently admitted to the Hub and
     /// document workers has drained. Pending decryption is quiescent; this
     /// does not wait for unavailable keys.
     WaitForQuiescence {
+        #[educe(Debug(ignore))]
         resp: futures::channel::oneshot::Sender<eyre::Result<()>>,
     },
 }
@@ -143,6 +198,8 @@ pub enum Runtime2Cmd {
 #[educe(Debug)]
 pub enum Runtime2Evt {
     SyncSessionObserved {
+        #[educe(Debug(ignore))]
+        cause: tracing::Span,
         session: subduction_core::sync_session::SyncSession,
     },
     ConnEstablished {
@@ -176,6 +233,11 @@ pub enum Runtime2Evt {
         barrier_id: u64,
         result: eyre::Result<u64>,
     },
+    KeyhiveReconciliationCaptured {
+        result: eyre::Result<u64>,
+        #[educe(Debug(ignore))]
+        resp: futures::channel::oneshot::Sender<eyre::Result<()>>,
+    },
     /// The persisted Keyhive-derived partition cursor advanced.
     GroupPartWorkerAdvanced {
         cursor: u64,
@@ -193,6 +255,10 @@ pub enum Runtime2Evt {
     },
     DocWorkerMaterializationReady {
         doc_id: DocumentId,
+    },
+    DocWorkerMaterializationRetryCompleted {
+        doc_id: DocumentId,
+        status: crate::runtime2::MaterializationStatus,
     },
     /// A document worker reached a quiescence barrier in mailbox order.
     DocWorkerQuiescent {
@@ -242,12 +308,14 @@ pub enum Runtime2Evt {
 #[educe(Debug)]
 pub enum DocWorkerMsg {
     PutDoc {
+        #[educe(Debug(ignore))]
         initial_content: Box<automerge::Automerge>,
         resp: futures::channel::oneshot::Sender<
             eyre::Result<Arc<crate::runtime2::types::LiveDocBundle>>,
         >,
     },
     AcquireHandle {
+        #[educe(Debug(ignore))]
         resp: futures::channel::oneshot::Sender<
             eyre::Result<
                 crate::runtime2::types::DocLookup<Arc<crate::runtime2::types::LiveDocBundle>>,
@@ -255,14 +323,17 @@ pub enum DocWorkerMsg {
         >,
     },
     CommitDelta {
+        #[educe(Debug(ignore))]
         commits: Vec<(
             sedimentree_core::loose_commit::id::CommitId,
             std::collections::BTreeSet<sedimentree_core::loose_commit::id::CommitId>,
             Vec<u8>,
         )>,
         heads: Vec<automerge::ChangeHash>,
+        #[educe(Debug(ignore))]
         patches: Vec<automerge::Patch>,
         origin: crate::changes::BigRepoChangeOrigin,
+        #[educe(Debug(ignore))]
         resp: futures::channel::oneshot::Sender<eyre::Result<()>>,
         _lease: crate::runtime2::DocWorkerInternalLease,
     },
@@ -271,9 +342,31 @@ pub enum DocWorkerMsg {
         commit_ids: Vec<sedimentree_core::loose_commit::id::CommitId>,
         fragment_ids: Vec<sedimentree_core::loose_commit::id::CommitId>,
     },
-    ReattemptMaterialization,
+    FinalizeAfterSync {
+        sync_id: u64,
+        #[educe(Debug(ignore))]
+        transport: crate::runtime2::io::SyncDocAttempt,
+        peer_id: PeerId,
+        #[educe(Debug(ignore))]
+        resp: futures::channel::oneshot::Sender<
+            Result<crate::runtime2::types::SyncDocReceipt, crate::runtime2::types::SyncDocError>,
+        >,
+    },
+    ReattemptMaterialization {
+        #[educe(Debug(ignore))]
+        resp: futures::channel::oneshot::Sender<
+            Result<crate::runtime2::MaterializationStatus, String>,
+        >,
+    },
     QueryHeadState {
+        #[educe(Debug(ignore))]
         resp: futures::channel::oneshot::Sender<eyre::Result<crate::runtime2::DocHeadState>>,
+    },
+    InspectHeadState {
+        #[educe(Debug(ignore))]
+        resp: futures::channel::oneshot::Sender<
+            eyre::Result<Option<crate::runtime2::DocHeadState>>,
+        >,
     },
     /// Mailbox-ordered runtime quiescence barrier.
     Quiesce {

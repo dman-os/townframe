@@ -1,26 +1,23 @@
 use future_form::Local;
 use keyhive_core::{
-    access::Access,
-    keyhive::Keyhive,
-    listener::no_listener::NoListener,
-    principal::membered::Membered,
-    store::ciphertext::memory::MemoryCiphertextStore,
+    access::Access, keyhive::Keyhive, listener::no_listener::NoListener,
+    principal::membered::Membered, store::ciphertext::memory::MemoryCiphertextStore,
 };
 use keyhive_crypto::signer::memory::MemorySigner as KeyhiveMemorySigner;
 use nonempty::nonempty;
 use sedimentree_core::codec::{
-        decode::{self, DecodeFields},
-        encode::{self, EncodeFields},
-        error::DecodeError,
-        schema::{self, Schema},
-    };
+    decode::{self, DecodeFields},
+    encode::{self, EncodeFields},
+    error::DecodeError,
+    schema::{self, Schema},
+};
 use subduction_crypto::{
     signed::Signed, signer::memory::MemorySigner as SubductionMemorySigner,
     verified_author::VerifiedAuthor,
 };
 use subduction_keyhive::test_utils::{
-        create_channel_pair, keyhive_peer_id, make_protocol_with_shared_keyhive, run_sync_round,
-    };
+    create_channel_pair, keyhive_peer_id, make_protocol_with_shared_keyhive, run_sync_round,
+};
 
 use crate::interlude::*;
 

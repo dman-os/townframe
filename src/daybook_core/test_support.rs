@@ -159,20 +159,16 @@ pub async fn test_cx_with_options(
     let peer_id = crate::peer_id_from_label(&format!("test_{}", uuid::Uuid::new_v4().simple()));
 
     // Initialize SharedBigRepo with memory storage
-    let (big_repo, acx_stop) = BigRepo::boot(
-        big_repo::Config {
-            node_identity_seed: rand::random::<[u8; 32]>(),
-            storage: big_repo::StorageConfig::Memory,
-            scope_key: Arc::from("daybook-core-test"),
-            hidden_parts: Default::default(),
-        },
-    )
+    let (big_repo, acx_stop) = BigRepo::boot(big_repo::Config {
+        node_identity_seed: rand::random::<[u8; 32]>(),
+        storage: big_repo::StorageConfig::Memory,
+        scope_key: Arc::from("daybook-core-test"),
+        hidden_parts: Default::default(),
+    })
     .await?;
     let part_store = big_repo.shared_part_store();
-    let (_worker, big_sync_stop) = big_sync::spawn_big_sync_worker(
-        Arc::clone(&part_store),
-        HashMap::new(),
-    )?;
+    let (_worker, big_sync_stop) =
+        big_sync::spawn_big_sync_worker(Arc::clone(&part_store), HashMap::new())?;
 
     // Create a drawer document
     let drawer_doc_id = {
@@ -443,20 +439,16 @@ pub async fn boot_repo() -> Res<(
     big_sync::Ctx,
     Box<dyn FnOnce() -> futures::future::BoxFuture<'static, Res<()>>>,
 )> {
-    let (repo, stop) = BigRepo::boot(
-        big_repo::Config {
-            node_identity_seed: [7_u8; 32],
-            storage: big_repo::StorageConfig::Memory,
-            scope_key: Arc::from("daybook-core-test"),
-            hidden_parts: Default::default(),
-        },
-    )
+    let (repo, stop) = BigRepo::boot(big_repo::Config {
+        node_identity_seed: [7_u8; 32],
+        storage: big_repo::StorageConfig::Memory,
+        scope_key: Arc::from("daybook-core-test"),
+        hidden_parts: Default::default(),
+    })
     .await?;
     let part_store = repo.shared_part_store();
-    let (worker, big_sync_stop) = big_sync::spawn_big_sync_worker(
-        Arc::clone(&part_store),
-        HashMap::new(),
-    )?;
+    let (worker, big_sync_stop) =
+        big_sync::spawn_big_sync_worker(Arc::clone(&part_store), HashMap::new())?;
     let big_sync_host = big_sync::Ctx {
         store: part_store,
         worker,
@@ -482,20 +474,16 @@ pub async fn boot_disk_repo(
     big_sync::Ctx,
     Box<dyn FnOnce() -> futures::future::BoxFuture<'static, Res<()>>>,
 )> {
-    let (repo, stop) = BigRepo::boot(
-        big_repo::Config {
-            node_identity_seed: [7_u8; 32],
-            storage: big_repo::StorageConfig::Disk { path },
-            scope_key: Arc::from("daybook-core-test"),
-            hidden_parts: Default::default(),
-        },
-    )
+    let (repo, stop) = BigRepo::boot(big_repo::Config {
+        node_identity_seed: [7_u8; 32],
+        storage: big_repo::StorageConfig::Disk { path },
+        scope_key: Arc::from("daybook-core-test"),
+        hidden_parts: Default::default(),
+    })
     .await?;
     let part_store = repo.shared_part_store();
-    let (worker, big_sync_stop) = big_sync::spawn_big_sync_worker(
-        Arc::clone(&part_store),
-        HashMap::new(),
-    )?;
+    let (worker, big_sync_stop) =
+        big_sync::spawn_big_sync_worker(Arc::clone(&part_store), HashMap::new())?;
     let big_sync_host = big_sync::Ctx {
         store: part_store,
         worker,

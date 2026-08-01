@@ -14,11 +14,11 @@
 
 use crate::interlude::*;
 use crate::keyhive_storage::BigRepoKeyhiveStorage;
+use crate::runtime2::support::BigRepoCiphertextLocator;
 use crate::runtime2::{
-    CausalDecryptResult, Clock, DocIo, RuntimeIo, SyncDocAttempt, TaskSet, Timer,
+    CausalDecryptResult, DocIo, MaterializationBlocker, RuntimeIo, SyncDocAttempt, TaskSet,
 };
 use crate::{
-    BigEphemeral, BigKeyhiveHandle, DocumentId,
     encrypted_blob::decode_encrypted_blob,
     ephemeral::{BigEphemeralBackend, BigEphemeralSwitchboard, BigRepoEphemeralBackend},
     handler::{
@@ -27,15 +27,15 @@ use crate::{
     },
     keyhive_conn::BigRepoKeyhiveConnAdapter,
     runtime2::support::{
-        BigRepoIrohTransport, BigRepoSubduction, BigRepoSubductionStorage, IrohConnectResult,
-        SubductionSedimentrees, accept_incoming, connect_outgoing_to, encrypt_fragment_blob,
+        accept_incoming, connect_outgoing_to, encrypt_fragment_blob,
         encrypt_loose_commit_with_update_op, encrypt_staged_automerge_ingest,
-        persist_cgka_updates_durably, sedimentree_heads_payload,
+        persist_cgka_updates_durably, sedimentree_heads_payload, BigRepoIrohTransport,
+        BigRepoSubduction, BigRepoSubductionStorage, IrohConnectResult, SubductionSedimentrees,
     },
     runtime2::types::BigRepoSyncPolicy,
+    BigEphemeral, BigKeyhiveHandle, DocumentId,
 };
-use big_sync_core::PeerId;
-use future_form::{FutureForm, Sendable};
+use keyhive_core::principal::document::DecryptError;
 use keyhive_core::{
     crypto::envelope::Envelope, principal::document::id::DocumentId as KhDocumentId,
     principal::identifier::Identifier, store::ciphertext::CiphertextStore,
@@ -46,14 +46,12 @@ use sedimentree_core::{
     depth::CountLeadingZeroBytes,
     id::SedimentreeId,
     loose_commit::id::CommitId,
-    sedimentree::{Sedimentree, minimized::MinimizedSedimentree},
+    sedimentree::{minimized::MinimizedSedimentree, Sedimentree},
 };
-use std::collections::{BTreeSet, HashMap};
-use std::sync::Arc;
 use subduction_core::{
-    authenticated::Authenticated, connection::Connection, handler::sync::SyncHandler,
-    nonce_cache::NonceCache, storage::powerbox::StoragePowerbox, subduction::Subduction,
-    subduction::request::FragmentRequested,
+    authenticated::Authenticated, handler::sync::SyncHandler, nonce_cache::NonceCache,
+    storage::powerbox::StoragePowerbox, subduction::request::FragmentRequested,
+    subduction::Subduction,
 };
 use subduction_ephemeral::{
     clock::std_clock::StdClock, config::EphemeralConfig, handler::EphemeralHandler,
@@ -127,31 +125,31 @@ where
     S: BigRepoSubductionStorage,
 {
     /// Shared SQLite state for Keyhive-derived partition/event watermarks.
-    pub(crate) group_part_store: crate::sqlite_big_repo_store::SqliteBigRepoStore,
+    group_part_store: crate::sqlite_big_repo_store::SqliteBigRepoStore,
     /// Shared subduction handle — the core sync + storage engine.
-    pub(crate) subduction: Arc<BigRepoSubduction<S>>,
+    subduction: Arc<BigRepoSubduction<S>>,
     /// Clonable storage backend (for direct reads).
-    pub(crate) storage: S,
+    storage: S,
     /// Shared sedimentree cache (minimized trees).
-    pub(crate) sedimentrees: SubductionSedimentrees,
+    sedimentrees: SubductionSedimentrees,
     /// Keyhive handle — document operations, content encryption.
-    pub(crate) keyhive: BigKeyhiveHandle,
+    keyhive: BigKeyhiveHandle,
     /// Keyhive storage — CGKA ops, archives.
-    pub(crate) keyhive_storage: BigRepoKeyhiveStorage,
+    keyhive_storage: BigRepoKeyhiveStorage,
     /// Keyhive protocol handle — sync initiation, cache refresh, compaction.
-    pub(crate) keyhive_protocol: BigRepoKeyhiveProtocol,
+    keyhive_protocol: BigRepoKeyhiveProtocol,
     /// Local peer identity.
-    pub(crate) local_peer_id: PeerId,
+    local_peer_id: PeerId,
     /// Sync policy (timeouts, TTLs).
-    pub(crate) sync_policy: BigRepoSyncPolicy,
+    sync_policy: BigRepoSyncPolicy,
     /// Ownership for the legacy ephemeral switchboard task. Dropping the
     /// runtime2 hub drops this set and therefore shuts the switchboard down.
-    pub(crate) ephemeral_tasks: Arc<utils_rs::AbortableJoinSet>,
+    ephemeral_tasks: Arc<utils_rs::AbortableJoinSet>,
     /// Ephemeral publisher for application-level transient messages.
-    pub(crate) ephemeral_backend: Arc<dyn BigEphemeralBackend>,
+    ephemeral_backend: Arc<dyn BigEphemeralBackend>,
     /// Single funnel for local Keyhive change notifications: cache-busts the
     /// protocol and broadcasts the RPC keyhive-changed hint to peers.
-    pub(crate) keyhive_notifier: KeyhiveChangeNotifier,
+    keyhive_notifier: KeyhiveChangeNotifier,
 }
 
 impl<S> std::fmt::Debug for NativeBigRepoIo<S>
@@ -189,6 +187,45 @@ impl<S: BigRepoSubductionStorage> NativeCiphertextStore<S> {
         }
     }
 
+    async fn contains_content(&self, content_ref: &[u8]) -> Res<bool> {
+        // Check cache first.
+        {
+            let cache = self.cache.lock().expect(ERROR_MUTEX);
+            if let Some(encrypted) = cache.get(content_ref) {
+                return Ok(true);
+            }
+        }
+        let commit_id_bytes: [u8; 32] = content_ref
+            .try_into()
+            .map_err(|_| ferr!("content_ref must be 32 bytes, got {}", content_ref.len()))?;
+        let commit_id = CommitId::new(commit_id_bytes);
+        // FIXME: use select! and race these two loads
+        if let Some(verified) =
+            <S as subduction_core::storage::traits::Storage<Sendable>>::load_fragment(
+                &self.storage,
+                self.sed_id,
+                commit_id,
+            )
+            .await
+            .wrap_err("failed loading fragment for ciphertext")?
+        {
+            return Ok(true);
+        }
+        if let Some(verified) =
+            <S as subduction_core::storage::traits::Storage<Sendable>>::load_loose_commit(
+                &self.storage,
+                self.sed_id,
+                commit_id,
+            )
+            .await
+            .wrap_err("failed loading loose commit for ciphertext")?
+        {
+            return Ok(true);
+        }
+
+        Ok(false)
+    }
+
     async fn load_and_cache(
         &self,
         content_ref: &[u8],
@@ -214,10 +251,10 @@ impl<S: BigRepoSubductionStorage> NativeCiphertextStore<S> {
                 commit_id,
             )
             .await
-            .map_err(|e| ferr!("failed loading fragment for ciphertext: {e}"))?
+            .wrap_err("failed loading fragment for ciphertext")?
         {
             let encrypted = decode_encrypted_blob(verified.blob().as_slice())
-                .map_err(|e| ferr!("failed decoding fragment encrypted blob: {e}"))?;
+                .wrap_err("failed decoding fragment encrypted blob")?;
             let encrypted = Arc::new(encrypted);
             self.cache
                 .lock()
@@ -233,10 +270,10 @@ impl<S: BigRepoSubductionStorage> NativeCiphertextStore<S> {
                 commit_id,
             )
             .await
-            .map_err(|e| ferr!("failed loading loose commit for ciphertext: {e}"))?
+            .wrap_err("failed loading loose commit for ciphertext")?
         {
             let encrypted = decode_encrypted_blob(verified.blob().as_slice())
-                .map_err(|e| ferr!("failed decoding loose commit encrypted blob: {e}"))?;
+                .wrap_err("failed decoding loose commit encrypted blob")?;
             let encrypted = Arc::new(encrypted);
             self.cache
                 .lock()
@@ -258,7 +295,7 @@ impl<S: BigRepoSubductionStorage> CiphertextStore<Sendable, Vec<u8>, Vec<u8>>
     fn get_ciphertext<'a>(
         &'a self,
         content_ref: &'a Vec<u8>,
-    ) -> <Sendable as future_form::FutureForm>::Future<
+    ) -> <Sendable as FutureForm>::Future<
         'a,
         std::result::Result<
             Option<Arc<beekem::encrypted::EncryptedContent<Vec<u8>, Vec<u8>>>>,
@@ -273,7 +310,7 @@ impl<S: BigRepoSubductionStorage> CiphertextStore<Sendable, Vec<u8>, Vec<u8>>
         _pcs_update: &'a keyhive_crypto::digest::Digest<
             keyhive_crypto::signed::Signed<beekem::operation::CgkaOperation>,
         >,
-    ) -> <Sendable as future_form::FutureForm>::Future<
+    ) -> <Sendable as FutureForm>::Future<
         'a,
         std::result::Result<
             Vec<Arc<beekem::encrypted::EncryptedContent<Vec<u8>, Vec<u8>>>>,
@@ -287,10 +324,8 @@ impl<S: BigRepoSubductionStorage> CiphertextStore<Sendable, Vec<u8>, Vec<u8>>
     fn mark_decrypted<'a>(
         &'a self,
         _content_ref: &'a Vec<u8>,
-    ) -> <Sendable as future_form::FutureForm>::Future<
-        'a,
-        std::result::Result<(), Self::MarkDecryptedError>,
-    > {
+    ) -> <Sendable as FutureForm>::Future<'a, std::result::Result<(), Self::MarkDecryptedError>>
+    {
         Sendable::from_future(async move { Ok(()) })
     }
 }
@@ -344,7 +379,7 @@ where
         &self,
         sed_id: SedimentreeId,
         staged: crate::runtime2::support::StagedAutomergeIngest,
-    ) -> <Sendable as future_form::FutureForm>::Future<'_, eyre::Result<()>> {
+    ) -> <Sendable as FutureForm>::Future<'_, eyre::Result<()>> {
         Sendable::from_future(async move {
             let (sedimentree, blobs, cgka_ops, local_secrets) =
                 encrypt_staged_automerge_ingest(&staged, &self.keyhive, sed_id)
@@ -358,7 +393,7 @@ where
             self.subduction
                 .store_sedimentree(sed_id, sedimentree, blobs)
                 .await
-                .map_err(|error| ferr!("failed storing initial sedimentree: {error}"))?;
+                .wrap_err("failed storing initial sedimentree")?;
             if keyhive_changed {
                 // Cache-bust + notify peers in one call.
                 self.keyhive_notifier.note_local_keyhive_changed().await?;
@@ -371,8 +406,7 @@ where
         &self,
         sed_id: SedimentreeId,
         commits: Vec<(CommitId, BTreeSet<CommitId>, Vec<u8>)>,
-    ) -> <Sendable as future_form::FutureForm>::Future<'_, eyre::Result<BTreeSet<FragmentRequested>>>
-    {
+    ) -> <Sendable as FutureForm>::Future<'_, eyre::Result<BTreeSet<FragmentRequested>>> {
         Sendable::from_future(async move {
             let mut fragment_requests = BTreeSet::new();
             let mut keyhive_changed = false;
@@ -410,7 +444,7 @@ where
                     .subduction
                     .store_commit(sed_id, head, parents, encrypted_blob)
                     .await
-                    .map_err(|error| ferr!("failed store_commit: {error}"))?
+                    .wrap_err("failed store_commit")?
                 {
                     assert!(
                         fragment_requests.insert(request),
@@ -429,7 +463,7 @@ where
     fn sedimentree_heads(
         &self,
         sed_id: SedimentreeId,
-    ) -> <Sendable as future_form::FutureForm>::Future<'_, eyre::Result<Vec<CommitId>>> {
+    ) -> <Sendable as FutureForm>::Future<'_, eyre::Result<Vec<CommitId>>> {
         Sendable::from_future(async move {
             // Try sedimentree cache first. If it reports an impossible empty
             // frontier, compare it with durable storage before returning so a
@@ -500,8 +534,7 @@ where
     fn hydrate_tree(
         &self,
         sed_id: SedimentreeId,
-    ) -> <Sendable as future_form::FutureForm>::Future<'_, eyre::Result<Option<MinimizedSedimentree>>>
-    {
+    ) -> <Sendable as FutureForm>::Future<'_, eyre::Result<Option<MinimizedSedimentree>>> {
         Sendable::from_future(async move {
             // Check cache first.
             if let Some(tree) = self.sedimentrees.get_cloned(&sed_id).await {
@@ -548,7 +581,7 @@ where
         boundary: std::collections::BTreeSet<CommitId>,
         checkpoints: Vec<CommitId>,
         raw_blob: Vec<u8>,
-    ) -> <Sendable as future_form::FutureForm>::Future<'_, eyre::Result<()>> {
+    ) -> <Sendable as FutureForm>::Future<'_, eyre::Result<()>> {
         Sendable::from_future(async move {
             let raw_blob = Blob::new(raw_blob);
             let encrypted_blob = encrypt_fragment_blob(
@@ -587,8 +620,8 @@ where
     fn try_decrypt_content_keyed(
         &self,
         sed_id: SedimentreeId,
-        locator: crate::runtime2::support::BigRepoCiphertextLocator,
-    ) -> <Sendable as future_form::FutureForm>::Future<'_, eyre::Result<Option<Vec<u8>>>> {
+        locator: BigRepoCiphertextLocator,
+    ) -> <Sendable as FutureForm>::Future<'_, eyre::Result<Option<Vec<u8>>>> {
         Sendable::from_future(async move {
             // Load the raw blob from storage.
             let raw = match locator.kind {
@@ -639,18 +672,30 @@ where
                         .map_err(|e| ferr!("bincode decrypt result: {e}"))?;
                     Ok(Some(envelope.plaintext))
                 }
-                Err(keyhive_core::principal::document::DecryptError::KeyNotFound) => Ok(None),
+                Err(DecryptError::KeyNotFound) => Ok(None),
                 Err(err) => Err(ferr!("decrypt failed: {err}")),
             }
         })
     }
 
+    #[tracing::instrument(skip(self))]
     fn try_causal_decrypt(
         &self,
         sed_id: SedimentreeId,
-        locator: crate::runtime2::support::BigRepoCiphertextLocator,
-    ) -> <Sendable as future_form::FutureForm>::Future<'_, eyre::Result<CausalDecryptResult>> {
-        Sendable::from_future(async move {
+        locator: BigRepoCiphertextLocator,
+    ) -> <Sendable as FutureForm>::Future<'_, eyre::Result<CausalDecryptResult>> {
+        let fut = async move {
+            // A missing local Keyhive document means the content keys have
+            // not arrived yet. Return an incomplete causal result so the doc
+            // worker records PendingMaterialization and retries after the
+            // next Keyhive sync.
+            let kh_doc_id = kh_doc_id_from_sed_id(sed_id)?;
+            let Some(kh_doc) = self.keyhive.clone_keyhive().get_document(kh_doc_id).await else {
+                return Ok(CausalDecryptResult {
+                    complete: Vec::new(),
+                    blockers: vec![MaterializationBlocker::DocumentNotInHive],
+                });
+            };
             // Load the raw blob from storage.
             let raw = match locator.kind {
                 crate::runtime2::support::BigRepoCiphertextKind::LooseCommit => {
@@ -675,20 +720,22 @@ where
                 }
             };
             let Some(raw) = raw else {
-                return Ok(CausalDecryptResult::default());
+                return Ok(CausalDecryptResult {
+                    complete: Vec::new(),
+                    blockers: vec![MaterializationBlocker::MissingCiphertexts {
+                        content_refs: vec![locator.commit_id.as_bytes().to_vec()],
+                    }],
+                });
             };
 
             // Decode the encrypted blob.
-            let encrypted = decode_encrypted_blob(&raw)
-                .map_err(|e| ferr!("failed decoding encrypted blob: {e}"))?;
-
-            // A missing local Keyhive document means the content keys have
-            // not arrived yet. Return an incomplete causal result so the doc
-            // worker records PendingMaterialization and retries after the
-            // next Keyhive sync.
-            let kh_doc_id = kh_doc_id_from_sed_id(sed_id)?;
-            let Some(kh_doc) = self.keyhive.clone_keyhive().get_document(kh_doc_id).await else {
-                return Ok(CausalDecryptResult::default());
+            let encrypted =
+                decode_encrypted_blob(&raw).wrap_err("failed decoding encrypted blob")?;
+            let key_tag = |key: &keyhive_crypto::symmetric_key::SymmetricKey| {
+                use std::hash::{Hash, Hasher};
+                let mut hasher = std::collections::hash_map::DefaultHasher::new();
+                key.as_slice().hash(&mut hasher);
+                format!("{:016x}", hasher.finish())
             };
 
             // Set up a ciphertext store backed by our storage.
@@ -700,9 +747,25 @@ where
             let (entrypoint_raw, entrypoint_key) = {
                 let mut doc = kh_doc.lock().await;
                 match doc.try_decrypt_content_keyed(&encrypted) {
-                    Ok((plaintext, key)) => (plaintext, key),
-                    Err(keyhive_core::principal::document::DecryptError::KeyNotFound) => {
-                        return Ok(CausalDecryptResult::default());
+                    Ok((plaintext, key)) => {
+                        tracing::debug!(
+                            content_ref = ?encrypted.content_ref,
+                            entry_key_id = %key_tag(&key),
+                            "decrypted sedimentree entrypoint"
+                        );
+                        (plaintext, key)
+                    }
+                    Err(DecryptError::KeyNotFound) => {
+                        tracing::warn!(
+                            content_ref = ?encrypted.content_ref,
+                            "missing entry encryption key while materializing"
+                        );
+                        return Ok(CausalDecryptResult {
+                            complete: Vec::new(),
+                            blockers: vec![MaterializationBlocker::MissingDocumentKeys {
+                                content_refs: vec![encrypted.content_ref.clone()],
+                            }],
+                        });
                     }
                     Err(error) => {
                         return Err(ferr!("entrypoint decrypt failed: {error}"));
@@ -716,16 +779,41 @@ where
             // Attempt causal decrypt for the entrypoint's ancestors.
             let state = {
                 let mut doc = kh_doc.lock().await;
-                match doc.try_causal_decrypt_content(&encrypted, ct_store).await {
-                    Ok(state) => state,
-                    Err(error) => {
-                        return Err(ferr!(
-                            "causal decrypt failed; BigRepo envelope is not causally closed: {error}"
-                        ));
-                    }
-                }
+                doc.try_causal_decrypt_content(&encrypted, &ct_store)
+                    .await
+                    .map_err(|err| {
+                        ferr!(
+                            "causal decrypt failed; BigRepo envelope is not causally closed: {err}"
+                        )
+                    })?
             };
 
+            let mut missing_ciphertexts = Vec::new();
+            let mut missing_keys = Vec::new();
+            let complete_refs: std::collections::HashSet<_> = state
+                .complete
+                .iter()
+                .map(|(content_ref, _)| content_ref)
+                .collect();
+            for ancestor_ref in entrypoint_envelope.ancestors.keys() {
+                if complete_refs.contains(ancestor_ref) {
+                    continue;
+                }
+                if ct_store.contains_content(ancestor_ref).await? {
+                    missing_keys.push(ancestor_ref.clone());
+                } else {
+                    missing_ciphertexts.push(ancestor_ref.clone());
+                }
+            }
+            if !missing_ciphertexts.is_empty() || !missing_keys.is_empty() {
+                tracing::warn!(
+                    content_ref = ?encrypted.content_ref,
+                    ancestor_count = entrypoint_envelope.ancestors.len(),
+                    missing_ciphertexts = ?missing_ciphertexts,
+                    missing_keys = ?missing_keys,
+                    "causal decrypt returned an incomplete ancestor closure"
+                );
+            }
             // The causal store returns the application keys it used, but the
             // generic Keyhive API does not persist them on the document. Keep
             // them there so a later local child commit can construct its own
@@ -734,6 +822,11 @@ where
                 let mut doc = kh_doc.lock().await;
                 doc.remember_decryption_key(encrypted.content_ref.clone(), entrypoint_key);
                 for (content_ref, key) in &state.keys {
+                    tracing::debug!(
+                        content_ref = ?content_ref,
+                        key_id = %key_tag(key),
+                        "remembering causal decryption key"
+                    );
                     doc.remember_decryption_key(content_ref.clone(), *key);
                 }
             }
@@ -749,19 +842,32 @@ where
                 {
                     continue;
                 }
-                let envelope: Envelope<Vec<u8>, Vec<u8>> =
-                    match bincode::deserialize(&ciphertext_or_plaintext) {
-                        Ok(env) => env,
-                        Err(_) => {
-                            complete.push((content_ref, ciphertext_or_plaintext));
-                            continue;
-                        }
-                    };
-                complete.push((content_ref, envelope.plaintext));
+                match bincode::deserialize::<'_, Envelope<Vec<u8>, Vec<u8>>>(
+                    &ciphertext_or_plaintext,
+                ) {
+                    Ok(env) => {
+                        complete.push((content_ref, env.plaintext));
+                    }
+                    Err(_) => {
+                        complete.push((content_ref, ciphertext_or_plaintext));
+                    }
+                };
             }
 
-            Ok(CausalDecryptResult { complete })
-        })
+            let mut blockers = Vec::new();
+            if !missing_ciphertexts.is_empty() {
+                blockers.push(MaterializationBlocker::MissingCiphertexts {
+                    content_refs: missing_ciphertexts,
+                });
+            }
+            if !missing_keys.is_empty() {
+                blockers.push(MaterializationBlocker::MissingDocumentKeys {
+                    content_refs: missing_keys,
+                });
+            }
+            Ok(CausalDecryptResult { complete, blockers })
+        };
+        Sendable::from_future(fut)
     }
 }
 
@@ -777,7 +883,7 @@ where
         &self,
         parents: Vec<crate::keyhive::BigKeyhiveAuthority>,
         content_heads: NonEmpty<[u8; 32]>,
-    ) -> <Sendable as future_form::FutureForm>::Future<'_, eyre::Result<DocumentId>> {
+    ) -> <Sendable as FutureForm>::Future<'_, eyre::Result<DocumentId>> {
         Sendable::from_future(async move {
             let uuid = Uuid::new_v4();
             info!(%uuid, "creating doc");
@@ -794,7 +900,7 @@ where
     fn contains_sedimentree(
         &self,
         sed_id: SedimentreeId,
-    ) -> <Sendable as future_form::FutureForm>::Future<'_, eyre::Result<bool>> {
+    ) -> <Sendable as FutureForm>::Future<'_, eyre::Result<bool>> {
         Sendable::from_future(async move {
             self.storage
                 .contains_sedimentree_id(sed_id)
@@ -806,7 +912,7 @@ where
     fn inspect_stored_doc_blobs(
         &self,
         sed_id: SedimentreeId,
-    ) -> <Sendable as future_form::FutureForm>::Future<'_, eyre::Result<Vec<Vec<u8>>>> {
+    ) -> <Sendable as FutureForm>::Future<'_, eyre::Result<Vec<Vec<u8>>>> {
         Sendable::from_future(async move {
             let commits =
                 <S as subduction_core::storage::traits::Storage<Sendable>>::load_loose_commits(
@@ -834,10 +940,7 @@ where
         })
     }
 
-
-    fn keyhive_event_log_cursor(
-        &self,
-    ) -> <Sendable as future_form::FutureForm>::Future<'_, eyre::Result<u64>> {
+    fn keyhive_event_log_cursor(&self) -> <Sendable as FutureForm>::Future<'_, eyre::Result<u64>> {
         Sendable::from_future(async move { self.group_part_store.keyhive_event_log_cursor().await })
     }
 
@@ -860,7 +963,7 @@ where
         &self,
         peer_id: PeerId,
         request_id: subduction_keyhive::message::RequestId,
-    ) -> <Sendable as future_form::FutureForm>::Future<'_, eyre::Result<()>> {
+    ) -> <Sendable as FutureForm>::Future<'_, eyre::Result<()>> {
         Sendable::from_future(async move {
             let kh_peer_id = KeyhivePeerId::from_bytes(*peer_id.as_bytes());
             match self
@@ -881,7 +984,7 @@ where
     fn refresh_keyhive_cache(
         &self,
         notify: bool,
-    ) -> <Sendable as future_form::FutureForm>::Future<'_, eyre::Result<()>> {
+    ) -> <Sendable as FutureForm>::Future<'_, eyre::Result<()>> {
         Sendable::from_future(async move {
             self.keyhive_protocol
                 .refresh_cache()
@@ -896,10 +999,7 @@ where
         })
     }
 
-    // ── compact_keyhive ───────────────────────────────────────────────────
-    fn compact_keyhive(
-        &self,
-    ) -> <Sendable as future_form::FutureForm>::Future<'_, eyre::Result<()>> {
+    fn compact_keyhive(&self) -> <Sendable as FutureForm>::Future<'_, eyre::Result<()>> {
         Sendable::from_future(async move {
             let archive_id =
                 subduction_keyhive::storage::StorageHash::new(*self.local_peer_id.as_bytes());
@@ -914,7 +1014,7 @@ where
         &self,
         sed_id: SedimentreeId,
         peer_id: PeerId,
-    ) -> <Sendable as future_form::FutureForm>::Future<'_, eyre::Result<SyncDocAttempt>> {
+    ) -> <Sendable as FutureForm>::Future<'_, eyre::Result<SyncDocAttempt>> {
         Sendable::from_future(async move {
             let remote_peer_id = subduction_core::peer::id::PeerId::new(*peer_id.as_bytes());
             let result = self
@@ -943,7 +1043,6 @@ where
                             }
                         })
                     } else if conn_errs.is_empty() {
-                        // Sync completed with no content exchanged and no errors.
                         Ok(SyncDocAttempt::NotFound)
                     } else {
                         Err(ferr!("doc sync transport errors: {conn_errs:?}"))
@@ -976,6 +1075,28 @@ where
     pub(crate) local_peer_id: PeerId,
     pub(crate) ephemeral_backend: Arc<dyn BigEphemeralBackend>,
     pub(crate) keyhive_protocol: BigRepoKeyhiveProtocol,
+    /// Live authenticated connections keyed by their end flag. Subduction
+    /// tracks multiple connections per peer, so closing one connection must
+    /// disconnect exactly that connection — the flag's pointer identity is
+    /// the connection id.
+    conns: std::sync::Arc<
+        std::sync::Mutex<
+            Vec<(
+                std::sync::Arc<std::sync::atomic::AtomicBool>,
+                Authenticated<BigRepoIrohTransport, Sendable>,
+            )>,
+        >,
+    >,
+    /// Which connection (by end flag) last registered the keyhive protocol
+    /// adapter for each peer. `add_peer` overwrites per peer id, so the
+    /// close path must only `remove_peer` when the closing connection is
+    /// still the registered owner — otherwise a superseded connection's
+    /// close would nuke the replacement's adapter and syncpoint.
+    keyhive_adapter_owner: std::sync::Arc<
+        std::sync::Mutex<
+            std::collections::HashMap<KeyhivePeerId, std::sync::Arc<std::sync::atomic::AtomicBool>>,
+        >,
+    >,
 }
 
 impl<S> std::fmt::Debug for IrohTransportConnect<S>
@@ -1009,6 +1130,8 @@ where
         let signer = self.signer.clone();
         let ephemeral_backend = Arc::clone(&self.ephemeral_backend);
         let keyhive_protocol = Arc::clone(&self.keyhive_protocol);
+        let conns = Arc::clone(&self.conns);
+        let keyhive_adapter_owner = Arc::clone(&self.keyhive_adapter_owner);
         Sendable::from_future(async move {
             let (endpoint, endpoint_addr): (iroh::Endpoint, iroh::EndpointAddr) = *addr_blob
                 .downcast::<(iroh::Endpoint, iroh::EndpointAddr)>()
@@ -1040,10 +1163,24 @@ where
             let adapter = BigRepoKeyhiveConnAdapter::<BigRepoIrohTransport>::new(
                 result.authenticated.clone(),
             );
-            keyhive_protocol.add_peer(adapter.peer_id(), adapter).await;
+            let adapter_peer = adapter.peer_id();
+            keyhive_protocol
+                .add_peer(adapter_peer.clone(), adapter)
+                .await;
 
             let closed = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
-
+            // Register this connection in the close registry (keyed by its
+            // end flag) so a later close can disconnect exactly it.
+            conns
+                .lock()
+                .unwrap()
+                .push((Arc::clone(&closed), result.authenticated.clone()));
+            // This connection owns the peer's keyhive adapter (add_peer
+            // overwrites per peer id) until the next connection re-registers.
+            keyhive_adapter_owner
+                .lock()
+                .unwrap()
+                .insert(adapter_peer, Arc::clone(&closed));
             // End future: race listener_task and sender_task. The first to
             // complete signals connection loss.
             let listener = result.listener_task;
@@ -1051,7 +1188,7 @@ where
             let closed_end = std::sync::Arc::clone(&closed);
             let end_fut: <Sendable as FutureForm>::Future<'static, eyre::Result<()>> =
                 Sendable::from_future(async move {
-                    use futures::future::{Either, select};
+                    use futures::future::{select, Either};
                     match select(
                         Box::pin(async { listener.await.map_err(|e| eyre::eyre!("{e}")) }),
                         Box::pin(async { sender.await.map_err(|e| eyre::eyre!("{e}")) }),
@@ -1060,6 +1197,12 @@ where
                     {
                         Either::Left((res, _)) | Either::Right((res, _)) => {
                             closed_end.store(true, std::sync::atomic::Ordering::SeqCst);
+                            // Natural end: drop the close-registry entry so
+                            // a later close of this connection is a clean no-op.
+                            conns
+                                .lock()
+                                .unwrap()
+                                .retain(|(flag, _)| !Arc::ptr_eq(flag, &closed_end));
                             res
                         }
                     }
@@ -1086,6 +1229,8 @@ where
         let local_peer_id = self.local_peer_id;
         let ephemeral_backend = Arc::clone(&self.ephemeral_backend);
         let keyhive_protocol = Arc::clone(&self.keyhive_protocol);
+        let conns = Arc::clone(&self.conns);
+        let keyhive_adapter_owner = Arc::clone(&self.keyhive_adapter_owner);
         Sendable::from_future(async move {
             let conn: iroh::endpoint::Connection = *incoming
                 .downcast::<iroh::endpoint::Connection>()
@@ -1112,17 +1257,31 @@ where
             let adapter = BigRepoKeyhiveConnAdapter::<BigRepoIrohTransport>::new(
                 result.authenticated.clone(),
             );
-            keyhive_protocol.add_peer(adapter.peer_id(), adapter).await;
+            let adapter_peer = adapter.peer_id();
+            keyhive_protocol
+                .add_peer(adapter_peer.clone(), adapter)
+                .await;
 
             let closed = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
-
+            // Register this connection in the close registry (keyed by its
+            // end flag) so a later close can disconnect exactly it.
+            conns
+                .lock()
+                .unwrap()
+                .push((Arc::clone(&closed), result.authenticated.clone()));
+            // This connection owns the peer's keyhive adapter (add_peer
+            // overwrites per peer id) until the next connection re-registers.
+            keyhive_adapter_owner
+                .lock()
+                .unwrap()
+                .insert(adapter_peer, Arc::clone(&closed));
             // End future races listener_task and sender_task.
             let listener = result.listener_task;
             let sender = result.sender_task;
             let closed_end = std::sync::Arc::clone(&closed);
             let end_fut: <Sendable as FutureForm>::Future<'static, eyre::Result<()>> =
                 Sendable::from_future(async move {
-                    use futures::future::{Either, select};
+                    use futures::future::{select, Either};
                     match select(
                         Box::pin(async { listener.await.map_err(|e| eyre::eyre!("{e}")) }),
                         Box::pin(async { sender.await.map_err(|e| eyre::eyre!("{e}")) }),
@@ -1131,6 +1290,12 @@ where
                     {
                         Either::Left((res, _)) | Either::Right((res, _)) => {
                             closed_end.store(true, std::sync::atomic::Ordering::SeqCst);
+                            // Natural end: drop the close-registry entry so
+                            // a later close of this connection is a clean no-op.
+                            conns
+                                .lock()
+                                .unwrap()
+                                .retain(|(flag, _)| !Arc::ptr_eq(flag, &closed_end));
                             res
                         }
                     }
@@ -1143,23 +1308,73 @@ where
     fn close(
         &self,
         peer_id: PeerId,
-    ) -> <Sendable as FutureForm>::Future<'static, eyre::Result<()>> {
+        closed: std::sync::Arc<std::sync::atomic::AtomicBool>,
+    ) -> <Sendable as FutureForm>::Future<
+        'static,
+        eyre::Result<Option<std::sync::Arc<std::sync::atomic::AtomicBool>>>,
+    > {
         let subduction = Arc::clone(&self.subduction);
         let keyhive_protocol = Arc::clone(&self.keyhive_protocol);
+        let conns = Arc::clone(&self.conns);
+        let keyhive_adapter_owner = Arc::clone(&self.keyhive_adapter_owner);
         Sendable::from_future(async move {
-            // Tear down keyhive protocol for this peer.
-            keyhive_protocol
-                .remove_peer(&KeyhivePeerId::from_bytes(*peer_id.as_bytes()))
-                .await;
+            let peer_keyhive = KeyhivePeerId::from_bytes(*peer_id.as_bytes());
+            let owns_adapter = keyhive_adapter_owner
+                .lock()
+                .unwrap()
+                .get(&peer_keyhive)
+                .is_some_and(|owner| std::sync::Arc::ptr_eq(owner, &closed));
 
-            // Disconnect from subduction.
-            let remote_peer_id = subduction_core::peer::id::PeerId::new(*peer_id.as_bytes());
-            subduction
-                .disconnect_from_peer(&remote_peer_id)
-                .await
-                .map_err(|err| ferr!("subduction disconnect_from_peer failed: {err}"))?;
+            // Disconnect exactly the transport represented by this handle.
+            // Subduction removes the connection's paired multiplexer without
+            // disturbing other live connections to the same peer.
+            let auth = conns
+                .lock()
+                .unwrap()
+                .iter()
+                .find(|(flag, _)| std::sync::Arc::ptr_eq(flag, &closed))
+                .map(|(_, auth)| auth.clone());
+            conns
+                .lock()
+                .unwrap()
+                .retain(|(flag, _)| !std::sync::Arc::ptr_eq(flag, &closed));
+            if let Some(auth) = auth {
+                subduction
+                    .disconnect(&auth)
+                    .await
+                    .map_err(|err| ferr!("subduction disconnect failed: {err}"))?;
+            }
 
-            Ok(())
+            // The Keyhive protocol has one adapter per peer. Closing an older
+            // connection must not remove the adapter installed by its replacement.
+            // If the owning connection closes while another transport remains,
+            // immediately install that transport as the protocol adapter.
+            let mut replacement = None;
+            if owns_adapter {
+                let fallback = conns
+                    .lock()
+                    .unwrap()
+                    .iter()
+                    .rev()
+                    .find(|(_, auth)| auth.peer_id().as_bytes() == peer_id.as_bytes())
+                    .map(|(flag, auth)| (Arc::clone(flag), auth.clone()));
+                if let Some((fallback_flag, fallback_auth)) = fallback {
+                    let adapter =
+                        BigRepoKeyhiveConnAdapter::<BigRepoIrohTransport>::new(fallback_auth);
+                    keyhive_protocol
+                        .add_peer(peer_keyhive.clone(), adapter)
+                        .await;
+                    keyhive_adapter_owner
+                        .lock()
+                        .unwrap()
+                        .insert(peer_keyhive, Arc::clone(&fallback_flag));
+                    replacement = Some(fallback_flag);
+                } else {
+                    keyhive_protocol.remove_peer(&peer_keyhive).await;
+                    keyhive_adapter_owner.lock().unwrap().remove(&peer_keyhive);
+                }
+            }
+            Ok(replacement)
         })
     }
 }
@@ -1180,7 +1395,10 @@ impl subduction_core::sync_session::SyncSessionObserver for Runtime2EvtBridge {
     fn on_sync_session(&self, session: subduction_core::sync_session::SyncSession) {
         if self
             .evt_tx
-            .try_send(crate::runtime2::Runtime2Evt::SyncSessionObserved { session })
+            .try_send(crate::runtime2::Runtime2Evt::SyncSessionObserved {
+                cause: tracing::Span::current(),
+                session,
+            })
             .is_err()
         {
             tracing::warn!("runtime2 shutting down; dropping observed sync session");
@@ -1245,7 +1463,6 @@ where
 
     // ── Sync handler (with sync session observer) ─────────────────────────
     let (evt_tx, evt_rx) = async_channel::unbounded::<crate::runtime2::Runtime2Evt>();
-
     let sync_session_observer: Arc<
         dyn subduction_core::sync_session::SyncSessionObserver + Send + Sync,
     > = Arc::new(Runtime2EvtBridge {
@@ -1376,6 +1593,10 @@ where
         local_peer_id: PeerId::new(*local_peer_id.as_bytes()),
         ephemeral_backend: Arc::clone(&ephemeral_backend),
         keyhive_protocol: Arc::clone(&keyhive_protocol),
+        conns: std::sync::Arc::new(std::sync::Mutex::new(Vec::new())),
+        keyhive_adapter_owner: std::sync::Arc::new(std::sync::Mutex::new(
+            std::collections::HashMap::new(),
+        )),
     });
 
     let timer: Arc<dyn crate::runtime2::Timer<Sendable>> = Arc::new(crate::runtime2::TokioTimer);
@@ -1545,9 +1766,9 @@ impl crate::runtime2::Clock for subduction_ephemeral::clock::std_clock::StdClock
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::BigKeyhiveHandle;
     use crate::keyhive_listener::BigRepoKeyhiveListener;
     use crate::keyhive_storage::BigRepoKeyhiveStorage;
+    use crate::BigKeyhiveHandle;
     use keyhive_core::crypto::envelope::Envelope;
     use keyhive_core::store::ciphertext::CiphertextStore;
     use sedimentree_core::blob::verified::VerifiedBlobMeta;
@@ -1771,7 +1992,10 @@ mod tests {
             .try_decrypt(h2_key)
             .map_err(|e| ferr!("decrypting fragment: {e}"))?;
         let envelope: Envelope<Vec<u8>, Vec<u8>> = bincode::deserialize(&plaintext)?;
-        assert_eq!(envelope.plaintext, b"fragment-payload");
+        // Fragment compaction preserves the self-contained checkpoint payload
+        // from its head loose commit; it must not replace it with a dependency-
+        // incomplete Automerge fragment bundle.
+        assert_eq!(envelope.plaintext, b"head-bytes");
         assert_eq!(envelope.ancestors.get(&h1.as_bytes()[..]), Some(&h1_key));
         Ok(())
     }
@@ -1791,17 +2015,15 @@ mod tests {
         .await;
         Storage::<Sendable>::save_loose_commit(&storage, sed_id, verified)
             .await
-            .map_err(|e| ferr!("save_loose_commit failed: {e}"))?;
+            .wrap_err("save_loose_commit failed")?;
         let ct_store = NativeCiphertextStore::new(storage, sed_id);
         let error = ct_store
             .get_ciphertext(&head.as_bytes().to_vec())
             .await
             .expect_err("plaintext blob must not decode as ciphertext");
-        assert!(
-            error
-                .to_string()
-                .contains("failed decoding loose commit encrypted blob")
-        );
+        assert!(error
+            .to_string()
+            .contains("failed decoding loose commit encrypted blob"));
         Ok(())
     }
 }

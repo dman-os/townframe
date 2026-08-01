@@ -16,9 +16,9 @@
 //! | `decrypt_after_fork_and_merge`                            | Forked-then-merged content is decryptable by both participants. |
 //! | `decrypt_after_archive_roundtrip`                         | After process restart (keyhive archive restore), decryptability is preserved. |
 
-use super::harness::{Node, Pair, fixtures, heads, topo::ShutdownGuard};
+use super::harness::{fixtures, heads, topo::ShutdownGuard, Node, Pair};
 use crate::encrypted_blob::decode_encrypted_blob;
-use automerge::{ReadDoc, ScalarValue, transaction::Transactable};
+use automerge::{transaction::Transactable, ReadDoc, ScalarValue};
 use keyhive_core::access::Access;
 use std::sync::Arc;
 
@@ -294,6 +294,17 @@ async fn tier8_checkpoint_ancestor_carries_pregrant_head() -> crate::Res<()> {
     assert!(
         envelope.ancestors.contains_key(&pregrant_head),
         "checkpoint envelope must carry the pregrant head in its ancestors map"
+    );
+
+    let snapshot = automerge::Automerge::load(&envelope.plaintext).map_err(|error| {
+        crate::ferr!("checkpoint payload is not a standalone snapshot: {error}")
+    })?;
+    assert!(
+        snapshot
+            .get_heads()
+            .iter()
+            .any(|head| head.0.as_slice() == checkpoint_head.as_slice()),
+        "checkpoint snapshot must materialize its advertised head without predecessor blobs"
     );
 
     drop(doc);

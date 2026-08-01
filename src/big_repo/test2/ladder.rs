@@ -5,9 +5,9 @@
 //! `sync_*` call per barrier, no retry loops. A missed post-condition
 //! surfaces as an `Err`, exposing runtime2 ordering bugs.
 
-use super::harness::{Pair, fixtures, heads};
+use super::harness::{fixtures, heads, Pair};
 use crate::{BigRepoChangeFilter, BigRepoDocIdFilter, StorageConfig};
-use automerge::{ReadDoc, ScalarValue, transaction::Transactable};
+use automerge::{transaction::Transactable, ReadDoc, ScalarValue};
 use keyhive_core::access::Access;
 
 #[tokio::test(flavor = "multi_thread")]
@@ -68,8 +68,8 @@ async fn tier1_connected_document_replicates_and_preserves_head_parity() -> crat
 }
 
 #[tokio::test(flavor = "multi_thread")]
-async fn tier1_connected_document_update_propagates_to_reader_after_first_replication()
--> crate::Res<()> {
+async fn tier1_connected_document_update_propagates_to_reader_after_first_replication(
+) -> crate::Res<()> {
     utils_rs::testing::setup_tracing_once();
     let pair = Pair::boot(33, 34, "Owner", "Reader").await?;
 
@@ -413,6 +413,143 @@ async fn tier1_offline_updates_catch_up() -> crate::Res<()> {
 
     drop(owner_doc);
     drop(reader_doc2);
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn tier1_long_history_rehydrate_mutate_diverge_and_reopen() -> crate::Res<()> {
+    utils_rs::testing::setup_tracing_once();
+    let temp = tempfile::tempdir()?;
+    let left_path = temp.path().join("owner-long-history");
+    let right_path = temp.path().join("editor-long-history");
+    let mut pair = Pair::boot_persistent(
+        49,
+        50,
+        "HistoryOwner",
+        "HistoryEditor",
+        left_path,
+        right_path.clone(),
+    )
+    .await?;
+
+    let editor_agent = fixtures::agent_of(&pair.left().repo, pair.right()).await?;
+    let mut initial = automerge::Automerge::new();
+    for revision in 0..96 {
+        initial
+            .transact(|tx| {
+                tx.put(
+                    automerge::ROOT,
+                    format!("history_{revision:03}"),
+                    format!("value_{revision:03}"),
+                )
+            })
+            .map_err(|error| crate::ferr!("failed building history revision: {error:?}"))?;
+    }
+    initial
+        .transact(|tx| tx.put(automerge::ROOT, "title", "long history base"))
+        .map_err(|error| crate::ferr!("failed writing history title: {error:?}"))?;
+
+    let owner_doc = pair.left().repo.create_doc(initial).await?;
+    let doc_id = owner_doc.document_id();
+    fixtures::grant_and_propagate(&pair, doc_id, &editor_agent, Access::Edit).await?;
+    let editor_doc =
+        fixtures::sync_doc_expect_ready(pair.right_conn(), &pair.right().repo, doc_id).await?;
+    heads::tier0_invariants(&pair, doc_id, &owner_doc, &editor_doc).await?;
+    drop(editor_doc);
+
+    let old_left = pair.left_conn.take().expect("left connection should exist");
+    let _old_right = pair
+        .right_conn
+        .take()
+        .expect("right connection should exist");
+    old_left.stop().await?;
+    pair.restart_right(StorageConfig::Disk {
+        path: right_path.clone(),
+    })
+    .await?;
+    pair.connect().await?;
+    pair.right_conn().sync_keyhive_with_peer(None).await?;
+    pair.left_conn().sync_keyhive_with_peer(None).await?;
+
+    let editor_doc =
+        fixtures::sync_doc_expect_ready(pair.right_conn(), &pair.right().repo, doc_id).await?;
+    editor_doc
+        .with_document(|doc| {
+            doc.set_actor(automerge::ActorId::from([50_u8; 16]));
+            doc.transact(|tx| tx.put(automerge::ROOT, "editor_after_rehydrate", "editor branch"))
+                .map_err(|error| crate::ferr!("failed editor post-rehydrate mutation: {error:?}"))
+        })
+        .await??;
+    owner_doc
+        .with_document(|doc| {
+            doc.set_actor(automerge::ActorId::from([49_u8; 16]));
+            doc.transact(|tx| tx.put(automerge::ROOT, "owner_branch", "owner branch"))
+                .map_err(|error| crate::ferr!("failed owner divergent mutation: {error:?}"))
+        })
+        .await??;
+
+    pair.right_conn().sync_keyhive_with_peer(None).await?;
+    pair.left_conn().sync_keyhive_with_peer(None).await?;
+    pair.left_conn()
+        .sync_doc_with_peer(doc_id, Some(std::time::Duration::from_secs(15)))
+        .await?;
+    pair.right_conn()
+        .sync_doc_with_peer(doc_id, Some(std::time::Duration::from_secs(15)))
+        .await?;
+    pair.left()
+        .repo
+        .wait_for_quiescence(Some(std::time::Duration::from_secs(15)))
+        .await?;
+    pair.right()
+        .repo
+        .wait_for_quiescence(Some(std::time::Duration::from_secs(15)))
+        .await?;
+
+    for (label, handle) in [("owner", &owner_doc), ("editor", &editor_doc)] {
+        assert_eq!(
+            read_optional_text(handle, "owner_branch").await.as_deref(),
+            Some("owner branch"),
+            "{label} is missing the owner branch",
+        );
+        assert_eq!(
+            read_optional_text(handle, "editor_after_rehydrate")
+                .await
+                .as_deref(),
+            Some("editor branch"),
+            "{label} is missing the editor branch",
+        );
+    }
+    heads::tier0_invariants(&pair, doc_id, &owner_doc, &editor_doc).await?;
+    drop(editor_doc);
+
+    let old_left = pair.left_conn.take().expect("left connection should exist");
+    let _old_right = pair
+        .right_conn
+        .take()
+        .expect("right connection should exist");
+    old_left.stop().await?;
+    pair.restart_right(StorageConfig::Disk { path: right_path })
+        .await?;
+    pair.connect().await?;
+    pair.right_conn().sync_keyhive_with_peer(None).await?;
+    let reopened =
+        fixtures::sync_doc_expect_ready(pair.right_conn(), &pair.right().repo, doc_id).await?;
+    assert_eq!(
+        read_optional_text(&reopened, "owner_branch")
+            .await
+            .as_deref(),
+        Some("owner branch"),
+    );
+    assert_eq!(
+        read_optional_text(&reopened, "editor_after_rehydrate")
+            .await
+            .as_deref(),
+        Some("editor branch"),
+    );
+    heads::tier0_invariants(&pair, doc_id, &owner_doc, &reopened).await?;
+
+    drop(owner_doc);
+    drop(reopened);
     Ok(())
 }
 

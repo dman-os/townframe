@@ -23,14 +23,18 @@ pub async fn diagnostics(pair: &Pair, doc_id: DocumentId) -> Res<String> {
     let right = pair.right().repo.doc_head_state(doc_id).await?;
     let left_lookup = lookup_summary(&pair.left().repo, doc_id).await;
     let right_lookup = lookup_summary(&pair.right().repo, doc_id).await;
+    let left_storage = storage_summary(&pair.left().repo, doc_id).await;
+    let right_storage = storage_summary(&pair.right().repo, doc_id).await;
     Ok(format!(
-        "\n[diagnostics doc={doc_id}]\n  {}\n    {}\n    {}\n  {}\n    {}\n    {}\n",
+        "\n[diagnostics doc={doc_id}]\n  {}\n    {}\n    {}\n    {}\n  {}\n    {}\n    {}\n    {}\n",
         pair.left().label,
         state_summary(pair.left().label, &left),
         left_lookup,
+        left_storage,
         pair.right().label,
         state_summary(pair.right().label, &right),
         right_lookup,
+        right_storage,
     ))
 }
 
@@ -44,4 +48,10 @@ async fn lookup_summary(repo: &Arc<crate::BigRepo>, doc_id: DocumentId) -> Strin
         Ok(crate::DocLookup::Missing) => format!("{nick}: lookup=Missing"),
         Err(e) => format!("{nick}: lookup=error({e})"),
     }
+}
+
+async fn storage_summary(repo: &Arc<crate::BigRepo>, doc_id: DocumentId) -> String {
+    repo.document_sync_diagnostics(doc_id)
+        .await
+        .unwrap_or_else(|error| format!("diagnostics error: {error}"))
 }

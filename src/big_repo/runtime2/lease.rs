@@ -1,9 +1,9 @@
 //! Leases for runtime2. Lease drops enqueue release commands directly; worker
 //! operation leases use oneshots because their owner is an in-flight future.
 
-use crate::DocumentId;
 use crate::interlude::*;
 use crate::runtime2::messages::DocWorkerMsg;
+use crate::DocumentId;
 
 /// RAII lease held by a `BigDocHandle` (the public doc handle).
 ///
@@ -82,12 +82,17 @@ impl DocWorkerHandle {
     /// # Errors
     ///
     /// Returns an error if the channel is closed (worker gone) or full
-    /// (worker backlogged). Both are treated as fatal by the hub.
+    /// (worker backlogged). Callers may explicitly handle closure when it races
+    /// an expected zero-handle eviction.
     pub fn send(&self, msg: DocWorkerMsg) -> eyre::Result<()> {
         self.msg_tx.try_send(msg).map_err(|e| match e {
             async_channel::TrySendError::Closed(_) => ferr!("doc worker closed"),
             async_channel::TrySendError::Full(_) => ferr!("doc worker mailbox full"),
         })
+    }
+
+    pub fn is_closed(&self) -> bool {
+        self.msg_tx.is_closed()
     }
 }
 

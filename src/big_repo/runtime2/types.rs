@@ -2,8 +2,8 @@
 
 use crate::interlude::*;
 
-use crate::DocumentId;
 use crate::keyhive_listener::BigRepoKeyhiveListener;
+use crate::DocumentId;
 use future_form::Sendable;
 use keyhive_core::principal::identifier::Identifier;
 use std::sync::Arc;
@@ -61,12 +61,30 @@ pub enum SyncDocError {
     Unauthorized,
     /// The storage policy rejected the sync: {0}
     Policy(SyncDocPolicyError),
+    /// Document content was stored but the active handle remains pending materialization.
+    PendingMaterialization,
     /// TransportError
     TransportError,
     /// IoError
     IoError(eyre::Report),
     /// Unexpected {0}
     Other(#[from] eyre::Report),
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum SyncDocOutcome {
+    /// The active document worker merged the newly persisted state.
+    Ready,
+    /// State is durably stored, but no active worker was eager-materialized.
+    Stored,
+    /// State is stored but materialization is blocked by these dependencies.
+    Pending(Vec<crate::runtime2::io::MaterializationBlocker>),
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SyncDocReceipt {
+    pub transport: crate::runtime2::io::SyncDocAttempt,
+    pub outcome: SyncDocOutcome,
 }
 
 #[derive(Debug, thiserror::Error, displaydoc::Display, PartialEq, Eq)]
@@ -135,15 +153,16 @@ pub struct LiveDocBundle {
 }
 
 impl LiveDocBundle {
-    pub(crate) fn new_runtime2(
+    pub(crate) fn new(
         doc_id: DocumentId,
         doc: automerge::Automerge,
         lease: crate::runtime2::DocLease,
+        partially_decrypted: bool,
     ) -> Self {
         Self {
             doc_id,
             doc: tokio::sync::Mutex::new(doc),
-            partially_decrypted: std::sync::atomic::AtomicBool::new(false),
+            partially_decrypted: std::sync::atomic::AtomicBool::new(partially_decrypted),
             _runtime2_lease: Some(lease),
         }
     }

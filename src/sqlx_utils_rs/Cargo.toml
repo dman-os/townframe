@@ -12,3 +12,6 @@ path = "lib.rs"
 [dependencies]
 color-eyre.workspace = true
 sqlx = { workspace = true, features = ["sqlite"] }
+
+[dev-dependencies]
+tokio = { workspace = true, features = ["macros", "rt"] }

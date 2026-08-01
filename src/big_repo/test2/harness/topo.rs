@@ -17,11 +17,11 @@ use crate::{
     BigRepo, BigRepoConnection, BigRepoStopToken, Config, DocumentId, PeerId, SqliteBigRepoStore,
     StorageConfig,
 };
-use big_sync::{HostPartStore, stress_support};
+use big_sync::{stress_support, HostPartStore};
 use sqlx_utils_rs::SqlCtx;
 use std::{collections::HashMap, sync::Arc};
 use tokio::sync::{Mutex, Notify};
-use tokio::time::{Duration, timeout};
+use tokio::time::{timeout, Duration};
 
 /// A single booted BigRepo node with an Iroh endpoint + big-sync worker.
 ///
@@ -91,7 +91,13 @@ impl Node {
             }
         };
         let store = Arc::new(
-            SqliteBigRepoStore::new(sql, "big-repo-test", big_sync_core::BuckId::MAX_LEVEL, Arc::new(crate::access_policy::KeyhiveMembershipPolicy::new())).await?,
+            SqliteBigRepoStore::new(
+                sql,
+                "big-repo-test",
+                big_sync_core::BuckId::MAX_LEVEL,
+                Arc::new(crate::access_policy::KeyhiveMembershipPolicy::new()),
+            )
+            .await?,
         );
         let part_init_obj = big_sync_core::ObjId(big_sync_core::Byte32Id::new(
             [255_u8.wrapping_sub(seed); 32],

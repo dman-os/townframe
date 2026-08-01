@@ -23,8 +23,8 @@
 //! | `triangle_replication`       | A↔B, B↔C, C↔A      | 3               |
 //! | `partition_then_heal`        | A↔B, partition, heal | 2               |
 
-use super::harness::{Node, Topo, fixtures, keyhive as kh_snap, topo::ShutdownGuard};
-use automerge::{ReadDoc, ScalarValue, transaction::Transactable};
+use super::harness::{fixtures, keyhive as kh_snap, topo::ShutdownGuard, Node, Topo};
+use automerge::{transaction::Transactable, ReadDoc, ScalarValue};
 use keyhive_core::access::Access;
 // ─── Read helpers ───────────────────────────────────────────────────────────
 
@@ -306,6 +306,46 @@ async fn tier3_line_replication() -> crate::Res<()> {
 
     drop(a_doc);
     drop(c_doc);
+    Ok(())
+}
+
+/// A private reader's Keyhive grant must traverse a Relay-only intermediate
+/// node along with the encrypted document content.
+#[tokio::test(flavor = "multi_thread")]
+async fn tier3_line_private_reader_keyhive_propagates_through_relay() -> crate::Res<()> {
+    utils_rs::testing::setup_tracing_once();
+    let topo = Topo::boot_line(233, 234, 235, "Alice", "Relay", "Carol").await?;
+    let mut initial = automerge::Automerge::new();
+    initial
+        .transact(|tx| tx.put(automerge::ROOT, "title", "private-line-doc"))
+        .map_err(|err| crate::ferr!("failed creating doc: {err:?}"))?;
+    let owner_doc = topo.topo_node(0).repo.create_doc(initial).await?;
+    let doc_id = owner_doc.document_id();
+    topo.topo_conn(0, 1).sync_keyhive_with_peer(None).await?;
+    topo.topo_conn(1, 2).sync_keyhive_with_peer(None).await?;
+    let relay_agent = fixtures::agent_of(&topo.topo_node(0).repo, topo.topo_node(1)).await?;
+    let reader_agent = fixtures::agent_of(&topo.topo_node(1).repo, topo.topo_node(2)).await?;
+    topo.topo_node(0)
+        .repo
+        .grant_doc_access(doc_id, relay_agent, Access::Relay)
+        .await?;
+    topo.topo_node(0)
+        .repo
+        .grant_doc_access(doc_id, reader_agent, Access::Read)
+        .await?;
+
+    topo.topo_conn(0, 1).sync_keyhive_with_peer(None).await?;
+    topo.topo_conn(1, 2).sync_keyhive_with_peer(None).await?;
+    assert_relay_only(&topo.topo_node(1).repo, topo.topo_node(1), doc_id).await?;
+
+    sync_doc_no_materialize(topo.topo_conn(1, 0), doc_id).await?;
+    let reader_doc =
+        fixtures::sync_doc_expect_ready(topo.topo_conn(2, 1), &topo.topo_node(2).repo, doc_id)
+            .await?;
+    assert_eq!(read_title(&reader_doc).await, "private-line-doc");
+
+    drop(owner_doc);
+    drop(reader_doc);
     Ok(())
 }
 

@@ -869,13 +869,17 @@ async fn wait_for_sync_convergence(
         .into_keys()
         .collect::<Vec<_>>();
     let peer_id = PeerId::new(*endpoint_id.as_bytes());
-    // Match the BigRepo topology harness: the receiving side must complete
-    // Keyhive synchronization before BigSync is allowed to materialize docs.
-    target
-        .ctx
-        .big_repo
-        .sync_keyhive_with_peer(peer_id, Some(timeout))
-        .await?;
+    // Keyhive convergence is driven by the production notification
+    // subscription. The test waits for the observable BigSync and drawer
+    // results instead of reaching through the daybook API into BigRepo to
+    // force an internal sync round.
+    info!(
+        source = %source.sync_repo.router.endpoint().id(),
+        target = %target.sync_repo.router.endpoint().id(),
+        peer_id = %peer_id,
+        partition_count = required_partitions.len(),
+        "waiting for notification-driven sync convergence"
+    );
     tokio::try_join!(
         target.sync_repo.wait_for_full_sync(
             std::slice::from_ref(&peer_id),
@@ -884,9 +888,14 @@ async fn wait_for_sync_convergence(
         ),
         wait_for_doc_set_parity(&source.drawer, &target.drawer, timeout),
     )?;
+    info!(
+        source = %source.sync_repo.router.endpoint().id(),
+        target = %target.sync_repo.router.endpoint().id(),
+        peer_id = %peer_id,
+        "notification-driven sync convergence reached"
+    );
     Ok(())
 }
-
 #[tokio::test(flavor = "multi_thread")]
 async fn wait_for_full_sync_succeeds_after_event_was_already_emitted() -> Res<()> {
     utils_rs::testing::setup_tracing_once();
@@ -991,6 +1000,17 @@ async fn wait_for_doc_set_parity(
     Ok(())
 }
 
+async fn wait_for_drawer_doc_parity(
+    left: &SyncTestNode,
+    right: &SyncTestNode,
+    doc_id: &DocId,
+    branch: &daybook_types::doc::BranchPath,
+    timeout: Duration,
+) -> Res<()> {
+    wait_for_doc_presence_with_activity(right, doc_id, timeout).await?;
+    wait_for_doc_head_parity(left, right, doc_id, branch, timeout).await
+}
+
 async fn wait_for_doc_head_parity(
     left: &SyncTestNode,
     right: &SyncTestNode,
@@ -1000,32 +1020,81 @@ async fn wait_for_doc_head_parity(
 ) -> Res<()> {
     let mut last_left = None::<Vec<String>>;
     let mut last_right = None::<Vec<String>>;
+    let mut last_left_facets = None::<Vec<String>>;
+    let mut last_right_facets = None::<Vec<String>>;
+    let mut last_left_facet_values = None::<String>;
+    let mut last_right_facet_values = None::<String>;
+    let mut last_runtime = None::<String>;
+    let mut last_sync_diagnostics = None::<String>;
     tokio::time::timeout(timeout, async {
+        let mut last_heartbeat = std::time::Instant::now();
         loop {
-            let left_heads = left
+            let (left_doc, left_facet_values, left_heads) = left
                 .drawer
                 .get_with_heads(doc_id, branch, None)
                 .await?
-                .map(|(_, heads)| {
-                    let mut out = heads.iter().map(ToString::to_string).collect::<Vec<_>>();
-                    out.sort_unstable();
-                    out
+                .map(|(doc, heads)| {
+                    let mut facets = doc.facets.keys().map(ToString::to_string).collect::<Vec<_>>();
+                    facets.sort_unstable();
+                    (facets, format!("{doc:?}"), heads)
                 })
                 .ok_or_else(|| eyre::eyre!("left missing doc heads for {doc_id}"))?;
-            let right_heads = right
+            let (right_doc, right_facet_values, right_heads) = right
                 .drawer
                 .get_with_heads(doc_id, branch, None)
                 .await?
-                .map(|(_, heads)| {
-                    let mut out = heads.iter().map(ToString::to_string).collect::<Vec<_>>();
-                    out.sort_unstable();
-                    out
+                .map(|(doc, heads)| {
+                    let mut facets = doc.facets.keys().map(ToString::to_string).collect::<Vec<_>>();
+                    facets.sort_unstable();
+                    (facets, format!("{doc:?}"), heads)
                 })
                 .ok_or_else(|| eyre::eyre!("right missing doc heads for {doc_id}"))?;
+            last_left_facets = Some(left_doc.clone());
+            last_right_facets = Some(right_doc.clone());
+            last_left_facet_values = Some(left_facet_values.clone());
+            last_right_facet_values = Some(right_facet_values.clone());
+            let mut left_heads = left_heads.iter().map(ToString::to_string).collect::<Vec<_>>();
+            left_heads.sort_unstable();
+            let mut right_heads = right_heads.iter().map(ToString::to_string).collect::<Vec<_>>();
+            right_heads.sort_unstable();
             last_left = Some(left_heads);
             last_right = Some(right_heads);
-            if last_left == last_right {
+            if last_left == last_right && left_doc == right_doc && left_facet_values == right_facet_values {
                 break eyre::Ok(());
+            }
+            let now = std::time::Instant::now();
+            if now.duration_since(last_heartbeat) >= Duration::from_secs(2) {
+                last_heartbeat = now;
+                let runtime_doc_id = doc_id.parse::<big_repo::DocumentId>().ok();
+                let left_state = match runtime_doc_id {
+                    Some(id) => left.ctx.big_repo.doc_head_state(id).await.ok(),
+                    None => None,
+                };
+                let right_state = match runtime_doc_id {
+                    Some(id) => right.ctx.big_repo.doc_head_state(id).await.ok(),
+                    None => None,
+                };
+                let left_diagnostics = match runtime_doc_id {
+                    Some(id) => left.ctx.big_repo.document_sync_diagnostics(id).await.ok(),
+                    None => None,
+                };
+                let right_diagnostics = match runtime_doc_id {
+                    Some(id) => right.ctx.big_repo.document_sync_diagnostics(id).await.ok(),
+                    None => None,
+                };
+                last_runtime = Some(format!("left={left_state:?} right={right_state:?}"));
+                last_sync_diagnostics = Some(format!(
+                    "left={left_diagnostics:?} right={right_diagnostics:?}"
+                ));
+                tracing::debug!(
+                    doc_id,
+                    branch = %branch,
+                    left_heads = ?last_left,
+                    right_heads = ?last_right,
+                    runtime = ?last_runtime,
+                    sync_diagnostics = ?last_sync_diagnostics,
+                    "waiting for document head parity"
+                );
             }
             tokio::time::sleep(Duration::from_millis(200)).await;
         }
@@ -1033,11 +1102,17 @@ async fn wait_for_doc_head_parity(
     .await
     .map_err(|_| {
         eyre::eyre!(
-            "timed out waiting for doc head parity: doc_id={} branch={} left={:?} right={:?}",
+            "timed out waiting for doc head parity: doc_id={} branch={} left={:?} right={:?} left_facets={:?} right_facets={:?} left_doc={:?} right_doc={:?} runtime={:?} sync_diagnostics={:?}",
             doc_id,
             branch,
             last_left,
-            last_right
+            last_right,
+            last_left_facets,
+            last_right_facets,
+            last_left_facet_values,
+            last_right_facet_values,
+            last_runtime,
+            last_sync_diagnostics
         )
     })??;
     Ok(())

@@ -85,7 +85,11 @@ impl DecidePeerStrategyTask {
         Rpc: BigSyncRpcClient<K>,
         Rng: rand::Rng,
     {
-        let peer_rpc = cx.rpc_clients.get(&self.peer_id).expect(ERROR_UNRECONIZED);
+        let Some(peer_rpc) = cx.rpc_clients.get(&self.peer_id) else {
+            // Peer teardown can race a queued strategy task. Treat the
+            // missing client as a transport failure instead of panicking.
+            return Err(DecidePeerStrategyErrorDeets::Rpc(RpcError::TransportError));
+        };
 
         let summary = peer_rpc
             .peer_summary(PeerSummaryRequest {

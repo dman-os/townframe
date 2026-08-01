@@ -59,12 +59,22 @@ pub trait Clock: Send + Sync {
 /// from [`Document::try_causal_decrypt_content`](keyhive_core::principal::document::Document::try_causal_decrypt_content).
 /// The doc-worker materializer iterates [`complete`](Self::complete) to collect
 /// ancestor plaintexts, then continues the walk.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum MaterializationBlocker {
+    DocumentNotInHive,
+    MissingDocumentKeys { content_refs: Vec<Vec<u8>> },
+    MissingCiphertexts { content_refs: Vec<Vec<u8>> },
+    MissingAutomergeDependencies { deferred_blobs: usize },
+}
+
 #[derive(Debug, Clone, Default)]
 pub struct CausalDecryptResult {
     /// Successfully-decrypted (content_ref, plaintext) pairs, starting with the
     /// entrypoint ancestor chain. Consumed by the materializer to build the
     /// full automerge doc.
     pub complete: Vec<(Vec<u8>, Vec<u8>)>,
+    /// Concrete reasons why the causal closure could not be decrypted.
+    pub blockers: Vec<MaterializationBlocker>,
 }
 
 /// Result of a transport-level document sync attempt before materialization.
@@ -83,7 +93,7 @@ pub enum SyncDocAttempt {
 )]
 pub(crate) struct DocumentKeyUnavailable {
     #[source]
-    pub(crate) source: beekem::error::CgkaError,
+    pub(crate) source: eyre::Report,
     pub(crate) document_id: crate::DocumentId,
     pub(crate) owner_secret_count: usize,
     pub(crate) cgka_operation_count: usize,
@@ -184,6 +194,13 @@ pub trait DocIo<F: FutureForm>: Send + Sync {
     ) -> F::Future<'_, eyre::Result<CausalDecryptResult>>;
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum MaterializationStatus {
+    Missing,
+    Pending(Vec<MaterializationBlocker>),
+    Ready { partially_decrypted: bool },
+}
+
 // ─── RuntimeIo: hub-level IO contract ──────────────────────────────────────
 
 /// Hub-level IO that runtime2 currently hardcodes in the hub/handle.
@@ -211,7 +228,6 @@ pub trait RuntimeIo<F: FutureForm>: Send + Sync {
         &self,
         sed_id: sedimentree_core::id::SedimentreeId,
     ) -> F::Future<'_, eyre::Result<Vec<Vec<u8>>>>;
-
 
     /// Read the immutable Keyhive event-log watermark for quiescence barriers.
     fn keyhive_event_log_cursor(&self) -> F::Future<'_, eyre::Result<u64>>;

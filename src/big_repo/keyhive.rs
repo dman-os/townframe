@@ -1,6 +1,6 @@
 use crate::interlude::*;
 
-use crate::{DocumentId, keyhive_listener::BigRepoKeyhiveListener};
+use crate::{keyhive_listener::BigRepoKeyhiveListener, DocumentId};
 use keyhive_core::access::Access;
 use keyhive_core::event::static_event::StaticEvent;
 use keyhive_core::principal::document::id::DocumentId as KhDocumentId;

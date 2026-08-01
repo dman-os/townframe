@@ -422,28 +422,28 @@ impl BigSyncWorker {
             tokio::select! {
                 biased;
                 _ = self.cancel_token.cancelled() => {
-                    debug!("XXX cancelled");
+                    trace!("XXX cancelled");
                     break;
                 }
                 msg = self.task_rx.recv() => {
                     let Ok(msg) = msg else {
                         break;
                     };
-                    debug!(?msg, "XXX task msg");
+                    trace!(?msg, "XXX task msg");
                     self.machine.handle_task_msg(msg);
                 }
                 evt = self.sync_rx.recv() => {
                     let Ok(evt) = evt else {
                         break;
                     };
-                    debug!(?evt, "XXX sync msg");
+                    trace!(?evt, "XXX sync msg");
                     self.machine.handle_evt(evt);
                 }
                 msg = self.host_rx.recv() => {
                     let Some(msg) = msg else {
                         break;
                     };
-                    debug!(?msg, "XXX host msg");
+                    trace!(?msg, "XXX host msg");
                     self.handle_msg(msg).await?;
                 }
                 _ = janitor_tick.tick() => {
@@ -452,7 +452,7 @@ impl BigSyncWorker {
                 }
             };
             while let Some((id, cmd)) = self.machine.get_cmd() {
-                debug!(?cmd, "XXX cmd");
+                trace!(?cmd, "XXX cmd");
                 match cmd {
                     BigSyncMachineCommand::RemoveObjFromPart { obj_id, part_id } => {
                         self.part_store
@@ -481,7 +481,7 @@ impl BigSyncWorker {
             self.machine_spawn_queue
                 .extend(self.machine.drain_machine_spawn_queue());
             while let Some(task) = self.machine_spawn_queue.pop_front() {
-                debug!(?task, "XXX machine task");
+                trace!(?task, "XXX machine task");
                 self.spawn_machine_task(task, Arc::clone(&shutdown)).await?;
             }
 
@@ -492,12 +492,12 @@ impl BigSyncWorker {
                 let Some(task) = self.sync_spawn_queue.pop_front() else {
                     break;
                 };
-                debug!(?task, "XXX sync task");
+                trace!(?task, "XXX sync task");
                 self.spawn_sync_task(task).await?;
             }
             self.sweep_finished_zombies();
             for event in self.machine.drain_stat_evts() {
-                debug!(?event, "XXX stat event");
+                trace!(?event, "XXX stat event");
                 if let big_sync_core::SyncStatEvent::FullSyncWaiterSatisfied { waiter_id } = event {
                     if let Some(resp) = self.full_sync_waiters.remove(&waiter_id) {
                         let _ = resp.send(Ok(()));
@@ -642,7 +642,7 @@ impl BigSyncWorker {
         let task_ids: Vec<_> = self.machine.drain_stop_queue().collect();
         let stop_count = task_ids.len();
         if stop_count > 0 {
-            tracing::debug!(stop_count, "draining stop queue");
+            tracing::trace!(stop_count, "draining stop queue");
         }
         for task_id in task_ids {
             if let Some(task) = self.tasks.remove(&task_id) {
@@ -687,7 +687,7 @@ impl BigSyncWorker {
             .zombie_tasks
             .extract_if(|_task_id, task| task.handle.is_finished())
         {
-            tracing::debug!(task_id, kind = ?task.kind, "sweeping finished zombie task");
+            tracing::trace!(task_id, kind = ?task.kind, "sweeping finished zombie task");
         }
     }
 
@@ -788,7 +788,7 @@ impl BigSyncWorker {
         );
         let cancel_token = self.cancel_token.child_token();
         let task_id = task.id;
-        tracing::debug!(
+        tracing::trace!(
             task_id,
             peer_id = %task.deets.peer_id,
             obj_id = %task.deets.obj_id,

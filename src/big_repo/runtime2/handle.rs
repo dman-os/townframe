@@ -8,12 +8,12 @@
 //! [`Runtime2Cmd`]: super::Runtime2Cmd
 //! [`Timer`]: super::Timer
 
-use crate::DocumentId;
 use crate::interlude::*;
 use crate::runtime2::{
+    messages::{fresh_waiter_id, Runtime2Cmd},
     Timer,
-    messages::{Runtime2Cmd, fresh_waiter_id},
 };
+use crate::DocumentId;
 use big_sync_core::PeerId;
 use future_form::FutureForm;
 use std::sync::Arc;
@@ -155,13 +155,7 @@ impl<F: FutureForm> Runtime2Handle<F> {
             .map_err(|_| eyre::eyre!("caller dropped before response"))?
     }
 
-    /// NEW: query walk-derived head state for a document.
-    ///
-    /// Returns both the sedimentree heads (storage ground truth, always
-    /// present if the doc is known) and the materialized automerge heads
-    /// (`None` when pending or relay-only). Backs the test2 Tier-0 flake
-    /// detector. This operation is new — no equivalent in the old
-    /// `BigRepoRuntimeHandle`.
+    /// Query walk-derived storage and materialization heads for a document.
     pub async fn doc_head_state(
         &self,
         doc_id: DocumentId,
@@ -175,15 +169,21 @@ impl<F: FutureForm> Runtime2Handle<F> {
             .map_err(|_| eyre::eyre!("caller dropped before response"))?
     }
 
-    /// Convenience: query only the sedimentree (payload) heads.
-    ///
-    /// After the heads fix this always returns `Some(sedimentree_heads)` for
-    /// a known doc, never the old "materialized heads or sedimentree heads?"
-    /// ambiguity. Returns `None` only if the doc is unknown to the runtime.
-    ///
-    /// Replaces `BigRepo::doc_payload_heads` (`lib.rs:658`) which returned
-    /// the overloaded `obj_payload.heads` field that caused the
-    /// head-divergence flake.
+    /// Inspect head state without creating a document worker.
+    pub async fn inspect_doc_head_state(
+        &self,
+        doc_id: DocumentId,
+    ) -> eyre::Result<Option<crate::runtime2::DocHeadState>> {
+        let (resp, rx) = futures::channel::oneshot::channel();
+        self.cmd_tx
+            .send(Runtime2Cmd::InspectDocHeadState { doc_id, resp })
+            .await
+            .map_err(|_| eyre::eyre!(ERROR_ACTOR))?;
+        rx.await
+            .map_err(|_| eyre::eyre!("caller dropped before response"))?
+    }
+
+    /// Query only the persisted Sedimentree payload heads.
     pub async fn doc_payload_heads(
         &self,
         doc_id: DocumentId,
@@ -203,8 +203,10 @@ impl<F: FutureForm> Runtime2Handle<F> {
     /// [`TransportConnect`](super::TransportConnect) implementation
     /// interprets.
     ///
-    /// The returned receiver resolves with the connection end result once the
-    /// hub's watcher observes the transport connection lifecycle ending.
+    /// The returned receiver resolves with `(closed, end_result)` once the
+    /// hub's watcher observes the transport connection lifecycle ending —
+    /// `closed` is the connection's end flag (shared with the runtime) so
+    /// callers can tell which connection ended when ids are reused.
     pub async fn open_connection(
         &self,
         peer: PeerId,
@@ -212,7 +214,10 @@ impl<F: FutureForm> Runtime2Handle<F> {
     ) -> eyre::Result<(
         PeerId,
         std::sync::Arc<std::sync::atomic::AtomicBool>,
-        futures::channel::oneshot::Receiver<eyre::Result<()>>,
+        futures::channel::oneshot::Receiver<(
+            std::sync::Arc<std::sync::atomic::AtomicBool>,
+            eyre::Result<()>,
+        )>,
     )> {
         let (resp, rx) = futures::channel::oneshot::channel();
         self.cmd_tx
@@ -229,15 +234,20 @@ impl<F: FutureForm> Runtime2Handle<F> {
     /// [`TransportConnect`](super::TransportConnect) implementation
     /// uses to complete the handshake.
     ///
-    /// The returned receiver resolves with the connection end result once the
-    /// hub's watcher observes the transport connection lifecycle ending.
+    /// The returned receiver resolves with `(closed, end_result)` once the
+    /// hub's watcher observes the transport connection lifecycle ending —
+    /// `closed` is the connection's end flag (shared with the runtime) so
+    /// callers can tell which connection ended when ids are reused.
     pub async fn accept_connection(
         &self,
         incoming: Box<dyn std::any::Any + Send>,
     ) -> eyre::Result<(
         PeerId,
         std::sync::Arc<std::sync::atomic::AtomicBool>,
-        futures::channel::oneshot::Receiver<eyre::Result<()>>,
+        futures::channel::oneshot::Receiver<(
+            std::sync::Arc<std::sync::atomic::AtomicBool>,
+            eyre::Result<()>,
+        )>,
     )> {
         let (resp, rx) = futures::channel::oneshot::channel();
         self.cmd_tx
@@ -248,12 +258,19 @@ impl<F: FutureForm> Runtime2Handle<F> {
             .map_err(|_| eyre::eyre!("caller dropped before response"))?
     }
 
-    /// Close an established peer connection.
-    pub async fn close_connection(&self, peer_id: PeerId) -> eyre::Result<()> {
+    /// Close one established connection to `peer_id`, identified by its end
+    /// flag. Only the peer's current connection's registration is torn
+    /// down; closing a superseded connection leaves the replacement intact.
+    pub async fn close_connection(
+        &self,
+        peer_id: PeerId,
+        closed: std::sync::Arc<std::sync::atomic::AtomicBool>,
+    ) -> eyre::Result<()> {
         let (resp, rx) = futures::channel::oneshot::channel();
         self.cmd_tx
             .send(Runtime2Cmd::CloseConn {
                 peer_id,
+                closed,
                 resp: Some(resp),
             })
             .await
@@ -272,7 +289,24 @@ impl<F: FutureForm> Runtime2Handle<F> {
         peer_id: PeerId,
         timeout: Option<std::time::Duration>,
     ) -> Result<(), crate::runtime2::types::SyncDocError> {
+        self.sync_doc_with_peer_receipt(doc_id, peer_id, timeout)
+            .await
+            .map(|_| ())
+    }
+
+    pub async fn sync_doc_with_peer_receipt(
+        &self,
+        doc_id: DocumentId,
+        peer_id: PeerId,
+        timeout: Option<std::time::Duration>,
+    ) -> Result<crate::runtime2::types::SyncDocReceipt, crate::runtime2::types::SyncDocError> {
         let waiter_id = fresh_waiter_id(&self.doc_sync_waiter_ids);
+        debug!(
+            sync_id = waiter_id,
+            %doc_id,
+            %peer_id,
+            "document sync requested"
+        );
         let (resp, rx) = futures::channel::oneshot::channel();
         self.cmd_tx
             .send(Runtime2Cmd::SyncDocWithPeer {
@@ -283,52 +317,54 @@ impl<F: FutureForm> Runtime2Handle<F> {
                 resp,
             })
             .await
-            .map_err(|_| {
-                crate::runtime2::types::SyncDocError::IoError(eyre::eyre!(ERROR_ACTOR))
-            })?;
-        // If no timeout, wait indefinitely (the old handle returns
-        // immediately without timeout).
-        let Some(duration) = timeout else {
-            return rx.await.map_err(|_| {
+            .map_err(|_| crate::runtime2::types::SyncDocError::IoError(eyre::eyre!(ERROR_ACTOR)))?;
+        let result = if let Some(duration) = timeout {
+            match self.race_timeout(rx, duration).await {
+                Ok(Ok(result)) => result,
+                Ok(Err(_)) => Err(crate::runtime2::types::SyncDocError::IoError(eyre::eyre!(
+                    "caller dropped before response"
+                ))),
+                Err(()) => {
+                    self.cmd_tx
+                        .try_send(Runtime2Cmd::CancelDocSyncWaiter {
+                            doc_id,
+                            peer_id,
+                            waiter_id,
+                        })
+                        .map_err(|e| match e {
+                            async_channel::TrySendError::Closed(_) => {
+                                crate::runtime2::types::SyncDocError::IoError(ferr!(
+                                    "task was found dead"
+                                ))
+                            }
+                            async_channel::TrySendError::Full(_) => {
+                                crate::runtime2::types::SyncDocError::IoError(ferr!("mailbox full"))
+                            }
+                        })?;
+                    Err(crate::runtime2::types::SyncDocError::IoError(eyre::eyre!(
+                        "doc sync timed out"
+                    )))
+                }
+            }
+        } else {
+            rx.await.map_err(|_| {
                 crate::runtime2::types::SyncDocError::IoError(eyre::eyre!(
                     "caller dropped before response"
                 ))
-            })?;
+            })?
         };
-        match self.race_timeout(rx, duration).await {
-            Ok(Ok(result)) => result,
-            Ok(Err(_)) => Err(crate::runtime2::types::SyncDocError::IoError(eyre::eyre!(
-                "caller dropped before response"
-            ))),
-            Err(()) => {
-                // Send cancellation to the hub so it cleans up the waiter.
-                self.cmd_tx
-                    .try_send(Runtime2Cmd::CancelDocSyncWaiter {
-                        doc_id,
-                        peer_id,
-                        waiter_id,
-                    })
-                    .map_err(|e| match e {
-                        async_channel::TrySendError::Closed(_) => {
-                            crate::runtime2::types::SyncDocError::IoError(ferr!(
-                                "task was found dead"
-                            ))
-                        }
-                        async_channel::TrySendError::Full(_) => {
-                            crate::runtime2::types::SyncDocError::IoError(ferr!("mailbox full"))
-                        }
-                    })?;
-                Err(crate::runtime2::types::SyncDocError::IoError(eyre::eyre!(
-                    "doc sync timed out"
-                )))
-            }
+        match &result {
+            Ok(receipt) => debug!(
+                sync_id = waiter_id,
+                ?receipt.outcome,
+                "document sync completed"
+            ),
+            Err(error) => debug!(sync_id = waiter_id, ?error, "document sync failed"),
         }
+        result
     }
 
     /// Sync keyhive state with a peer. Waits for completion or `timeout`.
-    ///
-    /// The old handle applies a timeout (defaulting to 5s); runtime2 does
-    /// the same via the injected [`Timer`].
     pub async fn sync_keyhive_with_peer(
         &self,
         peer_id: PeerId,
@@ -344,30 +380,39 @@ impl<F: FutureForm> Runtime2Handle<F> {
             })
             .await
             .map_err(|_| eyre::eyre!(ERROR_ACTOR))?;
-        let duration =
+        let timeout =
             timeout.unwrap_or_else(|| utils_rs::scale_timeout(std::time::Duration::from_secs(5)));
-        match self.race_timeout(rx, duration).await {
-            Ok(Ok(result)) => result.wrap_err("keyhive sync failed"),
+        let deadline = std::time::Instant::now() + timeout;
+        match self.race_timeout(rx, timeout).await {
+            Ok(Ok(result)) => {
+                result.wrap_err("keyhive sync failed")?;
+                let (resp, reconciled) = futures::channel::oneshot::channel();
+                self.cmd_tx
+                    .send(Runtime2Cmd::WaitForKeyhiveReconciliation { resp })
+                    .await
+                    .map_err(|_| eyre::eyre!(ERROR_ACTOR))?;
+                let remaining = deadline.saturating_duration_since(std::time::Instant::now());
+                match self.race_timeout(reconciled, remaining).await {
+                    Ok(Ok(result)) => result.wrap_err("keyhive post-sync reconciliation failed"),
+                    Ok(Err(_)) => Err(eyre::eyre!(
+                        "runtime dropped keyhive reconciliation response"
+                    )),
+                    Err(()) => Err(eyre::eyre!("keyhive post-sync reconciliation timed out")),
+                }
+            }
             Ok(Err(_)) => Err(eyre::eyre!("caller dropped before response")),
             Err(()) => {
                 self.cmd_tx
                     .try_send(Runtime2Cmd::CancelKeyhiveSyncWaiter { peer_id, waiter_id })
                     .map_err(|e| match e {
-                        async_channel::TrySendError::Closed(_) => {
-                            eyre::eyre!(ERROR_ACTOR)
-                        }
-                        async_channel::TrySendError::Full(_) => {
-                            eyre::eyre!("mailbox full")
-                        }
+                        async_channel::TrySendError::Closed(_) => eyre::eyre!(ERROR_ACTOR),
+                        async_channel::TrySendError::Full(_) => eyre::eyre!("mailbox full"),
                     })?;
                 Err(eyre::eyre!("keyhive sync timed out"))
             }
         }
     }
 
-    /// Wait until finite runtime work currently admitted to the Hub and its
-    /// document workers has drained. Pending materialization due to missing
-    /// keys is considered quiescent and does not block this barrier.
     pub async fn wait_for_quiescence(
         &self,
         timeout: Option<std::time::Duration>,
@@ -377,22 +422,19 @@ impl<F: FutureForm> Runtime2Handle<F> {
             .send(Runtime2Cmd::WaitForQuiescence { resp })
             .await
             .map_err(|_| eyre::eyre!(ERROR_ACTOR))?;
-        let duration =
-            timeout.unwrap_or_else(|| utils_rs::scale_timeout(std::time::Duration::from_secs(5)));
-        match self.race_timeout(rx, duration).await {
-            Ok(Ok(result)) => result,
-            Ok(Err(_)) => Err(eyre::eyre!("caller dropped before quiescence completion")),
-            Err(()) => Err(eyre::eyre!("runtime quiescence timed out")),
-        }
+        let result = if let Some(duration) = timeout {
+            match self.race_timeout(rx, duration).await {
+                Ok(Ok(result)) => result,
+                Ok(Err(_)) => Err(eyre::eyre!("caller dropped before response")),
+                Err(()) => Err(eyre::eyre!("quiescence wait timed out")),
+            }
+        } else {
+            rx.await
+                .map_err(|_| eyre::eyre!("caller dropped before response"))?
+        };
+        result
     }
 
-
-    // ── presence / introspection ───────────────────────────────────────────
-
-    /// Check whether the sedimentree for `doc_id` is resident in storage.
-    ///
-    /// This is the authoritative presence check for the fetch gate: a doc
-    /// that was never pulled subduction-side exists as a marker only.
     pub async fn contains_sedimentree_id(&self, doc_id: DocumentId) -> eyre::Result<bool> {
         let (resp, rx) = futures::channel::oneshot::channel();
         self.cmd_tx
@@ -403,25 +445,21 @@ impl<F: FutureForm> Runtime2Handle<F> {
             .map_err(|_| eyre::eyre!("caller dropped before response"))?
     }
 
-    /// Inspect raw stored commit/fragment blobs for a document.
     #[cfg(test)]
     pub(crate) async fn inspect_stored_doc_blobs(
         &self,
         doc_id: DocumentId,
     ) -> eyre::Result<Vec<Vec<u8>>> {
         let (resp, rx) = futures::channel::oneshot::channel();
+        let sed_id = sedimentree_core::id::SedimentreeId::new(doc_id.into_bytes());
         self.cmd_tx
-            .send(Runtime2Cmd::InspectStoredDocBlobs {
-                sed_id: sedimentree_core::id::SedimentreeId::new(doc_id.into_bytes()),
-                resp,
-            })
+            .send(Runtime2Cmd::InspectStoredDocBlobs { sed_id, resp })
             .await
             .map_err(|_| eyre::eyre!(ERROR_ACTOR))?;
         rx.await
             .map_err(|_| eyre::eyre!("caller dropped before response"))?
     }
 
-    /// Return whether the document has either an active worker or persisted sedimentree state.
     pub async fn has_local_doc_state(&self, doc_id: DocumentId) -> eyre::Result<bool> {
         let (resp, rx) = futures::channel::oneshot::channel();
         self.cmd_tx
@@ -431,6 +469,7 @@ impl<F: FutureForm> Runtime2Handle<F> {
         rx.await
             .map_err(|_| eyre::eyre!("caller dropped before response"))?
     }
+
     #[cfg(test)]
     pub(crate) async fn has_doc_worker(&self, doc_id: DocumentId) -> eyre::Result<bool> {
         let (resp, rx) = futures::channel::oneshot::channel();
@@ -457,7 +496,7 @@ impl<F: FutureForm> Runtime2Handle<F> {
         rx: futures::channel::oneshot::Receiver<T>,
         duration: std::time::Duration,
     ) -> Result<Result<T, futures::channel::oneshot::Canceled>, ()> {
-        use futures::future::{Either, select};
+        use futures::future::{select, Either};
         let sleep = Box::pin(self.timer.sleep(duration));
         match select(sleep, rx).await {
             Either::Left(_) => Err(()),

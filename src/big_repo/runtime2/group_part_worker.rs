@@ -63,6 +63,13 @@ impl GroupPartWorker {
                 self.timer.sleep(IDLE_POLL).await;
                 continue;
             }
+            tracing::debug!(
+                cursor,
+                event_count = events.len(),
+                first_event = events.first().expect("non-empty event batch").seq,
+                last_event = events.last().expect("non-empty event batch").seq,
+                "group-part worker processing Keyhive events"
+            );
             announced_idle = false;
 
             let event_cursor = events.last().expect("non-empty event batch").seq;
@@ -73,7 +80,7 @@ impl GroupPartWorker {
             let missed_history = events
                 .first()
                 .is_some_and(|event| event.seq > cursor.saturating_add(1));
-            let docs: Vec<_> = if missed_history {
+            let mut docs: Vec<_> = if missed_history {
                 tracing::warn!(
                     cursor,
                     first_retained_event = events.first().expect("non-empty event batch").seq,
@@ -87,6 +94,26 @@ impl GroupPartWorker {
                 }
                 docs.into_iter().collect()
             };
+            if docs.is_empty() {
+                // Keyhive state may advance through a protocol exchange whose
+                // persisted events do not identify the affected document. A
+                // full reconciliation here prevents a newly granted document
+                // from remaining outside GLOBAL_PART_ID indefinitely.
+                tracing::debug!(
+                    cursor,
+                    event_cursor,
+                    "no directly affected documents; rebuilding current document state"
+                );
+                docs = self.keyhive.document_ids().await;
+            }
+            tracing::debug!(
+                cursor,
+                event_cursor,
+                document_count = docs.len(),
+                ?docs,
+                managed_group_part_count = managed_group_parts.len(),
+                "group-part worker derived affected documents"
+            );
             if docs.is_empty() {
                 self.store
                     .reconcile_group_part_batch(&[], event_cursor, true)
@@ -135,7 +162,7 @@ impl GroupPartWorker {
             .into_iter()
             .map(|(principal, access)| (PeerId::new(principal), access))
             .collect::<HashMap<_, _>>();
-        let desired_group_parts = group_documents
+        let desired_group_parts: HashSet<PartId> = group_documents
             .iter()
             .filter(|(_, documents)| documents.contains(&doc))
             .map(|(group_id, _)| group_part_id(*group_id))
@@ -143,6 +170,14 @@ impl GroupPartWorker {
         let desired_global = agents
             .get(&local_principal)
             .is_some_and(|access| access.is_reader());
+        tracing::debug!(
+            ?doc,
+            agent_count = agents.len(),
+            local_access = ?agents.get(&local_principal),
+            desired_global,
+            desired_group_part_count = desired_group_parts.len(),
+            "group-part worker computed document reconciliation"
+        );
         Ok(GroupPartReconciliation {
             doc,
             agents,

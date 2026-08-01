@@ -154,32 +154,38 @@ pub async fn assert_reader_has_access(repo: &crate::BigRepo, doc_id: DocumentId)
 
 /// Sync a document and expect it to be fully materialized (Ready) on `repo`.
 ///
-/// One `sync_doc_with_peer` call is the barrier. If the doc is not `Ready`
-/// (or still `PendingMaterialization`) on return, the sync's synchronous
-/// ack/apply guarantee is broken — returned as `Err`.
+/// One `sync_doc_with_peer` call starts the exchange. Because subduction sends
+/// requested commits as fire-and-forget messages, this helper waits for the
+/// receiving document to become fully materialized before returning.
 pub async fn sync_doc_expect_ready(
     conn: &crate::BigRepoConnection,
     repo: &Arc<crate::BigRepo>,
     doc_id: DocumentId,
 ) -> Res<crate::BigDocHandle> {
-    conn.sync_doc_with_peer(doc_id, Some(std::time::Duration::from_secs(10)))
+    let receipt = conn
+        .sync_doc_with_peer_receipt(doc_id, Some(std::time::Duration::from_secs(10)))
         .await?;
-    repo.wait_for_quiescence(Some(std::time::Duration::from_secs(10)))
-        .await?;
-    match repo.get_doc(&doc_id).await? {
-        crate::DocLookup::Ready(handle) => Ok(handle),
-        crate::DocLookup::PendingMaterialization => Err(crate::ferr!(
-            "{}: doc still PendingMaterialization after a single sync_doc_with_peer — \
-             sync barrier did not await materialization",
+    tracing::debug!(?receipt.outcome, "document sync receipt captured in ready fixture");
+    tokio::time::timeout(std::time::Duration::from_secs(15), async {
+        loop {
+            repo.wait_for_quiescence(Some(std::time::Duration::from_secs(5)))
+                .await?;
+            match repo.get_doc(&doc_id).await? {
+                crate::DocLookup::Ready(handle) => return Ok(handle),
+                crate::DocLookup::PendingMaterialization | crate::DocLookup::Missing => {
+                    tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+                }
+            }
+        }
+    })
+    .await
+    .map_err(|_| {
+        crate::ferr!(
+            "{}: doc did not become Ready after sync_doc_with_peer",
             log_nickname::nickname(&repo.local_peer_id()),
-        )),
-        crate::DocLookup::Missing => Err(crate::ferr!(
-            "{}: doc Missing after sync_doc_with_peer",
-            log_nickname::nickname(&repo.local_peer_id()),
-        )),
-    }
+        )
+    })?
 }
-
 // ─── Bidirectional document sync ─────────────────────────────────────────────
 
 /// Bidirectional document sync: both sides pull from each other, then both

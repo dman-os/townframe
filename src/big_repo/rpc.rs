@@ -1,9 +1,9 @@
-use crate::{BigRepo, interlude::*};
+use crate::{interlude::*, BigRepo};
 
 use big_sync_core::PeerId;
 use iroh::endpoint::Connection;
 use iroh::protocol::{AcceptError, ProtocolHandler};
-use irpc::{WithChannels, channel, rpc_requests};
+use irpc::{channel, rpc_requests, WithChannels};
 use std::{collections::HashMap, sync::RwLock};
 
 use tokio::sync::mpsc;

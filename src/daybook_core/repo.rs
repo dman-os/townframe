@@ -261,7 +261,6 @@ impl RepoCtx {
         .await
     }
 
-
     async fn open_inner(
         layout: RepoLayout,
         lock_guard: RepoLockGuard,
@@ -710,13 +709,8 @@ pub(crate) async fn finish_clone_init(
         .await?
         .into_ready(doc_id_drawer)?;
     let authority = crate::authority::ensure(&parts.big_repo, sql, None).await?;
-    ensure_expected_partitions_for_docs(
-        &parts.part_store,
-        &authority,
-        doc_id_app,
-        doc_id_drawer,
-    )
-    .await?;
+    ensure_expected_partitions_for_docs(&parts.part_store, &authority, doc_id_app, doc_id_drawer)
+        .await?;
     ensure_blob_partitions(&parts.blob_part_store).await?;
     Ok(RepoCtx::from_parts(parts, doc_app, doc_drawer))
 }

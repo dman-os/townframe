@@ -1,13 +1,16 @@
 //! Support types, traits, type aliases, and helper functions that are still
 //! imported by runtime2, its native backend, handler.rs, keyhive_conn.rs,
 //! and ephemeral.rs.
+//!
+//! NOTE: we use bincode for the initial Envelope but this is safe/canonicalized 
+//! since it uses an ordered serializer internally
 
 use crate::interlude::*;
 
 use crate::{
-    BigKeyhiveHandle,
     encrypted_blob::{decode_encrypted_blob, encode_encrypted_blob},
     keyhive_storage::BigRepoKeyhiveStorage,
+    BigKeyhiveHandle,
 };
 use future_form::Sendable;
 use futures::future::BoxFuture;
@@ -17,8 +20,8 @@ use sedimentree_core::{
     depth::CountLeadingZeroBytes,
     fragment::Fragment,
     id::SedimentreeId,
-    loose_commit::{LooseCommit, id::CommitId},
-    sedimentree::{Sedimentree, minimized::MinimizedSedimentree},
+    loose_commit::{id::CommitId, LooseCommit},
+    sedimentree::{minimized::MinimizedSedimentree, Sedimentree},
 };
 use std::collections::BTreeSet;
 use std::time::Duration;
@@ -227,7 +230,8 @@ pub(crate) fn stage_automerge_ingest(doc: &automerge::Automerge) -> StagedAutome
     let cached = doc.fragments(1..);
     let loose = doc.fragments(0..=0);
     let cached_bytes = doc.bundle_fragments(cached.iter().cloned());
-    let loose_bytes = doc.bundle_fragments(loose.iter().cloned());
+    let mut snapshot_doc = doc.clone();
+    let snapshot = snapshot_doc.save();
 
     let mut blobs = Vec::with_capacity(cached.len() + loose.len());
     let mut fragment_entries = Vec::with_capacity(cached.len());
@@ -256,14 +260,14 @@ pub(crate) fn stage_automerge_ingest(doc: &automerge::Automerge) -> StagedAutome
         });
     }
 
-    for (fragment, raw) in loose.iter().zip(loose_bytes) {
+    for fragment in &loose {
         let head = CommitId::new(fragment.head.0);
         let parents: BTreeSet<CommitId> = fragment
             .boundary
             .iter()
             .map(|pp| CommitId::new(pp.0))
             .collect();
-        blobs.push(Blob::new(raw));
+        blobs.push(Blob::new(snapshot.clone()));
         loose_entries.push(LooseEntry { head, parents });
     }
 
@@ -357,8 +361,6 @@ pub(crate) async fn persist_cgka_updates_durably(
     Ok(())
 }
 
-// ─── encrypt_staged_automerge_ingest ───────────────────────────────────────────
-
 pub(crate) async fn encrypt_staged_automerge_ingest(
     staged_ingest: &StagedAutomergeIngest,
     keyhive_handle: &BigKeyhiveHandle,
@@ -418,8 +420,7 @@ pub(crate) async fn encrypt_staged_automerge_ingest(
             plaintext: blob.as_slice().to_vec(),
             ancestors,
         };
-        let envelope_bytes =
-            bincode::serialize(&envelope).map_err(|e| ferr!("bincode encode envelope: {e}"))?;
+        let envelope_bytes = bincode::serialize(&envelope).wrap_err("bincode encode envelope")?;
 
         let (encrypted, app_key) = keyhive
             .try_encrypt_content_keyed(
@@ -475,8 +476,7 @@ pub(crate) async fn encrypt_staged_automerge_ingest(
             plaintext: blob.as_slice().to_vec(),
             ancestors,
         };
-        let envelope_bytes =
-            bincode::serialize(&envelope).map_err(|e| ferr!("bincode encode envelope: {e}"))?;
+        let envelope_bytes = bincode::serialize(&envelope).wrap_err("bincode encode envelope")?;
 
         let (encrypted, app_key) = keyhive
             .try_encrypt_content_keyed(
@@ -517,8 +517,6 @@ pub(crate) async fn encrypt_staged_automerge_ingest(
     ))
 }
 
-// ─── encrypt_loose_commit_with_update_op ───────────────────────────────────────
-
 pub(crate) async fn encrypt_loose_commit_with_update_op(
     keyhive_handle: &BigKeyhiveHandle,
     sedimentree_id: SedimentreeId,
@@ -546,30 +544,6 @@ pub(crate) async fn encrypt_loose_commit_with_update_op(
         .ok_or_else(|| ferr!("keyhive doc not found for commit encryption"))?;
     let content_ref: Vec<u8> = head.as_bytes().to_vec();
     let pred_refs: Vec<Vec<u8>> = parents.iter().map(|c| c.as_bytes().to_vec()).collect();
-
-    let ancestors: std::collections::HashMap<Vec<u8>, SymmetricKey> = {
-        let doc_keys = kh_doc.lock().await.known_decryption_keys().clone();
-        let ancestors: std::collections::HashMap<Vec<u8>, SymmetricKey> = parents
-            .iter()
-            .map(|p| {
-                let pref = p.as_bytes().to_vec();
-                let key = batch_keys
-                    .get(p)
-                    .copied()
-                    .or_else(|| doc_keys.get(&pref).copied())
-                    .ok_or_else(|| ferr!("missing causal encryption key for parent {p}"))?;
-                Ok((pref, key))
-            })
-            .collect::<Res<_>>()?;
-        ancestors
-    };
-    let envelope = Envelope {
-        plaintext: blob.to_vec(),
-        ancestors,
-    };
-    let envelope_bytes =
-        bincode::serialize(&envelope).map_err(|e| ferr!("bincode encode envelope: {e}"))?;
-
     let (owner_secret_count, cgka_operation_count, has_pcs_key) = {
         let locked = kh_doc.lock().await;
         let cgka = locked
@@ -577,6 +551,41 @@ pub(crate) async fn encrypt_loose_commit_with_update_op(
             .map_err(|error| ferr!("failed inspecting document CGKA before encryption: {error}"))?;
         (cgka.owner_sks().len(), cgka.ops_count(), cgka.has_pcs_key())
     };
+    let key_tag = |key: &SymmetricKey| {
+        use std::hash::{Hash, Hasher};
+        let mut hasher = std::collections::hash_map::DefaultHasher::new();
+        key.as_slice().hash(&mut hasher);
+        format!("{:016x}", hasher.finish())
+    };
+    let ancestors: std::collections::HashMap<Vec<u8>, SymmetricKey> = {
+        let doc_keys = kh_doc.lock().await.known_decryption_keys().clone();
+        parents
+            .iter()
+            .map(|parent| {
+                let content_ref = parent.as_bytes().to_vec();
+                let key = batch_keys
+                    .get(parent)
+                    .copied()
+                    .or_else(|| doc_keys.get(&content_ref).copied())
+                    .ok_or_else(|| {
+                        eyre::Report::new(crate::runtime2::io::DocumentKeyUnavailable {
+                            source: ferr!("missing causal encryption key for parent {parent}"),
+                            document_id: crate::DocumentId::new(*sedimentree_id.as_bytes()),
+                            owner_secret_count,
+                            cgka_operation_count,
+                            has_pcs_key,
+                        })
+                    })?;
+                Ok((content_ref, key))
+            })
+            .collect::<Res<_>>()?
+    };
+    let envelope = Envelope {
+        plaintext: blob.to_vec(),
+        ancestors,
+    };
+    let envelope_bytes = bincode::serialize(&envelope).wrap_err("bincode encode envelope")?;
+
     let (encrypted, app_key) = keyhive
         .try_encrypt_content_keyed(
             Arc::clone(&kh_doc),
@@ -589,7 +598,7 @@ pub(crate) async fn encrypt_loose_commit_with_update_op(
             keyhive_core::keyhive::EncryptContentError::EncryptError(
                 keyhive_core::principal::document::EncryptError::FailedToMakeAppSecret(source),
             ) => eyre::Report::new(crate::runtime2::io::DocumentKeyUnavailable {
-                source,
+                source: eyre::Report::new(source),
                 document_id: crate::DocumentId::new(*sedimentree_id.as_bytes()),
                 owner_secret_count,
                 cgka_operation_count,
@@ -599,9 +608,15 @@ pub(crate) async fn encrypt_loose_commit_with_update_op(
         })?;
     let update_op = encrypted.update_op().cloned();
     let local_secret = encrypted.local_cgka_secret().copied();
+    tracing::debug!(
+        %sedimentree_id,
+        %head,
+        app_key_id = %key_tag(&app_key),
+        parent_count = parents.len(),
+        "generated application encryption key for loose commit"
+    );
 
     let encrypted_bytes = encode_encrypted_blob(encrypted.encrypted_content())?;
-
     Ok((Blob::new(encrypted_bytes), app_key, update_op, local_secret))
 }
 
@@ -613,7 +628,7 @@ pub(crate) async fn encrypt_fragment_blob<S>(
     sedimentree_id: SedimentreeId,
     head: CommitId,
     boundary: &BTreeSet<CommitId>,
-    fragment_bytes: &[u8],
+    _fragment_bytes: &[u8],
 ) -> Res<Blob>
 where
     S: BigRepoSubductionStorage,
@@ -634,7 +649,6 @@ where
 
     let mut known_decryption_keys = kh_doc.lock().await.known_decryption_keys().clone();
 
-    let head_ref: Vec<u8> = head.as_bytes().to_vec();
     let head_verified = <S as Storage<Sendable>>::load_loose_commit(
         storage_for_reads,
         sedimentree_id,
@@ -648,58 +662,56 @@ where
         )
     })?;
     let head_encrypted = decode_encrypted_blob(head_verified.blob().as_slice())?;
-    let head_key: SymmetricKey = if let Some(key) = known_decryption_keys.get(&head_ref).copied() {
-        key
-    } else {
-        let (_, key) = kh_doc
-            .lock()
-            .await
-            .try_decrypt_content_keyed(&head_encrypted)
-            .map_err(|e| ferr!("failed recovering fragment head key: {e}"))?;
-        known_decryption_keys.insert(head_ref.clone(), key);
-        key
-    };
+    let (head_plaintext, head_key) = kh_doc
+        .lock()
+        .await
+        .try_decrypt_content_keyed(&head_encrypted)
+        .map_err(|error| ferr!("failed recovering fragment head snapshot: {error}"))?;
+    let head_envelope: Envelope<Vec<u8>, Vec<u8>> = bincode::deserialize(&head_plaintext)
+        .map_err(|error| ferr!("failed decoding fragment head envelope: {error}"))?;
 
     let mut ancestors = std::collections::HashMap::with_capacity(boundary.len());
-    for pred in boundary {
-        let pred_ref: Vec<u8> = pred.as_bytes().to_vec();
-        let pred_key = if let Some(key) = known_decryption_keys.get(&pred_ref).copied() {
+    for predecessor in boundary {
+        let content_ref = predecessor.as_bytes().to_vec();
+        let key = if let Some(key) = known_decryption_keys.get(&content_ref).copied() {
             key
         } else {
-            let pred_verified = <S as Storage<Sendable>>::load_loose_commit(storage_for_reads, sedimentree_id, *pred)
-                .await
-                .map_err(|e| {
-                    ferr!("failed loading fragment boundary loose commit for encryption: {e}")
-                })?
-                .ok_or_else(|| {
-                    ferr!(
-                        "fragment boundary missing loose commit in storage: sedimentree_id={sedimentree_id:?} head={pred:?}"
-                    )
-                })?;
-            let pred_encrypted = decode_encrypted_blob(pred_verified.blob().as_slice())?;
+            let verified = <S as Storage<Sendable>>::load_loose_commit(
+                storage_for_reads,
+                sedimentree_id,
+                *predecessor,
+            )
+            .await
+            .map_err(|error| ferr!("failed loading fragment boundary commit: {error}"))?
+            .ok_or_else(|| {
+                ferr!(
+                    "fragment boundary missing loose commit: sedimentree_id={sedimentree_id:?} head={predecessor:?}"
+                )
+            })?;
+            let encrypted = decode_encrypted_blob(verified.blob().as_slice())?;
             let (_, key) = kh_doc
                 .lock()
                 .await
-                .try_decrypt_content_keyed(&pred_encrypted)
-                .map_err(|e| ferr!("failed recovering fragment boundary key: {e}"))?;
-            known_decryption_keys.insert(pred_ref.clone(), key);
+                .try_decrypt_content_keyed(&encrypted)
+                .map_err(|error| ferr!("failed recovering fragment boundary key: {error}"))?;
+            known_decryption_keys.insert(content_ref.clone(), key);
             key
         };
-        ancestors.insert(pred_ref, pred_key);
+        ancestors.insert(content_ref, key);
     }
 
     let envelope = Envelope {
-        plaintext: fragment_bytes.to_vec(),
+        plaintext: head_envelope.plaintext,
         ancestors,
     };
-    let envelope_bytes = bincode::serialize(&envelope)
-        .map_err(|e| ferr!("bincode encode fragment envelope: {e}"))?;
+    let envelope_bytes =
+        bincode::serialize(&envelope).wrap_err("bincode encode fragment envelope")?;
     let nonce_context = fragment_nonce_context(sedimentree_id, head, boundary);
     let nonce = Siv::new(&head_key, &envelope_bytes, &nonce_context);
     let mut ciphertext = envelope_bytes;
     head_key
         .try_encrypt(nonce, &mut ciphertext)
-        .map_err(|e| ferr!("encrypt fragment payload failed: {e}"))?;
+        .map_err(|err| ferr!("encrypt fragment payload failed: {err}"))?;
 
     let encrypted = beekem::encrypted::EncryptedContent::new(
         nonce,

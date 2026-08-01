@@ -25,6 +25,8 @@ pub use part_store::host_contract as host_part_store_contract;
 #[cfg(feature = "test-support")]
 pub use part_store::host_contract::HostPartStoreContractHarness;
 pub use part_store::memory::MemoryPartStore;
+#[cfg(any(test, feature = "test-support"))]
+pub use part_store::policy::MembershipPolicy;
 pub use part_store::policy::{AllowAllPolicy, ObjAccessPolicy};
 pub use part_store::sqlite::SqlitePartStore;
 pub use part_store::sqlite_core;

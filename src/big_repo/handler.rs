@@ -30,8 +30,8 @@ use subduction_ephemeral::{
     policy::OpenEphemeralPolicy,
 };
 use subduction_keyhive::{
-    KeyhiveMessage,
     handler::{HandleError as KeyhiveHandleError, SendableKeyhiveHandler, SendableRuntimeProtocol},
+    KeyhiveMessage,
 };
 
 // ─── Generic type aliases (connection-parameterised, old-runtime default) ──

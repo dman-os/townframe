@@ -202,7 +202,6 @@ pub struct IrohBigSyncRpcClient {
     client: irpc::Client<BigSyncIrpc>,
 }
 
-
 #[async_trait]
 impl HostBigRpcClient for IrohBigSyncRpcClient {
     async fn peer_summary(

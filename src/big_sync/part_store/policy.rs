@@ -56,3 +56,58 @@ impl ObjAccessPolicy for AllowAllPolicy {
     fn add_obj_member(&self, _obj: ObjId, _member: PeerId, _access: Access) {}
     fn remove_obj_member(&self, _obj: ObjId, _member: PeerId) {}
 }
+
+/// Deterministic membership policy used by the host-store contract tests.
+/// Production callers should provide their Keyhive-backed policy instead.
+#[cfg(any(test, feature = "test-support"))]
+#[derive(Default)]
+pub struct MembershipPolicy {
+    members: std::sync::RwLock<HashMap<ObjId, HashMap<PeerId, Access>>>,
+}
+
+#[cfg(any(test, feature = "test-support"))]
+impl ObjAccessPolicy for MembershipPolicy {
+    fn is_event_permitted(
+        &self,
+        _part_id: Option<PartId>,
+        obj_id: ObjId,
+        principal: Option<PeerId>,
+    ) -> bool {
+        let Some(principal) = principal else {
+            return true;
+        };
+        self.members
+            .read()
+            .expect("membership policy lock poisoned")
+            .get(&obj_id)
+            .and_then(|members| members.get(&principal))
+            .is_some_and(|access| access.is_fetcher())
+    }
+
+    fn set_obj_members(&self, obj: ObjId, agents: HashMap<PeerId, Access>) {
+        self.members
+            .write()
+            .expect("membership policy lock poisoned")
+            .insert(obj, agents);
+    }
+
+    fn add_obj_member(&self, obj: ObjId, member: PeerId, access: Access) {
+        self.members
+            .write()
+            .expect("membership policy lock poisoned")
+            .entry(obj)
+            .or_default()
+            .insert(member, access);
+    }
+
+    fn remove_obj_member(&self, obj: ObjId, member: PeerId) {
+        if let Some(members) = self
+            .members
+            .write()
+            .expect("membership policy lock poisoned")
+            .get_mut(&obj)
+        {
+            members.remove(&member);
+        }
+    }
+}

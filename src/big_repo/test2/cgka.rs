@@ -23,8 +23,8 @@
 //! | `group_add_checkpoint`                        | BigRepo emits CGKA membership plus a history checkpoint |
 //! |                                               | for a group member added after document creation.       |
 
-use super::harness::{Pair, fixtures, keyhive as kh_snap};
-use automerge::{ReadDoc, ScalarValue, transaction::Transactable};
+use super::harness::{fixtures, keyhive as kh_snap, Pair};
+use automerge::{transaction::Transactable, ReadDoc, ScalarValue};
 use keyhive_core::access::Access;
 use std::collections::BTreeSet;
 

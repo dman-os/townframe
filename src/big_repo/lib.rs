@@ -2,9 +2,9 @@
 //! internally by sharing the Arc<Mutex> of the registry to the runtime
 
 mod interlude {
-    #[allow(unused_imports)]
     pub use big_sync_core::{ObjId, PartId, PeerId};
 
+    pub use future_form::{FutureForm, Local, Sendable};
     pub use utils_rs::prelude::*;
 }
 
@@ -41,8 +41,27 @@ mod sqlite_big_repo_store;
 pub use sqlite_big_repo_store::SqliteBigRepoStore;
 pub(crate) mod wire;
 pub use runtime2::types::{
-    CreateDocError, DocLookup, GetDocError, PutDocError, SyncDocError, SyncDocPolicyError,
+    CreateDocError, DocLookup, GetDocError, PutDocError, SyncDocError, SyncDocOutcome,
+    SyncDocPolicyError, SyncDocReceipt,
 };
+pub use runtime2::{DocHeadState, MaterializationState};
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum DocumentSyncStage {
+    NotPersisted,
+    Persisted,
+    Indexed,
+    Materialized,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct DocumentSyncSnapshot {
+    pub doc_id: DocumentId,
+    pub stage: DocumentSyncStage,
+    pub head_state: Option<DocHeadState>,
+    pub indexed_parts: usize,
+    pub payload_present: bool,
+}
 #[cfg(test)]
 pub(crate) mod test;
 #[cfg(test)]
@@ -55,14 +74,15 @@ pub use ephemeral::{
 };
 pub use keyhive::{BigKeyhiveAgent, BigKeyhiveAuthority, BigKeyhiveGroup, BigKeyhiveHandle};
 
-pub use changes::{BigRepoAccess, BigRepoDomainNotification, GroupId};
 pub use changes::{
-    BigRepoChangeNotification, BigRepoChangeOrigin, ChangeFilter as BigRepoChangeFilter,
+    path_prefix_matches as big_repo_path_prefix_matches, BigRepoChangeNotification,
+    BigRepoChangeOrigin, ChangeFilter as BigRepoChangeFilter,
     ChangeListenerRegistration as BigRepoChangeListenerRegistration,
     DocIdFilter as BigRepoDocIdFilter, DomainFilter as BigRepoDomainFilter,
     DomainListenerRegistration as BigRepoDomainListenerRegistration,
-    OriginFilter as BigRepoOriginFilter, path_prefix_matches as big_repo_path_prefix_matches,
+    OriginFilter as BigRepoOriginFilter,
 };
+pub use changes::{BigRepoAccess, BigRepoDomainNotification, GroupId};
 
 pub type DocumentId = big_sync_core::ObjId;
 pub type SharedPartStore = Arc<dyn big_sync::HostPartStore>;
@@ -248,19 +268,19 @@ impl BigRepo {
 
         let (runtime, ephemeral, _events, keyhive_notifier, runtime_stop) =
             runtime2::native::spawn_native_runtime2(
-            signer,
-            subduction_storage.clone(),
-            subduction_storage.clone(),
-            Arc::clone(&policy),
-            sync_policy,
-            keyhive.clone(),
-            keyhive_storage.clone(),
-            Arc::clone(&change_manager),
-            listener_evt_tx,
-            listener_evt_rx,
-            keyhive_change_tx.clone(),
-        )
-        .await?;
+                signer,
+                subduction_storage.clone(),
+                subduction_storage.clone(),
+                Arc::clone(&policy),
+                sync_policy,
+                keyhive.clone(),
+                keyhive_storage.clone(),
+                Arc::clone(&change_manager),
+                listener_evt_tx,
+                listener_evt_rx,
+                keyhive_change_tx.clone(),
+            )
+            .await?;
 
         let out = Arc::new(Self {
             local_peer_id: peer_id,
@@ -346,10 +366,6 @@ impl BigRepo {
         self.sync_policy
     }
 
-    pub(crate) fn big_sync_store(&self) -> &SharedPartStore {
-        &self.big_sync_store
-    }
-
     pub(crate) async fn subscribe_local(
         &self,
         reqs: big_sync_core::rpc::SubPartsRequest,
@@ -391,6 +407,17 @@ impl BigRepo {
             .await
     }
 
+    pub async fn sync_doc_with_peer_receipt(
+        &self,
+        doc_id: DocumentId,
+        peer_id: PeerId,
+        timeout: Option<std::time::Duration>,
+    ) -> Result<SyncDocReceipt, SyncDocError> {
+        self.runtime
+            .sync_doc_with_peer_receipt(doc_id, peer_id, timeout)
+            .await
+    }
+
     #[cfg(test)]
     pub(crate) async fn inspect_stored_doc_blobs(&self, doc_id: DocumentId) -> Res<Vec<Vec<u8>>> {
         self.runtime.inspect_stored_doc_blobs(doc_id).await
@@ -417,6 +444,49 @@ impl BigRepo {
     #[tracing::instrument(skip_all, fields(%self.local_peer_id))]
     pub async fn doc_head_state(&self, document_id: DocumentId) -> Res<runtime2::DocHeadState> {
         self.runtime.doc_head_state(document_id).await
+    }
+
+    pub async fn document_sync_snapshot(
+        &self,
+        document_id: DocumentId,
+    ) -> Res<DocumentSyncSnapshot> {
+        let head_state = self.runtime.inspect_doc_head_state(document_id).await?;
+        let store = &self.big_sync_store;
+        let indexed_parts = store.obj_parts(document_id).await?.len();
+        let payload_present = store.obj_payload(document_id).await?.is_some();
+        let stage = match head_state.as_ref().map(|state| state.state) {
+            Some(
+                MaterializationState::Materialized | MaterializationState::PartiallyMaterialized,
+            ) => DocumentSyncStage::Materialized,
+            Some(MaterializationState::Pending | MaterializationState::Missing)
+                if indexed_parts > 0 =>
+            {
+                DocumentSyncStage::Indexed
+            }
+            _ if payload_present => DocumentSyncStage::Persisted,
+            _ => DocumentSyncStage::NotPersisted,
+        };
+        Ok(DocumentSyncSnapshot {
+            doc_id: document_id,
+            stage,
+            head_state,
+            indexed_parts,
+            payload_present,
+        })
+    }
+
+    /// Return a compact, non-sensitive snapshot for sync timeout diagnostics.
+    pub async fn document_sync_diagnostics(&self, document_id: DocumentId) -> Res<String> {
+        let snapshot = self.document_sync_snapshot(document_id).await?;
+        Ok(format!(
+            "peer={} doc={} stage={:?} state={:?} indexed_parts={} payload_present={}",
+            self.local_peer_id,
+            snapshot.doc_id,
+            snapshot.stage,
+            snapshot.head_state.as_ref().map(|state| state.state),
+            snapshot.indexed_parts,
+            snapshot.payload_present
+        ))
     }
 
     /// Wait until finite runtime work currently admitted to this repository
@@ -617,24 +687,35 @@ impl BigRepo {
 /// connection drops, whether outbound or inbound).
 fn watch_connection_end(
     peer_id: PeerId,
-    end_rx: futures::channel::oneshot::Receiver<eyre::Result<()>>,
+    end_rx: futures::channel::oneshot::Receiver<(
+        std::sync::Arc<std::sync::atomic::AtomicBool>,
+        eyre::Result<()>,
+    )>,
     end_signal_tx: Option<tokio::sync::mpsc::UnboundedSender<ConnFinishSignal>>,
 ) {
     let Some(end_signal_tx) = end_signal_tx else {
         return;
     };
     tokio::spawn(async move {
-        let result = end_rx.await;
-        let err = match result {
-            Ok(result) => result.err(),
-        // The runtime stopped before its watcher fired; treat the
-        // connection as ended without a transport error.
-        Err(_) => None,
-    };
-    end_signal_tx
-        .send(ConnFinishSignal { peer_id, err })
-        .inspect_err(|_| warn!(ERROR_CALLER))
-        .ok();
+        let (closed, result) = end_rx.await.unwrap_or_else(|_| {
+            // The runtime stopped before its watcher fired; treat the
+            // connection as ended without a transport error. No end flag is
+            // available — synthesize a fresh one (the connection is dead
+            // either way).
+            (
+                std::sync::Arc::new(std::sync::atomic::AtomicBool::new(true)),
+                Ok(()),
+            )
+        });
+        let err = result.err();
+        end_signal_tx
+            .send(ConnFinishSignal {
+                peer_id,
+                closed,
+                err,
+            })
+            .inspect_err(|_| warn!(ERROR_CALLER))
+            .ok();
     });
 }
 
@@ -650,12 +731,22 @@ pub struct BigRepoConnection {
 
 pub struct ConnFinishSignal {
     pub peer_id: PeerId,
+    /// The ended connection's end flag (shared with the runtime's watcher).
+    /// Lets consumers distinguish WHICH connection ended when a peer id is
+    /// reused across connections (e.g. re-establishment after a replace).
+    pub closed: std::sync::Arc<std::sync::atomic::AtomicBool>,
     pub err: Option<eyre::Report>,
 }
 
 impl BigRepoConnection {
     pub fn peer_id(&self) -> PeerId {
         self.peer_id
+    }
+
+    /// The connection's end flag, shared with the runtime's watcher; use for
+    /// identity comparisons against [`ConnFinishSignal::closed`].
+    pub fn closed_flag(&self) -> std::sync::Arc<std::sync::atomic::AtomicBool> {
+        std::sync::Arc::clone(&self.closed)
     }
 
     pub fn is_closed(&self) -> bool {
@@ -689,8 +780,28 @@ impl BigRepoConnection {
             .await
     }
 
+    pub async fn sync_doc_with_peer_receipt(
+        &self,
+        doc_id: DocumentId,
+        timeout: Option<std::time::Duration>,
+    ) -> Result<SyncDocReceipt, SyncDocError> {
+        if self.is_closed() {
+            return Err(SyncDocError::IoError(ferr!("connection is closed")));
+        }
+        self.repo
+            .runtime
+            .sync_doc_with_peer_receipt(doc_id, self.peer_id, timeout)
+            .await
+    }
+
     pub async fn stop(self) -> Res<()> {
-        self.repo.runtime.close_connection(self.peer_id).await
+        // Per-connection close: pass this connection's end flag so the
+        // runtime tears down only this connection's registration (a
+        // superseded connection's stop must not affect the replacement).
+        self.repo
+            .runtime
+            .close_connection(self.peer_id, std::sync::Arc::clone(&self.closed))
+            .await
     }
 }
 
@@ -808,6 +919,10 @@ impl BigDocHandle {
             return Ok(out);
         }
 
+        // Capture the current materialization while holding the same lock as
+        // the mutation. Any newly retained head must remain independently
+        // loadable after sedimentree minimization discards its predecessors.
+        let snapshot = doc.save();
         let changes = doc
             .get_changes(&before_heads)
             .into_iter()
@@ -818,7 +933,12 @@ impl BigDocHandle {
                     .iter()
                     .map(|dep| CommitId::new(dep.0))
                     .collect::<BTreeSet<_>>();
-                (head, parents, change.raw_bytes().to_vec())
+                let bytes = if after_heads.contains(&change.hash()) {
+                    snapshot.clone()
+                } else {
+                    change.raw_bytes().to_vec()
+                };
+                (head, parents, bytes)
             })
             .collect::<Vec<_>>();
         let patches = if self

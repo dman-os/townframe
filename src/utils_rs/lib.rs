@@ -21,7 +21,7 @@ mod interlude {
     pub use crate::{default, CHeapStr, DHashMap, JsonExt, ToAnyhow, ToEyre};
 
     pub use std::{
-        collections::{HashMap, HashSet},
+        collections::{BTreeMap, BTreeSet, HashMap, HashSet},
         path::{Path, PathBuf},
         rc::Rc,
         sync::{Arc, LazyLock},
@@ -832,7 +832,11 @@ impl AbortableJoinSet {
         // every result until `stop()`. A failed task is an invariant break and
         // must surface immediately rather than remain hidden until shutdown.
         while let Some(result) = join_set.try_join_next() {
-            result.expect("background task failed");
+            if let Err(err) = result {
+                if !err.is_cancelled() {
+                    std::panic::resume_unwind(err.into_panic());
+                }
+            }
         }
         let (done_tx, done_rx) = tokio::sync::oneshot::channel();
         let abort = join_set.spawn(async move {

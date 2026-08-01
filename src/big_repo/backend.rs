@@ -13,6 +13,10 @@ impl BigRepoSyncBackend {
 
 #[async_trait::async_trait]
 impl big_sync::SyncBackend for BigRepoSyncBackend {
+    #[tracing::instrument(
+        skip_all,
+        fields(%peer_id, %obj_id, remote_payload_present = remote_payload.is_some()),
+    )]
     async fn sync_obj(
         &self,
         peer_id: PeerId,
@@ -48,48 +52,53 @@ impl big_sync::SyncBackend for BigRepoSyncBackend {
                         },
                     ));
                 }
-            };
+            }
         }
-        match repo
+        let receipt = match repo
             .runtime
-            .sync_doc_with_peer(doc_id, peer_id, Some(repo.sync_policy().doc_sync_timeout))
+            .sync_doc_with_peer_receipt(doc_id, peer_id, Some(repo.sync_policy().doc_sync_timeout))
             .await
         {
-            Ok(()) => {
-                let heads = repo
-                    .doc_payload_heads(doc_id)
-                    .await?
-                    .ok_or_eyre("local doc payload missing after successful sync")?;
-                let deets = if remote_payload.is_none()
-                    && local_heads
-                        .as_ref()
-                        .map(|prev| prev.as_ref() == heads.as_ref())
-                        .unwrap_or_default()
-                {
-                    big_sync_core::SyncCompletionDeets::Noop
-                } else {
-                    big_sync_core::SyncCompletionDeets::ChangedObject
-                };
-                Ok(big_sync::SyncTaskRunOutcome::Completion(
-                    big_sync_core::SyncTaskCompletion { obj_id, deets },
-                ))
-            }
-            Err(crate::SyncDocError::Other(inner)) => Err(inner),
+            Ok(receipt) => receipt,
+            Err(crate::SyncDocError::Other(inner)) => return Err(inner),
             Err(crate::SyncDocError::IoError(inner)) => {
-                Err(inner).wrap_err("i/o error syncing doc")
+                return Err(inner).wrap_err("i/o error syncing doc");
             }
             Err(crate::SyncDocError::TransportError) => {
-                eyre::bail!("transport error syncing doc")
+                eyre::bail!("transport error syncing doc");
             }
             Err(crate::SyncDocError::NotFound) => {
-                eyre::bail!("remote doc was not found")
+                eyre::bail!("remote doc was not found");
             }
             Err(crate::SyncDocError::Unauthorized) => {
-                eyre::bail!("remote doc sync was unauthorized")
+                eyre::bail!("remote doc sync was unauthorized");
             }
             Err(crate::SyncDocError::Policy(error)) => {
-                eyre::bail!("remote doc sync was rejected by policy: {error}")
+                eyre::bail!("remote doc sync was rejected by policy: {error}");
             }
-        }
+            Err(crate::SyncDocError::PendingMaterialization) => {
+                eyre::bail!("document sync returned legacy pending outcome");
+            }
+        };
+        debug!(peer_id = %peer_id, obj_id = %obj_id, ?receipt.outcome, "big sync document receipt");
+        let heads = repo
+            .doc_payload_heads(doc_id)
+            .await?
+            .ok_or_eyre("local doc payload missing after successful sync")?;
+        debug!(head_count = heads.len(), "loaded persisted heads after document sync");
+        let deets = if remote_payload.is_none()
+            && local_heads
+                .as_ref()
+                .map(|prev| prev.as_ref() == heads.as_ref())
+                .unwrap_or_default()
+        {
+            big_sync_core::SyncCompletionDeets::Noop
+        } else {
+            big_sync_core::SyncCompletionDeets::ChangedObject
+        };
+        debug!(?deets, "document sync backend completed");
+        Ok(big_sync::SyncTaskRunOutcome::Completion(
+            big_sync_core::SyncTaskCompletion { obj_id, deets },
+        ))
     }
 }

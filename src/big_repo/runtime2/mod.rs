@@ -15,12 +15,15 @@ pub(crate) mod types;
 mod test_support;
 
 pub use doc_worker::spawn_doc_worker;
-pub(crate) use native::KeyhiveChangeNotifier;
-pub use io::{CausalDecryptResult, Clock, DocIo, RuntimeIo, SyncDocAttempt, Timer};
+pub use io::{
+    CausalDecryptResult, Clock, DocIo, MaterializationBlocker, MaterializationStatus, RuntimeIo,
+    SyncDocAttempt, Timer,
+};
 pub use lease::{
     DocLease, DocWorkerEntry, DocWorkerHandle, DocWorkerInternalLease, DocWorkerStopToken,
 };
 pub use messages::{Runtime2Cmd, Runtime2Evt};
+pub(crate) use native::KeyhiveChangeNotifier;
 pub use tasks::{TaskRuntime, TaskSet, TokioTaskRuntime, TokioTimer};
 
 mod doc_worker;
@@ -28,7 +31,7 @@ mod handle;
 mod hub;
 
 pub use handle::Runtime2Handle;
-pub use hub::{Runtime2StopToken, spawn_runtime2};
+pub use hub::{spawn_runtime2, Runtime2StopToken};
 
 /// Generic over `F: FutureForm` (Sendable native, Local wasm) and the task
 /// runtime `R`. Concrete storage, keyhive, and transport are behind the
@@ -102,9 +105,19 @@ pub trait TransportConnect<F: FutureForm>: Send + Sync {
         )>,
     >;
 
-    /// Asynchronously close the connection to `peer_id`.
+    /// Asynchronously close one connection to `peer_id`, identified by its
+    /// end flag. Subduction tracks multiple connections per peer, so the
+    /// close is per-connection; the peer's registration (keyhive adapter)
+    /// is only torn down when the closing connection is still the owner.
     /// Returns when the transport has finished tearing down.
-    fn close(&self, peer_id: big_sync_core::PeerId) -> F::Future<'static, eyre::Result<()>>;
+    fn close(
+        &self,
+        peer_id: big_sync_core::PeerId,
+        closed: std::sync::Arc<std::sync::atomic::AtomicBool>,
+    ) -> F::Future<
+        'static,
+        eyre::Result<Option<std::sync::Arc<std::sync::atomic::AtomicBool>>>,
+    >;
 }
 
 /// The result of the walk-derived heads query (`Runtime2Handle::doc_head_state`).

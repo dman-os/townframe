@@ -6,6 +6,7 @@
 mod access_matrix;
 mod capability;
 mod cgka;
+mod conn_lifecycle;
 mod convergence;
 mod edge;
 mod encryption;

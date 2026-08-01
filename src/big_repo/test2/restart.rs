@@ -22,9 +22,9 @@
 //! parity) at the end. Seeds are unique per test; RAII `Pair` teardown
 //! handles all cleanup — no manual `.stop()` calls.
 
-use super::harness::{Pair, fixtures, heads};
+use super::harness::{fixtures, heads, Pair};
 use crate::StorageConfig;
-use automerge::{ReadDoc, ScalarValue, transaction::Transactable};
+use automerge::{transaction::Transactable, ReadDoc, ScalarValue};
 use keyhive_core::access::Access;
 
 // ─── helpers ───────────────────────────────────────────────────────────────
@@ -675,6 +675,116 @@ async fn tier5_restart_after_local_write_delivers_on_reconnect() -> crate::Res<(
 
     drop(reader_doc);
     drop(owner_doc2);
+    drop(owner_doc);
+    Ok(())
+}
+
+/// Notification-only barrier for a document update after reconnect.
+async fn wait_for_title(
+    repo: &std::sync::Arc<crate::BigRepo>,
+    doc_id: crate::DocumentId,
+    expected: &str,
+) -> crate::Res<()> {
+    tokio::time::timeout(std::time::Duration::from_secs(30), async {
+        loop {
+            if let crate::DocLookup::Ready(handle) = repo.get_doc(&doc_id).await? {
+                if read_title(&handle).await == expected {
+                    return crate::eyre::Ok(());
+                }
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+        }
+    })
+    .await
+    .map_err(|_| crate::ferr!("timed out waiting for notification-driven title update"))??;
+    Ok(())
+}
+
+/// Notification-only barrier for a direct document membership grant.
+async fn wait_for_reader_access(
+    repo: &std::sync::Arc<crate::BigRepo>,
+    doc_id: crate::DocumentId,
+) -> crate::Res<()> {
+    let peer = repo.local_peer_id();
+    let agent = keyhive_core::principal::identifier::Identifier::from(
+        ed25519_dalek::VerifyingKey::from_bytes(peer.as_bytes())
+            .expect("peer id must be a verifying key"),
+    );
+    let document = keyhive_core::principal::identifier::Identifier::from(
+        ed25519_dalek::VerifyingKey::from_bytes(&doc_id.into_bytes())
+            .expect("document id must be a verifying key"),
+    );
+    tokio::time::timeout(std::time::Duration::from_secs(30), async {
+        loop {
+            if repo
+                .keyhive()
+                .agent_access_on(&agent, document)
+                .await
+                .is_some()
+            {
+                return crate::eyre::Ok(());
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+        }
+    })
+    .await
+    .map_err(|_| crate::ferr!("timed out waiting for notification-driven document access"))??;
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn tier5_remote_restart_notification_propagates_existing_doc_update() -> crate::Res<()> {
+    utils_rs::testing::setup_tracing_once();
+    let temp = tempfile::tempdir()?;
+    let left_path = temp.path().join("owner");
+    let right_path = temp.path().join("reader");
+    let mut pair =
+        Pair::boot_persistent(154, 155, "Owner", "Reader", left_path, right_path.clone()).await?;
+    let (owner_doc, doc_id) = create_initial(&pair, "before-notification-restart").await?;
+    let reader_doc = grant_and_sync(&pair, doc_id).await?;
+    drop(reader_doc);
+    restart_right(&mut pair, right_path).await?;
+    pair.connect().await?;
+    pair.left()
+        .set_peer_parts(pair.right(), vec![crate::GLOBAL_PART_ID])
+        .await?;
+    pair.right()
+        .set_peer_parts(pair.left(), vec![crate::GLOBAL_PART_ID])
+        .await?;
+    owner_doc
+        .with_document(|doc| {
+            doc.transact(|tx| tx.put(automerge::ROOT, "title", "after-notification-restart"))
+                .map_err(|err| crate::ferr!("failed updating restart doc: {err:?}"))
+        })
+        .await??;
+    wait_for_title(&pair.right().repo, doc_id, "after-notification-restart").await?;
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn tier5_remote_restart_notification_propagates_new_doc_membership() -> crate::Res<()> {
+    utils_rs::testing::setup_tracing_once();
+    let temp = tempfile::tempdir()?;
+    let left_path = temp.path().join("owner");
+    let right_path = temp.path().join("reader");
+    let mut pair =
+        Pair::boot_persistent(156, 157, "Owner", "Reader", left_path, right_path.clone()).await?;
+    restart_right(&mut pair, right_path).await?;
+    pair.connect().await?;
+    pair.left()
+        .set_peer_parts(pair.right(), vec![crate::GLOBAL_PART_ID])
+        .await?;
+    pair.right()
+        .set_peer_parts(pair.left(), vec![crate::GLOBAL_PART_ID])
+        .await?;
+    let (owner_doc, doc_id) = create_initial(&pair, "new-notification-doc").await?;
+    let reader_agent = fixtures::agent_of(&pair.left().repo, pair.right()).await?;
+    pair.left()
+        .repo
+        .grant_doc_access(doc_id, reader_agent, Access::Read)
+        .await?;
+    wait_for_reader_access(&pair.right().repo, doc_id).await?;
+    wait_for_title(&pair.right().repo, doc_id, "new-notification-doc").await?;
     drop(owner_doc);
     Ok(())
 }

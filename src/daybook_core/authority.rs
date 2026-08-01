@@ -42,7 +42,6 @@ impl RepoAuthority {
         self.core_docs.clone().into()
     }
 
-
     pub(crate) fn core_docs_part_id(&self) -> PartId {
         big_repo::group_part_id(self.core_docs.id().to_bytes())
     }
@@ -88,10 +87,7 @@ pub(crate) async fn ensure(
     )
     .await?;
 
-    if repo_agents_created
-        || core_docs_created
-        || content_docs_created
-        || default_drawer_created {
+    if repo_agents_created || core_docs_created || content_docs_created || default_drawer_created {
         let local_agent = big_repo.local_keyhive_agent().await?;
         if repo_agents_created {
             big_repo

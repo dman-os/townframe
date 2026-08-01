@@ -2,8 +2,8 @@ use daybook_types::doc::{BranchPath, BranchPathBuf};
 
 use super::*;
 
-async fn boot_connected_sync_pair()
--> Res<(tempfile::TempDir, SyncTestNode, SyncTestNode, EndpointId)> {
+async fn boot_connected_sync_pair(
+) -> Res<(tempfile::TempDir, SyncTestNode, SyncTestNode, EndpointId)> {
     info!("XXX boot_connected_sync_pair");
     let temp_root = tempfile::tempdir()?;
     let repo_a_path = temp_root.path().join("repo-a");
@@ -37,8 +37,27 @@ async fn boot_connected_sync_pair()
     Ok((temp_root, node_a, node_b, endpoint_id_a))
 }
 
+async fn wait_for_facet_manifest(node: &SyncTestNode, tag: &'static str) -> Res<()> {
+    tokio::time::timeout(Duration::from_secs(30), async {
+        loop {
+            if node
+                ._plugs_repo
+                .get_facet_manifest_by_tag(tag)
+                .await
+                .is_some()
+            {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(50)).await;
+        }
+    })
+    .await
+    .map_err(|_| eyre::eyre!("timed out waiting for facet manifest: {tag}"))
+}
+
 async fn update_title_at_main_branch(node: &SyncTestNode, doc_id: &String, title: &str) -> Res<()> {
     let title_key = FacetKey::from(WellKnownFacetTag::TitleGeneric);
+    wait_for_facet_manifest(node, "org.example.daybook.titlegeneric").await?;
     let branch = BranchPathBuf::from("main");
     let Some((_, heads)) = node.drawer.get_with_heads(doc_id, &branch, None).await? else {
         eyre::bail!("missing doc while updating title: {doc_id}");
@@ -67,6 +86,7 @@ async fn update_title_at_heads(
     title: &str,
 ) -> Res<()> {
     let title_key = FacetKey::from(WellKnownFacetTag::TitleGeneric);
+    wait_for_facet_manifest(node, "org.example.daybook.titlegeneric").await?;
     node.drawer
         .update_at_heads(
             daybook_types::doc::DocPatch {
@@ -91,6 +111,7 @@ async fn update_note_at_heads(
     note: &str,
 ) -> Res<()> {
     let note_key = FacetKey::from(WellKnownFacetTag::Note);
+    wait_for_facet_manifest(node, "org.example.daybook.note").await?;
     node.drawer
         .update_at_heads(
             daybook_types::doc::DocPatch {
@@ -283,6 +304,14 @@ async fn iroh_sync_single_doc_created_before_connect_replicates() -> Res<()> {
             .get_with_heads(&doc_on_a, &BranchPathBuf::from("main"), None)
             .await?
             .ok_or_eyre("node_a lost the pre-connect doc")?;
+        wait_for_drawer_doc_parity(
+            &node_a,
+            &node_b,
+            &doc_on_a.0.id,
+            &BranchPathBuf::from("main"),
+            Duration::from_secs(30),
+        )
+        .await?;
         let doc_on_b = node_b
             .drawer
             .get_with_heads(&doc_on_a.0.id, &BranchPathBuf::from("main"), None)
@@ -366,6 +395,14 @@ async fn iroh_sync_single_blob_created_before_connect_replicates() -> Res<()> {
             .get_with_heads(&doc_id, &BranchPathBuf::from("main"), None)
             .await?
             .ok_or_eyre("node_a lost the pre-connect blob doc")?;
+        wait_for_drawer_doc_parity(
+            &node_a,
+            &node_b,
+            &doc_id,
+            &BranchPathBuf::from("main"),
+            Duration::from_secs(30),
+        )
+        .await?;
         let doc_on_b = node_b
             .drawer
             .get_with_heads(&doc_id, &BranchPathBuf::from("main"), None)
@@ -442,6 +479,14 @@ async fn iroh_sync_single_doc_created_while_connected_replicates() -> Res<()> {
             .await?;
 
         wait_for_doc_presence_with_activity(&node_b, &doc_on_a, Duration::from_secs(60)).await?;
+        wait_for_doc_head_parity(
+            &node_a,
+            &node_b,
+            &doc_on_a,
+            &BranchPathBuf::from("main"),
+            Duration::from_secs(60),
+        )
+        .await?;
         let doc_on_a = node_a
             .drawer
             .get_with_heads(&doc_on_a, &BranchPathBuf::from("main"), None)
@@ -658,7 +703,14 @@ async fn iroh_sync_connected_divergent_facet_updates_propagate_originator_then_o
             })
             .await?;
 
-        wait_for_doc_presence_with_activity(&node_b, &doc_id, Duration::from_secs(60)).await?;
+        wait_for_drawer_doc_parity(
+            &node_a,
+            &node_b,
+            &doc_id,
+            &BranchPathBuf::from("main"),
+            Duration::from_secs(60),
+        )
+        .await?;
         let branch = BranchPathBuf::from("main");
         let Some((_, base_heads)) = node_a.drawer.get_with_heads(&doc_id, &branch, None).await?
         else {
@@ -698,7 +750,14 @@ async fn iroh_sync_connected_divergent_facet_updates_propagate_other_then_origin
             })
             .await?;
 
-        wait_for_doc_presence_with_activity(&node_b, &doc_id, Duration::from_secs(60)).await?;
+        wait_for_drawer_doc_parity(
+            &node_a,
+            &node_b,
+            &doc_id,
+            &BranchPathBuf::from("main"),
+            Duration::from_secs(60),
+        )
+        .await?;
         let branch = BranchPathBuf::from("main");
         let Some((_, base_heads)) = node_a.drawer.get_with_heads(&doc_id, &branch, None).await?
         else {

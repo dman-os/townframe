@@ -9,8 +9,8 @@ use crate::{BigKeyhiveGroup, DocumentId, PeerId, Res, StorageConfig};
 use am_utils_rs::codecs::ThroughJson;
 use autosurgeon;
 use big_sync::{
-    HostPartStore,
     stress_support::{self, StressFixture},
+    HostPartStore,
 };
 use big_sync_core::{ObjId, PartId};
 use futures::future::try_join_all;
@@ -287,17 +287,13 @@ impl StressFixture for BigRepoStressFixture {
     }
 
     async fn connect_pair(&self, left: &Self::Node, right: &Self::Node) -> Res<()> {
-        let connection = left
+        let _connection = left
             .connect_with_parts(right, vec![crate::GLOBAL_PART_ID])
             .await?;
         let _ = right.accepted_connection().await;
-        connection
-            .sync_keyhive_with_peer(Some(Duration::from_secs(10)))
-            .await?;
-        let reverse = right.connection_to(left.peer_id()).await?;
-        reverse
-            .sync_keyhive_with_peer(Some(Duration::from_secs(10)))
-            .await?;
+        // Keyhive convergence is notification-driven. The quiescence waits
+        // below only let the resulting work settle; they do not initiate a
+        // manual sync round.
         left.repo
             .wait_for_quiescence(Some(Duration::from_secs(20)))
             .await?;
@@ -349,12 +345,9 @@ impl StressFixture for BigRepoStressFixture {
                 .grant_doc_access(doc_id, relay_agent, Access::Relay)
                 .await?;
         }
-        for peer_id in node.connected_peer_ids().await {
-            node.connection_to(peer_id)
-                .await?
-                .sync_keyhive_with_peer(Some(Duration::from_secs(10)))
-                .await?;
-        }
+        // The Keyhive notification listeners propagate the new relay grants;
+        // this stress fixture intentionally does not force a synchronous
+        // Keyhive round after every document creation.
 
         self.obj_doc_map.lock().await.insert(*obj, doc_id);
         self.all_docs.lock().await.insert(doc_id);
@@ -429,11 +422,8 @@ impl StressFixture for BigRepoStressFixture {
         // disconnects it before randomized phase 1 begins.
         for left_index in 0..live.len() {
             for right_index in (left_index + 1)..live.len() {
-                let connection = live[left_index].connect(live[right_index]).await?;
+                let _connection = live[left_index].connect(live[right_index]).await?;
                 let _ = live[right_index].accepted_connection().await;
-                connection
-                    .sync_keyhive_with_peer(Some(Duration::from_secs(10)))
-                    .await?;
             }
         }
 
@@ -465,25 +455,9 @@ impl StressFixture for BigRepoStressFixture {
                 .await
                 .insert(editor.peer_id(), group.clone());
         }
-
-        // Deliver the bootstrap group membership over the connections that
-        // already exist; no extra topology is introduced.
-        for left in &editors {
-            for right in &editors {
-                if left.peer_id() >= right.peer_id() {
-                    continue;
-                }
-                left.connection_to(right.peer_id())
-                    .await?
-                    .sync_keyhive_with_peer(Some(Duration::from_secs(10)))
-                    .await?;
-                right
-                    .connection_to(left.peer_id())
-                    .await?
-                    .sync_keyhive_with_peer(Some(Duration::from_secs(10)))
-                    .await?;
-            }
-        }
+        // Membership propagation is notification-driven. Keep the initial
+        // quiescence barrier, but do not inject explicit Keyhive sync rounds
+        // into the stress workload.
         for node in &live {
             node.repo
                 .wait_for_quiescence(Some(Duration::from_secs(20)))
@@ -514,18 +488,26 @@ impl StressFixture for BigRepoStressFixture {
         let parts = self.sync_parts().await;
         try_join_all(nodes.iter().map(|node| async {
             let peer_ids = node.connected_peer_ids().await;
-            timeout(
-                Duration::from_secs(20),
-                node.worker
-                    .wait_for_full_sync(peer_ids, parts.iter().copied()),
-            )
-            .await
-            .map_err(|_| {
-                crate::ferr!(
-                    "timed out waiting for existing BigSync routes on {}",
-                    node.peer_id()
+            let snapshot = node.worker.snapshot().await?;
+            for peer_id in peer_ids {
+                let peer_parts = snapshot
+                    .peer_parts
+                    .get(&peer_id)
+                    .ok_or_else(|| crate::ferr!("missing BigSync route for peer {peer_id}"))?
+                    .keys()
+                    .copied();
+                timeout(
+                    Duration::from_secs(20),
+                    node.worker.wait_for_full_sync([peer_id], peer_parts),
                 )
-            })??;
+                .await
+                .map_err(|_| {
+                    crate::ferr!(
+                        "timed out waiting for existing BigSync route from {} to {peer_id}",
+                        node.peer_id(),
+                    )
+                })??;
+            }
             Ok::<_, crate::interlude::eyre::Report>(())
         }))
         .await?;
@@ -731,7 +713,7 @@ impl StressFixture for BigRepoStressFixture {
 mod tests {
     use super::*;
     use big_sync::stress_support::{
-        PHASE1_MUTATIONS, PHASE2_MUTATIONS, PHASE3_MUTATIONS, run_randomized_stress,
+        run_randomized_stress, PHASE1_MUTATIONS, PHASE2_MUTATIONS, PHASE3_MUTATIONS,
     };
     const SETTLE_TIMEOUT: Duration = Duration::from_secs(60);
 

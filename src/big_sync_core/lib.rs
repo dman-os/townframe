@@ -645,7 +645,7 @@ impl BigSyncMachine {
                 BigSyncMachineCommand::SetPartCursor { .. } => unreachable!(),
                 BigSyncMachineCommand::RemoveObjFromPart { obj_id, part_id }
                 | BigSyncMachineCommand::AddObjToPart { obj_id, part_id } => {
-                    tracing::debug!(
+                    tracing::trace!(
                         peer_id = %peer_id,
                         obj_id = %obj_id,
                         part_id = %part_id,

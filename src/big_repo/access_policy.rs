@@ -26,7 +26,7 @@ impl KeyhiveMembershipPolicy {
 impl ObjAccessPolicy for KeyhiveMembershipPolicy {
     fn is_event_permitted(
         &self,
-        _part_id: Option<PartId>,
+        part_id: Option<PartId>,
         obj_id: ObjId,
         principal: Option<PeerId>,
     ) -> bool {
@@ -38,8 +38,13 @@ impl ObjAccessPolicy for KeyhiveMembershipPolicy {
                 .expect(ERROR_POLICY_LOCK)
                 .get(&obj_id)
                 .and_then(|members| members.get(&peer))
-                .map(|access| access.is_fetcher())
-                .unwrap_or(false),
+                .is_some_and(|access| {
+                    if part_id.is_some() {
+                        access.is_reader()
+                    } else {
+                        access.is_fetcher()
+                    }
+                }),
         }
     }
 
@@ -70,3 +75,37 @@ impl ObjAccessPolicy for KeyhiveMembershipPolicy {
 }
 
 const ERROR_POLICY_LOCK: &str = "keyhive membership policy lock poisoned";
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn relay_access_allows_direct_fetch_without_partition_discovery() {
+        let policy = KeyhiveMembershipPolicy::new();
+        let object = ObjId::new([1; 32]);
+        let relay = PeerId::new([2; 32]);
+        policy.add_obj_member(object, relay, Access::Relay);
+
+        assert!(policy.is_event_permitted(None, object, Some(relay)));
+        assert!(!policy.is_event_permitted(
+            Some(PartId::new([3; 32])),
+            object,
+            Some(relay),
+        ));
+    }
+
+    #[test]
+    fn reader_access_allows_partition_discovery() {
+        let policy = KeyhiveMembershipPolicy::new();
+        let object = ObjId::new([4; 32]);
+        let reader = PeerId::new([5; 32]);
+        policy.add_obj_member(object, reader, Access::Read);
+
+        assert!(policy.is_event_permitted(
+            Some(PartId::new([6; 32])),
+            object,
+            Some(reader),
+        ));
+    }
+}

@@ -19,9 +19,9 @@
 //! - **stop-waits-for-save-tasks**: Every test2 test exercises the RAII
 //!   [`ShutdownGuard`] / [`Pair`] teardown path.
 
-use super::harness::{Node, Pair, Topo, fixtures, topo::ShutdownGuard};
+use super::harness::{fixtures, topo::ShutdownGuard, Node, Pair, Topo};
 use crate::SyncDocError;
-use automerge::{ReadDoc, ScalarValue, transaction::Transactable};
+use automerge::{transaction::Transactable, ReadDoc, ScalarValue};
 use keyhive_core::access::Access;
 use std::sync::Arc;
 use std::time::Duration;
@@ -817,6 +817,20 @@ async fn tier9_r2_live_handle_missing_key_does_not_kill_worker() -> crate::Res<(
 
     drop(reader_doc);
     drop(owner_doc);
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn tier0_sync_diagnostics_do_not_create_worker() -> crate::Res<()> {
+    utils_rs::testing::setup_tracing_once();
+    let pair = Pair::boot(254, 255, "Left", "Right").await?;
+    let doc_id = crate::DocumentId::random();
+
+    assert!(!pair.left().repo.runtime.has_doc_worker(doc_id).await?);
+    let snapshot = pair.left().repo.document_sync_snapshot(doc_id).await?;
+    assert_eq!(snapshot.stage, crate::DocumentSyncStage::NotPersisted);
+    assert_eq!(snapshot.head_state, None);
+    assert!(!pair.left().repo.runtime.has_doc_worker(doc_id).await?);
     Ok(())
 }
 
