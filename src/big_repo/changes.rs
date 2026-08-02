@@ -24,6 +24,10 @@ use tokio_util::sync::CancellationToken;
 pub enum BigRepoChangeOrigin {
     Local,
     Remote { peer_id: PeerId },
+    /// Materialization advanced because local keyhive state changed (a
+    /// processed CGKA operation, delegation, revocation, or keyhive sync
+    /// completion) — not attributable to a single peer and not a local edit.
+    Keyhive,
     Bootstrap,
 }
 

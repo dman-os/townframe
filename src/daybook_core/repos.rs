@@ -45,7 +45,9 @@ pub fn should_skip_live_patch(
         Some(big_repo::BigRepoChangeOrigin::Remote { peer_id, .. }) => {
             exclude_peer_id.is_some_and(|exclude| peer_id == exclude)
         }
-        Some(big_repo::BigRepoChangeOrigin::Bootstrap) | None => false,
+        Some(big_repo::BigRepoChangeOrigin::Bootstrap)
+        | Some(big_repo::BigRepoChangeOrigin::Keyhive)
+        | None => false,
     }
 }
 
@@ -59,7 +61,8 @@ pub fn resolve_origin_from_vtag_actor(
     live_origin: Option<&big_repo::BigRepoChangeOrigin>,
 ) -> crate::event_origin::SwitchEventOrigin {
     match live_origin {
-        Some(big_repo::BigRepoChangeOrigin::Bootstrap) => {
+        Some(big_repo::BigRepoChangeOrigin::Bootstrap)
+        | Some(big_repo::BigRepoChangeOrigin::Keyhive) => {
             crate::event_origin::SwitchEventOrigin::Bootstrap
         }
         Some(big_repo::BigRepoChangeOrigin::Remote { peer_id, .. }) => {
@@ -104,7 +107,8 @@ pub fn resolve_origin_for_delete(
                 peer_id: peer_id.to_string(),
             }
         }
-        Some(big_repo::BigRepoChangeOrigin::Bootstrap) => {
+        Some(big_repo::BigRepoChangeOrigin::Bootstrap)
+        | Some(big_repo::BigRepoChangeOrigin::Keyhive) => {
             crate::event_origin::SwitchEventOrigin::Bootstrap
         }
         None => {

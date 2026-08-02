@@ -140,7 +140,8 @@ impl ConfigRepo {
                     peer_id: peer_id.to_string(),
                 }
             }
-            Some(big_repo::BigRepoChangeOrigin::Bootstrap) => {
+            Some(big_repo::BigRepoChangeOrigin::Bootstrap)
+            | Some(big_repo::BigRepoChangeOrigin::Keyhive) => {
                 crate::event_origin::SwitchEventOrigin::Bootstrap
             }
             None => crate::event_origin::SwitchEventOrigin::Remote {

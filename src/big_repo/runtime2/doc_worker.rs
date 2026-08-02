@@ -269,6 +269,7 @@ impl<F: FutureForm> DocWorker2<F> {
             } => self.put_doc(initial_content, resp).await,
             DocWorkerMsg::AcquireHandle { resp } => self.acquire_handle(resp).await,
             DocWorkerMsg::CommitDelta {
+                bundle_id,
                 commits,
                 heads,
                 patches,
@@ -276,7 +277,7 @@ impl<F: FutureForm> DocWorker2<F> {
                 resp,
                 _lease,
             } => {
-                self.commit_delta(commits, heads, patches, origin, resp)
+                self.commit_delta(bundle_id, commits, heads, patches, origin, resp)
                     .await
             }
             DocWorkerMsg::ApplyReceivedContent {
@@ -349,15 +350,13 @@ impl<F: FutureForm> DocWorker2<F> {
                     }
                 }
             }
-            DocWorkerMsg::ReattemptMaterialization { resp } => {
+            DocWorkerMsg::ReattemptMaterialization { origin, resp } => {
                 debug!(
                     doc_id = %self.doc_id,
                     pending = matches!(self.state, DocState::PendingMaterialization(_)),
                     "retrying document materialization after dependency update"
                 );
-                match self
-                    .retry_materialization(BigRepoChangeOrigin::Bootstrap)
-                    .await
+                match self.retry_materialization(origin).await
                 {
                     Ok(status) => {
                         debug!(%self.doc_id, ?status, "document materialization retry completed");
@@ -451,10 +450,17 @@ impl<F: FutureForm> DocWorker2<F> {
     ) -> eyre::Result<()> {
         let result = match &self.state {
             // - `Live(bundle)` and bundle still alive → upgrade the `Weak`, return
-            //   `Ready(upgraded)`.
+            //   `Ready(upgraded)`. A broken bundle (an earlier commit from it
+            //   was rejected) reloads the last persisted state into a fresh
+            //   bundle instead.
             DocState::Live(bundle) => {
                 if let Some(bundle) = bundle.upgrade() {
-                    DocLookup::Ready(bundle)
+                    if bundle.is_broken() {
+                        self.state = DocState::Unloaded;
+                        self.take_or_load_transient_doc().await?
+                    } else {
+                        DocLookup::Ready(bundle)
+                    }
                 } else {
                     // Weak reference expired — fall through to re-load below.
                     self.state = DocState::Unloaded;
@@ -646,14 +652,71 @@ impl<F: FutureForm> DocWorker2<F> {
 
 impl<F: FutureForm> DocWorker2<F> {
     /// Commit a set of changes locally.
+    ///
+    /// The authoritative write gate: a commit is rejected (and its bundle
+    /// latched broken) when
+    /// 1. it comes from a stale or broken bundle (an earlier commit from this
+    ///    bundle was rejected, or the bundle was replaced by a reload), or
+    /// 2. the local principal no longer holds write access (revoked or
+    ///    Read-only), or
+    /// 3. the encrypted commit cannot be persisted (key unavailable).
+    /// A rejected commit never persists, so no partial history can form.
     async fn commit_delta(
         &mut self,
+        bundle_id: u64,
         commits: Vec<(CommitId, BTreeSet<CommitId>, Vec<u8>)>,
         heads: Vec<automerge::ChangeHash>,
         patches: Vec<automerge::Patch>,
         origin: BigRepoChangeOrigin,
         resp: futures::channel::oneshot::Sender<eyre::Result<()>>,
     ) -> eyre::Result<()> {
+        // ── 1. Handle validity gate ───────────────────────────────────────
+        // Reject commits from broken bundles (an earlier commit from this
+        // bundle was rejected) and from bundles the worker no longer serves
+        // (reloaded after a break, or a freshly spawned worker with no
+        // bundle). This makes concurrent commits from the same handle fail
+        // atomically with the first rejection, instead of persisting a chain
+        // whose parent — the rejected commit's ghost — was never stored.
+        let current = match &self.state {
+            DocState::Live(bundle) => bundle.upgrade(),
+            _ => None,
+        };
+        let served_bundle_id = current.as_ref().map(|bundle| bundle.id());
+        if served_bundle_id != Some(bundle_id)
+            || current.as_ref().is_some_and(|bundle| bundle.is_broken())
+        {
+            let message = if current.as_ref().is_some_and(|b| b.is_broken()) {
+                "document write rejected: handle invalidated by an earlier rejected commit; re-acquire the document"
+            } else {
+                "document write rejected: commit from a stale handle; re-acquire the document"
+            };
+            resp.send(Err(ferr!("{message}")))
+                .inspect_err(|_| warn!(ERROR_CALLER))
+                .ok();
+            return Ok(());
+        }
+        // ── 2. Write-access gate ──────────────────────────────────────────
+        match self.io.has_doc_write_access(self.doc_id).await {
+            Ok(true) => {}
+            Ok(false) => {
+                current
+                    .as_ref()
+                    .expect("live bundle present for a valid commit")
+                    .mark_broken();
+                resp.send(Err(ferr!(
+                    "document write rejected: local access is not writable (revoked or read-only)"
+                )))
+                .inspect_err(|_| warn!(ERROR_CALLER))
+                .ok();
+                return Ok(());
+            }
+            Err(error) => {
+                resp.send(Err(error))
+                    .inspect_err(|_| warn!(ERROR_CALLER))
+                    .ok();
+                return Ok(());
+            }
+        }
         let pending_fragment_requests =
             match self.io.persist_local_commits(self.sed_id, commits).await {
                 Ok(requests) => requests,
@@ -663,10 +726,15 @@ impl<F: FutureForm> DocWorker2<F> {
                         .is_some() =>
                 {
                     // The Automerge operation already ran against the live
-                    // handle, but its encrypted commit cannot be accepted until
-                    // Keyhive supplies the document key. Report the transient
-                    // failure to the caller and keep the worker alive; the
-                    // runtime's retry/materialization paths remain usable.
+                    // handle, but its encrypted commit cannot be accepted
+                    // (key unavailable). Report the failure and invalidate the
+                    // handle: the in-memory mutation cannot persist and would
+                    // poison later commits, so the caller must re-acquire to
+                    // reload the last persisted state.
+                    current
+                        .as_ref()
+                        .expect("live bundle present for a valid commit")
+                        .mark_broken();
                     resp.send(Err(error))
                         .inspect_err(|_| warn!(ERROR_CALLER))
                         .ok();

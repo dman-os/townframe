@@ -55,8 +55,6 @@ struct Runtime2Hub<F: FutureForm, R: TaskRuntime<F>> {
     active_keyhive_syncs: HashMap<PeerId, KeyhiveSyncRound>,
     keyhive_round_ids: u64,
     keyhive_reconciliation_waiters: Vec<(u64, futures::channel::oneshot::Sender<eyre::Result<()>>)>,
-    /// A quiescence probe has admitted a cache refresh barrier.
-    quiescence_cache_refresh_pending: bool,
     /// A quiescence probe is awaiting its event-log watermark.
     quiescence_group_part_watermark_pending: bool,
 
@@ -256,16 +254,11 @@ where
             pending_docs: doc_ids.iter().copied().collect(),
             group_part_cursor: self.group_part_cursor,
         });
-        self.quiescence_cache_refresh_pending = true;
         self.quiescence_group_part_watermark_pending = true;
         self.spawn_background(F::capture_group_part_watermark(
             Arc::clone(&self.runtime_io),
             self.evt_tx.clone(),
             barrier_id,
-        ))?;
-        self.spawn_background(F::refresh_cache_for_quiescence(
-            Arc::clone(&self.runtime_io),
-            self.evt_tx.clone(),
         ))?;
         for doc_id in doc_ids {
             let (worker, lease) = self.doc_worker_handle(doc_id)?;
@@ -304,7 +297,6 @@ where
             || self.quiescence_group_part_watermark_pending
             || !self.active_keyhive_syncs.is_empty()
             || !self.pending_keyhive_syncs.is_empty()
-            || self.quiescence_cache_refresh_pending
             || self.group_part_cursor < probe.group_part_cursor
         {
             return Ok(());
@@ -377,6 +369,7 @@ where
             }
             Runtime2Cmd::CommitDelta {
                 doc_id,
+                bundle_id,
                 commits,
                 heads,
                 patches,
@@ -388,6 +381,7 @@ where
                 // stays alive for the duration of the operation.
                 worker
                     .send(DocWorkerMsg::CommitDelta {
+                        bundle_id,
                         commits,
                         heads,
                         patches,
@@ -628,10 +622,6 @@ trait HubBackgroundFuture<F: FutureForm> {
         request_id: subduction_keyhive::message::RequestId,
     ) -> F::Future<'static, eyre::Result<()>>;
 
-    fn refresh_cache_for_quiescence(
-        runtime_io: Arc<dyn crate::runtime2::RuntimeIo<F>>,
-        evt_tx: async_channel::Sender<Runtime2Evt>,
-    ) -> F::Future<'static, eyre::Result<()>>;
     fn capture_keyhive_reconciliation(
         runtime_io: Arc<dyn crate::runtime2::RuntimeIo<F>>,
         evt_tx: async_channel::Sender<Runtime2Evt>,
@@ -741,41 +731,39 @@ impl<F: FutureForm> HubBackgroundFuture<F> for F {
         );
         F::from_future(
             async move {
-                if let Err(error) = runtime_io
+                match runtime_io
                     .sync_keyhive_with_peer(peer_id, request_id.clone())
                     .await
                 {
-                    let error = format!("keyhive sync with {peer_id} failed: {error}");
-                    evt_tx
-                        .send(Runtime2Evt::KeyhiveSyncFailed {
-                            peer_id,
-                            request_id,
-                            error,
-                        })
-                        .await
-                        .expect(ERROR_CHANNEL);
+                    Ok(crate::runtime2::KeyhiveSyncOutcome::Initiated) => {}
+                    Ok(crate::runtime2::KeyhiveSyncOutcome::PeerDisappeared) => {
+                        evt_tx
+                            .send(Runtime2Evt::KeyhiveSyncFailed {
+                                peer_id,
+                                request_id,
+                                error: format!(
+                                    "keyhive peer {peer_id} disappeared before sync could start"
+                                ),
+                            })
+                            .await
+                            .expect(ERROR_CHANNEL);
+                    }
+                    Err(error) => {
+                        let error = format!("keyhive sync with {peer_id} failed: {error}");
+                        evt_tx
+                            .send(Runtime2Evt::KeyhiveSyncFailed {
+                                peer_id,
+                                request_id,
+                                error,
+                            })
+                            .await
+                            .expect(ERROR_CHANNEL);
+                    }
                 }
                 Ok(())
             }
             .instrument(span),
         )
-    }
-
-    fn refresh_cache_for_quiescence(
-        runtime_io: Arc<dyn crate::runtime2::RuntimeIo<F>>,
-        evt_tx: async_channel::Sender<Runtime2Evt>,
-    ) -> F::Future<'static, eyre::Result<()>> {
-        F::from_future(async move {
-            let result = runtime_io
-                .refresh_keyhive_cache(false)
-                .await
-                .wrap_err("quiescence cache refresh failed");
-            evt_tx
-                .send(Runtime2Evt::QuiescenceCacheRefreshDone { result })
-                .await
-                .expect(ERROR_CHANNEL);
-            Ok(())
-        })
     }
 
     fn capture_keyhive_reconciliation(
@@ -784,14 +772,7 @@ impl<F: FutureForm> HubBackgroundFuture<F> for F {
         resp: futures::channel::oneshot::Sender<eyre::Result<()>>,
     ) -> F::Future<'static, eyre::Result<()>> {
         F::from_future(async move {
-            let result = async {
-                runtime_io
-                    .refresh_keyhive_cache(false)
-                    .await
-                    .wrap_err("keyhive reconciliation cache refresh failed")?;
-                runtime_io.keyhive_event_log_cursor().await
-            }
-            .await;
+            let result = runtime_io.keyhive_event_log_cursor().await;
             evt_tx
                 .send(Runtime2Evt::KeyhiveReconciliationCaptured { result, resp })
                 .await
@@ -1276,7 +1257,6 @@ where
         if !matches!(
             &evt,
             Runtime2Evt::DocWorkerQuiescent { .. }
-                | Runtime2Evt::QuiescenceCacheRefreshDone { .. }
                 | Runtime2Evt::QuiescenceGroupPartWatermark { .. }
                 | Runtime2Evt::KeyhiveReconciliationCaptured { .. }
                 | Runtime2Evt::GroupPartWorkerAdvanced { .. }
@@ -1323,21 +1303,6 @@ where
                 error,
             } => {
                 self.fail_keyhive_sync(peer_id, request_id, error)?;
-            }
-            Runtime2Evt::QuiescenceCacheRefreshDone { result } => {
-                self.quiescence_cache_refresh_pending = false;
-                if let Err(error) = result {
-                    self.quiescence_probe = None;
-                    let message = error.to_string();
-                    for waiter in std::mem::take(&mut self.quiescence_waiters) {
-                        // A caller timeout drops the receiver; that cancellation
-                        // is not a runtime failure.
-                        waiter
-                            .send(Err(ferr!("quiescence cache refresh failed: {message}")))
-                            .inspect_err(|_| warn!(ERROR_CALLER))
-                            .ok();
-                    }
-                }
             }
             Runtime2Evt::QuiescenceGroupPartWatermark { barrier_id, result } => {
                 let current = self
@@ -1507,8 +1472,6 @@ where
         }
         self.try_resolve_quiescence()
     }
-
-    // ─── sync session routing ──────────────────────────────────────────────
 
     /// Route an observed sync session to the relevant doc-worker.
     #[tracing::instrument(
@@ -1822,7 +1785,10 @@ where
             let (resp, result) = futures::channel::oneshot::channel();
             if let Err(error) = entry
                 .handle
-                .send(DocWorkerMsg::ReattemptMaterialization { resp })
+                .send(DocWorkerMsg::ReattemptMaterialization {
+                    origin: crate::changes::BigRepoChangeOrigin::Keyhive,
+                    resp,
+                })
             {
                 self.materialization_retries_in_flight.remove(&doc_id);
                 return Err(error).wrap_err(ERROR_CHANNEL);
@@ -1996,9 +1962,34 @@ impl<F: FutureForm + HubBackgroundFuture<F> + DocWorkerLoop<F> + 'static, R: Tas
             .map(|(doc_id, _)| *doc_id)
             .collect();
         for doc_id in expired {
-            if let Some(entry) = self.doc_workers.get(&doc_id) {
-                entry.stop.cancel();
+            // Eviction requires both lease counts to be zero (the deadline is
+            // only armed by `schedule_doc_worker_eviction_if_idle` in that
+            // case); guard anyway so an in-flight operation is never cancelled
+            // underneath itself.
+            let idle = self.doc_workers.get(&doc_id).is_some_and(|entry| {
+                entry.local_handles == 0 && entry.internal_leases == 0
+            });
+            if !idle {
+                if let Some(entry) = self.doc_workers.get_mut(&doc_id) {
+                    entry.eviction_deadline = None;
+                }
+                continue;
             }
+            // Remove the entry *before* cancelling: the abort path of the
+            // worker's mailbox loop does not emit `DocWorkerStopped` (that
+            // event is only sent on normal mailbox completion), so a cancelled
+            // worker would otherwise linger as a stale closed-sender entry —
+            // re-cancelled by the janitor every tick and fenced by quiescence.
+            let entry = self
+                .doc_workers
+                .remove(&doc_id)
+                .expect("doc worker entry present when janitor evicted it");
+            self.pending_materialization.remove(&doc_id);
+            self.materialization_retries_in_flight.remove(&doc_id);
+            if let Some(probe) = self.quiescence_probe.as_mut() {
+                probe.pending_docs.remove(&doc_id);
+            }
+            entry.stop.cancel();
         }
     }
 }
@@ -2180,7 +2171,6 @@ where
         active_keyhive_syncs: HashMap::new(),
         keyhive_round_ids: 0,
         keyhive_reconciliation_waiters: Vec::new(),
-        quiescence_cache_refresh_pending: false,
         quiescence_group_part_watermark_pending: false,
         quiescence_waiters: Vec::new(),
         quiescence_probe: None,

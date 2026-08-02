@@ -16,7 +16,8 @@ use crate::interlude::*;
 use crate::keyhive_storage::BigRepoKeyhiveStorage;
 use crate::runtime2::support::BigRepoCiphertextLocator;
 use crate::runtime2::{
-    CausalDecryptResult, DocIo, MaterializationBlocker, RuntimeIo, SyncDocAttempt, TaskSet,
+    CausalDecryptResult, DocIo, KeyhiveSyncOutcome, MaterializationBlocker, RuntimeIo,
+    SyncDocAttempt, TaskSet,
 };
 use crate::{
     encrypted_blob::decode_encrypted_blob,
@@ -457,6 +458,33 @@ where
                 self.keyhive_notifier.note_local_keyhive_changed().await?;
             }
             Ok(fragment_requests)
+        })
+    }
+
+    fn has_doc_write_access(
+        &self,
+        doc_id: crate::DocumentId,
+    ) -> <Sendable as FutureForm>::Future<'_, eyre::Result<bool>> {
+        Sendable::from_future(async move {
+            let local_ident = keyhive_core::principal::identifier::Identifier::from(
+                ed25519_dalek::VerifyingKey::from_bytes(self.local_peer_id.as_bytes())
+                    .map_err(|_| ferr!("local peer id is not a valid verifying key"))?,
+            );
+            let doc_ident = keyhive_core::principal::identifier::Identifier::from(
+                ed25519_dalek::VerifyingKey::from_bytes(&doc_id.into_bytes())
+                    .map_err(|_| ferr!("doc id is not a valid verifying key"))?,
+            );
+            let access = self.keyhive.agent_access_on(&local_ident, doc_ident).await;
+            if access.is_some_and(|access| access.is_editor()) {
+                return Ok(true);
+            }
+            // Public-member path: a doc that grants editor access to the
+            // well-known Public agent may be written by anyone (the writer
+            // encrypts through Public's well-known keys).
+            let public_ident = keyhive_core::principal::public::Public.id();
+            let public_access =
+                self.keyhive.agent_access_on(&public_ident, doc_ident).await;
+            Ok(public_access.is_some_and(|access| access.is_editor()))
         })
     }
 
@@ -963,7 +991,7 @@ where
         &self,
         peer_id: PeerId,
         request_id: subduction_keyhive::message::RequestId,
-    ) -> <Sendable as FutureForm>::Future<'_, eyre::Result<()>> {
+    ) -> <Sendable as FutureForm>::Future<'_, eyre::Result<KeyhiveSyncOutcome>> {
         Sendable::from_future(async move {
             let kh_peer_id = KeyhivePeerId::from_bytes(*peer_id.as_bytes());
             match self
@@ -971,31 +999,13 @@ where
                 .initiate_sync_with_request(&kh_peer_id, request_id)
                 .await
             {
-                Ok(()) => Ok(()),
-                Err(error) if error.to_string().contains("unknown peer") => {
-                    tracing::debug!(%peer_id, "dropping keyhive sync after peer teardown");
-                    Ok(())
+                Ok(()) => Ok(KeyhiveSyncOutcome::Initiated),
+                Err(subduction_keyhive::ProtocolError::UnknownPeer(_)) => {
+                    tracing::debug!(%peer_id, "keyhive peer disappeared before sync initiation");
+                    Ok(KeyhiveSyncOutcome::PeerDisappeared)
                 }
                 Err(error) => Err(ferr!("keyhive initiate_sync_with_peer failed: {error}")),
             }
-        })
-    }
-
-    fn refresh_keyhive_cache(
-        &self,
-        notify: bool,
-    ) -> <Sendable as FutureForm>::Future<'_, eyre::Result<()>> {
-        Sendable::from_future(async move {
-            self.keyhive_protocol
-                .refresh_cache()
-                .await
-                .wrap_err("keyhive cache refresh failed")?;
-            if notify {
-                // Notify peers only after the refreshed projection is published
-                // and only when this sync ingested new operations.
-                self.keyhive_notifier.notify_peers();
-            }
-            Ok(())
         })
     }
 

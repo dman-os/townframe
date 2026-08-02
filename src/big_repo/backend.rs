@@ -76,9 +76,6 @@ impl big_sync::SyncBackend for BigRepoSyncBackend {
             Err(crate::SyncDocError::Policy(error)) => {
                 eyre::bail!("remote doc sync was rejected by policy: {error}");
             }
-            Err(crate::SyncDocError::PendingMaterialization) => {
-                eyre::bail!("document sync returned legacy pending outcome");
-            }
         };
         debug!(peer_id = %peer_id, obj_id = %obj_id, ?receipt.outcome, "big sync document receipt");
         let heads = repo

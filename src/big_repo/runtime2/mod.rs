@@ -16,8 +16,8 @@ mod test_support;
 
 pub use doc_worker::spawn_doc_worker;
 pub use io::{
-    CausalDecryptResult, Clock, DocIo, MaterializationBlocker, MaterializationStatus, RuntimeIo,
-    SyncDocAttempt, Timer,
+    CausalDecryptResult, Clock, DocIo, KeyhiveSyncOutcome, MaterializationBlocker,
+    MaterializationStatus, RuntimeIo, SyncDocAttempt, Timer,
 };
 pub use lease::{
     DocLease, DocWorkerEntry, DocWorkerHandle, DocWorkerInternalLease, DocWorkerStopToken,

@@ -332,7 +332,7 @@ async fn pull_required_partitions_via_big_sync_worker(
                     .sync_doc_with_peer(doc_id, peer_id, Some(timeout))
                     .await
                 {
-                    Ok(()) => {}
+                    Ok(_receipt) => {}
                     Err(big_repo::SyncDocError::Policy(
                         big_repo::SyncDocPolicyError::DocumentNotFound,
                     )) => {

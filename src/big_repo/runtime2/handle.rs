@@ -130,6 +130,9 @@ impl<F: FutureForm> Runtime2Handle<F> {
     pub async fn commit_delta(
         &self,
         doc_id: DocumentId,
+        // Bundle id of the committing handle; the hub forwards it to the worker
+        // which rejects commits from broken or replaced bundles.
+        bundle_id: u64,
         commits: Vec<(
             sedimentree_core::loose_commit::id::CommitId,
             std::collections::BTreeSet<sedimentree_core::loose_commit::id::CommitId>,
@@ -143,6 +146,7 @@ impl<F: FutureForm> Runtime2Handle<F> {
         self.cmd_tx
             .send(Runtime2Cmd::CommitDelta {
                 doc_id,
+                bundle_id,
                 commits,
                 heads,
                 patches,

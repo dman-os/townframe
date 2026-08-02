@@ -48,6 +48,9 @@ pub enum Runtime2Cmd {
     },
     CommitDelta {
         doc_id: DocumentId,
+        /// Bundle id of the committing handle; the worker rejects commits from
+        /// broken or replaced bundles.
+        bundle_id: u64,
         #[educe(Debug(ignore))]
         commits: Vec<(
             sedimentree_core::loose_commit::id::CommitId,
@@ -224,10 +227,6 @@ pub enum Runtime2Evt {
         request_id: subduction_keyhive::message::RequestId,
         error: String,
     },
-    /// Completion of the cache refresh admitted by a quiescence barrier.
-    QuiescenceCacheRefreshDone {
-        result: eyre::Result<()>,
-    },
     /// Event-log cursor captured when a quiescence barrier is admitted.
     QuiescenceGroupPartWatermark {
         barrier_id: u64,
@@ -323,6 +322,9 @@ pub enum DocWorkerMsg {
         >,
     },
     CommitDelta {
+        /// Bundle id of the committing handle; the worker rejects commits from
+        /// broken or replaced bundles.
+        bundle_id: u64,
         #[educe(Debug(ignore))]
         commits: Vec<(
             sedimentree_core::loose_commit::id::CommitId,
@@ -353,6 +355,10 @@ pub enum DocWorkerMsg {
         >,
     },
     ReattemptMaterialization {
+        /// Why the retry was triggered; reported to change listeners as the
+        /// materialization origin (keyhive-driven retries must not surface as
+        /// `Bootstrap`).
+        origin: crate::changes::BigRepoChangeOrigin,
         #[educe(Debug(ignore))]
         resp: futures::channel::oneshot::Sender<
             Result<crate::runtime2::MaterializationStatus, String>,

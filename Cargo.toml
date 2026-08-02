@@ -169,17 +169,17 @@ reqwest = { version = "0.12", default-features = false, features = ["charset", "
 automerge = "0.9.0"
 autosurgeon = "0.11.0"
 automerge-test = "0.9"
-subduction_core = { git = "https://github.com/dman-os/subduction", rev = "ceadf18535b86acd8f6be82181beae1dfb8bf654" }
-subduction_iroh = { git = "https://github.com/dman-os/subduction", rev = "ceadf18535b86acd8f6be82181beae1dfb8bf654" }
-subduction_websocket = { git = "https://github.com/dman-os/subduction", rev = "ceadf18535b86acd8f6be82181beae1dfb8bf654" }
-subduction_ephemeral = { git = "https://github.com/dman-os/subduction", rev = "ceadf18535b86acd8f6be82181beae1dfb8bf654" }
-sedimentree_core = { git = "https://github.com/dman-os/subduction", rev = "ceadf18535b86acd8f6be82181beae1dfb8bf654" }
-subduction_redb_storage = { git = "https://github.com/dman-os/subduction", rev = "ceadf18535b86acd8f6be82181beae1dfb8bf654" }
-subduction_crypto = { git = "https://github.com/dman-os/subduction", rev = "ceadf18535b86acd8f6be82181beae1dfb8bf654" }
-subduction_keyhive = { git = "https://github.com/dman-os/subduction", rev = "ceadf18535b86acd8f6be82181beae1dfb8bf654" }
-keyhive_crypto = { version = "0.2.1", git = "https://github.com/dman-os/keyhive", rev = "4fcc3121a3d6a759db62da13ed36f96df043d086" }
-keyhive_core = { version = "0.5.0", git = "https://github.com/dman-os/keyhive", rev = "4fcc3121a3d6a759db62da13ed36f96df043d086" }
-beekem = { version = "0.3.0", git = "https://github.com/dman-os/keyhive", rev = "4fcc3121a3d6a759db62da13ed36f96df043d086" }
+subduction_core = { git = "https://github.com/dman-os/subduction", rev = "ff45e1e4126f5c943b7302f865c59778b5edbb86" }
+subduction_iroh = { git = "https://github.com/dman-os/subduction", rev = "ff45e1e4126f5c943b7302f865c59778b5edbb86" }
+subduction_websocket = { git = "https://github.com/dman-os/subduction", rev = "ff45e1e4126f5c943b7302f865c59778b5edbb86" }
+subduction_ephemeral = { git = "https://github.com/dman-os/subduction", rev = "ff45e1e4126f5c943b7302f865c59778b5edbb86" }
+sedimentree_core = { git = "https://github.com/dman-os/subduction", rev = "ff45e1e4126f5c943b7302f865c59778b5edbb86" }
+subduction_redb_storage = { git = "https://github.com/dman-os/subduction", rev = "ff45e1e4126f5c943b7302f865c59778b5edbb86" }
+subduction_crypto = { git = "https://github.com/dman-os/subduction", rev = "ff45e1e4126f5c943b7302f865c59778b5edbb86" }
+subduction_keyhive = { git = "https://github.com/dman-os/subduction", rev = "ff45e1e4126f5c943b7302f865c59778b5edbb86" }
+keyhive_crypto = { version = "0.2.1", git = "https://github.com/dman-os/keyhive", rev = "1b1130b0eb6b126cd3aefb59399b3e01a9aa1f68" }
+keyhive_core = { version = "0.5.0", git = "https://github.com/dman-os/keyhive", rev = "1b1130b0eb6b126cd3aefb59399b3e01a9aa1f68" }
+beekem = { version = "0.3.0", git = "https://github.com/dman-os/keyhive", rev = "1b1130b0eb6b126cd3aefb59399b3e01a9aa1f68" }
 ed25519-dalek = "2.2.0"
 async-channel = "2.5.0"
 nonempty = "0.10.0"
@@ -254,11 +254,11 @@ sedimentree_core = { path = "../subduction/sedimentree_core" }
 subduction_redb_storage = { path = "../subduction/subduction_redb_storage" }
 subduction_crypto = { path = "../subduction/subduction_crypto" }
 subduction_keyhive = { path = "../subduction/subduction_keyhive" }
-
-[patch."https://github.com/dman-os/keyhive"]
-keyhive_crypto = { path = "../keyhive/keyhive_crypto" }
-keyhive_core = { path = "../keyhive/keyhive_core" }
-beekem = { path = "../keyhive/beekem" }
+#
+# [patch."https://github.com/dman-os/keyhive"]
+# keyhive_crypto = { path = "../keyhive/keyhive_crypto" }
+# keyhive_core = { path = "../keyhive/keyhive_core" }
+# beekem = { path = "../keyhive/beekem" }
 
 # The default profile is optimized for Wasm builds because
 # that's what [Trunk reads](https://github.com/trunk-rs/trunk/issues/605).

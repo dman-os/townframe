@@ -401,17 +401,6 @@ impl BigRepo {
         doc_id: DocumentId,
         peer_id: PeerId,
         timeout: Option<std::time::Duration>,
-    ) -> Result<(), SyncDocError> {
-        self.runtime
-            .sync_doc_with_peer(doc_id, peer_id, timeout)
-            .await
-    }
-
-    pub async fn sync_doc_with_peer_receipt(
-        &self,
-        doc_id: DocumentId,
-        peer_id: PeerId,
-        timeout: Option<std::time::Duration>,
     ) -> Result<SyncDocReceipt, SyncDocError> {
         self.runtime
             .sync_doc_with_peer_receipt(doc_id, peer_id, timeout)
@@ -910,6 +899,14 @@ impl BigDocHandle {
     where
         F: FnOnce(&mut automerge::Automerge) -> R,
     {
+        // Fast-fail on an invalidated handle before doing any work. The
+        // authoritative rejection happens at the worker commit path; this
+        // check only avoids running the mutation against a known-dead bundle.
+        if self.bundle.is_broken() {
+            return Err(ferr!(
+                "document write rejected: handle invalidated by an earlier rejected commit; re-acquire the document"
+            ));
+        }
         let mut doc = self.bundle.doc.lock().await;
 
         let before_heads = doc.get_heads();
@@ -954,7 +951,14 @@ impl BigDocHandle {
 
         self.repo
             .runtime
-            .commit_delta(self.document_id(), changes, after_heads, patches, origin)
+            .commit_delta(
+                self.document_id(),
+                self.bundle.id(),
+                changes,
+                after_heads,
+                patches,
+                origin,
+            )
             .await?;
 
         Ok(out)

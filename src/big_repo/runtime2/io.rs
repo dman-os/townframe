@@ -86,6 +86,18 @@ pub enum SyncDocAttempt {
     Policy(subduction_core::sync_session::SyncPolicyRejectionKind),
 }
 
+/// Outcome of initiating a keyhive sync round.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum KeyhiveSyncOutcome {
+    /// The round was initiated; completion arrives via `KeyhiveSyncDone` /
+    /// `KeyhiveSyncFailed`.
+    Initiated,
+    /// The peer's transport connection is already gone; the round cannot
+    /// start. The hub must fail the round deterministically instead of waiting
+    /// for a separate connection-loss event to clear it.
+    PeerDisappeared,
+}
+
 /// A document's Keyhive encryption state cannot currently produce an application key.
 #[derive(Debug, thiserror::Error)]
 #[error(
@@ -157,9 +169,18 @@ pub trait DocIo<F: FutureForm>: Send + Sync {
             std::collections::BTreeSet<subduction_core::subduction::request::FragmentRequested>,
         >,
     >;
-    /// Store a raw fragment bundle at a boundary commit.
-    /// The implementation encrypts the bundle and constructs the persisted
-    /// fragment metadata from the encrypted blob.
+
+    /// Whether the local principal may write to this document (Edit access or
+    /// better). The authoritative write gate: rejects revoked members and
+    /// Read-only holders before a commit is persisted.
+    fn has_doc_write_access(
+        &self,
+        doc_id: crate::DocumentId,
+    ) -> F::Future<'_, eyre::Result<bool>>;
+
+    /// Store a raw fragment bundle at a boundary commit. The implementation
+    /// encrypts the bundle and constructs the persisted fragment metadata from
+    /// the encrypted blob.
     fn store_fragment(
         &self,
         sed_id: sedimentree_core::id::SedimentreeId,
@@ -243,10 +264,7 @@ pub trait RuntimeIo<F: FutureForm>: Send + Sync {
         &self,
         peer_id: big_sync_core::PeerId,
         request_id: subduction_keyhive::message::RequestId,
-    ) -> F::Future<'_, eyre::Result<()>>;
-
-    /// Refresh the keyhive cache (periodic maintenance).
-    fn refresh_keyhive_cache(&self, notify: bool) -> F::Future<'_, eyre::Result<()>>;
+    ) -> F::Future<'_, eyre::Result<KeyhiveSyncOutcome>>;
 
     /// Compact the keyhive archive (periodic maintenance).
     fn compact_keyhive(&self) -> F::Future<'_, eyre::Result<()>>;

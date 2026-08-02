@@ -61,8 +61,6 @@ pub enum SyncDocError {
     Unauthorized,
     /// The storage policy rejected the sync: {0}
     Policy(SyncDocPolicyError),
-    /// Document content was stored but the active handle remains pending materialization.
-    PendingMaterialization,
     /// TransportError
     TransportError,
     /// IoError
@@ -140,14 +138,25 @@ impl<T> DocLookup<T> {
 
 // ─── LiveDocBundle ─────────────────────────────────────────────────────────────
 
+/// Monotonic source of bundle ids. A global counter (not a per-worker one) so
+/// a stale handle's id can never collide with a bundle served by a restarted
+/// worker.
+static NEXT_BUNDLE_ID: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(1);
+
 #[derive(educe::Educe)]
 #[educe(Debug)]
 pub struct LiveDocBundle {
+    /// Unique id of this bundle instance. Commits carry it so the worker can
+    /// reject commits originating from invalidated (broken) or replaced
+    /// bundles.
+    id: u64,
     pub doc_id: DocumentId,
     #[educe(Debug(ignore))]
     pub doc: tokio::sync::Mutex<automerge::Automerge>,
     #[educe(Debug(ignore))]
     partially_decrypted: std::sync::atomic::AtomicBool,
+    #[educe(Debug(ignore))]
+    broken: std::sync::atomic::AtomicBool,
     #[educe(Debug(ignore))]
     _runtime2_lease: Option<crate::runtime2::DocLease>,
 }
@@ -160,11 +169,30 @@ impl LiveDocBundle {
         partially_decrypted: bool,
     ) -> Self {
         Self {
+            id: NEXT_BUNDLE_ID.fetch_add(1, std::sync::atomic::Ordering::Relaxed),
             doc_id,
             doc: tokio::sync::Mutex::new(doc),
             partially_decrypted: std::sync::atomic::AtomicBool::new(partially_decrypted),
+            broken: std::sync::atomic::AtomicBool::new(false),
             _runtime2_lease: Some(lease),
         }
+    }
+
+    /// Identity used to correlate commit requests with this bundle instance.
+    pub(crate) fn id(&self) -> u64 {
+        self.id
+    }
+
+    /// Whether a commit from this bundle was rejected (no write access, key
+    /// unavailable, ...). A broken bundle must be re-acquired to reload the
+    /// last persisted state; further commits from it are rejected by the
+    /// worker.
+    pub fn is_broken(&self) -> bool {
+        self.broken.load(std::sync::atomic::Ordering::Acquire)
+    }
+
+    pub(crate) fn mark_broken(&self) {
+        self.broken.store(true, std::sync::atomic::Ordering::Release);
     }
 
     /// Whether some locally stored Sedimentree heads are not represented in
