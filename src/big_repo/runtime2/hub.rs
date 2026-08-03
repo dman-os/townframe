@@ -72,7 +72,10 @@ struct Runtime2Hub<F: FutureForm, R: TaskRuntime<F>> {
     quiescence_barrier_ids: u64,
     activity_generation: u64,
     group_part_cursor: u64,
-
+    /// Finite background futures admitted via `spawn_tracked` that have not
+    /// yet completed. The quiescence predicate waits for this to drain, so
+    /// in-flight work started before a probe cannot resolve it early (A2/A5).
+    tracked_in_flight: u64,
     // ── doc-worker registry ────────────────────────────────────────────────
     doc_workers: HashMap<DocumentId, DocWorkerEntry>,
     pending_materialization: HashSet<DocumentId>,
@@ -272,24 +275,36 @@ where
             group_part_cursor: self.group_part_cursor,
         });
         self.quiescence_group_part_watermark_pending = true;
-        self.spawn_background(F::capture_group_part_watermark(
-            Arc::clone(&self.runtime_io),
-            self.evt_tx.clone(),
-            barrier_id,
-        ))?;
+        self.spawn_tracked(
+            crate::runtime2::TrackedWorkKind::CaptureGroupPartWatermark,
+            F::capture_group_part_watermark(
+                Arc::clone(&self.runtime_io),
+                self.evt_tx.clone(),
+                barrier_id,
+            ))?;
         for doc_id in doc_ids {
             let (worker, lease) = self.doc_worker_handle(doc_id)?;
+            let (fence_reply, reply_rx) = futures::channel::oneshot::channel();
             worker
-                .send(DocWorkerMsg::Quiesce {
-                    barrier_id,
+                .send(DocWorkerMsg::Fence {
+                    reply: fence_reply,
                     _lease: lease,
                 })
                 .wrap_err(ERROR_CHANNEL)?;
+            self.spawn_tracked(
+                crate::runtime2::TrackedWorkKind::WorkerFence,
+                F::await_worker_fence(
+                    barrier_id,
+                    doc_id,
+                    reply_rx,
+                    self.evt_tx.clone(),
+                ),
+            )?;
         }
         Ok(())
     }
 
-    fn handle_doc_worker_quiescent(
+    fn handle_doc_worker_fenced(
         &mut self,
         doc_id: DocumentId,
         barrier_id: u64,
@@ -312,6 +327,7 @@ where
         }
         if !probe.pending_docs.is_empty()
             || self.quiescence_group_part_watermark_pending
+            || self.tracked_in_flight > 0
             || !self.active_keyhive_syncs.is_empty()
             || !self.pending_keyhive_syncs.is_empty()
             || self.group_part_cursor < probe.group_part_cursor
@@ -356,13 +372,15 @@ where
                 content_heads,
                 resp,
             } => {
-                self.spawn_background(F::create_doc(
-                    Arc::clone(&self.runtime_io),
-                    self.cmd_tx.clone(),
-                    initial_content,
-                    parents,
-                    content_heads,
-                    resp,
+                self.spawn_tracked(
+                    crate::runtime2::TrackedWorkKind::CreateDoc,
+                    F::create_doc(
+                        Arc::clone(&self.runtime_io),
+                        self.cmd_tx.clone(),
+                        initial_content,
+                        parents,
+                        content_heads,
+                        resp,
                 ))?;
             }
             Runtime2Cmd::PutDoc {
@@ -475,12 +493,14 @@ where
                         "closing superseded connection; current registration left intact"
                     );
                 }
-                self.spawn_background(F::close_connection_async(
-                    Arc::clone(&self.connect),
-                    peer_id,
-                    closed,
-                    self.evt_tx.clone(),
-                    resp,
+                self.spawn_tracked(
+                    crate::runtime2::TrackedWorkKind::CloseConn,
+                    F::close_connection_async(
+                        Arc::clone(&self.connect),
+                        peer_id,
+                        closed,
+                        self.evt_tx.clone(),
+                        resp,
                 ))?;
             }
             Runtime2Cmd::SyncDocWithPeer {
@@ -506,12 +526,14 @@ where
                     },
                 );
                 let sed_id = sedimentree_core::id::SedimentreeId::new(doc_id.into_bytes());
-                self.spawn_background(F::sync_doc_with_peer(
-                    request_id,
-                    Arc::clone(&self.runtime_io),
-                    peer_id,
-                    sed_id,
-                    self.cmd_tx.clone(),
+                self.spawn_tracked(
+                    crate::runtime2::TrackedWorkKind::SyncDoc,
+                    F::sync_doc_with_peer(
+                        request_id,
+                        Arc::clone(&self.runtime_io),
+                        peer_id,
+                        sed_id,
+                        self.cmd_tx.clone(),
                 ))?;
             }
             Runtime2Cmd::DocSyncRoundDone { request_id } => {
@@ -560,10 +582,12 @@ where
                 }
             }
             Runtime2Cmd::WaitForKeyhiveReconciliation { resp } => {
-                self.spawn_background(F::capture_keyhive_reconciliation(
-                    Arc::clone(&self.runtime_io),
-                    self.evt_tx.clone(),
-                    resp,
+                self.spawn_tracked(
+                    crate::runtime2::TrackedWorkKind::CaptureKeyhiveReconciliation,
+                    F::capture_keyhive_reconciliation(
+                        Arc::clone(&self.runtime_io),
+                        self.evt_tx.clone(),
+                        resp,
                 ))?;
             }
             Runtime2Cmd::CancelDocSyncWaiter { waiter_id, .. } => {
@@ -591,19 +615,23 @@ where
             }
             Runtime2Cmd::ContainsSedimentree { doc_id, resp } => {
                 let sedimentree_id = sedimentree_core::id::SedimentreeId::new(doc_id.into_bytes());
-                self.spawn_background(F::contains_sedimentree(
-                    Arc::clone(&self.runtime_io),
-                    sedimentree_id,
-                    resp,
+                self.spawn_tracked(
+                    crate::runtime2::TrackedWorkKind::ContainsSedimentree,
+                    F::contains_sedimentree(
+                        Arc::clone(&self.runtime_io),
+                        sedimentree_id,
+                        resp,
                 ))?;
             }
             Runtime2Cmd::HasLocalDocState { doc_id, resp } => {
                 let has_doc_worker = self.doc_workers.contains_key(&doc_id);
-                self.spawn_background(F::has_local_doc_state(
-                    Arc::clone(&self.runtime_io),
-                    doc_id,
-                    has_doc_worker,
-                    resp,
+                self.spawn_tracked(
+                    crate::runtime2::TrackedWorkKind::HasLocalDocState,
+                    F::has_local_doc_state(
+                        Arc::clone(&self.runtime_io),
+                        doc_id,
+                        has_doc_worker,
+                        resp,
                 ))?;
             }
             #[cfg(test)]
@@ -613,10 +641,12 @@ where
                     .ok();
             }
             Runtime2Cmd::InspectStoredDocBlobs { sed_id, resp } => {
-                self.spawn_background(F::inspect_stored_doc_blobs(
-                    Arc::clone(&self.runtime_io),
-                    sed_id,
-                    resp,
+                self.spawn_tracked(
+                    crate::runtime2::TrackedWorkKind::InspectStoredDocBlobs,
+                    F::inspect_stored_doc_blobs(
+                        Arc::clone(&self.runtime_io),
+                        sed_id,
+                        resp,
                 ))?;
             }
             Runtime2Cmd::WaitForQuiescence { resp } => {
@@ -667,6 +697,21 @@ trait HubBackgroundFuture<F: FutureForm> {
         lease_rx: futures::channel::oneshot::Receiver<()>,
         cmd_tx: async_channel::Sender<Runtime2Cmd>,
         doc_id: DocumentId,
+    ) -> F::Future<'static, eyre::Result<()>>;
+    /// Await a doc-worker's fence reply and forward it as a `DocWorkerFenced`
+    /// event so the hub can clear the probe's pending-doc set.
+    fn await_worker_fence(
+        barrier_id: u64,
+        doc_id: DocumentId,
+        reply: futures::channel::oneshot::Receiver<()>,
+        evt_tx: async_channel::Sender<Runtime2Evt>,
+    ) -> F::Future<'static, eyre::Result<()>>;
+    /// Wrap a finite background future so a `TrackedWorkDone` event is emitted
+    /// after its own emissions (keeps channel order for the in-flight counter).
+    fn track_work(
+        kind: crate::runtime2::TrackedWorkKind,
+        fut: F::Future<'static, eyre::Result<()>>,
+        evt_tx: async_channel::Sender<Runtime2Evt>,
     ) -> F::Future<'static, eyre::Result<()>>;
 }
 
@@ -889,6 +934,38 @@ impl<F: FutureForm> HubBackgroundFuture<F> for F {
                 .await
                 .expect(ERROR_CHANNEL);
             Ok(())
+        })
+    }
+    fn await_worker_fence(
+        barrier_id: u64,
+        doc_id: DocumentId,
+        reply: futures::channel::oneshot::Receiver<()>,
+        evt_tx: async_channel::Sender<Runtime2Evt>,
+    ) -> F::Future<'static, eyre::Result<()>> {
+        F::from_future(async move {
+            // The worker replies once its mailbox work has drained past the
+            // fence. A dropped reply (worker evicted mid-fence) still acks:
+            // `DocWorkerStopped` clears the doc from the probe anyway.
+            let _ = reply.await;
+            evt_tx
+                .send(Runtime2Evt::DocWorkerFenced { doc_id, barrier_id })
+                .await
+                .expect(ERROR_CHANNEL);
+            Ok(())
+        })
+    }
+    fn track_work(
+        kind: crate::runtime2::TrackedWorkKind,
+        fut: F::Future<'static, eyre::Result<()>>,
+        evt_tx: async_channel::Sender<Runtime2Evt>,
+    ) -> F::Future<'static, eyre::Result<()>> {
+        F::from_future(async move {
+            let result = fut.await;
+            evt_tx
+                .send(Runtime2Evt::TrackedWorkDone { kind })
+                .await
+                .expect(ERROR_CHANNEL);
+            result
         })
     }
 }
@@ -1181,12 +1258,27 @@ impl<F: FutureForm, Tasks: crate::runtime2::TaskSet<F>> HubIoFutures<F, Tasks> f
 
 // ─── Shared helper: spawn owned background work on the child task set ────
 
-impl<F: FutureForm + 'static, R: TaskRuntime<F>> Runtime2Hub<F, R> {
+impl<F: FutureForm + HubBackgroundFuture<F> + 'static, R: TaskRuntime<F>> Runtime2Hub<F, R> {
     fn spawn_background(
         &self,
         fut: F::Future<'static, eyre::Result<()>>,
     ) -> eyre::Result<futures::stream::AbortHandle> {
         self.child_tasks.spawn(fut)
+    }
+
+    /// Spawn finite background work that participates in the quiescence
+    /// predicate (B8 tracked-work seam). The future is wrapped so a
+    /// `TrackedWorkDone` event is emitted *after* its own emissions, keeping
+    /// channel order: the hub processes everything the future reported before
+    /// it decrements the in-flight counter.
+    fn spawn_tracked(
+        &mut self,
+        kind: crate::runtime2::TrackedWorkKind,
+        fut: F::Future<'static, eyre::Result<()>>,
+    ) -> eyre::Result<futures::stream::AbortHandle> {
+        self.tracked_in_flight = self.tracked_in_flight.wrapping_add(1);
+        self.child_tasks
+            .spawn(F::track_work(kind, fut, self.evt_tx.clone()))
     }
 }
 
@@ -1264,7 +1356,8 @@ where
         // domain mutations restart a quiescence probe's activity generation.
         if !matches!(
             &evt,
-            Runtime2Evt::DocWorkerQuiescent { .. }
+            Runtime2Evt::DocWorkerFenced { .. }
+                | Runtime2Evt::TrackedWorkDone { .. }
                 | Runtime2Evt::QuiescenceGroupPartWatermark { .. }
                 | Runtime2Evt::KeyhiveReconciliationCaptured { .. }
                 | Runtime2Evt::GroupPartWorkerAdvanced { .. }
@@ -1376,8 +1469,21 @@ where
                     probe.pending_docs.remove(&doc_id);
                 }
             }
-            Runtime2Evt::DocWorkerQuiescent { doc_id, barrier_id } => {
-                self.handle_doc_worker_quiescent(doc_id, barrier_id)?;
+            Runtime2Evt::DocWorkerFenced { doc_id, barrier_id } => {
+                self.handle_doc_worker_fenced(doc_id, barrier_id)?;
+            }
+            Runtime2Evt::TrackedWorkDone { kind } => {
+                assert!(
+                    self.tracked_in_flight > 0,
+                    "TrackedWorkDone without a matching spawn_tracked increment"
+                );
+                self.tracked_in_flight -= 1;
+                debug!(
+                    local_peer_id = %self.local_peer_id,
+                    kind = ?kind,
+                    tracked_in_flight = self.tracked_in_flight,
+                    "tracked background work completed",
+                );
             }
             Runtime2Evt::FatalWorkerError {
                 doc_id: _,
@@ -1451,14 +1557,16 @@ where
                     data.payload().delegate(),
                     keyhive_core::principal::agent::Agent::Document(..)
                 );
-                self.spawn_background(F::emit_membership_change(
-                    Arc::clone(&self.runtime_io),
-                    Arc::clone(&self.change_manager),
-                    target,
-                    member_id,
-                    crate::changes::BigRepoAccess::from(data.payload().can()),
-                    false,
-                    member_is_document,
+                self.spawn_tracked(
+                    crate::runtime2::TrackedWorkKind::EmitMembershipChange,
+                    F::emit_membership_change(
+                        Arc::clone(&self.runtime_io),
+                        Arc::clone(&self.change_manager),
+                        target,
+                        member_id,
+                        crate::changes::BigRepoAccess::from(data.payload().can()),
+                        false,
+                        member_is_document,
                 ))?;
             }
             Runtime2Evt::RevocationReceived { target, data } => {
@@ -1467,14 +1575,16 @@ where
                     data.payload().revoked().payload().delegate(),
                     keyhive_core::principal::agent::Agent::Document(..)
                 );
-                self.spawn_background(F::emit_membership_change(
-                    Arc::clone(&self.runtime_io),
-                    Arc::clone(&self.change_manager),
-                    target,
-                    member_id,
-                    crate::changes::BigRepoAccess::Relay,
-                    true,
-                    member_is_document,
+                self.spawn_tracked(
+                    crate::runtime2::TrackedWorkKind::EmitMembershipChange,
+                    F::emit_membership_change(
+                        Arc::clone(&self.runtime_io),
+                        Arc::clone(&self.change_manager),
+                        target,
+                        member_id,
+                        crate::changes::BigRepoAccess::Relay,
+                        true,
+                        member_is_document,
                 ))?;
             }
         }
@@ -1682,11 +1792,13 @@ where
             pending_waiters = self.pending_keyhive_syncs.get(&peer_id).map_or(0, Vec::len),
             "starting Keyhive sync round"
         );
-        self.spawn_background(F::start_sync(
-            Arc::clone(&self.runtime_io),
-            self.evt_tx.clone(),
-            peer_id,
-            request_id,
+        self.spawn_tracked(
+            crate::runtime2::TrackedWorkKind::KeyhiveSync,
+            F::start_sync(
+                Arc::clone(&self.runtime_io),
+                self.evt_tx.clone(),
+                peer_id,
+                request_id,
         ))?;
         Ok(())
     }
@@ -1862,10 +1974,12 @@ where
                 self.materialization_retries_in_flight.remove(&doc_id);
                 return Err(error).wrap_err(ERROR_CHANNEL);
             }
-            self.spawn_background(F::forward_materialization_retry(
-                result,
-                self.evt_tx.clone(),
-                doc_id,
+            self.spawn_tracked(
+                crate::runtime2::TrackedWorkKind::MaterializationRetry,
+                F::forward_materialization_retry(
+                    result,
+                    self.evt_tx.clone(),
+                    doc_id,
             ))?;
         }
         Ok(())
@@ -2246,6 +2360,7 @@ where
         quiescence_barrier_ids: 0,
         activity_generation: 0,
         group_part_cursor: 0,
+        tracked_in_flight: 0,
         doc_workers: HashMap::new(),
         pending_materialization: HashSet::new(),
         materialization_retries_in_flight: HashSet::new(),

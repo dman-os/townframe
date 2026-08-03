@@ -163,8 +163,9 @@ struct DocWorker2<F: FutureForm> {
     pending_fragment_requests:
         std::collections::BTreeSet<subduction_core::subduction::request::FragmentRequested>,
 
-    /// Mailbox-ordered quiescence barriers waiting for active finite work.
-    quiescence_waiters: Vec<(u64, DocWorkerInternalLease)>,
+    /// Mailbox-ordered quiescence fences waiting for active finite work.
+    /// Each fence replies directly on its oneshot once the worker is quiescent.
+    quiescence_waiters: Vec<(futures::channel::oneshot::Sender<()>, DocWorkerInternalLease)>,
 }
 
 enum DocState {
@@ -325,8 +326,8 @@ impl<F: FutureForm> DocWorker2<F> {
                     .ok();
                 Ok(())
             }
-            DocWorkerMsg::Quiesce { barrier_id, _lease } => {
-                self.quiescence_waiters.push((barrier_id, _lease));
+            DocWorkerMsg::Fence { reply, _lease } => {
+                self.quiescence_waiters.push((reply, _lease));
                 Ok(())
             }
         }
@@ -1377,14 +1378,10 @@ impl<F: FutureForm> DocWorker2<F> {
             return Ok(());
         }
         let waiters = std::mem::take(&mut self.quiescence_waiters);
-        for (barrier_id, _lease) in waiters {
-            self.evt_tx
-                .send(Runtime2Evt::DocWorkerQuiescent {
-                    doc_id: self.doc_id,
-                    barrier_id,
-                })
-                .await
-                .expect(ERROR_CHANNEL);
+        for (reply, _lease) in waiters {
+            // A dropped reply receiver means the hub-side fence awaiter was
+            // aborted (shutdown) — benign.
+            reply.send(()).inspect_err(|_| debug!(%self.doc_id, "worker fence reply dropped")).ok();
         }
         Ok(())
     }

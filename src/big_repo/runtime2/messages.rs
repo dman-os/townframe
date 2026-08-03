@@ -263,10 +263,17 @@ pub enum Runtime2Evt {
         doc_id: DocumentId,
         status: crate::runtime2::MaterializationStatus,
     },
-    /// A document worker reached a quiescence barrier in mailbox order.
-    DocWorkerQuiescent {
+    /// A document worker replied to a quiescence fence in mailbox order.
+    /// `barrier_id` filters acks from a superseded (restarted) probe.
+    DocWorkerFenced {
         doc_id: DocumentId,
         barrier_id: u64,
+    },
+    /// A tracked finite background future completed; decrements the hub's
+    /// in-flight counter (A2/A5 tracked-work seam). Ordered after the future's
+    /// own emissions by the `spawn_tracked` wrapper.
+    TrackedWorkDone {
+        kind: TrackedWorkKind,
     },
     PrekeyExpanded {
         new_prekey: Arc<crate::runtime2::types::SignedAddKeyOp>,
@@ -379,9 +386,10 @@ pub enum DocWorkerMsg {
             eyre::Result<Option<crate::runtime2::DocHeadState>>,
         >,
     },
-    /// Mailbox-ordered runtime quiescence barrier.
-    Quiesce {
-        barrier_id: u64,
+    /// Mailbox-ordered runtime quiescence barrier. The worker replies on
+    /// `reply` once its in-flight work has drained (the mailbox is quiescent).
+    Fence {
+        reply: futures::channel::oneshot::Sender<()>,
         _lease: crate::runtime2::DocWorkerInternalLease,
     },
 }
@@ -389,4 +397,21 @@ pub enum DocWorkerMsg {
 /// Monotonic waiter-id counters (shared handle↔hub).
 pub fn fresh_waiter_id(counter: &AtomicU64) -> u64 {
     counter.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
+}
+
+/// Classification of a tracked finite background future, for diagnostics.
+#[derive(Debug, Clone, Copy)]
+pub enum TrackedWorkKind {
+    CreateDoc,
+    SyncDoc,
+    KeyhiveSync,
+    CloseConn,
+    CaptureKeyhiveReconciliation,
+    CaptureGroupPartWatermark,
+    ContainsSedimentree,
+    HasLocalDocState,
+    InspectStoredDocBlobs,
+    EmitMembershipChange,
+    MaterializationRetry,
+    WorkerFence,
 }

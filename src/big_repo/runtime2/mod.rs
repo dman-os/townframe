@@ -22,7 +22,7 @@ pub use io::{
 pub use lease::{
     DocLease, DocWorkerEntry, DocWorkerHandle, DocWorkerInternalLease, DocWorkerStopToken,
 };
-pub use messages::{Runtime2Cmd, Runtime2Evt};
+pub use messages::{Runtime2Cmd, Runtime2Evt, TrackedWorkKind};
 pub(crate) use native::KeyhiveChangeNotifier;
 pub use tasks::{TaskRuntime, TaskSet, TokioTaskRuntime, TokioTimer};
 
