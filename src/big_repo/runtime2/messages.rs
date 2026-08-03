@@ -125,16 +125,20 @@ pub enum Runtime2Cmd {
             Result<crate::runtime2::types::SyncDocReceipt, crate::runtime2::types::SyncDocError>,
         >,
     },
-    FinalizeDocSync {
-        sync_id: u64,
-        doc_id: DocumentId,
-        peer_id: PeerId,
+    /// The doc-sync transport round finished successfully (no error).
+    ///
+    /// Sessions never resolve waiters (a rejected session must not look like
+    /// success); the round completion is the authoritative receipt resolution:
+    /// a worker reconsider over the fully-persisted tree.
+    DocSyncRoundDone {
+        request_id: subduction_core::connection::message::RequestId,
+    },
+    /// The doc-sync transport round failed; resolve the waiter (if any) with
+    /// this error.
+    DocSyncFailed {
+        request_id: subduction_core::connection::message::RequestId,
         #[educe(Debug(ignore))]
-        transport: crate::runtime2::io::SyncDocAttempt,
-        #[educe(Debug(ignore))]
-        resp: futures::channel::oneshot::Sender<
-            Result<crate::runtime2::types::SyncDocReceipt, crate::runtime2::types::SyncDocError>,
-        >,
+        error: crate::runtime2::types::SyncDocError,
     },
     SyncKeyhiveWithPeer {
         peer_id: PeerId,
@@ -339,19 +343,20 @@ pub enum DocWorkerMsg {
         resp: futures::channel::oneshot::Sender<eyre::Result<()>>,
         _lease: crate::runtime2::DocWorkerInternalLease,
     },
-    ApplyReceivedContent {
+    ApplySyncSession {
         peer_id: PeerId,
         commit_ids: Vec<sedimentree_core::loose_commit::id::CommitId>,
         fragment_ids: Vec<sedimentree_core::loose_commit::id::CommitId>,
-    },
-    FinalizeAfterSync {
-        sync_id: u64,
+        /// Resolve the caller's sync receipt with the outcome. `None` for
+        /// passive (fire-and-forget) routing.
         #[educe(Debug(ignore))]
-        transport: crate::runtime2::io::SyncDocAttempt,
-        peer_id: PeerId,
-        #[educe(Debug(ignore))]
-        resp: futures::channel::oneshot::Sender<
-            Result<crate::runtime2::types::SyncDocReceipt, crate::runtime2::types::SyncDocError>,
+        reply: Option<
+            futures::channel::oneshot::Sender<
+                Result<
+                    crate::runtime2::types::SyncDocReceipt,
+                    crate::runtime2::types::SyncDocError,
+                >,
+            >,
         >,
     },
     ReattemptMaterialization {

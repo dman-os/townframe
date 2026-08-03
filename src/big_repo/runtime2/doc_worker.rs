@@ -6,7 +6,7 @@ use crate::changes::BigRepoChangeOrigin;
 use crate::runtime2::support::{
     stage_automerge_ingest, BigRepoCiphertextKind, BigRepoCiphertextLocator,
 };
-use crate::runtime2::types::{DocLookup, LiveDocBundle, SyncDocOutcome, SyncDocReceipt};
+use crate::runtime2::types::{DocLookup, LiveDocBundle};
 use crate::runtime2::Runtime2Evt;
 use crate::runtime2::{
     messages::DocWorkerMsg, DocIo, DocWorkerHandle, DocWorkerInternalLease, DocWorkerStopToken,
@@ -280,76 +280,14 @@ impl<F: FutureForm> DocWorker2<F> {
                 self.commit_delta(bundle_id, commits, heads, patches, origin, resp)
                     .await
             }
-            DocWorkerMsg::ApplyReceivedContent {
+            DocWorkerMsg::ApplySyncSession {
                 peer_id,
                 commit_ids,
                 fragment_ids,
-            } => {
-                self.apply_received_content(peer_id, commit_ids, fragment_ids)
-                    .await
-            }
-            DocWorkerMsg::FinalizeAfterSync {
-                sync_id,
-                transport,
-                peer_id,
-                resp,
-            } => {
-                let has_live_handle = matches!(
-                    &self.state,
-                    DocState::Live(bundle) if bundle.strong_count() > 0
-                );
-                if !has_live_handle {
-                    debug!(sync_id, "invalidating inactive document after sync");
-                    self.state = DocState::Unloaded;
-                    self.set_partially_decrypted(false).await?;
-                    resp.send(Ok(SyncDocReceipt {
-                        transport,
-                        outcome: SyncDocOutcome::Stored,
-                    }))
-                    .inspect_err(|_| warn!(ERROR_CALLER))
-                    .ok();
-                    return Ok(());
-                }
-
-                debug!(sync_id, "refreshing active document after sync");
-                match self
-                    .retry_materialization(BigRepoChangeOrigin::Remote { peer_id })
-                    .await
-                {
-                    Ok(MaterializationStatus::Ready { .. }) => {
-                        resp.send(Ok(SyncDocReceipt {
-                            transport,
-                            outcome: SyncDocOutcome::Ready,
-                        }))
-                        .inspect_err(|_| warn!(ERROR_CALLER))
-                        .ok();
-                        Ok(())
-                    }
-                    Ok(MaterializationStatus::Pending(blockers)) => {
-                        resp.send(Ok(SyncDocReceipt {
-                            transport,
-                            outcome: SyncDocOutcome::Pending(blockers),
-                        }))
-                        .inspect_err(|_| warn!(ERROR_CALLER))
-                        .ok();
-                        Ok(())
-                    }
-                    Ok(MaterializationStatus::Missing) => {
-                        resp.send(Err(crate::runtime2::types::SyncDocError::NotFound))
-                            .inspect_err(|_| warn!(ERROR_CALLER))
-                            .ok();
-                        Ok(())
-                    }
-                    Err(error) => {
-                        resp.send(Err(crate::runtime2::types::SyncDocError::Other(ferr!(
-                            "{error:?}"
-                        ))))
-                        .inspect_err(|_| warn!(ERROR_CALLER))
-                        .ok();
-                        Err(error)
-                    }
-                }
-            }
+                reply,
+            } => self
+                .apply_sync_session(peer_id, commit_ids, fragment_ids, reply)
+                .await,
             DocWorkerMsg::ReattemptMaterialization { origin, resp } => {
                 debug!(
                     doc_id = %self.doc_id,
@@ -935,9 +873,13 @@ impl<F: FutureForm> DocWorker2<F> {
 }
 
 impl<F: FutureForm> DocWorker2<F> {
-    /// Apply content that Subduction has already persisted to the resident live
-    /// Automerge document. Sessions for documents without live handles never
-    /// reach this worker.
+    /// Apply content that Subduction has already persisted to the resident
+    /// live Automerge document, then report the sync outcome.
+    ///
+    /// `commit_ids`/`fragment_ids` may be empty (an empty session): nothing
+    /// is applied, but a pending doc is reconsidered and its current state
+    /// reported. `reply: Some` resolves the caller's sync receipt; `None` is
+    /// passive (fire-and-forget) routing.
     #[tracing::instrument(
         skip_all,
         fields(
@@ -946,99 +888,231 @@ impl<F: FutureForm> DocWorker2<F> {
             received_fragments = fragment_ids.len(),
         )
     )]
-    async fn apply_received_content(
+    async fn apply_sync_session(
         &mut self,
         peer_id: PeerId,
         commit_ids: Vec<CommitId>,
         fragment_ids: Vec<CommitId>,
+        reply: Option<
+            futures::channel::oneshot::Sender<
+                Result<
+                    crate::runtime2::types::SyncDocReceipt,
+                    crate::runtime2::types::SyncDocError,
+                >,
+            >,
+        >,
     ) -> eyre::Result<()> {
-        let received_refs: HashSet<Vec<u8>> = commit_ids
-            .iter()
-            .chain(&fragment_ids)
-            .map(|id| id.as_bytes().to_vec())
-            .collect();
-        assert!(
-            !received_refs.is_empty(),
-            "empty sync sessions are not routed to doc workers"
+        let received = !commit_ids.is_empty() || !fragment_ids.is_empty();
+        let has_live = matches!(
+            &self.state,
+            DocState::Live(bundle) if bundle.strong_count() > 0
         );
-        let Some(bundle) = (match &self.state {
-            DocState::Live(bundle) => bundle.upgrade(),
-            _ => None,
-        }) else {
-            // The lease-release command can trail the final Arc drop on the
-            // hub's separate command channel. Stored content will be loaded by
-            // the next acquisition; there is no live document to update now.
-            return Ok(());
-        };
-        let Some(mut tree) = self.io.hydrate_tree(self.sed_id).await? else {
-            error!(
-                doc_id = %self.doc_id,
-                "received sync content has no persisted Sedimentree"
-            );
-            return Err(ferr!(
-                "received sync session has no persisted Sedimentree content"
-            ));
-        };
-        tree.ensure_minimized(&sedimentree_core::depth::CountLeadingZeroBytes);
-        let (blobs, partially_decrypted) = self
-            .try_decrypt_received_blobs(&mut tree, &received_refs)
-            .await?;
-        self.set_partially_decrypted(partially_decrypted).await?;
 
-        if blobs.is_empty() {
-            self.notif_pending_heads(&mut tree, peer_id).await?;
-            return Ok(());
-        }
-        if partially_decrypted {
-            self.notif_pending_heads(&mut tree, peer_id).await?;
-        }
+        if received {
+            // Incremental apply of the received content into the live
+            // document. Content for documents without live handles never
+            // reaches the live path; it is persisted by Subduction and
+            // hydrated by the next acquisition (or by the walk below when
+            // the doc is pending).
+            if let Some(bundle) = match &self.state {
+                DocState::Live(bundle) => bundle.upgrade(),
+                _ => None,
+            } {
+                let received_refs: HashSet<Vec<u8>> = commit_ids
+                    .iter()
+                    .chain(&fragment_ids)
+                    .map(|id| id.as_bytes().to_vec())
+                    .collect();
+                let Some(mut tree) = self.io.hydrate_tree(self.sed_id).await? else {
+                    error!(
+                        doc_id = %self.doc_id,
+                        "received sync content has no persisted Sedimentree"
+                    );
+                    return Err(ferr!(
+                        "received sync session has no persisted Sedimentree content"
+                    ));
+                };
+                tree.ensure_minimized(&sedimentree_core::depth::CountLeadingZeroBytes);
+                let (blobs, partially_decrypted) = self
+                    .try_decrypt_received_blobs(&mut tree, &received_refs)
+                    .await?;
+                self.set_partially_decrypted(partially_decrypted).await?;
 
-        let (after_heads, patches) = {
-            let mut doc = bundle.doc.lock().await;
-            let before = doc.get_heads();
-            for blob in blobs {
-                match doc.load_incremental(&blob) {
-                    Ok(_) => {}
-                    Err(automerge::AutomergeError::MissingDeps) => {
-                        self.set_partially_decrypted(true).await?;
-                        self.notif_pending_heads(&mut tree, peer_id).await?;
-                        return Ok(());
+                if blobs.is_empty() {
+                    self.notif_pending_heads(&mut tree, peer_id).await?;
+                    return self
+                        .report_sync_outcome(peer_id, has_live, true, reply)
+                        .await;
+                }
+                if partially_decrypted {
+                    self.notif_pending_heads(&mut tree, peer_id).await?;
+                }
+
+                let mut missing_deps = false;
+                let mut changed;
+                let (after_heads, patches) = {
+                    let mut doc = bundle.doc.lock().await;
+                    let before = doc.get_heads();
+                    for blob in blobs {
+                        match doc.load_incremental(&blob) {
+                            Ok(_) => {}
+                            Err(automerge::AutomergeError::MissingDeps) => {
+                                missing_deps = true;
+                                break;
+                            }
+                            Err(error) => {
+                                return Err(ferr!("failed applying sync blob: {error}"));
+                            }
+                        }
                     }
-                    Err(error) => {
-                        return Err(ferr!("failed applying sync blob: {error}"));
+                    let after = doc.get_heads();
+                    changed = before != after;
+                    if !changed {
+                        (after, Vec::new())
+                    } else {
+                        let patches = if self
+                            .change_manager
+                            .has_change_listener_interest(
+                                self.doc_id,
+                                &BigRepoChangeOrigin::Remote { peer_id },
+                            )
+                        {
+                            doc.diff(&before, &after)
+                        } else {
+                            Vec::new()
+                        };
+                        (after, patches)
+                    }
+                };
+                if missing_deps {
+                    self.set_partially_decrypted(true).await?;
+                    self.notif_pending_heads(&mut tree, peer_id).await?;
+                } else if changed {
+                    // Notify only when heads actually advanced.
+                    let heads = Arc::<[automerge::ChangeHash]>::from(after_heads);
+                    self.change_manager.notify_doc_heads_changed(
+                        self.doc_id,
+                        Arc::clone(&heads),
+                        BigRepoChangeOrigin::Remote { peer_id },
+                    )?;
+                    for patch in patches {
+                        self.change_manager.notify_doc_changed(
+                            self.doc_id,
+                            Arc::new(patch),
+                            Arc::clone(&heads),
+                            BigRepoChangeOrigin::Remote { peer_id },
+                        )?;
                     }
                 }
             }
-            let after = doc.get_heads();
-            if before == after {
-                return Ok(());
-            }
-            let patches = if self
-                .change_manager
-                .has_change_listener_interest(self.doc_id, &BigRepoChangeOrigin::Remote { peer_id })
-            {
-                doc.diff(&before, &after)
-            } else {
-                Vec::new()
-            };
-            (after, patches)
-        };
-
-        let heads = Arc::<[automerge::ChangeHash]>::from(after_heads);
-        self.change_manager.notify_doc_heads_changed(
-            self.doc_id,
-            Arc::clone(&heads),
-            BigRepoChangeOrigin::Remote { peer_id },
-        )?;
-        for patch in patches {
-            self.change_manager.notify_doc_changed(
-                self.doc_id,
-                Arc::new(patch),
-                Arc::clone(&heads),
-                BigRepoChangeOrigin::Remote { peer_id },
-            )?;
         }
-        Ok(())
+
+        self.report_sync_outcome(peer_id, has_live, received, reply).await
+    }
+
+    /// Determine and report the sync outcome after applying a session.
+    ///
+    /// The full walk (decrypt of the entire persisted tree) runs when the
+    /// doc is pending, is partially decrypted, or received content — it is
+    /// the honest evaluator: a session that decrypts cleanly must still
+    /// reconsider previously-stored undecryptable content (A7), and the
+    /// receipt must report `Pending` for a doc that is still blocked.
+    async fn report_sync_outcome(
+        &mut self,
+        peer_id: PeerId,
+        has_live: bool,
+        received: bool,
+        reply: Option<
+            futures::channel::oneshot::Sender<
+                Result<
+                    crate::runtime2::types::SyncDocReceipt,
+                    crate::runtime2::types::SyncDocError,
+                >,
+            >,
+        >,
+    ) -> eyre::Result<()> {
+        let pending = matches!(
+            self.state,
+            DocState::PendingMaterialization(_)
+        );
+        // A live doc that received content is walked unconditionally: the
+        // session-scoped decrypt result can be stale relative to the full
+        // tree (a clean session must still reconsider previously-stored
+        // undecryptable content — A7).
+        let walk = pending || self.partially_decrypted || (received && has_live);
+        let result = if walk {
+            match self
+                .retry_materialization(BigRepoChangeOrigin::Remote { peer_id })
+                .await
+            {
+                Ok(MaterializationStatus::Ready { .. }) => Ok(
+                    crate::runtime2::types::SyncDocReceipt {
+                        outcome: crate::runtime2::types::SyncDocOutcome::Ready,
+                    },
+                ),
+                Ok(MaterializationStatus::Pending(blockers)) => Ok(
+                    crate::runtime2::types::SyncDocReceipt {
+                        outcome: crate::runtime2::types::SyncDocOutcome::Pending(blockers),
+                    },
+                ),
+                Ok(MaterializationStatus::Missing) => Err(
+                    crate::runtime2::types::SyncDocError::NotFound,
+                ),
+                Err(error) => {
+                    let report = Err(crate::runtime2::types::SyncDocError::Other(ferr!(
+                        "{error:?}"
+                    )));
+                    return self.finish_sync_outcome(reply, report, Err(error));
+                }
+            }
+        } else if has_live {
+            Ok(crate::runtime2::types::SyncDocReceipt {
+                outcome: crate::runtime2::types::SyncDocOutcome::Ready,
+            })
+        } else {
+            // No live bundle and not pending: state is persisted; the next
+            // acquisition hydrates it.
+            if matches!(self.state, DocState::Transient(_)) {
+                debug!(
+                    doc_id = %self.doc_id,
+                    "invalidating inactive document after sync"
+                );
+                self.state = DocState::Unloaded;
+                self.set_partially_decrypted(false).await?;
+            }
+            Ok(crate::runtime2::types::SyncDocReceipt {
+                outcome: crate::runtime2::types::SyncDocOutcome::Stored,
+            })
+        };
+        self.finish_sync_outcome(reply, result, Ok(()))
+    }
+
+    /// Send the receipt outcome to the caller and return the worker-level
+    /// result (an error both reports `Other` on the receipt and fails the
+    /// worker, preserving the pre-B4 fatal-walk behavior).
+    fn finish_sync_outcome(
+        &mut self,
+        reply: Option<
+            futures::channel::oneshot::Sender<
+                Result<
+                    crate::runtime2::types::SyncDocReceipt,
+                    crate::runtime2::types::SyncDocError,
+                >,
+            >,
+        >,
+        result: Result<
+            crate::runtime2::types::SyncDocReceipt,
+            crate::runtime2::types::SyncDocError,
+        >,
+        worker: eyre::Result<()>,
+    ) -> eyre::Result<()> {
+        if let Some(reply) = reply {
+            reply
+                .send(result)
+                .inspect_err(|_| warn!(ERROR_CALLER))
+                .ok();
+        }
+        worker
     }
 
     /// Decrypt only the content received by this Subduction exchange.

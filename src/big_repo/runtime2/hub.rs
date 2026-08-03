@@ -58,6 +58,14 @@ struct Runtime2Hub<F: FutureForm, R: TaskRuntime<F>> {
     /// A quiescence probe is awaiting its event-log watermark.
     quiescence_group_part_watermark_pending: bool,
 
+    // ── doc sync bookkeeping ───────────────────────────────────────────────
+    /// Waiters for caller-initiated doc sync rounds, keyed by waiter id.
+    ///
+    /// The waiter id doubles as the `RequestId` nonce (the requestor is the
+    /// local peer id), so the round-completion commands (`DocSyncRoundDone` /
+    /// `DocSyncFailed`) resolve exactly the right waiter — no single-flight
+    /// needed for concurrent syncs of the same (doc, peer).
+    pending_doc_syncs: HashMap<u64, PendingDocSyncWaiter>,
     // ── runtime-wide quiescence ────────────────────────────────────────────
     quiescence_waiters: Vec<futures::channel::oneshot::Sender<eyre::Result<()>>>,
     quiescence_probe: Option<QuiescenceProbe>,
@@ -84,6 +92,15 @@ struct KeyhiveSyncRound {
     request_id: subduction_keyhive::message::RequestId,
     changed: bool,
     validating: bool,
+}
+
+struct PendingDocSyncWaiter {
+    doc_id: DocumentId,
+    peer_id: PeerId,
+    request_id: subduction_core::connection::message::RequestId,
+    resp: futures::channel::oneshot::Sender<
+        Result<crate::runtime2::types::SyncDocReceipt, crate::runtime2::types::SyncDocError>,
+    >,
 }
 
 struct QuiescenceProbe {
@@ -469,63 +486,58 @@ where
             Runtime2Cmd::SyncDocWithPeer {
                 doc_id,
                 peer_id,
-                waiter_id: sync_id,
+                waiter_id,
                 timeout: _,
                 resp,
             } => {
+                let request_id = subduction_core::connection::message::RequestId {
+                    requestor: subduction_core::peer::id::PeerId::new(
+                        *self.local_peer_id.as_bytes(),
+                    ),
+                    nonce: waiter_id,
+                };
+                self.pending_doc_syncs.insert(
+                    waiter_id,
+                    PendingDocSyncWaiter {
+                        doc_id,
+                        peer_id,
+                        request_id: request_id.clone(),
+                        resp,
+                    },
+                );
                 let sed_id = sedimentree_core::id::SedimentreeId::new(doc_id.into_bytes());
                 self.spawn_background(F::sync_doc_with_peer(
-                    sync_id,
+                    request_id,
                     Arc::clone(&self.runtime_io),
                     peer_id,
                     sed_id,
                     self.cmd_tx.clone(),
-                    resp,
                 ))?;
             }
-            Runtime2Cmd::FinalizeDocSync {
-                sync_id,
-                doc_id,
-                peer_id,
-                transport,
-                resp,
-            } => {
-                let Some(entry) = self.doc_workers.get(&doc_id) else {
-                    resp.send(Ok(crate::runtime2::types::SyncDocReceipt {
-                        transport,
-                        outcome: crate::runtime2::types::SyncDocOutcome::Stored,
-                    }))
-                    .inspect_err(|_| warn!(ERROR_CALLER))
-                    .ok();
+            Runtime2Cmd::DocSyncRoundDone { request_id } => {
+                // Transport round succeeded: resolve the waiter (if still
+                // pending) with a worker reconsider so the receipt reflects
+                // the fully-persisted tree.
+                let Some(waiter) = self.pending_doc_syncs.remove(&request_id.nonce) else {
                     return self.try_resolve_quiescence();
                 };
-                if entry.handle.is_closed() {
-                    if entry.local_handles == 0 {
-                        self.doc_workers.remove(&doc_id);
-                        resp.send(Ok(crate::runtime2::types::SyncDocReceipt {
-                            transport,
-                            outcome: crate::runtime2::types::SyncDocOutcome::Stored,
-                        }))
-                        .inspect_err(|_| warn!(ERROR_CALLER))
-                        .ok();
-                    } else {
-                        resp.send(Err(crate::runtime2::types::SyncDocError::Other(ferr!(
-                            "active document worker closed during sync finalization"
-                        ))))
-                        .inspect_err(|_| warn!(ERROR_CALLER))
-                        .ok();
-                    }
-                } else {
-                    entry
-                        .handle
-                        .send(DocWorkerMsg::FinalizeAfterSync {
-                            sync_id,
-                            transport,
-                            peer_id,
-                            resp,
-                        })
-                        .wrap_err(ERROR_CHANNEL)?;
-                }
+                self.route_sync_session_apply(
+                    waiter.doc_id,
+                    waiter.peer_id,
+                    Vec::new(),
+                    Vec::new(),
+                    Some(waiter.resp),
+                )?;
+            }
+            Runtime2Cmd::DocSyncFailed { request_id, error } => {
+                let Some(waiter) = self.pending_doc_syncs.remove(&request_id.nonce) else {
+                    return self.try_resolve_quiescence();
+                };
+                waiter
+                    .resp
+                    .send(Err(error))
+                    .inspect_err(|_| warn!(ERROR_CALLER))
+                    .ok();
             }
             Runtime2Cmd::SyncKeyhiveWithPeer {
                 peer_id,
@@ -554,9 +566,10 @@ where
                     resp,
                 ))?;
             }
-            Runtime2Cmd::CancelDocSyncWaiter { .. } => {
-                // Dropping the timed-out response receiver is sufficient. The
-                // shared Subduction sync continues independently of doc workers.
+            Runtime2Cmd::CancelDocSyncWaiter { waiter_id, .. } => {
+                // The caller's timeout dropped the response receiver; forget
+                // the waiter so a late session / round-done cannot resolve it.
+                self.pending_doc_syncs.remove(&waiter_id);
             }
             Runtime2Cmd::CancelKeyhiveSyncWaiter { peer_id, waiter_id } => {
                 self.cancel_pending_keyhive_sync(&peer_id, waiter_id);
@@ -705,14 +718,11 @@ trait HubIoFutures<F: FutureForm, Tasks: crate::runtime2::TaskSet<F>> {
     ) -> F::Future<'static, eyre::Result<()>>;
 
     fn sync_doc_with_peer(
-        sync_id: u64,
+        request_id: subduction_core::connection::message::RequestId,
         runtime_io: std::sync::Arc<dyn crate::runtime2::RuntimeIo<F>>,
         peer_id: PeerId,
         sed_id: sedimentree_core::id::SedimentreeId,
         cmd_tx: async_channel::Sender<Runtime2Cmd>,
-        resp: futures::channel::oneshot::Sender<
-            Result<crate::runtime2::types::SyncDocReceipt, crate::runtime2::types::SyncDocError>,
-        >,
     ) -> F::Future<'static, eyre::Result<()>>;
 }
 
@@ -1099,24 +1109,24 @@ impl<F: FutureForm, Tasks: crate::runtime2::TaskSet<F>> HubIoFutures<F, Tasks> f
     }
 
     fn sync_doc_with_peer(
-        sync_id: u64,
+        request_id: subduction_core::connection::message::RequestId,
         runtime_io: std::sync::Arc<dyn crate::runtime2::RuntimeIo<F>>,
         peer_id: PeerId,
         sed_id: sedimentree_core::id::SedimentreeId,
         cmd_tx: async_channel::Sender<Runtime2Cmd>,
-        resp: futures::channel::oneshot::Sender<
-            Result<crate::runtime2::types::SyncDocReceipt, crate::runtime2::types::SyncDocError>,
-        >,
     ) -> F::Future<'static, eyre::Result<()>> {
         let span = tracing::debug_span!(
             "document_sync",
-            sync_id,
+            request_nonce = request_id.nonce,
             remote_peer_id = %peer_id,
             document_id = %DocumentId::new(*sed_id.as_bytes()),
         );
         F::from_future(
             async move {
-                let result = match runtime_io.sync_doc_with_peer(sed_id, peer_id).await {
+                let result = match runtime_io
+                    .sync_doc_with_peer(sed_id, peer_id, Some(request_id.clone()))
+                    .await
+                {
                     Ok(crate::runtime2::SyncDocAttempt::Exchanged) => Ok(()),
                     Ok(crate::runtime2::SyncDocAttempt::NotFound) => {
                         Err(crate::runtime2::types::SyncDocError::NotFound)
@@ -1147,21 +1157,19 @@ impl<F: FutureForm, Tasks: crate::runtime2::TaskSet<F>> HubIoFutures<F, Tasks> f
                 };
                 match result {
                     Ok(()) => {
+                        // The emitted session(s) carry `request_id`; the hub
+                        // resolves the waiter from the session or, if no
+                        // session is observed, from this round-done signal.
                         cmd_tx
-                            .send(Runtime2Cmd::FinalizeDocSync {
-                                sync_id,
-                                doc_id: DocumentId::new(*sed_id.as_bytes()),
-                                transport: crate::runtime2::SyncDocAttempt::Exchanged,
-                                peer_id,
-                                resp,
-                            })
+                            .send(Runtime2Cmd::DocSyncRoundDone { request_id })
                             .await
                             .expect(ERROR_CHANNEL);
                     }
                     Err(error) => {
-                        resp.send(Err(error))
-                            .inspect_err(|_| warn!(ERROR_CALLER))
-                            .ok();
+                        cmd_tx
+                            .send(Runtime2Cmd::DocSyncFailed { request_id, error })
+                            .await
+                            .expect(ERROR_CHANNEL);
                     }
                 }
                 Ok(())
@@ -1499,36 +1507,97 @@ where
             sent_fragment_ids = session.sent_fragment_ids.len(),
             "observed sync session"
         );
-        if session.received_commit_ids.is_empty() && session.received_fragment_ids.is_empty() {
+        let received =
+            !session.received_commit_ids.is_empty() || !session.received_fragment_ids.is_empty();
+        if !received {
+            // Empty sessions carry no content and never resolve a receipt:
+            // the transport round's completion (or a later session) handles
+            // the reconsider walk. Skipped as before B4.
             return Ok(());
         }
+        let peer_id = PeerId::new(*session.peer_id.as_bytes());
+
+        // Sessions are always routed fire-and-forget. Caller waiters are
+        // resolved at round completion (`DocSyncRoundDone` /
+        // `DocSyncFailed`) so the receipt reflects the authoritative
+        // transport result — a rejected session (remote or policy) must not
+        // resolve a waiter with a success receipt.
+        debug!(
+            doc_id = %doc_id,
+            remote_peer_id = %peer_id,
+            "routing received sync content to document worker"
+        );
+        self.route_sync_session_apply(
+            doc_id,
+            peer_id,
+            session.received_commit_ids,
+            session.received_fragment_ids,
+            None,
+        )
+    }
+
+    /// Route a sync-session apply to the doc worker, resolving the receipt
+    /// directly when no (or no live) worker exists.
+    ///
+    /// `reply: Some` resolves a caller's sync receipt with the worker's
+    /// outcome; `None` is fire-and-forget (passive sessions). Empty `commit_ids`
+    /// / `fragment_ids` make the worker only reconsider a pending doc / report
+    /// its current state.
+    fn route_sync_session_apply(
+        &mut self,
+        doc_id: DocumentId,
+        peer_id: PeerId,
+        commit_ids: Vec<sedimentree_core::loose_commit::id::CommitId>,
+        fragment_ids: Vec<sedimentree_core::loose_commit::id::CommitId>,
+        reply: Option<
+            futures::channel::oneshot::Sender<
+                Result<
+                    crate::runtime2::types::SyncDocReceipt,
+                    crate::runtime2::types::SyncDocError,
+                >,
+            >,
+        >,
+    ) -> eyre::Result<()> {
         let Some(entry) = self.doc_workers.get_mut(&doc_id) else {
             // Subduction has persisted the session. A later acquisition will
             // hydrate it directly when no worker currently exists.
+            if let Some(reply) = reply {
+                reply
+                    .send(Ok(crate::runtime2::types::SyncDocReceipt {
+                        outcome: crate::runtime2::types::SyncDocOutcome::Stored,
+                    }))
+                    .inspect_err(|_| warn!(ERROR_CALLER))
+                    .ok();
+            }
             return Ok(());
         };
-        debug!(
-            doc_id = %doc_id,
-            remote_peer_id = %session.peer_id,
-            "routing received sync content to document worker"
-        );
         entry.eviction_deadline = None;
-        let send_result = entry.handle.send(DocWorkerMsg::ApplyReceivedContent {
-            peer_id: PeerId::new(*session.peer_id.as_bytes()),
-            commit_ids: session.received_commit_ids,
-            fragment_ids: session.received_fragment_ids,
-        });
-        if let Err(error) = send_result {
-            if entry.local_handles == 0 && entry.handle.is_closed() {
-                debug!(
-                    doc_id = %doc_id,
-                    "discarding stale evicted document worker during sync routing"
-                );
-                self.doc_workers.remove(&doc_id);
-                return Ok(());
+        if entry.handle.is_closed() && entry.local_handles == 0 {
+            debug!(
+                doc_id = %doc_id,
+                "discarding stale evicted document worker during sync routing"
+            );
+            self.doc_workers.remove(&doc_id);
+            // The waiter was already removed from `pending_doc_syncs`;
+            // resolve its receipt here so the caller does not hang.
+            if let Some(reply) = reply {
+                reply
+                    .send(Ok(crate::runtime2::types::SyncDocReceipt {
+                        outcome: crate::runtime2::types::SyncDocOutcome::Stored,
+                    }))
+                    .inspect_err(|_| warn!(ERROR_CALLER))
+                    .ok();
             }
-            return Err(error);
+            return Ok(());
         }
+        entry
+            .handle
+            .send(DocWorkerMsg::ApplySyncSession {
+                peer_id,
+                commit_ids,
+                fragment_ids,
+                reply,
+            })?;
         Ok(())
     }
 
@@ -2082,7 +2151,6 @@ impl<
                 .await;
                 match result {
                     Ok(Ok(())) => Ok(()),
-                    Ok(Err(_error)) if cancellation.is_aborted() => Ok(()),
                     Ok(Err(error)) => {
                         error!(error = %error, "runtime2 hub machine failed");
                         Err(error)
@@ -2172,6 +2240,7 @@ where
         keyhive_round_ids: 0,
         keyhive_reconciliation_waiters: Vec::new(),
         quiescence_group_part_watermark_pending: false,
+        pending_doc_syncs: HashMap::new(),
         quiescence_waiters: Vec::new(),
         quiescence_probe: None,
         quiescence_barrier_ids: 0,

@@ -1024,6 +1024,7 @@ where
         &self,
         sed_id: SedimentreeId,
         peer_id: PeerId,
+        request_id: Option<subduction_core::connection::message::RequestId>,
     ) -> <Sendable as FutureForm>::Future<'_, eyre::Result<SyncDocAttempt>> {
         Sendable::from_future(async move {
             let remote_peer_id = subduction_core::peer::id::PeerId::new(*peer_id.as_bytes());
@@ -1034,6 +1035,7 @@ where
                     sed_id,
                     false,
                     subduction_core::timeout::call::CallTimeout::Default,
+                    request_id,
                 )
                 .await;
 

@@ -81,7 +81,6 @@ pub enum SyncDocOutcome {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SyncDocReceipt {
-    pub transport: crate::runtime2::io::SyncDocAttempt,
     pub outcome: SyncDocOutcome,
 }
 

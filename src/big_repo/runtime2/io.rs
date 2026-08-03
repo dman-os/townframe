@@ -273,9 +273,13 @@ pub trait RuntimeIo<F: FutureForm>: Send + Sync {
     /// Returns `true` if the sync exchange had success (commits/fragments
     /// were received or sent), `false` if the sync completed without
     /// meaningful exchange (no new content).
+    ///
+    /// `request_id` (when `Some`) is threaded into the transport so the
+    /// emitted sessions carry an ID the hub can correlate back to its waiter.
     fn sync_doc_with_peer(
         &self,
         sed_id: sedimentree_core::id::SedimentreeId,
         peer_id: big_sync_core::PeerId,
+        request_id: Option<subduction_core::connection::message::RequestId>,
     ) -> F::Future<'_, eyre::Result<SyncDocAttempt>>;
 }
