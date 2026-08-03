@@ -354,6 +354,7 @@ impl HostPartStore for SqlitePartStore {
                 PartSummary {
                     latest_cursor: u64::try_from(latest_cursor).expect(ERROR_IMPOSSIBLE),
                     member_count: u64::try_from(member_count).expect(ERROR_IMPOSSIBLE),
+                    deepest_bucket_level: self.core.bucket_depth,
                 },
             );
         }

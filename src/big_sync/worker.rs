@@ -246,6 +246,7 @@ const ABORT_DURATION_SECS: u64 = 2;
 pub fn spawn_big_sync_worker(
     part_store: SharedPartitionStore,
     sync_backends: HashMap<BackendId, Arc<dyn SyncBackend>>,
+    label: &'static str,
 ) -> Res<(BigSyncWorkerHandle, StopToken)> {
     let cancel_token = CancellationToken::new();
     let task_set = utils_rs::AbortableJoinSet::new();
@@ -261,6 +262,7 @@ pub fn spawn_big_sync_worker(
         part_store,
         sync_backends,
         machine,
+        label,
 
         machine_spawn_queue: default(),
         sync_spawn_queue: default(),
@@ -361,6 +363,11 @@ impl BigRedToken {
 struct BigSyncWorker {
     cancel_token: CancellationToken,
 
+    /// Node-scoped label recorded on the machine loop's spans, so task-level
+    /// logs can be attributed to a specific worker (the machine itself is
+    /// otherwise anonymous — it only knows remote peer ids).
+    label: &'static str,
+
     task_set: utils_rs::AbortableJoinSet,
     sync_backends: HashMap<BackendId, Arc<dyn SyncBackend>>,
 
@@ -415,7 +422,7 @@ struct ZombieTaskDeets {
 const MAX_ACTIVE_SYNC_TASKS: usize = 32;
 
 impl BigSyncWorker {
-    #[tracing::instrument(skip(self, shutdown))]
+    #[tracing::instrument(skip(self, shutdown), fields(worker = %self.label))]
     async fn machine_loop(&mut self, shutdown: Arc<BigRedToken>) -> Res<()> {
         let mut janitor_tick = tokio::time::interval(Duration::from_millis(500));
         loop {

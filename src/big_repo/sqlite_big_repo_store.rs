@@ -143,6 +143,15 @@ impl SqliteBigRepoStore {
         Ok(store)
     }
 
+    /// Parts this node opts out of entirely: not served (hidden parts are
+    /// answered with `UnkownParts` on subscribe/summarize) and — per the
+    /// hidden-parts design — not advertised or pulled by `peer_sync_parts`.
+    pub(crate) fn hidden_parts(&self) -> Arc<HashSet<PartId>> {
+        Arc::clone(&self.hidden_parts)
+    }
+
+
+
     async fn next_cursor(tx: &mut sqlx::Transaction<'_, sqlx::Sqlite>) -> Res<CursorIndex> {
         SqliteCore::next_cursor(tx).await
     }
@@ -406,6 +415,7 @@ impl HostPartStore for SqliteBigRepoStore {
                 PartSummary {
                     latest_cursor: u64::try_from(latest_cursor).expect(ERROR_IMPOSSIBLE),
                     member_count: u64::try_from(member_count).expect(ERROR_IMPOSSIBLE),
+                    deepest_bucket_level: self.core.bucket_depth,
                 },
             );
         }
@@ -1288,6 +1298,23 @@ pub enum SqliteBigRepoStoreError {
 }
 
 impl SqliteBigRepoStore {
+    /// Ensure the part row exists (idempotent). Inherent mirror of the
+    /// `HostPartStore` method so runtime workers can call it without the
+    /// crate-private trait in scope — a part is advertiseable once its row
+    /// exists.
+    pub(crate) async fn ensure_part(&self, part_id: PartId) -> Res<()> {
+        sqlx::query(
+            "INSERT INTO big_sync_parts(scope_id, part_id, latest_cursor)
+             VALUES (?1, ?2, 0)
+             ON CONFLICT(scope_id, part_id) DO NOTHING",
+        )
+        .bind(self.scope_id)
+        .bind(Self::part_blob(part_id))
+        .execute(&self.sql.write_pool)
+        .await?;
+        Ok(())
+    }
+
     async fn subscribe_with_policy(
         &self,
         reqs: SubPartsRequest,
@@ -1786,6 +1813,20 @@ impl SqliteBigRepoStore {
                     .await?;
                 if desired_parts.contains(&part_id) {
                     let Some(payload) = event_payload.clone() else {
+                        // Pending member: the local principal wants the doc in
+                        // this part but has no payload yet (fetcher/relay). The
+                        // part row must exist anyway — a pending want is pull
+                        // access, and the part must be advertiseable
+                        // (`summarize_parts` succeeds) so a sync route can be
+                        // established and the first pull promotes the member.
+                        sqlx::query(
+                            "INSERT OR IGNORE INTO big_sync_parts(scope_id, part_id, latest_cursor)
+                             VALUES (?1, ?2, 0)",
+                        )
+                        .bind(self.scope_id)
+                        .bind(Self::part_blob(part_id))
+                        .execute(&mut *tx)
+                        .await?;
                         sqlx::query(
                             "INSERT OR IGNORE INTO big_sync_pending_members(scope_id, part_id, obj_id)
                              VALUES (?1, ?2, ?3)",

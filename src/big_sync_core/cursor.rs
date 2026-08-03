@@ -126,6 +126,13 @@ impl CursorSyncMachine {
 
         match evt {
             SubEvent::Changed(evt) => {
+                tracing::trace!(
+                    ?evt.obj_id,
+                    ?evt.cursor,
+                    part_count = evt.part_ids.len(),
+                    payload = !evt.payload.is_null(),
+                    "subscription Changed event",
+                );
                 let mut parts = vec![];
                 for &part_id in &evt.part_ids {
                     if !self.mark_pending_cursor(part_id, evt.cursor) {
@@ -148,6 +155,13 @@ impl CursorSyncMachine {
                 });
             }
             SubEvent::Added(evt) => {
+                tracing::trace!(
+                    ?evt.obj_id,
+                    ?evt.cursor,
+                    ?evt.part_id,
+                    payload = !evt.payload.is_null(),
+                    "subscription Added event",
+                );
                 if !self.mark_pending_cursor(evt.part_id, evt.cursor) {
                     return;
                 }
@@ -169,6 +183,12 @@ impl CursorSyncMachine {
                 });
             }
             SubEvent::Removed(evt) => {
+                tracing::trace!(
+                    ?evt.obj_id,
+                    ?evt.cursor,
+                    ?evt.part_id,
+                    "subscription Removed event",
+                );
                 if !self.mark_pending_cursor(evt.part_id, evt.cursor) {
                     return;
                 }
@@ -183,6 +203,11 @@ impl CursorSyncMachine {
                 });
             }
             SubEvent::ObjectChanged(evt) => {
+                tracing::trace!(
+                    ?evt.obj_id,
+                    payload = !evt.payload.is_null(),
+                    "subscription ObjectChanged event",
+                );
                 out.push(CursorMachineCommand::SyncObj {
                     obj_id: evt.obj_id,
                     remote_payload: evt.payload,

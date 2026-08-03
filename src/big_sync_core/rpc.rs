@@ -31,7 +31,8 @@ pub trait BigSyncRpcClient<K: FutureForm> {
     ) -> K::Future<'a, BigSyncRpcResult<Result<Vec<BucketSummary>, ListPartsError>>>;
 
     /// WARN: this doesn't limit the number of returned results
-    /// It thus only accepts buckets that are of the level [`PeerSummaryResult::deepest_bucket_level`]
+    /// It only accepts buckets at the level the requesting part advertises in
+    /// its per-part [`PartStratSummary::Bucket`] summary.
     fn leaf_buckets<'a>(
         &'a self,
         req: LeafBucketsRequest,
@@ -160,6 +161,34 @@ pub struct GetChangedBucketsRequest {
     pub limit_hint: u32,
 }
 
+/// Store-level part summary: the raw per-part facts a part store can report.
+/// The RPC layer expands this into the per-strat [`PartStratSummary`] vec so
+/// the decision side can pick a strat per part.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PartSummary {
+    pub latest_cursor: CursorIndex,
+    pub member_count: u64,
+    /// The deepest bucket level this store has materialized for the part.
+    pub deepest_bucket_level: BuckLevel,
+}
+
+impl PartSummary {
+    /// Expand the raw store summary into the per-strat wire summaries the
+    /// decision side consumes: cursor strat (latest cursor) + bucket strat
+    /// (that part's deepest bucket level and member count).
+    pub fn into_strat_summaries(self) -> Vec<PartStratSummary> {
+        vec![
+            PartStratSummary::Cursor(CursorPartSummary {
+                latest_cursor: self.latest_cursor,
+            }),
+            PartStratSummary::Bucket(BucketPartSummary {
+                deepest_bucket_level: self.deepest_bucket_level,
+                member_count: self.member_count,
+            }),
+        ]
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct BucketSummary {
     pub id: BuckId,
@@ -226,16 +255,29 @@ structstruck::strike! {
 
 structstruck::strike! {
     #[structstruck::each[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]]
+    pub enum PartStratSummary {
+        /// The peer can serve this part with the cursor strat; reports the
+        /// latest cursor of the part.
+        Cursor(pub struct CursorPartSummary {
+            pub latest_cursor: CursorIndex,
+        }),
+        /// The peer can serve this part with the bucket strat; reports that
+        /// part's deepest materialized bucket level and member count.
+        Bucket(pub struct BucketPartSummary {
+            pub deepest_bucket_level: BuckLevel,
+            pub member_count: u64,
+        }),
+    }
+}
+
+structstruck::strike! {
+    #[structstruck::each[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]]
     pub struct PeerSummaryResult {
         /// Only known partitions where the requestor has accessed are returned here.
-        pub parts: Map<
-            PartId,
-            pub struct PartSummary {
-                pub latest_cursor: CursorIndex,
-                pub member_count: u64,
-            }
-        >,
-        pub deepest_bucket_level: BuckLevel
+        /// Each part reports the sync strats it supports; the decision side
+        /// picks a strat per part (cursor diff or bucket working level), so
+        /// different parts can be served by different strats.
+        pub parts: Map<PartId, Vec<PartStratSummary>>,
     }
 }
 

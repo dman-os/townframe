@@ -90,6 +90,10 @@ struct Runtime2Hub<F: FutureForm, R: TaskRuntime<F>> {
     frozen_cmd_buffer: Vec<Runtime2Cmd>,
     /// A resolving `WaitForQuiescence { freeze: true }` freezes the hub.
     freeze_on_resolve: bool,
+    /// Set once the commands channel closes (the stop token dropped its
+    /// sender); no new background work is admitted and the machine loop
+    /// exits once tracked work drains.
+    cmd_closed: bool,
     activity_generation: u64,
     /// Finite background futures admitted via `spawn_tracked` that have not
     /// yet completed. The quiescence predicate waits for this to drain, so
@@ -192,14 +196,21 @@ impl<F: FutureForm> HubCommandFuture<F> for F {
         F::from_future(async move {
             match runtime_io.create_document(parents, content_heads).await {
                 Ok(doc_id) => {
-                    cmd_tx
+                    match cmd_tx
                         .send(Runtime2Cmd::PutDoc {
                             doc_id,
                             initial_content,
                             resp,
                         })
                         .await
-                        .expect(ERROR_CHANNEL);
+                    {
+                        Ok(()) => {}
+                        Err(_) => {
+                            // Shutdown: the hub's machine loop is gone. The
+                            // caller's `resp` is dropped with the hub, so a
+                            // send error is the signal — nothing to report.
+                        }
+                    }
                 }
                 Err(err) => {
                     resp.send(Err(err))
@@ -577,6 +588,12 @@ where
                 let Some(waiter) = self.pending_doc_syncs.remove(&request_id.nonce) else {
                     return self.try_resolve_quiescence();
                 };
+                debug!(
+                    request_nonce = request_id.nonce,
+                    doc_id = %waiter.doc_id,
+                    remote_peer_id = %waiter.peer_id,
+                    "doc sync round resolved; resolving waiter",
+                );
                 self.route_sync_session_apply(
                     waiter.doc_id,
                     waiter.peer_id,
@@ -589,6 +606,12 @@ where
                 let Some(waiter) = self.pending_doc_syncs.remove(&request_id.nonce) else {
                     return self.try_resolve_quiescence();
                 };
+                debug!(
+                    ?error,
+                    doc_id = %waiter.doc_id,
+                    remote_peer_id = %waiter.peer_id,
+                    "doc sync round failed; failing waiter",
+                );
                 waiter
                     .resp
                     .send(Err(error))
@@ -925,10 +948,11 @@ impl<F: FutureForm> HubBackgroundFuture<F> for F {
     ) -> F::Future<'static, eyre::Result<()>> {
         F::from_future(async move {
             let _ = lease_rx.await;
-            cmd_tx
+            // A closed commands channel means the runtime is draining; the
+            // lease bookkeeping is moot then.
+            let _ = cmd_tx
                 .send(Runtime2Cmd::ReleaseInternalLease { doc_id })
-                .await
-                .expect(ERROR_CHANNEL);
+                .await;
             Ok(())
         })
     }
@@ -1233,16 +1257,17 @@ impl<F: FutureForm, Tasks: crate::runtime2::TaskSet<F>> HubIoFutures<F, Tasks> f
                         // The emitted session(s) carry `request_id`; the hub
                         // resolves the waiter from the session or, if no
                         // session is observed, from this round-done signal.
-                        cmd_tx
+                        // A closed commands channel means the runtime is
+                        // draining; the waiter is dropped with the hub and
+                        // the caller observes the closure.
+                        let _ = cmd_tx
                             .send(Runtime2Cmd::DocSyncRoundDone { request_id })
-                            .await
-                            .expect(ERROR_CHANNEL);
+                            .await;
                     }
                     Err(error) => {
-                        cmd_tx
+                        let _ = cmd_tx
                             .send(Runtime2Cmd::DocSyncFailed { request_id, error })
-                            .await
-                            .expect(ERROR_CHANNEL);
+                            .await;
                     }
                 }
                 Ok(())
@@ -1272,6 +1297,19 @@ impl<F: FutureForm + HubBackgroundFuture<F> + 'static, R: TaskRuntime<F>> Runtim
         kind: crate::runtime2::TrackedWorkKind,
         fut: F::Future<'static, eyre::Result<()>>,
     ) -> eyre::Result<futures::stream::AbortHandle> {
+        if self.cmd_closed {
+            // The runtime is draining; dropping new background work is the
+            // point of shutdown (its events could otherwise keep the drain
+            // alive indefinitely, e.g. B11's follow-up sync or B6's
+            // re-verification retry).
+            debug!(
+                local_peer_id = %self.local_peer_id,
+                kind = ?kind,
+                "discarding background work while shutting down"
+            );
+            let (abort, _) = futures::future::AbortHandle::new_pair();
+            return Ok(abort);
+        }
         self.tracked_in_flight = self.tracked_in_flight.wrapping_add(1);
         self.child_tasks
             .spawn(F::track_work(kind, fut, self.evt_tx.clone()))
@@ -2052,7 +2090,9 @@ where
         if let Some(waiters) = self.keyhive_waiters.remove(peer_id) {
             for (_id, sender) in waiters.waiters {
                 sender
-                    .send(Err(eyre::eyre!("{reason}")))
+                    .send(Err(eyre::Report::new(crate::KeyhiveSyncCancelled {
+                        reason,
+                    })))
                     .inspect_err(|_| warn!(ERROR_CALLER))
                     .ok();
             }
@@ -2099,6 +2139,10 @@ impl<F: FutureForm + HubBackgroundFuture<F> + DocWorkerLoop<F> + 'static, R: Tas
     /// Lazily spawn a doc-worker if none exists.
     #[tracing::instrument(skip_all, fields(%doc_id))]
     fn spawn_doc_worker(&mut self, doc_id: DocumentId) -> eyre::Result<()> {
+        if self.cmd_closed {
+            debug!(%doc_id, "discarding doc worker spawn while shutting down");
+            return Ok(());
+        }
         // Fast path: already alive, just reset eviction.
         if self
             .doc_workers
@@ -2230,26 +2274,45 @@ impl<F: FutureForm + HubBackgroundFuture<F> + DocWorkerLoop<F> + 'static, R: Tas
 /// Stop token for the runtime. Generic over the async form `F` and the
 /// concrete [`TaskRuntime`] backend `R`. Holds two independent task sets:
 /// - `child_tasks` — construction-time workers and dynamic background jobs.
-/// - `machine_tasks` — the hub's dispatcher loop, stopped first so it cannot
-///    dispatch work into an aborted child scope.
+/// - `machine_tasks` — the hub's dispatcher loop, stopped last so it can
+///    drain in-flight tracked work before exiting.
 pub struct Runtime2StopToken<F: FutureForm, R: TaskRuntime<F>> {
     pub(crate) cancel: futures::future::AbortHandle,
+    pub(crate) cmd_tx: async_channel::Sender<Runtime2Cmd>,
+    pub(crate) timer: Arc<dyn crate::runtime2::Timer<F>>,
     pub(crate) child_tasks: R::Tasks,
     pub(crate) machine_tasks: R::Tasks,
 }
 
 impl<F: FutureForm, R: TaskRuntime<F>> Runtime2StopToken<F, R> {
     /// Cancel the runtime and await graceful shutdown.
+    ///
+    /// Closing the commands channel (via [`Sender::close`], so the closure
+    /// is observed even while the hub, handle and in-flight children still
+    /// hold sender clones) makes the machine loop stop admitting new
+    /// background work, drain in-flight tracked work (processing their
+    /// events, so no child ever reports into a closed channel) and exit.
+    /// Senders that still hold a `cmd_tx` clone treat the closed channel as
+    /// the shutdown signal. Only if the drain does not complete within
+    /// `timeout` is the machine loop aborted outright.
     pub async fn stop(self, timeout: std::time::Duration) -> eyre::Result<()> {
-        // Stop the dispatcher before aborting its children. Otherwise a late
-        // connection-loss event can be consumed by the still-running hub and
-        // try to spawn work into the already-aborted child task set.
-        self.cancel.abort();
-        self.machine_tasks.stop(timeout).await?;
+        // Close the commands channel: no `Stop` message, no ack — the
+        // receiver observes the closure after draining buffered commands.
+        self.cmd_tx.close();
+
+        // Wait for the machine loop to drain and exit. A timeout means the
+        // drain is wedged (e.g. a child stuck on transport IO), so abort the
+        // machine loop outright as a fallback (the second stop then joins
+        // the already-aborted set).
+        if self.machine_tasks.stop(timeout).await.is_err() {
+            tracing::warn!("runtime2 graceful shutdown timed out; aborting machine loop");
+            self.cancel.abort();
+            let _ = self.machine_tasks.stop(timeout).await;
+        }
 
         // Not every child operation observes the runtime cancellation token
         // (for example a peer sync may be awaiting transport IO). Abort the
-        // child scope only after the dispatcher has stopped, then join it.
+        // child scope only after the machine loop has exited, then join it.
         self.child_tasks.abort();
         self.child_tasks.stop(timeout).await?;
         Ok(())
@@ -2286,6 +2349,16 @@ impl<
                 let result = futures::future::Abortable::new(
                     async move {
                         loop {
+                            if hub.cmd_closed && hub.tracked_in_flight == 0 {
+                                // Drain complete: the commands channel closed
+                                // (the stop token dropped its sender) and all
+                                // tracked work has reported. Exit; the stop
+                                // token then aborts the child scope, which is
+                                // safe because no child still has events to
+                                // report (and the ones that outlive it handle a
+                                // closed channel).
+                                break;
+                            }
                             if hub.frozen {
                                 // B12 freeze: events and the janitor are held;
                                 // only `Unfreeze` is processed — everything
@@ -2300,7 +2373,15 @@ impl<
                                         }
                                     }
                                     Ok(cmd) => hub.frozen_cmd_buffer.push(cmd),
-                                    Err(_) => break,
+                                    Err(_) => {
+                                        // Shutdown wins over a freeze: unfreeze
+                                        // so queued TrackedWorkDone events can
+                                        // drain, then fall through to the normal
+                                        // drain path.
+                                        hub.frozen = false;
+                                        hub.frozen_cmd_buffer.clear();
+                                        hub.cmd_closed = true;
+                                    }
                                 }
                                 continue;
                             }
@@ -2315,9 +2396,16 @@ impl<
                                     Ok(evt) => hub.handle_evt(evt)?,
                                     Err(_) => break,
                                 },
-                                cmd = cmd.as_mut() => match cmd {
+                                cmd_res = cmd.as_mut() => match cmd_res {
                                     Ok(cmd) => hub.handle_cmd(cmd)?,
-                                    Err(_) => break,
+                                    Err(_) => {
+                                        // Channel closed: no more commands.
+                                        // The fused future is now terminated
+                                        // so `select_biased!` stops polling it;
+                                        // the loop keeps draining events until
+                                        // `tracked_in_flight` hits zero.
+                                        hub.cmd_closed = true;
+                                    }
                                 },
                             }
                         }
@@ -2427,6 +2515,7 @@ where
         frozen: false,
         frozen_cmd_buffer: Vec::new(),
         freeze_on_resolve: false,
+        cmd_closed: false,
         activity_generation: 0,
         tracked_in_flight: 0,
         doc_workers: HashMap::new(),
@@ -2451,7 +2540,7 @@ where
         hub,
         cmd_rx,
         evt_rx,
-        timer,
+        timer.clone(),
         runtime_registration,
     ))?;
 
@@ -2459,6 +2548,8 @@ where
         handle,
         Runtime2StopToken {
             cancel: runtime_abort,
+            cmd_tx,
+            timer,
             child_tasks,
             machine_tasks,
         },

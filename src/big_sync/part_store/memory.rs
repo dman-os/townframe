@@ -407,6 +407,7 @@ impl HostPartStore for MemoryPartStore {
                             .values()
                             .filter(|member| member.removed_at.is_none())
                             .count() as _,
+                        deepest_bucket_level: BuckId::MAX_LEVEL,
                     },
                 );
             }

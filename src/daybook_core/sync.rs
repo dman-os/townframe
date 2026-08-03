@@ -237,12 +237,12 @@ impl IrohSyncRepo {
             Arc::clone(&repo_sync_backend) as _,
         );
         let (big_sync_worker, big_sync_worker_stop) =
-            big_sync::spawn_big_sync_worker(Arc::clone(&rcx.part_store), doc_sync_backends)?;
+            big_sync::spawn_big_sync_worker(Arc::clone(&rcx.part_store), doc_sync_backends, "daybook-docs")?;
 
         let mut blob_sync_backends = std::collections::HashMap::new();
         blob_sync_backends.insert(BLOBS_BACKEND_ID.into(), blob_sync_backend);
         let (blob_sync_worker, blob_sync_worker_stop) =
-            big_sync::spawn_big_sync_worker(Arc::clone(&rcx.blob_part_store), blob_sync_backends)?;
+            big_sync::spawn_big_sync_worker(Arc::clone(&rcx.blob_part_store), blob_sync_backends, "daybook-blobs")?;
 
         let (big_sync_rpc, big_sync_rpc_stop) =
             big_sync::rpc::spawn_big_sync_rpc(Arc::clone(&rcx.part_store)).await?;
@@ -504,7 +504,17 @@ impl IrohSyncRepo {
                 }
                 val = incoming_conn_rx.recv() => {
                     let conn = val.ok_or_eyre("iroh protcol is down")?;
-                    self.handle_incoming_big_repo_conn(conn).await?;
+                    // Per-connection error isolation: an incoming connection
+                    // handler failure (provision sync cancelled by a closed
+                    // connection, keyhive round failure, ...) drops that
+                    // connection — the handler has already cleaned up its
+                    // registration and re-registered a clone for re-provision
+                    // — but must not take down the whole sync machine. The
+                    // peer's reconnect machinery re-establishes the
+                    // connection and re-runs the flow.
+                    if let Err(error) = self.handle_incoming_big_repo_conn(conn).await {
+                        warn!(?error, "incoming big_repo connection failed; dropping connection");
+                    }
                 }
                 val = conn_end_rx.recv() => {
                     let signal = val.expect("impossible actually");
@@ -630,6 +640,13 @@ impl IrohSyncRepo {
             self.blobs_sync_backend
                 .register_remote_peer(conn.peer_id, addr.clone());
             if clone_provision {
+                // A keyhive round cancelled by connection lifecycle (peer
+                // restart/shutdown mid-round) propagates as an error: the
+                // provision is not complete without the round, so the whole
+                // incoming connection setup fails and the reconnect path
+                // re-runs it (the peer is re-registered for re-provision
+                // below). Absorbing the cancellation here would continue the
+                // provision with keys that never arrived.
                 self.rcx
                     .big_repo
                     .sync_keyhive_with_peer(peer_id, Some(Duration::from_secs(10)))

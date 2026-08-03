@@ -1,9 +1,34 @@
 //! Tier 9 — ephemeral topic delivery and filtering.
 
+use super::harness::topo::Node;
 use super::harness::Pair;
-use crate::{BigEphemeralFilter, BigEphemeralTopic};
+use crate::{BigEphemeralEvent, BigEphemeralFilter, BigEphemeralSubscription, BigEphemeralTopic};
 use std::time::Duration;
 use tokio::time::timeout;
+
+/// Ephemeral delivery is fire-and-forget (see `subduction_ephemeral`'s
+/// design): a publish that races the subscriber's `Subscribe` — still queued
+/// on the publisher's listener task right after a fresh connect — is dropped
+/// silently. Retry until the event lands, bounded by the outer timeout.
+async fn publish_until_delivered(
+    publisher: &Node,
+    topic: BigEphemeralTopic,
+    payload: Vec<u8>,
+    subscription: &mut BigEphemeralSubscription,
+) -> crate::Res<BigEphemeralEvent> {
+    timeout(Duration::from_secs(5), async {
+        loop {
+            publisher.repo.ephemeral().publish(topic, payload.clone()).await?;
+            match timeout(Duration::from_millis(200), subscription.recv()).await {
+                Ok(Some(event)) => return Ok(event),
+                Ok(None) => return Err(crate::ferr!("ephemeral subscription closed unexpectedly")),
+                Err(_) => continue,
+            }
+        }
+    })
+    .await
+    .map_err(|_| crate::ferr!("timed out waiting for ephemeral event"))?
+}
 
 #[tokio::test(flavor = "multi_thread")]
 async fn tier9_ephemeral_roundtrip_between_two_nodes() -> crate::Res<()> {
@@ -19,16 +44,13 @@ async fn tier9_ephemeral_roundtrip_between_two_nodes() -> crate::Res<()> {
         .await?;
     pair.connect().await?;
 
-    pair.left()
-        .repo
-        .ephemeral()
-        .publish(topic, b"hello-ephemeral".to_vec())
-        .await?;
-
-    let event = timeout(Duration::from_secs(5), subscription.recv())
-        .await
-        .map_err(|_| crate::ferr!("timed out waiting for ephemeral event"))?
-        .ok_or_else(|| crate::ferr!("ephemeral subscription closed unexpectedly"))?;
+    let event = publish_until_delivered(
+        pair.left(),
+        topic,
+        b"hello-ephemeral".to_vec(),
+        &mut subscription,
+    )
+    .await?;
     assert_eq!(event.topic, topic);
     assert_eq!(event.sender, sender);
     assert_eq!(event.payload, b"hello-ephemeral");
@@ -63,16 +85,13 @@ async fn tier9_ephemeral_filters_topic_and_sender() -> crate::Res<()> {
         .await?;
     pair.connect().await?;
 
-    pair.left()
-        .repo
-        .ephemeral()
-        .publish(topic, b"matching".to_vec())
-        .await?;
-
-    let event = timeout(Duration::from_secs(5), matching.recv())
-        .await
-        .map_err(|_| crate::ferr!("timed out waiting for matching ephemeral event"))?
-        .ok_or_else(|| crate::ferr!("matching ephemeral subscription closed unexpectedly"))?;
+    let event = publish_until_delivered(
+        pair.left(),
+        topic,
+        b"matching".to_vec(),
+        &mut matching,
+    )
+    .await?;
     assert_eq!(event.payload, b"matching");
     assert!(timeout(Duration::from_millis(250), wrong_sender.recv())
         .await

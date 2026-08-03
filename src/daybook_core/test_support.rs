@@ -168,7 +168,7 @@ pub async fn test_cx_with_options(
     .await?;
     let part_store = big_repo.shared_part_store();
     let (_worker, big_sync_stop) =
-        big_sync::spawn_big_sync_worker(Arc::clone(&part_store), HashMap::new())?;
+        big_sync::spawn_big_sync_worker(Arc::clone(&part_store), HashMap::new(), "daybook-test-cx")?;
 
     // Create a drawer document
     let drawer_doc_id = {
@@ -430,7 +430,8 @@ pub async fn boot_part_store(sqlite_url: &str) -> Res<(big_sync::Ctx, big_sync::
         .await?,
     );
     let store: Arc<dyn big_sync::HostPartStore> = store as _;
-    let (worker, stop) = big_sync::spawn_big_sync_worker(Arc::clone(&store), HashMap::new())?;
+    let (worker, stop) =
+        big_sync::spawn_big_sync_worker(Arc::clone(&store), HashMap::new(), "daybook-test-part-store")?;
     Ok((big_sync::Ctx { store, worker }, stop))
 }
 
@@ -448,7 +449,7 @@ pub async fn boot_repo() -> Res<(
     .await?;
     let part_store = repo.shared_part_store();
     let (worker, big_sync_stop) =
-        big_sync::spawn_big_sync_worker(Arc::clone(&part_store), HashMap::new())?;
+        big_sync::spawn_big_sync_worker(Arc::clone(&part_store), HashMap::new(), "daybook-boot-repo")?;
     let big_sync_host = big_sync::Ctx {
         store: part_store,
         worker,
@@ -483,7 +484,7 @@ pub async fn boot_disk_repo(
     .await?;
     let part_store = repo.shared_part_store();
     let (worker, big_sync_stop) =
-        big_sync::spawn_big_sync_worker(Arc::clone(&part_store), HashMap::new())?;
+        big_sync::spawn_big_sync_worker(Arc::clone(&part_store), HashMap::new(), "daybook-boot-disk")?;
     let big_sync_host = big_sync::Ctx {
         store: part_store,
         worker,

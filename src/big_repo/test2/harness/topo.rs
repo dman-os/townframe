@@ -19,7 +19,8 @@ use crate::{
 };
 use big_sync::{stress_support, HostPartStore};
 use sqlx_utils_rs::SqlCtx;
-use std::{collections::HashMap, sync::Arc};
+use std::collections::{HashMap, HashSet};
+use std::sync::Arc;
 use tokio::sync::{Mutex, Notify};
 use tokio::time::{timeout, Duration};
 
@@ -42,6 +43,11 @@ pub(crate) struct Node {
     /// Human label for diagnostics ("Alice"). Registered in [`log_nickname`].
     pub label: &'static str,
     pub(crate) identity_seed: [u8; 32],
+    /// Parts this node opts out of entirely (hidden parts). Persisted across
+    /// restarts so a restarted node keeps its hidden-parts config — a
+    /// restart that drops it silently re-advertises GLOBAL to peers that
+    /// still hide it, and those routes never establish.
+    hidden_parts: HashSet<big_sync_core::PartId>,
 }
 
 #[derive(Clone, Debug)]
@@ -80,6 +86,15 @@ impl Node {
         label: &'static str,
         storage: StorageConfig,
     ) -> crate::Res<Self> {
+        Self::boot_with_config_and_hidden(seed, label, storage, Default::default()).await
+    }
+
+    pub(crate) async fn boot_with_config_and_hidden(
+        seed: u8,
+        label: &'static str,
+        storage: StorageConfig,
+        hidden_parts: HashSet<big_sync_core::PartId>,
+    ) -> crate::Res<Self> {
         let sql = match &storage {
             StorageConfig::Memory => SqlCtx::memory().await?,
             StorageConfig::Disk { path } => {
@@ -89,10 +104,13 @@ impl Node {
             }
         };
         let store = Arc::new(
-            SqliteBigRepoStore::new(
+            SqliteBigRepoStore::new_with_config(
                 sql,
                 "big-repo-test",
                 big_sync_core::BuckId::MAX_LEVEL,
+                big_sync::HostPartStoreConfig {
+                    hidden_parts: hidden_parts.clone(),
+                },
                 Arc::new(crate::access_policy::KeyhiveMembershipPolicy::new()),
             )
             .await?,
@@ -110,7 +128,7 @@ impl Node {
             .remove_obj_from_part(part_init_obj, stress_support::test_part())
             .await?;
         store.ensure_part(crate::GLOBAL_PART_ID).await?;
-        Self::boot_with_store(seed, label, storage, store).await
+        Self::boot_with_store(seed, label, storage, store, hidden_parts).await
     }
 
     async fn boot_with_store(
@@ -118,6 +136,7 @@ impl Node {
         label: &'static str,
         storage: StorageConfig,
         store: Arc<SqliteBigRepoStore>,
+        hidden_parts: HashSet<big_sync_core::PartId>,
     ) -> crate::Res<Self> {
         let (repo, repo_stop) = BigRepo::boot_with_store(
             Config {
@@ -156,8 +175,7 @@ impl Node {
         let mut backends = HashMap::new();
         backends.insert(BigRepo::BACKEND_ID.into(), sync_backend as _);
         let shared_store: crate::SharedPartStore = Arc::clone(&store) as _;
-        let (worker, big_sync_stop) = big_sync::spawn_big_sync_worker(shared_store, backends)?;
-
+        let (worker, big_sync_stop) = big_sync::spawn_big_sync_worker(shared_store, backends, label)?;
         log_nickname::register(repo.local_peer_id(), label);
         Ok(Self {
             repo,
@@ -173,12 +191,14 @@ impl Node {
             connections: Arc::new(Mutex::new(HashMap::new())),
             label,
             identity_seed: [seed; 32],
+            hidden_parts,
         })
     }
 
     pub(crate) async fn restart(self, storage: StorageConfig) -> crate::Res<Self> {
         let seed = self.identity_seed;
         let label = self.label;
+        let hidden_parts = self.hidden_parts.clone();
         let retained_memory_store =
             matches!(&storage, StorageConfig::Memory).then(|| Arc::clone(&self.store));
         self.shutdown().await;
@@ -186,11 +206,13 @@ impl Node {
         if let Some(store) = retained_memory_store {
             // Memory restarts intentionally retain the store for tests that
             // isolate Keyhive loss from part-store persistence.
-            Self::boot_with_store(seed[0], label, storage, store).await
+            Self::boot_with_store(seed[0], label, storage, store, hidden_parts).await
         } else {
             // Disk restarts reopen the SQLite file, modeling a new process
-            // rather than reusing the old pool/Arc.
-            Self::boot_with_config(seed[0], label, storage).await
+            // rather than reusing the old pool/Arc. Keep the hidden-parts
+            // config: a restart that drops it silently re-advertises parts
+            // peers still hide.
+            Self::boot_with_config_and_hidden(seed[0], label, storage, hidden_parts).await
         }
     }
 

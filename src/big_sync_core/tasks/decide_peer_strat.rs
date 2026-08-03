@@ -5,7 +5,7 @@ use crate::{
     part_store::{CursorIndex, PartStoreReadOnly},
     rpc::{
         BigSyncRpcClient, BuckLevel, BucketSummary, GetChangedBucketsRequest, ListPartsError,
-        PeerSummaryRequest, RpcError,
+        PartStratSummary, PeerSummaryRequest, RpcError,
     },
     tasks::{TaskCtx, TaskResultDeets},
     SyncMode,
@@ -99,16 +99,23 @@ impl DecidePeerStrategyTask {
         tracing::debug!(
             peer_id = %self.peer_id,
             part_count = summary.parts.len(),
-            deepest_bucket_level = summary.deepest_bucket_level,
             "decide peer strategy summary"
         );
 
         let mut part_strats: Map<_, _> = default();
         for part_id in self.parts {
-            let Some(part_summary) = summary.parts.get(&part_id) else {
+            let Some(strat_summaries) = summary.parts.get(&part_id) else {
                 part_strats.insert(part_id, PeerPartStratDecision::Unkown);
                 continue;
             };
+            let cursor_summary = strat_summaries.iter().find_map(|strat| match strat {
+                PartStratSummary::Cursor(cursor) => Some(cursor.latest_cursor),
+                PartStratSummary::Bucket(_) => None,
+            });
+            let bucket_summary = strat_summaries.iter().find_map(|strat| match strat {
+                PartStratSummary::Bucket(bucket) => Some(bucket),
+                PartStratSummary::Cursor(_) => None,
+            });
             let last_peer_cursor = cx
                 .part_store
                 .get_peer_part_cursor(self.peer_id, part_id)
@@ -120,24 +127,76 @@ impl DecidePeerStrategyTask {
                 .get(&part_id)
                 .copied()
                 .unwrap_or(SyncMode::Bucket);
+            let Some(latest_cursor) = cursor_summary else {
+                // No cursor strat advertised for this part (bucket-only).
+                // Drive it through the bucket path if a bucket summary exists;
+                // otherwise the part is unknown to the peer.
+                let Some(bucket) = bucket_summary else {
+                    part_strats.insert(part_id, PeerPartStratDecision::Unkown);
+                    continue;
+                };
+                let working_level =
+                    calc_working_level(bucket.member_count, bucket.deepest_bucket_level);
+                let mut offset = BuckId::ROOT;
+                loop {
+                    let buckets = peer_rpc
+                        .get_changed_buckets(GetChangedBucketsRequest {
+                            part_id,
+                            offset,
+                            limit_hint: BucketMachine::GET_BUCKET_LIMIT_HINT,
+                            since: last_peer_cursor,
+                        })
+                        .await??;
+                    let filtered = crate::bucket::filter_buckets(
+                        part_id,
+                        working_level,
+                        buckets,
+                        &cx.part_store,
+                    )
+                    .await;
+                    let strat = match filtered {
+                        crate::bucket::FilteredBuckets::Relist(buck_id) => {
+                            offset = buck_id;
+                            continue;
+                        }
+                        crate::bucket::FilteredBuckets::Done => {
+                            PeerPartStratDecision::Cursor(CursorStrat {
+                                latest_cursor: last_peer_cursor,
+                                last_cursor: last_peer_cursor,
+                            })
+                        }
+                        crate::bucket::FilteredBuckets::Handoff(buckets) => {
+                            PeerPartStratDecision::Bucket(BucketStrat {
+                                latest_cursor: last_peer_cursor,
+                                initial_filtered_buckets: buckets,
+                                last_cursor: last_peer_cursor,
+                                remote_depth: bucket.deepest_bucket_level,
+                                remote_len: bucket.member_count,
+                            })
+                        }
+                    };
+                    part_strats.insert(part_id, strat);
+                    break;
+                }
+                continue;
+            };
             if sync_mode == SyncMode::CursorOnly {
                 part_strats.insert(
                     part_id,
                     PeerPartStratDecision::Cursor(CursorStrat {
-                        latest_cursor: part_summary.latest_cursor,
+                        latest_cursor,
                         last_cursor: last_peer_cursor,
                     }),
                 );
                 continue;
             }
-            let diff = part_summary.latest_cursor.abs_diff(last_peer_cursor);
+            let diff = latest_cursor.abs_diff(last_peer_cursor);
             tracing::debug!(
                 peer_id = %self.peer_id,
                 ?part_id,
-                remote_cursor = part_summary.latest_cursor,
+                remote_cursor = latest_cursor,
                 stored_peer_cursor = last_peer_cursor,
                 cursor_diff = diff,
-                member_count = part_summary.member_count,
                 ?sync_mode,
                 "decide peer part strategy",
             );
@@ -145,15 +204,27 @@ impl DecidePeerStrategyTask {
                 part_strats.insert(
                     part_id,
                     PeerPartStratDecision::Cursor(CursorStrat {
-                        latest_cursor: part_summary.latest_cursor,
+                        latest_cursor,
                         last_cursor: last_peer_cursor,
                     }),
                 );
                 continue;
             }
+            let Some(bucket) = bucket_summary else {
+                // The peer advertises only a cursor strat for this part and
+                // the diff is large; degrade to the cursor strat.
+                part_strats.insert(
+                    part_id,
+                    PeerPartStratDecision::Cursor(CursorStrat {
+                        latest_cursor,
+                        last_cursor: last_peer_cursor,
+                    }),
+                );
+                continue;
+            };
             let mut offset = BuckId::ROOT;
             let working_level =
-                calc_working_level(part_summary.member_count, summary.deepest_bucket_level);
+                calc_working_level(bucket.member_count, bucket.deepest_bucket_level);
             loop {
                 let buckets = peer_rpc
                     .get_changed_buckets(GetChangedBucketsRequest {
@@ -173,17 +244,17 @@ impl DecidePeerStrategyTask {
                     }
                     crate::bucket::FilteredBuckets::Done => {
                         PeerPartStratDecision::Cursor(CursorStrat {
-                            latest_cursor: part_summary.latest_cursor,
+                            latest_cursor,
                             last_cursor: last_peer_cursor,
                         })
                     }
                     crate::bucket::FilteredBuckets::Handoff(buckets) => {
                         PeerPartStratDecision::Bucket(BucketStrat {
-                            latest_cursor: part_summary.latest_cursor,
+                            latest_cursor,
                             initial_filtered_buckets: buckets,
                             last_cursor: last_peer_cursor,
-                            remote_depth: summary.deepest_bucket_level,
-                            remote_len: part_summary.member_count,
+                            remote_depth: bucket.deepest_bucket_level,
+                            remote_len: bucket.member_count,
                         })
                     }
                 };

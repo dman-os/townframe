@@ -322,8 +322,12 @@ impl BigSyncRpcWorker {
                 let out = {
                     let parts = self.store.summarize_parts(inner.parts).await.unwrap();
                     parts.map(|parts| PeerSummaryResult {
-                        parts,
-                        deepest_bucket_level: big_sync_core::BuckId::MAX_LEVEL,
+                        parts: parts
+                            .into_iter()
+                            .map(|(part_id, summary)| {
+                                (part_id, summary.into_strat_summaries())
+                            })
+                            .collect(),
                     })
                 };
                 tx.send(out).await.inspect_err(|_| warn!(ERROR_CALLER)).ok();
@@ -354,6 +358,41 @@ impl BigSyncRpcWorker {
                                                 break;
                                             }
                                         };
+                                        match &evt {
+                                            big_sync_core::rpc::SubEvent::Added(inner) => tracing::trace!(
+                                                ?subscriber,
+                                                obj_id = %inner.obj_id,
+                                                part_id = %inner.part_id,
+                                                cursor = inner.cursor,
+                                                payload = !inner.payload.is_null(),
+                                                "rpc forwarding Added event",
+                                            ),
+                                            big_sync_core::rpc::SubEvent::Changed(inner) => tracing::trace!(
+                                                ?subscriber,
+                                                obj_id = %inner.obj_id,
+                                                cursor = inner.cursor,
+                                                part_count = inner.part_ids.len(),
+                                                payload = !inner.payload.is_null(),
+                                                "rpc forwarding Changed event",
+                                            ),
+                                            big_sync_core::rpc::SubEvent::Removed(inner) => tracing::trace!(
+                                                ?subscriber,
+                                                obj_id = %inner.obj_id,
+                                                part_id = %inner.part_id,
+                                                cursor = inner.cursor,
+                                                "rpc forwarding Removed event",
+                                            ),
+                                            big_sync_core::rpc::SubEvent::ObjectChanged(inner) => tracing::trace!(
+                                                ?subscriber,
+                                                obj_id = %inner.obj_id,
+                                                payload = !inner.payload.is_null(),
+                                                "rpc forwarding ObjectChanged event",
+                                            ),
+                                            big_sync_core::rpc::SubEvent::ReplayComplete => tracing::trace!(
+                                                ?subscriber,
+                                                "rpc forwarding ReplayComplete",
+                                            ),
+                                        }
                                         if tx.send(evt).await.is_err() {
                                             break;
                                         }
@@ -447,8 +486,10 @@ mod tests {
             parts: store
                 .summarize_parts([part_id].into_iter().collect())
                 .await?
-                .unwrap(),
-            deepest_bucket_level: big_sync_core::BuckId::MAX_LEVEL,
+                .unwrap()
+                .into_iter()
+                .map(|(part_id, summary)| (part_id, summary.into_strat_summaries()))
+                .collect(),
         };
         let expected_changed_buckets = store
             .get_changed_buckets(GetChangedBucketsRequest {

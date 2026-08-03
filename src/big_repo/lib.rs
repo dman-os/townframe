@@ -41,8 +41,8 @@ mod sqlite_big_repo_store;
 pub use sqlite_big_repo_store::SqliteBigRepoStore;
 pub(crate) mod wire;
 pub use runtime2::types::{
-    CreateDocError, DocLookup, GetDocError, PutDocError, SyncDocError, SyncDocOutcome,
-    SyncDocPolicyError, SyncDocReceipt,
+    CreateDocError, DocLookup, GetDocError, KeyhiveSyncCancelled, PutDocError, SyncDocError,
+    SyncDocOutcome, SyncDocPolicyError, SyncDocReceipt,
 };
 pub use runtime2::{DocHeadState, MaterializationState};
 

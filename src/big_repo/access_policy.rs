@@ -30,7 +30,7 @@ impl ObjAccessPolicy for KeyhiveMembershipPolicy {
         obj_id: ObjId,
         principal: Option<PeerId>,
     ) -> bool {
-        match principal {
+        let permitted = match principal {
             None => true,
             Some(peer) => self
                 .members
@@ -38,14 +38,24 @@ impl ObjAccessPolicy for KeyhiveMembershipPolicy {
                 .expect(ERROR_POLICY_LOCK)
                 .get(&obj_id)
                 .and_then(|members| members.get(&peer))
-                .is_some_and(|access| {
-                    if part_id.is_some() {
-                        access.is_reader()
-                    } else {
-                        access.is_fetcher()
-                    }
-                }),
-        }
+                // Part events (the part cursor relay: a doc joined/changed/left
+                // a part) carry the doc's head summary and are the only way a
+                // fetcher (Relay access) learns the doc exists in the part —
+                // a relay must know about every doc it is to serve. Fetch
+                // access is the bar for events, matching the trait contract
+                // ("remote principals that keyhive has not granted fetch
+                // access are denied"); decryption access is enforced at the
+                // sync-session policy, not here.
+                .is_some_and(|access| access.is_fetcher()),
+        };
+        tracing::trace!(
+            ?part_id,
+            ?obj_id,
+            ?principal,
+            permitted,
+            "policy event permission",
+        );
+        permitted
     }
 
     fn set_obj_members(&self, obj: ObjId, agents: HashMap<PeerId, Access>) {
@@ -81,14 +91,18 @@ mod tests {
     use super::*;
 
     #[test]
-    fn relay_access_allows_direct_fetch_without_partition_discovery() {
+    fn relay_access_allows_direct_fetch_and_part_discovery() {
+        // A relay (fetch-only access) must learn that a doc exists in a part
+        // through the part cursor relay — the part event is how it discovers
+        // the docs it is to serve. Only decryption is gated at the
+        // sync-session policy, not event visibility.
         let policy = KeyhiveMembershipPolicy::new();
         let object = ObjId::new([1; 32]);
         let relay = PeerId::new([2; 32]);
         policy.add_obj_member(object, relay, Access::Relay);
 
         assert!(policy.is_event_permitted(None, object, Some(relay)));
-        assert!(!policy.is_event_permitted(
+        assert!(policy.is_event_permitted(
             Some(PartId::new([3; 32])),
             object,
             Some(relay),

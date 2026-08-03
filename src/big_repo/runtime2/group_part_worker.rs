@@ -93,6 +93,21 @@ impl GroupPartWorker {
             let group_documents = self.keyhive.group_document_ids_by_id().await;
             let managed_group_parts: HashSet<PartId> =
                 group_documents.keys().copied().map(group_part_id).collect();
+            // Pre-create the group parts as we learn about groups (the group
+            // is the access primitive). A group part row must exist for the
+            // part to be advertiseable (`summarize_parts` succeeds) even
+            // before any doc payload arrives — a pending want is pull access
+            // and the route must be establishable for the first pull to
+            // promote it. Source is ALL visible groups (keyhive restricts
+            // visibility by definition), NOT just groups referenced by known
+            // docs: membership precedes document payloads, and an empty
+            // group must still advertise its part or peers answer the route
+            // with UnkownParts and it never establishes. Runs before doc
+            // reconciliation so member-before-group and group-before-member
+            // orderings both settle.
+            for group_id in self.keyhive.visible_group_ids().await {
+                self.store.ensure_part(group_part_id(group_id.to_bytes())).await?;
+            }
             let local_principal = self.local_peer_id;
             let missed_history = events
                 .first()
@@ -176,6 +191,13 @@ impl GroupPartWorker {
         let group_documents = self.keyhive.group_document_ids_by_id().await;
         let managed_group_parts: HashSet<PartId> =
             group_documents.keys().copied().map(group_part_id).collect();
+        // Pre-create group part rows (see the event path) so parts are
+        // advertiseable on rebuilds too. All visible groups, not just
+        // groups referenced by known docs — an empty group must still
+        // advertise its part.
+        for group_id in self.keyhive.visible_group_ids().await {
+            self.store.ensure_part(group_part_id(group_id.to_bytes())).await?;
+        }
         let local_principal = self.local_peer_id;
         let docs: Vec<_> = self.keyhive.document_ids().await;
         if docs.is_empty() {

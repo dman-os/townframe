@@ -171,8 +171,10 @@ impl crate::rpc::HostBigRpcClient for MemoryRpcClient {
         }
         let parts = self.target_part_store.summarize_parts(req.parts).await??;
         Ok(Ok(Ok(PeerSummaryResult {
-            parts,
-            deepest_bucket_level: BuckId::MAX_LEVEL,
+            parts: parts
+                .into_iter()
+                .map(|(part_id, summary)| (part_id, summary.into_strat_summaries()))
+                .collect(),
         })))
     }
 
@@ -725,6 +727,7 @@ where
     let (handle, stop) = crate::spawn_big_sync_worker(
         Arc::clone(&store_for_worker),
         [(TEST_BACKEND_ID.into(), backend)].into(),
+        "big-sync-test",
     )?;
     let host = Ctx {
         store: Arc::clone(&store_for_worker),

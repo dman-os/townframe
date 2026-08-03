@@ -30,6 +30,13 @@ impl big_sync::SyncBackend for BigRepoSyncBackend {
         let doc_id: crate::DocumentId = obj_id;
 
         let has_local_doc_state = repo.runtime.has_local_doc_state(doc_id).await?;
+        tracing::debug!(
+            remote_peer_id = %peer_id,
+            %doc_id,
+            has_local_doc_state,
+            remote_payload = remote_payload.is_some(),
+            "big repo sync_obj",
+        );
         if !has_local_doc_state && remote_payload.is_none() {
             return Ok(big_sync::SyncTaskRunOutcome::Completion(
                 big_sync_core::SyncTaskCompletion {

@@ -35,6 +35,16 @@ impl Default for BigRepoSyncPolicy {
 
 // ─── Errors ────────────────────────────────────────────────────────────────────
 
+/** A keyhive sync round was cancelled because the connection or peer went
+away. This is a NORMAL lifecycle event (peer restart, reconnect,
+shutdown) — the reconnect path runs its own sync round, so callers
+should treat it as retryable rather than fatal. */
+#[derive(Debug, Clone, PartialEq, Eq, thiserror::Error, displaydoc::Display)]
+pub struct KeyhiveSyncCancelled {
+    /// Why the sync was cancelled.
+    pub reason: &'static str,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error, displaydoc::Display)]
 pub enum SyncDocPolicyError {
     /// The local or remote policy has no document definition.

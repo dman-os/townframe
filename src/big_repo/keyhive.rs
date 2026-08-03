@@ -259,6 +259,15 @@ impl BigKeyhiveHandle {
             .await
             .map(|inner| BigKeyhiveGroup { id, inner })
     }
+    /// Every group visible to the local principal. Keyhive restricts group
+    /// visibility by definition, so this is the authoritative source for
+    /// group-part pre-creation: a group part row must exist (cursor 0) the
+    /// moment a group is visible, even before any of its docs exist —
+    /// membership precedes document payloads.
+    pub(crate) async fn visible_group_ids(&self) -> Vec<KhGroupId> {
+        self.keyhive.groups().lock().await.keys().copied().collect()
+    }
+
     /// All docs reachable by `agent`, with the [`Access`] level for each.
     /// O(all_docs × transitive_members) — only for boot full reindex.
     pub async fn docs_for_agent(&self, agent: &Identifier) -> BTreeMap<DocumentId, Access> {
