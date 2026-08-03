@@ -251,7 +251,6 @@ pub trait RuntimeIo<F: FutureForm>: Send + Sync {
     ) -> F::Future<'_, eyre::Result<Vec<Vec<u8>>>>;
 
     /// Read the immutable Keyhive event-log watermark for quiescence barriers.
-    fn keyhive_event_log_cursor(&self) -> F::Future<'_, eyre::Result<u64>>;
 
     /// Classify a membership target without exposing Keyhive types to callers.
     fn is_document_membership_target(

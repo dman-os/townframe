@@ -421,9 +421,20 @@ impl<F: FutureForm> Runtime2Handle<F> {
         &self,
         timeout: Option<std::time::Duration>,
     ) -> eyre::Result<()> {
+        self.wait_for_quiescence_freeze(timeout, false).await
+    }
+
+    /// Like [`Runtime2Handle::wait_for_quiescence`], but freezes the hub once
+    /// quiescence is reached: no further events are processed and all
+    /// non-`Unfreeze` commands are held until [`Runtime2Handle::unfreeze`].
+    pub async fn wait_for_quiescence_freeze(
+        &self,
+        timeout: Option<std::time::Duration>,
+        freeze: bool,
+    ) -> eyre::Result<()> {
         let (resp, rx) = futures::channel::oneshot::channel();
         self.cmd_tx
-            .send(Runtime2Cmd::WaitForQuiescence { resp })
+            .send(Runtime2Cmd::WaitForQuiescence { freeze, resp })
             .await
             .map_err(|_| eyre::eyre!(ERROR_ACTOR))?;
         let result = if let Some(duration) = timeout {
@@ -437,6 +448,14 @@ impl<F: FutureForm> Runtime2Handle<F> {
                 .map_err(|_| eyre::eyre!("caller dropped before response"))?
         };
         result
+    }
+
+    /// Resume event/command processing after a frozen quiescence wait.
+    pub async fn unfreeze(&self) -> eyre::Result<()> {
+        self.cmd_tx
+            .send(Runtime2Cmd::Unfreeze)
+            .await
+            .map_err(|_| eyre::eyre!(ERROR_ACTOR))
     }
 
     pub async fn contains_sedimentree_id(&self, doc_id: DocumentId) -> eyre::Result<bool> {

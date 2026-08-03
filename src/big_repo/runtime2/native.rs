@@ -60,7 +60,6 @@ use subduction_ephemeral::{
 };
 use subduction_keyhive::{KeyhiveConnection, KeyhivePeerId};
 use subduction_websocket::tokio::{TimeoutTokio, TokioSpawn};
-use tokio::sync::mpsc;
 /// Single funnel for "the local Keyhive changed".
 ///
 /// Every local Keyhive mutation calls
@@ -968,10 +967,6 @@ where
         })
     }
 
-    fn keyhive_event_log_cursor(&self) -> <Sendable as FutureForm>::Future<'_, eyre::Result<u64>> {
-        Sendable::from_future(async move { self.group_part_store.keyhive_event_log_cursor().await })
-    }
-
     fn is_document_membership_target(
         &self,
         target: keyhive_core::principal::identifier::Identifier,
@@ -1077,10 +1072,33 @@ where
 /// and keyhive protocol so that every `connect` / `accept` can register
 /// the authenticated connection with all three subsystems before returning
 /// the peer identity and connection lifecycle watcher.
+/// Per-peer keyhive-changes RPC subscription wiring (native/iroh only).
+///
+/// When present, every `connect` / `accept` starts a `SubscribeKeyhiveChanges`
+/// RPC subscription for the peer and emits [`Runtime2Evt::KeyhiveChangeNotif`]
+/// events to the hub, which triggers a waiter-less keyhive sync round. The
+/// subscription is cancelled when its connection ends or a newer connection
+/// for the same peer replaces it.
+#[derive(Clone)]
+struct KeyhiveNotifWiring {
+    /// Hub event sender for `KeyhiveChangeNotif` triggers.
+    evt_tx: async_channel::Sender<crate::runtime2::Runtime2Evt>,
+    /// Cancel token per peer; a new connection supersedes the previous
+    /// subscription for the same peer.
+    cancels: std::sync::Arc<
+        tokio::sync::Mutex<
+            std::collections::HashMap<PeerId, tokio_util::sync::CancellationToken>,
+        >,
+    >,
+}
+
 pub(crate) struct IrohTransportConnect<S>
 where
     S: BigRepoSubductionStorage,
 {
+    /// Keyhive-changes RPC subscription wiring; `None` disables notif-driven
+    /// syncs for every connection of this transport.
+    keyhive_notif: Option<KeyhiveNotifWiring>,
     pub(crate) subduction: Arc<BigRepoSubduction<S>>,
     pub(crate) signer: subduction_crypto::signer::memory::MemorySigner,
     pub(crate) nonce_cache: Arc<subduction_core::nonce_cache::NonceCache>,
@@ -1122,6 +1140,81 @@ where
     }
 }
 
+/// Start the keyhive-changes RPC subscription for `peer_id` and emit
+/// [`Runtime2Evt::KeyhiveChangeNotif`] events to the hub on every remote
+/// change. Cancelled via `cancel` (connection end) or when a newer connection
+/// for the same peer supersedes it. Best-effort: subscription failures are
+/// logged, never fatal to the connection.
+async fn spawn_keyhive_change_subscription(
+    wiring: KeyhiveNotifWiring,
+    peer_id: PeerId,
+    endpoint: iroh::Endpoint,
+    endpoint_addr: iroh::EndpointAddr,
+    cancel: tokio_util::sync::CancellationToken,
+) {
+    // Supersede any earlier subscription for the same peer (reconnect).
+    let mut cancels = wiring.cancels.lock().await;
+    if let Some(previous) = cancels.insert(peer_id, cancel.clone()) {
+        previous.cancel();
+    }
+    drop(cancels);
+
+    // tokio::spawn cannot fail to spawn; a JoinHandle dropped here detaches
+    // the task (it ends via `cancel` or stream close).
+    let _ = tokio::spawn(async move {
+        let client = crate::rpc::IrohBigRepoRpcClient::new(endpoint, endpoint_addr);
+        let mut changes = match client.subscribe_keyhive_changes(64).await {
+            Ok(changes) => changes,
+            Err(error) => {
+                tracing::warn!(%peer_id, ?error, "keyhive RPC subscription failed");
+                return;
+            }
+        };
+        // The first event confirms subscription readiness.
+        match tokio::time::timeout(std::time::Duration::from_secs(5), changes.recv()).await {
+            Ok(Ok(Some(event))) if event.initial => {}
+            Ok(Ok(Some(_))) => {
+                tracing::debug!(%peer_id, "keyhive RPC stream sent a non-initial event first");
+            }
+            Ok(Ok(None)) => {
+                tracing::warn!(%peer_id, "keyhive RPC stream closed before readiness");
+                return;
+            }
+            Ok(Err(error)) => {
+                tracing::warn!(%peer_id, ?error, "keyhive RPC stream failed before readiness");
+                return;
+            }
+            Err(_) => {
+                tracing::warn!(%peer_id, "timed out waiting for keyhive RPC subscription readiness");
+                return;
+            }
+        }
+
+        loop {
+            tokio::select! {
+                biased;
+                _ = cancel.cancelled() => break,
+                event = changes.recv() => {
+                    match event {
+                        Ok(Some(_)) => {
+                            if wiring
+                                .evt_tx
+                                .send(crate::runtime2::Runtime2Evt::KeyhiveChangeNotif { peer_id })
+                                .await
+                                .is_err()
+                            {
+                                // Hub gone; nothing left to notify.
+                                break;
+                            }
+                        }
+                        Ok(None) | Err(_) => break,
+                    }
+                }
+            }
+        }
+    });
+}
+
 impl<S> crate::runtime2::TransportConnect<Sendable> for IrohTransportConnect<S>
 where
     S: BigRepoSubductionStorage,
@@ -1144,10 +1237,12 @@ where
         let keyhive_protocol = Arc::clone(&self.keyhive_protocol);
         let conns = Arc::clone(&self.conns);
         let keyhive_adapter_owner = Arc::clone(&self.keyhive_adapter_owner);
+        let keyhive_notif = self.keyhive_notif.clone();
         Sendable::from_future(async move {
             let (endpoint, endpoint_addr): (iroh::Endpoint, iroh::EndpointAddr) = *addr_blob
                 .downcast::<(iroh::Endpoint, iroh::EndpointAddr)>()
                 .map_err(|_| ferr!("addr_blob must be (iroh::Endpoint, iroh::EndpointAddr)"))?;
+            let (rpc_endpoint, rpc_addr) = (endpoint.clone(), endpoint_addr.clone());
 
             let result: IrohConnectResult = connect_outgoing_to(
                 endpoint,
@@ -1198,26 +1293,48 @@ where
             let listener = result.listener_task;
             let sender = result.sender_task;
             let closed_end = std::sync::Arc::clone(&closed);
+            let sub_cancel = if let Some(wiring) = &keyhive_notif {
+                let cancel = tokio_util::sync::CancellationToken::new();
+                spawn_keyhive_change_subscription(
+                    wiring.clone(),
+                    peer_id,
+                    rpc_endpoint,
+                    rpc_addr,
+                    cancel.clone(),
+                )
+                .await;
+                Some(cancel)
+            } else {
+                None
+            };
+
+            let end_fut_inner = Sendable::from_future(async move {
+                use futures::future::{select, Either};
+                match select(
+                    Box::pin(async { listener.await.map_err(|e| eyre::eyre!("{e}")) }),
+                    Box::pin(async { sender.await.map_err(|e| eyre::eyre!("{e}")) }),
+                )
+                .await
+                {
+                    Either::Left((res, _)) | Either::Right((res, _)) => {
+                        closed_end.store(true, std::sync::atomic::Ordering::SeqCst);
+                        // Natural end: drop the close-registry entry so
+                        // a later close of this connection is a clean no-op.
+                        conns
+                            .lock()
+                            .unwrap()
+                            .retain(|(flag, _)| !Arc::ptr_eq(flag, &closed_end));
+                        res
+                    }
+                }
+            });
             let end_fut: <Sendable as FutureForm>::Future<'static, eyre::Result<()>> =
                 Sendable::from_future(async move {
-                    use futures::future::{select, Either};
-                    match select(
-                        Box::pin(async { listener.await.map_err(|e| eyre::eyre!("{e}")) }),
-                        Box::pin(async { sender.await.map_err(|e| eyre::eyre!("{e}")) }),
-                    )
-                    .await
-                    {
-                        Either::Left((res, _)) | Either::Right((res, _)) => {
-                            closed_end.store(true, std::sync::atomic::Ordering::SeqCst);
-                            // Natural end: drop the close-registry entry so
-                            // a later close of this connection is a clean no-op.
-                            conns
-                                .lock()
-                                .unwrap()
-                                .retain(|(flag, _)| !Arc::ptr_eq(flag, &closed_end));
-                            res
-                        }
+                    let result = end_fut_inner.await;
+                    if let Some(cancel) = &sub_cancel {
+                        cancel.cancel();
                     }
+                    result
                 });
 
             Ok((peer_id, closed, end_fut))
@@ -1243,11 +1360,18 @@ where
         let keyhive_protocol = Arc::clone(&self.keyhive_protocol);
         let conns = Arc::clone(&self.conns);
         let keyhive_adapter_owner = Arc::clone(&self.keyhive_adapter_owner);
+        let keyhive_notif = self.keyhive_notif.clone();
         Sendable::from_future(async move {
-            let conn: iroh::endpoint::Connection = *incoming
-                .downcast::<iroh::endpoint::Connection>()
-                .map_err(|_| ferr!("incoming must be iroh::endpoint::Connection"))?;
+            let (conn, rpc_endpoint): (iroh::endpoint::Connection, Option<iroh::Endpoint>) =
+                *incoming
+                    .downcast::<(iroh::endpoint::Connection, Option<iroh::Endpoint>)>()
+                    .map_err(|_| {
+                        ferr!("incoming must be (iroh::endpoint::Connection, Option<iroh::Endpoint>)")
+                    })?;
 
+            // Capture before `accept_incoming` consumes the connection: the
+            // subscription needs the remote endpoint id to derive its address.
+            let remote_endpoint_id = conn.remote_id();
             let subduction_peer_id =
                 subduction_core::peer::id::PeerId::new(*local_peer_id.as_bytes());
             let result: IrohConnectResult =
@@ -1291,26 +1415,73 @@ where
             let listener = result.listener_task;
             let sender = result.sender_task;
             let closed_end = std::sync::Arc::clone(&closed);
+            // Keyhive-changes RPC subscription for inbound connections: the
+            // caller supplies the local endpoint (needed to dial the peer's
+            // RPC server); the remote address is derived like the daybook
+            // accept path via remote_info.
+            let sub_cancel = if let (Some(wiring), Some(endpoint)) = (&keyhive_notif, rpc_endpoint)
+            {
+                let cancel = tokio_util::sync::CancellationToken::new();
+                let remote_addr = endpoint
+                    .remote_info(remote_endpoint_id)
+                    .await
+                    .map(|info| {
+                        iroh::EndpointAddr::from_parts(
+                            info.id(),
+                            info.into_addrs().map(|info| info.into_addr()),
+                        )
+                    });
+                match remote_addr {
+                    Some(remote_addr) => {
+                        spawn_keyhive_change_subscription(
+                            wiring.clone(),
+                            peer_id,
+                            endpoint.clone(),
+                            remote_addr,
+                            cancel.clone(),
+                        )
+                        .await;
+                        Some(cancel)
+                    }
+                    None => {
+                        tracing::debug!(
+                            %peer_id,
+                            "skipping keyhive RPC subscription: remote info unavailable"
+                        );
+                        None
+                    }
+                }
+            } else {
+                None
+            };
+
+            let end_fut_inner = Sendable::from_future(async move {
+                use futures::future::{select, Either};
+                match select(
+                    Box::pin(async { listener.await.map_err(|e| eyre::eyre!("{e}")) }),
+                    Box::pin(async { sender.await.map_err(|e| eyre::eyre!("{e}")) }),
+                )
+                .await
+                {
+                    Either::Left((res, _)) | Either::Right((res, _)) => {
+                        closed_end.store(true, std::sync::atomic::Ordering::SeqCst);
+                        // Natural end: drop the close-registry entry so
+                        // a later close of this connection is a clean no-op.
+                        conns
+                            .lock()
+                            .unwrap()
+                            .retain(|(flag, _)| !Arc::ptr_eq(flag, &closed_end));
+                        res
+                    }
+                }
+            });
             let end_fut: <Sendable as FutureForm>::Future<'static, eyre::Result<()>> =
                 Sendable::from_future(async move {
-                    use futures::future::{select, Either};
-                    match select(
-                        Box::pin(async { listener.await.map_err(|e| eyre::eyre!("{e}")) }),
-                        Box::pin(async { sender.await.map_err(|e| eyre::eyre!("{e}")) }),
-                    )
-                    .await
-                    {
-                        Either::Left((res, _)) | Either::Right((res, _)) => {
-                            closed_end.store(true, std::sync::atomic::Ordering::SeqCst);
-                            // Natural end: drop the close-registry entry so
-                            // a later close of this connection is a clean no-op.
-                            conns
-                                .lock()
-                                .unwrap()
-                                .retain(|(flag, _)| !Arc::ptr_eq(flag, &closed_end));
-                            res
-                        }
+                    let result = end_fut_inner.await;
+                    if let Some(cancel) = &sub_cancel {
+                        cancel.cancel();
                     }
+                    result
                 });
 
             Ok((peer_id, closed, end_fut))
@@ -1441,13 +1612,12 @@ pub async fn spawn_native_runtime2<S>(
     keyhive: BigKeyhiveHandle,
     keyhive_storage: BigRepoKeyhiveStorage,
     change_manager: Arc<crate::changes::ChangeListenerManager>,
-    listener_evt_tx: mpsc::UnboundedSender<crate::runtime2::types::RuntimeEvt>,
-    listener_evt_rx: mpsc::UnboundedReceiver<crate::runtime2::types::RuntimeEvt>,
+    evt_tx: async_channel::Sender<crate::runtime2::Runtime2Evt>,
+    evt_rx: async_channel::Receiver<crate::runtime2::Runtime2Evt>,
     keyhive_change_tx: tokio::sync::broadcast::Sender<()>,
 ) -> eyre::Result<(
     crate::runtime2::Runtime2Handle<Sendable>,
     BigEphemeral,
-    async_channel::Sender<crate::runtime2::Runtime2Evt>,
     crate::runtime2::KeyhiveChangeNotifier,
     crate::runtime2::Runtime2StopToken<Sendable, crate::runtime2::TokioTaskRuntime>,
 )>
@@ -1474,7 +1644,6 @@ where
         );
 
     // ── Sync handler (with sync session observer) ─────────────────────────
-    let (evt_tx, evt_rx) = async_channel::unbounded::<crate::runtime2::Runtime2Evt>();
     let sync_session_observer: Arc<
         dyn subduction_core::sync_session::SyncSessionObserver + Send + Sync,
     > = Arc::new(Runtime2EvtBridge {
@@ -1525,16 +1694,17 @@ where
             ) -> BigRepoKeyhiveConnAdapter<BigRepoIrohTransport>,
     );
     {
-        // Route sync completion through the same ordered listener channel as
+        // Route sync completion through the same ordered event channel as
         // membership events. The Keyhive protocol invokes its sync observer
-        // after applying events, but the runtime listener bridge is a separate
-        // task; sending completion directly to the runtime event channel could
-        // let `KeyhiveSyncDone` overtake a preceding delegation event.
+        // after applying events; sharing the channel with the keyhive listener
+        // keeps `KeyhiveSyncDone` from overtaking a preceding delegation event
+        // (single FIFO channel).
+        let evt_tx = evt_tx.clone();
         keyhive_handler = keyhive_handler.with_sync_done_observer(Arc::new(
             move |keyhive_peer_id, request_id, changed| {
                 let peer_id = PeerId::new(*keyhive_peer_id.verifying_key());
-                if listener_evt_tx
-                    .send(crate::runtime2::types::RuntimeEvt::KeyhiveSyncDone {
+                if evt_tx
+                    .try_send(crate::runtime2::Runtime2Evt::KeyhiveSyncDone {
                         peer_id,
                         request_id,
                         changed,
@@ -1609,6 +1779,12 @@ where
         keyhive_adapter_owner: std::sync::Arc::new(std::sync::Mutex::new(
             std::collections::HashMap::new(),
         )),
+        keyhive_notif: Some(KeyhiveNotifWiring {
+            evt_tx: evt_tx.clone(),
+            cancels: std::sync::Arc::new(tokio::sync::Mutex::new(
+                std::collections::HashMap::new(),
+            )),
+        }),
     });
 
     let timer: Arc<dyn crate::runtime2::Timer<Sendable>> = Arc::new(crate::runtime2::TokioTimer);
@@ -1616,6 +1792,7 @@ where
         Arc::new(subduction_ephemeral::clock::std_clock::StdClock);
 
     // ── Spawn runtime2 ───────────────────────────────────────────────────
+    let keyhive_state_generation = std::sync::Arc::new(std::sync::atomic::AtomicU64::new(0));
     let config = crate::runtime2::Runtime2Config {
         local_peer_id: PeerId::new(*local_peer_id.as_bytes()),
         runtime_io: native_io.clone() as Arc<dyn crate::runtime2::RuntimeIo<Sendable>>,
@@ -1626,6 +1803,7 @@ where
         timer: Arc::clone(&timer),
         clock: Arc::clone(&clock),
         connect: iroh_connect as Arc<dyn crate::runtime2::TransportConnect<Sendable>>,
+        keyhive_state_generation: Arc::clone(&keyhive_state_generation),
         event_channel: Some((evt_tx.clone(), evt_rx)),
     };
 
@@ -1641,6 +1819,7 @@ where
         PeerId::new(*local_peer_id.as_bytes()),
         Arc::clone(&timer),
         evt_tx.clone(),
+        Arc::clone(&keyhive_state_generation),
     );
     stop_token
         .child_tasks
@@ -1716,49 +1895,7 @@ where
         BigEphemeral::new(Arc::clone(&ephemeral_backend), switchboard)
     };
 
-    // Listener event forwarding: old RuntimeEvt -> Runtime2Evt.
-    {
-        let evt_tx = evt_tx.clone();
-        stop_token
-            .child_tasks
-            .spawn(Sendable::from_future(async move {
-                let mut rx = listener_evt_rx;
-                while let Some(evt) = rx.recv().await {
-                    let evt2 = match evt {
-                        crate::runtime2::types::RuntimeEvt::KeyhiveSyncDone {
-                            peer_id,
-                            request_id,
-                            changed,
-                        } => crate::runtime2::Runtime2Evt::KeyhiveSyncDone {
-                            peer_id,
-                            request_id,
-                            changed,
-                        },
-                        crate::runtime2::types::RuntimeEvt::PrekeyExpanded { new_prekey } => {
-                            crate::runtime2::Runtime2Evt::PrekeyExpanded { new_prekey }
-                        }
-                        crate::runtime2::types::RuntimeEvt::PrekeyRotated { rotate_key } => {
-                            crate::runtime2::Runtime2Evt::PrekeyRotated { rotate_key }
-                        }
-                        crate::runtime2::types::RuntimeEvt::CgkaOp { data } => {
-                            crate::runtime2::Runtime2Evt::CgkaOp { data }
-                        }
-                        crate::runtime2::types::RuntimeEvt::DelegationReceived { target, data } => {
-                            crate::runtime2::Runtime2Evt::DelegationReceived { target, data }
-                        }
-                        crate::runtime2::types::RuntimeEvt::RevocationReceived { target, data } => {
-                            crate::runtime2::Runtime2Evt::RevocationReceived { target, data }
-                        }
-                    };
-                    if evt_tx.send(evt2).await.is_err() {
-                        break;
-                    }
-                }
-                Ok(())
-            }))?;
-    }
-
-    Ok((handle, ephemeral, evt_tx, keyhive_notifier, stop_token))
+    Ok((handle, ephemeral, keyhive_notifier, stop_token))
 }
 
 // ═══════════════════════════════════════════════════════════════════════════
@@ -1794,7 +1931,7 @@ mod tests {
     use subduction_crypto::verified_meta::VerifiedMeta;
 
     fn kh_listener() -> BigRepoKeyhiveListener {
-        let (tx, _rx) = tokio::sync::mpsc::unbounded_channel();
+        let (tx, _rx) = async_channel::unbounded();
         BigRepoKeyhiveListener { evt_tx: tx }
     }
 

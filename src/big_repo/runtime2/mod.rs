@@ -58,6 +58,9 @@ pub struct Runtime2Config<F: FutureForm, R: TaskRuntime<F>> {
     /// `ChannelTransport` in tests; websocket in wasm. The blocking-out carries
     /// the addr as `Box<dyn Any + Send>`; the implementing model pins the type.
     pub connect: std::sync::Arc<dyn TransportConnect<F>>,
+    /// Shared Keyhive state-generation counter. The hub bumps it on state
+    /// advances; the group-part worker full-rebuilds and acks generations.
+    pub keyhive_state_generation: std::sync::Arc<std::sync::atomic::AtomicU64>,
     /// Event bus supplied by IO backends that receive protocol events from
     /// outside the runtime machine (for example Subduction's observer).
     /// When absent, runtime2 creates a private bus.

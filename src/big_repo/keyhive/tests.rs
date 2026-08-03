@@ -5,7 +5,7 @@ use nonempty::nonempty;
 #[tokio::test]
 async fn authority_change_archive_immediately_restores_private_document_key() -> Res<()> {
     let storage = crate::keyhive_storage::BigRepoKeyhiveStorage::memory();
-    let (evt_tx, _evt_rx) = tokio::sync::mpsc::unbounded_channel();
+    let (evt_tx, _evt_rx) = async_channel::unbounded();
     let listener = BigRepoKeyhiveListener { evt_tx };
     let owner_seed = [41; 32];
     let owner = BigKeyhiveHandle::new(owner_seed, listener.clone()).await?;
@@ -63,7 +63,7 @@ async fn authority_change_archive_immediately_restores_private_document_key() ->
     )
     .await?;
 
-    let (clone_evt_tx, _clone_evt_rx) = tokio::sync::mpsc::unbounded_channel();
+    let (clone_evt_tx, _clone_evt_rx) = async_channel::unbounded();
     let clone = BigKeyhiveHandle::new(
         [42; 32],
         BigRepoKeyhiveListener {

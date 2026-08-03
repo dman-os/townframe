@@ -194,10 +194,19 @@ pub enum Runtime2Cmd {
     /// Wait until all finite runtime work currently admitted to the Hub and
     /// document workers has drained. Pending decryption is quiescent; this
     /// does not wait for unavailable keys.
+    ///
+    /// When `freeze` is set, the hub stops processing events (and holds all
+    /// non-`Unfreeze` commands) once quiescence is reached, until a matching
+    /// `Unfreeze`. Tests use this to run assertions against a quiescent
+    /// snapshot with nothing able to slip past the barrier.
     WaitForQuiescence {
+        freeze: bool,
         #[educe(Debug(ignore))]
         resp: futures::channel::oneshot::Sender<eyre::Result<()>>,
     },
+    /// Resume event/command processing after a frozen `WaitForQuiescence`.
+    /// No-op when the hub is not frozen.
+    Unfreeze,
 }
 
 /// Events from background workers / keyhive listener / sync sessions / doc-workers.
@@ -231,19 +240,20 @@ pub enum Runtime2Evt {
         request_id: subduction_keyhive::message::RequestId,
         error: String,
     },
-    /// Event-log cursor captured when a quiescence barrier is admitted.
-    QuiescenceGroupPartWatermark {
-        barrier_id: u64,
-        result: eyre::Result<u64>,
+    /// A remote peer signalled that its Keyhive changed (keyhive-changes RPC
+    /// notification). The hub starts a waiter-less keyhive sync round when the
+    /// peer is connected and no round is active; the round participates in
+    /// quiescence via `active_keyhive_syncs`. The notification itself is a
+    /// hint, not the source of Keyhive state.
+    KeyhiveChangeNotif {
+        peer_id: PeerId,
     },
-    KeyhiveReconciliationCaptured {
-        result: eyre::Result<u64>,
-        #[educe(Debug(ignore))]
-        resp: futures::channel::oneshot::Sender<eyre::Result<()>>,
-    },
-    /// The persisted Keyhive-derived partition cursor advanced.
+    /// The highest Keyhive state generation the group-part projection has
+    /// reconciled. The hub bumps `keyhive_state_generation` on every state
+    /// advance (KeyhiveSyncDone{changed}, delegation, revocation, cgka); the
+    /// worker full-rebuilds on advance and acks the generation it covered.
     GroupPartWorkerAdvanced {
-        cursor: u64,
+        generation: u64,
     },
     DocWorkerStopped {
         doc_id: DocumentId,
@@ -406,8 +416,6 @@ pub enum TrackedWorkKind {
     SyncDoc,
     KeyhiveSync,
     CloseConn,
-    CaptureKeyhiveReconciliation,
-    CaptureGroupPartWatermark,
     ContainsSedimentree,
     HasLocalDocState,
     InspectStoredDocBlobs,

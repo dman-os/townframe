@@ -50,13 +50,26 @@ struct Runtime2Hub<F: FutureForm, R: TaskRuntime<F>> {
     connected_peers: HashMap<PeerId, ConnDeets>,
 
     // ── keyhive sync bookkeeping ───────────────────────────────────────────
-    pending_keyhive_syncs:
-        HashMap<PeerId, Vec<(u64, futures::channel::oneshot::Sender<eyre::Result<()>>)>>,
+    /// Keyhive sync waiters per peer. Each round snapshots the waiter ids it
+    /// owns (`KeyhiveSyncRound::admitted_ids`); waiters admitted during the
+    /// round stay queued and cascade to the next round. `ids` mirrors the vec
+    /// for O(1) cancellation (dead waiters never trigger a follow-up round).
+    keyhive_waiters: HashMap<PeerId, KeyhiveWaiters>,
     active_keyhive_syncs: HashMap<PeerId, KeyhiveSyncRound>,
+    /// A `KeyhiveChangeNotif` that arrived while a round for the peer was
+    /// already active. The in-flight exchange may have synced stale state;
+    /// when the round completes, a follow-up round is started for the peer.
+    keyhive_notif_pending: HashSet<PeerId>,
     keyhive_round_ids: u64,
     keyhive_reconciliation_waiters: Vec<(u64, futures::channel::oneshot::Sender<eyre::Result<()>>)>,
-    /// A quiescence probe is awaiting its event-log watermark.
-    quiescence_group_part_watermark_pending: bool,
+    /// Shared Keyhive state-generation counter. Bumped on every state advance
+    /// (KeyhiveSyncDone{changed:true}, delegation, revocation, cgka); the
+    /// group-part worker full-rebuilds on advance and acks the generation it
+    /// covered via `GroupPartWorkerAdvanced`.
+    keyhive_state_generation: std::sync::Arc<std::sync::atomic::AtomicU64>,
+    /// Highest Keyhive state generation the group-part projection has
+    /// reconciled (from worker acks).
+    group_part_generation: u64,
 
     // ── doc sync bookkeeping ───────────────────────────────────────────────
     /// Waiters for caller-initiated doc sync rounds, keyed by waiter id.
@@ -70,8 +83,14 @@ struct Runtime2Hub<F: FutureForm, R: TaskRuntime<F>> {
     quiescence_waiters: Vec<futures::channel::oneshot::Sender<eyre::Result<()>>>,
     quiescence_probe: Option<QuiescenceProbe>,
     quiescence_barrier_ids: u64,
+    /// Freeze the hub (B12): events are held, the janitor pauses, and all
+    /// commands except `Unfreeze` are buffered until unfreeze.
+    frozen: bool,
+    /// Commands buffered while frozen, replayed FIFO on unfreeze.
+    frozen_cmd_buffer: Vec<Runtime2Cmd>,
+    /// A resolving `WaitForQuiescence { freeze: true }` freezes the hub.
+    freeze_on_resolve: bool,
     activity_generation: u64,
-    group_part_cursor: u64,
     /// Finite background futures admitted via `spawn_tracked` that have not
     /// yet completed. The quiescence predicate waits for this to drain, so
     /// in-flight work started before a probe cannot resolve it early (A2/A5).
@@ -79,10 +98,12 @@ struct Runtime2Hub<F: FutureForm, R: TaskRuntime<F>> {
     // ── doc-worker registry ────────────────────────────────────────────────
     doc_workers: HashMap<DocumentId, DocWorkerEntry>,
     pending_materialization: HashSet<DocumentId>,
-    materialization_retries_in_flight: HashSet<DocumentId>,
+    /// Documents with a materialization retry in flight, mapped to the Keyhive
+    /// state generation at retry start. A `Pending` completion whose walk ran
+    /// against a generation older than the current one is re-verified (B6).
+    materialization_retries_in_flight: HashMap<DocumentId, u64>,
     // ── waiter-id counters (shared with the handle) ────────────────────────
     doc_sync_waiter_ids: Arc<std::sync::atomic::AtomicU64>,
-    keyhive_sync_waiter_ids: Arc<std::sync::atomic::AtomicU64>,
 }
 
 struct ConnDeets {
@@ -90,11 +111,19 @@ struct ConnDeets {
 }
 
 struct KeyhiveSyncRound {
-    watermark: u64,
     round_id: u64,
     request_id: subduction_keyhive::message::RequestId,
-    changed: bool,
-    validating: bool,
+    /// Ids of the waiters queued when this round started; the round resolves
+    /// them on completion. Waiters admitted during the round cascade.
+    admitted_ids: std::collections::HashSet<u64>,
+}
+
+/// Keyhive sync waiters for one peer: those owned by the active round plus
+/// those cascading to the next. `ids` mirrors `waiters` for O(1) cancellation.
+#[derive(Default)]
+struct KeyhiveWaiters {
+    waiters: Vec<(u64, futures::channel::oneshot::Sender<eyre::Result<()>>)>,
+    ids: std::collections::HashSet<u64>,
 }
 
 struct PendingDocSyncWaiter {
@@ -110,7 +139,7 @@ struct QuiescenceProbe {
     barrier_id: u64,
     activity_generation: u64,
     pending_docs: HashSet<DocumentId>,
-    group_part_cursor: u64,
+    group_part_generation: u64,
 }
 
 // ═══════════════════════════════════════════════════════════════════════════
@@ -246,7 +275,9 @@ where
     fn request_quiescence(
         &mut self,
         resp: futures::channel::oneshot::Sender<eyre::Result<()>>,
+        freeze: bool,
     ) -> eyre::Result<()> {
+        self.freeze_on_resolve |= freeze;
         self.quiescence_waiters.push(resp);
         if self.quiescence_probe.is_none() {
             self.start_quiescence_probe()?;
@@ -259,29 +290,22 @@ where
         let barrier_id = self.quiescence_barrier_ids;
         let generation = self.activity_generation;
         let doc_ids: Vec<_> = self.doc_workers.keys().copied().collect();
+        let group_part_generation = self.keyhive_state_generation.load(std::sync::atomic::Ordering::Relaxed);
         debug!(
             barrier_id,
             local_peer_id = %self.local_peer_id,
             activity_generation = generation,
             doc_workers = doc_ids.len(),
             pending_materialization = self.pending_materialization.len(),
-            group_part_cursor = self.group_part_cursor,
+            group_part_generation,
             "runtime2 quiescence probe started",
         );
         self.quiescence_probe = Some(QuiescenceProbe {
             barrier_id,
             activity_generation: generation,
             pending_docs: doc_ids.iter().copied().collect(),
-            group_part_cursor: self.group_part_cursor,
+            group_part_generation,
         });
-        self.quiescence_group_part_watermark_pending = true;
-        self.spawn_tracked(
-            crate::runtime2::TrackedWorkKind::CaptureGroupPartWatermark,
-            F::capture_group_part_watermark(
-                Arc::clone(&self.runtime_io),
-                self.evt_tx.clone(),
-                barrier_id,
-            ))?;
         for doc_id in doc_ids {
             let (worker, lease) = self.doc_worker_handle(doc_id)?;
             let (fence_reply, reply_rx) = futures::channel::oneshot::channel();
@@ -326,11 +350,10 @@ where
             return Ok(());
         }
         if !probe.pending_docs.is_empty()
-            || self.quiescence_group_part_watermark_pending
             || self.tracked_in_flight > 0
             || !self.active_keyhive_syncs.is_empty()
-            || !self.pending_keyhive_syncs.is_empty()
-            || self.group_part_cursor < probe.group_part_cursor
+            || !self.keyhive_waiters.is_empty()
+            || self.group_part_generation < probe.group_part_generation
         {
             return Ok(());
         }
@@ -340,7 +363,17 @@ where
             activity_generation = probe.activity_generation,
             "runtime2 quiescence probe resolved",
         );
+        let barrier_id = probe.barrier_id;
         self.quiescence_probe = None;
+        if self.freeze_on_resolve {
+            self.freeze_on_resolve = false;
+            self.frozen = true;
+            debug!(
+                local_peer_id = %self.local_peer_id,
+                barrier_id,
+                "runtime2 quiescence probe resolved; hub frozen until unfreeze"
+            );
+        }
         for waiter in std::mem::take(&mut self.quiescence_waiters) {
             // A caller timeout drops the receiver; that cancellation is not
             // a runtime failure and must not crash the hub while resolving
@@ -359,6 +392,7 @@ where
         if !matches!(
             &cmd,
             Runtime2Cmd::WaitForQuiescence { .. }
+                | Runtime2Cmd::Unfreeze
                 | Runtime2Cmd::RegisterDocLease { .. }
                 | Runtime2Cmd::ReleaseDocLease { .. }
                 | Runtime2Cmd::ReleaseInternalLease { .. }
@@ -566,10 +600,9 @@ where
                 waiter_id,
                 resp,
             } => {
-                self.pending_keyhive_syncs
-                    .entry(peer_id)
-                    .or_default()
-                    .push((waiter_id, resp));
+                let entry = self.keyhive_waiters.entry(peer_id).or_default();
+                entry.ids.insert(waiter_id);
+                entry.waiters.push((waiter_id, resp));
                 // A reconnect can expose the public connection handle before
                 // the hub has processed its ConnEstablished event. Do not
                 // initiate against the old/missing Keyhive peer in that gap;
@@ -582,13 +615,14 @@ where
                 }
             }
             Runtime2Cmd::WaitForKeyhiveReconciliation { resp } => {
-                self.spawn_tracked(
-                    crate::runtime2::TrackedWorkKind::CaptureKeyhiveReconciliation,
-                    F::capture_keyhive_reconciliation(
-                        Arc::clone(&self.runtime_io),
-                        self.evt_tx.clone(),
-                        resp,
-                ))?;
+                let captured = self
+                    .keyhive_state_generation
+                    .load(std::sync::atomic::Ordering::Relaxed);
+                if self.group_part_generation >= captured {
+                    resp.send(Ok(())).inspect_err(|_| warn!(ERROR_CALLER)).ok();
+                } else {
+                    self.keyhive_reconciliation_waiters.push((captured, resp));
+                }
             }
             Runtime2Cmd::CancelDocSyncWaiter { waiter_id, .. } => {
                 // The caller's timeout dropped the response receiver; forget
@@ -649,8 +683,11 @@ where
                         resp,
                 ))?;
             }
-            Runtime2Cmd::WaitForQuiescence { resp } => {
-                self.request_quiescence(resp)?;
+            Runtime2Cmd::WaitForQuiescence { freeze, resp } => {
+                self.request_quiescence(resp, freeze)?;
+            }
+            Runtime2Cmd::Unfreeze => {
+                debug!(local_peer_id = %self.local_peer_id, "unfreeze: hub not frozen");
             }
         }
         self.try_resolve_quiescence()
@@ -663,17 +700,6 @@ trait HubBackgroundFuture<F: FutureForm> {
         evt_tx: async_channel::Sender<Runtime2Evt>,
         peer_id: PeerId,
         request_id: subduction_keyhive::message::RequestId,
-    ) -> F::Future<'static, eyre::Result<()>>;
-
-    fn capture_keyhive_reconciliation(
-        runtime_io: Arc<dyn crate::runtime2::RuntimeIo<F>>,
-        evt_tx: async_channel::Sender<Runtime2Evt>,
-        resp: futures::channel::oneshot::Sender<eyre::Result<()>>,
-    ) -> F::Future<'static, eyre::Result<()>>;
-    fn capture_group_part_watermark(
-        runtime_io: Arc<dyn crate::runtime2::RuntimeIo<F>>,
-        evt_tx: async_channel::Sender<Runtime2Evt>,
-        barrier_id: u64,
     ) -> F::Future<'static, eyre::Result<()>>;
 
     fn emit_membership_change(
@@ -819,36 +845,6 @@ impl<F: FutureForm> HubBackgroundFuture<F> for F {
             }
             .instrument(span),
         )
-    }
-
-    fn capture_keyhive_reconciliation(
-        runtime_io: Arc<dyn crate::runtime2::RuntimeIo<F>>,
-        evt_tx: async_channel::Sender<Runtime2Evt>,
-        resp: futures::channel::oneshot::Sender<eyre::Result<()>>,
-    ) -> F::Future<'static, eyre::Result<()>> {
-        F::from_future(async move {
-            let result = runtime_io.keyhive_event_log_cursor().await;
-            evt_tx
-                .send(Runtime2Evt::KeyhiveReconciliationCaptured { result, resp })
-                .await
-                .expect(ERROR_CHANNEL);
-            Ok(())
-        })
-    }
-
-    fn capture_group_part_watermark(
-        runtime_io: Arc<dyn crate::runtime2::RuntimeIo<F>>,
-        evt_tx: async_channel::Sender<Runtime2Evt>,
-        barrier_id: u64,
-    ) -> F::Future<'static, eyre::Result<()>> {
-        F::from_future(async move {
-            let result = runtime_io.keyhive_event_log_cursor().await;
-            evt_tx
-                .send(Runtime2Evt::QuiescenceGroupPartWatermark { barrier_id, result })
-                .await
-                .expect(ERROR_CHANNEL);
-            Ok(())
-        })
     }
 
     fn emit_membership_change(
@@ -1358,8 +1354,6 @@ where
             &evt,
             Runtime2Evt::DocWorkerFenced { .. }
                 | Runtime2Evt::TrackedWorkDone { .. }
-                | Runtime2Evt::QuiescenceGroupPartWatermark { .. }
-                | Runtime2Evt::KeyhiveReconciliationCaptured { .. }
                 | Runtime2Evt::GroupPartWorkerAdvanced { .. }
                 | Runtime2Evt::ConnEstablished { .. }
                 | Runtime2Evt::ConnLost { .. }
@@ -1397,6 +1391,9 @@ where
                 changed,
             } => {
                 self.finish_keyhive_sync(peer_id, request_id, changed)?;
+                if changed {
+                    self.bump_keyhive_state_generation("keyhive sync exchange");
+                }
             }
             Runtime2Evt::KeyhiveSyncFailed {
                 peer_id,
@@ -1405,58 +1402,22 @@ where
             } => {
                 self.fail_keyhive_sync(peer_id, request_id, error)?;
             }
-            Runtime2Evt::QuiescenceGroupPartWatermark { barrier_id, result } => {
-                let current = self
-                    .quiescence_probe
-                    .as_ref()
-                    .is_some_and(|probe| probe.barrier_id == barrier_id);
-                if current {
-                    self.quiescence_group_part_watermark_pending = false;
-                    match result {
-                        Ok(cursor) => {
-                            self.quiescence_probe
-                                .as_mut()
-                                .expect("quiescence probe disappeared")
-                                .group_part_cursor = cursor;
-                        }
-                        Err(error) => {
-                            self.quiescence_probe = None;
-                            let message = error.to_string();
-                            for waiter in std::mem::take(&mut self.quiescence_waiters) {
-                                waiter
-                                    .send(Err(ferr!(
-                                        "group-part watermark capture failed: {message}"
-                                    )))
-                                    .inspect_err(|_| warn!(ERROR_CALLER))
-                                    .ok();
-                            }
-                        }
-                    }
-                }
+            Runtime2Evt::KeyhiveChangeNotif { peer_id } => {
+                self.handle_keyhive_change_notif(peer_id)?;
             }
-            Runtime2Evt::KeyhiveReconciliationCaptured { result, resp } => match result {
-                Ok(watermark) if self.group_part_cursor >= watermark => {
-                    resp.send(Ok(())).inspect_err(|_| warn!(ERROR_CALLER)).ok();
-                }
-                Ok(watermark) => self.keyhive_reconciliation_waiters.push((watermark, resp)),
-                Err(error) => {
-                    resp.send(Err(error))
-                        .inspect_err(|_| warn!(ERROR_CALLER))
-                        .ok();
-                }
-            },
-            Runtime2Evt::GroupPartWorkerAdvanced { cursor } => {
-                self.group_part_cursor = self.group_part_cursor.max(cursor);
+            Runtime2Evt::GroupPartWorkerAdvanced { generation } => {
+                self.group_part_generation = self.group_part_generation.max(generation);
                 let mut pending = Vec::new();
-                for (watermark, waiter) in std::mem::take(&mut self.keyhive_reconciliation_waiters)
+                for (captured, waiter) in
+                    std::mem::take(&mut self.keyhive_reconciliation_waiters)
                 {
-                    if self.group_part_cursor >= watermark {
+                    if self.group_part_generation >= captured {
                         waiter
                             .send(Ok(()))
                             .inspect_err(|_| warn!(ERROR_CALLER))
                             .ok();
                     } else {
-                        pending.push((watermark, waiter));
+                        pending.push((captured, waiter));
                     }
                 }
                 self.keyhive_reconciliation_waiters = pending;
@@ -1502,7 +1463,6 @@ where
                     worker_present = self.doc_workers.contains_key(&doc_id),
                     "document materialization entered pending set"
                 );
-                self.reattempt_pending_materialization()?;
             }
             Runtime2Evt::DocWorkerMaterializationReady { doc_id } => {
                 self.pending_materialization.remove(&doc_id);
@@ -1514,11 +1474,29 @@ where
                 );
             }
             Runtime2Evt::DocWorkerMaterializationRetryCompleted { doc_id, status } => {
-                self.materialization_retries_in_flight.remove(&doc_id);
+                let start_generation = self.materialization_retries_in_flight.remove(&doc_id);
+                let stale = start_generation.is_some_and(|start| {
+                    self.keyhive_state_generation
+                        .load(std::sync::atomic::Ordering::Relaxed)
+                        > start
+                });
                 match &status {
                     crate::runtime2::MaterializationStatus::Pending(blockers) => {
                         self.pending_materialization.insert(doc_id);
-                        debug!(%doc_id, ?blockers, "materialization remains dependency-blocked");
+                        debug!(
+                            %doc_id,
+                            ?blockers,
+                            stale,
+                            "materialization remains dependency-blocked"
+                        );
+                        if stale {
+                            // The Keyhive state advanced while the walk ran
+                            // (e.g. a later CGKA op of the same rotation) —
+                            // this Pending may be stale; re-verify with the
+                            // fresher key state (B6).
+                            debug!(%doc_id, "re-verifying stale materialization retry");
+                            self.retry_doc_materialization(doc_id)?;
+                        }
                     }
                     crate::runtime2::MaterializationStatus::Missing
                     | crate::runtime2::MaterializationStatus::Ready { .. } => {
@@ -1546,12 +1524,18 @@ where
                     pending_count = self.pending_materialization.len(),
                     "processing CGKA operation; retrying pending materialization after key update"
                 );
+                self.bump_keyhive_state_generation("cgka op");
                 self.change_manager
                     .notify_document_key_rotated(doc_id)
                     .expect(ERROR_CHANNEL);
-                self.reattempt_pending_materialization()?;
+                // Targeted retry: only this doc's keys moved; live docs are
+                // not re-walked (B6).
+                if was_pending {
+                    self.retry_doc_materialization(doc_id)?;
+                }
             }
             Runtime2Evt::DelegationReceived { target, data } => {
+                self.bump_keyhive_state_generation("delegation received");
                 let member_id = PeerId::new(data.payload().delegate().id().to_bytes());
                 let member_is_document = matches!(
                     data.payload().delegate(),
@@ -1570,6 +1554,7 @@ where
                 ))?;
             }
             Runtime2Evt::RevocationReceived { target, data } => {
+                self.bump_keyhive_state_generation("revocation received");
                 let member_id = PeerId::new(data.payload().revoked_id().as_bytes());
                 let member_is_document = matches!(
                     data.payload().revoked().payload().delegate(),
@@ -1755,16 +1740,17 @@ where
     /// Start a keyhive sync round with `peer_id` if not already active.
     #[tracing::instrument(skip_all, fields(local_peer_id = %self.local_peer_id, %peer_id))]
     fn start_keyhive_sync(&mut self, peer_id: PeerId) -> eyre::Result<()> {
-        self.start_keyhive_sync_round(peer_id, false)
+        self.start_keyhive_sync_round(peer_id)
     }
 
-    fn start_keyhive_sync_round(&mut self, peer_id: PeerId, validating: bool) -> eyre::Result<()> {
+    fn start_keyhive_sync_round(&mut self, peer_id: PeerId) -> eyre::Result<()> {
         if self.active_keyhive_syncs.contains_key(&peer_id) {
             return Ok(());
         }
-        let watermark = self
-            .keyhive_sync_waiter_ids
-            .load(std::sync::atomic::Ordering::Relaxed);
+        let admitted_ids = self
+            .keyhive_waiters
+            .get(&peer_id)
+            .map_or_else(std::collections::HashSet::new, |w| w.ids.clone());
         self.keyhive_round_ids = self.keyhive_round_ids.wrapping_add(1);
         let round_id = self.keyhive_round_ids;
         let request_id = subduction_keyhive::message::RequestId {
@@ -1776,20 +1762,20 @@ where
         self.active_keyhive_syncs.insert(
             peer_id,
             KeyhiveSyncRound {
-                watermark,
                 round_id,
                 request_id: request_id.clone(),
-                changed: false,
-                validating,
+                admitted_ids,
             },
         );
         debug!(
             %peer_id,
             round_id,
             ?request_id,
-            watermark,
-            validating,
-            pending_waiters = self.pending_keyhive_syncs.get(&peer_id).map_or(0, Vec::len),
+            admitted_waiters = self
+                .active_keyhive_syncs
+                .get(&peer_id)
+                .map_or(0, |round| round.admitted_ids.len()),
+            pending_waiters = self.keyhive_waiters.get(&peer_id).map_or(0, |w| w.waiters.len()),
             "starting Keyhive sync round"
         );
         self.spawn_tracked(
@@ -1828,8 +1814,8 @@ where
         self.active_keyhive_syncs
             .remove(&peer_id)
             .expect("active keyhive sync disappeared after failure validation");
-        if let Some(waiters) = self.pending_keyhive_syncs.remove(&peer_id) {
-            for (_, sender) in waiters {
+        if let Some(waiters) = self.keyhive_waiters.remove(&peer_id) {
+            for (_, sender) in waiters.waiters {
                 sender
                     .send(Err(ferr!("{error}")))
                     .inspect_err(|_| warn!(ERROR_CALLER))
@@ -1837,6 +1823,41 @@ where
             }
         }
         debug!(%peer_id, ?request_id, error, "keyhive sync initiation failed");
+        if self.keyhive_notif_pending.remove(&peer_id) {
+            debug!(
+                %peer_id,
+                "retrying latched change notification after failed keyhive sync"
+            );
+            self.start_keyhive_sync(peer_id)?;
+        }
+        Ok(())
+    }
+
+    /// A remote peer signalled a Keyhive change (keyhive-changes RPC
+    /// notification). Start a waiter-less sync round so the peer's changes are
+    /// pulled; the round is quiescence-visible via `active_keyhive_syncs`. If
+    /// a round is already active, the change is latched and a follow-up round
+    /// runs when the current one completes (the in-flight exchange may have
+    /// synced stale state); if the peer is not connected, the notification is
+    /// stale and ignored.
+    fn handle_keyhive_change_notif(&mut self, peer_id: PeerId) -> eyre::Result<()> {
+        if !self.connected_peers.contains_key(&peer_id) {
+            debug!(
+                %peer_id,
+                "keyhive change notification ignored: peer not connected"
+            );
+            return Ok(());
+        }
+        if self.active_keyhive_syncs.contains_key(&peer_id) {
+            self.keyhive_notif_pending.insert(peer_id);
+            debug!(
+                %peer_id,
+                "keyhive change notification latched; follow-up round after current completes"
+            );
+            return Ok(());
+        }
+        debug!(%peer_id, "keyhive change notification; starting sync round");
+        self.start_keyhive_sync(peer_id)?;
         Ok(())
     }
 
@@ -1852,11 +1873,6 @@ where
             self.reattempt_pending_materialization()?;
             return Ok(());
         };
-        // A concurrent inbound exchange can advance this peer's state while a
-        // different request owns the explicit waiter. That progress still
-        // invalidates the active round and requires an unchanged validation
-        // round before its waiters may resolve.
-        round.changed |= changed;
         if round.request_id != request_id {
             debug!(
                 %peer_id,
@@ -1877,36 +1893,16 @@ where
             .remove(&peer_id)
             .expect("active keyhive sync disappeared before protocol completion");
         assert_eq!(round.round_id, round_id);
-        let watermark = round.watermark;
+        let admitted_ids = round.admitted_ids;
 
-        // Ingestion can change the pair view used by the just-completed
-        // exchange. Keep every waiter pending until a subsequent unchanged
-        // round validates the caller-sided fixed point.
-        let has_preexisting_waiter = self
-            .pending_keyhive_syncs
-            .get(&peer_id)
-            .is_some_and(|waiters| waiters.iter().any(|(id, _)| *id < watermark));
-        if round.changed || (!round.validating && has_preexisting_waiter) {
-            debug!(
-                %peer_id,
-                round_id,
-                ?round.request_id,
-                changed = round.changed,
-                was_validation = round.validating,
-                pending_waiters = self.pending_keyhive_syncs.get(&peer_id).map_or(0, Vec::len),
-                "scheduling Keyhive validation round"
-            );
-            self.start_keyhive_sync_round(peer_id, true)?;
-            self.reattempt_pending_materialization()?;
-            return Ok(());
-        }
-        // Split waiters: those that existed before this sync started resolve,
-        // those that arrived during/after cascade into a new round.
+        // Split waiters: those this round admitted resolve; those that arrived
+        // during/after cascade into a new round.
         let mut resolved_waiters = 0usize;
-        if let Some(waiters) = self.pending_keyhive_syncs.get_mut(&peer_id) {
+        if let Some(waiters) = self.keyhive_waiters.get_mut(&peer_id) {
             let mut remaining = Vec::new();
-            for (id, sender) in std::mem::take(waiters) {
-                if id < watermark {
+            for (id, sender) in std::mem::take(&mut waiters.waiters) {
+                if admitted_ids.contains(&id) {
+                    waiters.ids.remove(&id);
                     sender
                         .send(Ok(()))
                         .inspect_err(|_| warn!(ERROR_CALLER))
@@ -1916,30 +1912,43 @@ where
                     remaining.push((id, sender));
                 }
             }
-            if remaining.is_empty() {
-                self.pending_keyhive_syncs.remove(&peer_id);
-            } else {
-                *waiters = remaining;
+            waiters.waiters = remaining;
+            if waiters.waiters.is_empty() {
+                self.keyhive_waiters.remove(&peer_id);
             }
         }
-        let has_remaining = self.pending_keyhive_syncs.contains_key(&peer_id);
+        let has_remaining = self.keyhive_waiters.contains_key(&peer_id);
         debug!(
             %peer_id,
             round_id,
             ?round.request_id,
-            watermark,
+            admitted_waiters = admitted_ids.len(),
             resolved_waiters,
-            remaining_waiters = self.pending_keyhive_syncs.get(&peer_id).map_or(0, Vec::len),
+            remaining_waiters = self
+                .keyhive_waiters
+                .get(&peer_id)
+                .map_or(0, |w| w.waiters.len()),
             has_remaining,
             "completing Keyhive sync round"
         );
         if has_remaining {
             self.start_keyhive_sync(peer_id)?;
         }
+        if self.keyhive_notif_pending.remove(&peer_id) {
+            debug!(
+                %peer_id,
+                round_id,
+                "change notification latched during round; starting follow-up round"
+            );
+            self.start_keyhive_sync(peer_id)?;
+        }
         self.reattempt_pending_materialization()?;
         Ok(())
     }
 
+    /// Full sweep: retry materialization for every doc in the pending set
+    /// (used by the exchange triggers — a keyhive sync may have unblocked any
+    /// pending doc).
     fn reattempt_pending_materialization(&mut self) -> eyre::Result<()> {
         let pending = self.pending_materialization.clone();
         debug!(
@@ -1948,64 +1957,100 @@ where
             "reattempting pending document materialization"
         );
         for doc_id in pending {
-            if !self.materialization_retries_in_flight.insert(doc_id) {
-                continue;
-            }
-            let Some(entry) = self.doc_workers.get(&doc_id) else {
-                debug!(%doc_id, "dropping pending materialization without document worker");
-                self.pending_materialization.remove(&doc_id);
-                self.materialization_retries_in_flight.remove(&doc_id);
-                self.schedule_doc_worker_eviction_if_idle(doc_id);
-                continue;
-            };
-            debug!(
-                %doc_id,
-                local_handles = entry.local_handles,
-                "requesting pending materialization retry from document worker"
-            );
-            let (resp, result) = futures::channel::oneshot::channel();
-            if let Err(error) = entry
-                .handle
-                .send(DocWorkerMsg::ReattemptMaterialization {
-                    origin: crate::changes::BigRepoChangeOrigin::Keyhive,
-                    resp,
-                })
-            {
-                self.materialization_retries_in_flight.remove(&doc_id);
-                return Err(error).wrap_err(ERROR_CHANNEL);
-            }
-            self.spawn_tracked(
-                crate::runtime2::TrackedWorkKind::MaterializationRetry,
-                F::forward_materialization_retry(
-                    result,
-                    self.evt_tx.clone(),
-                    doc_id,
-            ))?;
+            self.retry_doc_materialization(doc_id)?;
         }
         Ok(())
     }
 
-    /// Cancel a pending keyhive sync waiter by id.
-    fn cancel_pending_keyhive_sync(&mut self, peer_id: &PeerId, waiter_id: u64) -> bool {
-        let (removed, became_empty) =
-            if let Some(waiters) = self.pending_keyhive_syncs.get_mut(peer_id) {
-                let len_before = waiters.len();
-                waiters.retain(|(id, _)| *id != waiter_id);
-                (waiters.len() < len_before, waiters.is_empty())
-            } else {
-                return false;
-            };
-        if became_empty {
-            self.pending_keyhive_syncs.remove(peer_id);
+    /// Targeted retry for one document (B6). The in-flight entry records the
+    /// Keyhive state generation at retry start; `forward_materialization_retry`
+    /// acks the worker's status back through `DocWorkerMaterializationRetryCompleted`,
+    /// where a stale `Pending` (state advanced while the walk ran) re-verifies.
+    fn retry_doc_materialization(&mut self, doc_id: DocumentId) -> eyre::Result<()> {
+        if self.materialization_retries_in_flight.contains_key(&doc_id) {
+            return Ok(());
         }
-        removed
+        let Some(entry) = self.doc_workers.get(&doc_id) else {
+            debug!(%doc_id, "dropping pending materialization without document worker");
+            self.pending_materialization.remove(&doc_id);
+            self.schedule_doc_worker_eviction_if_idle(doc_id);
+            return Ok(());
+        };
+        let generation = self
+            .keyhive_state_generation
+            .load(std::sync::atomic::Ordering::Relaxed);
+        self.materialization_retries_in_flight
+            .insert(doc_id, generation);
+        debug!(
+            %doc_id,
+            local_handles = entry.local_handles,
+            generation,
+            "requesting targeted materialization retry from document worker"
+        );
+        let (resp, result) = futures::channel::oneshot::channel();
+        if let Err(error) = entry
+            .handle
+            .send(DocWorkerMsg::ReattemptMaterialization {
+                origin: crate::changes::BigRepoChangeOrigin::Keyhive,
+                resp,
+            })
+        {
+            self.materialization_retries_in_flight.remove(&doc_id);
+            return Err(error).wrap_err(ERROR_CHANNEL);
+        }
+        self.spawn_tracked(
+            crate::runtime2::TrackedWorkKind::MaterializationRetry,
+            F::forward_materialization_retry(
+                result,
+                self.evt_tx.clone(),
+                doc_id,
+        ))?;
+        Ok(())
+    }
+
+    /// Cancel a pending keyhive sync waiter by id. The waiter is removed
+    /// precisely (O(1) membership via the id set), so a timed-out caller's
+    /// dead entry can never cascade a follow-up round.
+    fn cancel_pending_keyhive_sync(&mut self, peer_id: &PeerId, waiter_id: u64) -> bool {
+        let Some(waiters) = self.keyhive_waiters.get_mut(peer_id) else {
+            return false;
+        };
+        if !waiters.ids.remove(&waiter_id) {
+            return false;
+        }
+        waiters.waiters.retain(|(id, _)| *id != waiter_id);
+        if waiters.waiters.is_empty() {
+            self.keyhive_waiters.remove(peer_id);
+        }
+        true
     }
 
     /// Cancel all pending keyhive syncs for a peer.
+    /// Bump the shared Keyhive state generation. The group-part worker
+    /// observes the advance, full-rebuilds its projection from current
+    /// Keyhive state, and acks the generation; reconciliation waiters and
+    /// quiescence probes resolve once the acked generation covers their
+    /// captured one.
+    fn bump_keyhive_state_generation(&self, cause: &'static str) {
+        let generation = self
+            .keyhive_state_generation
+            .fetch_add(1, std::sync::atomic::Ordering::Relaxed)
+            + 1;
+        debug!(
+            local_peer_id = %self.local_peer_id,
+            generation,
+            cause,
+            "Keyhive state generation advanced"
+        );
+    }
+
     fn cancel_pending_keyhive_syncs(&mut self, peer_id: &PeerId, reason: &'static str) {
         self.active_keyhive_syncs.remove(peer_id);
-        if let Some(waiters) = self.pending_keyhive_syncs.remove(peer_id) {
-            for (_id, sender) in waiters {
+        // A latched change notification is stale once the connection is gone;
+        // reconnecting runs its own initial sync round.
+        self.keyhive_notif_pending.remove(peer_id);
+        if let Some(waiters) = self.keyhive_waiters.remove(peer_id) {
+            for (_id, sender) in waiters.waiters {
                 sender
                     .send(Err(eyre::eyre!("{reason}")))
                     .inspect_err(|_| warn!(ERROR_CALLER))
@@ -2241,6 +2286,24 @@ impl<
                 let result = futures::future::Abortable::new(
                     async move {
                         loop {
+                            if hub.frozen {
+                                // B12 freeze: events and the janitor are held;
+                                // only `Unfreeze` is processed — everything
+                                // else is buffered and replayed on unfreeze.
+                                match cmd_rx.recv().await {
+                                    Ok(Runtime2Cmd::Unfreeze) => {
+                                        hub.frozen = false;
+                                        let buffered =
+                                            std::mem::take(&mut hub.frozen_cmd_buffer);
+                                        for cmd in buffered {
+                                            hub.handle_cmd(cmd)?;
+                                        }
+                                    }
+                                    Ok(cmd) => hub.frozen_cmd_buffer.push(cmd),
+                                    Err(_) => break,
+                                }
+                                continue;
+                            }
                             // FIXME: why do we need to allocate and box every loop?
                             let mut sleep =
                                 Box::pin(timer.sleep(std::time::Duration::from_millis(500)).fuse());
@@ -2317,6 +2380,7 @@ where
         timer,
         clock,
         connect,
+        keyhive_state_generation: keyhive_state_generation_config,
         event_channel,
     } = config;
 
@@ -2349,23 +2413,26 @@ where
         cmd_tx: cmd_tx.clone(),
         evt_tx: evt_tx.clone(),
         connected_peers: HashMap::new(),
-        pending_keyhive_syncs: HashMap::new(),
+        keyhive_waiters: HashMap::new(),
         active_keyhive_syncs: HashMap::new(),
+        keyhive_notif_pending: HashSet::new(),
         keyhive_round_ids: 0,
+        keyhive_state_generation: keyhive_state_generation_config,
+        group_part_generation: 0,
         keyhive_reconciliation_waiters: Vec::new(),
-        quiescence_group_part_watermark_pending: false,
         pending_doc_syncs: HashMap::new(),
         quiescence_waiters: Vec::new(),
         quiescence_probe: None,
         quiescence_barrier_ids: 0,
+        frozen: false,
+        frozen_cmd_buffer: Vec::new(),
+        freeze_on_resolve: false,
         activity_generation: 0,
-        group_part_cursor: 0,
         tracked_in_flight: 0,
         doc_workers: HashMap::new(),
         pending_materialization: HashSet::new(),
-        materialization_retries_in_flight: HashSet::new(),
+        materialization_retries_in_flight: HashMap::new(),
         doc_sync_waiter_ids: Arc::clone(&doc_sync_waiter_ids),
-        keyhive_sync_waiter_ids: Arc::clone(&keyhive_sync_waiter_ids),
     };
 
     // ── Construct handle ───────────────────────────────────────────────────

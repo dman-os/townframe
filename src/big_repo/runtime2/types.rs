@@ -2,11 +2,7 @@
 
 use crate::interlude::*;
 
-use crate::keyhive_listener::BigRepoKeyhiveListener;
 use crate::DocumentId;
-use future_form::Sendable;
-use keyhive_core::principal::identifier::Identifier;
-use std::sync::Arc;
 use std::time::Duration;
 
 // ─── Constants ─────────────────────────────────────────────────────────────────
@@ -215,57 +211,6 @@ pub(crate) type SignedRotateKeyOp = keyhive_crypto::signed::Signed<
     keyhive_core::principal::individual::op::rotate_key::RotateKeyOp,
 >;
 pub(crate) type SignedCgkaOp = keyhive_crypto::signed::Signed<beekem::operation::CgkaOperation>;
-
-// ─── Minimal RuntimeEvt (only variants still consumed by runtime2 / keyhive_listener) ──
-
-/// Events emitted by the keyhive listener and forwarded to the runtime2 event loop.
-///
-/// **Only** variants that are still sent or consumed by `keyhive_listener` and
-/// `runtime2/native` are retained here.  The remaining variants
-/// (`SyncSessionObserved`, `ConnEstablishedIroh`, `ConnLostIroh`, …) belonged to
-/// the old runtime and have been removed.
-pub(crate) enum RuntimeEvt {
-    KeyhiveSyncDone {
-        peer_id: crate::PeerId,
-        request_id: subduction_keyhive::message::RequestId,
-        changed: bool,
-    },
-    PrekeyExpanded {
-        new_prekey: Arc<SignedAddKeyOp>,
-    },
-    PrekeyRotated {
-        rotate_key: Arc<SignedRotateKeyOp>,
-    },
-    CgkaOp {
-        data: Arc<SignedCgkaOp>,
-    },
-    DelegationReceived {
-        target: Identifier,
-        data: Arc<
-            keyhive_crypto::signed::Signed<
-                keyhive_core::principal::group::delegation::Delegation<
-                    Sendable,
-                    keyhive_crypto::signer::memory::MemorySigner,
-                    Vec<u8>,
-                    BigRepoKeyhiveListener,
-                >,
-            >,
-        >,
-    },
-    RevocationReceived {
-        target: Identifier,
-        data: Arc<
-            keyhive_crypto::signed::Signed<
-                keyhive_core::principal::group::revocation::Revocation<
-                    Sendable,
-                    keyhive_crypto::signer::memory::MemorySigner,
-                    Vec<u8>,
-                    BigRepoKeyhiveListener,
-                >,
-            >,
-        >,
-    },
-}
 
 // ─── Tests ─────────────────────────────────────────────────────────────────
 

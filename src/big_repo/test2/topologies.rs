@@ -768,12 +768,6 @@ async fn tier3_opposite_order_membership_payload() -> crate::Res<()> {
     // Grant B as relay and C as Reader via public agent (same pattern as
     // the existing relay/line tests where the far-end agent is not directly
     // learned by the owner across a multi-hop connection).
-    topo.topo_node(1)
-        .stop_keyhive_rpc(topo.topo_node(2).peer_id())
-        .await;
-    topo.topo_node(2)
-        .stop_keyhive_rpc(topo.topo_node(1).peer_id())
-        .await;
     let b_agent = fixtures::agent_of(&topo.topo_node(0).repo, topo.topo_node(1)).await?;
     topo.topo_node(0)
         .repo

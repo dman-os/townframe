@@ -12,6 +12,7 @@ mod edge;
 mod encryption;
 mod ephemeral;
 mod fragmentation;
+mod freeze;
 mod harness;
 mod keyhive_rpc;
 mod ladder;

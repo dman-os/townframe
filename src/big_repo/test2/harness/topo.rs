@@ -36,9 +36,6 @@ pub(crate) struct Node {
     pub(crate) endpoint: iroh::Endpoint,
     _router: iroh::protocol::Router,
     repo_rpc_stop: crate::rpc::BigRepoRpcStopToken,
-    keyhive_rpc_tasks: Arc<utils_rs::AbortableJoinSet>,
-    keyhive_rpc_cancel: tokio_util::sync::CancellationToken,
-    keyhive_rpc_cancels: Arc<Mutex<HashMap<PeerId, tokio_util::sync::CancellationToken>>>,
     accepted: Arc<Mutex<Option<BigRepoConnection>>>,
     accepts: Arc<Notify>,
     connections: Arc<Mutex<HashMap<PeerId, BigRepoConnection>>>,
@@ -50,6 +47,7 @@ pub(crate) struct Node {
 #[derive(Clone, Debug)]
 struct AcceptHandler {
     repo: Arc<BigRepo>,
+    endpoint: iroh::Endpoint,
     accepted: Arc<Mutex<Option<BigRepoConnection>>>,
     accepts: Arc<Notify>,
 }
@@ -61,7 +59,7 @@ impl iroh::protocol::ProtocolHandler for AcceptHandler {
     ) -> Result<(), iroh::protocol::AcceptError> {
         let connection = self
             .repo
-            .accept_connection_iroh(conn, None)
+            .accept_connection_iroh(conn, self.endpoint.clone(), None)
             .await
             .map_err(|err| iroh::protocol::AcceptError::from_boxed(err.into()))?;
         *self.accepted.lock().await = Some(connection);
@@ -141,14 +139,12 @@ impl Node {
         let accepted = Arc::new(Mutex::new(None));
         let accepts = Arc::new(Notify::new());
         let (repo_rpc, repo_rpc_stop) = crate::rpc::spawn_repo_rpc(Arc::clone(&repo)).await?;
-        let keyhive_rpc_tasks = Arc::new(utils_rs::AbortableJoinSet::new());
-        let keyhive_rpc_cancel = tokio_util::sync::CancellationToken::new();
-        let keyhive_rpc_cancels = Arc::new(Mutex::new(HashMap::new()));
         let router = iroh::protocol::Router::builder(endpoint.clone())
             .accept(
                 subduction_iroh::ALPN,
                 AcceptHandler {
                     repo: Arc::clone(&repo),
+                    endpoint: endpoint.clone(),
                     accepted: Arc::clone(&accepted),
                     accepts: Arc::clone(&accepts),
                 },
@@ -172,9 +168,6 @@ impl Node {
             endpoint,
             _router: router,
             repo_rpc_stop,
-            keyhive_rpc_tasks,
-            keyhive_rpc_cancel,
-            keyhive_rpc_cancels,
             accepted,
             accepts,
             connections: Arc::new(Mutex::new(HashMap::new())),
@@ -217,94 +210,7 @@ impl Node {
         self.store.keyhive_group_part_cursor().await
     }
 
-    async fn start_keyhive_rpc(&self, remote: &Self) -> crate::Res<()> {
-        let client =
-            crate::rpc::IrohBigRepoRpcClient::new(self.endpoint.clone(), remote.endpoint.addr());
-        let mut changes = client.subscribe_keyhive_changes(64).await?;
-        let ready = timeout(Duration::from_secs(5), changes.recv())
-            .await
-            .map_err(|_| crate::ferr!("timed out installing Keyhive RPC subscription"))?
-            .map_err(|error| crate::ferr!("Keyhive RPC subscription failed: {error}"))?
-            .ok_or_else(|| crate::ferr!("Keyhive RPC subscription closed before ready"))?;
-        assert!(
-            ready.initial,
-            "first Keyhive RPC event must confirm readiness"
-        );
-
-        let repo = Arc::clone(&self.repo);
-        let peer_id = remote.peer_id();
-        let peer_cancel = tokio_util::sync::CancellationToken::new();
-        if let Some(previous) = self
-            .keyhive_rpc_cancels
-            .lock()
-            .await
-            .insert(peer_id, peer_cancel.clone())
-        {
-            previous.cancel();
-        }
-        let cancel = self.keyhive_rpc_cancel.child_token();
-        self.keyhive_rpc_tasks
-            .spawn(async move {
-                loop {
-                    tokio::select! {
-                        biased;
-                        _ = cancel.cancelled() => break,
-                        _ = peer_cancel.cancelled() => break,
-                        event = changes.recv() => {
-                            match event {
-                                Ok(Some(event)) if !event.initial => {
-                                    tracing::debug!(
-                                        %peer_id,
-                                        "received Keyhive RPC notification; starting sync",
-                                    );
-                                    match repo
-                                        .sync_keyhive_with_peer(
-                                            peer_id,
-                                            Some(Duration::from_secs(10)),
-                                        )
-                                        .await
-                                    {
-                                        Ok(()) => tracing::debug!(
-                                            %peer_id,
-                                            "Keyhive sync after RPC notification completed",
-                                        ),
-                                        Err(error) => tracing::debug!(
-                                            %peer_id,
-                                            ?error,
-                                            "Keyhive sync after RPC notification failed",
-                                        ),
-                                    }
-                                }
-                                Ok(Some(_)) => {}
-                                Ok(None) => {
-                                    tracing::debug!(
-                                        %peer_id,
-                                        "Keyhive RPC notification stream closed",
-                                    );
-                                    break;
-                                }
-                                Err(error) => {
-                                    tracing::debug!(
-                                        %peer_id,
-                                        ?error,
-                                        "Keyhive RPC notification stream failed",
-                                    );
-                                    break;
-                                }
-                            }
-                        }
-                    }
-                }
-            })
-            .map_err(|error| crate::ferr!("failed spawning Keyhive RPC subscription: {error}"))?;
-        Ok(())
-    }
-
-    pub(crate) async fn stop_keyhive_rpc(&self, peer_id: PeerId) {
-        if let Some(cancel) = self.keyhive_rpc_cancels.lock().await.remove(&peer_id) {
-            cancel.cancel();
-        }
-    }
+    /// Update the subscribed parts for an already-connected peer.
 
     /// Update the subscribed parts for an already-connected peer.
     /// part replication between the two nodes.
@@ -334,7 +240,6 @@ impl Node {
     async fn connect_with_keyhive_notifications(
         &self,
         remote: &Self,
-        enable_keyhive_notifications: bool,
         subscribed_parts: Vec<big_sync_core::PartId>,
     ) -> crate::Res<BigRepoConnection> {
         let connection = self
@@ -349,10 +254,6 @@ impl Node {
         self.set_peer_parts(remote, subscribed_parts.clone())
             .await?;
         remote.set_peer_parts(self, subscribed_parts).await?;
-        if enable_keyhive_notifications {
-            self.start_keyhive_rpc(remote).await?;
-            remote.start_keyhive_rpc(self).await?;
-        }
         Ok(connection)
     }
     pub(crate) async fn connect(&self, remote: &Self) -> crate::Res<BigRepoConnection> {
@@ -365,20 +266,7 @@ impl Node {
         subscribed_parts: Vec<big_sync_core::PartId>,
     ) -> crate::Res<BigRepoConnection> {
         let connection = self
-            .connect_with_keyhive_notifications(remote, true, subscribed_parts)
-            .await?;
-        self.connections
-            .lock()
-            .await
-            .insert(remote.peer_id(), connection.clone());
-        Ok(connection)
-    }
-    async fn connect_without_keyhive_notifications(
-        &self,
-        remote: &Self,
-    ) -> crate::Res<BigRepoConnection> {
-        let connection = self
-            .connect_with_keyhive_notifications(remote, false, stress_support::test_parts())
+            .connect_with_keyhive_notifications(remote, subscribed_parts)
             .await?;
         self.connections
             .lock()
@@ -399,7 +287,6 @@ impl Node {
     }
     pub(crate) async fn disconnect_peer(&self, peer_id: PeerId) -> crate::Res<()> {
         self.worker.remove_peer(peer_id).await?;
-        self.stop_keyhive_rpc(peer_id).await;
         if let Some(connection) = self.connections.lock().await.remove(&peer_id) {
             connection.stop().await?;
         }
@@ -440,8 +327,6 @@ impl Node {
             }
         }
         self.endpoint.close().await;
-        self.keyhive_rpc_cancel.cancel();
-        let _ = self.keyhive_rpc_tasks.stop(Duration::from_secs(5)).await;
         let _ = self.repo_rpc_stop.stop().await;
         let _ = self.repo_stop.stop().await;
         let _ = self.big_sync_stop.stop().await;
@@ -570,29 +455,13 @@ impl Pair {
 
     /// Connect an already-booted pair without performing a Keyhive sync.
     pub(crate) async fn connect(&mut self) -> crate::Res<()> {
-        self.connect_with_keyhive_notifications(true).await
+        self.connect_with_keyhive_notifications().await
     }
 
-    /// Connect an already-booted pair without installing direct Keyhive
-    /// notification consumers. Used by tests that intentionally model a
-    /// missing local Keyhive document after restart.
-    pub(crate) async fn connect_without_keyhive_notifications(&mut self) -> crate::Res<()> {
-        self.connect_with_keyhive_notifications(false).await
-    }
-
-    async fn connect_with_keyhive_notifications(
-        &mut self,
-        enable_keyhive_notifications: bool,
-    ) -> crate::Res<()> {
+    async fn connect_with_keyhive_notifications(&mut self) -> crate::Res<()> {
         assert!(self.left_conn.is_none());
         assert!(self.right_conn.is_none());
-        let left_conn = if enable_keyhive_notifications {
-            self.left().connect(self.right()).await?
-        } else {
-            self.left()
-                .connect_without_keyhive_notifications(self.right())
-                .await?
-        };
+        let left_conn = self.left().connect(self.right()).await?;
         let right_conn = self.right().accepted_connection().await;
         self.left_conn = Some(left_conn);
         self.right_conn = Some(right_conn);
@@ -611,8 +480,6 @@ impl Pair {
             .worker
             .remove_peer(self.left().peer_id())
             .await?;
-        self.left().stop_keyhive_rpc(self.right().peer_id()).await;
-        self.right().stop_keyhive_rpc(self.left().peer_id()).await;
         Ok(())
     }
 

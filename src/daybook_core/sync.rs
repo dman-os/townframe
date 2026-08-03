@@ -34,6 +34,7 @@ pub type PeerKey = Arc<str>;
 #[derive(Debug, Clone)]
 struct SubductionProtocolHandler {
     big_repo: Arc<BigRepo>,
+    endpoint: iroh::Endpoint,
     incoming_conn_tx: mpsc::UnboundedSender<big_repo::BigRepoConnection>,
     end_signal_tx: mpsc::UnboundedSender<big_repo::ConnFinishSignal>,
 }
@@ -42,7 +43,7 @@ impl ProtocolHandler for SubductionProtocolHandler {
     async fn accept(&self, conn: Connection) -> Result<(), AcceptError> {
         let conn = self
             .big_repo
-            .accept_connection_iroh(conn, Some(self.end_signal_tx.clone()))
+            .accept_connection_iroh(conn, self.endpoint.clone(), Some(self.end_signal_tx.clone()))
             .await
             .map_err(|err| AcceptError::from_boxed(err.into()))?;
         tracing::debug!(peer_id = %conn.peer_id, "subduction conn accepted");
@@ -84,8 +85,6 @@ pub struct IrohSyncRepo {
     active_peers: tokio::sync::RwLock<HashMap<PeerId, ActivePeerState>>,
     // sync_store: am_utils_rs::sync::store::SyncStoreHandle,
     reconnect_task: Arc<std::sync::Mutex<Option<JoinHandle<()>>>>,
-    keyhive_rpc_tasks: Arc<utils_rs::AbortableJoinSet>,
-    keyhive_rpc_cancels: Arc<tokio::sync::Mutex<HashMap<PeerId, CancellationToken>>>,
     clone_provision_peers: Arc<tokio::sync::Mutex<std::collections::HashSet<PeerId>>>,
     big_sync_worker: big_sync::BigSyncWorkerHandle,
     blob_sync_worker: big_sync::BigSyncWorkerHandle,
@@ -145,8 +144,6 @@ pub struct IrohSyncRepoStopToken {
     router: iroh::protocol::Router,
     // partition_sync_stop_token: am_utils_rs::sync::node::SyncNodeStopToken,
     big_repo_rpc_stop_token: big_repo::rpc::BigRepoRpcStopToken,
-    keyhive_rpc_tasks: Arc<utils_rs::AbortableJoinSet>,
-    keyhive_rpc_cancel: CancellationToken,
     big_sync_rpc_stop: big_sync::rpc::BigSyncRpcStopToken,
     big_sync_worker_stop: big_sync::StopToken,
     blob_sync_rpc_stop: big_sync::rpc::BigSyncRpcStopToken,
@@ -176,11 +173,6 @@ impl IrohSyncRepoStopToken {
         self.big_sync_rpc_stop.stop().await?;
         self.blob_sync_worker_stop.stop().await?;
         self.blob_sync_rpc_stop.stop().await?;
-        self.keyhive_rpc_cancel.cancel();
-        self.keyhive_rpc_tasks
-            .stop(Duration::from_secs(5))
-            .await
-            .wrap_err("failed stopping Keyhive RPC subscriptions")?;
         self.big_repo_rpc_stop_token.stop().await?;
         // NOTE: we only add timeouts for stop tokens that don't have internal
         // timeouts
@@ -261,6 +253,7 @@ impl IrohSyncRepo {
                 SUBDUCTION_ALPN,
                 SubductionProtocolHandler {
                     big_repo: Arc::clone(&rcx.big_repo),
+                    endpoint: endpoint.clone(),
                     incoming_conn_tx,
                     end_signal_tx: conn_end_tx.clone(),
                 },
@@ -298,9 +291,6 @@ impl IrohSyncRepo {
             .await?;
 
         let big_sync_rx = big_sync_worker.subscribe_stats();
-        let keyhive_rpc_tasks = Arc::new(utils_rs::AbortableJoinSet::new());
-        let keyhive_rpc_cancel = CancellationToken::new();
-        let keyhive_rpc_cancels = Arc::new(tokio::sync::Mutex::new(HashMap::new()));
         let clone_provision_peers =
             Arc::new(tokio::sync::Mutex::new(std::collections::HashSet::new()));
 
@@ -318,9 +308,7 @@ impl IrohSyncRepo {
             active_peers: default(),
             conn_end_signal_tx: conn_end_tx,
             reconnect_task: Arc::clone(&reconnect_task),
-            keyhive_rpc_tasks: Arc::clone(&keyhive_rpc_tasks),
             clone_provision_peers: Arc::clone(&clone_provision_peers),
-            keyhive_rpc_cancels: Arc::clone(&keyhive_rpc_cancels),
             big_sync_worker,
             blob_sync_worker,
             big_repo_rpc: big_repo_rpc.clone(),
@@ -355,105 +343,12 @@ impl IrohSyncRepo {
                 reconnect_task,
                 router,
                 big_repo_rpc_stop_token: repo_rpc_stop_token,
-                keyhive_rpc_tasks,
-                keyhive_rpc_cancel,
                 big_sync_rpc_stop,
                 big_sync_worker_stop,
                 blob_sync_rpc_stop,
                 blob_sync_worker_stop,
             },
         ))
-    }
-
-    #[tracing::instrument(skip(self, endpoint_addr))]
-    async fn start_keyhive_rpc_subscription(
-        &self,
-        peer_id: PeerId,
-        endpoint_addr: iroh::EndpointAddr,
-    ) -> Res<()> {
-        let cancel = CancellationToken::new();
-        if let Some(previous) = self
-            .keyhive_rpc_cancels
-            .lock()
-            .await
-            .insert(peer_id, cancel.clone())
-        {
-            previous.cancel();
-        }
-
-        let client =
-            big_repo::rpc::IrohBigRepoRpcClient::new(self.router.endpoint().clone(), endpoint_addr);
-        let mut changes =
-            tokio::time::timeout(Duration::from_secs(5), client.subscribe_keyhive_changes(64))
-                .await
-                .map_err(|_| ferr!("timed out installing Keyhive RPC subscription"))??;
-        let ready = tokio::time::timeout(Duration::from_secs(5), changes.recv())
-            .await
-            .map_err(|_| ferr!("timed out waiting for Keyhive RPC subscription readiness"))??
-            .ok_or_else(|| ferr!("Keyhive RPC stream closed before readiness"))?;
-        if !ready.initial {
-            eyre::bail!("Keyhive RPC stream did not send its readiness event");
-        }
-        info!(
-            local_peer_id = %self.router.endpoint().id(),
-            %peer_id,
-            "keyhive RPC subscription ready"
-        );
-
-        let stream_cancel = cancel.child_token();
-        let repo = Arc::clone(&self.rcx.big_repo);
-        self.keyhive_rpc_tasks
-            .spawn(async move {
-                loop {
-                    tokio::select! {
-                        biased;
-                        _ = stream_cancel.cancelled() => break,
-                        event = changes.recv() => {
-                            info!("recieved keyhive change notif");
-                            match event {
-                                Ok(Some(event)) => {
-                                    info!(
-                                        local_peer_id = %repo.local_peer_id(),
-                                        %peer_id,
-                                        initial = event.initial,
-                                        "keyhive RPC notification received; starting sync"
-                                    );
-                                    let result = repo
-                                        .sync_keyhive_with_peer(
-                                            peer_id,
-                                            Some(Duration::from_secs(10)),
-                                        )
-                                        .await;
-                                    info!(
-                                        local_peer_id = %repo.local_peer_id(),
-                                        %peer_id,
-                                        ?result,
-                                        "keyhive sync after RPC notification finished"
-                                    );
-                                    if let Err(error) = result {
-                                        warn!(%peer_id, ?error, "Keyhive sync after RPC notification failed");
-                                    }
-                                }
-                                Ok(None) => break,
-                                Err(error) => {
-                                    warn!(%peer_id, ?error, "Keyhive RPC stream failed");
-                                    break;
-                                }
-                            }
-                        }
-                    }
-                }
-            }
-                .in_current_span()
-            )
-            .map_err(|error| ferr!("failed spawning Keyhive RPC subscription: {error}"))?;
-        Ok(())
-    }
-
-    async fn stop_keyhive_rpc_subscription(&self, peer_id: PeerId) {
-        if let Some(cancel) = self.keyhive_rpc_cancels.lock().await.remove(&peer_id) {
-            cancel.cancel();
-        }
     }
 
     fn ensure_repo_live(&self) -> Res<()> {
@@ -650,7 +545,6 @@ impl IrohSyncRepo {
             .copied()
             .collect::<Vec<_>>();
         for peer_id in active_peers {
-            self.stop_keyhive_rpc_subscription(peer_id).await;
             self.big_repo_rpc.unregister_peer(peer_id);
             self.blobs_sync_backend.unregister_remote_peer(peer_id);
             self.big_sync_worker.remove_peer(peer_id).await.ok();
@@ -735,8 +629,6 @@ impl IrohSyncRepo {
 
             self.blobs_sync_backend
                 .register_remote_peer(conn.peer_id, addr.clone());
-            self.start_keyhive_rpc_subscription(conn.peer_id, addr)
-                .await?;
             if clone_provision {
                 self.rcx
                     .big_repo
@@ -881,7 +773,6 @@ impl IrohSyncRepo {
     /// Tear down a peer's registration without touching `active_peers` (the
     /// caller manages that). Idempotent per peer.
     async fn teardown_peer_registration(&self, peer_id: PeerId) {
-        self.stop_keyhive_rpc_subscription(peer_id).await;
         self.big_repo_rpc.unregister_peer(peer_id);
         self.blobs_sync_backend.unregister_remote_peer(peer_id);
         self.big_sync_worker.remove_peer(peer_id).await.ok();
@@ -1044,8 +935,6 @@ impl IrohSyncRepo {
                 %peer_id,
                 "outgoing connection registered; starting keyhive subscription"
             );
-            self.start_keyhive_rpc_subscription(conn.peer_id, endpoint_addr)
-                .await?;
 
             let old = self.active_peers.write().await.insert(
                 peer_id,

@@ -21,6 +21,10 @@ pub(crate) struct GroupPartWorker {
     local_peer_id: PeerId,
     timer: Arc<dyn crate::runtime2::Timer<future_form::Sendable>>,
     evt_tx: async_channel::Sender<crate::runtime2::Runtime2Evt>,
+    /// Shared Keyhive state-generation counter (bumped by the hub).
+    state_generation: Arc<std::sync::atomic::AtomicU64>,
+    /// Highest generation this worker has fully reconciled.
+    last_acked_generation: u64,
 }
 
 impl GroupPartWorker {
@@ -30,6 +34,7 @@ impl GroupPartWorker {
         local_peer_id: PeerId,
         timer: Arc<dyn crate::runtime2::Timer<future_form::Sendable>>,
         evt_tx: async_channel::Sender<crate::runtime2::Runtime2Evt>,
+        state_generation: Arc<std::sync::atomic::AtomicU64>,
     ) -> Self {
         Self {
             store,
@@ -37,13 +42,23 @@ impl GroupPartWorker {
             local_peer_id,
             timer,
             evt_tx,
+            state_generation,
+            last_acked_generation: 0,
         }
     }
 
-    pub(crate) async fn run(self) -> Res<()> {
+    pub(crate) async fn run(mut self) -> Res<()> {
         let mut announced_idle = false;
         loop {
             let cursor = self.store.keyhive_group_part_cursor().await?;
+            let generation = self.state_generation.load(std::sync::atomic::Ordering::Relaxed);
+            if generation > self.last_acked_generation {
+                if !self.rebuild_for_generation(generation, cursor).await? {
+                    return Ok(());
+                }
+                announced_idle = false;
+                continue;
+            }
             let events = self
                 .store
                 .keyhive_events_after(cursor, EVENT_BATCH_SIZE)
@@ -52,7 +67,9 @@ impl GroupPartWorker {
                 if !announced_idle {
                     if self
                         .evt_tx
-                        .send(crate::runtime2::Runtime2Evt::GroupPartWorkerAdvanced { cursor })
+                        .send(crate::runtime2::Runtime2Evt::GroupPartWorkerAdvanced {
+                            generation: self.last_acked_generation,
+                        })
                         .await
                         .is_err()
                     {
@@ -143,6 +160,62 @@ impl GroupPartWorker {
                 }
             }
         }
+    }
+
+    /// Full rebuild driven by a Keyhive state-generation advance. The event
+    /// log is only a durable dirty hint (B9): pending events can resolve with
+    /// no new row, so the worker must re-derive the projection from current
+    /// Keyhive state whenever the hub reports a state advance. Returns
+    /// `false` when the event channel closed (runtime stopping).
+    async fn rebuild_for_generation(&mut self, generation: u64, cursor: u64) -> Res<bool> {
+        tracing::debug!(
+            generation,
+            cursor,
+            "group-part worker full-rebuilding for Keyhive state generation"
+        );
+        let group_documents = self.keyhive.group_document_ids_by_id().await;
+        let managed_group_parts: HashSet<PartId> =
+            group_documents.keys().copied().map(group_part_id).collect();
+        let local_principal = self.local_peer_id;
+        let docs: Vec<_> = self.keyhive.document_ids().await;
+        if docs.is_empty() {
+            self.store
+                .reconcile_group_part_batch(&[], cursor, true)
+                .await?;
+        } else {
+            let batch_count = docs.len().div_ceil(DOC_BATCH_SIZE);
+            for (batch_index, doc_batch) in docs.chunks(DOC_BATCH_SIZE).enumerate() {
+                let mut reconciliations = Vec::with_capacity(doc_batch.len());
+                for &doc in doc_batch {
+                    reconciliations.push(
+                        self.reconciliation_for(
+                            doc,
+                            &group_documents,
+                            &managed_group_parts,
+                            local_principal,
+                        )
+                        .await?,
+                    );
+                }
+                self.store
+                    .reconcile_group_part_batch(
+                        &reconciliations,
+                        cursor,
+                        batch_index + 1 == batch_count,
+                    )
+                    .await?;
+            }
+        }
+        self.last_acked_generation = generation;
+        if self
+            .evt_tx
+            .send(crate::runtime2::Runtime2Evt::GroupPartWorkerAdvanced { generation })
+            .await
+            .is_err()
+        {
+            return Ok(false);
+        }
+        Ok(true)
     }
 
     async fn reconciliation_for(

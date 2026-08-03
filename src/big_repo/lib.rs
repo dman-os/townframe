@@ -234,13 +234,13 @@ impl BigRepo {
                     .wrap_err("failed booting keyhive storage")?
             }
         };
-        // Create the listener channel before constructing Keyhive so the
-        // listener can be wired in (avoids the reference cycle). Only the
-        // sender side is used by the listener; the receiver is forwarded into
-        // the runtime's own event channel via a background task.
-        let (listener_evt_tx, listener_evt_rx) = tokio::sync::mpsc::unbounded_channel();
+        // Create the runtime event channel before constructing Keyhive so the
+        // listener can be wired in (avoids the reference cycle). The listener
+        // and the keyhive sync-done observer send `Runtime2Evt` directly into
+        // this channel; the runtime consumes it.
+        let (evt_tx, evt_rx) = async_channel::unbounded::<crate::runtime2::Runtime2Evt>();
         let listener = crate::keyhive_listener::BigRepoKeyhiveListener {
-            evt_tx: listener_evt_tx.clone(),
+            evt_tx: evt_tx.clone(),
         };
         let keyhive = if let Some(restored) = BigKeyhiveHandle::restore_from_storage_archive(
             node_identity_seed,
@@ -266,7 +266,7 @@ impl BigRepo {
         let (change_manager, change_manager_stop) = changes::ChangeListenerManager::boot();
         let (keyhive_change_tx, _) = tokio::sync::broadcast::channel(128);
 
-        let (runtime, ephemeral, _events, keyhive_notifier, runtime_stop) =
+        let (runtime, ephemeral, keyhive_notifier, runtime_stop) =
             runtime2::native::spawn_native_runtime2(
                 signer,
                 subduction_storage.clone(),
@@ -276,8 +276,8 @@ impl BigRepo {
                 keyhive.clone(),
                 keyhive_storage.clone(),
                 Arc::clone(&change_manager),
-                listener_evt_tx,
-                listener_evt_rx,
+                evt_tx,
+                evt_rx,
                 keyhive_change_tx.clone(),
             )
             .await?;
@@ -484,6 +484,26 @@ impl BigRepo {
         self.runtime.wait_for_quiescence(timeout).await
     }
 
+    /// Like [`BigRepo::wait_for_quiescence`], but freezes the hub once
+    /// quiescence is reached: no events are processed and all non-unfreeze
+    /// commands are held until [`BigRepo::unfreeze`].
+    pub async fn wait_for_quiescence_freeze(
+        &self,
+        timeout: Option<std::time::Duration>,
+    ) -> Res<()> {
+        self.runtime.wait_for_quiescence_freeze(timeout, true).await
+    }
+
+    /// Resume event/command processing after a frozen quiescence wait.
+    pub async fn unfreeze(&self) -> Res<()> {
+        self.runtime.unfreeze().await
+    }
+
+    /// Whether the repository currently stores a sedimentree with `doc_id`.
+    pub async fn contains_sedimentree_id(&self, doc_id: DocumentId) -> Res<bool> {
+        self.runtime.contains_sedimentree_id(doc_id).await
+    }
+
     pub async fn create_doc(
         self: &Arc<Self>,
         initial_content: automerge::Automerge,
@@ -659,9 +679,13 @@ impl BigRepo {
     pub async fn accept_connection_iroh(
         self: &Arc<Self>,
         conn: iroh::endpoint::Connection,
+        endpoint: iroh::Endpoint,
         end_signal_tx: Option<tokio::sync::mpsc::UnboundedSender<ConnFinishSignal>>,
     ) -> Res<BigRepoConnection> {
-        let (peer_id, closed, end_rx) = self.runtime.accept_connection(Box::new(conn)).await?;
+        let (peer_id, closed, end_rx) = self
+            .runtime
+            .accept_connection(Box::new((conn, Some(endpoint))))
+            .await?;
         watch_connection_end(peer_id, end_rx, end_signal_tx);
         Ok(BigRepoConnection {
             repo: Arc::clone(self),
