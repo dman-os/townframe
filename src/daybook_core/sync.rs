@@ -153,6 +153,7 @@ pub struct IrohSyncRepoStopToken {
 
 impl IrohSyncRepoStopToken {
     pub async fn stop(self) -> Res<()> {
+        eprintln!("[ab] sync_stop: start");
         self.cancel_token.cancel();
         let reconnect_handle = self.reconnect_task.lock().expect(ERROR_MUTEX).take();
         if let Some(handle) = reconnect_handle {
@@ -162,6 +163,7 @@ impl IrohSyncRepoStopToken {
             )
             .await?;
         }
+        eprintln!("[ab] sync_stop: reconnect joined");
         // pre light the stop signal to the full worker
         // Worker shutdown drains active repo connections; each connection stop can wait up to 5s.
         utils_rs::wait_on_handle_with_timeout(
@@ -169,11 +171,17 @@ impl IrohSyncRepoStopToken {
             utils_rs::scale_timeout(Duration::from_secs(10)),
         )
         .await?;
+        eprintln!("[ab] sync_stop: worker joined");
         self.big_sync_worker_stop.stop().await?;
+        eprintln!("[ab] sync_stop: big_sync_worker stopped");
         self.big_sync_rpc_stop.stop().await?;
+        eprintln!("[ab] sync_stop: big_sync_rpc stopped");
         self.blob_sync_worker_stop.stop().await?;
+        eprintln!("[ab] sync_stop: blob_sync_worker stopped");
         self.blob_sync_rpc_stop.stop().await?;
+        eprintln!("[ab] sync_stop: blob_sync_rpc stopped");
         self.big_repo_rpc_stop_token.stop().await?;
+        eprintln!("[ab] sync_stop: big_repo_rpc (runtime2) stopped");
         // NOTE: we only add timeouts for stop tokens that don't have internal
         // timeouts
         tokio::time::timeout(
@@ -182,6 +190,7 @@ impl IrohSyncRepoStopToken {
         )
         .await
         .map_err(|_| eyre::eyre!("timeout waiting for router shutdown"))??;
+        eprintln!("[ab] sync_stop: router shutdown done");
         Ok(())
     }
 }

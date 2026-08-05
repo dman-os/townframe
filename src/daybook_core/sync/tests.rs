@@ -53,7 +53,9 @@ impl SyncTestNode {
             sync_repo,
             sync_stop,
         } = self;
+        eprintln!("[ab] node.stop: drop(sync_repo)");
         drop(sync_repo);
+        eprintln!("[ab] node.stop: dropped sync_repo, sync_stop.stop() start");
         sync_stop.cancel_token.cancel();
         tokio::time::timeout(
             utils_rs::scale_timeout(Duration::from_secs(30)),
@@ -61,12 +63,14 @@ impl SyncTestNode {
         )
         .await
         .map_err(|_| eyre::eyre!("timeout waiting sync stop"))??;
+        eprintln!("[ab] node.stop: sync done, progress_stop");
         tokio::time::timeout(
             utils_rs::scale_timeout(Duration::from_secs(10)),
             progress_stop.stop(),
         )
         .await
         .map_err(|_| eyre::eyre!("timeout waiting progress stop"))??;
+        eprintln!("[ab] node.stop: progress done, bridge join");
         doc_blobs_bridge_cancel.cancel();
         if let Some(handle) = doc_blobs_bridge_handle {
             tokio::time::timeout(
@@ -79,6 +83,7 @@ impl SyncTestNode {
             .await
             .map_err(|_| eyre::eyre!("timeout waiting doc blobs bridge join"))??;
         }
+        eprintln!("[ab] node.stop: bridge joined, index stop");
         doc_blobs_index_stop.cancel_token.cancel();
         tokio::time::timeout(
             utils_rs::scale_timeout(Duration::from_secs(10)),
@@ -86,6 +91,7 @@ impl SyncTestNode {
         )
         .await
         .map_err(|_| eyre::eyre!("timeout waiting doc blobs index stop"))??;
+        eprintln!("[ab] node.stop: index done, sqlite stop");
         sqlite_local_state_stop.cancel_token.cancel();
         tokio::time::timeout(
             utils_rs::scale_timeout(Duration::from_secs(10)),
@@ -93,6 +99,7 @@ impl SyncTestNode {
         )
         .await
         .map_err(|_| eyre::eyre!("timeout waiting sqlite local state stop"))??;
+        eprintln!("[ab] node.stop: sqlite done, config stop");
         config_stop.cancel_token.cancel();
         tokio::time::timeout(
             utils_rs::scale_timeout(Duration::from_secs(10)),
@@ -100,6 +107,7 @@ impl SyncTestNode {
         )
         .await
         .map_err(|_| eyre::eyre!("timeout waiting config stop"))??;
+        eprintln!("[ab] node.stop: config done, drawer stop");
         drawer_stop.cancel_token.cancel();
         tokio::time::timeout(
             utils_rs::scale_timeout(Duration::from_secs(10)),
@@ -107,6 +115,7 @@ impl SyncTestNode {
         )
         .await
         .map_err(|_| eyre::eyre!("timeout waiting drawer stop"))??;
+        eprintln!("[ab] node.stop: drawer done, plugs stop");
         plugs_stop.cancel_token.cancel();
         tokio::time::timeout(
             utils_rs::scale_timeout(Duration::from_secs(10)),
@@ -114,12 +123,14 @@ impl SyncTestNode {
         )
         .await
         .map_err(|_| eyre::eyre!("timeout waiting plugs stop"))??;
+        eprintln!("[ab] node.stop: plugs done, ctx.shutdown");
         tokio::time::timeout(
             utils_rs::scale_timeout(Duration::from_secs(10)),
             ctx.shutdown(),
         )
         .await
         .map_err(|_| eyre::eyre!("timeout waiting ctx shutdown"))??;
+        eprintln!("[ab] node.stop: ctx shutdown done");
         Ok(())
     }
 }
@@ -504,6 +515,7 @@ async fn iroh_sync_after_bootstrap_clone_converges() -> Res<()> {
 
     tokio::fs::create_dir_all(&repo_a_path).await?;
     let device_name = "test-device".to_string();
+    eprintln!("[ab] test: RepoCtx::init start");
     let rtx = RepoCtx::init(
         &repo_a_path,
         RepoOpenOptions {},
@@ -511,9 +523,13 @@ async fn iroh_sync_after_bootstrap_clone_converges() -> Res<()> {
         device_name,
     )
     .await?;
+    eprintln!("[ab] test: RepoCtx::init done, shutdown start");
     rtx.shutdown().await?;
+    eprintln!("[ab] test: rtx shutdown done");
 
+    eprintln!("[ab] test: open_sync_node(a) start");
     let node_a = open_sync_node(&repo_a_path).await?;
+    eprintln!("[ab] test: open_sync_node(a) done");
     let mut created_doc_ids = Vec::new();
     for _ in 0..8 {
         let new_doc_id = node_a
@@ -528,19 +544,28 @@ async fn iroh_sync_after_bootstrap_clone_converges() -> Res<()> {
             .await?;
         created_doc_ids.push(new_doc_id);
     }
+    eprintln!("[ab] test: 8 docs added on a");
 
     let sync_url = node_a.sync_repo.get_clone_ticket_url().await?;
+    eprintln!("[ab] test: clone ticket got");
     bootstrap_clone_repo_from_url_for_tests(&sync_url, &repo_b_path).await?;
+    eprintln!("[ab] test: bootstrap clone done");
 
+    eprintln!("[ab] test: open_sync_node(b) start");
     let node_b = open_sync_node(&repo_b_path).await?;
+    eprintln!("[ab] test: open_sync_node(b) done");
     let endpoint_addr = node_b.sync_repo.connect_url(&sync_url).await?;
+    eprintln!("[ab] test: connect_url done, waiting convergence");
     wait_for_sync_convergence(&node_a, &node_b, endpoint_addr.id, Duration::from_secs(30)).await?;
+    eprintln!("[ab] test: sync convergence done, waiting doc presence x{}", created_doc_ids.len());
 
     for doc_id in &created_doc_ids {
         wait_for_doc_presence_with_activity(&node_b, doc_id, Duration::from_secs(60)).await?;
     }
+    eprintln!("[ab] test: doc presence done, waiting set parity");
 
     wait_for_doc_set_parity(&node_a.drawer, &node_b.drawer, Duration::from_secs(30)).await?;
+    eprintln!("[ab] test: set parity done, listing ids");
 
     let ids_a = list_doc_ids(&node_a.drawer).await?;
     let ids_b = list_doc_ids(&node_b.drawer).await?;
@@ -548,9 +573,12 @@ async fn iroh_sync_after_bootstrap_clone_converges() -> Res<()> {
         ids_a, ids_b,
         "sync after bootstrap clone did not converge to equal doc sets"
     );
+    eprintln!("[ab] test: assert ok, stopping node_b");
 
     node_b.stop().await?;
+    eprintln!("[ab] test: node_b stopped, stopping node_a");
     node_a.stop().await?;
+    eprintln!("[ab] test: node_a stopped, test done");
     Ok(())
 }
 
@@ -784,6 +812,7 @@ async fn wait_for_doc_presence_with_activity(
     doc_id: &DocId,
     absolute_timeout: Duration,
 ) -> Res<()> {
+    eprintln!("[ab] presence: start doc_id={doc_id}");
     let last_activity = Arc::new(std::sync::Mutex::new(std::time::Instant::now()));
     let last_activity_for_wait = Arc::clone(&last_activity);
     let drawer_listener = node.drawer.subscribe(SubscribeOpts::new(1024));
@@ -793,11 +822,13 @@ async fn wait_for_doc_presence_with_activity(
     tokio::time::timeout(absolute_timeout, async {
         loop {
             loop_count += 1;
+            debug!(%doc_id, loop_count, "presence loop: before drawer read");
             let found = node
                 .drawer
                 .get_doc_with_facets_at_branch(doc_id, daybook_types::doc::BranchPath::new("main"), None)
                 .await?
                 .is_some();
+            debug!(%doc_id, loop_count, found, "presence loop: after drawer read");
             if found {
                 break;
             }
@@ -854,6 +885,7 @@ async fn wait_for_doc_presence_with_activity(
             since_last_activity,
         )
     })??;
+    eprintln!("[ab] presence: done doc_id={doc_id}");
     Ok(())
 }
 
@@ -863,6 +895,7 @@ async fn wait_for_sync_convergence(
     endpoint_id: EndpointId,
     timeout: Duration,
 ) -> Res<()> {
+    eprintln!("[ab] convergence: start");
     let required_partitions = source
         .sync_repo
         .peer_partition_ids("", true)
@@ -888,6 +921,7 @@ async fn wait_for_sync_convergence(
         ),
         wait_for_doc_set_parity(&source.drawer, &target.drawer, timeout),
     )?;
+    eprintln!("[ab] convergence: reached");
     info!(
         source = %source.sync_repo.router.endpoint().id(),
         target = %target.sync_repo.router.endpoint().id(),
@@ -946,6 +980,7 @@ async fn wait_for_doc_set_parity(
     right: &DrawerRepo,
     timeout: Duration,
 ) -> Res<()> {
+    eprintln!("[ab] parity: start");
     let mut last_left = HashSet::<String>::new();
     let mut last_right = HashSet::<String>::new();
     let timeout_outcome = tokio::time::timeout(timeout, async {
@@ -997,6 +1032,7 @@ async fn wait_for_doc_set_parity(
             );
         }
     }
+    eprintln!("[ab] parity: done");
     Ok(())
 }
 

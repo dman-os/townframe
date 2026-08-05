@@ -157,7 +157,7 @@ pub struct LiveDocBundle {
     id: u64,
     pub doc_id: DocumentId,
     #[educe(Debug(ignore))]
-    pub doc: tokio::sync::Mutex<automerge::Automerge>,
+    pub doc: surelock::mutex::Mutex<automerge::Automerge>,
     #[educe(Debug(ignore))]
     partially_decrypted: std::sync::atomic::AtomicBool,
     #[educe(Debug(ignore))]
@@ -176,7 +176,7 @@ impl LiveDocBundle {
         Self {
             id: NEXT_BUNDLE_ID.fetch_add(1, std::sync::atomic::Ordering::Relaxed),
             doc_id,
-            doc: tokio::sync::Mutex::new(doc),
+            doc: surelock::mutex::Mutex::new(doc),
             partially_decrypted: std::sync::atomic::AtomicBool::new(partially_decrypted),
             broken: std::sync::atomic::AtomicBool::new(false),
             _runtime2_lease: Some(lease),

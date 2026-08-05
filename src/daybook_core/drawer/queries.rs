@@ -108,7 +108,9 @@ impl DrawerRepo {
             let (heads, _key) = key.lock(&self.current_heads);
             heads.clone()
         });
+        debug!(%doc_id, "presence probe: entry cache miss, hydrating from drawer doc");
         let entry = self.hydrate_entry_at_heads(doc_id, &heads).await?;
+        debug!(%doc_id, found = entry.is_some(), "presence probe: hydrated entry");
 
         if let Some(entry) = entry {
             surelock::key::lock_scope(|key| {

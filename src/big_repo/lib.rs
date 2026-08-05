@@ -898,9 +898,10 @@ impl BigDocHandle {
     where
         F: FnOnce(&automerge::Automerge) -> R,
     {
-        let doc = self.bundle.doc.lock().await;
-
-        operation(&doc)
+        surelock::key::lock_scope(|key| {
+            let (doc, _key) = key.lock(&self.bundle.doc);
+            operation(&doc)
+        })
     }
 
     pub async fn export(&self) -> Vec<u8> {
@@ -931,47 +932,56 @@ impl BigDocHandle {
                 "document write rejected: handle invalidated by an earlier rejected commit; re-acquire the document"
             ));
         }
-        let mut doc = self.bundle.doc.lock().await;
 
-        let before_heads = doc.get_heads();
-        let out = operation(&mut doc);
-        let after_heads = doc.get_heads();
-        if before_heads == after_heads {
+
+        // All automerge work happens under a short sync lock; nothing is held
+        // across an await (the commit goes out only after the lock scope ends).
+        let (out, commit) = surelock::key::lock_scope(|key| {
+            let (mut doc, _key) = key.lock(&self.bundle.doc);
+            let before_heads = doc.get_heads();
+            let out = operation(&mut doc);
+            let after_heads = doc.get_heads();
+            if before_heads == after_heads {
+                return (out, None);
+            }
+
+            // Capture the current materialization while holding the same lock
+            // as the mutation. Any newly retained head must remain
+            // independently loadable after sedimentree minimization discards
+            // its predecessors.
+            let snapshot = doc.save();
+            let changes = doc
+                .get_changes(&before_heads)
+                .into_iter()
+                .map(|change| {
+                    let head = CommitId::new(change.hash().0);
+                    let parents = change
+                        .deps()
+                        .iter()
+                        .map(|dep| CommitId::new(dep.0))
+                        .collect::<BTreeSet<_>>();
+                    let bytes = if after_heads.contains(&change.hash()) {
+                        snapshot.clone()
+                    } else {
+                        change.raw_bytes().to_vec()
+                    };
+                    (head, parents, bytes)
+                })
+                .collect::<Vec<_>>();
+            let patches = if self
+                .repo
+                .change_manager
+                .has_change_listener_interest(self.document_id(), &origin)
+            {
+                doc.diff(&before_heads, &after_heads)
+            } else {
+                Vec::new()
+            };
+            (out, Some((after_heads, changes, patches)))
+        });
+        let Some((after_heads, changes, patches)) = commit else {
             return Ok(out);
-        }
-
-        // Capture the current materialization while holding the same lock as
-        // the mutation. Any newly retained head must remain independently
-        // loadable after sedimentree minimization discards its predecessors.
-        let snapshot = doc.save();
-        let changes = doc
-            .get_changes(&before_heads)
-            .into_iter()
-            .map(|change| {
-                let head = CommitId::new(change.hash().0);
-                let parents = change
-                    .deps()
-                    .iter()
-                    .map(|dep| CommitId::new(dep.0))
-                    .collect::<BTreeSet<_>>();
-                let bytes = if after_heads.contains(&change.hash()) {
-                    snapshot.clone()
-                } else {
-                    change.raw_bytes().to_vec()
-                };
-                (head, parents, bytes)
-            })
-            .collect::<Vec<_>>();
-        let patches = if self
-            .repo
-            .change_manager
-            .has_change_listener_interest(self.document_id(), &origin)
-        {
-            doc.diff(&before_heads, &after_heads)
-        } else {
-            Vec::new()
         };
-        drop(doc);
 
         self.repo
             .runtime

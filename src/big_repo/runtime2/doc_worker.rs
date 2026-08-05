@@ -465,6 +465,7 @@ impl<F: FutureForm> DocWorker2<F> {
         let Some(mut tree) = self.io.hydrate_tree(self.sed_id).await? else {
             return Ok(LoadedDocSnapshot::Missing);
         };
+        tracing::debug!(%self.doc_id, "passed point L2: load_doc_snapshot hydrate done");
         tree.ensure_minimized(&sedimentree_core::depth::CountLeadingZeroBytes);
 
         let order = tree
@@ -485,13 +486,16 @@ impl<F: FutureForm> DocWorker2<F> {
                 }
             };
             let locator = BigRepoCiphertextLocator::new(kind, self.sed_id, head);
+            tracing::debug!(%self.doc_id, "passed point L4: before try_causal_decrypt");
             let result = self.io.try_causal_decrypt(self.sed_id, locator).await?;
+            tracing::debug!(%self.doc_id, "passed point L5: after try_causal_decrypt");
             plaintexts.extend(result.complete);
             blockers.extend(result.blockers);
         }
 
         let mut partially_decrypted = false;
         let mut pending_plaintexts = Vec::new();
+        tracing::debug!(%self.doc_id, "passed point L1: load_doc_snapshot entry");
         for item in &order {
             let content_ref = match item {
                 SedimentreeItem::Fragment(index) => fragments[*index].head().as_bytes().to_vec(),
@@ -570,9 +574,9 @@ impl<F: FutureForm> DocWorker2<F> {
             return Ok(());
         }
         self.partially_decrypted = partial;
+        tracing::debug!(%self.doc_id, "passed point S1: set_partially_decrypted before evt send");
         if let DocState::Live(bundle) = &self.state {
             if let Some(bundle) = bundle.upgrade() {
-                bundle.set_partially_decrypted(partial);
             }
         }
         let event = if partial {
@@ -726,27 +730,29 @@ impl<F: FutureForm> DocWorker2<F> {
         let requests = std::mem::take(&mut self.pending_fragment_requests);
         for request in requests {
             let (boundary, checkpoints, raw_blob) = {
-                let doc = bundle.doc.lock().await;
                 let head = automerge::ChangeHash(*request.head().as_bytes());
-                let fragment = doc
-                    .get_fragment(head)
-                    .ok_or_else(|| ferr!("requested Automerge fragment is unavailable"))?;
-                let boundary = fragment
-                    .boundary
-                    .iter()
-                    .map(|head| CommitId::new(head.0))
-                    .collect();
-                let checkpoints = fragment
-                    .checkpoints
-                    .iter()
-                    .map(|head| CommitId::new(head.0))
-                    .collect();
-                let raw_blob = doc
-                    .bundle(fragment.members.iter().cloned())
-                    .wrap_err("unable to resolve bundle for fragment")?
-                    .bytes()
-                    .to_vec();
-                (boundary, checkpoints, raw_blob)
+                surelock::key::lock_scope(|key| {
+                    let (doc, _key) = key.lock(&bundle.doc);
+                    let fragment = doc
+                        .get_fragment(head)
+                        .ok_or_else(|| ferr!("requested Automerge fragment is unavailable"))?;
+                    let boundary = fragment
+                        .boundary
+                        .iter()
+                        .map(|head| CommitId::new(head.0))
+                        .collect();
+                    let checkpoints = fragment
+                        .checkpoints
+                        .iter()
+                        .map(|head| CommitId::new(head.0))
+                        .collect();
+                    let raw_blob = doc
+                        .bundle(fragment.members.iter().cloned())
+                        .wrap_err("unable to resolve bundle for fragment")?
+                        .bytes()
+                        .to_vec();
+                    Ok::<_, eyre::Error>((boundary, checkpoints, raw_blob))
+                })?
             };
             self.io
                 .store_fragment(self.sed_id, request.head(), boundary, checkpoints, raw_blob)
@@ -813,8 +819,10 @@ impl<F: FutureForm> DocWorker2<F> {
         let (materialized_heads, state) = match &self.state {
             DocState::Live(bundle) => {
                 if let Some(bundle) = bundle.upgrade() {
-                    let doc = bundle.doc.lock().await;
-                    let heads: Arc<[automerge::ChangeHash]> = Arc::from(doc.get_heads());
+                    let heads: Arc<[automerge::ChangeHash]> = surelock::key::lock_scope(|key| {
+                        let (doc, _key) = key.lock(&bundle.doc);
+                        Arc::from(doc.get_heads())
+                    });
                     (
                         Some(heads),
                         if self.partially_decrypted {
@@ -908,6 +916,7 @@ impl<F: FutureForm> DocWorker2<F> {
             &self.state,
             DocState::Live(bundle) if bundle.strong_count() > 0
         );
+        tracing::debug!(%self.doc_id, "passed point A1: apply_sync_session entry");
 
         if received {
             // Incremental apply of the received content into the live
@@ -933,27 +942,32 @@ impl<F: FutureForm> DocWorker2<F> {
                         "received sync session has no persisted Sedimentree content"
                     ));
                 };
+                tracing::debug!(%self.doc_id, "passed point A2: hydrate_tree done");
                 tree.ensure_minimized(&sedimentree_core::depth::CountLeadingZeroBytes);
                 let (blobs, partially_decrypted) = self
                     .try_decrypt_received_blobs(&mut tree, &received_refs)
                     .await?;
+                tracing::debug!(%self.doc_id, "passed point A3: try_decrypt_received_blobs done");
                 self.set_partially_decrypted(partially_decrypted).await?;
-
+                tracing::debug!(%self.doc_id, "passed point A4: set_partially_decrypted done");
                 if blobs.is_empty() {
                     self.notif_pending_heads(&mut tree, peer_id).await?;
+                    tracing::debug!(%self.doc_id, "passed point A5: notif_pending_heads (empty) done");
                     return self
                         .report_sync_outcome(peer_id, has_live, true, reply)
                         .await;
                 }
                 if partially_decrypted {
                     self.notif_pending_heads(&mut tree, peer_id).await?;
+                    tracing::debug!(%self.doc_id, "passed point A6: notif_pending_heads (partial) done");
                 }
 
                 let mut missing_deps = false;
-                let mut changed;
-                let (after_heads, patches) = {
-                    let mut doc = bundle.doc.lock().await;
+                let mut changed = false;
+                let ((after_heads, patches), apply_error) = surelock::key::lock_scope(|key| {
+                    let (mut doc, _key) = key.lock(&bundle.doc);
                     let before = doc.get_heads();
+                    let mut apply_error = None;
                     for blob in blobs {
                         match doc.load_incremental(&blob) {
                             Ok(_) => {}
@@ -962,13 +976,14 @@ impl<F: FutureForm> DocWorker2<F> {
                                 break;
                             }
                             Err(error) => {
-                                return Err(ferr!("failed applying sync blob: {error}"));
+                                apply_error = Some(ferr!("failed applying sync blob: {error}"));
+                                break;
                             }
                         }
                     }
                     let after = doc.get_heads();
                     changed = before != after;
-                    if !changed {
+                    let out = if !changed {
                         (after, Vec::new())
                     } else {
                         let patches = if self
@@ -983,8 +998,12 @@ impl<F: FutureForm> DocWorker2<F> {
                             Vec::new()
                         };
                         (after, patches)
-                    }
-                };
+                    };
+                    (out, apply_error)
+                });
+                if let Some(error) = apply_error {
+                    return Err(error);
+                }
                 if missing_deps {
                     self.set_partially_decrypted(true).await?;
                     self.notif_pending_heads(&mut tree, peer_id).await?;
@@ -1008,6 +1027,7 @@ impl<F: FutureForm> DocWorker2<F> {
             }
         }
 
+        tracing::debug!(%self.doc_id, "passed point A7: calling report_sync_outcome");
         self.report_sync_outcome(peer_id, has_live, received, reply).await
     }
 
@@ -1036,6 +1056,7 @@ impl<F: FutureForm> DocWorker2<F> {
             self.state,
             DocState::PendingMaterialization(_)
         );
+        tracing::debug!(%self.doc_id, "passed point P1: report_sync_outcome entry");
         // A live doc that received content is walked unconditionally: the
         // session-scoped decrypt result can be stale relative to the full
         // tree (a clean session must still reconsider previously-stored
@@ -1158,6 +1179,7 @@ impl<F: FutureForm> DocWorker2<F> {
             .collect();
         let mut made_progress = true;
         let mut materialization_pending = false;
+        tracing::debug!(%self.doc_id, "passed point T1: try_decrypt_received_blobs entry, items={}", received_order.len());
 
         while made_progress && plaintext_by_index.iter().any(Option::is_none) {
             made_progress = false;
@@ -1195,10 +1217,12 @@ impl<F: FutureForm> DocWorker2<F> {
                 };
 
                 // Try entrypoint decrypt first.
+                tracing::debug!(%self.doc_id, "passed point T2: before try_decrypt_content_keyed");
                 let entrypoint = self
                     .io
                     .try_decrypt_content_keyed(self.sed_id, locator)
                     .await?;
+                tracing::debug!(%self.doc_id, "passed point T3: after try_decrypt_content_keyed");
                 let Some(entrypoint_raw) = entrypoint else {
                     // Key not found — skip; may resolve via causal chain.
                     continue;
@@ -1213,6 +1237,7 @@ impl<F: FutureForm> DocWorker2<F> {
 
                 // Then causal decrypt to unlock ancestors.
                 let state = self.io.try_causal_decrypt(self.sed_id, locator).await?;
+                tracing::debug!(%self.doc_id, "passed point T4: after try_causal_decrypt");
                 for (ancestor_ref, ancestor_plaintext) in &state.complete {
                     if plaintext_by_ref
                         .insert(ancestor_ref.clone(), ancestor_plaintext.clone())
@@ -1223,6 +1248,7 @@ impl<F: FutureForm> DocWorker2<F> {
                 }
             }
         }
+        tracing::debug!(%self.doc_id, "passed point T5: try_decrypt_received_blobs loop end");
         let unresolved_count = plaintext_by_index
             .iter()
             .filter(|value| value.is_none())
@@ -1283,20 +1309,25 @@ impl<F: FutureForm> DocWorker2<F> {
             DocState::Live(weak) => weak.upgrade(),
             _ => None,
         };
+        tracing::debug!(%self.doc_id, "passed point R1: retry_materialization entry");
         match self.load_doc_snapshot().await? {
             LoadedDocSnapshot::Ready {
                 mut doc,
                 partially_decrypted,
             } => {
+                tracing::debug!(%self.doc_id, "passed point R2: load_doc_snapshot Ready");
                 if let Some(bundle) = live_bundle {
-                    let (before, after_heads, patches) = {
-                        let mut live = bundle.doc.lock().await;
+                    tracing::debug!(%self.doc_id, "passed point R3: before bundle.doc lock_scope");
+                    let (before, after_heads, patches) = surelock::key::lock_scope(|key| {
+                        let (mut live, _key) = key.lock(&bundle.doc);
                         let before = live.get_heads();
-                        live.merge(&mut doc)?;
+                        live.merge(&mut doc)
+                            .map_err(|e| ferr!("failed merging persisted snapshot into active document: {e:?}"))?;
                         let after_heads = live.get_heads();
                         let patches = live.diff(&before, &after_heads);
-                        (before, after_heads, patches)
-                    };
+                        Ok::<_, eyre::Error>((before, after_heads, patches))
+                    })?;
+                    tracing::debug!(%self.doc_id, "passed point R4: bundle.doc lock_scope done");
                     let heads = Arc::<[automerge::ChangeHash]>::from(after_heads);
                     debug!(
                         before_heads = before.len(),
@@ -1328,8 +1359,10 @@ impl<F: FutureForm> DocWorker2<F> {
                 }
 
                 let after_heads = doc.get_heads();
+                tracing::debug!(%self.doc_id, "passed point R5: non-live path, before transition_to_ready");
                 self.transition_to_ready(was_pending, Arc::from(after_heads.clone()))
                     .await?;
+                tracing::debug!(%self.doc_id, "passed point R6: transition_to_ready done");
                 if was_pending {
                     let patches = doc.diff(&[], &after_heads);
                     let heads = Arc::<[automerge::ChangeHash]>::from(after_heads);

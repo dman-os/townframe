@@ -172,6 +172,12 @@ impl GroupPartWorker {
                             batch_index + 1 == batch_count,
                         )
                         .await?;
+                    tracing::debug!(
+                        cursor,
+                        event_cursor,
+                        batch_index,
+                        "group-part worker reconciled batch"
+                    );
                 }
             }
         }

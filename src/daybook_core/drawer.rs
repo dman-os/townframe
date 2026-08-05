@@ -294,10 +294,16 @@ impl DrawerRepo {
         branch_path: &daybook_types::doc::BranchPath,
     ) -> Res<Option<ChangeHashSet>> {
         let Some(branch_ref) = self.get_branch_ref(doc_id, branch_path).await? else {
+            debug!(%doc_id, %branch_path, "presence probe: no branch ref");
             return Ok(None);
         };
-        self.get_branch_heads_by_doc_id(branch_ref.branch_doc_id)
-            .await
+        let Some(heads) = self
+            .get_branch_heads_by_doc_id(branch_ref.branch_doc_id)
+            .await? else {
+            debug!(%doc_id, %branch_path, branch_doc_id = %branch_ref.branch_doc_id, "presence probe: branch doc heads unavailable");
+            return Ok(None);
+        };
+        Ok(Some(heads))
     }
 
     async fn get_handle_by_branch_doc_id(
@@ -318,7 +324,10 @@ impl DrawerRepo {
                 });
                 Ok(Some(handle))
             }
-            _ => Ok(None),
+            other => {
+                debug!(%document_id, lookup = ?other, "presence probe: branch doc not ready");
+                Ok(None)
+            }
         }
     }
 
@@ -329,15 +338,17 @@ impl DrawerRepo {
         heads: &ChangeHashSet,
     ) -> Res<Option<big_repo::BigDocHandle>> {
         let Some(branch_ref) = self.get_branch_ref(doc_id, branch_path).await? else {
+            debug!(%doc_id, %branch_path, "presence probe: resolve: no branch ref");
             return Ok(None);
         };
         let Some(handle) = self
             .get_handle_by_branch_doc_id(branch_ref.branch_doc_id)
             .await?
         else {
+            debug!(%doc_id, %branch_path, branch_doc_id = %branch_ref.branch_doc_id, "presence probe: resolve: no handle");
             return Ok(None);
         };
-        let (contains_all_heads, _missing_heads) = handle
+        let (contains_all_heads, missing_heads) = handle
             .with_document_read(|doc| {
                 let mut missing = Vec::new();
                 for head in heads.iter() {
@@ -349,8 +360,10 @@ impl DrawerRepo {
             })
             .await?;
         if !contains_all_heads {
+            debug!(%doc_id, %branch_path, ?heads, ?missing_heads, "presence probe: resolve: heads missing from doc");
             return Ok(None);
         }
+        debug!(%doc_id, %branch_path, "presence probe: resolve: handle ok");
         Ok(Some(handle))
     }
 

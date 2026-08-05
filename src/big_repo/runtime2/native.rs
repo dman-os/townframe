@@ -689,6 +689,7 @@ where
                 return Ok(None);
             };
             let mut doc = kh_doc.lock().await;
+            tracing::debug!(%sed_id, "decrypt: acquired kh_doc lock");
             match doc.try_decrypt_content_keyed(&encrypted) {
                 Ok((plaintext, key)) => {
                     // Keep the recovered key available for a later local
@@ -767,12 +768,10 @@ where
 
             // Set up a ciphertext store backed by our storage.
             let ct_store = NativeCiphertextStore::new(self.storage.clone(), sed_id);
-
-            // The upstream causal walk returns the decrypted ancestors, but
-            // not the entrypoint itself. The old runtime explicitly loaded
-            // the entrypoint first; runtime2 must preserve that contract.
+            tracing::debug!(%sed_id, "causal: before entrypoint kh_doc lock");
             let (entrypoint_raw, entrypoint_key) = {
                 let mut doc = kh_doc.lock().await;
+                tracing::debug!(%sed_id, "causal: acquired entrypoint kh_doc lock");
                 match doc.try_decrypt_content_keyed(&encrypted) {
                     Ok((plaintext, key)) => {
                         tracing::debug!(
@@ -804,17 +803,17 @@ where
                     .map_err(|error| ferr!("failed decoding entrypoint envelope: {error}"))?;
 
             // Attempt causal decrypt for the entrypoint's ancestors.
+            tracing::debug!(%sed_id, "causal: before causal kh_doc lock (async IO across lock)");
             let state = {
                 let mut doc = kh_doc.lock().await;
+                tracing::debug!(%sed_id, "causal: acquired causal kh_doc lock");
                 doc.try_causal_decrypt_content(&encrypted, &ct_store)
                     .await
                     .map_err(|err| {
-                        ferr!(
-                            "causal decrypt failed; BigRepo envelope is not causally closed: {err}"
-                        )
+                        ferr!("causal decrypt failed; BigRepo envelope is not causally closed: {err}")
                     })?
             };
-
+            tracing::debug!(%sed_id, "causal: released causal kh_doc lock");
             let mut missing_ciphertexts = Vec::new();
             let mut missing_keys = Vec::new();
             let complete_refs: std::collections::HashSet<_> = state

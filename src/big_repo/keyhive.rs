@@ -6,6 +6,7 @@ use keyhive_core::event::static_event::StaticEvent;
 use keyhive_core::principal::document::id::DocumentId as KhDocumentId;
 use keyhive_core::principal::group::id::GroupId as KhGroupId;
 use keyhive_core::principal::identifier::Identifier;
+use keyhive_core::principal::membered::Membered;
 use keyhive_crypto::signer::memory::MemorySigner;
 use nonempty::NonEmpty;
 use std::collections::{BTreeMap, BTreeSet, HashMap};
@@ -13,6 +14,13 @@ use std::fmt::{Debug, Formatter};
 use std::sync::Arc;
 
 pub type BigKeyhiveAgent = keyhive_core::principal::agent::Agent<
+    future_form::Sendable,
+    keyhive_crypto::signer::memory::MemorySigner,
+    Vec<u8>,
+    BigRepoKeyhiveListener,
+>;
+
+type BigKeyhiveMembered = keyhive_core::principal::membered::Membered<
     future_form::Sendable,
     keyhive_crypto::signer::memory::MemorySigner,
     Vec<u8>,
@@ -279,8 +287,8 @@ impl BigKeyhiveHandle {
         };
         for kh_doc_id in doc_ids {
             if let Some(doc) = keyhive.get_document(kh_doc_id).await {
-                let locked = doc.lock().await;
-                if let Some((_, access)) = locked.transitive_members().await.get(agent) {
+                let members = transitive_members_short_locked(Membered::Document(kh_doc_id, doc)).await;
+                if let Some((_, access)) = members.get(agent) {
                     caps.insert(DocumentId::new(kh_doc_id.to_bytes()), *access);
                 }
             }
@@ -294,18 +302,14 @@ impl BigKeyhiveHandle {
         let keyhive = self.keyhive.as_ref();
         // Try document first, then group
         if let Some(doc) = keyhive.get_document(KhDocumentId::from(id)).await {
-            let locked = doc.lock().await;
-            return locked
-                .transitive_members()
+            return transitive_members_short_locked(Membered::Document(KhDocumentId::from(id), doc))
                 .await
                 .into_iter()
                 .map(|(id, (_, access))| (id.to_bytes(), access))
                 .collect();
         }
         if let Some(group) = keyhive.get_group(KhGroupId::from(id)).await {
-            let locked = group.lock().await;
-            return locked
-                .transitive_members()
+            return transitive_members_short_locked(Membered::Group(KhGroupId::from(id), group))
                 .await
                 .into_iter()
                 .map(|(id, (_, access))| (id.to_bytes(), access))
@@ -322,17 +326,13 @@ impl BigKeyhiveHandle {
     ) -> Option<Access> {
         let keyhive = self.keyhive.as_ref();
         if let Some(doc) = keyhive.get_document(KhDocumentId::from(membered_id)).await {
-            let locked = doc.lock().await;
-            return locked
-                .transitive_members()
+            return transitive_members_short_locked(Membered::Document(KhDocumentId::from(membered_id), doc))
                 .await
                 .get(agent)
                 .map(|(_, access)| *access);
         }
         if let Some(group) = keyhive.get_group(KhGroupId::from(membered_id)).await {
-            let locked = group.lock().await;
-            return locked
-                .transitive_members()
+            return transitive_members_short_locked(Membered::Group(KhGroupId::from(membered_id), group))
                 .await
                 .get(agent)
                 .map(|(_, access)| *access);
@@ -351,8 +351,8 @@ impl BigKeyhiveHandle {
         };
         for kh_doc_id in doc_ids {
             if let Some(doc) = keyhive.get_document(kh_doc_id).await {
-                let locked = doc.lock().await;
-                if let Some((_, access)) = locked.transitive_members().await.get(agent) {
+                let members = transitive_members_short_locked(Membered::Document(kh_doc_id, doc)).await;
+                if let Some((_, access)) = members.get(agent) {
                     caps.insert(kh_doc_id.to_bytes(), *access);
                 }
             }
@@ -365,8 +365,8 @@ impl BigKeyhiveHandle {
         };
         for kh_group_id in group_ids {
             if let Some(group) = keyhive.get_group(kh_group_id).await {
-                let locked = group.lock().await;
-                if let Some((_, access)) = locked.transitive_members().await.get(agent) {
+                let members = transitive_members_short_locked(Membered::Group(kh_group_id, group)).await;
+                if let Some((_, access)) = members.get(agent) {
                     caps.insert(kh_group_id.to_bytes(), *access);
                 }
             }
@@ -666,6 +666,106 @@ async fn persist_cgka_update_ops(
             .map_err(|err| ferr!("failed saving cgka update op: {err}"))?;
     }
     Ok(())
+}
+
+struct ExploreNode {
+    membered: BigKeyhiveMembered,
+    access: Access,
+}
+
+/// Transitive-membership walk with short per-node locks.
+
+/// Replicates `Group::transitive_members` semantics (explore/expanded/access-min
+/// with the root excluded) but never holds a doc/group lock across an await that
+/// acquires another lock: every node is locked only long enough to clone its
+/// direct members + capabilities, then the lock is dropped before the next node
+/// is visited. A walk therefore holds at most one lock at a time, so concurrent
+/// walks rooted at different docs/groups cannot ABBA-deadlock with each other
+/// (or with materialization decrypts that briefly lock a single document).
+async fn transitive_members_short_locked(
+    root: BigKeyhiveMembered,
+) -> HashMap<Identifier, (BigKeyhiveAgent, Access)> {
+    let root_id: Identifier = root.agent_id().into();
+    let mut caps: HashMap<Identifier, (BigKeyhiveAgent, Access)> = HashMap::new();
+    let mut expanded: HashMap<Identifier, Access> = HashMap::new();
+    let mut explore: Vec<ExploreNode> = Vec::new();
+
+    // Capture the root's direct members under a short lock, then walk.
+    let root_members = root.members().await;
+    for member_id in root_members.keys() {
+        let dlg = root
+            .get_capability(member_id)
+            .await
+            .expect("members have capabilities by definition");
+        enqueue_member(
+            dlg.payload.delegate().clone(),
+            dlg.payload.can(),
+            &root_id,
+            &mut caps,
+            &mut expanded,
+            &mut explore,
+        );
+    }
+
+    while let Some(explored) = explore.pop() {
+        let membered = explored.membered;
+        let access = explored.access;
+        let members = membered.members().await;
+        for (mem_id, dlgs) in members.iter() {
+            let dlg = membered
+                .get_capability(mem_id)
+                .await
+                .expect("members have capabilities by definition");
+            let member_access = access.min(dlg.payload.can());
+            if caps
+                .get(mem_id)
+                .is_none_or(|(_, existing_access)| *existing_access < member_access)
+            {
+                caps.insert(*mem_id, (dlg.payload.delegate().clone(), member_access));
+            }
+            for sub_dlg in dlgs.iter() {
+                enqueue_member(
+                    sub_dlg.payload.delegate().clone(),
+                    access.min(sub_dlg.payload.can()),
+                    &root_id,
+                    &mut caps,
+                    &mut expanded,
+                    &mut explore,
+                );
+            }
+        }
+    }
+
+    caps
+}
+
+fn enqueue_member(
+    agent: BigKeyhiveAgent,
+    access: Access,
+    root_id: &Identifier,
+    caps: &mut HashMap<Identifier, (BigKeyhiveAgent, Access)>,
+    expanded: &mut HashMap<Identifier, Access>,
+    explore: &mut Vec<ExploreNode>,
+) {
+    let id = agent.id();
+    if &id == root_id {
+        return;
+    }
+    if caps
+        .get(&id)
+        .is_none_or(|(_, existing_access)| *existing_access < access)
+    {
+        caps.insert(id, (agent.clone(), access));
+    }
+    if let Some(membered) = agent.as_membered() {
+        if expanded
+            .get(&id)
+            .is_none_or(|existing_access| *existing_access < access)
+        {
+            expanded.insert(id, access);
+            explore.push(ExploreNode { membered, access });
+        }
+    }
 }
 
 #[cfg(test)]

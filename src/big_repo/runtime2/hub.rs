@@ -950,9 +950,11 @@ impl<F: FutureForm> HubBackgroundFuture<F> for F {
             let _ = lease_rx.await;
             // A closed commands channel means the runtime is draining; the
             // lease bookkeeping is moot then.
-            let _ = cmd_tx
+            cmd_tx
                 .send(Runtime2Cmd::ReleaseInternalLease { doc_id })
-                .await;
+                .await
+                .inspect_err(|_| warn!(ERROR_CHANNEL))
+                .ok();
             Ok(())
         })
     }
@@ -1260,14 +1262,18 @@ impl<F: FutureForm, Tasks: crate::runtime2::TaskSet<F>> HubIoFutures<F, Tasks> f
                         // A closed commands channel means the runtime is
                         // draining; the waiter is dropped with the hub and
                         // the caller observes the closure.
-                        let _ = cmd_tx
+                        cmd_tx
                             .send(Runtime2Cmd::DocSyncRoundDone { request_id })
-                            .await;
+                            .await
+                            .inspect_err(|_| warn!(ERROR_CHANNEL))
+                            .ok();
                     }
                     Err(error) => {
-                        let _ = cmd_tx
+                        cmd_tx
                             .send(Runtime2Cmd::DocSyncFailed { request_id, error })
-                            .await;
+                            .await
+                            .inspect_err(|_| warn!(ERROR_CHANNEL))
+                            .ok();
                     }
                 }
                 Ok(())
